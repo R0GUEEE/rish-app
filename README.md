@@ -9,6 +9,13 @@ The Swift/WebKit code at the repository root is retained only as the original
 `web_proxy` baseline. `run-simulator.sh` now builds and launches the React
 Native product; it never starts or embeds that baseline.
 
+## Product documentation
+
+Rish App product designs, stable interface specs, plans, and evidence live in
+the private [Z-Seven document center](https://github.com/ZSeven-W/openpencil-docs/tree/main/rish-app).
+This source repository remains the implementation and runtime truth; do not
+infer completed behavior from a design document.
+
 ## Honest runtime boundary
 
 | Mode              | What runs on the phone                                                                                                     | Current status             |
