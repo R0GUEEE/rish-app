@@ -1,0 +1,6 @@
+.build/
+.DS_Store
+modules/rish/ios/Vendor/*.a
+modules/rish/ios/Vendor/libgit2.xcframework/
+modules/rish/ios/Vendor/rish_ffi.xcframework/
+modules/rish/ios/include/rish.h

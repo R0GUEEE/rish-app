@@ -1,0 +1,47 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<document type="com.apple.InterfaceBuilder3.CocoaTouch.Storyboard.XIB" version="3.0" toolsVersion="24516" targetRuntime="iOS.CocoaTouch" propertyAccessControl="none" useAutolayout="YES" launchScreen="YES" useTraitCollections="YES" useSafeAreas="YES" colorMatched="YES" initialViewController="launch-controller">
+    <device id="retina6_12" orientation="portrait" appearance="dark"/>
+    <dependencies>
+        <deployment identifier="iOS"/>
+        <plugIn identifier="com.apple.InterfaceBuilder.IBCocoaTouchPlugin" version="24511"/>
+        <capability name="Safe area layout guides" minToolsVersion="9.0"/>
+    </dependencies>
+    <scenes>
+        <scene sceneID="launch-scene">
+            <objects>
+                <viewController id="launch-controller" sceneMemberID="viewController">
+                    <view key="view" contentMode="scaleToFill" id="launch-view">
+                        <rect key="frame" x="0.0" y="0.0" width="393" height="852"/>
+                        <autoresizingMask key="autoresizingMask" widthSizable="YES" heightSizable="YES"/>
+                        <subviews>
+                            <imageView clipsSubviews="YES" userInteractionEnabled="NO" contentMode="scaleAspectFit" image="BrandMark" translatesAutoresizingMaskIntoConstraints="NO" id="brand-mark">
+                                <rect key="frame" x="140.5" y="344" width="112" height="112"/>
+                                <constraints>
+                                    <constraint firstAttribute="width" constant="112" id="brand-width"/>
+                                    <constraint firstAttribute="height" constant="112" id="brand-height"/>
+                                </constraints>
+                            </imageView>
+                            <label opaque="NO" userInteractionEnabled="NO" contentMode="left" text="Rish" textAlignment="center" translatesAutoresizingMaskIntoConstraints="NO" id="brand-label">
+                                <rect key="frame" x="176" y="478" width="41" height="22"/>
+                                <fontDescription key="fontDescription" type="boldSystem" pointSize="18"/>
+                                <color key="textColor" red="0.9568627451" green="0.9450980392" blue="0.9137254902" alpha="1" colorSpace="custom" customColorSpace="sRGB"/>
+                            </label>
+                        </subviews>
+                        <viewLayoutGuide key="safeArea" id="launch-safe-area"/>
+                        <color key="backgroundColor" red="0.03137254902" green="0.03529411765" blue="0.0431372549" alpha="1" colorSpace="custom" customColorSpace="sRGB"/>
+                        <constraints>
+                            <constraint firstItem="brand-mark" firstAttribute="centerX" secondItem="launch-view" secondAttribute="centerX" id="brand-center-x"/>
+                            <constraint firstItem="brand-mark" firstAttribute="centerY" secondItem="launch-view" secondAttribute="centerY" constant="-26" id="brand-center-y"/>
+                            <constraint firstItem="brand-label" firstAttribute="top" secondItem="brand-mark" secondAttribute="bottom" constant="22" id="label-top"/>
+                            <constraint firstItem="brand-label" firstAttribute="centerX" secondItem="launch-view" secondAttribute="centerX" id="label-center-x"/>
+                        </constraints>
+                    </view>
+                </viewController>
+                <placeholder placeholderIdentifier="IBFirstResponder" id="launch-responder" sceneMemberID="firstResponder"/>
+            </objects>
+        </scene>
+    </scenes>
+    <resources>
+        <image name="BrandMark" width="128" height="128"/>
+    </resources>
+</document>

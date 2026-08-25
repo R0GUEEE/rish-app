@@ -1,0 +1,83 @@
+import { NativeModules } from 'react-native';
+
+export type AttachmentSource = 'camera' | 'photos' | 'files';
+export type AttachmentKind = 'image' | 'text' | 'pdf';
+
+export type AttachmentDescriptor = {
+  schema_version: 1;
+  id: string;
+  kind: AttachmentKind;
+  name: string;
+  mime_type: string;
+  size: number;
+  thumbnail_data_url?: string;
+};
+
+export type AttachmentSelectionResult = {
+  schema_version: 1;
+  status: 'selected' | 'cancelled';
+  attachments: AttachmentDescriptor[];
+};
+
+export type AttachmentDiscardResult = {
+  schema_version: 1;
+  discarded_count: number;
+};
+
+export type AttachmentPruneResult = {
+  schema_version: 1;
+  removed_count: number;
+};
+
+export type AttachmentPreview = {
+  schema_version: 1;
+  id: string;
+  thumbnail_data_url: string | null;
+};
+
+export type AttachmentNativePreviewResult = {
+  schema_version: 1;
+  status: 'closed';
+};
+
+type NativeLocalAttachments = {
+  present(source: AttachmentSource): Promise<AttachmentSelectionResult>;
+  discard(ids: string[]): Promise<AttachmentDiscardResult>;
+  prune(referencedIds: string[]): Promise<AttachmentPruneResult>;
+  preview(id: string): Promise<AttachmentPreview>;
+  presentPreview(id: string): Promise<AttachmentNativePreviewResult>;
+};
+
+const native = NativeModules.LocalAttachments as unknown;
+
+function hasNativeCapabilities(
+  value: unknown,
+): value is NativeLocalAttachments {
+  if (typeof value !== 'object' || value === null) return false;
+  const candidate = value as Partial<
+    Record<keyof NativeLocalAttachments, unknown>
+  >;
+  return (
+    typeof candidate.present === 'function' &&
+    typeof candidate.discard === 'function' &&
+    typeof candidate.prune === 'function' &&
+    typeof candidate.preview === 'function' &&
+    typeof candidate.presentPreview === 'function'
+  );
+}
+
+function required(): NativeLocalAttachments {
+  if (!hasNativeCapabilities(native)) {
+    throw new Error('LocalAttachments native module is not linked');
+  }
+  return native;
+}
+
+export const LocalAttachments = {
+  isAvailable: () => hasNativeCapabilities(native),
+  present: (source: AttachmentSource) => required().present(source),
+  discard: (ids: string[]) => required().discard(ids),
+  prune: (referencedIds: string[]) => required().prune(referencedIds),
+  preview: (id: string) => required().preview(id),
+  presentPreview: (id: string) => required().presentPreview(id),
+};
