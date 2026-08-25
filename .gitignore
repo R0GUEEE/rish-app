@@ -1,4 +1,5 @@
 .build/
+.worktrees/
 .DS_Store
 modules/rish/ios/Vendor/*.a
 modules/rish/ios/Vendor/libgit2.xcframework/
