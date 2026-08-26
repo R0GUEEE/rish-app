@@ -2,6 +2,8 @@
 #import <React/RCTBridgeModule.h>
 #import <CommonCrypto/CommonDigest.h>
 
+#import "LocalProjectAccess.h"
+
 #include <errno.h>
 #include <dirent.h>
 #include <fcntl.h>
@@ -17,6 +19,7 @@
 static NSUInteger const LWMaxPathBytes = 1024;
 static NSUInteger const LWMaxTextBytes = 1024 * 1024;
 static NSUInteger const LWMaxListEntries = 1000;
+static NSUInteger const LWMaxFoldResolutionEntries = 10000;
 static NSUInteger const LWMaxTreeEntries = 10000;
 static NSUInteger const LWMaxTreeDepth = 64;
 static NSUInteger const LWMaxToolOutputBytes = 256 * 1024;
@@ -116,7 +119,8 @@ static NSData *LWDataFromByteArray(id value) {
 
 static BOOL LWValidateDirectoryTree(int directoryDescriptor, NSUInteger depth, NSUInteger *count) {
   if (depth > LWMaxTreeDepth) return NO;
-  int duplicate = dup(directoryDescriptor);
+  int duplicate = openat(directoryDescriptor, ".",
+      O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW);
   DIR *directory = duplicate < 0 ? nullptr : fdopendir(duplicate);
   if (directory == nullptr) {
     if (duplicate >= 0) close(duplicate);
@@ -157,6 +161,7 @@ static BOOL LWValidateDirectoryTree(int directoryDescriptor, NSUInteger depth, N
 
 @interface LocalWorkspaceModule : NSObject <RCTBridgeModule>
 @property(nonatomic, strong) dispatch_queue_t workspaceQueue;
+@property(nonatomic, strong) DSHLocalProjectAccess *projectAccess;
 @end
 
 @implementation LocalWorkspaceModule
@@ -170,9 +175,13 @@ RCT_EXPORT_MODULE(LocalWorkspace)
 - (instancetype)init {
   self = [super init];
   if (self != nil) {
+    _projectAccess = DSHLocalProjectAccess.sharedAccess;
+    dispatch_queue_attr_t queueAttributes =
+        dispatch_queue_attr_make_with_autorelease_frequency(
+            DISPATCH_QUEUE_SERIAL, DISPATCH_AUTORELEASE_FREQUENCY_WORK_ITEM);
     _workspaceQueue = dispatch_queue_create(
       "dev.zseven.dsh.mobile.local-workspace",
-      DISPATCH_QUEUE_SERIAL
+      queueAttributes
     );
   }
   return self;
@@ -237,25 +246,157 @@ RCT_EXPORT_MODULE(LocalWorkspace)
   NSArray<NSString *> *components = [path componentsSeparatedByString:@"/"];
   for (NSString *component in components) {
     NSUInteger bytes = [component lengthOfBytesUsingEncoding:NSUTF8StringEncoding];
+    NSString *folded = [DSHLocalProjectAccess filesystemFoldedComponent:component];
     if (bytes == 0 || bytes > NAME_MAX || [component isEqualToString:@"."]
-      || [component isEqualToString:@".."] || [component isEqualToString:@".trash"]
-      || [component isEqualToString:@".git"]) {
+      || [component isEqualToString:@".."] || [folded isEqualToString:@".trash"]
+      || [folded isEqualToString:@".git"] || [folded hasPrefix:@".staging-"]) {
       if (error != nil) *error = LWError(2008, @"Workspace path contains a forbidden component");
       return nil;
     }
   }
+  if (components.count > 0 &&
+      [[DSHLocalProjectAccess filesystemFoldedComponent:components[0]]
+          isEqual:@"projects"] &&
+      ![components[0] isEqual:@"projects"]) {
+    if (error != nil) *error = LWError(2008, @"Workspace path contains a forbidden alias");
+    return nil;
+  }
+  if (components.count >= 3 && [components[0] isEqual:@"projects"] &&
+      [DSHLocalProjectAccess isCanonicalProjectId:components[1]] &&
+      ![components[2] isEqual:@"repo"]) {
+    if (error != nil) *error = LWError(2008, @"Workspace project metadata is not a file workspace");
+    return nil;
+  }
   return components;
 }
 
-- (int)openDirectoryComponents:(NSArray<NSString *> *)components error:(NSError **)error {
-  NSURL *root = [self workspaceRoot:error];
-  if (root == nil) return -1;
-  int descriptor = open(root.fileSystemRepresentation, O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW);
+- (NSString *)resolvedOnDiskComponent:(NSString *)requested
+                   directoryDescriptor:(int)directoryDescriptor
+                           allowMissing:(BOOL)allowMissing
+                                  error:(NSError **)error {
+  const char *requestedBytes = requested.fileSystemRepresentation;
+  if (directoryDescriptor < 0 || requestedBytes == nullptr) {
+    if (error != nil) {
+      *error = LWError(2044, @"Workspace directory path is unsafe");
+    }
+    return nil;
+  }
+  struct stat exactMetadata = {};
+  if (fstatat(directoryDescriptor, requestedBytes, &exactMetadata,
+              AT_SYMLINK_NOFOLLOW) == 0) {
+    return requested;
+  }
+  if (errno != ENOENT) {
+    if (error != nil) {
+      *error = LWError(2044, @"Workspace directory path is unsafe");
+    }
+    return nil;
+  }
+
+  NSString *requestedFold =
+      [DSHLocalProjectAccess filesystemFoldedComponent:requested];
+  int duplicate = openat(directoryDescriptor, ".",
+      O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW);
+  DIR *directory = duplicate < 0 ? nullptr : fdopendir(duplicate);
+  if (directory == nullptr || requestedFold == nil) {
+    if (duplicate >= 0 && directory == nullptr) close(duplicate);
+    if (directory != nullptr) closedir(directory);
+    if (error != nil) *error = LWError(2044, @"Workspace directory path is unsafe");
+    return nil;
+  }
+  NSString *match = nil;
+  NSUInteger entries = 0;
+  struct dirent *entry = nullptr;
+  int enumerationError = 0;
+  while (YES) {
+    errno = 0;
+    entry = readdir(directory);
+    if (entry == nullptr) {
+      enumerationError = errno;
+      break;
+    }
+    if (strcmp(entry->d_name, ".") == 0 || strcmp(entry->d_name, "..") == 0) {
+      continue;
+    }
+    entries += 1;
+    if (entries > LWMaxFoldResolutionEntries) {
+      closedir(directory);
+      if (error != nil) *error = LWError(2044, @"Workspace directory path is unsafe");
+      return nil;
+    }
+    NSString *candidate = [NSString stringWithUTF8String:entry->d_name];
+    if (candidate == nil || ![[DSHLocalProjectAccess
+        filesystemFoldedComponent:candidate] isEqual:requestedFold]) {
+      continue;
+    }
+    if (match != nil && ![match isEqual:candidate]) {
+      closedir(directory);
+      if (error != nil) *error = LWError(2044, @"Workspace path is ambiguous");
+      return nil;
+    }
+    match = candidate;
+  }
+  closedir(directory);
+  if (enumerationError != 0) {
+    if (error != nil) *error = LWError(2044, @"Workspace directory path is unsafe");
+    return nil;
+  }
+  if (match != nil) return match;
+  if (allowMissing) return requested;
+  if (error != nil) *error = LWError(2044, @"Workspace directory path is unsafe");
+  return nil;
+}
+
+- (int)openDirectoryComponents:(NSArray<NSString *> *)components
+                       leaseSet:(DSHLocalProjectLeaseSet *)leaseSet
+                          error:(NSError **)error {
+  NSString *path = [components componentsJoinedByString:@"/"];
+  NSString *projectId =
+      [DSHLocalProjectAccess projectIdForWorkspacePath:path error:nil];
+  DSHLocalProjectLease *lease = projectId == nil
+      ? nil
+      : [leaseSet leaseForProjectId:projectId];
+  int descriptor = -1;
+  NSUInteger startIndex = 0;
+  if (projectId != nil) {
+    if (lease == nil) {
+      if (error != nil) *error = LWError(2043, @"Workspace project lease is unavailable");
+      return -1;
+    }
+    if (![self.projectAccess validateLeaseIdentity:lease error:nil]) {
+      if (error != nil) *error = LWError(2043, @"Workspace project changed during access");
+      return -1;
+    }
+    if (components.count >= 3) {
+      if (![components[2] isEqual:@"repo"]) {
+        if (error != nil) *error = LWError(2043, @"Workspace project path is unavailable");
+        return -1;
+      }
+      descriptor = dup(lease.repositoryDescriptor);
+      startIndex = 3;
+    } else {
+      descriptor = dup(lease.projectDescriptor);
+      startIndex = 2;
+    }
+  } else {
+    NSURL *root = [self workspaceRoot:error];
+    if (root == nil) return -1;
+    descriptor = open(root.fileSystemRepresentation,
+      O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW);
+  }
   if (descriptor < 0) {
     if (error != nil) *error = LWError(2043, @"Workspace root cannot be opened safely");
     return -1;
   }
-  for (NSString *component in components) {
+  for (NSUInteger index = startIndex; index < components.count; index++) {
+    NSString *component = [self resolvedOnDiskComponent:components[index]
+                                     directoryDescriptor:descriptor
+                                             allowMissing:NO
+                                                    error:error];
+    if (component == nil) {
+      close(descriptor);
+      return -1;
+    }
     int next = openat(descriptor, component.fileSystemRepresentation,
       O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW);
     close(descriptor);
@@ -265,19 +406,47 @@ RCT_EXPORT_MODULE(LocalWorkspace)
     }
     descriptor = next;
   }
+  if (lease != nil &&
+      ![self.projectAccess validateLeaseIdentity:lease error:nil]) {
+    close(descriptor);
+    if (error != nil) *error = LWError(2044, @"Workspace project changed during access");
+    return -1;
+  }
   return descriptor;
 }
 
 - (int)openParentDirectoryForPath:(id)value
                              name:(NSString **)name
                      relativePath:(NSString **)relativePath
+                        leaseSet:(DSHLocalProjectLeaseSet *)leaseSet
                             error:(NSError **)error {
   NSArray<NSString *> *components = [self componentsForPath:value allowRoot:NO error:error];
   if (components == nil) return -1;
+  if (components.count == 1 && [components[0] isEqual:@"projects"]) {
+    if (error != nil) *error = LWError(2007, @"Workspace projects root cannot be modified");
+    return -1;
+  }
+  NSString *path = [components componentsJoinedByString:@"/"];
+  NSString *projectId = [DSHLocalProjectAccess projectIdForWorkspacePath:path
+                                                                    error:nil];
+  if (projectId != nil && components.count <= 3) {
+    if (error != nil) *error = LWError(2007, @"Workspace project root cannot be modified");
+    return -1;
+  }
   NSArray<NSString *> *parents = [components subarrayWithRange:NSMakeRange(0, components.count - 1)];
-  int descriptor = [self openDirectoryComponents:parents error:error];
+  int descriptor = [self openDirectoryComponents:parents
+                                         leaseSet:leaseSet
+                                            error:error];
   if (descriptor < 0) return -1;
-  if (name != nil) *name = components.lastObject;
+  NSString *resolvedName = [self resolvedOnDiskComponent:components.lastObject
+                                      directoryDescriptor:descriptor
+                                              allowMissing:YES
+                                                     error:error];
+  if (resolvedName == nil) {
+    close(descriptor);
+    return -1;
+  }
+  if (name != nil) *name = resolvedName;
   if (relativePath != nil) *relativePath = [components componentsJoinedByString:@"/"];
   return descriptor;
 }
@@ -658,7 +827,12 @@ RCT_REMAP_METHOD(listDirectory,
     NSError *error = nil;
     NSString *pathValue = LWString(path);
     NSArray<NSString *> *components = [self componentsForPath:pathValue allowRoot:YES error:&error];
-    int directoryDescriptor = components == nil ? -1 : [self openDirectoryComponents:components error:&error];
+    __attribute__((objc_precise_lifetime)) DSHLocalProjectLeaseSet *leases =
+      components == nil ? nil : [self.projectAccess
+        leaseWorkspaceReadPaths:@[pathValue ?: @""]
+                      writePaths:@[] timeout:-1 error:&error];
+    int directoryDescriptor = leases == nil ? -1
+      : [self openDirectoryComponents:components leaseSet:leases error:&error];
     DIR *children = directoryDescriptor < 0 ? nullptr : fdopendir(directoryDescriptor);
     if (children == nullptr) {
       if (directoryDescriptor >= 0) close(directoryDescriptor);
@@ -675,6 +849,10 @@ RCT_REMAP_METHOD(listDirectory,
       if (name == nil || [name isEqualToString:@"."] || [name isEqualToString:@".."]) continue;
       if (pathValue.length == 0 && [name isEqualToString:@".trash"]) continue;
       if ([name isEqualToString:@".git"]) continue;
+      NSString *listedProjectId =
+        [DSHLocalProjectAccess projectIdForWorkspacePath:pathValue error:nil];
+      if (listedProjectId != nil && components.count == 2 &&
+          [name isEqualToString:@"project.json"]) continue;
       if (entries.count >= LWMaxListEntries) {
         closedir(children);
         reject(@"limit", @"Workspace directory contains too many entries", nil);
@@ -715,10 +893,16 @@ RCT_REMAP_METHOD(readText,
                  rejecter:(RCTPromiseRejectBlock)reject) {
   dispatch_async(self.workspaceQueue, ^{
     NSError *error = nil;
+    NSString *pathValue = LWString(path);
+    __attribute__((objc_precise_lifetime)) DSHLocalProjectLeaseSet *leases =
+      pathValue == nil ? nil : [self.projectAccess
+        leaseWorkspaceReadPaths:@[pathValue]
+                      writePaths:@[] timeout:-1 error:&error];
     NSString *name = nil;
     NSString *relative = nil;
-    int parentDescriptor = [self openParentDirectoryForPath:path name:&name
-                                               relativePath:&relative error:&error];
+    int parentDescriptor = leases == nil ? -1
+      : [self openParentDirectoryForPath:path name:&name
+                            relativePath:&relative leaseSet:leases error:&error];
     struct stat metadataValue = {};
     NSData *data = parentDescriptor < 0 ? nil : [self readDataAtDirectoryDescriptor:parentDescriptor
       name:name maximumBytes:LWMaxTextBytes metadata:&metadataValue error:&error];
@@ -755,10 +939,16 @@ RCT_REMAP_METHOD(writeText,
       reject(@"limit", @"Workspace text exceeds the size limit", nil);
       return;
     }
+    NSString *pathValue = LWString(path);
+    __attribute__((objc_precise_lifetime)) DSHLocalProjectLeaseSet *leases =
+      pathValue == nil ? nil : [self.projectAccess
+        leaseWorkspaceReadPaths:@[] writePaths:@[pathValue]
+                         timeout:-1 error:&error];
     NSString *name = nil;
     NSString *relative = nil;
-    int parentDescriptor = [self openParentDirectoryForPath:path name:&name
-                                               relativePath:&relative error:&error];
+    int parentDescriptor = leases == nil ? -1
+      : [self openParentDirectoryForPath:path name:&name
+                            relativePath:&relative leaseSet:leases error:&error];
     struct stat prior = {};
     BOOL existed = parentDescriptor >= 0 && fstatat(parentDescriptor, name.fileSystemRepresentation,
       &prior, AT_SYMLINK_NOFOLLOW) == 0;
@@ -794,10 +984,16 @@ RCT_REMAP_METHOD(createDirectory,
                  rejecter:(RCTPromiseRejectBlock)reject) {
   dispatch_async(self.workspaceQueue, ^{
     NSError *error = nil;
+    NSString *pathValue = LWString(path);
+    __attribute__((objc_precise_lifetime)) DSHLocalProjectLeaseSet *leases =
+      pathValue == nil ? nil : [self.projectAccess
+        leaseWorkspaceReadPaths:@[] writePaths:@[pathValue]
+                         timeout:-1 error:&error];
     NSString *name = nil;
     NSString *relative = nil;
-    int parentDescriptor = [self openParentDirectoryForPath:path name:&name
-                                               relativePath:&relative error:&error];
+    int parentDescriptor = leases == nil ? -1
+      : [self openParentDirectoryForPath:path name:&name
+                            relativePath:&relative leaseSet:leases error:&error];
     if (parentDescriptor < 0 || mkdirat(parentDescriptor, name.fileSystemRepresentation, 0700) != 0) {
       reject(@"workspace", error.localizedDescription ?: @"Workspace directory cannot be created", error);
       if (parentDescriptor >= 0) close(parentDescriptor);
@@ -828,13 +1024,20 @@ RCT_REMAP_METHOD(renameEntry,
       reject(@"workspace", @"Workspace rename paths are invalid", nil);
       return;
     }
+    __attribute__((objc_precise_lifetime)) DSHLocalProjectLeaseSet *leases =
+      [self.projectAccess leaseWorkspaceReadPaths:@[]
+                                       writePaths:@[sourceValue, destinationValue]
+                                          timeout:-1 error:&error];
     NSString *sourceName = nil;
-    int sourceParentDescriptor = [self openParentDirectoryForPath:sourcePath name:&sourceName
-                                                    relativePath:nil error:&error];
+    int sourceParentDescriptor = leases == nil ? -1
+      : [self openParentDirectoryForPath:sourcePath name:&sourceName
+                            relativePath:nil leaseSet:leases error:&error];
     NSString *destinationName = nil;
     NSString *destinationRelative = nil;
-    int destinationParentDescriptor = [self openParentDirectoryForPath:destinationPath
-      name:&destinationName relativePath:&destinationRelative error:&error];
+    int destinationParentDescriptor = leases == nil ? -1
+      : [self openParentDirectoryForPath:destinationPath
+        name:&destinationName relativePath:&destinationRelative
+        leaseSet:leases error:&error];
     BOOL destinationInsideSource = [destinationValue hasPrefix:[sourceValue stringByAppendingString:@"/"]];
     struct stat sourceMetadata = {};
     BOOL sourceValid = sourceParentDescriptor >= 0
@@ -875,10 +1078,16 @@ RCT_REMAP_METHOD(trashEntry,
                  rejecter:(RCTPromiseRejectBlock)reject) {
   dispatch_async(self.workspaceQueue, ^{
     NSError *error = nil;
+    NSString *pathValue = LWString(path);
+    __attribute__((objc_precise_lifetime)) DSHLocalProjectLeaseSet *leases =
+      pathValue == nil ? nil : [self.projectAccess
+        leaseWorkspaceReadPaths:@[] writePaths:@[pathValue]
+                         timeout:-1 error:&error];
     NSString *sourceName = nil;
     NSString *sourceRelative = nil;
-    int sourceParentDescriptor = [self openParentDirectoryForPath:path name:&sourceName
-                                                    relativePath:&sourceRelative error:&error];
+    int sourceParentDescriptor = leases == nil ? -1
+      : [self openParentDirectoryForPath:path name:&sourceName
+                            relativePath:&sourceRelative leaseSet:leases error:&error];
     struct stat sourceStat = {};
     BOOL sourceSafe = sourceParentDescriptor >= 0
       && [self validateEntryTreeAtDirectoryDescriptor:sourceParentDescriptor
@@ -967,11 +1176,15 @@ RCT_REMAP_METHOD(restoreFromTrash,
     NSString *destinationPath = destinationValue == nil || destinationValue == NSNull.null
       ? originalPath
       : LWString(destinationValue);
+    __attribute__((objc_precise_lifetime)) DSHLocalProjectLeaseSet *leases =
+      destinationPath == nil ? nil : [self.projectAccess
+        leaseWorkspaceReadPaths:@[] writePaths:@[destinationPath]
+                         timeout:-1 error:&error];
     NSString *destinationName = nil;
     NSString *destinationRelative = nil;
-    int destinationParentDescriptor = receipt == nil ? -1
+    int destinationParentDescriptor = receipt == nil || leases == nil ? -1
       : [self openParentDirectoryForPath:destinationPath name:&destinationName
-                            relativePath:&destinationRelative error:&error];
+                            relativePath:&destinationRelative leaseSet:leases error:&error];
     BOOL payloadTreeValid = receipt != nil
       && [self validateEntryTreeAtDirectoryDescriptor:recordDescriptor
         name:@"payload" metadata:&payloadStat error:&error];
@@ -1019,10 +1232,16 @@ RCT_REMAP_METHOD(executePortableTool,
                  rejecter:(RCTPromiseRejectBlock)reject) {
   dispatch_async(self.workspaceQueue, ^{
     NSError *error = nil;
+    NSString *pathValue = LWString(path);
+    __attribute__((objc_precise_lifetime)) DSHLocalProjectLeaseSet *leases =
+      pathValue == nil ? nil : [self.projectAccess
+        leaseWorkspaceReadPaths:@[pathValue]
+                      writePaths:@[] timeout:-1 error:&error];
     NSString *name = nil;
     NSString *relative = nil;
-    int parentDescriptor = [self openParentDirectoryForPath:path name:&name
-                                               relativePath:&relative error:&error];
+    int parentDescriptor = leases == nil ? -1
+      : [self openParentDirectoryForPath:path name:&name
+                            relativePath:&relative leaseSet:leases error:&error];
     NSData *textData = parentDescriptor < 0 ? nil : [self readDataAtDirectoryDescriptor:parentDescriptor
       name:name maximumBytes:LWMaxTextBytes metadata:nullptr error:&error];
     if (parentDescriptor >= 0) close(parentDescriptor);

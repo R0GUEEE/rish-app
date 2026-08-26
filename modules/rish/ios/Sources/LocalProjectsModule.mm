@@ -4,6 +4,8 @@
 #import <Security/Security.h>
 #import <UIKit/UIKit.h>
 
+#import "LocalProjectAccess.h"
+
 #include <arpa/inet.h>
 #include <dirent.h>
 #include <errno.h>
@@ -14,9 +16,7 @@
 #include <unistd.h>
 
 static NSString *const LPCredentialService = @"dev.zseven.rish.git.https";
-static NSString *const LPMetadataFilename = @"project.json";
 static NSString *const LPRemoteName = @"origin";
-static NSUInteger const LPMaxMetadataBytes = 64 * 1024;
 static NSUInteger const LPMaxProjectNameBytes = 120;
 static NSUInteger const LPMaxStatusEntries = 10000;
 static NSUInteger const LPMaxDiffFiles = 1000;
@@ -24,6 +24,13 @@ static NSUInteger const LPMaxDiffBytes = 1024 * 1024;
 static NSUInteger const LPMaxCommitMessageBytes = 64 * 1024;
 static NSUInteger const LPMaxCheckoutEntries = 100000;
 static NSUInteger const LPMaxCheckoutDepth = 64;
+// Cleanup begins one directory above the validated checkout, at the staging
+// wrapper. Preserve the checkout limit while accounting for that wrapper.
+static NSUInteger const LPMaxCleanupDepth = LPMaxCheckoutDepth + 1;
+static NSUInteger const LPMaxOrphansPerReconcile = 128;
+static NSUInteger const LPMaxOrphanCleanupEntriesPerPass = 128;
+static NSUInteger const LPMaxStagingOwnerBytes = 1024;
+static NSString *const LPStagingOwnerMarker = @".rish-staging-owner.json";
 
 static NSError *LPError(NSInteger code, NSString *message) {
   return [NSError errorWithDomain:@"LocalProjects"
@@ -53,12 +60,6 @@ static NSString *LPNow(void) {
 static BOOL LPHasControlCharacter(NSString *value) {
   return [value rangeOfCharacterFromSet:NSCharacterSet.controlCharacterSet].location
     != NSNotFound;
-}
-
-static BOOL LPIsCanonicalProjectId(NSString *value) {
-  if (value.length != 36 || LPHasControlCharacter(value)) return NO;
-  NSUUID *uuid = [[NSUUID alloc] initWithUUIDString:value];
-  return uuid != nil && [uuid.UUIDString.lowercaseString isEqualToString:value];
 }
 
 static NSString *LPValidatedProjectName(id value, NSError **error) {
@@ -245,31 +246,205 @@ static BOOL LPDirectoryIsSafe(NSURL *url) {
     && S_ISDIR(metadata.st_mode) && !S_ISLNK(metadata.st_mode);
 }
 
-static BOOL LPEnsurePrivateDirectory(NSURL *url, NSError **error) {
-  struct stat metadata = {};
-  if (lstat(url.fileSystemRepresentation, &metadata) == 0) {
-    if (!S_ISDIR(metadata.st_mode) || S_ISLNK(metadata.st_mode)) {
-      if (error != nil) *error = LPError(3003, @"Project storage is unsafe");
-      return NO;
-    }
-  } else if (errno == ENOENT) {
-    if (mkdir(url.fileSystemRepresentation, 0700) != 0) {
-      if (error != nil) *error = LPError(3004, @"Project storage cannot be created");
-      return NO;
-    }
-  } else {
-    if (error != nil) *error = LPError(3004, @"Project storage is unavailable");
+static BOOL LPSameNode(const struct stat &left, const struct stat &right) {
+  return left.st_dev == right.st_dev && left.st_ino == right.st_ino &&
+      left.st_mode == right.st_mode;
+}
+
+static BOOL LPWriteAll(int descriptor, NSData *data) {
+  const uint8_t *bytes = static_cast<const uint8_t *>(data.bytes);
+  size_t offset = 0;
+  while (offset < data.length) {
+    ssize_t written = write(descriptor, bytes + offset, data.length - offset);
+    if (written < 0 && errno == EINTR) continue;
+    if (written <= 0) return NO;
+    offset += static_cast<size_t>(written);
+  }
+  return YES;
+}
+
+static BOOL LPRemoveTreeContents(int directoryDescriptor,
+                                 dev_t expectedDevice,
+                                 NSUInteger depth,
+                                 NSUInteger *entryCount,
+                                 NSUInteger maxEntries) {
+  if (depth > LPMaxCleanupDepth) return NO;
+  int duplicate = openat(directoryDescriptor, ".",
+      O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW);
+  DIR *directory = duplicate < 0 ? nullptr : fdopendir(duplicate);
+  if (directory == nullptr) {
+    if (duplicate >= 0) close(duplicate);
     return NO;
   }
-  chmod(url.fileSystemRepresentation, 0700);
-  return YES;
+  BOOL ownerMarkerPresent = NO;
+  NSMutableArray<NSData *> *names = [NSMutableArray array];
+  BOOL valid = YES;
+  BOOL fullyEnumerated = YES;
+  while (valid) {
+    errno = 0;
+    struct dirent *entry = readdir(directory);
+    if (entry == nullptr) {
+      valid = errno == 0;
+      break;
+    }
+    if (strcmp(entry->d_name, ".") == 0 ||
+        strcmp(entry->d_name, "..") == 0) {
+      continue;
+    }
+    if (strcmp(entry->d_name, LPStagingOwnerMarker.UTF8String) == 0) {
+      ownerMarkerPresent = YES;
+      continue;
+    }
+    if (*entryCount >= maxEntries ||
+        names.count >= maxEntries - *entryCount) {
+      fullyEnumerated = NO;
+      break;
+    }
+    [names addObject:[NSData dataWithBytes:entry->d_name
+                                    length:strlen(entry->d_name) + 1]];
+  }
+  closedir(directory);
+  if (!valid) return NO;
+  for (NSData *nameData in names) {
+    if (*entryCount >= maxEntries) return NO;
+    *entryCount += 1;
+    const char *name = static_cast<const char *>(nameData.bytes);
+    struct stat before = {};
+    if (fstatat(directoryDescriptor, name, &before,
+                AT_SYMLINK_NOFOLLOW) != 0 ||
+        before.st_dev != expectedDevice ||
+        (!S_ISDIR(before.st_mode) && !S_ISREG(before.st_mode) &&
+         !S_ISLNK(before.st_mode))) {
+      valid = NO;
+      break;
+    }
+    if (S_ISDIR(before.st_mode)) {
+      int child = openat(directoryDescriptor, name,
+                         O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW);
+      struct stat opened = {};
+      valid = child >= 0 && fstat(child, &opened) == 0 &&
+          LPSameNode(before, opened) &&
+          LPRemoveTreeContents(child, expectedDevice, depth + 1, entryCount,
+                               maxEntries);
+      if (child >= 0) close(child);
+      struct stat after = {};
+      valid = valid &&
+          fstatat(directoryDescriptor, name, &after,
+                  AT_SYMLINK_NOFOLLOW) == 0 &&
+          LPSameNode(before, after) &&
+          unlinkat(directoryDescriptor, name, AT_REMOVEDIR) == 0;
+    } else {
+      struct stat after = {};
+      valid = fstatat(directoryDescriptor, name, &after,
+                      AT_SYMLINK_NOFOLLOW) == 0 &&
+          LPSameNode(before, after) &&
+          unlinkat(directoryDescriptor, name, 0) == 0;
+    }
+    if (!valid) return NO;
+  }
+  if (!valid) return NO;
+  if (!fullyEnumerated) return NO;
+  if (ownerMarkerPresent) {
+    struct stat marker = {};
+    if (fstatat(directoryDescriptor, LPStagingOwnerMarker.UTF8String, &marker,
+                AT_SYMLINK_NOFOLLOW) != 0 || !S_ISREG(marker.st_mode) ||
+        marker.st_dev != expectedDevice ||
+        unlinkat(directoryDescriptor, LPStagingOwnerMarker.UTF8String, 0) != 0) {
+      return NO;
+    }
+  }
+  return fsync(directoryDescriptor) == 0;
+}
+
+static NSDictionary *LPReadStagingOwner(int directoryDescriptor,
+                                         dev_t expectedDevice) {
+  int markerDescriptor = openat(directoryDescriptor,
+      LPStagingOwnerMarker.UTF8String, O_RDONLY | O_CLOEXEC | O_NOFOLLOW);
+  struct stat before = {};
+  BOOL safe = markerDescriptor >= 0 && fstat(markerDescriptor, &before) == 0 &&
+      S_ISREG(before.st_mode) && before.st_dev == expectedDevice &&
+      before.st_nlink == 1 && (before.st_mode & 0777) == 0600 &&
+      before.st_size > 0 && before.st_size <= LPMaxStagingOwnerBytes;
+  NSMutableData *data = safe
+      ? [NSMutableData dataWithLength:static_cast<NSUInteger>(before.st_size)]
+      : nil;
+  size_t offset = 0;
+  while (safe && offset < data.length) {
+    ssize_t count = read(markerDescriptor,
+                         static_cast<uint8_t *>(data.mutableBytes) + offset,
+                         data.length - offset);
+    if (count <= 0) {
+      safe = NO;
+      break;
+    }
+    offset += static_cast<size_t>(count);
+  }
+  struct stat after = {};
+  safe = safe && fstat(markerDescriptor, &after) == 0 &&
+      LPSameNode(before, after) && before.st_size == after.st_size &&
+      before.st_mtimespec.tv_sec == after.st_mtimespec.tv_sec &&
+      before.st_mtimespec.tv_nsec == after.st_mtimespec.tv_nsec &&
+      before.st_ctimespec.tv_sec == after.st_ctimespec.tv_sec &&
+      before.st_ctimespec.tv_nsec == after.st_ctimespec.tv_nsec;
+  if (markerDescriptor >= 0) close(markerDescriptor);
+  if (!safe) return nil;
+  NSDictionary *marker = LPDictionary(
+      [NSJSONSerialization JSONObjectWithData:data options:0 error:nil]);
+  NSSet *expectedKeys = [NSSet setWithArray:
+      @[@"schema_version", @"project_id", @"cleanup_token"]];
+  if (marker.count != expectedKeys.count ||
+      ![[NSSet setWithArray:marker.allKeys] isEqual:expectedKeys] ||
+      ![marker[@"schema_version"] isEqual:@1] ||
+      ![DSHLocalProjectAccess isCanonicalProjectId:LPString(marker[@"project_id"])] ||
+      ![DSHLocalProjectAccess isCanonicalProjectId:LPString(marker[@"cleanup_token"])]) {
+    return nil;
+  }
+  return marker;
+}
+
+static BOOL LPRemoveOwnedDirectoryAtRoot(int rootDescriptor,
+                                          NSString *name,
+                                          const struct stat *expectedIdentity,
+                                          NSString *expectedToken,
+                                          NSUInteger *entryCount,
+                                          NSUInteger maxEntries) {
+  struct stat before = {};
+  if (rootDescriptor < 0 || name.length == 0 ||
+      fstatat(rootDescriptor, name.fileSystemRepresentation, &before,
+              AT_SYMLINK_NOFOLLOW) != 0 || !S_ISDIR(before.st_mode) ||
+      (expectedIdentity != nullptr &&
+       !LPSameNode(*expectedIdentity, before))) {
+    return NO;
+  }
+  int directoryDescriptor = openat(rootDescriptor, name.fileSystemRepresentation,
+      O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW);
+  struct stat opened = {};
+  BOOL bound = directoryDescriptor >= 0 &&
+      fstat(directoryDescriptor, &opened) == 0 && LPSameNode(before, opened);
+  NSDictionary *marker = bound
+      ? LPReadStagingOwner(directoryDescriptor, before.st_dev) : nil;
+  bound = bound && marker != nil &&
+      [marker[@"cleanup_token"] isEqual:expectedToken];
+  BOOL emptied = bound && LPRemoveTreeContents(directoryDescriptor,
+      before.st_dev, 0, entryCount, maxEntries);
+  if (directoryDescriptor >= 0) close(directoryDescriptor);
+  struct stat after = {};
+  BOOL removed = emptied &&
+      fstatat(rootDescriptor, name.fileSystemRepresentation, &after,
+              AT_SYMLINK_NOFOLLOW) == 0 &&
+      LPSameNode(before, after) &&
+      unlinkat(rootDescriptor, name.fileSystemRepresentation,
+               AT_REMOVEDIR) == 0 &&
+      fsync(rootDescriptor) == 0;
+  return removed;
 }
 
 static BOOL LPValidateCheckoutTree(int directoryDescriptor,
                                    NSUInteger depth,
                                    NSUInteger *entryCount) {
   if (depth > LPMaxCheckoutDepth) return NO;
-  int duplicate = dup(directoryDescriptor);
+  int duplicate = openat(directoryDescriptor, ".",
+      O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW);
   DIR *directory = duplicate < 0 ? nullptr : fdopendir(duplicate);
   if (directory == nullptr) {
     if (duplicate >= 0) close(duplicate);
@@ -373,6 +548,18 @@ static int LPKeychainCredentialCallback(git_credential **out,
 
 @interface LocalProjectsModule : NSObject <RCTBridgeModule>
 @property(nonatomic, strong) dispatch_queue_t projectQueue;
+@property(nonatomic, strong) DSHLocalProjectAccess *projectAccess;
+@property(nonatomic, strong) NSMutableDictionary<NSString *, NSValue *> *stagingIdentities;
+@property(nonatomic, strong) NSMutableDictionary<NSString *, DSHLocalProjectsRootLease *> *stagingRootLeases;
+@property(nonatomic, strong) NSMutableDictionary<NSString *, NSString *> *stagingCleanupTokens;
+@property(nonatomic, strong, nullable) DSHLocalProjectsRootLease *pendingRootLease;
+- (BOOL)stagingEntryIsExactForProjectId:(NSString *)projectId
+                                  error:(NSError **)error;
+- (void)removeVisibleStagingDirectory:(NSURL *)staging
+                            projectId:(NSString *)projectId;
+- (BOOL)reconcileOwnedOrphansInRootLease:(DSHLocalProjectsRootLease *)rootLease;
+- (BOOL)removePublishedOwnerMarkerAtDescriptor:(int)descriptor;
+- (BOOL)syncPublishedRootDescriptor:(int)descriptor;
 @end
 
 @implementation LocalProjectsModule
@@ -386,154 +573,133 @@ RCT_EXPORT_MODULE(LocalProjects)
 - (instancetype)init {
   self = [super init];
   if (self != nil) {
-    git_libgit2_init();
+    _projectAccess = DSHLocalProjectAccess.sharedAccess;
+    _stagingIdentities = [NSMutableDictionary dictionary];
+    _stagingRootLeases = [NSMutableDictionary dictionary];
+    _stagingCleanupTokens = [NSMutableDictionary dictionary];
     _projectQueue = dispatch_queue_create(
       "dev.zseven.rish.local-projects", DISPATCH_QUEUE_SERIAL);
   }
   return self;
 }
 
-- (void)dealloc {
-  git_libgit2_shutdown();
-}
-
-- (NSURL *)projectsRoot:(NSError **)error {
-  NSError *internalError = nil;
-  NSURL *support = [[NSFileManager defaultManager]
-    URLForDirectory:NSApplicationSupportDirectory
-           inDomain:NSUserDomainMask
-  appropriateForURL:nil
-             create:YES
-              error:&internalError];
-  if (support == nil || !LPDirectoryIsSafe(support)) {
-    if (error != nil) *error = LPError(3005, @"Project storage is unavailable");
+- (NSURL *)projectsRootCreatingIfNeeded:(BOOL)create error:(NSError **)error {
+  NSError *accessError = nil;
+  DSHLocalProjectsRootLease *rootLease = [self.projectAccess
+      leaseProjectsRootCreatingIfNeeded:create error:&accessError];
+  self.pendingRootLease = rootLease;
+  if (rootLease == nil) {
+    if (error != nil) {
+      *error = accessError ?: LPError(3005, @"Project storage is unavailable");
+    }
     return nil;
   }
-  NSURL *workspace = [support URLByAppendingPathComponent:@"workspace" isDirectory:YES];
-  NSURL *projects = [workspace URLByAppendingPathComponent:@"projects" isDirectory:YES];
-  if (!LPEnsurePrivateDirectory(workspace, error)
-    || !LPEnsurePrivateDirectory(projects, error)) return nil;
-  [projects setResourceValue:@YES forKey:NSURLIsExcludedFromBackupKey error:nil];
-  [[NSFileManager defaultManager] setAttributes:@{
-    NSFilePosixPermissions: @0700,
-    NSFileProtectionKey: NSFileProtectionCompleteUntilFirstUserAuthentication,
-  } ofItemAtPath:projects.path error:nil];
-  return projects;
+  return rootLease.rootURL;
+}
+
+- (BOOL)removePublishedOwnerMarkerAtDescriptor:(int)descriptor {
+  return descriptor >= 0 &&
+      unlinkat(descriptor, LPStagingOwnerMarker.UTF8String, 0) == 0 &&
+      fsync(descriptor) == 0;
+}
+
+- (BOOL)syncPublishedRootDescriptor:(int)descriptor {
+  return descriptor >= 0 && fsync(descriptor) == 0;
 }
 
 - (NSURL *)projectDirectoryForId:(NSString *)projectId error:(NSError **)error {
-  if (!LPIsCanonicalProjectId(projectId)) {
+  if (![DSHLocalProjectAccess isCanonicalProjectId:projectId]) {
     if (error != nil) *error = LPError(3006, @"Project identifier is invalid");
     return nil;
   }
-  NSURL *root = [self projectsRoot:error];
-  if (root == nil) return nil;
-  NSURL *project = [root URLByAppendingPathComponent:projectId isDirectory:YES];
-  if (!LPDirectoryIsSafe(project)) {
+  NSURL *project = [self.projectAccess projectDirectoryURLForId:projectId error:nil];
+  if (project == nil) {
     if (error != nil) *error = LPError(3007, @"Project is unavailable");
     return nil;
   }
   return project;
 }
 
-- (git_repository *)openRepositoryForId:(NSString *)projectId
-                               metadata:(NSDictionary **)metadata
-                                  error:(NSError **)error {
-  NSURL *project = [self projectDirectoryForId:projectId error:error];
-  if (project == nil) return nullptr;
-  NSURL *repoURL = [project URLByAppendingPathComponent:@"repo" isDirectory:YES];
-  NSURL *gitURL = [repoURL URLByAppendingPathComponent:@".git" isDirectory:YES];
-  if (!LPDirectoryIsSafe(repoURL) || !LPDirectoryIsSafe(gitURL)) {
-    if (error != nil) *error = LPError(3008, @"Repository storage is unsafe");
-    return nullptr;
-  }
-  git_repository *repository = nullptr;
-  int result = git_repository_open_ext(
-    &repository, repoURL.fileSystemRepresentation, GIT_REPOSITORY_OPEN_NO_SEARCH, nullptr);
-  if (result < 0 || repository == nullptr || git_repository_is_bare(repository)) {
-    if (repository != nullptr) git_repository_free(repository);
-    if (error != nil) *error = LPError(3009, @"Repository cannot be opened");
-    return nullptr;
-  }
-  const char *workdir = git_repository_workdir(repository);
-  NSString *actual = workdir == nullptr ? nil
-    : [[NSFileManager defaultManager] stringWithFileSystemRepresentation:workdir
-                                                                 length:strlen(workdir)];
-  NSString *expected = [repoURL.path stringByStandardizingPath];
-  if (actual == nil || ![[actual stringByStandardizingPath] isEqualToString:expected]) {
-    git_repository_free(repository);
-    if (error != nil) *error = LPError(3008, @"Repository storage is unsafe");
-    return nullptr;
+- (DSHLocalProjectLease *)leaseRepositoryForId:(NSString *)projectId
+                                          mode:(DSHLocalProjectAccessMode)mode
+                                      metadata:(NSDictionary **)metadata
+                                         error:(NSError **)error {
+  NSError *accessError = nil;
+  DSHLocalProjectLease *lease = [self.projectAccess
+    leaseProjectId:projectId
+              mode:mode
+   includeMetadata:NO
+             error:&accessError];
+  if (lease == nil) {
+    if (error != nil) {
+      if (accessError.code == DSHLocalProjectAccessErrorInvalidIdentifier) {
+        *error = LPError(3006, @"Project identifier is invalid");
+      } else if (accessError.code == DSHLocalProjectAccessErrorStorageUnavailable) {
+        *error = LPError(3007, @"Project is unavailable");
+      } else if (accessError.code == DSHLocalProjectAccessErrorUnsafeStorage) {
+        *error = LPError(3008, @"Repository storage is unsafe");
+      } else {
+        *error = LPError(3009, @"Repository cannot be opened");
+      }
+    }
+    return nil;
   }
   if (metadata != nullptr) {
-    *metadata = [self readMetadataAtProjectDirectory:project projectId:projectId error:error];
+    *metadata = [self.projectAccess readProjectMetadataFromLease:lease
+                                                          error:nil];
+    NSString *origin = (*metadata)[@"origin_url"] == NSNull.null
+      ? nil : LPString((*metadata)[@"origin_url"]);
+    if (*metadata != nil && origin != nil &&
+        LPValidatedHTTPSURL(origin, nil) == nil) {
+      *metadata = nil;
+    }
     if (*metadata == nil) {
-      git_repository_free(repository);
-      return nullptr;
+      if (error != nil) *error = LPError(3010, @"Project metadata is invalid");
+      return nil;
     }
   }
-  return repository;
-}
-
-- (NSDictionary *)readMetadataAtProjectDirectory:(NSURL *)project
-                                        projectId:(NSString *)projectId
-                                            error:(NSError **)error {
-  NSURL *url = [project URLByAppendingPathComponent:LPMetadataFilename];
-  struct stat metadata = {};
-  if (lstat(url.fileSystemRepresentation, &metadata) != 0 || !S_ISREG(metadata.st_mode)
-    || S_ISLNK(metadata.st_mode) || metadata.st_size < 2
-    || metadata.st_size > (off_t)LPMaxMetadataBytes) {
-    if (error != nil) *error = LPError(3010, @"Project metadata is invalid");
-    return nil;
-  }
-  NSData *data = [NSData dataWithContentsOfURL:url options:NSDataReadingMappedIfSafe error:nil];
-  NSDictionary *object = LPDictionary(data == nil ? nil
-    : [NSJSONSerialization JSONObjectWithData:data options:0 error:nil]);
-  NSString *name = LPValidatedProjectName(object[@"name"], nil);
-  NSString *createdAt = LPString(object[@"created_at"]);
-  NSString *updatedAt = LPString(object[@"updated_at"]);
-  id originValue = object[@"origin_url"];
-  NSString *origin = originValue == NSNull.null ? nil : LPString(originValue);
-  if (object == nil || name == nil || createdAt.length < 20 || createdAt.length > 64
-    || updatedAt.length < 20 || updatedAt.length > 64
-    || LPHasControlCharacter(createdAt) || LPHasControlCharacter(updatedAt)
-    || (origin != nil && LPValidatedHTTPSURL(origin, nil) == nil)) {
-    if (error != nil) *error = LPError(3010, @"Project metadata is invalid");
-    return nil;
-  }
-  return @{
-    @"schema_version": @1,
-    @"id": projectId,
-    @"name": name,
-    @"workspace_path": [NSString stringWithFormat:@"projects/%@/repo", projectId],
-    @"created_at": createdAt,
-    @"updated_at": updatedAt,
-    @"origin_url": origin ?: NSNull.null,
-  };
+  return lease;
 }
 
 - (BOOL)writeMetadata:(NSDictionary *)metadata
     atProjectDirectory:(NSURL *)project
+             projectId:(NSString *)projectId
+            writeToken:(DSHLocalProjectLockToken *)writeToken
                  error:(NSError **)error {
-  NSData *data = [NSJSONSerialization dataWithJSONObject:metadata
-                                                  options:NSJSONWritingSortedKeys
-                                                    error:nil];
-  if (data == nil || data.length > LPMaxMetadataBytes) {
+  DSHLocalProjectsRootLease *rootLease = self.stagingRootLeases[projectId];
+  NSString *stagingName = [@".staging-" stringByAppendingString:projectId];
+  BOOL stagingBound = [self stagingEntryIsExactForProjectId:projectId
+                                                       error:nil];
+  int descriptor = !stagingBound || rootLease == nil ? -1 : openat(
+      rootLease.descriptor, stagingName.fileSystemRepresentation,
+      O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW);
+  BOOL correctURL = [project.lastPathComponent isEqual:stagingName] &&
+      [project.URLByDeletingLastPathComponent.path.stringByStandardizingPath
+          isEqual:rootLease.rootURL.path.stringByStandardizingPath];
+  BOOL success = descriptor >= 0 && correctURL && [self.projectAccess
+      writeInitialProjectMetadataRecord:metadata
+                       projectId:projectId
+               projectDescriptor:descriptor
+                      writeToken:writeToken
+                           error:nil];
+  struct stat identity = {};
+  success = success && fstat(descriptor, &identity) == 0 &&
+            S_ISDIR(identity.st_mode);
+  if (success) {
+    self.stagingIdentities[projectId] =
+        [NSValue value:&identity withObjCType:@encode(struct stat)];
+  }
+  if (descriptor >= 0) close(descriptor);
+  if (!success) {
     if (error != nil) *error = LPError(3011, @"Project metadata cannot be saved");
     return NO;
   }
-  NSURL *url = [project URLByAppendingPathComponent:LPMetadataFilename];
-  if (![data writeToURL:url options:NSDataWritingAtomic error:nil]) {
-    if (error != nil) *error = LPError(3011, @"Project metadata cannot be saved");
-    return NO;
-  }
-  chmod(url.fileSystemRepresentation, 0600);
   return YES;
 }
 
 - (NSDictionary *)updatedMetadata:(NSDictionary *)metadata
                          originURL:(NSString *)origin
-                  projectDirectory:(NSURL *)project
+                             lease:(DSHLocalProjectLease *)lease
                              error:(NSError **)error {
   NSDictionary *stored = @{
     @"schema_version": @1,
@@ -542,8 +708,17 @@ RCT_EXPORT_MODULE(LocalProjects)
     @"updated_at": LPNow(),
     @"origin_url": origin ?: NSNull.null,
   };
-  if (![self writeMetadata:stored atProjectDirectory:project error:error]) return nil;
-  return [self readMetadataAtProjectDirectory:project projectId:metadata[@"id"] error:error];
+  if (![self.projectAccess writeProjectMetadataRecord:stored
+                                                lease:lease error:nil]) {
+    if (error != nil) *error = LPError(3011, @"Project metadata cannot be saved");
+    return nil;
+  }
+  NSDictionary *updated = [self.projectAccess readProjectMetadataFromLease:lease
+                                                                      error:nil];
+  if (updated == nil) {
+    if (error != nil) *error = LPError(3010, @"Project metadata is invalid");
+  }
+  return updated;
 }
 
 - (NSMutableDictionary *)keychainQueryForHost:(NSString *)host {
@@ -654,32 +829,407 @@ RCT_EXPORT_MODULE(LocalProjects)
 - (NSURL *)createStagingDirectoryAtRoot:(NSURL *)root
                               projectId:(NSString *)projectId
                                    error:(NSError **)error {
+  DSHLocalProjectsRootLease *rootLease = self.pendingRootLease;
+  self.pendingRootLease = nil;
+  if (rootLease == nil ||
+      ![rootLease.rootURL.path.stringByStandardizingPath
+          isEqual:root.path.stringByStandardizingPath]) {
+    rootLease = [self.projectAccess leaseProjectsRootCreatingIfNeeded:NO
+                                                                error:nil];
+  }
   NSURL *staging = [root URLByAppendingPathComponent:
     [@".staging-" stringByAppendingString:projectId] isDirectory:YES];
-  if (mkdir(staging.fileSystemRepresentation, 0700) != 0) {
+  NSString *stagingName = [@".staging-" stringByAppendingString:projectId];
+  if (rootLease == nil ||
+      mkdirat(rootLease.descriptor, stagingName.fileSystemRepresentation,
+              0700) != 0) {
+    if (error != nil) *error = LPError(3017, @"Project staging cannot be created");
+    return nil;
+  }
+  self.stagingRootLeases[projectId] = rootLease;
+  struct stat identity = {};
+  int stagingDescriptor = openat(rootLease.descriptor,
+      stagingName.fileSystemRepresentation,
+      O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW);
+  struct stat openedIdentity = {};
+  BOOL openedValid = stagingDescriptor >= 0 &&
+      fstat(stagingDescriptor, &openedIdentity) == 0 &&
+      S_ISDIR(openedIdentity.st_mode);
+  BOOL pathValid =
+      fstatat(rootLease.descriptor, stagingName.fileSystemRepresentation,
+              &identity, AT_SYMLINK_NOFOLLOW) == 0 && S_ISDIR(identity.st_mode);
+  BOOL stagingBound = openedValid && pathValid &&
+      LPSameNode(identity, openedIdentity);
+  if (!stagingBound) {
+    if (stagingDescriptor >= 0) close(stagingDescriptor);
+    struct stat finalIdentity = {};
+    if (openedValid && pathValid &&
+        fstatat(rootLease.descriptor, stagingName.fileSystemRepresentation,
+                &finalIdentity, AT_SYMLINK_NOFOLLOW) == 0 &&
+        LPSameNode(openedIdentity, finalIdentity) &&
+        unlinkat(rootLease.descriptor, stagingName.fileSystemRepresentation,
+                 AT_REMOVEDIR) == 0) {
+      (void)fsync(rootLease.descriptor);
+    }
+    [self.stagingRootLeases removeObjectForKey:projectId];
+    if (error != nil) *error = LPError(3017, @"Project staging cannot be created");
+    return nil;
+  }
+  self.stagingIdentities[projectId] =
+      [NSValue value:&identity withObjCType:@encode(struct stat)];
+  NSString *cleanupToken = NSUUID.UUID.UUIDString.lowercaseString;
+  NSDictionary *owner = @{
+    @"schema_version" : @1,
+    @"project_id" : projectId,
+    @"cleanup_token" : cleanupToken,
+  };
+  NSData *ownerData = [NSJSONSerialization dataWithJSONObject:owner
+      options:NSJSONWritingSortedKeys error:nil];
+  int markerDescriptor = stagingDescriptor < 0 ? -1 : openat(
+      stagingDescriptor, LPStagingOwnerMarker.UTF8String,
+      O_WRONLY | O_CREAT | O_EXCL | O_CLOEXEC | O_NOFOLLOW, 0600);
+  BOOL markerSaved = markerDescriptor >= 0 && ownerData.length > 0 &&
+      ownerData.length <= LPMaxStagingOwnerBytes &&
+      fchmod(markerDescriptor, 0600) == 0 &&
+      LPWriteAll(markerDescriptor, ownerData) && fsync(markerDescriptor) == 0 &&
+      fsync(stagingDescriptor) == 0;
+  if (markerDescriptor >= 0) close(markerDescriptor);
+  if (stagingDescriptor >= 0) close(stagingDescriptor);
+  if (!markerSaved) {
+    struct stat current = {};
+    if (fstatat(rootLease.descriptor, stagingName.fileSystemRepresentation,
+                &current, AT_SYMLINK_NOFOLLOW) == 0 &&
+        LPSameNode(identity, current)) {
+      int cleanupDescriptor = openat(rootLease.descriptor,
+          stagingName.fileSystemRepresentation,
+          O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW);
+      if (cleanupDescriptor >= 0) {
+        errno = 0;
+        if (unlinkat(cleanupDescriptor, LPStagingOwnerMarker.UTF8String, 0) == 0 ||
+            errno == ENOENT) {
+          (void)fsync(cleanupDescriptor);
+        }
+        close(cleanupDescriptor);
+      }
+      struct stat finalIdentity = {};
+      if (fstatat(rootLease.descriptor, stagingName.fileSystemRepresentation,
+                  &finalIdentity, AT_SYMLINK_NOFOLLOW) == 0 &&
+          LPSameNode(identity, finalIdentity) &&
+          unlinkat(rootLease.descriptor, stagingName.fileSystemRepresentation,
+                   AT_REMOVEDIR) == 0) {
+        (void)fsync(rootLease.descriptor);
+      }
+    }
+    [self.stagingIdentities removeObjectForKey:projectId];
+    [self.stagingRootLeases removeObjectForKey:projectId];
+    if (error != nil) *error = LPError(3017, @"Project staging cannot be created");
+    return nil;
+  }
+  self.stagingCleanupTokens[projectId] = cleanupToken;
+  if (fsync(rootLease.descriptor) != 0) {
+    [self removeVisibleStagingDirectory:staging projectId:projectId];
     if (error != nil) *error = LPError(3017, @"Project staging cannot be created");
     return nil;
   }
   return staging;
 }
 
+- (BOOL)stagingEntryIsExactForProjectId:(NSString *)projectId
+                                  error:(NSError **)error {
+  DSHLocalProjectsRootLease *rootLease = self.stagingRootLeases[projectId];
+  NSValue *identityValue = self.stagingIdentities[projectId];
+  if (rootLease == nil || identityValue == nil ||
+      ![self.projectAccess validateProjectsRootLease:rootLease error:nil]) {
+    if (error != nil) *error = LPError(3018, @"Project cannot be published");
+    return NO;
+  }
+  NSString *expectedName = [@".staging-" stringByAppendingString:projectId];
+  NSString *expectedFold =
+      [DSHLocalProjectAccess filesystemFoldedComponent:expectedName];
+  struct stat expected = {};
+  [identityValue getValue:&expected size:sizeof(expected)];
+  int duplicate = openat(rootLease.descriptor, ".",
+      O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW);
+  DIR *directory = duplicate < 0 ? nullptr : fdopendir(duplicate);
+  if (directory == nullptr) {
+    if (duplicate >= 0) close(duplicate);
+    if (error != nil) *error = LPError(3018, @"Project cannot be published");
+    return NO;
+  }
+  NSUInteger entries = 0;
+  NSUInteger foldedMatches = 0;
+  BOOL exactBound = NO;
+  struct dirent *entry = nullptr;
+  int enumerationError = 0;
+  while (YES) {
+    errno = 0;
+    entry = readdir(directory);
+    if (entry == nullptr) {
+      enumerationError = errno;
+      break;
+    }
+    if (strcmp(entry->d_name, ".") == 0 || strcmp(entry->d_name, "..") == 0) {
+      continue;
+    }
+    entries += 1;
+    if (entries > LPMaxStatusEntries) break;
+    NSString *candidate = [NSString stringWithUTF8String:entry->d_name];
+    if (candidate == nil || ![[DSHLocalProjectAccess
+        filesystemFoldedComponent:candidate] isEqual:expectedFold]) {
+      continue;
+    }
+    foldedMatches += 1;
+    if ([candidate isEqual:expectedName]) {
+      struct stat observed = {};
+      exactBound = fstatat(rootLease.descriptor, entry->d_name, &observed,
+                           AT_SYMLINK_NOFOLLOW) == 0 &&
+          expected.st_dev == observed.st_dev &&
+          expected.st_ino == observed.st_ino &&
+          expected.st_mode == observed.st_mode;
+    }
+  }
+  closedir(directory);
+  BOOL valid = enumerationError == 0 && entries <= LPMaxStatusEntries &&
+      foldedMatches == 1 && exactBound;
+  if (!valid && error != nil) {
+    *error = LPError(3018, @"Project cannot be published");
+  }
+  return valid;
+}
+
+- (void)removeVisibleStagingDirectory:(NSURL *)staging
+                            projectId:(NSString *)projectId {
+  BOOL safeToRemove = [self stagingEntryIsExactForProjectId:projectId
+                                                       error:nil];
+  DSHLocalProjectsRootLease *rootLease = self.stagingRootLeases[projectId];
+  NSString *cleanupToken = self.stagingCleanupTokens[projectId];
+  NSValue *identityValue = self.stagingIdentities[projectId];
+  struct stat expected = {};
+  if (identityValue != nil) {
+    [identityValue getValue:&expected size:sizeof(expected)];
+  }
+  BOOL rootValid = rootLease != nil &&
+      [self.projectAccess validateProjectsRootLease:rootLease error:nil];
+  NSString *stagingName = [@".staging-" stringByAppendingString:projectId];
+  NSString *sourceName = safeToRemove ? stagingName : nil;
+  if (sourceName == nil && rootValid && identityValue != nil) {
+    struct stat published = {};
+    if (fstatat(rootLease.descriptor, projectId.fileSystemRepresentation,
+                &published, AT_SYMLINK_NOFOLLOW) == 0 &&
+        LPSameNode(expected, published) && S_ISDIR(published.st_mode)) {
+      sourceName = projectId;
+    }
+  }
+  if (sourceName != nil && rootValid && cleanupToken != nil &&
+      identityValue != nil) {
+    int stagingDescriptor = openat(rootLease.descriptor,
+        sourceName.fileSystemRepresentation,
+        O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW);
+    NSDictionary *owner = stagingDescriptor < 0 ? nil :
+        LPReadStagingOwner(stagingDescriptor, expected.st_dev);
+    if (stagingDescriptor >= 0) close(stagingDescriptor);
+    BOOL owned = [owner[@"project_id"] isEqual:projectId] &&
+        [owner[@"cleanup_token"] isEqual:cleanupToken];
+    NSString *quarantineName = [@".orphan-"
+        stringByAppendingString:cleanupToken];
+    BOOL renamed = owned && renameatx_np(
+        rootLease.descriptor, sourceName.fileSystemRepresentation,
+        rootLease.descriptor, quarantineName.fileSystemRepresentation,
+        RENAME_EXCL) == 0;
+    if (renamed) {
+      (void)fsync(rootLease.descriptor);
+      NSUInteger cleanupEntries = 0;
+      (void)LPRemoveOwnedDirectoryAtRoot(rootLease.descriptor,
+          quarantineName, &expected, cleanupToken, &cleanupEntries,
+          LPMaxOrphanCleanupEntriesPerPass);
+    }
+  }
+  [self.stagingIdentities removeObjectForKey:projectId];
+  [self.stagingRootLeases removeObjectForKey:projectId];
+  [self.stagingCleanupTokens removeObjectForKey:projectId];
+  (void)staging;
+}
+
+- (BOOL)reconcileOwnedOrphansInRootLease:(DSHLocalProjectsRootLease *)rootLease {
+  if (rootLease == nil ||
+      ![self.projectAccess validateProjectsRootLease:rootLease error:nil]) {
+    return NO;
+  }
+  int duplicate = openat(rootLease.descriptor, ".",
+      O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW);
+  DIR *directory = duplicate < 0 ? nullptr : fdopendir(duplicate);
+  if (directory == nullptr) {
+    if (duplicate >= 0) close(duplicate);
+    return NO;
+  }
+  NSMutableArray<NSString *> *candidates = [NSMutableArray array];
+  NSUInteger entries = 0;
+  int enumerationError = 0;
+  while (YES) {
+    errno = 0;
+    struct dirent *entry = readdir(directory);
+    if (entry == nullptr) {
+      enumerationError = errno;
+      break;
+    }
+    if (strcmp(entry->d_name, ".") == 0 ||
+        strcmp(entry->d_name, "..") == 0) {
+      continue;
+    }
+    entries += 1;
+    if (entries > LPMaxStatusEntries) break;
+    NSString *name = [NSString stringWithUTF8String:entry->d_name];
+    BOOL orphan = [name hasPrefix:@".orphan-"] &&
+        [DSHLocalProjectAccess isCanonicalProjectId:
+            [name substringFromIndex:@".orphan-".length]];
+    BOOL staging = [name hasPrefix:@".staging-"] &&
+        [DSHLocalProjectAccess isCanonicalProjectId:
+            [name substringFromIndex:@".staging-".length]];
+    if (orphan || staging ||
+        [DSHLocalProjectAccess isCanonicalProjectId:name]) {
+      [candidates addObject:name];
+    }
+  }
+  closedir(directory);
+  if (enumerationError != 0 || entries > LPMaxStatusEntries) return NO;
+  NSUInteger removedCount = 0;
+  NSUInteger cleanupEntries = 0;
+  for (NSString *name in candidates) {
+    BOOL orphan = [name hasPrefix:@".orphan-"];
+    BOOL staging = [name hasPrefix:@".staging-"];
+    NSString *nameIdentity = orphan
+        ? [name substringFromIndex:@".orphan-".length]
+        : (staging ? [name substringFromIndex:@".staging-".length] : name);
+    struct stat before = {};
+    if (fstatat(rootLease.descriptor, name.fileSystemRepresentation, &before,
+                AT_SYMLINK_NOFOLLOW) != 0 || !S_ISDIR(before.st_mode) ||
+        before.st_dev != rootLease.device) {
+      continue;
+    }
+    int orphanDescriptor = openat(rootLease.descriptor,
+        name.fileSystemRepresentation,
+        O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW);
+    struct stat opened = {};
+    BOOL bound = orphanDescriptor >= 0 &&
+        fstat(orphanDescriptor, &opened) == 0 && LPSameNode(before, opened);
+    NSDictionary *owner = bound
+        ? LPReadStagingOwner(orphanDescriptor, rootLease.device) : nil;
+    if (orphanDescriptor >= 0) close(orphanDescriptor);
+    if (owner == nil) continue;
+    NSString *projectId = LPString(owner[@"project_id"]);
+    NSString *cleanupToken = LPString(owner[@"cleanup_token"]);
+    BOOL bindingValid = [DSHLocalProjectAccess
+        isCanonicalProjectId:projectId] &&
+        [DSHLocalProjectAccess isCanonicalProjectId:cleanupToken] &&
+        (orphan ? [cleanupToken isEqual:nameIdentity]
+                : [projectId isEqual:nameIdentity]);
+    if (!bindingValid) {
+      continue;
+    }
+    __attribute__((objc_precise_lifetime)) DSHLocalProjectLockToken *cleanupLock =
+        [self.projectAccess tryLockProjectIdForWrite:projectId error:nil];
+    if (cleanupLock == nil) continue;
+    if (!orphan && !staging) {
+      int projectDescriptor = openat(rootLease.descriptor,
+          name.fileSystemRepresentation,
+          O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW);
+      struct stat openedProject = {};
+      BOOL boundProject = projectDescriptor >= 0 &&
+          fstat(projectDescriptor, &openedProject) == 0 &&
+          LPSameNode(before, openedProject);
+      BOOL cleaned = boundProject &&
+          [self removePublishedOwnerMarkerAtDescriptor:projectDescriptor];
+      if (projectDescriptor >= 0) close(projectDescriptor);
+      if (cleaned) (void)fsync(rootLease.descriptor);
+      continue;
+    }
+    if (removedCount >= LPMaxOrphansPerReconcile) break;
+    if (!LPRemoveOwnedDirectoryAtRoot(rootLease.descriptor, name,
+                                      &before, cleanupToken, &cleanupEntries,
+                                      LPMaxOrphanCleanupEntriesPerPass)) {
+      if (cleanupEntries >= LPMaxOrphanCleanupEntriesPerPass) break;
+      continue;
+    }
+    removedCount += 1;
+  }
+  return [self.projectAccess validateProjectsRootLease:rootLease error:nil];
+}
+
 - (BOOL)publishStagingDirectory:(NSURL *)staging
                          atRoot:(NSURL *)root
                       projectId:(NSString *)projectId
                           error:(NSError **)error {
-  NSURL *destination = [root URLByAppendingPathComponent:projectId isDirectory:YES];
-  struct stat metadata = {};
-  if (lstat(destination.fileSystemRepresentation, &metadata) == 0 || errno != ENOENT
-    || rename(staging.fileSystemRepresentation, destination.fileSystemRepresentation) != 0) {
+  NSString *stagingName = [@".staging-" stringByAppendingString:projectId];
+  NSValue *identityValue = self.stagingIdentities[projectId];
+  DSHLocalProjectsRootLease *rootLease = self.stagingRootLeases[projectId];
+  if (![staging.lastPathComponent isEqual:stagingName] ||
+      ![staging.URLByDeletingLastPathComponent.path.stringByStandardizingPath
+          isEqual:root.path.stringByStandardizingPath] || identityValue == nil ||
+      rootLease == nil ||
+      ![rootLease.rootURL.path.stringByStandardizingPath
+          isEqual:root.path.stringByStandardizingPath] ||
+      ![self stagingEntryIsExactForProjectId:projectId error:nil]) {
     if (error != nil) *error = LPError(3018, @"Project cannot be published");
     return NO;
   }
-  int rootDescriptor = open(root.fileSystemRepresentation,
+  int rootDescriptor = dup(rootLease.descriptor);
+  int stagingDescriptor = rootDescriptor < 0 ? -1 : openat(
+    rootDescriptor, stagingName.fileSystemRepresentation,
     O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW);
-  if (rootDescriptor >= 0) {
-    fsync(rootDescriptor);
-    close(rootDescriptor);
+  struct stat expected = {};
+  struct stat opened = {};
+  struct stat pathBefore = {};
+  struct stat destinationBefore = {};
+  [identityValue getValue:&expected size:sizeof(expected)];
+  NSString *cleanupToken = self.stagingCleanupTokens[projectId];
+  NSDictionary *owner = stagingDescriptor < 0 ? nil :
+      LPReadStagingOwner(stagingDescriptor, expected.st_dev);
+  errno = 0;
+  BOOL destinationAbsent = rootDescriptor >= 0 &&
+    fstatat(rootDescriptor, projectId.fileSystemRepresentation,
+            &destinationBefore, AT_SYMLINK_NOFOLLOW) != 0 && errno == ENOENT;
+  BOOL bound = stagingDescriptor >= 0 && fstat(stagingDescriptor, &opened) == 0 &&
+    fstatat(rootDescriptor, stagingName.fileSystemRepresentation,
+            &pathBefore, AT_SYMLINK_NOFOLLOW) == 0 &&
+    expected.st_dev == opened.st_dev && expected.st_ino == opened.st_ino &&
+    expected.st_mode == opened.st_mode &&
+    opened.st_dev == pathBefore.st_dev && opened.st_ino == pathBefore.st_ino &&
+    opened.st_mode == pathBefore.st_mode && destinationAbsent &&
+    cleanupToken != nil && [owner[@"project_id"] isEqual:projectId] &&
+    [owner[@"cleanup_token"] isEqual:cleanupToken];
+  BOOL renamed = bound && renameatx_np(
+    rootDescriptor, stagingName.fileSystemRepresentation,
+    rootDescriptor, projectId.fileSystemRepresentation, RENAME_EXCL) == 0;
+  struct stat published = {};
+  BOOL publishedBound = renamed &&
+    fstatat(rootDescriptor, projectId.fileSystemRepresentation,
+            &published, AT_SYMLINK_NOFOLLOW) == 0 &&
+    expected.st_dev == published.st_dev && expected.st_ino == published.st_ino &&
+    expected.st_mode == published.st_mode;
+  BOOL rootSynced = publishedBound &&
+      [self syncPublishedRootDescriptor:rootDescriptor];
+  BOOL durable = publishedBound && rootSynced;
+  if (renamed && !durable) {
+    if (renameatx_np(rootDescriptor, projectId.fileSystemRepresentation,
+                     rootDescriptor, stagingName.fileSystemRepresentation,
+                     RENAME_EXCL) == 0) {
+      (void)fsync(rootDescriptor);
+    }
   }
+  if (durable) {
+    // The root rename is the commit point. Marker removal is recoverable
+    // housekeeping; list reconciliation retries it after a crash or I/O error.
+    (void)[self removePublishedOwnerMarkerAtDescriptor:stagingDescriptor];
+  }
+  if (stagingDescriptor >= 0) close(stagingDescriptor);
+  if (rootDescriptor >= 0) close(rootDescriptor);
+  if (!durable) {
+    if (error != nil) *error = LPError(3018, @"Project cannot be published");
+    return NO;
+  }
+  [self.stagingIdentities removeObjectForKey:projectId];
+  [self.stagingRootLeases removeObjectForKey:projectId];
+  [self.stagingCleanupTokens removeObjectForKey:projectId];
   return YES;
 }
 
@@ -797,27 +1347,58 @@ RCT_REMAP_METHOD(list,
                  rejecter:(RCTPromiseRejectBlock)reject) {
   dispatch_async(self.projectQueue, ^{
     NSError *error = nil;
-    NSURL *root = [self projectsRoot:&error];
+    NSURL *root = [self projectsRootCreatingIfNeeded:NO error:&error];
     if (root == nil) {
+      if ([error.domain isEqual:DSHLocalProjectAccessErrorDomain] &&
+          error.code == DSHLocalProjectAccessErrorRootAbsent) {
+        resolve(@{ @"schema_version": @1, @"projects": @[] });
+        return;
+      }
       reject(@"storage", error.localizedDescription, nil);
       return;
     }
-    NSArray<NSURL *> *children = [[NSFileManager defaultManager]
-      contentsOfDirectoryAtURL:root
-    includingPropertiesForKeys:nil
-                       options:NSDirectoryEnumerationSkipsHiddenFiles
-                         error:nil];
+    __attribute__((objc_precise_lifetime)) DSHLocalProjectsRootLease *rootLease =
+      self.pendingRootLease;
+    self.pendingRootLease = nil;
+    if (![self reconcileOwnedOrphansInRootLease:rootLease]) {
+      reject(@"storage", @"Project storage is unavailable", nil);
+      return;
+    }
+    int duplicate = rootLease == nil ? -1 : openat(rootLease.descriptor, ".",
+      O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW);
+    DIR *children = duplicate < 0 ? nullptr : fdopendir(duplicate);
+    if (children == nullptr) {
+      if (duplicate >= 0) close(duplicate);
+      reject(@"storage", @"Project storage is unavailable", nil);
+      return;
+    }
     NSMutableArray<NSDictionary *> *projects = [NSMutableArray array];
-    for (NSURL *child in children) {
-      NSString *projectId = child.lastPathComponent.lowercaseString;
-      if (!LPIsCanonicalProjectId(projectId)) continue;
+    BOOL rootChanged = NO;
+    struct dirent *entry = nullptr;
+    while ((entry = readdir(children)) != nullptr) {
+      NSString *projectId = [NSString stringWithUTF8String:entry->d_name];
+      if (projectId == nil || [projectId hasPrefix:@"."]) continue;
+      if (![DSHLocalProjectAccess isCanonicalProjectId:projectId]) continue;
+      if (![self.projectAccess validateProjectsRootLease:rootLease error:nil]) {
+        rootChanged = YES;
+        break;
+      }
       NSDictionary *metadata = nil;
-      git_repository *repository = [self openRepositoryForId:projectId
-                                                    metadata:&metadata
-                                                       error:nil];
-      if (repository == nullptr || metadata == nil) continue;
-      git_repository_free(repository);
+      __attribute__((objc_precise_lifetime)) DSHLocalProjectLease *lease = [self leaseRepositoryForId:projectId
+                                                          mode:DSHLocalProjectAccessModeRead
+                                                      metadata:&metadata
+                                                         error:nil];
+      if (![self.projectAccess validateProjectsRootLease:rootLease error:nil]) {
+        rootChanged = YES;
+        break;
+      }
+      if (lease == nil || metadata == nil) continue;
       [projects addObject:metadata];
+    }
+    closedir(children);
+    if (rootChanged) {
+      reject(@"storage", @"Project storage changed during listing", nil);
+      return;
     }
     [projects sortUsingComparator:^NSComparisonResult(NSDictionary *left, NSDictionary *right) {
       NSComparisonResult date = [right[@"updated_at"] compare:left[@"updated_at"]];
@@ -834,12 +1415,20 @@ RCT_REMAP_METHOD(create,
   dispatch_async(self.projectQueue, ^{
     NSError *error = nil;
     NSString *name = LPValidatedProjectName(nameValue, &error);
-    NSURL *root = [self projectsRoot:&error];
+    NSURL *root = [self projectsRootCreatingIfNeeded:YES error:&error];
     if (name == nil || root == nil) {
       reject(@"validation", error.localizedDescription, nil);
       return;
     }
     NSString *projectId = NSUUID.UUID.UUIDString.lowercaseString;
+    __attribute__((objc_precise_lifetime)) DSHLocalProjectLockToken *projectLock = [self.projectAccess
+      lockProjectId:projectId
+               mode:DSHLocalProjectAccessModeWrite
+              error:nil];
+    if (projectLock == nil) {
+      reject(@"storage", @"Project storage is unavailable", nil);
+      return;
+    }
     NSURL *staging = [self createStagingDirectoryAtRoot:root projectId:projectId error:&error];
     if (staging == nil) {
       reject(@"storage", error.localizedDescription, nil);
@@ -851,7 +1440,14 @@ RCT_REMAP_METHOD(create,
     options.mode = 0700;
     options.initial_head = "main";
     git_repository *repository = nullptr;
-    int result = git_repository_init_ext(&repository, repoURL.fileSystemRepresentation, &options);
+    BOOL stagingBoundBefore = [self stagingEntryIsExactForProjectId:projectId
+                                                               error:&error];
+    int result = stagingBoundBefore
+      ? git_repository_init_ext(&repository, repoURL.fileSystemRepresentation,
+                                &options)
+      : -1;
+    BOOL stagingBoundAfter = result == 0 &&
+      [self stagingEntryIsExactForProjectId:projectId error:&error];
     NSString *now = LPNow();
     NSDictionary *stored = @{
       @"schema_version": @1,
@@ -860,22 +1456,25 @@ RCT_REMAP_METHOD(create,
       @"updated_at": now,
       @"origin_url": NSNull.null,
     };
-    BOOL success = result == 0 && repository != nullptr
+    BOOL success = stagingBoundAfter && repository != nullptr
       && LPDirectoryIsSafe(repoURL)
       && LPDirectoryIsSafe([repoURL URLByAppendingPathComponent:@".git" isDirectory:YES])
-      && [self writeMetadata:stored atProjectDirectory:staging error:&error]
+      && [self writeMetadata:stored atProjectDirectory:staging
+                   projectId:projectId writeToken:projectLock error:&error]
       && [self publishStagingDirectory:staging atRoot:root projectId:projectId error:&error];
     if (repository != nullptr) git_repository_free(repository);
     if (!success) {
-      [[NSFileManager defaultManager] removeItemAtURL:staging error:nil];
+      [self removeVisibleStagingDirectory:staging projectId:projectId];
       reject(@"git", error.localizedDescription ?: @"Project cannot be created", nil);
       return;
     }
-    NSURL *project = [root URLByAppendingPathComponent:projectId isDirectory:YES];
-    NSDictionary *metadata = [self readMetadataAtProjectDirectory:project
-                                                        projectId:projectId
-                                                            error:&error];
-    if (metadata == nil) {
+    projectLock = nil;
+    NSDictionary *metadata = nil;
+    DSHLocalProjectLease *publishedLease = [self leaseRepositoryForId:projectId
+                                                                 mode:DSHLocalProjectAccessModeRead
+                                                             metadata:&metadata
+                                                                error:&error];
+    if (publishedLease == nil || metadata == nil) {
       reject(@"storage", error.localizedDescription, nil);
       return;
     }
@@ -901,12 +1500,20 @@ RCT_REMAP_METHOD(clone,
     } else {
       name = LPValidatedProjectName(nameValue, &error);
     }
-    NSURL *root = [self projectsRoot:&error];
+    NSURL *root = [self projectsRootCreatingIfNeeded:YES error:&error];
     if (remoteURL == nil || name == nil || root == nil) {
       reject(@"validation", error.localizedDescription, nil);
       return;
     }
     NSString *projectId = NSUUID.UUID.UUIDString.lowercaseString;
+    __attribute__((objc_precise_lifetime)) DSHLocalProjectLockToken *projectLock = [self.projectAccess
+      lockProjectId:projectId
+               mode:DSHLocalProjectAccessModeWrite
+              error:nil];
+    if (projectLock == nil) {
+      reject(@"storage", @"Project storage is unavailable", nil);
+      return;
+    }
     NSURL *staging = [self createStagingDirectoryAtRoot:root projectId:projectId error:&error];
     if (staging == nil) {
       reject(@"storage", error.localizedDescription, nil);
@@ -919,12 +1526,18 @@ RCT_REMAP_METHOD(clone,
     options.fetch_opts.proxy_opts.type = GIT_PROXY_NONE;
     options.fetch_opts.callbacks.credentials = LPPublicCloneCredentialCallback;
     git_repository *repository = nullptr;
-    int result = git_clone(&repository, remoteURL.absoluteString.UTF8String,
-      repoURL.fileSystemRepresentation, &options);
+    BOOL stagingBoundBefore = [self stagingEntryIsExactForProjectId:projectId
+                                                               error:&error];
+    int result = stagingBoundBefore
+      ? git_clone(&repository, remoteURL.absoluteString.UTF8String,
+                  repoURL.fileSystemRepresentation, &options)
+      : -1;
+    BOOL stagingBoundAfter = result == 0 &&
+      [self stagingEntryIsExactForProjectId:projectId error:&error];
     NSString *cloneFailure = result < 0
       ? LPSanitizedGitFailure(@"Public clone transport", result) : nil;
     BOOL checkoutSafe = NO;
-    if (result == 0 && repository != nullptr && LPDirectoryIsSafe(repoURL)
+    if (stagingBoundAfter && repository != nullptr && LPDirectoryIsSafe(repoURL)
       && LPDirectoryIsSafe([repoURL URLByAppendingPathComponent:@".git" isDirectory:YES])
       && ![self repositoryContainsGitlink:repository]) {
       int repoDescriptor = open(repoURL.fileSystemRepresentation,
@@ -934,13 +1547,13 @@ RCT_REMAP_METHOD(clone,
         && LPValidateCheckoutTree(repoDescriptor, 0, &entryCount);
       if (repoDescriptor >= 0) close(repoDescriptor);
       if (!checkoutSafe) cloneFailure = @"Public clone validation failed (code 1, class checkout/20)";
-    } else if (result == 0 && repository != nullptr
+    } else if (stagingBoundAfter && repository != nullptr
       && [self repositoryContainsGitlink:repository]) {
       cloneFailure = @"Public clone validation failed (code 2, class submodule/17)";
     }
-    NSString *storedOrigin = repository == nullptr ? nil
+    NSString *storedOrigin = !stagingBoundAfter || repository == nullptr ? nil
       : [self originURLForRepository:repository error:nil];
-    if (result == 0 && repository != nullptr
+    if (stagingBoundAfter && repository != nullptr
       && ![storedOrigin isEqualToString:remoteURL.absoluteString]) {
       checkoutSafe = NO;
       cloneFailure = @"Public clone validation failed (code 3, class config/7)";
@@ -954,20 +1567,23 @@ RCT_REMAP_METHOD(clone,
       @"origin_url": remoteURL.absoluteString,
     };
     BOOL success = checkoutSafe
-      && [self writeMetadata:stored atProjectDirectory:staging error:&error]
+      && [self writeMetadata:stored atProjectDirectory:staging
+                   projectId:projectId writeToken:projectLock error:&error]
       && [self publishStagingDirectory:staging atRoot:root projectId:projectId error:&error];
     if (repository != nullptr) git_repository_free(repository);
     if (!success) {
-      [[NSFileManager defaultManager] removeItemAtURL:staging error:nil];
+      [self removeVisibleStagingDirectory:staging projectId:projectId];
       reject(@"git", error.localizedDescription ?: cloneFailure
         ?: @"Public repository cannot be cloned", nil);
       return;
     }
-    NSURL *project = [root URLByAppendingPathComponent:projectId isDirectory:YES];
-    NSDictionary *metadata = [self readMetadataAtProjectDirectory:project
-                                                        projectId:projectId
-                                                            error:&error];
-    if (metadata == nil) {
+    projectLock = nil;
+    NSDictionary *metadata = nil;
+    DSHLocalProjectLease *publishedLease = [self leaseRepositoryForId:projectId
+                                                                 mode:DSHLocalProjectAccessModeRead
+                                                             metadata:&metadata
+                                                                error:&error];
+    if (publishedLease == nil || metadata == nil) {
       reject(@"storage", error.localizedDescription, nil);
       return;
     }
@@ -982,13 +1598,16 @@ RCT_REMAP_METHOD(status,
   dispatch_async(self.projectQueue, ^{
     NSError *error = nil;
     NSString *projectId = LPString(projectIdValue);
-    git_repository *repository = [self openRepositoryForId:projectId metadata:nil error:&error];
-    if (repository == nullptr) {
+    __attribute__((objc_precise_lifetime)) DSHLocalProjectLease *lease = [self leaseRepositoryForId:projectId
+                                                        mode:DSHLocalProjectAccessModeRead
+                                                    metadata:nil
+                                                       error:&error];
+    if (lease == nil) {
       reject(@"project", error.localizedDescription, nil);
       return;
     }
+    git_repository *repository = lease.repository;
     NSDictionary *status = [self statusForRepository:repository projectId:projectId error:&error];
-    git_repository_free(repository);
     if (status == nil) {
       reject(@"git", error.localizedDescription, nil);
       return;
@@ -1124,17 +1743,20 @@ RCT_REMAP_METHOD(diff,
       reject(@"validation", @"Diff context is invalid", nil);
       return;
     }
-    git_repository *repository = [self openRepositoryForId:projectId metadata:nil error:&error];
-    if (repository == nullptr) {
+    __attribute__((objc_precise_lifetime)) DSHLocalProjectLease *lease = [self leaseRepositoryForId:projectId
+                                                        mode:DSHLocalProjectAccessModeRead
+                                                    metadata:nil
+                                                       error:&error];
+    if (lease == nil) {
       reject(@"project", error.localizedDescription, nil);
       return;
     }
+    git_repository *repository = lease.repository;
     NSDictionary *diff = [self diffForRepository:repository
                                        projectId:projectId
                                           staged:staged
                                     contextLines:(NSUInteger)rawContext
                                            error:&error];
-    git_repository_free(repository);
     if (diff == nil) {
       reject(@"git", error.localizedDescription, nil);
       return;
@@ -1150,11 +1772,15 @@ RCT_REMAP_METHOD(stageAll,
   dispatch_async(self.projectQueue, ^{
     NSError *error = nil;
     NSString *projectId = LPString(projectIdValue);
-    git_repository *repository = [self openRepositoryForId:projectId metadata:nil error:&error];
-    if (repository == nullptr) {
+    __attribute__((objc_precise_lifetime)) DSHLocalProjectLease *lease = [self leaseRepositoryForId:projectId
+                                                        mode:DSHLocalProjectAccessModeWrite
+                                                    metadata:nil
+                                                       error:&error];
+    if (lease == nil) {
       reject(@"project", error.localizedDescription, nil);
       return;
     }
+    git_repository *repository = lease.repository;
     git_index *index = nullptr;
     int result = git_repository_index(&index, repository);
     char wildcard[] = "*";
@@ -1167,7 +1793,6 @@ RCT_REMAP_METHOD(stageAll,
     if (index != nullptr) git_index_free(index);
     NSDictionary *status = result == 0
       ? [self statusForRepository:repository projectId:projectId error:&error] : nil;
-    git_repository_free(repository);
     if (result < 0 || status == nil) {
       reject(@"git", error.localizedDescription ?: @"Repository changes cannot be staged", nil);
       return;
@@ -1236,13 +1861,15 @@ RCT_REMAP_METHOD(commit,
       return;
     }
     NSDictionary *metadata = nil;
-    git_repository *repository = [self openRepositoryForId:projectId
-                                                  metadata:&metadata
-                                                     error:&error];
-    if (repository == nullptr) {
+    __attribute__((objc_precise_lifetime)) DSHLocalProjectLease *lease = [self leaseRepositoryForId:projectId
+                                                        mode:DSHLocalProjectAccessModeWrite
+                                                    metadata:&metadata
+                                                       error:&error];
+    if (lease == nil) {
       reject(@"project", error.localizedDescription, nil);
       return;
     }
+    git_repository *repository = lease.repository;
     git_index *index = nullptr;
     git_tree *tree = nullptr;
     git_commit *parent = nullptr;
@@ -1281,18 +1908,15 @@ RCT_REMAP_METHOD(commit,
     if (tree != nullptr) git_tree_free(tree);
     if (index != nullptr) git_index_free(index);
     if (result != 0) {
-      git_repository_free(repository);
       NSString *reason = result == GIT_EUNCHANGED ? @"There are no staged changes"
         : result == GIT_EUNMERGED ? @"Repository has unresolved conflicts"
         : @"Commit cannot be created";
       reject(@"git", reason, nil);
       return;
     }
-    git_repository_free(repository);
-    NSURL *project = [self projectDirectoryForId:projectId error:nil];
     [self updatedMetadata:metadata
                 originURL:(metadata[@"origin_url"] == NSNull.null ? nil : metadata[@"origin_url"])
-         projectDirectory:project
+                    lease:lease
                     error:nil];
     NSString *summary = [[message componentsSeparatedByCharactersInSet:
       NSCharacterSet.newlineCharacterSet] firstObject];
@@ -1320,13 +1944,15 @@ RCT_REMAP_METHOD(setRemote,
       return;
     }
     NSDictionary *metadata = nil;
-    git_repository *repository = [self openRepositoryForId:projectId
-                                                  metadata:&metadata
-                                                     error:&error];
-    if (repository == nullptr) {
+    __attribute__((objc_precise_lifetime)) DSHLocalProjectLease *lease = [self leaseRepositoryForId:projectId
+                                                        mode:DSHLocalProjectAccessModeWrite
+                                                    metadata:&metadata
+                                                       error:&error];
+    if (lease == nil) {
       reject(@"project", error.localizedDescription, nil);
       return;
     }
+    git_repository *repository = lease.repository;
     git_remote *remote = nullptr;
     int result = git_remote_lookup(&remote, repository, LPRemoteName.UTF8String);
     if (result == GIT_ENOTFOUND) {
@@ -1345,15 +1971,13 @@ RCT_REMAP_METHOD(setRemote,
     if (remote != nullptr) git_remote_free(remote);
     NSString *storedURL = result == 0
       ? [self originURLForRepository:repository error:&error] : nil;
-    git_repository_free(repository);
     if (result < 0 || ![storedURL isEqualToString:remoteURL.absoluteString]) {
       reject(@"git", @"Origin remote cannot be updated", nil);
       return;
     }
-    NSURL *project = [self projectDirectoryForId:projectId error:&error];
     NSDictionary *updated = [self updatedMetadata:metadata
                                         originURL:remoteURL.absoluteString
-                                 projectDirectory:project
+                                           lease:lease
                                             error:&error];
     if (updated == nil) {
       reject(@"storage", error.localizedDescription, nil);
@@ -1375,15 +1999,18 @@ RCT_REMAP_METHOD(credentialStatus,
   dispatch_async(self.projectQueue, ^{
     NSError *error = nil;
     NSString *projectId = LPString(projectIdValue);
-    git_repository *repository = [self openRepositoryForId:projectId metadata:nil error:&error];
-    if (repository == nullptr) {
+    __attribute__((objc_precise_lifetime)) DSHLocalProjectLease *lease = [self leaseRepositoryForId:projectId
+                                                        mode:DSHLocalProjectAccessModeRead
+                                                    metadata:nil
+                                                       error:&error];
+    if (lease == nil) {
       reject(@"project", error.localizedDescription, nil);
       return;
     }
+    git_repository *repository = lease.repository;
     NSDictionary *status = [self credentialStatusForId:projectId
                                              repository:repository
                                                   error:&error];
-    git_repository_free(repository);
     if (status == nil) {
       reject(@"keychain", error.localizedDescription, nil);
       return;
@@ -1401,13 +2028,17 @@ RCT_REMAP_METHOD(presentCredentialPrompt,
   NSString *locale = LPString(localeValue);
   dispatch_async(self.projectQueue, ^{
     NSError *error = nil;
-    git_repository *repository = [self openRepositoryForId:projectId metadata:nil error:&error];
-    if (repository == nullptr) {
+    __attribute__((objc_precise_lifetime)) DSHLocalProjectLease *lease = [self leaseRepositoryForId:projectId
+                                                        mode:DSHLocalProjectAccessModeRead
+                                                    metadata:nil
+                                                       error:&error];
+    if (lease == nil) {
       reject(@"project", error.localizedDescription, nil);
       return;
     }
+    git_repository *repository = lease.repository;
     NSString *origin = [self originURLForRepository:repository error:&error];
-    git_repository_free(repository);
+    lease = nil;
     if (origin == nil) {
       reject(@"remote", error.localizedDescription, nil);
       return;
@@ -1451,6 +2082,19 @@ RCT_REMAP_METHOD(presentCredentialPrompt,
           for (UITextField *field in alert.textFields) field.text = @"";
           dispatch_async(self.projectQueue, ^{
             NSError *storeError = nil;
+            __attribute__((objc_precise_lifetime)) DSHLocalProjectLease *currentLease = [self leaseRepositoryForId:projectId
+                                                                       mode:DSHLocalProjectAccessModeRead
+                                                                   metadata:nil
+                                                                      error:&storeError];
+            NSString *currentOrigin = currentLease == nil ? nil
+              : [self originURLForRepository:currentLease.repository error:&storeError];
+            NSString *currentHost = [NSURLComponents
+              componentsWithString:currentOrigin].host.lowercaseString;
+            if (currentOrigin == nil || ![currentHost isEqualToString:host]) {
+              currentLease = nil;
+              reject(@"remote", @"Origin remote changed before credential save", nil);
+              return;
+            }
             if (![self storeCredentialForHost:host
                                       username:username
                                          token:token
@@ -1458,6 +2102,7 @@ RCT_REMAP_METHOD(presentCredentialPrompt,
               reject(@"credential", storeError.localizedDescription, nil);
               return;
             }
+            currentLease = nil;
             resolve(@{
               @"schema_version": @1,
               @"project_id": projectId,
@@ -1478,22 +2123,28 @@ RCT_REMAP_METHOD(clearCredential,
   dispatch_async(self.projectQueue, ^{
     NSError *error = nil;
     NSString *projectId = LPString(projectIdValue);
-    git_repository *repository = [self openRepositoryForId:projectId metadata:nil error:&error];
-    if (repository == nullptr) {
+    __attribute__((objc_precise_lifetime)) DSHLocalProjectLease *lease = [self leaseRepositoryForId:projectId
+                                                        mode:DSHLocalProjectAccessModeRead
+                                                    metadata:nil
+                                                       error:&error];
+    if (lease == nil) {
       reject(@"project", error.localizedDescription, nil);
       return;
     }
+    git_repository *repository = lease.repository;
     NSString *origin = [self originURLForRepository:repository error:&error];
-    git_repository_free(repository);
     if (origin == nil) {
+      lease = nil;
       reject(@"remote", error.localizedDescription, nil);
       return;
     }
     NSString *host = [NSURLComponents componentsWithString:origin].host.lowercaseString;
     if (![self deleteCredentialForHost:host error:&error]) {
+      lease = nil;
       reject(@"keychain", error.localizedDescription, nil);
       return;
     }
+    lease = nil;
     resolve(@{
       @"schema_version": @1,
       @"project_id": projectId,
@@ -1511,20 +2162,21 @@ RCT_REMAP_METHOD(push,
     NSError *error = nil;
     NSString *projectId = LPString(projectIdValue);
     NSDictionary *metadata = nil;
-    git_repository *repository = [self openRepositoryForId:projectId
-                                                  metadata:&metadata
-                                                     error:&error];
-    if (repository == nullptr) {
+    __attribute__((objc_precise_lifetime)) DSHLocalProjectLease *lease = [self leaseRepositoryForId:projectId
+                                                        mode:DSHLocalProjectAccessModeWrite
+                                                    metadata:&metadata
+                                                       error:&error];
+    if (lease == nil) {
       reject(@"project", error.localizedDescription, nil);
       return;
     }
+    git_repository *repository = lease.repository;
     NSString *origin = [self originURLForRepository:repository error:&error];
     NSString *host = [NSURLComponents componentsWithString:origin].host.lowercaseString;
     OSStatus keychainStatus = errSecSuccess;
     NSDictionary *credential = origin == nil ? nil
       : [self credentialForHost:host status:&keychainStatus];
     if (origin == nil || credential == nil) {
-      git_repository_free(repository);
       reject(@"credential", @"Git credential is not configured for this host", nil);
       return;
     }
@@ -1538,7 +2190,6 @@ RCT_REMAP_METHOD(push,
     if (!localBranch || branch.length == 0 || !LPIsSafeRepositoryPath(branch)
       || [branch containsString:@".."] || [branch containsString:@" "]) {
       if (head != nullptr) git_reference_free(head);
-      git_repository_free(repository);
       reject(@"git", @"A local branch with at least one commit is required", nil);
       return;
     }
@@ -1546,7 +2197,6 @@ RCT_REMAP_METHOD(push,
     NSString *refspecValue = [NSString stringWithFormat:@"%@:%@", fullReference, fullReference];
     if ([refspecValue hasPrefix:@"+"]) {
       git_reference_free(head);
-      git_repository_free(repository);
       reject(@"git", @"Force push is not supported", nil);
       return;
     }
@@ -1581,15 +2231,13 @@ RCT_REMAP_METHOD(push,
     }
     if (remote != nullptr) git_remote_free(remote);
     git_reference_free(head);
-    git_repository_free(repository);
     if (result < 0) {
       reject(@"git", @"Repository cannot be pushed", nil);
       return;
     }
-    NSURL *project = [self projectDirectoryForId:projectId error:nil];
     [self updatedMetadata:metadata
                 originURL:origin
-         projectDirectory:project
+                    lease:lease
                     error:nil];
     resolve(@{
       @"schema_version": @1,
