@@ -12,6 +12,7 @@ function makeDeps(overrides: Partial<Deps> = {}): Deps {
     })),
     requestApproval: jest.fn(async () => true),
     onTrace: jest.fn(),
+    recordTrace: jest.fn(),
     ...overrides,
   };
 }
@@ -79,6 +80,10 @@ test('executes read-only tools then reports outcomes back in the follow-up round
   expect(result.traces).toEqual([
     { callId: 'c1', name: 'read_file', arguments: '{"path":"a"}',
       approved: true, ok: true, outputDigest: 'bytes:12:sha1:92380ee3' },
+  ]);
+  expect(deps.recordTrace).toHaveBeenCalledWith([
+    { name: 'read_file', arguments_sha256: expect.any(String),
+      outcome: 'ok' },
   ]);
   expect(deps.modelCalls).toHaveBeenCalledTimes(2);
   const followupCall = (deps.modelCalls as jest.Mock).mock.calls[1][0];
@@ -156,6 +161,10 @@ test('denied gated calls skip execution and still close the loop', async () => {
   expect(result.traces[0]).toMatchObject({
     callId: 'p1', approved: false, ok: false, blocked: 'denied_by_user',
   });
+  expect(deps.recordTrace).toHaveBeenCalledWith([
+    { name: 'git_push', arguments_sha256: expect.any(String),
+      outcome: 'denied' },
+  ]);
 });
 
 test('tool failures fail the turn with the structured code', async () => {

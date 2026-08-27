@@ -1623,6 +1623,51 @@ RCT_REMAP_METHOD(completeV2,
   [task resume];
 }
 
+RCT_REMAP_METHOD(recordAgentTrace,
+                 recordAgentTraceEntries:(NSArray *)entries
+                 resolver:(RCTPromiseResolveBlock)resolve
+                 rejecter:(RCTPromiseRejectBlock)reject) {
+  dispatch_async(self.stateQueue, ^{
+    NSError *error = nil;
+    NSMutableDictionary *proof = [self baseProofWithRishReceipt:nil
+                                                      credential:([self credentialLookupStatus] == errSecSuccess)
+                                                            error:&error];
+    if (proof == nil) {
+      reject(@"proof", @"Runtime proof state is unavailable", nil);
+      return;
+    }
+    if (![entries isKindOfClass:NSArray.class] || entries.count > 32) {
+      reject(@"trace", @"Agent trace entries must be an array of at most 32 rows", nil);
+      return;
+    }
+    NSMutableArray<NSDictionary *> *rows = [NSMutableArray array];
+    for (NSDictionary *entry in entries) {
+      if (![entry isKindOfClass:NSDictionary.class]) continue;
+      NSString *name = DSHString(entry[@"name"]);
+      NSString *argsSha = DSHString(entry[@"arguments_sha256"]);
+      NSString *outcome = DSHString(entry[@"outcome"]);
+      if (name.length == 0 || name.length > 64) continue;
+      if (argsSha.length == 0 || argsSha.length > 128) continue;
+      if (![outcome isEqualToString:@"ok"] &&
+          ![outcome isEqualToString:@"failed"] &&
+          ![outcome isEqualToString:@"denied"]) continue;
+      [rows addObject:@{
+        @"name": name,
+        @"arguments_sha256": argsSha,
+        @"outcome": outcome,
+        @"recorded_at": DSHNow(),
+      }];
+    }
+    proof[@"agent_tool_trace"] = @{
+      @"recorded_at": DSHNow(),
+      @"entry_count": @(rows.count),
+      @"entries": rows,
+    };
+    [self writeProof:proof error:nil];
+    resolve(@{ @"recorded": @(rows.count) });
+  });
+}
+
 RCT_REMAP_METHOD(persistSession,
                  persistSessionJSON:(NSString *)json
                  resolver:(RCTPromiseResolveBlock)resolve

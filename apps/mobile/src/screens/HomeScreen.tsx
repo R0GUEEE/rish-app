@@ -851,6 +851,9 @@ export function HomeScreen() {
                 agentApprovalResolver.current = resolve;
               }),
             onTrace: rows => setAgentTraces(rows),
+            recordTrace: entries => {
+              LocalRuntime.recordAgentTrace(entries).catch(() => undefined);
+            },
           },
         });
         if (requestEpoch.current !== epoch) return;

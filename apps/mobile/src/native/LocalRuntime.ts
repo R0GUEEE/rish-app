@@ -144,6 +144,12 @@ export type CompleteV2ToolCall = {
   arguments: string;
 };
 
+export type AgentTraceProofEntry = {
+  name: string;
+  arguments_sha256: string;
+  outcome: 'ok' | 'failed' | 'denied';
+};
+
 export type CompleteV2Result = {
   schema_version: 1;
   text: string;
@@ -173,6 +179,9 @@ type NativeLocalRuntime = {
   persistSession(json: string): Promise<boolean>;
   loadSession(): Promise<string | null>;
   completeV2?(envelopeJSON: string): Promise<Record<string, unknown>>;
+  recordAgentTrace?(
+    entries: readonly AgentTraceProofEntry[],
+  ): Promise<{ recorded: number }>;
 };
 
 const native = NativeModules.LocalRuntime as unknown;
@@ -261,6 +270,25 @@ export const LocalRuntime = {
     });
     const raw = await nativeModule.completeV2(envelope);
     return raw as unknown as CompleteV2Result;
+  },
+  isRecordAgentTraceAvailable: () => {
+    const module = NativeModules.LocalRuntime as
+      | Partial<NativeLocalRuntime>
+      | undefined;
+    return typeof module?.recordAgentTrace === 'function';
+  },
+  recordAgentTrace: async (
+    entries: readonly AgentTraceProofEntry[],
+  ): Promise<{ recorded: number }> => {
+    const nativeModule = required() as NativeLocalRuntime & {
+      recordAgentTrace?: (
+        entries: readonly AgentTraceProofEntry[],
+      ) => Promise<{ recorded: number }>;
+    };
+    if (typeof nativeModule.recordAgentTrace !== 'function') {
+      throw new Error('recordAgentTrace native method is not linked');
+    }
+    return nativeModule.recordAgentTrace([...entries]);
   },
   persistSession: (json: string) => required().persistSession(json),
   loadSession: () => required().loadSession(),

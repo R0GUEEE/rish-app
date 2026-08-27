@@ -5,6 +5,7 @@ import {
   type AgentLoopState,
   type AgentTraceRow,
 } from './AgentLoop';
+import { digestForText } from './AgentTools';
 
 /**
  * Thin driver that walks the agent reducer's commands against the real
@@ -40,6 +41,18 @@ export type RunAgentTurnDeps = {
   }) => Promise<boolean>;
   /** Streamed on every trace change for live UI rendering. */
   onTrace?: (traces: readonly AgentTraceRow[]) => void;
+  /**
+   * Redacted per-call proof rows (name + argument digest + outcome) sent to
+   * the runtime-proof store after every trace change. Content never travels
+   * with them.
+   */
+  recordTrace?: (
+    entries: ReadonlyArray<{
+      name: string;
+      arguments_sha256: string;
+      outcome: 'ok' | 'failed' | 'denied';
+    }>,
+  ) => void;
 };
 
 export type RunAgentTurnOptions = {
@@ -99,7 +112,28 @@ export async function runAgentTurn(
     const outcome = agentLoopReduce(ref.current, event);
     ref.current = outcome.state;
     queue.push(...outcome.commands);
-    if (ref.current !== null) deps.onTrace?.(ref.current.traces);
+    if (ref.current === null) return;
+    deps.onTrace?.(ref.current.traces);
+    if (deps.recordTrace && ref.current.traces.length > 0) {
+      const settledRows = ref.current.traces
+        .filter(
+          row =>
+            row.blocked === 'denied_by_user' ||
+            row.ok === true ||
+            row.ok === false,
+        )
+        .map(row => ({
+          name: row.name,
+          arguments_sha256: digestForText(row.arguments),
+          outcome:
+            row.blocked === 'denied_by_user'
+              ? ('denied' as const)
+              : row.ok === false
+                ? ('failed' as const)
+                : ('ok' as const),
+        }));
+      if (settledRows.length > 0) deps.recordTrace(settledRows);
+    }
   };
 
   reduceEvent({
