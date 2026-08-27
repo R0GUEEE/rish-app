@@ -85,9 +85,8 @@ NSArray<NSDictionary<NSString *, id> *> * _Nullable DSHCompletionToolsV2FromArra
       }
       return nil;
     }
-    NSMutableDictionary *entry = [NSMutableDictionary dictionaryWithObject:type
-                                                                   forKey:@"type"];
-    entry[@"name"] = name;
+    NSMutableDictionary *function = [NSMutableDictionary dictionary];
+    function[@"name"] = name;
     id description = tool[@"description"];
     if (description != nil) {
       NSString *text = DSHV2String(description);
@@ -99,7 +98,7 @@ NSArray<NSDictionary<NSString *, id> *> * _Nullable DSHCompletionToolsV2FromArra
         }
         return nil;
       }
-      entry[@"description"] = text;
+      function[@"description"] = text;
     }
     id parameters = tool[@"parameters"];
     if (parameters != nil) {
@@ -119,9 +118,12 @@ NSArray<NSDictionary<NSString *, id> *> * _Nullable DSHCompletionToolsV2FromArra
         }
         return nil;
       }
-      entry[@"parameters"] = parameters;
+      function[@"parameters"] = parameters;
     }
-    [sanitized addObject:entry];
+    [sanitized addObject:@{
+      @"type": @"function",
+      @"function": function,
+    }];
   }
   return sanitized;
 }
