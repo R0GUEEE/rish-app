@@ -5,6 +5,7 @@ NS_ASSUME_NONNULL_BEGIN
 // completionV2 transport contracts shared between LocalRuntimeModule and the
 // native test target. Pure functions only: no I/O, no module state.
 
+extern const NSInteger kDSHCompletionEnvelopeVersion;
 extern const NSInteger DSHCompletionV2MaxToolCount;
 extern const NSInteger DSHCompletionV2MaxToolNameLength;
 extern const NSInteger DSHCompletionV2MaxToolDescriptionLength;

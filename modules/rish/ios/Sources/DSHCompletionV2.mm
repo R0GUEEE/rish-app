@@ -2,6 +2,7 @@
 
 NSString * const DSHCompletionV2ErrorDomain = @"DSHCompletionV2Error";
 
+const NSInteger kDSHCompletionEnvelopeVersion = 1;
 const NSInteger DSHCompletionV2MaxToolCount = 32;
 const NSInteger DSHCompletionV2MaxToolNameLength = 64;
 const NSInteger DSHCompletionV2MaxToolDescriptionLength = 1024;
