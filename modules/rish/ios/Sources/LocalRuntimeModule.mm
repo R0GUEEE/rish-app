@@ -1,3 +1,4 @@
+#import "DSHCompletionV2.h"
 #import "LocalAttachmentStore.h"
 
 #import <Foundation/Foundation.h>
@@ -1357,6 +1358,247 @@ RCT_REMAP_METHOD(complete,
     });
     resolve(@{
       @"text": text,
+      @"model": model,
+      @"request_id": requestId,
+      @"latency_ms": @((NSInteger)(-[started timeIntervalSinceNow] * 1000)),
+      @"reasoning": reasoning,
+      @"thinking_mode": thinkingMode,
+    });
+  }];
+  NSURLSessionDataTask *previousTask = nil;
+  @synchronized (self) {
+    if (credentialGeneration != self.credentialGeneration) {
+      reject(@"credential", @"Credential changed before the request started", nil);
+      return;
+    }
+    self.completionGeneration += 1;
+    completionGeneration = self.completionGeneration;
+    previousTask = self.activeCompletionTask;
+    self.activeCompletionTask = task;
+    self.activeCompletionRequestId = requestId;
+    self.activeCompletionGeneration = completionGeneration;
+  }
+  [previousTask cancel];
+  [task resume];
+}
+
+RCT_REMAP_METHOD(completeV2,
+                 completeV2EnvelopeJSON:(NSString *)envelopeJSON
+                 resolver:(RCTPromiseResolveBlock)resolve
+                 rejecter:(RCTPromiseRejectBlock)reject) {
+  NSError *envelopeDecodeError = nil;
+  NSData *envelopeData =
+    [envelopeJSON dataUsingEncoding:NSUTF8StringEncoding];
+  NSDictionary *envelope = DSHDictionary(
+    [NSJSONSerialization JSONObjectWithData:envelopeData options:0
+                                      error:&envelopeDecodeError]);
+  if (envelope == nil ||
+      ![envelope[@"schema_version"] isEqual:@(kDSHCompletionEnvelopeVersion)]) {
+    reject(@"request",
+           @"CompletionV2 envelope must be an object with schema_version 1", nil);
+    return;
+  }
+  NSString *requestedModel = DSHString(envelope[@"model"]);
+  NSString *requestId = DSHString(envelope[@"request_id"]);
+  NSString *thinkingMode = DSHString(envelope[@"thinking_mode"]);
+  NSArray *history = DSHArray(envelope[@"history"]);
+  if (!DSHIsSupportedModel(requestedModel)) {
+    reject(@"model", @"Unsupported DeepSeek model", nil);
+    return;
+  }
+  if (!DSHIsValidRequestId(requestId)) {
+    reject(@"request", @"Completion request ID is invalid", nil);
+    return;
+  }
+  if (!DSHIsThinkingMode(thinkingMode)) {
+    reject(@"thinking", @"Unsupported DeepSeek thinking mode", nil);
+    return;
+  }
+  NSError *validationError = nil;
+  NSArray<NSDictionary *> *proofMessages = nil;
+  NSArray<NSDictionary *> *messages = [self validatedMessagesFromHistory:history
+                                                                    model:requestedModel
+                                                            proofMessages:&proofMessages
+                                                                    error:&validationError];
+  if (messages == nil) {
+    reject(@"history", validationError.localizedDescription, validationError);
+    return;
+  }
+  NSArray *tools = DSHCompletionToolsV2FromArray(
+    DSHArray(envelope[@"tools"]), &validationError);
+  if (tools == nil) {
+    reject(@"tools", validationError.localizedDescription, validationError);
+    return;
+  }
+  NSString *historyDigest = DSHJSONSha256(proofMessages, &validationError);
+  if (historyDigest == nil) {
+    reject(@"history", validationError.localizedDescription, validationError);
+    return;
+  }
+  __block NSString *apiKey = nil;
+  __block NSUInteger credentialGeneration = 0;
+  @synchronized (self) {
+    apiKey = self.credential;
+    credentialGeneration = self.credentialGeneration;
+  }
+  if (apiKey.length == 0) {
+    reject(@"credential", @"DeepSeek credential is unavailable", nil);
+    return;
+  }
+  NSURL *url = [NSURL URLWithString:@"https://api.deepseek.com/chat/completions"];
+  NSMutableURLRequest *request = [NSMutableURLRequest requestWithURL:url];
+  request.HTTPMethod = @"POST";
+  request.HTTPShouldHandleCookies = NO;
+  request.cachePolicy = NSURLRequestReloadIgnoringLocalCacheData;
+  request.timeoutInterval = 90;
+  [request setValue:@"application/json" forHTTPHeaderField:@"Content-Type"];
+  [request setValue:[@"Bearer " stringByAppendingString:apiKey] forHTTPHeaderField:@"Authorization"];
+  NSDictionary *body = DSHCompletionRequestBodyV2(
+    requestedModel, thinkingMode, messages, tools);
+  if (body == nil) {
+    reject(@"request", @"CompletionV2 request body could not be built", nil);
+    return;
+  }
+  NSError *bodyError = nil;
+  request.HTTPBody = [NSJSONSerialization dataWithJSONObject:body options:0 error:&bodyError];
+  if (request.HTTPBody == nil || request.HTTPBody.length > DSHMaximumRequestBodyBytes) {
+    if (bodyError == nil && request.HTTPBody.length > DSHMaximumRequestBodyBytes) {
+      bodyError = DSHLocalRuntimeError(1038, @"Completion request exceeds the transport limit");
+    }
+    reject(@"request", bodyError.localizedDescription, bodyError);
+    return;
+  }
+
+  NSDate *started = NSDate.date;
+  __block NSUInteger completionGeneration = 0;
+  NSURLSessionDataTask *task = [self.modelSession dataTaskWithRequest:request
+                                                            completionHandler:^(NSData *data, NSURLResponse *response, NSError *error) {
+    BOOL (^finishRequest)(void) = ^BOOL {
+      return [self finishCompletionRequestId:requestId
+                        completionGeneration:completionGeneration
+                        credentialGeneration:credentialGeneration];
+    };
+    if (error != nil) {
+      BOOL current = finishRequest();
+      if (!current || ([error.domain isEqualToString:NSURLErrorDomain]
+        && error.code == NSURLErrorCancelled)) {
+        reject(@"cancelled", @"Completion was cancelled", nil);
+        return;
+      }
+      reject(@"transport", error.localizedDescription, error);
+      return;
+    }
+    if (![response isKindOfClass:NSHTTPURLResponse.class]) {
+      if (!finishRequest()) {
+        reject(@"cancelled", @"Completion was cancelled", nil);
+      } else {
+        reject(@"response", @"DeepSeek returned a non-HTTP response", nil);
+      }
+      return;
+    }
+    NSHTTPURLResponse *http = (NSHTTPURLResponse *)response;
+    if (data.length == 0 || data.length > DSHMaximumResponseBytes) {
+      if (!finishRequest()) {
+        reject(@"cancelled", @"Completion was cancelled", nil);
+      } else {
+        reject(@"response", @"DeepSeek response body has an invalid size", nil);
+      }
+      return;
+    }
+    NSError *decodeError = nil;
+    NSDictionary *decoded = DSHDictionary(
+      [NSJSONSerialization JSONObjectWithData:data options:0 error:&decodeError]);
+    if (decoded == nil) {
+      BOOL current = finishRequest();
+      if (!current) {
+        reject(@"cancelled", @"Completion was cancelled", nil);
+      } else if (http.statusCode < 200 || http.statusCode >= 300) {
+        reject(@"api", [NSString stringWithFormat:@"DeepSeek returned HTTP %ld", (long)http.statusCode], nil);
+      } else {
+        reject(@"response", decodeError.localizedDescription ?: @"DeepSeek returned invalid JSON", decodeError);
+      }
+      return;
+    }
+    if (http.statusCode < 200 || http.statusCode >= 300) {
+      NSDictionary *apiError = DSHDictionary(decoded[@"error"]);
+      NSString *message = DSHString(apiError[@"message"]);
+      if (message.length == 0 || message.length > 512) {
+        message = [NSString stringWithFormat:@"DeepSeek returned HTTP %ld", (long)http.statusCode];
+      }
+      if (!finishRequest()) {
+        reject(@"cancelled", @"Completion was cancelled", nil);
+      } else {
+        reject(@"api", message, nil);
+      }
+      return;
+    }
+    NSError *parseError = nil;
+    NSDictionary *parsed = DSHParseCompletionResponseV2(decoded, &parseError);
+    if (parsed == nil) {
+      BOOL current = finishRequest();
+      if (!current) {
+        reject(@"cancelled", @"Completion was cancelled", nil);
+      } else {
+        reject(@"response", parseError.localizedDescription ?: @"DeepSeek response failed validation", parseError);
+      }
+      return;
+    }
+    NSString *text = parsed[@"text"];
+    NSString *reasoning = parsed[@"reasoning"];
+    NSString *finishReason = parsed[@"finish_reason"];
+    NSArray *toolCalls = parsed[@"tool_calls"];
+    NSString *model = DSHString(decoded[@"model"]);
+    if (model.length == 0 || model.length > 128) model = requestedModel;
+    if (!finishRequest()) {
+      reject(@"cancelled", @"Completion was cancelled", nil);
+      return;
+    }
+    NSString *assistantDigest = text.length == 0 ? nil : DSHTextSha256(text);
+    NSString *reasoningDigest = reasoning.length == 0 ? nil : DSHTextSha256(reasoning);
+    if (text.length > 0 && assistantDigest == nil) {
+      reject(@"response", @"DeepSeek assistant text is not valid UTF-8", nil);
+      return;
+    }
+    NSString *proofRunId = NSUUID.UUID.UUIDString.lowercaseString;
+
+    dispatch_async(self.stateQueue, ^{
+      NSError *proofError = nil;
+      BOOL hasCurrentCredential = [self credentialLookupStatus] == errSecSuccess;
+      NSMutableDictionary *proof = [self baseProofWithRishReceipt:nil
+                                                        credential:hasCurrentCredential
+                                                              error:&proofError];
+      if (proof == nil) return;
+      NSMutableDictionary *checks = [proof[@"checks"] mutableCopy];
+      checks[@"model_response_received"] = @YES;
+      checks[@"session_restored_after_restart"] = @NO;
+      proof[@"checks"] = checks;
+      proof[@"proof_run_id"] = proofRunId;
+      proof[@"model_response"] = @{
+        @"proof_run_id": proofRunId,
+        @"launch_instance_id": DSHLaunchInstanceId(),
+        @"received_at": DSHNow(),
+        @"http_status": @(http.statusCode),
+        @"model": model,
+        @"requested_model": requestedModel,
+        @"request_id": requestId,
+        @"request_history_sha256": historyDigest,
+        @"request_message_count": @(proofMessages.count),
+        @"assistant_text_sha256": assistantDigest ?: @"none",
+        @"thinking_mode": thinkingMode,
+        @"reasoning_text_sha256": reasoningDigest ?: @"none",
+        @"finish_reason": finishReason,
+        @"tool_calls_count": @(toolCalls.count),
+        @"response_id": DSHString(decoded[@"id"]) ?: @"unreported",
+      };
+      [proof removeObjectForKey:@"session_persisted"];
+      [proof removeObjectForKey:@"session_restore"];
+      [self writeProof:proof error:nil];
+    });
+    resolve(@{
+      @"schema_version": @1,
+      @"text": text,
+      @"tool_calls": toolCalls,
+      @"finish_reason": finishReason,
       @"model": model,
       @"request_id": requestId,
       @"latency_ms": @((NSInteger)(-[started timeIntervalSinceNow] * 1000)),

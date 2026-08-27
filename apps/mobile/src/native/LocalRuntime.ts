@@ -124,6 +124,37 @@ export type CompletionResult = {
   reasoning: string;
   thinking_mode: DeepSeekThinkingMode;
 };
+export type CompletionToolDefinitionV2 = {
+  name: string;
+  description?: string;
+  parameters?: Record<string, unknown>;
+};
+
+export type CompleteV2Request = {
+  model: DeepSeekModelId;
+  requestId: string;
+  thinkingMode: DeepSeekThinkingMode;
+  history: readonly CompletionMessage[];
+  tools?: readonly CompletionToolDefinitionV2[];
+};
+
+export type CompleteV2ToolCall = {
+  id: string;
+  name: string;
+  arguments: string;
+};
+
+export type CompleteV2Result = {
+  schema_version: 1;
+  text: string;
+  tool_calls: readonly CompleteV2ToolCall[];
+  finish_reason: string;
+  model: string;
+  request_id: string;
+  latency_ms: number;
+  reasoning: string;
+  thinking_mode: DeepSeekThinkingMode;
+};
 
 type NativeLocalRuntime = {
   bootstrap(): Promise<BootstrapResult>;
@@ -141,6 +172,7 @@ type NativeLocalRuntime = {
   cancelCompletion(requestId: string): Promise<CancelCompletionResult>;
   persistSession(json: string): Promise<boolean>;
   loadSession(): Promise<string | null>;
+  completeV2?(envelopeJSON: string): Promise<Record<string, unknown>>;
 };
 
 const native = NativeModules.LocalRuntime as unknown;
@@ -204,6 +236,32 @@ export const LocalRuntime = {
   ) => required().complete(model, history, requestId, thinkingMode),
   cancelCompletion: (requestId: string) =>
     required().cancelCompletion(requestId),
+  isCompletionV2Available: () => {
+    const module = NativeModules.LocalRuntime as
+      | Partial<NativeLocalRuntime>
+      | undefined;
+    return typeof module?.completeV2 === 'function';
+  },
+  completeV2: async (
+    request: CompleteV2Request,
+  ): Promise<CompleteV2Result> => {
+    const nativeModule = required() as NativeLocalRuntime & {
+      completeV2?: (envelopeJSON: string) => Promise<Record<string, unknown>>;
+    };
+    if (typeof nativeModule.completeV2 !== 'function') {
+      throw new Error('completionV2 native method is not linked');
+    }
+    const envelope = JSON.stringify({
+      schema_version: 1,
+      model: request.model,
+      request_id: request.requestId,
+      thinking_mode: request.thinkingMode,
+      history: request.history,
+      tools: request.tools ?? [],
+    });
+    const raw = await nativeModule.completeV2(envelope);
+    return raw as unknown as CompleteV2Result;
+  },
   persistSession: (json: string) => required().persistSession(json),
   loadSession: () => required().loadSession(),
 };
