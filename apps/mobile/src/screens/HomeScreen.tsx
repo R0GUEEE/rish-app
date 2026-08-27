@@ -806,83 +806,6 @@ export function HomeScreen() {
     [persist, refreshProof, store],
   );
 
-  const send = useCallback(async () => {
-    const prompt = draft.trim();
-    const outgoingAttachments = draftAttachments;
-    if (
-      !credentialConfigured ||
-      (prompt.length === 0 && outgoingAttachments.length === 0) ||
-      requestState === 'sending'
-    )
-      return;
-    const conversationId = ensureConversation();
-    const beforeAppend = selectConversationById(
-      store.getState(),
-      conversationId,
-    );
-    const historyNeedsVision =
-      beforeAppend?.messages.some(message =>
-        message.attachments?.some(attachment => attachment.kind === 'image'),
-      ) === true ||
-      outgoingAttachments.some(attachment => attachment.kind === 'image');
-    if (
-      historyNeedsVision &&
-      beforeAppend?.modelId !== 'deepseek-v4-flash-vision-exp'
-    ) {
-      store.setModel(conversationId, 'deepseek-v4-flash-vision-exp');
-      setAttachmentNotice(t('messages.attachment.visionEnabled'));
-    }
-    store.appendUserMessage(conversationId, prompt, {
-      attachments: outgoingAttachments,
-    });
-    setDraft('');
-    setDraftAttachments([]);
-    setAttachmentNotice(null);
-    setRequestFailure(null);
-    setRetryContext(null);
-    await persist();
-    const conversation = selectConversationById(
-      store.getState(),
-      conversationId,
-    );
-    if (conversation === null) return;
-    const context: RetryContext = {
-      conversationId,
-      model: conversation.modelId,
-      thinkingMode: conversation.thinkingMode,
-      history: conversation.messages.map(completionMessage),
-    };
-    const epoch = ++requestEpoch.current;
-    setRequestState('sending');
-    if (
-      typeof conversation.projectId === 'string' &&
-      LocalRuntime.isCompletionV2Available()
-    ) {
-      await runAgentCompletion(context, conversation.projectId, epoch);
-      return;
-    }
-    await finishCompletion(context, epoch);
-  }, [
-    credentialConfigured,
-    draft,
-    draftAttachments,
-    ensureConversation,
-    finishCompletion,
-    persist,
-    requestState,
-    runAgentCompletion,
-    store,
-    t,
-  ]);
-
-  const retry = useCallback(async () => {
-    if (retryContext === null || requestState === 'sending') return;
-    const epoch = ++requestEpoch.current;
-    setRequestFailure(null);
-    setRequestState('sending');
-    await finishCompletion(retryContext, epoch);
-  }, [finishCompletion, requestState, retryContext]);
-
   const runAgentCompletion = useCallback(
     async (context: RetryContext, projectId: string, epoch: number) => {
       const requestId = LocalRuntime.createCompletionRequestId();
@@ -966,6 +889,85 @@ export function HomeScreen() {
     },
     [persist, refreshProof, store, t],
   );
+
+
+  const send = useCallback(async () => {
+    const prompt = draft.trim();
+    const outgoingAttachments = draftAttachments;
+    if (
+      !credentialConfigured ||
+      (prompt.length === 0 && outgoingAttachments.length === 0) ||
+      requestState === 'sending'
+    )
+      return;
+    const conversationId = ensureConversation();
+    const beforeAppend = selectConversationById(
+      store.getState(),
+      conversationId,
+    );
+    const historyNeedsVision =
+      beforeAppend?.messages.some(message =>
+        message.attachments?.some(attachment => attachment.kind === 'image'),
+      ) === true ||
+      outgoingAttachments.some(attachment => attachment.kind === 'image');
+    if (
+      historyNeedsVision &&
+      beforeAppend?.modelId !== 'deepseek-v4-flash-vision-exp'
+    ) {
+      store.setModel(conversationId, 'deepseek-v4-flash-vision-exp');
+      setAttachmentNotice(t('messages.attachment.visionEnabled'));
+    }
+    store.appendUserMessage(conversationId, prompt, {
+      attachments: outgoingAttachments,
+    });
+    setDraft('');
+    setDraftAttachments([]);
+    setAttachmentNotice(null);
+    setRequestFailure(null);
+    setRetryContext(null);
+    await persist();
+    const conversation = selectConversationById(
+      store.getState(),
+      conversationId,
+    );
+    if (conversation === null) return;
+    const context: RetryContext = {
+      conversationId,
+      model: conversation.modelId,
+      thinkingMode: conversation.thinkingMode,
+      history: conversation.messages.map(completionMessage),
+    };
+    const epoch = ++requestEpoch.current;
+    setRequestState('sending');
+    if (
+      typeof conversation.projectId === 'string' &&
+      LocalRuntime.isCompletionV2Available()
+    ) {
+      await runAgentCompletion(context, conversation.projectId, epoch);
+      return;
+    }
+    await finishCompletion(context, epoch);
+  }, [
+    credentialConfigured,
+    draft,
+    draftAttachments,
+    ensureConversation,
+    finishCompletion,
+    persist,
+    requestState,
+    runAgentCompletion,
+    store,
+    t,
+  ]);
+
+  const retry = useCallback(async () => {
+    if (retryContext === null || requestState === 'sending') return;
+    const epoch = ++requestEpoch.current;
+    setRequestFailure(null);
+    setRequestState('sending');
+    await finishCompletion(retryContext, epoch);
+  }, [finishCompletion, requestState, retryContext]);
+
 
   const cancel = useCallback(() => {
     const requestId = activeRequestId.current;
