@@ -14,6 +14,15 @@ class AppDelegate: UIResponder, UIApplicationDelegate {
     _ application: UIApplication,
     didFinishLaunchingWithOptions launchOptions: [UIApplication.LaunchOptionsKey: Any]? = nil
   ) -> Bool {
+    // Under XCTest the host process must stay quiet: a second React Native
+    // lifecycle here restarts the JS runtime mid-suite and tears the runner
+    // down. Tests exercise the native modules directly instead.
+    if NSClassFromString("XCTestCase") != nil {
+      // No UI, no scene session, no React lifecycle: tests exercise the
+      // native modules directly.
+      return true
+    }
+
     let delegate = ReactNativeDelegate()
     let factory = RCTReactNativeFactory(delegate: delegate)
     delegate.dependencyProvider = RCTAppDependencyProvider()
