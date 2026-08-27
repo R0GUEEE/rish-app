@@ -158,6 +158,7 @@ function summaryFor(conversation: Conversation): ConversationSummary {
       last?.attachments?.map(attachment => attachment.name).join(', ') ||
       '',
     updatedAt: Date.parse(conversation.updatedAt),
+    messageCount: conversation.messages.length,
   };
 }
 

@@ -34,6 +34,8 @@ export type ConversationSummary = {
   title: string;
   preview: string;
   updatedAt: number;
+  /** Entries without at least one message are working drafts, not history. */
+  messageCount?: number;
 };
 
 type Props = {
@@ -76,13 +78,18 @@ export function ChatDrawer(props: Props) {
   const { colors, locale, t } = useAppPresentation();
   const styles = useMemo(() => createStyles(colors), [colors]);
   const [query, setQuery] = useState('');
+  // Zero-message conversations are working drafts, never history.
+  const history = useMemo(
+    () => props.conversations.filter(c => (c.messageCount ?? 0) > 0),
+    [props.conversations],
+  );
   const filtered = useMemo(() => {
     const normalized = query.trim().toLocaleLowerCase();
-    if (normalized.length === 0) return props.conversations;
-    return props.conversations.filter(item =>
+    if (normalized.length === 0) return history;
+    return history.filter(item =>
       `${item.title}\n${item.preview}`.toLocaleLowerCase().includes(normalized),
     );
-  }, [props.conversations, query]);
+  }, [history, query]);
 
   return (
     <SlidingSurface
