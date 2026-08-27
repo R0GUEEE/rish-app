@@ -26,7 +26,8 @@
   NSArray *tools = DSHCompletionToolsV2FromArray(@[ [self validTool] ], &error);
   XCTAssertNil(error);
   XCTAssertEqual(tools.count, 1u);
-  XCTAssertEqualObjects(tools.firstObject[@"name"], @"git_commit");
+  XCTAssertEqualObjects(
+      tools.firstObject[@"function"][@"name"], @"git_commit");
   XCTAssertEqualObjects(tools.firstObject[@"type"], @"function");
 }
 
