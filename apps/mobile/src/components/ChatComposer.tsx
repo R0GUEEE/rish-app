@@ -426,7 +426,7 @@ const createStyles = (colors: ThemePalette) =>
     },
     projectContext: {
       alignSelf: 'flex-start',
-      height: 20,
+      height: 22,
       borderRadius: 10,
       backgroundColor: colors.surfaceRaised,
       flexDirection: 'row',
@@ -502,12 +502,13 @@ const createStyles = (colors: ThemePalette) =>
     workspaceChip: {
       height: 30,
       borderRadius: 15,
-      paddingHorizontal: 8,
+      paddingHorizontal: 10,
       backgroundColor: colors.surfaceRaised,
       flexDirection: 'row',
       alignItems: 'center',
-      maxWidth: 108,
-      marginRight: 5,
+      gap: 5,
+      maxWidth: 132,
+      marginRight: 6,
     },
     workspaceText: { color: colors.textDim, fontSize: 10, fontWeight: '600' },
     modelChip: {
