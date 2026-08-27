@@ -232,6 +232,16 @@ export function isProjectId(value: unknown): value is string {
   );
 }
 
+export const WORKSPACE_ID_MAX_LENGTH = 256;
+
+export function isWorkspaceId(value: unknown): value is string {
+  return (
+    typeof value === 'string' &&
+    value.trim().length > 0 &&
+    value.length <= WORKSPACE_ID_MAX_LENGTH
+  );
+}
+
 function normalizeManualTitle(value: string): string | null {
   const normalized = value.replace(/\s+/gu, ' ').trim();
   if (normalized.length === 0) {
@@ -279,6 +289,7 @@ export function chatReducer(state: ChatState, action: ChatAction): ChatState {
         modelId = DEFAULT_MODEL_ID,
         thinkingMode = DEFAULT_THINKING_MODE,
         projectId = null,
+        workspaceId = null,
         select = true,
       } = action.payload;
       if (
@@ -287,6 +298,7 @@ export function chatReducer(state: ChatState, action: ChatAction): ChatState {
         !isModelId(modelId) ||
         !isConversationThinkingMode(thinkingMode) ||
         (projectId !== null && !isProjectId(projectId)) ||
+        (workspaceId !== null && !isWorkspaceId(workspaceId)) ||
         state.conversations[id] !== undefined
       ) {
         return state;
@@ -299,6 +311,7 @@ export function chatReducer(state: ChatState, action: ChatAction): ChatState {
       const conversation: Conversation = {
         id,
         projectId,
+        workspaceId,
         title: suppliedTitle ?? DEFAULT_CONVERSATION_TITLE,
         titleSource: suppliedTitle === null ? 'auto' : 'manual',
         modelId,
@@ -448,6 +461,39 @@ export function chatReducer(state: ChatState, action: ChatAction): ChatState {
       return withConversation(state, {
         ...conversation,
         projectId: null,
+        updatedAt: laterTimestamp(conversation.updatedAt, action.payload.at),
+      });
+    }
+
+    case 'conversation/bind-workspace': {
+      const conversation = state.conversations[action.payload.id];
+      if (
+        conversation === undefined ||
+        !isWorkspaceId(action.payload.workspaceId) ||
+        !isCanonicalTimestamp(action.payload.at) ||
+        conversation.workspaceId === action.payload.workspaceId
+      ) {
+        return state;
+      }
+      return withConversation(state, {
+        ...conversation,
+        workspaceId: action.payload.workspaceId,
+        updatedAt: laterTimestamp(conversation.updatedAt, action.payload.at),
+      });
+    }
+
+    case 'conversation/unbind-workspace': {
+      const conversation = state.conversations[action.payload.id];
+      if (
+        conversation === undefined ||
+        conversation.workspaceId === null ||
+        !isCanonicalTimestamp(action.payload.at)
+      ) {
+        return state;
+      }
+      return withConversation(state, {
+        ...conversation,
+        workspaceId: null,
         updatedAt: laterTimestamp(conversation.updatedAt, action.payload.at),
       });
     }

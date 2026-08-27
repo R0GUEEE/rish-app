@@ -2,6 +2,7 @@ import {
   ATTACHMENT_DESCRIPTOR_SCHEMA_VERSION,
   CHAT_STATE_SCHEMA_VERSION,
   LEGACY_CHAT_STATE_SCHEMA_VERSION,
+  OLDER_CHAT_STATE_SCHEMA_VERSION,
   PREVIOUS_CHAT_STATE_SCHEMA_VERSION,
   ChatStateValidationError,
   type ChatAttachment,
@@ -12,7 +13,7 @@ import {
   type HydrationResult,
   type PersistedChatAttachmentV1,
   type PersistedChatMessageV4,
-  type PersistedChatStateV4,
+  type PersistedChatStateV5,
 } from './types';
 import {
   DEFAULT_THINKING_MODE,
@@ -27,6 +28,7 @@ import {
   isConversationThinkingMode,
   isModelId,
   isProjectId,
+  isWorkspaceId,
   orderConversationIds,
   selectActiveMessages,
 } from './reducer';
@@ -39,6 +41,7 @@ const MAX_MESSAGE_LENGTH = 1_000_000;
 
 type PersistedSchemaVersion =
   | typeof LEGACY_CHAT_STATE_SCHEMA_VERSION
+  | typeof OLDER_CHAT_STATE_SCHEMA_VERSION
   | typeof PREVIOUS_CHAT_STATE_SCHEMA_VERSION
   | typeof CHAT_STATE_SCHEMA_VERSION;
 
@@ -226,9 +229,10 @@ function parseMessage(
       ? undefined
       : parseMetadata(raw.metadata, `${path}.metadata`);
   const attachments =
-    schemaVersion === CHAT_STATE_SCHEMA_VERSION
-      ? parseAttachments(raw.attachments, `${path}.attachments`)
-      : [];
+    schemaVersion === LEGACY_CHAT_STATE_SCHEMA_VERSION ||
+    schemaVersion === OLDER_CHAT_STATE_SCHEMA_VERSION
+      ? []
+      : parseAttachments(raw.attachments, `${path}.attachments`);
   const text = boundedString(
     raw.text,
     `${path}.text`,
@@ -305,6 +309,14 @@ function parseConversation(
   if (projectId !== null && !isProjectId(projectId)) {
     return invalid(`${path}.project_id`, 'must be a valid project id or null');
   }
+  const workspaceId =
+    schemaVersion === CHAT_STATE_SCHEMA_VERSION ? raw.workspace_id : null;
+  if (workspaceId !== null && !isWorkspaceId(workspaceId)) {
+    return invalid(
+      `${path}.workspace_id`,
+      'must be a valid workspace id or null',
+    );
+  }
 
   const createdAt = timestamp(raw.created_at, `${path}.created_at`);
   const updatedAt = timestamp(raw.updated_at, `${path}.updated_at`);
@@ -329,6 +341,7 @@ function parseConversation(
   return {
     id: boundedString(raw.id, `${path}.id`, MAX_ID_LENGTH),
     projectId,
+    workspaceId,
     title: boundedString(raw.title, `${path}.title`, MAX_TITLE_LENGTH),
     titleSource: raw.title_source,
     modelId: raw.model_id,
@@ -435,7 +448,7 @@ function toPersistedMessage(message: ChatMessage): PersistedChatMessageV4 {
   };
 }
 
-function toPersistedState(state: ChatState): PersistedChatStateV4 {
+function toPersistedState(state: ChatState): PersistedChatStateV5 {
   const conversationOrder = orderConversationIds(state.conversations);
   const conversations = conversationOrder.map(id => {
     const conversation = state.conversations[id];
@@ -445,6 +458,7 @@ function toPersistedState(state: ChatState): PersistedChatStateV4 {
     return {
       id: conversation.id,
       project_id: conversation.projectId,
+      workspace_id: conversation.workspaceId,
       title: conversation.title,
       title_source: conversation.titleSource,
       model_id: conversation.modelId,
@@ -475,12 +489,13 @@ export function hydrateChatState(input: unknown): ChatState {
   const raw = record(decoded, '$');
   if (
     raw.schema_version !== LEGACY_CHAT_STATE_SCHEMA_VERSION &&
+    raw.schema_version !== OLDER_CHAT_STATE_SCHEMA_VERSION &&
     raw.schema_version !== PREVIOUS_CHAT_STATE_SCHEMA_VERSION &&
     raw.schema_version !== CHAT_STATE_SCHEMA_VERSION
   ) {
     return invalid(
       '$.schema_version',
-      `must equal ${LEGACY_CHAT_STATE_SCHEMA_VERSION}, ${PREVIOUS_CHAT_STATE_SCHEMA_VERSION}, or ${CHAT_STATE_SCHEMA_VERSION}`,
+      `must equal ${LEGACY_CHAT_STATE_SCHEMA_VERSION}, ${OLDER_CHAT_STATE_SCHEMA_VERSION}, ${PREVIOUS_CHAT_STATE_SCHEMA_VERSION}, or ${CHAT_STATE_SCHEMA_VERSION}`,
     );
   }
   const schemaVersion = raw.schema_version;

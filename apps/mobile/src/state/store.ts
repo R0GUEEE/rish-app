@@ -22,6 +22,7 @@ export type CreateConversationOptions = {
   readonly modelId?: ModelId;
   readonly thinkingMode?: ConversationThinkingMode;
   readonly projectId?: string | null;
+  readonly workspaceId?: string | null;
   readonly title?: string;
   readonly select?: boolean;
 };
@@ -54,6 +55,8 @@ export type ChatStore = {
   setThinkingMode(id: string, thinkingMode: ConversationThinkingMode): void;
   bindConversationToProject(id: string, projectId: string): void;
   unbindConversationFromProject(id: string): void;
+  bindConversationToWorkspace(id: string, workspaceId: string): void;
+  unbindConversationFromWorkspace(id: string): void;
   serialize(): string;
   hydrate(input: unknown): ChatState;
 };
@@ -182,6 +185,18 @@ export function createChatStore(options: ChatStoreOptions = {}): ChatStore {
     unbindConversationFromProject: id => {
       dispatch({
         type: 'conversation/unbind-project',
+        payload: { id, at: canonicalNow(now) },
+      });
+    },
+    bindConversationToWorkspace: (id, workspaceId) => {
+      dispatch({
+        type: 'conversation/bind-workspace',
+        payload: { id, workspaceId, at: canonicalNow(now) },
+      });
+    },
+    unbindConversationFromWorkspace: id => {
+      dispatch({
+        type: 'conversation/unbind-workspace',
         payload: { id, at: canonicalNow(now) },
       });
     },

@@ -33,17 +33,19 @@ import { ConversationActionSheet } from '../components/ConversationActionSheet';
 import { EmptyChat } from '../components/EmptyChat';
 import { MessageList, type DisplayMessage } from '../components/MessageList';
 import { MirrorSettingsSheet } from '../components/MirrorSettingsSheet';
+import { ConversationOptionsPicker } from '../components/ConversationOptionsPicker';
 import { HarnessPicker } from '../components/HarnessPicker';
 import type { StructuredBlock } from '../components/StructuredContent';
 import { ModelPicker, type SupportedModel } from '../components/ModelPicker';
+import { LocalWorkspaces } from '../native/LocalWorkspaces';
 import { ProjectsSurface } from '../components/ProjectsSurface';
 import {
   RuntimeEvidenceSheet,
   type RuntimeVerificationStatus,
 } from '../components/RuntimeEvidenceSheet';
 import { SettingsSheet } from '../components/SettingsSheet';
-import { ThinkingPicker } from '../components/ThinkingPicker';
 import { WorkspaceDrawer } from '../components/WorkspaceDrawer';
+import { WorkspacePickerSheet } from '../components/WorkspacePickerSheet';
 import {
   createChatStore,
   MAX_ATTACHMENTS_PER_MESSAGE,
@@ -251,11 +253,13 @@ export function HomeScreen() {
   const [drawerVisible, setDrawerVisible] = useState(false);
   const [accountVisible, setAccountVisible] = useState(false);
   const [settingsVisible, setSettingsVisible] = useState(false);
+  const [composerOptionsVisible, setComposerOptionsVisible] = useState(false);
+  const [workspaceSheetVisible, setWorkspaceSheetVisible] = useState(false);
+  const [workspaceNames, setWorkspaceNames] = useState<
+    Readonly<Record<string, string>>
+  >({});
+  const [workspaceRefreshToken, setWorkspaceRefreshToken] = useState(0);
   const [modelVisible, setModelVisible] = useState(false);
-  const [modelPickerPlacement, setModelPickerPlacement] = useState<
-    'composer' | 'settings'
-  >('composer');
-  const [thinkingVisible, setThinkingVisible] = useState(false);
   const [mirrorsVisible, setMirrorsVisible] = useState(false);
   const [harnessesVisible, setHarnessesVisible] = useState(false);
   const [evidenceVisible, setEvidenceVisible] = useState(false);
@@ -529,6 +533,7 @@ export function HomeScreen() {
     preferences.defaultModel) as SupportedModel;
   const activeThinkingMode =
     activeConversation?.thinkingMode ?? preferences.thinkingMode;
+  const activeWorkspaceId = activeConversation?.workspaceId ?? null;
   const runtimeLocal =
     proof !== null &&
     proof.checks.credential_in_keychain &&
@@ -932,6 +937,38 @@ export function HomeScreen() {
     [ensureConversation, persist, store],
   );
 
+  useEffect(() => {
+    if (!LocalWorkspaces.isAvailable()) return;
+    let cancelled = false;
+    LocalWorkspaces.list()
+      .then(listing => {
+        if (cancelled) return;
+        setWorkspaceNames(
+          Object.fromEntries(
+            listing.workspaces.map(workspace => [
+              workspace.workspace_id,
+              workspace.display_name,
+            ]),
+          ),
+        );
+      })
+      .catch(() => undefined);
+    return () => {
+      cancelled = true;
+    };
+  }, [workspaceRefreshToken]);
+
+  const handleWorkspaceSelect = useCallback(
+    (workspaceId: string) => {
+      const conversationId = ensureConversation();
+      store.bindConversationToWorkspace(conversationId, workspaceId);
+      persist().catch(() => undefined);
+      setWorkspaceSheetVisible(false);
+      setWorkspaceRefreshToken(token => token + 1);
+    },
+    [ensureConversation, persist, store],
+  );
+
   const chatInProject = useCallback(
     (project: LocalProject) => {
       const current = selectActiveConversation(store.getState());
@@ -1220,11 +1257,16 @@ export function HomeScreen() {
             draft={draft}
             harnessName={activeHarness.name}
             model={activeModel}
-            modelPickerVisible={modelVisible}
+            optionsVisible={composerOptionsVisible}
             previewingAttachmentId={previewingAttachmentId}
             projectName={activeProjectName}
             thinkingMode={activeThinkingMode}
-            thinkingPickerVisible={thinkingVisible}
+            workspaceName={
+              activeWorkspaceId === null
+                ? null
+                : workspaceNames[activeWorkspaceId] ?? null
+            }
+            workspacePickerVisible={workspaceSheetVisible}
             sending={requestState === 'sending'}
             onAddAttachment={source => {
               addAttachment(source).catch(() => undefined);
@@ -1232,19 +1274,16 @@ export function HomeScreen() {
             onCancel={cancel}
             onChange={setDraft}
             onConfigure={() => setSettingsVisible(true)}
-            onModelPress={() => {
-              setThinkingVisible(false);
-              setModelPickerPlacement('composer');
-              setModelVisible(true);
+            onOptionsPress={() => {
+              setComposerOptionsVisible(true);
+            }}
+            onWorkspacePress={() => {
+              setWorkspaceSheetVisible(true);
             }}
             onPreviewAttachment={id => {
               presentAttachmentPreview(id).catch(() => undefined);
             }}
             onRemoveAttachment={removeDraftAttachment}
-            onThinkingPress={() => {
-              setModelVisible(false);
-              setThinkingVisible(true);
-            }}
             onSend={() => send().catch(() => undefined)}
           />
         </View>
@@ -1288,10 +1327,7 @@ export function HomeScreen() {
       />
       <SettingsSheet
         busy={credentialBusy}
-        covered={
-          mirrorsVisible ||
-          (modelVisible && modelPickerPlacement === 'settings')
-        }
+        covered={mirrorsVisible || modelVisible}
         credentialConfigured={credentialConfigured}
         model={activeModel}
         runtimeAvailable={nativeAvailable}
@@ -1305,8 +1341,6 @@ export function HomeScreen() {
           configureCredential().catch(() => undefined)
         }
         onOpenModelPicker={() => {
-          setThinkingVisible(false);
-          setModelPickerPlacement('settings');
           setModelVisible(true);
         }}
         onOpenMirrors={() => setMirrorsVisible(true)}
@@ -1320,17 +1354,28 @@ export function HomeScreen() {
         onClose={() => setAccountVisible(false)}
       />
       <ModelPicker
-        placement={modelPickerPlacement}
+        placement="settings"
         selected={activeModel}
         visible={modelVisible}
         onClose={() => setModelVisible(false)}
         onSelect={selectModel}
       />
-      <ThinkingPicker
-        selected={activeThinkingMode}
-        visible={thinkingVisible}
-        onClose={() => setThinkingVisible(false)}
-        onSelect={selectThinkingMode}
+      <ConversationOptionsPicker
+        model={activeModel}
+        thinkingMode={activeThinkingMode}
+        visible={composerOptionsVisible}
+        onClose={() => setComposerOptionsVisible(false)}
+        onSelectModel={selectModel}
+        onSelectThinkingMode={selectThinkingMode}
+      />
+      <WorkspacePickerSheet
+        activeWorkspaceId={activeWorkspaceId}
+        visible={workspaceSheetVisible}
+        onClose={() => {
+          setWorkspaceSheetVisible(false);
+          setWorkspaceRefreshToken(token => token + 1);
+        }}
+        onSelect={handleWorkspaceSelect}
       />
       <MirrorSettingsSheet
         visible={mirrorsVisible}

@@ -1,7 +1,6 @@
 import React, { useMemo, useRef, useState } from 'react';
 import type { LucideIcon } from 'lucide-react-native';
 import ArrowUp from 'lucide-react-native/icons/arrow-up';
-import BrainCircuit from 'lucide-react-native/icons/brain-circuit';
 import Camera from 'lucide-react-native/icons/camera';
 import ChevronDown from 'lucide-react-native/icons/chevron-down';
 import FileImage from 'lucide-react-native/icons/file-image';
@@ -29,7 +28,7 @@ import { useAppPresentation } from '../presentation/AppPresentation';
 import type { AttachmentDescriptor, ConversationThinkingMode } from '../state';
 import { fonts, type ThemePalette } from '../theme';
 import { localizedModelDetails, type SupportedModel } from './ModelPicker';
-import { localizedThinkingDetails } from './ThinkingPicker';
+import { localizedThinkingDetails } from './ConversationOptionsPicker';
 import { AppIcon } from './AppIcon';
 
 export type AttachmentSource = 'camera' | 'photos' | 'files';
@@ -42,20 +41,21 @@ type Props = {
   previewingAttachmentId: string | null;
   harnessName: string;
   model: SupportedModel;
-  modelPickerVisible: boolean;
+  optionsVisible: boolean;
   projectName?: string | null;
   thinkingMode: ConversationThinkingMode;
-  thinkingPickerVisible: boolean;
+  workspaceName?: string | null;
+  workspacePickerVisible?: boolean;
   sending: boolean;
   onAddAttachment: (source: AttachmentSource) => void;
   onCancel: () => void;
   onChange: (value: string) => void;
   onConfigure: () => void;
-  onModelPress: () => void;
+  onOptionsPress: () => void;
   onPreviewAttachment: (id: string) => void;
   onRemoveAttachment: (id: string) => void;
-  onThinkingPress: () => void;
   onSend: () => void;
+  onWorkspacePress?: () => void;
 };
 
 const menuItems: ReadonlyArray<{
@@ -239,23 +239,58 @@ export function ChatComposer(props: Props) {
             <AppIcon color={colors.text} icon={Plus} size={19} />
           )}
         </Pressable>
-        {props.configured ? (
+        {props.configured && props.onWorkspacePress !== undefined && (
           <Pressable
-            accessibilityLabel={t('messages.chooseModel')}
+            accessibilityLabel={t('messages.chooseWorkspace')}
             accessibilityRole="button"
-            accessibilityState={{ expanded: props.modelPickerVisible }}
+            accessibilityState={{ expanded: props.workspacePickerVisible }}
             onPress={() => {
               Keyboard.dismiss();
-              props.onModelPress();
+              props.onWorkspacePress?.();
+            }}
+            style={({ pressed }) => [
+              styles.workspaceChip,
+              pressed && styles.pressed,
+            ]}
+            testID="composer-workspace-chip"
+          >
+            <AppIcon
+              color={colors.accent}
+              icon={FolderCode}
+              size={13}
+            />
+            <Text numberOfLines={1} style={styles.workspaceText}>
+              {props.workspaceName ?? t('messages.workspaceLabel')}
+            </Text>
+            <AppIcon
+              color={colors.muted}
+              icon={ChevronDown}
+              size={14}
+              style={styles.chevronIcon}
+            />
+          </Pressable>
+        )}
+        {props.configured ? (
+          <Pressable
+            accessibilityLabel={t('messages.composerOptions', {
+              model: model.name,
+              effort: thinking.name,
+            })}
+            accessibilityRole="button"
+            accessibilityState={{ expanded: props.optionsVisible }}
+            onPress={() => {
+              Keyboard.dismiss();
+              props.onOptionsPress();
             }}
             style={({ pressed }) => [
               styles.modelChip,
               pressed && styles.pressed,
             ]}
+            testID="composer-options-chip"
           >
             <View style={styles.modelDot} />
             <Text numberOfLines={1} style={styles.modelText}>
-              {model.name}
+              {model.name} · {thinking.shortName}
             </Text>
             <AppIcon
               color={colors.muted}
@@ -277,35 +312,6 @@ export function ChatComposer(props: Props) {
             <Text style={styles.configureText}>
               {t('messages.configureKeyShort')}
             </Text>
-          </Pressable>
-        )}
-        {props.configured && (
-          <Pressable
-            accessibilityLabel={t('messages.chooseThinking')}
-            accessibilityRole="button"
-            accessibilityState={{ expanded: props.thinkingPickerVisible }}
-            onPress={() => {
-              Keyboard.dismiss();
-              props.onThinkingPress();
-            }}
-            style={({ pressed }) => [
-              styles.thinkingChip,
-              pressed && styles.pressed,
-            ]}
-          >
-            <AppIcon
-              color={colors.accent}
-              icon={BrainCircuit}
-              size={15}
-              style={styles.thinkingIcon}
-            />
-            <Text style={styles.thinkingText}>{thinking.shortName}</Text>
-            <AppIcon
-              color={colors.muted}
-              icon={ChevronDown}
-              size={14}
-              style={styles.chevronIcon}
-            />
           </Pressable>
         )}
         <View style={styles.actionSpacer} />
@@ -493,6 +499,17 @@ const createStyles = (colors: ThemePalette) =>
       justifyContent: 'center',
       marginRight: 5,
     },
+    workspaceChip: {
+      height: 30,
+      borderRadius: 15,
+      paddingHorizontal: 8,
+      backgroundColor: colors.surfaceRaised,
+      flexDirection: 'row',
+      alignItems: 'center',
+      maxWidth: 108,
+      marginRight: 5,
+    },
+    workspaceText: { color: colors.textDim, fontSize: 10, fontWeight: '600' },
     modelChip: {
       height: 30,
       borderRadius: 15,
@@ -500,7 +517,7 @@ const createStyles = (colors: ThemePalette) =>
       backgroundColor: colors.surfaceRaised,
       flexDirection: 'row',
       alignItems: 'center',
-      maxWidth: 94,
+      maxWidth: 170,
     },
     modelDot: {
       width: 5,
@@ -510,18 +527,6 @@ const createStyles = (colors: ThemePalette) =>
       marginRight: 5,
     },
     modelText: { color: colors.textDim, fontSize: 10, fontWeight: '600' },
-    thinkingChip: {
-      height: 30,
-      borderRadius: 15,
-      paddingHorizontal: 8,
-      backgroundColor: colors.surfaceRaised,
-      flexDirection: 'row',
-      alignItems: 'center',
-      marginLeft: 4,
-      maxWidth: 76,
-    },
-    thinkingIcon: { marginRight: 4 },
-    thinkingText: { color: colors.textDim, fontSize: 10, fontWeight: '600' },
     chevronIcon: { marginLeft: 3 },
     configureChip: {
       height: 38,

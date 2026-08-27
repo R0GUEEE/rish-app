@@ -75,6 +75,17 @@ jest.mock('../src/native/LocalMirrors', () => ({
     status: jest.fn(),
   },
 }));
+jest.mock('../src/native/LocalWorkspaces', () => ({
+  LocalWorkspaces: {
+    isAvailable: jest.fn(),
+    list: jest.fn(),
+    create: jest.fn(),
+    grantFolder: jest.fn(),
+    importFolder: jest.fn(),
+    resolve: jest.fn(),
+    forget: jest.fn(),
+  },
+}));
 jest.mock('react-native-safe-area-context', () => {
   const ReactModule = require('react') as typeof React;
   return {
@@ -107,6 +118,11 @@ const mockLocalAttachments = (
     LocalAttachments: Record<string, jest.Mock>;
   }
 ).LocalAttachments;
+const mockLocalWorkspaces = (
+  jest.requireMock('../src/native/LocalWorkspaces') as {
+    LocalWorkspaces: Record<string, jest.Mock>;
+  }
+).LocalWorkspaces;
 const mockLocalWorkspace = (
   jest.requireMock('../src/native/LocalWorkspace') as {
     LocalWorkspace: Record<string, jest.Mock>;
@@ -173,6 +189,7 @@ function lastPersistedState() {
       id: string;
       model_id: string;
       project_id: string | null;
+      workspace_id: string | null;
       thinking_mode: string;
       messages: Array<{
         role: string;
@@ -206,6 +223,74 @@ function actionByLabel(
   if (action === undefined) throw new Error(`no actionable ${label}`);
   return action;
 }
+
+function composerOptionsChip(root: ReactTestInstance): ReactTestInstance {
+  const chip = root
+    .findAllByProps({ testID: 'composer-options-chip' })
+    .find(instance => typeof instance.props.onPress === 'function');
+  if (chip === undefined) throw new Error('no composer options chip');
+  return chip;
+}
+
+function optionInComposerPanel(
+  root: ReactTestInstance,
+  label: string,
+): ReactTestInstance {
+  const popover = root.findAllByProps({
+    testID: 'conversation-options-popover',
+  })[0];
+  if (popover === undefined) throw new Error('composer panel not rendered');
+  return actionByLabel(popover, label);
+}
+
+test('binds the active conversation to a chosen local workspace', async () => {
+  mockLocalWorkspaces.list.mockResolvedValue({
+    schema_version: 1,
+    workspaces: [
+      {
+        schema_version: 1,
+        workspace_id: 'ws-alpha',
+        display_name: 'Alpha',
+        origin: 'rish_created',
+        created_at: '2026-08-27T01:00:00.000Z',
+        last_opened_at: '2026-08-27T01:00:00.000Z',
+        status: 'ok',
+      },
+      {
+        schema_version: 1,
+        workspace_id: 'ws-beta',
+        display_name: 'Beta',
+        origin: 'granted_folder',
+        created_at: '2026-08-27T01:00:00.000Z',
+        last_opened_at: '2026-08-27T01:00:00.000Z',
+        status: 'ok',
+      },
+    ],
+  });
+  const renderer = await renderApp();
+  const root = renderer.root;
+
+  await act(async () =>
+    actionByLabel(root, 'Choose workspace').props.onPress(),
+  );
+  await act(async () => settle());
+  const sheetHosts = () =>
+    root
+      .findAllByProps({ testID: 'workspace-picker-sheet' })
+      .filter(node => typeof node.type === 'string');
+  expect(sheetHosts()).toHaveLength(1);
+
+  await act(async () => {
+    const popover = root.findByProps({
+      testID: 'workspace-picker-sheet',
+    }) as ReactTestInstance;
+    actionByLabel(popover, 'Use Alpha').props.onPress();
+    await settle();
+  });
+
+  expect(sheetHosts()).toHaveLength(0);
+  expect(lastPersistedState().conversations[0]?.workspace_id).toBe('ws-alpha');
+});
 
 async function chooseAttachmentSource(
   root: ReactTestInstance,
@@ -965,49 +1050,77 @@ test('closes settings back to the still-open navigation drawer', async () => {
   ).toHaveLength(0);
 });
 
-test('opens compact composer pickers mutually exclusively and dismisses the keyboard', async () => {
+test('opens one combined composer options panel and keeps it open across changes', async () => {
   const dismissKeyboard = jest
     .spyOn(Keyboard, 'dismiss')
     .mockImplementation(() => undefined);
   const renderer = await renderApp();
   const root = renderer.root;
 
-  const modelButton = actionByLabel(root, 'Choose model');
-  const thinkingButton = actionByLabel(root, 'Choose thinking mode');
-  expect(modelButton.props.accessibilityState).toEqual({ expanded: false });
-  expect(thinkingButton.props.accessibilityState).toEqual({ expanded: false });
+  expect(composerOptionsChip(root).props.accessibilityState).toEqual({
+    expanded: false,
+  });
 
-  await act(async () => modelButton.props.onPress());
+  await act(async () => composerOptionsChip(root).props.onPress());
   expect(dismissKeyboard).toHaveBeenCalledTimes(1);
-  expect(root.findByProps({ testID: 'model-picker-modal' }).props.visible).toBe(
-    true,
-  );
+  const modal = () => root.findByProps({ testID: 'conversation-options-modal' });
+  expect(modal().props.visible).toBe(true);
   expect(
-    root.findByProps({ testID: 'thinking-picker-modal' }).props.visible,
+    root.findByProps({ testID: 'model-picker-modal' }).props.visible,
   ).toBe(false);
-  expect(actionByLabel(root, 'Choose model').props.accessibilityState).toEqual({
+  expect(composerOptionsChip(root).props.accessibilityState).toEqual({
     expanded: true,
   });
 
-  await act(async () =>
-    root.findByProps({ testID: 'model-picker-backdrop' }).props.onPress(),
-  );
-  await act(async () =>
-    actionByLabel(root, 'Choose thinking mode').props.onPress(),
+  await act(async () => {
+    optionInComposerPanel(root, 'Use V4 Pro').props.onPress();
+    await settle();
+  });
+  expect(modal().props.visible).toBe(true);
+  expect(dismissKeyboard).toHaveBeenCalledTimes(1);
+  expect(composerOptionsChip(root).props.accessibilityLabel).toBe(
+    'Model V4 Pro, thinking High',
   );
 
-  expect(dismissKeyboard).toHaveBeenCalledTimes(2);
-  expect(root.findByProps({ testID: 'model-picker-modal' }).props.visible).toBe(
-    false,
+  await act(async () => {
+    optionInComposerPanel(root, 'Use Max thinking').props.onPress();
+    await settle();
+  });
+  expect(modal().props.visible).toBe(true);
+
+  await act(async () =>
+    optionInComposerPanel(root, 'Done').props.onPress(),
   );
-  expect(
-    root.findByProps({ testID: 'thinking-picker-modal' }).props.visible,
-  ).toBe(true);
-  expect(
-    actionByLabel(root, 'Choose thinking mode').props.accessibilityState,
-  ).toEqual({ expanded: true });
+  await act(async () => settle());
+  expect(modal().props.visible).toBe(false);
+  expect(composerOptionsChip(root).props.accessibilityState).toEqual({
+    expanded: false,
+  });
+  expect(composerOptionsChip(root).props.accessibilityLabel).toBe(
+    'Model V4 Pro, thinking Max',
+  );
 
   dismissKeyboard.mockRestore();
+});
+
+test('closes the combined panel from its light scrim without changing anything', async () => {
+  const renderer = await renderApp();
+  const root = renderer.root;
+
+  await act(async () => composerOptionsChip(root).props.onPress());
+  await act(async () => {
+    root
+      .findByProps({ testID: 'conversation-options-backdrop' })
+      .props.onPress();
+  });
+  await act(async () => settle());
+
+  expect(
+    root.findByProps({ testID: 'conversation-options-modal' }).props.visible,
+  ).toBe(false);
+  expect(composerOptionsChip(root).props.accessibilityLabel).toBe(
+    'Model V4 Flash, thinking High',
+  );
 });
 
 test('opens the compact model popover from settings and returns to settings', async () => {
@@ -1297,9 +1410,12 @@ test('reselects Flash Exp when existing history still contains an image', async 
     actionByLabel(root, 'Send message').props.onPress();
     await settle();
   });
-  await act(async () => actionByLabel(root, 'Choose model').props.onPress());
+  await act(async () => composerOptionsChip(root).props.onPress());
   await act(async () => {
-    actionByLabel(root, 'Use V4 Pro').props.onPress();
+    optionInComposerPanel(root, 'Use V4 Pro').props.onPress();
+  });
+  await act(async () => {
+    optionInComposerPanel(root, 'Done').props.onPress();
     await settle();
   });
   await act(async () => {
@@ -1324,11 +1440,12 @@ test('uses the model selected for the active conversation', async () => {
   const renderer = await renderApp();
   const root = renderer.root;
 
+  await act(async () => composerOptionsChip(root).props.onPress());
   await act(async () => {
-    root.findByProps({ accessibilityLabel: 'Choose model' }).props.onPress();
+    optionInComposerPanel(root, 'Use V4 Pro').props.onPress();
   });
   await act(async () => {
-    root.findByProps({ accessibilityLabel: 'Use V4 Pro' }).props.onPress();
+    optionInComposerPanel(root, 'Done').props.onPress();
     await settle();
   });
   await act(async () => {
@@ -1353,11 +1470,12 @@ test('offers the multimodal Flash Exp route in the model picker', async () => {
   const renderer = await renderApp();
   const root = renderer.root;
 
+  await act(async () => composerOptionsChip(root).props.onPress());
   await act(async () => {
-    actionByLabel(root, 'Choose model').props.onPress();
+    optionInComposerPanel(root, 'Use Flash Exp').props.onPress();
   });
   await act(async () => {
-    actionByLabel(root, 'Use Flash Exp').props.onPress();
+    optionInComposerPanel(root, 'Done').props.onPress();
     await settle();
   });
   await act(async () => {
@@ -1382,11 +1500,12 @@ test('selects thinking beside the composer and persists it per conversation', as
   const renderer = await renderApp();
   const root = renderer.root;
 
+  await act(async () => composerOptionsChip(root).props.onPress());
   await act(async () => {
-    actionByLabel(root, 'Choose thinking mode').props.onPress();
+    optionInComposerPanel(root, 'Use Max thinking').props.onPress();
   });
   await act(async () => {
-    actionByLabel(root, 'Use Max thinking').props.onPress();
+    optionInComposerPanel(root, 'Done').props.onPress();
     await settle();
   });
   await act(async () => {

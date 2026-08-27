@@ -315,7 +315,7 @@ describe('schema v4 persistence', () => {
     const decoded = JSON.parse(first) as PersistedChatStateV4;
 
     expect(first).toBe(second);
-    expect(decoded.schema_version).toBe(4);
+    expect(decoded.schema_version).toBe(5);
     expect(decoded.active_conversation_id).toBe('chat-a');
     expect(decoded.conversations.map(item => item.id)).toEqual([
       'chat-b',
@@ -369,7 +369,7 @@ describe('schema v4 persistence', () => {
     const first = hydrateChatState(legacy);
     const second = hydrateChatState(JSON.stringify(legacy));
     expect(first).toEqual(second);
-    expect(first.schemaVersion).toBe(4);
+    expect(first.schemaVersion).toBe(5);
     expect(
       Object.values(first.conversations).every(
         conversation =>
@@ -382,7 +382,7 @@ describe('schema v4 persistence', () => {
       schema_version: number;
       conversations: Array<{ project_id?: unknown }>;
     };
-    expect(migrated.schema_version).toBe(4);
+    expect(migrated.schema_version).toBe(5);
     expect(
       migrated.conversations.every(
         conversation => conversation.project_id === null,
@@ -403,7 +403,7 @@ describe('schema v4 persistence', () => {
     );
 
     const hydrated = hydrateChatState(legacy);
-    expect(hydrated.schemaVersion).toBe(4);
+    expect(hydrated.schemaVersion).toBe(5);
     expect(
       Object.values(hydrated.conversations).every(conversation =>
         conversation.messages.every(
@@ -646,5 +646,158 @@ describe('framework-neutral chat store', () => {
 
     store.unbindConversationFromProject(conversationId);
     expect(selectActiveConversation(store.getState())?.projectId).toBeNull();
+  });
+
+  test('exposes workspace binding operations', () => {
+    const times = [T0, T1, T2];
+    const store = createChatStore({
+      now: () => times.shift() ?? T2,
+      createId: () => 'conversation-workspace',
+    });
+
+    const conversationId = store.createConversation({
+      workspaceId: 'ws-alpha',
+    });
+    expect(selectActiveConversation(store.getState())?.workspaceId).toBe(
+      'ws-alpha',
+    );
+
+    store.bindConversationToWorkspace(conversationId, 'ws-beta');
+    expect(selectActiveConversation(store.getState())?.workspaceId).toBe(
+      'ws-beta',
+    );
+
+    store.unbindConversationFromWorkspace(conversationId);
+    expect(
+      selectActiveConversation(store.getState())?.workspaceId,
+    ).toBeNull();
+  });
+});
+
+describe('workspace binding persistence', () => {
+  function workspaceBoundState(): ChatState {
+    let state = createConversation(createEmptyChatState(), 'chat-a', T0, false);
+    state = chatReducer(state, {
+      type: 'conversation/create',
+      payload: { id: 'chat-b', at: T1, select: false, workspaceId: 'ws-beta' },
+    });
+    state = chatReducer(state, {
+      type: 'conversation/bind-workspace',
+      payload: { id: 'chat-a', workspaceId: 'ws-alpha', at: T0 },
+    });
+    state = appendUser(state, 'chat-a', 'u1', 'Work in this folder?', T2);
+    state = chatReducer(state, {
+      type: 'conversation/select',
+      payload: { id: 'chat-a' },
+    });
+    return state;
+  }
+
+  test('binds workspaces per conversation and rejects invalid ids', () => {
+    const state = workspaceBoundState();
+    expect(state.conversations['chat-a']?.workspaceId).toBe('ws-alpha');
+    expect(state.conversations['chat-b']?.workspaceId).toBe('ws-beta');
+
+    for (const invalidWorkspaceId of ['', '   ', 'x'.repeat(257), 42]) {
+      const rejected = chatReducer(state, {
+        type: 'conversation/bind-workspace',
+        payload: {
+          id: 'chat-a',
+          // Intentionally invalid input; the reducer must not adopt it.
+          workspaceId: invalidWorkspaceId as unknown as string,
+          at: T3,
+        },
+      });
+      expect(rejected).toBe(state);
+    }
+
+    const rebound = chatReducer(state, {
+      type: 'conversation/unbind-workspace',
+      payload: { id: 'chat-a', at: T3 },
+    });
+    expect(rebound.conversations['chat-a']?.workspaceId).toBeNull();
+    expect(rebound.conversations['chat-b']?.workspaceId).toBe('ws-beta');
+
+    const alreadyUnbound = chatReducer(rebound, {
+      type: 'conversation/unbind-workspace',
+      payload: { id: 'chat-a', at: T3 },
+    });
+    expect(alreadyUnbound).toBe(rebound);
+  });
+
+  test('persists schema v5 workspace ids deterministically', () => {
+    const state = workspaceBoundState();
+    const first = serializeChatState(state);
+    const second = serializeChatState(state);
+    const decoded = JSON.parse(first) as {
+      schema_version: number;
+      conversations: Array<{ id: string; workspace_id: string | null }>;
+    };
+
+    expect(first).toBe(second);
+    expect(decoded.schema_version).toBe(5);
+    expect(decoded.conversations[0]).toMatchObject({
+      id: 'chat-a',
+      workspace_id: 'ws-alpha',
+    });
+    expect(decoded.conversations[1]).toMatchObject({
+      id: 'chat-b',
+      workspace_id: 'ws-beta',
+    });
+  });
+
+  test('round-trips bound workspaces through hydration', () => {
+    const state = workspaceBoundState();
+    const hydrated = hydrateChatState(serializeChatState(state));
+    expect(hydrated).toEqual(state);
+    expect(serializeChatState(hydrated)).toBe(serializeChatState(state));
+  });
+
+  test('deterministically migrates schema v4 conversations as unbound', () => {
+    const legacy = JSON.parse(serializeChatState(workspaceBoundState())) as {
+      schema_version: number;
+      conversations: Array<Record<string, unknown>>;
+    };
+    legacy.schema_version = 4;
+    legacy.conversations.forEach(conversation => {
+      delete conversation.workspace_id;
+    });
+
+    const first = hydrateChatState(legacy);
+    const second = hydrateChatState(JSON.stringify(legacy));
+    expect(first).toEqual(second);
+    expect(first.schemaVersion).toBe(5);
+    expect(
+      Object.values(first.conversations).every(
+        conversation => conversation.workspaceId === null,
+      ),
+    ).toBe(true);
+
+    const migrated = JSON.parse(serializeChatState(first)) as {
+      schema_version: number;
+      conversations: Array<{ workspace_id: string | null }>;
+    };
+    expect(migrated.schema_version).toBe(5);
+    expect(
+      migrated.conversations.every(conversation =>
+        conversation.workspace_id === null,
+      ),
+    ).toBe(true);
+  });
+
+  test('strictly validates the required v5 workspace_id field', () => {
+    const missing = JSON.parse(
+      serializeChatState(workspaceBoundState()),
+    ) as { conversations: Array<Record<string, unknown>> };
+    delete missing.conversations[0]?.workspace_id;
+    expect(() => hydrateChatState(missing)).toThrow(/workspace_id/);
+
+    for (const invalidWorkspaceId of ['', '   ', 'x'.repeat(257), 42]) {
+      const invalid = JSON.parse(
+        serializeChatState(workspaceBoundState()),
+      ) as { conversations: Array<Record<string, unknown>> };
+      invalid.conversations[0]!.workspace_id = invalidWorkspaceId;
+      expect(() => hydrateChatState(invalid)).toThrow(/workspace_id/);
+    }
   });
 });

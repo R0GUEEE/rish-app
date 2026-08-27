@@ -1,6 +1,7 @@
-export const CHAT_STATE_SCHEMA_VERSION = 4 as const;
-export const PREVIOUS_CHAT_STATE_SCHEMA_VERSION = 3 as const;
+export const CHAT_STATE_SCHEMA_VERSION = 5 as const;
+export const PREVIOUS_CHAT_STATE_SCHEMA_VERSION = 4 as const;
 export const LEGACY_CHAT_STATE_SCHEMA_VERSION = 2 as const;
+export const OLDER_CHAT_STATE_SCHEMA_VERSION = 3 as const;
 export const ATTACHMENT_DESCRIPTOR_SCHEMA_VERSION = 1 as const;
 
 export const ATTACHMENT_KINDS = ['image', 'text', 'pdf'] as const;
@@ -51,6 +52,7 @@ export type ChatMessage = {
 export type Conversation = {
   readonly id: string;
   readonly projectId: string | null;
+  readonly workspaceId: string | null;
   readonly title: string;
   readonly titleSource: ConversationTitleSource;
   readonly modelId: ModelId;
@@ -76,6 +78,7 @@ export type ChatAction =
         readonly modelId?: ModelId;
         readonly thinkingMode?: ConversationThinkingMode;
         readonly projectId?: string | null;
+        readonly workspaceId?: string | null;
         readonly title?: string;
         readonly select?: boolean;
       };
@@ -130,6 +133,21 @@ export type ChatAction =
     }
   | {
       readonly type: 'conversation/unbind-project';
+      readonly payload: {
+        readonly id: string;
+        readonly at: string;
+      };
+    }
+  | {
+      readonly type: 'conversation/bind-workspace';
+      readonly payload: {
+        readonly id: string;
+        readonly workspaceId: string;
+        readonly at: string;
+      };
+    }
+  | {
+      readonly type: 'conversation/unbind-workspace';
       readonly payload: {
         readonly id: string;
         readonly at: string;
@@ -230,9 +248,29 @@ export type PersistedConversationV4 = {
 };
 
 export type PersistedChatStateV4 = {
-  readonly schema_version: typeof CHAT_STATE_SCHEMA_VERSION;
+  readonly schema_version: typeof PREVIOUS_CHAT_STATE_SCHEMA_VERSION;
   readonly active_conversation_id: string | null;
   readonly conversations: readonly PersistedConversationV4[];
+  readonly messages: readonly PersistedChatMessageV4[];
+};
+
+export type PersistedConversationV5 = {
+  readonly id: string;
+  readonly project_id: string | null;
+  readonly workspace_id: string | null;
+  readonly title: string;
+  readonly title_source: ConversationTitleSource;
+  readonly model_id: ModelId;
+  readonly thinking_mode: ConversationThinkingMode;
+  readonly messages: readonly PersistedChatMessageV4[];
+  readonly created_at: string;
+  readonly updated_at: string;
+};
+
+export type PersistedChatStateV5 = {
+  readonly schema_version: typeof CHAT_STATE_SCHEMA_VERSION;
+  readonly active_conversation_id: string | null;
+  readonly conversations: readonly PersistedConversationV5[];
   readonly messages: readonly PersistedChatMessageV4[];
 };
 

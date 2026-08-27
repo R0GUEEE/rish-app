@@ -10,7 +10,6 @@ import {
   ModelPicker,
   type SupportedModel,
 } from '../src/components/ModelPicker';
-import { ThinkingPicker } from '../src/components/ThinkingPicker';
 import { AppPresentationProvider } from '../src/presentation/AppPresentation';
 import {
   createDefaultPreferences,
@@ -134,56 +133,3 @@ test('closes the model popover from its light scrim without selecting', async ()
   expect(onClose).toHaveBeenCalledTimes(2);
 });
 
-test('selects effort and closes its smaller anchored popover', async () => {
-  const onClose = jest.fn();
-  const onSelect = jest.fn();
-  const renderer = await render(
-    <ThinkingPicker
-      selected="high"
-      visible
-      onClose={onClose}
-      onSelect={onSelect}
-    />,
-  );
-
-  expect(
-    StyleSheet.flatten(
-      renderer.root.findByProps({ testID: 'thinking-picker-popover' }).props
-        .style,
-    ).width,
-  ).toBe(230);
-
-  await act(async () => {
-    actionByLabel(renderer.root, 'Use Max thinking').props.onPress();
-  });
-
-  expect(onSelect).toHaveBeenCalledWith('max');
-  expect(onClose).toHaveBeenCalledTimes(1);
-});
-
-test('closes the effort popover from its backdrop without selecting', async () => {
-  const onClose = jest.fn();
-  const onSelect = jest.fn();
-  const renderer = await render(
-    <ThinkingPicker
-      selected="high"
-      visible
-      onClose={onClose}
-      onSelect={onSelect}
-    />,
-  );
-
-  await act(async () => {
-    renderer.root
-      .findByProps({ testID: 'thinking-picker-backdrop' })
-      .props.onPress();
-  });
-
-  expect(onClose).toHaveBeenCalledTimes(1);
-  expect(onSelect).not.toHaveBeenCalled();
-
-  await act(async () => {
-    renderer.root.findByType(Modal).props.onRequestClose();
-  });
-  expect(onClose).toHaveBeenCalledTimes(2);
-});
