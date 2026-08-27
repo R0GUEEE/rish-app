@@ -1,9 +1,9 @@
 #import <XCTest/XCTest.h>
 
-// The tests target links no pod libraries (search-paths inheritance only),
-// so the pure completionV2 helpers are compiled directly into this bundle
-// instead of being resolved against the stripped host application.
-#import "../../../../modules/rish/ios/Sources/DSHCompletionV2.mm"
+// The host application keeps its symbol table for simulator builds, so the
+// completionV2 helpers resolve from the linked pod like every other native
+// symbol.
+#import "../../../../modules/rish/ios/Sources/DSHCompletionV2.h"
 
 @interface CompletionV2Tests : XCTestCase
 @end
