@@ -33,6 +33,9 @@ import { ConversationActionSheet } from '../components/ConversationActionSheet';
 import { EmptyChat } from '../components/EmptyChat';
 import { MessageList, type DisplayMessage } from '../components/MessageList';
 import { MirrorSettingsSheet } from '../components/MirrorSettingsSheet';
+import { runAgentTurn } from '../agent/runAgentTurn';
+import { executeAgentTool } from '../agent/AgentTools';
+import type { AgentTraceRow } from '../agent/AgentLoop';
 import { ConversationOptionsPicker } from '../components/ConversationOptionsPicker';
 import { HarnessPicker } from '../components/HarnessPicker';
 import type { StructuredBlock } from '../components/StructuredContent';
@@ -225,6 +228,76 @@ function legacyMessages(input: string): LegacyMessage[] | null {
   }
 }
 
+/**
+ * Fixed completionV2 tool set for agent v0, bound to the conversation's
+ * project repository through the executor bridge.
+ */
+const AGENT_TOOLS_V0 = [
+  {
+    name: 'list_dir',
+    description: 'List files in the project directory.',
+    parameters: {
+      type: 'object',
+      properties: {
+        path: { type: 'string', description: 'Relative directory' },
+      },
+    },
+  },
+  {
+    name: 'read_file',
+    description: 'Read a bounded text file from the project.',
+    parameters: {
+      type: 'object',
+      properties: {
+        path: { type: 'string', description: 'Relative file path' },
+      },
+      required: ['path'],
+    },
+  },
+  {
+    name: 'write_file',
+    description: 'Create or overwrite a text file in the project.',
+    parameters: {
+      type: 'object',
+      properties: {
+        path: { type: 'string' },
+        content: { type: 'string' },
+      },
+      required: ['path', 'content'],
+    },
+  },
+  {
+    name: 'git_status',
+    description: 'Report branch, HEAD and cleanliness.',
+    parameters: { type: 'object', properties: {} },
+  },
+  {
+    name: 'git_commit',
+    description: 'Stage all changes and commit with a message.',
+    parameters: {
+      type: 'object',
+      properties: { message: { type: 'string' } },
+      required: ['message'],
+    },
+  },
+  {
+    name: 'git_push',
+    description: 'Push committed work to origin. Needs explicit approval.',
+    parameters: { type: 'object', properties: {} },
+  },
+] as const;
+
+function agentTraceLine(traces: readonly AgentTraceRow[]): string {
+  if (traces.length === 0) return '';
+  const parts = traces.map(row => {
+    if (row.blocked === 'denied_by_user') return `${row.name} blocked`;
+    if (row.ok === false) return `${row.name} failed`;
+    if (row.ok === true) return row.name;
+    return `${row.name}…`;
+  });
+  return `[agent] ${parts.join(' · ')}`;
+}
+
 export function HomeScreen() {
   const insets = useSafeAreaInsets();
   const {
@@ -283,6 +356,15 @@ export function HomeScreen() {
   const [requestFailure, setRequestFailure] = useState<string | null>(null);
   const [storageWarning, setStorageWarning] = useState<string | null>(null);
   const [retryContext, setRetryContext] = useState<RetryContext | null>(null);
+  const [agentTraces, setAgentTraces] = useState<readonly AgentTraceRow[]>([]);
+  const [agentApproval, setAgentApproval] = useState<{
+    callId: string;
+    name: string;
+    arguments: string;
+  } | null>(null);
+  const agentApprovalResolver = useRef<((approved: boolean) => void) | null>(
+    null,
+  );
   const requestEpoch = useRef(0);
   const activeRequestId = useRef<string | null>(null);
   const activeAttachmentPreviewId = useRef<string | null>(null);
@@ -772,6 +854,13 @@ export function HomeScreen() {
     };
     const epoch = ++requestEpoch.current;
     setRequestState('sending');
+    if (
+      typeof conversation.projectId === 'string' &&
+      LocalRuntime.isCompletionV2Available()
+    ) {
+      await runAgentCompletion(context, conversation.projectId, epoch);
+      return;
+    }
     await finishCompletion(context, epoch);
   }, [
     credentialConfigured,
@@ -781,6 +870,7 @@ export function HomeScreen() {
     finishCompletion,
     persist,
     requestState,
+    runAgentCompletion,
     store,
     t,
   ]);
@@ -792,6 +882,90 @@ export function HomeScreen() {
     setRequestState('sending');
     await finishCompletion(retryContext, epoch);
   }, [finishCompletion, requestState, retryContext]);
+
+  const runAgentCompletion = useCallback(
+    async (context: RetryContext, projectId: string, epoch: number) => {
+      const requestId = LocalRuntime.createCompletionRequestId();
+      activeRequestId.current = requestId;
+      const startedAt = Date.now();
+      setAgentTraces([]);
+      setAgentApproval(null);
+      try {
+        const result = await runAgentTurn({
+          projectId,
+          model: context.model,
+          thinkingMode: context.thinkingMode,
+          history: context.history,
+          tools: AGENT_TOOLS_V0,
+          requestId,
+          deps: {
+            modelCalls: async req => {
+              return await DshHarnessAdapter.completeV2(
+                req.model as Parameters<
+                  typeof DshHarnessAdapter.completeV2
+                >[0],
+                [...req.history],
+                req.requestId,
+                req.thinkingMode as Parameters<
+                  typeof DshHarnessAdapter.completeV2
+                >[3],
+                [...req.tools],
+              );
+            },
+            executeTool: (toolContext, name, argumentsJson) =>
+              executeAgentTool(
+                { projectId: toolContext.projectId },
+                name,
+                argumentsJson,
+              ),
+            requestApproval: call =>
+              new Promise<boolean>(resolve => {
+                setAgentApproval({
+                  callId: call.callId,
+                  name: call.name,
+                  arguments: call.arguments,
+                });
+                agentApprovalResolver.current = resolve;
+              }),
+            onTrace: rows => setAgentTraces(rows),
+          },
+        });
+        if (requestEpoch.current !== epoch) return;
+        if (result.status === 'failed') {
+          setRequestFailure(result.failure?.code ?? 'E_AGENT_FAILED');
+          return;
+        }
+        if (result.status === 'cancelled') {
+          setRequestFailure(t('home.responseStopped'));
+          return;
+        }
+        const traceLine = agentTraceLine(result.traces);
+        const finalBody =
+          (traceLine.length > 0 ? traceLine + '\n\n' : '') +
+          (result.finalText ??
+            t('messages.agent.noAnswer'));
+        store.appendAssistantMessage(context.conversationId, finalBody, {
+          metadata: {
+            modelId: context.model,
+            latencyMs: Date.now() - startedAt,
+            finishReason: 'stop',
+          },
+        });
+        setRetryContext(null);
+        setRequestFailure(null);
+        await persist();
+        await refreshProof();
+      } catch (error) {
+        if (requestEpoch.current !== epoch) return;
+        setRequestFailure(errorText(error));
+      } finally {
+        if (activeRequestId.current === requestId) activeRequestId.current = null;
+        if (requestEpoch.current === epoch) setRequestState('idle');
+        setAgentApproval(null);
+      }
+    },
+    [persist, refreshProof, store, t],
+  );
 
   const cancel = useCallback(() => {
     const requestId = activeRequestId.current;
@@ -1250,6 +1424,75 @@ export function HomeScreen() {
               {runtimeLabel.toLocaleUpperCase()}
             </Text>
           </Pressable>
+          {(agentApproval !== null || agentTraces.length > 0) && (
+            <View accessibilityRole="status" style={styles.agentPanel}>
+              {agentApproval !== null && (
+                <>
+                  <Text style={styles.agentPanelText}>
+                    {t('messages.agent.allowTitle', {
+                      name: agentApproval.name,
+                    })}
+                  </Text>
+                  <View style={styles.agentButtonsRow}>
+                    <Pressable
+                      accessibilityLabel={t('agent.allow')}
+                      accessibilityRole="button"
+                      onPress={() => {
+                        const resolve = agentApprovalResolver.current;
+                        setAgentApproval(null);
+                        agentApprovalResolver.current = null;
+                        resolve?.(true);
+                      }}
+                      style={({ pressed }) => [
+                        styles.agentAllow,
+                        pressed && styles.pressed,
+                      ]}
+                    >
+                      <Text style={styles.agentButtonText}>
+                        {t('agent.allow')}
+                      </Text>
+                    </Pressable>
+                    <Pressable
+                      accessibilityLabel={t('agent.deny')}
+                      accessibilityRole="button"
+                      onPress={() => {
+                        const resolve = agentApprovalResolver.current;
+                        setAgentApproval(null);
+                        agentApprovalResolver.current = null;
+                        resolve?.(false);
+                      }}
+                      style={({ pressed }) => [
+                        styles.agentDeny,
+                        pressed && styles.pressed,
+                      ]}
+                    >
+                      <Text style={styles.agentButtonTextDim}>
+                        {t('agent.deny')}
+                      </Text>
+                    </Pressable>
+                  </View>
+                </>
+              )}
+              {agentApproval === null && agentTraces.length > 0 && (
+                <Text numberOfLines={2} style={styles.agentTrace}>
+                  {`AGENT  ${agentTraces
+                    .map(
+                      row =>
+                        `${row.name}${
+                          row.blocked === 'denied_by_user'
+                            ? ' x'
+                            : row.ok === false
+                              ? ' !'
+                              : row.ok === true
+                                ? ' ok'
+                                : ' ...'
+                        }`,
+                    )
+                    .join('   ')}`}
+                </Text>
+              )}
+            </View>
+          )}
           <ChatComposer
             attachmentBusy={attachmentBusy}
             attachments={draftAttachments}
@@ -1455,6 +1698,47 @@ function RoundButton({
 
 const createStyles = (colors: ThemePalette) =>
   StyleSheet.create({
+    agentPanel: {
+      marginTop: 6,
+      borderRadius: 14,
+      backgroundColor: colors.surfaceRaised,
+      borderWidth: StyleSheet.hairlineWidth,
+      borderColor: colors.line,
+      paddingHorizontal: 12,
+      paddingVertical: 8,
+      gap: 6,
+    },
+    agentPanelText: { color: colors.text, fontSize: 12, fontWeight: '600' },
+    agentButtonsRow: { flexDirection: 'row', gap: 8 },
+    agentAllow: {
+      borderRadius: 12,
+      paddingHorizontal: 14,
+      paddingVertical: 6,
+      backgroundColor: colors.accent,
+    },
+    agentDeny: {
+      borderRadius: 12,
+      paddingHorizontal: 14,
+      paddingVertical: 6,
+      backgroundColor: colors.surfaceRaised,
+      borderWidth: StyleSheet.hairlineWidth,
+      borderColor: colors.line,
+    },
+    agentButtonText: {
+      color: colors.background,
+      fontSize: 12,
+      fontWeight: '700',
+    },
+    agentButtonTextDim: {
+      color: colors.textDim,
+      fontSize: 12,
+      fontWeight: '700',
+    },
+    agentTrace: {
+      color: colors.muted,
+      fontSize: 10,
+      fontFamily: fonts.mono,
+    },
     root: { flex: 1, backgroundColor: colors.background },
     screen: { flex: 1, backgroundColor: colors.background },
     topBar: {

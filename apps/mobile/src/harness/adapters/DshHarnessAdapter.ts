@@ -1,5 +1,6 @@
 import {
   LocalRuntime,
+  type CompletionToolDefinitionV2,
   type CompletionMessage,
   type CredentialPromptLocale,
   type DeepSeekModelId,
@@ -21,4 +22,18 @@ export const DshHarnessAdapter = {
     thinkingMode: DeepSeekThinkingMode,
   ) => LocalRuntime.complete(model, history, requestId, thinkingMode),
   cancel: (requestId: string) => LocalRuntime.cancelCompletion(requestId),
+  completeV2: (
+    model: DeepSeekModelId,
+    history: readonly CompletionMessage[],
+    requestId: string,
+    thinkingMode: DeepSeekThinkingMode,
+    tools: readonly unknown[],
+  ) =>
+    LocalRuntime.completeV2({
+      model,
+      requestId,
+      thinkingMode,
+      history,
+      tools: tools as readonly CompletionToolDefinitionV2[],
+    }),
 };

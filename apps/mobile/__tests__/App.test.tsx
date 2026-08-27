@@ -15,6 +15,7 @@ import App from '../App';
 jest.mock('../src/native/LocalRuntime', () => ({
   LocalRuntime: {
     isAvailable: jest.fn(),
+    isCompletionV2Available: jest.fn(() => false),
     createCompletionRequestId: jest.fn(),
     bootstrap: jest.fn(),
     credentialStatus: jest.fn(),
