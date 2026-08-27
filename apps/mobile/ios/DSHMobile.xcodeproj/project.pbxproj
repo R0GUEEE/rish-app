@@ -16,6 +16,7 @@
 		761780ED2CA45674006654EE /* AppDelegate.swift in Sources */ = {isa = PBXBuildFile; fileRef = 761780EC2CA45674006654EE /* AppDelegate.swift */; };
 		81AB9BB82411601600AC10FF /* LaunchScreen.storyboard in Resources */ = {isa = PBXBuildFile; fileRef = 81AB9BB72411601600AC10FF /* LaunchScreen.storyboard */; };
 		D4C400021AD99517003FC87E /* ProjectContextServiceTests.mm in Sources */ = {isa = PBXBuildFile; fileRef = D4C400011AD99517003FC87E /* ProjectContextServiceTests.mm */; };
+		D5C400021AD99517003FC87E /* CompletionV2Tests.mm in Sources */ = {isa = PBXBuildFile; fileRef = D5C400011AD99517003FC87E /* CompletionV2Tests.mm */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXContainerItemProxy section */
@@ -44,6 +45,7 @@
 		761780EC2CA45674006654EE /* AppDelegate.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; name = AppDelegate.swift; path = DSHMobile/AppDelegate.swift; sourceTree = "<group>"; };
 		81AB9BB72411601600AC10FF /* LaunchScreen.storyboard */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = file.storyboard; name = LaunchScreen.storyboard; path = DSHMobile/LaunchScreen.storyboard; sourceTree = "<group>"; };
 		D4C400011AD99517003FC87E /* ProjectContextServiceTests.mm */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.cpp.objcpp; path = ProjectContextServiceTests.mm; sourceTree = "<group>"; };
+		D5C400011AD99517003FC87E /* CompletionV2Tests.mm */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.cpp.objcpp; path = CompletionV2Tests.mm; sourceTree = "<group>"; };
 		ED297162215061F000B7C4FE /* JavaScriptCore.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = JavaScriptCore.framework; path = System/Library/Frameworks/JavaScriptCore.framework; sourceTree = SDKROOT; };
 		F9F4AF3337E9FB1D1EB4EB40 /* Pods-DSHMobileTests.debug.xcconfig */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = text.xcconfig; name = "Pods-DSHMobileTests.debug.xcconfig"; path = "Target Support Files/Pods-DSHMobileTests/Pods-DSHMobileTests.debug.xcconfig"; sourceTree = "<group>"; };
 /* End PBXFileReference section */
@@ -74,6 +76,7 @@
 				00E356F21AD99517003FC87E /* NativeRuntimeSmokeTests.mm */,
 				00E356F81AD99517003FC87E /* ProjectContextPolicyTests.mm */,
 				D4C400011AD99517003FC87E /* ProjectContextServiceTests.mm */,
+				D5C400011AD99517003FC87E /* CompletionV2Tests.mm */,
 			);
 			path = DSHMobileTests;
 			sourceTree = "<group>";
@@ -346,6 +349,7 @@
 				00E356F31AD99517003FC87E /* NativeRuntimeSmokeTests.mm in Sources */,
 				00E356F91AD99517003FC87E /* ProjectContextPolicyTests.mm in Sources */,
 				D4C400021AD99517003FC87E /* ProjectContextServiceTests.mm in Sources */,
+				D5C400021AD99517003FC87E /* CompletionV2Tests.mm in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -392,6 +396,19 @@
 				SUPPORTED_PLATFORMS = "iphoneos iphonesimulator";
 				TARGETED_DEVICE_FAMILY = "1,2";
 				TEST_HOST = "$(BUILT_PRODUCTS_DIR)/DSHMobile.app/DSHMobile";
+		
+				LIBRARY_SEARCH_PATHS = (
+					"$(inherited)",
+					"$(BUILT_PRODUCTS_DIR)/RishLocalRuntime",
+					"$(PODS_ROOT)/../../../../modules/rish/ios/Vendor/libgit2.xcframework/ios-arm64-simulator",
+					"$(PODS_ROOT)/../../../../modules/rish/ios/Vendor/rish_ffi.xcframework/ios-arm64-simulator",
+				);
+				OTHER_LDFLAGS = (
+					"$(inherited)",
+					"-lRishLocalRuntime",
+					"-lgit2",
+					"-lrish_ffi",
+				);
 			};
 			name = Debug;
 		};
@@ -415,6 +432,19 @@
 				SUPPORTED_PLATFORMS = "iphoneos iphonesimulator";
 				TARGETED_DEVICE_FAMILY = "1,2";
 				TEST_HOST = "$(BUILT_PRODUCTS_DIR)/DSHMobile.app/DSHMobile";
+		
+				LIBRARY_SEARCH_PATHS = (
+					"$(inherited)",
+					"$(BUILT_PRODUCTS_DIR)/RishLocalRuntime",
+					"$(PODS_ROOT)/../../../../modules/rish/ios/Vendor/libgit2.xcframework/ios-arm64-simulator",
+					"$(PODS_ROOT)/../../../../modules/rish/ios/Vendor/rish_ffi.xcframework/ios-arm64-simulator",
+				);
+				OTHER_LDFLAGS = (
+					"$(inherited)",
+					"-lRishLocalRuntime",
+					"-lgit2",
+					"-lrish_ffi",
+				);
 			};
 			name = Release;
 		};
