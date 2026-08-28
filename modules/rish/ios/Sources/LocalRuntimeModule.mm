@@ -44,6 +44,7 @@ static NSUInteger const DSHMaximumPDFTextBytes = 512 * 1024;
 static NSUInteger const DSHMaximumExpandedHistoryBytes = 4 * 1024 * 1024;
 static NSUInteger const DSHMaximumPDFPages = 512;
 static NSUInteger const DSHMaximumRequestBodyBytes = 40 * 1024 * 1024;
+static NSUInteger const DSHMaximumCompletionEnvelopeBytes = 40 * 1024 * 1024;
 
 static NSString *DSHNow(void) {
   static NSISO8601DateFormatter *formatter = nil;
@@ -111,6 +112,11 @@ static NSError *DSHLocalRuntimeError(NSInteger code, NSString *message) {
   return [NSError errorWithDomain:@"LocalRuntime"
                              code:code
                          userInfo:@{NSLocalizedDescriptionKey: message}];
+}
+
+static void DSHRejectCompletionSchema2(RCTPromiseRejectBlock reject,
+                                       NSString *code) {
+  reject(code, code, nil);
 }
 
 static BOOL DSHIsSupportedModel(NSString *model) {
@@ -453,7 +459,7 @@ static BOOL DSHCanConnectToMacProxy(void) {
   return connected;
 }
 
-@interface LocalRuntimeModule : NSObject <RCTBridgeModule>
+@interface LocalRuntimeModule : NSObject <RCTBridgeModule, NSURLSessionTaskDelegate>
 @property(nonatomic, strong) dispatch_queue_t stateQueue;
 @property(nonatomic, strong) NSURLSession *modelSession;
 @property(nonatomic, strong) NSURLSessionDataTask *activeCompletionTask;
@@ -461,6 +467,15 @@ static BOOL DSHCanConnectToMacProxy(void) {
 @property(nonatomic) NSUInteger activeCompletionGeneration;
 @property(nonatomic) NSUInteger completionGeneration;
 @property(nonatomic) NSUInteger credentialGeneration;
+@property(nonatomic) NSInteger activeCompletionSchemaVersion;
+@property(nonatomic, copy) RCTPromiseRejectBlock activeCompletionRejecter;
+@property(nonatomic) BOOL activeCompletionRedirected;
+@property(nonatomic, copy) NSString *completionV2TestCredential;
+@property(nonatomic, copy) NSString *(^completionV2UUIDGenerator)(void);
+@property(nonatomic, copy) NSTimeInterval (^completionV2MonotonicClock)(void);
+@property(nonatomic, copy) void (^completionV2BeforeTaskCancelForTesting)(void);
+@property(nonatomic, copy) void (^completionV2RedirectDecisionForTesting)(BOOL);
+@property(nonatomic, strong) NSMutableSet<NSNumber *> *schema2CompletionTaskIdentifiers;
 @end
 
 @implementation LocalRuntimeModule
@@ -472,15 +487,47 @@ RCT_EXPORT_MODULE(LocalRuntime)
 }
 
 - (instancetype)init {
+  NSURLSessionConfiguration *configuration =
+      NSURLSessionConfiguration.ephemeralSessionConfiguration;
+  return [self initForCompletionV2TestingWithConfiguration:configuration
+                                                credential:nil
+                                             uuidGenerator:nil
+                                            monotonicClock:nil];
+}
+
+- (instancetype)initForCompletionV2TestingWithConfiguration:
+    (NSURLSessionConfiguration *)configuration
+    credential:(NSString *)credential
+    uuidGenerator:(NSString *(^)(void))uuidGenerator
+    monotonicClock:(NSTimeInterval (^)(void))monotonicClock {
   self = [super init];
   if (self != nil) {
     _stateQueue = dispatch_queue_create("dev.zseven.dsh.mobile.local-runtime", DISPATCH_QUEUE_SERIAL);
-    NSURLSessionConfiguration *configuration = NSURLSessionConfiguration.ephemeralSessionConfiguration;
+    configuration = [configuration copy] ?:
+        NSURLSessionConfiguration.ephemeralSessionConfiguration;
     configuration.URLCache = nil;
     configuration.HTTPCookieStorage = nil;
     configuration.HTTPShouldSetCookies = NO;
     configuration.requestCachePolicy = NSURLRequestReloadIgnoringLocalCacheData;
-    _modelSession = [NSURLSession sessionWithConfiguration:configuration];
+    _completionV2TestCredential = [credential copy];
+    _schema2CompletionTaskIdentifiers = [NSMutableSet set];
+    if (uuidGenerator != nil) {
+      _completionV2UUIDGenerator = [uuidGenerator copy];
+    } else {
+      _completionV2UUIDGenerator = [^NSString *{
+        return NSUUID.UUID.UUIDString.lowercaseString;
+      } copy];
+    }
+    if (monotonicClock != nil) {
+      _completionV2MonotonicClock = [monotonicClock copy];
+    } else {
+      _completionV2MonotonicClock = [^NSTimeInterval {
+        return NSProcessInfo.processInfo.systemUptime;
+      } copy];
+    }
+    _modelSession = [NSURLSession sessionWithConfiguration:configuration
+                                                  delegate:self
+                                             delegateQueue:nil];
   }
   return self;
 }
@@ -537,6 +584,9 @@ RCT_EXPORT_MODULE(LocalRuntime)
 }
 
 - (NSString *)credential {
+  if (self.completionV2TestCredential != nil) {
+    return self.completionV2TestCredential;
+  }
   NSMutableDictionary *query = [self keychainQuery];
   query[(__bridge id)kSecReturnData] = @YES;
   query[(__bridge id)kSecMatchLimit] = (__bridge id)kSecMatchLimitOne;
@@ -549,14 +599,23 @@ RCT_EXPORT_MODULE(LocalRuntime)
 
 - (void)credentialDidChange {
   NSURLSessionDataTask *task = nil;
+  RCTPromiseRejectBlock schema2Rejecter = nil;
   @synchronized (self) {
     self.credentialGeneration += 1;
     task = self.activeCompletionTask;
-    self.activeCompletionTask = nil;
-    self.activeCompletionRequestId = nil;
-    self.activeCompletionGeneration = 0;
+    if (self.activeCompletionSchemaVersion == 2) {
+      schema2Rejecter = self.activeCompletionRejecter;
+    }
+    [self clearActiveCompletionLocked];
+  }
+  if (self.completionV2BeforeTaskCancelForTesting != nil) {
+    self.completionV2BeforeTaskCancelForTesting();
   }
   [task cancel];
+  if (schema2Rejecter != nil) {
+    DSHRejectCompletionSchema2(
+        schema2Rejecter, @"E_COMPLETION_CREDENTIAL_CHANGED");
+  }
 }
 
 - (BOOL)storeCredential:(NSString *)credential error:(NSError **)error {
@@ -1017,11 +1076,118 @@ RCT_EXPORT_MODULE(LocalRuntime)
       || self.credentialGeneration != credentialGeneration) {
       return NO;
     }
-    self.activeCompletionTask = nil;
-    self.activeCompletionRequestId = nil;
-    self.activeCompletionGeneration = 0;
+    [self clearActiveCompletionLocked];
     return YES;
   }
+}
+
+- (void)clearActiveCompletionLocked {
+  self.activeCompletionTask = nil;
+  self.activeCompletionRequestId = nil;
+  self.activeCompletionGeneration = 0;
+  self.activeCompletionSchemaVersion = 0;
+  self.activeCompletionRejecter = nil;
+  self.activeCompletionRedirected = NO;
+}
+
+- (NSString *)reserveSchema2Round:(NSString *)roundId
+             credentialGeneration:(NSUInteger)credentialGeneration
+                         rejecter:(RCTPromiseRejectBlock)rejecter
+                generationOutput:(NSUInteger *)generationOutput
+                        errorCode:(NSString **)errorCode {
+  @synchronized (self) {
+    if (self.activeCompletionRequestId != nil ||
+        self.activeCompletionTask != nil ||
+        self.activeCompletionSchemaVersion != 0) {
+      if (errorCode != nil) *errorCode = @"E_COMPLETION_BUSY";
+      return nil;
+    }
+    if (credentialGeneration != self.credentialGeneration) {
+      if (errorCode != nil) {
+        *errorCode = @"E_COMPLETION_CREDENTIAL_CHANGED";
+      }
+      return nil;
+    }
+    self.completionGeneration += 1;
+    self.activeCompletionGeneration = self.completionGeneration;
+    self.activeCompletionSchemaVersion = 2;
+    self.activeCompletionRequestId = roundId;
+    self.activeCompletionRejecter = rejecter;
+    self.activeCompletionRedirected = NO;
+    // Correlation is minted only after this caller atomically owns the slot,
+    // and before dataTaskWithRequest is allowed to run.
+    NSString *providerRequestId = self.completionV2UUIDGenerator();
+    if (!DSHIsValidRequestId(providerRequestId)) {
+      [self clearActiveCompletionLocked];
+      if (errorCode != nil) {
+        *errorCode = @"E_COMPLETION_PROVIDER_REQUEST_ID";
+      }
+      return nil;
+    }
+    if (generationOutput != nil) {
+      *generationOutput = self.activeCompletionGeneration;
+    }
+    return providerRequestId;
+  }
+}
+
+- (BOOL)bindSchema2Task:(NSURLSessionDataTask *)task
+                roundId:(NSString *)roundId
+              generation:(NSUInteger)generation {
+  @synchronized (self) {
+    if (self.activeCompletionSchemaVersion != 2 ||
+        ![self.activeCompletionRequestId isEqualToString:roundId] ||
+        self.activeCompletionGeneration != generation) {
+      return NO;
+    }
+    self.activeCompletionTask = task;
+    [self.schema2CompletionTaskIdentifiers addObject:@(task.taskIdentifier)];
+    return YES;
+  }
+}
+
+- (void)forgetSchema2TaskIdentifier:(NSUInteger)taskIdentifier {
+  @synchronized (self) {
+    [self.schema2CompletionTaskIdentifiers removeObject:@(taskIdentifier)];
+  }
+}
+
+- (BOOL)claimSchema2Round:(NSString *)roundId
+                generation:(NSUInteger)generation
+      credentialGeneration:(NSUInteger)credentialGeneration
+                redirected:(BOOL *)redirected {
+  @synchronized (self) {
+    if (self.activeCompletionSchemaVersion != 2 ||
+        ![self.activeCompletionRequestId isEqualToString:roundId] ||
+        self.activeCompletionGeneration != generation ||
+        self.credentialGeneration != credentialGeneration) {
+      return NO;
+    }
+    if (redirected != nil) *redirected = self.activeCompletionRedirected;
+    [self clearActiveCompletionLocked];
+    return YES;
+  }
+}
+
+- (void)URLSession:(__unused NSURLSession *)session
+              task:(NSURLSessionTask *)task
+willPerformHTTPRedirection:(__unused NSHTTPURLResponse *)response
+        newRequest:(NSURLRequest *)request
+ completionHandler:(void (^)(NSURLRequest * _Nullable))completionHandler {
+  __block BOOL rejectSchema2Redirect = NO;
+  @synchronized (self) {
+    rejectSchema2Redirect =
+        [self.schema2CompletionTaskIdentifiers containsObject:
+            @(task.taskIdentifier)];
+    if (rejectSchema2Redirect && self.activeCompletionSchemaVersion == 2 &&
+        self.activeCompletionTask == task) {
+      self.activeCompletionRedirected = YES;
+    }
+  }
+  if (self.completionV2RedirectDecisionForTesting != nil) {
+    self.completionV2RedirectDecisionForTesting(rejectSchema2Redirect);
+  }
+  completionHandler(rejectSchema2Redirect ? nil : request);
 }
 
 RCT_REMAP_METHOD(credentialStatus,
@@ -1133,21 +1299,31 @@ RCT_REMAP_METHOD(cancelCompletion,
     return;
   }
   NSURLSessionDataTask *task = nil;
+  RCTPromiseRejectBlock schema2Rejecter = nil;
   NSString *status = @"idle";
   @synchronized (self) {
-    if (self.activeCompletionTask != nil) {
+    if (self.activeCompletionRequestId != nil ||
+        self.activeCompletionTask != nil) {
       if ([self.activeCompletionRequestId isEqualToString:requestId]) {
         task = self.activeCompletionTask;
-        self.activeCompletionTask = nil;
-        self.activeCompletionRequestId = nil;
-        self.activeCompletionGeneration = 0;
+        if (self.activeCompletionSchemaVersion == 2) {
+          schema2Rejecter = self.activeCompletionRejecter;
+        }
+        [self clearActiveCompletionLocked];
         status = @"cancelled";
       } else {
         status = @"stale";
       }
     }
   }
+  if (self.completionV2BeforeTaskCancelForTesting != nil) {
+    self.completionV2BeforeTaskCancelForTesting();
+  }
   [task cancel];
+  if (schema2Rejecter != nil) {
+    DSHRejectCompletionSchema2(schema2Rejecter,
+                               @"E_COMPLETION_CANCELLED");
+  }
   resolve(@{@"status": status});
 }
 
@@ -1247,10 +1423,20 @@ RCT_REMAP_METHOD(complete,
     return;
   }
 
+  @synchronized (self) {
+    if (self.activeCompletionSchemaVersion == 2) {
+      DSHRejectCompletionSchema2(reject, @"E_COMPLETION_BUSY");
+      return;
+    }
+  }
   NSDate *started = NSDate.date;
   __block NSUInteger completionGeneration = 0;
+  __block BOOL abandonedBeforeStart = NO;
   NSURLSessionDataTask *task = [self.modelSession dataTaskWithRequest:request
                                                             completionHandler:^(NSData *data, NSURLResponse *response, NSError *error) {
+    @synchronized (self) {
+      if (abandonedBeforeStart) return;
+    }
     BOOL (^finishRequest)(void) = ^BOOL {
       return [self finishCompletionRequestId:requestId
                         completionGeneration:completionGeneration
@@ -1394,7 +1580,15 @@ RCT_REMAP_METHOD(complete,
   NSURLSessionDataTask *previousTask = nil;
   @synchronized (self) {
     if (credentialGeneration != self.credentialGeneration) {
+      abandonedBeforeStart = YES;
+      [task cancel];
       reject(@"credential", @"Credential changed before the request started", nil);
+      return;
+    }
+    if (self.activeCompletionSchemaVersion == 2) {
+      abandonedBeforeStart = YES;
+      [task cancel];
+      DSHRejectCompletionSchema2(reject, @"E_COMPLETION_BUSY");
       return;
     }
     self.completionGeneration += 1;
@@ -1403,8 +1597,186 @@ RCT_REMAP_METHOD(complete,
     self.activeCompletionTask = task;
     self.activeCompletionRequestId = requestId;
     self.activeCompletionGeneration = completionGeneration;
+    self.activeCompletionSchemaVersion = 1;
+    self.activeCompletionRejecter = nil;
+    self.activeCompletionRedirected = NO;
   }
   [previousTask cancel];
+  [task resume];
+}
+
+- (void)completeSchema2Envelope:(NSDictionary *)rawEnvelope
+                       resolver:(RCTPromiseResolveBlock)resolve
+                       rejecter:(RCTPromiseRejectBlock)reject {
+  NSError *validationError = nil;
+  NSDictionary *envelope = DSHCompletionEnvelopeSchema2FromDictionary(
+      rawEnvelope, &validationError);
+  if (envelope == nil) {
+    DSHRejectCompletionSchema2(
+        reject, validationError.localizedDescription ?: @"E_COMPLETION_SCHEMA");
+    return;
+  }
+
+  NSString *requestedModel = envelope[@"model"];
+  NSString *thinkingMode = envelope[@"thinking_mode"];
+  NSString *roundId = envelope[@"round_id"];
+  NSArray<NSDictionary *> *visibleProviderMessages =
+      [self validatedMessagesFromHistory:envelope[@"visible_history"]
+                                   model:requestedModel
+                           proofMessages:nil
+                                   error:&validationError];
+  if (visibleProviderMessages == nil) {
+    DSHRejectCompletionSchema2(reject, @"E_COMPLETION_HISTORY");
+    return;
+  }
+  NSMutableArray<NSDictionary *> *modelInput =
+      [visibleProviderMessages mutableCopy];
+  [modelInput addObjectsFromArray:envelope[@"round_transcript"]];
+
+  NSString *visibleDigest = DSHJSONSha256(envelope[@"visible_history"],
+                                          &validationError);
+  NSString *modelInputDigest = DSHJSONSha256(modelInput, &validationError);
+  if (visibleDigest == nil || modelInputDigest == nil) {
+    DSHRejectCompletionSchema2(reject, @"E_COMPLETION_BODY_INVALID");
+    return;
+  }
+  NSDictionary *body = DSHCompletionRequestBodyV2(
+      requestedModel, thinkingMode, modelInput, envelope[@"tools"]);
+  if (body == nil) {
+    DSHRejectCompletionSchema2(reject, @"E_COMPLETION_BODY_INVALID");
+    return;
+  }
+  NSError *bodyError = nil;
+  NSData *bodyData = [NSJSONSerialization dataWithJSONObject:body
+                                                     options:NSJSONWritingSortedKeys
+                                                       error:&bodyError];
+  if (bodyData == nil) {
+    DSHRejectCompletionSchema2(reject, @"E_COMPLETION_BODY_INVALID");
+    return;
+  }
+  if (bodyData.length > DSHMaximumRequestBodyBytes) {
+    DSHRejectCompletionSchema2(reject, @"E_COMPLETION_BODY_TOO_LARGE");
+    return;
+  }
+  NSString *bodyDigest = DSHSha256Hex(bodyData);
+
+  __block NSString *apiKey = nil;
+  __block NSUInteger credentialGeneration = 0;
+  @synchronized (self) {
+    apiKey = self.credential;
+    credentialGeneration = self.credentialGeneration;
+  }
+  if (apiKey.length == 0) {
+    DSHRejectCompletionSchema2(
+        reject, @"E_COMPLETION_CREDENTIAL_UNAVAILABLE");
+    return;
+  }
+
+  NSURL *url = [NSURL URLWithString:@"https://api.deepseek.com/chat/completions"];
+  NSMutableURLRequest *request = [NSMutableURLRequest requestWithURL:url];
+  request.HTTPMethod = @"POST";
+  request.HTTPShouldHandleCookies = NO;
+  request.cachePolicy = NSURLRequestReloadIgnoringLocalCacheData;
+  request.timeoutInterval = 90;
+  [request setValue:@"application/json" forHTTPHeaderField:@"Content-Type"];
+  [request setValue:[@"Bearer " stringByAppendingString:apiKey]
+      forHTTPHeaderField:@"Authorization"];
+  request.HTTPBody = bodyData;
+
+  NSUInteger generation = 0;
+  NSString *reserveError = nil;
+  NSString *providerRequestId = [self reserveSchema2Round:roundId
+      credentialGeneration:credentialGeneration
+      rejecter:reject
+      generationOutput:&generation
+      errorCode:&reserveError];
+  if (providerRequestId == nil) {
+    DSHRejectCompletionSchema2(
+        reject, reserveError ?: @"E_COMPLETION_PROVIDER_REQUEST_ID");
+    return;
+  }
+  NSTimeInterval started = self.completionV2MonotonicClock();
+  __block NSURLSessionDataTask *task = nil;
+  __block NSUInteger schema2TaskIdentifier = NSUIntegerMax;
+  task = [self.modelSession dataTaskWithRequest:request
+      completionHandler:^(NSData *data, NSURLResponse *response,
+                          NSError *transportError) {
+    [self forgetSchema2TaskIdentifier:schema2TaskIdentifier];
+    BOOL redirected = NO;
+    if (![self claimSchema2Round:roundId
+                     generation:generation
+           credentialGeneration:credentialGeneration
+                     redirected:&redirected]) {
+      return;
+    }
+    if (redirected) {
+      DSHRejectCompletionSchema2(reject, @"E_COMPLETION_REDIRECT");
+      return;
+    }
+    if (transportError != nil) {
+      DSHRejectCompletionSchema2(reject, @"E_COMPLETION_TRANSPORT");
+      return;
+    }
+    if (![response isKindOfClass:NSHTTPURLResponse.class]) {
+      DSHRejectCompletionSchema2(reject, @"E_COMPLETION_TRANSPORT");
+      return;
+    }
+    NSHTTPURLResponse *http = (NSHTTPURLResponse *)response;
+    if (http.statusCode < 200 || http.statusCode >= 300) {
+      DSHRejectCompletionSchema2(reject, @"E_COMPLETION_HTTP_STATUS");
+      return;
+    }
+    if (data.length == 0 || data.length > DSHMaximumResponseBytes) {
+      DSHRejectCompletionSchema2(reject, @"E_COMPLETION_RESPONSE_SIZE");
+      return;
+    }
+    NSError *decodeError = nil;
+    NSDictionary *decoded = DSHDictionary(
+        [NSJSONSerialization JSONObjectWithData:data options:0
+                                           error:&decodeError]);
+    if (decoded == nil) {
+      DSHRejectCompletionSchema2(reject, @"E_COMPLETION_RESPONSE_JSON");
+      return;
+    }
+    NSError *parseError = nil;
+    NSDictionary *parsed = DSHParseCompletionResponseSchema2(
+        decoded, requestedModel, thinkingMode, &parseError);
+    if (parsed == nil) {
+      DSHRejectCompletionSchema2(
+          reject, parseError.localizedDescription ?:
+              @"E_COMPLETION_EMPTY_RESPONSE");
+      return;
+    }
+    NSTimeInterval finished = self.completionV2MonotonicClock();
+    NSTimeInterval elapsed = MAX(0, finished - started);
+    NSInteger latencyMs = (NSInteger)floor(elapsed * 1000.0 + 0.000001);
+    resolve(@{
+      @"schema_version": @2,
+      @"turn_id": envelope[@"turn_id"],
+      @"attempt_id": envelope[@"attempt_id"],
+      @"round_id": roundId,
+      @"round_index": envelope[@"round_index"],
+      @"provider_request_id": providerRequestId,
+      @"provider_response_id": parsed[@"provider_response_id"],
+      @"requested_model": requestedModel,
+      @"model": parsed[@"model"],
+      @"thinking_mode": thinkingMode,
+      @"text": parsed[@"text"],
+      @"reasoning": parsed[@"reasoning"],
+      @"tool_calls": parsed[@"tool_calls"],
+      @"finish_reason": parsed[@"finish_reason"],
+      @"latency_ms": @(latencyMs),
+      @"visible_history_sha256": visibleDigest,
+      @"model_input_sha256": modelInputDigest,
+      @"request_body_sha256": bodyDigest,
+      @"project_context_receipt": NSNull.null,
+    });
+  }];
+  schema2TaskIdentifier = task.taskIdentifier;
+  if (![self bindSchema2Task:task roundId:roundId generation:generation]) {
+    [task cancel];
+    return;
+  }
   [task resume];
 }
 
@@ -1412,16 +1784,39 @@ RCT_REMAP_METHOD(completeV2,
                  completeV2EnvelopeJSON:(NSString *)envelopeJSON
                  resolver:(RCTPromiseResolveBlock)resolve
                  rejecter:(RCTPromiseRejectBlock)reject) {
+  if (![envelopeJSON isKindOfClass:NSString.class]) {
+    DSHRejectCompletionSchema2(reject, @"E_COMPLETION_SCHEMA");
+    return;
+  }
+  NSUInteger envelopeBytes =
+      [envelopeJSON lengthOfBytesUsingEncoding:NSUTF8StringEncoding];
+  if (envelopeBytes == 0) {
+    DSHRejectCompletionSchema2(reject, @"E_COMPLETION_SCHEMA");
+    return;
+  }
+  if (envelopeBytes > DSHMaximumCompletionEnvelopeBytes) {
+    DSHRejectCompletionSchema2(reject, @"E_COMPLETION_BODY_TOO_LARGE");
+    return;
+  }
   NSError *envelopeDecodeError = nil;
   NSData *envelopeData =
     [envelopeJSON dataUsingEncoding:NSUTF8StringEncoding];
-  NSDictionary *envelope = DSHDictionary(
-    [NSJSONSerialization JSONObjectWithData:envelopeData options:0
-                                      error:&envelopeDecodeError]);
-  if (envelope == nil ||
-      ![envelope[@"schema_version"] isEqual:@(kDSHCompletionEnvelopeVersion)]) {
-    reject(@"request",
-           @"CompletionV2 envelope must be an object with schema_version 1", nil);
+  NSDictionary *envelope = nil;
+  @try {
+    envelope = DSHDictionary(
+      [NSJSONSerialization JSONObjectWithData:envelopeData options:0
+                                        error:&envelopeDecodeError]);
+  } @catch (__unused NSException *exception) {
+    envelope = nil;
+  }
+  if ([envelope[@"schema_version"]
+      isEqual:@(kDSHCompletionEnvelopeVersion2)]) {
+    [self completeSchema2Envelope:envelope resolver:resolve rejecter:reject];
+    return;
+  }
+  if (envelope == nil || ![envelope[@"schema_version"]
+      isEqual:@(kDSHCompletionEnvelopeVersion)]) {
+    DSHRejectCompletionSchema2(reject, @"E_COMPLETION_SCHEMA");
     return;
   }
   NSString *requestedModel = DSHString(envelope[@"model"]);
@@ -1495,10 +1890,20 @@ RCT_REMAP_METHOD(completeV2,
     return;
   }
 
+  @synchronized (self) {
+    if (self.activeCompletionSchemaVersion == 2) {
+      DSHRejectCompletionSchema2(reject, @"E_COMPLETION_BUSY");
+      return;
+    }
+  }
   NSDate *started = NSDate.date;
   __block NSUInteger completionGeneration = 0;
+  __block BOOL abandonedBeforeStart = NO;
   NSURLSessionDataTask *task = [self.modelSession dataTaskWithRequest:request
                                                             completionHandler:^(NSData *data, NSURLResponse *response, NSError *error) {
+    @synchronized (self) {
+      if (abandonedBeforeStart) return;
+    }
     BOOL (^finishRequest)(void) = ^BOOL {
       return [self finishCompletionRequestId:requestId
                         completionGeneration:completionGeneration
@@ -1635,7 +2040,15 @@ RCT_REMAP_METHOD(completeV2,
   NSURLSessionDataTask *previousTask = nil;
   @synchronized (self) {
     if (credentialGeneration != self.credentialGeneration) {
+      abandonedBeforeStart = YES;
+      [task cancel];
       reject(@"credential", @"Credential changed before the request started", nil);
+      return;
+    }
+    if (self.activeCompletionSchemaVersion == 2) {
+      abandonedBeforeStart = YES;
+      [task cancel];
+      DSHRejectCompletionSchema2(reject, @"E_COMPLETION_BUSY");
       return;
     }
     self.completionGeneration += 1;
@@ -1644,6 +2057,9 @@ RCT_REMAP_METHOD(completeV2,
     self.activeCompletionTask = task;
     self.activeCompletionRequestId = requestId;
     self.activeCompletionGeneration = completionGeneration;
+    self.activeCompletionSchemaVersion = 1;
+    self.activeCompletionRejecter = nil;
+    self.activeCompletionRedirected = NO;
   }
   [previousTask cancel];
   [task resume];

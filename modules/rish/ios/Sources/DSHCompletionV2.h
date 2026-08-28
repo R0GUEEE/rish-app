@@ -6,6 +6,7 @@ NS_ASSUME_NONNULL_BEGIN
 // native test target. Pure functions only: no I/O, no module state.
 
 extern const NSInteger kDSHCompletionEnvelopeVersion;
+extern const NSInteger kDSHCompletionEnvelopeVersion2;
 extern const NSInteger DSHCompletionV2MaxToolCount;
 extern const NSInteger DSHCompletionV2MaxToolNameLength;
 extern const NSInteger DSHCompletionV2MaxToolDescriptionLength;
@@ -49,5 +50,27 @@ NSDictionary<NSString *, id> * DSHCompletionRequestBodyV2(
 /// nil with a descriptive *error instead of a partial result.
 NSDictionary<NSString *, id> * _Nullable DSHParseCompletionResponseV2(
     NSDictionary *decoded, NSError **error);
+
+/// Strict schema-2 contracts. These helpers are side-effect free so the
+/// bridge and its Release XCTest target share one fail-closed definition.
+NSDictionary<NSString *, id> * _Nullable DSHCompletionEnvelopeSchema2FromDictionary(
+    NSDictionary *envelope, NSError **error);
+
+NSArray<NSDictionary<NSString *, id> *> * _Nullable
+DSHCompletionProviderToolsSchema2FromArray(NSArray *tools, NSError **error);
+
+NSArray<NSDictionary<NSString *, id> *> * _Nullable
+DSHCompletionRoundTranscriptSchema2FromArray(
+    NSArray *transcript,
+    NSInteger roundIndex,
+    NSString *thinkingMode,
+    NSError **error);
+
+NSDictionary<NSString *, id> * _Nullable
+DSHParseCompletionResponseSchema2(
+    NSDictionary *decoded,
+    NSString *requestedModel,
+    NSString *thinkingMode,
+    NSError **error);
 
 NS_ASSUME_NONNULL_END
