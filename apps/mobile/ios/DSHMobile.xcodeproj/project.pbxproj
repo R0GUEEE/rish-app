@@ -17,6 +17,7 @@
 		81AB9BB82411601600AC10FF /* LaunchScreen.storyboard in Resources */ = {isa = PBXBuildFile; fileRef = 81AB9BB72411601600AC10FF /* LaunchScreen.storyboard */; };
 		D4C400021AD99517003FC87E /* ProjectContextServiceTests.mm in Sources */ = {isa = PBXBuildFile; fileRef = D4C400011AD99517003FC87E /* ProjectContextServiceTests.mm */; };
 		D5C400021AD99517003FC87E /* CompletionV2Tests.mm in Sources */ = {isa = PBXBuildFile; fileRef = D5C400011AD99517003FC87E /* CompletionV2Tests.mm */; };
+		D6C400021AD99517003FC87E /* ProjectContextProofTests.mm in Sources */ = {isa = PBXBuildFile; fileRef = D6C400011AD99517003FC87E /* ProjectContextProofTests.mm */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXContainerItemProxy section */
@@ -46,6 +47,7 @@
 		81AB9BB72411601600AC10FF /* LaunchScreen.storyboard */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = file.storyboard; name = LaunchScreen.storyboard; path = DSHMobile/LaunchScreen.storyboard; sourceTree = "<group>"; };
 		D4C400011AD99517003FC87E /* ProjectContextServiceTests.mm */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.cpp.objcpp; path = ProjectContextServiceTests.mm; sourceTree = "<group>"; };
 		D5C400011AD99517003FC87E /* CompletionV2Tests.mm */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.cpp.objcpp; path = CompletionV2Tests.mm; sourceTree = "<group>"; };
+		D6C400011AD99517003FC87E /* ProjectContextProofTests.mm */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.cpp.objcpp; path = ProjectContextProofTests.mm; sourceTree = "<group>"; };
 		ED297162215061F000B7C4FE /* JavaScriptCore.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = JavaScriptCore.framework; path = System/Library/Frameworks/JavaScriptCore.framework; sourceTree = SDKROOT; };
 		F9F4AF3337E9FB1D1EB4EB40 /* Pods-DSHMobileTests.debug.xcconfig */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = text.xcconfig; name = "Pods-DSHMobileTests.debug.xcconfig"; path = "Target Support Files/Pods-DSHMobileTests/Pods-DSHMobileTests.debug.xcconfig"; sourceTree = "<group>"; };
 /* End PBXFileReference section */
@@ -77,6 +79,7 @@
 				00E356F81AD99517003FC87E /* ProjectContextPolicyTests.mm */,
 				D4C400011AD99517003FC87E /* ProjectContextServiceTests.mm */,
 				D5C400011AD99517003FC87E /* CompletionV2Tests.mm */,
+				D6C400011AD99517003FC87E /* ProjectContextProofTests.mm */,
 			);
 			path = DSHMobileTests;
 			sourceTree = "<group>";
@@ -350,6 +353,7 @@
 				00E356F91AD99517003FC87E /* ProjectContextPolicyTests.mm in Sources */,
 				D4C400021AD99517003FC87E /* ProjectContextServiceTests.mm in Sources */,
 				D5C400021AD99517003FC87E /* CompletionV2Tests.mm in Sources */,
+				D6C400021AD99517003FC87E /* ProjectContextProofTests.mm in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
