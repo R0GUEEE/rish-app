@@ -380,6 +380,16 @@ function storedProjectContext(confirmed: boolean) {
   return { stored, conversationId, manifest };
 }
 
+function storedSetupProject() {
+  const stored = createChatStore({
+    now: () => '2026-08-28T00:00:00.000Z',
+  });
+  const conversationId = stored.createConversation({
+    projectId: CONTEXT_PROJECT_ID,
+  });
+  return { stored, conversationId };
+}
+
 async function settle() {
   await Promise.resolve();
   await Promise.resolve();
@@ -417,6 +427,8 @@ function lastPersistedState() {
       attempts?: Array<{
         attempt_id: string;
         status: string;
+        context_disposition?: string;
+        project_context?: null | { snapshot_id: string };
         assistant_message_id: string | null;
         failure_code: string | null;
         rounds: Array<{ round_id: string }>;
@@ -460,6 +472,51 @@ function visibleContextSheets(root: ReactTestInstance): ReactTestInstance[] {
   return root
     .findAllByType(ProjectContextSheet)
     .filter(sheet => sheet.props.visible === true);
+}
+
+async function renderSetupProjectApp(): Promise<Renderer> {
+  const fixture = storedSetupProject();
+  mockLocalRuntime.loadSession.mockResolvedValueOnce(fixture.stored.serialize());
+  mockLocalProjects.list.mockResolvedValue({
+    schema_version: 1,
+    projects: [contextProject],
+  });
+  return await renderApp();
+}
+
+async function enterPendingProjectRecovery(
+  root: ReactTestInstance,
+  text: string,
+) {
+  await act(async () =>
+    root
+      .findByProps({ accessibilityLabel: 'Message DSH' })
+      .props.onChangeText(text),
+  );
+  await act(async () => {
+    actionByLabel(root, 'Send message').props.onPress();
+    await settle();
+  });
+}
+
+async function preparePendingProjectDisclosure(root: ReactTestInstance) {
+  await act(async () =>
+    actionByLabel(root, 'Refresh and send').props.onPress(),
+  );
+  await act(async () => {
+    jest.advanceTimersByTime(180);
+    await settle();
+  });
+  await act(async () =>
+    root
+      .findByProps({ testID: 'project-context-candidate-README.md' })
+      .props.onPress(),
+  );
+  await act(async () => {
+    actionByLabel(root, 'Prepare context').props.onPress();
+    await settle();
+    await settle();
+  });
 }
 
 function composerOptionsChip(root: ReactTestInstance): ReactTestInstance {
@@ -893,6 +950,7 @@ describe('project context Home integration H1', () => {
     );
     expect(mockLocalRuntime.completeV2).not.toHaveBeenCalled();
     expect(mockLocalRuntime.complete).not.toHaveBeenCalled();
+    expect(mockLocalRuntime.persistSession).not.toHaveBeenCalled();
   });
 
   test('opens Context only after Projects starts dismissal and renders one Strip', async () => {
@@ -1673,14 +1731,714 @@ describe('project context Home integration H1', () => {
         conversation => conversation.project_id === CONTEXT_PROJECT_ID,
       )?.model_id,
     ).toBe('deepseek-v4-flash-vision-exp');
-    await act(async () =>
-      root.findByProps({ testID: 'project-context-strip' }).props.onPress(),
-    );
-    expect(visibleContextSheets(root)[0]?.props.disabled).toBe(false);
+    expect(visibleContextSheets(root)[0]?.props.mode).toBe('recovery');
+    expect(visibleContextSheets(root)[0]?.props.disabled).toBe(true);
     await act(async () => {
       jest.advanceTimersByTime(3000);
       await settle();
     });
+    jest.useRealTimers();
+  });
+});
+
+describe('project context Home integration H2', () => {
+  test('keeps explicit fallback and Cancel available when native context is unavailable', async () => {
+    mockLocalProjectContext.isAvailable.mockReturnValue(false);
+    const renderer = await renderSetupProjectApp();
+    const root = renderer.root;
+    await enterPendingProjectRecovery(root, 'Fallback without native context');
+
+    const refresh = actionByLabel(root, 'Refresh and send');
+    const sendWithout = actionByLabel(root, 'Send without project context');
+    const cancel = actionByLabel(root, 'Cancel');
+    expect(refresh.props.disabled).toBe(true);
+    expect(sendWithout.props.disabled).toBe(false);
+    expect(cancel.props.disabled).toBe(false);
+
+    await act(async () => refresh.props.onPress());
+    expect(mockLocalProjectContext.listCandidates).not.toHaveBeenCalled();
+    expect(mockLocalRuntime.completeV2).not.toHaveBeenCalled();
+  });
+
+  test('freezes a raw setup draft and attachment into explicit recovery with zero HTTP', async () => {
+    mockLocalAttachments.present.mockResolvedValueOnce({
+      schema_version: 1,
+      status: 'selected',
+      attachments: [
+        {
+          schema_version: 1,
+          id: 'pending-file-1',
+          kind: 'text',
+          name: 'notes.txt',
+          mime_type: 'text/plain',
+          size: 12,
+        },
+      ],
+    });
+    const renderer = await renderSetupProjectApp();
+    const root = renderer.root;
+    await act(async () => actionByLabel(root, 'Add attachment').props.onPress());
+    await chooseAttachmentSource(root, 'Files');
+
+    await enterPendingProjectRecovery(root, '  raw setup request  ');
+
+    const sheet = visibleContextSheets(root)[0];
+    expect(sheet?.props.mode).toBe('recovery');
+    for (const label of [
+      'Refresh and send',
+      'Send without project context',
+      'Cancel',
+    ]) {
+      expect(actionByLabel(root, label)).toBeDefined();
+    }
+    expect(
+      root.findAllByProps({ accessibilityLabel: 'Prepare context' }),
+    ).toHaveLength(0);
+    expect(
+      root.findByProps({ accessibilityLabel: 'Message DSH' }).props.value,
+    ).toBe('  raw setup request  ');
+    expect(root.findByType(ChatComposer).props.attachments).toEqual([
+      expect.objectContaining({ id: 'pending-file-1', name: 'notes.txt' }),
+    ]);
+    expect(mockLocalRuntime.completeV2).not.toHaveBeenCalled();
+    expect(mockLocalRuntime.complete).not.toHaveBeenCalled();
+    expect(mockLocalRuntime.persistSession).not.toHaveBeenCalled();
+  });
+
+  test('recovery Cancel clears only the pending intent and preserves the draft', async () => {
+    const renderer = await renderSetupProjectApp();
+    const root = renderer.root;
+    await enterPendingProjectRecovery(root, 'Keep after cancel');
+    expect(visibleContextSheets(root)[0]?.props.mode).toBe('recovery');
+
+    await act(async () => actionByLabel(root, 'Cancel').props.onPress());
+    expect(visibleContextSheets(root)).toHaveLength(0);
+    expect(
+      root.findByProps({ accessibilityLabel: 'Message DSH' }).props.value,
+    ).toBe('Keep after cancel');
+    expect(mockLocalRuntime.completeV2).not.toHaveBeenCalled();
+
+    await act(async () =>
+      root.findByProps({ testID: 'project-context-strip' }).props.onPress(),
+    );
+    expect(visibleContextSheets(root)[0]?.props.mode).toBe('candidates');
+  });
+
+  test('top close preserves pending recovery but any edit invalidates it permanently', async () => {
+    const renderer = await renderSetupProjectApp();
+    const root = renderer.root;
+    await enterPendingProjectRecovery(root, 'same text');
+    await act(async () => visibleContextSheets(root)[0]!.props.onClose());
+    expect(visibleContextSheets(root)).toHaveLength(0);
+    expect(mockLocalRuntime.completeV2).not.toHaveBeenCalled();
+
+    await act(async () =>
+      root.findByProps({ testID: 'project-context-strip' }).props.onPress(),
+    );
+    expect(visibleContextSheets(root)[0]?.props.mode).toBe('recovery');
+    await act(async () => visibleContextSheets(root)[0]!.props.onClose());
+    await act(async () =>
+      root
+        .findByProps({ accessibilityLabel: 'Message DSH' })
+        .props.onChangeText('changed text'),
+    );
+    await act(async () =>
+      root
+        .findByProps({ accessibilityLabel: 'Message DSH' })
+        .props.onChangeText('same text'),
+    );
+    await act(async () =>
+      root.findByProps({ testID: 'project-context-strip' }).props.onPress(),
+    );
+    expect(visibleContextSheets(root)[0]?.props.mode).toBe('candidates');
+    expect(mockLocalRuntime.completeV2).not.toHaveBeenCalled();
+  });
+
+  test('invalidates a closed pending send before reusing the empty chat for another project', async () => {
+    jest.useFakeTimers();
+    const secondProject = {
+      ...contextProject,
+      id: 'bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb',
+      name: 'second-project',
+      workspace_path:
+        'projects/bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb/repo',
+    };
+    const fixture = storedSetupProject();
+    mockLocalRuntime.loadSession.mockResolvedValueOnce(fixture.stored.serialize());
+    mockLocalProjects.list.mockResolvedValue({
+      schema_version: 1,
+      projects: [contextProject, secondProject],
+    });
+    const renderer = await renderApp();
+    const root = renderer.root;
+    await enterPendingProjectRecovery(root, 'Do not move this intent');
+    const oldSheet = visibleContextSheets(root)[0]!;
+    const staleSendWithout = oldSheet.props.onSendWithoutContext;
+    const staleDismiss = oldSheet.props.onDismiss;
+    await act(async () => oldSheet.props.onClose());
+
+    await act(async () => {
+      await root.findByType(ProjectsSurface).props.onChatInProject(secondProject);
+      await settle();
+    });
+    await act(async () => root.findByType(ProjectsSurface).props.onDismiss());
+
+    expect(visibleContextSheets(root)[0]?.props.mode).toBe('candidates');
+    await act(async () => staleSendWithout());
+    await act(async () => staleDismiss());
+    expect(mockLocalRuntime.completeV2).not.toHaveBeenCalled();
+    await act(async () => {
+      jest.advanceTimersByTime(180);
+      await settle();
+    });
+    jest.useRealTimers();
+  });
+
+  test('invalidates pending recovery when attachment ID order changes', async () => {
+    mockLocalAttachments.present.mockResolvedValueOnce({
+      schema_version: 1,
+      status: 'selected',
+      attachments: [
+        {
+          schema_version: 1,
+          id: 'ordered-a',
+          kind: 'text',
+          name: 'a.txt',
+          mime_type: 'text/plain',
+          size: 1,
+        },
+        {
+          schema_version: 1,
+          id: 'ordered-b',
+          kind: 'text',
+          name: 'b.txt',
+          mime_type: 'text/plain',
+          size: 1,
+        },
+      ],
+    });
+    const renderer = await renderSetupProjectApp();
+    const root = renderer.root;
+    await act(async () => actionByLabel(root, 'Add attachment').props.onPress());
+    await chooseAttachmentSource(root, 'Files');
+    await enterPendingProjectRecovery(root, 'Attachment ownership');
+    await act(async () => visibleContextSheets(root)[0]!.props.onClose());
+
+    await act(async () =>
+      actionByLabel(root, 'Remove a.txt').props.onPress({
+        stopPropagation: jest.fn(),
+      }),
+    );
+    await act(async () =>
+      root.findByProps({ testID: 'project-context-strip' }).props.onPress(),
+    );
+    expect(visibleContextSheets(root)[0]?.props.mode).toBe('candidates');
+    expect(mockLocalRuntime.completeV2).not.toHaveBeenCalled();
+  });
+
+  test('sends without context exactly once and only after Sheet dismissal', async () => {
+    const renderer = await renderSetupProjectApp();
+    const root = renderer.root;
+    await enterPendingProjectRecovery(root, '  explicit raw text  ');
+    const sheet = visibleContextSheets(root)[0]!;
+    const sendWithout = sheet.props.onSendWithoutContext;
+    const dismiss = sheet.props.onDismiss;
+    const staleSend = actionByLabel(root, 'Send message').props.onPress;
+
+    act(() => {
+      sendWithout();
+      staleSend();
+      expect(mockLocalRuntime.completeV2).not.toHaveBeenCalled();
+    });
+    await act(async () => settle());
+    expect(mockLocalRuntime.completeV2).toHaveBeenCalledTimes(1);
+    expect(mockLocalRuntime.completeV2).toHaveBeenCalledWith(
+      expect.objectContaining({
+        schemaVersion: 2,
+        projectContext: null,
+        visibleHistory: [
+          expect.objectContaining({ content: '  explicit raw text  ' }),
+        ],
+      }),
+    );
+    await act(async () => sendWithout());
+    await act(async () => dismiss());
+    expect(mockLocalRuntime.completeV2).toHaveBeenCalledTimes(1);
+    const persisted = lastPersistedState().conversations.find(
+      conversation => conversation.project_id === CONTEXT_PROJECT_ID,
+    );
+    expect(persisted?.attempts?.at(-1)).toMatchObject({
+      status: 'completed',
+      context_disposition: 'explicit_without_context',
+      project_context: null,
+    });
+  });
+
+  test('refreshes through explicit selection and confirmation, then sends schema3 after dismissal', async () => {
+    jest.useFakeTimers();
+    const manifest = contextManifest();
+    mockLocalProjectContext.listCandidates.mockResolvedValue({
+      schema_version: 1,
+      project_id: CONTEXT_PROJECT_ID,
+      candidates: [
+        {
+          path: 'README.md',
+          size: 16,
+          revision: 'f'.repeat(40),
+          git_state: 'unchanged',
+          eligible: true,
+          omission_reason: null,
+        },
+      ],
+      next_cursor: null,
+    });
+    mockLocalProjectContext.prepare.mockResolvedValue(manifest);
+    mockLocalProjectContext.confirm.mockResolvedValue({
+      schema_version: 1,
+      consent_receipt_id: CONTEXT_CONSENT_ID,
+      snapshot_id: CONTEXT_SNAPSHOT_ID,
+      snapshot_sha256: manifest.snapshot_sha256,
+      confirmed_at: '2026-08-28T00:00:01.000Z',
+    });
+    mockLocalRuntime.completeV2.mockImplementationOnce(
+      async (request: StrictCompletionRequest) => ({
+        ...strictCompletionResult(request, { text: 'Context answer' }),
+        project_context_receipt: {
+          schema_version: 1,
+          snapshot_id: CONTEXT_SNAPSHOT_ID,
+          snapshot_sha256: manifest.snapshot_sha256,
+          source_fingerprint: manifest.source_fingerprint,
+          context_bytes: manifest.context_bytes,
+          verified_at: '2026-08-28T00:00:02.000Z',
+        },
+      }),
+    );
+    const renderer = await renderSetupProjectApp();
+    const root = renderer.root;
+    await enterPendingProjectRecovery(root, 'Use confirmed context');
+    await act(async () =>
+      actionByLabel(root, 'Refresh and send').props.onPress(),
+    );
+    await act(async () => {
+      jest.advanceTimersByTime(180);
+      await settle();
+    });
+    expect(visibleContextSheets(root)[0]?.props.mode).toBe('candidates');
+    await act(async () =>
+      root
+        .findByProps({ testID: 'project-context-candidate-README.md' })
+        .props.onPress(),
+    );
+    await act(async () => {
+      actionByLabel(root, 'Prepare context').props.onPress();
+      await settle();
+      await settle();
+    });
+    expect(visibleContextSheets(root)[0]?.props.confirmationRequired).toBe(true);
+    const confirm = actionByLabel(root, 'Confirm context').props.onPress;
+    act(() => {
+      confirm();
+      expect(mockLocalRuntime.completeV2).not.toHaveBeenCalled();
+    });
+    await act(async () => {
+      await settle();
+      await settle();
+    });
+    expect(mockLocalRuntime.completeV2).toHaveBeenCalledTimes(1);
+    expect(mockLocalRuntime.completeV2).toHaveBeenCalledWith(
+      expect.objectContaining({
+        schemaVersion: 3,
+        projectContext: expect.objectContaining({
+          snapshotId: CONTEXT_SNAPSHOT_ID,
+          consentReceiptId: CONTEXT_CONSENT_ID,
+          projectId: CONTEXT_PROJECT_ID,
+        }),
+      }),
+    );
+    await act(async () => confirm());
+    expect(mockLocalRuntime.completeV2).toHaveBeenCalledTimes(1);
+    expect(
+      root.findByProps({ accessibilityLabel: 'Message DSH' }).props.value,
+    ).toBe('');
+    jest.useRealTimers();
+  });
+
+  test('waits for confirmed-context persistence retry before dismissing and sending', async () => {
+    jest.useFakeTimers();
+    const manifest = contextManifest();
+    mockLocalProjectContext.listCandidates.mockResolvedValue({
+      schema_version: 1,
+      project_id: CONTEXT_PROJECT_ID,
+      candidates: [
+        {
+          path: 'README.md',
+          size: 16,
+          revision: 'f'.repeat(40),
+          git_state: 'unchanged',
+          eligible: true,
+          omission_reason: null,
+        },
+      ],
+      next_cursor: null,
+    });
+    mockLocalProjectContext.prepare.mockResolvedValue(manifest);
+    mockLocalProjectContext.confirm.mockResolvedValue({
+      schema_version: 1,
+      consent_receipt_id: CONTEXT_CONSENT_ID,
+      snapshot_id: CONTEXT_SNAPSHOT_ID,
+      snapshot_sha256: manifest.snapshot_sha256,
+      confirmed_at: '2026-08-28T00:00:01.000Z',
+    });
+    mockLocalRuntime.completeV2.mockImplementationOnce(
+      async (request: StrictCompletionRequest) => ({
+        ...strictCompletionResult(request, { text: 'Retried persistence answer' }),
+        project_context_receipt: {
+          schema_version: 1,
+          snapshot_id: CONTEXT_SNAPSHOT_ID,
+          snapshot_sha256: manifest.snapshot_sha256,
+          source_fingerprint: manifest.source_fingerprint,
+          context_bytes: manifest.context_bytes,
+          verified_at: '2026-08-28T00:00:02.000Z',
+        },
+      }),
+    );
+    const renderer = await renderSetupProjectApp();
+    const root = renderer.root;
+    await enterPendingProjectRecovery(root, 'Persist before sending');
+    await preparePendingProjectDisclosure(root);
+    let candidate = '';
+    mockLocalRuntime.persistSession.mockImplementationOnce(async json => {
+      candidate = json;
+      return false;
+    });
+    mockLocalRuntime.loadSession.mockImplementationOnce(async () => candidate);
+
+    await act(async () => {
+      actionByLabel(root, 'Confirm context').props.onPress();
+      await settle();
+      await settle();
+    });
+    expect(mockLocalRuntime.completeV2).not.toHaveBeenCalled();
+    expect(visibleContextSheets(root)[0]?.props.recoveryAction).toBe(
+      'persistence',
+    );
+    expect(actionByLabel(root, 'Retry save')).toBeDefined();
+
+    await act(async () => {
+      actionByLabel(root, 'Retry save').props.onPress();
+      await settle();
+      await settle();
+    });
+    expect(mockLocalRuntime.completeV2).toHaveBeenCalledTimes(1);
+    expect(visibleContextSheets(root)).toHaveLength(0);
+    jest.useRealTimers();
+  });
+
+  test('keeps recovery disclosure and draft when native confirmation rejects', async () => {
+    jest.useFakeTimers();
+    const manifest = contextManifest();
+    mockLocalProjectContext.listCandidates.mockResolvedValue({
+      schema_version: 1,
+      project_id: CONTEXT_PROJECT_ID,
+      candidates: [
+        {
+          path: 'README.md',
+          size: 16,
+          revision: 'f'.repeat(40),
+          git_state: 'unchanged',
+          eligible: true,
+          omission_reason: null,
+        },
+      ],
+      next_cursor: null,
+    });
+    mockLocalProjectContext.prepare.mockResolvedValue(manifest);
+    mockLocalProjectContext.confirm.mockRejectedValueOnce({
+      code: 'E_CONTEXT_TIMEOUT',
+      message: 'RAW_CONFIRM_SENTINEL',
+    });
+    const renderer = await renderSetupProjectApp();
+    const root = renderer.root;
+    await enterPendingProjectRecovery(root, 'Keep after confirm failure');
+    await preparePendingProjectDisclosure(root);
+
+    await act(async () => {
+      actionByLabel(root, 'Confirm context').props.onPress();
+      await settle();
+    });
+    expect(visibleContextSheets(root)).toHaveLength(1);
+    expect(
+      root.findByProps({ accessibilityLabel: 'Message DSH' }).props.value,
+    ).toBe('Keep after confirm failure');
+    expect(mockLocalRuntime.completeV2).not.toHaveBeenCalled();
+    expect(
+      root.findAll(node =>
+        Object.values(node.props).some(
+          value =>
+            typeof value === 'string' &&
+            value.includes('RAW_CONFIRM_SENTINEL'),
+        ),
+      ),
+    ).toHaveLength(0);
+    jest.useRealTimers();
+  });
+
+  test('consumes a preserved pending intent before direct send after a hidden confirmation completes', async () => {
+    jest.useFakeTimers();
+    const manifest = contextManifest();
+    const confirmation = deferred<{
+      schema_version: 1;
+      consent_receipt_id: string;
+      snapshot_id: string;
+      snapshot_sha256: string;
+      confirmed_at: string;
+    }>();
+    mockLocalProjectContext.listCandidates.mockResolvedValue({
+      schema_version: 1,
+      project_id: CONTEXT_PROJECT_ID,
+      candidates: [
+        {
+          path: 'README.md',
+          size: 16,
+          revision: 'f'.repeat(40),
+          git_state: 'unchanged',
+          eligible: true,
+          omission_reason: null,
+        },
+      ],
+      next_cursor: null,
+    });
+    mockLocalProjectContext.prepare.mockResolvedValue(manifest);
+    mockLocalProjectContext.confirm.mockReturnValueOnce(confirmation.promise);
+    mockLocalRuntime.completeV2.mockImplementationOnce(
+      async (request: StrictCompletionRequest) => ({
+        ...strictCompletionResult(request),
+        project_context_receipt: {
+          schema_version: 1,
+          snapshot_id: CONTEXT_SNAPSHOT_ID,
+          snapshot_sha256: manifest.snapshot_sha256,
+          source_fingerprint: manifest.source_fingerprint,
+          context_bytes: manifest.context_bytes,
+          verified_at: '2026-08-28T00:00:02.000Z',
+        },
+      }),
+    );
+    const renderer = await renderSetupProjectApp();
+    const root = renderer.root;
+    await enterPendingProjectRecovery(root, 'Confirm while hidden');
+    await preparePendingProjectDisclosure(root);
+
+    await act(async () =>
+      actionByLabel(root, 'Confirm context').props.onPress(),
+    );
+    await act(async () => visibleContextSheets(root)[0]!.props.onClose());
+    confirmation.resolve({
+      schema_version: 1,
+      consent_receipt_id: CONTEXT_CONSENT_ID,
+      snapshot_id: CONTEXT_SNAPSHOT_ID,
+      snapshot_sha256: manifest.snapshot_sha256,
+      confirmed_at: '2026-08-28T00:00:01.000Z',
+    });
+    await act(async () => {
+      await settle();
+      await settle();
+    });
+    expect(mockLocalRuntime.completeV2).not.toHaveBeenCalled();
+
+    await act(async () => {
+      actionByLabel(root, 'Send message').props.onPress();
+      await settle();
+      await settle();
+    });
+    expect(mockLocalRuntime.completeV2).toHaveBeenCalledTimes(1);
+    await act(async () =>
+      root.findByProps({ testID: 'project-context-strip' }).props.onPress(),
+    );
+    expect(visibleContextSheets(root)[0]?.props.mode).toBe('disclosure');
+    await act(async () => visibleContextSheets(root)[0]!.props.onDismiss());
+    expect(mockLocalRuntime.completeV2).toHaveBeenCalledTimes(1);
+    jest.useRealTimers();
+  });
+
+  test('does not clear a newly edited draft when prepared durability resolves', async () => {
+    jest.useFakeTimers();
+    const manifest = contextManifest();
+    mockLocalProjectContext.listCandidates.mockResolvedValue({
+      schema_version: 1,
+      project_id: CONTEXT_PROJECT_ID,
+      candidates: [
+        {
+          path: 'README.md',
+          size: 16,
+          revision: 'f'.repeat(40),
+          git_state: 'unchanged',
+          eligible: true,
+          omission_reason: null,
+        },
+      ],
+      next_cursor: null,
+    });
+    mockLocalProjectContext.prepare.mockResolvedValue(manifest);
+    mockLocalProjectContext.confirm.mockResolvedValue({
+      schema_version: 1,
+      consent_receipt_id: CONTEXT_CONSENT_ID,
+      snapshot_id: CONTEXT_SNAPSHOT_ID,
+      snapshot_sha256: manifest.snapshot_sha256,
+      confirmed_at: '2026-08-28T00:00:01.000Z',
+    });
+    mockLocalRuntime.completeV2.mockImplementationOnce(
+      async (request: StrictCompletionRequest) => ({
+        ...strictCompletionResult(request, { text: 'Raw equality answer' }),
+        project_context_receipt: {
+          schema_version: 1,
+          snapshot_id: CONTEXT_SNAPSHOT_ID,
+          snapshot_sha256: manifest.snapshot_sha256,
+          source_fingerprint: manifest.source_fingerprint,
+          context_bytes: manifest.context_bytes,
+          verified_at: '2026-08-28T00:00:02.000Z',
+        },
+      }),
+    );
+    const completionPersist = deferred<boolean>();
+    const renderer = await renderSetupProjectApp();
+    const root = renderer.root;
+    await enterPendingProjectRecovery(root, '  raw  ');
+    await preparePendingProjectDisclosure(root);
+    mockLocalRuntime.persistSession.mockImplementation(async json => {
+      const decoded = JSON.parse(json) as {
+        conversations: Array<{ attempts?: unknown[] }>;
+      };
+      return decoded.conversations.some(
+        conversation => (conversation.attempts?.length ?? 0) > 0,
+      )
+        ? completionPersist.promise
+        : true;
+    });
+
+    await act(async () => {
+      actionByLabel(root, 'Confirm context').props.onPress();
+      await settle();
+      await settle();
+    });
+    expect(mockLocalRuntime.completeV2).not.toHaveBeenCalled();
+    await act(async () =>
+      root
+        .findByProps({ accessibilityLabel: 'Message DSH' })
+        .props.onChangeText('raw'),
+    );
+    completionPersist.resolve(true);
+    await act(async () => {
+      await settle();
+      await settle();
+    });
+
+    expect(
+      root.findByProps({ accessibilityLabel: 'Message DSH' }).props.value,
+    ).toBe('raw');
+    jest.useRealTimers();
+  });
+
+  test('copies pending text and attachment metadata before explicit schema2 send', async () => {
+    const selectedAttachment = {
+      schema_version: 1,
+      id: 'immutable-file-1',
+      kind: 'text',
+      name: 'original.txt',
+      mime_type: 'text/plain',
+      size: 12,
+      thumbnail_data_url: 'data:image/png;base64,RAW_PENDING_SENTINEL',
+    } as const;
+    mockLocalAttachments.present.mockResolvedValueOnce({
+      schema_version: 1,
+      status: 'selected',
+      attachments: [selectedAttachment],
+    });
+    const renderer = await renderSetupProjectApp();
+    const root = renderer.root;
+    await act(async () => actionByLabel(root, 'Add attachment').props.onPress());
+    await chooseAttachmentSource(root, 'Files');
+    await enterPendingProjectRecovery(root, '  immutable raw text  ');
+    const liveAttachment = root.findByType(ChatComposer).props.attachments[0] as {
+      name: string;
+    };
+    liveAttachment.name = 'MUTATED.txt';
+
+    await act(async () =>
+      actionByLabel(root, 'Send without project context').props.onPress(),
+    );
+    await act(async () => settle());
+    const request = mockLocalRuntime.completeV2.mock.calls[0]?.[0] as {
+      visibleHistory: Array<{
+        content: string;
+        attachments: Array<{ name: string }>;
+      }>;
+    };
+    expect(request.visibleHistory[0]).toEqual(
+      expect.objectContaining({
+        content: '  immutable raw text  ',
+        attachments: [expect.objectContaining({ name: 'original.txt' })],
+      }),
+    );
+    expect(request.visibleHistory[0]?.attachments[0]).not.toHaveProperty(
+      'thumbnail_data_url',
+    );
+    expect(JSON.stringify(request)).not.toContain('RAW_PENDING_SENTINEL');
+  });
+
+  test('locks Send without a fake Stop while native context preparation is active', async () => {
+    jest.useFakeTimers();
+    const manifest = contextManifest();
+    const preparation = deferred<ProjectContextManifestV1>();
+    mockLocalProjectContext.listCandidates.mockResolvedValue({
+      schema_version: 1,
+      project_id: CONTEXT_PROJECT_ID,
+      candidates: [
+        {
+          path: 'README.md',
+          size: 16,
+          revision: 'f'.repeat(40),
+          git_state: 'unchanged',
+          eligible: true,
+          omission_reason: null,
+        },
+      ],
+      next_cursor: null,
+    });
+    mockLocalProjectContext.prepare.mockReturnValueOnce(preparation.promise);
+    const renderer = await renderSetupProjectApp();
+    const root = renderer.root;
+    await enterPendingProjectRecovery(root, 'Locked while preparing');
+    await act(async () =>
+      actionByLabel(root, 'Refresh and send').props.onPress(),
+    );
+    await act(async () => {
+      jest.advanceTimersByTime(180);
+      await settle();
+    });
+    await act(async () =>
+      root
+        .findByProps({ testID: 'project-context-candidate-README.md' })
+        .props.onPress(),
+    );
+    const staleSend = actionByLabel(root, 'Send message').props.onPress;
+    await act(async () => actionByLabel(root, 'Prepare context').props.onPress());
+
+    expect(actionByLabel(root, 'Send message').props.disabled).toBe(true);
+    expect(
+      root.findAllByProps({ accessibilityLabel: 'Stop response' }),
+    ).toHaveLength(0);
+    await act(async () => staleSend());
+    expect(mockLocalRuntime.completeV2).not.toHaveBeenCalled();
+    expect(visibleContextSheets(root)[0]?.props.mode).toBe('candidates');
+    expect(visibleContextSheets(root)[0]?.props.busyAction).toBe('prepare');
+
+    preparation.resolve(manifest);
+    await act(async () => {
+      await settle();
+      await settle();
+    });
+    expect(visibleContextSheets(root)[0]?.props.mode).toBe('disclosure');
+    expect(visibleContextSheets(root)[0]?.props.confirmationRequired).toBe(true);
     jest.useRealTimers();
   });
 });

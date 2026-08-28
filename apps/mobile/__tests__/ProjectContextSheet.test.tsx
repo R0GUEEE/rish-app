@@ -205,6 +205,8 @@ async function renderSheet(
     hasActiveContext: true,
     confirmationRequired: true,
     recoveryAction: null,
+    recoveryRefreshDisabled: false,
+    recoverySendWithoutDisabled: false,
     disabled: false,
     busyAction: null,
     ...callbacks,
@@ -728,6 +730,36 @@ test('renders only the explicit stale pending-send recovery choices', async () =
   expect(harness.callbacks.onCancelRecovery).toHaveBeenCalledTimes(1);
   expect(harness.callbacks.onClose).not.toHaveBeenCalled();
   expect(harness.callbacks.onCancelCandidate).not.toHaveBeenCalled();
+});
+
+test('keeps explicit fallback and cancellation available when refresh is unavailable', async () => {
+  const recoveryOverrides = {
+    mode: 'recovery' as const,
+    unavailable: true,
+    recoveryRefreshDisabled: true,
+    recoverySendWithoutDisabled: false,
+  } as Partial<ProjectContextSheetProps> & {
+    recoveryRefreshDisabled: boolean;
+    recoverySendWithoutDisabled: boolean;
+  };
+  const harness = await renderSheet(recoveryOverrides);
+  const refresh = actionByLabel(harness.renderer.root, 'Refresh and send');
+  const sendWithout = actionByLabel(
+    harness.renderer.root,
+    'Send without project context',
+  );
+  const cancel = actionByLabel(harness.renderer.root, 'Cancel');
+
+  expect(refresh.props.disabled).toBe(true);
+  expect(sendWithout.props.disabled).toBe(false);
+  expect(cancel.props.disabled).toBe(false);
+  await act(async () => refresh.props.onPress());
+  await act(async () => sendWithout.props.onPress());
+  await act(async () => cancel.props.onPress());
+
+  expect(harness.callbacks.onRefreshAndSend).not.toHaveBeenCalled();
+  expect(harness.callbacks.onSendWithoutContext).toHaveBeenCalledTimes(1);
+  expect(harness.callbacks.onCancelRecovery).toHaveBeenCalledTimes(1);
 });
 
 test.each([

@@ -13,6 +13,7 @@ import {
   selectOrderedConversations,
   serializeChatState,
   MAX_PROJECT_CONTEXT_SNAPSHOT_REFERENCE_ROWS,
+  MAX_CHAT_MESSAGE_LENGTH,
   type ChatAttachment,
   type ChatStore,
   type CompletionRoundReceiptV1,
@@ -201,6 +202,52 @@ describe('chat reducer', () => {
     expect(duplicate).toBe(withAssistant);
   });
 
+  test('preserves legal message whitespace through serialization without accepting blanks', () => {
+    let state = createConversation(createEmptyChatState(), 'chat', T0);
+    state = appendUser(state, 'chat', 'm1', '  raw user text  ', T1);
+    state = chatReducer(state, {
+      type: 'message/append',
+      payload: {
+        conversationId: 'chat',
+        message: {
+          id: 'm2',
+          role: 'assistant',
+          text: '\nraw assistant text\t',
+          createdAt: T2,
+          attachments: [],
+        },
+      },
+    });
+
+    expect(state.conversations.chat?.messages.map(message => message.text)).toEqual([
+      '  raw user text  ',
+      '\nraw assistant text\t',
+    ]);
+    expect(state.conversations.chat?.title).toBe('raw user text');
+    expect(
+      hydrateChatState(serializeChatState(state)).conversations.chat?.messages.map(
+        message => message.text,
+      ),
+    ).toEqual(['  raw user text  ', '\nraw assistant text\t']);
+
+    const blankUser = appendUser(state, 'chat', 'm3', ' \n\t ', T3);
+    const blankAssistant = chatReducer(state, {
+      type: 'message/append',
+      payload: {
+        conversationId: 'chat',
+        message: {
+          id: 'm4',
+          role: 'assistant',
+          text: '\t  ',
+          createdAt: T3,
+          attachments: [],
+        },
+      },
+    });
+    expect(blankUser).toBe(state);
+    expect(blankAssistant).toBe(state);
+  });
+
   test('accepts an attachment-only user message and titles it from the file', () => {
     const state = createConversation(createEmptyChatState(), 'chat', T0);
     const next = appendUser(state, 'chat', 'm1', '', T1, [IMAGE_ATTACHMENT]);
@@ -224,6 +271,35 @@ describe('chat reducer', () => {
       },
     });
     expect(blankAssistant).toBe(next);
+  });
+
+  test('titles a whitespace-only attachment message from the attachment name', () => {
+    const state = createConversation(createEmptyChatState(), 'chat', T0);
+    const next = appendUser(
+      state,
+      'chat',
+      'm1',
+      ' \n\t ',
+      T1,
+      [IMAGE_ATTACHMENT],
+    );
+
+    expect(next.conversations.chat?.messages[0]?.text).toBe(' \n\t ');
+    expect(next.conversations.chat?.title).toBe('receipt.png');
+  });
+
+  test('bounds the preserved raw message length before serialization', () => {
+    const state = createConversation(createEmptyChatState(), 'chat', T0);
+    const boundary = `x${' '.repeat(MAX_CHAT_MESSAGE_LENGTH - 1)}`;
+    const accepted = appendUser(state, 'chat', 'm1', boundary, T1);
+    expect(accepted).not.toBe(state);
+    expect(
+      hydrateChatState(serializeChatState(accepted)).conversations.chat
+        ?.messages[0]?.text,
+    ).toBe(boundary);
+
+    const overLimit = `${boundary} `;
+    expect(appendUser(state, 'chat', 'm2', overLimit, T1)).toBe(state);
   });
 
   test('updates model and thinking per chat without moving on selection', () => {
@@ -1161,6 +1237,59 @@ describe('schema v6 attempts and project context', () => {
       contextProjectId: null,
       rounds: [],
     });
+  });
+
+  test('freezes and round-trips the exact legal user text for a prepared attempt', () => {
+    const store = v6Store();
+    const conversationId = store.createConversation();
+    const prepared = store.prepareTurnAttempt(
+      conversationId,
+      '  exact prepared text  ',
+    );
+
+    expect(prepared).not.toBeNull();
+    expect(
+      store.getState().conversations[conversationId]?.messages.at(-1)?.text,
+    ).toBe('  exact prepared text  ');
+    expect(
+      hydrateChatState(store.serialize()).conversations[conversationId]?.messages.at(
+        -1,
+      )?.text,
+    ).toBe('  exact prepared text  ');
+  });
+
+  test('bounds prepared raw text and keeps attachment title fallback', () => {
+    const boundary = `x${' '.repeat(MAX_CHAT_MESSAGE_LENGTH - 1)}`;
+    const acceptedStore = v6Store();
+    const acceptedConversation = acceptedStore.createConversation();
+    expect(
+      acceptedStore.prepareTurnAttempt(acceptedConversation, boundary),
+    ).not.toBeNull();
+    expect(
+      hydrateChatState(acceptedStore.serialize()).conversations[
+        acceptedConversation
+      ]?.messages.at(-1)?.text,
+    ).toBe(boundary);
+
+    const rejectedStore = v6Store();
+    const rejectedConversation = rejectedStore.createConversation();
+    expect(
+      rejectedStore.prepareTurnAttempt(rejectedConversation, `${boundary} `),
+    ).toBeNull();
+    expect(
+      rejectedStore.getState().conversations[rejectedConversation]?.messages,
+    ).toHaveLength(0);
+
+    const attachmentStore = v6Store();
+    const attachmentConversation = attachmentStore.createConversation();
+    expect(
+      attachmentStore.prepareTurnAttempt(attachmentConversation, ' \n\t ', {
+        attachments: [IMAGE_ATTACHMENT],
+      }),
+    ).not.toBeNull();
+    expect(
+      attachmentStore.getState().conversations[attachmentConversation]?.title,
+    ).toBe('receipt.png');
   });
 
   test('freezes only the last 200 contiguous visible messages', () => {

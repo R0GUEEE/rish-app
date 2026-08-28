@@ -40,6 +40,7 @@ export const DEFAULT_MODEL_ID: ModelId = 'deepseek-v4-flash';
 export const DEFAULT_THINKING_MODE: ConversationThinkingMode = 'high';
 export const AUTO_TITLE_MAX_LENGTH = 48;
 export const MANUAL_TITLE_MAX_LENGTH = 120;
+export const MAX_CHAT_MESSAGE_LENGTH = 1_000_000;
 export const PROJECT_ID_MAX_LENGTH = 256;
 export const MAX_ATTACHMENTS_PER_MESSAGE = 6;
 export const MAX_ATTACHMENT_ID_LENGTH = 256;
@@ -1076,13 +1077,15 @@ function normalizedMessage(
   conversation: Conversation,
   message: ChatMessage,
 ): ChatMessage | null {
-  const text = message.text.trim();
+  const text = message.text;
+  const nonBlankText = text.trim();
   if (
     !validIdentifier(message.id) ||
     !isCanonicalTimestamp(message.createdAt) ||
     (message.role !== 'user' && message.role !== 'assistant') ||
+    text.length > MAX_CHAT_MESSAGE_LENGTH ||
     !areValidChatAttachments(message.attachments) ||
-    (text.length === 0 &&
+    (nonBlankText.length === 0 &&
       (message.role === 'assistant' || message.attachments.length === 0)) ||
     hasMessageId(conversation, message.id)
   ) {
@@ -1583,7 +1586,9 @@ export function chatReducer(state: ChatState, action: ChatAction): ChatState {
       if (normalized === null) return state;
       const text = normalized.text;
       const autoTitleSource =
-        text.length > 0 ? text : normalized.attachments[0]?.name ?? '';
+        text.trim().length > 0
+          ? text
+          : normalized.attachments[0]?.name ?? '';
       const autoTitle =
         normalized.role === 'user' && shouldAutoTitle(conversation)
           ? deriveAutoTitle(autoTitleSource)
@@ -1654,7 +1659,7 @@ export function chatReducer(state: ChatState, action: ChatAction): ChatState {
         return state;
       }
       const autoTitleSource =
-        normalized.text.length > 0
+        normalized.text.trim().length > 0
           ? normalized.text
           : normalized.attachments[0]?.name ?? '';
       return withConversation(state, {

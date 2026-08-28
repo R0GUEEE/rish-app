@@ -111,6 +111,45 @@ type PendingContextOpen = {
   readonly uiEpoch: number;
 };
 
+type PendingProjectSend = {
+  readonly conversationId: string;
+  readonly uiEpoch: number;
+  readonly text: string;
+  readonly attachments: readonly AttachmentDescriptor[];
+  readonly attachmentIds: readonly string[];
+};
+
+type PendingProjectSendStage = 'recovery' | 'context_flow';
+type PendingContextDismissAction = {
+  readonly kind: 'verified' | 'without_context';
+  readonly pendingEpoch: number;
+};
+
+function copyPendingAttachment(
+  attachment: AttachmentDescriptor,
+): AttachmentDescriptor {
+  return Object.freeze({
+    schema_version: attachment.schema_version,
+    id: attachment.id,
+    kind: attachment.kind,
+    name: attachment.name,
+    mime_type: attachment.mime_type,
+    size: attachment.size,
+  });
+}
+
+function sameOrderedAttachmentIds(
+  attachments: readonly AttachmentDescriptor[],
+  expectedIds: readonly string[],
+): boolean {
+  return (
+    attachments.length === expectedIds.length &&
+    attachments.every(
+      (attachment, index) => attachment.id === expectedIds[index],
+    )
+  );
+}
+
 type LegacyMessage = {
   id?: unknown;
   role?: unknown;
@@ -363,6 +402,8 @@ export function HomeScreen() {
   const store = useMemo(() => createChatStore(), []);
   const [chatState, setChatState] = useState<ChatState>(() => store.getState());
   const [draft, setDraft] = useState('');
+  const draftRef = useRef('');
+  draftRef.current = draft;
   const [draftAttachments, setDraftAttachments] = useState<
     readonly AttachmentDescriptor[]
   >([]);
@@ -397,6 +438,15 @@ export function HomeScreen() {
   const navigationSurfaceVisibleRef = useRef(false);
   const [contextSheetFilter, setContextSheetFilter] =
     useState<ProjectContextSheetFilter>('all');
+  const [pendingProjectSend, setPendingProjectSend] =
+    useState<PendingProjectSend | null>(null);
+  const [pendingProjectSendStage, setPendingProjectSendStage] =
+    useState<PendingProjectSendStage | null>(null);
+  const pendingProjectSendRef = useRef<PendingProjectSend | null>(null);
+  const pendingProjectSendEpoch = useRef(0);
+  const pendingContextDismissAction =
+    useRef<PendingContextDismissAction | null>(null);
+  const pendingProjectSendActionInFlight = useRef(false);
   const [projectFilesScope, setProjectFilesScope] =
     useState<LocalProject | null>(null);
   const [projectRefreshToken, setProjectRefreshToken] = useState(0);
@@ -438,6 +488,70 @@ export function HomeScreen() {
     BUILTIN_HARNESSES.get(preferences.selectedHarnessId) ?? DSH_HARNESS;
 
   useEffect(() => store.subscribe(setChatState), [store]);
+
+  const invalidatePendingProjectSend = useCallback(() => {
+    pendingProjectSendEpoch.current += 1;
+    pendingProjectSendRef.current = null;
+    pendingContextDismissAction.current = null;
+    pendingProjectSendActionInFlight.current = false;
+    setPendingProjectSend(null);
+    setPendingProjectSendStage(null);
+  }, []);
+
+  const capturePendingProjectSend = useCallback(
+    (
+      conversationId: string,
+      text: string,
+      attachments: readonly AttachmentDescriptor[],
+    ): PendingProjectSend => {
+      const uiEpoch = ++pendingProjectSendEpoch.current;
+      pendingContextDismissAction.current = null;
+      pendingProjectSendActionInFlight.current = false;
+      const attachmentCopies = Object.freeze(
+        attachments.map(copyPendingAttachment),
+      );
+      const attachmentIds = Object.freeze(
+        attachmentCopies.map(attachment => attachment.id),
+      );
+      const pending = Object.freeze({
+        conversationId,
+        uiEpoch,
+        text,
+        attachments: attachmentCopies,
+        attachmentIds,
+      });
+      pendingProjectSendRef.current = pending;
+      setPendingProjectSend(pending);
+      setPendingProjectSendStage('recovery');
+      return pending;
+    },
+    [],
+  );
+
+  const pendingProjectSendIsLive = useCallback(
+    (pending: PendingProjectSend): boolean => {
+      return (
+        pendingProjectSendRef.current === pending &&
+        pendingProjectSendEpoch.current === pending.uiEpoch &&
+        store.getState().selectedConversationId === pending.conversationId &&
+        draftRef.current === pending.text &&
+        sameOrderedAttachmentIds(
+          draftAttachmentsRef.current,
+          pending.attachmentIds,
+        )
+      );
+    },
+    [store],
+  );
+
+  const changeDraft = useCallback(
+    (value: string) => {
+      invalidatePendingProjectSend();
+      draftRef.current = value;
+      setDraft(value);
+    },
+    [invalidatePendingProjectSend],
+  );
 
   useEffect(() => {
     const operation = activeAttachmentOperation.current;
@@ -895,7 +1009,15 @@ export function HomeScreen() {
     projectContextControllerState.phase === 'review' &&
     projectContextCandidateManifest !== null;
   const projectContextSheetMode: ProjectContextSheetMode =
-    projectContextManifest === null ? 'candidates' : 'disclosure';
+    pendingProjectSend !== null && pendingProjectSendStage === 'recovery'
+      ? 'recovery'
+      : pendingProjectSend !== null &&
+          pendingProjectSendStage === 'context_flow' &&
+          projectContextCandidateManifest === null
+        ? 'candidates'
+      : projectContextManifest === null
+        ? 'candidates'
+        : 'disclosure';
   const projectContextBusyAction: ProjectContextSheetBusyAction =
     !projectContextOwnerAligned
       ? null
@@ -937,6 +1059,16 @@ export function HomeScreen() {
     activeConversation?.projectId !== undefined &&
     projectContextOwnerAligned &&
     projectContextOwnsMutation(projectContextControllerState);
+  const projectContextRecoveryGloballyDisabled =
+    (activeConversation !== null &&
+      completionOwnsPresentation(completionState, activeConversation.id)) ||
+    (projectContextOwnerAligned &&
+      projectContextOwnsMutation(projectContextControllerState));
+  const projectContextRecoveryRefreshDisabled =
+    projectContextRecoveryGloballyDisabled ||
+    !projectContextNativeAvailable ||
+    projectContextActionToken === null ||
+    projectContextHasSnapshotReferences;
   const projectContextRenderEpoch = projectContextUiEpoch.current;
   const projectContextActionKey = JSON.stringify([
     projectContextRenderEpoch,
@@ -948,6 +1080,8 @@ export function HomeScreen() {
     projectContextActionToken?.projectId ?? null,
     projectContextActionToken?.runtimeContextId ?? null,
     projectContextActionToken?.modelId ?? null,
+    pendingProjectSend?.uiEpoch ?? null,
+    pendingProjectSendStage,
   ]);
   useEffect(() => {
     if (!projectContextNativeAvailable || activeConversation === null) return;
@@ -1074,6 +1208,7 @@ export function HomeScreen() {
   );
 
   const discardDraftAttachments = useCallback(() => {
+    invalidatePendingProjectSend();
     const referencedIds = new Set(referencedAttachmentIds(store.getState()));
     const ids = draftAttachments
       .map(attachment => attachment.id)
@@ -1087,7 +1222,13 @@ export function HomeScreen() {
         ),
       );
     }
-  }, [draftAttachments, referencedAttachmentIds, store, t]);
+  }, [
+    draftAttachments,
+    invalidatePendingProjectSend,
+    referencedAttachmentIds,
+    store,
+    t,
+  ]);
 
   const markAttachmentOperationStale = useCallback(() => {
     if (activeAttachmentOperation.current !== null) {
@@ -1202,6 +1343,7 @@ export function HomeScreen() {
           accepted.push(attachment);
         });
         const nextAttachments = [...liveDraftAttachments, ...accepted];
+        if (accepted.length > 0) invalidatePendingProjectSend();
         draftAttachmentsRef.current = nextAttachments;
         setDraftAttachments(nextAttachments);
         if (overflow.length > 0) {
@@ -1238,6 +1380,7 @@ export function HomeScreen() {
     [
       completionController,
       ensureConversation,
+      invalidatePendingProjectSend,
       referencedAttachmentIds,
       store,
       t,
@@ -1263,6 +1406,7 @@ export function HomeScreen() {
       const nextAttachments = draftAttachmentsRef.current.filter(
         attachment => attachment.id !== id,
       );
+      invalidatePendingProjectSend();
       draftAttachmentsRef.current = nextAttachments;
       setDraftAttachments(nextAttachments);
       const referenced = referencedAttachmentIds(store.getState()).includes(id);
@@ -1274,7 +1418,13 @@ export function HomeScreen() {
         );
       }
     },
-    [completionController, referencedAttachmentIds, store, t],
+    [
+      completionController,
+      invalidatePendingProjectSend,
+      referencedAttachmentIds,
+      store,
+      t,
+    ],
   );
 
   const presentAttachmentPreview = useCallback(
@@ -1325,13 +1475,81 @@ export function HomeScreen() {
     [completionController, store, t],
   );
 
+  const openPendingProjectRecovery = useCallback(
+    (
+      conversationId: string,
+      text: string,
+      attachments: readonly AttachmentDescriptor[],
+    ) => {
+      capturePendingProjectSend(conversationId, text, attachments);
+      projectContextUiEpoch.current += 1;
+      setContextSheetFilter('all');
+      contextSheetVisibleRef.current = true;
+      setContextSheetVisible(true);
+    },
+    [capturePendingProjectSend],
+  );
+
+  const performCompletionSend = useCallback(
+    async (
+      conversationId: string,
+      text: string,
+      attachments: readonly AttachmentDescriptor[],
+      sendWithoutProjectContext = false,
+    ) => {
+      const attachmentIds = attachments.map(attachment => attachment.id);
+      setAttachmentNotice(null);
+      setRequestFailure(null);
+      const outcomeEpoch = ++completionUiEpoch.current;
+      const result = await completionController.send(
+        {
+          conversationId,
+          text,
+          attachments,
+          ...(sendWithoutProjectContext ? { sendWithoutProjectContext: true } : {}),
+        },
+        {
+          onPreparedDurable: () => {
+            setDraft(current => {
+              const next = current === text ? '' : current;
+              draftRef.current = next;
+              return next;
+            });
+            setDraftAttachments(current => {
+              const next = sameOrderedAttachmentIds(current, attachmentIds)
+                ? []
+                : current;
+              draftAttachmentsRef.current = next;
+              return next;
+            });
+          },
+          onCommitted: () => {
+            refreshProof().catch(() => undefined);
+          },
+        },
+      );
+      applyCompletionOutcome(result, outcomeEpoch);
+    },
+    [applyCompletionOutcome, completionController, refreshProof],
+  );
+
   const send = useCallback(async () => {
-    const prompt = draft.trim();
+    const prompt = draft;
     const outgoingAttachments = draftAttachments;
+    const selectedConversation = selectActiveConversation(store.getState());
+    const contextControllerState = projectContextController.getState();
     if (
       !credentialConfigured ||
-      (prompt.length === 0 && outgoingAttachments.length === 0) ||
+      (prompt.trim().length === 0 && outgoingAttachments.length === 0) ||
       completionBusy(completionController.getState()) ||
+      contextSheetVisibleRef.current ||
+      pendingProjectSendActionInFlight.current ||
+      (selectedConversation !== null &&
+        sameProjectContextOwner(
+          contextControllerState.owner,
+          selectedConversation,
+        ) &&
+        projectContextOwnsMutation(contextControllerState)) ||
       activeAttachmentOperation.current !== null ||
       activeAttachmentPreviewId.current !== null
     )
@@ -1341,21 +1559,6 @@ export function HomeScreen() {
       store.getState(),
       conversationId,
     );
-    if (
-      beforeAppend?.projectId !== null &&
-      beforeAppend?.projectId !== undefined &&
-      (beforeAppend.projectContext === null ||
-        !isProjectContextSendable(beforeAppend.projectContext) ||
-        !projectContextNativeAvailable ||
-        !sameProjectContextOwner(
-          projectContextController.getState().owner,
-          beforeAppend,
-        ) ||
-        projectContextController.getState().phase !== 'idle' ||
-        projectContextController.getState().candidateManifest !== null)
-    ) {
-      return;
-    }
     const historyNeedsVision =
       beforeAppend?.messages.some(message =>
         message.attachments?.some(attachment => attachment.kind === 'image'),
@@ -1377,52 +1580,53 @@ export function HomeScreen() {
     }
     if (visionModelChanged && beforeAppend?.projectId !== null) {
       if (await persist()) reconcileSelectedConversation(conversationId);
+      openPendingProjectRecovery(
+        conversationId,
+        prompt,
+        outgoingAttachments,
+      );
       return;
     }
-    const attachmentIds = outgoingAttachments.map(attachment => attachment.id);
-    setAttachmentNotice(null);
-    setRequestFailure(null);
-    const outcomeEpoch = ++completionUiEpoch.current;
-    const result = await completionController.send(
-      {
+    if (
+      beforeAppend?.projectId !== null &&
+      beforeAppend?.projectId !== undefined &&
+      (beforeAppend.projectContext === null ||
+        !isProjectContextSendable(beforeAppend.projectContext) ||
+        !projectContextNativeAvailable ||
+        !sameProjectContextOwner(
+          projectContextController.getState().owner,
+          beforeAppend,
+        ) ||
+        projectContextController.getState().phase !== 'idle' ||
+        projectContextController.getState().candidateManifest !== null)
+    ) {
+      openPendingProjectRecovery(
         conversationId,
-        text: prompt,
-        attachments: outgoingAttachments,
-      },
-      {
-        onPreparedDurable: () => {
-          setDraft(current => (current.trim() === prompt ? '' : current));
-          setDraftAttachments(current => {
-            const next =
-              current.length === attachmentIds.length &&
-              current.every((attachment, index) =>
-                attachment.id === attachmentIds[index],
-              )
-                ? []
-                : current;
-            draftAttachmentsRef.current = next;
-            return next;
-          });
-        },
-        onCommitted: () => {
-          refreshProof().catch(() => undefined);
-        },
-      },
+        prompt,
+        outgoingAttachments,
+      );
+      return;
+    }
+    invalidatePendingProjectSend();
+    await performCompletionSend(
+      conversationId,
+      prompt,
+      outgoingAttachments,
     );
-    applyCompletionOutcome(result, outcomeEpoch);
   }, [
-    applyCompletionOutcome,
     changeConversationModel,
     completionController,
     credentialConfigured,
     draft,
     draftAttachments,
     ensureConversation,
+    invalidatePendingProjectSend,
+    openPendingProjectRecovery,
+    performCompletionSend,
     projectContextController,
     projectContextNativeAvailable,
     persist,
     reconcileSelectedConversation,
-    refreshProof,
     store,
     t,
   ]);
@@ -1698,6 +1902,7 @@ export function HomeScreen() {
         return;
       }
       const conversationId = ensureConversation();
+      invalidatePendingProjectSend();
       if (!changeConversationModel(conversationId, model, source)) return;
       setAttachmentNotice(null);
       persist()
@@ -1713,6 +1918,7 @@ export function HomeScreen() {
       persist,
       projectContextController,
       reconcileSelectedConversation,
+      invalidatePendingProjectSend,
     ],
   );
 
@@ -1736,6 +1942,7 @@ export function HomeScreen() {
         return;
       }
       const conversationId = ensureConversation();
+      invalidatePendingProjectSend();
       store.setThinkingMode(conversationId, thinkingMode);
       persist().catch(() => undefined);
     },
@@ -1744,6 +1951,7 @@ export function HomeScreen() {
       ensureConversation,
       persist,
       projectContextController,
+      invalidatePendingProjectSend,
       store,
     ],
   );
@@ -1787,13 +1995,14 @@ export function HomeScreen() {
 
   const handleWorkspaceSelect = useCallback(
     (workspaceId: string) => {
+      invalidatePendingProjectSend();
       const conversationId = ensureConversation();
       store.bindConversationToWorkspace(conversationId, workspaceId);
       persist().catch(() => undefined);
       setWorkspaceSheetVisible(false);
       setWorkspaceRefreshToken(token => token + 1);
     },
-    [ensureConversation, persist, store],
+    [ensureConversation, invalidatePendingProjectSend, persist, store],
   );
 
   const chatInProject = useCallback(
@@ -1821,6 +2030,7 @@ export function HomeScreen() {
         completionUiEpoch.current += 1;
         setRequestFailure(null);
         if (current?.projectId !== project.id) {
+          invalidatePendingProjectSend();
           if (current === null || current.messages.length > 0) {
             markAttachmentOperationStale();
             discardDraftAttachments();
@@ -1865,6 +2075,7 @@ export function HomeScreen() {
     [
       completionController,
       discardDraftAttachments,
+      invalidatePendingProjectSend,
       markAttachmentOperationStale,
       persist,
       preferencesStore,
@@ -2030,6 +2241,137 @@ export function HomeScreen() {
     setContextSheetVisible(false);
   };
 
+  const pendingProjectSurfaceIsLive = (
+    expected: PendingProjectSend | null,
+  ): expected is PendingProjectSend =>
+    expected !== null &&
+    contextSheetVisibleRef.current &&
+    projectContextUiEpoch.current === projectContextRenderEpoch &&
+    pendingProjectSendIsLive(expected);
+
+  const pendingProjectActionIsBlocked = (
+    expected: PendingProjectSend,
+  ): boolean => {
+    const conversation = selectConversationById(
+      store.getState(),
+      expected.conversationId,
+    );
+    if (conversation === null || conversation.projectId === null) return true;
+    const completion = completionController.getState();
+    if (completionOwnsPresentation(completion, conversation.id)) return true;
+    const context = projectContextController.getState();
+    return (
+      sameProjectContextOwner(context.owner, conversation) &&
+      projectContextOwnsMutation(context)
+    );
+  };
+
+  const verifiedPendingProjectContextIsLive = (
+    expected: PendingProjectSend,
+  ): boolean => {
+    if (!pendingProjectSendIsLive(expected)) return false;
+    const conversation = selectConversationById(
+      store.getState(),
+      expected.conversationId,
+    );
+    const controllerState = projectContextController.getState();
+    return (
+      conversation !== null &&
+      conversation.projectId !== null &&
+      conversation.projectContext !== null &&
+      isProjectContextSendable(conversation.projectContext) &&
+      sameProjectContextOwner(controllerState.owner, conversation) &&
+      controllerState.phase === 'idle' &&
+      controllerState.candidateManifest === null &&
+      !completionOwnsPresentation(
+        completionController.getState(),
+        conversation.id,
+      )
+    );
+  };
+
+  const queuePendingProjectSendAfterDismiss = (
+    expected: PendingProjectSend | null,
+    kind: PendingContextDismissAction['kind'],
+  ) => {
+    if (
+      pendingProjectSendActionInFlight.current ||
+      !pendingProjectSurfaceIsLive(expected) ||
+      (kind === 'verified'
+        ? !verifiedPendingProjectContextIsLive(expected)
+        : pendingProjectActionIsBlocked(expected))
+    ) {
+      return;
+    }
+    pendingProjectSendActionInFlight.current = true;
+    pendingContextDismissAction.current = {
+      kind,
+      pendingEpoch: expected.uiEpoch,
+    };
+    closeProjectContextSheet();
+  };
+
+  const refreshPendingProjectContext = (
+    expectedPending: PendingProjectSend | null,
+    expectedToken: ProjectContextActionToken | null,
+  ) => {
+    if (
+      pendingProjectSendActionInFlight.current ||
+      !pendingProjectSurfaceIsLive(expectedPending) ||
+      expectedToken === null ||
+      !projectContextNativeAvailable ||
+      !projectContextActionIsLive(expectedToken) ||
+      pendingProjectActionIsBlocked(expectedPending)
+    ) {
+      return;
+    }
+    pendingProjectSendActionInFlight.current = true;
+    setPendingProjectSendStage('context_flow');
+    projectContextController
+      .search(expectedToken, '')
+      .catch(() => undefined)
+      .finally(() => {
+        if (pendingProjectSendRef.current === expectedPending) {
+          pendingProjectSendActionInFlight.current = false;
+        }
+      });
+  };
+
+  const completePendingProjectContextAction = (
+    expectedPending: PendingProjectSend | null,
+    expectedToken: ProjectContextActionToken | null,
+    sendWhenCompleted: boolean,
+    operation: () => Promise<{ readonly status: string }>,
+  ) => {
+    if (
+      pendingProjectSendActionInFlight.current ||
+      !pendingProjectSurfaceIsLive(expectedPending) ||
+      !projectContextActionIsLive(expectedToken)
+    ) {
+      return;
+    }
+    const surfaceEpoch = projectContextRenderEpoch;
+    pendingProjectSendActionInFlight.current = true;
+    operation()
+      .then(outcome => {
+        if (pendingProjectSendRef.current !== expectedPending) return;
+        pendingProjectSendActionInFlight.current = false;
+        if (
+          sendWhenCompleted &&
+          outcome.status === 'completed' &&
+          contextSheetVisibleRef.current &&
+          projectContextUiEpoch.current === surfaceEpoch
+        ) {
+          queuePendingProjectSendAfterDismiss(expectedPending, 'verified');
+        }
+      })
+      .catch(() => {
+        if (pendingProjectSendRef.current === expectedPending) {
+          pendingProjectSendActionInFlight.current = false;
+        }
+      });
+  };
+
   const completeProjectContextAction = (
     expected: ProjectContextActionToken,
     closeOnSuccess: boolean,
@@ -2066,6 +2408,32 @@ export function HomeScreen() {
     if (typeof target === 'number') {
       AccessibilityInfo.setAccessibilityFocus(target);
     }
+    const action = pendingContextDismissAction.current;
+    pendingContextDismissAction.current = null;
+    if (action === null) return;
+    const pending = pendingProjectSendRef.current;
+    if (
+      pending === null ||
+      pending.uiEpoch !== action.pendingEpoch ||
+      !pendingProjectSendIsLive(pending) ||
+      (action.kind === 'verified' &&
+        !verifiedPendingProjectContextIsLive(pending)) ||
+      (action.kind === 'without_context' &&
+        pendingProjectActionIsBlocked(pending))
+    ) {
+      pendingProjectSendActionInFlight.current = false;
+      return;
+    }
+    const text = pending.text;
+    const attachments = pending.attachments;
+    const conversationId = pending.conversationId;
+    invalidatePendingProjectSend();
+    performCompletionSend(
+      conversationId,
+      text,
+      attachments,
+      action.kind === 'without_context',
+    ).catch(() => undefined);
   };
 
   const unbindProjectFromConversation = useCallback(async () => {
@@ -2077,21 +2445,28 @@ export function HomeScreen() {
       return;
     }
     completionUiEpoch.current += 1;
+    invalidatePendingProjectSend();
     setRequestFailure(null);
     store.unbindConversationFromProject(conversationId);
     setActiveProjectName(null);
     completionController.reconcileHydrated(conversationId);
     await persist();
-  }, [completionController, persist, store]);
+  }, [
+    completionController,
+    invalidatePendingProjectSend,
+    persist,
+    store,
+  ]);
 
   const selectHarness = useCallback(
     (harnessId: string) => {
       if (!BUILTIN_HARNESSES.has(harnessId)) return;
+      invalidatePendingProjectSend();
       preferencesStore.setSelectedHarness(harnessId);
       setHarnessesVisible(false);
       persist().catch(() => undefined);
     },
-    [persist, preferencesStore],
+    [invalidatePendingProjectSend, persist, preferencesStore],
   );
 
   const configureCredential = useCallback(async () => {
@@ -2382,7 +2757,7 @@ export function HomeScreen() {
               addAttachment(source, ownershipKey).catch(() => undefined);
             }}
             onCancel={() => cancel(completionState)}
-            onChange={setDraft}
+            onChange={changeDraft}
             onConfigure={openSettings}
             onOptionsPress={openComposerOptions}
             onWorkspacePress={() => {
@@ -2553,7 +2928,11 @@ export function HomeScreen() {
         }
         checking={projectContextVerificationStatus === 'checking'}
         confirmationRequired={projectContextConfirmationRequired}
-        disabled={projectContextActionsDisabled}
+        disabled={
+          projectContextSheetMode === 'recovery'
+            ? projectContextRecoveryGloballyDisabled
+            : projectContextActionsDisabled
+        }
         errorCode={
           projectContextOwnerAligned
             ? projectContextControllerState.failureCode
@@ -2591,6 +2970,8 @@ export function HomeScreen() {
             : ''
         }
         recoveryAction={projectContextRecoveryAction}
+        recoveryRefreshDisabled={projectContextRecoveryRefreshDisabled}
+        recoverySendWithoutDisabled={projectContextRecoveryGloballyDisabled}
         selectedCandidates={
           projectContextOwnerAligned
             ? projectContextControllerState.selectedCandidates
@@ -2615,11 +2996,33 @@ export function HomeScreen() {
             () => projectContextController.cancel(token),
           );
         }}
-        onCancelRecovery={closeProjectContextSheet}
+        onCancelRecovery={() => {
+          const expected = pendingProjectSend;
+          if (
+            !pendingProjectSurfaceIsLive(expected) ||
+            pendingProjectActionIsBlocked(expected)
+          ) {
+            return;
+          }
+          invalidatePendingProjectSend();
+          closeProjectContextSheet();
+        }}
         onClose={closeProjectContextSheet}
         onConfirm={() => {
           const token = projectContextActionToken;
           if (token === null) return;
+          if (
+            pendingProjectSend !== null &&
+            pendingProjectSendStage === 'context_flow'
+          ) {
+            completePendingProjectContextAction(
+              pendingProjectSend,
+              token,
+              true,
+              () => projectContextController.confirm(token),
+            );
+            return;
+          }
           completeProjectContextAction(
             token,
             true,
@@ -2648,6 +3051,18 @@ export function HomeScreen() {
         onPrepare={() => {
           const token = projectContextActionToken;
           if (token === null) return;
+          if (
+            pendingProjectSend !== null &&
+            pendingProjectSendStage === 'context_flow'
+          ) {
+            completePendingProjectContextAction(
+              pendingProjectSend,
+              token,
+              false,
+              () => projectContextController.prepare(token),
+            );
+            return;
+          }
           completeProjectContextAction(
             token,
             false,
@@ -2659,7 +3074,12 @@ export function HomeScreen() {
           if (!projectContextActionIsLive(token)) return;
           projectContextController.search(token, query).catch(() => undefined);
         }}
-        onRefreshAndSend={() => undefined}
+        onRefreshAndSend={() =>
+          refreshPendingProjectContext(
+            pendingProjectSend,
+            projectContextActionToken,
+          )
+        }
         onRefreshCandidates={() => {
           const token = projectContextActionToken;
           if (!projectContextActionIsLive(token)) return;
@@ -2688,13 +3108,31 @@ export function HomeScreen() {
         onRetryPersistence={() => {
           const token = projectContextActionToken;
           if (token === null) return;
+          if (
+            pendingProjectSend !== null &&
+            pendingProjectSendStage === 'context_flow'
+          ) {
+            completePendingProjectContextAction(
+              pendingProjectSend,
+              token,
+              projectContextControllerState.pendingPersistence?.kind ===
+                'confirmed_consent',
+              () => projectContextController.retryPersistence(token),
+            );
+            return;
+          }
           completeProjectContextAction(
             token,
             false,
             () => projectContextController.retryPersistence(token),
           );
         }}
-        onSendWithoutContext={() => undefined}
+        onSendWithoutContext={() =>
+          queuePendingProjectSendAfterDismiss(
+            pendingProjectSend,
+            'without_context',
+          )
+        }
         onTogglePath={path => {
           const token = projectContextActionToken;
           if (!projectContextActionIsLive(token)) return;

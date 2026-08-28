@@ -71,6 +71,8 @@ export type ProjectContextSheetProps = {
   readonly hasActiveContext: boolean;
   readonly confirmationRequired: boolean;
   readonly recoveryAction: ProjectContextSheetRecoveryAction;
+  readonly recoveryRefreshDisabled: boolean;
+  readonly recoverySendWithoutDisabled: boolean;
   readonly disabled: boolean;
   readonly busyAction: ProjectContextSheetBusyAction;
   readonly onQueryChange: (query: string) => void;
@@ -446,14 +448,22 @@ export function ProjectContextSheet(props: ProjectContextSheetProps) {
   const handleRefreshAndSend = () => {
     const current = currentForAction();
     if (current === null) return;
-    if (current.mode === 'recovery' && !actionLocked(current)) {
+    if (
+      current.mode === 'recovery' &&
+      !actionLocked(current) &&
+      !current.recoveryRefreshDisabled
+    ) {
       current.onRefreshAndSend();
     }
   };
   const handleSendWithoutContext = () => {
     const current = currentForAction();
     if (current === null) return;
-    if (current.mode === 'recovery' && !actionLocked(current)) {
+    if (
+      current.mode === 'recovery' &&
+      !actionLocked(current) &&
+      !current.recoverySendWithoutDisabled
+    ) {
       current.onSendWithoutContext();
     }
   };
@@ -828,14 +838,18 @@ export function ProjectContextSheet(props: ProjectContextSheetProps) {
           t('context.sheet.refreshAndSend'),
           handleRefreshAndSend,
           {
-            disabled: actionLocked(props),
+            disabled:
+              actionLocked(props) || props.recoveryRefreshDisabled,
             icon: RefreshCw,
           },
         )}
         {actionButton(
           t('context.sheet.sendWithoutContext'),
           handleSendWithoutContext,
-          { disabled: actionLocked(props) },
+          {
+            disabled:
+              actionLocked(props) || props.recoverySendWithoutDisabled,
+          },
         )}
         {actionButton(t('context.sheet.cancel'), handleCancelRecovery, {
           disabled: actionLocked(props),
