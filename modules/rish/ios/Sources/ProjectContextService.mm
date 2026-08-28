@@ -38,6 +38,9 @@ static NSError *DSHServiceError(DSHProjectContextServiceErrorCode code) {
     case DSHProjectContextServiceErrorIntegrity:
       message = @"Project context integrity validation failed.";
       break;
+    case DSHProjectContextServiceErrorSnapshotMissing:
+      message = @"Project context snapshot is missing.";
+      break;
     case DSHProjectContextServiceErrorInvalidArgument:
       break;
   }
@@ -49,6 +52,19 @@ static NSError *DSHServiceError(DSHProjectContextServiceErrorCode code) {
 static void DSHSetServiceError(NSError **error,
                                DSHProjectContextServiceErrorCode code) {
   if (error != nil) *error = DSHServiceError(code);
+}
+
+static DSHProjectContextServiceErrorCode DSHServiceSnapshotStoreError(
+    NSError *storeError) {
+  if ([storeError.domain isEqual:DSHProjectContextStoreErrorDomain]) {
+    if (storeError.code == DSHProjectContextStoreErrorNotFound) {
+      return DSHProjectContextServiceErrorSnapshotMissing;
+    }
+    if (storeError.code == DSHProjectContextStoreErrorIntegrity) {
+      return DSHProjectContextServiceErrorIntegrity;
+    }
+  }
+  return DSHProjectContextServiceErrorStorage;
 }
 
 static NSString *DSHServiceSHA256(NSData *data) {
@@ -1423,11 +1439,14 @@ static int DSHAppendSerializedPatchLine(__unused const git_diff_delta *delta,
                            limit:DSHProjectContextMaxCandidatePageSize
                            error:&policyError];
   if (page == nil) {
-    DSHSetServiceError(error,
-                       policyError.code ==
-                               DSHProjectContextPolicyErrorBudgetExceeded
-                           ? DSHProjectContextServiceErrorBudgetExceeded
-                           : DSHProjectContextServiceErrorChanged);
+    DSHProjectContextServiceErrorCode serviceCode =
+        DSHProjectContextServiceErrorInvalidArgument;
+    if (policyError.code == DSHProjectContextPolicyErrorBudgetExceeded) {
+      serviceCode = DSHProjectContextServiceErrorBudgetExceeded;
+    } else if (policyError.code == DSHProjectContextPolicyErrorStaleCursor) {
+      serviceCode = DSHProjectContextServiceErrorChanged;
+    }
+    DSHSetServiceError(error, serviceCode);
     return nil;
   }
   return @{
@@ -1769,9 +1788,11 @@ static int DSHAppendSerializedPatchLine(__unused const git_diff_delta *delta,
 
 - (NSDictionary *)inspectSnapshotId:(NSString *)snapshotId
                                error:(NSError **)error {
-  NSDictionary *snapshot = [self.store loadSnapshotId:snapshotId error:nil];
+  NSError *storeError = nil;
+  NSDictionary *snapshot = [self.store loadSnapshotId:snapshotId
+                                                 error:&storeError];
   if (snapshot == nil) {
-    DSHSetServiceError(error, DSHProjectContextServiceErrorStorage);
+    DSHSetServiceError(error, DSHServiceSnapshotStoreError(storeError));
     return nil;
   }
   NSError *verificationError = nil;
@@ -1813,8 +1834,14 @@ static int DSHAppendSerializedPatchLine(__unused const git_diff_delta *delta,
 }
 
 - (BOOL)discardSnapshotId:(NSString *)snapshotId error:(NSError **)error {
-  if (![self.store discardSnapshotId:snapshotId error:nil]) {
-    DSHSetServiceError(error, DSHProjectContextServiceErrorStorage);
+  NSError *storeError = nil;
+  if ([self.store loadSnapshotId:snapshotId error:&storeError] == nil) {
+    DSHSetServiceError(error, DSHServiceSnapshotStoreError(storeError));
+    return NO;
+  }
+  storeError = nil;
+  if (![self.store discardSnapshotId:snapshotId error:&storeError]) {
+    DSHSetServiceError(error, DSHServiceSnapshotStoreError(storeError));
     return NO;
   }
   return YES;
@@ -1943,3 +1970,22 @@ static int DSHAppendSerializedPatchLine(__unused const git_diff_delta *delta,
 }
 
 @end
+
+DSHProjectContextService *DSHSharedProjectContextService(void) {
+  static DSHProjectContextService *shared = nil;
+  static dispatch_once_t onceToken;
+  dispatch_once(&onceToken, ^{
+    shared = [[DSHProjectContextService alloc]
+        initWithProjectAccess:DSHLocalProjectAccess.sharedAccess
+                       store:[[DSHProjectContextStore alloc] init]
+                      policy:[[DSHProjectContextPolicy alloc] init]
+                       clock:^NSDate * {
+                         return NSDate.date;
+                       }
+         identifierGenerator:^NSString * {
+           return NSUUID.UUID.UUIDString.lowercaseString;
+         }
+                        hook:nil];
+  });
+  return shared;
+}

@@ -19,6 +19,7 @@ typedef NS_ERROR_ENUM(DSHProjectContextServiceErrorDomain,
   DSHProjectContextServiceErrorTimeout = 7,
   DSHProjectContextServiceErrorConsent = 8,
   DSHProjectContextServiceErrorIntegrity = 9,
+  DSHProjectContextServiceErrorSnapshotMissing = 10,
 };
 
 typedef void (^DSHProjectContextServiceHook)(NSString *stage,
@@ -55,5 +56,9 @@ typedef void (^DSHProjectContextServiceHook)(NSString *stage,
                                               error:(NSError **)error;
 
 @end
+
+/// One process-wide composition root. All production bridge instances share
+/// its project access, protected store, policy cursor key, clock, and ids.
+FOUNDATION_EXPORT DSHProjectContextService *DSHSharedProjectContextService(void);
 
 NS_ASSUME_NONNULL_END

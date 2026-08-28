@@ -36,6 +36,15 @@ export const PROJECT_CONTEXT_ERROR_CODES = [
   'E_CONTEXT_SNAPSHOT_MISSING',
 ] as const;
 
+export const PROJECT_CONTEXT_BRIDGE_ERROR_CODES = [
+  'E_CONTEXT_REQUEST_INVALID',
+  'E_CONTEXT_RESULT_INVALID',
+  'E_CONTEXT_STORAGE',
+  'E_CONTEXT_INTEGRITY',
+  'E_CONTEXT_BUSY',
+  'E_CONTEXT_NATIVE',
+] as const;
+
 export const PROJECT_CONTEXT_OMISSION_REASONS = [
   'secret_path',
   'generated',
@@ -54,6 +63,9 @@ export type ProjectContextStaleReason =
   (typeof PROJECT_CONTEXT_STALE_REASONS)[number];
 export type ProjectContextErrorCode =
   (typeof PROJECT_CONTEXT_ERROR_CODES)[number];
+export type ProjectContextBridgeErrorCode =
+  | ProjectContextErrorCode
+  | (typeof PROJECT_CONTEXT_BRIDGE_ERROR_CODES)[number];
 export type ProjectContextOmissionReason =
   (typeof PROJECT_CONTEXT_OMISSION_REASONS)[number];
 
@@ -126,6 +138,27 @@ export type ProjectContextCandidatePageV1 = {
     readonly omission_reason: ProjectContextOmissionReason | null;
   }[];
   readonly next_cursor: string | null;
+};
+
+export type ProjectContextSelectionV1 = {
+  readonly schema_version: typeof PROJECT_CONTEXT_SCHEMA_VERSION;
+  readonly project_id: string;
+  readonly conversation_id: string;
+  readonly provider: 'deepseek';
+  readonly model: DeepSeekModelId;
+  readonly policy: 'chat-read-v1';
+  readonly selected_paths: readonly string[];
+};
+
+export type ProjectContextInspectionV1 = {
+  readonly schema_version: typeof PROJECT_CONTEXT_SCHEMA_VERSION;
+  readonly state: 'prepared' | 'confirmed' | 'stale';
+  readonly manifest: ProjectContextManifestV1;
+};
+
+export type ProjectContextDiscardResultV1 = {
+  readonly schema_version: typeof PROJECT_CONTEXT_SCHEMA_VERSION;
+  readonly status: 'discarded';
 };
 
 export type ProjectContextState = {
