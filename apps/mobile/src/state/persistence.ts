@@ -2123,7 +2123,8 @@ export function hydrateChatState(input: unknown): ChatState {
     hydratedConversations[conversation.id] = {
       ...conversation,
       attempts: conversation.attempts.map(attempt =>
-        attempt.status === 'sending'
+        attempt.status === 'sending' ||
+        (attempt.status === 'prepared' && attempt.rounds.length > 0)
           ? {
               ...attempt,
               status: 'failed' as const,

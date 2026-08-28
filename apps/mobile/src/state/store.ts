@@ -63,6 +63,13 @@ export type PreparedTurnAttempt = {
   readonly userMessageId: string;
 };
 
+export type PreparedTurnTransaction = PreparedTurnAttempt & {
+  /** Disarms rollback after the prepared state is durably accepted. */
+  commit(): boolean;
+  /** Restores the exact prior root only while no later state won the race. */
+  rollback(): boolean;
+};
+
 export type ChatStore = {
   getState(): ChatState;
   dispatch(action: ChatAction): ChatState;
@@ -97,7 +104,7 @@ export type ChatStore = {
     conversationId: string,
     text: string,
     options?: PrepareTurnAttemptOptions,
-  ): PreparedTurnAttempt | null;
+  ): PreparedTurnTransaction | null;
   startAttemptRound(
     conversationId: string,
     attemptId: string,
@@ -124,7 +131,7 @@ export type ChatStore = {
   retryAttempt(
     conversationId: string,
     sourceAttemptId: string,
-  ): PreparedTurnAttempt | null;
+  ): PreparedTurnTransaction | null;
   serialize(): string;
   hydrate(input: unknown): ChatState;
 };
@@ -227,13 +234,59 @@ export function createChatStore(options: ChatStoreOptions = {}): ChatStore {
   let state = options.initialState ?? createEmptyChatState();
   const listeners = new Set<ChatStoreListener>();
 
-  const dispatch = (action: ChatAction): ChatState => {
-    const next = chatReducer(state, action);
-    if (next !== state) {
+  const notifyListeners = () => {
+    listeners.forEach(listener => {
+      try {
+        listener(state);
+      } catch {
+        // A UI subscriber must never strand an already-applied state mutation.
+      }
+    });
+  };
+
+  type AppliedAction = {
+    readonly before: ChatState;
+    readonly next: ChatState;
+    readonly changed: boolean;
+  };
+
+  const applyAction = (action: ChatAction): AppliedAction => {
+    const before = state;
+    const next = chatReducer(before, action);
+    if (next !== before) {
       state = next;
-      listeners.forEach(listener => listener(state));
+      notifyListeners();
     }
+    return { before, next, changed: next !== before };
+  };
+
+  const dispatch = (action: ChatAction): ChatState => {
+    applyAction(action);
     return state;
+  };
+
+  const preparedTransaction = (
+    applied: AppliedAction,
+    prepared: PreparedTurnAttempt,
+  ): PreparedTurnTransaction | null => {
+    if (!applied.changed) return null;
+    let settled = false;
+    return {
+      ...prepared,
+      commit: () => {
+        if (settled) return false;
+        settled = true;
+        return true;
+      },
+      rollback: () => {
+        if (settled) return false;
+        settled = true;
+        if (state !== applied.next) return false;
+        state = applied.before;
+        notifyListeners();
+        return true;
+      },
+    };
   };
 
   const appendMessage = (
@@ -425,8 +478,7 @@ export function createChatStore(options: ChatStoreOptions = {}): ChatStore {
         createdAt: at,
         updatedAt: at,
       };
-      const before = state;
-      dispatch({
+      const applied = applyAction({
         type: 'turn/prepare',
         payload: {
           conversationId,
@@ -441,7 +493,11 @@ export function createChatStore(options: ChatStoreOptions = {}): ChatStore {
           attempt,
         },
       });
-      return state === before ? null : { turnId, attemptId, userMessageId };
+      return preparedTransaction(applied, {
+        turnId,
+        attemptId,
+        userMessageId,
+      });
     },
     startAttemptRound: (
       conversationId,
@@ -549,25 +605,22 @@ export function createChatStore(options: ChatStoreOptions = {}): ChatStore {
         createdAt: at,
         updatedAt: at,
       };
-      const before = state;
-      dispatch({
+      const applied = applyAction({
         type: 'attempt/retry',
         payload: { conversationId, sourceAttemptId, attempt },
       });
-      return state === before
-        ? null
-        : {
-            turnId: turn.turnId,
-            attemptId,
-            userMessageId: turn.userMessageId,
-          };
+      return preparedTransaction(applied, {
+        turnId: turn.turnId,
+        attemptId,
+        userMessageId: turn.userMessageId,
+      });
     },
     serialize: () => serializeChatState(state),
     hydrate: input => {
       const next = hydrateChatState(input);
       if (next !== state) {
         state = next;
-        listeners.forEach(listener => listener(state));
+        notifyListeners();
       }
       return state;
     },

@@ -278,6 +278,27 @@ function hasSameStrings(
   );
 }
 
+function visibleAttachmentSummary(messages: readonly ChatMessage[]): {
+  readonly ids: readonly string[];
+  readonly occurrences: number;
+  readonly bytes: number;
+} {
+  const ids: string[] = [];
+  const seen = new Set<string>();
+  let occurrences = 0;
+  let bytes = 0;
+  messages.forEach(message => {
+    message.attachments.forEach(attachment => {
+      occurrences += 1;
+      bytes += attachment.size;
+      if (seen.has(attachment.id)) return;
+      seen.add(attachment.id);
+      ids.push(attachment.id);
+    });
+  });
+  return { ids, occurrences, bytes };
+}
+
 function hasLiveAttempt(conversation: Conversation): boolean {
   return conversation.attempts.some(
     attempt => attempt.status === 'prepared' || attempt.status === 'sending',
@@ -337,6 +358,26 @@ function attemptBindingIsValid(
     Number.isSafeInteger(binding.contextBytes) &&
     binding.contextBytes > 0 &&
     binding.contextBytes <= MAX_PROJECT_CONTEXT_RECEIPT_BYTES
+  );
+}
+
+function preparedAttemptIsApplicable(
+  conversation: Conversation,
+  attempt: TurnAttemptV1,
+): boolean {
+  const visible = conversation.messages.slice(-MAX_ATTEMPT_VISIBLE_MESSAGES);
+  const attachments = visibleAttachmentSummary(visible);
+  return (
+    attempt.modelId === conversation.modelId &&
+    attempt.thinkingMode === conversation.thinkingMode &&
+    hasSameStrings(
+      attempt.visibleMessageIds,
+      visible.map(message => message.id),
+    ) &&
+    hasSameStrings(attempt.attachmentIds, attachments.ids) &&
+    attachments.occurrences <= MAX_ATTEMPT_ATTACHMENT_IDS &&
+    attachments.bytes <= MAX_TOTAL_ATTACHMENT_SIZE &&
+    attemptBindingIsValid(conversation, attempt)
   );
 }
 
@@ -1150,6 +1191,7 @@ export function chatReducer(state: ChatState, action: ChatAction): ChatState {
       if (
         attempt === undefined ||
         attempt.status !== 'prepared' ||
+        !preparedAttemptIsApplicable(conversation, attempt) ||
         attempt.activeRound !== null ||
         attempt.rounds.length >= MAX_COMPLETION_ROUNDS ||
         (attempt.rounds.length > 0 &&

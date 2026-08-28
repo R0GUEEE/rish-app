@@ -2394,4 +2394,212 @@ describe('schema v6 attempts and project context', () => {
       ChatStateValidationError,
     );
   });
+
+  test('returns a one-shot exact rollback transaction for a prepared turn', () => {
+    const store = v6Store();
+    const conversationId = store.createConversation();
+    store.appendUserMessage(conversationId, 'preview', {
+      attachments: [IMAGE_ATTACHMENT],
+    });
+    const before = store.getState();
+    const notifications: ChatState[] = [];
+    store.subscribe(state => notifications.push(state));
+
+    const transaction = store.prepareTurnAttempt(conversationId, 'draft')!;
+    const preparedState = store.getState();
+    expect(typeof transaction.commit).toBe('function');
+    expect(typeof transaction.rollback).toBe('function');
+    expect(transaction.rollback()).toBe(true);
+    expect(store.getState()).toBe(before);
+    expect(
+      store.getState().conversations[conversationId]?.messages[0]
+        ?.attachments[0]?.thumbnail_data_url,
+    ).toBe(IMAGE_ATTACHMENT.thumbnail_data_url);
+    expect(transaction.rollback()).toBe(false);
+    expect(transaction.commit()).toBe(false);
+    expect(notifications).toEqual([preparedState, before]);
+  });
+
+  test('commit disarms rollback and retry transactions restore exact source', () => {
+    const committed = v6Store();
+    const committedId = committed.createConversation();
+    const first = committed.prepareTurnAttempt(committedId, 'commit')!;
+    expect(first.commit()).toBe(true);
+    expect(first.commit()).toBe(false);
+    expect(first.rollback()).toBe(false);
+
+    expect(
+      committed.failAttempt(
+        committedId,
+        first.attemptId,
+        'E_COMPLETION_TRANSPORT',
+      ),
+    ).toBe(true);
+    const failedState = committed.getState();
+    const retry = committed.retryAttempt(committedId, first.attemptId)!;
+    expect(retry.rollback()).toBe(true);
+    expect(committed.getState()).toBe(failedState);
+  });
+
+  test('rollback never overwrites a listener reentrant state transition', () => {
+    const store = v6Store();
+    const conversationId = store.createConversation();
+    let reentered = false;
+    store.subscribe(() => {
+      if (reentered) return;
+      reentered = true;
+      store.renameConversation(conversationId, 'listener update');
+    });
+    const transaction = store.prepareTurnAttempt(
+      conversationId,
+      'reentrant',
+    )!;
+    expect(transaction.rollback()).toBe(false);
+    expect(transaction.commit()).toBe(false);
+    expect(store.getState().conversations[conversationId]).toMatchObject({
+      title: 'listener update',
+      messages: [{ text: 'reentrant' }],
+    });
+  });
+
+  test('listener failures cannot strand a prepared state without a handle', () => {
+    const store = v6Store();
+    const conversationId = store.createConversation();
+    const before = store.getState();
+    const observed: ChatState[] = [];
+    store.subscribe(() => {
+      throw new Error('LISTENER_SECRET');
+    });
+    store.subscribe(state => observed.push(state));
+
+    let transaction:
+      | ReturnType<typeof store.prepareTurnAttempt>
+      | undefined;
+    expect(() => {
+      transaction = store.prepareTurnAttempt(conversationId, 'safe');
+    }).not.toThrow();
+    expect(transaction).toBeDefined();
+    const prepared = store.getState();
+    expect(observed).toEqual([prepared]);
+    expect(() => transaction!.rollback()).not.toThrow();
+    expect(store.getState()).toBe(before);
+    expect(observed).toEqual([prepared, before]);
+  });
+
+  test('commit always disarms once and failed rollback is consumed', () => {
+    const committed = v6Store();
+    const committedId = committed.createConversation();
+    const transaction = committed.prepareTurnAttempt(
+      committedId,
+      'commit after mutation',
+    )!;
+    committed.renameConversation(committedId, 'newer state');
+    expect(transaction.commit()).toBe(true);
+    expect(transaction.rollback()).toBe(false);
+    expect(transaction.commit()).toBe(false);
+
+    const conflicted = v6Store();
+    const conflictedId = conflicted.createConversation();
+    const failedRollback = conflicted.prepareTurnAttempt(
+      conflictedId,
+      'rollback conflict',
+    )!;
+    conflicted.renameConversation(conflictedId, 'wins');
+    expect(failedRollback.rollback()).toBe(false);
+    expect(failedRollback.commit()).toBe(false);
+    expect(failedRollback.rollback()).toBe(false);
+  });
+
+  test('interrupts persisted prepared receipts but preserves zero-round resume', () => {
+    const resumable = v6Store();
+    const resumableId = resumable.createConversation();
+    const zeroRound = resumable.prepareTurnAttempt(resumableId, 'resume')!;
+    const hydratedZero = hydrateChatState(resumable.serialize());
+    expect(
+      hydratedZero.conversations[resumableId]?.attempts.find(
+        attempt => attempt.attemptId === zeroRound.attemptId,
+      ),
+    ).toMatchObject({ status: 'prepared', rounds: [] });
+
+    const interrupted = v6Store();
+    const interruptedId = interrupted.createConversation();
+    const prepared = interrupted.prepareTurnAttempt(
+      interruptedId,
+      'intermediate',
+    )!;
+    interrupted.startAttemptRound(
+      interruptedId,
+      prepared.attemptId,
+      ROUND_ID,
+      0,
+    );
+    interrupted.recordAttemptRound(interruptedId, prepared.attemptId, {
+      ...schema2Receipt(prepared),
+      finishReason: 'tool_calls',
+    });
+    const hydratedRound = hydrateChatState(interrupted.serialize());
+    expect(
+      hydratedRound.conversations[interruptedId]?.attempts.find(
+        attempt => attempt.attemptId === prepared.attemptId,
+      ),
+    ).toMatchObject({
+      status: 'failed',
+      activeRound: null,
+      failureCode: 'E_ATTEMPT_INTERRUPTED',
+    });
+  });
+
+  test('start revalidates frozen model, visible history, and verified context', () => {
+    const modelStore = v6Store();
+    const modelConversation = modelStore.createConversation();
+    const modelAttempt = modelStore.prepareTurnAttempt(
+      modelConversation,
+      'model',
+    )!;
+    modelStore.setModel(modelConversation, 'deepseek-v4-pro');
+    const modelBefore = modelStore.getState();
+    expect(
+      modelStore.startAttemptRound(
+        modelConversation,
+        modelAttempt.attemptId,
+        ROUND_ID,
+        0,
+      ),
+    ).toBe(false);
+    expect(modelStore.getState()).toBe(modelBefore);
+
+    const historyStore = v6Store();
+    const historyConversation = historyStore.createConversation();
+    const historyAttempt = historyStore.prepareTurnAttempt(
+      historyConversation,
+      'history',
+    )!;
+    historyStore.appendAssistantMessage(historyConversation, 'later');
+    expect(
+      historyStore.startAttemptRound(
+        historyConversation,
+        historyAttempt.attemptId,
+        ROUND_ID,
+        0,
+      ),
+    ).toBe(false);
+
+    const verified = readyProjectStore();
+    const verifiedAttempt = verified.store.prepareTurnAttempt(
+      verified.conversationId,
+      'context',
+    )!;
+    verified.store.applyProjectContextAction(verified.conversationId, {
+      type: 'selection_changed',
+      selectedPaths: ['README.md'],
+    });
+    expect(
+      verified.store.startAttemptRound(
+        verified.conversationId,
+        verifiedAttempt.attemptId,
+        ROUND_ID,
+        0,
+      ),
+    ).toBe(false);
+  });
 });
