@@ -44,6 +44,14 @@ typedef void (^DSHPCReject)(NSString *code, NSString *message, NSError *error);
   }
   return nil;
 }
+- (BOOL)discardSnapshotId:(NSString *)snapshotId error:(NSError **)error {
+  (void)snapshotId;
+  if (error != nil) {
+    *error = [NSError errorWithDomain:DSHProjectContextStoreErrorDomain
+                                 code:self.injectedCode userInfo:@{}];
+  }
+  return NO;
+}
 @end
 
 @interface DSHFakeProjectContextService : DSHProjectContextService

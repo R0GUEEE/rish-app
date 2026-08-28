@@ -261,6 +261,7 @@ static NSString *DSHSHA256Hex(NSData *data) {
 - (BOOL)writeReferences:(NSDictionary *)references
                  applied:(BOOL *)applied
                    error:(NSError **)error;
+- (nullable NSDictionary *)accesses:(NSError **)error;
 - (BOOL)publishImmutableData:(NSData *)data
                         toURL:(NSURL *)url
                         error:(NSError **)error;
@@ -369,7 +370,10 @@ static NSString *DSHSHA256Hex(NSData *data) {
     if (error != nil) {
       *error = [NSError errorWithDomain:DSHProjectContextStoreErrorDomain
                                    code:DSHProjectContextStoreErrorUnavailable
-                               userInfo:@{}];
+                               userInfo:@{
+                                 NSLocalizedDescriptionKey :
+                                     @"RAW_DISCARD_IO_SENTINEL"
+                               }];
     }
     return NO;
   }
@@ -3217,6 +3221,218 @@ static NSString *DSHSHA256Hex(NSData *data) {
   XCTAssertNotNil([self.store loadSnapshotId:oldManifest[@"snapshot_id"]
                                         error:&error]);
   XCTAssertNil([self.store loadSnapshotId:newManifest[@"snapshot_id"] error:nil]);
+}
+
+- (void)testDiscardSnapshotIsIdempotent {
+  DSHProjectFixture *fixture = [self createProject:DSHFixtureProjectA
+                                             name:@"Alpha"
+                                      initialFile:@"README.md"
+                                          content:@"idempotent discard\n"
+                                           commit:YES];
+  NSError *error = nil;
+  NSDictionary *manifest = [self.service
+      prepareSelection:[self selectionForFixture:fixture paths:@[@"README.md"]]
+                   error:&error];
+  XCTAssertNotNil(manifest);
+  XCTAssertNotNil([self.service confirmSnapshotId:manifest[@"snapshot_id"]
+                                          error:&error]);
+  XCTAssertNil(error);
+
+  XCTAssertTrue([self.service discardSnapshotId:manifest[@"snapshot_id"]
+                                         error:&error]);
+  XCTAssertNil(error);
+  error = nil;
+  XCTAssertTrue([self.service discardSnapshotId:manifest[@"snapshot_id"]
+                                         error:&error]);
+  XCTAssertNil(error);
+}
+
+- (void)testDiscardRejectsInvalidIdentifierAndStableStorageFailure {
+  NSError *error = nil;
+  XCTAssertFalse([self.service discardSnapshotId:@"not-a-canonical-uuid"
+                                           error:&error]);
+  XCTAssertEqualObjects(error.domain, DSHProjectContextServiceErrorDomain);
+  XCTAssertEqual(error.code, DSHProjectContextServiceErrorStorage);
+
+  DSHProjectFixture *fixture = [self createProject:DSHFixtureProjectA
+                                             name:@"Alpha"
+                                      initialFile:@"README.md"
+                                          content:@"discard io failure\n"
+                                           commit:YES];
+  NSURL *faultRoot =
+      [self.temporaryURL URLByAppendingPathComponent:@"discard-io-fault"];
+  DSHFaultingProjectContextStore *faulting =
+      [[DSHFaultingProjectContextStore alloc]
+          initWithRootURL:faultRoot
+            capacityBytes:64 * 1024 * 1024
+                    clock:^NSDate *{ return self.now; }
+      identifierGenerator:^NSString *{
+        return NSUUID.UUID.UUIDString.lowercaseString;
+      }];
+  DSHProjectContextService *service = [[DSHProjectContextService alloc]
+      initWithProjectAccess:self.access
+                      store:faulting
+                     policy:[[DSHProjectContextPolicy alloc] init]
+                      clock:^NSDate *{ return self.now; }
+        identifierGenerator:^NSString *{
+          return NSUUID.UUID.UUIDString.lowercaseString;
+        }
+                       hook:nil];
+  error = nil;
+  NSDictionary *manifest = [service
+      prepareSelection:[self selectionForFixture:fixture paths:@[@"README.md"]]
+                   error:&error];
+  XCTAssertNotNil(manifest);
+  XCTAssertNil(error);
+
+  faulting.failTargetedDiscard = YES;
+  XCTAssertFalse([service discardSnapshotId:manifest[@"snapshot_id"]
+                                      error:&error]);
+  XCTAssertEqualObjects(error.domain, DSHProjectContextServiceErrorDomain);
+  XCTAssertEqual(error.code, DSHProjectContextServiceErrorStorage);
+  XCTAssertEqualObjects(error.localizedDescription,
+                        @"Project context storage is unavailable.");
+  XCTAssertEqual([error.localizedDescription rangeOfString:
+      @"RAW_DISCARD_IO_SENTINEL"].location, NSNotFound);
+  error = nil;
+  XCTAssertNotNil([faulting loadSnapshotId:manifest[@"snapshot_id"]
+                                        error:&error]);
+  XCTAssertNil(error);
+  faulting.failTargetedDiscard = NO;
+  error = nil;
+  XCTAssertTrue([service discardSnapshotId:manifest[@"snapshot_id"]
+                                     error:&error]);
+  XCTAssertNil(error);
+  XCTAssertNil([faulting loadSnapshotId:manifest[@"snapshot_id"] error:nil]);
+}
+
+- (void)testDiscardCleansPartialSnapshotResidualsOnRetry {
+  DSHProjectFixture *fixture = [self createProject:DSHFixtureProjectA
+                                             name:@"Alpha"
+                                      initialFile:@"README.md"
+                                          content:@"partial discard\n"
+                                           commit:YES];
+  NSError *error = nil;
+  NSDictionary *manifest = [self.service
+      prepareSelection:[self selectionForFixture:fixture paths:@[@"README.md"]]
+                   error:&error];
+  NSDictionary *consent =
+      [self.service confirmSnapshotId:manifest[@"snapshot_id"] error:&error];
+  XCTAssertNotNil(consent);
+
+  NSMutableDictionary *otherSelection =
+      [[self selectionForFixture:fixture paths:@[@"README.md"]] mutableCopy];
+  otherSelection[@"conversation_id"] = DSHFixtureConversationB;
+  NSDictionary *otherManifest =
+      [self.service prepareSelection:otherSelection error:&error];
+  NSDictionary *otherConsent =
+      [self.service confirmSnapshotId:otherManifest[@"snapshot_id"] error:&error];
+  XCTAssertNotNil(otherConsent);
+
+  XCTAssertNotNil([self.store loadSnapshotId:manifest[@"snapshot_id"]
+                                        error:&error]);
+  XCTAssertNotNil([self.store loadSnapshotId:otherManifest[@"snapshot_id"]
+                                        error:&error]);
+  NSArray<NSURL *> *files =
+      [self.store fileURLsForSnapshotId:manifest[@"snapshot_id"] error:&error];
+  NSArray<NSURL *> *otherFiles =
+      [self.store fileURLsForSnapshotId:otherManifest[@"snapshot_id"]
+                                  error:&error];
+  XCTAssertGreaterThanOrEqual(files.count, (NSUInteger)3);
+  XCTAssertGreaterThanOrEqual(otherFiles.count, (NSUInteger)3);
+  XCTAssertNotNil([self.store accesses:&error][manifest[@"snapshot_id"]]);
+  XCTAssertNotNil(
+      [self.store accesses:&error][otherManifest[@"snapshot_id"]]);
+  NSString *active =
+      [@"active:" stringByAppendingString:DSHFixtureConversation];
+  NSString *otherActive =
+      [@"active:" stringByAppendingString:DSHFixtureConversationB];
+  XCTAssertEqualObjects([self.store snapshotIdForReferenceKey:active
+                                                        error:&error],
+                        manifest[@"snapshot_id"]);
+  XCTAssertEqualObjects([self.store snapshotIdForReferenceKey:otherActive
+                                                        error:&error],
+                        otherManifest[@"snapshot_id"]);
+
+  NSURL *envelopeURL = [files filteredArrayUsingPredicate:
+      [NSPredicate predicateWithBlock:^BOOL(NSURL *url,
+                                            __unused NSDictionary *bindings) {
+        return [url.pathExtension isEqual:@"envelope"];
+      }]].firstObject;
+  NSURL *recordURL = [files filteredArrayUsingPredicate:
+      [NSPredicate predicateWithBlock:^BOOL(NSURL *url,
+                                            __unused NSDictionary *bindings) {
+        return [url.pathExtension isEqual:@"json"] &&
+            [url.URLByDeletingLastPathComponent.lastPathComponent
+                isEqual:@"snapshots"];
+      }]].firstObject;
+  NSURL *consentURL = [files filteredArrayUsingPredicate:
+      [NSPredicate predicateWithBlock:^BOOL(NSURL *url,
+                                            __unused NSDictionary *bindings) {
+        return [url.URLByDeletingLastPathComponent.lastPathComponent
+            isEqual:@"consents"];
+      }]].firstObject;
+  XCTAssertNotNil(envelopeURL);
+  XCTAssertNotNil(recordURL);
+  XCTAssertNotNil(consentURL);
+  XCTAssertTrue([[NSFileManager defaultManager]
+      removeItemAtURL:envelopeURL error:&error]);
+  XCTAssertNil(error);
+  XCTAssertTrue([[NSFileManager defaultManager]
+      createDirectoryAtURL:envelopeURL withIntermediateDirectories:NO
+      attributes:@{NSFilePosixPermissions : @0700} error:&error]);
+  XCTAssertNil(error);
+  error = nil;
+  XCTAssertFalse([self.service discardSnapshotId:manifest[@"snapshot_id"]
+                                          error:&error]);
+  XCTAssertEqualObjects(error.domain, DSHProjectContextServiceErrorDomain);
+  XCTAssertEqual(error.code, DSHProjectContextServiceErrorStorage);
+  XCTAssertTrue([[NSFileManager defaultManager]
+      fileExistsAtPath:envelopeURL.path]);
+  XCTAssertFalse([[NSFileManager defaultManager]
+      fileExistsAtPath:recordURL.path]);
+  XCTAssertFalse([[NSFileManager defaultManager]
+      fileExistsAtPath:consentURL.path]);
+  XCTAssertNil([self.store snapshotIdForReferenceKey:active error:nil]);
+  XCTAssertNil([self.store accesses:nil][manifest[@"snapshot_id"]]);
+
+  for (NSURL *url in otherFiles) {
+    XCTAssertTrue([[NSFileManager defaultManager] fileExistsAtPath:url.path]);
+  }
+  XCTAssertEqualObjects([self.store snapshotIdForReferenceKey:otherActive
+                                                        error:&error],
+                        otherManifest[@"snapshot_id"]);
+  XCTAssertNotNil(
+      [self.store accesses:&error][otherManifest[@"snapshot_id"]]);
+  XCTAssertNotNil([self.store loadConsentReceiptId:
+      otherConsent[@"consent_receipt_id"] error:&error]);
+
+  error = nil;
+  XCTAssertTrue([[NSFileManager defaultManager]
+      removeItemAtURL:envelopeURL error:&error]);
+  XCTAssertNil(error);
+  error = nil;
+  XCTAssertTrue([self.service discardSnapshotId:manifest[@"snapshot_id"]
+                                         error:&error]);
+  XCTAssertNil(error);
+
+  for (NSURL *url in files) {
+    XCTAssertFalse([[NSFileManager defaultManager] fileExistsAtPath:url.path]);
+  }
+  XCTAssertNil([self.store snapshotIdForReferenceKey:active error:&error]);
+  XCTAssertNil([self.store accesses:&error][manifest[@"snapshot_id"]]);
+  XCTAssertNil([self.store loadConsentReceiptId:
+      consent[@"consent_receipt_id"] error:&error]);
+  for (NSURL *url in otherFiles) {
+    XCTAssertTrue([[NSFileManager defaultManager] fileExistsAtPath:url.path]);
+  }
+  XCTAssertEqualObjects([self.store snapshotIdForReferenceKey:otherActive
+                                                        error:&error],
+                        otherManifest[@"snapshot_id"]);
+  XCTAssertNotNil(
+      [self.store accesses:&error][otherManifest[@"snapshot_id"]]);
+  XCTAssertNotNil([self.store loadConsentReceiptId:
+      otherConsent[@"consent_receipt_id"] error:&error]);
 }
 
 - (void)testCommitReferenceFailureDoesNotExposeConsentOrConfirmedState {

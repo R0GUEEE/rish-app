@@ -1835,11 +1835,6 @@ static int DSHAppendSerializedPatchLine(__unused const git_diff_delta *delta,
 
 - (BOOL)discardSnapshotId:(NSString *)snapshotId error:(NSError **)error {
   NSError *storeError = nil;
-  if ([self.store loadSnapshotId:snapshotId error:&storeError] == nil) {
-    DSHSetServiceError(error, DSHServiceSnapshotStoreError(storeError));
-    return NO;
-  }
-  storeError = nil;
   if (![self.store discardSnapshotId:snapshotId error:&storeError]) {
     DSHSetServiceError(error, DSHServiceSnapshotStoreError(storeError));
     return NO;
