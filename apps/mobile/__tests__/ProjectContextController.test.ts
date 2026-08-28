@@ -190,6 +190,7 @@ type StoreHarness = {
     conversationId: string,
     context: ProjectContextState,
   ) => void;
+  readonly installDestructiveJournal: () => void;
 };
 
 function storeHarness(options: {
@@ -431,6 +432,33 @@ function storeHarness(options: {
         throw new Error('missing conversation fixture');
       }
     },
+    installDestructiveJournal: () => {
+      const source = state.conversations[CONVERSATION_ID]!;
+      const snapshot = source.projectContext!.snapshot!;
+      state = {
+        ...state,
+        projectContextDestructiveEpoch: 1,
+        projectContextDestructiveTransition: {
+          schemaVersion: 1,
+          lifecycleId: SNAPSHOT_D,
+          epoch: 1,
+          action: 'unbind',
+          phase: 'intent',
+          conversationId: CONVERSATION_ID,
+          sourceProjectId: PROJECT_ID,
+          sourceRuntimeContextId: source.runtimeContextId,
+          sourceModelId: source.modelId,
+          snapshotId: snapshot.snapshot_id,
+          snapshotSha256: snapshot.snapshot_sha256,
+          consentReceiptId:
+            source.projectContext?.consent?.consent_receipt_id ?? null,
+          targetProjectId: null,
+          createdAt: NOW,
+          updatedAt: NOW,
+        },
+      };
+      listeners.forEach(listener => listener(state));
+    },
   };
 }
 
@@ -559,6 +587,99 @@ async function selectKnownPath(
 }
 
 describe('ProjectContextController V1', () => {
+  test('reverse-gates every presentation mutation while a destructive journal exists', async () => {
+    const cancelled = jest.fn();
+    const harness = controllerHarness({
+      ready: true,
+      scheduleSearch: (_delay, operation) => {
+        operation();
+        return { cancel: cancelled };
+      },
+    });
+    await attach(harness);
+    harness.store.installDestructiveJournal();
+    const beforeState = harness.controller.getState();
+    const beforeToken = harness.controller.getActionToken();
+    const hostileToken = new Proxy(
+      {},
+      {
+        get: () => {
+          throw new Error('RAW_TOKEN_SENTINEL');
+        },
+      },
+    ) as ReturnType<typeof actionToken>;
+    harness.native.listCandidates.mockClear();
+    harness.native.prepare.mockClear();
+    harness.native.confirm.mockClear();
+    harness.native.inspect.mockClear();
+    harness.native.discard.mockClear();
+    harness.persistCurrent.mockClear();
+    harness.ensureRuntimeContextId.mockClear();
+    harness.store.applyProjectContextAction.mockClear();
+    harness.store.replacePrepared.mockClear();
+    harness.store.replaceConfirmed.mockClear();
+    harness.store.disable.mockClear();
+
+    const expected = { status: 'blocked', code: 'E_CONTEXT_BUSY' };
+    await expect(
+      harness.controller.attachConversation(OTHER_CONVERSATION_ID),
+    ).resolves.toEqual(expected);
+    await expect(
+      harness.controller.reconcileHydrated(OTHER_CONVERSATION_ID),
+    ).resolves.toEqual(expected);
+    await expect(
+      harness.controller.search(hostileToken, 'query'),
+    ).resolves.toEqual(expected);
+    await expect(
+      harness.controller.loadMore(hostileToken),
+    ).resolves.toEqual(expected);
+    expect(
+      harness.controller.setSelectedPaths(hostileToken, ['README.md']),
+    ).toEqual(expected);
+    await expect(harness.controller.prepare(hostileToken)).resolves.toEqual(
+      expected,
+    );
+    await expect(harness.controller.confirm(hostileToken)).resolves.toEqual(
+      expected,
+    );
+    await expect(harness.controller.inspect(hostileToken)).resolves.toEqual(
+      expected,
+    );
+    await expect(harness.controller.disable(hostileToken)).resolves.toEqual(
+      expected,
+    );
+    await expect(
+      harness.controller.retryPersistence(hostileToken),
+    ).resolves.toEqual(expected);
+    await expect(
+      harness.controller.retryCleanup(hostileToken),
+    ).resolves.toEqual(expected);
+    await expect(harness.controller.cancel(hostileToken)).resolves.toEqual(
+      expected,
+    );
+    await expect(
+      harness.controller.beforeConversationChange(CONVERSATION_ID),
+    ).resolves.toBe(false);
+    await expect(
+      harness.controller.beforeConversationDelete(CONVERSATION_ID),
+    ).resolves.toBe(false);
+
+    expect(harness.controller.getState()).toEqual(beforeState);
+    expect(harness.controller.getActionToken()).toEqual(beforeToken);
+    expect(cancelled).not.toHaveBeenCalled();
+    expect(harness.native.listCandidates).not.toHaveBeenCalled();
+    expect(harness.native.prepare).not.toHaveBeenCalled();
+    expect(harness.native.confirm).not.toHaveBeenCalled();
+    expect(harness.native.inspect).not.toHaveBeenCalled();
+    expect(harness.native.discard).not.toHaveBeenCalled();
+    expect(harness.persistCurrent).not.toHaveBeenCalled();
+    expect(harness.ensureRuntimeContextId).not.toHaveBeenCalled();
+    expect(harness.store.applyProjectContextAction).not.toHaveBeenCalled();
+    expect(harness.store.replacePrepared).not.toHaveBeenCalled();
+    expect(harness.store.replaceConfirmed).not.toHaveBeenCalled();
+    expect(harness.store.disable).not.toHaveBeenCalled();
+  });
+
   test('publishes an exact render-time owner token and advances only list generation for search', async () => {
     const harness = controllerHarness({ ready: true });
     await attach(harness);

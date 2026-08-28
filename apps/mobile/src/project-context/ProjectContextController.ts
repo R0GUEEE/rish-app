@@ -681,6 +681,17 @@ export function createProjectContextController(
   const rejectBusy = (): ProjectContextControllerOutcome =>
     blocked('E_CONTEXT_BUSY');
 
+  const destructiveJournalActive = (): boolean => {
+    try {
+      return (
+        dependencies.chat.getState().projectContextDestructiveTransition !==
+        null
+      );
+    } catch {
+      return true;
+    }
+  };
+
   const setFailure = (
     code: ProjectContextControllerErrorCode,
   ): ProjectContextControllerOutcome => {
@@ -1174,6 +1185,7 @@ export function createProjectContextController(
   const attach = async (
     conversationId: string,
   ): Promise<ProjectContextControllerOutcome> => {
+    if (destructiveJournalActive()) return rejectBusy();
     if (notifyingListeners) return rejectBusy();
     if (activeOperation !== null && activeOperation.kind !== 'prepare') {
       return rejectBusy();
@@ -1393,6 +1405,7 @@ export function createProjectContextController(
   };
 
   const inspectInternal = async (): Promise<ProjectContextControllerOutcome> => {
+    if (destructiveJournalActive()) return rejectBusy();
     if (activeOperation !== null || persistenceOutbox !== null) {
       return rejectBusy();
     }
@@ -1463,6 +1476,7 @@ export function createProjectContextController(
   const prepare = async (
     expected: ProjectContextActionToken,
   ): Promise<ProjectContextControllerOutcome> => {
+    if (destructiveJournalActive()) return rejectBusy();
     if (!validExpected(expected, true)) return rejectStale();
     const owner = liveOwner();
     if (
@@ -1560,6 +1574,7 @@ export function createProjectContextController(
   const confirm = async (
     expected: ProjectContextActionToken,
   ): Promise<ProjectContextControllerOutcome> => {
+    if (destructiveJournalActive()) return rejectBusy();
     if (!validExpected(expected, true)) return rejectStale();
     const owner = liveOwner();
     const manifest = state.candidateManifest;
@@ -1633,6 +1648,7 @@ export function createProjectContextController(
   const disable = async (
     expected: ProjectContextActionToken,
   ): Promise<ProjectContextControllerOutcome> => {
+    if (destructiveJournalActive()) return rejectBusy();
     if (!validExpected(expected, true)) return rejectStale();
     const owner = liveOwner();
     if (
@@ -1675,6 +1691,7 @@ export function createProjectContextController(
   retryPersistence = async (
     expected: ProjectContextActionToken,
   ): Promise<ProjectContextControllerOutcome> => {
+    if (destructiveJournalActive()) return rejectBusy();
     if (!validExpected(expected, true)) return rejectStale();
     const outbox = persistenceOutbox;
     if (outbox === null) return rejectBusy();
@@ -1846,6 +1863,7 @@ export function createProjectContextController(
   retryCleanup = async (
     expected: ProjectContextActionToken,
   ): Promise<ProjectContextControllerOutcome> => {
+    if (destructiveJournalActive()) return rejectBusy();
     if (!validExpected(expected, true)) return rejectStale();
     if (
       state.cleanupSnapshotId === null ||
@@ -1871,6 +1889,7 @@ export function createProjectContextController(
   cancel = async (
     expected: ProjectContextActionToken,
   ): Promise<ProjectContextControllerOutcome> => {
+    if (destructiveJournalActive()) return rejectBusy();
     if (!validExpected(expected, true)) return rejectStale();
     if (activeOperation !== null || persistenceOutbox !== null) {
       return rejectBusy();
@@ -1940,6 +1959,7 @@ export function createProjectContextController(
     expected: ProjectContextActionToken,
     query: string,
   ): Promise<ProjectContextControllerOutcome> => {
+    if (destructiveJournalActive()) return rejectBusy();
     if (!validExpected(expected, false)) return rejectStale();
     const owner = liveOwner();
     if (owner === null) return rejectStale();
@@ -1993,6 +2013,7 @@ export function createProjectContextController(
   const loadMore = async (
     expected: ProjectContextActionToken,
   ): Promise<ProjectContextControllerOutcome> => {
+    if (destructiveJournalActive()) return rejectBusy();
     if (!validExpected(expected, true)) return rejectStale();
     const owner = liveOwner();
     const cursor = state.list.nextCursor;
@@ -2027,6 +2048,7 @@ export function createProjectContextController(
     expected: ProjectContextActionToken,
     paths: readonly string[],
   ): ProjectContextControllerOutcome => {
+    if (destructiveJournalActive()) return rejectBusy();
     if (!validExpected(expected, true)) return rejectStale();
     const owner = liveOwner();
     if (
@@ -2070,6 +2092,7 @@ export function createProjectContextController(
   };
 
   const navigationAllowed = (): boolean =>
+    !destructiveJournalActive() &&
     !notifyingListeners &&
     activeOperation === null &&
     persistenceOutbox === null &&
@@ -2099,6 +2122,7 @@ export function createProjectContextController(
     prepare,
     confirm,
     inspect: async expected => {
+      if (destructiveJournalActive()) return rejectBusy();
       if (!validExpected(expected, true)) return rejectStale();
       return inspectInternal();
     },

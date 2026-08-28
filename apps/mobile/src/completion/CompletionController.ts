@@ -321,6 +321,17 @@ export function createCompletionController(
     code: 'E_COMPLETION_BUSY',
   });
 
+  const destructiveJournalActive = (): boolean => {
+    try {
+      return (
+        dependencies.chat.getState().projectContextDestructiveTransition !==
+        null
+      );
+    } catch {
+      return true;
+    }
+  };
+
   const notifyPrepared = (
     events: CompletionControllerEvents,
     transaction: PreparedTurnTransaction,
@@ -819,6 +830,9 @@ export function createCompletionController(
       return () => listeners.delete(listener);
     },
     send: async (input, events = {}) => {
+      if (destructiveJournalActive()) {
+        return busyOutcome();
+      }
       if (
         active !== null ||
         pendingPreparation !== null ||
@@ -869,6 +883,9 @@ export function createCompletionController(
       );
     },
     retry: async (conversationId, attemptId, events = {}) => {
+      if (destructiveJournalActive()) {
+        return busyOutcome(conversationId, attemptId);
+      }
       if (
         active !== null ||
         pendingPreparation !== null ||
@@ -903,6 +920,9 @@ export function createCompletionController(
       );
     },
     resume: async (conversationId, attemptId, events = {}) => {
+      if (destructiveJournalActive()) {
+        return busyOutcome(conversationId, attemptId);
+      }
       if (
         active !== null ||
         pendingPreparation !== null ||
@@ -940,6 +960,7 @@ export function createCompletionController(
       );
     },
     retryPersistence: async () => {
+      if (destructiveJournalActive()) return busyOutcome();
       if (state.phase === 'cancelling' || state.phase === 'finalizing') {
         return busyOutcome();
       }
@@ -965,6 +986,7 @@ export function createCompletionController(
       }
     },
     retryCommit: async () => {
+      if (destructiveJournalActive()) return busyOutcome();
       if (state.phase === 'finalizing') return busyOutcome();
       const pending = pendingCommit;
       if (pending === null) return outcome('blocked', state);
@@ -990,6 +1012,7 @@ export function createCompletionController(
       }
     },
     cancel: async () => {
+      if (destructiveJournalActive()) return;
       if (
         pendingCommit !== null ||
         pendingTerminal !== null ||
@@ -1091,6 +1114,7 @@ export function createCompletionController(
       });
     },
     beforeConversationChange: async conversationId => {
+      if (destructiveJournalActive()) return false;
       if (
         state.phase === 'cancelling' &&
         state.conversationId === conversationId
@@ -1109,9 +1133,11 @@ export function createCompletionController(
       return lastCancellationCommitted;
     },
     beforeConversationDelete: async conversationId => {
+      if (destructiveJournalActive()) return false;
       return await controller.beforeConversationChange(conversationId);
     },
     reconcileHydrated: conversationId => {
+      if (destructiveJournalActive()) return state;
       if (
         active !== null ||
         pendingPreparation !== null ||

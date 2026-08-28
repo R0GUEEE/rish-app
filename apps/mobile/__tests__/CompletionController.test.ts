@@ -104,6 +104,7 @@ type Fixture = {
   >;
   readonly cancelRoundV2: jest.Mock;
   readonly cancelRoundV3: jest.Mock;
+  readonly createRoundId: jest.Mock<string, []>;
 };
 
 function fixture(options: {
@@ -114,6 +115,7 @@ function fixture(options: {
   completeRoundV3?: Fixture['completeRoundV3'];
   cancelRoundV2?: Fixture['cancelRoundV2'];
   cancelRoundV3?: Fixture['cancelRoundV3'];
+  createRoundId?: Fixture['createRoundId'];
 } = {}): Fixture {
   const store = options.store ?? storeWithIds();
   const durability = options.durability ?? [
@@ -134,6 +136,7 @@ function fixture(options: {
     options.cancelRoundV2 ?? jest.fn(async () => undefined);
   const cancelRoundV3 =
     options.cancelRoundV3 ?? jest.fn(async () => undefined);
+  const createRoundId = options.createRoundId ?? jest.fn(() => ROUND_ID);
   const controller = createCompletionController({
     chat: store,
     persistCurrent,
@@ -141,7 +144,7 @@ function fixture(options: {
     completeRoundV3,
     cancelRoundV2,
     cancelRoundV3,
-    createRoundId: () => ROUND_ID,
+    createRoundId,
   });
   return {
     store,
@@ -151,7 +154,29 @@ function fixture(options: {
     completeRoundV3,
     cancelRoundV2,
     cancelRoundV3,
+    createRoundId,
   };
+}
+
+function commitDestructiveJournal(store: ChatStore) {
+  const conversation = Object.values(store.getState().conversations).find(
+    candidate => candidate.projectContext?.snapshot !== null,
+  )!;
+  const transaction = store.beginProjectContextDestructiveTransition({
+    lifecycleId: 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa',
+    action: 'unbind',
+    targetProjectId: null,
+    owner: {
+      conversationId: conversation.id,
+      projectId: conversation.projectId!,
+      runtimeContextId: conversation.runtimeContextId,
+      modelId: conversation.modelId,
+      expectedUpdatedAt: conversation.updatedAt,
+      expectedContext: conversation.projectContext!,
+    },
+  });
+  expect(transaction).not.toBeNull();
+  expect(transaction!.commit()).toBe(true);
 }
 
 function readyProjectStore(): ChatStore {
@@ -232,6 +257,109 @@ function readyProjectStore(): ChatStore {
 }
 
 describe('transactional completion controller', () => {
+  test.each(['send', 'retry', 'resume'] as const)(
+    'reverse-gates %s while a destructive journal exists with zero side effects',
+    async operation => {
+      const store = readyProjectStore();
+      const conversationId = store.createConversation();
+      let attemptId: string | null = null;
+      if (operation !== 'send') {
+        const prepared = store.prepareTurnAttempt(conversationId, operation)!;
+        expect(prepared.commit()).toBe(true);
+        attemptId = prepared.attemptId;
+        if (operation === 'retry') {
+          expect(
+            store.failAttempt(
+              conversationId,
+              attemptId,
+              'E_COMPLETION_NATIVE',
+            ),
+          ).toBe(true);
+        }
+      }
+      commitDestructiveJournal(store);
+      const value = fixture({ store });
+      const beforeChat = store.getState();
+      const beforeController = value.controller.getState();
+      const events = {
+        onPreparedDurable: jest.fn(),
+        onCommitted: jest.fn(),
+      };
+
+      const outcome =
+        operation === 'send'
+          ? await value.controller.send(
+              { conversationId, text: 'blocked', attachments: [] },
+              events,
+            )
+          : operation === 'retry'
+            ? await value.controller.retry(conversationId, attemptId!, events)
+            : await value.controller.resume(conversationId, attemptId!, events);
+
+      expect(outcome).toMatchObject({
+        status: 'blocked',
+        code: 'E_COMPLETION_BUSY',
+      });
+      expect(store.getState()).toBe(beforeChat);
+      expect(value.controller.getState()).toBe(beforeController);
+      expect(value.persistCurrent).not.toHaveBeenCalled();
+      expect(value.completeRoundV2).not.toHaveBeenCalled();
+      expect(value.completeRoundV3).not.toHaveBeenCalled();
+      expect(value.cancelRoundV2).not.toHaveBeenCalled();
+      expect(value.cancelRoundV3).not.toHaveBeenCalled();
+      expect(value.createRoundId).not.toHaveBeenCalled();
+      expect(events.onPreparedDurable).not.toHaveBeenCalled();
+      expect(events.onCommitted).not.toHaveBeenCalled();
+    },
+  );
+
+  test('reverse-gates every remaining public completion action without reading hostile input', async () => {
+    const store = readyProjectStore();
+    commitDestructiveJournal(store);
+    const value = fixture({ store });
+    const before = value.controller.getState();
+    const hostileInput = new Proxy(
+      {},
+      {
+        get: () => {
+          throw new Error('RAW_INPUT_SENTINEL');
+        },
+      },
+    ) as Parameters<CompletionController['send']>[0];
+
+    await expect(value.controller.send(hostileInput)).resolves.toMatchObject({
+      status: 'blocked',
+      code: 'E_COMPLETION_BUSY',
+    });
+    await expect(value.controller.retryPersistence()).resolves.toMatchObject({
+      status: 'blocked',
+      code: 'E_COMPLETION_BUSY',
+    });
+    await expect(value.controller.retryCommit()).resolves.toMatchObject({
+      status: 'blocked',
+      code: 'E_COMPLETION_BUSY',
+    });
+    await expect(value.controller.cancel()).resolves.toBeUndefined();
+    await expect(
+      value.controller.beforeConversationChange('hostile-conversation'),
+    ).resolves.toBe(false);
+    await expect(
+      value.controller.beforeConversationDelete('hostile-conversation'),
+    ).resolves.toBe(false);
+    expect(
+      value.controller.reconcileHydrated('hostile-conversation'),
+    ).toBe(before);
+
+    expect(value.controller.getState()).toBe(before);
+    expect(store.getState().projectContextDestructiveTransition).not.toBeNull();
+    expect(value.persistCurrent).not.toHaveBeenCalled();
+    expect(value.completeRoundV2).not.toHaveBeenCalled();
+    expect(value.completeRoundV3).not.toHaveBeenCalled();
+    expect(value.cancelRoundV2).not.toHaveBeenCalled();
+    expect(value.cancelRoundV3).not.toHaveBeenCalled();
+    expect(value.createRoundId).not.toHaveBeenCalled();
+  });
+
   test('runs an unbound turn through exact schema2 durability boundaries', async () => {
     const value = fixture();
     const conversationId = value.store.createConversation();
