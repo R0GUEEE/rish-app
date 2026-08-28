@@ -1,5 +1,35 @@
 import { NativeModules } from 'react-native';
 
+import {
+  CompletionBridgeError,
+  encodeCompleteV2Request,
+  sanitizeCompletionError,
+  validateCompleteV2Result,
+  validateLegacyCompleteV2Result,
+} from '../completion/validation';
+import type {
+  CompleteRoundV2Request,
+  CompleteRoundV2Result,
+  CompleteV2Request,
+  CompleteV2Result,
+  CompletionMessage,
+  DeepSeekModelId,
+  DeepSeekThinkingMode,
+} from '../completion/types';
+
+export type {
+  CompleteRoundV2Request,
+  CompleteRoundV2Result,
+  CompleteV2Request,
+  CompleteV2Result,
+  CompletionAttachmentReference,
+  CompletionMessage,
+  CompletionToolDefinitionV2,
+  CompleteV2ToolCall,
+  DeepSeekModelId,
+  DeepSeekThinkingMode,
+} from '../completion/types';
+
 export type RuntimeProofChecks = {
   credential_in_keychain: boolean;
   model_response_received: boolean;
@@ -103,27 +133,6 @@ export type BootstrapResult = {
   rish: Record<string, unknown>;
 };
 
-export type DeepSeekModelId =
-  | 'deepseek-v4-flash'
-  | 'deepseek-v4-pro'
-  | 'deepseek-v4-flash-vision-exp';
-export type DeepSeekThinkingMode = 'off' | 'high' | 'max';
-
-export type CompletionAttachmentReference = {
-  schema_version: 1;
-  id: string;
-  kind: 'image' | 'text' | 'pdf';
-  name: string;
-  mime_type: string;
-  size: number;
-};
-
-export type CompletionMessage = {
-  role: 'user' | 'assistant';
-  content: string;
-  attachments?: CompletionAttachmentReference[];
-};
-
 export type CredentialStatus = {
   status: 'configured' | 'missing';
 };
@@ -150,26 +159,6 @@ export type CompletionResult = {
   reasoning: string;
   thinking_mode: DeepSeekThinkingMode;
 };
-export type CompletionToolDefinitionV2 = {
-  name: string;
-  description?: string;
-  parameters?: Record<string, unknown>;
-};
-
-export type CompleteV2Request = {
-  model: DeepSeekModelId;
-  requestId: string;
-  thinkingMode: DeepSeekThinkingMode;
-  history: readonly CompletionMessage[];
-  tools?: readonly CompletionToolDefinitionV2[];
-};
-
-export type CompleteV2ToolCall = {
-  id: string;
-  name: string;
-  arguments: string;
-};
-
 export type AgentTraceProofEntry = {
   name: string;
   arguments_sha256: string;
@@ -193,18 +182,6 @@ export type ModelTransitionProofEntry = {
   history_image_count: number;
 };
 
-export type CompleteV2Result = {
-  schema_version: 1;
-  text: string;
-  tool_calls: readonly CompleteV2ToolCall[];
-  finish_reason: string;
-  model: string;
-  request_id: string;
-  latency_ms: number;
-  reasoning: string;
-  thinking_mode: DeepSeekThinkingMode;
-};
-
 type NativeLocalRuntime = {
   bootstrap(): Promise<BootstrapResult>;
   credentialStatus(): Promise<CredentialStatus>;
@@ -221,7 +198,7 @@ type NativeLocalRuntime = {
   cancelCompletion(requestId: string): Promise<CancelCompletionResult>;
   persistSession(json: string): Promise<boolean>;
   loadSession(): Promise<string | null>;
-  completeV2?(envelopeJSON: string): Promise<Record<string, unknown>>;
+  completeV2?(envelopeJSON: string): Promise<unknown>;
   recordAgentTrace?(
     entries: readonly AgentTraceProofEntry[],
   ): Promise<{ recorded: number }>;
@@ -230,7 +207,7 @@ type NativeLocalRuntime = {
   ): Promise<{ recorded: number }>;
 };
 
-const native = NativeModules.LocalRuntime as unknown;
+const native: unknown = NativeModules.LocalRuntime;
 
 function hasNativeCapabilities(value: unknown): value is NativeLocalRuntime {
   if (typeof value !== 'object' || value === null) {
@@ -275,6 +252,75 @@ export function createCompletionRequestId(): string {
   )}-${hex.slice(16, 20)}-${hex.slice(20)}`;
 }
 
+function isCompleteRoundV2Request(
+  request: CompleteV2Request | CompleteRoundV2Request,
+): request is CompleteRoundV2Request {
+  return 'schemaVersion' in request;
+}
+
+function classifyCompleteV2Request(
+  request: CompleteV2Request | CompleteRoundV2Request,
+):
+  | { readonly kind: 'legacy'; readonly request: CompleteV2Request }
+  | { readonly kind: 'schema2'; readonly request: CompleteRoundV2Request } {
+  return isCompleteRoundV2Request(request)
+    ? { kind: 'schema2', request }
+    : { kind: 'legacy', request };
+}
+
+async function completeV2(
+  request: CompleteV2Request,
+): Promise<CompleteV2Result>;
+async function completeV2(
+  request: CompleteRoundV2Request,
+): Promise<CompleteRoundV2Result>;
+async function completeV2(
+  request: CompleteV2Request | CompleteRoundV2Request,
+): Promise<CompleteV2Result | CompleteRoundV2Result> {
+  let classified:
+    | { readonly kind: 'legacy'; readonly request: CompleteV2Request }
+    | { readonly kind: 'schema2'; readonly request: CompleteRoundV2Request };
+  try {
+    classified = classifyCompleteV2Request(request);
+  } catch {
+    throw new CompletionBridgeError('E_COMPLETION_NATIVE');
+  }
+  if (classified.kind === 'legacy') {
+    const legacyRequest = classified.request;
+    try {
+      const nativeModule = required();
+      if (typeof nativeModule.completeV2 !== 'function') {
+        throw new CompletionBridgeError('E_COMPLETION_NATIVE');
+      }
+      const envelope = JSON.stringify({
+        schema_version: 1,
+        model: legacyRequest.model,
+        request_id: legacyRequest.requestId,
+        thinking_mode: legacyRequest.thinkingMode,
+        history: legacyRequest.history,
+        tools: legacyRequest.tools ?? [],
+      });
+      const raw = await nativeModule.completeV2(envelope);
+      return validateLegacyCompleteV2Result(raw);
+    } catch (error) {
+      throw sanitizeCompletionError(error);
+    }
+  }
+
+  try {
+    const schema2Request = classified.request;
+    const envelope = encodeCompleteV2Request(schema2Request);
+    const nativeModule = required();
+    if (typeof nativeModule.completeV2 !== 'function') {
+      throw new CompletionBridgeError('E_COMPLETION_NATIVE');
+    }
+    const raw = await nativeModule.completeV2(envelope);
+    return validateCompleteV2Result(raw, schema2Request);
+  } catch (error) {
+    throw sanitizeCompletionError(error);
+  }
+}
+
 export const LocalRuntime = {
   isAvailable: () => hasNativeCapabilities(native),
   createCompletionRequestId,
@@ -297,26 +343,7 @@ export const LocalRuntime = {
       | undefined;
     return typeof module?.completeV2 === 'function';
   },
-  completeV2: async (
-    request: CompleteV2Request,
-  ): Promise<CompleteV2Result> => {
-    const nativeModule = required() as NativeLocalRuntime & {
-      completeV2?: (envelopeJSON: string) => Promise<Record<string, unknown>>;
-    };
-    if (typeof nativeModule.completeV2 !== 'function') {
-      throw new Error('completionV2 native method is not linked');
-    }
-    const envelope = JSON.stringify({
-      schema_version: 1,
-      model: request.model,
-      request_id: request.requestId,
-      thinking_mode: request.thinkingMode,
-      history: request.history,
-      tools: request.tools ?? [],
-    });
-    const raw = await nativeModule.completeV2(envelope);
-    return raw as unknown as CompleteV2Result;
-  },
+  completeV2,
   isRecordAgentTraceAvailable: () => {
     const module = NativeModules.LocalRuntime as
       | Partial<NativeLocalRuntime>
