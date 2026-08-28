@@ -167,13 +167,30 @@ test('reflects controlled selection states from current props', async () => {
       harness.renderer.root,
       'Use V4 Flash',
     ).props.accessibilityState,
-  ).toEqual({ checked: true });
+  ).toEqual({ checked: true, disabled: false });
   expect(
     actionByLabel(harness.renderer.root, 'Use High thinking').props
       .accessibilityState,
-  ).toEqual({ checked: true });
+  ).toEqual({ checked: true, disabled: false });
   expect(
     actionByLabel(harness.renderer.root, 'Use V4 Pro').props
       .accessibilityState,
-  ).toEqual({ checked: false });
+  ).toEqual({ checked: false, disabled: false });
+});
+
+test('disables every model and effort option while frozen', async () => {
+  const harness = await renderPicker({ disabled: true });
+
+  for (const label of [
+    'Use V4 Flash',
+    'Use V4 Pro',
+    'Use Flash Exp',
+    'Use Off thinking',
+    'Use High thinking',
+    'Use Max thinking',
+  ]) {
+    const option = actionByLabel(harness.renderer.root, label);
+    expect(option.props.disabled).toBe(true);
+    expect(option.props.accessibilityState.disabled).toBe(true);
+  }
 });

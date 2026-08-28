@@ -22,6 +22,7 @@ jest.mock('../src/native/LocalRuntime', () => ({
     presentCredentialPrompt: jest.fn(),
     clearCredential: jest.fn(),
     complete: jest.fn(),
+    recordModelTransition: jest.fn(),
     cancelCompletion: jest.fn(),
     persistSession: jest.fn(),
     loadSession: jest.fn(),
@@ -104,6 +105,7 @@ type MockLocalRuntime = Record<
   | 'presentCredentialPrompt'
   | 'clearCredential'
   | 'complete'
+  | 'recordModelTransition'
   | 'cancelCompletion'
   | 'persistSession'
   | 'loadSession',
@@ -195,6 +197,7 @@ function lastPersistedState() {
       messages: Array<{
         role: string;
         text: string;
+        metadata?: { model_id?: string };
         attachments: Array<{
           id: string;
           kind: string;
@@ -205,6 +208,7 @@ function lastPersistedState() {
     messages: Array<{
       role: string;
       text: string;
+      metadata?: { model_id?: string };
       attachments: Array<{
         id: string;
         kind: string;
@@ -324,6 +328,7 @@ beforeEach(() => {
     reasoning: '',
     thinking_mode: 'high',
   });
+  mockLocalRuntime.recordModelTransition.mockResolvedValue({ recorded: 1 });
   mockLocalRuntime.cancelCompletion.mockResolvedValue({ status: 'cancelled' });
   mockLocalRuntime.presentCredentialPrompt.mockResolvedValue({
     status: 'configured',
@@ -444,6 +449,45 @@ test('boots into a usable local empty chat', async () => {
   ).toHaveLength(0);
   expect(root.findByProps({ accessibilityLabel: 'Rish' })).toBeDefined();
   expect(mockLocalRuntime.bootstrap).toHaveBeenCalledTimes(1);
+});
+
+test('runtime evidence retry refreshes proof without rehydrating active chat state', async () => {
+  mockLocalRuntime.bootstrap
+    .mockRejectedValueOnce(new Error('temporary proof failure'))
+    .mockResolvedValueOnce({ proof, rish: {} });
+  const renderer = await renderApp();
+  const root = renderer.root;
+
+  await act(async () => composerOptionsChip(root).props.onPress());
+  await act(async () => {
+    optionInComposerPanel(root, 'Use V4 Pro').props.onPress();
+    await settle();
+  });
+  await act(async () => optionInComposerPanel(root, 'Done').props.onPress());
+  const stale = JSON.parse(
+    mockLocalRuntime.persistSession.mock.calls.at(-1)?.[0] as string,
+  ) as { conversations: Array<{ model_id: string }> };
+  if (stale.conversations[0] !== undefined) {
+    stale.conversations[0].model_id = 'deepseek-v4-flash';
+  }
+  mockLocalRuntime.loadSession.mockResolvedValueOnce(JSON.stringify(stale));
+
+  await act(async () =>
+    actionByLabel(root, 'Show runtime evidence').props.onPress(),
+  );
+  await act(async () => {
+    actionByLabel(root, 'Retry runtime check').props.onPress();
+    await settle();
+  });
+
+  expect(mockLocalRuntime.bootstrap).toHaveBeenCalledTimes(2);
+  expect(mockLocalRuntime.loadSession).not.toHaveBeenCalled();
+  expect(composerOptionsChip(root).props.accessibilityLabel).toBe(
+    'Model V4 Pro, thinking High',
+  );
+  expect(lastPersistedState().conversations[0]?.model_id).toBe(
+    'deepseek-v4-pro',
+  );
 });
 
 test('presents DSH as one built-in harness under the Rish runtime', async () => {
@@ -577,6 +621,7 @@ test('adds an image attachment, switches to Flash Exp, and sends without text', 
 
   expect(mockLocalAttachments.present).toHaveBeenCalledWith('photos');
   expect(actionByLabel(root, 'Remove camera.jpg')).toBeDefined();
+  expect(mockLocalRuntime.recordModelTransition).not.toHaveBeenCalled();
   expect(
     root.findByProps({ accessibilityLabel: 'Send message' }).props.disabled,
   ).toBe(false);
@@ -619,6 +664,18 @@ test('adds an image attachment, switches to Flash Exp, and sends without text', 
     persisted.messages[0]?.attachments[0]?.thumbnail_data_url,
   ).toBeUndefined();
   expect(mockLocalAttachments.discard).not.toHaveBeenCalled();
+  expect(mockLocalRuntime.recordModelTransition).toHaveBeenCalledTimes(1);
+  expect(mockLocalRuntime.recordModelTransition).toHaveBeenCalledWith({
+    attachment_busy: false,
+    conversation_id: expect.any(String),
+    draft_image_count: 1,
+    from_model: 'deepseek-v4-flash',
+    history_image_count: 0,
+    request_epoch: 0,
+    request_state: 'idle',
+    source: 'send_image_guard',
+    to_model: 'deepseek-v4-flash-vision-exp',
+  });
 });
 
 test('recovers the attachment button when a native picker promise never settles', async () => {
@@ -650,6 +707,256 @@ test('recovers the attachment button when a native picker promise never settles'
     }),
   ).toBeDefined();
   jest.useRealTimers();
+});
+
+test('blocks send and conversation options while the attachment picker is pending', async () => {
+  let resolvePicker:
+    | ((value: {
+        schema_version: 1;
+        status: 'cancelled';
+        attachments: [];
+      }) => void)
+    | undefined;
+  mockLocalAttachments.present.mockReturnValueOnce(
+    new Promise(resolve => {
+      resolvePicker = resolve;
+    }),
+  );
+  const renderer = await renderApp();
+  const root = renderer.root;
+
+  await act(async () => {
+    root
+      .findByProps({ accessibilityLabel: 'Message DSH' })
+      .props.onChangeText('Do not race this picker');
+  });
+  await act(async () => composerOptionsChip(root).props.onPress());
+  const staleModelPress = optionInComposerPanel(root, 'Use V4 Pro').props.onPress;
+  const staleEffortPress = optionInComposerPanel(
+    root,
+    'Use Max thinking',
+  ).props.onPress;
+  await act(async () => optionInComposerPanel(root, 'Done').props.onPress());
+  const staleOptionsOpen = composerOptionsChip(root).props.onPress;
+  await act(async () => actionByLabel(root, 'Add attachment').props.onPress());
+  await chooseAttachmentSource(root, 'Photos');
+
+  const send = actionByLabel(root, 'Send message');
+  expect(send.props.disabled).toBe(true);
+  expect(composerOptionsChip(root).props.disabled).toBe(true);
+  expect(composerOptionsChip(root).props.accessibilityState).toEqual({
+    disabled: true,
+    expanded: false,
+  });
+  await act(async () => {
+    staleModelPress();
+    staleEffortPress();
+    staleOptionsOpen();
+    await settle();
+  });
+  expect(composerOptionsChip(root).props.accessibilityLabel).toBe(
+    'Model V4 Flash, thinking High',
+  );
+  expect(
+    root.findByProps({ testID: 'conversation-options-modal' }).props.visible,
+  ).toBe(false);
+  expect(mockLocalRuntime.recordModelTransition).not.toHaveBeenCalled();
+
+  // The screen owns a second guard: even a stale callback or programmatic
+  // invocation cannot start a request while native attachment work is active.
+  await act(async () => {
+    send.props.onPress();
+    await settle();
+  });
+  expect(mockLocalRuntime.complete).not.toHaveBeenCalled();
+
+  await act(async () => {
+    resolvePicker?.({
+      schema_version: 1,
+      status: 'cancelled',
+      attachments: [],
+    });
+    await settle();
+  });
+  expect(actionByLabel(root, 'Send message').props.disabled).toBe(false);
+});
+
+test('discards a late attachment result when the originating conversation changed', async () => {
+  let resolvePicker:
+    | ((value: {
+        schema_version: 1;
+        status: 'selected';
+        attachments: Array<{
+          schema_version: 1;
+          id: string;
+          kind: 'image';
+          name: string;
+          mime_type: string;
+          size: number;
+        }>;
+      }) => void)
+    | undefined;
+  mockLocalAttachments.present.mockReturnValueOnce(
+    new Promise(resolve => {
+      resolvePicker = resolve;
+    }),
+  );
+  const renderer = await renderApp();
+  const root = renderer.root;
+
+  await act(async () => {
+    root
+      .findByProps({ accessibilityLabel: 'Message DSH' })
+      .props.onChangeText('Origin chat');
+  });
+  await act(async () => {
+    actionByLabel(root, 'Send message').props.onPress();
+    await settle();
+  });
+  await act(async () => actionByLabel(root, 'Add attachment').props.onPress());
+  await chooseAttachmentSource(root, 'Photos');
+  await act(async () => actionByLabel(root, 'Open navigation').props.onPress());
+  await act(async () => {
+    actionByLabel(root, 'Create new chat').props.onPress();
+    await settle();
+  });
+  await act(async () => actionByLabel(root, 'Open navigation').props.onPress());
+  await act(async () => {
+    actionByLabel(root, 'Open chat Origin chat').props.onPress();
+    await settle();
+  });
+
+  await act(async () => {
+    resolvePicker?.({
+      schema_version: 1,
+      status: 'selected',
+      attachments: [
+        {
+          schema_version: 1,
+          id: 'late-image',
+          kind: 'image',
+          name: 'late.png',
+          mime_type: 'image/png',
+          size: 64,
+        },
+      ],
+    });
+    await settle();
+  });
+
+  expect(mockLocalAttachments.discard).toHaveBeenCalledWith(['late-image']);
+  expect(root.findAllByProps({ accessibilityLabel: 'Remove late.png' })).toHaveLength(0);
+  expect(
+    lastPersistedState().conversations.every(
+      conversation => conversation.model_id === 'deepseek-v4-flash',
+    ),
+  ).toBe(
+    true,
+  );
+  expect(mockLocalRuntime.recordModelTransition).not.toHaveBeenCalled();
+});
+
+test('suppresses a stale picker failure after leaving and returning to its conversation', async () => {
+  let rejectPicker: ((error: Error) => void) | undefined;
+  mockLocalAttachments.present.mockReturnValueOnce(
+    new Promise((_resolve, reject) => {
+      rejectPicker = reject;
+    }),
+  );
+  const renderer = await renderApp();
+  const root = renderer.root;
+
+  await act(async () => {
+    root
+      .findByProps({ accessibilityLabel: 'Message DSH' })
+      .props.onChangeText('Stable origin');
+  });
+  await act(async () => {
+    actionByLabel(root, 'Send message').props.onPress();
+    await settle();
+  });
+  await act(async () => actionByLabel(root, 'Add attachment').props.onPress());
+  await chooseAttachmentSource(root, 'Photos');
+  await act(async () => actionByLabel(root, 'Open navigation').props.onPress());
+  await act(async () => {
+    actionByLabel(root, 'Create new chat').props.onPress();
+    await settle();
+  });
+  await act(async () => actionByLabel(root, 'Open navigation').props.onPress());
+  await act(async () => {
+    actionByLabel(root, 'Open chat Stable origin').props.onPress();
+    await settle();
+  });
+  await act(async () => {
+    rejectPicker?.(new Error('late picker failure'));
+    await settle();
+  });
+
+  expect(
+    root.findAllByProps({
+      children: 'Could not add attachment: late picker failure',
+    }),
+  ).toHaveLength(0);
+  expect(
+    root.findByProps({ accessibilityLabel: 'Add attachment' }).props
+      .accessibilityState.busy,
+  ).toBe(false);
+});
+
+test('keeps the selected model when a draft image is selected then removed', async () => {
+  mockLocalAttachments.present.mockResolvedValueOnce({
+    schema_version: 1,
+    status: 'selected',
+    attachments: [
+      {
+        schema_version: 1,
+        id: 'removed-image',
+        kind: 'image',
+        name: 'remove-before-send.png',
+        mime_type: 'image/png',
+        size: 32,
+      },
+    ],
+  });
+  const renderer = await renderApp();
+  const root = renderer.root;
+
+  await act(async () => composerOptionsChip(root).props.onPress());
+  await act(async () => {
+    optionInComposerPanel(root, 'Use V4 Pro').props.onPress();
+    await settle();
+  });
+  await act(async () => optionInComposerPanel(root, 'Done').props.onPress());
+
+  mockLocalRuntime.recordModelTransition.mockClear();
+  await act(async () => actionByLabel(root, 'Add attachment').props.onPress());
+  await chooseAttachmentSource(root, 'Photos');
+  expect(lastPersistedState().conversations[0]?.model_id).toBe(
+    'deepseek-v4-pro',
+  );
+  expect(mockLocalRuntime.recordModelTransition).not.toHaveBeenCalled();
+
+  await act(async () => {
+    actionByLabel(root, 'Remove remove-before-send.png').props.onPress({
+      stopPropagation: jest.fn(),
+    });
+    root
+      .findByProps({ accessibilityLabel: 'Message DSH' })
+      .props.onChangeText('Text only');
+    await settle();
+  });
+  await act(async () => {
+    actionByLabel(root, 'Send message').props.onPress();
+    await settle();
+  });
+
+  expect(mockLocalRuntime.complete.mock.calls.at(-1)?.[0]).toBe(
+    'deepseek-v4-pro',
+  );
+  expect(lastPersistedState().conversations[0]?.model_id).toBe(
+    'deepseek-v4-pro',
+  );
+  expect(mockLocalRuntime.recordModelTransition).not.toHaveBeenCalled();
 });
 
 test('removes an unsent attachment from native storage', async () => {
@@ -1059,6 +1366,7 @@ test('opens one combined composer options panel and keeps it open across changes
   const root = renderer.root;
 
   expect(composerOptionsChip(root).props.accessibilityState).toEqual({
+    disabled: false,
     expanded: false,
   });
 
@@ -1070,12 +1378,24 @@ test('opens one combined composer options panel and keeps it open across changes
     root.findByProps({ testID: 'model-picker-modal' }).props.visible,
   ).toBe(false);
   expect(composerOptionsChip(root).props.accessibilityState).toEqual({
+    disabled: false,
     expanded: true,
   });
 
   await act(async () => {
     optionInComposerPanel(root, 'Use V4 Pro').props.onPress();
     await settle();
+  });
+  expect(mockLocalRuntime.recordModelTransition).toHaveBeenCalledWith({
+    attachment_busy: false,
+    conversation_id: expect.any(String),
+    draft_image_count: 0,
+    from_model: 'deepseek-v4-flash',
+    history_image_count: 0,
+    request_epoch: 0,
+    request_state: 'idle',
+    source: 'composer_picker',
+    to_model: 'deepseek-v4-pro',
   });
   expect(modal().props.visible).toBe(true);
   expect(dismissKeyboard).toHaveBeenCalledTimes(1);
@@ -1095,6 +1415,7 @@ test('opens one combined composer options panel and keeps it open across changes
   await act(async () => settle());
   expect(modal().props.visible).toBe(false);
   expect(composerOptionsChip(root).props.accessibilityState).toEqual({
+    disabled: false,
     expanded: false,
   });
   expect(composerOptionsChip(root).props.accessibilityLabel).toBe(
@@ -1121,6 +1442,97 @@ test('closes the combined panel from its light scrim without changing anything',
   ).toBe(false);
   expect(composerOptionsChip(root).props.accessibilityLabel).toBe(
     'Model V4 Flash, thinking High',
+  );
+});
+
+test('freezes model and effort while a request is in flight', async () => {
+  let finishInitialPersist: ((value: boolean) => void) | undefined;
+  let finishRequest:
+    | ((value: {
+        text: string;
+        model: string;
+        request_id: string;
+        latency_ms: number;
+        reasoning: string;
+        thinking_mode: 'high';
+      }) => void)
+    | undefined;
+  mockLocalRuntime.complete.mockReturnValueOnce(
+    new Promise(resolve => {
+      finishRequest = resolve;
+    }),
+  );
+  const renderer = await renderApp();
+  const root = renderer.root;
+
+  await act(async () => composerOptionsChip(root).props.onPress());
+  const staleModelPress = optionInComposerPanel(root, 'Use V4 Pro').props.onPress;
+  const staleEffortPress = optionInComposerPanel(
+    root,
+    'Use Max thinking',
+  ).props.onPress;
+  await act(async () => optionInComposerPanel(root, 'Done').props.onPress());
+  await act(async () => {
+    root
+      .findByProps({ accessibilityLabel: 'Message DSH' })
+      .props.onChangeText('Freeze this request');
+  });
+  mockLocalRuntime.persistSession.mockReturnValueOnce(
+    new Promise(resolve => {
+      finishInitialPersist = resolve;
+    }),
+  );
+  const staleSendPress = actionByLabel(root, 'Send message').props.onPress;
+  await act(async () => {
+    staleSendPress();
+    await settle();
+  });
+
+  expect(composerOptionsChip(root).props.disabled).toBe(true);
+  expect(composerOptionsChip(root).props.accessibilityState).toEqual({
+    disabled: true,
+    expanded: false,
+  });
+  await act(async () => {
+    // These callbacks came from the render before `sending`; the screen guard
+    // must reject them rather than trusting only Pressable.disabled.
+    staleModelPress();
+    staleEffortPress();
+    staleSendPress();
+    await settle();
+  });
+  expect(lastPersistedState().conversations[0]).toMatchObject({
+    model_id: 'deepseek-v4-flash',
+    thinking_mode: 'high',
+  });
+  expect(mockLocalRuntime.recordModelTransition).not.toHaveBeenCalled();
+  expect(mockLocalRuntime.persistSession).toHaveBeenCalledTimes(1);
+  expect(mockLocalRuntime.complete).not.toHaveBeenCalled();
+
+  await act(async () => {
+    finishInitialPersist?.(true);
+    await settle();
+  });
+  expect(mockLocalRuntime.complete.mock.calls[0]?.[0]).toBe(
+    'deepseek-v4-flash',
+  );
+  expect(mockLocalRuntime.complete.mock.calls[0]?.[3]).toBe('high');
+
+  await act(async () => {
+    finishRequest?.({
+      text: 'Frozen response',
+      model: 'deepseek-v4-pro',
+      request_id: 'request-1',
+      latency_ms: 9,
+      reasoning: '',
+      thinking_mode: 'high',
+    });
+    await settle();
+  });
+  const persisted = lastPersistedState();
+  expect(persisted.conversations[0]?.model_id).toBe('deepseek-v4-flash');
+  expect(persisted.conversations[0]?.messages.at(-1)?.metadata?.model_id).toBe(
+    'deepseek-v4-flash',
   );
 });
 
@@ -1152,6 +1564,29 @@ test('opens the compact model popover from settings and returns to settings', as
   await act(async () => actionByLabel(root, 'Close settings').props.onPress());
   await act(async () => settle());
   expect(actionByLabel(root, 'Open local profile')).toBeDefined();
+});
+
+test('audits settings model changes with their distinct source', async () => {
+  const renderer = await renderApp();
+  const root = renderer.root;
+
+  await act(async () => actionByLabel(root, 'Open navigation').props.onPress());
+  await act(async () => actionByLabel(root, 'Settings').props.onPress());
+  await act(async () =>
+    actionByLabel(root, 'Choose default model').props.onPress(),
+  );
+  await act(async () => {
+    actionByLabel(root, 'Use V4 Pro').props.onPress();
+    await settle();
+  });
+
+  expect(mockLocalRuntime.recordModelTransition).toHaveBeenCalledWith(
+    expect.objectContaining({
+      from_model: 'deepseek-v4-flash',
+      source: 'settings_picker',
+      to_model: 'deepseek-v4-pro',
+    }),
+  );
 });
 
 test('stages a custom npm mirror through the native rish adapter', async () => {

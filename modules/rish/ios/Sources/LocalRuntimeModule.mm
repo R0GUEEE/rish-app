@@ -1,5 +1,6 @@
 #import "DSHCompletionV2.h"
 #import "LocalAttachmentStore.h"
+#import "ModelTransitionProof.h"
 
 #import <Foundation/Foundation.h>
 #import <PDFKit/PDFKit.h>
@@ -75,6 +76,30 @@ static NSArray *DSHArray(id value) {
 
 static NSString *DSHString(id value) {
   return [value isKindOfClass:NSString.class] ? value : nil;
+}
+
+static BOOL DSHProofToolNameIsSafe(NSString *value) {
+  if (value.length == 0 || value.length > 64) return NO;
+  NSCharacterSet *invalid =
+      [[NSCharacterSet characterSetWithCharactersInString:
+          @"abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_-"]
+          invertedSet];
+  return [value rangeOfCharacterFromSet:invalid].location == NSNotFound;
+}
+
+static BOOL DSHProofDigestIsSafe(NSString *value) {
+  if (![value isKindOfClass:NSString.class]) return NO;
+  NSString *hex = value;
+  if ([value hasPrefix:@"sha1:"]) {
+    if (value.length != 13) return NO;
+    hex = [value substringFromIndex:5];
+  } else if (value.length != 64) {
+    return NO;
+  }
+  NSCharacterSet *nonHex =
+      [[NSCharacterSet characterSetWithCharactersInString:@"0123456789abcdef"]
+          invertedSet];
+  return [hex rangeOfCharacterFromSet:nonHex].location == NSNotFound;
 }
 
 static BOOL DSHCredentialPromptUsesChinese(id localeValue) {
@@ -972,6 +997,7 @@ RCT_EXPORT_MODULE(LocalRuntime)
   if (modelResponse != nil) proof[@"model_response"] = modelResponse;
   if (sessionPersisted != nil) proof[@"session_persisted"] = sessionPersisted;
   if (sessionRestore != nil) proof[@"session_restore"] = sessionRestore;
+  DSHPreserveRuntimeProofTraces(previous, proof);
   return proof;
 }
 
@@ -1646,8 +1672,8 @@ RCT_REMAP_METHOD(recordAgentTrace,
       NSString *name = DSHString(entry[@"name"]);
       NSString *argsSha = DSHString(entry[@"arguments_sha256"]);
       NSString *outcome = DSHString(entry[@"outcome"]);
-      if (name.length == 0 || name.length > 64) continue;
-      if (argsSha.length == 0 || argsSha.length > 128) continue;
+      if (!DSHProofToolNameIsSafe(name)) continue;
+      if (!DSHProofDigestIsSafe(argsSha)) continue;
       if (![outcome isEqualToString:@"ok"] &&
           ![outcome isEqualToString:@"failed"] &&
           ![outcome isEqualToString:@"denied"]) continue;
@@ -1665,6 +1691,41 @@ RCT_REMAP_METHOD(recordAgentTrace,
     };
     [self writeProof:proof error:nil];
     resolve(@{ @"recorded": @(rows.count) });
+  });
+}
+
+RCT_REMAP_METHOD(recordModelTransition,
+                 recordModelTransitionEntry:(NSDictionary *)entry
+                 resolver:(RCTPromiseResolveBlock)resolve
+                 rejecter:(RCTPromiseRejectBlock)reject) {
+  dispatch_async(self.stateQueue, ^{
+    NSError *error = nil;
+    NSString *recordedAt = DSHNow();
+    NSDictionary *row = DSHValidatedModelTransitionProofRow(
+        entry, recordedAt, &error);
+    if (row == nil) {
+      reject(@"trace",
+             error.localizedDescription ?: @"Model transition entry is invalid",
+             error);
+      return;
+    }
+    NSMutableDictionary *proof = [self baseProofWithRishReceipt:nil
+                                                      credential:([self credentialLookupStatus] == errSecSuccess)
+                                                            error:&error];
+    if (proof == nil) {
+      reject(@"proof", @"Runtime proof state is unavailable", error);
+      return;
+    }
+    NSDictionary *trace = DSHModelTransitionTraceByAppendingRow(
+        proof[@"model_transition_trace"], row, recordedAt);
+    proof[@"model_transition_trace"] = trace;
+    if (![self writeProof:proof error:&error]) {
+      reject(@"proof",
+             error.localizedDescription ?: @"Unable to update runtime proof",
+             error);
+      return;
+    }
+    resolve(@{ @"recorded": trace[@"entry_count"] });
   });
 }
 

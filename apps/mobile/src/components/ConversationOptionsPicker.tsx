@@ -32,6 +32,7 @@ export function localizedThinkingDetails(
 }
 
 type Props = {
+  disabled?: boolean;
   model: SupportedModel;
   thinkingMode: ConversationThinkingMode;
   visible: boolean;
@@ -46,6 +47,7 @@ type Props = {
  * their own; dismissal is explicit.
  */
 export function ConversationOptionsPicker({
+  disabled = false,
   model,
   thinkingMode,
   visible,
@@ -99,13 +101,15 @@ export function ConversationOptionsPicker({
                       model: details.name,
                     })}
                     accessibilityRole="radio"
-                    accessibilityState={{ checked: isSelected }}
+                    accessibilityState={{ checked: isSelected, disabled }}
+                    disabled={disabled}
                     key={candidate}
                     onPress={() => onSelectModel(candidate)}
                     style={({ pressed }) => [
                       styles.option,
                       index > 0 && styles.optionDivider,
                       isSelected && styles.optionSelected,
+                      disabled && styles.optionDisabled,
                       pressed && styles.pressed,
                     ]}
                   >
@@ -139,13 +143,15 @@ export function ConversationOptionsPicker({
                       mode: details.name,
                     })}
                     accessibilityRole="radio"
-                    accessibilityState={{ checked: isSelected }}
+                    accessibilityState={{ checked: isSelected, disabled }}
+                    disabled={disabled}
                     key={mode}
                     onPress={() => onSelectThinkingMode(mode)}
                     style={({ pressed }) => [
                       styles.option,
                       index > 0 && styles.optionDivider,
                       isSelected && styles.optionSelected,
+                      disabled && styles.optionDisabled,
                       pressed && styles.pressed,
                     ]}
                   >
@@ -269,4 +275,5 @@ const createStyles = (colors: ThemePalette) =>
     doneText: { color: colors.accent, fontSize: 15, fontWeight: '700' },
     menuItemPressed: { backgroundColor: colors.surfaceRaised },
     pressed: { opacity: 0.58 },
+    optionDisabled: { opacity: 0.45 },
   });

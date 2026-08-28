@@ -61,6 +61,7 @@ export function localizedModelDetails(
 }
 
 type Props = {
+  disabled?: boolean;
   placement?: 'composer' | 'settings';
   selected: SupportedModel;
   visible: boolean;
@@ -69,6 +70,7 @@ type Props = {
 };
 
 export function ModelPicker({
+  disabled = false,
   placement = 'composer',
   selected,
   visible,
@@ -124,7 +126,8 @@ export function ModelPicker({
                 <Pressable
                   accessibilityLabel={t('model.use', { model: details.name })}
                   accessibilityRole="radio"
-                  accessibilityState={{ checked: isSelected }}
+                  accessibilityState={{ checked: isSelected, disabled }}
+                  disabled={disabled}
                   key={model}
                   onPress={() => {
                     onSelect(model);
@@ -134,6 +137,7 @@ export function ModelPicker({
                     styles.option,
                     index > 0 && styles.optionDivider,
                     isSelected && styles.optionSelected,
+                    disabled && styles.optionDisabled,
                     pressed && styles.pressed,
                   ]}
                 >
@@ -229,4 +233,5 @@ const createStyles = (colors: ThemePalette) =>
       marginRight: 8,
     },
     pressed: { opacity: 0.58 },
+    optionDisabled: { opacity: 0.45 },
   });

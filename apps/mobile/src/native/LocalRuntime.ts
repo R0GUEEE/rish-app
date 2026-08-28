@@ -68,6 +68,32 @@ export type RuntimeProof = {
     message_count: number;
     restored_at: string;
   };
+  agent_tool_trace?: {
+    recorded_at: string;
+    entry_count: number;
+    entries: Array<{
+      name: string;
+      arguments_sha256: string;
+      outcome: 'ok' | 'failed' | 'denied';
+      recorded_at: string;
+    }>;
+  };
+  model_transition_trace?: {
+    recorded_at: string;
+    entry_count: number;
+    entries: Array<{
+      conversation_id_sha256: string;
+      from_model: DeepSeekModelId;
+      to_model: DeepSeekModelId;
+      source: ModelTransitionSource;
+      request_epoch: number;
+      request_state: 'idle' | 'sending';
+      attachment_busy: boolean;
+      draft_image_count: number;
+      history_image_count: number;
+      recorded_at: string;
+    }>;
+  };
   mac_dsh_port_3180_reachable: boolean;
   checks: RuntimeProofChecks;
 };
@@ -150,6 +176,23 @@ export type AgentTraceProofEntry = {
   outcome: 'ok' | 'failed' | 'denied';
 };
 
+export type ModelTransitionSource =
+  | 'composer_picker'
+  | 'settings_picker'
+  | 'send_image_guard';
+
+export type ModelTransitionProofEntry = {
+  conversation_id: string;
+  from_model: DeepSeekModelId;
+  to_model: DeepSeekModelId;
+  source: ModelTransitionSource;
+  request_epoch: number;
+  request_state: 'idle' | 'sending';
+  attachment_busy: boolean;
+  draft_image_count: number;
+  history_image_count: number;
+};
+
 export type CompleteV2Result = {
   schema_version: 1;
   text: string;
@@ -181,6 +224,9 @@ type NativeLocalRuntime = {
   completeV2?(envelopeJSON: string): Promise<Record<string, unknown>>;
   recordAgentTrace?(
     entries: readonly AgentTraceProofEntry[],
+  ): Promise<{ recorded: number }>;
+  recordModelTransition?(
+    entry: ModelTransitionProofEntry,
   ): Promise<{ recorded: number }>;
 };
 
@@ -289,6 +335,25 @@ export const LocalRuntime = {
       throw new Error('recordAgentTrace native method is not linked');
     }
     return nativeModule.recordAgentTrace([...entries]);
+  },
+  isRecordModelTransitionAvailable: () => {
+    const module = NativeModules.LocalRuntime as
+      | Partial<NativeLocalRuntime>
+      | undefined;
+    return typeof module?.recordModelTransition === 'function';
+  },
+  recordModelTransition: async (
+    entry: ModelTransitionProofEntry,
+  ): Promise<{ recorded: number }> => {
+    const nativeModule = required() as NativeLocalRuntime & {
+      recordModelTransition?: (
+        value: ModelTransitionProofEntry,
+      ) => Promise<{ recorded: number }>;
+    };
+    if (typeof nativeModule.recordModelTransition !== 'function') {
+      throw new Error('recordModelTransition native method is not linked');
+    }
+    return nativeModule.recordModelTransition(entry);
   },
   persistSession: (json: string) => required().persistSession(json),
   loadSession: () => required().loadSession(),

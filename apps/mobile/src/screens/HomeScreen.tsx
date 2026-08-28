@@ -66,6 +66,7 @@ import {
   LocalRuntime,
   type CompletionMessage,
   type DeepSeekThinkingMode,
+  type ModelTransitionSource,
   type RuntimeProof,
 } from '../native/LocalRuntime';
 import { readRuntimeEvidence } from '../runtime/evidence';
@@ -367,7 +368,14 @@ export function HomeScreen() {
     null,
   );
   const requestEpoch = useRef(0);
+  const requestStateRef = useRef<RequestState>('idle');
   const activeRequestId = useRef<string | null>(null);
+  const attachmentOperationGeneration = useRef(0);
+  const activeAttachmentOperation = useRef<{
+    generation: number;
+    conversationId: string;
+    stale: boolean;
+  } | null>(null);
   const activeAttachmentPreviewId = useRef<string | null>(null);
   const afterDrawerDismiss = useRef<(() => void) | null>(null);
   const afterActionDismiss = useRef<(() => void) | null>(null);
@@ -376,7 +384,22 @@ export function HomeScreen() {
   const activeHarness =
     BUILTIN_HARNESSES.get(preferences.selectedHarnessId) ?? DSH_HARNESS;
 
+  const updateRequestState = useCallback((next: RequestState) => {
+    requestStateRef.current = next;
+    setRequestState(next);
+  }, []);
+
   useEffect(() => store.subscribe(setChatState), [store]);
+
+  useEffect(() => {
+    const operation = activeAttachmentOperation.current;
+    if (
+      operation !== null &&
+      chatState.selectedConversationId !== operation.conversationId
+    ) {
+      operation.stale = true;
+    }
+  }, [chatState.selectedConversationId]);
 
   useEffect(() => {
     if (attachmentNotice === null) return;
@@ -644,14 +667,71 @@ export function HomeScreen() {
     : 'incomplete';
 
   const refreshProof = useCallback(async () => {
-    if (!credentialConfigured) return;
+    if (!nativeAvailable) return;
     try {
+      const credential = await DshHarnessAdapter.credentialStatus();
+      const configured = credential.status === 'configured';
+      setCredentialConfigured(configured);
+      if (!configured) {
+        setProof(null);
+        setRuntimeFailure(null);
+        return;
+      }
       setProof((await LocalRuntime.bootstrap()).proof);
       setRuntimeFailure(null);
     } catch (error) {
       setRuntimeFailure(errorText(error));
     }
-  }, [credentialConfigured]);
+  }, [nativeAvailable]);
+
+  const changeConversationModel = useCallback(
+    (
+      conversationId: string,
+      model: SupportedModel,
+      source: ModelTransitionSource,
+    ): boolean => {
+      // UI disabled states are not a concurrency boundary: callbacks from an
+      // earlier render can still fire. The ref is updated synchronously before
+      // a request starts, so every model writer shares the same hard guard.
+      if (
+        requestStateRef.current === 'sending' ||
+        activeAttachmentOperation.current !== null
+      ) {
+        return false;
+      }
+      const conversation = selectConversationById(
+        store.getState(),
+        conversationId,
+      );
+      if (conversation === null || conversation.modelId === model) return false;
+      const historyImageCount = conversation.messages.reduce(
+        (count, message) =>
+          count +
+          (message.attachments?.filter(
+            attachment => attachment.kind === 'image',
+          ).length ?? 0),
+        0,
+      );
+      const draftImageCount = draftAttachments.filter(
+        attachment => attachment.kind === 'image',
+      ).length;
+      const fromModel = conversation.modelId;
+      store.setModel(conversationId, model);
+      LocalRuntime.recordModelTransition({
+        conversation_id: conversationId,
+        from_model: fromModel,
+        to_model: model,
+        source,
+        request_epoch: requestEpoch.current,
+        request_state: requestStateRef.current,
+        attachment_busy: activeAttachmentOperation.current !== null,
+        draft_image_count: draftImageCount,
+        history_image_count: historyImageCount,
+      }).catch(() => undefined);
+      return true;
+    },
+    [draftAttachments, store],
+  );
 
   const discardDraftAttachments = useCallback(() => {
     const ids = draftAttachments.map(attachment => attachment.id);
@@ -665,21 +745,75 @@ export function HomeScreen() {
     }
   }, [draftAttachments, t]);
 
+  const markAttachmentOperationStale = useCallback(() => {
+    if (activeAttachmentOperation.current !== null) {
+      activeAttachmentOperation.current.stale = true;
+    }
+  }, []);
+
   const addAttachment = useCallback(
     async (source: AttachmentSource) => {
-      if (!LocalAttachments.isAvailable() || attachmentBusy) {
+      if (
+        !LocalAttachments.isAvailable() ||
+        activeAttachmentOperation.current !== null
+      ) {
         setRequestFailure(t('messages.attachment.unsupported'));
         return;
       }
+      const conversationId = ensureConversation();
+      const generation = ++attachmentOperationGeneration.current;
+      activeAttachmentOperation.current = {
+        generation,
+        conversationId,
+        stale: false,
+      };
+      const discardUnreferenced = (attachments: readonly AttachmentDescriptor[]) => {
+        const protectedIds = new Set([
+          ...referencedAttachmentIds(store.getState()),
+          ...draftAttachments.map(attachment => attachment.id),
+        ]);
+        const ids = attachments
+          .map(attachment => attachment.id)
+          .filter(id => !protectedIds.has(id));
+        return ids.length === 0
+          ? Promise.resolve()
+          : LocalAttachments.discard(ids).then(() => undefined);
+      };
       setAttachmentBusy(true);
       setRequestFailure(null);
       try {
+        const nativeOperation = LocalAttachments.present(source);
+        // A native picker may finish after our timeout. If this operation is
+        // no longer current, reclaim every returned opaque attachment instead
+        // of leaking it into native storage.
+        nativeOperation
+          .then(result => {
+            if (
+              activeAttachmentOperation.current?.generation !== generation &&
+              result.attachments.length > 0
+            ) {
+              discardUnreferenced(result.attachments).catch(() => undefined);
+            }
+          })
+          .catch(() => undefined);
         const result = await waitForAttachmentPicker(
-          LocalAttachments.present(source),
+          nativeOperation,
           t('messages.attachment.timeout'),
         );
         if (result.status === 'cancelled' || result.attachments.length === 0)
           return;
+        const selectedConversationId = store.getState().selectedConversationId;
+        const operation = activeAttachmentOperation.current;
+        if (
+          operation?.generation !== generation ||
+          operation.conversationId !== conversationId ||
+          operation.stale ||
+          selectedConversationId !== conversationId ||
+          selectConversationById(store.getState(), conversationId) === null
+        ) {
+          await discardUnreferenced(result.attachments).catch(() => undefined);
+          return;
+        }
         const ids = new Set(draftAttachments.map(attachment => attachment.id));
         let totalSize = draftAttachments.reduce(
           (sum, attachment) => sum + attachment.size,
@@ -708,21 +842,31 @@ export function HomeScreen() {
           ).catch(() => undefined);
           setRequestFailure(t('messages.attachment.limit'));
         }
-        if (accepted.some(attachment => attachment.kind === 'image')) {
-          const conversationId = ensureConversation();
-          store.setModel(conversationId, 'deepseek-v4-flash-vision-exp');
-          setAttachmentNotice(t('messages.attachment.visionEnabled'));
-          await persist();
-        }
       } catch (error) {
-        setRequestFailure(
-          t('messages.attachment.failed', { error: errorText(error) }),
-        );
+        const operation = activeAttachmentOperation.current;
+        if (
+          operation?.generation === generation &&
+          !operation.stale &&
+          store.getState().selectedConversationId === conversationId
+        ) {
+          setRequestFailure(
+            t('messages.attachment.failed', { error: errorText(error) }),
+          );
+        }
       } finally {
-        setAttachmentBusy(false);
+        if (activeAttachmentOperation.current?.generation === generation) {
+          activeAttachmentOperation.current = null;
+          setAttachmentBusy(false);
+        }
       }
     },
-    [attachmentBusy, draftAttachments, ensureConversation, persist, store, t],
+    [
+      draftAttachments,
+      ensureConversation,
+      referencedAttachmentIds,
+      store,
+      t,
+    ],
   );
 
   const removeDraftAttachment = useCallback(
@@ -801,10 +945,10 @@ export function HomeScreen() {
       } finally {
         if (activeRequestId.current === requestId)
           activeRequestId.current = null;
-        if (requestEpoch.current === epoch) setRequestState('idle');
+        if (requestEpoch.current === epoch) updateRequestState('idle');
       }
     },
-    [persist, refreshProof, store],
+    [persist, refreshProof, store, updateRequestState],
   );
 
   const runAgentCompletion = useCallback(
@@ -887,11 +1031,11 @@ export function HomeScreen() {
         setRequestFailure(errorText(error));
       } finally {
         if (activeRequestId.current === requestId) activeRequestId.current = null;
-        if (requestEpoch.current === epoch) setRequestState('idle');
+        if (requestEpoch.current === epoch) updateRequestState('idle');
         setAgentApproval(null);
       }
     },
-    [persist, refreshProof, store, t],
+    [persist, refreshProof, store, t, updateRequestState],
   );
 
 
@@ -901,7 +1045,8 @@ export function HomeScreen() {
     if (
       !credentialConfigured ||
       (prompt.length === 0 && outgoingAttachments.length === 0) ||
-      requestState === 'sending'
+      requestStateRef.current === 'sending' ||
+      activeAttachmentOperation.current !== null
     )
       return;
     const conversationId = ensureConversation();
@@ -918,18 +1063,19 @@ export function HomeScreen() {
       historyNeedsVision &&
       beforeAppend?.modelId !== 'deepseek-v4-flash-vision-exp'
     ) {
-      store.setModel(conversationId, 'deepseek-v4-flash-vision-exp');
-      setAttachmentNotice(t('messages.attachment.visionEnabled'));
+      if (
+        changeConversationModel(
+          conversationId,
+          'deepseek-v4-flash-vision-exp',
+          'send_image_guard',
+        )
+      ) {
+        setAttachmentNotice(t('messages.attachment.visionEnabled'));
+      }
     }
     store.appendUserMessage(conversationId, prompt, {
       attachments: outgoingAttachments,
     });
-    setDraft('');
-    setDraftAttachments([]);
-    setAttachmentNotice(null);
-    setRequestFailure(null);
-    setRetryContext(null);
-    await persist();
     const conversation = selectConversationById(
       store.getState(),
       conversationId,
@@ -941,51 +1087,64 @@ export function HomeScreen() {
       thinkingMode: conversation.thinkingMode,
       history: conversation.messages.map(completionMessage),
     };
+    const projectId = conversation.projectId;
     const epoch = ++requestEpoch.current;
-    setRequestState('sending');
+    // Freeze synchronously before persistence or any other async boundary.
+    // This blocks stale callbacks and duplicate sends while retaining an exact
+    // model/effort/history snapshot for the request and its metadata.
+    updateRequestState('sending');
+    setDraft('');
+    setDraftAttachments([]);
+    setAttachmentNotice(null);
+    setRequestFailure(null);
+    setRetryContext(null);
+    await persist();
+    if (requestEpoch.current !== epoch) return;
     if (
-      typeof conversation.projectId === 'string' &&
+      typeof projectId === 'string' &&
       LocalRuntime.isCompletionV2Available()
     ) {
-      await runAgentCompletion(context, conversation.projectId, epoch);
+      await runAgentCompletion(context, projectId, epoch);
       return;
     }
     await finishCompletion(context, epoch);
   }, [
     credentialConfigured,
+    changeConversationModel,
     draft,
     draftAttachments,
     ensureConversation,
     finishCompletion,
     persist,
-    requestState,
     runAgentCompletion,
     store,
     t,
+    updateRequestState,
   ]);
 
   const retry = useCallback(async () => {
-    if (retryContext === null || requestState === 'sending') return;
+    if (retryContext === null || requestStateRef.current === 'sending') return;
     const epoch = ++requestEpoch.current;
     setRequestFailure(null);
-    setRequestState('sending');
+    updateRequestState('sending');
     await finishCompletion(retryContext, epoch);
-  }, [finishCompletion, requestState, retryContext]);
+  }, [finishCompletion, retryContext, updateRequestState]);
 
 
   const cancel = useCallback(() => {
     const requestId = activeRequestId.current;
     activeRequestId.current = null;
     requestEpoch.current += 1;
-    setRequestState('idle');
+    updateRequestState('idle');
     setRetryContext(null);
     setRequestFailure(t('home.responseStopped'));
     if (requestId !== null)
       DshHarnessAdapter.cancel(requestId).catch(() => undefined);
-  }, [t]);
+  }, [t, updateRequestState]);
 
   const createConversation = useCallback(() => {
     if (requestState === 'sending') cancel();
+    markAttachmentOperationStale();
     discardDraftAttachments();
     store.createConversation({
       modelId: preferencesStore.getState().defaultModel,
@@ -1000,6 +1159,7 @@ export function HomeScreen() {
   }, [
     cancel,
     discardDraftAttachments,
+    markAttachmentOperationStale,
     persist,
     preferencesStore,
     requestState,
@@ -1009,6 +1169,7 @@ export function HomeScreen() {
   const selectConversation = useCallback(
     (id: string) => {
       if (requestState === 'sending') cancel();
+      markAttachmentOperationStale();
       discardDraftAttachments();
       store.selectConversation(id);
       setDraft('');
@@ -1018,7 +1179,14 @@ export function HomeScreen() {
       setDrawerVisible(false);
       persist().catch(() => undefined);
     },
-    [cancel, discardDraftAttachments, persist, requestState, store],
+    [
+      cancel,
+      discardDraftAttachments,
+      markAttachmentOperationStale,
+      persist,
+      requestState,
+      store,
+    ],
   );
 
   const renameConversation = useCallback(
@@ -1099,23 +1267,55 @@ export function HomeScreen() {
   }, [actionConversationId, confirmDeleteConversation]);
 
   const selectModel = useCallback(
-    (model: SupportedModel) => {
+    (model: SupportedModel, source: ModelTransitionSource) => {
+      if (
+        requestStateRef.current === 'sending' ||
+        activeAttachmentOperation.current !== null
+      ) {
+        return;
+      }
       const conversationId = ensureConversation();
-      store.setModel(conversationId, model);
+      if (!changeConversationModel(conversationId, model, source)) return;
       setAttachmentNotice(null);
       persist().catch(() => undefined);
     },
-    [ensureConversation, persist, store],
+    [changeConversationModel, ensureConversation, persist],
+  );
+
+  const selectComposerModel = useCallback(
+    (model: SupportedModel) => selectModel(model, 'composer_picker'),
+    [selectModel],
+  );
+
+  const selectSettingsModel = useCallback(
+    (model: SupportedModel) => selectModel(model, 'settings_picker'),
+    [selectModel],
   );
 
   const selectThinkingMode = useCallback(
     (thinkingMode: DeepSeekThinkingMode) => {
+      if (
+        requestStateRef.current === 'sending' ||
+        activeAttachmentOperation.current !== null
+      ) {
+        return;
+      }
       const conversationId = ensureConversation();
       store.setThinkingMode(conversationId, thinkingMode);
       persist().catch(() => undefined);
     },
     [ensureConversation, persist, store],
   );
+
+  const openComposerOptions = useCallback(() => {
+    if (
+      requestStateRef.current === 'sending' ||
+      activeAttachmentOperation.current !== null
+    ) {
+      return;
+    }
+    setComposerOptionsVisible(true);
+  }, []);
 
   useEffect(() => {
     if (!LocalWorkspaces.isAvailable()) return;
@@ -1154,6 +1354,7 @@ export function HomeScreen() {
       const current = selectActiveConversation(store.getState());
       if (current?.projectId !== project.id) {
         if (current === null || current.messages.length > 0) {
+          markAttachmentOperationStale();
           discardDraftAttachments();
           setDraft('');
           setAttachmentNotice(null);
@@ -1170,7 +1371,13 @@ export function HomeScreen() {
       setProjectsVisible(false);
       persist().catch(() => undefined);
     },
-    [discardDraftAttachments, persist, preferencesStore, store],
+    [
+      discardDraftAttachments,
+      markAttachmentOperationStale,
+      persist,
+      preferencesStore,
+      store,
+    ],
   );
 
   const unbindProjectFromConversation = useCallback(() => {
@@ -1523,9 +1730,7 @@ export function HomeScreen() {
             onCancel={cancel}
             onChange={setDraft}
             onConfigure={() => setSettingsVisible(true)}
-            onOptionsPress={() => {
-              setComposerOptionsVisible(true);
-            }}
+            onOptionsPress={openComposerOptions}
             onWorkspacePress={() => {
               setWorkspaceSheetVisible(true);
             }}
@@ -1603,18 +1808,20 @@ export function HomeScreen() {
         onClose={() => setAccountVisible(false)}
       />
       <ModelPicker
+        disabled={requestState === 'sending' || attachmentBusy}
         placement="settings"
         selected={activeModel}
         visible={modelVisible}
         onClose={() => setModelVisible(false)}
-        onSelect={selectModel}
+        onSelect={selectSettingsModel}
       />
       <ConversationOptionsPicker
+        disabled={requestState === 'sending' || attachmentBusy}
         model={activeModel}
         thinkingMode={activeThinkingMode}
         visible={composerOptionsVisible}
         onClose={() => setComposerOptionsVisible(false)}
-        onSelectModel={selectModel}
+        onSelectModel={selectComposerModel}
         onSelectThinkingMode={selectThinkingMode}
       />
       <WorkspacePickerSheet
@@ -1649,7 +1856,7 @@ export function HomeScreen() {
         shell={shell}
         visible={evidenceVisible}
         onClose={() => setEvidenceVisible(false)}
-        onRetry={() => bootstrap().catch(() => undefined)}
+        onRetry={() => refreshProof().catch(() => undefined)}
       />
       <ProjectsSurface
         boundProjectId={activeConversation?.projectId ?? null}

@@ -5,6 +5,7 @@ const mockNativeLocalRuntime = {
   clearCredential: jest.fn(),
   complete: jest.fn(),
   completeV2: jest.fn(),
+  recordModelTransition: jest.fn(),
   cancelCompletion: jest.fn(),
   persistSession: jest.fn(),
   loadSession: jest.fn(),
@@ -172,5 +173,57 @@ test('defaults the tool list to empty and rejects when unlinked', async () => {
     ).rejects.toThrow(/completionV2 native method is not linked/);
   } finally {
     mockNativeLocalRuntime.completeV2 = previous;
+  }
+});
+
+test('forwards a redacted model transition envelope to native proof storage', async () => {
+  mockNativeLocalRuntime.recordModelTransition.mockResolvedValueOnce({
+    recorded: 3,
+  });
+  const entry = {
+    conversation_id: 'opaque-conversation-id',
+    from_model: 'deepseek-v4-flash' as const,
+    to_model: 'deepseek-v4-pro' as const,
+    source: 'composer_picker' as const,
+    request_epoch: 7,
+    request_state: 'idle' as const,
+    attachment_busy: false,
+    draft_image_count: 0,
+    history_image_count: 0,
+  };
+
+  await expect(LocalRuntime.isRecordModelTransitionAvailable()).toBe(true);
+  await expect(LocalRuntime.recordModelTransition(entry)).resolves.toEqual({
+    recorded: 3,
+  });
+  expect(mockNativeLocalRuntime.recordModelTransition).toHaveBeenCalledWith(
+    entry,
+  );
+  expect(JSON.stringify(entry)).not.toContain('message');
+  expect(JSON.stringify(entry)).not.toContain('path');
+  expect(JSON.stringify(entry)).not.toContain('key');
+});
+
+test('fails closed when model transition proof storage is not linked', async () => {
+  const previous = mockNativeLocalRuntime.recordModelTransition;
+  delete (mockNativeLocalRuntime as Record<string, unknown>)
+    .recordModelTransition;
+  try {
+    await expect(LocalRuntime.isRecordModelTransitionAvailable()).toBe(false);
+    await expect(
+      LocalRuntime.recordModelTransition({
+        conversation_id: 'conversation-id',
+        from_model: 'deepseek-v4-flash',
+        to_model: 'deepseek-v4-pro',
+        source: 'settings_picker',
+        request_epoch: 0,
+        request_state: 'idle',
+        attachment_busy: false,
+        draft_image_count: 0,
+        history_image_count: 0,
+      }),
+    ).rejects.toThrow(/recordModelTransition native method is not linked/);
+  } finally {
+    mockNativeLocalRuntime.recordModelTransition = previous;
   }
 });

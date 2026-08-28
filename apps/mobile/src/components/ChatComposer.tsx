@@ -85,7 +85,8 @@ export function ChatComposer(props: Props) {
   const canSend =
     props.configured &&
     (props.draft.trim().length > 0 || props.attachments.length > 0) &&
-    !props.sending;
+    !props.sending &&
+    !props.attachmentBusy;
   const model = localizedModelDetails(props.model, t);
   const thinking = localizedThinkingDetails(props.thinkingMode, t);
 
@@ -221,7 +222,8 @@ export function ChatComposer(props: Props) {
           accessibilityRole="button"
           accessibilityState={{
             busy: props.attachmentBusy,
-            disabled: !props.configured || props.sending,
+            disabled:
+              !props.configured || props.sending || props.attachmentBusy,
           }}
           disabled={!props.configured || props.sending || props.attachmentBusy}
           onPress={() => {
@@ -277,7 +279,11 @@ export function ChatComposer(props: Props) {
               effort: thinking.name,
             })}
             accessibilityRole="button"
-            accessibilityState={{ expanded: props.optionsVisible }}
+            accessibilityState={{
+              disabled: props.sending || props.attachmentBusy,
+              expanded: props.optionsVisible,
+            }}
+            disabled={props.sending || props.attachmentBusy}
             onPress={() => {
               Keyboard.dismiss();
               props.onOptionsPress();
