@@ -7,6 +7,8 @@
 #import "../../../../modules/rish/ios/Sources/ProjectContextStore.h"
 
 #include <CommonCrypto/CommonDigest.h>
+#include <errno.h>
+#include <fcntl.h>
 #include <git2.h>
 #include <string.h>
 #include <sys/stat.h>
@@ -440,9 +442,33 @@ static NSString *DSHSHA256Hex(NSData *data) {
 @property(nonatomic, strong) DSHProjectContextService *service;
 - (nullable NSDictionary *)listProjectsSynchronously:(LocalProjectsModule *)projects
                                              rejected:(BOOL *)rejected;
+- (BOOL)requireGitResult:(int)result operation:(NSString *)operation;
+- (BOOL)requirePointer:(const void *)pointer operation:(NSString *)operation;
+- (void)addConflictAtPath:(NSString *)relativePath
+          ancestorContent:(NSString *)ancestorContent
+              oursContent:(NSString *)oursContent
+            theirsContent:(NSString *)theirsContent
+                  fixture:(DSHProjectFixture *)fixture;
 @end
 
 @implementation ProjectContextServiceTests
+
+- (BOOL)requireGitResult:(int)result operation:(NSString *)operation {
+  if (result == 0) return YES;
+  const git_error *lastError = git_error_last();
+  NSString *detail = lastError == nullptr || lastError->message == nullptr
+      ? @"no libgit2 error detail"
+      : [NSString stringWithUTF8String:lastError->message];
+  XCTFail(@"%@ failed with libgit2 result %d: %@", operation, result,
+          detail ?: @"invalid libgit2 error detail");
+  return NO;
+}
+
+- (BOOL)requirePointer:(const void *)pointer operation:(NSString *)operation {
+  if (pointer != nullptr) return YES;
+  XCTFail(@"%@ returned a null pointer", operation);
+  return NO;
+}
 
 - (void)setUp {
   [super setUp];
@@ -542,10 +568,14 @@ static NSString *DSHSHA256Hex(NSData *data) {
       URLByAppendingPathComponent:@"project.json"] atomically:YES]);
 
   git_repository *repository = nullptr;
-  XCTAssertEqual(git_repository_init(&repository,
-                                     repositoryURL.fileSystemRepresentation,
-                                     0),
-                 0);
+  int initResult = git_repository_init(&repository,
+                                       repositoryURL.fileSystemRepresentation,
+                                       0);
+  if (![self requireGitResult:initResult operation:@"git_repository_init"] ||
+      ![self requirePointer:repository operation:@"git_repository_init"]) {
+    if (repository != nullptr) git_repository_free(repository);
+    return nil;
+  }
   DSHProjectFixture *fixture = [[DSHProjectFixture alloc] init];
   fixture.projectId = projectId;
   fixture.projectURL = projectURL;
@@ -585,47 +615,124 @@ static NSString *DSHSHA256Hex(NSData *data) {
 
 - (void)addPathToIndex:(NSString *)relativePath
                 fixture:(DSHProjectFixture *)fixture {
+  if (![self requirePointer:fixture.repository
+                   operation:@"fixture repository for addPathToIndex"]) {
+    return;
+  }
   git_index *index = nullptr;
-  XCTAssertEqual(git_repository_index(&index, fixture.repository), 0);
-  XCTAssertEqual(git_index_add_bypath(index, relativePath.UTF8String), 0);
-  XCTAssertEqual(git_index_write(index), 0);
+  int result = git_repository_index(&index, fixture.repository);
+  if (![self requireGitResult:result operation:@"git_repository_index"] ||
+      ![self requirePointer:index operation:@"git_repository_index"]) {
+    if (index != nullptr) git_index_free(index);
+    return;
+  }
+  result = git_index_add_bypath(index, relativePath.UTF8String);
+  if (![self requireGitResult:result operation:@"git_index_add_bypath"]) {
+    git_index_free(index);
+    return;
+  }
+  result = git_index_write(index);
+  if (![self requireGitResult:result operation:@"git_index_write"]) {
+    git_index_free(index);
+    return;
+  }
   git_index_free(index);
 }
 
 - (void)removePathFromIndex:(NSString *)relativePath
                      fixture:(DSHProjectFixture *)fixture {
+  if (![self requirePointer:fixture.repository
+                   operation:@"fixture repository for removePathFromIndex"]) {
+    return;
+  }
   git_index *index = nullptr;
-  XCTAssertEqual(git_repository_index(&index, fixture.repository), 0);
-  XCTAssertEqual(git_index_remove_bypath(index, relativePath.UTF8String), 0);
-  XCTAssertEqual(git_index_write(index), 0);
+  int result = git_repository_index(&index, fixture.repository);
+  if (![self requireGitResult:result operation:@"git_repository_index"] ||
+      ![self requirePointer:index operation:@"git_repository_index"]) {
+    if (index != nullptr) git_index_free(index);
+    return;
+  }
+  result = git_index_remove_bypath(index, relativePath.UTF8String);
+  if (![self requireGitResult:result operation:@"git_index_remove_bypath"]) {
+    git_index_free(index);
+    return;
+  }
+  result = git_index_write(index);
+  if (![self requireGitResult:result operation:@"git_index_write"]) {
+    git_index_free(index);
+    return;
+  }
   git_index_free(index);
 }
 
 - (void)addPathsToIndex:(NSArray<NSString *> *)relativePaths
                   fixture:(DSHProjectFixture *)fixture {
-  git_index *index = nullptr;
-  XCTAssertEqual(git_repository_index(&index, fixture.repository), 0);
-  for (NSString *relativePath in relativePaths) {
-    XCTAssertEqual(git_index_add_bypath(index, relativePath.UTF8String), 0);
+  if (![self requirePointer:fixture.repository
+                   operation:@"fixture repository for addPathsToIndex"]) {
+    return;
   }
-  XCTAssertEqual(git_index_write(index), 0);
+  git_index *index = nullptr;
+  int result = git_repository_index(&index, fixture.repository);
+  if (![self requireGitResult:result operation:@"git_repository_index"] ||
+      ![self requirePointer:index operation:@"git_repository_index"]) {
+    if (index != nullptr) git_index_free(index);
+    return;
+  }
+  for (NSString *relativePath in relativePaths) {
+    result = git_index_add_bypath(index, relativePath.UTF8String);
+    if (![self requireGitResult:result operation:@"git_index_add_bypath"]) {
+      git_index_free(index);
+      return;
+    }
+  }
+  result = git_index_write(index);
+  if (![self requireGitResult:result operation:@"git_index_write"]) {
+    git_index_free(index);
+    return;
+  }
   git_index_free(index);
 }
 
 - (void)addConflictAtPath:(NSString *)relativePath
                    fixture:(DSHProjectFixture *)fixture {
+  [self addConflictAtPath:relativePath
+          ancestorContent:@"base\n"
+              oursContent:@"ours\n"
+            theirsContent:@"theirs\n"
+                  fixture:fixture];
+}
+
+- (void)addConflictAtPath:(NSString *)relativePath
+          ancestorContent:(NSString *)ancestorContent
+              oursContent:(NSString *)oursContent
+            theirsContent:(NSString *)theirsContent
+                  fixture:(DSHProjectFixture *)fixture {
+  if (![self requirePointer:fixture.repository
+                   operation:@"fixture repository for addConflictAtPath"]) {
+    return;
+  }
+  NSData *ancestorData = DSHData(ancestorContent);
+  NSData *oursData = DSHData(oursContent);
+  NSData *theirsData = DSHData(theirsContent);
   git_oid ancestorOid = {};
   git_oid oursOid = {};
   git_oid theirsOid = {};
-  XCTAssertEqual(git_blob_create_from_buffer(&ancestorOid, fixture.repository,
-                                             "base\n", 5),
-                 0);
-  XCTAssertEqual(git_blob_create_from_buffer(&oursOid, fixture.repository,
-                                             "ours\n", 5),
-                 0);
-  XCTAssertEqual(git_blob_create_from_buffer(&theirsOid, fixture.repository,
-                                             "theirs\n", 7),
-                 0);
+  int result = git_blob_create_from_buffer(&ancestorOid, fixture.repository,
+                                           ancestorData.bytes,
+                                           ancestorData.length);
+  if (![self requireGitResult:result operation:@"git_blob_create ancestor"]) {
+    return;
+  }
+  result = git_blob_create_from_buffer(&oursOid, fixture.repository,
+                                       oursData.bytes, oursData.length);
+  if (![self requireGitResult:result operation:@"git_blob_create ours"]) {
+    return;
+  }
+  result = git_blob_create_from_buffer(&theirsOid, fixture.repository,
+                                       theirsData.bytes, theirsData.length);
+  if (![self requireGitResult:result operation:@"git_blob_create theirs"]) {
+    return;
+  }
   git_index_entry ancestor = {};
   git_index_entry ours = {};
   git_index_entry theirs = {};
@@ -639,11 +746,26 @@ static NSString *DSHSHA256Hex(NSData *data) {
   ours.path = relativePath.UTF8String;
   theirs.path = relativePath.UTF8String;
   git_index *index = nullptr;
-  XCTAssertEqual(git_repository_index(&index, fixture.repository), 0);
-  XCTAssertEqual(git_index_conflict_add(index, &ancestor, &ours, &theirs), 0);
-  XCTAssertEqual(git_index_write(index), 0);
+  result = git_repository_index(&index, fixture.repository);
+  if (![self requireGitResult:result operation:@"git_repository_index"] ||
+      ![self requirePointer:index operation:@"git_repository_index"]) {
+    if (index != nullptr) git_index_free(index);
+    return;
+  }
+  result = git_index_conflict_add(index, &ancestor, &ours, &theirs);
+  if (![self requireGitResult:result operation:@"git_index_conflict_add"]) {
+    git_index_free(index);
+    return;
+  }
+  result = git_index_write(index);
+  if (![self requireGitResult:result operation:@"git_index_write"]) {
+    git_index_free(index);
+    return;
+  }
   git_index_free(index);
-  [self writeString:@"<<<<<<< ours\nours\n=======\ntheirs\n>>>>>>> theirs\n"
+  [self writeString:[NSString stringWithFormat:
+      @"<<<<<<< ours\n%@=======\n%@>>>>>>> theirs\n", oursContent,
+      theirsContent]
        relativePath:relativePath
             fixture:fixture];
 }
@@ -698,33 +820,68 @@ static NSString *DSHSHA256Hex(NSData *data) {
   git_signature *signature = nullptr;
   git_oid treeOid = {};
   git_oid commitOid = {};
-  XCTAssertEqual(git_repository_index(&index, fixture.repository), 0);
-  XCTAssertEqual(git_index_write_tree(&treeOid, index), 0);
-  XCTAssertEqual(git_tree_lookup(&tree, fixture.repository, &treeOid), 0);
-  int headResult = git_repository_head(&head, fixture.repository);
-  if (headResult == 0) {
-    XCTAssertEqual(git_commit_lookup(&parent, fixture.repository,
-                                    git_reference_target(head)),
-                   0);
-  } else {
-    XCTAssertTrue(headResult == GIT_EUNBORNBRANCH || headResult == GIT_ENOTFOUND);
+  if (![self requirePointer:fixture.repository
+                   operation:@"fixture repository for commitFixture"]) {
+    return nil;
   }
-  XCTAssertEqual(git_signature_new(&signature, "Rish Test",
-                                   "rish-test@example.invalid", 1'777'777'777,
-                                   0),
-                 0);
-  const git_commit *parents[] = {parent};
-  XCTAssertEqual(git_commit_create(&commitOid, fixture.repository, "HEAD",
-                                   signature, signature, "UTF-8",
-                                   message.UTF8String, tree,
-                                   parent == nullptr ? 0 : 1, parents),
-                 0);
-  if (signature != nullptr) git_signature_free(signature);
-  if (head != nullptr) git_reference_free(head);
-  if (parent != nullptr) git_commit_free(parent);
-  if (tree != nullptr) git_tree_free(tree);
-  if (index != nullptr) git_index_free(index);
-  return DSHOidString(&commitOid);
+  @try {
+    int result = git_repository_index(&index, fixture.repository);
+    if (![self requireGitResult:result operation:@"git_repository_index"] ||
+        ![self requirePointer:index operation:@"git_repository_index"]) {
+      return nil;
+    }
+    result = git_index_write_tree(&treeOid, index);
+    if (![self requireGitResult:result operation:@"git_index_write_tree"]) {
+      return nil;
+    }
+    result = git_tree_lookup(&tree, fixture.repository, &treeOid);
+    if (![self requireGitResult:result operation:@"git_tree_lookup"] ||
+        ![self requirePointer:tree operation:@"git_tree_lookup"]) {
+      return nil;
+    }
+    int headResult = git_repository_head(&head, fixture.repository);
+    if (headResult == 0) {
+      if (![self requirePointer:head operation:@"git_repository_head"] ||
+          ![self requirePointer:git_reference_target(head)
+                       operation:@"git_reference_target"]) {
+        return nil;
+      }
+      result = git_commit_lookup(&parent, fixture.repository,
+                                 git_reference_target(head));
+      if (![self requireGitResult:result operation:@"git_commit_lookup"] ||
+          ![self requirePointer:parent operation:@"git_commit_lookup"]) {
+        return nil;
+      }
+    } else if (headResult != GIT_EUNBORNBRANCH &&
+               headResult != GIT_ENOTFOUND) {
+      [self requireGitResult:headResult operation:@"git_repository_head"];
+      return nil;
+    }
+    result = git_signature_new(&signature, "Rish Test",
+                               "rish-test@example.invalid", 1'777'777'777,
+                               0);
+    if (![self requireGitResult:result operation:@"git_signature_new"] ||
+        ![self requirePointer:signature operation:@"git_signature_new"]) {
+      return nil;
+    }
+    const git_commit *parents[] = {parent};
+    result = git_commit_create(&commitOid, fixture.repository, "HEAD",
+                               signature, signature, "UTF-8",
+                               message.UTF8String, tree,
+                               parent == nullptr ? 0 : 1, parents);
+    if (![self requireGitResult:result operation:@"git_commit_create"]) {
+      return nil;
+    }
+    NSString *oid = DSHOidString(&commitOid);
+    if (oid == nil) XCTFail(@"git_commit_create produced an invalid OID");
+    return oid;
+  } @finally {
+    if (signature != nullptr) git_signature_free(signature);
+    if (head != nullptr) git_reference_free(head);
+    if (parent != nullptr) git_commit_free(parent);
+    if (tree != nullptr) git_tree_free(tree);
+    if (index != nullptr) git_index_free(index);
+  }
 }
 
 - (NSDictionary *)selectionForFixture:(DSHProjectFixture *)fixture
@@ -1226,16 +1383,118 @@ static NSString *DSHSHA256Hex(NSData *data) {
                                       initialFile:@"conflict.txt"
                                           content:@"base\n"
                                            commit:YES];
-  [self addConflictAtPath:@"conflict.txt" fixture:fixture];
+  NSString *firstOursToken = @"OURS_CONTENT_MUST_STAY_PRIVATE_41A7";
+  NSString *firstTheirsToken = @"THEIRS_CONTENT_MUST_STAY_PRIVATE_52B8";
+  NSString *firstOurs = [firstOursToken stringByAppendingString:@"\n"];
+  NSString *firstTheirs = [firstTheirsToken stringByAppendingString:@"\n"];
+  [self addConflictAtPath:@"conflict.txt"
+          ancestorContent:@"base\n"
+              oursContent:firstOurs
+            theirsContent:firstTheirs
+                  fixture:fixture];
   NSError *error = nil;
-  NSDictionary *manifest = [self.service
+  NSDictionary *first = [self.service
       prepareSelection:[self selectionForFixture:fixture
                                            paths:@[@"conflict.txt"]]
                    error:&error];
-  XCTAssertTrue([manifest[@"conflicted"] boolValue]);
-  XCTAssertEqualObjects(manifest[@"omitted"][0][@"path"], @"conflict.txt");
-  XCTAssertEqualObjects(manifest[@"omitted"][0][@"reason"],
+  XCTAssertNotNil(first);
+  XCTAssertNil(error);
+  if (first == nil) return;
+  NSPredicate *lowercaseSHA256 =
+      [NSPredicate predicateWithFormat:@"SELF MATCHES %@", @"^[0-9a-f]{64}$"];
+  XCTAssertTrue([lowercaseSHA256 evaluateWithObject:first[@"source_fingerprint"]]);
+  XCTAssertTrue([first[@"conflicted"] boolValue]);
+  XCTAssertEqualObjects(first[@"omitted"][0][@"path"], @"conflict.txt");
+  XCTAssertEqualObjects(first[@"omitted"][0][@"reason"],
                         DSHProjectContextOmissionReasonPolicy);
+  XCTAssertEqual([first[@"included"] count], (NSUInteger)0);
+
+  NSDictionary *firstStored =
+      [self.store loadSnapshotId:first[@"snapshot_id"] error:&error];
+  NSData *firstManifestData =
+      [NSJSONSerialization dataWithJSONObject:first options:NSJSONWritingSortedKeys
+                                         error:&error];
+  NSString *firstManifestText = [[NSString alloc] initWithData:firstManifestData
+                                                       encoding:NSUTF8StringEncoding];
+  NSString *firstEnvelopeText = [[NSString alloc]
+      initWithData:firstStored[@"envelope"] encoding:NSUTF8StringEncoding];
+  XCTAssertNotNil(firstEnvelopeText);
+  XCTAssertFalse([firstManifestText containsString:firstOursToken]);
+  XCTAssertFalse([firstManifestText containsString:firstTheirsToken]);
+  XCTAssertFalse([firstEnvelopeText containsString:firstOursToken]);
+  XCTAssertFalse([firstEnvelopeText containsString:firstTheirsToken]);
+
+  error = nil;
+  NSDictionary *unchanged = [self.service
+      prepareSelection:[self selectionForFixture:fixture
+                                           paths:@[@"conflict.txt"]]
+                   error:&error];
+  XCTAssertNotNil(unchanged);
+  XCTAssertNil(error);
+  XCTAssertEqualObjects(unchanged[@"source_fingerprint"],
+                        first[@"source_fingerprint"]);
+
+  NSString *changedOursToken = @"CHANGED_OURS_MUST_STAY_PRIVATE_63C9";
+  NSString *changedOurs = [changedOursToken stringByAppendingString:@"\n"];
+  [self addConflictAtPath:@"conflict.txt"
+          ancestorContent:@"base\n"
+              oursContent:changedOurs
+            theirsContent:firstTheirs
+                  fixture:fixture];
+  error = nil;
+  NSDictionary *oursChanged = [self.service
+      prepareSelection:[self selectionForFixture:fixture
+                                           paths:@[@"conflict.txt"]]
+                   error:&error];
+  XCTAssertNotNil(oursChanged);
+  XCTAssertNil(error);
+  if (oursChanged == nil) return;
+  XCTAssertTrue([lowercaseSHA256
+      evaluateWithObject:oursChanged[@"source_fingerprint"]]);
+  XCTAssertNotEqualObjects(oursChanged[@"source_fingerprint"],
+                           first[@"source_fingerprint"]);
+
+  NSString *changedTheirsToken = @"CHANGED_THEIRS_MUST_STAY_PRIVATE_74DA";
+  NSString *changedTheirs =
+      [changedTheirsToken stringByAppendingString:@"\n"];
+  [self addConflictAtPath:@"conflict.txt"
+          ancestorContent:@"base\n"
+              oursContent:changedOurs
+            theirsContent:changedTheirs
+                  fixture:fixture];
+  error = nil;
+  NSDictionary *theirsChanged = [self.service
+      prepareSelection:[self selectionForFixture:fixture
+                                           paths:@[@"conflict.txt"]]
+                   error:&error];
+  XCTAssertNotNil(theirsChanged);
+  XCTAssertNil(error);
+  if (theirsChanged == nil) return;
+  XCTAssertTrue([lowercaseSHA256
+      evaluateWithObject:theirsChanged[@"source_fingerprint"]]);
+  XCTAssertNotEqualObjects(theirsChanged[@"source_fingerprint"],
+                           oursChanged[@"source_fingerprint"]);
+  XCTAssertEqual([theirsChanged[@"included"] count], (NSUInteger)0);
+  XCTAssertEqualObjects(theirsChanged[@"omitted"][0][@"path"],
+                        @"conflict.txt");
+  XCTAssertEqualObjects(theirsChanged[@"omitted"][0][@"reason"],
+                        DSHProjectContextOmissionReasonPolicy);
+  NSDictionary *changedStored =
+      [self.store loadSnapshotId:theirsChanged[@"snapshot_id"] error:&error];
+  NSData *changedManifestData =
+      [NSJSONSerialization dataWithJSONObject:theirsChanged
+                                      options:NSJSONWritingSortedKeys
+                                        error:&error];
+  NSString *changedManifestText = [[NSString alloc]
+      initWithData:changedManifestData encoding:NSUTF8StringEncoding];
+  NSString *changedEnvelopeText = [[NSString alloc]
+      initWithData:changedStored[@"envelope"] encoding:NSUTF8StringEncoding];
+  XCTAssertNotNil(changedEnvelopeText);
+  for (NSString *token in @[ firstOursToken, firstTheirsToken,
+                              changedOursToken, changedTheirsToken ]) {
+    XCTAssertFalse([changedManifestText containsString:token]);
+    XCTAssertFalse([changedEnvelopeText containsString:token]);
+  }
 }
 
 - (void)testUnbornHeadIncludesCompleteStagedAddition {
@@ -1476,39 +1735,120 @@ static NSString *DSHSHA256Hex(NSData *data) {
                                       initialFile:nil
                                           content:nil
                                            commit:NO];
-  git_index *index = nullptr;
-  XCTAssertEqual(git_repository_index(&index, fixture.repository), 0);
-  git_index_entry entry = {};
+  XCTAssertNotNil(fixture);
+  if (fixture == nil) return;
   const char invalidPath[] = {'s', 'r', 'c', '/', (char)0xff,
                               (char)0xfe, '.', 'm', 'd', '\0'};
-  entry.path = invalidPath;
-  entry.mode = GIT_FILEMODE_BLOB;
-  entry.file_size = 1;
-  XCTAssertEqual(git_blob_create_from_buffer(&entry.id, fixture.repository,
-                                              "x", 1), 0);
-  XCTAssertEqual(git_index_add(index, &entry), 0);
-  XCTAssertEqual(git_index_write(index), 0);
-  XCTAssertEqual(git_index_read(index, 1), 0);
-  BOOL foundExactBytes = NO;
-  for (size_t item = 0; item < git_index_entrycount(index); item++) {
-    const git_index_entry *stored = git_index_get_byindex(index, item);
-    if (stored != nullptr && stored->path != nullptr &&
-        memcmp(stored->path, invalidPath, sizeof(invalidPath)) == 0) {
-      foundExactBytes = YES;
-      break;
+  int repositoryFD = -1;
+  int rawFileFD = -1;
+  git_index *index = nullptr;
+  @try {
+    repositoryFD = open(fixture.repositoryURL.fileSystemRepresentation,
+                        O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW);
+    XCTAssertGreaterThanOrEqual(repositoryFD, 0);
+    if (repositoryFD < 0) return;
+    int directoryResult = mkdirat(repositoryFD, "src", 0700);
+    XCTAssertTrue(directoryResult == 0 || errno == EEXIST);
+    if (directoryResult != 0 && errno != EEXIST) return;
+    rawFileFD = openat(repositoryFD, invalidPath,
+                       O_WRONLY | O_CREAT | O_EXCL | O_CLOEXEC | O_NOFOLLOW,
+                       0600);
+    if (rawFileFD < 0) {
+      int rawOpenError = errno;
+      // APFS rejects non-UTF-8 directory entries at the syscall boundary.
+      // Keep the raw index fixture below so the service still receives the
+      // exact bytes; filesystems that permit them also exercise live cleanup.
+      XCTAssertEqual(rawOpenError, EILSEQ);
+    } else {
+      const uint8_t contents = 'x';
+      ssize_t written = write(rawFileFD, &contents, sizeof(contents));
+      XCTAssertEqual(written, (ssize_t)sizeof(contents));
+      if (written != (ssize_t)sizeof(contents)) return;
+      int syncResult = fsync(rawFileFD);
+      XCTAssertEqual(syncResult, 0);
+      if (syncResult != 0) return;
+      close(rawFileFD);
+      rawFileFD = -1;
+    }
+
+    int result = git_repository_index(&index, fixture.repository);
+    if (![self requireGitResult:result operation:@"git_repository_index"] ||
+        ![self requirePointer:index operation:@"git_repository_index"]) {
+      return;
+    }
+    git_index_entry entry = {};
+    entry.path = invalidPath;
+    entry.mode = GIT_FILEMODE_BLOB;
+    entry.file_size = 1;
+    result = git_blob_create_from_buffer(&entry.id, fixture.repository, "x", 1);
+    if (![self requireGitResult:result operation:@"git_blob_create invalid path"])
+      return;
+    result = git_index_add(index, &entry);
+    if (![self requireGitResult:result operation:@"git_index_add invalid path"])
+      return;
+    result = git_index_write(index);
+    if (![self requireGitResult:result operation:@"git_index_write invalid path"])
+      return;
+    result = git_index_read(index, 1);
+    if (![self requireGitResult:result operation:@"git_index_read invalid path"])
+      return;
+    BOOL foundExactBytes = NO;
+    for (size_t item = 0; item < git_index_entrycount(index); item++) {
+      const git_index_entry *stored = git_index_get_byindex(index, item);
+      if (stored != nullptr && stored->path != nullptr &&
+          memcmp(stored->path, invalidPath, sizeof(invalidPath)) == 0) {
+        foundExactBytes = YES;
+        break;
+      }
+    }
+    XCTAssertTrue(foundExactBytes);
+    git_index_free(index);
+    index = nullptr;
+
+    NSError *firstError = nil;
+    __block NSDictionary *firstPage = nil;
+    XCTAssertNoThrow(firstPage = [self.service
+        listCandidatesForProjectId:fixture.projectId query:@"" cursor:nil
+                             error:&firstError]);
+    XCTAssertNil(firstPage);
+    XCTAssertEqualObjects(firstError.domain,
+                          DSHProjectContextServiceErrorDomain);
+    XCTAssertEqual(firstError.code, DSHProjectContextServiceErrorIntegrity);
+    XCTAssertFalse([firstError.localizedDescription containsString:@"src"]);
+
+    NSError *secondError = nil;
+    __block NSDictionary *secondPage = nil;
+    XCTAssertNoThrow(secondPage = [self.service
+        listCandidatesForProjectId:fixture.projectId query:@"" cursor:nil
+                             error:&secondError]);
+    XCTAssertNil(secondPage);
+    XCTAssertEqualObjects(secondError.domain,
+                          DSHProjectContextServiceErrorDomain);
+    XCTAssertEqual(secondError.code, DSHProjectContextServiceErrorIntegrity);
+    XCTAssertEqualObjects(secondError.domain, firstError.domain);
+    XCTAssertEqual(secondError.code, firstError.code);
+    XCTAssertEqualObjects(secondError.localizedDescription,
+                          firstError.localizedDescription);
+
+    NSData *errorBytes = [[NSString stringWithFormat:@"%@", firstError]
+        dataUsingEncoding:NSUTF8StringEncoding];
+    NSData *rawPathBytes = [NSData dataWithBytes:invalidPath
+                                           length:sizeof(invalidPath) - 1];
+    NSData *pathPrefix = [@"src/" dataUsingEncoding:NSUTF8StringEncoding];
+    NSRange fullRange = NSMakeRange(0, errorBytes.length);
+    XCTAssertEqual([errorBytes rangeOfData:rawPathBytes options:0 range:fullRange].location,
+                   NSNotFound);
+    XCTAssertEqual([errorBytes rangeOfData:pathPrefix options:0 range:fullRange].location,
+                   NSNotFound);
+  } @finally {
+    if (index != nullptr) git_index_free(index);
+    if (rawFileFD >= 0) close(rawFileFD);
+    if (repositoryFD >= 0) {
+      unlinkat(repositoryFD, invalidPath, 0);
+      unlinkat(repositoryFD, "src", AT_REMOVEDIR);
+      close(repositoryFD);
     }
   }
-  git_index_free(index);
-  XCTAssertTrue(foundExactBytes);
-
-  NSError *error = nil;
-  __block NSDictionary *page = nil;
-  XCTAssertNoThrow(page = [self.service
-      listCandidatesForProjectId:fixture.projectId query:@"" cursor:nil
-                           error:&error]);
-  XCTAssertNil(page);
-  XCTAssertEqual(error.code, DSHProjectContextServiceErrorIntegrity);
-  XCTAssertFalse([error.localizedDescription containsString:@"src"]);
 }
 
 - (void)testDiffBudgetIncludesOnlyWholePatchesAndNeverTruncatesAt128KiB {
