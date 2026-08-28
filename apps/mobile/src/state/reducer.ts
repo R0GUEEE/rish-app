@@ -9,7 +9,9 @@ import {
   CONVERSATION_THINKING_MODES,
   CONVERSATION_TURN_SCHEMA_VERSION,
   SUPPORTED_MODEL_IDS,
+  TURN_ATTEMPT_STATUSES,
   TURN_ATTEMPT_SCHEMA_VERSION,
+  PROJECT_CONTEXT_DESTRUCTIVE_TRANSITION_SCHEMA_VERSION,
   type ChatAction,
   type ChatAttachment,
   type ChatAttachmentKind,
@@ -21,6 +23,8 @@ import {
   type CompletionRoundReceiptV1,
   type ModelId,
   type ProjectContextMutationScope,
+  type ProjectContextDestructiveAdvanceScope,
+  type ProjectContextDestructiveTransitionV1,
   type TurnAttemptV1,
 } from './types';
 import {
@@ -63,6 +67,7 @@ const finishReasons: ReadonlySet<string> = new Set(COMPLETION_FINISH_REASONS);
 const attemptFailureCodes: ReadonlySet<string> = new Set(
   ATTEMPT_FAILURE_CODES,
 );
+const attemptStatuses: ReadonlySet<string> = new Set(TURN_ATTEMPT_STATUSES);
 const mimeTypePattern = /^[A-Za-z0-9!#$&^_.+-]+\/[A-Za-z0-9!#$&^_.+-]+$/u;
 const canonicalUuidPattern =
   /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/u;
@@ -148,6 +153,46 @@ const replaceConfirmedContextKeys = [
   'consent',
 ] as const;
 const disableContextKeys = ['scope', 'at'] as const;
+const destructiveOwnerKeys = [
+  'conversationId',
+  'projectId',
+  'runtimeContextId',
+  'modelId',
+  'expectedUpdatedAt',
+  'expectedContext',
+] as const;
+const destructiveBeginKeys = [
+  'lifecycleId',
+  'action',
+  'targetProjectId',
+  'owner',
+  'at',
+] as const;
+const destructiveAdvanceKeys = ['scope', 'at'] as const;
+const destructiveAdvanceScopeKeys = [
+  'lifecycleId',
+  'epoch',
+  'action',
+  'targetProjectId',
+  'expectedTransition',
+] as const;
+const destructiveTransitionKeys = [
+  'schemaVersion',
+  'lifecycleId',
+  'epoch',
+  'action',
+  'phase',
+  'conversationId',
+  'sourceProjectId',
+  'sourceRuntimeContextId',
+  'sourceModelId',
+  'snapshotId',
+  'snapshotSha256',
+  'consentReceiptId',
+  'targetProjectId',
+  'createdAt',
+  'updatedAt',
+] as const;
 
 function isExactDataRecord(
   value: unknown,
@@ -179,6 +224,8 @@ function isExactDataRecord(
 export function createEmptyChatState(): ChatState {
   return {
     schemaVersion: CHAT_STATE_SCHEMA_VERSION,
+    projectContextDestructiveEpoch: 0,
+    projectContextDestructiveTransition: null,
     conversations: {},
     conversationOrder: [],
     selectedConversationId: null,
@@ -1013,6 +1060,87 @@ export function selectProjectContextSnapshotReferences(
   }
 }
 
+export function hasProjectContextDestructiveReferences(
+  state: ChatState,
+  transition: ProjectContextDestructiveTransitionV1,
+): boolean {
+  try {
+    const conversation = state.conversations[transition.conversationId];
+    if (
+      conversation === undefined ||
+      !Array.isArray(conversation.attempts) ||
+      Object.getPrototypeOf(conversation.attempts) !== Array.prototype ||
+      conversation.attempts.length >
+        MAX_PROJECT_CONTEXT_SNAPSHOT_REFERENCE_SCAN ||
+      Object.getOwnPropertySymbols(conversation.attempts).length > 0
+    ) {
+      return true;
+    }
+    const visibleMessageIds = conversation.messages
+      .slice(-MAX_ATTEMPT_VISIBLE_MESSAGES)
+      .map(message => message.id);
+    for (let index = 0; index < conversation.attempts.length; index += 1) {
+      const descriptor = Object.getOwnPropertyDescriptor(
+        conversation.attempts,
+        String(index),
+      );
+      if (
+        descriptor === undefined ||
+        !Object.prototype.hasOwnProperty.call(descriptor, 'value') ||
+        descriptor.enumerable !== true ||
+        !isExactDataRecord(
+          descriptor.value,
+          attemptReferenceProjectionKeys,
+        )
+      ) {
+        return true;
+      }
+      const attempt = descriptor.value as TurnAttemptV1;
+      if (!attemptStatuses.has(attempt.status)) return true;
+      if (attempt.contextDisposition === 'unbound') {
+        if (
+          attempt.contextProjectId !== null ||
+          attempt.projectContext !== null
+        ) {
+          return true;
+        }
+        continue;
+      }
+      if (attempt.contextDisposition === 'explicit_without_context') {
+        if (
+          attempt.contextProjectId === null ||
+          attempt.contextProjectId !== conversation.projectId ||
+          attempt.projectContext !== null
+        ) {
+          return true;
+        }
+        continue;
+      }
+      if (attempt.contextDisposition !== 'verified') return true;
+      if (
+        attempt.projectContext === null ||
+        !isExactDataRecord(attempt.projectContext, attemptBindingKeys) ||
+        verifiedAttemptSnapshotId(attempt) === null
+      ) {
+        return true;
+      }
+      if (attempt.projectContext.snapshotId !== transition.snapshotId) continue;
+      if (attempt.status === 'prepared' || attempt.status === 'sending') {
+        return true;
+      }
+      if (
+        (attempt.status === 'failed' || attempt.status === 'cancelled') &&
+        hasSameStrings(attempt.visibleMessageIds, visibleMessageIds)
+      ) {
+        return true;
+      }
+    }
+    return false;
+  } catch {
+    return true;
+  }
+}
+
 function validIdentifier(value: string): boolean {
   return value.trim().length > 0 && value.length <= 256;
 }
@@ -1099,7 +1227,9 @@ function normalizedMessage(
 }
 
 function hasLifecycleId(state: ChatState, id: string): boolean {
-  return Object.values(state.conversations).some(
+  return (
+    state.projectContextDestructiveTransition?.lifecycleId === id ||
+    Object.values(state.conversations).some(
     conversation =>
       conversation.runtimeContextId === id ||
       conversation.turns.some(turn => turn.turnId === id) ||
@@ -1109,6 +1239,7 @@ function hasLifecycleId(state: ChatState, id: string): boolean {
           attempt.activeRound?.roundId === id ||
           attempt.rounds.some(round => round.roundId === id),
       ),
+    )
   );
 }
 
@@ -1146,7 +1277,215 @@ function replaceAttempt(
   return { ...conversation, attempts };
 }
 
+function deleteConversationState(state: ChatState, id: string): ChatState {
+  if (state.conversations[id] === undefined) return state;
+  const conversations = { ...state.conversations };
+  delete conversations[id];
+  const conversationOrder = orderConversationIds(conversations);
+  return {
+    ...state,
+    conversations,
+    conversationOrder,
+    selectedConversationId:
+      state.selectedConversationId === id
+        ? conversationOrder[0] ?? null
+        : state.selectedConversationId,
+  };
+}
+
+function requiresDestructiveLifecycle(conversation: Conversation): boolean {
+  const context = conversation.projectContext;
+  return (
+    context !== null &&
+    (context.snapshot !== null || context.activePreparationId !== null)
+  );
+}
+
+function isExactDisabledContext(
+  conversation: Conversation,
+  transition: ProjectContextDestructiveTransitionV1,
+): boolean {
+  const context = conversation.projectContext;
+  return (
+    conversation.projectId === transition.sourceProjectId &&
+    conversation.runtimeContextId === transition.sourceRuntimeContextId &&
+    conversation.modelId === transition.sourceModelId &&
+    context !== null &&
+    context.projectId === transition.sourceProjectId &&
+    context.status === 'setup_required' &&
+    context.selectedPaths.length === 0 &&
+    context.activePreparationId === null &&
+    context.snapshot === null &&
+    context.consent === null &&
+    context.staleReason === null &&
+    context.errorCode === null
+  );
+}
+
+function isValidDestructiveTransition(
+  value: unknown,
+): value is ProjectContextDestructiveTransitionV1 {
+  try {
+    if (!isExactDataRecord(value, destructiveTransitionKeys)) return false;
+    const transition = value as ProjectContextDestructiveTransitionV1;
+    return (
+      transition.schemaVersion ===
+        PROJECT_CONTEXT_DESTRUCTIVE_TRANSITION_SCHEMA_VERSION &&
+      isCanonicalLifecycleId(transition.lifecycleId) &&
+      Number.isSafeInteger(transition.epoch) &&
+      !Object.is(transition.epoch, -0) &&
+      transition.epoch > 0 &&
+      (transition.action === 'unbind' ||
+        transition.action === 'delete' ||
+        transition.action === 'rebind') &&
+      (transition.phase === 'intent' ||
+        transition.phase === 'cleanup_pending' ||
+        transition.phase === 'ready_to_finalize') &&
+      validIdentifier(transition.conversationId) &&
+      isProjectId(transition.sourceProjectId) &&
+      (transition.sourceRuntimeContextId === null ||
+        isCanonicalLifecycleId(transition.sourceRuntimeContextId)) &&
+      isModelId(transition.sourceModelId) &&
+      isCanonicalLifecycleId(transition.snapshotId) &&
+      isSha256Digest(transition.snapshotSha256) &&
+      (transition.consentReceiptId === null ||
+        isCanonicalLifecycleId(transition.consentReceiptId)) &&
+      ((transition.action === 'rebind' &&
+        transition.targetProjectId !== null &&
+        isProjectId(transition.targetProjectId) &&
+        transition.targetProjectId !== transition.sourceProjectId) ||
+        (transition.action !== 'rebind' &&
+          transition.targetProjectId === null)) &&
+      isCanonicalTimestamp(transition.createdAt) &&
+      isCanonicalTimestamp(transition.updatedAt) &&
+      Date.parse(transition.updatedAt) >= Date.parse(transition.createdAt)
+    );
+  } catch {
+    return false;
+  }
+}
+
+function destructiveAdvanceScopeMatches(
+  scope: unknown,
+  transition: ProjectContextDestructiveTransitionV1 | null,
+): scope is ProjectContextDestructiveAdvanceScope {
+  try {
+    if (
+      transition === null ||
+      !isExactDataRecord(scope, destructiveAdvanceScopeKeys) ||
+      !isValidDestructiveTransition(scope.expectedTransition) ||
+      scope.expectedTransition !== transition
+    ) {
+      return false;
+    }
+    return (
+      scope.lifecycleId === transition.lifecycleId &&
+      scope.epoch === transition.epoch &&
+      scope.action === transition.action &&
+      scope.targetProjectId === transition.targetProjectId
+    );
+  } catch {
+    return false;
+  }
+}
+
+function isExactIntentContext(
+  conversation: Conversation,
+  transition: ProjectContextDestructiveTransitionV1,
+): boolean {
+  const context = conversation.projectContext;
+  return (
+    conversation.projectId === transition.sourceProjectId &&
+    conversation.runtimeContextId === transition.sourceRuntimeContextId &&
+    conversation.modelId === transition.sourceModelId &&
+    context !== null &&
+    context.activePreparationId === null &&
+    context.snapshot?.snapshot_id === transition.snapshotId &&
+    context.snapshot.snapshot_sha256 === transition.snapshotSha256 &&
+    (context.consent?.consent_receipt_id ?? null) ===
+      transition.consentReceiptId
+  );
+}
+
+function destructiveTransitionConversation(
+  state: ChatState,
+  scope: unknown,
+  phase: ProjectContextDestructiveTransitionV1['phase'],
+): {
+  transition: ProjectContextDestructiveTransitionV1;
+  conversation: Conversation;
+} | null {
+  const transition = state.projectContextDestructiveTransition;
+  if (
+    transition === null ||
+    !destructiveAdvanceScopeMatches(scope, transition) ||
+    transition.phase !== phase ||
+    state.projectContextDestructiveEpoch !== transition.epoch
+  ) {
+    return null;
+  }
+  const conversation = state.conversations[transition.conversationId];
+  if (
+    conversation === undefined ||
+    !isExactDisabledContext(conversation, transition) ||
+    hasProjectContextDestructiveReferences(state, transition)
+  ) {
+    return null;
+  }
+  return { transition, conversation };
+}
+
+function destructiveTargetConversationId(action: ChatAction): string | null {
+  switch (action.type) {
+    case 'conversation/rename':
+    case 'conversation/auto-title':
+    case 'conversation/delete':
+    case 'conversation/set-model':
+    case 'conversation/set-thinking':
+    case 'conversation/bind-project':
+    case 'conversation/unbind-project':
+    case 'conversation/bind-workspace':
+    case 'conversation/unbind-workspace':
+    case 'conversation/ensure-runtime-context':
+      return action.payload.id;
+    case 'project-context/apply':
+      return action.payload.conversationId;
+    case 'project-context/replace-prepared':
+    case 'project-context/replace-confirmed':
+    case 'project-context/disable':
+      return typeof action.payload.scope === 'object' &&
+        action.payload.scope !== null &&
+        'conversationId' in action.payload.scope &&
+        typeof action.payload.scope.conversationId === 'string'
+        ? action.payload.scope.conversationId
+        : null;
+    case 'message/append':
+    case 'turn/prepare':
+    case 'attempt/start-round':
+    case 'attempt/record-round':
+    case 'attempt/complete':
+    case 'attempt/fail':
+    case 'attempt/cancel':
+    case 'attempt/retry':
+      return action.payload.conversationId;
+    case 'conversation/create':
+    case 'conversation/select':
+    case 'project-context-destructive/begin':
+    case 'project-context-destructive/tombstone':
+    case 'project-context-destructive/cleanup-complete':
+    case 'project-context-destructive/finalize':
+      return null;
+  }
+}
+
 export function chatReducer(state: ChatState, action: ChatAction): ChatState {
+  const lifecycleTarget = state.projectContextDestructiveTransition;
+  if (
+    lifecycleTarget !== null &&
+    destructiveTargetConversationId(action) === lifecycleTarget.conversationId
+  ) {
+    return state;
+  }
   switch (action.type) {
     case 'conversation/create': {
       const {
@@ -1252,21 +1591,14 @@ export function chatReducer(state: ChatState, action: ChatAction): ChatState {
 
     case 'conversation/delete': {
       const { id } = action.payload;
-      if (state.conversations[id] === undefined) {
+      const conversation = state.conversations[id];
+      if (
+        conversation === undefined ||
+        requiresDestructiveLifecycle(conversation)
+      ) {
         return state;
       }
-      const conversations = { ...state.conversations };
-      delete conversations[id];
-      const conversationOrder = orderConversationIds(conversations);
-      return {
-        ...state,
-        conversations,
-        conversationOrder,
-        selectedConversationId:
-          state.selectedConversationId === id
-            ? conversationOrder[0] ?? null
-            : state.selectedConversationId,
-      };
+      return deleteConversationState(state, id);
     }
 
     case 'conversation/set-model': {
@@ -1318,6 +1650,7 @@ export function chatReducer(state: ChatState, action: ChatAction): ChatState {
         !isProjectId(action.payload.projectId) ||
         !isCanonicalTimestamp(action.payload.at) ||
         hasLiveAttempt(conversation) ||
+        requiresDestructiveLifecycle(conversation) ||
         conversation.projectId === action.payload.projectId
       ) {
         return state;
@@ -1336,6 +1669,7 @@ export function chatReducer(state: ChatState, action: ChatAction): ChatState {
         conversation === undefined ||
         conversation.projectId === null ||
         hasLiveAttempt(conversation) ||
+        requiresDestructiveLifecycle(conversation) ||
         !isCanonicalTimestamp(action.payload.at)
       ) {
         return state;
@@ -1573,6 +1907,216 @@ export function chatReducer(state: ChatState, action: ChatAction): ChatState {
         ...conversation,
         projectContext: createProjectContextState(conversation.projectId!),
         updatedAt: laterTimestamp(conversation.updatedAt, payload.at),
+      });
+    }
+
+    case 'project-context-destructive/begin': {
+      const payload = action.payload;
+      if (
+        !isExactDataRecord(payload, destructiveBeginKeys) ||
+        !isExactDataRecord(payload.owner, destructiveOwnerKeys) ||
+        state.projectContextDestructiveTransition !== null ||
+        state.projectContextDestructiveEpoch >= Number.MAX_SAFE_INTEGER ||
+        !isCanonicalLifecycleId(payload.lifecycleId) ||
+        hasLifecycleId(state, payload.lifecycleId) ||
+        !isCanonicalTimestamp(payload.at) ||
+        (payload.action !== 'unbind' &&
+          payload.action !== 'delete' &&
+          payload.action !== 'rebind') ||
+        ((payload.action === 'rebind') !==
+          (payload.targetProjectId !== null)) ||
+        (payload.targetProjectId !== null &&
+          (!isProjectId(payload.targetProjectId) ||
+            payload.targetProjectId === payload.owner.projectId))
+      ) {
+        return state;
+      }
+      const owner = payload.owner;
+      if (
+        typeof owner.conversationId !== 'string' ||
+        !validIdentifier(owner.conversationId) ||
+        !isProjectId(owner.projectId) ||
+        (owner.runtimeContextId !== null &&
+          !isCanonicalLifecycleId(owner.runtimeContextId)) ||
+        !isModelId(owner.modelId) ||
+        !isCanonicalTimestamp(owner.expectedUpdatedAt)
+      ) {
+        return state;
+      }
+      const conversation = state.conversations[owner.conversationId];
+      const context = conversation?.projectContext;
+      const strictContext =
+        context === null || context === undefined
+          ? null
+          : strictProjectContextState(context);
+      const snapshot = strictContext?.snapshot;
+      if (
+        conversation === undefined ||
+        conversation.projectId !== owner.projectId ||
+        conversation.runtimeContextId !== owner.runtimeContextId ||
+        conversation.modelId !== owner.modelId ||
+        conversation.updatedAt !== owner.expectedUpdatedAt ||
+        Date.parse(payload.at) < Date.parse(owner.expectedUpdatedAt) ||
+        context === null ||
+        context === undefined ||
+        strictContext === null ||
+        context !== owner.expectedContext ||
+        strictContext.activePreparationId !== null ||
+        snapshot === null ||
+        snapshot === undefined ||
+        !isCanonicalLifecycleId(snapshot.snapshot_id) ||
+        !isSha256Digest(snapshot.snapshot_sha256)
+      ) {
+        return state;
+      }
+      const consentReceiptId =
+        strictContext.consent?.consent_receipt_id ?? null;
+      if (
+        consentReceiptId !== null &&
+        !isCanonicalLifecycleId(consentReceiptId)
+      ) {
+        return state;
+      }
+      const epoch = state.projectContextDestructiveEpoch + 1;
+      const transition: ProjectContextDestructiveTransitionV1 = {
+        schemaVersion:
+          PROJECT_CONTEXT_DESTRUCTIVE_TRANSITION_SCHEMA_VERSION,
+        lifecycleId: payload.lifecycleId,
+        epoch,
+        action: payload.action,
+        phase: 'intent',
+        conversationId: conversation.id,
+        sourceProjectId: owner.projectId,
+        sourceRuntimeContextId: owner.runtimeContextId,
+        sourceModelId: owner.modelId,
+        snapshotId: snapshot.snapshot_id,
+        snapshotSha256: snapshot.snapshot_sha256,
+        consentReceiptId,
+        targetProjectId: payload.targetProjectId,
+        createdAt: payload.at,
+        updatedAt: payload.at,
+      };
+      if (hasProjectContextDestructiveReferences(state, transition)) {
+        return state;
+      }
+      return {
+        ...state,
+        projectContextDestructiveEpoch: epoch,
+        projectContextDestructiveTransition: transition,
+      };
+    }
+
+    case 'project-context-destructive/tombstone': {
+      const payload = action.payload;
+      const transition = state.projectContextDestructiveTransition;
+      if (
+        !isExactDataRecord(payload, destructiveAdvanceKeys) ||
+        transition === null ||
+        !destructiveAdvanceScopeMatches(payload.scope, transition) ||
+        !isCanonicalTimestamp(payload.at) ||
+        transition.phase !== 'intent' ||
+        Date.parse(payload.at) < Date.parse(transition.updatedAt) ||
+        state.projectContextDestructiveEpoch !== transition.epoch
+      ) {
+        return state;
+      }
+      const conversation = state.conversations[transition.conversationId];
+      if (
+        conversation === undefined ||
+        !isExactIntentContext(conversation, transition) ||
+        hasProjectContextDestructiveReferences(state, transition)
+      ) {
+        return state;
+      }
+      return withConversation(
+        {
+          ...state,
+          projectContextDestructiveTransition: {
+            ...transition,
+            phase: 'cleanup_pending',
+            updatedAt: payload.at,
+          },
+        },
+        {
+          ...conversation,
+          projectContext: createProjectContextState(
+            transition.sourceProjectId,
+          ),
+          updatedAt: laterTimestamp(conversation.updatedAt, payload.at),
+        },
+      );
+    }
+
+    case 'project-context-destructive/cleanup-complete': {
+      const payload = action.payload;
+      if (
+        !isExactDataRecord(payload, destructiveAdvanceKeys) ||
+        !isCanonicalTimestamp(payload.at)
+      ) {
+        return state;
+      }
+      const owned = destructiveTransitionConversation(
+        state,
+        payload.scope,
+        'cleanup_pending',
+      );
+      if (
+        owned === null ||
+        Date.parse(payload.at) < Date.parse(owned.transition.updatedAt)
+      ) {
+        return state;
+      }
+      return {
+        ...state,
+        projectContextDestructiveTransition: {
+          ...owned.transition,
+          phase: 'ready_to_finalize',
+          updatedAt: payload.at,
+        },
+      };
+    }
+
+    case 'project-context-destructive/finalize': {
+      const payload = action.payload;
+      if (
+        !isExactDataRecord(payload, destructiveAdvanceKeys) ||
+        !isCanonicalTimestamp(payload.at)
+      ) {
+        return state;
+      }
+      const owned = destructiveTransitionConversation(
+        state,
+        payload.scope,
+        'ready_to_finalize',
+      );
+      if (
+        owned === null ||
+        Date.parse(payload.at) < Date.parse(owned.transition.updatedAt)
+      ) {
+        return state;
+      }
+      const transition = owned.transition;
+      const withoutJournal: ChatState = {
+        ...state,
+        projectContextDestructiveTransition: null,
+      };
+      if (transition.action === 'delete') {
+        return deleteConversationState(
+          withoutJournal,
+          transition.conversationId,
+        );
+      }
+      return withConversation(withoutJournal, {
+        ...owned.conversation,
+        projectId:
+          transition.action === 'rebind'
+            ? transition.targetProjectId
+            : null,
+        projectContext:
+          transition.action === 'rebind'
+            ? createProjectContextState(transition.targetProjectId!)
+            : null,
+        updatedAt: laterTimestamp(owned.conversation.updatedAt, payload.at),
       });
     }
 

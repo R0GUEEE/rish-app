@@ -14,7 +14,9 @@ function deferred<T>() {
 }
 
 const CANDIDATE = JSON.stringify({
-  schema_version: 6,
+  schema_version: 7,
+  project_context_destructive_epoch: 0,
+  project_context_destructive_transition: null,
   active_conversation_id: null,
   conversations: [],
   messages: [],
@@ -58,7 +60,9 @@ describe('session persistence coordinator', () => {
         messages: [],
         conversations: [],
         active_conversation_id: null,
-        schema_version: 6,
+        project_context_destructive_transition: null,
+        project_context_destructive_epoch: 0,
+        schema_version: 7,
       });
       const fixture = coordinator({
         persist,

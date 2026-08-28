@@ -12,11 +12,12 @@ import {
   type ProjectContextState,
 } from '../src/project-context';
 import { ProjectContextBridgeError } from '../src/native/LocalProjectContext';
-import type {
-  ChatState,
-  ChatStore,
-  Conversation,
-  ProjectContextMutationScope,
+import {
+  CHAT_STATE_SCHEMA_VERSION,
+  type ChatState,
+  type ChatStore,
+  type Conversation,
+  type ProjectContextMutationScope,
 } from '../src/state';
 import type { SessionDurabilityResult } from '../src/completion/SessionPersistence';
 
@@ -196,7 +197,9 @@ function storeHarness(options: {
   readonly runtimeContextId?: string | null;
 } = {}): StoreHarness {
   let state: ChatState = {
-    schemaVersion: 6,
+    schemaVersion: CHAT_STATE_SCHEMA_VERSION,
+    projectContextDestructiveEpoch: 0,
+    projectContextDestructiveTransition: null,
     conversations: {
       [CONVERSATION_ID]: conversation(
         CONVERSATION_ID,

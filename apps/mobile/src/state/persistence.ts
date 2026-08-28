@@ -10,6 +10,10 @@ import {
   LEGACY_CHAT_STATE_SCHEMA_VERSION,
   OLDER_CHAT_STATE_SCHEMA_VERSION,
   PREVIOUS_CHAT_STATE_SCHEMA_VERSION,
+  WORKSPACE_CHAT_STATE_SCHEMA_VERSION,
+  PROJECT_CONTEXT_DESTRUCTIVE_ACTIONS,
+  PROJECT_CONTEXT_DESTRUCTIVE_PHASES,
+  PROJECT_CONTEXT_DESTRUCTIVE_TRANSITION_SCHEMA_VERSION,
   TURN_ATTEMPT_SCHEMA_VERSION,
   TURN_ATTEMPT_STATUSES,
   ChatStateValidationError,
@@ -23,13 +27,14 @@ import {
   type HydrationResult,
   type PersistedChatAttachmentV1,
   type PersistedChatMessageV4,
-  type PersistedChatStateV6,
+  type PersistedChatStateV7,
   type PersistedCompletionRoundReceiptV1,
   type PersistedConversationTurnV1,
   type PersistedTurnAttemptV1,
   type TurnAttemptStatus,
   type AttemptContextDisposition,
   type TurnAttemptV1,
+  type ProjectContextDestructiveTransitionV1,
 } from './types';
 import {
   DEFAULT_THINKING_MODE,
@@ -54,6 +59,7 @@ import {
   isWorkspaceId,
   orderConversationIds,
   selectActiveMessages,
+  hasProjectContextDestructiveReferences,
 } from './reducer';
 import {
   createProjectContextState,
@@ -79,14 +85,38 @@ const attemptStatuses: ReadonlySet<string> = new Set(TURN_ATTEMPT_STATUSES);
 const contextDispositions: ReadonlySet<string> = new Set(
   ATTEMPT_CONTEXT_DISPOSITIONS,
 );
+const destructiveActions: ReadonlySet<string> = new Set(
+  PROJECT_CONTEXT_DESTRUCTIVE_ACTIONS,
+);
+const destructivePhases: ReadonlySet<string> = new Set(
+  PROJECT_CONTEXT_DESTRUCTIVE_PHASES,
+);
 const opaqueIdPattern = /^[A-Za-z0-9._:-]+$/u;
 
 type PersistedSchemaVersion =
   | typeof LEGACY_CHAT_STATE_SCHEMA_VERSION
   | typeof OLDER_CHAT_STATE_SCHEMA_VERSION
   | typeof ATTACHMENT_CHAT_STATE_SCHEMA_VERSION
+  | typeof WORKSPACE_CHAT_STATE_SCHEMA_VERSION
   | typeof PREVIOUS_CHAT_STATE_SCHEMA_VERSION
   | typeof CHAT_STATE_SCHEMA_VERSION;
+
+function hasWorkspaceShape(schemaVersion: PersistedSchemaVersion): boolean {
+  return (
+    schemaVersion === WORKSPACE_CHAT_STATE_SCHEMA_VERSION ||
+    schemaVersion === PREVIOUS_CHAT_STATE_SCHEMA_VERSION ||
+    schemaVersion === CHAT_STATE_SCHEMA_VERSION
+  );
+}
+
+function hasProjectContextShape(
+  schemaVersion: PersistedSchemaVersion,
+): boolean {
+  return (
+    schemaVersion === PREVIOUS_CHAT_STATE_SCHEMA_VERSION ||
+    schemaVersion === CHAT_STATE_SCHEMA_VERSION
+  );
+}
 
 type UnknownRecord = Record<string, unknown>;
 
@@ -240,6 +270,140 @@ function nonNegativeSafeInteger(value: unknown, path: string): number {
     return invalid(path, 'must be a non-negative safe integer');
   }
   return value;
+}
+
+function lifecycleEpoch(
+  value: unknown,
+  path: string,
+  allowZero: boolean,
+): number {
+  if (
+    typeof value !== 'number' ||
+    !Number.isSafeInteger(value) ||
+    Object.is(value, -0) ||
+    value < (allowZero ? 0 : 1)
+  ) {
+    return invalid(
+      path,
+      allowZero
+        ? 'must be a non-negative safe integer without negative zero'
+        : 'must be a positive safe integer',
+    );
+  }
+  return value;
+}
+
+function parseDestructiveTransition(
+  value: unknown,
+  path: string,
+): ProjectContextDestructiveTransitionV1 {
+  const raw = exactRecord(value, path, [
+    'schema_version',
+    'lifecycle_id',
+    'epoch',
+    'action',
+    'phase',
+    'conversation_id',
+    'source_project_id',
+    'source_runtime_context_id',
+    'source_model_id',
+    'snapshot_id',
+    'snapshot_sha256',
+    'consent_receipt_id',
+    'target_project_id',
+    'created_at',
+    'updated_at',
+  ]);
+  if (
+    raw.schema_version !==
+    PROJECT_CONTEXT_DESTRUCTIVE_TRANSITION_SCHEMA_VERSION
+  ) {
+    return invalid(`${path}.schema_version`, 'must equal 1');
+  }
+  if (
+    typeof raw.action !== 'string' ||
+    !destructiveActions.has(raw.action)
+  ) {
+    return invalid(`${path}.action`, 'is not a supported destructive action');
+  }
+  if (
+    typeof raw.phase !== 'string' ||
+    !destructivePhases.has(raw.phase)
+  ) {
+    return invalid(`${path}.phase`, 'is not a supported lifecycle phase');
+  }
+  if (!isProjectId(raw.source_project_id)) {
+    return invalid(`${path}.source_project_id`, 'must be a valid project id');
+  }
+  if (!isModelId(raw.source_model_id)) {
+    return invalid(`${path}.source_model_id`, 'must be a supported model');
+  }
+  const sourceRuntimeContextId =
+    raw.source_runtime_context_id === null
+      ? null
+      : canonicalLifecycleId(
+          raw.source_runtime_context_id,
+          `${path}.source_runtime_context_id`,
+        );
+  const consentReceiptId =
+    raw.consent_receipt_id === null
+      ? null
+      : canonicalLifecycleId(
+          raw.consent_receipt_id,
+          `${path}.consent_receipt_id`,
+        );
+  const targetProjectId =
+    raw.target_project_id === null ? null : raw.target_project_id;
+  if (targetProjectId !== null && !isProjectId(targetProjectId)) {
+    return invalid(
+      `${path}.target_project_id`,
+      'must be a valid project id or null',
+    );
+  }
+  if (
+    (raw.action === 'rebind') !== (targetProjectId !== null) ||
+    (raw.action === 'rebind' && targetProjectId === raw.source_project_id)
+  ) {
+    return invalid(
+      `${path}.target_project_id`,
+      'must be a distinct project only for rebind',
+    );
+  }
+  const createdAt = timestamp(raw.created_at, `${path}.created_at`);
+  const updatedAt = timestamp(raw.updated_at, `${path}.updated_at`);
+  if (Date.parse(updatedAt) < Date.parse(createdAt)) {
+    return invalid(`${path}.updated_at`, 'must not precede created_at');
+  }
+  return {
+    schemaVersion: PROJECT_CONTEXT_DESTRUCTIVE_TRANSITION_SCHEMA_VERSION,
+    lifecycleId: canonicalLifecycleId(
+      raw.lifecycle_id,
+      `${path}.lifecycle_id`,
+    ),
+    epoch: lifecycleEpoch(raw.epoch, `${path}.epoch`, false),
+    action: raw.action as ProjectContextDestructiveTransitionV1['action'],
+    phase: raw.phase as ProjectContextDestructiveTransitionV1['phase'],
+    conversationId: boundedString(
+      raw.conversation_id,
+      `${path}.conversation_id`,
+      MAX_ID_LENGTH,
+    ),
+    sourceProjectId: raw.source_project_id,
+    sourceRuntimeContextId,
+    sourceModelId: raw.source_model_id,
+    snapshotId: canonicalLifecycleId(
+      raw.snapshot_id,
+      `${path}.snapshot_id`,
+    ),
+    snapshotSha256: sha256(
+      raw.snapshot_sha256,
+      `${path}.snapshot_sha256`,
+    ),
+    consentReceiptId,
+    targetProjectId,
+    createdAt,
+    updatedAt,
+  };
 }
 
 function opaqueProviderId(value: unknown, path: string): string {
@@ -707,7 +871,7 @@ function parseMessage(
   path: string,
   schemaVersion: PersistedSchemaVersion,
 ): ChatMessage {
-  const strict = schemaVersion === CHAT_STATE_SCHEMA_VERSION;
+  const strict = hasProjectContextShape(schemaVersion);
   const raw = strict
     ? exactRecord(
         value,
@@ -1289,7 +1453,7 @@ function parseConversation(
   schemaVersion: PersistedSchemaVersion,
 ): Conversation {
   const raw =
-    schemaVersion === CHAT_STATE_SCHEMA_VERSION
+    hasProjectContextShape(schemaVersion)
       ? exactRecord(value, path, [
           'id',
           'project_id',
@@ -1324,8 +1488,7 @@ function parseConversation(
     return invalid(`${path}.project_id`, 'must be a valid project id or null');
   }
   const workspaceId =
-    schemaVersion === PREVIOUS_CHAT_STATE_SCHEMA_VERSION ||
-    schemaVersion === CHAT_STATE_SCHEMA_VERSION
+    hasWorkspaceShape(schemaVersion)
       ? raw.workspace_id
       : null;
   if (workspaceId !== null && !isWorkspaceId(workspaceId)) {
@@ -1356,7 +1519,7 @@ function parseConversation(
   }
 
   const runtimeContextId =
-    schemaVersion === CHAT_STATE_SCHEMA_VERSION
+    hasProjectContextShape(schemaVersion)
       ? raw.runtime_context_id === null
         ? null
         : canonicalLifecycleId(
@@ -1365,7 +1528,7 @@ function parseConversation(
           )
       : null;
   const projectContext =
-    schemaVersion === CHAT_STATE_SCHEMA_VERSION
+    hasProjectContextShape(schemaVersion)
       ? raw.project_context === null
         ? null
         : (() => {
@@ -1410,7 +1573,7 @@ function parseConversation(
     );
   }
   const turnsRaw =
-    schemaVersion === CHAT_STATE_SCHEMA_VERSION
+    hasProjectContextShape(schemaVersion)
       ? array(
           raw.turns,
           `${path}.turns`,
@@ -1424,7 +1587,7 @@ function parseConversation(
     parseTurn(entry, `${path}.turns[${index}]`),
   );
   const attemptsRaw =
-    schemaVersion === CHAT_STATE_SCHEMA_VERSION
+    hasProjectContextShape(schemaVersion)
       ? array(
           raw.attempts,
           `${path}.attempts`,
@@ -1974,7 +2137,31 @@ function toPersistedAttempt(
   };
 }
 
-function toPersistedState(state: ChatState): PersistedChatStateV6 {
+function toPersistedDestructiveTransition(
+  transition: ProjectContextDestructiveTransitionV1,
+): NonNullable<
+  PersistedChatStateV7['project_context_destructive_transition']
+> {
+  return {
+    schema_version: transition.schemaVersion,
+    lifecycle_id: transition.lifecycleId,
+    epoch: transition.epoch,
+    action: transition.action,
+    phase: transition.phase,
+    conversation_id: transition.conversationId,
+    source_project_id: transition.sourceProjectId,
+    source_runtime_context_id: transition.sourceRuntimeContextId,
+    source_model_id: transition.sourceModelId,
+    snapshot_id: transition.snapshotId,
+    snapshot_sha256: transition.snapshotSha256,
+    consent_receipt_id: transition.consentReceiptId,
+    target_project_id: transition.targetProjectId,
+    created_at: transition.createdAt,
+    updated_at: transition.updatedAt,
+  };
+}
+
+function toPersistedState(state: ChatState): PersistedChatStateV7 {
   const conversationOrder = orderConversationIds(state.conversations);
   const conversations = conversationOrder.map(id => {
     const conversation = state.conversations[id];
@@ -1991,7 +2178,7 @@ function toPersistedState(state: ChatState): PersistedChatStateV6 {
           ? null
           : (JSON.parse(
               serializeProjectContextState(conversation.projectContext),
-            ) as PersistedChatStateV6['conversations'][number]['project_context']),
+            ) as PersistedChatStateV7['conversations'][number]['project_context']),
       title: conversation.title,
       title_source: conversation.titleSource,
       model_id: conversation.modelId,
@@ -2005,6 +2192,14 @@ function toPersistedState(state: ChatState): PersistedChatStateV6 {
   });
   return {
     schema_version: CHAT_STATE_SCHEMA_VERSION,
+    project_context_destructive_epoch:
+      state.projectContextDestructiveEpoch,
+    project_context_destructive_transition:
+      state.projectContextDestructiveTransition === null
+        ? null
+        : toPersistedDestructiveTransition(
+            state.projectContextDestructiveTransition,
+          ),
     active_conversation_id: state.selectedConversationId,
     conversations,
     messages: selectActiveMessages(state).map(toPersistedMessage),
@@ -2031,28 +2226,39 @@ export function hydrateChatState(input: unknown): ChatState {
     decodedSchemaVersion !== LEGACY_CHAT_STATE_SCHEMA_VERSION &&
     decodedSchemaVersion !== OLDER_CHAT_STATE_SCHEMA_VERSION &&
     decodedSchemaVersion !== ATTACHMENT_CHAT_STATE_SCHEMA_VERSION &&
+    decodedSchemaVersion !== WORKSPACE_CHAT_STATE_SCHEMA_VERSION &&
     decodedSchemaVersion !== PREVIOUS_CHAT_STATE_SCHEMA_VERSION &&
     decodedSchemaVersion !== CHAT_STATE_SCHEMA_VERSION
   ) {
     return invalid(
       '$.schema_version',
-      `must equal ${LEGACY_CHAT_STATE_SCHEMA_VERSION}, ${OLDER_CHAT_STATE_SCHEMA_VERSION}, ${ATTACHMENT_CHAT_STATE_SCHEMA_VERSION}, ${PREVIOUS_CHAT_STATE_SCHEMA_VERSION}, or ${CHAT_STATE_SCHEMA_VERSION}`,
+      `must equal ${LEGACY_CHAT_STATE_SCHEMA_VERSION}, ${OLDER_CHAT_STATE_SCHEMA_VERSION}, ${ATTACHMENT_CHAT_STATE_SCHEMA_VERSION}, ${WORKSPACE_CHAT_STATE_SCHEMA_VERSION}, ${PREVIOUS_CHAT_STATE_SCHEMA_VERSION}, or ${CHAT_STATE_SCHEMA_VERSION}`,
     );
   }
   const schemaVersion = decodedSchemaVersion;
-  if (schemaVersion === CHAT_STATE_SCHEMA_VERSION) {
+  if (hasProjectContextShape(schemaVersion)) {
     // App persistence deliberately co-locates the independently validated
     // preferences envelope at the root.
     raw = exactRecord(
       decoded,
       '$',
-      [
-        'schema_version',
-        'active_conversation_id',
-        'conversations',
-        'messages',
-        'preferences',
-      ],
+      schemaVersion === CHAT_STATE_SCHEMA_VERSION
+        ? [
+            'schema_version',
+            'project_context_destructive_epoch',
+            'project_context_destructive_transition',
+            'active_conversation_id',
+            'conversations',
+            'messages',
+            'preferences',
+          ]
+        : [
+            'schema_version',
+            'active_conversation_id',
+            'conversations',
+            'messages',
+            'preferences',
+          ],
       ['preferences'],
     );
   }
@@ -2061,6 +2267,32 @@ export function hydrateChatState(input: unknown): ChatState {
     typeof raw.active_conversation_id !== 'string'
   ) {
     return invalid('$.active_conversation_id', 'must be a string or null');
+  }
+
+  const destructiveEpoch =
+    schemaVersion === CHAT_STATE_SCHEMA_VERSION
+      ? lifecycleEpoch(
+          raw.project_context_destructive_epoch,
+          '$.project_context_destructive_epoch',
+          true,
+        )
+      : 0;
+  const destructiveTransition =
+    schemaVersion === CHAT_STATE_SCHEMA_VERSION &&
+    raw.project_context_destructive_transition !== null
+      ? parseDestructiveTransition(
+          raw.project_context_destructive_transition,
+          '$.project_context_destructive_transition',
+        )
+      : null;
+  if (
+    destructiveTransition !== null &&
+    destructiveTransition.epoch !== destructiveEpoch
+  ) {
+    return invalid(
+      '$.project_context_destructive_transition.epoch',
+      'must match the root destructive epoch',
+    );
   }
 
   const rawConversations = array(
@@ -2141,6 +2373,12 @@ export function hydrateChatState(input: unknown): ChatState {
       }
     });
   });
+  if (destructiveTransition !== null) {
+    claimLifecycleId(
+      destructiveTransition.lifecycleId,
+      '$.project_context_destructive_transition.lifecycle_id',
+    );
+  }
 
   const hydratedConversations: Record<string, Conversation> = {};
   Object.values(conversations).forEach(conversation => {
@@ -2159,6 +2397,97 @@ export function hydrateChatState(input: unknown): ChatState {
       ),
     };
   });
+
+  if (destructiveTransition !== null) {
+    const conversation =
+      hydratedConversations[destructiveTransition.conversationId];
+    if (conversation === undefined) {
+      return invalid(
+        '$.project_context_destructive_transition.conversation_id',
+        'must reference an existing conversation',
+      );
+    }
+    if (
+      conversation.projectId !== destructiveTransition.sourceProjectId ||
+      conversation.runtimeContextId !==
+        destructiveTransition.sourceRuntimeContextId ||
+      conversation.modelId !== destructiveTransition.sourceModelId ||
+      conversation.projectContext === null
+    ) {
+      return invalid(
+        '$.project_context_destructive_transition',
+        'must match the frozen conversation owner',
+      );
+    }
+    const context = conversation.projectContext;
+    if (destructiveTransition.phase === 'intent') {
+      if (
+        destructiveTransition.updatedAt !== destructiveTransition.createdAt ||
+        Date.parse(conversation.updatedAt) >
+          Date.parse(destructiveTransition.createdAt) ||
+        context.activePreparationId !== null ||
+        context.snapshot?.snapshot_id !== destructiveTransition.snapshotId ||
+        context.snapshot?.snapshot_sha256 !==
+          destructiveTransition.snapshotSha256 ||
+        (context.consent?.consent_receipt_id ?? null) !==
+          destructiveTransition.consentReceiptId
+      ) {
+        return invalid(
+          '$.project_context_destructive_transition',
+          'must match the exact source snapshot and consent',
+        );
+      }
+    } else {
+      if (
+        context.status !== 'setup_required' ||
+        context.selectedPaths.length !== 0 ||
+        context.activePreparationId !== null ||
+        context.snapshot !== null ||
+        context.consent !== null ||
+        context.staleReason !== null ||
+        context.errorCode !== null
+      ) {
+        return invalid(
+          '$.project_context_destructive_transition.phase',
+          'requires the exact disabled project context',
+        );
+      }
+      if (
+        (destructiveTransition.phase === 'cleanup_pending' &&
+          conversation.updatedAt !== destructiveTransition.updatedAt) ||
+        (destructiveTransition.phase === 'ready_to_finalize' &&
+          Date.parse(conversation.updatedAt) >
+            Date.parse(destructiveTransition.updatedAt))
+      ) {
+        return invalid(
+          '$.project_context_destructive_transition.updated_at',
+          'must match its reachable phase checkpoint',
+        );
+      }
+    }
+    const referenceState: ChatState = {
+      schemaVersion: CHAT_STATE_SCHEMA_VERSION,
+      projectContextDestructiveEpoch: destructiveEpoch,
+      projectContextDestructiveTransition: destructiveTransition,
+      conversations: hydratedConversations,
+      conversationOrder: orderConversationIds(hydratedConversations),
+      selectedConversationId:
+        typeof raw.active_conversation_id === 'string'
+          ? raw.active_conversation_id
+          : null,
+    };
+    if (
+      hasProjectContextDestructiveReferences(
+        referenceState,
+        destructiveTransition,
+      )
+    ) {
+      return invalid(
+        '$.project_context_destructive_transition.snapshot_id',
+        'must not be referenced by an attempt',
+      );
+    }
+  }
 
   const activeConversationId = raw.active_conversation_id;
   if (
@@ -2189,6 +2518,8 @@ export function hydrateChatState(input: unknown): ChatState {
 
   return {
     schemaVersion: CHAT_STATE_SCHEMA_VERSION,
+    projectContextDestructiveEpoch: destructiveEpoch,
+    projectContextDestructiveTransition: destructiveTransition,
     conversations: hydratedConversations,
     conversationOrder: orderConversationIds(hydratedConversations),
     selectedConversationId: activeConversationId,

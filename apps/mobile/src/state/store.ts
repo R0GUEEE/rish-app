@@ -15,6 +15,9 @@ import type {
   Conversation,
   ConversationThinkingMode,
   ModelId,
+  ProjectContextDestructiveAction,
+  ProjectContextDestructiveAdvanceScope,
+  ProjectContextDestructiveOwner,
   ProjectContextMutationScope,
   TurnAttemptV1,
 } from './types';
@@ -102,6 +105,20 @@ export type DisableProjectContextTransaction =
     readonly cleanupSnapshotId: string | null;
   };
 
+export type BeginProjectContextDestructiveInput = {
+  readonly lifecycleId: string;
+  readonly action: ProjectContextDestructiveAction;
+  readonly targetProjectId: string | null;
+  readonly owner: ProjectContextDestructiveOwner;
+};
+
+export type ProjectContextDestructiveTransaction = {
+  readonly lifecycleId: string;
+  readonly epoch: number;
+  commit(): boolean;
+  rollback(): boolean;
+};
+
 export type ChatStore = {
   getState(): ChatState;
   dispatch(action: ChatAction): ChatState;
@@ -143,6 +160,18 @@ export type ChatStore = {
   disableProjectContext(
     scope: ProjectContextMutationScope,
   ): DisableProjectContextTransaction | null;
+  beginProjectContextDestructiveTransition(
+    input: BeginProjectContextDestructiveInput,
+  ): ProjectContextDestructiveTransaction | null;
+  tombstoneProjectContextDestructiveTransition(
+    scope: ProjectContextDestructiveAdvanceScope,
+  ): ProjectContextDestructiveTransaction | null;
+  markProjectContextDestructiveCleanupComplete(
+    scope: ProjectContextDestructiveAdvanceScope,
+  ): ProjectContextDestructiveTransaction | null;
+  finalizeProjectContextDestructiveTransition(
+    scope: ProjectContextDestructiveAdvanceScope,
+  ): ProjectContextDestructiveTransaction | null;
   prepareTurnAttempt(
     conversationId: string,
     text: string,
@@ -215,6 +244,42 @@ function canonicalNow(now: () => Date | number | string): string {
   return date.toISOString();
 }
 
+function exactDataProjection(
+  value: unknown,
+  keys: readonly string[],
+): Record<string, unknown> | null {
+  try {
+    if (typeof value !== 'object' || value === null || Array.isArray(value)) {
+      return null;
+    }
+    const prototype = Object.getPrototypeOf(value);
+    if (prototype !== Object.prototype && prototype !== null) return null;
+    if (Object.getOwnPropertySymbols(value).length > 0) return null;
+    const names = Object.getOwnPropertyNames(value);
+    if (
+      names.length !== keys.length ||
+      names.some(name => !keys.includes(name))
+    ) {
+      return null;
+    }
+    const projected = Object.create(null) as Record<string, unknown>;
+    for (const key of keys) {
+      const descriptor = Object.getOwnPropertyDescriptor(value, key);
+      if (
+        descriptor === undefined ||
+        !Object.prototype.hasOwnProperty.call(descriptor, 'value') ||
+        descriptor.enumerable !== true
+      ) {
+        return null;
+      }
+      projected[key] = descriptor.value;
+    }
+    return projected;
+  } catch {
+    return null;
+  }
+}
+
 function frozenProjectContext(
   conversation: Conversation,
   sendWithoutProjectContext: boolean,
@@ -277,15 +342,21 @@ export function createChatStore(options: ChatStoreOptions = {}): ChatStore {
     options.createLifecycleId ?? defaultCreateLifecycleId;
   let state = options.initialState ?? createEmptyChatState();
   const listeners = new Set<ChatStoreListener>();
+  let notificationDepth = 0;
 
   const notifyListeners = () => {
-    listeners.forEach(listener => {
-      try {
-        listener(state);
-      } catch {
-        // A UI subscriber must never strand an already-applied state mutation.
-      }
-    });
+    notificationDepth += 1;
+    try {
+      listeners.forEach(listener => {
+        try {
+          listener(state);
+        } catch {
+          // A UI subscriber must never strand an already-applied state mutation.
+        }
+      });
+    } finally {
+      notificationDepth -= 1;
+    }
   };
 
   type AppliedAction = {
@@ -305,6 +376,15 @@ export function createChatStore(options: ChatStoreOptions = {}): ChatStore {
   };
 
   const dispatch = (action: ChatAction): ChatState => {
+    if (
+      notificationDepth > 0 &&
+      (action.type === 'project-context-destructive/begin' ||
+        action.type === 'project-context-destructive/tombstone' ||
+        action.type === 'project-context-destructive/cleanup-complete' ||
+        action.type === 'project-context-destructive/finalize')
+    ) {
+      return state;
+    }
     applyAction(action);
     return state;
   };
@@ -373,6 +453,67 @@ export function createChatStore(options: ChatStoreOptions = {}): ChatStore {
           ...state,
           conversations,
           conversationOrder: orderConversationIds(conversations),
+        };
+        notifyListeners();
+        return true;
+      },
+    };
+  };
+
+  const destructiveTransaction = (
+    applied: AppliedAction,
+    conversationId: string,
+  ): ProjectContextDestructiveTransaction | null => {
+    if (!applied.changed) return null;
+    const beforeTransition =
+      applied.before.projectContextDestructiveTransition;
+    const nextTransition = applied.next.projectContextDestructiveTransition;
+    const lifecycleId =
+      nextTransition?.lifecycleId ?? beforeTransition?.lifecycleId;
+    const epoch = nextTransition?.epoch ?? beforeTransition?.epoch;
+    if (lifecycleId === undefined || epoch === undefined) return null;
+    const beforeConversation = applied.before.conversations[conversationId];
+    const nextConversation = applied.next.conversations[conversationId];
+    const selectionChanged =
+      applied.before.selectedConversationId !==
+      applied.next.selectedConversationId;
+    let settled = false;
+    const nextStillOwned = () =>
+      state.projectContextDestructiveEpoch ===
+        applied.next.projectContextDestructiveEpoch &&
+      state.projectContextDestructiveTransition === nextTransition &&
+      state.conversations[conversationId] === nextConversation;
+    return {
+      lifecycleId,
+      epoch,
+      commit: () => {
+        if (settled) return false;
+        settled = true;
+        return nextStillOwned();
+      },
+      rollback: () => {
+        if (settled) return false;
+        settled = true;
+        if (!nextStillOwned()) return false;
+        const conversations = { ...state.conversations };
+        if (beforeConversation === undefined) {
+          delete conversations[conversationId];
+        } else {
+          conversations[conversationId] = beforeConversation;
+        }
+        state = {
+          ...state,
+          projectContextDestructiveEpoch:
+            applied.before.projectContextDestructiveEpoch,
+          projectContextDestructiveTransition: beforeTransition,
+          conversations,
+          conversationOrder: orderConversationIds(conversations),
+          selectedConversationId:
+            selectionChanged &&
+            state.selectedConversationId ===
+              applied.next.selectedConversationId
+              ? applied.before.selectedConversationId
+              : state.selectedConversationId,
         };
         notifyListeners();
         return true;
@@ -557,6 +698,106 @@ export function createChatStore(options: ChatStoreOptions = {}): ChatStore {
             ...transaction,
             cleanupSnapshotId: transaction.previousSnapshotId,
           };
+    },
+    beginProjectContextDestructiveTransition: input => {
+      if (notificationDepth > 0) return null;
+      const projected = exactDataProjection(input, [
+        'lifecycleId',
+        'action',
+        'targetProjectId',
+        'owner',
+      ]);
+      if (projected === null) return null;
+      const owner = exactDataProjection(projected.owner, [
+        'conversationId',
+        'projectId',
+        'runtimeContextId',
+        'modelId',
+        'expectedUpdatedAt',
+        'expectedContext',
+      ]);
+      if (owner === null) return null;
+      const applied = applyAction({
+        type: 'project-context-destructive/begin',
+        payload: {
+          lifecycleId: projected.lifecycleId as string,
+          action: projected.action as ProjectContextDestructiveAction,
+          targetProjectId: projected.targetProjectId as string | null,
+          owner: owner as ProjectContextDestructiveOwner,
+          at: canonicalNow(now),
+        },
+      });
+      const conversationId =
+        applied.next.projectContextDestructiveTransition?.conversationId;
+      return conversationId === undefined
+        ? null
+        : destructiveTransaction(applied, conversationId);
+    },
+    tombstoneProjectContextDestructiveTransition: scope => {
+      if (notificationDepth > 0) return null;
+      const projected = exactDataProjection(scope, [
+        'lifecycleId',
+        'epoch',
+        'action',
+        'targetProjectId',
+        'expectedTransition',
+      ]);
+      if (projected === null) return null;
+      const conversationId =
+        state.projectContextDestructiveTransition?.conversationId;
+      if (conversationId === undefined) return null;
+      const applied = applyAction({
+        type: 'project-context-destructive/tombstone',
+        payload: {
+          scope: projected as ProjectContextDestructiveAdvanceScope,
+          at: canonicalNow(now),
+        },
+      });
+      return destructiveTransaction(applied, conversationId);
+    },
+    markProjectContextDestructiveCleanupComplete: scope => {
+      if (notificationDepth > 0) return null;
+      const projected = exactDataProjection(scope, [
+        'lifecycleId',
+        'epoch',
+        'action',
+        'targetProjectId',
+        'expectedTransition',
+      ]);
+      if (projected === null) return null;
+      const conversationId =
+        state.projectContextDestructiveTransition?.conversationId;
+      if (conversationId === undefined) return null;
+      const applied = applyAction({
+        type: 'project-context-destructive/cleanup-complete',
+        payload: {
+          scope: projected as ProjectContextDestructiveAdvanceScope,
+          at: canonicalNow(now),
+        },
+      });
+      return destructiveTransaction(applied, conversationId);
+    },
+    finalizeProjectContextDestructiveTransition: scope => {
+      if (notificationDepth > 0) return null;
+      const projected = exactDataProjection(scope, [
+        'lifecycleId',
+        'epoch',
+        'action',
+        'targetProjectId',
+        'expectedTransition',
+      ]);
+      if (projected === null) return null;
+      const conversationId =
+        state.projectContextDestructiveTransition?.conversationId;
+      if (conversationId === undefined) return null;
+      const applied = applyAction({
+        type: 'project-context-destructive/finalize',
+        payload: {
+          scope: projected as ProjectContextDestructiveAdvanceScope,
+          at: canonicalNow(now),
+        },
+      });
+      return destructiveTransaction(applied, conversationId);
     },
     prepareTurnAttempt: (conversationId, text, appendOptions = {}) => {
       const conversation = state.conversations[conversationId];

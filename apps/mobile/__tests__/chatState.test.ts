@@ -18,7 +18,7 @@ import {
   type ChatStore,
   type CompletionRoundReceiptV1,
   type ChatState,
-  type PersistedChatStateV4,
+  type PersistedChatStateV7,
   type ProjectContextMutationScope,
   type ScopedProjectContextTransaction,
 } from '../src/state';
@@ -420,10 +420,22 @@ describe('schema v4 persistence', () => {
     const state = populatedState();
     const first = serializeChatState(state);
     const second = serializeChatState(state);
-    const decoded = JSON.parse(first) as PersistedChatStateV4;
+    const decoded = JSON.parse(first) as PersistedChatStateV7;
 
     expect(first).toBe(second);
-    expect(decoded.schema_version).toBe(6);
+    expect(Object.keys(decoded).sort()).toEqual(
+      [
+        'schema_version',
+        'project_context_destructive_epoch',
+        'project_context_destructive_transition',
+        'active_conversation_id',
+        'conversations',
+        'messages',
+      ].sort(),
+    );
+    expect(decoded.project_context_destructive_epoch).toBe(0);
+    expect(decoded.project_context_destructive_transition).toBeNull();
+    expect(decoded.schema_version).toBe(CHAT_STATE_SCHEMA_VERSION);
     expect(decoded.active_conversation_id).toBe('chat-a');
     expect(decoded.conversations.map(item => item.id)).toEqual([
       'chat-b',
@@ -477,7 +489,11 @@ describe('schema v4 persistence', () => {
     const first = hydrateChatState(legacy);
     const second = hydrateChatState(JSON.stringify(legacy));
     expect(first).toEqual(second);
-    expect(first.schemaVersion).toBe(6);
+    expect(first.schemaVersion).toBe(CHAT_STATE_SCHEMA_VERSION);
+    expect(first).toMatchObject({
+      projectContextDestructiveEpoch: 0,
+      projectContextDestructiveTransition: null,
+    });
     expect(
       Object.values(first.conversations).every(
         conversation =>
@@ -490,7 +506,7 @@ describe('schema v4 persistence', () => {
       schema_version: number;
       conversations: Array<{ project_id?: unknown }>;
     };
-    expect(migrated.schema_version).toBe(6);
+    expect(migrated.schema_version).toBe(CHAT_STATE_SCHEMA_VERSION);
     expect(
       migrated.conversations.every(
         conversation => conversation.project_id === null,
@@ -511,7 +527,11 @@ describe('schema v4 persistence', () => {
     );
 
     const hydrated = hydrateChatState(legacy);
-    expect(hydrated.schemaVersion).toBe(6);
+    expect(hydrated.schemaVersion).toBe(CHAT_STATE_SCHEMA_VERSION);
+    expect(hydrated).toMatchObject({
+      projectContextDestructiveEpoch: 0,
+      projectContextDestructiveTransition: null,
+    });
     expect(
       Object.values(hydrated.conversations).every(conversation =>
         conversation.messages.every(
@@ -835,7 +855,7 @@ describe('workspace binding persistence', () => {
     expect(alreadyUnbound).toBe(rebound);
   });
 
-  test('persists schema v6 workspace ids deterministically', () => {
+  test('persists current-schema workspace ids deterministically', () => {
     const state = workspaceBoundState();
     const first = serializeChatState(state);
     const second = serializeChatState(state);
@@ -845,7 +865,7 @@ describe('workspace binding persistence', () => {
     };
 
     expect(first).toBe(second);
-    expect(decoded.schema_version).toBe(6);
+    expect(decoded.schema_version).toBe(CHAT_STATE_SCHEMA_VERSION);
     expect(decoded.conversations[0]).toMatchObject({
       id: 'chat-a',
       workspace_id: 'ws-alpha',
@@ -876,7 +896,11 @@ describe('workspace binding persistence', () => {
     const first = hydrateChatState(legacy);
     const second = hydrateChatState(JSON.stringify(legacy));
     expect(first).toEqual(second);
-    expect(first.schemaVersion).toBe(6);
+    expect(first.schemaVersion).toBe(CHAT_STATE_SCHEMA_VERSION);
+    expect(first).toMatchObject({
+      projectContextDestructiveEpoch: 0,
+      projectContextDestructiveTransition: null,
+    });
     expect(
       Object.values(first.conversations).every(
         conversation => conversation.workspaceId === null,
@@ -887,7 +911,7 @@ describe('workspace binding persistence', () => {
       schema_version: number;
       conversations: Array<{ workspace_id: string | null }>;
     };
-    expect(migrated.schema_version).toBe(6);
+    expect(migrated.schema_version).toBe(CHAT_STATE_SCHEMA_VERSION);
     expect(
       migrated.conversations.every(conversation =>
         conversation.workspace_id === null,
@@ -928,6 +952,7 @@ describe('schema v6 attempts and project context', () => {
     'bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb';
   const REPLACEMENT_PREPARATION_ID =
     'cccccccc-cccc-4ccc-8ccc-cccccccccccc';
+  const LIFECYCLE_ID = 'dddddddd-dddd-4ddd-8ddd-dddddddddddd';
 
   const contextManifest: ProjectContextManifestV1 = {
     schema_version: 1,
@@ -1067,6 +1092,1514 @@ describe('schema v6 attempts and project context', () => {
     };
   }
 
+  function schema6Payload(store: ChatStore) {
+    const payload = JSON.parse(store.serialize()) as Record<string, unknown>;
+    payload.schema_version = 6;
+    delete payload.project_context_destructive_epoch;
+    delete payload.project_context_destructive_transition;
+    return payload;
+  }
+
+  function schema7IntentPayload(
+    store: ChatStore,
+    conversationId: string,
+    overrides: Record<string, unknown> = {},
+  ) {
+    const payload = schema6Payload(store);
+    const conversation = store.getState().conversations[conversationId]!;
+    const snapshot = conversation.projectContext!.snapshot!;
+    const consent = conversation.projectContext!.consent;
+    payload.schema_version = 7;
+    payload.project_context_destructive_epoch = 1;
+    payload.project_context_destructive_transition = {
+      schema_version: 1,
+      lifecycle_id: LIFECYCLE_ID,
+      epoch: 1,
+      action: 'unbind',
+      phase: 'intent',
+      conversation_id: conversationId,
+      source_project_id: conversation.projectId,
+      source_runtime_context_id: conversation.runtimeContextId,
+      source_model_id: conversation.modelId,
+      snapshot_id: snapshot.snapshot_id,
+      snapshot_sha256: snapshot.snapshot_sha256,
+      consent_receipt_id: consent?.consent_receipt_id ?? null,
+      target_project_id: null,
+      created_at: T3,
+      updated_at: T3,
+      ...overrides,
+    };
+    return payload;
+  }
+
+  test('migrates schema v6 to v7 without changing conversations, attempts, or messages', () => {
+    const store = v6Store();
+    const conversationId = store.createConversation();
+    const prepared = store.prepareTurnAttempt(conversationId, 'preserve me');
+    expect(prepared?.commit()).toBe(true);
+    const v6 = schema6Payload(store) as {
+      conversations: unknown;
+      messages: unknown;
+    };
+
+    const hydrated = hydrateChatState(v6) as ChatState & {
+      projectContextDestructiveEpoch?: number;
+      projectContextDestructiveTransition?: unknown;
+    };
+    expect(hydrated.schemaVersion).toBe(7);
+    expect(hydrated.projectContextDestructiveEpoch).toBe(0);
+    expect(hydrated.projectContextDestructiveTransition).toBeNull();
+    const serialized = JSON.parse(serializeChatState(hydrated)) as {
+      schema_version: number;
+      project_context_destructive_epoch: number;
+      project_context_destructive_transition: unknown;
+      conversations: unknown;
+      messages: unknown;
+    };
+    expect(serialized).toMatchObject({
+      schema_version: 7,
+      project_context_destructive_epoch: 0,
+      project_context_destructive_transition: null,
+    });
+    expect(serialized.conversations).toEqual(v6.conversations);
+    expect(serialized.messages).toEqual(v6.messages);
+  });
+
+  test('strictly round-trips one metadata-only schema v7 intent journal', () => {
+    const { store, conversationId } = readyProjectStore();
+    const payload = schema7IntentPayload(store, conversationId);
+    const hydrated = hydrateChatState(payload) as ChatState & {
+      projectContextDestructiveEpoch: number;
+      projectContextDestructiveTransition: {
+        lifecycleId: string;
+        action: string;
+        phase: string;
+        snapshotId: string;
+        consentReceiptId: string | null;
+      } | null;
+    };
+    expect(hydrated.projectContextDestructiveEpoch).toBe(1);
+    expect(hydrated.projectContextDestructiveTransition).toMatchObject({
+      lifecycleId: LIFECYCLE_ID,
+      action: 'unbind',
+      phase: 'intent',
+      snapshotId: SNAPSHOT_ID,
+      consentReceiptId: CONSENT_ID,
+    });
+    const serialized = JSON.parse(serializeChatState(hydrated)) as {
+      project_context_destructive_transition: Record<string, unknown>;
+    };
+    expect(Object.keys(serialized.project_context_destructive_transition).sort())
+      .toEqual(
+        [
+          'schema_version',
+          'lifecycle_id',
+          'epoch',
+          'action',
+          'phase',
+          'conversation_id',
+          'source_project_id',
+          'source_runtime_context_id',
+          'source_model_id',
+          'snapshot_id',
+          'snapshot_sha256',
+          'consent_receipt_id',
+          'target_project_id',
+          'created_at',
+          'updated_at',
+        ].sort(),
+      );
+    expect(serializeChatState(hydrateChatState(serialized))).toBe(
+      JSON.stringify(serialized),
+    );
+    expect(JSON.stringify(serialized.project_context_destructive_transition))
+      .not.toMatch(/selected_paths|manifest|content|attachment|native|error/);
+  });
+
+  test('accepts exact nullable runtime and consent from a stale source snapshot', () => {
+    const { store, conversationId } = readyProjectStore();
+    expect(
+      store.applyProjectContextAction(conversationId, {
+        type: 'project_changed',
+      }),
+    ).toBe(true);
+    const payload = schema7IntentPayload(store, conversationId, {
+      source_runtime_context_id: null,
+      consent_receipt_id: null,
+    });
+    const conversations = payload.conversations as Array<
+      Record<string, unknown>
+    >;
+    conversations[0]!.runtime_context_id = null;
+
+    const hydrated = hydrateChatState(payload) as ChatState & {
+      projectContextDestructiveTransition: {
+        sourceRuntimeContextId: string | null;
+        consentReceiptId: string | null;
+      } | null;
+    };
+    expect(hydrated.projectContextDestructiveTransition).toMatchObject({
+      sourceRuntimeContextId: null,
+      consentReceiptId: null,
+    });
+  });
+
+  test('rejects hostile and non-exact schema v7 root and journal records', () => {
+    const { store, conversationId } = readyProjectStore();
+    const cases: unknown[] = [];
+    const missingRoot = schema7IntentPayload(store, conversationId);
+    delete missingRoot.project_context_destructive_epoch;
+    cases.push(missingRoot);
+    const extraRoot = schema7IntentPayload(store, conversationId);
+    extraRoot.raw_context = 'RAW_CONTEXT_SENTINEL';
+    cases.push(extraRoot);
+    const extraJournal = schema7IntentPayload(store, conversationId);
+    (extraJournal.project_context_destructive_transition as Record<string, unknown>)
+      .path = '/private/raw-path-sentinel';
+    cases.push(extraJournal);
+    const symbolJournal = schema7IntentPayload(store, conversationId);
+    Object.defineProperty(
+      symbolJournal.project_context_destructive_transition as object,
+      Symbol('raw'),
+      { value: 'RAW_SYMBOL_SENTINEL', enumerable: true },
+    );
+    cases.push(symbolJournal);
+    const exoticJournal = schema7IntentPayload(store, conversationId);
+    Object.setPrototypeOf(
+      exoticJournal.project_context_destructive_transition as object,
+      { raw: true },
+    );
+    cases.push(exoticJournal);
+    const hiddenJournal = schema7IntentPayload(store, conversationId);
+    Object.defineProperty(
+      hiddenJournal.project_context_destructive_transition as object,
+      'action',
+      { value: 'unbind', enumerable: false },
+    );
+    cases.push(hiddenJournal);
+    let getterCalls = 0;
+    const getterRoot = schema7IntentPayload(store, conversationId);
+    Object.defineProperty(getterRoot, 'project_context_destructive_transition', {
+      enumerable: true,
+      get: () => {
+        getterCalls += 1;
+        throw new Error('RAW_GETTER_SENTINEL');
+      },
+    });
+    cases.push(getterRoot);
+
+    cases.forEach(candidate =>
+      expect(() => hydrateChatState(candidate)).toThrow(
+        ChatStateValidationError,
+      ),
+    );
+    expect(getterCalls).toBe(0);
+  });
+
+  test('rejects invalid schema v7 journal bounds, identities, and relations', () => {
+    const { store, conversationId } = readyProjectStore();
+    const invalidOverrides: Array<Record<string, unknown>> = [
+      { lifecycle_id: 'not-a-uuid' },
+      { epoch: 0 },
+      { action: 'destroy' },
+      { phase: 'done' },
+      { source_project_id: '' },
+      { source_runtime_context_id: 'not-a-uuid' },
+      { source_model_id: 'secret-model' },
+      { snapshot_id: OTHER_PROJECT_ID },
+      { snapshot_sha256: 'A'.repeat(64) },
+      { consent_receipt_id: OTHER_PROJECT_ID },
+      { target_project_id: PROJECT_ID },
+      { created_at: 'not-a-time' },
+      { updated_at: T0 },
+      { conversation_id: 'missing-conversation' },
+    ];
+    invalidOverrides.forEach(overrides =>
+      expect(() =>
+        hydrateChatState(
+          schema7IntentPayload(store, conversationId, overrides),
+        ),
+      ).toThrow(ChatStateValidationError),
+    );
+
+    expect(() =>
+      hydrateChatState(
+        schema7IntentPayload(store, conversationId, {
+          action: 'rebind',
+          target_project_id: null,
+        }),
+      ),
+    ).toThrow(ChatStateValidationError);
+    expect(() =>
+      hydrateChatState(
+        schema7IntentPayload(store, conversationId, {
+          action: 'rebind',
+          target_project_id: PROJECT_ID,
+        }),
+      ),
+    ).toThrow(ChatStateValidationError);
+  });
+
+  test('rejects lifecycle checkpoints with impossible phase timestamp relationships', () => {
+    const fixture = readyProjectStore();
+    expect(() =>
+      hydrateChatState(
+        schema7IntentPayload(fixture.store, fixture.conversationId, {
+          updated_at: '9999-12-31T23:59:59.999Z',
+        }),
+      ),
+    ).toThrow(ChatStateValidationError);
+    expect(() =>
+      hydrateChatState(
+        schema7IntentPayload(fixture.store, fixture.conversationId, {
+          created_at: T0,
+          updated_at: T0,
+        }),
+      ),
+    ).toThrow(ChatStateValidationError);
+
+    const begun = beginLifecycle(fixture.store, fixture.conversationId)!;
+    expect(begun.commit()).toBe(true);
+    const tombstone = tombstoneLifecycle(
+      fixture.store,
+      begun.lifecycleId,
+      begun.epoch,
+    )!;
+    expect(tombstone.commit()).toBe(true);
+    const cleanupPending = JSON.parse(fixture.store.serialize()) as {
+      conversations: Array<Record<string, unknown>>;
+      project_context_destructive_transition: Record<string, unknown>;
+    };
+    cleanupPending.project_context_destructive_transition.updated_at = T2;
+    expect(() => hydrateChatState(cleanupPending)).toThrow(
+      ChatStateValidationError,
+    );
+
+    const ready = cleanupLifecycle(
+      fixture.store,
+      begun.lifecycleId,
+      begun.epoch,
+    )!;
+    expect(ready.commit()).toBe(true);
+    const readyPayload = JSON.parse(fixture.store.serialize()) as {
+      conversations: Array<Record<string, unknown>>;
+    };
+    readyPayload.conversations[0]!.updated_at = T2;
+    expect(() => hydrateChatState(readyPayload)).toThrow(
+      ChatStateValidationError,
+    );
+  });
+
+  test('rejects root epoch edge cases, owner drift, lifecycle collisions, and journal accessors', () => {
+    const { store, conversationId } = readyProjectStore();
+    for (const epoch of [-1, -0, Number.MAX_SAFE_INTEGER + 1]) {
+      const payload = schema7IntentPayload(store, conversationId);
+      payload.project_context_destructive_epoch = epoch;
+      expect(() => hydrateChatState(payload)).toThrow(ChatStateValidationError);
+    }
+    const mismatch = schema7IntentPayload(store, conversationId);
+    mismatch.project_context_destructive_epoch = 2;
+    expect(() => hydrateChatState(mismatch)).toThrow(ChatStateValidationError);
+    for (const overrides of [
+      { source_project_id: OTHER_PROJECT_ID },
+      { source_runtime_context_id: OTHER_PROJECT_ID },
+      { source_model_id: 'deepseek-v4-pro' },
+      { lifecycle_id: RUNTIME_ID },
+    ]) {
+      expect(() =>
+        hydrateChatState(
+          schema7IntentPayload(store, conversationId, overrides),
+        ),
+      ).toThrow(ChatStateValidationError);
+    }
+
+    let getterCalls = 0;
+    const nestedGetter = schema7IntentPayload(store, conversationId);
+    Object.defineProperty(
+      nestedGetter.project_context_destructive_transition as object,
+      'snapshot_id',
+      {
+        enumerable: true,
+        get: () => {
+          getterCalls += 1;
+          throw new Error('RAW_NESTED_GETTER');
+        },
+      },
+    );
+    expect(() => hydrateChatState(nestedGetter)).toThrow(
+      ChatStateValidationError,
+    );
+    const epochGetter = schema7IntentPayload(store, conversationId);
+    Object.defineProperty(epochGetter, 'project_context_destructive_epoch', {
+      enumerable: true,
+      get: () => {
+        getterCalls += 1;
+        throw new Error('RAW_EPOCH_GETTER');
+      },
+    });
+    expect(() => hydrateChatState(epochGetter)).toThrow(
+      ChatStateValidationError,
+    );
+    expect(getterCalls).toBe(0);
+  });
+
+  test('round-trips cleanup, ready, and finalized lifecycle checkpoints', () => {
+    const { store, conversationId } = readyProjectStore();
+    const begun = beginLifecycle(store, conversationId)!;
+    expect(begun.commit()).toBe(true);
+    const tombstone = tombstoneLifecycle(
+      store,
+      begun.lifecycleId,
+      begun.epoch,
+    )!;
+    expect(tombstone.commit()).toBe(true);
+    expect(hydrateChatState(store.serialize())).toEqual(store.getState());
+    const ready = cleanupLifecycle(
+      store,
+      begun.lifecycleId,
+      begun.epoch,
+    )!;
+    expect(ready.commit()).toBe(true);
+    expect(hydrateChatState(store.serialize())).toEqual(store.getState());
+    const finalize = finalizeLifecycle(
+      store,
+      begun.lifecycleId,
+      begun.epoch,
+    )!;
+    expect(finalize.commit()).toBe(true);
+    const finalized = hydrateChatState(store.serialize());
+    expect(finalized).toMatchObject({
+      projectContextDestructiveEpoch: 1,
+      projectContextDestructiveTransition: null,
+    });
+  });
+
+  test('rejects hydrated lifecycle journals whose snapshot gains an attempt reference', () => {
+    const { store, conversationId } = readyProjectStore();
+    const prepared = store.prepareTurnAttempt(
+      conversationId,
+      'persisted lifecycle reference',
+    );
+    expect(prepared?.commit()).toBe(true);
+    expect(() =>
+      hydrateChatState(schema7IntentPayload(store, conversationId)),
+    ).toThrow(ChatStateValidationError);
+  });
+
+  type LifecycleTransactionHarness = {
+    lifecycleId: string;
+    epoch: number;
+    commit(): boolean;
+    rollback(): boolean;
+  };
+
+  type LifecycleAdvanceScopeHarness = {
+    lifecycleId: string;
+    epoch: number;
+    action: 'unbind' | 'delete' | 'rebind';
+    targetProjectId: string | null;
+    expectedTransition: NonNullable<
+      ChatState['projectContextDestructiveTransition']
+    >;
+  };
+
+  type LifecycleStoreHarness = ChatStore & {
+    beginProjectContextDestructiveTransition(input: {
+      lifecycleId: string;
+      action: 'unbind' | 'delete' | 'rebind';
+      targetProjectId: string | null;
+      owner: {
+        conversationId: string;
+        projectId: string;
+        runtimeContextId: string | null;
+        modelId: string;
+        expectedUpdatedAt: string;
+        expectedContext: NonNullable<
+          ChatState['conversations'][string]['projectContext']
+        >;
+      };
+    }): LifecycleTransactionHarness | null;
+    tombstoneProjectContextDestructiveTransition(
+      scope: LifecycleAdvanceScopeHarness,
+    ): LifecycleTransactionHarness | null;
+    markProjectContextDestructiveCleanupComplete(
+      scope: LifecycleAdvanceScopeHarness,
+    ): LifecycleTransactionHarness | null;
+    finalizeProjectContextDestructiveTransition(
+      scope: LifecycleAdvanceScopeHarness,
+    ): LifecycleTransactionHarness | null;
+  };
+
+  function lifecycleStore(store: ChatStore): LifecycleStoreHarness {
+    return store as LifecycleStoreHarness;
+  }
+
+  function lifecycleAdvanceScope(
+    store: ChatStore,
+    lifecycleId: string,
+    epoch: number,
+    expectedTransition = store.getState()
+      .projectContextDestructiveTransition!,
+  ): LifecycleAdvanceScopeHarness {
+    return {
+      lifecycleId,
+      epoch,
+      action: expectedTransition.action,
+      targetProjectId: expectedTransition.targetProjectId,
+      expectedTransition,
+    };
+  }
+
+  function tombstoneLifecycle(
+    store: ChatStore,
+    lifecycleId: string,
+    epoch: number,
+  ) {
+    return lifecycleStore(store).tombstoneProjectContextDestructiveTransition(
+      lifecycleAdvanceScope(store, lifecycleId, epoch),
+    );
+  }
+
+  function cleanupLifecycle(
+    store: ChatStore,
+    lifecycleId: string,
+    epoch: number,
+  ) {
+    return lifecycleStore(
+      store,
+    ).markProjectContextDestructiveCleanupComplete(
+      lifecycleAdvanceScope(store, lifecycleId, epoch),
+    );
+  }
+
+  function finalizeLifecycle(
+    store: ChatStore,
+    lifecycleId: string,
+    epoch: number,
+    expectedTransition?: NonNullable<
+      ChatState['projectContextDestructiveTransition']
+    >,
+  ) {
+    return lifecycleStore(store).finalizeProjectContextDestructiveTransition(
+      lifecycleAdvanceScope(store, lifecycleId, epoch, expectedTransition),
+    );
+  }
+
+  function beginLifecycle(
+    store: ChatStore,
+    conversationId: string,
+    action: 'unbind' | 'delete' | 'rebind' = 'unbind',
+    targetProjectId: string | null = null,
+    lifecycleId = LIFECYCLE_ID,
+  ) {
+    const conversation = store.getState().conversations[conversationId]!;
+    return lifecycleStore(store).beginProjectContextDestructiveTransition({
+      lifecycleId,
+      action,
+      targetProjectId,
+      owner: {
+        conversationId,
+        projectId: conversation.projectId!,
+        runtimeContextId: conversation.runtimeContextId,
+        modelId: conversation.modelId,
+        expectedUpdatedAt: conversation.updatedAt,
+        expectedContext: conversation.projectContext!,
+      },
+    });
+  }
+
+  function advanceLifecycleToReady(
+    store: ChatStore,
+    conversationId: string,
+    action: 'unbind' | 'delete' | 'rebind' = 'unbind',
+    targetProjectId: string | null = null,
+  ) {
+    const begun = beginLifecycle(
+      store,
+      conversationId,
+      action,
+      targetProjectId,
+    )!;
+    expect(begun.commit()).toBe(true);
+    const tombstone = tombstoneLifecycle(
+      store,
+      begun.lifecycleId,
+      begun.epoch,
+    )!;
+    expect(tombstone.commit()).toBe(true);
+    const ready = cleanupLifecycle(store, begun.lifecycleId, begun.epoch)!;
+    expect(ready.commit()).toBe(true);
+    return ready;
+  }
+
+  test('creates one global intent journal and preserves unrelated listener changes on rollback', () => {
+    const { store, conversationId } = readyProjectStore();
+    const unrelated = store.createConversation({
+      title: 'Unrelated before',
+      select: false,
+    });
+    const notifications: number[] = [];
+    let reentered = false;
+    store.subscribe(() => {
+      throw new Error('listener sentinel');
+    });
+    store.subscribe(state => {
+      notifications.push(state.conversationOrder.length);
+      if (!reentered && state.projectContextDestructiveTransition !== null) {
+        reentered = true;
+        store.renameConversation(unrelated, 'Unrelated after');
+      }
+    });
+
+    const transaction = beginLifecycle(store, conversationId);
+    expect(transaction).not.toBeNull();
+    expect(store.getState()).toMatchObject({
+      projectContextDestructiveEpoch: 1,
+      projectContextDestructiveTransition: {
+        lifecycleId: LIFECYCLE_ID,
+        epoch: 1,
+        action: 'unbind',
+        phase: 'intent',
+        conversationId,
+      },
+    });
+    expect(beginLifecycle(store, conversationId)).toBeNull();
+    expect(transaction?.rollback()).toBe(true);
+    expect(transaction?.rollback()).toBe(false);
+    expect(transaction?.commit()).toBe(false);
+    expect(store.getState()).toMatchObject({
+      projectContextDestructiveEpoch: 0,
+      projectContextDestructiveTransition: null,
+    });
+    expect(store.getState().conversations[unrelated]?.title).toBe(
+      'Unrelated after',
+    );
+    expect(notifications.length).toBeGreaterThanOrEqual(3);
+  });
+
+  test('rejects lifecycle advancement reentered from begin notification', () => {
+    const { store, conversationId } = readyProjectStore();
+    let nested: LifecycleTransactionHarness | null | undefined;
+    store.subscribe(state => {
+      const transition = state.projectContextDestructiveTransition;
+      if (transition?.phase === 'intent' && nested === undefined) {
+        nested = tombstoneLifecycle(
+          store,
+          transition.lifecycleId,
+          transition.epoch,
+        );
+        store.dispatch({
+          type: 'project-context-destructive/tombstone',
+          payload: {
+            scope: lifecycleAdvanceScope(
+              store,
+              transition.lifecycleId,
+              transition.epoch,
+              transition,
+            ),
+            at: T2,
+          },
+        });
+      }
+    });
+
+    const begun = beginLifecycle(store, conversationId);
+    expect(begun).not.toBeNull();
+    expect(nested).toBeNull();
+    expect(store.getState()).toMatchObject({
+      projectContextDestructiveTransition: { phase: 'intent' },
+      conversations: {
+        [conversationId]: {
+          projectContext: { snapshot: { snapshot_id: SNAPSHOT_ID } },
+        },
+      },
+    });
+  });
+
+  test('tombstone and cleanup-complete transactions roll back to their exact prior phases', () => {
+    const { store, conversationId } = readyProjectStore();
+    const begun = beginLifecycle(store, conversationId)!;
+    expect(begun.commit()).toBe(true);
+    const sourceContext = store.getState().conversations[conversationId]!
+      .projectContext;
+
+    const tombstone = tombstoneLifecycle(
+      store,
+      begun.lifecycleId,
+      begun.epoch,
+    )!;
+    expect(store.getState()).toMatchObject({
+      projectContextDestructiveTransition: { phase: 'cleanup_pending' },
+      conversations: {
+        [conversationId]: {
+          projectId: PROJECT_ID,
+          projectContext: { status: 'setup_required', snapshot: null },
+        },
+      },
+    });
+    expect(tombstone.rollback()).toBe(true);
+    expect(
+      store.getState().conversations[conversationId]?.projectContext,
+    ).toBe(sourceContext);
+    expect(store.getState()).toMatchObject({
+      projectContextDestructiveTransition: { phase: 'intent' },
+    });
+
+    const tombstoneAgain = tombstoneLifecycle(
+      store,
+      begun.lifecycleId,
+      begun.epoch,
+    )!;
+    expect(tombstoneAgain.commit()).toBe(true);
+    const cleanup = cleanupLifecycle(
+      store,
+      begun.lifecycleId,
+      begun.epoch,
+    )!;
+    expect(store.getState()).toMatchObject({
+      projectContextDestructiveTransition: { phase: 'ready_to_finalize' },
+    });
+    expect(cleanup.rollback()).toBe(true);
+    expect(store.getState()).toMatchObject({
+      projectContextDestructiveTransition: { phase: 'cleanup_pending' },
+    });
+    expect(cleanup.commit()).toBe(false);
+  });
+
+  test.each([
+    { action: 'unbind' as const, targetProjectId: null },
+    { action: 'rebind' as const, targetProjectId: OTHER_PROJECT_ID },
+  ])('finalizes $action and clears the journal atomically', fixture => {
+    const { store, conversationId } = readyProjectStore();
+    const ready = advanceLifecycleToReady(
+      store,
+      conversationId,
+      fixture.action,
+      fixture.targetProjectId,
+    );
+    const finalize = finalizeLifecycle(
+      store,
+      ready.lifecycleId,
+      ready.epoch,
+    )!;
+    expect(finalize).not.toBeNull();
+    expect(store.getState().projectContextDestructiveTransition).toBeNull();
+    expect(store.getState().projectContextDestructiveEpoch).toBe(1);
+    expect(store.getState().conversations[conversationId]).toMatchObject(
+      fixture.action === 'unbind'
+        ? { projectId: null, projectContext: null }
+        : {
+            projectId: OTHER_PROJECT_ID,
+            projectContext: {
+              projectId: OTHER_PROJECT_ID,
+              status: 'setup_required',
+              snapshot: null,
+            },
+          },
+    );
+    expect(finalize.rollback()).toBe(true);
+    expect(store.getState()).toMatchObject({
+      projectContextDestructiveTransition: { phase: 'ready_to_finalize' },
+      conversations: {
+        [conversationId]: { projectId: PROJECT_ID },
+      },
+    });
+  });
+
+  test('finalize delete preserves a nonactive selection and restores it exactly on rollback', () => {
+    const { store, conversationId } = readyProjectStore();
+    const selected = store.createConversation({ title: 'Keep selected' });
+    const ready = advanceLifecycleToReady(store, conversationId, 'delete');
+    const finalize = finalizeLifecycle(
+      store,
+      ready.lifecycleId,
+      ready.epoch,
+    )!;
+    expect(store.getState().conversations[conversationId]).toBeUndefined();
+    expect(store.getState().selectedConversationId).toBe(selected);
+    expect(finalize.rollback()).toBe(true);
+    expect(store.getState().conversations[conversationId]).toBeDefined();
+    expect(store.getState().selectedConversationId).toBe(selected);
+
+    const activeFixture = readyProjectStore();
+    const fallback = activeFixture.store.createConversation({
+      title: 'Fallback',
+      select: false,
+    });
+    activeFixture.store.selectConversation(activeFixture.conversationId);
+    const activeReady = advanceLifecycleToReady(
+      activeFixture.store,
+      activeFixture.conversationId,
+      'delete',
+    );
+    const activeFinalize = finalizeLifecycle(
+      activeFixture.store,
+      activeReady.lifecycleId,
+      activeReady.epoch,
+    )!;
+    expect(activeFixture.store.getState().selectedConversationId).toBe(fallback);
+    expect(activeFinalize.commit()).toBe(true);
+  });
+
+  test('rejects begin without a snapshot, with active preparation, or with an exact-retry reference', () => {
+    const setup = setupProjectStore();
+    expect(beginLifecycle(setup.store, setup.conversationId)).toBeNull();
+
+    const preparedFixture = setupProjectStore();
+    const prepared = preparedFixture.store.replaceProjectContextPrepared(
+      projectContextScope(preparedFixture.store, preparedFixture.conversationId),
+      {
+        preparationId: REPLACEMENT_PREPARATION_ID,
+        selectedPaths: [],
+        manifest: contextManifest,
+      },
+    );
+    expect(prepared?.commit()).toBe(true);
+    expect(
+      beginLifecycle(preparedFixture.store, preparedFixture.conversationId),
+    ).toBeNull();
+
+    const retryFixture = readyProjectStore();
+    const attempt = retryFixture.store.prepareTurnAttempt(
+      retryFixture.conversationId,
+      'frozen retry',
+    );
+    expect(attempt?.commit()).toBe(true);
+    expect(
+      retryFixture.store.failAttempt(
+        retryFixture.conversationId,
+        attempt!.attemptId,
+        'E_COMPLETION_NATIVE',
+      ),
+    ).toBe(true);
+    expect(
+      beginLifecycle(retryFixture.store, retryFixture.conversationId),
+    ).toBeNull();
+  });
+
+  test('fails closed for malformed or mismatched-owner bindings that reference the cleanup snapshot', () => {
+    const makeCorruptStore = (extra: Record<string, unknown>) => {
+      const fixture = readyProjectStore();
+      const prepared = fixture.store.prepareTurnAttempt(
+        fixture.conversationId,
+        'corrupt binding reference',
+      );
+      expect(prepared?.commit()).toBe(true);
+      const state = fixture.store.getState();
+      const conversation = state.conversations[fixture.conversationId]!;
+      const attempt = conversation.attempts[0]!;
+      return {
+        conversationId: fixture.conversationId,
+        store: createChatStore({
+          initialState: {
+            ...state,
+            conversations: {
+              ...state.conversations,
+              [fixture.conversationId]: {
+                ...conversation,
+                attempts: [
+                  {
+                    ...attempt,
+                    projectContext: {
+                      ...attempt.projectContext!,
+                      ...extra,
+                    },
+                  },
+                ],
+              },
+            },
+          },
+        }),
+      };
+    };
+
+    const mismatched = makeCorruptStore({
+      projectId: OTHER_PROJECT_ID,
+      runtimeContextId: OTHER_PROJECT_ID,
+    });
+    expect(beginLifecycle(mismatched.store, mismatched.conversationId)).toBeNull();
+
+    const malformed = makeCorruptStore({ raw_content: 'RAW_BINDING_SENTINEL' });
+    expect(beginLifecycle(malformed.store, malformed.conversationId)).toBeNull();
+
+    const wrongDisposition = makeCorruptStore({});
+    const wrongDispositionState = wrongDisposition.store.getState();
+    const wrongDispositionConversation =
+      wrongDispositionState.conversations[wrongDisposition.conversationId]!;
+    const wrongDispositionAttempt = wrongDispositionConversation.attempts[0]!;
+    const wrongDispositionStore = createChatStore({
+      initialState: {
+        ...wrongDispositionState,
+        conversations: {
+          ...wrongDispositionState.conversations,
+          [wrongDisposition.conversationId]: {
+            ...wrongDispositionConversation,
+            attempts: [
+              {
+                ...wrongDispositionAttempt,
+                contextDisposition: 'explicit_without_context',
+              },
+            ],
+          },
+        },
+      },
+    });
+    expect(
+      beginLifecycle(wrongDispositionStore, wrongDisposition.conversationId),
+    ).toBeNull();
+
+    const unknownStatus = makeCorruptStore({});
+    const unknownStatusState = unknownStatus.store.getState();
+    const unknownStatusConversation =
+      unknownStatusState.conversations[unknownStatus.conversationId]!;
+    const unknownStatusAttempt = unknownStatusConversation.attempts[0]!;
+    const unknownStatusStore = createChatStore({
+      initialState: {
+        ...unknownStatusState,
+        conversations: {
+          ...unknownStatusState.conversations,
+          [unknownStatus.conversationId]: {
+            ...unknownStatusConversation,
+            attempts: [
+              { ...unknownStatusAttempt, status: 'unknown-status' },
+            ],
+          },
+        },
+      } as ChatState,
+    });
+    expect(beginLifecycle(unknownStatusStore, unknownStatus.conversationId)).toBeNull();
+  });
+
+  test('rejects timestamp regression at tombstone, cleanup-complete, and finalize', () => {
+    const { store, conversationId } = readyProjectStore();
+    const begun = beginLifecycle(store, conversationId)!;
+    expect(begun.commit()).toBe(true);
+    let before = store.getState();
+    store.dispatch({
+      type: 'project-context-destructive/tombstone',
+      payload: {
+        scope: lifecycleAdvanceScope(store, begun.lifecycleId, begun.epoch),
+        at: T0,
+      },
+    });
+    expect(store.getState()).toBe(before);
+
+    const tombstone = tombstoneLifecycle(
+      store,
+      begun.lifecycleId,
+      begun.epoch,
+    )!;
+    expect(tombstone.commit()).toBe(true);
+    before = store.getState();
+    store.dispatch({
+      type: 'project-context-destructive/cleanup-complete',
+      payload: {
+        scope: lifecycleAdvanceScope(store, begun.lifecycleId, begun.epoch),
+        at: T0,
+      },
+    });
+    expect(store.getState()).toBe(before);
+
+    const cleanup = cleanupLifecycle(
+      store,
+      begun.lifecycleId,
+      begun.epoch,
+    )!;
+    expect(cleanup.commit()).toBe(true);
+    before = store.getState();
+    store.dispatch({
+      type: 'project-context-destructive/finalize',
+      payload: {
+        scope: lifecycleAdvanceScope(store, begun.lifecycleId, begun.epoch),
+        at: T0,
+      },
+    });
+    expect(store.getState()).toBe(before);
+  });
+
+  test('blocks direct target mutation and turn preparation while a journal exists', () => {
+    const { store, conversationId } = readyProjectStore();
+    const begun = beginLifecycle(store, conversationId)!;
+    expect(begun.commit()).toBe(true);
+    const before = store.getState().conversations[conversationId];
+
+    store.bindConversationToProject(conversationId, OTHER_PROJECT_ID);
+    store.unbindConversationFromProject(conversationId);
+    store.setModel(conversationId, 'deepseek-v4-pro');
+    store.applyProjectContextAction(conversationId, {
+      type: 'project_changed',
+    });
+    expect(store.prepareTurnAttempt(conversationId, 'must be blocked')).toBeNull();
+    store.deleteConversation(conversationId);
+
+    expect(store.getState().conversations[conversationId]).toBe(before);
+    expect(store.getState()).toMatchObject({
+      projectContextDestructiveTransition: {
+        lifecycleId: LIFECYCLE_ID,
+        phase: 'intent',
+      },
+    });
+  });
+
+  test('rejects epoch overflow and wrong lifecycle CAS without mutation', () => {
+    const { store, conversationId } = readyProjectStore();
+    const overflow = createChatStore({
+      initialState: {
+        ...store.getState(),
+        projectContextDestructiveEpoch: Number.MAX_SAFE_INTEGER,
+        projectContextDestructiveTransition: null,
+      } as ChatState,
+    });
+    expect(beginLifecycle(overflow, conversationId)).toBeNull();
+
+    const begun = beginLifecycle(store, conversationId)!;
+    expect(begun).not.toBeNull();
+    const before = store.getState();
+    expect(
+      lifecycleStore(store).tombstoneProjectContextDestructiveTransition({
+        ...lifecycleAdvanceScope(store, begun.lifecycleId, begun.epoch),
+        lifecycleId: OTHER_PROJECT_ID,
+      }),
+    ).toBeNull();
+    expect(
+      lifecycleStore(store).tombstoneProjectContextDestructiveTransition({
+        ...lifecycleAdvanceScope(store, begun.lifecycleId, begun.epoch),
+        epoch: begun.epoch + 1,
+      }),
+    ).toBeNull();
+    const current = store.getState().projectContextDestructiveTransition!;
+    expect(
+      lifecycleStore(store).tombstoneProjectContextDestructiveTransition({
+        ...lifecycleAdvanceScope(store, begun.lifecycleId, begun.epoch),
+        expectedTransition: { ...current },
+      }),
+    ).toBeNull();
+    expect(store.getState()).toBe(before);
+  });
+
+  test('allows direct project mutation only when no snapshot or preparation exists', () => {
+    const unbindFixture = setupProjectStore();
+    unbindFixture.store.unbindConversationFromProject(
+      unbindFixture.conversationId,
+    );
+    expect(
+      unbindFixture.store.getState().conversations[
+        unbindFixture.conversationId
+      ],
+    ).toMatchObject({ projectId: null, projectContext: null });
+
+    const rebindFixture = setupProjectStore();
+    rebindFixture.store.bindConversationToProject(
+      rebindFixture.conversationId,
+      OTHER_PROJECT_ID,
+    );
+    expect(
+      rebindFixture.store.getState().conversations[
+        rebindFixture.conversationId
+      ],
+    ).toMatchObject({
+      projectId: OTHER_PROJECT_ID,
+      projectContext: { projectId: OTHER_PROJECT_ID, snapshot: null },
+    });
+
+    const deleteFixture = setupProjectStore();
+    deleteFixture.store.deleteConversation(deleteFixture.conversationId);
+    expect(
+      deleteFixture.store.getState().conversations[deleteFixture.conversationId],
+    ).toBeUndefined();
+  });
+
+  test('begins lifecycle cleanup for a stale snapshot with null runtime and consent', () => {
+    const fixture = readyProjectStore();
+    expect(
+      fixture.store.applyProjectContextAction(fixture.conversationId, {
+        type: 'project_changed',
+      }),
+    ).toBe(true);
+    const state = fixture.store.getState();
+    const conversation = state.conversations[fixture.conversationId]!;
+    const store = createChatStore({
+      initialState: {
+        ...state,
+        conversations: {
+          ...state.conversations,
+          [fixture.conversationId]: {
+            ...conversation,
+            runtimeContextId: null,
+          },
+        },
+      },
+    });
+    const transaction = beginLifecycle(store, fixture.conversationId);
+    expect(transaction).not.toBeNull();
+    expect(store.getState().projectContextDestructiveTransition).toMatchObject({
+      sourceRuntimeContextId: null,
+      consentReceiptId: null,
+    });
+  });
+
+  test('rejects lifecycle ids already used by runtime, turn, attempt, or round', () => {
+    const { store, conversationId } = readyProjectStore();
+    const other = store.createConversation({ select: false });
+    const prepared = store.prepareTurnAttempt(other, 'identity claims')!;
+    expect(
+      store.startAttemptRound(other, prepared.attemptId, ROUND_ID, 0),
+    ).toBe(true);
+    for (const claimed of [
+      RUNTIME_ID,
+      prepared.turnId,
+      prepared.attemptId,
+      ROUND_ID,
+    ]) {
+      expect(
+        beginLifecycle(
+          store,
+          conversationId,
+          'unbind',
+          null,
+          claimed,
+        ),
+      ).toBeNull();
+    }
+  });
+
+  test('claims the journal lifecycle id against later unrelated runtime, turn, and round generation', () => {
+    const fixture = readyProjectStore();
+    const preparedConversation = fixture.store.createConversation({
+      select: false,
+    });
+    const prepared = fixture.store.prepareTurnAttempt(
+      preparedConversation,
+      'prepared before journal',
+    )!;
+    const boundConversation = fixture.store.createConversation({
+      projectId: OTHER_PROJECT_ID,
+      select: false,
+    });
+    const emptyConversation = fixture.store.createConversation({ select: false });
+    const begun = beginLifecycle(
+      fixture.store,
+      fixture.conversationId,
+    )!;
+    expect(begun.commit()).toBe(true);
+    const store = createChatStore({
+      initialState: fixture.store.getState(),
+      createLifecycleId: () => LIFECYCLE_ID,
+    });
+
+    expect(store.ensureRuntimeContextId(boundConversation)).toBeNull();
+    expect(
+      store.prepareTurnAttempt(emptyConversation, 'must not reuse journal id'),
+    ).toBeNull();
+    expect(
+      store.startAttemptRound(
+        preparedConversation,
+        prepared.attemptId,
+        LIFECYCLE_ID,
+        0,
+      ),
+    ).toBe(false);
+    expect(store.getState().projectContextDestructiveTransition).toMatchObject({
+      lifecycleId: LIFECYCLE_ID,
+      phase: 'intent',
+    });
+  });
+
+  test('blocks later lifecycle checkpoints when the snapshot gains a reference', () => {
+    const { store, conversationId } = readyProjectStore();
+    const source = store.getState().conversations[conversationId]!;
+    const snapshot = source.projectContext!.snapshot!;
+    const consent = source.projectContext!.consent!;
+    const begun = beginLifecycle(store, conversationId)!;
+    expect(begun.commit()).toBe(true);
+    const tombstone = tombstoneLifecycle(
+      store,
+      begun.lifecycleId,
+      begun.epoch,
+    )!;
+    expect(tombstone.commit()).toBe(true);
+    const tombstonedState = store.getState();
+    const tombstoned = tombstonedState.conversations[conversationId]!;
+    const referencedStore = createChatStore({
+      initialState: {
+        ...tombstonedState,
+        conversations: {
+          ...tombstonedState.conversations,
+          [conversationId]: {
+            ...tombstoned,
+            attempts: [
+              {
+                schemaVersion: 1,
+                attemptId: ATTEMPT_ID,
+                turnId: TURN_ID,
+                status: 'prepared',
+                visibleMessageIds: [],
+                visibleHistorySha256: null,
+                attachmentIds: [],
+                modelId: source.modelId,
+                thinkingMode: source.thinkingMode,
+                contextDisposition: 'verified',
+                contextProjectId: source.projectId,
+                projectContext: {
+                  schemaVersion: 1,
+                  runtimeContextId: source.runtimeContextId!,
+                  projectId: source.projectId!,
+                  snapshotId: snapshot.snapshot_id,
+                  snapshotSha256: snapshot.snapshot_sha256,
+                  sourceFingerprint: snapshot.source_fingerprint,
+                  contextBytes: snapshot.context_bytes,
+                  consentReceiptId: consent.consent_receipt_id,
+                  provider: 'deepseek',
+                  policy: 'chat-read-v1',
+                  policyVersion: 'chat-read-v1.0.0',
+                },
+                activeRound: null,
+                rounds: [],
+                assistantMessageId: null,
+                failureCode: null,
+                createdAt: T3,
+                updatedAt: T3,
+              },
+            ],
+          },
+        },
+      },
+    });
+    const beforeAdvance = referencedStore.getState();
+    expect(
+      cleanupLifecycle(
+        referencedStore,
+        begun.lifecycleId,
+        begun.epoch,
+      ),
+    ).toBeNull();
+    expect(referencedStore.getState()).toBe(beforeAdvance);
+  });
+
+  test('rejects finalize after a new context or owner drift and consumes raced rollback once', () => {
+    const { store, conversationId } = readyProjectStore();
+    const ready = advanceLifecycleToReady(store, conversationId);
+    const readyState = store.getState();
+    const tombstoned = readyState.conversations[conversationId]!;
+    const sourceContext = readyProjectStore().store.getState().conversations[
+      conversationId
+    ]!.projectContext!;
+    for (const patch of [
+      { projectContext: sourceContext },
+      { modelId: 'deepseek-v4-pro' as const },
+      { runtimeContextId: OTHER_PROJECT_ID },
+      { projectId: OTHER_PROJECT_ID },
+    ]) {
+      const drifted = createChatStore({
+        initialState: {
+          ...readyState,
+          conversations: {
+            ...readyState.conversations,
+            [conversationId]: { ...tombstoned, ...patch },
+          },
+        },
+      });
+      expect(
+        finalizeLifecycle(
+          drifted,
+          ready.lifecycleId,
+          ready.epoch,
+        ),
+      ).toBeNull();
+    }
+
+    const beginFixture = readyProjectStore();
+    const transaction = beginLifecycle(
+      beginFixture.store,
+      beginFixture.conversationId,
+    )!;
+    const serialized = JSON.parse(beginFixture.store.serialize()) as {
+      conversations: Array<Record<string, unknown>>;
+      project_context_destructive_transition: Record<string, unknown>;
+    };
+    serialized.conversations[0]!.title = 'Raced title';
+    serialized.conversations[0]!.updated_at = T3;
+    serialized.project_context_destructive_transition.created_at = T3;
+    serialized.project_context_destructive_transition.updated_at = T3;
+    beginFixture.store.hydrate(serialized);
+    expect(transaction.rollback()).toBe(false);
+    expect(transaction.commit()).toBe(false);
+  });
+
+  test('active delete rollback restores target and journal while preserving listener selection', () => {
+    const fixture = readyProjectStore();
+    const fallback = fixture.store.createConversation({
+      title: 'Fallback',
+      select: false,
+    });
+    const listenerSelection = fixture.store.createConversation({
+      title: 'Listener selection',
+      select: false,
+    });
+    fixture.store.selectConversation(fixture.conversationId);
+    const ready = advanceLifecycleToReady(
+      fixture.store,
+      fixture.conversationId,
+      'delete',
+    );
+    let reentered = false;
+    fixture.store.subscribe(state => {
+      if (
+        !reentered &&
+        state.projectContextDestructiveTransition === null &&
+        state.conversations[fixture.conversationId] === undefined
+      ) {
+        reentered = true;
+        fixture.store.selectConversation(listenerSelection);
+      }
+    });
+
+    const finalize = finalizeLifecycle(
+      fixture.store,
+      ready.lifecycleId,
+      ready.epoch,
+    )!;
+    expect(finalize).not.toBeNull();
+    expect(fixture.store.getState().selectedConversationId).toBe(
+      listenerSelection,
+    );
+    expect(fixture.store.getState().selectedConversationId).not.toBe(fallback);
+    expect(finalize.rollback()).toBe(true);
+    expect(fixture.store.getState()).toMatchObject({
+      projectContextDestructiveTransition: { phase: 'ready_to_finalize' },
+      selectedConversationId: listenerSelection,
+      conversations: {
+        [fixture.conversationId]: { projectId: PROJECT_ID },
+      },
+    });
+  });
+
+  test('rejects a semantically valid action or target drift before finalize', () => {
+    const fixture = readyProjectStore();
+    const ready = advanceLifecycleToReady(
+      fixture.store,
+      fixture.conversationId,
+    );
+    const readyState = fixture.store.getState();
+    const original = readyState.projectContextDestructiveTransition!;
+    const actionDrift = createChatStore({
+      initialState: {
+        ...readyState,
+        projectContextDestructiveTransition: {
+          ...original,
+          action: 'delete',
+        },
+      },
+    });
+    const beforeAction = actionDrift.getState();
+    expect(
+      finalizeLifecycle(
+        actionDrift,
+        ready.lifecycleId,
+        ready.epoch,
+        original,
+      ),
+    ).toBeNull();
+    expect(actionDrift.getState()).toBe(beforeAction);
+
+    const rebindFixture = readyProjectStore();
+    const rebindReady = advanceLifecycleToReady(
+      rebindFixture.store,
+      rebindFixture.conversationId,
+      'rebind',
+      OTHER_PROJECT_ID,
+    );
+    const rebindState = rebindFixture.store.getState();
+    const rebindOriginal = rebindState.projectContextDestructiveTransition!;
+    const targetDrift = createChatStore({
+      initialState: {
+        ...rebindState,
+        projectContextDestructiveTransition: {
+          ...rebindOriginal,
+          targetProjectId: 'project-three',
+        },
+      },
+    });
+    const beforeTarget = targetDrift.getState();
+    expect(
+      finalizeLifecycle(
+        targetDrift,
+        rebindReady.lifecycleId,
+        rebindReady.epoch,
+        rebindOriginal,
+      ),
+    ).toBeNull();
+    expect(targetDrift.getState()).toBe(beforeTarget);
+  });
+
+  test('rejects hostile destructive begin input and owner records without evaluating accessors', () => {
+    const { store, conversationId } = readyProjectStore();
+    const conversation = store.getState().conversations[conversationId]!;
+    const validOwner = {
+      conversationId,
+      projectId: conversation.projectId!,
+      runtimeContextId: conversation.runtimeContextId,
+      modelId: conversation.modelId,
+      expectedUpdatedAt: conversation.updatedAt,
+      expectedContext: conversation.projectContext!,
+    };
+    let getterCalls = 0;
+    const getterInput = {
+      lifecycleId: LIFECYCLE_ID,
+      action: 'unbind' as const,
+      targetProjectId: null,
+    } as Record<string, unknown>;
+    Object.defineProperty(getterInput, 'owner', {
+      enumerable: true,
+      get: () => {
+        getterCalls += 1;
+        return validOwner;
+      },
+    });
+    expect(
+      lifecycleStore(store).beginProjectContextDestructiveTransition(
+        getterInput as never,
+      ),
+    ).toBeNull();
+    expect(getterCalls).toBe(0);
+
+    for (const hostile of [
+      new Proxy(
+        {},
+        {
+          getPrototypeOf: () => {
+            throw new Error('RAW_PROXY_PROTOTYPE');
+          },
+        },
+      ),
+      new Proxy(
+        {},
+        {
+          ownKeys: () => {
+            throw new Error('RAW_PROXY_KEYS');
+          },
+        },
+      ),
+      new Proxy(
+        {},
+        {
+          getOwnPropertyDescriptor: () => {
+            throw new Error('RAW_PROXY_DESCRIPTOR');
+          },
+        },
+      ),
+    ]) {
+      expect(() =>
+        lifecycleStore(store).beginProjectContextDestructiveTransition(
+          hostile as never,
+        ),
+      ).not.toThrow();
+      expect(
+        lifecycleStore(store).beginProjectContextDestructiveTransition(
+          hostile as never,
+        ),
+      ).toBeNull();
+    }
+
+    const getterOwner = { ...validOwner } as Record<string, unknown>;
+    Object.defineProperty(getterOwner, 'expectedContext', {
+      enumerable: true,
+      get: () => {
+        getterCalls += 1;
+        return conversation.projectContext;
+      },
+    });
+    expect(
+      lifecycleStore(store).beginProjectContextDestructiveTransition({
+        lifecycleId: LIFECYCLE_ID,
+        action: 'unbind',
+        targetProjectId: null,
+        owner: getterOwner as never,
+      }),
+    ).toBeNull();
+    expect(getterCalls).toBe(0);
+
+    for (const mutate of [
+      (input: Record<string, unknown>) => {
+        input.extra = true;
+      },
+      (input: Record<string, unknown>) => {
+        Object.defineProperty(input, Symbol('raw'), {
+          value: true,
+          enumerable: true,
+        });
+      },
+      (input: Record<string, unknown>) => {
+        Object.setPrototypeOf(input, { raw: true });
+      },
+    ]) {
+      const input = {
+        lifecycleId: LIFECYCLE_ID,
+        action: 'unbind',
+        targetProjectId: null,
+        owner: validOwner,
+      } as Record<string, unknown>;
+      mutate(input);
+      expect(
+        lifecycleStore(store).beginProjectContextDestructiveTransition(
+          input as never,
+        ),
+      ).toBeNull();
+    }
+    expect(store.getState().projectContextDestructiveTransition).toBeNull();
+  });
+
+  test('fails closed when begin sees a malformed in-memory project context', () => {
+    const corruptions: Array<(context: Record<string, unknown>) => void> = [
+      context => {
+        const snapshot = context.snapshot as Record<string, unknown>;
+        snapshot.project_id = OTHER_PROJECT_ID;
+      },
+      context => {
+        const consent = context.consent as Record<string, unknown>;
+        consent.snapshot_sha256 = 'f'.repeat(64);
+      },
+      context => {
+        let calls = 0;
+        Object.defineProperty(context, 'selectedPaths', {
+          enumerable: true,
+          get: () => {
+            calls += 1;
+            throw new Error(`RAW_CONTEXT_GETTER_${calls}`);
+          },
+        });
+      },
+    ];
+    corruptions.forEach(corrupt => {
+      const fixture = readyProjectStore();
+      const state = fixture.store.getState();
+      const conversation = state.conversations[fixture.conversationId]!;
+      const context = {
+        ...conversation.projectContext!,
+        snapshot: { ...conversation.projectContext!.snapshot! },
+        consent: { ...conversation.projectContext!.consent! },
+        selectedPaths: [...conversation.projectContext!.selectedPaths],
+      } as Record<string, unknown>;
+      corrupt(context);
+      const corruptStore = createChatStore({
+        initialState: {
+          ...state,
+          conversations: {
+            ...state.conversations,
+            [fixture.conversationId]: {
+              ...conversation,
+              projectContext: context,
+            },
+          },
+        } as ChatState,
+      });
+      expect(
+        beginLifecycle(corruptStore, fixture.conversationId),
+      ).toBeNull();
+      expect(corruptStore.getState().projectContextDestructiveTransition).toBeNull();
+    });
+  });
+
   function schema3Receipt(
     prepared: { turnId: string; attemptId: string },
   ): CompletionRoundReceiptV1 {
@@ -1105,7 +2638,11 @@ describe('schema v6 attempts and project context', () => {
 
     const migrated = hydrateChatState(legacy);
     const conversation = migrated.conversations['legacy-chat'];
-    expect(migrated.schemaVersion).toBe(6);
+    expect(migrated.schemaVersion).toBe(CHAT_STATE_SCHEMA_VERSION);
+    expect(migrated).toMatchObject({
+      projectContextDestructiveEpoch: 0,
+      projectContextDestructiveTransition: null,
+    });
     expect(conversation?.id).toBe('legacy-chat');
     expect(conversation?.runtimeContextId).toBeNull();
     expect(conversation?.projectContext).toMatchObject({
@@ -1610,7 +3147,17 @@ describe('schema v6 attempts and project context', () => {
         'E_COMPLETION_TRANSPORT',
       ),
     ).toBe(true);
-    store.unbindConversationFromProject(conversationId);
+    store.appendUserMessage(conversationId, 'advance visible history');
+    const ready = advanceLifecycleToReady(
+      store,
+      conversationId,
+      'rebind',
+      OTHER_PROJECT_ID,
+    );
+    expect(
+      finalizeLifecycle(store, ready.lifecycleId, ready.epoch)
+        ?.commit(),
+    ).toBe(true);
     store.bindConversationToProject(conversationId, PROJECT_ID);
     const before = store.getState();
     expect(store.retryAttempt(conversationId, prepared.attemptId)).toBeNull();

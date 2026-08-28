@@ -6,8 +6,9 @@ import type {
   ProjectContextState,
 } from '../project-context/types';
 
-export const CHAT_STATE_SCHEMA_VERSION = 6 as const;
-export const PREVIOUS_CHAT_STATE_SCHEMA_VERSION = 5 as const;
+export const CHAT_STATE_SCHEMA_VERSION = 7 as const;
+export const PREVIOUS_CHAT_STATE_SCHEMA_VERSION = 6 as const;
+export const WORKSPACE_CHAT_STATE_SCHEMA_VERSION = 5 as const;
 export const ATTACHMENT_CHAT_STATE_SCHEMA_VERSION = 4 as const;
 export const LEGACY_CHAT_STATE_SCHEMA_VERSION = 2 as const;
 export const OLDER_CHAT_STATE_SCHEMA_VERSION = 3 as const;
@@ -16,6 +17,7 @@ export const CONVERSATION_TURN_SCHEMA_VERSION = 1 as const;
 export const TURN_ATTEMPT_SCHEMA_VERSION = 1 as const;
 export const ATTEMPT_PROJECT_CONTEXT_SCHEMA_VERSION = 1 as const;
 export const COMPLETION_ROUND_RECEIPT_SCHEMA_VERSION = 1 as const;
+export const PROJECT_CONTEXT_DESTRUCTIVE_TRANSITION_SCHEMA_VERSION = 1 as const;
 
 export const ATTACHMENT_KINDS = ['image', 'text', 'pdf'] as const;
 
@@ -43,6 +45,16 @@ export const ATTEMPT_CONTEXT_DISPOSITIONS = [
   'unbound',
   'verified',
   'explicit_without_context',
+] as const;
+export const PROJECT_CONTEXT_DESTRUCTIVE_ACTIONS = [
+  'unbind',
+  'delete',
+  'rebind',
+] as const;
+export const PROJECT_CONTEXT_DESTRUCTIVE_PHASES = [
+  'intent',
+  'cleanup_pending',
+  'ready_to_finalize',
 ] as const;
 export const ATTEMPT_FAILURE_CODES = [
   'E_ATTEMPT_INTERRUPTED',
@@ -118,6 +130,10 @@ export type CompletionFinishReason =
 export type AttemptContextDisposition =
   (typeof ATTEMPT_CONTEXT_DISPOSITIONS)[number];
 export type AttemptFailureCode = (typeof ATTEMPT_FAILURE_CODES)[number];
+export type ProjectContextDestructiveAction =
+  (typeof PROJECT_CONTEXT_DESTRUCTIVE_ACTIONS)[number];
+export type ProjectContextDestructivePhase =
+  (typeof PROJECT_CONTEXT_DESTRUCTIVE_PHASES)[number];
 
 export type ChatAttachment = {
   readonly schema_version: typeof ATTACHMENT_DESCRIPTOR_SCHEMA_VERSION;
@@ -255,8 +271,48 @@ export type ProjectContextMutationScope = {
   readonly expectedContext: ProjectContextState;
 };
 
+export type ProjectContextDestructiveTransitionV1 = {
+  readonly schemaVersion: typeof PROJECT_CONTEXT_DESTRUCTIVE_TRANSITION_SCHEMA_VERSION;
+  readonly lifecycleId: string;
+  readonly epoch: number;
+  readonly action: ProjectContextDestructiveAction;
+  readonly phase: ProjectContextDestructivePhase;
+  readonly conversationId: string;
+  readonly sourceProjectId: string;
+  readonly sourceRuntimeContextId: string | null;
+  readonly sourceModelId: ModelId;
+  readonly snapshotId: string;
+  readonly snapshotSha256: string;
+  readonly consentReceiptId: string | null;
+  readonly targetProjectId: string | null;
+  readonly createdAt: string;
+  readonly updatedAt: string;
+};
+
+export type ProjectContextDestructiveOwner = {
+  readonly conversationId: string;
+  readonly projectId: string;
+  readonly runtimeContextId: string | null;
+  readonly modelId: ModelId;
+  readonly expectedUpdatedAt: string;
+  readonly expectedContext: ProjectContextState;
+};
+
+export type ProjectContextDestructiveAdvanceScope = {
+  readonly lifecycleId: string;
+  readonly epoch: number;
+  readonly action: ProjectContextDestructiveAction;
+  readonly targetProjectId: string | null;
+  /** Exact reference captured from the checkpoint the caller is advancing. */
+  readonly expectedTransition: ProjectContextDestructiveTransitionV1;
+};
+
 export type ChatState = {
   readonly schemaVersion: typeof CHAT_STATE_SCHEMA_VERSION;
+  readonly projectContextDestructiveEpoch: number;
+  readonly projectContextDestructiveTransition:
+    | ProjectContextDestructiveTransitionV1
+    | null;
   readonly conversations: Readonly<Record<string, Conversation>>;
   readonly conversationOrder: readonly string[];
   readonly selectedConversationId: string | null;
@@ -387,6 +443,37 @@ export type ChatAction =
       readonly type: 'project-context/disable';
       readonly payload: {
         readonly scope: ProjectContextMutationScope;
+        readonly at: string;
+      };
+    }
+  | {
+      readonly type: 'project-context-destructive/begin';
+      readonly payload: {
+        readonly lifecycleId: string;
+        readonly action: ProjectContextDestructiveAction;
+        readonly targetProjectId: string | null;
+        readonly owner: ProjectContextDestructiveOwner;
+        readonly at: string;
+      };
+    }
+  | {
+      readonly type: 'project-context-destructive/tombstone';
+      readonly payload: {
+        readonly scope: ProjectContextDestructiveAdvanceScope;
+        readonly at: string;
+      };
+    }
+  | {
+      readonly type: 'project-context-destructive/cleanup-complete';
+      readonly payload: {
+        readonly scope: ProjectContextDestructiveAdvanceScope;
+        readonly at: string;
+      };
+    }
+  | {
+      readonly type: 'project-context-destructive/finalize';
+      readonly payload: {
+        readonly scope: ProjectContextDestructiveAdvanceScope;
         readonly at: string;
       };
     }
@@ -565,7 +652,7 @@ export type PersistedConversationV5 = {
 };
 
 export type PersistedChatStateV5 = {
-  readonly schema_version: typeof PREVIOUS_CHAT_STATE_SCHEMA_VERSION;
+  readonly schema_version: typeof WORKSPACE_CHAT_STATE_SCHEMA_VERSION;
   readonly active_conversation_id: string | null;
   readonly conversations: readonly PersistedConversationV5[];
   readonly messages: readonly PersistedChatMessageV4[];
@@ -645,7 +732,36 @@ export type PersistedConversationV6 = PersistedConversationV5 & {
 };
 
 export type PersistedChatStateV6 = {
+  readonly schema_version: typeof PREVIOUS_CHAT_STATE_SCHEMA_VERSION;
+  readonly active_conversation_id: string | null;
+  readonly conversations: readonly PersistedConversationV6[];
+  readonly messages: readonly PersistedChatMessageV4[];
+};
+
+export type PersistedProjectContextDestructiveTransitionV1 = {
+  readonly schema_version: typeof PROJECT_CONTEXT_DESTRUCTIVE_TRANSITION_SCHEMA_VERSION;
+  readonly lifecycle_id: string;
+  readonly epoch: number;
+  readonly action: ProjectContextDestructiveAction;
+  readonly phase: ProjectContextDestructivePhase;
+  readonly conversation_id: string;
+  readonly source_project_id: string;
+  readonly source_runtime_context_id: string | null;
+  readonly source_model_id: ModelId;
+  readonly snapshot_id: string;
+  readonly snapshot_sha256: string;
+  readonly consent_receipt_id: string | null;
+  readonly target_project_id: string | null;
+  readonly created_at: string;
+  readonly updated_at: string;
+};
+
+export type PersistedChatStateV7 = {
   readonly schema_version: typeof CHAT_STATE_SCHEMA_VERSION;
+  readonly project_context_destructive_epoch: number;
+  readonly project_context_destructive_transition:
+    | PersistedProjectContextDestructiveTransitionV1
+    | null;
   readonly active_conversation_id: string | null;
   readonly conversations: readonly PersistedConversationV6[];
   readonly messages: readonly PersistedChatMessageV4[];
