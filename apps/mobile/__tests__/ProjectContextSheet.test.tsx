@@ -189,6 +189,7 @@ async function renderSheet(
     errorCode: null,
     manifest: null,
     hasActiveContext: true,
+    confirmationRequired: true,
     disabled: false,
     busyAction: null,
     ...callbacks,
@@ -568,6 +569,60 @@ test('allows explicit Partial confirmation with omissions including budget_excee
   expect(renderer.root.findByProps({ children: 'Secret path' })).toBeDefined();
   await act(async () => confirm.props.onPress());
   expect(callbacks.onConfirm).toHaveBeenCalledTimes(1);
+});
+
+test('does not offer confirmation while inspecting the already active manifest', async () => {
+  const { renderer, callbacks } = await renderSheet({
+    mode: 'disclosure',
+    manifest,
+    confirmationRequired: false,
+  });
+
+  expect(
+    renderer.root.findAllByProps({ accessibilityLabel: 'Confirm context' }),
+  ).toHaveLength(0);
+  expect(
+    renderer.root.findAllByProps({
+      accessibilityLabel: 'Confirm partial context',
+    }),
+  ).toHaveLength(0);
+  expect(actionByLabel(renderer.root, 'Refresh context').props.disabled).toBe(
+    false,
+  );
+  expect(actionByLabel(renderer.root, 'Disable context').props.disabled).toBe(
+    false,
+  );
+  expect(actionByLabel(renderer.root, 'Cancel').props.disabled).toBe(false);
+  expect(callbacks.onConfirm).not.toHaveBeenCalled();
+});
+
+test('hard-guards a captured disclosure confirmation after switching to active inspection', async () => {
+  const harness = await renderSheet({
+    mode: 'disclosure',
+    manifest,
+    confirmationRequired: true,
+  });
+  const staleConfirm = actionByLabel(
+    harness.renderer.root,
+    'Confirm context',
+  ).props.onPress;
+
+  await act(async () => {
+    harness.renderer.update(
+      presentation(
+        <ProjectContextSheet
+          {...harness.props}
+          confirmationRequired={false}
+          manifest={manifest}
+          mode="disclosure"
+        />,
+        'en-US',
+      ),
+    );
+  });
+  await act(async () => staleConfirm());
+
+  expect(harness.callbacks.onConfirm).not.toHaveBeenCalled();
 });
 
 test('blocks disclosure confirmation only when manifest context bytes exceed budget', async () => {

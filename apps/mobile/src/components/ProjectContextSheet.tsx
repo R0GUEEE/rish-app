@@ -59,6 +59,7 @@ export type ProjectContextSheetProps = {
   readonly errorCode: ProjectContextBridgeErrorCode | null;
   readonly manifest: ProjectContextManifestV1 | null;
   readonly hasActiveContext: boolean;
+  readonly confirmationRequired: boolean;
   readonly disabled: boolean;
   readonly busyAction: ProjectContextSheetBusyAction;
   readonly onQueryChange: (query: string) => void;
@@ -188,6 +189,7 @@ function canPrepare(props: ProjectContextSheetProps): boolean {
 function canConfirm(props: ProjectContextSheetProps): boolean {
   return (
     props.mode === 'disclosure' &&
+    props.confirmationRequired &&
     !actionLocked(props) &&
     !props.unavailable &&
     props.errorCode === null &&
@@ -633,10 +635,11 @@ export function ProjectContextSheet(props: ProjectContextSheetProps) {
       : t('context.sheet.confirm');
     return (
       <View style={[styles.actions, { paddingBottom: insets.bottom + 14 }]}>
-        {actionButton(confirmLabel, handleConfirm, {
-          disabled: !canConfirm(props),
-          busy: props.busyAction === 'confirm',
-        })}
+        {props.confirmationRequired &&
+          actionButton(confirmLabel, handleConfirm, {
+            disabled: !canConfirm(props),
+            busy: props.busyAction === 'confirm',
+          })}
         {actionButton(t('context.sheet.refreshContext'), handleRefreshContext, {
           disabled: actionLocked(props) || !props.hasActiveContext,
           busy: props.busyAction === 'refresh',
