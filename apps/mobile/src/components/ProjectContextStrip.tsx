@@ -26,10 +26,19 @@ type EffectiveStatus =
   | ProjectContextStatus
   | 'review_required'
   | 'review_partial'
-  | 'ready_partial';
+  | 'ready_partial'
+  | 'recovery';
+
+export type ProjectContextVerificationStatus =
+  | 'checking'
+  | 'verified'
+  | 'error'
+  | 'unavailable'
+  | 'recovery';
 
 export type ProjectContextStripProps = {
   readonly checking?: boolean;
+  readonly verificationStatus: ProjectContextVerificationStatus;
   readonly disabled?: boolean;
   readonly projectName: string;
   readonly state: ProjectContextState;
@@ -39,20 +48,24 @@ export type ProjectContextStripProps = {
 function effectiveStatus(
   state: ProjectContextState,
   checking: boolean,
+  verificationStatus: ProjectContextVerificationStatus | undefined,
 ): EffectiveStatus {
-  if (checking) return 'checking';
+  if (verificationStatus === 'unavailable') return 'unavailable';
+  if (verificationStatus === 'error') return 'error';
+  if (verificationStatus === 'recovery') return 'recovery';
+  if (checking || verificationStatus === 'checking') return 'checking';
   if (state.errorCode !== null) return 'error';
   if (state.staleReason !== null) return 'stale';
   if (state.status === 'setup_required' && state.snapshot !== null) {
     return 'review_required';
   }
   if (state.status === 'ready') {
-    return isProjectContextSendable(state) ? 'ready' : 'review_required';
+    if (!isProjectContextSendable(state)) return 'review_required';
+    return verificationStatus === 'verified' ? 'ready' : 'checking';
   }
   if (state.status === 'partial') {
-    return isProjectContextSendable(state)
-      ? 'ready_partial'
-      : 'review_partial';
+    if (!isProjectContextSendable(state)) return 'review_partial';
+    return verificationStatus === 'verified' ? 'ready_partial' : 'checking';
   }
   return state.status;
 }
@@ -79,6 +92,8 @@ function statusKey(status: EffectiveStatus) {
       return 'context.strip.status.error' as const;
     case 'unavailable':
       return 'context.strip.status.unavailable' as const;
+    case 'recovery':
+      return 'context.strip.status.recovery' as const;
   }
 }
 
@@ -91,6 +106,8 @@ function statusIcon(status: EffectiveStatus): LucideIcon {
       return FileClock;
     case 'checking':
       return LoaderCircle;
+    case 'recovery':
+      return FileClock;
     case 'ready':
     case 'ready_partial':
       return ShieldCheck;
@@ -115,6 +132,7 @@ function statusColor(status: EffectiveStatus, colors: ThemePalette): string {
     case 'review_required':
     case 'review_partial':
     case 'partial':
+    case 'recovery':
       return colors.warning;
     case 'stale':
     case 'error':
@@ -165,6 +183,7 @@ export const ProjectContextStrip = React.forwardRef<
 >(function ProjectContextStripImpl(
   {
     checking = false,
+    verificationStatus,
     disabled = false,
     projectName,
     state,
@@ -178,7 +197,7 @@ export const ProjectContextStrip = React.forwardRef<
   const onPressRef = useRef(onPress);
   disabledRef.current = disabled;
   onPressRef.current = onPress;
-  const effective = effectiveStatus(state, checking);
+  const effective = effectiveStatus(state, checking, verificationStatus);
   const snapshot = state.snapshot;
   const branch = snapshot?.branch ?? null;
   const displayProject =

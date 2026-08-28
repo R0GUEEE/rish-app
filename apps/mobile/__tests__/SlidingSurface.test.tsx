@@ -56,3 +56,49 @@ test('keeps navigation transitions out of React Native Modal', async () => {
   });
   expect(onDismiss).toHaveBeenCalledTimes(1);
 });
+
+test('emits one presentation-complete event only after every open transition', async () => {
+  const onPresented = jest.fn();
+  const onDismiss = jest.fn();
+  let renderer: ReactTestRenderer.ReactTestRenderer | undefined;
+  const surface = (visible: boolean) => (
+    <SlidingSurface
+      closeAccessibilityLabel="Close surface"
+      onClose={() => undefined}
+      onDismiss={onDismiss}
+      onPresented={onPresented}
+      visible={visible}
+    >
+      <Text>Context surface</Text>
+    </SlidingSurface>
+  );
+
+  await act(async () => {
+    renderer = ReactTestRenderer.create(surface(true));
+    expect(onPresented).not.toHaveBeenCalled();
+  });
+  expect(onPresented).toHaveBeenCalledTimes(1);
+
+  await act(async () => {
+    renderer!.update(surface(true));
+  });
+  expect(onPresented).toHaveBeenCalledTimes(1);
+
+  await act(async () => {
+    renderer!.update(surface(false));
+  });
+  expect(onDismiss).toHaveBeenCalledTimes(1);
+  expect(onPresented).toHaveBeenCalledTimes(1);
+
+  await act(async () => {
+    renderer!.update(surface(true));
+    expect(onPresented).toHaveBeenCalledTimes(1);
+  });
+  expect(onPresented).toHaveBeenCalledTimes(2);
+
+  await act(async () => {
+    renderer!.update(surface(false));
+  });
+  expect(onDismiss).toHaveBeenCalledTimes(2);
+  expect(onPresented).toHaveBeenCalledTimes(2);
+});

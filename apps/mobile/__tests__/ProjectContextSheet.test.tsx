@@ -1085,11 +1085,11 @@ test('does not truncate Dynamic Type content or trap bottom actions in a fixed h
   expect(StyleSheet.flatten(body.props.style).height).toBeUndefined();
 });
 
-test('focuses the title on open and emits focus-return only from onDismiss', async () => {
+test('focuses the title once after every presentation and never during close', async () => {
   const focus = jest
     .spyOn(AccessibilityInfo, 'setAccessibilityFocus')
     .mockImplementation(() => undefined);
-  const { renderer, callbacks } = await renderSheet();
+  const { renderer, callbacks, props } = await renderSheet();
   const title = renderer.root.findByProps({
     testID: 'project-context-sheet-title',
   });
@@ -1103,10 +1103,31 @@ test('focuses the title on open and emits focus-return only from onDismiss', asy
     }),
   );
   expect(focus).toHaveBeenCalledTimes(1);
+  const presented = renderer.root.findByType(SlidingSurface).props.onPresented;
+  expect(typeof presented).toBe('function');
+  await act(async () => presented());
+  expect(focus).toHaveBeenCalledTimes(1);
+
+  await act(async () =>
+    renderer.root.findByType(SlidingSurface).props.onClose(),
+  );
+  expect(focus).toHaveBeenCalledTimes(1);
   expect(callbacks.onDismiss).not.toHaveBeenCalled();
 
-  await act(async () => renderer.root.findByType(SlidingSurface).props.onDismiss());
+  await act(async () => {
+    renderer.update(
+      presentation(<ProjectContextSheet {...props} visible={false} />, 'en-US'),
+    );
+  });
   expect(callbacks.onDismiss).toHaveBeenCalledTimes(1);
+  expect(focus).toHaveBeenCalledTimes(1);
+
+  await act(async () => {
+    renderer.update(
+      presentation(<ProjectContextSheet {...props} visible />, 'en-US'),
+    );
+  });
+  expect(focus).toHaveBeenCalledTimes(2);
   focus.mockRestore();
 });
 

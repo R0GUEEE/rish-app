@@ -20,6 +20,7 @@ type Props = React.PropsWithChildren<{
   scrim?: boolean;
   onClose: () => void;
   onDismiss?: () => void;
+  onPresented?: () => void;
 }>;
 
 const disableAnimations = process.env.NODE_ENV === 'test';
@@ -36,11 +37,16 @@ export function SlidingSurface({
   scrim = true,
   onClose,
   onDismiss,
+  onPresented,
 }: Props) {
   const { width, height } = useWindowDimensions();
   const panelWidth = Math.min(width * widthRatio, maxWidth);
   const progress = useRef(new Animated.Value(visible ? 1 : 0)).current;
-  const presented = useRef(visible);
+  const presented = useRef(false);
+  const onDismissRef = useRef(onDismiss);
+  const onPresentedRef = useRef(onPresented);
+  onDismissRef.current = onDismiss;
+  onPresentedRef.current = onPresented;
   const [active, setActive] = useState(visible);
 
   const animateTo = useCallback(
@@ -70,19 +76,21 @@ export function SlidingSurface({
       presented.current = true;
       setActive(true);
       if (disableAnimations) {
-        animateTo(1);
+        animateTo(1, () => onPresentedRef.current?.());
         return;
       }
-      const frame = requestAnimationFrame(() => animateTo(1));
+      const frame = requestAnimationFrame(() =>
+        animateTo(1, () => onPresentedRef.current?.()),
+      );
       return () => cancelAnimationFrame(frame);
     }
     if (!presented.current) return;
     presented.current = false;
     animateTo(0, () => {
       setActive(false);
-      onDismiss?.();
+      onDismissRef.current?.();
     });
-  }, [animateTo, onDismiss, visible]);
+  }, [animateTo, visible]);
 
   useEffect(() => {
     if (!visible) return;

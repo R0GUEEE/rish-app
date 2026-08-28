@@ -10,6 +10,8 @@ import { AppIcon } from '../src/components/AppIcon';
 import {
   PROJECT_CONTEXT_MAX_BYTES,
   ProjectContextStrip,
+  type ProjectContextStripProps,
+  type ProjectContextVerificationStatus,
 } from '../src/components/ProjectContextStrip';
 import {
   PROJECT_CONTEXT_SCHEMA_VERSION,
@@ -28,6 +30,10 @@ import {
 const PROJECT_ID = '11111111-1111-4111-8111-111111111111';
 const SNAPSHOT_ID = '22222222-2222-4222-8222-222222222222';
 const CONSENT_ID = '33333333-3333-4333-8333-333333333333';
+type VerificationStatusIsRequired = undefined extends ProjectContextStripProps['verificationStatus']
+  ? false
+  : true;
+const VERIFICATION_STATUS_IS_REQUIRED: VerificationStatusIsRequired = true;
 
 const manifest: ProjectContextManifestV1 = {
   schema_version: PROJECT_CONTEXT_SCHEMA_VERSION,
@@ -127,8 +133,9 @@ async function renderStrip(options: {
   locale?: ResolvedLocale;
   disabled?: boolean;
   checking?: boolean;
+  verificationStatus: ProjectContextVerificationStatus;
   onPress?: jest.Mock;
-} = {}): Promise<{ renderer: Renderer; onPress: jest.Mock }> {
+}): Promise<{ renderer: Renderer; onPress: jest.Mock }> {
   const onPress = options.onPress ?? jest.fn();
   let renderer: Renderer | undefined;
   await act(async () => {
@@ -137,6 +144,7 @@ async function renderStrip(options: {
         <ProjectContextStrip
           disabled={options.disabled ?? false}
           checking={options.checking ?? false}
+          verificationStatus={options.verificationStatus}
           projectName="demo"
           state={options.state ?? contextState('ready')}
           onPress={onPress}
@@ -166,11 +174,18 @@ test.each([
   ['error', 'Error'],
   ['unavailable', 'Unavailable'],
 ] as const)('renders the %s state with text and an icon', async (status, label) => {
-  const { renderer } = await renderStrip({ state: contextState(status) });
+  const { renderer } = await renderStrip({
+    state: contextState(status),
+    verificationStatus: 'verified',
+  });
 
   expect(renderer.root.findByProps({ children: label })).toBeDefined();
   expect(renderer.root.findAllByType(AppIcon).length).toBeGreaterThanOrEqual(1);
   expect(stripButton(renderer.root).props.accessibilityLabel).toContain(label);
+});
+
+test('requires every caller to declare the native verification projection', () => {
+  expect(VERIFICATION_STATUS_IS_REQUIRED).toBe(true);
 });
 
 test('distinguishes prepared disclosure states from confirmed readiness', async () => {
@@ -195,7 +210,10 @@ test('distinguishes prepared disclosure states from confirmed readiness', async 
     [reviewPartial, 'Review partial'],
     [confirmedPartial, 'Ready · Partial'],
   ] as const) {
-    const { renderer } = await renderStrip({ state });
+    const { renderer } = await renderStrip({
+      state,
+      verificationStatus: 'verified',
+    });
     expect(renderer.root.findByProps({ children: label })).toBeDefined();
     expect(stripButton(renderer.root).props.accessibilityLabel).toContain(label);
   }
@@ -205,6 +223,7 @@ test('shows Checking while the controller is inspecting a persisted snapshot', a
   const { renderer } = await renderStrip({
     state: contextState('ready'),
     checking: true,
+    verificationStatus: 'verified',
   });
 
   expect(renderer.root.findByProps({ children: 'Checking' })).toBeDefined();
@@ -212,6 +231,85 @@ test('shows Checking while the controller is inspecting a persisted snapshot', a
     'Checking',
   );
   expect(JSON.stringify(renderer.toJSON())).not.toContain('Ready · Partial');
+});
+
+test.each([
+  ['error', 'Error'],
+  ['unavailable', 'Unavailable'],
+  ['recovery', 'Recovery required'],
+] as const)(
+  'never shows hydrated Ready while native verification is %s',
+  async (verificationStatus, label) => {
+    const { renderer } = await renderStrip({
+      state: contextState('ready'),
+      verificationStatus,
+    });
+    expect(renderer.root.findByProps({ children: label })).toBeDefined();
+    expect(renderer.root.findAllByProps({ children: 'Ready' })).toHaveLength(0);
+    expect(stripButton(renderer.root).props.accessibilityLabel).toContain(label);
+  },
+);
+
+test('resolves legacy checking and verification conflicts fail-closed', async () => {
+  const checking = await renderStrip({
+    checking: true,
+    state: contextState('ready'),
+    verificationStatus: 'verified',
+  });
+  expect(checking.renderer.root.findByProps({ children: 'Checking' })).toBeDefined();
+  expect(
+    checking.renderer.root.findAllByProps({ children: 'Ready' }),
+  ).toHaveLength(0);
+
+  const rejected = await renderStrip({
+    checking: true,
+    state: contextState('ready'),
+    verificationStatus: 'error',
+  });
+  expect(rejected.renderer.root.findByProps({ children: 'Error' })).toBeDefined();
+  expect(
+    rejected.renderer.root.findAllByProps({ children: 'Checking' }),
+  ).toHaveLength(0);
+});
+
+test('shows Ready only after explicit successful native verification', async () => {
+  const { renderer } = await renderStrip({
+    state: contextState('ready'),
+    verificationStatus: 'verified',
+  });
+  expect(renderer.root.findByProps({ children: 'Ready' })).toBeDefined();
+});
+
+test('never treats runtime-omitted native verification as Ready', async () => {
+  let renderer: Renderer | undefined;
+  await act(async () => {
+    renderer = ReactTestRenderer.create(
+      presentation(
+        <ProjectContextStrip
+          verificationStatus={undefined as never}
+          projectName="demo"
+          state={contextState('ready')}
+          onPress={jest.fn()}
+        />,
+        'en-US',
+      ),
+    );
+  });
+  if (renderer === undefined) throw new Error('renderer was not created');
+  expect(renderer.root.findByProps({ children: 'Checking' })).toBeDefined();
+  expect(renderer.root.findAllByProps({ children: 'Ready' })).toHaveLength(0);
+});
+
+test('localizes value-free recovery projection in Chinese', async () => {
+  const { renderer } = await renderStrip({
+    locale: 'zh-CN',
+    state: contextState('ready'),
+    verificationStatus: 'recovery',
+  });
+  const output = JSON.stringify(renderer.toJSON());
+  expect(output).toContain('需要恢复');
+  expect(output).not.toContain('E_CONTEXT_');
+  expect(output).not.toContain('/private/');
 });
 
 test.each([
@@ -232,6 +330,7 @@ test.each([
   async (overrides, expected) => {
     const { renderer } = await renderStrip({
       state: contextState('ready', overrides),
+      verificationStatus: 'verified',
     });
     expect(renderer.root.findByProps({ children: expected })).toBeDefined();
     expect(
@@ -241,7 +340,10 @@ test.each([
 );
 
 test('distinguishes an unchecked branch from a detached HEAD', async () => {
-  const setup = await renderStrip({ state: contextState('setup_required') });
+  const setup = await renderStrip({
+    state: contextState('setup_required'),
+    verificationStatus: 'verified',
+  });
   const setupLabel = stripButton(setup.renderer.root).props
     .accessibilityLabel as string;
   expect(setupLabel).toContain('Branch not checked');
@@ -251,6 +353,7 @@ test('distinguishes an unchecked branch from a detached HEAD', async () => {
     state: contextState('ready', {
       snapshot: { ...manifest, branch: null },
     }),
+    verificationStatus: 'verified',
   });
   expect(
     stripButton(detached.renderer.root).props.accessibilityLabel,
@@ -258,7 +361,7 @@ test('distinguishes an unchecked branch from a detached HEAD', async () => {
 });
 
 test('announces exact ready metadata and the persistent read-only boundary', async () => {
-  const { renderer } = await renderStrip();
+  const { renderer } = await renderStrip({ verificationStatus: 'verified' });
   const label = stripButton(renderer.root).props.accessibilityLabel as string;
 
   expect(label).toContain('demo');
@@ -281,14 +384,19 @@ test.each([
   const state = contextState('ready', {
     snapshot: { ...manifest, ...flags },
   });
-  const { renderer } = await renderStrip({ state });
+  const { renderer } = await renderStrip({
+    state,
+    verificationStatus: 'verified',
+  });
 
   expect(renderer.root.findByProps({ children: label })).toBeDefined();
   expect(stripButton(renderer.root).props.accessibilityLabel).toContain(label);
 });
 
 test('is a Dynamic Type-safe 44 point target and invokes the detail action', async () => {
-  const { renderer, onPress } = await renderStrip();
+  const { renderer, onPress } = await renderStrip({
+    verificationStatus: 'verified',
+  });
   const button = stripButton(renderer.root);
   const rawStyle =
     typeof button.props.style === 'function'
@@ -311,7 +419,10 @@ test('is a Dynamic Type-safe 44 point target and invokes the detail action', asy
 });
 
 test('exposes disabled state without changing the read-only message', async () => {
-  const { renderer, onPress } = await renderStrip({ disabled: true });
+  const { renderer, onPress } = await renderStrip({
+    disabled: true,
+    verificationStatus: 'verified',
+  });
   const button = stripButton(renderer.root);
 
   expect(button.props.disabled).toBe(true);
@@ -324,13 +435,18 @@ test('exposes disabled state without changing the read-only message', async () =
 test('rejects an enabled press callback captured before the strip is disabled', async () => {
   const state = contextState('ready');
   const onPress = jest.fn();
-  const { renderer } = await renderStrip({ state, onPress });
+  const { renderer } = await renderStrip({
+    state,
+    onPress,
+    verificationStatus: 'verified',
+  });
   const stalePress = stripButton(renderer.root).props.onPress;
   await act(async () => {
     renderer.update(
       presentation(
         <ProjectContextStrip
           disabled
+          verificationStatus="verified"
           projectName="demo"
           state={state}
           onPress={onPress}
@@ -355,6 +471,7 @@ test('forwards the real native focus target and safely releases stale refs', asy
       presentation(
         <ProjectContextStrip
           ref={firstRef}
+          verificationStatus="verified"
           projectName="demo"
           state={state}
           onPress={jest.fn()}
@@ -371,6 +488,7 @@ test('forwards the real native focus target and safely releases stale refs', asy
       presentation(
         <ProjectContextStrip
           ref={secondRef}
+          verificationStatus="verified"
           projectName="demo"
           state={state}
           onPress={jest.fn()}
@@ -387,7 +505,10 @@ test('forwards the real native focus target and safely releases stale refs', asy
 });
 
 test('renders localized Chinese metadata and keeps translation keys identical', async () => {
-  const { renderer } = await renderStrip({ locale: 'zh-CN' });
+  const { renderer } = await renderStrip({
+    locale: 'zh-CN',
+    verificationStatus: 'verified',
+  });
   const label = stripButton(renderer.root).props.accessibilityLabel as string;
 
   expect(label).toContain('就绪');
@@ -410,6 +531,7 @@ test('defines the complete localized strip vocabulary', () => {
     'context.strip.status.readyPartial',
     'context.strip.status.error',
     'context.strip.status.unavailable',
+    'context.strip.status.recovery',
     'context.strip.repository.clean',
     'context.strip.repository.changed',
     'context.strip.repository.conflicted',

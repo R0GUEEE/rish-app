@@ -10,6 +10,7 @@ import {
   AccessibilityInfo,
   ActivityIndicator,
   FlatList,
+  findNodeHandle,
   Pressable,
   StyleSheet,
   Text,
@@ -239,6 +240,9 @@ export function ProjectContextSheet(props: ProjectContextSheetProps) {
   const { colors, t } = useAppPresentation();
   const styles = useMemo(() => createStyles(colors), [colors]);
   const latest = useRef(props);
+  const titleRef = useRef<React.ElementRef<typeof View> | null>(null);
+  const titleTarget = useRef<number | null>(null);
+  const titlePresented = useRef(false);
   const titleFocused = useRef(false);
   const renderActionKey = props.actionKey;
   latest.current = props;
@@ -248,19 +252,41 @@ export function ProjectContextSheet(props: ProjectContextSheetProps) {
   };
 
   useEffect(() => {
-    if (!props.visible) titleFocused.current = false;
+    if (!props.visible) {
+      titlePresented.current = false;
+      titleFocused.current = false;
+    }
   }, [props.visible]);
 
-  const handleTitleLayout = (event: LayoutChangeEvent) => {
+  const focusTitleIfReady = () => {
     if (
       titleFocused.current ||
       !latest.current.visible ||
-      typeof event.target !== 'number'
+      !titlePresented.current
     ) {
       return;
     }
+    let nativeTarget: number | null = null;
+    try {
+      nativeTarget = findNodeHandle(titleRef.current) ?? null;
+    } catch {
+      nativeTarget = null;
+    }
+    const target = nativeTarget ?? titleTarget.current;
+    if (typeof target !== 'number') return;
     titleFocused.current = true;
-    AccessibilityInfo.setAccessibilityFocus(event.target);
+    AccessibilityInfo.setAccessibilityFocus(target);
+  };
+
+  const handleTitleLayout = (event: LayoutChangeEvent) => {
+    if (typeof event.target === 'number') titleTarget.current = event.target;
+    focusTitleIfReady();
+  };
+
+  const handlePresented = () => {
+    if (!latest.current.visible) return;
+    titlePresented.current = true;
+    focusTitleIfReady();
   };
 
   const selectedSet = useMemo(
@@ -825,6 +851,7 @@ export function ProjectContextSheet(props: ProjectContextSheetProps) {
       closeAccessibilityLabel={t('context.sheet.close')}
       onClose={handleClose}
       onDismiss={handleDismiss}
+      onPresented={handlePresented}
       scrim={false}
       side="bottom"
       visible={props.visible}
@@ -834,6 +861,7 @@ export function ProjectContextSheet(props: ProjectContextSheetProps) {
         <View style={[styles.titleRow, { paddingTop: insets.top + 8 }]}>
           <View style={styles.titleCopy}>
             <View
+              ref={titleRef}
               accessible
               accessibilityRole="header"
               collapsable={false}
