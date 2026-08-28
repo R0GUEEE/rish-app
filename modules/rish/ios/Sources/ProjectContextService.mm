@@ -1878,7 +1878,7 @@ static int DSHAppendSerializedPatchLine(__unused const git_diff_delta *delta,
       beginAuthorizationForSnapshotId:snapshotId
                    activeReferenceKey:nil error:&authorizationError];
   if (authorization == nil) {
-    DSHSetServiceError(error, DSHProjectContextServiceErrorConsent);
+    DSHSetServiceError(error, DSHServiceSnapshotStoreError(authorizationError));
     return nil;
   }
   NSDictionary *snapshot = authorization.snapshot;

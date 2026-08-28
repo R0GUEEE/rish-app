@@ -3,13 +3,17 @@ import { NativeModules } from 'react-native';
 import {
   CompletionBridgeError,
   encodeCompleteV2Request,
+  encodeCompleteV3Request,
   sanitizeCompletionError,
   validateCompleteV2Result,
+  validateCompleteV3Result,
   validateLegacyCompleteV2Result,
 } from '../completion/validation';
 import type {
   CompleteRoundV2Request,
   CompleteRoundV2Result,
+  CompleteRoundV3Request,
+  CompleteRoundV3Result,
   CompleteV2Request,
   CompleteV2Result,
   CompletionMessage,
@@ -20,6 +24,8 @@ import type {
 export type {
   CompleteRoundV2Request,
   CompleteRoundV2Result,
+  CompleteRoundV3Request,
+  CompleteRoundV3Result,
   CompleteV2Request,
   CompleteV2Result,
   CompletionAttachmentReference,
@@ -252,20 +258,22 @@ export function createCompletionRequestId(): string {
   )}-${hex.slice(16, 20)}-${hex.slice(20)}`;
 }
 
-function isCompleteRoundV2Request(
-  request: CompleteV2Request | CompleteRoundV2Request,
-): request is CompleteRoundV2Request {
+function isStrictRoundRequest(
+  request: CompleteV2Request | CompleteRoundV2Request | CompleteRoundV3Request,
+): request is CompleteRoundV2Request | CompleteRoundV3Request {
   return 'schemaVersion' in request;
 }
 
 function classifyCompleteV2Request(
-  request: CompleteV2Request | CompleteRoundV2Request,
+  request: CompleteV2Request | CompleteRoundV2Request | CompleteRoundV3Request,
 ):
   | { readonly kind: 'legacy'; readonly request: CompleteV2Request }
-  | { readonly kind: 'schema2'; readonly request: CompleteRoundV2Request } {
-  return isCompleteRoundV2Request(request)
-    ? { kind: 'schema2', request }
-    : { kind: 'legacy', request };
+  | { readonly kind: 'schema2'; readonly request: CompleteRoundV2Request }
+  | { readonly kind: 'schema3'; readonly request: CompleteRoundV3Request } {
+  if (!isStrictRoundRequest(request)) return { kind: 'legacy', request };
+  return request.schemaVersion === 3
+    ? { kind: 'schema3', request }
+    : { kind: 'schema2', request };
 }
 
 async function completeV2(
@@ -275,11 +283,15 @@ async function completeV2(
   request: CompleteRoundV2Request,
 ): Promise<CompleteRoundV2Result>;
 async function completeV2(
-  request: CompleteV2Request | CompleteRoundV2Request,
-): Promise<CompleteV2Result | CompleteRoundV2Result> {
+  request: CompleteRoundV3Request,
+): Promise<CompleteRoundV3Result>;
+async function completeV2(
+  request: CompleteV2Request | CompleteRoundV2Request | CompleteRoundV3Request,
+): Promise<CompleteV2Result | CompleteRoundV2Result | CompleteRoundV3Result> {
   let classified:
     | { readonly kind: 'legacy'; readonly request: CompleteV2Request }
-    | { readonly kind: 'schema2'; readonly request: CompleteRoundV2Request };
+    | { readonly kind: 'schema2'; readonly request: CompleteRoundV2Request }
+    | { readonly kind: 'schema3'; readonly request: CompleteRoundV3Request };
   try {
     classified = classifyCompleteV2Request(request);
   } catch {
@@ -308,14 +320,18 @@ async function completeV2(
   }
 
   try {
-    const schema2Request = classified.request;
-    const envelope = encodeCompleteV2Request(schema2Request);
     const nativeModule = required();
     if (typeof nativeModule.completeV2 !== 'function') {
       throw new CompletionBridgeError('E_COMPLETION_NATIVE');
     }
+    if (classified.kind === 'schema3') {
+      const envelope = encodeCompleteV3Request(classified.request);
+      const raw = await nativeModule.completeV2(envelope);
+      return validateCompleteV3Result(raw, classified.request);
+    }
+    const envelope = encodeCompleteV2Request(classified.request);
     const raw = await nativeModule.completeV2(envelope);
-    return validateCompleteV2Result(raw, schema2Request);
+    return validateCompleteV2Result(raw, classified.request);
   } catch (error) {
     throw sanitizeCompletionError(error);
   }

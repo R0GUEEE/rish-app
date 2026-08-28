@@ -29,6 +29,10 @@ const TURN_ID = '11111111-1111-4111-8111-111111111111';
 const ATTEMPT_ID = '22222222-2222-4222-8222-222222222222';
 const ROUND_ID = '33333333-3333-4333-8333-333333333333';
 const PROVIDER_REQUEST_ID = '44444444-4444-4444-8444-444444444444';
+const SNAPSHOT_ID = '66666666-6666-4666-8666-666666666666';
+const CONSENT_ID = '77777777-7777-4777-8777-777777777777';
+const CONVERSATION_ID = '88888888-8888-4888-8888-888888888888';
+const PROJECT_ID = '99999999-9999-4999-8999-999999999999';
 const SHA256 = 'a'.repeat(64);
 
 function schema2Request() {
@@ -113,6 +117,37 @@ function schema2Result(): Record<string, unknown> {
     model_input_sha256: SHA256,
     request_body_sha256: SHA256,
     project_context_receipt: null,
+  };
+}
+
+function schema3Request() {
+  return {
+    ...schema2Request(),
+    schemaVersion: 3 as const,
+    projectContext: {
+      schemaVersion: 1 as const,
+      snapshotId: SNAPSHOT_ID,
+      consentReceiptId: CONSENT_ID,
+      conversationId: CONVERSATION_ID,
+      projectId: PROJECT_ID,
+      provider: 'deepseek' as const,
+      policy: 'chat-read-v1' as const,
+    },
+  };
+}
+
+function schema3Result(): Record<string, unknown> {
+  return {
+    ...schema2Result(),
+    schema_version: 3,
+    project_context_receipt: {
+      schema_version: 1,
+      snapshot_id: SNAPSHOT_ID,
+      snapshot_sha256: SHA256,
+      source_fingerprint: SHA256,
+      context_bytes: 123,
+      verified_at: '2026-08-28T00:00:00.000Z',
+    },
   };
 }
 
@@ -1005,5 +1040,200 @@ describe('strict completion schema 2 bridge', () => {
 
     expect(typeof DshHarnessAdapter.completeV2).toBe('function');
     expect(typeof DshHarnessAdapter.cancel).toBe('function');
+  });
+});
+
+describe('context-bound completion schema 3 bridge', () => {
+  test('projects exact root and context wires then validates receipt metadata', async () => {
+    mockNativeLocalRuntime.completeV2.mockResolvedValueOnce(schema3Result());
+
+    const result = await LocalRuntime.completeV2(schema3Request() as never);
+    const [json] = mockNativeLocalRuntime.completeV2.mock.calls.at(-1) as [
+      string,
+    ];
+    const wire = JSON.parse(json) as Record<string, unknown>;
+
+    expect(Object.keys(wire).sort()).toEqual(
+      [
+        'schema_version',
+        'turn_id',
+        'attempt_id',
+        'round_id',
+        'round_index',
+        'model',
+        'thinking_mode',
+        'visible_history',
+        'round_transcript',
+        'tools',
+        'project_context',
+      ].sort(),
+    );
+    expect(wire.schema_version).toBe(3);
+    expect(wire.project_context).toEqual({
+      schema_version: 1,
+      snapshot_id: SNAPSHOT_ID,
+      consent_receipt_id: CONSENT_ID,
+      conversation_id: CONVERSATION_ID,
+      project_id: PROJECT_ID,
+      provider: 'deepseek',
+      policy: 'chat-read-v1',
+    });
+    expect(result).toEqual(schema3Result());
+  });
+
+  test('rejects malformed or non-exact context before native dispatch', async () => {
+    const base = schema3Request();
+    const invalidContexts: unknown[] = [
+      null,
+      { ...base.projectContext, snapshotId: 'NOT-A-UUID' },
+      { ...base.projectContext, consentReceiptId: 'not-a-uuid' },
+      {
+        ...base.projectContext,
+        conversationId: 'AAAAAAAA-AAAA-4AAA-8AAA-AAAAAAAAAAAA',
+      },
+      { ...base.projectContext, projectId: 'missing' },
+      { ...base.projectContext, provider: 'other' },
+      { ...base.projectContext, policy: 'write' },
+      { ...base.projectContext, schemaVersion: 2 },
+      { ...base.projectContext, raw_context: 'raw-context-sentinel' },
+    ];
+    for (const projectContext of invalidContexts) {
+      await expect(
+        LocalRuntime.completeV2({ ...base, projectContext } as never),
+      ).rejects.toMatchObject({
+        code: 'E_COMPLETION_CONTEXT_INVALID',
+        message: 'E_COMPLETION_CONTEXT_INVALID',
+      });
+    }
+    expect(mockNativeLocalRuntime.completeV2).not.toHaveBeenCalled();
+  });
+
+  test('leaves the schema2 encoded bytes unchanged', async () => {
+    mockNativeLocalRuntime.completeV2.mockResolvedValueOnce(schema2Result());
+    await LocalRuntime.completeV2(schema2Request());
+    expect(mockNativeLocalRuntime.completeV2).toHaveBeenLastCalledWith(
+      JSON.stringify({
+        schema_version: 2,
+        turn_id: TURN_ID,
+        attempt_id: ATTEMPT_ID,
+        round_id: ROUND_ID,
+        round_index: 1,
+        model: 'deepseek-v4-flash',
+        thinking_mode: 'high',
+        visible_history: schema2Request().visibleHistory,
+        round_transcript: schema2Request().roundTranscript,
+        tools: schema2Request().tools,
+        project_context: null,
+      }),
+    );
+  });
+
+  test('validates exact receipt keys, types, bounds, and request correlation', async () => {
+    const invalidResults: Record<string, unknown>[] = [];
+    const missing = schema3Result();
+    delete (missing.project_context_receipt as Record<string, unknown>)
+      .verified_at;
+    invalidResults.push(missing);
+    invalidResults.push({
+      ...schema3Result(),
+      project_context_receipt: {
+        ...(schema3Result().project_context_receipt as Record<string, unknown>),
+        raw_context: 'raw-context-sentinel',
+      },
+    });
+    for (const patch of [
+      { schema_version: 2 },
+      { snapshot_id: PROJECT_ID },
+      { snapshot_sha256: 'bad' },
+      { source_fingerprint: 'bad' },
+      { context_bytes: 0 },
+      { context_bytes: 256 * 1024 + 1 },
+      { context_bytes: -0 },
+      { verified_at: 'not-a-time' },
+    ]) {
+      invalidResults.push({
+        ...schema3Result(),
+        project_context_receipt: {
+          ...(schema3Result().project_context_receipt as Record<string, unknown>),
+          ...patch,
+        },
+      });
+    }
+    invalidResults.push({ ...schema3Result(), schema_version: 2 });
+    invalidResults.push({
+      ...schema3Result(),
+      project_context_receipt: null,
+    });
+
+    for (const invalid of invalidResults) {
+      mockNativeLocalRuntime.completeV2.mockResolvedValueOnce(invalid);
+      await expect(
+        LocalRuntime.completeV2(schema3Request() as never),
+      ).rejects.toBeInstanceOf(CompletionBridgeError);
+    }
+  });
+
+  test('rebuilds known context failures and folds hostile failures to native', async () => {
+    const known = [
+      'E_COMPLETION_CONTEXT_INVALID',
+      'E_PROJECT_NOT_FOUND',
+      'E_CONTEXT_CHANGED',
+      'E_CONTEXT_SECRET',
+      'E_CONTEXT_BUDGET',
+      'E_CONTEXT_STORAGE',
+      'E_CONTEXT_TIMEOUT',
+      'E_CONTEXT_CONSENT_INVALID',
+      'E_CONTEXT_INTEGRITY',
+      'E_CONTEXT_SNAPSHOT_MISSING',
+    ];
+    for (const code of known) {
+      const nativeError = { code, message: 'raw-context-sentinel' };
+      mockNativeLocalRuntime.completeV2.mockRejectedValueOnce(nativeError);
+      try {
+        await LocalRuntime.completeV2(schema3Request() as never);
+        throw new Error('expected rejection');
+      } catch (error) {
+        expect(error).not.toBe(nativeError);
+        expect(error).toMatchObject({ code, message: code });
+        expect(JSON.stringify(error)).not.toContain('sentinel');
+      }
+    }
+
+    const hostile = new Proxy(
+      { code: 'E_CONTEXT_CHANGED', raw: 'raw-context-sentinel' },
+      { getPrototypeOf: () => { throw new Error('proxy-sentinel'); } },
+    );
+    mockNativeLocalRuntime.completeV2.mockRejectedValueOnce(hostile);
+    await expect(
+      LocalRuntime.completeV2(schema3Request() as never),
+    ).rejects.toMatchObject({
+      code: 'E_COMPLETION_NATIVE',
+      message: 'E_COMPLETION_NATIVE',
+    });
+  });
+
+  test('forwards typed schema3 complete and cancel aliases without raw context', async () => {
+    mockNativeLocalRuntime.completeV2.mockResolvedValueOnce(schema3Result());
+    const result = await DshHarnessAdapter.completeRoundV3(
+      schema3Request() as never,
+    );
+    expect(result).toEqual(schema3Result());
+    const [wireJSON] = mockNativeLocalRuntime.completeV2.mock.calls.at(-1) as [
+      string,
+    ];
+    expect(wireJSON).not.toContain('raw-context-sentinel');
+    expect(wireJSON).not.toContain('/private/');
+
+    mockNativeLocalRuntime.cancelCompletion.mockResolvedValueOnce({
+      status: 'cancelled',
+    });
+    await expect(
+      DshHarnessAdapter.cancelRoundV3(ROUND_ID),
+    ).resolves.toEqual({ status: 'cancelled' });
+    expect(mockNativeLocalRuntime.cancelCompletion).toHaveBeenCalledWith(
+      ROUND_ID,
+    );
+    expect(typeof DshHarnessAdapter.completeRoundV2).toBe('function');
+    expect(typeof DshHarnessAdapter.completeV2).toBe('function');
   });
 });

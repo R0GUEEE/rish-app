@@ -7,6 +7,7 @@ NSString * const DSHCompletionV2ErrorDomain = @"DSHCompletionV2Error";
 
 const NSInteger kDSHCompletionEnvelopeVersion = 1;
 const NSInteger kDSHCompletionEnvelopeVersion2 = 2;
+const NSInteger kDSHCompletionEnvelopeVersion3 = 3;
 const NSInteger DSHCompletionV2MaxToolCount = 32;
 const NSInteger DSHCompletionV2MaxToolNameLength = 64;
 const NSInteger DSHCompletionV2MaxToolDescriptionLength = 1024;
@@ -752,6 +753,100 @@ DSHCompletionEnvelopeSchema2FromDictionary(NSDictionary *envelope,
     @"round_transcript": transcript,
     @"tools": tools,
     @"project_context": NSNull.null,
+  };
+}
+
+NSDictionary<NSString *, id> * _Nullable
+DSHCompletionEnvelopeSchema3FromDictionary(NSDictionary *envelope,
+                                            NSError **error) {
+  if (error != nil) *error = nil;
+  NSArray *keys = @[
+    @"schema_version", @"turn_id", @"attempt_id", @"round_id",
+    @"round_index", @"model", @"thinking_mode", @"visible_history",
+    @"round_transcript", @"tools", @"project_context",
+  ];
+  NSInteger schemaVersion = 0;
+  if (!DSHSchema2ExactKeys(envelope, keys) ||
+      !DSHSchema2Integer(envelope[@"schema_version"], 3, 3,
+                         &schemaVersion)) {
+    DSHSchema2Fail(error, @"E_COMPLETION_SCHEMA");
+    return nil;
+  }
+  NSString *turnId = DSHSchema2CanonicalUUID(envelope[@"turn_id"]);
+  NSString *attemptId = DSHSchema2CanonicalUUID(envelope[@"attempt_id"]);
+  NSString *roundId = DSHSchema2CanonicalUUID(envelope[@"round_id"]);
+  if (turnId == nil || attemptId == nil || roundId == nil) {
+    DSHSchema2Fail(error, @"E_COMPLETION_IDENTIFIER");
+    return nil;
+  }
+  NSInteger roundIndex = 0;
+  if (!DSHSchema2Integer(envelope[@"round_index"], 0, 7, &roundIndex)) {
+    DSHSchema2Fail(error, @"E_COMPLETION_ROUND");
+    return nil;
+  }
+  NSString *model = DSHV2String(envelope[@"model"]);
+  if (!DSHSchema2SupportedModel(model)) {
+    DSHSchema2Fail(error, @"E_COMPLETION_MODEL");
+    return nil;
+  }
+  NSString *thinkingMode = DSHV2String(envelope[@"thinking_mode"]);
+  if (!DSHSchema2ThinkingMode(thinkingMode)) {
+    DSHSchema2Fail(error, @"E_COMPLETION_THINKING");
+    return nil;
+  }
+  NSDictionary *rawContext =
+      [envelope[@"project_context"] isKindOfClass:NSDictionary.class]
+          ? envelope[@"project_context"] : nil;
+  NSArray *contextKeys = @[
+    @"schema_version", @"snapshot_id", @"consent_receipt_id",
+    @"conversation_id", @"project_id", @"provider", @"policy",
+  ];
+  NSInteger contextSchema = 0;
+  NSString *snapshotId = DSHSchema2CanonicalUUID(rawContext[@"snapshot_id"]);
+  NSString *consentReceiptId =
+      DSHSchema2CanonicalUUID(rawContext[@"consent_receipt_id"]);
+  NSString *conversationId =
+      DSHSchema2CanonicalUUID(rawContext[@"conversation_id"]);
+  NSString *projectId = DSHSchema2CanonicalUUID(rawContext[@"project_id"]);
+  if (!DSHSchema2ExactKeys(rawContext, contextKeys) ||
+      !DSHSchema2Integer(rawContext[@"schema_version"], 1, 1,
+                         &contextSchema) ||
+      snapshotId == nil || consentReceiptId == nil ||
+      conversationId == nil || projectId == nil ||
+      ![DSHV2String(rawContext[@"provider"]) isEqualToString:@"deepseek"] ||
+      ![DSHV2String(rawContext[@"policy"])
+          isEqualToString:@"chat-read-v1"]) {
+    DSHSchema2Fail(error, @"E_COMPLETION_CONTEXT_INVALID");
+    return nil;
+  }
+  NSArray *visible = DSHSchema2VisibleHistory(envelope[@"visible_history"], error);
+  if (visible == nil) return nil;
+  NSArray *transcript = DSHCompletionRoundTranscriptSchema2FromArray(
+      envelope[@"round_transcript"], roundIndex, thinkingMode, error);
+  if (transcript == nil) return nil;
+  NSArray *tools = DSHCompletionProviderToolsSchema2FromArray(
+      envelope[@"tools"], error);
+  if (tools == nil) return nil;
+  return @{
+    @"schema_version": @3,
+    @"turn_id": turnId,
+    @"attempt_id": attemptId,
+    @"round_id": roundId,
+    @"round_index": @(roundIndex),
+    @"model": model,
+    @"thinking_mode": thinkingMode,
+    @"visible_history": visible,
+    @"round_transcript": transcript,
+    @"tools": tools,
+    @"project_context": @{
+      @"schema_version": @1,
+      @"snapshot_id": snapshotId,
+      @"consent_receipt_id": consentReceiptId,
+      @"conversation_id": conversationId,
+      @"project_id": projectId,
+      @"provider": @"deepseek",
+      @"policy": @"chat-read-v1",
+    },
   };
 }
 

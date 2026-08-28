@@ -1,11 +1,15 @@
 import type {
   CompleteRoundV2Request,
   CompleteRoundV2Result,
+  CompleteRoundV3Request,
+  CompleteRoundV3Result,
   CompleteV2Result,
   CompleteV2ToolCall,
   CompletionAttachmentReference,
   CompletionFinishReasonV2,
   CompletionProviderToolV2,
+  CompletionProjectContextReceiptV3,
+  CompletionProjectContextV3,
   CompletionRoundTranscriptMessageV2,
   CompletionVisibleMessageV2,
   DeepSeekModelId,
@@ -32,12 +36,14 @@ type CompletionRequestErrorCode =
   | 'E_COMPLETION_HISTORY'
   | 'E_COMPLETION_TRANSCRIPT'
   | 'E_COMPLETION_TOOLS'
+  | 'E_COMPLETION_CONTEXT_INVALID'
   | 'E_COMPLETION_CONTEXT_UNSUPPORTED';
 
 type StableCompletionErrorCode =
   | CompletionResultErrorCode
   | CompletionRequestErrorCode
-  | NativeCompletionErrorCode;
+  | NativeCompletionErrorCode
+  | NativeProjectContextErrorCode;
 
 type NativeCompletionErrorCode =
   | 'E_COMPLETION_CREDENTIAL_UNAVAILABLE'
@@ -58,6 +64,17 @@ type NativeCompletionErrorCode =
   | 'E_COMPLETION_FINISH_RELATION'
   | 'E_COMPLETION_TOOL_CALL_INVALID'
   | 'E_COMPLETION_EMPTY_RESPONSE';
+
+type NativeProjectContextErrorCode =
+  | 'E_PROJECT_NOT_FOUND'
+  | 'E_CONTEXT_CHANGED'
+  | 'E_CONTEXT_SECRET'
+  | 'E_CONTEXT_BUDGET'
+  | 'E_CONTEXT_STORAGE'
+  | 'E_CONTEXT_TIMEOUT'
+  | 'E_CONTEXT_CONSENT_INVALID'
+  | 'E_CONTEXT_INTEGRITY'
+  | 'E_CONTEXT_SNAPSHOT_MISSING';
 
 export class CompletionBridgeError extends Error {
   readonly code: StableCompletionErrorCode;
@@ -124,6 +141,7 @@ const NATIVE_ERROR_CODES: ReadonlySet<string> = new Set([
   'E_COMPLETION_HISTORY',
   'E_COMPLETION_TRANSCRIPT',
   'E_COMPLETION_TOOLS',
+  'E_COMPLETION_CONTEXT_INVALID',
   'E_COMPLETION_CONTEXT_UNSUPPORTED',
   'E_COMPLETION_CREDENTIAL_UNAVAILABLE',
   'E_COMPLETION_CREDENTIAL_CHANGED',
@@ -143,11 +161,23 @@ const NATIVE_ERROR_CODES: ReadonlySet<string> = new Set([
   'E_COMPLETION_FINISH_RELATION',
   'E_COMPLETION_TOOL_CALL_INVALID',
   'E_COMPLETION_EMPTY_RESPONSE',
+  'E_PROJECT_NOT_FOUND',
+  'E_CONTEXT_CHANGED',
+  'E_CONTEXT_SECRET',
+  'E_CONTEXT_BUDGET',
+  'E_CONTEXT_STORAGE',
+  'E_CONTEXT_TIMEOUT',
+  'E_CONTEXT_CONSENT_INVALID',
+  'E_CONTEXT_INTEGRITY',
+  'E_CONTEXT_SNAPSHOT_MISSING',
 ]);
 
 function isNativeErrorCode(
   value: string,
-): value is CompletionRequestErrorCode | NativeCompletionErrorCode {
+): value is
+  | CompletionRequestErrorCode
+  | NativeCompletionErrorCode
+  | NativeProjectContextErrorCode {
   return NATIVE_ERROR_CODES.has(value);
 }
 
@@ -207,6 +237,25 @@ const SCHEMA2_RESULT_KEYS = [
   'model_input_sha256',
   'request_body_sha256',
   'project_context_receipt',
+] as const;
+
+const SCHEMA3_CONTEXT_KEYS = [
+  'schemaVersion',
+  'snapshotId',
+  'consentReceiptId',
+  'conversationId',
+  'projectId',
+  'provider',
+  'policy',
+] as const;
+
+const SCHEMA3_RECEIPT_KEYS = [
+  'schema_version',
+  'snapshot_id',
+  'snapshot_sha256',
+  'source_fingerprint',
+  'context_bytes',
+  'verified_at',
 ] as const;
 
 const SCHEMA1_RESULT_KEYS = [
@@ -297,6 +346,17 @@ function boundedString(value: unknown, maximum: number): value is string {
 
 function canonicalUUID(value: unknown): value is string {
   return typeof value === 'string' && UUID_PATTERN.test(value);
+}
+
+function isoTimestamp(value: unknown): value is string {
+  return (
+    typeof value === 'string' &&
+    value.length <= 64 &&
+    /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:Z|[+-]\d{2}:\d{2})$/u.test(
+      value,
+    ) &&
+    Number.isFinite(Date.parse(value))
+  );
 }
 
 function opaqueIdentifier(value: unknown): value is string {
@@ -651,6 +711,34 @@ function projectTranscript(
   return projected;
 }
 
+function projectSchema3Context(
+  value: unknown,
+): CompletionProjectContextV3 {
+  if (!isRecord(value) || !hasExactKeys(value, SCHEMA3_CONTEXT_KEYS)) {
+    fail('E_COMPLETION_CONTEXT_INVALID');
+  }
+  if (
+    value.schemaVersion !== 1 ||
+    !canonicalUUID(value.snapshotId) ||
+    !canonicalUUID(value.consentReceiptId) ||
+    !canonicalUUID(value.conversationId) ||
+    !canonicalUUID(value.projectId) ||
+    value.provider !== 'deepseek' ||
+    value.policy !== 'chat-read-v1'
+  ) {
+    fail('E_COMPLETION_CONTEXT_INVALID');
+  }
+  return {
+    schemaVersion: 1,
+    snapshotId: value.snapshotId,
+    consentReceiptId: value.consentReceiptId,
+    conversationId: value.conversationId,
+    projectId: value.projectId,
+    provider: 'deepseek',
+    policy: 'chat-read-v1',
+  };
+}
+
 /** Projects a typed request into the exact native 11-key snake-case wire. */
 function encodeCompleteV2RequestUnsafe(
   request: CompleteRoundV2Request,
@@ -723,6 +811,82 @@ export function encodeCompleteV2Request(
 ): string {
   return withStableFailure('E_COMPLETION_SCHEMA', () =>
     encodeCompleteV2RequestUnsafe(request),
+  );
+}
+
+function encodeCompleteV3RequestUnsafe(
+  request: CompleteRoundV3Request,
+): string {
+  if (request.schemaVersion !== 3) fail('E_COMPLETION_SCHEMA');
+  const identifiersValid = withStableFailure('E_COMPLETION_IDENTIFIER', () =>
+    canonicalUUID(request.turnId) &&
+    canonicalUUID(request.attemptId) &&
+    canonicalUUID(request.roundId),
+  );
+  if (!identifiersValid) fail('E_COMPLETION_IDENTIFIER');
+  if (
+    !withStableFailure('E_COMPLETION_ROUND', () =>
+      Number.isSafeInteger(request.roundIndex) &&
+      !Object.is(request.roundIndex, -0) &&
+      request.roundIndex >= 0 &&
+      request.roundIndex <= MAX_ROUND_INDEX,
+    )
+  ) {
+    fail('E_COMPLETION_ROUND');
+  }
+  if (!withStableFailure('E_COMPLETION_MODEL', () => validModel(request.model))) {
+    fail('E_COMPLETION_MODEL');
+  }
+  if (
+    !withStableFailure('E_COMPLETION_THINKING', () =>
+      validThinkingMode(request.thinkingMode),
+    )
+  ) {
+    fail('E_COMPLETION_THINKING');
+  }
+  const context = withStableFailure('E_COMPLETION_CONTEXT_INVALID', () =>
+    projectSchema3Context(request.projectContext),
+  );
+  const visibleHistory = withStableFailure('E_COMPLETION_HISTORY', () =>
+    projectVisibleHistory(request.visibleHistory, request.model),
+  );
+  const roundTranscript = withStableFailure('E_COMPLETION_TRANSCRIPT', () =>
+    projectTranscript(request.roundTranscript, request.roundIndex),
+  );
+  const tools = withStableFailure('E_COMPLETION_TOOLS', () =>
+    projectProviderTools(request.tools),
+  );
+  return safeJSONStringify(
+    {
+      schema_version: 3,
+      turn_id: request.turnId,
+      attempt_id: request.attemptId,
+      round_id: request.roundId,
+      round_index: request.roundIndex,
+      model: request.model,
+      thinking_mode: request.thinkingMode,
+      visible_history: visibleHistory,
+      round_transcript: roundTranscript,
+      tools,
+      project_context: {
+        schema_version: 1,
+        snapshot_id: context.snapshotId,
+        consent_receipt_id: context.consentReceiptId,
+        conversation_id: context.conversationId,
+        project_id: context.projectId,
+        provider: context.provider,
+        policy: context.policy,
+      },
+    },
+    'E_COMPLETION_SCHEMA',
+  );
+}
+
+export function encodeCompleteV3Request(
+  request: CompleteRoundV3Request,
+): string {
+  return withStableFailure('E_COMPLETION_SCHEMA', () =>
+    encodeCompleteV3RequestUnsafe(request),
   );
 }
 
@@ -903,6 +1067,174 @@ export function validateCompleteV2Result(
 ): CompleteRoundV2Result {
   return withStableFailure('E_COMPLETION_RESULT_TYPE', () =>
     validateCompleteV2ResultUnsafe(value, request),
+  );
+}
+
+function projectSchema3Receipt(
+  value: unknown,
+  request: CompleteRoundV3Request,
+): CompletionProjectContextReceiptV3 {
+  const receipt = resultRecord(value, SCHEMA3_RECEIPT_KEYS);
+  if (
+    receipt.schema_version !== 1 ||
+    typeof receipt.snapshot_id !== 'string' ||
+    typeof receipt.snapshot_sha256 !== 'string' ||
+    typeof receipt.source_fingerprint !== 'string' ||
+    typeof receipt.context_bytes !== 'number' ||
+    typeof receipt.verified_at !== 'string'
+  ) {
+    fail('E_COMPLETION_RESULT_TYPE');
+  }
+  if (!canonicalUUID(receipt.snapshot_id)) {
+    fail('E_COMPLETION_RESULT_IDENTIFIER');
+  }
+  if (
+    !SHA256_PATTERN.test(receipt.snapshot_sha256) ||
+    !SHA256_PATTERN.test(receipt.source_fingerprint)
+  ) {
+    fail('E_COMPLETION_RESULT_DIGEST');
+  }
+  if (
+    !Number.isSafeInteger(receipt.context_bytes) ||
+    Object.is(receipt.context_bytes, -0) ||
+    receipt.context_bytes < 1 ||
+    receipt.context_bytes > 256 * 1024 ||
+    !isoTimestamp(receipt.verified_at)
+  ) {
+    fail('E_COMPLETION_RESULT_BOUNDS');
+  }
+  if (receipt.snapshot_id !== request.projectContext.snapshotId) {
+    fail('E_COMPLETION_RESULT_CORRELATION');
+  }
+  return {
+    schema_version: 1,
+    snapshot_id: receipt.snapshot_id,
+    snapshot_sha256: receipt.snapshot_sha256,
+    source_fingerprint: receipt.source_fingerprint,
+    context_bytes: receipt.context_bytes,
+    verified_at: receipt.verified_at,
+  };
+}
+
+function validateCompleteV3ResultUnsafe(
+  value: unknown,
+  request: CompleteRoundV3Request,
+): CompleteRoundV3Result {
+  const result = resultRecord(value, SCHEMA2_RESULT_KEYS);
+  if (
+    typeof result.schema_version !== 'number' ||
+    typeof result.round_index !== 'number' ||
+    typeof result.latency_ms !== 'number' ||
+    typeof result.turn_id !== 'string' ||
+    typeof result.attempt_id !== 'string' ||
+    typeof result.round_id !== 'string' ||
+    typeof result.provider_request_id !== 'string' ||
+    typeof result.provider_response_id !== 'string' ||
+    typeof result.requested_model !== 'string' ||
+    typeof result.model !== 'string' ||
+    typeof result.thinking_mode !== 'string' ||
+    typeof result.text !== 'string' ||
+    typeof result.reasoning !== 'string' ||
+    typeof result.finish_reason !== 'string' ||
+    typeof result.visible_history_sha256 !== 'string' ||
+    typeof result.model_input_sha256 !== 'string' ||
+    typeof result.request_body_sha256 !== 'string' ||
+    result.project_context_receipt === null
+  ) {
+    fail('E_COMPLETION_RESULT_TYPE');
+  }
+  if (result.schema_version !== 3) fail('E_COMPLETION_RESULT_ENUM');
+  if (
+    !canonicalUUID(result.turn_id) ||
+    !canonicalUUID(result.attempt_id) ||
+    !canonicalUUID(result.round_id) ||
+    !canonicalUUID(result.provider_request_id) ||
+    !opaqueIdentifier(result.provider_response_id)
+  ) {
+    fail('E_COMPLETION_RESULT_IDENTIFIER');
+  }
+  if (
+    !Number.isSafeInteger(result.round_index) ||
+    Object.is(result.round_index, -0) ||
+    result.round_index < 0 ||
+    result.round_index > MAX_ROUND_INDEX ||
+    !Number.isSafeInteger(result.latency_ms) ||
+    Object.is(result.latency_ms, -0) ||
+    result.latency_ms < 0 ||
+    !boundedString(result.text, MAX_MESSAGE_BYTES) ||
+    !boundedString(result.reasoning, MAX_MESSAGE_BYTES)
+  ) {
+    fail('E_COMPLETION_RESULT_BOUNDS');
+  }
+  if (
+    !validModel(result.requested_model) ||
+    !validModel(result.model) ||
+    !validThinkingMode(result.thinking_mode) ||
+    !validFinishReason(result.finish_reason)
+  ) {
+    fail('E_COMPLETION_RESULT_ENUM');
+  }
+  if (
+    !SHA256_PATTERN.test(result.visible_history_sha256) ||
+    !SHA256_PATTERN.test(result.model_input_sha256) ||
+    !SHA256_PATTERN.test(result.request_body_sha256)
+  ) {
+    fail('E_COMPLETION_RESULT_DIGEST');
+  }
+  if (
+    result.turn_id !== request.turnId ||
+    result.attempt_id !== request.attemptId ||
+    result.round_id !== request.roundId ||
+    result.round_index !== request.roundIndex ||
+    result.thinking_mode !== request.thinkingMode ||
+    result.requested_model !== request.model ||
+    result.model !== request.model ||
+    result.model !== result.requested_model
+  ) {
+    fail('E_COMPLETION_RESULT_CORRELATION');
+  }
+  const toolCalls = projectResultToolCalls(result.tool_calls);
+  const hasToolCalls = toolCalls.length > 0;
+  if (
+    (result.finish_reason === 'tool_calls') !== hasToolCalls ||
+    ((result.finish_reason === 'stop' || result.finish_reason === 'length') &&
+      result.text.trim().length === 0)
+  ) {
+    fail('E_COMPLETION_RESULT_RELATION');
+  }
+  const receipt = projectSchema3Receipt(
+    result.project_context_receipt,
+    request,
+  );
+  return {
+    schema_version: 3,
+    turn_id: result.turn_id,
+    attempt_id: result.attempt_id,
+    round_id: result.round_id,
+    round_index: result.round_index,
+    provider_request_id: result.provider_request_id,
+    provider_response_id: result.provider_response_id,
+    requested_model: result.requested_model,
+    model: result.model,
+    thinking_mode: result.thinking_mode,
+    text: result.text,
+    reasoning: result.reasoning,
+    tool_calls: toolCalls,
+    finish_reason: result.finish_reason,
+    latency_ms: result.latency_ms,
+    visible_history_sha256: result.visible_history_sha256,
+    model_input_sha256: result.model_input_sha256,
+    request_body_sha256: result.request_body_sha256,
+    project_context_receipt: receipt,
+  };
+}
+
+export function validateCompleteV3Result(
+  value: unknown,
+  request: CompleteRoundV3Request,
+): CompleteRoundV3Result {
+  return withStableFailure('E_COMPLETION_RESULT_TYPE', () =>
+    validateCompleteV3ResultUnsafe(value, request),
   );
 }
 

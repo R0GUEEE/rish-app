@@ -7,6 +7,7 @@ NS_ASSUME_NONNULL_BEGIN
 
 extern const NSInteger kDSHCompletionEnvelopeVersion;
 extern const NSInteger kDSHCompletionEnvelopeVersion2;
+extern const NSInteger kDSHCompletionEnvelopeVersion3;
 extern const NSInteger DSHCompletionV2MaxToolCount;
 extern const NSInteger DSHCompletionV2MaxToolNameLength;
 extern const NSInteger DSHCompletionV2MaxToolDescriptionLength;
@@ -54,6 +55,9 @@ NSDictionary<NSString *, id> * _Nullable DSHParseCompletionResponseV2(
 /// Strict schema-2 contracts. These helpers are side-effect free so the
 /// bridge and its Release XCTest target share one fail-closed definition.
 NSDictionary<NSString *, id> * _Nullable DSHCompletionEnvelopeSchema2FromDictionary(
+    NSDictionary *envelope, NSError **error);
+
+NSDictionary<NSString *, id> * _Nullable DSHCompletionEnvelopeSchema3FromDictionary(
     NSDictionary *envelope, NSError **error);
 
 NSArray<NSDictionary<NSString *, id> *> * _Nullable

@@ -108,6 +108,24 @@ export type CompleteRoundV2Request = {
   readonly projectContext: null;
 };
 
+export type CompletionProjectContextV3 = {
+  readonly schemaVersion: 1;
+  readonly snapshotId: string;
+  readonly consentReceiptId: string;
+  readonly conversationId: string;
+  readonly projectId: string;
+  readonly provider: 'deepseek';
+  readonly policy: 'chat-read-v1';
+};
+
+export type CompleteRoundV3Request = Omit<
+  CompleteRoundV2Request,
+  'schemaVersion' | 'projectContext'
+> & {
+  readonly schemaVersion: 3;
+  readonly projectContext: CompletionProjectContextV3;
+};
+
 export type CompletionFinishReasonV2 =
   | 'stop'
   | 'tool_calls'
@@ -134,4 +152,21 @@ export type CompleteRoundV2Result = {
   readonly model_input_sha256: string;
   readonly request_body_sha256: string;
   readonly project_context_receipt: null;
+};
+
+export type CompletionProjectContextReceiptV3 = {
+  readonly schema_version: 1;
+  readonly snapshot_id: string;
+  readonly snapshot_sha256: string;
+  readonly source_fingerprint: string;
+  readonly context_bytes: number;
+  readonly verified_at: string;
+};
+
+export type CompleteRoundV3Result = Omit<
+  CompleteRoundV2Result,
+  'schema_version' | 'project_context_receipt'
+> & {
+  readonly schema_version: 3;
+  readonly project_context_receipt: CompletionProjectContextReceiptV3;
 };

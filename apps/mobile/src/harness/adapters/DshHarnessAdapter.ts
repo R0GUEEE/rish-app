@@ -1,6 +1,7 @@
 import {
   LocalRuntime,
   type CompleteRoundV2Request,
+  type CompleteRoundV3Request,
   type CompletionToolDefinitionV2,
   type CompletionMessage,
   type CredentialPromptLocale,
@@ -63,7 +64,16 @@ export const DshHarnessAdapter = {
     }),
   completeRoundV2: (request: CompleteRoundV2Request) =>
     LocalRuntime.completeV2(request),
+  completeRoundV3: (request: CompleteRoundV3Request) =>
+    LocalRuntime.completeV2(request),
   cancelRoundV2: async (roundId: string) => {
+    try {
+      return await LocalRuntime.cancelCompletion(roundId);
+    } catch (error) {
+      throw sanitizeCompletionError(error);
+    }
+  },
+  cancelRoundV3: async (roundId: string) => {
     try {
       return await LocalRuntime.cancelCompletion(roundId);
     } catch (error) {

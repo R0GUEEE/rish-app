@@ -1123,7 +1123,7 @@ static NSString *DSHSHA256Hex(NSData *data) {
                          requestBind:[self requestBindForManifest:first]
                              receipt:nil
                                error:&error]);
-  XCTAssertEqual(error.code, DSHProjectContextServiceErrorConsent);
+  XCTAssertEqual(error.code, DSHProjectContextServiceErrorSnapshotMissing);
 
   NSDictionary *secondConsent =
       [self.service confirmSnapshotId:second[@"snapshot_id"] error:&error];
@@ -1148,7 +1148,7 @@ static NSString *DSHSHA256Hex(NSData *data) {
                          requestBind:[self requestBindForManifest:second]
                              receipt:nil
                                error:&error]);
-  XCTAssertEqual(error.code, DSHProjectContextServiceErrorConsent);
+  XCTAssertEqual(error.code, DSHProjectContextServiceErrorSnapshotMissing);
   XCTAssertTrue([self.store
       abortPrepareTransactionForSnapshotId:third[@"snapshot_id"]
                            activeReferenceKey:
