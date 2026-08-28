@@ -142,6 +142,35 @@ describe('project context state', () => {
     expect(isProjectContextSendable(ready)).toBe(true);
   });
 
+  test('keys included uniqueness by path and source', () => {
+    const base = manifest.included[0]!;
+    const samePathDifferentSource: ProjectContextManifestV1 = {
+      ...manifest,
+      included: [
+        base,
+        {
+          ...base,
+          source: 'staged_diff',
+          sha256: 'd'.repeat(64),
+        },
+      ],
+    };
+    const valid = prepareContext(samePathDifferentSource);
+    expect(() => serializeProjectContextState(valid)).not.toThrow();
+    expect(
+      hydrateProjectContextState(serializeProjectContextState(valid)).snapshot
+        ?.included,
+    ).toHaveLength(2);
+
+    const duplicatePair = prepareContext({
+      ...manifest,
+      included: [base, { ...base }],
+    });
+    expect(() => serializeProjectContextState(duplicatePair)).toThrow(
+      /included\[1\]\.path/,
+    );
+  });
+
   test('ignores confirmation that does not match the prepared manifest', () => {
     const prepared = prepareContext();
     const mismatch = projectContextReducer(prepared, {
@@ -851,6 +880,24 @@ describe('strict project context persistence', () => {
     };
 
     let mapCalls = 0;
+    let oversizedOwnKeysCalls = 0;
+    const oversizedIncluded = new Proxy(new Array(33), {
+      ownKeys: target => {
+        oversizedOwnKeysCalls += 1;
+        return Reflect.ownKeys(target);
+      },
+    });
+    expect(() =>
+      hydrateProjectContextState({
+        ...payload,
+        manifest: {
+          ...payload.manifest,
+          included: oversizedIncluded,
+        },
+      }),
+    ).toThrow(/included/);
+    expect(oversizedOwnKeysCalls).toBe(0);
+
     const maliciousIncluded = [...payload.manifest.included];
     Object.defineProperty(maliciousIncluded, 'map', {
       enumerable: false,
@@ -1010,6 +1057,19 @@ describe('strict project context persistence', () => {
         }),
       ).toThrow(new RegExp(hiddenKey));
     }
+
+    const hiddenRequired = { ...payload.manifest };
+    Object.defineProperty(hiddenRequired, 'snapshot_id', {
+      configurable: true,
+      enumerable: false,
+      value: 'snapshot-1',
+    });
+    expect(() =>
+      hydrateProjectContextState({
+        ...payload,
+        manifest: hiddenRequired,
+      }),
+    ).toThrow(/snapshot_id/);
 
     const symbolManifest = { ...payload.manifest };
     const rawSymbol = Symbol('raw_content');

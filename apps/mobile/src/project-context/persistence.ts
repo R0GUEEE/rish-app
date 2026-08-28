@@ -119,7 +119,10 @@ function exactRecord(
     if (descriptor === undefined) {
       return invalid(`${path}.${key}`, 'is required');
     }
-    if (!Object.prototype.hasOwnProperty.call(descriptor, 'value')) {
+    if (
+      !Object.prototype.hasOwnProperty.call(descriptor, 'value') ||
+      descriptor.enumerable !== true
+    ) {
       return invalid(`${path}.${key}`, 'must be an own data property');
     }
     sanitized[key] = descriptor.value;
@@ -138,7 +141,11 @@ function enumValue<Value extends string>(
   return value as Value;
 }
 
-function strictArray(value: unknown, path: string): unknown[] {
+function strictArray(
+  value: unknown,
+  path: string,
+  maximumLength: number,
+): unknown[] {
   if (
     !Array.isArray(value) ||
     Object.getPrototypeOf(value) !== trustedArrayPrototype
@@ -158,20 +165,20 @@ function strictArray(value: unknown, path: string): unknown[] {
   ) {
     return invalid(path, 'must use standard array semantics');
   }
-  if (Object.getOwnPropertySymbols(value).length > 0) {
-    return invalid(path, 'must not override array semantics');
-  }
-
   const lengthDescriptor = Object.getOwnPropertyDescriptor(value, 'length');
   if (
     lengthDescriptor === undefined ||
     !Object.prototype.hasOwnProperty.call(lengthDescriptor, 'value') ||
     !Number.isSafeInteger(lengthDescriptor.value) ||
-    lengthDescriptor.value < 0
+    lengthDescriptor.value < 0 ||
+    lengthDescriptor.value > maximumLength
   ) {
     return invalid(`${path}.length`, 'must be a valid array length');
   }
   const length = lengthDescriptor.value as number;
+  if (Object.getOwnPropertySymbols(value).length > 0) {
+    return invalid(path, 'must not override array semantics');
+  }
   const ownNames = Object.getOwnPropertyNames(value);
   const allowedNames = new Set<string>(['length']);
   const result: unknown[] = [];
@@ -304,7 +311,11 @@ function manifest(value: unknown): ProjectContextManifestV1 | null {
   if (raw.provider_host !== 'api.deepseek.com') {
     return invalid('$.manifest.provider_host', 'must equal api.deepseek.com');
   }
-  const includedEntries = strictArray(raw.included, '$.manifest.included');
+  const includedEntries = strictArray(
+    raw.included,
+    '$.manifest.included',
+    32,
+  );
   const included: ProjectContextIncludedItemV1[] = [];
   for (let index = 0; index < includedEntries.length; index += 1) {
     included[index] = includedItem(
@@ -315,12 +326,17 @@ function manifest(value: unknown): ProjectContextManifestV1 | null {
   const includedPaths = new Set<string>();
   for (let index = 0; index < included.length; index += 1) {
     const item = included[index]!;
-    if (includedPaths.has(item.path)) {
+    const identity = `${item.path}\n${item.source}`;
+    if (includedPaths.has(identity)) {
       return invalid(`$.manifest.included[${index}].path`, 'must be unique');
     }
-    includedPaths.add(item.path);
+    includedPaths.add(identity);
   }
-  const omittedEntries = strictArray(raw.omitted, '$.manifest.omitted');
+  const omittedEntries = strictArray(
+    raw.omitted,
+    '$.manifest.omitted',
+    5000,
+  );
   const omitted: ProjectContextManifestV1['omitted'][number][] = [];
   for (let index = 0; index < omittedEntries.length; index += 1) {
     omitted[index] = omittedItem(
@@ -413,7 +429,7 @@ function orderPaths(paths: readonly string[]): string[] {
 }
 
 function selectedPaths(value: unknown): string[] {
-  const entries = strictArray(value, '$.selected_paths');
+  const entries = strictArray(value, '$.selected_paths', 5000);
   const seen = new Set<string>();
   const paths: string[] = [];
   for (let index = 0; index < entries.length; index += 1) {
