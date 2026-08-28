@@ -1,6 +1,8 @@
 import type {
   PersistedProjectContextStateV1,
   ProjectContextAction,
+  ProjectContextConsentV1,
+  ProjectContextManifestV1,
   ProjectContextState,
 } from '../project-context/types';
 
@@ -241,6 +243,18 @@ export type Conversation = {
   readonly updatedAt: string;
 };
 
+/**
+ * Immutable ownership captured before an async native context operation.
+ * expectedContext is intentionally an exact in-memory CAS reference.
+ */
+export type ProjectContextMutationScope = {
+  readonly conversationId: string;
+  readonly projectId: string;
+  readonly runtimeContextId: string;
+  readonly modelId: ModelId;
+  readonly expectedContext: ProjectContextState;
+};
+
 export type ChatState = {
   readonly schemaVersion: typeof CHAT_STATE_SCHEMA_VERSION;
   readonly conversations: Readonly<Record<string, Conversation>>;
@@ -345,6 +359,34 @@ export type ChatAction =
       readonly payload: {
         readonly conversationId: string;
         readonly action: ProjectContextAction;
+        readonly at: string;
+      };
+    }
+  | {
+      readonly type: 'project-context/replace-prepared';
+      readonly payload: {
+        readonly scope: ProjectContextMutationScope;
+        readonly preparationId: string;
+        readonly selectedPaths: readonly string[];
+        readonly manifest: ProjectContextManifestV1;
+        readonly at: string;
+      };
+    }
+  | {
+      readonly type: 'project-context/replace-confirmed';
+      readonly payload: {
+        readonly scope: ProjectContextMutationScope;
+        readonly preparationId: string;
+        readonly selectedPaths: readonly string[];
+        readonly manifest: ProjectContextManifestV1;
+        readonly consent: ProjectContextConsentV1;
+        readonly at: string;
+      };
+    }
+  | {
+      readonly type: 'project-context/disable';
+      readonly payload: {
+        readonly scope: ProjectContextMutationScope;
         readonly at: string;
       };
     }

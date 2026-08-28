@@ -3,6 +3,7 @@ import {
   createEmptyChatState,
   isCanonicalLifecycleId,
   MAX_ATTEMPT_VISIBLE_MESSAGES,
+  orderConversationIds,
 } from './reducer';
 import { hydrateChatState, serializeChatState } from './persistence';
 import type {
@@ -14,10 +15,15 @@ import type {
   Conversation,
   ConversationThinkingMode,
   ModelId,
+  ProjectContextMutationScope,
   TurnAttemptV1,
 } from './types';
 import { isProjectContextSendable } from '../project-context/reducer';
-import type { ProjectContextAction } from '../project-context/types';
+import type {
+  ProjectContextAction,
+  ProjectContextConsentV1,
+  ProjectContextManifestV1,
+} from '../project-context/types';
 
 export type ChatStoreIdKind = 'conversation' | 'message';
 export type ChatStoreLifecycleIdKind =
@@ -70,6 +76,32 @@ export type PreparedTurnTransaction = PreparedTurnAttempt & {
   rollback(): boolean;
 };
 
+export type ReplaceProjectContextPreparedInput = {
+  readonly preparationId: string;
+  readonly selectedPaths: readonly string[];
+  readonly manifest: ProjectContextManifestV1;
+};
+
+export type ReplaceProjectContextConfirmedInput =
+  ReplaceProjectContextPreparedInput & {
+    readonly consent: ProjectContextConsentV1;
+  };
+
+export type ScopedProjectContextTransaction = {
+  readonly conversationId: string;
+  readonly previousSnapshotId: string | null;
+  readonly nextSnapshotId: string | null;
+  /** Settles only while the target conversation still equals the applied row. */
+  commit(): boolean;
+  /** Restores only the target conversation, preserving unrelated root changes. */
+  rollback(): boolean;
+};
+
+export type DisableProjectContextTransaction =
+  ScopedProjectContextTransaction & {
+    readonly cleanupSnapshotId: string | null;
+  };
+
 export type ChatStore = {
   getState(): ChatState;
   dispatch(action: ChatAction): ChatState;
@@ -100,6 +132,17 @@ export type ChatStore = {
     conversationId: string,
     action: ProjectContextAction,
   ): boolean;
+  replaceProjectContextPrepared(
+    scope: ProjectContextMutationScope,
+    input: ReplaceProjectContextPreparedInput,
+  ): ScopedProjectContextTransaction | null;
+  replaceProjectContextConfirmed(
+    scope: ProjectContextMutationScope,
+    input: ReplaceProjectContextConfirmedInput,
+  ): ScopedProjectContextTransaction | null;
+  disableProjectContext(
+    scope: ProjectContextMutationScope,
+  ): DisableProjectContextTransaction | null;
   prepareTurnAttempt(
     conversationId: string,
     text: string,
@@ -290,6 +333,53 @@ export function createChatStore(options: ChatStoreOptions = {}): ChatStore {
     };
   };
 
+  const scopedProjectContextTransaction = (
+    applied: AppliedAction,
+    conversationId: string,
+  ): ScopedProjectContextTransaction | null => {
+    const beforeConversation = applied.before.conversations[conversationId];
+    const nextConversation = applied.next.conversations[conversationId];
+    if (
+      !applied.changed ||
+      beforeConversation === undefined ||
+      nextConversation === undefined ||
+      beforeConversation === nextConversation
+    ) {
+      return null;
+    }
+    let settled = false;
+    return {
+      conversationId,
+      previousSnapshotId:
+        beforeConversation.projectContext?.snapshot?.snapshot_id ?? null,
+      nextSnapshotId:
+        nextConversation.projectContext?.snapshot?.snapshot_id ?? null,
+      commit: () => {
+        if (settled) return false;
+        settled = true;
+        return state.conversations[conversationId] === nextConversation;
+      },
+      rollback: () => {
+        if (settled) return false;
+        settled = true;
+        if (state.conversations[conversationId] !== nextConversation) {
+          return false;
+        }
+        const conversations = {
+          ...state.conversations,
+          [conversationId]: beforeConversation,
+        };
+        state = {
+          ...state,
+          conversations,
+          conversationOrder: orderConversationIds(conversations),
+        };
+        notifyListeners();
+        return true;
+      },
+    };
+  };
+
   const appendMessage = (
     role: 'user' | 'assistant',
     conversationId: string,
@@ -418,6 +508,55 @@ export function createChatStore(options: ChatStoreOptions = {}): ChatStore {
         payload: { conversationId, action, at: canonicalNow(now) },
       });
       return state !== before;
+    },
+    replaceProjectContextPrepared: (scope, input) => {
+      const conversationId = scope.conversationId;
+      if (typeof conversationId !== 'string') return null;
+      const applied = applyAction({
+        type: 'project-context/replace-prepared',
+        payload: {
+          scope,
+          preparationId: input.preparationId,
+          selectedPaths: input.selectedPaths,
+          manifest: input.manifest,
+          at: canonicalNow(now),
+        },
+      });
+      return scopedProjectContextTransaction(applied, conversationId);
+    },
+    replaceProjectContextConfirmed: (scope, input) => {
+      const conversationId = scope.conversationId;
+      if (typeof conversationId !== 'string') return null;
+      const applied = applyAction({
+        type: 'project-context/replace-confirmed',
+        payload: {
+          scope,
+          preparationId: input.preparationId,
+          selectedPaths: input.selectedPaths,
+          manifest: input.manifest,
+          consent: input.consent,
+          at: canonicalNow(now),
+        },
+      });
+      return scopedProjectContextTransaction(applied, conversationId);
+    },
+    disableProjectContext: scope => {
+      const conversationId = scope.conversationId;
+      if (typeof conversationId !== 'string') return null;
+      const applied = applyAction({
+        type: 'project-context/disable',
+        payload: { scope, at: canonicalNow(now) },
+      });
+      const transaction = scopedProjectContextTransaction(
+        applied,
+        conversationId,
+      );
+      return transaction === null
+        ? null
+        : {
+            ...transaction,
+            cleanupSnapshotId: transaction.previousSnapshotId,
+          };
     },
     prepareTurnAttempt: (conversationId, text, appendOptions = {}) => {
       const conversation = state.conversations[conversationId];

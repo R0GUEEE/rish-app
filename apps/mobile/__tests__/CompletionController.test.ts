@@ -30,6 +30,8 @@ const SNAPSHOT_ID = '66666666-6666-4666-8666-666666666666';
 const CONSENT_ID = '77777777-7777-4777-8777-777777777777';
 const PROJECT_ID = '88888888-8888-4888-8888-888888888888';
 const PROVIDER_REQUEST_ID = '99999999-9999-4999-8999-999999999999';
+const CONTEXT_PREPARATION_ID =
+  'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa';
 
 function deferred<T>() {
   let resolve!: (value: T) => void;
@@ -190,21 +192,42 @@ function readyProjectStore(): ChatStore {
     confirmed_at: LATER,
   };
   expect(store.ensureRuntimeContextId(conversationId)).toBe(RUNTIME_ID);
-  store.applyProjectContextAction(conversationId, {
-    type: 'checking',
-    preparationId: 'prepare-1',
-  });
-  store.applyProjectContextAction(conversationId, {
-    type: 'prepared',
-    preparationId: 'prepare-1',
-    manifest,
-  });
-  store.applyProjectContextAction(conversationId, {
-    type: 'confirmed',
-    preparationId: 'prepare-1',
-    manifest,
-    consent,
-  });
+  const preparedConversation = store.getState().conversations[conversationId]!;
+  const prepared = store.replaceProjectContextPrepared(
+    {
+      conversationId,
+      projectId: PROJECT_ID,
+      runtimeContextId: RUNTIME_ID,
+      modelId: preparedConversation.modelId,
+      expectedContext: preparedConversation.projectContext!,
+    },
+    {
+      preparationId: CONTEXT_PREPARATION_ID,
+      selectedPaths: ['README.md'],
+      manifest,
+    },
+  );
+  expect(prepared).not.toBeNull();
+  expect(prepared!.commit()).toBe(true);
+
+  const confirmedConversation = store.getState().conversations[conversationId]!;
+  const confirmed = store.replaceProjectContextConfirmed(
+    {
+      conversationId,
+      projectId: PROJECT_ID,
+      runtimeContextId: RUNTIME_ID,
+      modelId: confirmedConversation.modelId,
+      expectedContext: confirmedConversation.projectContext!,
+    },
+    {
+      preparationId: CONTEXT_PREPARATION_ID,
+      selectedPaths: ['README.md'],
+      manifest,
+      consent,
+    },
+  );
+  expect(confirmed).not.toBeNull();
+  expect(confirmed!.commit()).toBe(true);
   return store;
 }
 

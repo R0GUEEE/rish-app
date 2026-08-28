@@ -748,3 +748,202 @@ export function serializeProjectContextState(
   };
   return safeEncodeJSON(sanitized);
 }
+
+function durableUtf8Bytes(value: string): number | null {
+  let bytes = 0;
+  for (let index = 0; index < value.length; index += 1) {
+    const unit = value.charCodeAt(index);
+    if (unit <= 0x7f) {
+      bytes += 1;
+    } else if (unit <= 0x7ff) {
+      bytes += 2;
+    } else if (unit >= 0xd800 && unit <= 0xdbff) {
+      const low = value.charCodeAt(index + 1);
+      if (low < 0xdc00 || low > 0xdfff) return null;
+      bytes += 4;
+      index += 1;
+    } else if (unit >= 0xdc00 && unit <= 0xdfff) {
+      return null;
+    } else {
+      bytes += 3;
+    }
+  }
+  return bytes;
+}
+
+function durableBoundedUtf8(value: string, maximum: number): boolean {
+  const bytes = durableUtf8Bytes(value);
+  return bytes !== null && bytes > 0 && bytes <= maximum;
+}
+
+function durableHasControlCharacter(
+  value: string,
+  includeSpace = false,
+): boolean {
+  for (let index = 0; index < value.length; index += 1) {
+    const unit = value.charCodeAt(index);
+    if (
+      unit <= (includeSpace ? 0x20 : 0x1f) ||
+      (unit >= 0x7f && unit <= 0x9f)
+    ) {
+      return true;
+    }
+  }
+  return false;
+}
+
+function durableSafePath(value: string): boolean {
+  return (
+    durableBoundedUtf8(value, 4096) &&
+    !value.startsWith('/') &&
+    !value.includes('\\') &&
+    !durableHasControlCharacter(value) &&
+    !value
+      .split('/')
+      .some(component =>
+        component === '' || component === '.' || component === '..'
+      )
+  );
+}
+
+function durableSafeProjectName(value: string): boolean {
+  return (
+    durableBoundedUtf8(value, 120) &&
+    value.trim() === value &&
+    !durableHasControlCharacter(value) &&
+    !value.includes('/') &&
+    !value.includes('\\') &&
+    value !== '.' &&
+    value !== '..'
+  );
+}
+
+function durableSafeBranch(value: string | null): boolean {
+  if (value === null) return true;
+  return (
+    durableBoundedUtf8(value, 1024) &&
+    value !== '@' &&
+    !durableHasControlCharacter(value, true) &&
+    !['~', '^', ':', '?', '*', '[', '\\'].some(character =>
+      value.includes(character),
+    ) &&
+    !value.includes('..') &&
+    !value.includes('@{') &&
+    !value.startsWith('/') &&
+    !value.endsWith('/') &&
+    !value.startsWith('.') &&
+    !value.endsWith('.') &&
+    !value
+      .split('/')
+      .some(
+        component =>
+          component === '' ||
+          component.startsWith('.') ||
+          component.endsWith('.lock'),
+      )
+  );
+}
+
+function durableTimestamp(value: string): boolean {
+  return durableBoundedUtf8(value, 64) && Number.isFinite(Date.parse(value));
+}
+
+function durableInteger(value: number, maximum: number): boolean {
+  return (
+    Number.isSafeInteger(value) &&
+    !Object.is(value, -0) &&
+    value >= 0 &&
+    value <= maximum
+  );
+}
+
+function durableCanonicalId(value: string): boolean {
+  return /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/u.test(
+    value,
+  );
+}
+
+/**
+ * Strict metadata-only state accepted by chat schema v6 before live mutation.
+ * This is deliberately stronger than the portable project-context codec.
+ */
+export function canonicalizeDurableProjectContextState(
+  state: ProjectContextState,
+): ProjectContextState {
+  const normalized = hydrateProjectContextState(
+    serializeProjectContextState(state),
+  );
+  if (
+    !durableCanonicalId(normalized.projectId) ||
+    normalized.selectedPaths.length > 5000 ||
+    normalized.selectedPaths.some(
+      (path, index) =>
+        !durableSafePath(path) ||
+        (index > 0 && normalized.selectedPaths[index - 1]! >= path),
+    )
+  ) {
+    return invalid('$', 'violates the durable context contract');
+  }
+  const durableManifest = normalized.snapshot;
+  if (durableManifest === null) return normalized;
+  if (
+    !durableCanonicalId(durableManifest.snapshot_id) ||
+    durableManifest.project_id !== normalized.projectId ||
+    !durableSafeProjectName(durableManifest.project_name) ||
+    !durableSafeBranch(durableManifest.branch) ||
+    (durableManifest.clean && durableManifest.conflicted) ||
+    !durableTimestamp(durableManifest.captured_at) ||
+    durableManifest.policy_version !== 'chat-read-v1.0.0' ||
+    durableManifest.included.length > 32 ||
+    durableManifest.omitted.length > 5000 ||
+    !durableInteger(durableManifest.context_bytes, 256 * 1024) ||
+    durableManifest.context_bytes < 1 ||
+    !durableInteger(durableManifest.estimated_tokens, 65_536) ||
+    durableManifest.estimated_tokens !==
+      Math.floor((durableManifest.context_bytes + 3) / 4)
+  ) {
+    return invalid('$.manifest', 'violates the durable context contract');
+  }
+  const included = new Set<string>();
+  for (let index = 0; index < durableManifest.included.length; index += 1) {
+    const item = durableManifest.included[index]!;
+    const identity = `${item.path}\n${item.source}`;
+    if (
+      !durableSafePath(item.path) ||
+      !durableInteger(item.bytes, 256 * 1024) ||
+      included.has(identity)
+    ) {
+      return invalid(
+        `$.manifest.included[${index}]`,
+        'violates the durable context contract',
+      );
+    }
+    included.add(identity);
+  }
+  const omitted = new Set<string>();
+  for (let index = 0; index < durableManifest.omitted.length; index += 1) {
+    const item = durableManifest.omitted[index]!;
+    const identity = `${item.path}\n${item.reason}`;
+    if (!durableSafePath(item.path) || omitted.has(identity)) {
+      return invalid(
+        `$.manifest.omitted[${index}]`,
+        'violates the durable context contract',
+      );
+    }
+    omitted.add(identity);
+  }
+  const consentReceipt = normalized.consent;
+  if (
+    consentReceipt !== null &&
+    (!durableCanonicalId(consentReceipt.consent_receipt_id) ||
+      !durableCanonicalId(consentReceipt.snapshot_id) ||
+      consentReceipt.snapshot_id !== durableManifest.snapshot_id ||
+      consentReceipt.snapshot_sha256 !== durableManifest.snapshot_sha256 ||
+      !durableTimestamp(consentReceipt.confirmed_at) ||
+      Date.parse(consentReceipt.confirmed_at) <
+        Date.parse(durableManifest.captured_at))
+  ) {
+    return invalid('$.consent', 'violates the durable context contract');
+  }
+  return normalized;
+}

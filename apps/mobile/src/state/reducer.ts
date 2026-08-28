@@ -20,6 +20,7 @@ import {
   type ConversationThinkingMode,
   type CompletionRoundReceiptV1,
   type ModelId,
+  type ProjectContextMutationScope,
   type TurnAttemptV1,
 } from './types';
 import {
@@ -27,6 +28,12 @@ import {
   isProjectContextSendable,
   projectContextReducer,
 } from '../project-context/reducer';
+import { canonicalizeDurableProjectContextState } from '../project-context/persistence';
+import type {
+  ProjectContextConsentV1,
+  ProjectContextManifestV1,
+  ProjectContextState,
+} from '../project-context/types';
 
 export const DEFAULT_CONVERSATION_TITLE = 'New chat';
 export const DEFAULT_MODEL_ID: ModelId = 'deepseek-v4-flash';
@@ -99,6 +106,25 @@ const projectReceiptKeys = [
   'verified_at',
 ] as const;
 const activeRoundKeys = ['roundId', 'roundIndex'] as const;
+const projectContextScopeKeys = [
+  'conversationId',
+  'projectId',
+  'runtimeContextId',
+  'modelId',
+  'expectedContext',
+] as const;
+const replacePreparedContextKeys = [
+  'scope',
+  'preparationId',
+  'selectedPaths',
+  'manifest',
+  'at',
+] as const;
+const replaceConfirmedContextKeys = [
+  ...replacePreparedContextKeys,
+  'consent',
+] as const;
+const disableContextKeys = ['scope', 'at'] as const;
 
 function isExactDataRecord(
   value: unknown,
@@ -532,6 +558,176 @@ function retryBindingIsApplicable(
       binding.policyVersion &&
     conversation.projectContext.consent?.consent_receipt_id ===
       binding.consentReceiptId
+  );
+}
+
+function hasContextMutationBlocker(conversation: Conversation): boolean {
+  if (hasLiveAttempt(conversation)) return true;
+  const visibleMessageIds = conversation.messages
+    .slice(-MAX_ATTEMPT_VISIBLE_MESSAGES)
+    .map(message => message.id);
+  return conversation.attempts.some(
+    attempt =>
+      (attempt.status === 'failed' || attempt.status === 'cancelled') &&
+      attempt.projectContext !== null &&
+      hasSameStrings(attempt.visibleMessageIds, visibleMessageIds) &&
+      retryBindingIsApplicable(conversation, attempt),
+  );
+}
+
+function copiedSelectedPaths(value: unknown): string[] | null {
+  if (
+    !Array.isArray(value) ||
+    Object.getPrototypeOf(value) !== Array.prototype ||
+    value.length > 5000 ||
+    Object.getOwnPropertySymbols(value).length > 0
+  ) {
+    return null;
+  }
+  const names = Object.getOwnPropertyNames(value);
+  if (
+    names.length !== value.length + 1 ||
+    names.some(
+      name =>
+        name !== 'length' &&
+        (!/^(?:0|[1-9][0-9]*)$/u.test(name) || Number(name) >= value.length),
+    )
+  ) {
+    return null;
+  }
+  const copied: string[] = [];
+  for (let index = 0; index < value.length; index += 1) {
+    const descriptor = Object.getOwnPropertyDescriptor(value, String(index));
+    if (
+      descriptor === undefined ||
+      !Object.prototype.hasOwnProperty.call(descriptor, 'value') ||
+      descriptor.enumerable !== true ||
+      typeof descriptor.value !== 'string' ||
+      descriptor.value.length === 0
+    ) {
+      return null;
+    }
+    copied[index] = descriptor.value;
+  }
+  return copied;
+}
+
+function strictProjectContextState(
+  candidate: ProjectContextState,
+): ProjectContextState | null {
+  try {
+    return canonicalizeDurableProjectContextState(candidate);
+  } catch {
+    return null;
+  }
+}
+
+function normalizedPreparedProjectContext(
+  projectId: string,
+  preparationId: string,
+  selectedPathsValue: unknown,
+  manifest: ProjectContextManifestV1,
+): ProjectContextState | null {
+  const selectedPaths = copiedSelectedPaths(selectedPathsValue);
+  if (selectedPaths === null) return null;
+  for (const status of ['setup_required', 'partial'] as const) {
+    const normalized = strictProjectContextState({
+      schemaVersion: 1,
+      projectId,
+      status,
+      selectedPaths,
+      activePreparationId: preparationId,
+      snapshot: manifest,
+      consent: null,
+      staleReason: null,
+      errorCode: null,
+    });
+    if (normalized !== null) return normalized;
+  }
+  return null;
+}
+
+function normalizedConfirmedProjectContext(
+  projectId: string,
+  selectedPathsValue: unknown,
+  manifest: ProjectContextManifestV1,
+  consent: ProjectContextConsentV1,
+): ProjectContextState | null {
+  const selectedPaths = copiedSelectedPaths(selectedPathsValue);
+  if (selectedPaths === null) return null;
+  for (const status of ['ready', 'partial'] as const) {
+    const normalized = strictProjectContextState({
+      schemaVersion: 1,
+      projectId,
+      status,
+      selectedPaths,
+      activePreparationId: null,
+      snapshot: manifest,
+      consent,
+      staleReason: null,
+      errorCode: null,
+    });
+    if (normalized !== null) return normalized;
+  }
+  return null;
+}
+
+function scopedContextConversation(
+  state: ChatState,
+  scopeValue: unknown,
+): Conversation | null {
+  if (!isExactDataRecord(scopeValue, projectContextScopeKeys)) return null;
+  const scope = scopeValue as ProjectContextMutationScope;
+  if (
+    typeof scope.conversationId !== 'string' ||
+    !validIdentifier(scope.conversationId)
+  ) {
+    return null;
+  }
+  const conversation = state.conversations[scope.conversationId];
+  if (
+    conversation === undefined ||
+    conversation.projectId === null ||
+    conversation.projectContext === null ||
+    !isCanonicalLifecycleId(conversation.projectId) ||
+    !isCanonicalLifecycleId(scope.projectId) ||
+    !isCanonicalLifecycleId(scope.runtimeContextId) ||
+    !isModelId(scope.modelId) ||
+    conversation.projectId !== scope.projectId ||
+    conversation.runtimeContextId !== scope.runtimeContextId ||
+    conversation.modelId !== scope.modelId ||
+    conversation.projectContext !== scope.expectedContext ||
+    hasContextMutationBlocker(conversation)
+  ) {
+    return null;
+  }
+  return conversation;
+}
+
+function contextAuthorityMatches(
+  conversation: Conversation,
+  context: ProjectContextState,
+  preparationId: string,
+  confirmed: boolean,
+): boolean {
+  const snapshot = context.snapshot;
+  const consent = context.consent;
+  return (
+    isCanonicalLifecycleId(preparationId) &&
+    snapshot !== null &&
+    context.projectId === conversation.projectId &&
+    snapshot.project_id === conversation.projectId &&
+    snapshot.model === conversation.modelId &&
+    snapshot.provider_host === 'api.deepseek.com' &&
+    snapshot.policy_version === 'chat-read-v1.0.0' &&
+    isCanonicalLifecycleId(snapshot.snapshot_id) &&
+    (confirmed
+      ? context.activePreparationId === null &&
+        consent !== null &&
+        isCanonicalLifecycleId(consent.consent_receipt_id) &&
+        consent.snapshot_id === snapshot.snapshot_id &&
+        consent.snapshot_sha256 === snapshot.snapshot_sha256
+      : context.activePreparationId === preparationId && consent === null)
   );
 }
 
@@ -1047,11 +1243,24 @@ export function chatReducer(state: ChatState, action: ChatAction): ChatState {
       const conversation =
         state.conversations[action.payload.conversationId];
       if (
+        action.payload.action.type === 'checking' ||
+        action.payload.action.type === 'prepared' ||
+        action.payload.action.type === 'confirmed' ||
+        action.payload.action.type === 'selection_changed' ||
+        action.payload.action.type === 'disabled'
+      ) {
+        return state;
+      }
+      if (
         conversation === undefined ||
         conversation.projectContext === null ||
-        (action.payload.action.type === 'checking' &&
-          conversation.runtimeContextId === null) ||
         !isCanonicalTimestamp(action.payload.at)
+      ) {
+        return state;
+      }
+      if (
+        action.payload.action.type === 'unavailable' &&
+        conversation.projectContext.snapshot !== null
       ) {
         return state;
       }
@@ -1066,6 +1275,142 @@ export function chatReducer(state: ChatState, action: ChatAction): ChatState {
         ...conversation,
         projectContext,
         updatedAt: laterTimestamp(conversation.updatedAt, action.payload.at),
+      });
+    }
+
+    case 'project-context/replace-prepared': {
+      const payload = action.payload;
+      if (
+        !isExactDataRecord(payload, replacePreparedContextKeys) ||
+        !isCanonicalTimestamp(payload.at) ||
+        !isCanonicalLifecycleId(payload.preparationId)
+      ) {
+        return state;
+      }
+      const conversation = scopedContextConversation(state, payload.scope);
+      if (
+        conversation === null ||
+        conversation.projectContext === null ||
+        isProjectContextSendable(conversation.projectContext)
+      ) {
+        return state;
+      }
+      const projectContext = normalizedPreparedProjectContext(
+        conversation.projectId!,
+        payload.preparationId,
+        payload.selectedPaths,
+        payload.manifest,
+      );
+      if (
+        projectContext === null ||
+        !contextAuthorityMatches(
+          conversation,
+          projectContext,
+          payload.preparationId,
+          false,
+        )
+      ) {
+        return state;
+      }
+      return withConversation(state, {
+        ...conversation,
+        projectContext,
+        updatedAt: laterTimestamp(conversation.updatedAt, payload.at),
+      });
+    }
+
+    case 'project-context/replace-confirmed': {
+      const payload = action.payload;
+      if (
+        !isExactDataRecord(payload, replaceConfirmedContextKeys) ||
+        !isCanonicalTimestamp(payload.at) ||
+        !isCanonicalLifecycleId(payload.preparationId)
+      ) {
+        return state;
+      }
+      const conversation = scopedContextConversation(state, payload.scope);
+      if (conversation === null || conversation.projectContext === null) {
+        return state;
+      }
+      const desired = normalizedConfirmedProjectContext(
+        conversation.projectId!,
+        payload.selectedPaths,
+        payload.manifest,
+        payload.consent,
+      );
+      if (
+        desired === null ||
+        !contextAuthorityMatches(
+          conversation,
+          desired,
+          payload.preparationId,
+          true,
+        )
+      ) {
+        return state;
+      }
+
+      let projectContext = desired;
+      if (!isProjectContextSendable(conversation.projectContext)) {
+        if (
+          !hasSameStrings(
+            conversation.projectContext.selectedPaths,
+            desired.selectedPaths,
+          ) ||
+          desired.snapshot === null ||
+          desired.consent === null
+        ) {
+          return state;
+        }
+        const confirmed = projectContextReducer(conversation.projectContext, {
+          type: 'confirmed',
+          preparationId: payload.preparationId,
+          manifest: desired.snapshot,
+          consent: desired.consent,
+        });
+        if (confirmed === conversation.projectContext) return state;
+        const normalized = strictProjectContextState(confirmed);
+        if (normalized === null || !isProjectContextSendable(normalized)) {
+          return state;
+        }
+        projectContext = normalized;
+      }
+
+      return withConversation(state, {
+        ...conversation,
+        projectContext,
+        updatedAt: laterTimestamp(conversation.updatedAt, payload.at),
+      });
+    }
+
+    case 'project-context/disable': {
+      const payload = action.payload;
+      if (
+        !isExactDataRecord(payload, disableContextKeys) ||
+        !isCanonicalTimestamp(payload.at)
+      ) {
+        return state;
+      }
+      const conversation = scopedContextConversation(state, payload.scope);
+      if (conversation === null || conversation.projectContext === null) {
+        return state;
+      }
+      const current = conversation.projectContext;
+      if (
+        current.status === 'setup_required' &&
+        current.selectedPaths.length === 0 &&
+        current.activePreparationId === null &&
+        current.snapshot === null &&
+        current.consent === null &&
+        current.staleReason === null &&
+        current.errorCode === null
+      ) {
+        return state;
+      }
+      return withConversation(state, {
+        ...conversation,
+        projectContext: createProjectContextState(conversation.projectId!),
+        updatedAt: laterTimestamp(conversation.updatedAt, payload.at),
       });
     }
 

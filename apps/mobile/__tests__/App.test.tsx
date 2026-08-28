@@ -737,6 +737,7 @@ test('sends verified project context through schema3 without AgentLoop', async (
   const snapshotId = '22222222-2222-4222-8222-222222222222';
   const consentReceiptId = '33333333-3333-4333-8333-333333333333';
   const projectId = '44444444-4444-4444-8444-444444444444';
+  const preparationId = 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa';
   const lifecycleIds = [
     runtimeContextId,
     '55555555-5555-4555-8555-555555555555',
@@ -784,21 +785,42 @@ test('sends verified project context through schema3 without AgentLoop', async (
     snapshot_sha256: 'd'.repeat(64),
     confirmed_at: '2026-08-28T00:00:01.000Z',
   };
-  stored.applyProjectContextAction(conversationId, {
-    type: 'checking',
-    preparationId: 'prepare-verified',
-  });
-  stored.applyProjectContextAction(conversationId, {
-    type: 'prepared',
-    preparationId: 'prepare-verified',
-    manifest,
-  });
-  stored.applyProjectContextAction(conversationId, {
-    type: 'confirmed',
-    preparationId: 'prepare-verified',
-    manifest,
-    consent,
-  });
+  const preparedConversation = stored.getState().conversations[conversationId]!;
+  const prepared = stored.replaceProjectContextPrepared(
+    {
+      conversationId,
+      projectId,
+      runtimeContextId,
+      modelId: preparedConversation.modelId,
+      expectedContext: preparedConversation.projectContext!,
+    },
+    {
+      preparationId,
+      selectedPaths: ['README.md'],
+      manifest,
+    },
+  );
+  expect(prepared).not.toBeNull();
+  expect(prepared!.commit()).toBe(true);
+
+  const confirmedConversation = stored.getState().conversations[conversationId]!;
+  const confirmed = stored.replaceProjectContextConfirmed(
+    {
+      conversationId,
+      projectId,
+      runtimeContextId,
+      modelId: confirmedConversation.modelId,
+      expectedContext: confirmedConversation.projectContext!,
+    },
+    {
+      preparationId,
+      selectedPaths: ['README.md'],
+      manifest,
+      consent,
+    },
+  );
+  expect(confirmed).not.toBeNull();
+  expect(confirmed!.commit()).toBe(true);
   mockLocalRuntime.loadSession.mockResolvedValueOnce(stored.serialize());
   mockLocalRuntime.completeV2.mockImplementationOnce(
     async (request: StrictCompletionRequest) => ({

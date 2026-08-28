@@ -12,9 +12,12 @@ import {
   selectOrderedConversations,
   serializeChatState,
   type ChatAttachment,
+  type ChatStore,
   type CompletionRoundReceiptV1,
   type ChatState,
   type PersistedChatStateV4,
+  type ProjectContextMutationScope,
+  type ScopedProjectContextTransaction,
 } from '../src/state';
 import type {
   ProjectContextConsentV1,
@@ -35,6 +38,28 @@ const IMAGE_ATTACHMENT: ChatAttachment = {
   size: 2048,
   thumbnail_data_url: 'data:image/png;base64,cHJldmlldw==',
 };
+
+function projectContextScope(
+  store: ChatStore,
+  conversationId: string,
+): ProjectContextMutationScope {
+  const conversation = store.getState().conversations[conversationId];
+  if (
+    conversation === undefined ||
+    conversation.projectId === null ||
+    conversation.runtimeContextId === null ||
+    conversation.projectContext === null
+  ) {
+    throw new Error('test fixture requires a bound runtime project context');
+  }
+  return {
+    conversationId,
+    projectId: conversation.projectId,
+    runtimeContextId: conversation.runtimeContextId,
+    modelId: conversation.modelId,
+    expectedContext: conversation.projectContext,
+  };
+}
 
 function createConversation(
   state: ChatState,
@@ -816,8 +841,15 @@ describe('schema v6 attempts and project context', () => {
   const RETRY_ID = '44444444-4444-4444-8444-444444444444';
   const ROUND_ID = '55555555-5555-4555-8555-555555555555';
   const PROJECT_ID = '99999999-9999-4999-8999-999999999999';
+  const OTHER_PROJECT_ID = 'eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee';
   const SNAPSHOT_ID = '77777777-7777-4777-8777-777777777777';
   const CONSENT_ID = '88888888-8888-4888-8888-888888888888';
+  const REPLACEMENT_SNAPSHOT_ID =
+    'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa';
+  const REPLACEMENT_CONSENT_ID =
+    'bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb';
+  const REPLACEMENT_PREPARATION_ID =
+    'cccccccc-cccc-4ccc-8ccc-cccccccccccc';
 
   const contextManifest: ProjectContextManifestV1 = {
     schema_version: 1,
@@ -853,6 +885,30 @@ describe('schema v6 attempts and project context', () => {
     snapshot_sha256: 'd'.repeat(64),
     confirmed_at: T2,
   };
+  const replacementManifest: ProjectContextManifestV1 = {
+    ...contextManifest,
+    snapshot_id: REPLACEMENT_SNAPSHOT_ID,
+    captured_at: T3,
+    included: [
+      {
+        path: 'src/index.ts',
+        source: 'tracked_file',
+        bytes: 12,
+        sha256: '7'.repeat(64),
+      },
+    ],
+    context_bytes: 12,
+    estimated_tokens: 3,
+    snapshot_sha256: 'a'.repeat(64),
+    source_fingerprint: 'b'.repeat(64),
+  };
+  const replacementConsent: ProjectContextConsentV1 = {
+    schema_version: 1,
+    consent_receipt_id: REPLACEMENT_CONSENT_ID,
+    snapshot_id: REPLACEMENT_SNAPSHOT_ID,
+    snapshot_sha256: 'a'.repeat(64),
+    confirmed_at: T3,
+  };
 
   function v6Store() {
     const runtimeIds = [RUNTIME_ID, TURN_ID, ATTEMPT_ID, RETRY_ID];
@@ -873,22 +929,38 @@ describe('schema v6 attempts and project context', () => {
       estimated_tokens: Math.floor((contextBytes + 3) / 4),
     };
     expect(store.ensureRuntimeContextId(conversationId)).toBe(RUNTIME_ID);
-    store.applyProjectContextAction(conversationId, {
-      type: 'checking',
-      preparationId: 'prepare-1',
-    });
-    store.applyProjectContextAction(conversationId, {
-      type: 'prepared',
-      preparationId: 'prepare-1',
-      manifest,
-    });
-    store.applyProjectContextAction(conversationId, {
-      type: 'confirmed',
-      preparationId: 'prepare-1',
-      manifest,
-      consent: contextConsent,
-    });
+    const prepared = store.replaceProjectContextPrepared(
+      projectContextScope(store, conversationId),
+      {
+        preparationId: REPLACEMENT_PREPARATION_ID,
+        selectedPaths: [],
+        manifest,
+      },
+    );
+    expect(prepared?.commit()).toBe(true);
+    const confirmed = store.replaceProjectContextConfirmed(
+      projectContextScope(store, conversationId),
+      {
+        preparationId: REPLACEMENT_PREPARATION_ID,
+        selectedPaths: [],
+        manifest,
+        consent: contextConsent,
+      },
+    );
+    expect(confirmed?.commit()).toBe(true);
     return { store, conversationId };
+  }
+
+  function setupProjectStore() {
+    const store = v6Store();
+    const conversationId = store.createConversation({ projectId: PROJECT_ID });
+    expect(store.ensureRuntimeContextId(conversationId)).toBe(RUNTIME_ID);
+    return { store, conversationId };
+  }
+
+  function scopedReadyProjectStore(contextBytes = 10) {
+    const fixture = readyProjectStore(contextBytes);
+    return fixture;
   }
 
   function schema2Receipt(
@@ -2705,8 +2777,7 @@ describe('schema v6 attempts and project context', () => {
       'context',
     )!;
     verified.store.applyProjectContextAction(verified.conversationId, {
-      type: 'selection_changed',
-      selectedPaths: ['README.md'],
+      type: 'snapshot_missing',
     });
     expect(
       verified.store.startAttemptRound(
@@ -2716,5 +2787,542 @@ describe('schema v6 attempts and project context', () => {
         0,
       ),
     ).toBe(false);
+  });
+
+  test('scoped replace-prepared is one transition and never replaces Ready', () => {
+    const setup = setupProjectStore();
+    const observed: ChatState[] = [];
+    setup.store.subscribe(state => observed.push(state));
+    const transaction: ScopedProjectContextTransaction | null =
+      setup.store.replaceProjectContextPrepared(
+        projectContextScope(setup.store, setup.conversationId),
+        {
+          preparationId: REPLACEMENT_PREPARATION_ID,
+          selectedPaths: ['src/index.ts'],
+          manifest: replacementManifest,
+        },
+      );
+
+    expect(transaction).not.toBeNull();
+    expect(observed).toHaveLength(1);
+    expect(
+      observed.map(
+        state => state.conversations[setup.conversationId]?.projectContext?.status,
+      ),
+    ).toEqual(['setup_required']);
+    expect(
+      setup.store.getState().conversations[setup.conversationId]?.projectContext,
+    ).toMatchObject({
+      activePreparationId: REPLACEMENT_PREPARATION_ID,
+      snapshot: { snapshot_id: REPLACEMENT_SNAPSHOT_ID },
+      consent: null,
+    });
+    expect(transaction?.commit()).toBe(true);
+
+    const ready = scopedReadyProjectStore();
+    const readyBefore = ready.store.getState();
+    const readyNotifications: ChatState[] = [];
+    ready.store.subscribe(state => readyNotifications.push(state));
+    expect(
+      ready.store.replaceProjectContextPrepared(
+        projectContextScope(ready.store, ready.conversationId),
+        {
+          preparationId: REPLACEMENT_PREPARATION_ID,
+          selectedPaths: ['src/index.ts'],
+          manifest: replacementManifest,
+        },
+      ),
+    ).toBeNull();
+    expect(ready.store.getState()).toBe(readyBefore);
+    expect(readyNotifications).toEqual([]);
+  });
+
+  test('scoped replace-confirmed atomically promotes prepared to Ready', () => {
+    const fixture = setupProjectStore();
+    const prepared = fixture.store.replaceProjectContextPrepared(
+      projectContextScope(fixture.store, fixture.conversationId),
+      {
+        preparationId: REPLACEMENT_PREPARATION_ID,
+        selectedPaths: ['src/index.ts'],
+        manifest: replacementManifest,
+      },
+    )!;
+    expect(prepared.commit()).toBe(true);
+    const observed: ChatState[] = [];
+    fixture.store.subscribe(state => observed.push(state));
+
+    const confirmed = fixture.store.replaceProjectContextConfirmed(
+      projectContextScope(fixture.store, fixture.conversationId),
+      {
+        preparationId: REPLACEMENT_PREPARATION_ID,
+        selectedPaths: ['src/index.ts'],
+        manifest: replacementManifest,
+        consent: replacementConsent,
+      },
+    );
+
+    expect(confirmed).not.toBeNull();
+    expect(observed).toHaveLength(1);
+    expect(
+      observed[0]?.conversations[fixture.conversationId]?.projectContext,
+    ).toMatchObject({
+      status: 'ready',
+      activePreparationId: null,
+      snapshot: { snapshot_id: REPLACEMENT_SNAPSHOT_ID },
+      consent: { consent_receipt_id: REPLACEMENT_CONSENT_ID },
+    });
+    expect(confirmed?.commit()).toBe(true);
+  });
+
+  test('scoped replace-confirmed swaps Ready A to Ready B without an intermediate state', () => {
+    const fixture = scopedReadyProjectStore();
+    const oldContext =
+      fixture.store.getState().conversations[fixture.conversationId]!
+        .projectContext!;
+    const observed: ChatState[] = [];
+    fixture.store.subscribe(state => observed.push(state));
+
+    const transaction = fixture.store.replaceProjectContextConfirmed(
+      projectContextScope(fixture.store, fixture.conversationId),
+      {
+        preparationId: REPLACEMENT_PREPARATION_ID,
+        selectedPaths: ['src/index.ts'],
+        manifest: replacementManifest,
+        consent: replacementConsent,
+      },
+    );
+
+    expect(transaction).toMatchObject({
+      previousSnapshotId: SNAPSHOT_ID,
+      nextSnapshotId: REPLACEMENT_SNAPSHOT_ID,
+    });
+    expect(observed).toHaveLength(1);
+    expect(
+      observed.map(
+        state =>
+          state.conversations[fixture.conversationId]?.projectContext?.snapshot
+            ?.snapshot_id,
+      ),
+    ).toEqual([REPLACEMENT_SNAPSHOT_ID]);
+    expect(
+      observed[0]?.conversations[fixture.conversationId]?.projectContext
+        ?.consent?.consent_receipt_id,
+    ).toBe(REPLACEMENT_CONSENT_ID);
+
+    // This verifies only the pure state transaction. A post-native refresh
+    // persistence failure must not use this rollback after native pruned A.
+    expect(transaction?.rollback()).toBe(true);
+    expect(
+      fixture.store.getState().conversations[fixture.conversationId]
+        ?.projectContext,
+    ).toBe(oldContext);
+    expect(transaction?.commit()).toBe(false);
+  });
+
+  test('scoped confirmation rejects stale scope and mismatched authority metadata', () => {
+    const stale = scopedReadyProjectStore();
+    const staleScope = projectContextScope(stale.store, stale.conversationId);
+    stale.store.setModel(stale.conversationId, 'deepseek-v4-pro');
+    const afterModelChange = stale.store.getState();
+    expect(
+      stale.store.replaceProjectContextConfirmed(staleScope, {
+        preparationId: REPLACEMENT_PREPARATION_ID,
+        selectedPaths: ['src/index.ts'],
+        manifest: {
+          ...replacementManifest,
+          model: 'deepseek-v4-pro',
+        },
+        consent: replacementConsent,
+      }),
+    ).toBeNull();
+    expect(stale.store.getState()).toBe(afterModelChange);
+
+    const fixture = scopedReadyProjectStore();
+    const scope = projectContextScope(fixture.store, fixture.conversationId);
+    const invalidRows: Array<{
+      manifest: ProjectContextManifestV1;
+      consent: ProjectContextConsentV1;
+    }> = [
+      {
+        manifest: { ...replacementManifest, project_id: OTHER_PROJECT_ID },
+        consent: replacementConsent,
+      },
+      {
+        manifest: { ...replacementManifest, model: 'deepseek-v4-pro' },
+        consent: replacementConsent,
+      },
+      {
+        manifest: {
+          ...replacementManifest,
+          provider_host: 'proxy.example.com',
+        } as unknown as ProjectContextManifestV1,
+        consent: replacementConsent,
+      },
+      {
+        manifest: {
+          ...replacementManifest,
+          policy_version: 'chat-read-v1.0.1',
+        },
+        consent: replacementConsent,
+      },
+      {
+        manifest: replacementManifest,
+        consent: {
+          ...replacementConsent,
+          snapshot_sha256: 'f'.repeat(64),
+        },
+      },
+    ];
+    for (const row of invalidRows) {
+      const before = fixture.store.getState();
+      expect(
+        fixture.store.replaceProjectContextConfirmed(scope, {
+          preparationId: REPLACEMENT_PREPARATION_ID,
+          selectedPaths: ['src/index.ts'],
+          manifest: row.manifest,
+          consent: row.consent,
+        }),
+      ).toBeNull();
+      expect(fixture.store.getState()).toBe(before);
+    }
+
+    expect(
+      fixture.store.replaceProjectContextConfirmed(
+        {
+          ...scope,
+          projectId: OTHER_PROJECT_ID,
+          runtimeContextId: 'dddddddd-dddd-4ddd-8ddd-dddddddddddd',
+        },
+        {
+          preparationId: REPLACEMENT_PREPARATION_ID,
+          selectedPaths: ['src/index.ts'],
+          manifest: replacementManifest,
+          consent: replacementConsent,
+        },
+      ),
+    ).toBeNull();
+  });
+
+  test('all scoped context mutations reject live and exact-retry attempts', () => {
+    const liveSetup = setupProjectStore();
+    const setupScope = projectContextScope(
+      liveSetup.store,
+      liveSetup.conversationId,
+    );
+    const liveWithoutContext = liveSetup.store.prepareTurnAttempt(
+      liveSetup.conversationId,
+      'live',
+      { sendWithoutProjectContext: true },
+    )!;
+    expect(liveWithoutContext.commit()).toBe(true);
+    expect(
+      liveSetup.store.replaceProjectContextPrepared(setupScope, {
+        preparationId: REPLACEMENT_PREPARATION_ID,
+        selectedPaths: ['src/index.ts'],
+        manifest: replacementManifest,
+      }),
+    ).toBeNull();
+
+    const retryable = scopedReadyProjectStore();
+    const attempt = retryable.store.prepareTurnAttempt(
+      retryable.conversationId,
+      'retryable',
+    )!;
+    expect(attempt.commit()).toBe(true);
+    expect(
+      retryable.store.failAttempt(
+        retryable.conversationId,
+        attempt.attemptId,
+        'E_COMPLETION_TRANSPORT',
+      ),
+    ).toBe(true);
+    const retryScope = projectContextScope(
+      retryable.store,
+      retryable.conversationId,
+    );
+    expect(retryable.store.disableProjectContext(retryScope)).toBeNull();
+    expect(
+      retryable.store.replaceProjectContextConfirmed(retryScope, {
+        preparationId: REPLACEMENT_PREPARATION_ID,
+        selectedPaths: ['src/index.ts'],
+        manifest: replacementManifest,
+        consent: replacementConsent,
+      }),
+    ).toBeNull();
+  });
+
+  test('disable exposes cleanup identity and blocks schema3 before native cleanup', () => {
+    const fixture = scopedReadyProjectStore();
+    const observed: ChatState[] = [];
+    fixture.store.subscribe(state => observed.push(state));
+    const transaction = fixture.store.disableProjectContext(
+      projectContextScope(fixture.store, fixture.conversationId),
+    );
+
+    expect(transaction).toMatchObject({
+      previousSnapshotId: SNAPSHOT_ID,
+      nextSnapshotId: null,
+      cleanupSnapshotId: SNAPSHOT_ID,
+    });
+    expect(observed).toHaveLength(1);
+    expect(
+      fixture.store.getState().conversations[fixture.conversationId]
+        ?.projectContext,
+    ).toMatchObject({
+      status: 'setup_required',
+      snapshot: null,
+      consent: null,
+    });
+    expect(
+      fixture.store.prepareTurnAttempt(
+        fixture.conversationId,
+        'must not route schema3',
+      ),
+    ).toBeNull();
+    expect(fixture.store.serialize()).not.toContain(SNAPSHOT_ID);
+    expect(transaction?.commit()).toBe(true);
+  });
+
+  test('scoped rollback preserves unrelated root changes and rejects a target race', () => {
+    const fixture = scopedReadyProjectStore();
+    const transaction = fixture.store.disableProjectContext(
+      projectContextScope(fixture.store, fixture.conversationId),
+    )!;
+    const otherConversation = fixture.store.createConversation({
+      title: 'unrelated',
+    });
+    fixture.store.selectConversation(otherConversation);
+
+    expect(transaction.rollback()).toBe(true);
+    expect(fixture.store.getState().selectedConversationId).toBe(
+      otherConversation,
+    );
+    expect(
+      fixture.store.getState().conversations[otherConversation]?.title,
+    ).toBe('unrelated');
+    expect(
+      fixture.store.getState().conversations[fixture.conversationId]
+        ?.projectContext?.snapshot?.snapshot_id,
+    ).toBe(SNAPSHOT_ID);
+
+    const raced = scopedReadyProjectStore();
+    const racedTransaction = raced.store.disableProjectContext(
+      projectContextScope(raced.store, raced.conversationId),
+    )!;
+    raced.store.renameConversation(raced.conversationId, 'same target wins');
+    expect(racedTransaction.rollback()).toBe(false);
+    expect(racedTransaction.commit()).toBe(false);
+    expect(racedTransaction.rollback()).toBe(false);
+    expect(
+      raced.store.getState().conversations[raced.conversationId]?.title,
+    ).toBe('same target wins');
+  });
+
+  test('scoped transactions are once-only and isolate listener failures', () => {
+    const rollbackFixture = scopedReadyProjectStore();
+    const notifications: ChatState[] = [];
+    rollbackFixture.store.subscribe(() => {
+      throw new Error('CONTEXT_LISTENER_SECRET');
+    });
+    rollbackFixture.store.subscribe(state => notifications.push(state));
+    let rollbackTransaction:
+      | ReturnType<ChatStore['disableProjectContext']>
+      | undefined;
+    expect(() => {
+      rollbackTransaction = rollbackFixture.store.disableProjectContext(
+        projectContextScope(
+          rollbackFixture.store,
+          rollbackFixture.conversationId,
+        ),
+      );
+    }).not.toThrow();
+    expect(rollbackTransaction).not.toBeNull();
+    expect(() => rollbackTransaction!.rollback()).not.toThrow();
+    expect(rollbackTransaction!.rollback()).toBe(false);
+    expect(rollbackTransaction!.commit()).toBe(false);
+    expect(notifications).toHaveLength(2);
+
+    const commitFixture = scopedReadyProjectStore();
+    const commitTransaction = commitFixture.store.disableProjectContext(
+      projectContextScope(commitFixture.store, commitFixture.conversationId),
+    )!;
+    expect(commitTransaction.commit()).toBe(true);
+    expect(commitTransaction.commit()).toBe(false);
+    expect(commitTransaction.rollback()).toBe(false);
+  });
+
+  test('generic project-context actions cannot bypass scoped durable mutations', () => {
+    const fixture = setupProjectStore();
+    const setupBefore = fixture.store.getState();
+    expect(
+      fixture.store.applyProjectContextAction(fixture.conversationId, {
+        type: 'checking',
+        preparationId: REPLACEMENT_PREPARATION_ID,
+      }),
+    ).toBe(false);
+    expect(fixture.store.getState()).toBe(setupBefore);
+
+    const prepared = fixture.store.replaceProjectContextPrepared(
+      projectContextScope(fixture.store, fixture.conversationId),
+      {
+        preparationId: REPLACEMENT_PREPARATION_ID,
+        selectedPaths: ['src/index.ts'],
+        manifest: replacementManifest,
+      },
+    )!;
+    expect(prepared.commit()).toBe(true);
+    const preparedBefore = fixture.store.getState();
+    expect(
+      fixture.store.applyProjectContextAction(fixture.conversationId, {
+        type: 'confirmed',
+        preparationId: REPLACEMENT_PREPARATION_ID,
+        manifest: replacementManifest,
+        consent: replacementConsent,
+      }),
+    ).toBe(false);
+    expect(fixture.store.getState()).toBe(preparedBefore);
+
+    const confirmed = fixture.store.replaceProjectContextConfirmed(
+      projectContextScope(fixture.store, fixture.conversationId),
+      {
+        preparationId: REPLACEMENT_PREPARATION_ID,
+        selectedPaths: ['src/index.ts'],
+        manifest: replacementManifest,
+        consent: replacementConsent,
+      },
+    )!;
+    expect(confirmed.commit()).toBe(true);
+    const readyBefore = fixture.store.getState();
+    expect(
+      fixture.store.applyProjectContextAction(fixture.conversationId, {
+        type: 'selection_changed',
+        selectedPaths: ['README.md'],
+      }),
+    ).toBe(false);
+    expect(
+      fixture.store.applyProjectContextAction(fixture.conversationId, {
+        type: 'disabled',
+      }),
+    ).toBe(false);
+    expect(fixture.store.getState()).toBe(readyBefore);
+  });
+
+  test('scoped replacements reject v6-unsafe metadata before live mutation', () => {
+    const invalidPreparedRows: Array<{
+      selectedPaths: readonly string[];
+      manifest: ProjectContextManifestV1;
+    }> = [
+      {
+        selectedPaths: ['../secret'],
+        manifest: replacementManifest,
+      },
+      {
+        selectedPaths: ['src/index.ts'],
+        manifest: {
+          ...replacementManifest,
+          included: [
+            {
+              ...replacementManifest.included[0]!,
+              path: '../secret',
+            },
+          ],
+        },
+      },
+      {
+        selectedPaths: ['src/index.ts'],
+        manifest: {
+          ...replacementManifest,
+          context_bytes: 256 * 1024 + 1,
+          estimated_tokens: 65_537,
+        },
+      },
+      {
+        selectedPaths: ['src/index.ts'],
+        manifest: {
+          ...replacementManifest,
+          estimated_tokens: replacementManifest.estimated_tokens + 1,
+        },
+      },
+      {
+        selectedPaths: ['src/index.ts'],
+        manifest: {
+          ...replacementManifest,
+          clean: true,
+          conflicted: true,
+        },
+      },
+    ];
+
+    for (const row of invalidPreparedRows) {
+      const fixture = setupProjectStore();
+      const before = fixture.store.getState();
+      const notifications: ChatState[] = [];
+      fixture.store.subscribe(state => notifications.push(state));
+      expect(
+        fixture.store.replaceProjectContextPrepared(
+          projectContextScope(fixture.store, fixture.conversationId),
+          {
+            preparationId: REPLACEMENT_PREPARATION_ID,
+            selectedPaths: row.selectedPaths,
+            manifest: row.manifest,
+          },
+        ),
+      ).toBeNull();
+      expect(fixture.store.getState()).toBe(before);
+      expect(notifications).toEqual([]);
+    }
+
+    const confirmed = scopedReadyProjectStore();
+    const confirmedBefore = confirmed.store.getState();
+    const confirmedNotifications: ChatState[] = [];
+    confirmed.store.subscribe(state => confirmedNotifications.push(state));
+    expect(
+      confirmed.store.replaceProjectContextConfirmed(
+        projectContextScope(confirmed.store, confirmed.conversationId),
+        {
+          preparationId: REPLACEMENT_PREPARATION_ID,
+          selectedPaths: ['src/index.ts'],
+          manifest: replacementManifest,
+          consent: { ...replacementConsent, confirmed_at: T0 },
+        },
+      ),
+    ).toBeNull();
+    expect(confirmed.store.getState()).toBe(confirmedBefore);
+    expect(confirmedNotifications).toEqual([]);
+  });
+
+  test('hostile scoped conversation identity is rejected without coercion', () => {
+    const fixture = scopedReadyProjectStore();
+    const validScope = projectContextScope(
+      fixture.store,
+      fixture.conversationId,
+    );
+    let coercions = 0;
+    const hostileConversationId = {
+      [Symbol.toPrimitive]: () => {
+        coercions += 1;
+        throw new Error('SCOPE_COERCION_SECRET');
+      },
+    };
+    const hostileScope = {
+      ...validScope,
+      conversationId: hostileConversationId as unknown as string,
+    };
+    const before = fixture.store.getState();
+    expect(() => fixture.store.disableProjectContext(hostileScope)).not.toThrow();
+    expect(fixture.store.disableProjectContext(hostileScope)).toBeNull();
+    expect(coercions).toBe(0);
+    expect(fixture.store.getState()).toBe(before);
+  });
+
+  test('generic unavailable cannot clear a durable snapshot without cleanup identity', () => {
+    const fixture = scopedReadyProjectStore();
+    const before = fixture.store.getState();
+    expect(
+      fixture.store.applyProjectContextAction(fixture.conversationId, {
+        type: 'unavailable',
+      }),
+    ).toBe(false);
+    expect(fixture.store.getState()).toBe(before);
   });
 });
