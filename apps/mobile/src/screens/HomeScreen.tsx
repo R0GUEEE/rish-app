@@ -7,11 +7,12 @@ import React, {
 } from 'react';
 import CircleAlert from 'lucide-react-native/icons/circle-alert';
 import CircleEllipsis from 'lucide-react-native/icons/circle-ellipsis';
-import FolderCode from 'lucide-react-native/icons/folder-code';
 import LoaderCircle from 'lucide-react-native/icons/loader-circle';
 import Menu from 'lucide-react-native/icons/menu';
 import {
   Alert,
+  AccessibilityInfo,
+  findNodeHandle,
   KeyboardAvoidingView,
   Platform,
   Pressable,
@@ -40,6 +41,17 @@ import { ModelPicker, type SupportedModel } from '../components/ModelPicker';
 import { LocalWorkspaces } from '../native/LocalWorkspaces';
 import { ProjectsSurface } from '../components/ProjectsSurface';
 import {
+  ProjectContextSheet,
+  type ProjectContextSheetBusyAction,
+  type ProjectContextSheetFilter,
+  type ProjectContextSheetMode,
+  type ProjectContextSheetRecoveryAction,
+} from '../components/ProjectContextSheet';
+import {
+  ProjectContextStrip,
+  type ProjectContextVerificationStatus,
+} from '../components/ProjectContextStrip';
+import {
   RuntimeEvidenceSheet,
   type RuntimeVerificationStatus,
 } from '../components/RuntimeEvidenceSheet';
@@ -53,6 +65,7 @@ import {
   safeHydrateChatState,
   selectActiveConversation,
   selectConversationById,
+  selectProjectContextSnapshotReferences,
   selectOrderedConversations,
   type ChatState,
   type Conversation,
@@ -74,13 +87,29 @@ import {
 } from '../completion/SessionPersistence';
 import { readRuntimeEvidence } from '../runtime/evidence';
 import { LocalProjects, type LocalProject } from '../native/LocalProjects';
+import { LocalProjectContext } from '../native/LocalProjectContext';
 import { LocalAttachments } from '../native/LocalAttachments';
 import { BUILTIN_HARNESSES, DSH_HARNESS, DshHarnessAdapter } from '../harness';
 import { safeHydrateAppPreferences } from '../preferences';
+import {
+  createProjectContextController,
+  isProjectContextSendable,
+  type ProjectContextActionToken,
+  type ProjectContextControllerOwner,
+  type ProjectContextControllerState,
+} from '../project-context';
 import { useAppPresentation } from '../presentation/AppPresentation';
 import { fonts, hitSlop, type ThemePalette } from '../theme';
 
 type RequestState = 'idle' | 'sending';
+
+type PendingContextOpen = {
+  readonly conversationId: string;
+  readonly projectId: string;
+  readonly runtimeContextId: string | null;
+  readonly modelId: Conversation['modelId'];
+  readonly uiEpoch: number;
+};
 
 type LegacyMessage = {
   id?: unknown;
@@ -140,6 +169,86 @@ function completionCancellable(state: CompletionControllerState): boolean {
     state.phase === 'starting' ||
     state.phase === 'sending'
   );
+}
+
+function completionOwnsPresentation(
+  state: CompletionControllerState,
+  conversationId: string,
+): boolean {
+  return state.conversationId === conversationId && state.phase !== 'idle';
+}
+
+function completionBlocksContextMutation(
+  state: CompletionControllerState,
+  conversationId: string,
+): boolean {
+  return state.conversationId === conversationId && completionBusy(state);
+}
+
+function projectContextOwnsMutation(
+  state: ProjectContextControllerState,
+): boolean {
+  return (
+    state.phase === 'inspecting' ||
+    state.phase === 'preparing' ||
+    state.phase === 'review' ||
+    state.phase === 'confirming' ||
+    state.phase === 'disabling' ||
+    state.phase === 'persistence_pending' ||
+    state.phase === 'cleanup_pending' ||
+    state.candidateManifest !== null
+  );
+}
+
+function sameProjectContextOwner(
+  owner: ProjectContextControllerOwner | null,
+  conversation: Conversation | null,
+): boolean {
+  return (
+    owner !== null &&
+    conversation !== null &&
+    conversation.projectId !== null &&
+    owner.conversationId === conversation.id &&
+    owner.projectId === conversation.projectId &&
+    owner.runtimeContextId === conversation.runtimeContextId &&
+    owner.modelId === conversation.modelId
+  );
+}
+
+function sameProjectContextToken(
+  left: ProjectContextActionToken | null,
+  right: ProjectContextActionToken | null,
+): boolean {
+  return (
+    left !== null &&
+    right !== null &&
+    left.conversationId === right.conversationId &&
+    left.projectId === right.projectId &&
+    left.runtimeContextId === right.runtimeContextId &&
+    left.modelId === right.modelId &&
+    left.generation === right.generation &&
+    left.preparationId === right.preparationId &&
+    left.listGeneration === right.listGeneration
+  );
+}
+
+function scheduleProjectContextSearch(
+  delayMilliseconds: number,
+  operation: () => void,
+) {
+  let active = true;
+  const timer = setTimeout(() => {
+    if (!active) return;
+    active = false;
+    operation();
+  }, delayMilliseconds);
+  return {
+    cancel: () => {
+      if (!active) return;
+      active = false;
+      clearTimeout(timer);
+    },
+  };
 }
 
 function completionOwnershipKey(
@@ -282,6 +391,12 @@ export function HomeScreen() {
   const [evidenceVisible, setEvidenceVisible] = useState(false);
   const [workspaceVisible, setWorkspaceVisible] = useState(false);
   const [projectsVisible, setProjectsVisible] = useState(false);
+  const [contextSheetVisible, setContextSheetVisible] = useState(false);
+  const contextSheetVisibleRef = useRef(false);
+  contextSheetVisibleRef.current = contextSheetVisible;
+  const navigationSurfaceVisibleRef = useRef(false);
+  const [contextSheetFilter, setContextSheetFilter] =
+    useState<ProjectContextSheetFilter>('all');
   const [projectFilesScope, setProjectFilesScope] =
     useState<LocalProject | null>(null);
   const [projectRefreshToken, setProjectRefreshToken] = useState(0);
@@ -307,6 +422,14 @@ export function HomeScreen() {
   const activeAttachmentPreviewId = useRef<string | null>(null);
   const afterDrawerDismiss = useRef<(() => void) | null>(null);
   const afterActionDismiss = useRef<(() => void) | null>(null);
+  const pendingContextOpenAfterProjectsDismiss =
+    useRef<PendingContextOpen | null>(null);
+  const pendingContextAttachAfterOpen = useRef<PendingContextOpen | null>(null);
+  const projectChatTransitionInFlight = useRef(false);
+  const projectContextUiEpoch = useRef(0);
+  const projectContextStripRef =
+    useRef<React.ElementRef<typeof View> | null>(null);
+  const projectContextStripTarget = useRef<number | null>(null);
   const completionUiEpoch = useRef(0);
   const retryActionInFlight = useRef(false);
   const started = useRef(false);
@@ -474,6 +597,41 @@ export function HomeScreen() {
     () => completionController.subscribe(setCompletionState),
     [completionController],
   );
+  const projectContextNativeAvailable = useMemo(
+    () => LocalProjectContext.isAvailable(),
+    [],
+  );
+  const projectContextController = useMemo(
+    () =>
+      createProjectContextController({
+        chat: store,
+        native: LocalProjectContext,
+        persistCurrent: () => persistCurrentRef.current(),
+        createPreparationId: () => LocalRuntime.createCompletionRequestId(),
+        completionMutationBlocked: conversationId =>
+          completionBlocksContextMutation(
+            completionController.getState(),
+            conversationId,
+          ),
+        snapshotReferences: (conversationId, snapshotId) =>
+          selectProjectContextSnapshotReferences(
+            store.getState(),
+            conversationId,
+            snapshotId,
+          ),
+        scheduleSearch: scheduleProjectContextSearch,
+        maximumPendingPersistence: 1,
+      }),
+    [completionController, store],
+  );
+  const [projectContextControllerState, setProjectContextControllerState] =
+    useState<ProjectContextControllerState>(() =>
+      projectContextController.getState(),
+    );
+  useEffect(
+    () => projectContextController.subscribe(setProjectContextControllerState),
+    [projectContextController],
+  );
   const requestState: RequestState = completionBusy(completionState)
     ? 'sending'
     : 'idle';
@@ -531,11 +689,39 @@ export function HomeScreen() {
     });
   }, [preferencesStore, store]);
 
+  const reconcileSelectedConversation = useCallback(
+    (conversationId: string) => {
+      completionController.reconcileHydrated(conversationId);
+      if (!projectContextNativeAvailable) return;
+      if (
+        completionOwnsPresentation(
+          completionController.getState(),
+          conversationId,
+        ) ||
+        selectProjectContextSnapshotReferences(
+          store.getState(),
+          conversationId,
+        ).length > 0
+      ) {
+        return;
+      }
+      projectContextController
+        .reconcileHydrated(conversationId)
+        .catch(() => undefined);
+    },
+    [
+      completionController,
+      projectContextController,
+      projectContextNativeAvailable,
+      store,
+    ],
+  );
+
   const hydrateStoredState = useCallback(
     (stored: string | null) => {
       if (stored === null) {
         const conversationId = ensureConversation();
-        completionController.reconcileHydrated(conversationId);
+        reconcileSelectedConversation(conversationId);
         return;
       }
       try {
@@ -561,8 +747,7 @@ export function HomeScreen() {
         if (store.getState().selectedConversationId === null)
           ensureConversation();
         const selected = store.getState().selectedConversationId;
-        if (selected !== null)
-          completionController.reconcileHydrated(selected);
+        if (selected !== null) reconcileSelectedConversation(selected);
         return;
       }
 
@@ -589,7 +774,7 @@ export function HomeScreen() {
         t('home.storedChatsRejected', { error: hydrated.error.message }),
       );
     },
-    [completionController, ensureConversation, preferencesStore, store, t],
+    [ensureConversation, preferencesStore, reconcileSelectedConversation, store, t],
   );
 
   const bootstrap = useCallback(async () => {
@@ -676,6 +861,125 @@ export function HomeScreen() {
   const activeThinkingMode =
     activeConversation?.thinkingMode ?? preferences.thinkingMode;
   const activeWorkspaceId = activeConversation?.workspaceId ?? null;
+  const projectContextOwnerAligned = sameProjectContextOwner(
+    projectContextControllerState.owner,
+    activeConversation,
+  );
+  const projectContextVerificationStatus: ProjectContextVerificationStatus =
+    !projectContextNativeAvailable ||
+    activeConversation?.projectContext?.status === 'unavailable'
+      ? 'unavailable'
+      : !projectContextOwnerAligned
+        ? 'checking'
+        : projectContextControllerState.phase === 'persistence_pending' ||
+          projectContextControllerState.phase === 'cleanup_pending'
+        ? 'recovery'
+        : projectContextControllerState.failureCode !== null ||
+            projectContextControllerState.phase === 'blocked'
+          ? 'error'
+          : projectContextControllerState.phase === 'inspecting' ||
+              projectContextControllerState.phase === 'preparing' ||
+              projectContextControllerState.phase === 'confirming' ||
+              projectContextControllerState.phase === 'disabling'
+            ? 'checking'
+            : 'verified';
+  const projectContextCandidateManifest =
+    projectContextOwnerAligned
+      ? projectContextControllerState.candidateManifest
+      : null;
+  const projectContextManifest =
+    projectContextCandidateManifest ??
+    activeConversation?.projectContext?.snapshot ??
+    null;
+  const projectContextConfirmationRequired =
+    projectContextControllerState.phase === 'review' &&
+    projectContextCandidateManifest !== null;
+  const projectContextSheetMode: ProjectContextSheetMode =
+    projectContextManifest === null ? 'candidates' : 'disclosure';
+  const projectContextBusyAction: ProjectContextSheetBusyAction =
+    !projectContextOwnerAligned
+      ? null
+      : projectContextControllerState.phase === 'preparing'
+      ? 'prepare'
+      : projectContextControllerState.phase === 'confirming'
+        ? 'confirm'
+        : projectContextControllerState.phase === 'inspecting'
+          ? 'refresh'
+          : projectContextControllerState.phase === 'disabling'
+            ? 'disable'
+            : null;
+  const projectContextRecoveryAction: ProjectContextSheetRecoveryAction =
+    !projectContextOwnerAligned
+      ? null
+      : projectContextControllerState.phase === 'persistence_pending'
+      ? 'persistence'
+      : projectContextControllerState.phase === 'cleanup_pending'
+        ? 'cleanup'
+        : null;
+  const projectContextActionToken = projectContextOwnerAligned
+    ? projectContextController.getActionToken()
+    : null;
+  const completionBlocksActiveProjectMutation =
+    activeConversation !== null &&
+    completionBlocksContextMutation(completionState, activeConversation.id);
+  const projectContextHasSnapshotReferences =
+    activeConversation !== null &&
+    selectProjectContextSnapshotReferences(
+      chatState,
+      activeConversation.id,
+    ).length > 0;
+  const projectContextActionsDisabled =
+    projectContextActionToken === null ||
+    completionBlocksActiveProjectMutation ||
+    projectContextHasSnapshotReferences;
+  const projectContextLocksComposer =
+    activeConversation?.projectId !== null &&
+    activeConversation?.projectId !== undefined &&
+    projectContextOwnerAligned &&
+    projectContextOwnsMutation(projectContextControllerState);
+  const projectContextRenderEpoch = projectContextUiEpoch.current;
+  const projectContextActionKey = JSON.stringify([
+    projectContextRenderEpoch,
+    contextSheetVisible,
+    activeConversation?.id ?? null,
+    projectContextActionToken?.generation ?? null,
+    projectContextActionToken?.listGeneration ?? null,
+    projectContextActionToken?.preparationId ?? null,
+    projectContextActionToken?.projectId ?? null,
+    projectContextActionToken?.runtimeContextId ?? null,
+    projectContextActionToken?.modelId ?? null,
+  ]);
+  useEffect(() => {
+    if (!projectContextNativeAvailable || activeConversation === null) return;
+    if (
+      activeConversation.projectId === null ||
+      activeConversation.projectContext === null ||
+      completionOwnsPresentation(completionState, activeConversation.id) ||
+      selectProjectContextSnapshotReferences(
+        store.getState(),
+        activeConversation.id,
+      ).length > 0
+    ) {
+      return;
+    }
+    const controllerState = projectContextController.getState();
+    if (sameProjectContextOwner(controllerState.owner, activeConversation)) {
+      return;
+    }
+    if (projectContextOwnsMutation(controllerState)) {
+      return;
+    }
+    projectContextController
+      .reconcileHydrated(activeConversation.id)
+      .catch(() => undefined);
+  }, [
+    activeConversation,
+    completionState,
+    projectContextController,
+    projectContextControllerState,
+    projectContextNativeAvailable,
+    store,
+  ]);
   const runtimeLocal =
     proof !== null &&
     proof.checks.credential_in_keychain &&
@@ -1037,24 +1341,43 @@ export function HomeScreen() {
       store.getState(),
       conversationId,
     );
+    if (
+      beforeAppend?.projectId !== null &&
+      beforeAppend?.projectId !== undefined &&
+      (beforeAppend.projectContext === null ||
+        !isProjectContextSendable(beforeAppend.projectContext) ||
+        !projectContextNativeAvailable ||
+        !sameProjectContextOwner(
+          projectContextController.getState().owner,
+          beforeAppend,
+        ) ||
+        projectContextController.getState().phase !== 'idle' ||
+        projectContextController.getState().candidateManifest !== null)
+    ) {
+      return;
+    }
     const historyNeedsVision =
       beforeAppend?.messages.some(message =>
         message.attachments?.some(attachment => attachment.kind === 'image'),
       ) === true ||
       outgoingAttachments.some(attachment => attachment.kind === 'image');
+    let visionModelChanged = false;
     if (
       historyNeedsVision &&
       beforeAppend?.modelId !== 'deepseek-v4-flash-vision-exp'
     ) {
-      if (
-        changeConversationModel(
-          conversationId,
-          'deepseek-v4-flash-vision-exp',
-          'send_image_guard',
-        )
-      ) {
+      visionModelChanged = changeConversationModel(
+        conversationId,
+        'deepseek-v4-flash-vision-exp',
+        'send_image_guard',
+      );
+      if (visionModelChanged) {
         setAttachmentNotice(t('messages.attachment.visionEnabled'));
       }
+    }
+    if (visionModelChanged && beforeAppend?.projectId !== null) {
+      if (await persist()) reconcileSelectedConversation(conversationId);
+      return;
     }
     const attachmentIds = outgoingAttachments.map(attachment => attachment.id);
     setAttachmentNotice(null);
@@ -1095,6 +1418,10 @@ export function HomeScreen() {
     draft,
     draftAttachments,
     ensureConversation,
+    projectContextController,
+    projectContextNativeAvailable,
+    persist,
+    reconcileSelectedConversation,
     refreshProof,
     store,
     t,
@@ -1189,6 +1516,12 @@ export function HomeScreen() {
     const currentId = store.getState().selectedConversationId;
     if (
       currentId !== null &&
+      !(await projectContextController.beforeConversationChange(currentId))
+    ) {
+      return;
+    }
+    if (
+      currentId !== null &&
       !(await completionController.beforeConversationChange(currentId))
     ) {
       return;
@@ -1204,9 +1537,7 @@ export function HomeScreen() {
     setAttachmentNotice(null);
     setRequestFailure(null);
     setDrawerVisible(false);
-    completionController.reconcileHydrated(
-      store.getState().selectedConversationId!,
-    );
+    reconcileSelectedConversation(store.getState().selectedConversationId!);
     await persist();
   }, [
     completionController,
@@ -1214,12 +1545,20 @@ export function HomeScreen() {
     markAttachmentOperationStale,
     persist,
     preferencesStore,
+    projectContextController,
+    reconcileSelectedConversation,
     store,
   ]);
 
   const selectConversation = useCallback(
     async (id: string) => {
       const currentId = store.getState().selectedConversationId;
+      if (
+        currentId !== null &&
+        !(await projectContextController.beforeConversationChange(currentId))
+      ) {
+        return;
+      }
       if (
         currentId !== null &&
         !(await completionController.beforeConversationChange(currentId))
@@ -1234,7 +1573,7 @@ export function HomeScreen() {
       setAttachmentNotice(null);
       setRequestFailure(null);
       setDrawerVisible(false);
-      completionController.reconcileHydrated(id);
+      reconcileSelectedConversation(id);
       await persist();
     },
     [
@@ -1242,6 +1581,8 @@ export function HomeScreen() {
       discardDraftAttachments,
       markAttachmentOperationStale,
       persist,
+      projectContextController,
+      reconcileSelectedConversation,
       store,
     ],
   );
@@ -1264,6 +1605,13 @@ export function HomeScreen() {
           style: 'destructive',
           onPress: () =>
             (async () => {
+              if (
+                !(await projectContextController.beforeConversationDelete(
+                  deleting,
+                ))
+              ) {
+                return;
+              }
               if (
                 !(await completionController.beforeConversationDelete(deleting))
               ) {
@@ -1299,7 +1647,7 @@ export function HomeScreen() {
               const selectedAfterDelete =
                 store.getState().selectedConversationId;
               if (selectedAfterDelete !== null) {
-                completionController.reconcileHydrated(selectedAfterDelete);
+                reconcileSelectedConversation(selectedAfterDelete);
               }
               const remainingIds = new Set(
                 referencedAttachmentIds(store.getState()),
@@ -1325,6 +1673,8 @@ export function HomeScreen() {
       markAttachmentOperationStale,
       persist,
       preferencesStore,
+      projectContextController,
+      reconcileSelectedConversation,
       referencedAttachmentIds,
       store,
       t,
@@ -1342,6 +1692,7 @@ export function HomeScreen() {
     (model: SupportedModel, source: ModelTransitionSource) => {
       if (
         completionBusy(completionController.getState()) ||
+        projectContextOwnsMutation(projectContextController.getState()) ||
         activeAttachmentOperation.current !== null
       ) {
         return;
@@ -1349,9 +1700,20 @@ export function HomeScreen() {
       const conversationId = ensureConversation();
       if (!changeConversationModel(conversationId, model, source)) return;
       setAttachmentNotice(null);
-      persist().catch(() => undefined);
+      persist()
+        .then(saved => {
+          if (saved) reconcileSelectedConversation(conversationId);
+        })
+        .catch(() => undefined);
     },
-    [changeConversationModel, completionController, ensureConversation, persist],
+    [
+      changeConversationModel,
+      completionController,
+      ensureConversation,
+      persist,
+      projectContextController,
+      reconcileSelectedConversation,
+    ],
   );
 
   const selectComposerModel = useCallback(
@@ -1368,6 +1730,7 @@ export function HomeScreen() {
     (thinkingMode: Conversation['thinkingMode']) => {
       if (
         completionBusy(completionController.getState()) ||
+        projectContextOwnsMutation(projectContextController.getState()) ||
         activeAttachmentOperation.current !== null
       ) {
         return;
@@ -1376,18 +1739,30 @@ export function HomeScreen() {
       store.setThinkingMode(conversationId, thinkingMode);
       persist().catch(() => undefined);
     },
-    [completionController, ensureConversation, persist, store],
+    [
+      completionController,
+      ensureConversation,
+      persist,
+      projectContextController,
+      store,
+    ],
   );
 
   const openComposerOptions = useCallback(() => {
     if (
       completionBusy(completionController.getState()) ||
+      projectContextOwnsMutation(projectContextController.getState()) ||
       activeAttachmentOperation.current !== null
     ) {
       return;
     }
     setComposerOptionsVisible(true);
-  }, [completionController]);
+  }, [completionController, projectContextController]);
+
+  const openSettings = useCallback(() => {
+    if (projectContextOwnsMutation(projectContextController.getState())) return;
+    setSettingsVisible(true);
+  }, [projectContextController]);
 
   useEffect(() => {
     if (!LocalWorkspaces.isAvailable()) return;
@@ -1423,35 +1798,69 @@ export function HomeScreen() {
 
   const chatInProject = useCallback(
     async (project: LocalProject) => {
-      const current = selectActiveConversation(store.getState());
-      if (
-        current !== null &&
-        !(await completionController.beforeConversationChange(current.id))
-      ) {
-        return;
-      }
-      completionUiEpoch.current += 1;
-      setRequestFailure(null);
-      if (current?.projectId !== project.id) {
-        if (current === null || current.messages.length > 0) {
-          markAttachmentOperationStale();
-          discardDraftAttachments();
-          setDraft('');
-          setAttachmentNotice(null);
-          store.createConversation({
-            modelId: preferencesStore.getState().defaultModel,
-            thinkingMode: preferencesStore.getState().thinkingMode,
-            projectId: project.id,
-          });
-        } else {
-          store.bindConversationToProject(current.id, project.id);
+      if (projectChatTransitionInFlight.current) return;
+      projectChatTransitionInFlight.current = true;
+      let waitForDismiss = false;
+      try {
+        const current = selectActiveConversation(store.getState());
+        const expectedSelectedId = current?.id ?? null;
+        if (
+          current !== null &&
+          !(await projectContextController.beforeConversationChange(current.id))
+        ) {
+          return;
         }
+        if (store.getState().selectedConversationId !== expectedSelectedId) return;
+        if (
+          current !== null &&
+          !(await completionController.beforeConversationChange(current.id))
+        ) {
+          return;
+        }
+        if (store.getState().selectedConversationId !== expectedSelectedId) return;
+        completionUiEpoch.current += 1;
+        setRequestFailure(null);
+        if (current?.projectId !== project.id) {
+          if (current === null || current.messages.length > 0) {
+            markAttachmentOperationStale();
+            discardDraftAttachments();
+            setDraft('');
+            setAttachmentNotice(null);
+            store.createConversation({
+              modelId: preferencesStore.getState().defaultModel,
+              thinkingMode: preferencesStore.getState().thinkingMode,
+              projectId: project.id,
+            });
+          } else {
+            store.bindConversationToProject(current.id, project.id);
+          }
+        }
+        setActiveProjectName(project.name);
+        const selected = store.getState().selectedConversationId;
+        if (selected === null || !(await persist())) return;
+        const selectedConversation = selectConversationById(
+          store.getState(),
+          selected,
+        );
+        if (
+          selectedConversation === null ||
+          selectedConversation.projectId !== project.id
+        ) {
+          return;
+        }
+        const uiEpoch = ++projectContextUiEpoch.current;
+        pendingContextOpenAfterProjectsDismiss.current = {
+          conversationId: selected,
+          projectId: project.id,
+          runtimeContextId: selectedConversation.runtimeContextId,
+          modelId: selectedConversation.modelId,
+          uiEpoch,
+        };
+        waitForDismiss = true;
+        setProjectsVisible(false);
+      } finally {
+        if (!waitForDismiss) projectChatTransitionInFlight.current = false;
       }
-      setActiveProjectName(project.name);
-      setProjectsVisible(false);
-      const selected = store.getState().selectedConversationId;
-      if (selected !== null) completionController.reconcileHydrated(selected);
-      await persist();
     },
     [
       completionController,
@@ -1459,9 +1868,205 @@ export function HomeScreen() {
       markAttachmentOperationStale,
       persist,
       preferencesStore,
+      projectContextController,
       store,
     ],
   );
+
+  const handleProjectsDismiss = useCallback(() => {
+    const pending = pendingContextOpenAfterProjectsDismiss.current;
+    pendingContextOpenAfterProjectsDismiss.current = null;
+    if (pending === null) return;
+    projectChatTransitionInFlight.current = false;
+    const selected = selectActiveConversation(store.getState());
+    if (
+      selected === null ||
+      selected.id !== pending.conversationId ||
+      selected.projectId !== pending.projectId ||
+      selected.runtimeContextId !== pending.runtimeContextId ||
+      selected.modelId !== pending.modelId ||
+      projectContextUiEpoch.current !== pending.uiEpoch
+    ) {
+      return;
+    }
+    setContextSheetFilter('all');
+    contextSheetVisibleRef.current = true;
+    setContextSheetVisible(true);
+    if (
+      completionOwnsPresentation(
+        completionController.getState(),
+        selected.id,
+      ) ||
+      selectProjectContextSnapshotReferences(store.getState(), selected.id)
+        .length > 0 ||
+      !projectContextNativeAvailable
+    ) {
+      return;
+    }
+    pendingContextAttachAfterOpen.current = pending;
+  }, [
+    completionController,
+    projectContextNativeAvailable,
+    store,
+  ]);
+
+  useEffect(() => {
+    if (!contextSheetVisible) return;
+    const pending = pendingContextAttachAfterOpen.current;
+    pendingContextAttachAfterOpen.current = null;
+    if (pending === null) return;
+    (async () => {
+      await projectContextController.attachConversation(pending.conversationId);
+      const current = selectActiveConversation(store.getState());
+      if (
+        !contextSheetVisibleRef.current ||
+        current === null ||
+        current.id !== pending.conversationId ||
+        current.projectId !== pending.projectId ||
+        current.runtimeContextId !== pending.runtimeContextId ||
+        current.modelId !== pending.modelId ||
+        projectContextUiEpoch.current !== pending.uiEpoch
+      ) {
+        return;
+      }
+      const token = projectContextController.getActionToken();
+      if (token !== null && current.projectContext?.snapshot === null) {
+        projectContextController.search(token, '').catch(() => undefined);
+      }
+    })().catch(() => undefined);
+  }, [contextSheetVisible, projectContextController, store]);
+
+  const openProjectContextFromStrip = useCallback(() => {
+    if (
+      contextSheetVisibleRef.current ||
+      navigationSurfaceVisibleRef.current
+    ) {
+      return;
+    }
+    const selected = selectActiveConversation(store.getState());
+    if (
+      selected === null ||
+      selected.projectId === null ||
+      selected.projectContext === null
+    ) {
+      return;
+    }
+    const uiEpoch = ++projectContextUiEpoch.current;
+    setContextSheetFilter('all');
+    contextSheetVisibleRef.current = true;
+    setContextSheetVisible(true);
+    if (
+      completionOwnsPresentation(
+        completionController.getState(),
+        selected.id,
+      ) ||
+      selectProjectContextSnapshotReferences(store.getState(), selected.id)
+        .length > 0 ||
+      !projectContextNativeAvailable
+    ) {
+      return;
+    }
+    const controllerState = projectContextController.getState();
+    if (sameProjectContextOwner(controllerState.owner, selected)) return;
+    projectContextController
+      .attachConversation(selected.id)
+      .then(() => {
+        if (
+          projectContextUiEpoch.current !== uiEpoch ||
+          store.getState().selectedConversationId !== selected.id
+        ) {
+          return;
+        }
+        const current = selectConversationById(store.getState(), selected.id);
+        const token = projectContextController.getActionToken();
+        if (
+          current?.projectContext?.snapshot === null &&
+          token !== null
+        ) {
+          projectContextController.search(token, '').catch(() => undefined);
+        }
+      })
+      .catch(() => undefined);
+  }, [
+    completionController,
+    projectContextController,
+    projectContextNativeAvailable,
+    store,
+  ]);
+
+  const projectContextActionIsLive = (
+    expected: ProjectContextActionToken | null,
+  ): expected is ProjectContextActionToken => {
+    if (
+      !contextSheetVisibleRef.current ||
+      projectContextUiEpoch.current !== projectContextRenderEpoch ||
+      expected === null
+    ) {
+      return false;
+    }
+    const selected = selectActiveConversation(store.getState());
+    if (
+      selected === null ||
+      selected.id !== expected.conversationId ||
+      selected.projectId !== expected.projectId ||
+      completionBlocksContextMutation(
+        completionController.getState(),
+        selected.id,
+      ) ||
+      selectProjectContextSnapshotReferences(store.getState(), selected.id)
+        .length > 0
+    ) {
+      return false;
+    }
+    return sameProjectContextToken(
+      expected,
+      projectContextController.getActionToken(),
+    );
+  };
+
+  const closeProjectContextSheet = () => {
+    contextSheetVisibleRef.current = false;
+    projectContextUiEpoch.current += 1;
+    setContextSheetVisible(false);
+  };
+
+  const completeProjectContextAction = (
+    expected: ProjectContextActionToken,
+    closeOnSuccess: boolean,
+    operation: () => Promise<{ readonly status: string }>,
+  ) => {
+    if (!projectContextActionIsLive(expected)) return;
+    const capturedEpoch = projectContextRenderEpoch;
+    operation()
+      .then(outcome => {
+        const selected = selectConversationById(
+          store.getState(),
+          expected.conversationId,
+        );
+        if (
+          closeOnSuccess &&
+          outcome.status === 'completed' &&
+          contextSheetVisibleRef.current &&
+          projectContextUiEpoch.current === capturedEpoch &&
+          store.getState().selectedConversationId === expected.conversationId &&
+          selected?.projectId === expected.projectId &&
+          selected.runtimeContextId === expected.runtimeContextId &&
+          selected.modelId === expected.modelId
+        ) {
+          closeProjectContextSheet();
+        }
+      })
+      .catch(() => undefined);
+  };
+
+  const handleProjectContextDismiss = () => {
+    const target =
+      findNodeHandle(projectContextStripRef.current) ??
+      projectContextStripTarget.current;
+    if (typeof target === 'number') {
+      AccessibilityInfo.setAccessibilityFocus(target);
+    }
+  };
 
   const unbindProjectFromConversation = useCallback(async () => {
     const conversationId = store.getState().selectedConversationId;
@@ -1568,7 +2173,9 @@ export function HomeScreen() {
     accountVisible ||
     mirrorsVisible ||
     projectsVisible ||
-    workspaceVisible;
+    workspaceVisible ||
+    contextSheetVisible;
+  navigationSurfaceVisibleRef.current = navigationSurfaceVisible;
   const workspaceProjectScope = useMemo(
     () =>
       projectFilesScope === null
@@ -1607,20 +2214,6 @@ export function HomeScreen() {
                   {activeConversation.title}
                 </Text>
               )}
-            {activeProjectName !== null && (
-              <View
-                accessible
-                accessibilityLabel={t('messages.projectContext', {
-                  project: activeProjectName,
-                })}
-                style={styles.projectContext}
-              >
-                <AppIcon color={colors.accent} icon={FolderCode} size={11} />
-                <Text numberOfLines={1} style={styles.projectContextText}>
-                  {activeProjectName}
-                </Text>
-              </View>
-            )}
           </View>
           {runtimeStatus === 'verified' ? (
             <View style={styles.topBarSpacer} />
@@ -1737,6 +2330,31 @@ export function HomeScreen() {
               {runtimeLabel.toLocaleUpperCase()}
             </Text>
           </Pressable>
+          {activeConversation?.projectContext !== null &&
+            activeConversation?.projectContext !== undefined &&
+            activeConversation.projectId !== null && (
+              <View
+                collapsable={false}
+                onLayout={event => {
+                  if (typeof event.target === 'number') {
+                    projectContextStripTarget.current = event.target;
+                  }
+                }}
+                testID="project-context-strip-focus-target"
+              >
+                <ProjectContextStrip
+                  ref={projectContextStripRef}
+                  projectName={
+                    activeProjectName ??
+                    activeConversation.projectContext.snapshot?.project_name ??
+                    activeConversation.projectId
+                  }
+                  state={activeConversation.projectContext}
+                  verificationStatus={projectContextVerificationStatus}
+                  onPress={openProjectContextFromStrip}
+                />
+              </View>
+            )}
           <ChatComposer
             attachmentBusy={attachmentBusy}
             attachments={draftAttachments}
@@ -1745,12 +2363,13 @@ export function HomeScreen() {
             harnessName={activeHarness.name}
             model={activeModel}
             locked={
-              requestState === 'sending' || previewingAttachmentId !== null
+              requestState === 'sending' ||
+              previewingAttachmentId !== null ||
+              projectContextLocksComposer
             }
             ownershipKey={attachmentOwnershipKey}
             optionsVisible={composerOptionsVisible}
             previewingAttachmentId={previewingAttachmentId}
-            projectName={activeProjectName}
             thinkingMode={activeThinkingMode}
             workspaceName={
               activeWorkspaceId === null
@@ -1764,7 +2383,7 @@ export function HomeScreen() {
             }}
             onCancel={() => cancel(completionState)}
             onChange={setDraft}
-            onConfigure={() => setSettingsVisible(true)}
+            onConfigure={openSettings}
             onOptionsPress={openComposerOptions}
             onWorkspacePress={() => {
               setWorkspaceSheetVisible(true);
@@ -1805,7 +2424,7 @@ export function HomeScreen() {
           openAfterDrawerDismiss(() => setHarnessesVisible(true))
         }
         onOpenRuntime={openRuntimeFromDrawer}
-        onOpenSettings={() => setSettingsVisible(true)}
+        onOpenSettings={openSettings}
         onSelect={selectConversation}
       />
       <ConversationActionSheet
@@ -1832,6 +2451,9 @@ export function HomeScreen() {
           configureCredential().catch(() => undefined)
         }
         onOpenModelPicker={() => {
+          if (projectContextOwnsMutation(projectContextController.getState())) {
+            return;
+          }
           setModelVisible(true);
         }}
         onOpenMirrors={() => setMirrorsVisible(true)}
@@ -1845,7 +2467,11 @@ export function HomeScreen() {
         onClose={() => setAccountVisible(false)}
       />
       <ModelPicker
-        disabled={requestState === 'sending' || attachmentBusy}
+        disabled={
+          requestState === 'sending' ||
+          attachmentBusy ||
+          projectContextLocksComposer
+        }
         placement="settings"
         selected={activeModel}
         visible={modelVisible}
@@ -1853,7 +2479,11 @@ export function HomeScreen() {
         onSelect={selectSettingsModel}
       />
       <ConversationOptionsPicker
-        disabled={requestState === 'sending' || attachmentBusy}
+        disabled={
+          requestState === 'sending' ||
+          attachmentBusy ||
+          projectContextLocksComposer
+        }
         model={activeModel}
         thinkingMode={activeThinkingMode}
         visible={composerOptionsVisible}
@@ -1901,12 +2531,179 @@ export function HomeScreen() {
         refreshToken={projectRefreshToken}
         visible={projectsVisible}
         onChatInProject={chatInProject}
-        onClose={() => setProjectsVisible(false)}
+        onClose={() => {
+          if (!projectChatTransitionInFlight.current) {
+            setProjectsVisible(false);
+          }
+        }}
+        onDismiss={handleProjectsDismiss}
         onOpenFiles={project => {
           setProjectFilesScope(project);
           setWorkspaceVisible(true);
         }}
         onUnbindFromChat={unbindProjectFromConversation}
+      />
+      <ProjectContextSheet
+        actionKey={projectContextActionKey}
+        busyAction={projectContextBusyAction}
+        candidates={
+          projectContextOwnerAligned
+            ? projectContextControllerState.list.candidates
+            : []
+        }
+        checking={projectContextVerificationStatus === 'checking'}
+        confirmationRequired={projectContextConfirmationRequired}
+        disabled={projectContextActionsDisabled}
+        errorCode={
+          projectContextOwnerAligned
+            ? projectContextControllerState.failureCode
+            : null
+        }
+        filter={contextSheetFilter}
+        hasActiveContext={
+          !projectContextConfirmationRequired &&
+          activeConversation?.projectContext?.snapshot !== null &&
+          activeConversation?.projectContext?.snapshot !== undefined
+        }
+        loading={
+          projectContextOwnerAligned && projectContextControllerState.list.loading
+        }
+        loadingMore={
+          projectContextOwnerAligned &&
+          projectContextControllerState.list.loadingMore
+        }
+        manifest={projectContextManifest}
+        mode={projectContextSheetMode}
+        nextCursor={
+          projectContextOwnerAligned
+            ? projectContextControllerState.list.nextCursor
+            : null
+        }
+        projectName={
+          activeProjectName ??
+          activeConversation?.projectContext?.snapshot?.project_name ??
+          activeConversation?.projectId ??
+          ''
+        }
+        query={
+          projectContextOwnerAligned
+            ? projectContextControllerState.list.query
+            : ''
+        }
+        recoveryAction={projectContextRecoveryAction}
+        selectedCandidates={
+          projectContextOwnerAligned
+            ? projectContextControllerState.selectedCandidates
+            : []
+        }
+        selectedPaths={
+          projectContextOwnerAligned
+            ? projectContextControllerState.selectedPaths
+            : []
+        }
+        unavailable={
+          !projectContextNativeAvailable ||
+          activeConversation?.projectContext?.status === 'unavailable'
+        }
+        visible={contextSheetVisible}
+        onCancelCandidate={() => {
+          const token = projectContextActionToken;
+          if (token === null) return;
+          completeProjectContextAction(
+            token,
+            true,
+            () => projectContextController.cancel(token),
+          );
+        }}
+        onCancelRecovery={closeProjectContextSheet}
+        onClose={closeProjectContextSheet}
+        onConfirm={() => {
+          const token = projectContextActionToken;
+          if (token === null) return;
+          completeProjectContextAction(
+            token,
+            true,
+            () => projectContextController.confirm(token),
+          );
+        }}
+        onDisable={() => {
+          const token = projectContextActionToken;
+          if (token === null) return;
+          completeProjectContextAction(
+            token,
+            true,
+            () => projectContextController.disable(token),
+          );
+        }}
+        onDismiss={handleProjectContextDismiss}
+        onFilterChange={filter => {
+          if (!projectContextActionIsLive(projectContextActionToken)) return;
+          setContextSheetFilter(filter);
+        }}
+        onLoadMore={() => {
+          const token = projectContextActionToken;
+          if (!projectContextActionIsLive(token)) return;
+          projectContextController.loadMore(token).catch(() => undefined);
+        }}
+        onPrepare={() => {
+          const token = projectContextActionToken;
+          if (token === null) return;
+          completeProjectContextAction(
+            token,
+            false,
+            () => projectContextController.prepare(token),
+          );
+        }}
+        onQueryChange={query => {
+          const token = projectContextActionToken;
+          if (!projectContextActionIsLive(token)) return;
+          projectContextController.search(token, query).catch(() => undefined);
+        }}
+        onRefreshAndSend={() => undefined}
+        onRefreshCandidates={() => {
+          const token = projectContextActionToken;
+          if (!projectContextActionIsLive(token)) return;
+          projectContextController
+            .search(token, projectContextControllerState.list.query)
+            .catch(() => undefined);
+        }}
+        onRefreshContext={() => {
+          const token = projectContextActionToken;
+          if (token === null) return;
+          completeProjectContextAction(
+            token,
+            false,
+            () => projectContextController.inspect(token),
+          );
+        }}
+        onRetryCleanup={() => {
+          const token = projectContextActionToken;
+          if (token === null) return;
+          completeProjectContextAction(
+            token,
+            false,
+            () => projectContextController.retryCleanup(token),
+          );
+        }}
+        onRetryPersistence={() => {
+          const token = projectContextActionToken;
+          if (token === null) return;
+          completeProjectContextAction(
+            token,
+            false,
+            () => projectContextController.retryPersistence(token),
+          );
+        }}
+        onSendWithoutContext={() => undefined}
+        onTogglePath={path => {
+          const token = projectContextActionToken;
+          if (!projectContextActionIsLive(token)) return;
+          const selected = projectContextController.getState().selectedPaths;
+          const next = selected.includes(path)
+            ? selected.filter(candidate => candidate !== path)
+            : [...selected, path];
+          projectContextController.setSelectedPaths(token, next);
+        }}
       />
       <WorkspaceDrawer
         confirmDestructive={preferences.confirmDestructiveFileActions}
@@ -2006,19 +2803,6 @@ const createStyles = (colors: ThemePalette) =>
       fontSize: 9,
       marginTop: 3,
       maxWidth: 210,
-    },
-    projectContext: {
-      flexDirection: 'row',
-      alignItems: 'center',
-      gap: 3,
-      marginTop: 2,
-      maxWidth: 150,
-    },
-    projectContextText: {
-      color: colors.accent,
-      fontFamily: fonts.mono,
-      fontSize: 8,
-      flexShrink: 1,
     },
     roundButton: {
       width: 42,

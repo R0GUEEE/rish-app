@@ -3,7 +3,7 @@
  */
 
 import React from 'react';
-import { Alert, Keyboard, StyleSheet } from 'react-native';
+import { AccessibilityInfo, Alert, Keyboard, StyleSheet } from 'react-native';
 import ReactTestRenderer, {
   act,
   type ReactTestInstance,
@@ -12,8 +12,19 @@ import ReactTestRenderer, {
 
 import App from '../App';
 import { ChatDrawer } from '../src/components/ChatDrawer';
+import { ChatComposer } from '../src/components/ChatComposer';
 import { ConversationActionSheet } from '../src/components/ConversationActionSheet';
+import { ProjectContextSheet } from '../src/components/ProjectContextSheet';
+import { ProjectContextStrip } from '../src/components/ProjectContextStrip';
+import { ProjectsSurface } from '../src/components/ProjectsSurface';
+import { SettingsSheet } from '../src/components/SettingsSheet';
+import { ModelPicker } from '../src/components/ModelPicker';
+import { ConversationOptionsPicker } from '../src/components/ConversationOptionsPicker';
 import { createChatStore } from '../src/state';
+import type {
+  ProjectContextInspectionV1,
+  ProjectContextManifestV1,
+} from '../src/project-context';
 
 jest.mock('../src/native/LocalRuntime', () => ({
   LocalRuntime: {
@@ -77,6 +88,20 @@ jest.mock('../src/native/LocalProjects', () => ({
     push: jest.fn(),
   },
 }));
+jest.mock('../src/native/LocalProjectContext', () => {
+  const actual = jest.requireActual('../src/native/LocalProjectContext');
+  return {
+    ...actual,
+    LocalProjectContext: {
+      isAvailable: jest.fn(),
+      listCandidates: jest.fn(),
+      prepare: jest.fn(),
+      confirm: jest.fn(),
+      inspect: jest.fn(),
+      discard: jest.fn(),
+    },
+  };
+});
 jest.mock('../src/native/LocalMirrors', () => ({
   LocalMirrors: {
     isAvailable: jest.fn(),
@@ -150,6 +175,11 @@ const mockLocalProjects = (
     LocalProjects: Record<string, jest.Mock>;
   }
 ).LocalProjects;
+const mockLocalProjectContext = (
+  jest.requireMock('../src/native/LocalProjectContext') as {
+    LocalProjectContext: Record<string, jest.Mock>;
+  }
+).LocalProjectContext;
 const mockLocalMirrors = (
   jest.requireMock('../src/native/LocalMirrors') as {
     LocalMirrors: Record<string, jest.Mock>;
@@ -228,6 +258,128 @@ function strictCompletionResult(
   };
 }
 
+function deferred<T>() {
+  let resolve!: (value: T) => void;
+  let reject!: (reason?: unknown) => void;
+  const promise = new Promise<T>((nextResolve, nextReject) => {
+    resolve = nextResolve;
+    reject = nextReject;
+  });
+  return { promise, resolve, reject };
+}
+
+const CONTEXT_PROJECT_ID = '44444444-4444-4444-8444-444444444444';
+const CONTEXT_RUNTIME_ID = '11111111-1111-4111-8111-111111111111';
+const CONTEXT_SNAPSHOT_ID = '22222222-2222-4222-8222-222222222222';
+const CONTEXT_CONSENT_ID = '33333333-3333-4333-8333-333333333333';
+const CONTEXT_PREPARATION_ID = 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa';
+
+const contextProject = {
+  schema_version: 1 as const,
+  id: CONTEXT_PROJECT_ID,
+  name: 'verified-demo',
+  workspace_path: `projects/${CONTEXT_PROJECT_ID}/repo`,
+  created_at: '2026-08-28T00:00:00.000Z',
+  updated_at: '2026-08-28T00:00:00.000Z',
+  origin_url: null,
+};
+
+function contextManifest(): ProjectContextManifestV1 {
+  return {
+    schema_version: 1,
+    snapshot_id: CONTEXT_SNAPSHOT_ID,
+    project_id: CONTEXT_PROJECT_ID,
+    project_name: contextProject.name,
+    branch: 'main',
+    head_oid: '0'.repeat(40),
+    clean: true,
+    conflicted: false,
+    captured_at: '2026-08-28T00:00:00.000Z',
+    policy_version: 'chat-read-v1.0.0',
+    provider_host: 'api.deepseek.com',
+    model: 'deepseek-v4-flash',
+    included: [
+      {
+        path: 'README.md',
+        source: 'tracked_file',
+        bytes: 16,
+        sha256: 'f'.repeat(64),
+      },
+    ],
+    omitted: [],
+    context_bytes: 16,
+    estimated_tokens: 4,
+    snapshot_sha256: 'd'.repeat(64),
+    source_fingerprint: 'e'.repeat(64),
+  };
+}
+
+function storedProjectContext(confirmed: boolean) {
+  let messageId = 0;
+  const lifecycleIds = [
+    CONTEXT_RUNTIME_ID,
+    '55555555-5555-4555-8555-555555555555',
+    '66666666-6666-4666-8666-666666666666',
+    '77777777-7777-4777-8777-777777777777',
+    '88888888-8888-4888-8888-888888888888',
+    '99999999-9999-4999-8999-999999999999',
+  ];
+  const stored = createChatStore({
+    now: () => '2026-08-28T00:00:00.000Z',
+    createId: kind => `${kind}-${++messageId}`,
+    createLifecycleId: () => lifecycleIds.shift()!,
+  });
+  const conversationId = stored.createConversation({
+    projectId: CONTEXT_PROJECT_ID,
+  });
+  expect(stored.ensureRuntimeContextId(conversationId)).toBe(
+    CONTEXT_RUNTIME_ID,
+  );
+  const manifest = contextManifest();
+  const initial = stored.getState().conversations[conversationId]!;
+  const prepared = stored.replaceProjectContextPrepared(
+    {
+      conversationId,
+      projectId: CONTEXT_PROJECT_ID,
+      runtimeContextId: CONTEXT_RUNTIME_ID,
+      modelId: initial.modelId,
+      expectedContext: initial.projectContext!,
+    },
+    {
+      preparationId: CONTEXT_PREPARATION_ID,
+      selectedPaths: ['README.md'],
+      manifest,
+    },
+  );
+  expect(prepared?.commit()).toBe(true);
+  if (confirmed) {
+    const preparedConversation = stored.getState().conversations[conversationId]!;
+    const transaction = stored.replaceProjectContextConfirmed(
+      {
+        conversationId,
+        projectId: CONTEXT_PROJECT_ID,
+        runtimeContextId: CONTEXT_RUNTIME_ID,
+        modelId: preparedConversation.modelId,
+        expectedContext: preparedConversation.projectContext!,
+      },
+      {
+        preparationId: CONTEXT_PREPARATION_ID,
+        selectedPaths: ['README.md'],
+        manifest,
+        consent: {
+          schema_version: 1,
+          consent_receipt_id: CONTEXT_CONSENT_ID,
+          snapshot_id: CONTEXT_SNAPSHOT_ID,
+          snapshot_sha256: manifest.snapshot_sha256,
+          confirmed_at: '2026-08-28T00:00:01.000Z',
+        },
+      },
+    );
+    expect(transaction?.commit()).toBe(true);
+  }
+  return { stored, conversationId, manifest };
+}
+
 async function settle() {
   await Promise.resolve();
   await Promise.resolve();
@@ -254,6 +406,12 @@ function lastPersistedState() {
       id: string;
       model_id: string;
       project_id: string | null;
+      project_context: null | {
+        status: string;
+        selected_paths: string[];
+        manifest: null | { snapshot_id: string };
+        consent: null | { consent_receipt_id: string };
+      };
       workspace_id: string | null;
       thinking_mode: string;
       attempts?: Array<{
@@ -296,6 +454,12 @@ function actionByLabel(
     .find(instance => typeof instance.props.onPress === 'function');
   if (action === undefined) throw new Error(`no actionable ${label}`);
   return action;
+}
+
+function visibleContextSheets(root: ReactTestInstance): ReactTestInstance[] {
+  return root
+    .findAllByType(ProjectContextSheet)
+    .filter(sheet => sheet.props.visible === true);
 }
 
 function composerOptionsChip(root: ReactTestInstance): ReactTestInstance {
@@ -504,6 +668,28 @@ beforeEach(() => {
     host: '',
     configured: false,
   });
+  mockLocalProjectContext.isAvailable.mockReturnValue(true);
+  mockLocalProjectContext.listCandidates.mockImplementation(
+    async (projectId: string) => ({
+      schema_version: 1,
+      project_id: projectId,
+      candidates: [],
+      next_cursor: null,
+    }),
+  );
+  mockLocalProjectContext.prepare.mockRejectedValue({
+    code: 'E_CONTEXT_REQUEST_INVALID',
+  });
+  mockLocalProjectContext.confirm.mockRejectedValue({
+    code: 'E_CONTEXT_REQUEST_INVALID',
+  });
+  mockLocalProjectContext.inspect.mockRejectedValue({
+    code: 'E_CONTEXT_SNAPSHOT_MISSING',
+  });
+  mockLocalProjectContext.discard.mockResolvedValue({
+    schema_version: 1,
+    status: 'discarded',
+  });
   mockLocalMirrors.isAvailable.mockReturnValue(true);
   mockLocalMirrors.status.mockResolvedValue(null);
   mockLocalMirrors.apply.mockResolvedValue({
@@ -514,6 +700,10 @@ beforeEach(() => {
     root: 'rish-guest-overlay',
     entries: [],
   });
+});
+
+afterEach(() => {
+  jest.useRealTimers();
 });
 
 test('boots into a usable local empty chat', async () => {
@@ -643,7 +833,860 @@ test('opens Projects as a full-width primary surface from the navigation drawer'
   expect(actionByLabel(root, 'New project')).toBeDefined();
 });
 
-test('starts a project-bound chat and surfaces its cwd context in the composer', async () => {
+describe('project context Home integration H1', () => {
+  test('hydrates a confirmed snapshot as Checking until one native inspection confirms', async () => {
+    const fixture = storedProjectContext(true);
+    const inspection = deferred<ProjectContextInspectionV1>();
+    mockLocalRuntime.loadSession.mockResolvedValueOnce(fixture.stored.serialize());
+    mockLocalProjects.list.mockResolvedValue({
+      schema_version: 1,
+      projects: [contextProject],
+    });
+    mockLocalProjectContext.inspect.mockReturnValueOnce(inspection.promise);
+
+    const renderer = await renderApp();
+    const root = renderer.root;
+    expect(mockLocalProjectContext.inspect).toHaveBeenCalledTimes(1);
+    expect(mockLocalProjectContext.inspect).toHaveBeenCalledWith(
+      CONTEXT_SNAPSHOT_ID,
+    );
+    expect(root.findByProps({ children: 'Checking' })).toBeDefined();
+    expect(root.findAllByProps({ children: 'Ready' })).toHaveLength(0);
+    expect(mockLocalRuntime.completeV2).not.toHaveBeenCalled();
+    expect(mockLocalRuntime.complete).not.toHaveBeenCalled();
+
+    inspection.resolve({
+      schema_version: 1,
+      state: 'confirmed',
+      manifest: fixture.manifest,
+    });
+    await act(async () => settle());
+
+    expect(root.findByProps({ children: 'Ready' })).toBeDefined();
+    expect(mockLocalProjectContext.inspect).toHaveBeenCalledTimes(1);
+    expect(mockLocalRuntime.completeV2).not.toHaveBeenCalled();
+  });
+
+  test('fails closed when hydrated native inspection rejects', async () => {
+    const fixture = storedProjectContext(true);
+    mockLocalRuntime.loadSession.mockResolvedValueOnce(fixture.stored.serialize());
+    mockLocalProjects.list.mockResolvedValue({
+      schema_version: 1,
+      projects: [contextProject],
+    });
+    mockLocalProjectContext.inspect.mockRejectedValueOnce({
+      code: 'E_CONTEXT_TIMEOUT',
+      message: 'RAW_NATIVE_SENTINEL /private/project',
+    });
+
+    const renderer = await renderApp();
+    const root = renderer.root;
+    await act(async () => settle());
+
+    expect(root.findByProps({ children: 'Error' })).toBeDefined();
+    expect(root.findAllByProps({ children: 'Ready' })).toHaveLength(0);
+    expect(
+      root.findByProps({ accessibilityLabel: 'Message DSH' }).props.editable,
+    ).toBe(true);
+    expect(JSON.stringify(renderer.toJSON())).not.toContain(
+      'RAW_NATIVE_SENTINEL',
+    );
+    expect(mockLocalRuntime.completeV2).not.toHaveBeenCalled();
+    expect(mockLocalRuntime.complete).not.toHaveBeenCalled();
+  });
+
+  test('opens Context only after Projects starts dismissal and renders one Strip', async () => {
+    jest.useFakeTimers();
+    mockLocalProjects.list.mockResolvedValue({
+      schema_version: 1,
+      projects: [contextProject],
+    });
+    const renderer = await renderApp();
+    const root = renderer.root;
+    await act(async () => actionByLabel(root, 'Open navigation').props.onPress());
+    await act(async () => {
+      actionByLabel(root, 'Projects').props.onPress();
+      await settle();
+    });
+    await act(async () => {
+      actionByLabel(root, `Open project ${contextProject.name}`).props.onPress();
+      await settle();
+    });
+
+    await act(async () => {
+      actionByLabel(root, 'Chat in this project').props.onPress();
+      expect(visibleContextSheets(root)).toHaveLength(0);
+      await settle();
+    });
+    await act(async () => {
+      jest.advanceTimersByTime(180);
+      await settle();
+    });
+
+    expect(root.findByType(ProjectsSurface).props.visible).toBe(false);
+    expect(visibleContextSheets(root)).toHaveLength(1);
+    expect(mockLocalProjectContext.listCandidates).toHaveBeenCalledTimes(1);
+    expect(root.findAllByType(ProjectContextStrip)).toHaveLength(1);
+    expect(
+      root.findAllByProps({ accessibilityLabel: `Project ${contextProject.name}` }),
+    ).toHaveLength(0);
+    expect(
+      Object.prototype.hasOwnProperty.call(
+        root.findByType(ChatComposer).props,
+        'projectName',
+      ),
+    ).toBe(false);
+    jest.useRealTimers();
+  });
+
+  test('opens current confirmed context as disclosure without confirmation', async () => {
+    const fixture = storedProjectContext(true);
+    mockLocalRuntime.loadSession.mockResolvedValueOnce(fixture.stored.serialize());
+    mockLocalProjects.list.mockResolvedValue({
+      schema_version: 1,
+      projects: [contextProject],
+    });
+    mockLocalProjectContext.inspect.mockResolvedValueOnce({
+      schema_version: 1,
+      state: 'confirmed',
+      manifest: fixture.manifest,
+    });
+    const renderer = await renderApp();
+    const root = renderer.root;
+    await act(async () =>
+      root.findByProps({ testID: 'project-context-strip' }).props.onPress(),
+    );
+    await act(async () => settle());
+
+    const sheet = visibleContextSheets(root)[0];
+    expect(sheet?.props.mode).toBe('disclosure');
+    expect(sheet?.props.confirmationRequired).toBe(false);
+    expect(
+      root.findAllByProps({ accessibilityLabel: 'Confirm context' }),
+    ).toHaveLength(0);
+  });
+
+  test('shows Context Checking immediately after Projects dismisses while reinspection is pending', async () => {
+    const fixture = storedProjectContext(true);
+    const reinspection = deferred<ProjectContextInspectionV1>();
+    mockLocalRuntime.loadSession.mockResolvedValueOnce(fixture.stored.serialize());
+    mockLocalProjects.list.mockResolvedValue({
+      schema_version: 1,
+      projects: [contextProject],
+    });
+    mockLocalProjectContext.inspect
+      .mockResolvedValueOnce({
+        schema_version: 1,
+        state: 'confirmed',
+        manifest: fixture.manifest,
+      })
+      .mockReturnValueOnce(reinspection.promise);
+    const renderer = await renderApp();
+    const root = renderer.root;
+    await act(async () => actionByLabel(root, 'Open navigation').props.onPress());
+    await act(async () => {
+      actionByLabel(root, 'Projects').props.onPress();
+      await settle();
+    });
+
+    await act(async () => {
+      root.findByType(ProjectsSurface).props.onChatInProject(contextProject);
+      await settle();
+    });
+
+    expect(root.findByType(ProjectsSurface).props.visible).toBe(false);
+    expect(visibleContextSheets(root)).toHaveLength(1);
+    expect(visibleContextSheets(root)[0]?.props.checking).toBe(true);
+    expect(mockLocalProjectContext.inspect).toHaveBeenCalledTimes(2);
+
+    reinspection.resolve({
+      schema_version: 1,
+      state: 'confirmed',
+      manifest: fixture.manifest,
+    });
+    await act(async () => settle());
+    expect(visibleContextSheets(root)[0]?.props.checking).toBe(false);
+  });
+
+  test('selects a fresh candidate, prepares disclosure, and confirms durably with zero HTTP', async () => {
+    jest.useFakeTimers();
+    const manifest = contextManifest();
+    mockLocalProjects.list.mockResolvedValue({
+      schema_version: 1,
+      projects: [contextProject],
+    });
+    mockLocalProjectContext.listCandidates.mockResolvedValue({
+      schema_version: 1,
+      project_id: CONTEXT_PROJECT_ID,
+      candidates: [
+        {
+          path: 'README.md',
+          size: 16,
+          revision: 'f'.repeat(40),
+          git_state: 'unchanged',
+          eligible: true,
+          omission_reason: null,
+        },
+      ],
+      next_cursor: null,
+    });
+    mockLocalProjectContext.prepare.mockResolvedValue(manifest);
+    mockLocalProjectContext.confirm.mockResolvedValue({
+      schema_version: 1,
+      consent_receipt_id: CONTEXT_CONSENT_ID,
+      snapshot_id: CONTEXT_SNAPSHOT_ID,
+      snapshot_sha256: manifest.snapshot_sha256,
+      confirmed_at: '2026-08-28T00:00:01.000Z',
+    });
+    const renderer = await renderApp();
+    const root = renderer.root;
+    await act(async () => actionByLabel(root, 'Open navigation').props.onPress());
+    await act(async () => {
+      actionByLabel(root, 'Projects').props.onPress();
+      await settle();
+    });
+    await act(async () => {
+      actionByLabel(root, `Open project ${contextProject.name}`).props.onPress();
+      await settle();
+    });
+    await act(async () => {
+      actionByLabel(root, 'Chat in this project').props.onPress();
+      await settle();
+    });
+    await act(async () => {
+      jest.advanceTimersByTime(180);
+      await settle();
+    });
+
+    await act(async () =>
+      root
+        .findByProps({ testID: 'project-context-candidate-README.md' })
+        .props.onPress(),
+    );
+    await act(async () => {
+      actionByLabel(root, 'Prepare context').props.onPress();
+      await settle();
+      await settle();
+    });
+    expect(visibleContextSheets(root)[0]?.props.mode).toBe('disclosure');
+    expect(visibleContextSheets(root)[0]?.props.confirmationRequired).toBe(true);
+    expect(visibleContextSheets(root)[0]?.props.manifest).toEqual(manifest);
+    expect(mockLocalRuntime.completeV2).not.toHaveBeenCalled();
+
+    await act(async () => {
+      actionByLabel(root, 'Confirm context').props.onPress();
+      await settle();
+      await settle();
+    });
+    expect(mockLocalProjectContext.confirm).toHaveBeenCalledWith(
+      CONTEXT_SNAPSHOT_ID,
+    );
+    expect(visibleContextSheets(root)).toHaveLength(0);
+    const persisted = lastPersistedState().conversations.find(
+      conversation => conversation.project_id === CONTEXT_PROJECT_ID,
+    );
+    expect(persisted?.project_context).toMatchObject({
+      status: 'ready',
+      selected_paths: ['README.md'],
+      manifest: { snapshot_id: CONTEXT_SNAPSHOT_ID },
+      consent: { consent_receipt_id: CONTEXT_CONSENT_ID },
+    });
+    expect(root.findByProps({ children: 'Ready' })).toBeDefined();
+    expect(mockLocalRuntime.completeV2).not.toHaveBeenCalled();
+    expect(mockLocalRuntime.complete).not.toHaveBeenCalled();
+    jest.useRealTimers();
+  });
+
+  test('opens a persisted prepared snapshot as disclosure requiring confirmation', async () => {
+    const fixture = storedProjectContext(false);
+    mockLocalRuntime.loadSession.mockResolvedValueOnce(fixture.stored.serialize());
+    mockLocalProjects.list.mockResolvedValue({
+      schema_version: 1,
+      projects: [contextProject],
+    });
+    mockLocalProjectContext.inspect.mockResolvedValueOnce({
+      schema_version: 1,
+      state: 'prepared',
+      manifest: fixture.manifest,
+    });
+    const renderer = await renderApp();
+    const root = renderer.root;
+    await act(async () => settle());
+    await act(async () =>
+      root.findByProps({ testID: 'project-context-strip' }).props.onPress(),
+    );
+
+    const sheet = visibleContextSheets(root)[0];
+    expect(sheet?.props.mode).toBe('disclosure');
+    expect(sheet?.props.confirmationRequired).toBe(true);
+    expect(actionByLabel(root, 'Confirm context')).toBeDefined();
+  });
+
+  test('opens a retryable completion owner read-only with zero context attach side effects', async () => {
+    const fixture = storedProjectContext(true);
+    const pending = fixture.stored.prepareTurnAttempt(
+      fixture.conversationId,
+      'Retry this project request',
+    );
+    expect(pending?.commit()).toBe(true);
+    expect(
+      fixture.stored.failAttempt(
+        fixture.conversationId,
+        pending!.attemptId,
+        'E_COMPLETION_NATIVE',
+      ),
+    ).toBe(true);
+    mockLocalRuntime.loadSession.mockResolvedValueOnce(fixture.stored.serialize());
+    mockLocalProjects.list.mockResolvedValue({
+      schema_version: 1,
+      projects: [contextProject],
+    });
+
+    const renderer = await renderApp();
+    const root = renderer.root;
+    expect(mockLocalProjectContext.inspect).not.toHaveBeenCalled();
+    expect(mockLocalProjectContext.listCandidates).not.toHaveBeenCalled();
+    await act(async () =>
+      root.findByProps({ testID: 'project-context-strip' }).props.onPress(),
+    );
+    await act(async () => settle());
+
+    expect(mockLocalProjectContext.inspect).not.toHaveBeenCalled();
+    expect(mockLocalProjectContext.listCandidates).not.toHaveBeenCalled();
+    expect(
+      root.findAllByProps({ accessibilityLabel: 'Stop response' }),
+    ).toHaveLength(0);
+  });
+
+  test('hard-blocks model and options callbacks while Context owns an inspection', async () => {
+    const fixture = storedProjectContext(true);
+    const inspection = deferred<ProjectContextInspectionV1>();
+    mockLocalRuntime.loadSession.mockResolvedValueOnce(fixture.stored.serialize());
+    mockLocalProjects.list.mockResolvedValue({
+      schema_version: 1,
+      projects: [contextProject],
+    });
+    mockLocalProjectContext.inspect.mockReturnValueOnce(inspection.promise);
+    const renderer = await renderApp();
+    const root = renderer.root;
+
+    await act(async () => root.findByType(ChatComposer).props.onOptionsPress());
+    await act(async () => root.findByType(ChatDrawer).props.onOpenSettings());
+    expect(
+      root.findAllByProps({ testID: 'conversation-options-popover' }),
+    ).toHaveLength(0);
+    expect(root.findByType(SettingsSheet).props.visible).toBe(false);
+    await act(async () => root.findByType(SettingsSheet).props.onOpenModelPicker());
+    expect(root.findByType(ModelPicker).props.visible).toBe(false);
+    await act(async () =>
+      root.findByType(ModelPicker).props.onSelect('deepseek-v4-pro'),
+    );
+    await act(async () =>
+      root
+        .findByType(ConversationOptionsPicker)
+        .props.onSelectThinkingMode('max'),
+    );
+    expect(mockLocalRuntime.recordModelTransition).not.toHaveBeenCalled();
+
+    inspection.resolve({
+      schema_version: 1,
+      state: 'confirmed',
+      manifest: fixture.manifest,
+    });
+    await act(async () => settle());
+  });
+
+  test('reconciles Context after a retryable Completion owner returns idle', async () => {
+    const fixture = storedProjectContext(true);
+    const pending = fixture.stored.prepareTurnAttempt(
+      fixture.conversationId,
+      'Retry and release context ownership',
+    );
+    expect(pending?.commit()).toBe(true);
+    expect(
+      fixture.stored.failAttempt(
+        fixture.conversationId,
+        pending!.attemptId,
+        'E_COMPLETION_NATIVE',
+      ),
+    ).toBe(true);
+    mockLocalRuntime.loadSession.mockResolvedValueOnce(fixture.stored.serialize());
+    mockLocalProjects.list.mockResolvedValue({
+      schema_version: 1,
+      projects: [contextProject],
+    });
+    mockLocalProjectContext.inspect.mockResolvedValue({
+      schema_version: 1,
+      state: 'confirmed',
+      manifest: fixture.manifest,
+    });
+    mockLocalRuntime.completeV2.mockImplementationOnce(
+      async (request: StrictCompletionRequest) => ({
+        ...strictCompletionResult(request, { text: 'Retry succeeded' }),
+        project_context_receipt: {
+          schema_version: 1,
+          snapshot_id: CONTEXT_SNAPSHOT_ID,
+          snapshot_sha256: fixture.manifest.snapshot_sha256,
+          source_fingerprint: fixture.manifest.source_fingerprint,
+          context_bytes: fixture.manifest.context_bytes,
+          verified_at: '2026-08-28T00:00:02.000Z',
+        },
+      }),
+    );
+    const renderer = await renderApp();
+    const root = renderer.root;
+    expect(mockLocalProjectContext.inspect).not.toHaveBeenCalled();
+
+    await act(async () =>
+      actionByLabel(root, 'Retry response').props.onPress(),
+    );
+    await act(async () => settle());
+
+    expect(mockLocalProjectContext.inspect).toHaveBeenCalledTimes(1);
+    expect(root.findByProps({ children: 'Ready' })).toBeDefined();
+  });
+
+  test('never projects prior-owner candidate metadata into a retryable conversation', async () => {
+    jest.useFakeTimers();
+    const fixture = storedProjectContext(true);
+    fixture.stored.renameConversation(fixture.conversationId, 'Project A');
+    fixture.stored.appendUserMessage(fixture.conversationId, 'Visible A');
+    const conversationB = fixture.stored.createConversation({
+      projectId: CONTEXT_PROJECT_ID,
+    });
+    const runtimeB = fixture.stored.ensureRuntimeContextId(conversationB)!;
+    const initialB = fixture.stored.getState().conversations[conversationB]!;
+    const preparedB = fixture.stored.replaceProjectContextPrepared(
+      {
+        conversationId: conversationB,
+        projectId: CONTEXT_PROJECT_ID,
+        runtimeContextId: runtimeB,
+        modelId: initialB.modelId,
+        expectedContext: initialB.projectContext!,
+      },
+      {
+        preparationId: 'bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb',
+        selectedPaths: ['README.md'],
+        manifest: fixture.manifest,
+      },
+    );
+    expect(preparedB?.commit()).toBe(true);
+    const preparedConversationB =
+      fixture.stored.getState().conversations[conversationB]!;
+    const confirmedB = fixture.stored.replaceProjectContextConfirmed(
+      {
+        conversationId: conversationB,
+        projectId: CONTEXT_PROJECT_ID,
+        runtimeContextId: runtimeB,
+        modelId: preparedConversationB.modelId,
+        expectedContext: preparedConversationB.projectContext!,
+      },
+      {
+        preparationId: 'bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb',
+        selectedPaths: ['README.md'],
+        manifest: fixture.manifest,
+        consent: {
+          schema_version: 1,
+          consent_receipt_id: 'cccccccc-cccc-4ccc-8ccc-cccccccccccc',
+          snapshot_id: CONTEXT_SNAPSHOT_ID,
+          snapshot_sha256: fixture.manifest.snapshot_sha256,
+          confirmed_at: '2026-08-28T00:00:02.000Z',
+        },
+      },
+    );
+    expect(confirmedB?.commit()).toBe(true);
+    fixture.stored.renameConversation(conversationB, 'Project B');
+    const retryB = fixture.stored.prepareTurnAttempt(
+      conversationB,
+      'Visible B retry',
+    );
+    expect(retryB?.commit()).toBe(true);
+    expect(
+      fixture.stored.failAttempt(
+        conversationB,
+        retryB!.attemptId,
+        'E_COMPLETION_NATIVE',
+      ),
+    ).toBe(true);
+    fixture.stored.selectConversation(fixture.conversationId);
+    mockLocalRuntime.loadSession.mockResolvedValueOnce(fixture.stored.serialize());
+    mockLocalProjects.list.mockResolvedValue({
+      schema_version: 1,
+      projects: [contextProject],
+    });
+    mockLocalProjectContext.inspect.mockResolvedValue({
+      schema_version: 1,
+      state: 'confirmed',
+      manifest: fixture.manifest,
+    });
+    mockLocalProjectContext.listCandidates.mockResolvedValue({
+      schema_version: 1,
+      project_id: CONTEXT_PROJECT_ID,
+      candidates: [
+        {
+          path: 'SECRET_A.ts',
+          size: 10,
+          revision: 'a'.repeat(40),
+          git_state: 'unchanged',
+          eligible: true,
+          omission_reason: null,
+        },
+      ],
+      next_cursor: null,
+    });
+    const renderer = await renderApp();
+    const root = renderer.root;
+    await act(async () =>
+      root.findByProps({ testID: 'project-context-strip' }).props.onPress(),
+    );
+    await act(async () =>
+      visibleContextSheets(root)[0]!.props.onRefreshCandidates(),
+    );
+    await act(async () => {
+      jest.advanceTimersByTime(180);
+      await settle();
+    });
+    expect(visibleContextSheets(root)[0]?.props.candidates).toHaveLength(1);
+    mockLocalProjectContext.inspect.mockRejectedValueOnce({
+      code: 'E_CONTEXT_TIMEOUT',
+    });
+    await act(async () =>
+      visibleContextSheets(root)[0]!.props.onRefreshContext(),
+    );
+    await act(async () => settle());
+    expect(root.findByProps({ children: 'Error' })).toBeDefined();
+    await act(async () => visibleContextSheets(root)[0]!.props.onClose());
+    await act(async () => actionByLabel(root, 'Open navigation').props.onPress());
+    await act(async () =>
+      actionByLabel(root, 'Open chat Project B').props.onPress(),
+    );
+    await act(async () =>
+      root.findByProps({ testID: 'project-context-strip' }).props.onPress(),
+    );
+
+    const sheetB = visibleContextSheets(root)[0]!;
+    expect(sheetB.props.candidates).toEqual([]);
+    expect(sheetB.props.selectedCandidates).toEqual([]);
+    expect(sheetB.props.errorCode).toBeNull();
+    expect(sheetB.props.checking).toBe(true);
+    expect(root.findAllByProps({ children: 'Error' })).toHaveLength(0);
+    expect(root.findAllByProps({ children: 'Recovery required' })).toHaveLength(
+      0,
+    );
+    expect(
+      root.findByProps({ accessibilityLabel: 'Message DSH' }).props.editable,
+    ).toBe(true);
+    mockLocalRuntime.completeV2.mockImplementationOnce(
+      async (request: StrictCompletionRequest) => ({
+        ...strictCompletionResult(request, { text: 'B retry completed' }),
+        project_context_receipt: {
+          schema_version: 1,
+          snapshot_id: CONTEXT_SNAPSHOT_ID,
+          snapshot_sha256: fixture.manifest.snapshot_sha256,
+          source_fingerprint: fixture.manifest.source_fingerprint,
+          context_bytes: fixture.manifest.context_bytes,
+          verified_at: '2026-08-28T00:00:03.000Z',
+        },
+      }),
+    );
+    mockLocalProjectContext.inspect.mockClear();
+    mockLocalProjectContext.inspect.mockResolvedValue({
+      schema_version: 1,
+      state: 'confirmed',
+      manifest: fixture.manifest,
+    });
+    await act(async () => visibleContextSheets(root)[0]!.props.onClose());
+
+    await act(async () =>
+      actionByLabel(root, 'Retry response').props.onPress(),
+    );
+    await act(async () => settle());
+    expect(mockLocalProjectContext.inspect).toHaveBeenCalledTimes(1);
+    expect(root.findByProps({ children: 'Ready' })).toBeDefined();
+    jest.useRealTimers();
+  });
+
+  test('lets an unmounted pending search settle once without React updates', async () => {
+    jest.useFakeTimers();
+    mockLocalProjects.list.mockResolvedValue({
+      schema_version: 1,
+      projects: [contextProject],
+    });
+    const renderer = await renderApp();
+    const root = renderer.root;
+    await act(async () => actionByLabel(root, 'Open navigation').props.onPress());
+    await act(async () => {
+      actionByLabel(root, 'Projects').props.onPress();
+      await settle();
+    });
+    await act(async () => {
+      actionByLabel(root, `Open project ${contextProject.name}`).props.onPress();
+      await settle();
+    });
+    await act(async () => {
+      actionByLabel(root, 'Chat in this project').props.onPress();
+      await settle();
+    });
+    expect(mockLocalProjectContext.listCandidates).not.toHaveBeenCalled();
+    const consoleError = jest
+      .spyOn(console, 'error')
+      .mockImplementation(() => undefined);
+
+    await act(async () => renderer.unmount());
+    await act(async () => {
+      jest.advanceTimersByTime(180);
+      await settle();
+    });
+
+    expect(mockLocalProjectContext.listCandidates).toHaveBeenCalledTimes(1);
+    expect(
+      consoleError.mock.calls.some(call =>
+        call.some(value =>
+          String(value).includes('not wrapped in act'),
+        ),
+      ),
+    ).toBe(false);
+    consoleError.mockRestore();
+    jest.useRealTimers();
+  });
+
+  test('coalesces rapid project Chat transitions into one deferred Context open', async () => {
+    jest.useFakeTimers();
+    const firstPersist = deferred<boolean>();
+    mockLocalRuntime.persistSession
+      .mockImplementationOnce(() => firstPersist.promise)
+      .mockResolvedValue(true);
+    mockLocalProjects.list.mockResolvedValue({
+      schema_version: 1,
+      projects: [contextProject],
+    });
+    const renderer = await renderApp();
+    const root = renderer.root;
+    await act(async () => actionByLabel(root, 'Open navigation').props.onPress());
+    await act(async () => {
+      actionByLabel(root, 'Projects').props.onPress();
+      await settle();
+    });
+    await act(async () => {
+      actionByLabel(root, `Open project ${contextProject.name}`).props.onPress();
+      await settle();
+    });
+    const chat = root.findByType(ProjectsSurface).props.onChatInProject;
+
+    await act(async () => {
+      chat(contextProject);
+      chat(contextProject);
+      await settle();
+    });
+    expect(mockLocalRuntime.persistSession).toHaveBeenCalledTimes(1);
+    firstPersist.resolve(true);
+    await act(async () => settle());
+    expect(visibleContextSheets(root)).toHaveLength(1);
+
+    await act(async () => visibleContextSheets(root)[0]!.props.onClose());
+    await act(async () => root.findByType(ProjectsSurface).props.onDismiss());
+    expect(visibleContextSheets(root)).toHaveLength(0);
+    expect(mockLocalRuntime.persistSession).toHaveBeenCalledTimes(1);
+    await act(async () => {
+      jest.advanceTimersByTime(180);
+      await settle();
+    });
+    jest.useRealTimers();
+  });
+
+  test('keeps the project transition lock until Projects onDismiss consumes it', async () => {
+    jest.useFakeTimers();
+    mockLocalProjects.list.mockResolvedValue({
+      schema_version: 1,
+      projects: [contextProject],
+    });
+    const renderer = await renderApp();
+    const root = renderer.root;
+    await act(async () => actionByLabel(root, 'Open navigation').props.onPress());
+    await act(async () => {
+      actionByLabel(root, 'Projects').props.onPress();
+      await settle();
+    });
+    await act(async () => {
+      actionByLabel(root, `Open project ${contextProject.name}`).props.onPress();
+      await settle();
+    });
+    const chat = root.findByType(ProjectsSurface).props.onChatInProject;
+
+    await act(async () => {
+      await chat(contextProject);
+      chat(contextProject);
+      expect(mockLocalRuntime.persistSession).toHaveBeenCalledTimes(1);
+    });
+    expect(mockLocalRuntime.persistSession).toHaveBeenCalledTimes(1);
+    expect(visibleContextSheets(root)).toHaveLength(1);
+    await act(async () => {
+      jest.advanceTimersByTime(180);
+      await settle();
+    });
+    jest.useRealTimers();
+  });
+
+  test('rejects an old Sheet callback after close and reopen with the same owner', async () => {
+    const fixture = storedProjectContext(true);
+    mockLocalRuntime.loadSession.mockResolvedValueOnce(fixture.stored.serialize());
+    mockLocalProjects.list.mockResolvedValue({
+      schema_version: 1,
+      projects: [contextProject],
+    });
+    mockLocalProjectContext.inspect.mockResolvedValue({
+      schema_version: 1,
+      state: 'confirmed',
+      manifest: fixture.manifest,
+    });
+    const renderer = await renderApp();
+    const root = renderer.root;
+    await act(async () =>
+      root.findByProps({ testID: 'project-context-strip' }).props.onPress(),
+    );
+    const oldRefresh = visibleContextSheets(root)[0]!.props.onRefreshContext;
+    await act(async () => visibleContextSheets(root)[0]!.props.onClose());
+    await act(async () =>
+      root.findByProps({ testID: 'project-context-strip' }).props.onPress(),
+    );
+    mockLocalProjectContext.inspect.mockClear();
+
+    await act(async () => oldRefresh());
+    await act(async () => settle());
+    expect(mockLocalProjectContext.inspect).not.toHaveBeenCalled();
+  });
+
+  test('keeps the current Sheet callbacks live after a duplicate Strip press', async () => {
+    const fixture = storedProjectContext(true);
+    mockLocalRuntime.loadSession.mockResolvedValueOnce(fixture.stored.serialize());
+    mockLocalProjects.list.mockResolvedValue({
+      schema_version: 1,
+      projects: [contextProject],
+    });
+    mockLocalProjectContext.inspect.mockResolvedValue({
+      schema_version: 1,
+      state: 'confirmed',
+      manifest: fixture.manifest,
+    });
+    const renderer = await renderApp();
+    const root = renderer.root;
+    await act(async () =>
+      root.findByProps({ testID: 'project-context-strip' }).props.onPress(),
+    );
+    const sheet = visibleContextSheets(root)[0]!;
+    const actionKey = sheet.props.actionKey;
+    const refresh = sheet.props.onRefreshContext;
+
+    await act(async () =>
+      root.findByProps({ testID: 'project-context-strip' }).props.onPress(),
+    );
+    expect(visibleContextSheets(root)[0]?.props.actionKey).toBe(actionKey);
+    mockLocalProjectContext.inspect.mockClear();
+    await act(async () => refresh());
+    await act(async () => settle());
+    expect(mockLocalProjectContext.inspect).toHaveBeenCalledTimes(1);
+  });
+
+  test('returns accessibility focus to the Strip only after Sheet dismissal', async () => {
+    const fixture = storedProjectContext(true);
+    mockLocalRuntime.loadSession.mockResolvedValueOnce(fixture.stored.serialize());
+    mockLocalProjects.list.mockResolvedValue({
+      schema_version: 1,
+      projects: [contextProject],
+    });
+    mockLocalProjectContext.inspect.mockResolvedValue({
+      schema_version: 1,
+      state: 'confirmed',
+      manifest: fixture.manifest,
+    });
+    const focus = jest
+      .spyOn(AccessibilityInfo, 'setAccessibilityFocus')
+      .mockImplementation(() => undefined);
+    const renderer = await renderApp();
+    const root = renderer.root;
+    await act(async () =>
+      root.findByProps({ testID: 'project-context-strip-focus-target' }).props.onLayout({
+        target: 77,
+        nativeEvent: { layout: { x: 0, y: 0, width: 320, height: 44 } },
+      }),
+    );
+    await act(async () =>
+      root.findByProps({ testID: 'project-context-strip' }).props.onPress(),
+    );
+    const beforeClose = focus.mock.calls.length;
+    const close = visibleContextSheets(root)[0]!.props.onClose;
+
+    act(() => {
+      close();
+      expect(focus).toHaveBeenCalledTimes(beforeClose);
+    });
+    expect(visibleContextSheets(root)).toHaveLength(0);
+    expect(focus).toHaveBeenCalledTimes(beforeClose + 1);
+    focus.mockRestore();
+  });
+
+  test('stops a confirmed project image send after Vision invalidates context', async () => {
+    jest.useFakeTimers();
+    const fixture = storedProjectContext(true);
+    mockLocalRuntime.loadSession.mockResolvedValueOnce(fixture.stored.serialize());
+    mockLocalProjects.list.mockResolvedValue({
+      schema_version: 1,
+      projects: [contextProject],
+    });
+    mockLocalProjectContext.inspect
+      .mockResolvedValueOnce({
+        schema_version: 1,
+        state: 'confirmed',
+        manifest: fixture.manifest,
+      })
+      .mockRejectedValueOnce({ code: 'E_CONTEXT_TIMEOUT' });
+    mockLocalAttachments.present.mockResolvedValueOnce({
+      schema_version: 1,
+      status: 'selected',
+      attachments: [
+        {
+          schema_version: 1,
+          id: 'project-image-1',
+          kind: 'image',
+          name: 'project.png',
+          mime_type: 'image/png',
+          size: 128,
+          thumbnail_data_url: 'data:image/png;base64,AAAA',
+        },
+      ],
+    });
+    const renderer = await renderApp();
+    const root = renderer.root;
+    await act(async () => actionByLabel(root, 'Add attachment').props.onPress());
+    await chooseAttachmentSource(root, 'Photos');
+
+    await act(async () => actionByLabel(root, 'Send message').props.onPress());
+    await act(async () => settle());
+
+    expect(mockLocalRuntime.completeV2).not.toHaveBeenCalled();
+    expect(mockLocalRuntime.complete).not.toHaveBeenCalled();
+    expect(root.findByType(ChatComposer).props.attachments).toEqual([
+      expect.objectContaining({ id: 'project-image-1' }),
+    ]);
+    expect(
+      lastPersistedState().conversations.find(
+        conversation => conversation.project_id === CONTEXT_PROJECT_ID,
+      )?.model_id,
+    ).toBe('deepseek-v4-flash-vision-exp');
+    await act(async () =>
+      root.findByProps({ testID: 'project-context-strip' }).props.onPress(),
+    );
+    expect(visibleContextSheets(root)[0]?.props.disabled).toBe(false);
+    await act(async () => {
+      jest.advanceTimersByTime(3000);
+      await settle();
+    });
+    jest.useRealTimers();
+  });
+});
+
+test('starts a project-bound chat with one actionable context Strip', async () => {
+  jest.useFakeTimers();
   mockLocalProjects.list.mockResolvedValue({
     schema_version: 1,
     projects: [
@@ -674,16 +1717,23 @@ test('starts a project-bound chat and surfaces its cwd context in the composer',
     actionByLabel(root, 'Chat in this project').props.onPress();
     await settle();
   });
+  await act(async () => {
+    jest.advanceTimersByTime(180);
+    await settle();
+  });
 
   expect(lastPersistedState().conversations.at(-1)?.project_id).toBe(
     'project-1',
   );
+  expect(root.findAllByType(ProjectContextStrip)).toHaveLength(1);
   expect(
-    root.findAllByProps({ accessibilityLabel: 'Project demo' }).length,
-  ).toBeGreaterThanOrEqual(1);
+    root.findAllByProps({ accessibilityLabel: 'Project demo' }),
+  ).toHaveLength(0);
+  jest.useRealTimers();
 });
 
 test('does not auto-route a setup-required project through AgentLoop', async () => {
+  jest.useFakeTimers();
   mockLocalRuntime.isCompletionV2Available.mockReturnValue(true);
   mockLocalProjects.list.mockResolvedValue({
     schema_version: 1,
@@ -715,6 +1765,10 @@ test('does not auto-route a setup-required project through AgentLoop', async () 
     await settle();
   });
   await act(async () => {
+    jest.advanceTimersByTime(180);
+    await settle();
+  });
+  await act(async () => {
     root
       .findByProps({ accessibilityLabel: 'Message DSH' })
       .props.onChangeText('Wait for context');
@@ -730,6 +1784,11 @@ test('does not auto-route a setup-required project through AgentLoop', async () 
   expect(
     root.findByProps({ accessibilityLabel: 'Message DSH' }).props.value,
   ).toBe('Wait for context');
+  expect(visibleContextSheets(root)[0]?.props.disabled).toBe(false);
+  expect(
+    root.findAllByProps({ accessibilityLabel: 'Retry response' }),
+  ).toHaveLength(0);
+  jest.useRealTimers();
 });
 
 test('sends verified project context through schema3 without AgentLoop', async () => {
@@ -822,6 +1881,11 @@ test('sends verified project context through schema3 without AgentLoop', async (
   expect(confirmed).not.toBeNull();
   expect(confirmed!.commit()).toBe(true);
   mockLocalRuntime.loadSession.mockResolvedValueOnce(stored.serialize());
+  mockLocalProjectContext.inspect.mockResolvedValueOnce({
+    schema_version: 1,
+    state: 'confirmed',
+    manifest,
+  });
   mockLocalRuntime.completeV2.mockImplementationOnce(
     async (request: StrictCompletionRequest) => ({
       ...strictCompletionResult(request, { text: 'Verified context answer' }),

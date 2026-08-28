@@ -42,7 +42,6 @@ type Props = {
   harnessName: string;
   model: SupportedModel;
   optionsVisible: boolean;
-  projectName?: string | null;
   thinkingMode: ConversationThinkingMode;
   workspaceName?: string | null;
   workspacePickerVisible?: boolean;
@@ -112,20 +111,6 @@ export function ChatComposer(props: Props) {
 
   return (
     <View style={styles.shell}>
-      {props.projectName != null && (
-        <View
-          accessible
-          accessibilityLabel={t('messages.projectContext', {
-            project: props.projectName,
-          })}
-          style={styles.projectContext}
-        >
-          <AppIcon color={colors.accent} icon={FolderCode} size={12} />
-          <Text numberOfLines={1} style={styles.projectContextText}>
-            {props.projectName}
-          </Text>
-        </View>
-      )}
       {props.attachments.length > 0 && (
         <ScrollView
           accessibilityLabel={t('messages.attachment.selected')}
@@ -462,25 +447,6 @@ const createStyles = (colors: ThemePalette) =>
       fontSize: 17,
       lineHeight: 23,
       fontFamily: fonts.body,
-    },
-    projectContext: {
-      alignSelf: 'flex-start',
-      height: 22,
-      borderRadius: 10,
-      backgroundColor: colors.surfaceRaised,
-      flexDirection: 'row',
-      alignItems: 'center',
-      gap: 4,
-      justifyContent: 'center',
-      paddingHorizontal: 8,
-      marginBottom: 7,
-      maxWidth: '72%',
-    },
-    projectContextText: {
-      color: colors.accent,
-      fontFamily: fonts.mono,
-      fontSize: 8,
-      fontWeight: '700',
     },
     attachmentScroll: { marginBottom: 9, maxHeight: 72 },
     attachmentRow: { gap: 8, paddingRight: 4 },
