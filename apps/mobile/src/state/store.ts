@@ -188,6 +188,13 @@ function frozenProjectContext(
       projectContext: null,
     };
   }
+  if (sendWithoutProjectContext) {
+    return {
+      contextDisposition: 'explicit_without_context',
+      contextProjectId: conversation.projectId,
+      projectContext: null,
+    };
+  }
   const context = conversation.projectContext;
   if (
     context === null ||
@@ -199,13 +206,7 @@ function frozenProjectContext(
     !isCanonicalLifecycleId(context.snapshot.snapshot_id) ||
     !isCanonicalLifecycleId(context.consent.consent_receipt_id)
   ) {
-    return sendWithoutProjectContext
-      ? {
-          contextDisposition: 'explicit_without_context',
-          contextProjectId: conversation.projectId,
-          projectContext: null,
-        }
-      : undefined;
+    return undefined;
   }
   return {
     contextDisposition: 'verified',

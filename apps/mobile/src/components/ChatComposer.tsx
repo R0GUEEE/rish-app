@@ -46,14 +46,16 @@ type Props = {
   thinkingMode: ConversationThinkingMode;
   workspaceName?: string | null;
   workspacePickerVisible?: boolean;
+  ownershipKey: string;
+  locked: boolean;
   sending: boolean;
-  onAddAttachment: (source: AttachmentSource) => void;
+  onAddAttachment: (source: AttachmentSource, ownershipKey: string) => void;
   onCancel: () => void;
   onChange: (value: string) => void;
   onConfigure: () => void;
   onOptionsPress: () => void;
-  onPreviewAttachment: (id: string) => void;
-  onRemoveAttachment: (id: string) => void;
+  onPreviewAttachment: (id: string, ownershipKey: string) => void;
+  onRemoveAttachment: (id: string, ownershipKey: string) => void;
   onSend: () => void;
   onWorkspacePress?: () => void;
 };
@@ -82,23 +84,30 @@ export function ChatComposer(props: Props) {
   const styles = useMemo(() => createStyles(colors), [colors]);
   const [attachmentMenuVisible, setAttachmentMenuVisible] = useState(false);
   const pendingAttachmentSource = useRef<AttachmentSource | null>(null);
+  const pendingAttachmentOwnership = useRef<string | null>(null);
+  const locked = props.locked || props.sending;
   const canSend =
     props.configured &&
     (props.draft.trim().length > 0 || props.attachments.length > 0) &&
-    !props.sending &&
+    !locked &&
     !props.attachmentBusy;
   const model = localizedModelDetails(props.model, t);
   const thinking = localizedThinkingDetails(props.thinkingMode, t);
 
   const chooseAttachment = (source: AttachmentSource) => {
+    if (locked) return;
     pendingAttachmentSource.current = source;
     setAttachmentMenuVisible(false);
   };
 
   const finishAttachmentMenuDismiss = () => {
     const source = pendingAttachmentSource.current;
+    const ownershipKey = pendingAttachmentOwnership.current;
     pendingAttachmentSource.current = null;
-    if (source !== null) props.onAddAttachment(source);
+    pendingAttachmentOwnership.current = null;
+    if (source !== null && ownershipKey !== null) {
+      props.onAddAttachment(source, ownershipKey);
+    }
   };
 
   return (
@@ -135,11 +144,13 @@ export function ChatComposer(props: Props) {
               accessibilityState={{
                 busy: props.previewingAttachmentId === attachment.id,
                 disabled:
-                  props.sending || props.previewingAttachmentId !== null,
+                  locked || props.previewingAttachmentId !== null,
               }}
-              disabled={props.sending || props.previewingAttachmentId !== null}
+              disabled={locked || props.previewingAttachmentId !== null}
               key={attachment.id}
-              onPress={() => props.onPreviewAttachment(attachment.id)}
+              onPress={() =>
+                props.onPreviewAttachment(attachment.id, props.ownershipKey)
+              }
               style={({ pressed }) => [
                 styles.attachmentCard,
                 pressed && styles.attachmentCardPressed,
@@ -177,11 +188,24 @@ export function ChatComposer(props: Props) {
                   name: attachment.name,
                 })}
                 accessibilityRole="button"
-                disabled={props.sending}
+                accessibilityState={{
+                  disabled:
+                    locked ||
+                    props.attachmentBusy ||
+                    props.previewingAttachmentId !== null,
+                }}
+                disabled={
+                  locked ||
+                  props.attachmentBusy ||
+                  props.previewingAttachmentId !== null
+                }
                 hitSlop={6}
                 onPress={event => {
                   event.stopPropagation();
-                  props.onRemoveAttachment(attachment.id);
+                  props.onRemoveAttachment(
+                    attachment.id,
+                    props.ownershipKey,
+                  );
                 }}
                 style={({ pressed }) => [
                   styles.removeAttachment,
@@ -203,8 +227,8 @@ export function ChatComposer(props: Props) {
         accessibilityLabel={t('messages.inputLabel', {
           harness: props.harnessName,
         })}
-        accessibilityState={{ disabled: !props.configured || props.sending }}
-        editable={props.configured && !props.sending}
+        accessibilityState={{ disabled: !props.configured || locked }}
+        editable={props.configured && !locked}
         multiline
         onChangeText={props.onChange}
         placeholder={
@@ -223,11 +247,12 @@ export function ChatComposer(props: Props) {
           accessibilityState={{
             busy: props.attachmentBusy,
             disabled:
-              !props.configured || props.sending || props.attachmentBusy,
+              !props.configured || locked || props.attachmentBusy,
           }}
-          disabled={!props.configured || props.sending || props.attachmentBusy}
+          disabled={!props.configured || locked || props.attachmentBusy}
           onPress={() => {
             Keyboard.dismiss();
+            pendingAttachmentOwnership.current = props.ownershipKey;
             setAttachmentMenuVisible(true);
           }}
           style={({ pressed }) => [
@@ -245,7 +270,11 @@ export function ChatComposer(props: Props) {
           <Pressable
             accessibilityLabel={t('messages.chooseWorkspace')}
             accessibilityRole="button"
-            accessibilityState={{ expanded: props.workspacePickerVisible }}
+            accessibilityState={{
+              disabled: locked,
+              expanded: props.workspacePickerVisible,
+            }}
+            disabled={locked}
             onPress={() => {
               Keyboard.dismiss();
               props.onWorkspacePress?.();
@@ -280,10 +309,10 @@ export function ChatComposer(props: Props) {
             })}
             accessibilityRole="button"
             accessibilityState={{
-              disabled: props.sending || props.attachmentBusy,
+              disabled: locked || props.attachmentBusy,
               expanded: props.optionsVisible,
             }}
-            disabled={props.sending || props.attachmentBusy}
+            disabled={locked || props.attachmentBusy}
             onPress={() => {
               Keyboard.dismiss();
               props.onOptionsPress();
@@ -309,6 +338,8 @@ export function ChatComposer(props: Props) {
           <Pressable
             accessibilityLabel={t('messages.configureKey')}
             accessibilityRole="button"
+            accessibilityState={{ disabled: locked }}
+            disabled={locked}
             onPress={props.onConfigure}
             style={({ pressed }) => [
               styles.configureChip,
@@ -330,14 +361,14 @@ export function ChatComposer(props: Props) {
           accessibilityRole="button"
           accessibilityState={{
             busy: props.sending,
-            disabled: !props.sending && !canSend,
+            disabled: !props.sending && (locked || !canSend),
           }}
-          disabled={!props.sending && !canSend}
+          disabled={!props.sending && (locked || !canSend)}
           onPress={props.sending ? props.onCancel : props.onSend}
           style={({ pressed }) => [
             styles.send,
             props.sending && styles.stop,
-            !props.sending && !canSend && styles.sendDisabled,
+            !props.sending && (locked || !canSend) && styles.sendDisabled,
             pressed && styles.pressed,
           ]}
         >
@@ -390,6 +421,8 @@ export function ChatComposer(props: Props) {
               <Pressable
                 accessibilityLabel={t(item.labelKey)}
                 accessibilityRole="menuitem"
+                accessibilityState={{ disabled: locked }}
+                disabled={locked}
                 key={item.source}
                 onPress={() => chooseAttachment(item.source)}
                 style={({ pressed }) => [

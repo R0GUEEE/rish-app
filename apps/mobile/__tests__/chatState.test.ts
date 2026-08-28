@@ -1030,6 +1030,23 @@ describe('schema v6 attempts and project context', () => {
     ).toBe(true);
   });
 
+  test('honors explicit without-context when verified context is ready', () => {
+    const { store, conversationId } = readyProjectStore();
+    const explicit = store.prepareTurnAttempt(
+      conversationId,
+      'do not send verified project context',
+      { sendWithoutProjectContext: true },
+    );
+    expect(explicit).not.toBeNull();
+    expect(
+      store.getState().conversations[conversationId]?.attempts[0],
+    ).toMatchObject({
+      contextDisposition: 'explicit_without_context',
+      contextProjectId: PROJECT_ID,
+      projectContext: null,
+    });
+  });
+
   test('atomically prepares a user turn from ordered visible message ids', () => {
     const store = v6Store();
     const conversationId = store.createConversation();
@@ -1841,6 +1858,74 @@ describe('schema v6 attempts and project context', () => {
     expect(() => hydrateChatState(tampered)).toThrow(
       ChatStateValidationError,
     );
+
+    const droppedDigest = JSON.parse(store.serialize()) as {
+      conversations: Array<{
+        attempts: Array<{ visible_history_sha256: string | null }>;
+      }>;
+    };
+    droppedDigest.conversations[0]!.attempts[1]!.visible_history_sha256 = null;
+    expect(() => hydrateChatState(droppedDigest)).toThrow(
+      /visible_history_sha256/,
+    );
+  });
+
+  test('roundtrips the first known visible digest after an unknown failed attempt', () => {
+    const store = v6Store();
+    const conversationId = store.createConversation();
+    const first = store.prepareTurnAttempt(conversationId, 'retry before receipt')!;
+    expect(first.commit()).toBe(true);
+    expect(
+      store.startAttemptRound(
+        conversationId,
+        first.attemptId,
+        ROUND_ID,
+        0,
+      ),
+    ).toBe(true);
+    expect(
+      store.failAttempt(
+        conversationId,
+        first.attemptId,
+        'E_COMPLETION_TRANSPORT',
+      ),
+    ).toBe(true);
+    const retry = store.retryAttempt(conversationId, first.attemptId)!;
+    expect(retry.commit()).toBe(true);
+    const retryRoundId = '66666666-6666-4666-8666-666666666666';
+    expect(
+      store.startAttemptRound(
+        conversationId,
+        retry.attemptId,
+        retryRoundId,
+        0,
+      ),
+    ).toBe(true);
+    expect(
+      store.recordAttemptRound(conversationId, retry.attemptId, {
+        ...schema2Receipt(retry),
+        roundId: retryRoundId,
+        providerRequestId: 'bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb',
+        providerResponseId: 'resp_retry',
+      }),
+    ).toBe(true);
+    expect(
+      store.completeAttempt(conversationId, retry.attemptId, 'Recovered', {
+        metadata: {
+          modelId: 'deepseek-v4-flash',
+          latencyMs: 1,
+          finishReason: 'stop',
+        },
+      }),
+    ).not.toBeNull();
+
+    expect(
+      store.getState().conversations[conversationId]?.attempts.map(attempt =>
+        attempt.visibleHistorySha256,
+      ),
+    ).toEqual([null, 'a'.repeat(64)]);
+    const serialized = store.serialize();
+    expect(serializeChatState(hydrateChatState(serialized))).toBe(serialized);
   });
 
   test('rejects a roundful retry with a changed visible-history digest', () => {
@@ -2004,6 +2089,36 @@ describe('schema v6 attempts and project context', () => {
     expect(() => hydrateChatState(rootExtra)).toThrow(
       ChatStateValidationError,
     );
+  });
+
+  test('reports the global attempt index for a later turn validation failure', () => {
+    const store = v6Store();
+    const conversationId = store.createConversation();
+    const first = store.prepareTurnAttempt(conversationId, 'first turn')!;
+    first.commit();
+    store.failAttempt(
+      conversationId,
+      first.attemptId,
+      'E_COMPLETION_TRANSPORT',
+    );
+    const second = store.prepareTurnAttempt(conversationId, 'second turn')!;
+    second.commit();
+    const payload = JSON.parse(store.serialize()) as {
+      conversations: Array<{
+        attempts: Array<{ visible_message_ids: string[] }>;
+      }>;
+    };
+    payload.conversations[0]!.attempts[1]!.visible_message_ids = ['missing'];
+
+    try {
+      hydrateChatState(payload);
+      throw new Error('expected hydration failure');
+    } catch (error) {
+      expect(error).toBeInstanceOf(ChatStateValidationError);
+      expect((error as ChatStateValidationError).path).toBe(
+        '$.conversations[0].attempts[1].visible_message_ids',
+      );
+    }
   });
 
   test('rejects accessor-backed v6 fields without evaluating the getter', () => {

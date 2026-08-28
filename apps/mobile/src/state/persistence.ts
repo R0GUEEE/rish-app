@@ -1274,7 +1274,6 @@ function sameFrozenAttempt(
 ): boolean {
   return (
     sameStringSequence(left.visibleMessageIds, right.visibleMessageIds) &&
-    left.visibleHistorySha256 === right.visibleHistorySha256 &&
     sameStringSequence(left.attachmentIds, right.attachmentIds) &&
     left.modelId === right.modelId &&
     left.thinkingMode === right.thinkingMode &&
@@ -1443,6 +1442,7 @@ function parseConversation(
     messages.map((message, index) => [message.id, index]),
   );
   const attemptById = new Map<string, TurnAttemptV1>();
+  const attemptIndexById = new Map<string, number>();
   const referencedAttempts = new Set<string>();
   const assistantAttemptReferences = new Set<string>();
   const turnIds = new Set<string>();
@@ -1461,6 +1461,7 @@ function parseConversation(
       invalid(`${path}.attempts[${index}].attempt_id`, 'must be unique');
     }
     attemptById.set(attempt.attemptId, attempt);
+    attemptIndexById.set(attempt.attemptId, index);
   });
   if (
     attempts.filter(
@@ -1500,6 +1501,7 @@ function parseConversation(
       );
     }
     let completedAttempts = 0;
+    let knownVisibleHistorySha256: string | null = null;
     turn.attemptIds.forEach((attemptId, attemptIndexValue) => {
       turnAttemptReferences += 1;
       if (turnAttemptReferences > MAX_ATTEMPTS_PER_CONVERSATION) {
@@ -1509,7 +1511,12 @@ function parseConversation(
         );
       }
       const attempt = attemptById.get(attemptId);
-      if (attempt === undefined || attempt.turnId !== turn.turnId) {
+      const persistedAttemptIndex = attemptIndexById.get(attemptId);
+      if (
+        attempt === undefined ||
+        persistedAttemptIndex === undefined ||
+        attempt.turnId !== turn.turnId
+      ) {
         invalid(
           `${path}.turns[${index}].attempt_ids[${attemptIndexValue}]`,
           'must reference an attempt for this turn',
@@ -1549,6 +1556,23 @@ function parseConversation(
           'retry attempts must preserve the frozen request',
         );
       }
+      if (attempt.visibleHistorySha256 === null) {
+        if (knownVisibleHistorySha256 !== null) {
+          invalid(
+            `${path}.attempts[${persistedAttemptIndex}].visible_history_sha256`,
+            'must retain the first verified visible-history digest',
+          );
+        }
+      } else if (knownVisibleHistorySha256 === null) {
+        knownVisibleHistorySha256 = attempt.visibleHistorySha256;
+      } else if (
+        attempt.visibleHistorySha256 !== knownVisibleHistorySha256
+      ) {
+        invalid(
+          `${path}.attempts[${persistedAttemptIndex}].visible_history_sha256`,
+          'must match the first verified visible-history digest',
+        );
+      }
       if (
         attempt.rounds.length === 0 &&
         attempt.visibleHistorySha256 !== null
@@ -1569,7 +1593,7 @@ function parseConversation(
             });
         if (!hasDigestProvenance) {
           invalid(
-            `${path}.attempts[${attemptIndexValue}].visible_history_sha256`,
+            `${path}.attempts[${persistedAttemptIndex}].visible_history_sha256`,
             'requires an earlier correlated round receipt',
           );
         }
@@ -1609,7 +1633,7 @@ function parseConversation(
         )
       ) {
         invalid(
-          `${path}.attempts[${attemptIndexValue}].visible_message_ids`,
+          `${path}.attempts[${persistedAttemptIndex}].visible_message_ids`,
           'must freeze the contiguous visible-message window',
         );
       }
@@ -1636,7 +1660,7 @@ function parseConversation(
         )
       ) {
         invalid(
-          `${path}.attempts[${attemptIndexValue}].attachment_ids`,
+          `${path}.attempts[${persistedAttemptIndex}].attachment_ids`,
           'must match the user message attachments',
         );
       }

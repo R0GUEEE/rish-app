@@ -11,6 +11,9 @@ import ReactTestRenderer, {
 } from 'react-test-renderer';
 
 import App from '../App';
+import { ChatDrawer } from '../src/components/ChatDrawer';
+import { ConversationActionSheet } from '../src/components/ConversationActionSheet';
+import { createChatStore } from '../src/state';
 
 jest.mock('../src/native/LocalRuntime', () => ({
   LocalRuntime: {
@@ -22,11 +25,15 @@ jest.mock('../src/native/LocalRuntime', () => ({
     presentCredentialPrompt: jest.fn(),
     clearCredential: jest.fn(),
     complete: jest.fn(),
+    completeV2: jest.fn(),
     recordModelTransition: jest.fn(),
     cancelCompletion: jest.fn(),
     persistSession: jest.fn(),
     loadSession: jest.fn(),
   },
+}));
+jest.mock('../src/agent/runAgentTurn', () => ({
+  runAgentTurn: jest.fn(),
 }));
 jest.mock('../src/native/LocalAttachments', () => ({
   LocalAttachments: {
@@ -105,6 +112,8 @@ type MockLocalRuntime = Record<
   | 'presentCredentialPrompt'
   | 'clearCredential'
   | 'complete'
+  | 'completeV2'
+  | 'isCompletionV2Available'
   | 'recordModelTransition'
   | 'cancelCompletion'
   | 'persistSession'
@@ -116,6 +125,11 @@ const mockLocalRuntime = (
     LocalRuntime: MockLocalRuntime;
   }
 ).LocalRuntime;
+const mockRunAgentTurn = (
+  jest.requireMock('../src/agent/runAgentTurn') as {
+    runAgentTurn: jest.Mock;
+  }
+).runAgentTurn;
 const mockLocalAttachments = (
   jest.requireMock('../src/native/LocalAttachments') as {
     LocalAttachments: Record<string, jest.Mock>;
@@ -166,6 +180,54 @@ const proof = {
   },
 };
 
+type StrictCompletionRequest = {
+  schemaVersion: 2 | 3;
+  turnId: string;
+  attemptId: string;
+  roundId: string;
+  roundIndex: number;
+  model: string;
+  thinkingMode: string;
+  visibleHistory?: Array<{ attachments?: unknown }>;
+  projectContext?: {
+    schemaVersion: number;
+    snapshotId: string;
+    consentReceiptId: string;
+    conversationId: string;
+    projectId: string;
+    provider: string;
+    policy: string;
+  } | null;
+};
+
+function strictCompletionResult(
+  request: StrictCompletionRequest,
+  overrides: Record<string, unknown> = {},
+) {
+  return {
+    schema_version: request.schemaVersion,
+    turn_id: request.turnId,
+    attempt_id: request.attemptId,
+    round_id: request.roundId,
+    round_index: request.roundIndex,
+    provider_request_id: request.roundId,
+    provider_response_id: `resp_${request.roundId}`,
+    requested_model: request.model,
+    model: request.model,
+    thinking_mode: request.thinkingMode,
+    text: 'STRICT_LOCAL_OK',
+    reasoning: '',
+    tool_calls: [],
+    finish_reason: 'stop',
+    latency_ms: 24,
+    visible_history_sha256: 'a'.repeat(64),
+    model_input_sha256: 'b'.repeat(64),
+    request_body_sha256: 'c'.repeat(64),
+    project_context_receipt: null,
+    ...overrides,
+  };
+}
+
 async function settle() {
   await Promise.resolve();
   await Promise.resolve();
@@ -194,6 +256,13 @@ function lastPersistedState() {
       project_id: string | null;
       workspace_id: string | null;
       thinking_mode: string;
+      attempts?: Array<{
+        attempt_id: string;
+        status: string;
+        assistant_message_id: string | null;
+        failure_code: string | null;
+        rounds: Array<{ round_id: string }>;
+      }>;
       messages: Array<{
         role: string;
         text: string;
@@ -314,7 +383,11 @@ beforeEach(() => {
   let requestCounter = 0;
   mockLocalRuntime.isAvailable.mockReturnValue(true);
   mockLocalRuntime.createCompletionRequestId.mockImplementation(
-    () => `request-${++requestCounter}`,
+    () =>
+      `${String(++requestCounter).padStart(
+        8,
+        '0',
+      )}-0000-4000-8000-000000000000`,
   );
   mockLocalRuntime.credentialStatus.mockResolvedValue({ status: 'configured' });
   mockLocalRuntime.bootstrap.mockResolvedValue({ proof, rish: {} });
@@ -327,6 +400,15 @@ beforeEach(() => {
     latency_ms: 42,
     reasoning: '',
     thinking_mode: 'high',
+  });
+  mockLocalRuntime.completeV2.mockImplementation(
+    async (request: StrictCompletionRequest) =>
+      strictCompletionResult(request),
+  );
+  mockRunAgentTurn.mockResolvedValue({
+    status: 'failed',
+    traces: [],
+    failure: { code: 'E_AGENT_FAILED' },
   });
   mockLocalRuntime.recordModelTransition.mockResolvedValue({ recorded: 1 });
   mockLocalRuntime.cancelCompletion.mockResolvedValue({ status: 'cancelled' });
@@ -451,6 +533,49 @@ test('boots into a usable local empty chat', async () => {
   expect(mockLocalRuntime.bootstrap).toHaveBeenCalledTimes(1);
 });
 
+test.each(['prepared', 'failed'] as const)(
+  'surfaces Retry for a hydrated %s attempt without automatic HTTP',
+  async status => {
+    const lifecycleIds = [
+      '11111111-1111-4111-8111-111111111111',
+      '22222222-2222-4222-8222-222222222222',
+    ];
+    let messageId = 0;
+    const stored = createChatStore({
+      now: () => '2026-08-28T00:00:00.000Z',
+      createId: kind => `${kind}-${++messageId}`,
+      createLifecycleId: () => lifecycleIds.shift()!,
+    });
+    const conversationId = stored.createConversation();
+    const prepared = stored.prepareTurnAttempt(
+      conversationId,
+      `${status} after restart`,
+    )!;
+    prepared.commit();
+    if (status === 'failed') {
+      stored.failAttempt(
+        conversationId,
+        prepared.attemptId,
+        'E_COMPLETION_TRANSPORT',
+      );
+    }
+    mockLocalRuntime.loadSession.mockResolvedValueOnce(stored.serialize());
+
+    const renderer = await renderApp();
+    expect(actionByLabel(renderer.root, 'Retry response')).toBeDefined();
+    if (status === 'prepared') {
+      expect(
+        renderer.root.findByProps({ accessibilityLabel: 'Message DSH' }).props
+          .editable,
+      ).toBe(false);
+      expect(actionByLabel(renderer.root, 'Send message').props.disabled).toBe(
+        true,
+      );
+    }
+    expect(mockLocalRuntime.completeV2).not.toHaveBeenCalled();
+  },
+);
+
 test('runtime evidence retry refreshes proof without rehydrating active chat state', async () => {
   mockLocalRuntime.bootstrap
     .mockRejectedValueOnce(new Error('temporary proof failure'))
@@ -558,6 +683,167 @@ test('starts a project-bound chat and surfaces its cwd context in the composer',
   ).toBeGreaterThanOrEqual(1);
 });
 
+test('does not auto-route a setup-required project through AgentLoop', async () => {
+  mockLocalRuntime.isCompletionV2Available.mockReturnValue(true);
+  mockLocalProjects.list.mockResolvedValue({
+    schema_version: 1,
+    projects: [
+      {
+        schema_version: 1,
+        id: 'project-1',
+        name: 'demo',
+        workspace_path: 'projects/project-1/repo',
+        created_at: '2026-08-24T00:00:00.000Z',
+        updated_at: '2026-08-24T00:00:00.000Z',
+        origin_url: null,
+      },
+    ],
+  });
+  const renderer = await renderApp();
+  const root = renderer.root;
+  await act(async () => actionByLabel(root, 'Open navigation').props.onPress());
+  await act(async () => {
+    actionByLabel(root, 'Projects').props.onPress();
+    await settle();
+  });
+  await act(async () => {
+    actionByLabel(root, 'Open project demo').props.onPress();
+    await settle();
+  });
+  await act(async () => {
+    actionByLabel(root, 'Chat in this project').props.onPress();
+    await settle();
+  });
+  await act(async () => {
+    root
+      .findByProps({ accessibilityLabel: 'Message DSH' })
+      .props.onChangeText('Wait for context');
+  });
+  await act(async () => {
+    actionByLabel(root, 'Send message').props.onPress();
+    await settle();
+  });
+
+  expect(mockRunAgentTurn).not.toHaveBeenCalled();
+  expect(mockLocalRuntime.completeV2).not.toHaveBeenCalled();
+  expect(mockLocalRuntime.complete).not.toHaveBeenCalled();
+  expect(
+    root.findByProps({ accessibilityLabel: 'Message DSH' }).props.value,
+  ).toBe('Wait for context');
+});
+
+test('sends verified project context through schema3 without AgentLoop', async () => {
+  const runtimeContextId = '11111111-1111-4111-8111-111111111111';
+  const snapshotId = '22222222-2222-4222-8222-222222222222';
+  const consentReceiptId = '33333333-3333-4333-8333-333333333333';
+  const projectId = '44444444-4444-4444-8444-444444444444';
+  const lifecycleIds = [
+    runtimeContextId,
+    '55555555-5555-4555-8555-555555555555',
+    '66666666-6666-4666-8666-666666666666',
+  ];
+  let messageId = 0;
+  const stored = createChatStore({
+    now: () => '2026-08-28T00:00:00.000Z',
+    createId: kind => `${kind}-${++messageId}`,
+    createLifecycleId: () => lifecycleIds.shift()!,
+  });
+  const conversationId = stored.createConversation({ projectId });
+  expect(stored.ensureRuntimeContextId(conversationId)).toBe(runtimeContextId);
+  const manifest = {
+    schema_version: 1 as const,
+    snapshot_id: snapshotId,
+    project_id: projectId,
+    project_name: 'verified-demo',
+    branch: 'main',
+    head_oid: '0'.repeat(40),
+    clean: true,
+    conflicted: false,
+    captured_at: '2026-08-28T00:00:00.000Z',
+    policy_version: 'chat-read-v1.0.0' as const,
+    provider_host: 'api.deepseek.com' as const,
+    model: 'deepseek-v4-flash' as const,
+    included: [
+      {
+        path: 'README.md',
+        source: 'tracked_file' as const,
+        bytes: 16,
+        sha256: 'f'.repeat(64),
+      },
+    ],
+    omitted: [],
+    context_bytes: 16,
+    estimated_tokens: 4,
+    snapshot_sha256: 'd'.repeat(64),
+    source_fingerprint: 'e'.repeat(64),
+  };
+  const consent = {
+    schema_version: 1 as const,
+    consent_receipt_id: consentReceiptId,
+    snapshot_id: snapshotId,
+    snapshot_sha256: 'd'.repeat(64),
+    confirmed_at: '2026-08-28T00:00:01.000Z',
+  };
+  stored.applyProjectContextAction(conversationId, {
+    type: 'checking',
+    preparationId: 'prepare-verified',
+  });
+  stored.applyProjectContextAction(conversationId, {
+    type: 'prepared',
+    preparationId: 'prepare-verified',
+    manifest,
+  });
+  stored.applyProjectContextAction(conversationId, {
+    type: 'confirmed',
+    preparationId: 'prepare-verified',
+    manifest,
+    consent,
+  });
+  mockLocalRuntime.loadSession.mockResolvedValueOnce(stored.serialize());
+  mockLocalRuntime.completeV2.mockImplementationOnce(
+    async (request: StrictCompletionRequest) => ({
+      ...strictCompletionResult(request, { text: 'Verified context answer' }),
+      project_context_receipt: {
+        schema_version: 1,
+        snapshot_id: snapshotId,
+        snapshot_sha256: 'd'.repeat(64),
+        source_fingerprint: 'e'.repeat(64),
+        context_bytes: 16,
+        verified_at: '2026-08-28T00:00:02.000Z',
+      },
+    }),
+  );
+  const renderer = await renderApp();
+  const root = renderer.root;
+  await act(async () => {
+    root
+      .findByProps({ accessibilityLabel: 'Message DSH' })
+      .props.onChangeText('Read verified project');
+  });
+  await act(async () => {
+    await actionByLabel(root, 'Send message').props.onPress();
+  });
+
+  expect(mockLocalRuntime.completeV2).toHaveBeenCalledWith(
+    expect.objectContaining({
+      schemaVersion: 3,
+      projectContext: {
+        schemaVersion: 1,
+        snapshotId,
+        consentReceiptId,
+        conversationId: runtimeContextId,
+        projectId,
+        provider: 'deepseek',
+        policy: 'chat-read-v1',
+      },
+    }),
+  );
+  expect(mockRunAgentTurn).not.toHaveBeenCalled();
+  expect(lastPersistedState().messages.at(-1)?.text).toBe(
+    'Verified context answer',
+  );
+});
+
 test('sends the complete conversation history and persists both messages', async () => {
   const renderer = await renderApp();
   const root = renderer.root;
@@ -572,18 +858,196 @@ test('sends the complete conversation history and persists both messages', async
     await settle();
   });
 
-  expect(mockLocalRuntime.complete).toHaveBeenCalledWith(
-    'deepseek-v4-flash',
-    [{ role: 'user', content: 'First turn' }],
-    'request-1',
-    'high',
+  expect(mockLocalRuntime.complete).not.toHaveBeenCalled();
+  expect(mockLocalRuntime.completeV2).toHaveBeenCalledWith(
+    expect.objectContaining({
+      schemaVersion: 2,
+      model: 'deepseek-v4-flash',
+      thinkingMode: 'high',
+      visibleHistory: [
+        { role: 'user', content: 'First turn', attachments: [] },
+      ],
+      roundTranscript: [],
+      tools: [],
+      projectContext: null,
+    }),
   );
   const persisted = lastPersistedState();
   expect(persisted.messages.map(message => message.role)).toEqual([
     'user',
     'assistant',
   ]);
-  expect(persisted.messages[1]?.text).toBe('SIMULATOR_LOCAL_OK');
+  expect(persisted.messages[1]?.text).toBe('STRICT_LOCAL_OK');
+});
+
+test('preserves the draft and sends zero HTTP when prepared durability is absent', async () => {
+  mockLocalAttachments.present.mockResolvedValueOnce({
+    schema_version: 1,
+    status: 'selected',
+    attachments: [
+      {
+        schema_version: 1,
+        id: 'undurable-file',
+        kind: 'text',
+        name: 'undurable.txt',
+        mime_type: 'text/plain',
+        size: 32,
+      },
+    ],
+  });
+  const renderer = await renderApp();
+  const root = renderer.root;
+  await act(async () => actionByLabel(root, 'Add attachment').props.onPress());
+  await chooseAttachmentSource(root, 'Files');
+  mockLocalRuntime.persistSession.mockResolvedValueOnce(false);
+  mockLocalRuntime.loadSession.mockResolvedValueOnce(null);
+
+  await act(async () => {
+    root
+      .findByProps({ accessibilityLabel: 'Message DSH' })
+      .props.onChangeText('Keep this draft');
+  });
+  await act(async () => {
+    actionByLabel(root, 'Send message').props.onPress();
+    await settle();
+  });
+
+  expect(
+    root.findByProps({ accessibilityLabel: 'Message DSH' }).props.value,
+  ).toBe('Keep this draft');
+  expect(actionByLabel(root, 'Remove undurable.txt')).toBeDefined();
+  expect(mockLocalAttachments.discard).not.toHaveBeenCalledWith([
+    'undurable-file',
+  ]);
+  expect(mockLocalRuntime.completeV2).not.toHaveBeenCalled();
+  expect(mockLocalRuntime.complete).not.toHaveBeenCalled();
+  expect(mockLocalRuntime.loadSession).toHaveBeenCalledTimes(2);
+});
+
+test('keeps draft ownership until prepared persistence resolves true', async () => {
+  let resolvePersist!: (saved: boolean) => void;
+  const renderer = await renderApp();
+  const root = renderer.root;
+  mockLocalRuntime.persistSession.mockReturnValueOnce(
+    new Promise<boolean>(resolve => {
+      resolvePersist = resolve;
+    }),
+  );
+  await act(async () => {
+    root
+      .findByProps({ accessibilityLabel: 'Message DSH' })
+      .props.onChangeText('Durable first');
+  });
+  await act(async () => {
+    actionByLabel(root, 'Send message').props.onPress();
+    await Promise.resolve();
+  });
+  expect(
+    root.findByProps({ accessibilityLabel: 'Message DSH' }).props.value,
+  ).toBe('Durable first');
+  expect(mockLocalRuntime.completeV2).not.toHaveBeenCalled();
+
+  await act(async () => {
+    resolvePersist(true);
+    await settle();
+  });
+  expect(
+    root.findByProps({ accessibilityLabel: 'Message DSH' }).props.value,
+  ).toBe('');
+  expect(mockLocalRuntime.completeV2).toHaveBeenCalledTimes(1);
+});
+
+test('clears a durable draft after cancellation during its first persistence', async () => {
+  mockLocalAttachments.present.mockResolvedValueOnce({
+    schema_version: 1,
+    status: 'selected',
+    attachments: [
+      {
+        schema_version: 1,
+        id: 'cancel-draft-image',
+        kind: 'image',
+        name: 'cancel-draft.png',
+        mime_type: 'image/png',
+        size: 128,
+      },
+    ],
+  });
+  const renderer = await renderApp();
+  const root = renderer.root;
+  await act(async () => actionByLabel(root, 'Add attachment').props.onPress());
+  await chooseAttachmentSource(root, 'Photos');
+  await act(async () => {
+    root
+      .findByProps({ accessibilityLabel: 'Message DSH' })
+      .props.onChangeText('Cancel during save');
+  });
+  let resolvePersist!: (saved: boolean) => void;
+  mockLocalRuntime.persistSession.mockReturnValueOnce(
+    new Promise<boolean>(resolve => {
+      resolvePersist = resolve;
+    }),
+  );
+  let sendPromise: Promise<unknown> | undefined;
+  await act(async () => {
+    const result = actionByLabel(root, 'Send message').props.onPress() as unknown;
+    if (result instanceof Promise) sendPromise = result;
+    await Promise.resolve();
+  });
+  expect(actionByLabel(root, 'Stop response')).toBeDefined();
+  await act(async () => {
+    await actionByLabel(root, 'Stop response').props.onPress();
+  });
+  await act(async () => {
+    resolvePersist(true);
+    await sendPromise;
+  });
+
+  expect(
+    root.findByProps({ accessibilityLabel: 'Message DSH' }).props.value,
+  ).toBe('');
+  expect(
+    root.findAllByProps({ accessibilityLabel: 'Remove cancel-draft.png' }),
+  ).toHaveLength(0);
+  expect(mockLocalRuntime.completeV2).not.toHaveBeenCalled();
+  expect(
+    lastPersistedState().conversations[0]?.attempts?.at(-1)?.status,
+  ).toBe('cancelled');
+});
+
+test('shows cancellation persistence failure instead of a false stopped notice', async () => {
+  const renderer = await renderApp();
+  const root = renderer.root;
+  await act(async () => {
+    root
+      .findByProps({ accessibilityLabel: 'Message DSH' })
+      .props.onChangeText('Cancel must persist');
+  });
+  let resolvePersist!: (saved: boolean) => void;
+  mockLocalRuntime.persistSession
+    .mockReturnValueOnce(
+      new Promise<boolean>(resolve => {
+        resolvePersist = resolve;
+      }),
+    )
+    .mockResolvedValueOnce(false);
+  let sendPromise: Promise<unknown> | undefined;
+  await act(async () => {
+    const result = actionByLabel(root, 'Send message').props.onPress() as unknown;
+    if (result instanceof Promise) sendPromise = result;
+    await Promise.resolve();
+  });
+  await act(async () => {
+    await actionByLabel(root, 'Stop response').props.onPress();
+  });
+  await act(async () => {
+    resolvePersist(true);
+    await sendPromise;
+  });
+
+  const rendered = JSON.stringify(renderer.toJSON());
+  expect(rendered).toContain('E_ATTEMPT_PERSISTENCE');
+  expect(rendered).not.toContain('Response stopped.');
+  expect(actionByLabel(root, 'Retry response')).toBeDefined();
 });
 
 test('adds an image attachment, switches to Flash Exp, and sends without text', async () => {
@@ -631,26 +1095,28 @@ test('adds an image attachment, switches to Flash Exp, and sends without text', 
     await settle();
   });
 
-  expect(mockLocalRuntime.complete).toHaveBeenCalledWith(
-    'deepseek-v4-flash-vision-exp',
-    [
-      {
-        role: 'user',
-        content: '',
-        attachments: [
-          {
-            schema_version: 1,
-            id: 'image-1',
-            kind: 'image',
-            name: 'camera.jpg',
-            mime_type: 'image/jpeg',
-            size: 2048,
-          },
-        ],
-      },
-    ],
-    'request-1',
-    'high',
+  expect(mockLocalRuntime.completeV2).toHaveBeenCalledWith(
+    expect.objectContaining({
+      schemaVersion: 2,
+      model: 'deepseek-v4-flash-vision-exp',
+      thinkingMode: 'high',
+      visibleHistory: [
+        {
+          role: 'user',
+          content: '',
+          attachments: [
+            {
+              schema_version: 1,
+              id: 'image-1',
+              kind: 'image',
+              name: 'camera.jpg',
+              mime_type: 'image/jpeg',
+              size: 2048,
+            },
+          ],
+        },
+      ],
+    }),
   );
   const persisted = lastPersistedState();
   expect(persisted.conversations[0]?.model_id).toBe(
@@ -676,6 +1142,231 @@ test('adds an image attachment, switches to Flash Exp, and sends without text', 
     source: 'send_image_guard',
     to_model: 'deepseek-v4-flash-vision-exp',
   });
+});
+
+test('ignores a stale attachment-menu dismissal after completion ownership changes', async () => {
+  let activeRequest: StrictCompletionRequest | undefined;
+  let resolveCompletion:
+    | ((value: ReturnType<typeof strictCompletionResult>) => void)
+    | undefined;
+  mockLocalRuntime.completeV2.mockImplementationOnce(
+    (request: StrictCompletionRequest) =>
+      new Promise(resolve => {
+        activeRequest = request;
+        resolveCompletion = resolve;
+      }),
+  );
+  const renderer = await renderApp();
+  const root = renderer.root;
+  await act(async () => actionByLabel(root, 'Add attachment').props.onPress());
+  const menu = root.findByProps({ testID: 'attachment-menu-modal' });
+  await act(async () => actionByLabel(root, 'Files').props.onPress());
+  await act(async () => {
+    root
+      .findByProps({ accessibilityLabel: 'Message DSH' })
+      .props.onChangeText('Own the composer first');
+  });
+  await act(async () => {
+    actionByLabel(root, 'Send message').props.onPress();
+    await settle();
+  });
+
+  await act(async () => {
+    menu.props.onDismiss();
+    await settle();
+  });
+  expect(mockLocalAttachments.present).not.toHaveBeenCalled();
+
+  await act(async () => {
+    await actionByLabel(root, 'Stop response').props.onPress();
+    if (activeRequest !== undefined) {
+      resolveCompletion?.(strictCompletionResult(activeRequest));
+    }
+    await settle();
+  });
+});
+
+test('never discards a referenced attachment through a stale Remove callback', async () => {
+  mockLocalAttachments.present.mockResolvedValueOnce({
+    schema_version: 1,
+    status: 'selected',
+    attachments: [
+      {
+        schema_version: 1,
+        id: 'owned-file',
+        kind: 'text',
+        name: 'owned.txt',
+        mime_type: 'text/plain',
+        size: 64,
+      },
+    ],
+  });
+  let activeRequest: StrictCompletionRequest | undefined;
+  let resolveCompletion:
+    | ((value: ReturnType<typeof strictCompletionResult>) => void)
+    | undefined;
+  mockLocalRuntime.completeV2.mockImplementationOnce(
+    (request: StrictCompletionRequest) =>
+      new Promise(resolve => {
+        activeRequest = request;
+        resolveCompletion = resolve;
+      }),
+  );
+  const renderer = await renderApp();
+  const root = renderer.root;
+  await act(async () => actionByLabel(root, 'Add attachment').props.onPress());
+  await chooseAttachmentSource(root, 'Files');
+  const staleRemove = actionByLabel(root, 'Remove owned.txt').props.onPress;
+  mockLocalAttachments.discard.mockClear();
+  await act(async () => {
+    root
+      .findByProps({ accessibilityLabel: 'Message DSH' })
+      .props.onChangeText('Persist this file');
+  });
+  await act(async () => {
+    actionByLabel(root, 'Send message').props.onPress();
+    await settle();
+  });
+
+  await act(async () => {
+    staleRemove({ stopPropagation: jest.fn() });
+  });
+  expect(mockLocalAttachments.discard).not.toHaveBeenCalledWith(['owned-file']);
+  expect(lastPersistedState().messages[0]?.attachments[0]?.id).toBe(
+    'owned-file',
+  );
+
+  await act(async () => {
+    await actionByLabel(root, 'Stop response').props.onPress();
+    if (activeRequest !== undefined) {
+      resolveCompletion?.(strictCompletionResult(activeRequest));
+    }
+    await settle();
+  });
+});
+
+test('keeps the existing draft stable while another picker is in flight', async () => {
+  mockLocalAttachments.present.mockResolvedValueOnce({
+    schema_version: 1,
+    status: 'selected',
+    attachments: [
+      {
+        schema_version: 1,
+        id: 'existing-draft',
+        kind: 'text',
+        name: 'existing.txt',
+        mime_type: 'text/plain',
+        size: 10,
+      },
+    ],
+  });
+  const renderer = await renderApp();
+  const root = renderer.root;
+  await act(async () => actionByLabel(root, 'Add attachment').props.onPress());
+  await chooseAttachmentSource(root, 'Files');
+  const staleRemove = actionByLabel(root, 'Remove existing.txt').props.onPress;
+  let resolvePicker:
+    | ((value: {
+        schema_version: number;
+        status: string;
+        attachments: Array<{
+          schema_version: number;
+          id: string;
+          kind: string;
+          name: string;
+          mime_type: string;
+          size: number;
+        }>;
+      }) => void)
+    | undefined;
+  mockLocalAttachments.present.mockReturnValueOnce(
+    new Promise(resolve => {
+      resolvePicker = resolve;
+    }),
+  );
+  mockLocalAttachments.discard.mockClear();
+  await act(async () => actionByLabel(root, 'Add attachment').props.onPress());
+  await chooseAttachmentSource(root, 'Files');
+  expect(
+    actionByLabel(root, 'Remove existing.txt').props.disabled,
+  ).toBe(true);
+
+  await act(async () => {
+    staleRemove({ stopPropagation: jest.fn() });
+  });
+  expect(mockLocalAttachments.discard).not.toHaveBeenCalledWith([
+    'existing-draft',
+  ]);
+  await act(async () => {
+    resolvePicker?.({
+      schema_version: 1,
+      status: 'selected',
+      attachments: [
+        {
+          schema_version: 1,
+          id: 'new-draft',
+          kind: 'text',
+          name: 'new.txt',
+          mime_type: 'text/plain',
+          size: 20,
+        },
+      ],
+    });
+    await settle();
+  });
+  expect(actionByLabel(root, 'Remove existing.txt')).toBeDefined();
+  expect(actionByLabel(root, 'Remove new.txt')).toBeDefined();
+});
+
+test('does not remove native bytes while an attachment preview is active', async () => {
+  mockLocalAttachments.present.mockResolvedValueOnce({
+    schema_version: 1,
+    status: 'selected',
+    attachments: [
+      {
+        schema_version: 1,
+        id: 'preview-owned',
+        kind: 'text',
+        name: 'preview-owned.txt',
+        mime_type: 'text/plain',
+        size: 12,
+      },
+    ],
+  });
+  let closePreview: ((value: unknown) => void) | undefined;
+  mockLocalAttachments.presentPreview.mockReturnValueOnce(
+    new Promise(resolve => {
+      closePreview = resolve;
+    }),
+  );
+  const renderer = await renderApp();
+  const root = renderer.root;
+  await act(async () => actionByLabel(root, 'Add attachment').props.onPress());
+  await chooseAttachmentSource(root, 'Files');
+  const staleRemove = actionByLabel(
+    root,
+    'Remove preview-owned.txt',
+  ).props.onPress;
+  mockLocalAttachments.discard.mockClear();
+  await act(async () => {
+    actionByLabel(root, 'Preview preview-owned.txt').props.onPress();
+    await Promise.resolve();
+  });
+  expect(
+    actionByLabel(root, 'Remove preview-owned.txt').props.disabled,
+  ).toBe(true);
+
+  await act(async () => {
+    staleRemove({ stopPropagation: jest.fn() });
+  });
+  expect(mockLocalAttachments.discard).not.toHaveBeenCalledWith([
+    'preview-owned',
+  ]);
+  await act(async () => {
+    closePreview?.({ schema_version: 1, status: 'closed' });
+    await settle();
+  });
+  expect(actionByLabel(root, 'Remove preview-owned.txt')).toBeDefined();
 });
 
 test('recovers the attachment button when a native picker promise never settles', async () => {
@@ -950,7 +1641,7 @@ test('keeps the selected model when a draft image is selected then removed', asy
     await settle();
   });
 
-  expect(mockLocalRuntime.complete.mock.calls.at(-1)?.[0]).toBe(
+  expect(mockLocalRuntime.completeV2.mock.calls.at(-1)?.[0]?.model).toBe(
     'deepseek-v4-pro',
   );
   expect(lastPersistedState().conversations[0]?.model_id).toBe(
@@ -1448,19 +2139,16 @@ test('closes the combined panel from its light scrim without changing anything',
 test('freezes model and effort while a request is in flight', async () => {
   let finishInitialPersist: ((value: boolean) => void) | undefined;
   let finishRequest:
-    | ((value: {
-        text: string;
-        model: string;
-        request_id: string;
-        latency_ms: number;
-        reasoning: string;
-        thinking_mode: 'high';
-      }) => void)
+    | ((value: ReturnType<typeof strictCompletionResult>) => void)
     | undefined;
-  mockLocalRuntime.complete.mockReturnValueOnce(
-    new Promise(resolve => {
-      finishRequest = resolve;
-    }),
+  let frozenRequest: StrictCompletionRequest | undefined;
+  mockLocalRuntime.completeV2.mockImplementationOnce(
+    (request: StrictCompletionRequest) => {
+      frozenRequest = request;
+      return new Promise(resolve => {
+        finishRequest = resolve;
+      });
+    },
   );
   const renderer = await renderApp();
   const root = renderer.root;
@@ -1507,26 +2195,28 @@ test('freezes model and effort while a request is in flight', async () => {
   });
   expect(mockLocalRuntime.recordModelTransition).not.toHaveBeenCalled();
   expect(mockLocalRuntime.persistSession).toHaveBeenCalledTimes(1);
-  expect(mockLocalRuntime.complete).not.toHaveBeenCalled();
+  expect(mockLocalRuntime.completeV2).not.toHaveBeenCalled();
 
   await act(async () => {
     finishInitialPersist?.(true);
     await settle();
   });
-  expect(mockLocalRuntime.complete.mock.calls[0]?.[0]).toBe(
+  expect(mockLocalRuntime.completeV2.mock.calls[0]?.[0]?.model).toBe(
     'deepseek-v4-flash',
   );
-  expect(mockLocalRuntime.complete.mock.calls[0]?.[3]).toBe('high');
+  expect(mockLocalRuntime.completeV2.mock.calls[0]?.[0]?.thinkingMode).toBe(
+    'high',
+  );
 
   await act(async () => {
-    finishRequest?.({
-      text: 'Frozen response',
-      model: 'deepseek-v4-pro',
-      request_id: 'request-1',
-      latency_ms: 9,
-      reasoning: '',
-      thinking_mode: 'high',
-    });
+    if (frozenRequest !== undefined) {
+      finishRequest?.(
+        strictCompletionResult(frozenRequest, {
+          text: 'Frozen response',
+          latency_ms: 9,
+        }),
+      );
+    }
     await settle();
   });
   const persisted = lastPersistedState();
@@ -1534,6 +2224,53 @@ test('freezes model and effort while a request is in flight', async () => {
   expect(persisted.conversations[0]?.messages.at(-1)?.metadata?.model_id).toBe(
     'deepseek-v4-flash',
   );
+});
+
+test('keeps model, effort, and attachments frozen while persistence is pending', async () => {
+  const renderer = await renderApp();
+  const root = renderer.root;
+  await act(async () => composerOptionsChip(root).props.onPress());
+  const staleModelPress = optionInComposerPanel(root, 'Use V4 Pro').props.onPress;
+  const staleEffortPress = optionInComposerPanel(
+    root,
+    'Use Max thinking',
+  ).props.onPress;
+  await act(async () => optionInComposerPanel(root, 'Done').props.onPress());
+  let candidate = '';
+  mockLocalRuntime.persistSession.mockImplementationOnce(async json => {
+    candidate = json;
+    return false;
+  });
+  mockLocalRuntime.loadSession.mockImplementationOnce(async () => candidate);
+  await act(async () => {
+    root
+      .findByProps({ accessibilityLabel: 'Message DSH' })
+      .props.onChangeText('Hold pending state');
+  });
+  await act(async () => {
+    await actionByLabel(root, 'Send message').props.onPress();
+  });
+
+  expect(actionByLabel(root, 'Retry response')).toBeDefined();
+  expect(composerOptionsChip(root).props.disabled).toBe(true);
+  expect(actionByLabel(root, 'Add attachment').props.disabled).toBe(true);
+  expect(
+    root.findAllByProps({ accessibilityLabel: 'Stop response' }),
+  ).toHaveLength(0);
+  expect(actionByLabel(root, 'Send message').props.disabled).toBe(true);
+  expect(
+    root.findAllByProps({ accessibilityLabel: 'Configure DeepSeek key' }),
+  ).toHaveLength(0);
+  await act(async () => {
+    staleModelPress();
+    staleEffortPress();
+  });
+  expect(lastPersistedState().conversations[0]).toMatchObject({
+    model_id: 'deepseek-v4-flash',
+    thinking_mode: 'high',
+  });
+  expect(mockLocalRuntime.recordModelTransition).not.toHaveBeenCalled();
+  expect(mockLocalRuntime.completeV2).not.toHaveBeenCalled();
 });
 
 test('opens the compact model popover from settings and returns to settings', async () => {
@@ -1736,16 +2473,15 @@ test('opens chat actions from the drawer and persists a renamed title', async ()
 });
 
 test('keeps the composer recoverable and retries a failed response', async () => {
-  mockLocalRuntime.complete
+  mockLocalRuntime.completeV2
     .mockRejectedValueOnce(new Error('network unavailable'))
-    .mockResolvedValueOnce({
-      text: 'Recovered',
-      model: 'deepseek-v4-flash',
-      request_id: 'request-2',
-      latency_ms: 50,
-      reasoning: 'Retrying the local request.',
-      thinking_mode: 'high',
-    });
+    .mockImplementationOnce(async (request: StrictCompletionRequest) =>
+      strictCompletionResult(request, {
+        text: 'Recovered',
+        latency_ms: 50,
+        reasoning: 'Retrying the local request.',
+      }),
+    );
   const renderer = await renderApp();
   const root = renderer.root;
 
@@ -1766,11 +2502,216 @@ test('keeps the composer recoverable and retries a failed response', async () =>
   ).toBeDefined();
 
   await act(async () => {
-    root.findByProps({ accessibilityLabel: 'Retry response' }).props.onPress();
+    await root
+      .findByProps({ accessibilityLabel: 'Retry response' })
+      .props.onPress();
+  });
+  expect(mockLocalRuntime.completeV2).toHaveBeenCalledTimes(2);
+  expect(
+    mockLocalRuntime.persistSession.mock.calls.map(call => {
+      const state = JSON.parse(call[0] as string) as {
+        conversations: Array<{ attempts?: Array<{ status: string }> }>;
+      };
+      return state.conversations[0]?.attempts?.at(-1)?.status ?? 'none';
+    }),
+  ).toEqual([
+    'prepared',
+    'sending',
+    'failed',
+    'prepared',
+    'sending',
+    'completed',
+  ]);
+  const persisted = lastPersistedState();
+  expect(persisted.conversations[0]?.attempts?.at(-1)).toMatchObject({
+    status: 'completed',
+    assistant_message_id: expect.any(String),
+  });
+  expect(persisted.messages.at(-1)?.text).toBe('Recovered');
+});
+
+test('coalesces rapid Retry taps without hiding the successful outcome', async () => {
+  mockLocalRuntime.completeV2.mockRejectedValueOnce(
+    new Error('retry once'),
+  );
+  const renderer = await renderApp();
+  const root = renderer.root;
+  await act(async () => {
+    root
+      .findByProps({ accessibilityLabel: 'Message DSH' })
+      .props.onChangeText('Retry rapidly');
+  });
+  await act(async () => {
+    await actionByLabel(root, 'Send message').props.onPress();
+  });
+
+  let retryRequest: StrictCompletionRequest | undefined;
+  let resolveRetry:
+    | ((value: ReturnType<typeof strictCompletionResult>) => void)
+    | undefined;
+  mockLocalRuntime.completeV2.mockImplementationOnce(
+    (request: StrictCompletionRequest) =>
+      new Promise(resolve => {
+        retryRequest = request;
+        resolveRetry = resolve;
+      }),
+  );
+  const retryPress = actionByLabel(root, 'Retry response').props.onPress;
+  let firstTap: Promise<unknown> | undefined;
+  let secondTap: Promise<unknown> | undefined;
+  await act(async () => {
+    const first = retryPress() as unknown;
+    const second = retryPress() as unknown;
+    if (first instanceof Promise) firstTap = first;
+    if (second instanceof Promise) secondTap = second;
     await settle();
   });
-  expect(mockLocalRuntime.complete).toHaveBeenCalledTimes(2);
-  expect(lastPersistedState().messages.at(-1)?.text).toBe('Recovered');
+  expect(mockLocalRuntime.completeV2).toHaveBeenCalledTimes(2);
+
+  await act(async () => {
+    if (retryRequest !== undefined) {
+      resolveRetry?.(
+        strictCompletionResult(retryRequest, { text: 'One retry wins' }),
+      );
+    }
+    await firstTap;
+    await secondTap;
+  });
+  expect(lastPersistedState().messages.at(-1)?.text).toBe('One retry wins');
+  const rendered = JSON.stringify(renderer.toJSON());
+  expect(rendered).not.toContain('E_COMPLETION_BUSY');
+  expect(rendered).not.toContain('E_COMPLETION_NATIVE');
+  expect(
+    root.findAllByProps({ accessibilityLabel: 'Retry response' }),
+  ).toHaveLength(0);
+});
+
+test('ignores a stale Retry callback after moving to another failed chat', async () => {
+  mockLocalRuntime.completeV2
+    .mockRejectedValueOnce(new Error('first failed'))
+    .mockRejectedValueOnce(new Error('second failed'));
+  const renderer = await renderApp();
+  const root = renderer.root;
+  await act(async () => {
+    root
+      .findByProps({ accessibilityLabel: 'Message DSH' })
+      .props.onChangeText('First failed chat');
+  });
+  await act(async () => {
+    await actionByLabel(root, 'Send message').props.onPress();
+  });
+  const staleRetry = actionByLabel(root, 'Retry response').props.onPress;
+  await act(async () => actionByLabel(root, 'Open navigation').props.onPress());
+  await act(async () => {
+    await actionByLabel(root, 'Create new chat').props.onPress();
+  });
+  await act(async () => {
+    root
+      .findByProps({ accessibilityLabel: 'Message DSH' })
+      .props.onChangeText('Second failed chat');
+  });
+  await act(async () => {
+    await actionByLabel(root, 'Send message').props.onPress();
+  });
+  expect(mockLocalRuntime.completeV2).toHaveBeenCalledTimes(2);
+
+  await act(async () => {
+    await staleRetry();
+  });
+  expect(mockLocalRuntime.completeV2).toHaveBeenCalledTimes(2);
+  expect(actionByLabel(root, 'Retry response')).toBeDefined();
+  expect(lastPersistedState().messages.at(-1)?.text).toBe('Second failed chat');
+});
+
+test('blocks Retry while a native attachment picker owns the composer', async () => {
+  mockLocalRuntime.completeV2.mockRejectedValueOnce(new Error('first failed'));
+  const renderer = await renderApp();
+  const root = renderer.root;
+  await act(async () => {
+    root
+      .findByProps({ accessibilityLabel: 'Message DSH' })
+      .props.onChangeText('Retry after picker');
+  });
+  await act(async () => {
+    await actionByLabel(root, 'Send message').props.onPress();
+  });
+  const staleRetry = actionByLabel(root, 'Retry response').props.onPress;
+  let rejectPicker: ((error: Error) => void) | undefined;
+  mockLocalAttachments.present.mockReturnValueOnce(
+    new Promise((_resolve, reject) => {
+      rejectPicker = reject;
+    }),
+  );
+  await act(async () => actionByLabel(root, 'Add attachment').props.onPress());
+  await chooseAttachmentSource(root, 'Files');
+  expect(actionByLabel(root, 'Retry response').props.disabled).toBe(true);
+
+  await act(async () => {
+    await staleRetry();
+  });
+  expect(mockLocalRuntime.completeV2).toHaveBeenCalledTimes(1);
+  await act(async () => {
+    rejectPicker?.(new Error('picker released'));
+    await settle();
+  });
+});
+
+test('blocks Retry while native attachment preview owns the file', async () => {
+  mockLocalAttachments.present.mockResolvedValueOnce({
+    schema_version: 1,
+    status: 'selected',
+    attachments: [
+      {
+        schema_version: 1,
+        id: 'retry-preview',
+        kind: 'text',
+        name: 'retry-preview.txt',
+        mime_type: 'text/plain',
+        size: 8,
+      },
+    ],
+  });
+  mockLocalRuntime.completeV2.mockRejectedValueOnce(new Error('first failed'));
+  const renderer = await renderApp();
+  const root = renderer.root;
+  await act(async () => actionByLabel(root, 'Add attachment').props.onPress());
+  await chooseAttachmentSource(root, 'Files');
+  await act(async () => {
+    root
+      .findByProps({ accessibilityLabel: 'Message DSH' })
+      .props.onChangeText('Retry after preview');
+  });
+  await act(async () => {
+    await actionByLabel(root, 'Send message').props.onPress();
+  });
+  const staleRetry = actionByLabel(root, 'Retry response').props.onPress;
+  await act(async () => {
+    root
+      .findByProps({ accessibilityLabel: 'Message DSH' })
+      .props.onChangeText('Do not send during preview');
+  });
+  const staleSend = actionByLabel(root, 'Send message').props.onPress;
+  let closePreview: ((value: unknown) => void) | undefined;
+  mockLocalAttachments.presentPreview.mockReturnValueOnce(
+    new Promise(resolve => {
+      closePreview = resolve;
+    }),
+  );
+  await act(async () => {
+    actionByLabel(root, 'Preview retry-preview.txt').props.onPress();
+    await Promise.resolve();
+  });
+  expect(actionByLabel(root, 'Retry response').props.disabled).toBe(true);
+
+  await act(async () => {
+    await staleRetry();
+    await staleSend();
+  });
+  expect(mockLocalRuntime.completeV2).toHaveBeenCalledTimes(1);
+  await act(async () => {
+    closePreview?.({ schema_version: 1, status: 'closed' });
+    await settle();
+  });
 });
 
 test('retry keeps the exact attachment history', async () => {
@@ -1788,16 +2729,14 @@ test('retry keeps the exact attachment history', async () => {
       },
     ],
   });
-  mockLocalRuntime.complete
+  mockLocalRuntime.completeV2
     .mockRejectedValueOnce(new Error('temporary failure'))
-    .mockResolvedValueOnce({
-      text: 'Recovered with the PDF',
-      model: 'deepseek-v4-flash',
-      request_id: 'request-2',
-      latency_ms: 50,
-      reasoning: '',
-      thinking_mode: 'high',
-    });
+    .mockImplementationOnce(async (request: StrictCompletionRequest) =>
+      strictCompletionResult(request, {
+        text: 'Recovered with the PDF',
+        latency_ms: 50,
+      }),
+    );
   const renderer = await renderApp();
   const root = renderer.root;
 
@@ -1812,12 +2751,13 @@ test('retry keeps the exact attachment history', async () => {
     await settle();
   });
 
-  expect(mockLocalRuntime.complete).toHaveBeenCalledTimes(2);
-  expect(mockLocalRuntime.complete.mock.calls[1]?.[1]).toEqual(
-    mockLocalRuntime.complete.mock.calls[0]?.[1],
+  expect(mockLocalRuntime.completeV2).toHaveBeenCalledTimes(2);
+  expect(mockLocalRuntime.completeV2.mock.calls[1]?.[0]?.visibleHistory).toEqual(
+    mockLocalRuntime.completeV2.mock.calls[0]?.[0]?.visibleHistory,
   );
   expect(
-    mockLocalRuntime.complete.mock.calls[1]?.[1]?.[0]?.attachments,
+    mockLocalRuntime.completeV2.mock.calls[1]?.[0]?.visibleHistory?.[0]
+      ?.attachments,
   ).toEqual([expect.objectContaining({ id: 'pdf-1', kind: 'pdf' })]);
 });
 
@@ -1864,7 +2804,7 @@ test('reselects Flash Exp when existing history still contains an image', async 
     await settle();
   });
 
-  expect(mockLocalRuntime.complete.mock.calls.at(-1)?.[0]).toBe(
+  expect(mockLocalRuntime.completeV2.mock.calls.at(-1)?.[0]?.model).toBe(
     'deepseek-v4-flash-vision-exp',
   );
   expect(lastPersistedState().conversations[0]?.model_id).toBe(
@@ -1894,7 +2834,7 @@ test('uses the model selected for the active conversation', async () => {
     await settle();
   });
 
-  expect(mockLocalRuntime.complete.mock.calls.at(-1)?.[0]).toBe(
+  expect(mockLocalRuntime.completeV2.mock.calls.at(-1)?.[0]?.model).toBe(
     'deepseek-v4-pro',
   );
   expect(lastPersistedState().conversations[0]?.model_id).toBe(
@@ -1924,7 +2864,7 @@ test('offers the multimodal Flash Exp route in the model picker', async () => {
     await settle();
   });
 
-  expect(mockLocalRuntime.complete.mock.calls.at(-1)?.[0]).toBe(
+  expect(mockLocalRuntime.completeV2.mock.calls.at(-1)?.[0]?.model).toBe(
     'deepseek-v4-flash-vision-exp',
   );
   expect(lastPersistedState().conversations[0]?.model_id).toBe(
@@ -1954,7 +2894,9 @@ test('selects thinking beside the composer and persists it per conversation', as
     await settle();
   });
 
-  expect(mockLocalRuntime.complete.mock.calls.at(-1)?.[3]).toBe('max');
+  expect(
+    mockLocalRuntime.completeV2.mock.calls.at(-1)?.[0]?.thinkingMode,
+  ).toBe('max');
   expect(lastPersistedState().conversations[0]?.thinking_mode).toBe('max');
 
   await act(async () => actionByLabel(root, 'Open navigation').props.onPress());
@@ -1963,14 +2905,14 @@ test('selects thinking beside the composer and persists it per conversation', as
 });
 
 test('passes thinking mode and renders persisted reasoning when enabled', async () => {
-  mockLocalRuntime.complete.mockResolvedValue({
-    text: 'Reasoned answer',
-    model: 'deepseek-v4-flash',
-    request_id: 'request-reasoning',
-    latency_ms: 88,
-    reasoning: 'I inspected the request before answering.',
-    thinking_mode: 'high',
-  });
+  mockLocalRuntime.completeV2.mockImplementation(
+    async (request: StrictCompletionRequest) =>
+      strictCompletionResult(request, {
+        text: 'Reasoned answer',
+        latency_ms: 88,
+        reasoning: 'I inspected the request before answering.',
+      }),
+  );
   const renderer = await renderApp();
   const root = renderer.root;
 
@@ -1993,7 +2935,9 @@ test('passes thinking mode and renders persisted reasoning when enabled', async 
     await settle();
   });
 
-  expect(mockLocalRuntime.complete.mock.calls.at(-1)?.[3]).toBe('high');
+  expect(
+    mockLocalRuntime.completeV2.mock.calls.at(-1)?.[0]?.thinkingMode,
+  ).toBe('high');
   expect(
     root.findByProps({ accessibilityLabel: 'Show reasoning' }),
   ).toBeDefined();
@@ -2007,11 +2951,16 @@ test('passes thinking mode and renders persisted reasoning when enabled', async 
 });
 
 test('stops an in-flight response and ignores its late resolution', async () => {
-  let resolveCompletion: ((value: unknown) => void) | undefined;
-  mockLocalRuntime.complete.mockReturnValue(
-    new Promise(resolve => {
-      resolveCompletion = resolve;
-    }),
+  let resolveCompletion:
+    | ((value: ReturnType<typeof strictCompletionResult>) => void)
+    | undefined;
+  let stoppedRequest: StrictCompletionRequest | undefined;
+  mockLocalRuntime.completeV2.mockImplementation(
+    (request: StrictCompletionRequest) =>
+      new Promise(resolve => {
+        stoppedRequest = request;
+        resolveCompletion = resolve;
+      }),
   );
   const renderer = await renderApp();
   const root = renderer.root;
@@ -2030,22 +2979,395 @@ test('stops an in-flight response and ignores its late resolution', async () => 
     await settle();
   });
   expect(mockLocalRuntime.cancelCompletion).toHaveBeenCalledTimes(1);
-  expect(mockLocalRuntime.cancelCompletion).toHaveBeenCalledWith('request-1');
+  expect(mockLocalRuntime.cancelCompletion).toHaveBeenCalledWith(
+    '00000001-0000-4000-8000-000000000000',
+  );
 
   await act(async () => {
-    resolveCompletion?.({
-      text: 'Too late',
-      model: 'deepseek-v4-flash',
-      request_id: 'late',
-      latency_ms: 99,
-      reasoning: '',
-      thinking_mode: 'high',
-    });
+    if (stoppedRequest !== undefined) {
+      resolveCompletion?.(
+        strictCompletionResult(stoppedRequest, {
+          text: 'Too late',
+          latency_ms: 99,
+        }),
+      );
+    }
     await settle();
   });
   expect(lastPersistedState().messages.map(message => message.text)).toEqual([
     'Stop me',
   ]);
+});
+
+test('ignores a stale Stop callback from an earlier completed request', async () => {
+  const requests: StrictCompletionRequest[] = [];
+  const resolvers: Array<
+    (value: ReturnType<typeof strictCompletionResult>) => void
+  > = [];
+  mockLocalRuntime.completeV2.mockImplementation(
+    (request: StrictCompletionRequest) =>
+      new Promise(resolve => {
+        requests.push(request);
+        resolvers.push(resolve);
+      }),
+  );
+  const renderer = await renderApp();
+  const root = renderer.root;
+  await act(async () => {
+    root
+      .findByProps({ accessibilityLabel: 'Message DSH' })
+      .props.onChangeText('First request');
+  });
+  await act(async () => {
+    actionByLabel(root, 'Send message').props.onPress();
+    await settle();
+  });
+  const staleStop = actionByLabel(root, 'Stop response').props.onPress;
+  await act(async () => {
+    resolvers[0]?.(
+      strictCompletionResult(requests[0]!, { text: 'First completed' }),
+    );
+    await settle();
+  });
+  await act(async () => {
+    root
+      .findByProps({ accessibilityLabel: 'Message DSH' })
+      .props.onChangeText('Second request');
+  });
+  await act(async () => {
+    actionByLabel(root, 'Send message').props.onPress();
+    await settle();
+  });
+  expect(requests).toHaveLength(2);
+  mockLocalRuntime.cancelCompletion.mockClear();
+
+  await act(async () => {
+    await staleStop();
+  });
+  expect(mockLocalRuntime.cancelCompletion).not.toHaveBeenCalled();
+
+  await act(async () => {
+    resolvers[1]?.(
+      strictCompletionResult(requests[1]!, { text: 'Second completed' }),
+    );
+    await settle();
+  });
+  expect(lastPersistedState().messages.map(message => message.text)).toEqual([
+    'First request',
+    'First completed',
+    'Second request',
+    'Second completed',
+  ]);
+});
+
+test('locks without Stop while a successful result is finalizing', async () => {
+  let completionRequest: StrictCompletionRequest | undefined;
+  let resolveCompletion:
+    | ((value: ReturnType<typeof strictCompletionResult>) => void)
+    | undefined;
+  mockLocalRuntime.completeV2.mockImplementationOnce(
+    (request: StrictCompletionRequest) =>
+      new Promise(resolve => {
+        completionRequest = request;
+        resolveCompletion = resolve;
+      }),
+  );
+  let resolveFinalPersist!: (saved: boolean) => void;
+  mockLocalRuntime.persistSession
+    .mockResolvedValueOnce(true)
+    .mockResolvedValueOnce(true)
+    .mockReturnValueOnce(
+      new Promise<boolean>(resolve => {
+        resolveFinalPersist = resolve;
+      }),
+    );
+  const renderer = await renderApp();
+  const root = renderer.root;
+  await act(async () => {
+    root
+      .findByProps({ accessibilityLabel: 'Message DSH' })
+      .props.onChangeText('Finalize success');
+  });
+  let sendPromise: Promise<unknown> | undefined;
+  await act(async () => {
+    const result = actionByLabel(root, 'Send message').props.onPress() as unknown;
+    if (result instanceof Promise) sendPromise = result;
+    await settle();
+  });
+  const staleStop = actionByLabel(root, 'Stop response').props.onPress;
+  await act(async () => {
+    resolveCompletion?.(
+      strictCompletionResult(completionRequest!, { text: 'Finalized answer' }),
+    );
+    await settle();
+  });
+
+  expect(
+    root.findAllByProps({ accessibilityLabel: 'Stop response' }),
+  ).toHaveLength(0);
+  expect(actionByLabel(root, 'Send message').props.disabled).toBe(true);
+  await act(async () => {
+    await staleStop();
+  });
+  expect(mockLocalRuntime.cancelCompletion).not.toHaveBeenCalled();
+  await act(async () => {
+    resolveFinalPersist(true);
+    await sendPromise;
+  });
+  expect(lastPersistedState().messages.at(-1)?.text).toBe('Finalized answer');
+  expect(JSON.stringify(renderer.toJSON())).not.toContain('Response stopped.');
+});
+
+test('locks without Stop while a failed result is becoming durable', async () => {
+  let rejectCompletion!: (error: unknown) => void;
+  mockLocalRuntime.completeV2.mockImplementationOnce(
+    () =>
+      new Promise((_resolve, reject) => {
+        rejectCompletion = reject;
+      }),
+  );
+  let resolveFailurePersist!: (saved: boolean) => void;
+  mockLocalRuntime.persistSession
+    .mockResolvedValueOnce(true)
+    .mockResolvedValueOnce(true)
+    .mockReturnValueOnce(
+      new Promise<boolean>(resolve => {
+        resolveFailurePersist = resolve;
+      }),
+    );
+  const renderer = await renderApp();
+  const root = renderer.root;
+  await act(async () => {
+    root
+      .findByProps({ accessibilityLabel: 'Message DSH' })
+      .props.onChangeText('Finalize failure');
+  });
+  let sendPromise: Promise<unknown> | undefined;
+  await act(async () => {
+    const result = actionByLabel(root, 'Send message').props.onPress() as unknown;
+    if (result instanceof Promise) sendPromise = result;
+    await settle();
+  });
+  const staleStop = actionByLabel(root, 'Stop response').props.onPress;
+  await act(async () => {
+    rejectCompletion({ code: 'E_COMPLETION_TRANSPORT' });
+    await settle();
+  });
+
+  expect(
+    root.findAllByProps({ accessibilityLabel: 'Stop response' }),
+  ).toHaveLength(0);
+  expect(actionByLabel(root, 'Send message').props.disabled).toBe(true);
+  await act(async () => {
+    await staleStop();
+  });
+  expect(mockLocalRuntime.cancelCompletion).not.toHaveBeenCalled();
+  await act(async () => {
+    resolveFailurePersist(true);
+    await sendPromise;
+  });
+  const rendered = JSON.stringify(renderer.toJSON());
+  expect(rendered).toContain('E_COMPLETION_TRANSPORT');
+  expect(rendered).not.toContain('Response stopped.');
+  expect(actionByLabel(root, 'Retry response')).toBeDefined();
+});
+
+test('cancels and persists the active round before switching chats', async () => {
+  const renderer = await renderApp();
+  const root = renderer.root;
+  const sendText = async (text: string) => {
+    await act(async () => {
+      root
+        .findByProps({ accessibilityLabel: 'Message DSH' })
+        .props.onChangeText(text);
+    });
+    await act(async () => {
+      await actionByLabel(root, 'Send message').props.onPress();
+    });
+  };
+
+  await sendText('Origin chat');
+  await act(async () => actionByLabel(root, 'Open navigation').props.onPress());
+  await act(async () => {
+    await actionByLabel(root, 'Create new chat').props.onPress();
+  });
+  await sendText('Destination chat');
+  await act(async () => actionByLabel(root, 'Open navigation').props.onPress());
+  await act(async () => {
+    await actionByLabel(root, 'Open chat Origin chat').props.onPress();
+  });
+
+  let activeRequest: StrictCompletionRequest | undefined;
+  let resolveCompletion:
+    | ((value: ReturnType<typeof strictCompletionResult>) => void)
+    | undefined;
+  mockLocalRuntime.completeV2.mockImplementationOnce(
+    (request: StrictCompletionRequest) =>
+      new Promise(resolve => {
+        activeRequest = request;
+        resolveCompletion = resolve;
+      }),
+  );
+  await act(async () => {
+    root
+      .findByProps({ accessibilityLabel: 'Message DSH' })
+      .props.onChangeText('Switch while active');
+  });
+  await act(async () => {
+    actionByLabel(root, 'Send message').props.onPress();
+    await settle();
+  });
+  expect(activeRequest).toBeDefined();
+  mockLocalRuntime.persistSession.mockClear();
+
+  await act(async () => actionByLabel(root, 'Open navigation').props.onPress());
+  await act(async () => {
+    await actionByLabel(root, 'Open chat Destination chat').props.onPress();
+  });
+
+  expect(mockLocalRuntime.cancelCompletion).toHaveBeenCalledWith(
+    activeRequest?.roundId,
+  );
+  const switchedSnapshots = mockLocalRuntime.persistSession.mock.calls.map(
+    call =>
+      JSON.parse(call[0] as string) as {
+        active_conversation_id: string;
+        conversations: Array<{
+          id: string;
+          title: string;
+          attempts: Array<{ status: string }>;
+          messages: Array<{ text: string }>;
+        }>;
+      },
+  );
+  expect(
+    switchedSnapshots.some(snapshot =>
+      snapshot.conversations
+        .find(conversation => conversation.title === 'Origin chat')
+        ?.attempts.some(attempt => attempt.status === 'cancelled'),
+    ),
+  ).toBe(true);
+  const selectedAfterSwitch = switchedSnapshots.at(-1)!;
+  expect(
+    selectedAfterSwitch.conversations.find(
+      conversation => conversation.id === selectedAfterSwitch.active_conversation_id,
+    )?.title,
+  ).toBe('Destination chat');
+
+  await act(async () => {
+    if (activeRequest !== undefined) {
+      resolveCompletion?.(
+        strictCompletionResult(activeRequest, { text: 'Too late after switch' }),
+      );
+    }
+    await settle();
+  });
+  expect(
+    lastPersistedState().conversations.flatMap(conversation =>
+      conversation.messages.map(message => message.text),
+    ),
+  ).not.toContain('Too late after switch');
+  expect(JSON.stringify(renderer.toJSON())).not.toContain('Response stopped.');
+});
+
+test('persists cancellation before deleting the active chat and ignores late output', async () => {
+  let deletePromise: Promise<unknown> | undefined;
+  const alert = jest
+    .spyOn(Alert, 'alert')
+    .mockImplementation((_title, _message, buttons) => {
+      const destructive = buttons?.find(button => button.style === 'destructive');
+      const invoke = destructive?.onPress as (() => unknown) | undefined;
+      const result = invoke?.();
+      if (
+        typeof result === 'object' &&
+        result !== null &&
+        'then' in result
+      ) {
+        deletePromise = Promise.resolve(result);
+      }
+    });
+  let activeRequest: StrictCompletionRequest | undefined;
+  let resolveCompletion:
+    | ((value: ReturnType<typeof strictCompletionResult>) => void)
+    | undefined;
+  mockLocalRuntime.completeV2.mockImplementationOnce(
+    (request: StrictCompletionRequest) =>
+      new Promise(resolve => {
+        activeRequest = request;
+        resolveCompletion = resolve;
+      }),
+  );
+  const renderer = await renderApp();
+  const root = renderer.root;
+
+  await act(async () => {
+    root
+      .findByProps({ accessibilityLabel: 'Message DSH' })
+      .props.onChangeText('Delete active chat');
+  });
+  await act(async () => {
+    actionByLabel(root, 'Send message').props.onPress();
+    await settle();
+  });
+  expect(activeRequest).toBeDefined();
+  mockLocalRuntime.persistSession.mockClear();
+  await act(async () => actionByLabel(root, 'Open navigation').props.onPress());
+  await act(async () => {
+    actionByLabel(root, 'Chat actions for Delete active chat').props.onPress();
+    root.findByType(ChatDrawer).props.onDismiss();
+  });
+  await act(async () => {
+    actionByLabel(root, 'Delete conversation').props.onPress();
+    root.findByType(ConversationActionSheet).props.onDismiss();
+    await settle();
+    expect(alert).toHaveBeenCalledTimes(1);
+    expect(deletePromise).toBeInstanceOf(Promise);
+    await deletePromise;
+  });
+
+  expect(mockLocalRuntime.cancelCompletion).toHaveBeenCalledWith(
+    activeRequest?.roundId,
+  );
+  const deletionSnapshots = mockLocalRuntime.persistSession.mock.calls.map(
+    call =>
+      JSON.parse(call[0] as string) as {
+        conversations: Array<{
+          title: string;
+          attempts: Array<{ status: string }>;
+          messages: Array<{ text: string }>;
+        }>;
+      },
+  );
+  const cancelledIndex = deletionSnapshots.findIndex(snapshot =>
+    snapshot.conversations
+      .find(conversation => conversation.title === 'Delete active chat')
+      ?.attempts.some(attempt => attempt.status === 'cancelled'),
+  );
+  const deletedIndex = deletionSnapshots.findIndex(
+    snapshot =>
+      !snapshot.conversations.some(
+        conversation => conversation.title === 'Delete active chat',
+      ),
+  );
+  expect(cancelledIndex).toBeGreaterThanOrEqual(0);
+  expect(deletedIndex).toBeGreaterThan(cancelledIndex);
+
+  await act(async () => {
+    if (activeRequest !== undefined) {
+      resolveCompletion?.(
+        strictCompletionResult(activeRequest, { text: 'Too late after delete' }),
+      );
+    }
+    await settle();
+  });
+  expect(
+    lastPersistedState().conversations.some(
+      conversation =>
+        conversation.messages.some(message => message.text === 'Too late after delete'),
+    ),
+  ).toBe(false);
+  expect(JSON.stringify(renderer.toJSON())).not.toContain('Response stopped.');
+  alert.mockRestore();
 });
 
 test('offers native credential recovery when no key is configured', async () => {

@@ -33,9 +33,6 @@ import { ConversationActionSheet } from '../components/ConversationActionSheet';
 import { EmptyChat } from '../components/EmptyChat';
 import { MessageList, type DisplayMessage } from '../components/MessageList';
 import { MirrorSettingsSheet } from '../components/MirrorSettingsSheet';
-import { runAgentTurn } from '../agent/runAgentTurn';
-import { executeAgentTool } from '../agent/AgentTools';
-import type { AgentTraceRow } from '../agent/AgentLoop';
 import { ConversationOptionsPicker } from '../components/ConversationOptionsPicker';
 import { HarnessPicker } from '../components/HarnessPicker';
 import type { StructuredBlock } from '../components/StructuredContent';
@@ -58,17 +55,23 @@ import {
   selectConversationById,
   selectOrderedConversations,
   type ChatState,
-  type ChatMessage,
   type Conversation,
   type AttachmentDescriptor,
 } from '../state';
 import {
   LocalRuntime,
-  type CompletionMessage,
-  type DeepSeekThinkingMode,
   type ModelTransitionSource,
   type RuntimeProof,
 } from '../native/LocalRuntime';
+import {
+  createCompletionController,
+  type CompletionControllerOutcome,
+  type CompletionControllerState,
+} from '../completion/CompletionController';
+import {
+  createSessionPersistenceCoordinator,
+  type SessionDurabilityResult,
+} from '../completion/SessionPersistence';
 import { readRuntimeEvidence } from '../runtime/evidence';
 import { LocalProjects, type LocalProject } from '../native/LocalProjects';
 import { LocalAttachments } from '../native/LocalAttachments';
@@ -78,12 +81,6 @@ import { useAppPresentation } from '../presentation/AppPresentation';
 import { fonts, hitSlop, type ThemePalette } from '../theme';
 
 type RequestState = 'idle' | 'sending';
-type RetryContext = {
-  conversationId: string;
-  history: CompletionMessage[];
-  model: SupportedModel;
-  thinkingMode: DeepSeekThinkingMode;
-};
 
 type LegacyMessage = {
   id?: unknown;
@@ -120,33 +117,46 @@ function waitForAttachmentPicker<T>(
   });
 }
 
-function completionMessage(message: ChatMessage): CompletionMessage {
-  return {
-    role: message.role,
-    content: message.text,
-    ...(message.attachments === undefined || message.attachments.length === 0
-      ? {}
-      : {
-          attachments: message.attachments.map(attachment => ({
-            schema_version: attachment.schema_version,
-            id: attachment.id,
-            kind: attachment.kind,
-            name: attachment.name,
-            mime_type: attachment.mime_type,
-            size: attachment.size,
-          })),
-        }),
-  };
-}
-
 function errorText(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
 }
 
-function errorCode(error: unknown): string | undefined {
-  if (typeof error !== 'object' || error === null || !('code' in error))
-    return undefined;
-  return typeof error.code === 'string' ? error.code : undefined;
+function completionBusy(state: CompletionControllerState): boolean {
+  return (
+    state.phase === 'preparing' ||
+    state.phase === 'persistence_pending' ||
+    state.phase === 'resume_available' ||
+    state.phase === 'starting' ||
+    state.phase === 'sending' ||
+    state.phase === 'cancelling' ||
+    state.phase === 'finalizing' ||
+    state.phase === 'commit_pending'
+  );
+}
+
+function completionCancellable(state: CompletionControllerState): boolean {
+  return (
+    state.phase === 'preparing' ||
+    state.phase === 'starting' ||
+    state.phase === 'sending'
+  );
+}
+
+function completionOwnershipKey(
+  state: CompletionControllerState,
+  conversationId: string | null,
+  uiEpoch: number,
+): string {
+  return JSON.stringify([
+    uiEpoch,
+    conversationId,
+    state.epoch,
+    state.phase,
+    state.conversationId,
+    state.turnId,
+    state.attemptId,
+    state.roundId,
+  ]);
 }
 
 function summaryFor(conversation: Conversation): ConversationSummary {
@@ -230,76 +240,6 @@ function legacyMessages(input: string): LegacyMessage[] | null {
   }
 }
 
-/**
- * Fixed completionV2 tool set for agent v0, bound to the conversation's
- * project repository through the executor bridge.
- */
-const AGENT_TOOLS_V0 = [
-  {
-    name: 'list_dir',
-    description: 'List files in the project directory.',
-    parameters: {
-      type: 'object',
-      properties: {
-        path: { type: 'string', description: 'Relative directory' },
-      },
-    },
-  },
-  {
-    name: 'read_file',
-    description: 'Read a bounded text file from the project.',
-    parameters: {
-      type: 'object',
-      properties: {
-        path: { type: 'string', description: 'Relative file path' },
-      },
-      required: ['path'],
-    },
-  },
-  {
-    name: 'write_file',
-    description: 'Create or overwrite a text file in the project.',
-    parameters: {
-      type: 'object',
-      properties: {
-        path: { type: 'string' },
-        content: { type: 'string' },
-      },
-      required: ['path', 'content'],
-    },
-  },
-  {
-    name: 'git_status',
-    description: 'Report branch, HEAD and cleanliness.',
-    parameters: { type: 'object', properties: {} },
-  },
-  {
-    name: 'git_commit',
-    description: 'Stage all changes and commit with a message.',
-    parameters: {
-      type: 'object',
-      properties: { message: { type: 'string' } },
-      required: ['message'],
-    },
-  },
-  {
-    name: 'git_push',
-    description: 'Push committed work to origin. Needs explicit approval.',
-    parameters: { type: 'object', properties: {} },
-  },
-] as const;
-
-function agentTraceLine(traces: readonly AgentTraceRow[]): string {
-  if (traces.length === 0) return '';
-  const parts = traces.map(row => {
-    if (row.blocked === 'denied_by_user') return `${row.name} blocked`;
-    if (row.ok === false) return `${row.name} failed`;
-    if (row.ok === true) return row.name;
-    return `${row.name}…`;
-  });
-  return `[agent] ${parts.join(' · ')}`;
-}
-
 export function HomeScreen() {
   const insets = useSafeAreaInsets();
   const {
@@ -317,6 +257,8 @@ export function HomeScreen() {
   const [draftAttachments, setDraftAttachments] = useState<
     readonly AttachmentDescriptor[]
   >([]);
+  const draftAttachmentsRef = useRef<readonly AttachmentDescriptor[]>([]);
+  draftAttachmentsRef.current = draftAttachments;
   const [attachmentBusy, setAttachmentBusy] = useState(false);
   const [attachmentNotice, setAttachmentNotice] = useState<string | null>(null);
   const [attachmentPreviews, setAttachmentPreviews] = useState<
@@ -352,24 +294,10 @@ export function HomeScreen() {
   const [credentialConfigured, setCredentialConfigured] = useState(false);
   const [credentialBusy, setCredentialBusy] = useState(false);
   const [runtimeChecking, setRuntimeChecking] = useState(true);
-  const [requestState, setRequestState] = useState<RequestState>('idle');
   const [proof, setProof] = useState<RuntimeProof | null>(null);
   const [runtimeFailure, setRuntimeFailure] = useState<string | null>(null);
   const [requestFailure, setRequestFailure] = useState<string | null>(null);
   const [storageWarning, setStorageWarning] = useState<string | null>(null);
-  const [retryContext, setRetryContext] = useState<RetryContext | null>(null);
-  const [agentTraces, setAgentTraces] = useState<readonly AgentTraceRow[]>([]);
-  const [agentApproval, setAgentApproval] = useState<{
-    callId: string;
-    name: string;
-    arguments: string;
-  } | null>(null);
-  const agentApprovalResolver = useRef<((approved: boolean) => void) | null>(
-    null,
-  );
-  const requestEpoch = useRef(0);
-  const requestStateRef = useRef<RequestState>('idle');
-  const activeRequestId = useRef<string | null>(null);
   const attachmentOperationGeneration = useRef(0);
   const activeAttachmentOperation = useRef<{
     generation: number;
@@ -379,15 +307,12 @@ export function HomeScreen() {
   const activeAttachmentPreviewId = useRef<string | null>(null);
   const afterDrawerDismiss = useRef<(() => void) | null>(null);
   const afterActionDismiss = useRef<(() => void) | null>(null);
+  const completionUiEpoch = useRef(0);
+  const retryActionInFlight = useRef(false);
   const started = useRef(false);
   const nativeAvailable = useMemo(() => DshHarnessAdapter.isAvailable(), []);
   const activeHarness =
     BUILTIN_HARNESSES.get(preferences.selectedHarnessId) ?? DSH_HARNESS;
-
-  const updateRequestState = useCallback((next: RequestState) => {
-    requestStateRef.current = next;
-    setRequestState(next);
-  }, []);
 
   useEffect(() => store.subscribe(setChatState), [store]);
 
@@ -471,24 +396,131 @@ export function HomeScreen() {
     [referencedAttachmentIds, t],
   );
 
+  const sessionPersistence = useMemo(
+    () =>
+      createSessionPersistenceCoordinator({
+        persistSession: json => LocalRuntime.persistSession(json),
+        loadSession: () => LocalRuntime.loadSession(),
+      }),
+    [],
+  );
+
+  const persistCurrent = useCallback(
+    async (): Promise<SessionDurabilityResult> => {
+      if (!nativeAvailable) {
+        setStorageWarning(t('home.persistenceUnavailable'));
+        return { status: 'unknown' };
+      }
+      try {
+        const snapshot = JSON.parse(
+          store.serialize(),
+        ) as Record<string, unknown>;
+        snapshot.preferences = JSON.parse(
+          preferencesStore.serialize(),
+        ) as unknown;
+        const result = await sessionPersistence.write(
+          JSON.stringify(snapshot),
+        );
+        if (result.status === 'committed') {
+          setStorageWarning(null);
+        } else {
+          setStorageWarning(
+            t('home.saveFailed', { error: result.status }),
+          );
+        }
+        return result;
+      } catch (error) {
+        setStorageWarning(t('home.saveFailed', { error: errorText(error) }));
+        return { status: 'unknown' };
+      }
+    },
+    [
+      nativeAvailable,
+      preferencesStore,
+      sessionPersistence,
+      store,
+      t,
+    ],
+  );
+
   const persist = useCallback(async (): Promise<boolean> => {
-    if (!nativeAvailable) {
-      setStorageWarning(t('home.persistenceUnavailable'));
-      return false;
-    }
-    try {
-      const snapshot = JSON.parse(store.serialize()) as Record<string, unknown>;
-      snapshot.preferences = JSON.parse(
-        preferencesStore.serialize(),
-      ) as unknown;
-      await LocalRuntime.persistSession(JSON.stringify(snapshot));
-      setStorageWarning(null);
-      return true;
-    } catch (error) {
-      setStorageWarning(t('home.saveFailed', { error: errorText(error) }));
-      return false;
-    }
-  }, [nativeAvailable, preferencesStore, store, t]);
+    return (await persistCurrent()).status === 'committed';
+  }, [persistCurrent]);
+
+  const persistCurrentRef = useRef(persistCurrent);
+  persistCurrentRef.current = persistCurrent;
+  const completionController = useMemo(
+    () =>
+      createCompletionController({
+        chat: store,
+        persistCurrent: () => persistCurrentRef.current(),
+        completeRoundV2: request =>
+          DshHarnessAdapter.completeRoundV2(request),
+        completeRoundV3: request =>
+          DshHarnessAdapter.completeRoundV3(request),
+        cancelRoundV2: roundId =>
+          DshHarnessAdapter.cancelRoundV2(roundId),
+        cancelRoundV3: roundId =>
+          DshHarnessAdapter.cancelRoundV3(roundId),
+        createRoundId: () => LocalRuntime.createCompletionRequestId(),
+      }),
+    [store],
+  );
+  const [completionState, setCompletionState] =
+    useState<CompletionControllerState>(() =>
+      completionController.getState(),
+    );
+  useEffect(
+    () => completionController.subscribe(setCompletionState),
+    [completionController],
+  );
+  const requestState: RequestState = completionBusy(completionState)
+    ? 'sending'
+    : 'idle';
+  const attachmentOwnershipKey = completionOwnershipKey(
+    completionState,
+    chatState.selectedConversationId,
+    completionUiEpoch.current,
+  );
+  const completionRetryVisible =
+    completionState.phase === 'retryable' ||
+    completionState.phase === 'resume_available' ||
+    completionState.phase === 'persistence_pending' ||
+    completionState.phase === 'commit_pending';
+  const durabilityFailure =
+    completionState.phase === 'persistence_pending' ||
+    completionState.phase === 'commit_pending'
+      ? completionState.failureCode ?? 'E_ATTEMPT_PERSISTENCE'
+      : null;
+  const visibleRequestFailure =
+    durabilityFailure ??
+    requestFailure ??
+    (completionRetryVisible
+      ? completionState.failureCode ??
+        (completionState.phase === 'resume_available'
+          ? 'E_ATTEMPT_INTERRUPTED'
+          : t('home.responseStopped'))
+      : null);
+
+  const applyCompletionOutcome = useCallback(
+    (result: CompletionControllerOutcome, expectedEpoch: number) => {
+      if (expectedEpoch !== completionUiEpoch.current) return;
+      if (
+        result.conversationId !== null &&
+        store.getState().selectedConversationId !== result.conversationId
+      ) {
+        return;
+      }
+      if (result.status === 'completed') {
+        setRequestFailure(null);
+      } else if (result.status === 'cancelled') {
+        setRequestFailure(t('home.responseStopped'));
+      } else {
+        setRequestFailure(result.code ?? 'E_COMPLETION_NATIVE');
+      }
+    },
+    [store, t],
+  );
 
   const ensureConversation = useCallback((): string => {
     const selected = store.getState().selectedConversationId;
@@ -502,7 +534,8 @@ export function HomeScreen() {
   const hydrateStoredState = useCallback(
     (stored: string | null) => {
       if (stored === null) {
-        ensureConversation();
+        const conversationId = ensureConversation();
+        completionController.reconcileHydrated(conversationId);
         return;
       }
       try {
@@ -527,6 +560,9 @@ export function HomeScreen() {
         store.hydrate(stored);
         if (store.getState().selectedConversationId === null)
           ensureConversation();
+        const selected = store.getState().selectedConversationId;
+        if (selected !== null)
+          completionController.reconcileHydrated(selected);
         return;
       }
 
@@ -553,7 +589,7 @@ export function HomeScreen() {
         t('home.storedChatsRejected', { error: hydrated.error.message }),
       );
     },
-    [ensureConversation, preferencesStore, store, t],
+    [completionController, ensureConversation, preferencesStore, store, t],
   );
 
   const bootstrap = useCallback(async () => {
@@ -690,11 +726,9 @@ export function HomeScreen() {
       model: SupportedModel,
       source: ModelTransitionSource,
     ): boolean => {
-      // UI disabled states are not a concurrency boundary: callbacks from an
-      // earlier render can still fire. The ref is updated synchronously before
-      // a request starts, so every model writer shares the same hard guard.
+      const controllerState = completionController.getState();
       if (
-        requestStateRef.current === 'sending' ||
+        completionBusy(controllerState) ||
         activeAttachmentOperation.current !== null
       ) {
         return false;
@@ -722,19 +756,25 @@ export function HomeScreen() {
         from_model: fromModel,
         to_model: model,
         source,
-        request_epoch: requestEpoch.current,
-        request_state: requestStateRef.current,
+        request_epoch: controllerState.epoch,
+        request_state: completionBusy(controllerState)
+          ? 'sending'
+          : 'idle',
         attachment_busy: activeAttachmentOperation.current !== null,
         draft_image_count: draftImageCount,
         history_image_count: historyImageCount,
       }).catch(() => undefined);
       return true;
     },
-    [draftAttachments, store],
+    [completionController, draftAttachments, store],
   );
 
   const discardDraftAttachments = useCallback(() => {
-    const ids = draftAttachments.map(attachment => attachment.id);
+    const referencedIds = new Set(referencedAttachmentIds(store.getState()));
+    const ids = draftAttachments
+      .map(attachment => attachment.id)
+      .filter(id => !referencedIds.has(id));
+    draftAttachmentsRef.current = [];
     setDraftAttachments([]);
     if (ids.length > 0 && LocalAttachments.isAvailable()) {
       LocalAttachments.discard(ids).catch(error =>
@@ -743,7 +783,7 @@ export function HomeScreen() {
         ),
       );
     }
-  }, [draftAttachments, t]);
+  }, [draftAttachments, referencedAttachmentIds, store, t]);
 
   const markAttachmentOperationStale = useCallback(() => {
     if (activeAttachmentOperation.current !== null) {
@@ -752,7 +792,18 @@ export function HomeScreen() {
   }, []);
 
   const addAttachment = useCallback(
-    async (source: AttachmentSource) => {
+    async (source: AttachmentSource, expectedOwnershipKey: string) => {
+      const liveOwnershipKey = completionOwnershipKey(
+        completionController.getState(),
+        store.getState().selectedConversationId,
+        completionUiEpoch.current,
+      );
+      if (
+        expectedOwnershipKey !== liveOwnershipKey ||
+        completionBusy(completionController.getState())
+      ) {
+        return;
+      }
       if (
         !LocalAttachments.isAvailable() ||
         activeAttachmentOperation.current !== null
@@ -768,9 +819,10 @@ export function HomeScreen() {
         stale: false,
       };
       const discardUnreferenced = (attachments: readonly AttachmentDescriptor[]) => {
+        const liveDraftAttachments = draftAttachmentsRef.current;
         const protectedIds = new Set([
           ...referencedAttachmentIds(store.getState()),
-          ...draftAttachments.map(attachment => attachment.id),
+          ...liveDraftAttachments.map(attachment => attachment.id),
         ]);
         const ids = attachments
           .map(attachment => attachment.id)
@@ -809,13 +861,23 @@ export function HomeScreen() {
           operation.conversationId !== conversationId ||
           operation.stale ||
           selectedConversationId !== conversationId ||
+          expectedOwnershipKey !==
+            completionOwnershipKey(
+              completionController.getState(),
+              selectedConversationId,
+              completionUiEpoch.current,
+            ) ||
+          completionBusy(completionController.getState()) ||
           selectConversationById(store.getState(), conversationId) === null
         ) {
           await discardUnreferenced(result.attachments).catch(() => undefined);
           return;
         }
-        const ids = new Set(draftAttachments.map(attachment => attachment.id));
-        let totalSize = draftAttachments.reduce(
+        const liveDraftAttachments = draftAttachmentsRef.current;
+        const ids = new Set(
+          liveDraftAttachments.map(attachment => attachment.id),
+        );
+        let totalSize = liveDraftAttachments.reduce(
           (sum, attachment) => sum + attachment.size,
           0,
         );
@@ -825,7 +887,7 @@ export function HomeScreen() {
           if (ids.has(attachment.id)) return;
           ids.add(attachment.id);
           if (
-            draftAttachments.length + accepted.length >=
+            liveDraftAttachments.length + accepted.length >=
               MAX_ATTACHMENTS_PER_MESSAGE ||
             totalSize + attachment.size > MAX_TOTAL_ATTACHMENT_SIZE
           ) {
@@ -835,7 +897,9 @@ export function HomeScreen() {
           totalSize += attachment.size;
           accepted.push(attachment);
         });
-        setDraftAttachments([...draftAttachments, ...accepted]);
+        const nextAttachments = [...liveDraftAttachments, ...accepted];
+        draftAttachmentsRef.current = nextAttachments;
+        setDraftAttachments(nextAttachments);
         if (overflow.length > 0) {
           LocalAttachments.discard(
             overflow.map(attachment => attachment.id),
@@ -847,7 +911,14 @@ export function HomeScreen() {
         if (
           operation?.generation === generation &&
           !operation.stale &&
-          store.getState().selectedConversationId === conversationId
+          store.getState().selectedConversationId === conversationId &&
+          expectedOwnershipKey ===
+            completionOwnershipKey(
+              completionController.getState(),
+              conversationId,
+              completionUiEpoch.current,
+            ) &&
+          !completionBusy(completionController.getState())
         ) {
           setRequestFailure(
             t('messages.attachment.failed', { error: errorText(error) }),
@@ -861,7 +932,7 @@ export function HomeScreen() {
       }
     },
     [
-      draftAttachments,
+      completionController,
       ensureConversation,
       referencedAttachmentIds,
       store,
@@ -870,11 +941,28 @@ export function HomeScreen() {
   );
 
   const removeDraftAttachment = useCallback(
-    (id: string) => {
-      setDraftAttachments(current =>
-        current.filter(attachment => attachment.id !== id),
+    (id: string, expectedOwnershipKey: string) => {
+      const liveOwnershipKey = completionOwnershipKey(
+        completionController.getState(),
+        store.getState().selectedConversationId,
+        completionUiEpoch.current,
       );
-      if (LocalAttachments.isAvailable()) {
+      if (
+        expectedOwnershipKey !== liveOwnershipKey ||
+        completionBusy(completionController.getState()) ||
+        activeAttachmentOperation.current !== null ||
+        activeAttachmentPreviewId.current !== null ||
+        !draftAttachmentsRef.current.some(attachment => attachment.id === id)
+      ) {
+        return;
+      }
+      const nextAttachments = draftAttachmentsRef.current.filter(
+        attachment => attachment.id !== id,
+      );
+      draftAttachmentsRef.current = nextAttachments;
+      setDraftAttachments(nextAttachments);
+      const referenced = referencedAttachmentIds(store.getState()).includes(id);
+      if (!referenced && LocalAttachments.isAvailable()) {
         LocalAttachments.discard([id]).catch(error =>
           setRequestFailure(
             t('messages.attachment.failed', { error: errorText(error) }),
@@ -882,12 +970,23 @@ export function HomeScreen() {
         );
       }
     },
-    [t],
+    [completionController, referencedAttachmentIds, store, t],
   );
 
   const presentAttachmentPreview = useCallback(
-    async (id: string) => {
-      if (activeAttachmentPreviewId.current !== null) return;
+    async (id: string, expectedOwnershipKey: string) => {
+      const liveOwnershipKey = completionOwnershipKey(
+        completionController.getState(),
+        store.getState().selectedConversationId,
+        completionUiEpoch.current,
+      );
+      if (
+        activeAttachmentPreviewId.current !== null ||
+        activeAttachmentOperation.current !== null ||
+        completionBusy(completionController.getState()) ||
+        expectedOwnershipKey !== liveOwnershipKey
+      )
+        return;
       if (!LocalAttachments.isAvailable()) {
         setRequestFailure(t('messages.attachment.previewUnavailable'));
         return;
@@ -898,9 +997,20 @@ export function HomeScreen() {
       try {
         await LocalAttachments.presentPreview(id);
       } catch (error) {
-        setRequestFailure(
-          t('messages.attachment.previewFailed', { error: errorText(error) }),
-        );
+        if (
+          activeAttachmentPreviewId.current === id &&
+          expectedOwnershipKey ===
+            completionOwnershipKey(
+              completionController.getState(),
+              store.getState().selectedConversationId,
+              completionUiEpoch.current,
+            ) &&
+          !completionBusy(completionController.getState())
+        ) {
+          setRequestFailure(
+            t('messages.attachment.previewFailed', { error: errorText(error) }),
+          );
+        }
       } finally {
         if (activeAttachmentPreviewId.current === id) {
           activeAttachmentPreviewId.current = null;
@@ -908,136 +1018,8 @@ export function HomeScreen() {
         }
       }
     },
-    [t],
+    [completionController, store, t],
   );
-
-  const finishCompletion = useCallback(
-    async (context: RetryContext, epoch: number) => {
-      const requestId = LocalRuntime.createCompletionRequestId();
-      activeRequestId.current = requestId;
-      try {
-        const result = await DshHarnessAdapter.complete(
-          context.model,
-          context.history,
-          requestId,
-          context.thinkingMode,
-        );
-        if (requestEpoch.current !== epoch) return;
-        store.appendAssistantMessage(context.conversationId, result.text, {
-          metadata: {
-            modelId: context.model,
-            latencyMs: result.latency_ms,
-            finishReason: 'stop',
-            ...(result.reasoning.length === 0
-              ? {}
-              : { reasoning: result.reasoning }),
-          },
-        });
-        setRetryContext(null);
-        setRequestFailure(null);
-        await persist();
-        await refreshProof();
-      } catch (error) {
-        if (requestEpoch.current !== epoch || errorCode(error) === 'cancelled')
-          return;
-        setRetryContext(context);
-        setRequestFailure(errorText(error));
-      } finally {
-        if (activeRequestId.current === requestId)
-          activeRequestId.current = null;
-        if (requestEpoch.current === epoch) updateRequestState('idle');
-      }
-    },
-    [persist, refreshProof, store, updateRequestState],
-  );
-
-  const runAgentCompletion = useCallback(
-    async (context: RetryContext, projectId: string, epoch: number) => {
-      const requestId = LocalRuntime.createCompletionRequestId();
-      activeRequestId.current = requestId;
-      const startedAt = Date.now();
-      setAgentTraces([]);
-      setAgentApproval(null);
-      try {
-        const result = await runAgentTurn({
-          projectId,
-          model: context.model,
-          thinkingMode: context.thinkingMode,
-          history: context.history,
-          tools: AGENT_TOOLS_V0,
-          requestId,
-          deps: {
-            modelCalls: async req => {
-              return await DshHarnessAdapter.completeV2(
-                req.model as Parameters<
-                  typeof DshHarnessAdapter.completeV2
-                >[0],
-                [...req.history],
-                req.requestId,
-                req.thinkingMode as Parameters<
-                  typeof DshHarnessAdapter.completeV2
-                >[3],
-                [...req.tools],
-              );
-            },
-            executeTool: (toolContext, name, argumentsJson) =>
-              executeAgentTool(
-                { projectId: toolContext.projectId },
-                name,
-                argumentsJson,
-              ),
-            requestApproval: call =>
-              new Promise<boolean>(resolve => {
-                setAgentApproval({
-                  callId: call.callId,
-                  name: call.name,
-                  arguments: call.arguments,
-                });
-                agentApprovalResolver.current = resolve;
-              }),
-            onTrace: rows => setAgentTraces(rows),
-            recordTrace: entries => {
-              LocalRuntime.recordAgentTrace(entries).catch(() => undefined);
-            },
-          },
-        });
-        if (requestEpoch.current !== epoch) return;
-        if (result.status === 'failed') {
-          setRequestFailure(result.failure?.code ?? 'E_AGENT_FAILED');
-          return;
-        }
-        if (result.status === 'cancelled') {
-          setRequestFailure(t('home.responseStopped'));
-          return;
-        }
-        const traceLine = agentTraceLine(result.traces);
-        const finalBody =
-          (traceLine.length > 0 ? traceLine + '\n\n' : '') +
-          (result.finalText ??
-            t('messages.agent.noAnswer'));
-        store.appendAssistantMessage(context.conversationId, finalBody, {
-          metadata: {
-            modelId: context.model,
-            latencyMs: Date.now() - startedAt,
-            finishReason: 'stop',
-          },
-        });
-        setRetryContext(null);
-        setRequestFailure(null);
-        await persist();
-        await refreshProof();
-      } catch (error) {
-        if (requestEpoch.current !== epoch) return;
-        setRequestFailure(errorText(error));
-      } finally {
-        if (activeRequestId.current === requestId) activeRequestId.current = null;
-        if (requestEpoch.current === epoch) updateRequestState('idle');
-        setAgentApproval(null);
-      }
-    },
-    [persist, refreshProof, store, t, updateRequestState],
-  );
-
 
   const send = useCallback(async () => {
     const prompt = draft.trim();
@@ -1045,8 +1027,9 @@ export function HomeScreen() {
     if (
       !credentialConfigured ||
       (prompt.length === 0 && outgoingAttachments.length === 0) ||
-      requestStateRef.current === 'sending' ||
-      activeAttachmentOperation.current !== null
+      completionBusy(completionController.getState()) ||
+      activeAttachmentOperation.current !== null ||
+      activeAttachmentPreviewId.current !== null
     )
       return;
     const conversationId = ensureConversation();
@@ -1073,77 +1056,144 @@ export function HomeScreen() {
         setAttachmentNotice(t('messages.attachment.visionEnabled'));
       }
     }
-    store.appendUserMessage(conversationId, prompt, {
-      attachments: outgoingAttachments,
-    });
-    const conversation = selectConversationById(
-      store.getState(),
-      conversationId,
-    );
-    if (conversation === null) return;
-    const context: RetryContext = {
-      conversationId,
-      model: conversation.modelId,
-      thinkingMode: conversation.thinkingMode,
-      history: conversation.messages.map(completionMessage),
-    };
-    const projectId = conversation.projectId;
-    const epoch = ++requestEpoch.current;
-    // Freeze synchronously before persistence or any other async boundary.
-    // This blocks stale callbacks and duplicate sends while retaining an exact
-    // model/effort/history snapshot for the request and its metadata.
-    updateRequestState('sending');
-    setDraft('');
-    setDraftAttachments([]);
+    const attachmentIds = outgoingAttachments.map(attachment => attachment.id);
     setAttachmentNotice(null);
     setRequestFailure(null);
-    setRetryContext(null);
-    await persist();
-    if (requestEpoch.current !== epoch) return;
-    if (
-      typeof projectId === 'string' &&
-      LocalRuntime.isCompletionV2Available()
-    ) {
-      await runAgentCompletion(context, projectId, epoch);
-      return;
-    }
-    await finishCompletion(context, epoch);
+    const outcomeEpoch = ++completionUiEpoch.current;
+    const result = await completionController.send(
+      {
+        conversationId,
+        text: prompt,
+        attachments: outgoingAttachments,
+      },
+      {
+        onPreparedDurable: () => {
+          setDraft(current => (current.trim() === prompt ? '' : current));
+          setDraftAttachments(current => {
+            const next =
+              current.length === attachmentIds.length &&
+              current.every((attachment, index) =>
+                attachment.id === attachmentIds[index],
+              )
+                ? []
+                : current;
+            draftAttachmentsRef.current = next;
+            return next;
+          });
+        },
+        onCommitted: () => {
+          refreshProof().catch(() => undefined);
+        },
+      },
+    );
+    applyCompletionOutcome(result, outcomeEpoch);
   }, [
-    credentialConfigured,
+    applyCompletionOutcome,
     changeConversationModel,
+    completionController,
+    credentialConfigured,
     draft,
     draftAttachments,
     ensureConversation,
-    finishCompletion,
-    persist,
-    runAgentCompletion,
+    refreshProof,
     store,
     t,
-    updateRequestState,
   ]);
 
-  const retry = useCallback(async () => {
-    if (retryContext === null || requestStateRef.current === 'sending') return;
-    const epoch = ++requestEpoch.current;
-    setRequestFailure(null);
-    updateRequestState('sending');
-    await finishCompletion(retryContext, epoch);
-  }, [finishCompletion, retryContext, updateRequestState]);
+  const retry = useCallback(async (expected: CompletionControllerState) => {
+    if (
+      retryActionInFlight.current ||
+      activeAttachmentOperation.current !== null ||
+      activeAttachmentPreviewId.current !== null
+    )
+      return;
+    const current = completionController.getState();
+    if (
+      current.epoch !== expected.epoch ||
+      current.phase !== expected.phase ||
+      current.conversationId !== expected.conversationId ||
+      current.attemptId !== expected.attemptId ||
+      current.roundId !== expected.roundId
+    ) {
+      return;
+    }
+    const actionable =
+      current.phase === 'persistence_pending' ||
+      current.phase === 'commit_pending' ||
+      ((current.phase === 'resume_available' ||
+        current.phase === 'retryable') &&
+        current.conversationId !== null &&
+        current.attemptId !== null);
+    if (!actionable) return;
+    retryActionInFlight.current = true;
+    const outcomeEpoch = ++completionUiEpoch.current;
+    let result: CompletionControllerOutcome | null = null;
+    try {
+      if (current.phase === 'persistence_pending') {
+        result = await completionController.retryPersistence();
+      } else if (current.phase === 'commit_pending') {
+        result = await completionController.retryCommit();
+      } else if (
+        current.phase === 'resume_available' &&
+        current.conversationId !== null &&
+        current.attemptId !== null
+      ) {
+        result = await completionController.resume(
+          current.conversationId,
+          current.attemptId,
+          { onCommitted: () => refreshProof().catch(() => undefined) },
+        );
+      } else if (
+        current.phase === 'retryable' &&
+        current.conversationId !== null &&
+        current.attemptId !== null
+      ) {
+        result = await completionController.retry(
+          current.conversationId,
+          current.attemptId,
+          { onCommitted: () => refreshProof().catch(() => undefined) },
+        );
+      }
+      if (result !== null) applyCompletionOutcome(result, outcomeEpoch);
+    } finally {
+      retryActionInFlight.current = false;
+    }
+  }, [applyCompletionOutcome, completionController, refreshProof]);
 
+  const cancel = useCallback(async (expected: CompletionControllerState) => {
+    const owned = completionController.getState();
+    if (
+      !completionCancellable(owned) ||
+      owned.epoch !== expected.epoch ||
+      owned.conversationId !== expected.conversationId ||
+      owned.attemptId !== expected.attemptId ||
+      owned.roundId !== expected.roundId
+    ) {
+      return;
+    }
+    const outcomeEpoch = ++completionUiEpoch.current;
+    await completionController.cancel();
+    if (outcomeEpoch !== completionUiEpoch.current) return;
+    const current = completionController.getState();
+    if (
+      current.phase === 'persistence_pending' ||
+      current.phase === 'blocked'
+    ) {
+      setRequestFailure(current.failureCode ?? 'E_ATTEMPT_PERSISTENCE');
+    } else {
+      setRequestFailure(t('home.responseStopped'));
+    }
+  }, [completionController, t]);
 
-  const cancel = useCallback(() => {
-    const requestId = activeRequestId.current;
-    activeRequestId.current = null;
-    requestEpoch.current += 1;
-    updateRequestState('idle');
-    setRetryContext(null);
-    setRequestFailure(t('home.responseStopped'));
-    if (requestId !== null)
-      DshHarnessAdapter.cancel(requestId).catch(() => undefined);
-  }, [t, updateRequestState]);
-
-  const createConversation = useCallback(() => {
-    if (requestState === 'sending') cancel();
+  const createConversation = useCallback(async () => {
+    const currentId = store.getState().selectedConversationId;
+    if (
+      currentId !== null &&
+      !(await completionController.beforeConversationChange(currentId))
+    ) {
+      return;
+    }
+    completionUiEpoch.current += 1;
     markAttachmentOperationStale();
     discardDraftAttachments();
     store.createConversation({
@@ -1153,38 +1203,45 @@ export function HomeScreen() {
     setDraft('');
     setAttachmentNotice(null);
     setRequestFailure(null);
-    setRetryContext(null);
     setDrawerVisible(false);
-    persist().catch(() => undefined);
+    completionController.reconcileHydrated(
+      store.getState().selectedConversationId!,
+    );
+    await persist();
   }, [
-    cancel,
+    completionController,
     discardDraftAttachments,
     markAttachmentOperationStale,
     persist,
     preferencesStore,
-    requestState,
     store,
   ]);
 
   const selectConversation = useCallback(
-    (id: string) => {
-      if (requestState === 'sending') cancel();
+    async (id: string) => {
+      const currentId = store.getState().selectedConversationId;
+      if (
+        currentId !== null &&
+        !(await completionController.beforeConversationChange(currentId))
+      ) {
+        return;
+      }
+      completionUiEpoch.current += 1;
       markAttachmentOperationStale();
       discardDraftAttachments();
       store.selectConversation(id);
       setDraft('');
       setAttachmentNotice(null);
       setRequestFailure(null);
-      setRetryContext(null);
       setDrawerVisible(false);
-      persist().catch(() => undefined);
+      completionController.reconcileHydrated(id);
+      await persist();
     },
     [
-      cancel,
+      completionController,
       discardDraftAttachments,
       markAttachmentOperationStale,
       persist,
-      requestState,
       store,
     ],
   );
@@ -1205,52 +1262,67 @@ export function HomeScreen() {
         {
           text: t('common.delete'),
           style: 'destructive',
-          onPress: () => {
-            const deletingConversation = selectConversationById(
-              store.getState(),
-              deleting,
-            );
-            const candidateAttachmentIds = Array.from(
-              new Set(
-                (deletingConversation?.messages ?? []).flatMap(message =>
-                  (message.attachments ?? []).map(attachment => attachment.id),
+          onPress: () =>
+            (async () => {
+              if (
+                !(await completionController.beforeConversationDelete(deleting))
+              ) {
+                return;
+              }
+              completionUiEpoch.current += 1;
+              setRequestFailure(null);
+              const deletingConversation = selectConversationById(
+                store.getState(),
+                deleting,
+              );
+              const candidateAttachmentIds = Array.from(
+                new Set(
+                  (deletingConversation?.messages ?? []).flatMap(message =>
+                    (message.attachments ?? []).map(
+                      attachment => attachment.id,
+                    ),
+                  ),
                 ),
-              ),
-            );
-            discardDraftAttachments();
-            store.deleteConversation(deleting);
-            if (store.getState().selectedConversationId === null) {
-              store.createConversation({
-                modelId: preferencesStore.getState().defaultModel,
-                thinkingMode: preferencesStore.getState().thinkingMode,
-              });
-            }
-            const remainingIds = new Set(
-              referencedAttachmentIds(store.getState()),
-            );
-            const orphanedIds = candidateAttachmentIds.filter(
-              id => !remainingIds.has(id),
-            );
-            persist()
-              .then(saved => {
-                if (
-                  saved &&
-                  orphanedIds.length > 0 &&
-                  LocalAttachments.isAvailable()
-                ) {
-                  return LocalAttachments.discard(orphanedIds).then(
-                    () => undefined,
-                  );
-                }
-                return undefined;
-              })
-              .catch(() => undefined);
-          },
+              );
+              if (store.getState().selectedConversationId === deleting) {
+                markAttachmentOperationStale();
+                discardDraftAttachments();
+                setDraft('');
+              }
+              store.deleteConversation(deleting);
+              if (store.getState().selectedConversationId === null) {
+                store.createConversation({
+                  modelId: preferencesStore.getState().defaultModel,
+                  thinkingMode: preferencesStore.getState().thinkingMode,
+                });
+              }
+              const selectedAfterDelete =
+                store.getState().selectedConversationId;
+              if (selectedAfterDelete !== null) {
+                completionController.reconcileHydrated(selectedAfterDelete);
+              }
+              const remainingIds = new Set(
+                referencedAttachmentIds(store.getState()),
+              );
+              const orphanedIds = candidateAttachmentIds.filter(
+                id => !remainingIds.has(id),
+              );
+              const saved = await persist();
+              if (
+                saved &&
+                orphanedIds.length > 0 &&
+                LocalAttachments.isAvailable()
+              ) {
+                await LocalAttachments.discard(orphanedIds);
+              }
+            })().catch(() => undefined),
         },
       ]);
     },
     [
+      completionController,
       discardDraftAttachments,
+      markAttachmentOperationStale,
       persist,
       preferencesStore,
       referencedAttachmentIds,
@@ -1269,7 +1341,7 @@ export function HomeScreen() {
   const selectModel = useCallback(
     (model: SupportedModel, source: ModelTransitionSource) => {
       if (
-        requestStateRef.current === 'sending' ||
+        completionBusy(completionController.getState()) ||
         activeAttachmentOperation.current !== null
       ) {
         return;
@@ -1279,7 +1351,7 @@ export function HomeScreen() {
       setAttachmentNotice(null);
       persist().catch(() => undefined);
     },
-    [changeConversationModel, ensureConversation, persist],
+    [changeConversationModel, completionController, ensureConversation, persist],
   );
 
   const selectComposerModel = useCallback(
@@ -1293,9 +1365,9 @@ export function HomeScreen() {
   );
 
   const selectThinkingMode = useCallback(
-    (thinkingMode: DeepSeekThinkingMode) => {
+    (thinkingMode: Conversation['thinkingMode']) => {
       if (
-        requestStateRef.current === 'sending' ||
+        completionBusy(completionController.getState()) ||
         activeAttachmentOperation.current !== null
       ) {
         return;
@@ -1304,18 +1376,18 @@ export function HomeScreen() {
       store.setThinkingMode(conversationId, thinkingMode);
       persist().catch(() => undefined);
     },
-    [ensureConversation, persist, store],
+    [completionController, ensureConversation, persist, store],
   );
 
   const openComposerOptions = useCallback(() => {
     if (
-      requestStateRef.current === 'sending' ||
+      completionBusy(completionController.getState()) ||
       activeAttachmentOperation.current !== null
     ) {
       return;
     }
     setComposerOptionsVisible(true);
-  }, []);
+  }, [completionController]);
 
   useEffect(() => {
     if (!LocalWorkspaces.isAvailable()) return;
@@ -1350,8 +1422,16 @@ export function HomeScreen() {
   );
 
   const chatInProject = useCallback(
-    (project: LocalProject) => {
+    async (project: LocalProject) => {
       const current = selectActiveConversation(store.getState());
+      if (
+        current !== null &&
+        !(await completionController.beforeConversationChange(current.id))
+      ) {
+        return;
+      }
+      completionUiEpoch.current += 1;
+      setRequestFailure(null);
       if (current?.projectId !== project.id) {
         if (current === null || current.messages.length > 0) {
           markAttachmentOperationStale();
@@ -1369,9 +1449,12 @@ export function HomeScreen() {
       }
       setActiveProjectName(project.name);
       setProjectsVisible(false);
-      persist().catch(() => undefined);
+      const selected = store.getState().selectedConversationId;
+      if (selected !== null) completionController.reconcileHydrated(selected);
+      await persist();
     },
     [
+      completionController,
       discardDraftAttachments,
       markAttachmentOperationStale,
       persist,
@@ -1380,13 +1463,21 @@ export function HomeScreen() {
     ],
   );
 
-  const unbindProjectFromConversation = useCallback(() => {
+  const unbindProjectFromConversation = useCallback(async () => {
     const conversationId = store.getState().selectedConversationId;
     if (conversationId === null) return;
+    if (
+      !(await completionController.beforeConversationChange(conversationId))
+    ) {
+      return;
+    }
+    completionUiEpoch.current += 1;
+    setRequestFailure(null);
     store.unbindConversationFromProject(conversationId);
     setActiveProjectName(null);
-    persist().catch(() => undefined);
-  }, [persist, store]);
+    completionController.reconcileHydrated(conversationId);
+    await persist();
+  }, [completionController, persist, store]);
 
   const selectHarness = useCallback(
     (harnessId: string) => {
@@ -1570,7 +1661,9 @@ export function HomeScreen() {
             autoExpandTools={preferences.autoExpandTools}
             messages={activeMessages}
             onPreviewAttachment={id => {
-              presentAttachmentPreview(id).catch(() => undefined);
+              presentAttachmentPreview(id, attachmentOwnershipKey).catch(
+                () => undefined,
+              );
             }}
             previewingAttachmentId={previewingAttachmentId}
             showReasoning={preferences.showReasoning}
@@ -1583,17 +1676,24 @@ export function HomeScreen() {
             { paddingBottom: Math.max(insets.bottom, 11) },
           ]}
         >
-          {(requestFailure !== null || storageWarning !== null) && (
+          {(visibleRequestFailure !== null || storageWarning !== null) && (
             <View style={styles.notice}>
               <Text numberOfLines={3} style={styles.noticeText}>
-                {requestFailure ?? storageWarning}
+                {visibleRequestFailure ?? storageWarning}
               </Text>
-              {retryContext !== null && requestFailure !== null && (
+              {completionRetryVisible && visibleRequestFailure !== null && (
                 <Pressable
                   accessibilityLabel={t('messages.retryResponse')}
                   accessibilityRole="button"
+                  accessibilityState={{
+                    disabled:
+                      attachmentBusy || previewingAttachmentId !== null,
+                  }}
+                  disabled={attachmentBusy || previewingAttachmentId !== null}
                   hitSlop={hitSlop}
-                  onPress={() => retry().catch(() => undefined)}
+                  onPress={() =>
+                    retry(completionState).catch(() => undefined)
+                  }
                   style={({ pressed }) => [
                     styles.retry,
                     pressed && styles.pressed,
@@ -1604,7 +1704,7 @@ export function HomeScreen() {
               )}
             </View>
           )}
-          {attachmentNotice !== null && requestFailure === null && (
+          {attachmentNotice !== null && visibleRequestFailure === null && (
             <View
               accessibilityLiveRegion="polite"
               accessibilityRole="status"
@@ -1637,75 +1737,6 @@ export function HomeScreen() {
               {runtimeLabel.toLocaleUpperCase()}
             </Text>
           </Pressable>
-          {(agentApproval !== null || agentTraces.length > 0) && (
-            <View accessibilityRole="status" style={styles.agentPanel}>
-              {agentApproval !== null && (
-                <>
-                  <Text style={styles.agentPanelText}>
-                    {t('messages.agent.allowTitle', {
-                      name: agentApproval.name,
-                    })}
-                  </Text>
-                  <View style={styles.agentButtonsRow}>
-                    <Pressable
-                      accessibilityLabel={t('agent.allow')}
-                      accessibilityRole="button"
-                      onPress={() => {
-                        const resolve = agentApprovalResolver.current;
-                        setAgentApproval(null);
-                        agentApprovalResolver.current = null;
-                        resolve?.(true);
-                      }}
-                      style={({ pressed }) => [
-                        styles.agentAllow,
-                        pressed && styles.pressed,
-                      ]}
-                    >
-                      <Text style={styles.agentButtonText}>
-                        {t('agent.allow')}
-                      </Text>
-                    </Pressable>
-                    <Pressable
-                      accessibilityLabel={t('agent.deny')}
-                      accessibilityRole="button"
-                      onPress={() => {
-                        const resolve = agentApprovalResolver.current;
-                        setAgentApproval(null);
-                        agentApprovalResolver.current = null;
-                        resolve?.(false);
-                      }}
-                      style={({ pressed }) => [
-                        styles.agentDeny,
-                        pressed && styles.pressed,
-                      ]}
-                    >
-                      <Text style={styles.agentButtonTextDim}>
-                        {t('agent.deny')}
-                      </Text>
-                    </Pressable>
-                  </View>
-                </>
-              )}
-              {agentApproval === null && agentTraces.length > 0 && (
-                <Text numberOfLines={2} style={styles.agentTrace}>
-                  {`AGENT  ${agentTraces
-                    .map(
-                      row =>
-                        `${row.name}${
-                          row.blocked === 'denied_by_user'
-                            ? ' x'
-                            : row.ok === false
-                              ? ' !'
-                              : row.ok === true
-                                ? ' ok'
-                                : ' ...'
-                        }`,
-                    )
-                    .join('   ')}`}
-                </Text>
-              )}
-            </View>
-          )}
           <ChatComposer
             attachmentBusy={attachmentBusy}
             attachments={draftAttachments}
@@ -1713,6 +1744,10 @@ export function HomeScreen() {
             draft={draft}
             harnessName={activeHarness.name}
             model={activeModel}
+            locked={
+              requestState === 'sending' || previewingAttachmentId !== null
+            }
+            ownershipKey={attachmentOwnershipKey}
             optionsVisible={composerOptionsVisible}
             previewingAttachmentId={previewingAttachmentId}
             projectName={activeProjectName}
@@ -1723,19 +1758,21 @@ export function HomeScreen() {
                 : workspaceNames[activeWorkspaceId] ?? null
             }
             workspacePickerVisible={workspaceSheetVisible}
-            sending={requestState === 'sending'}
-            onAddAttachment={source => {
-              addAttachment(source).catch(() => undefined);
+            sending={completionCancellable(completionState)}
+            onAddAttachment={(source, ownershipKey) => {
+              addAttachment(source, ownershipKey).catch(() => undefined);
             }}
-            onCancel={cancel}
+            onCancel={() => cancel(completionState)}
             onChange={setDraft}
             onConfigure={() => setSettingsVisible(true)}
             onOptionsPress={openComposerOptions}
             onWorkspacePress={() => {
               setWorkspaceSheetVisible(true);
             }}
-            onPreviewAttachment={id => {
-              presentAttachmentPreview(id).catch(() => undefined);
+            onPreviewAttachment={(id, ownershipKey) => {
+              presentAttachmentPreview(id, ownershipKey).catch(
+                () => undefined,
+              );
             }}
             onRemoveAttachment={removeDraftAttachment}
             onSend={() => send().catch(() => undefined)}
