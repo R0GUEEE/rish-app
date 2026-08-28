@@ -3,7 +3,7 @@ import type { LucideIcon } from 'lucide-react-native';
 import ChevronRight from 'lucide-react-native/icons/chevron-right';
 import CircleAlert from 'lucide-react-native/icons/circle-alert';
 import CircleOff from 'lucide-react-native/icons/circle-off';
-import FileCheck2 from 'lucide-react-native/icons/file-check-2';
+import FileCheckCorner from 'lucide-react-native/icons/file-check-corner';
 import FileClock from 'lucide-react-native/icons/file-clock';
 import FolderCog from 'lucide-react-native/icons/folder-cog';
 import LoaderCircle from 'lucide-react-native/icons/loader-circle';
@@ -112,7 +112,7 @@ function statusIcon(status: EffectiveStatus): LucideIcon {
     case 'ready_partial':
       return ShieldCheck;
     case 'partial':
-      return FileCheck2;
+      return FileCheckCorner;
     case 'stale':
       return TriangleAlert;
     case 'error':
