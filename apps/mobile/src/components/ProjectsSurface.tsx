@@ -113,6 +113,7 @@ type Props = {
   visible: boolean;
   onChatInProject?: (project: LocalProject) => void;
   onClose: () => void;
+  onDismiss?: () => void;
   onOpenFiles: (project: LocalProject) => void;
   onUnbindFromChat?: () => void;
 };
@@ -124,6 +125,7 @@ export function ProjectsSurface({
   visible,
   onChatInProject,
   onClose,
+  onDismiss,
   onOpenFiles,
   onUnbindFromChat,
 }: Props) {
@@ -436,6 +438,7 @@ export function ProjectsSurface({
       accessibilityLabel={title}
       closeAccessibilityLabel={t('projects.close')}
       onClose={onClose}
+      onDismiss={onDismiss}
       scrim={false}
       side="right"
       visible={visible}

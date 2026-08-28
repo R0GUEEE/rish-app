@@ -7,6 +7,7 @@ import ReactTestRenderer, {
 } from 'react-test-renderer';
 
 import { ProjectsSurface } from '../src/components/ProjectsSurface';
+import { SlidingSurface } from '../src/components/SlidingSurface';
 import { AppPresentationProvider } from '../src/presentation/AppPresentation';
 import {
   createDefaultPreferences,
@@ -95,11 +96,13 @@ async function settle() {
 async function renderSurface({
   boundProjectId = null,
   onChatInProject = jest.fn(),
+  onDismiss = jest.fn(),
   onOpenFiles = jest.fn(),
   onUnbindFromChat = jest.fn(),
 }: {
   boundProjectId?: string | null;
   onChatInProject?: jest.Mock;
+  onDismiss?: jest.Mock;
   onOpenFiles?: jest.Mock;
   onUnbindFromChat?: jest.Mock;
 } = {}): Promise<Renderer> {
@@ -118,6 +121,7 @@ async function renderSurface({
           visible
           onChatInProject={onChatInProject}
           onClose={jest.fn()}
+          onDismiss={onDismiss}
           onOpenFiles={onOpenFiles}
           onUnbindFromChat={onUnbindFromChat}
         />
@@ -128,6 +132,16 @@ async function renderSurface({
   if (renderer === undefined) throw new Error('renderer was not created');
   return renderer;
 }
+
+test('forwards dismissal only after the Projects sliding surface finishes', async () => {
+  const onDismiss = jest.fn();
+  const renderer = await renderSurface({ onDismiss });
+  const surface = renderer.root.findByType(SlidingSurface);
+
+  expect(surface.props.onDismiss).toBe(onDismiss);
+  await act(async () => surface.props.onDismiss());
+  expect(onDismiss).toHaveBeenCalledTimes(1);
+});
 
 function actionByLabel(
   root: ReactTestInstance,

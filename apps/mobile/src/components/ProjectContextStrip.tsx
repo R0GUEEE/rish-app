@@ -159,13 +159,19 @@ function changedPathCount(state: ProjectContextState): number {
   ).size;
 }
 
-export function ProjectContextStrip({
-  checking = false,
-  disabled = false,
-  projectName,
-  state,
-  onPress,
-}: ProjectContextStripProps) {
+export const ProjectContextStrip = React.forwardRef<
+  React.ElementRef<typeof View>,
+  ProjectContextStripProps
+>(function ProjectContextStripImpl(
+  {
+    checking = false,
+    disabled = false,
+    projectName,
+    state,
+    onPress,
+  },
+  focusTargetRef,
+) {
   const { colors, t } = useAppPresentation();
   const styles = useMemo(() => createStyles(colors), [colors]);
   const disabledRef = useRef(disabled);
@@ -220,6 +226,7 @@ export function ProjectContextStrip({
 
   return (
     <Pressable
+      ref={focusTargetRef}
       accessibilityHint={t('context.strip.openDetails')}
       accessibilityLabel={accessibilityLabel}
       accessibilityRole="button"
@@ -265,7 +272,7 @@ export function ProjectContextStrip({
       <AppIcon color={colors.muted} icon={ChevronRight} size={16} />
     </Pressable>
   );
-}
+});
 
 const createStyles = (colors: ThemePalette) =>
   StyleSheet.create({

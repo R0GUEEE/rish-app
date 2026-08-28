@@ -143,6 +143,9 @@ const enUS = {
   'context.sheet.empty': 'No project files found',
   'context.sheet.unavailable': 'Project context is unavailable',
   'context.sheet.loadError': 'Could not load project context',
+  'context.sheet.error.persistence': 'Could not save project context',
+  'context.sheet.error.ownerStale':
+    'Project context changed. Reopen it to continue',
   'context.sheet.eligible': 'Eligible',
   'context.sheet.candidate.accessibility':
     '{path}, {size}, {git}, {eligibility}',
@@ -171,6 +174,10 @@ const enUS = {
   'context.sheet.refreshFiles': 'Refresh files',
   'context.sheet.refreshContext': 'Refresh context',
   'context.sheet.disable': 'Disable context',
+  'context.sheet.retryPersistence': 'Retry save',
+  'context.sheet.retryCleanup': 'Retry cleanup',
+  'context.sheet.refreshAndSend': 'Refresh and send',
+  'context.sheet.sendWithoutContext': 'Send without project context',
   'context.sheet.cancel': 'Cancel',
   'context.sheet.disclosure':
     'Confirming authorizes Rish to send only the listed content as read-only model context. It does not authorize file edits, commands, commits, or pushes. Those actions remain governed by separate tool approvals.',
@@ -754,6 +761,8 @@ const zhCN: Readonly<Record<TranslationKey, string>> = {
   'context.sheet.empty': '没有找到项目文件',
   'context.sheet.unavailable': '项目上下文不可用',
   'context.sheet.loadError': '无法载入项目上下文',
+  'context.sheet.error.persistence': '无法保存项目上下文',
+  'context.sheet.error.ownerStale': '项目上下文已变化，请重新打开后继续',
   'context.sheet.eligible': '可选择',
   'context.sheet.candidate.accessibility':
     '{path}，{size}，{git}，{eligibility}',
@@ -782,6 +791,10 @@ const zhCN: Readonly<Record<TranslationKey, string>> = {
   'context.sheet.refreshFiles': '刷新文件',
   'context.sheet.refreshContext': '刷新上下文',
   'context.sheet.disable': '停用上下文',
+  'context.sheet.retryPersistence': '重试保存',
+  'context.sheet.retryCleanup': '重试清理',
+  'context.sheet.refreshAndSend': '刷新并发送',
+  'context.sheet.sendWithoutContext': '不使用项目上下文发送',
   'context.sheet.cancel': '取消',
   'context.sheet.disclosure':
     '确认后，Rish 仅会将列表中的内容作为只读模型上下文发送。此授权不包含文件编辑、命令、提交或推送；这些操作仍由独立的工具审批管理。',

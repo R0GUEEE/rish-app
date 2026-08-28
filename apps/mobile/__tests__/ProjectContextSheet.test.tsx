@@ -150,7 +150,12 @@ type Harness = {
     readonly onRefreshCandidates: jest.Mock;
     readonly onRefreshContext: jest.Mock;
     readonly onDisable: jest.Mock;
-    readonly onCancel: jest.Mock;
+    readonly onClose: jest.Mock;
+    readonly onCancelCandidate: jest.Mock;
+    readonly onRetryPersistence: jest.Mock;
+    readonly onRetryCleanup: jest.Mock;
+    readonly onRefreshAndSend: jest.Mock;
+    readonly onSendWithoutContext: jest.Mock;
     readonly onDismiss: jest.Mock;
   };
   readonly props: ProjectContextSheetProps;
@@ -170,11 +175,17 @@ async function renderSheet(
     onRefreshCandidates: jest.fn(),
     onRefreshContext: jest.fn(),
     onDisable: jest.fn(),
-    onCancel: jest.fn(),
+    onClose: jest.fn(),
+    onCancelCandidate: jest.fn(),
+    onRetryPersistence: jest.fn(),
+    onRetryCleanup: jest.fn(),
+    onRefreshAndSend: jest.fn(),
+    onSendWithoutContext: jest.fn(),
     onDismiss: jest.fn(),
   };
   const props: ProjectContextSheetProps = {
     visible: true,
+    actionKey: 'owner-a:0',
     mode: 'candidates',
     projectName: 'demo',
     query: '',
@@ -190,6 +201,7 @@ async function renderSheet(
     manifest: null,
     hasActiveContext: true,
     confirmationRequired: true,
+    recoveryAction: null,
     disabled: false,
     busyAction: null,
     ...callbacks,
@@ -259,7 +271,8 @@ test('keeps an immediate 44 point title-bar close action during busy read-only s
   expect(flatStyle(close).minWidth).toBeGreaterThanOrEqual(44);
 
   await act(async () => close.props.onPress());
-  expect(callbacks.onCancel).toHaveBeenCalledTimes(1);
+  expect(callbacks.onClose).toHaveBeenCalledTimes(1);
+  expect(callbacks.onCancelCandidate).not.toHaveBeenCalled();
 });
 
 test('renders eligible and ineligible metadata rows with exact accessibility state', async () => {
@@ -441,18 +454,19 @@ test('keeps every candidate action at least 44 points with busy and disabled sem
   }
   expect(actionByLabel(renderer.root, 'Prepare context').props.accessibilityState.busy).toBe(true);
   const cancel = actionByLabel(renderer.root, 'Cancel');
-  expect(cancel.props.disabled).toBe(false);
+  expect(cancel.props.disabled).toBe(true);
   await act(async () => cancel.props.onPress());
-  expect(callbacks.onCancel).toHaveBeenCalledTimes(1);
+  expect(callbacks.onCancelCandidate).not.toHaveBeenCalled();
 });
 
-test('always allows Cancel and system close in read-only disabled mode', async () => {
+test('always allows close but hard-disables candidate cancellation in read-only mode', async () => {
   const { renderer, callbacks } = await renderSheet({ disabled: true });
   const cancel = actionByLabel(renderer.root, 'Cancel');
-  expect(cancel.props.disabled).toBe(false);
+  expect(cancel.props.disabled).toBe(true);
   await act(async () => cancel.props.onPress());
   await act(async () => renderer.root.findByType(SlidingSurface).props.onClose());
-  expect(callbacks.onCancel).toHaveBeenCalledTimes(2);
+  expect(callbacks.onCancelCandidate).not.toHaveBeenCalled();
+  expect(callbacks.onClose).toHaveBeenCalledTimes(1);
 });
 
 test('rejects a stale enabled mutation callback after the Sheet becomes disabled', async () => {
@@ -472,6 +486,251 @@ test('rejects a stale enabled mutation callback after the Sheet becomes disabled
 
   await act(async () => stalePrepare());
   expect(harness.callbacks.onPrepare).not.toHaveBeenCalled();
+});
+
+test('rejects a captured candidate cancellation after the Sheet becomes busy', async () => {
+  const harness = await renderSheet();
+  const staleCancel = actionByLabel(
+    harness.renderer.root,
+    'Cancel',
+  ).props.onPress;
+
+  await act(async () => {
+    harness.renderer.update(
+      presentation(
+        <ProjectContextSheet {...harness.props} busyAction="prepare" />,
+        'en-US',
+      ),
+    );
+  });
+  await act(async () => staleCancel());
+
+  expect(harness.callbacks.onCancelCandidate).not.toHaveBeenCalled();
+  expect(harness.callbacks.onClose).not.toHaveBeenCalled();
+});
+
+test('rejects a captured candidate cancellation after same-state owner replacement', async () => {
+  const harness = await renderSheet();
+  const staleCancel = actionByLabel(
+    harness.renderer.root,
+    'Cancel',
+  ).props.onPress;
+
+  await act(async () => {
+    harness.renderer.update(
+      presentation(
+        <ProjectContextSheet {...harness.props} actionKey="owner-b:0" />,
+        'en-US',
+      ),
+    );
+  });
+  await act(async () => staleCancel());
+
+  expect(harness.callbacks.onCancelCandidate).not.toHaveBeenCalled();
+});
+
+test.each([
+  ['E_CONTEXT_PERSISTENCE', 'Could not save project context'],
+  [
+    'E_CONTEXT_OWNER_STALE',
+    'Project context changed. Reopen it to continue',
+  ],
+] as const)(
+  'renders the stable controller error %s without native details',
+  async (errorCode, message) => {
+    const { renderer } = await renderSheet({ errorCode });
+    const output = renderedText(renderer.root);
+    expect(output).toContain(message);
+    expect(output).not.toContain(errorCode);
+    expect(output).not.toContain('/private/');
+  },
+);
+
+test.each([
+  ['persistence', 'Retry save', 'onRetryPersistence'],
+  ['cleanup', 'Retry cleanup', 'onRetryCleanup'],
+] as const)(
+  'routes the %s recovery action exactly once',
+  async (recoveryAction, label, callbackName) => {
+    const harness = await renderSheet({
+      recoveryAction,
+      errorCode:
+        recoveryAction === 'persistence'
+          ? 'E_CONTEXT_PERSISTENCE'
+          : 'E_CONTEXT_STORAGE',
+    });
+    const action = actionByLabel(harness.renderer.root, label);
+    expect(action.props.disabled).toBe(false);
+    expect(flatStyle(action).minHeight).toBeGreaterThanOrEqual(44);
+    await act(async () => action.props.onPress());
+
+    expect(harness.callbacks[callbackName]).toHaveBeenCalledTimes(1);
+    expect(
+      harness.callbacks[
+        callbackName === 'onRetryPersistence'
+          ? 'onRetryCleanup'
+          : 'onRetryPersistence'
+      ],
+    ).not.toHaveBeenCalled();
+  },
+);
+
+test('hard-guards a captured persistence retry after recovery ownership changes', async () => {
+  const harness = await renderSheet({ recoveryAction: 'persistence' });
+  const staleRetry = actionByLabel(
+    harness.renderer.root,
+    'Retry save',
+  ).props.onPress;
+
+  await act(async () => {
+    harness.renderer.update(
+      presentation(
+        <ProjectContextSheet
+          {...harness.props}
+          recoveryAction="cleanup"
+        />,
+        'en-US',
+      ),
+    );
+  });
+  await act(async () => staleRetry());
+
+  expect(harness.callbacks.onRetryPersistence).not.toHaveBeenCalled();
+  expect(harness.callbacks.onRetryCleanup).not.toHaveBeenCalled();
+});
+
+test('hard-guards a captured retry after same-state owner replacement', async () => {
+  const harness = await renderSheet({ recoveryAction: 'persistence' });
+  const staleRetry = actionByLabel(
+    harness.renderer.root,
+    'Retry save',
+  ).props.onPress;
+
+  await act(async () => {
+    harness.renderer.update(
+      presentation(
+        <ProjectContextSheet
+          {...harness.props}
+          actionKey="owner-b:0"
+          recoveryAction="persistence"
+        />,
+        'en-US',
+      ),
+    );
+  });
+  await act(async () => staleRetry());
+
+  expect(harness.callbacks.onRetryPersistence).not.toHaveBeenCalled();
+});
+
+test('renders only the explicit stale pending-send recovery choices', async () => {
+  const harness = await renderSheet({
+    mode: 'recovery',
+    candidates: [],
+    selectedPaths: [],
+    selectedCandidates: [],
+    manifest,
+    hasActiveContext: false,
+    confirmationRequired: false,
+  });
+
+  for (const label of [
+    'Refresh and send',
+    'Send without project context',
+    'Cancel',
+  ]) {
+    expect(actionByLabel(harness.renderer.root, label)).toBeDefined();
+  }
+  expect(renderedText(harness.renderer.root)).not.toContain(
+    'No project files found',
+  );
+  for (const label of [
+    'Prepare context',
+    'Confirm context',
+    'Confirm partial context',
+    'Refresh files',
+    'Refresh context',
+    'Disable context',
+    'Retry save',
+    'Retry cleanup',
+  ]) {
+    expect(
+      harness.renderer.root.findAllByProps({ accessibilityLabel: label }),
+    ).toHaveLength(0);
+  }
+
+  await act(async () =>
+    actionByLabel(harness.renderer.root, 'Refresh and send').props.onPress(),
+  );
+  await act(async () =>
+    actionByLabel(
+      harness.renderer.root,
+      'Send without project context',
+    ).props.onPress(),
+  );
+  await act(async () =>
+    actionByLabel(harness.renderer.root, 'Cancel').props.onPress(),
+  );
+  expect(harness.callbacks.onRefreshAndSend).toHaveBeenCalledTimes(1);
+  expect(harness.callbacks.onSendWithoutContext).toHaveBeenCalledTimes(1);
+  expect(harness.callbacks.onClose).toHaveBeenCalledTimes(1);
+  expect(harness.callbacks.onCancelCandidate).not.toHaveBeenCalled();
+});
+
+test('hard-guards stale pending-send actions after recovery mode is disabled', async () => {
+  const harness = await renderSheet({ mode: 'recovery' });
+  const staleRefresh = actionByLabel(
+    harness.renderer.root,
+    'Refresh and send',
+  ).props.onPress;
+  const staleWithoutContext = actionByLabel(
+    harness.renderer.root,
+    'Send without project context',
+  ).props.onPress;
+
+  await act(async () => {
+    harness.renderer.update(
+      presentation(
+        <ProjectContextSheet {...harness.props} disabled mode="recovery" />,
+        'en-US',
+      ),
+    );
+  });
+  await act(async () => staleRefresh());
+  await act(async () => staleWithoutContext());
+
+  expect(harness.callbacks.onRefreshAndSend).not.toHaveBeenCalled();
+  expect(harness.callbacks.onSendWithoutContext).not.toHaveBeenCalled();
+});
+
+test('hard-guards stale pending-send actions after same-state owner replacement', async () => {
+  const harness = await renderSheet({ mode: 'recovery' });
+  const staleRefresh = actionByLabel(
+    harness.renderer.root,
+    'Refresh and send',
+  ).props.onPress;
+  const staleWithoutContext = actionByLabel(
+    harness.renderer.root,
+    'Send without project context',
+  ).props.onPress;
+
+  await act(async () => {
+    harness.renderer.update(
+      presentation(
+        <ProjectContextSheet
+          {...harness.props}
+          actionKey="owner-b:0"
+          mode="recovery"
+        />,
+        'en-US',
+      ),
+    );
+  });
+  await act(async () => staleRefresh());
+  await act(async () => staleWithoutContext());
+
+  expect(harness.callbacks.onRefreshAndSend).not.toHaveBeenCalled();
+  expect(harness.callbacks.onSendWithoutContext).not.toHaveBeenCalled();
 });
 
 test('renders metadata-only disclosure and the corrected authorization boundary', async () => {
@@ -514,6 +773,21 @@ test('renders the corrected Chinese disclosure instead of a global capability cl
   expect(output).toContain('确认部分上下文');
   expect(output).toContain('机密路径');
   expect(output).not.toContain('无法编辑文件');
+});
+
+test('renders the explicit stale recovery choices and persistence error in Chinese', async () => {
+  const { renderer } = await renderSheet(
+    {
+      mode: 'recovery',
+      errorCode: 'E_CONTEXT_PERSISTENCE',
+    },
+    'zh-CN',
+  );
+  const output = renderedText(renderer.root);
+  expect(output).toContain('刷新并发送');
+  expect(output).toContain('不使用项目上下文发送');
+  expect(output).toContain('取消');
+  expect(output).toContain('无法保存项目上下文');
 });
 
 test('never renders raw content or absolute-path metadata extras', async () => {
@@ -674,7 +948,7 @@ test('keeps disclosure actions reachable, 44 point, and independently routed', a
     ['Confirm context', callbacks.onConfirm],
     ['Refresh context', callbacks.onRefreshContext],
     ['Disable context', callbacks.onDisable],
-    ['Cancel', callbacks.onCancel],
+    ['Cancel', callbacks.onCancelCandidate],
   ] as const) {
     const action = actionByLabel(renderer.root, label);
     expect(flatStyle(action).minHeight).toBeGreaterThanOrEqual(44);
@@ -746,6 +1020,8 @@ test('defines key-identical English and Chinese Sheet vocabulary', () => {
     'context.sheet.empty',
     'context.sheet.unavailable',
     'context.sheet.loadError',
+    'context.sheet.error.persistence',
+    'context.sheet.error.ownerStale',
     'context.sheet.omission.secretPath',
     'context.sheet.omission.generated',
     'context.sheet.omission.lockfile',
@@ -768,6 +1044,10 @@ test('defines key-identical English and Chinese Sheet vocabulary', () => {
     'context.sheet.refreshFiles',
     'context.sheet.refreshContext',
     'context.sheet.disable',
+    'context.sheet.retryPersistence',
+    'context.sheet.retryCleanup',
+    'context.sheet.refreshAndSend',
+    'context.sheet.sendWithoutContext',
     'context.sheet.cancel',
     'context.sheet.disclosure',
     'context.sheet.disclosure.provider',

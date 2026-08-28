@@ -1,5 +1,5 @@
 import React from 'react';
-import { StyleSheet, Text } from 'react-native';
+import { StyleSheet, Text, View } from 'react-native';
 import ReactTestRenderer, {
   act,
   type ReactTestInstance,
@@ -342,6 +342,48 @@ test('rejects an enabled press callback captured before the strip is disabled', 
 
   await act(async () => stalePress());
   expect(onPress).not.toHaveBeenCalled();
+});
+
+test('forwards the real native focus target and safely releases stale refs', async () => {
+  const firstRef = React.createRef<React.ElementRef<typeof View>>();
+  const secondRef = React.createRef<React.ElementRef<typeof View>>();
+  const state = contextState('ready');
+  let renderer: Renderer | undefined;
+
+  await act(async () => {
+    renderer = ReactTestRenderer.create(
+      presentation(
+        <ProjectContextStrip
+          ref={firstRef}
+          projectName="demo"
+          state={state}
+          onPress={jest.fn()}
+        />,
+        'en-US',
+      ),
+    );
+  });
+  if (renderer === undefined) throw new Error('renderer was not created');
+  expect(firstRef.current === null).toBe(false);
+
+  await act(async () => {
+    renderer!.update(
+      presentation(
+        <ProjectContextStrip
+          ref={secondRef}
+          projectName="demo"
+          state={state}
+          onPress={jest.fn()}
+        />,
+        'en-US',
+      ),
+    );
+  });
+  expect(firstRef.current).toBeNull();
+  expect(secondRef.current === null).toBe(false);
+
+  await act(async () => renderer!.unmount());
+  expect(secondRef.current).toBeNull();
 });
 
 test('renders localized Chinese metadata and keeps translation keys identical', async () => {

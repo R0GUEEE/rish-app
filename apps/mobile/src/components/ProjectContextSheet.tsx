@@ -21,8 +21,8 @@ import {
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 
 import type {
-  ProjectContextBridgeErrorCode,
   ProjectContextCandidatePageV1,
+  ProjectContextControllerErrorCode,
   ProjectContextManifestV1,
   ProjectContextOmissionReason,
 } from '../project-context';
@@ -33,18 +33,26 @@ import { PROJECT_CONTEXT_MAX_BYTES } from './ProjectContextStrip';
 import { SlidingSurface } from './SlidingSurface';
 
 export type ProjectContextSheetFilter = 'all' | 'selected' | 'changed';
-export type ProjectContextSheetMode = 'candidates' | 'disclosure';
+export type ProjectContextSheetMode =
+  | 'candidates'
+  | 'disclosure'
+  | 'recovery';
 export type ProjectContextSheetBusyAction =
   | 'prepare'
   | 'confirm'
   | 'refresh'
   | 'disable'
   | null;
+export type ProjectContextSheetRecoveryAction =
+  | 'persistence'
+  | 'cleanup'
+  | null;
 
 type Candidate = ProjectContextCandidatePageV1['candidates'][number];
 
 export type ProjectContextSheetProps = {
   readonly visible: boolean;
+  readonly actionKey: string;
   readonly mode: ProjectContextSheetMode;
   readonly projectName: string;
   readonly query: string;
@@ -56,10 +64,11 @@ export type ProjectContextSheetProps = {
   readonly loading: boolean;
   readonly loadingMore: boolean;
   readonly unavailable: boolean;
-  readonly errorCode: ProjectContextBridgeErrorCode | null;
+  readonly errorCode: ProjectContextControllerErrorCode | null;
   readonly manifest: ProjectContextManifestV1 | null;
   readonly hasActiveContext: boolean;
   readonly confirmationRequired: boolean;
+  readonly recoveryAction: ProjectContextSheetRecoveryAction;
   readonly disabled: boolean;
   readonly busyAction: ProjectContextSheetBusyAction;
   readonly onQueryChange: (query: string) => void;
@@ -71,7 +80,12 @@ export type ProjectContextSheetProps = {
   readonly onRefreshCandidates: () => void;
   readonly onRefreshContext: () => void;
   readonly onDisable: () => void;
-  readonly onCancel: () => void;
+  readonly onClose: () => void;
+  readonly onCancelCandidate: () => void;
+  readonly onRetryPersistence: () => void;
+  readonly onRetryCleanup: () => void;
+  readonly onRefreshAndSend: () => void;
+  readonly onSendWithoutContext: () => void;
   readonly onDismiss: () => void;
 };
 
@@ -153,7 +167,26 @@ function sourceKey(source: DisclosureRow & { kind: 'included' }) {
 }
 
 function actionLocked(props: ProjectContextSheetProps): boolean {
-  return props.disabled || props.busyAction !== null;
+  return (
+    props.disabled ||
+    props.busyAction !== null ||
+    props.recoveryAction !== null
+  );
+}
+
+function recoveryActionEnabled(props: ProjectContextSheetProps): boolean {
+  return !props.disabled && props.busyAction === null;
+}
+
+function controllerErrorKey(code: ProjectContextControllerErrorCode) {
+  switch (code) {
+    case 'E_CONTEXT_PERSISTENCE':
+      return 'context.sheet.error.persistence' as const;
+    case 'E_CONTEXT_OWNER_STALE':
+      return 'context.sheet.error.ownerStale' as const;
+    default:
+      return 'context.sheet.loadError' as const;
+  }
 }
 
 function selectedCandidateSummary(props: ProjectContextSheetProps) {
@@ -205,7 +238,12 @@ export function ProjectContextSheet(props: ProjectContextSheetProps) {
   const styles = useMemo(() => createStyles(colors), [colors]);
   const latest = useRef(props);
   const titleFocused = useRef(false);
+  const renderActionKey = props.actionKey;
   latest.current = props;
+  const currentForAction = (): ProjectContextSheetProps | null => {
+    const current = latest.current;
+    return current.actionKey === renderActionKey ? current : null;
+  };
 
   useEffect(() => {
     if (!props.visible) titleFocused.current = false;
@@ -261,17 +299,20 @@ export function ProjectContextSheet(props: ProjectContextSheetProps) {
       : filteredCandidates;
 
   const handleQueryChange = (query: string) => {
-    const current = latest.current;
+    const current = currentForAction();
+    if (current === null) return;
     if (!actionLocked(current)) current.onQueryChange(query);
   };
   const handleFilterChange = (filter: ProjectContextSheetFilter) => {
-    const current = latest.current;
+    const current = currentForAction();
+    if (current === null) return;
     if (!actionLocked(current) && current.mode === 'candidates') {
       current.onFilterChange(filter);
     }
   };
   const handleTogglePath = (path: string) => {
-    const current = latest.current;
+    const current = currentForAction();
+    if (current === null) return;
     const candidate =
       current.candidates.find(row => row.path === path) ??
       current.selectedCandidates.find(row => row.path === path);
@@ -287,7 +328,8 @@ export function ProjectContextSheet(props: ProjectContextSheetProps) {
     }
   };
   const handleLoadMore = () => {
-    const current = latest.current;
+    const current = currentForAction();
+    if (current === null) return;
     if (
       !actionLocked(current) &&
       current.mode === 'candidates' &&
@@ -301,33 +343,81 @@ export function ProjectContextSheet(props: ProjectContextSheetProps) {
     }
   };
   const handlePrepare = () => {
-    const current = latest.current;
+    const current = currentForAction();
+    if (current === null) return;
     if (canPrepare(current)) current.onPrepare();
   };
   const handleConfirm = () => {
-    const current = latest.current;
+    const current = currentForAction();
+    if (current === null) return;
     if (canConfirm(current)) current.onConfirm();
   };
   const handleRefreshCandidates = () => {
-    const current = latest.current;
+    const current = currentForAction();
+    if (current === null) return;
     if (!actionLocked(current) && current.mode === 'candidates') {
       current.onRefreshCandidates();
     }
   };
   const handleRefreshContext = () => {
-    const current = latest.current;
+    const current = currentForAction();
+    if (current === null) return;
     if (!actionLocked(current) && current.hasActiveContext) {
       current.onRefreshContext();
     }
   };
   const handleDisable = () => {
-    const current = latest.current;
+    const current = currentForAction();
+    if (current === null) return;
     if (!actionLocked(current) && current.hasActiveContext) {
       current.onDisable();
     }
   };
-  const handleCancel = () => {
-    latest.current.onCancel();
+  const handleClose = () => {
+    latest.current.onClose();
+  };
+  const handleCancelCandidate = () => {
+    const current = currentForAction();
+    if (current === null) return;
+    if (current.mode !== 'recovery' && !actionLocked(current)) {
+      current.onCancelCandidate();
+    }
+  };
+  const handleRetryPersistence = () => {
+    const current = currentForAction();
+    if (current === null) return;
+    if (
+      current.mode !== 'recovery' &&
+      current.recoveryAction === 'persistence' &&
+      recoveryActionEnabled(current)
+    ) {
+      current.onRetryPersistence();
+    }
+  };
+  const handleRetryCleanup = () => {
+    const current = currentForAction();
+    if (current === null) return;
+    if (
+      current.mode !== 'recovery' &&
+      current.recoveryAction === 'cleanup' &&
+      recoveryActionEnabled(current)
+    ) {
+      current.onRetryCleanup();
+    }
+  };
+  const handleRefreshAndSend = () => {
+    const current = currentForAction();
+    if (current === null) return;
+    if (current.mode === 'recovery' && !actionLocked(current)) {
+      current.onRefreshAndSend();
+    }
+  };
+  const handleSendWithoutContext = () => {
+    const current = currentForAction();
+    if (current === null) return;
+    if (current.mode === 'recovery' && !actionLocked(current)) {
+      current.onSendWithoutContext();
+    }
   };
   const handleDismiss = () => latest.current.onDismiss();
 
@@ -336,7 +426,7 @@ export function ProjectContextSheet(props: ProjectContextSheetProps) {
   const candidateNotice = props.unavailable
     ? t('context.sheet.unavailable')
     : props.errorCode !== null
-      ? t('context.sheet.loadError')
+      ? t(controllerErrorKey(props.errorCode))
       : props.loading
         ? t('context.sheet.loading')
         : filteredCandidates.length === 0
@@ -344,6 +434,11 @@ export function ProjectContextSheet(props: ProjectContextSheetProps) {
           : props.loadingMore
             ? t('context.sheet.loadingMore')
             : null;
+  const recoveryNotice = props.unavailable
+    ? t('context.sheet.unavailable')
+    : props.errorCode === null
+      ? null
+      : t(controllerErrorKey(props.errorCode));
 
   const actionButton = (
     label: string,
@@ -382,6 +477,24 @@ export function ProjectContextSheet(props: ProjectContextSheetProps) {
       </Text>
     </Pressable>
   );
+
+  const recoveryActionButton = (() => {
+    if (props.recoveryAction === 'persistence') {
+      return actionButton(
+        t('context.sheet.retryPersistence'),
+        handleRetryPersistence,
+        { disabled: !recoveryActionEnabled(props), icon: RefreshCw },
+      );
+    }
+    if (props.recoveryAction === 'cleanup') {
+      return actionButton(
+        t('context.sheet.retryCleanup'),
+        handleRetryCleanup,
+        { disabled: !recoveryActionEnabled(props), icon: RefreshCw },
+      );
+    }
+    return null;
+  })();
 
   const filterButton = (filter: ProjectContextSheetFilter, label: string) => {
     const selectedFilter = props.filter === filter;
@@ -452,6 +565,7 @@ export function ProjectContextSheet(props: ProjectContextSheetProps) {
 
   const candidateFooter = (
     <View style={[styles.actions, { paddingBottom: insets.bottom + 14 }]}>
+      {recoveryActionButton}
       {actionButton(t('context.sheet.prepare'), handlePrepare, {
         disabled: !canPrepare(props),
         busy: props.busyAction === 'prepare',
@@ -472,8 +586,8 @@ export function ProjectContextSheet(props: ProjectContextSheetProps) {
         danger: true,
         icon: ShieldOff,
       })}
-      {actionButton(t('context.sheet.cancel'), handleCancel, {
-        disabled: false,
+      {actionButton(t('context.sheet.cancel'), handleCancelCandidate, {
+        disabled: actionLocked(props),
         icon: X,
       })}
     </View>
@@ -538,7 +652,7 @@ export function ProjectContextSheet(props: ProjectContextSheetProps) {
     const failure = props.unavailable
       ? t('context.sheet.unavailable')
       : props.errorCode !== null
-        ? t('context.sheet.loadError')
+        ? t(controllerErrorKey(props.errorCode))
         : null;
     return (
       <View style={styles.disclosureHeader}>
@@ -635,6 +749,7 @@ export function ProjectContextSheet(props: ProjectContextSheetProps) {
       : t('context.sheet.confirm');
     return (
       <View style={[styles.actions, { paddingBottom: insets.bottom + 14 }]}>
+        {recoveryActionButton}
         {props.confirmationRequired &&
           actionButton(confirmLabel, handleConfirm, {
             disabled: !canConfirm(props),
@@ -651,19 +766,52 @@ export function ProjectContextSheet(props: ProjectContextSheetProps) {
           danger: true,
           icon: ShieldOff,
         })}
-        {actionButton(t('context.sheet.cancel'), handleCancel, {
-          disabled: false,
+        {actionButton(t('context.sheet.cancel'), handleCancelCandidate, {
+          disabled: actionLocked(props),
           icon: X,
         })}
       </View>
     );
   })();
 
+  const recoveryBody = (
+    <View style={styles.recoveryBody}>
+      {recoveryNotice !== null && (
+        <Text
+          accessibilityLiveRegion="polite"
+          accessibilityRole={props.errorCode === null ? 'status' : 'alert'}
+          style={props.errorCode === null ? styles.notice : styles.error}
+        >
+          {recoveryNotice}
+        </Text>
+      )}
+      <View style={[styles.actions, { paddingBottom: insets.bottom + 14 }]}>
+        {actionButton(
+          t('context.sheet.refreshAndSend'),
+          handleRefreshAndSend,
+          {
+            disabled: actionLocked(props),
+            icon: RefreshCw,
+          },
+        )}
+        {actionButton(
+          t('context.sheet.sendWithoutContext'),
+          handleSendWithoutContext,
+          { disabled: actionLocked(props) },
+        )}
+        {actionButton(t('context.sheet.cancel'), handleClose, {
+          disabled: false,
+          icon: X,
+        })}
+      </View>
+    </View>
+  );
+
   return (
     <SlidingSurface
       accessibilityLabel={t('context.sheet.title')}
       closeAccessibilityLabel={t('context.sheet.close')}
-      onClose={handleCancel}
+      onClose={handleClose}
       onDismiss={handleDismiss}
       scrim={false}
       side="bottom"
@@ -688,7 +836,7 @@ export function ProjectContextSheet(props: ProjectContextSheetProps) {
             accessibilityLabel={t('context.sheet.close')}
             accessibilityRole="button"
             hitSlop={hitSlop}
-            onPress={handleCancel}
+            onPress={handleClose}
             style={({ pressed }) => [
               styles.close,
               pressed && styles.pressed,
@@ -697,7 +845,9 @@ export function ProjectContextSheet(props: ProjectContextSheetProps) {
             <AppIcon color={colors.text} icon={X} size={20} />
           </Pressable>
         </View>
-        {props.mode === 'candidates' ? (
+        {props.mode === 'recovery' ? (
+          recoveryBody
+        ) : props.mode === 'candidates' ? (
           <FlatList<Candidate>
             contentContainerStyle={styles.listContent}
             data={visibleCandidates}
@@ -766,6 +916,11 @@ const createStyles = (colors: ThemePalette) =>
       marginTop: 2,
     },
     listContent: { flexGrow: 1 },
+    recoveryBody: {
+      flex: 1,
+      paddingHorizontal: 18,
+      paddingTop: 14,
+    },
     header: { paddingHorizontal: 18, paddingTop: 14, gap: 10 },
     search: {
       minHeight: 46,
