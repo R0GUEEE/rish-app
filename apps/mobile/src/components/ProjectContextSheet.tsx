@@ -63,6 +63,7 @@ export type ProjectContextSheetProps = {
   readonly nextCursor: string | null;
   readonly loading: boolean;
   readonly loadingMore: boolean;
+  readonly checking: boolean;
   readonly unavailable: boolean;
   readonly errorCode: ProjectContextControllerErrorCode | null;
   readonly manifest: ProjectContextManifestV1 | null;
@@ -82,6 +83,7 @@ export type ProjectContextSheetProps = {
   readonly onDisable: () => void;
   readonly onClose: () => void;
   readonly onCancelCandidate: () => void;
+  readonly onCancelRecovery: () => void;
   readonly onRetryPersistence: () => void;
   readonly onRetryCleanup: () => void;
   readonly onRefreshAndSend: () => void;
@@ -381,6 +383,16 @@ export function ProjectContextSheet(props: ProjectContextSheetProps) {
     if (current === null) return;
     if (current.mode !== 'recovery' && !actionLocked(current)) {
       current.onCancelCandidate();
+    }
+  };
+  const handleCancelRecovery = () => {
+    const current = currentForAction();
+    if (
+      current !== null &&
+      current.mode === 'recovery' &&
+      !actionLocked(current)
+    ) {
+      current.onCancelRecovery();
     }
   };
   const handleRetryPersistence = () => {
@@ -799,8 +811,8 @@ export function ProjectContextSheet(props: ProjectContextSheetProps) {
           handleSendWithoutContext,
           { disabled: actionLocked(props) },
         )}
-        {actionButton(t('context.sheet.cancel'), handleClose, {
-          disabled: false,
+        {actionButton(t('context.sheet.cancel'), handleCancelRecovery, {
+          disabled: actionLocked(props),
           icon: X,
         })}
       </View>
@@ -845,6 +857,15 @@ export function ProjectContextSheet(props: ProjectContextSheetProps) {
             <AppIcon color={colors.text} icon={X} size={20} />
           </Pressable>
         </View>
+        {props.checking && (
+          <Text
+            accessibilityLiveRegion="polite"
+            accessibilityRole="status"
+            style={styles.checkingNotice}
+          >
+            {t('context.sheet.checking')}
+          </Text>
+        )}
         {props.mode === 'recovery' ? (
           recoveryBody
         ) : props.mode === 'candidates' ? (
@@ -916,6 +937,13 @@ const createStyles = (colors: ThemePalette) =>
       marginTop: 2,
     },
     listContent: { flexGrow: 1 },
+    checkingNotice: {
+      color: colors.muted,
+      fontSize: 13,
+      lineHeight: 19,
+      paddingHorizontal: 18,
+      paddingTop: 12,
+    },
     recoveryBody: {
       flex: 1,
       paddingHorizontal: 18,

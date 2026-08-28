@@ -152,6 +152,7 @@ type Harness = {
     readonly onDisable: jest.Mock;
     readonly onClose: jest.Mock;
     readonly onCancelCandidate: jest.Mock;
+    readonly onCancelRecovery: jest.Mock;
     readonly onRetryPersistence: jest.Mock;
     readonly onRetryCleanup: jest.Mock;
     readonly onRefreshAndSend: jest.Mock;
@@ -177,6 +178,7 @@ async function renderSheet(
     onDisable: jest.fn(),
     onClose: jest.fn(),
     onCancelCandidate: jest.fn(),
+    onCancelRecovery: jest.fn(),
     onRetryPersistence: jest.fn(),
     onRetryCleanup: jest.fn(),
     onRefreshAndSend: jest.fn(),
@@ -196,6 +198,7 @@ async function renderSheet(
     nextCursor: 'opaque-cursor',
     loading: false,
     loadingMore: false,
+    checking: false,
     unavailable: false,
     errorCode: null,
     manifest: null,
@@ -383,6 +386,55 @@ test.each([
 ] as const)('keeps candidate state %j distinct', async (overrides, label) => {
   const { renderer } = await renderSheet(overrides);
   expect(renderer.root.findByProps({ children: label })).toBeDefined();
+});
+
+test('keeps native context checking distinct from candidate list loading', async () => {
+  const { renderer } = await renderSheet({ checking: true, loading: true });
+  const checking = renderer.root.findByProps({
+    children: 'Checking project context',
+  });
+  const loading = renderer.root.findByProps({
+    children: 'Loading project files…',
+  });
+
+  expect(checking.props.accessibilityLiveRegion).toBe('polite');
+  expect(checking.props.accessibilityRole).toBe('status');
+  expect(loading.props.accessibilityLiveRegion).toBe('polite');
+  expect(checking).not.toBe(loading);
+});
+
+test.each([
+  ['candidates', null],
+  ['disclosure', manifest],
+  ['recovery', null],
+] as const)(
+  'shows value-free checking status in %s mode',
+  async (mode, currentManifest) => {
+    const unsafeCheckingProps = {
+      checking: true,
+      checkingDetail: 'RAW_NATIVE_DETAIL /private/project',
+    } as Partial<ProjectContextSheetProps> & {
+      readonly checkingDetail: string;
+    };
+    const { renderer } = await renderSheet({
+      ...unsafeCheckingProps,
+      mode,
+      manifest: currentManifest,
+    });
+    const output = renderedText(renderer.root);
+    expect(output).toContain('Checking project context');
+    expect(output).not.toContain('RAW_NATIVE_DETAIL');
+    expect(output).not.toContain('/private/project');
+  },
+);
+
+test('localizes native context checking independently in Chinese', async () => {
+  const { renderer } = await renderSheet(
+    { checking: true, mode: 'disclosure', manifest },
+    'zh-CN',
+  );
+  expect(renderedText(renderer.root)).toContain('正在检查项目上下文');
+  expect(renderedText(renderer.root)).not.toContain('Loading project files');
 });
 
 test('blocks Prepare when selected candidate bytes exceed the fixed budget', async () => {
@@ -673,8 +725,58 @@ test('renders only the explicit stale pending-send recovery choices', async () =
   );
   expect(harness.callbacks.onRefreshAndSend).toHaveBeenCalledTimes(1);
   expect(harness.callbacks.onSendWithoutContext).toHaveBeenCalledTimes(1);
-  expect(harness.callbacks.onClose).toHaveBeenCalledTimes(1);
+  expect(harness.callbacks.onCancelRecovery).toHaveBeenCalledTimes(1);
+  expect(harness.callbacks.onClose).not.toHaveBeenCalled();
   expect(harness.callbacks.onCancelCandidate).not.toHaveBeenCalled();
+});
+
+test.each([
+  { disabled: true },
+  { busyAction: 'refresh' as const },
+])('hard-disables recovery cancellation for state %j', async overrides => {
+  const harness = await renderSheet({ mode: 'recovery', ...overrides });
+  const cancel = actionByLabel(harness.renderer.root, 'Cancel');
+
+  expect(cancel.props.disabled).toBe(true);
+  await act(async () => cancel.props.onPress());
+  expect(harness.callbacks.onCancelRecovery).not.toHaveBeenCalled();
+  expect(harness.callbacks.onClose).not.toHaveBeenCalled();
+
+  await act(async () =>
+    actionByLabel(
+      harness.renderer.root,
+      'Close project context',
+    ).props.onPress(),
+  );
+  await act(async () =>
+    harness.renderer.root.findByType(SlidingSurface).props.onClose(),
+  );
+  expect(harness.callbacks.onClose).toHaveBeenCalledTimes(2);
+});
+
+test('hard-guards a captured recovery cancellation after same-state owner replacement', async () => {
+  const harness = await renderSheet({ mode: 'recovery' });
+  const staleCancel = actionByLabel(
+    harness.renderer.root,
+    'Cancel',
+  ).props.onPress;
+
+  await act(async () => {
+    harness.renderer.update(
+      presentation(
+        <ProjectContextSheet
+          {...harness.props}
+          actionKey="owner-b:0"
+          mode="recovery"
+        />,
+        'en-US',
+      ),
+    );
+  });
+  await act(async () => staleCancel());
+
+  expect(harness.callbacks.onCancelRecovery).not.toHaveBeenCalled();
+  expect(harness.callbacks.onClose).not.toHaveBeenCalled();
 });
 
 test('hard-guards stale pending-send actions after recovery mode is disabled', async () => {
@@ -1017,6 +1119,7 @@ test('defines key-identical English and Chinese Sheet vocabulary', () => {
     'context.sheet.filter.selected',
     'context.sheet.filter.changed',
     'context.sheet.loading',
+    'context.sheet.checking',
     'context.sheet.empty',
     'context.sheet.unavailable',
     'context.sheet.loadError',
