@@ -9,8 +9,10 @@ import {
   safeHydrateChatState,
   selectActiveConversation,
   selectActiveMessages,
+  selectProjectContextSnapshotReferences,
   selectOrderedConversations,
   serializeChatState,
+  MAX_PROJECT_CONTEXT_SNAPSHOT_REFERENCE_ROWS,
   type ChatAttachment,
   type ChatStore,
   type CompletionRoundReceiptV1,
@@ -986,6 +988,24 @@ describe('schema v6 attempts and project context', () => {
       requestBodySha256: 'c'.repeat(64),
       projectContextReceipt: null,
       ...overrides,
+    };
+  }
+
+  function schema3Receipt(
+    prepared: { turnId: string; attemptId: string },
+  ): CompletionRoundReceiptV1 {
+    return {
+      ...schema2Receipt(prepared),
+      transportSchemaVersion: 3,
+      providerRequestId: '66666666-6666-4666-8666-666666666666',
+      projectContextReceipt: {
+        schema_version: 1,
+        snapshot_id: SNAPSHOT_ID,
+        snapshot_sha256: contextManifest.snapshot_sha256,
+        source_fingerprint: contextManifest.source_fingerprint,
+        context_bytes: contextManifest.context_bytes,
+        verified_at: T2,
+      },
     };
   }
 
@@ -3324,5 +3344,306 @@ describe('schema v6 attempts and project context', () => {
       }),
     ).toBe(false);
     expect(fixture.store.getState()).toBe(before);
+  });
+
+  test('selects only verified prepared, sending, and exact-retry references', () => {
+    const fixture = scopedReadyProjectStore();
+    const prepared = fixture.store.prepareTurnAttempt(
+      fixture.conversationId,
+      'reference',
+    )!;
+    expect(prepared.commit()).toBe(true);
+    expect(
+      selectProjectContextSnapshotReferences(
+        fixture.store.getState(),
+        fixture.conversationId,
+      ),
+    ).toEqual([
+      {
+        conversationId: fixture.conversationId,
+        attemptId: prepared.attemptId,
+        kind: 'prepared',
+      },
+    ]);
+    expect(
+      selectProjectContextSnapshotReferences(
+        fixture.store.getState(),
+        fixture.conversationId,
+        REPLACEMENT_SNAPSHOT_ID,
+      ),
+    ).toEqual([]);
+
+    expect(
+      fixture.store.startAttemptRound(
+        fixture.conversationId,
+        prepared.attemptId,
+        ROUND_ID,
+        0,
+      ),
+    ).toBe(true);
+    expect(
+      selectProjectContextSnapshotReferences(
+        fixture.store.getState(),
+        fixture.conversationId,
+        SNAPSHOT_ID,
+      ),
+    ).toEqual([
+      {
+        conversationId: fixture.conversationId,
+        attemptId: prepared.attemptId,
+        kind: 'sending',
+      },
+    ]);
+
+    expect(
+      fixture.store.failAttempt(
+        fixture.conversationId,
+        prepared.attemptId,
+        'E_COMPLETION_TRANSPORT',
+      ),
+    ).toBe(true);
+    expect(
+      selectProjectContextSnapshotReferences(
+        fixture.store.getState(),
+        fixture.conversationId,
+        SNAPSHOT_ID,
+      ),
+    ).toEqual([
+      {
+        conversationId: fixture.conversationId,
+        attemptId: prepared.attemptId,
+        kind: 'retryable',
+      },
+    ]);
+
+    const cancelled = scopedReadyProjectStore();
+    const cancelledAttempt = cancelled.store.prepareTurnAttempt(
+      cancelled.conversationId,
+      'cancelled retry',
+    )!;
+    expect(cancelledAttempt.commit()).toBe(true);
+    expect(
+      cancelled.store.cancelAttempt(
+        cancelled.conversationId,
+        cancelledAttempt.attemptId,
+      ),
+    ).toBe(true);
+    expect(
+      selectProjectContextSnapshotReferences(
+        cancelled.store.getState(),
+        cancelled.conversationId,
+        SNAPSHOT_ID,
+      ),
+    ).toEqual([
+      {
+        conversationId: cancelled.conversationId,
+        attemptId: cancelledAttempt.attemptId,
+        kind: 'retryable',
+      },
+    ]);
+  });
+
+  test('excludes plain, completed, old-visible, and other-snapshot attempts', () => {
+    const explicit = setupProjectStore();
+    const plain = explicit.store.prepareTurnAttempt(
+      explicit.conversationId,
+      'plain',
+      { sendWithoutProjectContext: true },
+    )!;
+    expect(plain.commit()).toBe(true);
+    expect(
+      selectProjectContextSnapshotReferences(
+        explicit.store.getState(),
+        explicit.conversationId,
+      ),
+    ).toEqual([]);
+
+    const completed = scopedReadyProjectStore();
+    const terminal = completed.store.prepareTurnAttempt(
+      completed.conversationId,
+      'done',
+    )!;
+    expect(terminal.commit()).toBe(true);
+    expect(
+      completed.store.startAttemptRound(
+        completed.conversationId,
+        terminal.attemptId,
+        ROUND_ID,
+        0,
+      ),
+    ).toBe(true);
+    expect(
+      completed.store.recordAttemptRound(
+        completed.conversationId,
+        terminal.attemptId,
+        schema3Receipt(terminal),
+      ),
+    ).toBe(true);
+    expect(
+      completed.store.completeAttempt(
+        completed.conversationId,
+        terminal.attemptId,
+        'complete',
+        {
+          metadata: {
+            modelId: 'deepseek-v4-flash',
+            latencyMs: 1,
+            finishReason: 'stop',
+          },
+        },
+      ),
+    ).not.toBeNull();
+    expect(
+      selectProjectContextSnapshotReferences(
+        completed.store.getState(),
+        completed.conversationId,
+      ),
+    ).toEqual([]);
+
+    const oldVisible = scopedReadyProjectStore();
+    const failed = oldVisible.store.prepareTurnAttempt(
+      oldVisible.conversationId,
+      'old',
+    )!;
+    expect(failed.commit()).toBe(true);
+    expect(
+      oldVisible.store.failAttempt(
+        oldVisible.conversationId,
+        failed.attemptId,
+        'E_COMPLETION_TRANSPORT',
+      ),
+    ).toBe(true);
+    oldVisible.store.appendAssistantMessage(
+      oldVisible.conversationId,
+      'history advanced',
+    );
+    expect(
+      selectProjectContextSnapshotReferences(
+        oldVisible.store.getState(),
+        oldVisible.conversationId,
+        SNAPSHOT_ID,
+      ),
+    ).toEqual([]);
+  });
+
+  test('bounds snapshot reference rows without returning raw context metadata', () => {
+    const fixture = scopedReadyProjectStore();
+    const prepared = fixture.store.prepareTurnAttempt(
+      fixture.conversationId,
+      'bounded',
+    )!;
+    expect(prepared.commit()).toBe(true);
+    const state = fixture.store.getState();
+    const conversation = state.conversations[fixture.conversationId]!;
+    const source = conversation.attempts[0]!;
+    const attempts = Array.from({ length: 2_000 }, (_, index) => ({
+      ...source,
+      attemptId: `${index.toString(16).padStart(8, '0')}-0000-4000-8000-000000000000`,
+    }));
+    const adversarialState: ChatState = {
+      ...state,
+      conversations: {
+        ...state.conversations,
+        [fixture.conversationId]: { ...conversation, attempts },
+      },
+    };
+
+    const rows = selectProjectContextSnapshotReferences(
+      adversarialState,
+      fixture.conversationId,
+      SNAPSHOT_ID,
+    );
+    expect(rows.length).toBeGreaterThan(0);
+    expect(rows.length).toBeLessThanOrEqual(
+      MAX_PROJECT_CONTEXT_SNAPSHOT_REFERENCE_ROWS,
+    );
+    expect(JSON.stringify(rows)).not.toMatch(
+      /snapshot|consent|source|fingerprint|contextBytes|projectContext/u,
+    );
+  });
+
+  test('snapshot reference selector fails closed for missing and hostile inputs', () => {
+    const fixture = scopedReadyProjectStore();
+    expect(
+      selectProjectContextSnapshotReferences(
+        fixture.store.getState(),
+        'missing-conversation',
+      ),
+    ).toEqual([]);
+
+    let coercions = 0;
+    const hostile = {
+      [Symbol.toPrimitive]: () => {
+        coercions += 1;
+        throw new Error('REFERENCE_SELECTOR_SECRET');
+      },
+    };
+    expect(() =>
+      selectProjectContextSnapshotReferences(
+        fixture.store.getState(),
+        hostile as unknown as string,
+        hostile as unknown as string,
+      ),
+    ).not.toThrow();
+    expect(
+      selectProjectContextSnapshotReferences(
+        fixture.store.getState(),
+        hostile as unknown as string,
+        hostile as unknown as string,
+      ),
+    ).toEqual([]);
+    expect(coercions).toBe(0);
+
+    const hostileState = new Proxy({} as ChatState, {
+      get: () => {
+        throw new Error('HOSTILE_STATE_SECRET');
+      },
+    });
+    expect(() =>
+      selectProjectContextSnapshotReferences(
+        hostileState,
+        fixture.conversationId,
+      ),
+    ).not.toThrow();
+    expect(
+      selectProjectContextSnapshotReferences(
+        hostileState,
+        fixture.conversationId,
+      ),
+    ).toEqual([]);
+
+    const validAttempt = fixture.store.prepareTurnAttempt(
+      fixture.conversationId,
+      'valid before hostile',
+    )!;
+    expect(validAttempt.commit()).toBe(true);
+    let getterCalls = 0;
+    const hostileAttempt = {};
+    Object.defineProperty(hostileAttempt, 'attemptId', {
+      enumerable: true,
+      get: () => {
+        getterCalls += 1;
+        throw new Error('ATTEMPT_GETTER_SECRET');
+      },
+    });
+    const current = fixture.store.getState();
+    const currentConversation = current.conversations[fixture.conversationId]!;
+    const hostileAttemptState = {
+      ...current,
+      conversations: {
+        ...current.conversations,
+        [fixture.conversationId]: {
+          ...currentConversation,
+          attempts: [...currentConversation.attempts, hostileAttempt],
+        },
+      },
+    } as ChatState;
+    expect(
+      selectProjectContextSnapshotReferences(
+        hostileAttemptState,
+        fixture.conversationId,
+      ),
+    ).toEqual([]);
+    expect(getterCalls).toBe(0);
   });
 });

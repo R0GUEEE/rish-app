@@ -52,6 +52,8 @@ export const MAX_COMPLETION_ROUNDS = 8;
 export const MAX_ATTEMPT_VISIBLE_MESSAGES = 200;
 export const MAX_ATTEMPT_ATTACHMENT_IDS = 24;
 export const MAX_PROJECT_CONTEXT_RECEIPT_BYTES = 256 * 1024;
+export const MAX_PROJECT_CONTEXT_SNAPSHOT_REFERENCE_ROWS = 1024;
+const MAX_PROJECT_CONTEXT_SNAPSHOT_REFERENCE_SCAN = 100_000;
 
 const supportedModels: ReadonlySet<string> = new Set(SUPPORTED_MODEL_IDS);
 const thinkingModes: ReadonlySet<string> = new Set(CONVERSATION_THINKING_MODES);
@@ -106,6 +108,26 @@ const projectReceiptKeys = [
   'verified_at',
 ] as const;
 const activeRoundKeys = ['roundId', 'roundIndex'] as const;
+const attemptReferenceProjectionKeys = [
+  'schemaVersion',
+  'attemptId',
+  'turnId',
+  'status',
+  'visibleMessageIds',
+  'visibleHistorySha256',
+  'attachmentIds',
+  'modelId',
+  'thinkingMode',
+  'contextDisposition',
+  'contextProjectId',
+  'projectContext',
+  'activeRound',
+  'rounds',
+  'assistantMessageId',
+  'failureCode',
+  'createdAt',
+  'updatedAt',
+] as const;
 const projectContextScopeKeys = [
   'conversationId',
   'projectId',
@@ -561,6 +583,20 @@ function retryBindingIsApplicable(
   );
 }
 
+function attemptSupportsExactProjectContextRetry(
+  conversation: Conversation,
+  attempt: TurnAttemptV1,
+  visibleMessageIds: readonly string[],
+): boolean {
+  return (
+    (attempt.status === 'failed' || attempt.status === 'cancelled') &&
+    attempt.contextDisposition === 'verified' &&
+    attempt.projectContext !== null &&
+    hasSameStrings(attempt.visibleMessageIds, visibleMessageIds) &&
+    retryBindingIsApplicable(conversation, attempt)
+  );
+}
+
 function hasContextMutationBlocker(conversation: Conversation): boolean {
   if (hasLiveAttempt(conversation)) return true;
   const visibleMessageIds = conversation.messages
@@ -568,10 +604,11 @@ function hasContextMutationBlocker(conversation: Conversation): boolean {
     .map(message => message.id);
   return conversation.attempts.some(
     attempt =>
-      (attempt.status === 'failed' || attempt.status === 'cancelled') &&
-      attempt.projectContext !== null &&
-      hasSameStrings(attempt.visibleMessageIds, visibleMessageIds) &&
-      retryBindingIsApplicable(conversation, attempt),
+      attemptSupportsExactProjectContextRetry(
+        conversation,
+        attempt,
+        visibleMessageIds,
+      ),
   );
 }
 
@@ -851,6 +888,128 @@ export function selectActiveConversation(
 
 export function selectActiveMessages(state: ChatState): readonly ChatMessage[] {
   return selectActiveConversation(state)?.messages ?? [];
+}
+
+export type ProjectContextSnapshotReference = {
+  readonly conversationId: string;
+  readonly attemptId: string;
+  readonly kind: 'prepared' | 'sending' | 'retryable';
+};
+
+function verifiedAttemptSnapshotId(attempt: TurnAttemptV1): string | null {
+  const binding = attempt.projectContext;
+  if (
+    attempt.contextDisposition !== 'verified' ||
+    binding === null ||
+    !isExactDataRecord(binding, attemptBindingKeys) ||
+    binding.schemaVersion !== ATTEMPT_PROJECT_CONTEXT_SCHEMA_VERSION ||
+    !isCanonicalLifecycleId(binding.runtimeContextId) ||
+    !isCanonicalLifecycleId(binding.projectId) ||
+    !isCanonicalLifecycleId(binding.snapshotId) ||
+    !isSha256Digest(binding.snapshotSha256) ||
+    !isSha256Digest(binding.sourceFingerprint) ||
+    !Number.isSafeInteger(binding.contextBytes) ||
+    binding.contextBytes < 1 ||
+    binding.contextBytes > MAX_PROJECT_CONTEXT_RECEIPT_BYTES ||
+    !isCanonicalLifecycleId(binding.consentReceiptId) ||
+    binding.provider !== 'deepseek' ||
+    binding.policy !== 'chat-read-v1' ||
+    binding.policyVersion !== 'chat-read-v1.0.0'
+  ) {
+    return null;
+  }
+  return binding.snapshotId;
+}
+
+/**
+ * Metadata-only references used to guard snapshot replacement and cleanup.
+ * Invalid external state or identifiers return no projected rows and never
+ * expose the frozen binding itself.
+ */
+export function selectProjectContextSnapshotReferences(
+  state: ChatState,
+  conversationId: string,
+  snapshotId?: string,
+): readonly ProjectContextSnapshotReference[] {
+  if (
+    typeof conversationId !== 'string' ||
+    !validIdentifier(conversationId) ||
+    (snapshotId !== undefined &&
+      (typeof snapshotId !== 'string' ||
+        !isCanonicalLifecycleId(snapshotId)))
+  ) {
+    return [];
+  }
+  try {
+    if (typeof state !== 'object' || state === null) return [];
+    const conversation = state.conversations[conversationId];
+    if (
+      conversation === undefined ||
+      conversation.id !== conversationId ||
+      !Array.isArray(conversation.attempts) ||
+      Object.getPrototypeOf(conversation.attempts) !== Array.prototype ||
+      conversation.attempts.length >
+        MAX_PROJECT_CONTEXT_SNAPSHOT_REFERENCE_SCAN ||
+      Object.getOwnPropertySymbols(conversation.attempts).length > 0
+    ) {
+      return [];
+    }
+    const visibleMessageIds = conversation.messages
+      .slice(-MAX_ATTEMPT_VISIBLE_MESSAGES)
+      .map(message => message.id);
+    const rows: ProjectContextSnapshotReference[] = [];
+    for (
+      let index = 0;
+      index < conversation.attempts.length;
+      index += 1
+    ) {
+      const descriptor = Object.getOwnPropertyDescriptor(
+        conversation.attempts,
+        String(index),
+      );
+      if (
+        descriptor === undefined ||
+        !Object.prototype.hasOwnProperty.call(descriptor, 'value') ||
+        descriptor.enumerable !== true ||
+        !isExactDataRecord(
+          descriptor.value,
+          attemptReferenceProjectionKeys,
+        )
+      ) {
+        return [];
+      }
+      const attempt = descriptor.value as TurnAttemptV1;
+      if (!isCanonicalLifecycleId(attempt.attemptId)) return [];
+      const bindingSnapshotId = verifiedAttemptSnapshotId(attempt);
+      if (
+        bindingSnapshotId === null ||
+        (snapshotId !== undefined && bindingSnapshotId !== snapshotId)
+      ) {
+        continue;
+      }
+      const kind =
+        attempt.status === 'prepared'
+          ? 'prepared'
+          : attempt.status === 'sending'
+            ? 'sending'
+            : attemptSupportsExactProjectContextRetry(
+                  conversation,
+                  attempt,
+                  visibleMessageIds,
+                )
+              ? 'retryable'
+              : null;
+      if (
+        kind !== null &&
+        rows.length < MAX_PROJECT_CONTEXT_SNAPSHOT_REFERENCE_ROWS
+      ) {
+        rows.push({ conversationId, attemptId: attempt.attemptId, kind });
+      }
+    }
+    return rows;
+  } catch {
+    return [];
+  }
 }
 
 function validIdentifier(value: string): boolean {
