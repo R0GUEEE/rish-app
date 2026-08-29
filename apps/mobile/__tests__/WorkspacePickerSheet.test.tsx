@@ -1,10 +1,14 @@
 const mockNativeLocalWorkspaces = {
   list: jest.fn(),
+  resolveMetadata: jest.fn(),
+  queryOperation: jest.fn(),
   create: jest.fn(),
+  presentFolderPicker: jest.fn(),
   grantFolder: jest.fn(),
   importFolder: jest.fn(),
-  resolve: jest.fn(),
   forget: jest.fn(),
+  deleteOwnedContent: jest.fn(),
+  cancelPicker: jest.fn(),
 };
 
 import React from 'react';
@@ -41,13 +45,21 @@ afterEach(() => {
 
 function descriptor(id: string, name: string, status = 'ok') {
   return {
-    schema_version: 1 as const,
+    schema_version: 2 as const,
     workspace_id: id,
     display_name: name,
     origin: 'rish_created' as const,
     created_at: '2026-08-27T01:00:00.000Z',
     last_opened_at: '2026-08-27T01:00:00.000Z',
     status,
+    binding_revision: 1,
+    capabilities: {
+      read: false,
+      write: false,
+      git: false,
+      project_context: false,
+      files_visible: true,
+    },
   };
 }
 
@@ -138,10 +150,10 @@ test('lists workspaces with structured access states', async () => {
 
   expect(actionByLabel(renderer.root, 'Use Alpha')).toBeDefined();
   expect(actionByLabel(renderer.root, 'Use Beta').props.accessibilityState)
-    .toEqual({ checked: false });
+    .toEqual({ checked: false, disabled: true });
   expect(
     actionByLabel(renderer.root, 'Use Alpha').props.accessibilityState,
-  ).toEqual({ checked: true });
+  ).toEqual({ checked: true, disabled: false });
 });
 
 test('selects a workspace through its row without closing the sheet', async () => {
@@ -182,7 +194,11 @@ test('creates a named Rish workspace and reloads the registry', async () => {
     actionByLabel(renderer.root, 'New workspace').props.onPress();
   });
 
-  expect(mockNativeLocalWorkspaces.create).toHaveBeenCalledWith('Scratch');
+  expect(mockNativeLocalWorkspaces.create).toHaveBeenCalledWith({
+    schema_version: 1,
+    display_name: 'Scratch',
+    operation_id: expect.any(String),
+  });
   expect(mockNativeLocalWorkspaces.list).toHaveBeenCalledTimes(2);
   expect(actionByLabel(renderer.root, 'Use Scratch')).toBeDefined();
 });
@@ -201,7 +217,11 @@ test('forgets a workspace by its opaque id and reloads', async () => {
     actionByLabel(renderer.root, 'Forget Alpha').props.onPress();
   });
 
-  expect(mockNativeLocalWorkspaces.forget).toHaveBeenCalledWith('ws-alpha');
+  expect(mockNativeLocalWorkspaces.forget).toHaveBeenCalledWith({
+    schema_version: 1,
+    workspace_id: 'ws-alpha',
+    expected_binding_revision: 1,
+  });
   expect(mockNativeLocalWorkspaces.list).toHaveBeenCalledTimes(2);
 });
 
@@ -214,5 +234,5 @@ test('surfaces revoked folders instead of hiding them', async () => {
   const renderer = await renderSheet();
 
   expect(renderer.root.findByProps({ children: 'Access revoked' })).toBeDefined();
+  expect(actionByLabel(renderer.root, 'Use Beta').props.disabled).toBe(true);
 });
-

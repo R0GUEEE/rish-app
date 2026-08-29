@@ -19,6 +19,7 @@ import Plus from 'lucide-react-native/icons/plus';
 
 import { useAppPresentation } from '../presentation/AppPresentation';
 import { LocalWorkspaces, type WorkspaceDescriptor } from '../native/LocalWorkspaces';
+import { createCompletionRequestId } from '../native/LocalRuntime';
 import { fonts, type ThemePalette } from '../theme';
 import { AppIcon } from './AppIcon';
 
@@ -148,7 +149,11 @@ export function WorkspacePickerSheet({
     const name = draftName.trim();
     if (name.length === 0) return Promise.resolve();
     return runAction(async () => {
-      await LocalWorkspaces.create(name);
+      await LocalWorkspaces.create({
+        schema_version: 1,
+        display_name: name,
+        operation_id: createCompletionRequestId(),
+      });
       setDraftName('');
     });
   }, [draftName, runAction]);
@@ -221,10 +226,15 @@ export function WorkspacePickerSheet({
                         name: row.display_name,
                       })}
                       accessibilityRole="radio"
-                      accessibilityState={{ checked: isActive }}
+                      accessibilityState={{
+                        checked: isActive,
+                        disabled: row.status !== 'ok',
+                      }}
+                      disabled={busy || row.status !== 'ok'}
                       onPress={() => onSelect(row.workspace_id)}
                       style={({ pressed }) => [
                         styles.row,
+                        row.status !== 'ok' && styles.disabledRow,
                         pressed && styles.pressed,
                       ]}
                     >
@@ -254,9 +264,13 @@ export function WorkspacePickerSheet({
                           name: row.display_name,
                         })}
                         accessibilityRole="button"
-                        onPress={() =>
-                          runAction(() =>
-                            LocalWorkspaces.forget(row.workspace_id),
+                          onPress={() =>
+                            runAction(() =>
+                            LocalWorkspaces.forget({
+                              schema_version: 1,
+                              workspace_id: row.workspace_id,
+                              expected_binding_revision: row.binding_revision,
+                            }),
                           )
                         }
                         style={({ pressed }) => [
@@ -315,7 +329,12 @@ export function WorkspacePickerSheet({
               accessibilityRole="button"
               disabled={busy}
               onPress={() => {
-                runAction(() => LocalWorkspaces.grantFolder()).catch(
+                runAction(() =>
+                  LocalWorkspaces.grantFolder({
+                    schema_version: 1,
+                    operation_id: createCompletionRequestId(),
+                  }),
+                ).catch(
                   () => undefined,
                 );
               }}
@@ -334,7 +353,12 @@ export function WorkspacePickerSheet({
               accessibilityRole="button"
               disabled={busy}
               onPress={() => {
-                runAction(() => LocalWorkspaces.importFolder()).catch(
+                runAction(() =>
+                  LocalWorkspaces.importFolder({
+                    schema_version: 1,
+                    operation_id: createCompletionRequestId(),
+                  }),
+                ).catch(
                   () => undefined,
                 );
               }}
@@ -419,6 +443,7 @@ const createStyles = (colors: ThemePalette) =>
       paddingVertical: 8,
       paddingRight: 2,
     },
+    disabledRow: { opacity: 0.56 },
     rowCopy: { flex: 1 },
     rowTitle: { color: colors.text, fontSize: 15, fontWeight: '700' },
     rowStatus: {

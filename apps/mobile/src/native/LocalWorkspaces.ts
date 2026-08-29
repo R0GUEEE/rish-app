@@ -10,21 +10,33 @@ export type WorkspaceStatus =
   | 'stale'
   | 'revoked'
   | 'unavailable'
-  | 'not_downloaded';
+  | 'not_downloaded'
+  | 'import_required';
 
 export type WorkspaceOrigin =
   | 'rish_created'
   | 'imported'
-  | 'granted_folder';
+  | 'granted_folder'
+  | 'legacy_app_owned';
+
+export type WorkspaceCapabilities = {
+  read: boolean;
+  write: boolean;
+  git: boolean;
+  project_context: boolean;
+  files_visible: boolean;
+};
 
 export type WorkspaceDescriptor = {
-  schema_version: 1;
+  schema_version: 2;
   workspace_id: string;
   display_name: string;
   origin: WorkspaceOrigin;
   created_at: string;
   last_opened_at: string;
   status: WorkspaceStatus;
+  binding_revision: number;
+  capabilities: WorkspaceCapabilities;
 };
 
 export type WorkspaceListing = {
@@ -34,17 +46,44 @@ export type WorkspaceListing = {
 
 export type WorkspaceResolveResult = {
   schema_version: 1;
+  disposition: 'metadata' | 'direct';
+  workspace: WorkspaceDescriptor;
+};
+
+export type WorkspaceResolveRequest = {
+  schema_version: 1;
   workspace_id: string;
-  status: WorkspaceStatus;
+  expected_binding_revision: number | null;
+  required_capabilities: readonly (
+    | 'read'
+    | 'write'
+    | 'git'
+    | 'project_context'
+  )[];
+};
+
+export type WorkspaceCreateRequest = {
+  schema_version: 1;
+  display_name: string;
+  operation_id: string;
+};
+
+export type WorkspaceOperationRequest = {
+  schema_version: 1;
+  operation_id: string;
 };
 
 type NativeLocalWorkspaces = {
   list(): Promise<WorkspaceListing>;
-  create(displayName: string): Promise<WorkspaceDescriptor>;
-  grantFolder(): Promise<WorkspaceDescriptor>;
-  importFolder(): Promise<WorkspaceDescriptor>;
-  resolve(workspaceId: string): Promise<WorkspaceResolveResult>;
-  forget(workspaceId: string): Promise<{ schema_version: 1 }>;
+  resolveMetadata(request: WorkspaceResolveRequest): Promise<WorkspaceResolveResult>;
+  queryOperation(request: WorkspaceOperationRequest): Promise<unknown>;
+  create(request: WorkspaceCreateRequest): Promise<WorkspaceDescriptor>;
+  presentFolderPicker(request: Record<string, unknown>): Promise<unknown>;
+  grantFolder(request: Record<string, unknown>): Promise<unknown>;
+  importFolder(request: Record<string, unknown>): Promise<unknown>;
+  forget(request: Record<string, unknown>): Promise<unknown>;
+  deleteOwnedContent(request: Record<string, unknown>): Promise<unknown>;
+  cancelPicker(request: Record<string, unknown>): Promise<unknown>;
 };
 
 function currentNative(): unknown {
@@ -58,11 +97,15 @@ function hasNativeCapabilities(value: unknown): value is NativeLocalWorkspaces {
   >;
   return (
     typeof candidate.list === 'function' &&
+    typeof candidate.resolveMetadata === 'function' &&
+    typeof candidate.queryOperation === 'function' &&
     typeof candidate.create === 'function' &&
+    typeof candidate.presentFolderPicker === 'function' &&
     typeof candidate.grantFolder === 'function' &&
     typeof candidate.importFolder === 'function' &&
-    typeof candidate.resolve === 'function' &&
-    typeof candidate.forget === 'function'
+    typeof candidate.forget === 'function' &&
+    typeof candidate.deleteOwnedContent === 'function' &&
+    typeof candidate.cancelPicker === 'function'
   );
 }
 
@@ -86,24 +129,40 @@ export const LocalWorkspaces = {
     const nativeModule = required();
     return nativeModule.list();
   },
-  create: async (displayName: string) => {
+  create: async (request: WorkspaceCreateRequest) => {
     const nativeModule = required();
-    return nativeModule.create(displayName);
+    return nativeModule.create(request);
   },
-  grantFolder: async () => {
+  presentFolderPicker: async (request: Record<string, unknown>) => {
     const nativeModule = required();
-    return nativeModule.grantFolder();
+    return nativeModule.presentFolderPicker(request);
   },
-  importFolder: async () => {
+  grantFolder: async (request: Record<string, unknown>) => {
     const nativeModule = required();
-    return nativeModule.importFolder();
+    return nativeModule.grantFolder(request);
   },
-  resolve: async (workspaceId: string) => {
+  importFolder: async (request: Record<string, unknown>) => {
     const nativeModule = required();
-    return nativeModule.resolve(workspaceId);
+    return nativeModule.importFolder(request);
   },
-  forget: async (workspaceId: string) => {
+  resolve: async (request: WorkspaceResolveRequest) => {
     const nativeModule = required();
-    return nativeModule.forget(workspaceId);
+    return nativeModule.resolveMetadata(request);
+  },
+  queryOperation: async (request: WorkspaceOperationRequest) => {
+    const nativeModule = required();
+    return nativeModule.queryOperation(request);
+  },
+  forget: async (request: Record<string, unknown>) => {
+    const nativeModule = required();
+    return nativeModule.forget(request);
+  },
+  deleteOwnedContent: async (request: Record<string, unknown>) => {
+    const nativeModule = required();
+    return nativeModule.deleteOwnedContent(request);
+  },
+  cancelPicker: async (request: Record<string, unknown>) => {
+    const nativeModule = required();
+    return nativeModule.cancelPicker(request);
   },
 };
