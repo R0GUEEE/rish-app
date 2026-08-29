@@ -1530,6 +1530,24 @@ describe('schema v6 attempts and project context', () => {
     ): LifecycleTransactionHarness | null;
   };
 
+  type SnapshotFreeMutationHarness = ChatStore & {
+    applySnapshotFreeProjectMutation(input: {
+      action: 'unbind' | 'delete' | 'rebind';
+      conversationId: string;
+      targetProjectId: string | null;
+      expectedConversation: ChatState['conversations'][string];
+    }): {
+      conversationId: string;
+      action: 'unbind' | 'delete' | 'rebind';
+      commit(): boolean;
+      rollback(): boolean;
+    } | null;
+  };
+
+  function snapshotFreeStore(store: ChatStore): SnapshotFreeMutationHarness {
+    return store as SnapshotFreeMutationHarness;
+  }
+
   function lifecycleStore(store: ChatStore): LifecycleStoreHarness {
     return store as LifecycleStoreHarness;
   }
@@ -2107,6 +2125,319 @@ describe('schema v6 attempts and project context', () => {
     expect(
       deleteFixture.store.getState().conversations[deleteFixture.conversationId],
     ).toBeUndefined();
+  });
+
+  test.each([
+    { action: 'unbind' as const, targetProjectId: null },
+    { action: 'rebind' as const, targetProjectId: OTHER_PROJECT_ID },
+    { action: 'delete' as const, targetProjectId: null },
+  ])(
+    'returns an exact one-shot snapshot-free $action transaction',
+    fixture => {
+      const value = setupProjectStore();
+      const beforeState = value.store.getState();
+      const beforeConversation =
+        beforeState.conversations[value.conversationId]!;
+      const transaction = snapshotFreeStore(
+        value.store,
+      ).applySnapshotFreeProjectMutation({
+        action: fixture.action,
+        conversationId: value.conversationId,
+        targetProjectId: fixture.targetProjectId,
+        expectedConversation: beforeConversation,
+      });
+      expect(transaction).not.toBeNull();
+      const applied = value.store.getState();
+      if (fixture.action === 'delete') {
+        expect(applied.conversations[value.conversationId]).toBeUndefined();
+      } else {
+        expect(applied.conversations[value.conversationId]?.projectId).toBe(
+          fixture.targetProjectId,
+        );
+      }
+      expect(transaction?.rollback()).toBe(true);
+      expect(
+        value.store.getState().conversations[value.conversationId],
+      ).toBe(beforeConversation);
+      expect(transaction?.rollback()).toBe(false);
+      expect(transaction?.commit()).toBe(false);
+    },
+  );
+
+  test('commits snapshot-free mutation once and rejects stale, hostile, or unsafe input', () => {
+    const ready = readyProjectStore();
+    const readyConversation =
+      ready.store.getState().conversations[ready.conversationId]!;
+    expect(
+      snapshotFreeStore(ready.store).applySnapshotFreeProjectMutation({
+        action: 'unbind',
+        conversationId: ready.conversationId,
+        targetProjectId: null,
+        expectedConversation: readyConversation,
+      }),
+    ).toBeNull();
+
+    const setup = setupProjectStore();
+    const expected = setup.store.getState().conversations[setup.conversationId]!;
+    setup.store.renameConversation(setup.conversationId, 'Drifted');
+    expect(
+      snapshotFreeStore(setup.store).applySnapshotFreeProjectMutation({
+        action: 'unbind',
+        conversationId: setup.conversationId,
+        targetProjectId: null,
+        expectedConversation: expected,
+      }),
+    ).toBeNull();
+
+    let getterCalls = 0;
+    const hostile = {
+      action: 'unbind',
+      conversationId: setup.conversationId,
+      targetProjectId: null,
+      get expectedConversation() {
+        getterCalls += 1;
+        throw new Error('RAW_DIRECT_SENTINEL');
+      },
+    };
+    expect(
+      snapshotFreeStore(setup.store).applySnapshotFreeProjectMutation(
+        hostile as never,
+      ),
+    ).toBeNull();
+    expect(getterCalls).toBe(0);
+
+    const fresh = setupProjectStore();
+    const freshConversation =
+      fresh.store.getState().conversations[fresh.conversationId]!;
+    const committed = snapshotFreeStore(
+      fresh.store,
+    ).applySnapshotFreeProjectMutation({
+      action: 'rebind',
+      conversationId: fresh.conversationId,
+      targetProjectId: OTHER_PROJECT_ID,
+      expectedConversation: freshConversation,
+    });
+    expect(committed?.commit()).toBe(true);
+    expect(committed?.commit()).toBe(false);
+    expect(committed?.rollback()).toBe(false);
+  });
+
+  test('snapshot-free delete rollback preserves listener selection and unrelated changes', () => {
+    const value = setupProjectStore();
+    const fallback = value.store.createConversation({
+      title: 'Fallback',
+      select: false,
+    });
+    const listenerSelection = value.store.createConversation({
+      title: 'Listener selection',
+      select: false,
+    });
+    value.store.selectConversation(value.conversationId);
+    let reentered = false;
+    value.store.subscribe(state => {
+      if (
+        !reentered &&
+        state.conversations[value.conversationId] === undefined
+      ) {
+        reentered = true;
+        value.store.selectConversation(listenerSelection);
+        value.store.renameConversation(fallback, 'Fallback changed');
+      }
+    });
+    const beforeConversation =
+      value.store.getState().conversations[value.conversationId]!;
+    const transaction = snapshotFreeStore(
+      value.store,
+    ).applySnapshotFreeProjectMutation({
+      action: 'delete',
+      conversationId: value.conversationId,
+      targetProjectId: null,
+      expectedConversation: beforeConversation,
+    });
+
+    expect(transaction).not.toBeNull();
+    expect(value.store.getState().selectedConversationId).toBe(
+      listenerSelection,
+    );
+    expect(transaction?.rollback()).toBe(true);
+    expect(value.store.getState()).toMatchObject({
+      selectedConversationId: listenerSelection,
+      conversations: {
+        [value.conversationId]: { projectId: PROJECT_ID },
+        [fallback]: { title: 'Fallback changed' },
+      },
+    });
+  });
+
+  test('snapshot-free delete rejects a live attempt', () => {
+    const value = setupProjectStore();
+    const prepared = value.store.prepareTurnAttempt(
+      value.conversationId,
+      'still active',
+      { sendWithoutProjectContext: true },
+    );
+    expect(prepared?.commit()).toBe(true);
+    const conversation =
+      value.store.getState().conversations[value.conversationId]!;
+    expect(
+      snapshotFreeStore(value.store).applySnapshotFreeProjectMutation({
+        action: 'delete',
+        conversationId: value.conversationId,
+        targetProjectId: null,
+        expectedConversation: conversation,
+      }),
+    ).toBeNull();
+    expect(value.store.getState().conversations[value.conversationId]).toBe(
+      conversation,
+    );
+  });
+
+  test('snapshot-free rollback preserves a lifecycle journal on an unrelated conversation', () => {
+    const value = readyProjectStore();
+    const directId = value.store.createConversation({
+      projectId: OTHER_PROJECT_ID,
+      select: false,
+    });
+    const beforeDirect = value.store.getState().conversations[directId]!;
+    const transaction = snapshotFreeStore(
+      value.store,
+    ).applySnapshotFreeProjectMutation({
+      action: 'delete',
+      conversationId: directId,
+      targetProjectId: null,
+      expectedConversation: beforeDirect,
+    });
+    const lifecycle = beginLifecycle(value.store, value.conversationId);
+
+    expect(transaction).not.toBeNull();
+    expect(lifecycle).not.toBeNull();
+    expect(transaction?.rollback()).toBe(true);
+    expect(value.store.getState().conversations[directId]).toBe(beforeDirect);
+    expect(value.store.getState().projectContextDestructiveTransition).toMatchObject({
+      conversationId: value.conversationId,
+      phase: 'intent',
+    });
+  });
+
+  test('snapshot-free mutation rechecks target and journal after the injected clock returns', () => {
+    let renameStore!: ChatStore;
+    let renameReentry = false;
+    let renameTargetId = '';
+    renameStore = createChatStore({
+      now: () => {
+        if (renameReentry) {
+          renameReentry = false;
+          renameStore.renameConversation(renameTargetId, 'Clock drift');
+        }
+        return T2;
+      },
+    });
+    const renameId = renameStore.createConversation({
+      projectId: PROJECT_ID,
+      select: false,
+    });
+    renameTargetId = renameId;
+    const renamedState = renameStore.getState();
+    const renamedConversation = renamedState.conversations[renameId]!;
+    renameReentry = true;
+    expect(
+      snapshotFreeStore(renameStore).applySnapshotFreeProjectMutation({
+        action: 'unbind',
+        conversationId: renameId,
+        targetProjectId: null,
+        expectedConversation: renamedConversation,
+      }),
+    ).toBeNull();
+    expect(renameStore.getState().conversations[renameId]).toMatchObject({
+      projectId: PROJECT_ID,
+      title: 'Clock drift',
+    });
+
+    const ready = readyProjectStore();
+    const directId = ready.store.createConversation({
+      projectId: OTHER_PROJECT_ID,
+      select: false,
+    });
+    let journalStore!: ChatStore;
+    let journalReentry = true;
+    journalStore = createChatStore({
+      initialState: ready.store.getState(),
+      now: () => {
+        if (journalReentry) {
+          journalReentry = false;
+          expect(beginLifecycle(journalStore, ready.conversationId)).not.toBeNull();
+        }
+        return T2;
+      },
+    });
+    const directConversation =
+      journalStore.getState().conversations[directId]!;
+    expect(
+      snapshotFreeStore(journalStore).applySnapshotFreeProjectMutation({
+        action: 'rebind',
+        conversationId: directId,
+        targetProjectId: PROJECT_ID,
+        expectedConversation: directConversation,
+      }),
+    ).toBeNull();
+    expect(journalStore.getState()).toMatchObject({
+      projectContextDestructiveTransition: { phase: 'intent' },
+      conversations: {
+        [directId]: { projectId: OTHER_PROJECT_ID },
+      },
+    });
+  });
+
+  test('snapshot-free mutation rejects invalid action-target relations atomically', () => {
+    const value = setupProjectStore();
+    const conversation =
+      value.store.getState().conversations[value.conversationId]!;
+    const before = value.store.getState();
+    for (const input of [
+      {
+        action: 'unbind',
+        conversationId: value.conversationId,
+        targetProjectId: OTHER_PROJECT_ID,
+        expectedConversation: conversation,
+      },
+      {
+        action: 'delete',
+        conversationId: value.conversationId,
+        targetProjectId: OTHER_PROJECT_ID,
+        expectedConversation: conversation,
+      },
+      {
+        action: 'rebind',
+        conversationId: value.conversationId,
+        targetProjectId: null,
+        expectedConversation: conversation,
+      },
+      {
+        action: 'rebind',
+        conversationId: value.conversationId,
+        targetProjectId: PROJECT_ID,
+        expectedConversation: conversation,
+      },
+      {
+        action: 'rebind',
+        conversationId: value.conversationId,
+        targetProjectId: '',
+        expectedConversation: conversation,
+      },
+      {
+        action: 'raw_action',
+        conversationId: value.conversationId,
+        targetProjectId: null,
+        expectedConversation: conversation,
+      },
+    ]) {
+      expect(
+        snapshotFreeStore(value.store).applySnapshotFreeProjectMutation(
+          input as never,
+        ),
+      ).toBeNull();
+      expect(value.store.getState()).toBe(before);
+    }
   });
 
   test('begins lifecycle cleanup for a stale snapshot with null runtime and consent', () => {

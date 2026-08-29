@@ -11,15 +11,22 @@ import ReactTestRenderer, {
 } from 'react-test-renderer';
 
 import App from '../App';
+import { AccountSheet } from '../src/components/AccountSheet';
 import { ChatDrawer } from '../src/components/ChatDrawer';
 import { ChatComposer } from '../src/components/ChatComposer';
 import { ConversationActionSheet } from '../src/components/ConversationActionSheet';
+import { EmptyChat } from '../src/components/EmptyChat';
 import { ProjectContextSheet } from '../src/components/ProjectContextSheet';
 import { ProjectContextStrip } from '../src/components/ProjectContextStrip';
 import { ProjectsSurface } from '../src/components/ProjectsSurface';
 import { SettingsSheet } from '../src/components/SettingsSheet';
+import { WorkspacePickerSheet } from '../src/components/WorkspacePickerSheet';
 import { ModelPicker } from '../src/components/ModelPicker';
+import { MirrorSettingsSheet } from '../src/components/MirrorSettingsSheet';
 import { ConversationOptionsPicker } from '../src/components/ConversationOptionsPicker';
+import { HarnessPicker } from '../src/components/HarnessPicker';
+import { RuntimeEvidenceSheet } from '../src/components/RuntimeEvidenceSheet';
+import { WorkspaceDrawer } from '../src/components/WorkspaceDrawer';
 import { createChatStore } from '../src/state';
 import type {
   ProjectContextInspectionV1,
@@ -390,6 +397,56 @@ function storedSetupProject() {
   return { stored, conversationId };
 }
 
+function storedLifecycleCheckpoint(
+  phase: 'intent' | 'cleanup_pending' | 'ready_to_finalize',
+) {
+  const fixture = storedProjectContext(true);
+  const conversation = fixture.stored.getState().conversations[
+    fixture.conversationId
+  ]!;
+  const begun = fixture.stored.beginProjectContextDestructiveTransition({
+    lifecycleId: 'bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb',
+    action: 'unbind',
+    targetProjectId: null,
+    owner: {
+      conversationId: fixture.conversationId,
+      projectId: conversation.projectId!,
+      runtimeContextId: conversation.runtimeContextId,
+      modelId: conversation.modelId,
+      expectedUpdatedAt: conversation.updatedAt,
+      expectedContext: conversation.projectContext!,
+    },
+  })!;
+  expect(begun.commit()).toBe(true);
+  if (phase !== 'intent') {
+    const transition = fixture.stored.getState()
+      .projectContextDestructiveTransition!;
+    const tombstone =
+      fixture.stored.tombstoneProjectContextDestructiveTransition({
+        lifecycleId: transition.lifecycleId,
+        epoch: transition.epoch,
+        action: transition.action,
+        targetProjectId: transition.targetProjectId,
+        expectedTransition: transition,
+      })!;
+    expect(tombstone.commit()).toBe(true);
+  }
+  if (phase === 'ready_to_finalize') {
+    const transition = fixture.stored.getState()
+      .projectContextDestructiveTransition!;
+    const ready =
+      fixture.stored.markProjectContextDestructiveCleanupComplete({
+        lifecycleId: transition.lifecycleId,
+        epoch: transition.epoch,
+        action: transition.action,
+        targetProjectId: transition.targetProjectId,
+        expectedTransition: transition,
+      })!;
+    expect(ready.commit()).toBe(true);
+  }
+  return fixture;
+}
+
 async function settle() {
   await Promise.resolve();
   await Promise.resolve();
@@ -457,6 +514,15 @@ function lastPersistedState() {
   };
 }
 
+function persistedStates(): Array<ReturnType<typeof lastPersistedState>> {
+  return mockLocalRuntime.persistSession.mock.calls.flatMap(call => {
+    const value = call[0];
+    return typeof value === 'string'
+      ? [JSON.parse(value) as ReturnType<typeof lastPersistedState>]
+      : [];
+  });
+}
+
 function actionByLabel(
   root: ReactTestInstance,
   label: string,
@@ -472,6 +538,16 @@ function visibleContextSheets(root: ReactTestInstance): ReactTestInstance[] {
   return root
     .findAllByType(ProjectContextSheet)
     .filter(sheet => sheet.props.visible === true);
+}
+
+async function openProjectsSurface(root: ReactTestInstance): Promise<void> {
+  await act(async () => actionByLabel(root, 'Open navigation').props.onPress());
+  await act(async () => {
+    root.findByType(ChatDrawer).props.onOpenProjects();
+    root.findByType(ChatDrawer).props.onDismiss();
+    await settle();
+  });
+  expect(root.findByType(ProjectsSurface).props.visible).toBe(true);
 }
 
 async function renderSetupProjectApp(): Promise<Renderer> {
@@ -1854,6 +1930,22 @@ describe('project context Home integration H2', () => {
     expect(mockLocalRuntime.completeV2).not.toHaveBeenCalled();
   });
 
+  test('invalidates closed pending recovery when an EmptyChat suggestion changes the draft', async () => {
+    const renderer = await renderSetupProjectApp();
+    const root = renderer.root;
+    await enterPendingProjectRecovery(root, 'pending suggestion');
+    await act(async () => visibleContextSheets(root)[0]!.props.onClose());
+    await act(async () =>
+      root.findByType(EmptyChat).props.onSuggestion('Use this suggestion'),
+    );
+    await act(async () =>
+      root.findByProps({ testID: 'project-context-strip' }).props.onPress(),
+    );
+
+    expect(visibleContextSheets(root)[0]?.props.mode).toBe('candidates');
+    expect(mockLocalRuntime.completeV2).not.toHaveBeenCalled();
+  });
+
   test('invalidates a closed pending send before reusing the empty chat for another project', async () => {
     jest.useFakeTimers();
     const secondProject = {
@@ -1876,6 +1968,12 @@ describe('project context Home integration H2', () => {
     const staleSendWithout = oldSheet.props.onSendWithoutContext;
     const staleDismiss = oldSheet.props.onDismiss;
     await act(async () => oldSheet.props.onClose());
+
+    await act(async () => actionByLabel(root, 'Open navigation').props.onPress());
+    await act(async () => {
+      actionByLabel(root, 'Projects').props.onPress();
+      await settle();
+    });
 
     await act(async () => {
       await root.findByType(ProjectsSurface).props.onChatInProject(secondProject);
@@ -2440,6 +2538,1417 @@ describe('project context Home integration H2', () => {
     expect(visibleContextSheets(root)[0]?.props.mode).toBe('disclosure');
     expect(visibleContextSheets(root)[0]?.props.confirmationRequired).toBe(true);
     jest.useRealTimers();
+  });
+});
+
+describe('project context Home integration H3', () => {
+  test.each([
+    ['intent', 1],
+    ['cleanup_pending', 1],
+    ['ready_to_finalize', 0],
+  ] as const)(
+    'resumes a hydrated %s lifecycle before normal Context attachment',
+    async (phase, expectedDiscardCalls) => {
+      const fixture = storedLifecycleCheckpoint(phase);
+      mockLocalRuntime.loadSession.mockResolvedValueOnce(
+        fixture.stored.serialize(),
+      );
+      mockLocalProjectContext.inspect.mockResolvedValue({
+        schema_version: 1,
+        state: 'confirmed',
+        manifest: fixture.manifest,
+      });
+
+      const renderer = await renderApp();
+      await act(async () => {
+        await settle();
+        await settle();
+      });
+
+      expect(mockLocalProjectContext.inspect).not.toHaveBeenCalled();
+      expect(mockLocalProjectContext.discard).toHaveBeenCalledTimes(
+        expectedDiscardCalls,
+      );
+      const persisted = JSON.parse(
+        mockLocalRuntime.persistSession.mock.calls.at(-1)?.[0] as string,
+      ) as {
+        project_context_destructive_transition: unknown;
+        conversations: Array<{
+          id: string;
+          project_id: string | null;
+          project_context: unknown;
+        }>;
+      };
+      expect(persisted.project_context_destructive_transition).toBeNull();
+      expect(
+        persisted.conversations.find(
+          conversation => conversation.id === fixture.conversationId,
+        ),
+      ).toMatchObject({ project_id: null, project_context: null });
+      expect(visibleContextSheets(renderer.root)).toHaveLength(0);
+    },
+  );
+
+  test('restores cleanup recovery value-free when hydrated native discard fails', async () => {
+    const fixture = storedLifecycleCheckpoint('cleanup_pending');
+    mockLocalRuntime.loadSession.mockResolvedValueOnce(fixture.stored.serialize());
+    mockLocalProjectContext.discard.mockRejectedValueOnce({
+      code: 'E_CONTEXT_TIMEOUT',
+      message: 'RAW_RESTART_CLEANUP_SENTINEL',
+    });
+
+    const renderer = await renderApp();
+    await act(async () => {
+      await settle();
+      await settle();
+    });
+
+    const sheet = visibleContextSheets(renderer.root)[0];
+    expect(sheet?.props.mode).toBe('lifecycle');
+    expect(sheet?.props.lifecycle).toMatchObject({
+      kind: 'transition',
+      action: 'unbind',
+      controllerState: {
+        phase: 'cleanup_pending',
+        failureCode: 'E_CONTEXT_TIMEOUT',
+      },
+    });
+    expect(mockLocalProjectContext.inspect).not.toHaveBeenCalled();
+    expect(
+      renderer.root.findAll(node =>
+        Object.values(node.props).some(
+          value =>
+            typeof value === 'string' &&
+            value.includes('RAW_RESTART_CLEANUP_SENTINEL'),
+        ),
+      ),
+    ).toHaveLength(0);
+  });
+
+  test('keeps a restored journal visible when the native context bridge is unavailable', async () => {
+    const fixture = storedLifecycleCheckpoint('cleanup_pending');
+    mockLocalRuntime.loadSession.mockResolvedValueOnce(fixture.stored.serialize());
+    mockLocalProjectContext.isAvailable.mockReturnValue(false);
+    mockLocalProjectContext.discard.mockRejectedValueOnce({
+      code: 'E_CONTEXT_NATIVE',
+      message: 'RAW_UNAVAILABLE_SENTINEL',
+    });
+
+    const renderer = await renderApp();
+    await act(async () => {
+      await settle();
+      await settle();
+    });
+
+    const sheet = visibleContextSheets(renderer.root)[0];
+    expect(sheet?.props.mode).toBe('lifecycle');
+    expect(sheet?.props.unavailable).toBe(true);
+    expect(sheet?.props.lifecycle).toMatchObject({
+      kind: 'transition',
+      action: 'unbind',
+      controllerState: {
+        phase: 'cleanup_pending',
+        failureCode: 'E_CONTEXT_NATIVE',
+      },
+    });
+    expect(mockLocalProjectContext.inspect).not.toHaveBeenCalled();
+  });
+
+  test('closes navigation and opens the blocking Context review before creating a new chat', async () => {
+    const fixture = storedProjectContext(false);
+    mockLocalRuntime.loadSession.mockResolvedValueOnce(fixture.stored.serialize());
+    mockLocalProjects.list.mockResolvedValue({
+      schema_version: 1,
+      projects: [contextProject],
+    });
+    mockLocalProjectContext.inspect.mockResolvedValueOnce({
+      schema_version: 1,
+      state: 'prepared',
+      manifest: fixture.manifest,
+    });
+    const renderer = await renderApp();
+    const root = renderer.root;
+    await act(async () => settle());
+    const originalConversationId = root.findByType(ChatDrawer).props.activeId;
+    await act(async () => actionByLabel(root, 'Open navigation').props.onPress());
+
+    await act(async () => {
+      await root.findByType(ChatDrawer).props.onNewChat();
+      root.findByType(ChatDrawer).props.onDismiss();
+      await settle();
+    });
+
+    expect(root.findByType(ChatDrawer).props.visible).toBe(false);
+    expect(root.findByType(ChatDrawer).props.activeId).toBe(
+      originalConversationId,
+    );
+    expect(visibleContextSheets(root)).toHaveLength(1);
+    expect(visibleContextSheets(root)[0]?.props.mode).toBe('disclosure');
+    expect(visibleContextSheets(root)[0]?.props.confirmationRequired).toBe(true);
+    expect(mockLocalRuntime.cancelCompletion).not.toHaveBeenCalled();
+    expect(mockLocalRuntime.persistSession).not.toHaveBeenCalled();
+  });
+
+  test('keeps an active confirmed snapshot conversation and opens lifecycle delete confirmation', async () => {
+    let deletePromise: Promise<unknown> | undefined;
+    const alert = jest
+      .spyOn(Alert, 'alert')
+      .mockImplementation((_title, _message, buttons) => {
+        const destructive = buttons?.find(button => button.style === 'destructive');
+        const result = destructive?.onPress?.();
+        if (result !== undefined) deletePromise = Promise.resolve(result);
+      });
+    const fixture = storedProjectContext(true);
+    mockLocalRuntime.loadSession.mockResolvedValueOnce(fixture.stored.serialize());
+    mockLocalProjects.list.mockResolvedValue({
+      schema_version: 1,
+      projects: [contextProject],
+    });
+    mockLocalProjectContext.inspect.mockResolvedValue({
+      schema_version: 1,
+      state: 'confirmed',
+      manifest: fixture.manifest,
+    });
+    const renderer = await renderApp();
+    const root = renderer.root;
+    await act(async () => settle());
+    await act(async () => actionByLabel(root, 'Open navigation').props.onPress());
+    await act(async () => {
+      root.findByType(ChatDrawer).props.onOpenConversationMenu(
+        fixture.conversationId,
+      );
+      root.findByType(ChatDrawer).props.onDismiss();
+    });
+    expect(root.findByType(ConversationActionSheet).props.visible).toBe(true);
+    await act(async () => {
+      root.findByType(ConversationActionSheet).props.onDelete();
+      root.findByType(ConversationActionSheet).props.onDismiss();
+      await settle();
+      await deletePromise;
+    });
+
+    expect(root.findByType(ChatDrawer).props.activeId).toBe(
+      fixture.conversationId,
+    );
+    expect(root.findAllByType(ProjectContextStrip)).toHaveLength(1);
+    expect(visibleContextSheets(root)).toHaveLength(1);
+    expect(visibleContextSheets(root)[0]?.props.mode).toBe('lifecycle');
+    expect(visibleContextSheets(root)[0]?.props.lifecycle).toMatchObject({
+      kind: 'confirmation',
+      action: 'delete',
+    });
+    expect(actionByLabel(root, 'Delete chat')).toBeDefined();
+    expect(mockLocalProjectContext.discard).not.toHaveBeenCalled();
+    expect(mockLocalRuntime.cancelCompletion).not.toHaveBeenCalled();
+    await act(async () => visibleContextSheets(root)[0]!.props.onClose());
+    expect(visibleContextSheets(root)).toHaveLength(0);
+    await act(async () => root.findByType(ChatComposer).props.onOptionsPress());
+    expect(root.findByType(ConversationOptionsPicker).props.visible).toBe(true);
+    await act(async () =>
+      root.findByType(ConversationOptionsPicker).props.onClose(),
+    );
+    await act(async () => actionByLabel(root, 'Open navigation').props.onPress());
+    expect(
+      root.findAllByProps({ accessibilityLabel: 'Pending project cleanup' }),
+    ).toHaveLength(0);
+    alert.mockRestore();
+  });
+
+  test('drops a stale snapshot delete confirmation after the selected owner changes', async () => {
+    let staleConfirm: (() => unknown) | undefined;
+    const alert = jest
+      .spyOn(Alert, 'alert')
+      .mockImplementation((_title, _message, buttons) => {
+        const onPress = buttons?.find(
+          button => button.style === 'destructive',
+        )?.onPress;
+        staleConfirm =
+          typeof onPress === 'function' ? () => onPress() : undefined;
+      });
+    const fixture = storedProjectContext(true);
+    const otherId = fixture.stored.createConversation({
+      title: 'Other chat',
+      select: false,
+    });
+    mockLocalRuntime.loadSession.mockResolvedValueOnce(fixture.stored.serialize());
+    const renderer = await renderApp();
+    const root = renderer.root;
+    await act(async () => settle());
+
+    await act(async () => actionByLabel(root, 'Open navigation').props.onPress());
+    await act(async () => {
+      root.findByType(ChatDrawer).props.onOpenConversationMenu(
+        fixture.conversationId,
+      );
+      root.findByType(ChatDrawer).props.onDismiss();
+    });
+    await act(async () => {
+      root.findByType(ConversationActionSheet).props.onDelete();
+      root.findByType(ConversationActionSheet).props.onDismiss();
+      await settle();
+    });
+    expect(staleConfirm).toEqual(expect.any(Function));
+
+    await act(async () => actionByLabel(root, 'Open navigation').props.onPress());
+    await act(async () => {
+      await root.findByType(ChatDrawer).props.onSelect(otherId);
+      await settle();
+    });
+    expect(root.findByType(ChatDrawer).props.activeId).toBe(otherId);
+    mockLocalRuntime.persistSession.mockClear();
+    mockLocalProjectContext.discard.mockClear();
+
+    await act(async () => {
+      await staleConfirm?.();
+      await settle();
+    });
+
+    expect(root.findByType(ChatDrawer).props.activeId).toBe(otherId);
+    expect(visibleContextSheets(root)).toHaveLength(0);
+    expect(mockLocalRuntime.persistSession).not.toHaveBeenCalled();
+    expect(mockLocalProjectContext.discard).not.toHaveBeenCalled();
+    alert.mockRestore();
+  });
+
+  test('dismisses Projects into exact Context review when snapshot unbind is blocked by a candidate', async () => {
+    const fixture = storedProjectContext(false);
+    mockLocalRuntime.loadSession.mockResolvedValueOnce(fixture.stored.serialize());
+    mockLocalProjectContext.inspect.mockResolvedValue({
+      schema_version: 1,
+      state: 'prepared',
+      manifest: fixture.manifest,
+    });
+    const renderer = await renderApp();
+    const root = renderer.root;
+    mockLocalRuntime.persistSession.mockClear();
+
+    await openProjectsSurface(root);
+    await act(async () => {
+      root.findByType(ProjectsSurface).props.onUnbindFromChat();
+      await settle();
+    });
+    expect(root.findByType(ProjectsSurface).props.visible).toBe(false);
+    await act(async () => root.findByType(ProjectsSurface).props.onDismiss());
+
+    expect(visibleContextSheets(root)[0]?.props.mode).toBe('disclosure');
+    expect(visibleContextSheets(root)[0]?.props.confirmationRequired).toBe(true);
+    expect(mockLocalRuntime.persistSession).not.toHaveBeenCalled();
+    expect(mockLocalProjectContext.discard).not.toHaveBeenCalled();
+    expect(mockLocalRuntime.cancelCompletion).not.toHaveBeenCalled();
+  });
+
+  test('unbinds only after the context tombstone is durable and native cleanup succeeds', async () => {
+    const fixture = storedProjectContext(true);
+    const cleanup = deferred<{
+      schema_version: 1;
+      status: 'discarded';
+    }>();
+    mockLocalRuntime.loadSession.mockResolvedValueOnce(fixture.stored.serialize());
+    mockLocalProjects.list.mockResolvedValue({
+      schema_version: 1,
+      projects: [contextProject],
+    });
+    mockLocalProjectContext.inspect.mockResolvedValue({
+      schema_version: 1,
+      state: 'confirmed',
+      manifest: fixture.manifest,
+    });
+    mockLocalProjectContext.discard.mockReturnValueOnce(cleanup.promise);
+    const renderer = await renderApp();
+    const root = renderer.root;
+    await act(async () => settle());
+    mockLocalRuntime.persistSession.mockClear();
+
+    await openProjectsSurface(root);
+    await act(async () => {
+      root.findByType(ProjectsSurface).props.onUnbindFromChat();
+      await settle();
+    });
+    await act(async () => root.findByType(ProjectsSurface).props.onDismiss());
+    await act(async () => {
+      actionByLabel(root, 'Disable context and unbind').props.onPress();
+      await settle();
+    });
+
+    const beforeCleanup = persistedStates();
+    expect(beforeCleanup.at(-1)?.conversations[0]).toMatchObject({
+      project_id: CONTEXT_PROJECT_ID,
+      project_context: {
+        status: 'setup_required',
+        manifest: null,
+        consent: null,
+      },
+    });
+    expect(root.findByType(ProjectsSurface).props.boundProjectId).toBe(
+      CONTEXT_PROJECT_ID,
+    );
+    expect(mockLocalProjectContext.discard).toHaveBeenCalledTimes(1);
+    expect(mockLocalProjectContext.discard).toHaveBeenCalledWith(
+      CONTEXT_SNAPSHOT_ID,
+    );
+    cleanup.resolve({ schema_version: 1, status: 'discarded' });
+    await act(async () => {
+      await settle();
+      await settle();
+    });
+
+    expect(persistedStates().at(-1)?.conversations[0]).toMatchObject({
+      project_id: null,
+      project_context: null,
+    });
+    expect(mockLocalProjectContext.discard).toHaveBeenCalledTimes(1);
+  });
+
+  test('keeps the project bound until Retry save completes a pending unbind', async () => {
+    const fixture = storedProjectContext(true);
+    mockLocalRuntime.loadSession.mockResolvedValueOnce(fixture.stored.serialize());
+    mockLocalProjects.list.mockResolvedValue({
+      schema_version: 1,
+      projects: [contextProject],
+    });
+    mockLocalProjectContext.inspect.mockResolvedValue({
+      schema_version: 1,
+      state: 'confirmed',
+      manifest: fixture.manifest,
+    });
+    const renderer = await renderApp();
+    const root = renderer.root;
+    await act(async () => settle());
+    mockLocalRuntime.persistSession.mockClear();
+    let candidate = '';
+    mockLocalRuntime.persistSession
+      .mockImplementationOnce(async json => {
+        candidate = json;
+        return false;
+      })
+      .mockResolvedValue(true);
+    mockLocalRuntime.loadSession.mockImplementationOnce(async () => candidate);
+
+    await openProjectsSurface(root);
+    await act(async () => {
+      root.findByType(ProjectsSurface).props.onUnbindFromChat();
+      await settle();
+    });
+    await act(async () => root.findByType(ProjectsSurface).props.onDismiss());
+    await act(async () => settle());
+    await act(async () => {
+      actionByLabel(root, 'Disable context and unbind').props.onPress();
+      await settle();
+    });
+
+    expect(root.findByType(ProjectsSurface).props.boundProjectId).toBe(
+      CONTEXT_PROJECT_ID,
+    );
+    expect(visibleContextSheets(root)[0]?.props.lifecycle).toMatchObject({
+      kind: 'transition',
+      action: 'unbind',
+      controllerState: { pendingPersistence: 'intent' },
+    });
+    expect(actionByLabel(root, 'Retry save')).toBeDefined();
+    expect(mockLocalProjectContext.discard).not.toHaveBeenCalled();
+
+    await act(async () => {
+      actionByLabel(root, 'Retry save').props.onPress();
+      await settle();
+      await settle();
+    });
+    expect(mockLocalProjectContext.discard).toHaveBeenCalledTimes(1);
+    expect(persistedStates().at(-1)?.conversations[0]).toMatchObject({
+      project_id: null,
+      project_context: null,
+    });
+  });
+
+  test('keeps the project bound until Retry cleanup succeeds exactly once', async () => {
+    const fixture = storedProjectContext(true);
+    mockLocalRuntime.loadSession.mockResolvedValueOnce(fixture.stored.serialize());
+    mockLocalProjects.list.mockResolvedValue({
+      schema_version: 1,
+      projects: [contextProject],
+    });
+    mockLocalProjectContext.inspect.mockResolvedValue({
+      schema_version: 1,
+      state: 'confirmed',
+      manifest: fixture.manifest,
+    });
+    mockLocalProjectContext.discard
+      .mockRejectedValueOnce({
+        code: 'E_CONTEXT_TIMEOUT',
+        message: 'RAW_UNBIND_CLEANUP_SENTINEL',
+      })
+      .mockResolvedValue({ schema_version: 1, status: 'discarded' });
+    const renderer = await renderApp();
+    const root = renderer.root;
+    await act(async () => settle());
+    mockLocalRuntime.persistSession.mockClear();
+
+    await openProjectsSurface(root);
+    await act(async () => {
+      root.findByType(ProjectsSurface).props.onUnbindFromChat();
+      await settle();
+    });
+    await act(async () => root.findByType(ProjectsSurface).props.onDismiss());
+    await act(async () => settle());
+    await act(async () => {
+      actionByLabel(root, 'Disable context and unbind').props.onPress();
+      await settle();
+      await settle();
+    });
+
+    expect(root.findByType(ProjectsSurface).props.boundProjectId).toBe(
+      CONTEXT_PROJECT_ID,
+    );
+    expect(visibleContextSheets(root)[0]?.props.lifecycle).toMatchObject({
+      kind: 'transition',
+      action: 'unbind',
+      controllerState: {
+        phase: 'cleanup_pending',
+        failureCode: 'E_CONTEXT_TIMEOUT',
+      },
+    });
+    expect(actionByLabel(root, 'Retry cleanup')).toBeDefined();
+    expect(
+      root.findAll(node =>
+        Object.values(node.props).some(
+          value =>
+            typeof value === 'string' &&
+            value.includes('RAW_UNBIND_CLEANUP_SENTINEL'),
+        ),
+      ),
+    ).toHaveLength(0);
+    const staleRetry = visibleContextSheets(root)[0]!.props
+      .onRetryLifecycleCleanup;
+    const staleToken = visibleContextSheets(root)[0]!.props.lifecycle
+      .controllerState.token;
+
+    await act(async () => {
+      actionByLabel(root, 'Retry cleanup').props.onPress();
+      await settle();
+      await settle();
+    });
+    expect(mockLocalProjectContext.discard).toHaveBeenCalledTimes(2);
+    expect(persistedStates().at(-1)?.conversations[0]).toMatchObject({
+      project_id: null,
+      project_context: null,
+    });
+    await act(async () => staleRetry(staleToken));
+    expect(mockLocalProjectContext.discard).toHaveBeenCalledTimes(2);
+  });
+
+  test('does not unbind a snapshot referenced by an exact retry attempt', async () => {
+    const fixture = storedProjectContext(true);
+    const prepared = fixture.stored.prepareTurnAttempt(
+      fixture.conversationId,
+      'Keep the frozen snapshot',
+    );
+    expect(prepared?.commit()).toBe(true);
+    expect(
+      fixture.stored.failAttempt(
+        fixture.conversationId,
+        prepared!.attemptId,
+        'E_COMPLETION_NATIVE',
+      ),
+    ).toBe(true);
+    mockLocalRuntime.loadSession.mockResolvedValueOnce(fixture.stored.serialize());
+    mockLocalProjects.list.mockResolvedValue({
+      schema_version: 1,
+      projects: [contextProject],
+    });
+    const renderer = await renderApp();
+    const root = renderer.root;
+    await act(async () => settle());
+    mockLocalRuntime.persistSession.mockClear();
+
+    await openProjectsSurface(root);
+    await act(async () => {
+      await root.findByType(ProjectsSurface).props.onUnbindFromChat();
+      await settle();
+    });
+
+    expect(root.findByType(ProjectsSurface).props.boundProjectId).toBe(
+      CONTEXT_PROJECT_ID,
+    );
+    expect(mockLocalRuntime.persistSession).not.toHaveBeenCalled();
+    expect(mockLocalProjectContext.discard).not.toHaveBeenCalled();
+    expect(actionByLabel(root, 'Retry response')).toBeDefined();
+    await act(async () =>
+      root.findByProps({ testID: 'project-context-strip' }).props.onPress(),
+    );
+    expect(visibleContextSheets(root)[0]?.props.disabled).toBe(true);
+  });
+
+  test('creates a new project chat instead of rebinding an empty snapshot owner', async () => {
+    jest.useFakeTimers();
+    const secondProject = {
+      ...contextProject,
+      id: 'bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb',
+      name: 'second-project',
+      workspace_path:
+        'projects/bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb/repo',
+    };
+    const fixture = storedProjectContext(true);
+    mockLocalRuntime.loadSession.mockResolvedValueOnce(fixture.stored.serialize());
+    mockLocalProjects.list.mockResolvedValue({
+      schema_version: 1,
+      projects: [contextProject, secondProject],
+    });
+    mockLocalProjectContext.inspect.mockResolvedValue({
+      schema_version: 1,
+      state: 'confirmed',
+      manifest: fixture.manifest,
+    });
+    const renderer = await renderApp();
+    const root = renderer.root;
+    await act(async () => settle());
+
+    await act(async () => actionByLabel(root, 'Open navigation').props.onPress());
+    await act(async () => {
+      actionByLabel(root, 'Projects').props.onPress();
+      await settle();
+    });
+
+    await act(async () => {
+      await root.findByType(ProjectsSurface).props.onChatInProject(secondProject);
+      await settle();
+    });
+    await act(async () => root.findByType(ProjectsSurface).props.onDismiss());
+
+    const persisted = lastPersistedState();
+    expect(persisted.conversations).toHaveLength(2);
+    expect(
+      persisted.conversations.find(
+        conversation => conversation.id === fixture.conversationId,
+      ),
+    ).toMatchObject({
+      project_id: CONTEXT_PROJECT_ID,
+      project_context: {
+        manifest: { snapshot_id: CONTEXT_SNAPSHOT_ID },
+        consent: { consent_receipt_id: CONTEXT_CONSENT_ID },
+      },
+    });
+    const selected = persisted.conversations.find(
+      conversation => conversation.id === persisted.active_conversation_id,
+    );
+    expect(selected?.id).not.toBe(fixture.conversationId);
+    expect(selected).toMatchObject({
+      project_id: secondProject.id,
+      project_context: { status: 'setup_required' },
+    });
+    expect(mockLocalProjectContext.discard).not.toHaveBeenCalled();
+    await act(async () => {
+      jest.advanceTimersByTime(180);
+      await settle();
+    });
+    jest.useRealTimers();
+  });
+
+  test('deletes a nonactive snapshot chat without selecting it and prunes only after commit', async () => {
+    let deletePromise: Promise<unknown> | undefined;
+    const alert = jest
+      .spyOn(Alert, 'alert')
+      .mockImplementation((_title, _message, buttons) => {
+        const destructive = buttons?.find(
+          button => button.style === 'destructive',
+        );
+        const result = destructive?.onPress?.();
+        if (result !== undefined) deletePromise = Promise.resolve(result);
+      });
+    const fixture = storedProjectContext(true);
+    fixture.stored.appendUserMessage(
+      fixture.conversationId,
+      'Project attachment',
+      {
+        attachments: [
+          {
+            schema_version: 1,
+            id: 'attachment-project-delete',
+            kind: 'text',
+            name: 'project.txt',
+            mime_type: 'text/plain',
+            size: 12,
+          },
+        ],
+      },
+    );
+    const activeId = fixture.stored.createConversation({ title: 'Keep me' });
+    mockLocalRuntime.loadSession.mockResolvedValueOnce(fixture.stored.serialize());
+    const renderer = await renderApp();
+    const root = renderer.root;
+    await act(async () => settle());
+    await act(async () => {
+      root
+        .findByProps({ accessibilityLabel: 'Message DSH' })
+        .props.onChangeText('active draft');
+    });
+    mockLocalAttachments.prune.mockClear();
+    mockLocalAttachments.discard.mockClear();
+
+    await act(async () => actionByLabel(root, 'Open navigation').props.onPress());
+    expect(root.findByType(ChatDrawer).props.visible).toBe(true);
+    await act(async () => {
+      root.findByType(ChatDrawer).props.onOpenConversationMenu(
+        fixture.conversationId,
+      );
+      root.findByType(ChatDrawer).props.onDismiss();
+    });
+    expect(root.findByType(ConversationActionSheet).props.visible).toBe(true);
+    await act(async () => {
+      root.findByType(ConversationActionSheet).props.onDelete();
+      root.findByType(ConversationActionSheet).props.onDismiss();
+      await settle();
+      await deletePromise;
+    });
+
+    expect(root.findByType(ChatDrawer).props.activeId).toBe(activeId);
+    expect(visibleContextSheets(root)[0]?.props.lifecycle).toMatchObject({
+      kind: 'confirmation',
+      action: 'delete',
+    });
+    expect(mockLocalProjectContext.discard).not.toHaveBeenCalled();
+    expect(mockLocalAttachments.prune).not.toHaveBeenCalled();
+    await act(async () => {
+      actionByLabel(root, 'Delete chat').props.onPress();
+      await settle();
+      await settle();
+    });
+
+    expect(root.findByType(ChatDrawer).props.activeId).toBe(activeId);
+    expect(
+      root.findByProps({ accessibilityLabel: 'Message DSH' }).props.value,
+    ).toBe('active draft');
+    expect(
+      lastPersistedState().conversations.find(
+        conversation => conversation.id === fixture.conversationId,
+      ),
+    ).toBeUndefined();
+    expect(mockLocalProjectContext.discard).toHaveBeenCalledTimes(1);
+    expect(mockLocalAttachments.prune).toHaveBeenCalledWith([]);
+    expect(mockLocalAttachments.discard).not.toHaveBeenCalled();
+    alert.mockRestore();
+  });
+
+  test('directly unbinds snapshot-free context with no journal or native discard', async () => {
+    const fixture = storedSetupProject();
+    mockLocalRuntime.loadSession.mockResolvedValueOnce(fixture.stored.serialize());
+    const renderer = await renderApp();
+    const root = renderer.root;
+    mockLocalRuntime.persistSession.mockClear();
+
+    await openProjectsSurface(root);
+    await act(async () => {
+      root.findByType(ProjectsSurface).props.onUnbindFromChat();
+      await settle();
+      await settle();
+    });
+
+    const persisted = JSON.parse(
+      mockLocalRuntime.persistSession.mock.calls.at(-1)?.[0] as string,
+    ) as {
+      project_context_destructive_transition: unknown;
+      conversations: Array<{ project_id: string | null }>;
+    };
+    expect(persisted.project_context_destructive_transition).toBeNull();
+    expect(persisted.conversations[0]?.project_id).toBeNull();
+    expect(mockLocalProjectContext.discard).not.toHaveBeenCalled();
+  });
+
+  test('rolls back snapshot-free unbind when the direct session write is not committed', async () => {
+    const fixture = storedSetupProject();
+    mockLocalRuntime.loadSession.mockResolvedValueOnce(fixture.stored.serialize());
+    const renderer = await renderApp();
+    const root = renderer.root;
+    mockLocalRuntime.persistSession.mockResolvedValueOnce(false);
+    mockLocalRuntime.loadSession.mockResolvedValueOnce(fixture.stored.serialize());
+
+    await openProjectsSurface(root);
+    await act(async () => {
+      root.findByType(ProjectsSurface).props.onUnbindFromChat();
+      await settle();
+      await settle();
+    });
+
+    expect(root.findByType(ProjectsSurface).props.boundProjectId).toBe(
+      CONTEXT_PROJECT_ID,
+    );
+    expect(mockLocalProjectContext.discard).not.toHaveBeenCalled();
+  });
+
+  test.each(
+    (['unbind', 'delete', 'rebind'] as const).flatMap(action =>
+      (['not_committed', 'session_only', 'unknown'] as const).map(status => [
+        action,
+        status,
+      ] as const),
+    ),
+  )(
+    'keeps snapshot-free %s crash-safe for %s durability and retries once',
+    async (action, status) => {
+      const fixture = storedSetupProject();
+      const secondProject = {
+        ...contextProject,
+        id: 'bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb',
+        name: 'second-project',
+        workspace_path:
+          'projects/bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb/repo',
+      };
+      mockLocalRuntime.loadSession.mockResolvedValueOnce(
+        fixture.stored.serialize(),
+      );
+      mockLocalProjects.list.mockResolvedValue({
+        schema_version: 1,
+        projects: [contextProject, secondProject],
+      });
+      let deletePromise: Promise<unknown> | undefined;
+      const alert = jest
+        .spyOn(Alert, 'alert')
+        .mockImplementation((_title, _message, buttons) => {
+          const result = buttons
+            ?.find(button => button.style === 'destructive')
+            ?.onPress?.();
+          if (result !== undefined) deletePromise = Promise.resolve(result);
+        });
+      const renderer = await renderApp();
+      const root = renderer.root;
+      let candidate = '';
+      if (status === 'unknown') {
+        mockLocalRuntime.persistSession.mockRejectedValueOnce(
+          new Error('DIRECT_PERSIST_SENTINEL'),
+        );
+        mockLocalRuntime.loadSession.mockRejectedValueOnce(
+          new Error('DIRECT_LOAD_SENTINEL'),
+        );
+      } else {
+        mockLocalRuntime.persistSession.mockImplementationOnce(async json => {
+          candidate = json;
+          return false;
+        });
+        mockLocalRuntime.loadSession.mockImplementationOnce(async () =>
+          status === 'session_only' ? candidate : fixture.stored.serialize(),
+        );
+      }
+
+      if (action === 'unbind') {
+        await openProjectsSurface(root);
+        await act(async () => {
+          root.findByType(ProjectsSurface).props.onUnbindFromChat();
+          await settle();
+          await settle();
+        });
+      } else if (action === 'rebind') {
+        await act(async () => actionByLabel(root, 'Open navigation').props.onPress());
+        await act(async () => {
+          actionByLabel(root, 'Projects').props.onPress();
+          await settle();
+        });
+        await act(async () => {
+          await root.findByType(ProjectsSurface).props.onChatInProject(
+            secondProject,
+          );
+          await settle();
+          await settle();
+        });
+      } else {
+        await act(async () =>
+          actionByLabel(root, 'Open navigation').props.onPress(),
+        );
+        await act(async () => {
+          root.findByType(ChatDrawer).props.onOpenConversationMenu(
+            fixture.conversationId,
+          );
+          root.findByType(ChatDrawer).props.onDismiss();
+        });
+        await act(async () => {
+          root.findByType(ConversationActionSheet).props.onDelete();
+          root.findByType(ConversationActionSheet).props.onDismiss();
+          await settle();
+          await deletePromise;
+          await settle();
+        });
+      }
+
+      if (action !== 'delete') {
+        expect(root.findByType(ProjectsSurface).props.visible).toBe(false);
+        await act(async () => root.findByType(ProjectsSurface).props.onDismiss());
+      }
+
+      expect(visibleContextSheets(root)[0]?.props.lifecycle).toMatchObject({
+        kind: 'direct_persistence',
+        action,
+      });
+      const boundBeforeRetry = root.findByType(ProjectsSurface).props
+        .boundProjectId;
+      if (action === 'unbind') {
+        expect(boundBeforeRetry).toBe(
+          status === 'not_committed' ? CONTEXT_PROJECT_ID : null,
+        );
+      } else if (action === 'rebind') {
+        expect(boundBeforeRetry).toBe(
+          status === 'not_committed' ? CONTEXT_PROJECT_ID : secondProject.id,
+        );
+      } else {
+        expect(root.findByType(ChatDrawer).props.activeId === fixture.conversationId).toBe(
+          status === 'not_committed',
+        );
+      }
+      expect(mockLocalProjectContext.discard).not.toHaveBeenCalled();
+
+      mockLocalRuntime.persistSession.mockResolvedValueOnce(true);
+      await act(async () => {
+        actionByLabel(root, 'Retry save').props.onPress();
+        await settle();
+        await settle();
+      });
+      expect(visibleContextSheets(root)).toHaveLength(0);
+      if (action === 'unbind') {
+        expect(root.findByType(ProjectsSurface).props.boundProjectId).toBeNull();
+      } else if (action === 'rebind') {
+        expect(root.findByType(ProjectsSurface).props.boundProjectId).toBe(
+          secondProject.id,
+        );
+      } else {
+        expect(root.findByType(ChatDrawer).props.activeId).not.toBe(
+          fixture.conversationId,
+        );
+      }
+      alert.mockRestore();
+    },
+  );
+
+  test('busy lifecycle top close is presentation-only and late cleanup cannot reopen it', async () => {
+    const fixture = storedProjectContext(true);
+    const cleanup = deferred<{ schema_version: 1; status: 'discarded' }>();
+    mockLocalRuntime.loadSession.mockResolvedValueOnce(fixture.stored.serialize());
+    mockLocalProjectContext.inspect.mockResolvedValue({
+      schema_version: 1,
+      state: 'confirmed',
+      manifest: fixture.manifest,
+    });
+    mockLocalProjectContext.discard.mockReturnValueOnce(cleanup.promise);
+    const renderer = await renderApp();
+    const root = renderer.root;
+    await openProjectsSurface(root);
+    await act(async () => {
+      root.findByType(ProjectsSurface).props.onUnbindFromChat();
+      await settle();
+    });
+    await act(async () => root.findByType(ProjectsSurface).props.onDismiss());
+    await act(async () => {
+      actionByLabel(root, 'Disable context and unbind').props.onPress();
+      await settle();
+    });
+    const sheet = visibleContextSheets(root)[0]!;
+    await act(async () => sheet.props.onClose());
+    expect(visibleContextSheets(root)).toHaveLength(0);
+    expect(mockLocalProjectContext.discard).toHaveBeenCalledTimes(1);
+
+    cleanup.resolve({ schema_version: 1, status: 'discarded' });
+    await act(async () => {
+      await settle();
+      await settle();
+    });
+    expect(visibleContextSheets(root)).toHaveLength(0);
+    expect(mockLocalProjectContext.discard).toHaveBeenCalledTimes(1);
+    expect(lastPersistedState().conversations[0]?.project_id).toBeNull();
+  });
+
+  test('reopens nonactive direct persistence from one value-free Drawer row and rejects its stale callback', async () => {
+    let deletePromise: Promise<unknown> | undefined;
+    const alert = jest
+      .spyOn(Alert, 'alert')
+      .mockImplementation((_title, _message, buttons) => {
+        const result = buttons
+          ?.find(button => button.style === 'destructive')
+          ?.onPress?.();
+        if (result !== undefined) deletePromise = Promise.resolve(result);
+      });
+    const fixture = storedSetupProject();
+    const activeId = fixture.stored.createConversation({ title: 'Active' });
+    mockLocalRuntime.loadSession.mockResolvedValueOnce(fixture.stored.serialize());
+    const renderer = await renderApp();
+    const root = renderer.root;
+    mockLocalRuntime.persistSession.mockRejectedValueOnce(
+      new Error('DIRECT_UNKNOWN_SENTINEL'),
+    );
+    mockLocalRuntime.loadSession.mockRejectedValueOnce(
+      new Error('DIRECT_LOAD_SENTINEL'),
+    );
+
+    await act(async () => actionByLabel(root, 'Open navigation').props.onPress());
+    await act(async () => {
+      root.findByType(ChatDrawer).props.onOpenConversationMenu(
+        fixture.conversationId,
+      );
+      root.findByType(ChatDrawer).props.onDismiss();
+    });
+    await act(async () => {
+      root.findByType(ConversationActionSheet).props.onDelete();
+      root.findByType(ConversationActionSheet).props.onDismiss();
+      await settle();
+      await deletePromise;
+      await settle();
+    });
+    await act(async () => visibleContextSheets(root)[0]!.props.onClose());
+    expect(visibleContextSheets(root)).toHaveLength(0);
+
+    await act(async () => actionByLabel(root, 'Open navigation').props.onPress());
+    const pending = actionByLabel(root, 'Pending project cleanup');
+    const stalePending = pending.props.onPress;
+    expect(pending.props.accessibilityLabel).toBe('Pending project cleanup');
+    await act(async () => pending.props.onPress());
+    expect(root.findByType(ChatDrawer).props.visible).toBe(false);
+    await act(async () => root.findByType(ChatDrawer).props.onDismiss());
+    expect(visibleContextSheets(root)[0]?.props.lifecycle).toMatchObject({
+      kind: 'direct_persistence',
+      action: 'delete',
+    });
+    expect(root.findByType(ChatDrawer).props.activeId).toBe(activeId);
+    expect(mockLocalProjectContext.inspect).not.toHaveBeenCalled();
+    expect(mockLocalProjectContext.discard).not.toHaveBeenCalled();
+
+    mockLocalRuntime.persistSession.mockResolvedValueOnce(true);
+    await act(async () => {
+      actionByLabel(root, 'Retry save').props.onPress();
+      await settle();
+      await settle();
+    });
+    expect(visibleContextSheets(root)).toHaveLength(0);
+    await act(async () => stalePending());
+    expect(visibleContextSheets(root)).toHaveLength(0);
+    expect(root.findByType(ChatDrawer).props.activeId).toBe(activeId);
+    alert.mockRestore();
+  });
+
+  test('reopens nonactive lifecycle cleanup from Drawer without selecting its target', async () => {
+    let deletePromise: Promise<unknown> | undefined;
+    const alert = jest
+      .spyOn(Alert, 'alert')
+      .mockImplementation((_title, _message, buttons) => {
+        const result = buttons
+          ?.find(button => button.style === 'destructive')
+          ?.onPress?.();
+        if (result !== undefined) deletePromise = Promise.resolve(result);
+      });
+    const fixture = storedProjectContext(true);
+    const activeId = fixture.stored.createConversation({ title: 'Active' });
+    mockLocalRuntime.loadSession.mockResolvedValueOnce(fixture.stored.serialize());
+    mockLocalProjectContext.discard
+      .mockRejectedValueOnce({ code: 'E_CONTEXT_TIMEOUT' })
+      .mockResolvedValue({ schema_version: 1, status: 'discarded' });
+    const renderer = await renderApp();
+    const root = renderer.root;
+
+    await act(async () => actionByLabel(root, 'Open navigation').props.onPress());
+    await act(async () => {
+      root.findByType(ChatDrawer).props.onOpenConversationMenu(
+        fixture.conversationId,
+      );
+      root.findByType(ChatDrawer).props.onDismiss();
+    });
+    await act(async () => {
+      root.findByType(ConversationActionSheet).props.onDelete();
+      root.findByType(ConversationActionSheet).props.onDismiss();
+      await settle();
+      await deletePromise;
+    });
+    await act(async () => {
+      actionByLabel(root, 'Delete chat').props.onPress();
+      await settle();
+      await settle();
+    });
+    expect(visibleContextSheets(root)[0]?.props.lifecycle).toMatchObject({
+      kind: 'transition',
+      action: 'delete',
+      controllerState: { phase: 'cleanup_pending' },
+    });
+    await act(async () => visibleContextSheets(root)[0]!.props.onClose());
+
+    await act(async () => actionByLabel(root, 'Open navigation').props.onPress());
+    const pending = actionByLabel(root, 'Pending project cleanup');
+    await act(async () => pending.props.onPress());
+    await act(async () => root.findByType(ChatDrawer).props.onDismiss());
+    expect(root.findByType(ChatDrawer).props.activeId).toBe(activeId);
+    expect(visibleContextSheets(root)[0]?.props.lifecycle).toMatchObject({
+      kind: 'transition',
+      action: 'delete',
+      controllerState: { phase: 'cleanup_pending' },
+    });
+    expect(mockLocalProjectContext.inspect).not.toHaveBeenCalled();
+
+    await act(async () => {
+      actionByLabel(root, 'Retry cleanup').props.onPress();
+      await settle();
+      await settle();
+    });
+    expect(root.findByType(ChatDrawer).props.activeId).toBe(activeId);
+    expect(
+      lastPersistedState().conversations.find(
+        conversation => conversation.id === fixture.conversationId,
+      ),
+    ).toBeUndefined();
+    alert.mockRestore();
+  });
+
+  test('rejects stale Drawer and composer surface openers while lifecycle confirmation owns the screen', async () => {
+    let deletePromise: Promise<unknown> | undefined;
+    let staleDelete = () => undefined;
+    const alert = jest
+      .spyOn(Alert, 'alert')
+      .mockImplementation((_title, _message, buttons) => {
+        const result = buttons
+          ?.find(button => button.style === 'destructive')
+          ?.onPress?.();
+        if (result !== undefined) deletePromise = Promise.resolve(result);
+    });
+    const fixture = storedProjectContext(true);
+    const staleSelectTarget = fixture.stored.createConversation({
+      title: 'Stale target',
+      select: false,
+    });
+    mockLocalRuntime.loadSession.mockResolvedValueOnce(fixture.stored.serialize());
+    mockLocalRuntime.bootstrap.mockResolvedValue({
+      proof: {
+        ...proof,
+        checks: { ...proof.checks, rish_applet_executed: false },
+      },
+      rish: {},
+    });
+    const renderer = await renderApp();
+    const root = renderer.root;
+    const staleMainRuntime = actionByLabel(
+      root,
+      'Show runtime evidence',
+    ).props.onPress;
+    const composer = root.findByType(ChatComposer);
+    const staleWorkspace = composer.props.onWorkspacePress;
+    const staleOptions = composer.props.onOptionsPress;
+    const staleContext = root.findByProps({
+      testID: 'project-context-strip',
+    }).props.onPress;
+    const staleDrawerOpen = actionByLabel(root, 'Open navigation').props.onPress;
+    await act(async () => staleDrawerOpen());
+    const firstDrawer = root.findByType(ChatDrawer);
+    const staleAccount = firstDrawer.props.onOpenAccount;
+    const staleNew = firstDrawer.props.onNewChat;
+    const staleSelect = () => firstDrawer.props.onSelect(staleSelectTarget);
+    await act(async () => {
+      firstDrawer.props.onOpenSettings();
+      firstDrawer.props.onDismiss();
+    });
+    const staleModel = root.findByType(SettingsSheet).props.onOpenModelPicker;
+    const staleEvidenceFromSettings = root.findByType(SettingsSheet).props
+      .onOpenRuntime;
+    const staleMirrors = root.findByType(SettingsSheet).props.onOpenMirrors;
+    const staleProjectFiles = root.findByType(ProjectsSurface).props.onOpenFiles;
+    const staleProjectChat = root.findByType(ProjectsSurface).props.onChatInProject;
+    const staleProjectUnbind = root.findByType(ProjectsSurface).props
+      .onUnbindFromChat;
+    await act(async () => root.findByType(SettingsSheet).props.onClose());
+    await act(async () => actionByLabel(root, 'Open navigation').props.onPress());
+    const drawer = root.findByType(ChatDrawer);
+    const staleProjects = drawer.props.onOpenProjects;
+    const staleSettings = drawer.props.onOpenSettings;
+    const staleHarnesses = drawer.props.onOpenHarnesses;
+    const staleEvidence = drawer.props.onOpenRuntime;
+    await act(async () => {
+      drawer.props.onOpenConversationMenu(fixture.conversationId);
+      drawer.props.onDismiss();
+    });
+    await act(async () => {
+      staleDelete = root.findByType(ConversationActionSheet).props.onDelete;
+      staleDelete();
+      root.findByType(ConversationActionSheet).props.onDismiss();
+      await settle();
+      await deletePromise;
+    });
+    expect(visibleContextSheets(root)[0]?.props.mode).toBe('lifecycle');
+    mockLocalRuntime.persistSession.mockClear();
+    const activeBefore = root.findByType(ChatDrawer).props.activeId;
+
+    await act(async () => {
+      staleNew();
+      staleSelect();
+      staleProjectChat(contextProject);
+      staleDelete();
+      staleProjects();
+      staleSettings();
+      staleWorkspace();
+      staleOptions();
+      staleModel();
+      staleEvidenceFromSettings();
+      staleMirrors();
+      staleAccount();
+      staleProjectFiles(contextProject);
+      staleProjectUnbind();
+      staleHarnesses();
+      staleEvidence();
+      staleMainRuntime();
+      staleContext();
+      staleDrawerOpen();
+      root.findByType(ChatDrawer).props.onDismiss();
+      await settle();
+    });
+    expect(root.findByType(ProjectsSurface).props.visible).toBe(false);
+    expect(root.findByType(SettingsSheet).props.visible).toBe(false);
+    expect(root.findByType(ConversationOptionsPicker).props.visible).toBe(
+      false,
+    );
+    expect(root.findByType(WorkspacePickerSheet).props.visible).toBe(false);
+    expect(root.findByType(ModelPicker).props.visible).toBe(false);
+    expect(root.findByType(HarnessPicker).props.visible).toBe(false);
+    expect(root.findByType(RuntimeEvidenceSheet).props.visible).toBe(false);
+    expect(root.findByType(AccountSheet).props.visible).toBe(false);
+    expect(root.findByType(MirrorSettingsSheet).props.visible).toBe(false);
+    expect(root.findByType(WorkspaceDrawer).props.visible).toBe(false);
+    expect(root.findByType(ChatDrawer).props.visible).toBe(false);
+    expect(visibleContextSheets(root)).toHaveLength(1);
+    expect(visibleContextSheets(root)[0]?.props.lifecycle).toMatchObject({
+      kind: 'confirmation',
+      action: 'delete',
+    });
+    expect(root.findByType(ChatDrawer).props.activeId).toBe(activeBefore);
+    expect(mockLocalRuntime.persistSession).not.toHaveBeenCalled();
+    alert.mockRestore();
+  });
+
+  test('rejects a stale Drawer Settings opener after Context disclosure takes authority', async () => {
+    const fixture = storedProjectContext(true);
+    mockLocalRuntime.loadSession.mockResolvedValueOnce(fixture.stored.serialize());
+    mockLocalProjectContext.inspect.mockResolvedValue({
+      schema_version: 1,
+      state: 'confirmed',
+      manifest: fixture.manifest,
+    });
+    const renderer = await renderApp();
+    const root = renderer.root;
+    await act(async () => settle());
+    const staleOptions = root.findByType(ChatComposer).props.onOptionsPress;
+
+    await act(async () => actionByLabel(root, 'Open navigation').props.onPress());
+    const staleSettings = root.findByType(ChatDrawer).props.onOpenSettings;
+    await act(async () => root.findByType(ChatDrawer).props.onClose());
+    await act(async () => {
+      root.findByProps({ testID: 'project-context-strip' }).props.onPress();
+      await settle();
+    });
+    expect(visibleContextSheets(root)).toHaveLength(1);
+
+    await act(async () => {
+      staleSettings();
+      staleOptions();
+    });
+
+    expect(visibleContextSheets(root)).toHaveLength(1);
+    expect(root.findByType(SettingsSheet).props.visible).toBe(false);
+    expect(root.findByType(ConversationOptionsPicker).props.visible).toBe(
+      false,
+    );
+  });
+
+  test.each(['Drawer', 'Settings'] as const)(
+    'blocks a stale composer Workspace opener behind %s',
+    async surface => {
+      const renderer = await renderApp();
+      const root = renderer.root;
+      await act(async () => settle());
+      const staleWorkspace = root.findByType(ChatComposer).props
+        .onWorkspacePress;
+
+      await act(async () =>
+        actionByLabel(root, 'Open navigation').props.onPress(),
+      );
+      if (surface === 'Settings') {
+        await act(async () =>
+          root.findByType(ChatDrawer).props.onOpenSettings(),
+        );
+        expect(root.findByType(SettingsSheet).props.visible).toBe(true);
+      }
+
+      await act(async () => staleWorkspace());
+
+      expect(root.findByType(WorkspacePickerSheet).props.visible).toBe(false);
+    },
+  );
+
+  test('rejects old Settings child openers after close and reopen', async () => {
+    const renderer = await renderApp();
+    const root = renderer.root;
+    await act(async () => settle());
+    await act(async () => actionByLabel(root, 'Open navigation').props.onPress());
+    await act(async () => root.findByType(ChatDrawer).props.onOpenSettings());
+    const settings = root.findByType(SettingsSheet);
+    const staleModel = settings.props.onOpenModelPicker;
+    const staleMirrors = settings.props.onOpenMirrors;
+    const staleRuntime = settings.props.onOpenRuntime;
+
+    await act(async () => settings.props.onClose());
+    expect(root.findByType(ChatDrawer).props.visible).toBe(true);
+    await act(async () => root.findByType(ChatDrawer).props.onOpenSettings());
+    expect(root.findByType(SettingsSheet).props.visible).toBe(true);
+
+    await act(async () => {
+      staleModel();
+      staleMirrors();
+      staleRuntime();
+    });
+
+    expect(root.findByType(ModelPicker).props.visible).toBe(false);
+    expect(root.findByType(MirrorSettingsSheet).props.visible).toBe(false);
+    expect(root.findByType(RuntimeEvidenceSheet).props.visible).toBe(false);
+  });
+
+  test('blocks every root surface and navigation mutation until lifecycle bootstrap settles', async () => {
+    const restored = storedLifecycleCheckpoint('cleanup_pending');
+    const load = deferred<string | null>();
+    mockLocalRuntime.loadSession.mockReturnValueOnce(load.promise);
+    mockLocalProjectContext.discard.mockRejectedValueOnce({
+      code: 'E_CONTEXT_TIMEOUT',
+      message: 'BOOTSTRAP_SURFACE_SENTINEL',
+    });
+    const renderer = await renderApp();
+    const root = renderer.root;
+    const initialActive = root.findByType(ChatDrawer).props.activeId;
+    const composer = root.findByType(ChatComposer);
+    const drawer = root.findByType(ChatDrawer);
+    const settings = root.findByType(SettingsSheet);
+
+    await act(async () => {
+      actionByLabel(root, 'Open navigation').props.onPress();
+      actionByLabel(root, 'Show runtime evidence').props.onPress();
+      composer.props.onConfigure();
+      composer.props.onOptionsPress();
+      composer.props.onWorkspacePress();
+      drawer.props.onOpenAccount();
+      drawer.props.onOpenSettings();
+      await drawer.props.onNewChat();
+      await drawer.props.onSelect('stale-bootstrap-conversation');
+      settings.props.onOpenModelPicker();
+      settings.props.onOpenMirrors();
+      settings.props.onOpenRuntime();
+      await settle();
+    });
+
+    expect(root.findByType(ChatDrawer).props.visible).toBe(false);
+    expect(root.findByType(SettingsSheet).props.visible).toBe(false);
+    expect(root.findByType(AccountSheet).props.visible).toBe(false);
+    expect(root.findByType(ModelPicker).props.visible).toBe(false);
+    expect(root.findByType(MirrorSettingsSheet).props.visible).toBe(false);
+    expect(root.findByType(RuntimeEvidenceSheet).props.visible).toBe(false);
+    expect(root.findByType(ConversationOptionsPicker).props.visible).toBe(false);
+    expect(root.findByType(WorkspacePickerSheet).props.visible).toBe(false);
+    expect(root.findByType(ChatDrawer).props.activeId).toBe(initialActive);
+    expect(mockLocalRuntime.persistSession).not.toHaveBeenCalled();
+
+    load.resolve(restored.stored.serialize());
+    await act(async () => {
+      await settle();
+      await settle();
+    });
+
+    expect(visibleContextSheets(root)).toHaveLength(1);
+    expect(visibleContextSheets(root)[0]?.props.lifecycle).toMatchObject({
+      kind: 'transition',
+      controllerState: { phase: 'cleanup_pending' },
+    });
+    expect(root.findByType(ChatDrawer).props.visible).toBe(false);
+    expect(root.findByType(SettingsSheet).props.visible).toBe(false);
+    expect(root.findByType(RuntimeEvidenceSheet).props.visible).toBe(false);
+  });
+
+  test('closes Projects during an in-flight project transition and ignores its late persistence', async () => {
+    const persisted = deferred<boolean>();
+    mockLocalRuntime.persistSession.mockImplementationOnce(
+      () => persisted.promise,
+    );
+    mockLocalProjects.list.mockResolvedValue({
+      schema_version: 1,
+      projects: [contextProject],
+    });
+    const renderer = await renderApp();
+    const root = renderer.root;
+    await act(async () => actionByLabel(root, 'Open navigation').props.onPress());
+    await act(async () => {
+      actionByLabel(root, 'Projects').props.onPress();
+      await settle();
+    });
+    const chat = root.findByType(ProjectsSurface).props.onChatInProject;
+    await act(async () => {
+      chat(contextProject);
+      await settle();
+    });
+    expect(mockLocalRuntime.persistSession).toHaveBeenCalledTimes(1);
+
+    await act(async () => root.findByType(ProjectsSurface).props.onClose());
+    expect(root.findByType(ProjectsSurface).props.visible).toBe(false);
+    persisted.resolve(true);
+    await act(async () => {
+      await settle();
+      await settle();
+      root.findByType(ProjectsSurface).props.onDismiss();
+    });
+    expect(visibleContextSheets(root)).toHaveLength(0);
+  });
+
+  test('does not auto-open direct recovery after Projects closes during an ambiguous write', async () => {
+    const fixture = storedSetupProject();
+    mockLocalRuntime.loadSession.mockResolvedValueOnce(fixture.stored.serialize());
+    const persisted = deferred<boolean>();
+    mockLocalRuntime.persistSession.mockImplementationOnce(
+      () => persisted.promise,
+    );
+    const renderer = await renderApp();
+    const root = renderer.root;
+    await openProjectsSurface(root);
+
+    await act(async () => {
+      root.findByType(ProjectsSurface).props.onUnbindFromChat();
+      await settle();
+    });
+    await act(async () => root.findByType(ProjectsSurface).props.onClose());
+    expect(root.findByType(ProjectsSurface).props.visible).toBe(false);
+    await act(async () => actionByLabel(root, 'Open navigation').props.onPress());
+    expect(root.findByType(ChatDrawer).props.visible).toBe(false);
+    mockLocalRuntime.loadSession.mockRejectedValueOnce(
+      new Error('AMBIGUOUS_LOAD_SENTINEL'),
+    );
+    persisted.resolve(false);
+    await act(async () => {
+      await settle();
+      await settle();
+      root.findByType(ProjectsSurface).props.onDismiss();
+    });
+    expect(visibleContextSheets(root)).toHaveLength(0);
+
+    await act(async () => actionByLabel(root, 'Open navigation').props.onPress());
+    expect(actionByLabel(root, 'Pending project cleanup')).toBeDefined();
+  });
+
+  test('drops a queued Drawer opener when bootstrap restores lifecycle recovery first', async () => {
+    const loaded = deferred<string | null>();
+    const fixture = storedLifecycleCheckpoint('cleanup_pending');
+    mockLocalRuntime.loadSession.mockReturnValueOnce(loaded.promise);
+    mockLocalProjectContext.discard.mockRejectedValueOnce({
+      code: 'E_CONTEXT_TIMEOUT',
+    });
+    let renderer: Renderer | undefined;
+    await act(async () => {
+      renderer = ReactTestRenderer.create(<App />);
+      await settle();
+    });
+    if (renderer === undefined) throw new Error('renderer missing');
+    const root = renderer.root;
+    await act(async () => actionByLabel(root, 'Open navigation').props.onPress());
+    await act(async () => root.findByType(ChatDrawer).props.onOpenProjects());
+    expect(root.findByType(ChatDrawer).props.visible).toBe(false);
+
+    loaded.resolve(fixture.stored.serialize());
+    await act(async () => {
+      await settle();
+      await settle();
+    });
+    expect(visibleContextSheets(root)[0]?.props.mode).toBe('lifecycle');
+    await act(async () => root.findByType(ChatDrawer).props.onDismiss());
+    expect(root.findByType(ProjectsSurface).props.visible).toBe(false);
+    expect(visibleContextSheets(root)).toHaveLength(1);
   });
 });
 
@@ -3754,7 +5263,7 @@ test('restores persisted image thumbnails through the bounded preview API', asyn
   ).toBeGreaterThanOrEqual(1);
 });
 
-test('discards sent attachments only after their conversation is persisted as deleted', async () => {
+test('globally prunes sent attachments only after their conversation is persisted as deleted', async () => {
   mockLocalAttachments.present.mockResolvedValueOnce({
     schema_version: 1,
     status: 'selected',
@@ -3794,7 +5303,8 @@ test('discards sent attachments only after their conversation is persisted as de
     await settle();
   });
 
-  expect(mockLocalAttachments.discard).toHaveBeenCalledWith(['delete-image']);
+  expect(mockLocalAttachments.prune).toHaveBeenLastCalledWith([]);
+  expect(mockLocalAttachments.discard).not.toHaveBeenCalled();
   expect(lastPersistedState().messages).toEqual([]);
   alert.mockRestore();
 });
@@ -5038,6 +6548,11 @@ test('cancels and persists the active round before switching chats', async () =>
   await sendText('Destination chat');
   await act(async () => actionByLabel(root, 'Open navigation').props.onPress());
   await act(async () => {
+    await actionByLabel(root, 'Create new chat').props.onPress();
+  });
+  await sendText('Third chat');
+  await act(async () => actionByLabel(root, 'Open navigation').props.onPress());
+  await act(async () => {
     await actionByLabel(root, 'Open chat Origin chat').props.onPress();
   });
 
@@ -5063,10 +6578,25 @@ test('cancels and persists the active round before switching chats', async () =>
   });
   expect(activeRequest).toBeDefined();
   mockLocalRuntime.persistSession.mockClear();
+  const cancellation = deferred<{ status: 'cancelled' }>();
+  mockLocalRuntime.cancelCompletion.mockReturnValueOnce(cancellation.promise);
 
   await act(async () => actionByLabel(root, 'Open navigation').props.onPress());
+  const drawer = root.findByType(ChatDrawer);
+  const destinationId = drawer.props.conversations.find(
+    (conversation: { title: string }) => conversation.title === 'Destination chat',
+  )?.id;
+  const thirdId = drawer.props.conversations.find(
+    (conversation: { title: string }) => conversation.title === 'Third chat',
+  )?.id;
   await act(async () => {
-    await actionByLabel(root, 'Open chat Destination chat').props.onPress();
+    const first = drawer.props.onSelect(destinationId);
+    const second = drawer.props.onSelect(thirdId);
+    await settle();
+    expect(mockLocalRuntime.cancelCompletion).toHaveBeenCalledTimes(1);
+    cancellation.resolve({ status: 'cancelled' });
+    await first;
+    await second;
   });
 
   expect(mockLocalRuntime.cancelCompletion).toHaveBeenCalledWith(

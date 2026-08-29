@@ -119,6 +119,21 @@ export type ProjectContextDestructiveTransaction = {
   rollback(): boolean;
 };
 
+export type SnapshotFreeProjectMutationInput = {
+  readonly action: 'unbind' | 'delete' | 'rebind';
+  readonly conversationId: string;
+  readonly targetProjectId: string | null;
+  readonly expectedConversation: Conversation;
+};
+
+export type SnapshotFreeProjectMutationTransaction = {
+  readonly conversationId: string;
+  readonly action: SnapshotFreeProjectMutationInput['action'];
+  readonly targetProjectId: string | null;
+  commit(): boolean;
+  rollback(): boolean;
+};
+
 export type ChatStore = {
   getState(): ChatState;
   dispatch(action: ChatAction): ChatState;
@@ -172,6 +187,9 @@ export type ChatStore = {
   finalizeProjectContextDestructiveTransition(
     scope: ProjectContextDestructiveAdvanceScope,
   ): ProjectContextDestructiveTransaction | null;
+  applySnapshotFreeProjectMutation(
+    input: SnapshotFreeProjectMutationInput,
+  ): SnapshotFreeProjectMutationTransaction | null;
   prepareTurnAttempt(
     conversationId: string,
     text: string,
@@ -521,6 +539,56 @@ export function createChatStore(options: ChatStoreOptions = {}): ChatStore {
     };
   };
 
+  const snapshotFreeProjectTransaction = (
+    applied: AppliedAction,
+    conversationId: string,
+    action: SnapshotFreeProjectMutationInput['action'],
+    targetProjectId: string | null,
+  ): SnapshotFreeProjectMutationTransaction | null => {
+    if (!applied.changed) return null;
+    const beforeConversation = applied.before.conversations[conversationId];
+    const nextConversation = applied.next.conversations[conversationId];
+    if (beforeConversation === undefined) return null;
+    const selectionChanged =
+      applied.before.selectedConversationId !==
+      applied.next.selectedConversationId;
+    let settled = false;
+    const nextStillOwned = () =>
+      state.conversations[conversationId] === nextConversation;
+    return {
+      conversationId,
+      action,
+      targetProjectId,
+      commit: () => {
+        if (settled) return false;
+        settled = true;
+        return nextStillOwned();
+      },
+      rollback: () => {
+        if (settled) return false;
+        settled = true;
+        if (!nextStillOwned()) return false;
+        const conversations = {
+          ...state.conversations,
+          [conversationId]: beforeConversation,
+        };
+        state = {
+          ...state,
+          conversations,
+          conversationOrder: orderConversationIds(conversations),
+          selectedConversationId:
+            selectionChanged &&
+            state.selectedConversationId ===
+              applied.next.selectedConversationId
+              ? applied.before.selectedConversationId
+              : state.selectedConversationId,
+        };
+        notifyListeners();
+        return true;
+      },
+    };
+  };
+
   const appendMessage = (
     role: 'user' | 'assistant',
     conversationId: string,
@@ -798,6 +866,66 @@ export function createChatStore(options: ChatStoreOptions = {}): ChatStore {
         },
       });
       return destructiveTransaction(applied, conversationId);
+    },
+    applySnapshotFreeProjectMutation: input => {
+      if (notificationDepth > 0) return null;
+      const projected = exactDataProjection(input, [
+        'action',
+        'conversationId',
+        'targetProjectId',
+        'expectedConversation',
+      ]);
+      if (projected === null) return null;
+      try {
+        const action = projected.action;
+        const conversationId = projected.conversationId;
+        const targetProjectId = projected.targetProjectId;
+        const expectedConversation = projected.expectedConversation;
+        if (
+          (action !== 'unbind' &&
+            action !== 'delete' &&
+            action !== 'rebind') ||
+          typeof conversationId !== 'string' ||
+          ((action === 'rebind') !== (typeof targetProjectId === 'string')) ||
+          (action !== 'rebind' && targetProjectId !== null)
+        ) {
+          return null;
+        }
+        const at = action === 'delete' ? null : canonicalNow(now);
+        if (
+          expectedConversation !== state.conversations[conversationId] ||
+          state.projectContextDestructiveTransition !== null
+        ) {
+          return null;
+        }
+        const applied =
+          action === 'delete'
+            ? applyAction({
+                type: 'conversation/delete',
+                payload: { id: conversationId },
+              })
+            : action === 'rebind'
+              ? applyAction({
+                  type: 'conversation/bind-project',
+                  payload: {
+                    id: conversationId,
+                    projectId: targetProjectId as string,
+                    at: at!,
+                  },
+                })
+              : applyAction({
+                  type: 'conversation/unbind-project',
+                  payload: { id: conversationId, at: at! },
+                });
+        return snapshotFreeProjectTransaction(
+          applied,
+          conversationId,
+          action,
+          targetProjectId as string | null,
+        );
+      } catch {
+        return null;
+      }
     },
     prepareTurnAttempt: (conversationId, text, appendOptions = {}) => {
       const conversation = state.conversations[conversationId];

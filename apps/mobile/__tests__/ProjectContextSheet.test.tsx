@@ -3,6 +3,7 @@ import {
   AccessibilityInfo,
   FlatList,
   Modal,
+  ScrollView,
   StyleSheet,
   Text,
   TextInput,
@@ -23,8 +24,11 @@ import {
 import { SlidingSurface } from '../src/components/SlidingSurface';
 import type {
   ProjectContextCandidatePageV1,
+  ProjectContextDestructiveToken,
+  ProjectContextLifecycleControllerState,
   ProjectContextManifestV1,
 } from '../src/project-context';
+import type { ProjectContextDestructiveAction } from '../src/state';
 import { AppPresentationProvider } from '../src/presentation/AppPresentation';
 import {
   TRANSLATIONS,
@@ -158,6 +162,10 @@ type Harness = {
     readonly onRefreshAndSend: jest.Mock;
     readonly onSendWithoutContext: jest.Mock;
     readonly onDismiss: jest.Mock;
+    readonly onConfirmLifecycle: jest.Mock;
+    readonly onRetryLifecyclePersistence: jest.Mock;
+    readonly onRetryLifecycleCleanup: jest.Mock;
+    readonly onRetryDirectPersistence: jest.Mock;
   };
   readonly props: ProjectContextSheetProps;
 };
@@ -184,6 +192,10 @@ async function renderSheet(
     onRefreshAndSend: jest.fn(),
     onSendWithoutContext: jest.fn(),
     onDismiss: jest.fn(),
+    onConfirmLifecycle: jest.fn(),
+    onRetryLifecyclePersistence: jest.fn(),
+    onRetryLifecycleCleanup: jest.fn(),
+    onRetryDirectPersistence: jest.fn(),
   };
   const props: ProjectContextSheetProps = {
     visible: true,
@@ -209,6 +221,7 @@ async function renderSheet(
     recoverySendWithoutDisabled: false,
     disabled: false,
     busyAction: null,
+    lifecycle: null,
     ...callbacks,
     ...overrides,
   };
@@ -222,6 +235,57 @@ async function renderSheet(
   if (renderer === undefined) throw new Error('renderer missing');
   activeRenderers.push(renderer);
   return { renderer, callbacks, props };
+}
+
+const lifecycleToken: ProjectContextDestructiveToken = {
+  generation: 4,
+  lifecycleId: '33333333-3333-4333-8333-333333333333',
+  epoch: 2,
+  action: 'unbind',
+  conversationId: 'conversation-target',
+  sourceProjectId: PROJECT_ID,
+  sourceRuntimeContextId: '44444444-4444-4444-8444-444444444444',
+  sourceModelId: 'deepseek-v4-flash',
+  snapshotId: SNAPSHOT_ID,
+  snapshotSha256: '1'.repeat(64),
+  consentReceiptId: '55555555-5555-4555-8555-555555555555',
+  targetProjectId: null,
+  phase: 'cleanup_pending',
+};
+
+function lifecycleState(
+  overrides: Partial<ProjectContextLifecycleControllerState> = {},
+): ProjectContextLifecycleControllerState {
+  return {
+    generation: lifecycleToken.generation,
+    phase: 'cleanup_pending',
+    token: lifecycleToken,
+    failureCode: null,
+    pendingPersistence: null,
+    ...overrides,
+  };
+}
+
+function lifecyclePresentation(
+  action: ProjectContextDestructiveAction,
+  kind: 'confirmation' | 'transition' = 'confirmation',
+  state: ProjectContextLifecycleControllerState =
+    kind === 'confirmation'
+      ? {
+          generation: 0,
+          phase: 'idle',
+          token: null,
+          failureCode: null,
+          pendingPersistence: null,
+        }
+      : lifecycleState(),
+) {
+  return {
+    kind,
+    action,
+    controllerState: state,
+    targetProjectLabel: action === 'rebind' ? 'next-project' : null,
+  } as const;
 }
 
 function actionByLabel(root: ReactTestInstance, label: string) {
@@ -252,6 +316,235 @@ function renderedText(root: ReactTestInstance): string {
     .map(node => flatten(node.props.children))
     .join('\n');
 }
+
+test.each([
+  ['unbind', 'Disable context and unbind'],
+  ['delete', 'Delete chat'],
+  ['rebind', 'Rebind'],
+] as const)(
+  'renders one isolated %s lifecycle confirmation action',
+  async (action, label) => {
+    const harness = await renderSheet({
+      mode: 'lifecycle',
+      lifecycle: lifecyclePresentation(action),
+    });
+    const confirm = actionByLabel(harness.renderer.root, label);
+    expect(flatStyle(confirm).minHeight).toBeGreaterThanOrEqual(44);
+    expect(
+      harness.renderer.root.findAllByProps({
+        accessibilityLabel: 'Disable context',
+      }),
+    ).toHaveLength(0);
+    expect(
+      harness.renderer.root.findAllByProps({
+        accessibilityLabel: 'Confirm and use context',
+      }),
+    ).toHaveLength(0);
+    await act(async () => confirm.props.onPress());
+    expect(harness.callbacks.onConfirmLifecycle).toHaveBeenCalledTimes(1);
+    expect(harness.callbacks.onDisable).not.toHaveBeenCalled();
+    expect(harness.callbacks.onConfirm).not.toHaveBeenCalled();
+  },
+);
+
+test('keeps lifecycle content scrollable and replaces raw project identities with a generic label', async () => {
+  const rawProjectId = '99999999-9999-4999-8999-999999999999';
+  const harness = await renderSheet({
+    mode: 'lifecycle',
+    projectName: rawProjectId,
+    lifecycle: {
+      ...lifecyclePresentation('rebind'),
+      targetProjectLabel: rawProjectId,
+    },
+  });
+  const output = renderedText(harness.renderer.root);
+  expect(harness.renderer.root.findByType(ScrollView)).toBeDefined();
+  expect(output).toContain('Local project');
+  expect(output).not.toContain(rawProjectId);
+  expect(
+    flatStyle(actionByLabel(harness.renderer.root, 'Rebind')).minHeight,
+  ).toBeGreaterThanOrEqual(44);
+});
+
+test.each([
+  [
+    'intent_persistence_pending',
+    'intent',
+    'Retry save',
+    'onRetryLifecyclePersistence',
+  ],
+  [
+    'tombstone_persistence_pending',
+    'tombstone',
+    'Retry save',
+    'onRetryLifecyclePersistence',
+  ],
+  [
+    'ready_persistence_pending',
+    'ready_to_finalize',
+    'Retry save',
+    'onRetryLifecyclePersistence',
+  ],
+  [
+    'finalize_persistence_pending',
+    'finalize',
+    'Retry save',
+    'onRetryLifecyclePersistence',
+  ],
+  [
+    'cleanup_pending',
+    null,
+    'Retry cleanup',
+    'onRetryLifecycleCleanup',
+  ],
+] as const)(
+  'routes lifecycle %s only through its exact destructive retry',
+  async (phase, pendingPersistence, label, callbackName) => {
+    const token: ProjectContextDestructiveToken = {
+      ...lifecycleToken,
+      phase:
+        pendingPersistence === 'intent'
+          ? 'intent'
+          : pendingPersistence === 'tombstone'
+            ? 'cleanup_pending'
+            : pendingPersistence === 'ready_to_finalize' ||
+                pendingPersistence === 'finalize'
+              ? 'ready_to_finalize'
+              : 'cleanup_pending',
+    };
+    const state = lifecycleState({
+      phase,
+      pendingPersistence,
+      token,
+      failureCode:
+        phase === 'cleanup_pending'
+          ? 'E_CONTEXT_TIMEOUT'
+          : 'E_CONTEXT_PERSISTENCE',
+    });
+    const harness = await renderSheet({
+      mode: 'lifecycle',
+      lifecycle: lifecyclePresentation('unbind', 'transition', state),
+      recoveryAction: 'persistence',
+      errorCode: 'E_CONTEXT_PERSISTENCE',
+    });
+    const retry = actionByLabel(harness.renderer.root, label);
+    await act(async () => retry.props.onPress());
+    expect(harness.callbacks[callbackName]).toHaveBeenCalledWith(
+      token,
+    );
+    expect(harness.callbacks.onRetryPersistence).not.toHaveBeenCalled();
+    expect(harness.callbacks.onRetryCleanup).not.toHaveBeenCalled();
+    expect(
+      harness.renderer.root.findAllByProps({
+        accessibilityLabel: 'Disable context',
+      }),
+    ).toHaveLength(0);
+  },
+);
+
+test('keeps lifecycle top close presentation-only and rejects stale owner callbacks', async () => {
+  const harness = await renderSheet({
+    mode: 'lifecycle',
+    lifecycle: lifecyclePresentation('delete'),
+  });
+  const staleConfirm = actionByLabel(
+    harness.renderer.root,
+    'Delete chat',
+  ).props.onPress;
+  await act(async () =>
+    harness.renderer.root.findByType(SlidingSurface).props.onClose(),
+  );
+  expect(harness.callbacks.onClose).toHaveBeenCalledTimes(1);
+  expect(harness.callbacks.onConfirmLifecycle).not.toHaveBeenCalled();
+
+  await act(async () => {
+    harness.renderer.update(
+      presentation(
+        <ProjectContextSheet
+          {...harness.props}
+          actionKey="lifecycle-owner-b"
+          lifecycle={lifecyclePresentation('delete')}
+          mode="lifecycle"
+        />,
+        'en-US',
+      ),
+    );
+  });
+  await act(async () => staleConfirm());
+  expect(harness.callbacks.onConfirmLifecycle).not.toHaveBeenCalled();
+});
+
+test('localizes lifecycle confirmation and never renders token or native details', async () => {
+  const unsafe = {
+    ...lifecycleState({
+      phase: 'blocked',
+      failureCode: 'E_CONTEXT_TRANSITION_UNKNOWN',
+    }),
+    rawDetail: 'RAW_NATIVE /private/project',
+  } as ProjectContextLifecycleControllerState & { rawDetail: string };
+  const harness = await renderSheet(
+    {
+      mode: 'lifecycle',
+      lifecycle: lifecyclePresentation('unbind', 'transition', unsafe),
+    },
+    'zh-CN',
+  );
+  const output = renderedText(harness.renderer.root);
+  expect(output).toContain('项目清理');
+  expect(output).not.toContain(lifecycleToken.lifecycleId);
+  expect(output).not.toContain(lifecycleToken.snapshotSha256);
+  expect(output).not.toContain('E_CONTEXT_TRANSITION_UNKNOWN');
+  expect(output).not.toContain('RAW_NATIVE');
+  expect(output).not.toContain('/private/project');
+});
+
+test('routes snapshot-free persistence only through the direct retry callback', async () => {
+  const harness = await renderSheet({
+    mode: 'lifecycle',
+    lifecycle: {
+      kind: 'direct_persistence',
+      action: 'unbind',
+      targetProjectLabel: null,
+    },
+  });
+  await act(async () =>
+    actionByLabel(harness.renderer.root, 'Retry save').props.onPress(),
+  );
+  expect(harness.callbacks.onRetryDirectPersistence).toHaveBeenCalledTimes(1);
+  expect(harness.callbacks.onRetryLifecyclePersistence).not.toHaveBeenCalled();
+  expect(harness.callbacks.onRetryPersistence).not.toHaveBeenCalled();
+});
+
+test.each([
+  ['intent_persistence_pending', 'intent', 'cleanup_pending'],
+  ['tombstone_persistence_pending', 'tombstone', 'ready_to_finalize'],
+  ['ready_persistence_pending', 'ready_to_finalize', 'intent'],
+  ['finalize_persistence_pending', 'finalize', 'cleanup_pending'],
+] as const)(
+  'fails lifecycle %s closed for the cross-wired %s token phase',
+  async (phase, pendingPersistence, tokenPhase) => {
+    const harness = await renderSheet({
+      mode: 'lifecycle',
+      lifecycle: lifecyclePresentation(
+        'unbind',
+        'transition',
+        lifecycleState({
+          phase,
+          pendingPersistence,
+          failureCode: 'E_CONTEXT_PERSISTENCE',
+          token: { ...lifecycleToken, phase: tokenPhase },
+        }),
+      ),
+    });
+    expect(renderedText(harness.renderer.root)).toContain(
+      'This project change cannot continue safely.',
+    );
+    expect(
+      harness.renderer.root.findAllByProps({ accessibilityLabel: 'Retry save' }),
+    ).toHaveLength(0);
+    expect(harness.callbacks.onRetryLifecyclePersistence).not.toHaveBeenCalled();
+  },
+);
 
 test('uses one full-width bottom SlidingSurface and a virtualized candidate list', async () => {
   const { renderer } = await renderSheet();

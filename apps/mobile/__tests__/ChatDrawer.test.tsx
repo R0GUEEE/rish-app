@@ -1,5 +1,6 @@
 import React from 'react';
 import ReactTestRenderer, { act } from 'react-test-renderer';
+import { StyleSheet, Text } from 'react-native';
 
 import { ChatDrawer } from '../src/components/ChatDrawer';
 
@@ -24,6 +25,8 @@ function renderDrawer(
     messageCount?: number;
   }>,
   activeId: string | null = null,
+  pendingProjectCleanup = false,
+  onOpenPendingProjectCleanup = noop,
 ) {
   let renderer: ReactTestRenderer.ReactTestRenderer | undefined;
   const store = createPreferencesStore({
@@ -39,6 +42,7 @@ function renderDrawer(
           runtimeStatus="verified"
           covered={false}
           visible
+          pendingProjectCleanup={pendingProjectCleanup}
           onClose={noop}
           onDismiss={noop}
           onNewChat={noop}
@@ -46,6 +50,7 @@ function renderDrawer(
           onOpenAccount={noop}
           onOpenFiles={noop}
           onOpenProjects={noop}
+          onOpenPendingProjectCleanup={onOpenPendingProjectCleanup}
           onOpenHarnesses={noop}
           onOpenRuntime={noop}
           onOpenSettings={noop}
@@ -106,4 +111,35 @@ test('conversations without a message count are treated as empty', async () => {
 
   const output = JSON.stringify(renderer.toJSON());
   expect(output).not.toContain('Legacy entry');
+});
+
+test('shows one value-free 44 point pending cleanup action when requested', async () => {
+  const onOpen = jest.fn();
+  const renderer = renderDrawer([], null, true, onOpen);
+  const action = renderer.root.findByProps({
+    accessibilityLabel: 'Pending project cleanup',
+  });
+  const rawStyle =
+    typeof action.props.style === 'function'
+      ? action.props.style({ pressed: false })
+      : action.props.style;
+  const style = Array.isArray(rawStyle)
+    ? Object.assign({}, ...rawStyle.filter(Boolean))
+    : rawStyle;
+
+  expect(action.props.accessibilityRole).toBe('button');
+  expect(style.minHeight ?? style.height).toBeGreaterThanOrEqual(44);
+  expect(style.height).toBeUndefined();
+  const label = renderer.root
+    .findAllByType(Text)
+    .find(node => node.props.children === 'Pending project cleanup');
+  expect(StyleSheet.flatten(label?.props.style)).toMatchObject({
+    flex: 1,
+    flexShrink: 1,
+  });
+  expect(JSON.stringify(renderer.toJSON())).not.toMatch(
+    /conversation-target|snapshot|project-[0-9]|\/private\//,
+  );
+  await act(async () => action.props.onPress());
+  expect(onOpen).toHaveBeenCalledTimes(1);
 });

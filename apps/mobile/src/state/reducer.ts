@@ -1594,6 +1594,7 @@ export function chatReducer(state: ChatState, action: ChatAction): ChatState {
       const conversation = state.conversations[id];
       if (
         conversation === undefined ||
+        hasLiveAttempt(conversation) ||
         requiresDestructiveLifecycle(conversation)
       ) {
         return state;

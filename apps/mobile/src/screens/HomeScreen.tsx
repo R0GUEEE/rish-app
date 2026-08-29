@@ -70,6 +70,7 @@ import {
   type ChatState,
   type Conversation,
   type AttachmentDescriptor,
+  type SnapshotFreeProjectMutationTransaction,
 } from '../state';
 import {
   LocalRuntime,
@@ -93,10 +94,15 @@ import { BUILTIN_HARNESSES, DSH_HARNESS, DshHarnessAdapter } from '../harness';
 import { safeHydrateAppPreferences } from '../preferences';
 import {
   createProjectContextController,
+  createProjectContextLifecycleController,
   isProjectContextSendable,
   type ProjectContextActionToken,
   type ProjectContextControllerOwner,
   type ProjectContextControllerState,
+  type ProjectContextDestructiveBeginToken,
+  type ProjectContextDestructiveOutcome,
+  type ProjectContextDestructiveToken,
+  type ProjectContextLifecycleControllerState,
 } from '../project-context';
 import { useAppPresentation } from '../presentation/AppPresentation';
 import { fonts, hitSlop, type ThemePalette } from '../theme';
@@ -124,6 +130,59 @@ type PendingContextDismissAction = {
   readonly kind: 'verified' | 'without_context';
   readonly pendingEpoch: number;
 };
+
+type ProjectContextLifecycleIntent = {
+  readonly nonce: number;
+  readonly action: 'unbind' | 'delete' | 'rebind';
+  readonly conversationId: string;
+  readonly selectedConversationId: string | null;
+  readonly targetProjectId: string | null;
+  readonly beginToken: ProjectContextDestructiveBeginToken;
+};
+
+type ConversationDeleteRequest = {
+  readonly actionEpoch: number;
+  readonly completionEpoch: number;
+  readonly selectedConversationId: string | null;
+  readonly conversation: Conversation;
+};
+
+type DirectProjectMutationOutbox = {
+  readonly action: 'unbind' | 'delete' | 'rebind';
+  readonly conversationId: string;
+  readonly targetProjectId: string | null;
+  readonly targetProjectName: string | null;
+  readonly expectedConversation: Conversation;
+  readonly selectedConversationId: string | null;
+  readonly transaction: SnapshotFreeProjectMutationTransaction | null;
+  readonly sourceProjectsEpoch: number | null;
+};
+
+type DirectProjectMutationView = Pick<
+  DirectProjectMutationOutbox,
+  'action' | 'conversationId' | 'targetProjectId' | 'targetProjectName'
+>;
+
+function sameDeleteOwner(
+  current: Conversation | null,
+  expected: Conversation,
+): boolean {
+  return (
+    current !== null &&
+    current.id === expected.id &&
+    current.projectId === expected.projectId &&
+    current.workspaceId === expected.workspaceId &&
+    current.runtimeContextId === expected.runtimeContextId &&
+    current.projectContext === expected.projectContext &&
+    current.title === expected.title &&
+    current.titleSource === expected.titleSource &&
+    current.modelId === expected.modelId &&
+    current.thinkingMode === expected.thinkingMode &&
+    current.messages === expected.messages &&
+    current.turns === expected.turns &&
+    current.createdAt === expected.createdAt
+  );
+}
 
 function copyPendingAttachment(
   attachment: AttachmentDescriptor,
@@ -235,7 +294,24 @@ function projectContextOwnsMutation(
     state.phase === 'disabling' ||
     state.phase === 'persistence_pending' ||
     state.phase === 'cleanup_pending' ||
-    state.candidateManifest !== null
+    state.candidateManifest !== null ||
+    state.list.loading ||
+    state.list.loadingMore
+  );
+}
+
+function projectContextOperationInFlight(
+  state: ProjectContextControllerState,
+): boolean {
+  return (
+    state.phase === 'inspecting' ||
+    state.phase === 'preparing' ||
+    state.phase === 'confirming' ||
+    state.phase === 'disabling' ||
+    state.phase === 'persistence_pending' ||
+    state.phase === 'cleanup_pending' ||
+    state.list.loading ||
+    state.list.loadingMore
   );
 }
 
@@ -254,6 +330,22 @@ function sameProjectContextOwner(
   );
 }
 
+function sameConversationOwner(
+  expected: Conversation | null,
+  current: Conversation | null,
+): boolean {
+  return (
+    expected === null
+      ? current === null
+      : current !== null &&
+        current.id === expected.id &&
+        current.projectId === expected.projectId &&
+        current.runtimeContextId === expected.runtimeContextId &&
+        current.modelId === expected.modelId &&
+        current.projectContext === expected.projectContext
+  );
+}
+
 function sameProjectContextToken(
   left: ProjectContextActionToken | null,
   right: ProjectContextActionToken | null,
@@ -268,6 +360,47 @@ function sameProjectContextToken(
     left.generation === right.generation &&
     left.preparationId === right.preparationId &&
     left.listGeneration === right.listGeneration
+  );
+}
+
+function sameDestructiveBeginToken(
+  left: ProjectContextDestructiveBeginToken,
+  right: ProjectContextDestructiveBeginToken,
+): boolean {
+  return (
+    left.expectedRootEpoch === right.expectedRootEpoch &&
+    left.action === right.action &&
+    left.conversationId === right.conversationId &&
+    left.sourceProjectId === right.sourceProjectId &&
+    left.sourceRuntimeContextId === right.sourceRuntimeContextId &&
+    left.sourceModelId === right.sourceModelId &&
+    left.snapshotId === right.snapshotId &&
+    left.snapshotSha256 === right.snapshotSha256 &&
+    left.consentReceiptId === right.consentReceiptId &&
+    left.expectedUpdatedAt === right.expectedUpdatedAt &&
+    left.targetProjectId === right.targetProjectId
+  );
+}
+
+function sameDestructiveToken(
+  left: ProjectContextDestructiveToken,
+  right: ProjectContextDestructiveToken | null,
+): boolean {
+  return (
+    right !== null &&
+    left.generation === right.generation &&
+    left.lifecycleId === right.lifecycleId &&
+    left.epoch === right.epoch &&
+    left.action === right.action &&
+    left.conversationId === right.conversationId &&
+    left.sourceProjectId === right.sourceProjectId &&
+    left.sourceRuntimeContextId === right.sourceRuntimeContextId &&
+    left.sourceModelId === right.sourceModelId &&
+    left.snapshotId === right.snapshotId &&
+    left.snapshotSha256 === right.snapshotSha256 &&
+    left.consentReceiptId === right.consentReceiptId &&
+    left.targetProjectId === right.targetProjectId &&
+    left.phase === right.phase
   );
 }
 
@@ -418,8 +551,14 @@ export function HomeScreen() {
     string | null
   >(null);
   const [drawerVisible, setDrawerVisible] = useState(false);
+  const drawerVisibleRef = useRef(false);
+  drawerVisibleRef.current = drawerVisible;
+  const drawerSurfaceEpoch = useRef(0);
   const [accountVisible, setAccountVisible] = useState(false);
   const [settingsVisible, setSettingsVisible] = useState(false);
+  const settingsVisibleRef = useRef(false);
+  settingsVisibleRef.current = settingsVisible;
+  const settingsSurfaceEpoch = useRef(0);
   const [composerOptionsVisible, setComposerOptionsVisible] = useState(false);
   const [workspaceSheetVisible, setWorkspaceSheetVisible] = useState(false);
   const [workspaceNames, setWorkspaceNames] = useState<
@@ -432,10 +571,32 @@ export function HomeScreen() {
   const [evidenceVisible, setEvidenceVisible] = useState(false);
   const [workspaceVisible, setWorkspaceVisible] = useState(false);
   const [projectsVisible, setProjectsVisible] = useState(false);
+  const projectsVisibleRef = useRef(false);
+  projectsVisibleRef.current = projectsVisible;
+  const projectsSurfaceEpoch = useRef(0);
   const [contextSheetVisible, setContextSheetVisible] = useState(false);
   const contextSheetVisibleRef = useRef(false);
   contextSheetVisibleRef.current = contextSheetVisible;
   const navigationSurfaceVisibleRef = useRef(false);
+  const lifecycleBootstrapReadyRef = useRef(false);
+  const [lifecycleBootstrapReady, setLifecycleBootstrapReady] =
+    useState(false);
+  const lifecycleIntentNonce = useRef(0);
+  const lifecycleActionInFlight = useRef(false);
+  const [lifecycleIntent, setLifecycleIntent] =
+    useState<ProjectContextLifecycleIntent | null>(null);
+  const lifecycleIntentRef = useRef<ProjectContextLifecycleIntent | null>(
+    null,
+  );
+  lifecycleIntentRef.current = lifecycleIntent;
+  const [lifecycleSheetTargetId, setLifecycleSheetTargetId] = useState<
+    string | null
+  >(null);
+  const [directProjectMutationView, setDirectProjectMutationView] =
+    useState<DirectProjectMutationView | null>(null);
+  const directProjectMutationOutboxRef =
+    useRef<DirectProjectMutationOutbox | null>(null);
+  const directProjectMutationPersistenceInFlight = useRef(false);
   const [contextSheetFilter, setContextSheetFilter] =
     useState<ProjectContextSheetFilter>('all');
   const [pendingProjectSend, setPendingProjectSend] =
@@ -456,6 +617,7 @@ export function HomeScreen() {
   const [actionConversationId, setActionConversationId] = useState<
     string | null
   >(null);
+  const conversationActionEpoch = useRef(0);
   const [credentialConfigured, setCredentialConfigured] = useState(false);
   const [credentialBusy, setCredentialBusy] = useState(false);
   const [runtimeChecking, setRuntimeChecking] = useState(true);
@@ -475,7 +637,19 @@ export function HomeScreen() {
   const pendingContextOpenAfterProjectsDismiss =
     useRef<PendingContextOpen | null>(null);
   const pendingContextAttachAfterOpen = useRef<PendingContextOpen | null>(null);
+  const pendingLifecycleOpenAfterProjectsDismiss =
+    useRef<ProjectContextLifecycleIntent | null>(null);
+  const pendingExistingLifecycleAfterProjectsDismiss =
+    useRef<ProjectContextDestructiveToken | null>(null);
+  const pendingDirectOpenAfterProjectsDismiss =
+    useRef<DirectProjectMutationView | null>(null);
+  const pendingLifecycleOpenAfterDrawerDismiss = useRef<{
+    readonly intent: ProjectContextLifecycleIntent | null;
+    readonly token: ProjectContextDestructiveToken | null;
+    readonly direct: DirectProjectMutationView | null;
+  } | null>(null);
   const projectChatTransitionInFlight = useRef(false);
+  const navigationMutationInFlight = useRef(false);
   const projectContextUiEpoch = useRef(0);
   const projectContextStripRef =
     useRef<React.ElementRef<typeof View> | null>(null);
@@ -746,6 +920,38 @@ export function HomeScreen() {
     () => projectContextController.subscribe(setProjectContextControllerState),
     [projectContextController],
   );
+  const projectContextLifecycleController = useMemo(
+    () =>
+      createProjectContextLifecycleController({
+        chat: store,
+        native: LocalProjectContext,
+        persistCurrent: () => persistCurrentRef.current(),
+        createLifecycleId: () => LocalRuntime.createCompletionRequestId(),
+        completionMutationBlocked: () =>
+          completionBusy(completionController.getState()),
+        projectContextMutationBlocked: () =>
+          projectContextOwnsMutation(projectContextController.getState()),
+        snapshotReferences: (conversationId, snapshotId) =>
+          selectProjectContextSnapshotReferences(
+            store.getState(),
+            conversationId,
+            snapshotId,
+          ),
+        maximumPendingLifecycle: 1,
+      }),
+    [completionController, projectContextController, store],
+  );
+  const [projectContextLifecycleState, setProjectContextLifecycleState] =
+    useState<ProjectContextLifecycleControllerState>(() =>
+      projectContextLifecycleController.getState(),
+    );
+  useEffect(
+    () =>
+      projectContextLifecycleController.subscribe(
+        setProjectContextLifecycleState,
+      ),
+    [projectContextLifecycleController],
+  );
   const requestState: RequestState = completionBusy(completionState)
     ? 'sending'
     : 'idle';
@@ -805,6 +1011,12 @@ export function HomeScreen() {
 
   const reconcileSelectedConversation = useCallback(
     (conversationId: string) => {
+      if (
+        directProjectMutationOutboxRef.current !== null ||
+        store.getState().projectContextDestructiveTransition !== null
+      ) {
+        return;
+      }
       completionController.reconcileHydrated(conversationId);
       if (!projectContextNativeAvailable) return;
       if (
@@ -834,8 +1046,7 @@ export function HomeScreen() {
   const hydrateStoredState = useCallback(
     (stored: string | null) => {
       if (stored === null) {
-        const conversationId = ensureConversation();
-        reconcileSelectedConversation(conversationId);
+        ensureConversation();
         return;
       }
       try {
@@ -860,8 +1071,6 @@ export function HomeScreen() {
         store.hydrate(stored);
         if (store.getState().selectedConversationId === null)
           ensureConversation();
-        const selected = store.getState().selectedConversationId;
-        if (selected !== null) reconcileSelectedConversation(selected);
         return;
       }
 
@@ -888,7 +1097,7 @@ export function HomeScreen() {
         t('home.storedChatsRejected', { error: hydrated.error.message }),
       );
     },
-    [ensureConversation, preferencesStore, reconcileSelectedConversation, store, t],
+    [ensureConversation, preferencesStore, store, t],
   );
 
   const bootstrap = useCallback(async () => {
@@ -897,6 +1106,8 @@ export function HomeScreen() {
     if (!nativeAvailable) {
       ensureConversation();
       setChatState(store.getState());
+      lifecycleBootstrapReadyRef.current = true;
+      setLifecycleBootstrapReady(true);
       setRuntimeFailure(t('home.localAdapterUnavailable'));
       setRuntimeChecking(false);
       return;
@@ -910,6 +1121,56 @@ export function HomeScreen() {
       const stored = await LocalRuntime.loadSession();
       hydrateStoredState(stored);
       setChatState(store.getState());
+      const restoredTransition =
+        store.getState().projectContextDestructiveTransition;
+      if (restoredTransition !== null) {
+        const outcome =
+          await projectContextLifecycleController.reconcileDestructiveTransition();
+        if (outcome.status !== 'completed') {
+          drawerSurfaceEpoch.current += 1;
+          drawerVisibleRef.current = false;
+          setDrawerVisible(false);
+          conversationActionEpoch.current += 1;
+          setActionConversationId(null);
+          settingsSurfaceEpoch.current += 1;
+          settingsVisibleRef.current = false;
+          setSettingsVisible(false);
+          setAccountVisible(false);
+          setMirrorsVisible(false);
+          setModelVisible(false);
+          setComposerOptionsVisible(false);
+          setWorkspaceSheetVisible(false);
+          setHarnessesVisible(false);
+          setEvidenceVisible(false);
+          projectsSurfaceEpoch.current += 1;
+          projectsVisibleRef.current = false;
+          setProjectsVisible(false);
+          setWorkspaceVisible(false);
+          afterDrawerDismiss.current = null;
+          afterActionDismiss.current = null;
+          lifecycleIntentRef.current = null;
+          setLifecycleIntent(null);
+          setLifecycleSheetTargetId(restoredTransition.conversationId);
+          projectContextUiEpoch.current += 1;
+          contextSheetVisibleRef.current = true;
+          setContextSheetVisible(true);
+        }
+      }
+      lifecycleBootstrapReadyRef.current = true;
+      setLifecycleBootstrapReady(true);
+      if (
+        store.getState().projectContextDestructiveTransition === null &&
+        store.getState().selectedConversationId === null
+      ) {
+        ensureConversation();
+      }
+      const selectedAfterLifecycle = store.getState().selectedConversationId;
+      if (
+        store.getState().projectContextDestructiveTransition === null &&
+        selectedAfterLifecycle !== null
+      ) {
+        reconcileSelectedConversation(selectedAfterLifecycle);
+      }
       await synchronizeAttachmentStore(store.getState());
       if (configured && stored !== null)
         initialProof = (await LocalRuntime.bootstrap()).proof;
@@ -920,12 +1181,18 @@ export function HomeScreen() {
         ensureConversation();
       setChatState(store.getState());
     } finally {
+      if (!lifecycleBootstrapReadyRef.current) {
+        lifecycleBootstrapReadyRef.current = true;
+        setLifecycleBootstrapReady(true);
+      }
       setRuntimeChecking(false);
     }
   }, [
     ensureConversation,
     hydrateStoredState,
     nativeAvailable,
+    projectContextLifecycleController,
+    reconcileSelectedConversation,
     store,
     synchronizeAttachmentStore,
     t,
@@ -979,8 +1246,14 @@ export function HomeScreen() {
     projectContextControllerState.owner,
     activeConversation,
   );
+  const lifecycleToken = projectContextLifecycleState.token;
   const projectContextVerificationStatus: ProjectContextVerificationStatus =
-    !projectContextNativeAvailable ||
+    (directProjectMutationView?.conversationId ??
+      lifecycleIntent?.conversationId ??
+      lifecycleToken?.conversationId) ===
+      activeConversation?.id
+      ? 'recovery'
+      : !projectContextNativeAvailable ||
     activeConversation?.projectContext?.status === 'unavailable'
       ? 'unavailable'
       : !projectContextOwnerAligned
@@ -1005,11 +1278,54 @@ export function HomeScreen() {
     projectContextCandidateManifest ??
     activeConversation?.projectContext?.snapshot ??
     null;
+  const lifecycleTargetId =
+    directProjectMutationView?.conversationId ??
+    lifecycleIntent?.conversationId ??
+    lifecycleToken?.conversationId ??
+    lifecycleSheetTargetId;
+  const lifecycleTargetConversation =
+    lifecycleTargetId === null
+      ? null
+      : selectConversationById(chatState, lifecycleTargetId);
+  const lifecycleSheetActive =
+    lifecycleTargetId !== null &&
+    (directProjectMutationView !== null ||
+      lifecycleIntent !== null ||
+      lifecycleToken !== null);
+  const lifecycleAction =
+    directProjectMutationView?.action ??
+    lifecycleIntent?.action ??
+    lifecycleToken?.action ??
+    null;
+  const lifecyclePresentation =
+    lifecycleSheetActive && lifecycleAction !== null
+      ? directProjectMutationView !== null
+        ? {
+            kind: 'direct_persistence' as const,
+            action: directProjectMutationView.action,
+            targetProjectLabel:
+              directProjectMutationView.action === 'rebind'
+                ? directProjectMutationView.targetProjectName ??
+                  t('context.sheet.lifecycle.localProject')
+                : null,
+          }
+        : {
+          kind: lifecycleIntent !== null ? ('confirmation' as const) : ('transition' as const),
+          action: lifecycleAction,
+          controllerState: projectContextLifecycleState,
+          targetProjectLabel:
+            lifecycleAction === 'rebind'
+              ? t('context.sheet.lifecycle.localProject')
+              : null,
+          }
+      : null;
   const projectContextConfirmationRequired =
     projectContextControllerState.phase === 'review' &&
     projectContextCandidateManifest !== null;
   const projectContextSheetMode: ProjectContextSheetMode =
-    pendingProjectSend !== null && pendingProjectSendStage === 'recovery'
+    lifecycleSheetActive
+      ? 'lifecycle'
+      : pendingProjectSend !== null && pendingProjectSendStage === 'recovery'
       ? 'recovery'
       : pendingProjectSend !== null &&
           pendingProjectSendStage === 'context_flow' &&
@@ -1055,10 +1371,13 @@ export function HomeScreen() {
     completionBlocksActiveProjectMutation ||
     projectContextHasSnapshotReferences;
   const projectContextLocksComposer =
-    activeConversation?.projectId !== null &&
-    activeConversation?.projectId !== undefined &&
-    projectContextOwnerAligned &&
-    projectContextOwnsMutation(projectContextControllerState);
+    directProjectMutationView !== null ||
+    projectContextLifecycleState.token !== null ||
+    lifecycleIntent !== null ||
+    (activeConversation?.projectId !== null &&
+      activeConversation?.projectId !== undefined &&
+      projectContextOwnerAligned &&
+      projectContextOwnsMutation(projectContextControllerState));
   const projectContextRecoveryGloballyDisabled =
     (activeConversation !== null &&
       completionOwnsPresentation(completionState, activeConversation.id)) ||
@@ -1070,6 +1389,9 @@ export function HomeScreen() {
     projectContextActionToken === null ||
     projectContextHasSnapshotReferences;
   const projectContextRenderEpoch = projectContextUiEpoch.current;
+  const projectsRenderEpoch = projectsSurfaceEpoch.current;
+  const drawerRenderEpoch = drawerSurfaceEpoch.current;
+  const settingsRenderEpoch = settingsSurfaceEpoch.current;
   const projectContextActionKey = JSON.stringify([
     projectContextRenderEpoch,
     contextSheetVisible,
@@ -1082,9 +1404,25 @@ export function HomeScreen() {
     projectContextActionToken?.modelId ?? null,
     pendingProjectSend?.uiEpoch ?? null,
     pendingProjectSendStage,
+    lifecycleIntent?.nonce ?? null,
+    projectContextLifecycleState.generation,
+    lifecycleToken?.lifecycleId ?? null,
+    lifecycleToken?.epoch ?? null,
+    lifecycleToken?.phase ?? null,
+    directProjectMutationView?.action ?? null,
+    directProjectMutationView?.conversationId ?? null,
   ]);
   useEffect(() => {
-    if (!projectContextNativeAvailable || activeConversation === null) return;
+    if (
+      !lifecycleBootstrapReady ||
+      directProjectMutationView !== null ||
+      lifecycleIntent !== null ||
+      store.getState().projectContextDestructiveTransition !== null ||
+      directProjectMutationOutboxRef.current !== null ||
+      !projectContextNativeAvailable ||
+      activeConversation === null
+    )
+      return;
     if (
       activeConversation.projectId === null ||
       activeConversation.projectContext === null ||
@@ -1109,6 +1447,9 @@ export function HomeScreen() {
   }, [
     activeConversation,
     completionState,
+    directProjectMutationView,
+    lifecycleIntent,
+    lifecycleBootstrapReady,
     projectContextController,
     projectContextControllerState,
     projectContextNativeAvailable,
@@ -1542,6 +1883,9 @@ export function HomeScreen() {
       !credentialConfigured ||
       (prompt.trim().length === 0 && outgoingAttachments.length === 0) ||
       completionBusy(completionController.getState()) ||
+      store.getState().projectContextDestructiveTransition !== null ||
+      directProjectMutationOutboxRef.current !== null ||
+      lifecycleIntentRef.current !== null ||
       contextSheetVisibleRef.current ||
       pendingProjectSendActionInFlight.current ||
       (selectedConversation !== null &&
@@ -1634,6 +1978,9 @@ export function HomeScreen() {
   const retry = useCallback(async (expected: CompletionControllerState) => {
     if (
       retryActionInFlight.current ||
+      directProjectMutationOutboxRef.current !== null ||
+      lifecycleIntentRef.current !== null ||
+      store.getState().projectContextDestructiveTransition !== null ||
       activeAttachmentOperation.current !== null ||
       activeAttachmentPreviewId.current !== null
     )
@@ -1689,7 +2036,7 @@ export function HomeScreen() {
     } finally {
       retryActionInFlight.current = false;
     }
-  }, [applyCompletionOutcome, completionController, refreshProof]);
+  }, [applyCompletionOutcome, completionController, refreshProof, store]);
 
   const cancel = useCallback(async (expected: CompletionControllerState) => {
     const owned = completionController.getState();
@@ -1716,76 +2063,757 @@ export function HomeScreen() {
     }
   }, [completionController, t]);
 
-  const createConversation = useCallback(async () => {
-    const currentId = store.getState().selectedConversationId;
+  const captureLifecycleIntent = useCallback(
+    (
+      conversationId: string,
+      action: ProjectContextLifecycleIntent['action'],
+      targetProjectId: string | null = null,
+    ): ProjectContextLifecycleIntent | null => {
+      const captured =
+        projectContextLifecycleController.captureDestructiveBeginToken(
+          conversationId,
+          action,
+          targetProjectId,
+        );
+      if (!captured.ok) {
+        setRequestFailure(captured.code);
+        return null;
+      }
+      return Object.freeze({
+        nonce: ++lifecycleIntentNonce.current,
+        action,
+        conversationId,
+        selectedConversationId: store.getState().selectedConversationId,
+        targetProjectId,
+        beginToken: captured.token,
+      });
+    },
+    [projectContextLifecycleController, store],
+  );
+
+  const lifecycleIntentIsLive = useCallback(
+    (expected: ProjectContextLifecycleIntent): boolean => {
+      if (
+        lifecycleIntentRef.current !== expected ||
+        store.getState().selectedConversationId !==
+          expected.selectedConversationId
+      ) {
+        return false;
+      }
+      const fresh =
+        projectContextLifecycleController.captureDestructiveBeginToken(
+          expected.conversationId,
+          expected.action,
+          expected.targetProjectId,
+        );
+      return fresh.ok && sameDestructiveBeginToken(fresh.token, expected.beginToken);
+    },
+    [projectContextLifecycleController, store],
+  );
+
+  const openLifecycleSheet = useCallback(
+    (intent: ProjectContextLifecycleIntent) => {
+      lifecycleIntentRef.current = intent;
+      setLifecycleIntent(intent);
+      setLifecycleSheetTargetId(intent.conversationId);
+      projectContextUiEpoch.current += 1;
+      contextSheetVisibleRef.current = true;
+      setContextSheetVisible(true);
+    },
+    [],
+  );
+
+  const openBlockedProjectContext = useCallback((conversationId: string) => {
+    lifecycleIntentRef.current = null;
+    setLifecycleIntent(null);
+    setLifecycleSheetTargetId(null);
+    projectContextUiEpoch.current += 1;
+    contextSheetVisibleRef.current = true;
+    setContextSheetVisible(true);
     if (
-      currentId !== null &&
-      !(await projectContextController.beforeConversationChange(currentId))
+      projectContextController.getState().owner?.conversationId !==
+      conversationId
+    ) {
+      projectContextController
+        .attachConversation(conversationId)
+        .catch(() => undefined);
+    }
+  }, [projectContextController]);
+
+  const finishLifecycleOutcome = useCallback(
+    async (
+      result: ProjectContextDestructiveOutcome,
+      action: ProjectContextLifecycleIntent['action'],
+      targetConversationId: string,
+      selectedAtStart: string | null,
+    ) => {
+      lifecycleActionInFlight.current = false;
+      if (result.status !== 'completed') {
+        if (store.getState().projectContextDestructiveTransition !== null) {
+          lifecycleIntentRef.current = null;
+          setLifecycleIntent(null);
+        }
+        setRequestFailure(
+          result.status === 'blocked' ||
+            result.status === 'cleanup_pending' ||
+            result.status === 'persistence_pending'
+            ? result.code
+            : null,
+        );
+        return;
+      }
+
+      lifecycleIntentRef.current = null;
+      setLifecycleIntent(null);
+      setLifecycleSheetTargetId(null);
+      contextSheetVisibleRef.current = false;
+      projectContextUiEpoch.current += 1;
+      setContextSheetVisible(false);
+      setRequestFailure(null);
+      completionUiEpoch.current += 1;
+
+      if (action === 'delete') {
+        if (selectedAtStart === targetConversationId) {
+          markAttachmentOperationStale();
+          discardDraftAttachments();
+          draftRef.current = '';
+          setDraft('');
+        }
+        if (store.getState().selectedConversationId === null) {
+          store.createConversation({
+            modelId: preferencesStore.getState().defaultModel,
+            thinkingMode: preferencesStore.getState().thinkingMode,
+          });
+        }
+        await synchronizeAttachmentStore(store.getState());
+      } else if (
+        action === 'unbind' &&
+        store.getState().selectedConversationId === targetConversationId
+      ) {
+        setActiveProjectName(null);
+      }
+
+      const selected = store.getState().selectedConversationId;
+      if (selected !== null) reconcileSelectedConversation(selected);
+    },
+    [
+      discardDraftAttachments,
+      markAttachmentOperationStale,
+      preferencesStore,
+      reconcileSelectedConversation,
+      store,
+      synchronizeAttachmentStore,
+    ],
+  );
+
+  const confirmLifecycleIntent = useCallback(async (
+    expected: ProjectContextLifecycleIntent | null,
+    expectedSurfaceEpoch: number,
+  ) => {
+    if (
+      expected === null ||
+      projectContextUiEpoch.current !== expectedSurfaceEpoch ||
+      lifecycleActionInFlight.current ||
+      !contextSheetVisibleRef.current ||
+      !lifecycleIntentIsLive(expected)
     ) {
       return;
     }
+    lifecycleActionInFlight.current = true;
     if (
-      currentId !== null &&
-      !(await completionController.beforeConversationChange(currentId))
+      !(await projectContextController.beforeConversationChange(
+        expected.conversationId,
+      )) ||
+      !lifecycleIntentIsLive(expected) ||
+      completionBusy(completionController.getState())
     ) {
+      lifecycleActionInFlight.current = false;
       return;
     }
-    completionUiEpoch.current += 1;
-    markAttachmentOperationStale();
-    discardDraftAttachments();
-    store.createConversation({
-      modelId: preferencesStore.getState().defaultModel,
-      thinkingMode: preferencesStore.getState().thinkingMode,
-    });
-    setDraft('');
-    setAttachmentNotice(null);
-    setRequestFailure(null);
-    setDrawerVisible(false);
-    reconcileSelectedConversation(store.getState().selectedConversationId!);
-    await persist();
+    const fresh =
+      projectContextLifecycleController.captureDestructiveBeginToken(
+        expected.conversationId,
+        expected.action,
+        expected.targetProjectId,
+      );
+    if (
+      !fresh.ok ||
+      !sameDestructiveBeginToken(fresh.token, expected.beginToken) ||
+      !lifecycleIntentIsLive(expected)
+    ) {
+      lifecycleActionInFlight.current = false;
+      return;
+    }
+    const result =
+      await projectContextLifecycleController.beginDestructiveTransition(
+        fresh.token,
+      );
+    await finishLifecycleOutcome(
+      result,
+      expected.action,
+      expected.conversationId,
+      expected.selectedConversationId,
+    );
   }, [
     completionController,
-    discardDraftAttachments,
-    markAttachmentOperationStale,
-    persist,
-    preferencesStore,
+    finishLifecycleOutcome,
+    lifecycleIntentIsLive,
     projectContextController,
-    reconcileSelectedConversation,
-    store,
+    projectContextLifecycleController,
   ]);
 
-  const selectConversation = useCallback(
-    async (id: string) => {
+  const retryLifecyclePersistence = useCallback(
+    async (
+      expected: ProjectContextDestructiveToken,
+      expectedSurfaceEpoch: number,
+    ) => {
+      if (
+        projectContextUiEpoch.current !== expectedSurfaceEpoch ||
+        lifecycleActionInFlight.current ||
+        !contextSheetVisibleRef.current ||
+        !sameDestructiveToken(
+          expected,
+          projectContextLifecycleController.getDestructiveToken(),
+        )
+      ) {
+        return;
+      }
+      lifecycleActionInFlight.current = true;
+      const result =
+        await projectContextLifecycleController.retryDestructivePersistence(
+          expected,
+        );
+      await finishLifecycleOutcome(
+        result,
+        expected.action,
+        expected.conversationId,
+        store.getState().selectedConversationId,
+      );
+    }, [finishLifecycleOutcome, projectContextLifecycleController, store],
+  );
+
+  const retryLifecycleCleanup = useCallback(
+    async (
+      expected: ProjectContextDestructiveToken,
+      expectedSurfaceEpoch: number,
+    ) => {
+      if (
+        projectContextUiEpoch.current !== expectedSurfaceEpoch ||
+        lifecycleActionInFlight.current ||
+        !contextSheetVisibleRef.current ||
+        !sameDestructiveToken(
+          expected,
+          projectContextLifecycleController.getDestructiveToken(),
+        )
+      ) {
+        return;
+      }
+      lifecycleActionInFlight.current = true;
+      const result =
+        await projectContextLifecycleController.retryDestructiveCleanup(
+          expected,
+        );
+      await finishLifecycleOutcome(
+        result,
+        expected.action,
+        expected.conversationId,
+        store.getState().selectedConversationId,
+      );
+    }, [finishLifecycleOutcome, projectContextLifecycleController, store],
+  );
+
+  const showDirectProjectMutationRecovery = useCallback(
+    (outbox: DirectProjectMutationOutbox) => {
+      const view: DirectProjectMutationView = {
+        action: outbox.action,
+        conversationId: outbox.conversationId,
+        targetProjectId: outbox.targetProjectId,
+        targetProjectName: outbox.targetProjectName,
+      };
+      directProjectMutationOutboxRef.current = outbox;
+      setDirectProjectMutationView(view);
+      setLifecycleSheetTargetId(outbox.conversationId);
+      projectContextUiEpoch.current += 1;
+      if (
+        outbox.sourceProjectsEpoch !== null &&
+        projectsSurfaceEpoch.current !== outbox.sourceProjectsEpoch
+      ) {
+        setRequestFailure('E_CONTEXT_PERSISTENCE');
+        return;
+      }
+      if (
+        outbox.sourceProjectsEpoch !== null &&
+        projectsVisibleRef.current
+      ) {
+        pendingDirectOpenAfterProjectsDismiss.current = view;
+        projectsVisibleRef.current = false;
+        setProjectsVisible(false);
+      } else {
+        contextSheetVisibleRef.current = true;
+        setContextSheetVisible(true);
+      }
+      setRequestFailure('E_CONTEXT_PERSISTENCE');
+    },
+    [],
+  );
+
+  const completeDirectProjectMutation = useCallback(
+    async (outbox: DirectProjectMutationOutbox) => {
+      directProjectMutationOutboxRef.current = null;
+      setDirectProjectMutationView(null);
+      setLifecycleSheetTargetId(null);
+      contextSheetVisibleRef.current = false;
+      projectContextUiEpoch.current += 1;
+      setContextSheetVisible(false);
+      setRequestFailure(null);
+      if (outbox.action === 'delete') {
+        if (outbox.selectedConversationId === outbox.conversationId) {
+          markAttachmentOperationStale();
+          discardDraftAttachments();
+          draftRef.current = '';
+          setDraft('');
+        }
+        if (store.getState().selectedConversationId === null) {
+          store.createConversation({
+            modelId: preferencesStore.getState().defaultModel,
+            thinkingMode: preferencesStore.getState().thinkingMode,
+          });
+        }
+        await synchronizeAttachmentStore(store.getState());
+      } else if (
+        store.getState().selectedConversationId === outbox.conversationId
+      ) {
+        setActiveProjectName(
+          outbox.action === 'rebind' ? outbox.targetProjectName : null,
+        );
+      }
+      const selected = store.getState().selectedConversationId;
+      if (selected !== null) reconcileSelectedConversation(selected);
+    },
+    [
+      discardDraftAttachments,
+      markAttachmentOperationStale,
+      preferencesStore,
+      reconcileSelectedConversation,
+      store,
+      synchronizeAttachmentStore,
+    ],
+  );
+
+  const settleDirectProjectMutation = useCallback(
+    async (
+      outbox: DirectProjectMutationOutbox,
+      transaction: SnapshotFreeProjectMutationTransaction,
+      durability: SessionDurabilityResult,
+    ) => {
+      if (directProjectMutationOutboxRef.current !== outbox) return;
+      if (durability.status === 'committed') {
+        if (!transaction.commit()) {
+          showDirectProjectMutationRecovery({
+            ...outbox,
+            transaction: null,
+          });
+          return;
+        }
+        await completeDirectProjectMutation(outbox);
+        return;
+      }
+      if (durability.status === 'not_committed') {
+        if (!transaction.rollback()) {
+          showDirectProjectMutationRecovery({
+            ...outbox,
+            transaction: null,
+          });
+          return;
+        }
+        showDirectProjectMutationRecovery({
+          ...outbox,
+          transaction: null,
+        });
+        return;
+      }
+      showDirectProjectMutationRecovery({ ...outbox, transaction });
+    }, [completeDirectProjectMutation, showDirectProjectMutationRecovery],
+  );
+
+  const applyDirectProjectMutation = useCallback(
+    async (
+      action: DirectProjectMutationOutbox['action'],
+      conversation: Conversation,
+      targetProjectId: string | null,
+      targetProjectName: string | null = null,
+    ): Promise<boolean> => {
+      if (directProjectMutationOutboxRef.current !== null) return false;
+      const selectedConversationId = store.getState().selectedConversationId;
+      const sourceProjectsEpoch = projectsVisibleRef.current
+        ? projectsSurfaceEpoch.current
+        : null;
+      const transaction = store.applySnapshotFreeProjectMutation({
+        action,
+        conversationId: conversation.id,
+        targetProjectId,
+        expectedConversation: conversation,
+      });
+      if (transaction === null) return false;
+      const outbox: DirectProjectMutationOutbox = {
+        action,
+        conversationId: conversation.id,
+        targetProjectId,
+        targetProjectName,
+        expectedConversation: conversation,
+        selectedConversationId,
+        transaction,
+        sourceProjectsEpoch,
+      };
+      directProjectMutationOutboxRef.current = outbox;
+      setDirectProjectMutationView({
+        action,
+        conversationId: conversation.id,
+        targetProjectId,
+        targetProjectName,
+      });
+      directProjectMutationPersistenceInFlight.current = true;
+      try {
+        await settleDirectProjectMutation(
+          outbox,
+          transaction,
+          await persistCurrentRef.current(),
+        );
+      } finally {
+        directProjectMutationPersistenceInFlight.current = false;
+      }
+      return true;
+    }, [settleDirectProjectMutation, store],
+  );
+
+  const retryDirectProjectMutationPersistence = useCallback(async (
+    expected: DirectProjectMutationView | null,
+    expectedSurfaceEpoch: number,
+  ) => {
+    const outbox = directProjectMutationOutboxRef.current;
+    if (
+      expected === null ||
+      projectContextUiEpoch.current !== expectedSurfaceEpoch ||
+      outbox === null ||
+      outbox.action !== expected.action ||
+      outbox.conversationId !== expected.conversationId ||
+      outbox.targetProjectId !== expected.targetProjectId ||
+      lifecycleActionInFlight.current ||
+      !contextSheetVisibleRef.current
+    ) {
+      return;
+    }
+    lifecycleActionInFlight.current = true;
+    try {
+      const transaction =
+        outbox.transaction ??
+        store.applySnapshotFreeProjectMutation({
+          action: outbox.action,
+          conversationId: outbox.conversationId,
+          targetProjectId: outbox.targetProjectId,
+          expectedConversation: outbox.expectedConversation,
+        });
+      if (transaction === null) return;
+      const next = { ...outbox, transaction, sourceProjectsEpoch: null };
+      directProjectMutationOutboxRef.current = next;
+      directProjectMutationPersistenceInFlight.current = true;
+      try {
+        await settleDirectProjectMutation(
+          next,
+          transaction,
+          await persistCurrentRef.current(),
+        );
+      } finally {
+        directProjectMutationPersistenceInFlight.current = false;
+      }
+    } finally {
+      lifecycleActionInFlight.current = false;
+    }
+  }, [settleDirectProjectMutation, store]);
+
+  const destructiveAuthorityActive = useCallback(
+    (allowSettledRecovery = false) => {
+      const destructiveToken =
+        projectContextLifecycleController.getDestructiveToken();
+      const durableLifecycleActive =
+        store.getState().projectContextDestructiveTransition !== null ||
+        destructiveToken !== null;
+      return (
+      (directProjectMutationOutboxRef.current !== null &&
+        (!allowSettledRecovery ||
+          directProjectMutationPersistenceInFlight.current)) ||
+      lifecycleIntentRef.current !== null ||
+        (durableLifecycleActive &&
+          (!allowSettledRecovery ||
+            lifecycleActionInFlight.current ||
+            destructiveToken === null))
+      );
+    },
+    [projectContextLifecycleController, store],
+  );
+
+  const rootSurfaceAdmissionAllowed = useCallback(
+    (allowSettledDirectRecovery = false) =>
+      lifecycleBootstrapReadyRef.current &&
+      !navigationSurfaceVisibleRef.current &&
+      !contextSheetVisibleRef.current &&
+      !destructiveAuthorityActive(allowSettledDirectRecovery) &&
+      !projectContextOperationInFlight(projectContextController.getState()),
+    [destructiveAuthorityActive, projectContextController],
+  );
+
+  const drawerSourceIsLive = useCallback(
+    (expectedEpoch: number) =>
+      lifecycleBootstrapReadyRef.current &&
+      drawerVisibleRef.current &&
+      drawerSurfaceEpoch.current === expectedEpoch &&
+      !contextSheetVisibleRef.current &&
+      !destructiveAuthorityActive() &&
+      !projectContextOperationInFlight(projectContextController.getState()),
+    [destructiveAuthorityActive, projectContextController],
+  );
+
+  const settingsSourceIsLive = useCallback(
+    (expectedEpoch: number) =>
+      lifecycleBootstrapReadyRef.current &&
+      settingsVisibleRef.current &&
+      settingsSurfaceEpoch.current === expectedEpoch &&
+      !contextSheetVisibleRef.current &&
+      !destructiveAuthorityActive() &&
+      !projectContextOperationInFlight(projectContextController.getState()),
+    [destructiveAuthorityActive, projectContextController],
+  );
+
+  const closeDrawerSurface = useCallback(() => {
+    drawerSurfaceEpoch.current += 1;
+    drawerVisibleRef.current = false;
+    setDrawerVisible(false);
+  }, []);
+
+  const createConversation = useCallback(async (
+    expectedDrawerEpoch: number,
+  ) => {
+    if (
+      navigationMutationInFlight.current ||
+      !drawerSourceIsLive(expectedDrawerEpoch)
+    )
+      return;
+    navigationMutationInFlight.current = true;
+    try {
       const currentId = store.getState().selectedConversationId;
+      const currentConversation =
+        currentId === null
+          ? null
+          : selectConversationById(store.getState(), currentId);
+      if (directProjectMutationOutboxRef.current !== null) {
+        const direct = directProjectMutationView;
+        if (direct !== null) {
+          pendingLifecycleOpenAfterDrawerDismiss.current = {
+            intent: null,
+            token: null,
+            direct,
+          };
+          closeDrawerSurface();
+        }
+        return;
+      }
+      if (
+        currentId !== null &&
+        !projectContextLifecycleController.beforeConversationChange(currentId)
+      ) {
+        const token = projectContextLifecycleController.getDestructiveToken();
+        if (token !== null) {
+          pendingLifecycleOpenAfterDrawerDismiss.current = {
+            intent: null,
+            token,
+            direct: null,
+          };
+          closeDrawerSurface();
+        }
+        return;
+      }
       if (
         currentId !== null &&
         !(await projectContextController.beforeConversationChange(currentId))
       ) {
+        afterDrawerDismiss.current = () =>
+          openBlockedProjectContext(currentId);
+        closeDrawerSurface();
         return;
       }
+      if (
+        !drawerSourceIsLive(expectedDrawerEpoch) ||
+        store.getState().selectedConversationId !== currentId ||
+        !sameConversationOwner(
+          currentConversation,
+          currentId === null
+            ? null
+            : selectConversationById(store.getState(), currentId),
+        )
+      )
+        return;
       if (
         currentId !== null &&
         !(await completionController.beforeConversationChange(currentId))
       ) {
         return;
       }
+      if (
+        !drawerSourceIsLive(expectedDrawerEpoch) ||
+        store.getState().selectedConversationId !== currentId ||
+        !sameConversationOwner(
+          currentConversation,
+          currentId === null
+            ? null
+            : selectConversationById(store.getState(), currentId),
+        )
+      )
+        return;
       completionUiEpoch.current += 1;
       markAttachmentOperationStale();
       discardDraftAttachments();
-      store.selectConversation(id);
+      store.createConversation({
+        modelId: preferencesStore.getState().defaultModel,
+        thinkingMode: preferencesStore.getState().thinkingMode,
+      });
       setDraft('');
       setAttachmentNotice(null);
       setRequestFailure(null);
-      setDrawerVisible(false);
-      reconcileSelectedConversation(id);
+      closeDrawerSurface();
+      reconcileSelectedConversation(store.getState().selectedConversationId!);
       await persist();
+    } finally {
+      navigationMutationInFlight.current = false;
+    }
+  }, [
+    completionController,
+    closeDrawerSurface,
+    discardDraftAttachments,
+    directProjectMutationView,
+    drawerSourceIsLive,
+    markAttachmentOperationStale,
+    openBlockedProjectContext,
+    persist,
+    preferencesStore,
+    projectContextController,
+    projectContextLifecycleController,
+    reconcileSelectedConversation,
+    store,
+  ]);
+
+  const selectConversation = useCallback(
+    async (id: string, expectedDrawerEpoch: number) => {
+      if (
+        navigationMutationInFlight.current ||
+        !drawerSourceIsLive(expectedDrawerEpoch)
+      )
+        return;
+      navigationMutationInFlight.current = true;
+      try {
+        const currentId = store.getState().selectedConversationId;
+        const currentConversation =
+          currentId === null
+            ? null
+            : selectConversationById(store.getState(), currentId);
+        const targetConversation = selectConversationById(store.getState(), id);
+        if (targetConversation === null) return;
+        if (directProjectMutationOutboxRef.current !== null) {
+          const direct = directProjectMutationView;
+          if (direct !== null) {
+            pendingLifecycleOpenAfterDrawerDismiss.current = {
+              intent: null,
+              token: null,
+              direct,
+            };
+            closeDrawerSurface();
+          }
+          return;
+        }
+        if (
+          currentId !== null &&
+          !projectContextLifecycleController.beforeConversationChange(currentId)
+        ) {
+          const token = projectContextLifecycleController.getDestructiveToken();
+          if (token !== null) {
+            pendingLifecycleOpenAfterDrawerDismiss.current = {
+              intent: null,
+              token,
+              direct: null,
+            };
+            closeDrawerSurface();
+          }
+          return;
+        }
+        if (
+          currentId !== null &&
+          !(await projectContextController.beforeConversationChange(currentId))
+        ) {
+          afterDrawerDismiss.current = () =>
+            openBlockedProjectContext(currentId);
+          closeDrawerSurface();
+          return;
+        }
+        if (
+          !drawerSourceIsLive(expectedDrawerEpoch) ||
+          store.getState().selectedConversationId !== currentId ||
+          !sameConversationOwner(
+            currentConversation,
+            currentId === null
+              ? null
+              : selectConversationById(store.getState(), currentId),
+          ) ||
+          !sameConversationOwner(
+            targetConversation,
+            selectConversationById(store.getState(), id),
+          )
+        )
+          return;
+        if (
+          currentId !== null &&
+          !(await completionController.beforeConversationChange(currentId))
+        ) {
+          return;
+        }
+        if (
+          !drawerSourceIsLive(expectedDrawerEpoch) ||
+          store.getState().selectedConversationId !== currentId ||
+          !sameConversationOwner(
+            currentConversation,
+            currentId === null
+              ? null
+              : selectConversationById(store.getState(), currentId),
+          ) ||
+          !sameConversationOwner(
+            targetConversation,
+            selectConversationById(store.getState(), id),
+          )
+        )
+          return;
+        completionUiEpoch.current += 1;
+        markAttachmentOperationStale();
+        discardDraftAttachments();
+        store.selectConversation(id);
+        setDraft('');
+        setAttachmentNotice(null);
+        setRequestFailure(null);
+        closeDrawerSurface();
+        reconcileSelectedConversation(id);
+        await persist();
+      } finally {
+        navigationMutationInFlight.current = false;
+      }
     },
     [
       completionController,
+      closeDrawerSurface,
       discardDraftAttachments,
+      directProjectMutationView,
+      drawerSourceIsLive,
       markAttachmentOperationStale,
+      openBlockedProjectContext,
       persist,
       projectContextController,
+      projectContextLifecycleController,
       reconcileSelectedConversation,
       store,
     ],
@@ -1793,7 +2821,13 @@ export function HomeScreen() {
 
   const renameConversation = useCallback(
     (title: string) => {
-      if (actionConversationId === null) return;
+      if (
+        actionConversationId === null ||
+        directProjectMutationOutboxRef.current !== null ||
+        lifecycleIntentRef.current !== null ||
+        store.getState().projectContextDestructiveTransition !== null
+      )
+        return;
       store.renameConversation(actionConversationId, title);
       persist().catch(() => undefined);
     },
@@ -1801,71 +2835,130 @@ export function HomeScreen() {
   );
 
   const confirmDeleteConversation = useCallback(
-    (deleting: string) => {
+    (request: ConversationDeleteRequest) => {
+      const requestIsLive = () =>
+        conversationActionEpoch.current === request.actionEpoch &&
+        completionUiEpoch.current === request.completionEpoch &&
+        store.getState().selectedConversationId ===
+          request.selectedConversationId &&
+        selectConversationById(
+          store.getState(),
+          request.conversation.id,
+        ) === request.conversation &&
+        !contextSheetVisibleRef.current &&
+        lifecycleIntentRef.current === null &&
+        directProjectMutationOutboxRef.current === null &&
+        store.getState().projectContextDestructiveTransition === null;
+      if (!requestIsLive()) return;
       Alert.alert(t('home.deleteChatTitle'), t('home.deleteChatBody'), [
-        { text: t('common.cancel'), style: 'cancel' },
+        {
+          text: t('common.cancel'),
+          style: 'cancel',
+          onPress: () => {
+            if (conversationActionEpoch.current === request.actionEpoch) {
+              conversationActionEpoch.current += 1;
+            }
+          },
+        },
         {
           text: t('common.delete'),
           style: 'destructive',
           onPress: () =>
             (async () => {
-              if (
-                !(await projectContextController.beforeConversationDelete(
-                  deleting,
-                ))
-              ) {
-                return;
-              }
-              if (
-                !(await completionController.beforeConversationDelete(deleting))
-              ) {
-                return;
-              }
-              completionUiEpoch.current += 1;
-              setRequestFailure(null);
-              const deletingConversation = selectConversationById(
-                store.getState(),
-                deleting,
-              );
-              const candidateAttachmentIds = Array.from(
-                new Set(
-                  (deletingConversation?.messages ?? []).flatMap(message =>
-                    (message.attachments ?? []).map(
-                      attachment => attachment.id,
-                    ),
+              if (navigationMutationInFlight.current || !requestIsLive()) return;
+              const operationActionEpoch = ++conversationActionEpoch.current;
+              const operationIsLive = () =>
+                conversationActionEpoch.current === operationActionEpoch &&
+                completionUiEpoch.current === request.completionEpoch &&
+                store.getState().selectedConversationId ===
+                  request.selectedConversationId &&
+                sameDeleteOwner(
+                  selectConversationById(
+                    store.getState(),
+                    request.conversation.id,
                   ),
-                ),
-              );
-              if (store.getState().selectedConversationId === deleting) {
-                markAttachmentOperationStale();
-                discardDraftAttachments();
-                setDraft('');
-              }
-              store.deleteConversation(deleting);
-              if (store.getState().selectedConversationId === null) {
-                store.createConversation({
-                  modelId: preferencesStore.getState().defaultModel,
-                  thinkingMode: preferencesStore.getState().thinkingMode,
-                });
-              }
-              const selectedAfterDelete =
-                store.getState().selectedConversationId;
-              if (selectedAfterDelete !== null) {
-                reconcileSelectedConversation(selectedAfterDelete);
-              }
-              const remainingIds = new Set(
-                referencedAttachmentIds(store.getState()),
-              );
-              const orphanedIds = candidateAttachmentIds.filter(
-                id => !remainingIds.has(id),
-              );
-              const saved = await persist();
-              if (
-                saved &&
-                orphanedIds.length > 0 &&
-                LocalAttachments.isAvailable()
-              ) {
-                await LocalAttachments.discard(orphanedIds);
+                  request.conversation,
+                ) &&
+                !contextSheetVisibleRef.current &&
+                lifecycleIntentRef.current === null &&
+                directProjectMutationOutboxRef.current === null &&
+                store.getState().projectContextDestructiveTransition === null;
+              navigationMutationInFlight.current = true;
+              try {
+                if (
+                  !operationIsLive() ||
+                  !projectContextLifecycleController.beforeConversationDelete(
+                    request.conversation.id,
+                  )
+                ) {
+                  return;
+                }
+                if (
+                  request.conversation.projectContext?.snapshot !== null &&
+                  request.conversation.projectContext?.snapshot !== undefined
+                ) {
+                  const intent = captureLifecycleIntent(
+                    request.conversation.id,
+                    'delete',
+                  );
+                  if (
+                    intent === null ||
+                    !operationIsLive() ||
+                    !(await projectContextController.beforeConversationChange(
+                      request.conversation.id,
+                    )) ||
+                    !operationIsLive()
+                  ) {
+                    return;
+                  }
+                  const fresh =
+                    projectContextLifecycleController.captureDestructiveBeginToken(
+                      request.conversation.id,
+                      'delete',
+                      null,
+                    );
+                  if (
+                    !fresh.ok ||
+                    !sameDestructiveBeginToken(
+                      fresh.token,
+                      intent.beginToken,
+                    ) ||
+                    !operationIsLive()
+                  ) {
+                    return;
+                  }
+                  openLifecycleSheet(intent);
+                  return;
+                }
+                if (
+                  !(await projectContextController.beforeConversationDelete(
+                    request.conversation.id,
+                  )) ||
+                  !operationIsLive()
+                ) {
+                  return;
+                }
+                const completionAllowed =
+                  await completionController.beforeConversationDelete(
+                    request.conversation.id,
+                  );
+                if (!completionAllowed || !operationIsLive()) {
+                  return;
+                }
+                const beforeMutation = selectConversationById(
+                  store.getState(),
+                  request.conversation.id,
+                );
+                if (beforeMutation === null) return;
+                completionUiEpoch.current += 1;
+                setRequestFailure(null);
+                await applyDirectProjectMutation(
+                  'delete',
+                  beforeMutation,
+                  null,
+                );
+              } finally {
+                navigationMutationInFlight.current = false;
               }
             })().catch(() => undefined),
         },
@@ -1873,29 +2966,56 @@ export function HomeScreen() {
     },
     [
       completionController,
-      discardDraftAttachments,
-      markAttachmentOperationStale,
-      persist,
-      preferencesStore,
+      applyDirectProjectMutation,
+      captureLifecycleIntent,
+      openLifecycleSheet,
       projectContextController,
-      reconcileSelectedConversation,
-      referencedAttachmentIds,
+      projectContextLifecycleController,
       store,
       t,
     ],
   );
 
   const requestDeleteConversation = useCallback(() => {
-    if (actionConversationId === null) return;
-    const deleting = actionConversationId;
-    afterActionDismiss.current = () => confirmDeleteConversation(deleting);
+    if (
+      actionConversationId === null ||
+      contextSheetVisibleRef.current ||
+      lifecycleIntentRef.current !== null ||
+      directProjectMutationOutboxRef.current !== null ||
+      store.getState().projectContextDestructiveTransition !== null
+    )
+      return;
+    const deleting = selectConversationById(
+      store.getState(),
+      actionConversationId,
+    );
+    if (deleting === null) return;
+    const request: ConversationDeleteRequest = Object.freeze({
+      actionEpoch: conversationActionEpoch.current,
+      completionEpoch: completionUiEpoch.current,
+      selectedConversationId: store.getState().selectedConversationId,
+      conversation: deleting,
+    });
+    afterActionDismiss.current = () => confirmDeleteConversation(request);
     setActionConversationId(null);
-  }, [actionConversationId, confirmDeleteConversation]);
+  }, [actionConversationId, confirmDeleteConversation, store]);
+
+  const destructiveSurfaceBlocked = useCallback(
+    () =>
+      contextSheetVisibleRef.current ||
+      store.getState().projectContextDestructiveTransition !== null ||
+      directProjectMutationOutboxRef.current !== null ||
+      lifecycleIntentRef.current !== null,
+    [store],
+  );
 
   const selectModel = useCallback(
     (model: SupportedModel, source: ModelTransitionSource) => {
       if (
         completionBusy(completionController.getState()) ||
+        store.getState().projectContextDestructiveTransition !== null ||
+        directProjectMutationOutboxRef.current !== null ||
+        lifecycleIntentRef.current !== null ||
         projectContextOwnsMutation(projectContextController.getState()) ||
         activeAttachmentOperation.current !== null
       ) {
@@ -1919,6 +3039,7 @@ export function HomeScreen() {
       projectContextController,
       reconcileSelectedConversation,
       invalidatePendingProjectSend,
+      store,
     ],
   );
 
@@ -1932,10 +3053,25 @@ export function HomeScreen() {
     [selectModel],
   );
 
+  const presentSettingsSurface = useCallback(() => {
+    settingsSurfaceEpoch.current += 1;
+    settingsVisibleRef.current = true;
+    setSettingsVisible(true);
+  }, []);
+
+  const closeSettingsSurface = useCallback(() => {
+    settingsSurfaceEpoch.current += 1;
+    settingsVisibleRef.current = false;
+    setSettingsVisible(false);
+  }, []);
+
   const selectThinkingMode = useCallback(
     (thinkingMode: Conversation['thinkingMode']) => {
       if (
         completionBusy(completionController.getState()) ||
+        store.getState().projectContextDestructiveTransition !== null ||
+        directProjectMutationOutboxRef.current !== null ||
+        lifecycleIntentRef.current !== null ||
         projectContextOwnsMutation(projectContextController.getState()) ||
         activeAttachmentOperation.current !== null
       ) {
@@ -1958,19 +3094,24 @@ export function HomeScreen() {
 
   const openComposerOptions = useCallback(() => {
     if (
+      !rootSurfaceAdmissionAllowed() ||
       completionBusy(completionController.getState()) ||
-      projectContextOwnsMutation(projectContextController.getState()) ||
       activeAttachmentOperation.current !== null
     ) {
       return;
     }
     setComposerOptionsVisible(true);
-  }, [completionController, projectContextController]);
+  }, [completionController, rootSurfaceAdmissionAllowed]);
 
   const openSettings = useCallback(() => {
-    if (projectContextOwnsMutation(projectContextController.getState())) return;
-    setSettingsVisible(true);
-  }, [projectContextController]);
+    if (!rootSurfaceAdmissionAllowed()) return;
+    presentSettingsSurface();
+  }, [presentSettingsSurface, rootSurfaceAdmissionAllowed]);
+
+  const openSettingsFromDrawer = useCallback((expectedEpoch: number) => {
+    if (!drawerSourceIsLive(expectedEpoch)) return;
+    presentSettingsSurface();
+  }, [drawerSourceIsLive, presentSettingsSurface]);
 
   useEffect(() => {
     if (!LocalWorkspaces.isAvailable()) return;
@@ -1995,6 +3136,7 @@ export function HomeScreen() {
 
   const handleWorkspaceSelect = useCallback(
     (workspaceId: string) => {
+      if (destructiveSurfaceBlocked()) return;
       invalidatePendingProjectSend();
       const conversationId = ensureConversation();
       store.bindConversationToWorkspace(conversationId, workspaceId);
@@ -2002,36 +3144,109 @@ export function HomeScreen() {
       setWorkspaceSheetVisible(false);
       setWorkspaceRefreshToken(token => token + 1);
     },
-    [ensureConversation, invalidatePendingProjectSend, persist, store],
+    [
+      destructiveSurfaceBlocked,
+      ensureConversation,
+      invalidatePendingProjectSend,
+      persist,
+      store,
+    ],
   );
 
   const chatInProject = useCallback(
     async (project: LocalProject) => {
-      if (projectChatTransitionInFlight.current) return;
+      if (
+        projectChatTransitionInFlight.current ||
+        !projectsVisibleRef.current ||
+        contextSheetVisibleRef.current ||
+        lifecycleIntentRef.current !== null ||
+        directProjectMutationOutboxRef.current !== null ||
+        store.getState().projectContextDestructiveTransition !== null
+      )
+        return;
       projectChatTransitionInFlight.current = true;
       let waitForDismiss = false;
       try {
+        const sourceSurfaceEpoch = projectsSurfaceEpoch.current;
         const current = selectActiveConversation(store.getState());
         const expectedSelectedId = current?.id ?? null;
+        if (directProjectMutationOutboxRef.current !== null) {
+          if (directProjectMutationView !== null) {
+            pendingDirectOpenAfterProjectsDismiss.current =
+              directProjectMutationView;
+            waitForDismiss = true;
+            setProjectsVisible(false);
+          }
+          return;
+        }
+        if (
+          current !== null &&
+          !projectContextLifecycleController.beforeConversationChange(
+            current.id,
+          )
+        ) {
+          const token = projectContextLifecycleController.getDestructiveToken();
+          if (token !== null) {
+            pendingExistingLifecycleAfterProjectsDismiss.current = token;
+            waitForDismiss = true;
+            setProjectsVisible(false);
+          }
+          return;
+        }
         if (
           current !== null &&
           !(await projectContextController.beforeConversationChange(current.id))
         ) {
           return;
         }
-        if (store.getState().selectedConversationId !== expectedSelectedId) return;
+        const afterContextGuard =
+          expectedSelectedId === null
+            ? null
+            : selectConversationById(store.getState(), expectedSelectedId);
+        if (
+          projectsSurfaceEpoch.current !== sourceSurfaceEpoch ||
+          store.getState().selectedConversationId !== expectedSelectedId ||
+          (current !== null &&
+            (afterContextGuard === null ||
+              afterContextGuard.projectId !== current.projectId ||
+              afterContextGuard.runtimeContextId !== current.runtimeContextId ||
+              afterContextGuard.modelId !== current.modelId ||
+              afterContextGuard.projectContext !== current.projectContext))
+        )
+          return;
         if (
           current !== null &&
           !(await completionController.beforeConversationChange(current.id))
         ) {
           return;
         }
-        if (store.getState().selectedConversationId !== expectedSelectedId) return;
+        const afterCompletionGuard =
+          expectedSelectedId === null
+            ? null
+            : selectConversationById(store.getState(), expectedSelectedId);
+        if (
+          projectsSurfaceEpoch.current !== sourceSurfaceEpoch ||
+          store.getState().selectedConversationId !== expectedSelectedId ||
+          (current !== null &&
+            (afterCompletionGuard === null ||
+              afterCompletionGuard.projectId !== current.projectId ||
+              afterCompletionGuard.runtimeContextId !==
+                current.runtimeContextId ||
+              afterCompletionGuard.modelId !== current.modelId ||
+              afterCompletionGuard.projectContext !== current.projectContext))
+        )
+          return;
         completionUiEpoch.current += 1;
         setRequestFailure(null);
+        let mutationPersisted = false;
         if (current?.projectId !== project.id) {
           invalidatePendingProjectSend();
-          if (current === null || current.messages.length > 0) {
+          if (
+            current === null ||
+            current.messages.length > 0 ||
+            current.projectContext?.snapshot !== null &&
+              current.projectContext?.snapshot !== undefined
+          ) {
             markAttachmentOperationStale();
             discardDraftAttachments();
             setDraft('');
@@ -2042,17 +3257,34 @@ export function HomeScreen() {
               projectId: project.id,
             });
           } else {
-            store.bindConversationToProject(current.id, project.id);
+            if (
+              !(await applyDirectProjectMutation(
+                'rebind',
+                current,
+                project.id,
+                project.name,
+              )) ||
+              directProjectMutationOutboxRef.current !== null
+            ) {
+              return;
+            }
+            mutationPersisted = true;
           }
         }
         setActiveProjectName(project.name);
         const selected = store.getState().selectedConversationId;
-        if (selected === null || !(await persist())) return;
+        if (
+          projectsSurfaceEpoch.current !== sourceSurfaceEpoch ||
+          selected === null ||
+          (!mutationPersisted && !(await persist()))
+        )
+          return;
         const selectedConversation = selectConversationById(
           store.getState(),
           selected,
         );
         if (
+          projectsSurfaceEpoch.current !== sourceSurfaceEpoch ||
           selectedConversation === null ||
           selectedConversation.projectId !== project.id
         ) {
@@ -2067,6 +3299,7 @@ export function HomeScreen() {
           uiEpoch,
         };
         waitForDismiss = true;
+        projectsVisibleRef.current = false;
         setProjectsVisible(false);
       } finally {
         if (!waitForDismiss) projectChatTransitionInFlight.current = false;
@@ -2074,17 +3307,63 @@ export function HomeScreen() {
     },
     [
       completionController,
+      applyDirectProjectMutation,
       discardDraftAttachments,
+      directProjectMutationView,
       invalidatePendingProjectSend,
       markAttachmentOperationStale,
       persist,
       preferencesStore,
       projectContextController,
+      projectContextLifecycleController,
       store,
     ],
   );
 
   const handleProjectsDismiss = useCallback(() => {
+    const direct = pendingDirectOpenAfterProjectsDismiss.current;
+    pendingDirectOpenAfterProjectsDismiss.current = null;
+    if (direct !== null) {
+      projectChatTransitionInFlight.current = false;
+      const live = directProjectMutationOutboxRef.current;
+      if (
+        live !== null &&
+        live.action === direct.action &&
+        live.conversationId === direct.conversationId &&
+        live.targetProjectId === direct.targetProjectId
+      ) {
+        setLifecycleSheetTargetId(direct.conversationId);
+        projectContextUiEpoch.current += 1;
+        contextSheetVisibleRef.current = true;
+        setContextSheetVisible(true);
+      }
+      return;
+    }
+    const existingLifecycle =
+      pendingExistingLifecycleAfterProjectsDismiss.current;
+    pendingExistingLifecycleAfterProjectsDismiss.current = null;
+    if (existingLifecycle !== null) {
+      projectChatTransitionInFlight.current = false;
+      if (
+        sameDestructiveToken(
+          existingLifecycle,
+          projectContextLifecycleController.getDestructiveToken(),
+        )
+      ) {
+        setLifecycleSheetTargetId(existingLifecycle.conversationId);
+        projectContextUiEpoch.current += 1;
+        contextSheetVisibleRef.current = true;
+        setContextSheetVisible(true);
+      }
+      return;
+    }
+    const lifecycle = pendingLifecycleOpenAfterProjectsDismiss.current;
+    pendingLifecycleOpenAfterProjectsDismiss.current = null;
+    if (lifecycle !== null) {
+      projectChatTransitionInFlight.current = false;
+      if (lifecycleIntentIsLive(lifecycle)) openLifecycleSheet(lifecycle);
+      return;
+    }
     const pending = pendingContextOpenAfterProjectsDismiss.current;
     pendingContextOpenAfterProjectsDismiss.current = null;
     if (pending === null) return;
@@ -2117,7 +3396,10 @@ export function HomeScreen() {
     pendingContextAttachAfterOpen.current = pending;
   }, [
     completionController,
+    lifecycleIntentIsLive,
+    openLifecycleSheet,
     projectContextNativeAvailable,
+    projectContextLifecycleController,
     store,
   ]);
 
@@ -2160,6 +3442,19 @@ export function HomeScreen() {
       selected.projectId === null ||
       selected.projectContext === null
     ) {
+      return;
+    }
+    const pendingLifecycle = lifecycleIntentRef.current;
+    const durableLifecycle =
+      store.getState().projectContextDestructiveTransition;
+    if (
+      pendingLifecycle?.conversationId === selected.id ||
+      durableLifecycle?.conversationId === selected.id
+    ) {
+      setLifecycleSheetTargetId(selected.id);
+      projectContextUiEpoch.current += 1;
+      contextSheetVisibleRef.current = true;
+      setContextSheetVisible(true);
       return;
     }
     const uiEpoch = ++projectContextUiEpoch.current;
@@ -2236,6 +3531,17 @@ export function HomeScreen() {
   };
 
   const closeProjectContextSheet = () => {
+    if (
+      lifecycleIntentRef.current !== null &&
+      store.getState().projectContextDestructiveTransition === null
+    ) {
+      lifecycleIntentNonce.current += 1;
+      lifecycleIntentRef.current = null;
+      setLifecycleIntent(null);
+      setLifecycleSheetTargetId(null);
+      lifecycleActionInFlight.current = false;
+      setRequestFailure(null);
+    }
     contextSheetVisibleRef.current = false;
     projectContextUiEpoch.current += 1;
     setContextSheetVisible(false);
@@ -2436,25 +3742,94 @@ export function HomeScreen() {
     ).catch(() => undefined);
   };
 
-  const unbindProjectFromConversation = useCallback(async () => {
+  const unbindProjectFromConversation = useCallback(async (
+    sourceSurfaceEpoch: number,
+  ) => {
+    if (
+      !projectsVisibleRef.current ||
+      projectsSurfaceEpoch.current !== sourceSurfaceEpoch ||
+      destructiveSurfaceBlocked()
+    ) {
+      return;
+    }
     const conversationId = store.getState().selectedConversationId;
     if (conversationId === null) return;
+    const conversation = selectConversationById(store.getState(), conversationId);
+    if (conversation === null || conversation.projectId === null) return;
+    const sourceIsLive = () => {
+      if (
+        !projectsVisibleRef.current ||
+        projectsSurfaceEpoch.current !== sourceSurfaceEpoch ||
+        destructiveSurfaceBlocked() ||
+        store.getState().selectedConversationId !== conversationId
+      ) {
+        return false;
+      }
+      const current = selectConversationById(store.getState(), conversationId);
+      return (
+        current !== null &&
+        current.projectId === conversation.projectId &&
+        current.runtimeContextId === conversation.runtimeContextId &&
+        current.modelId === conversation.modelId &&
+        current.projectContext === conversation.projectContext
+      );
+    };
+    if (!sourceIsLive()) return;
+    if (conversation.projectContext?.snapshot !== null &&
+        conversation.projectContext?.snapshot !== undefined) {
+      const intent = captureLifecycleIntent(conversationId, 'unbind');
+      if (!sourceIsLive()) return;
+      if (intent === null) {
+        const uiEpoch = ++projectContextUiEpoch.current;
+        pendingContextOpenAfterProjectsDismiss.current = {
+          conversationId,
+          projectId: conversation.projectId,
+          runtimeContextId: conversation.runtimeContextId,
+          modelId: conversation.modelId,
+          uiEpoch,
+        };
+        projectsSurfaceEpoch.current += 1;
+        projectsVisibleRef.current = false;
+        setProjectsVisible(false);
+        return;
+      }
+      lifecycleIntentRef.current = intent;
+      setLifecycleIntent(intent);
+      setLifecycleSheetTargetId(conversationId);
+      pendingLifecycleOpenAfterProjectsDismiss.current = intent;
+      projectsSurfaceEpoch.current += 1;
+      projectsVisibleRef.current = false;
+      setProjectsVisible(false);
+      return;
+    }
     if (
-      !(await completionController.beforeConversationChange(conversationId))
+      !(await projectContextController.beforeConversationChange(conversationId)) ||
+      !sourceIsLive()
+    ) {
+      return;
+    }
+    if (
+      !(await completionController.beforeConversationChange(conversationId)) ||
+      !sourceIsLive()
     ) {
       return;
     }
     completionUiEpoch.current += 1;
     invalidatePendingProjectSend();
     setRequestFailure(null);
-    store.unbindConversationFromProject(conversationId);
-    setActiveProjectName(null);
-    completionController.reconcileHydrated(conversationId);
-    await persist();
+    const beforeMutation = selectConversationById(
+      store.getState(),
+      conversationId,
+    );
+    if (beforeMutation === null) return;
+    await applyDirectProjectMutation('unbind', beforeMutation, null);
   }, [
+    applyDirectProjectMutation,
+    captureLifecycleIntent,
     completionController,
+    destructiveSurfaceBlocked,
     invalidatePendingProjectSend,
-    persist,
+    projectContextController,
     store,
   ]);
 
@@ -2501,39 +3876,141 @@ export function HomeScreen() {
             .then(() => {
               setCredentialConfigured(false);
               setProof(null);
-              setSettingsVisible(false);
+              closeSettingsSurface();
             })
             .catch(error => setRuntimeFailure(errorText(error)))
             .finally(() => setCredentialBusy(false));
         },
       },
     ]);
-  }, [t]);
+  }, [closeSettingsSurface, t]);
 
-  const openAfterDrawerDismiss = useCallback((open: () => void) => {
+  const openAfterDrawerDismiss = useCallback((
+    expectedEpoch: number,
+    open: () => void,
+  ) => {
+    if (!drawerSourceIsLive(expectedEpoch)) return;
     afterDrawerDismiss.current = open;
-    setDrawerVisible(false);
-  }, []);
+    closeDrawerSurface();
+  }, [closeDrawerSurface, drawerSourceIsLive]);
+
+  const openPendingLifecycleFromDrawer = useCallback(
+    (
+      expectedIntent: ProjectContextLifecycleIntent | null,
+      expectedToken: ProjectContextDestructiveToken | null,
+      expectedDirect: DirectProjectMutationView | null,
+      expectedDrawerEpoch: number,
+    ) => {
+      if (
+        !lifecycleBootstrapReadyRef.current ||
+        !drawerVisibleRef.current ||
+        drawerSurfaceEpoch.current !== expectedDrawerEpoch
+      )
+        return;
+      if (
+        expectedDirect !== null
+          ? directProjectMutationOutboxRef.current === null ||
+            directProjectMutationOutboxRef.current.action !==
+              expectedDirect.action ||
+            directProjectMutationOutboxRef.current.conversationId !==
+              expectedDirect.conversationId ||
+            directProjectMutationOutboxRef.current.targetProjectId !==
+              expectedDirect.targetProjectId
+          : expectedIntent !== null
+          ? !lifecycleIntentIsLive(expectedIntent)
+          : expectedToken === null ||
+            !sameDestructiveToken(
+              expectedToken,
+              projectContextLifecycleController.getDestructiveToken(),
+            )
+      ) {
+        return;
+      }
+      pendingLifecycleOpenAfterDrawerDismiss.current = {
+        intent: expectedIntent,
+        token: expectedToken,
+        direct: expectedDirect,
+      };
+      closeDrawerSurface();
+    },
+    [
+      closeDrawerSurface,
+      lifecycleIntentIsLive,
+      projectContextLifecycleController,
+    ],
+  );
 
   const handleDrawerDismiss = useCallback(() => {
+    const lifecycle = pendingLifecycleOpenAfterDrawerDismiss.current;
+    pendingLifecycleOpenAfterDrawerDismiss.current = null;
+    if (lifecycle !== null) {
+      const targetId =
+        lifecycle.direct?.conversationId ??
+        lifecycle.intent?.conversationId ??
+        lifecycle.token?.conversationId;
+      const live =
+        lifecycle.direct !== null
+          ? directProjectMutationOutboxRef.current !== null &&
+            directProjectMutationOutboxRef.current.action ===
+              lifecycle.direct.action &&
+            directProjectMutationOutboxRef.current.conversationId ===
+              lifecycle.direct.conversationId &&
+            directProjectMutationOutboxRef.current.targetProjectId ===
+              lifecycle.direct.targetProjectId
+          : lifecycle.intent !== null
+          ? lifecycleIntentIsLive(lifecycle.intent)
+          : lifecycle.token !== null &&
+            sameDestructiveToken(
+              lifecycle.token,
+              projectContextLifecycleController.getDestructiveToken(),
+            );
+      if (live && targetId !== undefined) {
+        setLifecycleSheetTargetId(targetId);
+        projectContextUiEpoch.current += 1;
+        contextSheetVisibleRef.current = true;
+        setContextSheetVisible(true);
+      }
+      return;
+    }
     const open = afterDrawerDismiss.current;
     afterDrawerDismiss.current = null;
+    if (
+      !lifecycleBootstrapReadyRef.current ||
+      contextSheetVisibleRef.current ||
+      lifecycleIntentRef.current !== null ||
+      directProjectMutationOutboxRef.current !== null ||
+      store.getState().projectContextDestructiveTransition !== null
+    ) {
+      return;
+    }
     open?.();
-  }, []);
+  }, [lifecycleIntentIsLive, projectContextLifecycleController, store]);
 
   const handleActionDismiss = useCallback(() => {
     const open = afterActionDismiss.current;
     afterActionDismiss.current = null;
+    if (
+      !lifecycleBootstrapReadyRef.current ||
+      contextSheetVisibleRef.current ||
+      lifecycleIntentRef.current !== null ||
+      directProjectMutationOutboxRef.current !== null ||
+      store.getState().projectContextDestructiveTransition !== null
+    ) {
+      return;
+    }
     open?.();
-  }, []);
+  }, [store]);
 
-  const openRuntimeFromDrawer = useCallback(() => {
-    openAfterDrawerDismiss(() => setEvidenceVisible(true));
+  const openRuntimeFromDrawer = useCallback((expectedEpoch: number) => {
+    openAfterDrawerDismiss(expectedEpoch, () => setEvidenceVisible(true));
   }, [openAfterDrawerDismiss]);
 
   const openConversationActions = useCallback(
-    (id: string) => {
-      openAfterDrawerDismiss(() => setActionConversationId(id));
+    (id: string, expectedEpoch: number) => {
+      openAfterDrawerDismiss(expectedEpoch, () => {
+        conversationActionEpoch.current += 1;
+        setActionConversationId(id);
+      });
     },
     [openAfterDrawerDismiss],
   );
@@ -2544,9 +4021,15 @@ export function HomeScreen() {
       : selectConversationById(chatState, actionConversationId);
   const navigationSurfaceVisible =
     drawerVisible ||
+    actionConversation !== null ||
     settingsVisible ||
     accountVisible ||
     mirrorsVisible ||
+    modelVisible ||
+    composerOptionsVisible ||
+    workspaceSheetVisible ||
+    harnessesVisible ||
+    evidenceVisible ||
     projectsVisible ||
     workspaceVisible ||
     contextSheetVisible;
@@ -2577,7 +4060,12 @@ export function HomeScreen() {
         <View style={styles.topBar}>
           <RoundButton
             accessibilityLabel={t('home.openNavigation')}
-            onPress={() => setDrawerVisible(true)}
+            onPress={() => {
+              if (!rootSurfaceAdmissionAllowed(true)) return;
+              drawerSurfaceEpoch.current += 1;
+              drawerVisibleRef.current = true;
+              setDrawerVisible(true);
+            }}
           >
             <AppIcon color={colors.text} icon={Menu} size={20} />
           </RoundButton>
@@ -2595,7 +4083,10 @@ export function HomeScreen() {
           ) : (
             <RoundButton
               accessibilityLabel={t('home.showRuntimeEvidence')}
-              onPress={() => setEvidenceVisible(true)}
+              onPress={() => {
+                if (!rootSurfaceAdmissionAllowed()) return;
+                setEvidenceVisible(true);
+              }}
             >
               <View style={styles.runtimeGlyph}>
                 <View
@@ -2623,7 +4114,7 @@ export function HomeScreen() {
         </View>
 
         {activeMessages.length === 0 ? (
-          <EmptyChat onSuggestion={setDraft} />
+          <EmptyChat onSuggestion={changeDraft} />
         ) : (
           <MessageList
             autoExpandTools={preferences.autoExpandTools}
@@ -2688,7 +4179,10 @@ export function HomeScreen() {
             accessibilityRole="button"
             accessibilityState={{ busy: runtimeStatus === 'checking' }}
             hitSlop={hitSlop}
-            onPress={() => setEvidenceVisible(true)}
+            onPress={() => {
+              if (!rootSurfaceAdmissionAllowed()) return;
+              setEvidenceVisible(true);
+            }}
             style={({ pressed }) => [
               styles.proofChip,
               pressed && styles.pressed,
@@ -2761,6 +4255,12 @@ export function HomeScreen() {
             onConfigure={openSettings}
             onOptionsPress={openComposerOptions}
             onWorkspacePress={() => {
+              if (
+                !rootSurfaceAdmissionAllowed() ||
+                completionBusy(completionController.getState())
+              ) {
+                return;
+              }
               setWorkspaceSheetVisible(true);
             }}
             onPreviewAttachment={(id, ownershipKey) => {
@@ -2778,34 +4278,62 @@ export function HomeScreen() {
         activeId={chatState.selectedConversationId}
         conversations={conversationSummaries}
         covered={settingsVisible || accountVisible || mirrorsVisible}
+        pendingProjectCleanup={
+          lifecycleSheetActive &&
+          (lifecycleTargetId !== chatState.selectedConversationId ||
+            (directProjectMutationView !== null &&
+              activeConversation?.projectId === null))
+        }
         runtimeLabel={runtimeLabel}
         runtimeStatus={runtimeStatus}
         visible={drawerVisible}
-        onClose={() => setDrawerVisible(false)}
+        onClose={closeDrawerSurface}
         onDismiss={handleDrawerDismiss}
-        onNewChat={createConversation}
-        onOpenAccount={() => setAccountVisible(true)}
-        onOpenConversationMenu={openConversationActions}
+        onNewChat={() => createConversation(drawerRenderEpoch)}
+        onOpenAccount={() => {
+          if (!drawerSourceIsLive(drawerRenderEpoch)) return;
+          setAccountVisible(true);
+        }}
+        onOpenConversationMenu={id =>
+          openConversationActions(id, drawerRenderEpoch)
+        }
         onOpenFiles={() =>
-          openAfterDrawerDismiss(() => {
+          openAfterDrawerDismiss(drawerRenderEpoch, () => {
             setProjectFilesScope(null);
             setWorkspaceVisible(true);
           })
         }
         onOpenProjects={() =>
-          openAfterDrawerDismiss(() => setProjectsVisible(true))
+          openAfterDrawerDismiss(drawerRenderEpoch, () => {
+            projectsSurfaceEpoch.current += 1;
+            projectsVisibleRef.current = true;
+            setProjectsVisible(true);
+          })
+        }
+        onOpenPendingProjectCleanup={() =>
+          openPendingLifecycleFromDrawer(
+            lifecycleIntent,
+            lifecycleToken,
+            directProjectMutationView,
+            drawerRenderEpoch,
+          )
         }
         onOpenHarnesses={() =>
-          openAfterDrawerDismiss(() => setHarnessesVisible(true))
+          openAfterDrawerDismiss(drawerRenderEpoch, () =>
+            setHarnessesVisible(true),
+          )
         }
-        onOpenRuntime={openRuntimeFromDrawer}
-        onOpenSettings={openSettings}
-        onSelect={selectConversation}
+        onOpenRuntime={() => openRuntimeFromDrawer(drawerRenderEpoch)}
+        onOpenSettings={() => openSettingsFromDrawer(drawerRenderEpoch)}
+        onSelect={id => selectConversation(id, drawerRenderEpoch)}
       />
       <ConversationActionSheet
         title={actionConversation?.title ?? ''}
         visible={actionConversation !== null}
-        onClose={() => setActionConversationId(null)}
+        onClose={() => {
+          conversationActionEpoch.current += 1;
+          setActionConversationId(null);
+        }}
         onDelete={requestDeleteConversation}
         onDismiss={handleActionDismiss}
         onRename={renameConversation}
@@ -2819,21 +4347,30 @@ export function HomeScreen() {
         runtimeLabel={runtimeLabel}
         runtimeStatus={runtimeStatus}
         visible={settingsVisible}
-        onClearCredential={clearCredential}
-        onClose={() => setSettingsVisible(false)}
+        onClearCredential={() => {
+          if (!settingsSourceIsLive(settingsRenderEpoch)) return;
+          clearCredential();
+        }}
+        onClose={closeSettingsSurface}
         onDismiss={() => undefined}
-        onConfigureCredential={() =>
-          configureCredential().catch(() => undefined)
-        }
+        onConfigureCredential={() => {
+          if (!settingsSourceIsLive(settingsRenderEpoch)) return;
+          configureCredential().catch(() => undefined);
+        }}
         onOpenModelPicker={() => {
-          if (projectContextOwnsMutation(projectContextController.getState())) {
-            return;
-          }
+          if (!settingsSourceIsLive(settingsRenderEpoch)) return;
           setModelVisible(true);
         }}
-        onOpenMirrors={() => setMirrorsVisible(true)}
-        onOpenRuntime={() => setEvidenceVisible(true)}
+        onOpenMirrors={() => {
+          if (!settingsSourceIsLive(settingsRenderEpoch)) return;
+          setMirrorsVisible(true);
+        }}
+        onOpenRuntime={() => {
+          if (!settingsSourceIsLive(settingsRenderEpoch)) return;
+          setEvidenceVisible(true);
+        }}
         onPreferencesChanged={() => {
+          if (!settingsSourceIsLive(settingsRenderEpoch)) return;
           persist().catch(() => undefined);
         }}
       />
@@ -2907,16 +4444,25 @@ export function HomeScreen() {
         visible={projectsVisible}
         onChatInProject={chatInProject}
         onClose={() => {
-          if (!projectChatTransitionInFlight.current) {
-            setProjectsVisible(false);
-          }
+          projectsSurfaceEpoch.current += 1;
+          projectContextUiEpoch.current += 1;
+          projectsVisibleRef.current = false;
+          pendingContextOpenAfterProjectsDismiss.current = null;
+          pendingContextAttachAfterOpen.current = null;
+          pendingExistingLifecycleAfterProjectsDismiss.current = null;
+          pendingLifecycleOpenAfterProjectsDismiss.current = null;
+          pendingDirectOpenAfterProjectsDismiss.current = null;
+          setProjectsVisible(false);
         }}
         onDismiss={handleProjectsDismiss}
         onOpenFiles={project => {
+          if (!projectsVisibleRef.current || destructiveSurfaceBlocked()) return;
           setProjectFilesScope(project);
           setWorkspaceVisible(true);
         }}
-        onUnbindFromChat={unbindProjectFromConversation}
+        onUnbindFromChat={() =>
+          unbindProjectFromConversation(projectsRenderEpoch)
+        }
       />
       <ProjectContextSheet
         actionKey={projectContextActionKey}
@@ -2929,7 +4475,9 @@ export function HomeScreen() {
         checking={projectContextVerificationStatus === 'checking'}
         confirmationRequired={projectContextConfirmationRequired}
         disabled={
-          projectContextSheetMode === 'recovery'
+          projectContextSheetMode === 'lifecycle'
+            ? lifecycleActionInFlight.current
+            : projectContextSheetMode === 'recovery'
             ? projectContextRecoveryGloballyDisabled
             : projectContextActionsDisabled
         }
@@ -2951,6 +4499,7 @@ export function HomeScreen() {
           projectContextOwnerAligned &&
           projectContextControllerState.list.loadingMore
         }
+        lifecycle={lifecyclePresentation}
         manifest={projectContextManifest}
         mode={projectContextSheetMode}
         nextCursor={
@@ -2959,9 +4508,13 @@ export function HomeScreen() {
             : null
         }
         projectName={
-          activeProjectName ??
-          activeConversation?.projectContext?.snapshot?.project_name ??
-          activeConversation?.projectId ??
+          lifecycleSheetActive
+            ? lifecycleTargetConversation?.projectContext?.snapshot
+                ?.project_name ??
+              t('context.sheet.lifecycle.localProject')
+            : activeProjectName ??
+              activeConversation?.projectContext?.snapshot?.project_name ??
+              activeConversation?.projectId ??
           ''
         }
         query={
@@ -3007,7 +4560,10 @@ export function HomeScreen() {
           invalidatePendingProjectSend();
           closeProjectContextSheet();
         }}
-        onClose={closeProjectContextSheet}
+        onClose={() => {
+          if (projectContextUiEpoch.current !== projectContextRenderEpoch) return;
+          closeProjectContextSheet();
+        }}
         onConfirm={() => {
           const token = projectContextActionToken;
           if (token === null) return;
@@ -3028,6 +4584,12 @@ export function HomeScreen() {
             true,
             () => projectContextController.confirm(token),
           );
+        }}
+        onConfirmLifecycle={() => {
+          confirmLifecycleIntent(
+            lifecycleIntent,
+            projectContextRenderEpoch,
+          ).catch(() => undefined);
         }}
         onDisable={() => {
           const token = projectContextActionToken;
@@ -3104,6 +4666,22 @@ export function HomeScreen() {
             false,
             () => projectContextController.retryCleanup(token),
           );
+        }}
+        onRetryLifecycleCleanup={token => {
+          retryLifecycleCleanup(token, projectContextRenderEpoch).catch(
+            () => undefined,
+          );
+        }}
+        onRetryLifecyclePersistence={token => {
+          retryLifecyclePersistence(token, projectContextRenderEpoch).catch(
+            () => undefined,
+          );
+        }}
+        onRetryDirectPersistence={() => {
+          retryDirectProjectMutationPersistence(
+            directProjectMutationView,
+            projectContextRenderEpoch,
+          ).catch(() => undefined);
         }}
         onRetryPersistence={() => {
           const token = projectContextActionToken;

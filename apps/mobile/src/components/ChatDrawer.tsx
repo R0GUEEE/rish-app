@@ -8,6 +8,7 @@ import Ellipsis from 'lucide-react-native/icons/ellipsis';
 import FolderKanban from 'lucide-react-native/icons/folder-kanban';
 import FolderOpen from 'lucide-react-native/icons/folder-open';
 import Plus from 'lucide-react-native/icons/plus';
+import RefreshCw from 'lucide-react-native/icons/refresh-cw';
 import Search from 'lucide-react-native/icons/search';
 import Settings from 'lucide-react-native/icons/settings';
 import X from 'lucide-react-native/icons/x';
@@ -45,6 +46,7 @@ type Props = {
   runtimeStatus: RuntimeVerificationStatus;
   covered: boolean;
   visible: boolean;
+  pendingProjectCleanup: boolean;
   onClose: () => void;
   onDismiss: () => void;
   onNewChat: () => void;
@@ -52,6 +54,7 @@ type Props = {
   onOpenAccount: () => void;
   onOpenFiles: () => void;
   onOpenProjects: () => void;
+  onOpenPendingProjectCleanup: () => void;
   onOpenHarnesses: () => void;
   onOpenRuntime: () => void;
   onOpenSettings: () => void;
@@ -167,6 +170,13 @@ export function ChatDrawer(props: Props) {
         </View>
 
         <View style={styles.utilityRows}>
+          {props.pendingProjectCleanup && (
+            <UtilityRow
+              icon={RefreshCw}
+              label={t('drawer.pendingProjectCleanup')}
+              onPress={props.onOpenPendingProjectCleanup}
+            />
+          )}
           <UtilityRow
             icon={FolderKanban}
             label={t('drawer.projects')}
@@ -412,15 +422,24 @@ const createStyles = (colors: ThemePalette) =>
     },
     utilityRows: { marginTop: 18, gap: 5 },
     utilityRow: {
-      height: 46,
+      minHeight: 46,
       borderRadius: 13,
       flexDirection: 'row',
       alignItems: 'center',
       paddingHorizontal: 12,
+      paddingVertical: 9,
     },
     utilityIcon: { width: 26 },
-    utilityLabel: { color: colors.textDim, fontSize: 14, fontWeight: '600' },
-    utilityArrow: { marginLeft: 'auto' },
+    utilityLabel: {
+      flex: 1,
+      flexShrink: 1,
+      minWidth: 0,
+      color: colors.textDim,
+      fontSize: 14,
+      lineHeight: 20,
+      fontWeight: '600',
+    },
+    utilityArrow: { marginLeft: 8, flexShrink: 0 },
     sectionHeader: {
       flexDirection: 'row',
       alignItems: 'center',

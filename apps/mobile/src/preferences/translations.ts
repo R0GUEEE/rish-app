@@ -64,6 +64,7 @@ const enUS = {
   'drawer.searchConversations': 'Search conversations',
   'drawer.searchPlaceholder': 'Search chats',
   'drawer.projects': 'Projects',
+  'drawer.pendingProjectCleanup': 'Pending project cleanup',
   'drawer.runtimeProof': 'Runtime proof',
   'drawer.files': 'Files',
   'drawer.harnesses': 'Harnesses',
@@ -194,6 +195,37 @@ const enUS = {
   'context.sheet.disclosure.omitted': 'Omitted content',
   'context.sheet.disclosure.budget': 'Context budget',
   'context.sheet.disclosure.digest': 'Snapshot digest',
+  'context.sheet.lifecycle.title': 'Project cleanup',
+  'context.sheet.lifecycle.close': 'Close project cleanup',
+  'context.sheet.lifecycle.localProject': 'Local project',
+  'context.sheet.lifecycle.confirm.unbind': 'Disable context and unbind',
+  'context.sheet.lifecycle.confirm.delete': 'Delete chat',
+  'context.sheet.lifecycle.confirm.rebind': 'Rebind',
+  'context.sheet.lifecycle.body.unbind':
+    'Rish will remove this chat’s local project context, then unbind the project.',
+  'context.sheet.lifecycle.body.delete':
+    'Rish will remove this chat’s local project context, then delete the chat.',
+  'context.sheet.lifecycle.body.rebind':
+    'Rish will remove this chat’s current local project context, then bind it to {project}.',
+  'context.sheet.lifecycle.status.resuming':
+    'Restoring pending project cleanup…',
+  'context.sheet.lifecycle.status.saving': 'Saving project cleanup…',
+  'context.sheet.lifecycle.status.cleaning':
+    'Cleaning local project context…',
+  'context.sheet.lifecycle.status.finalizing':
+    'Finishing project change…',
+  'context.sheet.lifecycle.error.persistence':
+    'Project cleanup was not saved. Retry to continue.',
+  'context.sheet.lifecycle.error.cleanup':
+    'Local project cleanup did not finish. Retry to continue.',
+  'context.sheet.lifecycle.error.busy':
+    'Another operation must finish before this project change can continue.',
+  'context.sheet.lifecycle.error.referenced':
+    'This project context is still used by a pending response.',
+  'context.sheet.lifecycle.error.conflict':
+    'This chat changed. Close this sheet and try again.',
+  'context.sheet.lifecycle.error.safe':
+    'This project change cannot continue safely.',
 
   'messages.conversationLabel': 'Conversation messages',
   'messages.role.you': 'YOU',
@@ -685,6 +717,7 @@ const zhCN: Readonly<Record<TranslationKey, string>> = {
   'drawer.searchConversations': '搜索对话',
   'drawer.searchPlaceholder': '搜索对话',
   'drawer.projects': '项目',
+  'drawer.pendingProjectCleanup': '待完成的项目清理',
   'drawer.runtimeProof': '运行证明',
   'drawer.files': '文件',
   'drawer.harnesses': 'Harness',
@@ -813,6 +846,33 @@ const zhCN: Readonly<Record<TranslationKey, string>> = {
   'context.sheet.disclosure.omitted': '省略内容',
   'context.sheet.disclosure.budget': '上下文预算',
   'context.sheet.disclosure.digest': '快照摘要',
+  'context.sheet.lifecycle.title': '项目清理',
+  'context.sheet.lifecycle.close': '关闭项目清理',
+  'context.sheet.lifecycle.localProject': '本地项目',
+  'context.sheet.lifecycle.confirm.unbind': '停用上下文并解除绑定',
+  'context.sheet.lifecycle.confirm.delete': '删除对话',
+  'context.sheet.lifecycle.confirm.rebind': '重新绑定',
+  'context.sheet.lifecycle.body.unbind':
+    'Rish 会先清理此对话的本地项目上下文，再解除项目绑定。',
+  'context.sheet.lifecycle.body.delete':
+    'Rish 会先清理此对话的本地项目上下文，再删除对话。',
+  'context.sheet.lifecycle.body.rebind':
+    'Rish 会先清理此对话当前的本地项目上下文，再绑定到“{project}”。',
+  'context.sheet.lifecycle.status.resuming': '正在恢复待处理的项目清理…',
+  'context.sheet.lifecycle.status.saving': '正在保存项目清理进度…',
+  'context.sheet.lifecycle.status.cleaning': '正在清理本地项目上下文…',
+  'context.sheet.lifecycle.status.finalizing': '正在完成项目变更…',
+  'context.sheet.lifecycle.error.persistence':
+    '项目清理进度尚未保存，请重试后继续。',
+  'context.sheet.lifecycle.error.cleanup':
+    '本地项目上下文尚未清理完成，请重试后继续。',
+  'context.sheet.lifecycle.error.busy':
+    '另一项操作完成后才能继续此项目变更。',
+  'context.sheet.lifecycle.error.referenced':
+    '待处理的回复仍在使用此项目上下文。',
+  'context.sheet.lifecycle.error.conflict':
+    '此对话已变化，请关闭后重试。',
+  'context.sheet.lifecycle.error.safe': '无法安全继续此项目变更。',
 
   'messages.conversationLabel': '对话消息',
   'messages.role.you': '你',

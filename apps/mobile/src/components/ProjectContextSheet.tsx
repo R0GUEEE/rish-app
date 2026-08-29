@@ -12,6 +12,7 @@ import {
   FlatList,
   findNodeHandle,
   Pressable,
+  ScrollView,
   StyleSheet,
   Text,
   TextInput,
@@ -24,9 +25,13 @@ import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import type {
   ProjectContextCandidatePageV1,
   ProjectContextControllerErrorCode,
+  ProjectContextDestructiveErrorCode,
+  ProjectContextDestructiveToken,
+  ProjectContextLifecycleControllerState,
   ProjectContextManifestV1,
   ProjectContextOmissionReason,
 } from '../project-context';
+import type { ProjectContextDestructiveAction } from '../state';
 import { useAppPresentation } from '../presentation/AppPresentation';
 import { fonts, hitSlop, type ThemePalette } from '../theme';
 import { AppIcon } from './AppIcon';
@@ -37,7 +42,8 @@ export type ProjectContextSheetFilter = 'all' | 'selected' | 'changed';
 export type ProjectContextSheetMode =
   | 'candidates'
   | 'disclosure'
-  | 'recovery';
+  | 'recovery'
+  | 'lifecycle';
 export type ProjectContextSheetBusyAction =
   | 'prepare'
   | 'confirm'
@@ -50,6 +56,21 @@ export type ProjectContextSheetRecoveryAction =
   | null;
 
 type Candidate = ProjectContextCandidatePageV1['candidates'][number];
+const canonicalUuidPattern =
+  /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/u;
+
+export type ProjectContextSheetLifecyclePresentation =
+  | {
+      readonly kind: 'confirmation' | 'transition';
+      readonly action: ProjectContextDestructiveAction;
+      readonly controllerState: ProjectContextLifecycleControllerState;
+      readonly targetProjectLabel: string | null;
+    }
+  | {
+      readonly kind: 'direct_persistence';
+      readonly action: ProjectContextDestructiveAction;
+      readonly targetProjectLabel: string | null;
+    };
 
 export type ProjectContextSheetProps = {
   readonly visible: boolean;
@@ -75,6 +96,7 @@ export type ProjectContextSheetProps = {
   readonly recoverySendWithoutDisabled: boolean;
   readonly disabled: boolean;
   readonly busyAction: ProjectContextSheetBusyAction;
+  readonly lifecycle: ProjectContextSheetLifecyclePresentation | null;
   readonly onQueryChange: (query: string) => void;
   readonly onFilterChange: (filter: ProjectContextSheetFilter) => void;
   readonly onTogglePath: (path: string) => void;
@@ -92,6 +114,14 @@ export type ProjectContextSheetProps = {
   readonly onRefreshAndSend: () => void;
   readonly onSendWithoutContext: () => void;
   readonly onDismiss: () => void;
+  readonly onConfirmLifecycle: () => void;
+  readonly onRetryLifecyclePersistence: (
+    token: ProjectContextDestructiveToken,
+  ) => void;
+  readonly onRetryLifecycleCleanup: (
+    token: ProjectContextDestructiveToken,
+  ) => void;
+  readonly onRetryDirectPersistence: () => void;
 };
 
 type DisclosureRow =
@@ -116,6 +146,30 @@ function formatItemBytes(bytes: number): string {
   }
   const value = bytes / (1024 * 1024);
   return `${Number.isInteger(value) ? String(value) : value.toFixed(1)} MB`;
+}
+
+function safeLifecycleProjectLabel(value: string | null): string | null {
+  let invalidCharacter = false;
+  if (value !== null) {
+    for (let index = 0; index < value.length; index += 1) {
+      const code = value.charCodeAt(index);
+      if (code <= 0x1f || code === 0x7f || value[index] === '/' || value[index] === '\\') {
+        invalidCharacter = true;
+        break;
+      }
+    }
+  }
+  if (
+    value === null ||
+    value.length === 0 ||
+    value.length > 120 ||
+    value.trim() !== value ||
+    canonicalUuidPattern.test(value) ||
+    invalidCharacter
+  ) {
+    return null;
+  }
+  return value;
 }
 
 function formatBudgetBytes(bytes: number): string {
@@ -194,6 +248,97 @@ function controllerErrorKey(code: ProjectContextControllerErrorCode) {
   }
 }
 
+function lifecycleErrorKey(code: ProjectContextDestructiveErrorCode) {
+  switch (code) {
+    case 'E_CONTEXT_PERSISTENCE':
+      return 'context.sheet.lifecycle.error.persistence' as const;
+    case 'E_CONTEXT_TRANSITION_BUSY':
+      return 'context.sheet.lifecycle.error.busy' as const;
+    case 'E_CONTEXT_TRANSITION_REFERENCED':
+      return 'context.sheet.lifecycle.error.referenced' as const;
+    case 'E_CONTEXT_TRANSITION_CONFLICT':
+      return 'context.sheet.lifecycle.error.conflict' as const;
+    case 'E_CONTEXT_TIMEOUT':
+    case 'E_CONTEXT_STORAGE':
+    case 'E_CONTEXT_SNAPSHOT_MISSING':
+      return 'context.sheet.lifecycle.error.cleanup' as const;
+    default:
+      return 'context.sheet.lifecycle.error.safe' as const;
+  }
+}
+
+function validLifecyclePresentation(
+  value: ProjectContextSheetLifecyclePresentation | null,
+): value is ProjectContextSheetLifecyclePresentation {
+  if (value === null) return false;
+  if (
+    value.action !== 'unbind' &&
+    value.action !== 'delete' &&
+    value.action !== 'rebind'
+  ) {
+    return false;
+  }
+  if (
+    value.action === 'rebind'
+      ? value.targetProjectLabel === null ||
+        value.targetProjectLabel.trim().length === 0
+      : value.targetProjectLabel !== null
+  ) {
+    return false;
+  }
+  if (value.kind === 'direct_persistence') return true;
+  const state = value.controllerState;
+  if (value.kind === 'confirmation') {
+    return (
+      state.phase === 'idle' &&
+      state.token === null &&
+      state.failureCode === null &&
+      state.pendingPersistence === null
+    );
+  }
+  const token = state.token;
+  if (
+    token === null ||
+    token.action !== value.action ||
+    token.generation !== state.generation ||
+    (value.action === 'rebind' && token.targetProjectId === null)
+  ) {
+    return false;
+  }
+  if (state.pendingPersistence === 'intent') {
+    return (
+      state.phase === 'intent_persistence_pending' &&
+      token.phase === 'intent'
+    );
+  }
+  if (state.pendingPersistence === 'tombstone') {
+    return (
+      state.phase === 'tombstone_persistence_pending' &&
+      (token.phase === 'intent' || token.phase === 'cleanup_pending')
+    );
+  }
+  if (state.pendingPersistence === 'ready_to_finalize') {
+    return (
+      state.phase === 'ready_persistence_pending' &&
+      (token.phase === 'cleanup_pending' ||
+        token.phase === 'ready_to_finalize')
+    );
+  }
+  if (state.pendingPersistence === 'finalize') {
+    return (
+      state.phase === 'finalize_persistence_pending' &&
+      token.phase === 'ready_to_finalize'
+    );
+  }
+  return (
+    (state.phase === 'cleanup_pending' && token.phase === 'cleanup_pending') ||
+    (state.phase === 'ready_to_finalize' &&
+      token.phase === 'ready_to_finalize') ||
+    state.phase === 'resuming' ||
+    state.phase === 'blocked'
+  );
+}
+
 function selectedCandidateSummary(props: ProjectContextSheetProps) {
   const selected = new Set(props.selectedPaths);
   const seen = new Set<string>();
@@ -247,6 +392,11 @@ export function ProjectContextSheet(props: ProjectContextSheetProps) {
   const titlePresented = useRef(false);
   const titleFocused = useRef(false);
   const renderActionKey = props.actionKey;
+  const displayedProjectName =
+    props.mode === 'lifecycle'
+      ? safeLifecycleProjectLabel(props.projectName) ??
+        t('context.sheet.lifecycle.localProject')
+      : props.projectName;
   latest.current = props;
   const currentForAction = (): ProjectContextSheetProps | null => {
     const current = latest.current;
@@ -465,6 +615,64 @@ export function ProjectContextSheet(props: ProjectContextSheetProps) {
       !current.recoverySendWithoutDisabled
     ) {
       current.onSendWithoutContext();
+    }
+  };
+  const handleConfirmLifecycle = () => {
+    const current = currentForAction();
+    if (
+      current !== null &&
+      current.mode === 'lifecycle' &&
+      validLifecyclePresentation(current.lifecycle) &&
+      current.lifecycle.kind === 'confirmation' &&
+      !current.disabled
+    ) {
+      current.onConfirmLifecycle();
+    }
+  };
+  const handleRetryLifecyclePersistence = () => {
+    const current = currentForAction();
+    if (
+      current !== null &&
+      current.mode === 'lifecycle' &&
+      validLifecyclePresentation(current.lifecycle) &&
+      current.lifecycle.kind === 'transition' &&
+      current.lifecycle.controllerState.pendingPersistence !== null &&
+      current.lifecycle.controllerState.token !== null &&
+      !current.disabled
+    ) {
+      current.onRetryLifecyclePersistence(
+        current.lifecycle.controllerState.token,
+      );
+    }
+  };
+  const handleRetryLifecycleCleanup = () => {
+    const current = currentForAction();
+    if (
+      current !== null &&
+      current.mode === 'lifecycle' &&
+      validLifecyclePresentation(current.lifecycle) &&
+      current.lifecycle.kind === 'transition' &&
+      current.lifecycle.controllerState.phase === 'cleanup_pending' &&
+      current.lifecycle.controllerState.pendingPersistence === null &&
+      current.lifecycle.controllerState.failureCode !== null &&
+      current.lifecycle.controllerState.token !== null &&
+      !current.disabled
+    ) {
+      current.onRetryLifecycleCleanup(
+        current.lifecycle.controllerState.token,
+      );
+    }
+  };
+  const handleRetryDirectPersistence = () => {
+    const current = currentForAction();
+    if (
+      current !== null &&
+      current.mode === 'lifecycle' &&
+      validLifecyclePresentation(current.lifecycle) &&
+      current.lifecycle.kind === 'direct_persistence' &&
+      !current.disabled
+    ) {
+      current.onRetryDirectPersistence();
     }
   };
   const handleDismiss = () => latest.current.onDismiss();
@@ -859,10 +1067,147 @@ export function ProjectContextSheet(props: ProjectContextSheetProps) {
     </View>
   );
 
+  const lifecycleBody = (() => {
+    const lifecycle = props.lifecycle;
+    if (!validLifecyclePresentation(lifecycle)) {
+      return (
+        <ScrollView
+          contentContainerStyle={[
+            styles.lifecycleContent,
+            { paddingBottom: insets.bottom + 14 },
+          ]}
+        >
+          <Text
+            accessibilityLiveRegion="polite"
+            accessibilityRole="alert"
+            style={styles.error}
+          >
+            {t('context.sheet.lifecycle.error.safe')}
+          </Text>
+        </ScrollView>
+      );
+    }
+    if (lifecycle.kind === 'direct_persistence') {
+      return (
+        <ScrollView
+          contentContainerStyle={[
+            styles.lifecycleContent,
+            { paddingBottom: insets.bottom + 14 },
+          ]}
+        >
+          <Text
+            accessibilityLiveRegion="polite"
+            accessibilityRole="alert"
+            style={styles.error}
+          >
+            {t('context.sheet.lifecycle.error.persistence')}
+          </Text>
+          <View style={[styles.actions, { paddingBottom: insets.bottom + 14 }]}>
+            {actionButton(
+              t('context.sheet.retryPersistence'),
+              handleRetryDirectPersistence,
+              { disabled: props.disabled, icon: RefreshCw },
+            )}
+          </View>
+        </ScrollView>
+      );
+    }
+    if (lifecycle.kind === 'confirmation') {
+      const bodyKey =
+        lifecycle.action === 'unbind'
+          ? 'context.sheet.lifecycle.body.unbind'
+          : lifecycle.action === 'delete'
+            ? 'context.sheet.lifecycle.body.delete'
+            : 'context.sheet.lifecycle.body.rebind';
+      const confirmKey =
+        lifecycle.action === 'unbind'
+          ? 'context.sheet.lifecycle.confirm.unbind'
+          : lifecycle.action === 'delete'
+            ? 'context.sheet.lifecycle.confirm.delete'
+            : 'context.sheet.lifecycle.confirm.rebind';
+      return (
+        <ScrollView
+          contentContainerStyle={[
+            styles.lifecycleContent,
+            { paddingBottom: insets.bottom + 14 },
+          ]}
+        >
+          <Text style={styles.disclosure}>
+            {t(bodyKey, {
+              project:
+                safeLifecycleProjectLabel(lifecycle.targetProjectLabel) ??
+                t('context.sheet.lifecycle.localProject'),
+            })}
+          </Text>
+          <View style={[styles.actions, { paddingBottom: insets.bottom + 14 }]}>
+            {actionButton(t(confirmKey), handleConfirmLifecycle, {
+              disabled: props.disabled,
+              danger: true,
+              icon: ShieldOff,
+            })}
+          </View>
+        </ScrollView>
+      );
+    }
+    const controller = lifecycle.controllerState;
+    const error =
+      controller.failureCode === null
+        ? null
+        : t(lifecycleErrorKey(controller.failureCode));
+    const status =
+      controller.phase === 'resuming'
+        ? t('context.sheet.lifecycle.status.resuming')
+        : controller.pendingPersistence !== null
+          ? t('context.sheet.lifecycle.status.saving')
+          : controller.phase === 'cleanup_pending'
+            ? t('context.sheet.lifecycle.status.cleaning')
+            : t('context.sheet.lifecycle.status.finalizing');
+    return (
+      <ScrollView
+        contentContainerStyle={[
+          styles.lifecycleContent,
+          { paddingBottom: insets.bottom + 14 },
+        ]}
+      >
+        <Text
+          accessibilityLiveRegion="polite"
+          accessibilityRole={error === null ? 'status' : 'alert'}
+          style={error === null ? styles.notice : styles.error}
+        >
+          {error ?? status}
+        </Text>
+        <View style={[styles.actions, { paddingBottom: insets.bottom + 14 }]}>
+          {controller.pendingPersistence !== null &&
+            actionButton(
+              t('context.sheet.retryPersistence'),
+              handleRetryLifecyclePersistence,
+              { disabled: props.disabled, icon: RefreshCw },
+            )}
+          {controller.phase === 'cleanup_pending' &&
+            controller.pendingPersistence === null &&
+            controller.failureCode !== null &&
+            actionButton(
+              t('context.sheet.retryCleanup'),
+              handleRetryLifecycleCleanup,
+              { disabled: props.disabled, icon: RefreshCw },
+            )}
+        </View>
+      </ScrollView>
+    );
+  })();
+
   return (
     <SlidingSurface
-      accessibilityLabel={t('context.sheet.title')}
-      closeAccessibilityLabel={t('context.sheet.close')}
+      accessibilityLabel={t(
+        props.mode === 'lifecycle'
+          ? 'context.sheet.lifecycle.title'
+          : 'context.sheet.title',
+      )}
+      closeAccessibilityLabel={t(
+        props.mode === 'lifecycle'
+          ? 'context.sheet.lifecycle.close'
+          : 'context.sheet.close',
+      )}
       onClose={handleClose}
       onDismiss={handleDismiss}
       onPresented={handlePresented}
@@ -882,12 +1227,22 @@ export function ProjectContextSheet(props: ProjectContextSheetProps) {
               onLayout={handleTitleLayout}
               testID="project-context-sheet-title"
             >
-              <Text style={styles.title}>{t('context.sheet.title')}</Text>
+              <Text style={styles.title}>
+                {t(
+                  props.mode === 'lifecycle'
+                    ? 'context.sheet.lifecycle.title'
+                    : 'context.sheet.title',
+                )}
+              </Text>
             </View>
-            <Text style={styles.project}>{props.projectName}</Text>
+            <Text style={styles.project}>{displayedProjectName}</Text>
           </View>
           <Pressable
-            accessibilityLabel={t('context.sheet.close')}
+            accessibilityLabel={t(
+              props.mode === 'lifecycle'
+                ? 'context.sheet.lifecycle.close'
+                : 'context.sheet.close',
+            )}
             accessibilityRole="button"
             hitSlop={hitSlop}
             onPress={handleClose}
@@ -908,7 +1263,9 @@ export function ProjectContextSheet(props: ProjectContextSheetProps) {
             {t('context.sheet.checking')}
           </Text>
         )}
-        {props.mode === 'recovery' ? (
+        {props.mode === 'lifecycle' ? (
+          lifecycleBody
+        ) : props.mode === 'recovery' ? (
           recoveryBody
         ) : props.mode === 'candidates' ? (
           <FlatList<Candidate>
@@ -988,6 +1345,11 @@ const createStyles = (colors: ThemePalette) =>
     },
     recoveryBody: {
       flex: 1,
+      paddingHorizontal: 18,
+      paddingTop: 14,
+    },
+    lifecycleContent: {
+      flexGrow: 1,
       paddingHorizontal: 18,
       paddingTop: 14,
     },
