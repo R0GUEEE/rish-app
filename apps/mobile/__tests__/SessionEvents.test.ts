@@ -1,5 +1,10 @@
 import {
+  MAX_SESSION_EVENT_LOG_SIZE,
+  SESSION_EVENTS_SNAPSHOT_KEY,
   SESSION_EVENT_SCHEMA_VERSION,
+  appendSessionEventBounded,
+  attachSessionEventsToSnapshot,
+  extractSessionEventsFromSnapshot,
   hydrateSessionEvents,
   recordSessionEvent,
   replayAssistantTurn,
@@ -145,3 +150,86 @@ test('tool rows require their ids; reasoning rows tolerate empty text', () => {
     ]),
   ).toThrow(/outcome/);
 });
+test('hydration rejects rows that lost their schema_version', () => {
+  const row = baseAttemptEvent() as Record<string, unknown>;
+  delete row.schema_version;
+  expect(() => hydrateSessionEvents([row])).toThrow(/schema_version/);
+});
+
+test('bounded append caps the log at the newest events in order', () => {
+  let log: readonly SessionEventV1[] = [];
+  const total = MAX_SESSION_EVENT_LOG_SIZE + 7;
+  for (let index = 0; index < total; index += 1) {
+    log = appendSessionEventBounded(log, {
+      ...baseAttemptEvent({ event_id: 'e' + index, seq: index }),
+    });
+  }
+  expect(log).toHaveLength(MAX_SESSION_EVENT_LOG_SIZE);
+  expect(log[0]?.event_id).toBe('e7');
+  expect(log[log.length - 1]?.event_id).toBe('e' + (total - 1));
+  expect(log.every((event, index) => event.seq === index + 7)).toBe(true);
+});
+
+test('bounded append validates the row and rejects a bad cap', () => {
+  expect(() =>
+    appendSessionEventBounded(
+      [],
+      baseAttemptEvent({ kind: 'not-a-kind' as never }),
+    ),
+  ).toThrow(/kind/);
+  expect(() =>
+    appendSessionEventBounded([], baseAttemptEvent(), 0),
+  ).toThrow(/maxEvents/);
+});
+
+test('snapshot attach/extract round-trips through the session document', () => {
+  const snapshot: Record<string, unknown> = { chats: 'payload' };
+  const events: SessionEventV1[] = [
+    baseAttemptEvent(),
+    baseAttemptEvent({
+      event_id: 'e2',
+      seq: 1,
+      kind: 'assistant_text',
+      text: 'answer',
+    }),
+  ];
+  const attached = attachSessionEventsToSnapshot(snapshot, events);
+  const serialized = JSON.parse(JSON.stringify(attached)) as unknown;
+  const recovered = extractSessionEventsFromSnapshot(serialized);
+  expect(recovered).toEqual(events);
+  expect(attached[SESSION_EVENTS_SNAPSHOT_KEY]).toHaveLength(2);
+});
+
+test('attach omits an invalid log instead of blocking session persistence', () => {
+  const snapshot: Record<string, unknown> = { chats: 'payload' };
+  const bad = [
+    baseAttemptEvent({
+      kind: 'tool_call',
+      tool_call_id: undefined as never,
+    }),
+  ];
+  const attached = attachSessionEventsToSnapshot(
+    snapshot,
+    bad as unknown as SessionEventV1[],
+  );
+  expect(attached).toBe(snapshot);
+});
+
+test('extract discards absent or corrupted trajectory data fail-closed', () => {
+  expect(extractSessionEventsFromSnapshot(null)).toBeNull();
+  expect(extractSessionEventsFromSnapshot('nope')).toBeNull();
+  expect(extractSessionEventsFromSnapshot([1, 2])).toBeNull();
+  expect(extractSessionEventsFromSnapshot({})).toBeNull();
+  expect(
+    extractSessionEventsFromSnapshot({
+      session_events: 'not-an-array',
+    }),
+  ).toBeNull();
+  const malformed = JSON.parse(
+    JSON.stringify([{ schema_version: 1, event_id: '' }]),
+  ) as unknown;
+  expect(
+    extractSessionEventsFromSnapshot({ session_events: malformed }),
+  ).toBeNull();
+});
+

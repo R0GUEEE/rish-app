@@ -95,7 +95,13 @@ test('executes read-only tools then reports outcomes back in the follow-up round
   );
   const callRow = (deps.emitSessionEvent as jest.Mock).mock.calls.find(
     call => (call[0] as { kind: string }).kind === 'tool_call',
-  )?.[0] as { tool_call_id?: string; tool_name?: string; arguments_json?: string };
+  )?.[0] as {
+    schema_version?: number;
+    tool_call_id?: string;
+    tool_name?: string;
+    arguments_json?: string;
+  };
+  expect(callRow.schema_version).toBe(1);
   expect(callRow.tool_call_id).toBe('c1');
   expect(callRow.tool_name).toBe('read_file');
   expect(callRow.arguments_json).toBe('{"path":"a"}');

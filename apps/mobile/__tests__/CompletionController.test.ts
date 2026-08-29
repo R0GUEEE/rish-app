@@ -1341,6 +1341,10 @@ test('completing a round emits reasoning before text session events', async () =
   expect(events.map(e => e.seq)).toEqual(
     events.map((_, i) => i),
   );
+  // Every emitted row must conform to the persisted session-event schema.
+  expect(
+    events.every(e => (e as { schema_version?: unknown }).schema_version === 1),
+  ).toBe(true);
   const textIdx = kinds.indexOf('assistant_text');
   const reasoningIdx = kinds.indexOf('assistant_reasoning');
   if (reasoningIdx !== -1) {

@@ -5,6 +5,7 @@ import type {
   CompleteRoundV3Result,
   CompletionVisibleMessageV2,
 } from './types';
+import { SESSION_EVENT_SCHEMA_VERSION } from '../agent/SessionEvents';
 import type { SessionDurabilityResult } from './SessionPersistence';
 import {
   ATTEMPT_FAILURE_CODES,
@@ -82,6 +83,7 @@ export type CompletionControllerDependencies = {
    * unless asserted.
    */
   onSessionEvent?: (event: {
+    schema_version: typeof SESSION_EVENT_SCHEMA_VERSION;
     event_id: string;
     attempt_id: string;
     seq: number;
@@ -287,6 +289,7 @@ export function createCompletionController(
     if (dependencies.onSessionEvent === undefined) return;
     try {
       dependencies.onSessionEvent({
+        schema_version: SESSION_EVENT_SCHEMA_VERSION,
         event_id: `${attemptId}-${sessionEventSeq}`,
         attempt_id: attemptId,
         seq: sessionEventSeq,

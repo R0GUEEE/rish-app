@@ -86,6 +86,12 @@ import {
   createSessionPersistenceCoordinator,
   type SessionDurabilityResult,
 } from '../completion/SessionPersistence';
+import {
+  appendSessionEventBounded,
+  attachSessionEventsToSnapshot,
+  extractSessionEventsFromSnapshot,
+  type SessionEventV1,
+} from '../agent/SessionEvents';
 import { readRuntimeEvidence } from '../runtime/evidence';
 import { LocalProjects, type LocalProject } from '../native/LocalProjects';
 import { LocalProjectContext } from '../native/LocalProjectContext';
@@ -829,8 +835,12 @@ export function HomeScreen() {
         snapshot.preferences = JSON.parse(
           preferencesStore.serialize(),
         ) as unknown;
+        const withEvents = attachSessionEventsToSnapshot(
+          snapshot,
+          sessionEventLogRef.current,
+        );
         const result = await sessionPersistence.write(
-          JSON.stringify(snapshot),
+          JSON.stringify(withEvents),
         );
         if (result.status === 'committed') {
           setStorageWarning(null);
@@ -860,16 +870,7 @@ export function HomeScreen() {
 
   const persistCurrentRef = useRef(persistCurrent);
   persistCurrentRef.current = persistCurrent;
-  const sessionEventLogRef = useRef<
-    ReadonlyArray<{
-      event_id: string;
-      attempt_id: string;
-      seq: number;
-      kind: string;
-      created_at: string;
-      text: string;
-    }>
-  >([]);
+  const sessionEventLogRef = useRef<readonly SessionEventV1[]>([]);
 
   const completionController = useMemo(
     () =>
@@ -877,13 +878,13 @@ export function HomeScreen() {
         chat: store,
         persistCurrent: () => persistCurrentRef.current(),
         onSessionEvent: event => {
-          // Durable trajectory capture: appended to the in-memory log which
-          // hydrates the replay surface; persistence rides the existing
-          // session store on the next persist pass.
-          sessionEventLogRef.current = [
-            ...sessionEventLogRef.current,
+          // Durable trajectory capture: appended (bounded) to the log,
+          // persisted with the session snapshot on the next persist pass,
+          // and restored on startup from the same snapshot.
+          sessionEventLogRef.current = appendSessionEventBounded(
+            sessionEventLogRef.current,
             event,
-          ];
+          );
         },
         completeRoundV2: request =>
           DshHarnessAdapter.completeRoundV2(request),
@@ -1081,6 +1082,10 @@ export function HomeScreen() {
           if (savedPreferences !== undefined) {
             const result = safeHydrateAppPreferences(savedPreferences);
             if (result.ok) preferencesStore.hydrate(savedPreferences);
+          }
+          const savedEvents = extractSessionEventsFromSnapshot(decoded);
+          if (savedEvents !== null) {
+            sessionEventLogRef.current = savedEvents;
           }
         }
       } catch {

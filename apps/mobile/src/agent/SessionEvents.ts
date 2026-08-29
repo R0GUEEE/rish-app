@@ -149,3 +149,74 @@ export function replayAssistantTurn(
     .slice()
     .sort((left, right) => left.seq - right.seq);
 }
+
+/**
+ * Upper bound for one session's trajectory log. The log rides the session
+ * document (16 MiB budget), so it must stay bounded instead of growing
+ * with every completed round.
+ */
+export const MAX_SESSION_EVENT_LOG_SIZE = 512 as const;
+
+export const SESSION_EVENTS_SNAPSHOT_KEY = 'session_events' as const;
+
+/**
+ * Appends one validated event and drops the oldest rows beyond the cap.
+ * Unlike recordSessionEvent, the session-wide log intentionally mixes
+ * attempts (one log per session, replay filters by attempt_id), so only
+ * per-row validation applies here — not per-attempt sequencing.
+ */
+export function appendSessionEventBounded(
+  log: readonly SessionEventV1[],
+  event: SessionEventV1,
+  maxEvents: number = MAX_SESSION_EVENT_LOG_SIZE,
+): readonly SessionEventV1[] {
+  validate(event);
+  if (!Number.isSafeInteger(maxEvents) || maxEvents <= 0) {
+    throw new SessionEventValidationError(
+      'maxEvents must be a positive safe integer',
+    );
+  }
+  const next = [...log, event];
+  if (next.length <= maxEvents) return next;
+  return next.slice(next.length - maxEvents);
+}
+
+/**
+ * Attaches the trajectory log to a session snapshot for persistence.
+ * Fail-closed: an invalid in-memory log is silently omitted so a broken
+ * trajectory can never block the session document from being saved.
+ */
+export function attachSessionEventsToSnapshot(
+  snapshot: Record<string, unknown>,
+  log: readonly SessionEventV1[],
+): Record<string, unknown> {
+  try {
+    hydrateSessionEvents(log);
+  } catch {
+    return snapshot;
+  }
+  return { ...snapshot, [SESSION_EVENTS_SNAPSHOT_KEY]: log };
+}
+
+/**
+ * Recovers the trajectory log from a persisted snapshot.
+ * Returns null when the key is absent or the stored rows are malformed —
+ * corrupted trajectory data is discarded fail-closed instead of throwing
+ * during app startup.
+ */
+export function extractSessionEventsFromSnapshot(
+  snapshot: unknown,
+): readonly SessionEventV1[] | null {
+  if (typeof snapshot !== 'object' || snapshot === null) return null;
+  if (Array.isArray(snapshot)) return null;
+  const raw = (snapshot as Record<string, unknown>)[
+    SESSION_EVENTS_SNAPSHOT_KEY
+  ];
+  if (raw === undefined) return null;
+  if (!Array.isArray(raw)) return null;
+  try {
+    return hydrateSessionEvents(raw);
+  } catch {
+    return null;
+  }
+}

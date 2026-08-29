@@ -5,6 +5,7 @@ import {
   type AgentLoopState,
   type AgentTraceRow,
 } from './AgentLoop';
+import { SESSION_EVENT_SCHEMA_VERSION } from './SessionEvents';
 import { digestForText } from './AgentTools';
 
 /**
@@ -55,6 +56,7 @@ export type RunAgentTurnDeps = {
   ) => void;
   /** Appends one durable SessionEvent row for this attempt. */
   emitSessionEvent?: (event: {
+    schema_version: typeof SESSION_EVENT_SCHEMA_VERSION;
     event_id: string;
     attempt_id: string;
     seq: number;
@@ -124,12 +126,13 @@ export async function runAgentTurn(
   const emitEvent = (
     event: Omit<
       Parameters<NonNullable<RunAgentTurnDeps['emitSessionEvent']>>[0],
-      'event_id' | 'attempt_id' | 'seq' | 'created_at'
+      'schema_version' | 'event_id' | 'attempt_id' | 'seq' | 'created_at'
     >,
   ): void => {
     if (deps.emitSessionEvent === undefined) return;
     deps.emitSessionEvent({
       ...event,
+      schema_version: SESSION_EVENT_SCHEMA_VERSION,
       event_id: `${attemptId}-${eventSeq}`,
       attempt_id: attemptId,
       seq: eventSeq,
