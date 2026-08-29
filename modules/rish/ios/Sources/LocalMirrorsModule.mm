@@ -1,3 +1,5 @@
+#import "DSHGuestRuntimeState.h"
+
 #import <Foundation/Foundation.h>
 #import <React/RCTBridgeModule.h>
 
@@ -150,11 +152,18 @@ RCT_EXPORT_MODULE(LocalMirrors)
   }
 
   NSString *stagedAt = [[NSISO8601DateFormatter new] stringFromDate:[NSDate date]];
+  // guest_runtime_mounted reflects the shared registry: YES only while a
+  // LocalGuestModule session is genuinely booted. It does NOT mean the staged
+  // overlay below reached the guest — the interpreter has no block-device
+  // injection, so staged_config_enters_guest stays false until a real mount
+  // path exists (see docs/mobile-guest-runtime.md).
   NSDictionary *receipt = @{
     @"schema_version": @1,
     @"status": @"staged",
     @"staged_at": stagedAt,
-    @"guest_runtime_mounted": @NO,
+    @"guest_runtime_mounted":
+        @([[DSHGuestRuntimeState sharedState] guestRuntimeMounted]),
+    @"staged_config_enters_guest": @NO,
     @"root": @"rish-guest-overlay",
     @"entries": @[alpine, pip, npm],
   };
