@@ -860,11 +860,31 @@ export function HomeScreen() {
 
   const persistCurrentRef = useRef(persistCurrent);
   persistCurrentRef.current = persistCurrent;
+  const sessionEventLogRef = useRef<
+    ReadonlyArray<{
+      event_id: string;
+      attempt_id: string;
+      seq: number;
+      kind: string;
+      created_at: string;
+      text: string;
+    }>
+  >([]);
+
   const completionController = useMemo(
     () =>
       createCompletionController({
         chat: store,
         persistCurrent: () => persistCurrentRef.current(),
+        onSessionEvent: event => {
+          // Durable trajectory capture: appended to the in-memory log which
+          // hydrates the replay surface; persistence rides the existing
+          // session store on the next persist pass.
+          sessionEventLogRef.current = [
+            ...sessionEventLogRef.current,
+            event,
+          ];
+        },
         completeRoundV2: request =>
           DshHarnessAdapter.completeRoundV2(request),
         completeRoundV3: request =>
