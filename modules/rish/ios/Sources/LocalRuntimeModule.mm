@@ -1,3 +1,4 @@
+#import <React/RCTEventEmitter.h>
 #import "DSHCompletionV2.h"
 #import "LocalAttachmentStore.h"
 #import "ModelTransitionProof.h"
@@ -584,7 +585,9 @@ static BOOL DSHCanConnectToMacProxy(void) {
   return connected;
 }
 
-@interface LocalRuntimeModule : NSObject <RCTBridgeModule, NSURLSessionTaskDelegate>
+@interface LocalRuntimeModule : RCTEventEmitter <NSURLSessionTaskDelegate>
+@property(nonatomic, assign) NSUInteger streamObserverCount;
+@property(nonatomic, readonly) BOOL hasStreamingObservers;
 @property(nonatomic, strong) dispatch_queue_t stateQueue;
 @property(nonatomic, strong) NSURLSession *modelSession;
 @property(nonatomic, strong) NSURLSessionDataTask *activeCompletionTask;
@@ -611,6 +614,22 @@ static BOOL DSHCanConnectToMacProxy(void) {
 @implementation LocalRuntimeModule
 
 RCT_EXPORT_MODULE(LocalRuntime)
+
+- (NSArray<NSString *> *)supportedEvents {
+  return @[ @"completionStream" ];
+}
+
+- (void)startObserving {
+  @synchronized(self) { _streamObserverCount += 1; }
+}
+
+- (void)stopObserving {
+  @synchronized(self) { _streamObserverCount = _streamObserverCount > 0 ? _streamObserverCount - 1 : 0; }
+}
+
+- (BOOL)hasStreamingObservers {
+  @synchronized(self) { return _streamObserverCount > 0; }
+}
 
 + (BOOL)requiresMainQueueSetup {
   return NO;
@@ -1184,6 +1203,13 @@ RCT_EXPORT_MODULE(LocalRuntime)
     return nil;
   }
 
+  // The rish applet rejects sandbox roots whose path traverses a symbolic
+  // link. On hardware the container's visible path goes through /var (a
+  // symlink to /private/var), so hand the applet the fully resolved
+  // physical path instead of the visible one.
+  NSURL *resolvedWorkspace = [NSURL fileURLWithPath:
+      [workspace.path stringByResolvingSymlinksInPath] isDirectory:YES];
+
   NSData *stdinData = [@"dsh-mobile-local-proof" dataUsingEncoding:NSUTF8StringEncoding];
   NSMutableArray<NSNumber *> *stdinBytes = [NSMutableArray arrayWithCapacity:stdinData.length];
   const uint8_t *bytes = static_cast<const uint8_t *>(stdinData.bytes);
@@ -1192,7 +1218,7 @@ RCT_EXPORT_MODULE(LocalRuntime)
   }
   NSDictionary *request = @{
     @"protocol_version": @1,
-    @"sandbox_root": workspace.path,
+    @"sandbox_root": resolvedWorkspace.path,
     @"read_only": @NO,
     @"user": @"dsh-mobile",
     @"hostname": @"ios-simulator",
@@ -2391,6 +2417,18 @@ RCT_REMAP_METHOD(complete,
     }
     [task resume];
   });
+}
+
+RCT_REMAP_METHOD(completeV2Stream,
+                 completeV2StreamEnvelopeJSON:(NSString *)envelopeJSON
+                 resolver:(RCTPromiseResolveBlock)resolve
+                 rejecter:(RCTPromiseRejectBlock)reject) {
+  // Streaming variant: same envelope contract as completeV2, but the
+  // transport requests SSE and emits "completionStream" events
+  // {request_id, delta:{content|reasoning|finish_reason}} while running.
+  // The promise resolves with the assembled result (identical shape to
+  // completeV2) once the stream finishes; parsing stays fail-closed.
+  reject(@"stream", @"Streaming transport is not wired to a session delegate yet", nil);
 }
 
 RCT_REMAP_METHOD(completeV2,
