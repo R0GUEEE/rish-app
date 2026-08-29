@@ -43,6 +43,12 @@ static DSHStreamDelta * _Nullable DSHDecodeEventLines(
   if ([data isEqualToString:@"[DONE]"]) {
     return @{@"type": @"done"};
   }
+  // Blank data (e.g. a bare "data: " keep-alive) is a legal SSE no-op,
+  // not a JSON decode failure.
+  if ([[data stringByTrimmingCharactersInSet:
+      NSCharacterSet.whitespaceAndNewlineCharacterSet] length] == 0) {
+    return nil;
+  }
   NSData *json = [data dataUsingEncoding:NSUTF8StringEncoding];
   if (json == nil) {
     if (error != nil) {
@@ -129,6 +135,14 @@ static DSHStreamDelta * _Nullable DSHDecodeEventLines(
     NSData *lineData = [NSData dataWithBytes:base length:lineLength];
     NSString *line = [[NSString alloc] initWithData:lineData
                                            encoding:NSUTF8StringEncoding];
+    if (line == nil) {
+      // Fail closed: an undecodable line must never be mistaken for a
+      // blank line (nil.length == 0) or silently dropped.
+      if (error != nil) {
+        *error = DSHStreamError(2101, @"SSE line is not valid UTF-8");
+      }
+      return nil;
+    }
     // Strip a trailing CR from CRLF transports.
     if ([line hasSuffix:@"\r"]) {
       line = [line substringToIndex:line.length - 1];
@@ -157,6 +171,15 @@ static DSHStreamDelta * _Nullable DSHDecodeEventLines(
       continue;
     }
     if ([line hasPrefix:@"data:"]) {
+      // Enforce the buffered-line cap as lines accumulate, not only when
+      // the terminating blank line finally arrives: an unterminated event
+      // must not grow the line buffer without bound.
+      if (self.eventLines.count >= (NSUInteger)DSHStreamMaxBufferedLines) {
+        if (error != nil) {
+          *error = DSHStreamError(2105, @"SSE event has too many lines");
+        }
+        return nil;
+      }
       NSString *payload = [line substringFromIndex:5];
       if ([payload hasPrefix:@" "]) payload = [payload substringFromIndex:1];
       [self.eventLines addObject:payload];
@@ -177,16 +200,21 @@ static DSHStreamDelta * _Nullable DSHDecodeEventLines(
   self.finished = YES;
   NSMutableArray<DSHStreamDelta *> *deltas = [NSMutableArray array];
   if (self.pending.length > 0) {
-    // Tolerate one unterminated final line.
+    // Tolerate one unterminated final line — but never silently drop
+    // bytes that are not valid UTF-8: fail closed instead.
     NSString *line = [[NSString alloc] initWithData:self.pending
                                            encoding:NSUTF8StringEncoding];
-    if (line != nil) {
-      if ([line hasSuffix:@"\r"]) line = [line substringToIndex:line.length - 1];
-      if ([line hasPrefix:@"data:"]) {
-        NSString *payload = [line substringFromIndex:5];
-        if ([payload hasPrefix:@" "]) payload = [payload substringFromIndex:1];
-        [self.eventLines addObject:payload];
+    if (line == nil) {
+      if (error != nil) {
+        *error = DSHStreamError(2101, @"SSE trailing bytes are not valid UTF-8");
       }
+      return nil;
+    }
+    if ([line hasSuffix:@"\r"]) line = [line substringToIndex:line.length - 1];
+    if ([line hasPrefix:@"data:"]) {
+      NSString *payload = [line substringFromIndex:5];
+      if ([payload hasPrefix:@" "]) payload = [payload substringFromIndex:1];
+      [self.eventLines addObject:payload];
     }
     self.pending = [NSMutableData data];
   }

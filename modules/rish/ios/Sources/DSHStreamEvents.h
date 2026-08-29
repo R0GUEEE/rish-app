@@ -9,6 +9,10 @@ NS_ASSUME_NONNULL_BEGIN
 extern const NSInteger DSHStreamMaxLineBytes;
 extern const NSInteger DSHStreamMaxBufferedLines;
 
+/// Error domain for all parser errors (2101 invalid UTF-8, 2102 not a JSON
+/// object, 2103 already finished, 2104 oversized line, 2105 too many lines).
+extern NSString * const DSHStreamEventErrorDomain;
+
 /// A parsed streaming delta emitted to JS.
 typedef NSDictionary<NSString *, id> DSHStreamDelta;
 

@@ -147,6 +147,63 @@
   XCTAssertEqual(deltas.count, 0u);
 }
 
+
+- (void)testUnterminatedEventWithTooManyDataLinesFailsClosed {
+  DSHStreamEventParser *parser = [self parser];
+  // An event that never sends its blank-line terminator must not grow the
+  // line buffer without bound: the cap is enforced while lines accumulate.
+  NSMutableString *stream = [NSMutableString string];
+  for (NSInteger index = 0;
+      index < DSHStreamMaxBufferedLines + 2; index += 1) {
+    [stream appendFormat:@"data: {\"line\":%ld}\n", (long)index];
+  }
+  const char *c = stream.UTF8String;
+  NSError *error = nil;
+  XCTAssertNil([parser appendBytes:(const uint8_t *)c length:strlen(c)
+                              error:&error]);
+  XCTAssertNotNil(error);
+  XCTAssertEqual(error.domain, DSHStreamEventErrorDomain);
+  XCTAssertEqual(error.code, 2105);
+}
+
+- (void)testInvalidUTF8LineFailsClosedInsteadOfEndingTheEvent {
+  DSHStreamEventParser *parser = [self parser];
+  // 0xFF is never valid UTF-8; it must error out rather than being
+  // mistaken for a blank line (nil string) that terminates the event.
+  const uint8_t bytes[] = {'d', 'a', 't', 'a', ':', ' ', 0xFF, 0xFE, '\n', '\n'};
+  NSError *error = nil;
+  XCTAssertNil([parser appendBytes:bytes length:sizeof(bytes) error:&error]);
+  XCTAssertNotNil(error);
+  XCTAssertEqual(error.code, 2101);
+}
+
+- (void)testFinishFailsClosedOnUndecodableTrailingBytes {
+  DSHStreamEventParser *parser = [self parser];
+  // Trailing bytes without a newline that are not valid UTF-8 must error
+  // instead of being silently dropped.
+  const uint8_t bytes[] = {'d', 'a', 't', 'a', ':', ' ', 0xC3};
+  NSError *error = nil;
+  XCTAssertEqual([parser appendBytes:bytes length:sizeof(bytes) error:&error].count,
+                 0u);
+  XCTAssertNil(error);
+  error = nil;
+  XCTAssertNil([parser finish:&error]);
+  XCTAssertNotNil(error);
+  XCTAssertEqual(error.code, 2101);
+}
+
+- (void)testBlankDataKeepAliveIsANoOp {
+  DSHStreamEventParser *parser = [self parser];
+  NSString *stream = @"data: \n\ndata: {\"choices\":[{\"delta\":{\"content\":\"x\"}}]}\n\n";
+  const char *c = stream.UTF8String;
+  NSError *error = nil;
+  NSArray *deltas = [parser appendBytes:(const uint8_t *)c length:strlen(c)
+                                  error:&error];
+  XCTAssertNil(error);
+  XCTAssertEqual(deltas.count, 1u);
+  XCTAssertEqualObjects(deltas.firstObject[@"content"], @"x");
+}
+
 - (void)testResetAllowsReuse {
   DSHStreamEventParser *parser = [self parser];
   NSString *event = [self contentDeltaJson:@"one"];
