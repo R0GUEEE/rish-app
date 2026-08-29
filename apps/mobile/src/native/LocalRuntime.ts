@@ -205,6 +205,7 @@ type NativeLocalRuntime = {
   persistSession(json: string): Promise<boolean>;
   loadSession(): Promise<string | null>;
   completeV2?(envelopeJSON: string): Promise<unknown>;
+  completeV2Stream?(envelopeJSON: string): Promise<unknown>;
   recordAgentTrace?(
     entries: readonly AgentTraceProofEntry[],
   ): Promise<{ recorded: number }>;
@@ -365,6 +366,49 @@ export const LocalRuntime = {
       | Partial<NativeLocalRuntime>
       | undefined;
     return typeof module?.recordAgentTrace === 'function';
+  },
+  isStreamingAvailable: () => {
+    const module = NativeModules.LocalRuntime as
+      | Partial<NativeLocalRuntime>
+      | undefined;
+    return typeof module?.completeV2Stream === 'function';
+  },
+  completeV2Stream: async (
+    request: CompleteV2Request,
+  ): Promise<CompleteV2Result> => {
+    const nativeModule = required() as NativeLocalRuntime & {
+      completeV2Stream?: (envelopeJSON: string) => Promise<Record<string, unknown>>;
+    };
+    if (typeof nativeModule.completeV2Stream !== 'function') {
+      throw new Error('completeV2Stream native method is not linked');
+    }
+    const envelope = JSON.stringify({
+      schema_version: 1,
+      model: request.model,
+      request_id: request.requestId,
+      thinking_mode: request.thinkingMode,
+      history: request.history,
+      tools: request.tools ?? [],
+    });
+    const raw = await nativeModule.completeV2Stream(envelope);
+    return raw as unknown as CompleteV2Result;
+  },
+  addStreamingListener: (
+    listener: (event: {
+      request_id: string;
+      delta: {
+        type: 'delta' | 'done';
+        content?: string;
+        reasoning?: string;
+        finish_reason?: string;
+      };
+    }) => void,
+  ) => {
+    const { NativeEventEmitter } =
+      require('react-native') as typeof import('react-native');
+    const emitter = new NativeEventEmitter(NativeModules.LocalRuntime);
+    const subscription = emitter.addListener('completionStream', listener as (payload: unknown) => void);
+    return { remove: () => subscription.remove() };
   },
   recordAgentTrace: async (
     entries: readonly AgentTraceProofEntry[],

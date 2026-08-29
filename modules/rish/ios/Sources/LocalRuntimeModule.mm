@@ -1,5 +1,6 @@
 #import <React/RCTEventEmitter.h>
 #import "DSHCompletionV2.h"
+#import "DSHStreamEvents.h"
 #import "LocalAttachmentStore.h"
 #import "ModelTransitionProof.h"
 #import "ProjectContextService.h"
@@ -587,6 +588,14 @@ static BOOL DSHCanConnectToMacProxy(void) {
 
 @interface LocalRuntimeModule : RCTEventEmitter <NSURLSessionTaskDelegate>
 @property(nonatomic, assign) NSUInteger streamObserverCount;
+@property(nonatomic, strong) DSHStreamEventParser *streamParser;
+@property(nonatomic, copy) NSString *streamRequestId;
+@property(nonatomic, strong) NSMutableString *streamContent;
+@property(nonatomic, strong) NSMutableString *streamReasoning;
+@property(nonatomic, copy) NSString *streamFinishReason;
+@property(nonatomic, copy) void (^streamCompletion)(NSArray<NSDictionary *> * _Nullable, NSError * _Nullable);
+@property(nonatomic, copy) NSString *streamRequestedModel;
+@property(nonatomic, copy) NSString *streamThinkingMode;
 @property(nonatomic, readonly) BOOL hasStreamingObservers;
 @property(nonatomic, strong) dispatch_queue_t stateQueue;
 @property(nonatomic, strong) NSURLSession *modelSession;
@@ -2428,7 +2437,210 @@ RCT_REMAP_METHOD(completeV2Stream,
   // {request_id, delta:{content|reasoning|finish_reason}} while running.
   // The promise resolves with the assembled result (identical shape to
   // completeV2) once the stream finishes; parsing stays fail-closed.
-  reject(@"stream", @"Streaming transport is not wired to a session delegate yet", nil);
+  NSError *envelopeDecodeError = nil;
+  NSData *envelopeData =
+      [envelopeJSON dataUsingEncoding:NSUTF8StringEncoding];
+  NSDictionary *envelope = DSHDictionary(
+      [NSJSONSerialization JSONObjectWithData:envelopeData options:0
+                                        error:&envelopeDecodeError]);
+  if (envelope == nil ||
+      ![envelope[@"schema_version"] isEqual:@(kDSHCompletionEnvelopeVersion)]) {
+    reject(@"request",
+           @"CompletionV2 envelope must be an object with schema_version 1", nil);
+    return;
+  }
+  NSString *requestedModel = DSHString(envelope[@"model"]);
+  NSString *requestId = DSHString(envelope[@"request_id"]);
+  NSString *thinkingMode = DSHString(envelope[@"thinking_mode"]);
+  NSArray *history = DSHArray(envelope[@"history"]);
+  if (!DSHIsSupportedModel(requestedModel) ||
+      !DSHIsValidRequestId(requestId) ||
+      !DSHIsThinkingMode(thinkingMode)) {
+    reject(@"validation", @"Streaming envelope fields are invalid", nil);
+    return;
+  }
+  NSError *validationError = nil;
+  NSArray<NSDictionary *> *proofMessages = nil;
+  NSArray<NSDictionary *> *messages = [self validatedMessagesFromHistory:history
+                                                                    model:requestedModel
+                                                            proofMessages:&proofMessages
+                                                                    error:&validationError];
+  if (messages == nil) {
+    reject(@"history", validationError.localizedDescription, validationError);
+    return;
+  }
+  NSArray *tools = DSHCompletionToolsV2FromArray(
+      DSHArray(envelope[@"tools"]), &validationError);
+  if (tools == nil) {
+    reject(@"tools", validationError.localizedDescription, validationError);
+    return;
+  }
+  __block NSString *apiKey = nil;
+  @synchronized(self) {
+    apiKey = self.credential;
+  }
+  if (apiKey.length == 0) {
+    reject(@"credential", @"DeepSeek credential is unavailable", nil);
+    return;
+  }
+  NSMutableURLRequest *request = [NSMutableURLRequest requestWithURL:
+      [NSURL URLWithString:@"https://api.deepseek.com/chat/completions"]];
+  request.HTTPMethod = @"POST";
+  request.HTTPShouldHandleCookies = NO;
+  request.cachePolicy = NSURLRequestReloadIgnoringLocalCacheData;
+  request.timeoutInterval = 120;
+  [request setValue:@"application/json" forHTTPHeaderField:@"Content-Type"];
+  [request setValue:@"text/event-stream" forHTTPHeaderField:@"Accept"];
+  [request setValue:[@"Bearer " stringByAppendingString:apiKey]
+      forHTTPHeaderField:@"Authorization"];
+  NSMutableDictionary *body = [DSHCompletionRequestBodyV2(
+      requestedModel, thinkingMode, messages, tools) mutableCopy];
+  body[@"stream"] = @YES;
+  NSError *bodyError = nil;
+  request.HTTPBody = [NSJSONSerialization dataWithJSONObject:body
+      options:0 error:&bodyError];
+  if (request.HTTPBody == nil ||
+      request.HTTPBody.length > DSHMaximumRequestBodyBytes) {
+    reject(@"request",
+        bodyError.localizedDescription ?:
+            @"Streaming request body is invalid or oversized", bodyError);
+    return;
+  }
+
+  // Reset per-stream state under the state queue.
+  dispatch_async(self.stateQueue, ^{
+    self.streamParser = [[DSHStreamEventParser alloc] init];
+    self.streamContent = [NSMutableString string];
+    self.streamReasoning = [NSMutableString string];
+    self.streamFinishReason = nil;
+    self.streamRequestId = requestId;
+    self.streamRequestedModel = requestedModel;
+    self.streamThinkingMode = thinkingMode;
+    NSDate *started = NSDate.date;
+    __block NSUInteger completionGeneration = 0;
+    self.streamCompletion = ^(NSArray<NSDictionary *> *flushed, NSError *error) {
+      // Runs once from didCompleteWithError after the stream ends.
+      NSString *content = [self.streamContent copy];
+      NSString *reasoning = [self.streamReasoning copy];
+      NSString *finish = self.streamFinishReason ?: @"unknown";
+      BOOL current = [self finishCompletionRequestId:requestId
+                                   completionGeneration:completionGeneration
+                                   credentialGeneration:0];
+      if (!current) {
+        reject(@"cancelled", @"Streaming completion was cancelled", nil);
+        return;
+      }
+      if (error != nil) {
+        reject(@"transport", error.localizedDescription, error);
+        return;
+      }
+      if (content.length == 0 && self.streamReasoning.length == 0) {
+        reject(@"response", @"Streaming completion produced no content", nil);
+        return;
+      }
+      resolve(@{
+        @"schema_version": @1,
+        @"text": content,
+        @"tool_calls": @[],
+        @"finish_reason": finish,
+        @"model": requestedModel,
+        @"request_id": requestId,
+        @"latency_ms": @((NSInteger)(-[started timeIntervalSinceNow] * 1000)),
+        @"reasoning": reasoning,
+        @"thinking_mode": thinkingMode,
+      });
+    };
+    @synchronized(self) {
+      self.completionGeneration += 1;
+      completionGeneration = self.completionGeneration;
+      self.activeCompletionGeneration = completionGeneration;
+      self.activeCompletionRequestId = requestId;
+    }
+  });
+  // The data task itself runs on the session's delegate queue; the
+  // completionGeneration capture above is set synchronously on stateQueue
+  // before the task resumes below on the main queue hop.
+  dispatch_async(dispatch_get_main_queue(), ^{
+    NSURLSessionDataTask *task =
+        [self.modelSession dataTaskWithRequest:request];
+    @synchronized(self) {
+      self.activeCompletionTask = task;
+    }
+    [task resume];
+  });
+}
+
+#pragma mark NSURLSessionDataDelegate (streaming)
+
+- (void)URLSession:(NSURLSession *)session
+          dataTask:(NSURLSessionDataTask *)dataTask
+    didReceiveData:(NSData *)data {
+  dispatch_async(self.stateQueue, ^{
+    if (self.streamParser == nil || self.streamCompletion == nil) return;
+    NSError *error = nil;
+    NSArray<NSDictionary *> *deltas =
+        [self.streamParser appendBytes:static_cast<const uint8_t *>(data.bytes)
+                                 length:data.length error:&error];
+    if (error != nil) {
+      [dataTask cancel];
+      self.streamCompletion(nil, error);
+      self.streamCompletion = nil;
+      return;
+    }
+    for (NSDictionary *delta in deltas) {
+      NSString *content = delta[@"content"];
+      NSString *reasoning = delta[@"reasoning"];
+      NSString *finish = delta[@"finish_reason"];
+      if (content != nil) [self.streamContent appendString:content];
+      if (reasoning != nil) [self.streamReasoning appendString:reasoning];
+      if (finish != nil) self.streamFinishReason = finish;
+      if (self.hasStreamingObservers) {
+        [self sendEventWithName:@"completionStream" body:@{
+          @"request_id": self.streamRequestId ?: @"",
+          @"delta": delta,
+        }];
+      }
+    }
+  });
+}
+
+- (void)URLSession:(NSURLSession *)session
+              task:(NSURLSessionTask *)task
+didCompleteWithError:(NSError *)error {
+  if (self.streamCompletion == nil) return;
+  dispatch_async(self.stateQueue, ^{
+    if (self.streamCompletion == nil) return;
+    void (^completion)(NSArray<NSDictionary *> *, NSError *) =
+        self.streamCompletion;
+    self.streamCompletion = nil;
+    if (error != nil &&
+        [error.domain isEqualToString:NSURLErrorDomain] &&
+        error.code == NSURLErrorCancelled) {
+      completion(nil, error);
+      return;
+    }
+    NSError *flushError = nil;
+    NSArray *flushed = [self.streamParser finish:&flushError];
+    if (flushError != nil) {
+      completion(nil, flushError);
+      return;
+    }
+    for (NSDictionary *delta in flushed) {
+      NSString *content = delta[@"content"];
+      NSString *reasoning = delta[@"reasoning"];
+      NSString *finish = delta[@"finish_reason"];
+      if (content != nil) [self.streamContent appendString:content];
+      if (reasoning != nil) [self.streamReasoning appendString:reasoning];
+      if (finish != nil) self.streamFinishReason = finish;
+      if (self.hasStreamingObservers) {
+        [self sendEventWithName:@"completionStream" body:@{
+          @"request_id": self.streamRequestId ?: @"",
+          @"delta": delta,
+        }];
+      }
+    }
+    completion(flushed, error);
+  });
 }
 
 RCT_REMAP_METHOD(completeV2,
