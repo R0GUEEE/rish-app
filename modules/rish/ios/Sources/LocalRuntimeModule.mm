@@ -589,9 +589,11 @@ static BOOL DSHCanConnectToMacProxy(void) {
 @interface LocalRuntimeModule : RCTEventEmitter <NSURLSessionTaskDelegate>
 @property(nonatomic, assign) NSUInteger streamObserverCount;
 @property(nonatomic, strong) DSHStreamEventParser *streamParser;
+@property(nonatomic, strong) NSURLSessionDataTask *streamTask;
 @property(nonatomic, copy) NSString *streamRequestId;
 @property(nonatomic, strong) NSMutableString *streamContent;
 @property(nonatomic, strong) NSMutableString *streamReasoning;
+@property(nonatomic, assign) NSUInteger streamContentBytes;
 @property(nonatomic, copy) NSString *streamFinishReason;
 @property(nonatomic, copy) void (^streamCompletion)(NSArray<NSDictionary *> * _Nullable, NSError * _Nullable);
 @property(nonatomic, copy) NSString *streamRequestedModel;
@@ -618,6 +620,7 @@ static BOOL DSHCanConnectToMacProxy(void) {
 @property(nonatomic, copy) NSDictionary *(^completionAttachmentResolver)(
     id value, NSData **payloadData, NSDictionary **manifestOut,
     NSError **error);
+- (void)settleActiveStreamForTask:(NSURLSessionDataTask *)task;
 @end
 
 @implementation LocalRuntimeModule
@@ -807,6 +810,7 @@ RCT_EXPORT_MODULE(LocalRuntime)
     DSHRejectCompletionSchema2(
         strictRejecter, @"E_COMPLETION_CREDENTIAL_CHANGED");
   }
+  [self settleActiveStreamForTask:task];
 }
 
 - (BOOL)storeCredential:(NSString *)credential error:(NSError **)error {
@@ -1420,6 +1424,31 @@ RCT_EXPORT_MODULE(LocalRuntime)
   self.activeCompletionRedirected = NO;
 }
 
+/// Settles the active streaming round when its task is cancelled by the
+/// cancel/credential-rotation paths. Runs on the state queue so it is
+/// serialized ahead of any successor stream's reset: the JS promise must
+/// never be left hanging, and a late didCompleteWithError from the stale
+/// task must not be able to settle (or corrupt) the next stream.
+- (void)settleActiveStreamForTask:(NSURLSessionDataTask *)task {
+  // task may be nil when the stream was cancelled between the synchronous
+  // slot reservation and the main-queue task creation: the stream's
+  // promise must still settle. A non-nil task that no longer matches the
+  // bound stream task belongs to a strict (schema 2/3) round — never
+  // touch stream state for those.
+  @synchronized(self) {
+    if (task != nil && self.streamTask != task) return;
+  }
+  dispatch_async(self.stateQueue, ^{
+    if (self.streamCompletion == nil) return;
+    void (^completion)(NSArray<NSDictionary *> *, NSError *) =
+        self.streamCompletion;
+    self.streamCompletion = nil;
+    self.streamParser = nil;
+    completion(nil, DSHLocalRuntimeError(1040,
+        @"Streaming completion was cancelled"));
+  });
+}
+
 - (NSString *)reserveStrictRound:(NSInteger)schemaVersion
                          roundId:(NSString *)roundId
              credentialGeneration:(NSUInteger)credentialGeneration
@@ -1693,6 +1722,7 @@ RCT_REMAP_METHOD(cancelCompletion,
     DSHRejectCompletionSchema2(strictRejecter,
                                @"E_COMPLETION_CANCELLED");
   }
+  [self settleActiveStreamForTask:task];
   resolve(@{@"status": status});
 }
 
@@ -2437,6 +2467,23 @@ RCT_REMAP_METHOD(completeV2Stream,
   // {request_id, delta:{content|reasoning|finish_reason}} while running.
   // The promise resolves with the assembled result (identical shape to
   // completeV2) once the stream finishes; parsing stays fail-closed.
+  if (![envelopeJSON isKindOfClass:NSString.class]) {
+    reject(@"request", @"CompletionV2 envelope must be a string", nil);
+    return;
+  }
+  NSUInteger envelopeBytes =
+      [envelopeJSON lengthOfBytesUsingEncoding:NSUTF8StringEncoding];
+  if (envelopeBytes == 0) {
+    reject(@"request",
+           @"CompletionV2 envelope must be an object with schema_version 1",
+           nil);
+    return;
+  }
+  if (envelopeBytes > DSHMaximumCompletionEnvelopeBytes) {
+    reject(@"request", @"CompletionV2 envelope exceeds the transport limit",
+           nil);
+    return;
+  }
   NSError *envelopeDecodeError = nil;
   NSData *envelopeData =
       [envelopeJSON dataUsingEncoding:NSUTF8StringEncoding];
@@ -2476,8 +2523,10 @@ RCT_REMAP_METHOD(completeV2Stream,
     return;
   }
   __block NSString *apiKey = nil;
+  __block NSUInteger credentialGeneration = 0;
   @synchronized(self) {
     apiKey = self.credential;
+    credentialGeneration = self.credentialGeneration;
   }
   if (apiKey.length == 0) {
     reject(@"credential", @"DeepSeek credential is unavailable", nil);
@@ -2507,17 +2556,49 @@ RCT_REMAP_METHOD(completeV2Stream,
     return;
   }
 
-  // Reset per-stream state under the state queue.
+  // Atomically reserve the single active-completion slot before any
+  // stream state exists: a concurrent complete/completeV2/completeV2Stream
+  // call must fail with E_COMPLETION_BUSY instead of corrupting the shared
+  // parser/accumulator state.
+  __block NSUInteger completionGeneration = 0;
+  NSDate *started = NSDate.date;
+  @synchronized(self) {
+    if (self.activeCompletionRequestId != nil ||
+        self.activeCompletionTask != nil) {
+      DSHRejectCompletionSchema2(reject, @"E_COMPLETION_BUSY");
+      return;
+    }
+    if (credentialGeneration != self.credentialGeneration) {
+      reject(@"credential", @"Credential changed before the stream started",
+             nil);
+      return;
+    }
+    self.completionGeneration += 1;
+    completionGeneration = self.completionGeneration;
+    self.activeCompletionGeneration = completionGeneration;
+    self.activeCompletionRequestId = requestId;
+    // Schema value 2 makes the legacy complete() and completeV2 busy
+    // guards treat the streaming round like any in-flight completion.
+    self.activeCompletionSchemaVersion = 2;
+    self.activeCompletionRejecter = nil;
+    self.activeCompletionRedirected = NO;
+  }
+
+  // Reset per-stream state under the state queue. The reset block is
+  // enqueued before the task below is created on the main queue, so every
+  // delegate callback for that task is serialized behind this reset.
   dispatch_async(self.stateQueue, ^{
     self.streamParser = [[DSHStreamEventParser alloc] init];
     self.streamContent = [NSMutableString string];
     self.streamReasoning = [NSMutableString string];
+    self.streamContentBytes = 0;
     self.streamFinishReason = nil;
     self.streamRequestId = requestId;
     self.streamRequestedModel = requestedModel;
     self.streamThinkingMode = thinkingMode;
-    NSDate *started = NSDate.date;
-    __block NSUInteger completionGeneration = 0;
+    @synchronized(self) {
+      self.streamTask = nil;
+    }
     self.streamCompletion = ^(NSArray<NSDictionary *> *flushed, NSError *error) {
       // Runs once from didCompleteWithError after the stream ends.
       NSString *content = [self.streamContent copy];
@@ -2525,7 +2606,7 @@ RCT_REMAP_METHOD(completeV2Stream,
       NSString *finish = self.streamFinishReason ?: @"unknown";
       BOOL current = [self finishCompletionRequestId:requestId
                                    completionGeneration:completionGeneration
-                                   credentialGeneration:0];
+                                   credentialGeneration:credentialGeneration];
       if (!current) {
         reject(@"cancelled", @"Streaming completion was cancelled", nil);
         return;
@@ -2550,20 +2631,16 @@ RCT_REMAP_METHOD(completeV2Stream,
         @"thinking_mode": thinkingMode,
       });
     };
-    @synchronized(self) {
-      self.completionGeneration += 1;
-      completionGeneration = self.completionGeneration;
-      self.activeCompletionGeneration = completionGeneration;
-      self.activeCompletionRequestId = requestId;
-    }
   });
-  // The data task itself runs on the session's delegate queue; the
-  // completionGeneration capture above is set synchronously on stateQueue
-  // before the task resumes below on the main queue hop.
+  // The data task itself runs on the session's delegate queue. The task is
+  // bound to streamTask before resume so delegate callbacks can verify
+  // they still belong to the active stream (stale callbacks from a
+  // cancelled predecessor must never touch the new stream's state).
   dispatch_async(dispatch_get_main_queue(), ^{
     NSURLSessionDataTask *task =
         [self.modelSession dataTaskWithRequest:request];
     @synchronized(self) {
+      self.streamTask = task;
       self.activeCompletionTask = task;
     }
     [task resume];
@@ -2576,6 +2653,11 @@ RCT_REMAP_METHOD(completeV2Stream,
           dataTask:(NSURLSessionDataTask *)dataTask
     didReceiveData:(NSData *)data {
   dispatch_async(self.stateQueue, ^{
+    NSURLSessionDataTask *active = nil;
+    @synchronized(self) {
+      active = self.streamTask;
+    }
+    if (active != dataTask) return;
     if (self.streamParser == nil || self.streamCompletion == nil) return;
     NSError *error = nil;
     NSArray<NSDictionary *> *deltas =
@@ -2591,8 +2673,26 @@ RCT_REMAP_METHOD(completeV2Stream,
       NSString *content = delta[@"content"];
       NSString *reasoning = delta[@"reasoning"];
       NSString *finish = delta[@"finish_reason"];
+      NSUInteger deltaBytes =
+          (content == nil ? 0
+              : [content lengthOfBytesUsingEncoding:NSUTF8StringEncoding]) +
+          (reasoning == nil ? 0
+              : [reasoning lengthOfBytesUsingEncoding:NSUTF8StringEncoding]);
+      // Same transport budget as the non-streaming path: a stream that
+      // keeps producing content must not grow the accumulator without
+      // bound, and must fail closed instead.
+      if (deltaBytes > DSHMaximumResponseBytes - MIN(self.streamContentBytes,
+              (NSUInteger)DSHMaximumResponseBytes)) {
+        [dataTask cancel];
+        self.streamCompletion(
+            nil, DSHLocalRuntimeError(1039,
+                @"Streaming response exceeds the transport limit"));
+        self.streamCompletion = nil;
+        return;
+      }
       if (content != nil) [self.streamContent appendString:content];
       if (reasoning != nil) [self.streamReasoning appendString:reasoning];
+      self.streamContentBytes += deltaBytes;
       if (finish != nil) self.streamFinishReason = finish;
       if (self.hasStreamingObservers) {
         [self sendEventWithName:@"completionStream" body:@{
@@ -2609,6 +2709,11 @@ RCT_REMAP_METHOD(completeV2Stream,
 didCompleteWithError:(NSError *)error {
   if (self.streamCompletion == nil) return;
   dispatch_async(self.stateQueue, ^{
+    NSURLSessionDataTask *active = nil;
+    @synchronized(self) {
+      active = self.streamTask;
+    }
+    if (active != (NSURLSessionDataTask *)task) return;
     if (self.streamCompletion == nil) return;
     void (^completion)(NSArray<NSDictionary *> *, NSError *) =
         self.streamCompletion;
@@ -2629,8 +2734,20 @@ didCompleteWithError:(NSError *)error {
       NSString *content = delta[@"content"];
       NSString *reasoning = delta[@"reasoning"];
       NSString *finish = delta[@"finish_reason"];
+      NSUInteger deltaBytes =
+          (content == nil ? 0
+              : [content lengthOfBytesUsingEncoding:NSUTF8StringEncoding]) +
+          (reasoning == nil ? 0
+              : [reasoning lengthOfBytesUsingEncoding:NSUTF8StringEncoding]);
+      if (deltaBytes > DSHMaximumResponseBytes - MIN(self.streamContentBytes,
+              (NSUInteger)DSHMaximumResponseBytes)) {
+        completion(nil, DSHLocalRuntimeError(1039,
+            @"Streaming response exceeds the transport limit"));
+        return;
+      }
       if (content != nil) [self.streamContent appendString:content];
       if (reasoning != nil) [self.streamReasoning appendString:reasoning];
+      self.streamContentBytes += deltaBytes;
       if (finish != nil) self.streamFinishReason = finish;
       if (self.hasStreamingObservers) {
         [self sendEventWithName:@"completionStream" body:@{
