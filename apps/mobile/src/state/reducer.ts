@@ -4,6 +4,8 @@ import {
   ATTACHMENT_DESCRIPTOR_SCHEMA_VERSION,
   ATTACHMENT_KINDS,
   CHAT_STATE_SCHEMA_VERSION,
+  CONVERSATION_WORKSPACE_BINDING_SCHEMA_VERSION,
+  CONVERSATION_WORKSPACE_BOOTSTRAP_STATES,
   COMPLETION_FINISH_REASONS,
   COMPLETION_ROUND_RECEIPT_SCHEMA_VERSION,
   CONVERSATION_THINKING_MODES,
@@ -12,6 +14,7 @@ import {
   TURN_ATTEMPT_STATUSES,
   TURN_ATTEMPT_SCHEMA_VERSION,
   PROJECT_CONTEXT_DESTRUCTIVE_TRANSITION_SCHEMA_VERSION,
+  WORKSPACE_AUTHORITY_OUTBOX_SCHEMA_VERSION,
   type ChatAction,
   type ChatAttachment,
   type ChatAttachmentKind,
@@ -25,6 +28,9 @@ import {
   type ProjectContextMutationScope,
   type ProjectContextDestructiveAdvanceScope,
   type ProjectContextDestructiveTransitionV1,
+  type ConversationWorkspaceBindingV1,
+  type ConversationWorkspaceBootstrapState,
+  type WorkspaceAuthorityOutboxV1,
   type TurnAttemptV1,
 } from './types';
 import {
@@ -58,6 +64,7 @@ export const MAX_ATTEMPT_VISIBLE_MESSAGES = 200;
 export const MAX_ATTEMPT_ATTACHMENT_IDS = 24;
 export const MAX_PROJECT_CONTEXT_RECEIPT_BYTES = 256 * 1024;
 export const MAX_PROJECT_CONTEXT_SNAPSHOT_REFERENCE_ROWS = 1024;
+export const MAX_WORKSPACE_AUTHORITY_OUTBOX_ENTRIES = 16;
 const MAX_PROJECT_CONTEXT_SNAPSHOT_REFERENCE_SCAN = 100_000;
 
 const supportedModels: ReadonlySet<string> = new Set(SUPPORTED_MODEL_IDS);
@@ -68,6 +75,9 @@ const attemptFailureCodes: ReadonlySet<string> = new Set(
   ATTEMPT_FAILURE_CODES,
 );
 const attemptStatuses: ReadonlySet<string> = new Set(TURN_ATTEMPT_STATUSES);
+const workspaceBootstrapStates: ReadonlySet<string> = new Set(
+  CONVERSATION_WORKSPACE_BOOTSTRAP_STATES,
+);
 const mimeTypePattern = /^[A-Za-z0-9!#$&^_.+-]+\/[A-Za-z0-9!#$&^_.+-]+$/u;
 const canonicalUuidPattern =
   /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/u;
@@ -86,6 +96,28 @@ const attemptBindingKeys = [
   'policy',
   'policyVersion',
 ] as const;
+const workspaceBindingKeys = [
+  'schemaVersion',
+  'workspaceId',
+  'bindingRevision',
+  'projectId',
+] as const;
+const workspaceOutboxKeys = [
+  'schemaVersion',
+  'operationId',
+  'action',
+  'workspaceId',
+  'bindingRevision',
+  'clearanceReceiptId',
+  'createdAt',
+] as const;
+const workspaceBindingOwnerKeys = [
+  'conversationId',
+  'expectedConversation',
+  'expectedProjectContext',
+  'expectedDestructiveEpoch',
+] as const;
+const workspaceBindingActionKeys = ['owner', 'binding', 'at'] as const;
 const roundReceiptKeys = [
   'schemaVersion',
   'transportSchemaVersion',
@@ -126,6 +158,8 @@ const attemptReferenceProjectionKeys = [
   'thinkingMode',
   'contextDisposition',
   'contextProjectId',
+  'workspaceId',
+  'workspaceBindingRevision',
   'projectContext',
   'activeRound',
   'rounds',
@@ -221,9 +255,65 @@ function isExactDataRecord(
   });
 }
 
+function workspaceBindingIsValid(
+  value: unknown,
+): value is ConversationWorkspaceBindingV1 {
+  if (!isExactDataRecord(value, workspaceBindingKeys)) return false;
+  const binding = value as ConversationWorkspaceBindingV1;
+  return (
+    binding.schemaVersion === CONVERSATION_WORKSPACE_BINDING_SCHEMA_VERSION &&
+    isCanonicalLifecycleId(binding.workspaceId) &&
+    Number.isSafeInteger(binding.bindingRevision) &&
+    !Object.is(binding.bindingRevision, -0) &&
+    binding.bindingRevision > 0 &&
+    binding.bindingRevision < Number.MAX_SAFE_INTEGER &&
+    (binding.projectId === null || isProjectId(binding.projectId))
+  );
+}
+
+export function isConversationWorkspaceBootstrapState(
+  value: unknown,
+): value is ConversationWorkspaceBootstrapState {
+  return typeof value === 'string' && workspaceBootstrapStates.has(value);
+}
+
+export function isWorkspaceAuthorityOutboxEntry(
+  value: unknown,
+): value is WorkspaceAuthorityOutboxV1 {
+  if (!isExactDataRecord(value, workspaceOutboxKeys)) return false;
+  const entry = value as WorkspaceAuthorityOutboxV1;
+  return (
+    entry.schemaVersion === WORKSPACE_AUTHORITY_OUTBOX_SCHEMA_VERSION &&
+    isCanonicalLifecycleId(entry.operationId) &&
+    (entry.action === 'forget' || entry.action === 'delete_owned') &&
+    isCanonicalLifecycleId(entry.workspaceId) &&
+    Number.isSafeInteger(entry.bindingRevision) &&
+    !Object.is(entry.bindingRevision, -0) &&
+    entry.bindingRevision > 0 &&
+    entry.bindingRevision < Number.MAX_SAFE_INTEGER &&
+    isCanonicalLifecycleId(entry.clearanceReceiptId) &&
+    isCanonicalTimestamp(entry.createdAt)
+  );
+}
+
+function copyWorkspaceBinding(
+  binding: ConversationWorkspaceBindingV1 | null,
+): ConversationWorkspaceBindingV1 | null {
+  return binding === null
+    ? null
+    : {
+        schemaVersion: binding.schemaVersion,
+        workspaceId: binding.workspaceId,
+        bindingRevision: binding.bindingRevision,
+        projectId: binding.projectId,
+      };
+}
+
+
 export function createEmptyChatState(): ChatState {
   return {
     schemaVersion: CHAT_STATE_SCHEMA_VERSION,
+    workspaceAuthorityOutbox: [],
     projectContextDestructiveEpoch: 0,
     projectContextDestructiveTransition: null,
     conversations: {},
@@ -401,10 +491,65 @@ function hasLiveAttempt(conversation: Conversation): boolean {
   );
 }
 
+function conversationWorkspaceStateIsValid(
+  conversation: Conversation,
+): boolean {
+  const binding = conversation.workspaceBinding ?? null;
+  const bootstrapState = conversation.workspaceBootstrapState ?? 'none';
+  if (!isConversationWorkspaceBootstrapState(bootstrapState)) {
+    return false;
+  }
+  if (binding === null) {
+    return (
+      conversation.workspaceId === null ||
+      bootstrapState !== 'none'
+    );
+  }
+  return (
+    workspaceBindingIsValid(binding) &&
+    bootstrapState === 'none' &&
+    conversation.workspaceId === binding.workspaceId &&
+    conversation.projectId === binding.projectId
+  );
+}
+
+function attemptWorkspaceBindingIsValid(
+  conversation: Conversation,
+  attempt: TurnAttemptV1,
+): boolean {
+  const conversationBinding = conversation.workspaceBinding ?? null;
+  if (
+    attempt.workspaceId === null ||
+    attempt.workspaceBindingRevision === null
+  ) {
+    return (
+      attempt.workspaceId === null &&
+      attempt.workspaceBindingRevision === null &&
+      (conversationBinding === null ||
+        (attempt.status !== 'prepared' && attempt.status !== 'sending'))
+    );
+  }
+  return (
+    conversationBinding !== null &&
+    conversationWorkspaceStateIsValid(conversation) &&
+    attempt.workspaceId === conversationBinding.workspaceId &&
+    attempt.workspaceBindingRevision === conversationBinding.bindingRevision &&
+    attempt.contextProjectId === conversationBinding.projectId
+  );
+}
+
 function attemptBindingIsValid(
   conversation: Conversation,
   attempt: TurnAttemptV1,
 ): boolean {
+  if (
+    (typeof conversation.workspaceBootstrapState === 'string' &&
+      conversation.workspaceBootstrapState.startsWith('blocked_')) ||
+    !conversationWorkspaceStateIsValid(conversation) ||
+    !attemptWorkspaceBindingIsValid(conversation, attempt)
+  ) {
+    return false;
+  }
   const binding = attempt.projectContext;
   if (binding !== null && !isExactDataRecord(binding, attemptBindingKeys)) {
     return false;
@@ -574,6 +719,8 @@ function copyAttempt(attempt: TurnAttemptV1): TurnAttemptV1 {
     thinkingMode: attempt.thinkingMode,
     contextDisposition: attempt.contextDisposition,
     contextProjectId: attempt.contextProjectId,
+    workspaceId: attempt.workspaceId,
+    workspaceBindingRevision: attempt.workspaceBindingRevision,
     projectContext: copyAttemptBinding(attempt.projectContext),
     activeRound:
       attempt.activeRound === null
@@ -594,6 +741,13 @@ function retryBindingIsApplicable(
   conversation: Conversation,
   source: TurnAttemptV1,
 ): boolean {
+  if (
+    typeof conversation.workspaceBootstrapState === 'string' &&
+    conversation.workspaceBootstrapState.startsWith('blocked_')
+  ) {
+    return false;
+  }
+  if (!attemptWorkspaceBindingIsValid(conversation, source)) return false;
   const binding = source.projectContext;
   if (source.contextDisposition === 'unbound') {
     return (
@@ -1141,6 +1295,46 @@ export function hasProjectContextDestructiveReferences(
   }
 }
 
+/**
+ * Returns true when any durable chat-owned row still names a workspace. The
+ * authority outbox is only safe once this is false; callers use it before
+ * handing a clearance receipt to native code.
+ */
+export function hasWorkspaceAuthorityReferences(
+  state: ChatState,
+  workspaceId: string,
+): boolean {
+  try {
+    if (!isCanonicalLifecycleId(workspaceId)) return true;
+    return Object.values(state.conversations).some(conversation => {
+      if (
+        conversation.workspaceId === workspaceId ||
+        conversation.workspaceBinding?.workspaceId === workspaceId
+      ) {
+        return true;
+      }
+      return conversation.attempts.some(
+        attempt => attempt.workspaceId === workspaceId,
+      );
+    });
+  } catch {
+    return true;
+  }
+}
+
+function hasWorkspaceAuthorityOutboxEntry(
+  state: ChatState,
+  workspaceId: string | null | undefined,
+): boolean {
+  return (
+    workspaceId !== null &&
+    workspaceId !== undefined &&
+    (state.workspaceAuthorityOutbox ?? []).some(
+      entry => entry.workspaceId === workspaceId,
+    )
+  );
+}
+
 function validIdentifier(value: string): boolean {
   return value.trim().length > 0 && value.length <= 256;
 }
@@ -1448,6 +1642,22 @@ function destructiveTargetConversationId(action: ChatAction): string | null {
     case 'conversation/unbind-workspace':
     case 'conversation/ensure-runtime-context':
       return action.payload.id;
+    case 'conversation/apply-workspace-binding':
+      {
+        const descriptor =
+          typeof action.payload.owner === 'object' &&
+          action.payload.owner !== null
+            ? Object.getOwnPropertyDescriptor(
+                action.payload.owner,
+                'conversationId',
+              )
+            : undefined;
+        return descriptor !== undefined &&
+          Object.prototype.hasOwnProperty.call(descriptor, 'value') &&
+          typeof descriptor.value === 'string'
+          ? descriptor.value
+          : null;
+      }
     case 'project-context/apply':
       return action.payload.conversationId;
     case 'project-context/replace-prepared':
@@ -1504,6 +1714,7 @@ export function chatReducer(state: ChatState, action: ChatAction): ChatState {
         !isConversationThinkingMode(thinkingMode) ||
         (projectId !== null && !isProjectId(projectId)) ||
         (workspaceId !== null && !isWorkspaceId(workspaceId)) ||
+        hasWorkspaceAuthorityOutboxEntry(state, workspaceId) ||
         state.conversations[id] !== undefined
       ) {
         return state;
@@ -1517,6 +1728,15 @@ export function chatReducer(state: ChatState, action: ChatAction): ChatState {
         id,
         projectId,
         workspaceId,
+        workspaceBinding: null,
+        workspaceBootstrapState:
+          workspaceId !== null
+            ? projectId === null
+              ? 'pending_registry_resolution'
+              : 'pending_legacy_project'
+            : projectId === null
+              ? 'none'
+              : 'pending_legacy_project',
         runtimeContextId: null,
         projectContext:
           projectId === null ? null : createProjectContextState(projectId),
@@ -1654,6 +1874,8 @@ export function chatReducer(state: ChatState, action: ChatAction): ChatState {
         !isCanonicalTimestamp(action.payload.at) ||
         hasLiveAttempt(conversation) ||
         requiresDestructiveLifecycle(conversation) ||
+        conversation.workspaceBinding !== null ||
+        conversation.workspaceId !== null ||
         conversation.projectId === action.payload.projectId
       ) {
         return state;
@@ -1661,6 +1883,7 @@ export function chatReducer(state: ChatState, action: ChatAction): ChatState {
       return withConversation(state, {
         ...conversation,
         projectId: action.payload.projectId,
+        workspaceBootstrapState: 'pending_legacy_project',
         projectContext: createProjectContextState(action.payload.projectId),
         updatedAt: laterTimestamp(conversation.updatedAt, action.payload.at),
       });
@@ -1673,6 +1896,8 @@ export function chatReducer(state: ChatState, action: ChatAction): ChatState {
         conversation.projectId === null ||
         hasLiveAttempt(conversation) ||
         requiresDestructiveLifecycle(conversation) ||
+        conversation.workspaceBinding !== null ||
+        conversation.workspaceId !== null ||
         !isCanonicalTimestamp(action.payload.at)
       ) {
         return state;
@@ -1680,6 +1905,7 @@ export function chatReducer(state: ChatState, action: ChatAction): ChatState {
       return withConversation(state, {
         ...conversation,
         projectId: null,
+        workspaceBootstrapState: 'none',
         projectContext: null,
         updatedAt: laterTimestamp(conversation.updatedAt, action.payload.at),
       });
@@ -1691,6 +1917,9 @@ export function chatReducer(state: ChatState, action: ChatAction): ChatState {
         conversation === undefined ||
         !isWorkspaceId(action.payload.workspaceId) ||
         !isCanonicalTimestamp(action.payload.at) ||
+        hasLiveAttempt(conversation) ||
+        hasWorkspaceAuthorityOutboxEntry(state, action.payload.workspaceId) ||
+        conversation.workspaceBinding !== null ||
         conversation.workspaceId === action.payload.workspaceId
       ) {
         return state;
@@ -1698,6 +1927,10 @@ export function chatReducer(state: ChatState, action: ChatAction): ChatState {
       return withConversation(state, {
         ...conversation,
         workspaceId: action.payload.workspaceId,
+        workspaceBootstrapState:
+          conversation.projectId === null
+            ? 'pending_registry_resolution'
+            : 'pending_legacy_project',
         updatedAt: laterTimestamp(conversation.updatedAt, action.payload.at),
       });
     }
@@ -1707,6 +1940,9 @@ export function chatReducer(state: ChatState, action: ChatAction): ChatState {
       if (
         conversation === undefined ||
         conversation.workspaceId === null ||
+        hasLiveAttempt(conversation) ||
+        hasWorkspaceAuthorityOutboxEntry(state, conversation.workspaceId) ||
+        conversation.workspaceBinding !== null ||
         !isCanonicalTimestamp(action.payload.at)
       ) {
         return state;
@@ -1714,7 +1950,100 @@ export function chatReducer(state: ChatState, action: ChatAction): ChatState {
       return withConversation(state, {
         ...conversation,
         workspaceId: null,
+        workspaceBootstrapState:
+          conversation.projectId === null ? 'none' : 'pending_legacy_project',
         updatedAt: laterTimestamp(conversation.updatedAt, action.payload.at),
+      });
+    }
+
+    case 'conversation/apply-workspace-binding': {
+      const payload = action.payload;
+      if (
+        !isExactDataRecord(payload, workspaceBindingActionKeys) ||
+        !isExactDataRecord(payload.owner, workspaceBindingOwnerKeys) ||
+        !isCanonicalTimestamp(payload.at)
+      ) {
+        return state;
+      }
+      const owner = payload.owner;
+      if (
+        typeof owner.conversationId !== 'string' ||
+        !validIdentifier(owner.conversationId) ||
+        !Number.isSafeInteger(owner.expectedDestructiveEpoch) ||
+        Object.is(owner.expectedDestructiveEpoch, -0) ||
+        owner.expectedDestructiveEpoch < 0 ||
+        owner.expectedDestructiveEpoch >= Number.MAX_SAFE_INTEGER ||
+        owner.expectedDestructiveEpoch !== state.projectContextDestructiveEpoch ||
+        state.projectContextDestructiveTransition !== null
+      ) {
+        return state;
+      }
+      const conversation = state.conversations[owner.conversationId];
+      if (
+        conversation === undefined ||
+        owner.expectedConversation !== conversation ||
+        owner.expectedProjectContext !== conversation.projectContext ||
+        !conversationWorkspaceStateIsValid(conversation) ||
+        hasLiveAttempt(conversation) ||
+        requiresDestructiveLifecycle(conversation)
+      ) {
+        return state;
+      }
+      const binding = payload.binding;
+      const conversationBinding = conversation.workspaceBinding ?? null;
+      if (binding !== null && !workspaceBindingIsValid(binding)) return state;
+      const currentWorkspaceId =
+        conversationBinding?.workspaceId ?? conversation.workspaceId;
+      const targetWorkspaceId = binding?.workspaceId ?? currentWorkspaceId;
+      if (
+        binding !== null &&
+        binding.workspaceId === conversation.workspaceId &&
+        binding.projectId === conversation.projectId &&
+        conversationBinding !== null &&
+        binding.bindingRevision === conversationBinding.bindingRevision
+      ) {
+        return state;
+      }
+      if (
+        conversation.attempts.length > 0 ||
+        (binding !== null &&
+          conversationBinding !== null &&
+          binding.bindingRevision <= conversationBinding.bindingRevision)
+      ) {
+        return state;
+      }
+      if (
+        hasWorkspaceAuthorityOutboxEntry(state, currentWorkspaceId) ||
+        hasWorkspaceAuthorityOutboxEntry(state, targetWorkspaceId)
+      ) {
+        return state;
+      }
+      // A null workspace binding clears only workspace authority. The
+      // existing project may remain attached while native bootstrap/detach is
+      // retried; a non-null binding carries the complete project relation.
+      const targetProjectId =
+        binding === null ? conversation.projectId : binding.projectId;
+      const nextProjectContext =
+        targetProjectId === null
+          ? null
+          : conversation.projectId === targetProjectId &&
+              conversation.projectContext !== null
+            ? conversation.projectContext
+            : createProjectContextState(targetProjectId);
+      const nextRuntimeContextId =
+        targetProjectId === conversation.projectId
+          ? conversation.runtimeContextId
+          : null;
+      return withConversation(state, {
+        ...conversation,
+        projectId: targetProjectId,
+        workspaceId: binding?.workspaceId ?? null,
+        workspaceBinding: copyWorkspaceBinding(binding),
+        workspaceBootstrapState: binding === null ?
+          targetProjectId === null ? 'none' : 'pending_legacy_project' : 'none',
+        runtimeContextId: nextRuntimeContextId,
+        projectContext: nextProjectContext,
+        updatedAt: laterTimestamp(conversation.updatedAt, payload.at),
       });
     }
 
@@ -2115,6 +2444,9 @@ export function chatReducer(state: ChatState, action: ChatAction): ChatState {
           transition.action === 'rebind'
             ? transition.targetProjectId
             : null,
+        workspaceId: null,
+        workspaceBinding: null,
+        workspaceBootstrapState: 'none',
         projectContext:
           transition.action === 'rebind'
             ? createProjectContextState(transition.targetProjectId!)
@@ -2446,6 +2778,8 @@ export function chatReducer(state: ChatState, action: ChatAction): ChatState {
         attempt.thinkingMode !== source.thinkingMode ||
         attempt.contextDisposition !== source.contextDisposition ||
         attempt.contextProjectId !== source.contextProjectId ||
+        attempt.workspaceId !== source.workspaceId ||
+        attempt.workspaceBindingRevision !== source.workspaceBindingRevision ||
         !sameAttemptBinding(attempt.projectContext, source.projectContext) ||
         attempt.activeRound !== null ||
         attempt.rounds.length !== 0 ||

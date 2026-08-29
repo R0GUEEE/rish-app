@@ -6,9 +6,10 @@ import type {
   ProjectContextState,
 } from '../project-context/types';
 
-export const CHAT_STATE_SCHEMA_VERSION = 7 as const;
-export const PREVIOUS_CHAT_STATE_SCHEMA_VERSION = 6 as const;
+export const CHAT_STATE_SCHEMA_VERSION = 8 as const;
+export const PREVIOUS_CHAT_STATE_SCHEMA_VERSION = 7 as const;
 export const WORKSPACE_CHAT_STATE_SCHEMA_VERSION = 5 as const;
+export const PROJECT_CONTEXT_CHAT_STATE_SCHEMA_VERSION = 6 as const;
 export const ATTACHMENT_CHAT_STATE_SCHEMA_VERSION = 4 as const;
 export const LEGACY_CHAT_STATE_SCHEMA_VERSION = 2 as const;
 export const OLDER_CHAT_STATE_SCHEMA_VERSION = 3 as const;
@@ -18,6 +19,8 @@ export const TURN_ATTEMPT_SCHEMA_VERSION = 1 as const;
 export const ATTEMPT_PROJECT_CONTEXT_SCHEMA_VERSION = 1 as const;
 export const COMPLETION_ROUND_RECEIPT_SCHEMA_VERSION = 1 as const;
 export const PROJECT_CONTEXT_DESTRUCTIVE_TRANSITION_SCHEMA_VERSION = 1 as const;
+export const CONVERSATION_WORKSPACE_BINDING_SCHEMA_VERSION = 1 as const;
+export const WORKSPACE_AUTHORITY_OUTBOX_SCHEMA_VERSION = 1 as const;
 
 export const ATTACHMENT_KINDS = ['image', 'text', 'pdf'] as const;
 
@@ -55,6 +58,13 @@ export const PROJECT_CONTEXT_DESTRUCTIVE_PHASES = [
   'intent',
   'cleanup_pending',
   'ready_to_finalize',
+] as const;
+export const CONVERSATION_WORKSPACE_BOOTSTRAP_STATES = [
+  'none',
+  'pending_legacy_project',
+  'pending_registry_resolution',
+  'blocked_invalid_legacy_id',
+  'blocked_missing_legacy_workspace',
 ] as const;
 export const ATTEMPT_FAILURE_CODES = [
   'E_ATTEMPT_INTERRUPTED',
@@ -134,6 +144,8 @@ export type ProjectContextDestructiveAction =
   (typeof PROJECT_CONTEXT_DESTRUCTIVE_ACTIONS)[number];
 export type ProjectContextDestructivePhase =
   (typeof PROJECT_CONTEXT_DESTRUCTIVE_PHASES)[number];
+export type ConversationWorkspaceBootstrapState =
+  (typeof CONVERSATION_WORKSPACE_BOOTSTRAP_STATES)[number];
 
 export type ChatAttachment = {
   readonly schema_version: typeof ATTACHMENT_DESCRIPTOR_SCHEMA_VERSION;
@@ -233,6 +245,9 @@ export type TurnAttemptV1 = {
   readonly thinkingMode: ConversationThinkingMode;
   readonly contextDisposition: AttemptContextDisposition;
   readonly contextProjectId: string | null;
+  /** Workspace authority frozen before an async completion starts. */
+  readonly workspaceId: string | null;
+  readonly workspaceBindingRevision: number | null;
   readonly projectContext: AttemptProjectContextBindingV1 | null;
   readonly activeRound: ActiveAttemptRoundV1 | null;
   readonly rounds: readonly CompletionRoundReceiptV1[];
@@ -246,6 +261,8 @@ export type Conversation = {
   readonly id: string;
   readonly projectId: string | null;
   readonly workspaceId: string | null;
+  readonly workspaceBinding?: ConversationWorkspaceBindingV1 | null;
+  readonly workspaceBootstrapState?: ConversationWorkspaceBootstrapState;
   readonly runtimeContextId: string | null;
   readonly projectContext: ProjectContextState | null;
   readonly title: string;
@@ -257,6 +274,71 @@ export type Conversation = {
   readonly attempts: readonly TurnAttemptV1[];
   readonly createdAt: string;
   readonly updatedAt: string;
+};
+
+export type ConversationWorkspaceBindingV1 = {
+  readonly schemaVersion: typeof CONVERSATION_WORKSPACE_BINDING_SCHEMA_VERSION;
+  readonly workspaceId: string;
+  readonly bindingRevision: number;
+  readonly projectId: string | null;
+};
+
+export type WorkspaceAuthorityOutboxV1 = {
+  readonly schemaVersion: typeof WORKSPACE_AUTHORITY_OUTBOX_SCHEMA_VERSION;
+  readonly operationId: string;
+  readonly action: 'forget' | 'delete_owned';
+  readonly workspaceId: string;
+  readonly bindingRevision: number;
+  readonly clearanceReceiptId: string;
+  readonly createdAt: string;
+};
+
+export type WorkspaceBindingOwnerV1 = {
+  readonly conversationId: string;
+  readonly expectedConversation: Conversation;
+  readonly expectedProjectContext: ProjectContextState | null;
+  readonly expectedDestructiveEpoch: number;
+};
+
+export type ApplyWorkspaceBindingInputCamelV1 = {
+  readonly schemaVersion: typeof CONVERSATION_WORKSPACE_BINDING_SCHEMA_VERSION;
+  readonly owner: WorkspaceBindingOwnerV1;
+  readonly binding: ConversationWorkspaceBindingV1 | null;
+};
+
+/** Exact snake-case request shape used at the persistence/bridge boundary. */
+export type WorkspaceBindingOwnerWireV1 = {
+  readonly conversation_id: string;
+  readonly expected_conversation: Conversation;
+  readonly expected_project_context: ProjectContextState | null;
+  readonly expected_destructive_epoch: number;
+};
+
+export type ConversationWorkspaceBindingWireV1 = {
+  readonly schema_version: typeof CONVERSATION_WORKSPACE_BINDING_SCHEMA_VERSION;
+  readonly workspace_id: string;
+  readonly binding_revision: number;
+  readonly project_id: string | null;
+};
+
+export type ApplyWorkspaceBindingInputWireV1 = {
+  readonly schema_version: typeof CONVERSATION_WORKSPACE_BINDING_SCHEMA_VERSION;
+  readonly owner: WorkspaceBindingOwnerWireV1;
+  readonly binding: ConversationWorkspaceBindingWireV1 | null;
+};
+
+export type ApplyWorkspaceBindingInputV1 =
+  | ApplyWorkspaceBindingInputCamelV1
+  | ApplyWorkspaceBindingInputWireV1;
+
+export type WorkspaceAuthorityMutationInputV1 = {
+  readonly schemaVersion: typeof WORKSPACE_AUTHORITY_OUTBOX_SCHEMA_VERSION;
+  readonly operationId: string;
+  readonly action: 'forget' | 'delete_owned';
+  readonly workspaceId: string;
+  readonly bindingRevision: number;
+  readonly clearanceReceiptId: string;
+  readonly expectedState: ChatState;
 };
 
 /**
@@ -309,6 +391,7 @@ export type ProjectContextDestructiveAdvanceScope = {
 
 export type ChatState = {
   readonly schemaVersion: typeof CHAT_STATE_SCHEMA_VERSION;
+  readonly workspaceAuthorityOutbox?: readonly WorkspaceAuthorityOutboxV1[];
   readonly projectContextDestructiveEpoch: number;
   readonly projectContextDestructiveTransition:
     | ProjectContextDestructiveTransitionV1
@@ -399,6 +482,14 @@ export type ChatAction =
       readonly type: 'conversation/unbind-workspace';
       readonly payload: {
         readonly id: string;
+        readonly at: string;
+      };
+    }
+  | {
+      readonly type: 'conversation/apply-workspace-binding';
+      readonly payload: {
+        readonly owner: WorkspaceBindingOwnerV1;
+        readonly binding: ConversationWorkspaceBindingV1 | null;
         readonly at: string;
       };
     }
@@ -712,6 +803,10 @@ export type PersistedTurnAttemptV1 = {
   readonly thinking_mode: ConversationThinkingMode;
   readonly context_disposition: AttemptContextDisposition;
   readonly context_project_id: string | null;
+  /** Required by schema 8; omitted by schema 7 persistence. */
+  readonly workspace_id?: string | null;
+  /** Required by schema 8; omitted by schema 7 persistence. */
+  readonly workspace_binding_revision?: number | null;
   readonly project_context: PersistedAttemptProjectContextV1 | null;
   readonly active_round: {
     readonly round_id: string;
@@ -732,9 +827,23 @@ export type PersistedConversationV6 = PersistedConversationV5 & {
 };
 
 export type PersistedChatStateV6 = {
-  readonly schema_version: typeof PREVIOUS_CHAT_STATE_SCHEMA_VERSION;
+  readonly schema_version: typeof PROJECT_CONTEXT_CHAT_STATE_SCHEMA_VERSION;
   readonly active_conversation_id: string | null;
   readonly conversations: readonly PersistedConversationV6[];
+  readonly messages: readonly PersistedChatMessageV4[];
+};
+
+/** Schema-7 persisted shape, before workspace authority binding existed. */
+export type PersistedConversationV7 = PersistedConversationV6;
+
+export type PersistedChatStateV7 = {
+  readonly schema_version: typeof PREVIOUS_CHAT_STATE_SCHEMA_VERSION;
+  readonly project_context_destructive_epoch: number;
+  readonly project_context_destructive_transition:
+    | PersistedProjectContextDestructiveTransitionV1
+    | null;
+  readonly active_conversation_id: string | null;
+  readonly conversations: readonly PersistedConversationV7[];
   readonly messages: readonly PersistedChatMessageV4[];
 };
 
@@ -756,14 +865,37 @@ export type PersistedProjectContextDestructiveTransitionV1 = {
   readonly updated_at: string;
 };
 
-export type PersistedChatStateV7 = {
+export type PersistedConversationWorkspaceBindingV1 = {
+  readonly schema_version: typeof CONVERSATION_WORKSPACE_BINDING_SCHEMA_VERSION;
+  readonly workspace_id: string;
+  readonly binding_revision: number;
+  readonly project_id: string | null;
+};
+
+export type PersistedWorkspaceAuthorityOutboxV1 = {
+  readonly schema_version: typeof WORKSPACE_AUTHORITY_OUTBOX_SCHEMA_VERSION;
+  readonly operation_id: string;
+  readonly action: 'forget' | 'delete_owned';
+  readonly workspace_id: string;
+  readonly binding_revision: number;
+  readonly clearance_receipt_id: string;
+  readonly created_at: string;
+};
+
+export type PersistedConversationV8 = PersistedConversationV6 & {
+  readonly workspace_binding: PersistedConversationWorkspaceBindingV1 | null;
+  readonly workspace_bootstrap_state: ConversationWorkspaceBootstrapState;
+};
+
+export type PersistedChatStateV8 = {
   readonly schema_version: typeof CHAT_STATE_SCHEMA_VERSION;
+  readonly workspace_authority_outbox: readonly PersistedWorkspaceAuthorityOutboxV1[];
   readonly project_context_destructive_epoch: number;
   readonly project_context_destructive_transition:
     | PersistedProjectContextDestructiveTransitionV1
     | null;
   readonly active_conversation_id: string | null;
-  readonly conversations: readonly PersistedConversationV6[];
+  readonly conversations: readonly PersistedConversationV8[];
   readonly messages: readonly PersistedChatMessageV4[];
 };
 

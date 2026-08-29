@@ -426,6 +426,7 @@ describe('schema v4 persistence', () => {
     expect(Object.keys(decoded).sort()).toEqual(
       [
         'schema_version',
+        'workspace_authority_outbox',
         'project_context_destructive_epoch',
         'project_context_destructive_transition',
         'active_conversation_id',
@@ -1095,8 +1096,19 @@ describe('schema v6 attempts and project context', () => {
   function schema6Payload(store: ChatStore) {
     const payload = JSON.parse(store.serialize()) as Record<string, unknown>;
     payload.schema_version = 6;
+    delete payload.workspace_authority_outbox;
     delete payload.project_context_destructive_epoch;
     delete payload.project_context_destructive_transition;
+    (payload.conversations as Array<Record<string, unknown>>).forEach(row => {
+      delete row.workspace_binding;
+      delete row.workspace_bootstrap_state;
+      (row.attempts as Array<Record<string, unknown>> | undefined)?.forEach(
+        attempt => {
+          delete attempt.workspace_id;
+          delete attempt.workspace_binding_revision;
+        },
+      );
+    });
     return payload;
   }
 
@@ -1146,7 +1158,7 @@ describe('schema v6 attempts and project context', () => {
       projectContextDestructiveEpoch?: number;
       projectContextDestructiveTransition?: unknown;
     };
-    expect(hydrated.schemaVersion).toBe(7);
+    expect(hydrated.schemaVersion).toBe(CHAT_STATE_SCHEMA_VERSION);
     expect(hydrated.projectContextDestructiveEpoch).toBe(0);
     expect(hydrated.projectContextDestructiveTransition).toBeNull();
     const serialized = JSON.parse(serializeChatState(hydrated)) as {
@@ -1157,11 +1169,22 @@ describe('schema v6 attempts and project context', () => {
       messages: unknown;
     };
     expect(serialized).toMatchObject({
-      schema_version: 7,
+      schema_version: CHAT_STATE_SCHEMA_VERSION,
       project_context_destructive_epoch: 0,
       project_context_destructive_transition: null,
     });
-    expect(serialized.conversations).toEqual(v6.conversations);
+    const legacyProjection = JSON.parse(
+      JSON.stringify(serialized.conversations),
+    ) as Array<Record<string, unknown>>;
+    legacyProjection.forEach(row => {
+      delete row.workspace_binding;
+      delete row.workspace_bootstrap_state;
+      (row.attempts as Array<Record<string, unknown>>).forEach(attempt => {
+        delete attempt.workspace_id;
+        delete attempt.workspace_binding_revision;
+      });
+    });
+    expect(legacyProjection).toEqual(v6.conversations);
     expect(serialized.messages).toEqual(v6.messages);
   });
 
@@ -2571,6 +2594,8 @@ describe('schema v6 attempts and project context', () => {
                 thinkingMode: source.thinkingMode,
                 contextDisposition: 'verified',
                 contextProjectId: source.projectId,
+                workspaceId: null,
+                workspaceBindingRevision: null,
                 projectContext: {
                   schemaVersion: 1,
                   runtimeContextId: source.runtimeContextId!,

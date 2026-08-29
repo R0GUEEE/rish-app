@@ -4,16 +4,20 @@ import {
   ATTEMPT_PROJECT_CONTEXT_SCHEMA_VERSION,
   ATTACHMENT_DESCRIPTOR_SCHEMA_VERSION,
   CHAT_STATE_SCHEMA_VERSION,
+  CONVERSATION_WORKSPACE_BINDING_SCHEMA_VERSION,
+  CONVERSATION_WORKSPACE_BOOTSTRAP_STATES,
   COMPLETION_FINISH_REASONS,
   COMPLETION_ROUND_RECEIPT_SCHEMA_VERSION,
   CONVERSATION_TURN_SCHEMA_VERSION,
   LEGACY_CHAT_STATE_SCHEMA_VERSION,
   OLDER_CHAT_STATE_SCHEMA_VERSION,
   PREVIOUS_CHAT_STATE_SCHEMA_VERSION,
+  PROJECT_CONTEXT_CHAT_STATE_SCHEMA_VERSION,
   WORKSPACE_CHAT_STATE_SCHEMA_VERSION,
   PROJECT_CONTEXT_DESTRUCTIVE_ACTIONS,
   PROJECT_CONTEXT_DESTRUCTIVE_PHASES,
   PROJECT_CONTEXT_DESTRUCTIVE_TRANSITION_SCHEMA_VERSION,
+  WORKSPACE_AUTHORITY_OUTBOX_SCHEMA_VERSION,
   TURN_ATTEMPT_SCHEMA_VERSION,
   TURN_ATTEMPT_STATUSES,
   ChatStateValidationError,
@@ -27,7 +31,9 @@ import {
   type HydrationResult,
   type PersistedChatAttachmentV1,
   type PersistedChatMessageV4,
-  type PersistedChatStateV7,
+  type PersistedChatStateV8,
+  type PersistedConversationWorkspaceBindingV1,
+  type PersistedWorkspaceAuthorityOutboxV1,
   type PersistedCompletionRoundReceiptV1,
   type PersistedConversationTurnV1,
   type PersistedTurnAttemptV1,
@@ -35,6 +41,9 @@ import {
   type AttemptContextDisposition,
   type TurnAttemptV1,
   type ProjectContextDestructiveTransitionV1,
+  type ConversationWorkspaceBindingV1,
+  type ConversationWorkspaceBootstrapState,
+  type WorkspaceAuthorityOutboxV1,
 } from './types';
 import {
   DEFAULT_THINKING_MODE,
@@ -60,6 +69,8 @@ import {
   orderConversationIds,
   selectActiveMessages,
   hasProjectContextDestructiveReferences,
+  hasWorkspaceAuthorityReferences,
+  MAX_WORKSPACE_AUTHORITY_OUTBOX_ENTRIES,
 } from './reducer';
 import {
   createProjectContextState,
@@ -98,18 +109,36 @@ type PersistedSchemaVersion =
   | typeof OLDER_CHAT_STATE_SCHEMA_VERSION
   | typeof ATTACHMENT_CHAT_STATE_SCHEMA_VERSION
   | typeof WORKSPACE_CHAT_STATE_SCHEMA_VERSION
+  | typeof PROJECT_CONTEXT_CHAT_STATE_SCHEMA_VERSION
   | typeof PREVIOUS_CHAT_STATE_SCHEMA_VERSION
   | typeof CHAT_STATE_SCHEMA_VERSION;
 
 function hasWorkspaceShape(schemaVersion: PersistedSchemaVersion): boolean {
   return (
     schemaVersion === WORKSPACE_CHAT_STATE_SCHEMA_VERSION ||
+    schemaVersion === PROJECT_CONTEXT_CHAT_STATE_SCHEMA_VERSION ||
     schemaVersion === PREVIOUS_CHAT_STATE_SCHEMA_VERSION ||
     schemaVersion === CHAT_STATE_SCHEMA_VERSION
   );
 }
 
 function hasProjectContextShape(
+  schemaVersion: PersistedSchemaVersion,
+): boolean {
+  return (
+    schemaVersion === PREVIOUS_CHAT_STATE_SCHEMA_VERSION ||
+    schemaVersion === PROJECT_CONTEXT_CHAT_STATE_SCHEMA_VERSION ||
+    schemaVersion === CHAT_STATE_SCHEMA_VERSION
+  );
+}
+
+function hasWorkspaceRoutingShape(
+  schemaVersion: PersistedSchemaVersion,
+): boolean {
+  return schemaVersion === CHAT_STATE_SCHEMA_VERSION;
+}
+
+function hasDestructiveJournalShape(
   schemaVersion: PersistedSchemaVersion,
 ): boolean {
   return (
@@ -400,9 +429,149 @@ function parseDestructiveTransition(
       `${path}.snapshot_sha256`,
     ),
     consentReceiptId,
-    targetProjectId,
+    targetProjectId: targetProjectId as string | null,
     createdAt,
     updatedAt,
+  };
+}
+
+function parseWorkspaceBinding(
+  value: unknown,
+  path: string,
+): ConversationWorkspaceBindingV1 {
+  const raw = exactRecord(value, path, [
+    'schema_version',
+    'workspace_id',
+    'binding_revision',
+    'project_id',
+  ]);
+  if (raw.schema_version !== CONVERSATION_WORKSPACE_BINDING_SCHEMA_VERSION) {
+    return invalid(`${path}.schema_version`, 'must equal 1');
+  }
+  if (!isCanonicalLifecycleId(raw.workspace_id)) {
+    return invalid(`${path}.workspace_id`, 'must be a canonical workspace id');
+  }
+  const bindingRevision = lifecycleEpoch(
+    raw.binding_revision,
+    `${path}.binding_revision`,
+    false,
+  );
+  if (bindingRevision >= Number.MAX_SAFE_INTEGER) {
+    return invalid(
+      `${path}.binding_revision`,
+      'must be less than Number.MAX_SAFE_INTEGER',
+    );
+  }
+  if (raw.project_id !== null && !isProjectId(raw.project_id)) {
+    return invalid(`${path}.project_id`, 'must be a valid project id or null');
+  }
+  return {
+    schemaVersion: CONVERSATION_WORKSPACE_BINDING_SCHEMA_VERSION,
+    workspaceId: raw.workspace_id as string,
+    bindingRevision,
+    projectId: raw.project_id as string | null,
+  };
+}
+
+function parseWorkspaceBootstrapState(
+  value: unknown,
+  path: string,
+): ConversationWorkspaceBootstrapState {
+  if (
+    typeof value !== 'string' ||
+    !CONVERSATION_WORKSPACE_BOOTSTRAP_STATES.includes(
+      value as ConversationWorkspaceBootstrapState,
+    )
+  ) {
+    return invalid(
+      path,
+      'must be a supported workspace bootstrap state',
+    );
+  }
+  return value as ConversationWorkspaceBootstrapState;
+}
+
+function migratedLegacyWorkspaceState(
+  value: unknown,
+  projectId: string | null,
+  path: string,
+): {
+  readonly workspaceId: string | null;
+  readonly workspaceBinding: null;
+  readonly workspaceBootstrapState: ConversationWorkspaceBootstrapState;
+} {
+  if (value === undefined || value === null) {
+    return {
+      workspaceId: null,
+      workspaceBinding: null,
+      workspaceBootstrapState:
+        projectId === null ? 'none' : 'pending_legacy_project',
+    };
+  }
+  if (typeof value !== 'string') {
+    return invalid(path, 'must be a string or null');
+  }
+  if (!isWorkspaceId(value) || !isCanonicalLifecycleId(value)) {
+    return {
+      workspaceId: null,
+      workspaceBinding: null,
+      workspaceBootstrapState: 'blocked_invalid_legacy_id',
+    };
+  }
+  return {
+    workspaceId: null,
+    workspaceBinding: null,
+    workspaceBootstrapState:
+      projectId === null
+        ? 'pending_registry_resolution'
+        : 'pending_legacy_project',
+  };
+}
+
+function parseWorkspaceOutboxEntry(
+  value: unknown,
+  path: string,
+): WorkspaceAuthorityOutboxV1 {
+  const raw = exactRecord(value, path, [
+    'schema_version',
+    'operation_id',
+    'action',
+    'workspace_id',
+    'binding_revision',
+    'clearance_receipt_id',
+    'created_at',
+  ]);
+  if (raw.schema_version !== WORKSPACE_AUTHORITY_OUTBOX_SCHEMA_VERSION) {
+    return invalid(`${path}.schema_version`, 'must equal 1');
+  }
+  if (raw.action !== 'forget' && raw.action !== 'delete_owned') {
+    return invalid(`${path}.action`, 'must be forget or delete_owned');
+  }
+  const bindingRevision = lifecycleEpoch(
+    raw.binding_revision,
+    `${path}.binding_revision`,
+    false,
+  );
+  if (bindingRevision >= Number.MAX_SAFE_INTEGER) {
+    return invalid(
+      `${path}.binding_revision`,
+      'must be less than Number.MAX_SAFE_INTEGER',
+    );
+  }
+  return {
+    schemaVersion: WORKSPACE_AUTHORITY_OUTBOX_SCHEMA_VERSION,
+    operationId: canonicalLifecycleId(raw.operation_id, `${path}.operation_id`),
+    action: raw.action,
+    workspaceId: canonicalLifecycleId(
+      raw.workspace_id,
+      `${path}.workspace_id`,
+    ),
+    bindingRevision,
+    clearanceReceiptId: canonicalLifecycleId(
+      raw.clearance_receipt_id,
+      `${path}.clearance_receipt_id`,
+    ),
+    createdAt: timestamp(raw.created_at, `${path}.created_at`),
   };
 }
 
@@ -1209,8 +1378,12 @@ function parseTurn(value: unknown, path: string): ConversationTurnV1 {
   };
 }
 
-function parseAttempt(value: unknown, path: string): TurnAttemptV1 {
-  const raw = exactRecord(value, path, [
+function parseAttempt(
+  value: unknown,
+  path: string,
+  schemaVersion: PersistedSchemaVersion,
+): TurnAttemptV1 {
+  const attemptKeys = [
     'schema_version',
     'attempt_id',
     'turn_id',
@@ -1222,6 +1395,9 @@ function parseAttempt(value: unknown, path: string): TurnAttemptV1 {
     'thinking_mode',
     'context_disposition',
     'context_project_id',
+    ...(hasWorkspaceRoutingShape(schemaVersion)
+      ? ['workspace_id', 'workspace_binding_revision']
+      : []),
     'project_context',
     'active_round',
     'rounds',
@@ -1229,7 +1405,8 @@ function parseAttempt(value: unknown, path: string): TurnAttemptV1 {
     'failure_code',
     'created_at',
     'updated_at',
-  ]);
+  ] as const;
+  const raw = exactRecord(value, path, attemptKeys);
   if (raw.schema_version !== TURN_ATTEMPT_SCHEMA_VERSION) {
     return invalid(`${path}.schema_version`, 'must equal 1');
   }
@@ -1302,6 +1479,32 @@ function parseAttempt(value: unknown, path: string): TurnAttemptV1 {
   if (Date.parse(updatedAt) < Date.parse(createdAt)) {
     return invalid(`${path}.updated_at`, 'must not precede created_at');
   }
+  let workspaceId: string | null = null;
+  let workspaceBindingRevision: number | null = null;
+  if (hasWorkspaceRoutingShape(schemaVersion)) {
+    workspaceId =
+      raw.workspace_id === null
+        ? null
+        : canonicalLifecycleId(raw.workspace_id, `${path}.workspace_id`);
+    workspaceBindingRevision =
+      raw.workspace_binding_revision === null
+        ? null
+        : lifecycleEpoch(
+            raw.workspace_binding_revision,
+            `${path}.workspace_binding_revision`,
+            false,
+          );
+    if (
+      (workspaceId === null) !== (workspaceBindingRevision === null) ||
+      (workspaceBindingRevision !== null &&
+        workspaceBindingRevision >= Number.MAX_SAFE_INTEGER)
+    ) {
+      return invalid(
+        `${path}.workspace_binding_revision`,
+        'workspace id and binding revision must be both null or both present',
+      );
+    }
+  }
   const attempt: TurnAttemptV1 = {
     schemaVersion: TURN_ATTEMPT_SCHEMA_VERSION,
     attemptId: canonicalLifecycleId(
@@ -1340,6 +1543,8 @@ function parseAttempt(value: unknown, path: string): TurnAttemptV1 {
               `${path}.context_project_id`,
               'must be a valid project id or null',
             ),
+    workspaceId,
+    workspaceBindingRevision,
     projectContext: parseAttemptProjectContext(
       raw.project_context,
       `${path}.project_context`,
@@ -1443,6 +1648,8 @@ function sameFrozenAttempt(
     left.thinkingMode === right.thinkingMode &&
     left.contextDisposition === right.contextDisposition &&
     left.contextProjectId === right.contextProjectId &&
+    left.workspaceId === right.workspaceId &&
+    left.workspaceBindingRevision === right.workspaceBindingRevision &&
     samePersistedAttemptBinding(left.projectContext, right.projectContext)
   );
 }
@@ -1452,14 +1659,19 @@ function parseConversation(
   path: string,
   schemaVersion: PersistedSchemaVersion,
 ): Conversation {
-  const raw =
-    hasProjectContextShape(schemaVersion)
-      ? exactRecord(value, path, [
+  const raw = hasProjectContextShape(schemaVersion)
+    ? exactRecord(
+        value,
+        path,
+        [
           'id',
           'project_id',
           'workspace_id',
           'runtime_context_id',
           'project_context',
+          ...(hasWorkspaceRoutingShape(schemaVersion)
+            ? ['workspace_binding', 'workspace_bootstrap_state']
+            : []),
           'title',
           'title_source',
           'model_id',
@@ -1469,8 +1681,9 @@ function parseConversation(
           'attempts',
           'created_at',
           'updated_at',
-        ])
-      : record(value, path);
+        ],
+      )
+    : record(value, path);
   if (raw.title_source !== 'auto' && raw.title_source !== 'manual') {
     return invalid(`${path}.title_source`, 'must be auto or manual');
   }
@@ -1482,19 +1695,74 @@ function parseConversation(
   if (!isConversationThinkingMode(thinkingMode)) {
     return invalid(`${path}.thinking_mode`, 'is not a supported thinking mode');
   }
-  const projectId =
-    schemaVersion === LEGACY_CHAT_STATE_SCHEMA_VERSION ? null : raw.project_id;
+  const projectId: string | null =
+    schemaVersion === LEGACY_CHAT_STATE_SCHEMA_VERSION
+      ? null
+      : (raw.project_id as string | null);
   if (projectId !== null && !isProjectId(projectId)) {
     return invalid(`${path}.project_id`, 'must be a valid project id or null');
   }
-  const workspaceId =
-    hasWorkspaceShape(schemaVersion)
-      ? raw.workspace_id
-      : null;
-  if (workspaceId !== null && !isWorkspaceId(workspaceId)) {
+  const legacyWorkspace = hasWorkspaceShape(schemaVersion)
+    ? migratedLegacyWorkspaceState(
+        raw.workspace_id,
+        projectId as string | null,
+        `${path}.workspace_id`,
+      )
+    : {
+        workspaceId: null,
+        workspaceBinding: null,
+        workspaceBootstrapState:
+          'none' as ConversationWorkspaceBootstrapState,
+      };
+  const workspaceId = hasWorkspaceRoutingShape(schemaVersion)
+    ? raw.workspace_id === null
+      ? null
+      : typeof raw.workspace_id === 'string'
+        ? raw.workspace_id
+        : invalid(`${path}.workspace_id`, 'must be a string or null')
+    : legacyWorkspace.workspaceId;
+  if (
+    workspaceId !== null &&
+    (!isWorkspaceId(workspaceId) ||
+      (hasWorkspaceRoutingShape(schemaVersion) &&
+        raw.workspace_binding === null &&
+        raw.workspace_bootstrap_state === 'none'))
+  ) {
     return invalid(
       `${path}.workspace_id`,
       'must be a valid workspace id or null',
+    );
+  }
+  const workspaceBinding = hasWorkspaceRoutingShape(schemaVersion)
+    ? raw.workspace_binding === null
+      ? null
+      : parseWorkspaceBinding(raw.workspace_binding, `${path}.workspace_binding`)
+    : legacyWorkspace.workspaceBinding;
+  const workspaceBootstrapState = hasWorkspaceRoutingShape(schemaVersion)
+    ? parseWorkspaceBootstrapState(
+        raw.workspace_bootstrap_state,
+        `${path}.workspace_bootstrap_state`,
+      )
+    : legacyWorkspace.workspaceBootstrapState;
+  if (
+    workspaceBinding !== null &&
+    (workspaceId !== workspaceBinding.workspaceId ||
+      projectId !== workspaceBinding.projectId ||
+      workspaceBootstrapState !== 'none')
+  ) {
+    return invalid(
+      `${path}.workspace_binding`,
+      'must match workspace_id/project_id and completed bootstrap state',
+    );
+  }
+  if (
+    workspaceBinding === null &&
+    workspaceId !== null &&
+    workspaceBootstrapState === 'none'
+  ) {
+    return invalid(
+      `${path}.workspace_bootstrap_state`,
+      'legacy workspace ids require a pending bootstrap state',
     );
   }
 
@@ -1551,7 +1819,7 @@ function parseConversation(
           })()
       : projectId === null
         ? null
-        : createProjectContextState(projectId);
+        : createProjectContextState(projectId as string);
   if (
     (projectId === null) !== (projectContext === null) ||
     (projectContext !== null && projectContext.projectId !== projectId)
@@ -1598,8 +1866,49 @@ function parseConversation(
     return invalid(`${path}.attempts`, 'contains too many attempts');
   }
   const attempts = attemptsRaw.map((entry, index) =>
-    parseAttempt(entry, `${path}.attempts[${index}]`),
+    parseAttempt(entry, `${path}.attempts[${index}]`, schemaVersion),
   );
+  if (
+    workspaceBootstrapState === 'none' &&
+    projectContext !== null &&
+    isProjectContextSendable(projectContext) &&
+    workspaceBinding === null
+  ) {
+    return invalid(
+      `${path}.workspace_binding`,
+      'a sendable project context requires a workspace binding',
+    );
+  }
+  for (const [attemptIndexValue, attempt] of attempts.entries()) {
+    const hasWorkspace =
+      attempt.workspaceId !== null || attempt.workspaceBindingRevision !== null;
+    if (
+      (attempt.status === 'prepared' || attempt.status === 'sending') &&
+      workspaceBootstrapState === 'none' &&
+      projectId !== null &&
+      (workspaceBinding === null ||
+        !hasWorkspace ||
+        attempt.workspaceId !== workspaceBinding.workspaceId ||
+        attempt.workspaceBindingRevision !== workspaceBinding.bindingRevision ||
+        attempt.contextProjectId !== workspaceBinding.projectId)
+    ) {
+      return invalid(
+        `${path}.attempts[${attemptIndexValue}].workspace_binding_revision`,
+        'a live attempt must freeze the conversation workspace binding',
+      );
+    }
+    if (
+      hasWorkspace &&
+      (workspaceBinding === null ||
+        attempt.workspaceId !== workspaceBinding.workspaceId ||
+        attempt.workspaceBindingRevision !== workspaceBinding.bindingRevision)
+    ) {
+      return invalid(
+        `${path}.attempts[${attemptIndexValue}].workspace_id`,
+        'must match the conversation workspace binding',
+      );
+    }
+  }
   const messageById = new Map(messages.map(message => [message.id, message]));
   const messageIndexById = new Map(
     messages.map((message, index) => [message.id, index]),
@@ -1943,8 +2252,10 @@ function parseConversation(
 
   return {
     id: boundedString(raw.id, `${path}.id`, MAX_ID_LENGTH),
-    projectId,
+    projectId: projectId as string | null,
     workspaceId,
+    workspaceBinding,
+    workspaceBootstrapState,
     runtimeContextId,
     projectContext,
     title: boundedString(raw.title, `${path}.title`, MAX_TITLE_LENGTH),
@@ -2106,6 +2417,8 @@ function toPersistedAttempt(
     thinking_mode: attempt.thinkingMode,
     context_disposition: attempt.contextDisposition,
     context_project_id: attempt.contextProjectId,
+    workspace_id: attempt.workspaceId,
+    workspace_binding_revision: attempt.workspaceBindingRevision,
     project_context:
       attempt.projectContext === null
         ? null
@@ -2140,7 +2453,7 @@ function toPersistedAttempt(
 function toPersistedDestructiveTransition(
   transition: ProjectContextDestructiveTransitionV1,
 ): NonNullable<
-  PersistedChatStateV7['project_context_destructive_transition']
+  PersistedChatStateV8['project_context_destructive_transition']
 > {
   return {
     schema_version: transition.schemaVersion,
@@ -2161,7 +2474,34 @@ function toPersistedDestructiveTransition(
   };
 }
 
-function toPersistedState(state: ChatState): PersistedChatStateV7 {
+function toPersistedWorkspaceBinding(
+  binding: ConversationWorkspaceBindingV1 | null,
+): PersistedConversationWorkspaceBindingV1 | null {
+  return binding === null
+    ? null
+    : {
+        schema_version: binding.schemaVersion,
+        workspace_id: binding.workspaceId,
+        binding_revision: binding.bindingRevision,
+        project_id: binding.projectId,
+      };
+}
+
+function toPersistedWorkspaceOutboxEntry(
+  entry: WorkspaceAuthorityOutboxV1,
+): PersistedWorkspaceAuthorityOutboxV1 {
+  return {
+    schema_version: entry.schemaVersion,
+    operation_id: entry.operationId,
+    action: entry.action,
+    workspace_id: entry.workspaceId,
+    binding_revision: entry.bindingRevision,
+    clearance_receipt_id: entry.clearanceReceiptId,
+    created_at: entry.createdAt,
+  };
+}
+
+function toPersistedState(state: ChatState): PersistedChatStateV8 {
   const conversationOrder = orderConversationIds(state.conversations);
   const conversations = conversationOrder.map(id => {
     const conversation = state.conversations[id];
@@ -2172,13 +2512,17 @@ function toPersistedState(state: ChatState): PersistedChatStateV7 {
       id: conversation.id,
       project_id: conversation.projectId,
       workspace_id: conversation.workspaceId,
+      workspace_binding: toPersistedWorkspaceBinding(
+        conversation.workspaceBinding ?? null,
+      ),
+      workspace_bootstrap_state: conversation.workspaceBootstrapState ?? 'none',
       runtime_context_id: conversation.runtimeContextId,
       project_context:
         conversation.projectContext === null
           ? null
           : (JSON.parse(
               serializeProjectContextState(conversation.projectContext),
-            ) as PersistedChatStateV7['conversations'][number]['project_context']),
+            ) as PersistedChatStateV8['conversations'][number]['project_context']),
       title: conversation.title,
       title_source: conversation.titleSource,
       model_id: conversation.modelId,
@@ -2192,6 +2536,9 @@ function toPersistedState(state: ChatState): PersistedChatStateV7 {
   });
   return {
     schema_version: CHAT_STATE_SCHEMA_VERSION,
+    workspace_authority_outbox: (state.workspaceAuthorityOutbox ?? []).map(
+      toPersistedWorkspaceOutboxEntry,
+    ),
     project_context_destructive_epoch:
       state.projectContextDestructiveEpoch,
     project_context_destructive_transition:
@@ -2227,12 +2574,13 @@ export function hydrateChatState(input: unknown): ChatState {
     decodedSchemaVersion !== OLDER_CHAT_STATE_SCHEMA_VERSION &&
     decodedSchemaVersion !== ATTACHMENT_CHAT_STATE_SCHEMA_VERSION &&
     decodedSchemaVersion !== WORKSPACE_CHAT_STATE_SCHEMA_VERSION &&
+    decodedSchemaVersion !== PROJECT_CONTEXT_CHAT_STATE_SCHEMA_VERSION &&
     decodedSchemaVersion !== PREVIOUS_CHAT_STATE_SCHEMA_VERSION &&
     decodedSchemaVersion !== CHAT_STATE_SCHEMA_VERSION
   ) {
     return invalid(
       '$.schema_version',
-      `must equal ${LEGACY_CHAT_STATE_SCHEMA_VERSION}, ${OLDER_CHAT_STATE_SCHEMA_VERSION}, ${ATTACHMENT_CHAT_STATE_SCHEMA_VERSION}, ${WORKSPACE_CHAT_STATE_SCHEMA_VERSION}, ${PREVIOUS_CHAT_STATE_SCHEMA_VERSION}, or ${CHAT_STATE_SCHEMA_VERSION}`,
+      `must equal ${LEGACY_CHAT_STATE_SCHEMA_VERSION}, ${OLDER_CHAT_STATE_SCHEMA_VERSION}, ${ATTACHMENT_CHAT_STATE_SCHEMA_VERSION}, ${WORKSPACE_CHAT_STATE_SCHEMA_VERSION}, ${PROJECT_CONTEXT_CHAT_STATE_SCHEMA_VERSION}, ${PREVIOUS_CHAT_STATE_SCHEMA_VERSION}, or ${CHAT_STATE_SCHEMA_VERSION}`,
     );
   }
   const schemaVersion = decodedSchemaVersion;
@@ -2242,9 +2590,12 @@ export function hydrateChatState(input: unknown): ChatState {
     raw = exactRecord(
       decoded,
       '$',
-      schemaVersion === CHAT_STATE_SCHEMA_VERSION
+      hasDestructiveJournalShape(schemaVersion)
         ? [
             'schema_version',
+            ...(hasWorkspaceRoutingShape(schemaVersion)
+              ? ['workspace_authority_outbox']
+              : []),
             'project_context_destructive_epoch',
             'project_context_destructive_transition',
             'active_conversation_id',
@@ -2270,15 +2621,37 @@ export function hydrateChatState(input: unknown): ChatState {
   }
 
   const destructiveEpoch =
-    schemaVersion === CHAT_STATE_SCHEMA_VERSION
+    hasDestructiveJournalShape(schemaVersion)
       ? lifecycleEpoch(
           raw.project_context_destructive_epoch,
           '$.project_context_destructive_epoch',
           true,
         )
       : 0;
+  const workspaceAuthorityOutbox = hasWorkspaceRoutingShape(schemaVersion)
+    ? array(
+        raw.workspace_authority_outbox,
+        '$.workspace_authority_outbox',
+        MAX_WORKSPACE_AUTHORITY_OUTBOX_ENTRIES,
+      ).map((entry, index) =>
+        parseWorkspaceOutboxEntry(
+          entry,
+          `$.workspace_authority_outbox[${index}]`,
+        ),
+      )
+    : [];
+  const workspaceOperationIds = new Set<string>();
+  workspaceAuthorityOutbox.forEach((entry, index) => {
+    if (workspaceOperationIds.has(entry.operationId)) {
+      invalid(
+        `$.workspace_authority_outbox[${index}].operation_id`,
+        'must be globally unique',
+      );
+    }
+    workspaceOperationIds.add(entry.operationId);
+  });
   const destructiveTransition =
-    schemaVersion === CHAT_STATE_SCHEMA_VERSION &&
+    hasDestructiveJournalShape(schemaVersion) &&
     raw.project_context_destructive_transition !== null
       ? parseDestructiveTransition(
           raw.project_context_destructive_transition,
@@ -2398,6 +2771,29 @@ export function hydrateChatState(input: unknown): ChatState {
     };
   });
 
+  if (workspaceAuthorityOutbox.length > 0) {
+    const outboxReferenceState: ChatState = {
+      schemaVersion: CHAT_STATE_SCHEMA_VERSION,
+      workspaceAuthorityOutbox,
+      projectContextDestructiveEpoch: destructiveEpoch,
+      projectContextDestructiveTransition: destructiveTransition,
+      conversations: hydratedConversations,
+      conversationOrder: orderConversationIds(hydratedConversations),
+      selectedConversationId:
+        typeof raw.active_conversation_id === 'string'
+          ? raw.active_conversation_id
+          : null,
+    };
+    workspaceAuthorityOutbox.forEach((entry, index) => {
+      if (hasWorkspaceAuthorityReferences(outboxReferenceState, entry.workspaceId)) {
+        invalid(
+          `$.workspace_authority_outbox[${index}].workspace_id`,
+          'must not be referenced by a conversation, context, or attempt',
+        );
+      }
+    });
+  }
+
   if (destructiveTransition !== null) {
     const conversation =
       hydratedConversations[destructiveTransition.conversationId];
@@ -2467,6 +2863,7 @@ export function hydrateChatState(input: unknown): ChatState {
     }
     const referenceState: ChatState = {
       schemaVersion: CHAT_STATE_SCHEMA_VERSION,
+      workspaceAuthorityOutbox,
       projectContextDestructiveEpoch: destructiveEpoch,
       projectContextDestructiveTransition: destructiveTransition,
       conversations: hydratedConversations,
@@ -2489,7 +2886,14 @@ export function hydrateChatState(input: unknown): ChatState {
     }
   }
 
-  const activeConversationId = raw.active_conversation_id;
+  const activeConversationId =
+    raw.active_conversation_id === null
+      ? null
+      : boundedString(
+          raw.active_conversation_id,
+          '$.active_conversation_id',
+          MAX_ID_LENGTH,
+        );
   if (
     activeConversationId !== null &&
     hydratedConversations[activeConversationId] === undefined
@@ -2518,6 +2922,7 @@ export function hydrateChatState(input: unknown): ChatState {
 
   return {
     schemaVersion: CHAT_STATE_SCHEMA_VERSION,
+    workspaceAuthorityOutbox,
     projectContextDestructiveEpoch: destructiveEpoch,
     projectContextDestructiveTransition: destructiveTransition,
     conversations: hydratedConversations,
