@@ -11,6 +11,7 @@
 		00E356F91AD99517003FC87E /* ProjectContextPolicyTests.mm in Sources */ = {isa = PBXBuildFile; fileRef = 00E356F81AD99517003FC87E /* ProjectContextPolicyTests.mm */; };
 		0594E09A6912F74E7DD3CD7E /* StreamEventParserTests.mm in Sources */ = {isa = PBXBuildFile; fileRef = BEAB33D4FD608B29CABFBC8D /* StreamEventParserTests.mm */; };
 		C91A46F4761A4A3EA8F34780 /* CompletionV2StreamTests.mm in Sources */ = {isa = PBXBuildFile; fileRef = 94F13054405C479482FDBF90 /* CompletionV2StreamTests.mm */; };
+		E7A2B4012C9FC4196B3C00A1 /* ContainerAnchorTests.mm in Sources */ = {isa = PBXBuildFile; fileRef = E7A2B4012C9FC4196B3C00A0 /* ContainerAnchorTests.mm */; };
 		0C80B921A6F3F58F76C31292 /* libPods-DSHMobile.a in Frameworks */ = {isa = PBXBuildFile; fileRef = 5DCACB8F33CDC322A6C60F78 /* libPods-DSHMobile.a */; };
 		0FB00ADC1B871CFEE69D14D1 /* DeviceCloneDriveUITests.m in Sources */ = {isa = PBXBuildFile; fileRef = 2CC0852742D4D62FB4839A6D /* DeviceCloneDriveUITests.m */; };
 		0FD535F546494316DAC7D8C8 /* Foundation.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = 83D13607DBF7D23FF1349ED7 /* Foundation.framework */; };
@@ -67,6 +68,7 @@
 		83D13607DBF7D23FF1349ED7 /* Foundation.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = Foundation.framework; path = System/Library/Frameworks/Foundation.framework; sourceTree = SDKROOT; };
 		BEAB33D4FD608B29CABFBC8D /* StreamEventParserTests.mm */ = {isa = PBXFileReference; includeInIndex = 1; path = StreamEventParserTests.mm; sourceTree = "<group>"; };
 		94F13054405C479482FDBF90 /* CompletionV2StreamTests.mm */ = {isa = PBXFileReference; includeInIndex = 1; path = CompletionV2StreamTests.mm; sourceTree = "<group>"; };
+		E7A2B4012C9FC4196B3C00A0 /* ContainerAnchorTests.mm */ = {isa = PBXFileReference; includeInIndex = 1; path = ContainerAnchorTests.mm; sourceTree = "<group>"; };
 		D4C400011AD99517003FC87E /* ProjectContextServiceTests.mm */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.cpp.objcpp; path = ProjectContextServiceTests.mm; sourceTree = "<group>"; };
 		D5C400011AD99517003FC87E /* CompletionV2Tests.mm */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.cpp.objcpp; path = CompletionV2Tests.mm; sourceTree = "<group>"; };
 		D6C400011AD99517003FC87E /* ProjectContextProofTests.mm */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.cpp.objcpp; path = ProjectContextProofTests.mm; sourceTree = "<group>"; };
@@ -119,6 +121,7 @@
 				3175292C9FC14967A3F72251 /* WorkspaceBootstrapFreshInstallTests.mm */,
 				BEAB33D4FD608B29CABFBC8D /* StreamEventParserTests.mm */,
 				94F13054405C479482FDBF90 /* CompletionV2StreamTests.mm */,
+				E7A2B4012C9FC4196B3C00A0 /* ContainerAnchorTests.mm */,
 			);
 			path = DSHMobileTests;
 			sourceTree = "<group>";
@@ -450,6 +453,7 @@
 				22A08E972B0819769FA015A3 /* WorkspaceBootstrapFreshInstallTests.mm in Sources */,
 				0594E09A6912F74E7DD3CD7E /* StreamEventParserTests.mm in Sources */,
 				C91A46F4761A4A3EA8F34780 /* CompletionV2StreamTests.mm in Sources */,
+				E7A2B4012C9FC4196B3C00A1 /* ContainerAnchorTests.mm in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};

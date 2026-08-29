@@ -1,9 +1,12 @@
 #import "LocalProjectAccess.h"
+#import "LocalProjectAccessInternals.h"
 
 #import <CommonCrypto/CommonDigest.h>
 
 #include <fcntl.h>
+#include <limits.h>
 #include <math.h>
+#include <stdlib.h>
 #include <sys/stat.h>
 #include <unistd.h>
 
@@ -67,6 +70,101 @@ static BOOL DSHDictionaryHasExactKeys(NSDictionary *object,
 }
 
 static BOOL DSHSameNode(const struct stat &left, const struct stat &right);
+static NSString *DSHFileSystemString(const char *path);
+
+// Canonicalizes the trusted system symlink aliases (/var -> /private/var,
+// /tmp -> /private/tmp, /etc -> /private/etc) so paths can be compared
+// against the canonical container root.
+static NSString *DSHApplyTrustedSystemAliases(NSString *path) {
+  NSDictionary<NSString *, NSString *> *trustedSystemAliases = @{
+    @"/var" : @"/private/var",
+    @"/tmp" : @"/private/tmp",
+    @"/etc" : @"/private/etc",
+  };
+  for (NSString *alias in trustedSystemAliases) {
+    if ([path isEqual:alias] ||
+        [path hasPrefix:[alias stringByAppendingString:@"/"]]) {
+      return [trustedSystemAliases[alias]
+          stringByAppendingString:[path substringFromIndex:alias.length]];
+    }
+  }
+  return path;
+}
+
+static BOOL DSHIsCanonicalUUIDText(NSString *component) {
+  if (component.length != 36) return NO;
+  NSUUID *uuid = [[NSUUID alloc] initWithUUIDString:component];
+  return uuid != nil &&
+      [uuid.UUIDString.lowercaseString isEqualToString:component.lowercaseString];
+}
+
+// True when components[index-3..index] read Containers/Data/Application/
+// <UUID> — the shared tail of both container layouts:
+//   device:    /private/var/mobile/Containers/Data/Application/<UUID>/...
+//   simulator: <...>/CoreSimulator/Devices/<uuid>/data/Containers/Data/
+//              Application/<uuid>/...
+static BOOL DSHComponentsEndWithAppContainer(NSArray<NSString *> *components,
+                                             NSUInteger index) {
+  return index >= 3 && [components[index - 3] isEqual:@"Containers"] &&
+      [components[index - 2] isEqual:@"Data"] &&
+      [components[index - 1] isEqual:@"Application"] &&
+      DSHIsCanonicalUUIDText(components[index]);
+}
+
+static NSUInteger DSHLastAppContainerComponentIndex(
+    NSArray<NSString *> *components) {
+  for (NSUInteger index = components.count; index > 0; index--) {
+    NSUInteger candidate = index - 1;
+    if (DSHComponentsEndWithAppContainer(components, candidate)) {
+      return candidate;
+    }
+  }
+  return NSNotFound;
+}
+
+static BOOL DSHComponentsHavePrefix(NSArray<NSString *> *components,
+                                    NSArray<NSString *> *prefix) {
+  if (prefix.count > components.count) return NO;
+  for (NSUInteger index = 0; index < prefix.count; index++) {
+    if (![components[index] isEqual:prefix[index]]) return NO;
+  }
+  return YES;
+}
+
+// Traversal components anywhere in the path are refused at derivation time
+// (the strict walk also refuses them, but failing early keeps the anchor
+// itself from ever being derived from a traversal-shaped path).
+static BOOL DSHComponentsContainTraversal(NSArray<NSString *> *components) {
+  for (NSString *component in components) {
+    if ([component isEqual:@"."] || [component isEqual:@".."]) return YES;
+  }
+  return NO;
+}
+
+NSUInteger DSHContainerAnchorSegmentCountForPaths(NSString *targetPath,
+                                                  NSString *containerRootPath) {
+  if (![targetPath isKindOfClass:NSString.class] ||
+      ![containerRootPath isKindOfClass:NSString.class]) {
+    return NSNotFound;
+  }
+  NSArray<NSString *> *components = targetPath.pathComponents;
+  NSArray<NSString *> *containerComponents = containerRootPath.pathComponents;
+  NSUInteger rootIndex = DSHLastAppContainerComponentIndex(containerComponents);
+  if (DSHComponentsContainTraversal(components) ||
+      DSHComponentsContainTraversal(containerComponents) ||
+      rootIndex == NSNotFound || rootIndex + 1 != containerComponents.count ||
+      !DSHComponentsHavePrefix(components, containerComponents)) {
+    return NSNotFound;
+  }
+  return rootIndex;
+}
+
+NSUInteger DSHContainerRootScanSegmentCount(NSString *path) {
+  if (![path isKindOfClass:NSString.class]) return NSNotFound;
+  NSArray<NSString *> *components = path.pathComponents;
+  if (DSHComponentsContainTraversal(components)) return NSNotFound;
+  return DSHLastAppContainerComponentIndex(components);
+}
 
 static int DSHOpenAnchoredAbsoluteDirectory(
     NSURL *url, DSHLocalProjectAccessHook hook, NSError **error) {
@@ -80,49 +178,62 @@ static int DSHOpenAnchoredAbsoluteDirectory(
         physicalPath, error != nil && *error != nil
             ? (*error).localizedDescription : nil);
   }
-  NSDictionary<NSString *, NSString *> *trustedSystemAliases = @{
-    @"/var" : @"/private/var",
-    @"/tmp" : @"/private/tmp",
-    @"/etc" : @"/private/etc",
-  };
-  for (NSString *alias in trustedSystemAliases) {
-    if ([physicalPath isEqual:alias] ||
-        [physicalPath hasPrefix:[alias stringByAppendingString:@"/"]]) {
-      physicalPath = [trustedSystemAliases[alias]
-          stringByAppendingString:[physicalPath substringFromIndex:alias.length]];
-      break;
-    }
-  }
+  physicalPath = DSHApplyTrustedSystemAliases(physicalPath);
   NSArray<NSString *> *components = physicalPath.pathComponents;
   // Real-device sandboxes forbid openat() descent from "/" (EPERM outside
   // the container), so anchoring must start at the application container.
   // Everything up to and including the container root is opened through
   // realpath-verified absolute opens; only the container-relative tail is
   // strict-walked with O_NOFOLLOW.
-  NSUInteger systemPrefixSegments = 0;
-  if (components.count > 1 && [components[1] isEqual:@"private"]) {
-    systemPrefixSegments = 2;
-    if (components.count > 2 &&
-        ([components[2] isEqual:@"var"] || [components[2] isEqual:@"tmp"] ||
-         [components[2] isEqual:@"etc"])) {
-      systemPrefixSegments = 3;
+  //
+  // The container root is derived from the system API first:
+  // NSHomeDirectory() names the app data container for both the device
+  // layout /private/var/mobile/Containers/Data/Application/<UUID>/... and
+  // the simulator layout <...>/CoreSimulator/Devices/<uuid>/data/
+  // Containers/Data/Application/<uuid>/... . realpath() canonicalizes the
+  // root where the sandbox permits it; on a real device realpath() fails on
+  // the sandbox-external prefix, so the alias-rewritten home string is used
+  // instead with the container shape as validation. Matching the container
+  // shape inside the target itself is only a last-resort fallback for when
+  // no root can be derived. A target outside the derived container is
+  // refused outright: fail closed, no cross-container access.
+  NSString *containerRootPath = nil;
+  NSString *homePath = NSHomeDirectory();
+  if (homePath.length > 0) {
+    char resolvedHome[PATH_MAX] = {};
+    if (realpath(homePath.fileSystemRepresentation, resolvedHome) != nullptr) {
+      containerRootPath = DSHFileSystemString(resolvedHome);
+    } else {
+      NSString *physicalHome = DSHApplyTrustedSystemAliases(homePath);
+      NSArray<NSString *> *homeComponents = physicalHome.pathComponents;
+      NSUInteger homeRootIndex =
+          DSHLastAppContainerComponentIndex(homeComponents);
+      if (homeRootIndex != NSNotFound &&
+          homeRootIndex + 1 == homeComponents.count) {
+        containerRootPath = physicalHome;
+      }
     }
   }
-  NSUInteger containerSegments = systemPrefixSegments;
-  // The container root is the first UUID segment under Data/Application.
-  for (NSUInteger index = systemPrefixSegments + 1;
-      index + 1 < components.count; index++) {
-    NSString *component = components[index];
-    if ([component isEqual:@"Application"] &&
-        [components[index + 1] isEqual:@"Application Support"]) {
-      containerSegments = index + 2;
-      break;
+  NSUInteger containerSegments = NSNotFound;
+  if (containerRootPath != nil) {
+    containerSegments =
+        DSHContainerAnchorSegmentCountForPaths(physicalPath, containerRootPath);
+    if (containerSegments == NSNotFound) {
+      DSHSetAccessError(error, DSHLocalProjectAccessErrorUnsafeStorage);
+      return -1;
+    }
+  } else {
+    containerSegments = DSHContainerRootScanSegmentCount(physicalPath);
+    if (containerSegments == NSNotFound) {
+      DSHSetAccessError(error, DSHLocalProjectAccessErrorUnsafeStorage);
+      return -1;
     }
   }
-  if (containerSegments + 1 > components.count) {
-    containerSegments = components.count - 1;
+  if (getenv("DSH_ANCHOR_TRACE") != nullptr) {
+    NSLog(@"[anchor-trace] container root %@, anchoring after component %lu",
+        containerRootPath ?: @"(derived from target)",
+        (unsigned long)containerSegments);
   }
-  if (containerSegments < 1) containerSegments = 1;
 
   // Phase 1: open the trusted prefix with one absolute open (no descent
   // from "/"), then verify it is the directory the path names.
