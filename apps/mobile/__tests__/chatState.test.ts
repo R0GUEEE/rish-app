@@ -4763,6 +4763,121 @@ describe('schema v6 attempts and project context', () => {
     });
   });
 
+  test.each(['prepared', 'sending'] as const)(
+    'rejects model and thinking mutations while an attempt is %s',
+    status => {
+      const store = v6Store();
+      const conversationId = store.createConversation();
+      const prepared = store.prepareTurnAttempt(
+        conversationId,
+        `freeze ${status}`,
+      )!;
+      if (status === 'sending') {
+        expect(
+          store.startAttemptRound(
+            conversationId,
+            prepared.attemptId,
+            ROUND_ID,
+            0,
+          ),
+        ).toBe(true);
+      }
+      const before = store.getState();
+      const conversationBefore = before.conversations[conversationId]!;
+
+      store.setModel(conversationId, 'deepseek-v4-pro');
+      store.setThinkingMode(conversationId, 'max');
+
+      expect(store.getState()).toBe(before);
+      expect(store.getState().conversations[conversationId]).toBe(
+        conversationBefore,
+      );
+      expect(conversationBefore).toMatchObject({
+        modelId: 'deepseek-v4-flash',
+        thinkingMode: 'high',
+        updatedAt: T1,
+      });
+    },
+  );
+
+  test('allows model and thinking mutations after terminal attempt states', () => {
+    const terminalStores: Array<{
+      store: ChatStore;
+      conversationId: string;
+    }> = [];
+
+    const failed = v6Store();
+    const failedId = failed.createConversation();
+    const failedAttempt = failed.prepareTurnAttempt(failedId, 'failed')!;
+    expect(
+      failed.failAttempt(
+        failedId,
+        failedAttempt.attemptId,
+        'E_COMPLETION_NATIVE',
+      ),
+    ).toBe(true);
+    terminalStores.push({ store: failed, conversationId: failedId });
+
+    const cancelled = v6Store();
+    const cancelledId = cancelled.createConversation();
+    const cancelledAttempt = cancelled.prepareTurnAttempt(
+      cancelledId,
+      'cancelled',
+    )!;
+    expect(
+      cancelled.cancelAttempt(cancelledId, cancelledAttempt.attemptId),
+    ).toBe(true);
+    terminalStores.push({ store: cancelled, conversationId: cancelledId });
+
+    const completed = v6Store();
+    const completedId = completed.createConversation();
+    const completedAttempt = completed.prepareTurnAttempt(
+      completedId,
+      'completed',
+    )!;
+    expect(
+      completed.startAttemptRound(
+        completedId,
+        completedAttempt.attemptId,
+        ROUND_ID,
+        0,
+      ),
+    ).toBe(true);
+    expect(
+      completed.recordAttemptRound(
+        completedId,
+        completedAttempt.attemptId,
+        schema2Receipt(completedAttempt),
+      ),
+    ).toBe(true);
+    expect(
+      completed.completeAttempt(
+        completedId,
+        completedAttempt.attemptId,
+        'done',
+        {
+          metadata: {
+            modelId: 'deepseek-v4-flash',
+            latencyMs: 1,
+            finishReason: 'stop',
+          },
+        },
+      ),
+    ).not.toBeNull();
+    terminalStores.push({ store: completed, conversationId: completedId });
+
+    terminalStores.forEach(({ store, conversationId }) => {
+      const before = store.getState();
+      store.setModel(conversationId, 'deepseek-v4-pro');
+      store.setThinkingMode(conversationId, 'max');
+      expect(store.getState()).not.toBe(before);
+      expect(store.getState().conversations[conversationId]).toMatchObject({
+        modelId: 'deepseek-v4-pro',
+        thinkingMode: 'max',
+      });
+    });
+  });
+
   test('start revalidates frozen model, visible history, and verified context', () => {
     const modelStore = v6Store();
     const modelConversation = modelStore.createConversation();
@@ -4770,17 +4885,34 @@ describe('schema v6 attempts and project context', () => {
       modelConversation,
       'model',
     )!;
-    modelStore.setModel(modelConversation, 'deepseek-v4-pro');
-    const modelBefore = modelStore.getState();
+    const legalModelState = modelStore.getState();
+    const legalModelConversation = legalModelState.conversations[
+      modelConversation
+    ]!;
+    const hostileModelState: ChatState = {
+      ...legalModelState,
+      conversations: {
+        ...legalModelState.conversations,
+        [modelConversation]: {
+          ...legalModelConversation,
+          modelId: 'deepseek-v4-pro',
+        },
+      },
+    };
+    const hostileModelStore = createChatStore({
+      initialState: hostileModelState,
+      now: () => T1,
+    });
+    const modelBefore = hostileModelStore.getState();
     expect(
-      modelStore.startAttemptRound(
+      hostileModelStore.startAttemptRound(
         modelConversation,
         modelAttempt.attemptId,
         ROUND_ID,
         0,
       ),
     ).toBe(false);
-    expect(modelStore.getState()).toBe(modelBefore);
+    expect(hostileModelStore.getState()).toBe(modelBefore);
 
     const historyStore = v6Store();
     const historyConversation = historyStore.createConversation();

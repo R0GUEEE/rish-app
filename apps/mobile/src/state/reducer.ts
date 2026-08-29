@@ -1606,6 +1606,7 @@ export function chatReducer(state: ChatState, action: ChatAction): ChatState {
       const conversation = state.conversations[action.payload.id];
       if (
         conversation === undefined ||
+        hasLiveAttempt(conversation) ||
         !isModelId(action.payload.modelId) ||
         !isCanonicalTimestamp(action.payload.at) ||
         conversation.modelId === action.payload.modelId
@@ -1631,6 +1632,7 @@ export function chatReducer(state: ChatState, action: ChatAction): ChatState {
       const conversation = state.conversations[action.payload.id];
       if (
         conversation === undefined ||
+        hasLiveAttempt(conversation) ||
         !isConversationThinkingMode(action.payload.thinkingMode) ||
         !isCanonicalTimestamp(action.payload.at) ||
         conversation.thinkingMode === action.payload.thinkingMode
