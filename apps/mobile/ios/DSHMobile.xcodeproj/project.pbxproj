@@ -10,7 +10,10 @@
 		00E356F31AD99517003FC87E /* NativeRuntimeSmokeTests.mm in Sources */ = {isa = PBXBuildFile; fileRef = 00E356F21AD99517003FC87E /* NativeRuntimeSmokeTests.mm */; };
 		00E356F91AD99517003FC87E /* ProjectContextPolicyTests.mm in Sources */ = {isa = PBXBuildFile; fileRef = 00E356F81AD99517003FC87E /* ProjectContextPolicyTests.mm */; };
 		0594E09A6912F74E7DD3CD7E /* StreamEventParserTests.mm in Sources */ = {isa = PBXBuildFile; fileRef = BEAB33D4FD608B29CABFBC8D /* StreamEventParserTests.mm */; };
+		C91A46F4761A4A3EA8F34780 /* CompletionV2StreamTests.mm in Sources */ = {isa = PBXBuildFile; fileRef = 94F13054405C479482FDBF90 /* CompletionV2StreamTests.mm */; };
 		0C80B921A6F3F58F76C31292 /* libPods-DSHMobile.a in Frameworks */ = {isa = PBXBuildFile; fileRef = 5DCACB8F33CDC322A6C60F78 /* libPods-DSHMobile.a */; };
+		0FB00ADC1B871CFEE69D14D1 /* DeviceCloneDriveUITests.m in Sources */ = {isa = PBXBuildFile; fileRef = 2CC0852742D4D62FB4839A6D /* DeviceCloneDriveUITests.m */; };
+		0FD535F546494316DAC7D8C8 /* Foundation.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = 83D13607DBF7D23FF1349ED7 /* Foundation.framework */; };
 		13B07FBF1A68108700A75B9A /* Images.xcassets in Resources */ = {isa = PBXBuildFile; fileRef = 13B07FB51A68108700A75B9A /* Images.xcassets */; };
 		22A08E972B0819769FA015A3 /* WorkspaceBootstrapFreshInstallTests.mm in Sources */ = {isa = PBXBuildFile; fileRef = 3175292C9FC14967A3F72251 /* WorkspaceBootstrapFreshInstallTests.mm */; };
 		3D97A1AB7731B11795FBBB91 /* libPods-DSHMobileTests.a in Frameworks */ = {isa = PBXBuildFile; fileRef = 6F24AC77CE20B288D7D94AA9 /* libPods-DSHMobileTests.a */; };
@@ -33,6 +36,13 @@
 			remoteGlobalIDString = 13B07F861A680F5B00A75B9A;
 			remoteInfo = DSHMobile;
 		};
+		FA37681CF3B9AA82764C666A /* PBXContainerItemProxy */ = {
+			isa = PBXContainerItemProxy;
+			containerPortal = 83CBB9F71A601CBA00E9B192 /* Project object */;
+			proxyType = 1;
+			remoteGlobalIDString = 13B07F861A680F5B00A75B9A;
+			remoteInfo = DSHMobile;
+		};
 /* End PBXContainerItemProxy section */
 
 /* Begin PBXFileReference section */
@@ -43,15 +53,20 @@
 		13B07FB51A68108700A75B9A /* Images.xcassets */ = {isa = PBXFileReference; lastKnownFileType = folder.assetcatalog; name = Images.xcassets; path = DSHMobile/Images.xcassets; sourceTree = "<group>"; };
 		13B07FB61A68108700A75B9A /* Info.plist */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = text.plist.xml; name = Info.plist; path = DSHMobile/Info.plist; sourceTree = "<group>"; };
 		13B07FB81A68108700A75B9A /* PrivacyInfo.xcprivacy */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = text.plist.xml; name = PrivacyInfo.xcprivacy; path = DSHMobile/PrivacyInfo.xcprivacy; sourceTree = "<group>"; };
+		1626FED4935CCF1E6723D53C /* DSHMobile.app */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = wrapper.application; path = DSHMobile.app; sourceTree = "<group>"; };
 		1AE248E2C179C9B712622942 /* Pods-DSHMobileTests.release.xcconfig */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = text.xcconfig; name = "Pods-DSHMobileTests.release.xcconfig"; path = "Target Support Files/Pods-DSHMobileTests/Pods-DSHMobileTests.release.xcconfig"; sourceTree = "<group>"; };
+		2CC0852742D4D62FB4839A6D /* DeviceCloneDriveUITests.m */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.c.objc; path = DeviceCloneDriveUITests.m; sourceTree = "<group>"; };
 		3175292C9FC14967A3F72251 /* WorkspaceBootstrapFreshInstallTests.mm */ = {isa = PBXFileReference; includeInIndex = 1; path = WorkspaceBootstrapFreshInstallTests.mm; sourceTree = "<group>"; };
 		3B4392A12AC88292D35C810B /* Pods-DSHMobile.debug.xcconfig */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = text.xcconfig; name = "Pods-DSHMobile.debug.xcconfig"; path = "Target Support Files/Pods-DSHMobile/Pods-DSHMobile.debug.xcconfig"; sourceTree = "<group>"; };
 		5709B34CF0A7D63546082F79 /* Pods-DSHMobile.release.xcconfig */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = text.xcconfig; name = "Pods-DSHMobile.release.xcconfig"; path = "Target Support Files/Pods-DSHMobile/Pods-DSHMobile.release.xcconfig"; sourceTree = "<group>"; };
 		5DCACB8F33CDC322A6C60F78 /* libPods-DSHMobile.a */ = {isa = PBXFileReference; explicitFileType = archive.ar; includeInIndex = 0; path = "libPods-DSHMobile.a"; sourceTree = BUILT_PRODUCTS_DIR; };
 		6F24AC77CE20B288D7D94AA9 /* libPods-DSHMobileTests.a */ = {isa = PBXFileReference; explicitFileType = archive.ar; includeInIndex = 0; path = "libPods-DSHMobileTests.a"; sourceTree = BUILT_PRODUCTS_DIR; };
+		71DFAAFF78228859B0B14FAA /* DSHMobileUITests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = DSHMobileUITests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
 		761780EC2CA45674006654EE /* AppDelegate.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; name = AppDelegate.swift; path = DSHMobile/AppDelegate.swift; sourceTree = "<group>"; };
 		81AB9BB72411601600AC10FF /* LaunchScreen.storyboard */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = file.storyboard; name = LaunchScreen.storyboard; path = DSHMobile/LaunchScreen.storyboard; sourceTree = "<group>"; };
+		83D13607DBF7D23FF1349ED7 /* Foundation.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = Foundation.framework; path = System/Library/Frameworks/Foundation.framework; sourceTree = SDKROOT; };
 		BEAB33D4FD608B29CABFBC8D /* StreamEventParserTests.mm */ = {isa = PBXFileReference; includeInIndex = 1; path = StreamEventParserTests.mm; sourceTree = "<group>"; };
+		94F13054405C479482FDBF90 /* CompletionV2StreamTests.mm */ = {isa = PBXFileReference; includeInIndex = 1; path = CompletionV2StreamTests.mm; sourceTree = "<group>"; };
 		D4C400011AD99517003FC87E /* ProjectContextServiceTests.mm */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.cpp.objcpp; path = ProjectContextServiceTests.mm; sourceTree = "<group>"; };
 		D5C400011AD99517003FC87E /* CompletionV2Tests.mm */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.cpp.objcpp; path = CompletionV2Tests.mm; sourceTree = "<group>"; };
 		D6C400011AD99517003FC87E /* ProjectContextProofTests.mm */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.cpp.objcpp; path = ProjectContextProofTests.mm; sourceTree = "<group>"; };
@@ -79,6 +94,14 @@
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
+		9CEB9A35B2ECCC7532476602 /* Frameworks */ = {
+			isa = PBXFrameworksBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				0FD535F546494316DAC7D8C8 /* Foundation.framework in Frameworks */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
 /* End PBXFrameworksBuildPhase section */
 
 /* Begin PBXGroup section */
@@ -95,6 +118,7 @@
 				D9C400011AD99517003FC87E /* LocalWorkspaceAccessTests.mm */,
 				3175292C9FC14967A3F72251 /* WorkspaceBootstrapFreshInstallTests.mm */,
 				BEAB33D4FD608B29CABFBC8D /* StreamEventParserTests.mm */,
+				94F13054405C479482FDBF90 /* CompletionV2StreamTests.mm */,
 			);
 			path = DSHMobileTests;
 			sourceTree = "<group>";
@@ -117,8 +141,18 @@
 				ED297162215061F000B7C4FE /* JavaScriptCore.framework */,
 				5DCACB8F33CDC322A6C60F78 /* libPods-DSHMobile.a */,
 				6F24AC77CE20B288D7D94AA9 /* libPods-DSHMobileTests.a */,
+				B31E7E2D48B57A1FE3A2D55C /* iOS */,
 			);
 			name = Frameworks;
+			sourceTree = "<group>";
+		};
+		350607EB0AE336315419B120 /* DSHMobileUITests */ = {
+			isa = PBXGroup;
+			children = (
+				2CC0852742D4D62FB4839A6D /* DeviceCloneDriveUITests.m */,
+			);
+			name = DSHMobileUITests;
+			path = DSHMobileUITests;
 			sourceTree = "<group>";
 		};
 		832341AE1AAA6A7D00B99B32 /* Libraries */ = {
@@ -137,6 +171,8 @@
 				83CBBA001A601CBA00E9B192 /* Products */,
 				2D16E6871FA4F8E400B85C8A /* Frameworks */,
 				BBD78D7AC51CEA395F1C20DB /* Pods */,
+				1626FED4935CCF1E6723D53C /* DSHMobile.app */,
+				350607EB0AE336315419B120 /* DSHMobileUITests */,
 			);
 			indentWidth = 2;
 			sourceTree = "<group>";
@@ -148,8 +184,17 @@
 			children = (
 				13B07F961A680F5B00A75B9A /* DSHMobile.app */,
 				00E356EE1AD99517003FC87E /* DSHMobileTests.xctest */,
+				71DFAAFF78228859B0B14FAA /* DSHMobileUITests.xctest */,
 			);
 			name = Products;
+			sourceTree = "<group>";
+		};
+		B31E7E2D48B57A1FE3A2D55C /* iOS */ = {
+			isa = PBXGroup;
+			children = (
+				83D13607DBF7D23FF1349ED7 /* Foundation.framework */,
+			);
+			name = iOS;
 			sourceTree = "<group>";
 		};
 		BBD78D7AC51CEA395F1C20DB /* Pods */ = {
@@ -206,6 +251,24 @@
 			productReference = 13B07F961A680F5B00A75B9A /* DSHMobile.app */;
 			productType = "com.apple.product-type.application";
 		};
+		C4DAFB561CF311B71EDF9602 /* DSHMobileUITests */ = {
+			isa = PBXNativeTarget;
+			buildConfigurationList = 1FBA757987B43FF4DA8E5618 /* Build configuration list for PBXNativeTarget "DSHMobileUITests" */;
+			buildPhases = (
+				F8A7226AE6B3818C1B779539 /* Sources */,
+				9CEB9A35B2ECCC7532476602 /* Frameworks */,
+				63CF89F8EFB5FDF140BCAAF0 /* Resources */,
+			);
+			buildRules = (
+			);
+			dependencies = (
+				4917810F30793A34717050DF /* PBXTargetDependency */,
+			);
+			name = DSHMobileUITests;
+			productName = DSHMobileUITests;
+			productReference = 71DFAAFF78228859B0B14FAA /* DSHMobileUITests.xctest */;
+			productType = "com.apple.product-type.bundle.ui-testing";
+		};
 /* End PBXNativeTarget section */
 
 /* Begin PBXProject section */
@@ -220,6 +283,10 @@
 					};
 					13B07F861A680F5B00A75B9A = {
 						LastSwiftMigration = 1120;
+					};
+					C4DAFB561CF311B71EDF9602 = {
+						CreatedOnToolsVersion = 16.4;
+						TestTargetID = 13B07F861A680F5B00A75B9A;
 					};
 				};
 			};
@@ -238,6 +305,7 @@
 			targets = (
 				13B07F861A680F5B00A75B9A /* DSHMobile */,
 				00E356ED1AD99517003FC87E /* DSHMobileTests */,
+				C4DAFB561CF311B71EDF9602 /* DSHMobileUITests */,
 			);
 		};
 /* End PBXProject section */
@@ -257,6 +325,13 @@
 				81AB9BB82411601600AC10FF /* LaunchScreen.storyboard in Resources */,
 				13B07FBF1A68108700A75B9A /* Images.xcassets in Resources */,
 				40D5B5F596262FD65CF7C474 /* PrivacyInfo.xcprivacy in Resources */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		63CF89F8EFB5FDF140BCAAF0 /* Resources */ = {
+			isa = PBXResourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -374,6 +449,7 @@
 				D9C400021AD99517003FC87E /* LocalWorkspaceAccessTests.mm in Sources */,
 				22A08E972B0819769FA015A3 /* WorkspaceBootstrapFreshInstallTests.mm in Sources */,
 				0594E09A6912F74E7DD3CD7E /* StreamEventParserTests.mm in Sources */,
+				C91A46F4761A4A3EA8F34780 /* CompletionV2StreamTests.mm in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -385,6 +461,14 @@
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
+		F8A7226AE6B3818C1B779539 /* Sources */ = {
+			isa = PBXSourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				0FB00ADC1B871CFEE69D14D1 /* DeviceCloneDriveUITests.m in Sources */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
 /* End PBXSourcesBuildPhase section */
 
 /* Begin PBXTargetDependency section */
@@ -392,6 +476,12 @@
 			isa = PBXTargetDependency;
 			target = 13B07F861A680F5B00A75B9A /* DSHMobile */;
 			targetProxy = 00E356F41AD99517003FC87E /* PBXContainerItemProxy */;
+		};
+		4917810F30793A34717050DF /* PBXTargetDependency */ = {
+			isa = PBXTargetDependency;
+			name = DSHMobile;
+			target = 13B07F861A680F5B00A75B9A /* DSHMobile */;
+			targetProxy = FA37681CF3B9AA82764C666A /* PBXContainerItemProxy */;
 		};
 /* End PBXTargetDependency section */
 
@@ -556,6 +646,21 @@
 			};
 			name = Release;
 		};
+		4647F2489814822AE97B974D /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				CODE_SIGN_IDENTITY = "Apple Development";
+				DEVELOPMENT_TEAM = "";
+				GENERATE_INFOPLIST_FILE = YES;
+				IPHONEOS_DEPLOYMENT_TARGET = 15.1;
+				PRODUCT_BUNDLE_IDENTIFIER = dev.zseven.dsh.mobile.uitests;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SWIFT_VERSION = 5.0;
+				TARGETED_DEVICE_FAMILY = "1,2";
+				TEST_TARGET_NAME = DSHMobile;
+			};
+			name = Release;
+		};
 		83CBBA201A601CBA00E9B192 /* Debug */ = {
 			isa = XCBuildConfiguration;
 			buildSettings = {
@@ -712,6 +817,21 @@
 			};
 			name = Release;
 		};
+		BE15F0966F95DD551330367F /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				CODE_SIGN_IDENTITY = "Apple Development";
+				DEVELOPMENT_TEAM = "";
+				GENERATE_INFOPLIST_FILE = YES;
+				IPHONEOS_DEPLOYMENT_TARGET = 15.1;
+				PRODUCT_BUNDLE_IDENTIFIER = dev.zseven.dsh.mobile.uitests;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SWIFT_VERSION = 5.0;
+				TARGETED_DEVICE_FAMILY = "1,2";
+				TEST_TARGET_NAME = DSHMobile;
+			};
+			name = Debug;
+		};
 /* End XCBuildConfiguration section */
 
 /* Begin XCConfigurationList section */
@@ -729,6 +849,15 @@
 			buildConfigurations = (
 				13B07F941A680F5B00A75B9A /* Debug */,
 				13B07F951A680F5B00A75B9A /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Release;
+		};
+		1FBA757987B43FF4DA8E5618 /* Build configuration list for PBXNativeTarget "DSHMobileUITests" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				4647F2489814822AE97B974D /* Release */,
+				BE15F0966F95DD551330367F /* Debug */,
 			);
 			defaultConfigurationIsVisible = 0;
 			defaultConfigurationName = Release;

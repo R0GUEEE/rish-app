@@ -38,6 +38,18 @@
                ReferencedContainer = "container:DSHMobile.xcodeproj">
             </BuildableReference>
          </TestableReference>
+			<TestableReference
+				skipped = "NO"
+				parallelizable = "NO"
+			>
+				<BuildableReference
+					BuildableIdentifier = "primary"
+					BlueprintIdentifier = "C4DAFB561CF311B71EDF9602"
+					BuildableName = "DSHMobileUITests.xctest"
+					BlueprintName = "DSHMobileUITests"
+					ReferencedContainer = "container:DSHMobile.xcodeproj">
+				</BuildableReference>
+			</TestableReference>
       </Testables>
    </TestAction>
    <LaunchAction
