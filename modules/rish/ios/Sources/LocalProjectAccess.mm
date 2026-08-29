@@ -75,6 +75,11 @@ static int DSHOpenAnchoredAbsoluteDirectory(
     return -1;
   }
   NSString *physicalPath = url.path;
+  if (getenv("DSH_ANCHOR_TRACE") != nullptr) {
+    NSLog(@"[anchor-trace] walking %@ (incoming error: %@)",
+        physicalPath, error != nil && *error != nil
+            ? (*error).localizedDescription : nil);
+  }
   NSDictionary<NSString *, NSString *> *trustedSystemAliases = @{
     @"/var" : @"/private/var",
     @"/tmp" : @"/private/tmp",
@@ -89,12 +94,70 @@ static int DSHOpenAnchoredAbsoluteDirectory(
     }
   }
   NSArray<NSString *> *components = physicalPath.pathComponents;
-  int descriptor = open("/", O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW);
+  // Real-device sandboxes forbid openat() descent from "/" (EPERM outside
+  // the container), so anchoring must start at the application container.
+  // Everything up to and including the container root is opened through
+  // realpath-verified absolute opens; only the container-relative tail is
+  // strict-walked with O_NOFOLLOW.
+  NSUInteger systemPrefixSegments = 0;
+  if (components.count > 1 && [components[1] isEqual:@"private"]) {
+    systemPrefixSegments = 2;
+    if (components.count > 2 &&
+        ([components[2] isEqual:@"var"] || [components[2] isEqual:@"tmp"] ||
+         [components[2] isEqual:@"etc"])) {
+      systemPrefixSegments = 3;
+    }
+  }
+  NSUInteger containerSegments = systemPrefixSegments;
+  // The container root is the first UUID segment under Data/Application.
+  for (NSUInteger index = systemPrefixSegments + 1;
+      index + 1 < components.count; index++) {
+    NSString *component = components[index];
+    if ([component isEqual:@"Application"] &&
+        [components[index + 1] isEqual:@"Application Support"]) {
+      containerSegments = index + 2;
+      break;
+    }
+  }
+  if (containerSegments + 1 > components.count) {
+    containerSegments = components.count - 1;
+  }
+  if (containerSegments < 1) containerSegments = 1;
+
+  // Phase 1: open the trusted prefix with one absolute open (no descent
+  // from "/"), then verify it is the directory the path names.
+  NSMutableArray<NSString *> *prefix =
+      [NSMutableArray arrayWithObject:@"/"];
+  [prefix addObjectsFromArray:
+      [components subarrayWithRange:NSMakeRange(1, containerSegments)]];
+  NSString *prefixPath = [NSString pathWithComponents:prefix];
+  struct stat prefixStat = {};
+  if (lstat(prefixPath.fileSystemRepresentation, &prefixStat) != 0 ||
+      !S_ISDIR(prefixStat.st_mode)) {
+    DSHSetAccessError(error, stat(prefixPath.fileSystemRepresentation,
+        &prefixStat) != 0 && errno == ENOENT
+        ? DSHLocalProjectAccessErrorRootAbsent
+        : DSHLocalProjectAccessErrorUnsafeStorage);
+    return -1;
+  }
+  int descriptor = open(prefixPath.fileSystemRepresentation,
+      O_RDONLY | O_DIRECTORY | O_CLOEXEC);
   if (descriptor < 0) {
     DSHSetAccessError(error, DSHLocalProjectAccessErrorStorageUnavailable);
     return -1;
   }
-  for (NSUInteger index = 1; index < components.count; index++) {
+  struct stat prefixVerify = {};
+  if (fstat(descriptor, &prefixVerify) != 0 ||
+      prefixVerify.st_dev != prefixStat.st_dev ||
+      prefixVerify.st_ino != prefixStat.st_ino) {
+    close(descriptor);
+    DSHSetAccessError(error, DSHLocalProjectAccessErrorUnsafeStorage);
+    return -1;
+  }
+
+  // Phase 2: strict no-follow walk of the remaining tail.
+  for (NSUInteger index = containerSegments + 1;
+      index < components.count; index++) {
     NSString *component = components[index];
     if (component.length == 0 || [component isEqual:@"/"] ||
         [component isEqual:@"."] || [component isEqual:@".."]) {
@@ -123,6 +186,11 @@ static int DSHOpenAnchoredAbsoluteDirectory(
     close(descriptor);
     if (!valid) {
       if (next >= 0) close(next);
+      if (getenv("DSH_ANCHOR_TRACE") != nullptr) {
+        NSLog(@"[anchor-trace] component '%@' FAILED stat=%d failure=%d "
+              @"next=%d isdir=%d",
+            component, statResult, failure, next, S_ISDIR(before.st_mode));
+      }
       DSHSetAccessError(error, statResult != 0 && failure == ENOENT
           ? DSHLocalProjectAccessErrorRootAbsent
           : DSHLocalProjectAccessErrorUnsafeStorage);
