@@ -13,7 +13,15 @@ export type MirrorApplyResult = {
   schema_version: 1;
   status: 'staged';
   staged_at: string;
-  guest_runtime_mounted: false;
+  /**
+   * True only while a LocalGuestModule session is genuinely booted in this
+   * process. It does NOT mean the staged mirror configuration below reached
+   * the guest: the interpreter has no block-device injection, so the guest
+   * keeps using the offline repository baked into its initramfs at build
+   * time. See docs/mobile-guest-runtime.md.
+   */
+  guest_runtime_mounted: boolean;
+  staged_config_enters_guest: false;
   root: 'rish-guest-overlay';
   entries: MirrorApplyEntry[];
 };
