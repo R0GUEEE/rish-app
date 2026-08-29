@@ -53,6 +53,20 @@ export type RunAgentTurnDeps = {
       outcome: 'ok' | 'failed' | 'denied';
     }>,
   ) => void;
+  /** Appends one durable SessionEvent row for this attempt. */
+  emitSessionEvent?: (event: {
+    event_id: string;
+    attempt_id: string;
+    seq: number;
+    kind: 'assistant_reasoning' | 'assistant_text' | 'tool_call' | 'tool_result';
+    created_at: string;
+    text?: string;
+    tool_call_id?: string;
+    tool_name?: string;
+    arguments_json?: string;
+    outcome?: 'ok' | 'failed' | 'denied';
+    output_digest?: string;
+  }) => void;
 };
 
 export type RunAgentTurnOptions = {
@@ -103,6 +117,26 @@ export async function runAgentTurn(
 ): Promise<AgentTurnResult> {
   const { deps } = options;
   let cancelled = false;
+  const attemptId =
+    options.requestId ||
+    `attempt-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
+  let eventSeq = 0;
+  const emitEvent = (
+    event: Omit<
+      Parameters<NonNullable<RunAgentTurnDeps['emitSessionEvent']>>[0],
+      'event_id' | 'attempt_id' | 'seq' | 'created_at'
+    >,
+  ): void => {
+    if (deps.emitSessionEvent === undefined) return;
+    deps.emitSessionEvent({
+      ...event,
+      event_id: `${attemptId}-${eventSeq}`,
+      attempt_id: attemptId,
+      seq: eventSeq,
+      created_at: new Date().toISOString(),
+    });
+    eventSeq += 1;
+  };
 
   // Wrapped so TypeScript keeps the wide nullable type across closures.
   const ref: { current: AgentLoopState | null } = { current: null };
@@ -173,6 +207,17 @@ export async function runAgentTurn(
             ],
             tools: command.tools,
           });
+          for (const call of result.tool_calls) {
+            emitEvent({
+              kind: 'tool_call',
+              tool_call_id: call.id,
+              tool_name: call.name,
+              arguments_json: call.arguments,
+            });
+          }
+          if (result.tool_calls.length === 0 && result.text.trim().length > 0) {
+            emitEvent({ kind: 'assistant_text', text: result.text });
+          }
           reduceEvent({
             kind: 'model_result',
             text: result.text,
@@ -196,6 +241,12 @@ export async function runAgentTurn(
           command.call.name,
           command.call.arguments,
         );
+        emitEvent({
+          kind: 'tool_result',
+          tool_call_id: command.call.id,
+          outcome: execution.ok ? 'ok' : 'failed',
+          output_digest: execution.outputDigest,
+        });
         reduceEvent({
           kind: 'tool_outcome',
           callId: command.call.id,

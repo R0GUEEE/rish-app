@@ -13,6 +13,7 @@ function makeDeps(overrides: Partial<Deps> = {}): Deps {
     requestApproval: jest.fn(async () => true),
     onTrace: jest.fn(),
     recordTrace: jest.fn(),
+    emitSessionEvent: jest.fn(),
     ...overrides,
   };
 }
@@ -85,6 +86,19 @@ test('executes read-only tools then reports outcomes back in the follow-up round
     { name: 'read_file', arguments_sha256: expect.any(String),
       outcome: 'ok' },
   ]);
+  // SessionEvent trajectory: tool_call before tool_result, then text.
+  const kinds = (deps.emitSessionEvent as jest.Mock).mock.calls.map(
+    call => (call[0] as { kind: string }).kind,
+  );
+  expect(kinds).toEqual(
+    expect.arrayContaining(['tool_call', 'tool_result', 'assistant_text']),
+  );
+  const callRow = (deps.emitSessionEvent as jest.Mock).mock.calls.find(
+    call => (call[0] as { kind: string }).kind === 'tool_call',
+  )?.[0] as { tool_call_id?: string; tool_name?: string; arguments_json?: string };
+  expect(callRow.tool_call_id).toBe('c1');
+  expect(callRow.tool_name).toBe('read_file');
+  expect(callRow.arguments_json).toBe('{"path":"a"}');
   expect(deps.modelCalls).toHaveBeenCalledTimes(2);
   const followupCall = (deps.modelCalls as jest.Mock).mock.calls[1][0];
   const lastUser = followupCall.history[followupCall.history.length - 1];

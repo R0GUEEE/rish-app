@@ -76,6 +76,19 @@ export type CompletionControllerOutcome = {
 };
 
 export type CompletionControllerDependencies = {
+  /**
+   * Durable session-event hook: called exactly once per completed round
+   * with the reasoning/text trajectory rows. Optional; omitted in tests
+   * unless asserted.
+   */
+  onSessionEvent?: (event: {
+    event_id: string;
+    attempt_id: string;
+    seq: number;
+    kind: 'assistant_reasoning' | 'assistant_text';
+    created_at: string;
+    text: string;
+  }) => void;
   readonly chat: ChatStore;
   readonly persistCurrent: () => Promise<SessionDurabilityResult>;
   readonly completeRoundV2: (
@@ -262,8 +275,30 @@ export function createCompletionController(
   let pendingTerminal: PendingTerminalPersistence | null = null;
   let retryPersistenceInFlight = false;
   let retryCommitInFlight = false;
+  let sessionEventSeq = 0;
   let lastCancellationCommitted = true;
   const listeners = new Set<(next: CompletionControllerState) => void>();
+
+  const emitSessionEvent = (
+    attemptId: string,
+    kind: 'assistant_reasoning' | 'assistant_text',
+    text: string,
+  ): void => {
+    if (dependencies.onSessionEvent === undefined) return;
+    try {
+      dependencies.onSessionEvent({
+        event_id: `${attemptId}-${sessionEventSeq}`,
+        attempt_id: attemptId,
+        seq: sessionEventSeq,
+        kind,
+        created_at: new Date().toISOString(),
+        text,
+      });
+      sessionEventSeq += 1;
+    } catch {
+      // Trajectory emission must never affect the completion flow.
+    }
+  };
 
   const publish = (next: Omit<CompletionControllerState, 'epoch'>) => {
     state = { ...next, epoch };
@@ -631,6 +666,10 @@ export function createCompletionController(
         'E_COMPLETION_EMPTY_RESPONSE',
       );
     }
+    if (result.reasoning.length > 0) {
+      emitSessionEvent(attemptId, 'assistant_reasoning', result.reasoning);
+    }
+    emitSessionEvent(attemptId, 'assistant_text', result.text);
     const assistantId = dependencies.chat.completeAttempt(
       conversationId,
       attemptId,

@@ -105,6 +105,7 @@ type Fixture = {
   readonly cancelRoundV2: jest.Mock;
   readonly cancelRoundV3: jest.Mock;
   readonly createRoundId: jest.Mock<string, []>;
+  readonly onSessionEvent: jest.Mock;
 };
 
 function fixture(options: {
@@ -116,6 +117,7 @@ function fixture(options: {
   cancelRoundV2?: Fixture['cancelRoundV2'];
   cancelRoundV3?: Fixture['cancelRoundV3'];
   createRoundId?: Fixture['createRoundId'];
+  onSessionEvent?: Fixture['onSessionEvent'];
 } = {}): Fixture {
   const store = options.store ?? storeWithIds();
   const durability = options.durability ?? [
@@ -137,6 +139,8 @@ function fixture(options: {
   const cancelRoundV3 =
     options.cancelRoundV3 ?? jest.fn(async () => undefined);
   const createRoundId = options.createRoundId ?? jest.fn(() => ROUND_ID);
+  const onSessionEvent =
+    options.onSessionEvent ?? jest.fn();
   const controller = createCompletionController({
     chat: store,
     persistCurrent,
@@ -145,6 +149,7 @@ function fixture(options: {
     cancelRoundV2,
     cancelRoundV3,
     createRoundId,
+    onSessionEvent,
   });
   return {
     store,
@@ -155,6 +160,7 @@ function fixture(options: {
     cancelRoundV2,
     cancelRoundV3,
     createRoundId,
+    onSessionEvent,
   };
 }
 
@@ -1316,4 +1322,28 @@ describe('transactional completion controller', () => {
       resumable.controller.resume(resumableId, ATTEMPT_ID),
     ).resolves.toMatchObject({ status: 'completed' });
   });
+});
+
+test('completing a round emits reasoning before text session events', async () => {
+  const events: Array<{ kind: string; seq: number; text: string }> = [];
+  const f = fixture({
+    onSessionEvent: jest.fn((event: { kind: string; seq: number; text: string }) => {
+      events.push(event);
+    }),
+  });
+  f.store.createConversation();
+  const conversationId = f.store.getState().selectedConversationId;
+  if (conversationId === null) throw new Error('no conversation');
+  await f.controller.send({ conversationId, text: 'hello', attachments: [] });
+
+  const kinds = events.map(e => e.kind);
+  expect(kinds).toContain('assistant_text');
+  expect(events.map(e => e.seq)).toEqual(
+    events.map((_, i) => i),
+  );
+  const textIdx = kinds.indexOf('assistant_text');
+  const reasoningIdx = kinds.indexOf('assistant_reasoning');
+  if (reasoningIdx !== -1) {
+    expect(reasoningIdx).toBeLessThan(textIdx);
+  }
 });
