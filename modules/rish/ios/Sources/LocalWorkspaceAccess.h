@@ -43,7 +43,17 @@ FOUNDATION_EXPORT BOOL DSHLocalWorkspaceValidateBindingRevisionAdvance(
                                   clock:(DSHLocalWorkspaceClock)clock
                           UUIDGenerator:(DSHLocalWorkspaceUUIDGenerator)UUIDGenerator
                          legacyResolver:(DSHLocalWorkspaceLegacyResolver)legacyResolver
-                              faultHook:(nullable DSHLocalWorkspaceFaultHook)faultHook
+                              faultHook:(nullable DSHLocalWorkspaceFaultHook)faultHook;
+
+/// Testable/application-owned Documents container. Production callers should
+/// use the convenience initializer above, which resolves NSDocumentDirectory
+/// internally; tests inject a temporary container to avoid touching user data.
+- (instancetype)initWithPrivateRootURL:(NSURL *)privateRootURL
+                     documentsRootURL:(nullable NSURL *)documentsRootURL
+                                  clock:(DSHLocalWorkspaceClock)clock
+                         UUIDGenerator:(DSHLocalWorkspaceUUIDGenerator)UUIDGenerator
+                        legacyResolver:(DSHLocalWorkspaceLegacyResolver)legacyResolver
+                             faultHook:(nullable DSHLocalWorkspaceFaultHook)faultHook
     NS_DESIGNATED_INITIALIZER;
 
 - (BOOL)ensurePrivateLayoutWithError:(NSError **)error;
@@ -69,6 +79,38 @@ FOUNDATION_EXPORT BOOL DSHLocalWorkspaceValidateBindingRevisionAdvance(
                                          displayName:(NSString *)displayName
                                           operationId:(NSString *)operationId
                                                 error:(NSError **)error;
+
+/// Task B Rish-owned Files-visible root creation. The native implementation
+/// accepts only the bounded fields from the bridge create request and returns
+/// metadata-only WorkspaceDescriptorV2 dictionaries.
+- (nullable NSDictionary *)createRishOwnedWorkspaceWithDisplayName:
+    (NSString *)displayName
+                                                    operationId:
+                                                        (NSString *)operationId
+                                                          error:(NSError **)error;
+
+/// Destructive authority operations remain fail-closed until the schema-8
+/// clearance receipt/outbox is mounted. These declarations keep that boundary
+/// explicit for native callers and focused tests.
+- (nullable NSDictionary *)forgetWorkspaceId:(NSString *)workspaceId
+                       expectedBindingRevision:(NSNumber *)revision
+                                     operationId:(NSString *)operationId
+                               clearanceReceiptId:(NSString *)clearanceReceiptId
+                                            error:(NSError **)error;
+
+- (nullable NSDictionary *)prepareDeleteOwnedContentForWorkspaceId:
+    (NSString *)workspaceId
+                       expectedBindingRevision:(NSNumber *)revision
+                           clearanceReceiptId:(NSString *)clearanceReceiptId
+                                        error:(NSError **)error;
+
+- (nullable NSDictionary *)deleteOwnedContentForWorkspaceId:
+    (NSString *)workspaceId
+                       expectedBindingRevision:(NSNumber *)revision
+                                     operationId:(NSString *)operationId
+                               clearanceReceiptId:(NSString *)clearanceReceiptId
+                                  confirmationId:(NSString *)confirmationId
+                                            error:(NSError **)error;
 
 @end
 

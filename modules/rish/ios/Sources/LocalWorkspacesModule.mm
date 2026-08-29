@@ -3,6 +3,8 @@
 
 #import "LocalWorkspaceAccess.h"
 
+#include <CoreFoundation/CoreFoundation.h>
+
 @interface LocalWorkspacesModule : NSObject <RCTBridgeModule>
 @property(nonatomic, strong) dispatch_queue_t workspaceQueue;
 @property(nonatomic, strong) DSHLocalWorkspaceAccess *access;
@@ -77,7 +79,19 @@ static NSString *LWErrorMessage(NSError *error) {
       : @"Workspace operation is unavailable.";
 }
 
+static BOOL LWSchemaVersionIsOne(id value) {
+  return [value isKindOfClass:NSNumber.class] &&
+         CFGetTypeID((__bridge CFTypeRef)value) != CFBooleanGetTypeID() &&
+         [value isEqual:@1];
+}
+
 - (void)reject:(RCTPromiseRejectBlock)reject error:(NSError *)error {
+  if (error == nil) {
+    reject(@"E_WORKSPACE_UNAVAILABLE",
+           @"Workspace operation is unavailable.",
+           nil);
+    return;
+  }
   reject(LWErrorCode(error), LWErrorMessage(error), nil);
 }
 
@@ -133,7 +147,7 @@ RCT_REMAP_METHOD(resolveMetadata,
     ];
     id revision = request[@"expected_binding_revision"];
     if (![self hasExactKeys:request keys:keys] ||
-        ![request[@"schema_version"] isEqual:@1] ||
+        !LWSchemaVersionIsOne(request[@"schema_version"]) ||
         (revision != NSNull.null && ![revision isKindOfClass:NSNumber.class])) {
       NSError *error = [NSError errorWithDomain:
           @"LocalWorkspaces"
@@ -188,7 +202,7 @@ RCT_REMAP_METHOD(queryOperation,
         ? requestValue
         : nil;
     if (![self hasExactKeys:request keys:@[ @"schema_version", @"operation_id" ]] ||
-        ![request[@"schema_version"] isEqual:@1]) {
+        !LWSchemaVersionIsOne(request[@"schema_version"])) {
       NSError *error = [NSError errorWithDomain:
           @"LocalWorkspaces"
                               code:1
@@ -211,15 +225,47 @@ RCT_REMAP_METHOD(queryOperation,
   });
 }
 
-// A2 deliberately exposes the future mutator names but keeps them fail-closed
-// until Documents, picker lifetime, and project/chat clearance are implemented.
+// Task B exposes only the Rish-owned create vertical slice. Picker/import/
+// regrant and destructive authority mutations remain fail-closed until their
+// bounded native lifetimes and schema-8 clearance receipts are implemented.
 RCT_REMAP_METHOD(create,
                  createWorkspaceRequest:(id)requestValue
                  resolver:(RCTPromiseResolveBlock)resolve
                  rejecter:(RCTPromiseRejectBlock)reject) {
-  (void)requestValue;
-  (void)resolve;
-  [self rejectUnavailable:reject];
+  dispatch_async(self.workspaceQueue, ^{
+    NSDictionary *request = [requestValue isKindOfClass:NSDictionary.class]
+        ? requestValue
+        : nil;
+    NSArray<NSString *> *keys = @[
+      @"schema_version", @"display_name", @"operation_id",
+    ];
+    if (![self hasExactKeys:request keys:keys] ||
+        !LWSchemaVersionIsOne(request[@"schema_version"]) ||
+        ![request[@"display_name"] isKindOfClass:NSString.class] ||
+        ![request[@"operation_id"] isKindOfClass:NSString.class]) {
+      NSError *error = [NSError errorWithDomain:@"LocalWorkspaces"
+                                            code:1
+                                        userInfo:@{
+                                          @"code" : @"E_WORKSPACE_INVALID",
+                                          NSLocalizedDescriptionKey :
+                                              @"Workspace request is invalid.",
+                                        }];
+      [self reject:reject error:error];
+      return;
+    }
+    NSError *error = nil;
+    NSDictionary *descriptor =
+        [self.access createRishOwnedWorkspaceWithDisplayName:
+                       request[@"display_name"]
+                                               operationId:
+                                                   request[@"operation_id"]
+                                                     error:&error];
+    if (descriptor == nil) {
+      [self reject:reject error:error];
+      return;
+    }
+    resolve(descriptor);
+  });
 }
 
 RCT_REMAP_METHOD(presentFolderPicker,

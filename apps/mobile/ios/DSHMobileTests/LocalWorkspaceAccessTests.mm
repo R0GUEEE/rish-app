@@ -8,6 +8,21 @@
 #include <math.h>
 #include <sys/stat.h>
 
+typedef void (^DSHLWResolve)(id value);
+typedef void (^DSHLWReject)(NSString *code, NSString *message, NSError *error);
+
+@protocol DSHLocalWorkspacesModuleTesting <NSObject>
+- (void)createWorkspaceRequest:(id)request
+                       resolver:(DSHLWResolve)resolve
+                       rejecter:(DSHLWReject)reject;
+- (void)resolveMetadataRequest:(id)request
+                        resolver:(DSHLWResolve)resolve
+                        rejecter:(DSHLWReject)reject;
+- (void)queryOperationRequest:(id)request
+                       resolver:(DSHLWResolve)resolve
+                       rejecter:(DSHLWReject)reject;
+@end
+
 @interface LocalWorkspaceAccessTests : XCTestCase
 @property(nonatomic, strong) NSURL *rootURL;
 @property(nonatomic, strong) NSDate *now;
@@ -81,9 +96,20 @@ static NSString *const DSHDigestB =
 - (DSHLocalWorkspaceAccess *)accessWithRoot:(NSURL *)root
                                        fault:(nullable DSHLocalWorkspaceFaultHook)fault
                                UUIDGenerator:(DSHLocalWorkspaceUUIDGenerator)UUIDGenerator {
+  return [self accessWithRoot:root
+                documentsRootURL:nil
+                         fault:fault
+                   UUIDGenerator:UUIDGenerator];
+}
+
+- (DSHLocalWorkspaceAccess *)accessWithRoot:(NSURL *)root
+                           documentsRootURL:(nullable NSURL *)documentsRootURL
+                                      fault:(nullable DSHLocalWorkspaceFaultHook)fault
+                              UUIDGenerator:(DSHLocalWorkspaceUUIDGenerator)UUIDGenerator {
   __weak LocalWorkspaceAccessTests *weakSelf = self;
   return [[DSHLocalWorkspaceAccess alloc]
       initWithPrivateRootURL:root
+          documentsRootURL:documentsRootURL
       clock:^NSDate *{
         return weakSelf.now;
       }
@@ -119,6 +145,15 @@ static NSString *const DSHDigestB =
   return [self accessWithRoot:self.rootURL fault:nil];
 }
 
+- (id<DSHLocalWorkspacesModuleTesting>)workspaceModuleWithAccess:
+    (DSHLocalWorkspaceAccess *)access {
+  Class cls = NSClassFromString(@"LocalWorkspacesModule");
+  XCTAssertNotNil(cls);
+  id module = [[(id)cls alloc] init];
+  [module setValue:access forKey:@"access"];
+  return module;
+}
+
 - (NSURL *)registryURLForRoot:(NSURL *)root {
   return [[root URLByAppendingPathComponent:@"local-workspaces"
                                 isDirectory:YES]
@@ -135,6 +170,29 @@ static NSString *const DSHDigestB =
   return [[root URLByAppendingPathComponent:@"local-workspaces"
                                 isDirectory:YES]
       URLByAppendingPathComponent:@"authority-journal-v1.json"];
+}
+
+- (NSURL *)documentsRootForRoot:(NSURL *)root {
+  return [root URLByAppendingPathComponent:@"Documents" isDirectory:YES];
+}
+
+- (NSURL *)ownedWorkspacesRootForRoot:(NSURL *)root {
+  return [[self documentsRootForRoot:root]
+      URLByAppendingPathComponent:@"Rish Workspaces" isDirectory:YES];
+}
+
+- (NSDictionary *)registryObjectForRoot:(NSURL *)root {
+  NSData *data = [NSData dataWithContentsOfURL:[self registryURLForRoot:root]];
+  return data == nil ? nil : [NSJSONSerialization JSONObjectWithData:data
+                                                               options:0
+                                                                 error:nil];
+}
+
+- (NSDictionary *)recordForRoot:(NSURL *)root workspaceId:(NSString *)workspaceId {
+  for (NSDictionary *record in [self registryObjectForRoot:root][@"records"]) {
+    if ([record[@"workspace_id"] isEqual:workspaceId]) return record;
+  }
+  return nil;
 }
 
 - (NSURL *)authorityURLForRoot:(NSURL *)root
@@ -156,6 +214,24 @@ static NSString *const DSHDigestB =
     [result appendFormat:@"%02x", digest[index]];
   }
   return result;
+}
+
+- (NSString *)createRequestDigestForDisplayName:(NSString *)displayName {
+  NSDictionary *request = @{
+    @"operation": @"create",
+    @"display_name": displayName,
+  };
+  return [self sha256ForData:[self canonicalData:request]];
+}
+
+- (NSString *)bootstrapRequestDigestForProjectId:(NSString *)projectId
+                                     displayName:(NSString *)displayName {
+  NSDictionary *request = @{
+    @"operation": @"bootstrap_legacy",
+    @"project_id": projectId,
+    @"display_name": displayName,
+  };
+  return [self sha256ForData:[self canonicalData:request]];
 }
 
 - (NSData *)canonicalData:(id)object {
@@ -845,7 +921,7 @@ static NSString *const DSHDigestB =
     @"schema_version": @1,
     @"operation_id": DSHOperationA,
     @"workspace_id": DSHWorkspaceA,
-    @"operation": @"create",
+    @"operation": @"import",
     @"phase": @"prepared",
     @"binding_revision": @1,
     @"previous_registry_generation": @0,
@@ -854,10 +930,21 @@ static NSString *const DSHDigestB =
     @"record_sha256": NSNull.null,
     @"staging_name": @"staging-a",
     @"destination_name": @"destination-a",
+    @"display_name": @"Import A",
+    @"request_sha256": DSHDigestA,
+    @"staging_device_id": NSNull.null,
+    @"staging_inode_id": NSNull.null,
+    @"staging_uid": NSNull.null,
+    @"staging_gid": NSNull.null,
+    @"destination_device_id": NSNull.null,
+    @"destination_inode_id": NSNull.null,
+    @"destination_uid": NSNull.null,
+    @"destination_gid": NSNull.null,
     @"legacy_project_id": NSNull.null,
     @"clearance_receipt_id": NSNull.null,
     @"confirmation_id": NSNull.null,
     @"created_at": DSHTimestamp,
+    @"last_opened_at": DSHTimestamp,
     @"updated_at": DSHTimestamp,
   };
   [self secureWriteObject:futureJournal
@@ -890,10 +977,22 @@ static NSString *const DSHDigestB =
     @"record_sha256": NSNull.null,
     @"staging_name": NSNull.null,
     @"destination_name": NSNull.null,
+    @"display_name": @"Legacy Workspace",
+    @"request_sha256": [self bootstrapRequestDigestForProjectId:DSHProjectA
+                                                        displayName:@"Legacy Workspace"],
+    @"staging_device_id": NSNull.null,
+    @"staging_inode_id": NSNull.null,
+    @"staging_uid": NSNull.null,
+    @"staging_gid": NSNull.null,
+    @"destination_device_id": NSNull.null,
+    @"destination_inode_id": NSNull.null,
+    @"destination_uid": NSNull.null,
+    @"destination_gid": NSNull.null,
     @"legacy_project_id": DSHProjectA,
     @"clearance_receipt_id": NSNull.null,
     @"confirmation_id": NSNull.null,
     @"created_at": DSHTimestamp,
+    @"last_opened_at": DSHTimestamp,
     @"updated_at": DSHTimestamp,
   };
   [self secureWriteObject:prepared
@@ -1090,6 +1189,7 @@ static NSString *const DSHDigestB =
     @"binding_revision": @1,
     @"registry_generation": @1,
     @"registry_sha256": DSHDigestA,
+    @"request_sha256": DSHDigestB,
     @"outcome": @"committed",
     @"committed_at": timestamp,
   };
@@ -1229,7 +1329,7 @@ static NSString *const DSHDigestB =
   [self assertDictionary:query[@"receipt"] hasExactKeys:@[
     @"schema_version", @"operation_id", @"workspace_id", @"operation",
     @"binding_revision", @"registry_generation", @"registry_sha256",
-    @"outcome", @"committed_at"
+    @"request_sha256", @"outcome", @"committed_at"
   ]];
 }
 
@@ -1289,6 +1389,900 @@ static NSString *const DSHDigestB =
     XCTAssertEqualObjects(error.userInfo[@"code"], @"E_WORKSPACE_UNAVAILABLE");
   }
   XCTAssertEqual(self.resolverCalls, 0u);
+}
+
+#pragma mark - Task B: Rish-owned Files-visible roots (RED before implementation)
+
+- (void)testCreateRishOwnedWorkspaceExactRequestPublishesFilesVisibleRootAndOwnedAuthority {
+  NSURL *documents = [self documentsRootForRoot:self.rootURL];
+  DSHLocalWorkspaceAccess *access =
+      [self accessWithRoot:self.rootURL
+          documentsRootURL:documents
+                     fault:nil
+               UUIDGenerator:^NSString *{
+                 return DSHWorkspaceA;
+               }];
+  NSError *error = nil;
+  NSDictionary *descriptor =
+      [access createRishOwnedWorkspaceWithDisplayName:@"Scratch"
+                                           operationId:DSHOperationA
+                                                 error:&error];
+  XCTAssertNotNil(descriptor, @"%@", error);
+  XCTAssertNil(error);
+  [self assertDictionary:descriptor hasExactKeys:@[
+    @"schema_version", @"workspace_id", @"display_name", @"origin",
+    @"status", @"binding_revision", @"capabilities", @"created_at",
+    @"last_opened_at"
+  ]];
+  XCTAssertEqualObjects(descriptor[@"schema_version"], @2);
+  XCTAssertEqualObjects(descriptor[@"workspace_id"], DSHWorkspaceA);
+  XCTAssertEqualObjects(descriptor[@"display_name"], @"Scratch");
+  XCTAssertEqualObjects(descriptor[@"origin"], @"rish_created");
+  XCTAssertEqualObjects(descriptor[@"status"], @"ok");
+  XCTAssertEqualObjects(descriptor[@"binding_revision"], @1);
+  XCTAssertEqualObjects(descriptor[@"capabilities"], (@{
+    @"read": @YES, @"write": @YES, @"git": @NO,
+    @"project_context": @NO, @"files_visible": @YES
+  }));
+
+  NSDictionary *record = [self recordForRoot:self.rootURL
+                                   workspaceId:DSHWorkspaceA];
+  XCTAssertNotNil(record);
+  XCTAssertEqualObjects(record[@"owned_directory_name"], @"Scratch");
+  NSURL *ownedRoot = [[self ownedWorkspacesRootForRoot:self.rootURL]
+      URLByAppendingPathComponent:record[@"owned_directory_name"]
+                       isDirectory:YES];
+  struct stat rootState = {};
+  XCTAssertEqual(lstat(ownedRoot.fileSystemRepresentation, &rootState), 0);
+  XCTAssertTrue(S_ISDIR(rootState.st_mode));
+  NSURL *authorityURL = [self authorityURLForRoot:self.rootURL
+                                             kind:@"owned"
+                                      workspaceId:DSHWorkspaceA
+                                         revision:1];
+  NSData *authorityData = [NSData dataWithContentsOfURL:authorityURL];
+  NSDictionary *authority = authorityData == nil
+      ? nil
+      : [NSJSONSerialization JSONObjectWithData:authorityData options:0 error:nil];
+  XCTAssertNotNil(authority);
+  XCTAssertEqualObjects(authority[@"workspace_id"], DSHWorkspaceA);
+  XCTAssertEqualObjects(authority[@"binding_revision"], @1);
+  XCTAssertEqualObjects(authority[@"device_id"],
+                        ([NSString stringWithFormat:@"%llu",
+                         (unsigned long long)rootState.st_dev]));
+  XCTAssertEqualObjects(authority[@"inode_id"],
+                        ([NSString stringWithFormat:@"%llu",
+                         (unsigned long long)rootState.st_ino]));
+  NSData *directoryData =
+      [record[@"owned_directory_name"] dataUsingEncoding:NSUTF8StringEncoding];
+  XCTAssertEqualObjects(authority[@"directory_name_sha256"],
+                        [self sha256ForData:directoryData]);
+
+  NSArray<NSURL *> *privateEntries = [NSFileManager.defaultManager
+      contentsOfDirectoryAtURL:[self documentsRootForRoot:self.rootURL]
+       includingPropertiesForKeys:nil
+                          options:0
+                            error:nil];
+  for (NSURL *entry in privateEntries) {
+    XCTAssertFalse([entry.lastPathComponent isEqual:@"local-workspaces"]);
+    XCTAssertFalse([entry.lastPathComponent isEqual:@"workspace-bindings"]);
+    XCTAssertFalse([entry.lastPathComponent hasSuffix:@".json"]);
+  }
+  NSNumber *excluded = nil;
+  XCTAssertTrue([[self ownedWorkspacesRootForRoot:self.rootURL]
+      getResourceValue:&excluded
+                forKey:NSURLIsExcludedFromBackupKey
+                 error:nil]);
+  XCTAssertFalse(excluded.boolValue);
+}
+
+- (void)testCreateRishOwnedWorkspaceAllocatesCollisionSafeNormalizedDirectoryNames {
+  NSURL *documents = [self documentsRootForRoot:self.rootURL];
+  NSURL *container = [self ownedWorkspacesRootForRoot:self.rootURL];
+  XCTAssertTrue([NSFileManager.defaultManager createDirectoryAtURL:container
+                                           withIntermediateDirectories:YES
+                                                            attributes:nil
+                                                                 error:nil]);
+  NSURL *preexisting = [container URLByAppendingPathComponent:@"scratch"
+                                                    isDirectory:YES];
+  XCTAssertEqual(mkdir(preexisting.fileSystemRepresentation, 0700), 0);
+
+  DSHLocalWorkspaceAccess *first =
+      [self accessWithRoot:self.rootURL
+          documentsRootURL:documents
+                     fault:nil
+               UUIDGenerator:^NSString *{
+                 return DSHWorkspaceA;
+               }];
+  NSError *error = nil;
+  NSDictionary *one =
+      [first createRishOwnedWorkspaceWithDisplayName:@"Scratch"
+                                          operationId:DSHOperationA
+                                                error:&error];
+  XCTAssertNotNil(one, @"%@", error);
+  XCTAssertEqualObjects([self recordForRoot:self.rootURL
+                              workspaceId:DSHWorkspaceA][@"owned_directory_name"],
+                        @"Scratch (1)");
+
+  DSHLocalWorkspaceAccess *second =
+      [self accessWithRoot:self.rootURL
+          documentsRootURL:documents
+                     fault:nil
+               UUIDGenerator:^NSString *{
+                 return DSHWorkspaceB;
+               }];
+  NSDictionary *two =
+      [second createRishOwnedWorkspaceWithDisplayName:@"sCrAtCh"
+                                           operationId:DSHOperationB
+                                                 error:&error];
+  XCTAssertNotNil(two, @"%@", error);
+  XCTAssertEqualObjects([self recordForRoot:self.rootURL
+                              workspaceId:DSHWorkspaceB][@"owned_directory_name"],
+                        @"sCrAtCh (2)");
+}
+
+- (void)testCreateRishOwnedWorkspaceRejectsInvalidDisplayNamesBeforeDocumentsMutation {
+  NSURL *documents = [self documentsRootForRoot:self.rootURL];
+  NSArray<NSString *> *invalidNames = @[
+    @"", @" ", @".", @"..", @".hidden", @"Rish Workspaces",
+    @"scratch/escape", @"scratch\\escape",
+    [@"x" stringByPaddingToLength:121 withString:@"x" startingAtIndex:0]
+  ];
+  for (NSString *name in invalidNames) {
+    DSHLocalWorkspaceAccess *access =
+        [self accessWithRoot:self.rootURL
+            documentsRootURL:documents
+                       fault:nil
+                 UUIDGenerator:^NSString *{
+                   return DSHWorkspaceA;
+                 }];
+    NSError *error = nil;
+    XCTAssertNil([access createRishOwnedWorkspaceWithDisplayName:name
+                                                     operationId:DSHOperationA
+                                                           error:&error],
+                 @"name=%@", name);
+    XCTAssertEqualObjects(error.userInfo[@"code"], @"E_WORKSPACE_INVALID",
+                          @"name=%@", name);
+  }
+  XCTAssertFalse([NSFileManager.defaultManager
+      fileExistsAtPath:[self documentsRootForRoot:self.rootURL].path]);
+}
+
+- (void)testRishOwnedRootIdentityIsRevalidatedAfterRelaunchAndReplacement {
+  NSURL *documents = [self documentsRootForRoot:self.rootURL];
+  DSHLocalWorkspaceAccess *access =
+      [self accessWithRoot:self.rootURL
+          documentsRootURL:documents
+                     fault:nil
+               UUIDGenerator:^NSString *{
+                 return DSHWorkspaceA;
+               }];
+  NSError *error = nil;
+  XCTAssertNotNil([access createRishOwnedWorkspaceWithDisplayName:@"Stable"
+                                                       operationId:DSHOperationA
+                                                             error:&error]);
+  NSDictionary *record = [self recordForRoot:self.rootURL
+                                   workspaceId:DSHWorkspaceA];
+  NSURL *ownedRoot = [[self ownedWorkspacesRootForRoot:self.rootURL]
+      URLByAppendingPathComponent:record[@"owned_directory_name"]
+                       isDirectory:YES];
+  DSHLocalWorkspaceAccess *restarted =
+      [self accessWithRoot:self.rootURL
+          documentsRootURL:documents
+                     fault:nil
+               UUIDGenerator:^NSString *{
+                 return DSHWorkspaceB;
+               }];
+  NSDictionary *listed = [restarted listWorkspaceMetadataWithError:&error].firstObject;
+  XCTAssertEqualObjects(listed[@"status"], @"ok");
+  XCTAssertEqualObjects(listed[@"binding_revision"], @1);
+
+  XCTAssertTrue([NSFileManager.defaultManager removeItemAtURL:ownedRoot
+                                                         error:&error]);
+  XCTAssertTrue([NSFileManager.defaultManager createDirectoryAtURL:ownedRoot
+                                           withIntermediateDirectories:NO
+                                                            attributes:nil
+                                                                 error:&error]);
+  NSArray *replaced = [restarted listWorkspaceMetadataWithError:&error];
+  XCTAssertNotNil(replaced);
+  XCTAssertEqualObjects(replaced.firstObject[@"status"], @"unavailable");
+  XCTAssertEqualObjects(replaced.firstObject[@"capabilities"], (@{
+    @"read": @NO, @"write": @NO, @"git": @NO,
+    @"project_context": @NO, @"files_visible": @YES
+  }));
+  XCTAssertNil([restarted resolveWorkspaceId:DSHWorkspaceA
+                   expectedBindingRevision:@1
+                      requiredCapabilities:@[@"read"]
+                                     error:&error]);
+  XCTAssertEqualObjects(error.userInfo[@"code"], @"E_WORKSPACE_UNAVAILABLE");
+}
+
+- (void)testRishOwnedCreateFsyncFailureLeavesNoPublishedWorkspaceAndRecoversOnRelaunch {
+  NSURL *documents = [self documentsRootForRoot:self.rootURL];
+  DSHLocalWorkspaceAccess *access =
+      [self accessWithRoot:self.rootURL
+          documentsRootURL:documents
+                     fault:^BOOL(NSString *stage) {
+                       return [stage isEqual:@"create_after_staging_fsync"];
+                     }
+               UUIDGenerator:^NSString *{
+                 return DSHWorkspaceA;
+               }];
+  NSError *error = nil;
+  XCTAssertNil([access createRishOwnedWorkspaceWithDisplayName:@"Crash"
+                                                    operationId:DSHOperationA
+                                                          error:&error]);
+  XCTAssertEqualObjects(error.userInfo[@"code"], @"E_WORKSPACE_PERSISTENCE");
+  DSHLocalWorkspaceAccess *restarted =
+      [self accessWithRoot:self.rootURL
+          documentsRootURL:documents
+                     fault:nil
+               UUIDGenerator:^NSString *{
+                 return DSHWorkspaceA;
+               }];
+  XCTAssertEqual([restarted listWorkspaceMetadataWithError:&error].count, 0u);
+  XCTAssertEqualObjects([restarted queryOperationId:DSHOperationA
+                                               error:&error][@"status"],
+                        @"not_started");
+}
+
+- (void)testRishOwnedCreateRegistryFailureRecoversAuthorityReadyPublication {
+  NSURL *documents = [self documentsRootForRoot:self.rootURL];
+  DSHLocalWorkspaceAccess *access =
+      [self accessWithRoot:self.rootURL
+          documentsRootURL:documents
+                     fault:^BOOL(NSString *stage) {
+                       return [stage isEqual:@"before_create_registry_publication"];
+                     }
+               UUIDGenerator:^NSString *{
+                 return DSHWorkspaceA;
+               }];
+  NSError *error = nil;
+  XCTAssertNil([access createRishOwnedWorkspaceWithDisplayName:@"Registry crash"
+                                                    operationId:DSHOperationA
+                                                          error:&error]);
+  XCTAssertEqualObjects(error.userInfo[@"code"], @"E_WORKSPACE_PERSISTENCE");
+  DSHLocalWorkspaceAccess *restarted =
+      [self accessWithRoot:self.rootURL
+          documentsRootURL:documents
+                     fault:nil
+               UUIDGenerator:^NSString *{
+                 return DSHWorkspaceA;
+               }];
+  NSArray *listed = [restarted listWorkspaceMetadataWithError:&error];
+  XCTAssertEqual(listed.count, 1u);
+  XCTAssertEqualObjects(listed.firstObject[@"display_name"], @"Registry crash");
+  XCTAssertEqualObjects([restarted queryOperationId:DSHOperationA
+                                               error:&error][@"status"],
+                        @"committed");
+}
+
+- (void)testRishOwnedCreateReceiptRecoveryIsIdempotentAcrossRelaunch {
+  NSURL *documents = [self documentsRootForRoot:self.rootURL];
+  DSHLocalWorkspaceAccess *access =
+      [self accessWithRoot:self.rootURL
+          documentsRootURL:documents
+                     fault:^BOOL(NSString *stage) {
+                       return [stage isEqual:@"after_create_registry_publication"];
+                     }
+               UUIDGenerator:^NSString *{
+                 return DSHWorkspaceA;
+               }];
+  NSError *error = nil;
+  XCTAssertNil([access createRishOwnedWorkspaceWithDisplayName:@"Retry"
+                                                    operationId:DSHOperationA
+                                                          error:&error]);
+  DSHLocalWorkspaceAccess *restarted =
+      [self accessWithRoot:self.rootURL
+          documentsRootURL:documents
+                     fault:nil
+               UUIDGenerator:^NSString *{
+                 return DSHWorkspaceB;
+               }];
+  NSArray *listed = [restarted listWorkspaceMetadataWithError:&error];
+  XCTAssertEqual(listed.count, 1u);
+  XCTAssertEqualObjects([restarted queryOperationId:DSHOperationA
+                                               error:&error][@"status"],
+                        @"committed");
+  NSDictionary *retried =
+      [restarted createRishOwnedWorkspaceWithDisplayName:@"Retry"
+                                               operationId:DSHOperationA
+                                                     error:&error];
+  XCTAssertEqualObjects(retried, listed.firstObject);
+  XCTAssertEqual([restarted listWorkspaceMetadataWithError:&error].count, 1u);
+}
+
+- (void)testRishOwnedCreateUsesRealDirectoryLinkSemanticsAndRecoversStaging {
+  NSURL *documents = [self documentsRootForRoot:self.rootURL];
+  DSHLocalWorkspaceAccess *access =
+      [self accessWithRoot:self.rootURL
+          documentsRootURL:documents
+                     fault:^BOOL(NSString *stage) {
+                       return [stage isEqual:@"create_after_staging_fsync"];
+                     }
+               UUIDGenerator:^NSString *{
+                 return DSHWorkspaceA;
+               }];
+  NSError *error = nil;
+  XCTAssertNil([access createRishOwnedWorkspaceWithDisplayName:@"Nlink"
+                                                    operationId:DSHOperationA
+                                                          error:&error]);
+  XCTAssertEqualObjects(error.userInfo[@"code"], @"E_WORKSPACE_PERSISTENCE");
+
+  NSURL *container = [self ownedWorkspacesRootForRoot:self.rootURL];
+  NSURL *staging = [container URLByAppendingPathComponent:
+      [@".rish-staging-" stringByAppendingString:DSHOperationA]
+                                             isDirectory:YES];
+  struct stat stagingState = {};
+  XCTAssertEqual(lstat(staging.fileSystemRepresentation, &stagingState), 0);
+  XCTAssertTrue(S_ISDIR(stagingState.st_mode));
+  // APFS and other POSIX filesystems report an empty directory as at least
+  // two links (self plus parent); one is never a valid directory invariant.
+  XCTAssertGreaterThanOrEqual(stagingState.st_nlink, (nlink_t)2);
+
+  DSHLocalWorkspaceAccess *restarted =
+      [self accessWithRoot:self.rootURL
+          documentsRootURL:documents
+                     fault:nil
+               UUIDGenerator:^NSString *{
+                 return DSHWorkspaceA;
+               }];
+  XCTAssertEqual([restarted listWorkspaceMetadataWithError:&error].count, 0u);
+  XCTAssertFalse([NSFileManager.defaultManager fileExistsAtPath:staging.path]);
+  XCTAssertEqualObjects([restarted queryOperationId:DSHOperationA
+                                               error:&error][@"status"],
+                        @"not_started");
+}
+
+- (void)testCreateRegistryCapacityRejectsBeforeDocumentsOrUUIDAllocation {
+  NSURL *documents = [self documentsRootForRoot:self.rootURL];
+  __block BOOL UUIDWasRequested = NO;
+  DSHLocalWorkspaceAccess *access =
+      [self accessWithRoot:self.rootURL
+          documentsRootURL:documents
+                     fault:nil
+               UUIDGenerator:^NSString *{
+                 UUIDWasRequested = YES;
+                 return DSHWorkspaceA;
+               }];
+  NSError *error = nil;
+  XCTAssertTrue([access ensurePrivateLayoutWithError:&error], @"%@", error);
+  NSMutableArray *records = [NSMutableArray arrayWithCapacity:1024];
+  for (NSUInteger index = 0; index < 1024; index++) {
+    NSString *workspace = [NSString stringWithFormat:
+        @"%08lx-0000-4000-8000-%012lx", (unsigned long)index,
+        (unsigned long)index];
+    [records addObject:[self recordForWorkspaceId:workspace
+                                           origin:@"rish_created"
+                                  rootLocatorKind:@"documents_owned"
+                                    locationClass:@"rish_owned"
+                              ownedDirectoryName:[NSString stringWithFormat:
+                                                    @"Owned %04lu",
+                                                    (unsigned long)index]
+                                 legacyProjectId:nil
+                                 bindingRevision:1]];
+  }
+  [self writeRegistryRecords:records generation:7 root:self.rootURL];
+  NSData *before = [NSData dataWithContentsOfURL:
+      [self registryURLForRoot:self.rootURL]];
+  XCTAssertNil([access createRishOwnedWorkspaceWithDisplayName:@"Full"
+                                                    operationId:DSHOperationA
+                                                          error:&error]);
+  XCTAssertEqualObjects(error.userInfo[@"code"], @"E_WORKSPACE_BUSY");
+  XCTAssertFalse(UUIDWasRequested);
+  XCTAssertFalse([NSFileManager.defaultManager
+      fileExistsAtPath:documents.path]);
+  XCTAssertEqualObjects([NSData dataWithContentsOfURL:
+      [self registryURLForRoot:self.rootURL]], before);
+  XCTAssertFalse([NSFileManager.defaultManager
+      fileExistsAtPath:[self journalURLForRoot:self.rootURL].path]);
+}
+
+- (void)testPreparedCreateRecoveryPreservesExternalDestinationAndJournalEvidence {
+  NSURL *documents = [self documentsRootForRoot:self.rootURL];
+  DSHLocalWorkspaceAccess *access =
+      [self accessWithRoot:self.rootURL
+          documentsRootURL:documents
+                     fault:nil
+               UUIDGenerator:^NSString *{
+                 return DSHWorkspaceA;
+               }];
+  NSError *error = nil;
+  XCTAssertTrue([access ensurePrivateLayoutWithError:&error], @"%@", error);
+  NSURL *container = [self ownedWorkspacesRootForRoot:self.rootURL];
+  XCTAssertTrue([NSFileManager.defaultManager createDirectoryAtURL:container
+                                           withIntermediateDirectories:YES
+                                                            attributes:nil
+                                                                 error:&error],
+                @"%@", error);
+  NSURL *destination = [container URLByAppendingPathComponent:@"Scratch"
+                                                       isDirectory:YES];
+  XCTAssertEqual(mkdir(destination.fileSystemRepresentation, 0755), 0);
+  struct stat externalBefore = {};
+  XCTAssertEqual(lstat(destination.fileSystemRepresentation, &externalBefore), 0);
+
+  NSData *registryData =
+      [NSData dataWithContentsOfURL:[self registryURLForRoot:self.rootURL]];
+  NSDictionary *prepared = @{
+    @"schema_version": @1,
+    @"operation_id": DSHOperationA,
+    @"workspace_id": DSHWorkspaceA,
+    @"operation": @"create",
+    @"phase": @"prepared",
+    @"binding_revision": @1,
+    @"previous_registry_generation": @0,
+    @"previous_registry_sha256": [self sha256ForData:registryData],
+    @"authority_sha256": NSNull.null,
+    @"record_sha256": NSNull.null,
+    @"staging_name": [@".rish-staging-" stringByAppendingString:DSHOperationA],
+    @"destination_name": @"Scratch",
+    @"display_name": @"Scratch",
+    @"request_sha256": [self createRequestDigestForDisplayName:@"Scratch"],
+    @"staging_device_id": NSNull.null,
+    @"staging_inode_id": NSNull.null,
+    @"staging_uid": NSNull.null,
+    @"staging_gid": NSNull.null,
+    @"destination_device_id": NSNull.null,
+    @"destination_inode_id": NSNull.null,
+    @"destination_uid": NSNull.null,
+    @"destination_gid": NSNull.null,
+    @"legacy_project_id": NSNull.null,
+    @"clearance_receipt_id": NSNull.null,
+    @"confirmation_id": NSNull.null,
+    @"created_at": DSHTimestamp,
+    @"last_opened_at": DSHTimestamp,
+    @"updated_at": DSHTimestamp,
+  };
+  [self secureWriteObject:prepared toURL:[self journalURLForRoot:self.rootURL]];
+
+  DSHLocalWorkspaceAccess *restarted =
+      [self accessWithRoot:self.rootURL
+          documentsRootURL:documents
+                     fault:nil
+               UUIDGenerator:^NSString *{
+                 return DSHWorkspaceA;
+               }];
+  XCTAssertNil([restarted listWorkspaceMetadataWithError:&error]);
+  BOOL failedClosed = [@[@"E_WORKSPACE_CONFLICT", @"E_WORKSPACE_PERSISTENCE"]
+      containsObject:error.userInfo[@"code"]];
+  XCTAssertTrue(failedClosed);
+  struct stat externalAfter = {};
+  XCTAssertEqual(lstat(destination.fileSystemRepresentation, &externalAfter), 0);
+  XCTAssertEqual(externalBefore.st_dev, externalAfter.st_dev);
+  XCTAssertEqual(externalBefore.st_ino, externalAfter.st_ino);
+  XCTAssertEqual(externalBefore.st_uid, externalAfter.st_uid);
+  XCTAssertEqual(externalBefore.st_gid, externalAfter.st_gid);
+  XCTAssertTrue([NSFileManager.defaultManager
+      fileExistsAtPath:[self journalURLForRoot:self.rootURL].path]);
+}
+
+- (void)testCreateReceiptBindsOperationIdToOriginalDisplayName {
+  NSURL *documents = [self documentsRootForRoot:self.rootURL];
+  DSHLocalWorkspaceAccess *access =
+      [self accessWithRoot:self.rootURL
+          documentsRootURL:documents
+                     fault:nil
+               UUIDGenerator:^NSString *{
+                 return DSHWorkspaceA;
+               }];
+  NSError *error = nil;
+  NSDictionary *first =
+      [access createRishOwnedWorkspaceWithDisplayName:@"Scratch"
+                                           operationId:DSHOperationA
+                                                 error:&error];
+  XCTAssertNotNil(first, @"%@", error);
+  XCTAssertNil(error);
+  XCTAssertEqualObjects(first[@"display_name"], @"Scratch");
+
+  NSDictionary *retry =
+      [access createRishOwnedWorkspaceWithDisplayName:@"Other"
+                                           operationId:DSHOperationA
+                                                 error:&error];
+  XCTAssertNil(retry);
+  XCTAssertEqualObjects(error.userInfo[@"code"], @"E_WORKSPACE_CONFLICT");
+  XCTAssertEqual([access listWorkspaceMetadataWithError:&error].count, 1u);
+  XCTAssertEqualObjects([self recordForRoot:self.rootURL
+                               workspaceId:DSHWorkspaceA][@"display_name"],
+                        @"Scratch");
+}
+
+- (void)testCreateRecoveryKeepsOriginalDisplayNameWhenDirectoryGetsCollisionSuffix {
+  NSURL *documents = [self documentsRootForRoot:self.rootURL];
+  NSURL *container = [self ownedWorkspacesRootForRoot:self.rootURL];
+  XCTAssertTrue([NSFileManager.defaultManager createDirectoryAtURL:container
+                                           withIntermediateDirectories:YES
+                                                            attributes:nil
+                                                                 error:nil]);
+  NSURL *preexisting = [container URLByAppendingPathComponent:@"Scratch"
+                                                    isDirectory:YES];
+  XCTAssertEqual(mkdir(preexisting.fileSystemRepresentation, 0700), 0);
+  DSHLocalWorkspaceAccess *access =
+      [self accessWithRoot:self.rootURL
+          documentsRootURL:documents
+          fault:^BOOL(NSString *stage) {
+            return [stage isEqual:@"after_authority_ready"];
+          }
+          UUIDGenerator:^NSString *{
+            return DSHWorkspaceA;
+          }];
+  NSError *error = nil;
+  XCTAssertNil([access createRishOwnedWorkspaceWithDisplayName:@"Scratch"
+                                                    operationId:DSHOperationA
+                                                          error:&error]);
+  XCTAssertEqualObjects(error.userInfo[@"code"], @"E_WORKSPACE_PERSISTENCE");
+  // Recovery must reconstruct the original last_opened_at even when a
+  // relaunch advances the journal's updated_at.
+  NSMutableDictionary *journal = [[NSJSONSerialization
+      JSONObjectWithData:[NSData dataWithContentsOfURL:
+          [self journalURLForRoot:self.rootURL]]
+                         options:0
+                           error:nil] mutableCopy];
+  journal[@"updated_at"] = @"2026-08-29T00:00:01.000Z";
+  [self secureWriteObject:journal toURL:[self journalURLForRoot:self.rootURL]];
+  self.now = [self.now dateByAddingTimeInterval:1];
+
+  DSHLocalWorkspaceAccess *restarted =
+      [self accessWithRoot:self.rootURL
+          documentsRootURL:documents
+                     fault:nil
+               UUIDGenerator:^NSString *{
+                 return DSHWorkspaceB;
+               }];
+  NSArray *listed = [restarted listWorkspaceMetadataWithError:&error];
+  XCTAssertEqual(listed.count, 1u, @"%@", error);
+  XCTAssertEqualObjects(listed.firstObject[@"display_name"], @"Scratch");
+  XCTAssertEqualObjects([self recordForRoot:self.rootURL
+                               workspaceId:DSHWorkspaceA][@"owned_directory_name"],
+                        @"Scratch (1)");
+  NSDictionary *retried =
+      [restarted createRishOwnedWorkspaceWithDisplayName:@"Scratch"
+                                               operationId:DSHOperationA
+                                                     error:&error];
+  XCTAssertEqualObjects(retried, listed.firstObject);
+}
+
+- (void)testCreateAuthorityReadyRecoveryPreflightsAllPublishedAuthorities {
+  NSURL *documents = [self documentsRootForRoot:self.rootURL];
+  DSHLocalWorkspaceAccess *bootstrapAccess =
+      [self accessWithRoot:self.rootURL
+          documentsRootURL:documents
+                     fault:nil
+               UUIDGenerator:^NSString *{
+                 return DSHWorkspaceA;
+               }];
+  NSError *error = nil;
+  XCTAssertNotNil([self bootstrapWithAccess:bootstrapAccess
+                                operationId:DSHOperationA
+                                      error:&error], @"%@", error);
+
+  DSHLocalWorkspaceAccess *createAccess =
+      [self accessWithRoot:self.rootURL
+          documentsRootURL:documents
+                     fault:^BOOL(NSString *stage) {
+                       return [stage isEqual:@"after_authority_ready"];
+                     }
+               UUIDGenerator:^NSString *{
+                 return DSHWorkspaceB;
+               }];
+  XCTAssertNil([createAccess createRishOwnedWorkspaceWithDisplayName:@"New"
+                                                         operationId:DSHOperationB
+                                                               error:&error]);
+  XCTAssertEqualObjects(error.userInfo[@"code"], @"E_WORKSPACE_PERSISTENCE");
+
+  NSURL *existingAuthority = [self authorityURLForRoot:self.rootURL
+                                                  kind:@"legacy"
+                                           workspaceId:DSHWorkspaceA
+                                              revision:1];
+  XCTAssertTrue([NSFileManager.defaultManager
+      fileExistsAtPath:existingAuthority.path]);
+  [self secureWriteObject:@{@"corrupt": @YES} toURL:existingAuthority];
+
+  DSHLocalWorkspaceAccess *restarted =
+      [self accessWithRoot:self.rootURL
+          documentsRootURL:documents
+                     fault:nil
+               UUIDGenerator:^NSString *{
+                 return DSHWorkspaceC;
+               }];
+  XCTAssertNil([restarted listWorkspaceMetadataWithError:&error]);
+  XCTAssertEqualObjects(error.userInfo[@"code"], @"E_WORKSPACE_PERSISTENCE");
+  NSDictionary *registry = [self registryObjectForRoot:self.rootURL];
+  XCTAssertEqual([registry[@"records"] count], 1u);
+  XCTAssertNil([self recordForRoot:self.rootURL workspaceId:DSHWorkspaceB]);
+  XCTAssertTrue([NSFileManager.defaultManager
+      fileExistsAtPath:[self journalURLForRoot:self.rootURL].path]);
+  XCTAssertTrue([NSFileManager.defaultManager
+      fileExistsAtPath:[self authorityURLForRoot:self.rootURL
+                                             kind:@"owned"
+                                      workspaceId:DSHWorkspaceB
+                                         revision:1].path]);
+}
+
+- (void)testLegacyAuthorityReadyRecoveryPreflightsAllPublishedAuthorities {
+  NSURL *documents = [self documentsRootForRoot:self.rootURL];
+  DSHLocalWorkspaceAccess *existing =
+      [self accessWithRoot:self.rootURL
+          documentsRootURL:documents
+                     fault:nil
+               UUIDGenerator:^NSString *{
+                 return DSHWorkspaceA;
+               }];
+  NSError *error = nil;
+  XCTAssertNotNil([existing bootstrapLegacyProjectId:DSHProjectA
+                                          displayName:@"Existing"
+                                           operationId:DSHOperationA
+                                                 error:&error], @"%@", error);
+
+  DSHLocalWorkspaceAccess *pending =
+      [self accessWithRoot:self.rootURL
+          documentsRootURL:documents
+          fault:^BOOL(NSString *stage) {
+            return [stage isEqual:@"after_authority_ready"];
+          }
+          UUIDGenerator:^NSString *{
+            return DSHWorkspaceB;
+          }];
+  XCTAssertNil([pending bootstrapLegacyProjectId:DSHProjectWide
+                                       displayName:@"Pending"
+                                        operationId:DSHOperationB
+                                              error:&error]);
+  XCTAssertEqualObjects(error.userInfo[@"code"], @"E_WORKSPACE_PERSISTENCE");
+
+  NSURL *existingAuthority = [self authorityURLForRoot:self.rootURL
+                                                  kind:@"legacy"
+                                           workspaceId:DSHWorkspaceA
+                                              revision:1];
+  [self secureWriteObject:@{@"corrupt": @YES} toURL:existingAuthority];
+
+  DSHLocalWorkspaceAccess *restarted =
+      [self accessWithRoot:self.rootURL
+          documentsRootURL:documents
+                     fault:nil
+               UUIDGenerator:^NSString *{
+                 return DSHWorkspaceC;
+               }];
+  XCTAssertNil([restarted listWorkspaceMetadataWithError:&error]);
+  XCTAssertEqualObjects(error.userInfo[@"code"], @"E_WORKSPACE_PERSISTENCE");
+  NSDictionary *registry = [self registryObjectForRoot:self.rootURL];
+  XCTAssertEqual([registry[@"records"] count], 1u);
+  XCTAssertNil([self recordForRoot:self.rootURL workspaceId:DSHWorkspaceB]);
+  XCTAssertTrue([NSFileManager.defaultManager
+      fileExistsAtPath:[self journalURLForRoot:self.rootURL].path]);
+  XCTAssertTrue([NSFileManager.defaultManager
+      fileExistsAtPath:[self authorityURLForRoot:self.rootURL
+                                             kind:@"legacy"
+                                      workspaceId:DSHWorkspaceB
+                                         revision:1].path]);
+}
+
+- (void)testLegacyRegistryCommittedRecoveryPreflightsAllPublishedAuthorities {
+  NSURL *documents = [self documentsRootForRoot:self.rootURL];
+  DSHLocalWorkspaceAccess *existing =
+      [self accessWithRoot:self.rootURL
+          documentsRootURL:documents
+                     fault:nil
+               UUIDGenerator:^NSString *{
+                 return DSHWorkspaceA;
+               }];
+  NSError *error = nil;
+  XCTAssertNotNil([existing bootstrapLegacyProjectId:DSHProjectA
+                                          displayName:@"Existing"
+                                           operationId:DSHOperationA
+                                                 error:&error], @"%@", error);
+
+  DSHLocalWorkspaceAccess *committed =
+      [self accessWithRoot:self.rootURL
+          documentsRootURL:documents
+          fault:^BOOL(NSString *stage) {
+            return [stage isEqual:@"after_registry_committed"];
+          }
+          UUIDGenerator:^NSString *{
+            return DSHWorkspaceB;
+          }];
+  XCTAssertNil([committed bootstrapLegacyProjectId:DSHProjectWide
+                                         displayName:@"Committed"
+                                          operationId:DSHOperationB
+                                                error:&error]);
+  XCTAssertEqualObjects(error.userInfo[@"code"], @"E_WORKSPACE_PERSISTENCE");
+  XCTAssertEqual([[[self registryObjectForRoot:self.rootURL]
+      objectForKey:@"records"] count], 2u);
+
+  NSURL *existingAuthority = [self authorityURLForRoot:self.rootURL
+                                                  kind:@"legacy"
+                                           workspaceId:DSHWorkspaceA
+                                              revision:1];
+  [self secureWriteObject:@{@"corrupt": @YES} toURL:existingAuthority];
+
+  DSHLocalWorkspaceAccess *restarted =
+      [self accessWithRoot:self.rootURL
+          documentsRootURL:documents
+                     fault:nil
+               UUIDGenerator:^NSString *{
+                 return DSHWorkspaceC;
+               }];
+  XCTAssertNil([restarted listWorkspaceMetadataWithError:&error]);
+  XCTAssertEqualObjects(error.userInfo[@"code"], @"E_WORKSPACE_PERSISTENCE");
+  NSDictionary *registry = [self registryObjectForRoot:self.rootURL];
+  XCTAssertEqual([registry[@"records"] count], 2u);
+  XCTAssertNotNil([self recordForRoot:self.rootURL workspaceId:DSHWorkspaceB]);
+  XCTAssertTrue([NSFileManager.defaultManager
+      fileExistsAtPath:[self journalURLForRoot:self.rootURL].path]);
+  NSDictionary *receipts = [NSJSONSerialization
+      JSONObjectWithData:[NSData dataWithContentsOfURL:
+          [self receiptsURLForRoot:self.rootURL]]
+                 options:0
+                   error:nil];
+  for (NSDictionary *receipt in receipts[@"receipts"]) {
+    XCTAssertFalse([receipt[@"operation_id"] isEqual:DSHOperationB]);
+  }
+}
+
+- (void)testWorkspaceBridgeRejectsBooleanSchemaWithoutPersisting {
+  NSArray<NSString *> *operations = @[@"create", @"resolve", @"query"];
+  for (NSString *operation in operations) {
+    NSURL *root = [self.rootURL URLByAppendingPathComponent:operation
+                                                  isDirectory:YES];
+    XCTAssertTrue([NSFileManager.defaultManager createDirectoryAtURL:root
+                                           withIntermediateDirectories:YES
+                                                            attributes:nil
+                                                                 error:nil]);
+    DSHLocalWorkspaceAccess *access = [self accessWithRoot:root
+                                                     fault:nil];
+    id<DSHLocalWorkspacesModuleTesting> module =
+        [self workspaceModuleWithAccess:access];
+    XCTestExpectation *rejected =
+        [self expectationWithDescription:[operation stringByAppendingString:@" boolean schema"]];
+    DSHLWResolve resolve = ^(__unused id value) {
+      XCTFail(@"%@ must reject boolean schema", operation);
+      [rejected fulfill];
+    };
+    DSHLWReject reject = ^(NSString *code, __unused NSString *message,
+                           NSError *nativeError) {
+      XCTAssertEqualObjects(code, @"E_WORKSPACE_INVALID");
+      XCTAssertNil(nativeError);
+      [rejected fulfill];
+    };
+    if ([operation isEqual:@"create"]) {
+      [module createWorkspaceRequest:@{
+        @"schema_version": @YES,
+        @"display_name": @"Boolean schema",
+        @"operation_id": DSHOperationA,
+      } resolver:resolve rejecter:reject];
+    } else if ([operation isEqual:@"resolve"]) {
+      [module resolveMetadataRequest:@{
+        @"schema_version": @YES,
+        @"workspace_id": DSHWorkspaceA,
+        @"expected_binding_revision": NSNull.null,
+        @"required_capabilities": @[],
+      } resolver:resolve rejecter:reject];
+    } else {
+      [module queryOperationRequest:@{
+        @"schema_version": @YES,
+        @"operation_id": DSHOperationA,
+      } resolver:resolve rejecter:reject];
+    }
+    [self waitForExpectations:@[rejected] timeout:1];
+    XCTAssertFalse([NSFileManager.defaultManager
+        fileExistsAtPath:[root URLByAppendingPathComponent:@"local-workspaces"
+                                              isDirectory:YES].path]);
+    XCTAssertFalse([NSFileManager.defaultManager
+        fileExistsAtPath:[self documentsRootForRoot:root].path]);
+  }
+}
+
+- (void)testPrivateRegistryRejectsBooleanSchemaVersion {
+  DSHLocalWorkspaceAccess *access = [self access];
+  NSError *error = nil;
+  XCTAssertTrue([access ensurePrivateLayoutWithError:&error], @"%@", error);
+  [self secureWriteObject:@{
+    @"schema_version": @YES,
+    @"generation": @0,
+    @"records": @[],
+  } toURL:[self registryURLForRoot:self.rootURL]];
+  XCTAssertNil([access listWorkspaceMetadataWithError:&error]);
+  XCTAssertEqualObjects(error.userInfo[@"code"], @"E_WORKSPACE_PERSISTENCE");
+}
+
+- (void)testA1BootstrapReceiptWithoutRequestDigestRemainsQueryableAndRetryable {
+  DSHLocalWorkspaceAccess *access = [self access];
+  NSDictionary *first = [self bootstrapWithAccess:access
+                                       operationId:DSHOperationA
+                                             error:nil];
+  XCTAssertNotNil(first);
+  NSMutableDictionary *envelope = [[NSJSONSerialization
+      JSONObjectWithData:[NSData dataWithContentsOfURL:
+          [self receiptsURLForRoot:self.rootURL]]
+                         options:0
+                           error:nil] mutableCopy];
+  NSMutableDictionary *oldReceipt =
+      [((NSArray *)envelope[@"receipts"]).firstObject mutableCopy];
+  [oldReceipt removeObjectForKey:@"request_sha256"];
+  envelope[@"receipts"] = @[oldReceipt];
+  [self secureWriteObject:envelope toURL:[self receiptsURLForRoot:self.rootURL]];
+
+  DSHLocalWorkspaceAccess *restarted = [self access];
+  NSDictionary *query = [restarted queryOperationId:DSHOperationA error:nil];
+  XCTAssertEqualObjects(query[@"status"], @"committed");
+  XCTAssertNil(query[@"receipt"][@"request_sha256"]);
+  NSDictionary *retried = [self bootstrapWithAccess:restarted
+                                         operationId:DSHOperationA
+                                               error:nil];
+  XCTAssertEqualObjects(retried, first);
+}
+
+- (void)testA1BootstrapJournalWithoutBFieldsRecoversAndKeepsReceiptReadable {
+  DSHLocalWorkspaceAccess *access = [self accessWithRoot:self.rootURL
+      fault:^BOOL(NSString *stage) {
+        return [stage isEqual:@"after_authority_ready"];
+      }];
+  NSError *error = nil;
+  XCTAssertNil([self bootstrapWithAccess:access
+                              operationId:DSHOperationA
+                                    error:&error]);
+  XCTAssertEqualObjects(error.userInfo[@"code"], @"E_WORKSPACE_PERSISTENCE");
+
+  NSMutableDictionary *oldJournal = [[NSJSONSerialization
+      JSONObjectWithData:[NSData dataWithContentsOfURL:
+          [self journalURLForRoot:self.rootURL]]
+                         options:0
+                           error:nil] mutableCopy];
+  for (NSString *key in @[
+    @"display_name", @"request_sha256", @"last_opened_at",
+    @"staging_device_id", @"staging_inode_id", @"staging_uid", @"staging_gid",
+    @"destination_device_id", @"destination_inode_id", @"destination_uid",
+    @"destination_gid",
+  ]) {
+    [oldJournal removeObjectForKey:key];
+  }
+  [self secureWriteObject:oldJournal
+                    toURL:[self journalURLForRoot:self.rootURL]];
+
+  DSHLocalWorkspaceAccess *restarted = [self access];
+  NSArray *listed = [restarted listWorkspaceMetadataWithError:&error];
+  XCTAssertEqual(listed.count, 1u, @"%@", error);
+  XCTAssertFalse([NSFileManager.defaultManager
+      fileExistsAtPath:[self journalURLForRoot:self.rootURL].path]);
+  NSDictionary *query = [restarted queryOperationId:DSHOperationA error:&error];
+  XCTAssertEqualObjects(query[@"status"], @"committed");
+  XCTAssertNil(query[@"receipt"][@"request_sha256"]);
+  XCTAssertNotNil([self bootstrapWithAccess:restarted
+                                operationId:DSHOperationA
+                                      error:&error]);
+}
+
+- (void)testInfoPlistEnablesFilesVisibilityKeys {
+  NSString *sourcePath = [NSString stringWithUTF8String:__FILE__];
+  NSURL *infoURL = [[NSURL fileURLWithPath:sourcePath]
+      URLByDeletingLastPathComponent];
+  infoURL = [[infoURL URLByDeletingLastPathComponent]
+      URLByAppendingPathComponent:@"DSHMobile/Info.plist"];
+  NSDictionary *info = [NSDictionary dictionaryWithContentsOfURL:infoURL];
+  XCTAssertEqualObjects(info[@"UIFileSharingEnabled"], @YES);
+  XCTAssertEqualObjects(info[@"LSSupportsOpeningDocumentsInPlace"], @YES);
+}
+
+- (void)testForgetAndDeleteRemainFailClosedWithoutCommittedClearanceReceipt {
+  DSHLocalWorkspaceAccess *access = [self access];
+  NSError *error = nil;
+  XCTAssertNil([access forgetWorkspaceId:DSHWorkspaceA
+                expectedBindingRevision:@1
+                              operationId:DSHOperationA
+                        clearanceReceiptId:DSHOperationB
+                                   error:&error]);
+  XCTAssertEqualObjects(error.userInfo[@"code"], @"E_WORKSPACE_UNAVAILABLE");
+  error = nil;
+  XCTAssertNil([access prepareDeleteOwnedContentForWorkspaceId:DSHWorkspaceA
+                                       expectedBindingRevision:@1
+                                           clearanceReceiptId:DSHOperationB
+                                                        error:&error]);
+  XCTAssertEqualObjects(error.userInfo[@"code"], @"E_WORKSPACE_UNAVAILABLE");
+  error = nil;
+  XCTAssertNil([access deleteOwnedContentForWorkspaceId:DSHWorkspaceA
+                                expectedBindingRevision:@1
+                                              operationId:DSHOperationA
+                                        clearanceReceiptId:DSHOperationB
+                                           confirmationId:DSHOperationA
+                                                     error:&error]);
+  XCTAssertEqualObjects(error.userInfo[@"code"], @"E_WORKSPACE_UNAVAILABLE");
 }
 
 @end
