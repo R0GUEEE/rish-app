@@ -215,6 +215,46 @@ test('attach omits an invalid log instead of blocking session persistence', () =
   expect(attached).toBe(snapshot);
 });
 
+test('extract trims an oversized stored log to the newest cap rows', () => {
+  const total = MAX_SESSION_EVENT_LOG_SIZE + 7;
+  const stored: SessionEventV1[] = [];
+  for (let index = 0; index < total; index += 1) {
+    stored.push(
+      baseAttemptEvent({ event_id: 'e' + index, seq: index }),
+    );
+  }
+  const serialized = JSON.parse(
+    JSON.stringify({ session_events: stored }),
+  ) as unknown;
+  const recovered = extractSessionEventsFromSnapshot(serialized);
+  expect(recovered).not.toBeNull();
+  expect(recovered).toHaveLength(MAX_SESSION_EVENT_LOG_SIZE);
+  expect(recovered?.[0]?.event_id).toBe('e7');
+  expect(recovered?.[recovered.length - 1]?.event_id).toBe(
+    'e' + (total - 1),
+  );
+  expect(
+    recovered?.every((event, index) => event.seq === index + 7),
+  ).toBe(true);
+});
+
+test('attach trims an oversized in-memory log to the newest cap rows', () => {
+  const snapshot: Record<string, unknown> = { chats: 'payload' };
+  const total = MAX_SESSION_EVENT_LOG_SIZE + 7;
+  const log: SessionEventV1[] = [];
+  for (let index = 0; index < total; index += 1) {
+    log.push(baseAttemptEvent({ event_id: 'e' + index, seq: index }));
+  }
+  const attached = attachSessionEventsToSnapshot(snapshot, log);
+  const rows = attached[SESSION_EVENTS_SNAPSHOT_KEY] as
+    | SessionEventV1[]
+    | undefined;
+  expect(rows).toBeDefined();
+  expect(rows).toHaveLength(MAX_SESSION_EVENT_LOG_SIZE);
+  expect(rows?.[0]?.event_id).toBe('e7');
+  expect(rows?.[rows.length - 1]?.event_id).toBe('e' + (total - 1));
+});
+
 test('extract discards absent or corrupted trajectory data fail-closed', () => {
   expect(extractSessionEventsFromSnapshot(null)).toBeNull();
   expect(extractSessionEventsFromSnapshot('nope')).toBeNull();

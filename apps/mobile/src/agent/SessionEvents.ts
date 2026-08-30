@@ -182,6 +182,24 @@ export function appendSessionEventBounded(
 }
 
 /**
+ * Drops the oldest rows of a session-wide log beyond the cap, keeping the
+ * newest events in recorded order. One shared trim for append, attach, and
+ * extract so the 512-row promise holds on every path.
+ */
+export function trimSessionEventsToCap(
+  log: readonly SessionEventV1[],
+  maxEvents: number = MAX_SESSION_EVENT_LOG_SIZE,
+): readonly SessionEventV1[] {
+  if (!Number.isSafeInteger(maxEvents) || maxEvents <= 0) {
+    throw new SessionEventValidationError(
+      'maxEvents must be a positive safe integer',
+    );
+  }
+  if (log.length <= maxEvents) return log;
+  return log.slice(log.length - maxEvents);
+}
+
+/**
  * Attaches the trajectory log to a session snapshot for persistence.
  * Fail-closed: an invalid in-memory log is silently omitted so a broken
  * trajectory can never block the session document from being saved.
@@ -195,7 +213,12 @@ export function attachSessionEventsToSnapshot(
   } catch {
     return snapshot;
   }
-  return { ...snapshot, [SESSION_EVENTS_SNAPSHOT_KEY]: log };
+  // Enforce the same cap as appendSessionEventBounded so an oversized
+  // in-memory log can never be persisted past the 512-row promise.
+  return {
+    ...snapshot,
+    [SESSION_EVENTS_SNAPSHOT_KEY]: trimSessionEventsToCap(log),
+  };
 }
 
 /**
@@ -215,7 +238,10 @@ export function extractSessionEventsFromSnapshot(
   if (raw === undefined) return null;
   if (!Array.isArray(raw)) return null;
   try {
-    return hydrateSessionEvents(raw);
+    // Enforce the same cap as appendSessionEventBounded: oversized data on
+    // disk is trimmed to the newest rows instead of being hydrated in full
+    // and written back past the 512-row promise.
+    return trimSessionEventsToCap(hydrateSessionEvents(raw));
   } catch {
     return null;
   }
