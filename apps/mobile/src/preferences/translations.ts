@@ -655,6 +655,23 @@ const enUS = {
   'files.confirmOverwrite': 'Replace file',
   'files.actionCompleted': '{action} completed',
   'files.actionFailed': '{action} failed',
+
+  'agent.approvalTitle': 'Approve tool action',
+  'agent.approvalEyebrow': 'AGENT · APPROVAL',
+  'agent.approvalScopeLabel': 'Allow scope',
+  'agent.approvalScope.once': 'This time only',
+  'agent.approvalScope.onceBody': 'Approve only this call.',
+  'agent.approvalScope.conversation': 'For this turn',
+  'agent.approvalScope.conversationBody':
+    'Auto-allow this tool until the agent turn ends.',
+  'agent.approvalAllow': 'Allow',
+  'agent.approvalDeny': 'Deny',
+  'agent.questionTitle': 'Answer question',
+  'agent.questionEyebrow': 'AGENT · QUESTION',
+  'agent.questionSubmit': 'Submit',
+  'agent.questionFreeTextPlaceholder': 'Type your answer…',
+  'agent.questionErrorRequired': 'An answer is required.',
+  'agent.questionErrorOption': 'Choose one of the options.',
 } as const;
 
 export type TranslationKey = keyof typeof enUS;
@@ -1280,6 +1297,22 @@ const zhCN: Readonly<Record<TranslationKey, string>> = {
   'files.confirmOverwrite': '替换文件',
   'files.actionCompleted': '{action}已完成',
   'files.actionFailed': '{action}失败',
+
+  'agent.approvalTitle': '批准工具操作',
+  'agent.approvalEyebrow': '智能体 · 审批',
+  'agent.approvalScopeLabel': '允许范围',
+  'agent.approvalScope.once': '仅此一次',
+  'agent.approvalScope.onceBody': '只批准这一次调用。',
+  'agent.approvalScope.conversation': '本回合',
+  'agent.approvalScope.conversationBody': '本回合结束前自动允许该工具。',
+  'agent.approvalAllow': '允许',
+  'agent.approvalDeny': '拒绝',
+  'agent.questionTitle': '回答问题',
+  'agent.questionEyebrow': '智能体 · 提问',
+  'agent.questionSubmit': '提交',
+  'agent.questionFreeTextPlaceholder': '输入你的回答…',
+  'agent.questionErrorRequired': '必须回答。',
+  'agent.questionErrorOption': '请选择一个选项。',
 };
 
 export const TRANSLATIONS: Readonly<
