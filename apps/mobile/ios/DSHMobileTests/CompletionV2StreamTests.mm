@@ -91,6 +91,7 @@ static NSDictionary *DSHDoneDelta(void) {
   ]};
 }
 
+
 - (void)tearDown {
   [DSHCompletionURLProtocol reset];
   [super tearDown];
@@ -109,11 +110,11 @@ static NSDictionary *DSHDoneDelta(void) {
       monotonicClock:^NSTimeInterval { return 10.0; }];
 }
 
-- (NSString *)validStreamEnvelopeJSON {
+- (NSString *)streamEnvelopeJSONWithRequestId:(NSString *)requestId {
   NSDictionary *envelope = @{
     @"schema_version": @1,
     @"model": @"deepseek-v4-flash",
-    @"request_id": @"11111111-1111-4111-8111-111111111111",
+    @"request_id": requestId,
     @"thinking_mode": @"high",
     @"history": @[ @{@"role": @"user", @"content": @"hello"} ],
     @"tools": @[],
@@ -122,6 +123,11 @@ static NSDictionary *DSHDoneDelta(void) {
                                                  options:0
                                                    error:nil];
   return [[NSString alloc] initWithData:data encoding:NSUTF8StringEncoding];
+}
+
+- (NSString *)validStreamEnvelopeJSON {
+  return [self streamEnvelopeJSONWithRequestId:
+      @"11111111-1111-4111-8111-111111111111"];
 }
 
 - (void)testStreamResolvesAssembledContentAcrossChunkBoundaries {
@@ -277,28 +283,13 @@ static NSDictionary *DSHDoneDelta(void) {
 
 - (void)testCancelThenRestartSettlesBothStreamsInIsolation {
   LocalRuntimeModule *module = [self streamTestModule];
-  __block NSURLProtocol *firstProtocol = nil;
-  __block BOOL firstStarted = NO;
+  // The cancelled round must never reach the wire, so every request that
+  // does start belongs to a live stream and completes immediately with its
+  // own content. A regression that resumes the cancelled round would leave
+  // its zombie task in the slot, and the restart below would then be
+  // rejected with E_COMPLETION_BUSY instead of resolving.
   [DSHCompletionURLProtocol setHandler:^(NSURLProtocol *protocol,
                                          NSURLRequest *request) {
-    if (!firstStarted) {
-      firstStarted = YES;
-      firstProtocol = protocol;
-      // Deliver one partial delta, then hold: the first stream stays open
-      // until it is explicitly cancelled.
-      NSHTTPURLResponse *response = [[NSHTTPURLResponse alloc]
-          initWithURL:request.URL
-           statusCode:200
-          HTTPVersion:@"HTTP/1.1"
-         headerFields:@{@"Content-Type": @"text/event-stream"}];
-      [protocol.client URLProtocol:protocol
-                didReceiveResponse:response
-                cacheStoragePolicy:NSURLCacheStorageNotAllowed];
-      [protocol.client URLProtocol:protocol
-            didLoadData:DSHSSEChunk(DSHContentDelta(@"first-"))];
-      return;
-    }
-    // Second stream completes immediately with its own content.
     NSHTTPURLResponse *response = [[NSHTTPURLResponse alloc]
         initWithURL:request.URL
          statusCode:200
@@ -357,7 +348,6 @@ static NSDictionary *DSHDoneDelta(void) {
   XCTAssertNil(secondRejection);
   XCTAssertNotNil(secondResult);
   XCTAssertEqualObjects(secondResult[@"text"], @"second");
-  (void)firstProtocol;
 }
 
 - (void)testCredentialRotationSettlesAnInFlightStream {
@@ -379,6 +369,178 @@ static NSDictionary *DSHDoneDelta(void) {
   [module credentialDidChange];
   [self waitForExpectations:@[settled] timeout:5];
   XCTAssertEqualObjects(rejection, @"cancelled");
+}
+
+// Regression: cancelling a stream that has claimed the completion slot but
+// has not bound its data task yet must not leave a zombie task occupying
+// the slot. Cancel-only, no restart in between: the next stream must start
+// normally instead of E_COMPLETION_BUSY.
+- (void)testCancelBeforeTaskBindDoesNotPoisonTheCompletionSlot {
+  LocalRuntimeModule *module = [self streamTestModule];
+  NSString *firstRequestId = @"11111111-1111-4111-8111-111111111111";
+  NSString *secondRequestId = @"22222222-2222-4222-8222-222222222222";
+  __block NSUInteger startedRequests = 0;
+  [DSHCompletionURLProtocol setHandler:^(NSURLProtocol *protocol,
+                                         NSURLRequest *request) {
+    startedRequests += 1;
+    NSHTTPURLResponse *response = [[NSHTTPURLResponse alloc]
+        initWithURL:request.URL
+         statusCode:200
+        HTTPVersion:@"HTTP/1.1"
+       headerFields:@{@"Content-Type": @"text/event-stream"}];
+    [protocol.client URLProtocol:protocol
+              didReceiveResponse:response
+              cacheStoragePolicy:NSURLCacheStorageNotAllowed];
+    [protocol.client URLProtocol:protocol
+          didLoadData:DSHSSEChunk(DSHContentDelta(@"after-cancel"))];
+    [protocol.client URLProtocol:protocol
+          didLoadData:DSHSSEChunk(DSHDoneDelta())];
+    [protocol.client URLProtocolDidFinishLoading:protocol];
+  }];
+
+  // Cancel from inside the main-queue block, after the data task exists but
+  // before it is bound/resumed: the deterministic "claimed but not bound"
+  // window from the race report.
+  __weak LocalRuntimeModule *weakModule = module;
+  [module setValue:[^{
+    LocalRuntimeModule *strongModule = weakModule;
+    [strongModule setValue:nil
+                    forKey:@"completionV2StreamBeforeMainBindForTesting"];
+    [strongModule cancelCompletionRequestId:firstRequestId
+        resolver:^(__unused id value) {}
+        rejecter:^(__unused NSString *code, __unused NSString *message,
+                   __unused NSError *error) {
+          XCTFail(@"cancelCompletion must not reject");
+        }];
+  } copy] forKey:@"completionV2StreamBeforeMainBindForTesting"];
+
+  XCTestExpectation *firstSettled = [self expectationWithDescription:@"first"];
+  __block NSString *firstRejection = nil;
+  __block BOOL firstResolved = NO;
+  [module completeV2StreamEnvelopeJSON:
+      [self streamEnvelopeJSONWithRequestId:firstRequestId]
+      resolver:^(id value) {
+        firstResolved = YES;
+        [firstSettled fulfill];
+      }
+      rejecter:^(NSString *code, NSString *message, NSError *error) {
+        firstRejection = code;
+        [firstSettled fulfill];
+      }];
+  [self waitForExpectations:@[firstSettled] timeout:5];
+  XCTAssertFalse(firstResolved);
+  XCTAssertEqualObjects(firstRejection, @"cancelled");
+
+  XCTestExpectation *secondSettled =
+      [self expectationWithDescription:@"second"];
+  __block NSString *secondRejection = nil;
+  __block NSDictionary *secondResult = nil;
+  [module completeV2StreamEnvelopeJSON:
+      [self streamEnvelopeJSONWithRequestId:secondRequestId]
+      resolver:^(id value) {
+        secondResult = value;
+        [secondSettled fulfill];
+      }
+      rejecter:^(NSString *code, NSString *message, NSError *error) {
+        secondRejection = code;
+        [secondSettled fulfill];
+      }];
+  [self waitForExpectations:@[secondSettled] timeout:5];
+  XCTAssertNil(secondRejection);
+  XCTAssertNotNil(secondResult);
+  XCTAssertEqualObjects(secondResult[@"text"], @"after-cancel");
+  // The cancelled round must never reach the wire: exactly one request
+  // (the fresh round) is started in total.
+  XCTAssertEqual(startedRequests, 1u);
+}
+
+// Regression: a cancel injected from another thread between the slot claim
+// and the streamCompletion install must still settle the stream promise as
+// cancelled — it must neither hang nor resolve with content — and the slot
+// must remain usable for the next stream.
+- (void)testCrossThreadCancelBetweenSlotClaimAndStreamInstall {
+  LocalRuntimeModule *module = [self streamTestModule];
+  NSString *firstRequestId = @"11111111-1111-4111-8111-111111111111";
+  NSString *secondRequestId = @"22222222-2222-4222-8222-222222222222";
+  __block NSUInteger startedRequests = 0;
+  [DSHCompletionURLProtocol setHandler:^(NSURLProtocol *protocol,
+                                         NSURLRequest *request) {
+    startedRequests += 1;
+    NSHTTPURLResponse *response = [[NSHTTPURLResponse alloc]
+        initWithURL:request.URL
+         statusCode:200
+        HTTPVersion:@"HTTP/1.1"
+       headerFields:@{@"Content-Type": @"text/event-stream"}];
+    [protocol.client URLProtocol:protocol
+              didReceiveResponse:response
+              cacheStoragePolicy:NSURLCacheStorageNotAllowed];
+    [protocol.client URLProtocol:protocol
+          didLoadData:DSHSSEChunk(DSHContentDelta(@"after-cancel"))];
+    [protocol.client URLProtocol:protocol
+          didLoadData:DSHSSEChunk(DSHDoneDelta())];
+    [protocol.client URLProtocolDidFinishLoading:protocol];
+  }];
+
+  // The hook fires synchronously between the slot reservation and the
+  // dispatch of the stream-state install. Park this thread and run the
+  // cancel on a different thread so the cancel fully completes inside the
+  // window — deterministic cross-thread injection, no sleeps.
+  __weak LocalRuntimeModule *weakModule = module;
+  [module setValue:[^{
+    LocalRuntimeModule *strongModule = weakModule;
+    [strongModule setValue:nil
+                    forKey:@"completionV2StreamAfterClaimForTesting"];
+    dispatch_semaphore_t done = dispatch_semaphore_create(0);
+    dispatch_async(dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^{
+      [strongModule cancelCompletionRequestId:firstRequestId
+          resolver:^(__unused id value) {}
+          rejecter:^(__unused NSString *code, __unused NSString *message,
+                     __unused NSError *error) {
+            XCTFail(@"cancelCompletion must not reject");
+          }];
+      dispatch_semaphore_signal(done);
+    });
+    dispatch_semaphore_wait(done, DISPATCH_TIME_FOREVER);
+  } copy] forKey:@"completionV2StreamAfterClaimForTesting"];
+
+  XCTestExpectation *firstSettled = [self expectationWithDescription:@"first"];
+  __block NSString *firstRejection = nil;
+  __block BOOL firstResolved = NO;
+  [module completeV2StreamEnvelopeJSON:
+      [self streamEnvelopeJSONWithRequestId:firstRequestId]
+      resolver:^(id value) {
+        firstResolved = YES;
+        [firstSettled fulfill];
+      }
+      rejecter:^(NSString *code, NSString *message, NSError *error) {
+        firstRejection = code;
+        [firstSettled fulfill];
+      }];
+  [self waitForExpectations:@[firstSettled] timeout:5];
+  XCTAssertFalse(firstResolved);
+  XCTAssertEqualObjects(firstRejection, @"cancelled");
+
+  XCTestExpectation *secondSettled =
+      [self expectationWithDescription:@"second"];
+  __block NSString *secondRejection = nil;
+  __block NSDictionary *secondResult = nil;
+  [module completeV2StreamEnvelopeJSON:
+      [self streamEnvelopeJSONWithRequestId:secondRequestId]
+      resolver:^(id value) {
+        secondResult = value;
+        [secondSettled fulfill];
+      }
+      rejecter:^(NSString *code, NSString *message, NSError *error) {
+        secondRejection = code;
+        [secondSettled fulfill];
+      }];
+  [self waitForExpectations:@[secondSettled] timeout:5];
+  XCTAssertNil(secondRejection);
+  XCTAssertNotNil(secondResult);
+  XCTAssertEqualObjects(secondResult[@"text"], @"after-cancel");
+  // The cancelled round must never reach the wire: exactly one request
+  // (the fresh round) is started in total.
+  XCTAssertEqual(startedRequests, 1u);
 }
 
 - (void)testStreamEnvelopeValidationFailsClosed {
