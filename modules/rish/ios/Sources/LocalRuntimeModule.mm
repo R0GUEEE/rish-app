@@ -590,6 +590,7 @@ static BOOL DSHCanConnectToMacProxy(void) {
 @property(nonatomic, assign) NSUInteger streamObserverCount;
 @property(nonatomic, strong) DSHStreamEventParser *streamParser;
 @property(nonatomic, strong) NSURLSessionDataTask *streamTask;
+@property(nonatomic) NSUInteger streamGeneration;
 @property(nonatomic, copy) NSString *streamRequestId;
 @property(nonatomic, strong) NSMutableString *streamContent;
 @property(nonatomic, strong) NSMutableString *streamReasoning;
@@ -608,11 +609,14 @@ static BOOL DSHCanConnectToMacProxy(void) {
 @property(nonatomic) NSUInteger credentialGeneration;
 @property(nonatomic) NSInteger activeCompletionSchemaVersion;
 @property(nonatomic, copy) RCTPromiseRejectBlock activeCompletionRejecter;
+@property(nonatomic, copy) RCTPromiseRejectBlock activeCompletionStreamRejecter;
 @property(nonatomic) BOOL activeCompletionRedirected;
 @property(nonatomic, copy) NSString *completionV2TestCredential;
 @property(nonatomic, copy) NSString *(^completionV2UUIDGenerator)(void);
 @property(nonatomic, copy) NSTimeInterval (^completionV2MonotonicClock)(void);
 @property(nonatomic, copy) void (^completionV2BeforeTaskCancelForTesting)(void);
+@property(nonatomic, copy) void (^completionV2StreamAfterClaimForTesting)(void);
+@property(nonatomic, copy) void (^completionV2StreamBeforeMainBindForTesting)(void);
 @property(nonatomic, copy) void (^completionV2RedirectDecisionForTesting)(BOOL);
 @property(nonatomic, strong) NSMutableSet<NSNumber *> *strictCompletionTaskIdentifiers;
 @property(nonatomic, strong) DSHProjectContextService *projectContextService;
@@ -620,7 +624,8 @@ static BOOL DSHCanConnectToMacProxy(void) {
 @property(nonatomic, copy) NSDictionary *(^completionAttachmentResolver)(
     id value, NSData **payloadData, NSDictionary **manifestOut,
     NSError **error);
-- (void)settleActiveStreamForTask:(NSURLSessionDataTask *)task;
+- (void)clearStreamStateForRequestId:(NSString *)requestId
+                          generation:(NSUInteger)generation;
 @end
 
 @implementation LocalRuntimeModule
@@ -793,6 +798,9 @@ RCT_EXPORT_MODULE(LocalRuntime)
 - (void)credentialDidChange {
   NSURLSessionDataTask *task = nil;
   RCTPromiseRejectBlock strictRejecter = nil;
+  RCTPromiseRejectBlock streamRejecter = nil;
+  NSString *streamRequestId = nil;
+  NSUInteger streamGeneration = 0;
   @synchronized (self) {
     self.credentialGeneration += 1;
     task = self.activeCompletionTask;
@@ -800,6 +808,9 @@ RCT_EXPORT_MODULE(LocalRuntime)
         self.activeCompletionSchemaVersion == 3) {
       strictRejecter = self.activeCompletionRejecter;
     }
+    streamRejecter = self.activeCompletionStreamRejecter;
+    streamRequestId = self.activeCompletionRequestId;
+    streamGeneration = self.activeCompletionGeneration;
     [self clearActiveCompletionLocked];
   }
   if (self.completionV2BeforeTaskCancelForTesting != nil) {
@@ -810,7 +821,14 @@ RCT_EXPORT_MODULE(LocalRuntime)
     DSHRejectCompletionSchema2(
         strictRejecter, @"E_COMPLETION_CREDENTIAL_CHANGED");
   }
-  [self settleActiveStreamForTask:task];
+  if (streamRejecter != nil) {
+    // Settle the streaming promise synchronously: the round's reject block
+    // travels with the slot, so cancellation works even while the stream
+    // state is still being installed on the state queue.
+    streamRejecter(@"cancelled", @"Streaming completion was cancelled", nil);
+  }
+  [self clearStreamStateForRequestId:streamRequestId
+                          generation:streamGeneration];
 }
 
 - (BOOL)storeCredential:(NSString *)credential error:(NSError **)error {
@@ -1421,31 +1439,37 @@ RCT_EXPORT_MODULE(LocalRuntime)
   self.activeCompletionGeneration = 0;
   self.activeCompletionSchemaVersion = 0;
   self.activeCompletionRejecter = nil;
+  self.activeCompletionStreamRejecter = nil;
   self.activeCompletionRedirected = NO;
+  // The stream task belongs to the completion slot: clear it together with
+  // the slot so a cancelled round never leaves a dangling task for a
+  // successor stream's reset to discover, and a stale delegate callback
+  // can never match it again.
+  self.streamTask = nil;
 }
 
-/// Settles the active streaming round when its task is cancelled by the
-/// cancel/credential-rotation paths. Runs on the state queue so it is
-/// serialized ahead of any successor stream's reset: the JS promise must
-/// never be left hanging, and a late didCompleteWithError from the stale
-/// task must not be able to settle (or corrupt) the next stream.
-- (void)settleActiveStreamForTask:(NSURLSessionDataTask *)task {
-  // task may be nil when the stream was cancelled between the synchronous
-  // slot reservation and the main-queue task creation: the stream's
-  // promise must still settle. A non-nil task that no longer matches the
-  // bound stream task belongs to a strict (schema 2/3) round — never
-  // touch stream state for those.
-  @synchronized(self) {
-    if (task != nil && self.streamTask != task) return;
-  }
+/// Clears the installed per-stream state for a cancelled round. Runs on
+/// the state queue so it serializes with the stream reset and every
+/// delegate block; the round-identity check keeps it from ever touching a
+/// successor stream's freshly installed state. Settlement of the JS promise
+/// is handled separately and synchronously through the rejecter stored with
+/// the slot (activeCompletionStreamRejecter), so cancellation never depends
+/// on streamCompletion having been installed yet.
+- (void)clearStreamStateForRequestId:(NSString *)requestId
+                          generation:(NSUInteger)generation {
+  if (requestId == nil || generation == 0) return;
   dispatch_async(self.stateQueue, ^{
-    if (self.streamCompletion == nil) return;
-    void (^completion)(NSArray<NSDictionary *> *, NSError *) =
-        self.streamCompletion;
-    self.streamCompletion = nil;
-    self.streamParser = nil;
-    completion(nil, DSHLocalRuntimeError(1040,
-        @"Streaming completion was cancelled"));
+    @synchronized(self) {
+      if (self.streamGeneration != generation ||
+          ![self.streamRequestId isEqualToString:requestId]) {
+        return;
+      }
+      self.streamCompletion = nil;
+      self.streamParser = nil;
+      self.streamGeneration = 0;
+      self.streamRequestId = nil;
+      self.streamTask = nil;
+    }
   });
 }
 
@@ -1477,6 +1501,7 @@ RCT_EXPORT_MODULE(LocalRuntime)
     self.activeCompletionSchemaVersion = schemaVersion;
     self.activeCompletionRequestId = roundId;
     self.activeCompletionRejecter = rejecter;
+    self.activeCompletionStreamRejecter = nil;
     self.activeCompletionRedirected = NO;
     // Correlation is minted only after this caller atomically owns the slot,
     // and before dataTaskWithRequest is allowed to run.
@@ -1697,6 +1722,9 @@ RCT_REMAP_METHOD(cancelCompletion,
   }
   NSURLSessionDataTask *task = nil;
   RCTPromiseRejectBlock strictRejecter = nil;
+  RCTPromiseRejectBlock streamRejecter = nil;
+  NSString *streamRequestId = nil;
+  NSUInteger streamGeneration = 0;
   NSString *status = @"idle";
   @synchronized (self) {
     if (self.activeCompletionRequestId != nil ||
@@ -1707,6 +1735,9 @@ RCT_REMAP_METHOD(cancelCompletion,
             self.activeCompletionSchemaVersion == 3) {
           strictRejecter = self.activeCompletionRejecter;
         }
+        streamRejecter = self.activeCompletionStreamRejecter;
+        streamRequestId = self.activeCompletionRequestId;
+        streamGeneration = self.activeCompletionGeneration;
         [self clearActiveCompletionLocked];
         status = @"cancelled";
       } else {
@@ -1722,7 +1753,16 @@ RCT_REMAP_METHOD(cancelCompletion,
     DSHRejectCompletionSchema2(strictRejecter,
                                @"E_COMPLETION_CANCELLED");
   }
-  [self settleActiveStreamForTask:task];
+  if (streamRejecter != nil) {
+    // Settle the streaming promise synchronously: cancellation must work
+    // even before the stream state (and its completion block) is installed
+    // on the state queue.
+    streamRejecter(@"cancelled", @"Streaming completion was cancelled", nil);
+  }
+  // Only a matching cancel touches stream state: a stale request id must
+  // never settle or clear the active stream.
+  [self clearStreamStateForRequestId:streamRequestId
+                          generation:streamGeneration];
   resolve(@{@"status": status});
 }
 
@@ -2581,13 +2621,35 @@ RCT_REMAP_METHOD(completeV2Stream,
     // guards treat the streaming round like any in-flight completion.
     self.activeCompletionSchemaVersion = 2;
     self.activeCompletionRejecter = nil;
+    // The round's reject block travels with the slot so the cancel and
+    // credential-rotation paths can settle the JS promise synchronously,
+    // even while the stream state below is still being installed.
+    self.activeCompletionStreamRejecter = reject;
     self.activeCompletionRedirected = NO;
+  }
+  if (self.completionV2StreamAfterClaimForTesting != nil) {
+    self.completionV2StreamAfterClaimForTesting();
   }
 
   // Reset per-stream state under the state queue. The reset block is
   // enqueued before the task below is created on the main queue, so every
   // delegate callback for that task is serialized behind this reset.
   dispatch_async(self.stateQueue, ^{
+    // The round may have been cancelled between the synchronous slot
+    // reservation above and this install: in that case the cancel path has
+    // already rejected the JS promise (through the rejecter stored with
+    // the slot) and cleared the slot, so install nothing and touch no
+    // stream state. Without this guard a cancelled round would resurrect
+    // its stream state after the cancel and keep running.
+    BOOL current = NO;
+    @synchronized(self) {
+      current = [self.activeCompletionRequestId isEqualToString:requestId] &&
+          self.activeCompletionGeneration == completionGeneration &&
+          self.activeCompletionSchemaVersion == 2;
+    }
+    if (!current) {
+      return;
+    }
     self.streamParser = [[DSHStreamEventParser alloc] init];
     self.streamContent = [NSMutableString string];
     self.streamReasoning = [NSMutableString string];
@@ -2598,6 +2660,7 @@ RCT_REMAP_METHOD(completeV2Stream,
     self.streamThinkingMode = thinkingMode;
     @synchronized(self) {
       self.streamTask = nil;
+      self.streamGeneration = completionGeneration;
     }
     self.streamCompletion = ^(NSArray<NSDictionary *> *flushed, NSError *error) {
       // Runs once from didCompleteWithError after the stream ends.
@@ -2608,7 +2671,9 @@ RCT_REMAP_METHOD(completeV2Stream,
                                    completionGeneration:completionGeneration
                                    credentialGeneration:credentialGeneration];
       if (!current) {
-        reject(@"cancelled", @"Streaming completion was cancelled", nil);
+        // The slot is gone: the cancel/credential path settled this
+        // promise already through the rejecter stored with the slot.
+        // Never settle a promise twice.
         return;
       }
       if (error != nil) {
@@ -2639,9 +2704,27 @@ RCT_REMAP_METHOD(completeV2Stream,
   dispatch_async(dispatch_get_main_queue(), ^{
     NSURLSessionDataTask *task =
         [self.modelSession dataTaskWithRequest:request];
+    if (self.completionV2StreamBeforeMainBindForTesting != nil) {
+      self.completionV2StreamBeforeMainBindForTesting();
+    }
+    // Bind and resume only while this round still owns the slot: a cancel
+    // that raced ahead of task creation has already cleared it, and this
+    // main-queue continuation must not re-occupy the slot with a zombie
+    // task (which would strand the module in E_COMPLETION_BUSY and send a
+    // request the caller already cancelled).
+    BOOL current = NO;
     @synchronized(self) {
-      self.streamTask = task;
-      self.activeCompletionTask = task;
+      current = [self.activeCompletionRequestId isEqualToString:requestId] &&
+          self.activeCompletionGeneration == completionGeneration &&
+          self.activeCompletionSchemaVersion == 2;
+      if (current) {
+        self.streamTask = task;
+        self.activeCompletionTask = task;
+      }
+    }
+    if (!current) {
+      [task cancel];
+      return;
     }
     [task resume];
   });
