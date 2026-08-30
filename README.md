@@ -258,6 +258,9 @@ the proof verifier remain separate required gates.
   HTTPS workflow.
 - Android native local runtime/workspace adapters and device proof.
 
-See [the DSH Web parity matrix](docs/dsh-web-parity.md),
-[the mobile UI audit](docs/mobile-ui-audit.md), and
-[the proof contract](docs/local-runtime-proof.md) for the exact boundaries.
+See [the DSH Web parity matrix][parity], [the mobile UI audit][ui-audit], and
+[the proof contract][proof] in the document center for the exact boundaries.
+
+[parity]: https://github.com/ZSeven-W/openpencil-docs/blob/main/rish-app/reference/dsh-web-parity.md
+[ui-audit]: https://github.com/ZSeven-W/openpencil-docs/blob/main/rish-app/reference/mobile-ui-audit.md
+[proof]: https://github.com/ZSeven-W/openpencil-docs/blob/main/rish-app/reference/local-runtime-proof.md
