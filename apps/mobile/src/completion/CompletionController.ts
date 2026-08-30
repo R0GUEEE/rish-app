@@ -79,16 +79,16 @@ export type CompletionControllerOutcome = {
 export type CompletionControllerDependencies = {
   /**
    * Durable session-event hook: called exactly once per completed round
-   * with the reasoning/text trajectory rows. Optional; omitted in tests
-   * unless asserted.
+   * with the reasoning/text trajectory rows. The receiver owns event_id,
+   * seq, and created_at allocation (the shared session-event journal), so
+   * this emitter can never collide with the agent-turn driver on one
+   * attempt's trajectory namespace. Optional; omitted in tests unless
+   * asserted.
    */
   onSessionEvent?: (event: {
     schema_version: typeof SESSION_EVENT_SCHEMA_VERSION;
-    event_id: string;
     attempt_id: string;
-    seq: number;
     kind: 'assistant_reasoning' | 'assistant_text';
-    created_at: string;
     text: string;
   }) => void;
   readonly chat: ChatStore;
@@ -277,7 +277,6 @@ export function createCompletionController(
   let pendingTerminal: PendingTerminalPersistence | null = null;
   let retryPersistenceInFlight = false;
   let retryCommitInFlight = false;
-  let sessionEventSeq = 0;
   let lastCancellationCommitted = true;
   const listeners = new Set<(next: CompletionControllerState) => void>();
 
@@ -290,14 +289,10 @@ export function createCompletionController(
     try {
       dependencies.onSessionEvent({
         schema_version: SESSION_EVENT_SCHEMA_VERSION,
-        event_id: `${attemptId}-${sessionEventSeq}`,
         attempt_id: attemptId,
-        seq: sessionEventSeq,
         kind,
-        created_at: new Date().toISOString(),
         text,
       });
-      sessionEventSeq += 1;
     } catch {
       // Trajectory emission must never affect the completion flow.
     }

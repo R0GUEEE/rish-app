@@ -10,6 +10,10 @@ import type {
 } from '../src/completion/types';
 import type { SessionDurabilityResult } from '../src/completion/SessionPersistence';
 import {
+  createSessionEventJournal,
+  type SessionEventEmission,
+} from '../src/agent/SessionEvents';
+import {
   createChatStore,
   hydrateChatState,
   type ChatStore,
@@ -1325,10 +1329,13 @@ describe('transactional completion controller', () => {
 });
 
 test('completing a round emits reasoning before text session events', async () => {
-  const events: Array<{ kind: string; seq: number; text: string }> = [];
+  // The controller delegates event_id/seq/created_at allocation to the
+  // receiver; feed its emissions through the shared journal exactly like
+  // production wiring does.
+  const journal = createSessionEventJournal();
   const f = fixture({
-    onSessionEvent: jest.fn((event: { kind: string; seq: number; text: string }) => {
-      events.push(event);
+    onSessionEvent: jest.fn((event: { schema_version: number; attempt_id: string; kind: string; text: string }) => {
+      journal.append(event as unknown as SessionEventEmission);
     }),
   });
   f.store.createConversation();
@@ -1336,11 +1343,14 @@ test('completing a round emits reasoning before text session events', async () =
   if (conversationId === null) throw new Error('no conversation');
   await f.controller.send({ conversationId, text: 'hello', attachments: [] });
 
+  const events = journal.snapshot();
   const kinds = events.map(e => e.kind);
   expect(kinds).toContain('assistant_text');
+  // The journal allocates strictly increasing per-attempt sequences.
   expect(events.map(e => e.seq)).toEqual(
     events.map((_, i) => i),
   );
+  expect(new Set(events.map(e => e.event_id)).size).toBe(events.length);
   // Every emitted row must conform to the persisted session-event schema.
   expect(
     events.every(e => (e as { schema_version?: unknown }).schema_version === 1),

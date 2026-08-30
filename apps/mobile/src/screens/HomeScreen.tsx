@@ -87,11 +87,18 @@ import {
   type SessionDurabilityResult,
 } from '../completion/SessionPersistence';
 import {
-  appendSessionEventBounded,
   attachSessionEventsToSnapshot,
+  createSessionEventJournal,
   extractSessionEventsFromSnapshot,
-  type SessionEventV1,
 } from '../agent/SessionEvents';
+import {
+  createAgentInteractionController,
+  type AgentInteractionController,
+  type AgentInteractionState,
+} from '../agent/AgentInteractionController';
+import { createAgentTurnService } from '../agent/AgentTurnService';
+import { ApprovalComposer } from '../components/ApprovalComposer';
+import { QuestionComposer } from '../components/QuestionComposer';
 import { readRuntimeEvidence } from '../runtime/evidence';
 import { LocalProjects, type LocalProject } from '../native/LocalProjects';
 import { LocalProjectContext } from '../native/LocalProjectContext';
@@ -837,7 +844,7 @@ export function HomeScreen() {
         ) as unknown;
         const withEvents = attachSessionEventsToSnapshot(
           snapshot,
-          sessionEventLogRef.current,
+          sessionEventJournalRef.current.snapshot(),
         );
         const result = await sessionPersistence.write(
           JSON.stringify(withEvents),
@@ -870,7 +877,11 @@ export function HomeScreen() {
 
   const persistCurrentRef = useRef(persistCurrent);
   persistCurrentRef.current = persistCurrent;
-  const sessionEventLogRef = useRef<readonly SessionEventV1[]>([]);
+  // One journal for every trajectory emitter in the app. It owns event_id,
+  // seq (strictly increasing per attempt), and created_at allocation, which
+  // is what lets the completion controller and the agent turn driver write
+  // the same attempt's trajectory without id collisions.
+  const sessionEventJournalRef = useRef(createSessionEventJournal());
 
   const completionController = useMemo(
     () =>
@@ -878,13 +889,10 @@ export function HomeScreen() {
         chat: store,
         persistCurrent: () => persistCurrentRef.current(),
         onSessionEvent: event => {
-          // Durable trajectory capture: appended (bounded) to the log,
-          // persisted with the session snapshot on the next persist pass,
-          // and restored on startup from the same snapshot.
-          sessionEventLogRef.current = appendSessionEventBounded(
-            sessionEventLogRef.current,
-            event,
-          );
+          // Durable trajectory capture: the shared journal allocates the
+          // per-attempt sequence and caps the log; the snapshot attach on
+          // the next persist pass stores it, and hydration restores it.
+          sessionEventJournalRef.current.append(event);
         },
         completeRoundV2: request =>
           DshHarnessAdapter.completeRoundV2(request),
@@ -906,6 +914,54 @@ export function HomeScreen() {
     () => completionController.subscribe(setCompletionState),
     [completionController],
   );
+  // DSH approval / structured-question broker: publishes pending decisions
+  // to the composers below and settles the agent turn's wait states.
+  const agentInteractions: AgentInteractionController = useMemo(
+    () => createAgentInteractionController(),
+    [],
+  );
+  const [agentInteractionState, setAgentInteractionState] =
+    useState<AgentInteractionState>(() => agentInteractions.getState());
+  useEffect(
+    () => agentInteractions.subscribe(setAgentInteractionState),
+    [agentInteractions],
+  );
+  // The agent turn service binds runAgentTurn to the real surfaces: native
+  // tool execution, the harness transport, the decision broker, and the
+  // same durable journal the completion controller writes. Every approval
+  // and question row from a real turn lands in the persisted trajectory.
+  const agentTurnService = useMemo(
+    () =>
+      createAgentTurnService({
+        journal: sessionEventJournalRef.current,
+        interactions: agentInteractions,
+        modelCalls: async args => {
+          const result = await DshHarnessAdapter.completeV2(
+            args.model as 'deepseek-v4-flash',
+            args.history,
+            args.requestId,
+            args.thinkingMode as 'high',
+            args.tools,
+          );
+          return {
+            text: result.text,
+            finish_reason: result.finish_reason,
+            tool_calls: result.tool_calls,
+          };
+        },
+        createApprovalId: () =>
+          'approval-' + LocalRuntime.createCompletionRequestId(),
+        createQuestionId: () =>
+          'question-' + LocalRuntime.createCompletionRequestId(),
+      }),
+    [agentInteractions],
+  );
+  // Switching conversations tears down any in-flight agent turn the same
+  // way the completion controller cancels its attempt: pending approval and
+  // question waits settle fail-closed instead of outliving their context.
+  useEffect(() => {
+    agentTurnService.cancel();
+  }, [chatState.selectedConversationId, agentTurnService]);
   const projectContextNativeAvailable = useMemo(
     () => LocalProjectContext.isAvailable(),
     [],
@@ -1084,9 +1140,7 @@ export function HomeScreen() {
             if (result.ok) preferencesStore.hydrate(savedPreferences);
           }
           const savedEvents = extractSessionEventsFromSnapshot(decoded);
-          if (savedEvents !== null) {
-            sessionEventLogRef.current = savedEvents;
-          }
+          sessionEventJournalRef.current.restore(savedEvents);
         }
       } catch {
         // Chat hydration below owns the fail-closed error shown to the user.
@@ -4352,6 +4406,25 @@ export function HomeScreen() {
         onOpenSettings={() => openSettingsFromDrawer(drawerRenderEpoch)}
         onSelect={id => selectConversation(id, drawerRenderEpoch)}
       />
+      {agentInteractionState.pendingApproval !== null && (
+        <ApprovalComposer
+          request={agentInteractionState.pendingApproval}
+          onDecide={(approvalId, decision) =>
+            agentInteractions.decideApproval(approvalId, decision)
+          }
+        />
+      )}
+      {agentInteractionState.pendingQuestion !== null && (
+        <QuestionComposer
+          question={agentInteractionState.pendingQuestion}
+          onAnswer={(questionId, answer) =>
+            agentInteractions.answerQuestion(questionId, answer)
+          }
+          onCancel={questionId =>
+            agentInteractions.cancelQuestion(questionId)
+          }
+        />
+      )}
       <ConversationActionSheet
         title={actionConversation?.title ?? ''}
         visible={actionConversation !== null}
