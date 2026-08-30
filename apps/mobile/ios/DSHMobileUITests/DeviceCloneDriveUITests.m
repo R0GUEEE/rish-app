@@ -36,6 +36,10 @@
 - (void)setUp {
   [super setUp];
   self.continueAfterFailure = NO;
+  // Capture the container-anchor trace (env-gated NSLog in
+  // LocalProjectAccess) from the target app while the clone drives the
+  // real project-path walk on the device.
+  self.app.launchEnvironment = @{@"DSH_ANCHOR_TRACE" : @"1"};
 }
 
 - (void)testDrivePublicCloneEndToEnd {
