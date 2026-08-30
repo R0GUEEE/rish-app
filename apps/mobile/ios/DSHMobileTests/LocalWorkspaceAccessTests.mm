@@ -2250,12 +2250,11 @@ static NSString *const DSHDigestB =
 }
 
 - (void)testInfoPlistEnablesFilesVisibilityKeys {
-  NSString *sourcePath = [NSString stringWithUTF8String:__FILE__];
-  NSURL *infoURL = [[NSURL fileURLWithPath:sourcePath]
-      URLByDeletingLastPathComponent];
-  infoURL = [[infoURL URLByDeletingLastPathComponent]
-      URLByAppendingPathComponent:@"DSHMobile/Info.plist"];
-  NSDictionary *info = [NSDictionary dictionaryWithContentsOfURL:infoURL];
+  // Read the host app bundle rather than the source tree: the source path is
+  // only reachable on the build machine, so a source-tree read passes on the
+  // simulator even when the keys never reached the built app, and fails on a
+  // device for a reason that says nothing about the product.
+  NSDictionary *info = NSBundle.mainBundle.infoDictionary;
   XCTAssertEqualObjects(info[@"UIFileSharingEnabled"], @YES);
   XCTAssertEqualObjects(info[@"LSSupportsOpeningDocumentsInPlace"], @YES);
 }
