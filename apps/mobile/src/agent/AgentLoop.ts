@@ -22,6 +22,7 @@ const AUTO_TOOLS: ReadonlySet<string> = new Set([
   'list_dir',
   'read_file',
   'git_status',
+  'ask_user',
 ]);
 const CONVERSATION_TOOLS: ReadonlySet<string> = new Set([
   'write_file',
@@ -58,6 +59,8 @@ export type AgentTraceRow = {
   readonly outputDigest?: string;
   readonly blocked?: string;
   readonly detail?: string;
+  /** The user's answer content for an answered ask_user call. */
+  readonly questionAnswer?: string;
 };
 
 export type AgentFeedbackRow = {
@@ -67,6 +70,10 @@ export type AgentFeedbackRow = {
   ok: boolean;
   outputDigest?: string;
   blocked?: string;
+  /** The user's answer content for an answered ask_user call. */
+  questionAnswer?: string;
+  /** Marked when an optional question was dismissed without an answer. */
+  questionStatus?: 'cancelled';
 };
 
 export type AgentLoopFailure = {
@@ -115,13 +122,21 @@ export type AgentLoopEvent =
     }
   | { kind: 'model_result'; text: string; toolCalls: readonly AgentCallRef[] }
   | { kind: 'model_failed'; message: string }
-  | { kind: 'approval_decision'; approved: boolean }
+  | {
+      kind: 'approval_decision';
+      approved: boolean;
+      /** User-chosen scope; undefined keeps the legacy default policy. */
+      scope?: 'once' | 'conversation';
+    }
   | {
       kind: 'tool_outcome';
       callId: string;
       ok: boolean;
       outputDigest?: string;
       detail?: string;
+      /** ask_user outcomes: answered carries the answer, cancelled none. */
+      questionStatus?: 'answered' | 'cancelled';
+      questionAnswer?: string;
     }
   | { kind: 'cancel' };
 
@@ -166,12 +181,10 @@ function freshStarted(history: readonly CompletionMessage[], tools: readonly unk
 
 /** Effective classification for a tool against the current loop state. */
 function gateFor(state: AgentLoopState, name: string): AgentToolAccess {
-  const access = agentToolAccess(name);
-  if (access === 'conversation_confirm' &&
-      state.conversationAllowed.includes(name)) {
-    return 'auto';
-  }
-  return access;
+  // A conversation-scoped approval grants any tool name for the rest of
+  // this turn; base classes only apply while no grant exists.
+  if (state.conversationAllowed.includes(name)) return 'auto';
+  return agentToolAccess(name);
 }
 
 /**
@@ -344,12 +357,18 @@ export function agentLoopReduce(
           pendingCalls: state.pendingCalls.filter(c => c.id !== call.id),
         });
       }
-      // Approved: mark the call, allow its family for the conversation when
-      // applicable, and resume driving the queue from the head.
-      const allowed =
-        agentToolAccess(call.name) === 'conversation_confirm'
-          ? [...withTrace.conversationAllowed, call.name]
-          : withTrace.conversationAllowed;
+      // Approved: mark the call, extend the conversation grant when the
+      // user chose that scope (or keep the legacy default policy when no
+      // scope was given), and resume driving the queue from the head.
+      const extendGrant =
+        event.scope === 'conversation' ||
+        (event.scope === undefined &&
+          agentToolAccess(call.name) === 'conversation_confirm');
+      const allowed = extendGrant
+        ? withTrace.conversationAllowed.includes(call.name)
+          ? withTrace.conversationAllowed
+          : [...withTrace.conversationAllowed, call.name]
+        : withTrace.conversationAllowed;
       const resuming: AgentLoopState = {
         ...withTrace,
         conversationAllowed: allowed,
@@ -393,6 +412,12 @@ export function agentLoopReduce(
         arguments: call.arguments,
         ok: true,
         outputDigest: event.outputDigest,
+        ...(event.questionStatus === 'answered'
+          ? { questionAnswer: event.questionAnswer ?? '' }
+          : {}),
+        ...(event.questionStatus === 'cancelled'
+          ? { questionStatus: 'cancelled' as const }
+          : {}),
       };
       const settled: AgentLoopState = {
         ...state,
@@ -407,6 +432,12 @@ export function agentLoopReduce(
             approved: true,
             ok: true,
             outputDigest: event.outputDigest,
+            ...(event.questionStatus === 'answered'
+              ? { questionAnswer: event.questionAnswer }
+              : {}),
+            ...(event.questionStatus === 'cancelled'
+              ? { detail: 'cancelled (no answer)' }
+              : {}),
           },
         ],
         feedbackRows: [...state.feedbackRows, outcomeRow],

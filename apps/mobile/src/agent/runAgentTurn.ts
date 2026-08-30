@@ -5,15 +5,43 @@ import {
   type AgentLoopState,
   type AgentTraceRow,
 } from './AgentLoop';
-import { SESSION_EVENT_SCHEMA_VERSION } from './SessionEvents';
+import {
+  approvalRequestDraft,
+  approvalResponseDraft,
+  DEFAULT_APPROVAL_TIMEOUT_MS,
+  resolveApprovalDecision,
+  type ApprovalRequestSpec,
+} from './AgentApprovals';
+import {
+  DEFAULT_QUESTION_TIMEOUT_MS,
+  parseQuestionSpec,
+  questionDraft,
+  questionResponseDraft,
+  resolveQuestionAnswer,
+  type QuestionAnswer,
+  type QuestionSpec,
+} from './AgentQuestions';
+import {
+  SESSION_EVENT_SCHEMA_VERSION,
+  type SessionEventDraft,
+  type SessionEventEmission,
+} from './SessionEvents';
 import { digestForText } from './AgentTools';
 
 /**
  * Thin driver that walks the agent reducer's commands against the real
- * surfaces: `LocalRuntime.completeV2` for model rounds and the tool executor
- * for actions. Every dependency is injected so the whole flow is testable
- * without a simulator.
+ * surfaces: the model round function, the tool executor, and the user
+ * decision broker (approvals + structured questions). Every dependency is
+ * injected so the whole flow is testable without a simulator.
+ *
+ * SessionEvent rows leave here as drafts without event_id/seq/created_at;
+ * the shared journal allocates those fields, which is what keeps the
+ * completion controller and this driver from colliding on one attempt's
+ * trajectory namespace.
  */
+
+const APPROVAL_SCOPES = ['once', 'conversation'] as const;
+const TIMEOUT: unique symbol = Symbol('agent-timeout');
 
 export type RunAgentTurnDeps = {
   /** Called once per model round; returns the parsed completionV2 result. */
@@ -34,12 +62,19 @@ export type RunAgentTurnDeps = {
     name: string,
     argumentsJson: string,
   ) => Promise<{ ok: boolean; outputDigest: string; detail?: string }>;
-  /** Resolves when the user answers the inline approval card. */
-  requestApproval: (call: {
-    callId: string;
-    name: string;
-    arguments: string;
-  }) => Promise<boolean>;
+  /**
+   * Resolves when the user answers the approval card with a raw decision;
+   * the caller re-validates fail-closed. May resolve undefined on expiry.
+   */
+  requestApproval: (spec: ApprovalRequestSpec) => Promise<unknown>;
+  /**
+   * Resolves when the user answers or dismisses the question composer;
+   * the caller re-validates fail-closed.
+   */
+  askQuestion: (spec: QuestionSpec) => Promise<unknown>;
+  /** Fresh correlation ids for protocol rows. */
+  createApprovalId: () => string;
+  createQuestionId: () => string;
   /** Streamed on every trace change for live UI rendering. */
   onTrace?: (traces: readonly AgentTraceRow[]) => void;
   /**
@@ -54,21 +89,13 @@ export type RunAgentTurnDeps = {
       outcome: 'ok' | 'failed' | 'denied';
     }>,
   ) => void;
-  /** Appends one durable SessionEvent row for this attempt. */
-  emitSessionEvent?: (event: {
-    schema_version: typeof SESSION_EVENT_SCHEMA_VERSION;
-    event_id: string;
-    attempt_id: string;
-    seq: number;
-    kind: 'assistant_reasoning' | 'assistant_text' | 'tool_call' | 'tool_result';
-    created_at: string;
-    text?: string;
-    tool_call_id?: string;
-    tool_name?: string;
-    arguments_json?: string;
-    outcome?: 'ok' | 'failed' | 'denied';
-    output_digest?: string;
-  }) => void;
+  /** Appends one durable SessionEvent draft for this attempt. */
+  emitSessionEvent?: (event: SessionEventEmission) => void;
+  /**
+   * Polled around wait states; when true the turn ends without executing
+   * anything else and unanswered decisions are recorded as cancelled.
+   */
+  shouldCancel?: () => boolean;
 };
 
 export type RunAgentTurnOptions = {
@@ -78,6 +105,8 @@ export type RunAgentTurnOptions = {
   history: readonly { role: 'user' | 'assistant'; content: string }[];
   tools: readonly unknown[];
   requestId?: string;
+  approvalTimeoutMs?: number;
+  questionTimeoutMs?: number;
   deps: RunAgentTurnDeps;
 };
 
@@ -89,6 +118,24 @@ export type AgentTurnResult = {
   failure?: { code: string };
 };
 
+async function withDeadline(
+  promise: Promise<unknown>,
+  timeoutMs: number,
+): Promise<unknown> {
+  let timer: ReturnType<typeof setTimeout> | null = null;
+  const deadline = new Promise<unknown>(resolve => {
+    timer = setTimeout(() => resolve(TIMEOUT), timeoutMs);
+  });
+  try {
+    return await Promise.race([promise, deadline]);
+  } catch {
+    // A rejecting decision source is an absent answer, not an approval.
+    return undefined;
+  } finally {
+    if (timer !== null) clearTimeout(timer);
+  }
+}
+
 function formatFeedback(
   rows: readonly {
     name: string;
@@ -96,11 +143,19 @@ function formatFeedback(
     ok: boolean;
     outputDigest?: string;
     blocked?: string;
+    questionAnswer?: string;
+    questionStatus?: 'cancelled';
   }[],
 ): { role: 'user'; content: string } {
   const lines = rows.map(row => {
     if (row.blocked === 'denied_by_user') {
       return `- ${row.name} ${row.arguments} → blocked (denied by user)`;
+    }
+    if (row.questionAnswer !== undefined) {
+      return `- ${row.name} ${row.arguments} → answered: ${row.questionAnswer}`;
+    }
+    if (row.questionStatus === 'cancelled') {
+      return `- ${row.name} ${row.arguments} → cancelled (no answer)`;
     }
     return row.ok
       ? `- ${row.name} ${row.arguments} → ok (${row.outputDigest ?? 'ok'})`
@@ -122,23 +177,23 @@ export async function runAgentTurn(
   const attemptId =
     options.requestId ||
     `attempt-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
-  let eventSeq = 0;
-  const emitEvent = (
-    event: Omit<
-      Parameters<NonNullable<RunAgentTurnDeps['emitSessionEvent']>>[0],
-      'schema_version' | 'event_id' | 'attempt_id' | 'seq' | 'created_at'
-    >,
-  ): void => {
+  const approvalTimeoutMs =
+    options.approvalTimeoutMs ?? DEFAULT_APPROVAL_TIMEOUT_MS;
+  const questionTimeoutMs =
+    options.questionTimeoutMs ?? DEFAULT_QUESTION_TIMEOUT_MS;
+  const emitEvent = (draft: SessionEventDraft): void => {
     if (deps.emitSessionEvent === undefined) return;
-    deps.emitSessionEvent({
-      ...event,
-      schema_version: SESSION_EVENT_SCHEMA_VERSION,
-      event_id: `${attemptId}-${eventSeq}`,
-      attempt_id: attemptId,
-      seq: eventSeq,
-      created_at: new Date().toISOString(),
-    });
-    eventSeq += 1;
+    try {
+      deps.emitSessionEvent({
+        ...draft,
+        schema_version: SESSION_EVENT_SCHEMA_VERSION,
+        attempt_id: attemptId,
+      });
+    } catch {
+      // Trajectory emission never affects the loop. Safety still holds:
+      // replay treats an unanswered approval_request as denied, so a lost
+      // row can never turn into an assumed approval.
+    }
   };
 
   // Wrapped so TypeScript keeps the wide nullable type across closures.
@@ -173,6 +228,176 @@ export async function runAgentTurn(
     }
   };
 
+  const isCancelled = (): boolean => cancelled || deps.shouldCancel?.() === true;
+
+  const runApproval = async (call: {
+    id: string;
+    name: string;
+    arguments: string;
+  }): Promise<void> => {
+    const spec: ApprovalRequestSpec = {
+      approvalId: deps.createApprovalId(),
+      toolCallId: call.id,
+      toolName: call.name,
+      argumentsJson: call.arguments,
+      scopes: APPROVAL_SCOPES,
+      expiresAtMs: Date.now() + approvalTimeoutMs,
+    };
+    emitEvent(approvalRequestDraft(spec));
+    let raw: unknown;
+    try {
+      raw = await withDeadline(deps.requestApproval(spec), approvalTimeoutMs);
+    } catch {
+      // A throwing decision source is an absent answer, not an approval.
+      raw = undefined;
+    }
+    if (isCancelled()) {
+      // The turn ended while the card was up: record the cancellation
+      // instead of a fabricated decision, and stop without executing.
+      emitEvent({
+        kind: 'approval_response',
+        approval_id: spec.approvalId,
+        approval_decision: 'denied',
+        approval_resolution: 'cancelled',
+      });
+      reduceEvent({ kind: 'cancel' });
+      return;
+    }
+    const decision = resolveApprovalDecision(spec, raw, Date.now());
+    emitEvent(approvalResponseDraft(spec, decision));
+    if (decision.status === 'denied') {
+      // A denial is a settled tool result, not a transport failure.
+      emitEvent({
+        kind: 'tool_result',
+        tool_call_id: call.id,
+        outcome: 'denied',
+        output_digest: '',
+      });
+    }
+    reduceEvent({
+      kind: 'approval_decision',
+      approved: decision.status === 'approved',
+      ...(decision.status === 'approved' ? { scope: decision.scope } : {}),
+    });
+  };
+
+  const runQuestion = async (call: {
+    id: string;
+    name: string;
+    arguments: string;
+  }): Promise<void> => {
+    let args: Record<string, unknown>;
+    try {
+      args = JSON.parse(call.arguments) as Record<string, unknown>;
+    } catch {
+      args = {};
+    }
+    const spec = parseQuestionSpec(
+      deps.createQuestionId(),
+      args.question,
+      args.input_mode ?? args.inputMode,
+      args.options,
+      args.required,
+    );
+    if (spec === null) {
+      emitEvent({
+        kind: 'tool_result',
+        tool_call_id: call.id,
+        outcome: 'failed',
+        output_digest: '',
+      });
+      reduceEvent({
+        kind: 'tool_outcome',
+        callId: call.id,
+        ok: false,
+        outputDigest: '',
+        detail: 'E_AGENT_BAD_QUESTION',
+      });
+      return;
+    }
+    emitEvent(questionDraft(spec));
+    let raw: unknown;
+    try {
+      raw = await withDeadline(deps.askQuestion(spec), questionTimeoutMs);
+    } catch {
+      raw = undefined;
+    }
+    if (isCancelled()) {
+      emitEvent(questionResponseDraft(spec, { status: 'cancelled' }));
+      reduceEvent({ kind: 'cancel' });
+      return;
+    }
+    const answer: QuestionAnswer =
+      raw === TIMEOUT && !spec.required
+        ? { status: 'cancelled' }
+        : resolveQuestionAnswer(spec, raw);
+    emitEvent(questionResponseDraft(spec, answer));
+    if (answer.status === 'answered') {
+      emitEvent({
+        kind: 'tool_result',
+        tool_call_id: call.id,
+        outcome: 'ok',
+        output_digest: digestForText(answer.answer),
+      });
+      reduceEvent({
+        kind: 'tool_outcome',
+        callId: call.id,
+        ok: true,
+        outputDigest: digestForText(answer.answer),
+        questionStatus: 'answered',
+        questionAnswer: answer.answer,
+      });
+      return;
+    }
+    if (answer.status === 'cancelled') {
+      emitEvent({
+        kind: 'tool_result',
+        tool_call_id: call.id,
+        outcome: 'ok',
+        output_digest: 'cancelled',
+      });
+      reduceEvent({
+        kind: 'tool_outcome',
+        callId: call.id,
+        ok: true,
+        outputDigest: 'cancelled',
+        questionStatus: 'cancelled',
+      });
+      return;
+    }
+    // Invalid answer (fail-closed): a required question must end the turn;
+    // an optional one is treated as dismissed so the loop can adapt.
+    if (spec.required) {
+      emitEvent({
+        kind: 'tool_result',
+        tool_call_id: call.id,
+        outcome: 'failed',
+        output_digest: '',
+      });
+      reduceEvent({
+        kind: 'tool_outcome',
+        callId: call.id,
+        ok: false,
+        outputDigest: '',
+        detail: 'E_AGENT_QUESTION_UNANSWERED',
+      });
+      return;
+    }
+    emitEvent({
+      kind: 'tool_result',
+      tool_call_id: call.id,
+      outcome: 'ok',
+      output_digest: 'cancelled',
+    });
+    reduceEvent({
+      kind: 'tool_outcome',
+      callId: call.id,
+      ok: true,
+      outputDigest: 'cancelled',
+      questionStatus: 'cancelled',
+    });
+  };
+
   reduceEvent({
     kind: 'started',
     history: options.history,
@@ -182,7 +407,7 @@ export async function runAgentTurn(
   while (true) {
     const liveState = ref.current;
     if (
-      cancelled &&
+      isCancelled() &&
       (liveState === null ||
         (liveState.phase !== 'done' && liveState.phase !== 'cancelled'))
     ) {
@@ -238,7 +463,14 @@ export async function runAgentTurn(
 
       if (command.kind === 'execute_tool') {
         if (ref.current === null || ref.current.phase !== 'executing_tool') continue;
-        if (cancelled) break;
+        if (isCancelled()) {
+          reduceEvent({ kind: 'cancel' });
+          continue;
+        }
+        if (command.call.name === 'ask_user') {
+          await runQuestion(command.call);
+          continue;
+        }
         const execution = await deps.executeTool(
           { projectId: options.projectId },
           command.call.name,
@@ -266,15 +498,13 @@ export async function runAgentTurn(
     // commands is an approval decision.
     const current = ref.current;
     if (current !== null && current.phase === 'awaiting_approval') {
-      if (cancelled) break;
+      if (isCancelled()) {
+        reduceEvent({ kind: 'cancel' });
+        continue;
+      }
       const call = current.pendingCalls.find(c => c.id === current.currentCallId);
       if (call === undefined) break;
-      const approved = await deps.requestApproval({
-        callId: call.id,
-        name: call.name,
-        arguments: call.arguments,
-      });
-      reduceEvent({ kind: 'approval_decision', approved });
+      await runApproval(call);
       continue;
     }
 
