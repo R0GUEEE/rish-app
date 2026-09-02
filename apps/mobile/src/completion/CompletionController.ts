@@ -800,6 +800,7 @@ export function createCompletionController(
     resultSha256: string | null,
     approvalReference: string | null,
     failureCode: PersistedSessionEventV3['failure_code'],
+    createdAt = canonicalNow(dependencies.now),
   ): PersistedSessionEventV3 => {
     const previous = dependencies.chat.getState().sessionEvents ?? [];
     const latest = previous
@@ -819,7 +820,7 @@ export function createCompletionController(
       result_sha256: resultSha256,
       approval_reference: approvalReference,
       failure_code: failureCode,
-      created_at: canonicalNow(dependencies.now),
+      created_at: createdAt,
     } as PersistedSessionEventV3;
   };
 
@@ -1980,6 +1981,7 @@ export function createCompletionController(
     attempt: TurnAttemptV1,
     journal: PersistedAgentAttemptJournalV3,
     reason: AgentTranscriptCleanupV1['reason'],
+    createdAt: string,
   ): AgentTranscriptCleanupV1 | null => {
     const cleanupId = freshOperationId();
     return cleanupId === null
@@ -1993,7 +1995,7 @@ export function createCompletionController(
           transcript_ref: journal.transcript.transcript_ref,
           transcript_sha256: journal.transcript.transcript_sha256,
           reason,
-          created_at: canonicalNow(dependencies.now),
+          created_at: createdAt,
         };
   };
 
@@ -2027,6 +2029,7 @@ export function createCompletionController(
       return await failAgentWithoutNative(conversationId, attemptId, 'E_AGENT_CONFLICT');
     }
     const completionReceipt = roundOutcome.completion_receipt;
+    const terminalCreatedAt = canonicalNow(dependencies.now);
     const nextJournal: PersistedAgentAttemptJournalV3 = {
       ...copyAgentJournal(currentJournal),
       phase,
@@ -2039,13 +2042,14 @@ export function createCompletionController(
       },
       call_index: null,
       batch: [],
-      updated_at: canonicalNow(dependencies.now),
+      updated_at: terminalCreatedAt,
     };
     const cleanup = agentCleanupFor(
       conversationId,
       located.attempt,
       nextJournal,
       phase === 'final_response' ? 'completed' : 'failed',
+      terminalCreatedAt,
     );
     if (cleanup === null) {
       return await failAgentWithoutNative(conversationId, attemptId, 'E_AGENT_PERSISTENCE');
@@ -2062,6 +2066,7 @@ export function createCompletionController(
       null,
       null,
       phase === 'final_response' ? null : (roundOutcome.kind === 'blocked' ? roundOutcome.failure_code : 'E_AGENT_PERSISTENCE'),
+      terminalCreatedAt,
     );
     const assistantMessage =
       phase === 'final_response' && roundOutcome.kind === 'final'
@@ -2073,7 +2078,7 @@ export function createCompletionController(
                   id,
                   role: 'assistant' as const,
                   text: roundOutcome.text,
-                  createdAt: canonicalNow(dependencies.now),
+                  createdAt: terminalCreatedAt,
                   attachments: [],
                   metadata: {
         modelId: completionReceipt.model,
@@ -2368,6 +2373,7 @@ export function createCompletionController(
     const current = located.attempt.agent;
     const lineage = current.round_lineage;
     if (lineage === null) return await failAgentWithoutNative(conversationId, attemptId, 'E_AGENT_CONFLICT');
+    const transitionCreatedAt = canonicalNow(dependencies.now);
     const phase: AgentAttemptPhase =
       result.status === 'in_flight'
         ? 'round_in_flight'
@@ -2395,7 +2401,7 @@ export function createCompletionController(
               : result.status,
         native_row_revision: result.result_round_revision,
       },
-      updated_at: canonicalNow(dependencies.now),
+      updated_at: transitionCreatedAt,
     };
     const eventId = freshOperationId();
     if (eventId === null) {
@@ -2413,6 +2419,7 @@ export function createCompletionController(
       null,
       null,
       null,
+      transitionCreatedAt,
     );
     const cleanup =
       phase === 'round_in_flight'
@@ -2422,6 +2429,7 @@ export function createCompletionController(
             located.attempt,
             nextJournal,
             phase === 'cancelled' ? 'cancelled' : 'failed',
+            transitionCreatedAt,
           );
     if (phase !== 'round_in_flight' && cleanup === null) {
       return await failAgentWithoutNative(conversationId, attemptId, 'E_AGENT_PERSISTENCE');
@@ -3068,7 +3076,8 @@ export function createCompletionController(
         // native union; the post-commit branch must still handle unknown and
         // ambiguous outcomes without issuing another effect.
         const executeStatus: ExecuteAgentToolResultV2['status'] = executeResult.status;
-        const resultJournal = journalForToolResult(currentJournal, safeExecuteResult, canonicalNow(dependencies.now));
+        const resultCreatedAt = canonicalNow(dependencies.now);
+        const resultJournal = journalForToolResult(currentJournal, safeExecuteResult, resultCreatedAt);
         if (resultJournal === null) return await failAgentWithoutNative(conversationId, attemptId, 'E_AGENT_TRANSCRIPT');
         const resultEvent =
           executeStatus === 'running' || executeStatus === 'cancel_requested'
@@ -3084,6 +3093,7 @@ export function createCompletionController(
                 null,
                 null,
                 null,
+                resultCreatedAt,
               )
             : agentEvent(
                 attemptId,
@@ -3101,6 +3111,7 @@ export function createCompletionController(
                 executeStatus === 'unknown'
                   ? 'E_AGENT_CONFLICT'
                   : (safeExecuteResult.receipt?.failure_code ?? null) as PersistedSessionEventV3['failure_code'],
+                resultCreatedAt,
               );
         const resultCas = authorityFor(current.attempt, conversationId);
         if (resultCas === null) return await failAgentWithoutNative(conversationId, attemptId, 'E_AGENT_PERSISTENCE');
@@ -3110,6 +3121,7 @@ export function createCompletionController(
             current.attempt,
             resultJournal,
             'cancelled',
+            resultCreatedAt,
           );
           if (cleanup === null) return await failAgentWithoutNative(conversationId, attemptId, 'E_AGENT_PERSISTENCE');
           const terminalEvent = {
@@ -3125,6 +3137,7 @@ export function createCompletionController(
               null,
               null,
               'E_AGENT_CANCELLED',
+              resultCreatedAt,
             ),
             seq: resultEvent.seq + 1,
           };
@@ -4140,6 +4153,7 @@ export function createCompletionController(
         }
         return nextCall;
       });
+      const cancelCreatedAt = canonicalNow(dependencies.now);
       const nextJournal: PersistedAgentAttemptJournalV3 = {
         ...copyAgentJournal(currentJournal),
         phase: terminal ? 'cancelled' : result.status === 'unknown' ? 'unknown' : result.status === 'ambiguous' ? 'ambiguous' : currentJournal.phase,
@@ -4147,9 +4161,17 @@ export function createCompletionController(
         transcript: copyAgentTranscript(result.transcript),
         round_lineage: cancelledLineage,
         batch: cancelledBatch,
-        updated_at: canonicalNow(dependencies.now),
+        updated_at: cancelCreatedAt,
       };
-      const cleanup = terminal ? agentCleanupFor(run.conversationId, current.attempt, nextJournal, 'cancelled') : null;
+      const cleanup = terminal
+        ? agentCleanupFor(
+            run.conversationId,
+            current.attempt,
+            nextJournal,
+            'cancelled',
+            cancelCreatedAt,
+          )
+        : null;
       if (terminal && cleanup === null) return await failAgentWithoutNative(run.conversationId, run.attemptId, 'E_AGENT_PERSISTENCE');
       const terminalEventId = terminal ? freshOperationId() : request.operation_id;
       if (terminal && terminalEventId === null) return await failAgentWithoutNative(run.conversationId, run.attemptId, 'E_AGENT_PERSISTENCE');
@@ -4166,6 +4188,7 @@ export function createCompletionController(
             null,
             null,
             'E_AGENT_CANCELLED',
+            cancelCreatedAt,
           )
         : agentEvent(
             run.attemptId,
@@ -4181,6 +4204,7 @@ export function createCompletionController(
             null,
             request.operation_id,
             request.cancel_token.reason_code,
+            cancelCreatedAt,
           );
       const postCas = authorityFor(current.attempt, run.conversationId);
       if (postCas === null) return await failAgentWithoutNative(run.conversationId, run.attemptId, 'E_AGENT_PERSISTENCE');

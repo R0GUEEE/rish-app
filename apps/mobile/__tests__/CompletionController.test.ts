@@ -1848,6 +1848,7 @@ describe('project Agent completion controller', () => {
     persistCurrent: () => Promise<CompletionPersistenceResult>,
     operationIds = [...IDS],
     requestAgentApproval = jest.fn(async () => ({ status: 'approved' as const, scope: 'once' as const })),
+    now: () => string = () => NOW,
   ) {
     return createCompletionController({
       chat: store,
@@ -1860,7 +1861,7 @@ describe('project Agent completion controller', () => {
       createOperationId: jest.fn(() => operationIds.shift() ?? AGENT_ATTEMPT),
       agentRuntime: runtime,
       requestAgentApproval,
-      now: () => NOW,
+      now,
     });
   }
 
@@ -2011,6 +2012,49 @@ describe('project Agent completion controller', () => {
     expect(runtime.completeAgentRoundV2).toHaveBeenCalledTimes(1);
     expect(runtime.prepareAgentToolBatch).not.toHaveBeenCalled();
     expect(runtime.executeAgentTool).not.toHaveBeenCalled();
+  });
+
+  test('freezes one timestamp across an atomic final checkpoint when the clock advances', async () => {
+    const store = agentStore();
+    const conversationId = store.getState().selectedConversationId!;
+    const runtime = makeRuntime([], { finalRoundIndex: 0 });
+    const finalStore = jest.spyOn(store, 'completeAgentAttempt');
+    let tick = 0;
+    const observedTimes: string[] = [];
+    const advancingNow = jest.fn(() => {
+      const value = new Date(Date.parse(NOW) + tick).toISOString();
+      tick += 1;
+      observedTimes.push(value);
+      return value;
+    });
+    const controller = agentController(
+      store,
+      runtime,
+      committedPersistence(store),
+      [...IDS],
+      undefined,
+      advancingNow,
+    );
+
+    const result = await controller.send({
+      conversationId,
+      text: 'finish with a moving clock',
+      attachments: [],
+    });
+
+    expect(result.status).toBe('completed');
+    expect(new Set(observedTimes).size).toBeGreaterThan(1);
+    expect(finalStore).toHaveBeenCalledTimes(1);
+    const terminal = finalStore.mock.calls[0]?.[0];
+    const terminalEvent = terminal?.events.find(event => event.kind === 'terminal');
+    expect(terminalEvent).toBeDefined();
+    expect(terminal?.journal.updated_at).toBe(terminal?.cleanup.created_at);
+    expect(terminalEvent?.created_at).toBe(terminal?.cleanup.created_at);
+    expect(terminal?.assistantMessage?.createdAt).toBe(terminal?.cleanup.created_at);
+    expect(store.getState().conversations[conversationId]?.attempts[0]).toMatchObject({
+      status: 'completed',
+      agent: { phase: 'final_response' },
+    });
   });
 
   test('drives write approval, commit, next round, and atomic final cleanup', async () => {
