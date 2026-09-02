@@ -49,6 +49,15 @@ import type {
   ProjectContextState,
 } from '../src/project-context';
 
+declare const __dirname: string;
+
+const nodeFs = jest.requireActual('node:fs') as {
+  readFileSync(path: string, encoding: 'utf8'): string;
+};
+const nodePath = jest.requireActual('node:path') as {
+  resolve(...paths: string[]): string;
+};
+
 const NOW = '2026-08-28T01:00:00.000Z';
 const LATER = '2026-08-28T01:00:01.000Z';
 const TURN_ID = '11111111-1111-4111-8111-111111111111';
@@ -1615,7 +1624,8 @@ describe('project Agent completion controller', () => {
         attempt_id: request.attempt_id,
         round_id: request.round_id,
         round_index: request.round_index,
-        provider_request_id: `provider-${request.round_index}`,
+        provider_request_id:
+          `77777777-7777-4777-8777-${String(request.round_index + 1).padStart(12, '0')}`,
         provider_response_id: `response-${request.round_index}`,
         requested_model: request.model,
         model: request.model,
@@ -2008,6 +2018,10 @@ describe('project Agent completion controller', () => {
     const runtime = makeRuntime(operations);
     const originalCheckpointAgentRound = store.checkpointAgentRound.bind(store);
     const roundCommitByOperationId = new Map<string, jest.Mock>();
+    const roundCommits: Array<{
+      readonly kind: string;
+      readonly commit: jest.Mock;
+    }> = [];
     const roundStore = jest
       .spyOn(store, 'checkpointAgentRound')
       .mockImplementation(input => {
@@ -2019,6 +2033,7 @@ describe('project Agent completion controller', () => {
             originalCommit(proof),
         );
         roundCommitByOperationId.set(input.evidence.operation_id, commit);
+        roundCommits.push({ kind: input.evidence.kind, commit });
         return { ...transaction, commit };
       });
     const executionStore = jest.spyOn(store, 'insertAgentExecutionIntent');
@@ -2027,11 +2042,17 @@ describe('project Agent completion controller', () => {
     const committedSnapshots: NonNullable<
       CompletionPersistenceResult['snapshot']
     >[] = [];
+    const committedSessions: Array<{
+      readonly snapshot: NonNullable<CompletionPersistenceResult['snapshot']>;
+      readonly session: string;
+    }> = [];
     const persistCurrent = jest.fn(async (): Promise<CompletionPersistenceResult> => {
-      const digest = sessionSnapshotSHA256(store.serialize())!;
+      const session = store.serialize();
+      const digest = sessionSnapshotSHA256(session)!;
       const generation = (store.getSessionAuthority()?.generation ?? 1) + 1;
       const snapshot = { schema_version: 1 as const, generation, session_sha256: digest };
       committedSnapshots.push(snapshot);
+      committedSessions.push({ snapshot, session });
       store.setSessionAuthority({ generation, sessionSha256: digest });
       return { status: 'committed', snapshot };
     });
@@ -2086,15 +2107,46 @@ describe('project Agent completion controller', () => {
     const completeRoundCommit = roundCommitByOperationId.get(
       completeRoundEvidence.operation_id,
     );
+    const beginRoundEvidence = roundStore.mock.calls.find(
+      call => call[0]?.evidence?.kind === 'begin_round',
+    )?.[0]?.evidence;
+    if (beginRoundEvidence?.kind !== 'begin_round') {
+      throw new Error('missing begin-round evidence');
+    }
+    const beginRoundCommit = roundCommits.find(
+      entry => entry.kind === 'begin_round',
+    )?.commit;
     const batchCommit = roundCommitByOperationId.get(batchEvidence.operation_id);
+    expect(beginRoundCommit).toHaveBeenCalledTimes(1);
     expect(completeRoundCommit).toHaveBeenCalledTimes(1);
     expect(batchCommit).toHaveBeenCalledTimes(1);
     expect(completeRoundCommit!.mock.results[0]?.value).toBe(true);
     expect(batchCommit!.mock.results[0]?.value).toBe(true);
     const completeRoundProof = completeRoundCommit!.mock.calls[0]?.[0];
+    const beginRoundProof = beginRoundCommit!.mock.calls[0]?.[0];
     const batchProof = batchCommit!.mock.calls[0]?.[0];
     expect(committedSnapshots).toContain(completeRoundProof);
     expect(committedSnapshots).toContain(batchProof);
+    const beginSession = committedSessions.find(
+      entry => entry.snapshot === beginRoundProof,
+    )?.session;
+    const completeSession = committedSessions.find(
+      entry => entry.snapshot === completeRoundProof,
+    )?.session;
+    expect(beginSession).toBeDefined();
+    expect(completeSession).toBeDefined();
+    const fixtures = nodePath.resolve(
+      __dirname,
+      '../ios/DSHMobileTests/Fixtures',
+    );
+    expect(`${beginSession}\n`).toBe(nodeFs.readFileSync(
+      nodePath.resolve(fixtures, 'agent-begin-round-session.json'),
+      'utf8',
+    ));
+    expect(`${completeSession}\n`).toBe(nodeFs.readFileSync(
+      nodePath.resolve(fixtures, 'agent-first-round-complete-session.json'),
+      'utf8',
+    ));
     expect(batchRequest.committed_checkpoint).toMatchObject({
       session_generation: completeRoundProof.generation,
       session_sha256: completeRoundProof.session_sha256,

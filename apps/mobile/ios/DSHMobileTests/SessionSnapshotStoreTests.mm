@@ -469,6 +469,56 @@ static NSString *const DSHSessionTestOperationB =
   return root;
 }
 
+- (NSDictionary *)visibleHistoryCandidateWithAgent:(BOOL)agent
+                                     completedRound:(BOOL)completedRound {
+  NSMutableDictionary *root = [[self candidateWithAgentToolEvent] mutableCopy];
+  NSMutableDictionary *conversation = [root[@"conversations"][0] mutableCopy];
+  NSMutableDictionary *attempt = [conversation[@"attempts"][0] mutableCopy];
+  NSMutableDictionary *journal = [attempt[@"agent"] mutableCopy];
+  NSString *controllerDigest =
+      @"1111111111111111111111111111111111111111111111111111111111111111";
+  NSString *providerDigest =
+      @"2222222222222222222222222222222222222222222222222222222222222222";
+  attempt[@"visible_history_sha256"] = controllerDigest;
+  if (completedRound) {
+    NSString *roundID = journal[@"round_lineage"][@"round_id"];
+    attempt[@"rounds"] = @[@{
+      @"schema_version" : @1,
+      @"transport_schema_version" : @2,
+      @"turn_id" : attempt[@"turn_id"],
+      @"attempt_id" : attempt[@"attempt_id"],
+      @"round_id" : roundID,
+      @"round_index" : @0,
+      @"provider_request_id" : @"77777777-7777-4777-8777-777777777777",
+      @"provider_response_id" : @"provider-response-1",
+      @"requested_model" : @"deepseek-v4-flash",
+      @"model" : @"deepseek-v4-flash",
+      @"thinking_mode" : @"off",
+      @"finish_reason" : @"tool_calls",
+      @"latency_ms" : @1,
+      @"visible_history_sha256" : providerDigest,
+      @"model_input_sha256" :
+          @"3333333333333333333333333333333333333333333333333333333333333333",
+      @"request_body_sha256" :
+          @"4444444444444444444444444444444444444444444444444444444444444444",
+      @"project_context_receipt" : NSNull.null,
+    }];
+    NSMutableDictionary *lineage = [journal[@"round_lineage"] mutableCopy];
+    lineage[@"native_row_revision"] = @3;
+    journal[@"round_lineage"] = lineage;
+  }
+  if (agent) {
+    attempt[@"agent"] = journal;
+  } else {
+    attempt[@"agent"] = NSNull.null;
+    attempt[@"journal_revision"] = @0;
+    root[@"session_events"] = @[];
+  }
+  conversation[@"attempts"] = @[ attempt ];
+  root[@"conversations"] = @[ conversation ];
+  return root;
+}
+
 - (NSDictionary *)candidateWithAgentCancelEvents {
   NSMutableDictionary *root = [[self candidateWithAgentToolEvent] mutableCopy];
   NSMutableDictionary *conversation = [root[@"conversations"][0] mutableCopy];
@@ -556,6 +606,22 @@ static NSString *const DSHSessionTestOperationB =
   NSData *data = DSHWorkspaceCanonicalJSONData(candidate, &error);
   XCTAssertNotNil(data);
   return [[NSString alloc] initWithData:data encoding:NSUTF8StringEncoding];
+}
+
+- (NSDictionary *)sharedFixtureNamed:(NSString *)name {
+  NSURL *url = [[NSBundle bundleForClass:self.class]
+      URLForResource:name withExtension:@"json"];
+  XCTAssertNotNil(url);
+  if (url == nil) return nil;
+  NSError *error = nil;
+  NSData *data = [NSData dataWithContentsOfURL:url options:0 error:&error];
+  XCTAssertNotNil(data);
+  XCTAssertNil(error);
+  id value = data == nil ? nil
+      : [NSJSONSerialization JSONObjectWithData:data options:0 error:&error];
+  XCTAssertTrue([value isKindOfClass:NSDictionary.class]);
+  XCTAssertNil(error);
+  return [value isKindOfClass:NSDictionary.class] ? value : nil;
 }
 
 - (id)objectByReplacingCanonicalMilliseconds:(id)object
@@ -1667,6 +1733,69 @@ static NSString *const DSHSessionTestOperationB =
     @"candidate_json" : [self jsonForCandidate:invalid],
   } error:&error]));
   XCTAssertEqual(error.code, DSHSessionSnapshotStoreErrorInvalidArgument);
+}
+
+- (void)testAgentAttemptAcceptsFrozenVisibleHistoryBeforeFirstRound {
+  NSError *error = nil;
+  NSDictionary *result = [self casWithOperation:DSHSessionTestOperationA
+      expected:@{ @"schema_version" : @1, @"kind" : @"missing" }
+      candidate:[self visibleHistoryCandidateWithAgent:YES completedRound:NO]
+      error:&error];
+  XCTAssertNil(error);
+  XCTAssertEqualObjects(result[@"status"], @"committed");
+}
+
+- (void)testNonAgentAttemptStillRejectsVisibleHistoryWithoutRoundProvenance {
+  NSError *error = nil;
+  XCTAssertNil(([self casWithOperation:DSHSessionTestOperationA
+      expected:@{ @"schema_version" : @1, @"kind" : @"missing" }
+      candidate:[self visibleHistoryCandidateWithAgent:NO completedRound:NO]
+      error:&error]));
+  XCTAssertEqual(error.code, DSHSessionSnapshotStoreErrorInvalidArgument);
+}
+
+- (void)testAgentAttemptAcceptsDistinctControllerAndProviderHistoryDigests {
+  NSError *error = nil;
+  NSDictionary *result = [self casWithOperation:DSHSessionTestOperationA
+      expected:@{ @"schema_version" : @1, @"kind" : @"missing" }
+      candidate:[self visibleHistoryCandidateWithAgent:YES completedRound:YES]
+      error:&error];
+  XCTAssertNil(error);
+  XCTAssertEqualObjects(result[@"status"], @"committed");
+}
+
+- (void)testNonAgentAttemptStillRejectsDistinctRoundHistoryDigest {
+  NSError *error = nil;
+  XCTAssertNil(([self casWithOperation:DSHSessionTestOperationA
+      expected:@{ @"schema_version" : @1, @"kind" : @"missing" }
+      candidate:[self visibleHistoryCandidateWithAgent:NO completedRound:YES]
+      error:&error]));
+  XCTAssertEqual(error.code, DSHSessionSnapshotStoreErrorInvalidArgument);
+}
+
+- (void)testSharedJSBeginRoundFixtureCommitsThroughNativeStore {
+  NSDictionary *candidate = [self sharedFixtureNamed:@"agent-begin-round-session"];
+  XCTAssertNotNil(candidate);
+  if (candidate == nil) return;
+  NSError *error = nil;
+  NSDictionary *result = [self casWithOperation:DSHSessionTestOperationA
+      expected:@{ @"schema_version" : @1, @"kind" : @"missing" }
+      candidate:candidate error:&error];
+  XCTAssertNil(error);
+  XCTAssertEqualObjects(result[@"status"], @"committed");
+}
+
+- (void)testSharedJSFirstRoundFixtureCommitsThroughNativeStore {
+  NSDictionary *candidate =
+      [self sharedFixtureNamed:@"agent-first-round-complete-session"];
+  XCTAssertNotNil(candidate);
+  if (candidate == nil) return;
+  NSError *error = nil;
+  NSDictionary *result = [self casWithOperation:DSHSessionTestOperationA
+      expected:@{ @"schema_version" : @1, @"kind" : @"missing" }
+      candidate:candidate error:&error];
+  XCTAssertNil(error);
+  XCTAssertEqualObjects(result[@"status"], @"committed");
 }
 
 - (void)testSchema8HydrateCanPersistExactCurrentAgentV3Shape {

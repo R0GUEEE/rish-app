@@ -2197,6 +2197,8 @@ static BOOL DSHSessionValidateConversation(NSDictionary *conversation,
     if (!DSHSessionValidateAttempt(attempt, schemaVersion) ||
         attemptsById[attempt[@"attempt_id"]] != nil ||
         ![turnIds containsObject:attempt[@"turn_id"]]) return NO;
+    BOOL agentAttempt = agentSchema &&
+        DSHSessionTrustedDictionary(attempt[@"agent"]);
     attemptMessageReferences += [(NSArray *)attempt[@"visible_message_ids"] count];
     if (attemptMessageReferences > 1000000U) return NO;
     for (NSString *messageId in attempt[@"visible_message_ids"]) {
@@ -2249,8 +2251,9 @@ static BOOL DSHSessionValidateConversation(NSDictionary *conversation,
           ![round[@"requested_model"] isEqual:attempt[@"model_id"]] ||
           ![round[@"model"] isEqual:attempt[@"model_id"]] ||
           ![round[@"thinking_mode"] isEqual:attempt[@"thinking_mode"]] ||
-          ![round[@"visible_history_sha256"]
-              isEqual:attempt[@"visible_history_sha256"]]) return NO;
+          (!agentAttempt &&
+           ![round[@"visible_history_sha256"]
+               isEqual:attempt[@"visible_history_sha256"]])) return NO;
       if (roundIndex + 1 < [(NSArray *)attempt[@"rounds"] count] &&
           ![round[@"finish_reason"] isEqual:@"tool_calls"]) return NO;
       NSDictionary *attemptContext = attempt[@"project_context"] == NSNull.null
@@ -2350,7 +2353,11 @@ static BOOL DSHSessionValidateConversation(NSDictionary *conversation,
       } else if (![knownVisibleHistory isEqual:visibleHistory]) {
         return NO;
       }
-      if ([(NSArray *)attempt[@"rounds"] count] == 0 && visibleHistory != nil) {
+      BOOL agentAttempt = agentSchema &&
+          DSHSessionTrustedDictionary(attempt[@"agent"]);
+      if (!agentAttempt &&
+          [(NSArray *)attempt[@"rounds"] count] == 0 &&
+          visibleHistory != nil) {
         BOOL provenance = NO;
         for (NSUInteger priorIndex = 0; priorIndex < attemptIndex;
              priorIndex += 1) {

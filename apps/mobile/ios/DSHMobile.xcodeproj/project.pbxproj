@@ -31,6 +31,8 @@
 		A9C400021AD99517003FC87E /* LocalProjectsModuleV2Tests.mm in Sources */ = {isa = PBXBuildFile; fileRef = A9C400011AD99517003FC87E /* LocalProjectsModuleV2Tests.mm */; };
 		AAC400021AD99517003FC87E /* AgentToolEffectsTests.mm in Sources */ = {isa = PBXBuildFile; fileRef = AAC400011AD99517003FC87E /* AgentToolEffectsTests.mm */; };
 		ABC400021AD99517003FC87E /* DSHCompletionProviderTransportTests.mm in Sources */ = {isa = PBXBuildFile; fileRef = ABC400011AD99517003FC87E /* DSHCompletionProviderTransportTests.mm */; };
+		C0F400021AD99517003FC87E /* agent-begin-round-session.json in Resources */ = {isa = PBXBuildFile; fileRef = C0F400011AD99517003FC87E /* agent-begin-round-session.json */; };
+		C1F400021AD99517003FC87E /* agent-first-round-complete-session.json in Resources */ = {isa = PBXBuildFile; fileRef = C1F400011AD99517003FC87E /* agent-first-round-complete-session.json */; };
 		ABD400021AD99517003FC87E /* AgentPreparedAttemptStoreTests.mm in Sources */ = {isa = PBXBuildFile; fileRef = ABD400011AD99517003FC87E /* AgentPreparedAttemptStoreTests.mm */; };
 		ABE400021AD99517003FC87E /* AgentProviderRoundServiceTests.mm in Sources */ = {isa = PBXBuildFile; fileRef = ABE400011AD99517003FC87E /* AgentProviderRoundServiceTests.mm */; };
 		ABF400021AD99517003FC87E /* LegacyBoundProjectRootAccessTests.mm in Sources */ = {isa = PBXBuildFile; fileRef = ABF400011AD99517003FC87E /* LegacyBoundProjectRootAccessTests.mm */; };
@@ -97,6 +99,8 @@
 		A9C400011AD99517003FC87E /* LocalProjectsModuleV2Tests.mm */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.cpp.objcpp; path = LocalProjectsModuleV2Tests.mm; sourceTree = "<group>"; };
 		AAC400011AD99517003FC87E /* AgentToolEffectsTests.mm */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.cpp.objcpp; path = AgentToolEffectsTests.mm; sourceTree = "<group>"; };
 		ABC400011AD99517003FC87E /* DSHCompletionProviderTransportTests.mm */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.cpp.objcpp; path = DSHCompletionProviderTransportTests.mm; sourceTree = "<group>"; };
+		C0F400011AD99517003FC87E /* agent-begin-round-session.json */ = {isa = PBXFileReference; lastKnownFileType = text.json; path = "Fixtures/agent-begin-round-session.json"; sourceTree = "<group>"; };
+		C1F400011AD99517003FC87E /* agent-first-round-complete-session.json */ = {isa = PBXFileReference; lastKnownFileType = text.json; path = "Fixtures/agent-first-round-complete-session.json"; sourceTree = "<group>"; };
 		ABD400011AD99517003FC87E /* AgentPreparedAttemptStoreTests.mm */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.cpp.objcpp; path = AgentPreparedAttemptStoreTests.mm; sourceTree = "<group>"; };
 		ABE400011AD99517003FC87E /* AgentProviderRoundServiceTests.mm */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.cpp.objcpp; path = AgentProviderRoundServiceTests.mm; sourceTree = "<group>"; };
 		ABF400011AD99517003FC87E /* LegacyBoundProjectRootAccessTests.mm */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.cpp.objcpp; path = LegacyBoundProjectRootAccessTests.mm; sourceTree = "<group>"; };
@@ -153,6 +157,8 @@
 				A1C400011AD99517003FC87E /* AgentNativeStoreTests.mm */,
 				A2C400011AD99517003FC87E /* AgentRuntimeModuleTests.mm */,
 				A3C400011AD99517003FC87E /* SessionSnapshotStoreTests.mm */,
+				C0F400011AD99517003FC87E /* agent-begin-round-session.json */,
+				C1F400011AD99517003FC87E /* agent-first-round-complete-session.json */,
 				A4C400011AD99517003FC87E /* SessionSnapshotsModuleTests.mm */,
 				A5C400011AD99517003FC87E /* LocalWorkspaceModuleV2Tests.mm */,
 				A6C400011AD99517003FC87E /* LocalDocumentsModuleV2Tests.mm */,
@@ -382,6 +388,8 @@
 			isa = PBXResourcesBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
+				C0F400021AD99517003FC87E /* agent-begin-round-session.json in Resources */,
+				C1F400021AD99517003FC87E /* agent-first-round-complete-session.json in Resources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
