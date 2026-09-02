@@ -1,5 +1,7 @@
 #import "LocalWorkspaceAccess.h"
 
+#import "DSHWorkspaceCanonical.h"
+
 #import <CommonCrypto/CommonDigest.h>
 #import <TargetConditionals.h>
 
@@ -32,14 +34,32 @@ static NSString *DSHWorkspacePublicCode(
       return @"E_WORKSPACE_NOT_FOUND";
     case DSHLocalWorkspaceAccessErrorBusy:
       return @"E_WORKSPACE_BUSY";
+    case DSHLocalWorkspaceAccessErrorPickerBusy:
+      return @"E_WORKSPACE_PICKER_BUSY";
+    case DSHLocalWorkspaceAccessErrorSelectionExpired:
+      return @"E_WORKSPACE_SELECTION_EXPIRED";
     case DSHLocalWorkspaceAccessErrorRevisionStale:
       return @"E_WORKSPACE_REVISION_STALE";
     case DSHLocalWorkspaceAccessErrorRevisionOverflow:
       return @"E_WORKSPACE_REVISION_OVERFLOW";
+    case DSHLocalWorkspaceAccessErrorStatusStale:
+      return @"E_WORKSPACE_STATUS_STALE";
+    case DSHLocalWorkspaceAccessErrorRevoked:
+      return @"E_WORKSPACE_REVOKED";
     case DSHLocalWorkspaceAccessErrorUnavailable:
       return @"E_WORKSPACE_UNAVAILABLE";
+    case DSHLocalWorkspaceAccessErrorNotDownloaded:
+      return @"E_WORKSPACE_NOT_DOWNLOADED";
+    case DSHLocalWorkspaceAccessErrorImportRequired:
+      return @"E_WORKSPACE_IMPORT_REQUIRED";
     case DSHLocalWorkspaceAccessErrorCapability:
       return @"E_WORKSPACE_CAPABILITY";
+    case DSHLocalWorkspaceAccessErrorRootChanged:
+      return @"E_WORKSPACE_ROOT_CHANGED";
+    case DSHLocalWorkspaceAccessErrorReferenced:
+      return @"E_WORKSPACE_REFERENCED";
+    case DSHLocalWorkspaceAccessErrorConfirmation:
+      return @"E_WORKSPACE_CONFIRMATION";
     case DSHLocalWorkspaceAccessErrorConflict:
       return @"E_WORKSPACE_CONFLICT";
     case DSHLocalWorkspaceAccessErrorIO:
@@ -58,14 +78,32 @@ static NSString *DSHWorkspacePublicMessage(
       return @"Workspace is not available.";
     case DSHLocalWorkspaceAccessErrorBusy:
       return @"Workspace storage is busy.";
+    case DSHLocalWorkspaceAccessErrorPickerBusy:
+      return @"Another workspace picker operation is active.";
+    case DSHLocalWorkspaceAccessErrorSelectionExpired:
+      return @"Workspace picker selection has expired.";
     case DSHLocalWorkspaceAccessErrorRevisionStale:
       return @"Workspace binding is stale.";
     case DSHLocalWorkspaceAccessErrorRevisionOverflow:
       return @"Workspace binding cannot be advanced.";
+    case DSHLocalWorkspaceAccessErrorStatusStale:
+      return @"Workspace authority is stale.";
+    case DSHLocalWorkspaceAccessErrorRevoked:
+      return @"Workspace authority was revoked.";
     case DSHLocalWorkspaceAccessErrorUnavailable:
       return @"Workspace is unavailable.";
+    case DSHLocalWorkspaceAccessErrorNotDownloaded:
+      return @"Workspace content is not downloaded.";
+    case DSHLocalWorkspaceAccessErrorImportRequired:
+      return @"Workspace import is required.";
     case DSHLocalWorkspaceAccessErrorCapability:
       return @"Workspace capability is unavailable.";
+    case DSHLocalWorkspaceAccessErrorRootChanged:
+      return @"Workspace root changed.";
+    case DSHLocalWorkspaceAccessErrorReferenced:
+      return @"Workspace is still referenced.";
+    case DSHLocalWorkspaceAccessErrorConfirmation:
+      return @"Workspace confirmation is invalid.";
     case DSHLocalWorkspaceAccessErrorConflict:
       return @"Workspace storage changed concurrently.";
     case DSHLocalWorkspaceAccessErrorIO:
@@ -216,6 +254,66 @@ static BOOL DSHCanonicalUnsignedIntegerString(id value) {
   return errno != ERANGE;
 }
 
+static BOOL DSHCanonicalPositiveIntegerString(id value) {
+  return DSHCanonicalUnsignedIntegerString(value) && ![value isEqual:@"0"];
+}
+
+static BOOL DSHCanonicalCapabilitiesSet(id value);
+static BOOL DSHCanonicalDisplayName(id value);
+
+static BOOL DSHValidLegacyEvidence(NSDictionary *identity,
+                                   NSString *expectedProjectId) {
+  NSArray *keys = @[
+    @"project_id", @"display_name", @"metadata_sha256", @"capabilities",
+    @"projects_root_device_id",
+    @"projects_root_inode_id", @"repository_device_id",
+    @"repository_inode_id", @"git_device_id", @"git_inode_id",
+  ];
+  return DSHExactKeys(identity, keys) &&
+      [identity[@"project_id"] isEqual:expectedProjectId] &&
+      DSHCanonicalDisplayName(identity[@"display_name"]) &&
+      DSHCanonicalSHA256(identity[@"metadata_sha256"]) &&
+      DSHCanonicalCapabilitiesSet(identity[@"capabilities"]) &&
+      DSHCanonicalPositiveIntegerString(identity[@"projects_root_device_id"]) &&
+      DSHCanonicalPositiveIntegerString(identity[@"projects_root_inode_id"]) &&
+      DSHCanonicalPositiveIntegerString(identity[@"repository_device_id"]) &&
+      DSHCanonicalPositiveIntegerString(identity[@"repository_inode_id"]) &&
+      DSHCanonicalPositiveIntegerString(identity[@"git_device_id"]) &&
+      DSHCanonicalPositiveIntegerString(identity[@"git_inode_id"]);
+}
+
+static BOOL DSHValidLegacyPhysicalIdentity(NSDictionary *identity,
+                                           NSString *expectedMetadata) {
+  NSArray *keys = @[
+    @"project_metadata_sha256", @"projects_root_device_id",
+    @"projects_root_inode_id", @"repository_device_id",
+    @"repository_inode_id", @"git_device_id", @"git_inode_id",
+  ];
+  return DSHExactKeys(identity, keys) &&
+      [identity[@"project_metadata_sha256"] isEqual:expectedMetadata] &&
+      DSHCanonicalSHA256(identity[@"project_metadata_sha256"]) &&
+      DSHCanonicalPositiveIntegerString(identity[@"projects_root_device_id"]) &&
+      DSHCanonicalPositiveIntegerString(identity[@"projects_root_inode_id"]) &&
+      DSHCanonicalPositiveIntegerString(identity[@"repository_device_id"]) &&
+      DSHCanonicalPositiveIntegerString(identity[@"repository_inode_id"]) &&
+      DSHCanonicalPositiveIntegerString(identity[@"git_device_id"]) &&
+      DSHCanonicalPositiveIntegerString(identity[@"git_inode_id"]);
+}
+
+static BOOL DSHLegacyPhysicalIdentityMatchesAuthority(
+    NSDictionary *identity,
+    NSDictionary *authority) {
+  NSArray *keys = @[
+    @"projects_root_device_id",
+    @"projects_root_inode_id", @"repository_device_id",
+    @"repository_inode_id", @"git_device_id", @"git_inode_id",
+  ];
+  for (NSString *key in keys) {
+    if (![identity[key] isEqual:authority[key]]) return NO;
+  }
+  return YES;
+}
+
 static BOOL DSHCanonicalDisplayName(id value) {
   if (![value isKindOfClass:NSString.class]) return NO;
   NSString *name = value;
@@ -248,21 +346,216 @@ static BOOL DSHSafeDirectoryName(id value) {
 }
 
 static NSString *DSHSHA256(NSData *data) {
-  if (![data isKindOfClass:NSData.class]) return nil;
-  unsigned char digest[CC_SHA256_DIGEST_LENGTH] = {};
-  CC_SHA256(data.bytes, (CC_LONG)data.length, digest);
-  NSMutableString *result = [NSMutableString stringWithCapacity:64];
-  for (NSUInteger index = 0; index < CC_SHA256_DIGEST_LENGTH; index++) {
-    [result appendFormat:@"%02x", digest[index]];
-  }
-  return result;
+  return DSHWorkspaceSHA256Hex(data);
 }
 
 static NSData *DSHCanonicalJSON(id object) {
-  if (![NSJSONSerialization isValidJSONObject:object]) return nil;
-  return [NSJSONSerialization dataWithJSONObject:object
-                                          options:NSJSONWritingSortedKeys
-                                            error:nil];
+  return DSHWorkspaceCanonicalJSONData(object, nil);
+}
+
+static NSString *DSHAuthorityDigestWithoutFingerprint(
+    NSDictionary *authority) {
+  if (![authority isKindOfClass:NSDictionary.class]) return nil;
+  NSMutableDictionary *base = [authority mutableCopy];
+  [base removeObjectForKey:@"root_fingerprint_sha256"];
+  return DSHSHA256(DSHCanonicalJSON(base));
+}
+
+static NSDictionary *DSHDocumentsOwnedFingerprintInput(
+    NSDictionary *record,
+    NSDictionary *authority,
+    NSString *authorityDigest) {
+  if (![record isKindOfClass:NSDictionary.class] ||
+      ![authority isKindOfClass:NSDictionary.class] ||
+      ![authorityDigest isKindOfClass:NSString.class]) {
+    return nil;
+  }
+  return @{
+    @"schema_version" : @1,
+    @"origin" : record[@"origin"],
+    @"workspace_id" : record[@"workspace_id"],
+    @"binding_revision" : record[@"binding_revision"],
+    @"root_locator_kind" : @"documents_owned",
+    @"device_id" : authority[@"device_id"],
+    @"inode_id" : authority[@"inode_id"],
+    @"directory_name_sha256" : authority[@"directory_name_sha256"],
+    @"authority_sha256" : authorityDigest,
+  };
+}
+
+static BOOL DSHValidDocumentsOwnedFingerprint(NSDictionary *authority,
+                                              NSDictionary *record) {
+  NSString *fingerprint = authority[@"root_fingerprint_sha256"];
+  if (!DSHCanonicalSHA256(fingerprint)) return NO;
+  NSString *authorityDigest = DSHAuthorityDigestWithoutFingerprint(authority);
+  NSDictionary *input = DSHDocumentsOwnedFingerprintInput(record, authority,
+                                                          authorityDigest);
+  NSString *expected = DSHWorkspaceRootFingerprintSHA256(input, nil);
+  return expected != nil && [fingerprint isEqual:expected];
+}
+
+static NSDictionary *DSHGrantedFingerprintInput(NSDictionary *record,
+                                                NSDictionary *authority,
+                                                NSString *authorityDigest) {
+  if (![record isKindOfClass:NSDictionary.class] ||
+      ![authority isKindOfClass:NSDictionary.class] ||
+      ![authorityDigest isKindOfClass:NSString.class]) {
+    return nil;
+  }
+  return @{
+    @"schema_version" : @1,
+    @"origin" : record[@"origin"],
+    @"workspace_id" : record[@"workspace_id"],
+    @"binding_revision" : record[@"binding_revision"],
+    @"root_locator_kind" : @"security_scoped",
+    @"volume_identifier_sha256" : authority[@"volume_identifier_sha256"],
+    @"resource_identifier_sha256" : authority[@"resource_identifier_sha256"],
+    @"device_id" : authority[@"device_id"],
+    @"inode_id" : authority[@"inode_id"],
+    @"bookmark_sha256" : authority[@"bookmark_sha256"],
+    @"authority_sha256" : authorityDigest,
+  };
+}
+
+static BOOL DSHValidGrantedFingerprint(NSDictionary *authority,
+                                       NSDictionary *record) {
+  NSString *fingerprint = authority[@"root_fingerprint_sha256"];
+  if (!DSHCanonicalSHA256(fingerprint)) return NO;
+  NSString *authorityDigest = DSHAuthorityDigestWithoutFingerprint(authority);
+  NSDictionary *input = DSHGrantedFingerprintInput(record, authority,
+                                                   authorityDigest);
+  NSString *expected = DSHWorkspaceRootFingerprintSHA256(input, nil);
+  return expected != nil && [fingerprint isEqual:expected];
+}
+
+static NSDictionary *DSHLegacyFingerprintInput(NSDictionary *record,
+                                               NSDictionary *authority,
+                                               NSString *authorityDigest) {
+  if (![record isKindOfClass:NSDictionary.class] ||
+      ![authority isKindOfClass:NSDictionary.class] ||
+      ![authorityDigest isKindOfClass:NSString.class]) {
+    return nil;
+  }
+  return @{
+    @"schema_version" : @1,
+    @"origin" : record[@"origin"],
+    @"workspace_id" : record[@"workspace_id"],
+    @"binding_revision" : record[@"binding_revision"],
+    @"root_locator_kind" : @"legacy_app_owned",
+    @"legacy_project_id" : authority[@"legacy_project_id"],
+    @"project_metadata_sha256" : authority[@"project_metadata_sha256"],
+    @"projects_root_device_id" : authority[@"projects_root_device_id"],
+    @"projects_root_inode_id" : authority[@"projects_root_inode_id"],
+    @"repository_device_id" : authority[@"repository_device_id"],
+    @"repository_inode_id" : authority[@"repository_inode_id"],
+    @"git_device_id" : authority[@"git_device_id"],
+    @"git_inode_id" : authority[@"git_inode_id"],
+  };
+}
+
+static BOOL DSHValidLegacyFingerprint(NSDictionary *authority,
+                                      NSDictionary *record) {
+  NSString *fingerprint = authority[@"root_fingerprint_sha256"];
+  if (!DSHCanonicalSHA256(fingerprint)) return NO;
+  NSString *authorityDigest = DSHAuthorityDigestWithoutFingerprint(authority);
+  NSDictionary *input = DSHLegacyFingerprintInput(record, authority,
+                                                  authorityDigest);
+  NSString *expected = DSHWorkspaceRootFingerprintSHA256(input, nil);
+  return expected != nil && [fingerprint isEqual:expected];
+}
+
+static NSDictionary *DSHMigrateOwnedAuthority(NSDictionary *authority,
+                                              NSDictionary *record) {
+  NSArray *keys = @[
+    @"schema_version", @"workspace_id", @"binding_revision", @"device_id",
+    @"inode_id", @"directory_name_sha256", @"recorded_at",
+  ];
+  NSString *directoryName = record[@"owned_directory_name"];
+  NSData *directoryBytes =
+      [directoryName dataUsingEncoding:NSUTF8StringEncoding allowLossyConversion:NO];
+  if (!DSHExactKeys(authority, keys) ||
+      !DSHSchemaVersionIsOne(authority[@"schema_version"]) ||
+      ![authority[@"workspace_id"] isEqual:record[@"workspace_id"]] ||
+      ![authority[@"binding_revision"] isEqual:record[@"binding_revision"]] ||
+      !DSHCanonicalUnsignedIntegerString(authority[@"device_id"]) ||
+      !DSHCanonicalUnsignedIntegerString(authority[@"inode_id"]) ||
+      ![authority[@"directory_name_sha256"] isEqual:DSHSHA256(directoryBytes)] ||
+      !DSHCanonicalTimestamp(authority[@"recorded_at"])) {
+    return nil;
+  }
+  NSMutableDictionary *migrated = [authority mutableCopy];
+  NSString *authorityDigest = DSHAuthorityDigestWithoutFingerprint(authority);
+  NSDictionary *input = DSHDocumentsOwnedFingerprintInput(record, authority,
+                                                          authorityDigest);
+  NSString *fingerprint = DSHWorkspaceRootFingerprintSHA256(input, nil);
+  if (fingerprint == nil) return nil;
+  migrated[@"root_fingerprint_sha256"] = fingerprint;
+  return migrated;
+}
+
+static NSDictionary *DSHMigrateGrantedAuthority(NSDictionary *authority,
+                                                NSDictionary *record,
+                                                NSDictionary *bookmark) {
+  NSArray *keys = @[
+    @"schema_version", @"workspace_id", @"binding_revision",
+    @"volume_identifier_sha256", @"resource_identifier_sha256", @"device_id",
+    @"inode_id", @"bookmark_sha256", @"classified_at",
+  ];
+  if (!DSHExactKeys(authority, keys) ||
+      !DSHSchemaVersionIsOne(authority[@"schema_version"]) ||
+      ![authority[@"workspace_id"] isEqual:record[@"workspace_id"]] ||
+      ![authority[@"binding_revision"] isEqual:record[@"binding_revision"]] ||
+      !DSHCanonicalSHA256(authority[@"volume_identifier_sha256"]) ||
+      !DSHCanonicalSHA256(authority[@"resource_identifier_sha256"]) ||
+      !DSHCanonicalUnsignedIntegerString(authority[@"device_id"]) ||
+      !DSHCanonicalUnsignedIntegerString(authority[@"inode_id"]) ||
+      ![authority[@"bookmark_sha256"] isEqual:bookmark[@"bookmark_sha256"]] ||
+      !DSHCanonicalTimestamp(authority[@"classified_at"])) {
+    return nil;
+  }
+  NSMutableDictionary *migrated = [authority mutableCopy];
+  NSString *authorityDigest = DSHAuthorityDigestWithoutFingerprint(authority);
+  NSDictionary *input = DSHGrantedFingerprintInput(record, authority,
+                                                   authorityDigest);
+  NSString *fingerprint = DSHWorkspaceRootFingerprintSHA256(input, nil);
+  if (fingerprint == nil) return nil;
+  migrated[@"root_fingerprint_sha256"] = fingerprint;
+  return migrated;
+}
+
+static NSDictionary *DSHMigrateLegacyAuthority(NSDictionary *authority,
+                                               NSDictionary *record,
+                                               NSDictionary *physicalIdentity) {
+  NSArray *keys = @[
+    @"schema_version", @"workspace_id", @"binding_revision",
+    @"legacy_project_id", @"root_identity_sha256", @"display_name",
+    @"created_at", @"last_opened_at", @"recorded_at",
+  ];
+  if (!DSHExactKeys(authority, keys) ||
+      !DSHSchemaVersionIsOne(authority[@"schema_version"]) ||
+      ![authority[@"workspace_id"] isEqual:record[@"workspace_id"]] ||
+      ![authority[@"binding_revision"] isEqual:record[@"binding_revision"]] ||
+      ![authority[@"legacy_project_id"] isEqual:record[@"legacy_project_id"]] ||
+      !DSHCanonicalSHA256(authority[@"root_identity_sha256"]) ||
+      ![authority[@"display_name"] isEqual:record[@"display_name"]] ||
+      !DSHCanonicalTimestamp(authority[@"created_at"]) ||
+      !DSHCanonicalTimestamp(authority[@"last_opened_at"]) ||
+      !DSHCanonicalTimestamp(authority[@"recorded_at"])) {
+    return nil;
+  }
+  if (!DSHValidLegacyPhysicalIdentity(
+          physicalIdentity, authority[@"root_identity_sha256"])) {
+    return nil;
+  }
+  NSMutableDictionary *migrated = [authority mutableCopy];
+  [migrated addEntriesFromDictionary:physicalIdentity];
+  NSString *authorityDigest = DSHAuthorityDigestWithoutFingerprint(migrated);
+  NSDictionary *input = DSHLegacyFingerprintInput(record, migrated,
+                                                  authorityDigest);
+  NSString *fingerprint = DSHWorkspaceRootFingerprintSHA256(input, nil);
+  if (fingerprint == nil) return nil;
+  migrated[@"root_fingerprint_sha256"] = fingerprint;
+  return migrated;
 }
 
 // Request digests are persisted in private authority records so an operation
@@ -276,12 +569,11 @@ static NSString *DSHCreateRequestSHA256(NSString *displayName) {
   }));
 }
 
-static NSString *DSHBootstrapRequestSHA256(NSString *projectId,
-                                            NSString *displayName) {
+static NSString *DSHBootstrapRequestSHA256(NSString *projectId) {
   return DSHSHA256(DSHCanonicalJSON(@{
+    @"schema_version" : @1,
     @"operation" : @"bootstrap_legacy",
     @"project_id" : projectId,
-    @"display_name" : displayName,
   }));
 }
 
@@ -514,7 +806,11 @@ static BOOL DSHValidLegacyAuthority(NSDictionary *authority,
   NSArray *keys = @[
     @"schema_version", @"workspace_id", @"binding_revision",
     @"legacy_project_id", @"root_identity_sha256", @"display_name",
-    @"created_at", @"last_opened_at", @"recorded_at",
+    @"capabilities", @"created_at", @"last_opened_at", @"recorded_at",
+    @"project_metadata_sha256", @"projects_root_device_id",
+    @"projects_root_inode_id", @"repository_device_id",
+    @"repository_inode_id", @"git_device_id", @"git_inode_id",
+    @"root_fingerprint_sha256",
   ];
   return DSHExactKeys(authority, keys) &&
       DSHSchemaVersionIsOne(authority[@"schema_version"]) &&
@@ -523,9 +819,18 @@ static BOOL DSHValidLegacyAuthority(NSDictionary *authority,
       [authority[@"legacy_project_id"] isEqual:record[@"legacy_project_id"]] &&
       DSHCanonicalSHA256(authority[@"root_identity_sha256"]) &&
       [authority[@"display_name"] isEqual:record[@"display_name"]] &&
+      DSHCanonicalCapabilitiesArray(authority[@"capabilities"]) &&
       [authority[@"created_at"] isEqual:record[@"created_at"]] &&
       [authority[@"last_opened_at"] isEqual:record[@"last_opened_at"]] &&
-      DSHCanonicalTimestamp(authority[@"recorded_at"]);
+      DSHCanonicalTimestamp(authority[@"recorded_at"]) &&
+      DSHCanonicalSHA256(authority[@"project_metadata_sha256"]) &&
+      DSHCanonicalPositiveIntegerString(authority[@"projects_root_device_id"]) &&
+      DSHCanonicalPositiveIntegerString(authority[@"projects_root_inode_id"]) &&
+      DSHCanonicalPositiveIntegerString(authority[@"repository_device_id"]) &&
+      DSHCanonicalPositiveIntegerString(authority[@"repository_inode_id"]) &&
+      DSHCanonicalPositiveIntegerString(authority[@"git_device_id"]) &&
+      DSHCanonicalPositiveIntegerString(authority[@"git_inode_id"]) &&
+      DSHValidLegacyFingerprint(authority, record);
 }
 
 static BOOL DSHValidOwnedAuthority(NSDictionary *authority,
@@ -533,18 +838,21 @@ static BOOL DSHValidOwnedAuthority(NSDictionary *authority,
   NSArray *keys = @[
     @"schema_version", @"workspace_id", @"binding_revision", @"device_id",
     @"inode_id", @"directory_name_sha256", @"recorded_at",
+    @"root_fingerprint_sha256",
   ];
+  BOOL exactShape = DSHExactKeys(authority, keys);
   NSString *directoryName = record[@"owned_directory_name"];
   NSData *directoryBytes =
       [directoryName dataUsingEncoding:NSUTF8StringEncoding allowLossyConversion:NO];
-  return DSHExactKeys(authority, keys) &&
+  return exactShape &&
       DSHSchemaVersionIsOne(authority[@"schema_version"]) &&
       [authority[@"workspace_id"] isEqual:record[@"workspace_id"]] &&
       [authority[@"binding_revision"] isEqual:record[@"binding_revision"]] &&
       DSHCanonicalUnsignedIntegerString(authority[@"device_id"]) &&
       DSHCanonicalUnsignedIntegerString(authority[@"inode_id"]) &&
       [authority[@"directory_name_sha256"] isEqual:DSHSHA256(directoryBytes)] &&
-      DSHCanonicalTimestamp(authority[@"recorded_at"]);
+      DSHCanonicalTimestamp(authority[@"recorded_at"]) &&
+      DSHValidDocumentsOwnedFingerprint(authority, record);
 }
 
 static BOOL DSHValidBookmarkAuthority(NSDictionary *authority,
@@ -576,6 +884,7 @@ static BOOL DSHValidGrantedAuthority(NSDictionary *authority,
     @"schema_version", @"workspace_id", @"binding_revision",
     @"volume_identifier_sha256", @"resource_identifier_sha256", @"device_id",
     @"inode_id", @"bookmark_sha256", @"classified_at",
+    @"root_fingerprint_sha256",
   ];
   return DSHExactKeys(authority, keys) &&
       DSHSchemaVersionIsOne(authority[@"schema_version"]) &&
@@ -586,12 +895,32 @@ static BOOL DSHValidGrantedAuthority(NSDictionary *authority,
       DSHCanonicalUnsignedIntegerString(authority[@"device_id"]) &&
       DSHCanonicalUnsignedIntegerString(authority[@"inode_id"]) &&
       [authority[@"bookmark_sha256"] isEqual:bookmark[@"bookmark_sha256"]] &&
-      DSHCanonicalTimestamp(authority[@"classified_at"]);
+      DSHCanonicalTimestamp(authority[@"classified_at"]) &&
+      DSHValidGrantedFingerprint(authority, record);
 }
 
 static BOOL DSHSameNode(const struct stat &left, const struct stat &right) {
   return left.st_dev == right.st_dev && left.st_ino == right.st_ino &&
          left.st_mode == right.st_mode;
+}
+
+static BOOL DSHWorkspaceDescriptorMatchesAuthority(
+    int descriptor,
+    NSDictionary *authority) {
+  if (descriptor < 0 || ![authority isKindOfClass:NSDictionary.class]) {
+    return NO;
+  }
+  struct stat state = {};
+  if (fstat(descriptor, &state) != 0 || !S_ISDIR(state.st_mode) ||
+      S_ISLNK(state.st_mode)) {
+    return NO;
+  }
+  unsigned long long expectedDevice = strtoull(
+      [authority[@"device_id"] UTF8String], nullptr, 10);
+  unsigned long long expectedInode = strtoull(
+      [authority[@"inode_id"] UTF8String], nullptr, 10);
+  return (unsigned long long)state.st_dev == expectedDevice &&
+         (unsigned long long)state.st_ino == expectedInode;
 }
 
 static NSString *DSHUnsignedIntegerString(unsigned long long value) {
@@ -653,6 +982,8 @@ static NSString *DSHTruncateDisplayNameForSuffix(NSString *base,
   return [prefix stringByAppendingString:suffix];
 }
 
+@class DSHLocalWorkspaceAuthorityLock;
+
 @interface DSHLocalWorkspaceAccess ()
 @property(nonatomic, strong) NSURL *privateRootURL;
 @property(nonatomic, strong) NSURL *documentsRootURL;
@@ -667,13 +998,38 @@ static NSString *DSHTruncateDisplayNameForSuffix(NSString *base,
 @property(nonatomic) dev_t documentsRootDevice;
 @property(nonatomic) ino_t documentsRootInode;
 @property(nonatomic) BOOL bootstrapped;
+- (nullable NSDictionary *)verifiedLegacyEvidenceForProjectId:
+    (NSString *)projectId;
+- (nullable NSDictionary *)migrateLegacyAuthority:(NSDictionary *)authority
+                                            record:(NSDictionary *)record;
+- (nullable NSDictionary *)terminalValidatedOwnedDescriptorForRecord:
+    (NSDictionary *)record
+    error:(NSError **)error;
+- (nullable DSHLocalWorkspaceAuthorityLock *)acquireAuthorityLock:
+    (NSError **)error NS_RETURNS_RETAINED;
+- (BOOL)ensurePrivateLayoutLocked:(NSError **)error;
+- (nullable NSDictionary *)loadRegistry:(NSError **)error
+                                  digest:(NSString *_Nullable *_Nullable)digest;
+- (nullable NSDictionary *)recordInRegistry:(NSDictionary *)registry
+                                  workspaceId:(NSString *)workspaceId;
+- (nullable NSDictionary *)loadAuthorityForRecord:(NSDictionary *)record
+                                             error:(NSError **)error;
+- (nullable NSSet<NSString *> *)verifiedLegacyCapabilitiesForRecord:
+    (NSDictionary *)record
+    authority:(NSDictionary *)authority;
+- (int)openOwnedRootDescriptorForRecord:(NSDictionary *)record
+                               authority:(NSDictionary *)authority
+                                  error:(NSError **)error;
+- (NSString *)metadataStatusForRecord:(NSDictionary *)record
+                              authority:(NSDictionary *)authority;
 @end
 
-@interface DSHLocalWorkspaceAuthorityLock : NSObject
+@interface DSHLocalWorkspaceAuthorityMutationGuard ()
 @property(nonatomic) int descriptor;
+@property(nonatomic, weak) DSHLocalWorkspaceAccess *owner;
 @end
 
-@implementation DSHLocalWorkspaceAuthorityLock
+@implementation DSHLocalWorkspaceAuthorityMutationGuard
 - (instancetype)init {
   self = [super init];
   if (self) _descriptor = -1;
@@ -685,6 +1041,60 @@ static NSString *DSHTruncateDisplayNameForSuffix(NSString *base,
     close(_descriptor);
   }
 }
+@end
+
+@interface DSHLocalWorkspaceAuthorityLock :
+    DSHLocalWorkspaceAuthorityMutationGuard
+@end
+
+@implementation DSHLocalWorkspaceAuthorityLock
+@end
+
+@interface DSHLocalWorkspaceLease ()
+/// Immutable operation-lifetime guard. It carries the verified private
+/// authority snapshot without retaining the registry's flock across async
+/// consumers; every new native open still revalidates the registry/authority.
+@property(nonatomic, copy) NSDictionary *authorityGuard;
+@property(nonatomic, readwrite, copy) NSString *workspaceId;
+@property(nonatomic, readwrite) NSUInteger bindingRevision;
+@property(nonatomic, readwrite) int rootDescriptor;
+@property(nonatomic, readwrite) BOOL supportsGit;
+@property(nonatomic, readwrite) BOOL supportsProjectContext;
+- (instancetype)initWithWorkspaceId:(NSString *)workspaceId
+                   bindingRevision:(NSUInteger)bindingRevision
+                    rootDescriptor:(int)rootDescriptor
+                        supportsGit:(BOOL)supportsGit
+              supportsProjectContext:(BOOL)supportsProjectContext
+                      authorityGuard:(NSDictionary *)authorityGuard;
+@end
+
+@implementation DSHLocalWorkspaceLease
+
+- (instancetype)initWithWorkspaceId:(NSString *)workspaceId
+                   bindingRevision:(NSUInteger)bindingRevision
+                    rootDescriptor:(int)rootDescriptor
+                        supportsGit:(BOOL)supportsGit
+              supportsProjectContext:(BOOL)supportsProjectContext
+                      authorityGuard:(NSDictionary *)authorityGuard {
+  self = [super init];
+  if (self != nil) {
+    _workspaceId = [workspaceId copy];
+    _bindingRevision = bindingRevision;
+    _rootDescriptor = rootDescriptor;
+    _supportsGit = supportsGit;
+    _supportsProjectContext = supportsProjectContext;
+    _authorityGuard = [authorityGuard copy];
+  }
+  return self;
+}
+
+- (void)dealloc {
+  if (_rootDescriptor >= 0) {
+    close(_rootDescriptor);
+    _rootDescriptor = -1;
+  }
+}
+
 @end
 
 @implementation DSHLocalWorkspaceAccess
@@ -705,7 +1115,7 @@ static NSString *DSHTruncateDisplayNameForSuffix(NSString *base,
 - (instancetype)initWithPrivateRootURL:(NSURL *)privateRootURL
                      documentsRootURL:(NSURL *)documentsRootURL
                                   clock:(DSHLocalWorkspaceClock)clock
-                          UUIDGenerator:(DSHLocalWorkspaceUUIDGenerator)UUIDGenerator
+                         UUIDGenerator:(DSHLocalWorkspaceUUIDGenerator)UUIDGenerator
                          legacyResolver:(DSHLocalWorkspaceLegacyResolver)legacyResolver
                               faultHook:(DSHLocalWorkspaceFaultHook)faultHook {
   self = [super init];
@@ -718,6 +1128,47 @@ static NSString *DSHTruncateDisplayNameForSuffix(NSString *base,
     _faultHook = [faultHook copy];
   }
   return self;
+}
+
+- (nullable NSDictionary *)verifiedLegacyEvidenceForProjectId:
+    (NSString *)projectId {
+  if (!DSHCanonicalUUID(projectId)) return nil;
+  NSDictionary *evidence = nil;
+  NSError *resolverError = nil;
+  @try {
+    if (!self.legacyResolver(projectId, &evidence, &resolverError) ||
+        !DSHValidLegacyEvidence(evidence, projectId)) {
+      return nil;
+    }
+  } @catch (__unused NSException *exception) {
+    return nil;
+  }
+  return [evidence copy];
+}
+
+- (nullable NSDictionary *)migrateLegacyAuthority:(NSDictionary *)authority
+                                            record:(NSDictionary *)record {
+  NSString *projectId = authority[@"legacy_project_id"];
+  NSString *projectMetadata = authority[@"root_identity_sha256"];
+  NSDictionary *evidence = [self verifiedLegacyEvidenceForProjectId:projectId];
+  if (evidence == nil ||
+      ![evidence[@"metadata_sha256"] isEqual:projectMetadata]) return nil;
+  NSMutableDictionary *physical = [evidence mutableCopy];
+  physical[@"project_metadata_sha256"] = evidence[@"metadata_sha256"];
+  [physical removeObjectsForKeys:@[
+    @"project_id", @"display_name", @"metadata_sha256", @"capabilities"
+  ]];
+  NSMutableDictionary *migrated =
+      [DSHMigrateLegacyAuthority(authority, record, physical) mutableCopy];
+  if (migrated == nil) return nil;
+  NSMutableArray *orderedCapabilities = [NSMutableArray array];
+  for (NSString *capability in DSHCapabilityOrder()) {
+    if ([evidence[@"capabilities"] containsObject:capability]) {
+      [orderedCapabilities addObject:capability];
+    }
+  }
+  migrated[@"capabilities"] = orderedCapabilities;
+  return migrated;
 }
 
 - (NSURL *)workspaceStoreURL {
@@ -938,10 +1389,21 @@ static NSString *DSHTruncateDisplayNameForSuffix(NSString *base,
   }
   dev_t device = 0;
   ino_t inode = 0;
+  NSError *identityError = nil;
   if (![self ownedRootIdentityForDirectoryName:record[@"owned_directory_name"]
                                          device:&device
                                           inode:&inode
-                                          error:error]) {
+                                          error:&identityError]) {
+    NSURL *root = [[self ownedWorkspacesRootURL]
+        URLByAppendingPathComponent:record[@"owned_directory_name"]
+                         isDirectory:YES];
+    struct stat replacedState = {};
+    if (lstat(root.fileSystemRepresentation, &replacedState) == 0) {
+      DSHSetWorkspaceError(error, DSHLocalWorkspaceAccessErrorRootChanged);
+    } else if (error != nil) {
+      *error = identityError ?: DSHWorkspaceError(
+          DSHLocalWorkspaceAccessErrorUnavailable);
+    }
     return NO;
   }
   unsigned long long expectedDevice =
@@ -950,7 +1412,7 @@ static NSString *DSHTruncateDisplayNameForSuffix(NSString *base,
       strtoull([authority[@"inode_id"] UTF8String], NULL, 10);
   if ((unsigned long long)device != expectedDevice ||
       (unsigned long long)inode != expectedInode) {
-    DSHSetWorkspaceError(error, DSHLocalWorkspaceAccessErrorUnavailable);
+    DSHSetWorkspaceError(error, DSHLocalWorkspaceAccessErrorRootChanged);
     return NO;
   }
   return YES;
@@ -1106,7 +1568,59 @@ static NSString *DSHTruncateDisplayNameForSuffix(NSString *base,
   DSHLocalWorkspaceAuthorityLock *token =
       [[DSHLocalWorkspaceAuthorityLock alloc] init];
   token.descriptor = descriptor;
+  token.owner = self;
   return token;
+}
+
+- (DSHLocalWorkspaceAuthorityMutationGuard *)
+    acquireAuthorityMutationGuard:(NSError **)error {
+  return [self acquireAuthorityLock:error];
+}
+
+- (BOOL)validateWorkspaceForClearanceId:(NSString *)workspaceId
+                        bindingRevision:(NSUInteger)revision
+                 authorityMutationGuard:
+                     (DSHLocalWorkspaceAuthorityMutationGuard *)guard
+                                   error:(NSError **)error {
+  if (guard == nil || guard.owner != self || guard.descriptor < 0 ||
+      !DSHCanonicalUUID(workspaceId) || revision == 0 ||
+      revision > DSHWorkspaceMaxSafeInteger) {
+    DSHSetWorkspaceError(error, DSHLocalWorkspaceAccessErrorInvalid);
+    return NO;
+  }
+  if (![self ensurePrivateLayoutLocked:error]) return NO;
+  NSDictionary *registry = [self loadRegistry:error digest:nil];
+  NSDictionary *record = registry == nil ? nil :
+      [self recordInRegistry:registry workspaceId:workspaceId];
+  if (record == nil ||
+      ![record[@"binding_revision"] isEqual:@(revision)]) {
+    DSHSetWorkspaceError(error, record == nil
+        ? DSHLocalWorkspaceAccessErrorNotFound
+        : DSHLocalWorkspaceAccessErrorRevisionStale);
+    return NO;
+  }
+  NSString *locator = record[@"root_locator_kind"];
+  NSString *origin = record[@"origin"];
+  if ([locator isEqual:@"legacy_app_owned"]) {
+    DSHSetWorkspaceError(error, DSHLocalWorkspaceAccessErrorConflict);
+    return NO;
+  }
+  BOOL originValid =
+      ([locator isEqual:@"documents_owned"] &&
+       ([origin isEqual:@"rish_created"] || [origin isEqual:@"imported"])) ||
+      ([locator isEqual:@"security_scoped"] &&
+       [origin isEqual:@"granted_folder"]);
+  NSDictionary *authority = originValid
+      ? [self loadAuthorityForRecord:record error:error] : nil;
+  if (!originValid || authority == nil ||
+      ![[self metadataStatusForRecord:record authority:authority]
+          isEqual:@"ok"]) {
+    if (error != nil && *error == nil) {
+      DSHSetWorkspaceError(error, DSHLocalWorkspaceAccessErrorConflict);
+    }
+    return NO;
+  }
+  return YES;
 }
 
 - (BOOL)writeProtectedData:(NSData *)data
@@ -1326,11 +1840,24 @@ static NSString *DSHTruncateDisplayNameForSuffix(NSString *base,
   NSString *workspaceId = record[@"workspace_id"];
   NSNumber *revision = record[@"binding_revision"];
   if ([locator isEqual:@"documents_owned"]) {
+    NSURL *ownedURL = [self authorityURLForKind:@"owned" workspaceId:workspaceId
+                                         revision:revision];
     NSDictionary *owned = [self readProtectedObjectAtURL:
-        [self authorityURLForKind:@"owned" workspaceId:workspaceId
-                         revision:revision]
+        ownedURL
                                                maxBytes:DSHWorkspaceAuthorityMaxBytes
                                                   error:error];
+    if (owned != nil && !DSHValidOwnedAuthority(owned, record)) {
+      NSDictionary *migrated = DSHMigrateOwnedAuthority(owned, record);
+      if (migrated != nil) {
+        if (![self writeProtectedObject:migrated
+                                  toURL:ownedURL
+                               maxBytes:DSHWorkspaceAuthorityMaxBytes
+                                  error:error]) {
+          return nil;
+        }
+        owned = migrated;
+      }
+    }
     if (owned == nil || !DSHValidOwnedAuthority(owned, record)) {
       if (owned != nil) {
         DSHSetWorkspaceError(error, DSHLocalWorkspaceAccessErrorPersistence);
@@ -1340,9 +1867,10 @@ static NSString *DSHTruncateDisplayNameForSuffix(NSString *base,
     return owned;
   }
   if ([locator isEqual:@"security_scoped"]) {
-    NSDictionary *bookmark = [self readProtectedObjectAtURL:
-        [self authorityURLForKind:@"bookmark" workspaceId:workspaceId
-                         revision:revision]
+    NSURL *bookmarkURL = [self authorityURLForKind:@"bookmark"
+                                        workspaceId:workspaceId
+                                           revision:revision];
+    NSDictionary *bookmark = [self readProtectedObjectAtURL:bookmarkURL
                                                   maxBytes:DSHWorkspaceAuthorityMaxBytes
                                                      error:error];
     if (bookmark == nil || !DSHValidBookmarkAuthority(bookmark, record)) {
@@ -1351,11 +1879,25 @@ static NSString *DSHTruncateDisplayNameForSuffix(NSString *base,
       }
       return nil;
     }
-    NSDictionary *granted = [self readProtectedObjectAtURL:
-        [self authorityURLForKind:@"granted" workspaceId:workspaceId
-                         revision:revision]
+    NSURL *grantedURL = [self authorityURLForKind:@"granted"
+                                       workspaceId:workspaceId
+                                          revision:revision];
+    NSDictionary *granted = [self readProtectedObjectAtURL:grantedURL
                                                  maxBytes:DSHWorkspaceAuthorityMaxBytes
                                                     error:error];
+    if (granted != nil && !DSHValidGrantedAuthority(granted, record, bookmark)) {
+      NSDictionary *migrated = DSHMigrateGrantedAuthority(granted, record,
+                                                          bookmark);
+      if (migrated != nil) {
+        if (![self writeProtectedObject:migrated
+                                  toURL:grantedURL
+                               maxBytes:DSHWorkspaceAuthorityMaxBytes
+                                  error:error]) {
+          return nil;
+        }
+        granted = migrated;
+      }
+    }
     if (granted == nil ||
         !DSHValidGrantedAuthority(granted, record, bookmark)) {
       if (granted != nil) {
@@ -1366,11 +1908,24 @@ static NSString *DSHTruncateDisplayNameForSuffix(NSString *base,
     return @{ @"bookmark" : bookmark, @"granted" : granted };
   }
   if ([locator isEqual:@"legacy_app_owned"]) {
-    NSDictionary *legacy = [self readProtectedObjectAtURL:
-        [self authorityURLForKind:@"legacy" workspaceId:workspaceId
-                         revision:revision]
+    NSURL *legacyURL = [self authorityURLForKind:@"legacy" workspaceId:workspaceId
+                                        revision:revision];
+    NSDictionary *legacy = [self readProtectedObjectAtURL:legacyURL
                                                 maxBytes:DSHWorkspaceAuthorityMaxBytes
                                                    error:error];
+    if (legacy != nil && !DSHValidLegacyAuthority(legacy, record)) {
+      NSDictionary *migrated = [self migrateLegacyAuthority:legacy
+                                                     record:record];
+      if (migrated != nil) {
+        if (![self writeProtectedObject:migrated
+                                  toURL:legacyURL
+                               maxBytes:DSHWorkspaceAuthorityMaxBytes
+                                  error:error]) {
+          return nil;
+        }
+        legacy = migrated;
+      }
+    }
     if (legacy == nil || !DSHValidLegacyAuthority(legacy, record)) {
       if (legacy != nil) {
         DSHSetWorkspaceError(error, DSHLocalWorkspaceAccessErrorPersistence);
@@ -1399,9 +1954,11 @@ static NSString *DSHTruncateDisplayNameForSuffix(NSString *base,
                           capabilities:(nullable NSSet<NSString *> *)capabilities {
   NSMutableDictionary *projectedCapabilities =
       [[self zeroCapabilitiesForRecord:record] mutableCopy];
-  for (NSString *capability in capabilities ?: [NSSet set]) {
-    if (projectedCapabilities[capability] != nil) {
-      projectedCapabilities[capability] = @YES;
+  if ([status isEqual:@"ok"]) {
+    for (NSString *capability in capabilities ?: [NSSet set]) {
+      if (projectedCapabilities[capability] != nil) {
+        projectedCapabilities[capability] = @YES;
+      }
     }
   }
   return @{
@@ -1417,34 +1974,124 @@ static NSString *DSHTruncateDisplayNameForSuffix(NSString *base,
   };
 }
 
+- (NSSet<NSString *> *)operationalCapabilitiesForMetadataRecord:(NSDictionary *)record
+                                                        authority:(NSDictionary *)authority
+                                                           status:(NSString *)status {
+  if (![status isEqual:@"ok"]) return [NSSet set];
+  NSString *locator = record[@"root_locator_kind"];
+  if ([locator isEqual:@"documents_owned"]) {
+    // Documents-owned roots are verified by the native split-git producer.
+    return [NSSet setWithArray:@[
+      @"read", @"write", @"git", @"project_context"
+    ]];
+  }
+  // Security-scoped roots currently have no native coordinated Git,
+  // Project Context, or Files producer. Keep the advertised contract honest
+  // until those consumers exist; coordinated access itself remains available
+  // for read/write only.
+  if ([locator isEqual:@"security_scoped"]) {
+    return [NSSet setWithArray:@[@"read", @"write"]];
+  }
+  if (![locator isEqual:@"legacy_app_owned"]) return [NSSet set];
+  return [self verifiedLegacyCapabilitiesForRecord:record authority:authority]
+      ?: [NSSet set];
+}
+
+- (nullable NSSet<NSString *> *)verifiedLegacyCapabilitiesForRecord:
+    (NSDictionary *)record
+    authority:(NSDictionary *)authority {
+  if (![record[@"root_locator_kind"] isEqual:@"legacy_app_owned"] ||
+      !DSHValidLegacyAuthority(authority, record)) {
+    return nil;
+  }
+  @try {
+    NSDictionary *evidence =
+        [self verifiedLegacyEvidenceForProjectId:record[@"legacy_project_id"]];
+    if (evidence != nil &&
+        [evidence[@"display_name"] isEqual:record[@"display_name"]] &&
+        [evidence[@"metadata_sha256"]
+            isEqual:authority[@"root_identity_sha256"]] &&
+        [evidence[@"capabilities"]
+            isEqual:[NSSet setWithArray:authority[@"capabilities"]]] &&
+        DSHLegacyPhysicalIdentityMatchesAuthority(evidence, authority)) {
+      return evidence[@"capabilities"];
+    }
+  } @catch (__unused NSException *exception) {
+  }
+  return nil;
+}
+
 - (NSString *)metadataStatusForRecord:(NSDictionary *)record
                               authority:(NSDictionary *)authority {
   if ([record[@"root_locator_kind"] isEqual:@"documents_owned"]) {
-    if (![record[@"origin"] isEqual:@"rish_created"] ||
+    if ((![record[@"origin"] isEqual:@"rish_created"] &&
+         ![record[@"origin"] isEqual:@"imported"]) ||
         ![self captureDocumentsRootIdentity:nil] ||
         ![self validateOwnedRootForRecord:record authority:authority error:nil]) {
       return @"unavailable";
     }
     return @"ok";
   }
+  if ([record[@"root_locator_kind"] isEqual:@"security_scoped"]) {
+    NSDictionary *bookmarkAuthority = authority[@"bookmark"];
+    NSDictionary *grantedAuthority = authority[@"granted"];
+    NSData *bookmark = [[NSData alloc]
+        initWithBase64EncodedString:bookmarkAuthority[@"bookmark_bytes_base64"]
+                            options:0];
+    if (bookmark == nil || bookmark.length > DSHWorkspaceBookmarkMaxBytes) {
+      return @"revoked";
+    }
+    BOOL bookmarkStale = NO;
+    NSError *resolutionError = nil;
+    NSURL *url = [NSURL URLByResolvingBookmarkData:bookmark
+                                           options:
+#if TARGET_OS_OSX || TARGET_OS_MACCATALYST
+                                               NSURLBookmarkResolutionWithSecurityScope
+#else
+                                               0
+#endif
+                                     relativeToURL:nil
+                               bookmarkDataIsStale:&bookmarkStale
+                                             error:&resolutionError];
+    if (url == nil) return bookmarkStale ? @"stale" : @"revoked";
+    BOOL scopeStarted = NO;
+    @try {
+      if (bookmarkStale) return @"stale";
+      scopeStarted = [url startAccessingSecurityScopedResource];
+      if (!scopeStarted) return @"revoked";
+      struct stat state = {};
+      BOOL isDirectory = lstat(url.fileSystemRepresentation, &state) == 0 &&
+                         S_ISDIR(state.st_mode) && !S_ISLNK(state.st_mode);
+      unsigned long long expectedDevice = strtoull(
+          [grantedAuthority[@"device_id"] UTF8String], nullptr, 10);
+      unsigned long long expectedInode = strtoull(
+          [grantedAuthority[@"inode_id"] UTF8String], nullptr, 10);
+      BOOL identityMatches = isDirectory &&
+          (unsigned long long)state.st_dev == expectedDevice &&
+          (unsigned long long)state.st_ino == expectedInode;
+      NSNumber *ubiquitous = nil;
+      NSString *downloadStatus = nil;
+      [url getResourceValue:&ubiquitous
+                     forKey:NSURLIsUbiquitousItemKey
+                      error:nil];
+      [url getResourceValue:&downloadStatus
+                     forKey:NSURLUbiquitousItemDownloadingStatusKey
+                      error:nil];
+      if (!identityMatches) return @"revoked";
+      if (ubiquitous.boolValue &&
+          ![downloadStatus isEqual:NSURLUbiquitousItemDownloadingStatusCurrent]) {
+        return @"not_downloaded";
+      }
+      return @"ok";
+    } @finally {
+      if (scopeStarted) [url stopAccessingSecurityScopedResource];
+    }
+  }
   if (![record[@"root_locator_kind"] isEqual:@"legacy_app_owned"]) {
     return @"unavailable";
   }
-  @try {
-    NSString *identity = nil;
-    NSSet<NSString *> *capabilities = nil;
-    NSError *resolverError = nil;
-    BOOL resolved = self.legacyResolver(record[@"legacy_project_id"],
-                                        &identity, &capabilities,
-                                        &resolverError);
-    if (resolved && DSHCanonicalSHA256(identity) &&
-        DSHCanonicalCapabilitiesSet(capabilities) &&
-        [identity isEqual:authority[@"root_identity_sha256"]]) {
-      return @"ok";
-    }
-  } @catch (__unused NSException *exception) {
-  }
-  return @"unavailable";
+  return [self verifiedLegacyCapabilitiesForRecord:record authority:authority]
+      != nil ? @"ok" : @"unavailable";
 }
 
 - (nullable NSDictionary *)recordInRegistry:(NSDictionary *)registry
@@ -1525,6 +2172,24 @@ static NSString *DSHTruncateDisplayNameForSuffix(NSString *base,
     return NO;
   }
   return YES;
+}
+
+static NSDictionary *DSHPublicOperationReceipt(NSDictionary *receipt) {
+  if (![receipt isKindOfClass:NSDictionary.class]) return nil;
+  // request_sha256 is a private idempotency binding. It is intentionally
+  // omitted from the public query result even though it remains in the
+  // protected receipt store for retry/conflict detection.
+  return @{
+    @"schema_version" : receipt[@"schema_version"],
+    @"operation_id" : receipt[@"operation_id"],
+    @"workspace_id" : receipt[@"workspace_id"],
+    @"operation" : receipt[@"operation"],
+    @"binding_revision" : receipt[@"binding_revision"],
+    @"registry_generation" : receipt[@"registry_generation"],
+    @"registry_sha256" : receipt[@"registry_sha256"],
+    @"outcome" : receipt[@"outcome"],
+    @"committed_at" : receipt[@"committed_at"],
+  };
 }
 
 - (nullable NSMutableArray<NSDictionary *> *)loadReceipts:(NSError **)error {
@@ -1665,8 +2330,7 @@ static NSString *DSHTruncateDisplayNameForSuffix(NSString *base,
     return [journal[@"binding_revision"] isEqual:@1] &&
            DSHCanonicalUUID(journal[@"legacy_project_id"]) &&
            [journal[@"request_sha256"]
-               isEqual:DSHBootstrapRequestSHA256(journal[@"legacy_project_id"],
-                                                 journal[@"display_name"])] &&
+               isEqual:DSHBootstrapRequestSHA256(journal[@"legacy_project_id"])] &&
            journal[@"staging_name"] == NSNull.null &&
            journal[@"destination_name"] == NSNull.null &&
            journal[@"staging_device_id"] == NSNull.null &&
@@ -2503,10 +3167,9 @@ static BOOL DSHOwnedAuthorityMatchesJournal(NSDictionary *authority,
         NSString *status = [self metadataStatusForRecord:record
                                                 authority:authority];
         NSSet<NSString *> *capabilities =
-            [status isEqual:@"ok"] &&
-                    [record[@"origin"] isEqual:@"rish_created"]
-                ? [NSSet setWithArray:@[@"read", @"write"]]
-                : nil;
+            [self operationalCapabilitiesForMetadataRecord:record
+                                                  authority:authority
+                                                     status:status];
         [result addObject:[self descriptorForRecord:record
                                              status:status
                                        capabilities:capabilities]];
@@ -2560,22 +3223,17 @@ static BOOL DSHOwnedAuthorityMatchesJournal(NSDictionary *authority,
                                        capabilities:nil],
         };
       }
-      if ([record[@"root_locator_kind"] isEqual:@"documents_owned"]) {
-        if (![record[@"origin"] isEqual:@"rish_created"] ||
-            ![self captureDocumentsRootIdentity:error] ||
-            ![self validateOwnedRootForRecord:record
-                                     authority:authority
-                                         error:error]) {
-          if (error != nil && *error == nil) {
-            DSHSetWorkspaceError(error, DSHLocalWorkspaceAccessErrorUnavailable);
-          } else if (error != nil &&
-                     (*error).code == DSHLocalWorkspaceAccessErrorPersistence) {
-            DSHSetWorkspaceError(error, DSHLocalWorkspaceAccessErrorUnavailable);
-          }
-          return nil;
-        }
+      NSString *locator = record[@"root_locator_kind"];
+      if ([locator isEqual:@"documents_owned"]) {
+        int descriptor = [self openOwnedRootDescriptorForRecord:record
+                                                       authority:authority
+                                                          error:error];
+        if (descriptor < 0) return nil;
+        close(descriptor);
         NSSet<NSString *> *available =
-            [NSSet setWithArray:@[@"read", @"write"]];
+            [self operationalCapabilitiesForMetadataRecord:record
+                                                   authority:authority
+                                                      status:@"ok"];
         if (![[NSSet setWithArray:capabilities] isSubsetOfSet:available]) {
           DSHSetWorkspaceError(error, DSHLocalWorkspaceAccessErrorCapability);
           return nil;
@@ -2588,21 +3246,37 @@ static BOOL DSHOwnedAuthorityMatchesJournal(NSDictionary *authority,
                                        capabilities:available],
         };
       }
-      if (![record[@"root_locator_kind"] isEqual:@"legacy_app_owned"]) {
-        DSHSetWorkspaceError(error, DSHLocalWorkspaceAccessErrorUnavailable);
+      if ([locator isEqual:@"legacy_app_owned"]) {
+        NSSet<NSString *> *available =
+            [self verifiedLegacyCapabilitiesForRecord:record
+                                            authority:authority];
+        if (available == nil) {
+          DSHSetWorkspaceError(error,
+                               DSHLocalWorkspaceAccessErrorUnavailable);
+          return nil;
+        }
+        if (![[NSSet setWithArray:capabilities] isSubsetOfSet:available]) {
+          DSHSetWorkspaceError(error, DSHLocalWorkspaceAccessErrorCapability);
+          return nil;
+        }
+        return @{
+          @"schema_version" : @1,
+          @"disposition" : @"direct",
+          @"workspace" : [self descriptorForRecord:record
+                                             status:@"ok"
+                                       capabilities:available],
+        };
+      }
+      NSString *status = [self metadataStatusForRecord:record
+                                               authority:authority];
+      if (![status isEqual:@"ok"]) {
+        DSHWorkspaceSetOperationalStatusError(status, error);
         return nil;
       }
-      NSString *identity = nil;
-      NSSet<NSString *> *available = nil;
-      NSError *resolverError = nil;
-      BOOL resolved = self.legacyResolver(record[@"legacy_project_id"],
-                                          &identity, &available, &resolverError);
-      if (!resolved || !DSHCanonicalSHA256(identity) ||
-          !DSHCanonicalCapabilitiesSet(available) ||
-          ![identity isEqual:authority[@"root_identity_sha256"]]) {
-        DSHSetWorkspaceError(error, DSHLocalWorkspaceAccessErrorUnavailable);
-        return nil;
-      }
+      NSSet<NSString *> *available =
+          [self operationalCapabilitiesForMetadataRecord:record
+                                                   authority:authority
+                                                      status:status];
       if (![[NSSet setWithArray:capabilities] isSubsetOfSet:available]) {
         DSHSetWorkspaceError(error, DSHLocalWorkspaceAccessErrorCapability);
         return nil;
@@ -2610,13 +3284,427 @@ static BOOL DSHOwnedAuthorityMatchesJournal(NSDictionary *authority,
       return @{
         @"schema_version" : @1,
         @"disposition" : @"direct",
-        @"workspace" : [self descriptorForRecord:record status:@"ok"
-                                      capabilities:available],
+        @"workspace" : [self descriptorForRecord:record
+                                           status:@"ok"
+                                     capabilities:available],
       };
     }
   } @catch (__unused NSException *exception) {
     DSHSetWorkspaceError(error, DSHLocalWorkspaceAccessErrorUnavailable);
     return nil;
+  }
+}
+
+static void DSHWorkspaceSetOperationalStatusError(NSString *status,
+                                                   NSError **error) {
+  if ([status isEqual:@"stale"]) {
+    DSHSetWorkspaceError(error, DSHLocalWorkspaceAccessErrorStatusStale);
+  } else if ([status isEqual:@"revoked"]) {
+    DSHSetWorkspaceError(error, DSHLocalWorkspaceAccessErrorRevoked);
+  } else if ([status isEqual:@"not_downloaded"]) {
+    DSHSetWorkspaceError(error, DSHLocalWorkspaceAccessErrorNotDownloaded);
+  } else {
+    DSHSetWorkspaceError(error, DSHLocalWorkspaceAccessErrorUnavailable);
+  }
+}
+
+- (int)openOwnedRootDescriptorForRecord:(NSDictionary *)record
+                               authority:(NSDictionary *)authority
+                                  error:(NSError **)error {
+  if (![record[@"root_locator_kind"] isEqual:@"documents_owned"] ||
+      !DSHValidOwnedAuthority(authority, record) ||
+      ![self captureDocumentsRootIdentity:error] ||
+      ![self validateOwnedRootForRecord:record authority:authority error:error]) {
+    if (error != nil && *error == nil) {
+      DSHSetWorkspaceError(error, DSHLocalWorkspaceAccessErrorUnavailable);
+    } else if (error != nil &&
+               (*error).code == DSHLocalWorkspaceAccessErrorPersistence) {
+      DSHSetWorkspaceError(error, DSHLocalWorkspaceAccessErrorUnavailable);
+    }
+    return -1;
+  }
+  NSURL *root = [[self ownedWorkspacesRootURL]
+      URLByAppendingPathComponent:record[@"owned_directory_name"]
+                       isDirectory:YES];
+  int descriptor = open(root.fileSystemRepresentation,
+                         O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW);
+  if (descriptor < 0) {
+    DSHSetWorkspaceError(error, DSHLocalWorkspaceAccessErrorUnavailable);
+    return -1;
+  }
+  struct stat opened = {};
+  if (fstat(descriptor, &opened) != 0 || !S_ISDIR(opened.st_mode) ||
+      S_ISLNK(opened.st_mode) || opened.st_nlink < 2) {
+    close(descriptor);
+    DSHSetWorkspaceError(error, DSHLocalWorkspaceAccessErrorUnavailable);
+    return -1;
+  }
+  if (!DSHWorkspaceDescriptorMatchesAuthority(descriptor, authority)) {
+    close(descriptor);
+    DSHSetWorkspaceError(error, DSHLocalWorkspaceAccessErrorRootChanged);
+    return -1;
+  }
+  return descriptor;
+}
+
+- (nullable NSDictionary *)terminalValidatedOwnedDescriptorForRecord:
+    (NSDictionary *)record
+    error:(NSError **)error {
+  if (![record[@"root_locator_kind"] isEqual:@"documents_owned"]) {
+    DSHSetWorkspaceError(error, DSHLocalWorkspaceAccessErrorUnavailable);
+    return nil;
+  }
+  NSDictionary *authority = [self loadAuthorityForRecord:record error:error];
+  if (authority == nil) return nil;
+  int descriptor = [self openOwnedRootDescriptorForRecord:record
+                                                 authority:authority
+                                                    error:error];
+  if (descriptor < 0) return nil;
+  BOOL identityMatches = NO;
+  @try {
+    identityMatches = DSHWorkspaceDescriptorMatchesAuthority(descriptor,
+                                                              authority);
+  } @finally {
+    close(descriptor);
+  }
+  if (!identityMatches) {
+    DSHSetWorkspaceError(error, DSHLocalWorkspaceAccessErrorRootChanged);
+    return nil;
+  }
+  NSString *status = [self metadataStatusForRecord:record authority:authority];
+  if (![status isEqual:@"ok"]) {
+    DSHWorkspaceSetOperationalStatusError(status, error);
+    return nil;
+  }
+  return [self descriptorForRecord:record
+                            status:@"ok"
+                      capabilities:[self operationalCapabilitiesForMetadataRecord:
+                                         record
+                                      authority:authority
+                                         status:@"ok"]];
+}
+
+- (nullable DSHLocalWorkspaceLease *)leaseWorkspaceId:(NSString *)workspaceId
+                               expectedBindingRevision:(NSUInteger)revision
+                                  requiredCapabilities:(NSSet<NSString *> *)capabilities
+                                                 error:(NSError **)error {
+  @try {
+    @synchronized(DSHLocalWorkspaceAccess.class) {
+      if (!DSHCanonicalUUID(workspaceId) || revision == 0 ||
+          revision > DSHWorkspaceMaxSafeInteger ||
+          !DSHCanonicalCapabilitiesSet(capabilities)) {
+        DSHSetWorkspaceError(error, DSHLocalWorkspaceAccessErrorInvalid);
+        return nil;
+      }
+      __attribute__((objc_precise_lifetime))
+      DSHLocalWorkspaceAuthorityLock *lock = [self acquireAuthorityLock:error];
+      if (lock == nil || ![self ensurePrivateLayoutLocked:error]) return nil;
+      NSDictionary *registry = [self loadRegistry:error digest:nil];
+      if (registry == nil) return nil;
+      NSDictionary *record = [self recordInRegistry:registry
+                                         workspaceId:workspaceId];
+      if (record == nil) {
+        DSHSetWorkspaceError(error, DSHLocalWorkspaceAccessErrorNotFound);
+        return nil;
+      }
+      if (![record[@"binding_revision"] isEqual:@(revision)]) {
+        DSHSetWorkspaceError(error, DSHLocalWorkspaceAccessErrorRevisionStale);
+        return nil;
+      }
+      if ([record[@"root_locator_kind"] isEqual:@"security_scoped"]) {
+        // Security-scoped roots never return a long-lived descriptor lease.
+        // They are served only by performCoordinated... below.
+        DSHSetWorkspaceError(error, DSHLocalWorkspaceAccessErrorCapability);
+        return nil;
+      }
+      NSDictionary *authority = [self loadAuthorityForRecord:record error:error];
+      if (authority == nil) return nil;
+      NSString *locator = record[@"root_locator_kind"];
+      NSSet<NSString *> *available = nil;
+      BOOL legacy = [locator isEqual:@"legacy_app_owned"];
+      if (legacy) {
+        available = [self verifiedLegacyCapabilitiesForRecord:record
+                                                     authority:authority];
+        if (available == nil) {
+          DSHSetWorkspaceError(error, DSHLocalWorkspaceAccessErrorUnavailable);
+          return nil;
+        }
+      } else if ([locator isEqual:@"documents_owned"] ||
+                 [locator isEqual:@"security_scoped"]) {
+        NSString *status = [self metadataStatusForRecord:record
+                                                 authority:authority];
+        if (![status isEqual:@"ok"]) {
+          DSHWorkspaceSetOperationalStatusError(status, error);
+          return nil;
+        }
+        available = [self operationalCapabilitiesForMetadataRecord:record
+                                                            authority:authority
+                                                               status:status];
+      }
+      if (![capabilities isSubsetOfSet:available]) {
+        DSHSetWorkspaceError(error, DSHLocalWorkspaceAccessErrorCapability);
+        return nil;
+      }
+      if (legacy) {
+        // The legacy resolver intentionally exposes no filesystem locator.
+        // Returning a lease with descriptor -1 would invite a caller to treat
+        // the unresolved root as verified authority, so fail closed until the
+        // existing project-access lease is available to this resolver.
+        DSHSetWorkspaceError(error, DSHLocalWorkspaceAccessErrorUnavailable);
+        return nil;
+      }
+      int descriptor = [self openOwnedRootDescriptorForRecord:record
+                                                     authority:authority
+                                                        error:error];
+      if (descriptor < 0) return nil;
+      return [[DSHLocalWorkspaceLease alloc]
+          initWithWorkspaceId:workspaceId
+             bindingRevision:revision
+              rootDescriptor:descriptor
+                  supportsGit:[available containsObject:@"git"]
+                  supportsProjectContext:[available containsObject:@"project_context"]
+                  authorityGuard:@{
+                    @"workspace_id" : workspaceId,
+                    @"binding_revision" : @(revision),
+                    @"root_fingerprint_sha256" :
+                        authority[@"root_fingerprint_sha256"] ?: @"",
+                  }];
+    }
+  } @catch (__unused NSException *exception) {
+    DSHSetWorkspaceError(error, DSHLocalWorkspaceAccessErrorUnavailable);
+    return nil;
+  }
+}
+
+- (BOOL)performCoordinatedWorkspaceOperationForId:(NSString *)workspaceId
+                          expectedBindingRevision:(NSUInteger)revision
+                             requiredCapabilities:(NSSet<NSString *> *)capabilities
+                                            block:(BOOL (^)(int rootDescriptor,
+                                                            NSError **error))block
+                                            error:(NSError **)error {
+  @try {
+    @synchronized(DSHLocalWorkspaceAccess.class) {
+      if (!DSHCanonicalUUID(workspaceId) || revision == 0 ||
+          revision > DSHWorkspaceMaxSafeInteger ||
+          !DSHCanonicalCapabilitiesSet(capabilities) || block == nil) {
+        DSHSetWorkspaceError(error, DSHLocalWorkspaceAccessErrorInvalid);
+        return NO;
+      }
+      __attribute__((objc_precise_lifetime))
+      DSHLocalWorkspaceAuthorityLock *lock = [self acquireAuthorityLock:error];
+      if (lock == nil || ![self ensurePrivateLayoutLocked:error]) return NO;
+      NSDictionary *registry = [self loadRegistry:error digest:nil];
+      if (registry == nil) return NO;
+      NSDictionary *record = [self recordInRegistry:registry
+                                         workspaceId:workspaceId];
+      if (record == nil) {
+        DSHSetWorkspaceError(error, DSHLocalWorkspaceAccessErrorNotFound);
+        return NO;
+      }
+      if (![record[@"binding_revision"] isEqual:@(revision)]) {
+        DSHSetWorkspaceError(error, DSHLocalWorkspaceAccessErrorRevisionStale);
+        return NO;
+      }
+      // Security-scoped roots expose only the capabilities that have a real
+      // coordinated native consumer today. Reject unsupported requests before
+      // resolving bookmark authority or entering the user's security scope.
+      if ([record[@"root_locator_kind"] isEqual:@"security_scoped"] &&
+          ![capabilities isSubsetOfSet:
+              [NSSet setWithArray:@[@"read", @"write"]]]) {
+        DSHSetWorkspaceError(error, DSHLocalWorkspaceAccessErrorCapability);
+        return NO;
+      }
+      NSDictionary *authority = [self loadAuthorityForRecord:record error:error];
+      if (authority == nil) return NO;
+      NSString *locator = record[@"root_locator_kind"];
+      if ([locator isEqual:@"legacy_app_owned"]) {
+        NSSet<NSString *> *available =
+            [self verifiedLegacyCapabilitiesForRecord:record
+                                            authority:authority];
+        if (available == nil) {
+          DSHSetWorkspaceError(error,
+                               DSHLocalWorkspaceAccessErrorUnavailable);
+          return NO;
+        }
+        if (![capabilities isSubsetOfSet:available]) {
+          DSHSetWorkspaceError(error, DSHLocalWorkspaceAccessErrorCapability);
+          return NO;
+        }
+        // Legacy authority can prove the recorded physical identity but does
+        // not provide an open descriptor. Never run a coordinated operation
+        // against a sentinel descriptor or collapse that mismatch to a
+        // transient availability error.
+        DSHSetWorkspaceError(error, DSHLocalWorkspaceAccessErrorRootChanged);
+        return NO;
+      }
+      NSString *status = [self metadataStatusForRecord:record
+                                               authority:authority];
+      if (![status isEqual:@"ok"]) {
+        DSHWorkspaceSetOperationalStatusError(status, error);
+        return NO;
+      }
+      NSSet<NSString *> *available =
+          [self operationalCapabilitiesForMetadataRecord:record
+                                                   authority:authority
+                                                      status:status];
+      if (![capabilities isSubsetOfSet:available]) {
+        DSHSetWorkspaceError(error, DSHLocalWorkspaceAccessErrorCapability);
+        return NO;
+      }
+
+      if ([locator isEqual:@"documents_owned"]) {
+        int descriptor = [self openOwnedRootDescriptorForRecord:record
+                                                       authority:authority
+                                                          error:error];
+        if (descriptor < 0) return NO;
+        NSError *blockError = nil;
+        BOOL success = NO;
+        @try {
+          success = block(descriptor, &blockError);
+          if (!DSHWorkspaceDescriptorMatchesAuthority(descriptor, authority)) {
+            success = NO;
+            blockError = DSHWorkspaceError(
+                DSHLocalWorkspaceAccessErrorRootChanged);
+          }
+        } @catch (__unused NSException *exception) {
+          success = NO;
+          blockError = DSHWorkspaceError(DSHLocalWorkspaceAccessErrorIO);
+        } @finally {
+          close(descriptor);
+        }
+        if (!success && blockError == nil) {
+          blockError = DSHWorkspaceError(DSHLocalWorkspaceAccessErrorIO);
+        }
+        if (!success && blockError != nil) {
+          if (error != nil) *error = blockError;
+          return NO;
+        }
+        return success;
+      }
+
+      if (![locator isEqual:@"security_scoped"]) {
+        DSHSetWorkspaceError(error, DSHLocalWorkspaceAccessErrorUnavailable);
+        return NO;
+      }
+      NSDictionary *bookmarkAuthority = authority[@"bookmark"];
+      NSDictionary *grantedAuthority = authority[@"granted"];
+      NSData *bookmark = [[NSData alloc]
+          initWithBase64EncodedString:bookmarkAuthority[@"bookmark_bytes_base64"]
+                              options:0];
+      if (bookmark == nil || bookmark.length > DSHWorkspaceBookmarkMaxBytes) {
+        DSHSetWorkspaceError(error, DSHLocalWorkspaceAccessErrorRevoked);
+        return NO;
+      }
+      BOOL bookmarkStale = NO;
+      NSError *resolutionError = nil;
+      NSURL *url = [NSURL URLByResolvingBookmarkData:bookmark
+                                             options:
+#if TARGET_OS_OSX || TARGET_OS_MACCATALYST
+                                                 NSURLBookmarkResolutionWithSecurityScope
+#else
+                                                 0
+#endif
+                                       relativeToURL:nil
+                                 bookmarkDataIsStale:&bookmarkStale
+                                               error:&resolutionError];
+      if (url == nil) {
+        DSHSetWorkspaceError(error, bookmarkStale
+                                      ? DSHLocalWorkspaceAccessErrorStatusStale
+                                      : DSHLocalWorkspaceAccessErrorRevoked);
+        return NO;
+      }
+      BOOL scopeStarted = NO;
+      @try {
+        if (bookmarkStale) {
+          DSHSetWorkspaceError(error, DSHLocalWorkspaceAccessErrorStatusStale);
+          return NO;
+        }
+        scopeStarted = [url startAccessingSecurityScopedResource];
+        if (!scopeStarted) {
+          DSHSetWorkspaceError(error, DSHLocalWorkspaceAccessErrorRevoked);
+          return NO;
+        }
+        __block BOOL operationResult = NO;
+        __block NSError *operationError = nil;
+        __block BOOL descriptorClosed = NO;
+        void (^coordinatedAccessor)(NSURL *) = ^(NSURL *coordinatedURL) {
+          int descriptor = -1;
+          @try {
+            descriptor = open(coordinatedURL.fileSystemRepresentation,
+                              O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW);
+            if (descriptor < 0) {
+              operationError = DSHWorkspaceError(
+                  DSHLocalWorkspaceAccessErrorUnavailable);
+              return;
+            }
+            struct stat state = {};
+            unsigned long long expectedDevice = strtoull(
+                [grantedAuthority[@"device_id"] UTF8String], nullptr, 10);
+            unsigned long long expectedInode = strtoull(
+                [grantedAuthority[@"inode_id"] UTF8String], nullptr, 10);
+            if (fstat(descriptor, &state) != 0 || !S_ISDIR(state.st_mode) ||
+                S_ISLNK(state.st_mode) ||
+                (unsigned long long)state.st_dev != expectedDevice ||
+                (unsigned long long)state.st_ino != expectedInode) {
+              operationError = DSHWorkspaceError(
+                  DSHLocalWorkspaceAccessErrorRootChanged);
+              return;
+            }
+            NSError *blockError = nil;
+            operationResult = block(descriptor, &blockError);
+            if (!DSHWorkspaceDescriptorMatchesAuthority(descriptor,
+                                                        grantedAuthority)) {
+              operationResult = NO;
+              blockError = DSHWorkspaceError(
+                  DSHLocalWorkspaceAccessErrorRootChanged);
+            }
+            if (!operationResult && blockError != nil) {
+              operationError = blockError;
+            }
+          } @catch (__unused NSException *exception) {
+            operationResult = NO;
+            operationError = DSHWorkspaceError(DSHLocalWorkspaceAccessErrorIO);
+          } @finally {
+            if (descriptor >= 0) close(descriptor);
+            descriptorClosed = YES;
+          }
+          if (!operationResult && operationError == nil) {
+            operationError = DSHWorkspaceError(DSHLocalWorkspaceAccessErrorIO);
+          }
+        };
+        NSFileCoordinator *coordinator =
+            [[NSFileCoordinator alloc] initWithFilePresenter:nil];
+        NSError *coordinationError = nil;
+        if ([capabilities containsObject:@"write"]) {
+          [coordinator coordinateWritingItemAtURL:url
+                                           options:0
+                                             error:&coordinationError
+                                        byAccessor:coordinatedAccessor];
+        } else {
+          [coordinator coordinateReadingItemAtURL:url
+                                           options:0
+                                             error:&coordinationError
+                                        byAccessor:coordinatedAccessor];
+        }
+        if (!descriptorClosed && operationError == nil) {
+          operationError = DSHWorkspaceError(DSHLocalWorkspaceAccessErrorIO);
+        }
+        if (coordinationError != nil) {
+          DSHSetWorkspaceError(error, DSHLocalWorkspaceAccessErrorUnavailable);
+          return NO;
+        }
+        if (operationError != nil) {
+          if (error != nil) *error = operationError;
+          return NO;
+        }
+        return operationResult;
+      } @finally {
+        if (scopeStarted) [url stopAccessingSecurityScopedResource];
+      }
+    }
+  } @catch (__unused NSException *exception) {
+    DSHSetWorkspaceError(error, DSHLocalWorkspaceAccessErrorIO);
+    return NO;
   }
 }
 
@@ -2639,7 +3727,7 @@ static BOOL DSHOwnedAuthorityMatchesJournal(NSDictionary *authority,
                                                  receipts:receipts];
       if (receipt != nil) {
         return @{@"schema_version" : @1, @"status" : @"committed",
-                 @"receipt" : receipt};
+                 @"receipt" : DSHPublicOperationReceipt(receipt)};
       }
       NSDictionary *journal = [self loadJournalIfPresent:error];
       if (journal == nil) return nil;
@@ -2657,6 +3745,8 @@ static BOOL DSHOwnedAuthorityMatchesJournal(NSDictionary *authority,
 
 - (nullable NSDictionary *)commitInternalWorkspaceRecord:(NSDictionary *)record
                                           authorityRecord:(NSDictionary *)authority
+                                      verifiedCapabilities:
+                                          (NSSet<NSString *> *)capabilities
                                                  operation:(NSString *)operation
                                                operationId:(NSString *)operationId
                                   expectedCurrentRevision:(NSNumber *)revision
@@ -2670,6 +3760,7 @@ static BOOL DSHOwnedAuthorityMatchesJournal(NSDictionary *authority,
       if (!DSHCanonicalUUID(operationId) || !DSHValidWorkspaceRecord(record) ||
           ![record[@"root_locator_kind"] isEqual:@"legacy_app_owned"] ||
           !DSHValidLegacyAuthority(authority, record) ||
+          !DSHCanonicalCapabilitiesSet(capabilities) ||
           ![record[@"binding_revision"] isEqual:@1]) {
         DSHSetWorkspaceError(error, DSHLocalWorkspaceAccessErrorInvalid);
         return nil;
@@ -2708,13 +3799,15 @@ static BOOL DSHOwnedAuthorityMatchesJournal(NSDictionary *authority,
             (priorReceipt[@"request_sha256"] != nil &&
              ![priorReceipt[@"request_sha256"]
                  isEqual:DSHBootstrapRequestSHA256(
-                     record[@"legacy_project_id"], record[@"display_name"])] ) ||
+                     record[@"legacy_project_id"])] ) ||
             ![existing isEqual:record] ||
             ![existingAuthority isEqual:authority]) {
           DSHSetWorkspaceError(error, DSHLocalWorkspaceAccessErrorConflict);
           return nil;
         }
-        return [self descriptorForRecord:existing status:@"ok" capabilities:nil];
+        return [self descriptorForRecord:existing
+                                  status:@"ok"
+                            capabilities:capabilities];
       }
       if (receipts.count >= DSHWorkspaceReceiptCapacity) {
         DSHSetWorkspaceError(error, DSHLocalWorkspaceAccessErrorBusy);
@@ -2764,8 +3857,7 @@ static BOOL DSHOwnedAuthorityMatchesJournal(NSDictionary *authority,
         @"destination_name" : NSNull.null,
         @"display_name" : record[@"display_name"],
         @"request_sha256" :
-            DSHBootstrapRequestSHA256(record[@"legacy_project_id"],
-                                       record[@"display_name"]),
+            DSHBootstrapRequestSHA256(record[@"legacy_project_id"]),
         @"staging_device_id" : NSNull.null,
         @"staging_inode_id" : NSNull.null,
         @"staging_uid" : NSNull.null,
@@ -2855,7 +3947,9 @@ static BOOL DSHOwnedAuthorityMatchesJournal(NSDictionary *authority,
         return nil;
       }
       if (![self finishCommittedJournal:journal error:error]) return nil;
-      return [self descriptorForRecord:record status:@"ok" capabilities:nil];
+      return [self descriptorForRecord:record
+                                status:@"ok"
+                          capabilities:capabilities];
     }
   } @catch (__unused NSException *exception) {
     DSHSetWorkspaceError(error, DSHLocalWorkspaceAccessErrorPersistence);
@@ -2865,7 +3959,6 @@ static BOOL DSHOwnedAuthorityMatchesJournal(NSDictionary *authority,
 
 - (nullable NSDictionary *)descriptorForBootstrapReceipt:(NSDictionary *)receipt
                                                  projectId:(NSString *)projectId
-                                                displayName:(NSString *)displayName
                                                       error:(NSError **)error {
   NSDictionary *registry = [self loadRegistry:error digest:nil];
   NSDictionary *record = registry == nil ? nil :
@@ -2876,28 +3969,27 @@ static BOOL DSHOwnedAuthorityMatchesJournal(NSDictionary *authority,
   }
   if (![receipt[@"operation"] isEqual:@"bootstrap_legacy"] ||
       ![record[@"legacy_project_id"] isEqual:projectId] ||
-      ![record[@"display_name"] isEqual:displayName] ||
       (receipt[@"request_sha256"] != nil &&
        ![receipt[@"request_sha256"]
-           isEqual:DSHBootstrapRequestSHA256(projectId, displayName)])) {
+           isEqual:DSHBootstrapRequestSHA256(projectId)])) {
     DSHSetWorkspaceError(error, DSHLocalWorkspaceAccessErrorConflict);
     return nil;
   }
   NSDictionary *authority = [self loadAuthorityForRecord:record error:error];
   if (authority == nil) return nil;
-  NSString *status = [self metadataStatusForRecord:record authority:authority];
-  return [self descriptorForRecord:record status:status capabilities:nil];
+  NSSet<NSString *> *capabilities =
+      [NSSet setWithArray:authority[@"capabilities"]];
+  return [self descriptorForRecord:record
+                            status:@"ok"
+                      capabilities:capabilities];
 }
 
 - (nullable NSDictionary *)bootstrapLegacyProjectId:(NSString *)projectId
-                                         displayName:(NSString *)displayName
                                           operationId:(NSString *)operationId
                                                 error:(NSError **)error {
   @try {
     @synchronized(DSHLocalWorkspaceAccess.class) {
-      if (!DSHCanonicalUUID(projectId) ||
-          !DSHCanonicalDisplayName(displayName) ||
-          !DSHCanonicalUUID(operationId)) {
+      if (!DSHCanonicalUUID(projectId) || !DSHCanonicalUUID(operationId)) {
         DSHSetWorkspaceError(error, DSHLocalWorkspaceAccessErrorInvalid);
         return nil;
       }
@@ -2905,6 +3997,17 @@ static BOOL DSHOwnedAuthorityMatchesJournal(NSDictionary *authority,
       DSHLocalWorkspaceAuthorityLock *lock = [self acquireAuthorityLock:error];
       if (lock == nil) return nil;
       if (![self ensurePrivateLayoutLocked:error]) return nil;
+      NSMutableArray *receipts = [self loadReceipts:error];
+      if (receipts == nil || ![self pruneReceipts:receipts write:YES error:error]) {
+        return nil;
+      }
+      NSDictionary *receipt = [self receiptForOperationId:operationId
+                                                  receipts:receipts];
+      if (receipt != nil) {
+        return [self descriptorForBootstrapReceipt:receipt
+                                          projectId:projectId
+                                              error:error];
+      }
       NSDictionary *pendingJournal = [self loadJournalIfPresent:error];
       if (pendingJournal == nil) return nil;
       BOOL pendingMustCommit = NO;
@@ -2942,8 +4045,7 @@ static BOOL DSHOwnedAuthorityMatchesJournal(NSDictionary *authority,
                   isEqual:pendingJournal[@"workspace_id"]] ||
               ![record[@"binding_revision"]
                   isEqual:pendingJournal[@"binding_revision"]] ||
-              ![record[@"legacy_project_id"] isEqual:projectId] ||
-              ![record[@"display_name"] isEqual:displayName]) {
+              ![record[@"legacy_project_id"] isEqual:projectId]) {
             DSHSetWorkspaceError(error, DSHLocalWorkspaceAccessErrorConflict);
             return nil;
           }
@@ -2953,29 +4055,18 @@ static BOOL DSHOwnedAuthorityMatchesJournal(NSDictionary *authority,
         }
         if (![self recoverJournal:error]) return nil;
       }
-      NSMutableArray *receipts = [self loadReceipts:error];
+      receipts = [self loadReceipts:error];
       if (receipts == nil || ![self pruneReceipts:receipts write:YES error:error]) {
         return nil;
       }
-      NSDictionary *receipt = [self receiptForOperationId:operationId
-                                                 receipts:receipts];
+      receipt = [self receiptForOperationId:operationId receipts:receipts];
       if (receipt != nil) {
         return [self descriptorForBootstrapReceipt:receipt
                                           projectId:projectId
-                                         displayName:displayName error:error];
+                                              error:error];
       }
       if (pendingMustCommit) {
         DSHSetWorkspaceError(error, DSHLocalWorkspaceAccessErrorPersistence);
-        return nil;
-      }
-      NSString *identity = nil;
-      NSSet<NSString *> *capabilities = nil;
-      NSError *resolverError = nil;
-      if (!self.legacyResolver(projectId, &identity, &capabilities,
-                               &resolverError) ||
-          !DSHCanonicalSHA256(identity) ||
-          !DSHCanonicalCapabilitiesSet(capabilities)) {
-        DSHSetWorkspaceError(error, DSHLocalWorkspaceAccessErrorUnavailable);
         return nil;
       }
       NSDictionary *registry = [self loadRegistry:error digest:nil];
@@ -2986,6 +4077,15 @@ static BOOL DSHOwnedAuthorityMatchesJournal(NSDictionary *authority,
           return nil;
         }
       }
+      NSDictionary *evidence =
+          [self verifiedLegacyEvidenceForProjectId:projectId];
+      if (evidence == nil) {
+        DSHSetWorkspaceError(error, DSHLocalWorkspaceAccessErrorUnavailable);
+        return nil;
+      }
+      NSString *displayName = evidence[@"display_name"];
+      NSString *identity = evidence[@"metadata_sha256"];
+      NSSet<NSString *> *capabilities = evidence[@"capabilities"];
       NSString *workspaceId = self.UUIDGenerator();
       NSString *timestamp = DSHCanonicalTimestampForDate(self.clock());
       if (!DSHCanonicalUUID(workspaceId) || timestamp == nil ||
@@ -3006,22 +4106,120 @@ static BOOL DSHOwnedAuthorityMatchesJournal(NSDictionary *authority,
         @"created_at" : timestamp,
         @"last_opened_at" : timestamp,
       };
-      NSDictionary *authority = @{
+      NSDictionary *authorityBase = @{
         @"schema_version" : @1,
         @"workspace_id" : workspaceId,
         @"binding_revision" : @1,
         @"legacy_project_id" : projectId,
         @"root_identity_sha256" : identity,
         @"display_name" : displayName,
+        @"capabilities" : [DSHCapabilityOrder()
+            filteredArrayUsingPredicate:[NSPredicate predicateWithBlock:
+                ^BOOL(NSString *capability, __unused NSDictionary *bindings) {
+                  return [capabilities containsObject:capability];
+                }]],
         @"created_at" : timestamp,
         @"last_opened_at" : timestamp,
         @"recorded_at" : timestamp,
+        @"project_metadata_sha256" : evidence[@"metadata_sha256"],
+        @"projects_root_device_id" : evidence[@"projects_root_device_id"],
+        @"projects_root_inode_id" : evidence[@"projects_root_inode_id"],
+        @"repository_device_id" : evidence[@"repository_device_id"],
+        @"repository_inode_id" : evidence[@"repository_inode_id"],
+        @"git_device_id" : evidence[@"git_device_id"],
+        @"git_inode_id" : evidence[@"git_inode_id"],
       };
+      NSString *authorityDigest =
+          DSHAuthorityDigestWithoutFingerprint(authorityBase);
+      NSDictionary *fingerprintInput = DSHLegacyFingerprintInput(
+          record, authorityBase, authorityDigest);
+      NSString *rootFingerprint =
+          DSHWorkspaceRootFingerprintSHA256(fingerprintInput, nil);
+      if (authorityDigest == nil || rootFingerprint == nil) {
+        DSHSetWorkspaceError(error, DSHLocalWorkspaceAccessErrorPersistence);
+        return nil;
+      }
+      NSMutableDictionary *authority = [authorityBase mutableCopy];
+      authority[@"root_fingerprint_sha256"] = rootFingerprint;
       return [self commitInternalWorkspaceRecord:record
                                   authorityRecord:authority
+                              verifiedCapabilities:capabilities
                                          operation:@"bootstrap_legacy"
                                        operationId:operationId
                           expectedCurrentRevision:nil error:error];
+    }
+  } @catch (__unused NSException *exception) {
+    DSHSetWorkspaceError(error, DSHLocalWorkspaceAccessErrorUnavailable);
+    return nil;
+  }
+}
+
+- (nullable NSString *)legacyProjectIdForWorkspaceId:(NSString *)workspaceId
+                              expectedBindingRevision:(NSUInteger)revision
+                                               error:(NSError **)error {
+  @try {
+    @synchronized(DSHLocalWorkspaceAccess.class) {
+      if (!DSHCanonicalUUID(workspaceId) || revision == 0 ||
+          revision > DSHWorkspaceMaxSafeInteger) {
+        DSHSetWorkspaceError(error, DSHLocalWorkspaceAccessErrorInvalid);
+        return nil;
+      }
+      __attribute__((objc_precise_lifetime))
+      DSHLocalWorkspaceAuthorityLock *lock = [self acquireAuthorityLock:error];
+      if (lock == nil || ![self ensurePrivateLayoutLocked:error]) return nil;
+      NSDictionary *registry = [self loadRegistry:error digest:nil];
+      if (registry == nil) return nil;
+      NSDictionary *record = [self recordInRegistry:registry
+                                         workspaceId:workspaceId];
+      if (record == nil) {
+        DSHSetWorkspaceError(error, DSHLocalWorkspaceAccessErrorNotFound);
+        return nil;
+      }
+      if (![record[@"binding_revision"] isEqual:@(revision)]) {
+        DSHSetWorkspaceError(error, DSHLocalWorkspaceAccessErrorRevisionStale);
+        return nil;
+      }
+      if (![record[@"origin"] isEqual:@"legacy_app_owned"] ||
+          ![record[@"root_locator_kind"] isEqual:@"legacy_app_owned"]) {
+        return nil;
+      }
+      NSString *projectId = record[@"legacy_project_id"];
+      if (!DSHCanonicalUUID(projectId)) {
+        DSHSetWorkspaceError(error, DSHLocalWorkspaceAccessErrorConflict);
+        return nil;
+      }
+      NSDictionary *authority = [self loadAuthorityForRecord:record error:error];
+      if (authority == nil) return nil;
+
+      NSDictionary *evidence = nil;
+      NSError *resolverError = nil;
+      BOOL resolved = NO;
+      @try {
+        resolved = self.legacyResolver(projectId, &evidence, &resolverError);
+      } @catch (__unused NSException *exception) {
+        resolved = NO;
+      }
+      if (!resolved || evidence == nil) {
+        DSHSetWorkspaceError(error, DSHLocalWorkspaceAccessErrorUnavailable);
+        return nil;
+      }
+      if (!DSHValidLegacyEvidence(evidence, projectId)) {
+        DSHSetWorkspaceError(error, DSHLocalWorkspaceAccessErrorConflict);
+        return nil;
+      }
+      NSSet<NSString *> *recordedCapabilities =
+          [NSSet setWithArray:authority[@"capabilities"]];
+      BOOL evidenceMatches =
+          [evidence[@"display_name"] isEqual:record[@"display_name"]] &&
+          [evidence[@"metadata_sha256"]
+              isEqual:authority[@"root_identity_sha256"]] &&
+          [evidence[@"capabilities"] isEqual:recordedCapabilities] &&
+          DSHLegacyPhysicalIdentityMatchesAuthority(evidence, authority);
+      if (!evidenceMatches) {
+        DSHSetWorkspaceError(error, DSHLocalWorkspaceAccessErrorRootChanged);
+        return nil;
+      }
+      return [projectId copy];
     }
   } @catch (__unused NSException *exception) {
     DSHSetWorkspaceError(error, DSHLocalWorkspaceAccessErrorUnavailable);
@@ -3094,18 +4292,7 @@ static BOOL DSHOwnedAuthorityMatchesJournal(NSDictionary *authority,
           DSHSetWorkspaceError(error, DSHLocalWorkspaceAccessErrorConflict);
           return nil;
         }
-        NSDictionary *authority = [self loadAuthorityForRecord:record
-                                                          error:error];
-        if (authority == nil) return nil;
-        NSString *status = [self metadataStatusForRecord:record
-                                                authority:authority];
-        NSSet<NSString *> *capabilities =
-            [status isEqual:@"ok"]
-                ? [NSSet setWithArray:@[@"read", @"write"]]
-                : nil;
-        return [self descriptorForRecord:record
-                                  status:status
-                            capabilities:capabilities];
+        return [self terminalValidatedOwnedDescriptorForRecord:record error:error];
       }
 
       NSString *registryDigest = nil;
@@ -3299,7 +4486,7 @@ static BOOL DSHOwnedAuthorityMatchesJournal(NSDictionary *authority,
                                 error:error]) {
         return nil;
       }
-      NSDictionary *authority = @{
+      NSDictionary *authorityBase = @{
         @"schema_version" : @1,
         @"workspace_id" : workspaceId,
         @"binding_revision" : @1,
@@ -3311,6 +4498,18 @@ static BOOL DSHOwnedAuthorityMatchesJournal(NSDictionary *authority,
             DSHSHA256([directoryName dataUsingEncoding:NSUTF8StringEncoding]),
         @"recorded_at" : timestamp,
       };
+      NSString *authorityDigest =
+          DSHAuthorityDigestWithoutFingerprint(authorityBase);
+      NSDictionary *fingerprintInput = DSHDocumentsOwnedFingerprintInput(
+          record, authorityBase, authorityDigest);
+      NSString *rootFingerprint =
+          DSHWorkspaceRootFingerprintSHA256(fingerprintInput, nil);
+      if (authorityDigest == nil || rootFingerprint == nil) {
+        DSHSetWorkspaceError(error, DSHLocalWorkspaceAccessErrorPersistence);
+        return nil;
+      }
+      NSMutableDictionary *authority = [authorityBase mutableCopy];
+      authority[@"root_fingerprint_sha256"] = rootFingerprint;
       NSURL *authorityURL = [self authorityURLForKind:@"owned"
                                            workspaceId:workspaceId
                                               revision:@1];
@@ -3386,10 +4585,23 @@ static BOOL DSHOwnedAuthorityMatchesJournal(NSDictionary *authority,
         return nil;
       }
       if (![self finishCommittedJournal:journal error:error]) return nil;
-      return [self descriptorForRecord:record
-                                status:@"ok"
-                          capabilities:[NSSet setWithArray:@[@"read",
-                                                              @"write"]]];
+      if (self.faultHook != nil &&
+          self.faultHook(@"before_create_terminal_validation")) {
+        DSHSetWorkspaceError(error, DSHLocalWorkspaceAccessErrorPersistence);
+        return nil;
+      }
+      NSDictionary *terminalRegistry = [self loadRegistry:error digest:nil];
+      NSDictionary *terminalRecord = terminalRegistry == nil
+          ? nil
+          : [self recordInRegistry:terminalRegistry workspaceId:workspaceId];
+      if (terminalRecord == nil || ![terminalRecord isEqual:record]) {
+        if (error != nil && *error == nil) {
+          DSHSetWorkspaceError(error, DSHLocalWorkspaceAccessErrorPersistence);
+        }
+        return nil;
+      }
+      return [self terminalValidatedOwnedDescriptorForRecord:terminalRecord
+                                                        error:error];
     }
   } @catch (__unused NSException *exception) {
     DSHSetWorkspaceError(error, DSHLocalWorkspaceAccessErrorUnavailable);

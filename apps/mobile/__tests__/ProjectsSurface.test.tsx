@@ -95,12 +95,14 @@ async function settle() {
 
 async function renderSurface({
   boundProjectId = null,
+  gitHttpsProxyUrl = null,
   onChatInProject = jest.fn(),
   onDismiss = jest.fn(),
   onOpenFiles = jest.fn(),
   onUnbindFromChat = jest.fn(),
 }: {
   boundProjectId?: string | null;
+  gitHttpsProxyUrl?: string | null;
   onChatInProject?: jest.Mock;
   onDismiss?: jest.Mock;
   onOpenFiles?: jest.Mock;
@@ -109,6 +111,7 @@ async function renderSurface({
   const store = createPreferencesStore({
     initialPreferences: {
       ...createDefaultPreferences(),
+      gitHttpsProxyUrl,
       locale: 'en-US',
     },
   });
@@ -245,8 +248,9 @@ test('creates an isolated local project and opens its real detail response', asy
 });
 
 test('clones only through the native API and surfaces a native failure', async () => {
+  const gitHttpsProxyUrl = 'http://127.0.0.1:7890/';
   mockLocalProjects.clone.mockRejectedValueOnce(new Error('TLS failed'));
-  const renderer = await renderSurface();
+  const renderer = await renderSurface({ gitHttpsProxyUrl });
 
   await act(async () =>
     actionByLabel(renderer.root, 'Clone repository').props.onPress(),
@@ -265,6 +269,7 @@ test('clones only through the native API and surfaces a native failure', async (
   expect(mockLocalProjects.clone).toHaveBeenCalledWith(
     'https://github.com/example/demo.git',
     'copy',
+    { httpsProxyUrl: gitHttpsProxyUrl },
   );
   expect(
     renderer.root.findByProps({
@@ -274,6 +279,29 @@ test('clones only through the native API and surfaces a native failure', async (
   expect(
     renderer.root.findAllByProps({ children: 'Repository cloned locally.' }),
   ).toHaveLength(0);
+});
+
+test('passes an explicit null proxy when no HTTPS proxy is configured', async () => {
+  const renderer = await renderSurface();
+
+  await act(async () =>
+    actionByLabel(renderer.root, 'Clone repository').props.onPress(),
+  );
+  await act(async () =>
+    inputByLabel(renderer.root, 'Remote HTTPS URL').props.onChangeText(
+      'https://github.com/example/demo.git',
+    ),
+  );
+  await act(async () => {
+    actionByLabel(renderer.root, 'Clone').props.onPress();
+    await settle();
+  });
+
+  expect(mockLocalProjects.clone).toHaveBeenCalledWith(
+    'https://github.com/example/demo.git',
+    undefined,
+    { httpsProxyUrl: null },
+  );
 });
 
 test('opens only the selected project worktree in Files', async () => {
@@ -370,8 +398,9 @@ test('localizes readable index and working-tree status labels', () => {
 });
 
 test('stores credentials natively and never pushes before confirmation', async () => {
+  const gitHttpsProxyUrl = 'http://127.0.0.1:7890/';
   const alert = jest.spyOn(Alert, 'alert').mockImplementation(() => undefined);
-  const renderer = await renderSurface();
+  const renderer = await renderSurface({ gitHttpsProxyUrl });
   await openProject(renderer);
 
   await act(async () => {
@@ -407,5 +436,7 @@ test('stores credentials natively and never pushes before confirmation', async (
     confirm?.onPress?.();
     await settle();
   });
-  expect(mockLocalProjects.push).toHaveBeenCalledWith(project.id);
+  expect(mockLocalProjects.push).toHaveBeenCalledWith(project.id, {
+    httpsProxyUrl: gitHttpsProxyUrl,
+  });
 });

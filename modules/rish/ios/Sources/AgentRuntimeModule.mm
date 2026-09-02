@@ -1,0 +1,382 @@
+#import <Foundation/Foundation.h>
+#import <React/RCTBridge.h>
+#import <React/RCTBridgeModule.h>
+
+#import "AgentExecutionLedger.h"
+#import "AgentGitToolExecutor.h"
+#import "AgentNativeWAL.h"
+#import "AgentPreparedAttemptStore.h"
+#import "AgentProviderRoundService.h"
+#import "AgentRootResolver.h"
+#import "AgentRoundJournal.h"
+#import "AgentRuntimeCoordinator.h"
+#import "AgentToolBatchService.h"
+#import "AgentToolExecutionService.h"
+#import "AgentTranscriptStore.h"
+#import "AgentWorkspaceToolExecutor.h"
+#import "DSHCompletionProviderTransport.h"
+#import "LocalProjectAccess.h"
+#import "LocalWorkspaceAccess.h"
+#import "ProjectContextService.h"
+#import "SessionSnapshotStore.h"
+#import "SessionWorkspaceCoordinator.h"
+
+typedef NSDictionary *_Nullable (^DSHRuntimeModuleInvoke)(
+    id<DSHAgentRuntimeCoordinating> coordinator, NSDictionary *request,
+    NSError **error);
+
+@interface DSHProjectContextService (DSHAgentRuntimeComposition)
+@property(nonatomic, strong, readonly) DSHLocalProjectAccess *projectAccess;
+@property(nonatomic, strong, readonly, nullable)
+    DSHLocalWorkspaceAccess *workspaceAccess;
+@end
+
+@interface NSObject (DSHAgentRuntimeLocalRuntimeComposition)
+@property(nonatomic, strong, readonly)
+    DSHCompletionProviderTransport *completionProviderTransport;
+@property(nonatomic, strong, readonly)
+    DSHProjectContextService *projectContextService;
+@property(nonatomic, readonly) NSUInteger credentialGeneration;
+- (nullable NSString *)credential;
+@end
+
+static DSHAgentNativeWAL *DSHRuntimeSharedWAL(void) {
+  static DSHAgentNativeWAL *wal;
+  static dispatch_once_t onceToken;
+  dispatch_once(&onceToken, ^{
+    NSError *error = nil;
+    NSURL *support = [NSFileManager.defaultManager
+        URLForDirectory:NSApplicationSupportDirectory
+               inDomain:NSUserDomainMask
+      appropriateForURL:nil create:YES error:&error];
+    if (support == nil) return;
+    NSURL *agentRoot = [support
+        URLByAppendingPathComponent:@"agent-runtime" isDirectory:YES]
+        .URLByStandardizingPath;
+    wal = [[DSHAgentNativeWAL alloc]
+        initWithRootURL:agentRoot
+                  clock:^NSDate * { return NSDate.date; }
+     identifierGenerator:^NSString * {
+       return NSUUID.UUID.UUIDString.lowercaseString;
+     }
+              faultHook:nil];
+  });
+  return wal;
+}
+
+static NSDictionary *DSHRuntimeLoadSession(DSHSessionSnapshotStore *store,
+                                           NSError **error) {
+  NSDictionary *load = [store loadSessionSnapshotWithError:error];
+  if (![load[@"status"] isEqualToString:@"present"] ||
+      ![load[@"session_json"] isKindOfClass:NSString.class]) {
+    if (error != nullptr && *error == nil) {
+      *error = DSHAgentNativeStoreError(DSHAgentNativeStoreErrorConflict);
+    }
+    return nil;
+  }
+  NSData *data = [load[@"session_json"] dataUsingEncoding:NSUTF8StringEncoding];
+  id value = data == nil ? nil :
+      [NSJSONSerialization JSONObjectWithData:data options:0 error:nil];
+  if (![value isKindOfClass:NSDictionary.class]) {
+    if (error != nullptr) {
+      *error = DSHAgentNativeStoreError(DSHAgentNativeStoreErrorCorrupt);
+    }
+    return nil;
+  }
+  return value;
+}
+
+static NSDictionary *DSHRuntimeConversation(NSDictionary *session,
+                                            NSString *conversationId) {
+  for (NSDictionary *conversation in session[@"conversations"]) {
+    if ([conversation[@"id"] isEqual:conversationId]) return conversation;
+  }
+  return nil;
+}
+
+static NSDictionary *DSHRuntimeAttempt(NSDictionary *conversation,
+                                       NSString *attemptId) {
+  for (NSDictionary *attempt in conversation[@"attempts"]) {
+    if ([attempt[@"attempt_id"] isEqual:attemptId]) return attempt;
+  }
+  return nil;
+}
+
+static NSArray *DSHRuntimeVisibleHistory(DSHSessionSnapshotStore *store,
+                                         NSDictionary *authority,
+                                         NSError **error) {
+  NSDictionary *session = DSHRuntimeLoadSession(store, error);
+  NSDictionary *conversation = DSHRuntimeConversation(
+      session, authority[@"conversation_id"]);
+  if (conversation == nil) {
+    DSHSetAgentNativeStoreError(error, DSHAgentNativeStoreErrorConflict);
+    return nil;
+  }
+  NSMutableDictionary *byId = [NSMutableDictionary dictionary];
+  for (NSDictionary *message in conversation[@"messages"]) {
+    if ([message[@"id"] isKindOfClass:NSString.class]) {
+      byId[message[@"id"]] = message;
+    }
+  }
+  NSMutableArray *visible = [NSMutableArray array];
+  for (NSString *messageId in authority[@"visible_message_ids"]) {
+    NSDictionary *message = byId[messageId];
+    if (![message isKindOfClass:NSDictionary.class]) {
+      DSHSetAgentNativeStoreError(error, DSHAgentNativeStoreErrorConflict);
+      return nil;
+    }
+    NSMutableArray *attachments = [NSMutableArray array];
+    for (NSDictionary *attachment in message[@"attachments"] ?: @[]) {
+      [attachments addObject:@{
+        @"schema_version" : attachment[@"schema_version"],
+        @"id" : attachment[@"id"], @"kind" : attachment[@"kind"],
+        @"name" : attachment[@"name"],
+        @"mime_type" : attachment[@"mime_type"], @"size" : attachment[@"size"],
+      }];
+    }
+    [visible addObject:@{ @"role" : message[@"role"],
+                          @"content" : message[@"text"],
+                          @"attachments" : attachments }];
+  }
+  return [visible copy];
+}
+
+static NSDictionary *DSHRuntimeContextBundle(
+    DSHSessionSnapshotStore *store,
+    DSHProjectContextService *service,
+    NSDictionary *authority,
+    NSError **error) {
+  NSDictionary *session = DSHRuntimeLoadSession(store, error);
+  NSDictionary *conversation = DSHRuntimeConversation(
+      session, authority[@"conversation_id"]);
+  NSDictionary *attempt = DSHRuntimeAttempt(conversation,
+                                             authority[@"attempt_id"]);
+  NSDictionary *context = attempt[@"project_context"];
+  if (![context isKindOfClass:NSDictionary.class]) {
+    DSHSetAgentNativeStoreError(error, DSHAgentNativeStoreErrorConflict);
+    return nil;
+  }
+  NSDictionary *receipt = nil;
+  NSDictionary *rootRef = @{
+    @"schema_version" : @1,
+    @"workspace_id" : authority[@"root"][@"workspace_id"],
+    @"binding_revision" : authority[@"root"][@"workspace_binding_revision"],
+    @"project_id" : authority[@"root"][@"project_id"],
+  };
+  NSData *envelope = [service
+      verifiedEnvelopeV2ForSnapshotId:context[@"snapshot_id"]
+      consentReceiptId:context[@"consent_receipt_id"]
+      root:rootRef
+      conversationId:context[@"runtime_context_id"]
+      modelId:authority[@"model"] policy:context[@"policy"]
+      receipt:&receipt error:error];
+  NSString *content = envelope == nil ? nil :
+      [[NSString alloc] initWithData:envelope encoding:NSUTF8StringEncoding];
+  if (content == nil || ![context[@"context_bytes"] isEqual:@(envelope.length)] ||
+      ![receipt[@"snapshot_sha256"] isEqual:context[@"snapshot_sha256"]] ||
+      ![receipt[@"source_fingerprint"] isEqual:context[@"source_fingerprint"]]) {
+    DSHSetAgentNativeStoreError(error, DSHAgentNativeStoreErrorConflict);
+    return nil;
+  }
+  return @{
+    @"project_context_sha256" : authority[@"project_context_sha256"],
+    @"receipt" : @{
+      @"schema_version" : @1, @"snapshot_id" : context[@"snapshot_id"],
+      @"snapshot_sha256" : context[@"snapshot_sha256"],
+      @"source_fingerprint" : context[@"source_fingerprint"],
+      @"context_bytes" : context[@"context_bytes"],
+      @"verified_at" : receipt[@"verified_at"],
+    },
+    @"messages" : @[@{ @"role" : @"system", @"content" : content,
+                         @"attachments" : @[] }],
+  };
+}
+
+static NSString *DSHRuntimeErrorCode(NSError *error) {
+  id candidate = error.userInfo[@"code"];
+  if ([candidate isKindOfClass:NSString.class] &&
+      DSHAgentFailureCode(candidate)) return candidate;
+  switch ((DSHAgentNativeStoreErrorCode)error.code) {
+    case DSHAgentNativeStoreErrorInvalidArgument: return @"E_AGENT_BAD_ARGUMENTS";
+    case DSHAgentNativeStoreErrorCorrupt: return @"E_AGENT_TRANSCRIPT";
+    case DSHAgentNativeStoreErrorConflict: return @"E_AGENT_CONFLICT";
+    case DSHAgentNativeStoreErrorCapacity: return @"E_AGENT_CAPACITY";
+    case DSHAgentNativeStoreErrorOwnerLost:
+      return @"E_AGENT_EXECUTION_AMBIGUOUS";
+    case DSHAgentNativeStoreErrorNotFound: return @"E_AGENT_NOT_FOUND";
+    case DSHAgentNativeStoreErrorPersistence:
+    case DSHAgentNativeStoreErrorUnavailable:
+      return @"E_AGENT_PERSISTENCE";
+  }
+  return @"E_AGENT_PERSISTENCE";
+}
+
+@interface AgentRuntimeModule : NSObject <RCTBridgeModule>
+@property(nonatomic, weak) RCTBridge *bridge;
+@property(nonatomic, strong) id<DSHAgentRuntimeCoordinating> runtimeCoordinator;
+@property(nonatomic, strong) DSHSessionWorkspaceCoordinator *serializationCoordinator;
+- (instancetype)initWithCoordinator:(id<DSHAgentRuntimeCoordinating>)coordinator;
+@end
+
+@implementation AgentRuntimeModule
+
+RCT_EXPORT_MODULE(AgentRuntime)
+
+@synthesize bridge = _bridge;
+
++ (BOOL)requiresMainQueueSetup { return NO; }
+
+- (instancetype)init {
+  self = [super init];
+  if (self != nil) {
+    _serializationCoordinator = DSHSessionWorkspaceCoordinator.sharedCoordinator;
+  }
+  return self;
+}
+
+- (instancetype)initWithCoordinator:(id<DSHAgentRuntimeCoordinating>)coordinator {
+  self = [self init];
+  if (self != nil) _runtimeCoordinator = coordinator;
+  return self;
+}
+
+- (id<DSHAgentRuntimeCoordinating>)buildRuntimeCoordinator:(NSError **)error {
+  if (self.runtimeCoordinator != nil) {
+    return self.runtimeCoordinator.isAvailable ? self.runtimeCoordinator : nil;
+  }
+  id localRuntime = [self.bridge moduleForName:@"LocalRuntime"
+                         lazilyLoadIfNecessary:YES];
+  DSHCompletionProviderTransport *transport =
+      [localRuntime completionProviderTransport];
+  DSHProjectContextService *projectContext =
+      [localRuntime projectContextService] ?: DSHSharedProjectContextService();
+  DSHLocalWorkspaceAccess *workspaceAccess = projectContext.workspaceAccess;
+  DSHLocalProjectAccess *projectAccess = projectContext.projectAccess;
+  DSHAgentNativeWAL *wal = DSHRuntimeSharedWAL();
+  DSHSessionSnapshotStore *sessions = [[DSHSessionSnapshotStore alloc]
+      initWithError:error];
+  if (localRuntime == nil || transport == nil || workspaceAccess == nil ||
+      projectAccess == nil || wal == nil || sessions == nil) return nil;
+  DSHAgentRootResolver *rootResolver = [[DSHAgentRootResolver alloc]
+      initWithWorkspaceAccess:workspaceAccess projectAccess:projectAccess];
+  DSHAgentTranscriptStore *transcripts = [[DSHAgentTranscriptStore alloc]
+      initWithWAL:wal];
+  DSHAgentRoundJournal *rounds = [[DSHAgentRoundJournal alloc] initWithWAL:wal];
+  DSHAgentExecutionLedger *ledger = [[DSHAgentExecutionLedger alloc]
+      initWithWAL:wal];
+  DSHAgentPreparedAttemptStore *prepared = [[DSHAgentPreparedAttemptStore alloc]
+      initWithWAL:wal rootResolver:rootResolver sessionSnapshotStore:sessions
+      transcriptStore:transcripts];
+  __weak id weakRuntime = localRuntime;
+  DSHAgentProviderRoundCredentialProvider credentials =
+      ^NSString *(NSUInteger *generation) {
+    id runtime = weakRuntime;
+    if (runtime == nil) return nil;
+    @synchronized (runtime) {
+      if (generation != nullptr) *generation = [runtime credentialGeneration];
+      return [runtime credential];
+    }
+  };
+  DSHAgentProviderRoundVisibleHistoryProvider history =
+      ^NSArray *(NSDictionary *authority, NSError **providerError) {
+    return DSHRuntimeVisibleHistory(sessions, authority, providerError);
+  };
+  DSHAgentProviderRoundContextReceiptProvider context =
+      ^NSDictionary *(NSDictionary *authority, NSError **providerError) {
+    return DSHRuntimeContextBundle(sessions, projectContext, authority,
+                                   providerError);
+  };
+  DSHAgentProviderRoundService *roundService = [[DSHAgentProviderRoundService alloc]
+      initWithWAL:wal preparedStore:prepared transcripts:transcripts rounds:rounds
+      transport:transport credentialProvider:credentials
+      visibleHistoryProvider:history contextReceiptProvider:context];
+  DSHAgentWorkspaceToolExecutor *workspaceExecutor =
+      [[DSHAgentWorkspaceToolExecutor alloc] initWithRootResolver:rootResolver];
+  DSHAgentGitToolExecutor *gitExecutor = [[DSHAgentGitToolExecutor alloc]
+      initWithRootResolver:rootResolver];
+  DSHAgentToolBatchService *batch = [[DSHAgentToolBatchService alloc]
+      initWithWAL:wal ledger:ledger preparedStore:prepared
+      transcripts:transcripts workspaceExecutor:workspaceExecutor
+      gitExecutor:gitExecutor];
+  DSHAgentToolExecutionService *execution = [[DSHAgentToolExecutionService alloc]
+      initWithWAL:wal ledger:ledger preparedStore:prepared
+      transcripts:transcripts workspaceExecutor:workspaceExecutor
+      gitExecutor:gitExecutor];
+  DSHAgentRuntimeCoordinator *coordinator = [[DSHAgentRuntimeCoordinator alloc]
+      initWithWAL:wal preparedStore:prepared roundService:roundService
+      batchService:batch executionService:execution transcripts:transcripts
+      rounds:rounds ledger:ledger];
+  if (!coordinator.isAvailable) return nil;
+  self.runtimeCoordinator = coordinator;
+  return coordinator;
+}
+
+- (void)invoke:(id)rawRequest resolver:(RCTPromiseResolveBlock)resolve
+       rejecter:(RCTPromiseRejectBlock)reject block:(DSHRuntimeModuleInvoke)block {
+  NSError *copyError = nil;
+  NSDictionary *request = DSHAgentImmutableJSONCopy(rawRequest, &copyError);
+  if (![request isKindOfClass:NSDictionary.class]) {
+    if (reject != nil) reject(@"E_AGENT_BAD_ARGUMENTS",
+                              @"E_AGENT_BAD_ARGUMENTS", nil);
+    return;
+  }
+  [self.serializationCoordinator performAsync:^{
+    NSError *error = nil;
+    id<DSHAgentRuntimeCoordinating> coordinator =
+        [self buildRuntimeCoordinator:&error];
+    NSDictionary *result = nil;
+    @try {
+      result = coordinator == nil ? nil : block(coordinator, request, &error);
+      result = result == nil ? nil : DSHAgentImmutableJSONCopy(result, &error);
+    } @catch (__unused NSException *exception) {
+      result = nil;
+      error = DSHAgentNativeStoreError(DSHAgentNativeStoreErrorPersistence);
+    }
+    if (![result isKindOfClass:NSDictionary.class]) {
+      NSString *code = coordinator == nil ? @"E_AGENT_NATIVE" :
+          DSHRuntimeErrorCode(error);
+      if (reject != nil) reject(code, code, nil);
+    } else if (resolve != nil) {
+      resolve(result);
+    }
+  }];
+}
+
+#define DSH_RUNTIME_EXPORT(js_name, objc_name, selector) \
+  RCT_REMAP_METHOD(js_name, objc_name:(id)request \
+                   resolver:(RCTPromiseResolveBlock)resolve \
+                   rejecter:(RCTPromiseRejectBlock)reject) { \
+    [self invoke:request resolver:resolve rejecter:reject \
+        block:^NSDictionary *(id<DSHAgentRuntimeCoordinating> coordinator, \
+                              NSDictionary *value, NSError **error) { \
+      return [coordinator selector:value error:error]; \
+    }]; \
+  }
+
+DSH_RUNTIME_EXPORT(prepare_agent_attempt, prepareAgentAttemptRequest,
+                   prepareAgentAttempt)
+DSH_RUNTIME_EXPORT(complete_agent_round_v2, completeAgentRoundV2Request,
+                   completeAgentRoundV2)
+DSH_RUNTIME_EXPORT(prepare_agent_tool_batch, prepareAgentToolBatchRequest,
+                   prepareAgentToolBatch)
+DSH_RUNTIME_EXPORT(bind_agent_approval, bindAgentApprovalRequest,
+                   bindAgentApproval)
+DSH_RUNTIME_EXPORT(execute_agent_tool, executeAgentToolRequest,
+                   executeAgentTool)
+DSH_RUNTIME_EXPORT(cancel_agent_attempt, cancelAgentAttemptRequest,
+                   cancelAgentAttempt)
+DSH_RUNTIME_EXPORT(query_agent_attempt, queryAgentAttemptRequest,
+                   queryAgentAttempt)
+DSH_RUNTIME_EXPORT(query_agent_tool, queryAgentToolRequest, queryAgentTool)
+DSH_RUNTIME_EXPORT(recover_agent_attempt, recoverAgentAttemptRequest,
+                   recoverAgentAttempt)
+DSH_RUNTIME_EXPORT(finalize_agent_attempt, finalizeAgentAttemptRequest,
+                   finalizeAgentAttempt)
+DSH_RUNTIME_EXPORT(discard_agent_attempt, discardAgentAttemptRequest,
+                   discardAgentAttempt)
+DSH_RUNTIME_EXPORT(query_agent_cleanup, queryAgentCleanupRequest,
+                   queryAgentCleanup)
+
+#undef DSH_RUNTIME_EXPORT
+
+@end

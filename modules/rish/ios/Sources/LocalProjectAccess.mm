@@ -1,6 +1,9 @@
 #import "LocalProjectAccess.h"
 #import "LocalProjectAccessInternals.h"
 
+#import "DSHWorkspaceCanonical.h"
+#import "LocalWorkspaceAccess.h"
+
 #import <CommonCrypto/CommonDigest.h>
 
 #include <fcntl.h>
@@ -12,6 +15,21 @@
 
 #include <chrono>
 #include <shared_mutex>
+
+// The workspace resolver intentionally keeps authority records private. This
+// narrow native-only category lets the project lease bind its private root
+// fingerprint without adding any bridge-visible accessor or duplicating the
+// registry parser.
+@interface DSHLocalWorkspaceAccess (DSHLocalProjectAuthorityAccess)
+@property(nonatomic, strong) NSURL *privateRootURL;
+- (nullable NSURL *)ownedWorkspacesRootURL;
+- (nullable NSDictionary *)loadRegistry:(NSError **)error
+                                  digest:(NSString *_Nullable *_Nullable)digest;
+- (nullable NSDictionary *)recordInRegistry:(NSDictionary *)registry
+                                  workspaceId:(NSString *)workspaceId;
+- (nullable NSDictionary *)loadAuthorityForRecord:(NSDictionary *)record
+                                             error:(NSError **)error;
+@end
 
 NSErrorDomain const DSHLocalProjectAccessErrorDomain =
     @"dev.zseven.rish.local-project-access";
@@ -67,6 +85,116 @@ static BOOL DSHDictionaryHasExactKeys(NSDictionary *object,
     }
   }
   return YES;
+}
+
+static BOOL DSHLocalProjectIsBoolean(id value) {
+  return [value isKindOfClass:NSNumber.class] &&
+         CFGetTypeID((__bridge CFTypeRef)value) == CFBooleanGetTypeID();
+}
+
+static BOOL DSHLocalProjectSafeRevision(id value, NSUInteger *revisionOut) {
+  if (![value isKindOfClass:NSNumber.class] ||
+      DSHLocalProjectIsBoolean(value) || [value isKindOfClass:NSDecimalNumber.class]) {
+    return NO;
+  }
+  NSNumber *number = value;
+  double decimal = number.doubleValue;
+  if (!isfinite(decimal) || signbit(decimal) || floor(decimal) != decimal ||
+      decimal < 1.0 || decimal > 9007199254740991.0 ||
+      number.unsignedLongLongValue != (unsigned long long)decimal) {
+    return NO;
+  }
+  if (revisionOut != nullptr) *revisionOut = (NSUInteger)decimal;
+  return YES;
+}
+
+static BOOL DSHLocalProjectCanonicalDigest(id value) {
+  if (![value isKindOfClass:NSString.class] || [value length] != 64) {
+    return NO;
+  }
+  NSCharacterSet *hex =
+      [NSCharacterSet characterSetWithCharactersInString:@"0123456789abcdef"];
+  return [value rangeOfCharacterFromSet:hex.invertedSet].location == NSNotFound;
+}
+
+static BOOL DSHLocalProjectBindingIsValid(NSDictionary *binding,
+                                          NSDictionary *rootRef,
+                                          NSString *rootFingerprint) {
+  if (!DSHDictionaryHasExactKeys(binding, @[
+        @"schema_version", @"workspace_id", @"binding_revision", @"project_id",
+        @"display_name", @"git_topology", @"git_directory_url",
+        @"root_fingerprint_sha256"
+      ]) ||
+      ![binding[@"schema_version"] isKindOfClass:NSNumber.class] ||
+      DSHLocalProjectIsBoolean(binding[@"schema_version"]) ||
+      [binding[@"schema_version"] isKindOfClass:NSDecimalNumber.class] ||
+      ![binding[@"schema_version"] isEqual:@2] ||
+      ![binding[@"workspace_id"] isEqual:rootRef[@"workspace_id"]] ||
+      ![binding[@"binding_revision"] isEqual:rootRef[@"binding_revision"]] ||
+      ![binding[@"project_id"] isEqual:rootRef[@"project_id"]] ||
+      !DSHLocalProjectCanonicalDigest(binding[@"root_fingerprint_sha256"]) ||
+      ![binding[@"root_fingerprint_sha256"] isEqual:rootFingerprint] ||
+      ![binding[@"git_topology"] isEqual:@"private_split_gitdir"]) {
+    return NO;
+  }
+  NSString *displayName = binding[@"display_name"];
+  if (![displayName isKindOfClass:NSString.class]) return NO;
+  NSData *displayBytes = [displayName dataUsingEncoding:NSUTF8StringEncoding
+                                      allowLossyConversion:NO];
+  if (displayBytes == nil ||
+      displayBytes.length == 0 || displayBytes.length > 120 ||
+      DSHHasControlCharacter(displayName) ||
+      [displayName containsString:@"/"] || [displayName containsString:@"\\"] ||
+      [displayName isEqual:@"."] || [displayName isEqual:@".."]) {
+    return NO;
+  }
+  NSURL *gitDirectoryURL = binding[@"git_directory_url"];
+  return [gitDirectoryURL isKindOfClass:NSURL.class] &&
+      gitDirectoryURL.isFileURL && [gitDirectoryURL.path hasPrefix:@"/"] &&
+      !DSHHasControlCharacter(gitDirectoryURL.path) &&
+      gitDirectoryURL.path.length <= PATH_MAX;
+}
+
+static NSString *DSHLocalProjectBindingDigest(NSDictionary *binding) {
+  if (![binding isKindOfClass:NSDictionary.class]) return nil;
+  NSMutableDictionary *privateFields = [binding mutableCopy];
+  [privateFields removeObjectForKey:@"git_directory_url"];
+  NSData *canonical = DSHWorkspaceCanonicalJSONData(privateFields, nil);
+  return DSHWorkspaceSHA256Hex(canonical);
+}
+
+static BOOL DSHLocalProjectRootRefIsValid(NSDictionary *rootRef,
+                                          BOOL projectRequired,
+                                          NSUInteger *revisionOut) {
+  if (!DSHDictionaryHasExactKeys(rootRef, @[
+        @"schema_version", @"workspace_id", @"binding_revision", @"project_id"
+      ]) ||
+      ![rootRef[@"schema_version"] isKindOfClass:NSNumber.class] ||
+      DSHLocalProjectIsBoolean(rootRef[@"schema_version"]) ||
+      [rootRef[@"schema_version"] isKindOfClass:NSDecimalNumber.class] ||
+      ![rootRef[@"schema_version"] isEqual:@1] ||
+      ![rootRef[@"workspace_id"] isKindOfClass:NSString.class] ||
+      ![DSHLocalProjectAccess isCanonicalProjectId:rootRef[@"workspace_id"]] ||
+      !DSHLocalProjectSafeRevision(rootRef[@"binding_revision"], revisionOut)) {
+    return NO;
+  }
+  id project = rootRef[@"project_id"];
+  return project == NSNull.null
+             ? !projectRequired
+             : [project isKindOfClass:NSString.class] &&
+                   [DSHLocalProjectAccess isCanonicalProjectId:project];
+}
+
+static NSDictionary *DSHLocalProjectCanonicalRootRef(NSDictionary *rootRef) {
+  NSUInteger revision = 0;
+  if (!DSHLocalProjectRootRefIsValid(rootRef, NO, &revision)) return nil;
+  id project = rootRef[@"project_id"];
+  return @{
+    @"schema_version" : @1,
+    @"workspace_id" : [rootRef[@"workspace_id"] copy],
+    @"binding_revision" : @(revision),
+    @"project_id" : project == NSNull.null ? NSNull.null : [project copy],
+  };
 }
 
 static BOOL DSHSameNode(const struct stat &left, const struct stat &right);
@@ -164,6 +292,49 @@ NSUInteger DSHContainerRootScanSegmentCount(NSString *path) {
   NSArray<NSString *> *components = path.pathComponents;
   if (DSHComponentsContainTraversal(components)) return NSNotFound;
   return DSHLastAppContainerComponentIndex(components);
+}
+
+BOOL DSHLocalProjectAccessValidateWorkspaceRootRefV1(
+    NSDictionary *rootRef,
+    BOOL projectRequired,
+    NSError **error) {
+  if (!DSHLocalProjectRootRefIsValid(rootRef, projectRequired, nullptr)) {
+    DSHSetAccessError(error, DSHLocalProjectAccessErrorInvalidIdentifier);
+    return NO;
+  }
+  return YES;
+}
+
+BOOL DSHLocalProjectAccessParseCanonicalUInt64(
+    id value,
+    unsigned long long *valueOut) {
+  NSString *decimal = nil;
+  if ([value isKindOfClass:NSString.class]) {
+    decimal = value;
+  } else if ([value isKindOfClass:NSNumber.class] &&
+             !DSHLocalProjectIsBoolean(value) &&
+             ![value isKindOfClass:NSDecimalNumber.class]) {
+    // NSNumber's stringValue preserves the exact integer spelling for the
+    // integral values emitted by legacy/native records. Fractional NSNumber
+    // values retain a decimal point and are rejected by the same parser.
+    decimal = [value stringValue];
+  } else {
+    return NO;
+  }
+  if (decimal.length == 0 || decimal.length > 20 ||
+      (decimal.length > 1 && [decimal hasPrefix:@"0"])) {
+    return NO;
+  }
+  unsigned long long parsed = 0;
+  for (NSUInteger index = 0; index < decimal.length; index++) {
+    unichar character = [decimal characterAtIndex:index];
+    if (character < '0' || character > '9') return NO;
+    unsigned long long digit = (unsigned long long)(character - '0');
+    if (parsed > (ULLONG_MAX - digit) / 10ULL) return NO;
+    parsed = parsed * 10ULL + digit;
+  }
+  if (valueOut != nullptr) *valueOut = parsed;
+  return YES;
 }
 
 static int DSHOpenAnchoredAbsoluteDirectory(
@@ -499,9 +670,31 @@ static void DSHEnsureLibgit2Lifetime(void) {
 @property(nonatomic, readwrite) git_repository *repository;
 @property(nonatomic, readwrite) DSHLocalProjectAccessMode accessMode;
 @property(nonatomic, strong) DSHLocalProjectLockToken *lockToken;
+@property(nonatomic, strong, nullable) DSHLocalWorkspaceLease *workspaceLease;
+@property(nonatomic, strong, nullable) DSHLocalWorkspaceAccess *workspaceAccess;
+@property(nonatomic, copy, readwrite, nullable) NSString *workspaceId;
+@property(nonatomic, readwrite) NSUInteger workspaceBindingRevision;
+@property(nonatomic, copy, readwrite, nullable) NSString *rootFingerprintSHA256;
+@property(nonatomic, readwrite) int workspaceRootDescriptor;
+@property(nonatomic, readwrite) dev_t workspaceRootDevice;
+@property(nonatomic, readwrite) ino_t workspaceRootInode;
+@property(nonatomic, copy, readwrite, nullable) NSDictionary *workspaceRootRef;
+@property(nonatomic, copy, nullable) NSString *workspaceProjectComponent;
+@property(nonatomic, copy, nullable) NSString *workspaceGitComponent;
+@property(nonatomic, copy, nullable) NSString *workspacePath;
+@property(nonatomic, copy, nullable) NSString *workspaceProjectMetadataDigest;
+@property(nonatomic, copy, readwrite, nullable) NSString *gitTopology;
+@property(nonatomic, strong, nullable) NSURL *workspaceGitDirectoryURL;
+@property(nonatomic, copy, nullable) NSString *workspaceBindingDigest;
+@property(nonatomic, copy, nullable) NSDictionary *workspaceBinding;
+@property(nonatomic) BOOL workspaceBindingWasInjected;
 @end
 
 @implementation DSHLocalProjectLease
+- (NSString *)rootFingerprint {
+  return self.rootFingerprintSHA256;
+}
+
 - (instancetype)init {
   self = [super init];
   if (self) {
@@ -510,6 +703,7 @@ static void DSHEnsureLibgit2Lifetime(void) {
     _repositoryDescriptor = -1;
     _gitDescriptor = -1;
     _objectsDescriptor = -1;
+    _workspaceRootDescriptor = -1;
     _repository = nullptr;
   }
   return self;
@@ -521,7 +715,9 @@ static void DSHEnsureLibgit2Lifetime(void) {
   if (_repositoryDescriptor >= 0) close(_repositoryDescriptor);
   if (_projectDescriptor >= 0) close(_projectDescriptor);
   if (_projectsRootDescriptor >= 0) close(_projectsRootDescriptor);
+  if (_workspaceRootDescriptor >= 0) close(_workspaceRootDescriptor);
   _lockToken = nil;
+  _workspaceLease = nil;
 }
 @end
 
@@ -537,13 +733,199 @@ static void DSHEnsureLibgit2Lifetime(void) {
 
 @interface DSHLocalProjectAccess ()
 @property(nonatomic, strong, nullable) NSURL *injectedProjectsRootURL;
+@property(nonatomic, strong, nullable) DSHLocalWorkspaceAccess *workspaceAccess;
+@property(nonatomic, copy, nullable) DSHLocalProjectWorkspaceBindingResolver bindingResolver;
 @property(nonatomic, copy, nullable) DSHLocalProjectAccessHook hook;
+- (nullable NSDictionary *)workspaceBindingForRootRef:(NSDictionary *)rootRef
+                                   rootFingerprintSHA256:(NSString *)rootFingerprint
+                                              error:(NSError **)error;
+- (nullable DSHLocalProjectLease *)leaseWorkspaceRootRef:(NSDictionary *)rootRef
+                                         workspaceLease:(DSHLocalWorkspaceLease *)workspaceLease
+                                       authorityAccess:(DSHLocalWorkspaceAccess *)authorityAccess
+                                      workspaceBinding:(nullable NSDictionary *)workspaceBinding
+                                                  mode:(DSHLocalProjectAccessMode)mode
+                                       includeMetadata:(BOOL)includeMetadata
+                                               timeout:(NSTimeInterval)timeout
+                                                 error:(NSError **)error;
 - (nullable NSURL *)resolvedProjectsRootCreatingIfNeeded:(BOOL)create
                                                descriptor:(nullable int *)descriptorOut
                                                     error:(NSError **)error;
 @end
 
+static NSString *DSHLocalProjectDescriptorPath(int descriptor) {
+  if (descriptor < 0) return nil;
+  char path[PATH_MAX] = {};
+  if (fcntl(descriptor, F_GETPATH, path) != 0 || path[0] != '/') return nil;
+  return [[NSFileManager defaultManager]
+      stringWithFileSystemRepresentation:path length:strlen(path)];
+}
+
+static BOOL DSHLocalProjectSameStat(const struct stat &left,
+                                    const struct stat &right) {
+  return left.st_dev == right.st_dev && left.st_ino == right.st_ino &&
+         left.st_mode == right.st_mode && left.st_nlink == right.st_nlink &&
+         left.st_size == right.st_size &&
+         left.st_mtimespec.tv_sec == right.st_mtimespec.tv_sec &&
+         left.st_mtimespec.tv_nsec == right.st_mtimespec.tv_nsec &&
+         left.st_ctimespec.tv_sec == right.st_ctimespec.tv_sec &&
+         left.st_ctimespec.tv_nsec == right.st_ctimespec.tv_nsec;
+}
+
+static NSURL *DSHLocalProjectWorkspaceRootURL(
+    DSHLocalWorkspaceAccess *workspaceAccess,
+    NSDictionary *record) {
+  if (workspaceAccess == nil ||
+      ![record[@"root_locator_kind"] isEqual:@"documents_owned"] ||
+      ![record[@"owned_directory_name"] isKindOfClass:NSString.class]) {
+    return nil;
+  }
+  NSURL *container = workspaceAccess.ownedWorkspacesRootURL;
+  NSString *directoryName = record[@"owned_directory_name"];
+  return container == nil
+      ? nil
+      : [container URLByAppendingPathComponent:directoryName isDirectory:YES];
+}
+
 @implementation DSHLocalProjectAccess
+
+- (NSDictionary *)workspaceBindingForRootRef:(NSDictionary *)rootRef
+                         rootFingerprintSHA256:(NSString *)rootFingerprint
+                                        error:(NSError **)error {
+  if (!DSHLocalProjectCanonicalDigest(rootFingerprint)) {
+    DSHSetAccessError(error, DSHLocalProjectAccessErrorRepositoryUnavailable);
+    return nil;
+  }
+  NSDictionary *binding = nil;
+  if (self.bindingResolver != nil) {
+    @try {
+      binding = self.bindingResolver(rootRef, rootFingerprint, error);
+    } @catch (__unused NSException *exception) {
+      DSHSetAccessError(error, DSHLocalProjectAccessErrorRepositoryUnavailable);
+      return nil;
+    }
+  } else {
+    // Production's default source is a private workspace-gitdirs binding.
+    // It is deliberately not derived from project_id alone or from a global
+    // projects path. The file is native-only and never crosses the bridge.
+    NSURL *privateRoot = nil;
+    @try {
+      privateRoot = self.workspaceAccess.privateRootURL;
+    } @catch (__unused NSException *exception) {
+      privateRoot = nil;
+    }
+    NSString *workspaceId = rootRef[@"workspace_id"];
+    NSString *projectId = rootRef[@"project_id"];
+    if (privateRoot == nil || workspaceId.length == 0 || projectId.length == 0) {
+      DSHSetAccessError(error, DSHLocalProjectAccessErrorRepositoryUnavailable);
+      return nil;
+    }
+    // Read the native binding through a strict descriptor-relative walk. The
+    // private root is trusted only as a location; every workspace/project
+    // component and the final file are still opened with O_NOFOLLOW and
+    // pinned against their fstatat/fstat identities.
+    int privateDescriptor = DSHOpenAnchoredAbsoluteDirectory(
+        privateRoot, self.hook, error);
+    int gitdirsDescriptor = privateDescriptor >= 0
+        ? DSHOpenPrivateChildDirectory(privateDescriptor, "workspace-gitdirs",
+                                       NO, error)
+        : -1;
+    int workspaceDescriptor = gitdirsDescriptor >= 0
+        ? DSHOpenPrivateChildDirectory(gitdirsDescriptor,
+                                       workspaceId.fileSystemRepresentation,
+                                       NO, error)
+        : -1;
+    int projectDescriptor = workspaceDescriptor >= 0
+        ? DSHOpenPrivateChildDirectory(workspaceDescriptor,
+                                       projectId.fileSystemRepresentation,
+                                       NO, error)
+        : -1;
+    int descriptor = projectDescriptor >= 0
+        ? openat(projectDescriptor, "binding-v2.json",
+                 O_RDONLY | O_CLOEXEC | O_NOFOLLOW)
+        : -1;
+    struct stat metadata = {};
+    BOOL valid = descriptor >= 0 && fstat(descriptor, &metadata) == 0 &&
+        S_ISREG(metadata.st_mode) && metadata.st_nlink == 1 &&
+        metadata.st_size > 0 && metadata.st_size <= 64 * 1024;
+    NSMutableData *data = valid
+        ? [NSMutableData dataWithLength:(NSUInteger)metadata.st_size] : nil;
+    NSUInteger offset = 0;
+    while (valid && offset < data.length) {
+      ssize_t count = pread(descriptor,
+                            static_cast<uint8_t *>(data.mutableBytes) + offset,
+                            data.length - offset, (off_t)offset);
+      if (count <= 0) {
+        valid = NO;
+        break;
+      }
+      offset += (NSUInteger)count;
+    }
+    struct stat after = {};
+    valid = valid && fstat(descriptor, &after) == 0 &&
+        DSHLocalProjectSameStat(metadata, after);
+    struct stat pathAfter = {};
+    valid = valid && projectDescriptor >= 0 &&
+        fstatat(projectDescriptor, "binding-v2.json", &pathAfter,
+                AT_SYMLINK_NOFOLLOW) == 0 &&
+        DSHLocalProjectSameStat(metadata, pathAfter);
+    if (descriptor >= 0) close(descriptor);
+    if (projectDescriptor >= 0) close(projectDescriptor);
+    if (workspaceDescriptor >= 0) close(workspaceDescriptor);
+    if (gitdirsDescriptor >= 0) close(gitdirsDescriptor);
+    if (privateDescriptor >= 0) close(privateDescriptor);
+    NSDictionary *record = valid
+        ? [NSJSONSerialization JSONObjectWithData:data options:0 error:nil]
+        : nil;
+    if (![record isKindOfClass:NSDictionary.class] ||
+        !DSHDictionaryHasExactKeys(record, @[
+          @"schema_version", @"workspace_id", @"binding_revision",
+          @"project_id", @"display_name", @"git_topology",
+          @"git_directory_relative", @"root_fingerprint_sha256"
+        ]) ||
+        ![record[@"schema_version"] isEqual:@2] ||
+        ![record[@"workspace_id"] isEqual:workspaceId] ||
+        ![record[@"binding_revision"] isEqual:rootRef[@"binding_revision"]] ||
+        ![record[@"project_id"] isEqual:projectId] ||
+        ![record[@"root_fingerprint_sha256"] isEqual:rootFingerprint] ||
+        ![record[@"git_topology"] isEqual:@"private_split_gitdir"]) {
+      DSHSetAccessError(error, DSHLocalProjectAccessErrorMetadataInvalid);
+      return nil;
+    }
+    NSString *relative = record[@"git_directory_relative"];
+    BOOL relativeValid = [relative isKindOfClass:NSString.class];
+    NSData *relativeBytes = relativeValid
+        ? [relative dataUsingEncoding:NSUTF8StringEncoding
+                    allowLossyConversion:NO]
+        : nil;
+    NSArray<NSString *> *components = relativeValid
+        ? [relative componentsSeparatedByString:@"/"] : @[];
+    relativeValid = relativeValid && relativeBytes != nil &&
+        relativeBytes.length > 0 &&
+        relativeBytes.length <= 1024 && ![relative hasPrefix:@"/"] &&
+        ![relative containsString:@"\\"] && !DSHHasControlCharacter(relative);
+    for (NSString *component in components) {
+      relativeValid = relativeValid && component.length > 0 &&
+          ![component isEqual:@"."] && ![component isEqual:@".."];
+    }
+    if (!relativeValid) {
+      DSHSetAccessError(error, DSHLocalProjectAccessErrorMetadataInvalid);
+      return nil;
+    }
+    NSURL *gitURL = privateRoot;
+    for (NSString *component in components) {
+      gitURL = [gitURL URLByAppendingPathComponent:component isDirectory:YES];
+    }
+    NSMutableDictionary *resolved = [record mutableCopy];
+    [resolved removeObjectForKey:@"git_directory_relative"];
+    resolved[@"git_directory_url"] = gitURL;
+    binding = resolved;
+  }
+  if (!DSHLocalProjectBindingIsValid(binding, rootRef, rootFingerprint)) {
+    DSHSetAccessError(error, DSHLocalProjectAccessErrorMetadataInvalid);
+    return nil;
+  }
+  return [binding copy];
+}
 
 + (instancetype)sharedAccess {
   static DSHLocalProjectAccess *access;
@@ -604,6 +986,16 @@ static void DSHEnsureLibgit2Lifetime(void) {
   return projectId;
 }
 
++ (BOOL)validateWorkspaceRootRefV1:(NSDictionary *)rootRef
+                    projectRequired:(BOOL)projectRequired
+                              error:(NSError **)error {
+  if (!DSHLocalProjectRootRefIsValid(rootRef, projectRequired, nullptr)) {
+    DSHSetAccessError(error, DSHLocalProjectAccessErrorInvalidIdentifier);
+    return NO;
+  }
+  return YES;
+}
+
 - (instancetype)init {
   return [self initWithProjectsRootURL:nil hook:nil];
 }
@@ -614,10 +1006,46 @@ static void DSHEnsureLibgit2Lifetime(void) {
 
 - (instancetype)initWithProjectsRootURL:(NSURL *)projectsRootURL
                                    hook:(DSHLocalProjectAccessHook)hook {
+  return [self initWithProjectsRootURL:projectsRootURL
+                       workspaceAccess:nil
+                                  hook:hook];
+}
+
+- (instancetype)initWithWorkspaceAccess:(DSHLocalWorkspaceAccess *)workspaceAccess
+                                    hook:(DSHLocalProjectAccessHook)hook {
+  return [self initWithWorkspaceAccess:workspaceAccess
+                       bindingResolver:nil
+                                  hook:hook];
+}
+
+- (instancetype)initWithWorkspaceAccess:(DSHLocalWorkspaceAccess *)workspaceAccess
+                        bindingResolver:(DSHLocalProjectWorkspaceBindingResolver)bindingResolver
+                                    hook:(DSHLocalProjectAccessHook)hook {
+  return [self initWithProjectsRootURL:nil
+                       workspaceAccess:workspaceAccess
+                      bindingResolver:bindingResolver
+                                  hook:hook];
+}
+
+- (instancetype)initWithProjectsRootURL:(NSURL *)projectsRootURL
+                        workspaceAccess:(DSHLocalWorkspaceAccess *)workspaceAccess
+                                    hook:(DSHLocalProjectAccessHook)hook {
+  return [self initWithProjectsRootURL:projectsRootURL
+                       workspaceAccess:workspaceAccess
+                      bindingResolver:nil
+                                  hook:hook];
+}
+
+- (instancetype)initWithProjectsRootURL:(NSURL *)projectsRootURL
+                        workspaceAccess:(DSHLocalWorkspaceAccess *)workspaceAccess
+                       bindingResolver:(DSHLocalProjectWorkspaceBindingResolver)bindingResolver
+                                    hook:(DSHLocalProjectAccessHook)hook {
   self = [super init];
   if (self) {
     DSHEnsureLibgit2Lifetime();
     _injectedProjectsRootURL = [projectsRootURL copy];
+    _workspaceAccess = workspaceAccess;
+    _bindingResolver = [bindingResolver copy];
     _hook = [hook copy];
   }
   return self;
@@ -1223,6 +1651,11 @@ static BOOL DSHPathsEqual(NSString *left, NSString *right) {
 
 - (BOOL)validateLeaseIdentity:(DSHLocalProjectLease *)lease
                          error:(NSError **)error {
+  if (lease.workspaceLease != nil) {
+    return [self validateWorkspaceLeaseIdentity:lease
+                                         rootRef:lease.workspaceRootRef
+                                           error:error];
+  }
   if (lease == nil || lease.repository == nullptr ||
       lease.projectsRootDescriptor < 0 || lease.projectDescriptor < 0 ||
       lease.repositoryDescriptor < 0 || lease.gitDescriptor < 0 ||
@@ -1310,6 +1743,14 @@ static BOOL DSHPathsEqual(NSString *left, NSString *right) {
 
 - (NSDictionary *)readProjectMetadataFromLease:(DSHLocalProjectLease *)lease
                                           error:(NSError **)error {
+  if (lease.workspaceLease != nil) {
+    if (![self validateWorkspaceLeaseIdentity:lease
+                                       rootRef:lease.workspaceRootRef
+                                         error:error]) {
+      return nil;
+    }
+    return [lease.metadata copy];
+  }
   if (![self validateLeaseIdentity:lease error:error]) return nil;
   NSDictionary *metadata = DSHReadMetadata(lease.projectDescriptor,
                                            lease.projectDevice,
@@ -1322,6 +1763,14 @@ static BOOL DSHPathsEqual(NSString *left, NSString *right) {
 
 - (NSString *)projectMetadataDigestFromLease:(DSHLocalProjectLease *)lease
                                         error:(NSError **)error {
+  if (lease.workspaceLease != nil) {
+    if (![self validateWorkspaceLeaseIdentity:lease
+                                       rootRef:lease.workspaceRootRef
+                                         error:error]) {
+      return nil;
+    }
+    return [lease.workspaceProjectMetadataDigest copy];
+  }
   if (![self validateLeaseIdentity:lease error:error]) return nil;
   NSString *digest = nil;
   NSDictionary *metadata = DSHReadMetadata(lease.projectDescriptor,
@@ -1332,6 +1781,119 @@ static BOOL DSHPathsEqual(NSString *left, NSString *right) {
     return nil;
   }
   return digest;
+}
+
+static BOOL DSHLocalProjectCanonicalLegacyDisplayName(id value) {
+  if (![value isKindOfClass:NSString.class]) return NO;
+  NSString *name = value;
+  NSString *normalized = [name precomposedStringWithCanonicalMapping];
+  NSData *bytes = [name dataUsingEncoding:NSUTF8StringEncoding
+                     allowLossyConversion:NO];
+  NSString *trimmed = [name
+      stringByTrimmingCharactersInSet:
+          NSCharacterSet.whitespaceAndNewlineCharacterSet];
+  return [normalized isEqual:name] && bytes.length > 0 && bytes.length <= 120 &&
+      [trimmed isEqual:name] && ![name hasPrefix:@"."] &&
+      ![name isEqual:@"."] && ![name isEqual:@".."] &&
+      ![name containsString:@"/"] && ![name containsString:@"\\"] &&
+      ![name containsString:@":"] && !DSHHasControlCharacter(name);
+}
+
+static BOOL DSHLocalProjectLegacyEvidenceNode(
+    int descriptor,
+    dev_t expectedDevice,
+    ino_t expectedInode,
+    int parentDescriptor,
+    const char *name,
+    NSURL *absoluteURL) {
+  struct stat descriptorState = {};
+  struct stat pathState = {};
+  BOOL pathRead = parentDescriptor >= 0 && name != nullptr
+      ? fstatat(parentDescriptor, name, &pathState, AT_SYMLINK_NOFOLLOW) == 0
+      : absoluteURL != nil &&
+          lstat(absoluteURL.fileSystemRepresentation, &pathState) == 0;
+  return descriptor >= 0 && fstat(descriptor, &descriptorState) == 0 &&
+      pathRead && S_ISDIR(descriptorState.st_mode) &&
+      S_ISDIR(pathState.st_mode) && !S_ISLNK(pathState.st_mode) &&
+      descriptorState.st_nlink > 0 && pathState.st_nlink > 0 &&
+      descriptorState.st_dev == expectedDevice &&
+      descriptorState.st_ino == expectedInode &&
+      descriptorState.st_dev == pathState.st_dev &&
+      descriptorState.st_ino == pathState.st_ino &&
+      (descriptorState.st_mode & S_IFMT) == (pathState.st_mode & S_IFMT) &&
+      descriptorState.st_nlink == pathState.st_nlink;
+}
+
+- (NSDictionary *)legacyWorkspaceBootstrapEvidenceForProjectId:
+    (NSString *)projectId error:(NSError **)error {
+  DSHLocalProjectLease *lease = [self leaseProjectId:projectId
+                                                mode:DSHLocalProjectAccessModeRead
+                                     includeMetadata:NO
+                                             timeout:-1
+                                               error:error];
+  if (lease == nil) return nil;
+  if (![self validateLeaseIdentity:lease error:error]) return nil;
+
+  NSString *metadataDigest = nil;
+  NSDictionary *metadata = DSHReadMetadata(lease.projectDescriptor,
+                                            lease.projectDevice,
+                                            lease.projectId,
+                                            &metadataDigest, error);
+  NSString *displayName = metadata[@"name"];
+  if (metadata == nil ||
+      !DSHLocalProjectCanonicalDigest(metadataDigest) ||
+      !DSHLocalProjectCanonicalLegacyDisplayName(displayName)) {
+    if (error != nil && *error == nil) {
+      DSHSetAccessError(error, DSHLocalProjectAccessErrorMetadataInvalid);
+    }
+    return nil;
+  }
+
+  NSURL *projectsRootURL =
+      lease.projectDirectoryURL.URLByDeletingLastPathComponent;
+  BOOL physicalIdentityValid =
+      DSHLocalProjectLegacyEvidenceNode(
+          lease.projectsRootDescriptor, lease.projectsRootDevice,
+          lease.projectsRootInode, -1, nullptr, projectsRootURL) &&
+      DSHLocalProjectLegacyEvidenceNode(
+          lease.repositoryDescriptor, lease.repositoryDevice,
+          lease.repositoryInode, lease.projectDescriptor, "repo", nil) &&
+      DSHLocalProjectLegacyEvidenceNode(
+          lease.gitDescriptor, lease.gitDevice, lease.gitInode,
+          lease.repositoryDescriptor, ".git", nil) &&
+      [self validateLeaseIdentity:lease error:error];
+  if (!physicalIdentityValid) {
+    if (error != nil && *error == nil) {
+      DSHSetAccessError(error, DSHLocalProjectAccessErrorUnsafeStorage);
+    }
+    return nil;
+  }
+
+  return @{
+    @"project_id" : [lease.projectId copy],
+    @"display_name" : [displayName copy],
+    @"metadata_sha256" : metadataDigest,
+    @"capabilities" : [NSSet setWithObjects:
+        @"read", @"write", @"git", @"project_context", nil],
+    @"projects_root_device_id" :
+        [NSString stringWithFormat:@"%llu",
+            (unsigned long long)lease.projectsRootDevice],
+    @"projects_root_inode_id" :
+        [NSString stringWithFormat:@"%llu",
+            (unsigned long long)lease.projectsRootInode],
+    @"repository_device_id" :
+        [NSString stringWithFormat:@"%llu",
+            (unsigned long long)lease.repositoryDevice],
+    @"repository_inode_id" :
+        [NSString stringWithFormat:@"%llu",
+            (unsigned long long)lease.repositoryInode],
+    @"git_device_id" :
+        [NSString stringWithFormat:@"%llu",
+            (unsigned long long)lease.gitDevice],
+    @"git_inode_id" :
+        [NSString stringWithFormat:@"%llu",
+            (unsigned long long)lease.gitInode],
+  };
 }
 
 - (BOOL)writeProjectMetadataRecord:(NSDictionary *)record
@@ -1442,6 +2004,646 @@ static BOOL DSHWriteProjectMetadataRecord(NSDictionary *record,
     DSHSetAccessError(error, DSHLocalProjectAccessErrorUnsafeStorage);
   }
   return success;
+}
+
+- (DSHLocalProjectLease *)leaseWorkspaceRootRef:(NSDictionary *)rootRef
+                                  workspaceLease:(DSHLocalWorkspaceLease *)workspaceLease
+                                             mode:(DSHLocalProjectAccessMode)mode
+                                  includeMetadata:(BOOL)includeMetadata
+                                          timeout:(NSTimeInterval)timeout
+                                            error:(NSError **)error {
+  return [self leaseWorkspaceRootRef:rootRef
+                       workspaceLease:workspaceLease
+                     authorityAccess:self.workspaceAccess
+                    workspaceBinding:nil
+                                mode:mode
+                     includeMetadata:includeMetadata
+                             timeout:timeout
+                               error:error];
+}
+
+- (DSHLocalProjectLease *)leaseWorkspaceRootRef:(NSDictionary *)rootRef
+                                  workspaceLease:(DSHLocalWorkspaceLease *)workspaceLease
+                               workspaceBinding:(NSDictionary *)workspaceBinding
+                                             mode:(DSHLocalProjectAccessMode)mode
+                                  includeMetadata:(BOOL)includeMetadata
+                                          timeout:(NSTimeInterval)timeout
+                                            error:(NSError **)error {
+  return [self leaseWorkspaceRootRef:rootRef
+                       workspaceLease:workspaceLease
+                     authorityAccess:self.workspaceAccess
+                    workspaceBinding:workspaceBinding
+                                mode:mode
+                     includeMetadata:includeMetadata
+                             timeout:timeout
+                               error:error];
+}
+
+- (DSHLocalProjectLease *)leaseWorkspaceRootRef:(NSDictionary *)rootRef
+                                  workspaceLease:(DSHLocalWorkspaceLease *)workspaceLease
+                                authorityAccess:(DSHLocalWorkspaceAccess *)authorityAccess
+                               workspaceBinding:(NSDictionary *)workspaceBinding
+                                             mode:(DSHLocalProjectAccessMode)mode
+                                  includeMetadata:(BOOL)includeMetadata
+                                          timeout:(NSTimeInterval)timeout
+                                            error:(NSError **)error {
+  NSUInteger revision = 0;
+  if (!DSHLocalProjectRootRefIsValid(rootRef, YES, &revision) ||
+      workspaceLease == nil || workspaceLease.rootDescriptor < 0 ||
+      authorityAccess == nil ||
+      (mode != DSHLocalProjectAccessModeRead &&
+       mode != DSHLocalProjectAccessModeWrite) ||
+      !isfinite(timeout)) {
+    DSHSetAccessError(error, DSHLocalProjectAccessErrorInvalidIdentifier);
+    return nil;
+  }
+
+  NSDictionary *canonicalRoot = DSHLocalProjectCanonicalRootRef(rootRef);
+  if (canonicalRoot == nil) {
+    DSHSetAccessError(error, DSHLocalProjectAccessErrorInvalidIdentifier);
+    return nil;
+  }
+  NSString *workspaceId = canonicalRoot[@"workspace_id"];
+  NSString *projectId = canonicalRoot[@"project_id"];
+  if (![workspaceLease.workspaceId isEqual:workspaceId] ||
+      workspaceLease.bindingRevision != revision ||
+      !workspaceLease.supportsGit) {
+    DSHSetAccessError(error, DSHLocalProjectAccessErrorRepositoryUnavailable);
+    return nil;
+  }
+
+  DSHLocalProjectLockToken *projectLock = [[DSHLocalProjectLockToken alloc]
+      initWithLock:DSHLockForProjectId(projectId)
+         projectId:projectId
+              mode:mode
+           timeout:timeout];
+  if (!projectLock.acquired) {
+    DSHSetAccessError(error, DSHLocalProjectAccessErrorLockTimeout);
+    return nil;
+  }
+
+  NSError *authorityError = nil;
+  NSString *rootFingerprint = nil;
+  NSDictionary *registry = [authorityAccess loadRegistry:&authorityError
+                                                   digest:nil];
+  NSDictionary *record = registry == nil
+      ? nil : [authorityAccess recordInRegistry:registry
+                                     workspaceId:workspaceId];
+  NSDictionary *authority = record == nil
+      ? nil : [authorityAccess loadAuthorityForRecord:record
+                                                 error:&authorityError];
+  if (authority != nil &&
+      [authority[@"workspace_id"] isEqual:workspaceId] &&
+      [authority[@"binding_revision"] isEqual:@(revision)] &&
+      DSHLocalProjectCanonicalDigest(authority[@"root_fingerprint_sha256"])) {
+    rootFingerprint = [authority[@"root_fingerprint_sha256"] copy];
+  }
+  if (rootFingerprint == nil) {
+    if (error != nil) *error = authorityError ?: DSHAccessError(
+        DSHLocalProjectAccessErrorUnsafeStorage);
+    return nil;
+  }
+  // Bind the descriptor supplied by DSHLocalWorkspaceLease to the same
+  // device/inode recorded by the workspace authority. Matching only the
+  // lease's path would allow a same-ID lease from another native access
+  // instance to cross the workspace boundary.
+  unsigned long long authorityDevice = 0;
+  unsigned long long authorityInode = 0;
+  if (!DSHLocalProjectAccessParseCanonicalUInt64(authority[@"device_id"],
+                                                 &authorityDevice) ||
+      !DSHLocalProjectAccessParseCanonicalUInt64(authority[@"inode_id"],
+                                                 &authorityInode)) {
+    DSHSetAccessError(error, DSHLocalProjectAccessErrorUnsafeStorage);
+    return nil;
+  }
+  NSURL *workspaceRootURL =
+      DSHLocalProjectWorkspaceRootURL(authorityAccess, record);
+  NSString *expectedRootPath = workspaceRootURL.path.stringByStandardizingPath;
+
+  if (self.hook != nil) self.hook(@"before_workspace_root_open");
+  struct stat rootMetadata = {};
+  BOOL rootValid = fstat(workspaceLease.rootDescriptor, &rootMetadata) == 0 &&
+      S_ISDIR(rootMetadata.st_mode) && !S_ISLNK(rootMetadata.st_mode) &&
+      (unsigned long long)rootMetadata.st_dev == authorityDevice &&
+      (unsigned long long)rootMetadata.st_ino == authorityInode;
+  NSString *rootPath = rootValid && expectedRootPath.length > 0
+      ? expectedRootPath : nil;
+  struct stat rootPathMetadata = {};
+  rootValid = rootValid && rootPath != nil &&
+      lstat(rootPath.fileSystemRepresentation, &rootPathMetadata) == 0 &&
+      DSHLocalProjectSameStat(rootMetadata, rootPathMetadata);
+  if (!rootValid) {
+    DSHSetAccessError(error, DSHLocalProjectAccessErrorUnsafeStorage);
+    return nil;
+  }
+
+  // V2 accepts only the approved split topology: the Files-visible workspace
+  // is the worktree and the private binding supplies a separate gitdir. A
+  // `.git` entry in the visible root, or a `repo` fixture child, is never an
+  // authority for this path (legacy embedded repositories stay on the
+  // explicit project-id adapter).
+  NSError *bindingError = nil;
+  NSDictionary *binding = workspaceBinding ?: [self workspaceBindingForRootRef:
+      canonicalRoot rootFingerprintSHA256:rootFingerprint error:&bindingError];
+  if (binding == nil) {
+    if (error != nil) *error = bindingError ?: DSHAccessError(
+        DSHLocalProjectAccessErrorRepositoryUnavailable);
+    return nil;
+  }
+  NSString *bindingDigest = DSHLocalProjectBindingDigest(binding);
+  if (!DSHLocalProjectCanonicalDigest(bindingDigest)) {
+    DSHSetAccessError(error, DSHLocalProjectAccessErrorMetadataInvalid);
+    return nil;
+  }
+  struct stat visibleGitProbe = {};
+  if (fstatat(workspaceLease.rootDescriptor, ".git", &visibleGitProbe,
+              AT_SYMLINK_NOFOLLOW) == 0) {
+    DSHSetAccessError(error, DSHLocalProjectAccessErrorUnsafeStorage);
+    return nil;
+  }
+  if (errno != ENOENT) {
+    DSHSetAccessError(error, DSHLocalProjectAccessErrorUnsafeStorage);
+    return nil;
+  }
+  int projectDescriptor = dup(workspaceLease.rootDescriptor);
+  int repositoryDescriptor = dup(workspaceLease.rootDescriptor);
+  struct stat projectMetadata = rootMetadata;
+  struct stat repositoryMetadata = rootMetadata;
+  if (projectDescriptor < 0 || repositoryDescriptor < 0) {
+    if (repositoryDescriptor >= 0) close(repositoryDescriptor);
+    if (projectDescriptor >= 0) close(projectDescriptor);
+    DSHSetAccessError(error, DSHLocalProjectAccessErrorRepositoryUnavailable);
+    return nil;
+  }
+  if (self.hook != nil) self.hook(@"after_workspace_project_open");
+  struct stat rootPathAfterProject = {};
+  if (lstat(rootPath.fileSystemRepresentation, &rootPathAfterProject) != 0 ||
+      !DSHLocalProjectSameStat(rootMetadata, rootPathAfterProject)) {
+    close(repositoryDescriptor);
+    close(projectDescriptor);
+    DSHSetAccessError(error, DSHLocalProjectAccessErrorUnsafeStorage);
+    return nil;
+  }
+  visibleGitProbe = {};
+  if (fstatat(workspaceLease.rootDescriptor, ".git", &visibleGitProbe,
+             AT_SYMLINK_NOFOLLOW) == 0 || errno != ENOENT) {
+    close(repositoryDescriptor);
+    close(projectDescriptor);
+    DSHSetAccessError(error, DSHLocalProjectAccessErrorUnsafeStorage);
+    return nil;
+  }
+
+  if (self.hook != nil) self.hook(@"before_workspace_git_open");
+  NSURL *gitDirectoryURL = binding[@"git_directory_url"];
+  NSString *gitDirectoryPath = gitDirectoryURL.path.stringByStandardizingPath;
+  NSString *worktreePath = rootPath.stringByStandardizingPath;
+  NSString *privateRootPath =
+      authorityAccess.privateRootURL.path.stringByStandardizingPath;
+  if (gitDirectoryPath.length == 0 || worktreePath.length == 0 ||
+      privateRootPath.length == 0 ||
+      ![gitDirectoryPath hasPrefix:
+          [privateRootPath stringByAppendingString:@"/"]] ||
+      [gitDirectoryPath isEqual:worktreePath] ||
+      [gitDirectoryPath hasPrefix:[worktreePath stringByAppendingString:@"/"]]) {
+    close(repositoryDescriptor);
+    close(projectDescriptor);
+    DSHSetAccessError(error, DSHLocalProjectAccessErrorUnsafeStorage);
+    return nil;
+  }
+  int gitDescriptor = DSHOpenAnchoredAbsoluteDirectory(
+      gitDirectoryURL, self.hook, error);
+  struct stat gitMetadata = {};
+  BOOL gitValid = gitDescriptor >= 0 && fstat(gitDescriptor, &gitMetadata) == 0 &&
+      S_ISDIR(gitMetadata.st_mode) && !S_ISLNK(gitMetadata.st_mode);
+  if (!gitValid) {
+    if (gitDescriptor >= 0) close(gitDescriptor);
+    close(repositoryDescriptor);
+    close(projectDescriptor);
+    DSHSetAccessError(error, DSHLocalProjectAccessErrorRepositoryUnavailable);
+    return nil;
+  }
+  if (self.hook != nil) self.hook(@"after_workspace_git_open");
+  struct stat rootPathAfterGit = {};
+  if (lstat(rootPath.fileSystemRepresentation, &rootPathAfterGit) != 0 ||
+      !DSHLocalProjectSameStat(rootMetadata, rootPathAfterGit)) {
+    close(gitDescriptor);
+    close(repositoryDescriptor);
+    close(projectDescriptor);
+    DSHSetAccessError(error, DSHLocalProjectAccessErrorUnsafeStorage);
+    return nil;
+  }
+  struct stat gitPathMetadata = {};
+  gitValid = lstat(gitDirectoryURL.fileSystemRepresentation,
+                   &gitPathMetadata) == 0 &&
+      DSHLocalProjectSameStat(gitMetadata, gitPathMetadata);
+  if (!gitValid) {
+    close(gitDescriptor);
+    close(repositoryDescriptor);
+    close(projectDescriptor);
+    DSHSetAccessError(error, DSHLocalProjectAccessErrorUnsafeStorage);
+    return nil;
+  }
+  struct stat objectsMetadata = {};
+  int objectsDescriptor = openat(gitDescriptor, "objects",
+                                 O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW);
+  BOOL objectsValid = objectsDescriptor >= 0 &&
+      fstat(objectsDescriptor, &objectsMetadata) == 0 &&
+      S_ISDIR(objectsMetadata.st_mode) && !S_ISLNK(objectsMetadata.st_mode) &&
+      DSHForbiddenGitIndirectionAbsent(gitDescriptor, objectsDescriptor);
+  struct stat objectsPathMetadata = {};
+  objectsValid = objectsValid &&
+      fstatat(gitDescriptor, "objects", &objectsPathMetadata,
+              AT_SYMLINK_NOFOLLOW) == 0 &&
+      DSHLocalProjectSameStat(objectsMetadata, objectsPathMetadata);
+  if (!objectsValid) {
+    if (objectsDescriptor >= 0) close(objectsDescriptor);
+    close(gitDescriptor);
+    close(repositoryDescriptor);
+    close(projectDescriptor);
+    DSHSetAccessError(error, DSHLocalProjectAccessErrorUnsafeStorage);
+    return nil;
+  }
+  if (self.hook != nil) self.hook(@"after_workspace_objects_open");
+
+  struct stat rootAfter = {};
+  BOOL rootStillSame = fstat(workspaceLease.rootDescriptor, &rootAfter) == 0 &&
+      DSHLocalProjectSameStat(rootMetadata, rootAfter);
+  objectsPathMetadata = {};
+  rootStillSame = rootStillSame &&
+      fstatat(gitDescriptor, "objects", &objectsPathMetadata,
+              AT_SYMLINK_NOFOLLOW) == 0 &&
+      DSHLocalProjectSameStat(objectsMetadata, objectsPathMetadata);
+  if (!rootStillSame) {
+    close(objectsDescriptor);
+    close(gitDescriptor);
+    close(repositoryDescriptor);
+    close(projectDescriptor);
+    DSHSetAccessError(error, DSHLocalProjectAccessErrorUnsafeStorage);
+    return nil;
+  }
+
+  NSString *repositoryPath = rootPath;
+  NSString *gitPath = DSHLocalProjectDescriptorPath(gitDescriptor);
+  if (repositoryPath == nil || gitPath == nil) {
+    close(objectsDescriptor);
+    close(gitDescriptor);
+    close(repositoryDescriptor);
+    close(projectDescriptor);
+    DSHSetAccessError(error, DSHLocalProjectAccessErrorRepositoryUnavailable);
+    return nil;
+  }
+  git_repository *repository = nullptr;
+  int openResult = git_repository_open_ext(
+      &repository, gitPath.fileSystemRepresentation,
+      GIT_REPOSITORY_OPEN_NO_SEARCH | GIT_REPOSITORY_OPEN_NO_DOTGIT |
+          GIT_REPOSITORY_OPEN_BARE,
+      nullptr);
+  BOOL splitConfigured = openResult == 0 && repository != nullptr &&
+      git_repository_is_bare(repository) &&
+      git_repository_set_workdir(repository, repositoryPath.fileSystemRepresentation,
+                                  0) == 0;
+  const char *workdir = splitConfigured && repository != nullptr
+      ? git_repository_workdir(repository) : nullptr;
+  NSString *actualWorkdir = workdir == nullptr ? nil :
+      [[NSFileManager defaultManager]
+          stringWithFileSystemRepresentation:workdir length:strlen(workdir)];
+  NSString *expectedWorkdir = [repositoryPath stringByStandardizingPath];
+  BOOL repositoryValid = openResult == 0 && repository != nullptr &&
+      splitConfigured && !git_repository_is_bare(repository) && actualWorkdir != nil &&
+      [actualWorkdir.stringByStandardizingPath isEqual:expectedWorkdir];
+  if (repositoryValid) {
+    const char *actualGit = git_repository_path(repository);
+    NSString *actualGitPath = actualGit == nullptr ? nil :
+        [[NSFileManager defaultManager]
+            stringWithFileSystemRepresentation:actualGit length:strlen(actualGit)];
+    repositoryValid = actualGitPath != nil &&
+        [actualGitPath.stringByStandardizingPath isEqual:
+             [gitPath stringByStandardizingPath]];
+  }
+  if (repositoryValid) {
+    const char *actualCommon = git_repository_commondir(repository);
+    NSString *actualCommonPath = actualCommon == nullptr ? nil :
+        [[NSFileManager defaultManager]
+            stringWithFileSystemRepresentation:actualCommon
+                                         length:strlen(actualCommon)];
+    repositoryValid = actualCommonPath != nil &&
+        [actualCommonPath.stringByStandardizingPath isEqual:
+             [gitPath stringByStandardizingPath]];
+  }
+  if (!repositoryValid) {
+    if (repository != nullptr) git_repository_free(repository);
+    close(objectsDescriptor);
+    close(gitDescriptor);
+    close(repositoryDescriptor);
+    close(projectDescriptor);
+    DSHSetAccessError(error, DSHLocalProjectAccessErrorRepositoryUnavailable);
+    return nil;
+  }
+
+  struct stat repositoryAfter = {};
+  struct stat gitAfter = {};
+  struct stat objectsAfter = {};
+  struct stat rootPathAfterOpen = {};
+  struct stat visibleGitAfterOpen = {};
+  BOOL descriptorsStable = fstat(repositoryDescriptor, &repositoryAfter) == 0 &&
+      fstat(gitDescriptor, &gitAfter) == 0 &&
+      fstat(objectsDescriptor, &objectsAfter) == 0 &&
+      lstat(rootPath.fileSystemRepresentation, &rootPathAfterOpen) == 0 &&
+      DSHLocalProjectSameStat(rootMetadata, rootPathAfterOpen) &&
+      DSHLocalProjectSameStat(repositoryMetadata, repositoryAfter) &&
+      DSHLocalProjectSameStat(gitMetadata, gitAfter) &&
+      DSHLocalProjectSameStat(objectsMetadata, objectsAfter) &&
+      lstat(gitDirectoryURL.fileSystemRepresentation, &gitPathMetadata) == 0 &&
+      DSHLocalProjectSameStat(gitAfter, gitPathMetadata) &&
+      fstatat(gitDescriptor, "objects", &objectsPathMetadata,
+              AT_SYMLINK_NOFOLLOW) == 0 &&
+      DSHLocalProjectSameStat(objectsAfter, objectsPathMetadata) &&
+      fstatat(workspaceLease.rootDescriptor, ".git", &visibleGitAfterOpen,
+              AT_SYMLINK_NOFOLLOW) != 0 && errno == ENOENT;
+  if (!descriptorsStable) {
+    git_repository_free(repository);
+    close(objectsDescriptor);
+    close(gitDescriptor);
+    close(repositoryDescriptor);
+    close(projectDescriptor);
+    DSHSetAccessError(error, DSHLocalProjectAccessErrorUnsafeStorage);
+    return nil;
+  }
+
+  NSDictionary *metadata = nil;
+  if (includeMetadata) {
+    NSString *name = binding[@"display_name"];
+    NSData *nameData = [name dataUsingEncoding:NSUTF8StringEncoding
+                              allowLossyConversion:NO];
+    if (name.length == 0 || nameData == nil || nameData.length > 120 ||
+        DSHHasControlCharacter(name) || [name containsString:@"/"] ||
+        [name containsString:@"\\"] || [name isEqual:@"."] ||
+        [name isEqual:@".."]) {
+      name = projectId;
+    }
+    metadata = @{
+      @"schema_version" : @2,
+      @"id" : projectId,
+      @"name" : name,
+      @"workspace_id" : workspaceId,
+      @"binding_revision" : @(revision),
+    };
+  }
+  if (rootFingerprint == nil) {
+    git_repository_free(repository);
+    close(objectsDescriptor);
+    close(gitDescriptor);
+    close(repositoryDescriptor);
+    close(projectDescriptor);
+    DSHSetAccessError(error, DSHLocalProjectAccessErrorUnsafeStorage);
+    return nil;
+  }
+
+  DSHLocalProjectLease *lease = [[DSHLocalProjectLease alloc] init];
+  lease.projectId = projectId;
+  lease.workspaceId = workspaceId;
+  lease.workspaceBindingRevision = revision;
+  lease.rootFingerprintSHA256 = rootFingerprint;
+  lease.workspaceRootRef = canonicalRoot;
+  lease.workspaceLease = workspaceLease;
+  lease.workspaceAccess = authorityAccess;
+  lease.workspaceBinding = binding;
+  lease.workspaceBindingWasInjected = workspaceBinding != nil;
+  lease.workspaceBindingDigest = bindingDigest;
+  lease.gitTopology = binding[@"git_topology"];
+  lease.workspaceGitDirectoryURL = gitDirectoryURL;
+  lease.workspaceRootDescriptor = dup(workspaceLease.rootDescriptor);
+  lease.workspaceRootDevice = rootMetadata.st_dev;
+  lease.workspaceRootInode = rootMetadata.st_ino;
+  lease.projectDirectoryURL = [NSURL fileURLWithPath:repositoryPath
+                                         isDirectory:YES];
+  lease.repositoryURL = lease.projectDirectoryURL;
+  lease.metadata = metadata;
+  lease.workspaceProjectMetadataDigest =
+      DSHWorkspaceSHA256Hex(DSHWorkspaceCanonicalJSONData(
+          metadata ?: @{}, nil));
+  lease.projectsRootDescriptor = dup(workspaceLease.rootDescriptor);
+  lease.projectDescriptor = projectDescriptor;
+  lease.repositoryDescriptor = repositoryDescriptor;
+  lease.gitDescriptor = gitDescriptor;
+  lease.objectsDescriptor = objectsDescriptor;
+  lease.projectsRootDevice = rootMetadata.st_dev;
+  lease.projectsRootInode = rootMetadata.st_ino;
+  lease.projectDevice = projectMetadata.st_dev;
+  lease.projectInode = projectMetadata.st_ino;
+  lease.repositoryDevice = repositoryMetadata.st_dev;
+  lease.repositoryInode = repositoryMetadata.st_ino;
+  lease.gitDevice = gitMetadata.st_dev;
+  lease.gitInode = gitMetadata.st_ino;
+  lease.objectsDevice = objectsMetadata.st_dev;
+  lease.objectsInode = objectsMetadata.st_ino;
+  lease.repository = repository;
+  lease.accessMode = mode;
+  lease.lockToken = projectLock;
+  // V2 leases are rooted directly at the authoritative workspace root.  The
+  // private split git directory is tracked separately above; there is no
+  // project/repository path component to persist as a fallback identity.
+  lease.workspaceProjectComponent = @".";
+  lease.workspaceGitComponent = nil;
+  lease.workspacePath = repositoryPath;
+  if (![self validateWorkspaceLeaseIdentity:lease
+                                     rootRef:canonicalRoot
+                                       error:error]) {
+    return nil;
+  }
+  return lease;
+}
+
+- (DSHLocalProjectLease *)leaseWorkspaceRootRef:(NSDictionary *)rootRef
+                                             mode:(DSHLocalProjectAccessMode)mode
+                                  includeMetadata:(BOOL)includeMetadata
+                                          timeout:(NSTimeInterval)timeout
+                                            error:(NSError **)error {
+  return [self leaseWorkspaceRootRef:rootRef
+                      workspaceAccess:self.workspaceAccess
+                                 mode:mode
+                      includeMetadata:includeMetadata
+                              timeout:timeout
+                                error:error];
+}
+
+- (DSHLocalProjectLease *)leaseWorkspaceRootRef:(NSDictionary *)rootRef
+                                  workspaceAccess:(DSHLocalWorkspaceAccess *)workspaceAccess
+                                             mode:(DSHLocalProjectAccessMode)mode
+                                  includeMetadata:(BOOL)includeMetadata
+                                          timeout:(NSTimeInterval)timeout
+                                            error:(NSError **)error {
+  NSUInteger revision = 0;
+  if (!DSHLocalProjectRootRefIsValid(rootRef, YES, &revision) ||
+      workspaceAccess == nil) {
+    DSHSetAccessError(error, DSHLocalProjectAccessErrorInvalidIdentifier);
+    return nil;
+  }
+  NSError *workspaceError = nil;
+  DSHLocalWorkspaceLease *workspaceLease = [workspaceAccess
+      leaseWorkspaceId:rootRef[@"workspace_id"]
+      expectedBindingRevision:revision
+      requiredCapabilities:[NSSet setWithObjects:@"read", @"git",
+                                      @"project_context", nil]
+      error:&workspaceError];
+  if (workspaceLease == nil) {
+    if (error != nil) *error = workspaceError ?: DSHAccessError(
+        DSHLocalProjectAccessErrorRepositoryUnavailable);
+    return nil;
+  }
+  return [self leaseWorkspaceRootRef:rootRef
+                       workspaceLease:workspaceLease
+                     authorityAccess:workspaceAccess
+                    workspaceBinding:nil
+                                mode:mode
+                     includeMetadata:includeMetadata
+                             timeout:timeout
+                               error:error];
+}
+
+- (BOOL)validateWorkspaceLeaseIdentity:(DSHLocalProjectLease *)lease
+                                rootRef:(NSDictionary *)rootRef
+                                  error:(NSError **)error {
+  NSUInteger revision = 0;
+  NSDictionary *canonicalRoot = DSHLocalProjectCanonicalRootRef(rootRef);
+  if (lease == nil || lease.workspaceLease == nil || canonicalRoot == nil ||
+      !DSHLocalProjectRootRefIsValid(canonicalRoot, YES, &revision) ||
+      ![lease.workspaceRootRef isEqual:canonicalRoot] ||
+      ![lease.workspaceId isEqual:canonicalRoot[@"workspace_id"]] ||
+      lease.workspaceBindingRevision != revision ||
+      ![lease.projectId isEqual:canonicalRoot[@"project_id"]] ||
+      ![lease.gitTopology isEqual:@"private_split_gitdir"] ||
+      !DSHLocalProjectCanonicalDigest(lease.workspaceBindingDigest) ||
+      lease.workspaceRootDescriptor < 0 || lease.projectDescriptor < 0 ||
+      lease.repositoryDescriptor < 0 || lease.gitDescriptor < 0 ||
+      lease.objectsDescriptor < 0 || lease.repository == nullptr ||
+      lease.workspaceLease.rootDescriptor < 0) {
+    DSHSetAccessError(error, DSHLocalProjectAccessErrorUnsafeStorage);
+    return NO;
+  }
+  if (![lease.workspaceLease.workspaceId isEqual:lease.workspaceId] ||
+      lease.workspaceLease.bindingRevision != lease.workspaceBindingRevision ||
+      !lease.workspaceLease.supportsGit) {
+    DSHSetAccessError(error, DSHLocalProjectAccessErrorRepositoryUnavailable);
+    return NO;
+  }
+  if (lease.workspaceAccess == nil) {
+    DSHSetAccessError(error, DSHLocalProjectAccessErrorUnsafeStorage);
+    return NO;
+  }
+  NSError *authorityError = nil;
+  NSDictionary *registry = [lease.workspaceAccess loadRegistry:&authorityError
+                                                          digest:nil];
+  NSDictionary *record = registry == nil
+      ? nil : [lease.workspaceAccess recordInRegistry:registry
+                                          workspaceId:lease.workspaceId];
+  NSDictionary *authority = record == nil
+      ? nil : [lease.workspaceAccess loadAuthorityForRecord:record
+                                                       error:&authorityError];
+  if (authority == nil ||
+      ![authority[@"workspace_id"] isEqual:lease.workspaceId] ||
+      ![authority[@"binding_revision"] isEqual:@(lease.workspaceBindingRevision)] ||
+      ![authority[@"root_fingerprint_sha256"]
+          isEqual:lease.rootFingerprintSHA256]) {
+    DSHSetAccessError(error, DSHLocalProjectAccessErrorUnsafeStorage);
+    return NO;
+  }
+  unsigned long long authorityDevice = 0;
+  unsigned long long authorityInode = 0;
+  if (!DSHLocalProjectAccessParseCanonicalUInt64(authority[@"device_id"],
+                                                 &authorityDevice) ||
+      !DSHLocalProjectAccessParseCanonicalUInt64(authority[@"inode_id"],
+                                                 &authorityInode)) {
+    DSHSetAccessError(error, DSHLocalProjectAccessErrorUnsafeStorage);
+    return NO;
+  }
+  NSURL *workspaceRootURL =
+      DSHLocalProjectWorkspaceRootURL(lease.workspaceAccess, record);
+  NSString *expectedRootPath = workspaceRootURL.path.stringByStandardizingPath;
+  NSError *bindingError = nil;
+  // Explicit bindings exist only for the pre-publication attach staging
+  // lease. Production leases must re-open the native workspace/project
+  // relation on every identity validation; trusting the binding cached at
+  // lease construction would miss a relation change during a Files block.
+  NSDictionary *currentBinding = lease.workspaceBindingWasInjected
+      ? lease.workspaceBinding
+      : [self workspaceBindingForRootRef:canonicalRoot
+                    rootFingerprintSHA256:lease.rootFingerprintSHA256
+                                   error:&bindingError];
+  if (currentBinding == nil ||
+      ![DSHLocalProjectBindingDigest(currentBinding)
+          isEqual:lease.workspaceBindingDigest] ||
+      ![currentBinding[@"git_directory_url"]
+          isEqual:lease.workspaceGitDirectoryURL]) {
+    DSHSetAccessError(error, DSHLocalProjectAccessErrorMetadataInvalid);
+    return NO;
+  }
+  NSString *privateRootPath =
+      lease.workspaceAccess.privateRootURL.path.stringByStandardizingPath;
+  NSString *currentGitPath =
+      lease.workspaceGitDirectoryURL.path.stringByStandardizingPath;
+  if (privateRootPath.length == 0 || currentGitPath.length == 0 ||
+      ![currentGitPath hasPrefix:
+          [privateRootPath stringByAppendingString:@"/"]]) {
+    DSHSetAccessError(error, DSHLocalProjectAccessErrorUnsafeStorage);
+    return NO;
+  }
+  if (self.hook != nil) self.hook(@"before_workspace_identity_recheck");
+
+  struct stat root = {};
+  struct stat retainedRoot = {};
+  struct stat project = {};
+  struct stat repository = {};
+  struct stat git = {};
+  struct stat objects = {};
+  BOOL valid = fstat(lease.workspaceLease.rootDescriptor, &root) == 0 &&
+      fstat(lease.workspaceRootDescriptor, &retainedRoot) == 0 &&
+      fstat(lease.projectDescriptor, &project) == 0 &&
+      fstat(lease.repositoryDescriptor, &repository) == 0 &&
+      fstat(lease.gitDescriptor, &git) == 0 &&
+      fstat(lease.objectsDescriptor, &objects) == 0 &&
+      DSHLocalProjectSameStat(root, retainedRoot) &&
+      root.st_dev == lease.workspaceRootDevice &&
+      root.st_ino == lease.workspaceRootInode &&
+      (unsigned long long)root.st_dev == authorityDevice &&
+      (unsigned long long)root.st_ino == authorityInode &&
+      project.st_dev == lease.projectDevice &&
+      project.st_ino == lease.projectInode &&
+      repository.st_dev == lease.repositoryDevice &&
+      repository.st_ino == lease.repositoryInode &&
+      git.st_dev == lease.gitDevice && git.st_ino == lease.gitInode &&
+      objects.st_dev == lease.objectsDevice &&
+      objects.st_ino == lease.objectsInode && S_ISDIR(root.st_mode) &&
+      S_ISDIR(project.st_mode) && S_ISDIR(repository.st_mode) &&
+      S_ISDIR(git.st_mode) && S_ISDIR(objects.st_mode) &&
+      DSHForbiddenGitIndirectionAbsent(lease.gitDescriptor,
+                                       lease.objectsDescriptor);
+  NSString *rootPath = expectedRootPath.length > 0 ? expectedRootPath : nil;
+  struct stat pathRoot = {};
+  valid = valid && rootPath != nil &&
+      lstat(rootPath.fileSystemRepresentation, &pathRoot) == 0 &&
+      DSHLocalProjectSameStat(root, pathRoot);
+  struct stat pathGit = {};
+  struct stat pathObjects = {};
+  valid = valid && lease.workspaceGitDirectoryURL != nil &&
+      lstat(lease.workspaceGitDirectoryURL.fileSystemRepresentation, &pathGit) == 0 &&
+      DSHLocalProjectSameStat(git, pathGit) &&
+      fstatat(lease.gitDescriptor, "objects", &pathObjects,
+              AT_SYMLINK_NOFOLLOW) == 0 &&
+      DSHLocalProjectSameStat(objects, pathObjects);
+  struct stat visibleGit = {};
+  valid = valid && fstatat(lease.workspaceLease.rootDescriptor, ".git",
+                           &visibleGit, AT_SYMLINK_NOFOLLOW) != 0 && errno == ENOENT;
+  if (!valid) {
+    DSHSetAccessError(error, DSHLocalProjectAccessErrorUnsafeStorage);
+    return NO;
+  }
+
+  if (!DSHLocalProjectCanonicalDigest(lease.rootFingerprintSHA256)) {
+    DSHSetAccessError(error, DSHLocalProjectAccessErrorUnsafeStorage);
+    return NO;
+  }
+  return YES;
 }
 
 - (DSHLocalProjectLeaseSet *)

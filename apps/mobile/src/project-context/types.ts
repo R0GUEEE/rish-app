@@ -1,6 +1,8 @@
 import type { DeepSeekModelId } from '../native/LocalRuntime';
+import type { WorkspaceRootRefV1 } from '../native/WorkspaceRoot';
 
 export const PROJECT_CONTEXT_SCHEMA_VERSION = 1 as const;
+export const PROJECT_CONTEXT_V2_SCHEMA_VERSION = 2 as const;
 
 export const PROJECT_CONTEXT_STATUSES = [
   'setup_required',
@@ -68,6 +70,22 @@ export type ProjectContextBridgeErrorCode =
   | (typeof PROJECT_CONTEXT_BRIDGE_ERROR_CODES)[number];
 export type ProjectContextOmissionReason =
   (typeof PROJECT_CONTEXT_OMISSION_REASONS)[number];
+
+/**
+ * The only public authority reference accepted by Project Context V2.  The
+ * native lease adds and verifies the private root fingerprint; JavaScript
+ * never receives the fingerprint input or any path/descriptor material.
+ */
+export type ProjectContextWorkspaceRootRefV1 = WorkspaceRootRefV1;
+
+export type ProjectContextProjectDescriptorV2 = {
+  readonly schema_version: 2;
+  readonly project_id: string;
+  readonly workspace_id: string;
+  readonly workspace_binding_revision: number;
+  readonly display_name: string;
+  readonly git_topology: 'legacy_embedded' | 'private_split_gitdir';
+};
 
 export type ProjectContextIncludedItemV1 = {
   readonly path: string;
@@ -148,6 +166,123 @@ export type ProjectContextSelectionV1 = {
   readonly model: DeepSeekModelId;
   readonly policy: 'chat-read-v1';
   readonly selected_paths: readonly string[];
+};
+
+/** Candidate listing uses the root authority but remains metadata-only. */
+export type ProjectContextCandidateListRequestV2 = {
+  readonly schema_version: 1;
+  readonly root: ProjectContextWorkspaceRootRefV1;
+  readonly query: string;
+  readonly cursor: string | null;
+};
+
+export type ProjectContextCandidatePageV2 = {
+  readonly schema_version: 2;
+  readonly root: ProjectContextWorkspaceRootRefV1;
+  readonly project: ProjectContextProjectDescriptorV2;
+  readonly candidates: ProjectContextCandidatePageV1['candidates'];
+  readonly next_cursor: string | null;
+};
+
+export type ProjectContextSelectionV2 = {
+  readonly schema_version: 2;
+  readonly root: ProjectContextWorkspaceRootRefV1;
+  readonly conversation_id: string;
+  readonly model_id: DeepSeekModelId;
+  readonly policy: 'chat-read-v1';
+  readonly selected_paths: readonly string[];
+};
+
+export type ProjectContextManifestV2 = {
+  readonly schema_version: 2;
+  readonly snapshot_id: string;
+  readonly root: ProjectContextWorkspaceRootRefV1;
+  readonly project: ProjectContextProjectDescriptorV2;
+  readonly project_id: string;
+  readonly conversation_id: string;
+  readonly model_id: DeepSeekModelId;
+  readonly policy: 'chat-read-v1';
+  readonly branch: string | null;
+  readonly head_oid: string | null;
+  readonly clean: boolean;
+  readonly conflicted: boolean;
+  readonly captured_at: string;
+  readonly policy_version: string;
+  readonly included: readonly ProjectContextIncludedItemV1[];
+  readonly omitted: readonly {
+    readonly path: string;
+    readonly reason: ProjectContextOmissionReason;
+  }[];
+  readonly context_bytes: number;
+  readonly estimated_tokens: number;
+  readonly snapshot_sha256: string;
+  readonly source_fingerprint: string;
+};
+
+export type ProjectContextConfirmRequestV2 = {
+  readonly schema_version: 2;
+  readonly snapshot_id: string;
+  readonly root: ProjectContextWorkspaceRootRefV1;
+};
+
+export type ProjectContextConsentV2 = {
+  readonly schema_version: 2;
+  readonly consent_receipt_id: string;
+  readonly snapshot_id: string;
+  readonly root: ProjectContextWorkspaceRootRefV1;
+  readonly workspace_id: string;
+  readonly workspace_binding_revision: number;
+  readonly snapshot_sha256: string;
+  readonly confirmed_at: string;
+};
+
+export type ProjectContextInspectRequestV2 = {
+  readonly schema_version: 2;
+  readonly snapshot_id: string;
+  readonly root: ProjectContextWorkspaceRootRefV1;
+};
+
+/** The native V2 service returns a flat manifest plus its current state. */
+export type ProjectContextInspectionV2 = {
+  readonly schema_version: 2;
+  readonly state: 'prepared' | 'confirmed' | 'stale';
+  readonly manifest: ProjectContextManifestV2;
+};
+
+export type ProjectContextDiscardRequestV2 = {
+  readonly schema_version: 2;
+  readonly snapshot_id: string;
+  readonly root: ProjectContextWorkspaceRootRefV1;
+};
+
+export type ProjectContextDiscardResultV2 = {
+  readonly schema_version: 2;
+  readonly root: ProjectContextWorkspaceRootRefV1;
+  readonly status: 'discarded';
+  readonly snapshot_id: string;
+  readonly workspace_id: string;
+  readonly workspace_binding_revision: number;
+};
+
+export type ProjectContextVerifiedSendRequestV2 = {
+  readonly schema_version: 2;
+  readonly snapshot_id: string;
+  readonly consent_receipt_id: string;
+  readonly root: ProjectContextWorkspaceRootRefV1;
+  readonly conversation_id: string;
+  readonly model_id: DeepSeekModelId;
+  readonly policy: 'chat-read-v1';
+};
+
+/** Metadata-only result. The native envelope bytes never cross the bridge. */
+export type ProjectContextVerifiedSendReceiptV2 = {
+  readonly schema_version: 2;
+  readonly snapshot_id: string;
+  readonly root: ProjectContextWorkspaceRootRefV1;
+  readonly snapshot_sha256: string;
+  readonly source_fingerprint: string;
+  readonly context_bytes: number;
+  readonly verified_at: string;
 };
 
 export type ProjectContextInspectionV1 = {

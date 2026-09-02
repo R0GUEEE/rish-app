@@ -27,7 +27,28 @@ import { ConversationOptionsPicker } from '../src/components/ConversationOptions
 import { HarnessPicker } from '../src/components/HarnessPicker';
 import { RuntimeEvidenceSheet } from '../src/components/RuntimeEvidenceSheet';
 import { WorkspaceDrawer } from '../src/components/WorkspaceDrawer';
-import { createChatStore } from '../src/state';
+import { ApprovalComposer } from '../src/components/ApprovalComposer';
+import {
+  createChatStore,
+  safeHydrateChatState,
+  type AgentToolReceiptV1,
+} from '../src/state';
+import { sessionSnapshotSHA256 } from '../src/completion/SessionPersistence';
+import type {
+  AgentApprovalBindingTokenV2,
+  AgentAttemptProjectionV2,
+  AgentBatchCallProjectionV2,
+  AgentBatchReceiptV2,
+  AgentRoundReceiptV2,
+  AgentRuntimePolicyV1,
+  AgentRuntimeRootV1,
+  AgentRuntimeTranscriptHandleV1,
+  BindAgentApprovalRequestV2,
+  CompleteAgentRoundRequestV2,
+  ExecuteAgentToolRequestV2,
+  PrepareAgentAttemptRequestV2,
+  PrepareAgentToolBatchRequestV2,
+} from '../src/native/AgentRuntime';
 import type {
   ProjectContextInspectionV1,
   ProjectContextManifestV1,
@@ -46,8 +67,31 @@ jest.mock('../src/native/LocalRuntime', () => ({
     completeV2: jest.fn(),
     recordModelTransition: jest.fn(),
     cancelCompletion: jest.fn(),
-    persistSession: jest.fn(),
-    loadSession: jest.fn(),
+  },
+}));
+jest.mock('../src/native/SessionSnapshots', () => ({
+  SessionSnapshots: {
+    isAvailable: jest.fn(),
+    loadSessionSnapshot: jest.fn(),
+    casPersistSession: jest.fn(),
+    querySessionCommit: jest.fn(),
+  },
+}));
+jest.mock('../src/native/AgentRuntime', () => ({
+  AgentRuntime: {
+    isAvailable: jest.fn(),
+    prepareAgentAttempt: jest.fn(),
+    completeAgentRoundV2: jest.fn(),
+    prepareAgentToolBatch: jest.fn(),
+    bindAgentApproval: jest.fn(),
+    executeAgentTool: jest.fn(),
+    cancelAgentAttempt: jest.fn(),
+    queryAgentAttempt: jest.fn(),
+    queryAgentTool: jest.fn(),
+    recoverAgentAttempt: jest.fn(),
+    finalizeAgentAttempt: jest.fn(),
+    discardAgentAttempt: jest.fn(),
+    queryAgentCleanup: jest.fn(),
   },
 }));
 jest.mock('../src/agent/runAgentTurn', () => ({
@@ -76,6 +120,15 @@ jest.mock('../src/native/LocalWorkspace', () => ({
     listTrash: jest.fn(),
     restoreFromTrash: jest.fn(),
     executePortableTool: jest.fn(),
+    listV2: jest.fn(),
+    readV2: jest.fn(),
+    writeV2: jest.fn(),
+    createDirectoryV2: jest.fn(),
+    renameEntryV2: jest.fn(),
+    trashEntryV2: jest.fn(),
+    listTrashV2: jest.fn(),
+    restoreFromTrashV2: jest.fn(),
+    executePortableToolV2: jest.fn(),
   },
 }));
 jest.mock('../src/native/LocalProjects', () => ({
@@ -93,6 +146,15 @@ jest.mock('../src/native/LocalProjects', () => ({
     presentCredentialPrompt: jest.fn(),
     clearCredential: jest.fn(),
     push: jest.fn(),
+    attachWorkspaceProject: jest.fn(),
+    projectForWorkspaceV2: jest.fn(),
+    prepareProjectDetachV1: jest.fn(),
+    commitProjectDetachV1: jest.fn(),
+    statusV2: jest.fn(),
+    diffV2: jest.fn(),
+    stageAllV2: jest.fn(),
+    commitV2: jest.fn(),
+    pushV2: jest.fn(),
   },
 }));
 jest.mock('../src/native/LocalProjectContext', () => {
@@ -102,10 +164,15 @@ jest.mock('../src/native/LocalProjectContext', () => {
     LocalProjectContext: {
       isAvailable: jest.fn(),
       listCandidates: jest.fn(),
+      listCandidatesV2: jest.fn(),
       prepare: jest.fn(),
+      prepareV2: jest.fn(),
       confirm: jest.fn(),
+      confirmV2: jest.fn(),
       inspect: jest.fn(),
+      inspectV2: jest.fn(),
       discard: jest.fn(),
+      discardV2: jest.fn(),
     },
   };
 });
@@ -121,10 +188,18 @@ jest.mock('../src/native/LocalWorkspaces', () => ({
     isAvailable: jest.fn(),
     list: jest.fn(),
     create: jest.fn(),
-    grantFolder: jest.fn(),
-    importFolder: jest.fn(),
+    bootstrapLegacyProject: jest.fn(),
+    presentFolderPicker: jest.fn(),
+    importSelection: jest.fn(),
+    cancelSelection: jest.fn(),
+    presentRegrantPicker: jest.fn(),
+    completeRegrant: jest.fn(),
     resolve: jest.fn(),
     forget: jest.fn(),
+    prepareDeleteOwnedContent: jest.fn(),
+    deleteOwnedContent: jest.fn(),
+    queryOperation: jest.fn(),
+    cancelPicker: jest.fn(),
   },
 }));
 jest.mock('react-native-safe-area-context', () => {
@@ -147,9 +222,7 @@ type MockLocalRuntime = Record<
   | 'completeV2'
   | 'isCompletionV2Available'
   | 'recordModelTransition'
-  | 'cancelCompletion'
-  | 'persistSession'
-  | 'loadSession',
+  | 'cancelCompletion',
   jest.Mock
 >;
 const mockLocalRuntime = (
@@ -157,6 +230,16 @@ const mockLocalRuntime = (
     LocalRuntime: MockLocalRuntime;
   }
 ).LocalRuntime;
+const mockSessionSnapshots = (
+  jest.requireMock('../src/native/SessionSnapshots') as {
+    SessionSnapshots: Record<string, jest.Mock>;
+  }
+).SessionSnapshots;
+const mockAgentRuntime = (
+  jest.requireMock('../src/native/AgentRuntime') as {
+    AgentRuntime: Record<string, jest.Mock>;
+  }
+).AgentRuntime;
 const mockRunAgentTurn = (
   jest.requireMock('../src/agent/runAgentTurn') as {
     runAgentTurn: jest.Mock;
@@ -291,6 +374,40 @@ const contextProject = {
   origin_url: null,
 };
 
+const APP_WORKSPACE_ID = 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa';
+
+function appWorkspaceDescriptor(
+  workspaceId = APP_WORKSPACE_ID,
+  displayName = 'Workspace',
+) {
+  return {
+    schema_version: 2 as const,
+    workspace_id: workspaceId,
+    display_name: displayName,
+    origin: 'rish_created' as const,
+    status: 'ok' as const,
+    binding_revision: 1,
+    capabilities: {
+      read: true,
+      write: true,
+      git: false,
+      project_context: false,
+      files_visible: true,
+    },
+    created_at: '2026-08-30T00:00:00.000Z',
+    last_opened_at: '2026-08-30T00:00:00.000Z',
+  };
+}
+
+function appWorkspaceRoot(request: { root: { workspace_id: string; binding_revision: number; project_id: string | null } }) {
+  return {
+    schema_version: 1 as const,
+    workspace_id: request.root.workspace_id,
+    binding_revision: request.root.binding_revision,
+    project_id: request.root.project_id,
+  };
+}
+
 function contextManifest(): ProjectContextManifestV1 {
   return {
     schema_version: 1,
@@ -387,6 +504,119 @@ function storedProjectContext(confirmed: boolean) {
   return { stored, conversationId, manifest };
 }
 
+function storedAgentProject() {
+  const fixture = storedProjectContext(true);
+  const state = fixture.stored.getState();
+  const conversation = state.conversations[fixture.conversationId]!;
+  const conversationId = '10101010-1010-4010-8010-101010101010';
+  const stored = createChatStore({
+    initialState: {
+      ...state,
+      conversations: {
+        [conversationId]: {
+          ...conversation,
+          id: conversationId,
+          workspaceId: CONTEXT_RUNTIME_ID,
+          workspaceBinding: {
+            schemaVersion: 1,
+            workspaceId: CONTEXT_RUNTIME_ID,
+            bindingRevision: 1,
+            projectId: CONTEXT_PROJECT_ID,
+          },
+          workspaceBootstrapState: 'none',
+        },
+      },
+      conversationOrder: [conversationId],
+      selectedConversationId: conversationId,
+    },
+  });
+  return { ...fixture, stored, conversationId };
+}
+
+function mockConfirmedAgentProjectInspection(
+  manifest: ProjectContextManifestV1,
+): void {
+  mockLocalProjectContext.inspectV2.mockReset();
+  mockLocalProjectContext.inspectV2.mockImplementation(
+    async (request: {
+      schema_version: 2;
+      snapshot_id: string;
+      root: {
+        schema_version: 1;
+        workspace_id: string;
+        binding_revision: number;
+        project_id: string;
+      };
+    }) => ({
+      schema_version: 2,
+      state: 'confirmed',
+      manifest: {
+        schema_version: 2,
+        snapshot_id: request.snapshot_id,
+        root: request.root,
+        project: {
+          schema_version: 2,
+          project_id: CONTEXT_PROJECT_ID,
+          workspace_id: request.root.workspace_id,
+          workspace_binding_revision: request.root.binding_revision,
+          display_name: contextProject.name,
+          git_topology: 'legacy_embedded',
+        },
+        project_id: CONTEXT_PROJECT_ID,
+        conversation_id: CONTEXT_RUNTIME_ID,
+        model_id: manifest.model,
+        policy: 'chat-read-v1',
+        branch: manifest.branch,
+        head_oid: manifest.head_oid,
+        clean: manifest.clean,
+        conflicted: manifest.conflicted,
+        captured_at: manifest.captured_at,
+        policy_version: manifest.policy_version,
+        included: manifest.included,
+        omitted: manifest.omitted,
+        context_bytes: manifest.context_bytes,
+        estimated_tokens: manifest.estimated_tokens,
+        snapshot_sha256: manifest.snapshot_sha256,
+        source_fingerprint: manifest.source_fingerprint,
+      },
+    }),
+  );
+}
+
+function mockAgentWorkspaceAuthority(): void {
+  const workspace = {
+    ...appWorkspaceDescriptor(CONTEXT_RUNTIME_ID, contextProject.name),
+    capabilities: {
+      read: true,
+      write: true,
+      git: true,
+      project_context: true,
+      files_visible: true,
+    },
+  };
+  mockLocalWorkspaces.list.mockResolvedValue({
+    schema_version: 1,
+    workspaces: [workspace],
+  });
+  mockLocalWorkspaces.resolve.mockResolvedValue({
+    schema_version: 1,
+    disposition: 'direct',
+    workspace,
+  });
+  mockLocalProjects.projectForWorkspaceV2.mockResolvedValue({
+    schema_version: 1,
+    status: 'attached',
+    project: {
+      schema_version: 2,
+      project_id: CONTEXT_PROJECT_ID,
+      workspace_id: CONTEXT_RUNTIME_ID,
+      workspace_binding_revision: 1,
+      display_name: contextProject.name,
+      git_topology: 'legacy_embedded',
+    },
+  });
+}
+
 function storedSetupProject() {
   const stored = createChatStore({
     now: () => '2026-08-28T00:00:00.000Z',
@@ -448,9 +678,9 @@ function storedLifecycleCheckpoint(
 }
 
 async function settle() {
-  await Promise.resolve();
-  await Promise.resolve();
-  await Promise.resolve();
+  for (let index = 0; index < 24; index += 1) {
+    await Promise.resolve();
+  }
 }
 
 async function renderApp(): Promise<Renderer> {
@@ -464,8 +694,8 @@ async function renderApp(): Promise<Renderer> {
 }
 
 function lastPersistedState() {
-  const calls = mockLocalRuntime.persistSession.mock.calls;
-  const serialized = calls.at(-1)?.[0];
+  const calls = mockSessionSnapshots.casPersistSession.mock.calls;
+  const serialized = calls.at(-1)?.[0]?.candidate_json;
   if (typeof serialized !== 'string') throw new Error('no persisted state');
   return JSON.parse(serialized) as {
     active_conversation_id: string;
@@ -480,6 +710,13 @@ function lastPersistedState() {
         consent: null | { consent_receipt_id: string };
       };
       workspace_id: string | null;
+      workspace_binding: null | {
+        schema_version: 1;
+        workspace_id: string;
+        binding_revision: number;
+        project_id: string | null;
+      };
+      runtime_context_id: string | null;
       thinking_mode: string;
       attempts?: Array<{
         attempt_id: string;
@@ -514,13 +751,87 @@ function lastPersistedState() {
   };
 }
 
+function lastPersistedCandidateJSON(): string {
+  const serialized =
+    mockSessionSnapshots.casPersistSession.mock.calls.at(-1)?.[0]
+      ?.candidate_json;
+  if (typeof serialized !== 'string') throw new Error('no persisted state');
+  return serialized;
+}
+
 function persistedStates(): Array<ReturnType<typeof lastPersistedState>> {
-  return mockLocalRuntime.persistSession.mock.calls.flatMap(call => {
-    const value = call[0];
+  return mockSessionSnapshots.casPersistSession.mock.calls.flatMap(call => {
+    const value = call[0]?.candidate_json;
     return typeof value === 'string'
       ? [JSON.parse(value) as ReturnType<typeof lastPersistedState>]
       : [];
   });
+}
+
+function sessionOnlyResultFor(request: { candidate_json: string }) {
+  const current = bridgedAuthority();
+  const generation =
+    current.kind === 'present' ? current.snapshot.generation + 1 : 1;
+  return {
+    schema_version: 1,
+    status: 'session_only' as const,
+    current: {
+      schema_version: 1 as const,
+      kind: 'present' as const,
+      snapshot: {
+        schema_version: 1 as const,
+        generation,
+        session_sha256: sessionSnapshotSHA256(request.candidate_json)!,
+      },
+    },
+  };
+}
+
+function notCommittedResult() {
+  return {
+    schema_version: 1,
+    status: 'not_committed' as const,
+    current: bridgedAuthority(),
+  };
+}
+
+function unknownResult() {
+  return {
+    schema_version: 1,
+    status: 'unknown' as const,
+    current: bridgedAuthority(),
+  };
+}
+
+function queuePresentSession(sessionJSON: string, generation = 1): void {
+  bridgedSessionJSON = sessionJSON;
+  bridgedGeneration = generation;
+  mockSessionSnapshots.loadSessionSnapshot.mockResolvedValueOnce(
+    presentLoadResult(sessionJSON, generation),
+  );
+}
+
+function queueLegacySession(sessionJSON: string): void {
+  bridgedSessionJSON = sessionJSON;
+  bridgedGeneration = 0;
+  mockSessionSnapshots.loadSessionSnapshot.mockResolvedValueOnce(
+    legacyLoadResult(sessionJSON),
+  );
+}
+
+function queueDeferredSessionLoad(load: Promise<string | null>): void {
+  mockSessionSnapshots.loadSessionSnapshot.mockReturnValueOnce(
+    load.then(sessionJSON =>
+      sessionJSON === null
+        ? {
+            schema_version: 1,
+            status: 'missing',
+            snapshot: null,
+            session_json: null,
+          }
+        : presentLoadResult(sessionJSON),
+    ),
+  );
 }
 
 function actionByLabel(
@@ -552,7 +863,7 @@ async function openProjectsSurface(root: ReactTestInstance): Promise<void> {
 
 async function renderSetupProjectApp(): Promise<Renderer> {
   const fixture = storedSetupProject();
-  mockLocalRuntime.loadSession.mockResolvedValueOnce(fixture.stored.serialize());
+  queuePresentSession(fixture.stored.serialize());
   mockLocalProjects.list.mockResolvedValue({
     schema_version: 1,
     projects: [contextProject],
@@ -619,22 +930,16 @@ test('binds the active conversation to a chosen local workspace', async () => {
     schema_version: 1,
     workspaces: [
       {
-        schema_version: 1,
-        workspace_id: 'ws-alpha',
-        display_name: 'Alpha',
-        origin: 'rish_created',
-        created_at: '2026-08-27T01:00:00.000Z',
-        last_opened_at: '2026-08-27T01:00:00.000Z',
-        status: 'ok',
+        ...appWorkspaceDescriptor(
+          'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa',
+          'Alpha',
+        ),
       },
       {
-        schema_version: 1,
-        workspace_id: 'ws-beta',
-        display_name: 'Beta',
-        origin: 'granted_folder',
-        created_at: '2026-08-27T01:00:00.000Z',
-        last_opened_at: '2026-08-27T01:00:00.000Z',
-        status: 'ok',
+        ...appWorkspaceDescriptor(
+          'bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb',
+          'Beta',
+        ),
       },
     ],
   });
@@ -660,7 +965,384 @@ test('binds the active conversation to a chosen local workspace', async () => {
   });
 
   expect(sheetHosts()).toHaveLength(0);
-  expect(lastPersistedState().conversations[0]?.workspace_id).toBe('ws-alpha');
+  expect(lastPersistedState().conversations[0]?.workspace_id).toBe(
+    'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa',
+  );
+});
+
+test('creates a new project chat from a workspace-only active conversation', async () => {
+  jest.useFakeTimers();
+  const harnessWorkspaceId = 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa';
+  const spoonWorkspaceId = CONTEXT_RUNTIME_ID;
+  const harnessWorkspace = appWorkspaceDescriptor(
+    harnessWorkspaceId,
+    'Harness',
+  );
+  const spoonWorkspace = {
+    ...appWorkspaceDescriptor(spoonWorkspaceId, 'Spoon'),
+    capabilities: {
+      read: true,
+      write: true,
+      git: true,
+      project_context: true,
+      files_visible: true,
+    },
+  };
+  const projectRoot = {
+    schema_version: 1 as const,
+    workspace_id: spoonWorkspaceId,
+    binding_revision: 1,
+    project_id: contextProject.id,
+  };
+  const projectDescriptor = {
+    schema_version: 2 as const,
+    project_id: contextProject.id,
+    workspace_id: spoonWorkspaceId,
+    workspace_binding_revision: 1,
+    display_name: contextProject.name,
+    git_topology: 'legacy_embedded' as const,
+  };
+  const manifest = contextManifest();
+  mockLocalWorkspaces.list.mockResolvedValue({
+    schema_version: 1,
+    workspaces: [harnessWorkspace, spoonWorkspace],
+  });
+  mockLocalWorkspaces.bootstrapLegacyProject.mockResolvedValue(
+    spoonWorkspace,
+  );
+  mockLocalWorkspaces.resolve.mockImplementation(async request => ({
+    schema_version: 1,
+    disposition: 'direct',
+    workspace:
+      request.workspace_id === spoonWorkspaceId
+        ? spoonWorkspace
+        : harnessWorkspace,
+  }));
+  mockLocalProjects.projectForWorkspaceV2.mockImplementation(async root =>
+    root.workspace_id === spoonWorkspaceId
+      ? {
+          schema_version: 1,
+          status: 'attached',
+          project: projectDescriptor,
+        }
+      : { schema_version: 1, status: 'none' },
+  );
+  mockLocalProjects.list.mockResolvedValue({
+    schema_version: 1,
+    projects: [contextProject],
+  });
+  mockLocalProjectContext.listCandidatesV2.mockImplementation(
+    async request => ({
+      schema_version: 2,
+      root: request.root,
+      project: projectDescriptor,
+      candidates: [
+        {
+          path: 'README.md',
+          size: 16,
+          revision: 'f'.repeat(40),
+          git_state: 'unchanged',
+          eligible: true,
+          omission_reason: null,
+        },
+      ],
+      next_cursor: null,
+    }),
+  );
+  mockLocalProjectContext.prepareV2.mockImplementation(async request => ({
+    schema_version: 2,
+    snapshot_id: CONTEXT_SNAPSHOT_ID,
+    root: request.root,
+    project: projectDescriptor,
+    project_id: contextProject.id,
+    conversation_id: request.conversation_id,
+    model_id: request.model_id,
+    policy: 'chat-read-v1',
+    branch: manifest.branch,
+    head_oid: manifest.head_oid,
+    clean: manifest.clean,
+    conflicted: manifest.conflicted,
+    captured_at: manifest.captured_at,
+    policy_version: manifest.policy_version,
+    included: manifest.included,
+    omitted: manifest.omitted,
+    context_bytes: manifest.context_bytes,
+    estimated_tokens: manifest.estimated_tokens,
+    snapshot_sha256: manifest.snapshot_sha256,
+    source_fingerprint: manifest.source_fingerprint,
+  }));
+  mockLocalProjectContext.confirmV2.mockImplementation(async request => ({
+    schema_version: 2,
+    consent_receipt_id: CONTEXT_CONSENT_ID,
+    snapshot_id: request.snapshot_id,
+    root: request.root,
+    workspace_id: request.root.workspace_id,
+    workspace_binding_revision: request.root.binding_revision,
+    snapshot_sha256: manifest.snapshot_sha256,
+    confirmed_at: '2026-08-28T00:00:01.000Z',
+  }));
+  const renderer = await renderApp();
+  const root = renderer.root;
+
+  await act(async () =>
+    actionByLabel(root, 'Choose workspace').props.onPress(),
+  );
+  await act(async () => settle());
+  await act(async () => {
+    const popover = root.findByProps({
+      testID: 'workspace-picker-sheet',
+    }) as ReactTestInstance;
+    actionByLabel(popover, 'Use Harness').props.onPress();
+    await settle();
+  });
+
+  const workspaceOnly = lastPersistedState();
+  const workspaceConversationId = workspaceOnly.active_conversation_id;
+  expect(workspaceOnly.conversations).toHaveLength(1);
+  expect(workspaceOnly.conversations[0]).toMatchObject({
+    id: workspaceConversationId,
+    workspace_id: harnessWorkspaceId,
+    project_id: null,
+    project_context: null,
+  });
+
+  await openProjectsSurface(root);
+  await act(async () => {
+    await root.findByType(ProjectsSurface).props.onChatInProject(contextProject);
+    await settle();
+  });
+  const bootstrapOperationId =
+    mockLocalWorkspaces.bootstrapLegacyProject.mock.calls[0]?.[0]
+      .operation_id;
+  expect(mockLocalWorkspaces.bootstrapLegacyProject.mock.calls[0]?.[0]).toEqual({
+    schema_version: 1,
+    operation_id: bootstrapOperationId,
+    project_id: contextProject.id,
+  });
+  expect(bootstrapOperationId).toMatch(
+    /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-8[0-9a-f]{3}-[0-9a-f]{12}$/u,
+  );
+  await act(async () => {
+    jest.advanceTimersByTime(180);
+    await settle();
+  });
+
+  const persisted = lastPersistedState();
+  expect(persisted.conversations).toHaveLength(2);
+  expect(
+    persisted.conversations.find(
+      conversation => conversation.id === workspaceConversationId,
+    ),
+  ).toMatchObject({
+    workspace_id: harnessWorkspaceId,
+    project_id: null,
+    project_context: null,
+  });
+  const selected = persisted.conversations.find(
+    conversation => conversation.id === persisted.active_conversation_id,
+  );
+  expect(selected?.id).not.toBe(workspaceConversationId);
+  expect(selected).toMatchObject({
+    workspace_id: spoonWorkspaceId,
+    workspace_binding: {
+      binding_revision: 1,
+      project_id: contextProject.id,
+    },
+    project_id: contextProject.id,
+    project_context: { status: 'setup_required' },
+  });
+  expect(visibleContextSheets(root)).toHaveLength(1);
+  expect(visibleContextSheets(root)[0]?.props.mode).toBe('candidates');
+  expect(visibleContextSheets(root)[0]?.props.projectName).toBe(
+    contextProject.name,
+  );
+  expect(mockLocalProjectContext.listCandidatesV2).toHaveBeenCalledWith({
+    schema_version: 1,
+    root: projectRoot,
+    query: '',
+    cursor: null,
+  });
+  expect(mockSessionSnapshots.casPersistSession).toHaveBeenCalledTimes(2);
+  expect(bridgedSessionJSON).toBe(lastPersistedCandidateJSON());
+
+  await act(async () =>
+    root
+      .findByProps({ testID: 'project-context-candidate-README.md' })
+      .props.onPress(),
+  );
+  await act(async () => {
+    actionByLabel(root, 'Prepare context').props.onPress();
+    await settle();
+    await settle();
+  });
+  expect(mockLocalProjectContext.prepareV2).toHaveBeenCalledWith(
+    expect.objectContaining({
+      schema_version: 2,
+      root: projectRoot,
+      conversation_id: expect.any(String),
+      selected_paths: ['README.md'],
+    }),
+  );
+  expect(visibleContextSheets(root)[0]?.props.mode).toBe('disclosure');
+  expect(visibleContextSheets(root)[0]?.props.confirmationRequired).toBe(true);
+
+  await act(async () => {
+    actionByLabel(root, 'Confirm context').props.onPress();
+    await settle();
+    await settle();
+  });
+  expect(mockLocalProjectContext.confirmV2).toHaveBeenCalledWith({
+    schema_version: 2,
+    snapshot_id: CONTEXT_SNAPSHOT_ID,
+    root: projectRoot,
+  });
+  const confirmed = lastPersistedState().conversations.find(
+    conversation => conversation.id === persisted.active_conversation_id,
+  );
+  expect(confirmed).toMatchObject({
+    workspace_id: spoonWorkspaceId,
+    workspace_binding: {
+      binding_revision: 1,
+      project_id: contextProject.id,
+    },
+    project_id: contextProject.id,
+    project_context: {
+      status: 'ready',
+      selected_paths: ['README.md'],
+      manifest: { snapshot_id: CONTEXT_SNAPSHOT_ID },
+      consent: { consent_receipt_id: CONTEXT_CONSENT_ID },
+    },
+  });
+  expect(
+    mockLocalProjectContext.prepareV2.mock.calls[0]?.[0].conversation_id,
+  ).toBe(confirmed?.runtime_context_id);
+  jest.useRealTimers();
+});
+
+test('does not create a chat when legacy project bootstrap fails', async () => {
+  const workspaceId = 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa';
+  mockLocalWorkspaces.list.mockResolvedValue({
+    schema_version: 1,
+    workspaces: [appWorkspaceDescriptor(workspaceId, 'Alpha')],
+  });
+  mockLocalProjects.list.mockResolvedValue({
+    schema_version: 1,
+    projects: [contextProject],
+  });
+  const renderer = await renderApp();
+  const root = renderer.root;
+
+  await act(async () =>
+    actionByLabel(root, 'Choose workspace').props.onPress(),
+  );
+  await act(async () => settle());
+  await act(async () => {
+    const popover = root.findByProps({
+      testID: 'workspace-picker-sheet',
+    }) as ReactTestInstance;
+    actionByLabel(popover, 'Use Alpha').props.onPress();
+    await settle();
+  });
+  const workspaceOnly = lastPersistedState();
+  mockLocalWorkspaces.bootstrapLegacyProject.mockRejectedValueOnce({
+    code: 'E_WORKSPACE_UNAVAILABLE',
+    message: 'RAW_BOOTSTRAP /private/project',
+  });
+
+  await openProjectsSurface(root);
+  await act(async () => {
+    await root.findByType(ProjectsSurface).props.onChatInProject(contextProject);
+    await settle();
+  });
+
+  expect(visibleContextSheets(root)).toHaveLength(0);
+  expect(mockLocalProjectContext.listCandidatesV2).not.toHaveBeenCalled();
+  expect(mockSessionSnapshots.casPersistSession).toHaveBeenCalledTimes(1);
+  expect(lastPersistedState()).toEqual(workspaceOnly);
+  expect(root.findByType(ChatDrawer).props.conversations).toHaveLength(1);
+  expect(JSON.stringify(renderer.toJSON())).toContain(
+    'E_WORKSPACE_UNAVAILABLE',
+  );
+  expect(JSON.stringify(renderer.toJSON())).not.toContain('RAW_BOOTSTRAP');
+});
+
+test('shows workspace recovery and no Context when project binding durability is unknown', async () => {
+  const workspaceId = 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa';
+  const workspace = {
+    ...appWorkspaceDescriptor(workspaceId, 'Alpha'),
+    capabilities: {
+      read: true,
+      write: true,
+      git: true,
+      project_context: true,
+      files_visible: true,
+    },
+  };
+  const projectDescriptor = {
+    schema_version: 2 as const,
+    project_id: contextProject.id,
+    workspace_id: workspaceId,
+    workspace_binding_revision: 1,
+    display_name: contextProject.name,
+    git_topology: 'legacy_embedded' as const,
+  };
+  mockLocalWorkspaces.list.mockResolvedValue({
+    schema_version: 1,
+    workspaces: [workspace],
+  });
+  mockLocalWorkspaces.resolve.mockResolvedValue({
+    schema_version: 1,
+    disposition: 'direct',
+    workspace,
+  });
+  mockLocalWorkspaces.bootstrapLegacyProject.mockResolvedValue(workspace);
+  mockLocalProjects.list.mockResolvedValue({
+    schema_version: 1,
+    projects: [contextProject],
+  });
+  mockLocalProjects.projectForWorkspaceV2
+    .mockResolvedValueOnce({
+      schema_version: 1,
+      status: 'none',
+    })
+    .mockResolvedValue({
+      schema_version: 1,
+      status: 'attached',
+      project: projectDescriptor,
+    });
+  const renderer = await renderApp();
+  const root = renderer.root;
+
+  await act(async () =>
+    actionByLabel(root, 'Choose workspace').props.onPress(),
+  );
+  await act(async () => settle());
+  await act(async () => {
+    const popover = root.findByProps({
+      testID: 'workspace-picker-sheet',
+    }) as ReactTestInstance;
+    actionByLabel(popover, 'Use Alpha').props.onPress();
+    await settle();
+  });
+  const committedWorkspaceOnly = bridgedSessionJSON;
+  mockSessionSnapshots.casPersistSession.mockResolvedValueOnce(unknownResult());
+  mockSessionSnapshots.querySessionCommit.mockResolvedValueOnce({
+    schema_version: 1,
+    status: 'unknown',
+  });
+
+  await openProjectsSurface(root);
+  await act(async () => {
+    await root.findByType(ProjectsSurface).props.onChatInProject(contextProject);
+    await settle();
+  });
+
+  expect(visibleContextSheets(root)).toHaveLength(0);
+  expect(mockLocalProjectContext.listCandidatesV2).not.toHaveBeenCalled();
+  expect(actionByLabel(root, 'Retry workspace binding')).toBeDefined();
+  expect(mockSessionSnapshots.casPersistSession).toHaveBeenCalledTimes(2);
+  expect(mockSessionSnapshots.querySessionCommit).toHaveBeenCalledTimes(1);
+  expect(bridgedSessionJSON).toBe(committedWorkspaceOnly);
 });
 
 async function chooseAttachmentSource(
@@ -675,8 +1357,168 @@ async function chooseAttachmentSource(
   });
 }
 
+type AppSessionAuthority =
+  | { schema_version: 1; kind: 'missing' }
+  | {
+      schema_version: 1;
+      kind: 'legacy_present';
+      legacy: { schema_version: 1; legacy_bytes_sha256: string };
+    }
+  | {
+      schema_version: 1;
+      kind: 'present';
+      snapshot: {
+        schema_version: 1;
+        generation: number;
+        session_sha256: string;
+      };
+    };
+
+let bridgedSessionJSON: string | null = null;
+let bridgedGeneration = 0;
+let bridgedLegacyBytesSha256 = 'a'.repeat(64);
+let bootstrappedLegacyProjectId: string | null = null;
+const bridgedOperations = new Map<
+  string,
+  {
+    candidateJSON: string;
+    snapshot: { schema_version: 1; generation: number; session_sha256: string };
+  }
+>();
+
+function bridgedAuthority(): AppSessionAuthority {
+  if (bridgedSessionJSON === null) {
+    return { schema_version: 1, kind: 'missing' };
+  }
+  let schema: unknown;
+  try {
+    schema = JSON.parse(bridgedSessionJSON).schema_version;
+  } catch {
+    return { schema_version: 1, kind: 'missing' };
+  }
+  if (typeof schema !== 'number') {
+    return { schema_version: 1, kind: 'missing' };
+  }
+  if (schema === 9) {
+    const digest = sessionSnapshotSHA256(bridgedSessionJSON);
+    if (digest === null) return { schema_version: 1, kind: 'missing' };
+    return {
+      schema_version: 1,
+      kind: 'present',
+      snapshot: {
+        schema_version: 1,
+        generation: Math.max(1, bridgedGeneration),
+        session_sha256: digest,
+      },
+    };
+  }
+  if (schema >= 2 && schema <= 8) {
+    return {
+      schema_version: 1,
+      kind: 'legacy_present',
+      legacy: {
+        schema_version: 1,
+        legacy_bytes_sha256: bridgedLegacyBytesSha256,
+      },
+    };
+  }
+  return { schema_version: 1, kind: 'missing' };
+}
+
+function bridgedLoadResult(): unknown {
+  if (bridgedSessionJSON === null) {
+    return {
+      schema_version: 1,
+      status: 'missing',
+      snapshot: null,
+      session_json: null,
+    };
+  }
+  const authority = bridgedAuthority();
+  if (authority.kind === 'present') {
+    return {
+      schema_version: 1,
+      status: 'present',
+      snapshot: authority.snapshot,
+      session_json: bridgedSessionJSON,
+    };
+  }
+  if (authority.kind === 'legacy_present') {
+    return {
+      schema_version: 1,
+      status: 'legacy_present',
+      legacy: authority.legacy,
+      session_json: bridgedSessionJSON,
+    };
+  }
+  return bridgedSessionJSON;
+}
+
+function sameBridgedAuthority(
+  left: AppSessionAuthority,
+  right: AppSessionAuthority,
+): boolean {
+  if (left.kind !== right.kind) return false;
+  if (left.kind === 'missing' || right.kind === 'missing') return true;
+  if (left.kind === 'legacy_present' && right.kind === 'legacy_present') {
+    return (
+      left.legacy.legacy_bytes_sha256 === right.legacy.legacy_bytes_sha256
+    );
+  }
+  if (left.kind !== 'present' || right.kind !== 'present') return false;
+  return (
+    left.snapshot.generation === right.snapshot.generation &&
+    left.snapshot.session_sha256 === right.snapshot.session_sha256
+  );
+}
+
+function commitBridgedCandidate(request: {
+  operation_id: string;
+  candidate_json: string;
+}) {
+  const digest = sessionSnapshotSHA256(request.candidate_json);
+  if (digest === null) {
+    return {
+      schema_version: 1,
+      status: 'unknown' as const,
+      current: bridgedAuthority(),
+    };
+  }
+  const current = bridgedAuthority();
+  bridgedSessionJSON = request.candidate_json;
+  bridgedGeneration =
+    current.kind === 'present' ? current.snapshot.generation + 1 : 1;
+  const snapshot = {
+    schema_version: 1 as const,
+    generation: bridgedGeneration,
+    session_sha256: digest,
+  };
+  bridgedOperations.set(request.operation_id, {
+    candidateJSON: request.candidate_json,
+    snapshot,
+  });
+  return { schema_version: 1, status: 'committed' as const, snapshot };
+}
+
 beforeEach(() => {
   jest.clearAllMocks();
+  mockSessionSnapshots.isAvailable.mockReset();
+  mockSessionSnapshots.loadSessionSnapshot.mockReset();
+  mockSessionSnapshots.casPersistSession.mockReset();
+  mockSessionSnapshots.querySessionCommit.mockReset();
+  mockLocalProjectContext.listCandidatesV2.mockReset();
+  mockLocalProjectContext.prepareV2.mockReset();
+  mockLocalProjectContext.confirmV2.mockReset();
+  mockLocalProjectContext.discardV2.mockReset();
+  mockLocalWorkspaces.bootstrapLegacyProject.mockReset();
+  mockLocalWorkspaces.resolve.mockReset();
+  mockLocalProjects.projectForWorkspaceV2.mockReset();
+  Object.values(mockAgentRuntime).forEach(method => method.mockReset());
+  bridgedSessionJSON = null;
+  bridgedGeneration = 0;
+  bridgedLegacyBytesSha256 = 'a'.repeat(64);
+  bootstrappedLegacyProjectId = null;
+  bridgedOperations.clear();
   let requestCounter = 0;
   mockLocalRuntime.isAvailable.mockReturnValue(true);
   mockLocalRuntime.createCompletionRequestId.mockImplementation(
@@ -688,8 +1530,38 @@ beforeEach(() => {
   );
   mockLocalRuntime.credentialStatus.mockResolvedValue({ status: 'configured' });
   mockLocalRuntime.bootstrap.mockResolvedValue({ proof, rish: {} });
-  mockLocalRuntime.loadSession.mockResolvedValue(null);
-  mockLocalRuntime.persistSession.mockResolvedValue(true);
+  mockSessionSnapshots.isAvailable.mockReturnValue(true);
+  mockAgentRuntime.isAvailable.mockReturnValue(false);
+  mockSessionSnapshots.loadSessionSnapshot.mockImplementation(async () =>
+    bridgedLoadResult(),
+  );
+  mockSessionSnapshots.casPersistSession.mockImplementation(async request => {
+    const expected = request.expected as AppSessionAuthority;
+    const operationId = request.operation_id as string;
+    const replay = bridgedOperations.get(operationId);
+    if (replay !== undefined) {
+      return replay.candidateJSON === request.candidate_json
+        ? { schema_version: 1, status: 'committed', snapshot: replay.snapshot }
+        : {
+            schema_version: 1,
+            status: 'conflict',
+            current: bridgedAuthority(),
+          };
+    }
+    const current = bridgedAuthority();
+    if (!sameBridgedAuthority(expected, current)) {
+      return { schema_version: 1, status: 'conflict', current };
+    }
+    return commitBridgedCandidate(request);
+  });
+  mockSessionSnapshots.querySessionCommit.mockImplementation(
+    async (request: { operation_id: string }) => {
+      const operation = bridgedOperations.get(request.operation_id);
+      return operation === undefined
+        ? { schema_version: 1, status: 'not_started' }
+        : { schema_version: 1, status: 'committed', snapshot: operation.snapshot };
+    },
+  );
   mockLocalRuntime.complete.mockResolvedValue({
     text: 'SIMULATOR_LOCAL_OK',
     model: 'deepseek-v4-flash',
@@ -771,11 +1643,147 @@ beforeEach(() => {
     protocol_version: 1,
     path_kind: 'portable_applet',
   });
+  mockLocalWorkspace.listV2.mockImplementation(
+    async (request: {
+      root: { workspace_id: string; binding_revision: number; project_id: string | null };
+      path: string;
+    }) => ({
+      schema_version: 1,
+      root: appWorkspaceRoot(request),
+      path: request.path,
+      entries: [],
+    }),
+  );
+  mockLocalWorkspace.listTrashV2.mockImplementation(
+    async (request: {
+      root: { workspace_id: string; binding_revision: number; project_id: string | null };
+    }) => ({
+      schema_version: 1,
+      root: appWorkspaceRoot(request),
+      entries: [],
+      invalid_record_count: 0,
+    }),
+  );
+  mockLocalWorkspace.writeV2.mockImplementation(
+    async (request: {
+      root: { workspace_id: string; binding_revision: number; project_id: string | null };
+      path: string;
+      content: string;
+      create_only: boolean;
+    }) => ({
+      schema_version: 1,
+      root: appWorkspaceRoot(request),
+      file: {
+        path: request.path,
+        name: request.path.split('/').at(-1) ?? request.path,
+        kind: 'file',
+        size: request.content.length,
+        modified_at: '2026-08-30T00:00:00.000Z',
+        revision: 'rev-1',
+      },
+      created: request.create_only,
+    }),
+  );
+  mockLocalWorkspace.readV2.mockImplementation(
+    async (request: {
+      root: { workspace_id: string; binding_revision: number; project_id: string | null };
+      path: string;
+    }) => ({
+      schema_version: 1,
+      root: appWorkspaceRoot(request),
+      path: request.path,
+      file: {
+        path: request.path,
+        name: request.path.split('/').at(-1) ?? request.path,
+        kind: 'file',
+        size: 5,
+        modified_at: '2026-08-30T00:00:00.000Z',
+        revision: 'rev-1',
+      },
+      content: 'hello',
+    }),
+  );
+  mockLocalWorkspace.executePortableToolV2.mockImplementation(
+    async (request: {
+      root: { workspace_id: string; binding_revision: number; project_id: string | null };
+      tool: string;
+      path: string;
+    }) => ({
+      schema_version: 1,
+      root: appWorkspaceRoot(request),
+      tool: request.tool,
+      path: request.path,
+      exit_code: 0,
+      stdout: 'abc  note.md\n',
+      stderr: '',
+      protocol_version: 1,
+      path_kind: 'portable_applet',
+    }),
+  );
   mockLocalProjects.isAvailable.mockReturnValue(true);
   mockLocalProjects.list.mockResolvedValue({
     schema_version: 1,
     projects: [],
   });
+  mockLocalProjects.projectForWorkspaceV2.mockImplementation(async root =>
+    bootstrappedLegacyProjectId !== null &&
+    root.workspace_id === CONTEXT_RUNTIME_ID
+      ? {
+          schema_version: 1,
+          status: 'attached',
+          project: {
+            schema_version: 2,
+            project_id: bootstrappedLegacyProjectId,
+            workspace_id: CONTEXT_RUNTIME_ID,
+            workspace_binding_revision: 1,
+            display_name: contextProject.name,
+            git_topology: 'legacy_embedded',
+          },
+        }
+      : { schema_version: 1, status: 'none' },
+  );
+  mockLocalWorkspaces.list.mockResolvedValue({
+    schema_version: 1,
+    workspaces: [],
+  });
+  mockLocalWorkspaces.create.mockResolvedValue(appWorkspaceDescriptor());
+  mockLocalWorkspaces.bootstrapLegacyProject.mockImplementation(
+    async request => {
+      bootstrappedLegacyProjectId = request.project_id;
+      return {
+        ...appWorkspaceDescriptor(CONTEXT_RUNTIME_ID, contextProject.name),
+        capabilities: {
+          read: true,
+          write: true,
+          git: true,
+          project_context: true,
+          files_visible: true,
+        },
+      };
+    },
+  );
+  mockLocalWorkspaces.resolve.mockImplementation(
+    async (request: { workspace_id: string; expected_binding_revision: number }) => {
+      const workspace = appWorkspaceDescriptor(request.workspace_id);
+      return {
+        schema_version: 1,
+        disposition: 'direct',
+        workspace:
+          request.workspace_id === CONTEXT_RUNTIME_ID
+            ? {
+                ...workspace,
+                capabilities: {
+                  read: true,
+                  write: true,
+                  git: true,
+                  project_context: true,
+                  files_visible: true,
+                },
+              }
+            : workspace,
+      };
+    },
+  );
   mockLocalProjects.status.mockResolvedValue({
     schema_version: 1,
     project_id: 'project-1',
@@ -810,18 +1818,104 @@ beforeEach(() => {
       next_cursor: null,
     }),
   );
+  mockLocalProjectContext.listCandidatesV2.mockImplementation(async request => {
+    const page = await mockLocalProjectContext.listCandidates(
+      request.root.project_id,
+      request.query,
+      request.cursor,
+    );
+    return {
+      schema_version: 2,
+      root: request.root,
+      project: {
+        schema_version: 2,
+        project_id: request.root.project_id,
+        workspace_id: request.root.workspace_id,
+        workspace_binding_revision: request.root.binding_revision,
+        display_name: contextProject.name,
+        git_topology: 'legacy_embedded',
+      },
+      candidates: page.candidates,
+      next_cursor: page.next_cursor,
+    };
+  });
   mockLocalProjectContext.prepare.mockRejectedValue({
     code: 'E_CONTEXT_REQUEST_INVALID',
+  });
+  mockLocalProjectContext.prepareV2.mockImplementation(async request => {
+    const manifest = await mockLocalProjectContext.prepare({
+      schema_version: 1,
+      project_id: request.root.project_id,
+      conversation_id: request.conversation_id,
+      provider: 'deepseek',
+      model: request.model_id,
+      policy: request.policy,
+      selected_paths: request.selected_paths,
+    });
+    return {
+      schema_version: 2,
+      snapshot_id: manifest.snapshot_id,
+      root: request.root,
+      project: {
+        schema_version: 2,
+        project_id: request.root.project_id,
+        workspace_id: request.root.workspace_id,
+        workspace_binding_revision: request.root.binding_revision,
+        display_name: manifest.project_name,
+        git_topology: 'legacy_embedded',
+      },
+      project_id: request.root.project_id,
+      conversation_id: request.conversation_id,
+      model_id: request.model_id,
+      policy: request.policy,
+      branch: manifest.branch,
+      head_oid: manifest.head_oid,
+      clean: manifest.clean,
+      conflicted: manifest.conflicted,
+      captured_at: manifest.captured_at,
+      policy_version: manifest.policy_version,
+      included: manifest.included,
+      omitted: manifest.omitted,
+      context_bytes: manifest.context_bytes,
+      estimated_tokens: manifest.estimated_tokens,
+      snapshot_sha256: manifest.snapshot_sha256,
+      source_fingerprint: manifest.source_fingerprint,
+    };
   });
   mockLocalProjectContext.confirm.mockRejectedValue({
     code: 'E_CONTEXT_REQUEST_INVALID',
   });
+  mockLocalProjectContext.confirmV2.mockImplementation(async request => {
+    const consent = await mockLocalProjectContext.confirm(request.snapshot_id);
+    return {
+      schema_version: 2,
+      consent_receipt_id: consent.consent_receipt_id,
+      snapshot_id: consent.snapshot_id,
+      root: request.root,
+      workspace_id: request.root.workspace_id,
+      workspace_binding_revision: request.root.binding_revision,
+      snapshot_sha256: consent.snapshot_sha256,
+      confirmed_at: consent.confirmed_at,
+    };
+  });
   mockLocalProjectContext.inspect.mockRejectedValue({
+    code: 'E_CONTEXT_SNAPSHOT_MISSING',
+  });
+  mockLocalProjectContext.inspectV2.mockRejectedValue({
     code: 'E_CONTEXT_SNAPSHOT_MISSING',
   });
   mockLocalProjectContext.discard.mockResolvedValue({
     schema_version: 1,
     status: 'discarded',
+  });
+  mockLocalProjectContext.discardV2.mockImplementation(async request => {
+    const result = await mockLocalProjectContext.discard(request.snapshot_id);
+    return {
+      schema_version: 2,
+      status: result.status,
+      snapshot_id: request.snapshot_id,
+      root: request.root,
+    };
   });
   mockLocalMirrors.isAvailable.mockReturnValue(true);
   mockLocalMirrors.status.mockResolvedValue(null);
@@ -856,6 +1950,37 @@ test('boots into a usable local empty chat', async () => {
   expect(mockLocalRuntime.bootstrap).toHaveBeenCalledTimes(1);
 });
 
+test('re-probes false session availability before bootstrap and loads exactly once when it becomes true', async () => {
+  mockSessionSnapshots.isAvailable
+    .mockReturnValueOnce(false)
+    .mockReturnValueOnce(true);
+  await renderApp();
+
+  expect(mockSessionSnapshots.isAvailable).toHaveBeenCalledTimes(2);
+  expect(mockSessionSnapshots.loadSessionSnapshot).toHaveBeenCalledTimes(1);
+});
+
+test('keeps cold-start bootstrap gated for a third session availability probe', async () => {
+  jest.useFakeTimers();
+  mockSessionSnapshots.isAvailable
+    .mockReturnValueOnce(false)
+    .mockReturnValueOnce(false)
+    .mockReturnValueOnce(true);
+  let renderer: Renderer | undefined;
+  await act(async () => {
+    renderer = ReactTestRenderer.create(<App />);
+    await settle();
+  });
+  expect(mockSessionSnapshots.loadSessionSnapshot).not.toHaveBeenCalled();
+  await act(async () => {
+    jest.advanceTimersByTime(100);
+    await settle();
+  });
+  expect(renderer).toBeDefined();
+  expect(mockSessionSnapshots.isAvailable).toHaveBeenCalledTimes(3);
+  expect(mockSessionSnapshots.loadSessionSnapshot).toHaveBeenCalledTimes(1);
+});
+
 test.each(['prepared', 'failed'] as const)(
   'surfaces Retry for a hydrated %s attempt without automatic HTTP',
   async status => {
@@ -882,7 +2007,7 @@ test.each(['prepared', 'failed'] as const)(
         'E_COMPLETION_TRANSPORT',
       );
     }
-    mockLocalRuntime.loadSession.mockResolvedValueOnce(stored.serialize());
+    queuePresentSession(stored.serialize());
 
     const renderer = await renderApp();
     expect(actionByLabel(renderer.root, 'Retry response')).toBeDefined();
@@ -912,14 +2037,6 @@ test('runtime evidence retry refreshes proof without rehydrating active chat sta
     await settle();
   });
   await act(async () => optionInComposerPanel(root, 'Done').props.onPress());
-  const stale = JSON.parse(
-    mockLocalRuntime.persistSession.mock.calls.at(-1)?.[0] as string,
-  ) as { conversations: Array<{ model_id: string }> };
-  if (stale.conversations[0] !== undefined) {
-    stale.conversations[0].model_id = 'deepseek-v4-flash';
-  }
-  mockLocalRuntime.loadSession.mockResolvedValueOnce(JSON.stringify(stale));
-
   await act(async () =>
     actionByLabel(root, 'Show runtime evidence').props.onPress(),
   );
@@ -929,7 +2046,7 @@ test('runtime evidence retry refreshes proof without rehydrating active chat sta
   });
 
   expect(mockLocalRuntime.bootstrap).toHaveBeenCalledTimes(2);
-  expect(mockLocalRuntime.loadSession).not.toHaveBeenCalled();
+  expect(mockSessionSnapshots.loadSessionSnapshot).toHaveBeenCalled();
   expect(composerOptionsChip(root).props.accessibilityLabel).toBe(
     'Model V4 Pro, thinking High',
   );
@@ -970,7 +2087,7 @@ describe('project context Home integration H1', () => {
   test('hydrates a confirmed snapshot as Checking until one native inspection confirms', async () => {
     const fixture = storedProjectContext(true);
     const inspection = deferred<ProjectContextInspectionV1>();
-    mockLocalRuntime.loadSession.mockResolvedValueOnce(fixture.stored.serialize());
+    queuePresentSession(fixture.stored.serialize());
     mockLocalProjects.list.mockResolvedValue({
       schema_version: 1,
       projects: [contextProject],
@@ -1002,7 +2119,7 @@ describe('project context Home integration H1', () => {
 
   test('fails closed when hydrated native inspection rejects', async () => {
     const fixture = storedProjectContext(true);
-    mockLocalRuntime.loadSession.mockResolvedValueOnce(fixture.stored.serialize());
+    queuePresentSession(fixture.stored.serialize());
     mockLocalProjects.list.mockResolvedValue({
       schema_version: 1,
       projects: [contextProject],
@@ -1026,7 +2143,7 @@ describe('project context Home integration H1', () => {
     );
     expect(mockLocalRuntime.completeV2).not.toHaveBeenCalled();
     expect(mockLocalRuntime.complete).not.toHaveBeenCalled();
-    expect(mockLocalRuntime.persistSession).not.toHaveBeenCalled();
+    expect(mockSessionSnapshots.casPersistSession).not.toHaveBeenCalled();
   });
 
   test('opens Context only after Projects starts dismissal and renders one Strip', async () => {
@@ -1075,7 +2192,7 @@ describe('project context Home integration H1', () => {
 
   test('opens current confirmed context as disclosure without confirmation', async () => {
     const fixture = storedProjectContext(true);
-    mockLocalRuntime.loadSession.mockResolvedValueOnce(fixture.stored.serialize());
+    queuePresentSession(fixture.stored.serialize());
     mockLocalProjects.list.mockResolvedValue({
       schema_version: 1,
       projects: [contextProject],
@@ -1103,7 +2220,7 @@ describe('project context Home integration H1', () => {
   test('shows Context Checking immediately after Projects dismisses while reinspection is pending', async () => {
     const fixture = storedProjectContext(true);
     const reinspection = deferred<ProjectContextInspectionV1>();
-    mockLocalRuntime.loadSession.mockResolvedValueOnce(fixture.stored.serialize());
+    queuePresentSession(fixture.stored.serialize());
     mockLocalProjects.list.mockResolvedValue({
       schema_version: 1,
       projects: [contextProject],
@@ -1233,7 +2350,7 @@ describe('project context Home integration H1', () => {
 
   test('opens a persisted prepared snapshot as disclosure requiring confirmation', async () => {
     const fixture = storedProjectContext(false);
-    mockLocalRuntime.loadSession.mockResolvedValueOnce(fixture.stored.serialize());
+    queuePresentSession(fixture.stored.serialize());
     mockLocalProjects.list.mockResolvedValue({
       schema_version: 1,
       projects: [contextProject],
@@ -1270,7 +2387,7 @@ describe('project context Home integration H1', () => {
         'E_COMPLETION_NATIVE',
       ),
     ).toBe(true);
-    mockLocalRuntime.loadSession.mockResolvedValueOnce(fixture.stored.serialize());
+    queuePresentSession(fixture.stored.serialize());
     mockLocalProjects.list.mockResolvedValue({
       schema_version: 1,
       projects: [contextProject],
@@ -1295,7 +2412,7 @@ describe('project context Home integration H1', () => {
   test('hard-blocks model and options callbacks while Context owns an inspection', async () => {
     const fixture = storedProjectContext(true);
     const inspection = deferred<ProjectContextInspectionV1>();
-    mockLocalRuntime.loadSession.mockResolvedValueOnce(fixture.stored.serialize());
+    queuePresentSession(fixture.stored.serialize());
     mockLocalProjects.list.mockResolvedValue({
       schema_version: 1,
       projects: [contextProject],
@@ -1344,7 +2461,7 @@ describe('project context Home integration H1', () => {
         'E_COMPLETION_NATIVE',
       ),
     ).toBe(true);
-    mockLocalRuntime.loadSession.mockResolvedValueOnce(fixture.stored.serialize());
+    queuePresentSession(fixture.stored.serialize());
     mockLocalProjects.list.mockResolvedValue({
       schema_version: 1,
       projects: [contextProject],
@@ -1443,7 +2560,7 @@ describe('project context Home integration H1', () => {
       ),
     ).toBe(true);
     fixture.stored.selectConversation(fixture.conversationId);
-    mockLocalRuntime.loadSession.mockResolvedValueOnce(fixture.stored.serialize());
+    queuePresentSession(fixture.stored.serialize());
     mockLocalProjects.list.mockResolvedValue({
       schema_version: 1,
       projects: [contextProject],
@@ -1584,12 +2701,15 @@ describe('project context Home integration H1', () => {
     jest.useRealTimers();
   });
 
-  test('coalesces rapid project Chat transitions into one deferred Context open', async () => {
+  test('coalesces rapid project Chat transitions into one authority bind', async () => {
     jest.useFakeTimers();
     const firstPersist = deferred<boolean>();
-    mockLocalRuntime.persistSession
-      .mockImplementationOnce(() => firstPersist.promise)
-      .mockResolvedValue(true);
+    mockSessionSnapshots.casPersistSession
+      .mockImplementationOnce(async request => {
+        await firstPersist.promise;
+        return commitBridgedCandidate(request);
+      })
+      .mockImplementation(async request => commitBridgedCandidate(request));
     mockLocalProjects.list.mockResolvedValue({
       schema_version: 1,
       projects: [contextProject],
@@ -1606,25 +2726,21 @@ describe('project context Home integration H1', () => {
       await settle();
     });
     const chat = root.findByType(ProjectsSurface).props.onChatInProject;
+    let firstChat: Promise<void> | undefined;
 
     await act(async () => {
-      chat(contextProject);
+      firstChat = chat(contextProject);
       chat(contextProject);
       await settle();
     });
-    expect(mockLocalRuntime.persistSession).toHaveBeenCalledTimes(1);
+    expect(mockSessionSnapshots.casPersistSession).toHaveBeenCalledTimes(1);
     firstPersist.resolve(true);
-    await act(async () => settle());
-    expect(visibleContextSheets(root)).toHaveLength(1);
-
-    await act(async () => visibleContextSheets(root)[0]!.props.onClose());
-    await act(async () => root.findByType(ProjectsSurface).props.onDismiss());
-    expect(visibleContextSheets(root)).toHaveLength(0);
-    expect(mockLocalRuntime.persistSession).toHaveBeenCalledTimes(1);
     await act(async () => {
-      jest.advanceTimersByTime(180);
+      await firstChat;
       await settle();
     });
+    expect(mockLocalWorkspaces.bootstrapLegacyProject).toHaveBeenCalledTimes(1);
+    expect(mockSessionSnapshots.casPersistSession).toHaveBeenCalledTimes(1);
     jest.useRealTimers();
   });
 
@@ -1650,9 +2766,9 @@ describe('project context Home integration H1', () => {
     await act(async () => {
       await chat(contextProject);
       chat(contextProject);
-      expect(mockLocalRuntime.persistSession).toHaveBeenCalledTimes(1);
+      expect(mockSessionSnapshots.casPersistSession).toHaveBeenCalledTimes(1);
     });
-    expect(mockLocalRuntime.persistSession).toHaveBeenCalledTimes(1);
+    expect(mockSessionSnapshots.casPersistSession).toHaveBeenCalledTimes(1);
     expect(visibleContextSheets(root)).toHaveLength(1);
     await act(async () => {
       jest.advanceTimersByTime(180);
@@ -1663,7 +2779,7 @@ describe('project context Home integration H1', () => {
 
   test('rejects an old Sheet callback after close and reopen with the same owner', async () => {
     const fixture = storedProjectContext(true);
-    mockLocalRuntime.loadSession.mockResolvedValueOnce(fixture.stored.serialize());
+    queuePresentSession(fixture.stored.serialize());
     mockLocalProjects.list.mockResolvedValue({
       schema_version: 1,
       projects: [contextProject],
@@ -1692,7 +2808,7 @@ describe('project context Home integration H1', () => {
 
   test('keeps the current Sheet callbacks live after a duplicate Strip press', async () => {
     const fixture = storedProjectContext(true);
-    mockLocalRuntime.loadSession.mockResolvedValueOnce(fixture.stored.serialize());
+    queuePresentSession(fixture.stored.serialize());
     mockLocalProjects.list.mockResolvedValue({
       schema_version: 1,
       projects: [contextProject],
@@ -1723,7 +2839,7 @@ describe('project context Home integration H1', () => {
 
   test('returns accessibility focus to the Strip only after Sheet dismissal', async () => {
     const fixture = storedProjectContext(true);
-    mockLocalRuntime.loadSession.mockResolvedValueOnce(fixture.stored.serialize());
+    queuePresentSession(fixture.stored.serialize());
     mockLocalProjects.list.mockResolvedValue({
       schema_version: 1,
       projects: [contextProject],
@@ -1762,7 +2878,7 @@ describe('project context Home integration H1', () => {
   test('stops a confirmed project image send after Vision invalidates context', async () => {
     jest.useFakeTimers();
     const fixture = storedProjectContext(true);
-    mockLocalRuntime.loadSession.mockResolvedValueOnce(fixture.stored.serialize());
+    queuePresentSession(fixture.stored.serialize());
     mockLocalProjects.list.mockResolvedValue({
       schema_version: 1,
       projects: [contextProject],
@@ -1878,7 +2994,7 @@ describe('project context Home integration H2', () => {
     ]);
     expect(mockLocalRuntime.completeV2).not.toHaveBeenCalled();
     expect(mockLocalRuntime.complete).not.toHaveBeenCalled();
-    expect(mockLocalRuntime.persistSession).not.toHaveBeenCalled();
+    expect(mockSessionSnapshots.casPersistSession).not.toHaveBeenCalled();
   });
 
   test('recovery Cancel clears only the pending intent and preserves the draft', async () => {
@@ -1956,7 +3072,7 @@ describe('project context Home integration H2', () => {
         'projects/bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb/repo',
     };
     const fixture = storedSetupProject();
-    mockLocalRuntime.loadSession.mockResolvedValueOnce(fixture.stored.serialize());
+    queuePresentSession(fixture.stored.serialize());
     mockLocalProjects.list.mockResolvedValue({
       schema_version: 1,
       projects: [contextProject, secondProject],
@@ -2205,11 +3321,23 @@ describe('project context Home integration H2', () => {
     await enterPendingProjectRecovery(root, 'Persist before sending');
     await preparePendingProjectDisclosure(root);
     let candidate = '';
-    mockLocalRuntime.persistSession.mockImplementationOnce(async json => {
-      candidate = json;
-      return false;
+    mockSessionSnapshots.casPersistSession.mockImplementationOnce(async request => {
+      candidate = request.candidate_json;
+      const digest = sessionSnapshotSHA256(candidate)!;
+      return {
+        schema_version: 1,
+        status: 'session_only',
+        current: {
+          schema_version: 1,
+          kind: 'present',
+          snapshot: {
+            schema_version: 1,
+            generation: 1,
+            session_sha256: digest,
+          },
+        },
+      };
     });
-    mockLocalRuntime.loadSession.mockImplementationOnce(async () => candidate);
 
     await act(async () => {
       actionByLabel(root, 'Confirm context').props.onPress();
@@ -2402,15 +3530,16 @@ describe('project context Home integration H2', () => {
     const root = renderer.root;
     await enterPendingProjectRecovery(root, '  raw  ');
     await preparePendingProjectDisclosure(root);
-    mockLocalRuntime.persistSession.mockImplementation(async json => {
-      const decoded = JSON.parse(json) as {
+    mockSessionSnapshots.casPersistSession.mockImplementation(async request => {
+      const decoded = JSON.parse(request.candidate_json) as {
         conversations: Array<{ attempts?: unknown[] }>;
       };
       return decoded.conversations.some(
         conversation => (conversation.attempts?.length ?? 0) > 0,
       )
-        ? completionPersist.promise
-        : true;
+        ? (await completionPersist.promise,
+          commitBridgedCandidate(request))
+        : commitBridgedCandidate(request);
     });
 
     await act(async () => {
@@ -2550,9 +3679,7 @@ describe('project context Home integration H3', () => {
     'resumes a hydrated %s lifecycle before normal Context attachment',
     async (phase, expectedDiscardCalls) => {
       const fixture = storedLifecycleCheckpoint(phase);
-      mockLocalRuntime.loadSession.mockResolvedValueOnce(
-        fixture.stored.serialize(),
-      );
+      queuePresentSession(fixture.stored.serialize());
       mockLocalProjectContext.inspect.mockResolvedValue({
         schema_version: 1,
         state: 'confirmed',
@@ -2570,7 +3697,7 @@ describe('project context Home integration H3', () => {
         expectedDiscardCalls,
       );
       const persisted = JSON.parse(
-        mockLocalRuntime.persistSession.mock.calls.at(-1)?.[0] as string,
+        lastPersistedCandidateJSON(),
       ) as {
         project_context_destructive_transition: unknown;
         conversations: Array<{
@@ -2591,7 +3718,7 @@ describe('project context Home integration H3', () => {
 
   test('restores cleanup recovery value-free when hydrated native discard fails', async () => {
     const fixture = storedLifecycleCheckpoint('cleanup_pending');
-    mockLocalRuntime.loadSession.mockResolvedValueOnce(fixture.stored.serialize());
+    queuePresentSession(fixture.stored.serialize());
     mockLocalProjectContext.discard.mockRejectedValueOnce({
       code: 'E_CONTEXT_TIMEOUT',
       message: 'RAW_RESTART_CLEANUP_SENTINEL',
@@ -2627,7 +3754,7 @@ describe('project context Home integration H3', () => {
 
   test('keeps a restored journal visible when the native context bridge is unavailable', async () => {
     const fixture = storedLifecycleCheckpoint('cleanup_pending');
-    mockLocalRuntime.loadSession.mockResolvedValueOnce(fixture.stored.serialize());
+    queuePresentSession(fixture.stored.serialize());
     mockLocalProjectContext.isAvailable.mockReturnValue(false);
     mockLocalProjectContext.discard.mockRejectedValueOnce({
       code: 'E_CONTEXT_NATIVE',
@@ -2656,7 +3783,7 @@ describe('project context Home integration H3', () => {
 
   test('closes navigation and opens the blocking Context review before creating a new chat', async () => {
     const fixture = storedProjectContext(false);
-    mockLocalRuntime.loadSession.mockResolvedValueOnce(fixture.stored.serialize());
+    queuePresentSession(fixture.stored.serialize());
     mockLocalProjects.list.mockResolvedValue({
       schema_version: 1,
       projects: [contextProject],
@@ -2686,7 +3813,7 @@ describe('project context Home integration H3', () => {
     expect(visibleContextSheets(root)[0]?.props.mode).toBe('disclosure');
     expect(visibleContextSheets(root)[0]?.props.confirmationRequired).toBe(true);
     expect(mockLocalRuntime.cancelCompletion).not.toHaveBeenCalled();
-    expect(mockLocalRuntime.persistSession).not.toHaveBeenCalled();
+    expect(mockSessionSnapshots.casPersistSession).not.toHaveBeenCalled();
   });
 
   test('keeps an active confirmed snapshot conversation and opens lifecycle delete confirmation', async () => {
@@ -2699,7 +3826,7 @@ describe('project context Home integration H3', () => {
         if (result !== undefined) deletePromise = Promise.resolve(result);
       });
     const fixture = storedProjectContext(true);
-    mockLocalRuntime.loadSession.mockResolvedValueOnce(fixture.stored.serialize());
+    queuePresentSession(fixture.stored.serialize());
     mockLocalProjects.list.mockResolvedValue({
       schema_version: 1,
       projects: [contextProject],
@@ -2770,7 +3897,7 @@ describe('project context Home integration H3', () => {
       title: 'Other chat',
       select: false,
     });
-    mockLocalRuntime.loadSession.mockResolvedValueOnce(fixture.stored.serialize());
+    queuePresentSession(fixture.stored.serialize());
     const renderer = await renderApp();
     const root = renderer.root;
     await act(async () => settle());
@@ -2795,7 +3922,7 @@ describe('project context Home integration H3', () => {
       await settle();
     });
     expect(root.findByType(ChatDrawer).props.activeId).toBe(otherId);
-    mockLocalRuntime.persistSession.mockClear();
+    mockSessionSnapshots.casPersistSession.mockClear();
     mockLocalProjectContext.discard.mockClear();
 
     await act(async () => {
@@ -2805,14 +3932,14 @@ describe('project context Home integration H3', () => {
 
     expect(root.findByType(ChatDrawer).props.activeId).toBe(otherId);
     expect(visibleContextSheets(root)).toHaveLength(0);
-    expect(mockLocalRuntime.persistSession).not.toHaveBeenCalled();
+    expect(mockSessionSnapshots.casPersistSession).not.toHaveBeenCalled();
     expect(mockLocalProjectContext.discard).not.toHaveBeenCalled();
     alert.mockRestore();
   });
 
   test('dismisses Projects into exact Context review when snapshot unbind is blocked by a candidate', async () => {
     const fixture = storedProjectContext(false);
-    mockLocalRuntime.loadSession.mockResolvedValueOnce(fixture.stored.serialize());
+    queuePresentSession(fixture.stored.serialize());
     mockLocalProjectContext.inspect.mockResolvedValue({
       schema_version: 1,
       state: 'prepared',
@@ -2820,7 +3947,7 @@ describe('project context Home integration H3', () => {
     });
     const renderer = await renderApp();
     const root = renderer.root;
-    mockLocalRuntime.persistSession.mockClear();
+    mockSessionSnapshots.casPersistSession.mockClear();
 
     await openProjectsSurface(root);
     await act(async () => {
@@ -2832,7 +3959,7 @@ describe('project context Home integration H3', () => {
 
     expect(visibleContextSheets(root)[0]?.props.mode).toBe('disclosure');
     expect(visibleContextSheets(root)[0]?.props.confirmationRequired).toBe(true);
-    expect(mockLocalRuntime.persistSession).not.toHaveBeenCalled();
+    expect(mockSessionSnapshots.casPersistSession).not.toHaveBeenCalled();
     expect(mockLocalProjectContext.discard).not.toHaveBeenCalled();
     expect(mockLocalRuntime.cancelCompletion).not.toHaveBeenCalled();
   });
@@ -2843,7 +3970,7 @@ describe('project context Home integration H3', () => {
       schema_version: 1;
       status: 'discarded';
     }>();
-    mockLocalRuntime.loadSession.mockResolvedValueOnce(fixture.stored.serialize());
+    queuePresentSession(fixture.stored.serialize());
     mockLocalProjects.list.mockResolvedValue({
       schema_version: 1,
       projects: [contextProject],
@@ -2857,7 +3984,7 @@ describe('project context Home integration H3', () => {
     const renderer = await renderApp();
     const root = renderer.root;
     await act(async () => settle());
-    mockLocalRuntime.persistSession.mockClear();
+    mockSessionSnapshots.casPersistSession.mockClear();
 
     await openProjectsSurface(root);
     await act(async () => {
@@ -2901,7 +4028,7 @@ describe('project context Home integration H3', () => {
 
   test('keeps the project bound until Retry save completes a pending unbind', async () => {
     const fixture = storedProjectContext(true);
-    mockLocalRuntime.loadSession.mockResolvedValueOnce(fixture.stored.serialize());
+    queuePresentSession(fixture.stored.serialize());
     mockLocalProjects.list.mockResolvedValue({
       schema_version: 1,
       projects: [contextProject],
@@ -2914,15 +4041,12 @@ describe('project context Home integration H3', () => {
     const renderer = await renderApp();
     const root = renderer.root;
     await act(async () => settle());
-    mockLocalRuntime.persistSession.mockClear();
-    let candidate = '';
-    mockLocalRuntime.persistSession
-      .mockImplementationOnce(async json => {
-        candidate = json;
-        return false;
+    mockSessionSnapshots.casPersistSession.mockClear();
+    mockSessionSnapshots.casPersistSession
+      .mockImplementationOnce(async request => {
+        return sessionOnlyResultFor(request);
       })
-      .mockResolvedValue(true);
-    mockLocalRuntime.loadSession.mockImplementationOnce(async () => candidate);
+      .mockImplementation(async request => commitBridgedCandidate(request));
 
     await openProjectsSurface(root);
     await act(async () => {
@@ -2961,7 +4085,7 @@ describe('project context Home integration H3', () => {
 
   test('keeps the project bound until Retry cleanup succeeds exactly once', async () => {
     const fixture = storedProjectContext(true);
-    mockLocalRuntime.loadSession.mockResolvedValueOnce(fixture.stored.serialize());
+    queuePresentSession(fixture.stored.serialize());
     mockLocalProjects.list.mockResolvedValue({
       schema_version: 1,
       projects: [contextProject],
@@ -2980,7 +4104,7 @@ describe('project context Home integration H3', () => {
     const renderer = await renderApp();
     const root = renderer.root;
     await act(async () => settle());
-    mockLocalRuntime.persistSession.mockClear();
+    mockSessionSnapshots.casPersistSession.mockClear();
 
     await openProjectsSurface(root);
     await act(async () => {
@@ -3049,7 +4173,7 @@ describe('project context Home integration H3', () => {
         'E_COMPLETION_NATIVE',
       ),
     ).toBe(true);
-    mockLocalRuntime.loadSession.mockResolvedValueOnce(fixture.stored.serialize());
+    queuePresentSession(fixture.stored.serialize());
     mockLocalProjects.list.mockResolvedValue({
       schema_version: 1,
       projects: [contextProject],
@@ -3057,7 +4181,7 @@ describe('project context Home integration H3', () => {
     const renderer = await renderApp();
     const root = renderer.root;
     await act(async () => settle());
-    mockLocalRuntime.persistSession.mockClear();
+    mockSessionSnapshots.casPersistSession.mockClear();
 
     await openProjectsSurface(root);
     await act(async () => {
@@ -3068,7 +4192,7 @@ describe('project context Home integration H3', () => {
     expect(root.findByType(ProjectsSurface).props.boundProjectId).toBe(
       CONTEXT_PROJECT_ID,
     );
-    expect(mockLocalRuntime.persistSession).not.toHaveBeenCalled();
+    expect(mockSessionSnapshots.casPersistSession).not.toHaveBeenCalled();
     expect(mockLocalProjectContext.discard).not.toHaveBeenCalled();
     expect(actionByLabel(root, 'Retry response')).toBeDefined();
     await act(async () =>
@@ -3087,7 +4211,7 @@ describe('project context Home integration H3', () => {
         'projects/bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb/repo',
     };
     const fixture = storedProjectContext(true);
-    mockLocalRuntime.loadSession.mockResolvedValueOnce(fixture.stored.serialize());
+    queuePresentSession(fixture.stored.serialize());
     mockLocalProjects.list.mockResolvedValue({
       schema_version: 1,
       projects: [contextProject, secondProject],
@@ -3171,7 +4295,7 @@ describe('project context Home integration H3', () => {
       },
     );
     const activeId = fixture.stored.createConversation({ title: 'Keep me' });
-    mockLocalRuntime.loadSession.mockResolvedValueOnce(fixture.stored.serialize());
+    queuePresentSession(fixture.stored.serialize());
     const renderer = await renderApp();
     const root = renderer.root;
     await act(async () => settle());
@@ -3229,10 +4353,10 @@ describe('project context Home integration H3', () => {
 
   test('directly unbinds snapshot-free context with no journal or native discard', async () => {
     const fixture = storedSetupProject();
-    mockLocalRuntime.loadSession.mockResolvedValueOnce(fixture.stored.serialize());
+    queuePresentSession(fixture.stored.serialize());
     const renderer = await renderApp();
     const root = renderer.root;
-    mockLocalRuntime.persistSession.mockClear();
+    mockSessionSnapshots.casPersistSession.mockClear();
 
     await openProjectsSurface(root);
     await act(async () => {
@@ -3242,7 +4366,7 @@ describe('project context Home integration H3', () => {
     });
 
     const persisted = JSON.parse(
-      mockLocalRuntime.persistSession.mock.calls.at(-1)?.[0] as string,
+      lastPersistedCandidateJSON(),
     ) as {
       project_context_destructive_transition: unknown;
       conversations: Array<{ project_id: string | null }>;
@@ -3254,11 +4378,12 @@ describe('project context Home integration H3', () => {
 
   test('rolls back snapshot-free unbind when the direct session write is not committed', async () => {
     const fixture = storedSetupProject();
-    mockLocalRuntime.loadSession.mockResolvedValueOnce(fixture.stored.serialize());
+    queuePresentSession(fixture.stored.serialize());
     const renderer = await renderApp();
     const root = renderer.root;
-    mockLocalRuntime.persistSession.mockResolvedValueOnce(false);
-    mockLocalRuntime.loadSession.mockResolvedValueOnce(fixture.stored.serialize());
+    mockSessionSnapshots.casPersistSession.mockResolvedValueOnce(
+      notCommittedResult(),
+    );
 
     await openProjectsSurface(root);
     await act(async () => {
@@ -3274,7 +4399,9 @@ describe('project context Home integration H3', () => {
   });
 
   test.each(
-    (['unbind', 'delete', 'rebind'] as const).flatMap(action =>
+    (
+      ['unbind', 'delete'] as Array<'unbind' | 'delete' | 'rebind'>
+    ).flatMap(action =>
       (['not_committed', 'session_only', 'unknown'] as const).map(status => [
         action,
         status,
@@ -3291,9 +4418,7 @@ describe('project context Home integration H3', () => {
         workspace_path:
           'projects/bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb/repo',
       };
-      mockLocalRuntime.loadSession.mockResolvedValueOnce(
-        fixture.stored.serialize(),
-      );
+      queuePresentSession(fixture.stored.serialize());
       mockLocalProjects.list.mockResolvedValue({
         schema_version: 1,
         projects: [contextProject, secondProject],
@@ -3309,21 +4434,20 @@ describe('project context Home integration H3', () => {
         });
       const renderer = await renderApp();
       const root = renderer.root;
-      let candidate = '';
       if (status === 'unknown') {
-        mockLocalRuntime.persistSession.mockRejectedValueOnce(
-          new Error('DIRECT_PERSIST_SENTINEL'),
+        mockSessionSnapshots.casPersistSession.mockImplementationOnce(
+          async () => unknownResult(),
         );
-        mockLocalRuntime.loadSession.mockRejectedValueOnce(
-          new Error('DIRECT_LOAD_SENTINEL'),
-        );
-      } else {
-        mockLocalRuntime.persistSession.mockImplementationOnce(async json => {
-          candidate = json;
-          return false;
+        mockSessionSnapshots.querySessionCommit.mockResolvedValueOnce({
+          schema_version: 1,
+          status: 'unknown',
         });
-        mockLocalRuntime.loadSession.mockImplementationOnce(async () =>
-          status === 'session_only' ? candidate : fixture.stored.serialize(),
+      } else {
+        mockSessionSnapshots.casPersistSession.mockImplementationOnce(
+          async request =>
+            status === 'session_only'
+              ? sessionOnlyResultFor(request)
+              : notCommittedResult(),
         );
       }
 
@@ -3392,7 +4516,9 @@ describe('project context Home integration H3', () => {
       }
       expect(mockLocalProjectContext.discard).not.toHaveBeenCalled();
 
-      mockLocalRuntime.persistSession.mockResolvedValueOnce(true);
+      mockSessionSnapshots.casPersistSession.mockImplementationOnce(
+        async request => commitBridgedCandidate(request),
+      );
       await act(async () => {
         actionByLabel(root, 'Retry save').props.onPress();
         await settle();
@@ -3417,7 +4543,7 @@ describe('project context Home integration H3', () => {
   test('busy lifecycle top close is presentation-only and late cleanup cannot reopen it', async () => {
     const fixture = storedProjectContext(true);
     const cleanup = deferred<{ schema_version: 1; status: 'discarded' }>();
-    mockLocalRuntime.loadSession.mockResolvedValueOnce(fixture.stored.serialize());
+    queuePresentSession(fixture.stored.serialize());
     mockLocalProjectContext.inspect.mockResolvedValue({
       schema_version: 1,
       state: 'confirmed',
@@ -3463,15 +4589,16 @@ describe('project context Home integration H3', () => {
       });
     const fixture = storedSetupProject();
     const activeId = fixture.stored.createConversation({ title: 'Active' });
-    mockLocalRuntime.loadSession.mockResolvedValueOnce(fixture.stored.serialize());
+    queuePresentSession(fixture.stored.serialize());
     const renderer = await renderApp();
     const root = renderer.root;
-    mockLocalRuntime.persistSession.mockRejectedValueOnce(
-      new Error('DIRECT_UNKNOWN_SENTINEL'),
+    mockSessionSnapshots.casPersistSession.mockImplementationOnce(
+      async () => unknownResult(),
     );
-    mockLocalRuntime.loadSession.mockRejectedValueOnce(
-      new Error('DIRECT_LOAD_SENTINEL'),
-    );
+    mockSessionSnapshots.querySessionCommit.mockResolvedValueOnce({
+      schema_version: 1,
+      status: 'unknown',
+    });
 
     await act(async () => actionByLabel(root, 'Open navigation').props.onPress());
     await act(async () => {
@@ -3505,7 +4632,9 @@ describe('project context Home integration H3', () => {
     expect(mockLocalProjectContext.inspect).not.toHaveBeenCalled();
     expect(mockLocalProjectContext.discard).not.toHaveBeenCalled();
 
-    mockLocalRuntime.persistSession.mockResolvedValueOnce(true);
+    mockSessionSnapshots.casPersistSession.mockImplementationOnce(
+      async request => commitBridgedCandidate(request),
+    );
     await act(async () => {
       actionByLabel(root, 'Retry save').props.onPress();
       await settle();
@@ -3530,7 +4659,7 @@ describe('project context Home integration H3', () => {
       });
     const fixture = storedProjectContext(true);
     const activeId = fixture.stored.createConversation({ title: 'Active' });
-    mockLocalRuntime.loadSession.mockResolvedValueOnce(fixture.stored.serialize());
+    queuePresentSession(fixture.stored.serialize());
     mockLocalProjectContext.discard
       .mockRejectedValueOnce({ code: 'E_CONTEXT_TIMEOUT' })
       .mockResolvedValue({ schema_version: 1, status: 'discarded' });
@@ -3604,7 +4733,7 @@ describe('project context Home integration H3', () => {
       title: 'Stale target',
       select: false,
     });
-    mockLocalRuntime.loadSession.mockResolvedValueOnce(fixture.stored.serialize());
+    queuePresentSession(fixture.stored.serialize());
     mockLocalRuntime.bootstrap.mockResolvedValue({
       proof: {
         ...proof,
@@ -3661,7 +4790,7 @@ describe('project context Home integration H3', () => {
       await deletePromise;
     });
     expect(visibleContextSheets(root)[0]?.props.mode).toBe('lifecycle');
-    mockLocalRuntime.persistSession.mockClear();
+    mockSessionSnapshots.casPersistSession.mockClear();
     const activeBefore = root.findByType(ChatDrawer).props.activeId;
 
     await act(async () => {
@@ -3706,13 +4835,13 @@ describe('project context Home integration H3', () => {
       action: 'delete',
     });
     expect(root.findByType(ChatDrawer).props.activeId).toBe(activeBefore);
-    expect(mockLocalRuntime.persistSession).not.toHaveBeenCalled();
+    expect(mockSessionSnapshots.casPersistSession).not.toHaveBeenCalled();
     alert.mockRestore();
   });
 
   test('rejects a stale Drawer Settings opener after Context disclosure takes authority', async () => {
     const fixture = storedProjectContext(true);
-    mockLocalRuntime.loadSession.mockResolvedValueOnce(fixture.stored.serialize());
+    queuePresentSession(fixture.stored.serialize());
     mockLocalProjectContext.inspect.mockResolvedValue({
       schema_version: 1,
       state: 'confirmed',
@@ -3799,7 +4928,7 @@ describe('project context Home integration H3', () => {
   test('blocks every root surface and navigation mutation until lifecycle bootstrap settles', async () => {
     const restored = storedLifecycleCheckpoint('cleanup_pending');
     const load = deferred<string | null>();
-    mockLocalRuntime.loadSession.mockReturnValueOnce(load.promise);
+    queueDeferredSessionLoad(load.promise);
     mockLocalProjectContext.discard.mockRejectedValueOnce({
       code: 'E_CONTEXT_TIMEOUT',
       message: 'BOOTSTRAP_SURFACE_SENTINEL',
@@ -3836,7 +4965,7 @@ describe('project context Home integration H3', () => {
     expect(root.findByType(ConversationOptionsPicker).props.visible).toBe(false);
     expect(root.findByType(WorkspacePickerSheet).props.visible).toBe(false);
     expect(root.findByType(ChatDrawer).props.activeId).toBe(initialActive);
-    expect(mockLocalRuntime.persistSession).not.toHaveBeenCalled();
+    expect(mockSessionSnapshots.casPersistSession).not.toHaveBeenCalled();
 
     load.resolve(restored.stored.serialize());
     await act(async () => {
@@ -3856,8 +4985,11 @@ describe('project context Home integration H3', () => {
 
   test('closes Projects during an in-flight project transition and ignores its late persistence', async () => {
     const persisted = deferred<boolean>();
-    mockLocalRuntime.persistSession.mockImplementationOnce(
-      () => persisted.promise,
+    mockSessionSnapshots.casPersistSession.mockImplementationOnce(
+      async request => {
+        const saved = await persisted.promise;
+        return saved ? commitBridgedCandidate(request) : unknownResult();
+      },
     );
     mockLocalProjects.list.mockResolvedValue({
       schema_version: 1,
@@ -3875,7 +5007,7 @@ describe('project context Home integration H3', () => {
       chat(contextProject);
       await settle();
     });
-    expect(mockLocalRuntime.persistSession).toHaveBeenCalledTimes(1);
+    expect(mockSessionSnapshots.casPersistSession).toHaveBeenCalledTimes(1);
 
     await act(async () => root.findByType(ProjectsSurface).props.onClose());
     expect(root.findByType(ProjectsSurface).props.visible).toBe(false);
@@ -3890,10 +5022,13 @@ describe('project context Home integration H3', () => {
 
   test('does not auto-open direct recovery after Projects closes during an ambiguous write', async () => {
     const fixture = storedSetupProject();
-    mockLocalRuntime.loadSession.mockResolvedValueOnce(fixture.stored.serialize());
+    queuePresentSession(fixture.stored.serialize());
     const persisted = deferred<boolean>();
-    mockLocalRuntime.persistSession.mockImplementationOnce(
-      () => persisted.promise,
+    mockSessionSnapshots.casPersistSession.mockImplementationOnce(
+      async request => {
+        const saved = await persisted.promise;
+        return saved ? commitBridgedCandidate(request) : unknownResult();
+      },
     );
     const renderer = await renderApp();
     const root = renderer.root;
@@ -3907,9 +5042,10 @@ describe('project context Home integration H3', () => {
     expect(root.findByType(ProjectsSurface).props.visible).toBe(false);
     await act(async () => actionByLabel(root, 'Open navigation').props.onPress());
     expect(root.findByType(ChatDrawer).props.visible).toBe(false);
-    mockLocalRuntime.loadSession.mockRejectedValueOnce(
-      new Error('AMBIGUOUS_LOAD_SENTINEL'),
-    );
+    mockSessionSnapshots.querySessionCommit.mockResolvedValueOnce({
+      schema_version: 1,
+      status: 'unknown',
+    });
     persisted.resolve(false);
     await act(async () => {
       await settle();
@@ -3925,7 +5061,7 @@ describe('project context Home integration H3', () => {
   test('drops a queued Drawer opener when bootstrap restores lifecycle recovery first', async () => {
     const loaded = deferred<string | null>();
     const fixture = storedLifecycleCheckpoint('cleanup_pending');
-    mockLocalRuntime.loadSession.mockReturnValueOnce(loaded.promise);
+    queueDeferredSessionLoad(loaded.promise);
     mockLocalProjectContext.discard.mockRejectedValueOnce({
       code: 'E_CONTEXT_TIMEOUT',
     });
@@ -3959,9 +5095,9 @@ test('starts a project-bound chat with one actionable context Strip', async () =
     projects: [
       {
         schema_version: 1,
-        id: 'project-1',
+        id: CONTEXT_PROJECT_ID,
         name: 'demo',
-        workspace_path: 'projects/project-1/repo',
+        workspace_path: `projects/${CONTEXT_PROJECT_ID}/repo`,
         created_at: '2026-08-24T00:00:00.000Z',
         updated_at: '2026-08-24T00:00:00.000Z',
         origin_url: null,
@@ -3990,7 +5126,7 @@ test('starts a project-bound chat with one actionable context Strip', async () =
   });
 
   expect(lastPersistedState().conversations.at(-1)?.project_id).toBe(
-    'project-1',
+    CONTEXT_PROJECT_ID,
   );
   expect(root.findAllByType(ProjectContextStrip)).toHaveLength(1);
   expect(
@@ -4007,9 +5143,9 @@ test('does not auto-route a setup-required project through AgentLoop', async () 
     projects: [
       {
         schema_version: 1,
-        id: 'project-1',
+        id: CONTEXT_PROJECT_ID,
         name: 'demo',
-        workspace_path: 'projects/project-1/repo',
+        workspace_path: `projects/${CONTEXT_PROJECT_ID}/repo`,
         created_at: '2026-08-24T00:00:00.000Z',
         updated_at: '2026-08-24T00:00:00.000Z',
         origin_url: null,
@@ -4147,7 +5283,7 @@ test('sends verified project context through schema3 without AgentLoop', async (
   );
   expect(confirmed).not.toBeNull();
   expect(confirmed!.commit()).toBe(true);
-  mockLocalRuntime.loadSession.mockResolvedValueOnce(stored.serialize());
+  queuePresentSession(stored.serialize());
   mockLocalProjectContext.inspect.mockResolvedValueOnce({
     schema_version: 1,
     state: 'confirmed',
@@ -4252,8 +5388,9 @@ test('preserves the draft and sends zero HTTP when prepared durability is absent
   const root = renderer.root;
   await act(async () => actionByLabel(root, 'Add attachment').props.onPress());
   await chooseAttachmentSource(root, 'Files');
-  mockLocalRuntime.persistSession.mockResolvedValueOnce(false);
-  mockLocalRuntime.loadSession.mockResolvedValueOnce(null);
+  mockSessionSnapshots.casPersistSession.mockImplementationOnce(
+    async request => sessionOnlyResultFor(request),
+  );
 
   await act(async () => {
     root
@@ -4274,17 +5411,20 @@ test('preserves the draft and sends zero HTTP when prepared durability is absent
   ]);
   expect(mockLocalRuntime.completeV2).not.toHaveBeenCalled();
   expect(mockLocalRuntime.complete).not.toHaveBeenCalled();
-  expect(mockLocalRuntime.loadSession).toHaveBeenCalledTimes(2);
+  expect(mockSessionSnapshots.casPersistSession).toHaveBeenCalledTimes(1);
 });
 
 test('keeps draft ownership until prepared persistence resolves true', async () => {
   let resolvePersist!: (saved: boolean) => void;
   const renderer = await renderApp();
   const root = renderer.root;
-  mockLocalRuntime.persistSession.mockReturnValueOnce(
-    new Promise<boolean>(resolve => {
-      resolvePersist = resolve;
-    }),
+  mockSessionSnapshots.casPersistSession.mockImplementationOnce(
+    async request => {
+      await new Promise<boolean>(resolve => {
+        resolvePersist = resolve;
+      });
+      return commitBridgedCandidate(request);
+    },
   );
   await act(async () => {
     root
@@ -4335,10 +5475,13 @@ test('clears a durable draft after cancellation during its first persistence', a
       .props.onChangeText('Cancel during save');
   });
   let resolvePersist!: (saved: boolean) => void;
-  mockLocalRuntime.persistSession.mockReturnValueOnce(
-    new Promise<boolean>(resolve => {
-      resolvePersist = resolve;
-    }),
+  mockSessionSnapshots.casPersistSession.mockImplementationOnce(
+    async request => {
+      await new Promise<boolean>(resolve => {
+        resolvePersist = resolve;
+      });
+      return commitBridgedCandidate(request);
+    },
   );
   let sendPromise: Promise<unknown> | undefined;
   await act(async () => {
@@ -4376,13 +5519,14 @@ test('shows cancellation persistence failure instead of a false stopped notice',
       .props.onChangeText('Cancel must persist');
   });
   let resolvePersist!: (saved: boolean) => void;
-  mockLocalRuntime.persistSession
-    .mockReturnValueOnce(
-      new Promise<boolean>(resolve => {
+  mockSessionSnapshots.casPersistSession
+    .mockImplementationOnce(async request => {
+      await new Promise<boolean>(resolve => {
         resolvePersist = resolve;
-      }),
-    )
-    .mockResolvedValueOnce(false);
+      });
+      return commitBridgedCandidate(request);
+    })
+    .mockImplementationOnce(async request => sessionOnlyResultFor(request));
   let sendPromise: Promise<unknown> | undefined;
   await act(async () => {
     const result = actionByLabel(root, 'Send message').props.onPress() as unknown;
@@ -5225,7 +6369,7 @@ test('restores persisted image thumbnails through the bounded preview API', asyn
     created_at: '2026-08-24T00:00:01.000Z',
     attachments: [imageAttachment],
   };
-  mockLocalRuntime.loadSession.mockResolvedValueOnce(
+  queueLegacySession(
     JSON.stringify({
       schema_version: 4,
       active_conversation_id: 'conversation-restored',
@@ -5360,9 +6504,20 @@ test('creates a file through the app-owned workspace drawer', async () => {
     await settle();
   });
 
-  expect(mockLocalWorkspace.writeText).toHaveBeenCalledWith('note.md', '', {
-    createOnly: true,
-  });
+  expect(mockLocalWorkspace.writeV2).toHaveBeenCalledWith(
+    expect.objectContaining({
+      schema_version: 1,
+      path: 'note.md',
+      content: '',
+      expected_revision: null,
+      create_only: true,
+      root: expect.objectContaining({
+        workspace_id: APP_WORKSPACE_ID,
+        binding_revision: 1,
+        project_id: null,
+      }),
+    }),
+  );
 });
 
 test('opens the honest local profile entry from the drawer footer', async () => {
@@ -5519,10 +6674,13 @@ test('freezes model and effort while a request is in flight', async () => {
       .findByProps({ accessibilityLabel: 'Message DSH' })
       .props.onChangeText('Freeze this request');
   });
-  mockLocalRuntime.persistSession.mockReturnValueOnce(
-    new Promise(resolve => {
-      finishInitialPersist = resolve;
-    }),
+  mockSessionSnapshots.casPersistSession.mockImplementationOnce(
+    async request => {
+      await new Promise<boolean>(resolve => {
+        finishInitialPersist = resolve;
+      });
+      return commitBridgedCandidate(request);
+    },
   );
   const staleSendPress = actionByLabel(root, 'Send message').props.onPress;
   await act(async () => {
@@ -5548,7 +6706,7 @@ test('freezes model and effort while a request is in flight', async () => {
     thinking_mode: 'high',
   });
   expect(mockLocalRuntime.recordModelTransition).not.toHaveBeenCalled();
-  expect(mockLocalRuntime.persistSession).toHaveBeenCalledTimes(1);
+  expect(mockSessionSnapshots.casPersistSession).toHaveBeenCalledTimes(1);
   expect(mockLocalRuntime.completeV2).not.toHaveBeenCalled();
 
   await act(async () => {
@@ -5590,12 +6748,9 @@ test('keeps model, effort, and attachments frozen while persistence is pending',
     'Use Max thinking',
   ).props.onPress;
   await act(async () => optionInComposerPanel(root, 'Done').props.onPress());
-  let candidate = '';
-  mockLocalRuntime.persistSession.mockImplementationOnce(async json => {
-    candidate = json;
-    return false;
+  mockSessionSnapshots.casPersistSession.mockImplementationOnce(async request => {
+    return sessionOnlyResultFor(request);
   });
-  mockLocalRuntime.loadSession.mockImplementationOnce(async () => candidate);
   await act(async () => {
     root
       .findByProps({ accessibilityLabel: 'Message DSH' })
@@ -5715,7 +6870,8 @@ test('stages a custom npm mirror through the native rish adapter', async () => {
     }),
   );
   const persisted = JSON.parse(
-    mockLocalRuntime.persistSession.mock.calls.at(-1)?.[0],
+    mockSessionSnapshots.casPersistSession.mock.calls.at(-1)?.[0]
+      ?.candidate_json,
   ) as {
     preferences: { mirrors: { npm: { enabled: boolean; base_url: string } } };
   };
@@ -5731,6 +6887,1326 @@ test('stages a custom npm mirror through the native rish adapter', async () => {
   expect(root.findByProps({ children: 'Settings' })).toBeDefined();
 });
 
+test('persists only a validated Git HTTPS proxy and clears it to direct', async () => {
+  const renderer = await renderApp();
+  const root = renderer.root;
+
+  await act(async () => actionByLabel(root, 'Open navigation').props.onPress());
+  await act(async () => actionByLabel(root, 'Settings').props.onPress());
+  mockSessionSnapshots.casPersistSession.mockClear();
+
+  await act(async () => {
+    root
+      .findByProps({ accessibilityLabel: 'Git HTTPS proxy URL' })
+      .props.onChangeText('http://127.0.0.1');
+  });
+  await act(async () => {
+    actionByLabel(root, 'Save Git proxy').props.onPress();
+    await settle();
+  });
+
+  expect(mockSessionSnapshots.casPersistSession).not.toHaveBeenCalled();
+  expect(
+    root.findByProps({
+      children:
+        'Enter http:// or https:// with a host and explicit port, without credentials, a path, query, fragment, or surrounding spaces.',
+    }),
+  ).toBeDefined();
+
+  await act(async () => {
+    root
+      .findByProps({ accessibilityLabel: 'Git HTTPS proxy URL' })
+      .props.onChangeText('http://127.0.0.1:1082');
+  });
+  await act(async () => {
+    actionByLabel(root, 'Save Git proxy').props.onPress();
+    await settle();
+  });
+
+  const configured = JSON.parse(
+    mockSessionSnapshots.casPersistSession.mock.calls.at(-1)?.[0]
+      ?.candidate_json,
+  ) as { preferences: { git_https_proxy_url: string | null } };
+  expect(configured.preferences.git_https_proxy_url).toBe(
+    'http://127.0.0.1:1082/',
+  );
+  expect(
+    root.findByProps({ accessibilityLabel: 'Git HTTPS proxy URL' }).props.value,
+  ).toBe('http://127.0.0.1:1082/');
+
+  await act(async () => {
+    actionByLabel(root, 'Clear Git proxy').props.onPress();
+    await settle();
+  });
+  const cleared = JSON.parse(
+    mockSessionSnapshots.casPersistSession.mock.calls.at(-1)?.[0]
+      ?.candidate_json,
+  ) as { preferences: { git_https_proxy_url: string | null } };
+  expect(cleared.preferences.git_https_proxy_url).toBeNull();
+  expect(
+    root.findByProps({ accessibilityLabel: 'Git HTTPS proxy URL' }).props.value,
+  ).toBe('');
+});
+
+test('retries an indeterminate session write by query with the same operation and candidate', async () => {
+  const renderer = await renderApp();
+  const root = renderer.root;
+  await act(async () => actionByLabel(root, 'Open navigation').props.onPress());
+  await act(async () => actionByLabel(root, 'Settings').props.onPress());
+
+  mockSessionSnapshots.casPersistSession.mockResolvedValueOnce({
+    schema_version: 1,
+    status: 'unknown',
+    current: { schema_version: 1, kind: 'missing' },
+  });
+  mockSessionSnapshots.querySessionCommit
+    .mockResolvedValueOnce({ schema_version: 1, status: 'unknown' })
+    .mockImplementationOnce(async request => {
+      const casRequest =
+        mockSessionSnapshots.casPersistSession.mock.calls[0]?.[0];
+      const candidateJSON = casRequest?.candidate_json as string;
+      return commitBridgedCandidate({
+        operation_id: request.operation_id,
+        candidate_json: candidateJSON,
+      });
+    });
+
+  await act(async () => {
+    root
+      .findByProps({ accessibilityLabel: 'Git HTTPS proxy URL' })
+      .props.onChangeText('http://127.0.0.1:1082');
+  });
+  await act(async () => {
+    actionByLabel(root, 'Save Git proxy').props.onPress();
+    await settle();
+  });
+  await act(async () => {
+    actionByLabel(root, 'Save Git proxy').props.onPress();
+    await settle();
+  });
+
+  expect(mockSessionSnapshots.casPersistSession).toHaveBeenCalledTimes(1);
+  expect(mockSessionSnapshots.querySessionCommit).toHaveBeenCalledTimes(2);
+  const firstQuery =
+    mockSessionSnapshots.querySessionCommit.mock.calls[0]?.[0];
+  const secondQuery =
+    mockSessionSnapshots.querySessionCommit.mock.calls[1]?.[0];
+  expect(secondQuery?.operation_id).toBe(firstQuery?.operation_id);
+  expect(
+    mockSessionSnapshots.casPersistSession.mock.calls[0]?.[0].candidate_json,
+  ).toBeDefined();
+});
+
+test('retries session-only durability by the exact operation before any second CAS', async () => {
+  const renderer = await renderApp();
+  const root = renderer.root;
+  await act(async () => actionByLabel(root, 'Open navigation').props.onPress());
+  await act(async () => actionByLabel(root, 'Settings').props.onPress());
+
+  mockSessionSnapshots.casPersistSession.mockImplementationOnce(async request => {
+    const candidateJSON = request.candidate_json as string;
+    return {
+      schema_version: 1,
+      status: 'session_only',
+      current: {
+        schema_version: 1,
+        kind: 'present',
+        snapshot: {
+          schema_version: 1,
+          generation: 1,
+          session_sha256: sessionSnapshotSHA256(candidateJSON)!,
+        },
+      },
+    };
+  });
+  mockSessionSnapshots.querySessionCommit.mockImplementationOnce(async request => {
+    const candidateJSON =
+      mockSessionSnapshots.casPersistSession.mock.calls[0]?.[0]
+        ?.candidate_json as string;
+    return commitBridgedCandidate({
+      operation_id: request.operation_id,
+      candidate_json: candidateJSON,
+    });
+  });
+
+  await act(async () => {
+    root
+      .findByProps({ accessibilityLabel: 'Git HTTPS proxy URL' })
+      .props.onChangeText('http://127.0.0.1:1082');
+  });
+  await act(async () => {
+    actionByLabel(root, 'Save Git proxy').props.onPress();
+    await settle();
+  });
+  await act(async () => {
+    actionByLabel(root, 'Save Git proxy').props.onPress();
+    await settle();
+  });
+
+  expect(mockSessionSnapshots.casPersistSession).toHaveBeenCalledTimes(1);
+  expect(mockSessionSnapshots.querySessionCommit).toHaveBeenCalledTimes(1);
+  expect(
+    mockSessionSnapshots.querySessionCommit.mock.calls[0]?.[0].operation_id,
+  ).toBe(
+    mockSessionSnapshots.casPersistSession.mock.calls[0]?.[0].operation_id,
+  );
+});
+
+test('maps rejected CAS queried not_started to not_committed and clears the pending operation', async () => {
+  const renderer = await renderApp();
+  const root = renderer.root;
+  await act(async () => actionByLabel(root, 'Open navigation').props.onPress());
+  await act(async () => actionByLabel(root, 'Settings').props.onPress());
+
+  mockSessionSnapshots.casPersistSession.mockClear();
+  mockSessionSnapshots.querySessionCommit.mockClear();
+  mockSessionSnapshots.casPersistSession
+    .mockRejectedValueOnce(new Error('native CAS rejected'))
+    .mockResolvedValueOnce(notCommittedResult());
+  mockSessionSnapshots.querySessionCommit.mockResolvedValueOnce({
+    schema_version: 1,
+    status: 'not_started',
+  });
+
+  await act(async () => {
+    root
+      .findByProps({ accessibilityLabel: 'Git HTTPS proxy URL' })
+      .props.onChangeText('http://127.0.0.1:1082');
+  });
+  await act(async () => {
+    actionByLabel(root, 'Save Git proxy').props.onPress();
+    await settle();
+  });
+  await waitForRenderedText(renderer, 'Could not save locally: not_committed');
+
+  expect(mockSessionSnapshots.casPersistSession).toHaveBeenCalledTimes(1);
+  expect(mockSessionSnapshots.querySessionCommit).toHaveBeenCalledTimes(1);
+  const firstOperationId =
+    mockSessionSnapshots.casPersistSession.mock.calls[0]?.[0].operation_id;
+
+  await act(async () => {
+    actionByLabel(root, 'Save Git proxy').props.onPress();
+    await settle();
+  });
+
+  expect(mockSessionSnapshots.casPersistSession).toHaveBeenCalledTimes(2);
+  expect(mockSessionSnapshots.querySessionCommit).toHaveBeenCalledTimes(1);
+  expect(
+    mockSessionSnapshots.casPersistSession.mock.calls[1]?.[0].operation_id,
+  ).not.toBe(firstOperationId);
+  expect(mockLocalRuntime.completeV2).not.toHaveBeenCalled();
+});
+
+function legacyV2SessionJSON(): string {
+  const stored = createChatStore({
+    now: () => '2026-08-30T00:00:00.000Z',
+    createId: kind => `${kind}-legacy`,
+    createLifecycleId: () => '11111111-1111-4111-8111-111111111111',
+  });
+  const conversationId = stored.createConversation();
+  stored.appendUserMessage(conversationId, 'legacy message');
+  const legacy = JSON.parse(stored.serialize()) as Record<string, unknown>;
+  legacy.schema_version = 8;
+  delete legacy.agent_transcript_cleanup_outbox;
+  delete legacy.session_events;
+  legacy.conversations = (
+    legacy.conversations as Array<Record<string, unknown>>
+  ).map(conversation => {
+    const copy = { ...conversation };
+    delete copy.agent_grants;
+    return copy;
+  });
+  return JSON.stringify(legacy);
+}
+
+function schema9AgentExecutionIntentJSON(): string {
+  const seed = createChatStore({ now: () => '2026-08-30T00:00:00.000Z' });
+  const conversationId = seed.createConversation();
+  const seedState = seed.getState();
+  const seedConversation = seedState.conversations[conversationId]!;
+  const workspaceId = 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa';
+  const boundState = {
+    ...seedState,
+    conversations: {
+      [conversationId]: {
+        ...seedConversation,
+        workspaceId,
+        workspaceBinding: {
+          schemaVersion: 1 as const,
+          workspaceId,
+          bindingRevision: 1,
+          projectId: null,
+        },
+        workspaceBootstrapState: 'none' as const,
+      },
+    },
+  };
+  const authoritySeed = createChatStore({ initialState: boundState });
+  const authorityDigest = sessionSnapshotSHA256(authoritySeed.serialize());
+  if (authorityDigest === null) throw new Error('invalid Agent seed');
+  const stored = createChatStore({
+    initialState: boundState,
+    sessionAuthority: { generation: 1, sessionSha256: authorityDigest },
+    now: () => '2026-08-30T00:00:00.000Z',
+  });
+  const prepared = stored.prepareTurnAttempt(
+    conversationId,
+    'agent restart pending',
+  );
+  if (prepared === null || !prepared.commit()) {
+    throw new Error('could not prepare Agent fixture');
+  }
+  const persisted = JSON.parse(stored.serialize()) as Record<string, unknown>;
+  const conversations = persisted.conversations as Array<Record<string, unknown>>;
+  const conversation = conversations[0]!;
+  const attempts = conversation.attempts as Array<Record<string, unknown>>;
+  const attempt = attempts[0]!;
+  const attemptId = attempt.attempt_id as string;
+  const roundId = 'bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb';
+  const callId = 'agent-list-dir';
+  const argumentsSha256 = 'c'.repeat(64);
+  attempt.journal_revision = 1;
+  attempt.agent = {
+    schema_version: 2,
+    phase: 'execution_intent',
+    controller_generation: 1,
+    policy: {
+      schema_version: 1,
+      policy_version: 'agent-v1',
+      max_single_write_bytes: 32768,
+      max_batch_write_bytes: 512 * 1024,
+      max_attempt_write_bytes: 4 * 1024 * 1024,
+    },
+    root: {
+      schema_version: 1,
+      kind: 'workspace',
+      workspace_id: workspaceId,
+      workspace_binding_revision: 1,
+      project_id: null,
+      root_fingerprint_sha256: 'd'.repeat(64),
+      capabilities: ['file_read'],
+    },
+    tool_registry_version: 1,
+    toolset_sha256: 'e'.repeat(64),
+    transcript: {
+      schema_version: 1,
+      transcript_ref: 'cccccccc-cccc-4ccc-8ccc-cccccccccccc',
+      generation: 0,
+      transcript_sha256: 'f'.repeat(64),
+      transcript_bytes: 0,
+    },
+    round_index: 0,
+    round_lineage: {
+      schema_version: 2,
+      round_id: roundId,
+      round_index: 0,
+      launch_attempt: 1,
+      status: 'completed',
+      native_row_revision: 2,
+    },
+    call_index: 0,
+    batch: [
+      {
+        schema_version: 2,
+        call_id: callId,
+        call_index: 0,
+        name: 'list_dir',
+        arguments_sha256: argumentsSha256,
+        safe_summary_key: 'agent.list_dir',
+        access: 'auto',
+        approval_token: null,
+        approval_decision: 'allow_once',
+        approval_reference: null,
+        idempotency_key: '1'.repeat(64),
+        native_row_revision: 1,
+        receipt: null,
+      },
+    ],
+    frozen_grant_ids: [],
+    reserved_write_bytes: 0,
+    updated_at: '2026-08-30T00:00:00.000Z',
+  };
+  persisted.session_events = [
+    {
+      schema_version: 2,
+      event_id: 'dddddddd-dddd-4ddd-8ddd-dddddddddddd',
+      attempt_id: attemptId,
+      seq: 0,
+      kind: 'tool_call',
+      round_index: 0,
+      call_id: callId,
+      status: 'running',
+      safe_summary_key: 'agent.list_dir',
+      arguments_sha256: argumentsSha256,
+      result_sha256: null,
+      approval_reference: null,
+      failure_code: null,
+      created_at: '2026-08-30T00:00:00.000Z',
+    },
+  ];
+  return JSON.stringify(persisted);
+}
+
+function schema9AgentPendingSessionJSON(
+  phase: 'execution_intent' | 'tool_result_pending' | 'final_response',
+): string {
+  const persisted = JSON.parse(
+    schema9AgentExecutionIntentJSON(),
+  ) as Record<string, unknown>;
+  const conversation = (
+    persisted.conversations as Array<Record<string, unknown>>
+  )[0]!;
+  const attempt = (conversation.attempts as Array<Record<string, unknown>>)[0]!;
+  const agent = attempt.agent as Record<string, unknown>;
+  if (phase === 'execution_intent') return JSON.stringify(persisted);
+  if (phase === 'final_response') {
+    agent.phase = 'final_response';
+    agent.call_index = null;
+    agent.batch = [];
+    persisted.session_events = [
+      {
+        schema_version: 2,
+        event_id: 'eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee',
+        attempt_id: attempt.attempt_id,
+        seq: 0,
+        kind: 'terminal',
+        round_index: null,
+        call_id: null,
+        status: 'ok',
+        safe_summary_key: null,
+        arguments_sha256: null,
+        result_sha256: null,
+        approval_reference: null,
+        failure_code: null,
+        created_at: '2026-08-30T00:00:00.000Z',
+      },
+    ];
+    return JSON.stringify(persisted);
+  }
+
+  agent.phase = 'tool_result_pending';
+  agent.transcript = {
+    ...(agent.transcript as Record<string, unknown>),
+    generation: 1,
+    transcript_sha256: '0'.repeat(64),
+  };
+  const call = (agent.batch as Array<Record<string, unknown>>)[0]!;
+  call.native_row_revision = 2;
+  call.receipt = {
+    schema_version: 1,
+    call_id: call.call_id,
+    name: call.name,
+    arguments_sha256: call.arguments_sha256,
+    result_sha256: '1'.repeat(64),
+    result_bytes: 0,
+    truncated: false,
+    duration_ms: 1,
+    outcome: 'ok',
+    failure_code: null,
+    approval_reference: null,
+  };
+  persisted.session_events = [
+    {
+      schema_version: 2,
+      event_id: 'eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeef',
+      attempt_id: attempt.attempt_id,
+      seq: 0,
+      kind: 'tool_result',
+      round_index: 0,
+      call_id: call.call_id,
+      status: 'ok',
+      safe_summary_key: call.safe_summary_key,
+      arguments_sha256: call.arguments_sha256,
+      result_sha256: '1'.repeat(64),
+      approval_reference: null,
+      failure_code: null,
+      created_at: '2026-08-30T00:00:00.000Z',
+    },
+  ];
+  return JSON.stringify(persisted);
+}
+
+function schema9LegacyApprovalSessionJSON(
+  mismatch: 'conversation' | 'session' | 'journal' | 'root',
+): string {
+  const persisted = JSON.parse(
+    schema9AgentExecutionIntentJSON(),
+  ) as Record<string, unknown>;
+  const conversation = (
+    persisted.conversations as Array<Record<string, unknown>>
+  )[0]!;
+  const attempt = (conversation.attempts as Array<Record<string, unknown>>)[0]!;
+  const agent = attempt.agent as Record<string, unknown>;
+  const root = agent.root as Record<string, unknown>;
+  const lineage = agent.round_lineage as Record<string, unknown>;
+  const callId = 'legacy-write-file';
+  const argumentsSha256 = '2'.repeat(64);
+  root.capabilities = ['file_read', 'file_write'];
+  agent.phase = 'approval_pending';
+  agent.call_index = 0;
+  const token = {
+    schema_version: 1,
+    controller_cas: {
+      schema_version: 1,
+      conversation_id: conversation.id,
+      task_id: attempt.turn_id,
+      attempt_id: attempt.attempt_id,
+      expected_controller_generation: 0,
+      expected_journal_revision: 0,
+      expected_session_generation: 7,
+      expected_session_sha256: '3'.repeat(64),
+    },
+    round_id: lineage.round_id,
+    round_index: 0,
+    batch_call_ids: [callId],
+    batch_arguments_sha256: [argumentsSha256],
+    call_index: 0,
+    call_id: callId,
+    name: 'write_file',
+    access: 'conversation_confirm',
+    arguments_sha256: argumentsSha256,
+    root_fingerprint_sha256: root.root_fingerprint_sha256,
+    binding_revision: root.workspace_binding_revision,
+    policy_version: (agent.policy as Record<string, unknown>).policy_version,
+    registry_version: 1,
+    allowed_decisions: [
+      'denied',
+      'allow_once',
+      'allow_conversation',
+      'cancelled',
+    ],
+  };
+  if (mismatch === 'conversation') {
+    token.controller_cas.conversation_id = 'wrong-conversation';
+  } else if (mismatch === 'session') {
+    token.controller_cas.expected_session_sha256 = '4'.repeat(64);
+  } else if (mismatch === 'journal') {
+    token.controller_cas.expected_journal_revision = 4;
+  } else {
+    token.root_fingerprint_sha256 = '5'.repeat(64);
+  }
+  agent.batch = [
+    {
+      schema_version: 2,
+      call_id: callId,
+      call_index: 0,
+      name: 'write_file',
+      arguments_sha256: argumentsSha256,
+      safe_summary_key: 'agent.write_file',
+      access: 'conversation_confirm',
+      approval_token: token,
+      approval_decision: 'allow_once',
+      approval_reference: null,
+      idempotency_key: null,
+      native_row_revision: null,
+      receipt: null,
+    },
+  ];
+  persisted.session_events = [
+    {
+      schema_version: 2,
+      event_id: 'f1111111-1111-4111-8111-111111111111',
+      attempt_id: attempt.attempt_id,
+      seq: 0,
+      kind: 'tool_call',
+      round_index: 0,
+      call_id: callId,
+      status: 'approval',
+      safe_summary_key: 'agent.write_file',
+      arguments_sha256: argumentsSha256,
+      result_sha256: null,
+      approval_reference: null,
+      failure_code: null,
+      created_at: '2026-08-30T00:00:00.000Z',
+    },
+  ];
+  const sessionJSON = JSON.stringify(persisted);
+  if (mismatch !== 'root' && !safeHydrateChatState(sessionJSON).ok) {
+    throw new Error('legacy approval fixture must expose the missing-authority bug');
+  }
+  return sessionJSON;
+}
+
+function schema9MixedAgentSession(): {
+  sessionJSON: string;
+  currentAttemptId: string;
+} {
+  const persisted = JSON.parse(schema9AgentExecutionIntentJSON()) as Record<
+    string,
+    unknown
+  >;
+  const persistedConversation = (
+    persisted.conversations as Array<Record<string, unknown>>
+  )[0]!;
+  const historical = (
+    persistedConversation.attempts as Array<Record<string, unknown>>
+  )[0]!;
+  historical.status = 'cancelled';
+  historical.failure_code = null;
+  const historicalAgent = historical.agent as Record<string, unknown>;
+  historicalAgent.phase = 'cancelled';
+  historicalAgent.round_lineage = {
+    ...(historicalAgent.round_lineage as Record<string, unknown>),
+    status: 'completed',
+  };
+  historicalAgent.call_index = null;
+  historicalAgent.batch = [];
+  persisted.session_events = [];
+  const hydrated = safeHydrateChatState(JSON.stringify(persisted));
+  if (!hydrated.ok) throw new Error('could not hydrate mixed Agent fixture');
+  const mixed = createChatStore({
+    initialState: hydrated.state,
+    now: () => '2026-08-30T00:00:01.000Z',
+  });
+  const conversationId = mixed.getState().selectedConversationId;
+  if (conversationId === null) throw new Error('mixed Agent chat not selected');
+  const current = mixed.prepareTurnAttempt(conversationId, 'current non-agent');
+  if (current === null || !current.commit()) {
+    throw new Error('could not prepare mixed Agent attempt');
+  }
+  return { sessionJSON: mixed.serialize(), currentAttemptId: current.attemptId };
+}
+
+function legacyLoadResult(sessionJSON: string) {
+  return {
+    schema_version: 1 as const,
+    status: 'legacy_present' as const,
+    legacy: {
+      schema_version: 1 as const,
+      legacy_bytes_sha256: 'a'.repeat(64),
+    },
+    session_json: sessionJSON,
+  };
+}
+
+function presentLoadResult(sessionJSON: string, generation = 1) {
+  const digest = sessionSnapshotSHA256(sessionJSON);
+  if (digest === null) throw new Error('fixture is not a V9 session');
+  return {
+    schema_version: 1 as const,
+    status: 'present' as const,
+    snapshot: {
+      schema_version: 1 as const,
+      generation,
+      session_sha256: digest,
+    },
+    session_json: sessionJSON,
+  };
+}
+
+function installAgentRuntimeFlow(options: { inFlight?: boolean } = {}) {
+  const root: AgentRuntimeRootV1 = {
+    schema_version: 1,
+    kind: 'project',
+    workspace_id: CONTEXT_RUNTIME_ID,
+    workspace_binding_revision: 1,
+    project_id: CONTEXT_PROJECT_ID,
+    root_fingerprint_sha256: '6'.repeat(64),
+    capabilities: ['file_read', 'file_write', 'git_commit'],
+  };
+  const policy: AgentRuntimePolicyV1 = {
+    schema_version: 1,
+    policy_version: 'agent-v1',
+    max_single_write_bytes: 32768,
+    max_batch_write_bytes: 512 * 1024,
+    max_attempt_write_bytes: 4 * 1024 * 1024,
+  };
+  const transcript = (
+    generation: number,
+    digest: string,
+  ): AgentRuntimeTranscriptHandleV1 => ({
+    schema_version: 1,
+    transcript_ref: 'abababab-abab-4bab-8bab-abababababab',
+    generation,
+    transcript_sha256: digest,
+    transcript_bytes: generation * 10,
+  });
+  mockAgentRuntime.isAvailable.mockReturnValue(true);
+  mockAgentRuntime.prepareAgentAttempt.mockImplementation(
+    async (request: PrepareAgentAttemptRequestV2) => ({
+      schema_version: 2,
+      status: 'prepared',
+      operation_id: request.operation_id,
+      attempt: {
+        schema_version: 2,
+        task_id: request.task_id,
+        conversation_id: request.conversation_id,
+        attempt_id: request.attempt_id,
+        phase: 'ready_for_round',
+        controller_generation:
+          request.controller_cas.expected_controller_generation,
+        journal_revision: request.controller_cas.expected_journal_revision,
+        authority_revision: 1,
+        root,
+        policy,
+        registry: {
+          schema_version: 2,
+          registry_version: 1,
+          toolset_sha256: '7'.repeat(64),
+          tools: [
+            {
+              schema_version: 2,
+              name: 'write_file',
+              safe_summary_key: 'agent.write_file',
+              access: 'conversation_confirm',
+            },
+            {
+              schema_version: 2,
+              name: 'git_commit',
+              safe_summary_key: 'agent.git_commit',
+              access: 'conversation_confirm',
+            },
+          ],
+        },
+        transcript: transcript(0, '8'.repeat(64)),
+        round_index: 0,
+        round_id: null,
+        round_revision: null,
+        round_status: null,
+        batch_kind: null,
+        batch_revision: null,
+        manifest_sha256: null,
+        call_index: null,
+        batch: [],
+        frozen_grant_ids: [],
+        reserved_write_bytes: 0,
+        cancel_source_event_id: null,
+        cleanup_id: null,
+      } satisfies AgentAttemptProjectionV2,
+      observed_checkpoint: request.committed_checkpoint,
+    }),
+  );
+  mockAgentRuntime.completeAgentRoundV2.mockImplementation(
+    async (request: CompleteAgentRoundRequestV2) => {
+      if (options.inFlight) {
+        return {
+          schema_version: 2,
+          status: 'in_flight',
+          operation_id: request.operation_id,
+          task_id: request.task_id,
+          attempt_id: request.attempt_id,
+          round_id: request.round_id,
+          round_index: request.round_index,
+          launch_attempt: request.launch_attempt,
+          result_round_revision: 1,
+          transcript: request.transcript,
+        };
+      }
+      const final = request.round_index === 1;
+      const nextTranscript = transcript(
+        final ? 4 : 1,
+        final ? '9'.repeat(64) : '1'.repeat(64),
+      );
+      const completionReceipt: AgentRoundReceiptV2 = {
+        schema_version: 2,
+        transport_schema_version: request.transport_schema_version,
+        turn_id: request.task_id,
+        task_id: request.task_id,
+        attempt_id: request.attempt_id,
+        round_id: request.round_id,
+        round_index: request.round_index,
+        provider_request_id: `provider-${request.round_index}`,
+        provider_response_id: `response-${request.round_index}`,
+        requested_model: request.model,
+        model: request.model,
+        thinking_mode: request.thinking_mode,
+        finish_reason: final ? 'stop' : 'tool_calls',
+        latency_ms: 1,
+        visible_history_sha256: request.visible_history_sha256,
+        model_input_sha256: 'a'.repeat(64),
+        request_body_sha256: 'b'.repeat(64),
+        project_context_receipt: {
+          schema_version: 1,
+          snapshot_id: CONTEXT_SNAPSHOT_ID,
+          snapshot_sha256: request.project_context_sha256!,
+          source_fingerprint: 'e'.repeat(64),
+          context_bytes: 16,
+          verified_at: '2026-08-30T00:00:02.000Z',
+        },
+      };
+      if (final) {
+        return {
+          schema_version: 2,
+          status: 'completed',
+          operation_id: request.operation_id,
+          task_id: request.task_id,
+          attempt_id: request.attempt_id,
+          round_id: request.round_id,
+          round_index: request.round_index,
+          launch_attempt: request.launch_attempt,
+          result_round_revision: 1,
+          transcript: nextTranscript,
+          outcome: {
+            schema_version: 3,
+            kind: 'final',
+            finish_reason: 'stop',
+            completion_receipt: completionReceipt,
+            transcript: nextTranscript,
+            text: 'Agent final',
+            reasoning: 'Agent reasoning',
+          },
+        };
+      }
+      return {
+        schema_version: 2,
+        status: 'completed',
+        operation_id: request.operation_id,
+        task_id: request.task_id,
+        attempt_id: request.attempt_id,
+        round_id: request.round_id,
+        round_index: request.round_index,
+        launch_attempt: request.launch_attempt,
+        result_round_revision: 1,
+        transcript: nextTranscript,
+        outcome: {
+          schema_version: 3,
+          kind: 'tool_batch',
+          finish_reason: 'tool_calls',
+          completion_receipt: completionReceipt,
+          transcript: nextTranscript,
+          calls: [
+            {
+              schema_version: 3,
+              call_index: 0,
+              call_id: 'write-call',
+              name: 'write_file',
+              arguments_sha256: '2'.repeat(64),
+              safe_summary_key: 'agent.write_file',
+              access: 'conversation_confirm',
+              approval_state: 'deferred',
+            },
+            {
+              schema_version: 3,
+              call_index: 1,
+              call_id: 'commit-call',
+              name: 'git_commit',
+              arguments_sha256: '3'.repeat(64),
+              safe_summary_key: 'agent.git_commit',
+              access: 'conversation_confirm',
+              approval_state: 'deferred',
+            },
+          ],
+          batch_class: 'executable',
+          executable_call_count: 2,
+          denied_call_count: 0,
+          reasoning: '',
+        },
+      };
+    },
+  );
+  mockAgentRuntime.prepareAgentToolBatch.mockImplementation(
+    async (request: PrepareAgentToolBatchRequestV2) => {
+      const batchRevision = request.expected_batch_revision + 1;
+      const makeToken = (
+        index: number,
+        callId: string,
+        name: string,
+        argumentsSha256: string,
+      ): AgentApprovalBindingTokenV2 => ({
+        schema_version: 2,
+        token:
+          index === 0
+            ? '93939393-9393-4939-8939-939393939393'
+            : '94949494-9494-4949-8949-949494949494',
+        controller_cas: request.controller_cas,
+        task_id: request.task_id,
+        attempt_id: request.attempt_id,
+        round_id: request.round_id,
+        round_index: request.round_index,
+        batch_call_ids: ['write-call', 'commit-call'],
+        batch_arguments_sha256: ['2'.repeat(64), '3'.repeat(64)],
+        batch_revision: batchRevision,
+        manifest_sha256: 'c'.repeat(64),
+        call_index: index,
+        call_id: callId,
+        name,
+        arguments_sha256: argumentsSha256,
+        idempotency_key: `${index + 4}`.repeat(64),
+        root_fingerprint_sha256: root.root_fingerprint_sha256,
+        binding_revision: 1,
+        policy_version: 'agent-v1',
+        registry_version: 1,
+        access: 'conversation_confirm',
+        allowed_decisions: [
+          'denied',
+          'allow_once',
+          'allow_conversation',
+          'cancelled',
+        ],
+      });
+      const calls: AgentBatchCallProjectionV2[] = [
+        {
+          schema_version: 2,
+          call_index: 0,
+          call_id: 'write-call',
+          name: 'write_file',
+          arguments_sha256: '2'.repeat(64),
+          idempotency_key: '4'.repeat(64),
+          safe_summary_key: 'agent.write_file',
+          access: 'conversation_confirm',
+          approval_state: 'pending',
+          approval_token: makeToken(0, 'write-call', 'write_file', '2'.repeat(64)),
+          approval_reference: null,
+          execution_status: 'intent',
+          execution_revision: 1,
+          native_row_revision: 1,
+          receipt: null,
+        },
+        {
+          schema_version: 2,
+          call_index: 1,
+          call_id: 'commit-call',
+          name: 'git_commit',
+          arguments_sha256: '3'.repeat(64),
+          idempotency_key: '5'.repeat(64),
+          safe_summary_key: 'agent.git_commit',
+          access: 'conversation_confirm',
+          approval_state: 'pending',
+          approval_token: makeToken(1, 'commit-call', 'git_commit', '3'.repeat(64)),
+          approval_reference: null,
+          execution_status: 'intent',
+          execution_revision: 1,
+          native_row_revision: 1,
+          receipt: null,
+        },
+      ];
+      const receipt: AgentBatchReceiptV2 = {
+        schema_version: 2,
+        task_id: request.task_id,
+        attempt_id: request.attempt_id,
+        round_id: request.round_id,
+        round_index: request.round_index,
+        batch_kind: 'write_batch',
+        batch_revision: batchRevision,
+        manifest_sha256: 'c'.repeat(64),
+        transcript: request.transcript,
+        calls,
+        batch_new_write_bytes: 1,
+        reserved_write_bytes: request.expected_reserved_write_bytes + 1,
+        effect_gate: 'closed',
+      };
+      return {
+        schema_version: 2,
+        status: 'prepared',
+        operation_id: request.operation_id,
+        receipt,
+        observed_checkpoint: request.committed_checkpoint,
+      };
+    },
+  );
+  mockAgentRuntime.bindAgentApproval.mockImplementation(
+    async (request: BindAgentApprovalRequestV2) => ({
+      schema_version: 2,
+      status: 'bound',
+      operation_id: request.operation_id,
+      task_id: request.task_id,
+      attempt_id: request.attempt_id,
+      round_id: request.round_id,
+      call_index: request.call_index,
+      call_id: request.call_id,
+      decision: request.decision,
+      approval_reference: request.operation_id,
+      grant: null,
+      result_batch_revision: request.batch_revision,
+      observed_checkpoint: request.committed_checkpoint,
+    }),
+  );
+  mockAgentRuntime.executeAgentTool.mockImplementation(
+    async (request: ExecuteAgentToolRequestV2) => {
+      const receipt: AgentToolReceiptV1 = {
+        schema_version: 1,
+        call_id: request.call_id,
+        name: request.name,
+        arguments_sha256: request.arguments_sha256,
+        result_sha256: `${request.call_index + 6}`.repeat(64),
+        result_bytes: 1,
+        truncated: false,
+        duration_ms: 1,
+        outcome: 'ok',
+        failure_code: null,
+        approval_reference: request.approval_reference,
+      };
+      return {
+        schema_version: 2,
+        status: 'completed',
+        operation_id: request.operation_id,
+        task_id: request.task_id,
+        attempt_id: request.attempt_id,
+        round_id: request.round_id,
+        round_index: request.round_index,
+        call_index: request.call_index,
+        call_id: request.call_id,
+        name: request.name,
+        idempotency_key: request.idempotency_key,
+        result_execution_revision: 2,
+        transcript: transcript(
+          request.call_index + 2,
+          `${request.call_index + 2}`.repeat(64),
+        ),
+        receipt,
+        effect_may_have_occurred: true,
+      };
+    },
+  );
+  mockAgentRuntime.finalizeAgentAttempt.mockImplementation(async request => ({
+    schema_version: 2,
+    status: 'terminal',
+    operation_id: request.operation_id,
+    cleanup_id: request.cleanup_id,
+    transcript: request.transcript,
+  }));
+  mockAgentRuntime.discardAgentAttempt.mockImplementation(async request => ({
+    schema_version: 2,
+    status: 'discarded',
+    operation_id: request.operation_id,
+    cleanup_id: request.cleanup_id,
+  }));
+}
+
+async function waitForAgentApproval(
+  renderer: Renderer,
+  toolName: string,
+): Promise<ReactTestInstance> {
+  for (let index = 0; index < 100; index += 1) {
+    const composer = renderer.root
+      .findAllByType(ApprovalComposer)
+      .find(candidate => candidate.props.request.toolName === toolName);
+    if (composer !== undefined) return composer;
+    await act(async () => settle());
+  }
+  throw new Error(
+    `missing Agent approval for ${toolName}`,
+  );
+}
+
+async function waitForRenderedText(
+  renderer: Renderer,
+  text: string,
+): Promise<void> {
+  for (let index = 0; index < 100; index += 1) {
+    if (renderer.root.findAllByProps({ children: text }).length > 0) return;
+    await act(async () => {
+      await settle();
+      await new Promise<void>(resolve => setTimeout(() => resolve(), 0));
+    });
+  }
+  throw new Error(`missing rendered text ${text}`);
+}
+
+test('runs a project Agent task through two safe approvals and restores it without replay', async () => {
+  const fixture = storedAgentProject();
+  queuePresentSession(fixture.stored.serialize(), 7);
+  mockAgentWorkspaceAuthority();
+  mockConfirmedAgentProjectInspection(fixture.manifest);
+  installAgentRuntimeFlow();
+
+  const renderer = await renderApp();
+  expect(
+    renderer.root.findAllByType(ProjectContextStrip).map(strip => ({
+      status: strip.props.state.status,
+      verificationStatus: strip.props.verificationStatus,
+    })),
+  ).toEqual([{ status: 'ready', verificationStatus: 'verified' }]);
+  await waitForRenderedText(renderer, 'Ready');
+  expect(renderer.root.findByType(ChatComposer).props.locked).toBe(false);
+  await act(async () => {
+    renderer.root
+      .findByProps({ accessibilityLabel: 'Message DSH' })
+      .props.onChangeText('write and commit');
+  });
+  await act(async () => {
+    const sendAction = actionByLabel(renderer.root, 'Send message');
+    expect(sendAction.props.disabled).toBe(false);
+    sendAction.props.onPress();
+    await settle();
+  });
+  for (let index = 0; index < 20; index += 1) {
+    await act(async () => settle());
+    if (mockAgentRuntime.prepareAgentAttempt.mock.calls.length > 0) break;
+  }
+  expect(mockAgentRuntime.isAvailable).toHaveBeenCalled();
+  expect(mockLocalRuntime.completeV2).not.toHaveBeenCalled();
+  expect(mockAgentRuntime.prepareAgentAttempt).toHaveBeenCalledTimes(1);
+
+  const writeApproval = await waitForAgentApproval(renderer, 'write_file');
+  expect(JSON.parse(writeApproval.props.request.argumentsJson)).toEqual({
+    arguments_sha256: '2'.repeat(64),
+  });
+  expect(writeApproval.props.request.argumentsJson).not.toContain('path');
+  await act(async () => {
+    renderer.root.findByProps({ testID: 'approval-allow' }).props.onPress();
+    await settle();
+  });
+
+  const commitApproval = await waitForAgentApproval(renderer, 'git_commit');
+  expect(JSON.parse(commitApproval.props.request.argumentsJson)).toEqual({
+    arguments_sha256: '3'.repeat(64),
+  });
+  await act(async () => {
+    renderer.root.findByProps({ testID: 'approval-allow' }).props.onPress();
+    await settle();
+  });
+  await waitForRenderedText(renderer, 'Agent final');
+
+  expect(mockAgentRuntime.prepareAgentAttempt).toHaveBeenCalledTimes(1);
+  expect(mockAgentRuntime.completeAgentRoundV2).toHaveBeenCalledTimes(2);
+  expect(mockAgentRuntime.prepareAgentToolBatch).toHaveBeenCalledTimes(1);
+  expect(mockAgentRuntime.bindAgentApproval).toHaveBeenCalledTimes(2);
+  expect(mockAgentRuntime.executeAgentTool).toHaveBeenCalledTimes(2);
+  expect(mockAgentRuntime.finalizeAgentAttempt).toHaveBeenCalledTimes(1);
+  expect(mockAgentRuntime.discardAgentAttempt).toHaveBeenCalledTimes(1);
+  expect(mockRunAgentTurn).not.toHaveBeenCalled();
+  expect(mockLocalRuntime.completeV2).not.toHaveBeenCalled();
+  const persisted = JSON.parse(lastPersistedCandidateJSON()) as {
+    conversations: Array<{
+      attempts: Array<{
+        status: string;
+        agent: null | { phase: string; batch: unknown[] };
+      }>;
+    }>;
+    session_events: Array<{ kind: string; status: string }>;
+  };
+  expect(persisted.conversations[0]?.attempts[0]).toMatchObject({
+    status: 'completed',
+    agent: { phase: 'final_response' },
+  });
+  expect(
+    persisted.session_events.map(event => `${event.kind}:${event.status}`),
+  ).toEqual(
+    expect.arrayContaining(['tool_result:ok', 'terminal:ok']),
+  );
+
+  const callsBeforeRestart = {
+    prepare: mockAgentRuntime.prepareAgentAttempt.mock.calls.length,
+    rounds: mockAgentRuntime.completeAgentRoundV2.mock.calls.length,
+    batches: mockAgentRuntime.prepareAgentToolBatch.mock.calls.length,
+    effects: mockAgentRuntime.executeAgentTool.mock.calls.length,
+  };
+  queuePresentSession(lastPersistedCandidateJSON(), bridgedGeneration);
+  await act(async () => renderer.unmount());
+  const restarted = await renderApp();
+  await waitForRenderedText(restarted, 'Agent final');
+  expect(mockAgentRuntime.prepareAgentAttempt).toHaveBeenCalledTimes(
+    callsBeforeRestart.prepare,
+  );
+  expect(mockAgentRuntime.completeAgentRoundV2).toHaveBeenCalledTimes(
+    callsBeforeRestart.rounds,
+  );
+  expect(mockAgentRuntime.prepareAgentToolBatch).toHaveBeenCalledTimes(
+    callsBeforeRestart.batches,
+  );
+  expect(mockAgentRuntime.executeAgentTool).toHaveBeenCalledTimes(
+    callsBeforeRestart.effects,
+  );
+});
+
+test('executes zero Agent native calls when outer project-task persistence fails', async () => {
+  const fixture = storedAgentProject();
+  queuePresentSession(fixture.stored.serialize(), 7);
+  mockAgentWorkspaceAuthority();
+  mockConfirmedAgentProjectInspection(fixture.manifest);
+  installAgentRuntimeFlow();
+  const renderer = await renderApp();
+  await waitForRenderedText(renderer, 'Ready');
+  mockSessionSnapshots.casPersistSession.mockResolvedValueOnce(
+    notCommittedResult(),
+  );
+
+  await act(async () => {
+    renderer.root
+      .findByProps({ accessibilityLabel: 'Message DSH' })
+      .props.onChangeText('must not execute');
+  });
+  await act(async () => {
+    actionByLabel(renderer.root, 'Send message').props.onPress();
+    await settle();
+  });
+  for (let index = 0; index < 20; index += 1) {
+    await act(async () => settle());
+  }
+
+  expect(mockAgentRuntime.prepareAgentAttempt).not.toHaveBeenCalled();
+  expect(mockAgentRuntime.completeAgentRoundV2).not.toHaveBeenCalled();
+  expect(mockAgentRuntime.prepareAgentToolBatch).not.toHaveBeenCalled();
+  expect(mockAgentRuntime.bindAgentApproval).not.toHaveBeenCalled();
+  expect(mockAgentRuntime.executeAgentTool).not.toHaveBeenCalled();
+  expect(mockLocalRuntime.completeV2).not.toHaveBeenCalled();
+  expect(mockRunAgentTurn).not.toHaveBeenCalled();
+  expect(
+    renderer.root.findByProps({ accessibilityLabel: 'Message DSH' }).props.value,
+  ).toBe('must not execute');
+});
+
+test('promotes an exact V2 legacy token to one canonical V3/V9 session', async () => {
+  const legacyJSON = legacyV2SessionJSON();
+  mockSessionSnapshots.loadSessionSnapshot
+    .mockResolvedValueOnce(legacyLoadResult(legacyJSON))
+    .mockResolvedValueOnce(legacyLoadResult(legacyJSON));
+  mockSessionSnapshots.casPersistSession.mockImplementationOnce(
+    async request => commitBridgedCandidate(request),
+  );
+
+  const renderer = await renderApp();
+  const root = renderer.root;
+  expect(root.findAllByProps({ children: 'legacy message' })).not.toHaveLength(0);
+  expect(mockSessionSnapshots.casPersistSession).toHaveBeenCalledWith(
+    expect.objectContaining({
+      expected: {
+        schema_version: 1,
+        kind: 'legacy_present',
+        legacy: {
+          schema_version: 1,
+          legacy_bytes_sha256: 'a'.repeat(64),
+        },
+      },
+      candidate_json: expect.stringContaining('"schema_version":9'),
+    }),
+  );
+  expect(mockSessionSnapshots.loadSessionSnapshot).toHaveBeenCalledTimes(2);
+});
+
+test.each([
+  'execution_intent',
+  'tool_result_pending',
+  'final_response',
+] as const)('hydrates a present %s without replaying tools after restart', async phase => {
+  const sessionJSON = schema9AgentPendingSessionJSON(phase);
+  queuePresentSession(sessionJSON, 7);
+
+  const renderer = await renderApp();
+  expect(
+    renderer.root.findAllByProps({ children: 'agent restart pending' }),
+  ).not.toHaveLength(0);
+  await act(async () => {
+    actionByLabel(renderer.root, 'Retry response').props.onPress();
+    await settle();
+  });
+  expect(mockSessionSnapshots.casPersistSession).toHaveBeenCalledTimes(1);
+  expect(mockSessionSnapshots.querySessionCommit).not.toHaveBeenCalled();
+  expect(mockLocalRuntime.completeV2).not.toHaveBeenCalled();
+  expect(mockLocalWorkspace.executePortableTool).not.toHaveBeenCalled();
+  expect(mockRunAgentTurn).not.toHaveBeenCalled();
+});
+
+test('CAS-migrates a present V2/V9 candidate before installing its new authority', async () => {
+  const sessionJSON = schema9AgentExecutionIntentJSON();
+  const loaded = presentLoadResult(sessionJSON, 7);
+  queuePresentSession(sessionJSON, 7);
+
+  const renderer = await renderApp();
+  expect(
+    renderer.root.findAllByProps({ children: 'agent restart pending' }),
+  ).not.toHaveLength(0);
+  expect(mockSessionSnapshots.casPersistSession).toHaveBeenCalledTimes(1);
+  const request = mockSessionSnapshots.casPersistSession.mock.calls[0]?.[0];
+  expect(request.expected).toEqual({
+    schema_version: 1,
+    kind: 'present',
+    snapshot: loaded.snapshot,
+  });
+  expect(sessionSnapshotSHA256(request.candidate_json)).not.toBe(
+    loaded.snapshot.session_sha256,
+  );
+  const candidate = JSON.parse(request.candidate_json) as {
+    conversations: Array<{ attempts: Array<{ agent: { schema_version: number } }> }>;
+  };
+  expect(candidate.conversations[0]?.attempts[0]?.agent.schema_version).toBe(3);
+});
+
+test.each(['conversation', 'session', 'journal', 'root'] as const)(
+  'rejects a present legacy approval with the wrong %s authority',
+  async mismatch => {
+    const sessionJSON = schema9LegacyApprovalSessionJSON(mismatch);
+    queuePresentSession(sessionJSON, 7);
+
+    const renderer = await renderApp();
+    expect(
+      renderer.root.findAllByProps({ children: 'agent restart pending' }),
+    ).toHaveLength(0);
+    expect(mockSessionSnapshots.casPersistSession).not.toHaveBeenCalled();
+    expect(mockLocalRuntime.completeV2).not.toHaveBeenCalled();
+  },
+);
+
+test.each(['conflict', 'lost'] as const)(
+  'does not install the old present authority when migration is %s',
+  async outcome => {
+    const sessionJSON = schema9AgentExecutionIntentJSON();
+    const loaded = presentLoadResult(sessionJSON, 7);
+    queuePresentSession(sessionJSON, 7);
+    if (outcome === 'conflict') {
+      mockSessionSnapshots.casPersistSession.mockResolvedValueOnce({
+        schema_version: 1,
+        status: 'conflict',
+        current: { schema_version: 1, kind: 'present', snapshot: loaded.snapshot },
+      });
+    } else {
+      mockSessionSnapshots.casPersistSession.mockResolvedValueOnce(undefined);
+    }
+
+    const renderer = await renderApp();
+    expect(
+      renderer.root.findAllByProps({ children: 'agent restart pending' }),
+    ).toHaveLength(0);
+    expect(mockLocalRuntime.completeV2).not.toHaveBeenCalled();
+    expect(mockRunAgentTurn).not.toHaveBeenCalled();
+  },
+);
+
+test('uses the ordinary retry path for a current non-Agent attempt after Agent history', async () => {
+  const { sessionJSON, currentAttemptId } = schema9MixedAgentSession();
+  queuePresentSession(sessionJSON, 7);
+
+  const renderer = await renderApp();
+  expect(currentAttemptId).toBeDefined();
+  expect(actionByLabel(renderer.root, 'Retry response')).toBeDefined();
+
+  await act(async () => {
+    actionByLabel(renderer.root, 'Retry response').props.onPress();
+    await settle();
+    await settle();
+  });
+
+  expect(mockLocalRuntime.completeV2).toHaveBeenCalledTimes(1);
+  expect(mockRunAgentTurn).not.toHaveBeenCalled();
+});
+
+test.each([
+  ['boolean native load', true],
+  [
+    'malformed native load',
+    { schema_version: 1, status: 'present', snapshot: null, session_json: '{}' },
+  ],
+] as const)('does not downgrade or overwrite on %s', async (_label, loaded) => {
+  mockSessionSnapshots.loadSessionSnapshot.mockResolvedValueOnce(loaded);
+
+  const renderer = await renderApp();
+  expect(renderer.root.findByProps({ accessibilityLabel: 'Message DSH' })).toBeDefined();
+  expect(mockSessionSnapshots.casPersistSession).not.toHaveBeenCalled();
+  expect(mockSessionSnapshots.querySessionCommit).not.toHaveBeenCalled();
+});
+
+test.each(['conflict', 'unknown', 'session_only'] as const)(
+  'keeps a legacy session hidden when migration returns %s',
+  async status => {
+    const legacyJSON = legacyV2SessionJSON();
+    mockSessionSnapshots.loadSessionSnapshot.mockResolvedValueOnce(
+      legacyLoadResult(legacyJSON),
+    );
+    mockSessionSnapshots.loadSessionSnapshot.mockResolvedValueOnce(
+      legacyLoadResult(legacyJSON),
+    );
+    mockSessionSnapshots.casPersistSession.mockResolvedValueOnce({
+      schema_version: 1,
+      status,
+      current: { schema_version: 1, kind: 'missing' },
+    });
+
+    const renderer = await renderApp();
+    expect(renderer.root.findAllByProps({ children: 'legacy message' })).toHaveLength(0);
+  },
+);
+
 test('edits with revision protection and renders a real portable tool receipt', async () => {
   const file = {
     path: 'note.md',
@@ -5740,15 +8216,58 @@ test('edits with revision protection and renders a real portable tool receipt', 
     modified_at: '2026-08-24T00:00:00.000Z',
     revision: 'rev-1',
   };
-  mockLocalWorkspace.listDirectory.mockResolvedValue({
-    path: '',
-    entries: [file],
-  });
-  mockLocalWorkspace.readText.mockResolvedValue({ file, content: 'hello' });
-  mockLocalWorkspace.writeText.mockResolvedValue({
-    created: false,
-    file: { ...file, size: 12, revision: 'rev-2' },
-  });
+  mockLocalWorkspace.listV2.mockImplementationOnce(
+    async (request: {
+      root: { workspace_id: string; binding_revision: number; project_id: string | null };
+      path: string;
+    }) => ({
+      schema_version: 1,
+      root: appWorkspaceRoot(request),
+      path: request.path,
+      entries: [file],
+    }),
+  );
+  mockLocalWorkspace.readV2.mockImplementationOnce(
+    async (request: {
+      root: { workspace_id: string; binding_revision: number; project_id: string | null };
+      path: string;
+    }) => ({
+      schema_version: 1,
+      root: appWorkspaceRoot(request),
+      path: request.path,
+      file,
+      content: 'hello',
+    }),
+  );
+  mockLocalWorkspace.writeV2.mockImplementationOnce(
+    async (request: {
+      root: { workspace_id: string; binding_revision: number; project_id: string | null };
+      path: string;
+      content: string;
+    }) => ({
+      schema_version: 1,
+      root: appWorkspaceRoot(request),
+      file: { ...file, size: request.content.length, revision: 'rev-2' },
+      created: false,
+    }),
+  );
+  mockLocalWorkspace.executePortableToolV2.mockImplementationOnce(
+    async (request: {
+      root: { workspace_id: string; binding_revision: number; project_id: string | null };
+      tool: string;
+      path: string;
+    }) => ({
+      schema_version: 1,
+      root: appWorkspaceRoot(request),
+      tool: request.tool,
+      path: request.path,
+      exit_code: 0,
+      stdout: 'abc  note.md\n',
+      stderr: '',
+      protocol_version: 1,
+      path_kind: 'portable_applet',
+    }),
+  );
   const renderer = await renderApp();
   const root = renderer.root;
 
@@ -5770,20 +8289,37 @@ test('edits with revision protection and renders a real portable tool receipt', 
     actionByLabel(root, 'Save changes').props.onPress();
     await settle();
   });
-  expect(mockLocalWorkspace.writeText).toHaveBeenCalledWith(
-    'note.md',
-    'hello mobile',
-    { createOnly: false, expectedRevision: 'rev-1' },
+  expect(mockLocalWorkspace.writeV2).toHaveBeenCalledWith(
+    expect.objectContaining({
+      schema_version: 1,
+      path: 'note.md',
+      content: 'hello mobile',
+      expected_revision: 'rev-1',
+      create_only: false,
+      root: expect.objectContaining({
+        workspace_id: APP_WORKSPACE_ID,
+        binding_revision: 1,
+        project_id: null,
+      }),
+    }),
   );
 
   await act(async () => {
     actionByLabel(root, 'SHA-256').props.onPress();
     await settle();
   });
-  expect(mockLocalWorkspace.executePortableTool).toHaveBeenCalledWith(
-    'sha256sum',
-    'note.md',
-    {},
+  expect(mockLocalWorkspace.executePortableToolV2).toHaveBeenCalledWith(
+    expect.objectContaining({
+      schema_version: 1,
+      tool: 'sha256sum',
+      path: 'note.md',
+      options: {},
+      root: expect.objectContaining({
+        workspace_id: APP_WORKSPACE_ID,
+        binding_revision: 1,
+        project_id: null,
+      }),
+    }),
   );
   expect(root.findByProps({ children: 'abc  note.md\n' })).toBeDefined();
 });
@@ -5819,7 +8355,7 @@ test('opens chat actions from the drawer and persists a renamed title', async ()
 
   expect(lastPersistedState().conversations[0]?.id).toBeDefined();
   const lastSerialized = JSON.parse(
-    mockLocalRuntime.persistSession.mock.calls.at(-1)?.[0],
+    lastPersistedCandidateJSON(),
   ) as {
     conversations: Array<{ title: string }>;
   };
@@ -5862,8 +8398,8 @@ test('keeps the composer recoverable and retries a failed response', async () =>
   });
   expect(mockLocalRuntime.completeV2).toHaveBeenCalledTimes(2);
   expect(
-    mockLocalRuntime.persistSession.mock.calls.map(call => {
-      const state = JSON.parse(call[0] as string) as {
+    mockSessionSnapshots.casPersistSession.mock.calls.map(call => {
+      const state = JSON.parse(call[0]?.candidate_json as string) as {
         conversations: Array<{ attempts?: Array<{ status: string }> }>;
       };
       return state.conversations[0]?.attempts?.at(-1)?.status ?? 'none';
@@ -6334,7 +8870,7 @@ test('stops an in-flight response and ignores its late resolution', async () => 
   });
   expect(mockLocalRuntime.cancelCompletion).toHaveBeenCalledTimes(1);
   expect(mockLocalRuntime.cancelCompletion).toHaveBeenCalledWith(
-    '00000001-0000-4000-8000-000000000000',
+    stoppedRequest?.roundId,
   );
 
   await act(async () => {
@@ -6427,14 +8963,15 @@ test('locks without Stop while a successful result is finalizing', async () => {
       }),
   );
   let resolveFinalPersist!: (saved: boolean) => void;
-  mockLocalRuntime.persistSession
-    .mockResolvedValueOnce(true)
-    .mockResolvedValueOnce(true)
-    .mockReturnValueOnce(
-      new Promise<boolean>(resolve => {
+  mockSessionSnapshots.casPersistSession
+    .mockImplementationOnce(async request => commitBridgedCandidate(request))
+    .mockImplementationOnce(async request => commitBridgedCandidate(request))
+    .mockImplementationOnce(async request => {
+      await new Promise<boolean>(resolve => {
         resolveFinalPersist = resolve;
-      }),
-    );
+      });
+      return commitBridgedCandidate(request);
+    });
   const renderer = await renderApp();
   const root = renderer.root;
   await act(async () => {
@@ -6481,14 +9018,15 @@ test('locks without Stop while a failed result is becoming durable', async () =>
       }),
   );
   let resolveFailurePersist!: (saved: boolean) => void;
-  mockLocalRuntime.persistSession
-    .mockResolvedValueOnce(true)
-    .mockResolvedValueOnce(true)
-    .mockReturnValueOnce(
-      new Promise<boolean>(resolve => {
+  mockSessionSnapshots.casPersistSession
+    .mockImplementationOnce(async request => commitBridgedCandidate(request))
+    .mockImplementationOnce(async request => commitBridgedCandidate(request))
+    .mockImplementationOnce(async request => {
+      await new Promise<boolean>(resolve => {
         resolveFailurePersist = resolve;
-      }),
-    );
+      });
+      return commitBridgedCandidate(request);
+    });
   const renderer = await renderApp();
   const root = renderer.root;
   await act(async () => {
@@ -6577,7 +9115,7 @@ test('cancels and persists the active round before switching chats', async () =>
     await settle();
   });
   expect(activeRequest).toBeDefined();
-  mockLocalRuntime.persistSession.mockClear();
+  mockSessionSnapshots.casPersistSession.mockClear();
   const cancellation = deferred<{ status: 'cancelled' }>();
   mockLocalRuntime.cancelCompletion.mockReturnValueOnce(cancellation.promise);
 
@@ -6602,9 +9140,9 @@ test('cancels and persists the active round before switching chats', async () =>
   expect(mockLocalRuntime.cancelCompletion).toHaveBeenCalledWith(
     activeRequest?.roundId,
   );
-  const switchedSnapshots = mockLocalRuntime.persistSession.mock.calls.map(
+  const switchedSnapshots = mockSessionSnapshots.casPersistSession.mock.calls.map(
     call =>
-      JSON.parse(call[0] as string) as {
+      JSON.parse(call[0]?.candidate_json as string) as {
         active_conversation_id: string;
         conversations: Array<{
           id: string;
@@ -6684,7 +9222,7 @@ test('persists cancellation before deleting the active chat and ignores late out
     await settle();
   });
   expect(activeRequest).toBeDefined();
-  mockLocalRuntime.persistSession.mockClear();
+  mockSessionSnapshots.casPersistSession.mockClear();
   await act(async () => actionByLabel(root, 'Open navigation').props.onPress());
   await act(async () => {
     actionByLabel(root, 'Chat actions for Delete active chat').props.onPress();
@@ -6702,9 +9240,9 @@ test('persists cancellation before deleting the active chat and ignores late out
   expect(mockLocalRuntime.cancelCompletion).toHaveBeenCalledWith(
     activeRequest?.roundId,
   );
-  const deletionSnapshots = mockLocalRuntime.persistSession.mock.calls.map(
+  const deletionSnapshots = mockSessionSnapshots.casPersistSession.mock.calls.map(
     call =>
-      JSON.parse(call[0] as string) as {
+      JSON.parse(call[0]?.candidate_json as string) as {
         conversations: Array<{
           title: string;
           attempts: Array<{ status: string }>;
@@ -6789,7 +9327,7 @@ test('applies and persists light theme plus Simplified Chinese immediately', asy
   });
 
   expect(root.findByProps({ children: '设置' })).toBeDefined();
-  const serialized = mockLocalRuntime.persistSession.mock.calls.at(-1)?.[0];
+  const serialized = lastPersistedCandidateJSON();
   const persisted = JSON.parse(serialized) as {
     preferences: { theme_mode: string; locale: string };
   };

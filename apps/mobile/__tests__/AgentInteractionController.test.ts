@@ -1,5 +1,8 @@
 import { createAgentInteractionController } from '../src/agent/AgentInteractionController';
-import type { ApprovalRequestSpec } from '../src/agent/AgentApprovals';
+import {
+  resolveApprovalDecision,
+  type ApprovalRequestSpec,
+} from '../src/agent/AgentApprovals';
 import type { QuestionSpec } from '../src/agent/AgentQuestions';
 
 const approvalSpec: ApprovalRequestSpec = {
@@ -42,12 +45,73 @@ test('requestApproval publishes the pending card and settles on decide', async (
   expect(seen.at(-1)).toBeNull();
 });
 
+test('the broker adds the matched approval id to a UI allow decision', async () => {
+  const controller = createAgentInteractionController();
+  const decisionPromise = controller.requestApproval(approvalSpec);
+
+  // ApprovalComposer sends status + scope; the broker owns the protocol id.
+  controller.decideApproval('ap-1', {
+    status: 'approved',
+    scope: 'once',
+  });
+
+  const rawDecision = await decisionPromise;
+  expect(rawDecision).toEqual({
+    status: 'approved',
+    approval_id: 'ap-1',
+    scope: 'once',
+  });
+  expect(resolveApprovalDecision(approvalSpec, rawDecision, Date.now())).toEqual({
+    status: 'approved',
+    scope: 'once',
+  });
+});
+
+test('git_push rejects conversation scope but accepts a once-scoped UI decision', async () => {
+  const controller = createAgentInteractionController();
+  const conversationSpec: ApprovalRequestSpec = {
+    ...approvalSpec,
+    approvalId: 'ap-push-conversation',
+    toolCallId: 'push-conversation',
+    toolName: 'git_push',
+  };
+  const conversationDecision = controller.requestApproval(conversationSpec);
+
+  controller.decideApproval('ap-push-conversation', {
+    status: 'approved',
+    scope: 'conversation',
+  });
+
+  const rejected = await conversationDecision;
+  expect(rejected).toBeUndefined();
+  expect(
+    resolveApprovalDecision(conversationSpec, rejected, Date.now()),
+  ).toEqual({ status: 'denied', resolution: 'missing' });
+
+  const onceSpec: ApprovalRequestSpec = {
+    ...conversationSpec,
+    approvalId: 'ap-push-once',
+    toolCallId: 'push-once',
+  };
+  const onceDecision = controller.requestApproval(onceSpec);
+  controller.decideApproval('ap-push-once', {
+    status: 'approved',
+    scope: 'once',
+  });
+
+  await expect(onceDecision).resolves.toEqual({
+    status: 'approved',
+    approval_id: 'ap-push-once',
+    scope: 'once',
+  });
+});
+
 test('decisions for unknown ids are ignored', async () => {
   const controller = createAgentInteractionController();
   const decisionPromise = controller.requestApproval(approvalSpec);
   controller.decideApproval('someone-else', { status: 'denied' });
   expect(controller.getState().pendingApproval).toEqual(approvalSpec);
-  controller.decideApproval('ap-1', { status: 'denied', approval_id: 'ap-1' });
+  controller.decideApproval('ap-1', { status: 'denied' });
   await expect(decisionPromise).resolves.toEqual({
     status: 'denied',
     approval_id: 'ap-1',
@@ -63,6 +127,29 @@ test('an unanswered approval clears its card after the timeout', async () => {
     const decisionPromise = controller.requestApproval(approvalSpec);
     expect(controller.getState().pendingApproval).toEqual(approvalSpec);
     await jest.advanceTimersByTimeAsync(1100);
+    await expect(decisionPromise).resolves.toBeUndefined();
+    expect(controller.getState().pendingApproval).toBeNull();
+  } finally {
+    jest.useRealTimers();
+  }
+});
+
+test('a late decision for an expired approval id is ignored', async () => {
+  jest.useFakeTimers();
+  try {
+    const controller = createAgentInteractionController({
+      approvalTimeoutMs: 1000,
+    });
+    const decisionPromise = controller.requestApproval({
+      ...approvalSpec,
+      expiresAtMs: Date.now() + 1000,
+    });
+    await jest.advanceTimersByTimeAsync(1100);
+
+    controller.decideApproval('ap-1', {
+      status: 'approved',
+      scope: 'once',
+    });
     await expect(decisionPromise).resolves.toBeUndefined();
     expect(controller.getState().pendingApproval).toBeNull();
   } finally {

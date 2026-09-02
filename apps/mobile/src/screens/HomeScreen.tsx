@@ -67,9 +67,11 @@ import {
   selectConversationById,
   selectProjectContextSnapshotReferences,
   selectOrderedConversations,
+  serializeChatState,
   type ChatState,
   type Conversation,
   type AttachmentDescriptor,
+  type SessionAuthority,
   type SnapshotFreeProjectMutationTransaction,
 } from '../state';
 import {
@@ -79,32 +81,35 @@ import {
 } from '../native/LocalRuntime';
 import {
   createCompletionController,
+  type CompletionAgentApprovalRequest,
+  type CompletionAgentQuestionRequest,
   type CompletionControllerOutcome,
   type CompletionControllerState,
+  type CompletionPersistenceResult,
 } from '../completion/CompletionController';
-import {
-  createSessionPersistenceCoordinator,
-  type SessionDurabilityResult,
-} from '../completion/SessionPersistence';
-import {
-  attachSessionEventsToSnapshot,
-  createSessionEventJournal,
-  extractSessionEventsFromSnapshot,
-} from '../agent/SessionEvents';
 import {
   createAgentInteractionController,
   type AgentInteractionController,
   type AgentInteractionState,
 } from '../agent/AgentInteractionController';
-import { createAgentTurnService } from '../agent/AgentTurnService';
 import { ApprovalComposer } from '../components/ApprovalComposer';
 import { QuestionComposer } from '../components/QuestionComposer';
+import { DEFAULT_APPROVAL_TIMEOUT_MS } from '../agent/AgentApprovals';
+import {
+  createSessionPersistenceCoordinator,
+  sessionSnapshotSHA256,
+  type LoadSessionSnapshotResultV1,
+  type SessionCASPersistResultV1,
+  type SessionCommitQueryResultV1,
+  type SessionDurabilityResult,
+  type SessionSnapshotAuthorityV1,
+  type SessionSnapshotRefV1,
+} from '../completion/SessionPersistence';
 import { readRuntimeEvidence } from '../runtime/evidence';
 import { LocalProjects, type LocalProject } from '../native/LocalProjects';
 import { LocalProjectContext } from '../native/LocalProjectContext';
 import { LocalAttachments } from '../native/LocalAttachments';
 import { BUILTIN_HARNESSES, DSH_HARNESS, DshHarnessAdapter } from '../harness';
-import { safeHydrateAppPreferences } from '../preferences';
 import {
   createProjectContextController,
   createProjectContextLifecycleController,
@@ -119,8 +124,25 @@ import {
 } from '../project-context';
 import { useAppPresentation } from '../presentation/AppPresentation';
 import { fonts, hitSlop, type ThemePalette } from '../theme';
+import { SessionSnapshots } from '../native/SessionSnapshots';
+import { AgentRuntime } from '../native/AgentRuntime';
+import {
+  WorkspaceBindingController,
+} from '../workspaces/WorkspaceBindingController';
+import {
+  assertWorkspaceRootRefV1,
+  type WorkspaceRootRefV1,
+} from '../native/WorkspaceRoot';
 
 type RequestState = 'idle' | 'sending';
+
+type PendingSessionWrite = {
+  readonly operationId: string;
+  readonly candidateJSON: string;
+  readonly candidateDigest: string;
+};
+
+const MAX_PENDING_SESSION_WRITES = 16;
 
 type PendingContextOpen = {
   readonly conversationId: string;
@@ -222,11 +244,23 @@ function sameOrderedAttachmentIds(
   );
 }
 
-type LegacyMessage = {
-  id?: unknown;
-  role?: unknown;
-  text?: unknown;
-};
+function sameSessionSnapshotAuthority(
+  left: SessionSnapshotAuthorityV1,
+  right: SessionSnapshotAuthorityV1,
+): boolean {
+  if (left.kind !== right.kind) return false;
+  if (left.kind === 'missing' || right.kind === 'missing') return true;
+  if (left.kind === 'legacy_present' && right.kind === 'legacy_present') {
+    return (
+      left.legacy.legacy_bytes_sha256 === right.legacy.legacy_bytes_sha256
+    );
+  }
+  if (left.kind !== 'present' || right.kind !== 'present') return false;
+  return (
+    left.snapshot.generation === right.snapshot.generation &&
+    left.snapshot.session_sha256 === right.snapshot.session_sha256
+  );
+}
 
 const ATTACHMENT_PICKER_TIMEOUT_MS = 120_000;
 
@@ -268,6 +302,9 @@ function completionBusy(state: CompletionControllerState): boolean {
     state.phase === 'resume_available' ||
     state.phase === 'starting' ||
     state.phase === 'sending' ||
+    state.phase === 'approval_pending' ||
+    state.phase === 'executing' ||
+    state.phase === 'recovering' ||
     state.phase === 'cancelling' ||
     state.phase === 'finalizing' ||
     state.phase === 'commit_pending'
@@ -278,7 +315,10 @@ function completionCancellable(state: CompletionControllerState): boolean {
   return (
     state.phase === 'preparing' ||
     state.phase === 'starting' ||
-    state.phase === 'sending'
+    state.phase === 'sending' ||
+    state.phase === 'approval_pending' ||
+    state.phase === 'executing' ||
+    state.phase === 'recovering'
   );
 }
 
@@ -516,24 +556,6 @@ function displayMessages(
   });
 }
 
-function legacyMessages(input: string): LegacyMessage[] | null {
-  try {
-    const decoded = JSON.parse(input) as unknown;
-    if (
-      typeof decoded !== 'object' ||
-      decoded === null ||
-      Array.isArray(decoded)
-    )
-      return null;
-    const record = decoded as Record<string, unknown>;
-    return record.schema_version === 1 && Array.isArray(record.messages)
-      ? (record.messages as LegacyMessage[])
-      : null;
-  } catch {
-    return null;
-  }
-}
-
 export function HomeScreen() {
   const insets = useSafeAreaInsets();
   const {
@@ -545,7 +567,13 @@ export function HomeScreen() {
   } = useAppPresentation();
   const styles = useMemo(() => createStyles(colors), [colors]);
   const shell = useMemo(readRuntimeEvidence, []);
-  const store = useMemo(() => createChatStore(), []);
+  const store = useMemo(
+    () =>
+      createChatStore({
+        createId: () => LocalRuntime.createCompletionRequestId(),
+      }),
+    [],
+  );
   const [chatState, setChatState] = useState<ChatState>(() => store.getState());
   const [draft, setDraft] = useState('');
   const draftRef = useRef('');
@@ -574,15 +602,32 @@ export function HomeScreen() {
   const settingsSurfaceEpoch = useRef(0);
   const [composerOptionsVisible, setComposerOptionsVisible] = useState(false);
   const [workspaceSheetVisible, setWorkspaceSheetVisible] = useState(false);
+  const workspaceSheetVisibleRef = useRef(false);
   const [workspaceNames, setWorkspaceNames] = useState<
     Readonly<Record<string, string>>
   >({});
   const [workspaceRefreshToken, setWorkspaceRefreshToken] = useState(0);
+  const workspacePickerGenerationRef = useRef(0);
+  const [workspacePickerGeneration, setWorkspacePickerGeneration] =
+    useState(0);
+  const workspacePickerOwnersRef = useRef(
+    new Map<number, Conversation | null>(),
+  );
+  const workspaceSurfaceNonceRef = useRef(0);
+  const [workspaceRoute, setWorkspaceRoute] = useState<{
+    readonly root: WorkspaceRootRefV1;
+    readonly label: string;
+    readonly conversationId: string | null;
+    readonly projectId: string | null;
+  } | null>(null);
   const [modelVisible, setModelVisible] = useState(false);
   const [mirrorsVisible, setMirrorsVisible] = useState(false);
   const [harnessesVisible, setHarnessesVisible] = useState(false);
   const [evidenceVisible, setEvidenceVisible] = useState(false);
   const [workspaceVisible, setWorkspaceVisible] = useState(false);
+  const workspaceVisibleRef = useRef(false);
+  workspaceSheetVisibleRef.current = workspaceSheetVisible;
+  workspaceVisibleRef.current = workspaceVisible;
   const [projectsVisible, setProjectsVisible] = useState(false);
   const projectsVisibleRef = useRef(false);
   projectsVisibleRef.current = projectsVisible;
@@ -638,6 +683,8 @@ export function HomeScreen() {
   const [runtimeFailure, setRuntimeFailure] = useState<string | null>(null);
   const [requestFailure, setRequestFailure] = useState<string | null>(null);
   const [storageWarning, setStorageWarning] = useState<string | null>(null);
+  const [workspaceBindingRecoveryVisible, setWorkspaceBindingRecoveryVisible] =
+    useState(false);
   const attachmentOperationGeneration = useRef(0);
   const activeAttachmentOperation = useRef<{
     generation: number;
@@ -671,10 +718,29 @@ export function HomeScreen() {
   const retryActionInFlight = useRef(false);
   const started = useRef(false);
   const nativeAvailable = useMemo(() => DshHarnessAdapter.isAvailable(), []);
+  const [sessionSnapshotsAvailable, setSessionSnapshotsAvailable] = useState<
+    boolean | null
+  >(
+    () => (SessionSnapshots.isAvailable() ? true : null),
+  );
   const activeHarness =
     BUILTIN_HARNESSES.get(preferences.selectedHarnessId) ?? DSH_HARNESS;
 
   useEffect(() => store.subscribe(setChatState), [store]);
+
+  useEffect(() => {
+    if (SessionSnapshots.isAvailable() === true) {
+      setSessionSnapshotsAvailable(true);
+      return undefined;
+    }
+    // New-architecture modules can appear after the first post-mount probe on
+    // a cold device launch.  Keep bootstrap gated briefly instead of turning
+    // that transient miss into a permanent blank session for this process.
+    const retry = setTimeout(() => {
+      setSessionSnapshotsAvailable(SessionSnapshots.isAvailable() === true);
+    }, 100);
+    return () => clearTimeout(retry);
+  }, []);
 
   const invalidatePendingProjectSend = useCallback(() => {
     pendingProjectSendEpoch.current += 1;
@@ -823,32 +889,250 @@ export function HomeScreen() {
   const sessionPersistence = useMemo(
     () =>
       createSessionPersistenceCoordinator({
-        persistSession: json => LocalRuntime.persistSession(json),
-        loadSession: () => LocalRuntime.loadSession(),
+        loadSessionSnapshot: () => SessionSnapshots.loadSessionSnapshot(),
+        casPersistSession: request =>
+          SessionSnapshots.casPersistSession(request),
+        querySessionCommit: request =>
+          SessionSnapshots.querySessionCommit(request),
       }),
     [],
   );
+  const pendingSessionWritesRef = useRef(new Map<string, PendingSessionWrite>());
+  const sessionWriteTailRef = useRef(Promise.resolve());
+
+  /**
+   * Preferences have a presentation store of their own, while the schema-9
+   * session root owns the canonical persisted projection.  Rehydrate through
+   * the full chat validator before serialization so every native write gets
+   * one complete, canonical V9 root instead of an ad-hoc merged envelope.
+   */
+  const synchronizePreferencesIntoChatState = useCallback(() => {
+    const serializedChat = store.serialize();
+    const serializedPreferences = preferencesStore.serialize();
+    const snapshot = JSON.parse(serializedChat) as Record<string, unknown>;
+    if (JSON.stringify(snapshot.preferences) === serializedPreferences) {
+      return serializedChat;
+    }
+    snapshot.preferences = JSON.parse(serializedPreferences) as unknown;
+    store.hydrate(snapshot);
+    return store.serialize();
+  }, [preferencesStore, store]);
+
+  const setSessionAuthority = useCallback(
+    (authority: SessionAuthority | null) => {
+      store.setSessionAuthority(authority);
+    },
+    [store],
+  );
+
+  const installSessionAuthority = useCallback(
+    (snapshot: SessionSnapshotRefV1): boolean => {
+      const authority: SessionAuthority = {
+        generation: snapshot.generation,
+        sessionSha256: snapshot.session_sha256,
+      };
+      setSessionAuthority(authority);
+      const installed = store.getSessionAuthority();
+      if (
+        installed === null ||
+        installed.generation !== authority.generation ||
+        installed.sessionSha256 !== authority.sessionSha256
+      ) {
+        setSessionAuthority(null);
+        return false;
+      }
+      return true;
+    },
+    [setSessionAuthority, store],
+  );
+
+  const restoreCurrentSessionAuthority = useCallback(async (): Promise<boolean> => {
+    let loaded: LoadSessionSnapshotResultV1 | null;
+    try {
+      loaded = await sessionPersistence.loadSessionSnapshotResult();
+    } catch {
+      return false;
+    }
+    if (loaded === null || loaded.status !== 'present') return false;
+    let currentDigest: string | null = null;
+    try {
+      currentDigest = sessionSnapshotSHA256(store.serialize());
+    } catch {
+      return false;
+    }
+    if (currentDigest !== loaded.snapshot.session_sha256) {
+      const hydrated = safeHydrateChatState(loaded.session_json, {
+        sessionAuthority: {
+          schema_version: 1,
+          generation: loaded.snapshot.generation,
+          session_sha256: loaded.snapshot.session_sha256,
+        },
+      });
+      if (!hydrated.ok) return false;
+      let durableCandidate: string;
+      try {
+        durableCandidate = serializeChatState(hydrated.state);
+      } catch {
+        return false;
+      }
+      if (
+        sessionSnapshotSHA256(durableCandidate) !==
+        loaded.snapshot.session_sha256
+      ) {
+        return false;
+      }
+      store.hydrate(durableCandidate);
+    }
+    return installSessionAuthority(loaded.snapshot);
+  }, [installSessionAuthority, sessionPersistence, store]);
+
+  const performSessionCandidate = useCallback(
+    async (
+      candidateJSON: string,
+      expectedAuthority?: SessionSnapshotAuthorityV1,
+    ): Promise<CompletionPersistenceResult> => {
+      const candidateDigest = sessionSnapshotSHA256(candidateJSON);
+      if (candidateDigest === null) return { status: 'unknown' };
+      let pending = pendingSessionWritesRef.current.get(candidateDigest);
+      const hadPending = pending !== undefined;
+      if (pending !== undefined && pending.candidateJSON !== candidateJSON) {
+        pending = undefined;
+      }
+      if (pending === undefined) {
+        if (
+          pendingSessionWritesRef.current.size >= MAX_PENDING_SESSION_WRITES
+        ) {
+          return { status: 'unknown' };
+        }
+        let operationId: string;
+        try {
+          operationId = LocalRuntime.createCompletionRequestId();
+        } catch {
+          return { status: 'unknown' };
+        }
+        pending = { operationId, candidateJSON, candidateDigest };
+        pendingSessionWritesRef.current.set(candidateDigest, pending);
+      }
+
+      if (hadPending && pending !== undefined) {
+        const prior: SessionCommitQueryResultV1 | null =
+          await sessionPersistence.queryCommit(pending.operationId);
+        if (prior?.status === 'committed') {
+          if (
+            prior.snapshot.session_sha256 !== pending.candidateDigest ||
+            !installSessionAuthority(prior.snapshot)
+          ) {
+            return { status: 'unknown' };
+          }
+          pendingSessionWritesRef.current.delete(candidateDigest);
+          return { status: 'committed', snapshot: prior.snapshot };
+        }
+        if (prior?.status === 'conflict') {
+          pendingSessionWritesRef.current.delete(candidateDigest);
+          return { status: 'not_committed' };
+        }
+      }
+
+      let authority: SessionSnapshotAuthorityV1;
+      try {
+        authority = await sessionPersistence.loadAuthority();
+      } catch {
+        // Keep the exact operation/candidate pair for a later query/retry.
+        return { status: 'unknown' };
+      }
+      if (
+        expectedAuthority !== undefined &&
+        !sameSessionSnapshotAuthority(expectedAuthority, authority)
+      ) {
+        pendingSessionWritesRef.current.delete(candidateDigest);
+        return { status: 'not_committed' };
+      }
+
+      const response: SessionCASPersistResultV1 | null =
+        await sessionPersistence.casPersist({
+          schema_version: 1,
+          operation_id: pending.operationId,
+          expected: authority,
+          candidate_json: pending.candidateJSON,
+        });
+      if (response?.status === 'committed') {
+        if (
+          response.snapshot.session_sha256 !== pending.candidateDigest ||
+          !installSessionAuthority(response.snapshot)
+        ) {
+          // The native CAS may already have committed, but without a
+          // correlated Store authority it is unsafe to report durability.
+          return { status: 'unknown' };
+        }
+        pendingSessionWritesRef.current.delete(candidateDigest);
+        return { status: 'committed', snapshot: response.snapshot };
+      }
+      if (
+        response?.status === 'conflict' ||
+        response?.status === 'not_committed'
+      ) {
+        pendingSessionWritesRef.current.delete(candidateDigest);
+        return { status: 'not_committed' };
+      }
+      if (response?.status === 'session_only') {
+        // session_only is deliberately not promoted to Store authority.
+        return { status: 'session_only' };
+      }
+
+      // A null/unknown CAS response is indeterminate. Query the exact same
+      // operation before retrying; never mint a second operation for it.
+      const queried: SessionCommitQueryResultV1 | null =
+        await sessionPersistence.queryCommit(pending.operationId);
+      if (queried?.status === 'committed') {
+        if (
+          queried.snapshot.session_sha256 !== pending.candidateDigest ||
+          !installSessionAuthority(queried.snapshot)
+        ) {
+          return { status: 'unknown' };
+        }
+        pendingSessionWritesRef.current.delete(candidateDigest);
+        return { status: 'committed', snapshot: queried.snapshot };
+      }
+      if (queried?.status === 'conflict') {
+        pendingSessionWritesRef.current.delete(candidateDigest);
+        return { status: 'not_committed' };
+      }
+      if (queried?.status === 'not_started') {
+        pendingSessionWritesRef.current.delete(candidateDigest);
+        return { status: 'not_committed' };
+      }
+      return { status: 'unknown' };
+    },
+    [installSessionAuthority, sessionPersistence],
+  );
+
+  const persistSessionCandidate = useCallback(
+    (
+      candidateJSON: string,
+      expectedAuthority?: SessionSnapshotAuthorityV1,
+    ): Promise<CompletionPersistenceResult> => {
+      const operation = sessionWriteTailRef.current.then(
+        () => performSessionCandidate(candidateJSON, expectedAuthority),
+        () => performSessionCandidate(candidateJSON, expectedAuthority),
+      );
+      sessionWriteTailRef.current = operation.then(
+        () => undefined,
+        () => undefined,
+      );
+      return operation;
+    },
+    [performSessionCandidate],
+  );
 
   const persistCurrent = useCallback(
-    async (): Promise<SessionDurabilityResult> => {
-      if (!nativeAvailable) {
+    async (): Promise<CompletionPersistenceResult> => {
+      if (!nativeAvailable || sessionSnapshotsAvailable !== true) {
         setStorageWarning(t('home.persistenceUnavailable'));
         return { status: 'unknown' };
       }
       try {
-        const snapshot = JSON.parse(
-          store.serialize(),
-        ) as Record<string, unknown>;
-        snapshot.preferences = JSON.parse(
-          preferencesStore.serialize(),
-        ) as unknown;
-        const withEvents = attachSessionEventsToSnapshot(
-          snapshot,
-          sessionEventJournalRef.current.snapshot(),
-        );
-        const result = await sessionPersistence.write(
-          JSON.stringify(withEvents),
-        );
+        const candidate = synchronizePreferencesIntoChatState();
+        const result = await persistSessionCandidate(candidate);
         if (result.status === 'committed') {
           setStorageWarning(null);
         } else {
@@ -864,9 +1148,9 @@ export function HomeScreen() {
     },
     [
       nativeAvailable,
-      preferencesStore,
-      sessionPersistence,
-      store,
+      sessionSnapshotsAvailable,
+      persistSessionCandidate,
+      synchronizePreferencesIntoChatState,
       t,
     ],
   );
@@ -877,45 +1161,10 @@ export function HomeScreen() {
 
   const persistCurrentRef = useRef(persistCurrent);
   persistCurrentRef.current = persistCurrent;
-  // One journal for every trajectory emitter in the app. It owns event_id,
-  // seq (strictly increasing per attempt), and created_at allocation, which
-  // is what lets the completion controller and the agent turn driver write
-  // the same attempt's trajectory without id collisions.
-  const sessionEventJournalRef = useRef(createSessionEventJournal());
 
-  const completionController = useMemo(
-    () =>
-      createCompletionController({
-        chat: store,
-        persistCurrent: () => persistCurrentRef.current(),
-        onSessionEvent: event => {
-          // Durable trajectory capture: the shared journal allocates the
-          // per-attempt sequence and caps the log; the snapshot attach on
-          // the next persist pass stores it, and hydration restores it.
-          sessionEventJournalRef.current.append(event);
-        },
-        completeRoundV2: request =>
-          DshHarnessAdapter.completeRoundV2(request),
-        completeRoundV3: request =>
-          DshHarnessAdapter.completeRoundV3(request),
-        cancelRoundV2: roundId =>
-          DshHarnessAdapter.cancelRoundV2(roundId),
-        cancelRoundV3: roundId =>
-          DshHarnessAdapter.cancelRoundV3(roundId),
-        createRoundId: () => LocalRuntime.createCompletionRequestId(),
-      }),
-    [store],
-  );
-  const [completionState, setCompletionState] =
-    useState<CompletionControllerState>(() =>
-      completionController.getState(),
-    );
-  useEffect(
-    () => completionController.subscribe(setCompletionState),
-    [completionController],
-  );
-  // DSH approval / structured-question broker: publishes pending decisions
-  // to the composers below and settles the agent turn's wait states.
+  // One UI broker is shared by the durable controller and the composers.
+  // The adapter below projects only safe call metadata; raw arguments and
+  // workspace paths never enter React state or the approval modal.
   const agentInteractions: AgentInteractionController = useMemo(
     () => createAgentInteractionController(),
     [],
@@ -926,42 +1175,66 @@ export function HomeScreen() {
     () => agentInteractions.subscribe(setAgentInteractionState),
     [agentInteractions],
   );
-  // The agent turn service binds runAgentTurn to the real surfaces: native
-  // tool execution, the harness transport, the decision broker, and the
-  // same durable journal the completion controller writes. Every approval
-  // and question row from a real turn lands in the persisted trajectory.
-  const agentTurnService = useMemo(
+
+  const completionController = useMemo(
     () =>
-      createAgentTurnService({
-        journal: sessionEventJournalRef.current,
-        interactions: agentInteractions,
-        modelCalls: async args => {
-          const result = await DshHarnessAdapter.completeV2(
-            args.model as 'deepseek-v4-flash',
-            args.history,
-            args.requestId,
-            args.thinkingMode as 'high',
-            args.tools,
-          );
-          return {
-            text: result.text,
-            finish_reason: result.finish_reason,
-            tool_calls: result.tool_calls,
-          };
+      createCompletionController({
+        chat: store,
+        persistCurrent: () => persistCurrentRef.current(),
+        completeRoundV2: request =>
+          DshHarnessAdapter.completeRoundV2(request),
+        completeRoundV3: request =>
+          DshHarnessAdapter.completeRoundV3(request),
+        cancelRoundV2: roundId =>
+          DshHarnessAdapter.cancelRoundV2(roundId),
+        cancelRoundV3: roundId =>
+          DshHarnessAdapter.cancelRoundV3(roundId),
+        createRoundId: () => LocalRuntime.createCompletionRequestId(),
+        createOperationId: () => LocalRuntime.createCompletionRequestId(),
+        agentRuntime: AgentRuntime,
+        requestAgentApproval: (request: CompletionAgentApprovalRequest) => {
+          const scopes = [
+            ...(request.allowedDecisions.includes('allow_once')
+              ? (['once'] as const)
+              : []),
+            ...(request.allowedDecisions.includes('allow_conversation')
+              ? (['conversation'] as const)
+              : []),
+          ];
+          if (scopes.length === 0) {
+            return Promise.resolve({ status: 'denied' as const });
+          }
+          return agentInteractions.requestApproval({
+            approvalId: request.approvalId,
+            toolCallId: request.callId,
+            toolName: request.name,
+            argumentsJson: JSON.stringify({
+              arguments_sha256: request.argumentsSha256,
+            }),
+            scopes,
+            expiresAtMs: Date.now() + DEFAULT_APPROVAL_TIMEOUT_MS,
+          });
         },
-        createApprovalId: () =>
-          'approval-' + LocalRuntime.createCompletionRequestId(),
-        createQuestionId: () =>
-          'question-' + LocalRuntime.createCompletionRequestId(),
+        askAgentQuestion: (request: CompletionAgentQuestionRequest) =>
+          agentInteractions.askQuestion({
+            questionId: request.questionId,
+            text: request.question,
+            inputMode: request.inputMode,
+            options: request.options,
+            required: request.required,
+          }),
+        now: () => new Date().toISOString(),
       }),
-    [agentInteractions],
+    [agentInteractions, store],
   );
-  // Switching conversations tears down any in-flight agent turn the same
-  // way the completion controller cancels its attempt: pending approval and
-  // question waits settle fail-closed instead of outliving their context.
-  useEffect(() => {
-    agentTurnService.cancel();
-  }, [chatState.selectedConversationId, agentTurnService]);
+  const [completionState, setCompletionState] =
+    useState<CompletionControllerState>(() =>
+      completionController.getState(),
+    );
+  useEffect(
+    () => completionController.subscribe(setCompletionState),
+    [completionController],
+  );
   const projectContextNativeAvailable = useMemo(
     () => LocalProjectContext.isAvailable(),
     [],
@@ -1029,6 +1302,67 @@ export function HomeScreen() {
       ),
     [projectContextLifecycleController],
   );
+  const workspaceBindingController = useMemo(
+    () =>
+      new WorkspaceBindingController({
+        chat: store,
+        workspaces: LocalWorkspaces,
+        projectForWorkspace: root => LocalProjects.projectForWorkspaceV2(root),
+        contextGuard: async (conversationId, targetProjectId) => {
+          try {
+            if (
+              !(await projectContextController.beforeConversationChange(
+                conversationId,
+              ))
+            ) {
+              return false;
+            }
+            const current = selectConversationById(
+              store.getState(),
+              conversationId,
+            );
+            const context = current?.projectContext;
+            if (
+              context === null ||
+              context === undefined ||
+              (context.snapshot === null && context.activePreparationId === null)
+            ) {
+              return true;
+            }
+            const begin =
+              projectContextLifecycleController.captureDestructiveBeginToken(
+                conversationId,
+                targetProjectId === null ? 'unbind' : 'rebind',
+                targetProjectId,
+              );
+            if (!begin.ok) return false;
+            const outcome =
+              await projectContextLifecycleController.beginDestructiveTransition(
+                begin.token,
+              );
+            if (outcome.status !== 'completed') return false;
+            return { status: 'rebound' as const };
+          } catch {
+            return false;
+          }
+        },
+        completionGuard: conversationId =>
+          completionController.beforeConversationChange(conversationId),
+        persistCurrent: () => persistCurrentRef.current(),
+        createOperationId: () => LocalRuntime.createCompletionRequestId(),
+        isPickerGenerationCurrent: generation =>
+          workspacePickerGenerationRef.current === generation &&
+          workspaceSheetVisibleRef.current,
+        isSurfaceNonceCurrent: nonce =>
+          workspaceSurfaceNonceRef.current === nonce,
+      }),
+    [
+      completionController,
+      projectContextController,
+      projectContextLifecycleController,
+      store,
+    ],
+  );
   const requestState: RequestState = completionBusy(completionState)
     ? 'sending'
     : 'idle';
@@ -1037,11 +1371,26 @@ export function HomeScreen() {
     chatState.selectedConversationId,
     completionUiEpoch.current,
   );
+  const completionAgentRetryBlocked =
+    (completionState.phase === 'resume_available' ||
+      completionState.phase === 'retryable') &&
+    completionState.conversationId !== null &&
+    completionState.attemptId !== null &&
+    selectConversationById(chatState, completionState.conversationId)?.attempts.some(
+      attempt =>
+        attempt.attemptId === completionState.attemptId &&
+        attempt.agent !== undefined &&
+        attempt.agent !== null,
+    ) === true;
   const completionRetryVisible =
-    completionState.phase === 'retryable' ||
-    completionState.phase === 'resume_available' ||
+    (completionState.phase === 'retryable' && !completionAgentRetryBlocked) ||
+    (completionState.phase === 'resume_available' &&
+      !completionAgentRetryBlocked) ||
     completionState.phase === 'persistence_pending' ||
     completionState.phase === 'commit_pending';
+  const completionActionVisible =
+    completionRetryVisible || completionAgentRetryBlocked;
+  const completionNoticeVisible = completionActionVisible;
   const durabilityFailure =
     completionState.phase === 'persistence_pending' ||
     completionState.phase === 'commit_pending'
@@ -1050,7 +1399,7 @@ export function HomeScreen() {
   const visibleRequestFailure =
     durabilityFailure ??
     requestFailure ??
-    (completionRetryVisible
+    (completionNoticeVisible
       ? completionState.failureCode ??
         (completionState.phase === 'resume_available'
           ? 'E_ATTEMPT_INTERRUPTED'
@@ -1121,62 +1470,136 @@ export function HomeScreen() {
   );
 
   const hydrateStoredState = useCallback(
-    (stored: string | null) => {
-      if (stored === null) {
+    async (loaded: LoadSessionSnapshotResultV1 | null): Promise<void> => {
+      if (loaded === null) {
+        // A malformed, unavailable, or boolean native result is not a
+        // missing session. Do not hydrate or overwrite the live projection;
+        // the blank shell remains usable while storage fails closed.
+        setSessionAuthority(null);
+        ensureConversation();
+        setStorageWarning(
+          t('home.storedChatsRejected', { error: 'E_SESSION_PERSISTENCE' }),
+        );
+        return;
+      }
+      if (loaded.status === 'missing') {
+        setSessionAuthority(null);
         ensureConversation();
         return;
       }
-      try {
-        const decoded = JSON.parse(stored) as unknown;
-        if (
-          typeof decoded === 'object' &&
-          decoded !== null &&
-          !Array.isArray(decoded)
-        ) {
-          const savedPreferences = (decoded as Record<string, unknown>)
-            .preferences;
-          if (savedPreferences !== undefined) {
-            const result = safeHydrateAppPreferences(savedPreferences);
-            if (result.ok) preferencesStore.hydrate(savedPreferences);
-          }
-          const savedEvents = extractSessionEventsFromSnapshot(decoded);
-          sessionEventJournalRef.current.restore(savedEvents);
-        }
-      } catch {
-        // Chat hydration below owns the fail-closed error shown to the user.
-      }
-      const hydrated = safeHydrateChatState(stored);
-      if (hydrated.ok) {
-        store.hydrate(stored);
-        if (store.getState().selectedConversationId === null)
-          ensureConversation();
-        return;
-      }
 
-      const legacy = legacyMessages(stored);
-      if (legacy !== null) {
-        const conversationId = store.createConversation();
-        legacy.forEach(message => {
-          if (message.role !== 'user' && message.role !== 'assistant') return;
-          if (
-            typeof message.text !== 'string' ||
-            message.text.trim().length === 0
-          )
-            return;
-          if (message.role === 'user')
-            store.appendUserMessage(conversationId, message.text);
-          else store.appendAssistantMessage(conversationId, message.text);
-        });
-        setStorageWarning(t('home.legacySessionUpgraded'));
-        return;
-      }
-
-      ensureConversation();
-      setStorageWarning(
-        t('home.storedChatsRejected', { error: hydrated.error.message }),
+      const hydrated = safeHydrateChatState(
+        loaded.session_json,
+        loaded.status === 'present'
+          ? {
+              sessionAuthority: {
+                schema_version: 1,
+                generation: loaded.snapshot.generation,
+                session_sha256: loaded.snapshot.session_sha256,
+              },
+            }
+          : {},
       );
+      if (!hydrated.ok) {
+        setSessionAuthority(null);
+        ensureConversation();
+        setStorageWarning(
+          t('home.storedChatsRejected', { error: hydrated.error.message }),
+        );
+        return;
+      }
+
+      let candidate: string;
+      try {
+        candidate = serializeChatState(hydrated.state);
+      } catch (error) {
+        setSessionAuthority(null);
+        ensureConversation();
+        setStorageWarning(t('home.saveFailed', { error: errorText(error) }));
+        return;
+      }
+      const candidateDigest = sessionSnapshotSHA256(candidate);
+      if (candidateDigest === null) {
+        setSessionAuthority(null);
+        ensureConversation();
+        setStorageWarning(
+          t('home.saveFailed', { error: 'E_SESSION_PERSISTENCE' }),
+        );
+        return;
+      }
+
+      let migratedFromLegacy = false;
+      if (loaded.status === 'legacy_present') {
+        const expected: SessionSnapshotAuthorityV1 = {
+          schema_version: 1,
+          kind: 'legacy_present',
+          legacy: loaded.legacy,
+        };
+        const migrated = await persistSessionCandidate(candidate, expected);
+        if (migrated.status !== 'committed') {
+          // Do not expose or mutate the legacy projection unless the exact
+          // V2 byte-token CAS promoted it to schema-9.
+          setSessionAuthority(null);
+          ensureConversation();
+          setStorageWarning(t('home.saveFailed', { error: migrated.status }));
+          return;
+        }
+        migratedFromLegacy = true;
+      } else if (candidateDigest !== loaded.snapshot.session_sha256) {
+        const expected: SessionSnapshotAuthorityV1 = {
+          schema_version: 1,
+          kind: 'present',
+          snapshot: loaded.snapshot,
+        };
+        const migrated = await persistSessionCandidate(candidate, expected);
+        const installed = store.getSessionAuthority();
+        if (
+          migrated.status !== 'committed' ||
+          installed === null ||
+          installed.sessionSha256 !== candidateDigest
+        ) {
+          // A decoded migration candidate is not live authority.  It becomes
+          // visible only after the exact present snapshot CAS commits and the
+          // returned reference is correlated to these candidate bytes.
+          setSessionAuthority(null);
+          ensureConversation();
+          setStorageWarning(t('home.saveFailed', { error: migrated.status }));
+          return;
+        }
+      } else {
+        // The native facade has already verified the V9 digest and requires
+        // generations to start at one; retain that authority for CAS-bound
+        // in-memory mutations before touching the live store.
+        if (!installSessionAuthority(loaded.snapshot)) {
+          setStorageWarning(
+            t('home.saveFailed', { error: 'E_SESSION_PERSISTENCE' }),
+          );
+          ensureConversation();
+          return;
+        }
+      }
+
+      store.hydrate(candidate);
+      const persistedPreferences = store.getState().preferences;
+      if (persistedPreferences !== undefined) {
+        preferencesStore.hydrate(persistedPreferences);
+      }
+      if (store.getState().selectedConversationId === null) {
+        ensureConversation();
+      }
+      if (migratedFromLegacy) {
+        setStorageWarning(t('home.legacySessionUpgraded'));
+      }
     },
-    [ensureConversation, preferencesStore, store, t],
+    [
+      ensureConversation,
+      installSessionAuthority,
+      preferencesStore,
+      persistSessionCandidate,
+      setSessionAuthority,
+      store,
+      t,
+    ],
   );
 
   const bootstrap = useCallback(async () => {
@@ -1196,9 +1619,19 @@ export function HomeScreen() {
       const configured = credential.status === 'configured';
       setCredentialConfigured(configured);
       let initialProof: RuntimeProof | null = null;
-      if (configured) initialProof = (await LocalRuntime.bootstrap()).proof;
-      const stored = await LocalRuntime.loadSession();
-      hydrateStoredState(stored);
+      if (configured) {
+        try {
+          initialProof = (await LocalRuntime.bootstrap()).proof;
+        } catch (error) {
+          // Runtime proof is observational. A broken sandbox probe must not
+          // suppress restoration of an already committed local session.
+          setRuntimeFailure(errorText(error));
+        }
+      }
+      const loaded = sessionSnapshotsAvailable === true
+        ? await sessionPersistence.loadSessionSnapshotResult()
+        : null;
+      await hydrateStoredState(loaded);
       setChatState(store.getState());
       const restoredTransition =
         store.getState().projectContextDestructiveTransition;
@@ -1218,13 +1651,20 @@ export function HomeScreen() {
           setMirrorsVisible(false);
           setModelVisible(false);
           setComposerOptionsVisible(false);
+          workspacePickerGenerationRef.current += 1;
+          setWorkspacePickerGeneration(workspacePickerGenerationRef.current);
+          workspaceSurfaceNonceRef.current += 1;
+          workspaceBindingController.invalidate();
+          workspaceSheetVisibleRef.current = false;
           setWorkspaceSheetVisible(false);
           setHarnessesVisible(false);
           setEvidenceVisible(false);
           projectsSurfaceEpoch.current += 1;
           projectsVisibleRef.current = false;
           setProjectsVisible(false);
+          workspaceVisibleRef.current = false;
           setWorkspaceVisible(false);
+          setWorkspaceRoute(null);
           afterDrawerDismiss.current = null;
           afterActionDismiss.current = null;
           lifecycleIntentRef.current = null;
@@ -1251,8 +1691,17 @@ export function HomeScreen() {
         reconcileSelectedConversation(selectedAfterLifecycle);
       }
       await synchronizeAttachmentStore(store.getState());
-      if (configured && stored !== null)
-        initialProof = (await LocalRuntime.bootstrap()).proof;
+      if (
+        configured &&
+        loaded !== null &&
+        loaded.status !== 'missing'
+      ) {
+        try {
+          initialProof = (await LocalRuntime.bootstrap()).proof;
+        } catch (error) {
+          setRuntimeFailure(errorText(error));
+        }
+      }
       setProof(initialProof);
     } catch (error) {
       setRuntimeFailure(errorText(error));
@@ -1270,21 +1719,50 @@ export function HomeScreen() {
     ensureConversation,
     hydrateStoredState,
     nativeAvailable,
+    sessionSnapshotsAvailable,
+    sessionPersistence,
     projectContextLifecycleController,
     reconcileSelectedConversation,
     store,
     synchronizeAttachmentStore,
     t,
+    workspaceBindingController,
   ]);
 
   useEffect(() => {
+    if (sessionSnapshotsAvailable === null) return;
     if (started.current) return;
     started.current = true;
     bootstrap().catch(() => undefined);
-  }, [bootstrap]);
+  }, [bootstrap, sessionSnapshotsAvailable]);
 
   const activeConversation = selectActiveConversation(chatState);
   const activeProjectId = activeConversation?.projectId ?? null;
+  const workspaceOwnerConversationRef = useRef<string | null>(null);
+  useEffect(() => {
+    const previous = workspaceOwnerConversationRef.current;
+    const current = activeConversation?.id ?? null;
+    if (previous !== null && previous !== current) {
+      workspaceBindingController.invalidate();
+    }
+    workspaceOwnerConversationRef.current = current;
+  }, [activeConversation?.id, workspaceBindingController]);
+  useEffect(() => {
+    const routeConversationId = workspaceRoute?.conversationId;
+    if (
+      !workspaceVisibleRef.current ||
+      routeConversationId === null ||
+      routeConversationId === undefined ||
+      routeConversationId === activeConversation?.id
+    ) {
+      return;
+    }
+    workspaceSurfaceNonceRef.current += 1;
+    workspaceBindingController.invalidate();
+    workspaceVisibleRef.current = false;
+    setWorkspaceVisible(false);
+    setWorkspaceRoute(null);
+  }, [activeConversation?.id, workspaceBindingController, workspaceRoute]);
   useEffect(() => {
     let cancelled = false;
     if (activeProjectId === null || !LocalProjects.isAvailable()) {
@@ -2082,6 +2560,23 @@ export function HomeScreen() {
         current.conversationId !== null &&
         current.attemptId !== null);
     if (!actionable) return;
+    if (
+      (current.phase === 'resume_available' || current.phase === 'retryable') &&
+      !(await restoreCurrentSessionAuthority())
+    ) {
+      setStorageWarning(t('home.persistenceUnavailable'));
+      return;
+    }
+    const restored = completionController.getState();
+    if (
+      restored.epoch !== current.epoch ||
+      restored.phase !== current.phase ||
+      restored.conversationId !== current.conversationId ||
+      restored.attemptId !== current.attemptId ||
+      restored.roundId !== current.roundId
+    ) {
+      return;
+    }
     retryActionInFlight.current = true;
     const outcomeEpoch = ++completionUiEpoch.current;
     let result: CompletionControllerOutcome | null = null;
@@ -2115,7 +2610,14 @@ export function HomeScreen() {
     } finally {
       retryActionInFlight.current = false;
     }
-  }, [applyCompletionOutcome, completionController, refreshProof, store]);
+  }, [
+    applyCompletionOutcome,
+    completionController,
+    refreshProof,
+    restoreCurrentSessionAuthority,
+    store,
+    t,
+  ]);
 
   const cancel = useCallback(async (expected: CompletionControllerState) => {
     const owned = completionController.getState();
@@ -2533,7 +3035,10 @@ export function HomeScreen() {
         targetProjectId,
         expectedConversation: conversation,
       });
-      if (transaction === null) return false;
+      if (transaction === null) {
+        setRequestFailure('E_PROJECT_MUTATION_UNAVAILABLE');
+        return false;
+      }
       const outbox: DirectProjectMutationOutbox = {
         action,
         conversationId: conversation.id,
@@ -3213,23 +3718,331 @@ export function HomeScreen() {
     };
   }, [workspaceRefreshToken]);
 
+  const openWorkspacePicker = useCallback(() => {
+    if (
+      !rootSurfaceAdmissionAllowed() ||
+      completionBusy(completionController.getState())
+    ) {
+      return;
+    }
+    const nextGeneration = workspacePickerGenerationRef.current + 1;
+    workspacePickerGenerationRef.current = nextGeneration;
+    workspacePickerOwnersRef.current.set(
+      nextGeneration,
+      selectActiveConversation(store.getState()),
+    );
+    setWorkspacePickerGeneration(nextGeneration);
+    const nextNonce = workspaceSurfaceNonceRef.current + 1;
+    workspaceSurfaceNonceRef.current = nextNonce;
+    workspaceSheetVisibleRef.current = true;
+    setWorkspaceSheetVisible(true);
+  }, [completionController, rootSurfaceAdmissionAllowed, store]);
+
+  const closeWorkspacePicker = useCallback(() => {
+    workspacePickerGenerationRef.current += 1;
+    workspacePickerOwnersRef.current.clear();
+    setWorkspacePickerGeneration(workspacePickerGenerationRef.current);
+    workspaceSurfaceNonceRef.current += 1;
+    workspaceBindingController.invalidate();
+    workspaceSheetVisibleRef.current = false;
+    setWorkspaceSheetVisible(false);
+    setWorkspaceRefreshToken(token => token + 1);
+  }, [workspaceBindingController]);
+
   const handleWorkspaceSelect = useCallback(
-    (workspaceId: string) => {
-      if (destructiveSurfaceBlocked()) return;
+    (
+      workspaceId: string,
+      pickerGeneration: number,
+      surfaceNonce: number,
+      expectedConversation: Conversation | null,
+    ) => {
+      if (
+        destructiveSurfaceBlocked() ||
+        !workspaceSheetVisibleRef.current ||
+        workspacePickerGenerationRef.current !== pickerGeneration ||
+        workspaceSurfaceNonceRef.current !== surfaceNonce ||
+        selectActiveConversation(store.getState()) !== expectedConversation
+      )
+        return;
       invalidatePendingProjectSend();
       const conversationId = ensureConversation();
-      store.bindConversationToWorkspace(conversationId, workspaceId);
-      persist().catch(() => undefined);
-      setWorkspaceSheetVisible(false);
-      setWorkspaceRefreshToken(token => token + 1);
+      workspaceBindingController
+        .bindWorkspace({
+          conversationId,
+          workspaceId,
+          pickerGeneration,
+          surfaceNonce,
+          requiredCapabilities:
+            preferences.toolPermission === 'read-only'
+              ? ['read']
+              : ['read', 'write'],
+        })
+        .then(outcome => {
+          if (
+            outcome.status !== 'committed' &&
+            outcome.status !== 'unchanged'
+          ) {
+            if (
+              outcome.status === 'unknown' ||
+              outcome.status === 'session_only'
+            ) {
+              setWorkspaceBindingRecoveryVisible(true);
+              if ('code' in outcome) setRequestFailure(outcome.code);
+            } else if (
+              outcome.status === 'stale' &&
+              workspaceBindingController.getState().phase ===
+                'persistence_pending'
+            ) {
+              setWorkspaceBindingRecoveryVisible(true);
+              setRequestFailure('E_WORKSPACE_PERSISTENCE');
+            } else if (
+              outcome.status !== 'stale' &&
+              outcome.code !== undefined
+            ) {
+              setRequestFailure(outcome.code);
+            }
+            return;
+          }
+          if (
+            workspacePickerGenerationRef.current !== pickerGeneration ||
+            workspaceSurfaceNonceRef.current !== surfaceNonce
+          ) {
+            if ('ownerDrifted' in outcome && outcome.ownerDrifted) {
+              setChatState(store.getState());
+              setRequestFailure('E_WORKSPACE_CONFLICT');
+            }
+            return;
+          }
+          if ('ownerDrifted' in outcome && outcome.ownerDrifted) {
+            setChatState(store.getState());
+            setRequestFailure('E_WORKSPACE_CONFLICT');
+            return;
+          }
+          setWorkspaceNames(previous => ({
+            ...previous,
+            [outcome.workspace.workspace_id]: outcome.workspace.display_name,
+          }));
+          setWorkspaceBindingRecoveryVisible(false);
+          closeWorkspacePicker();
+        })
+        .catch(error => setRequestFailure(errorText(error)));
     },
     [
+      closeWorkspacePicker,
       destructiveSurfaceBlocked,
       ensureConversation,
       invalidatePendingProjectSend,
-      persist,
+      preferences.toolPermission,
       store,
+      workspaceBindingController,
     ],
+  );
+
+  const retryWorkspaceBinding = useCallback(() => {
+    workspaceBindingController
+      .retryPersistence()
+      .then(outcome => {
+          if (
+            outcome.status === 'unknown' ||
+            outcome.status === 'session_only'
+          ) {
+            setWorkspaceBindingRecoveryVisible(true);
+            if ('code' in outcome) setRequestFailure(outcome.code);
+          return;
+        }
+        if (outcome.status === 'not_committed' || outcome.status === 'conflict') {
+          setWorkspaceBindingRecoveryVisible(false);
+          if ('code' in outcome) setRequestFailure(outcome.code);
+          return;
+        }
+        if (outcome.status !== 'committed' && outcome.status !== 'unchanged') {
+          return;
+        }
+        setWorkspaceBindingRecoveryVisible(false);
+        if ('ownerDrifted' in outcome && outcome.ownerDrifted) {
+          setRequestFailure('E_WORKSPACE_CONFLICT');
+          return;
+        }
+        if (workspaceSheetVisibleRef.current) {
+          closeWorkspacePicker();
+        } else if ('root' in outcome && 'workspace' in outcome) {
+          const current = selectActiveConversation(store.getState());
+          if (current !== null) {
+            workspaceVisibleRef.current = true;
+            setWorkspaceRoute({
+              root: outcome.root,
+              label: outcome.workspace.display_name,
+              conversationId: current.id,
+              projectId: outcome.root.project_id,
+            });
+            setWorkspaceVisible(true);
+          }
+        }
+      })
+      .catch(() => setWorkspaceBindingRecoveryVisible(true));
+  }, [closeWorkspacePicker, store, workspaceBindingController]);
+
+  const workspacePickerOnSelect = useCallback(
+    (workspaceId: string) =>
+      handleWorkspaceSelect(
+        workspaceId,
+        workspacePickerGeneration,
+        workspacePickerGeneration,
+        workspacePickerOwnersRef.current.get(workspacePickerGeneration) ?? null,
+      ),
+    [handleWorkspaceSelect, workspacePickerGeneration],
+  );
+
+  const openFilesForConversation = useCallback(
+    async (expectedConversation: Conversation | null) => {
+      if (!lifecycleBootstrapReadyRef.current || expectedConversation === null)
+        return;
+      const current = selectActiveConversation(store.getState());
+      if (current === null || current !== expectedConversation) return;
+      const binding = current.workspaceBinding ?? null;
+      if (binding !== null) {
+        try {
+          const root = assertWorkspaceRootRefV1({
+            schema_version: 1,
+            workspace_id: binding.workspaceId,
+            binding_revision: binding.bindingRevision,
+            project_id: binding.projectId,
+          });
+          workspaceVisibleRef.current = true;
+          setWorkspaceRoute({
+            root,
+            label:
+              workspaceNames[binding.workspaceId] ??
+              (binding.projectId === null
+                ? t('files.workspace')
+                : activeProjectName ?? binding.projectId),
+            conversationId: current.id,
+            projectId: binding.projectId,
+          });
+          setWorkspaceVisible(true);
+        } catch (error) {
+          setRequestFailure(errorText(error));
+        }
+        return;
+      }
+      if (current.projectId !== null) {
+        // Legacy project rows have no public workspace authority. Do not
+        // synthesize a path or silently create a second app-owned root.
+        setRequestFailure('E_WORKSPACE_ROOT_CHANGED');
+        return;
+      }
+      const surfaceNonce = workspaceSurfaceNonceRef.current + 1;
+      workspaceSurfaceNonceRef.current = surfaceNonce;
+      const outcome = await workspaceBindingController.ensureAppOwnedWorkspace({
+        conversationId: current.id,
+        displayName: t('files.workspace'),
+        requiredCapabilities:
+          preferences.toolPermission === 'read-only'
+            ? ['read']
+            : ['read', 'write'],
+        surfaceNonce,
+        requireProjectless: true,
+      });
+      if (
+        outcome.status !== 'committed' &&
+        outcome.status !== 'unchanged'
+      ) {
+        if (
+          outcome.status === 'unknown' ||
+          outcome.status === 'session_only'
+        ) {
+          setWorkspaceBindingRecoveryVisible(true);
+          if ('code' in outcome) setRequestFailure(outcome.code);
+        } else if (
+          outcome.status === 'stale' &&
+          workspaceBindingController.getState().phase ===
+            'persistence_pending'
+        ) {
+          setWorkspaceBindingRecoveryVisible(true);
+          setRequestFailure('E_WORKSPACE_PERSISTENCE');
+        } else if (outcome.status !== 'stale' && outcome.code !== undefined) {
+          setRequestFailure(outcome.code);
+        }
+        return;
+      }
+      if (
+        workspaceSurfaceNonceRef.current !== surfaceNonce ||
+        store.getState().selectedConversationId !== current.id ||
+        store.getState().conversations[current.id] === undefined
+      ) {
+        if ('ownerDrifted' in outcome && outcome.ownerDrifted) {
+          setChatState(store.getState());
+          setRequestFailure('E_WORKSPACE_CONFLICT');
+        }
+        return;
+      }
+      if ('ownerDrifted' in outcome && outcome.ownerDrifted) {
+        setChatState(store.getState());
+        setRequestFailure('E_WORKSPACE_CONFLICT');
+        return;
+      }
+      workspaceVisibleRef.current = true;
+      setWorkspaceRoute({
+        root: outcome.root,
+        label: outcome.workspace.display_name,
+        conversationId: current.id,
+        projectId: outcome.root.project_id,
+      });
+      setWorkspaceVisible(true);
+    },
+    [
+      activeProjectName,
+      preferences.toolPermission,
+      store,
+      t,
+      workspaceBindingController,
+      workspaceNames,
+    ],
+  );
+
+  const resolveProjectFilesRoot = useCallback(
+    async (projectId: string): Promise<WorkspaceRootRefV1 | null> => {
+      const listing = await LocalWorkspaces.list();
+      const candidates = listing.workspaces
+        .filter(workspace => workspace.status === 'ok')
+        .sort((left, right) => left.workspace_id.localeCompare(right.workspace_id));
+      for (const candidate of candidates) {
+        const resolved = await LocalWorkspaces.resolve({
+          schema_version: 1,
+          workspace_id: candidate.workspace_id,
+          expected_binding_revision: candidate.binding_revision,
+          required_capabilities: ['read'],
+        });
+        if (
+          resolved.disposition !== 'direct' ||
+          resolved.workspace.status !== 'ok' ||
+          resolved.workspace.workspace_id !== candidate.workspace_id ||
+          resolved.workspace.binding_revision !== candidate.binding_revision
+        ) {
+          continue;
+        }
+        const baseRoot = assertWorkspaceRootRefV1({
+          schema_version: 1,
+          workspace_id: candidate.workspace_id,
+          binding_revision: candidate.binding_revision,
+          project_id: null,
+        });
+        const lookup = await LocalProjects.projectForWorkspaceV2(baseRoot);
+        if (
+          lookup.status === 'attached' &&
+          lookup.project.project_id === projectId &&
+          lookup.project.workspace_id === baseRoot.workspace_id &&
+          lookup.project.workspace_binding_revision === baseRoot.binding_revision
+        ) {
+          return assertWorkspaceRootRefV1({
+            ...baseRoot,
+            project_id: lookup.project.project_id,
+          });
+        }
+      }
+      return null;
+    },
+    [],
   );
 
   const chatInProject = useCallback(
@@ -3315,47 +4128,135 @@ export function HomeScreen() {
               afterCompletionGuard.projectContext !== current.projectContext))
         )
           return;
+        const requiresProjectAuthority = current?.projectId !== project.id;
+        let bootstrappedWorkspace: Awaited<
+          ReturnType<typeof LocalWorkspaces.bootstrapLegacyProject>
+        > | null = null;
+        if (requiresProjectAuthority) {
+          try {
+            bootstrappedWorkspace =
+              await LocalWorkspaces.bootstrapLegacyProject({
+                schema_version: 1,
+                operation_id: LocalRuntime.createCompletionRequestId(),
+                project_id: project.id,
+              });
+          } catch {
+            setRequestFailure('E_WORKSPACE_UNAVAILABLE');
+            return;
+          }
+          const afterBootstrap =
+            expectedSelectedId === null
+              ? null
+              : selectConversationById(store.getState(), expectedSelectedId);
+          if (
+            projectsSurfaceEpoch.current !== sourceSurfaceEpoch ||
+            store.getState().selectedConversationId !== expectedSelectedId ||
+            (current === null
+              ? afterBootstrap !== null
+              : afterBootstrap === null ||
+                afterBootstrap.projectId !== current.projectId ||
+                afterBootstrap.runtimeContextId !== current.runtimeContextId ||
+                afterBootstrap.modelId !== current.modelId ||
+                afterBootstrap.projectContext !== current.projectContext ||
+                afterBootstrap.workspaceId !== current.workspaceId ||
+                afterBootstrap.workspaceBinding !== current.workspaceBinding)
+          ) {
+            setRequestFailure('E_WORKSPACE_CONFLICT');
+            return;
+          }
+        }
         completionUiEpoch.current += 1;
         setRequestFailure(null);
-        let mutationPersisted = false;
         if (current?.projectId !== project.id) {
           invalidatePendingProjectSend();
-          if (
-            current === null ||
-            current.messages.length > 0 ||
-            current.projectContext?.snapshot !== null &&
-              current.projectContext?.snapshot !== undefined
-          ) {
-            markAttachmentOperationStale();
-            discardDraftAttachments();
-            setDraft('');
-            setAttachmentNotice(null);
-            store.createConversation({
-              modelId: preferencesStore.getState().defaultModel,
-              thinkingMode: preferencesStore.getState().thinkingMode,
-              projectId: project.id,
-            });
-          } else {
-            if (
-              !(await applyDirectProjectMutation(
-                'rebind',
-                current,
-                project.id,
-                project.name,
-              )) ||
-              directProjectMutationOutboxRef.current !== null
-            ) {
-              return;
-            }
-            mutationPersisted = true;
+          if (bootstrappedWorkspace === null) {
+            setRequestFailure('E_WORKSPACE_CONFLICT');
+            return;
           }
+          markAttachmentOperationStale();
+          discardDraftAttachments();
+          setDraft('');
+          setAttachmentNotice(null);
+          const conversationId = store.createConversation({
+            modelId: preferencesStore.getState().defaultModel,
+            thinkingMode: preferencesStore.getState().thinkingMode,
+          });
+          let outcome: Awaited<
+            ReturnType<typeof workspaceBindingController.bindWorkspace>
+          >;
+          try {
+            outcome = await workspaceBindingController.bindWorkspace({
+              conversationId,
+              workspaceId: bootstrappedWorkspace.workspace_id,
+              target: bootstrappedWorkspace,
+              expectedProjectId: project.id,
+              requiredCapabilities: [
+                'read',
+                'write',
+                'git',
+                'project_context',
+              ],
+            });
+          } catch {
+            setRequestFailure('E_WORKSPACE_CONFLICT');
+            return;
+          }
+          if (
+            outcome.status === 'session_only' ||
+            outcome.status === 'unknown'
+          ) {
+            setWorkspaceBindingRecoveryVisible(true);
+            setRequestFailure(outcome.code);
+            return;
+          }
+          setWorkspaceBindingRecoveryVisible(false);
+          if (
+            outcome.status !== 'committed' &&
+            outcome.status !== 'unchanged'
+          ) {
+            setRequestFailure(outcome.code ?? 'E_WORKSPACE_CONFLICT');
+            return;
+          }
+          if (
+            outcome.ownerDrifted === true ||
+            outcome.root.workspace_id !== bootstrappedWorkspace.workspace_id ||
+            outcome.root.binding_revision !==
+              bootstrappedWorkspace.binding_revision ||
+            outcome.root.project_id !== project.id
+          ) {
+            setChatState(store.getState());
+            setRequestFailure('E_WORKSPACE_CONFLICT');
+            return;
+          }
+          const boundConversation = selectConversationById(
+            store.getState(),
+            conversationId,
+          );
+          if (
+            projectsSurfaceEpoch.current !== sourceSurfaceEpoch ||
+            store.getState().selectedConversationId !== conversationId ||
+            boundConversation === null ||
+            boundConversation.projectId !== project.id ||
+            boundConversation.workspaceId !== outcome.root.workspace_id ||
+            boundConversation.workspaceBinding?.workspaceId !==
+              outcome.root.workspace_id ||
+            boundConversation.workspaceBinding.bindingRevision !==
+              outcome.root.binding_revision ||
+            boundConversation.workspaceBinding.projectId !== project.id
+          ) {
+            setRequestFailure('E_WORKSPACE_CONFLICT');
+            return;
+          }
+          setWorkspaceNames(previous => ({
+            ...previous,
+            [outcome.workspace.workspace_id]: outcome.workspace.display_name,
+          }));
         }
         setActiveProjectName(project.name);
         const selected = store.getState().selectedConversationId;
         if (
           projectsSurfaceEpoch.current !== sourceSurfaceEpoch ||
-          selected === null ||
-          (!mutationPersisted && !(await persist()))
+          selected === null
         )
           return;
         const selectedConversation = selectConversationById(
@@ -3386,16 +4287,15 @@ export function HomeScreen() {
     },
     [
       completionController,
-      applyDirectProjectMutation,
       discardDraftAttachments,
       directProjectMutationView,
       invalidatePendingProjectSend,
       markAttachmentOperationStale,
-      persist,
       preferencesStore,
       projectContextController,
       projectContextLifecycleController,
       store,
+      workspaceBindingController,
     ],
   );
 
@@ -4113,16 +5013,6 @@ export function HomeScreen() {
     workspaceVisible ||
     contextSheetVisible;
   navigationSurfaceVisibleRef.current = navigationSurfaceVisible;
-  const workspaceProjectScope = useMemo(
-    () =>
-      projectFilesScope === null
-        ? undefined
-        : {
-            rootPath: projectFilesScope.workspace_path,
-            label: projectFilesScope.name,
-          },
-    [projectFilesScope],
-  );
 
   return (
     <KeyboardAvoidingView
@@ -4219,7 +5109,7 @@ export function HomeScreen() {
               <Text numberOfLines={3} style={styles.noticeText}>
                 {visibleRequestFailure ?? storageWarning}
               </Text>
-              {completionRetryVisible && visibleRequestFailure !== null && (
+              {completionActionVisible && visibleRequestFailure !== null && (
                 <Pressable
                   accessibilityLabel={t('messages.retryResponse')}
                   accessibilityRole="button"
@@ -4238,6 +5128,20 @@ export function HomeScreen() {
                   ]}
                 >
                   <Text style={styles.retryText}>{t('messages.retry')}</Text>
+                </Pressable>
+              )}
+              {workspaceBindingRecoveryVisible && (
+                <Pressable
+                  accessibilityLabel="Retry workspace binding"
+                  accessibilityRole="button"
+                  disabled={attachmentBusy || previewingAttachmentId !== null}
+                  onPress={retryWorkspaceBinding}
+                  style={({ pressed }) => [
+                    styles.retry,
+                    pressed && styles.pressed,
+                  ]}
+                >
+                  <Text style={styles.retryText}>Retry workspace binding</Text>
                 </Pressable>
               )}
             </View>
@@ -4334,13 +5238,7 @@ export function HomeScreen() {
             onConfigure={openSettings}
             onOptionsPress={openComposerOptions}
             onWorkspacePress={() => {
-              if (
-                !rootSurfaceAdmissionAllowed() ||
-                completionBusy(completionController.getState())
-              ) {
-                return;
-              }
-              setWorkspaceSheetVisible(true);
+              openWorkspacePicker();
             }}
             onPreviewAttachment={(id, ownershipKey) => {
               presentAttachmentPreview(id, ownershipKey).catch(
@@ -4376,12 +5274,14 @@ export function HomeScreen() {
         onOpenConversationMenu={id =>
           openConversationActions(id, drawerRenderEpoch)
         }
-        onOpenFiles={() =>
+        onOpenFiles={() => {
+          const expectedConversation = selectActiveConversation(store.getState());
           openAfterDrawerDismiss(drawerRenderEpoch, () => {
-            setProjectFilesScope(null);
-            setWorkspaceVisible(true);
-          })
-        }
+            openFilesForConversation(expectedConversation).catch(error =>
+              setRequestFailure(errorText(error)),
+            );
+          });
+        }}
         onOpenProjects={() =>
           openAfterDrawerDismiss(drawerRenderEpoch, () => {
             projectsSurfaceEpoch.current += 1;
@@ -4504,11 +5404,8 @@ export function HomeScreen() {
       <WorkspacePickerSheet
         activeWorkspaceId={activeWorkspaceId}
         visible={workspaceSheetVisible}
-        onClose={() => {
-          setWorkspaceSheetVisible(false);
-          setWorkspaceRefreshToken(token => token + 1);
-        }}
-        onSelect={handleWorkspaceSelect}
+        onClose={closeWorkspacePicker}
+        onSelect={workspacePickerOnSelect}
       />
       <MirrorSettingsSheet
         visible={mirrorsVisible}
@@ -4556,7 +5453,57 @@ export function HomeScreen() {
         onOpenFiles={project => {
           if (!projectsVisibleRef.current || destructiveSurfaceBlocked()) return;
           setProjectFilesScope(project);
-          setWorkspaceVisible(true);
+          const current = selectActiveConversation(store.getState());
+          const currentBinding = current?.workspaceBinding ?? null;
+          if (
+            current !== null &&
+            current.projectId === project.id &&
+            currentBinding !== null
+          ) {
+            try {
+              const binding = currentBinding;
+              const root = assertWorkspaceRootRefV1({
+                schema_version: 1,
+                workspace_id: binding.workspaceId,
+                binding_revision: binding.bindingRevision,
+                project_id: binding.projectId,
+              });
+              workspaceSurfaceNonceRef.current += 1;
+              workspaceVisibleRef.current = true;
+              setWorkspaceRoute({
+                root,
+                label: project.name,
+                conversationId: current.id,
+                projectId: project.id,
+              });
+              setWorkspaceVisible(true);
+            } catch (error) {
+              setRequestFailure(errorText(error));
+            }
+            return;
+          }
+          const expectedProjectsEpoch = projectsSurfaceEpoch.current;
+          workspaceSurfaceNonceRef.current += 1;
+          resolveProjectFilesRoot(project.id)
+            .then(root => {
+              if (
+                root === null ||
+                !projectsVisibleRef.current ||
+                projectsSurfaceEpoch.current !== expectedProjectsEpoch
+              ) {
+                if (root === null) setRequestFailure('E_WORKSPACE_ROOT_CHANGED');
+                return;
+              }
+              workspaceVisibleRef.current = true;
+              setWorkspaceRoute({
+                root,
+                label: project.name,
+                conversationId: null,
+                projectId: project.id,
+              });
+              setWorkspaceVisible(true);
+            })
+            .catch(error => setRequestFailure(errorText(error)));
         }}
         onUnbindFromChat={() =>
           unbindProjectFromConversation(projectsRenderEpoch)
@@ -4821,11 +5768,16 @@ export function HomeScreen() {
       />
       <WorkspaceDrawer
         confirmDestructive={preferences.confirmDestructiveFileActions}
-        projectScope={workspaceProjectScope}
+        workspaceLabel={workspaceRoute?.label}
+        workspaceRoot={workspaceRoute?.root}
         readOnly={preferences.toolPermission === 'read-only'}
         visible={workspaceVisible}
         onClose={() => {
+          workspaceSurfaceNonceRef.current += 1;
+          workspaceBindingController.invalidate();
+          workspaceVisibleRef.current = false;
           setWorkspaceVisible(false);
+          setWorkspaceRoute(null);
           if (projectFilesScope !== null)
             setProjectRefreshToken(previous => previous + 1);
         }}

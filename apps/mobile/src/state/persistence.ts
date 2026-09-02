@@ -1,5 +1,33 @@
 import {
   ATTACHMENT_CHAT_STATE_SCHEMA_VERSION,
+  AGENT_ATTEMPT_JOURNAL_SCHEMA_VERSION,
+  AGENT_ATTEMPT_JOURNAL_SCHEMA_VERSION_V3,
+  AGENT_CALL_JOURNAL_SCHEMA_VERSION,
+  AGENT_CALL_JOURNAL_SCHEMA_VERSION_V3,
+  AGENT_CLEANUP_SCHEMA_VERSION,
+  AGENT_FAILURE_CODES,
+  AGENT_GRANT_SCHEMA_VERSION,
+  AGENT_ROOT_SCHEMA_VERSION,
+  AGENT_SAFE_SUMMARY_KEYS,
+  AGENT_ROUND_LINEAGE_SCHEMA_VERSION,
+  AGENT_TRANSCRIPT_REFERENCE_SCHEMA_VERSION,
+  AGENT_WRITE_POLICY_SCHEMA_VERSION,
+  CHAT_STATE_SCHEMA_VERSION_V8,
+  MAX_AGENT_ATTEMPT_WRITE_BYTES,
+  MAX_AGENT_BATCH_WRITE_BYTES,
+  MAX_AGENT_CALLS_PER_BATCH,
+  MAX_AGENT_CLEANUP_OUTBOX_ENTRIES,
+  MAX_AGENT_GRANTS_PER_CONVERSATION,
+  MAX_AGENT_ROUNDS,
+  MAX_AGENT_SINGLE_WRITE_BYTES,
+  MAX_AGENT_RESULT_BYTES,
+  MAX_AGENT_SUMMARY_KEY_LENGTH,
+  MAX_AGENT_DURATION_MS,
+  MAX_AGENT_TRANSCRIPT_BYTES,
+  MAX_SESSION_EVENT_ROWS,
+  PERSISTED_TURN_ATTEMPT_SCHEMA_VERSION,
+  SESSION_EVENT_V2_SCHEMA_VERSION,
+  PERSISTED_TURN_ATTEMPT_SCHEMA_VERSION_V3,
   ATTEMPT_CONTEXT_DISPOSITIONS,
   ATTEMPT_PROJECT_CONTEXT_SCHEMA_VERSION,
   ATTACHMENT_DESCRIPTOR_SCHEMA_VERSION,
@@ -25,6 +53,24 @@ import {
   type ChatMessage,
   type ChatMessageMetadata,
   type ChatState,
+  type AgentAccess,
+  type AgentCapability,
+  type AgentConversationGrantV2,
+  type AgentApprovalTokenV1,
+  type AgentApprovalBindingTokenV2,
+  type AgentApprovalTokenMigrationV3,
+  type AgentControllerCASV1,
+  type AgentApprovalDecision,
+  type AgentFailureCode,
+  type AgentToolReceiptV1,
+  type AgentWritePolicyV1,
+  type AgentTranscriptCleanupV1,
+  type AgentTranscriptReferenceV1,
+  type FrozenAgentRootV1,
+  type PersistedAgentAttemptJournalV3,
+  type PersistedAgentCallJournalV3,
+  type PersistedAgentRoundLineageV2,
+  type SessionEventV2,
   type CompletionRoundReceiptV1,
   type Conversation,
   type ConversationTurnV1,
@@ -32,11 +78,14 @@ import {
   type PersistedChatAttachmentV1,
   type PersistedChatMessageV4,
   type PersistedChatStateV8,
+  type PersistedSessionSnapshotV9,
+  type PersistedTurnAttemptV3,
+  type PersistedSessionEventV3,
+  type AgentCancelEventV2,
   type PersistedConversationWorkspaceBindingV1,
   type PersistedWorkspaceAuthorityOutboxV1,
   type PersistedCompletionRoundReceiptV1,
   type PersistedConversationTurnV1,
-  type PersistedTurnAttemptV1,
   type TurnAttemptStatus,
   type AttemptContextDisposition,
   type TurnAttemptV1,
@@ -44,6 +93,7 @@ import {
   type ConversationWorkspaceBindingV1,
   type ConversationWorkspaceBootstrapState,
   type WorkspaceAuthorityOutboxV1,
+  isAgentPhaseLineageValid,
 } from './types';
 import {
   DEFAULT_THINKING_MODE,
@@ -81,6 +131,12 @@ import {
   serializeProjectContextState,
 } from '../project-context/persistence';
 import type { ProjectContextState } from '../project-context/types';
+import { DEFAULT_APP_PREFERENCES } from '../preferences/reducer';
+import {
+  hydrateAppPreferences,
+  serializeAppPreferences,
+} from '../preferences/persistence';
+import type { PersistedAppPreferencesV1 } from '../preferences/types';
 
 const MAX_CONVERSATIONS = 10_000;
 const MAX_MESSAGES_PER_CONVERSATION = 100_000;
@@ -111,13 +167,116 @@ type PersistedSchemaVersion =
   | typeof WORKSPACE_CHAT_STATE_SCHEMA_VERSION
   | typeof PROJECT_CONTEXT_CHAT_STATE_SCHEMA_VERSION
   | typeof PREVIOUS_CHAT_STATE_SCHEMA_VERSION
+  | typeof CHAT_STATE_SCHEMA_VERSION_V8
   | typeof CHAT_STATE_SCHEMA_VERSION;
+
+export type AgentHydrationAuthorityV1 = {
+  readonly schema_version: 1;
+  readonly generation: number;
+  readonly session_sha256: string;
+};
+
+export type AgentHydrationNativeEnvelopeV1 = {
+  readonly schema_version: 1;
+  readonly journal_revision: number;
+  readonly session_generation: number;
+  readonly session_sha256: string;
+};
+
+export type ChatHydrationOptionsV1 = {
+  /** Native session authority used to verify legacy approval CAS bindings. */
+  readonly sessionAuthority?: AgentHydrationAuthorityV1;
+  /** Committed checkpoint envelope used by production root hydration. */
+  readonly nativeEnvelope?: AgentHydrationNativeEnvelopeV1;
+};
+
+type NormalizedChatHydrationOptions = {
+  readonly sessionAuthority?: AgentHydrationAuthorityV1;
+  readonly nativeJournalRevision?: number;
+};
+
+function parseHydrationAuthority(
+  value: unknown,
+): AgentHydrationAuthorityV1 {
+  const raw = exactRecord(value, '$.session_authority', [
+    'schema_version',
+    'generation',
+    'session_sha256',
+  ]);
+  if (raw.schema_version !== 1) {
+    return invalid('$.session_authority.schema_version', 'must equal 1');
+  }
+  const generation = lifecycleEpoch(
+    raw.generation,
+    '$.session_authority.generation',
+    false,
+  );
+  if (generation >= Number.MAX_SAFE_INTEGER) {
+    return invalid(
+      '$.session_authority.generation',
+      'must leave room for the next generation',
+    );
+  }
+  return {
+    schema_version: 1,
+    generation,
+    session_sha256: sha256(
+      raw.session_sha256,
+      '$.session_authority.session_sha256',
+    ),
+  };
+}
+
+function parseHydrationNativeEnvelope(
+  value: unknown,
+): AgentHydrationNativeEnvelopeV1 {
+  const raw = exactRecord(value, '$.native_envelope', [
+    'schema_version',
+    'journal_revision',
+    'session_generation',
+    'session_sha256',
+  ]);
+  if (raw.schema_version !== 1) {
+    return invalid('$.native_envelope.schema_version', 'must equal 1');
+  }
+  const journalRevision = nonNegativeSafeInteger(
+    raw.journal_revision,
+    '$.native_envelope.journal_revision',
+  );
+  if (journalRevision >= Number.MAX_SAFE_INTEGER) {
+    return invalid(
+      '$.native_envelope.journal_revision',
+      'must leave room for the next revision',
+    );
+  }
+  const sessionGeneration = lifecycleEpoch(
+    raw.session_generation,
+    '$.native_envelope.session_generation',
+    false,
+  );
+  if (sessionGeneration >= Number.MAX_SAFE_INTEGER) {
+    return invalid(
+      '$.native_envelope.session_generation',
+      'must leave room for the next generation',
+    );
+  }
+  return {
+    schema_version: 1,
+    journal_revision: journalRevision,
+    session_generation: sessionGeneration,
+    session_sha256: sha256(
+      raw.session_sha256,
+      '$.native_envelope.session_sha256',
+    ),
+  };
+}
 
 function hasWorkspaceShape(schemaVersion: PersistedSchemaVersion): boolean {
   return (
     schemaVersion === WORKSPACE_CHAT_STATE_SCHEMA_VERSION ||
     schemaVersion === PROJECT_CONTEXT_CHAT_STATE_SCHEMA_VERSION ||
     schemaVersion === PREVIOUS_CHAT_STATE_SCHEMA_VERSION ||
+    schemaVersion === CHAT_STATE_SCHEMA_VERSION_V8 ||
     schemaVersion === CHAT_STATE_SCHEMA_VERSION
   );
 }
@@ -128,6 +287,7 @@ function hasProjectContextShape(
   return (
     schemaVersion === PREVIOUS_CHAT_STATE_SCHEMA_VERSION ||
     schemaVersion === PROJECT_CONTEXT_CHAT_STATE_SCHEMA_VERSION ||
+    schemaVersion === CHAT_STATE_SCHEMA_VERSION_V8 ||
     schemaVersion === CHAT_STATE_SCHEMA_VERSION
   );
 }
@@ -135,7 +295,10 @@ function hasProjectContextShape(
 function hasWorkspaceRoutingShape(
   schemaVersion: PersistedSchemaVersion,
 ): boolean {
-  return schemaVersion === CHAT_STATE_SCHEMA_VERSION;
+  return (
+    schemaVersion === CHAT_STATE_SCHEMA_VERSION_V8 ||
+    schemaVersion === CHAT_STATE_SCHEMA_VERSION
+  );
 }
 
 function hasDestructiveJournalShape(
@@ -143,8 +306,13 @@ function hasDestructiveJournalShape(
 ): boolean {
   return (
     schemaVersion === PREVIOUS_CHAT_STATE_SCHEMA_VERSION ||
+    schemaVersion === CHAT_STATE_SCHEMA_VERSION_V8 ||
     schemaVersion === CHAT_STATE_SCHEMA_VERSION
   );
+}
+
+function hasAgentSchema(schemaVersion: PersistedSchemaVersion): boolean {
+  return schemaVersion === CHAT_STATE_SCHEMA_VERSION;
 }
 
 type UnknownRecord = Record<string, unknown>;
@@ -199,11 +367,7 @@ function exactRecord(
   return raw;
 }
 
-function array(
-  value: unknown,
-  path: string,
-  maximumLength: number,
-): unknown[] {
+function array(value: unknown, path: string, maximumLength: number): unknown[] {
   if (
     !Array.isArray(value) ||
     Object.getPrototypeOf(value) !== Array.prototype
@@ -294,6 +458,7 @@ function nonNegativeSafeInteger(value: unknown, path: string): number {
   if (
     typeof value !== 'number' ||
     !Number.isSafeInteger(value) ||
+    Object.is(value, -0) ||
     value < 0
   ) {
     return invalid(path, 'must be a non-negative safe integer');
@@ -344,21 +509,14 @@ function parseDestructiveTransition(
     'updated_at',
   ]);
   if (
-    raw.schema_version !==
-    PROJECT_CONTEXT_DESTRUCTIVE_TRANSITION_SCHEMA_VERSION
+    raw.schema_version !== PROJECT_CONTEXT_DESTRUCTIVE_TRANSITION_SCHEMA_VERSION
   ) {
     return invalid(`${path}.schema_version`, 'must equal 1');
   }
-  if (
-    typeof raw.action !== 'string' ||
-    !destructiveActions.has(raw.action)
-  ) {
+  if (typeof raw.action !== 'string' || !destructiveActions.has(raw.action)) {
     return invalid(`${path}.action`, 'is not a supported destructive action');
   }
-  if (
-    typeof raw.phase !== 'string' ||
-    !destructivePhases.has(raw.phase)
-  ) {
+  if (typeof raw.phase !== 'string' || !destructivePhases.has(raw.phase)) {
     return invalid(`${path}.phase`, 'is not a supported lifecycle phase');
   }
   if (!isProjectId(raw.source_project_id)) {
@@ -405,10 +563,7 @@ function parseDestructiveTransition(
   }
   return {
     schemaVersion: PROJECT_CONTEXT_DESTRUCTIVE_TRANSITION_SCHEMA_VERSION,
-    lifecycleId: canonicalLifecycleId(
-      raw.lifecycle_id,
-      `${path}.lifecycle_id`,
-    ),
+    lifecycleId: canonicalLifecycleId(raw.lifecycle_id, `${path}.lifecycle_id`),
     epoch: lifecycleEpoch(raw.epoch, `${path}.epoch`, false),
     action: raw.action as ProjectContextDestructiveTransitionV1['action'],
     phase: raw.phase as ProjectContextDestructiveTransitionV1['phase'],
@@ -420,14 +575,8 @@ function parseDestructiveTransition(
     sourceProjectId: raw.source_project_id,
     sourceRuntimeContextId,
     sourceModelId: raw.source_model_id,
-    snapshotId: canonicalLifecycleId(
-      raw.snapshot_id,
-      `${path}.snapshot_id`,
-    ),
-    snapshotSha256: sha256(
-      raw.snapshot_sha256,
-      `${path}.snapshot_sha256`,
-    ),
+    snapshotId: canonicalLifecycleId(raw.snapshot_id, `${path}.snapshot_id`),
+    snapshotSha256: sha256(raw.snapshot_sha256, `${path}.snapshot_sha256`),
     consentReceiptId,
     targetProjectId: targetProjectId as string | null,
     createdAt,
@@ -483,10 +632,7 @@ function parseWorkspaceBootstrapState(
       value as ConversationWorkspaceBootstrapState,
     )
   ) {
-    return invalid(
-      path,
-      'must be a supported workspace bootstrap state',
-    );
+    return invalid(path, 'must be a supported workspace bootstrap state');
   }
   return value as ConversationWorkspaceBootstrapState;
 }
@@ -562,10 +708,7 @@ function parseWorkspaceOutboxEntry(
     schemaVersion: WORKSPACE_AUTHORITY_OUTBOX_SCHEMA_VERSION,
     operationId: canonicalLifecycleId(raw.operation_id, `${path}.operation_id`),
     action: raw.action,
-    workspaceId: canonicalLifecycleId(
-      raw.workspace_id,
-      `${path}.workspace_id`,
-    ),
+    workspaceId: canonicalLifecycleId(raw.workspace_id, `${path}.workspace_id`),
     bindingRevision,
     clearanceReceiptId: canonicalLifecycleId(
       raw.clearance_receipt_id,
@@ -585,6 +728,31 @@ function opaqueProviderId(value: unknown, path: string): string {
     return invalid(path, 'must be a bounded opaque provider identifier');
   }
   return value;
+}
+
+function agentIdentifier(value: unknown, path: string): string {
+  if (
+    typeof value !== 'string' ||
+    value.length === 0 ||
+    value.length > MAX_ID_LENGTH ||
+    !opaqueIdPattern.test(value)
+  ) {
+    return invalid(path, 'must be a bounded Agent identifier');
+  }
+  return value;
+}
+
+function boundedIdentifier(
+  value: unknown,
+  path: string,
+  maximumBytes = MAX_ID_LENGTH,
+): string {
+  const result = boundedString(value, path, maximumBytes);
+  const bytes = utf8ByteLength(result);
+  if (bytes === null || bytes > maximumBytes) {
+    return invalid(path, `must contain at most ${maximumBytes} UTF-8 bytes`);
+  }
+  return result;
 }
 
 function uniqueStringArray(
@@ -660,8 +828,8 @@ function safeProjectPath(value: string): boolean {
   }
   return !value
     .split('/')
-    .some(component =>
-      component === '' || component === '.' || component === '..'
+    .some(
+      component => component === '' || component === '.' || component === '..',
     );
 }
 
@@ -741,11 +909,7 @@ function preflightArrayCap(
   }
 }
 
-function ownDataValue(
-  value: object,
-  key: string,
-  path: string,
-): unknown {
+function ownDataValue(value: object, key: string, path: string): unknown {
   const descriptor = Object.getOwnPropertyDescriptor(value, key);
   if (
     descriptor === undefined ||
@@ -767,11 +931,7 @@ function preflightV6ProjectContext(
     5000,
     `${path}.selected_paths`,
   );
-  const manifestValue = ownDataValue(
-    persisted,
-    'manifest',
-    `${path}.manifest`,
-  );
+  const manifestValue = ownDataValue(persisted, 'manifest', `${path}.manifest`);
   if (manifestValue === null) return;
   const manifest = record(manifestValue, `${path}.manifest`);
   preflightArrayCap(
@@ -838,8 +998,7 @@ function validateV6ProjectContext(
     !strictNonNegativeInteger(manifest.context_bytes, 256 * 1024) ||
     manifest.context_bytes < 1 ||
     !strictNonNegativeInteger(manifest.estimated_tokens, 65_536) ||
-    manifest.estimated_tokens !==
-      Math.floor((manifest.context_bytes + 3) / 4)
+    manifest.estimated_tokens !== Math.floor((manifest.context_bytes + 3) / 4)
   ) {
     return invalid(`${path}.manifest`, 'violates the v6 context contract');
   }
@@ -888,16 +1047,14 @@ function validateV6ProjectContext(
 function parseMetadata(
   value: unknown,
   path: string,
-  strict = false,
+  _strict = false,
 ): ChatMessageMetadata {
-  const raw = strict
-    ? exactRecord(
-        value,
-        path,
-        ['model_id', 'latency_ms', 'finish_reason', 'reasoning'],
-        ['model_id', 'latency_ms', 'finish_reason', 'reasoning'],
-      )
-    : record(value, path);
+  const raw = exactRecord(
+    value,
+    path,
+    ['model_id', 'latency_ms', 'finish_reason', 'reasoning'],
+    ['model_id', 'latency_ms', 'finish_reason', 'reasoning'],
+  );
   const metadata: {
     modelId?: ChatMessageMetadata['modelId'];
     latencyMs?: number;
@@ -914,7 +1071,8 @@ function parseMetadata(
   if (raw.latency_ms !== undefined) {
     if (
       typeof raw.latency_ms !== 'number' ||
-      !Number.isFinite(raw.latency_ms) ||
+      !Number.isSafeInteger(raw.latency_ms) ||
+      Object.is(raw.latency_ms, -0) ||
       raw.latency_ms < 0
     ) {
       return invalid(
@@ -1015,11 +1173,7 @@ function parseAttachments(
   const ids = new Set<string>();
   let totalSize = 0;
   return raw.map((entry, index) => {
-    const attachment = parseAttachment(
-      entry,
-      `${path}[${index}]`,
-      strict,
-    );
+    const attachment = parseAttachment(entry, `${path}[${index}]`, strict);
     if (ids.has(attachment.id)) {
       return invalid(
         `${path}[${index}].id`,
@@ -1040,15 +1194,17 @@ function parseMessage(
   path: string,
   schemaVersion: PersistedSchemaVersion,
 ): ChatMessage {
-  const strict = hasProjectContextShape(schemaVersion);
-  const raw = strict
-    ? exactRecord(
-        value,
-        path,
-        ['id', 'role', 'text', 'created_at', 'attachments', 'metadata'],
-        ['metadata'],
-      )
-    : record(value, path);
+  const hasAttachments =
+    schemaVersion !== LEGACY_CHAT_STATE_SCHEMA_VERSION &&
+    schemaVersion !== OLDER_CHAT_STATE_SCHEMA_VERSION;
+  const raw = exactRecord(
+    value,
+    path,
+    hasAttachments
+      ? ['id', 'role', 'text', 'created_at', 'attachments', 'metadata']
+      : ['id', 'role', 'text', 'created_at', 'metadata'],
+    ['metadata'],
+  );
   const role = raw.role;
   if (role !== 'user' && role !== 'assistant') {
     return invalid(`${path}.role`, 'must be user or assistant');
@@ -1057,12 +1213,12 @@ function parseMessage(
   const metadata =
     raw.metadata === undefined
       ? undefined
-      : parseMetadata(raw.metadata, `${path}.metadata`, strict);
+      : parseMetadata(raw.metadata, `${path}.metadata`);
   const attachments =
     schemaVersion === LEGACY_CHAT_STATE_SCHEMA_VERSION ||
     schemaVersion === OLDER_CHAT_STATE_SCHEMA_VERSION
       ? []
-      : parseAttachments(raw.attachments, `${path}.attachments`, strict);
+      : parseAttachments(raw.attachments, `${path}.attachments`, true);
   const text = boundedString(
     raw.text,
     `${path}.text`,
@@ -1145,10 +1301,7 @@ function parseAttemptProjectContext(
     return invalid(`${path}.policy`, 'must equal chat-read-v1');
   }
   if (raw.policy_version !== 'chat-read-v1.0.0') {
-    return invalid(
-      `${path}.policy_version`,
-      'must equal chat-read-v1.0.0',
-    );
+    return invalid(`${path}.policy_version`, 'must equal chat-read-v1.0.0');
   }
   if (!isProjectId(raw.project_id)) {
     return invalid(`${path}.project_id`, 'must be a valid project id');
@@ -1160,14 +1313,8 @@ function parseAttemptProjectContext(
       `${path}.runtime_context_id`,
     ),
     projectId: raw.project_id,
-    snapshotId: canonicalLifecycleId(
-      raw.snapshot_id,
-      `${path}.snapshot_id`,
-    ),
-    snapshotSha256: sha256(
-      raw.snapshot_sha256,
-      `${path}.snapshot_sha256`,
-    ),
+    snapshotId: canonicalLifecycleId(raw.snapshot_id, `${path}.snapshot_id`),
+    snapshotSha256: sha256(raw.snapshot_sha256, `${path}.snapshot_sha256`),
     sourceFingerprint: sha256(
       raw.source_fingerprint,
       `${path}.source_fingerprint`,
@@ -1216,14 +1363,8 @@ function parseProjectContextReceipt(
   }
   return {
     schema_version: 1,
-    snapshot_id: canonicalLifecycleId(
-      raw.snapshot_id,
-      `${path}.snapshot_id`,
-    ),
-    snapshot_sha256: sha256(
-      raw.snapshot_sha256,
-      `${path}.snapshot_sha256`,
-    ),
+    snapshot_id: canonicalLifecycleId(raw.snapshot_id, `${path}.snapshot_id`),
+    snapshot_sha256: sha256(raw.snapshot_sha256, `${path}.snapshot_sha256`),
     source_fingerprint: sha256(
       raw.source_fingerprint,
       `${path}.source_fingerprint`,
@@ -1274,11 +1415,11 @@ function parseRoundReceipt(
   if (raw.schema_version !== COMPLETION_ROUND_RECEIPT_SCHEMA_VERSION) {
     return invalid(`${path}.schema_version`, 'must equal 1');
   }
-  if (raw.transport_schema_version !== 2 && raw.transport_schema_version !== 3) {
-    return invalid(
-      `${path}.transport_schema_version`,
-      'must equal 2 or 3',
-    );
+  if (
+    raw.transport_schema_version !== 2 &&
+    raw.transport_schema_version !== 3
+  ) {
+    return invalid(`${path}.transport_schema_version`, 'must equal 2 or 3');
   }
   if (!isModelId(raw.requested_model) || !isModelId(raw.model)) {
     return invalid(`${path}.model`, 'must contain supported models');
@@ -1303,13 +1444,10 @@ function parseRoundReceipt(
     schemaVersion: COMPLETION_ROUND_RECEIPT_SCHEMA_VERSION,
     transportSchemaVersion: raw.transport_schema_version,
     turnId: canonicalLifecycleId(raw.turn_id, `${path}.turn_id`),
-    attemptId: canonicalLifecycleId(
-      raw.attempt_id,
-      `${path}.attempt_id`,
-    ),
+    attemptId: canonicalLifecycleId(raw.attempt_id, `${path}.attempt_id`),
     roundId: canonicalLifecycleId(raw.round_id, `${path}.round_id`),
     roundIndex,
-    providerRequestId: canonicalLifecycleId(
+    providerRequestId: opaqueProviderId(
       raw.provider_request_id,
       `${path}.provider_request_id`,
     ),
@@ -1320,12 +1458,8 @@ function parseRoundReceipt(
     requestedModel: raw.requested_model,
     model: raw.model,
     thinkingMode: raw.thinking_mode,
-    finishReason:
-      raw.finish_reason as CompletionRoundReceiptV1['finishReason'],
-    latencyMs: nonNegativeSafeInteger(
-      raw.latency_ms,
-      `${path}.latency_ms`,
-    ),
+    finishReason: raw.finish_reason as CompletionRoundReceiptV1['finishReason'],
+    latencyMs: nonNegativeSafeInteger(raw.latency_ms, `${path}.latency_ms`),
     visibleHistorySha256: sha256(
       raw.visible_history_sha256,
       `${path}.visible_history_sha256`,
@@ -1343,6 +1477,2270 @@ function parseRoundReceipt(
       `${path}.project_context_receipt`,
     ),
   };
+}
+
+const agentPhases = new Set([
+  'ready_for_round',
+  'round_in_flight',
+  'batch_frozen',
+  'approval_pending',
+  'execution_intent',
+  'tool_result_pending',
+  'final_response',
+  'cancelled',
+  'failed',
+  'unknown',
+  'ambiguous',
+]);
+const agentLineageStatuses = new Set([
+  'ready',
+  'active',
+  'failed_retryable',
+  'completed',
+  'cancel_requested',
+  'cancelled',
+  'unknown',
+  'ambiguous',
+]);
+const agentAccesses = new Set<AgentAccess>([
+  'auto',
+  'conversation_confirm',
+  'confirm_once',
+  'durable_deny',
+]);
+const agentApprovalDecisions = new Set([
+  'pending',
+  'denied',
+  'allow_once',
+  'allow_conversation',
+  'cancelled',
+]);
+const agentCapabilities = new Set([
+  'file_read',
+  'file_write',
+  'git_status',
+  'git_commit',
+  'git_push',
+]);
+const sessionEventKinds = new Set([
+  'round',
+  'tool_call',
+  'tool_result',
+  'approval',
+  'terminal',
+  'cancel',
+]);
+const sessionEventStatuses = new Set([
+  'waiting',
+  'approval',
+  'running',
+  'ok',
+  'failed',
+  'denied',
+  'cancelled',
+  'unknown',
+  'ambiguous',
+]);
+const registeredAgentTools = new Set([
+  'list_dir',
+  'read_file',
+  'write_file',
+  'git_status',
+  'git_commit',
+  'git_push',
+]);
+const autoAgentTools = new Set(['list_dir', 'read_file', 'git_status']);
+const safeSummaryKeys = new Set<string>(AGENT_SAFE_SUMMARY_KEYS);
+
+function agentFailureCode(
+  value: unknown,
+  path: string,
+): AgentFailureCode | null {
+  if (value === null) return null;
+  if (
+    typeof value !== 'string' ||
+    !AGENT_FAILURE_CODES.includes(value as AgentFailureCode)
+  ) {
+    return invalid(`${path}`, 'must be a stable Agent failure code or null');
+  }
+  return value as AgentFailureCode;
+}
+
+function parseAgentRoot(value: unknown, path: string): FrozenAgentRootV1 {
+  const raw = exactRecord(value, path, [
+    'schema_version',
+    'kind',
+    'workspace_id',
+    'workspace_binding_revision',
+    'project_id',
+    'root_fingerprint_sha256',
+    'capabilities',
+  ]);
+  if (raw.schema_version !== AGENT_ROOT_SCHEMA_VERSION) {
+    return invalid(`${path}.schema_version`, 'must equal 1');
+  }
+  if (raw.kind !== 'project' && raw.kind !== 'workspace') {
+    return invalid(`${path}.kind`, 'must be project or workspace');
+  }
+  const workspaceId = canonicalLifecycleId(
+    raw.workspace_id,
+    `${path}.workspace_id`,
+  );
+  const bindingRevision = lifecycleEpoch(
+    raw.workspace_binding_revision,
+    `${path}.workspace_binding_revision`,
+    false,
+  );
+  if (bindingRevision >= Number.MAX_SAFE_INTEGER) {
+    return invalid(
+      `${path}.workspace_binding_revision`,
+      'must be less than Number.MAX_SAFE_INTEGER',
+    );
+  }
+  const projectId =
+    raw.project_id === null
+      ? null
+      : canonicalLifecycleId(raw.project_id, `${path}.project_id`);
+  if ((raw.kind === 'project') !== (projectId !== null)) {
+    return invalid(`${path}.project_id`, 'must match root kind');
+  }
+  const capabilitiesRaw = array(
+    raw.capabilities,
+    `${path}.capabilities`,
+    agentCapabilities.size,
+  );
+  const capabilities: FrozenAgentRootV1['capabilities'] = [];
+  const seen = new Set<string>();
+  capabilitiesRaw.forEach((entry, index) => {
+    if (typeof entry !== 'string' || !agentCapabilities.has(entry)) {
+      invalid(
+        `${path}.capabilities[${index}]`,
+        'is not a supported capability',
+      );
+    }
+    if (seen.has(entry))
+      invalid(`${path}.capabilities[${index}]`, 'must be unique');
+    seen.add(entry);
+    if (raw.kind === 'workspace' && entry.startsWith('git_')) {
+      invalid(
+        `${path}.capabilities[${index}]`,
+        'workspace roots cannot expose Git',
+      );
+    }
+    (capabilities as AgentCapability[]).push(entry as AgentCapability);
+  });
+  return {
+    schema_version: AGENT_ROOT_SCHEMA_VERSION,
+    kind: raw.kind,
+    workspace_id: workspaceId,
+    workspace_binding_revision: bindingRevision,
+    project_id: projectId,
+    root_fingerprint_sha256: sha256(
+      raw.root_fingerprint_sha256,
+      `${path}.root_fingerprint_sha256`,
+    ),
+    capabilities,
+  };
+}
+
+function parseAgentPolicy(value: unknown, path: string): AgentWritePolicyV1 {
+  const raw = exactRecord(value, path, [
+    'schema_version',
+    'policy_version',
+    'max_single_write_bytes',
+    'max_batch_write_bytes',
+    'max_attempt_write_bytes',
+  ]);
+  if (raw.schema_version !== AGENT_WRITE_POLICY_SCHEMA_VERSION) {
+    return invalid(`${path}.schema_version`, 'must equal 1');
+  }
+  const policyVersion = boundedIdentifier(
+    raw.policy_version,
+    `${path}.policy_version`,
+    256,
+  );
+  const single = nonNegativeSafeInteger(
+    raw.max_single_write_bytes,
+    `${path}.max_single_write_bytes`,
+  );
+  const batch = nonNegativeSafeInteger(
+    raw.max_batch_write_bytes,
+    `${path}.max_batch_write_bytes`,
+  );
+  const attempt = nonNegativeSafeInteger(
+    raw.max_attempt_write_bytes,
+    `${path}.max_attempt_write_bytes`,
+  );
+  if (
+    single !== MAX_AGENT_SINGLE_WRITE_BYTES ||
+    batch < MAX_AGENT_SINGLE_WRITE_BYTES ||
+    batch > MAX_AGENT_BATCH_WRITE_BYTES ||
+    attempt < batch ||
+    attempt > MAX_AGENT_ATTEMPT_WRITE_BYTES
+  ) {
+    return invalid(`${path}`, 'violates the Agent write policy bounds');
+  }
+  return {
+    schema_version: AGENT_WRITE_POLICY_SCHEMA_VERSION,
+    policy_version: policyVersion,
+    max_single_write_bytes: MAX_AGENT_SINGLE_WRITE_BYTES,
+    max_batch_write_bytes: batch,
+    max_attempt_write_bytes: attempt,
+  };
+}
+
+function parseTranscriptReference(
+  value: unknown,
+  path: string,
+): AgentTranscriptReferenceV1 {
+  const raw = exactRecord(value, path, [
+    'schema_version',
+    'transcript_ref',
+    'generation',
+    'transcript_sha256',
+    'transcript_bytes',
+  ]);
+  if (raw.schema_version !== AGENT_TRANSCRIPT_REFERENCE_SCHEMA_VERSION) {
+    return invalid(`${path}.schema_version`, 'must equal 1');
+  }
+  return {
+    schema_version: AGENT_TRANSCRIPT_REFERENCE_SCHEMA_VERSION,
+    transcript_ref: canonicalLifecycleId(
+      raw.transcript_ref,
+      `${path}.transcript_ref`,
+    ),
+    generation: nonNegativeSafeInteger(raw.generation, `${path}.generation`),
+    transcript_sha256: sha256(
+      raw.transcript_sha256,
+      `${path}.transcript_sha256`,
+    ),
+    transcript_bytes: (() => {
+      const bytes = nonNegativeSafeInteger(
+        raw.transcript_bytes,
+        `${path}.transcript_bytes`,
+      );
+      return bytes > MAX_AGENT_TRANSCRIPT_BYTES
+        ? invalid(`${path}.transcript_bytes`, 'exceeds the transcript limit')
+        : bytes;
+    })(),
+  };
+}
+
+function parseAgentReceipt(value: unknown, path: string): AgentToolReceiptV1 {
+  const raw = exactRecord(value, path, [
+    'schema_version',
+    'call_id',
+    'name',
+    'arguments_sha256',
+    'result_sha256',
+    'result_bytes',
+    'truncated',
+    'duration_ms',
+    'outcome',
+    'failure_code',
+    'approval_reference',
+  ]);
+  if (raw.schema_version !== 1)
+    return invalid(`${path}.schema_version`, 'must equal 1');
+  const callId = opaqueProviderId(raw.call_id, `${path}.call_id`);
+  const name = boundedString(raw.name, `${path}.name`, 64);
+  if (!/^[\x21-\x7e]+$/u.test(name))
+    return invalid(`${path}.name`, 'must be ASCII');
+  if (typeof raw.truncated !== 'boolean')
+    return invalid(`${path}.truncated`, 'must be a boolean');
+  const resultBytes = nonNegativeSafeInteger(
+    raw.result_bytes,
+    `${path}.result_bytes`,
+  );
+  if (resultBytes > MAX_AGENT_RESULT_BYTES)
+    return invalid(`${path}.result_bytes`, 'exceeds the result limit');
+  const durationMs = nonNegativeSafeInteger(
+    raw.duration_ms,
+    `${path}.duration_ms`,
+  );
+  if (durationMs > MAX_AGENT_DURATION_MS)
+    return invalid(`${path}.duration_ms`, 'exceeds the duration limit');
+  const outcome = raw.outcome;
+  if (
+    outcome !== 'ok' &&
+    outcome !== 'failed' &&
+    outcome !== 'denied' &&
+    outcome !== 'cancelled' &&
+    outcome !== 'ambiguous'
+  )
+    return invalid(`${path}.outcome`, 'must be a supported receipt outcome');
+  const failureCode = agentFailureCode(
+    raw.failure_code,
+    `${path}.failure_code`,
+  );
+  const approvalReference =
+    raw.approval_reference === null
+      ? null
+      : agentIdentifier(raw.approval_reference, `${path}.approval_reference`);
+  if (outcome === 'ok' && failureCode !== null) {
+    return invalid(
+      `${path}.failure_code`,
+      'successful receipts cannot carry a failure code',
+    );
+  }
+  if (
+    outcome === 'ambiguous' &&
+    failureCode !== 'E_AGENT_EXECUTION_AMBIGUOUS'
+  ) {
+    return invalid(
+      `${path}.failure_code`,
+      'ambiguous receipts require the stable ambiguity code',
+    );
+  }
+  if (
+    (outcome === 'ok' || outcome === 'failed' || outcome === 'denied') &&
+    failureCode === 'E_AGENT_EXECUTION_AMBIGUOUS'
+  )
+    return invalid(
+      `${path}.failure_code`,
+      'ambiguous code requires ambiguous outcome',
+    );
+  return {
+    schema_version: 1,
+    call_id: callId,
+    name,
+    arguments_sha256: sha256(raw.arguments_sha256, `${path}.arguments_sha256`),
+    result_sha256: sha256(raw.result_sha256, `${path}.result_sha256`),
+    result_bytes: resultBytes,
+    truncated: raw.truncated,
+    duration_ms: durationMs,
+    outcome,
+    failure_code: failureCode,
+    approval_reference: approvalReference,
+  };
+}
+
+function parseAgentControllerCAS(
+  value: unknown,
+  path: string,
+): AgentControllerCASV1 {
+  const raw = exactRecord(value, path, [
+    'schema_version',
+    'conversation_id',
+    'task_id',
+    'attempt_id',
+    'expected_controller_generation',
+    'expected_journal_revision',
+    'expected_session_generation',
+    'expected_session_sha256',
+  ]);
+  if (raw.schema_version !== 1)
+    return invalid(`${path}.schema_version`, 'must equal 1');
+  const controllerGeneration = nonNegativeSafeInteger(
+    raw.expected_controller_generation,
+    `${path}.expected_controller_generation`,
+  );
+  const journalRevision = nonNegativeSafeInteger(
+    raw.expected_journal_revision,
+    `${path}.expected_journal_revision`,
+  );
+  const sessionGeneration = lifecycleEpoch(
+    raw.expected_session_generation,
+    `${path}.expected_session_generation`,
+    false,
+  );
+  if (
+    controllerGeneration >= Number.MAX_SAFE_INTEGER ||
+    journalRevision >= Number.MAX_SAFE_INTEGER ||
+    sessionGeneration >= Number.MAX_SAFE_INTEGER
+  )
+    return invalid(
+      path,
+      'CAS generations must leave room for the next transition',
+    );
+  return {
+    schema_version: 1,
+    conversation_id: boundedIdentifier(
+      raw.conversation_id,
+      `${path}.conversation_id`,
+      MAX_ID_LENGTH,
+    ),
+    task_id: canonicalLifecycleId(raw.task_id, `${path}.task_id`),
+    attempt_id: canonicalLifecycleId(raw.attempt_id, `${path}.attempt_id`),
+    expected_controller_generation: controllerGeneration,
+    expected_journal_revision: journalRevision,
+    expected_session_generation: sessionGeneration,
+    expected_session_sha256: sha256(
+      raw.expected_session_sha256,
+      `${path}.expected_session_sha256`,
+    ),
+  };
+}
+
+function parseAgentApprovalToken(
+  value: unknown,
+  path: string,
+): AgentApprovalTokenV1 {
+  const raw = exactRecord(value, path, [
+    'schema_version',
+    'controller_cas',
+    'round_id',
+    'round_index',
+    'batch_call_ids',
+    'batch_arguments_sha256',
+    'call_index',
+    'call_id',
+    'name',
+    'access',
+    'arguments_sha256',
+    'root_fingerprint_sha256',
+    'binding_revision',
+    'policy_version',
+    'registry_version',
+    'allowed_decisions',
+  ]);
+  if (raw.schema_version !== 1)
+    return invalid(`${path}.schema_version`, 'must equal 1');
+  const batchCallIds = array(
+    raw.batch_call_ids,
+    `${path}.batch_call_ids`,
+    MAX_AGENT_CALLS_PER_BATCH,
+  ).map((entry, index) =>
+    opaqueProviderId(entry, `${path}.batch_call_ids[${index}]`),
+  );
+  const batchArguments = array(
+    raw.batch_arguments_sha256,
+    `${path}.batch_arguments_sha256`,
+    MAX_AGENT_CALLS_PER_BATCH,
+  ).map((entry, index) =>
+    sha256(entry, `${path}.batch_arguments_sha256[${index}]`),
+  );
+  if (
+    batchCallIds.length < 1 ||
+    batchCallIds.length !== batchArguments.length ||
+    new Set(batchCallIds).size !== batchCallIds.length
+  )
+    return invalid(path, 'must contain a unique complete batch binding');
+  const callId = opaqueProviderId(raw.call_id, `${path}.call_id`);
+  const callIndex = nonNegativeSafeInteger(
+    raw.call_index,
+    `${path}.call_index`,
+  );
+  const argumentsSha256 = sha256(
+    raw.arguments_sha256,
+    `${path}.arguments_sha256`,
+  );
+  if (
+    callIndex >= batchCallIds.length ||
+    batchCallIds[callIndex] !== callId ||
+    batchArguments[callIndex] !== argumentsSha256
+  ) {
+    return invalid(path, 'call identity must match its complete batch binding');
+  }
+  const allowedDecisions = array(
+    raw.allowed_decisions,
+    `${path}.allowed_decisions`,
+    4,
+  ).map((entry, index) => {
+    if (
+      entry !== 'denied' &&
+      entry !== 'allow_once' &&
+      entry !== 'allow_conversation' &&
+      entry !== 'cancelled'
+    )
+      return invalid(
+        `${path}.allowed_decisions[${index}]`,
+        'is not a decision',
+      );
+    return entry as Exclude<AgentApprovalDecision, 'pending'>;
+  });
+  if (allowedDecisions.length < 1) {
+    return invalid(`${path}.allowed_decisions`, 'must not be empty');
+  }
+  if (new Set(allowedDecisions).size !== allowedDecisions.length) {
+    return invalid(`${path}.allowed_decisions`, 'must be unique');
+  }
+  if (!agentAccesses.has(raw.access as AgentAccess)) {
+    return invalid(`${path}.access`, 'must be a supported access policy');
+  }
+  const expectedDecisions =
+    raw.access === 'conversation_confirm'
+      ? ['denied', 'allow_once', 'allow_conversation', 'cancelled']
+      : raw.access === 'confirm_once'
+      ? ['denied', 'allow_once', 'cancelled']
+      : null;
+  if (
+    expectedDecisions !== null &&
+    (allowedDecisions.length !== expectedDecisions.length ||
+      allowedDecisions.some(
+        (entry, index) => entry !== expectedDecisions[index],
+      ))
+  ) {
+    return invalid(`${path}.allowed_decisions`, 'does not match access policy');
+  }
+  return {
+    schema_version: 1,
+    controller_cas: parseAgentControllerCAS(
+      raw.controller_cas,
+      `${path}.controller_cas`,
+    ),
+    round_id: canonicalLifecycleId(raw.round_id, `${path}.round_id`),
+    round_index: (() => {
+      const index = nonNegativeSafeInteger(
+        raw.round_index,
+        `${path}.round_index`,
+      );
+      return index >= MAX_AGENT_ROUNDS
+        ? invalid(`${path}.round_index`, 'must be less than 8')
+        : index;
+    })(),
+    batch_call_ids: batchCallIds,
+    batch_arguments_sha256: batchArguments,
+    call_index: callIndex,
+    call_id: callId,
+    name: (() => {
+      const name = boundedString(raw.name, `${path}.name`, 64);
+      return /^[\x21-\x7e]+$/u.test(name)
+        ? name
+        : invalid(`${path}.name`, 'must be ASCII');
+    })(),
+    access: (() => {
+      if (!agentAccesses.has(raw.access as AgentAccess)) {
+        return invalid(`${path}.access`, 'must be a supported access policy');
+      }
+      return raw.access as AgentAccess;
+    })(),
+    arguments_sha256: argumentsSha256,
+    root_fingerprint_sha256: sha256(
+      raw.root_fingerprint_sha256,
+      `${path}.root_fingerprint_sha256`,
+    ),
+    binding_revision: (() => {
+      const revision = lifecycleEpoch(
+        raw.binding_revision,
+        `${path}.binding_revision`,
+        false,
+      );
+      return revision >= Number.MAX_SAFE_INTEGER
+        ? invalid(
+            `${path}.binding_revision`,
+            'must be less than Number.MAX_SAFE_INTEGER',
+          )
+        : revision;
+    })(),
+    policy_version: boundedIdentifier(
+      raw.policy_version,
+      `${path}.policy_version`,
+      MAX_ID_LENGTH,
+    ),
+    registry_version:
+      raw.registry_version === 1
+        ? 1
+        : invalid(`${path}.registry_version`, 'must equal 1'),
+    allowed_decisions: allowedDecisions,
+  };
+}
+
+/**
+ * Parses the closed, final schema-9 call projection.  This parser is kept
+ * separate from the V2 parser above on purpose: a structured legacy approval
+ * object is a migration input, never a valid V3 persisted value.
+ */
+export function parsePersistedAgentCallJournalV3(
+  value: unknown,
+  path = '$',
+): PersistedAgentCallJournalV3 {
+  const raw = exactRecord(value, path, [
+    'schema_version',
+    'call_id',
+    'call_index',
+    'name',
+    'arguments_sha256',
+    'safe_summary_key',
+    'access',
+    'approval_token',
+    'approval_decision',
+    'approval_reference',
+    'idempotency_key',
+    'native_row_revision',
+    'receipt',
+  ]);
+  if (raw.schema_version !== AGENT_CALL_JOURNAL_SCHEMA_VERSION_V3) {
+    return invalid(`${path}.schema_version`, 'must equal 3');
+  }
+  const callId = opaqueProviderId(raw.call_id, `${path}.call_id`);
+  const callIndex = nonNegativeSafeInteger(
+    raw.call_index,
+    `${path}.call_index`,
+  );
+  const name = boundedString(raw.name, `${path}.name`, 64);
+  if (!/^[\x21-\x7e]+$/u.test(name)) {
+    return invalid(`${path}.name`, 'must be ASCII');
+  }
+  if (
+    typeof raw.access !== 'string' ||
+    !agentAccesses.has(raw.access as AgentAccess)
+  ) {
+    return invalid(`${path}.access`, 'must be a supported access policy');
+  }
+  const access = raw.access as AgentAccess;
+  if (
+    typeof raw.approval_decision !== 'string' ||
+    !agentApprovalDecisions.has(raw.approval_decision)
+  ) {
+    return invalid(
+      `${path}.approval_decision`,
+      'must be a supported approval decision',
+    );
+  }
+  const decision = raw.approval_decision as AgentApprovalDecision;
+  const approvalToken =
+    raw.approval_token === null
+      ? null
+      : opaqueProviderId(raw.approval_token, `${path}.approval_token`);
+  const approvalReference =
+    raw.approval_reference === null
+      ? null
+      : agentIdentifier(raw.approval_reference, `${path}.approval_reference`);
+  const idempotencyKey =
+    raw.idempotency_key === null
+      ? null
+      : sha256(raw.idempotency_key, `${path}.idempotency_key`);
+  const nativeRowRevision =
+    raw.native_row_revision === null
+      ? null
+      : (() => {
+          const revision = nonNegativeSafeInteger(
+            raw.native_row_revision,
+            `${path}.native_row_revision`,
+          );
+          return revision < 1
+            ? invalid(`${path}.native_row_revision`, 'must be positive')
+            : revision;
+        })();
+  const receipt =
+    raw.receipt === null
+      ? null
+      : parseAgentReceipt(raw.receipt, `${path}.receipt`);
+  const knownTool = registeredAgentTools.has(name);
+  const expectedAccess = knownTool
+    ? autoAgentTools.has(name)
+      ? 'auto'
+      : name === 'git_push'
+      ? 'confirm_once'
+      : 'conversation_confirm'
+    : 'durable_deny';
+  if (access !== expectedAccess) {
+    return invalid(
+      `${path}.access`,
+      'does not match the registered tool policy',
+    );
+  }
+  const expectedSummaryKey = knownTool ? `agent.${name}` : 'agent.unknown';
+  const safeSummaryKey = boundedString(
+    raw.safe_summary_key,
+    `${path}.safe_summary_key`,
+    MAX_AGENT_SUMMARY_KEY_LENGTH,
+  );
+  if (
+    !safeSummaryKeys.has(safeSummaryKey) ||
+    safeSummaryKey !== expectedSummaryKey
+  ) {
+    return invalid(
+      `${path}.safe_summary_key`,
+      'must be the registered value-free summary key',
+    );
+  }
+  const argumentsSha256 = sha256(
+    raw.arguments_sha256,
+    `${path}.arguments_sha256`,
+  );
+  if (
+    access === 'auto' &&
+    (approvalToken !== null || approvalReference !== null)
+  ) {
+    return invalid(path, 'auto calls cannot carry approval references');
+  }
+  if (
+    access === 'durable_deny' &&
+    (approvalToken !== null ||
+      approvalReference !== null ||
+      idempotencyKey !== null)
+  ) {
+    return invalid(
+      path,
+      'durable deny cannot carry approval or execution fields',
+    );
+  }
+  if (access === 'durable_deny' && decision !== 'denied') {
+    return invalid(`${path}.approval_decision`, 'durable deny must be denied');
+  }
+  if (decision === 'pending' && approvalReference !== null) {
+    return invalid(
+      `${path}.approval_reference`,
+      'pending approvals cannot carry a decision reference',
+    );
+  }
+  const gated = access === 'conversation_confirm' || access === 'confirm_once';
+  if (
+    gated &&
+    (decision === 'pending' ||
+      decision === 'allow_once' ||
+      decision === 'allow_conversation')
+  ) {
+    if (approvalToken === null) {
+      return invalid(
+        `${path}.approval_token`,
+        'gated decisions require a non-null opaque approval token',
+      );
+    }
+  }
+  if (decision === 'denied' || decision === 'cancelled') {
+    if (approvalToken !== null || approvalReference !== null) {
+      return invalid(
+        path,
+        'terminal approval decisions cannot carry authority',
+      );
+    }
+  }
+  if (name === 'git_push' && decision === 'allow_conversation') {
+    return invalid(`${path}.approval_decision`, 'git_push is once-only');
+  }
+  if (
+    receipt !== null &&
+    (receipt.call_id !== callId ||
+      receipt.name !== name ||
+      receipt.arguments_sha256 !== argumentsSha256 ||
+      receipt.approval_reference !== approvalReference)
+  ) {
+    return invalid(`${path}.receipt`, 'must match its call');
+  }
+  if (receipt !== null && nativeRowRevision === null) {
+    return invalid(
+      `${path}.native_row_revision`,
+      'settled receipts require a native row revision',
+    );
+  }
+  return {
+    schema_version: AGENT_CALL_JOURNAL_SCHEMA_VERSION_V3,
+    call_id: callId,
+    call_index: callIndex,
+    name,
+    arguments_sha256: argumentsSha256,
+    safe_summary_key: safeSummaryKey,
+    access,
+    approval_token: approvalToken,
+    approval_decision: decision,
+    approval_reference: approvalReference,
+    idempotency_key: idempotencyKey,
+    native_row_revision: nativeRowRevision,
+    receipt,
+  };
+}
+
+function parseAgentApprovalBindingTokenV2(
+  value: unknown,
+  path: string,
+): AgentApprovalBindingTokenV2 {
+  const raw = exactRecord(value, path, [
+    'schema_version',
+    'token',
+    'controller_cas',
+    'task_id',
+    'attempt_id',
+    'round_id',
+    'round_index',
+    'batch_call_ids',
+    'batch_arguments_sha256',
+    'batch_revision',
+    'manifest_sha256',
+    'call_index',
+    'call_id',
+    'name',
+    'arguments_sha256',
+    'idempotency_key',
+    'root_fingerprint_sha256',
+    'binding_revision',
+    'policy_version',
+    'registry_version',
+    'access',
+    'allowed_decisions',
+  ]);
+  if (raw.schema_version !== 2) {
+    return invalid(`${path}.schema_version`, 'must equal 2');
+  }
+  const controllerCas = parseAgentControllerCAS(
+    raw.controller_cas,
+    `${path}.controller_cas`,
+  );
+  const taskId = canonicalLifecycleId(raw.task_id, `${path}.task_id`);
+  const attemptId = canonicalLifecycleId(raw.attempt_id, `${path}.attempt_id`);
+  const roundId = canonicalLifecycleId(raw.round_id, `${path}.round_id`);
+  const roundIndex = nonNegativeSafeInteger(
+    raw.round_index,
+    `${path}.round_index`,
+  );
+  if (roundIndex >= MAX_AGENT_ROUNDS) {
+    return invalid(`${path}.round_index`, 'must be less than 8');
+  }
+  if (
+    controllerCas.task_id !== taskId ||
+    controllerCas.attempt_id !== attemptId
+  ) {
+    return invalid(`${path}.controller_cas`, 'must match the token attempt');
+  }
+  const batchCallIds = array(
+    raw.batch_call_ids,
+    `${path}.batch_call_ids`,
+    MAX_AGENT_CALLS_PER_BATCH,
+  ).map((entry, index) =>
+    opaqueProviderId(entry, `${path}.batch_call_ids[${index}]`),
+  );
+  const batchArguments = array(
+    raw.batch_arguments_sha256,
+    `${path}.batch_arguments_sha256`,
+    MAX_AGENT_CALLS_PER_BATCH,
+  ).map((entry, index) =>
+    sha256(entry, `${path}.batch_arguments_sha256[${index}]`),
+  );
+  if (
+    batchCallIds.length < 1 ||
+    batchCallIds.length !== batchArguments.length ||
+    new Set(batchCallIds).size !== batchCallIds.length
+  ) {
+    return invalid(path, 'must contain a unique complete batch binding');
+  }
+  const callIndex = nonNegativeSafeInteger(
+    raw.call_index,
+    `${path}.call_index`,
+  );
+  if (callIndex >= batchCallIds.length) {
+    return invalid(`${path}.call_index`, 'must reference a batch call');
+  }
+  const access = raw.access;
+  if (access !== 'conversation_confirm' && access !== 'confirm_once') {
+    return invalid(`${path}.access`, 'must be a gated access policy');
+  }
+  const allowedDecisions = array(
+    raw.allowed_decisions,
+    `${path}.allowed_decisions`,
+    4,
+  ).map((entry, index) => {
+    if (
+      entry !== 'denied' &&
+      entry !== 'allow_once' &&
+      entry !== 'allow_conversation' &&
+      entry !== 'cancelled'
+    ) {
+      return invalid(
+        `${path}.allowed_decisions[${index}]`,
+        'is not a decision',
+      );
+    }
+    return entry as AgentApprovalBindingTokenV2['allowed_decisions'][number];
+  });
+  const expectedDecisions =
+    access === 'conversation_confirm'
+      ? ['denied', 'allow_once', 'allow_conversation', 'cancelled']
+      : ['denied', 'allow_once', 'cancelled'];
+  if (
+    allowedDecisions.length !== expectedDecisions.length ||
+    allowedDecisions.some((entry, index) => entry !== expectedDecisions[index])
+  ) {
+    return invalid(`${path}.allowed_decisions`, 'does not match access policy');
+  }
+  const name = boundedString(raw.name, `${path}.name`, 64);
+  if (!/^[\x21-\x7e]+$/u.test(name))
+    return invalid(`${path}.name`, 'must be ASCII');
+  return {
+    schema_version: 2,
+    token: canonicalLifecycleId(raw.token, `${path}.token`),
+    controller_cas: controllerCas,
+    task_id: taskId,
+    attempt_id: attemptId,
+    round_id: roundId,
+    round_index: roundIndex,
+    batch_call_ids: batchCallIds,
+    batch_arguments_sha256: batchArguments,
+    batch_revision: (() => {
+      const revision = lifecycleEpoch(
+        raw.batch_revision,
+        `${path}.batch_revision`,
+        false,
+      );
+      return revision >= Number.MAX_SAFE_INTEGER
+        ? invalid(
+            `${path}.batch_revision`,
+            'must leave room for the next revision',
+          )
+        : revision;
+    })(),
+    manifest_sha256: sha256(raw.manifest_sha256, `${path}.manifest_sha256`),
+    call_index: callIndex,
+    call_id: opaqueProviderId(raw.call_id, `${path}.call_id`),
+    name,
+    arguments_sha256: sha256(raw.arguments_sha256, `${path}.arguments_sha256`),
+    idempotency_key: sha256(raw.idempotency_key, `${path}.idempotency_key`),
+    root_fingerprint_sha256: sha256(
+      raw.root_fingerprint_sha256,
+      `${path}.root_fingerprint_sha256`,
+    ),
+    binding_revision: (() => {
+      const revision = lifecycleEpoch(
+        raw.binding_revision,
+        `${path}.binding_revision`,
+        false,
+      );
+      return revision >= Number.MAX_SAFE_INTEGER
+        ? invalid(
+            `${path}.binding_revision`,
+            'must leave room for the next revision',
+          )
+        : revision;
+    })(),
+    policy_version:
+      raw.policy_version === 'agent-v1'
+        ? 'agent-v1'
+        : invalid(`${path}.policy_version`, 'must equal agent-v1'),
+    registry_version:
+      raw.registry_version === 1
+        ? 1
+        : invalid(`${path}.registry_version`, 'must equal 1'),
+    access,
+    allowed_decisions: allowedDecisions,
+  };
+}
+
+function sameApprovalTokenCall(
+  token: Pick<
+    AgentApprovalTokenV1,
+    | 'call_id'
+    | 'call_index'
+    | 'name'
+    | 'access'
+    | 'arguments_sha256'
+    | 'batch_call_ids'
+    | 'batch_arguments_sha256'
+  >,
+  call: Pick<
+    PersistedAgentCallJournalV3,
+    'call_id' | 'call_index' | 'name' | 'access' | 'arguments_sha256'
+  >,
+): boolean {
+  return (
+    token.call_id === call.call_id &&
+    token.call_index === call.call_index &&
+    token.name === call.name &&
+    token.access === call.access &&
+    token.arguments_sha256 === call.arguments_sha256 &&
+    token.batch_call_ids[token.call_index] === call.call_id &&
+    token.batch_arguments_sha256[token.call_index] === call.arguments_sha256
+  );
+}
+
+function validateLegacyApprovalTokenRelations(
+  token: AgentApprovalTokenV1,
+  call: PersistedAgentCallJournalV3,
+  batch: readonly PersistedAgentCallJournalV3[],
+  lineage: PersistedAgentRoundLineageV2 | null,
+  roundIndex: number,
+  root: FrozenAgentRootV1,
+  policy: AgentWritePolicyV1,
+  controllerGeneration: number,
+  path: string,
+  expectedIdentity?: { readonly taskId: string; readonly attemptId: string },
+  expectedControllerCAS?: AgentControllerCASV1,
+): void {
+  if (
+    lineage === null ||
+    token.round_id !== lineage.round_id ||
+    token.round_index !== roundIndex ||
+    token.controller_cas.expected_controller_generation !==
+      Math.max(0, controllerGeneration - 1) ||
+    (expectedIdentity !== undefined &&
+      (token.controller_cas.task_id !== expectedIdentity.taskId ||
+        token.controller_cas.attempt_id !== expectedIdentity.attemptId)) ||
+    (expectedControllerCAS !== undefined &&
+      (token.controller_cas.schema_version !== expectedControllerCAS.schema_version ||
+        token.controller_cas.conversation_id !== expectedControllerCAS.conversation_id ||
+        token.controller_cas.task_id !== expectedControllerCAS.task_id ||
+        token.controller_cas.attempt_id !== expectedControllerCAS.attempt_id ||
+        token.controller_cas.expected_controller_generation !==
+          expectedControllerCAS.expected_controller_generation ||
+        token.controller_cas.expected_journal_revision !==
+          expectedControllerCAS.expected_journal_revision ||
+        token.controller_cas.expected_session_generation !==
+          expectedControllerCAS.expected_session_generation ||
+        token.controller_cas.expected_session_sha256 !==
+          expectedControllerCAS.expected_session_sha256)) ||
+    token.root_fingerprint_sha256 !== root.root_fingerprint_sha256 ||
+    token.binding_revision !== root.workspace_binding_revision ||
+    token.policy_version !== policy.policy_version ||
+    token.registry_version !== 1 ||
+    !sameApprovalTokenCall(token, call) ||
+    token.batch_call_ids.length !== batch.length ||
+    token.batch_arguments_sha256.length !== batch.length ||
+    token.batch_call_ids.some(
+      (callId, index) => callId !== batch[index]?.call_id,
+    ) ||
+    token.batch_arguments_sha256.some(
+      (digest, index) => digest !== batch[index]?.arguments_sha256,
+    )
+  ) {
+    return invalid(
+      `${path}.approval_token`,
+      'legacy approval binding must match the complete journal authority',
+    );
+  }
+}
+
+/**
+ * Classifies one pre-V3 token without ever upgrading a legacy object by
+ * guessing fields.  Call/journal relations are checked by the caller when
+ * the surrounding row is available; this function only returns safe audit
+ * metadata and the final token/decision pair.
+ */
+export function migrateAgentApprovalTokenV3(
+  value: unknown,
+  decision: AgentApprovalDecision,
+  call?: Pick<
+    PersistedAgentCallJournalV3,
+    'call_id' | 'call_index' | 'name' | 'access' | 'arguments_sha256'
+  >,
+  expectedControllerCAS?: AgentControllerCASV1,
+): AgentApprovalTokenMigrationV3 {
+  const sourceBase = <T extends AgentApprovalTokenMigrationV3['source']>(
+    source: T,
+  ): T => source;
+  if (value === null) {
+    if (
+      call !== undefined &&
+      (call.access === 'conversation_confirm' ||
+        call.access === 'confirm_once') &&
+      (decision === 'pending' ||
+        decision === 'allow_once' ||
+        decision === 'allow_conversation')
+    ) {
+      return {
+        schema_version: 3,
+        source_schema_version: 2,
+        source: sourceBase({
+          schema_version: 2,
+          source_kind: 'approved_opaque_string',
+          approval_token: null,
+        }),
+        status: 'needs_reprepare',
+        approval_token: null,
+        decision: 'cancelled',
+        historical_decision: decision,
+        failure_code: 'E_AGENT_APPROVAL',
+      };
+    }
+    return {
+      schema_version: 3,
+      source_schema_version: 2,
+      source: sourceBase({
+        schema_version: 2,
+        source_kind: 'approved_opaque_string',
+        approval_token: null,
+      }),
+      status: 'preserved',
+      approval_token: null,
+      decision,
+      historical_decision: null,
+      failure_code: null,
+    };
+  }
+  if (typeof value === 'string') {
+    const token = opaqueProviderId(value, '$.approval_token');
+    const source = sourceBase({
+      schema_version: 2,
+      source_kind: 'approved_opaque_string',
+      approval_token: token,
+    });
+    if (
+      decision === 'denied' ||
+      decision === 'cancelled' ||
+      (call !== undefined &&
+        call.access !== 'conversation_confirm' &&
+        call.access !== 'confirm_once')
+    ) {
+      return {
+        schema_version: 3,
+        source_schema_version: 2,
+        source,
+        status: 'cancelled',
+        approval_token: null,
+        decision: decision === 'denied' ? 'denied' : 'cancelled',
+        historical_decision: decision,
+        failure_code: 'E_AGENT_APPROVAL',
+      };
+    }
+    return {
+      schema_version: 3,
+      source_schema_version: 2,
+      source,
+      status: 'preserved',
+      approval_token: token,
+      decision,
+      historical_decision: null,
+      failure_code: null,
+    };
+  }
+  const raw = record(value, '$.approval_token');
+  const schemaDescriptor = Object.getOwnPropertyDescriptor(raw, 'schema_version');
+  if (
+    schemaDescriptor === undefined ||
+    !Object.prototype.hasOwnProperty.call(schemaDescriptor, 'value') ||
+    schemaDescriptor.enumerable !== true
+  ) {
+    return invalid(
+      '$.approval_token.schema_version',
+      'must be an enumerable own data property',
+    );
+  }
+  const schemaVersion = schemaDescriptor.value;
+  if (schemaVersion === 1) {
+    const legacy = parseAgentApprovalToken(value, '$.approval_token');
+    const source = sourceBase({
+      schema_version: 2,
+      source_kind: 'current_object_legacy',
+      approval_token: legacy,
+    });
+    if (
+      expectedControllerCAS !== undefined &&
+      (legacy.controller_cas.schema_version !== expectedControllerCAS.schema_version ||
+        legacy.controller_cas.conversation_id !== expectedControllerCAS.conversation_id ||
+        legacy.controller_cas.task_id !== expectedControllerCAS.task_id ||
+        legacy.controller_cas.attempt_id !== expectedControllerCAS.attempt_id ||
+        legacy.controller_cas.expected_controller_generation !==
+          expectedControllerCAS.expected_controller_generation ||
+        legacy.controller_cas.expected_journal_revision !==
+          expectedControllerCAS.expected_journal_revision ||
+        legacy.controller_cas.expected_session_generation !==
+          expectedControllerCAS.expected_session_generation ||
+        legacy.controller_cas.expected_session_sha256 !==
+          expectedControllerCAS.expected_session_sha256)
+    ) {
+      return invalid(
+        '$.approval_token.controller_cas',
+        'must match the complete containing controller CAS',
+      );
+    }
+    if (
+      call !== undefined &&
+      (legacy.call_id !== call.call_id ||
+        legacy.call_index !== call.call_index ||
+        legacy.name !== call.name ||
+        legacy.access !== call.access ||
+        legacy.arguments_sha256 !== call.arguments_sha256)
+    ) {
+      return {
+        schema_version: 3,
+        source_schema_version: 2,
+        source,
+        status: 'needs_reprepare',
+        approval_token: null,
+        decision: 'cancelled',
+        historical_decision: decision,
+        failure_code: 'E_AGENT_CONFLICT',
+      };
+    }
+    return {
+      schema_version: 3,
+      source_schema_version: 2,
+      source,
+      status:
+        decision === 'denied' || decision === 'cancelled'
+          ? 'cancelled'
+          : 'needs_reprepare',
+      approval_token: null,
+      decision: decision === 'denied' ? 'denied' : 'cancelled',
+      historical_decision: decision,
+      failure_code:
+        decision === 'denied' || decision === 'cancelled'
+          ? 'E_AGENT_APPROVAL'
+          : 'E_AGENT_APPROVAL',
+    };
+  }
+  if (schemaVersion === 2) {
+    const runtime = parseAgentApprovalBindingTokenV2(value, '$.approval_token');
+    const source = sourceBase({
+      schema_version: 2,
+      source_kind: 'runtime_object_v2',
+      approval_token: runtime,
+    });
+    // Runtime V2 is a native-issued authority envelope.  Hydration cannot
+    // prove its native binding, so it is never flattened into a V3 token.
+    // Terminal decisions retain their terminal meaning; live decisions are
+    // made inert and require a fresh native prepare/bind operation.
+    return {
+      schema_version: 3,
+      source_schema_version: 2,
+      source,
+      status: 'needs_reprepare',
+      approval_token: null,
+      decision: decision === 'denied' ? 'denied' : 'cancelled',
+      historical_decision: decision,
+      failure_code: 'E_AGENT_APPROVAL',
+    };
+  }
+  return invalid(
+    '$.approval_token',
+    'must be null, an opaque token, or a supported migration object',
+  );
+}
+
+function parseAgentCallForFinal(
+  value: unknown,
+  path: string,
+): PersistedAgentCallJournalV3 {
+  const raw = exactRecord(value, path, [
+    'schema_version',
+    'call_id',
+    'call_index',
+    'name',
+    'arguments_sha256',
+    'safe_summary_key',
+    'access',
+    'approval_token',
+    'approval_decision',
+    'approval_reference',
+    'idempotency_key',
+    'native_row_revision',
+    'receipt',
+  ]);
+  if (raw.schema_version === AGENT_CALL_JOURNAL_SCHEMA_VERSION_V3) {
+    return parsePersistedAgentCallJournalV3(value, path);
+  }
+  if (raw.schema_version !== AGENT_CALL_JOURNAL_SCHEMA_VERSION) {
+    return invalid(`${path}.schema_version`, 'must equal 2 or 3');
+  }
+  const callStub = {
+    call_id: opaqueProviderId(raw.call_id, `${path}.call_id`),
+    call_index: nonNegativeSafeInteger(raw.call_index, `${path}.call_index`),
+    name: boundedString(raw.name, `${path}.name`, 64),
+    access: raw.access as AgentAccess,
+    arguments_sha256: sha256(raw.arguments_sha256, `${path}.arguments_sha256`),
+  } as const;
+  // A native-issued runtime V2 envelope is authority, not a migration input.
+  // Pure session hydration has no native revalidation capability, so it must
+  // reject the object instead of flattening `runtime.token` into V3 storage.
+  if (
+    typeof raw.approval_token === 'object' &&
+    raw.approval_token !== null &&
+    !Array.isArray(raw.approval_token)
+  ) {
+    const tokenSchemaDescriptor = Object.getOwnPropertyDescriptor(
+      raw.approval_token,
+      'schema_version',
+    );
+    if (
+      tokenSchemaDescriptor === undefined ||
+      !Object.prototype.hasOwnProperty.call(tokenSchemaDescriptor, 'value') ||
+      tokenSchemaDescriptor.enumerable !== true
+    ) {
+      return invalid(
+        `${path}.approval_token`,
+        'approval bindings must be plain data records',
+      );
+    }
+    if (tokenSchemaDescriptor.value === 2) {
+      return invalid(
+        `${path}.approval_token`,
+        'runtime approval bindings require native revalidation before hydration',
+      );
+    }
+  }
+  const decision = raw.approval_decision;
+  if (!agentApprovalDecisions.has(decision as string)) {
+    return invalid(
+      `${path}.approval_decision`,
+      'must be a supported approval decision',
+    );
+  }
+  const migration = migrateAgentApprovalTokenV3(
+    raw.approval_token,
+    decision as AgentApprovalDecision,
+    callStub,
+  );
+  const migrated = {
+    ...raw,
+    schema_version: AGENT_CALL_JOURNAL_SCHEMA_VERSION_V3,
+    approval_token: migration.approval_token,
+    approval_decision: migration.decision,
+  };
+  // `exactRecord` above already established the source key set.  The final
+  // parser performs all field, policy, receipt, and terminal-authority checks.
+  return parsePersistedAgentCallJournalV3(migrated, path);
+}
+
+/** Parses final V3 journals and atomically classifies early schema-9 journals. */
+export function parsePersistedAgentAttemptJournalV3(
+  value: unknown,
+  path = '$',
+  expectedIdentity?: {
+    readonly taskId: string;
+    readonly attemptId: string;
+    readonly controllerCAS?: AgentControllerCASV1;
+  },
+): PersistedAgentAttemptJournalV3 {
+  const raw = exactRecord(value, path, [
+    'schema_version',
+    'phase',
+    'controller_generation',
+    'policy',
+    'root',
+    'tool_registry_version',
+    'toolset_sha256',
+    'transcript',
+    'round_index',
+    'round_lineage',
+    'call_index',
+    'batch',
+    'frozen_grant_ids',
+    'reserved_write_bytes',
+    'updated_at',
+  ]);
+  if (
+    raw.schema_version !== AGENT_ATTEMPT_JOURNAL_SCHEMA_VERSION &&
+    raw.schema_version !== AGENT_ATTEMPT_JOURNAL_SCHEMA_VERSION_V3
+  ) {
+    return invalid(`${path}.schema_version`, 'must equal 2 or 3');
+  }
+  if (typeof raw.phase !== 'string' || !agentPhases.has(raw.phase)) {
+    return invalid(`${path}.phase`, 'must be a supported Agent phase');
+  }
+  const controllerGeneration = nonNegativeSafeInteger(
+    raw.controller_generation,
+    `${path}.controller_generation`,
+  );
+  if (controllerGeneration >= Number.MAX_SAFE_INTEGER) {
+    return invalid(
+      `${path}.controller_generation`,
+      'must leave room for the next transition',
+    );
+  }
+  const policy = parseAgentPolicy(raw.policy, `${path}.policy`);
+  const root = parseAgentRoot(raw.root, `${path}.root`);
+  if (raw.tool_registry_version !== 1) {
+    return invalid(`${path}.tool_registry_version`, 'must equal 1');
+  }
+  const toolsetSha256 = sha256(raw.toolset_sha256, `${path}.toolset_sha256`);
+  const transcript = parseTranscriptReference(
+    raw.transcript,
+    `${path}.transcript`,
+  );
+  const roundIndex = nonNegativeSafeInteger(
+    raw.round_index,
+    `${path}.round_index`,
+  );
+  if (roundIndex >= MAX_AGENT_ROUNDS) {
+    return invalid(`${path}.round_index`, 'must be less than 8');
+  }
+  const lineage =
+    raw.round_lineage === null
+      ? null
+      : (() => {
+          const line = exactRecord(raw.round_lineage, `${path}.round_lineage`, [
+            'schema_version',
+            'round_id',
+            'round_index',
+            'launch_attempt',
+            'status',
+            'native_row_revision',
+          ]);
+          if (line.schema_version !== AGENT_ROUND_LINEAGE_SCHEMA_VERSION) {
+            return invalid(
+              `${path}.round_lineage.schema_version`,
+              'must equal 2',
+            );
+          }
+          const lineRoundIndex = nonNegativeSafeInteger(
+            line.round_index,
+            `${path}.round_lineage.round_index`,
+          );
+          if (
+            lineRoundIndex !== roundIndex ||
+            lineRoundIndex >= MAX_AGENT_ROUNDS
+          ) {
+            return invalid(
+              `${path}.round_lineage.round_index`,
+              'must match the journal round',
+            );
+          }
+          const launchAttempt = nonNegativeSafeInteger(
+            line.launch_attempt,
+            `${path}.round_lineage.launch_attempt`,
+          );
+          if (launchAttempt < 1 || launchAttempt > MAX_AGENT_ROUNDS) {
+            return invalid(
+              `${path}.round_lineage.launch_attempt`,
+              'must be between 1 and 8',
+            );
+          }
+          if (!agentLineageStatuses.has(line.status as string)) {
+            return invalid(
+              `${path}.round_lineage.status`,
+              'must be a supported lineage status',
+            );
+          }
+          const nativeRowRevision =
+            line.native_row_revision === null
+              ? null
+              : (() => {
+                  const revision = nonNegativeSafeInteger(
+                    line.native_row_revision,
+                    `${path}.round_lineage.native_row_revision`,
+                  );
+                  return revision < 1
+                    ? invalid(
+                        `${path}.round_lineage.native_row_revision`,
+                        'must be positive',
+                      )
+                    : revision;
+                })();
+          return {
+            schema_version: AGENT_ROUND_LINEAGE_SCHEMA_VERSION,
+            round_id: canonicalLifecycleId(
+              line.round_id,
+              `${path}.round_lineage.round_id`,
+            ),
+            round_index: lineRoundIndex,
+            launch_attempt: launchAttempt,
+            status: line.status as PersistedAgentRoundLineageV2['status'],
+            native_row_revision: nativeRowRevision,
+          };
+        })();
+  const callIndex =
+    raw.call_index === null
+      ? null
+      : nonNegativeSafeInteger(raw.call_index, `${path}.call_index`);
+  const batchRaw = array(raw.batch, `${path}.batch`, MAX_AGENT_CALLS_PER_BATCH);
+  const batch = batchRaw.map((entry, index) =>
+    parseAgentCallForFinal(entry, `${path}.batch[${index}]`),
+  );
+  batchRaw.forEach((entry, index) => {
+    if (
+      typeof entry !== 'object' ||
+      entry === null ||
+      Array.isArray(entry)
+    ) return;
+    const approvalTokenDescriptor = Object.getOwnPropertyDescriptor(
+      entry,
+      'approval_token',
+    );
+    const approvalToken = approvalTokenDescriptor !== undefined &&
+      Object.prototype.hasOwnProperty.call(approvalTokenDescriptor, 'value')
+      ? approvalTokenDescriptor.value
+      : undefined;
+    if (
+      typeof approvalToken !== 'object' ||
+      approvalToken === null ||
+      Array.isArray(approvalToken) ||
+      Object.getOwnPropertyDescriptor(approvalToken, 'schema_version')?.value !== 1
+    ) return;
+    const token = parseAgentApprovalToken(
+      approvalToken,
+      `${path}.batch[${index}].approval_token`,
+    );
+    const call = batch[index];
+    if (call === undefined) {
+      return invalid(
+        `${path}.batch[${index}].approval_token`,
+        'must reference a containing call',
+      );
+    }
+    validateLegacyApprovalTokenRelations(
+      token,
+      call,
+      batch,
+      lineage,
+      roundIndex,
+      root,
+      policy,
+      controllerGeneration,
+      `${path}.batch[${index}]`,
+      expectedIdentity,
+      expectedIdentity?.controllerCAS,
+    );
+  });
+  const runtimeTokens = batchRaw.map((entry, index) => {
+    if (typeof entry !== 'object' || entry === null || Array.isArray(entry)) {
+      return null;
+    }
+    const tokenValue = (entry as Record<string, unknown>).approval_token;
+    if (
+      typeof tokenValue !== 'object' ||
+      tokenValue === null ||
+      Array.isArray(tokenValue) ||
+      (tokenValue as Record<string, unknown>).schema_version !== 2
+    ) {
+      return null;
+    }
+    return parseAgentApprovalBindingTokenV2(
+      tokenValue,
+      `${path}.batch[${index}].approval_token`,
+    );
+  });
+  const callIds = new Set<string>();
+  batch.forEach((call, index) => {
+    if (call.call_index !== index) {
+      invalid(`${path}.batch[${index}].call_index`, 'must be contiguous');
+    }
+    if (callIds.has(call.call_id)) {
+      invalid(
+        `${path}.batch[${index}].call_id`,
+        'must be unique within the batch',
+      );
+    }
+    callIds.add(call.call_id);
+  });
+  runtimeTokens.forEach((token, index) => {
+    if (token === null) return;
+    const call = batch[index];
+    if (
+      call === undefined ||
+      lineage === null ||
+      token.round_id !== lineage.round_id ||
+      token.round_index !== roundIndex ||
+      token.root_fingerprint_sha256 !== root.root_fingerprint_sha256 ||
+      token.binding_revision !== root.workspace_binding_revision ||
+      token.policy_version !== policy.policy_version ||
+      token.registry_version !== 1 ||
+      token.batch_call_ids.length !== batch.length ||
+      token.batch_arguments_sha256.length !== batch.length ||
+      token.batch_call_ids.some(
+        (callId, batchIndex) => callId !== batch[batchIndex]?.call_id,
+      ) ||
+      token.batch_arguments_sha256.some(
+        (digest, batchIndex) => digest !== batch[batchIndex]?.arguments_sha256,
+      ) ||
+      !sameApprovalTokenCall(token, call)
+    ) {
+      invalid(
+        `${path}.batch[${index}].approval_token`,
+        'runtime approval binding must match the complete containing batch',
+      );
+    }
+  });
+  if (callIndex !== null && callIndex >= batch.length) {
+    return invalid(`${path}.call_index`, 'must reference a batch call');
+  }
+  const frozenGrantIds = uniqueStringArray(
+    raw.frozen_grant_ids,
+    `${path}.frozen_grant_ids`,
+    MAX_AGENT_GRANTS_PER_CONVERSATION,
+    true,
+  );
+  const reservedWriteBytes = nonNegativeSafeInteger(
+    raw.reserved_write_bytes,
+    `${path}.reserved_write_bytes`,
+  );
+  if (reservedWriteBytes > policy.max_attempt_write_bytes) {
+    return invalid(
+      `${path}.reserved_write_bytes`,
+      'exceeds the attempt write budget',
+    );
+  }
+  const migratedStaleCall =
+    raw.schema_version === AGENT_ATTEMPT_JOURNAL_SCHEMA_VERSION &&
+    batch.some((call, index) => {
+      const source = batchRaw[index];
+      if (
+        typeof source !== 'object' ||
+        source === null ||
+        Array.isArray(source)
+      ) {
+        return false;
+      }
+      const sourceRecord = source as Record<string, unknown>;
+      const sourceDecision = sourceRecord.approval_decision;
+      const sourceAccess = sourceRecord.access;
+      return (
+        (sourceAccess === 'conversation_confirm' ||
+          sourceAccess === 'confirm_once') &&
+        (sourceDecision === 'pending' ||
+          sourceDecision === 'allow_once' ||
+          sourceDecision === 'allow_conversation') &&
+        call.approval_decision === 'cancelled'
+      );
+    });
+  // A legacy live approval is made inert at the call boundary only.  Hydration
+  // must not invent a cancelled outer journal phase or mutate its native
+  // round lineage; the controller will explicitly reprepare the attempt.
+  const sourcePhase = raw.phase as PersistedAgentAttemptJournalV3['phase'];
+  const effectiveLineage = lineage;
+  const effectiveCallIndex = callIndex;
+  const effectiveBatch = batch;
+  const allMigratedCallsInert =
+    effectiveBatch.length > 0 &&
+    effectiveBatch.every(
+      call =>
+        call.approval_decision === 'denied' ||
+        call.approval_decision === 'cancelled',
+    );
+  // A legacy live approval is converted to a cancelled call with no token.
+  // If that conversion consumes the whole batch, retaining the outer
+  // `approval_pending` phase would create an impossible V3 journal that can
+  // never round-trip.  Promote only this fully inert migration result to the
+  // terminal cancelled phase; mixed batches retain approval_pending because a
+  // surviving pending call still explains that phase.
+  const phase =
+    raw.schema_version === AGENT_ATTEMPT_JOURNAL_SCHEMA_VERSION &&
+    sourcePhase === 'approval_pending' &&
+    migratedStaleCall &&
+    allMigratedCallsInert
+      ? 'cancelled'
+      : sourcePhase;
+  if (!isAgentPhaseLineageValid(phase, effectiveLineage?.status ?? null)) {
+    return invalid(
+      `${path}.phase`,
+      'does not match the closed phase-lineage matrix',
+    );
+  }
+  if (
+    phase === 'approval_pending' &&
+    !effectiveBatch.some(
+      call =>
+        call.access !== 'auto' &&
+        call.access !== 'durable_deny' &&
+        call.approval_decision === 'pending',
+    ) &&
+    !migratedStaleCall
+  ) {
+    return invalid(
+      `${path}.phase`,
+      'approval_pending requires a pending gated call',
+    );
+  }
+  if (phase === 'execution_intent') {
+    const call =
+      effectiveCallIndex === null
+        ? undefined
+        : effectiveBatch[effectiveCallIndex];
+    if (
+      call === undefined ||
+      call.idempotency_key === null ||
+      (call.access !== 'auto' &&
+        call.approval_decision !== 'allow_once' &&
+        call.approval_decision !== 'allow_conversation')
+    ) {
+      return invalid(
+        `${path}.phase`,
+        'execution_intent requires an approved call and idempotency key',
+      );
+    }
+  }
+  if (phase === 'tool_result_pending') {
+    const call =
+      effectiveCallIndex === null
+        ? undefined
+        : effectiveBatch[effectiveCallIndex];
+    if (
+      call === undefined ||
+      call.receipt === null ||
+      (call.receipt.outcome !== 'ok' &&
+        call.receipt.outcome !== 'failed' &&
+        call.receipt.outcome !== 'denied')
+    ) {
+      return invalid(
+        `${path}.phase`,
+        'tool_result_pending requires a settled receipt',
+      );
+    }
+  }
+  if (
+    phase === 'final_response' &&
+    (effectiveCallIndex !== null || effectiveBatch.length !== 0)
+  ) {
+    return invalid(
+      `${path}.phase`,
+      'final response cannot retain a call batch',
+    );
+  }
+  if (
+    phase === 'cancelled' &&
+    effectiveBatch.some(
+      call =>
+        call.receipt === null &&
+        call.approval_decision !== 'denied' &&
+        call.approval_decision !== 'cancelled',
+    )
+  ) {
+    return invalid(
+      `${path}.phase`,
+      'cancelled requires all unsettled calls to be inert',
+    );
+  }
+  return {
+    schema_version: AGENT_ATTEMPT_JOURNAL_SCHEMA_VERSION_V3,
+    phase,
+    controller_generation: controllerGeneration,
+    policy,
+    root,
+    tool_registry_version: 1,
+    toolset_sha256: toolsetSha256,
+    transcript,
+    round_index: roundIndex,
+    round_lineage: effectiveLineage,
+    call_index: effectiveCallIndex,
+    batch: effectiveBatch,
+    frozen_grant_ids: frozenGrantIds,
+    reserved_write_bytes: reservedWriteBytes,
+    updated_at: timestamp(raw.updated_at, `${path}.updated_at`),
+  };
+}
+
+function parseAgentGrant(
+  value: unknown,
+  path: string,
+): AgentConversationGrantV2 {
+  const raw = exactRecord(value, path, [
+    'schema_version',
+    'grant_id',
+    'conversation_id',
+    'workspace_id',
+    'project_id',
+    'binding_revision',
+    'root_fingerprint_sha256',
+    'tool_family',
+    'registry_version',
+    'policy_version',
+    'issued_for',
+    'created_at',
+  ]);
+  if (raw.schema_version !== AGENT_GRANT_SCHEMA_VERSION)
+    return invalid(`${path}.schema_version`, 'must equal 2');
+  if (raw.tool_family !== 'file_write' && raw.tool_family !== 'git_commit')
+    return invalid(`${path}.tool_family`, 'must be file_write or git_commit');
+  if (raw.registry_version !== 1)
+    return invalid(`${path}.registry_version`, 'must equal 1');
+  const projectId =
+    raw.project_id === null
+      ? null
+      : canonicalLifecycleId(raw.project_id, `${path}.project_id`);
+  if (raw.tool_family === 'git_commit' && projectId === null)
+    return invalid(`${path}.project_id`, 'Git grants require a project');
+  const issued = exactRecord(raw.issued_for, `${path}.issued_for`, [
+    'schema_version',
+    'task_id',
+    'attempt_id',
+  ]);
+  if (issued.schema_version !== 1)
+    return invalid(`${path}.issued_for.schema_version`, 'must equal 1');
+  return {
+    schema_version: AGENT_GRANT_SCHEMA_VERSION,
+    grant_id: canonicalLifecycleId(raw.grant_id, `${path}.grant_id`),
+    conversation_id: boundedIdentifier(
+      raw.conversation_id,
+      `${path}.conversation_id`,
+      MAX_ID_LENGTH,
+    ),
+    workspace_id: canonicalLifecycleId(
+      raw.workspace_id,
+      `${path}.workspace_id`,
+    ),
+    project_id: projectId,
+    binding_revision: (() => {
+      const revision = lifecycleEpoch(
+        raw.binding_revision,
+        `${path}.binding_revision`,
+        false,
+      );
+      return revision >= Number.MAX_SAFE_INTEGER
+        ? invalid(
+            `${path}.binding_revision`,
+            'must be less than Number.MAX_SAFE_INTEGER',
+          )
+        : revision;
+    })(),
+    root_fingerprint_sha256: sha256(
+      raw.root_fingerprint_sha256,
+      `${path}.root_fingerprint_sha256`,
+    ),
+    tool_family: raw.tool_family,
+    registry_version: 1,
+    policy_version: boundedIdentifier(
+      raw.policy_version,
+      `${path}.policy_version`,
+      256,
+    ),
+    issued_for: {
+      schema_version: 1,
+      task_id: canonicalLifecycleId(
+        issued.task_id,
+        `${path}.issued_for.task_id`,
+      ),
+      attempt_id: canonicalLifecycleId(
+        issued.attempt_id,
+        `${path}.issued_for.attempt_id`,
+      ),
+    },
+    created_at: timestamp(raw.created_at, `${path}.created_at`),
+  };
+}
+
+function parseCleanupEntry(
+  value: unknown,
+  path: string,
+): AgentTranscriptCleanupV1 {
+  const raw = exactRecord(value, path, [
+    'schema_version',
+    'cleanup_id',
+    'conversation_id',
+    'task_id',
+    'attempt_id',
+    'transcript_ref',
+    'transcript_sha256',
+    'reason',
+    'created_at',
+  ]);
+  if (raw.schema_version !== AGENT_CLEANUP_SCHEMA_VERSION)
+    return invalid(`${path}.schema_version`, 'must equal 1');
+  if (
+    raw.reason !== 'completed' &&
+    raw.reason !== 'cancelled' &&
+    raw.reason !== 'failed' &&
+    raw.reason !== 'conversation_deleted'
+  )
+    return invalid(`${path}.reason`, 'must be a supported cleanup reason');
+  return {
+    schema_version: AGENT_CLEANUP_SCHEMA_VERSION,
+    cleanup_id: canonicalLifecycleId(raw.cleanup_id, `${path}.cleanup_id`),
+    conversation_id: boundedIdentifier(
+      raw.conversation_id,
+      `${path}.conversation_id`,
+      MAX_ID_LENGTH,
+    ),
+    task_id: canonicalLifecycleId(raw.task_id, `${path}.task_id`),
+    attempt_id: canonicalLifecycleId(raw.attempt_id, `${path}.attempt_id`),
+    transcript_ref: canonicalLifecycleId(
+      raw.transcript_ref,
+      `${path}.transcript_ref`,
+    ),
+    transcript_sha256: sha256(
+      raw.transcript_sha256,
+      `${path}.transcript_sha256`,
+    ),
+    reason: raw.reason,
+    created_at: timestamp(raw.created_at, `${path}.created_at`),
+  };
+}
+
+function parseSessionEvent(
+  value: unknown,
+  path: string,
+): PersistedSessionEventV3 {
+  const raw = exactRecord(value, path, [
+    'schema_version',
+    'event_id',
+    'attempt_id',
+    'seq',
+    'kind',
+    'round_index',
+    'call_id',
+    'status',
+    'safe_summary_key',
+    'arguments_sha256',
+    'result_sha256',
+    'approval_reference',
+    'failure_code',
+    'created_at',
+  ]);
+  if (raw.schema_version !== SESSION_EVENT_V2_SCHEMA_VERSION)
+    return invalid(`${path}.schema_version`, 'must equal 2');
+  if (typeof raw.kind !== 'string' || !sessionEventKinds.has(raw.kind))
+    return invalid(`${path}.kind`, 'must be a supported event kind');
+  const eventId = canonicalLifecycleId(raw.event_id, `${path}.event_id`);
+  const attemptId = canonicalLifecycleId(raw.attempt_id, `${path}.attempt_id`);
+  const seq = nonNegativeSafeInteger(raw.seq, `${path}.seq`);
+  if (typeof raw.status !== 'string' || !sessionEventStatuses.has(raw.status))
+    return invalid(`${path}.status`, 'must be a supported event status');
+  const roundIndex =
+    raw.round_index === null
+      ? null
+      : nonNegativeSafeInteger(raw.round_index, `${path}.round_index`);
+  if (roundIndex !== null && roundIndex >= MAX_AGENT_ROUNDS)
+    return invalid(`${path}.round_index`, 'must be less than 8');
+  const callId =
+    raw.call_id === null
+      ? null
+      : opaqueProviderId(raw.call_id, `${path}.call_id`);
+  const safeSummaryKey =
+    raw.safe_summary_key === null
+      ? null
+      : boundedString(
+          raw.safe_summary_key,
+          `${path}.safe_summary_key`,
+          MAX_AGENT_SUMMARY_KEY_LENGTH,
+        );
+  if (safeSummaryKey !== null && !safeSummaryKeys.has(safeSummaryKey))
+    return invalid(
+      `${path}.safe_summary_key`,
+      'must be a registered summary key',
+    );
+  const argumentsSha =
+    raw.arguments_sha256 === null
+      ? null
+      : sha256(raw.arguments_sha256, `${path}.arguments_sha256`);
+  const resultSha =
+    raw.result_sha256 === null
+      ? null
+      : sha256(raw.result_sha256, `${path}.result_sha256`);
+  const approvalReference =
+    raw.approval_reference === null
+      ? null
+      : boundedIdentifier(
+          raw.approval_reference,
+          `${path}.approval_reference`,
+          MAX_ID_LENGTH,
+        );
+  if (raw.kind === 'cancel') {
+    if (
+      raw.status !== 'cancelled' ||
+      safeSummaryKey !== null ||
+      resultSha !== null ||
+      approvalReference !== eventId ||
+      (raw.failure_code !== 'E_AGENT_CANCELLED' &&
+        raw.failure_code !== 'E_AGENT_ROOT_STALE' &&
+        raw.failure_code !== 'E_AGENT_PERSISTENCE')
+    ) {
+      return invalid(
+        path,
+        'cancel events must carry the exact cancellation envelope',
+      );
+    }
+    const attemptCancel =
+      roundIndex === null && callId === null && argumentsSha === null;
+    const roundCancel =
+      roundIndex !== null && callId === null && argumentsSha === null;
+    const callCancel =
+      roundIndex !== null && callId !== null && argumentsSha !== null;
+    if (!attemptCancel && !roundCancel && !callCancel) {
+      return invalid(path, 'cancel target coordinates are invalid');
+    }
+    return {
+      schema_version: SESSION_EVENT_V2_SCHEMA_VERSION,
+      event_id: eventId,
+      attempt_id: attemptId,
+      seq,
+      kind: 'cancel',
+      round_index: roundIndex,
+      call_id: callId,
+      status: 'cancelled',
+      safe_summary_key: null,
+      arguments_sha256: argumentsSha,
+      result_sha256: null,
+      approval_reference: approvalReference as string,
+      failure_code: raw.failure_code,
+      created_at: timestamp(raw.created_at, `${path}.created_at`),
+    } as AgentCancelEventV2;
+  }
+  return {
+    schema_version: SESSION_EVENT_V2_SCHEMA_VERSION,
+    event_id: eventId,
+    attempt_id: attemptId,
+    seq,
+    kind: raw.kind as SessionEventV2['kind'],
+    round_index: roundIndex,
+    call_id: callId,
+    status: raw.status as SessionEventV2['status'],
+    safe_summary_key: safeSummaryKey,
+    arguments_sha256: argumentsSha,
+    result_sha256: resultSha,
+    approval_reference: approvalReference,
+    failure_code: agentFailureCode(raw.failure_code, `${path}.failure_code`),
+    created_at: timestamp(raw.created_at, `${path}.created_at`),
+  };
+}
+
+function validateSessionEventCorrelations(
+  events: readonly PersistedSessionEventV3[],
+  conversations: Readonly<Record<string, Conversation>>,
+): void {
+  const eventCalls = new Map<
+    string,
+    {
+      readonly attemptId: string;
+      readonly roundIndex: number | null;
+      readonly name?: string;
+      readonly safeSummaryKey?: string;
+      readonly argumentsSha256?: string;
+      readonly approvalReference?: string | null;
+      readonly resultSha256?: string;
+      readonly failureCode?: AgentFailureCode | null;
+    }
+  >();
+  const attempts = new Map<string, TurnAttemptV1>();
+  Object.values(conversations).forEach(conversation => {
+    conversation.attempts.forEach(attempt =>
+      attempts.set(attempt.attemptId, attempt),
+    );
+  });
+  events.forEach((event, index) => {
+    const path = `$.session_events[${index}]`;
+    const attempt = attempts.get(event.attempt_id);
+    if (attempt === undefined) {
+      invalid(`${path}.attempt_id`, 'must reference an existing attempt');
+    }
+    if (event.kind === 'cancel') {
+      // Cancellation is a source-authority event, not a settled receipt.  Its
+      // exact coordinates and event-id reference were checked by parseSessionEvent.
+      if (
+        event.approval_reference !== event.event_id ||
+        event.status !== 'cancelled'
+      ) {
+        invalid(path, 'cancel events must retain their source event authority');
+      }
+      if (event.round_index !== null) {
+        const roundKnown =
+          event.round_index < (attempt?.rounds.length ?? 0) ||
+          event.round_index === attempt?.agent?.round_index;
+        if (!roundKnown) {
+          invalid(
+            `${path}.round_index`,
+            'must reference a known attempt round',
+          );
+        }
+        if (event.call_id !== null) {
+          const call = attempt?.agent?.batch.find(
+            candidate => candidate.call_id === event.call_id,
+          );
+          if (
+            call === undefined ||
+            call.arguments_sha256 !== event.arguments_sha256
+          ) {
+            invalid(
+              `${path}.call_id`,
+              'must reference the matching journal call',
+            );
+          }
+        }
+      }
+      return;
+    }
+    const journalCall = attempt?.agent?.batch.find(
+      call => call.call_id === event.call_id,
+    );
+    const eventCallKey =
+      event.call_id === null ? null : `${event.attempt_id}\0${event.call_id}`;
+    const previous =
+      eventCallKey === null ? undefined : eventCalls.get(eventCallKey);
+    if (
+      event.round_index !== null &&
+      event.round_index >= (attempt?.rounds.length ?? 0) &&
+      event.round_index !== attempt?.agent?.round_index
+    ) {
+      invalid(`${path}.round_index`, 'must reference a known attempt round');
+    }
+    if (event.kind === 'round') {
+      if (
+        event.call_id !== null ||
+        event.arguments_sha256 !== null ||
+        event.result_sha256 !== null ||
+        event.approval_reference !== null ||
+        event.safe_summary_key !== null
+      )
+        invalid(path, 'round events cannot carry call fields');
+      return;
+    }
+    if (event.kind === 'terminal') {
+      const expectedTerminalStatus =
+        attempt?.agent?.phase === 'final_response'
+          ? 'ok'
+          : attempt?.agent?.phase === 'cancelled'
+          ? 'cancelled'
+          : attempt?.agent?.phase === 'failed'
+          ? 'failed'
+          : attempt?.agent?.phase === 'unknown'
+          ? 'unknown'
+          : attempt?.agent?.phase === 'ambiguous'
+          ? 'ambiguous'
+          : null;
+      if (
+        event.call_id !== null ||
+        event.arguments_sha256 !== null ||
+        event.result_sha256 !== null ||
+        event.approval_reference !== null ||
+        event.safe_summary_key !== null
+      )
+        invalid(path, 'terminal events cannot carry call fields');
+      if (
+        expectedTerminalStatus !== null &&
+        event.status !== expectedTerminalStatus
+      )
+        invalid(`${path}.status`, 'must match the terminal journal phase');
+      return;
+    }
+    if (event.call_id === null) {
+      invalid(`${path}.call_id`, 'call events require a call id');
+    }
+    const historicalEvent =
+      journalCall === undefined &&
+      previous === undefined &&
+      event.round_index !== null &&
+      attempt?.agent?.schema_version === 3 &&
+      event.round_index < attempt.agent.round_index &&
+      attempt.rounds.some(round => round.roundIndex === event.round_index);
+    if (journalCall === undefined && previous === undefined && !historicalEvent) {
+      invalid(`${path}.call_id`, 'must reference a journal call');
+    }
+    if (
+      journalCall !== undefined &&
+      event.round_index !== attempt?.agent?.round_index
+    ) {
+      invalid(`${path}.round_index`, 'must match the journal round');
+    }
+    if (previous !== undefined && previous.roundIndex !== event.round_index) {
+      invalid(`${path}.round_index`, 'must match the previous call event');
+    }
+    const knownArguments =
+      journalCall?.arguments_sha256 ?? previous?.argumentsSha256;
+    const knownSummary =
+      journalCall?.safe_summary_key ?? previous?.safeSummaryKey;
+    const knownApproval =
+      journalCall !== undefined
+        ? journalCall.approval_reference
+        : previous?.approvalReference;
+    if (
+      event.arguments_sha256 !== null &&
+      knownArguments !== undefined &&
+      event.arguments_sha256 !== knownArguments
+    )
+      invalid(`${path}.arguments_sha256`, 'must match the journal call');
+    if (
+      event.safe_summary_key !== null &&
+      knownSummary !== undefined &&
+      event.safe_summary_key !== knownSummary
+    )
+      invalid(`${path}.safe_summary_key`, 'must match the journal call');
+    if (
+      journalCall !== undefined &&
+      event.kind !== 'tool_call' &&
+      !(event.kind === 'approval' && event.approval_reference === null) &&
+      event.approval_reference !== knownApproval
+    )
+      invalid(`${path}.approval_reference`, 'must match the journal call');
+    if (
+      journalCall === undefined &&
+      previous !== undefined &&
+      event.kind !== 'tool_call' &&
+      event.approval_reference !== knownApproval
+    ) {
+      invalid(
+        `${path}.approval_reference`,
+        'must match the previous call event',
+      );
+    }
+    if (event.kind === 'tool_call') {
+      if (
+        event.arguments_sha256 === null ||
+        event.safe_summary_key === null ||
+        event.result_sha256 !== null ||
+        event.approval_reference !== null ||
+        (event.status !== 'waiting' &&
+          event.status !== 'approval' &&
+          event.status !== 'running')
+      )
+        invalid(
+          path,
+          'tool_call events must carry only call presentation fields',
+        );
+      eventCalls.set(eventCallKey!, {
+        ...(previous ?? {
+          attemptId: event.attempt_id,
+          roundIndex: event.round_index,
+        }),
+        name: journalCall?.name ?? previous?.name,
+        safeSummaryKey: event.safe_summary_key,
+        argumentsSha256: event.arguments_sha256,
+        // The event itself remains presentation-only/null; do not erase the
+        // approval authority already established for this call.
+        approvalReference:
+          previous?.approvalReference ??
+          journalCall?.approval_reference ??
+          null,
+      });
+      return;
+    }
+    if (event.kind === 'approval') {
+      if (
+        event.arguments_sha256 === null ||
+        event.safe_summary_key === null ||
+        event.status !== 'approval'
+      )
+        invalid(path, 'approval events must carry the call presentation');
+      const priorCall = eventCalls.get(eventCallKey!);
+      eventCalls.set(eventCallKey!, {
+        ...(priorCall ?? {
+          attemptId: event.attempt_id,
+          roundIndex: event.round_index,
+        }),
+        safeSummaryKey: event.safe_summary_key,
+        argumentsSha256: event.arguments_sha256,
+        approvalReference: event.approval_reference,
+      });
+      return;
+    }
+    const unknownWithoutReceipt =
+      event.status === 'unknown' &&
+      event.result_sha256 === null &&
+      event.failure_code === 'E_AGENT_CONFLICT' &&
+      attempt?.agent?.phase === 'unknown' &&
+      attempt.agent.round_lineage?.status === 'unknown' &&
+      journalCall !== undefined &&
+      journalCall.native_row_revision !== null;
+    if (
+      event.arguments_sha256 === null ||
+      event.safe_summary_key === null ||
+      (!unknownWithoutReceipt && event.result_sha256 === null) ||
+      (event.status !== 'ok' &&
+        event.status !== 'failed' &&
+        event.status !== 'denied' &&
+        event.status !== 'cancelled' &&
+        event.status !== 'unknown' &&
+        event.status !== 'ambiguous')
+    )
+      invalid(path, 'tool_result events must carry a settled call result');
+    const receipt = journalCall?.receipt;
+    if (
+      journalCall !== undefined &&
+      receipt === null &&
+      !unknownWithoutReceipt
+    ) {
+      invalid(`${path}.call_id`, 'tool_result requires a journal receipt');
+    }
+    if (receipt !== undefined && receipt !== null) {
+      const expectedStatus = receipt.outcome;
+      if (event.status !== expectedStatus) {
+        invalid(`${path}.status`, 'must match the journal receipt outcome');
+      }
+      if (
+        event.result_sha256 !== receipt.result_sha256 ||
+        event.arguments_sha256 !== receipt.arguments_sha256 ||
+        event.approval_reference !== receipt.approval_reference ||
+        event.failure_code !== receipt.failure_code
+      )
+        invalid(path, 'must match the journal receipt');
+    }
+    const priorCall = eventCalls.get(eventCallKey!);
+    if (
+      receipt === undefined &&
+      priorCall?.resultSha256 !== undefined &&
+      (priorCall.resultSha256 !== event.result_sha256 ||
+        priorCall.failureCode !== event.failure_code)
+    ) {
+      invalid(path, 'must match the previous call receipt');
+    }
+    eventCalls.set(eventCallKey!, {
+      ...(priorCall ?? {
+        attemptId: event.attempt_id,
+        roundIndex: event.round_index,
+      }),
+      argumentsSha256: event.arguments_sha256,
+      ...(event.result_sha256 === null
+        ? {}
+        : { resultSha256: event.result_sha256 }),
+      approvalReference: event.approval_reference,
+      failureCode: event.failure_code,
+    });
+  });
 }
 
 function parseTurn(value: unknown, path: string): ConversationTurnV1 {
@@ -1382,7 +3780,10 @@ function parseAttempt(
   value: unknown,
   path: string,
   schemaVersion: PersistedSchemaVersion,
+  conversationId: string,
+  hydrationOptions?: NormalizedChatHydrationOptions,
 ): TurnAttemptV1 {
+  const agentSchema = hasAgentSchema(schemaVersion);
   const attemptKeys = [
     'schema_version',
     'attempt_id',
@@ -1405,15 +3806,25 @@ function parseAttempt(
     'failure_code',
     'created_at',
     'updated_at',
+    ...(agentSchema ? ['journal_revision', 'agent'] : []),
   ] as const;
   const raw = exactRecord(value, path, attemptKeys);
-  if (raw.schema_version !== TURN_ATTEMPT_SCHEMA_VERSION) {
-    return invalid(`${path}.schema_version`, 'must equal 1');
-  }
   if (
-    typeof raw.status !== 'string' ||
-    !attemptStatuses.has(raw.status)
+    agentSchema
+      ? raw.schema_version !== PERSISTED_TURN_ATTEMPT_SCHEMA_VERSION &&
+        raw.schema_version !== PERSISTED_TURN_ATTEMPT_SCHEMA_VERSION_V3
+      : raw.schema_version !== TURN_ATTEMPT_SCHEMA_VERSION
   ) {
+    return invalid(
+      `${path}.schema_version`,
+      `must equal ${
+        agentSchema
+          ? `${PERSISTED_TURN_ATTEMPT_SCHEMA_VERSION} or ${PERSISTED_TURN_ATTEMPT_SCHEMA_VERSION_V3}`
+          : TURN_ATTEMPT_SCHEMA_VERSION
+      }`,
+    );
+  }
+  if (typeof raw.status !== 'string' || !attemptStatuses.has(raw.status)) {
     return invalid(`${path}.status`, 'must be a supported attempt status');
   }
   if (!isModelId(raw.model_id)) {
@@ -1431,11 +3842,7 @@ function parseAttempt(
       'must be a supported context disposition',
     );
   }
-  const roundsRaw = array(
-    raw.rounds,
-    `${path}.rounds`,
-    MAX_COMPLETION_ROUNDS,
-  );
+  const roundsRaw = array(raw.rounds, `${path}.rounds`, MAX_COMPLETION_ROUNDS);
   if (roundsRaw.length > MAX_COMPLETION_ROUNDS) {
     return invalid(`${path}.rounds`, 'must contain no more than 8 rounds');
   }
@@ -1472,8 +3879,8 @@ function parseAttempt(
     raw.failure_code === null
       ? null
       : isAttemptFailureCode(raw.failure_code)
-        ? raw.failure_code
-        : invalid(`${path}.failure_code`, 'must be a stable error code');
+      ? raw.failure_code
+      : invalid(`${path}.failure_code`, 'must be a stable error code');
   const createdAt = timestamp(raw.created_at, `${path}.created_at`);
   const updatedAt = timestamp(raw.updated_at, `${path}.updated_at`);
   if (Date.parse(updatedAt) < Date.parse(createdAt)) {
@@ -1505,14 +3912,72 @@ function parseAttempt(
       );
     }
   }
+  const attemptId = canonicalLifecycleId(
+    raw.attempt_id,
+    `${path}.attempt_id`,
+  );
+  const turnId = canonicalLifecycleId(raw.turn_id, `${path}.turn_id`);
+  const parsedAgent =
+        agentSchema && raw.agent !== null
+      ? (() => {
+          const authority = hydrationOptions?.sessionAuthority;
+          const nativeJournalRevision = hydrationOptions?.nativeJournalRevision;
+          const controllerCAS =
+            authority === undefined
+              ? undefined
+              : (() => {
+                  const agentRecord = record(raw.agent, `${path}.agent`);
+                  const controllerGeneration = nonNegativeSafeInteger(
+                    ownDataValue(
+                      agentRecord,
+                      'controller_generation',
+                      `${path}.agent.controller_generation`,
+                    ),
+                    `${path}.agent.controller_generation`,
+                  );
+                  const journalRevision = nonNegativeSafeInteger(
+                    raw.journal_revision,
+                    `${path}.journal_revision`,
+                  );
+                  if (
+                    nativeJournalRevision !== undefined &&
+                    journalRevision !==
+                      nativeJournalRevision + 1
+                  ) {
+                    return invalid(
+                      `${path}.journal_revision`,
+                      'must match the native committed checkpoint',
+                    );
+                  }
+                  return {
+                    schema_version: 1 as const,
+                    conversation_id: conversationId,
+                    task_id: turnId,
+                    attempt_id: attemptId,
+                    expected_controller_generation: Math.max(
+                      0,
+                      controllerGeneration - 1,
+                    ),
+                    expected_journal_revision:
+                      nativeJournalRevision ??
+                      Math.max(0, journalRevision - 1),
+                    expected_session_generation: authority.generation,
+                    expected_session_sha256: authority.session_sha256,
+                  };
+                })();
+          return parsePersistedAgentAttemptJournalV3(raw.agent, `${path}.agent`, {
+            taskId: turnId,
+            attemptId,
+            controllerCAS,
+          });
+        })()
+      : null;
+  const migratedCancelled = parsedAgent?.phase === 'cancelled';
   const attempt: TurnAttemptV1 = {
     schemaVersion: TURN_ATTEMPT_SCHEMA_VERSION,
-    attemptId: canonicalLifecycleId(
-      raw.attempt_id,
-      `${path}.attempt_id`,
-    ),
-    turnId: canonicalLifecycleId(raw.turn_id, `${path}.turn_id`),
-    status: raw.status as TurnAttemptStatus,
+    attemptId,
+    turnId,
+    status: migratedCancelled ? 'cancelled' : (raw.status as TurnAttemptStatus),
     visibleMessageIds: uniqueStringArray(
       raw.visible_message_ids,
       `${path}.visible_message_ids`,
@@ -1521,10 +3986,7 @@ function parseAttempt(
     visibleHistorySha256:
       raw.visible_history_sha256 === null
         ? null
-        : sha256(
-            raw.visible_history_sha256,
-            `${path}.visible_history_sha256`,
-          ),
+        : sha256(raw.visible_history_sha256, `${path}.visible_history_sha256`),
     attachmentIds: uniqueStringArray(
       raw.attachment_ids,
       `${path}.attachment_ids`,
@@ -1532,37 +3994,56 @@ function parseAttempt(
     ),
     modelId: raw.model_id,
     thinkingMode: raw.thinking_mode,
-    contextDisposition:
-      raw.context_disposition as AttemptContextDisposition,
+    contextDisposition: raw.context_disposition as AttemptContextDisposition,
     contextProjectId:
       raw.context_project_id === null
         ? null
         : isProjectId(raw.context_project_id)
-          ? raw.context_project_id
-          : invalid(
-              `${path}.context_project_id`,
-              'must be a valid project id or null',
-            ),
+        ? raw.context_project_id
+        : invalid(
+            `${path}.context_project_id`,
+            'must be a valid project id or null',
+          ),
     workspaceId,
     workspaceBindingRevision,
     projectContext: parseAttemptProjectContext(
       raw.project_context,
       `${path}.project_context`,
     ),
-    activeRound,
+    activeRound: migratedCancelled ? null : activeRound,
     rounds,
     assistantMessageId:
-      raw.assistant_message_id === null
+      migratedCancelled || raw.assistant_message_id === null
         ? null
         : boundedString(
             raw.assistant_message_id,
             `${path}.assistant_message_id`,
             MAX_ID_LENGTH,
           ),
-    failureCode,
+    failureCode: migratedCancelled ? null : failureCode,
     createdAt,
     updatedAt,
+    journalRevision: agentSchema
+      ? nonNegativeSafeInteger(raw.journal_revision, `${path}.journal_revision`)
+      : 0,
+    agent: parsedAgent,
   };
+  if (
+    attempt.journalRevision !== undefined &&
+    attempt.agent !== null &&
+    attempt.journalRevision < 1
+  ) {
+    return invalid(
+      `${path}.journal_revision`,
+      'a non-null Agent journal requires revision at least one',
+    );
+  }
+  if (
+    attempt.journalRevision !== undefined &&
+    attempt.journalRevision >= Number.MAX_SAFE_INTEGER
+  ) {
+    return invalid(`${path}.journal_revision`, 'must be a safe integer');
+  }
   if (
     (attempt.status === 'sending') !== (attempt.activeRound !== null) ||
     (attempt.status === 'completed') !==
@@ -1580,11 +4061,9 @@ function parseAttempt(
     (attempt.contextDisposition === 'verified') !==
       (attempt.projectContext !== null) ||
     (attempt.contextDisposition === 'unbound' &&
-      (attempt.projectContext !== null ||
-        attempt.contextProjectId !== null)) ||
+      (attempt.projectContext !== null || attempt.contextProjectId !== null)) ||
     (attempt.contextDisposition === 'explicit_without_context' &&
-      (attempt.projectContext !== null ||
-        attempt.contextProjectId === null)) ||
+      (attempt.projectContext !== null || attempt.contextProjectId === null)) ||
     (attempt.contextDisposition === 'verified' &&
       attempt.contextProjectId !== attempt.projectContext?.projectId)
   ) {
@@ -1637,10 +4116,7 @@ function samePersistedAttemptBinding(
   );
 }
 
-function sameFrozenAttempt(
-  left: TurnAttemptV1,
-  right: TurnAttemptV1,
-): boolean {
+function sameFrozenAttempt(left: TurnAttemptV1, right: TurnAttemptV1): boolean {
   return (
     sameStringSequence(left.visibleMessageIds, right.visibleMessageIds) &&
     sameStringSequence(left.attachmentIds, right.attachmentIds) &&
@@ -1654,36 +4130,87 @@ function sameFrozenAttempt(
   );
 }
 
+function legacyConversationRecord(
+  value: unknown,
+  path: string,
+  schemaVersion: PersistedSchemaVersion,
+): UnknownRecord {
+  if (schemaVersion === LEGACY_CHAT_STATE_SCHEMA_VERSION) {
+    return exactRecord(
+      value,
+      path,
+      [
+        'id',
+        'title',
+        'title_source',
+        'model_id',
+        'thinking_mode',
+        'messages',
+        'created_at',
+        'updated_at',
+      ],
+      ['thinking_mode'],
+    );
+  }
+  if (
+    schemaVersion === OLDER_CHAT_STATE_SCHEMA_VERSION ||
+    schemaVersion === ATTACHMENT_CHAT_STATE_SCHEMA_VERSION
+  ) {
+    return exactRecord(value, path, [
+      'id',
+      'project_id',
+      'title',
+      'title_source',
+      'model_id',
+      'thinking_mode',
+      'messages',
+      'created_at',
+      'updated_at',
+    ]);
+  }
+  if (schemaVersion === WORKSPACE_CHAT_STATE_SCHEMA_VERSION) {
+    return exactRecord(value, path, [
+      'id',
+      'project_id',
+      'workspace_id',
+      'title',
+      'title_source',
+      'model_id',
+      'thinking_mode',
+      'messages',
+      'created_at',
+      'updated_at',
+    ]);
+  }
+  return exactRecord(value, path, [
+    'id',
+    'project_id',
+    'workspace_id',
+    'runtime_context_id',
+    'project_context',
+    ...(hasWorkspaceRoutingShape(schemaVersion)
+      ? ['workspace_binding', 'workspace_bootstrap_state']
+      : []),
+    ...(hasAgentSchema(schemaVersion) ? ['agent_grants'] : []),
+    'title',
+    'title_source',
+    'model_id',
+    'thinking_mode',
+    'messages',
+    'turns',
+    'attempts',
+    'created_at',
+    'updated_at',
+  ]);
+}
+
 function parseConversation(
   value: unknown,
   path: string,
   schemaVersion: PersistedSchemaVersion,
+  hydrationOptions?: NormalizedChatHydrationOptions,
 ): Conversation {
-  const raw = hasProjectContextShape(schemaVersion)
-    ? exactRecord(
-        value,
-        path,
-        [
-          'id',
-          'project_id',
-          'workspace_id',
-          'runtime_context_id',
-          'project_context',
-          ...(hasWorkspaceRoutingShape(schemaVersion)
-            ? ['workspace_binding', 'workspace_bootstrap_state']
-            : []),
-          'title',
-          'title_source',
-          'model_id',
-          'thinking_mode',
-          'messages',
-          'turns',
-          'attempts',
-          'created_at',
-          'updated_at',
-        ],
-      )
-    : record(value, path);
+  const raw = legacyConversationRecord(value, path, schemaVersion);
   if (raw.title_source !== 'auto' && raw.title_source !== 'manual') {
     return invalid(`${path}.title_source`, 'must be auto or manual');
   }
@@ -1711,15 +4238,14 @@ function parseConversation(
     : {
         workspaceId: null,
         workspaceBinding: null,
-        workspaceBootstrapState:
-          'none' as ConversationWorkspaceBootstrapState,
+        workspaceBootstrapState: 'none' as ConversationWorkspaceBootstrapState,
       };
   const workspaceId = hasWorkspaceRoutingShape(schemaVersion)
     ? raw.workspace_id === null
       ? null
       : typeof raw.workspace_id === 'string'
-        ? raw.workspace_id
-        : invalid(`${path}.workspace_id`, 'must be a string or null')
+      ? raw.workspace_id
+      : invalid(`${path}.workspace_id`, 'must be a string or null')
     : legacyWorkspace.workspaceId;
   if (
     workspaceId !== null &&
@@ -1736,7 +4262,10 @@ function parseConversation(
   const workspaceBinding = hasWorkspaceRoutingShape(schemaVersion)
     ? raw.workspace_binding === null
       ? null
-      : parseWorkspaceBinding(raw.workspace_binding, `${path}.workspace_binding`)
+      : parseWorkspaceBinding(
+          raw.workspace_binding,
+          `${path}.workspace_binding`,
+        )
     : legacyWorkspace.workspaceBinding;
   const workspaceBootstrapState = hasWorkspaceRoutingShape(schemaVersion)
     ? parseWorkspaceBootstrapState(
@@ -1786,40 +4315,38 @@ function parseConversation(
     );
   }
 
-  const runtimeContextId =
-    hasProjectContextShape(schemaVersion)
-      ? raw.runtime_context_id === null
-        ? null
-        : canonicalLifecycleId(
-            raw.runtime_context_id,
-            `${path}.runtime_context_id`,
-          )
-      : null;
-  const projectContext =
-    hasProjectContextShape(schemaVersion)
-      ? raw.project_context === null
-        ? null
-        : (() => {
-            try {
-              preflightV6ProjectContext(
-                raw.project_context,
-                `${path}.project_context`,
-              );
-              return validateV6ProjectContext(
-                hydrateProjectContextState(raw.project_context),
-                raw.project_context,
-                `${path}.project_context`,
-              );
-            } catch {
-              return invalid(
-                `${path}.project_context`,
-                'violates the v6 context contract',
-              );
-            }
-          })()
-      : projectId === null
-        ? null
-        : createProjectContextState(projectId as string);
+  const runtimeContextId = hasProjectContextShape(schemaVersion)
+    ? raw.runtime_context_id === null
+      ? null
+      : canonicalLifecycleId(
+          raw.runtime_context_id,
+          `${path}.runtime_context_id`,
+        )
+    : null;
+  const projectContext = hasProjectContextShape(schemaVersion)
+    ? raw.project_context === null
+      ? null
+      : (() => {
+          try {
+            preflightV6ProjectContext(
+              raw.project_context,
+              `${path}.project_context`,
+            );
+            return validateV6ProjectContext(
+              hydrateProjectContextState(raw.project_context),
+              raw.project_context,
+              `${path}.project_context`,
+            );
+          } catch {
+            return invalid(
+              `${path}.project_context`,
+              'violates the v6 context contract',
+            );
+          }
+        })()
+    : projectId === null
+    ? null
+    : createProjectContextState(projectId as string);
   if (
     (projectId === null) !== (projectContext === null) ||
     (projectContext !== null && projectContext.projectId !== projectId)
@@ -1840,34 +4367,227 @@ function parseConversation(
       'a sendable context must match runtime_context_id and model_id',
     );
   }
-  const turnsRaw =
-    hasProjectContextShape(schemaVersion)
-      ? array(
-          raw.turns,
-          `${path}.turns`,
-          MAX_TURNS_PER_CONVERSATION,
-        )
-      : [];
+  const turnsRaw = hasProjectContextShape(schemaVersion)
+    ? array(raw.turns, `${path}.turns`, MAX_TURNS_PER_CONVERSATION)
+    : [];
   if (turnsRaw.length > MAX_TURNS_PER_CONVERSATION) {
     return invalid(`${path}.turns`, 'contains too many turns');
   }
   const turns = turnsRaw.map((entry, index) =>
     parseTurn(entry, `${path}.turns[${index}]`),
   );
-  const attemptsRaw =
-    hasProjectContextShape(schemaVersion)
-      ? array(
-          raw.attempts,
-          `${path}.attempts`,
-          MAX_ATTEMPTS_PER_CONVERSATION,
-        )
-      : [];
+  const conversationId = boundedString(raw.id, `${path}.id`, MAX_ID_LENGTH);
+  const attemptsRaw = hasProjectContextShape(schemaVersion)
+    ? array(raw.attempts, `${path}.attempts`, MAX_ATTEMPTS_PER_CONVERSATION)
+    : [];
   if (attemptsRaw.length > MAX_ATTEMPTS_PER_CONVERSATION) {
     return invalid(`${path}.attempts`, 'contains too many attempts');
   }
   const attempts = attemptsRaw.map((entry, index) =>
-    parseAttempt(entry, `${path}.attempts[${index}]`, schemaVersion),
+    parseAttempt(
+      entry,
+      `${path}.attempts[${index}]`,
+      schemaVersion,
+      conversationId,
+      hydrationOptions,
+    ),
   );
+  const agentGrants = hasAgentSchema(schemaVersion)
+    ? array(
+        raw.agent_grants,
+        `${path}.agent_grants`,
+        MAX_AGENT_GRANTS_PER_CONVERSATION,
+      ).map((entry, index) =>
+        parseAgentGrant(entry, `${path}.agent_grants[${index}]`),
+      )
+    : [];
+  const grantIds = new Set<string>();
+  agentGrants.forEach((grant, index) => {
+    if (grantIds.has(grant.grant_id)) {
+      invalid(`${path}.agent_grants[${index}].grant_id`, 'must be unique');
+    }
+    grantIds.add(grant.grant_id);
+    if (grant.conversation_id !== raw.id) {
+      invalid(
+        `${path}.agent_grants[${index}].conversation_id`,
+        'must match the containing conversation',
+      );
+    }
+    if (grant.project_id !== raw.project_id) {
+      invalid(
+        `${path}.agent_grants[${index}].project_id`,
+        'must match the containing project',
+      );
+    }
+    if (
+      workspaceBinding === null ||
+      grant.workspace_id !== workspaceId ||
+      grant.binding_revision !== workspaceBinding.bindingRevision ||
+      grant.project_id !== projectId
+    ) {
+      invalid(
+        `${path}.agent_grants[${index}]`,
+        'must match the containing workspace binding',
+      );
+    }
+    if (
+      !attempts.some(
+        attempt =>
+          attempt.attemptId === grant.issued_for.attempt_id &&
+          attempt.turnId === grant.issued_for.task_id,
+      )
+    ) {
+      invalid(
+        `${path}.agent_grants[${index}].issued_for`,
+        'must reference an attempt for this conversation turn',
+      );
+    }
+  });
+  if (hasAgentSchema(schemaVersion)) {
+    const grantsById = new Map(
+      agentGrants.map(grant => [grant.grant_id, grant]),
+    );
+    attempts.forEach((attempt, index) => {
+      const journal = attempt.agent;
+      const revision = attempt.journalRevision ?? 0;
+      if (journal === null || journal === undefined) {
+        if (revision !== 0) {
+          invalid(
+            `${path}.attempts[${index}].journal_revision`,
+            'agent:null requires journal_revision zero',
+          );
+        }
+        return;
+      }
+      if (
+        revision < 1 ||
+        journal.root.workspace_id !== workspaceId ||
+        journal.root.workspace_binding_revision !==
+          (workspaceBinding?.bindingRevision ?? null) ||
+        journal.root.project_id !== projectId ||
+        journal.round_index > attempt.rounds.length ||
+        journal.round_index < Math.max(0, attempt.rounds.length - 1)
+      ) {
+        invalid(
+          `${path}.attempts[${index}].agent`,
+          'must match the containing attempt workspace/root and rounds',
+        );
+      }
+      const lineage = journal.round_lineage;
+      if (
+        journal.phase === 'round_in_flight' &&
+        (attempt.activeRound === null ||
+          lineage === null ||
+          attempt.activeRound.roundId !== lineage.round_id ||
+          attempt.activeRound.roundIndex !== lineage.round_index)
+      ) {
+        invalid(
+          `${path}.attempts[${index}].agent`,
+          'round_in_flight must match the outer active round',
+        );
+      }
+      if (journal.phase !== 'round_in_flight' && attempt.activeRound !== null) {
+        invalid(
+          `${path}.attempts[${index}].agent`,
+          'non-in-flight Agent phases cannot retain an active round',
+        );
+      }
+      if (journal.phase === 'round_in_flight' && attempt.status !== 'sending') {
+        invalid(
+          `${path}.attempts[${index}].status`,
+          'round_in_flight Agent journals require a sending attempt',
+        );
+      }
+      if (journal.phase === 'cancelled' && attempt.status !== 'cancelled') {
+        invalid(
+          `${path}.attempts[${index}].status`,
+          'cancelled Agent journals require a cancelled attempt',
+        );
+      }
+      if (
+        (journal.phase === 'failed' ||
+          journal.phase === 'unknown' ||
+          journal.phase === 'ambiguous') &&
+        attempt.status !== 'failed'
+      ) {
+        invalid(
+          `${path}.attempts[${index}].status`,
+          'failed Agent journals require a failed attempt',
+        );
+      }
+      if (
+        journal.phase === 'failed' &&
+        attempt.failureCode !== 'E_AGENT_PERSISTENCE' &&
+        attempt.failureCode !== 'E_AGENT_ROUND_LIMIT' &&
+        !(
+          attempt.failureCode === 'E_COMPLETION_LENGTH' &&
+          attempt.rounds.at(-1)?.finishReason === 'length'
+        ) &&
+        !(
+          attempt.failureCode === 'E_COMPLETION_CONTENT_FILTER' &&
+          attempt.rounds.at(-1)?.finishReason === 'content_filter'
+        )
+      ) {
+        invalid(
+          `${path}.attempts[${index}].failure_code`,
+          'failed Agent journals require a stable completion, persistence, or round-limit code',
+        );
+      }
+      if (
+        journal.phase === 'unknown' &&
+        attempt.failureCode !== 'E_AGENT_CONFLICT'
+      ) {
+        invalid(
+          `${path}.attempts[${index}].failure_code`,
+          'unknown Agent journals require the conflict failure code',
+        );
+      }
+      if (
+        journal.phase === 'ambiguous' &&
+        attempt.failureCode !== 'E_AGENT_EXECUTION_AMBIGUOUS'
+      ) {
+        invalid(
+          `${path}.attempts[${index}].failure_code`,
+          'ambiguous Agent journals require the ambiguity failure code',
+        );
+      }
+      if (
+        journal.phase !== 'round_in_flight' &&
+        journal.phase !== 'cancelled' &&
+        journal.phase !== 'failed' &&
+        journal.phase !== 'unknown' &&
+        journal.phase !== 'ambiguous' &&
+        attempt.status !== 'prepared' &&
+        attempt.status !== 'completed'
+      ) {
+        invalid(
+          `${path}.attempts[${index}].status`,
+          'active Agent checkpoints require a prepared or completed attempt',
+        );
+      }
+      journal.frozen_grant_ids.forEach((grantId, grantIndex) => {
+        const grant = grantsById.get(grantId);
+        if (
+          grant === undefined ||
+          grant.workspace_id !== journal.root.workspace_id ||
+          grant.project_id !== journal.root.project_id ||
+          grant.binding_revision !== journal.root.workspace_binding_revision ||
+          grant.registry_version !== journal.tool_registry_version ||
+          grant.policy_version !== journal.policy.policy_version ||
+          grant.root_fingerprint_sha256 !==
+            journal.root.root_fingerprint_sha256 ||
+          !journal.root.capabilities.includes(
+            grant.tool_family === 'file_write' ? 'file_write' : 'git_commit',
+          )
+        ) {
+          invalid(
+            `${path}.attempts[${index}].agent.frozen_grant_ids[${grantIndex}]`,
+            'must reference a matching live grant',
+          );
+        }
+      });
+    });
+  }
   if (
     workspaceBootstrapState === 'none' &&
     projectContext !== null &&
@@ -1937,8 +4657,7 @@ function parseConversation(
   });
   if (
     attempts.filter(
-      attempt =>
-        attempt.status === 'prepared' || attempt.status === 'sending',
+      attempt => attempt.status === 'prepared' || attempt.status === 'sending',
     ).length > 1
   ) {
     return invalid(`${path}.attempts`, 'must contain at most one live attempt');
@@ -2037,9 +4756,7 @@ function parseConversation(
         }
       } else if (knownVisibleHistorySha256 === null) {
         knownVisibleHistorySha256 = attempt.visibleHistorySha256;
-      } else if (
-        attempt.visibleHistorySha256 !== knownVisibleHistorySha256
-      ) {
+      } else if (attempt.visibleHistorySha256 !== knownVisibleHistorySha256) {
         invalid(
           `${path}.attempts[${persistedAttemptIndex}].visible_history_sha256`,
           'must match the first verified visible-history digest',
@@ -2100,8 +4817,7 @@ function parseConversation(
         attempt.visibleMessageIds.length !== expectedWindowLength ||
         !attempt.visibleMessageIds.every(
           (messageId, visibleIndex) =>
-            messageId ===
-            messages[expectedWindowStart + visibleIndex]?.id,
+            messageId === messages[expectedWindowStart + visibleIndex]?.id,
         )
       ) {
         invalid(
@@ -2159,8 +4875,7 @@ function parseConversation(
             projectReceipt === null ||
             projectReceipt.snapshot_id !== binding.snapshotId ||
             projectReceipt.snapshot_sha256 !== binding.snapshotSha256 ||
-            projectReceipt.source_fingerprint !==
-              binding.sourceFingerprint ||
+            projectReceipt.source_fingerprint !== binding.sourceFingerprint ||
             projectReceipt.context_bytes !== binding.contextBytes)
       ) {
         invalid(
@@ -2251,7 +4966,7 @@ function parseConversation(
   });
 
   return {
-    id: boundedString(raw.id, `${path}.id`, MAX_ID_LENGTH),
+    id: conversationId,
     projectId: projectId as string | null,
     workspaceId,
     workspaceBinding,
@@ -2267,6 +4982,7 @@ function parseConversation(
     attempts,
     createdAt,
     updatedAt,
+    agentGrants,
   };
 }
 
@@ -2402,11 +5118,67 @@ function toPersistedRoundReceipt(
   };
 }
 
-function toPersistedAttempt(
-  attempt: TurnAttemptV1,
-): PersistedTurnAttemptV1 {
+function toPersistedAgentJournalV3(
+  journal: PersistedAgentAttemptJournalV3,
+): PersistedAgentAttemptJournalV3 {
+  if (journal.schema_version !== AGENT_ATTEMPT_JOURNAL_SCHEMA_VERSION_V3) {
+    throw new ChatStateValidationError(
+      '$.conversations.attempts.agent',
+      'schema-2 Agent journals require bootstrap hydration before serialization',
+    );
+  }
   return {
-    schema_version: attempt.schemaVersion,
+    schema_version: AGENT_ATTEMPT_JOURNAL_SCHEMA_VERSION_V3,
+    phase: journal.phase,
+    controller_generation: journal.controller_generation,
+    policy: { ...journal.policy },
+    root: { ...journal.root, capabilities: [...journal.root.capabilities] },
+    tool_registry_version: journal.tool_registry_version,
+    toolset_sha256: journal.toolset_sha256,
+    transcript: { ...journal.transcript },
+    round_index: journal.round_index,
+    round_lineage:
+      journal.round_lineage === null ? null : { ...journal.round_lineage },
+    call_index: journal.call_index,
+    batch: journal.batch.map(call => {
+      if (call.schema_version !== AGENT_CALL_JOURNAL_SCHEMA_VERSION_V3) {
+        throw new ChatStateValidationError(
+          '$.conversations.attempts.agent.batch',
+          'schema-2 Agent calls require bootstrap hydration before serialization',
+        );
+      }
+      return {
+        ...call,
+        receipt: call.receipt === null ? null : { ...call.receipt },
+      };
+    }),
+    frozen_grant_ids: [...journal.frozen_grant_ids],
+    reserved_write_bytes: journal.reserved_write_bytes,
+    updated_at: journal.updated_at,
+  };
+}
+
+function toPersistedAttempt(attempt: TurnAttemptV1): PersistedTurnAttemptV3 {
+  const hasAgentJournal = attempt.agent !== undefined && attempt.agent !== null;
+  const journalRevision = attempt.journalRevision ?? 0;
+  if (
+    !Number.isSafeInteger(journalRevision) ||
+    Object.is(journalRevision, -0) ||
+    journalRevision < (hasAgentJournal ? 1 : 0) ||
+    (hasAgentJournal && journalRevision >= Number.MAX_SAFE_INTEGER) ||
+    (!hasAgentJournal && journalRevision !== 0)
+  ) {
+    throw new ChatStateValidationError(
+      '$.conversations.attempts.journal_revision',
+      'invalid journal revision cannot be promoted during serialization',
+    );
+  }
+  const agent =
+    attempt.agent === undefined || attempt.agent === null
+      ? null
+      : toPersistedAgentJournalV3(attempt.agent);
+  return {
+    schema_version: PERSISTED_TURN_ATTEMPT_SCHEMA_VERSION_V3,
     attempt_id: attempt.attemptId,
     turn_id: attempt.turnId,
     status: attempt.status,
@@ -2447,14 +5219,14 @@ function toPersistedAttempt(
     failure_code: attempt.failureCode,
     created_at: attempt.createdAt,
     updated_at: attempt.updatedAt,
+    journal_revision: hasAgentJournal ? journalRevision : 0,
+    agent,
   };
 }
 
 function toPersistedDestructiveTransition(
   transition: ProjectContextDestructiveTransitionV1,
-): NonNullable<
-  PersistedChatStateV8['project_context_destructive_transition']
-> {
+): NonNullable<PersistedChatStateV8['project_context_destructive_transition']> {
   return {
     schema_version: transition.schemaVersion,
     lifecycle_id: transition.lifecycleId,
@@ -2501,7 +5273,48 @@ function toPersistedWorkspaceOutboxEntry(
   };
 }
 
-function toPersistedState(state: ChatState): PersistedChatStateV8 {
+function toPersistedAgentGrant(
+  grant: AgentConversationGrantV2,
+): AgentConversationGrantV2 {
+  return {
+    schema_version: grant.schema_version,
+    grant_id: grant.grant_id,
+    conversation_id: grant.conversation_id,
+    workspace_id: grant.workspace_id,
+    project_id: grant.project_id,
+    binding_revision: grant.binding_revision,
+    root_fingerprint_sha256: grant.root_fingerprint_sha256,
+    tool_family: grant.tool_family,
+    registry_version: grant.registry_version,
+    policy_version: grant.policy_version,
+    issued_for: { ...grant.issued_for },
+    created_at: grant.created_at,
+  };
+}
+
+function toPersistedCleanupEntry(
+  entry: AgentTranscriptCleanupV1,
+): AgentTranscriptCleanupV1 {
+  return { ...entry };
+}
+
+function defaultPersistedPreferences(): PersistedAppPreferencesV1 {
+  return JSON.parse(
+    serializeAppPreferences(DEFAULT_APP_PREFERENCES),
+  ) as PersistedAppPreferencesV1;
+}
+
+function canonicalPersistedPreferences(
+  value: PersistedAppPreferencesV1 | undefined,
+): PersistedAppPreferencesV1 {
+  if (value === undefined) return defaultPersistedPreferences();
+  const parsed = hydrateAppPreferences(value);
+  return JSON.parse(
+    serializeAppPreferences(parsed),
+  ) as PersistedAppPreferencesV1;
+}
+
+function toPersistedState(state: ChatState): PersistedSessionSnapshotV9 {
   const conversationOrder = orderConversationIds(state.conversations);
   const conversations = conversationOrder.map(id => {
     const conversation = state.conversations[id];
@@ -2532,6 +5345,11 @@ function toPersistedState(state: ChatState): PersistedChatStateV8 {
       attempts: conversation.attempts.map(toPersistedAttempt),
       created_at: conversation.createdAt,
       updated_at: conversation.updatedAt,
+      agent_grants: (
+        conversation.agentGrants ??
+        conversation.agent_grants ??
+        []
+      ).map(toPersistedAgentGrant),
     };
   });
   return {
@@ -2539,8 +5357,10 @@ function toPersistedState(state: ChatState): PersistedChatStateV8 {
     workspace_authority_outbox: (state.workspaceAuthorityOutbox ?? []).map(
       toPersistedWorkspaceOutboxEntry,
     ),
-    project_context_destructive_epoch:
-      state.projectContextDestructiveEpoch,
+    agent_transcript_cleanup_outbox: (
+      state.agentTranscriptCleanupOutbox ?? []
+    ).map(toPersistedCleanupEntry),
+    project_context_destructive_epoch: state.projectContextDestructiveEpoch,
     project_context_destructive_transition:
       state.projectContextDestructiveTransition === null
         ? null
@@ -2550,14 +5370,256 @@ function toPersistedState(state: ChatState): PersistedChatStateV8 {
     active_conversation_id: state.selectedConversationId,
     conversations,
     messages: selectActiveMessages(state).map(toPersistedMessage),
+    session_events: (state.sessionEvents ?? []).map(event => ({ ...event })),
+    preferences: canonicalPersistedPreferences(state.preferences),
   };
 }
 
-export function hydrateChatState(input: unknown): ChatState {
+/**
+ * JSON.parse accepts duplicate object keys and silently turns -0 into a
+ * number.  Schema-9 is an authority boundary, so scan the bytes first and
+ * reject those forms (and unsafe integer literals) before allocation.
+ */
+function strictJSONInput(value: string): unknown {
+  let index = 0;
+  const length = value.length;
+  const whitespace = () => {
+    while (
+      index < length &&
+      (value[index] === ' ' ||
+        value[index] === '\n' ||
+        value[index] === '\r' ||
+        value[index] === '\t')
+    )
+      index += 1;
+  };
+  const parseString = (): string => {
+    if (value[index] !== '"') throw new Error('string');
+    index += 1;
+    let result = '';
+    let escaped = false;
+    while (index < length) {
+      const character = value[index]!;
+      if (escaped) {
+        escaped = false;
+        if (character === 'u') {
+          const digits = value.slice(index + 1, index + 5);
+          if (!/^[0-9a-fA-F]{4}$/u.test(digits)) throw new Error('escape');
+          result += String.fromCharCode(Number.parseInt(digits, 16));
+          index += 4;
+        } else {
+          const escapedCharacter: Record<string, string> = {
+            '"': '"',
+            '\\': '\\',
+            '/': '/',
+            b: '\b',
+            f: '\f',
+            n: '\n',
+            r: '\r',
+            t: '\t',
+          };
+          const replacement = escapedCharacter[character];
+          if (replacement === undefined) throw new Error('escape');
+          result += replacement;
+        }
+        index += 1;
+        continue;
+      }
+      if (character === '\\') {
+        escaped = true;
+        index += 1;
+        continue;
+      }
+      if (character === '"') {
+        index += 1;
+        if (utf8ByteLength(result) === null) throw new Error('utf8');
+        return result;
+      }
+      if (character < ' ' || character === '\u007f') throw new Error('control');
+      result += character;
+      index += 1;
+    }
+    throw new Error('unterminated string');
+  };
+  const parseValue = (depth: number): void => {
+    if (depth > 64) throw new Error('depth');
+    whitespace();
+    const character = value[index];
+    if (character === '"') {
+      parseString();
+      return;
+    }
+    if (character === '{') {
+      index += 1;
+      whitespace();
+      const keys = new Set<string>();
+      if (value[index] === '}') {
+        index += 1;
+        return;
+      }
+      while (index < length) {
+        whitespace();
+        const key = parseString();
+        if (keys.has(key)) throw new Error('duplicate key');
+        keys.add(key);
+        whitespace();
+        if (value[index] !== ':') throw new Error('colon');
+        index += 1;
+        parseValue(depth + 1);
+        whitespace();
+        if (value[index] === '}') {
+          index += 1;
+          return;
+        }
+        if (value[index] !== ',') throw new Error('object');
+        index += 1;
+      }
+      throw new Error('object');
+    }
+    if (character === '[') {
+      index += 1;
+      whitespace();
+      if (value[index] === ']') {
+        index += 1;
+        return;
+      }
+      while (index < length) {
+        parseValue(depth + 1);
+        whitespace();
+        if (value[index] === ']') {
+          index += 1;
+          return;
+        }
+        if (value[index] !== ',') throw new Error('array');
+        index += 1;
+      }
+      throw new Error('array');
+    }
+    if (value.startsWith('true', index)) {
+      index += 4;
+      return;
+    }
+    if (value.startsWith('false', index)) {
+      index += 5;
+      return;
+    }
+    if (value.startsWith('null', index)) {
+      index += 4;
+      return;
+    }
+    const number = value
+      .slice(index)
+      .match(/^-?(?:0|[1-9][0-9]*)(?:\.[0-9]+)?(?:[eE][+-]?[0-9]+)?/u)?.[0];
+    if (number === undefined) throw new Error('value');
+    const parsedNumber = Number(number);
+    if (
+      !Number.isFinite(parsedNumber) ||
+      (Number.isInteger(parsedNumber) && !Number.isSafeInteger(parsedNumber)) ||
+      Object.is(parsedNumber, -0)
+    )
+      throw new Error('number');
+    index += number.length;
+  };
+  parseValue(0);
+  whitespace();
+  if (index !== length) throw new Error('trailing');
+  return JSON.parse(value) as unknown;
+}
+
+function plainDataTree(value: unknown, depth = 0): boolean {
+  if (depth > 16 || value === null) return true;
+  if (typeof value !== 'object') {
+    return (
+      typeof value === 'string' ||
+      typeof value === 'boolean' ||
+      (typeof value === 'number' &&
+        Number.isFinite(value) &&
+        !Object.is(value, -0))
+    );
+  }
+  if (Array.isArray(value)) {
+    if (Object.getPrototypeOf(value) !== Array.prototype) return false;
+    const descriptor = Object.getOwnPropertyDescriptor(value, 'length');
+    if (
+      descriptor === undefined ||
+      !Object.prototype.hasOwnProperty.call(descriptor, 'value')
+    )
+      return false;
+    for (let index = 0; index < value.length; index += 1) {
+      const item = Object.getOwnPropertyDescriptor(value, String(index));
+      if (
+        item === undefined ||
+        !Object.prototype.hasOwnProperty.call(item, 'value') ||
+        item.enumerable !== true ||
+        !plainDataTree(item.value, depth + 1)
+      )
+        return false;
+    }
+    return Object.getOwnPropertyNames(value).every(
+      name => name === 'length' || /^(?:0|[1-9][0-9]*)$/u.test(name),
+    );
+  }
+  const prototype = Object.getPrototypeOf(value);
+  if (prototype !== Object.prototype && prototype !== null) return false;
+  if (Object.getOwnPropertySymbols(value).length > 0) return false;
+  return Object.getOwnPropertyNames(value).every(name => {
+    const descriptor = Object.getOwnPropertyDescriptor(value, name);
+    return (
+      descriptor !== undefined &&
+      Object.prototype.hasOwnProperty.call(descriptor, 'value') &&
+      descriptor.enumerable === true &&
+      plainDataTree(descriptor.value, depth + 1)
+    );
+  });
+}
+
+/** Shared strict JSON gate for the session CAS coordinator. */
+export function parseStrictJSON(value: string): unknown {
+  return strictJSONInput(value);
+}
+
+export function hydrateChatState(
+  input: unknown,
+  options: ChatHydrationOptionsV1 = {},
+): ChatState {
+  const explicitAuthority =
+    options.sessionAuthority === undefined
+      ? undefined
+      : parseHydrationAuthority(options.sessionAuthority);
+  const nativeEnvelope =
+    options.nativeEnvelope === undefined
+      ? undefined
+      : parseHydrationNativeEnvelope(options.nativeEnvelope);
+  if (
+    explicitAuthority !== undefined &&
+    nativeEnvelope !== undefined &&
+    (explicitAuthority.generation !== nativeEnvelope.session_generation ||
+      explicitAuthority.session_sha256 !== nativeEnvelope.session_sha256)
+  ) {
+    return invalid(
+      '$.native_envelope',
+      'must match the supplied session authority',
+    );
+  }
+  const hydrationOptions: NormalizedChatHydrationOptions = {
+    ...(explicitAuthority === undefined && nativeEnvelope === undefined
+      ? {}
+      : {
+          sessionAuthority:
+            explicitAuthority ?? {
+              schema_version: 1,
+              generation: nativeEnvelope!.session_generation,
+              session_sha256: nativeEnvelope!.session_sha256,
+            },
+        }),
+    ...(nativeEnvelope === undefined
+      ? {}
+      : { nativeJournalRevision: nativeEnvelope.journal_revision }),
+  };
   let decoded: unknown = input;
   if (typeof input === 'string') {
     try {
-      decoded = JSON.parse(input) as unknown;
+      decoded = strictJSONInput(input);
     } catch {
       return invalid('$', 'must be valid JSON');
     }
@@ -2576,15 +5638,35 @@ export function hydrateChatState(input: unknown): ChatState {
     decodedSchemaVersion !== WORKSPACE_CHAT_STATE_SCHEMA_VERSION &&
     decodedSchemaVersion !== PROJECT_CONTEXT_CHAT_STATE_SCHEMA_VERSION &&
     decodedSchemaVersion !== PREVIOUS_CHAT_STATE_SCHEMA_VERSION &&
+    decodedSchemaVersion !== CHAT_STATE_SCHEMA_VERSION_V8 &&
     decodedSchemaVersion !== CHAT_STATE_SCHEMA_VERSION
   ) {
     return invalid(
       '$.schema_version',
-      `must equal ${LEGACY_CHAT_STATE_SCHEMA_VERSION}, ${OLDER_CHAT_STATE_SCHEMA_VERSION}, ${ATTACHMENT_CHAT_STATE_SCHEMA_VERSION}, ${WORKSPACE_CHAT_STATE_SCHEMA_VERSION}, ${PROJECT_CONTEXT_CHAT_STATE_SCHEMA_VERSION}, ${PREVIOUS_CHAT_STATE_SCHEMA_VERSION}, or ${CHAT_STATE_SCHEMA_VERSION}`,
+      `must equal ${LEGACY_CHAT_STATE_SCHEMA_VERSION}, ${OLDER_CHAT_STATE_SCHEMA_VERSION}, ${ATTACHMENT_CHAT_STATE_SCHEMA_VERSION}, ${WORKSPACE_CHAT_STATE_SCHEMA_VERSION}, ${PROJECT_CONTEXT_CHAT_STATE_SCHEMA_VERSION}, ${PREVIOUS_CHAT_STATE_SCHEMA_VERSION}, ${CHAT_STATE_SCHEMA_VERSION_V8}, or ${CHAT_STATE_SCHEMA_VERSION}`,
     );
   }
   const schemaVersion = decodedSchemaVersion;
-  if (hasProjectContextShape(schemaVersion)) {
+  if (schemaVersion === CHAT_STATE_SCHEMA_VERSION) {
+    raw = exactRecord(decoded, '$', [
+      'schema_version',
+      'workspace_authority_outbox',
+      'agent_transcript_cleanup_outbox',
+      'project_context_destructive_epoch',
+      'project_context_destructive_transition',
+      'active_conversation_id',
+      'conversations',
+      'messages',
+      'session_events',
+      'preferences',
+    ]);
+    try {
+      if (!plainDataTree(raw.preferences)) throw new Error('preferences');
+      hydrateAppPreferences(raw.preferences);
+    } catch {
+      return invalid('$.preferences', 'violates the preferences contract');
+    }
+  } else if (hasProjectContextShape(schemaVersion)) {
     // App persistence deliberately co-locates the independently validated
     // preferences envelope at the root.
     raw = exactRecord(
@@ -2602,6 +5684,7 @@ export function hydrateChatState(input: unknown): ChatState {
             'conversations',
             'messages',
             'preferences',
+            'session_events',
           ]
         : [
             'schema_version',
@@ -2609,9 +5692,52 @@ export function hydrateChatState(input: unknown): ChatState {
             'conversations',
             'messages',
             'preferences',
+            'session_events',
           ],
-      ['preferences'],
+      ['preferences', 'session_events'],
     );
+  } else {
+    raw = exactRecord(
+      decoded,
+      '$',
+      [
+        'schema_version',
+        'active_conversation_id',
+        'conversations',
+        'messages',
+        'preferences',
+        'session_events',
+      ],
+      ['preferences', 'session_events'],
+    );
+  }
+  const hasLegacyPreferences = Object.prototype.hasOwnProperty.call(
+    raw,
+    'preferences',
+  );
+  const hasLegacySessionEvents = Object.prototype.hasOwnProperty.call(
+    raw,
+    'session_events',
+  );
+  if (
+    !hasAgentSchema(schemaVersion) &&
+    ((hasLegacyPreferences && raw.preferences === undefined) ||
+      (hasLegacySessionEvents && raw.session_events === undefined))
+  ) {
+    return invalid(
+      hasLegacyPreferences && raw.preferences === undefined
+        ? '$.preferences'
+        : '$.session_events',
+      'must not be undefined when present',
+    );
+  }
+  if (
+    !hasAgentSchema(schemaVersion) &&
+    hasLegacySessionEvents &&
+    (!Array.isArray(raw.session_events) ||
+      Object.getPrototypeOf(raw.session_events) !== Array.prototype)
+  ) {
+    return invalid('$.session_events', 'must be an array');
   }
   if (
     raw.active_conversation_id !== null &&
@@ -2620,14 +5746,13 @@ export function hydrateChatState(input: unknown): ChatState {
     return invalid('$.active_conversation_id', 'must be a string or null');
   }
 
-  const destructiveEpoch =
-    hasDestructiveJournalShape(schemaVersion)
-      ? lifecycleEpoch(
-          raw.project_context_destructive_epoch,
-          '$.project_context_destructive_epoch',
-          true,
-        )
-      : 0;
+  const destructiveEpoch = hasDestructiveJournalShape(schemaVersion)
+    ? lifecycleEpoch(
+        raw.project_context_destructive_epoch,
+        '$.project_context_destructive_epoch',
+        true,
+      )
+    : 0;
   const workspaceAuthorityOutbox = hasWorkspaceRoutingShape(schemaVersion)
     ? array(
         raw.workspace_authority_outbox,
@@ -2650,6 +5775,83 @@ export function hydrateChatState(input: unknown): ChatState {
     }
     workspaceOperationIds.add(entry.operationId);
   });
+  const agentTranscriptCleanupOutbox = hasAgentSchema(schemaVersion)
+    ? array(
+        raw.agent_transcript_cleanup_outbox,
+        '$.agent_transcript_cleanup_outbox',
+        MAX_AGENT_CLEANUP_OUTBOX_ENTRIES,
+      ).map((entry, index) =>
+        parseCleanupEntry(entry, `$.agent_transcript_cleanup_outbox[${index}]`),
+      )
+    : [];
+  const cleanupIds = new Set<string>();
+  agentTranscriptCleanupOutbox.forEach((entry, index) => {
+    if (cleanupIds.has(entry.cleanup_id)) {
+      invalid(
+        `$.agent_transcript_cleanup_outbox[${index}].cleanup_id`,
+        'must be globally unique',
+      );
+    }
+    cleanupIds.add(entry.cleanup_id);
+  });
+  const sessionEvents = hasAgentSchema(schemaVersion)
+    ? array(raw.session_events, '$.session_events', MAX_SESSION_EVENT_ROWS).map(
+        (entry, index) =>
+          parseSessionEvent(entry, `$.session_events[${index}]`),
+      )
+    : [];
+  const eventIds = new Set<string>();
+  const eventSequences = new Map<string, number>();
+  sessionEvents.forEach((event, index) => {
+    if (eventIds.has(event.event_id)) {
+      invalid(`$.session_events[${index}].event_id`, 'must be globally unique');
+    }
+    eventIds.add(event.event_id);
+    const previous = eventSequences.get(event.attempt_id);
+    if (previous !== undefined && event.seq <= previous) {
+      invalid(
+        `$.session_events[${index}].seq`,
+        'must strictly increase for the attempt',
+      );
+    }
+    eventSequences.set(event.attempt_id, event.seq);
+  });
+  const hydratedPreferences = (() => {
+    try {
+      if (raw.preferences === undefined && hasAgentSchema(schemaVersion)) {
+        // A schema-9 root always serializes the canonical default envelope,
+        // but preserve the historical in-memory omission when the caller
+        // supplied no preference projection at all.
+        return undefined;
+      }
+      const parsed =
+        raw.preferences === undefined
+          ? DEFAULT_APP_PREFERENCES
+          : (() => {
+              if (!plainDataTree(raw.preferences))
+                throw new Error('preferences');
+              return hydrateAppPreferences(raw.preferences);
+            })();
+      // Always carry the canonical schema-1 preference envelope in the
+      // migrated schema-9 projection.  In particular, never silently omit a
+      // defaulted legacy value: the diagnostic below records that boundary.
+      return JSON.parse(
+        serializeAppPreferences(parsed),
+      ) as PersistedAppPreferencesV1;
+    } catch {
+      return invalid('$.preferences', 'violates the preferences contract');
+    }
+  })();
+  const migrationDiagnostics: {
+    defaulted_legacy_preferences?: true;
+    dropped_legacy_session_events?: true;
+  } = {};
+  if (!hasAgentSchema(schemaVersion) && !hasLegacyPreferences) {
+    migrationDiagnostics.defaulted_legacy_preferences = true;
+  }
+  if (!hasAgentSchema(schemaVersion) && hasLegacySessionEvents) {
+    migrationDiagnostics.dropped_legacy_session_events = true;
+  }
   const destructiveTransition =
     hasDestructiveJournalShape(schemaVersion) &&
     raw.project_context_destructive_transition !== null
@@ -2686,12 +5888,92 @@ export function hydrateChatState(input: unknown): ChatState {
       entry,
       `$.conversations[${index}]`,
       schemaVersion,
+      hydrationOptions,
     );
     if (conversations[conversation.id] !== undefined) {
       return invalid(`$.conversations[${index}].id`, 'must be unique');
     }
     conversations[conversation.id] = conversation;
   });
+  if (hasAgentSchema(schemaVersion)) {
+    validateSessionEventCorrelations(sessionEvents, conversations);
+  }
+
+  if (hasAgentSchema(schemaVersion)) {
+    agentTranscriptCleanupOutbox.forEach((cleanup, index) => {
+      const conversation = conversations[cleanup.conversation_id];
+      const attempt = conversation?.attempts.find(
+        candidate => candidate.attemptId === cleanup.attempt_id,
+      );
+      if (
+        (conversation === undefined || attempt === undefined) &&
+        !(
+          cleanup.reason === 'conversation_deleted' &&
+          conversation === undefined
+        )
+      ) {
+        invalid(
+          `$.agent_transcript_cleanup_outbox[${index}]`,
+          'must reference an existing attempt',
+        );
+      }
+      if (conversation === undefined) {
+        if (cleanup.reason !== 'conversation_deleted') {
+          invalid(
+            `$.agent_transcript_cleanup_outbox[${index}]`,
+            'detached cleanup must be conversation_deleted',
+          );
+        }
+        return;
+      }
+      if (attempt === undefined)
+        return invalid(
+          `$.agent_transcript_cleanup_outbox[${index}]`,
+          'must reference an existing attempt',
+        );
+      const transcript = attempt.agent?.transcript;
+      const expectedReason =
+        attempt.agent?.phase === 'final_response'
+          ? 'completed'
+          : attempt.agent?.phase === 'cancelled'
+            ? 'cancelled'
+            : attempt.agent?.phase === 'failed'
+              ? 'failed'
+              : null;
+      if (expectedReason === null || cleanup.reason !== expectedReason) {
+        invalid(
+          `$.agent_transcript_cleanup_outbox[${index}].reason`,
+          'must match the terminal attempt phase',
+        );
+      }
+      if (
+        transcript === undefined ||
+        transcript === null ||
+        cleanup.task_id !== attempt.turnId ||
+        transcript.transcript_ref !== cleanup.transcript_ref ||
+        transcript.transcript_sha256 !== cleanup.transcript_sha256
+      ) {
+        invalid(
+          `$.agent_transcript_cleanup_outbox[${index}]`,
+          'must match the attempt transcript',
+        );
+      }
+    });
+    sessionEvents.forEach((event, index) => {
+      if (
+        !Object.values(conversations).some(conversation =>
+          conversation.attempts.some(
+            attempt => attempt.attemptId === event.attempt_id,
+          ),
+        )
+      ) {
+        invalid(
+          `$.session_events[${index}].attempt_id`,
+          'must reference an existing attempt',
+        );
+      }
+    });
+  }
 
   const lifecycleIds = new Set<string>();
   const providerRequestIds = new Set<string>();
@@ -2700,7 +5982,23 @@ export function hydrateChatState(input: unknown): ChatState {
     if (lifecycleIds.has(value)) invalid(path, 'must be globally unique');
     lifecycleIds.add(value);
   };
+  workspaceAuthorityOutbox.forEach((entry, index) => {
+    claimLifecycleId(
+      entry.operationId,
+      `$.workspace_authority_outbox[${index}].operation_id`,
+    );
+    claimLifecycleId(
+      entry.clearanceReceiptId,
+      `$.workspace_authority_outbox[${index}].clearance_receipt_id`,
+    );
+  });
   Object.values(conversations).forEach((conversation, conversationIndex) => {
+    conversation.agentGrants?.forEach((grant, grantIndex) =>
+      claimLifecycleId(
+        grant.grant_id,
+        `$.conversations[${conversationIndex}].agent_grants[${grantIndex}].grant_id`,
+      ),
+    );
     if (conversation.runtimeContextId !== null) {
       claimLifecycleId(
         conversation.runtimeContextId,
@@ -2718,34 +6016,60 @@ export function hydrateChatState(input: unknown): ChatState {
         attempt.attemptId,
         `$.conversations[${conversationIndex}].attempts[${attemptIndexValue}].attempt_id`,
       );
-      attempt.rounds.forEach((round, roundIndex) =>
-        {
-          const roundPath = `$.conversations[${conversationIndex}].attempts[${attemptIndexValue}].rounds[${roundIndex}]`;
-          claimLifecycleId(round.roundId, `${roundPath}.round_id`);
-          if (providerRequestIds.has(round.providerRequestId)) {
-            invalid(
-              `${roundPath}.provider_request_id`,
-              'must be globally unique',
-            );
-          }
-          providerRequestIds.add(round.providerRequestId);
-          if (providerResponseIds.has(round.providerResponseId)) {
-            invalid(
-              `${roundPath}.provider_response_id`,
-              'must be globally unique',
-            );
-          }
-          providerResponseIds.add(round.providerResponseId);
-        },
-      );
+      attempt.rounds.forEach((round, roundIndex) => {
+        const roundPath = `$.conversations[${conversationIndex}].attempts[${attemptIndexValue}].rounds[${roundIndex}]`;
+        claimLifecycleId(round.roundId, `${roundPath}.round_id`);
+        if (providerRequestIds.has(round.providerRequestId)) {
+          invalid(
+            `${roundPath}.provider_request_id`,
+            'must be globally unique',
+          );
+        }
+        providerRequestIds.add(round.providerRequestId);
+        if (providerResponseIds.has(round.providerResponseId)) {
+          invalid(
+            `${roundPath}.provider_response_id`,
+            'must be globally unique',
+          );
+        }
+        providerResponseIds.add(round.providerResponseId);
+      });
       if (attempt.activeRound !== null) {
         claimLifecycleId(
           attempt.activeRound.roundId,
           `$.conversations[${conversationIndex}].attempts[${attemptIndexValue}].active_round.round_id`,
         );
       }
+      if (
+        attempt.agent?.round_lineage !== null &&
+        attempt.agent?.round_lineage !== undefined &&
+        attempt.activeRound?.roundId !== attempt.agent.round_lineage.round_id &&
+        !attempt.rounds.some(
+          round => round.roundId === attempt.agent?.round_lineage?.round_id,
+        )
+      ) {
+        claimLifecycleId(
+          attempt.agent.round_lineage.round_id,
+          `$.conversations[${conversationIndex}].attempts[${attemptIndexValue}].agent.round_lineage.round_id`,
+        );
+      }
+      if (attempt.agent?.transcript !== undefined) {
+        claimLifecycleId(
+          attempt.agent.transcript.transcript_ref,
+          `$.conversations[${conversationIndex}].attempts[${attemptIndexValue}].agent.transcript.transcript_ref`,
+        );
+      }
     });
   });
+  agentTranscriptCleanupOutbox.forEach((entry, index) =>
+    claimLifecycleId(
+      entry.cleanup_id,
+      `$.agent_transcript_cleanup_outbox[${index}].cleanup_id`,
+    ),
+  );
+  sessionEvents.forEach((event, index) =>
+    claimLifecycleId(event.event_id, `$.session_events[${index}].event_id`),
+  );
   if (destructiveTransition !== null) {
     claimLifecycleId(
       destructiveTransition.lifecycleId,
@@ -2758,8 +6082,9 @@ export function hydrateChatState(input: unknown): ChatState {
     hydratedConversations[conversation.id] = {
       ...conversation,
       attempts: conversation.attempts.map(attempt =>
-        attempt.status === 'sending' ||
-        (attempt.status === 'prepared' && attempt.rounds.length > 0)
+        (!hasAgentSchema(schemaVersion) || attempt.agent === null) &&
+        (attempt.status === 'sending' ||
+          (attempt.status === 'prepared' && attempt.rounds.length > 0))
           ? {
               ...attempt,
               status: 'failed' as const,
@@ -2785,7 +6110,9 @@ export function hydrateChatState(input: unknown): ChatState {
           : null,
     };
     workspaceAuthorityOutbox.forEach((entry, index) => {
-      if (hasWorkspaceAuthorityReferences(outboxReferenceState, entry.workspaceId)) {
+      if (
+        hasWorkspaceAuthorityReferences(outboxReferenceState, entry.workspaceId)
+      ) {
         invalid(
           `$.workspace_authority_outbox[${index}].workspace_id`,
           'must not be referenced by a conversation, context, or attempt',
@@ -2920,7 +6247,7 @@ export function hydrateChatState(input: unknown): ChatState {
     );
   }
 
-  return {
+  const hydratedState: ChatState = {
     schemaVersion: CHAT_STATE_SCHEMA_VERSION,
     workspaceAuthorityOutbox,
     projectContextDestructiveEpoch: destructiveEpoch,
@@ -2928,12 +6255,29 @@ export function hydrateChatState(input: unknown): ChatState {
     conversations: hydratedConversations,
     conversationOrder: orderConversationIds(hydratedConversations),
     selectedConversationId: activeConversationId,
+    agentTranscriptCleanupOutbox,
+    sessionEvents,
+    ...(hydratedPreferences === undefined
+      ? {}
+      : { preferences: hydratedPreferences }),
   };
+  if (Object.keys(migrationDiagnostics).length > 0) {
+    Object.defineProperty(hydratedState, 'migrationDiagnostics', {
+      value: Object.freeze({ ...migrationDiagnostics }),
+      enumerable: false,
+      writable: false,
+      configurable: false,
+    });
+  }
+  return hydratedState;
 }
 
-export function safeHydrateChatState(input: unknown): HydrationResult {
+export function safeHydrateChatState(
+  input: unknown,
+  options: ChatHydrationOptionsV1 = {},
+): HydrationResult {
   try {
-    return { ok: true, state: hydrateChatState(input) };
+    return { ok: true, state: hydrateChatState(input, options) };
   } catch (error) {
     return {
       ok: false,
@@ -2952,9 +6296,6 @@ export function serializeChatState(state: ChatState): string {
     return JSON.stringify(persisted);
   } catch (error) {
     if (error instanceof ChatStateValidationError) throw error;
-    throw new ChatStateValidationError(
-      '$',
-      'could not serialize chat state',
-    );
+    throw new ChatStateValidationError('$', 'could not serialize chat state');
   }
 }

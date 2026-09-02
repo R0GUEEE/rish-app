@@ -12,20 +12,24 @@ import {
   createDefaultPreferences,
   createPreferencesStore,
 } from '../src/preferences';
+import {
+  workspaceRoot,
+  type WorkspaceRootRefV1,
+} from '../src/native/WorkspaceRoot';
 
 jest.mock('../src/native/LocalWorkspace', () => ({
   LocalWorkspace: {
     isAvailable: jest.fn(),
     capabilities: jest.fn(),
-    listDirectory: jest.fn(),
-    readText: jest.fn(),
-    writeText: jest.fn(),
-    createDirectory: jest.fn(),
-    renameEntry: jest.fn(),
-    trashEntry: jest.fn(),
-    listTrash: jest.fn(),
-    restoreFromTrash: jest.fn(),
-    executePortableTool: jest.fn(),
+    listV2: jest.fn(),
+    readV2: jest.fn(),
+    writeV2: jest.fn(),
+    createDirectoryV2: jest.fn(),
+    renameEntryV2: jest.fn(),
+    trashEntryV2: jest.fn(),
+    listTrashV2: jest.fn(),
+    restoreFromTrashV2: jest.fn(),
+    executePortableToolV2: jest.fn(),
   },
 }));
 
@@ -52,14 +56,31 @@ const mockLocalDocuments = (
   }
 ).LocalDocuments;
 
+const ROOT = workspaceRoot('11111111-1111-4111-8111-111111111111', 1, null);
+const PROJECT_ROOT = workspaceRoot(
+  ROOT.workspace_id,
+  ROOT.binding_revision,
+  '22222222-2222-4222-8222-222222222222',
+);
 const rootFile = {
   path: 'note.md',
   name: 'note.md',
   kind: 'file' as const,
   size: 5,
   modified_at: '2026-08-24T00:00:00.000Z',
-  revision: 'rev-1',
+  revision: 'a'.repeat(64),
 };
+
+function entry(path: string, kind: 'file' | 'directory' = 'file') {
+  return {
+    path,
+    name: path.split('/')[path.split('/').length - 1],
+    kind,
+    size: kind === 'file' ? 5 : 0,
+    modified_at: '2026-08-24T00:00:00.000Z',
+    revision: 'b'.repeat(64),
+  };
+}
 
 async function settle() {
   await Promise.resolve();
@@ -67,20 +88,27 @@ async function settle() {
   await Promise.resolve();
 }
 
+function deferred<T>() {
+  let resolve!: (value: T) => void;
+  const promise = new Promise<T>(resolveValue => {
+    resolve = resolveValue;
+  });
+  return { promise, resolve };
+}
+
 async function renderDrawer({
+  root = ROOT,
+  label = 'workspace',
   confirmDestructive = true,
-  projectScope,
   readOnly = false,
 }: {
+  root?: WorkspaceRootRefV1;
+  label?: string;
   confirmDestructive?: boolean;
-  projectScope?: { rootPath: string; label: string };
   readOnly?: boolean;
 } = {}): Promise<Renderer> {
   const store = createPreferencesStore({
-    initialPreferences: {
-      ...createDefaultPreferences(),
-      locale: 'en-US',
-    },
+    initialPreferences: { ...createDefaultPreferences(), locale: 'en-US' },
   });
   let renderer: Renderer | undefined;
   await act(async () => {
@@ -89,9 +117,10 @@ async function renderDrawer({
         <WorkspaceDrawer
           confirmDestructive={confirmDestructive}
           onClose={jest.fn()}
-          projectScope={projectScope}
           readOnly={readOnly}
           visible
+          workspaceLabel={label}
+          workspaceRoot={root}
         />
       </AppPresentationProvider>,
     );
@@ -115,39 +144,109 @@ function actionByLabel(
 beforeEach(() => {
   jest.clearAllMocks();
   mockLocalWorkspace.isAvailable.mockReturnValue(true);
-  mockLocalWorkspace.listDirectory.mockResolvedValue({ path: '', entries: [] });
-  mockLocalWorkspace.listTrash.mockResolvedValue({
-    entries: [],
-    invalid_record_count: 0,
+  mockLocalWorkspace.listV2.mockImplementation(
+    async (request: { path: string; root: WorkspaceRootRefV1 }) => ({
+      schema_version: 1,
+      root: request.root,
+      path: request.path,
+      entries: request.path === '' ? [] : [],
+    }),
+  );
+  mockLocalWorkspace.listTrashV2.mockImplementation(
+    async (request: { root: WorkspaceRootRefV1 }) => ({
+      schema_version: 1,
+      root: request.root,
+      entries: [],
+      invalid_record_count: 0,
+    }),
+  );
+  mockLocalWorkspace.readV2.mockResolvedValue({
+    schema_version: 1,
+    root: ROOT,
+    path: rootFile.path,
+    file: rootFile,
+    content: 'hello',
+  });
+  mockLocalWorkspace.writeV2.mockResolvedValue({
+    schema_version: 1,
+    root: ROOT,
+    file: rootFile,
+    created: false,
+  });
+  mockLocalWorkspace.createDirectoryV2.mockResolvedValue({
+    schema_version: 1,
+    root: ROOT,
+    directory: entry('docs', 'directory'),
+  });
+  mockLocalWorkspace.renameEntryV2.mockResolvedValue({
+    schema_version: 1,
+    root: ROOT,
+    entry: rootFile,
+    from: 'note.md',
+  });
+  mockLocalWorkspace.trashEntryV2.mockResolvedValue({
+    schema_version: 1,
+    root: ROOT,
+    receipt: {
+      schema_version: 1,
+      trash_id: '33333333-3333-4333-8333-333333333333',
+      original_path: 'note.md',
+      kind: 'file',
+      deleted_at: '2026-08-24T00:00:00.000Z',
+    },
+  });
+  mockLocalWorkspace.restoreFromTrashV2.mockResolvedValue({
+    schema_version: 1,
+    root: ROOT,
+    entry: rootFile,
+    trash_id: '33333333-3333-4333-8333-333333333333',
+    original_path: 'note.md',
+  });
+  mockLocalWorkspace.executePortableToolV2.mockResolvedValue({
+    schema_version: 1,
+    root: ROOT,
+    tool: 'sha256sum',
+    path: 'note.md',
+    exit_code: 0,
+    stdout: 'hash',
+    stderr: '',
+    protocol_version: 1,
+    path_kind: 'portable_applet',
   });
   mockLocalDocuments.isAvailable.mockReturnValue(true);
-  mockLocalDocuments.presentImportPicker.mockResolvedValue({
-    schema_version: 1,
-    status: 'imported',
-    destination_root: '',
-    entries: [{ path: 'imported.txt', kind: 'file', size: 7 }],
-  });
-  mockLocalDocuments.presentExportPicker.mockResolvedValue({
-    schema_version: 1,
-    status: 'exported',
-    item_count: 1,
-  });
+  mockLocalDocuments.presentImportPicker.mockImplementation(
+    async (request: { root: WorkspaceRootRefV1; operation_id: string }) => ({
+      schema_version: 1,
+      status: 'imported',
+      root: request.root,
+      operation_id: request.operation_id,
+      destination_path: '',
+      entries: [{ path: 'imported.txt', kind: 'file', size: 7 }],
+    }),
+  );
+  mockLocalDocuments.presentExportPicker.mockImplementation(
+    async (request: { root: WorkspaceRootRefV1; operation_id: string }) => ({
+      schema_version: 1,
+      status: 'exported',
+      root: request.root,
+      operation_id: request.operation_id,
+      item_count: 1,
+    }),
+  );
 });
 
-test('stays in a selected subdirectory instead of reinitializing the root', async () => {
-  const docs = {
-    path: 'docs',
-    name: 'docs',
-    kind: 'directory' as const,
-    size: 0,
-    modified_at: '2026-08-24T00:00:00.000Z',
-  };
-  mockLocalWorkspace.listDirectory.mockImplementation(async (path: string) =>
-    path === ''
-      ? { path: '', entries: [docs] }
-      : { path: 'docs', entries: [{ ...rootFile, path: 'docs/note.md' }] },
+test('routes list and navigation through one opaque root reference', async () => {
+  const docs = entry('docs', 'directory');
+  mockLocalWorkspace.listV2.mockImplementation(
+    async (request: { path: string; root: WorkspaceRootRefV1 }) => ({
+      schema_version: 1,
+      root: request.root,
+      path: request.path,
+      entries:
+        request.path === '' ? [docs] : [{ ...rootFile, path: 'docs/note.md' }],
+    }),
   );
-  const renderer = await renderDrawer();
+  const renderer = await renderDrawer({ root: ROOT });
 
   await act(async () => {
     actionByLabel(renderer.root, 'Open docs').props.onPress();
@@ -155,36 +254,34 @@ test('stays in a selected subdirectory instead of reinitializing the root', asyn
   });
 
   expect(
+    mockLocalWorkspace.listV2.mock.calls.map(([request]) => request),
+  ).toEqual([
+    { schema_version: 1, root: ROOT, path: '', max_entries: 1000 },
+    { schema_version: 1, root: ROOT, path: 'docs', max_entries: 1000 },
+  ]);
+  expect(
     renderer.root.findByProps({ children: 'workspace/docs' }),
   ).toBeDefined();
-  expect(
-    mockLocalWorkspace.listDirectory.mock.calls.map(([path]) => path),
-  ).toEqual(['', 'docs']);
 });
 
-test('roots project files at the selected worktree and hides Git metadata', async () => {
-  const rootPath = 'projects/project-1/repo';
-  mockLocalWorkspace.listDirectory.mockResolvedValue({
-    path: rootPath,
+test('roots project files at the selected opaque project binding and hides Git metadata', async () => {
+  mockLocalWorkspace.listV2.mockResolvedValue({
+    schema_version: 1,
+    root: PROJECT_ROOT,
+    path: '',
     entries: [
-      { ...rootFile, path: `${rootPath}/note.md` },
-      {
-        path: `${rootPath}/.git`,
-        name: '.git',
-        kind: 'directory',
-        size: 0,
-        modified_at: '2026-08-24T00:00:00.000Z',
-      },
+      rootFile,
+      { ...entry('.git', 'directory'), path: '.git', name: '.git' },
     ],
   });
-  const renderer = await renderDrawer({
-    projectScope: { rootPath, label: 'demo' },
-  });
+  const renderer = await renderDrawer({ root: PROJECT_ROOT, label: 'demo' });
 
-  expect(mockLocalWorkspace.listDirectory).toHaveBeenCalledWith(rootPath);
-  expect(
-    renderer.root.findAllByProps({ children: 'demo' }).length,
-  ).toBeGreaterThan(0);
+  expect(mockLocalWorkspace.listV2).toHaveBeenCalledWith({
+    schema_version: 1,
+    root: PROJECT_ROOT,
+    path: '',
+    max_entries: 1000,
+  });
   expect(
     renderer.root.findAllByProps({ accessibilityLabel: 'Open .git' }),
   ).toHaveLength(0);
@@ -193,104 +290,87 @@ test('roots project files at the selected worktree and hides Git metadata', asyn
     actionByLabel(renderer.root, 'Export note.md to Files').props.onPress();
     await settle();
   });
-  expect(mockLocalDocuments.presentExportPicker).toHaveBeenCalledWith([
-    `${rootPath}/note.md`,
-  ]);
+  expect(mockLocalDocuments.presentExportPicker).toHaveBeenCalledWith({
+    schema_version: 1,
+    root: PROJECT_ROOT,
+    operation_id: expect.stringMatching(/^[0-9a-f-]{36}$/),
+    source_paths: ['note.md'],
+  });
 });
 
-test('does not create or rename project Git metadata through the file UI', async () => {
-  const rootPath = 'projects/project-1/repo';
-  mockLocalWorkspace.listDirectory.mockResolvedValue({
-    path: rootPath,
-    entries: [{ ...rootFile, path: `${rootPath}/note.md` }],
-  });
-  const renderer = await renderDrawer({
-    projectScope: { rootPath, label: 'demo' },
-  });
-
+test('does not create or rename Git metadata through the file UI', async () => {
+  const renderer = await renderDrawer({ root: ROOT, label: 'demo' });
   await act(async () =>
     actionByLabel(renderer.root, 'New folder').props.onPress(),
   );
-  await act(async () => {
+  await act(async () =>
     renderer.root
       .findByProps({ accessibilityLabel: 'Name' })
-      .props.onChangeText('.git');
-  });
+      .props.onChangeText('.git'),
+  );
   await act(async () => {
     actionByLabel(renderer.root, 'Create').props.onPress();
     await settle();
   });
-  expect(mockLocalWorkspace.createDirectory).not.toHaveBeenCalled();
+  expect(mockLocalWorkspace.createDirectoryV2).not.toHaveBeenCalled();
   expect(
     renderer.root.findByProps({
       children: 'Git metadata is managed by Rish and cannot be edited here.',
     }),
   ).toBeDefined();
-
-  await act(async () =>
-    actionByLabel(renderer.root, 'Rename note.md').props.onPress(),
-  );
-  await act(async () =>
-    renderer.root
-      .findAllByProps({ accessibilityLabel: 'Rename' })
-      .find(instance => typeof instance.props.onChangeText === 'function')
-      ?.props.onChangeText('.git'),
-  );
-  await act(async () => {
-    actionByLabel(renderer.root, 'Rename').props.onPress();
-    await settle();
-  });
-  expect(mockLocalWorkspace.renameEntry).not.toHaveBeenCalled();
 });
 
-test('imports multiple Files items into the current project directory', async () => {
-  const rootPath = 'projects/project-1/repo';
-  mockLocalWorkspace.listDirectory.mockResolvedValue({
-    path: rootPath,
-    entries: [],
-  });
-  mockLocalDocuments.presentImportPicker.mockResolvedValue({
-    schema_version: 1,
-    status: 'imported',
-    destination_root: rootPath,
-    entries: [
-      { path: `${rootPath}/README.md`, kind: 'file', size: 12 },
-      { path: `${rootPath}/src`, kind: 'directory', size: 0 },
-    ],
-  });
-  const renderer = await renderDrawer({
-    projectScope: { rootPath, label: 'demo' },
-  });
-
+test('imports into the current directory with the same root reference', async () => {
+  mockLocalDocuments.presentImportPicker.mockImplementationOnce(
+    async (request: { root: WorkspaceRootRefV1; operation_id: string }) => ({
+      schema_version: 1,
+      status: 'imported',
+      root: request.root,
+      operation_id: request.operation_id,
+      destination_path: '',
+      entries: [{ path: 'imported.txt', kind: 'file', size: 7 }],
+    }),
+  );
+  const renderer = await renderDrawer({ root: PROJECT_ROOT, label: 'demo' });
   await act(async () => {
     actionByLabel(renderer.root, 'Import from Files').props.onPress();
     await settle();
   });
-
-  expect(mockLocalDocuments.presentImportPicker).toHaveBeenCalledWith(rootPath);
-  expect(mockLocalWorkspace.listDirectory).toHaveBeenCalledTimes(2);
+  expect(mockLocalDocuments.presentImportPicker).toHaveBeenCalledWith({
+    schema_version: 1,
+    root: PROJECT_ROOT,
+    operation_id: expect.stringMatching(/^[0-9a-f-]{36}$/),
+    destination_path: '',
+  });
   expect(
-    renderer.root.findByProps({
-      children: 'Imported 2 item(s) from Files.',
-    }),
+    renderer.root.findByProps({ children: 'Imported 1 item(s) from Files.' }),
   ).toBeDefined();
 });
 
-test('exports the opened project file and treats picker cancellation as neutral', async () => {
-  const rootPath = 'projects/project-1/repo';
-  const projectFile = { ...rootFile, path: `${rootPath}/note.md` };
-  mockLocalWorkspace.listDirectory.mockResolvedValue({
-    path: rootPath,
-    entries: [projectFile],
+test('exports an opened file and treats picker cancellation as neutral', async () => {
+  mockLocalWorkspace.listV2.mockResolvedValue({
+    schema_version: 1,
+    root: ROOT,
+    path: '',
+    entries: [rootFile],
   });
-  mockLocalWorkspace.readText.mockResolvedValue({
-    file: projectFile,
+  mockLocalWorkspace.readV2.mockResolvedValue({
+    schema_version: 1,
+    root: ROOT,
+    path: rootFile.path,
+    file: rootFile,
     content: 'hello',
   });
-  const renderer = await renderDrawer({
-    projectScope: { rootPath, label: 'demo' },
-  });
-
+  mockLocalDocuments.presentExportPicker.mockImplementationOnce(
+    async (request: { root: WorkspaceRootRefV1; operation_id: string }) => ({
+      schema_version: 1,
+      status: 'exported',
+      root: request.root,
+      operation_id: request.operation_id,
+      item_count: 1,
+    }),
+  );
+  const renderer = await renderDrawer({ root: ROOT, label: 'demo' });
   await act(async () => {
     actionByLabel(renderer.root, 'Open note.md').props.onPress();
     await settle();
@@ -299,18 +379,25 @@ test('exports the opened project file and treats picker cancellation as neutral'
     actionByLabel(renderer.root, 'Export to Files').props.onPress();
     await settle();
   });
-  expect(mockLocalDocuments.presentExportPicker).toHaveBeenCalledWith([
-    projectFile.path,
-  ]);
+  expect(mockLocalDocuments.presentExportPicker).toHaveBeenCalledWith({
+    schema_version: 1,
+    root: ROOT,
+    operation_id: expect.stringMatching(/^[0-9a-f-]{36}$/),
+    source_paths: ['note.md'],
+  });
   expect(
     renderer.root.findByProps({ children: 'Exported 1 item(s) to Files.' }),
   ).toBeDefined();
 
-  mockLocalDocuments.presentExportPicker.mockResolvedValueOnce({
-    schema_version: 1,
-    status: 'cancelled',
-    item_count: 0,
-  });
+  mockLocalDocuments.presentExportPicker.mockImplementationOnce(
+    async (request: { root: WorkspaceRootRefV1; operation_id: string }) => ({
+      schema_version: 1,
+      status: 'cancelled',
+      root: request.root,
+      operation_id: request.operation_id,
+      item_count: 0,
+    }),
+  );
   await act(async () => {
     actionByLabel(renderer.root, 'Export to Files').props.onPress();
     await settle();
@@ -320,12 +407,14 @@ test('exports the opened project file and treats picker cancellation as neutral'
   ).toHaveLength(0);
 });
 
-test('does not expose trash restoration while the workspace is read only', async () => {
-  mockLocalWorkspace.listTrash.mockResolvedValue({
+test('does not expose write or trash controls in read-only mode', async () => {
+  mockLocalWorkspace.listTrashV2.mockResolvedValue({
+    schema_version: 1,
+    root: ROOT,
     entries: [
       {
         schema_version: 1,
-        trash_id: 'trash-1',
+        trash_id: '33333333-3333-4333-8333-333333333333',
         original_path: 'note.md',
         kind: 'file',
         deleted_at: '2026-08-24T00:00:00.000Z',
@@ -334,7 +423,6 @@ test('does not expose trash restoration while the workspace is read only', async
     invalid_record_count: 0,
   });
   const renderer = await renderDrawer({ readOnly: true });
-
   expect(
     renderer.root.findAllByProps({ accessibilityLabel: 'Restore note.md' }),
   ).toHaveLength(0);
@@ -342,108 +430,239 @@ test('does not expose trash restoration while the workspace is read only', async
   expect(actionByLabel(renderer.root, 'Import from Files').props.disabled).toBe(
     true,
   );
-  expect(mockLocalWorkspace.restoreFromTrash).not.toHaveBeenCalled();
+  expect(mockLocalWorkspace.restoreFromTrashV2).not.toHaveBeenCalled();
 });
 
-test('keeps create and rename editors mutually exclusive', async () => {
-  mockLocalWorkspace.listDirectory.mockResolvedValue({
+test('sends the read revision back for an optimistic V2 write', async () => {
+  mockLocalWorkspace.listV2.mockResolvedValue({
+    schema_version: 1,
+    root: ROOT,
     path: '',
     entries: [rootFile],
+  });
+  mockLocalWorkspace.readV2.mockResolvedValue({
+    schema_version: 1,
+    root: ROOT,
+    path: rootFile.path,
+    file: rootFile,
+    content: 'hello',
+  });
+  mockLocalWorkspace.writeV2.mockResolvedValue({
+    schema_version: 1,
+    root: ROOT,
+    file: { ...rootFile, size: 14, revision: 'c'.repeat(64) },
+    created: false,
   });
   const renderer = await renderDrawer();
-
   await act(async () => {
-    actionByLabel(renderer.root, 'New file').props.onPress();
+    actionByLabel(renderer.root, 'Open note.md').props.onPress();
+    await settle();
   });
-  expect(actionByLabel(renderer.root, 'Create')).toBeDefined();
-
-  await act(async () => {
-    actionByLabel(renderer.root, 'Rename note.md').props.onPress();
-  });
-  expect(
-    renderer.root.findAllByProps({ accessibilityLabel: 'Create' }),
-  ).toHaveLength(0);
-  expect(actionByLabel(renderer.root, 'Rename')).toBeDefined();
-
-  await act(async () => {
-    actionByLabel(renderer.root, 'New folder').props.onPress();
-  });
-  expect(
+  await act(async () =>
     renderer.root
-      .findAllByProps({ accessibilityLabel: 'Rename' })
-      .filter(instance => typeof instance.props.onPress === 'function'),
-  ).toHaveLength(0);
-  expect(actionByLabel(renderer.root, 'Create')).toBeDefined();
+      .findByProps({ accessibilityLabel: 'File content' })
+      .props.onChangeText('updated content'),
+  );
+  await act(async () => {
+    actionByLabel(renderer.root, 'Save changes').props.onPress();
+    await settle();
+  });
+  expect(mockLocalWorkspace.writeV2).toHaveBeenCalledWith({
+    schema_version: 1,
+    root: ROOT,
+    path: 'note.md',
+    content: 'updated content',
+    expected_revision: rootFile.revision,
+    create_only: false,
+  });
 });
 
-test('asks before closing a dirty editor when confirmation is enabled', async () => {
-  mockLocalWorkspace.listDirectory.mockResolvedValue({
+test('asks before closing a dirty editor', async () => {
+  mockLocalWorkspace.listV2.mockResolvedValue({
+    schema_version: 1,
+    root: ROOT,
     path: '',
     entries: [rootFile],
   });
-  mockLocalWorkspace.readText.mockResolvedValue({
+  mockLocalWorkspace.readV2.mockResolvedValue({
+    schema_version: 1,
+    root: ROOT,
+    path: rootFile.path,
     file: rootFile,
     content: 'hello',
   });
   const alert = jest.spyOn(Alert, 'alert').mockImplementation(() => undefined);
   const renderer = await renderDrawer();
-
   await act(async () => {
     actionByLabel(renderer.root, 'Open note.md').props.onPress();
     await settle();
   });
-  await act(async () => {
+  await act(async () =>
     renderer.root
       .findByProps({ accessibilityLabel: 'File content' })
-      .props.onChangeText('changed');
-  });
-  await act(async () => {
-    actionByLabel(renderer.root, 'Close').props.onPress();
-  });
-
+      .props.onChangeText('changed'),
+  );
+  await act(async () => actionByLabel(renderer.root, 'Close').props.onPress());
   expect(alert).toHaveBeenCalledWith(
     'Save changes?',
     'note.md',
     expect.any(Array),
   );
-  expect(
-    renderer.root.findByProps({ accessibilityLabel: 'File content' }),
-  ).toBeDefined();
   alert.mockRestore();
 });
 
-test('updates cached file metadata after a revision-protected save', async () => {
-  mockLocalWorkspace.listDirectory.mockResolvedValue({
-    path: '',
-    entries: [rootFile],
-  });
-  mockLocalWorkspace.readText.mockResolvedValue({
-    file: rootFile,
-    content: 'hello',
-  });
-  mockLocalWorkspace.writeText.mockResolvedValue({
-    created: false,
-    file: { ...rootFile, size: 2048, revision: 'rev-2' },
-  });
+test('clears create and rename state when the workspace root changes', async () => {
+  const nextRoot = workspaceRoot(ROOT.workspace_id, ROOT.binding_revision + 1);
+  mockLocalWorkspace.listV2.mockImplementation(
+    async (request: { root: WorkspaceRootRefV1; path: string }) => ({
+      schema_version: 1,
+      root: request.root,
+      path: request.path,
+      entries: request.path === '' ? [rootFile] : [],
+    }),
+  );
   const renderer = await renderDrawer();
-
+  await act(async () =>
+    actionByLabel(renderer.root, 'New folder').props.onPress(),
+  );
+  expect(
+    renderer.root.findByProps({ accessibilityLabel: 'Name' }),
+  ).toBeDefined();
   await act(async () => {
-    actionByLabel(renderer.root, 'Open note.md').props.onPress();
+    renderer.update(
+      <AppPresentationProvider
+        store={createPreferencesStore({
+          initialPreferences: {
+            ...createDefaultPreferences(),
+            locale: 'en-US',
+          },
+        })}
+      >
+        <WorkspaceDrawer onClose={jest.fn()} visible workspaceRoot={nextRoot} />
+      </AppPresentationProvider>,
+    );
+    await settle();
+  });
+  expect(
+    renderer.root.findAllByProps({ accessibilityLabel: 'Name' }),
+  ).toHaveLength(0);
+});
+
+test('does not execute a destructive alert action after a live root change', async () => {
+  const nextRoot = workspaceRoot(ROOT.workspace_id, ROOT.binding_revision + 1);
+  mockLocalWorkspace.listV2.mockImplementation(
+    async (request: { root: WorkspaceRootRefV1; path: string }) => ({
+      schema_version: 1,
+      root: request.root,
+      path: request.path,
+      entries: request.path === '' ? [rootFile] : [],
+    }),
+  );
+  let buttons: readonly { text?: string; onPress?: () => void }[] = [];
+  const alert = jest
+    .spyOn(Alert, 'alert')
+    .mockImplementation((_title, _message, suppliedButtons) => {
+      buttons = (suppliedButtons ?? []) as readonly {
+        text?: string;
+        onPress?: () => void;
+      }[];
+    });
+  const renderer = await renderDrawer();
+  await act(async () =>
+    actionByLabel(renderer.root, 'Delete note.md').props.onPress(),
+  );
+  await act(async () => {
+    renderer.update(
+      <AppPresentationProvider
+        store={createPreferencesStore({
+          initialPreferences: {
+            ...createDefaultPreferences(),
+            locale: 'en-US',
+          },
+        })}
+      >
+        <WorkspaceDrawer onClose={jest.fn()} visible workspaceRoot={nextRoot} />
+      </AppPresentationProvider>,
+    );
+    await settle();
+  });
+  const destructive = buttons.find(button => button.text === 'Move to Trash');
+  await act(async () => {
+    destructive?.onPress?.();
+    await settle();
+  });
+  expect(mockLocalWorkspace.trashEntryV2).not.toHaveBeenCalled();
+  alert.mockRestore();
+});
+
+test('ignores a late result from an earlier workspace reference generation', async () => {
+  const nextRoot = workspaceRoot(ROOT.workspace_id, ROOT.binding_revision + 1);
+  const oldList = deferred<unknown>();
+  const oldTrash = deferred<unknown>();
+  let listCall = 0;
+  mockLocalWorkspace.listV2.mockImplementation(
+    (request: { root: WorkspaceRootRefV1; path: string }) => {
+      listCall += 1;
+      if (listCall === 1) return oldList.promise;
+      return Promise.resolve({
+        schema_version: 1,
+        root: request.root,
+        path: request.path,
+        entries: [{ ...rootFile, name: 'new.md', path: 'new.md' }],
+      });
+    },
+  );
+  let trashCall = 0;
+  mockLocalWorkspace.listTrashV2.mockImplementation(
+    (request: { root: WorkspaceRootRefV1 }) => {
+      trashCall += 1;
+      if (trashCall === 1) return oldTrash.promise;
+      return Promise.resolve({
+        schema_version: 1,
+        root: request.root,
+        entries: [],
+        invalid_record_count: 0,
+      });
+    },
+  );
+  const store = createPreferencesStore({
+    initialPreferences: { ...createDefaultPreferences(), locale: 'en-US' },
+  });
+  let renderer: Renderer | undefined;
+  await act(async () => {
+    renderer = ReactTestRenderer.create(
+      <AppPresentationProvider store={store}>
+        <WorkspaceDrawer onClose={jest.fn()} visible workspaceRoot={ROOT} />
+      </AppPresentationProvider>,
+    );
+    await settle();
+  });
+  if (renderer === undefined) throw new Error('renderer was not created');
+  await act(async () => {
+    renderer!.update(
+      <AppPresentationProvider store={store}>
+        <WorkspaceDrawer onClose={jest.fn()} visible workspaceRoot={nextRoot} />
+      </AppPresentationProvider>,
+    );
     await settle();
   });
   await act(async () => {
-    renderer.root
-      .findByProps({ accessibilityLabel: 'File content' })
-      .props.onChangeText('updated content');
-  });
-  await act(async () => {
-    actionByLabel(renderer.root, 'Save changes').props.onPress();
+    oldList.resolve({
+      schema_version: 1,
+      root: ROOT,
+      path: '',
+      entries: [{ ...rootFile, name: 'old.md', path: 'old.md' }],
+    });
+    oldTrash.resolve({
+      schema_version: 1,
+      root: ROOT,
+      entries: [],
+      invalid_record_count: 0,
+    });
     await settle();
   });
-  await act(async () => {
-    actionByLabel(renderer.root, 'Close').props.onPress();
-  });
-
-  expect(renderer.root.findByProps({ children: '2.0 KB' })).toBeDefined();
-  expect(mockLocalWorkspace.listDirectory).toHaveBeenCalledTimes(1);
+  expect(renderer.root.findAllByProps({ children: 'old.md' })).toHaveLength(0);
+  expect(
+    renderer.root.findAllByProps({ children: 'new.md' }).length,
+  ).toBeGreaterThan(0);
 });

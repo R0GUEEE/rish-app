@@ -5,6 +5,8 @@
 #import <UIKit/UIKit.h>
 
 #import "LocalProjectAccess.h"
+#import "LocalWorkspaceAccess.h"
+#import "WorkspaceClearanceStore.h"
 
 #include <arpa/inet.h>
 #include <dirent.h>
@@ -31,6 +33,28 @@ static NSUInteger const LPMaxOrphansPerReconcile = 128;
 static NSUInteger const LPMaxOrphanCleanupEntriesPerPass = 128;
 static NSUInteger const LPMaxStagingOwnerBytes = 1024;
 static NSString *const LPStagingOwnerMarker = @".rish-staging-owner.json";
+static NSUInteger const LPV2MaxDiffBytes = 1024 * 1024;
+static NSUInteger const LPV2MaxCommitMessageBytes = 500;
+static NSUInteger const LPV2MaxCredentialReferenceBytes = 256;
+static NSUInteger const LPV2MaxAttachJournalBytes = 16 * 1024;
+static NSString *const LPV2BindingFile = @"binding-v2.json";
+static NSString *const LPV2GitTopology = @"private_split_gitdir";
+typedef BOOL (^LPV2AttachFaultHook)(NSString *stage);
+
+// LocalWorkspaceAccess intentionally keeps authority storage private.  This
+// narrow native-only category is used to read the already verified root
+// fingerprint and to publish the private Git binding; none of these methods
+// or objects cross the React Native boundary.
+@interface DSHLocalWorkspaceAccess (DSHLocalProjectsPrivateAccess)
+@property(nonatomic, strong) NSURL *privateRootURL;
+- (nullable NSURL *)ownedWorkspacesRootURL;
+- (nullable NSDictionary *)loadRegistry:(NSError **)error
+                                  digest:(NSString *_Nullable *_Nullable)digest;
+- (nullable NSDictionary *)recordInRegistry:(NSDictionary *)registry
+                                  workspaceId:(NSString *)workspaceId;
+- (nullable NSDictionary *)loadAuthorityForRecord:(NSDictionary *)record
+                                             error:(NSError **)error;
+@end
 
 static NSError *LPError(NSInteger code, NSString *message) {
   return [NSError errorWithDomain:@"LocalProjects"
@@ -44,6 +68,266 @@ static NSString *LPString(id value) {
 
 static NSDictionary *LPDictionary(id value) {
   return [value isKindOfClass:NSDictionary.class] ? value : nil;
+}
+
+static BOOL LPHasControlCharacter(NSString *value);
+static BOOL LPSameNode(const struct stat &left, const struct stat &right);
+
+static BOOL LPV2ExactKeys(NSDictionary *value, NSArray<NSString *> *keys) {
+  if (![value isKindOfClass:NSDictionary.class] || value.count != keys.count) {
+    return NO;
+  }
+  return [[NSSet setWithArray:value.allKeys]
+      isEqualToSet:[NSSet setWithArray:keys]];
+}
+
+static BOOL LPV2SafeRevision(id value) {
+  if (![value isKindOfClass:NSNumber.class] ||
+      CFGetTypeID((__bridge CFTypeRef)value) == CFBooleanGetTypeID() ||
+      [value isKindOfClass:NSDecimalNumber.class]) {
+    return NO;
+  }
+  double number = [value doubleValue];
+  if (!isfinite(number) || signbit(number) || floor(number) != number ||
+      number < 1.0 || number > 9007199254740991.0) {
+    return NO;
+  }
+  unsigned long long exact = [value unsignedLongLongValue];
+  return (double)exact == number && exact >= 1 &&
+      exact <= 9007199254740991ULL;
+}
+
+static BOOL LPV2CanonicalOID(id value, BOOL allowNull) {
+  if (allowNull && value == NSNull.null) return YES;
+  NSString *oid = LPString(value);
+  if (oid.length != 40) return NO;
+  NSCharacterSet *hex =
+      [NSCharacterSet characterSetWithCharactersInString:@"0123456789abcdef"];
+  return [oid rangeOfCharacterFromSet:hex.invertedSet].location == NSNotFound;
+}
+
+static BOOL LPV2CanonicalDigest(id value) {
+  NSString *digest = LPString(value);
+  if (digest.length != 64) return NO;
+  NSCharacterSet *hex =
+      [NSCharacterSet characterSetWithCharactersInString:@"0123456789abcdef"];
+  return [digest rangeOfCharacterFromSet:hex.invertedSet].location == NSNotFound;
+}
+
+static BOOL LPV2CanonicalOperationId(id value) {
+  NSString *candidate = LPString(value);
+  if (candidate.length != 36 ||
+      ![candidate isEqualToString:candidate.lowercaseString]) return NO;
+  NSUUID *uuid = [[NSUUID alloc] initWithUUIDString:candidate];
+  return uuid != nil && [uuid.UUIDString.lowercaseString isEqual:candidate];
+}
+
+static BOOL LPV2BoundedString(id value, NSUInteger maximumBytes,
+                              BOOL allowEmpty) {
+  NSString *string = LPString(value);
+  NSData *data = [string dataUsingEncoding:NSUTF8StringEncoding
+                         allowLossyConversion:NO];
+  return string != nil && data != nil && data.length <= maximumBytes &&
+      (allowEmpty || string.length > 0) && !LPHasControlCharacter(string);
+}
+
+static NSDictionary *LPV2Root(id value, BOOL projectRequired, NSError **error) {
+  NSDictionary *root = LPDictionary(value);
+  if (!LPV2ExactKeys(root, @[
+        @"schema_version", @"workspace_id", @"binding_revision", @"project_id"
+      ]) || ![root[@"schema_version"] isKindOfClass:NSNumber.class] ||
+      CFGetTypeID((__bridge CFTypeRef)root[@"schema_version"]) ==
+          CFBooleanGetTypeID() ||
+      [root[@"schema_version"] isKindOfClass:NSDecimalNumber.class] ||
+      ![root[@"schema_version"] isEqual:@1] ||
+      ![DSHLocalProjectAccess isCanonicalProjectId:LPString(root[@"workspace_id"])] ||
+      !LPV2SafeRevision(root[@"binding_revision"])) {
+    if (error != nil) *error = LPError(3101, @"Workspace root is invalid");
+    return nil;
+  }
+  id project = root[@"project_id"];
+  if (project == NSNull.null) {
+    if (projectRequired) {
+      if (error != nil) *error = LPError(3101, @"Workspace root is invalid");
+      return nil;
+    }
+  } else if (![DSHLocalProjectAccess isCanonicalProjectId:LPString(project)]) {
+    if (error != nil) *error = LPError(3101, @"Workspace root is invalid");
+    return nil;
+  }
+  return @{
+    @"schema_version" : @1,
+    @"workspace_id" : [root[@"workspace_id"] copy],
+    @"binding_revision" : @([root[@"binding_revision"] unsignedLongLongValue]),
+    @"project_id" : project == NSNull.null ? NSNull.null : [project copy],
+  };
+}
+
+static BOOL LPV2RootsEqual(NSDictionary *left, NSDictionary *right) {
+  NSDictionary *a = LPV2Root(left, NO, nil);
+  NSDictionary *b = LPV2Root(right, NO, nil);
+  return a != nil && b != nil && [a isEqual:b];
+}
+
+static NSDictionary *LPV2ReadAttachJournal(NSURL *url,
+                                           NSString *workspaceId,
+                                           NSString *operationId,
+                                           NSError **error) {
+  struct stat before = {};
+  if (url == nil || lstat(url.fileSystemRepresentation, &before) != 0 ||
+      !S_ISREG(before.st_mode) || S_ISLNK(before.st_mode) ||
+      before.st_nlink != 1 || before.st_size <= 0 ||
+      before.st_size > (off_t)LPV2MaxAttachJournalBytes) {
+    if (error != nil) *error = LPError(3104, @"Attach journal is unsafe");
+    return nil;
+  }
+  int descriptor = open(url.fileSystemRepresentation,
+      O_RDONLY | O_CLOEXEC | O_NOFOLLOW);
+  struct stat opened = {};
+  BOOL valid = descriptor >= 0 && fstat(descriptor, &opened) == 0 &&
+      LPSameNode(before, opened) && opened.st_size == before.st_size;
+  NSMutableData *data = valid
+      ? [NSMutableData dataWithLength:(NSUInteger)opened.st_size] : nil;
+  NSUInteger offset = 0;
+  while (valid && offset < data.length) {
+    ssize_t count = pread(descriptor,
+        static_cast<uint8_t *>(data.mutableBytes) + offset,
+        data.length - offset, (off_t)offset);
+    if (count <= 0) { valid = NO; break; }
+    offset += (NSUInteger)count;
+  }
+  struct stat after = {};
+  valid = valid && fstat(descriptor, &after) == 0 &&
+      LPSameNode(opened, after) && after.st_size == opened.st_size;
+  if (descriptor >= 0) close(descriptor);
+  NSDictionary *journal = valid ? LPDictionary([NSJSONSerialization
+      JSONObjectWithData:data options:0 error:nil]) : nil;
+  if (!LPV2ExactKeys(journal, @[
+        @"schema_version", @"operation_id", @"workspace_id",
+        @"binding_revision", @"project_id", @"root_fingerprint_sha256",
+        @"staging_name", @"final_name", @"phase"
+      ]) || ![journal[@"schema_version"] isEqual:@1] ||
+      ![journal[@"operation_id"] isEqual:operationId] ||
+      ![journal[@"workspace_id"] isEqual:workspaceId] ||
+      !LPV2SafeRevision(journal[@"binding_revision"]) ||
+      ![DSHLocalProjectAccess isCanonicalProjectId:journal[@"project_id"]] ||
+      !LPV2CanonicalDigest(journal[@"root_fingerprint_sha256"]) ||
+      ![journal[@"staging_name"] isEqual:
+          [NSString stringWithFormat:@".rish-attach-%@", operationId]] ||
+      ![journal[@"final_name"] isEqual:journal[@"project_id"]] ||
+      !([journal[@"phase"] isEqual:@"prepared"] ||
+        [journal[@"phase"] isEqual:@"published"])) {
+    if (error != nil) *error = LPError(3104, @"Attach journal is invalid");
+    return nil;
+  }
+  return journal;
+}
+
+static NSString *LPV2StableErrorCode(NSError *error) {
+  if ([error.domain isEqual:@"LocalProjects"]) {
+    switch (error.code) {
+      case 3003:
+      case 3101:
+        return @"E_PROJECT_REQUEST_INVALID";
+      case 3105:
+      case 3106:
+        return @"E_PROJECT_BUSY";
+      case 3104:
+      case 3107:
+        return @"E_PROJECT_STORAGE_UNSAFE";
+      case 3110:
+        return @"E_PROJECT_CONFLICT";
+      case 3111:
+        return @"E_PROJECT_UNAVAILABLE";
+      case 3112:
+        return @"E_WORKSPACE_CONFIRMATION";
+      default:
+        return @"E_PROJECT_NATIVE";
+    }
+  }
+  if ([error.domain isEqual:DSHLocalWorkspaceAccessErrorDomain]) {
+    switch ((DSHLocalWorkspaceAccessErrorCode)error.code) {
+      case DSHLocalWorkspaceAccessErrorInvalid:
+        return @"E_WORKSPACE_INVALID";
+      case DSHLocalWorkspaceAccessErrorNotFound:
+        return @"E_WORKSPACE_NOT_FOUND";
+      case DSHLocalWorkspaceAccessErrorBusy:
+      case DSHLocalWorkspaceAccessErrorPickerBusy:
+        return @"E_WORKSPACE_BUSY";
+      case DSHLocalWorkspaceAccessErrorRevisionStale:
+        return @"E_WORKSPACE_REVISION_STALE";
+      case DSHLocalWorkspaceAccessErrorRevoked:
+        return @"E_WORKSPACE_REVOKED";
+      case DSHLocalWorkspaceAccessErrorCapability:
+        return @"E_WORKSPACE_CAPABILITY";
+      case DSHLocalWorkspaceAccessErrorRootChanged:
+        return @"E_WORKSPACE_ROOT_CHANGED";
+      case DSHLocalWorkspaceAccessErrorConflict:
+        return @"E_WORKSPACE_CONFLICT";
+      case DSHLocalWorkspaceAccessErrorPersistence:
+        return @"E_WORKSPACE_PERSISTENCE";
+      case DSHLocalWorkspaceAccessErrorIO:
+        return @"E_WORKSPACE_IO";
+      default:
+        return @"E_WORKSPACE_UNAVAILABLE";
+    }
+  }
+  if ([error.domain isEqual:DSHLocalProjectAccessErrorDomain]) {
+    switch ((DSHLocalProjectAccessErrorCode)error.code) {
+      case DSHLocalProjectAccessErrorInvalidIdentifier:
+        return @"E_PROJECT_REQUEST_INVALID";
+      case DSHLocalProjectAccessErrorUnsafeStorage:
+        return @"E_PROJECT_STORAGE_UNSAFE";
+      case DSHLocalProjectAccessErrorLockTimeout:
+        return @"E_PROJECT_BUSY";
+      default:
+        return @"E_PROJECT_UNAVAILABLE";
+    }
+  }
+  return @"E_PROJECT_NATIVE";
+}
+
+static void LPV2Reject(RCTPromiseRejectBlock reject, NSError *error) {
+  NSString *code = LPV2StableErrorCode(error);
+  reject(code, code, nil);
+}
+
+static NSString *LPV2DescriptorPath(int descriptor) {
+  if (descriptor < 0) return nil;
+  char path[PATH_MAX] = {};
+  if (fcntl(descriptor, F_GETPATH, path) != 0 || path[0] != '/') return nil;
+  return [[NSFileManager defaultManager]
+      stringWithFileSystemRepresentation:path length:strlen(path)];
+}
+
+static NSString *LPV2ProjectDisplayName(DSHLocalProjectLease *lease) {
+  NSString *name = LPString(lease.metadata[@"name"]);
+  if (name.length == 0 || LPHasControlCharacter(name) ||
+      [name containsString:@"/"] || [name containsString:@"\\"] ||
+      [name isEqual:@"."] || [name isEqual:@".."]) {
+    return lease.projectId;
+  }
+  return name;
+}
+
+static NSString *LPV2ClipUTF8(NSString *value, NSUInteger maximumBytes,
+                              BOOL *truncated) {
+  NSData *data = [value dataUsingEncoding:NSUTF8StringEncoding
+                         allowLossyConversion:NO];
+  if (data == nil || data.length <= maximumBytes) {
+    if (truncated != nullptr) *truncated = NO;
+    return value;
+  }
+  NSUInteger take = maximumBytes;
+  NSString *clipped = nil;
+  while (take > 0 && clipped == nil) {
+    clipped = [[NSString alloc]
+        initWithData:[data subdataWithRange:NSMakeRange(0, take)]
+            encoding:NSUTF8StringEncoding];
+    if (clipped == nil) take -= 1;
+  }
+  if (truncated != nullptr) *truncated = YES;
+  return clipped ?: @"";
 }
 
 static NSString *LPNow(void) {
@@ -60,6 +344,56 @@ static NSString *LPNow(void) {
 static BOOL LPHasControlCharacter(NSString *value) {
   return [value rangeOfCharacterFromSet:NSCharacterSet.controlCharacterSet].location
     != NSNotFound;
+}
+
+static NSString *LPValidatedHTTPSProxyURL(id optionsValue, NSError **error) {
+  if (optionsValue == nil || optionsValue == NSNull.null) return nil;
+  NSDictionary *options = LPDictionary(optionsValue);
+  if (options == nil) {
+    if (error != nil) *error = LPError(3003, @"HTTPS proxy options are invalid");
+    return nil;
+  }
+  id proxyValue = options[@"httpsProxyUrl"];
+  if (proxyValue == nil || proxyValue == NSNull.null) return nil;
+  NSString *input = LPString(proxyValue);
+  if (input == nil) {
+    if (error != nil) *error = LPError(3003, @"HTTPS proxy URL is invalid");
+    return nil;
+  }
+  if (input.length == 0) return nil;
+  if (input.length > 2048 || LPHasControlCharacter(input)
+    || ![input isEqualToString:[input stringByTrimmingCharactersInSet:
+      NSCharacterSet.whitespaceAndNewlineCharacterSet]]) {
+    if (error != nil) *error = LPError(3003, @"HTTPS proxy URL is invalid");
+    return nil;
+  }
+  NSURLComponents *components = [NSURLComponents componentsWithString:input];
+  NSString *scheme = components.scheme.lowercaseString;
+  NSString *host = components.host;
+  NSNumber *port = components.port;
+  NSString *path = components.path;
+  BOOL valid = ([scheme isEqualToString:@"http"] || [scheme isEqualToString:@"https"])
+    && host.length > 0 && !LPHasControlCharacter(host)
+    && port != nil && port.integerValue >= 1 && port.integerValue <= 65535
+    && (path.length == 0 || [path isEqualToString:@"/"])
+    && components.user == nil && components.password == nil
+    && components.query == nil && components.fragment == nil
+    && components.URL != nil;
+  if (!valid) {
+    if (error != nil) *error = LPError(3003, @"HTTPS proxy URL is invalid");
+    return nil;
+  }
+  NSURLComponents *canonical = [[NSURLComponents alloc] init];
+  canonical.scheme = scheme;
+  canonical.host = host;
+  canonical.port = port;
+  canonical.path = @"/";
+  NSString *proxyURL = canonical.URL.absoluteString;
+  if (proxyURL.length == 0 || proxyURL.length > 2048) {
+    if (error != nil) *error = LPError(3003, @"HTTPS proxy URL is invalid");
+    return nil;
+  }
+  return proxyURL;
 }
 
 static NSString *LPValidatedProjectName(id value, NSError **error) {
@@ -549,10 +883,16 @@ static int LPKeychainCredentialCallback(git_credential **out,
 @interface LocalProjectsModule : NSObject <RCTBridgeModule>
 @property(nonatomic, strong) dispatch_queue_t projectQueue;
 @property(nonatomic, strong) DSHLocalProjectAccess *projectAccess;
+@property(nonatomic, strong, nullable) DSHLocalWorkspaceAccess *workspaceAccessV2;
+@property(nonatomic, strong, nullable) DSHLocalProjectAccess *projectAccessV2;
 @property(nonatomic, strong) NSMutableDictionary<NSString *, NSValue *> *stagingIdentities;
 @property(nonatomic, strong) NSMutableDictionary<NSString *, DSHLocalProjectsRootLease *> *stagingRootLeases;
 @property(nonatomic, strong) NSMutableDictionary<NSString *, NSString *> *stagingCleanupTokens;
+@property(nonatomic, strong) NSMutableDictionary<NSString *, NSDictionary *> *v2DetachCheckpoints;
+@property(nonatomic, strong) NSMutableDictionary<NSString *, NSDictionary *> *v2AttachResults;
+@property(nonatomic, strong, nullable) NSError *v2AttachStartupError;
 @property(nonatomic, strong, nullable) DSHLocalProjectsRootLease *pendingRootLease;
+@property(nonatomic, copy, nullable) LPV2AttachFaultHook v2AttachFaultHook;
 - (BOOL)stagingEntryIsExactForProjectId:(NSString *)projectId
                                   error:(NSError **)error;
 - (void)removeVisibleStagingDirectory:(NSURL *)staging
@@ -560,6 +900,53 @@ static int LPKeychainCredentialCallback(git_credential **out,
 - (BOOL)reconcileOwnedOrphansInRootLease:(DSHLocalProjectsRootLease *)rootLease;
 - (BOOL)removePublishedOwnerMarkerAtDescriptor:(int)descriptor;
 - (BOOL)syncPublishedRootDescriptor:(int)descriptor;
+- (nullable DSHLocalProjectLease *)v2LeaseForRoot:(NSDictionary *)root
+                                             mode:(DSHLocalProjectAccessMode)mode
+                                            error:(NSError **)error;
+- (nullable NSDictionary *)v2ProjectDescriptorForLease:(DSHLocalProjectLease *)lease
+                                                  root:(NSDictionary *)root;
+- (nullable NSDictionary *)v2ProjectDescriptorForRoot:(NSDictionary *)root
+                                            projectId:(NSString *)projectId
+                                          displayName:(NSString *)displayName;
+- (nullable NSDictionary *)v2ProjectForWorkspace:(NSDictionary *)root
+                                             error:(NSError **)error;
+- (DSHLocalProjectAccess *)v2LegacyProjectAccess;
+- (nullable NSDictionary *)v2AttachWorkspaceProject:(NSDictionary *)request
+                                               error:(NSError **)error;
+- (BOOL)v2ReconcileAttachStagingForWorkspaceId:(NSString *)workspaceId
+                                         error:(NSError **)error;
+- (BOOL)v2ReconcileAllAttachStaging:(NSError **)error;
+- (nullable NSArray<NSURL *> *)v2AttachContentsOfDirectory:(NSURL *)directory
+                                                      error:(NSError **)error;
+- (BOOL)v2WriteAttachJournalData:(NSData *)data
+                            toURL:(NSURL *)url
+                            error:(NSError **)error;
+- (BOOL)v2RemoveAttachItemAtURL:(NSURL *)url
+                          parent:(NSURL *)parent
+                           error:(NSError **)error;
+- (BOOL)v2FsyncDirectoryAtURL:(NSURL *)url error:(NSError **)error;
+- (nullable NSDictionary *)v2PrepareDetach:(NSDictionary *)request
+                                      error:(NSError **)error;
+- (nullable NSDictionary *)v2CommitDetach:(NSDictionary *)request
+                                     error:(NSError **)error;
+- (nullable NSString *)v2RootFingerprintForRoot:(NSDictionary *)root
+                                           error:(NSError **)error;
+- (nullable NSDictionary *)v2BindingForRoot:(NSDictionary *)root
+                                  projectId:(NSString *)projectId
+                                     error:(NSError **)error;
+- (nullable NSURL *)v2GitDirectoryURLForWorkspaceId:(NSString *)workspaceId
+                                           projectId:(NSString *)projectId;
+- (BOOL)v2WriteBindingForRoot:(NSDictionary *)root
+                    projectId:(NSString *)projectId
+                  displayName:(NSString *)displayName
+                        gitURL:(NSURL *)gitURL
+                 rootFingerprint:(NSString *)rootFingerprint
+                           error:(NSError **)error;
+- (nullable NSDictionary *)credentialForReference:(NSString *)reference
+                                              host:(NSString *)host
+                                            status:(OSStatus *)statusOut;
+- (instancetype)initWithSupportURL:(nullable NSURL *)support
+                       projectAccess:(DSHLocalProjectAccess *)projectAccess;
 @end
 
 @implementation LocalProjectsModule
@@ -571,14 +958,67 @@ RCT_EXPORT_MODULE(LocalProjects)
 }
 
 - (instancetype)init {
+  NSError *workspaceError = nil;
+  NSURL *support = [[NSFileManager defaultManager]
+      URLForDirectory:NSApplicationSupportDirectory
+             inDomain:NSUserDomainMask
+    appropriateForURL:nil
+               create:YES
+                error:&workspaceError];
+  return [self initWithSupportURL:support
+                     projectAccess:[DSHLocalProjectAccess sharedAccess]];
+}
+
+- (instancetype)initWithSupportURL:(NSURL *)support
+                       projectAccess:(DSHLocalProjectAccess *)projectAccess {
   self = [super init];
   if (self != nil) {
-    _projectAccess = DSHLocalProjectAccess.sharedAccess;
+    _projectAccess = projectAccess;
+    if (support != nil) {
+      DSHLocalProjectAccess *legacyProjectAccess = projectAccess;
+      _workspaceAccessV2 = [[DSHLocalWorkspaceAccess alloc]
+          initWithPrivateRootURL:support
+          clock:^NSDate * { return NSDate.date; }
+          UUIDGenerator:^NSString * {
+            return NSUUID.UUID.UUIDString.lowercaseString;
+          }
+          legacyResolver:^BOOL(NSString *projectId,
+                               NSDictionary **evidence,
+                               NSError **resolverError) {
+            NSError *projectError = nil;
+            NSDictionary *resolved = [legacyProjectAccess
+                legacyWorkspaceBootstrapEvidenceForProjectId:projectId
+                                                       error:&projectError];
+            if (resolved == nil) {
+              if (evidence != nil) *evidence = nil;
+              if (resolverError != nil) {
+                *resolverError = [NSError errorWithDomain:
+                  DSHLocalWorkspaceAccessErrorDomain
+                                             code:DSHLocalWorkspaceAccessErrorUnavailable
+                                         userInfo:@{}];
+              }
+              return NO;
+            }
+            if (evidence != nil) *evidence = [resolved copy];
+            return YES;
+          }
+          faultHook:nil];
+      _projectAccessV2 = [[DSHLocalProjectAccess alloc]
+          initWithWorkspaceAccess:_workspaceAccessV2 hook:nil];
+    }
     _stagingIdentities = [NSMutableDictionary dictionary];
     _stagingRootLeases = [NSMutableDictionary dictionary];
     _stagingCleanupTokens = [NSMutableDictionary dictionary];
+    _v2DetachCheckpoints = [NSMutableDictionary dictionary];
+    _v2AttachResults = [NSMutableDictionary dictionary];
     _projectQueue = dispatch_queue_create(
       "dev.zseven.rish.local-projects", DISPATCH_QUEUE_SERIAL);
+    NSError *startupError = nil;
+    if (_workspaceAccessV2 != nil &&
+        ![self v2ReconcileAllAttachStaging:&startupError]) {
+      _v2AttachStartupError = startupError ?:
+          LPError(3104, @"Attach startup reconciliation failed");
+    }
   }
   return self;
 }
@@ -749,6 +1189,52 @@ RCT_EXPORT_MODULE(LocalProjects)
   NSString *token = LPString(credential[@"token"]);
   if (!LPValidCredentialUsername(username) || !LPValidCredentialToken(token)) return nil;
   return @{ @"username": username, @"token": token };
+}
+
+- (NSDictionary *)credentialForReference:(NSString *)reference
+                                    host:(NSString *)host
+                                  status:(OSStatus *)statusOut {
+  NSData *persistentReference = [[NSData alloc]
+      initWithBase64EncodedString:reference options:0];
+  if (persistentReference.length == 0 || host.length == 0) {
+    if (statusOut != nullptr) *statusOut = errSecItemNotFound;
+    return nil;
+  }
+  NSMutableDictionary *query = [@{
+    (__bridge id)kSecClass : (__bridge id)kSecClassGenericPassword,
+    (__bridge id)kSecValuePersistentRef : persistentReference,
+    (__bridge id)kSecReturnAttributes : @YES,
+    (__bridge id)kSecReturnData : @YES,
+    (__bridge id)kSecMatchLimit : (__bridge id)kSecMatchLimitOne,
+  } mutableCopy];
+  CFTypeRef result = nullptr;
+  OSStatus status = SecItemCopyMatching((__bridge CFDictionaryRef)query,
+                                         &result);
+  if (statusOut != nullptr) *statusOut = status;
+  if (status != errSecSuccess || result == nullptr) {
+    if (result != nullptr) CFRelease(result);
+    return nil;
+  }
+  NSDictionary *item = CFBridgingRelease(result);
+  if (![item isKindOfClass:NSDictionary.class]) return nil;
+  NSString *service = LPString(item[(__bridge id)kSecAttrService]);
+  NSString *account = LPString(item[(__bridge id)kSecAttrAccount]);
+  NSData *data = [item[(__bridge id)kSecValueData] isKindOfClass:NSData.class]
+      ? item[(__bridge id)kSecValueData]
+      : nil;
+  if (![service isEqual:LPCredentialService] ||
+      ![account.lowercaseString isEqual:host.lowercaseString] || data == nil ||
+      data.length == 0 || data.length > 8192) {
+    return nil;
+  }
+  NSDictionary *credential = LPDictionary(
+      [NSJSONSerialization JSONObjectWithData:data options:0 error:nil]);
+  NSString *username = LPString(credential[@"username"]);
+  NSString *token = LPString(credential[@"token"]);
+  if (!LPValidCredentialUsername(username) || !LPValidCredentialToken(token)) {
+    return nil;
+  }
+  return @{ @"username" : username, @"token" : token };
 }
 
 - (BOOL)storeCredentialForHost:(NSString *)host
@@ -1342,6 +1828,1044 @@ RCT_EXPORT_MODULE(LocalProjects)
   return contains;
 }
 
+- (DSHLocalProjectLease *)v2LeaseForRoot:(NSDictionary *)root
+                                   mode:(DSHLocalProjectAccessMode)mode
+                                  error:(NSError **)error {
+  NSDictionary *canonical = LPV2Root(root, YES, error);
+  if (canonical == nil || self.projectAccessV2 == nil) {
+    if (error != nil && *error == nil) {
+      *error = LPError(3102, @"Workspace project is unavailable");
+    }
+    return nil;
+  }
+  if (self.workspaceAccessV2 == nil) {
+    if (error != nil) *error = LPError(3102, @"Workspace project is unavailable");
+    return nil;
+  }
+  NSSet<NSString *> *requiredCapabilities = mode == DSHLocalProjectAccessModeRead
+      ? [NSSet setWithObjects:@"read", @"git", nil]
+      : [NSSet setWithObjects:@"read", @"write", @"git", nil];
+  NSError *accessError = nil;
+  DSHLocalWorkspaceLease *workspaceLease = [self.workspaceAccessV2
+      leaseWorkspaceId:canonical[@"workspace_id"]
+      expectedBindingRevision:[canonical[@"binding_revision"] unsignedIntegerValue]
+      requiredCapabilities:requiredCapabilities
+      error:&accessError];
+  DSHLocalProjectLease *lease = workspaceLease == nil ? nil
+      : [self.projectAccessV2
+          leaseWorkspaceRootRef:canonical
+                  workspaceLease:workspaceLease
+                             mode:mode
+                  includeMetadata:YES
+                          timeout:2.0
+                            error:&accessError];
+  if (lease == nil && error != nil) {
+    *error = accessError ?: LPError(3102, @"Workspace project is unavailable");
+  }
+  return lease;
+}
+
+- (NSDictionary *)v2ProjectDescriptorForLease:(DSHLocalProjectLease *)lease
+                                          root:(NSDictionary *)root {
+  NSDictionary *canonicalRoot = LPV2Root(root, YES, nil);
+  if (lease == nil || canonicalRoot == nil ||
+      ![lease.projectId isEqual:canonicalRoot[@"project_id"]] ||
+      ![lease.workspaceId isEqual:canonicalRoot[@"workspace_id"]] ||
+      lease.workspaceBindingRevision !=
+          [canonicalRoot[@"binding_revision"] unsignedIntegerValue]) {
+    return nil;
+  }
+  return @{
+    @"schema_version" : @2,
+    @"project_id" : lease.projectId,
+    @"workspace_id" : lease.workspaceId,
+    @"workspace_binding_revision" :
+        @(lease.workspaceBindingRevision),
+    @"display_name" : LPV2ProjectDisplayName(lease),
+    @"git_topology" : lease.gitTopology ?: LPV2GitTopology,
+  };
+}
+
+- (NSDictionary *)v2ProjectDescriptorForRoot:(NSDictionary *)root
+                                    projectId:(NSString *)projectId
+                                  displayName:(NSString *)displayName {
+  NSDictionary *canonical = LPV2Root(root, YES, nil);
+  if (canonical == nil ||
+      ![projectId isKindOfClass:NSString.class] ||
+      ![DSHLocalProjectAccess isCanonicalProjectId:projectId] ||
+      ![projectId isEqual:canonical[@"project_id"]] ||
+      !LPV2BoundedString(displayName, LPMaxProjectNameBytes, NO)) {
+    return nil;
+  }
+  return @{
+    @"schema_version" : @2,
+    @"project_id" : projectId,
+    @"workspace_id" : canonical[@"workspace_id"],
+    @"workspace_binding_revision" : canonical[@"binding_revision"],
+    @"display_name" : displayName,
+    @"git_topology" : LPV2GitTopology,
+  };
+}
+
+- (DSHLocalProjectAccess *)v2LegacyProjectAccess {
+  return self.projectAccess;
+}
+
+- (NSString *)v2RootFingerprintForRoot:(NSDictionary *)root
+                                  error:(NSError **)error {
+  NSDictionary *canonical = LPV2Root(root, NO, error);
+  if (canonical == nil || self.workspaceAccessV2 == nil) return nil;
+  NSError *authorityError = nil;
+  NSDictionary *registry = [self.workspaceAccessV2
+      loadRegistry:&authorityError digest:nil];
+  NSDictionary *record = registry == nil
+      ? nil
+      : [self.workspaceAccessV2 recordInRegistry:registry
+                                      workspaceId:canonical[@"workspace_id"]];
+  NSDictionary *authority = record == nil
+      ? nil
+      : [self.workspaceAccessV2 loadAuthorityForRecord:record
+                                                  error:&authorityError];
+  NSString *fingerprint = LPString(authority[@"root_fingerprint_sha256"]);
+  if (authority == nil ||
+      ![authority[@"workspace_id"] isEqual:canonical[@"workspace_id"]] ||
+      ![authority[@"binding_revision"] isEqual:canonical[@"binding_revision"]] ||
+      !LPV2CanonicalDigest(fingerprint)) {
+    if (error != nil) {
+      *error = authorityError ?: LPError(3103, @"Workspace authority is unavailable");
+    }
+    return nil;
+  }
+  return [fingerprint copy];
+}
+
+- (NSURL *)v2GitDirectoryURLForWorkspaceId:(NSString *)workspaceId
+                                  projectId:(NSString *)projectId {
+  NSURL *privateRoot = self.workspaceAccessV2.privateRootURL;
+  if (privateRoot == nil ||
+      ![DSHLocalProjectAccess isCanonicalProjectId:workspaceId] ||
+      ![DSHLocalProjectAccess isCanonicalProjectId:projectId]) {
+    return nil;
+  }
+  NSURL *gitdirs = [privateRoot URLByAppendingPathComponent:@"workspace-gitdirs"
+                                               isDirectory:YES];
+  NSURL *workspace = [gitdirs URLByAppendingPathComponent:workspaceId
+                                               isDirectory:YES];
+  return [workspace URLByAppendingPathComponent:projectId isDirectory:YES];
+}
+
+- (BOOL)v2WriteBindingForRoot:(NSDictionary *)root
+                      projectId:(NSString *)projectId
+                    displayName:(NSString *)displayName
+                          gitURL:(NSURL *)gitURL
+                   rootFingerprint:(NSString *)rootFingerprint
+                             error:(NSError **)error {
+  if (gitURL == nil || !LPV2CanonicalDigest(rootFingerprint) ||
+      !LPV2BoundedString(displayName, LPMaxProjectNameBytes, NO)) {
+    if (error != nil) *error = LPError(3104, @"Project binding is invalid");
+    return NO;
+  }
+  NSDictionary *canonical = LPV2Root(root, YES, error);
+  if (canonical == nil) return NO;
+  NSURL *privateRoot = self.workspaceAccessV2.privateRootURL;
+  NSString *relative = [NSString stringWithFormat:@"workspace-gitdirs/%@/%@",
+      canonical[@"workspace_id"], projectId];
+  NSDictionary *binding = @{
+    @"schema_version" : @2,
+    @"workspace_id" : canonical[@"workspace_id"],
+    @"binding_revision" : canonical[@"binding_revision"],
+    @"project_id" : projectId,
+    @"display_name" : displayName,
+    @"git_topology" : LPV2GitTopology,
+    @"git_directory_relative" : relative,
+    @"root_fingerprint_sha256" : rootFingerprint,
+  };
+  NSData *data = [NSJSONSerialization dataWithJSONObject:binding
+                                                   options:NSJSONWritingSortedKeys
+                                                     error:nil];
+  if (data == nil || privateRoot == nil) {
+    if (error != nil) *error = LPError(3104, @"Project binding is invalid");
+    return NO;
+  }
+  NSURL *bindingURL = [gitURL URLByAppendingPathComponent:LPV2BindingFile];
+  int descriptor = open(bindingURL.fileSystemRepresentation,
+                         O_WRONLY | O_CREAT | O_EXCL | O_CLOEXEC | O_NOFOLLOW,
+                         0600);
+  BOOL written = descriptor >= 0 && LPWriteAll(descriptor, data) &&
+      fchmod(descriptor, 0600) == 0 && fsync(descriptor) == 0;
+  if (descriptor >= 0) close(descriptor);
+  written = written &&
+      [[NSFileManager defaultManager]
+          setAttributes:@{NSFilePosixPermissions : @0600,
+                          NSFileProtectionKey : NSFileProtectionComplete}
+                 ofItemAtPath:bindingURL.path error:nil] &&
+      [bindingURL setResourceValue:@YES
+                             forKey:NSURLIsExcludedFromBackupKey
+                              error:nil];
+  int parent = written
+      ? open(gitURL.fileSystemRepresentation,
+             O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW)
+      : -1;
+  BOOL durable = written && parent >= 0 && fsync(parent) == 0;
+  if (parent >= 0) close(parent);
+  if (!durable) {
+    unlink(bindingURL.fileSystemRepresentation);
+    if (error != nil) *error = LPError(3104, @"Project binding cannot be saved");
+    return NO;
+  }
+  return YES;
+}
+
+- (NSDictionary *)v2BindingForRoot:(NSDictionary *)root
+                          projectId:(NSString *)projectId
+                             error:(NSError **)error {
+  NSDictionary *canonical = LPV2Root(root, YES, error);
+  NSURL *gitURL = [self v2GitDirectoryURLForWorkspaceId:canonical[@"workspace_id"]
+                                                projectId:projectId];
+  if (canonical == nil || gitURL == nil) return nil;
+  NSURL *bindingURL = [gitURL URLByAppendingPathComponent:LPV2BindingFile];
+  struct stat metadata = {};
+  if (lstat(bindingURL.fileSystemRepresentation, &metadata) != 0 ||
+      !S_ISREG(metadata.st_mode) || metadata.st_nlink != 1 ||
+      metadata.st_size <= 0 || metadata.st_size > 64 * 1024) {
+    if (error != nil) *error = LPError(3102, @"Workspace project is unavailable");
+    return nil;
+  }
+  int descriptor = open(bindingURL.fileSystemRepresentation,
+                        O_RDONLY | O_CLOEXEC | O_NOFOLLOW);
+  struct stat opened = {};
+  BOOL readable = descriptor >= 0 && fstat(descriptor, &opened) == 0 &&
+      LPSameNode(metadata, opened) && opened.st_size == metadata.st_size;
+  NSMutableData *data = readable
+      ? [NSMutableData dataWithLength:(NSUInteger)opened.st_size]
+      : nil;
+  NSUInteger offset = 0;
+  while (readable && offset < data.length) {
+    ssize_t count = pread(descriptor,
+                           static_cast<uint8_t *>(data.mutableBytes) + offset,
+                           data.length - offset, (off_t)offset);
+    if (count <= 0) {
+      readable = NO;
+      break;
+    }
+    offset += (NSUInteger)count;
+  }
+  struct stat closed = {};
+  readable = readable && fstat(descriptor, &closed) == 0 &&
+      LPSameNode(opened, closed) && closed.st_size == opened.st_size;
+  if (descriptor >= 0) close(descriptor);
+  if (!readable) data = nil;
+  NSDictionary *binding = LPDictionary([NSJSONSerialization
+      JSONObjectWithData:data options:0 error:nil]);
+  if (!LPV2ExactKeys(binding, @[
+        @"schema_version", @"workspace_id", @"binding_revision",
+        @"project_id", @"display_name", @"git_topology",
+        @"git_directory_relative", @"root_fingerprint_sha256"
+      ]) || ![binding[@"schema_version"] isEqual:@2] ||
+      ![binding[@"workspace_id"] isEqual:canonical[@"workspace_id"]] ||
+      ![binding[@"binding_revision"] isEqual:canonical[@"binding_revision"]] ||
+      ![binding[@"project_id"] isEqual:projectId] ||
+      ![binding[@"git_topology"] isEqual:LPV2GitTopology] ||
+      !LPV2BoundedString(binding[@"display_name"], LPMaxProjectNameBytes, NO) ||
+      !LPV2CanonicalDigest(binding[@"root_fingerprint_sha256"])) {
+    if (error != nil) *error = LPError(3104, @"Project binding is invalid");
+    return nil;
+  }
+  NSString *fingerprint = [self v2RootFingerprintForRoot:@{
+    @"schema_version" : @1,
+    @"workspace_id" : canonical[@"workspace_id"],
+    @"binding_revision" : canonical[@"binding_revision"],
+    @"project_id" : NSNull.null,
+  } error:error];
+  if (fingerprint == nil || ![fingerprint isEqual:binding[@"root_fingerprint_sha256"]]) {
+    if (error != nil && *error == nil) *error = LPError(3104, @"Project binding is invalid");
+    return nil;
+  }
+  return binding;
+}
+
+- (NSDictionary *)v2ProjectForWorkspace:(NSDictionary *)root
+                                   error:(NSError **)error {
+  NSDictionary *canonical = LPV2Root(root, NO, error);
+  if (canonical == nil) return nil;
+  id project = canonical[@"project_id"];
+  if (project != NSNull.null) {
+    NSDictionary *binding = [self v2BindingForRoot:canonical
+                                           projectId:project
+                                              error:error];
+    NSDictionary *descriptor = binding == nil
+        ? nil
+        : [self v2ProjectDescriptorForRoot:canonical
+                                 projectId:project
+                               displayName:binding[@"display_name"]];
+    return descriptor == nil
+        ? nil
+        : @{ @"schema_version" : @1, @"status" : @"attached",
+             @"project" : descriptor };
+  }
+  NSError *legacyRelationError = nil;
+  NSString *legacyProjectId = [self.workspaceAccessV2
+      legacyProjectIdForWorkspaceId:canonical[@"workspace_id"]
+      expectedBindingRevision:
+          [canonical[@"binding_revision"] unsignedIntegerValue]
+      error:&legacyRelationError];
+  if (legacyProjectId != nil) {
+    NSError *legacyEvidenceError = nil;
+    NSDictionary *evidence = [[self v2LegacyProjectAccess]
+        legacyWorkspaceBootstrapEvidenceForProjectId:legacyProjectId
+                                               error:&legacyEvidenceError];
+    NSString *verifiedProjectId = LPString(evidence[@"project_id"]);
+    NSString *displayName = LPString(evidence[@"display_name"]);
+    if (evidence == nil ||
+        ![verifiedProjectId isEqual:legacyProjectId] ||
+        !LPV2BoundedString(displayName, LPMaxProjectNameBytes, NO)) {
+      if (error != nil) {
+        *error = LPError(3110, @"Legacy workspace project relation changed");
+      }
+      return nil;
+    }
+    NSDictionary *descriptor = @{
+      @"schema_version" : @2,
+      @"project_id" : legacyProjectId,
+      @"workspace_id" : canonical[@"workspace_id"],
+      @"workspace_binding_revision" : canonical[@"binding_revision"],
+      @"display_name" : displayName,
+      @"git_topology" : @"legacy_embedded",
+    };
+    return @{ @"schema_version" : @1, @"status" : @"attached",
+              @"project" : descriptor };
+  }
+  if (legacyRelationError != nil) {
+    DSHLocalWorkspaceAccessErrorCode code =
+        (DSHLocalWorkspaceAccessErrorCode)legacyRelationError.code;
+    if ([legacyRelationError.domain
+            isEqual:DSHLocalWorkspaceAccessErrorDomain] &&
+        (code == DSHLocalWorkspaceAccessErrorRevisionStale ||
+         code == DSHLocalWorkspaceAccessErrorRootChanged ||
+         code == DSHLocalWorkspaceAccessErrorConflict)) {
+      if (error != nil) {
+        *error = LPError(3110, @"Legacy workspace project relation changed");
+      }
+    } else if (error != nil) {
+      *error = legacyRelationError;
+    }
+    return nil;
+  }
+  NSURL *workspaceGitRoot = [[self.workspaceAccessV2.privateRootURL
+      URLByAppendingPathComponent:@"workspace-gitdirs" isDirectory:YES]
+      URLByAppendingPathComponent:canonical[@"workspace_id"] isDirectory:YES];
+  NSError *enumerationError = nil;
+  NSArray<NSURL *> *children = [self
+      v2AttachContentsOfDirectory:workspaceGitRoot error:&enumerationError];
+  if (children == nil) {
+    if ([enumerationError.domain isEqual:NSCocoaErrorDomain] &&
+        enumerationError.code == NSFileReadNoSuchFileError) {
+      return @{ @"schema_version" : @1, @"status" : @"none" };
+    }
+    if (error != nil) {
+      *error = enumerationError ?:
+          LPError(3104, @"Workspace project enumeration failed");
+    }
+    return nil;
+  }
+  NSMutableArray<NSString *> *projectIds = [NSMutableArray array];
+  for (NSURL *child in children) {
+    NSString *candidate = child.lastPathComponent;
+    if ([candidate hasPrefix:@".rish-attach-"]) continue;
+    if (![DSHLocalProjectAccess isCanonicalProjectId:candidate]) continue;
+    NSDictionary *candidateRoot = @{
+      @"schema_version" : @1,
+      @"workspace_id" : canonical[@"workspace_id"],
+      @"binding_revision" : canonical[@"binding_revision"],
+      @"project_id" : candidate,
+    };
+    if ([self v2BindingForRoot:candidateRoot
+                      projectId:candidate error:error] == nil) return nil;
+    [projectIds addObject:candidate];
+  }
+  if (projectIds.count == 0) {
+    return @{ @"schema_version" : @1, @"status" : @"none" };
+  }
+  if (projectIds.count != 1) {
+    if (error != nil) *error = LPError(3105, @"Workspace has conflicting projects");
+    return nil;
+  }
+  NSDictionary *attachedRoot = @{
+    @"schema_version" : @1,
+    @"workspace_id" : canonical[@"workspace_id"],
+    @"binding_revision" : canonical[@"binding_revision"],
+    @"project_id" : projectIds.firstObject,
+  };
+  NSDictionary *binding = [self v2BindingForRoot:attachedRoot
+                                         projectId:projectIds.firstObject
+                                            error:error];
+  NSDictionary *descriptor = binding == nil
+      ? nil
+      : [self v2ProjectDescriptorForRoot:attachedRoot
+                               projectId:projectIds.firstObject
+                             displayName:binding[@"display_name"]];
+  if (descriptor == nil) {
+    if (error != nil && *error == nil) *error = LPError(3102, @"Workspace project is unavailable");
+    return nil;
+  }
+  return @{ @"schema_version" : @1, @"status" : @"attached",
+            @"project" : descriptor };
+}
+
+- (BOOL)v2FsyncDirectoryAtURL:(NSURL *)url error:(NSError **)error {
+  int descriptor = url == nil ? -1 : open(url.fileSystemRepresentation,
+      O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW);
+  BOOL durable = descriptor >= 0 && fsync(descriptor) == 0;
+  if (descriptor >= 0) close(descriptor);
+  if (!durable && error != nil) {
+    *error = LPError(3104, @"Attach directory is not durable");
+  }
+  return durable;
+}
+
+- (NSArray<NSURL *> *)v2AttachContentsOfDirectory:(NSURL *)directory
+                                             error:(NSError **)error {
+  if (self.v2AttachFaultHook != nil &&
+      self.v2AttachFaultHook(@"attach_reconcile_enumeration")) {
+    if (error != nil) *error = LPError(3104, @"Attach enumeration failed");
+    return nil;
+  }
+  NSError *enumerationError = nil;
+  NSArray<NSURL *> *entries = [[NSFileManager defaultManager]
+      contentsOfDirectoryAtURL:directory
+      includingPropertiesForKeys:@[NSURLIsDirectoryKey, NSURLIsRegularFileKey]
+                         options:0
+                           error:&enumerationError];
+  if (entries == nil && error != nil) *error = enumerationError;
+  return entries;
+}
+
+- (BOOL)v2WriteAttachJournalData:(NSData *)data
+                            toURL:(NSURL *)url
+                            error:(NSError **)error {
+  if (![data isKindOfClass:NSData.class] || data.length == 0 ||
+      data.length > LPV2MaxAttachJournalBytes || url == nil) {
+    if (error != nil) *error = LPError(3104, @"Attach journal is invalid");
+    return NO;
+  }
+  NSError *writeError = nil;
+  BOOL written = [data writeToURL:url
+                         options:NSDataWritingAtomic
+                           error:&writeError];
+  if (written) {
+    written = [[NSFileManager defaultManager]
+        setAttributes:@{NSFilePosixPermissions : @0600,
+                        NSFileProtectionKey : NSFileProtectionComplete}
+           ofItemAtPath:url.path error:&writeError] &&
+        [url setResourceValue:@YES
+                       forKey:NSURLIsExcludedFromBackupKey error:&writeError];
+  }
+  int descriptor = written ? open(url.fileSystemRepresentation,
+      O_RDONLY | O_CLOEXEC | O_NOFOLLOW) : -1;
+  struct stat metadata = {};
+  written = written && descriptor >= 0 && fstat(descriptor, &metadata) == 0 &&
+      S_ISREG(metadata.st_mode) && metadata.st_nlink == 1 &&
+      metadata.st_size == (off_t)data.length && fsync(descriptor) == 0;
+  if (descriptor >= 0) close(descriptor);
+  if (written) {
+    written = [self v2FsyncDirectoryAtURL:url.URLByDeletingLastPathComponent
+                                    error:&writeError];
+  }
+  if (!written && error != nil) {
+    *error = writeError ?: LPError(3104, @"Attach journal cannot be saved");
+  }
+  return written;
+}
+
+- (BOOL)v2RemoveAttachItemAtURL:(NSURL *)url
+                          parent:(NSURL *)parent
+                           error:(NSError **)error {
+  if (url == nil || parent == nil ||
+      ![url.URLByDeletingLastPathComponent.path.stringByStandardizingPath
+          isEqual:parent.path.stringByStandardizingPath]) {
+    if (error != nil) *error = LPError(3104, @"Attach cleanup target is invalid");
+    return NO;
+  }
+  if (self.v2AttachFaultHook != nil &&
+      self.v2AttachFaultHook(@"attach_cleanup")) {
+    if (error != nil) *error = LPError(3104, @"Attach cleanup failed");
+    return NO;
+  }
+  struct stat state = {};
+  if (lstat(url.fileSystemRepresentation, &state) != 0) {
+    if (errno == ENOENT) return YES;
+    if (error != nil) *error = LPError(3104, @"Attach cleanup stat failed");
+    return NO;
+  }
+  NSError *cleanupError = nil;
+  if (![[NSFileManager defaultManager] removeItemAtURL:url error:&cleanupError] ||
+      ![self v2FsyncDirectoryAtURL:parent error:&cleanupError]) {
+    if (error != nil) {
+      *error = cleanupError ?: LPError(3104, @"Attach cleanup failed");
+    }
+    return NO;
+  }
+  return YES;
+}
+
+- (BOOL)v2ReconcileAttachStagingForWorkspaceId:(NSString *)workspaceId
+                                         error:(NSError **)error {
+  if (![DSHLocalProjectAccess isCanonicalProjectId:workspaceId] ||
+      self.workspaceAccessV2.privateRootURL == nil) {
+    if (error != nil) *error = LPError(3104, @"Attach reconciliation root is invalid");
+    return NO;
+  }
+  NSURL *workspaceGitRoot = [[self.workspaceAccessV2.privateRootURL
+      URLByAppendingPathComponent:@"workspace-gitdirs" isDirectory:YES]
+      URLByAppendingPathComponent:workspaceId isDirectory:YES];
+  NSError *enumerationError = nil;
+  NSArray<NSURL *> *entries = [self
+      v2AttachContentsOfDirectory:workspaceGitRoot error:&enumerationError];
+  if (entries == nil) {
+    if ([enumerationError.domain isEqual:NSCocoaErrorDomain] &&
+        enumerationError.code == NSFileReadNoSuchFileError) return YES;
+    if (error != nil) {
+      *error = enumerationError ?:
+          LPError(3104, @"Attach staging enumeration failed");
+    }
+    return NO;
+  }
+  NSMutableDictionary<NSString *, NSURL *> *stagingByOperation =
+      [NSMutableDictionary dictionary];
+  NSMutableDictionary<NSString *, NSURL *> *journalByOperation =
+      [NSMutableDictionary dictionary];
+  NSMutableDictionary<NSString *, NSDictionary *> *journals =
+      [NSMutableDictionary dictionary];
+  for (NSURL *entry in entries) {
+    if (![entry.lastPathComponent hasPrefix:@".rish-attach-"]) continue;
+    NSString *name = entry.lastPathComponent;
+    NSString *operation = [name substringFromIndex:@".rish-attach-".length];
+    BOOL journalEntry = [operation hasSuffix:@".journal"];
+    if (journalEntry) {
+      operation = [operation substringToIndex:
+          operation.length - @".journal".length];
+    }
+    if (!LPV2CanonicalOperationId(operation)) {
+      if (error != nil) *error = LPError(3104, @"Attach staging entry is invalid");
+      return NO;
+    }
+    if (journalEntry) {
+      NSDictionary *journal = LPV2ReadAttachJournal(
+          entry, workspaceId, operation, error);
+      if (journal == nil || journalByOperation[operation] != nil) return NO;
+      journalByOperation[operation] = entry;
+      journals[operation] = journal;
+    } else {
+      if (stagingByOperation[operation] != nil) {
+        if (error != nil) *error = LPError(3104, @"Attach staging is duplicated");
+        return NO;
+      }
+      stagingByOperation[operation] = entry;
+    }
+  }
+  for (NSString *operation in journals) {
+    NSDictionary *journal = journals[operation];
+    NSURL *journalURL = journalByOperation[operation];
+    NSURL *stagingURL = stagingByOperation[operation];
+    NSURL *finalURL = [workspaceGitRoot
+        URLByAppendingPathComponent:journal[@"final_name"] isDirectory:YES];
+    struct stat stagingState = {};
+    struct stat finalState = {};
+    BOOL stagingExists = stagingURL != nil &&
+        lstat(stagingURL.fileSystemRepresentation, &stagingState) == 0;
+    BOOL finalExists = lstat(finalURL.fileSystemRepresentation, &finalState) == 0;
+    if ((stagingExists && finalExists) ||
+        ([journal[@"phase"] isEqual:@"published"] && stagingExists)) {
+      if (error != nil) *error = LPError(3104, @"Attach recovery is ambiguous");
+      return NO;
+    }
+    if (finalExists) {
+      NSDictionary *root = @{
+        @"schema_version" : @1,
+        @"workspace_id" : journal[@"workspace_id"],
+        @"binding_revision" : journal[@"binding_revision"],
+        @"project_id" : journal[@"project_id"],
+      };
+      NSError *leaseError = nil;
+      DSHLocalProjectLease *lease = [self v2LeaseForRoot:root
+                                                   mode:DSHLocalProjectAccessModeRead
+                                                  error:&leaseError];
+      if (lease == nil ||
+          ![lease.rootFingerprintSHA256
+              isEqual:journal[@"root_fingerprint_sha256"]]) {
+        if (error != nil) {
+          *error = leaseError ?: LPError(3104, @"Published attach is invalid");
+        }
+        return NO;
+      }
+    }
+    if (stagingExists && ![self v2RemoveAttachItemAtURL:stagingURL
+                                                  parent:workspaceGitRoot
+                                                   error:error]) {
+      return NO;
+    }
+    if (![self v2RemoveAttachItemAtURL:journalURL
+                                parent:workspaceGitRoot error:error]) {
+      return NO;
+    }
+    [stagingByOperation removeObjectForKey:operation];
+  }
+  for (NSString *operation in stagingByOperation) {
+    if (![self v2RemoveAttachItemAtURL:stagingByOperation[operation]
+                                parent:workspaceGitRoot error:error]) {
+      return NO;
+    }
+  }
+  return YES;
+}
+
+- (BOOL)v2ReconcileAllAttachStaging:(NSError **)error {
+  NSURL *privateRoot = self.workspaceAccessV2.privateRootURL;
+  if (privateRoot == nil) {
+    if (error != nil) *error = LPError(3104, @"Attach startup root is unavailable");
+    return NO;
+  }
+  NSURL *gitdirs = [privateRoot URLByAppendingPathComponent:@"workspace-gitdirs"
+                                                isDirectory:YES];
+  NSError *enumerationError = nil;
+  NSArray<NSURL *> *workspaces = [self
+      v2AttachContentsOfDirectory:gitdirs error:&enumerationError];
+  if (workspaces == nil) {
+    if ([enumerationError.domain isEqual:NSCocoaErrorDomain] &&
+        enumerationError.code == NSFileReadNoSuchFileError) return YES;
+    if (error != nil) {
+      *error = enumerationError ?:
+          LPError(3104, @"Attach startup enumeration failed");
+    }
+    return NO;
+  }
+  for (NSURL *workspace in workspaces) {
+    NSString *workspaceId = workspace.lastPathComponent;
+    if (![DSHLocalProjectAccess isCanonicalProjectId:workspaceId]) continue;
+    if (![self v2ReconcileAttachStagingForWorkspaceId:workspaceId error:error]) {
+      return NO;
+    }
+  }
+  return YES;
+}
+
+- (NSDictionary *)v2AttachWorkspaceProject:(NSDictionary *)request
+                                      error:(NSError **)error {
+  NSDictionary *canonical = LPV2Root(request[@"root"], NO, error);
+  NSString *operationId = LPString(request[@"operation_id"]);
+  NSString *mode = LPString(request[@"mode"]);
+  if (!LPV2ExactKeys(request, @[
+        @"schema_version", @"operation_id", @"root", @"mode"
+      ]) || ![request[@"schema_version"] isEqual:@1] ||
+      !LPV2CanonicalOperationId(operationId) || canonical == nil ||
+      (![mode isEqual:@"open"] && ![mode isEqual:@"init"])) {
+    if (error != nil) *error = LPError(3101, @"Project attach request is invalid");
+    return nil;
+  }
+  if (self.v2AttachStartupError != nil) {
+    if (error != nil) *error = self.v2AttachStartupError;
+    return nil;
+  }
+  if (self.workspaceAccessV2 == nil ||
+      ![self v2ReconcileAttachStagingForWorkspaceId:canonical[@"workspace_id"]
+                                              error:error]) {
+    if (error != nil && *error == nil) {
+      *error = LPError(3104, @"Attach staging reconciliation failed");
+    }
+    return nil;
+  }
+  NSDictionary *cached = nil;
+  @synchronized (self) {
+    cached = self.v2AttachResults[operationId];
+  }
+  if (cached != nil) {
+    if (![cached[@"root"] isEqual:canonical]) {
+      if (error != nil) *error = LPError(3106, @"Project attach operation conflicts");
+      return nil;
+    }
+    NSString *cachedProjectId = cached[@"result"][@"project"][@"project_id"];
+    NSDictionary *cachedRoot = cachedProjectId == nil ? nil : @{
+      @"schema_version" : @1,
+      @"workspace_id" : canonical[@"workspace_id"],
+      @"binding_revision" : canonical[@"binding_revision"],
+      @"project_id" : cachedProjectId,
+    };
+    DSHLocalProjectLease *cachedLease = cachedRoot == nil
+        ? nil : [self v2LeaseForRoot:cachedRoot
+                                  mode:DSHLocalProjectAccessModeRead
+                                 error:error];
+    NSDictionary *verifiedProject = cachedLease == nil
+        ? nil : [self v2ProjectDescriptorForLease:cachedLease root:cachedRoot];
+    if (verifiedProject == nil) {
+      if (error != nil && *error == nil) {
+        *error = LPError(3102, @"Cached project verification failed");
+      }
+      return nil;
+    }
+    return @{ @"schema_version" : @1,
+              @"status" : @"already_attached",
+              @"project" : verifiedProject };
+  }
+  if (canonical[@"project_id"] != NSNull.null) {
+    NSDictionary *existing = [self v2ProjectForWorkspace:canonical error:error];
+    if (existing == nil || ![existing[@"status"] isEqual:@"attached"]) {
+      return nil;
+    }
+    DSHLocalProjectLease *verifiedLease = [self v2LeaseForRoot:canonical
+                                                            mode:DSHLocalProjectAccessModeRead
+                                                           error:error];
+    NSDictionary *verifiedProject = verifiedLease == nil
+        ? nil : [self v2ProjectDescriptorForLease:verifiedLease root:canonical];
+    if (verifiedProject == nil) {
+      if (error != nil && *error == nil) {
+        *error = LPError(3102, @"Attached project verification failed");
+      }
+      return nil;
+    }
+    NSDictionary *result = @{ @"schema_version" : @1,
+                              @"status" : @"already_attached",
+                              @"project" : verifiedProject };
+    @synchronized (self) {
+      self.v2AttachResults[operationId] = @{ @"root" : canonical,
+                                             @"result" : result };
+    }
+    return result;
+  }
+  NSDictionary *existing = [self v2ProjectForWorkspace:canonical error:error];
+  if (existing == nil) return nil;
+  if ([existing[@"status"] isEqual:@"attached"]) {
+    NSString *attachedProjectId = existing[@"project"][@"project_id"];
+    NSDictionary *attachedRoot = attachedProjectId == nil ? nil : @{
+      @"schema_version" : @1,
+      @"workspace_id" : canonical[@"workspace_id"],
+      @"binding_revision" : canonical[@"binding_revision"],
+      @"project_id" : attachedProjectId,
+    };
+    DSHLocalProjectLease *verifiedLease = attachedRoot == nil
+        ? nil : [self v2LeaseForRoot:attachedRoot
+                                  mode:DSHLocalProjectAccessModeRead
+                                 error:error];
+    NSDictionary *verifiedProject = verifiedLease == nil
+        ? nil : [self v2ProjectDescriptorForLease:verifiedLease root:attachedRoot];
+    if (verifiedProject == nil) {
+      if (error != nil && *error == nil) {
+        *error = LPError(3102, @"Attached project verification failed");
+      }
+      return nil;
+    }
+    NSDictionary *result = @{ @"schema_version" : @1,
+                              @"status" : @"already_attached",
+                              @"project" : verifiedProject };
+    @synchronized (self) {
+      self.v2AttachResults[operationId] = @{ @"root" : canonical,
+                                             @"result" : result };
+    }
+    return result;
+  }
+  if ([mode isEqual:@"open"]) {
+    if (error != nil) *error = LPError(3102, @"Workspace project is unavailable");
+    return nil;
+  }
+  if (self.workspaceAccessV2 == nil || self.projectAccessV2 == nil) {
+    if (error != nil) *error = LPError(3102, @"Workspace project is unavailable");
+    return nil;
+  }
+  NSError *workspaceError = nil;
+  DSHLocalWorkspaceLease *workspaceLease = [self.workspaceAccessV2
+      leaseWorkspaceId:canonical[@"workspace_id"]
+      expectedBindingRevision:[canonical[@"binding_revision"] unsignedIntegerValue]
+      requiredCapabilities:[NSSet setWithObjects:@"read", @"write", @"git", nil]
+      error:&workspaceError];
+  if (workspaceLease == nil) {
+    if (error != nil) *error = workspaceError ?: LPError(3102, @"Workspace project is unavailable");
+    return nil;
+  }
+  NSString *rootPath = LPV2DescriptorPath(workspaceLease.rootDescriptor);
+  struct stat rootBefore = {};
+  BOOL rootBeforeValid = rootPath != nil &&
+      fstat(workspaceLease.rootDescriptor, &rootBefore) == 0 &&
+      S_ISDIR(rootBefore.st_mode);
+  NSString *fingerprint = [self v2RootFingerprintForRoot:canonical error:error];
+  NSString *projectId = NSUUID.UUID.UUIDString.lowercaseString;
+  NSURL *gitURL = [self v2GitDirectoryURLForWorkspaceId:canonical[@"workspace_id"]
+                                                projectId:projectId];
+  if (!rootBeforeValid || fingerprint == nil || gitURL == nil ||
+      !LPV2CanonicalOperationId(projectId)) {
+    if (error != nil && *error == nil) *error = LPError(3102, @"Workspace project is unavailable");
+    return nil;
+  }
+  NSURL *finalGitURL = gitURL;
+  NSURL *gitParent = finalGitURL.URLByDeletingLastPathComponent;
+  NSURL *stagingGitURL = [gitParent
+      URLByAppendingPathComponent:[NSString stringWithFormat:@".rish-attach-%@", operationId]
+                         isDirectory:YES];
+  NSURL *attachJournalURL = [gitParent
+      URLByAppendingPathComponent:[NSString stringWithFormat:@".rish-attach-%@.journal", operationId]
+                         isDirectory:NO];
+  NSDictionary *attachJournal = @{
+    @"schema_version" : @1,
+    @"operation_id" : operationId,
+    @"workspace_id" : canonical[@"workspace_id"],
+    @"binding_revision" : canonical[@"binding_revision"],
+    @"project_id" : projectId,
+    @"root_fingerprint_sha256" : fingerprint,
+    @"staging_name" : stagingGitURL.lastPathComponent,
+    @"final_name" : finalGitURL.lastPathComponent,
+    @"phase" : @"prepared",
+  };
+  NSError *attachError = nil;
+  if (![[NSFileManager defaultManager]
+          createDirectoryAtURL:gitParent
+     withIntermediateDirectories:YES
+                      attributes:@{NSFilePosixPermissions : @0700}
+                           error:&attachError] ||
+      ![self v2FsyncDirectoryAtURL:gitParent.URLByDeletingLastPathComponent
+                              error:&attachError]) {
+    if (error != nil) {
+      *error = attachError ?: LPError(3104, @"Attach staging root cannot be created");
+    }
+    return nil;
+  }
+  NSData *attachJournalData = [NSJSONSerialization
+      dataWithJSONObject:attachJournal options:NSJSONWritingSortedKeys error:nil];
+  if (attachJournalData == nil ||
+      ![self v2WriteAttachJournalData:attachJournalData
+                                toURL:attachJournalURL error:&attachError]) {
+    (void)[self v2RemoveAttachItemAtURL:attachJournalURL
+                                 parent:gitParent error:nil];
+    if (error != nil) {
+      *error = attachError ?: LPError(3104, @"Attach journal cannot be saved");
+    }
+    return nil;
+  }
+  if (self.v2AttachFaultHook != nil && self.v2AttachFaultHook(@"after_attach_journal")) {
+    (void)[self v2RemoveAttachItemAtURL:attachJournalURL
+                                 parent:gitParent error:nil];
+    if (error != nil) *error = LPError(3104, @"Attach interrupted after journal");
+    return nil;
+  }
+  BOOL (^cleanupAttachURL)(NSURL *) = ^BOOL(NSURL *url) {
+    NSError *cleanupError = nil;
+    BOOL cleaned = [self v2RemoveAttachItemAtURL:url
+                                          parent:gitParent
+                                           error:&cleanupError];
+    if (!cleaned && error != nil) {
+      *error = cleanupError ?:
+          LPError(3104, @"Attach cleanup failed; reconciliation required");
+    }
+    return cleaned;
+  };
+  BOOL stagingCreateFault = self.v2AttachFaultHook != nil &&
+      self.v2AttachFaultHook(@"attach_staging_create");
+  BOOL stagingCreated = !stagingCreateFault &&
+      [[NSFileManager defaultManager]
+          createDirectoryAtURL:stagingGitURL
+     withIntermediateDirectories:NO
+                      attributes:@{NSFilePosixPermissions : @0700}
+                           error:&attachError];
+  BOOL stagingDurable = stagingCreated &&
+      [self v2FsyncDirectoryAtURL:gitParent error:&attachError];
+  if (!stagingDurable) {
+    if (stagingCreated) (void)cleanupAttachURL(stagingGitURL);
+    (void)cleanupAttachURL(attachJournalURL);
+    if (error != nil && *error == nil) {
+      *error = stagingCreateFault
+          ? LPError(3104, @"Attach staging creation failed")
+          : (attachError ?: LPError(3105, @"Workspace project already exists"));
+    }
+    return nil;
+  }
+  git_repository *repository = nullptr;
+  git_repository_init_options options = GIT_REPOSITORY_INIT_OPTIONS_INIT;
+  options.flags = GIT_REPOSITORY_INIT_BARE | GIT_REPOSITORY_INIT_MKPATH;
+  options.mode = 0700;
+  options.initial_head = "main";
+  int initResult = git_repository_init_ext(&repository,
+                                           stagingGitURL.fileSystemRepresentation,
+                                           &options);
+  BOOL configured = initResult == 0 && repository != nullptr &&
+      git_repository_set_workdir(repository, rootPath.fileSystemRepresentation, 0) == 0;
+  if (repository != nullptr) git_repository_free(repository);
+  NSDictionary *attachedRoot = @{
+    @"schema_version" : @1,
+    @"workspace_id" : canonical[@"workspace_id"],
+    @"binding_revision" : canonical[@"binding_revision"],
+    @"project_id" : projectId,
+  };
+  BOOL bindingWritten = configured &&
+      [self v2WriteBindingForRoot:attachedRoot
+                         projectId:projectId
+                       displayName:projectId
+                             gitURL:stagingGitURL
+                      rootFingerprint:fingerprint
+                                error:error];
+  if (!bindingWritten) {
+    cleanupAttachURL(stagingGitURL);
+    cleanupAttachURL(attachJournalURL);
+    if (error != nil && *error == nil) *error = LPError(3104, @"Project binding cannot be saved");
+    return nil;
+  }
+  if (self.v2AttachFaultHook != nil && self.v2AttachFaultHook(@"after_attach_staging")) {
+    cleanupAttachURL(stagingGitURL);
+    cleanupAttachURL(attachJournalURL);
+    if (error != nil) *error = LPError(3104, @"Attach interrupted during staging");
+    return nil;
+  }
+  NSDictionary *stagingBinding = @{
+    @"schema_version" : @2,
+    @"workspace_id" : attachedRoot[@"workspace_id"],
+    @"binding_revision" : attachedRoot[@"binding_revision"],
+    @"project_id" : projectId,
+    @"display_name" : projectId,
+    @"git_topology" : LPV2GitTopology,
+    @"git_directory_url" : stagingGitURL,
+    @"root_fingerprint_sha256" : fingerprint,
+  };
+  DSHLocalProjectLease *stagedLease = [self.projectAccessV2
+      leaseWorkspaceRootRef:attachedRoot
+               workspaceLease:workspaceLease
+            workspaceBinding:stagingBinding
+                         mode:DSHLocalProjectAccessModeRead
+              includeMetadata:YES
+                      timeout:2.0
+                        error:error];
+  if (stagedLease == nil) {
+    cleanupAttachURL(stagingGitURL);
+    cleanupAttachURL(attachJournalURL);
+    return nil;
+  }
+  if (self.v2AttachFaultHook != nil && self.v2AttachFaultHook(@"after_attach_preflight")) {
+    cleanupAttachURL(stagingGitURL);
+    cleanupAttachURL(attachJournalURL);
+    if (error != nil) *error = LPError(3104, @"Attach interrupted after preflight");
+    return nil;
+  }
+  // The production project lease has pinned and verified root, worktree,
+  // private gitdir and objects. Release that staging lease before rename so
+  // the final production lease can acquire the same project lock; the
+  // workspace descriptor remains pinned through publication and revalidation.
+  stagedLease = nil;
+  NSError *mutationError = nil;
+  DSHLocalWorkspaceAuthorityMutationGuard *authorityGuard =
+      [self.workspaceAccessV2 acquireAuthorityMutationGuard:&mutationError];
+  if (authorityGuard == nil) {
+    cleanupAttachURL(stagingGitURL);
+    cleanupAttachURL(attachJournalURL);
+    if (error != nil) {
+      *error = mutationError ?: LPError(3104, @"Workspace authority is busy");
+    }
+    return nil;
+  }
+  int publishParent = open(gitParent.fileSystemRepresentation,
+      O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW);
+  int renameResult = publishParent < 0 ? -1 : renameatx_np(
+      publishParent, stagingGitURL.lastPathComponent.fileSystemRepresentation,
+      publishParent, finalGitURL.lastPathComponent.fileSystemRepresentation,
+      RENAME_EXCL);
+  int renameFailure = renameResult == 0 ? 0 : errno;
+  BOOL renameDurable = renameResult == 0 && fsync(publishParent) == 0;
+  if (publishParent >= 0) close(publishParent);
+  if (!renameDurable) {
+    errno = renameFailure;
+    if (errno == EEXIST) {
+      if (error != nil) *error = LPError(3105, @"Workspace project already exists");
+    } else if (error != nil) {
+      *error = LPError(3104, @"Workspace project cannot be published");
+    }
+    cleanupAttachURL(renameResult == 0 ? finalGitURL : stagingGitURL);
+    cleanupAttachURL(attachJournalURL);
+    return nil;
+  }
+  NSMutableDictionary *publishedJournal = [attachJournal mutableCopy];
+  publishedJournal[@"phase"] = @"published";
+  NSData *publishedJournalData = [NSJSONSerialization
+      dataWithJSONObject:publishedJournal options:NSJSONWritingSortedKeys error:nil];
+  if (publishedJournalData == nil ||
+      ![self v2WriteAttachJournalData:publishedJournalData
+                                toURL:attachJournalURL error:&attachError]) {
+    cleanupAttachURL(finalGitURL);
+    cleanupAttachURL(attachJournalURL);
+    if (error != nil && *error == nil) {
+      *error = attachError ?: LPError(3104, @"Attach journal cannot be updated");
+    }
+    return nil;
+  }
+  if (self.v2AttachFaultHook != nil && self.v2AttachFaultHook(@"after_attach_publish")) {
+    cleanupAttachURL(finalGitURL);
+    cleanupAttachURL(attachJournalURL);
+    if (error != nil) *error = LPError(3104, @"Attach interrupted after publication");
+    return nil;
+  }
+  BOOL parentDurable = [self v2FsyncDirectoryAtURL:gitParent error:&attachError];
+  if (!parentDurable) {
+    if (error != nil) *error = LPError(3104, @"Workspace project publication is not durable");
+    cleanupAttachURL(finalGitURL);
+    cleanupAttachURL(attachJournalURL);
+    return nil;
+  }
+  authorityGuard = nil;
+  BOOL (^cleanupPublishedRelation)(void) = ^BOOL {
+    NSError *guardError = nil;
+    DSHLocalWorkspaceAuthorityMutationGuard *cleanupGuard =
+        [self.workspaceAccessV2 acquireAuthorityMutationGuard:&guardError];
+    if (cleanupGuard == nil) {
+      if (error != nil) *error = guardError ?:
+          LPError(3104, @"Published relation cleanup is blocked");
+      return NO;
+    }
+    return cleanupAttachURL(finalGitURL);
+  };
+  DSHLocalWorkspaceLease *afterWorkspaceLease = [self.workspaceAccessV2
+      leaseWorkspaceId:canonical[@"workspace_id"]
+      expectedBindingRevision:[canonical[@"binding_revision"] unsignedIntegerValue]
+      requiredCapabilities:[NSSet setWithObjects:@"read", @"write", @"git", nil]
+      error:nil];
+  struct stat rootAfter = {};
+  if (afterWorkspaceLease == nil ||
+      fstat(afterWorkspaceLease.rootDescriptor, &rootAfter) != 0 ||
+      rootAfter.st_dev != rootBefore.st_dev ||
+      rootAfter.st_ino != rootBefore.st_ino) {
+    cleanupPublishedRelation();
+    cleanupAttachURL(attachJournalURL);
+    if (error != nil) *error = LPError(3106, @"Workspace root changed");
+    return nil;
+  }
+  DSHLocalProjectLease *finalLease = [self.projectAccessV2
+      leaseWorkspaceRootRef:attachedRoot
+                       mode:DSHLocalProjectAccessModeRead
+            includeMetadata:YES
+                    timeout:2.0
+                      error:error];
+  NSDictionary *verifiedDescriptor = finalLease == nil
+      ? nil : [self v2ProjectDescriptorForLease:finalLease root:attachedRoot];
+  if (verifiedDescriptor == nil) {
+    cleanupPublishedRelation();
+    cleanupAttachURL(attachJournalURL);
+    if (error != nil && *error == nil) *error = LPError(3102, @"Workspace project verification failed");
+    return nil;
+  }
+  if (self.v2AttachFaultHook != nil && self.v2AttachFaultHook(@"after_attach_terminal_validation")) {
+    cleanupPublishedRelation();
+    cleanupAttachURL(attachJournalURL);
+    if (error != nil) *error = LPError(3104, @"Attach interrupted after validation");
+    return nil;
+  }
+  NSDictionary *result = @{ @"schema_version" : @1,
+                            @"status" : @"attached",
+                            @"project" : verifiedDescriptor };
+  @synchronized (self) {
+    self.v2AttachResults[operationId] = @{ @"root" : canonical,
+                                           @"result" : result };
+  }
+  if (!cleanupAttachURL(attachJournalURL)) {
+    @synchronized (self) {
+      [self.v2AttachResults removeObjectForKey:operationId];
+    }
+    return nil;
+  }
+  return result;
+}
+
 RCT_REMAP_METHOD(list,
                  listWithResolver:(RCTPromiseResolveBlock)resolve
                  rejecter:(RCTPromiseRejectBlock)reject) {
@@ -1485,10 +3009,17 @@ RCT_REMAP_METHOD(create,
 RCT_REMAP_METHOD(clone,
                  clonePublicRepository:(id)urlValue
                  name:(id)nameValue
+                 options:(id)optionsValue
                  resolver:(RCTPromiseResolveBlock)resolve
                  rejecter:(RCTPromiseRejectBlock)reject) {
   dispatch_async(self.projectQueue, ^{
     NSError *error = nil;
+    __attribute__((objc_precise_lifetime)) NSString *proxyURL =
+      LPValidatedHTTPSProxyURL(optionsValue, &error);
+    if (error != nil) {
+      reject(@"validation", error.localizedDescription, nil);
+      return;
+    }
     NSURL *remoteURL = LPValidatedHTTPSURL(urlValue, &error);
     NSString *name = nil;
     if (nameValue == nil || nameValue == NSNull.null) {
@@ -1523,7 +3054,9 @@ RCT_REMAP_METHOD(clone,
     git_clone_options options = GIT_CLONE_OPTIONS_INIT;
     options.checkout_opts.checkout_strategy = GIT_CHECKOUT_SAFE;
     options.fetch_opts.follow_redirects = GIT_REMOTE_REDIRECT_NONE;
-    options.fetch_opts.proxy_opts.type = GIT_PROXY_NONE;
+    options.fetch_opts.proxy_opts.type = proxyURL.length > 0
+      ? GIT_PROXY_SPECIFIED : GIT_PROXY_NONE;
+    options.fetch_opts.proxy_opts.url = proxyURL.UTF8String;
     options.fetch_opts.callbacks.credentials = LPPublicCloneCredentialCallback;
     git_repository *repository = nullptr;
     BOOL stagingBoundBefore = [self stagingEntryIsExactForProjectId:projectId
@@ -2156,10 +3689,17 @@ RCT_REMAP_METHOD(clearCredential,
 
 RCT_REMAP_METHOD(push,
                  pushProject:(id)projectIdValue
+                 options:(id)optionsValue
                  resolver:(RCTPromiseResolveBlock)resolve
                  rejecter:(RCTPromiseRejectBlock)reject) {
   dispatch_async(self.projectQueue, ^{
     NSError *error = nil;
+    __attribute__((objc_precise_lifetime)) NSString *proxyURL =
+      LPValidatedHTTPSProxyURL(optionsValue, &error);
+    if (error != nil) {
+      reject(@"validation", error.localizedDescription, nil);
+      return;
+    }
     NSString *projectId = LPString(projectIdValue);
     NSDictionary *metadata = nil;
     __attribute__((objc_precise_lifetime)) DSHLocalProjectLease *lease = [self leaseRepositoryForId:projectId
@@ -2212,7 +3752,9 @@ RCT_REMAP_METHOD(push,
     };
     git_push_options options = GIT_PUSH_OPTIONS_INIT;
     options.follow_redirects = GIT_REMOTE_REDIRECT_NONE;
-    options.proxy_opts.type = GIT_PROXY_NONE;
+    options.proxy_opts.type = proxyURL.length > 0
+      ? GIT_PROXY_SPECIFIED : GIT_PROXY_NONE;
+    options.proxy_opts.url = proxyURL.UTF8String;
     options.callbacks.credentials = LPKeychainCredentialCallback;
     options.callbacks.payload = &payload;
     char *rawRefspec = const_cast<char *>(refspecValue.UTF8String);
@@ -2246,6 +3788,659 @@ RCT_REMAP_METHOD(push,
       @"branch": branch,
       @"oid": oid,
       @"pushed_at": LPNow(),
+    });
+  });
+}
+
+// MARK: - Workspace-root routed Project/Git V2
+
+RCT_REMAP_METHOD(attachWorkspaceProject,
+                 attachWorkspaceProjectRequest:(id)requestValue
+                 resolver:(RCTPromiseResolveBlock)resolve
+                 rejecter:(RCTPromiseRejectBlock)reject) {
+  NSDictionary *request = nil;
+  NSError *validationError = nil;
+  @try {
+    request = LPDictionary(requestValue);
+    NSDictionary *root = LPV2Root(request[@"root"], NO, &validationError);
+    NSString *operationId = LPString(request[@"operation_id"]);
+    NSString *mode = LPString(request[@"mode"]);
+    if (!LPV2ExactKeys(request, @[
+          @"schema_version", @"operation_id", @"root", @"mode"
+        ]) || ![request[@"schema_version"] isEqual:@1] ||
+        !LPV2CanonicalOperationId(operationId) || root == nil ||
+        (![mode isEqual:@"open"] && ![mode isEqual:@"init"])) {
+      validationError = LPError(3101, @"Project attach request is invalid");
+    } else {
+      request = @{
+        @"schema_version" : @1,
+        @"operation_id" : [operationId copy],
+        @"root" : root,
+        @"mode" : [mode copy],
+      };
+    }
+  } @catch (__unused NSException *exception) {
+    validationError = LPError(3101, @"Project attach request is invalid");
+  }
+  if (validationError != nil || request == nil) {
+    LPV2Reject(reject, validationError ?: LPError(3101, @"Project attach request is invalid"));
+    return;
+  }
+  dispatch_async(self.projectQueue, ^{
+    NSError *error = nil;
+    NSDictionary *result = nil;
+    @try {
+      result = [self v2AttachWorkspaceProject:request error:&error];
+    } @catch (__unused NSException *exception) {
+      error = LPError(3199, @"Project attach failed");
+    }
+    if (result == nil) {
+      LPV2Reject(reject, error ?: LPError(3199, @"Project attach failed"));
+    } else {
+      resolve(result);
+    }
+  });
+}
+
+RCT_REMAP_METHOD(projectForWorkspaceV2,
+                 projectForWorkspaceV2:(id)rootValue
+                 resolver:(RCTPromiseResolveBlock)resolve
+                 rejecter:(RCTPromiseRejectBlock)reject) {
+  NSDictionary *root = nil;
+  NSError *validationError = nil;
+  @try {
+    root = LPV2Root(rootValue, NO, &validationError);
+  } @catch (__unused NSException *exception) {
+    validationError = LPError(3101, @"Workspace root is invalid");
+  }
+  if (root == nil) {
+    LPV2Reject(reject, validationError ?: LPError(3101, @"Workspace root is invalid"));
+    return;
+  }
+  dispatch_async(self.projectQueue, ^{
+    NSError *error = nil;
+    NSDictionary *result = nil;
+    @try {
+      result = [self v2ProjectForWorkspace:root error:&error];
+    } @catch (__unused NSException *exception) {
+      error = LPError(3199, @"Project lookup failed");
+    }
+    if (result == nil) LPV2Reject(reject, error ?: LPError(3199, @"Project lookup failed"));
+    else resolve(result);
+  });
+}
+
+- (NSDictionary *)v2PrepareDetach:(NSDictionary *)request
+                             error:(NSError **)error {
+  NSDictionary *root = LPV2Root(request[@"root"], YES, error);
+  NSString *operationId = LPString(request[@"operation_id"]);
+  NSString *mode = LPString(request[@"mode"]);
+  if (!LPV2ExactKeys(request, @[
+        @"schema_version", @"operation_id", @"root", @"mode"
+      ]) || ![request[@"schema_version"] isEqual:@1] || root == nil ||
+      !LPV2CanonicalOperationId(operationId) ||
+      (![mode isEqual:@"retain_private_gitdir"] &&
+       ![mode isEqual:@"delete_private_gitdir"])) {
+    if (error != nil) *error = LPError(3101, @"Project detach request is invalid");
+    return nil;
+  }
+  DSHLocalProjectLease *lease = [self v2LeaseForRoot:root
+                                                 mode:DSHLocalProjectAccessModeRead
+                                                error:error];
+  if (lease == nil || ![self.projectAccessV2
+          validateWorkspaceLeaseIdentity:lease rootRef:root error:error]) {
+    return nil;
+  }
+  NSString *checkpointId = NSUUID.UUID.UUIDString.lowercaseString;
+  NSString *gitdirDigest = lease.workspaceBindingDigest;
+  if (!LPV2CanonicalOperationId(checkpointId) ||
+      !LPV2CanonicalDigest(gitdirDigest)) {
+    if (error != nil) *error = LPError(3104, @"Project detach checkpoint is invalid");
+    return nil;
+  }
+  NSDictionary *checkpoint = @{
+    @"schema_version" : @1,
+    @"checkpoint_id" : checkpointId,
+    @"project_id" : root[@"project_id"],
+    @"workspace_id" : root[@"workspace_id"],
+    @"binding_revision" : root[@"binding_revision"],
+    @"gitdir_sha256" : gitdirDigest,
+    @"mode" : mode,
+    @"created_at" : LPNow(),
+  };
+  @synchronized (self) {
+    self.v2DetachCheckpoints[checkpointId] = checkpoint;
+  }
+  DSHWorkspaceClearanceRegisterProjectDetachCheckpoint(
+      checkpoint[@"workspace_id"],
+      [checkpoint[@"binding_revision"] unsignedIntegerValue]);
+  return checkpoint;
+}
+
+- (NSDictionary *)v2CommitDetach:(NSDictionary *)request
+                            error:(NSError **)error {
+  NSString *operationId = LPString(request[@"operation_id"]);
+  NSString *clearance = LPString(request[@"clearance_receipt_id"]);
+  NSDictionary *checkpoint = LPDictionary(request[@"checkpoint"]);
+  if (!LPV2ExactKeys(request, @[
+        @"schema_version", @"operation_id", @"checkpoint",
+        @"clearance_receipt_id"
+      ]) || ![request[@"schema_version"] isEqual:@1] ||
+      !LPV2CanonicalOperationId(operationId) ||
+      !LPV2CanonicalOperationId(clearance) ||
+      !LPV2ExactKeys(checkpoint, @[
+        @"schema_version", @"checkpoint_id", @"project_id",
+        @"workspace_id", @"binding_revision", @"gitdir_sha256",
+        @"mode", @"created_at"
+      ]) || ![checkpoint[@"schema_version"] isEqual:@1] ||
+      !LPV2CanonicalOperationId(LPString(checkpoint[@"checkpoint_id"])) ||
+      ![DSHLocalProjectAccess isCanonicalProjectId:
+          LPString(checkpoint[@"project_id"])] ||
+      ![DSHLocalProjectAccess isCanonicalProjectId:
+          LPString(checkpoint[@"workspace_id"])] ||
+      !LPV2SafeRevision(checkpoint[@"binding_revision"]) ||
+      !LPV2CanonicalDigest(checkpoint[@"gitdir_sha256"] ) ||
+      (![checkpoint[@"mode"] isEqual:@"retain_private_gitdir"] &&
+       ![checkpoint[@"mode"] isEqual:@"delete_private_gitdir"])) {
+    if (error != nil) *error = LPError(3101, @"Project detach request is invalid");
+    return nil;
+  }
+  NSDictionary *stored = nil;
+  @synchronized (self) {
+    stored = self.v2DetachCheckpoints[checkpoint[@"checkpoint_id"]];
+  }
+  if (stored == nil || ![stored isEqual:checkpoint]) {
+    if (error != nil) *error = LPError(3106, @"Project detach checkpoint is stale");
+    return nil;
+  }
+  NSDictionary *root = @{
+    @"schema_version" : @1,
+    @"workspace_id" : checkpoint[@"workspace_id"],
+    @"binding_revision" : checkpoint[@"binding_revision"],
+    @"project_id" : checkpoint[@"project_id"],
+  };
+  DSHLocalProjectLease *lease = [self v2LeaseForRoot:root
+                                                 mode:DSHLocalProjectAccessModeRead
+                                                error:error];
+  if (lease == nil || ![lease.workspaceBindingDigest
+          isEqual:checkpoint[@"gitdir_sha256"]] ||
+      ![self.projectAccessV2 validateWorkspaceLeaseIdentity:lease
+                                                     rootRef:root
+                                                       error:error]) {
+    if (error != nil && *error == nil) *error = LPError(3106, @"Project detach checkpoint is stale");
+    return nil;
+  }
+  // The schema-8 clearance store is the only authority allowed to approve a
+  // destructive private-gitdir mutation. This bridge has no access to that
+  // store yet, so fail closed rather than treating a JavaScript UUID as a
+  // trust anchor. The checkpoint remains retryable for the mounted owner.
+  if (error != nil) *error = LPError(3112, @"Workspace clearance is unavailable");
+  return nil;
+
+}
+
+RCT_REMAP_METHOD(prepareProjectDetachV1,
+                 prepareProjectDetachV1Request:(id)requestValue
+                 resolver:(RCTPromiseResolveBlock)resolve
+                 rejecter:(RCTPromiseRejectBlock)reject) {
+  NSDictionary *request = nil;
+  NSError *validationError = nil;
+  NSDictionary *root = nil;
+  NSString *operationId = nil;
+  NSString *mode = nil;
+  BOOL inputValid = NO;
+  @try {
+    request = LPDictionary(requestValue);
+    root = LPV2Root(request[@"root"], YES, &validationError);
+    operationId = LPString(request[@"operation_id"]);
+    mode = LPString(request[@"mode"]);
+    inputValid = LPV2ExactKeys(request, @[
+          @"schema_version", @"operation_id", @"root", @"mode"
+        ]) && [request[@"schema_version"] isEqual:@1] && root != nil &&
+        LPV2CanonicalOperationId(operationId) &&
+        ([mode isEqual:@"retain_private_gitdir"] ||
+         [mode isEqual:@"delete_private_gitdir"]);
+  } @catch (__unused NSException *exception) {
+    validationError = LPError(3199, @"Project detach request is invalid");
+  }
+  if (!inputValid) {
+    LPV2Reject(reject, validationError ?: LPError(3101, @"Project detach request is invalid"));
+    return;
+  }
+  NSDictionary *canonicalRequest = @{
+    @"schema_version" : @1,
+    @"operation_id" : operationId,
+    @"root" : root,
+    @"mode" : mode,
+  };
+  dispatch_async(self.projectQueue, ^{
+    NSError *error = nil;
+    NSDictionary *result = nil;
+    @try { result = [self v2PrepareDetach:canonicalRequest error:&error]; }
+    @catch (__unused NSException *exception) { error = LPError(3199, @"Project detach failed"); }
+    if (result == nil) LPV2Reject(reject, error ?: LPError(3199, @"Project detach failed"));
+    else resolve(result);
+  });
+}
+
+RCT_REMAP_METHOD(commitProjectDetachV1,
+                 commitProjectDetachV1Request:(id)requestValue
+                 resolver:(RCTPromiseResolveBlock)resolve
+                 rejecter:(RCTPromiseRejectBlock)reject) {
+  NSDictionary *request = LPDictionary(requestValue);
+  dispatch_async(self.projectQueue, ^{
+    NSError *error = nil;
+    NSDictionary *result = nil;
+    @try { result = [self v2CommitDetach:request error:&error]; }
+    @catch (__unused NSException *exception) { error = LPError(3199, @"Project detach failed"); }
+    if (result == nil) LPV2Reject(reject, error ?: LPError(3199, @"Project detach failed"));
+    else resolve(result);
+  });
+}
+
+RCT_REMAP_METHOD(statusV2,
+                 statusV2Request:(id)requestValue
+                 resolver:(RCTPromiseResolveBlock)resolve
+                 rejecter:(RCTPromiseRejectBlock)reject) {
+  NSDictionary *request = nil;
+  NSError *validationError = nil;
+  NSDictionary *root = nil;
+  BOOL inputValid = NO;
+  @try {
+    request = LPDictionary(requestValue);
+    root = LPV2Root(request[@"root"], YES, &validationError);
+    inputValid = LPV2ExactKeys(request, @[@"schema_version", @"root"]) &&
+        [request[@"schema_version"] isEqual:@1] && root != nil;
+  } @catch (__unused NSException *exception) {
+    validationError = LPError(3199, @"Git request is invalid");
+  }
+  if (!inputValid) {
+    LPV2Reject(reject, validationError ?: LPError(3101, @"Git request is invalid"));
+    return;
+  }
+  dispatch_async(self.projectQueue, ^{
+    NSError *error = nil;
+    DSHLocalProjectLease *lease = [self v2LeaseForRoot:root
+                                                   mode:DSHLocalProjectAccessModeRead
+                                                  error:&error];
+    NSDictionary *status = lease == nil ? nil
+        : [self statusForRepository:lease.repository
+                           projectId:root[@"project_id"] error:&error];
+    BOOL valid = status != nil && [self.projectAccessV2
+        validateWorkspaceLeaseIdentity:lease rootRef:root error:&error];
+    if (!valid) {
+      LPV2Reject(reject, error ?: LPError(3199, @"Git status failed"));
+      return;
+    }
+    NSMutableDictionary *result = [status mutableCopy];
+    result[@"schema_version"] = @2;
+    result[@"root"] = root;
+    resolve(result);
+  });
+}
+
+RCT_REMAP_METHOD(diffV2,
+                 diffV2Request:(id)requestValue
+                 resolver:(RCTPromiseResolveBlock)resolve
+                 rejecter:(RCTPromiseRejectBlock)reject) {
+  NSDictionary *request = nil;
+  NSError *validationError = nil;
+  NSDictionary *root = nil;
+  id maxValue = nil;
+  BOOL inputValid = NO;
+  @try {
+    request = LPDictionary(requestValue);
+    root = LPV2Root(request[@"root"], YES, &validationError);
+    maxValue = request[@"max_bytes"];
+    BOOL validMax = [maxValue isKindOfClass:NSNumber.class] &&
+        CFGetTypeID((__bridge CFTypeRef)maxValue) != CFBooleanGetTypeID() &&
+        ![maxValue isKindOfClass:NSDecimalNumber.class] &&
+        isfinite([maxValue doubleValue]) && floor([maxValue doubleValue]) ==
+            [maxValue doubleValue] && [maxValue unsignedIntegerValue] >= 1 &&
+        [maxValue unsignedIntegerValue] <= LPV2MaxDiffBytes &&
+        (double)[maxValue unsignedIntegerValue] == [maxValue doubleValue];
+    inputValid = LPV2ExactKeys(request,
+                               @[@"schema_version", @"root", @"max_bytes"]) &&
+        [request[@"schema_version"] isEqual:@1] && root != nil && validMax;
+  } @catch (__unused NSException *exception) {
+    validationError = LPError(3199, @"Git diff request is invalid");
+  }
+  if (!inputValid) {
+    LPV2Reject(reject, validationError ?: LPError(3101, @"Git diff request is invalid"));
+    return;
+  }
+  NSUInteger maxBytes = [maxValue unsignedIntegerValue];
+  dispatch_async(self.projectQueue, ^{
+    NSError *error = nil;
+    DSHLocalProjectLease *lease = [self v2LeaseForRoot:root
+                                                   mode:DSHLocalProjectAccessModeRead
+                                                  error:&error];
+    NSDictionary *diff = lease == nil ? nil
+        : [self diffForRepository:lease.repository
+                           projectId:root[@"project_id"] staged:NO
+                       contextLines:3 error:&error];
+    BOOL valid = diff != nil && [self.projectAccessV2
+        validateWorkspaceLeaseIdentity:lease rootRef:root error:&error];
+    if (!valid) {
+      LPV2Reject(reject, error ?: LPError(3199, @"Git diff failed"));
+      return;
+    }
+    NSMutableDictionary *result = [diff mutableCopy];
+    BOOL clipped = NO;
+    result[@"patch"] = LPV2ClipUTF8(result[@"patch"], maxBytes, &clipped);
+    result[@"truncated"] = @([result[@"truncated"] boolValue] || clipped);
+    result[@"schema_version"] = @2;
+    result[@"root"] = root;
+    resolve(result);
+  });
+}
+
+RCT_REMAP_METHOD(stageAllV2,
+                 stageAllV2Request:(id)requestValue
+                 resolver:(RCTPromiseResolveBlock)resolve
+                 rejecter:(RCTPromiseRejectBlock)reject) {
+  NSDictionary *request = nil;
+  NSError *validationError = nil;
+  NSDictionary *root = nil;
+  BOOL inputValid = NO;
+  @try {
+    request = LPDictionary(requestValue);
+    root = LPV2Root(request[@"root"], YES, &validationError);
+    inputValid = LPV2ExactKeys(request, @[@"schema_version", @"root"]) &&
+        [request[@"schema_version"] isEqual:@1] && root != nil;
+  } @catch (__unused NSException *exception) {
+    validationError = LPError(3199, @"Git request is invalid");
+  }
+  if (!inputValid) {
+    LPV2Reject(reject, validationError ?: LPError(3101, @"Git request is invalid"));
+    return;
+  }
+  dispatch_async(self.projectQueue, ^{
+    NSError *error = nil;
+    DSHLocalProjectLease *lease = [self v2LeaseForRoot:root
+                                                   mode:DSHLocalProjectAccessModeWrite
+                                                  error:&error];
+    git_index *index = nullptr;
+    int resultCode = lease == nil ? -1 : git_repository_index(&index, lease.repository);
+    char wildcard[] = "*";
+    char *patterns[] = {wildcard};
+    git_strarray pathspec = {patterns, 1};
+    if (resultCode == 0) resultCode = git_index_add_all(
+        index, &pathspec, GIT_INDEX_ADD_DEFAULT, nullptr, nullptr);
+    if (resultCode == 0) resultCode = git_index_write(index);
+    if (index != nullptr) git_index_free(index);
+    NSDictionary *status = resultCode == 0
+        ? [self statusForRepository:lease.repository
+                           projectId:root[@"project_id"] error:&error]
+        : nil;
+    BOOL valid = resultCode == 0 && status != nil && [self.projectAccessV2
+        validateWorkspaceLeaseIdentity:lease rootRef:root error:&error];
+    if (!valid) {
+      LPV2Reject(reject, error ?: LPError(3199, @"Git stage failed"));
+      return;
+    }
+    NSMutableDictionary *response = [status mutableCopy];
+    response[@"schema_version"] = @2;
+    response[@"root"] = root;
+    resolve(response);
+  });
+}
+
+RCT_REMAP_METHOD(commitV2,
+                 commitV2Request:(id)requestValue
+                 resolver:(RCTPromiseResolveBlock)resolve
+                 rejecter:(RCTPromiseRejectBlock)reject) {
+  NSDictionary *request = nil;
+  NSError *validationError = nil;
+  NSDictionary *root = nil;
+  NSString *operationId = nil;
+  NSString *message = nil;
+  NSString *authorName = nil;
+  NSString *authorEmail = nil;
+  id expectedHead = nil;
+  BOOL inputValid = NO;
+  @try {
+    request = LPDictionary(requestValue);
+    root = LPV2Root(request[@"root"], YES, &validationError);
+    operationId = LPString(request[@"operation_id"]);
+    message = LPString(request[@"message"]);
+    authorName = LPString(request[@"author_name"]);
+    authorEmail = LPString(request[@"author_email"]);
+    expectedHead = request[@"expected_head_oid"];
+    BOOL messageValid = LPV2BoundedString(message, LPV2MaxCommitMessageBytes, NO) &&
+        [message stringByTrimmingCharactersInSet:
+            NSCharacterSet.whitespaceAndNewlineCharacterSet].length > 0;
+    BOOL nameValid = LPV2BoundedString(authorName, 120, NO) &&
+        [authorName isEqualToString:[authorName
+            stringByTrimmingCharactersInSet:
+                NSCharacterSet.whitespaceAndNewlineCharacterSet]] &&
+        [authorName rangeOfCharacterFromSet:
+            NSCharacterSet.whitespaceAndNewlineCharacterSet].location == NSNotFound;
+    NSArray<NSString *> *emailParts =
+        [authorEmail componentsSeparatedByString:@"@"];
+    BOOL emailValid = LPV2BoundedString(authorEmail, 254, NO) &&
+        emailParts.count == 2 && emailParts[0].length > 0 &&
+        emailParts[1].length > 0 &&
+        [authorEmail rangeOfCharacterFromSet:
+            NSCharacterSet.whitespaceAndNewlineCharacterSet].location == NSNotFound &&
+        ![authorEmail containsString:@"<"] && ![authorEmail containsString:@">"];
+    inputValid = LPV2ExactKeys(request, @[
+          @"schema_version", @"root", @"operation_id", @"message",
+          @"author_name", @"author_email", @"expected_head_oid"
+        ]) && [request[@"schema_version"] isEqual:@1] && root != nil &&
+        LPV2CanonicalOperationId(operationId) && messageValid && nameValid &&
+        emailValid && LPV2CanonicalOID(expectedHead, YES);
+  } @catch (__unused NSException *exception) {
+    validationError = LPError(3199, @"Git commit request is invalid");
+  }
+  if (!inputValid) {
+    LPV2Reject(reject, validationError ?: LPError(3101, @"Git commit request is invalid"));
+    return;
+  }
+  dispatch_async(self.projectQueue, ^{
+    NSError *error = nil;
+    DSHLocalProjectLease *lease = [self v2LeaseForRoot:root
+                                                   mode:DSHLocalProjectAccessModeWrite
+                                                  error:&error];
+    if (lease == nil) {
+      LPV2Reject(reject, error ?: LPError(3199, @"Git commit failed"));
+      return;
+    }
+    git_repository *repository = lease.repository;
+    git_reference *head = nullptr;
+    const git_oid *target = nullptr;
+    int headResult = git_repository_head(&head, repository);
+    if (headResult == 0 && head != nullptr) target = git_reference_target(head);
+    NSString *currentHead = LPOidString(target);
+    BOOL unborn = headResult == GIT_EUNBORNBRANCH || headResult == GIT_ENOTFOUND;
+    BOOL expectedMatches = expectedHead == NSNull.null
+        ? unborn
+        : (headResult == 0 && [currentHead isEqual:expectedHead]);
+    if (!expectedMatches) {
+      if (head != nullptr) git_reference_free(head);
+      LPV2Reject(reject, LPError(3110, @"Git HEAD changed"));
+      return;
+    }
+    if (head != nullptr) git_reference_free(head);
+
+    git_index *index = nullptr;
+    git_tree *tree = nullptr;
+    git_commit *parent = nullptr;
+    git_signature *signature = nullptr;
+    git_oid treeOid = {};
+    git_oid commitOid = {};
+    int resultCode = git_repository_index(&index, repository);
+    if (resultCode == 0 && git_index_has_conflicts(index)) resultCode = GIT_EUNMERGED;
+    if (resultCode == 0) resultCode = git_index_write_tree(&treeOid, index);
+    if (resultCode == 0) resultCode = git_tree_lookup(&tree, repository, &treeOid);
+    git_reference *current = nullptr;
+    int currentResult = resultCode == 0 ? git_repository_head(&current, repository)
+                                        : resultCode;
+    if (currentResult == 0 && current != nullptr) {
+      const git_oid *parentOid = git_reference_target(current);
+      if (parentOid == nullptr || git_commit_lookup(&parent, repository, parentOid) < 0) {
+        resultCode = -1;
+      } else if (git_oid_equal(&treeOid, git_commit_tree_id(parent))) {
+        resultCode = GIT_EUNCHANGED;
+      }
+    } else if (currentResult == GIT_EUNBORNBRANCH || currentResult == GIT_ENOTFOUND) {
+      resultCode = git_index_entrycount(index) == 0 ? GIT_EUNCHANGED : 0;
+    } else if (currentResult < 0) {
+      resultCode = currentResult;
+    }
+    if (current != nullptr) git_reference_free(current);
+    if (resultCode == 0) resultCode = git_signature_now(
+        &signature, authorName.UTF8String, authorEmail.UTF8String);
+    const git_commit *parents[] = {parent};
+    if (resultCode == 0) resultCode = git_commit_create(
+        &commitOid, repository, "HEAD", signature, signature, "UTF-8",
+        message.UTF8String, tree, parent == nullptr ? 0 : 1, parents);
+    if (signature != nullptr) git_signature_free(signature);
+    if (parent != nullptr) git_commit_free(parent);
+    if (tree != nullptr) git_tree_free(tree);
+    if (index != nullptr) git_index_free(index);
+    if (resultCode != 0 || ![self.projectAccessV2
+        validateWorkspaceLeaseIdentity:lease rootRef:root error:&error]) {
+      LPV2Reject(reject, error ?: LPError(3199, @"Git commit failed"));
+      return;
+    }
+    NSString *summary = [[message componentsSeparatedByCharactersInSet:
+        NSCharacterSet.newlineCharacterSet] firstObject] ?: @"";
+    resolve(@{
+      @"schema_version" : @2,
+      @"root" : root,
+      @"project_id" : root[@"project_id"],
+      @"oid" : LPOidString(&commitOid) ?: @"",
+      @"summary" : summary,
+      @"committed_at" : LPNow(),
+    });
+  });
+}
+
+RCT_REMAP_METHOD(pushV2,
+                 pushV2Request:(id)requestValue
+                 resolver:(RCTPromiseResolveBlock)resolve
+                 rejecter:(RCTPromiseRejectBlock)reject) {
+  NSDictionary *request = nil;
+  NSError *validationError = nil;
+  NSDictionary *root = nil;
+  NSString *operationId = nil;
+  NSString *credentialReference = nil;
+  NSString *expectedLocalOid = nil;
+  NSString *proxyURL = nil;
+  BOOL inputValid = NO;
+  @try {
+    request = LPDictionary(requestValue);
+    root = LPV2Root(request[@"root"], YES, &validationError);
+    operationId = LPString(request[@"operation_id"]);
+    credentialReference = LPString(request[@"credential_reference"]);
+    expectedLocalOid = LPString(request[@"expected_local_oid"]);
+    id proxyValue = request[@"https_proxy_url"];
+    if (proxyValue != NSNull.null) {
+      proxyURL = LPValidatedHTTPSProxyURL(
+          @{ @"httpsProxyUrl" : proxyValue }, &validationError);
+    }
+    BOOL proxyValid = proxyValue == NSNull.null || proxyURL != nil;
+    inputValid = LPV2ExactKeys(request, @[
+          @"schema_version", @"root", @"operation_id", @"remote",
+          @"expected_local_oid", @"credential_reference", @"https_proxy_url"
+        ]) && [request[@"schema_version"] isEqual:@1] && root != nil &&
+        LPV2CanonicalOperationId(operationId) &&
+        [request[@"remote"] isEqual:@"origin"] &&
+        LPV2CanonicalOID(expectedLocalOid, NO) &&
+        LPV2BoundedString(credentialReference, LPV2MaxCredentialReferenceBytes, NO) &&
+        proxyValid;
+  } @catch (__unused NSException *exception) {
+    validationError = LPError(3199, @"Git push request is invalid");
+  }
+  if (!inputValid) {
+    LPV2Reject(reject, validationError ?: LPError(3101, @"Git push request is invalid"));
+    return;
+  }
+  request = @{
+    @"schema_version" : @1,
+    @"root" : root,
+    @"operation_id" : operationId,
+    @"remote" : @"origin",
+    @"expected_local_oid" : expectedLocalOid,
+    @"credential_reference" : credentialReference,
+    @"https_proxy_url" : proxyURL ?: NSNull.null,
+  };
+  dispatch_async(self.projectQueue, ^{
+    NSError *error = nil;
+    DSHLocalProjectLease *lease = [self v2LeaseForRoot:root
+                                                   mode:DSHLocalProjectAccessModeWrite
+                                                  error:&error];
+    if (lease == nil) {
+      LPV2Reject(reject, error ?: LPError(3199, @"Git push failed"));
+      return;
+    }
+    git_repository *repository = lease.repository;
+    git_reference *head = nullptr;
+    int headResult = git_repository_head(&head, repository);
+    const git_oid *target = head == nullptr ? nullptr : git_reference_target(head);
+    NSString *branch = nil;
+    const char *fullRef = head == nullptr ? nullptr : git_reference_name(head);
+    BOOL localBranch = headResult == 0 && fullRef != nullptr && target != nullptr &&
+        git_reference_is_branch(head) && strncmp(fullRef, "refs/heads/", 11) == 0;
+    if (localBranch) branch = [NSString stringWithUTF8String:fullRef + 11];
+    BOOL expectedMatches = localBranch && [LPOidString(target)
+        isEqual:expectedLocalOid] && branch.length > 0 &&
+        LPV2BoundedString(branch, 1024, NO);
+    if (!expectedMatches) {
+      if (head != nullptr) git_reference_free(head);
+      LPV2Reject(reject, LPError(3110, @"Git HEAD changed"));
+      return;
+    }
+    NSString *origin = [self originURLForRepository:repository error:&error];
+    NSString *host = [NSURLComponents componentsWithString:origin].host.lowercaseString;
+    OSStatus keychainStatus = errSecSuccess;
+    // V2 never falls back to the ambient host credential. The opaque
+    // persistent reference must resolve to this exact Keychain item and the
+    // item's service/account must match the repository origin host.
+    NSDictionary *credential = origin == nil ? nil
+        : [self credentialForReference:credentialReference
+                                  host:host
+                                status:&keychainStatus];
+    if (credential == nil) {
+      if (head != nullptr) git_reference_free(head);
+      LPV2Reject(reject, LPError(3111, @"Git credential is unavailable"));
+      return;
+    }
+    git_remote *remote = nullptr;
+    int resultCode = git_remote_lookup(&remote, repository, "origin");
+    if (resultCode == 0) resultCode = git_remote_set_instance_url(remote, origin.UTF8String);
+    if (resultCode == 0) resultCode = git_remote_set_instance_pushurl(remote, origin.UTF8String);
+    LPCredentialPayload payload = {host, credential[@"username"], credential[@"token"], false};
+    git_push_options options = GIT_PUSH_OPTIONS_INIT;
+    options.follow_redirects = GIT_REMOTE_REDIRECT_NONE;
+    // The caller's explicit policy is validated before queueing this
+    // operation. Null is an explicit direct-connection policy.
+    options.proxy_opts.type = proxyURL.length > 0
+        ? GIT_PROXY_SPECIFIED : GIT_PROXY_NONE;
+    options.proxy_opts.url = proxyURL.UTF8String;
+    options.callbacks.credentials = LPKeychainCredentialCallback;
+    options.callbacks.payload = &payload;
+    NSString *fullReference = [NSString stringWithUTF8String:fullRef];
+    char *rawRefspec = const_cast<char *>(
+        [NSString stringWithFormat:@"%@:%@", fullReference, fullReference].UTF8String);
+    git_strarray refspecs = {&rawRefspec, 1};
+    if (resultCode == 0) resultCode = git_remote_push(remote, &refspecs, &options);
+    if (remote != nullptr) git_remote_free(remote);
+    if (head != nullptr) git_reference_free(head);
+    if (resultCode != 0 || ![self.projectAccessV2
+        validateWorkspaceLeaseIdentity:lease rootRef:root error:&error]) {
+      LPV2Reject(reject, error ?: LPError(3199, @"Git push failed"));
+      return;
+    }
+    resolve(@{
+      @"schema_version" : @2,
+      @"root" : root,
+      @"project_id" : root[@"project_id"],
+      @"remote" : @"origin",
+      @"branch" : branch,
+      @"oid" : expectedLocalOid,
+      @"pushed_at" : LPNow(),
     });
   });
 }

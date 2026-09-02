@@ -130,7 +130,7 @@ export function ProjectsSurface({
   onUnbindFromChat,
 }: Props) {
   const insets = useSafeAreaInsets();
-  const { colors, locale, t } = useAppPresentation();
+  const { colors, locale, preferences, t } = useAppPresentation();
   const styles = useMemo(() => createStyles(colors), [colors]);
   const [projects, setProjects] = useState<LocalProject[]>([]);
   const [selected, setSelected] = useState<LocalProject | null>(null);
@@ -239,6 +239,7 @@ export function ProjectsSurface({
             : await LocalProjects.clone(
                 trimmedUrl,
                 trimmedName.length === 0 ? undefined : trimmedName,
+                { httpsProxyUrl: preferences.gitHttpsProxyUrl },
               );
         setProjects(previous => [
           project,
@@ -262,7 +263,7 @@ export function ProjectsSurface({
         setBusy(false);
       }
     },
-    [busy, cloneUrl, loadDetail, name, t],
+    [busy, cloneUrl, loadDetail, name, preferences.gitHttpsProxyUrl, t],
   );
 
   const refresh = useCallback(async () => {
@@ -411,7 +412,9 @@ export function ProjectsSurface({
             setBusy(true);
             setError(null);
             setNotice(null);
-            LocalProjects.push(selected.id)
+            LocalProjects.push(selected.id, {
+              httpsProxyUrl: preferences.gitHttpsProxyUrl,
+            })
               .then(() => {
                 setNotice(t('projects.pushSuccess'));
                 return loadDetail(selected);
@@ -428,7 +431,7 @@ export function ProjectsSurface({
         },
       ],
     );
-  }, [busy, loadDetail, selected, status, t]);
+  }, [busy, loadDetail, preferences.gitHttpsProxyUrl, selected, status, t]);
 
   const title = selected?.name ?? t('projects.title');
 

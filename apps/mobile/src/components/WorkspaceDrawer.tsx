@@ -1,4 +1,10 @@
-import React, { useCallback, useEffect, useMemo, useState } from 'react';
+import React, {
+  useCallback,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+} from 'react';
 import ArchiveRestore from 'lucide-react-native/icons/archive-restore';
 import ChevronLeft from 'lucide-react-native/icons/chevron-left';
 import FileInput from 'lucide-react-native/icons/file-input';
@@ -32,6 +38,7 @@ import {
   type WorkspaceTrashReceipt,
 } from '../native/LocalWorkspace';
 import { LocalDocuments } from '../native/LocalDocuments';
+import type { WorkspaceRootRefV1 } from '../native/WorkspaceRoot';
 import { useAppPresentation } from '../presentation/AppPresentation';
 import { fonts, type ThemePalette } from '../theme';
 import { AppIcon } from './AppIcon';
@@ -50,30 +57,64 @@ function parentPath(path: string): string {
   return parts.join('/');
 }
 
-function displayPath(
-  path: string,
-  rootPath: string,
-  rootLabel: string,
-): string {
-  if (rootPath.length === 0)
-    return path.length === 0 ? rootLabel : `${rootLabel}/${path}`;
-  const relative = path === rootPath ? '' : path.slice(rootPath.length + 1);
-  return relative.length === 0 ? rootLabel : `${rootLabel}/${relative}`;
+function displayPath(path: string, rootLabel: string): string {
+  return path.length === 0 ? rootLabel : `${rootLabel}/${path}`;
 }
 
-function isWithinRoot(path: string, rootPath: string): boolean {
+function isGitMetadata(path: string): boolean {
+  return path.split('/').some(part => part.toLowerCase() === '.git');
+}
+
+function sameRoot(
+  left: WorkspaceRootRefV1,
+  right: WorkspaceRootRefV1,
+): boolean {
   return (
-    rootPath.length === 0 ||
-    path === rootPath ||
-    path.startsWith(`${rootPath}/`)
+    left.workspace_id === right.workspace_id &&
+    left.binding_revision === right.binding_revision &&
+    left.project_id === right.project_id
   );
 }
 
-function isGitMetadata(path: string, rootPath: string): boolean {
-  if (!isWithinRoot(path, rootPath)) return true;
-  const relative =
-    rootPath.length === 0 ? path : path.slice(rootPath.length + 1);
-  return relative.split('/').some(part => part === '.git');
+function rootKey(root: WorkspaceRootRefV1 | undefined): string {
+  return root === undefined
+    ? 'none'
+    : `${root.workspace_id}:${root.binding_revision}:${
+        root.project_id ?? 'workspace'
+      }`;
+}
+
+function copyRoot(root: WorkspaceRootRefV1): WorkspaceRootRefV1 {
+  return {
+    schema_version: 1,
+    workspace_id: root.workspace_id,
+    binding_revision: root.binding_revision,
+    project_id: root.project_id,
+  };
+}
+
+function newOperationId(): string {
+  try {
+    const crypto = (
+      globalThis as typeof globalThis & {
+        crypto?: { randomUUID?: () => string };
+      }
+    ).crypto;
+    if (crypto !== undefined && typeof crypto.randomUUID === 'function') {
+      return crypto.randomUUID().toLowerCase();
+    }
+  } catch {
+    // Fall through to the local UUID-shaped fallback when the platform
+    // crypto implementation is unavailable or brand-checks its receiver.
+  }
+  const hex = Array.from({ length: 32 }, () =>
+    Math.floor(Math.random() * 16).toString(16),
+  );
+  hex[12] = '4';
+  hex[16] = (8 + (Number.parseInt(hex[16] ?? '8', 16) % 4)).toString(16);
+  return `${hex.slice(0, 8).join('')}-${hex.slice(8, 12).join('')}-${hex
+    .slice(12, 16)
+    .join('')}-${hex.slice(16, 20).join('')}-${hex.slice(20).join('')}`;
 }
 
 function formatSize(bytes: number): string {
@@ -84,12 +125,18 @@ function formatSize(bytes: number): string {
 
 export function WorkspaceDrawer({
   confirmDestructive = true,
+  workspaceRoot,
+  workspaceLabel,
+  // Kept as a display-only input while the Home coordinator migrates. It is
+  // deliberately never used as an authority or passed to native code.
   projectScope,
   readOnly = false,
   visible,
   onClose,
 }: {
   confirmDestructive?: boolean;
+  workspaceRoot?: WorkspaceRootRefV1;
+  workspaceLabel?: string;
   projectScope?: { rootPath: string; label: string };
   readOnly?: boolean;
   visible: boolean;
@@ -98,10 +145,38 @@ export function WorkspaceDrawer({
   const insets = useSafeAreaInsets();
   const { colors, t } = useAppPresentation();
   const styles = useMemo(() => createStyles(colors), [colors]);
-  const rootPath = projectScope?.rootPath ?? '';
-  const rootLabel = projectScope?.label ?? 'workspace';
-  const projectScoped = projectScope !== undefined;
-  const [path, setPath] = useState(rootPath);
+  const rootLabel = workspaceLabel ?? projectScope?.label ?? 'workspace';
+  const rootReady = workspaceRoot !== undefined;
+  const rootGenerationRef = useRef<{
+    key: string;
+    generation: number;
+    root: WorkspaceRootRefV1 | undefined;
+  }>({ key: '', generation: 0, root: undefined });
+  const nextRootKey = rootKey(workspaceRoot);
+  if (rootGenerationRef.current.key !== nextRootKey) {
+    rootGenerationRef.current = {
+      key: nextRootKey,
+      generation: rootGenerationRef.current.generation + 1,
+      root: workspaceRoot === undefined ? undefined : copyRoot(workspaceRoot),
+    };
+  }
+  const captureRoot = useCallback(
+    () => (workspaceRoot === undefined ? undefined : copyRoot(workspaceRoot)),
+    [workspaceRoot],
+  );
+  const isCurrentRoot = useCallback(
+    (captured: WorkspaceRootRefV1 | undefined, generation: number) => {
+      const current = rootGenerationRef.current;
+      return (
+        generation === current.generation &&
+        (captured === undefined
+          ? current.root === undefined
+          : current.root !== undefined && sameRoot(captured, current.root))
+      );
+    },
+    [],
+  );
+  const [path, setPath] = useState('');
   const [entries, setEntries] = useState<WorkspaceEntry[]>([]);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -111,6 +186,10 @@ export function WorkspaceDrawer({
   const [renameEntry, setRenameEntry] = useState<WorkspaceEntry | null>(null);
   const [renameName, setRenameName] = useState('');
   const [openFile, setOpenFile] = useState<WorkspaceEntry | null>(null);
+  const openFileAuthorityRef = useRef<{
+    root: WorkspaceRootRefV1;
+    generation: number;
+  } | null>(null);
   const [content, setContent] = useState('');
   const [savedContent, setSavedContent] = useState('');
   const [toolBlocks, setToolBlocks] = useState<StructuredBlock[]>([]);
@@ -118,7 +197,9 @@ export function WorkspaceDrawer({
 
   const load = useCallback(
     async (nextPath: string) => {
-      if (!LocalWorkspace.isAvailable()) {
+      const root = captureRoot();
+      const generation = rootGenerationRef.current.generation;
+      if (!rootReady || root === undefined || !LocalWorkspace.isAvailable()) {
         setError(t('files.unavailable'));
         return;
       }
@@ -126,52 +207,61 @@ export function WorkspaceDrawer({
       setError(null);
       setNotice(null);
       try {
-        if (
-          !isWithinRoot(nextPath, rootPath) ||
-          isGitMetadata(nextPath, rootPath)
-        )
-          throw new Error(
-            'The requested path is outside the selected project.',
-          );
+        if (isGitMetadata(nextPath))
+          throw new Error(t('files.gitMetadataProtected'));
         const [directory, trash] = await Promise.all([
-          LocalWorkspace.listDirectory(nextPath),
-          LocalWorkspace.listTrash(),
+          LocalWorkspace.listV2({
+            schema_version: 1,
+            root,
+            path: nextPath,
+            max_entries: 1000,
+          }),
+          LocalWorkspace.listTrashV2({
+            schema_version: 1,
+            root,
+            max_entries: 8,
+          }),
         ]);
-        if (!isWithinRoot(directory.path, rootPath))
-          throw new Error(
-            'The native workspace returned an invalid project path.',
-          );
+        if (!isCurrentRoot(root, generation)) return;
+        if (
+          directory.path !== nextPath ||
+          directory.root.workspace_id !== root.workspace_id ||
+          directory.root.binding_revision !== root.binding_revision ||
+          directory.root.project_id !== root.project_id
+        )
+          throw new Error(t('files.unavailable'));
         setPath(directory.path);
         setEntries(
-          directory.entries.filter(
-            entry => !isGitMetadata(entry.path, rootPath),
-          ),
+          directory.entries.filter(entry => !isGitMetadata(entry.path)),
         );
-        setRecentTrash(
-          !projectScoped
-            ? trash.entries
-            : trash.entries.filter(receipt =>
-                isWithinRoot(receipt.original_path, rootPath),
-              ),
-        );
+        setRecentTrash(trash.entries);
       } catch (caught) {
+        if (!isCurrentRoot(root, generation)) return;
         setError(caught instanceof Error ? caught.message : String(caught));
       } finally {
-        setBusy(false);
+        if (isCurrentRoot(root, generation)) setBusy(false);
       }
     },
-    [projectScoped, rootPath, t],
+    [captureRoot, isCurrentRoot, rootReady, t],
   );
 
   useEffect(() => {
     if (!visible) return;
-    setPath(rootPath);
+    setPath('');
+    setEntries([]);
+    setRecentTrash([]);
+    setBusy(false);
     setOpenFile(null);
+    openFileAuthorityRef.current = null;
     setContent('');
     setSavedContent('');
     setToolBlocks([]);
-    load(rootPath).catch(() => undefined);
-  }, [load, rootPath, visible]);
+    setCreateKind(null);
+    setNewName('');
+    setRenameEntry(null);
+    setRenameName('');
+    load('').catch(() => undefined);
+  }, [load, visible, workspaceRoot]);
 
   const open = useCallback(
     async (entry: WorkspaceEntry) => {
@@ -181,41 +271,53 @@ export function WorkspaceDrawer({
       }
       setBusy(true);
       setError(null);
+      const root = captureRoot();
+      const generation = rootGenerationRef.current.generation;
       try {
-        const file = await LocalWorkspace.readText(entry.path);
+        if (root === undefined) throw new Error(t('files.unavailable'));
+        const file = await LocalWorkspace.readV2({
+          schema_version: 1,
+          root,
+          path: entry.path,
+          max_bytes: 1024 * 1024,
+        });
+        if (!isCurrentRoot(root, generation)) return;
+        if (!sameRoot(root, file.root)) throw new Error(t('files.unavailable'));
         setOpenFile(file.file);
+        openFileAuthorityRef.current = { root, generation };
         setContent(file.content);
         setSavedContent(file.content);
         setToolBlocks([]);
       } catch (caught) {
+        if (!isCurrentRoot(root, generation)) return;
         setError(caught instanceof Error ? caught.message : String(caught));
       } finally {
-        setBusy(false);
+        if (isCurrentRoot(root, generation)) setBusy(false);
       }
     },
-    [load],
+    [captureRoot, isCurrentRoot, load, t],
   );
 
   const beginCreate = useCallback(
     (kind: CreateKind) => {
-      if (readOnly) return;
+      if (readOnly || !rootReady) return;
       setRenameEntry(null);
       setRenameName('');
       setCreateKind(kind);
       setNewName('');
     },
-    [readOnly],
+    [readOnly, rootReady],
   );
 
   const beginRename = useCallback(
     (entry: WorkspaceEntry) => {
-      if (readOnly) return;
+      if (readOnly || !rootReady) return;
       setCreateKind(null);
       setNewName('');
       setRenameEntry(entry);
       setRenameName(entry.name);
     },
-    [readOnly],
+    [readOnly, rootReady],
   );
 
   useEffect(() => {
@@ -227,41 +329,84 @@ export function WorkspaceDrawer({
   }, [readOnly]);
 
   const create = useCallback(async () => {
-    if (readOnly) return;
+    if (readOnly || !rootReady) return;
     const name = newName.trim();
     if (createKind === null || name.length === 0) return;
+    const root = captureRoot();
+    const generation = rootGenerationRef.current.generation;
     setBusy(true);
     setError(null);
     try {
+      if (!isCurrentRoot(root, generation)) return;
       const target = joinPath(path, name);
-      if (projectScoped && isGitMetadata(target, rootPath)) {
+      if (isGitMetadata(target)) {
         setError(t('files.gitMetadataProtected'));
         return;
       }
-      if (createKind === 'directory')
-        await LocalWorkspace.createDirectory(target);
-      else await LocalWorkspace.writeText(target, '', { createOnly: true });
+      if (root === undefined) throw new Error(t('files.unavailable'));
+      let createdRoot: WorkspaceRootRefV1;
+      if (createKind === 'directory') {
+        const result = await LocalWorkspace.createDirectoryV2({
+          schema_version: 1,
+          root,
+          path: target,
+        });
+        createdRoot = result.root;
+      } else {
+        const result = await LocalWorkspace.writeV2({
+          schema_version: 1,
+          root,
+          path: target,
+          content: '',
+          expected_revision: null,
+          create_only: true,
+        });
+        createdRoot = result.root;
+      }
+      if (!isCurrentRoot(root, generation)) return;
+      if (!sameRoot(root, createdRoot)) throw new Error(t('files.unavailable'));
       setCreateKind(null);
       setNewName('');
       await load(path);
+      if (!isCurrentRoot(root, generation)) return;
     } catch (caught) {
+      if (!isCurrentRoot(root, generation)) return;
       setError(caught instanceof Error ? caught.message : String(caught));
     } finally {
-      setBusy(false);
+      if (isCurrentRoot(root, generation)) setBusy(false);
     }
-  }, [createKind, load, newName, path, projectScoped, readOnly, rootPath, t]);
+  }, [
+    captureRoot,
+    createKind,
+    isCurrentRoot,
+    load,
+    newName,
+    path,
+    readOnly,
+    rootReady,
+    t,
+  ]);
 
   const save = useCallback(async (): Promise<boolean> => {
     if (openFile === null || readOnly) return false;
+    const authority = openFileAuthorityRef.current;
+    const root = authority?.root;
+    const generation = authority?.generation ?? -1;
     setBusy(true);
     setError(null);
     try {
-      const result = await LocalWorkspace.writeText(openFile.path, content, {
-        createOnly: false,
-        ...(openFile.revision === undefined
-          ? {}
-          : { expectedRevision: openFile.revision }),
+      if (!isCurrentRoot(root, generation)) return false;
+      if (root === undefined) throw new Error(t('files.unavailable'));
+      const result = await LocalWorkspace.writeV2({
+        schema_version: 1,
+        root,
+        path: openFile.path,
+        content,
+        expected_revision: openFile.revision,
+        create_only: false,
       });
+      if (!isCurrentRoot(root, generation)) return false;
+      if (!sameRoot(root, result.root)) throw new Error(t('files.unavailable'));
       setOpenFile(result.file);
       setSavedContent(content);
       setEntries(previous =>
@@ -271,15 +416,17 @@ export function WorkspaceDrawer({
       );
       return true;
     } catch (caught) {
+      if (!isCurrentRoot(root, generation)) return false;
       setError(caught instanceof Error ? caught.message : String(caught));
       return false;
     } finally {
-      setBusy(false);
+      if (isCurrentRoot(root, generation)) setBusy(false);
     }
-  }, [content, openFile, readOnly]);
+  }, [content, isCurrentRoot, openFile, readOnly, t]);
 
   const closeEditor = useCallback(() => {
     setOpenFile(null);
+    openFileAuthorityRef.current = null;
     setContent('');
     setSavedContent('');
     setToolBlocks([]);
@@ -326,52 +473,85 @@ export function WorkspaceDrawer({
   }, [closeEditor, confirmEditorExit, onClose]);
 
   const applyRename = useCallback(async () => {
-    if (readOnly || renameEntry === null || renameName.trim().length === 0)
+    if (
+      readOnly ||
+      !rootReady ||
+      renameEntry === null ||
+      renameName.trim().length === 0
+    )
       return;
+    const root = captureRoot();
+    const generation = rootGenerationRef.current.generation;
     setBusy(true);
     try {
+      if (!isCurrentRoot(root, generation)) return;
       const destination = joinPath(
         parentPath(renameEntry.path),
         renameName.trim(),
       );
-      if (projectScoped && isGitMetadata(destination, rootPath)) {
+      if (isGitMetadata(destination)) {
         setError(t('files.gitMetadataProtected'));
         return;
       }
-      await LocalWorkspace.renameEntry(renameEntry.path, destination);
+      if (root === undefined) throw new Error(t('files.unavailable'));
+      const result = await LocalWorkspace.renameEntryV2({
+        schema_version: 1,
+        root,
+        source_path: renameEntry.path,
+        destination_path: destination,
+      });
+      if (!isCurrentRoot(root, generation)) return;
+      if (!sameRoot(root, result.root)) throw new Error(t('files.unavailable'));
       setRenameEntry(null);
       setRenameName('');
       await load(path);
+      if (!isCurrentRoot(root, generation)) return;
     } catch (caught) {
+      if (!isCurrentRoot(root, generation)) return;
       setError(caught instanceof Error ? caught.message : String(caught));
     } finally {
-      setBusy(false);
+      if (isCurrentRoot(root, generation)) setBusy(false);
     }
   }, [
+    captureRoot,
+    isCurrentRoot,
     load,
     path,
-    projectScoped,
     readOnly,
     renameEntry,
     renameName,
-    rootPath,
+    rootReady,
     t,
   ]);
 
   const moveToTrash = useCallback(
     (entry: WorkspaceEntry) => {
-      if (readOnly) return;
+      if (readOnly || !rootReady) return;
+      const root = captureRoot();
+      const generation = rootGenerationRef.current.generation;
       const perform = async () => {
+        if (!isCurrentRoot(root, generation)) return;
         setBusy(true);
         try {
-          const receipt = await LocalWorkspace.trashEntry(entry.path);
-          setRecentTrash(previous => [receipt, ...previous].slice(0, 8));
+          if (!isCurrentRoot(root, generation)) return;
+          if (root === undefined) throw new Error(t('files.unavailable'));
+          const result = await LocalWorkspace.trashEntryV2({
+            schema_version: 1,
+            root,
+            path: entry.path,
+          });
+          if (!isCurrentRoot(root, generation)) return;
+          if (!sameRoot(root, result.root))
+            throw new Error(t('files.unavailable'));
+          setRecentTrash(previous => [result.receipt, ...previous].slice(0, 8));
           if (openFile?.path === entry.path) setOpenFile(null);
           await load(path);
+          if (!isCurrentRoot(root, generation)) return;
         } catch (caught) {
+          if (!isCurrentRoot(root, generation)) return;
           setError(caught instanceof Error ? caught.message : String(caught));
         } finally {
-          setBusy(false);
+          if (isCurrentRoot(root, generation)) setBusy(false);
         }
       };
       if (!confirmDestructive) {
@@ -395,27 +575,51 @@ export function WorkspaceDrawer({
         ],
       );
     },
-    [confirmDestructive, load, openFile?.path, path, readOnly, t],
+    [
+      confirmDestructive,
+      load,
+      openFile?.path,
+      path,
+      readOnly,
+      rootReady,
+      t,
+      captureRoot,
+      isCurrentRoot,
+    ],
   );
 
   const restore = useCallback(
     async (receipt: WorkspaceTrashReceipt) => {
-      if (readOnly) return;
+      if (readOnly || !rootReady) return;
+      const root = captureRoot();
+      const generation = rootGenerationRef.current.generation;
       setBusy(true);
       setError(null);
       try {
-        await LocalWorkspace.restoreFromTrash(receipt.trash_id);
+        if (!isCurrentRoot(root, generation)) return;
+        if (root === undefined) throw new Error(t('files.unavailable'));
+        const result = await LocalWorkspace.restoreFromTrashV2({
+          schema_version: 1,
+          root,
+          trash_id: receipt.trash_id,
+          destination_path: null,
+        });
+        if (!isCurrentRoot(root, generation)) return;
+        if (!sameRoot(root, result.root))
+          throw new Error(t('files.unavailable'));
         setRecentTrash(previous =>
           previous.filter(item => item.trash_id !== receipt.trash_id),
         );
         await load(path);
+        if (!isCurrentRoot(root, generation)) return;
       } catch (caught) {
+        if (!isCurrentRoot(root, generation)) return;
         setError(caught instanceof Error ? caught.message : String(caught));
       } finally {
-        setBusy(false);
+        if (isCurrentRoot(root, generation)) setBusy(false);
       }
     },
-    [load, path, readOnly],
+    [captureRoot, isCurrentRoot, load, path, readOnly, rootReady, t],
   );
 
   const runTool = useCallback(
@@ -426,6 +630,9 @@ export function WorkspaceDrawer({
         path: openFile.path,
         ...(tool === 'wc' ? { metric: 'words' } : {}),
       });
+      const authority = openFileAuthorityRef.current;
+      const root = authority?.root;
+      const generation = authority?.generation ?? -1;
       setToolBlocks([
         {
           id: `${callId}-call`,
@@ -436,11 +643,18 @@ export function WorkspaceDrawer({
         },
       ]);
       try {
-        const result = await LocalWorkspace.executePortableTool(
+        if (!isCurrentRoot(root, generation)) return;
+        if (root === undefined) throw new Error(t('files.unavailable'));
+        const result = await LocalWorkspace.executePortableToolV2({
+          schema_version: 1,
+          root,
           tool,
-          openFile.path,
-          tool === 'wc' ? { metric: 'words' } : {},
-        );
+          path: openFile.path,
+          options: tool === 'wc' ? { metric: 'words' } : {},
+        });
+        if (!isCurrentRoot(root, generation)) return;
+        if (!sameRoot(root, result.root))
+          throw new Error(t('files.unavailable'));
         setToolBlocks([
           {
             id: `${callId}-call`,
@@ -458,6 +672,7 @@ export function WorkspaceDrawer({
           },
         ]);
       } catch (caught) {
+        if (!isCurrentRoot(root, generation)) return;
         setToolBlocks([
           {
             id: `${callId}-call`,
@@ -476,11 +691,11 @@ export function WorkspaceDrawer({
         ]);
       }
     },
-    [openFile],
+    [isCurrentRoot, openFile, t],
   );
 
   const importFromFiles = useCallback(async () => {
-    if (readOnly || busy) return;
+    if (readOnly || busy || !rootReady) return;
     if (!LocalDocuments.isAvailable()) {
       setError(t('files.documentsUnavailable'));
       return;
@@ -488,17 +703,31 @@ export function WorkspaceDrawer({
     setBusy(true);
     setError(null);
     setNotice(null);
+    const root = captureRoot();
+    const generation = rootGenerationRef.current.generation;
+    const operationId = newOperationId();
     try {
-      const result = await LocalDocuments.presentImportPicker(path);
+      if (!isCurrentRoot(root, generation)) return;
+      if (root === undefined) throw new Error(t('files.unavailable'));
+      const result = await LocalDocuments.presentImportPicker({
+        schema_version: 1,
+        root,
+        operation_id: operationId,
+        destination_path: path,
+      });
+      if (!isCurrentRoot(root, generation)) return;
+      if (!sameRoot(root, result.root)) throw new Error(t('files.unavailable'));
       if (result.status === 'cancelled') return;
       await load(path);
+      if (!isCurrentRoot(root, generation)) return;
       setNotice(t('files.importedCount', { count: result.entries.length }));
     } catch (caught) {
+      if (!isCurrentRoot(root, generation)) return;
       setError(caught instanceof Error ? caught.message : String(caught));
     } finally {
-      setBusy(false);
+      if (isCurrentRoot(root, generation)) setBusy(false);
     }
-  }, [busy, load, path, readOnly, t]);
+  }, [busy, captureRoot, isCurrentRoot, load, path, readOnly, rootReady, t]);
 
   const exportPathsToFiles = useCallback(
     async (sourcePaths: string[]) => {
@@ -510,17 +739,32 @@ export function WorkspaceDrawer({
       setBusy(true);
       setError(null);
       setNotice(null);
+      const root = captureRoot();
+      const generation = rootGenerationRef.current.generation;
+      const operationId = newOperationId();
       try {
-        const result = await LocalDocuments.presentExportPicker(sourcePaths);
+        if (!isCurrentRoot(root, generation)) return;
+        const paths = sourcePaths.slice();
+        if (root === undefined) throw new Error(t('files.unavailable'));
+        const result = await LocalDocuments.presentExportPicker({
+          schema_version: 1,
+          root,
+          operation_id: operationId,
+          source_paths: paths,
+        });
+        if (!isCurrentRoot(root, generation)) return;
+        if (!sameRoot(root, result.root))
+          throw new Error(t('files.unavailable'));
         if (result.status === 'cancelled') return;
         setNotice(t('files.exportedCount', { count: result.item_count }));
       } catch (caught) {
+        if (!isCurrentRoot(root, generation)) return;
         setError(caught instanceof Error ? caught.message : String(caught));
       } finally {
-        setBusy(false);
+        if (isCurrentRoot(root, generation)) setBusy(false);
       }
     },
-    [busy, t],
+    [busy, captureRoot, isCurrentRoot, t],
   );
 
   const exportToFiles = useCallback(async () => {
@@ -531,7 +775,7 @@ export function WorkspaceDrawer({
   return (
     <SlidingPanel
       accessibilityLabel={t('files.title')}
-      onClose={onClose}
+      onClose={requestDrawerClose}
       visible={visible}
     >
       <View
@@ -547,7 +791,7 @@ export function WorkspaceDrawer({
             </Text>
             <Text accessibilityRole="header" style={styles.title}>
               {openFile === null
-                ? projectScope?.label ?? t('files.title')
+                ? workspaceLabel ?? projectScope?.label ?? t('files.title')
                 : openFile.name}
             </Text>
           </View>
@@ -564,7 +808,7 @@ export function WorkspaceDrawer({
         {openFile === null ? (
           <>
             <View style={styles.pathBar}>
-              {path !== rootPath && (
+              {path.length > 0 && (
                 <Pressable
                   accessibilityLabel={t('files.up')}
                   accessibilityRole="button"
@@ -580,7 +824,7 @@ export function WorkspaceDrawer({
                 </Pressable>
               )}
               <Text numberOfLines={1} style={styles.pathText}>
-                {displayPath(path, rootPath, rootLabel)}
+                {displayPath(path, rootLabel)}
               </Text>
               <Pressable
                 accessibilityLabel={t('files.refresh')}
@@ -596,12 +840,14 @@ export function WorkspaceDrawer({
               <Pressable
                 accessibilityLabel={t('files.newFile')}
                 accessibilityRole="button"
-                accessibilityState={{ disabled: readOnly || busy }}
-                disabled={readOnly || busy}
+                accessibilityState={{
+                  disabled: readOnly || busy || !rootReady,
+                }}
+                disabled={readOnly || busy || !rootReady}
                 onPress={() => beginCreate('file')}
                 style={[
                   styles.createButton,
-                  (readOnly || busy) && styles.disabled,
+                  (readOnly || busy || !rootReady) && styles.disabled,
                 ]}
               >
                 <AppIcon color={colors.accent} icon={FilePlus} size={17} />
@@ -612,12 +858,14 @@ export function WorkspaceDrawer({
               <Pressable
                 accessibilityLabel={t('files.newFolder')}
                 accessibilityRole="button"
-                accessibilityState={{ disabled: readOnly || busy }}
-                disabled={readOnly || busy}
+                accessibilityState={{
+                  disabled: readOnly || busy || !rootReady,
+                }}
+                disabled={readOnly || busy || !rootReady}
                 onPress={() => beginCreate('directory')}
                 style={[
                   styles.createButton,
-                  (readOnly || busy) && styles.disabled,
+                  (readOnly || busy || !rootReady) && styles.disabled,
                 ]}
               >
                 <AppIcon color={colors.accent} icon={FolderPlus} size={17} />
@@ -629,13 +877,25 @@ export function WorkspaceDrawer({
                 accessibilityLabel={t('files.importFromFiles')}
                 accessibilityRole="button"
                 accessibilityState={{
-                  disabled: readOnly || busy || !LocalDocuments.isAvailable(),
+                  disabled:
+                    readOnly ||
+                    busy ||
+                    !rootReady ||
+                    !LocalDocuments.isAvailable(),
                 }}
-                disabled={readOnly || busy || !LocalDocuments.isAvailable()}
+                disabled={
+                  readOnly ||
+                  busy ||
+                  !rootReady ||
+                  !LocalDocuments.isAvailable()
+                }
                 onPress={() => importFromFiles().catch(() => undefined)}
                 style={[
                   styles.createButton,
-                  (readOnly || busy || !LocalDocuments.isAvailable()) &&
+                  (readOnly ||
+                    busy ||
+                    !rootReady ||
+                    !LocalDocuments.isAvailable()) &&
                     styles.disabled,
                 ]}
               >
@@ -789,15 +1049,18 @@ export function WorkspaceDrawer({
                       })}
                       accessibilityRole="button"
                       accessibilityState={{
-                        disabled: busy || !LocalDocuments.isAvailable(),
+                        disabled:
+                          busy || !rootReady || !LocalDocuments.isAvailable(),
                       }}
-                      disabled={busy || !LocalDocuments.isAvailable()}
+                      disabled={
+                        busy || !rootReady || !LocalDocuments.isAvailable()
+                      }
                       onPress={() =>
                         exportPathsToFiles([entry.path]).catch(() => undefined)
                       }
                       style={[
                         styles.smallAction,
-                        (busy || !LocalDocuments.isAvailable()) &&
+                        (busy || !rootReady || !LocalDocuments.isAvailable()) &&
                           styles.disabled,
                       ]}
                     >
@@ -813,7 +1076,7 @@ export function WorkspaceDrawer({
                           name: entry.name,
                         })}
                         accessibilityRole="button"
-                        disabled={busy}
+                        disabled={busy || !rootReady}
                         onPress={() => beginRename(entry)}
                         style={styles.smallAction}
                       >
@@ -826,7 +1089,7 @@ export function WorkspaceDrawer({
                           name: entry.name,
                         })}
                         accessibilityRole="button"
-                        disabled={busy}
+                        disabled={busy || !rootReady}
                         onPress={() => moveToTrash(entry)}
                         style={styles.smallAction}
                       >
@@ -856,7 +1119,7 @@ export function WorkspaceDrawer({
                         receipt.original_path
                       }`}
                       accessibilityRole="button"
-                      disabled={busy}
+                      disabled={busy || !rootReady}
                       onPress={() => restore(receipt).catch(() => undefined)}
                       style={styles.restoreButton}
                     >
@@ -879,7 +1142,7 @@ export function WorkspaceDrawer({
             keyboardDismissMode="interactive"
           >
             <Text style={styles.editorPath}>
-              {displayPath(openFile.path, rootPath, rootLabel)}
+              {displayPath(openFile.path, rootLabel)}
             </Text>
             <TextInput
               accessibilityLabel={t('files.content')}
@@ -908,13 +1171,14 @@ export function WorkspaceDrawer({
                 accessibilityLabel={t('files.exportToFiles')}
                 accessibilityRole="button"
                 accessibilityState={{
-                  disabled: busy || !LocalDocuments.isAvailable(),
+                  disabled: busy || !rootReady || !LocalDocuments.isAvailable(),
                 }}
-                disabled={busy || !LocalDocuments.isAvailable()}
+                disabled={busy || !rootReady || !LocalDocuments.isAvailable()}
                 onPress={() => exportToFiles().catch(() => undefined)}
                 style={[
                   styles.inlineSecondary,
-                  (busy || !LocalDocuments.isAvailable()) && styles.disabled,
+                  (busy || !rootReady || !LocalDocuments.isAvailable()) &&
+                    styles.disabled,
                 ]}
               >
                 <AppIcon color={colors.textDim} icon={FileOutput} size={15} />

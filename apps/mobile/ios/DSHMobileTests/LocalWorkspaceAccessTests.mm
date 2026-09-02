@@ -4,8 +4,11 @@
 #import <TargetConditionals.h>
 
 #import "../../../../modules/rish/ios/Sources/LocalWorkspaceAccess.h"
+#import "../../../../modules/rish/ios/Sources/DSHWorkspaceCanonical.h"
+#import "DSHTestStorageFixture.h"
 
 #include <math.h>
+#include <fcntl.h>
 #include <sys/stat.h>
 
 typedef void (^DSHLWResolve)(id value);
@@ -15,7 +18,7 @@ typedef void (^DSHLWReject)(NSString *code, NSString *message, NSError *error);
 - (void)createWorkspaceRequest:(id)request
                        resolver:(DSHLWResolve)resolve
                        rejecter:(DSHLWReject)reject;
-- (void)resolveMetadataRequest:(id)request
+- (void)resolveWorkspaceRequest:(id)request
                         resolver:(DSHLWResolve)resolve
                         rejecter:(DSHLWReject)reject;
 - (void)queryOperationRequest:(id)request
@@ -24,12 +27,16 @@ typedef void (^DSHLWReject)(NSString *code, NSString *message, NSError *error);
 @end
 
 @interface LocalWorkspaceAccessTests : XCTestCase
+@property(nonatomic, strong) NSURL *fixtureRootURL;
 @property(nonatomic, strong) NSURL *rootURL;
+@property(nonatomic, strong) NSURL *documentsURL;
 @property(nonatomic, strong) NSDate *now;
 @property(nonatomic) NSUInteger resolverCalls;
 @property(nonatomic) BOOL resolverThrows;
 @property(nonatomic, copy) NSString *resolverIdentity;
+@property(nonatomic, copy) NSString *resolverDisplayName;
 @property(nonatomic, copy) NSSet<NSString *> *resolverCapabilities;
+@property(nonatomic, copy) NSString *resolverRepositoryInode;
 @end
 
 @implementation LocalWorkspaceAccessTests
@@ -56,27 +63,86 @@ static NSString *const DSHDigestA =
 static NSString *const DSHDigestB =
     @"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
 
+- (void)testRootFingerprintUsesExactJCSAndDomainSeparation {
+  NSDictionary *input = @{
+    @"schema_version" : @1,
+    @"origin" : @"rish_created",
+    @"workspace_id" : DSHWorkspaceA,
+    @"binding_revision" : @7,
+    @"root_locator_kind" : @"documents_owned",
+    @"device_id" : @"4",
+    @"inode_id" : @"8",
+    @"directory_name_sha256" : DSHDigestA,
+    @"authority_sha256" : DSHDigestB,
+  };
+  NSError *error = nil;
+  NSData *canonical = DSHWorkspaceCanonicalJSONData(input, &error);
+  XCTAssertNotNil(canonical);
+  XCTAssertNil(error);
+  XCTAssertEqualObjects(
+      [[NSString alloc] initWithData:canonical encoding:NSUTF8StringEncoding],
+      @"{\"authority_sha256\":\"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\",\"binding_revision\":7,\"device_id\":\"4\",\"directory_name_sha256\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"inode_id\":\"8\",\"origin\":\"rish_created\",\"root_locator_kind\":\"documents_owned\",\"schema_version\":1,\"workspace_id\":\"11111111-1111-4111-8111-111111111111\"}");
+  XCTAssertTrue(DSHWorkspaceValidateRootFingerprintInput(input, &error));
+  XCTAssertEqualObjects(
+      DSHWorkspaceRootFingerprintSHA256(input, &error),
+      @"d6df01a63e0b6c19597592adc25f012511f95f252ba4fa99ec4704fafd566be1");
+  XCTAssertNil(error);
+}
+
+- (void)testCanonicalNumbersMatchECMAScriptJCSVectors {
+  NSArray *vectors = @[
+    @[@(1.0e-6), @"0.000001"],
+    @[@(1.0e-7), @"1e-7"],
+    @[@(1.0e20), @"100000000000000000000"],
+    @[@(1.0e21), @"1e+21"],
+    @[@(1.2345678901234567), @"1.2345678901234567"],
+    @[@(-1.0e-7), @"-1e-7"],
+  ];
+  for (NSArray *vector in vectors) {
+    NSData *data = DSHWorkspaceCanonicalJSONData(vector[0], nil);
+    XCTAssertEqualObjects([[NSString alloc] initWithData:data
+                                                  encoding:NSUTF8StringEncoding],
+                          vector[1]);
+  }
+  NSError *error = nil;
+  XCTAssertNil(DSHWorkspaceCanonicalJSONData(@(9007199254740993ULL), &error));
+  XCTAssertEqualObjects(error.userInfo[@"code"], @"E_WORKSPACE_INVALID");
+}
+
 - (void)setUp {
   [super setUp];
-  NSString *name = [NSString stringWithFormat:@"rish-workspace-a1-%@",
-                    NSUUID.UUID.UUIDString.lowercaseString];
-  self.rootURL = [NSURL fileURLWithPath:
-      [NSTemporaryDirectory() stringByAppendingPathComponent:name]
-                              isDirectory:YES];
+  NSError *error = nil;
+  self.fixtureRootURL = DSHCreateTestStorageFixtureRoot(
+      @"LocalWorkspaceAccessTests", &error);
+  XCTAssertNotNil(self.fixtureRootURL, @"%@", error);
+  if (self.fixtureRootURL == nil) return;
+  self.rootURL = [self.fixtureRootURL URLByAppendingPathComponent:@"private"
+                                                       isDirectory:YES];
+  self.documentsURL = [self.fixtureRootURL
+      URLByAppendingPathComponent:@"Documents" isDirectory:YES];
   XCTAssertTrue([NSFileManager.defaultManager createDirectoryAtURL:self.rootURL
                                        withIntermediateDirectories:YES
-                                                        attributes:nil
-                                                             error:nil]);
+                                                        attributes:@{
+                                                          NSFilePosixPermissions : @0700
+                                                        }
+                                                             error:&error], @"%@", error);
   self.now = [NSDate dateWithTimeIntervalSince1970:1787961600];
   self.resolverCalls = 0;
   self.resolverThrows = NO;
   self.resolverIdentity = DSHDigestA;
+  self.resolverDisplayName = @"Legacy Repo";
   self.resolverCapabilities = [NSSet setWithArray:
       @[@"read", @"write", @"git", @"project_context"]];
+  self.resolverRepositoryInode = @"9";
 }
 
 - (void)tearDown {
-  [NSFileManager.defaultManager removeItemAtURL:self.rootURL error:nil];
+  if (self.fixtureRootURL != nil) {
+    [NSFileManager.defaultManager removeItemAtURL:self.fixtureRootURL error:nil];
+  }
+  self.documentsURL = nil;
+  self.rootURL = nil;
+  self.fixtureRootURL = nil;
   [super tearDown];
 }
 
@@ -115,8 +181,7 @@ static NSString *const DSHDigestB =
       }
       UUIDGenerator:UUIDGenerator
       legacyResolver:^BOOL(NSString *projectId,
-                           NSString *__autoreleasing *identityDigest,
-                           NSSet<NSString *> *__autoreleasing *capabilities,
+                           NSDictionary *__autoreleasing *evidence,
                            NSError *__autoreleasing *error) {
         __strong LocalWorkspaceAccessTests *self = weakSelf;
         self.resolverCalls += 1;
@@ -134,8 +199,20 @@ static NSString *const DSHDigestB =
           }
           return NO;
         }
-        if (identityDigest != nil) *identityDigest = self.resolverIdentity;
-        if (capabilities != nil) *capabilities = self.resolverCapabilities;
+        if (evidence != nil) {
+          *evidence = @{
+            @"project_id" : projectId,
+            @"display_name" : self.resolverDisplayName,
+            @"metadata_sha256" : self.resolverIdentity,
+            @"capabilities" : self.resolverCapabilities,
+            @"projects_root_device_id" : @"42",
+            @"projects_root_inode_id" : @"84",
+            @"repository_device_id" : @"7",
+            @"repository_inode_id" : self.resolverRepositoryInode,
+            @"git_device_id" : @"11",
+            @"git_inode_id" : @"13",
+          };
+        }
         return YES;
       }
       faultHook:fault];
@@ -173,6 +250,10 @@ static NSString *const DSHDigestB =
 }
 
 - (NSURL *)documentsRootForRoot:(NSURL *)root {
+  if ([root.URLByStandardizingPath.path
+          isEqual:self.rootURL.URLByStandardizingPath.path]) {
+    return self.documentsURL;
+  }
   return [root URLByAppendingPathComponent:@"Documents" isDirectory:YES];
 }
 
@@ -224,20 +305,17 @@ static NSString *const DSHDigestB =
   return [self sha256ForData:[self canonicalData:request]];
 }
 
-- (NSString *)bootstrapRequestDigestForProjectId:(NSString *)projectId
-                                     displayName:(NSString *)displayName {
+- (NSString *)bootstrapRequestDigestForProjectId:(NSString *)projectId {
   NSDictionary *request = @{
+    @"schema_version": @1,
     @"operation": @"bootstrap_legacy",
     @"project_id": projectId,
-    @"display_name": displayName,
   };
   return [self sha256ForData:[self canonicalData:request]];
 }
 
 - (NSData *)canonicalData:(id)object {
-  return [NSJSONSerialization dataWithJSONObject:object
-                                          options:NSJSONWritingSortedKeys
-                                            error:nil];
+  return DSHWorkspaceCanonicalJSONData(object, nil);
 }
 
 - (void)secureWriteObject:(id)object toURL:(NSURL *)url {
@@ -247,15 +325,8 @@ static NSString *const DSHDigestB =
 }
 
 - (void)secureWriteData:(NSData *)data toURL:(NSURL *)url {
-  XCTAssertTrue([data writeToURL:url options:NSDataWritingAtomic error:nil]);
-  XCTAssertTrue(([NSFileManager.defaultManager
-      setAttributes:@{NSFilePosixPermissions:@0600,
-                      NSFileProtectionKey:NSFileProtectionComplete}
-       ofItemAtPath:url.path
-              error:nil]));
-  XCTAssertTrue([url setResourceValue:@YES
-                               forKey:NSURLIsExcludedFromBackupKey
-                                error:nil]);
+  NSError *error = nil;
+  XCTAssertTrue(DSHWriteProtectedTestFixture(data, url, &error), @"%@", error);
 }
 
 - (NSDictionary *)recordForWorkspaceId:(NSString *)workspaceId
@@ -293,25 +364,64 @@ static NSString *const DSHDigestB =
 
 - (NSDictionary *)legacyAuthorityWithRevision:(NSUInteger)revision
                                 authorityDigest:(NSString *)digest {
-  NSDictionary *record = [self legacyRecordWithRevision:revision];
-  return @{
+  return [self legacyAuthorityForWorkspace:DSHWorkspaceA
+                                  projectId:DSHProjectA
+                               displayName:[self legacyRecordWithRevision:revision][@"display_name"]
+                                  revision:revision
+                           authorityDigest:digest];
+}
+
+- (NSDictionary *)legacyAuthorityForWorkspace:(NSString *)workspaceId
+                                     projectId:(NSString *)projectId
+                                  displayName:(NSString *)displayName
+                                     revision:(NSUInteger)revision
+                              authorityDigest:(NSString *)digest {
+  NSDictionary *base = @{
     @"schema_version": @1,
-    @"workspace_id": DSHWorkspaceA,
+    @"workspace_id": workspaceId,
     @"binding_revision": @(revision),
-    @"legacy_project_id": DSHProjectA,
+    @"legacy_project_id": projectId,
     @"root_identity_sha256": digest,
-    @"display_name": record[@"display_name"],
+    @"display_name": displayName,
+    @"capabilities": @[@"read", @"write", @"git", @"project_context"],
     @"created_at": DSHTimestamp,
     @"last_opened_at": DSHTimestamp,
     @"recorded_at": DSHTimestamp,
+    @"project_metadata_sha256": digest,
+    @"projects_root_device_id": @"42",
+    @"projects_root_inode_id": @"84",
+    @"repository_device_id": @"7",
+    @"repository_inode_id": @"9",
+    @"git_device_id": @"11",
+    @"git_inode_id": @"13",
   };
+  NSDictionary *input = @{
+    @"schema_version": @1,
+    @"origin": @"legacy_app_owned",
+    @"workspace_id": workspaceId,
+    @"binding_revision": @(revision),
+    @"root_locator_kind": @"legacy_app_owned",
+    @"legacy_project_id": projectId,
+    @"project_metadata_sha256": digest,
+    @"projects_root_device_id": @"42",
+    @"projects_root_inode_id": @"84",
+    @"repository_device_id": @"7",
+    @"repository_inode_id": @"9",
+    @"git_device_id": @"11",
+    @"git_inode_id": @"13",
+  };
+  NSMutableDictionary *authority = [base mutableCopy];
+  authority[@"root_fingerprint_sha256"] =
+      DSHWorkspaceRootFingerprintSHA256(input, nil);
+  XCTAssertNotNil(authority[@"root_fingerprint_sha256"]);
+  return authority;
 }
 
 - (NSDictionary *)ownedAuthorityForWorkspace:(NSString *)workspaceId
                                       revision:(NSUInteger)revision
                                  directoryName:(NSString *)directoryName {
   NSData *nameData = [directoryName dataUsingEncoding:NSUTF8StringEncoding];
-  return @{
+  NSDictionary *base = @{
     @"schema_version": @1,
     @"workspace_id": workspaceId,
     @"binding_revision": @(revision),
@@ -320,6 +430,32 @@ static NSString *const DSHDigestB =
     @"directory_name_sha256": [self sha256ForData:nameData],
     @"recorded_at": DSHTimestamp,
   };
+  NSString *origin = [workspaceId isEqual:DSHWorkspaceB]
+      ? @"imported" : @"rish_created";
+  NSDictionary *record = [self recordForWorkspaceId:workspaceId
+                                             origin:origin
+                                    rootLocatorKind:@"documents_owned"
+                                      locationClass:@"rish_owned"
+                                ownedDirectoryName:directoryName
+                                   legacyProjectId:nil
+                                  bindingRevision:revision];
+  NSString *authoritySHA256 = [self sha256ForData:[self canonicalData:base]];
+  NSDictionary *input = @{
+    @"schema_version": @1,
+    @"origin": record[@"origin"],
+    @"workspace_id": workspaceId,
+    @"binding_revision": @(revision),
+    @"root_locator_kind": @"documents_owned",
+    @"device_id": @"42",
+    @"inode_id": @"84",
+    @"directory_name_sha256": base[@"directory_name_sha256"],
+    @"authority_sha256": authoritySHA256,
+  };
+  NSMutableDictionary *authority = [base mutableCopy];
+  authority[@"root_fingerprint_sha256"] =
+      DSHWorkspaceRootFingerprintSHA256(input, nil);
+  XCTAssertNotNil(authority[@"root_fingerprint_sha256"]);
+  return authority;
 }
 
 - (NSDictionary *)bookmarkAuthorityForWorkspace:(NSString *)workspaceId
@@ -338,7 +474,7 @@ static NSString *const DSHDigestB =
 - (NSDictionary *)grantedAuthorityForWorkspace:(NSString *)workspaceId
                                         revision:(NSUInteger)revision
                                    bookmarkDigest:(NSString *)bookmarkDigest {
-  return @{
+  NSDictionary *base = @{
     @"schema_version": @1,
     @"workspace_id": workspaceId,
     @"binding_revision": @(revision),
@@ -349,6 +485,32 @@ static NSString *const DSHDigestB =
     @"bookmark_sha256": bookmarkDigest,
     @"classified_at": DSHTimestamp,
   };
+  NSDictionary *record = [self recordForWorkspaceId:workspaceId
+                                             origin:@"granted_folder"
+                                    rootLocatorKind:@"security_scoped"
+                                      locationClass:@"proven_local"
+                                ownedDirectoryName:nil
+                                   legacyProjectId:nil
+                                  bindingRevision:revision];
+  NSString *authoritySHA256 = [self sha256ForData:[self canonicalData:base]];
+  NSDictionary *input = @{
+    @"schema_version": @1,
+    @"origin": record[@"origin"],
+    @"workspace_id": workspaceId,
+    @"binding_revision": @(revision),
+    @"root_locator_kind": @"security_scoped",
+    @"volume_identifier_sha256": base[@"volume_identifier_sha256"],
+    @"resource_identifier_sha256": base[@"resource_identifier_sha256"],
+    @"device_id": base[@"device_id"],
+    @"inode_id": base[@"inode_id"],
+    @"bookmark_sha256": bookmarkDigest,
+    @"authority_sha256": authoritySHA256,
+  };
+  NSMutableDictionary *authority = [base mutableCopy];
+  authority[@"root_fingerprint_sha256"] =
+      DSHWorkspaceRootFingerprintSHA256(input, nil);
+  XCTAssertNotNil(authority[@"root_fingerprint_sha256"]);
+  return authority;
 }
 
 - (void)writeRegistryRecords:(NSArray<NSDictionary *> *)records
@@ -365,7 +527,6 @@ static NSString *const DSHDigestB =
                            operationId:(NSString *)operationId
                                  error:(NSError **)error {
   return [access bootstrapLegacyProjectId:DSHProjectA
-                               displayName:@"Legacy Workspace"
                                 operationId:operationId
                                       error:error];
 }
@@ -462,7 +623,6 @@ static NSString *const DSHDigestB =
                                                                error:nil]);
     DSHLocalWorkspaceAccess *access = [self accessWithRoot:root fault:nil];
     XCTAssertNotNil([access bootstrapLegacyProjectId:DSHProjectA
-                                          displayName:@"Persisted"
                                            operationId:DSHOperationA error:nil]);
     NSURL *target = [missing isEqual:@"registry"]
         ? [self registryURLForRoot:root] : [self receiptsURLForRoot:root];
@@ -617,13 +777,11 @@ static NSString *const DSHDigestB =
                                                 bookmarkDigest:bookmarkDigest]
                     toURL:[self authorityURLForRoot:self.rootURL kind:@"granted"
                                         workspaceId:DSHWorkspaceC revision:1]];
-  NSDictionary *legacy = @{
-    @"schema_version": @1, @"workspace_id": DSHWorkspaceD,
-    @"binding_revision": @1, @"legacy_project_id": DSHProjectA,
-    @"root_identity_sha256": DSHDigestA, @"display_name": @"Workspace 4444",
-    @"created_at": DSHTimestamp, @"last_opened_at": DSHTimestamp,
-    @"recorded_at": DSHTimestamp,
-  };
+  NSDictionary *legacy = [self legacyAuthorityForWorkspace:DSHWorkspaceD
+                                                    projectId:DSHProjectA
+                                                 displayName:@"Workspace 4444"
+                                                    revision:1
+                                             authorityDigest:DSHDigestA];
   [self secureWriteObject:legacy
                     toURL:[self authorityURLForRoot:self.rootURL kind:@"legacy"
                                         workspaceId:DSHWorkspaceD revision:1]];
@@ -977,9 +1135,8 @@ static NSString *const DSHDigestB =
     @"record_sha256": NSNull.null,
     @"staging_name": NSNull.null,
     @"destination_name": NSNull.null,
-    @"display_name": @"Legacy Workspace",
-    @"request_sha256": [self bootstrapRequestDigestForProjectId:DSHProjectA
-                                                        displayName:@"Legacy Workspace"],
+    @"display_name": @"Legacy Repo",
+    @"request_sha256": [self bootstrapRequestDigestForProjectId:DSHProjectA],
     @"staging_device_id": NSNull.null,
     @"staging_inode_id": NSNull.null,
     @"staging_uid": NSNull.null,
@@ -1036,17 +1193,12 @@ static NSString *const DSHDigestB =
   DSHLocalWorkspaceAccess *restarted = [self access];
   NSDictionary *query = [restarted queryOperationId:DSHOperationA error:nil];
   XCTAssertEqualObjects(query[@"status"], @"committed");
+  NSUInteger callsBeforeReplay = self.resolverCalls;
   NSDictionary *third = [self bootstrapWithAccess:restarted
                                        operationId:DSHOperationA error:nil];
   XCTAssertEqualObjects(first, third);
+  XCTAssertEqual(self.resolverCalls, callsBeforeReplay);
   XCTAssertEqual([restarted listWorkspaceMetadataWithError:nil].count, 1u);
-
-  NSError *error = nil;
-  XCTAssertNil([restarted bootstrapLegacyProjectId:DSHProjectA
-                                       displayName:@"Different Workspace"
-                                        operationId:DSHOperationA
-                                              error:&error]);
-  XCTAssertEqualObjects(error.userInfo[@"code"], @"E_WORKSPACE_CONFLICT");
 
   NSURL *authority = [self authorityURLForRoot:self.rootURL kind:@"legacy"
                                    workspaceId:DSHWorkspaceA revision:1];
@@ -1054,19 +1206,20 @@ static NSString *const DSHDigestB =
       JSONObjectWithData:[NSData dataWithContentsOfURL:authority]
                  options:0 error:nil];
   XCTAssertTrue([NSFileManager.defaultManager removeItemAtURL:authority error:nil]);
-  error = nil;
+  NSError *error = nil;
   XCTAssertNil([restarted bootstrapLegacyProjectId:DSHProjectA
-                                       displayName:@"Legacy Workspace"
                                         operationId:DSHOperationA error:&error]);
   XCTAssertEqualObjects(error.userInfo[@"code"], @"E_WORKSPACE_PERSISTENCE");
 
   [self secureWriteObject:authorityObject toURL:authority];
+  self.resolverDisplayName = @"Renamed after commit";
   self.resolverIdentity = DSHDigestB;
-  NSDictionary *unavailable = [restarted bootstrapLegacyProjectId:DSHProjectA
-                                                       displayName:@"Legacy Workspace"
-                                                        operationId:DSHOperationA
-                                                              error:nil];
-  XCTAssertEqualObjects(unavailable[@"status"], @"unavailable");
+  callsBeforeReplay = self.resolverCalls;
+  NSDictionary *replayed = [restarted bootstrapLegacyProjectId:DSHProjectA
+                                                     operationId:DSHOperationA
+                                                           error:nil];
+  XCTAssertEqualObjects(replayed, first);
+  XCTAssertEqual(self.resolverCalls, callsBeforeReplay);
 }
 
 - (void)testSameInstanceRetryRecoversPostAuthorityJournalBeforeNewUUID {
@@ -1098,7 +1251,6 @@ static NSString *const DSHDigestB =
         }];
     NSError *error = nil;
     XCTAssertNil([access bootstrapLegacyProjectId:DSHProjectA
-                                       displayName:@"Stable request"
                                         operationId:DSHOperationA error:&error]);
     XCTAssertTrue(faultInjected);
     nextWorkspaceId = DSHWorkspaceB;
@@ -1106,7 +1258,6 @@ static NSString *const DSHDigestB =
     error = nil;
 
     NSDictionary *retried = [access bootstrapLegacyProjectId:DSHProjectA
-                                                   displayName:@"Stable request"
                                                     operationId:DSHOperationA
                                                           error:&error];
     XCTAssertNotNil(retried, @"stage %@", stage);
@@ -1117,6 +1268,164 @@ static NSString *const DSHDigestB =
                                              error:&error][@"status"],
                           @"committed");
   }
+}
+
+- (void)testBootstrapUsesOneNativeEvidenceSnapshotAndPublishesRevisionOne {
+  NSDictionary *workspace = [self bootstrapWithAccess:[self access]
+                                           operationId:DSHOperationA
+                                                 error:nil];
+  XCTAssertNotNil(workspace);
+  XCTAssertEqual(self.resolverCalls, 1u);
+  XCTAssertEqualObjects(workspace[@"display_name"], @"Legacy Repo");
+  XCTAssertEqualObjects(workspace[@"origin"], @"legacy_app_owned");
+  XCTAssertEqualObjects(workspace[@"binding_revision"], @1);
+  XCTAssertNil(workspace[@"path"]);
+
+  NSDictionary *record = [self recordForRoot:self.rootURL
+                                  workspaceId:DSHWorkspaceA];
+  XCTAssertEqualObjects(record[@"root_locator_kind"], @"legacy_app_owned");
+  NSDictionary *authority = [NSJSONSerialization JSONObjectWithData:
+      [NSData dataWithContentsOfURL:[self authorityURLForRoot:self.rootURL
+          kind:@"legacy" workspaceId:DSHWorkspaceA revision:1]]
+      options:0 error:nil];
+  XCTAssertEqualObjects(authority[@"project_metadata_sha256"], DSHDigestA);
+  XCTAssertNotNil(authority[@"root_fingerprint_sha256"]);
+  XCTAssertNil(authority[@"path"]);
+}
+
+- (void)testBootstrapOperationConflictAndDuplicateProjectFailClosed {
+  DSHLocalWorkspaceAccess *access = [self access];
+  XCTAssertNotNil([self bootstrapWithAccess:access
+                                operationId:DSHOperationA error:nil]);
+  NSUInteger callsAfterCommit = self.resolverCalls;
+
+  NSError *error = nil;
+  XCTAssertNil([access bootstrapLegacyProjectId:DSHProjectWide
+                                      operationId:DSHOperationA error:&error]);
+  XCTAssertEqualObjects(error.userInfo[@"code"], @"E_WORKSPACE_CONFLICT");
+  XCTAssertEqual(self.resolverCalls, callsAfterCommit);
+
+  error = nil;
+  XCTAssertNil([access bootstrapLegacyProjectId:DSHProjectA
+                                      operationId:DSHOperationB error:&error]);
+  XCTAssertEqualObjects(error.userInfo[@"code"], @"E_WORKSPACE_CONFLICT");
+  XCTAssertEqual(self.resolverCalls, callsAfterCommit);
+  XCTAssertEqual([access listWorkspaceMetadataWithError:nil].count, 1u);
+}
+
+- (void)testCommittedBootstrapReplayWinsOverUnrelatedPendingJournal {
+  DSHLocalWorkspaceAccess *existing = [self access];
+  NSDictionary *first = [self bootstrapWithAccess:existing
+                                       operationId:DSHOperationA error:nil];
+  XCTAssertNotNil(first);
+
+  self.resolverDisplayName = @"Second Legacy Repo";
+  DSHLocalWorkspaceAccess *pending = [self accessWithRoot:self.rootURL
+      fault:^BOOL(NSString *stage) {
+        return [stage isEqual:@"after_authority_ready"];
+      }
+      workspaceId:DSHWorkspaceB];
+  XCTAssertNil([pending bootstrapLegacyProjectId:DSHProjectWide
+                                      operationId:DSHOperationB error:nil]);
+  self.resolverDisplayName = @"Renamed while another journal is pending";
+  NSUInteger callsBeforeReplay = self.resolverCalls;
+  NSDictionary *replayed = [existing bootstrapLegacyProjectId:DSHProjectA
+                                                    operationId:DSHOperationA
+                                                          error:nil];
+  XCTAssertEqualObjects(replayed, first);
+  XCTAssertEqual(self.resolverCalls, callsBeforeReplay);
+}
+
+- (void)testLegacyPhysicalSwapMakesOperationalResolutionUnavailable {
+  DSHLocalWorkspaceAccess *access = [self access];
+  XCTAssertNotNil([self bootstrapWithAccess:access
+                                operationId:DSHOperationA error:nil]);
+  self.resolverRepositoryInode = @"10";
+  NSError *error = nil;
+  XCTAssertNil([self resolve:access revision:@1 capabilities:@[@"read"]
+                       error:&error]);
+  XCTAssertEqualObjects(error.userInfo[@"code"], @"E_WORKSPACE_UNAVAILABLE");
+}
+
+- (void)testLegacyProjectReverseLookupSucceedsAcrossRestart {
+  DSHLocalWorkspaceAccess *access = [self access];
+  XCTAssertNotNil([self bootstrapWithAccess:access
+                                operationId:DSHOperationA error:nil]);
+  NSError *error = nil;
+  XCTAssertEqualObjects(
+      [access legacyProjectIdForWorkspaceId:DSHWorkspaceA
+                    expectedBindingRevision:1 error:&error],
+      DSHProjectA);
+  XCTAssertNil(error);
+
+  DSHLocalWorkspaceAccess *restarted = [self access];
+  XCTAssertEqualObjects(
+      [restarted legacyProjectIdForWorkspaceId:DSHWorkspaceA
+                       expectedBindingRevision:1 error:&error],
+      DSHProjectA);
+  XCTAssertNil(error);
+}
+
+- (void)testLegacyProjectReverseLookupRejectsWrongRevisionAndMissingWorkspace {
+  DSHLocalWorkspaceAccess *access = [self access];
+  XCTAssertNotNil([self bootstrapWithAccess:access
+                                operationId:DSHOperationA error:nil]);
+  NSUInteger callsAfterBootstrap = self.resolverCalls;
+  NSError *error = nil;
+  XCTAssertNil([access legacyProjectIdForWorkspaceId:DSHWorkspaceA
+                              expectedBindingRevision:2 error:&error]);
+  XCTAssertEqualObjects(error.userInfo[@"code"],
+                        @"E_WORKSPACE_REVISION_STALE");
+  XCTAssertEqual(self.resolverCalls, callsAfterBootstrap);
+
+  error = nil;
+  XCTAssertNil([access legacyProjectIdForWorkspaceId:DSHWorkspaceB
+                              expectedBindingRevision:1 error:&error]);
+  XCTAssertEqualObjects(error.userInfo[@"code"], @"E_WORKSPACE_NOT_FOUND");
+}
+
+- (void)testLegacyProjectReverseLookupReturnsNoRelationForOrdinaryWorkspace {
+  DSHLocalWorkspaceAccess *access = [self access];
+  XCTAssertTrue([access ensurePrivateLayoutWithError:nil]);
+  NSDictionary *ordinary = [self recordForWorkspaceId:DSHWorkspaceA
+                                                origin:@"rish_created"
+                                       rootLocatorKind:@"documents_owned"
+                                         locationClass:@"rish_owned"
+                                   ownedDirectoryName:@"Ordinary"
+                                      legacyProjectId:nil
+                                     bindingRevision:1];
+  [self writeRegistryRecords:@[ordinary] generation:1 root:self.rootURL];
+  NSError *error = nil;
+  XCTAssertNil([access legacyProjectIdForWorkspaceId:DSHWorkspaceA
+                              expectedBindingRevision:1 error:&error]);
+  XCTAssertNil(error);
+  XCTAssertEqual(self.resolverCalls, 0u);
+}
+
+- (void)testLegacyProjectReverseLookupRejectsEvidenceAndFingerprintDrift {
+  DSHLocalWorkspaceAccess *access = [self access];
+  XCTAssertNotNil([self bootstrapWithAccess:access
+                                operationId:DSHOperationA error:nil]);
+  self.resolverRepositoryInode = @"10";
+  NSError *error = nil;
+  XCTAssertNil([access legacyProjectIdForWorkspaceId:DSHWorkspaceA
+                              expectedBindingRevision:1 error:&error]);
+  XCTAssertEqualObjects(error.userInfo[@"code"],
+                        @"E_WORKSPACE_ROOT_CHANGED");
+
+  self.resolverRepositoryInode = @"9";
+  NSURL *authorityURL = [self authorityURLForRoot:self.rootURL kind:@"legacy"
+                                      workspaceId:DSHWorkspaceA revision:1];
+  NSMutableDictionary *authority = [[NSJSONSerialization JSONObjectWithData:
+      [NSData dataWithContentsOfURL:authorityURL] options:0 error:nil]
+      mutableCopy];
+  authority[@"root_fingerprint_sha256"] = DSHDigestB;
+  [self secureWriteObject:authority toURL:authorityURL];
+  error = nil;
+  XCTAssertNil([access legacyProjectIdForWorkspaceId:DSHWorkspaceA
+                              expectedBindingRevision:1 error:&error]);
+  XCTAssertEqualObjects(error.userInfo[@"code"],
+                        @"E_WORKSPACE_PERSISTENCE");
 }
 
 - (void)testAccessInstancesShareOneAuthorityExecutor {
@@ -1143,7 +1452,6 @@ static NSString *const DSHDigestB =
   __block NSDictionary *secondResult = nil;
   dispatch_async(dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^{
     firstResult = [first bootstrapLegacyProjectId:DSHProjectA
-                                       displayName:@"First"
                                         operationId:DSHOperationA error:nil];
     dispatch_semaphore_signal(firstDone);
   });
@@ -1151,7 +1459,6 @@ static NSString *const DSHDigestB =
       dispatch_time(DISPATCH_TIME_NOW, 2 * NSEC_PER_SEC)), 0l);
   dispatch_async(dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^{
     secondResult = [second bootstrapLegacyProjectId:DSHProjectWide
-                                         displayName:@"Second"
                                           operationId:DSHOperationB error:nil];
     dispatch_semaphore_signal(secondDone);
   });
@@ -1171,7 +1478,6 @@ static NSString *const DSHDigestB =
   DSHLocalWorkspaceAccess *access = [self access];
   NSError *error = nil;
   NSDictionary *workspace = [access bootstrapLegacyProjectId:DSHProjectWide
-                                                   displayName:@"Wide UUID"
                                                     operationId:DSHOperationA
                                                           error:&error];
   XCTAssertNotNil(workspace);
@@ -1329,8 +1635,9 @@ static NSString *const DSHDigestB =
   [self assertDictionary:query[@"receipt"] hasExactKeys:@[
     @"schema_version", @"operation_id", @"workspace_id", @"operation",
     @"binding_revision", @"registry_generation", @"registry_sha256",
-    @"request_sha256", @"outcome", @"committed_at"
+    @"outcome", @"committed_at"
   ]];
+  XCTAssertNil(query[@"receipt"][@"request_sha256"]);
 }
 
 - (void)testDocumentsAndGrantedOperationalResolveFailUnavailableWithZeroCapabilities {
@@ -1364,7 +1671,9 @@ static NSString *const DSHDigestB =
   NSArray *listed = [access listWorkspaceMetadataWithError:nil];
   XCTAssertEqual(listed.count, 2u);
   for (NSDictionary *descriptor in listed) {
-    XCTAssertEqualObjects(descriptor[@"status"], @"unavailable");
+    NSString *expectedStatus = [descriptor[@"origin"] isEqual:@"granted_folder"]
+        ? @"revoked" : @"unavailable";
+    XCTAssertEqualObjects(descriptor[@"status"], expectedStatus);
     XCTAssertEqualObjects(descriptor[@"capabilities"][@"read"], @NO);
     XCTAssertEqualObjects(descriptor[@"capabilities"][@"write"], @NO);
     XCTAssertEqualObjects(descriptor[@"capabilities"][@"git"], @NO);
@@ -1375,7 +1684,7 @@ static NSString *const DSHDigestB =
     NSDictionary *probe = [access resolveWorkspaceId:descriptor[@"workspace_id"]
                              expectedBindingRevision:nil
                                 requiredCapabilities:@[@"read"] error:nil];
-    XCTAssertEqualObjects(probe[@"workspace"][@"status"], @"unavailable");
+    XCTAssertEqualObjects(probe[@"workspace"][@"status"], expectedStatus);
     XCTAssertEqualObjects(probe[@"workspace"][@"capabilities"][@"read"], @NO);
   }
 
@@ -1386,7 +1695,9 @@ static NSString *const DSHDigestB =
                                   requiredCapabilities:@[@"read"]
                                                  error:&error];
     XCTAssertNil(result);
-    XCTAssertEqualObjects(error.userInfo[@"code"], @"E_WORKSPACE_UNAVAILABLE");
+    XCTAssertEqualObjects(error.userInfo[@"code"],
+        [workspace isEqual:DSHWorkspaceB]
+            ? @"E_WORKSPACE_REVOKED" : @"E_WORKSPACE_UNAVAILABLE");
   }
   XCTAssertEqual(self.resolverCalls, 0u);
 }
@@ -1421,8 +1732,8 @@ static NSString *const DSHDigestB =
   XCTAssertEqualObjects(descriptor[@"status"], @"ok");
   XCTAssertEqualObjects(descriptor[@"binding_revision"], @1);
   XCTAssertEqualObjects(descriptor[@"capabilities"], (@{
-    @"read": @YES, @"write": @YES, @"git": @NO,
-    @"project_context": @NO, @"files_visible": @YES
+    @"read": @YES, @"write": @YES, @"git": @YES,
+    @"project_context": @YES, @"files_visible": @YES
   }));
 
   NSDictionary *record = [self recordForRoot:self.rootURL
@@ -1473,6 +1784,200 @@ static NSString *const DSHDigestB =
                 forKey:NSURLIsExcludedFromBackupKey
                  error:nil]);
   XCTAssertFalse(excluded.boolValue);
+}
+
+- (void)testCreateOwnedTerminalRevalidationRejectsAuthorityTamperAndRootReplacement {
+  NSArray<NSString *> *tamperModes = @[@"authority", @"root"];
+  for (NSString *mode in tamperModes) {
+    NSURL *root = [self.rootURL URLByAppendingPathComponent:mode
+                                                isDirectory:YES];
+    XCTAssertTrue([NSFileManager.defaultManager createDirectoryAtURL:root
+                                         withIntermediateDirectories:YES
+                                                          attributes:nil
+                                                               error:nil]);
+    __weak LocalWorkspaceAccessTests *weakSelf = self;
+    DSHLocalWorkspaceAccess *access = [self accessWithRoot:root
+        documentsRootURL:[self documentsRootForRoot:root]
+        fault:^BOOL(NSString *stage) {
+          if (![stage isEqual:@"before_create_terminal_validation"]) return NO;
+          LocalWorkspaceAccessTests *strongSelf = weakSelf;
+          if ([mode isEqual:@"authority"]) {
+            NSURL *authorityURL = [strongSelf authorityURLForRoot:root
+                                                              kind:@"owned"
+                                                       workspaceId:DSHWorkspaceA
+                                                          revision:1];
+            NSMutableDictionary *authority = [[NSJSONSerialization
+                JSONObjectWithData:[NSData dataWithContentsOfURL:authorityURL]
+                             options:0
+                               error:nil] mutableCopy];
+            authority[@"root_fingerprint_sha256"] = DSHDigestB;
+            [strongSelf secureWriteObject:authority toURL:authorityURL];
+          } else {
+            NSURL *ownedRoot = [[strongSelf ownedWorkspacesRootForRoot:root]
+                URLByAppendingPathComponent:@"Scratch" isDirectory:YES];
+            [NSFileManager.defaultManager removeItemAtURL:ownedRoot error:nil];
+            [NSFileManager.defaultManager createDirectoryAtURL:ownedRoot
+                                    withIntermediateDirectories:NO
+                                                     attributes:nil
+                                                          error:nil];
+          }
+          return NO;
+        }
+        UUIDGenerator:^NSString *{
+          return DSHWorkspaceA;
+        }];
+    NSError *error = nil;
+    XCTAssertNil([access createRishOwnedWorkspaceWithDisplayName:@"Scratch"
+                                                     operationId:DSHOperationA
+                                                           error:&error]);
+    XCTAssertTrue([error.userInfo[@"code"] isEqual:@"E_WORKSPACE_PERSISTENCE"] ||
+                  [error.userInfo[@"code"] isEqual:@"E_WORKSPACE_UNAVAILABLE"] ||
+                  [error.userInfo[@"code"] isEqual:@"E_WORKSPACE_ROOT_CHANGED"]);
+  }
+}
+
+- (void)testOwnedLeaseAndCoordinatedOperationUseTheVerifiedDescriptor {
+  NSURL *documents = [self documentsRootForRoot:self.rootURL];
+  DSHLocalWorkspaceAccess *access =
+      [self accessWithRoot:self.rootURL
+          documentsRootURL:documents
+                     fault:nil
+               UUIDGenerator:^NSString *{
+                 return DSHWorkspaceA;
+               }];
+  XCTAssertNotNil([access createRishOwnedWorkspaceWithDisplayName:@"Lease"
+                                                        operationId:DSHOperationA
+                                                              error:nil]);
+  NSError *error = nil;
+  DSHLocalWorkspaceLease *lease =
+      [access leaseWorkspaceId:DSHWorkspaceA
+       expectedBindingRevision:1
+          requiredCapabilities:[NSSet setWithArray:@[@"read"]]
+                         error:&error];
+  XCTAssertNotNil(lease, @"%@", error);
+  XCTAssertNil(error);
+  XCTAssertEqualObjects(lease.workspaceId, DSHWorkspaceA);
+  XCTAssertEqual(lease.bindingRevision, 1u);
+  XCTAssertGreaterThanOrEqual(lease.rootDescriptor, 0);
+  XCTAssertTrue(lease.supportsGit);
+  XCTAssertTrue(lease.supportsProjectContext);
+  struct stat state = {};
+  XCTAssertEqual(fstat(lease.rootDescriptor, &state), 0);
+  XCTAssertTrue(S_ISDIR(state.st_mode));
+  lease = nil;
+
+  __block int coordinatedDescriptor = -1;
+  BOOL coordinated = [access
+      performCoordinatedWorkspaceOperationForId:DSHWorkspaceA
+                       expectedBindingRevision:1
+                          requiredCapabilities:[NSSet setWithArray:@[@"read"]]
+                                         block:^BOOL(int descriptor,
+                                                     NSError **blockError) {
+    (void)blockError;
+    coordinatedDescriptor = descriptor;
+    struct stat coordinatedState = {};
+    return fstat(descriptor, &coordinatedState) == 0 &&
+           S_ISDIR(coordinatedState.st_mode);
+  }
+                                         error:&error];
+  XCTAssertTrue(coordinated, @"%@", error);
+  XCTAssertNil(error);
+  XCTAssertGreaterThanOrEqual(coordinatedDescriptor, 0);
+  XCTAssertEqual(fcntl(coordinatedDescriptor, F_GETFD), -1);
+  XCTAssertEqualObjects(
+      [[access resolveWorkspaceId:DSHWorkspaceA
+            expectedBindingRevision:@2
+               requiredCapabilities:@[] error:&error]
+          valueForKey:@"disposition"], nil);
+  XCTAssertEqualObjects(error.userInfo[@"code"], @"E_WORKSPACE_REVISION_STALE");
+}
+
+- (void)testSecurityScopedRejectsNonFileCapabilitiesBeforeOpeningAuthority {
+  DSHLocalWorkspaceAccess *access = [self access];
+  XCTAssertTrue([access ensurePrivateLayoutWithError:nil]);
+  [self writeRegistryRecords:@[
+    [self recordForWorkspaceId:DSHWorkspaceA
+                         origin:@"granted_folder"
+                rootLocatorKind:@"security_scoped"
+                  locationClass:@"proven_local"
+            ownedDirectoryName:nil
+               legacyProjectId:nil
+              bindingRevision:1],
+  ] generation:1 root:self.rootURL];
+  for (NSString *capability in @[@"git", @"project_context"]) {
+    NSError *error = nil;
+    BOOL performed = [access
+        performCoordinatedWorkspaceOperationForId:DSHWorkspaceA
+                         expectedBindingRevision:1
+                            requiredCapabilities:[NSSet setWithArray:@[capability]]
+                                           block:^BOOL(__unused int descriptor,
+                                                       __unused NSError **blockError) {
+      XCTFail(@"capability rejection must happen before the block");
+      return YES;
+    }
+                                           error:&error];
+    XCTAssertFalse(performed);
+    XCTAssertEqualObjects(error.userInfo[@"code"], @"E_WORKSPACE_CAPABILITY");
+  }
+  XCTAssertFalse([NSFileManager.defaultManager
+      fileExistsAtPath:[self authorityURLForRoot:self.rootURL kind:@"bookmark"
+                                     workspaceId:DSHWorkspaceA revision:1].path]);
+}
+
+- (void)testLegacyLeaseFailsClosedWithoutARealVerifiedRootDescriptor {
+  DSHLocalWorkspaceAccess *access = [self access];
+  XCTAssertNotNil([self bootstrapWithAccess:access
+                                operationId:DSHOperationA
+                                      error:nil]);
+  NSError *error = nil;
+  XCTAssertNil([access leaseWorkspaceId:DSHWorkspaceA
+                  expectedBindingRevision:1
+                     requiredCapabilities:[NSSet setWithArray:@[@"read"]]
+                                    error:&error]);
+  XCTAssertEqualObjects(error.userInfo[@"code"], @"E_WORKSPACE_UNAVAILABLE");
+  error = nil;
+  BOOL performed = [access
+      performCoordinatedWorkspaceOperationForId:DSHWorkspaceA
+                       expectedBindingRevision:1
+                          requiredCapabilities:[NSSet setWithArray:@[@"read"]]
+                                         block:^BOOL(__unused int descriptor,
+                                                     __unused NSError **blockError) {
+    XCTFail(@"legacy route must not pass descriptor -1");
+    return YES;
+  }
+                                         error:&error];
+  XCTAssertFalse(performed);
+  XCTAssertEqualObjects(error.userInfo[@"code"], @"E_WORKSPACE_ROOT_CHANGED");
+}
+
+- (void)testLeaseDoesNotRetainAuthorityFlockAcrossConcurrentEnsure {
+  NSURL *documents = [self documentsRootForRoot:self.rootURL];
+  DSHLocalWorkspaceAccess *access =
+      [self accessWithRoot:self.rootURL
+          documentsRootURL:documents
+                     fault:nil
+               UUIDGenerator:^NSString *{
+                 return DSHWorkspaceA;
+               }];
+  XCTAssertNotNil([access createRishOwnedWorkspaceWithDisplayName:@"Concurrent"
+                                                        operationId:DSHOperationA
+                                                              error:nil]);
+  DSHLocalWorkspaceLease *lease =
+      [access leaseWorkspaceId:DSHWorkspaceA
+       expectedBindingRevision:1
+          requiredCapabilities:[NSSet setWithArray:@[@"read"]]
+                         error:nil];
+  XCTAssertNotNil(lease);
+  XCTestExpectation *finished =
+      [self expectationWithDescription:@"ensure completes while lease is active"];
+  dispatch_async(dispatch_get_global_queue(QOS_CLASS_DEFAULT, 0), ^{
+    NSError *error = nil;
+    BOOL ensured = [access ensurePrivateLayoutWithError:&error];
+    XCTAssertTrue(ensured, @"%@", error);
+    [finished fulfill];
+  });
+  [self waitForExpectations:@[finished] timeout:2.0];
+  lease = nil;
 }
 
 - (void)testCreateRishOwnedWorkspaceAllocatesCollisionSafeNormalizedDirectoryNames {
@@ -1593,7 +2098,7 @@ static NSString *const DSHDigestB =
                    expectedBindingRevision:@1
                       requiredCapabilities:@[@"read"]
                                      error:&error]);
-  XCTAssertEqualObjects(error.userInfo[@"code"], @"E_WORKSPACE_UNAVAILABLE");
+  XCTAssertEqualObjects(error.userInfo[@"code"], @"E_WORKSPACE_ROOT_CHANGED");
 }
 
 - (void)testRishOwnedCreateFsyncFailureLeavesNoPublishedWorkspaceAndRecoversOnRelaunch {
@@ -2008,7 +2513,6 @@ static NSString *const DSHDigestB =
                }];
   NSError *error = nil;
   XCTAssertNotNil([existing bootstrapLegacyProjectId:DSHProjectA
-                                          displayName:@"Existing"
                                            operationId:DSHOperationA
                                                  error:&error], @"%@", error);
 
@@ -2022,7 +2526,6 @@ static NSString *const DSHDigestB =
             return DSHWorkspaceB;
           }];
   XCTAssertNil([pending bootstrapLegacyProjectId:DSHProjectWide
-                                       displayName:@"Pending"
                                         operationId:DSHOperationB
                                               error:&error]);
   XCTAssertEqualObjects(error.userInfo[@"code"], @"E_WORKSPACE_PERSISTENCE");
@@ -2065,7 +2568,6 @@ static NSString *const DSHDigestB =
                }];
   NSError *error = nil;
   XCTAssertNotNil([existing bootstrapLegacyProjectId:DSHProjectA
-                                          displayName:@"Existing"
                                            operationId:DSHOperationA
                                                  error:&error], @"%@", error);
 
@@ -2079,7 +2581,6 @@ static NSString *const DSHDigestB =
             return DSHWorkspaceB;
           }];
   XCTAssertNil([committed bootstrapLegacyProjectId:DSHProjectWide
-                                         displayName:@"Committed"
                                           operationId:DSHOperationB
                                                 error:&error]);
   XCTAssertEqualObjects(error.userInfo[@"code"], @"E_WORKSPACE_PERSISTENCE");
@@ -2148,7 +2649,7 @@ static NSString *const DSHDigestB =
         @"operation_id": DSHOperationA,
       } resolver:resolve rejecter:reject];
     } else if ([operation isEqual:@"resolve"]) {
-      [module resolveMetadataRequest:@{
+      [module resolveWorkspaceRequest:@{
         @"schema_version": @YES,
         @"workspace_id": DSHWorkspaceA,
         @"expected_binding_revision": NSNull.null,

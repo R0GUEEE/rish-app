@@ -5,16 +5,33 @@ import {
   PROJECT_CONTEXT_ERROR_CODES,
   PROJECT_CONTEXT_OMISSION_REASONS,
   type ProjectContextBridgeErrorCode,
+  type ProjectContextCandidateListRequestV2,
   type ProjectContextCandidatePageV1,
+  type ProjectContextCandidatePageV2,
+  type ProjectContextConfirmRequestV2,
+  type ProjectContextConsentV2,
   type ProjectContextConsentV1,
+  type ProjectContextDiscardRequestV2,
+  type ProjectContextDiscardResultV2,
   type ProjectContextDiscardResultV1,
   type ProjectContextIncludedItemV1,
+  type ProjectContextInspectRequestV2,
+  type ProjectContextInspectionV2,
   type ProjectContextInspectionV1,
+  type ProjectContextManifestV2,
   type ProjectContextManifestV1,
   type ProjectContextOmissionReason,
+  type ProjectContextProjectDescriptorV2,
   type ProjectContextSelectionV1,
+  type ProjectContextSelectionV2,
+  type ProjectContextVerifiedSendReceiptV2,
+  type ProjectContextVerifiedSendRequestV2,
 } from '../project-context/types';
 import type { DeepSeekModelId } from './LocalRuntime';
+import {
+  assertWorkspaceRootRefV1,
+  type WorkspaceRootRefV1,
+} from './WorkspaceRoot';
 
 type UnknownRecord = Record<string, unknown>;
 
@@ -28,6 +45,14 @@ type NativeLocalProjectContext = {
   confirmProjectContext(snapshotId: string): Promise<unknown>;
   inspectProjectContext(snapshotId: string): Promise<unknown>;
   discardProjectContext(snapshotId: string): Promise<unknown>;
+  listCandidatesV2?(request: ProjectContextCandidateListRequestV2): Promise<unknown>;
+  prepareCandidateV2?(request: ProjectContextSelectionV2): Promise<unknown>;
+  confirmSnapshotV2?(request: ProjectContextConfirmRequestV2): Promise<unknown>;
+  inspectSnapshotV2?(request: ProjectContextInspectRequestV2): Promise<unknown>;
+  discardProjectContextV2?(request: ProjectContextDiscardRequestV2): Promise<unknown>;
+  verifiedSendProjectContextV2?(
+    request: ProjectContextVerifiedSendRequestV2,
+  ): Promise<unknown>;
 };
 
 const objectPrototype = Object.prototype;
@@ -111,6 +136,76 @@ const consentKeys = new Set([
 ]);
 const inspectionKeys = new Set(['schema_version', 'state', 'manifest']);
 const discardKeys = new Set(['schema_version', 'status']);
+const workspaceRootKeys = new Set([
+  'schema_version',
+  'workspace_id',
+  'binding_revision',
+  'project_id',
+]);
+const projectDescriptorV2Keys = new Set([
+  'schema_version',
+  'project_id',
+  'workspace_id',
+  'workspace_binding_revision',
+  'display_name',
+  'git_topology',
+]);
+const candidatePageV2Keys = new Set([
+  'schema_version',
+  'root',
+  'project',
+  'candidates',
+  'next_cursor',
+]);
+const manifestV2Keys = new Set([
+  'schema_version',
+  'snapshot_id',
+  'root',
+  'project',
+  'project_id',
+  'conversation_id',
+  'model_id',
+  'policy',
+  'branch',
+  'head_oid',
+  'clean',
+  'conflicted',
+  'captured_at',
+  'policy_version',
+  'included',
+  'omitted',
+  'context_bytes',
+  'estimated_tokens',
+  'snapshot_sha256',
+  'source_fingerprint',
+]);
+const consentV2Keys = new Set([
+  'schema_version',
+  'consent_receipt_id',
+  'snapshot_id',
+  'root',
+  'workspace_id',
+  'workspace_binding_revision',
+  'snapshot_sha256',
+  'confirmed_at',
+]);
+const verifiedSendReceiptV2Keys = new Set([
+  'schema_version',
+  'snapshot_id',
+  'root',
+  'snapshot_sha256',
+  'source_fingerprint',
+  'context_bytes',
+  'verified_at',
+]);
+const discardResultV2Keys = new Set([
+  'schema_version',
+  'status',
+  'snapshot_id',
+  'root',
+  'workspace_id',
+  'workspace_binding_revision',
+]);
 
 export class ProjectContextBridgeError extends Error {
   readonly code: ProjectContextBridgeErrorCode;
@@ -152,7 +247,15 @@ function exactRecord(
     return fail(code);
   }
   const prototype = Object.getPrototypeOf(value);
-  if (prototype !== objectPrototype && prototype !== null) fail(code);
+  if (
+    prototype !== objectPrototype ||
+    Object.getPrototypeOf(objectPrototype) !== null ||
+    Object.getPrototypeOf(arrayPrototype) !== objectPrototype ||
+    Object.prototype.hasOwnProperty.call(objectPrototype, 'toJSON') ||
+    Object.prototype.hasOwnProperty.call(arrayPrototype, 'toJSON')
+  ) {
+    fail(code);
+  }
   if (Object.getOwnPropertySymbols(value).length > 0) fail(code);
   const names = Object.getOwnPropertyNames(value);
   if (names.length !== keys.size || names.some(name => !keys.has(name))) {
@@ -595,6 +698,377 @@ function projectDiscard(value: unknown): ProjectContextDiscardResultV1 {
   return { schema_version: 1, status: 'discarded' };
 }
 
+function projectRoot(
+  value: unknown,
+  projectRequired = true,
+): WorkspaceRootRefV1 {
+  const row = exactRecord(
+    value,
+    workspaceRootKeys,
+    'E_CONTEXT_REQUEST_INVALID',
+  );
+  if (
+    row.schema_version !== 1 ||
+    !canonicalUUID(row.workspace_id) ||
+    !nonNegativeInteger(row.binding_revision, Number.MAX_SAFE_INTEGER) ||
+    row.binding_revision < 1 ||
+    (projectRequired
+      ? !canonicalUUID(row.project_id)
+      : row.project_id !== null && !canonicalUUID(row.project_id))
+  ) {
+    fail('E_CONTEXT_REQUEST_INVALID');
+  }
+  // Re-run the shared authority validator on a detached object. This keeps
+  // the public root contract identical across Files, Git, and Context while
+  // ensuring no caller-owned object can be retained by a native promise.
+  try {
+    return assertWorkspaceRootRefV1({
+      schema_version: 1,
+      workspace_id: row.workspace_id,
+      binding_revision: row.binding_revision,
+      project_id: row.project_id,
+    });
+  } catch {
+    fail('E_CONTEXT_REQUEST_INVALID');
+  }
+}
+
+function sameRoot(
+  left: WorkspaceRootRefV1,
+  right: WorkspaceRootRefV1,
+): boolean {
+  return (
+    left.workspace_id === right.workspace_id &&
+    left.binding_revision === right.binding_revision &&
+    left.project_id === right.project_id
+  );
+}
+
+function projectDescriptorV2(
+  value: unknown,
+  expectedRoot?: WorkspaceRootRefV1,
+): ProjectContextProjectDescriptorV2 {
+  const row = exactRecord(
+    value,
+    projectDescriptorV2Keys,
+    'E_CONTEXT_RESULT_INVALID',
+  );
+  const projectId = row.project_id;
+  const workspaceId = row.workspace_id;
+  const displayName = projectName(row.display_name);
+  if (
+    row.schema_version !== 2 ||
+    !canonicalUUID(projectId) ||
+    !canonicalUUID(workspaceId) ||
+    !nonNegativeInteger(
+      row.workspace_binding_revision,
+      Number.MAX_SAFE_INTEGER,
+    ) ||
+    row.workspace_binding_revision < 1 ||
+    displayName === null ||
+    (row.git_topology !== 'legacy_embedded' &&
+      row.git_topology !== 'private_split_gitdir') ||
+    (expectedRoot !== undefined &&
+      (projectId !== expectedRoot.project_id ||
+        workspaceId !== expectedRoot.workspace_id ||
+        row.workspace_binding_revision !== expectedRoot.binding_revision))
+  ) {
+    fail('E_CONTEXT_RESULT_INVALID');
+  }
+  return {
+    schema_version: 2,
+    project_id: projectId,
+    workspace_id: workspaceId,
+    workspace_binding_revision: row.workspace_binding_revision,
+    display_name: displayName,
+    git_topology: row.git_topology,
+  };
+}
+
+function projectCandidatePageV2(
+  value: unknown,
+  expectedRoot: WorkspaceRootRefV1,
+): ProjectContextCandidatePageV2 {
+  const row = exactRecord(value, candidatePageV2Keys, 'E_CONTEXT_RESULT_INVALID');
+  if (row.schema_version !== 2) fail('E_CONTEXT_RESULT_INVALID');
+  const root = projectRootResult(row.root);
+  if (!sameRoot(root, expectedRoot)) fail('E_CONTEXT_RESULT_INVALID');
+  const project = projectDescriptorV2(row.project, expectedRoot);
+  const candidates = strictArray(
+    row.candidates,
+    100,
+    'E_CONTEXT_RESULT_INVALID',
+  ).map(projectCandidate);
+  if (new Set(candidates.map(item => item.path)).size !== candidates.length) {
+    fail('E_CONTEXT_RESULT_INVALID');
+  }
+  return {
+    schema_version: 2,
+    root,
+    project,
+    candidates,
+    next_cursor: cursorResult(row.next_cursor),
+  };
+}
+
+// Result parsing uses result-specific error codes, unlike request roots. The
+// functions intentionally never return the input object itself.
+function projectRootResult(value: unknown): WorkspaceRootRefV1 {
+  const row = exactRecord(value, workspaceRootKeys, 'E_CONTEXT_RESULT_INVALID');
+  if (
+    row.schema_version !== 1 ||
+    !canonicalUUID(row.workspace_id) ||
+    !nonNegativeInteger(row.binding_revision, Number.MAX_SAFE_INTEGER) ||
+    row.binding_revision < 1 ||
+    !canonicalUUID(row.project_id)
+  ) {
+    fail('E_CONTEXT_RESULT_INVALID');
+  }
+  return {
+    schema_version: 1,
+    workspace_id: row.workspace_id,
+    binding_revision: row.binding_revision,
+    project_id: row.project_id,
+  };
+}
+
+function cursorResult(value: unknown): string | null {
+  if (value === null) return null;
+  return typeof value === 'string' && /^[A-Za-z0-9_-]{98}$/u.test(value)
+    ? value
+    : fail('E_CONTEXT_RESULT_INVALID');
+}
+
+function projectManifestV2(
+  value: unknown,
+  options: {
+    readonly expectedRoot?: WorkspaceRootRefV1;
+    readonly expectedSnapshotId?: string;
+    readonly expectedConversationId?: string;
+    readonly expectedModel?: DeepSeekModelId;
+  } = {},
+): ProjectContextManifestV2 {
+  const {
+    expectedRoot,
+    expectedSnapshotId,
+    expectedConversationId,
+    expectedModel,
+  } = options;
+  const row = exactRecord(value, manifestV2Keys, 'E_CONTEXT_RESULT_INVALID');
+  const root = projectRootResult(row.root);
+  const project = projectDescriptorV2(row.project, root);
+  const branch = gitBranch(row.branch);
+  const name = projectName(project.display_name);
+  const included = strictArray(
+    row.included,
+    32,
+    'E_CONTEXT_RESULT_INVALID',
+  ).map(projectIncluded);
+  const includedIds = new Set(included.map(item => `${item.path}\n${item.source}`));
+  const omitted = strictArray(
+    row.omitted,
+    5000,
+    'E_CONTEXT_RESULT_INVALID',
+  ).map(item => {
+    const omittedRow = exactRecord(
+      item,
+      omittedKeys,
+      'E_CONTEXT_RESULT_INVALID',
+    );
+    const path = safePath(omittedRow.path);
+    if (
+      path === null ||
+      typeof omittedRow.reason !== 'string' ||
+      !omissionReasons.has(omittedRow.reason)
+    ) {
+      fail('E_CONTEXT_RESULT_INVALID');
+    }
+    return {
+      path,
+      reason: omittedRow.reason as ProjectContextOmissionReason,
+    };
+  });
+  const omittedIds = new Set(omitted.map(item => `${item.path}\n${item.reason}`));
+  if (
+    row.schema_version !== 2 ||
+    !canonicalUUID(row.snapshot_id) ||
+    (expectedSnapshotId !== undefined && row.snapshot_id !== expectedSnapshotId) ||
+    (expectedRoot !== undefined && !sameRoot(root, expectedRoot)) ||
+    name === null ||
+    (row.branch !== null && branch === null) ||
+    (row.head_oid !== null &&
+      (typeof row.head_oid !== 'string' || !/^[0-9a-f]{40}$/u.test(row.head_oid))) ||
+    !canonicalUUID(row.project_id) ||
+    row.project_id !== root.project_id ||
+    !canonicalUUID(row.conversation_id) ||
+    (expectedConversationId !== undefined &&
+      row.conversation_id !== expectedConversationId) ||
+    typeof row.model_id !== 'string' ||
+    !models.has(row.model_id) ||
+    (expectedModel !== undefined && row.model_id !== expectedModel) ||
+    row.policy !== 'chat-read-v1' ||
+    typeof row.clean !== 'boolean' ||
+    typeof row.conflicted !== 'boolean' ||
+    (row.clean && row.conflicted) ||
+    !timestamp(row.captured_at) ||
+    row.policy_version !== 'chat-read-v1.0.0' ||
+    !nonNegativeInteger(row.context_bytes, 256 * 1024) ||
+    row.context_bytes < 1 ||
+    !nonNegativeInteger(row.estimated_tokens, 65536) ||
+    row.estimated_tokens !== Math.floor((row.context_bytes + 3) / 4) ||
+    !digest(row.snapshot_sha256) ||
+    !digest(row.source_fingerprint) ||
+    includedIds.size !== included.length ||
+    omittedIds.size !== omitted.length
+  ) {
+    fail('E_CONTEXT_RESULT_INVALID');
+  }
+  return {
+    schema_version: 2,
+    snapshot_id: row.snapshot_id,
+    root,
+    project,
+    project_id: row.project_id,
+    conversation_id: row.conversation_id,
+    model_id: row.model_id as DeepSeekModelId,
+    policy: 'chat-read-v1',
+    branch,
+    head_oid: row.head_oid as string | null,
+    clean: row.clean,
+    conflicted: row.conflicted,
+    captured_at: row.captured_at,
+    policy_version: 'chat-read-v1.0.0',
+    included,
+    omitted,
+    context_bytes: row.context_bytes,
+    estimated_tokens: row.estimated_tokens,
+    snapshot_sha256: row.snapshot_sha256,
+    source_fingerprint: row.source_fingerprint,
+  };
+}
+
+function projectConsentV2(
+  value: unknown,
+  expectedRoot: WorkspaceRootRefV1,
+  expectedSnapshotId?: string,
+): ProjectContextConsentV2 {
+  const row = exactRecord(value, consentV2Keys, 'E_CONTEXT_RESULT_INVALID');
+  const root = projectRootResult(row.root);
+  if (
+    row.schema_version !== 2 ||
+    !canonicalUUID(row.consent_receipt_id) ||
+    !canonicalUUID(row.snapshot_id) ||
+    (expectedSnapshotId !== undefined && row.snapshot_id !== expectedSnapshotId) ||
+    !sameRoot(root, expectedRoot) ||
+    row.workspace_id !== root.workspace_id ||
+    row.workspace_binding_revision !== root.binding_revision ||
+    !digest(row.snapshot_sha256) ||
+    !timestamp(row.confirmed_at)
+  ) {
+    fail('E_CONTEXT_RESULT_INVALID');
+  }
+  return {
+    schema_version: 2,
+    consent_receipt_id: row.consent_receipt_id,
+    snapshot_id: row.snapshot_id,
+    root,
+    workspace_id: row.workspace_id,
+    workspace_binding_revision: row.workspace_binding_revision,
+    snapshot_sha256: row.snapshot_sha256,
+    confirmed_at: row.confirmed_at,
+  };
+}
+
+function projectInspectionV2(
+  value: unknown,
+  expectedRoot: WorkspaceRootRefV1,
+  expectedSnapshotId?: string,
+): ProjectContextInspectionV2 {
+  const row = exactRecord(
+    value,
+    new Set(['schema_version', 'state', 'manifest']),
+    'E_CONTEXT_RESULT_INVALID',
+  );
+  if (
+    row.schema_version !== 2 ||
+    (row.state !== 'prepared' &&
+      row.state !== 'confirmed' &&
+      row.state !== 'stale')
+  ) {
+    fail('E_CONTEXT_RESULT_INVALID');
+  }
+  return {
+    schema_version: 2,
+    state: row.state,
+    manifest: projectManifestV2(row.manifest, {
+      expectedRoot,
+      expectedSnapshotId,
+    }),
+  };
+}
+
+function projectVerifiedSendReceiptV2(
+  value: unknown,
+  expectedRoot: WorkspaceRootRefV1,
+  expectedSnapshotId?: string,
+): ProjectContextVerifiedSendReceiptV2 {
+  const row = exactRecord(
+    value,
+    verifiedSendReceiptV2Keys,
+    'E_CONTEXT_RESULT_INVALID',
+  );
+  const root = projectRootResult(row.root);
+  if (
+    row.schema_version !== 2 ||
+    !canonicalUUID(row.snapshot_id) ||
+    (expectedSnapshotId !== undefined && row.snapshot_id !== expectedSnapshotId) ||
+    !sameRoot(root, expectedRoot) ||
+    !digest(row.snapshot_sha256) ||
+    !digest(row.source_fingerprint) ||
+    !nonNegativeInteger(row.context_bytes, 256 * 1024) ||
+    row.context_bytes < 1 ||
+    !timestamp(row.verified_at)
+  ) {
+    fail('E_CONTEXT_RESULT_INVALID');
+  }
+  return {
+    schema_version: 2,
+    snapshot_id: row.snapshot_id,
+    root,
+    snapshot_sha256: row.snapshot_sha256,
+    source_fingerprint: row.source_fingerprint,
+    context_bytes: row.context_bytes,
+    verified_at: row.verified_at,
+  };
+}
+
+function projectDiscardV2(
+  value: unknown,
+  expectedRoot: WorkspaceRootRefV1,
+  expectedSnapshotId: string,
+): ProjectContextDiscardResultV2 {
+  const row = exactRecord(value, discardResultV2Keys, 'E_CONTEXT_RESULT_INVALID');
+  const root = projectRootResult(row.root);
+  if (
+    row.schema_version !== 2 ||
+    row.status !== 'discarded' ||
+    row.snapshot_id !== expectedSnapshotId ||
+    !sameRoot(root, expectedRoot) ||
+    row.workspace_id !== root.workspace_id ||
+    row.workspace_binding_revision !== root.binding_revision
+  ) {
+    fail('E_CONTEXT_RESULT_INVALID');
+  }
+  return {
+    schema_version: 2,
+    status: 'discarded',
+    snapshot_id: expectedSnapshotId,
+    root,
+    workspace_id: root.workspace_id,
+    workspace_binding_revision: root.binding_revision,
+  };
+}
+
 function currentNative(): unknown {
   return (NativeModules as Record<string, unknown>).LocalProjectContext;
 }
@@ -623,6 +1097,34 @@ function required(): NativeLocalProjectContext {
     return fail('E_CONTEXT_NATIVE');
   }
   if (!hasCapabilities(value)) fail('E_CONTEXT_NATIVE');
+  return value;
+}
+
+function hasV2Capabilities(value: unknown): value is NativeLocalProjectContext {
+  try {
+    if (typeof value !== 'object' || value === null) return false;
+    const row = value as Partial<NativeLocalProjectContext>;
+    return (
+      typeof row.listCandidatesV2 === 'function' &&
+      typeof row.prepareCandidateV2 === 'function' &&
+      typeof row.confirmSnapshotV2 === 'function' &&
+      typeof row.inspectSnapshotV2 === 'function' &&
+      typeof row.discardProjectContextV2 === 'function' &&
+      typeof row.verifiedSendProjectContextV2 === 'function'
+    );
+  } catch {
+    return false;
+  }
+}
+
+function requiredV2(): NativeLocalProjectContext {
+  let value: unknown;
+  try {
+    value = currentNative();
+  } catch {
+    return fail('E_CONTEXT_NATIVE');
+  }
+  if (!hasV2Capabilities(value)) fail('E_CONTEXT_NATIVE');
   return value;
 }
 
@@ -659,6 +1161,13 @@ export const LocalProjectContext = {
   isAvailable: () => {
     try {
       return hasCapabilities(currentNative());
+    } catch {
+      return false;
+    }
+  },
+  isV2Available: () => {
+    try {
+      return hasV2Capabilities(currentNative());
     } catch {
       return false;
     }
@@ -733,6 +1242,264 @@ export const LocalProjectContext = {
       return await boundary(
         () => required().discardProjectContext(snapshotId),
         projectDiscard,
+      );
+    } catch (error) {
+      throw sanitize(error);
+    }
+  },
+  /**
+   * Workspace-routed V2 APIs. These are intentionally separate from the
+   * project-id compatibility methods above: a bound conversation must never
+   * silently downgrade to a global/project-only path.
+   */
+  listCandidatesV2: async (
+    requestValue: unknown,
+  ): Promise<ProjectContextCandidatePageV2> => {
+    try {
+      const row = exactRecord(
+        requestValue,
+        new Set(['schema_version', 'root', 'query', 'cursor']),
+        'E_CONTEXT_REQUEST_INVALID',
+      );
+      const root = projectRoot(row.root, true);
+      const queryValue = row.query;
+      const cursorValue = row.cursor;
+      if (
+        row.schema_version !== 1 ||
+        typeof queryValue !== 'string' ||
+        queryValue.length > 256 ||
+        utf8Bytes(queryValue) === null ||
+        utf8Bytes(queryValue)! > 256 ||
+        hasControlCharacter(queryValue)
+      ) {
+        fail('E_CONTEXT_REQUEST_INVALID');
+      }
+      const request: ProjectContextCandidateListRequestV2 = {
+        schema_version: 1,
+        root,
+        query: queryValue,
+        cursor:
+          cursorValue === null
+            ? null
+            : typeof cursorValue === 'string' &&
+                /^[A-Za-z0-9_-]{98}$/u.test(cursorValue)
+              ? cursorValue
+              : fail('E_CONTEXT_REQUEST_INVALID'),
+      };
+      return await boundary(
+        () => {
+          const nativeModule = requiredV2();
+          const method = nativeModule.listCandidatesV2;
+          if (typeof method !== 'function') fail('E_CONTEXT_NATIVE');
+          return method(request);
+        },
+        raw => projectCandidatePageV2(raw, root),
+      );
+    } catch (error) {
+      throw sanitize(error);
+    }
+  },
+  prepareV2: async (
+    selectionValue: unknown,
+  ): Promise<ProjectContextManifestV2> => {
+    try {
+      const row = exactRecord(
+        selectionValue,
+        new Set([
+          'schema_version',
+          'root',
+          'conversation_id',
+          'model_id',
+          'policy',
+          'selected_paths',
+        ]),
+        'E_CONTEXT_REQUEST_INVALID',
+      );
+      const root = projectRoot(row.root, true);
+      if (
+        row.schema_version !== 2 ||
+        !canonicalUUID(row.conversation_id) ||
+        typeof row.model_id !== 'string' ||
+        !models.has(row.model_id) ||
+        row.policy !== 'chat-read-v1'
+      ) {
+        fail('E_CONTEXT_REQUEST_INVALID');
+      }
+      const paths = strictArray(
+        row.selected_paths,
+        5000,
+        'E_CONTEXT_REQUEST_INVALID',
+      ).map(value => {
+        const path = safePath(value);
+        if (path === null) fail('E_CONTEXT_REQUEST_INVALID');
+        return path;
+      });
+      if (new Set(paths).size !== paths.length) {
+        fail('E_CONTEXT_REQUEST_INVALID');
+      }
+      paths.sort((left, right) =>
+        left < right ? -1 : left > right ? 1 : 0,
+      );
+      const request: ProjectContextSelectionV2 = {
+        schema_version: 2,
+        root,
+        conversation_id: row.conversation_id,
+        model_id: row.model_id as DeepSeekModelId,
+        policy: 'chat-read-v1',
+        selected_paths: paths,
+      };
+      return await boundary(
+        () => {
+          const nativeModule = requiredV2();
+          const method = nativeModule.prepareCandidateV2;
+          if (typeof method !== 'function') fail('E_CONTEXT_NATIVE');
+          return method(request);
+        },
+        raw =>
+          projectManifestV2(raw, {
+            expectedRoot: root,
+            expectedConversationId: row.conversation_id as string,
+            expectedModel: row.model_id as DeepSeekModelId,
+          }),
+      );
+    } catch (error) {
+      throw sanitize(error);
+    }
+  },
+  confirmV2: async (
+    requestValue: unknown,
+  ): Promise<ProjectContextConsentV2> => {
+    try {
+      const row = exactRecord(
+        requestValue,
+        new Set(['schema_version', 'snapshot_id', 'root']),
+        'E_CONTEXT_REQUEST_INVALID',
+      );
+      const root = projectRoot(row.root, true);
+      if (row.schema_version !== 2 || !canonicalUUID(row.snapshot_id)) {
+        fail('E_CONTEXT_REQUEST_INVALID');
+      }
+      const request: ProjectContextConfirmRequestV2 = {
+        schema_version: 2,
+        snapshot_id: row.snapshot_id as string,
+        root,
+      };
+      return await boundary(
+        () => {
+          const nativeModule = requiredV2();
+          const method = nativeModule.confirmSnapshotV2;
+          if (typeof method !== 'function') fail('E_CONTEXT_NATIVE');
+          return method(request);
+        },
+        raw => projectConsentV2(raw, root, row.snapshot_id as string),
+      );
+    } catch (error) {
+      throw sanitize(error);
+    }
+  },
+  inspectV2: async (
+    requestValue: unknown,
+  ): Promise<ProjectContextInspectionV2> => {
+    try {
+      const row = exactRecord(
+        requestValue,
+        new Set(['schema_version', 'snapshot_id', 'root']),
+        'E_CONTEXT_REQUEST_INVALID',
+      );
+      const root = projectRoot(row.root, true);
+      if (row.schema_version !== 2 || !canonicalUUID(row.snapshot_id)) {
+        fail('E_CONTEXT_REQUEST_INVALID');
+      }
+      const request: ProjectContextInspectRequestV2 = {
+        schema_version: 2,
+        snapshot_id: row.snapshot_id as string,
+        root,
+      };
+      return await boundary(
+        () => {
+          const nativeModule = requiredV2();
+          const method = nativeModule.inspectSnapshotV2;
+          if (typeof method !== 'function') fail('E_CONTEXT_NATIVE');
+          return method(request);
+        },
+        raw => projectInspectionV2(raw, root, row.snapshot_id as string),
+      );
+    } catch (error) {
+      throw sanitize(error);
+    }
+  },
+  discardV2: async (
+    requestValue: unknown,
+  ): Promise<ProjectContextDiscardResultV2> => {
+    try {
+      const row = exactRecord(
+        requestValue,
+        new Set(['schema_version', 'snapshot_id', 'root']),
+        'E_CONTEXT_REQUEST_INVALID',
+      );
+      const root = projectRoot(row.root, true);
+      if (row.schema_version !== 2 || !canonicalUUID(row.snapshot_id)) {
+        fail('E_CONTEXT_REQUEST_INVALID');
+      }
+      const nativeModule = requiredV2();
+      return await boundary(
+        () => nativeModule.discardProjectContextV2!(
+          {
+            schema_version: 2,
+            snapshot_id: row.snapshot_id as string,
+            root,
+          },
+        ),
+        raw => projectDiscardV2(raw, root, row.snapshot_id as string),
+      );
+    } catch (error) {
+      throw sanitize(error);
+    }
+  },
+  verifiedSendV2: async (
+    requestValue: unknown,
+  ): Promise<ProjectContextVerifiedSendReceiptV2> => {
+    try {
+      const row = exactRecord(
+        requestValue,
+        new Set([
+          'schema_version',
+          'snapshot_id',
+          'consent_receipt_id',
+          'root',
+          'conversation_id',
+          'model_id',
+          'policy',
+        ]),
+        'E_CONTEXT_REQUEST_INVALID',
+      );
+      const root = projectRoot(row.root, true);
+      if (
+        row.schema_version !== 2 ||
+        !canonicalUUID(row.snapshot_id) ||
+        !canonicalUUID(row.consent_receipt_id) ||
+        !canonicalUUID(row.conversation_id) ||
+        typeof row.model_id !== 'string' ||
+        !models.has(row.model_id) ||
+        row.policy !== 'chat-read-v1'
+      ) {
+        fail('E_CONTEXT_REQUEST_INVALID');
+      }
+      const request: ProjectContextVerifiedSendRequestV2 = {
+        schema_version: 2,
+        snapshot_id: row.snapshot_id as string,
+        consent_receipt_id: row.consent_receipt_id as string,
+        root,
+        conversation_id: row.conversation_id as string,
+        model_id: row.model_id as DeepSeekModelId,
+        policy: 'chat-read-v1',
+      };
+      const nativeModule = requiredV2();
+      const verified = nativeModule.verifiedSendProjectContextV2;
+      if (typeof verified !== 'function') fail('E_CONTEXT_NATIVE');
+      return await boundary(
+        () => verified(request),
+        raw => projectVerifiedSendReceiptV2(raw, root, row.snapshot_id as string),
       );
     } catch (error) {
       throw sanitize(error);

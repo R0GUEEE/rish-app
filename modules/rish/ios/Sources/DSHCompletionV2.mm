@@ -177,6 +177,23 @@ static BOOL DSHSchema2OpaqueIdentifier(id value) {
   return [string rangeOfCharacterFromSet:invalid].location == NSNotFound;
 }
 
+static NSDictionary *DSHSchema2NormalizeCreateOnlyWriteParameters(
+    NSString *name, NSDictionary *parameters) {
+  NSString *path = nil;
+  NSString *content = nil;
+  if (![name isEqualToString:@"write_file"] ||
+      !DSHSchema2ExactKeys(parameters, @[@"path", @"content"]) ||
+      !DSHSchema2BoundedUTF8String(parameters[@"path"], 512, &path) ||
+      !DSHSchema2BoundedUTF8String(parameters[@"content"],
+                                   DSHCompletionV2MaxArgumentsBytes,
+                                   &content)) {
+    return parameters;
+  }
+  NSMutableDictionary *createOnly = [parameters mutableCopy];
+  createOnly[@"expected_revision"] = NSNull.null;
+  return [createOnly copy];
+}
+
 static BOOL DSHSchema2SupportedModel(NSString *model) {
   return [model isEqualToString:@"deepseek-v4-flash"] ||
       [model isEqualToString:@"deepseek-v4-pro"] ||
@@ -912,43 +929,142 @@ DSHParseCompletionResponseSchema2(
   }
   NSMutableArray *toolCalls = [NSMutableArray arrayWithCapacity:calls.count];
   NSMutableSet *callIds = [NSMutableSet set];
-  for (id rawCall in calls) {
-    NSDictionary *call = [rawCall isKindOfClass:NSDictionary.class] ? rawCall : nil;
+  for (NSUInteger callIndex = 0; callIndex < calls.count; callIndex += 1) {
+    id rawCall = calls[callIndex];
+    NSDictionary *call = [rawCall isKindOfClass:NSDictionary.class]
+        ? rawCall : nil;
     NSDictionary *function =
         [call[@"function"] isKindOfClass:NSDictionary.class]
             ? call[@"function"] : nil;
     NSString *identifier = DSHV2String(call[@"id"]);
     NSString *name = DSHV2String(function[@"name"]);
     NSString *arguments = nil;
-    if (!DSHSchema2ExactKeys(call, @[@"id", @"type", @"function"]) ||
-        !DSHSchema2OpaqueIdentifier(identifier) ||
-        [callIds containsObject:identifier] ||
-        ![DSHV2String(call[@"type"]) isEqualToString:@"function"] ||
-        !DSHSchema2ExactKeys(function, @[@"name", @"arguments"]) ||
-        !DSHV2ValidToolName(name) ||
-        !DSHSchema2BoundedUTF8String(
-            function[@"arguments"], DSHCompletionV2MaxArgumentsBytes,
-            &arguments)) {
+    BOOL baseCallExact = DSHSchema2ExactKeys(
+        call, @[@"id", @"type", @"function"]);
+    NSInteger providerCallIndex = -1;
+    NSMutableDictionary *callWithoutIndex = [call mutableCopy];
+    BOOL hasProviderCallIndex = callWithoutIndex[@"index"] != nil;
+    [callWithoutIndex removeObjectForKey:@"index"];
+    BOOL indexedCallExact = hasProviderCallIndex &&
+        DSHSchema2ExactKeys(callWithoutIndex, @[@"id", @"type", @"function"]) &&
+        DSHSchema2Integer(call[@"index"], 0, 15, &providerCallIndex) &&
+        providerCallIndex == (NSInteger)callIndex;
+    BOOL callExact = baseCallExact || indexedCallExact;
+    BOOL identifierOpaque = DSHSchema2OpaqueIdentifier(identifier);
+    BOOL identifierDuplicate = identifier != nil &&
+        [callIds containsObject:identifier];
+    BOOL typeFunction =
+        [DSHV2String(call[@"type"]) isEqualToString:@"function"];
+    BOOL functionExact = DSHSchema2ExactKeys(
+        function, @[@"name", @"arguments"]);
+    BOOL nameValid = DSHV2ValidToolName(name);
+    BOOL argumentsBounded = DSHSchema2BoundedUTF8String(
+        function[@"arguments"], DSHCompletionV2MaxArgumentsBytes, &arguments);
+    if (!callExact || !identifierOpaque || identifierDuplicate ||
+        !typeFunction || !functionExact || !nameValid || !argumentsBounded) {
       DSHSchema2Fail(error, @"E_COMPLETION_TOOL_CALL_INVALID");
       return nil;
+    }
+    if ([name isEqualToString:@"write_file"]) {
+      NSData *argumentBytes = [arguments dataUsingEncoding:NSUTF8StringEncoding];
+      id value = argumentBytes == nil ? nil :
+          [NSJSONSerialization JSONObjectWithData:argumentBytes
+                                          options:0 error:nil];
+      NSDictionary *parameters = [value isKindOfClass:NSDictionary.class]
+          ? value : nil;
+      NSDictionary *normalized = DSHSchema2NormalizeCreateOnlyWriteParameters(
+          name, parameters);
+      if (normalized != parameters) {
+        NSData *normalizedBytes = [NSJSONSerialization
+            dataWithJSONObject:normalized options:NSJSONWritingSortedKeys
+                         error:nil];
+        NSString *normalizedArguments = normalizedBytes == nil ? nil :
+            [[NSString alloc] initWithData:normalizedBytes
+                                  encoding:NSUTF8StringEncoding];
+        if (normalizedArguments != nil &&
+            normalizedBytes.length <= DSHCompletionV2MaxArgumentsBytes) {
+          arguments = normalizedArguments;
+        }
+      }
     }
     [callIds addObject:identifier];
     [toolCalls addObject:@{
       @"id": identifier, @"name": name, @"arguments": arguments,
     }];
   }
+  BOOL compatibilityCall = NO;
+  NSString *trimmed = [text stringByTrimmingCharactersInSet:
+      NSCharacterSet.whitespaceAndNewlineCharacterSet];
+  if (toolCalls.count == 0 &&
+      ([finish isEqualToString:@"stop"] ||
+       [finish isEqualToString:@"tool_calls"]) &&
+      trimmed.length > 0) {
+    NSData *compatibilityBytes = [trimmed dataUsingEncoding:NSUTF8StringEncoding];
+    NSError *compatibilityError = nil;
+    id compatibilityValue = compatibilityBytes == nil ? nil :
+        [NSJSONSerialization JSONObjectWithData:compatibilityBytes
+                                        options:0
+                                          error:&compatibilityError];
+    NSDictionary *compatibility =
+        [compatibilityValue isKindOfClass:NSDictionary.class]
+            ? compatibilityValue : nil;
+    BOOL longShape = compatibility != nil &&
+        DSHSchema2ExactKeys(compatibility,
+                            @[@"type", @"function", @"parameters"]) &&
+        [compatibility[@"type"] isEqualToString:@"function_call"] &&
+        [compatibility[@"parameters"] isKindOfClass:NSDictionary.class];
+    BOOL shortShape = compatibility != nil &&
+        DSHSchema2ExactKeys(compatibility, @[@"name", @"arguments"]) &&
+        [compatibility[@"arguments"] isKindOfClass:NSDictionary.class];
+    NSString *compatibilityName = longShape
+        ? DSHV2String(compatibility[@"function"])
+        : (shortShape ? DSHV2String(compatibility[@"name"]) : nil);
+    NSDictionary *parameters = longShape
+        ? compatibility[@"parameters"]
+        : (shortShape ? compatibility[@"arguments"] : nil);
+    parameters = DSHSchema2NormalizeCreateOnlyWriteParameters(
+        compatibilityName, parameters);
+    if ((longShape || shortShape) &&
+        DSHV2ValidToolName(compatibilityName) && parameters != nil) {
+      NSData *argumentData = [NSJSONSerialization
+          dataWithJSONObject:parameters
+                     options:NSJSONWritingSortedKeys
+                       error:&compatibilityError];
+      NSString *arguments = argumentData == nil ? nil :
+          [[NSString alloc] initWithData:argumentData
+                                encoding:NSUTF8StringEncoding];
+      NSString *callIdentifier = [@"compat:" stringByAppendingString:responseId];
+      if (!DSHSchema2OpaqueIdentifier(callIdentifier)) {
+        callIdentifier = [@"compat:" stringByAppendingString:
+            NSUUID.UUID.UUIDString.lowercaseString];
+      }
+      NSData *argumentBytes = [arguments dataUsingEncoding:NSUTF8StringEncoding];
+      if (arguments != nil && argumentBytes != nil &&
+          argumentBytes.length <= DSHCompletionV2MaxArgumentsBytes &&
+          DSHSchema2OpaqueIdentifier(callIdentifier)) {
+        [toolCalls addObject:@{
+          @"id" : callIdentifier,
+          @"name" : compatibilityName,
+          @"arguments" : arguments,
+        }];
+        finish = @"tool_calls";
+        text = @"";
+        trimmed = @"";
+        compatibilityCall = YES;
+      }
+    }
+  }
   BOOL finishClaimsTools = [finish isEqualToString:@"tool_calls"];
   if (finishClaimsTools != (toolCalls.count > 0)) {
     DSHSchema2Fail(error, @"E_COMPLETION_FINISH_RELATION");
     return nil;
   }
-  if (finishClaimsTools && ![thinkingMode isEqualToString:@"off"] &&
+  if (finishClaimsTools && !compatibilityCall &&
+      ![thinkingMode isEqualToString:@"off"] &&
       ![rawReasoning isKindOfClass:NSString.class]) {
     DSHSchema2Fail(error, @"E_COMPLETION_FINISH_RELATION");
     return nil;
   }
-  NSString *trimmed = [text stringByTrimmingCharactersInSet:
-      NSCharacterSet.whitespaceAndNewlineCharacterSet];
   if (([finish isEqualToString:@"stop"] ||
        [finish isEqualToString:@"length"]) && trimmed.length == 0) {
     DSHSchema2Fail(error, @"E_COMPLETION_FINISH_RELATION");

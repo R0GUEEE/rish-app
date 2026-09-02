@@ -1,4 +1,4 @@
-import React, { useMemo } from 'react';
+import React, { useEffect, useMemo, useState } from 'react';
 import {
   ActivityIndicator,
   Pressable,
@@ -6,6 +6,7 @@ import {
   StyleSheet,
   Switch,
   Text,
+  TextInput,
   View,
 } from 'react-native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
@@ -14,6 +15,7 @@ import Bot from 'lucide-react-native/icons/bot';
 import BrainCircuit from 'lucide-react-native/icons/brain-circuit';
 import ChevronRight from 'lucide-react-native/icons/chevron-right';
 import CircleAlert from 'lucide-react-native/icons/circle-alert';
+import GitBranch from 'lucide-react-native/icons/git-branch';
 import KeyRound from 'lucide-react-native/icons/key-round';
 import Languages from 'lucide-react-native/icons/languages';
 import PackageOpen from 'lucide-react-native/icons/package-open';
@@ -28,11 +30,12 @@ import X from 'lucide-react-native/icons/x';
 
 import type { LucideIcon } from 'lucide-react-native';
 
-import type {
-  DefaultModelId,
-  LocalePreference,
-  ThemeMode,
-  ToolPermissionMode,
+import {
+  normalizeGitHttpsProxyUrl,
+  type DefaultModelId,
+  type LocalePreference,
+  type ThemeMode,
+  type ToolPermissionMode,
 } from '../preferences';
 import { useAppPresentation } from '../presentation/AppPresentation';
 import { fonts, hitSlop, type ThemePalette } from '../theme';
@@ -64,6 +67,10 @@ export function SettingsSheet(props: Props) {
   const insets = useSafeAreaInsets();
   const { colors, preferences, store, t } = useAppPresentation();
   const styles = useMemo(() => createStyles(colors), [colors]);
+  const [gitProxyDraft, setGitProxyDraft] = useState(
+    () => preferences.gitHttpsProxyUrl ?? '',
+  );
+  const [gitProxyError, setGitProxyError] = useState<string | null>(null);
   const modelName = (model: SupportedModel) =>
     localizedModelDetails(model, t).name;
   const modelDescription = (model: SupportedModel) =>
@@ -73,9 +80,37 @@ export function SettingsSheet(props: Props) {
     ? t('settings.local')
     : props.runtimeLabel;
 
+  useEffect(() => {
+    if (!props.visible) return;
+    setGitProxyDraft(preferences.gitHttpsProxyUrl ?? '');
+    setGitProxyError(null);
+  }, [preferences.gitHttpsProxyUrl, props.visible]);
+
   const update = (change: () => void) => {
     change();
     props.onPreferencesChanged();
+  };
+
+  const saveGitProxy = () => {
+    if (gitProxyDraft.length === 0) {
+      setGitProxyError(null);
+      update(() => store.setGitHttpsProxyUrl(null));
+      return;
+    }
+    const normalized = normalizeGitHttpsProxyUrl(gitProxyDraft);
+    if (normalized === null) {
+      setGitProxyError(t('settings.gitHttpsProxy.invalid'));
+      return;
+    }
+    setGitProxyDraft(normalized);
+    setGitProxyError(null);
+    update(() => store.setGitHttpsProxyUrl(normalized));
+  };
+
+  const clearGitProxy = () => {
+    setGitProxyDraft('');
+    setGitProxyError(null);
+    update(() => store.setGitHttpsProxyUrl(null));
   };
 
   return (
@@ -113,6 +148,8 @@ export function SettingsSheet(props: Props) {
 
         <ScrollView
           contentContainerStyle={styles.content}
+          keyboardDismissMode="interactive"
+          keyboardShouldPersistTaps="handled"
           showsVerticalScrollIndicator
         >
           <SectionLabel label={t('settings.section.appearance')} />
@@ -281,6 +318,64 @@ export function SettingsSheet(props: Props) {
 
           <SectionLabel label={t('settings.section.files')} />
           <SettingCard>
+            <SettingHeader
+              description={t('settings.gitHttpsProxy.description')}
+              icon={GitBranch}
+              title={t('settings.gitHttpsProxy')}
+            />
+            <TextInput
+              accessibilityHint={t('settings.gitHttpsProxy.hint')}
+              accessibilityLabel={t('settings.gitHttpsProxy.input')}
+              autoCapitalize="none"
+              autoCorrect={false}
+              keyboardType="url"
+              onChangeText={value => {
+                setGitProxyDraft(value);
+                setGitProxyError(null);
+              }}
+              onSubmitEditing={saveGitProxy}
+              placeholder={t('settings.gitHttpsProxy.placeholder')}
+              placeholderTextColor={colors.faint}
+              returnKeyType="done"
+              spellCheck={false}
+              style={styles.proxyInput}
+              value={gitProxyDraft}
+            />
+            <Text style={styles.proxyHint}>
+              {t('settings.gitHttpsProxy.hint')}
+            </Text>
+            {gitProxyError !== null && (
+              <Text
+                accessibilityLiveRegion="assertive"
+                accessibilityRole="alert"
+                style={styles.proxyError}
+              >
+                {gitProxyError}
+              </Text>
+            )}
+            <View style={styles.buttonRow}>
+              <Pressable
+                accessibilityLabel={t('settings.gitHttpsProxy.save')}
+                accessibilityRole="button"
+                onPress={saveGitProxy}
+                style={[styles.primaryButton, styles.proxySaveButton]}
+              >
+                <Text style={styles.primaryText}>
+                  {t('settings.gitHttpsProxy.save')}
+                </Text>
+              </Pressable>
+              <Pressable
+                accessibilityLabel={t('settings.gitHttpsProxy.clear')}
+                accessibilityRole="button"
+                onPress={clearGitProxy}
+                style={styles.secondaryButton}
+              >
+                <Text style={styles.secondaryText}>
+                  {t('settings.gitHttpsProxy.clear')}
+                </Text>
+              </Pressable>
+            </View>
+            <Divider />
             <Pressable
               accessibilityLabel={t('settings.packageMirrors')}
               accessibilityRole="button"
@@ -617,6 +712,7 @@ const createStyles = (colors: ThemePalette) =>
       paddingHorizontal: 14,
     },
     primaryText: { color: colors.background, fontSize: 11, fontWeight: '800' },
+    proxySaveButton: { flex: 1 },
     secondaryButton: {
       minHeight: 40,
       borderRadius: 11,
@@ -627,8 +723,34 @@ const createStyles = (colors: ThemePalette) =>
       gap: 7,
       paddingHorizontal: 14,
     },
+    secondaryText: { color: colors.textDim, fontSize: 11, fontWeight: '800' },
     dangerText: { color: colors.danger, fontSize: 11, fontWeight: '800' },
     disabled: { opacity: 0.38 },
+    proxyInput: {
+      minHeight: 44,
+      borderRadius: 11,
+      borderWidth: StyleSheet.hairlineWidth,
+      borderColor: colors.line,
+      backgroundColor: colors.surfaceRaised,
+      color: colors.text,
+      fontFamily: fonts.mono,
+      fontSize: 11,
+      marginTop: 12,
+      paddingHorizontal: 12,
+      paddingVertical: 10,
+    },
+    proxyHint: {
+      color: colors.muted,
+      fontSize: 10,
+      lineHeight: 15,
+      marginTop: 7,
+    },
+    proxyError: {
+      color: colors.danger,
+      fontSize: 10,
+      lineHeight: 15,
+      marginTop: 7,
+    },
     linkRow: { minHeight: 52, flexDirection: 'row', alignItems: 'center' },
     value: {
       color: colors.textDim,

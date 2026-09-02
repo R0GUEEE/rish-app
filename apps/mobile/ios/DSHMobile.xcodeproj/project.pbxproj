@@ -10,8 +10,6 @@
 		00E356F31AD99517003FC87E /* NativeRuntimeSmokeTests.mm in Sources */ = {isa = PBXBuildFile; fileRef = 00E356F21AD99517003FC87E /* NativeRuntimeSmokeTests.mm */; };
 		00E356F91AD99517003FC87E /* ProjectContextPolicyTests.mm in Sources */ = {isa = PBXBuildFile; fileRef = 00E356F81AD99517003FC87E /* ProjectContextPolicyTests.mm */; };
 		0594E09A6912F74E7DD3CD7E /* StreamEventParserTests.mm in Sources */ = {isa = PBXBuildFile; fileRef = BEAB33D4FD608B29CABFBC8D /* StreamEventParserTests.mm */; };
-		C91A46F4761A4A3EA8F34780 /* CompletionV2StreamTests.mm in Sources */ = {isa = PBXBuildFile; fileRef = 94F13054405C479482FDBF90 /* CompletionV2StreamTests.mm */; };
-		E7A2B4012C9FC4196B3C00A1 /* ContainerAnchorTests.mm in Sources */ = {isa = PBXBuildFile; fileRef = E7A2B4012C9FC4196B3C00A0 /* ContainerAnchorTests.mm */; };
 		0C80B921A6F3F58F76C31292 /* libPods-DSHMobile.a in Frameworks */ = {isa = PBXBuildFile; fileRef = 5DCACB8F33CDC322A6C60F78 /* libPods-DSHMobile.a */; };
 		0FB00ADC1B871CFEE69D14D1 /* DeviceCloneDriveUITests.m in Sources */ = {isa = PBXBuildFile; fileRef = 2CC0852742D4D62FB4839A6D /* DeviceCloneDriveUITests.m */; };
 		0FD535F546494316DAC7D8C8 /* Foundation.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = 83D13607DBF7D23FF1349ED7 /* Foundation.framework */; };
@@ -21,6 +19,22 @@
 		40D5B5F596262FD65CF7C474 /* PrivacyInfo.xcprivacy in Resources */ = {isa = PBXBuildFile; fileRef = 13B07FB81A68108700A75B9A /* PrivacyInfo.xcprivacy */; };
 		761780ED2CA45674006654EE /* AppDelegate.swift in Sources */ = {isa = PBXBuildFile; fileRef = 761780EC2CA45674006654EE /* AppDelegate.swift */; };
 		81AB9BB82411601600AC10FF /* LaunchScreen.storyboard in Resources */ = {isa = PBXBuildFile; fileRef = 81AB9BB72411601600AC10FF /* LaunchScreen.storyboard */; };
+		A0C400021AD99517003FC87E /* LocalWorkspacesModuleV2Tests.mm in Sources */ = {isa = PBXBuildFile; fileRef = A0C400011AD99517003FC87E /* LocalWorkspacesModuleV2Tests.mm */; };
+		A1C400021AD99517003FC87E /* AgentNativeStoreTests.mm in Sources */ = {isa = PBXBuildFile; fileRef = A1C400011AD99517003FC87E /* AgentNativeStoreTests.mm */; };
+		A2C400021AD99517003FC87E /* AgentRuntimeModuleTests.mm in Sources */ = {isa = PBXBuildFile; fileRef = A2C400011AD99517003FC87E /* AgentRuntimeModuleTests.mm */; };
+		A3C400021AD99517003FC87E /* SessionSnapshotStoreTests.mm in Sources */ = {isa = PBXBuildFile; fileRef = A3C400011AD99517003FC87E /* SessionSnapshotStoreTests.mm */; };
+		A4C400021AD99517003FC87E /* SessionSnapshotsModuleTests.mm in Sources */ = {isa = PBXBuildFile; fileRef = A4C400011AD99517003FC87E /* SessionSnapshotsModuleTests.mm */; };
+		A5C400021AD99517003FC87E /* LocalWorkspaceModuleV2Tests.mm in Sources */ = {isa = PBXBuildFile; fileRef = A5C400011AD99517003FC87E /* LocalWorkspaceModuleV2Tests.mm */; };
+		A6C400021AD99517003FC87E /* LocalDocumentsModuleV2Tests.mm in Sources */ = {isa = PBXBuildFile; fileRef = A6C400011AD99517003FC87E /* LocalDocumentsModuleV2Tests.mm */; };
+		A7C400021AD99517003FC87E /* LocalProjectAccessV2Tests.mm in Sources */ = {isa = PBXBuildFile; fileRef = A7C400011AD99517003FC87E /* LocalProjectAccessV2Tests.mm */; };
+		A8C400021AD99517003FC87E /* ProjectContextWorkspaceV2Tests.mm in Sources */ = {isa = PBXBuildFile; fileRef = A8C400011AD99517003FC87E /* ProjectContextWorkspaceV2Tests.mm */; };
+		A9C400021AD99517003FC87E /* LocalProjectsModuleV2Tests.mm in Sources */ = {isa = PBXBuildFile; fileRef = A9C400011AD99517003FC87E /* LocalProjectsModuleV2Tests.mm */; };
+		AAC400021AD99517003FC87E /* AgentToolEffectsTests.mm in Sources */ = {isa = PBXBuildFile; fileRef = AAC400011AD99517003FC87E /* AgentToolEffectsTests.mm */; };
+		ABC400021AD99517003FC87E /* DSHCompletionProviderTransportTests.mm in Sources */ = {isa = PBXBuildFile; fileRef = ABC400011AD99517003FC87E /* DSHCompletionProviderTransportTests.mm */; };
+		ABD400021AD99517003FC87E /* AgentPreparedAttemptStoreTests.mm in Sources */ = {isa = PBXBuildFile; fileRef = ABD400011AD99517003FC87E /* AgentPreparedAttemptStoreTests.mm */; };
+		ABE400021AD99517003FC87E /* AgentProviderRoundServiceTests.mm in Sources */ = {isa = PBXBuildFile; fileRef = ABE400011AD99517003FC87E /* AgentProviderRoundServiceTests.mm */; };
+		ABF400021AD99517003FC87E /* LegacyBoundProjectRootAccessTests.mm in Sources */ = {isa = PBXBuildFile; fileRef = ABF400011AD99517003FC87E /* LegacyBoundProjectRootAccessTests.mm */; };
+		C91A46F4761A4A3EA8F34780 /* CompletionV2StreamTests.mm in Sources */ = {isa = PBXBuildFile; fileRef = 94F13054405C479482FDBF90 /* CompletionV2StreamTests.mm */; };
 		D4C400021AD99517003FC87E /* ProjectContextServiceTests.mm in Sources */ = {isa = PBXBuildFile; fileRef = D4C400011AD99517003FC87E /* ProjectContextServiceTests.mm */; };
 		D5C400021AD99517003FC87E /* CompletionV2Tests.mm in Sources */ = {isa = PBXBuildFile; fileRef = D5C400011AD99517003FC87E /* CompletionV2Tests.mm */; };
 		D5E2000000000000000000A1 /* vmlinuz-virt-6.18.35 in Resources */ = {isa = PBXBuildFile; fileRef = D5E1000000000000000000A1 /* vmlinuz-virt-6.18.35 */; };
@@ -30,6 +44,7 @@
 		D7C400021AD99517003FC87E /* LocalProjectContextModuleTests.mm in Sources */ = {isa = PBXBuildFile; fileRef = D7C400011AD99517003FC87E /* LocalProjectContextModuleTests.mm */; };
 		D8C400021AD99517003FC87E /* ProjectContextCompletionV3Tests.mm in Sources */ = {isa = PBXBuildFile; fileRef = D8C400011AD99517003FC87E /* ProjectContextCompletionV3Tests.mm */; };
 		D9C400021AD99517003FC87E /* LocalWorkspaceAccessTests.mm in Sources */ = {isa = PBXBuildFile; fileRef = D9C400011AD99517003FC87E /* LocalWorkspaceAccessTests.mm */; };
+		E7A2B4012C9FC4196B3C00A1 /* ContainerAnchorTests.mm in Sources */ = {isa = PBXBuildFile; fileRef = E7A2B4012C9FC4196B3C00A0 /* ContainerAnchorTests.mm */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXContainerItemProxy section */
@@ -69,9 +84,23 @@
 		761780EC2CA45674006654EE /* AppDelegate.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; name = AppDelegate.swift; path = DSHMobile/AppDelegate.swift; sourceTree = "<group>"; };
 		81AB9BB72411601600AC10FF /* LaunchScreen.storyboard */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = file.storyboard; name = LaunchScreen.storyboard; path = DSHMobile/LaunchScreen.storyboard; sourceTree = "<group>"; };
 		83D13607DBF7D23FF1349ED7 /* Foundation.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = Foundation.framework; path = System/Library/Frameworks/Foundation.framework; sourceTree = SDKROOT; };
-		BEAB33D4FD608B29CABFBC8D /* StreamEventParserTests.mm */ = {isa = PBXFileReference; includeInIndex = 1; path = StreamEventParserTests.mm; sourceTree = "<group>"; };
 		94F13054405C479482FDBF90 /* CompletionV2StreamTests.mm */ = {isa = PBXFileReference; includeInIndex = 1; path = CompletionV2StreamTests.mm; sourceTree = "<group>"; };
-		E7A2B4012C9FC4196B3C00A0 /* ContainerAnchorTests.mm */ = {isa = PBXFileReference; includeInIndex = 1; path = ContainerAnchorTests.mm; sourceTree = "<group>"; };
+		A0C400011AD99517003FC87E /* LocalWorkspacesModuleV2Tests.mm */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.cpp.objcpp; path = LocalWorkspacesModuleV2Tests.mm; sourceTree = "<group>"; };
+		A1C400011AD99517003FC87E /* AgentNativeStoreTests.mm */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.cpp.objcpp; path = AgentNativeStoreTests.mm; sourceTree = "<group>"; };
+		A2C400011AD99517003FC87E /* AgentRuntimeModuleTests.mm */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.cpp.objcpp; path = AgentRuntimeModuleTests.mm; sourceTree = "<group>"; };
+		A3C400011AD99517003FC87E /* SessionSnapshotStoreTests.mm */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.cpp.objcpp; path = SessionSnapshotStoreTests.mm; sourceTree = "<group>"; };
+		A4C400011AD99517003FC87E /* SessionSnapshotsModuleTests.mm */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.cpp.objcpp; path = SessionSnapshotsModuleTests.mm; sourceTree = "<group>"; };
+		A5C400011AD99517003FC87E /* LocalWorkspaceModuleV2Tests.mm */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.cpp.objcpp; path = LocalWorkspaceModuleV2Tests.mm; sourceTree = "<group>"; };
+		A6C400011AD99517003FC87E /* LocalDocumentsModuleV2Tests.mm */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.cpp.objcpp; path = LocalDocumentsModuleV2Tests.mm; sourceTree = "<group>"; };
+		A7C400011AD99517003FC87E /* LocalProjectAccessV2Tests.mm */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.cpp.objcpp; path = LocalProjectAccessV2Tests.mm; sourceTree = "<group>"; };
+		A8C400011AD99517003FC87E /* ProjectContextWorkspaceV2Tests.mm */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.cpp.objcpp; path = ProjectContextWorkspaceV2Tests.mm; sourceTree = "<group>"; };
+		A9C400011AD99517003FC87E /* LocalProjectsModuleV2Tests.mm */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.cpp.objcpp; path = LocalProjectsModuleV2Tests.mm; sourceTree = "<group>"; };
+		AAC400011AD99517003FC87E /* AgentToolEffectsTests.mm */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.cpp.objcpp; path = AgentToolEffectsTests.mm; sourceTree = "<group>"; };
+		ABC400011AD99517003FC87E /* DSHCompletionProviderTransportTests.mm */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.cpp.objcpp; path = DSHCompletionProviderTransportTests.mm; sourceTree = "<group>"; };
+		ABD400011AD99517003FC87E /* AgentPreparedAttemptStoreTests.mm */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.cpp.objcpp; path = AgentPreparedAttemptStoreTests.mm; sourceTree = "<group>"; };
+		ABE400011AD99517003FC87E /* AgentProviderRoundServiceTests.mm */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.cpp.objcpp; path = AgentProviderRoundServiceTests.mm; sourceTree = "<group>"; };
+		ABF400011AD99517003FC87E /* LegacyBoundProjectRootAccessTests.mm */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.cpp.objcpp; path = LegacyBoundProjectRootAccessTests.mm; sourceTree = "<group>"; };
+		BEAB33D4FD608B29CABFBC8D /* StreamEventParserTests.mm */ = {isa = PBXFileReference; includeInIndex = 1; path = StreamEventParserTests.mm; sourceTree = "<group>"; };
 		D4C400011AD99517003FC87E /* ProjectContextServiceTests.mm */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.cpp.objcpp; path = ProjectContextServiceTests.mm; sourceTree = "<group>"; };
 		D5C400011AD99517003FC87E /* CompletionV2Tests.mm */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.cpp.objcpp; path = CompletionV2Tests.mm; sourceTree = "<group>"; };
 		D5E1000000000000000000A1 /* vmlinuz-virt-6.18.35 */ = {isa = PBXFileReference; lastKnownFileType = file; path = "vmlinuz-virt-6.18.35"; sourceTree = "<group>"; };
@@ -82,6 +111,7 @@
 		D7C400011AD99517003FC87E /* LocalProjectContextModuleTests.mm */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.cpp.objcpp; path = LocalProjectContextModuleTests.mm; sourceTree = "<group>"; };
 		D8C400011AD99517003FC87E /* ProjectContextCompletionV3Tests.mm */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.cpp.objcpp; path = ProjectContextCompletionV3Tests.mm; sourceTree = "<group>"; };
 		D9C400011AD99517003FC87E /* LocalWorkspaceAccessTests.mm */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.cpp.objcpp; path = LocalWorkspaceAccessTests.mm; sourceTree = "<group>"; };
+		E7A2B4012C9FC4196B3C00A0 /* ContainerAnchorTests.mm */ = {isa = PBXFileReference; includeInIndex = 1; path = ContainerAnchorTests.mm; sourceTree = "<group>"; };
 		ED297162215061F000B7C4FE /* JavaScriptCore.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = JavaScriptCore.framework; path = System/Library/Frameworks/JavaScriptCore.framework; sourceTree = SDKROOT; };
 		F9F4AF3337E9FB1D1EB4EB40 /* Pods-DSHMobileTests.debug.xcconfig */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = text.xcconfig; name = "Pods-DSHMobileTests.debug.xcconfig"; path = "Target Support Files/Pods-DSHMobileTests/Pods-DSHMobileTests.debug.xcconfig"; sourceTree = "<group>"; };
 /* End PBXFileReference section */
@@ -119,6 +149,21 @@
 			children = (
 				00E356F21AD99517003FC87E /* NativeRuntimeSmokeTests.mm */,
 				00E356F81AD99517003FC87E /* ProjectContextPolicyTests.mm */,
+				A0C400011AD99517003FC87E /* LocalWorkspacesModuleV2Tests.mm */,
+				A1C400011AD99517003FC87E /* AgentNativeStoreTests.mm */,
+				A2C400011AD99517003FC87E /* AgentRuntimeModuleTests.mm */,
+				A3C400011AD99517003FC87E /* SessionSnapshotStoreTests.mm */,
+				A4C400011AD99517003FC87E /* SessionSnapshotsModuleTests.mm */,
+				A5C400011AD99517003FC87E /* LocalWorkspaceModuleV2Tests.mm */,
+				A6C400011AD99517003FC87E /* LocalDocumentsModuleV2Tests.mm */,
+				A7C400011AD99517003FC87E /* LocalProjectAccessV2Tests.mm */,
+				A8C400011AD99517003FC87E /* ProjectContextWorkspaceV2Tests.mm */,
+				A9C400011AD99517003FC87E /* LocalProjectsModuleV2Tests.mm */,
+				AAC400011AD99517003FC87E /* AgentToolEffectsTests.mm */,
+				ABC400011AD99517003FC87E /* DSHCompletionProviderTransportTests.mm */,
+				ABD400011AD99517003FC87E /* AgentPreparedAttemptStoreTests.mm */,
+				ABE400011AD99517003FC87E /* AgentProviderRoundServiceTests.mm */,
+				ABF400011AD99517003FC87E /* LegacyBoundProjectRootAccessTests.mm */,
 				D4C400011AD99517003FC87E /* ProjectContextServiceTests.mm */,
 				D5C400011AD99517003FC87E /* CompletionV2Tests.mm */,
 				D6C400011AD99517003FC87E /* ProjectContextProofTests.mm */,
@@ -227,7 +272,7 @@
 				D5E1000000000000000000A2 /* rish-container.cpio */,
 				D5E1000000000000000000A3 /* SHA256SUMS */,
 			);
-			path = "DSHMobile/GuestAssets";
+			path = DSHMobile/GuestAssets;
 			sourceTree = "<group>";
 		};
 /* End PBXGroup section */
@@ -465,6 +510,21 @@
 			files = (
 				00E356F31AD99517003FC87E /* NativeRuntimeSmokeTests.mm in Sources */,
 				00E356F91AD99517003FC87E /* ProjectContextPolicyTests.mm in Sources */,
+				A0C400021AD99517003FC87E /* LocalWorkspacesModuleV2Tests.mm in Sources */,
+				A1C400021AD99517003FC87E /* AgentNativeStoreTests.mm in Sources */,
+				A2C400021AD99517003FC87E /* AgentRuntimeModuleTests.mm in Sources */,
+				A3C400021AD99517003FC87E /* SessionSnapshotStoreTests.mm in Sources */,
+				A4C400021AD99517003FC87E /* SessionSnapshotsModuleTests.mm in Sources */,
+				A5C400021AD99517003FC87E /* LocalWorkspaceModuleV2Tests.mm in Sources */,
+				A6C400021AD99517003FC87E /* LocalDocumentsModuleV2Tests.mm in Sources */,
+				A7C400021AD99517003FC87E /* LocalProjectAccessV2Tests.mm in Sources */,
+				A8C400021AD99517003FC87E /* ProjectContextWorkspaceV2Tests.mm in Sources */,
+				A9C400021AD99517003FC87E /* LocalProjectsModuleV2Tests.mm in Sources */,
+				AAC400021AD99517003FC87E /* AgentToolEffectsTests.mm in Sources */,
+				ABC400021AD99517003FC87E /* DSHCompletionProviderTransportTests.mm in Sources */,
+				ABD400021AD99517003FC87E /* AgentPreparedAttemptStoreTests.mm in Sources */,
+				ABE400021AD99517003FC87E /* AgentProviderRoundServiceTests.mm in Sources */,
+				ABF400021AD99517003FC87E /* LegacyBoundProjectRootAccessTests.mm in Sources */,
 				D4C400021AD99517003FC87E /* ProjectContextServiceTests.mm in Sources */,
 				D5C400021AD99517003FC87E /* CompletionV2Tests.mm in Sources */,
 				D6C400021AD99517003FC87E /* ProjectContextProofTests.mm in Sources */,
@@ -762,7 +822,7 @@
 					"-DRCT_REMOVE_LEGACY_ARCH=1",
 				);
 				PODFILE_DIR = "$(SRCROOT)";
-				REACT_NATIVE_PATH = "${PODS_ROOT}/../../../../../../apps/mobile/node_modules/react-native";
+				REACT_NATIVE_PATH = "${PODS_ROOT}/../../node_modules/.pnpm/react-native@0.87.0_@babel+core@7.29.7_supports-color@8.1.1__@react-native-community+cl_7036051d10b1d1090c9cad469f1b7b4c/node_modules/react-native";
 				SDKROOT = iphoneos;
 				SWIFT_ACTIVE_COMPILATION_CONDITIONS = "$(inherited) DEBUG";
 				USE_HERMES = true;
@@ -836,7 +896,7 @@
 					"-DRCT_REMOVE_LEGACY_ARCH=1",
 				);
 				PODFILE_DIR = "$(SRCROOT)";
-				REACT_NATIVE_PATH = "${PODS_ROOT}/../../../../../../apps/mobile/node_modules/react-native";
+				REACT_NATIVE_PATH = "${PODS_ROOT}/../../node_modules/.pnpm/react-native@0.87.0_@babel+core@7.29.7_supports-color@8.1.1__@react-native-community+cl_7036051d10b1d1090c9cad469f1b7b4c/node_modules/react-native";
 				SDKROOT = iphoneos;
 				USE_HERMES = true;
 				VALIDATE_PRODUCT = YES;

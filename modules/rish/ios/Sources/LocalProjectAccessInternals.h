@@ -22,4 +22,22 @@ FOUNDATION_EXPORT NSUInteger DSHContainerAnchorSegmentCountForPaths(
 FOUNDATION_EXPORT NSUInteger DSHContainerRootScanSegmentCount(
     NSString *_Nullable path);
 
+/// Native-only root-reference validation used by the workspace-routed Git and
+/// Project Context cores. The exact four-key shape mirrors WorkspaceRootRefV1;
+/// this helper intentionally accepts no path, URL, bookmark, descriptor, or
+/// private authority material.
+FOUNDATION_EXPORT BOOL DSHLocalProjectAccessValidateWorkspaceRootRefV1(
+    NSDictionary *_Nullable rootRef,
+    BOOL projectRequired,
+    NSError *_Nullable *_Nullable error);
+
+/// Parses the private authority's canonical unsigned decimal identity fields.
+/// Native persisted records use strings; the parser also accepts integral
+/// NSNumber values emitted by older in-process snapshot records so migration
+/// checks remain deterministic. Signs, leading zeroes, fractions, booleans,
+/// and overflow are rejected; zero is a valid unsigned spelling.
+FOUNDATION_EXPORT BOOL DSHLocalProjectAccessParseCanonicalUInt64(
+    id _Nullable value,
+    unsigned long long *_Nullable valueOut);
+
 NS_ASSUME_NONNULL_END

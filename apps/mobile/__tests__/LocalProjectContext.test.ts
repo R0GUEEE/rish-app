@@ -4,6 +4,12 @@ const mockNativeLocalProjectContext = {
   confirmProjectContext: jest.fn(),
   inspectProjectContext: jest.fn(),
   discardProjectContext: jest.fn(),
+  listCandidatesV2: jest.fn(),
+  prepareCandidateV2: jest.fn(),
+  confirmSnapshotV2: jest.fn(),
+  inspectSnapshotV2: jest.fn(),
+  discardProjectContextV2: jest.fn(),
+  verifiedSendProjectContextV2: jest.fn(),
 };
 
 import { NativeModules } from 'react-native';
@@ -21,6 +27,8 @@ const SNAPSHOT_ID = '33333333-3333-4333-8333-333333333333';
 const CONSENT_ID = '44444444-4444-4444-8444-444444444444';
 const SHA = 'a'.repeat(64);
 const REVISION = 'b'.repeat(64);
+const WORKSPACE_ID = '55555555-5555-4555-8555-555555555555';
+const BINDING_REVISION = 7;
 
 function selection() {
   return {
@@ -94,6 +102,53 @@ function consent() {
   };
 }
 
+function root() {
+  return {
+    schema_version: 1 as const,
+    workspace_id: WORKSPACE_ID,
+    binding_revision: BINDING_REVISION,
+    project_id: PROJECT_ID,
+  };
+}
+
+function v2Project() {
+  return {
+    schema_version: 2 as const,
+    project_id: PROJECT_ID,
+    workspace_id: WORKSPACE_ID,
+    workspace_binding_revision: BINDING_REVISION,
+    display_name: 'Fixture',
+    git_topology: 'private_split_gitdir' as const,
+  };
+}
+
+function v2Manifest() {
+  return {
+    schema_version: 2 as const,
+    snapshot_id: SNAPSHOT_ID,
+    root: root(),
+    project: v2Project(),
+    project_id: PROJECT_ID,
+    conversation_id: CONVERSATION_ID,
+    model_id: 'deepseek-v4-flash' as const,
+    policy: 'chat-read-v1' as const,
+    branch: 'main',
+    head_oid: 'c'.repeat(40),
+    clean: true,
+    conflicted: false,
+    captured_at: '2026-08-28T00:00:00.000Z',
+    policy_version: 'chat-read-v1.0.0',
+    included: [
+      { path: 'README.md', source: 'tracked_file' as const, bytes: 12, sha256: SHA },
+    ],
+    omitted: [],
+    context_bytes: 20,
+    estimated_tokens: 5,
+    snapshot_sha256: SHA,
+    source_fingerprint: SHA,
+  };
+}
+
 async function expectCode(promise: Promise<unknown>, code: string) {
   await expect(promise).rejects.toMatchObject({
     name: 'ProjectContextBridgeError',
@@ -124,9 +179,51 @@ beforeEach(() => {
     schema_version: 1,
     status: 'discarded',
   });
+  mockNativeLocalProjectContext.listCandidatesV2.mockResolvedValue({
+    schema_version: 2,
+    root: root(),
+    project: v2Project(),
+    candidates: [candidate()],
+    next_cursor: null,
+  });
+  mockNativeLocalProjectContext.prepareCandidateV2.mockResolvedValue(
+    v2Manifest(),
+  );
+  mockNativeLocalProjectContext.confirmSnapshotV2.mockResolvedValue({
+    schema_version: 2,
+    consent_receipt_id: CONSENT_ID,
+    snapshot_id: SNAPSHOT_ID,
+    root: root(),
+    workspace_id: WORKSPACE_ID,
+    workspace_binding_revision: BINDING_REVISION,
+    snapshot_sha256: SHA,
+    confirmed_at: '2026-08-28T00:00:01.000Z',
+  });
+  mockNativeLocalProjectContext.inspectSnapshotV2.mockResolvedValue({
+    schema_version: 2,
+    state: 'confirmed',
+    manifest: v2Manifest(),
+  });
+  mockNativeLocalProjectContext.discardProjectContextV2.mockResolvedValue({
+    schema_version: 2,
+    status: 'discarded',
+    snapshot_id: SNAPSHOT_ID,
+    root: root(),
+    workspace_id: WORKSPACE_ID,
+    workspace_binding_revision: BINDING_REVISION,
+  });
+  mockNativeLocalProjectContext.verifiedSendProjectContextV2.mockResolvedValue({
+    schema_version: 2,
+    snapshot_id: SNAPSHOT_ID,
+    root: root(),
+    snapshot_sha256: SHA,
+    source_fingerprint: SHA,
+    context_bytes: 20,
+    verified_at: '2026-08-28T00:00:02.000Z',
+  });
 });
 
-test('availability requires all five native methods', async () => {
+test('availability requires all six legacy native methods', async () => {
   expect(LocalProjectContext.isAvailable()).toBe(true);
   const incomplete = { ...mockNativeLocalProjectContext } as Record<
     string,
@@ -139,6 +236,26 @@ test('availability requires all five native methods', async () => {
     LocalProjectContext.inspect(SNAPSHOT_ID),
     'E_CONTEXT_NATIVE',
   );
+});
+
+test('does not accept renamed V2 compatibility aliases', () => {
+  const aliasesOnly = { ...mockNativeLocalProjectContext } as Record<
+    string,
+    unknown
+  >;
+  delete aliasesOnly.listCandidatesV2;
+  delete aliasesOnly.prepareCandidateV2;
+  delete aliasesOnly.confirmSnapshotV2;
+  delete aliasesOnly.inspectSnapshotV2;
+  delete aliasesOnly.verifiedSendProjectContextV2;
+  aliasesOnly.listProjectContextCandidatesV2 = jest.fn();
+  aliasesOnly.prepareProjectContextV2 = jest.fn();
+  aliasesOnly.confirmProjectContextV2 = jest.fn();
+  aliasesOnly.inspectProjectContextV2 = jest.fn();
+  aliasesOnly.verifiedProjectContextSendV2 = jest.fn();
+  (NativeModules as Record<string, unknown>).LocalProjectContext = aliasesOnly;
+
+  expect(LocalProjectContext.isV2Available()).toBe(false);
 });
 
 test('projects an exact immutable sorted selection before native dispatch', async () => {
@@ -484,4 +601,136 @@ test('exports a stable value-free bridge error class', () => {
     code: 'E_CONTEXT_STORAGE',
     message: 'E_CONTEXT_STORAGE',
   }));
+});
+
+test('routes workspace-bound V2 context calls through the exact root', async () => {
+  expect(LocalProjectContext.isV2Available()).toBe(true);
+  const capturedRoot = root();
+  await expect(
+    LocalProjectContext.listCandidatesV2({
+      schema_version: 1,
+      root: capturedRoot,
+      query: '',
+      cursor: null,
+    }),
+  ).resolves.toMatchObject({ root: root(), project: v2Project() });
+  expect(mockNativeLocalProjectContext.listCandidatesV2).toHaveBeenCalledWith({
+    schema_version: 1,
+    root: root(),
+    query: '',
+    cursor: null,
+  });
+  const result = await LocalProjectContext.prepareV2({
+    schema_version: 2,
+    root: capturedRoot,
+    conversation_id: CONVERSATION_ID,
+    model_id: 'deepseek-v4-flash',
+    policy: 'chat-read-v1',
+    selected_paths: ['README.md'],
+  });
+  capturedRoot.binding_revision = 8;
+  expect(result).toEqual(v2Manifest());
+  expect(mockNativeLocalProjectContext.prepareCandidateV2).toHaveBeenCalledWith({
+    schema_version: 2,
+    root: root(),
+    conversation_id: CONVERSATION_ID,
+    model_id: 'deepseek-v4-flash',
+    policy: 'chat-read-v1',
+    selected_paths: ['README.md'],
+  });
+
+  await expect(
+    LocalProjectContext.confirmV2({
+      schema_version: 2,
+      snapshot_id: SNAPSHOT_ID,
+      root: root(),
+    }),
+  ).resolves.toMatchObject({ root: root(), workspace_id: WORKSPACE_ID });
+  await expect(
+    LocalProjectContext.inspectV2({
+      schema_version: 2,
+      snapshot_id: SNAPSHOT_ID,
+      root: root(),
+    }),
+  ).resolves.toMatchObject({ state: 'confirmed', manifest: v2Manifest() });
+  await expect(
+    LocalProjectContext.discardV2({
+      schema_version: 2,
+      snapshot_id: SNAPSHOT_ID,
+      root: root(),
+    }),
+  ).resolves.toMatchObject({
+    schema_version: 2,
+    root: root(),
+    status: 'discarded',
+    snapshot_id: SNAPSHOT_ID,
+  });
+  expect(mockNativeLocalProjectContext.discardProjectContextV2).toHaveBeenCalledWith({
+    schema_version: 2,
+    snapshot_id: SNAPSHOT_ID,
+    root: root(),
+  });
+  await expect(
+    LocalProjectContext.verifiedSendV2({
+      schema_version: 2,
+      snapshot_id: SNAPSHOT_ID,
+      consent_receipt_id: CONSENT_ID,
+      root: root(),
+      conversation_id: CONVERSATION_ID,
+      model_id: 'deepseek-v4-flash',
+      policy: 'chat-read-v1',
+    }),
+  ).resolves.toMatchObject({ root: root(), snapshot_id: SNAPSHOT_ID });
+});
+
+test('never downgrades an invalid V2 root to project-only context', async () => {
+  await expectCode(
+    LocalProjectContext.prepareV2({
+      schema_version: 2,
+      root: { ...root(), project_id: null },
+      conversation_id: CONVERSATION_ID,
+      model_id: 'deepseek-v4-flash',
+      policy: 'chat-read-v1',
+      selected_paths: ['README.md'],
+    }),
+    'E_CONTEXT_REQUEST_INVALID',
+  );
+  expect(mockNativeLocalProjectContext.prepareCandidateV2).not.toHaveBeenCalled();
+});
+
+test('rejects null-prototype V2 result records before exposing them', async () => {
+  const nullPrototypeManifest = Object.assign(
+    Object.create(null),
+    v2Manifest(),
+  );
+  mockNativeLocalProjectContext.prepareCandidateV2.mockResolvedValueOnce(
+    nullPrototypeManifest,
+  );
+  await expectCode(
+    LocalProjectContext.prepareV2({
+      schema_version: 2,
+      root: root(),
+      conversation_id: CONVERSATION_ID,
+      model_id: 'deepseek-v4-flash',
+      policy: 'chat-read-v1',
+      selected_paths: ['README.md'],
+    }),
+    'E_CONTEXT_RESULT_INVALID',
+  );
+});
+
+test('rejects a discard result that changes the captured root', async () => {
+  mockNativeLocalProjectContext.discardProjectContextV2.mockResolvedValueOnce({
+    schema_version: 2,
+    root: { ...root(), binding_revision: BINDING_REVISION + 1 },
+    status: 'discarded',
+  });
+  await expectCode(
+    LocalProjectContext.discardV2({
+      schema_version: 2,
+      snapshot_id: SNAPSHOT_ID,
+      root: root(),
+    }),
+    'E_CONTEXT_RESULT_INVALID',
+  );
 });

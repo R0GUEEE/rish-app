@@ -1,100 +1,47 @@
-import type { AgentTurnResult, RunAgentTurnDeps } from './runAgentTurn';
-import { runAgentTurn } from './runAgentTurn';
-import { executeAgentTool } from './AgentTools';
-import type { SessionEventJournal } from './SessionEvents';
+import type { AgentTraceRow } from './AgentLoop';
 import type { AgentInteractionController } from './AgentInteractionController';
+import type { SessionEventJournal } from './SessionEvents';
+import type { WorkspaceRootRefV1 } from '../native/WorkspaceRoot';
 
 /**
- * Production binding of the agent turn: real native tool execution, real
- * model transport (injected), the user-decision broker, and the shared
- * session-event journal. The service is the single place where the
- * runAgentTurn driver meets the durable trajectory, so every approval and
- * question row from a real turn lands in the same persisted log the
- * completion controller writes.
+ * Disabled compatibility surface for the pre-durability agent driver.
+ *
+ * The durable completion controller is the only production agent authority.
+ * Keeping this adapter inert prevents a stale caller from starting a second
+ * provider/tool loop outside that authority.
+ *
+ * @deprecated Do not use for production agent execution.
  */
 
-/** Canonical agent tool registry (the six bounded applets + ask_user). */
-export const AGENT_TOOL_DEFINITIONS: readonly Record<string, unknown>[] = [
-  {
-    name: 'list_dir',
-    description: 'List entries in a project repo directory.',
-    parameters: {
-      type: 'object',
-      properties: { path: { type: 'string' } },
-      required: [],
-    },
-  },
-  {
-    name: 'read_file',
-    description: 'Read a text file from the project repo.',
-    parameters: {
-      type: 'object',
-      properties: { path: { type: 'string' } },
-      required: ['path'],
-    },
-  },
-  {
-    name: 'write_file',
-    description: 'Write or replace a text file in the project repo.',
-    parameters: {
-      type: 'object',
-      properties: {
-        path: { type: 'string' },
-        content: { type: 'string' },
-      },
-      required: ['path', 'content'],
-    },
-  },
-  {
-    name: 'git_status',
-    description: 'Show the working-tree status of the bound project.',
-    parameters: { type: 'object', properties: {} },
-  },
-  {
-    name: 'git_commit',
-    description: 'Stage all changes and commit them in the bound project.',
-    parameters: {
-      type: 'object',
-      properties: { message: { type: 'string' } },
-      required: ['message'],
-    },
-  },
-  {
-    name: 'git_push',
-    description: 'Push the bound project to its configured remote.',
-    parameters: { type: 'object', properties: {} },
-  },
-  {
-    name: 'ask_user',
-    description:
-      'Ask the user a structured question. Options mode offers up to 8 choices; free_text mode accepts a short typed answer.',
-    parameters: {
-      type: 'object',
-      properties: {
-        question: { type: 'string' },
-        input_mode: { type: 'string', enum: ['options', 'free_text'] },
-        options: {
-          type: 'array',
-          items: {
-            type: 'object',
-            properties: {
-              id: { type: 'string' },
-              label: { type: 'string' },
-            },
-            required: ['id', 'label'],
-          },
-        },
-        required: { type: 'boolean' },
-      },
-      required: ['question', 'input_mode'],
-    },
-  },
-];
+export const LEGACY_AGENT_TURN_DISABLED_CODE =
+  'E_AGENT_TURN_DISABLED' as const;
+
+export type AgentToolPermission =
+  | 'read-only'
+  | 'workspace-write'
+  | 'read-write';
+
+export type AgentModelCalls = (args: {
+  model: string;
+  thinkingMode: string;
+  requestId: string;
+  history: Array<{ role: 'user' | 'assistant'; content: string }>;
+  tools: readonly unknown[];
+}) => Promise<{
+  text: string;
+  finish_reason: string;
+  tool_calls: ReadonlyArray<{
+    id: string;
+    name: string;
+    arguments: string;
+  }>;
+}>;
 
 export type AgentTurnServiceDeps = {
   journal: SessionEventJournal;
   interactions: AgentInteractionController;
-  modelCalls: RunAgentTurnDeps['modelCalls'];
+  modelCalls: AgentModelCalls;
+  getGitHttpsProxyUrl: () => string | null;
   createApprovalId: () => string;
   createQuestionId: () => string;
   approvalTimeoutMs?: number;
@@ -102,77 +49,52 @@ export type AgentTurnServiceDeps = {
 };
 
 export type AgentTurnStartInput = {
-  projectId: string;
+  root: WorkspaceRootRefV1;
   model: string;
   thinkingMode: string;
   history: readonly { role: 'user' | 'assistant'; content: string }[];
   tools?: readonly unknown[];
   requestId?: string;
+  toolPermission?: AgentToolPermission;
+  mode?: AgentToolPermission;
+  access?: AgentToolPermission;
+  readOnly?: boolean;
+  operationId?: string;
+  credentialReference?: string | null;
+};
+
+export type AgentTurnResult = {
+  status: 'done' | 'cancelled' | 'failed';
+  finalText: string | null;
+  traces: readonly AgentTraceRow[];
+  exhausted: boolean;
+  failure?: { code: string };
 };
 
 export type AgentTurnService = {
   start(input: AgentTurnStartInput): Promise<AgentTurnResult>;
-  /** Settles any open approval/question wait and stops the turn loop. */
+  /** Settles any interaction wait left by a retired caller. */
   cancel(): void;
   isRunning(): boolean;
 };
 
+const NO_TRACES: readonly AgentTraceRow[] = Object.freeze([]);
+const DISABLED_RESULT: AgentTurnResult = Object.freeze({
+  status: 'failed' as const,
+  finalText: null,
+  traces: NO_TRACES,
+  exhausted: false,
+  failure: Object.freeze({ code: LEGACY_AGENT_TURN_DISABLED_CODE }),
+});
+
 export function createAgentTurnService(
   deps: AgentTurnServiceDeps,
 ): AgentTurnService {
-  let cancelled = false;
-  let running = false;
   return {
-    isRunning: () => running,
+    isRunning: () => false,
     cancel: () => {
-      cancelled = true;
       deps.interactions.cancelPending();
     },
-    start: async input => {
-      if (running) {
-        return {
-          status: 'failed' as const,
-          finalText: null,
-          traces: [],
-          exhausted: false,
-          failure: { code: 'E_AGENT_TURN_BUSY' },
-        };
-      }
-      cancelled = false;
-      running = true;
-      try {
-        return await runAgentTurn({
-          projectId: input.projectId,
-          model: input.model,
-          thinkingMode: input.thinkingMode,
-          history: input.history,
-          tools: input.tools ?? AGENT_TOOL_DEFINITIONS,
-          ...(input.requestId !== undefined
-            ? { requestId: input.requestId }
-            : {}),
-          ...(deps.approvalTimeoutMs !== undefined
-            ? { approvalTimeoutMs: deps.approvalTimeoutMs }
-            : {}),
-          ...(deps.questionTimeoutMs !== undefined
-            ? { questionTimeoutMs: deps.questionTimeoutMs }
-            : {}),
-          deps: {
-            modelCalls: deps.modelCalls,
-            executeTool: (context, name, argumentsJson) =>
-              executeAgentTool(context, name, argumentsJson),
-            requestApproval: spec => deps.interactions.requestApproval(spec),
-            askQuestion: spec => deps.interactions.askQuestion(spec),
-            createApprovalId: deps.createApprovalId,
-            createQuestionId: deps.createQuestionId,
-            emitSessionEvent: event => {
-              deps.journal.append(event);
-            },
-            shouldCancel: () => cancelled,
-          },
-        });
-      } finally {
-        running = false;
-      }
-    },
+    start: async _input => DISABLED_RESULT,
   };
 }

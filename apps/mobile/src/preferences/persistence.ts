@@ -16,6 +16,7 @@ import {
   isToolPermissionMode,
   normalizeMirrorBaseUrl,
 } from './reducer';
+import { normalizeGitHttpsProxyUrl } from './gitProxy';
 
 type UnknownRecord = Record<string, unknown>;
 
@@ -30,6 +31,7 @@ const persistedKeys: ReadonlySet<string> = new Set([
   'show_reasoning',
   'auto_expand_tools',
   'confirm_destructive_file_actions',
+  'git_https_proxy_url',
   'mirrors',
 ]);
 
@@ -115,6 +117,20 @@ function decode(input: unknown): unknown {
   }
 }
 
+function decodeGitHttpsProxyUrl(value: unknown): string | null {
+  if (value === undefined || value === null) {
+    return null;
+  }
+  const normalized = normalizeGitHttpsProxyUrl(value);
+  if (normalized === null) {
+    return invalid(
+      '$.git_https_proxy_url',
+      'must be null or a safe HTTP(S) proxy URL with an explicit port',
+    );
+  }
+  return normalized;
+}
+
 export function hydrateAppPreferences(input: unknown): AppPreferences {
   const raw = record(decode(input));
   if (required(raw, 'schema_version') !== APP_PREFERENCES_SCHEMA_VERSION) {
@@ -164,6 +180,7 @@ export function hydrateAppPreferences(input: unknown): AppPreferences {
       raw,
       'confirm_destructive_file_actions',
     ),
+    gitHttpsProxyUrl: decodeGitHttpsProxyUrl(raw.git_https_proxy_url),
     mirrors: decodeMirrors(raw.mirrors),
   };
 }
@@ -199,6 +216,7 @@ export function serializeAppPreferences(preferences: AppPreferences): string {
     show_reasoning: preferences.showReasoning,
     auto_expand_tools: preferences.autoExpandTools,
     confirm_destructive_file_actions: preferences.confirmDestructiveFileActions,
+    git_https_proxy_url: preferences.gitHttpsProxyUrl,
     mirrors: {
       alpine: {
         enabled: preferences.mirrors.alpine.enabled,

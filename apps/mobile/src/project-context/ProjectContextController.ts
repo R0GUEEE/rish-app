@@ -2,6 +2,10 @@ import {
   LocalProjectContext,
   ProjectContextBridgeError,
 } from '../native/LocalProjectContext';
+import {
+  workspaceRoot,
+  type WorkspaceRootRefV1,
+} from '../native/WorkspaceRoot';
 import type { SessionDurabilityResult } from '../completion/SessionPersistence';
 import type {
   ChatStore,
@@ -15,8 +19,11 @@ import {
   type ProjectContextBridgeErrorCode,
   type ProjectContextCandidatePageV1,
   type ProjectContextConsentV1,
+  type ProjectContextConsentV2,
   type ProjectContextInspectionV1,
+  type ProjectContextManifestV2,
   type ProjectContextManifestV1,
+  type ProjectContextCandidatePageV2,
   type ProjectContextSelectionV1,
   type ProjectContextState,
 } from './types';
@@ -44,6 +51,8 @@ export type ProjectContextControllerOwner = {
   readonly projectId: string;
   readonly runtimeContextId: string | null;
   readonly modelId: ModelId;
+  /** Exact workspace authority captured with this owner, when routed. */
+  readonly root: WorkspaceRootRefV1 | null;
 };
 
 export type ProjectContextActionToken = ProjectContextControllerOwner & {
@@ -103,7 +112,17 @@ export type ProjectContextControllerOutcome =
 type NativeProjectContext = Pick<
   typeof LocalProjectContext,
   'listCandidates' | 'prepare' | 'confirm' | 'inspect' | 'discard'
->;
+> &
+  Partial<
+    Pick<
+      typeof LocalProjectContext,
+      | 'listCandidatesV2'
+      | 'prepareV2'
+      | 'confirmV2'
+      | 'inspectV2'
+      | 'discardV2'
+    >
+  >;
 
 export type ProjectContextSearchHandle = {
   readonly cancel: () => void;
@@ -358,6 +377,87 @@ function cloneManifest(
   };
 }
 
+function manifestV2ForController(
+  manifest: ProjectContextManifestV2,
+  root: WorkspaceRootRefV1,
+  owner: ProjectContextControllerOwner,
+): ProjectContextManifestV1 | null {
+  if (
+    !sameRoot(manifest.root, root) ||
+    manifest.project_id !== owner.projectId ||
+    manifest.project.project_id !== owner.projectId ||
+    manifest.project.workspace_id !== root.workspace_id ||
+    manifest.project.workspace_binding_revision !== root.binding_revision ||
+    manifest.model_id !== owner.modelId ||
+    manifest.conversation_id !== owner.runtimeContextId
+  ) {
+    return null;
+  }
+  return {
+    schema_version: 1,
+    snapshot_id: manifest.snapshot_id,
+    project_id: manifest.project_id,
+    project_name: manifest.project.display_name,
+    branch: manifest.branch,
+    head_oid: manifest.head_oid,
+    clean: manifest.clean,
+    conflicted: manifest.conflicted,
+    captured_at: manifest.captured_at,
+    policy_version: manifest.policy_version,
+    provider_host: 'api.deepseek.com',
+    model: manifest.model_id,
+    included: manifest.included.map(item => ({ ...item })),
+    omitted: manifest.omitted.map(item => ({ ...item })),
+    context_bytes: manifest.context_bytes,
+    estimated_tokens: manifest.estimated_tokens,
+    snapshot_sha256: manifest.snapshot_sha256,
+    source_fingerprint: manifest.source_fingerprint,
+  };
+}
+
+function consentV2ForController(
+  consent: ProjectContextConsentV2,
+  root: WorkspaceRootRefV1,
+  manifest: ProjectContextManifestV1,
+): ProjectContextConsentV1 | null {
+  if (
+    !sameRoot(consent.root, root) ||
+    consent.workspace_id !== root.workspace_id ||
+    consent.workspace_binding_revision !== root.binding_revision ||
+    consent.snapshot_id !== manifest.snapshot_id ||
+    consent.snapshot_sha256 !== manifest.snapshot_sha256
+  ) {
+    return null;
+  }
+  return {
+    schema_version: 1,
+    consent_receipt_id: consent.consent_receipt_id,
+    snapshot_id: consent.snapshot_id,
+    snapshot_sha256: consent.snapshot_sha256,
+    confirmed_at: consent.confirmed_at,
+  };
+}
+
+function pageV2ForController(
+  page: ProjectContextCandidatePageV2,
+  root: WorkspaceRootRefV1,
+): ProjectContextCandidatePageV1 | null {
+  if (
+    !sameRoot(page.root, root) ||
+    page.project.project_id !== root.project_id ||
+    page.project.workspace_id !== root.workspace_id ||
+    page.project.workspace_binding_revision !== root.binding_revision
+  ) {
+    return null;
+  }
+  return {
+    schema_version: 1,
+    project_id: root.project_id as string,
+    candidates: page.candidates.map(candidate => ({ ...candidate })),
+    next_cursor: page.next_cursor,
+  };
+}
+
 function freezeCandidate(candidate: Candidate): Candidate {
   return Object.freeze(cloneCandidate(candidate));
 }
@@ -382,7 +482,12 @@ function exposedState(
   return Object.freeze({
     ...source,
     owner:
-      source.owner === null ? null : Object.freeze({ ...source.owner }),
+      source.owner === null
+        ? null
+        : Object.freeze({
+            ...source.owner,
+            root: Object.freeze(cloneRoot(source.owner.root)),
+          }),
     list: Object.freeze({
       ...source.list,
       candidates: Object.freeze(source.list.candidates.map(freezeCandidate)),
@@ -410,8 +515,72 @@ function sameOwner(
     left.conversationId === right.conversationId &&
     left.projectId === right.projectId &&
     left.runtimeContextId === right.runtimeContextId &&
-    left.modelId === right.modelId
+    left.modelId === right.modelId &&
+    sameRoot(left.root, right.root)
   );
+}
+
+type DerivedWorkspaceRoot = {
+  readonly root: WorkspaceRootRefV1 | null;
+  readonly invalid: boolean;
+};
+
+function deriveWorkspaceRoot(conversation: {
+  readonly workspaceId: string | null;
+  readonly projectId: string | null;
+  readonly workspaceBinding?: {
+    readonly workspaceId: string;
+    readonly bindingRevision: number;
+    readonly projectId: string | null;
+  } | null;
+}): DerivedWorkspaceRoot {
+  const binding = conversation.workspaceBinding;
+  if (conversation.workspaceId === null) {
+    return { root: null, invalid: binding !== undefined && binding !== null };
+  }
+  if (
+    binding === undefined ||
+    binding === null ||
+    binding.workspaceId !== conversation.workspaceId ||
+    binding.projectId !== conversation.projectId
+  ) {
+    return { root: null, invalid: true };
+  }
+  try {
+    return {
+      root: workspaceRoot(
+        binding.workspaceId,
+        binding.bindingRevision,
+        binding.projectId,
+      ),
+      invalid: false,
+    };
+  } catch {
+    return { root: null, invalid: true };
+  }
+}
+
+function sameRoot(
+  left: WorkspaceRootRefV1 | null | undefined,
+  right: WorkspaceRootRefV1 | null | undefined,
+): boolean {
+  return left === null || left === undefined ||
+      right === null || right === undefined
+    ? left == null && right == null
+    : left.workspace_id === right.workspace_id &&
+        left.binding_revision === right.binding_revision &&
+        left.project_id === right.project_id;
+}
+
+function cloneRoot(root: WorkspaceRootRefV1 | null): WorkspaceRootRefV1 | null {
+  return root === null
+    ? null
+    : {
+        schema_version: 1,
+        workspace_id: root.workspace_id,
+        binding_revision: root.binding_revision,
+        project_id: root.project_id,
+      };
 }
 
 function controllerError(error: unknown): ProjectContextControllerErrorCode {
@@ -536,11 +705,23 @@ export function createProjectContextController(
     ) {
       return null;
     }
+    const derivedRoot = deriveWorkspaceRoot(conversation);
+    // A null root is only allowed while the explicit legacy-project bootstrap
+    // adapter is pending. Normal production Context state must already carry
+    // the complete workspace binding and must never downgrade to V1 routing.
+    if (
+      derivedRoot.invalid ||
+      (derivedRoot.root === null &&
+        conversation.workspaceBootstrapState !== 'pending_legacy_project')
+    ) {
+      return null;
+    }
     return {
       conversationId,
       projectId: conversation.projectId,
       runtimeContextId: conversation.runtimeContextId,
       modelId: conversation.modelId,
+      root: cloneRoot(derivedRoot.root),
     };
   };
 
@@ -555,12 +736,26 @@ export function createProjectContextController(
 
   const currentToken = (): ProjectContextActionToken | null => {
     if (state.owner === null) return null;
-    return {
+    const token = {
       generation: state.generation,
       ...state.owner,
       preparationId: state.candidatePreparationId,
       listGeneration: state.listGeneration,
     };
+    // Preserve the legacy token's exact enumerable shape for unbound
+    // project-context callers. Routed V2 owners keep the root enumerable so
+    // render callbacks can capture and compare the authority explicitly.
+    if (state.owner.root === null) {
+      const legacyToken = { ...token };
+      Object.defineProperty(legacyToken, 'root', {
+        configurable: true,
+        enumerable: false,
+        value: undefined,
+        writable: false,
+      });
+      return legacyToken as ProjectContextActionToken;
+    }
+    return token;
   };
 
   const validExpected = (
@@ -580,6 +775,7 @@ export function createProjectContextController(
         expected.projectId === token.projectId &&
         expected.runtimeContextId === token.runtimeContextId &&
         expected.modelId === token.modelId &&
+        sameRoot(expected.root, token.root) &&
         expected.preparationId === token.preparationId &&
         (!requireListGeneration ||
           expected.listGeneration === token.listGeneration)
@@ -765,11 +961,25 @@ export function createProjectContextController(
     };
   };
 
-  const safeDiscard = async (snapshotId: string) => {
+  const safeDiscard = async (
+    snapshotId: string,
+    owner: ProjectContextControllerOwner,
+  ): Promise<boolean> => {
     try {
-      await dependencies.native.discard(snapshotId);
+      if (owner.root !== null) {
+        if (typeof dependencies.native.discardV2 !== 'function') return false;
+        await dependencies.native.discardV2({
+          schema_version: 2,
+          snapshot_id: snapshotId,
+          root: cloneRoot(owner.root)!,
+        });
+      } else {
+        await dependencies.native.discard(snapshotId);
+      }
+      return true;
     } catch {
       // Stale-result disposal has no durable pointer to retry from.
+      return false;
     }
   };
 
@@ -789,8 +999,7 @@ export function createProjectContextController(
     ) {
       return false;
     }
-    await safeDiscard(snapshotId);
-    return true;
+    return safeDiscard(snapshotId, operation);
   };
 
   const cleanupSnapshot = async (
@@ -838,7 +1047,18 @@ export function createProjectContextController(
       return cleanupPending(code);
     }
     try {
-      await dependencies.native.discard(snapshotId);
+      if (operation.root !== null) {
+        if (typeof dependencies.native.discardV2 !== 'function') {
+          return setFailure('E_CONTEXT_NATIVE');
+        }
+        await dependencies.native.discardV2({
+          schema_version: 2,
+          snapshot_id: snapshotId,
+          root: cloneRoot(operation.root)!,
+        });
+      } else {
+        await dependencies.native.discard(snapshotId);
+      }
       if (!operationLive(operation)) return rejectStale();
       const context = currentContext();
       cleanupPurpose = null;
@@ -1108,7 +1328,28 @@ export function createProjectContextController(
     };
     let manifest: ProjectContextManifestV1;
     try {
-      manifest = cloneManifest(await dependencies.native.prepare(selection));
+      if (operation.root !== null) {
+        if (typeof dependencies.native.prepareV2 !== 'function') {
+          return setFailure('E_CONTEXT_NATIVE');
+        }
+        const v2Manifest = await dependencies.native.prepareV2({
+          schema_version: 2,
+          root: cloneRoot(operation.root)!,
+          conversation_id: operation.runtimeContextId!,
+          model_id: operation.modelId,
+          policy: 'chat-read-v1',
+          selected_paths: [...intent.selectedPaths],
+        });
+        const projected = manifestV2ForController(
+          v2Manifest,
+          operation.root,
+          operation,
+        );
+        if (projected === null) return setFailure('E_CONTEXT_RESULT_INVALID');
+        manifest = cloneManifest(projected);
+      } else {
+        manifest = cloneManifest(await dependencies.native.prepare(selection));
+      }
     } catch (error) {
       if (!operationLive(operation)) return rejectStale();
       const code = controllerError(error);
@@ -1254,11 +1495,26 @@ export function createProjectContextController(
       return completed;
     }
     const context = conversation.projectContext;
+    const derivedRoot = deriveWorkspaceRoot(conversation);
+    if (
+      derivedRoot.invalid ||
+      (derivedRoot.root === null &&
+        conversation.workspaceBootstrapState !== 'pending_legacy_project')
+    ) {
+      publish({
+        ...initialState(),
+        generation,
+        phase: 'blocked',
+        failureCode: 'E_CONTEXT_OWNER_STALE',
+      });
+      return blocked('E_CONTEXT_OWNER_STALE');
+    }
     const owner: ProjectContextControllerOwner = {
       conversationId,
       projectId: conversation.projectId,
       runtimeContextId: conversation.runtimeContextId,
       modelId: conversation.modelId,
+      root: cloneRoot(derivedRoot.root),
     };
     publish({
       phase: context.snapshot === null ? contextPhase(context) : 'inspecting',
@@ -1423,13 +1679,40 @@ export function createProjectContextController(
       return setFailure('E_CONTEXT_OWNER_STALE');
     }
     try {
-      const rawInspection = await dependencies.native.inspect(
-        snapshot.snapshot_id,
-      );
-      const inspection: ProjectContextInspectionV1 = {
-        ...rawInspection,
-        manifest: cloneManifest(rawInspection.manifest),
-      };
+      let inspection: ProjectContextInspectionV1;
+      if (operation.root !== null) {
+        if (typeof dependencies.native.inspectV2 !== 'function') {
+          finishOperation(operation);
+          return setFailure('E_CONTEXT_NATIVE');
+        }
+        const rawInspection = await dependencies.native.inspectV2({
+          schema_version: 2,
+          snapshot_id: snapshot.snapshot_id,
+          root: cloneRoot(operation.root)!,
+        });
+        const projectedManifest = manifestV2ForController(
+          rawInspection.manifest,
+          operation.root,
+          operation,
+        );
+        if (projectedManifest === null) {
+          finishOperation(operation);
+          return setFailure('E_CONTEXT_RESULT_INVALID');
+        }
+        inspection = {
+          schema_version: 1,
+          state: rawInspection.state,
+          manifest: cloneManifest(projectedManifest),
+        };
+      } else {
+        const rawInspection = await dependencies.native.inspect(
+          snapshot.snapshot_id,
+        );
+        inspection = {
+          ...rawInspection,
+          manifest: cloneManifest(rawInspection.manifest),
+        };
+      }
       if (!operationLive(operation)) return rejectStale();
       if (
         inspection.manifest.project_id !== operation.projectId ||
@@ -1537,7 +1820,8 @@ export function createProjectContextController(
         updatedOwner === null ||
         updatedOwner.runtimeContextId !== runtimeContextId ||
         updatedOwner.projectId !== owner.projectId ||
-        updatedOwner.modelId !== owner.modelId
+        updatedOwner.modelId !== owner.modelId ||
+        !sameRoot(updatedOwner.root, owner.root)
       ) {
         finishOperation(operation);
         return setFailure('E_CONTEXT_OWNER_STALE');
@@ -1598,10 +1882,27 @@ export function createProjectContextController(
       return setFailure('E_CONTEXT_OWNER_STALE');
     }
     try {
-      const receipt = {
-        ...(await dependencies.native.confirm(manifest.snapshot_id)),
-      };
-      if (!matchingConsent(manifest, receipt)) {
+      let receipt: ProjectContextConsentV1 | null;
+      if (operation.root !== null) {
+        if (typeof dependencies.native.confirmV2 !== 'function') {
+          return setFailure('E_CONTEXT_NATIVE');
+        }
+        const v2Receipt = await dependencies.native.confirmV2({
+          schema_version: 2,
+          snapshot_id: manifest.snapshot_id,
+          root: cloneRoot(operation.root)!,
+        });
+        receipt = consentV2ForController(
+          v2Receipt,
+          operation.root,
+          manifest,
+        );
+      } else {
+        receipt = {
+          ...(await dependencies.native.confirm(manifest.snapshot_id)),
+        };
+      }
+      if (receipt === null || !matchingConsent(manifest, receipt)) {
         return setFailure('E_CONTEXT_RESULT_INVALID');
       }
       if (!operationLive(operation)) {
@@ -1996,8 +2297,34 @@ export function createProjectContextController(
             resolve(rejectStale());
             return;
           }
-          dependencies.native
-            .listCandidates(owner.projectId, normalized, null)
+          const listed =
+            operation.root !== null &&
+            typeof dependencies.native.listCandidatesV2 === 'function'
+              ? dependencies.native.listCandidatesV2({
+                  schema_version: 1,
+                  root: cloneRoot(operation.root)!,
+                  query: normalized,
+                  cursor: null,
+                })
+                  .then(page => {
+                    const projected = pageV2ForController(page, operation.root!);
+                    if (projected === null) {
+                      throw new ProjectContextBridgeError(
+                        'E_CONTEXT_RESULT_INVALID',
+                      );
+                    }
+                    return projected;
+                  })
+              : operation.root !== null
+                ? Promise.reject(
+                    new ProjectContextBridgeError('E_CONTEXT_NATIVE'),
+                  )
+                : dependencies.native.listCandidates(
+                    owner.projectId,
+                    normalized,
+                    null,
+                  );
+          listed
             .then(page => resolve(applyPage(operation, page, false)))
             .catch(error => resolve(failList(operation, error)));
         });
@@ -2033,11 +2360,27 @@ export function createProjectContextController(
       failureCode: null,
     });
     try {
-      const page = await dependencies.native.listCandidates(
-        owner.projectId,
-        operation.query,
-        cursor,
-      );
+      let page: ProjectContextCandidatePageV1;
+      if (operation.root !== null) {
+        if (typeof dependencies.native.listCandidatesV2 !== 'function') {
+          return setFailure('E_CONTEXT_NATIVE');
+        }
+        const v2Page = await dependencies.native.listCandidatesV2({
+          schema_version: 1,
+          root: cloneRoot(operation.root)!,
+          query: operation.query,
+          cursor,
+        });
+        const projected = pageV2ForController(v2Page, operation.root);
+        if (projected === null) return setFailure('E_CONTEXT_RESULT_INVALID');
+        page = projected;
+      } else {
+        page = await dependencies.native.listCandidates(
+          owner.projectId,
+          operation.query,
+          cursor,
+        );
+      }
       return applyPage(operation, page, true);
     } catch (error) {
       return failList(operation, error);

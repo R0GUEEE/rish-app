@@ -6,15 +6,70 @@ import type {
   CompletionVisibleMessageV2,
 } from './types';
 import { SESSION_EVENT_SCHEMA_VERSION } from '../agent/SessionEvents';
-import type { SessionDurabilityResult } from './SessionPersistence';
+import type {
+  SessionDurabilityResult,
+  SessionSnapshotRefV1,
+} from './SessionPersistence';
+import { projectAgentVisibleHistory } from '../agent/AgentVisibleHistory';
+import { validateAgentControllerPreflight } from '../agent/AgentControllerPreflight';
+import {
+  validateAgentStoreTransition,
+  type AgentStoreTransitionEvidence,
+} from '../agent/AgentStoreTransitions';
+import type {
+  AgentApprovalBindingTokenV2,
+  AgentAttemptProjectionV2,
+  AgentBatchCallProjectionV2,
+  AgentBatchReceiptV2,
+  AgentConversationGrantV2,
+  AgentRuntimeFacadeV2,
+  AgentRuntimeCommittedCheckpointV1,
+  AgentRuntimeControllerCASV1,
+  AgentRuntimeRootV1,
+  AgentRuntimeTranscriptHandleV1,
+  CompleteAgentRoundRequestV2,
+  CompleteAgentRoundResultV2,
+  PrepareAgentAttemptRequestV2,
+  PrepareAgentAttemptResultV2,
+  PrepareAgentToolBatchRequestV2,
+  PrepareAgentToolBatchResultV2,
+  BindAgentApprovalRequestV2,
+  BindAgentApprovalResultV2,
+  ExecuteAgentToolRequestV2,
+  ExecuteAgentToolResultV2,
+  CancelAgentAttemptRequestV2,
+  CancelAgentAttemptResultV2,
+  QueryAgentAttemptRequestV2,
+  QueryAgentAttemptResultV2,
+  RecoverAgentAttemptRequestV2,
+  RecoverAgentAttemptResultV2,
+  FinalizeAgentAttemptRequestV2,
+  FinalizeAgentAttemptResultV2,
+  DiscardAgentAttemptRequestV2,
+  DiscardAgentAttemptResultV2,
+  AgentRecoveryTargetV2,
+  AgentCancelTargetV2,
+  AgentCancelTokenV2,
+} from '../native/AgentRuntime';
 import {
   ATTEMPT_FAILURE_CODES,
+  type AgentCheckpointTransaction,
+  type AgentCleanupAcknowledgementTransaction,
+  type AgentApprovalDecision,
+  type AgentAttemptPhase,
   type AttemptFailureCode,
   type ChatAttachment,
   type ChatStore,
   type CompletionRoundReceiptV1,
+  type Conversation,
+  type PersistedAgentAttemptJournalV3,
+  type PersistedAgentCallJournalV3,
+  type AgentTranscriptCleanupV1,
+  type AgentToolReceiptV1 as StoreAgentToolReceiptV1,
+  type PersistedSessionEventV3,
   type PreparedTurnTransaction,
   type TurnAttemptV1,
+  type NativeAgentDiscardProofV1,
 } from '../state';
 
 export type CompletionControllerPhase =
@@ -23,6 +78,9 @@ export type CompletionControllerPhase =
   | 'persistence_pending'
   | 'starting'
   | 'sending'
+  | 'approval_pending'
+  | 'executing'
+  | 'recovering'
   | 'cancelling'
   | 'finalizing'
   | 'retryable'
@@ -46,6 +104,57 @@ export type CompletionControllerInput = {
   readonly text: string;
   readonly attachments: readonly ChatAttachment[];
   readonly sendWithoutProjectContext?: boolean;
+};
+
+/**
+ * The persistence adapter returns the native committed snapshot reference when
+ * one exists. The reference is optional for the legacy completion path so
+ * status-only callers remain source-compatible; Agent checkpoints fail closed
+ * unless a committed branch carries this proof.
+ */
+export type CompletionPersistenceResult = SessionDurabilityResult & {
+  readonly snapshot?: SessionSnapshotRefV1;
+};
+
+/** Safe UI projection for a gated Agent call. Raw arguments never leave the
+ * native/runtime transcript boundary.
+ */
+export type CompletionAgentApprovalRequest = {
+  readonly approvalId: string;
+  readonly conversationId: string;
+  readonly taskId: string;
+  readonly attemptId: string;
+  readonly roundId: string;
+  readonly roundIndex: number;
+  readonly batchRevision: number;
+  readonly manifestSha256: string;
+  readonly callIndex: number;
+  readonly callId: string;
+  readonly name: string;
+  readonly argumentsSha256: string;
+  readonly access: 'conversation_confirm' | 'confirm_once';
+  readonly allowedDecisions: readonly (
+    | 'denied'
+    | 'allow_once'
+    | 'allow_conversation'
+    | 'cancelled'
+  )[];
+};
+
+export type CompletionAgentApprovalDecision =
+  | { readonly status: 'denied' }
+  | { readonly status: 'approved'; readonly scope: 'once' | 'conversation' };
+
+/** Safe structured-question projection reserved for the Agent broker. */
+export type CompletionAgentQuestionRequest = {
+  readonly questionId: string;
+  readonly conversationId: string;
+  readonly taskId: string;
+  readonly attemptId: string;
+  readonly question: string;
+  readonly inputMode: 'options' | 'free_text';
+  readonly options: readonly { readonly id: string; readonly label: string }[];
+  readonly required: boolean;
 };
 
 export type CompletionControllerEvents = {
@@ -92,7 +201,7 @@ export type CompletionControllerDependencies = {
     text: string;
   }) => void;
   readonly chat: ChatStore;
-  readonly persistCurrent: () => Promise<SessionDurabilityResult>;
+  readonly persistCurrent: () => Promise<CompletionPersistenceResult>;
   readonly completeRoundV2: (
     request: CompleteRoundV2Request,
   ) => Promise<CompleteRoundV2Result>;
@@ -102,6 +211,20 @@ export type CompletionControllerDependencies = {
   readonly cancelRoundV2: (roundId: string) => Promise<unknown>;
   readonly cancelRoundV3: (roundId: string) => Promise<unknown>;
   readonly createRoundId: () => string;
+  /** Optional native high-level Agent facade. */
+  readonly agentRuntime?: AgentRuntimeFacadeV2;
+  /** Injected safe UI approval broker; absence fails closed. */
+  readonly requestAgentApproval?: (
+    request: CompletionAgentApprovalRequest,
+  ) => Promise<unknown>;
+  /** Injected safe structured-question broker; reserved for ask_user. */
+  readonly askAgentQuestion?: (
+    request: CompletionAgentQuestionRequest,
+  ) => Promise<unknown>;
+  /** Fresh canonical operation/event IDs for Agent CAS records. */
+  readonly createOperationId?: () => string;
+  /** Testable canonical timestamp source for persisted Agent events. */
+  readonly now?: () => string;
 };
 
 export type CompletionController = {
@@ -164,6 +287,66 @@ type PendingTerminalPersistence = {
     readonly events: CompletionControllerEvents;
     readonly transaction: PreparedTurnTransaction;
   } | null;
+};
+
+type AgentOperationKind =
+  | 'prepare_agent_attempt'
+  | 'complete_agent_round_v2'
+  | 'prepare_agent_tool_batch'
+  | 'bind_agent_approval'
+  | 'execute_agent_tool'
+  | 'cancel_agent_attempt'
+  | 'recover_agent_attempt';
+
+type AgentBatchAuthority = {
+  readonly roundId: string;
+  readonly roundIndex: number;
+  readonly batchKind: 'write_batch' | 'read_only_batch';
+  readonly batchRevision: number;
+  readonly manifestSha256: string | null;
+  readonly resultRoundRevision: number;
+};
+
+type AgentRun = {
+  readonly epoch: number;
+  readonly conversationId: string;
+  readonly turnId: string;
+  readonly attemptId: string;
+  readonly events: CompletionControllerEvents;
+  readonly transportSchemaVersion: 2 | 3;
+  /** The currently active native round, when one has been allocated. */
+  readonly roundId: string | null;
+  /** Native operation identity currently awaiting a result, if any. */
+  readonly operationId: string | null;
+  readonly cancelTarget:
+    | AgentCancelTargetV2
+    | null;
+  /** Native batch authority committed by prepareAgentToolBatch. */
+  readonly batchAuthority: AgentBatchAuthority | null;
+  /** Full token objects are intentionally memory-only; Store keeps only token. */
+  readonly approvalTokens: ReadonlyMap<number, AgentApprovalBindingTokenV2>;
+};
+
+type PendingAgentPersistence = {
+  readonly epoch: number;
+  readonly transaction: AgentCheckpointTransaction;
+  readonly conversationId: string;
+  readonly turnId: string;
+  readonly attemptId: string;
+  readonly kind: 'checkpoint' | 'final' | 'cancel';
+  readonly continuation: (
+    checkpoint: AgentRuntimeCommittedCheckpointV1,
+  ) => Promise<CompletionControllerOutcome>;
+};
+
+type PendingAgentCleanupAcknowledgement = {
+  readonly epoch: number;
+  readonly conversationId: string;
+  readonly turnId: string;
+  readonly attemptId: string;
+  readonly cleanup: AgentTranscriptCleanupV1;
+  readonly discardProof: NativeAgentDiscardProofV1;
+  readonly transaction: AgentCleanupAcknowledgementTransaction;
 };
 
 const FAILURE_CODES: ReadonlySet<string> = new Set(ATTEMPT_FAILURE_CODES);
@@ -266,6 +449,177 @@ function outcome(
   };
 }
 
+const AGENT_UUID =
+  /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/u;
+const AGENT_DIGEST = /^[0-9a-f]{64}$/u;
+
+function isSessionSnapshotRef(value: unknown): value is SessionSnapshotRefV1 {
+  try {
+    if (
+      typeof value !== 'object' ||
+      value === null ||
+      Array.isArray(value) ||
+      Object.getPrototypeOf(value) !== Object.prototype
+    ) return false;
+    const record = value as Record<string, unknown>;
+    return (
+      Object.keys(record).length === 3 &&
+      record.schema_version === 1 &&
+      typeof record.generation === 'number' &&
+      Number.isSafeInteger(record.generation) &&
+      record.generation >= 1 &&
+      typeof record.session_sha256 === 'string' &&
+      AGENT_DIGEST.test(record.session_sha256)
+    );
+  } catch {
+    return false;
+  }
+}
+
+function checkpointFromSnapshot(
+  snapshot: SessionSnapshotRefV1,
+  journalRevision: number,
+): AgentRuntimeCommittedCheckpointV1 {
+  return {
+    schema_version: 1,
+    journal_revision: journalRevision,
+    session_generation: snapshot.generation,
+    session_sha256: snapshot.session_sha256,
+  };
+}
+
+function canonicalNow(source?: () => string): string {
+  try {
+    const value = source?.() ?? new Date().toISOString();
+    const parsed = new Date(value);
+    return parsed.toISOString() === value ? value : new Date().toISOString();
+  } catch {
+    return new Date().toISOString();
+  }
+}
+
+function copyAgentTranscript(
+  transcript: AgentRuntimeTranscriptHandleV1,
+): AgentRuntimeTranscriptHandleV1 {
+  return { ...transcript };
+}
+
+function copyAgentRoot(root: AgentRuntimeRootV1): AgentRuntimeRootV1 {
+  return { ...root, capabilities: [...root.capabilities] };
+}
+
+function copyAgentCall(
+  call: PersistedAgentCallJournalV3,
+): PersistedAgentCallJournalV3 {
+  return { ...call, receipt: call.receipt === null ? null : { ...call.receipt } };
+}
+
+function copyAgentJournal(
+  journal: PersistedAgentAttemptJournalV3,
+): PersistedAgentAttemptJournalV3 {
+  return {
+    ...journal,
+    root: copyAgentRoot(journal.root),
+    policy: { ...journal.policy },
+    transcript: copyAgentTranscript(journal.transcript),
+    round_lineage:
+      journal.round_lineage === null ? null : { ...journal.round_lineage },
+    batch: journal.batch.map(copyAgentCall),
+    frozen_grant_ids: [...journal.frozen_grant_ids],
+  };
+}
+
+function agentCallFromProjection(
+  projection: AgentBatchCallProjectionV2,
+): PersistedAgentCallJournalV3 {
+  const approvalDecision: AgentApprovalDecision =
+    projection.approval_state === 'denied'
+      ? 'denied'
+      : projection.approval_state === 'cancelled'
+        ? 'cancelled'
+        : projection.approval_state === 'bound'
+          ? 'allow_once'
+          : 'pending';
+  return {
+    schema_version: 3,
+    call_id: projection.call_id,
+    call_index: projection.call_index,
+    name: projection.name,
+    arguments_sha256: projection.arguments_sha256,
+    safe_summary_key: projection.safe_summary_key,
+    access: projection.access,
+    approval_token:
+      projection.approval_token === null
+        ? null
+        : projection.approval_token.token,
+    approval_decision: approvalDecision,
+    approval_reference: projection.approval_reference,
+    idempotency_key: projection.idempotency_key,
+    native_row_revision: projection.native_row_revision,
+    receipt:
+      projection.receipt === null
+        ? null
+        : ({ ...projection.receipt } as unknown as StoreAgentToolReceiptV1),
+  };
+}
+
+type AgentExecuteResult = Exclude<ExecuteAgentToolResultV2, { readonly status: 'conflict' }>;
+
+function agentJournalFromProjection(
+  projection: AgentAttemptProjectionV2,
+  updatedAt: string,
+): PersistedAgentAttemptJournalV3 | null {
+  if (
+    projection.phase === 'not_agent' ||
+    projection.root === null ||
+    projection.policy === null ||
+    projection.transcript === null
+  ) return null;
+  return {
+    schema_version: 3,
+    phase: projection.phase,
+    controller_generation: projection.controller_generation,
+    policy: { ...projection.policy },
+    root: copyAgentRoot(projection.root),
+    tool_registry_version: projection.registry.registry_version,
+    toolset_sha256: projection.registry.toolset_sha256,
+    transcript: copyAgentTranscript(projection.transcript),
+    round_index: projection.round_index,
+    round_lineage:
+      projection.round_id === null
+        ? null
+        : {
+            schema_version: 2,
+            round_id: projection.round_id,
+            round_index: projection.round_index,
+            launch_attempt: 1,
+            status: projection.round_status ?? 'ready',
+            native_row_revision: projection.round_revision,
+          },
+    call_index: projection.call_index,
+    batch: projection.batch.map(agentCallFromProjection),
+    frozen_grant_ids: [...projection.frozen_grant_ids],
+    reserved_write_bytes: projection.reserved_write_bytes,
+    updated_at: updatedAt,
+  };
+}
+
+function agentFailure(error: unknown): AttemptFailureCode {
+  try {
+    if (typeof error !== 'object' || error === null) return 'E_COMPLETION_NATIVE';
+    const descriptor = Object.getOwnPropertyDescriptor(error, 'code');
+    if (
+      descriptor !== undefined &&
+      Object.prototype.hasOwnProperty.call(descriptor, 'value') &&
+      typeof descriptor.value === 'string' &&
+      FAILURE_CODES.has(descriptor.value)
+    ) return descriptor.value as AttemptFailureCode;
+  } catch {
+    // Collapse hostile native values to the closed completion vocabulary.
+  }
+  return 'E_COMPLETION_NATIVE';
+}
+
 export function createCompletionController(
   dependencies: CompletionControllerDependencies,
 ): CompletionController {
@@ -275,6 +629,9 @@ export function createCompletionController(
   let pendingPreparation: PendingPreparation | null = null;
   let pendingCommit: PendingCommit | null = null;
   let pendingTerminal: PendingTerminalPersistence | null = null;
+  let agentRun: AgentRun | null = null;
+  let pendingAgentPersistence: PendingAgentPersistence | null = null;
+  let pendingAgentCleanup: PendingAgentCleanupAcknowledgement | null = null;
   let retryPersistenceInFlight = false;
   let retryCommitInFlight = false;
   let lastCancellationCommitted = true;
@@ -329,15 +686,22 @@ export function createCompletionController(
     failureCode: identity.failureCode ?? null,
   });
 
-  const safePersist = async (): Promise<SessionDurabilityResult> => {
+  const safePersist = async (): Promise<CompletionPersistenceResult> => {
     try {
       const result = await dependencies.persistCurrent();
-      return result?.status === 'committed' ||
-        result?.status === 'session_only' ||
-        result?.status === 'not_committed' ||
-        result?.status === 'unknown'
-        ? result
-        : { status: 'unknown' };
+      if (
+        result?.status !== 'committed' &&
+        result?.status !== 'session_only' &&
+        result?.status !== 'not_committed' &&
+        result?.status !== 'unknown'
+      ) return { status: 'unknown' };
+      if (result.status !== 'committed') return { status: result.status };
+      return {
+        status: 'committed',
+        ...(isSessionSnapshotRef(result.snapshot)
+          ? { snapshot: result.snapshot }
+          : {}),
+      };
     } catch {
       return { status: 'unknown' };
     }
@@ -363,6 +727,196 @@ export function createCompletionController(
     } catch {
       return true;
     }
+  };
+
+  const agentRuntime = dependencies.agentRuntime;
+
+  const freshOperationId = (): string | null => {
+    try {
+      const value = dependencies.createOperationId?.() ?? dependencies.createRoundId();
+      return typeof value === 'string' && AGENT_UUID.test(value) ? value : null;
+    } catch {
+      return null;
+    }
+  };
+
+  const agentAvailable = (): boolean => {
+    if (agentRuntime === undefined) return false;
+    try {
+      return agentRuntime.isAvailable();
+    } catch {
+      return false;
+    }
+  };
+
+  const getConversationAttempt = (
+    conversationId: string,
+    attemptId: string,
+  ): { readonly conversation: Conversation; readonly attempt: TurnAttemptV1 } | null => {
+    try {
+      const conversation = dependencies.chat.getState().conversations[conversationId];
+      const attempt = conversation?.attempts.find(item => item.attemptId === attemptId);
+      return conversation === undefined || attempt === undefined
+        ? null
+        : { conversation, attempt };
+    } catch {
+      return null;
+    }
+  };
+
+  const authorityFor = (
+    attempt: TurnAttemptV1,
+    conversationId: string,
+  ): AgentRuntimeControllerCASV1 | null => {
+    const authority = dependencies.chat.getSessionAuthority();
+    if (
+      authority === null ||
+      !Number.isSafeInteger(authority.generation) ||
+      authority.generation < 1 ||
+      !AGENT_DIGEST.test(authority.sessionSha256)
+    ) return null;
+    const journal = attempt.agent;
+    return {
+      schema_version: 1,
+      conversation_id: conversationId,
+      task_id: attempt.turnId,
+      attempt_id: attempt.attemptId,
+      expected_controller_generation: journal?.controller_generation ?? 0,
+      expected_journal_revision: attempt.journalRevision ?? 0,
+      expected_session_generation: authority.generation,
+      expected_session_sha256: authority.sessionSha256,
+    };
+  };
+
+  const agentEvent = (
+    attemptId: string,
+    eventId: string,
+    kind: PersistedSessionEventV3['kind'],
+    roundIndex: number | null,
+    callId: string | null,
+    status: PersistedSessionEventV3['status'],
+    safeSummaryKey: string | null,
+    argumentsSha256: string | null,
+    resultSha256: string | null,
+    approvalReference: string | null,
+    failureCode: PersistedSessionEventV3['failure_code'],
+  ): PersistedSessionEventV3 => {
+    const previous = dependencies.chat.getState().sessionEvents ?? [];
+    const latest = previous
+      .filter(event => event.attempt_id === attemptId)
+      .reduce((value, event) => Math.max(value, event.seq), -1);
+    return {
+      schema_version: 2,
+      event_id: eventId,
+      attempt_id: attemptId,
+      seq: latest + 1,
+      kind,
+      round_index: roundIndex,
+      call_id: callId,
+      status,
+      safe_summary_key: safeSummaryKey,
+      arguments_sha256: argumentsSha256,
+      result_sha256: resultSha256,
+      approval_reference: approvalReference,
+      failure_code: failureCode,
+      created_at: canonicalNow(dependencies.now),
+    } as PersistedSessionEventV3;
+  };
+
+  const mapEvidence = (
+    operation: AgentOperationKind,
+    request: unknown,
+    result: unknown,
+  ): AgentStoreTransitionEvidence | null => {
+    try {
+      const evidence = validateAgentStoreTransition({ operation, request, result });
+      return evidence;
+    } catch {
+      return null;
+    }
+  };
+
+  const safeAgentPersist = async (
+    transaction: AgentCheckpointTransaction,
+    continuation: (
+      checkpoint: AgentRuntimeCommittedCheckpointV1,
+    ) => Promise<CompletionControllerOutcome>,
+    runEpoch: number,
+    ids: { readonly conversationId: string; readonly turnId: string; readonly attemptId: string },
+    kind: PendingAgentPersistence['kind'] = 'checkpoint',
+  ): Promise<CompletionControllerOutcome> => {
+    const pending: PendingAgentPersistence = {
+      epoch: runEpoch,
+      transaction,
+      conversationId: ids.conversationId,
+      turnId: ids.turnId,
+      attemptId: ids.attemptId,
+      kind,
+      continuation,
+    };
+    pendingAgentPersistence = pending;
+    const durability = await safePersist();
+    if (runEpoch !== epoch) return outcome('cancelled', state);
+    if (durability.status !== 'committed') {
+      if (durability.status === 'not_committed') {
+        transaction.rollback();
+        if (pendingAgentPersistence === pending) pendingAgentPersistence = null;
+        publish(
+          stateFor('blocked', {
+            conversationId: ids.conversationId,
+            turnId: ids.turnId,
+            attemptId: ids.attemptId,
+            failureCode: 'E_AGENT_PERSISTENCE',
+          }),
+        );
+        return outcome('blocked', state);
+      }
+      publish(
+        stateFor('persistence_pending', {
+          conversationId: ids.conversationId,
+          turnId: ids.turnId,
+          attemptId: ids.attemptId,
+          failureCode: 'E_AGENT_PERSISTENCE',
+        }),
+      );
+      return outcome('persistence_pending', state);
+    }
+    if (durability.snapshot === undefined) {
+      transaction.rollback();
+      if (pendingAgentPersistence === pending) pendingAgentPersistence = null;
+      publish(
+        stateFor('blocked', {
+          conversationId: ids.conversationId,
+          turnId: ids.turnId,
+          attemptId: ids.attemptId,
+          failureCode: 'E_AGENT_PERSISTENCE',
+        }),
+      );
+      return outcome('blocked', state);
+    }
+    const committed = transaction.commit(durability.snapshot);
+    if (!committed) {
+      transaction.rollback();
+      if (pendingAgentPersistence === pending) pendingAgentPersistence = null;
+      publish(
+        stateFor('blocked', {
+          conversationId: ids.conversationId,
+          turnId: ids.turnId,
+          attemptId: ids.attemptId,
+          failureCode: 'E_COMPLETION_RESULT_CORRELATION',
+        }),
+      );
+      return outcome('blocked', state);
+    }
+    if (pendingAgentPersistence === pending) pendingAgentPersistence = null;
+    return await continuation(
+      checkpointFromSnapshot(
+        durability.snapshot,
+        dependencies.chat.getState().conversations[ids.conversationId]?.attempts.find(
+          attempt => attempt.attemptId === ids.attemptId,
+        )?.journalRevision ?? 0,
+      ),
+    );
   };
 
   const notifyPrepared = (
@@ -497,7 +1051,2206 @@ export function createCompletionController(
     });
   };
 
-  const runPrepared = async (
+  const agentProjectContextSha = (attempt: TurnAttemptV1): string | null =>
+    attempt.contextDisposition === 'verified' && attempt.projectContext !== null
+      ? attempt.projectContext.snapshotSha256
+      : null;
+
+  const agentRoundContextMatchesAttempt = (
+    attempt: TurnAttemptV1,
+    result: CompleteAgentRoundResultV2,
+  ): boolean => {
+    if (result.status !== 'completed') return true;
+    const contextReceipt =
+      result.outcome.completion_receipt.project_context_receipt;
+    const context = attempt.projectContext;
+    if (attempt.contextDisposition !== 'verified' || context === null) {
+      return contextReceipt === null;
+    }
+    return contextReceipt !== null &&
+      contextReceipt.snapshot_id === context.snapshotId &&
+      contextReceipt.snapshot_sha256 === context.snapshotSha256 &&
+      contextReceipt.source_fingerprint === context.sourceFingerprint &&
+      contextReceipt.context_bytes === context.contextBytes;
+  };
+
+  const agentWorkspaceId = (attempt: TurnAttemptV1): string | null =>
+    attempt.workspaceId ?? attempt.projectContext?.runtimeContextId ?? null;
+
+  const agentProjectId = (attempt: TurnAttemptV1): string | null =>
+    attempt.contextDisposition === 'verified' && attempt.projectContext !== null
+      ? attempt.projectContext.projectId
+      : null;
+
+  const agentTransportSchema = (attempt: TurnAttemptV1): 2 | 3 =>
+    attempt.contextDisposition === 'verified' && attempt.projectContext !== null
+      ? 3
+      : 2;
+
+  const agentVisible = (
+    conversation: Conversation,
+    attempt: TurnAttemptV1,
+  ): { readonly history: readonly CompletionVisibleMessageV2[]; readonly digest: string; readonly count: number } | null => {
+    try {
+      return projectAgentVisibleHistory(
+        { messages: conversation.messages },
+        { visibleMessageIds: attempt.visibleMessageIds },
+      );
+    } catch {
+      return null;
+    }
+  };
+
+  const agentRootForJournal = (
+    journal: PersistedAgentAttemptJournalV3,
+  ): AgentRuntimeRootV1 => copyAgentRoot(journal.root);
+
+  const agentCheckpointForJournal = (
+    attempt: TurnAttemptV1,
+  ): AgentRuntimeCommittedCheckpointV1 | null => {
+    const authority = dependencies.chat.getSessionAuthority();
+    return authority === null
+      ? null
+      : checkpointFromSnapshot(
+          {
+            schema_version: 1,
+            generation: authority.generation,
+            session_sha256: authority.sessionSha256,
+          },
+          attempt.journalRevision ?? 0,
+        );
+  };
+
+  const agentPreflightBase = (
+    attempt: TurnAttemptV1,
+    conversationId: string,
+  ): AgentRuntimeControllerCASV1 | null =>
+    authorityFor(attempt, conversationId);
+
+  const agentTokenByIndex = (
+    run: AgentRun | null,
+    index: number,
+  ): AgentApprovalBindingTokenV2 | null =>
+    run?.approvalTokens.get(index) ?? null;
+
+  const rememberAgentTokens = (
+    run: AgentRun,
+    calls: readonly AgentBatchCallProjectionV2[],
+  ): AgentRun => {
+    const tokens = new Map(run.approvalTokens);
+    calls.forEach(call => {
+      if (call.approval_token !== null) tokens.set(call.call_index, call.approval_token);
+    });
+    return { ...run, approvalTokens: tokens };
+  };
+
+  const agentBatchAuthorityFromProjection = (
+    projection: AgentAttemptProjectionV2,
+  ): AgentBatchAuthority | null => {
+    if (
+      projection.round_id === null ||
+      projection.round_revision === null ||
+      projection.batch_kind === null ||
+      projection.batch_revision === null
+    ) return null;
+    return {
+      roundId: projection.round_id,
+      roundIndex: projection.round_index,
+      batchKind: projection.batch_kind,
+      batchRevision: projection.batch_revision,
+      manifestSha256: projection.manifest_sha256,
+      resultRoundRevision: projection.round_revision,
+    };
+  };
+
+  const updateAgentRun = (patch: Partial<AgentRun>): void => {
+    if (agentRun !== null) agentRun = { ...agentRun, ...patch };
+  };
+
+  const agentSafeApprovalDecision = (
+    raw: unknown,
+    allowed: readonly ('denied' | 'allow_once' | 'allow_conversation' | 'cancelled')[],
+  ): 'denied' | 'allow_once' | 'allow_conversation' | 'cancelled' => {
+    try {
+      if (typeof raw !== 'object' || raw === null || Array.isArray(raw)) return 'denied';
+      const record = raw as Record<string, unknown>;
+      if (record.status === 'denied') return allowed.includes('denied') ? 'denied' : 'cancelled';
+      if (record.status !== 'approved') return 'denied';
+      const scope = record.scope;
+      const decision = scope === 'conversation' ? 'allow_conversation' : scope === 'once' ? 'allow_once' : null;
+      return decision !== null && allowed.includes(decision) ? decision : 'denied';
+    } catch {
+      return 'denied';
+    }
+  };
+
+  const agentToolFamily = (
+    name: string,
+  ): 'file_write' | 'git_commit' | null =>
+    name === 'write_file'
+      ? 'file_write'
+      : name === 'git_commit'
+        ? 'git_commit'
+        : null;
+
+  const agentGrantFor = (
+    conversation: Conversation,
+    journal: PersistedAgentAttemptJournalV3,
+    call: PersistedAgentCallJournalV3,
+  ): AgentConversationGrantV2 | null => {
+    const family = agentToolFamily(call.name);
+    if (family === null) return null;
+    const grants = conversation.agentGrants ?? conversation.agent_grants ?? [];
+    return (
+      grants.find(
+        grant =>
+          grant.conversation_id === conversation.id &&
+          grant.workspace_id === journal.root.workspace_id &&
+          grant.project_id === journal.root.project_id &&
+          grant.binding_revision === journal.root.workspace_binding_revision &&
+          grant.root_fingerprint_sha256 === journal.root.root_fingerprint_sha256 &&
+          grant.tool_family === family &&
+          grant.registry_version === journal.tool_registry_version &&
+          grant.policy_version === journal.policy.policy_version,
+      ) ?? null
+    );
+  };
+
+  const agentNewGrant = (
+    conversation: Conversation,
+    attempt: TurnAttemptV1,
+    journal: PersistedAgentAttemptJournalV3,
+    call: PersistedAgentCallJournalV3,
+  ): AgentConversationGrantV2 | null => {
+    const family = agentToolFamily(call.name);
+    if (family === null) return null;
+    const grantId = freshOperationId();
+    const createdAt = canonicalNow(dependencies.now);
+    return grantId === null
+      ? null
+      : {
+          schema_version: 2,
+          grant_id: grantId,
+          conversation_id: conversation.id,
+          workspace_id: journal.root.workspace_id,
+          project_id: journal.root.project_id,
+          binding_revision: journal.root.workspace_binding_revision,
+          root_fingerprint_sha256: journal.root.root_fingerprint_sha256,
+          tool_family: family,
+          registry_version: journal.tool_registry_version,
+          policy_version: journal.policy.policy_version,
+          issued_for: {
+            schema_version: 1,
+            task_id: attempt.turnId,
+            attempt_id: attempt.attemptId,
+          },
+          created_at: createdAt,
+      };
+  };
+
+  const agentPrepareRequest = (
+    conversationId: string,
+    attempt: TurnAttemptV1,
+    operationId: string,
+    visible: { readonly digest: string; readonly count: number },
+    checkpoint: AgentRuntimeCommittedCheckpointV1,
+    cas: AgentRuntimeControllerCASV1,
+  ): PrepareAgentAttemptRequestV2 => ({
+    schema_version: 2,
+    operation_id: operationId,
+    controller_cas: cas,
+    committed_checkpoint: checkpoint,
+    task_id: attempt.turnId,
+    conversation_id: conversationId,
+    attempt_id: attempt.attemptId,
+    workspace_id: agentWorkspaceId(attempt),
+    project_id: agentProjectId(attempt),
+    workspace_binding_revision: attempt.workspaceBindingRevision,
+    transport_schema_version: agentTransportSchema(attempt),
+    model: attempt.modelId,
+    thinking_mode: attempt.thinkingMode,
+    visible_message_ids: [...attempt.visibleMessageIds],
+    visible_history_sha256: visible.digest,
+    visible_message_count: visible.count,
+    project_context_sha256: agentProjectContextSha(attempt),
+    registry_version: 1,
+    expected_policy_version: null,
+    expected_transcript: null,
+  });
+
+  const agentBeginRoundPreflight = (
+    conversationId: string,
+    attempt: TurnAttemptV1,
+    journal: PersistedAgentAttemptJournalV3,
+    visible: { readonly digest: string; readonly count: number },
+    roundId: string,
+    operationId: string,
+    cas: AgentRuntimeControllerCASV1,
+  ) => {
+    const priorLineage = journal.round_lineage;
+    const retrying = journal.phase === 'failed';
+    const roundIndex =
+      journal.phase === 'tool_result_pending'
+        ? journal.round_index + 1
+        : journal.round_index;
+    const expectedRoundRevision =
+      journal.phase === 'tool_result_pending'
+        ? 0
+        : priorLineage?.native_row_revision ?? 0;
+    const launchAttempt = retrying
+      ? (priorLineage?.launch_attempt ?? 1) + 1
+      : 1;
+    const raw = {
+      schema_version: 1 as const,
+      source: 'completion_controller' as const,
+      kind: 'begin_round' as const,
+      operation_id: operationId,
+      base_cas: cas,
+      conversation_id: conversationId,
+      task_id: attempt.turnId,
+      attempt_id: attempt.attemptId,
+      round_id: roundId,
+      round_index: roundIndex,
+      launch_attempt: launchAttempt,
+      expected_round_revision: expectedRoundRevision,
+      transport_schema_version: agentTransportSchema(attempt),
+      model: attempt.modelId,
+      thinking_mode: attempt.thinkingMode,
+      visible_history_sha256: visible.digest,
+      visible_message_count: visible.count,
+      project_context_sha256: agentProjectContextSha(attempt),
+      transcript: journal.transcript,
+      root: agentRootForJournal(journal),
+      registry_version: journal.tool_registry_version,
+      toolset_sha256: journal.toolset_sha256,
+    };
+    return validateAgentControllerPreflight(raw);
+  };
+
+  const journalForBeginRound = (
+    journal: PersistedAgentAttemptJournalV3,
+    preflight: Extract<
+      NonNullable<ReturnType<typeof validateAgentControllerPreflight>>,
+      { readonly kind: 'begin_round' }
+    >,
+    updatedAt: string,
+  ): PersistedAgentAttemptJournalV3 => ({
+    ...copyAgentJournal(journal),
+    phase: 'round_in_flight',
+    controller_generation: journal.controller_generation + 1,
+    round_index: preflight.round_index,
+    round_lineage: {
+      schema_version: 2,
+      round_id: preflight.round_id,
+      round_index: preflight.round_index,
+      launch_attempt: preflight.launch_attempt,
+      status: 'active',
+      native_row_revision: null,
+    },
+    call_index: null,
+    batch: [],
+    updated_at: updatedAt,
+  });
+
+  const journalForBatchReceipt = (
+    journal: PersistedAgentAttemptJournalV3,
+    batchReceipt: AgentBatchReceiptV2,
+    roundRevision: number,
+    updatedAt: string,
+  ): PersistedAgentAttemptJournalV3 => {
+    const calls = batchReceipt.calls.map(agentCallFromProjection);
+    const hasPendingApproval = calls.some(
+      call =>
+        call.access !== 'auto' &&
+        call.access !== 'durable_deny' &&
+        call.approval_decision === 'pending',
+    );
+    return {
+      ...copyAgentJournal(journal),
+      phase: hasPendingApproval ? 'approval_pending' : 'batch_frozen',
+      controller_generation: journal.controller_generation + 1,
+      transcript: copyAgentTranscript(batchReceipt.transcript),
+      round_lineage:
+        journal.round_lineage === null
+          ? null
+          : {
+              ...journal.round_lineage,
+              status: 'completed',
+              native_row_revision: roundRevision,
+            },
+      call_index: calls.findIndex(call => call.receipt === null),
+      batch: calls,
+      reserved_write_bytes: batchReceipt.reserved_write_bytes,
+      updated_at: updatedAt,
+    };
+  };
+
+  const journalForApproval = (
+    journal: PersistedAgentAttemptJournalV3,
+    callIndex: number,
+    decision: AgentApprovalDecision,
+    approvalReference: string | null,
+    grantId: string | null,
+    updatedAt: string,
+  ): PersistedAgentAttemptJournalV3 => {
+    const batch = journal.batch.map(copyAgentCall);
+    const call = batch[callIndex];
+    if (call !== undefined) {
+      batch[callIndex] = {
+        ...call,
+        approval_decision: decision,
+        approval_token:
+          decision === 'denied' || decision === 'cancelled'
+            ? null
+            : call.approval_token,
+        approval_reference:
+          decision === 'denied' || decision === 'cancelled'
+            ? null
+            : approvalReference,
+      };
+    }
+    const pending = batch.some(
+      candidate =>
+        candidate.access !== 'auto' &&
+        candidate.access !== 'durable_deny' &&
+        candidate.approval_decision === 'pending',
+    );
+    return {
+      ...copyAgentJournal(journal),
+      // A successful bind post-checkpoint is itself a batch-frozen state;
+      // remaining gated calls are presented one at a time from that phase.
+      // Denials keep the explicit approval-pending marker until all gates are
+      // settled.
+      phase:
+        decision === 'allow_once' || decision === 'allow_conversation'
+          ? 'batch_frozen'
+          : pending
+            ? 'approval_pending'
+            : 'batch_frozen',
+      controller_generation: journal.controller_generation + 1,
+      frozen_grant_ids:
+        grantId === null
+          ? [...journal.frozen_grant_ids]
+          : [...journal.frozen_grant_ids, grantId],
+      call_index: batch.findIndex(candidate => candidate.receipt === null),
+      batch,
+      updated_at: updatedAt,
+    };
+  };
+
+  const journalForExecutionIntent = (
+    journal: PersistedAgentAttemptJournalV3,
+    callIndex: number,
+    updatedAt: string,
+  ): PersistedAgentAttemptJournalV3 => ({
+    ...copyAgentJournal(journal),
+    phase: 'execution_intent',
+    controller_generation: journal.controller_generation + 1,
+    call_index: callIndex,
+    updated_at: updatedAt,
+  });
+
+  const journalForToolResult = (
+    journal: PersistedAgentAttemptJournalV3,
+    result: AgentExecuteResult,
+    updatedAt: string,
+  ): PersistedAgentAttemptJournalV3 | null => {
+    const call = journal.batch[result.call_index];
+    if (call === undefined) return null;
+    const toolReceipt =
+      result.receipt === null
+        ? null
+        : ({ ...result.receipt } as unknown as StoreAgentToolReceiptV1);
+    const batch = journal.batch.map(copyAgentCall);
+    batch[result.call_index] = {
+      ...call,
+      native_row_revision: result.result_execution_revision,
+      receipt: toolReceipt,
+    };
+    const phase =
+      result.status === 'running' || result.status === 'cancel_requested'
+        ? 'execution_intent'
+        : result.status === 'cancelled'
+        ? 'cancelled'
+        : result.status === 'unknown'
+          ? 'unknown'
+          : result.status === 'ambiguous'
+            ? 'ambiguous'
+            : 'tool_result_pending';
+    return {
+      ...copyAgentJournal(journal),
+      phase,
+      controller_generation: journal.controller_generation + 1,
+      transcript: copyAgentTranscript(result.transcript),
+      call_index: result.call_index,
+      batch,
+      updated_at: updatedAt,
+    };
+  };
+
+  let runAgentRound: (
+    conversationId: string,
+    attemptId: string,
+    runEpoch: number,
+  ) => Promise<CompletionControllerOutcome>;
+  let runAgentBatch: (
+    conversationId: string,
+    attemptId: string,
+    runEpoch: number,
+  ) => Promise<CompletionControllerOutcome>;
+
+  const failAgentWithoutNative = async (
+    conversationId: string,
+    attemptId: string,
+    code: AttemptFailureCode,
+  ): Promise<CompletionControllerOutcome> => {
+    const located = getConversationAttempt(conversationId, attemptId);
+    if (located === null) {
+      publish(stateFor('blocked', { conversationId, attemptId, failureCode: code }));
+      return outcome('blocked', state);
+    }
+    const failed = dependencies.chat.failAttempt(conversationId, attemptId, code);
+    if (!failed) {
+      publish(
+        stateFor('blocked', {
+          conversationId,
+          turnId: located.attempt.turnId,
+          attemptId,
+          failureCode: 'E_COMPLETION_RESULT_CORRELATION',
+        }),
+      );
+      return outcome('blocked', state);
+    }
+    const durability = await safePersist();
+    if (durability.status !== 'committed') {
+      publish(
+        stateFor('persistence_pending', {
+          conversationId,
+          turnId: located.attempt.turnId,
+          attemptId,
+          failureCode: 'E_AGENT_PERSISTENCE',
+        }),
+      );
+      return outcome('persistence_pending', state);
+    }
+    publish(
+      stateFor('retryable', {
+        conversationId,
+        turnId: located.attempt.turnId,
+        attemptId,
+        failureCode: code,
+      }),
+    );
+    return outcome('retryable', state);
+  };
+
+  const runAgentPrepared = async (
+    conversationId: string,
+    turnId: string,
+    attemptId: string,
+    events: CompletionControllerEvents,
+    runEpoch: number,
+  ): Promise<CompletionControllerOutcome> => {
+    if (agentRuntime === undefined || !agentAvailable()) {
+      return await runLegacyPrepared(
+        conversationId,
+        turnId,
+        attemptId,
+        events,
+        runEpoch,
+      );
+    }
+    const located = getConversationAttempt(conversationId, attemptId);
+    if (located === null || runEpoch !== epoch) return outcome('cancelled', state);
+    const { conversation, attempt } = located;
+    agentRun = {
+      epoch: runEpoch,
+      conversationId,
+      turnId,
+      attemptId,
+      events,
+      transportSchemaVersion: agentTransportSchema(attempt),
+      roundId: null,
+      operationId: null,
+      cancelTarget: {
+        schema_version: 2,
+        kind: 'attempt',
+        task_id: turnId,
+        attempt_id: attemptId,
+      },
+      batchAuthority: null,
+      approvalTokens: new Map(),
+    };
+    const visible = agentVisible(conversation, attempt);
+    const checkpoint = agentCheckpointForJournal(attempt);
+    const cas = agentPreflightBase(attempt, conversationId);
+    const operationId = freshOperationId();
+    if (visible === null || checkpoint === null || cas === null || operationId === null) {
+      const failureCode: AttemptFailureCode =
+        visible === null
+          ? 'E_COMPLETION_HISTORY'
+          : checkpoint === null
+            ? 'E_AGENT_PERSISTENCE'
+            : cas === null
+              ? 'E_AGENT_CONFLICT'
+              : 'E_COMPLETION_NATIVE';
+      publish(
+        stateFor('retryable', {
+          conversationId,
+          turnId,
+          attemptId,
+          failureCode,
+        }),
+      );
+      return outcome('retryable', state);
+    }
+    const request = agentPrepareRequest(
+      conversationId,
+      attempt,
+      operationId,
+      visible,
+      checkpoint,
+      cas,
+    );
+    const event = agentEvent(
+      attemptId,
+      operationId,
+      'round',
+      null,
+      null,
+      'waiting',
+      null,
+      null,
+      null,
+      null,
+      null,
+    );
+    updateAgentRun({
+      operationId,
+      roundId: null,
+      cancelTarget: {
+        schema_version: 2,
+        kind: 'attempt',
+        task_id: turnId,
+        attempt_id: attemptId,
+      },
+    });
+    publish(
+      stateFor('starting', {
+        conversationId,
+        turnId,
+        attemptId,
+        transportSchemaVersion: request.transport_schema_version,
+      }),
+    );
+    let result: PrepareAgentAttemptResultV2;
+    try {
+      result = await agentRuntime.prepareAgentAttempt(request);
+    } catch (error) {
+      updateAgentRun({ operationId: null, cancelTarget: null });
+      publish(
+        stateFor('retryable', {
+          conversationId,
+          turnId,
+          attemptId,
+          failureCode: agentFailure(error),
+        }),
+      );
+      return outcome('retryable', state);
+    }
+    if (runEpoch !== epoch) return outcome('cancelled', state);
+    if (result.status === 'conflict') {
+      updateAgentRun({ operationId: null, cancelTarget: null });
+      return await failAgentWithoutNative(
+        conversationId,
+        attemptId,
+        result.failure_code as AttemptFailureCode,
+      );
+    }
+    const evidence = mapEvidence('prepare_agent_attempt', request, result);
+    if (evidence === null) {
+      updateAgentRun({ operationId: null, cancelTarget: null });
+      return await failAgentWithoutNative(
+        conversationId,
+        attemptId,
+        'E_AGENT_TRANSCRIPT',
+      );
+    }
+    if (result.status === 'not_agent') {
+      agentRun = null;
+      return await runLegacyPrepared(
+        conversationId,
+        turnId,
+        attemptId,
+        events,
+        runEpoch,
+      );
+    }
+    const preparedJournal = agentJournalFromProjection(
+      result.attempt,
+      canonicalNow(dependencies.now),
+    );
+    if (preparedJournal === null) {
+      updateAgentRun({ operationId: null, cancelTarget: null });
+      return await failAgentWithoutNative(
+        conversationId,
+        attemptId,
+        'E_AGENT_TRANSCRIPT',
+      );
+    }
+    const transaction = dependencies.chat.initializeAgentAttempt({
+      cas,
+      expectedAttempt: attempt,
+      journal: preparedJournal,
+      events: [event],
+      evidence,
+    });
+    if (transaction === null) {
+      updateAgentRun({ operationId: null, cancelTarget: null });
+      return await failAgentWithoutNative(
+        conversationId,
+        attemptId,
+        'E_AGENT_CONFLICT',
+      );
+    }
+    agentRun = {
+      epoch: runEpoch,
+      conversationId,
+      turnId,
+      attemptId,
+      events,
+      transportSchemaVersion: request.transport_schema_version,
+      roundId: null,
+      operationId,
+      cancelTarget: {
+        schema_version: 2,
+        kind: 'attempt',
+        task_id: turnId,
+        attempt_id: attemptId,
+      },
+      batchAuthority: null,
+      approvalTokens: new Map(),
+    };
+    return await safeAgentPersist(
+      transaction,
+      async () => {
+        if (runEpoch !== epoch) return outcome('cancelled', state);
+        return await runAgentRound(conversationId, attemptId, runEpoch);
+      },
+      runEpoch,
+      { conversationId, turnId, attemptId },
+    );
+  };
+
+  let prepareAgentBatch: (
+    conversationId: string,
+    attemptId: string,
+    runEpoch: number,
+    request: CompleteAgentRoundRequestV2,
+    result: Extract<CompleteAgentRoundResultV2, { readonly status: 'completed' }> ,
+    evidence: AgentStoreTransitionEvidence,
+  ) => Promise<CompletionControllerOutcome>;
+  let finishAgentTerminal: (
+    conversationId: string,
+    attemptId: string,
+    runEpoch: number,
+    request: CompleteAgentRoundRequestV2,
+    result: Extract<CompleteAgentRoundResultV2, { readonly status: 'completed' }> ,
+    evidence: AgentStoreTransitionEvidence,
+  ) => Promise<CompletionControllerOutcome>;
+  let finishAgentNonTerminal: (
+    conversationId: string,
+    attemptId: string,
+    runEpoch: number,
+    request: CompleteAgentRoundRequestV2,
+    result: Exclude<CompleteAgentRoundResultV2, { readonly status: 'completed' }> ,
+    evidence: AgentStoreTransitionEvidence,
+  ) => Promise<CompletionControllerOutcome>;
+
+  const runAgentRoundImpl = async (
+    conversationId: string,
+    attemptId: string,
+    runEpoch: number,
+  ): Promise<CompletionControllerOutcome> => {
+    if (agentRuntime === undefined || runEpoch !== epoch) {
+      return outcome('cancelled', state);
+    }
+    const located = getConversationAttempt(conversationId, attemptId);
+    if (located === null || located.attempt.agent === undefined || located.attempt.agent === null) {
+      return await failAgentWithoutNative(conversationId, attemptId, 'E_AGENT_CONFLICT');
+    }
+    const { conversation, attempt } = located;
+    const journal = attempt.agent;
+    if (journal === undefined || journal === null) {
+      return await failAgentWithoutNative(conversationId, attemptId, 'E_AGENT_CONFLICT');
+    }
+    if (
+      journal.phase !== 'ready_for_round' &&
+      journal.phase !== 'tool_result_pending' &&
+      journal.phase !== 'failed'
+    ) return outcome('cancelled', state);
+    const visible = agentVisible(conversation, attempt);
+    const cas = agentPreflightBase(attempt, conversationId);
+    const checkpoint = agentCheckpointForJournal(attempt);
+    const operationId = freshOperationId();
+    const isNextRound = journal.phase === 'tool_result_pending';
+    const roundId =
+      !isNextRound && journal.phase === 'failed' && journal.round_lineage !== null
+        ? journal.round_lineage.round_id
+        : freshOperationId();
+    if (visible === null || cas === null || checkpoint === null || operationId === null || roundId === null) {
+      return await failAgentWithoutNative(conversationId, attemptId, 'E_AGENT_PERSISTENCE');
+    }
+    const preflight = agentBeginRoundPreflight(
+      conversationId,
+      attempt,
+      journal,
+      visible,
+      roundId,
+      operationId,
+      cas,
+    );
+    if (preflight === null || preflight.kind !== 'begin_round') {
+      return await failAgentWithoutNative(conversationId, attemptId, 'E_AGENT_CONFLICT');
+    }
+    const nextJournal = journalForBeginRound(
+      journal,
+      preflight,
+      canonicalNow(dependencies.now),
+    );
+    const transaction = dependencies.chat.checkpointAgentRound({
+      cas,
+      expectedAttempt: attempt,
+      journal: nextJournal,
+      events: [],
+      evidence: preflight,
+    });
+    if (transaction === null) {
+      return await failAgentWithoutNative(conversationId, attemptId, 'E_AGENT_CONFLICT');
+    }
+    updateAgentRun({
+      roundId,
+      operationId,
+      cancelTarget: {
+        schema_version: 2,
+        kind: 'round',
+        task_id: attempt.turnId,
+        attempt_id: attempt.attemptId,
+        round_id: roundId,
+        round_index: preflight.round_index,
+      },
+    });
+    publish(
+      stateFor('starting', {
+        conversationId,
+        turnId: attempt.turnId,
+        attemptId,
+        roundId,
+        transportSchemaVersion: preflight.transport_schema_version,
+      }),
+    );
+    return await safeAgentPersist(
+      transaction,
+      async committedCheckpoint => {
+        if (runEpoch !== epoch) return outcome('cancelled', state);
+        const current = getConversationAttempt(conversationId, attemptId);
+        if (current === null || current.attempt.agent === undefined || current.attempt.agent === null) {
+          return await failAgentWithoutNative(conversationId, attemptId, 'E_AGENT_CONFLICT');
+        }
+        const currentJournal = current.attempt.agent;
+        const currentVisible = agentVisible(current.conversation, current.attempt);
+        if (currentVisible === null || currentJournal.round_lineage === null) {
+          return await failAgentWithoutNative(conversationId, attemptId, 'E_COMPLETION_HISTORY');
+        }
+        // The begin-round preflight event is the durable round-launch marker.
+        // Reusing its operation identity for the provider completion keeps the
+        // post/final candidate anchored to one round event without adding a
+        // second synthetic "running" row.
+        const completeOperationId = preflight.operation_id;
+        const completeRequest: CompleteAgentRoundRequestV2 = {
+          schema_version: 2,
+          operation_id: completeOperationId,
+          controller_cas: authorityFor(current.attempt, conversationId)!,
+          committed_checkpoint: committedCheckpoint,
+          task_id: current.attempt.turnId,
+          conversation_id: conversationId,
+          attempt_id: attemptId,
+          round_id: currentJournal.round_lineage.round_id,
+          round_index: currentJournal.round_index,
+          launch_attempt: currentJournal.round_lineage.launch_attempt,
+          expected_round_revision: preflight.expected_round_revision,
+          transport_schema_version: current.attempt.contextDisposition === 'verified' ? 3 : 2,
+          model: current.attempt.modelId,
+          thinking_mode: current.attempt.thinkingMode,
+          visible_history_sha256: currentVisible.digest,
+          visible_message_count: currentVisible.count,
+          project_context_sha256: agentProjectContextSha(current.attempt),
+          transcript: currentJournal.transcript,
+          root: agentRootForJournal(currentJournal),
+          registry_version: currentJournal.tool_registry_version,
+          toolset_sha256: currentJournal.toolset_sha256,
+        };
+        updateAgentRun({ operationId: completeOperationId });
+        publish(
+          stateFor('sending', {
+            conversationId,
+            turnId: current.attempt.turnId,
+            attemptId,
+            roundId: currentJournal.round_lineage.round_id,
+            transportSchemaVersion: completeRequest.transport_schema_version,
+          }),
+        );
+        let result: CompleteAgentRoundResultV2;
+        try {
+          result = await agentRuntime!.completeAgentRoundV2(completeRequest);
+        } catch (error) {
+          updateAgentRun({ operationId: null, cancelTarget: null });
+          return await failAgentWithoutNative(conversationId, attemptId, agentFailure(error));
+        }
+        if (runEpoch !== epoch) return outcome('cancelled', state);
+        if (!agentRoundContextMatchesAttempt(current.attempt, result)) {
+          return await failAgentWithoutNative(
+            conversationId,
+            attemptId,
+            'E_AGENT_TRANSCRIPT',
+          );
+        }
+        const evidence = mapEvidence('complete_agent_round_v2', completeRequest, result);
+        if (evidence === null) {
+          updateAgentRun({ operationId: null, cancelTarget: null });
+          return await failAgentWithoutNative(conversationId, attemptId, 'E_AGENT_TRANSCRIPT');
+        }
+        if (result.status !== 'completed') {
+          return await finishAgentNonTerminal(
+            conversationId,
+            attemptId,
+            runEpoch,
+            completeRequest,
+            result,
+            evidence,
+          );
+        }
+        if (result.outcome.kind === 'tool_batch') {
+          return await prepareAgentBatch(
+            conversationId,
+            attemptId,
+            runEpoch,
+            completeRequest,
+            result,
+            evidence,
+          );
+        }
+        return await finishAgentTerminal(
+          conversationId,
+          attemptId,
+          runEpoch,
+          completeRequest,
+          result,
+          evidence,
+        );
+      },
+      runEpoch,
+      { conversationId, turnId: attempt.turnId, attemptId },
+    );
+  };
+
+  runAgentRound = runAgentRoundImpl;
+
+  const agentCleanupFor = (
+    conversationId: string,
+    attempt: TurnAttemptV1,
+    journal: PersistedAgentAttemptJournalV3,
+    reason: AgentTranscriptCleanupV1['reason'],
+  ): AgentTranscriptCleanupV1 | null => {
+    const cleanupId = freshOperationId();
+    return cleanupId === null
+      ? null
+      : {
+          schema_version: 1,
+          cleanup_id: cleanupId,
+          conversation_id: conversationId,
+          task_id: attempt.turnId,
+          attempt_id: attempt.attemptId,
+          transcript_ref: journal.transcript.transcript_ref,
+          transcript_sha256: journal.transcript.transcript_sha256,
+          reason,
+          created_at: canonicalNow(dependencies.now),
+        };
+  };
+
+  let finalizeAgent: (
+    conversationId: string,
+    attemptId: string,
+    runEpoch: number,
+    checkpoint: AgentRuntimeCommittedCheckpointV1,
+    journal: PersistedAgentAttemptJournalV3,
+    cleanup: AgentTranscriptCleanupV1,
+    cas: AgentRuntimeControllerCASV1,
+  ) => Promise<CompletionControllerOutcome>;
+
+  const terminalizeAgent = async (
+    conversationId: string,
+    attemptId: string,
+    runEpoch: number,
+    request: CompleteAgentRoundRequestV2,
+    result: Extract<CompleteAgentRoundResultV2, { readonly status: 'completed' }>,
+    evidence: AgentStoreTransitionEvidence,
+    phase: 'final_response' | 'failed',
+  ): Promise<CompletionControllerOutcome> => {
+    const located = getConversationAttempt(conversationId, attemptId);
+    if (located === null || located.attempt.agent === undefined || located.attempt.agent === null) {
+      return await failAgentWithoutNative(conversationId, attemptId, 'E_AGENT_CONFLICT');
+    }
+    const currentJournal = located.attempt.agent;
+    const roundOutcome = result.outcome;
+    const lineage = currentJournal.round_lineage;
+    if (lineage === null) {
+      return await failAgentWithoutNative(conversationId, attemptId, 'E_AGENT_CONFLICT');
+    }
+    const completionReceipt = roundOutcome.completion_receipt;
+    const nextJournal: PersistedAgentAttemptJournalV3 = {
+      ...copyAgentJournal(currentJournal),
+      phase,
+      controller_generation: currentJournal.controller_generation + 1,
+      transcript: copyAgentTranscript(roundOutcome.transcript),
+      round_lineage: {
+        ...lineage,
+        status: 'completed',
+        native_row_revision: result.result_round_revision,
+      },
+      call_index: null,
+      batch: [],
+      updated_at: canonicalNow(dependencies.now),
+    };
+    const cleanup = agentCleanupFor(
+      conversationId,
+      located.attempt,
+      nextJournal,
+      phase === 'final_response' ? 'completed' : 'failed',
+    );
+    if (cleanup === null) {
+      return await failAgentWithoutNative(conversationId, attemptId, 'E_AGENT_PERSISTENCE');
+    }
+    const terminalEvent = agentEvent(
+      attemptId,
+      freshOperationId() ?? request.operation_id,
+      'terminal',
+      null,
+      null,
+      phase === 'final_response' ? 'ok' : 'failed',
+      null,
+      null,
+      null,
+      null,
+      phase === 'final_response' ? null : (roundOutcome.kind === 'blocked' ? roundOutcome.failure_code : 'E_AGENT_PERSISTENCE'),
+    );
+    const assistantMessage =
+      phase === 'final_response' && roundOutcome.kind === 'final'
+        ? (() => {
+            const id = freshOperationId();
+            return id === null
+              ? null
+              : {
+                  id,
+                  role: 'assistant' as const,
+                  text: roundOutcome.text,
+                  createdAt: canonicalNow(dependencies.now),
+                  attachments: [],
+                  metadata: {
+        modelId: completionReceipt.model,
+        latencyMs: completionReceipt.latency_ms,
+        finishReason: completionReceipt.finish_reason,
+                    reasoning: roundOutcome.reasoning,
+                  },
+                };
+          })()
+        : null;
+    if (phase === 'final_response' && assistantMessage === null) {
+      return await failAgentWithoutNative(conversationId, attemptId, 'E_AGENT_PERSISTENCE');
+    }
+    const currentCas = authorityFor(located.attempt, conversationId);
+    if (currentCas === null) {
+      return await failAgentWithoutNative(conversationId, attemptId, 'E_AGENT_PERSISTENCE');
+    }
+    const finalEvidence = evidence;
+    const transaction = dependencies.chat.completeAgentAttempt({
+      cas: currentCas,
+      expectedAttempt: located.attempt,
+      journal: nextJournal,
+      events: [terminalEvent],
+      evidence: finalEvidence,
+      assistantMessage,
+      cleanup,
+    });
+    if (transaction === null) {
+      return await failAgentWithoutNative(conversationId, attemptId, 'E_AGENT_CONFLICT');
+    }
+    publish(
+      stateFor('finalizing', {
+        conversationId,
+        turnId: located.attempt.turnId,
+        attemptId,
+        roundId: request.round_id,
+        transportSchemaVersion: request.transport_schema_version,
+      }),
+    );
+    return await safeAgentPersist(
+      transaction,
+      async committedCheckpoint => {
+        if (runEpoch !== epoch || agentRuntime === undefined) return outcome('cancelled', state);
+        const finalized = await finalizeAgent(
+          conversationId,
+          attemptId,
+          runEpoch,
+          committedCheckpoint,
+          nextJournal,
+          cleanup,
+          currentCas,
+        );
+        return finalized;
+      },
+      runEpoch,
+      { conversationId, turnId: located.attempt.turnId, attemptId },
+      'final',
+    );
+  };
+
+  finishAgentTerminal = async (
+    conversationId,
+    attemptId,
+    runEpoch,
+    request,
+    result,
+    evidence,
+  ) => {
+    if (result.outcome.kind !== 'final') {
+      return await terminalizeAgent(
+        conversationId,
+        attemptId,
+        runEpoch,
+        request,
+        result,
+        evidence,
+        'failed',
+      );
+    }
+    if (result.outcome.text.trim().length === 0) {
+      return await failAgentWithoutNative(conversationId, attemptId, 'E_COMPLETION_EMPTY_RESPONSE');
+    }
+    if (result.outcome.reasoning.length > 0) {
+      emitSessionEvent(attemptId, 'assistant_reasoning', result.outcome.reasoning);
+    }
+    emitSessionEvent(attemptId, 'assistant_text', result.outcome.text);
+    return await terminalizeAgent(
+      conversationId,
+      attemptId,
+      runEpoch,
+      request,
+      result,
+      evidence,
+      'final_response',
+    );
+  };
+
+  const acknowledgeAgentCleanup = async (
+    conversationId: string,
+    attemptId: string,
+    runEpoch: number,
+    cleanup: AgentTranscriptCleanupV1,
+    discardProof: NativeAgentDiscardProofV1,
+  ): Promise<CompletionControllerOutcome> => {
+    // The atomic final checkpoint stores a reducer-owned cleanup entry in the
+    // outbox.  The object supplied by the caller is the pre-dispatch value,
+    // so use the live entry for the identity-bound acknowledgement transaction.
+    const committedCleanup = (dependencies.chat.getState().agentTranscriptCleanupOutbox ?? [])
+      .find(entry => entry.cleanup_id === cleanup.cleanup_id);
+    if (committedCleanup === undefined) {
+      publish(
+        stateFor('blocked', {
+          conversationId,
+          attemptId,
+          failureCode: 'E_AGENT_PERSISTENCE',
+        }),
+      );
+      return outcome('blocked', state);
+    }
+    const transaction = dependencies.chat.acknowledgeAgentTranscriptCleanupTransaction(
+      committedCleanup.cleanup_id,
+      committedCleanup,
+    );
+    if (transaction === null) {
+      publish(
+        stateFor('blocked', {
+          conversationId,
+          attemptId,
+          failureCode: 'E_AGENT_PERSISTENCE',
+        }),
+      );
+      return outcome('blocked', state);
+    }
+    const pending: PendingAgentCleanupAcknowledgement = {
+      epoch: runEpoch,
+      conversationId,
+      turnId: cleanup.task_id,
+      attemptId,
+      cleanup: committedCleanup,
+      discardProof,
+      transaction,
+    };
+    pendingAgentCleanup = pending;
+    const durability = await safePersist();
+    if (runEpoch !== epoch) return outcome('cancelled', state);
+    if (durability.status !== 'committed' || durability.snapshot === undefined) {
+      publish(
+        stateFor('persistence_pending', {
+          conversationId,
+          turnId: cleanup.task_id,
+          attemptId,
+          failureCode: 'E_AGENT_PERSISTENCE',
+        }),
+      );
+      return outcome('persistence_pending', state);
+    }
+    if (!transaction.commit(durability.snapshot, discardProof)) {
+      transaction.rollback();
+      if (pendingAgentCleanup === pending) pendingAgentCleanup = null;
+      publish(
+        stateFor('blocked', {
+          conversationId,
+          turnId: cleanup.task_id,
+          attemptId,
+          failureCode: 'E_COMPLETION_RESULT_CORRELATION',
+        }),
+      );
+      return outcome('blocked', state);
+    }
+    if (pendingAgentCleanup === pending) pendingAgentCleanup = null;
+    const completedRun = agentRun;
+    agentRun = null;
+    publish(stateFor('idle'));
+    try {
+      completedRun?.events.onCommitted?.({
+      conversationId,
+      turnId: cleanup.task_id,
+      attemptId,
+      });
+    } catch {
+      // Completion callbacks cannot change the committed cleanup state.
+    }
+    return {
+      status: 'completed',
+      conversationId,
+      turnId: cleanup.task_id,
+      attemptId,
+      code: null,
+    };
+  };
+
+  finalizeAgent = async (
+    conversationId,
+    attemptId,
+    runEpoch,
+    checkpoint,
+    journal,
+    cleanup,
+  ) => {
+    if (agentRuntime === undefined || runEpoch !== epoch) return outcome('cancelled', state);
+    const located = getConversationAttempt(conversationId, attemptId);
+    if (located === null) return outcome('cancelled', state);
+    const finalCas = authorityFor(located.attempt, conversationId);
+    if (finalCas === null) return await failAgentWithoutNative(conversationId, attemptId, 'E_AGENT_PERSISTENCE');
+    const finalizeOperationId = freshOperationId();
+    if (finalizeOperationId === null) return await failAgentWithoutNative(conversationId, attemptId, 'E_AGENT_PERSISTENCE');
+    const request: FinalizeAgentAttemptRequestV2 = {
+      schema_version: 2,
+      operation_id: finalizeOperationId,
+      controller_cas: finalCas,
+      committed_checkpoint: checkpoint,
+      task_id: located.attempt.turnId,
+      conversation_id: conversationId,
+      attempt_id: attemptId,
+      terminal_reason: journal.phase === 'final_response' ? 'completed' : journal.phase === 'cancelled' ? 'cancelled' : 'failed',
+      cleanup_id: cleanup.cleanup_id,
+      transcript: journal.transcript,
+      root: agentRootForJournal(journal),
+    };
+    updateAgentRun({ operationId: finalizeOperationId });
+    let finalized: FinalizeAgentAttemptResultV2;
+    try {
+      finalized = await agentRuntime.finalizeAgentAttempt(request);
+    } catch (error) {
+      updateAgentRun({ operationId: null, cancelTarget: null });
+      return await failAgentWithoutNative(conversationId, attemptId, agentFailure(error));
+    }
+    if (finalized.status === 'conflict') {
+      return await failAgentWithoutNative(conversationId, attemptId, 'E_AGENT_CONFLICT');
+    }
+    const discardOperationId = freshOperationId();
+    if (discardOperationId === null) return await failAgentWithoutNative(conversationId, attemptId, 'E_AGENT_PERSISTENCE');
+    const discardRequest: DiscardAgentAttemptRequestV2 = {
+      schema_version: 2,
+      operation_id: discardOperationId,
+      cleanup_id: cleanup.cleanup_id,
+      task_id: located.attempt.turnId,
+      conversation_id: conversationId,
+      attempt_id: attemptId,
+      transcript_ref: journal.transcript.transcript_ref,
+      transcript_sha256: journal.transcript.transcript_sha256,
+    };
+    let discarded: DiscardAgentAttemptResultV2;
+    try {
+      discarded = await agentRuntime.discardAgentAttempt(discardRequest);
+    } catch (error) {
+      return await failAgentWithoutNative(conversationId, attemptId, agentFailure(error));
+    }
+    if (discarded.status !== 'discarded' && discarded.status !== 'already_missing') {
+      publish(
+        stateFor('persistence_pending', {
+          conversationId,
+          turnId: located.attempt.turnId,
+          attemptId,
+          failureCode: 'E_AGENT_PERSISTENCE',
+        }),
+      );
+      return outcome('persistence_pending', state);
+    }
+    const discardProof: NativeAgentDiscardProofV1 = {
+      ...discarded,
+      task_id: located.attempt.turnId,
+      conversation_id: conversationId,
+      attempt_id: attemptId,
+      transcript_ref: journal.transcript.transcript_ref,
+      transcript_sha256: journal.transcript.transcript_sha256,
+    };
+    return await acknowledgeAgentCleanup(
+      conversationId,
+      attemptId,
+      runEpoch,
+      cleanup,
+      discardProof,
+    );
+  };
+
+  finishAgentNonTerminal = async (
+    conversationId,
+    attemptId,
+    runEpoch,
+    request,
+    result,
+    evidence,
+  ) => {
+    if (result.status === 'conflict') {
+      return await failAgentWithoutNative(conversationId, attemptId, 'E_AGENT_CONFLICT');
+    }
+    const located = getConversationAttempt(conversationId, attemptId);
+    if (located === null || located.attempt.agent === undefined || located.attempt.agent === null) {
+      return await failAgentWithoutNative(conversationId, attemptId, 'E_AGENT_CONFLICT');
+    }
+    const current = located.attempt.agent;
+    const lineage = current.round_lineage;
+    if (lineage === null) return await failAgentWithoutNative(conversationId, attemptId, 'E_AGENT_CONFLICT');
+    const phase: AgentAttemptPhase =
+      result.status === 'in_flight'
+        ? 'round_in_flight'
+        : result.status === 'cancelled'
+          ? 'cancelled'
+          : result.status === 'failed_retryable'
+            ? 'failed'
+          : result.status === 'unknown'
+            ? 'unknown'
+            : 'ambiguous';
+    const nextJournal: PersistedAgentAttemptJournalV3 = {
+      ...copyAgentJournal(current),
+      phase,
+      controller_generation: current.controller_generation + 1,
+      transcript: copyAgentTranscript(result.transcript),
+      round_lineage: {
+        ...lineage,
+        status:
+          result.status === 'in_flight'
+            ? 'active'
+            : result.status === 'cancelled'
+              ? 'cancelled'
+              : result.status === 'failed_retryable'
+                ? 'failed_retryable'
+              : result.status,
+        native_row_revision: result.result_round_revision,
+      },
+      updated_at: canonicalNow(dependencies.now),
+    };
+    const eventId = freshOperationId();
+    if (eventId === null) {
+      return await failAgentWithoutNative(conversationId, attemptId, 'E_AGENT_PERSISTENCE');
+    }
+    const event = agentEvent(
+      attemptId,
+      eventId,
+      'round',
+      request.round_index,
+      null,
+      'running',
+      null,
+      null,
+      null,
+      null,
+      null,
+    );
+    const cleanup =
+      phase === 'round_in_flight'
+        ? undefined
+        : agentCleanupFor(
+            conversationId,
+            located.attempt,
+            nextJournal,
+            phase === 'cancelled' ? 'cancelled' : 'failed',
+          );
+    if (phase !== 'round_in_flight' && cleanup === null) {
+      return await failAgentWithoutNative(conversationId, attemptId, 'E_AGENT_PERSISTENCE');
+    }
+    const cas = authorityFor(located.attempt, conversationId);
+    if (cas === null) return await failAgentWithoutNative(conversationId, attemptId, 'E_AGENT_PERSISTENCE');
+    const transaction =
+      phase === 'cancelled'
+        ? dependencies.chat.cancelAgentAttempt({
+            cas,
+            expectedAttempt: located.attempt,
+            journal: nextJournal,
+            events: [event],
+            evidence,
+            ...(cleanup === null || cleanup === undefined ? {} : { cleanup }),
+          })
+        : dependencies.chat.failAgentAttempt({
+            cas,
+            expectedAttempt: located.attempt,
+            journal: nextJournal,
+            events: [event],
+            evidence,
+            ...(cleanup === null || cleanup === undefined ? {} : { cleanup }),
+          });
+    if (transaction === null) return await failAgentWithoutNative(conversationId, attemptId, 'E_AGENT_CONFLICT');
+    if (phase !== 'round_in_flight' && cleanup !== null && cleanup !== undefined) {
+      publish(stateFor('finalizing', { conversationId, turnId: located.attempt.turnId, attemptId, roundId: request.round_id, transportSchemaVersion: request.transport_schema_version }));
+    }
+    return await safeAgentPersist(
+      transaction,
+      async committedCheckpoint => {
+        if (phase === 'round_in_flight') {
+          // Native reported that the round is still in flight. The durable
+          // journal now owns that identity; probing/recovery must decide its
+          // outcome before any later provider request is attempted.
+          publish(stateFor('resume_available', {
+            conversationId,
+            turnId: located.attempt.turnId,
+            attemptId,
+            roundId: request.round_id,
+            transportSchemaVersion: request.transport_schema_version,
+            failureCode: 'E_AGENT_CONFLICT',
+          }));
+          return outcome('retryable', state);
+        }
+        if (agentRuntime === undefined) return outcome('cancelled', state);
+        // A cancelled/unknown/ambiguous round is never re-executed. Keep the
+        // durable terminal candidate visible; recovery owns any later probe.
+        if (phase === 'cancelled' && cleanup !== null && cleanup !== undefined) {
+          const finalized = await finalizeAgent(
+            conversationId,
+            attemptId,
+            runEpoch,
+            committedCheckpoint,
+            nextJournal,
+            cleanup,
+            cas,
+          );
+          return finalized;
+        }
+        publish(stateFor('retryable', { conversationId, turnId: located.attempt.turnId, attemptId, roundId: request.round_id, transportSchemaVersion: request.transport_schema_version, failureCode: result.status === 'unknown' ? 'E_AGENT_CONFLICT' : 'E_AGENT_EXECUTION_AMBIGUOUS' }));
+        return outcome('retryable', state);
+      },
+      runEpoch,
+      { conversationId, turnId: located.attempt.turnId, attemptId },
+      phase === 'round_in_flight' ? 'checkpoint' : 'cancel',
+    );
+  };
+
+  prepareAgentBatch = async (
+    conversationId,
+    attemptId,
+    runEpoch,
+    request,
+    result,
+    evidence,
+  ) => {
+    if (agentRuntime === undefined || result.outcome.kind !== 'tool_batch') {
+      return await failAgentWithoutNative(conversationId, attemptId, 'E_AGENT_TRANSCRIPT');
+    }
+    const located = getConversationAttempt(conversationId, attemptId);
+    if (located === null || located.attempt.agent === undefined || located.attempt.agent === null) {
+      return await failAgentWithoutNative(conversationId, attemptId, 'E_AGENT_CONFLICT');
+    }
+    const journal = located.attempt.agent;
+    const lineage = journal.round_lineage;
+    if (lineage === null) return await failAgentWithoutNative(conversationId, attemptId, 'E_AGENT_CONFLICT');
+
+    // First commit the completed provider round. The native batch preparation
+    // is a separate effect and may only observe this committed checkpoint.
+    const completedRoundJournal: PersistedAgentAttemptJournalV3 = {
+      ...copyAgentJournal(journal),
+      phase: 'batch_frozen',
+      controller_generation: journal.controller_generation + 1,
+      transcript: copyAgentTranscript(result.outcome.transcript),
+      round_lineage: {
+        ...lineage,
+        status: 'completed',
+        native_row_revision: result.result_round_revision,
+      },
+      call_index: null,
+      batch: [],
+      updated_at: canonicalNow(dependencies.now),
+    };
+    const completedRoundEventId = freshOperationId();
+    const completedRoundCas = authorityFor(located.attempt, conversationId);
+    if (completedRoundEventId === null || completedRoundCas === null) {
+      return await failAgentWithoutNative(conversationId, attemptId, 'E_AGENT_PERSISTENCE');
+    }
+    const completedRoundEvent = agentEvent(
+      attemptId,
+      completedRoundEventId,
+      'round',
+      request.round_index,
+      null,
+      'running',
+      null,
+      null,
+      null,
+      null,
+      null,
+    );
+    const completedRoundTransaction = dependencies.chat.checkpointAgentRound({
+      cas: completedRoundCas,
+      expectedAttempt: located.attempt,
+      journal: completedRoundJournal,
+      events: [completedRoundEvent],
+      evidence,
+    });
+    if (completedRoundTransaction === null) {
+      return await failAgentWithoutNative(conversationId, attemptId, 'E_AGENT_CONFLICT');
+    }
+    return await safeAgentPersist(
+      completedRoundTransaction,
+      async completedCheckpoint => {
+        const completed = getConversationAttempt(conversationId, attemptId);
+        if (
+          completed === null ||
+          completed.attempt.agent === undefined ||
+          completed.attempt.agent === null ||
+          completed.attempt.agent.round_lineage === null
+        ) return await failAgentWithoutNative(conversationId, attemptId, 'E_AGENT_CONFLICT');
+        const completedJournal = completed.attempt.agent;
+        const completedLineage = completedJournal.round_lineage;
+        if (completedLineage === null) {
+          return await failAgentWithoutNative(conversationId, attemptId, 'E_AGENT_CONFLICT');
+        }
+        const batchOperationId = freshOperationId();
+        const batchCas = authorityFor(completed.attempt, conversationId);
+        // The batch revision is a native authority, not a count of provider
+        // rounds. Keep the last committed batch receipt across the next
+        // round; a fresh receipt replaces it below after the new batch
+        // checkpoint is durably committed.
+        const expectedBatchRevision = agentRun?.batchAuthority?.batchRevision ?? 0;
+        if (batchOperationId === null || batchCas === null) {
+          return await failAgentWithoutNative(conversationId, attemptId, 'E_AGENT_PERSISTENCE');
+        }
+        const batchRequest: PrepareAgentToolBatchRequestV2 = {
+          schema_version: 2,
+          operation_id: batchOperationId,
+          controller_cas: batchCas,
+          committed_checkpoint: completedCheckpoint,
+          task_id: completed.attempt.turnId,
+          conversation_id: conversationId,
+          attempt_id: attemptId,
+          round_id: completedLineage.round_id,
+          round_index: completedJournal.round_index,
+          expected_round_revision: result.result_round_revision,
+          transcript: result.outcome.transcript,
+          root: agentRootForJournal(completedJournal),
+          registry_version: completedJournal.tool_registry_version,
+          toolset_sha256: completedJournal.toolset_sha256,
+          policy_version: completedJournal.policy.policy_version as 'agent-v1',
+          expected_batch_revision: expectedBatchRevision,
+          expected_reserved_write_bytes: completedJournal.reserved_write_bytes,
+        };
+        updateAgentRun({ operationId: batchOperationId });
+        let batchResult: PrepareAgentToolBatchResultV2;
+        try {
+          batchResult = await agentRuntime!.prepareAgentToolBatch(batchRequest);
+        } catch (error) {
+          return await failAgentWithoutNative(conversationId, attemptId, agentFailure(error));
+        }
+        if (runEpoch !== epoch) return outcome('cancelled', state);
+        const batchEvidence = mapEvidence('prepare_agent_tool_batch', batchRequest, batchResult);
+        if (batchEvidence === null) return await failAgentWithoutNative(conversationId, attemptId, 'E_AGENT_TRANSCRIPT');
+        if (batchResult.status === 'conflict') {
+          return await failAgentWithoutNative(conversationId, attemptId, 'E_AGENT_CONFLICT');
+        }
+        if (batchResult.status === 'rejected') {
+          return await failAgentWithoutNative(conversationId, attemptId, batchResult.failure_code as AttemptFailureCode);
+        }
+        if (agentRun !== null) {
+          agentRun = {
+            ...rememberAgentTokens(agentRun, batchResult.receipt.calls),
+            batchAuthority: {
+              roundId: batchResult.receipt.round_id,
+              roundIndex: batchResult.receipt.round_index,
+              batchKind: batchResult.receipt.batch_kind,
+              batchRevision: batchResult.receipt.batch_revision,
+              manifestSha256: batchResult.receipt.manifest_sha256,
+              resultRoundRevision: result.result_round_revision,
+            },
+          };
+        }
+        const batchJournal = journalForBatchReceipt(
+          completedJournal,
+          batchResult.receipt,
+          result.result_round_revision,
+          canonicalNow(dependencies.now),
+        );
+        const batchEvent = agentEvent(
+          attemptId,
+          batchOperationId,
+          'round',
+          request.round_index,
+          null,
+          'running',
+          null,
+          null,
+          null,
+          null,
+          null,
+        );
+        const transaction = dependencies.chat.checkpointAgentRound({
+          cas: batchCas,
+          expectedAttempt: completed.attempt,
+          journal: batchJournal,
+          events: [batchEvent],
+          evidence: batchEvidence,
+        });
+        if (transaction === null) return await failAgentWithoutNative(conversationId, attemptId, 'E_AGENT_CONFLICT');
+        publish(
+          stateFor(batchJournal.phase === 'approval_pending' ? 'approval_pending' : 'executing', {
+            conversationId,
+            turnId: completed.attempt.turnId,
+            attemptId,
+            roundId: completedLineage.round_id,
+            transportSchemaVersion: request.transport_schema_version,
+          }),
+        );
+        return await safeAgentPersist(
+          transaction,
+          async () => await runAgentBatch(conversationId, attemptId, runEpoch),
+          runEpoch,
+          { conversationId, turnId: completed.attempt.turnId, attemptId },
+        );
+      },
+      runEpoch,
+      { conversationId, turnId: located.attempt.turnId, attemptId },
+    );
+  };
+
+  const bindAgentApproval = async (
+    conversationId: string,
+    attemptId: string,
+    runEpoch: number,
+    callIndex: number,
+  ): Promise<CompletionControllerOutcome> => {
+    if (agentRuntime === undefined) return await failAgentWithoutNative(conversationId, attemptId, 'E_AGENT_APPROVAL');
+    const located = getConversationAttempt(conversationId, attemptId);
+    if (located === null || located.attempt.agent === undefined || located.attempt.agent === null) {
+      return await failAgentWithoutNative(conversationId, attemptId, 'E_AGENT_CONFLICT');
+    }
+    const { conversation, attempt } = located;
+    const journal = attempt.agent;
+    if (journal === undefined || journal === null) {
+      return await failAgentWithoutNative(conversationId, attemptId, 'E_AGENT_CONFLICT');
+    }
+    const call = journal.batch[callIndex];
+    const token = agentTokenByIndex(agentRun, callIndex);
+    if (
+      call === undefined ||
+      token === null ||
+      call.approval_token !== token.token ||
+      (call.access !== 'conversation_confirm' && call.access !== 'confirm_once')
+    ) return await failAgentWithoutNative(conversationId, attemptId, 'E_AGENT_APPROVAL');
+    const approvalId = freshOperationId();
+    const allowedDecisions = token.allowed_decisions;
+    if (approvalId === null) return await failAgentWithoutNative(conversationId, attemptId, 'E_AGENT_PERSISTENCE');
+    publish(
+      stateFor('approval_pending', {
+        conversationId,
+        turnId: attempt.turnId,
+        attemptId,
+        roundId: token.round_id,
+        transportSchemaVersion: attempt.contextDisposition === 'verified' ? 3 : 2,
+      }),
+    );
+    const request: CompletionAgentApprovalRequest = {
+      approvalId,
+      conversationId,
+      taskId: attempt.turnId,
+      attemptId,
+      roundId: token.round_id,
+      roundIndex: token.round_index,
+      batchRevision: token.batch_revision,
+      manifestSha256: token.manifest_sha256,
+      callIndex,
+      callId: call.call_id,
+      name: call.name,
+      argumentsSha256: call.arguments_sha256,
+      access: call.access,
+      allowedDecisions,
+    };
+    let rawDecision: unknown;
+    try {
+      rawDecision = dependencies.requestAgentApproval === undefined
+        ? undefined
+        : await dependencies.requestAgentApproval(request);
+    } catch {
+      rawDecision = undefined;
+    }
+    if (runEpoch !== epoch) return outcome('cancelled', state);
+    const decision = agentSafeApprovalDecision(rawDecision, allowedDecisions);
+    const grant =
+      decision === 'allow_conversation'
+        ? agentGrantFor(conversation, journal, call) ?? agentNewGrant(conversation, attempt, journal, call)
+        : null;
+    if (decision === 'allow_conversation' && grant === null) {
+      return await failAgentWithoutNative(conversationId, attemptId, 'E_AGENT_APPROVAL');
+    }
+    const baseCas = authorityFor(attempt, conversationId);
+    if (baseCas === null) return await failAgentWithoutNative(conversationId, attemptId, 'E_AGENT_PERSISTENCE');
+    const nextJournal = journalForApproval(
+      journal,
+      callIndex,
+      decision,
+      decision === 'denied' || decision === 'cancelled' ? null : approvalId,
+      grant?.grant_id ?? null,
+      canonicalNow(dependencies.now),
+    );
+    const previousGrants = conversation.agentGrants ?? conversation.agent_grants ?? [];
+    const grants =
+      grant === null || previousGrants.some(item => item.grant_id === grant.grant_id)
+        ? previousGrants
+        : [...previousGrants, grant];
+    const preflight = validateAgentControllerPreflight({
+      schema_version: 1,
+      source: 'completion_controller',
+      kind: 'decide_approval',
+      operation_id: approvalId,
+      base_cas: baseCas,
+      conversation_id: conversationId,
+      task_id: attempt.turnId,
+      attempt_id: attemptId,
+      round_id: token.round_id,
+      round_index: token.round_index,
+      batch_revision: token.batch_revision,
+      manifest_sha256: token.manifest_sha256,
+      call_index: callIndex,
+      call_id: call.call_id,
+      name: call.name,
+      arguments_sha256: call.arguments_sha256,
+      approval_token: token.token,
+      decision,
+      source_event_id: approvalId,
+      access: call.access,
+      workspace_id: journal.root.workspace_id,
+      project_id: journal.root.project_id,
+      binding_revision: journal.root.workspace_binding_revision,
+      root_fingerprint_sha256: journal.root.root_fingerprint_sha256,
+      policy_version: 'agent-v1',
+      registry_version: 1,
+      tool_family: agentToolFamily(call.name),
+      grant,
+    });
+    if (preflight === null) return await failAgentWithoutNative(conversationId, attemptId, 'E_AGENT_APPROVAL');
+    const transaction = dependencies.chat.decideAgentApproval({
+      cas: baseCas,
+      expectedConversation: conversation,
+      expectedAttempt: attempt,
+      journal: nextJournal,
+      grants,
+      events: [],
+      evidence: preflight,
+    });
+    if (transaction === null) return await failAgentWithoutNative(conversationId, attemptId, 'E_AGENT_CONFLICT');
+    return await safeAgentPersist(
+      transaction,
+      async committedCheckpoint => {
+        if (runEpoch !== epoch) return outcome('cancelled', state);
+        if (decision === 'denied' || decision === 'cancelled') {
+          // Native bind is still the idempotent authority record. The Store
+          // preflight already closed the decision; no effect is dispatched.
+          let deniedResult: BindAgentApprovalResultV2;
+          const deniedOperationId = approvalId;
+          const deniedCurrent = getConversationAttempt(conversationId, attemptId);
+          const deniedCas = deniedCurrent === null
+            ? null
+            : authorityFor(deniedCurrent.attempt, conversationId);
+          if (deniedCas === null) return await failAgentWithoutNative(conversationId, attemptId, 'E_AGENT_PERSISTENCE');
+          const deniedRequest: BindAgentApprovalRequestV2 = {
+            schema_version: 2,
+            operation_id: deniedOperationId,
+            controller_cas: deniedCas,
+            committed_checkpoint: committedCheckpoint,
+            task_id: attempt.turnId,
+            conversation_id: conversationId,
+            attempt_id: attemptId,
+            round_id: token.round_id,
+            round_index: token.round_index,
+            manifest_sha256: token.manifest_sha256,
+            batch_revision: token.batch_revision,
+            call_index: callIndex,
+            call_id: call.call_id,
+            // The native token is an immutable envelope issued with the batch
+            // receipt. Top-level CAS advances with the persisted decision.
+            token,
+            decision,
+          };
+          try {
+            deniedResult = await agentRuntime!.bindAgentApproval(deniedRequest);
+          } catch {
+            return await failAgentWithoutNative(conversationId, attemptId, 'E_AGENT_APPROVAL');
+          }
+          if (mapEvidence('bind_agent_approval', deniedRequest, deniedResult) === null) {
+            return await failAgentWithoutNative(conversationId, attemptId, 'E_AGENT_TRANSCRIPT');
+          }
+          return await runAgentBatch(conversationId, attemptId, runEpoch);
+        }
+        // Reuse the approval preflight event identity for the native bind. The
+        // post-checkpoint ordering guard intentionally requires that marker to
+        // already be durable before accepting bind evidence.
+        const bindOperationId = approvalId;
+        const current = getConversationAttempt(conversationId, attemptId);
+        if (current === null || current.attempt.agent === undefined || current.attempt.agent === null) {
+          return await failAgentWithoutNative(conversationId, attemptId, 'E_AGENT_PERSISTENCE');
+        }
+        const currentJournal = current.attempt.agent;
+        const bindCas = authorityFor(current.attempt, conversationId);
+        if (bindCas === null) return await failAgentWithoutNative(conversationId, attemptId, 'E_AGENT_PERSISTENCE');
+        const bindRequest: BindAgentApprovalRequestV2 = {
+          schema_version: 2,
+          operation_id: bindOperationId,
+          controller_cas: bindCas,
+          committed_checkpoint: committedCheckpoint,
+          task_id: current.attempt.turnId,
+          conversation_id: conversationId,
+          attempt_id: attemptId,
+          round_id: token.round_id,
+          round_index: token.round_index,
+          manifest_sha256: token.manifest_sha256,
+          batch_revision: token.batch_revision,
+          call_index: callIndex,
+          call_id: call.call_id,
+          // Keep the native batch envelope byte-for-byte intact. Native binds
+          // it against the newer top-level CAS and committed decision journal.
+          token,
+          decision,
+        };
+        updateAgentRun({ operationId: bindOperationId });
+        let bindResult: BindAgentApprovalResultV2;
+        try {
+          bindResult = await agentRuntime!.bindAgentApproval(bindRequest);
+        } catch (error) {
+          return await failAgentWithoutNative(conversationId, attemptId, agentFailure(error));
+        }
+        const bindEvidence = mapEvidence('bind_agent_approval', bindRequest, bindResult);
+        if (bindEvidence === null || bindResult.status === 'conflict') {
+          return await failAgentWithoutNative(conversationId, attemptId, 'E_AGENT_APPROVAL');
+        }
+        const afterCall = currentJournal.batch[callIndex];
+        if (afterCall === undefined) return await failAgentWithoutNative(conversationId, attemptId, 'E_AGENT_CONFLICT');
+        const postJournalBase: PersistedAgentAttemptJournalV3 = {
+          ...copyAgentJournal(currentJournal),
+          controller_generation: currentJournal.controller_generation + 1,
+          phase: 'batch_frozen',
+          call_index: currentJournal.batch.findIndex(candidate => candidate.receipt === null),
+          updated_at: canonicalNow(dependencies.now),
+        };
+        const boundCall = postJournalBase.batch[callIndex];
+        const postJournal: PersistedAgentAttemptJournalV3 = boundCall === undefined
+          ? postJournalBase
+          : {
+              ...postJournalBase,
+              batch: postJournalBase.batch.map((candidate, index) =>
+                index === callIndex
+                  ? { ...candidate, approval_reference: bindResult.approval_reference }
+                  : candidate,
+              ),
+            };
+        const approvalEvent = agentEvent(
+          attemptId,
+          freshOperationId() ?? bindRequest.operation_id,
+          'approval',
+          bindRequest.round_index,
+          bindRequest.call_id,
+          'approval',
+          `agent.${call.name}`,
+          call.arguments_sha256,
+          null,
+          bindResult.approval_reference,
+          null,
+        );
+        const postCas = authorityFor(current.attempt, conversationId);
+        if (postCas === null) return await failAgentWithoutNative(conversationId, attemptId, 'E_AGENT_PERSISTENCE');
+        const postConversation = getConversationAttempt(conversationId, attemptId)?.conversation;
+        if (postConversation === undefined) return await failAgentWithoutNative(conversationId, attemptId, 'E_AGENT_CONFLICT');
+        const postTransaction = dependencies.chat.checkpointAgentApproval({
+          cas: postCas,
+          expectedConversation: postConversation,
+          expectedAttempt: current.attempt,
+          journal: postJournal,
+          grants: postConversation.agentGrants ?? postConversation.agent_grants ?? [],
+          events: [approvalEvent],
+          evidence: bindEvidence,
+        });
+        if (postTransaction === null) return await failAgentWithoutNative(conversationId, attemptId, 'E_AGENT_CONFLICT');
+        return await safeAgentPersist(
+          postTransaction,
+          async () => await runAgentBatch(conversationId, attemptId, runEpoch),
+          runEpoch,
+          { conversationId, turnId: current.attempt.turnId, attemptId },
+        );
+      },
+      runEpoch,
+      { conversationId, turnId: attempt.turnId, attemptId },
+    );
+  };
+
+  const executeAgentCall = async (
+    conversationId: string,
+    attemptId: string,
+    runEpoch: number,
+    callIndex: number,
+  ): Promise<CompletionControllerOutcome> => {
+    if (agentRuntime === undefined) return await failAgentWithoutNative(conversationId, attemptId, 'E_COMPLETION_NATIVE');
+    const located = getConversationAttempt(conversationId, attemptId);
+    if (located === null || located.attempt.agent === undefined || located.attempt.agent === null) return await failAgentWithoutNative(conversationId, attemptId, 'E_AGENT_CONFLICT');
+    const { attempt } = located;
+    const journal = attempt.agent;
+    if (journal === undefined || journal === null) {
+      return await failAgentWithoutNative(conversationId, attemptId, 'E_AGENT_CONFLICT');
+    }
+    const call = journal.batch[callIndex];
+    if (call === undefined || call.receipt !== null || call.idempotency_key === null) return await failAgentWithoutNative(conversationId, attemptId, 'E_AGENT_CONFLICT');
+    const cas = authorityFor(attempt, conversationId);
+    const checkpoint = agentCheckpointForJournal(attempt);
+    const operationId = freshOperationId();
+    if (cas === null || checkpoint === null || operationId === null) return await failAgentWithoutNative(conversationId, attemptId, 'E_AGENT_PERSISTENCE');
+    const batchAuthority = agentRun?.batchAuthority;
+    if (
+      batchAuthority === null ||
+      batchAuthority === undefined ||
+      batchAuthority.roundId !== journal.round_lineage?.round_id ||
+      batchAuthority.roundIndex !== journal.round_index ||
+      batchAuthority.resultRoundRevision !== journal.round_lineage?.native_row_revision
+    ) return await failAgentWithoutNative(conversationId, attemptId, 'E_AGENT_CONFLICT');
+    const batchKind = batchAuthority.batchKind;
+    const manifestSha256 = batchAuthority.manifestSha256;
+    const approvalReference = call.access === 'auto' ? null : call.approval_reference;
+    const preflight = validateAgentControllerPreflight({
+      schema_version: 1,
+      source: 'completion_controller',
+      kind: 'begin_execution',
+      operation_id: operationId,
+      base_cas: cas,
+      conversation_id: conversationId,
+      task_id: attempt.turnId,
+      attempt_id: attemptId,
+      round_id: journal.round_lineage?.round_id ?? '',
+      round_index: journal.round_index,
+      batch_kind: batchKind,
+      batch_revision: batchAuthority.batchRevision,
+      manifest_sha256: manifestSha256,
+      call_index: callIndex,
+      call_id: call.call_id,
+      name: call.name,
+      arguments_sha256: call.arguments_sha256,
+      idempotency_key: call.idempotency_key,
+      expected_execution_revision: call.native_row_revision ?? 1,
+      transcript: journal.transcript,
+      root: agentRootForJournal(journal),
+      access: call.access === 'durable_deny' ? 'auto' : call.access,
+      approval_state: call.access === 'auto' ? 'not_required' : 'bound',
+      approval_reference: approvalReference,
+      source_event_id: operationId,
+    });
+    if (preflight === null) return await failAgentWithoutNative(conversationId, attemptId, 'E_AGENT_CONFLICT');
+    const nextJournal = journalForExecutionIntent(journal, callIndex, canonicalNow(dependencies.now));
+    const transaction = dependencies.chat.insertAgentExecutionIntent({
+      cas,
+      expectedAttempt: attempt,
+      journal: nextJournal,
+      callIndex,
+      events: [],
+      evidence: preflight,
+    });
+    if (transaction === null) return await failAgentWithoutNative(conversationId, attemptId, 'E_AGENT_CONFLICT');
+    updateAgentRun({ operationId, cancelTarget: { schema_version: 2, kind: 'tool', task_id: attempt.turnId, attempt_id: attemptId, round_id: journal.round_lineage?.round_id ?? '', round_index: journal.round_index, call_index: callIndex, call_id: call.call_id, idempotency_key: call.idempotency_key } });
+    publish(stateFor('executing', { conversationId, turnId: attempt.turnId, attemptId, roundId: journal.round_lineage?.round_id ?? null, transportSchemaVersion: attempt.contextDisposition === 'verified' ? 3 : 2 }));
+    return await safeAgentPersist(
+      transaction,
+      async committedCheckpoint => {
+        const current = getConversationAttempt(conversationId, attemptId);
+        if (current === null || current.attempt.agent === undefined || current.attempt.agent === null || current.attempt.agent.round_lineage === null) return await failAgentWithoutNative(conversationId, attemptId, 'E_AGENT_CONFLICT');
+        const currentJournal = current.attempt.agent;
+        const currentLineage = currentJournal.round_lineage;
+        if (currentLineage === null) {
+          return await failAgentWithoutNative(conversationId, attemptId, 'E_AGENT_CONFLICT');
+        }
+        const executeRequest: ExecuteAgentToolRequestV2 = {
+          schema_version: 2,
+          operation_id: operationId,
+          controller_cas: authorityFor(current.attempt, conversationId)!,
+          committed_checkpoint: committedCheckpoint,
+          task_id: current.attempt.turnId,
+          conversation_id: conversationId,
+          attempt_id: attemptId,
+          round_id: currentLineage.round_id,
+          round_index: currentJournal.round_index,
+          batch_kind: batchKind,
+          manifest_sha256: manifestSha256,
+          expected_batch_revision: batchAuthority.batchRevision,
+          call_index: callIndex,
+          call_id: call.call_id,
+          name: call.name,
+          arguments_sha256: call.arguments_sha256,
+          idempotency_key: call.idempotency_key!,
+          expected_execution_revision: call.native_row_revision ?? 1,
+          transcript: currentJournal.transcript,
+          root: agentRootForJournal(currentJournal),
+          approval_reference: approvalReference,
+        };
+        const executionEvent = (dependencies.chat.getState().sessionEvents ?? [])
+          .find(event => event.event_id === executeRequest.operation_id);
+        const resultEventId = freshOperationId();
+        const terminalEventId = freshOperationId();
+        if (executionEvent === undefined || resultEventId === null || terminalEventId === null) {
+          return await failAgentWithoutNative(conversationId, attemptId, 'E_AGENT_PERSISTENCE');
+        }
+        updateAgentRun({ operationId: executeRequest.operation_id });
+        let executeResult: ExecuteAgentToolResultV2;
+        try {
+          executeResult = await agentRuntime!.executeAgentTool(executeRequest);
+        } catch (error) {
+          return await failAgentWithoutNative(conversationId, attemptId, agentFailure(error));
+        }
+        const executeEvidence = mapEvidence('execute_agent_tool', executeRequest, executeResult);
+        if (executeEvidence === null || executeResult.status === 'conflict') return await failAgentWithoutNative(conversationId, attemptId, 'E_AGENT_EXECUTION_AMBIGUOUS');
+        const safeExecuteResult = executeResult as AgentExecuteResult;
+        // Capture the discriminant before the receipt transaction narrows the
+        // native union; the post-commit branch must still handle unknown and
+        // ambiguous outcomes without issuing another effect.
+        const executeStatus: ExecuteAgentToolResultV2['status'] = executeResult.status;
+        const resultJournal = journalForToolResult(currentJournal, safeExecuteResult, canonicalNow(dependencies.now));
+        if (resultJournal === null) return await failAgentWithoutNative(conversationId, attemptId, 'E_AGENT_TRANSCRIPT');
+        const resultEvent =
+          executeStatus === 'running' || executeStatus === 'cancel_requested'
+            ? agentEvent(
+                attemptId,
+                resultEventId,
+                'tool_call',
+                executeRequest.round_index,
+                executeRequest.call_id,
+                'running',
+                `agent.${executeRequest.name}`,
+                executeRequest.arguments_sha256,
+                null,
+                null,
+                null,
+              )
+            : agentEvent(
+                attemptId,
+                resultEventId,
+                'tool_result',
+                executeRequest.round_index,
+                executeRequest.call_id,
+                executeStatus === 'unknown'
+                  ? 'unknown'
+                  : safeExecuteResult.receipt?.outcome ?? 'failed',
+                `agent.${executeRequest.name}`,
+                executeRequest.arguments_sha256,
+                safeExecuteResult.receipt?.result_sha256 ?? null,
+                safeExecuteResult.receipt?.approval_reference ?? approvalReference,
+                executeStatus === 'unknown'
+                  ? 'E_AGENT_CONFLICT'
+                  : (safeExecuteResult.receipt?.failure_code ?? null) as PersistedSessionEventV3['failure_code'],
+              );
+        const resultCas = authorityFor(current.attempt, conversationId);
+        if (resultCas === null) return await failAgentWithoutNative(conversationId, attemptId, 'E_AGENT_PERSISTENCE');
+        if (executeStatus === 'cancelled') {
+          const cleanup = agentCleanupFor(
+            conversationId,
+            current.attempt,
+            resultJournal,
+            'cancelled',
+          );
+          if (cleanup === null) return await failAgentWithoutNative(conversationId, attemptId, 'E_AGENT_PERSISTENCE');
+          const terminalEvent = {
+            ...agentEvent(
+              attemptId,
+              terminalEventId,
+              'terminal',
+              null,
+              null,
+              'cancelled',
+              null,
+              null,
+              null,
+              null,
+              'E_AGENT_CANCELLED',
+            ),
+            seq: resultEvent.seq + 1,
+          };
+          const terminalTransaction = dependencies.chat.completeAgentAttempt({
+            cas: resultCas,
+            expectedAttempt: current.attempt,
+            journal: resultJournal,
+            events: [executionEvent, resultEvent, terminalEvent],
+            evidence: executeEvidence,
+            assistantMessage: null,
+            cleanup,
+          });
+          if (terminalTransaction === null) return await failAgentWithoutNative(conversationId, attemptId, 'E_AGENT_CONFLICT');
+          publish(stateFor('finalizing', {
+            conversationId,
+            turnId: current.attempt.turnId,
+            attemptId,
+            roundId: executeRequest.round_id,
+            transportSchemaVersion: executeRequest.batch_kind === 'write_batch' ? 3 : 2,
+          }));
+          return await safeAgentPersist(
+            terminalTransaction,
+            async finalCheckpoint => await finalizeAgent(
+              conversationId,
+              attemptId,
+              runEpoch,
+              finalCheckpoint,
+              resultJournal,
+              cleanup,
+              resultCas,
+            ),
+            runEpoch,
+            { conversationId, turnId: current.attempt.turnId, attemptId },
+            'final',
+          );
+        }
+        const resultTransaction =
+            executeStatus === 'completed' || executeStatus === 'failed' || executeStatus === 'denied'
+            ? dependencies.chat.recordAgentToolResult({ cas: resultCas, expectedAttempt: current.attempt, journal: resultJournal, callIndex, receipt: safeExecuteResult.receipt! as unknown as StoreAgentToolReceiptV1, events: [executionEvent, resultEvent], evidence: executeEvidence })
+            : dependencies.chat.checkpointAgentAttempt({ cas: resultCas, expectedAttempt: current.attempt, journal: resultJournal, events: [executionEvent, resultEvent], evidence: executeEvidence });
+        if (resultTransaction === null) return await failAgentWithoutNative(conversationId, attemptId, 'E_AGENT_CONFLICT');
+        return await safeAgentPersist(
+          resultTransaction,
+          async () => {
+            if (executeStatus === 'unknown' || executeStatus === 'ambiguous') {
+              publish(stateFor('retryable', { conversationId, turnId: current.attempt.turnId, attemptId, roundId: executeRequest.round_id, transportSchemaVersion: executeRequest.batch_kind === 'write_batch' ? 3 : 2, failureCode: safeExecuteResult.status === 'ambiguous' ? 'E_AGENT_EXECUTION_AMBIGUOUS' : 'E_AGENT_CONFLICT' }));
+              return outcome('retryable', state);
+            }
+            const latest = getConversationAttempt(conversationId, attemptId);
+            const nextCallIndex = latest?.attempt.agent === undefined || latest?.attempt.agent === null
+              ? -1
+              : latest.attempt.agent.batch.findIndex(
+                  candidate =>
+                    candidate.receipt === null &&
+                    (candidate.access === 'auto' ||
+                      candidate.approval_decision === 'allow_once' ||
+                      candidate.approval_decision === 'allow_conversation'),
+                );
+            if (
+              latest !== null &&
+              latest.attempt.agent !== undefined &&
+              latest.attempt.agent !== null &&
+              nextCallIndex >= 0
+            ) {
+              const advanceCas = authorityFor(latest.attempt, conversationId);
+              const nextCall = latest.attempt.agent.batch[nextCallIndex];
+              const advanceJournal: PersistedAgentAttemptJournalV3 = {
+                ...copyAgentJournal(latest.attempt.agent),
+                phase:
+                  nextCall !== undefined &&
+                  nextCall.access !== 'auto' &&
+                  nextCall.access !== 'durable_deny' &&
+                  nextCall.approval_decision === 'pending'
+                    ? 'approval_pending'
+                    : 'batch_frozen',
+                controller_generation: latest.attempt.agent.controller_generation + 1,
+                call_index: nextCallIndex,
+                updated_at: canonicalNow(dependencies.now),
+              };
+              const advanceTransaction =
+                advanceCas === null
+                  ? null
+                  : dependencies.chat.advanceAgentCall({
+                      cas: advanceCas,
+                      expectedAttempt: latest.attempt,
+                      journal: advanceJournal,
+                    });
+              if (advanceTransaction === null) {
+                return await failAgentWithoutNative(conversationId, attemptId, 'E_AGENT_CONFLICT');
+              }
+              return await safeAgentPersist(
+                advanceTransaction,
+                async () => await runAgentBatch(conversationId, attemptId, runEpoch),
+                runEpoch,
+                { conversationId, turnId: latest.attempt.turnId, attemptId },
+              );
+            }
+            return await runAgentBatch(conversationId, attemptId, runEpoch);
+          },
+          runEpoch,
+          { conversationId, turnId: current.attempt.turnId, attemptId },
+        );
+      },
+      runEpoch,
+      { conversationId, turnId: attempt.turnId, attemptId },
+    );
+  };
+
+  const runAgentBatchImpl = async (
+    conversationId: string,
+    attemptId: string,
+    runEpoch: number,
+  ): Promise<CompletionControllerOutcome> => {
+    if (agentRuntime === undefined || runEpoch !== epoch) return outcome('cancelled', state);
+    const located = getConversationAttempt(conversationId, attemptId);
+    if (located === null || located.attempt.agent === undefined || located.attempt.agent === null) return await failAgentWithoutNative(conversationId, attemptId, 'E_AGENT_CONFLICT');
+    const journal = located.attempt.agent;
+    const pendingApprovalIndex = journal.batch.findIndex(
+      call =>
+        call.access !== 'auto' &&
+        call.access !== 'durable_deny' &&
+        call.approval_decision === 'pending',
+    );
+    if (pendingApprovalIndex >= 0) {
+      return await bindAgentApproval(
+        conversationId,
+        attemptId,
+        runEpoch,
+        pendingApprovalIndex,
+      );
+    }
+    const index = journal.batch.findIndex(call => call.receipt === null && (call.access === 'auto' || call.approval_decision === 'allow_once' || call.approval_decision === 'allow_conversation'));
+    if (index >= 0) return await executeAgentCall(conversationId, attemptId, runEpoch, index);
+    if (journal.phase === 'tool_result_pending' && journal.batch.length > 0 && journal.batch.every(call => call.receipt !== null)) {
+      return await runAgentRound(conversationId, attemptId, runEpoch);
+    }
+    if (journal.phase === 'batch_frozen' && journal.batch.every(call => call.receipt !== null || call.approval_decision === 'denied' || call.approval_decision === 'cancelled')) {
+      return await runAgentRound(conversationId, attemptId, runEpoch);
+    }
+    return outcome('retryable', state);
+  };
+
+  runAgentBatch = runAgentBatchImpl;
+
+  const runLegacyPrepared = async (
     conversationId: string,
     turnId: string,
     attemptId: string,
@@ -724,6 +3477,44 @@ export function createCompletionController(
     };
   };
 
+  const runPrepared = async (
+    conversationId: string,
+    turnId: string,
+    attemptId: string,
+    events: CompletionControllerEvents,
+    runEpoch: number,
+  ): Promise<CompletionControllerOutcome> => {
+    const runtimeAvailable = agentRuntime !== undefined && agentAvailable();
+    if (runtimeAvailable) {
+      const located = getConversationAttempt(conversationId, attemptId);
+      const attempt = located?.attempt;
+      const conversation = located?.conversation;
+      const agentEligible =
+        attempt !== undefined &&
+        conversation !== undefined &&
+        attempt.contextDisposition !== 'explicit_without_context' &&
+        (conversation.workspaceId !== null ||
+          conversation.projectId !== null ||
+          conversation.workspaceBinding !== null);
+      if (agentEligible) {
+        return await runAgentPrepared(
+          conversationId,
+          turnId,
+          attemptId,
+          events,
+          runEpoch,
+        );
+      }
+    }
+    return await runLegacyPrepared(
+      conversationId,
+      turnId,
+      attemptId,
+      events,
+      runEpoch,
+    );
+  };
+
   const continuePreparation = async (
     transaction: PreparedTurnTransaction,
     conversationId: string,
@@ -860,6 +3651,550 @@ export function createCompletionController(
     );
   };
 
+  const agentRecoveryTarget = (
+    attempt: TurnAttemptV1,
+  ): AgentRecoveryTargetV2 | null => {
+    const journal = attempt.agent;
+    if (journal === undefined || journal === null) return null;
+    const lineage = journal.round_lineage;
+    if (lineage === null || lineage.native_row_revision === null) {
+      return {
+        schema_version: 2,
+        kind: 'attempt',
+        task_id: attempt.turnId,
+        attempt_id: attempt.attemptId,
+      };
+    }
+    const call = journal.call_index === null ? null : journal.batch[journal.call_index];
+    if (
+      call !== undefined &&
+      call !== null &&
+      call.idempotency_key !== null &&
+      (journal.phase === 'execution_intent' ||
+        journal.phase === 'tool_result_pending' ||
+        journal.phase === 'unknown' ||
+        journal.phase === 'ambiguous')
+    ) {
+      return {
+        schema_version: 2,
+        kind: 'tool',
+        task_id: attempt.turnId,
+        attempt_id: attempt.attemptId,
+        round_id: lineage.round_id,
+        round_index: journal.round_index,
+        call_index: call.call_index,
+        call_id: call.call_id,
+        idempotency_key: call.idempotency_key,
+      };
+    }
+    return {
+      schema_version: 2,
+      kind: 'round',
+      task_id: attempt.turnId,
+      attempt_id: attempt.attemptId,
+      round_id: lineage.round_id,
+      round_index: journal.round_index,
+    };
+  };
+
+  const finishRecoveredFinal = async (
+    conversationId: string,
+    attemptId: string,
+    runEpoch: number,
+    request: RecoverAgentAttemptRequestV2,
+    recovered: Extract<RecoverAgentAttemptResultV2, { readonly status: 'resumed' | 'terminal' }>,
+    evidence: AgentStoreTransitionEvidence,
+    _events: CompletionControllerEvents,
+  ): Promise<CompletionControllerOutcome> => {
+    const completed = recovered.completed_round;
+    if (completed === null || completed.kind !== 'final') {
+      return await failAgentWithoutNative(conversationId, attemptId, 'E_AGENT_TRANSCRIPT');
+    }
+    const completionRequest: CompleteAgentRoundRequestV2 = {
+      schema_version: 2,
+      operation_id: request.operation_id,
+      controller_cas: request.controller_cas,
+      committed_checkpoint: request.committed_checkpoint,
+      task_id: request.target.task_id,
+      conversation_id: request.controller_cas.conversation_id,
+      attempt_id: request.target.attempt_id,
+      round_id: completed.round_id,
+      round_index: completed.round_index,
+      launch_attempt: completed.launch_attempt,
+      expected_round_revision: request.expected_round_revision ?? 0,
+      transport_schema_version: completed.completion_receipt.transport_schema_version,
+      model: completed.completion_receipt.model,
+      thinking_mode: completed.completion_receipt.thinking_mode,
+      visible_history_sha256: completed.completion_receipt.visible_history_sha256,
+      visible_message_count: 0,
+      project_context_sha256:
+        completed.completion_receipt.project_context_receipt?.snapshot_sha256 ?? null,
+      transcript: request.expected_transcript,
+      root: request.root,
+      registry_version: 1,
+      toolset_sha256: '',
+    };
+    // The recovery evidence already carries the authoritative projection. The
+    // request fields above are used only as a correlation envelope by the
+    // terminal Store transition; the native recovery result remains the source
+    // for the receipt and transcript.
+    return await terminalizeAgent(
+      conversationId,
+      attemptId,
+      runEpoch,
+      completionRequest,
+      {
+        schema_version: 2,
+        status: 'completed',
+        operation_id: request.operation_id,
+        task_id: request.target.task_id,
+        attempt_id: request.target.attempt_id,
+        round_id: completed.round_id,
+        round_index: completed.round_index,
+        launch_attempt: completed.launch_attempt,
+        result_round_revision: completed.result_round_revision,
+        transcript: completed.transcript,
+        outcome: {
+          schema_version: 3,
+          kind: 'final',
+          finish_reason: 'stop',
+          completion_receipt: completed.completion_receipt,
+          transcript: completed.transcript,
+          text: completed.text,
+          reasoning: completed.reasoning,
+        },
+      },
+      evidence,
+      'final_response',
+    );
+  };
+
+  const recoverAgentRun = async (
+    conversationId: string,
+    attemptId: string,
+    events: CompletionControllerEvents,
+    runEpoch: number,
+  ): Promise<CompletionControllerOutcome> => {
+    if (agentRuntime === undefined || !agentAvailable()) {
+      publish(stateFor('retryable', { conversationId, attemptId, failureCode: 'E_COMPLETION_NATIVE' }));
+      return outcome('retryable', state);
+    }
+    const located = getConversationAttempt(conversationId, attemptId);
+    if (located === null || located.attempt.agent === undefined || located.attempt.agent === null) {
+      return outcome('blocked', state);
+    }
+    const { attempt } = located;
+    const journal = attempt.agent;
+    if (journal === undefined || journal === null) {
+      return await failAgentWithoutNative(conversationId, attemptId, 'E_AGENT_CONFLICT');
+    }
+    const cas = authorityFor(attempt, conversationId);
+    const authorityCheckpoint = agentCheckpointForJournal(attempt);
+    const target = agentRecoveryTarget(attempt);
+    if (cas === null || authorityCheckpoint === null || target === null) {
+      publish(stateFor('resume_available', { conversationId, turnId: attempt.turnId, attemptId, failureCode: 'E_AGENT_PERSISTENCE' }));
+      return outcome('persistence_pending', state);
+    }
+    const queryRequest: QueryAgentAttemptRequestV2 = {
+      schema_version: 2,
+      controller_cas: cas,
+      task_id: attempt.turnId,
+      conversation_id: conversationId,
+      attempt_id: attemptId,
+      expected_journal_revision: attempt.journalRevision ?? 0,
+      expected_session_generation: authorityCheckpoint.session_generation,
+      expected_session_sha256: authorityCheckpoint.session_sha256,
+      expected_transcript: journal.transcript,
+      expected_root_fingerprint_sha256: journal.root.root_fingerprint_sha256,
+      expected_workspace_binding_revision: journal.root.workspace_binding_revision,
+    };
+    publish(stateFor('recovering', { conversationId, turnId: attempt.turnId, attemptId, roundId: journal.round_lineage?.round_id ?? null, transportSchemaVersion: agentTransportSchema(attempt) }));
+    let queried: QueryAgentAttemptResultV2;
+    try {
+      queried = await agentRuntime.queryAgentAttempt(queryRequest);
+    } catch (error) {
+      publish(stateFor('resume_available', { conversationId, turnId: attempt.turnId, attemptId, failureCode: agentFailure(error) }));
+      return outcome('retryable', state);
+    }
+    if (runEpoch !== epoch) return outcome('cancelled', state);
+    if (queried.status === 'conflict' || queried.status === 'not_found') {
+      publish(stateFor('resume_available', { conversationId, turnId: attempt.turnId, attemptId, failureCode: queried.status === 'conflict' ? 'E_AGENT_CONFLICT' : 'E_COMPLETION_HISTORY' }));
+      return outcome('retryable', state);
+    }
+    const queriedBatchAuthority = agentBatchAuthorityFromProjection(queried.attempt);
+    if (queriedBatchAuthority !== null) {
+      updateAgentRun({ batchAuthority: queriedBatchAuthority });
+    }
+    const recoveryOperationId = freshOperationId();
+    if (recoveryOperationId === null) return await failAgentWithoutNative(conversationId, attemptId, 'E_AGENT_PERSISTENCE');
+    const recoveryRequest: RecoverAgentAttemptRequestV2 = {
+      schema_version: 2,
+      operation_id: recoveryOperationId,
+      controller_cas: cas,
+      committed_checkpoint: authorityCheckpoint,
+      target,
+      action: 'reconcile',
+      expected_round_revision: target.kind === 'round'
+        ? journal.round_lineage?.native_row_revision ?? 0
+        : null,
+      expected_execution_revision: target.kind === 'tool'
+        ? journal.batch[target.call_index]?.native_row_revision ?? 0
+        : null,
+      expected_transcript: journal.transcript,
+      root: agentRootForJournal(journal),
+    };
+    updateAgentRun({ operationId: recoveryOperationId });
+    let recovered: RecoverAgentAttemptResultV2;
+    try {
+      recovered = await agentRuntime.recoverAgentAttempt(recoveryRequest);
+    } catch (error) {
+      publish(stateFor('resume_available', { conversationId, turnId: attempt.turnId, attemptId, failureCode: agentFailure(error) }));
+      return outcome('retryable', state);
+    }
+    const evidence = mapEvidence('recover_agent_attempt', recoveryRequest, recovered);
+    if (evidence === null || recovered.status === 'conflict') {
+      publish(stateFor('resume_available', { conversationId, turnId: attempt.turnId, attemptId, failureCode: 'E_AGENT_CONFLICT' }));
+      return outcome('retryable', state);
+    }
+    if (recovered.status === 'manual_reconciliation') {
+      publish(stateFor('resume_available', { conversationId, turnId: attempt.turnId, attemptId, failureCode: 'E_AGENT_EXECUTION_AMBIGUOUS' }));
+      return outcome('retryable', state);
+    }
+    if (recovered.status === 'retryable') {
+      publish(stateFor('retryable', { conversationId, turnId: attempt.turnId, attemptId, failureCode: 'E_AGENT_PERSISTENCE' }));
+      return outcome('retryable', state);
+    }
+    if (recovered.completed_round !== null && recovered.completed_round.kind === 'final') {
+      return await finishRecoveredFinal(conversationId, attemptId, runEpoch, recoveryRequest, recovered, evidence, events);
+    }
+    const recoveredProjection = agentJournalFromProjection(
+      recovered.attempt,
+      canonicalNow(dependencies.now),
+    );
+    if (recoveredProjection === null) {
+      publish(stateFor('resume_available', { conversationId, turnId: attempt.turnId, attemptId, failureCode: 'E_AGENT_TRANSCRIPT' }));
+      return outcome('retryable', state);
+    }
+    const recoveredJournal: PersistedAgentAttemptJournalV3 = {
+      ...recoveredProjection,
+      controller_generation: journal.controller_generation + 1,
+      updated_at: canonicalNow(dependencies.now),
+    };
+    const recoveryIsTerminal =
+      recoveredJournal.phase === 'final_response' ||
+      recoveredJournal.phase === 'failed' ||
+      recoveredJournal.phase === 'cancelled';
+    const recoveryIsReady = recoveredJournal.phase === 'ready_for_round';
+    const recoveryEvent = agentEvent(
+      attemptId,
+      recoveryOperationId,
+      recoveryIsTerminal ? 'terminal' : 'round',
+      recoveryIsTerminal || recoveryIsReady ? null : recoveredJournal.round_index,
+      null,
+      recoveredJournal.phase === 'final_response'
+        ? 'ok'
+        : recoveredJournal.phase === 'cancelled'
+          ? 'cancelled'
+          : recoveredJournal.phase === 'failed'
+            ? 'failed'
+            : recoveryIsReady
+              ? 'waiting'
+              : 'running',
+      null,
+      null,
+      null,
+      null,
+      recoveredJournal.phase === 'failed'
+        ? 'E_AGENT_PERSISTENCE'
+        : recoveredJournal.phase === 'cancelled'
+          ? 'E_AGENT_CANCELLED'
+          : null,
+    );
+    const currentCas = authorityFor(attempt, conversationId);
+    if (currentCas === null) return await failAgentWithoutNative(conversationId, attemptId, 'E_AGENT_PERSISTENCE');
+    const transaction = dependencies.chat.setAgentJournal({ cas: currentCas, expectedAttempt: attempt, journal: recoveredJournal, events: [recoveryEvent], evidence });
+    if (transaction === null) {
+      publish(stateFor('resume_available', { conversationId, turnId: attempt.turnId, attemptId, failureCode: 'E_AGENT_CONFLICT' }));
+      return outcome('retryable', state);
+    }
+    return await safeAgentPersist(transaction, async () => {
+      const recoveredBatchAuthority = agentBatchAuthorityFromProjection(recovered.attempt);
+      if (recoveredBatchAuthority !== null) {
+        updateAgentRun({ batchAuthority: recoveredBatchAuthority });
+      }
+      if (recoveredJournal.phase === 'ready_for_round' || recoveredJournal.phase === 'tool_result_pending') return await runAgentRound(conversationId, attemptId, runEpoch);
+      if (recoveredJournal.phase === 'batch_frozen' || recoveredJournal.phase === 'approval_pending') return await runAgentBatch(conversationId, attemptId, runEpoch);
+      publish(stateFor('retryable', { conversationId, turnId: attempt.turnId, attemptId, failureCode: 'E_AGENT_PERSISTENCE' }));
+      return outcome('retryable', state);
+    }, runEpoch, { conversationId, turnId: attempt.turnId, attemptId });
+  };
+
+  const cancelAgentRun = async (): Promise<void> => {
+    if (agentRuntime === undefined || agentRun === null) return;
+    const run = agentRun;
+    const located = getConversationAttempt(run.conversationId, run.attemptId);
+    if (located === null || located.attempt.agent === undefined || located.attempt.agent === null) return;
+    const { attempt } = located;
+    const journal = attempt.agent;
+    if (journal === undefined || journal === null) return;
+    const cas = authorityFor(attempt, run.conversationId);
+    const checkpoint = agentCheckpointForJournal(attempt);
+    const operationId = freshOperationId();
+    if (cas === null || checkpoint === null || operationId === null) {
+      publish(stateFor('blocked', { conversationId: run.conversationId, turnId: run.turnId, attemptId: run.attemptId, failureCode: 'E_AGENT_PERSISTENCE' }));
+      lastCancellationCommitted = false;
+      return;
+    }
+    const target: AgentCancelTargetV2 =
+      journal.phase === 'round_in_flight' && journal.round_lineage !== null
+        ? {
+            schema_version: 2,
+            kind: 'round',
+            task_id: run.turnId,
+            attempt_id: run.attemptId,
+            round_id: journal.round_lineage.round_id,
+            round_index: journal.round_index,
+          }
+        : journal.phase === 'execution_intent' && journal.call_index !== null && journal.batch[journal.call_index]?.idempotency_key !== null && journal.round_lineage !== null
+          ? {
+              schema_version: 2,
+              kind: 'tool',
+              task_id: run.turnId,
+              attempt_id: run.attemptId,
+              round_id: journal.round_lineage.round_id,
+              round_index: journal.round_index,
+              call_index: journal.call_index,
+              call_id: journal.batch[journal.call_index]!.call_id,
+              idempotency_key: journal.batch[journal.call_index]!.idempotency_key!,
+            }
+          : {
+              schema_version: 2,
+              kind: 'attempt',
+              task_id: run.turnId,
+              attempt_id: run.attemptId,
+            };
+    const expectedPhase: AgentCancelTokenV2['expected_phase'] =
+      journal.phase === 'approval_pending'
+        ? 'approval_pending'
+        : journal.phase === 'execution_intent'
+          ? 'execution_intent'
+          : journal.phase === 'tool_result_pending'
+            ? 'tool_result_pending'
+            : 'round_in_flight';
+    const cancelToken: AgentCancelTokenV2 = {
+      schema_version: 2,
+      issuer: 'completion_controller',
+      source_event_id: operationId,
+      token: operationId,
+      task_id: run.turnId,
+      attempt_id: run.attemptId,
+      expected_phase: expectedPhase,
+      reason_code: 'E_AGENT_CANCELLED',
+    };
+    const cancelPreflightInput = {
+      schema_version: 1,
+      source: 'completion_controller',
+      kind: 'request_cancel',
+      operation_id: operationId,
+      base_cas: cas,
+      conversation_id: run.conversationId,
+      task_id: run.turnId,
+      attempt_id: run.attemptId,
+      target,
+      cancel_token: cancelToken,
+      expected_round_revision: target.kind === 'round'
+        ? journal.round_lineage?.native_row_revision ?? 0
+        : null,
+      expected_execution_revision: target.kind === 'tool'
+        ? journal.batch[target.call_index]?.native_row_revision ?? 0
+        : null,
+      expected_transcript: journal.transcript,
+      root: agentRootForJournal(journal),
+    };
+    const preflight = validateAgentControllerPreflight(cancelPreflightInput);
+    if (preflight === null) {
+      publish(stateFor('blocked', { conversationId: run.conversationId, turnId: run.turnId, attemptId: run.attemptId, failureCode: 'E_AGENT_CONFLICT' }));
+      lastCancellationCommitted = false;
+      return;
+    }
+    const cancelledJournal: PersistedAgentAttemptJournalV3 =
+      target.kind === 'attempt'
+        ? {
+            ...copyAgentJournal(journal),
+            phase: 'cancelled',
+            controller_generation: journal.controller_generation + 1,
+            round_lineage: journal.round_lineage === null ? null : { ...journal.round_lineage, status: 'cancelled' },
+            batch: journal.batch.map(call => call.receipt === null && call.approval_decision !== 'denied' && call.approval_decision !== 'cancelled' ? { ...call, approval_decision: 'cancelled', approval_token: null, approval_reference: null } : call),
+            updated_at: canonicalNow(dependencies.now),
+          }
+        : {
+            ...copyAgentJournal(journal),
+            controller_generation: journal.controller_generation + 1,
+            round_lineage: journal.round_lineage === null ? null : { ...journal.round_lineage, status: 'cancel_requested' },
+            updated_at: canonicalNow(dependencies.now),
+          };
+    const transaction = dependencies.chat.cancelAgentAttempt({ cas, expectedAttempt: attempt, journal: cancelledJournal, events: [], evidence: preflight });
+    if (transaction === null) {
+      publish(stateFor('blocked', { conversationId: run.conversationId, turnId: run.turnId, attemptId: run.attemptId, failureCode: 'E_AGENT_CONFLICT' }));
+      lastCancellationCommitted = false;
+      return;
+    }
+    publish(stateFor('cancelling', { conversationId: run.conversationId, turnId: run.turnId, attemptId: run.attemptId, roundId: journal.round_lineage?.round_id ?? null, transportSchemaVersion: run.transportSchemaVersion }));
+    await safeAgentPersist(transaction, async committedCheckpoint => {
+      const current = getConversationAttempt(run.conversationId, run.attemptId);
+      if (current === null || current.attempt.agent === undefined || current.attempt.agent === null) return outcome('cancelled', state);
+      const nativeOperationId = freshOperationId();
+      if (nativeOperationId === null) return await failAgentWithoutNative(run.conversationId, run.attemptId, 'E_AGENT_PERSISTENCE');
+      const request: CancelAgentAttemptRequestV2 = {
+        schema_version: 2,
+        operation_id: nativeOperationId,
+        controller_cas: authorityFor(current.attempt, run.conversationId)!,
+        committed_checkpoint: committedCheckpoint,
+        target,
+        cancel_token: cancelToken,
+        expected_round_revision: target.kind === 'round'
+          ? journal.round_lineage?.native_row_revision ?? 0
+          : null,
+        expected_execution_revision: target.kind === 'tool'
+          ? journal.batch[target.call_index]?.native_row_revision ?? 0
+          : null,
+        expected_transcript: current.attempt.agent.transcript,
+        root: agentRootForJournal(current.attempt.agent),
+      };
+      updateAgentRun({ operationId: nativeOperationId });
+      let result: CancelAgentAttemptResultV2;
+      try {
+        result = await agentRuntime!.cancelAgentAttempt(request);
+      } catch {
+        lastCancellationCommitted = false;
+        return outcome('cancelled', state);
+      }
+      const evidence = mapEvidence('cancel_agent_attempt', request, result);
+      if (evidence === null || result.status === 'conflict') {
+        lastCancellationCommitted = false;
+        return outcome('cancelled', state);
+      }
+      const currentJournal = current.attempt.agent!;
+      const terminal = result.status === 'cancelled' || result.status === 'already_cancelled';
+      const cancelledLineage: PersistedAgentAttemptJournalV3['round_lineage'] = currentJournal.round_lineage === null
+        ? null
+        : {
+            ...currentJournal.round_lineage,
+            status: terminal
+              ? 'cancelled'
+              : result.status === 'unknown'
+                ? 'unknown'
+                : result.status === 'ambiguous'
+                  ? 'ambiguous'
+                  : 'cancel_requested',
+            ...(result.result_round_revision === null
+              ? {}
+              : { native_row_revision: result.result_round_revision }),
+          };
+      const cancelledBatch = currentJournal.batch.map((call, index) => {
+        let nextCall = call;
+        if (
+          target.kind === 'tool' &&
+          index === target.call_index &&
+          result.result_execution_revision !== null
+        ) {
+          nextCall = {
+            ...nextCall,
+            native_row_revision: result.result_execution_revision,
+            ...(result.receipt === null
+              ? {}
+              : { receipt: result.receipt as unknown as StoreAgentToolReceiptV1 }),
+          };
+        }
+        if (
+          terminal &&
+          nextCall.receipt === null &&
+          nextCall.approval_decision !== 'denied' &&
+          nextCall.approval_decision !== 'cancelled'
+        ) {
+          nextCall = {
+            ...nextCall,
+            approval_decision: 'cancelled',
+            approval_token: null,
+            approval_reference: null,
+          };
+        }
+        return nextCall;
+      });
+      const nextJournal: PersistedAgentAttemptJournalV3 = {
+        ...copyAgentJournal(currentJournal),
+        phase: terminal ? 'cancelled' : result.status === 'unknown' ? 'unknown' : result.status === 'ambiguous' ? 'ambiguous' : currentJournal.phase,
+        controller_generation: currentJournal.controller_generation + 1,
+        transcript: copyAgentTranscript(result.transcript),
+        round_lineage: cancelledLineage,
+        batch: cancelledBatch,
+        updated_at: canonicalNow(dependencies.now),
+      };
+      const cleanup = terminal ? agentCleanupFor(run.conversationId, current.attempt, nextJournal, 'cancelled') : null;
+      if (terminal && cleanup === null) return await failAgentWithoutNative(run.conversationId, run.attemptId, 'E_AGENT_PERSISTENCE');
+      const terminalEventId = terminal ? freshOperationId() : request.operation_id;
+      if (terminal && terminalEventId === null) return await failAgentWithoutNative(run.conversationId, run.attemptId, 'E_AGENT_PERSISTENCE');
+      const cancelEvent = terminal
+        ? agentEvent(
+            run.attemptId,
+            terminalEventId!,
+            'terminal',
+            null,
+            null,
+            'cancelled',
+            null,
+            null,
+            null,
+            null,
+            'E_AGENT_CANCELLED',
+          )
+        : agentEvent(
+            run.attemptId,
+            request.operation_id,
+            'cancel',
+            target.kind === 'attempt' ? null : target.round_index,
+            target.kind === 'tool' ? target.call_id : null,
+            'cancelled',
+            null,
+            target.kind === 'tool'
+              ? currentJournal.batch[target.call_index]?.arguments_sha256 ?? null
+              : null,
+            null,
+            request.operation_id,
+            request.cancel_token.reason_code,
+          );
+      const postCas = authorityFor(current.attempt, run.conversationId);
+      if (postCas === null) return await failAgentWithoutNative(run.conversationId, run.attemptId, 'E_AGENT_PERSISTENCE');
+      const postTx = terminal
+        ? dependencies.chat.completeAgentAttempt({
+            cas: postCas,
+            expectedAttempt: current.attempt,
+            journal: nextJournal,
+            events: [cancelEvent],
+            evidence,
+            assistantMessage: null,
+            cleanup: cleanup!,
+          })
+        : dependencies.chat.cancelAgentAttempt({
+            cas: postCas,
+            expectedAttempt: current.attempt,
+            journal: nextJournal,
+            events: [cancelEvent],
+            evidence,
+          });
+      if (postTx === null) return await failAgentWithoutNative(run.conversationId, run.attemptId, 'E_AGENT_CONFLICT');
+      return await safeAgentPersist(postTx, async finalCheckpoint => {
+        if (!terminal) {
+          lastCancellationCommitted = false;
+          publish(stateFor('retryable', { conversationId: run.conversationId, turnId: run.turnId, attemptId: run.attemptId, failureCode: result.status === 'ambiguous' ? 'E_AGENT_EXECUTION_AMBIGUOUS' : 'E_AGENT_CONFLICT' }));
+          return outcome('retryable', state);
+        }
+        lastCancellationCommitted = true;
+        return await finalizeAgent(run.conversationId, run.attemptId, run.epoch, finalCheckpoint, nextJournal, cleanup!, postCas);
+      }, run.epoch, { conversationId: run.conversationId, turnId: run.turnId, attemptId: run.attemptId }, 'cancel');
+    }, run.epoch, { conversationId: run.conversationId, turnId: run.turnId, attemptId: run.attemptId }, 'cancel');
+  };
+
   const controller: CompletionController = {
     getState: () => state,
     subscribe: listener => {
@@ -872,7 +4207,10 @@ export function createCompletionController(
       }
       if (
         active !== null ||
+        agentRun !== null ||
         pendingPreparation !== null ||
+        pendingAgentPersistence !== null ||
+        pendingAgentCleanup !== null ||
         pendingCommit !== null ||
         pendingTerminal !== null ||
         retryPersistenceInFlight ||
@@ -880,6 +4218,9 @@ export function createCompletionController(
         state.phase === 'preparing' ||
         state.phase === 'starting' ||
         state.phase === 'sending' ||
+        state.phase === 'approval_pending' ||
+        state.phase === 'executing' ||
+        state.phase === 'recovering' ||
         state.phase === 'cancelling' ||
         state.phase === 'resume_available'
       ) {
@@ -925,7 +4266,10 @@ export function createCompletionController(
       }
       if (
         active !== null ||
+        agentRun !== null ||
         pendingPreparation !== null ||
+        pendingAgentPersistence !== null ||
+        pendingAgentCleanup !== null ||
         pendingCommit !== null ||
         pendingTerminal !== null ||
         retryPersistenceInFlight ||
@@ -933,6 +4277,24 @@ export function createCompletionController(
         state.phase === 'cancelling'
       ) {
         return busyOutcome(conversationId, attemptId);
+      }
+      const source = getConversationAttempt(conversationId, attemptId);
+      if (source?.attempt.agent !== undefined && source.attempt.agent !== null) {
+        epoch += 1;
+        agentRun = {
+          epoch,
+          conversationId,
+          turnId: source.attempt.turnId,
+          attemptId,
+          events,
+          transportSchemaVersion: agentTransportSchema(source.attempt),
+          roundId: source.attempt.agent.round_lineage?.round_id ?? null,
+          operationId: null,
+          cancelTarget: agentRecoveryTarget(source.attempt),
+          batchAuthority: null,
+          approvalTokens: new Map(),
+        };
+        return await recoverAgentRun(conversationId, attemptId, events, epoch);
       }
       epoch += 1;
       const transaction = dependencies.chat.retryAttempt(
@@ -962,7 +4324,10 @@ export function createCompletionController(
       }
       if (
         active !== null ||
+        agentRun !== null ||
         pendingPreparation !== null ||
+        pendingAgentPersistence !== null ||
+        pendingAgentCleanup !== null ||
         pendingCommit !== null ||
         pendingTerminal !== null ||
         retryPersistenceInFlight ||
@@ -973,6 +4338,23 @@ export function createCompletionController(
       }
       const conversation = dependencies.chat.getState().conversations[conversationId];
       const attempt = conversation?.attempts.find(item => item.attemptId === attemptId);
+      if (attempt?.agent !== undefined && attempt.agent !== null) {
+        epoch += 1;
+        agentRun = {
+          epoch,
+          conversationId,
+          turnId: attempt.turnId,
+          attemptId,
+          events,
+          transportSchemaVersion: agentTransportSchema(attempt),
+          roundId: attempt.agent.round_lineage?.round_id ?? null,
+          operationId: null,
+          cancelTarget: agentRecoveryTarget(attempt),
+          batchAuthority: null,
+          approvalTokens: new Map(),
+        };
+        return await recoverAgentRun(conversationId, attemptId, events, epoch);
+      }
       if (
         attempt === undefined ||
         attempt.status !== 'prepared' ||
@@ -1001,12 +4383,61 @@ export function createCompletionController(
       if (state.phase === 'cancelling' || state.phase === 'finalizing') {
         return busyOutcome();
       }
+      const agentPending = pendingAgentPersistence;
+      const cleanupPending = pendingAgentCleanup;
       const pending = pendingPreparation;
       const terminal = pendingTerminal;
-      if (pending === null && terminal === null) return outcome('blocked', state);
+      if (
+        agentPending === null &&
+        cleanupPending === null &&
+        pending === null &&
+        terminal === null
+      ) return outcome('blocked', state);
       if (retryPersistenceInFlight) return busyOutcome();
       retryPersistenceInFlight = true;
       try {
+        if (agentPending !== null) {
+          return await safeAgentPersist(
+            agentPending.transaction,
+            agentPending.continuation,
+            agentPending.epoch,
+            {
+              conversationId: agentPending.conversationId,
+              turnId: agentPending.turnId,
+              attemptId: agentPending.attemptId,
+            },
+            agentPending.kind,
+          );
+        }
+        if (cleanupPending !== null) {
+          const durability = await safePersist();
+          if (durability.status !== 'committed' || durability.snapshot === undefined) {
+            return outcome('persistence_pending', state);
+          }
+          if (!cleanupPending.transaction.commit(durability.snapshot, cleanupPending.discardProof)) {
+            return outcome('blocked', state);
+          }
+          if (pendingAgentCleanup === cleanupPending) pendingAgentCleanup = null;
+          const completedRun = agentRun;
+          agentRun = null;
+          publish(stateFor('idle'));
+          try {
+            completedRun?.events.onCommitted?.({
+              conversationId: cleanupPending.conversationId,
+              turnId: cleanupPending.turnId,
+              attemptId: cleanupPending.attemptId,
+            });
+          } catch {
+            // UI callbacks cannot affect durable cleanup.
+          }
+          return {
+            status: 'completed',
+            conversationId: cleanupPending.conversationId,
+            turnId: cleanupPending.turnId,
+            attemptId: cleanupPending.attemptId,
+            code: null,
+          };
+        }
         if (terminal !== null) {
           return settleTerminalPersistence(terminal, await safePersist());
         }
@@ -1053,9 +4484,15 @@ export function createCompletionController(
       if (
         pendingCommit !== null ||
         pendingTerminal !== null ||
+        pendingAgentCleanup !== null ||
         state.phase === 'cancelling'
       )
         return;
+      if (agentRun !== null) {
+        await cancelAgentRun();
+        epoch += 1;
+        return;
+      }
       epoch += 1;
       const cancelling = active;
       active = null;
@@ -1160,10 +4597,16 @@ export function createCompletionController(
       }
       if (
         pendingCommit?.conversationId === conversationId ||
+        pendingAgentPersistence?.conversationId === conversationId ||
+        pendingAgentCleanup?.conversationId === conversationId ||
         pendingPreparation?.conversationId === conversationId ||
         pendingTerminal?.conversationId === conversationId
       ) {
         return false;
+      }
+      if (agentRun?.conversationId === conversationId) {
+        await controller.cancel();
+        return lastCancellationCommitted;
       }
       if (active?.conversationId !== conversationId) return true;
       await controller.cancel();
@@ -1187,7 +4630,21 @@ export function createCompletionController(
       const turn = conversation?.turns.at(-1);
       const attemptId = turn?.attemptIds.at(-1);
       const attempt = conversation?.attempts.find(item => item.attemptId === attemptId);
-      if (attempt?.status === 'prepared' && attempt.rounds.length === 0) {
+      if (attempt?.agent !== undefined && attempt.agent !== null) {
+        publish(
+          stateFor('resume_available', {
+            conversationId,
+            turnId: attempt.turnId,
+            attemptId: attempt.attemptId,
+            roundId: attempt.agent.round_lineage?.round_id ?? null,
+            transportSchemaVersion: agentTransportSchema(attempt),
+            failureCode:
+              attempt.agent.phase === 'unknown' || attempt.agent.phase === 'ambiguous'
+                ? 'E_AGENT_EXECUTION_AMBIGUOUS'
+                : null,
+          }),
+        );
+      } else if (attempt?.status === 'prepared' && attempt.rounds.length === 0) {
         publish(
           stateFor('resume_available', {
             conversationId,

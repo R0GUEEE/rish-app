@@ -15,6 +15,20 @@ import {
   TURN_ATTEMPT_SCHEMA_VERSION,
   PROJECT_CONTEXT_DESTRUCTIVE_TRANSITION_SCHEMA_VERSION,
   WORKSPACE_AUTHORITY_OUTBOX_SCHEMA_VERSION,
+  MAX_AGENT_ATTEMPT_WRITE_BYTES,
+  MAX_AGENT_BATCH_WRITE_BYTES,
+  MAX_AGENT_CALLS_PER_BATCH,
+  MAX_AGENT_CLEANUP_OUTBOX_ENTRIES,
+  MAX_AGENT_GRANTS_PER_CONVERSATION,
+  MAX_AGENT_ROUNDS,
+  MAX_AGENT_SINGLE_WRITE_BYTES,
+  MAX_SESSION_EVENT_ROWS,
+  MAX_AGENT_RESULT_BYTES,
+  MAX_AGENT_TRANSCRIPT_BYTES,
+  MAX_AGENT_SUMMARY_KEY_LENGTH,
+  MAX_AGENT_DURATION_MS,
+  AGENT_SAFE_SUMMARY_KEYS,
+  isAgentPhaseLineageValid,
   type ChatAction,
   type ChatAttachment,
   type ChatAttachmentKind,
@@ -32,7 +46,32 @@ import {
   type ConversationWorkspaceBootstrapState,
   type WorkspaceAuthorityOutboxV1,
   type TurnAttemptV1,
+  type AgentAccess,
+  type AgentApprovalDecision,
+  type AgentFailureCode,
+  type AgentToolReceiptV1,
+  type AgentTranscriptCleanupV1,
+  type AgentTranscriptReferenceV1,
+  type PersistedAgentAttemptJournalV2,
+  type PersistedAgentAttemptJournalV3,
+  type PersistedAgentCallJournalV2,
+  type PersistedAgentCallJournalV3,
+  type FrozenAgentRootV1,
+  type AgentWritePolicyV1,
+  type AgentConversationGrantV2,
+  type AgentApprovalTokenV1,
+  type AgentControllerCASV1,
+  type AgentCheckpointEvidence,
+  type AgentControllerPreflightV1,
+  type SessionEventV2,
+  type PersistedSessionEventV3,
+  type AgentAttemptPhase,
 } from './types';
+import {
+  validateAgentStoreTransition,
+  type AgentStoreTransitionEvidence,
+} from '../agent/AgentStoreTransitions';
+import { validateAgentControllerPreflight } from '../agent/AgentControllerPreflight';
 import {
   createProjectContextState,
   isProjectContextSendable,
@@ -44,6 +83,8 @@ import type {
   ProjectContextManifestV1,
   ProjectContextState,
 } from '../project-context/types';
+import { DEFAULT_APP_PREFERENCES } from '../preferences/reducer';
+import { serializeAppPreferences } from '../preferences/persistence';
 
 export const DEFAULT_CONVERSATION_TITLE = 'New chat';
 export const DEFAULT_MODEL_ID: ModelId = 'deepseek-v4-flash';
@@ -168,6 +209,31 @@ const attemptReferenceProjectionKeys = [
   'createdAt',
   'updatedAt',
 ] as const;
+
+function isAttemptReferenceProjection(value: unknown): boolean {
+  if (isExactDataRecord(value, attemptReferenceProjectionKeys)) return true;
+  if (
+    typeof value !== 'object' ||
+    value === null ||
+    Array.isArray(value) ||
+    Object.getOwnPropertySymbols(value).length > 0
+  ) return false;
+  const names = Object.getOwnPropertyNames(value);
+  const allowed = new Set<string>([
+    ...attemptReferenceProjectionKeys,
+    'journalRevision',
+    'agent',
+  ]);
+  if (names.some(name => !allowed.has(name))) return false;
+  return attemptReferenceProjectionKeys.every(key => {
+    const descriptor = Object.getOwnPropertyDescriptor(value, key);
+    return (
+      descriptor !== undefined &&
+      Object.prototype.hasOwnProperty.call(descriptor, 'value') &&
+      descriptor.enumerable === true
+    );
+  });
+}
 const projectContextScopeKeys = [
   'conversationId',
   'projectId',
@@ -255,6 +321,67 @@ function isExactDataRecord(
   });
 }
 
+function isExactDataRecordWithOptional(
+  value: unknown,
+  keys: readonly string[],
+  optionalKeys: readonly string[],
+): value is Record<string, unknown> {
+  if (typeof value !== 'object' || value === null || Array.isArray(value)) return false;
+  const prototype = Object.getPrototypeOf(value);
+  if (prototype !== Object.prototype && prototype !== null) return false;
+  if (Object.getOwnPropertySymbols(value).length > 0) return false;
+  const allowed = new Set([...keys, ...optionalKeys]);
+  const names = Object.getOwnPropertyNames(value);
+  if (names.some(name => !allowed.has(name))) return false;
+  return keys.every(key => {
+    const descriptor = Object.getOwnPropertyDescriptor(value, key);
+    return (
+      descriptor !== undefined &&
+      Object.prototype.hasOwnProperty.call(descriptor, 'value') &&
+      descriptor.enumerable === true
+    );
+  }) && optionalKeys.every(key => {
+    const descriptor = Object.getOwnPropertyDescriptor(value, key);
+    return (
+      descriptor === undefined ||
+      (Object.prototype.hasOwnProperty.call(descriptor, 'value') &&
+        descriptor.enumerable === true)
+    );
+  });
+}
+
+function isExactDataArray(value: unknown, maximum: number): value is unknown[] {
+  if (
+    !Array.isArray(value) ||
+    Object.getPrototypeOf(value) !== Array.prototype ||
+    Object.getOwnPropertySymbols(value).length > 0
+  ) return false;
+  const lengthDescriptor = Object.getOwnPropertyDescriptor(value, 'length');
+  if (
+    lengthDescriptor === undefined ||
+    !Object.prototype.hasOwnProperty.call(lengthDescriptor, 'value') ||
+    typeof lengthDescriptor.value !== 'number' ||
+    !Number.isSafeInteger(lengthDescriptor.value) ||
+    Object.is(lengthDescriptor.value, -0) ||
+    lengthDescriptor.value < 0 ||
+    lengthDescriptor.value > maximum
+  ) return false;
+  const length = lengthDescriptor.value;
+  const names = Object.getOwnPropertyNames(value);
+  if (names.length !== length + 1) return false;
+  for (let index = 0; index < length; index += 1) {
+    const descriptor = Object.getOwnPropertyDescriptor(value, String(index));
+    if (
+      descriptor === undefined ||
+      !Object.prototype.hasOwnProperty.call(descriptor, 'value') ||
+      descriptor.enumerable !== true
+    ) return false;
+  }
+  return names.every(
+    name => name === 'length' || /^(?:0|[1-9][0-9]*)$/u.test(name),
+  );
+}
+
 function workspaceBindingIsValid(
   value: unknown,
 ): value is ConversationWorkspaceBindingV1 {
@@ -311,14 +438,20 @@ function copyWorkspaceBinding(
 
 
 export function createEmptyChatState(): ChatState {
+  const preferences = JSON.parse(
+    serializeAppPreferences(DEFAULT_APP_PREFERENCES),
+  ) as ChatState['preferences'];
   return {
     schemaVersion: CHAT_STATE_SCHEMA_VERSION,
     workspaceAuthorityOutbox: [],
+    agentTranscriptCleanupOutbox: [],
+    sessionEvents: [],
     projectContextDestructiveEpoch: 0,
     projectContextDestructiveTransition: null,
     conversations: {},
     conversationOrder: [],
     selectedConversationId: null,
+    preferences,
   };
 }
 
@@ -489,6 +622,16 @@ function hasLiveAttempt(conversation: Conversation): boolean {
   return conversation.attempts.some(
     attempt => attempt.status === 'prepared' || attempt.status === 'sending',
   );
+}
+
+function hasAgentRecoveryOwner(conversation: Conversation): boolean {
+  return conversation.attempts.some(
+    attempt => attempt.agent !== undefined && attempt.agent !== null,
+  );
+}
+
+function hasAgentJournalOrReceipt(attempt: TurnAttemptV1): boolean {
+  return attempt.agent !== undefined && attempt.agent !== null;
 }
 
 function conversationWorkspaceStateIsValid(
@@ -734,6 +877,68 @@ function copyAttempt(attempt: TurnAttemptV1): TurnAttemptV1 {
     failureCode: attempt.failureCode,
     createdAt: attempt.createdAt,
     updatedAt: attempt.updatedAt,
+    ...(attempt.journalRevision === undefined
+      ? {}
+      : { journalRevision: attempt.journalRevision }),
+    ...(attempt.agent === undefined
+      ? {}
+      : {
+          agent:
+            attempt.agent === null ? null : copyAgentJournalV3(attempt.agent),
+        }),
+  };
+}
+
+// eslint-disable-next-line @typescript-eslint/no-unused-vars
+function copyAgentJournal(
+  journal: PersistedAgentAttemptJournalV2,
+): PersistedAgentAttemptJournalV2 {
+  return {
+    schema_version: journal.schema_version,
+    phase: journal.phase,
+    controller_generation: journal.controller_generation,
+    policy: { ...journal.policy },
+    root: { ...journal.root, capabilities: [...journal.root.capabilities] },
+    tool_registry_version: journal.tool_registry_version,
+    toolset_sha256: journal.toolset_sha256,
+    transcript: { ...journal.transcript },
+    round_index: journal.round_index,
+    round_lineage:
+      journal.round_lineage === null ? null : { ...journal.round_lineage },
+    call_index: journal.call_index,
+    batch: journal.batch.map(call => ({
+      ...call,
+      receipt: call.receipt === null ? null : { ...call.receipt },
+    })),
+    frozen_grant_ids: [...journal.frozen_grant_ids],
+    reserved_write_bytes: journal.reserved_write_bytes,
+    updated_at: journal.updated_at,
+  };
+}
+
+function copyAgentJournalV3(
+  journal: PersistedAgentAttemptJournalV3,
+): PersistedAgentAttemptJournalV3 {
+  return {
+    schema_version: journal.schema_version,
+    phase: journal.phase,
+    controller_generation: journal.controller_generation,
+    policy: { ...journal.policy },
+    root: { ...journal.root, capabilities: [...journal.root.capabilities] },
+    tool_registry_version: journal.tool_registry_version,
+    toolset_sha256: journal.toolset_sha256,
+    transcript: { ...journal.transcript },
+    round_index: journal.round_index,
+    round_lineage:
+      journal.round_lineage === null ? null : { ...journal.round_lineage },
+    call_index: journal.call_index,
+    batch: journal.batch.map(call => ({
+      ...call,
+      receipt: call.receipt === null ? null : { ...call.receipt },
+    })),
+    frozen_grant_ids: [...journal.frozen_grant_ids],
+    reserved_write_bytes: journal.reserved_write_bytes,
+    updated_at: journal.updated_at,
   };
 }
 
@@ -1006,13 +1211,14 @@ function receiptIsValid(
     Number.isSafeInteger(receipt.roundIndex) &&
     receipt.roundIndex >= 0 &&
     receipt.roundIndex < MAX_COMPLETION_ROUNDS &&
-    isCanonicalLifecycleId(receipt.providerRequestId) &&
+    isOpaqueProviderId(receipt.providerRequestId) &&
     isOpaqueProviderId(receipt.providerResponseId) &&
     receipt.requestedModel === attempt.modelId &&
     receipt.model === attempt.modelId &&
     receipt.thinkingMode === attempt.thinkingMode &&
     finishReasons.has(receipt.finishReason) &&
     Number.isSafeInteger(receipt.latencyMs) &&
+    !Object.is(receipt.latencyMs, -0) &&
     receipt.latencyMs >= 0 &&
     isSha256Digest(receipt.visibleHistorySha256) &&
     isSha256Digest(receipt.modelInputSha256) &&
@@ -1173,10 +1379,7 @@ export function selectProjectContextSnapshotReferences(
         descriptor === undefined ||
         !Object.prototype.hasOwnProperty.call(descriptor, 'value') ||
         descriptor.enumerable !== true ||
-        !isExactDataRecord(
-          descriptor.value,
-          attemptReferenceProjectionKeys,
-        )
+        !isAttemptReferenceProjection(descriptor.value)
       ) {
         return [];
       }
@@ -1242,10 +1445,7 @@ export function hasProjectContextDestructiveReferences(
         descriptor === undefined ||
         !Object.prototype.hasOwnProperty.call(descriptor, 'value') ||
         descriptor.enumerable !== true ||
-        !isExactDataRecord(
-          descriptor.value,
-          attemptReferenceProjectionKeys,
-        )
+        !isAttemptReferenceProjection(descriptor.value)
       ) {
         return true;
       }
@@ -1335,8 +1535,3496 @@ function hasWorkspaceAuthorityOutboxEntry(
   );
 }
 
-function validIdentifier(value: string): boolean {
-  return value.trim().length > 0 && value.length <= 256;
+function validIdentifier(value: unknown): value is string {
+  return (
+    typeof value === 'string' &&
+    value.trim().length > 0 &&
+    value.length <= 256
+  );
+}
+
+const agentPhaseValues = new Set<PersistedAgentAttemptJournalV2['phase']>([
+  'ready_for_round',
+  'round_in_flight',
+  'batch_frozen',
+  'approval_pending',
+  'execution_intent',
+  'tool_result_pending',
+  'final_response',
+  'cancelled',
+  'failed',
+  'unknown',
+  'ambiguous',
+]);
+const agentAccessValues = new Set<AgentAccess>([
+  'auto',
+  'conversation_confirm',
+  'confirm_once',
+  'durable_deny',
+]);
+const agentDecisionValues = new Set<AgentApprovalDecision>([
+  'pending',
+  'denied',
+  'allow_once',
+  'allow_conversation',
+  'cancelled',
+]);
+const agentStatusValues = new Set<SessionEventV2['status']>([
+  'waiting',
+  'approval',
+  'running',
+  'ok',
+  'failed',
+  'denied',
+  'cancelled',
+  'unknown',
+  'ambiguous',
+]);
+const safeSummaryKeys = new Set<string>(AGENT_SAFE_SUMMARY_KEYS);
+
+export function isAgentFailureCode(value: unknown): value is AgentFailureCode {
+  return (
+    typeof value === 'string' &&
+    [
+      'E_AGENT_UNKNOWN_TOOL',
+      'E_AGENT_BAD_ARGUMENTS',
+      'E_AGENT_BAD_PATH',
+      'E_AGENT_NO_ROOT',
+      'E_AGENT_ROOT_STALE',
+      'E_AGENT_CAPABILITY',
+      'E_AGENT_APPROVAL',
+      'E_AGENT_TRANSCRIPT',
+      'E_AGENT_LEDGER',
+      'E_AGENT_ROUND_AMBIGUOUS',
+      'E_AGENT_EXECUTION_AMBIGUOUS',
+      'E_AGENT_RETRY_LINEAGE',
+      'E_AGENT_PERSISTENCE',
+      'E_AGENT_CONFLICT',
+      'E_AGENT_ROUND_LIMIT',
+      'E_AGENT_CANCELLED',
+      'E_AGENT_TOOL_FAILED',
+      'E_COMPLETION_LENGTH',
+      'E_COMPLETION_CONTENT_FILTER',
+    ].includes(value)
+  );
+}
+
+function agentRootIsValid(value: unknown): value is FrozenAgentRootV1 {
+  if (!isExactDataRecord(value, [
+    'schema_version',
+    'kind',
+    'workspace_id',
+    'workspace_binding_revision',
+    'project_id',
+    'root_fingerprint_sha256',
+    'capabilities',
+  ])) return false;
+  const root = value as FrozenAgentRootV1;
+  if (
+    root.schema_version !== 1 ||
+    (root.kind !== 'project' && root.kind !== 'workspace') ||
+    !isCanonicalLifecycleId(root.workspace_id) ||
+    !Number.isSafeInteger(root.workspace_binding_revision) ||
+    Object.is(root.workspace_binding_revision, -0) ||
+    root.workspace_binding_revision < 1 ||
+    root.workspace_binding_revision >= Number.MAX_SAFE_INTEGER ||
+    !isSha256Digest(root.root_fingerprint_sha256) ||
+    (root.kind === 'project') !== (root.project_id !== null) ||
+    (root.project_id !== null && !isCanonicalLifecycleId(root.project_id)) ||
+    !isExactDataArray(root.capabilities, 6)
+  ) return false;
+  const capabilities = new Set<string>();
+  for (const capability of root.capabilities) {
+    if (
+      typeof capability !== 'string' ||
+      ![
+        'file_read',
+        'file_write',
+        'git_status',
+        'git_commit',
+        'git_push',
+      ].includes(capability) ||
+      capabilities.has(capability) ||
+      (root.kind === 'workspace' && capability.startsWith('git_'))
+    ) return false;
+    capabilities.add(capability);
+  }
+  return true;
+}
+
+export const isFrozenAgentRoot = agentRootIsValid;
+
+function agentPolicyIsValid(value: unknown): value is AgentWritePolicyV1 {
+  if (!isExactDataRecord(value, [
+    'schema_version',
+    'policy_version',
+    'max_single_write_bytes',
+    'max_batch_write_bytes',
+    'max_attempt_write_bytes',
+  ])) return false;
+  const policy = value as AgentWritePolicyV1;
+  return (
+    policy.schema_version === 1 &&
+    validIdentifier(policy.policy_version) &&
+    policy.max_single_write_bytes === MAX_AGENT_SINGLE_WRITE_BYTES &&
+    Number.isSafeInteger(policy.max_batch_write_bytes) &&
+    !Object.is(policy.max_batch_write_bytes, -0) &&
+    policy.max_batch_write_bytes >= MAX_AGENT_SINGLE_WRITE_BYTES &&
+    policy.max_batch_write_bytes <= MAX_AGENT_BATCH_WRITE_BYTES &&
+    Number.isSafeInteger(policy.max_attempt_write_bytes) &&
+    !Object.is(policy.max_attempt_write_bytes, -0) &&
+    policy.max_attempt_write_bytes >= policy.max_batch_write_bytes &&
+    policy.max_attempt_write_bytes <= MAX_AGENT_ATTEMPT_WRITE_BYTES
+  );
+}
+
+export const isAgentWritePolicy = agentPolicyIsValid;
+
+function agentTranscriptIsValid(value: unknown): value is AgentTranscriptReferenceV1 {
+  if (!isExactDataRecord(value, [
+    'schema_version',
+    'transcript_ref',
+    'generation',
+    'transcript_sha256',
+    'transcript_bytes',
+  ])) return false;
+  const transcript = value as AgentTranscriptReferenceV1;
+  return (
+    transcript.schema_version === 1 &&
+    isCanonicalLifecycleId(transcript.transcript_ref) &&
+    Number.isSafeInteger(transcript.generation) &&
+    !Object.is(transcript.generation, -0) &&
+    transcript.generation >= 0 &&
+    isSha256Digest(transcript.transcript_sha256) &&
+    Number.isSafeInteger(transcript.transcript_bytes) &&
+    !Object.is(transcript.transcript_bytes, -0) &&
+    transcript.transcript_bytes >= 0
+    && transcript.transcript_bytes <= MAX_AGENT_TRANSCRIPT_BYTES
+  );
+}
+
+export const isAgentTranscriptReference = agentTranscriptIsValid;
+
+function agentReceiptIsValid(value: unknown): value is AgentToolReceiptV1 {
+  if (typeof value !== 'object' || value === null || Array.isArray(value)) return false;
+  if (!isExactDataRecord(value, [
+    'schema_version',
+    'call_id',
+    'name',
+    'arguments_sha256',
+    'result_sha256',
+    'result_bytes',
+    'truncated',
+    'duration_ms',
+    'outcome',
+    'failure_code',
+    'approval_reference',
+  ])) return false;
+  const receipt = value as AgentToolReceiptV1;
+  return (
+    receipt.schema_version === 1 &&
+    isOpaqueProviderId(receipt.call_id) &&
+    typeof receipt.name === 'string' &&
+    receipt.name.length > 0 &&
+    receipt.name.length <= 64 &&
+    /^[\x21-\x7e]+$/u.test(receipt.name) &&
+    isSha256Digest(receipt.arguments_sha256) &&
+    isSha256Digest(receipt.result_sha256) &&
+    Number.isSafeInteger(receipt.result_bytes) &&
+    !Object.is(receipt.result_bytes, -0) &&
+    receipt.result_bytes >= 0 &&
+    receipt.result_bytes <= MAX_AGENT_RESULT_BYTES &&
+    typeof receipt.truncated === 'boolean' &&
+    Number.isSafeInteger(receipt.duration_ms) &&
+    !Object.is(receipt.duration_ms, -0) &&
+    receipt.duration_ms >= 0 &&
+    receipt.duration_ms <= MAX_AGENT_DURATION_MS &&
+    (receipt.outcome === 'ok' ||
+      receipt.outcome === 'failed' ||
+      receipt.outcome === 'denied' ||
+      receipt.outcome === 'cancelled' ||
+      receipt.outcome === 'ambiguous') &&
+    (receipt.failure_code === null || isAgentFailureCode(receipt.failure_code)) &&
+    (receipt.approval_reference === null || validIdentifier(receipt.approval_reference)) &&
+    (receipt.outcome !== 'ok' || receipt.failure_code === null) &&
+    (receipt.outcome !== 'ambiguous' || receipt.failure_code === 'E_AGENT_EXECUTION_AMBIGUOUS')
+  );
+}
+
+export const isAgentToolReceipt = agentReceiptIsValid;
+
+function agentApprovalTokenIsValid(
+  value: unknown,
+  call: Pick<
+    PersistedAgentCallJournalV2,
+    'call_id' | 'name' | 'arguments_sha256' | 'access'
+  >,
+  index: number,
+  journal?: PersistedAgentAttemptJournalV2,
+): value is AgentApprovalTokenV1 {
+  if (!isExactDataRecord(value, [
+    'schema_version',
+    'controller_cas',
+    'round_id',
+    'round_index',
+    'batch_call_ids',
+    'batch_arguments_sha256',
+    'call_index',
+    'call_id',
+    'name',
+    'access',
+    'arguments_sha256',
+    'root_fingerprint_sha256',
+    'binding_revision',
+    'policy_version',
+    'registry_version',
+    'allowed_decisions',
+  ])) return false;
+  const token = value as unknown as AgentApprovalTokenV1;
+  const allowed =
+    call.access === 'conversation_confirm'
+      ? ['denied', 'allow_once', 'allow_conversation', 'cancelled']
+      : call.access === 'confirm_once'
+        ? ['denied', 'allow_once', 'cancelled']
+        : null;
+  if (
+    allowed === null ||
+    token.schema_version !== 1 ||
+    !agentControllerCASIsValid(token.controller_cas) ||
+    !isCanonicalLifecycleId(token.round_id) ||
+    !Number.isSafeInteger(token.round_index) ||
+    Object.is(token.round_index, -0) ||
+    token.round_index < 0 ||
+    token.round_index >= MAX_AGENT_ROUNDS ||
+    !isExactDataArray(token.batch_call_ids, MAX_AGENT_CALLS_PER_BATCH) ||
+    !isExactDataArray(token.batch_arguments_sha256, MAX_AGENT_CALLS_PER_BATCH) ||
+    token.batch_call_ids.length < 1 ||
+    token.batch_call_ids.length !== token.batch_arguments_sha256.length ||
+    !Number.isSafeInteger(token.call_index) ||
+    Object.is(token.call_index, -0) ||
+    token.call_index !== index ||
+    token.call_index >= token.batch_call_ids.length ||
+    token.call_id !== call.call_id ||
+    token.name !== call.name ||
+    token.access !== call.access ||
+    token.arguments_sha256 !== call.arguments_sha256 ||
+    !isSha256Digest(token.arguments_sha256) ||
+    !isSha256Digest(token.root_fingerprint_sha256) ||
+    !Number.isSafeInteger(token.binding_revision) ||
+    Object.is(token.binding_revision, -0) ||
+    token.binding_revision < 1 ||
+    token.binding_revision >= Number.MAX_SAFE_INTEGER ||
+    !validIdentifier(token.policy_version) ||
+    token.registry_version !== 1 ||
+    !isExactDataArray(token.allowed_decisions, 4) ||
+    token.allowed_decisions.length !== allowed.length ||
+    token.allowed_decisions.some(
+      (decision, decisionIndex) => decision !== allowed[decisionIndex],
+    ) ||
+    token.batch_call_ids.some(
+      (callId, callIndex) =>
+        !isOpaqueProviderId(callId) ||
+        !isSha256Digest(token.batch_arguments_sha256[callIndex]),
+    ) ||
+    token.batch_call_ids[token.call_index] !== token.call_id
+  ) return false;
+  if (
+    journal !== undefined &&
+    (token.round_id !== journal.round_lineage?.round_id ||
+      token.round_index !== journal.round_index ||
+      token.root_fingerprint_sha256 !== journal.root.root_fingerprint_sha256 ||
+      token.binding_revision !== journal.root.workspace_binding_revision ||
+      token.policy_version !== journal.policy.policy_version ||
+      token.registry_version !== journal.tool_registry_version ||
+      token.batch_call_ids.length !== journal.batch.length ||
+      token.batch_arguments_sha256.length !== journal.batch.length ||
+      token.batch_call_ids.some((callId, callIndex) =>
+        callId !== journal.batch[callIndex]?.call_id,
+      ) ||
+      token.batch_arguments_sha256.some((digest, callIndex) =>
+        digest !== journal.batch[callIndex]?.arguments_sha256,
+      ))
+  ) return false;
+  return true;
+}
+
+function agentCallIsValid(value: unknown): value is PersistedAgentCallJournalV2 {
+  if (!isExactDataRecord(value, [
+    'schema_version',
+    'call_id',
+    'call_index',
+    'name',
+    'arguments_sha256',
+    'safe_summary_key',
+    'access',
+    'approval_token',
+    'approval_decision',
+    'approval_reference',
+    'idempotency_key',
+    'native_row_revision',
+    'receipt',
+  ])) return false;
+  const call = value as PersistedAgentCallJournalV2;
+  if (
+    call.schema_version !== 2 ||
+    !isOpaqueProviderId(call.call_id) ||
+    !Number.isSafeInteger(call.call_index) ||
+    Object.is(call.call_index, -0) ||
+    call.call_index < 0 ||
+    typeof call.name !== 'string' ||
+    call.name.length === 0 ||
+    call.name.length > 64 ||
+    !/^[\x21-\x7e]+$/u.test(call.name) ||
+    !isSha256Digest(call.arguments_sha256) ||
+    typeof call.safe_summary_key !== 'string' ||
+    call.safe_summary_key.length === 0 ||
+    call.safe_summary_key.length > MAX_AGENT_SUMMARY_KEY_LENGTH ||
+    !safeSummaryKeys.has(call.safe_summary_key) ||
+    call.safe_summary_key !==
+      (['list_dir', 'read_file', 'write_file', 'git_status', 'git_commit', 'git_push'].includes(call.name)
+        ? `agent.${call.name}`
+        : 'agent.unknown') ||
+    (['list_dir', 'read_file', 'git_status'].includes(call.name) &&
+      call.access !== 'auto') ||
+    (['write_file', 'git_commit'].includes(call.name) &&
+      call.access !== 'conversation_confirm') ||
+    (call.name === 'git_push' && call.access !== 'confirm_once') ||
+    (!['list_dir', 'read_file', 'write_file', 'git_status', 'git_commit', 'git_push'].includes(call.name) &&
+      call.access !== 'durable_deny') ||
+    !agentAccessValues.has(call.access) ||
+    !agentDecisionValues.has(call.approval_decision) ||
+    (call.approval_token !== null &&
+      !agentApprovalTokenIsValid(call.approval_token, call, call.call_index)) ||
+    (call.approval_reference !== null && !isOpaqueProviderId(call.approval_reference)) ||
+    (call.idempotency_key !== null && !isSha256Digest(call.idempotency_key)) ||
+    (call.native_row_revision !== null &&
+      (!Number.isSafeInteger(call.native_row_revision) ||
+        Object.is(call.native_row_revision, -0) ||
+        call.native_row_revision < 1)) ||
+    (call.receipt !== null && call.native_row_revision === null) ||
+    (call.receipt !== null && !agentReceiptIsValid(call.receipt)) ||
+    (call.receipt !== null &&
+      (call.receipt.call_id !== call.call_id ||
+        call.receipt.name !== call.name ||
+        call.receipt.arguments_sha256 !== call.arguments_sha256 ||
+        call.receipt.approval_reference !== call.approval_reference ||
+        (call.receipt.outcome === 'ok' && call.receipt.failure_code !== null) ||
+        (call.receipt.outcome === 'ambiguous' &&
+          call.receipt.failure_code !== 'E_AGENT_EXECUTION_AMBIGUOUS') ||
+        ((call.receipt.outcome === 'failed' ||
+          call.receipt.outcome === 'denied' ||
+          call.receipt.outcome === 'cancelled') &&
+          call.receipt.failure_code === 'E_AGENT_EXECUTION_AMBIGUOUS')))
+  ) return false;
+  if (call.access === 'auto' && (call.approval_token !== null || call.approval_reference !== null)) return false;
+  if (
+    call.access === 'durable_deny' &&
+    (call.approval_token !== null || call.approval_reference !== null)
+  ) return false;
+  if (call.access === 'durable_deny' && call.idempotency_key !== null) {
+    return false;
+  }
+  if (call.approval_decision === 'pending' && call.approval_reference !== null) {
+    return false;
+  }
+  if (
+    call.access === 'durable_deny' &&
+    call.receipt !== null &&
+    call.receipt.outcome !== 'denied'
+  ) return false;
+  if (call.access === 'durable_deny' && call.approval_decision !== 'denied') return false;
+  if (call.name === 'git_push' && call.approval_decision === 'allow_conversation') return false;
+  if (
+    (call.access === 'conversation_confirm' || call.access === 'confirm_once') &&
+    call.approval_token === null
+  ) return false;
+  return true;
+}
+
+export function isAgentAttemptJournal(
+  value: unknown,
+): value is PersistedAgentAttemptJournalV2 {
+  if (!isExactDataRecord(value, [
+    'schema_version',
+    'phase',
+    'controller_generation',
+    'policy',
+    'root',
+    'tool_registry_version',
+    'toolset_sha256',
+    'transcript',
+    'round_index',
+    'round_lineage',
+    'call_index',
+    'batch',
+    'frozen_grant_ids',
+    'reserved_write_bytes',
+    'updated_at',
+  ])) return false;
+  const journal = value as PersistedAgentAttemptJournalV2;
+  if (
+    journal.schema_version !== 2 ||
+    !agentPhaseValues.has(journal.phase) ||
+    !Number.isSafeInteger(journal.controller_generation) ||
+    Object.is(journal.controller_generation, -0) ||
+    journal.controller_generation < 0 ||
+    journal.controller_generation >= Number.MAX_SAFE_INTEGER ||
+    !agentPolicyIsValid(journal.policy) ||
+    !agentRootIsValid(journal.root) ||
+    journal.tool_registry_version !== 1 ||
+    !isSha256Digest(journal.toolset_sha256) ||
+    !agentTranscriptIsValid(journal.transcript) ||
+    !Number.isSafeInteger(journal.round_index) ||
+    Object.is(journal.round_index, -0) ||
+    journal.round_index < 0 ||
+    journal.round_index >= MAX_AGENT_ROUNDS ||
+    !isExactDataArray(journal.batch, MAX_AGENT_CALLS_PER_BATCH) ||
+    !isExactDataArray(
+      journal.frozen_grant_ids,
+      MAX_AGENT_GRANTS_PER_CONVERSATION,
+    ) ||
+    !Number.isSafeInteger(journal.reserved_write_bytes) ||
+    Object.is(journal.reserved_write_bytes, -0) ||
+    journal.reserved_write_bytes < 0 ||
+    journal.reserved_write_bytes > journal.policy.max_attempt_write_bytes ||
+    !isCanonicalTimestamp(journal.updated_at)
+  ) return false;
+  const seenCallIds = new Set<string>();
+  for (let index = 0; index < journal.batch.length; index += 1) {
+    const call = journal.batch[index];
+    if (
+      !agentCallIsValid(call) ||
+      call.call_index !== index ||
+      seenCallIds.has(call.call_id)
+    ) return false;
+    seenCallIds.add(call.call_id);
+  }
+  if (
+    journal.call_index !== null &&
+    (!Number.isSafeInteger(journal.call_index) ||
+      Object.is(journal.call_index, -0) ||
+      journal.call_index < 0 ||
+      journal.call_index >= journal.batch.length)
+  ) return false;
+  if (journal.round_lineage !== null) {
+    const lineage = journal.round_lineage;
+    if (
+      !isExactDataRecord(lineage, [
+        'schema_version',
+        'round_id',
+        'round_index',
+        'launch_attempt',
+        'status',
+        'native_row_revision',
+      ]) ||
+      lineage.schema_version !== 2 ||
+      !isCanonicalLifecycleId(lineage.round_id) ||
+      lineage.round_index !== journal.round_index ||
+      !Number.isSafeInteger(lineage.launch_attempt) ||
+      Object.is(lineage.launch_attempt, -0) ||
+      lineage.launch_attempt < 1 ||
+      lineage.launch_attempt > MAX_AGENT_ROUNDS ||
+      (lineage.native_row_revision !== null &&
+        (!Number.isSafeInteger(lineage.native_row_revision) ||
+          Object.is(lineage.native_row_revision, -0) ||
+          lineage.native_row_revision < 1))
+    ) return false;
+  }
+  if (
+    journal.phase === 'ready_for_round' &&
+    (journal.call_index !== null ||
+      journal.batch.length !== 0 ||
+      (journal.round_lineage !== null && journal.round_lineage.status !== 'ready'))
+  ) return false;
+  if (
+    !isAgentPhaseLineageValid(
+      journal.phase,
+      journal.round_lineage?.status ?? null,
+    )
+  ) return false;
+  if (journal.phase === 'approval_pending' && !journal.batch.some(call => call.approval_decision === 'pending')) return false;
+  if (journal.phase === 'execution_intent') {
+    const call = journal.call_index === null ? undefined : journal.batch[journal.call_index];
+    if (
+      call === undefined ||
+      call.idempotency_key === null ||
+      (call.access !== 'auto' &&
+        call.approval_decision !== 'allow_once' &&
+        call.approval_decision !== 'allow_conversation')
+    ) return false;
+  }
+  if (journal.phase === 'tool_result_pending') {
+    const call = journal.call_index === null ? undefined : journal.batch[journal.call_index];
+    if (
+      call === undefined ||
+      call.receipt === null ||
+      (call.receipt.outcome !== 'ok' &&
+        call.receipt.outcome !== 'failed' &&
+        call.receipt.outcome !== 'denied')
+    ) return false;
+  }
+  for (let index = 0; index < journal.batch.length; index += 1) {
+    const call = journal.batch[index]!;
+    if (
+      call.approval_token !== null &&
+      !agentApprovalTokenIsValid(call.approval_token, call, index, journal)
+    ) return false;
+  }
+  if (
+    journal.phase === 'cancelled' &&
+    journal.batch.some(
+      call =>
+        call.receipt === null &&
+        call.approval_decision !== 'denied' &&
+        call.approval_decision !== 'cancelled',
+    )
+  ) return false;
+  const grantIds = new Set<string>();
+  for (const grantId of journal.frozen_grant_ids) {
+    if (!isCanonicalLifecycleId(grantId) || grantIds.has(grantId)) return false;
+    grantIds.add(grantId);
+  }
+  return true;
+}
+
+export function validateAgentAttemptJournal(
+  value: unknown,
+): PersistedAgentAttemptJournalV2 {
+  if (!isAgentAttemptJournal(value)) {
+    throw new Error('invalid Agent attempt journal');
+  }
+  return value;
+}
+
+function agentCallV3IsValid(value: unknown): value is PersistedAgentCallJournalV3 {
+  if (!isExactDataRecord(value, [
+    'schema_version',
+    'call_id',
+    'call_index',
+    'name',
+    'arguments_sha256',
+    'safe_summary_key',
+    'access',
+    'approval_token',
+    'approval_decision',
+    'approval_reference',
+    'idempotency_key',
+    'native_row_revision',
+    'receipt',
+  ])) return false;
+  const call = value as PersistedAgentCallJournalV3;
+  const knownTool =
+    call.name === 'list_dir' ||
+    call.name === 'read_file' ||
+    call.name === 'write_file' ||
+    call.name === 'git_status' ||
+    call.name === 'git_commit' ||
+    call.name === 'git_push';
+  const expectedAccess = knownTool
+    ? call.name === 'list_dir' || call.name === 'read_file' || call.name === 'git_status'
+      ? 'auto'
+      : call.name === 'git_push'
+        ? 'confirm_once'
+        : 'conversation_confirm'
+    : 'durable_deny';
+  const gated = call.access === 'conversation_confirm' || call.access === 'confirm_once';
+  return (
+    call.schema_version === 3 &&
+    isOpaqueProviderId(call.call_id) &&
+    Number.isSafeInteger(call.call_index) &&
+    !Object.is(call.call_index, -0) &&
+    call.call_index >= 0 &&
+    typeof call.name === 'string' &&
+    call.name.length > 0 &&
+    call.name.length <= 64 &&
+    /^[\x21-\x7e]+$/u.test(call.name) &&
+    isSha256Digest(call.arguments_sha256) &&
+    typeof call.safe_summary_key === 'string' &&
+    safeSummaryKeys.has(call.safe_summary_key) &&
+    call.safe_summary_key === (knownTool ? `agent.${call.name}` : 'agent.unknown') &&
+    call.access === expectedAccess &&
+    (call.approval_token === null || isOpaqueProviderId(call.approval_token)) &&
+    agentDecisionValues.has(call.approval_decision) &&
+    (call.approval_reference === null || isOpaqueProviderId(call.approval_reference)) &&
+    (call.idempotency_key === null || isSha256Digest(call.idempotency_key)) &&
+    (call.native_row_revision === null ||
+      (Number.isSafeInteger(call.native_row_revision) &&
+        !Object.is(call.native_row_revision, -0) &&
+        call.native_row_revision >= 1)) &&
+    (call.receipt === null ||
+      (call.native_row_revision !== null &&
+        agentReceiptIsValid(call.receipt) &&
+        call.receipt.call_id === call.call_id &&
+        call.receipt.name === call.name &&
+        call.receipt.arguments_sha256 === call.arguments_sha256 &&
+        call.receipt.approval_reference === call.approval_reference)) &&
+    (call.access !== 'auto' ||
+      (call.approval_token === null && call.approval_reference === null)) &&
+    (call.access !== 'durable_deny' ||
+      (call.approval_token === null &&
+        call.approval_reference === null &&
+        call.idempotency_key === null &&
+        call.approval_decision === 'denied' &&
+        (call.receipt === null || call.receipt.outcome === 'denied'))) &&
+    (!gated ||
+      (call.approval_decision === 'denied' || call.approval_decision === 'cancelled'
+        ? call.approval_token === null && call.approval_reference === null
+        : call.approval_token !== null)) &&
+    (call.name !== 'git_push' || call.approval_decision !== 'allow_conversation')
+  );
+}
+
+export const isAgentCallJournalV3 = agentCallV3IsValid;
+
+export function isAgentAttemptJournalV3(
+  value: unknown,
+): value is PersistedAgentAttemptJournalV3 {
+  if (!isExactDataRecord(value, [
+    'schema_version',
+    'phase',
+    'controller_generation',
+    'policy',
+    'root',
+    'tool_registry_version',
+    'toolset_sha256',
+    'transcript',
+    'round_index',
+    'round_lineage',
+    'call_index',
+    'batch',
+    'frozen_grant_ids',
+    'reserved_write_bytes',
+    'updated_at',
+  ])) return false;
+  const journal = value as PersistedAgentAttemptJournalV3;
+  if (
+    journal.schema_version !== 3 ||
+    !agentPhaseValues.has(journal.phase) ||
+    !Number.isSafeInteger(journal.controller_generation) ||
+    Object.is(journal.controller_generation, -0) ||
+    journal.controller_generation < 0 ||
+    journal.controller_generation >= Number.MAX_SAFE_INTEGER ||
+    !agentPolicyIsValid(journal.policy) ||
+    !agentRootIsValid(journal.root) ||
+    journal.tool_registry_version !== 1 ||
+    !isSha256Digest(journal.toolset_sha256) ||
+    !agentTranscriptIsValid(journal.transcript) ||
+    !Number.isSafeInteger(journal.round_index) ||
+    Object.is(journal.round_index, -0) ||
+    journal.round_index < 0 ||
+    journal.round_index >= MAX_AGENT_ROUNDS ||
+    !isExactDataArray(journal.batch, MAX_AGENT_CALLS_PER_BATCH) ||
+    !isExactDataArray(journal.frozen_grant_ids, MAX_AGENT_GRANTS_PER_CONVERSATION) ||
+    !Number.isSafeInteger(journal.reserved_write_bytes) ||
+    Object.is(journal.reserved_write_bytes, -0) ||
+    journal.reserved_write_bytes < 0 ||
+    journal.reserved_write_bytes > journal.policy.max_attempt_write_bytes ||
+    !isCanonicalTimestamp(journal.updated_at)
+  ) return false;
+  const ids = new Set<string>();
+  for (let index = 0; index < journal.batch.length; index += 1) {
+    const call = journal.batch[index];
+    if (!agentCallV3IsValid(call) || call.call_index !== index || ids.has(call.call_id)) return false;
+    ids.add(call.call_id);
+  }
+  if (
+    journal.call_index !== null &&
+    (!Number.isSafeInteger(journal.call_index) ||
+      Object.is(journal.call_index, -0) ||
+      journal.call_index < 0 ||
+      journal.call_index >= journal.batch.length)
+  ) return false;
+  if (journal.round_lineage !== null) {
+    const lineage = journal.round_lineage;
+    if (
+      !isExactDataRecord(lineage, [
+        'schema_version',
+        'round_id',
+        'round_index',
+        'launch_attempt',
+        'status',
+        'native_row_revision',
+      ]) ||
+      lineage.schema_version !== 2 ||
+      !isCanonicalLifecycleId(lineage.round_id) ||
+      lineage.round_index !== journal.round_index ||
+      !Number.isSafeInteger(lineage.launch_attempt) ||
+      Object.is(lineage.launch_attempt, -0) ||
+      lineage.launch_attempt < 1 ||
+      lineage.launch_attempt > MAX_AGENT_ROUNDS ||
+      (lineage.native_row_revision !== null &&
+        (!Number.isSafeInteger(lineage.native_row_revision) ||
+          Object.is(lineage.native_row_revision, -0) ||
+          lineage.native_row_revision < 1))
+    ) return false;
+  }
+  if (
+    journal.phase === 'ready_for_round' &&
+    (journal.call_index !== null || journal.batch.length !== 0 ||
+      (journal.round_lineage !== null && journal.round_lineage.status !== 'ready'))
+  ) return false;
+  if (
+    !isAgentPhaseLineageValid(
+      journal.phase,
+      journal.round_lineage?.status ?? null,
+    )
+  ) return false;
+  if (journal.phase === 'approval_pending' && !journal.batch.some(call =>
+    call.access !== 'auto' && call.access !== 'durable_deny' && call.approval_decision === 'pending')) return false;
+  if (journal.phase === 'execution_intent') {
+    const call = journal.call_index === null ? undefined : journal.batch[journal.call_index];
+    if (call === undefined || call.idempotency_key === null ||
+      (call.access !== 'auto' && call.approval_decision !== 'allow_once' && call.approval_decision !== 'allow_conversation')) return false;
+  }
+  if (journal.phase === 'tool_result_pending') {
+    const call = journal.call_index === null ? undefined : journal.batch[journal.call_index];
+    if (call === undefined || call.receipt === null ||
+      (call.receipt.outcome !== 'ok' && call.receipt.outcome !== 'failed' && call.receipt.outcome !== 'denied')) return false;
+  }
+  if (
+    journal.phase === 'final_response' &&
+    (journal.call_index !== null || journal.batch.length !== 0)
+  ) return false;
+  if (journal.phase === 'cancelled' && journal.batch.some(call =>
+    call.receipt === null && call.approval_decision !== 'denied' && call.approval_decision !== 'cancelled')) return false;
+  return true;
+}
+
+export function isAgentAttemptJournalAny(
+  value: unknown,
+): value is PersistedAgentAttemptJournalV2 | PersistedAgentAttemptJournalV3 {
+  return isAgentAttemptJournal(value) || isAgentAttemptJournalV3(value);
+}
+
+function agentGrantIsValid(value: unknown): value is AgentConversationGrantV2 {
+  if (!isExactDataRecord(value, [
+    'schema_version',
+    'grant_id',
+    'conversation_id',
+    'workspace_id',
+    'project_id',
+    'binding_revision',
+    'root_fingerprint_sha256',
+    'tool_family',
+    'registry_version',
+    'policy_version',
+    'issued_for',
+    'created_at',
+  ])) return false;
+  const grant = value as AgentConversationGrantV2;
+  return (
+    grant.schema_version === 2 &&
+    isCanonicalLifecycleId(grant.grant_id) &&
+    validIdentifier(grant.conversation_id) &&
+    isCanonicalLifecycleId(grant.workspace_id) &&
+    (grant.project_id === null || isCanonicalLifecycleId(grant.project_id)) &&
+    Number.isSafeInteger(grant.binding_revision) &&
+    grant.binding_revision > 0 &&
+    grant.binding_revision < Number.MAX_SAFE_INTEGER &&
+    isSha256Digest(grant.root_fingerprint_sha256) &&
+    (grant.tool_family === 'file_write' || grant.tool_family === 'git_commit') &&
+    (grant.tool_family !== 'git_commit' || grant.project_id !== null) &&
+    grant.registry_version === 1 &&
+    validIdentifier(grant.policy_version) &&
+    isExactDataRecord(grant.issued_for, ['schema_version', 'task_id', 'attempt_id']) &&
+    grant.issued_for.schema_version === 1 &&
+    isCanonicalLifecycleId(grant.issued_for.task_id) &&
+    isCanonicalLifecycleId(grant.issued_for.attempt_id) &&
+    isCanonicalTimestamp(grant.created_at)
+  );
+}
+
+export const isAgentConversationGrant = agentGrantIsValid;
+
+function agentJournalMatchesConversation(
+  conversation: Conversation,
+  journal: PersistedAgentAttemptJournalV2 | PersistedAgentAttemptJournalV3,
+): boolean {
+  const binding = conversation.workspaceBinding ?? null;
+  if (
+    binding === null ||
+    journal.root.workspace_id !== binding.workspaceId ||
+    journal.root.workspace_binding_revision !== binding.bindingRevision ||
+    journal.root.project_id !== conversation.projectId
+  ) return false;
+  const grants = new Map(
+    (conversation.agentGrants ?? []).map(grant => [grant.grant_id, grant]),
+  );
+  return journal.frozen_grant_ids.every(grantId => {
+    const grant = grants.get(grantId);
+    return (
+      grant !== undefined &&
+      grant.workspace_id === journal.root.workspace_id &&
+      grant.binding_revision === journal.root.workspace_binding_revision &&
+      grant.project_id === journal.root.project_id &&
+      grant.registry_version === journal.tool_registry_version &&
+      grant.policy_version === journal.policy.policy_version &&
+      grant.root_fingerprint_sha256 === journal.root.root_fingerprint_sha256 &&
+      journal.root.capabilities.includes(
+        grant.tool_family === 'file_write' ? 'file_write' : 'git_commit',
+      )
+    );
+  });
+}
+
+function agentPhaseTransitionIsLegalAny(
+  current: PersistedAgentAttemptJournalV2 | PersistedAgentAttemptJournalV3,
+  next: PersistedAgentAttemptJournalV2 | PersistedAgentAttemptJournalV3,
+): boolean {
+  const allowed: Readonly<Record<AgentAttemptPhase, readonly AgentAttemptPhase[]>> = {
+    ready_for_round: ['round_in_flight'],
+    round_in_flight: [
+      'round_in_flight',
+      'ready_for_round',
+      'batch_frozen',
+      'approval_pending',
+      'final_response',
+      'cancelled',
+      'failed',
+      'unknown',
+      'ambiguous',
+    ],
+    batch_frozen: [
+      'batch_frozen',
+      'approval_pending',
+      'execution_intent',
+      'tool_result_pending',
+      'cancelled',
+      'failed',
+      'unknown',
+      'ambiguous',
+    ],
+    approval_pending: [
+      'approval_pending',
+      'batch_frozen',
+      'tool_result_pending',
+      'cancelled',
+      'failed',
+      'unknown',
+      'ambiguous',
+    ],
+    execution_intent: [
+      'execution_intent',
+      'tool_result_pending',
+      'cancelled',
+      'unknown',
+      'ambiguous',
+    ],
+    tool_result_pending: [
+      'tool_result_pending',
+      'batch_frozen',
+      'approval_pending',
+      'ready_for_round',
+      'cancelled',
+      'failed',
+      'unknown',
+      'ambiguous',
+    ],
+    final_response: ['final_response'],
+    cancelled: ['cancelled'],
+    failed: ['failed', 'round_in_flight'],
+    unknown: ['unknown'],
+    ambiguous: ['ambiguous'],
+  };
+  return allowed[current.phase]?.includes(next.phase) ?? false;
+}
+
+function sameAgentRoundLineage(
+  left: PersistedAgentAttemptJournalV3['round_lineage'],
+  right: PersistedAgentAttemptJournalV3['round_lineage'],
+): boolean {
+  return left === null
+    ? right === null
+    : right !== null &&
+        left.schema_version === right.schema_version &&
+        left.round_id === right.round_id &&
+        left.round_index === right.round_index &&
+        left.launch_attempt === right.launch_attempt &&
+        left.status === right.status &&
+        left.native_row_revision === right.native_row_revision;
+}
+
+function agentCallHasTerminalDisposition(
+  call: PersistedAgentCallJournalV3,
+): boolean {
+  return (
+    (call.receipt !== null &&
+      (call.receipt.outcome === 'ok' ||
+        call.receipt.outcome === 'failed' ||
+        call.receipt.outcome === 'denied' ||
+        call.receipt.outcome === 'cancelled')) ||
+    (call.receipt === null &&
+      (call.approval_decision === 'denied' ||
+        call.approval_decision === 'cancelled'))
+  );
+}
+
+function applyAgentCallAdvance(
+  state: ChatState,
+  payload: Extract<ChatAction, { readonly type: 'attempt/agent-advance-call' }>['payload'],
+): ChatState {
+  if (
+    !isExactDataRecordWithOptional(
+      payload,
+      ['cas', 'conversationId', 'attemptId', 'expectedAttempt', 'journal', 'at'],
+      ['journalRevision'],
+    ) ||
+    !isCanonicalTimestamp(payload.at) ||
+    !isAgentAttemptJournalV3(payload.journal)
+  ) return state;
+  const conversation = state.conversations[payload.conversationId];
+  const index =
+    conversation === undefined ? -1 : attemptIndex(conversation, payload.attemptId);
+  const attempt = conversation?.attempts[index];
+  const current = attempt?.agent;
+  if (
+    conversation === undefined ||
+    attempt === undefined ||
+    payload.expectedAttempt !== attempt ||
+    !agentControllerCASMatchesAttempt(payload.cas, conversation, attempt) ||
+    current === null ||
+    current === undefined ||
+    !isAgentAttemptJournalV3(current) ||
+    current.phase !== 'tool_result_pending' ||
+    current.call_index === null ||
+    (payload.journalRevision !== undefined &&
+      payload.journalRevision !== (attempt.journalRevision ?? 0) + 1)
+  ) return state;
+  const currentCall = current.batch[current.call_index];
+  if (
+    currentCall === undefined ||
+    currentCall.receipt === null ||
+    !agentCallHasTerminalDisposition(currentCall)
+  ) return state;
+
+  let nextCallIndex = current.call_index + 1;
+  while (
+    nextCallIndex < current.batch.length &&
+    agentCallHasTerminalDisposition(current.batch[nextCallIndex]!)
+  ) {
+    nextCallIndex += 1;
+  }
+  const nextCall = current.batch[nextCallIndex];
+  if (nextCall === undefined || nextCall.access === 'durable_deny') return state;
+  const nextPhase =
+    nextCall.access !== 'auto' &&
+    nextCall.approval_decision === 'pending' &&
+    nextCall.approval_token !== null
+      ? 'approval_pending'
+      : 'batch_frozen';
+  const next = payload.journal;
+  if (
+    next.phase !== nextPhase ||
+    next.call_index !== nextCallIndex ||
+    next.controller_generation !== current.controller_generation + 1 ||
+    next.updated_at !== payload.at ||
+    next.schema_version !== current.schema_version ||
+    !sameAgentPolicy(current.policy, next.policy) ||
+    !sameAgentRoot(current.root, next.root) ||
+    current.tool_registry_version !== next.tool_registry_version ||
+    current.toolset_sha256 !== next.toolset_sha256 ||
+    !sameAgentTranscript(current.transcript, next.transcript) ||
+    current.round_index !== next.round_index ||
+    !sameAgentRoundLineage(current.round_lineage, next.round_lineage) ||
+    current.batch.length !== next.batch.length ||
+    !current.batch.every((call, callIndex) =>
+      sameAgentCallJournal(call, next.batch[callIndex]!),
+    ) ||
+    !sameAgentStringArray(current.frozen_grant_ids, next.frozen_grant_ids) ||
+    current.reserved_write_bytes !== next.reserved_write_bytes ||
+    !agentJournalMatchesConversation(conversation, next)
+  ) return state;
+  const nextAgentAttempt = agentOuterAttemptCheckpoint(
+    attempt,
+    next,
+    undefined,
+    payload.at,
+  );
+  if (nextAgentAttempt === null) return state;
+  const nextAttempt: TurnAttemptV1 = {
+    ...nextAgentAttempt,
+    journalRevision: (attempt.journalRevision ?? 0) + 1,
+    agent: copyAgentJournalV3(next),
+  };
+  const nextConversation = replaceAttempt(conversation, index, nextAttempt);
+  const conversations = {
+    ...state.conversations,
+    [conversation.id]: nextConversation,
+  };
+  return {
+    ...state,
+    conversations,
+    conversationOrder: orderConversationIds(conversations),
+  };
+}
+
+function finalAgentCheckpointTransitionIsSafe(
+  current: PersistedAgentAttemptJournalV3 | null | undefined,
+  next: PersistedAgentAttemptJournalV3,
+  evidence: AgentCheckpointEvidence | undefined,
+  cas: AgentControllerCASV1,
+): boolean {
+  if (!isAgentAttemptJournalV3(next) || evidence === undefined) return false;
+  if (isControllerPreflight(evidence)) {
+    return preflightEventMatchesJournal(current, next, evidence, cas);
+  }
+  return highLevelEvidenceSupportsTransition(current, next, evidence, cas);
+}
+
+function applyFinalAgentCheckpoint(
+  state: ChatState,
+  payload: Extract<ChatAction, { readonly type: 'attempt/agent-checkpoint' }>['payload'],
+  allowFirstTerminal = false,
+): ChatState {
+  if (
+    payload.journal === null ||
+    !isAgentAttemptJournalV3(payload.journal) ||
+    !isExactDataRecordWithOptional(
+      payload,
+      ['cas', 'conversationId', 'attemptId', 'expectedAttempt', 'journal', 'events', 'at'],
+      ['journalRevision', 'evidence', 'cleanup'],
+    ) ||
+    !isCanonicalTimestamp(payload.at)
+  ) return state;
+  const evidence = closedCheckpointEvidence(payload.evidence);
+  if (
+    evidence === null ||
+    !agentCheckpointEvidenceMatchesControllerCAS(evidence, payload.cas)
+  ) return state;
+  if (payload.cleanup !== undefined) {
+    const expectedReason = cleanupReasonForTerminalPhase(payload.journal.phase);
+    const outbox = state.agentTranscriptCleanupOutbox ?? [];
+    if (
+      expectedReason === null ||
+      !cleanupEntryIsValid(payload.cleanup) ||
+      payload.cleanup.conversation_id !== payload.conversationId ||
+      payload.cleanup.attempt_id !== payload.attemptId ||
+      payload.cleanup.transcript_ref !== payload.journal.transcript.transcript_ref ||
+      payload.cleanup.transcript_sha256 !== payload.journal.transcript.transcript_sha256 ||
+      payload.cleanup.reason !== expectedReason ||
+      outbox.length >= MAX_AGENT_CLEANUP_OUTBOX_ENTRIES ||
+      outbox.some(entry => entry.cleanup_id === payload.cleanup!.cleanup_id)
+    ) return state;
+  }
+  const conversation = state.conversations[payload.conversationId];
+  const index =
+    conversation === undefined
+      ? -1
+      : attemptIndex(conversation, payload.attemptId);
+  const attempt = conversation?.attempts[index];
+  const current = attempt?.agent;
+  const currentPhase =
+    current?.schema_version === 3 ? current.phase : null;
+  const nextIsTerminal =
+    payload.journal.phase === 'final_response' ||
+    payload.journal.phase === 'cancelled' ||
+    payload.journal.phase === 'failed';
+  const currentIsTerminal =
+    currentPhase === 'final_response' ||
+    currentPhase === 'cancelled' ||
+    currentPhase === 'failed';
+
+  if (nextIsTerminal && (!allowFirstTerminal || currentIsTerminal)) {
+    return state;
+  }
+
+  if (
+    payload.cleanup !== undefined &&
+    (attempt === undefined || payload.cleanup.task_id !== attempt.turnId)
+  ) return state;
+  if (
+    conversation === undefined ||
+    attempt === undefined ||
+    payload.expectedAttempt !== attempt ||
+    !agentControllerCASMatchesAttempt(payload.cas, conversation, attempt) ||
+    (current !== null && current !== undefined && current.schema_version !== 3) ||
+    !agentJournalMatchesConversation(conversation, payload.journal) ||
+    (payload.journalRevision !== undefined &&
+      payload.journalRevision !== (attempt.journalRevision ?? 0) + 1) ||
+    payload.journal.controller_generation !==
+      (current?.schema_version === 3
+        ? current.controller_generation + 1
+        : 0) ||
+    !sessionEventsAreValid(payload.events) ||
+    payload.events.length === 0 ||
+    !payload.events.some(
+      event => !(state.sessionEvents ?? []).some(candidate =>
+        candidate.event_id === event.event_id,
+      ),
+    ) ||
+    payload.events.some(event => {
+      const existing = (state.sessionEvents ?? []).find(
+        candidate => candidate.event_id === event.event_id,
+      );
+      return existing !== undefined && !sameSessionEvent(existing, event);
+    }) ||
+    !sessionEventsMatchState(payload.events, state, {
+      conversationId: payload.conversationId,
+      attemptId: payload.attemptId,
+      journal: payload.journal,
+    }) ||
+    (isControllerPreflight(evidence) &&
+      evidence.kind === 'begin_round' &&
+      current?.schema_version === 3 &&
+      ((current.phase === 'tool_result_pending' &&
+        (attempt.visibleHistorySha256 === null ||
+          attempt.visibleHistorySha256 !== evidence.visible_history_sha256 ||
+          attempt.visibleMessageIds.length !== evidence.visible_message_count ||
+          (attempt.projectContext?.snapshotSha256 ?? null) !==
+            evidence.project_context_sha256)) ||
+        (current.phase === 'ready_for_round' &&
+          current.round_lineage === null &&
+          (attempt.visibleMessageIds.length !== evidence.visible_message_count ||
+            (attempt.projectContext?.snapshotSha256 ?? null) !==
+              evidence.project_context_sha256)))) ||
+    (isControllerPreflight(evidence)
+      ? !preflightEventMatchesPayload(
+          evidence,
+          payload.events,
+          current?.schema_version === 3 ? current : null,
+          payload.attemptId,
+      )
+      : !(allowFirstTerminal && evidence.kind === 'recover_agent_attempt') &&
+        !postEvidenceOrderingIsValid(
+          state,
+          evidence,
+          payload.attemptId,
+          payload.events,
+          allowFirstTerminal,
+        )) ||
+    !finalAgentCheckpointTransitionIsSafe(
+      current?.schema_version === 3 ? current : null,
+      payload.journal,
+      evidence,
+      payload.cas,
+    )
+  ) return state;
+  if (nextIsTerminal && !currentIsTerminal && payload.cleanup === undefined) {
+    return state;
+  }
+  const nextAgentAttempt = agentOuterAttemptCheckpoint(
+    attempt,
+    payload.journal,
+    evidenceRoundReceiptFor(evidence),
+    payload.at,
+  );
+  if (nextAgentAttempt === null) return state;
+  const nextAttempt: TurnAttemptV1 = {
+    ...nextAgentAttempt,
+    journalRevision: (attempt.journalRevision ?? 0) + 1,
+    agent: copyAgentJournalV3(payload.journal),
+  };
+  const nextConversation = replaceAttempt(conversation, index, nextAttempt);
+  const conversations = { ...state.conversations, [conversation.id]: nextConversation };
+  const sessionEvents = [...(state.sessionEvents ?? [])];
+  for (const event of payload.events) {
+    if (!(state.sessionEvents ?? []).some(candidate => candidate.event_id === event.event_id)) {
+      sessionEvents.push({ ...event });
+    }
+  }
+  return {
+    ...state,
+    conversations,
+    conversationOrder: orderConversationIds(conversations),
+    sessionEvents,
+    ...(payload.cleanup === undefined
+      ? {}
+      : {
+          agentTranscriptCleanupOutbox: [
+            ...(state.agentTranscriptCleanupOutbox ?? []),
+            { ...payload.cleanup },
+          ],
+        }),
+  };
+}
+
+type AgentFinalMaterial = {
+  readonly receipt: CompletionRoundReceiptV1 | undefined;
+  readonly text: string | null;
+  readonly reasoning: string | null;
+  readonly eventStatus: 'ok' | 'failed' | 'cancelled';
+  readonly failureCode: AgentFailureCode | null;
+};
+
+function agentFinalMaterial(
+  evidence: AgentStoreTransitionEvidence,
+  journal: PersistedAgentAttemptJournalV3,
+): AgentFinalMaterial | null {
+  let text: string | null = null;
+  let reasoning: string | null = null;
+  if (evidence.kind === 'complete_agent_round_v2') {
+    const result = evidence.result;
+    if (result.status === 'completed') {
+      if (result.outcome.kind === 'tool_batch') return null;
+      if (result.outcome.kind === 'final') {
+        if (journal.phase !== 'final_response') return null;
+        text = result.outcome.text;
+        reasoning = result.outcome.reasoning;
+      } else if (journal.phase !== 'failed') {
+        return null;
+      }
+    } else if (result.status === 'cancelled') {
+      if (journal.phase !== 'cancelled') return null;
+    } else if (result.status === 'failed_retryable') {
+      if (journal.phase !== 'failed') return null;
+    } else {
+      return null;
+    }
+  } else if (evidence.kind === 'cancel_agent_attempt') {
+    const result = evidence.result;
+    const settledCancellation =
+      result.status === 'settled' && result.receipt?.outcome === 'cancelled';
+    if (
+      journal.phase !== 'cancelled' ||
+      (result.status !== 'cancelled' &&
+        result.status !== 'already_cancelled' &&
+        !settledCancellation)
+    ) return null;
+  } else if (evidence.kind === 'execute_agent_tool') {
+    if (
+      journal.phase !== 'cancelled' ||
+      evidence.result.status !== 'cancelled' ||
+      evidence.result.receipt === null ||
+      evidence.result.receipt.outcome !== 'cancelled' ||
+      evidence.result.receipt.failure_code !== 'E_AGENT_CANCELLED' ||
+      evidence.result.effect_may_have_occurred !== false
+    ) return null;
+  } else if (evidence.kind === 'recover_agent_attempt') {
+    const recovered = evidence.result.completed_round;
+    if (journal.phase === 'final_response') {
+      if (recovered === null || recovered.kind !== 'final') return null;
+      text = recovered.text;
+      reasoning = recovered.reasoning;
+    } else if (recovered !== null && recovered.kind === 'final') {
+      return null;
+    }
+  } else {
+    return null;
+  }
+  const receipt = evidenceRoundReceiptFor(evidence);
+  if (journal.phase === 'final_response') {
+    return receipt === undefined || text === null || reasoning === null
+      ? null
+      : {
+          receipt,
+          text,
+          reasoning,
+          eventStatus: 'ok',
+          failureCode: null,
+        };
+  }
+  if (journal.phase === 'cancelled') {
+    const cancellationFailure =
+      evidence.kind === 'cancel_agent_attempt'
+        ? evidence.request.cancel_token.reason_code
+        : evidence.kind === 'execute_agent_tool'
+          ? 'E_AGENT_CANCELLED'
+        : 'E_AGENT_CANCELLED';
+    return {
+      receipt,
+      text: null,
+      reasoning: null,
+      eventStatus: 'cancelled',
+      failureCode: cancellationFailure,
+    };
+  }
+  if (journal.phase !== 'failed') return null;
+  const failureCode: AgentFailureCode =
+    receipt?.finishReason === 'length'
+      ? 'E_COMPLETION_LENGTH'
+      : receipt?.finishReason === 'content_filter'
+        ? 'E_COMPLETION_CONTENT_FILTER'
+        : journal.round_index >= MAX_AGENT_ROUNDS - 1 &&
+            journal.round_lineage?.status === 'completed'
+          ? 'E_AGENT_ROUND_LIMIT'
+          : 'E_AGENT_PERSISTENCE';
+  return {
+    receipt,
+    text: null,
+    reasoning: null,
+    eventStatus: 'failed',
+    failureCode,
+  };
+}
+
+function exactFinalAssistantMessage(
+  conversation: Conversation,
+  value: ChatMessage | null,
+  material: AgentFinalMaterial,
+): ChatMessage | null {
+  if (material.text === null || material.reasoning === null) {
+    return null;
+  }
+  if (
+    value === null ||
+    !isExactDataRecordWithOptional(
+      value,
+      ['id', 'role', 'text', 'createdAt', 'attachments'],
+      ['metadata'],
+    ) ||
+    value.role !== 'assistant' ||
+    value.text !== material.text ||
+    !isExactDataArray(value.attachments, 0) ||
+    !isExactDataRecord(value.metadata, [
+      'modelId',
+      'latencyMs',
+      'finishReason',
+      'reasoning',
+    ]) ||
+    material.receipt === undefined ||
+    value.metadata.modelId !== material.receipt.model ||
+    value.metadata.latencyMs !== material.receipt.latencyMs ||
+    value.metadata.finishReason !== material.receipt.finishReason ||
+    value.metadata.reasoning !== material.reasoning
+  ) return null;
+  return normalizedMessage(conversation, value);
+}
+
+function atomicTerminalEventMatches(
+  state: ChatState,
+  payload: Extract<
+    ChatAction,
+    { readonly type: 'attempt/agent-final-checkpoint' }
+  >['payload'],
+  material: AgentFinalMaterial,
+  evidence: AgentStoreTransitionEvidence,
+): boolean {
+  const previous = state.sessionEvents ?? [];
+  const fresh = payload.events.filter(
+    event =>
+      !previous.some(candidate => candidate.event_id === event.event_id),
+  );
+  const latestSeq = previous
+    .filter(candidate => candidate.attempt_id === payload.attemptId)
+    .reduce((value, candidate) => Math.max(value, candidate.seq), -1);
+  const terminalMatches = (
+    event: PersistedSessionEventV3,
+    seq: number,
+  ) =>
+    event.attempt_id === payload.attemptId &&
+    event.seq === seq &&
+    event.kind === 'terminal' &&
+    event.round_index === null &&
+    event.call_id === null &&
+    event.status === material.eventStatus &&
+    event.safe_summary_key === null &&
+    event.arguments_sha256 === null &&
+    event.result_sha256 === null &&
+    event.approval_reference === null &&
+    event.failure_code === material.failureCode &&
+    event.created_at === payload.cleanup.created_at;
+  if (evidence.kind === 'execute_agent_tool') {
+    if (
+      evidence.result.status !== 'cancelled' ||
+      evidence.result.receipt === null ||
+      fresh.length !== 2
+    ) return false;
+    const resultEvent = fresh[0]!;
+    const terminalEvent = fresh[1]!;
+    const receipt = evidence.result.receipt;
+    return (
+      resultEvent.event_id !== evidence.operation_id &&
+      terminalEvent.event_id !== evidence.operation_id &&
+      resultEvent.event_id !== terminalEvent.event_id &&
+      resultEvent.attempt_id === payload.attemptId &&
+      resultEvent.seq === latestSeq + 1 &&
+      resultEvent.kind === 'tool_result' &&
+      resultEvent.round_index === evidence.request.round_index &&
+      resultEvent.call_id === evidence.request.call_id &&
+      resultEvent.status === 'cancelled' &&
+      resultEvent.safe_summary_key === `agent.${evidence.request.name}` &&
+      resultEvent.arguments_sha256 === evidence.request.arguments_sha256 &&
+      resultEvent.result_sha256 === receipt.result_sha256 &&
+      resultEvent.approval_reference === receipt.approval_reference &&
+      resultEvent.failure_code === receipt.failure_code &&
+      terminalMatches(terminalEvent, latestSeq + 2)
+    );
+  }
+  if (fresh.length !== 1) return false;
+  const event = fresh[0]!;
+  return (
+    event.event_id !== evidence.operation_id &&
+    terminalMatches(event, latestSeq + 1)
+  );
+}
+
+function applyAtomicAgentFinalCheckpoint(
+  state: ChatState,
+  payload: Extract<
+    ChatAction,
+    { readonly type: 'attempt/agent-final-checkpoint' }
+  >['payload'],
+): ChatState {
+  if (
+    !isExactDataRecordWithOptional(
+      payload,
+      [
+        'cas',
+        'conversationId',
+        'attemptId',
+        'expectedAttempt',
+        'journal',
+        'events',
+        'evidence',
+        'assistantMessage',
+        'cleanup',
+        'at',
+      ],
+      ['journalRevision'],
+    ) ||
+    !isAgentAttemptJournalV3(payload.journal) ||
+    (payload.journal.phase !== 'final_response' &&
+      payload.journal.phase !== 'failed' &&
+      payload.journal.phase !== 'cancelled')
+  ) return state;
+  const evidence = closedAgentEvidence(payload.evidence);
+  const conversation = state.conversations[payload.conversationId];
+  const attempt = conversation?.attempts.find(
+    candidate => candidate.attemptId === payload.attemptId,
+  );
+  if (
+    evidence === null ||
+    conversation === undefined ||
+    attempt === undefined ||
+    attempt !== payload.expectedAttempt ||
+    attempt.assistantMessageId !== null ||
+    attempt.status === 'completed' ||
+    attempt.agent === null ||
+    attempt.agent === undefined ||
+    attempt.agent.phase === 'final_response' ||
+    attempt.agent.phase === 'failed' ||
+    attempt.agent.phase === 'cancelled'
+  ) return state;
+  const material = agentFinalMaterial(evidence, payload.journal);
+  if (
+    material === null ||
+    !atomicTerminalEventMatches(state, payload, material, evidence) ||
+    (material.receipt !== undefined &&
+      hasProviderReceiptId(state, material.receipt))
+  ) return state;
+  const assistant = exactFinalAssistantMessage(
+    conversation,
+    payload.assistantMessage,
+    material,
+  );
+  if (
+    (payload.journal.phase === 'final_response' && assistant === null) ||
+    (payload.journal.phase !== 'final_response' &&
+      payload.assistantMessage !== null)
+  ) return state;
+  const checkpointed = applyFinalAgentCheckpoint(
+    state,
+    {
+      cas: payload.cas,
+      conversationId: payload.conversationId,
+      attemptId: payload.attemptId,
+      expectedAttempt: payload.expectedAttempt,
+      journal: payload.journal,
+      events: payload.events,
+      evidence,
+      cleanup: payload.cleanup,
+      ...(payload.journalRevision === undefined
+        ? {}
+        : { journalRevision: payload.journalRevision }),
+      at: payload.at,
+    },
+    true,
+  );
+  if (checkpointed === state || assistant === null) return checkpointed;
+  const checkpointedConversation =
+    checkpointed.conversations[payload.conversationId];
+  if (checkpointedConversation === undefined) return state;
+  const index = attemptIndex(checkpointedConversation, payload.attemptId);
+  const checkpointedAttempt = checkpointedConversation.attempts[index];
+  if (checkpointedAttempt === undefined) return state;
+  const completedAttempt: TurnAttemptV1 = {
+    ...checkpointedAttempt,
+    status: 'completed',
+    assistantMessageId: assistant.id,
+    failureCode: null,
+    updatedAt: laterTimestamp(checkpointedAttempt.updatedAt, assistant.createdAt),
+  };
+  return withConversation(checkpointed, {
+    ...replaceAttempt(checkpointedConversation, index, completedAttempt),
+    messages: [...checkpointedConversation.messages, assistant],
+    updatedAt: laterTimestamp(
+      checkpointedConversation.updatedAt,
+      assistant.createdAt,
+    ),
+  });
+}
+
+function sameAgentStringArray(
+  left: readonly string[],
+  right: readonly string[],
+): boolean {
+  return left.length === right.length && left.every((value, index) => value === right[index]);
+}
+
+function sameAgentGrant(
+  left: AgentConversationGrantV2,
+  right: AgentConversationGrantV2,
+): boolean {
+  return (
+    left.schema_version === right.schema_version &&
+    left.grant_id === right.grant_id &&
+    left.conversation_id === right.conversation_id &&
+    left.workspace_id === right.workspace_id &&
+    left.project_id === right.project_id &&
+    left.binding_revision === right.binding_revision &&
+    left.root_fingerprint_sha256 === right.root_fingerprint_sha256 &&
+    left.tool_family === right.tool_family &&
+    left.registry_version === right.registry_version &&
+    left.policy_version === right.policy_version &&
+    left.issued_for.schema_version === right.issued_for.schema_version &&
+    left.issued_for.task_id === right.issued_for.task_id &&
+    left.issued_for.attempt_id === right.issued_for.attempt_id &&
+    left.created_at === right.created_at
+  );
+}
+
+function sameAgentGrants(
+  left: readonly AgentConversationGrantV2[],
+  right: readonly AgentConversationGrantV2[],
+): boolean {
+  return (
+    left.length === right.length &&
+    left.every((grant, index) => sameAgentGrant(grant, right[index]!))
+  );
+}
+
+function sameAgentRoot(
+  left: FrozenAgentRootV1,
+  right: FrozenAgentRootV1,
+): boolean {
+  return (
+    left.schema_version === right.schema_version &&
+    left.kind === right.kind &&
+    left.workspace_id === right.workspace_id &&
+    left.workspace_binding_revision === right.workspace_binding_revision &&
+    left.project_id === right.project_id &&
+    left.root_fingerprint_sha256 === right.root_fingerprint_sha256 &&
+    sameAgentStringArray(left.capabilities, right.capabilities)
+  );
+}
+
+function sameAgentPolicy(
+  left: AgentWritePolicyV1,
+  right: AgentWritePolicyV1,
+): boolean {
+  return (
+    left.schema_version === right.schema_version &&
+    left.policy_version === right.policy_version &&
+    left.max_single_write_bytes === right.max_single_write_bytes &&
+    left.max_batch_write_bytes === right.max_batch_write_bytes &&
+    left.max_attempt_write_bytes === right.max_attempt_write_bytes
+  );
+}
+
+function sameAgentTranscript(
+  left: AgentTranscriptReferenceV1,
+  right: AgentTranscriptReferenceV1,
+): boolean {
+  return (
+    left.schema_version === right.schema_version &&
+    left.transcript_ref === right.transcript_ref &&
+    left.generation === right.generation &&
+    left.transcript_sha256 === right.transcript_sha256 &&
+    left.transcript_bytes === right.transcript_bytes
+  );
+}
+
+
+/**
+ * Re-validate the already-mapped evidence at the reducer boundary.  Store
+ * callers are not trusted merely because they received a typed value: a
+ * caller can still construct an object with the same TypeScript shape.
+ */
+function closedAgentEvidence(value: unknown): AgentStoreTransitionEvidence | null {
+  try {
+    if (!isExactDataRecord(value, ['kind', 'operation_id', 'request', 'result'])) {
+      return null;
+    }
+    const kind = value.kind;
+    const operations = new Set([
+      'prepare_agent_attempt',
+      'complete_agent_round_v2',
+      'prepare_agent_tool_batch',
+      'bind_agent_approval',
+      'execute_agent_tool',
+      'cancel_agent_attempt',
+      'recover_agent_attempt',
+    ]);
+    if (typeof kind !== 'string' || !operations.has(kind)) return null;
+    const mapped = validateAgentStoreTransition({
+      operation: kind,
+      request: value.request,
+      result: value.result,
+    });
+    return mapped !== null && mapped.operation_id === value.operation_id
+      ? mapped
+      : null;
+  } catch {
+    return null;
+  }
+}
+
+function closedControllerPreflight(
+  value: unknown,
+): AgentControllerPreflightV1 | null {
+  try {
+    return validateAgentControllerPreflight(value);
+  } catch {
+    return null;
+  }
+}
+
+function closedCheckpointEvidence(
+  value: unknown,
+): AgentCheckpointEvidence | null {
+  return closedControllerPreflight(value) ?? closedAgentEvidence(value);
+}
+
+function agentEvidenceMatchesControllerCAS(
+  evidence: AgentStoreTransitionEvidence,
+  cas: AgentControllerCASV1,
+): boolean {
+  const request = evidence.request;
+  const requestCas = request.controller_cas;
+  const checkpoint = request.committed_checkpoint;
+  const target = 'target' in request ? request.target : null;
+  return (
+    requestCas.schema_version === cas.schema_version &&
+    requestCas.conversation_id === cas.conversation_id &&
+    requestCas.task_id === cas.task_id &&
+    requestCas.attempt_id === cas.attempt_id &&
+    requestCas.expected_controller_generation === cas.expected_controller_generation &&
+    requestCas.expected_journal_revision === cas.expected_journal_revision &&
+    requestCas.expected_session_generation === cas.expected_session_generation &&
+    requestCas.expected_session_sha256 === cas.expected_session_sha256 &&
+    checkpoint.schema_version === 1 &&
+    checkpoint.journal_revision === cas.expected_journal_revision &&
+    checkpoint.session_generation === cas.expected_session_generation &&
+    checkpoint.session_sha256 === cas.expected_session_sha256 &&
+    ('task_id' in request
+      ? request.task_id === cas.task_id &&
+        request.conversation_id === cas.conversation_id &&
+        request.attempt_id === cas.attempt_id
+      : target !== null &&
+        target.task_id === cas.task_id &&
+        target.attempt_id === cas.attempt_id)
+  );
+}
+
+function agentCheckpointEvidenceMatchesControllerCAS(
+  evidence: AgentCheckpointEvidence,
+  cas: AgentControllerCASV1,
+): boolean {
+  if (isControllerPreflight(evidence)) {
+    const base = evidence.base_cas;
+    return (
+      base.schema_version === cas.schema_version &&
+      base.conversation_id === cas.conversation_id &&
+      base.task_id === cas.task_id &&
+      base.attempt_id === cas.attempt_id &&
+      base.expected_controller_generation === cas.expected_controller_generation &&
+      base.expected_journal_revision === cas.expected_journal_revision &&
+      base.expected_session_generation === cas.expected_session_generation &&
+      base.expected_session_sha256 === cas.expected_session_sha256 &&
+      evidence.conversation_id === cas.conversation_id &&
+      evidence.task_id === cas.task_id &&
+      evidence.attempt_id === cas.attempt_id
+    );
+  }
+  return agentEvidenceMatchesControllerCAS(evidence, cas);
+}
+
+function isControllerPreflight(
+  value: AgentCheckpointEvidence,
+): value is AgentControllerPreflightV1 {
+  return (
+    value.kind === 'begin_round' ||
+    value.kind === 'decide_approval' ||
+    value.kind === 'begin_execution' ||
+    value.kind === 'request_cancel'
+  );
+}
+
+function sameAgentCallJournal(
+  left: PersistedAgentCallJournalV3,
+  right: PersistedAgentCallJournalV3,
+): boolean {
+  return (
+    left.schema_version === right.schema_version &&
+    left.call_id === right.call_id &&
+    left.call_index === right.call_index &&
+    left.name === right.name &&
+    left.arguments_sha256 === right.arguments_sha256 &&
+    left.safe_summary_key === right.safe_summary_key &&
+    left.access === right.access &&
+    left.approval_token === right.approval_token &&
+    left.approval_decision === right.approval_decision &&
+    left.approval_reference === right.approval_reference &&
+    left.idempotency_key === right.idempotency_key &&
+    left.native_row_revision === right.native_row_revision &&
+    (left.receipt === null
+      ? right.receipt === null
+      : right.receipt !== null && sameAgentReceipt(left.receipt, right.receipt))
+  );
+}
+
+function preflightEventMatchesJournal(
+  current: PersistedAgentAttemptJournalV3 | null | undefined,
+  next: PersistedAgentAttemptJournalV3,
+  evidence: AgentControllerPreflightV1,
+  cas: AgentControllerCASV1,
+): boolean {
+  // A controller intent cannot bootstrap an Agent attempt.  The first live
+  // authority must come from the committed native prepare result so the
+  // preflight seed is always anchored to a persisted ready journal.
+  if (current === null || current === undefined) return false;
+  if (
+    evidence.kind === 'begin_round' &&
+    current.phase === 'ready_for_round' &&
+    current.round_lineage === null
+  ) {
+    if (
+      !isAgentAttemptJournalV3(current) ||
+      !isAgentAttemptJournalV3(next) ||
+      !agentCheckpointEvidenceMatchesControllerCAS(evidence, cas) ||
+      next.round_lineage === null
+    ) return false;
+    return (
+      current.round_index === 0 &&
+      current.batch.length === 0 &&
+      current.call_index === null &&
+      next.phase === 'round_in_flight' &&
+      next.controller_generation === current.controller_generation + 1 &&
+      evidence.round_index === 0 &&
+      evidence.launch_attempt === 1 &&
+      evidence.expected_round_revision === 0 &&
+      next.round_index === 0 &&
+      next.round_lineage.round_id === evidence.round_id &&
+      next.round_lineage.round_index === 0 &&
+      next.round_lineage.launch_attempt === 1 &&
+      next.round_lineage.status === 'active' &&
+      next.round_lineage.native_row_revision === null &&
+      next.batch.length === 0 &&
+      next.call_index === null &&
+      next.reserved_write_bytes === current.reserved_write_bytes &&
+      sameAgentRoot(current.root, evidence.root) &&
+      sameAgentRoot(next.root, evidence.root) &&
+      sameAgentTranscript(current.transcript, evidence.transcript) &&
+      sameAgentTranscript(next.transcript, evidence.transcript) &&
+      current.toolset_sha256 === evidence.toolset_sha256 &&
+      next.toolset_sha256 === evidence.toolset_sha256 &&
+      current.tool_registry_version === evidence.registry_version &&
+      next.tool_registry_version === evidence.registry_version &&
+      sameAgentPolicy(current.policy, next.policy) &&
+      sameAgentStringArray(current.frozen_grant_ids, next.frozen_grant_ids)
+    );
+  }
+  if (evidence.kind === 'begin_round' && current.phase === 'tool_result_pending') {
+    if (
+      !isAgentAttemptJournalV3(current) ||
+      !isAgentAttemptJournalV3(next) ||
+      !agentCheckpointEvidenceMatchesControllerCAS(evidence, cas) ||
+      current.round_lineage === null ||
+      next.round_lineage === null ||
+      current.batch.length === 0 ||
+      current.call_index !== current.batch.length - 1 ||
+      current.batch.some(call =>
+        call.receipt === null ||
+        (call.receipt.outcome !== 'ok' &&
+          call.receipt.outcome !== 'failed' &&
+          call.receipt.outcome !== 'denied' &&
+          call.receipt.outcome !== 'cancelled'),
+      )
+    ) return false;
+    return (
+      next.phase === 'round_in_flight' &&
+      next.controller_generation === current.controller_generation + 1 &&
+      evidence.round_index === current.round_index + 1 &&
+      evidence.round_index < MAX_AGENT_ROUNDS &&
+      evidence.round_id !== current.round_lineage.round_id &&
+      evidence.launch_attempt === 1 &&
+      evidence.expected_round_revision === 0 &&
+      next.round_index === evidence.round_index &&
+      next.round_lineage.round_id === evidence.round_id &&
+      next.round_lineage.round_index === evidence.round_index &&
+      next.round_lineage.launch_attempt === 1 &&
+      next.round_lineage.status === 'active' &&
+      next.round_lineage.native_row_revision === null &&
+      next.batch.length === 0 &&
+      next.call_index === null &&
+      next.reserved_write_bytes === current.reserved_write_bytes &&
+      sameAgentRoot(current.root, evidence.root) &&
+      sameAgentRoot(next.root, evidence.root) &&
+      sameAgentTranscript(current.transcript, evidence.transcript) &&
+      sameAgentTranscript(next.transcript, evidence.transcript) &&
+      current.toolset_sha256 === evidence.toolset_sha256 &&
+      next.toolset_sha256 === evidence.toolset_sha256 &&
+      current.tool_registry_version === evidence.registry_version &&
+      next.tool_registry_version === evidence.registry_version &&
+      sameAgentPolicy(current.policy, next.policy) &&
+      sameAgentStringArray(current.frozen_grant_ids, next.frozen_grant_ids)
+    );
+  }
+  if (
+    !isAgentAttemptJournalV3(current) ||
+    !isAgentAttemptJournalV3(next) ||
+    !agentCheckpointEvidenceMatchesControllerCAS(evidence, cas) ||
+    !agentPhaseTransitionIsLegalAny(current, next) ||
+    next.controller_generation !== current.controller_generation + 1
+  ) return false;
+  if (evidence.kind === 'begin_round') {
+    const retrying = current.phase === 'failed';
+    return (
+      (current.phase === 'ready_for_round' ||
+        (retrying && current.round_lineage?.status === 'failed_retryable')) &&
+      next.phase === 'round_in_flight' &&
+      current.round_index === evidence.round_index &&
+      current.round_lineage?.round_id === evidence.round_id &&
+      next.round_lineage?.round_id === evidence.round_id &&
+      next.round_lineage?.round_index === evidence.round_index &&
+      next.round_lineage?.launch_attempt === evidence.launch_attempt &&
+      (!retrying || evidence.launch_attempt === current.round_lineage!.launch_attempt + 1) &&
+      evidence.expected_round_revision ===
+        (current.round_lineage?.native_row_revision ?? 0) &&
+      next.round_lineage?.status === 'active' &&
+      next.round_lineage.native_row_revision === null &&
+      sameAgentRoot(current.root, evidence.root) &&
+      sameAgentRoot(next.root, evidence.root) &&
+      sameAgentTranscript(current.transcript, evidence.transcript) &&
+      sameAgentTranscript(next.transcript, evidence.transcript) &&
+      current.toolset_sha256 === evidence.toolset_sha256 &&
+      next.toolset_sha256 === evidence.toolset_sha256 &&
+      current.tool_registry_version === evidence.registry_version &&
+      next.tool_registry_version === evidence.registry_version &&
+      sameAgentPolicy(current.policy, next.policy) &&
+      current.batch.length === 0 &&
+      next.batch.length === 0 &&
+      next.call_index === null
+    );
+  }
+  if (evidence.kind === 'decide_approval') {
+    const beforeCall = current.batch[evidence.call_index];
+    const afterCall = next.batch[evidence.call_index];
+    if (
+      (current.phase !== 'approval_pending' && current.phase !== 'batch_frozen') ||
+      beforeCall === undefined ||
+      afterCall === undefined ||
+      current.round_lineage?.round_id !== evidence.round_id ||
+      current.round_index !== evidence.round_index ||
+      beforeCall.call_id !== evidence.call_id ||
+      beforeCall.name !== evidence.name ||
+      beforeCall.arguments_sha256 !== evidence.arguments_sha256 ||
+      beforeCall.approval_token !== evidence.approval_token ||
+      beforeCall.access !== evidence.access ||
+      current.root.workspace_id !== evidence.workspace_id ||
+      current.root.project_id !== evidence.project_id ||
+      current.root.workspace_binding_revision !== evidence.binding_revision ||
+      current.root.root_fingerprint_sha256 !== evidence.root_fingerprint_sha256 ||
+      current.policy.policy_version !== evidence.policy_version ||
+      !sameAgentTranscript(current.transcript, next.transcript) ||
+      !sameAgentRoot(current.root, next.root) ||
+      !sameAgentPolicy(current.policy, next.policy) ||
+      current.tool_registry_version !== evidence.registry_version ||
+      next.tool_registry_version !== evidence.registry_version ||
+      current.toolset_sha256 !== next.toolset_sha256
+    ) return false;
+    const expectedDecision = evidence.decision;
+    const expectedToken =
+      expectedDecision === 'denied' || expectedDecision === 'cancelled'
+        ? null
+        : evidence.approval_token;
+    const expectedReference =
+      expectedDecision === 'denied' || expectedDecision === 'cancelled'
+        ? null
+        : evidence.operation_id;
+    return (
+      afterCall.approval_decision === expectedDecision &&
+      afterCall.approval_token === expectedToken &&
+      afterCall.approval_reference === expectedReference &&
+      sameAgentStringArray(
+        next.frozen_grant_ids,
+        evidence.grant === null
+          ? current.frozen_grant_ids
+          : [...current.frozen_grant_ids, evidence.grant.grant_id],
+      ) &&
+      next.batch.every((call, index) => index === evidence.call_index || sameAgentCallJournal(call, current.batch[index]!))
+    );
+  }
+  if (evidence.kind === 'begin_execution') {
+    const beforeCall = current.batch[evidence.call_index];
+    const afterCall = next.batch[evidence.call_index];
+    return (
+      current.phase === 'batch_frozen' &&
+      next.phase === 'execution_intent' &&
+      beforeCall !== undefined &&
+      afterCall !== undefined &&
+      current.round_lineage?.round_id === evidence.round_id &&
+      current.round_index === evidence.round_index &&
+      beforeCall.call_id === evidence.call_id &&
+      beforeCall.name === evidence.name &&
+      beforeCall.arguments_sha256 === evidence.arguments_sha256 &&
+      beforeCall.access === evidence.access &&
+      current.call_index === evidence.call_index &&
+      evidence.approval_state ===
+        (beforeCall.access === 'auto' ? 'not_required' : 'bound') &&
+      (beforeCall.access === 'auto' ||
+        beforeCall.approval_decision === 'allow_once' ||
+        beforeCall.approval_decision === 'allow_conversation') &&
+      beforeCall.approval_reference === evidence.approval_reference &&
+      beforeCall.native_row_revision === evidence.expected_execution_revision &&
+      afterCall.idempotency_key === evidence.idempotency_key &&
+      afterCall.call_id === beforeCall.call_id &&
+      afterCall.name === beforeCall.name &&
+      afterCall.arguments_sha256 === beforeCall.arguments_sha256 &&
+      afterCall.approval_token === beforeCall.approval_token &&
+      afterCall.approval_decision === beforeCall.approval_decision &&
+      afterCall.approval_reference === beforeCall.approval_reference &&
+      afterCall.native_row_revision === evidence.expected_execution_revision &&
+      beforeCall.receipt === null &&
+      afterCall.receipt === null &&
+      sameAgentRoot(current.root, evidence.root) &&
+      sameAgentRoot(next.root, evidence.root) &&
+      sameAgentTranscript(current.transcript, evidence.transcript) &&
+      sameAgentTranscript(next.transcript, evidence.transcript) &&
+      current.tool_registry_version === next.tool_registry_version &&
+      current.toolset_sha256 === next.toolset_sha256 &&
+      sameAgentPolicy(current.policy, next.policy) &&
+      next.batch.every((call, index) => index === evidence.call_index || sameAgentCallJournal(call, current.batch[index]!))
+    );
+  }
+  const target = evidence.target;
+  if (evidence.kind === 'request_cancel') {
+    if (
+      target.task_id !== cas.task_id ||
+      target.attempt_id !== cas.attempt_id ||
+      !sameAgentRoot(current.root, evidence.root) ||
+      !sameAgentRoot(next.root, evidence.root) ||
+      !sameAgentPolicy(current.policy, next.policy) ||
+      !sameAgentTranscript(current.transcript, next.transcript) ||
+      current.tool_registry_version !== next.tool_registry_version ||
+      current.toolset_sha256 !== next.toolset_sha256
+    ) return false;
+    if (target.kind === 'round' && current.round_lineage?.round_id !== target.round_id) return false;
+    if (target.kind === 'tool') {
+      const call = current.batch[target.call_index];
+      if (call === undefined || call.call_id !== target.call_id || call.idempotency_key !== target.idempotency_key) return false;
+    }
+    const unchanged = current.batch.every((call, index) => sameAgentCallJournal(call, next.batch[index]!));
+    if (next.phase === current.phase && unchanged) {
+      return target.kind === 'attempt' ||
+        (target.kind === 'round' && next.round_lineage?.status === 'cancel_requested') ||
+        (target.kind === 'tool' && next.round_lineage?.status === 'cancel_requested');
+    }
+    if (next.phase !== 'cancelled') return false;
+    return next.batch.every((call, index) => {
+      const before = current.batch[index]!;
+      return call.receipt !== null
+        ? sameAgentCallJournal(call, before)
+        : call.approval_decision === 'cancelled' &&
+            call.approval_token === null &&
+            call.approval_reference === null &&
+            before.call_id === call.call_id &&
+            before.name === call.name &&
+            before.arguments_sha256 === call.arguments_sha256;
+    });
+  }
+  return false;
+}
+
+function preflightEventMatchesPayload(
+  evidence: AgentControllerPreflightV1,
+  events: readonly PersistedSessionEventV3[],
+  current: PersistedAgentAttemptJournalV3 | null | undefined,
+  attemptId: string,
+): boolean {
+  const event = events.find(candidate => candidate.event_id === evidence.operation_id);
+  if (event === undefined || event.attempt_id !== attemptId) {
+    return false;
+  }
+  if (evidence.kind === 'begin_round') {
+    return (
+      event.kind === 'round' &&
+      event.round_index === evidence.round_index &&
+      event.call_id === null &&
+      event.status === 'running' &&
+      event.safe_summary_key === null &&
+      event.arguments_sha256 === null &&
+      event.result_sha256 === null &&
+      event.failure_code === null
+    );
+  }
+  if (evidence.kind === 'decide_approval') {
+    return (
+      event.kind === 'approval' &&
+      event.round_index === evidence.round_index &&
+      event.call_id === evidence.call_id &&
+      event.status === 'approval' &&
+      event.safe_summary_key === `agent.${evidence.name}` &&
+      event.arguments_sha256 === evidence.arguments_sha256 &&
+      event.result_sha256 === null &&
+      event.approval_reference === evidence.operation_id &&
+      event.failure_code === null
+    );
+  }
+  if (evidence.kind === 'begin_execution') {
+    return (
+      event.kind === 'tool_call' &&
+      event.round_index === evidence.round_index &&
+      event.call_id === evidence.call_id &&
+      event.status === 'running' &&
+      event.safe_summary_key === `agent.${evidence.name}` &&
+      event.arguments_sha256 === evidence.arguments_sha256 &&
+      event.result_sha256 === null &&
+      event.approval_reference === null &&
+      event.failure_code === null
+    );
+  }
+  const target = evidence.target;
+  if (event.kind !== 'cancel' || event.status !== 'cancelled' || event.safe_summary_key !== null || event.result_sha256 !== null || event.failure_code !== evidence.cancel_token.reason_code) return false;
+  if (target.kind === 'attempt') return event.round_index === null && event.call_id === null && event.arguments_sha256 === null;
+  if (target.kind === 'round') return event.round_index === target.round_index && event.call_id === null && event.arguments_sha256 === null;
+  const call = current?.batch[target.call_index];
+  return call !== undefined && event.round_index === target.round_index && event.call_id === target.call_id && event.arguments_sha256 === call.arguments_sha256;
+}
+
+function postEvidenceOrderingIsValid(
+  state: ChatState,
+  evidence: AgentStoreTransitionEvidence,
+  attemptId: string,
+  candidateEvents?: readonly PersistedSessionEventV3[],
+  acceptDurablePreflightOnly = false,
+): boolean {
+  const events = state.sessionEvents ?? [];
+  if (evidence.kind === 'prepare_agent_attempt') return true;
+  const has = (
+    predicate: (event: PersistedSessionEventV3) => boolean,
+  ): boolean => events.some(event => event.attempt_id === attemptId && predicate(event));
+  const hasCandidate = (
+    predicate: (event: PersistedSessionEventV3) => boolean,
+  ): boolean => candidateEvents?.some(
+    event => event.attempt_id === attemptId && event.event_id === evidence.operation_id && predicate(event),
+  ) === true;
+  if (evidence.kind === 'complete_agent_round_v2') {
+    return has(event => event.kind === 'round' && event.round_index === evidence.request.round_index && event.status === 'running');
+  }
+  if (evidence.kind === 'prepare_agent_tool_batch') {
+    return (
+      hasCandidate(
+        event =>
+          event.kind === 'round' &&
+          event.round_index === evidence.request.round_index &&
+          event.status === 'running',
+      ) &&
+      has(
+        event =>
+          event.kind === 'round' &&
+          event.round_index === evidence.request.round_index &&
+          event.status === 'running',
+      )
+    );
+  }
+  if (evidence.kind === 'bind_agent_approval') {
+    const request = evidence.request;
+    const result = evidence.result;
+    const preflight = events.find(
+      event =>
+        event.attempt_id === attemptId &&
+        event.event_id === evidence.operation_id,
+    );
+    if (
+      preflight === undefined ||
+      preflight.kind !== 'approval' ||
+      preflight.round_index !== request.round_index ||
+      preflight.call_id !== request.call_id ||
+      preflight.status !== 'approval' ||
+      preflight.safe_summary_key !== `agent.${request.token.name}` ||
+      preflight.arguments_sha256 !== request.token.arguments_sha256 ||
+      preflight.result_sha256 !== null ||
+      preflight.approval_reference !== evidence.operation_id ||
+      preflight.failure_code !== null
+    ) return false;
+    const fresh = (candidateEvents ?? []).filter(
+      event =>
+        event.attempt_id === attemptId &&
+        !events.some(existing => existing.event_id === event.event_id),
+    );
+    return (
+      fresh.length === 1 &&
+      fresh[0]!.event_id !== evidence.operation_id &&
+      fresh[0]!.kind === 'approval' &&
+      fresh[0]!.round_index === request.round_index &&
+      fresh[0]!.call_id === request.call_id &&
+      fresh[0]!.status === 'approval' &&
+      fresh[0]!.safe_summary_key === `agent.${request.token.name}` &&
+      fresh[0]!.arguments_sha256 === request.token.arguments_sha256 &&
+      fresh[0]!.result_sha256 === null &&
+      fresh[0]!.approval_reference === result.approval_reference &&
+      fresh[0]!.failure_code === null
+    );
+  }
+  if (evidence.kind === 'execute_agent_tool') {
+    const matchesExecution = (event: PersistedSessionEventV3) =>
+      event.kind === 'tool_call' &&
+      event.event_id === evidence.operation_id &&
+      event.round_index === evidence.request.round_index &&
+      event.call_id === evidence.request.call_id &&
+      event.status === 'running';
+    return (
+      has(matchesExecution) &&
+      (acceptDurablePreflightOnly || hasCandidate(matchesExecution))
+    );
+  }
+  if (evidence.kind === 'cancel_agent_attempt') {
+    const target = evidence.request.target;
+    return has(event => event.kind === 'cancel' && event.approval_reference === event.event_id && (target.kind === 'attempt' ? event.round_index === null && event.call_id === null : target.kind === 'round' ? event.round_index === target.round_index && event.call_id === null : event.round_index === target.round_index && event.call_id === target.call_id));
+  }
+  return has(event => event.kind === 'round' || event.kind === 'tool_call' || event.kind === 'approval');
+}
+
+type AgentEvidenceTranscript = {
+  readonly schema_version: 1;
+  readonly transcript_ref: string;
+  readonly generation: number;
+  readonly transcript_sha256: string;
+  readonly transcript_bytes: number;
+};
+
+function evidenceTranscript(value: unknown): AgentEvidenceTranscript | null {
+  if (!isExactDataRecord(value, [
+    'schema_version',
+    'transcript_ref',
+    'generation',
+    'transcript_sha256',
+    'transcript_bytes',
+  ])) return null;
+  return value as AgentEvidenceTranscript;
+}
+
+function evidenceRoundReceipt(value: unknown): CompletionRoundReceiptV1 | null {
+  if (!isExactDataRecord(value, [
+    'schema_version',
+    'transport_schema_version',
+    'turn_id',
+    'task_id',
+    'attempt_id',
+    'round_id',
+    'round_index',
+    'provider_request_id',
+    'provider_response_id',
+    'requested_model',
+    'model',
+    'thinking_mode',
+    'finish_reason',
+    'latency_ms',
+    'visible_history_sha256',
+    'model_input_sha256',
+    'request_body_sha256',
+    'project_context_receipt',
+  ])) return null;
+  const receipt = value as unknown as {
+    readonly schema_version: number;
+    readonly transport_schema_version: 2 | 3;
+    readonly turn_id: string;
+    readonly task_id: string;
+    readonly attempt_id: string;
+    readonly round_id: string;
+    readonly round_index: number;
+    readonly provider_request_id: string;
+    readonly provider_response_id: string;
+    readonly requested_model: CompletionRoundReceiptV1['requestedModel'];
+    readonly model: CompletionRoundReceiptV1['model'];
+    readonly thinking_mode: CompletionRoundReceiptV1['thinkingMode'];
+    readonly finish_reason: CompletionRoundReceiptV1['finishReason'];
+    readonly latency_ms: number;
+    readonly visible_history_sha256: string;
+    readonly model_input_sha256: string;
+    readonly request_body_sha256: string;
+    readonly project_context_receipt: CompletionRoundReceiptV1['projectContextReceipt'];
+  };
+  if (receipt.schema_version !== 2) return null;
+  return {
+    schemaVersion: 1,
+    transportSchemaVersion: receipt.transport_schema_version,
+    turnId: receipt.turn_id,
+    attemptId: receipt.attempt_id,
+    roundId: receipt.round_id,
+    roundIndex: receipt.round_index,
+    providerRequestId: receipt.provider_request_id,
+    providerResponseId: receipt.provider_response_id,
+    requestedModel: receipt.requested_model,
+    model: receipt.model,
+    thinkingMode: receipt.thinking_mode,
+    finishReason: receipt.finish_reason,
+    latencyMs: receipt.latency_ms,
+    visibleHistorySha256: receipt.visible_history_sha256,
+    modelInputSha256: receipt.model_input_sha256,
+    requestBodySha256: receipt.request_body_sha256,
+    projectContextReceipt: receipt.project_context_receipt,
+  };
+}
+
+function projectionCallMatchesJournal(
+  projection: Record<string, unknown>,
+  call: PersistedAgentCallJournalV3,
+  stage: 'attempt_projection' | 'prepared_batch' = 'attempt_projection',
+): boolean {
+  if (
+    projection.call_index !== call.call_index ||
+    projection.call_id !== call.call_id ||
+    projection.name !== call.name ||
+    projection.arguments_sha256 !== call.arguments_sha256 ||
+    projection.idempotency_key !== call.idempotency_key ||
+    projection.safe_summary_key !== call.safe_summary_key ||
+    projection.access !== call.access ||
+    projection.approval_reference !== call.approval_reference
+  ) return false;
+  const approvalState =
+    call.access === 'auto'
+      ? 'not_required'
+      : call.access === 'durable_deny'
+        ? 'denied'
+        : call.approval_decision === 'pending'
+          ? 'pending'
+          : call.approval_decision === 'denied'
+            ? 'denied'
+            : call.approval_decision === 'cancelled'
+              ? 'cancelled'
+              : 'bound';
+  if (projection.approval_state !== approvalState) return false;
+  const token = projection.approval_token;
+  if (call.approval_token === null) {
+    if (token !== null) return false;
+  } else if (
+    !isExactDataRecord(token, [
+      'schema_version',
+      'token',
+      'controller_cas',
+      'task_id',
+      'attempt_id',
+      'round_id',
+      'round_index',
+      'batch_call_ids',
+      'batch_arguments_sha256',
+      'batch_revision',
+      'manifest_sha256',
+      'call_index',
+      'call_id',
+      'name',
+      'arguments_sha256',
+      'idempotency_key',
+      'root_fingerprint_sha256',
+      'binding_revision',
+      'policy_version',
+      'registry_version',
+      'access',
+      'allowed_decisions',
+    ]) ||
+    token.token !== call.approval_token ||
+    token.call_index !== call.call_index ||
+    token.call_id !== call.call_id ||
+    token.name !== call.name ||
+    token.arguments_sha256 !== call.arguments_sha256 ||
+    token.idempotency_key !== call.idempotency_key ||
+    token.access !== call.access
+  ) return false;
+  if (stage === 'prepared_batch') {
+    if (call.access === 'durable_deny') {
+      if (
+        call.approval_decision !== 'denied' ||
+        call.idempotency_key !== null ||
+        call.native_row_revision === null ||
+        call.receipt === null ||
+        call.receipt.outcome !== 'denied' ||
+        projection.execution_status !== 'denied' ||
+        projection.execution_revision !== null
+      ) return false;
+    } else if (
+      call.idempotency_key === null ||
+      call.receipt !== null ||
+      projection.execution_status !== 'intent' ||
+      projection.execution_revision !== 1 ||
+      (call.access === 'auto'
+        ? call.approval_decision !== 'pending'
+        : call.approval_decision !== 'pending' ||
+          call.approval_token === null ||
+          call.approval_reference !== null)
+    ) return false;
+    return projection.native_row_revision === call.native_row_revision &&
+      (call.receipt === null
+        ? projection.receipt === null
+        : JSON.stringify(projection.receipt) === JSON.stringify(call.receipt));
+  }
+  const expectedExecutionStatus =
+    call.receipt === null
+      ? call.idempotency_key === null
+        ? 'not_started'
+        : call.approval_decision === 'denied'
+          ? 'denied'
+          : call.approval_decision === 'cancelled'
+            ? 'cancelled'
+            : 'not_started'
+      : call.receipt.outcome === 'ok'
+        ? 'completed'
+        : call.receipt.outcome;
+  if (projection.execution_status !== expectedExecutionStatus) return false;
+  if (projection.execution_revision !== (call.receipt === null ? null : call.native_row_revision)) return false;
+  return projection.native_row_revision === call.native_row_revision &&
+    (call.receipt === null
+      ? projection.receipt === null
+      : JSON.stringify(projection.receipt) === JSON.stringify(call.receipt));
+}
+
+function evidenceAttemptProjectionMatchesJournal(
+  projection: unknown,
+  journal: PersistedAgentAttemptJournalV3,
+  identity?: {
+    readonly taskId: string;
+    readonly conversationId: string;
+    readonly attemptId: string;
+  },
+): boolean {
+  if (!isExactDataRecord(projection, [
+    'schema_version',
+    'task_id',
+    'conversation_id',
+    'attempt_id',
+    'phase',
+    'controller_generation',
+    'journal_revision',
+    'authority_revision',
+    'root',
+    'policy',
+    'registry',
+    'transcript',
+    'round_index',
+    'round_id',
+    'round_revision',
+    'round_status',
+    'batch_kind',
+    'batch_revision',
+    'manifest_sha256',
+    'call_index',
+    'batch',
+    'frozen_grant_ids',
+    'reserved_write_bytes',
+    'cancel_source_event_id',
+    'cleanup_id',
+  ])) return false;
+  const value = projection;
+  const expectedBatchKind =
+    journal.batch.length === 0
+      ? null
+      : journal.batch.every(call => call.access === 'auto')
+        ? 'read_only_batch'
+        : 'write_batch';
+  if (
+    value.schema_version !== 2 ||
+    (identity !== undefined &&
+      (value.task_id !== identity.taskId ||
+        value.conversation_id !== identity.conversationId ||
+        value.attempt_id !== identity.attemptId)) ||
+    value.phase !== journal.phase ||
+    value.controller_generation !== journal.controller_generation ||
+    typeof value.journal_revision !== 'number' ||
+    !Number.isSafeInteger(value.journal_revision) ||
+    value.journal_revision < 0 ||
+    value.round_index !== journal.round_index ||
+    value.round_id !== (journal.round_lineage?.round_id ?? null) ||
+    value.round_revision !== (journal.round_lineage?.native_row_revision ?? null) ||
+    value.round_status !== (journal.round_lineage?.status ?? null) ||
+    value.call_index !== journal.call_index ||
+    value.batch_kind !== expectedBatchKind ||
+    (expectedBatchKind === null
+      ? value.batch_revision !== null || value.manifest_sha256 !== null
+      : value.batch_revision === null ||
+        (expectedBatchKind === 'read_only_batch'
+          ? value.manifest_sha256 !== null
+          : value.manifest_sha256 === null)) ||
+    value.reserved_write_bytes !== journal.reserved_write_bytes ||
+    !Array.isArray(value.frozen_grant_ids) ||
+    value.root === null ||
+    value.policy === null ||
+    value.transcript === null ||
+    !sameAgentStringArray(value.frozen_grant_ids as string[], journal.frozen_grant_ids) ||
+    !sameAgentRoot(value.root as FrozenAgentRootV1, journal.root) ||
+    !sameAgentPolicy(value.policy as AgentWritePolicyV1, journal.policy) ||
+    !sameAgentTranscript(value.transcript as AgentTranscriptReferenceV1, journal.transcript)
+  ) return false;
+  if (!Array.isArray(value.batch)) return false;
+  if (value.batch.length !== journal.batch.length) return false;
+  return value.batch.every((call, index) =>
+    isExactDataRecord(call, [
+      'schema_version',
+      'call_index',
+      'call_id',
+      'name',
+      'arguments_sha256',
+      'idempotency_key',
+      'safe_summary_key',
+      'access',
+      'approval_state',
+      'approval_token',
+      'approval_reference',
+      'execution_status',
+      'execution_revision',
+      'native_row_revision',
+      'receipt',
+    ]) && projectionCallMatchesJournal(call, journal.batch[index]!),
+  );
+}
+
+function evidenceRoundReceiptFor(
+  evidence: AgentCheckpointEvidence,
+): CompletionRoundReceiptV1 | undefined {
+  if (isControllerPreflight(evidence)) return undefined;
+  let raw: unknown = null;
+  if (evidence.kind === 'complete_agent_round_v2' && evidence.result.status === 'completed') {
+    raw = evidence.result.outcome.completion_receipt;
+  } else if (evidence.kind === 'recover_agent_attempt' && evidence.result.completed_round !== null) {
+    raw = evidence.result.completed_round.completion_receipt;
+  }
+  const receipt = evidenceRoundReceipt(raw);
+  return receipt === null ? undefined : receipt;
+}
+
+function approvalEvidenceGrantsMatch(
+  evidence: AgentCheckpointEvidence,
+  grants: readonly AgentConversationGrantV2[],
+  currentGrants: readonly AgentConversationGrantV2[],
+): boolean {
+  try {
+    const grant = isControllerPreflight(evidence)
+      ? evidence.kind === 'decide_approval'
+        ? evidence.grant
+        : null
+      : evidence.kind === 'bind_agent_approval'
+        ? evidence.result.grant
+        : null;
+    if (
+      (!isControllerPreflight(evidence) && evidence.kind !== 'bind_agent_approval') ||
+      (isControllerPreflight(evidence) && evidence.kind !== 'decide_approval')
+    ) return false;
+    if (!isControllerPreflight(evidence)) {
+      return (
+        sameAgentGrants(grants, currentGrants) &&
+        (grant === null ||
+          grants.some(candidate => sameAgentGrant(candidate, grant)))
+      );
+    }
+    if (grant === null) return sameAgentGrants(grants, currentGrants);
+    const existing = currentGrants.find(
+      candidate => candidate.grant_id === grant.grant_id,
+    );
+    if (existing !== undefined) {
+      return sameAgentGrant(existing, grant) && sameAgentGrants(grants, currentGrants);
+    }
+    return (
+      grants.length === currentGrants.length + 1 &&
+      currentGrants.every((candidate, index) =>
+        sameAgentGrant(candidate, grants[index]!),
+      ) &&
+      sameAgentGrant(grants[grants.length - 1]!, grant)
+    );
+  } catch {
+    return false;
+  }
+}
+
+function highLevelEvidenceSupportsTransition(
+  current: PersistedAgentAttemptJournalV3 | null | undefined,
+  next: PersistedAgentAttemptJournalV3,
+  evidence: AgentStoreTransitionEvidence,
+  cas: AgentControllerCASV1,
+): boolean {
+  if (!agentEvidenceMatchesControllerCAS(evidence, cas)) return false;
+  const result = evidence.result as unknown as Record<string, unknown>;
+  const nextLineage = next.round_lineage;
+  if (current === undefined || current === null) {
+    if (evidence.kind !== 'prepare_agent_attempt' ||
+      (result.status !== 'prepared' && result.status !== 'already_prepared') ||
+      !evidenceAttemptProjectionMatchesJournal(result.attempt, next, {
+        taskId: evidence.request.controller_cas.task_id,
+        conversationId: evidence.request.controller_cas.conversation_id,
+        attemptId: evidence.request.controller_cas.attempt_id,
+      })) return false;
+    return next.phase === 'ready_for_round' && next.batch.length === 0 && next.call_index === null;
+  }
+  if (!isAgentAttemptJournalV3(current) || !agentPhaseTransitionIsLegalAny(current, next)) return false;
+  if (!sameAgentRoot(current.root, next.root) || !sameAgentPolicy(current.policy, next.policy) ||
+    current.tool_registry_version !== next.tool_registry_version ||
+    current.toolset_sha256 !== next.toolset_sha256 ||
+    !sameAgentStringArray(current.frozen_grant_ids, next.frozen_grant_ids) ||
+    next.controller_generation !== current.controller_generation + 1) return false;
+  const requestCas = evidence.request.controller_cas;
+  if (requestCas.expected_controller_generation !== current.controller_generation) return false;
+  if (evidence.kind === 'prepare_agent_attempt') {
+    if (evidence.result.status !== 'prepared' && evidence.result.status !== 'already_prepared') return false;
+    return evidenceAttemptProjectionMatchesJournal(evidence.result.attempt, next, {
+      taskId: requestCas.task_id,
+      conversationId: requestCas.conversation_id,
+      attemptId: requestCas.attempt_id,
+    });
+  }
+  if (evidence.kind === 'complete_agent_round_v2') {
+    const roundRequest = evidence.request;
+    const roundResult = evidence.result;
+    if (current.round_lineage === null ||
+      roundRequest.round_id !== current.round_lineage.round_id ||
+      roundRequest.round_index !== current.round_lineage.round_index ||
+      roundResult.round_id !== roundRequest.round_id ||
+      roundResult.round_index !== roundRequest.round_index) return false;
+    const transcript = evidenceTranscript(roundResult.transcript);
+    if (transcript === null || !sameAgentTranscript(transcript, next.transcript)) return false;
+    if (roundResult.status === 'completed') {
+      const outcome = roundResult.outcome;
+      const expectedPhase = outcome.kind === 'final' ? 'final_response' : outcome.kind === 'blocked' ? 'failed' :
+        next.batch.some(call => call.access !== 'auto' && call.access !== 'durable_deny' && call.approval_decision === 'pending')
+          ? 'approval_pending' : 'batch_frozen';
+      if (next.phase !== expectedPhase || nextLineage?.status !== 'completed' ||
+        nextLineage.native_row_revision !== roundResult.result_round_revision ||
+        !sameAgentTranscript(outcome.transcript, next.transcript)) return false;
+      const mappedReceipt = evidenceRoundReceiptFor(evidence);
+      return mappedReceipt !== undefined &&
+        mappedReceipt.roundId === nextLineage.round_id &&
+        mappedReceipt.roundIndex === nextLineage.round_index;
+    }
+    if (roundResult.status === 'in_flight') {
+      return next.phase === 'round_in_flight' && nextLineage?.status === 'active' &&
+        nextLineage.native_row_revision === roundResult.result_round_revision;
+    }
+    if (roundResult.status === 'failed_retryable') {
+      return next.phase === 'failed' && nextLineage?.status === 'failed_retryable' &&
+        nextLineage.native_row_revision === roundResult.result_round_revision;
+    }
+    if (roundResult.status === 'cancelled') {
+      return next.phase === 'cancelled' && nextLineage?.status === 'cancelled' &&
+        nextLineage.native_row_revision === roundResult.result_round_revision;
+    }
+    if (roundResult.status === 'unknown') {
+      return next.phase === 'unknown' && nextLineage?.status === 'unknown' &&
+        nextLineage.native_row_revision === roundResult.result_round_revision;
+    }
+    return next.phase === 'ambiguous' && nextLineage?.status === 'ambiguous' &&
+      nextLineage.native_row_revision === roundResult.result_round_revision;
+  }
+  if (evidence.kind === 'prepare_agent_tool_batch') {
+    const request = evidence.request;
+    const batchResult = evidence.result;
+    if (batchResult.status === 'rejected') return false;
+    const receipt = batchResult.receipt;
+    const firstUnsettledCall = next.batch.findIndex(call => call.receipt === null);
+    const expectedPhase = next.batch.some(call =>
+      call.access !== 'auto' &&
+      call.access !== 'durable_deny' &&
+      call.approval_decision === 'pending')
+      ? 'approval_pending'
+      : 'batch_frozen';
+    if (current.phase !== 'batch_frozen' || current.batch.length !== 0 ||
+      current.call_index !== null || current.round_lineage === null ||
+      current.round_lineage.status !== 'completed' ||
+      request.round_id !== current.round_lineage.round_id ||
+      request.round_index !== current.round_index ||
+      request.expected_round_revision !== current.round_lineage.native_row_revision ||
+      !sameAgentTranscript(request.transcript, current.transcript) ||
+      !sameAgentRoot(request.root, current.root) ||
+      request.expected_reserved_write_bytes !== current.reserved_write_bytes ||
+      nextLineage === null || !sameAgentRoundLineage(current.round_lineage, nextLineage) ||
+      next.phase !== expectedPhase ||
+      next.call_index !== (firstUnsettledCall < 0 ? null : firstUnsettledCall) ||
+      receipt.task_id !== requestCas.task_id || receipt.attempt_id !== requestCas.attempt_id ||
+      receipt.round_id !== nextLineage?.round_id || receipt.round_index !== next.round_index ||
+      !sameAgentTranscript(receipt.transcript, next.transcript) ||
+      receipt.reserved_write_bytes !== next.reserved_write_bytes ||
+      receipt.calls.length !== next.batch.length ||
+      !receipt.calls.every((call, index) =>
+        projectionCallMatchesJournal(
+          call as unknown as Record<string, unknown>,
+          next.batch[index]!,
+          'prepared_batch',
+        ),
+      )) return false;
+    return true;
+  }
+  if (evidence.kind === 'bind_agent_approval') {
+    const request = evidence.request;
+    const bind = evidence.result;
+    const token = request.token;
+    const beforeCall = current.batch[request.call_index];
+    const afterCall = next.batch[request.call_index];
+    const firstUnsettledCall = current.batch.findIndex(
+      call => call.receipt === null,
+    );
+    const allowedDecision =
+      request.decision === 'allow_once' ||
+      request.decision === 'allow_conversation';
+    if (
+      !allowedDecision ||
+      (current.phase !== 'batch_frozen' && current.phase !== 'approval_pending') ||
+      next.phase !== current.phase ||
+      bind.task_id !== requestCas.task_id ||
+      bind.attempt_id !== requestCas.attempt_id ||
+      bind.round_id !== request.round_id ||
+      current.round_lineage === null ||
+      next.round_lineage === null ||
+      current.round_lineage.round_id !== request.round_id ||
+      next.round_lineage.round_id !== request.round_id ||
+      current.round_lineage.round_index !== request.round_index ||
+      next.round_lineage.round_index !== request.round_index ||
+      current.round_lineage.launch_attempt !== next.round_lineage.launch_attempt ||
+      current.round_lineage.status !== next.round_lineage.status ||
+      current.round_lineage.native_row_revision !== next.round_lineage.native_row_revision ||
+      current.round_index !== request.round_index ||
+      next.round_index !== request.round_index ||
+      firstUnsettledCall < 0 ||
+      current.call_index !== firstUnsettledCall ||
+      next.call_index !== current.call_index ||
+      beforeCall === undefined ||
+      afterCall === undefined ||
+      beforeCall.call_id !== request.call_id ||
+      beforeCall.call_id !== bind.call_id ||
+      beforeCall.call_index !== request.call_index ||
+      beforeCall.name !== token.name ||
+      beforeCall.arguments_sha256 !== token.arguments_sha256 ||
+      beforeCall.access !== token.access ||
+      beforeCall.approval_token !== token.token ||
+      beforeCall.approval_decision !== request.decision ||
+      beforeCall.approval_reference !== evidence.operation_id ||
+      beforeCall.approval_reference !== bind.approval_reference ||
+      beforeCall.receipt !== null ||
+      request.batch_revision !== token.batch_revision ||
+      bind.result_batch_revision !== request.batch_revision ||
+      token.round_id !== request.round_id ||
+      token.round_index !== request.round_index ||
+      token.call_index !== request.call_index ||
+      token.call_id !== request.call_id ||
+      token.batch_call_ids.length !== current.batch.length ||
+      token.batch_arguments_sha256.length !== current.batch.length ||
+      !current.batch.every(
+        (call, index) =>
+          token.batch_call_ids[index] === call.call_id &&
+          token.batch_arguments_sha256[index] === call.arguments_sha256,
+      ) ||
+      token.root_fingerprint_sha256 !== current.root.root_fingerprint_sha256 ||
+      token.binding_revision !== current.root.workspace_binding_revision ||
+      token.policy_version !== current.policy.policy_version ||
+      token.registry_version !== current.tool_registry_version ||
+      current.batch.length !== next.batch.length ||
+      !current.batch.every((call, index) =>
+        sameAgentCallJournal(call, next.batch[index]!),
+      ) ||
+      current.reserved_write_bytes !== next.reserved_write_bytes
+    ) return false;
+    const grant = bind.grant;
+    return grant === null
+      ? request.decision === 'allow_once'
+      : request.decision === 'allow_conversation' &&
+          current.frozen_grant_ids.includes(grant.grant_id) &&
+          next.frozen_grant_ids.includes(grant.grant_id);
+  }
+  if (evidence.kind === 'execute_agent_tool') {
+    const execution = evidence.result;
+    if (execution.task_id !== requestCas.task_id || execution.attempt_id !== requestCas.attempt_id ||
+      next.round_lineage?.round_id !== execution.round_id || next.round_index !== execution.round_index ||
+      next.call_index !== execution.call_index) return false;
+    const call = next.batch[execution.call_index];
+    if (call === undefined || call.call_id !== execution.call_id || call.name !== execution.name ||
+      call.idempotency_key !== execution.idempotency_key || !sameAgentTranscript(execution.transcript, next.transcript)) return false;
+    if (execution.status === 'running' || execution.status === 'cancel_requested') {
+      return next.phase === 'execution_intent' && execution.receipt === null && call.receipt === null &&
+        call.native_row_revision === execution.result_execution_revision;
+    }
+    if (execution.status === 'unknown' || execution.status === 'ambiguous') {
+      return next.phase === execution.status && execution.receipt === null && call.receipt === null &&
+        call.native_row_revision === execution.result_execution_revision;
+    }
+    if (execution.status === 'cancelled') {
+      if (execution.receipt === null || call.receipt === null ||
+        !sameAgentReceipt(call.receipt, execution.receipt as unknown as AgentToolReceiptV1)) return false;
+      return next.phase === 'cancelled' && call.native_row_revision === execution.result_execution_revision;
+    }
+    if (execution.receipt === null || call.receipt === null ||
+      !sameAgentReceipt(call.receipt, execution.receipt as unknown as AgentToolReceiptV1)) return false;
+    return next.phase === 'tool_result_pending' && call.native_row_revision === execution.result_execution_revision;
+  }
+  if (evidence.kind === 'cancel_agent_attempt') {
+    const cancellation = evidence.result;
+    const target = evidence.request.target;
+    const resultTarget = cancellation.target;
+    const targetsMatch =
+      resultTarget.schema_version === target.schema_version &&
+      resultTarget.kind === target.kind &&
+      resultTarget.task_id === target.task_id &&
+      resultTarget.attempt_id === target.attempt_id &&
+      (target.kind === 'attempt'
+        ? resultTarget.kind === 'attempt'
+        : target.kind === 'round'
+          ? resultTarget.kind === 'round' &&
+            resultTarget.round_id === target.round_id &&
+            resultTarget.round_index === target.round_index
+          : resultTarget.kind === 'tool' &&
+            resultTarget.round_id === target.round_id &&
+            resultTarget.round_index === target.round_index &&
+            resultTarget.call_index === target.call_index &&
+            resultTarget.call_id === target.call_id &&
+            resultTarget.idempotency_key === target.idempotency_key);
+    const revisionsMatch =
+      target.kind === 'attempt'
+        ? cancellation.result_round_revision === null && cancellation.result_execution_revision === null
+        : target.kind === 'round'
+          ? cancellation.result_round_revision === nextLineage?.native_row_revision &&
+            cancellation.result_execution_revision === null
+          : cancellation.result_round_revision === null &&
+            cancellation.result_execution_revision === next.batch[target.call_index]?.native_row_revision;
+    if (!targetsMatch || !revisionsMatch) return false;
+    if (!sameAgentTranscript(cancellation.transcript, next.transcript)) return false;
+    const nextCall =
+      target.kind === 'tool' ? next.batch[target.call_index] : undefined;
+    if (
+      cancellation.receipt === null
+        ? target.kind === 'tool' &&
+          (cancellation.status === 'cancelled' ||
+            cancellation.status === 'already_cancelled' ||
+            cancellation.status === 'settled')
+        : target.kind !== 'tool' ||
+          nextCall?.receipt === null ||
+          nextCall?.receipt === undefined ||
+          !sameAgentReceipt(
+            nextCall.receipt,
+            cancellation.receipt as unknown as AgentToolReceiptV1,
+          )
+    ) return false;
+    if (cancellation.status === 'cancel_requested') return next.phase === current.phase;
+    if (cancellation.status === 'cancelled' || cancellation.status === 'already_cancelled') return next.phase === 'cancelled';
+    if (cancellation.status === 'unknown') return next.phase === 'unknown';
+    if (cancellation.status === 'ambiguous') return next.phase === 'ambiguous';
+    if (cancellation.receipt?.outcome === 'cancelled') {
+      return next.phase === 'cancelled';
+    }
+    if (cancellation.receipt?.outcome === 'ambiguous') {
+      return next.phase === 'ambiguous';
+    }
+    return next.phase === 'tool_result_pending';
+  }
+  const recovery = evidence.result;
+  const rebasedRecoveryProjection = {
+    ...recovery.attempt,
+    controller_generation: next.controller_generation,
+  };
+  if (!evidenceAttemptProjectionMatchesJournal(rebasedRecoveryProjection, next, {
+    taskId: requestCas.task_id,
+    conversationId: requestCas.conversation_id,
+    attemptId: requestCas.attempt_id,
+  })) return false;
+  if (recovery.status === 'retryable') return next.phase === 'round_in_flight' || next.phase === 'failed';
+  if (recovery.status === 'manual_reconciliation') return next.phase === 'unknown' || next.phase === 'ambiguous';
+  if (recovery.status === 'terminal') return next.phase === 'final_response' || next.phase === 'cancelled' || next.phase === 'failed';
+  if (
+    recovery.status === 'resumed' &&
+    recovery.next_action === 'none' &&
+    evidence.request.target.kind === 'attempt' &&
+    recovery.completed_round === null
+  ) {
+    return current.phase === 'round_in_flight' &&
+      current.round_lineage?.native_row_revision === null &&
+      next.phase === 'ready_for_round' &&
+      next.round_lineage === null &&
+      next.batch.length === 0 &&
+      next.call_index === null;
+  }
+  switch (recovery.next_action) {
+    case 'persist_round':
+      return next.phase === 'round_in_flight';
+    case 'persist_batch':
+      return next.phase === 'batch_frozen' || next.phase === 'approval_pending';
+    case 'persist_approval':
+      return next.phase === 'approval_pending' || next.phase === 'batch_frozen';
+    case 'persist_tool_result':
+      return next.phase === 'tool_result_pending' || next.phase === 'cancelled';
+    case 'persist_final':
+      return next.phase === 'final_response' || next.phase === 'failed';
+    case 'none':
+      return next.phase === 'final_response' || next.phase === 'cancelled' || next.phase === 'failed';
+  }
+}
+
+// eslint-disable-next-line @typescript-eslint/no-unused-vars
+function agentCheckpointEventMatchesTransition(
+  state: ChatState,
+  attemptId: string,
+  current: PersistedAgentAttemptJournalV2 | null | undefined,
+  next: PersistedAgentAttemptJournalV2,
+  events: readonly PersistedSessionEventV3[],
+  roundReceipt?: CompletionRoundReceiptV1,
+): boolean {
+  const previous = state.sessionEvents ?? [];
+  const fresh = events.filter(
+    event => !previous.some(existing => existing.event_id === event.event_id),
+  );
+  if (fresh.length === 0 || fresh.some(event => event.attempt_id !== attemptId)) {
+    return false;
+  }
+  if (
+    next.phase === 'cancelled' &&
+    fresh.some(
+      event =>
+        event.kind === 'cancel' &&
+        event.status === 'cancelled' &&
+        event.approval_reference === event.event_id,
+    )
+  ) {
+    return true;
+  }
+  const expected = (() => {
+    switch (next.phase) {
+      case 'ready_for_round':
+        return { kind: 'round' as const, status: 'waiting' as const };
+      case 'round_in_flight':
+        return { kind: 'round' as const, status: 'running' as const };
+      case 'approval_pending':
+        return { kind: 'approval' as const, status: 'approval' as const };
+      case 'batch_frozen':
+        if (current?.phase === 'approval_pending') {
+          return { kind: 'approval' as const, status: 'approval' as const };
+        }
+        return next.batch.some(
+          call =>
+            call.access !== 'auto' &&
+            call.access !== 'durable_deny' &&
+            call.approval_decision === 'pending',
+        )
+          ? { kind: 'approval' as const, status: 'approval' as const }
+          : { kind: 'tool_call' as const, status: 'waiting' as const };
+      case 'execution_intent':
+        return { kind: 'tool_call' as const, status: 'running' as const };
+      case 'tool_result_pending': {
+        const call =
+          next.call_index === null ? undefined : next.batch[next.call_index];
+        const outcome = call?.receipt?.outcome;
+        return outcome === undefined || outcome === 'ambiguous'
+          ? null
+          : { kind: 'tool_result' as const, status: outcome };
+      }
+      case 'final_response':
+        return { kind: 'terminal' as const, status: 'ok' as const };
+      case 'cancelled':
+        return { kind: 'terminal' as const, status: 'cancelled' as const };
+      case 'failed':
+        return { kind: 'terminal' as const, status: 'failed' as const };
+      case 'unknown':
+        return { kind: 'terminal' as const, status: 'unknown' as const };
+      case 'ambiguous':
+        return { kind: 'terminal' as const, status: 'ambiguous' as const };
+    }
+  })();
+  if (expected === null) return false;
+  const expectedFailureCode =
+    next.phase === 'failed' &&
+    current?.phase === 'round_in_flight' &&
+    roundReceipt?.finishReason === 'length'
+      ? 'E_COMPLETION_LENGTH'
+      : next.phase === 'failed' &&
+          current?.phase === 'round_in_flight' &&
+          roundReceipt?.finishReason === 'content_filter'
+        ? 'E_COMPLETION_CONTENT_FILTER'
+        : undefined;
+  return fresh.some(
+    event =>
+      event.kind === expected.kind &&
+      event.status === expected.status &&
+      (expectedFailureCode === undefined ||
+        event.failure_code === expectedFailureCode) &&
+      (expected.kind === 'round'
+        ? event.round_index === next.round_index
+        : expected.kind === 'terminal'
+          ? event.round_index === null && event.call_id === null
+          : event.round_index === next.round_index),
+  );
+}
+
+function sameAgentReceipt(
+  left: AgentToolReceiptV1,
+  right: AgentToolReceiptV1,
+): boolean {
+  return (
+    left.schema_version === right.schema_version &&
+    left.call_id === right.call_id &&
+    left.name === right.name &&
+    left.arguments_sha256 === right.arguments_sha256 &&
+    left.result_sha256 === right.result_sha256 &&
+    left.result_bytes === right.result_bytes &&
+    left.truncated === right.truncated &&
+    left.duration_ms === right.duration_ms &&
+    left.outcome === right.outcome &&
+    left.failure_code === right.failure_code &&
+    left.approval_reference === right.approval_reference
+  );
+}
+
+function agentOuterAttemptCheckpoint(
+  attempt: TurnAttemptV1,
+  journal: PersistedAgentAttemptJournalV2 | PersistedAgentAttemptJournalV3,
+  roundReceipt: CompletionRoundReceiptV1 | undefined,
+  at: string,
+): TurnAttemptV1 | null {
+  if (
+    attempt.status === 'completed' ||
+    attempt.assistantMessageId !== null
+  ) return null;
+  if (
+    attempt.agent?.phase === 'round_in_flight' &&
+    journal.phase !== 'round_in_flight' &&
+    journal.phase !== 'failed' &&
+    journal.phase !== 'unknown' &&
+    journal.phase !== 'ambiguous' &&
+    journal.phase !== 'cancelled' &&
+    roundReceipt === undefined &&
+    !(
+      attempt.agent.round_lineage?.native_row_revision === null &&
+      journal.phase === 'ready_for_round' &&
+      journal.round_lineage === null
+    )
+  ) return null;
+  let rounds = attempt.rounds;
+  if (roundReceipt !== undefined) {
+    if (
+      !receiptIsValid(attempt, roundReceipt) ||
+      roundReceipt.roundIndex !== attempt.rounds.length ||
+      journal.round_lineage === null ||
+      journal.round_lineage.round_id !== roundReceipt.roundId ||
+      journal.round_lineage.round_index !== roundReceipt.roundIndex ||
+      journal.round_lineage.status !== 'completed' ||
+      attempt.rounds.some(round => round.roundId === roundReceipt.roundId)
+    ) return null;
+    rounds = [...attempt.rounds, copyRoundReceipt(roundReceipt)];
+  }
+  const activeRound =
+    journal.phase === 'round_in_flight' && journal.round_lineage !== null
+      ? {
+          roundId: journal.round_lineage.round_id,
+          roundIndex: journal.round_lineage.round_index,
+        }
+      : null;
+  const status: TurnAttemptV1['status'] =
+    journal.phase === 'round_in_flight'
+      ? 'sending'
+      : journal.phase === 'cancelled'
+        ? 'cancelled'
+        : journal.phase === 'failed' ||
+            journal.phase === 'unknown' ||
+            journal.phase === 'ambiguous'
+          ? 'failed'
+          : 'prepared';
+  const failureCode: TurnAttemptV1['failureCode'] =
+    status !== 'failed'
+      ? null
+      : journal.phase === 'ambiguous'
+        ? 'E_AGENT_EXECUTION_AMBIGUOUS'
+        : journal.phase === 'unknown'
+          ? 'E_AGENT_CONFLICT'
+          : journal.phase === 'failed' &&
+              roundReceipt?.finishReason === 'length'
+            ? 'E_COMPLETION_LENGTH'
+          : journal.phase === 'failed' &&
+              roundReceipt?.finishReason === 'content_filter'
+            ? 'E_COMPLETION_CONTENT_FILTER'
+          : journal.round_index >= MAX_AGENT_ROUNDS - 1 &&
+              journal.round_lineage?.status === 'completed'
+            ? 'E_AGENT_ROUND_LIMIT'
+          : 'E_AGENT_PERSISTENCE';
+  return {
+    ...attempt,
+    status,
+    activeRound,
+    rounds,
+    visibleHistorySha256:
+      roundReceipt === undefined
+        ? attempt.visibleHistorySha256
+        : roundReceipt.visibleHistorySha256,
+    assistantMessageId: null,
+    failureCode,
+    updatedAt: laterTimestamp(attempt.updatedAt, at),
+  };
+}
+
+function cleanupEntryIsValid(value: unknown): value is AgentTranscriptCleanupV1 {
+  if (!isExactDataRecord(value, [
+    'schema_version',
+    'cleanup_id',
+    'conversation_id',
+    'task_id',
+    'attempt_id',
+    'transcript_ref',
+    'transcript_sha256',
+    'reason',
+    'created_at',
+  ])) return false;
+  const cleanup = value as AgentTranscriptCleanupV1;
+  return (
+    cleanup.schema_version === 1 &&
+    isCanonicalLifecycleId(cleanup.cleanup_id) &&
+    validIdentifier(cleanup.conversation_id) &&
+    isCanonicalLifecycleId(cleanup.task_id) &&
+    isCanonicalLifecycleId(cleanup.attempt_id) &&
+    isCanonicalLifecycleId(cleanup.transcript_ref) &&
+    isSha256Digest(cleanup.transcript_sha256) &&
+    (cleanup.reason === 'completed' ||
+      cleanup.reason === 'cancelled' ||
+      cleanup.reason === 'failed' ||
+      cleanup.reason === 'conversation_deleted') &&
+    isCanonicalTimestamp(cleanup.created_at)
+  );
+}
+
+function cleanupReasonForTerminalPhase(
+  phase: AgentAttemptPhase,
+): Exclude<AgentTranscriptCleanupV1['reason'], 'conversation_deleted'> | null {
+  return phase === 'final_response'
+    ? 'completed'
+    : phase === 'cancelled'
+      ? 'cancelled'
+      : phase === 'failed'
+        ? 'failed'
+        : null;
+}
+
+function sessionEventIsValid(value: unknown): value is PersistedSessionEventV3 {
+  if (!isExactDataRecord(value, [
+    'schema_version',
+    'event_id',
+    'attempt_id',
+    'seq',
+    'kind',
+    'round_index',
+    'call_id',
+    'status',
+    'safe_summary_key',
+    'arguments_sha256',
+    'result_sha256',
+    'approval_reference',
+    'failure_code',
+    'created_at',
+  ])) return false;
+  const event = value as PersistedSessionEventV3;
+  if (event.kind === 'cancel') {
+    return (
+      event.schema_version === 2 &&
+      isCanonicalLifecycleId(event.event_id) &&
+      isCanonicalLifecycleId(event.attempt_id) &&
+      Number.isSafeInteger(event.seq) &&
+      !Object.is(event.seq, -0) &&
+      event.seq >= 0 &&
+      (event.round_index === null ||
+        (Number.isSafeInteger(event.round_index) &&
+          !Object.is(event.round_index, -0) &&
+          event.round_index >= 0 &&
+          event.round_index < MAX_AGENT_ROUNDS)) &&
+      (event.call_id === null || isOpaqueProviderId(event.call_id)) &&
+      event.status === 'cancelled' &&
+      event.safe_summary_key === null &&
+      event.result_sha256 === null &&
+      ((event.round_index === null &&
+        event.call_id === null &&
+        event.arguments_sha256 === null) ||
+        (event.round_index !== null &&
+          event.call_id === null &&
+          event.arguments_sha256 === null) ||
+        (event.round_index !== null &&
+          event.call_id !== null &&
+          isSha256Digest(event.arguments_sha256))) &&
+      isCanonicalLifecycleId(event.approval_reference) &&
+      event.approval_reference === event.event_id &&
+      (event.failure_code === 'E_AGENT_CANCELLED' ||
+        event.failure_code === 'E_AGENT_ROOT_STALE' ||
+        event.failure_code === 'E_AGENT_PERSISTENCE') &&
+      isCanonicalTimestamp(event.created_at)
+    );
+  }
+  return (
+    event.schema_version === 2 &&
+    isCanonicalLifecycleId(event.event_id) &&
+    isCanonicalLifecycleId(event.attempt_id) &&
+    Number.isSafeInteger(event.seq) &&
+    !Object.is(event.seq, -0) &&
+    event.seq >= 0 &&
+    (event.kind === 'round' ||
+      event.kind === 'tool_call' ||
+      event.kind === 'tool_result' ||
+      event.kind === 'approval' ||
+      event.kind === 'terminal') &&
+    (event.round_index === null ||
+      (Number.isSafeInteger(event.round_index) &&
+        !Object.is(event.round_index, -0) &&
+        event.round_index >= 0 &&
+        event.round_index < MAX_AGENT_ROUNDS)) &&
+    (event.call_id === null || isOpaqueProviderId(event.call_id)) &&
+    (event.safe_summary_key === null ||
+      (typeof event.safe_summary_key === 'string' &&
+        event.safe_summary_key.length > 0 &&
+        event.safe_summary_key.length <= MAX_AGENT_SUMMARY_KEY_LENGTH &&
+        safeSummaryKeys.has(event.safe_summary_key))) &&
+    (event.arguments_sha256 === null || isSha256Digest(event.arguments_sha256)) &&
+    (event.result_sha256 === null || isSha256Digest(event.result_sha256)) &&
+    (event.approval_reference === null || validIdentifier(event.approval_reference)) &&
+    (event.failure_code === null || isAgentFailureCode(event.failure_code)) &&
+    agentStatusValues.has(event.status) &&
+    isCanonicalTimestamp(event.created_at)
+  );
+}
+
+function sameSessionEvent(
+  left: PersistedSessionEventV3,
+  right: PersistedSessionEventV3,
+): boolean {
+  return (
+    left.schema_version === right.schema_version &&
+    left.event_id === right.event_id &&
+    left.attempt_id === right.attempt_id &&
+    left.seq === right.seq &&
+    left.kind === right.kind &&
+    left.round_index === right.round_index &&
+    left.call_id === right.call_id &&
+    left.status === right.status &&
+    left.safe_summary_key === right.safe_summary_key &&
+    left.arguments_sha256 === right.arguments_sha256 &&
+    left.result_sha256 === right.result_sha256 &&
+    left.approval_reference === right.approval_reference &&
+    left.failure_code === right.failure_code &&
+    left.created_at === right.created_at
+  );
+}
+
+function sessionEventsAreValid(events: readonly PersistedSessionEventV3[]): boolean {
+  if (!isExactDataArray(events, MAX_SESSION_EVENT_ROWS)) return false;
+  const ids = new Set<string>();
+  const previousSeq = new Map<string, number>();
+  for (const event of events) {
+    if (!sessionEventIsValid(event) || ids.has(event.event_id)) return false;
+    ids.add(event.event_id);
+    const previous = previousSeq.get(event.attempt_id);
+    if (previous !== undefined && event.seq <= previous) return false;
+    previousSeq.set(event.attempt_id, event.seq);
+    if (event.kind === 'cancel') {
+      // The source event itself is the only cancellation authority.  It never
+      // represents a settled tool result or a rollback claim.
+      if (!sessionEventIsValid(event)) return false;
+    } else if (event.kind === 'round' || event.kind === 'terminal') {
+      if (
+        event.call_id !== null ||
+        event.safe_summary_key !== null ||
+        event.arguments_sha256 !== null ||
+        event.result_sha256 !== null ||
+        event.approval_reference !== null
+      ) return false;
+    } else if (event.kind === 'tool_call') {
+      if (
+        event.call_id === null ||
+        event.safe_summary_key === null ||
+        event.arguments_sha256 === null ||
+        event.result_sha256 !== null ||
+        event.approval_reference !== null ||
+        (event.status !== 'waiting' &&
+          event.status !== 'approval' &&
+          event.status !== 'running')
+      ) return false;
+    } else if (event.kind === 'approval') {
+      if (
+        event.call_id === null ||
+        event.safe_summary_key === null ||
+        event.arguments_sha256 === null ||
+        event.result_sha256 !== null ||
+        event.status !== 'approval'
+      ) return false;
+    } else if (
+      event.call_id === null ||
+      event.safe_summary_key === null ||
+      event.arguments_sha256 === null ||
+      (event.status === 'unknown'
+        ? event.result_sha256 !== null ||
+          event.failure_code !== 'E_AGENT_CONFLICT'
+        : event.result_sha256 === null) ||
+      (event.status !== 'ok' &&
+        event.status !== 'failed' &&
+        event.status !== 'denied' &&
+        event.status !== 'cancelled' &&
+        event.status !== 'unknown' &&
+        event.status !== 'ambiguous')
+    ) {
+      return false;
+    }
+  }
+  return true;
+}
+
+function sessionEventsMatchState(
+  events: readonly PersistedSessionEventV3[],
+  state: ChatState,
+  candidate?: {
+    readonly conversationId: string;
+    readonly attemptId: string;
+    readonly journal: PersistedAgentAttemptJournalV3;
+  },
+): boolean {
+  const attempts = new Map<string, TurnAttemptV1>();
+  Object.values(state.conversations).forEach(conversation => {
+    conversation.attempts.forEach(attempt => attempts.set(attempt.attemptId, attempt));
+  });
+  if (candidate !== undefined) {
+    const candidateConversation = state.conversations[candidate.conversationId];
+    const current = attempts.get(candidate.attemptId);
+    if (
+      candidateConversation === undefined ||
+      current === undefined ||
+      !candidateConversation.attempts.includes(current)
+    ) return false;
+    attempts.set(candidate.attemptId, {
+      ...current,
+      agent: candidate.journal,
+    });
+  }
+  const calls = new Map<
+    string,
+    {
+      readonly attemptId: string;
+      readonly roundIndex: number | null;
+      readonly safeSummaryKey: string;
+      readonly argumentsSha256: string;
+      readonly approvalReference: string | null;
+      readonly resultSha256?: string;
+      readonly failureCode?: AgentFailureCode | null;
+      readonly receiptStatus?: PersistedSessionEventV3['status'];
+    }
+  >();
+  for (const event of events) {
+    const attempt = attempts.get(event.attempt_id);
+    if (attempt === undefined) return false;
+    if (
+      event.round_index !== null &&
+      event.round_index >= attempt.rounds.length &&
+      event.round_index !== attempt.agent?.round_index
+    ) return false;
+    if (event.kind === 'cancel') {
+      if (event.approval_reference !== event.event_id || event.status !== 'cancelled') {
+        return false;
+      }
+      if (event.round_index === null) {
+        if (event.call_id !== null || event.arguments_sha256 !== null) return false;
+      } else if (event.call_id === null) {
+        if (event.arguments_sha256 !== null) return false;
+      } else {
+        const journal = isAgentAttemptJournalAny(attempt.agent)
+          ? attempt.agent
+          : undefined;
+        const call = journal?.batch.find(candidateCall => candidateCall.call_id === event.call_id);
+        if (call === undefined || call.arguments_sha256 !== event.arguments_sha256) return false;
+        if (event.round_index !== journal?.round_index) return false;
+      }
+      continue;
+    }
+    if (event.kind === 'round') continue;
+    if (event.kind === 'terminal') {
+      const expectedStatus =
+        attempt.agent?.phase === 'final_response'
+          ? 'ok'
+          : attempt.agent?.phase === 'cancelled'
+            ? 'cancelled'
+            : attempt.agent?.phase === 'failed'
+              ? 'failed'
+              : attempt.agent?.phase === 'unknown'
+                ? 'unknown'
+                : attempt.agent?.phase === 'ambiguous'
+                  ? 'ambiguous'
+                  : null;
+      if (expectedStatus !== null && event.status !== expectedStatus) return false;
+      continue;
+    }
+    if (event.call_id === null) return false;
+    const key = `${event.attempt_id}\0${event.call_id}`;
+    const journal = isAgentAttemptJournalAny(attempt.agent)
+      ? attempt.agent
+      : undefined;
+    const journalCall = journal?.batch.find(
+      call => call.call_id === event.call_id,
+    );
+    const previous = calls.get(key);
+    const historicalEvent =
+      journalCall === undefined &&
+      previous === undefined &&
+      event.round_index !== null &&
+      isAgentAttemptJournalV3(attempt.agent) &&
+      event.round_index < attempt.agent.round_index &&
+      attempt.rounds.some(round => round.roundIndex === event.round_index) &&
+      (state.sessionEvents ?? []).some(existing =>
+        existing.event_id === event.event_id && sameSessionEvent(existing, event),
+      );
+    if (journalCall === undefined && previous === undefined && !historicalEvent) {
+      return false;
+    }
+    if (
+      journalCall !== undefined &&
+      event.round_index !== journal!.round_index
+    ) return false;
+    if (
+      previous !== undefined &&
+      previous.roundIndex !== event.round_index
+    ) return false;
+    const expectedArgs = journalCall?.arguments_sha256 ?? previous?.argumentsSha256;
+    const expectedSummary = journalCall?.safe_summary_key ?? previous?.safeSummaryKey;
+    const expectedApproval =
+      journalCall !== undefined
+        ? journalCall.approval_reference
+        : previous?.approvalReference;
+    if (
+      event.arguments_sha256 !== null &&
+      expectedArgs !== undefined &&
+      event.arguments_sha256 !== expectedArgs
+    ) return false;
+    if (
+      event.safe_summary_key !== null &&
+      expectedSummary !== undefined &&
+      event.safe_summary_key !== expectedSummary
+    ) return false;
+    if (
+      journalCall !== undefined &&
+      event.kind !== 'tool_call' &&
+      !(event.kind === 'approval' && event.approval_reference === null) &&
+      event.approval_reference !== expectedApproval
+    ) return false;
+    if (
+      journalCall === undefined &&
+      previous !== undefined &&
+      event.kind !== 'tool_call' &&
+      event.approval_reference !== expectedApproval
+    ) return false;
+    if (event.kind === 'tool_call') {
+      calls.set(key, {
+        ...(previous ?? {
+          attemptId: event.attempt_id,
+          roundIndex: event.round_index,
+        }),
+        safeSummaryKey: event.safe_summary_key!,
+        argumentsSha256: event.arguments_sha256!,
+        approvalReference:
+          previous?.approvalReference ??
+          journalCall?.approval_reference ??
+          null,
+      });
+      continue;
+    }
+    if (event.kind === 'approval') {
+      calls.set(key, {
+        ...(previous ?? {
+          attemptId: event.attempt_id,
+          roundIndex: event.round_index,
+          safeSummaryKey: event.safe_summary_key!,
+          argumentsSha256: event.arguments_sha256!,
+          approvalReference: null,
+        }),
+        safeSummaryKey: event.safe_summary_key!,
+        argumentsSha256: event.arguments_sha256!,
+        approvalReference: event.approval_reference,
+      });
+      continue;
+    }
+    const receipt = journalCall?.receipt;
+    const unknownWithoutReceipt =
+      event.status === 'unknown' &&
+      event.result_sha256 === null &&
+      event.failure_code === 'E_AGENT_CONFLICT' &&
+      journal !== undefined &&
+      journal.phase === 'unknown' &&
+      journal.round_lineage?.status === 'unknown' &&
+      journalCall !== undefined &&
+      journalCall.native_row_revision !== null;
+    if (journalCall !== undefined && receipt === null && !unknownWithoutReceipt) {
+      return false;
+    }
+    if (receipt !== undefined && receipt !== null) {
+      if (
+        event.status !== receipt.outcome ||
+        event.result_sha256 !== receipt.result_sha256 ||
+        event.arguments_sha256 !== receipt.arguments_sha256 ||
+        event.approval_reference !== receipt.approval_reference ||
+        event.failure_code !== receipt.failure_code
+      ) return false;
+    } else if (
+      !unknownWithoutReceipt &&
+      previous?.resultSha256 !== undefined &&
+      (event.result_sha256 !== previous.resultSha256 ||
+        event.status !== previous.receiptStatus ||
+        event.failure_code !== previous.failureCode)
+    ) return false;
+    calls.set(key, {
+      ...(previous ?? {
+        attemptId: event.attempt_id,
+        roundIndex: event.round_index,
+        safeSummaryKey: event.safe_summary_key!,
+        argumentsSha256: event.arguments_sha256!,
+        approvalReference: event.approval_reference,
+      }),
+      argumentsSha256: event.arguments_sha256!,
+      ...(event.result_sha256 === null
+        ? {}
+        : { resultSha256: event.result_sha256 }),
+      approvalReference: event.approval_reference,
+      failureCode: event.failure_code,
+      receiptStatus: event.status,
+    });
+  }
+  return true;
+}
+
+function agentControllerCASIsValid(value: unknown): value is AgentControllerCASV1 {
+  if (!isExactDataRecord(value, [
+      'schema_version',
+      'conversation_id',
+      'task_id',
+      'attempt_id',
+      'expected_controller_generation',
+      'expected_journal_revision',
+      'expected_session_generation',
+      'expected_session_sha256',
+    ])) return false;
+  const cas = value as unknown as AgentControllerCASV1;
+  return (
+    cas.schema_version === 1 &&
+    validIdentifier(cas.conversation_id) &&
+    isCanonicalLifecycleId(cas.task_id) &&
+    isCanonicalLifecycleId(cas.attempt_id) &&
+    Number.isSafeInteger(cas.expected_controller_generation) &&
+    !Object.is(cas.expected_controller_generation, -0) &&
+    cas.expected_controller_generation >= 0 &&
+    cas.expected_controller_generation < Number.MAX_SAFE_INTEGER &&
+    Number.isSafeInteger(cas.expected_journal_revision) &&
+    !Object.is(cas.expected_journal_revision, -0) &&
+    cas.expected_journal_revision >= 0 &&
+    cas.expected_journal_revision < Number.MAX_SAFE_INTEGER &&
+    Number.isSafeInteger(cas.expected_session_generation) &&
+    !Object.is(cas.expected_session_generation, -0) &&
+    cas.expected_session_generation >= 1 &&
+    cas.expected_session_generation < Number.MAX_SAFE_INTEGER &&
+    isSha256Digest(cas.expected_session_sha256)
+  );
+}
+
+function agentControllerCASMatchesAttempt(
+  value: unknown,
+  conversation: Conversation,
+  attempt: TurnAttemptV1,
+): value is AgentControllerCASV1 {
+  return (
+    agentControllerCASIsValid(value) &&
+    value.conversation_id === conversation.id &&
+    value.task_id === attempt.turnId &&
+    value.attempt_id === attempt.attemptId &&
+    value.expected_controller_generation ===
+      (attempt.agent?.controller_generation ?? 0) &&
+    value.expected_journal_revision === (attempt.journalRevision ?? 0)
+  );
 }
 
 export function isProjectId(value: unknown): value is string {
@@ -1423,15 +5111,25 @@ function normalizedMessage(
 function hasLifecycleId(state: ChatState, id: string): boolean {
   return (
     state.projectContextDestructiveTransition?.lifecycleId === id ||
+    (state.agentTranscriptCleanupOutbox ?? []).some(
+      entry => entry.cleanup_id === id,
+    ) ||
+    (state.workspaceAuthorityOutbox ?? []).some(
+      entry => entry.operationId === id || entry.clearanceReceiptId === id,
+    ) ||
+    (state.sessionEvents ?? []).some(event => event.event_id === id) ||
     Object.values(state.conversations).some(
     conversation =>
       conversation.runtimeContextId === id ||
+      (conversation.agentGrants ?? []).some(grant => grant.grant_id === id) ||
       conversation.turns.some(turn => turn.turnId === id) ||
       conversation.attempts.some(
         attempt =>
           attempt.attemptId === id ||
           attempt.activeRound?.roundId === id ||
-          attempt.rounds.some(round => round.roundId === id),
+          attempt.rounds.some(round => round.roundId === id) ||
+          attempt.agent?.transcript.transcript_ref === id ||
+          attempt.agent?.round_lineage?.round_id === id,
       ),
     )
   );
@@ -1472,11 +5170,15 @@ function replaceAttempt(
 }
 
 function deleteConversationState(state: ChatState, id: string): ChatState {
-  if (state.conversations[id] === undefined) return state;
+  const deleted = state.conversations[id];
+  if (deleted === undefined) return state;
   const conversations = { ...state.conversations };
   delete conversations[id];
   const conversationOrder = orderConversationIds(conversations);
-  return {
+  const deletedAttemptIds = new Set(
+    deleted.attempts.map(attempt => attempt.attemptId),
+  );
+  const next = {
     ...state,
     conversations,
     conversationOrder,
@@ -1485,6 +5187,14 @@ function deleteConversationState(state: ChatState, id: string): ChatState {
         ? conversationOrder[0] ?? null
         : state.selectedConversationId,
   };
+  return state.sessionEvents === undefined
+    ? next
+    : {
+        ...next,
+        sessionEvents: state.sessionEvents.filter(
+          event => !deletedAttemptIds.has(event.attempt_id),
+        ),
+      };
 }
 
 function requiresDestructiveLifecycle(conversation: Conversation): boolean {
@@ -1642,6 +5352,8 @@ function destructiveTargetConversationId(action: ChatAction): string | null {
     case 'conversation/unbind-workspace':
     case 'conversation/ensure-runtime-context':
       return action.payload.id;
+    case 'conversation/delete-with-agent-cleanup':
+      return action.payload.conversationId;
     case 'conversation/apply-workspace-binding':
       {
         const descriptor =
@@ -1678,12 +5390,23 @@ function destructiveTargetConversationId(action: ChatAction): string | null {
     case 'attempt/cancel':
     case 'attempt/retry':
       return action.payload.conversationId;
+    case 'attempt/agent-checkpoint':
+    case 'attempt/agent-advance-call':
+    case 'attempt/agent-final-checkpoint':
+    case 'agent/cleanup-enqueue':
+      return action.payload.conversationId;
+    case 'conversation/agent-grants':
+      return action.payload.conversationId;
+    case 'agent/approval-checkpoint':
+      return action.payload.conversationId;
     case 'conversation/create':
     case 'conversation/select':
     case 'project-context-destructive/begin':
     case 'project-context-destructive/tombstone':
     case 'project-context-destructive/cleanup-complete':
     case 'project-context-destructive/finalize':
+      return null;
+    case 'agent/cleanup-ack':
       return null;
   }
 }
@@ -1749,6 +5472,7 @@ export function chatReducer(state: ChatState, action: ChatAction): ChatState {
         attempts: [],
         createdAt: at,
         updatedAt: at,
+        agentGrants: [],
       };
       const next = withConversation(state, conversation);
       return select ? { ...next, selectedConversationId: id } : next;
@@ -1815,11 +5539,120 @@ export function chatReducer(state: ChatState, action: ChatAction): ChatState {
       if (
         conversation === undefined ||
         hasLiveAttempt(conversation) ||
+        hasAgentRecoveryOwner(conversation) ||
         requiresDestructiveLifecycle(conversation)
       ) {
         return state;
       }
       return deleteConversationState(state, id);
+    }
+
+    case 'conversation/delete-with-agent-cleanup': {
+      const payload = action.payload;
+      const conversation = state.conversations[payload.conversationId];
+      if (
+        conversation === undefined ||
+        payload.expectedConversation !== conversation ||
+        !Array.isArray(payload.cleanup) ||
+        requiresDestructiveLifecycle(conversation) ||
+        conversation.attempts.some(
+          attempt =>
+            (attempt.status === 'prepared' || attempt.status === 'sending') &&
+            (attempt.agent === undefined ||
+              attempt.agent === null ||
+              (attempt.agent.phase !== 'final_response' &&
+                attempt.agent.phase !== 'cancelled' &&
+                attempt.agent.phase !== 'failed')),
+        )
+      ) return state;
+      const ownedAttempts = conversation.attempts.filter(
+        attempt => attempt.agent !== undefined && attempt.agent !== null,
+      );
+      // A deletion is allowed to release only terminal transcript owners. An
+      // unknown/ambiguous or in-flight Agent journal remains a recovery owner
+      // until native reconciliation has produced terminal evidence.
+      if (
+        ownedAttempts.some(
+          attempt =>
+            attempt.agent === undefined ||
+            attempt.agent === null ||
+            (attempt.agent.phase !== 'final_response' &&
+              attempt.agent.phase !== 'cancelled' &&
+              attempt.agent.phase !== 'failed'),
+        ) ||
+        payload.cleanup.length +
+          (state.agentTranscriptCleanupOutbox ?? []).length >
+          MAX_AGENT_CLEANUP_OUTBOX_ENTRIES
+      ) return state;
+      const existingCleanupIds = new Set(
+        (state.agentTranscriptCleanupOutbox ?? []).map(
+          entry => entry.cleanup_id,
+        ),
+      );
+      const existingCleanupForAttempt = new Set(
+        (state.agentTranscriptCleanupOutbox ?? [])
+          .filter(entry => entry.conversation_id === conversation.id)
+          .map(
+            entry =>
+              `${entry.attempt_id}\0${entry.transcript_ref}\0${entry.transcript_sha256}`,
+          ),
+      );
+      if (
+        (state.agentTranscriptCleanupOutbox ?? []).some(entry => {
+          if (entry.conversation_id !== conversation.id) return false;
+          const attempt = ownedAttempts.find(
+            candidate => candidate.attemptId === entry.attempt_id,
+          );
+          return (
+            attempt?.agent?.transcript.transcript_ref === entry.transcript_ref &&
+            attempt.agent.transcript.transcript_sha256 === entry.transcript_sha256 &&
+            entry.reason !== 'conversation_deleted'
+          );
+        })
+      ) return state;
+      const requiredCleanupCount = ownedAttempts.filter(attempt => {
+        const transcript = attempt.agent?.transcript;
+        return (
+          transcript !== undefined &&
+          !existingCleanupForAttempt.has(
+            `${attempt.attemptId}\0${transcript.transcript_ref}\0${transcript.transcript_sha256}`,
+          )
+        );
+      }).length;
+      const cleanupIds = new Set<string>();
+      for (const cleanup of payload.cleanup) {
+        if (
+          !cleanupEntryIsValid(cleanup) ||
+          cleanup.conversation_id !== conversation.id ||
+          cleanup.reason !== 'conversation_deleted' ||
+          cleanupIds.has(cleanup.cleanup_id) ||
+          existingCleanupIds.has(cleanup.cleanup_id)
+        ) return state;
+        const attempt = ownedAttempts.find(
+          candidate => candidate.attemptId === cleanup.attempt_id,
+        );
+        if (
+          attempt === undefined ||
+          attempt.agent === undefined ||
+          attempt.agent === null ||
+          attempt.turnId !== cleanup.task_id ||
+          attempt.agent.transcript.transcript_ref !== cleanup.transcript_ref ||
+          attempt.agent.transcript.transcript_sha256 !== cleanup.transcript_sha256 ||
+          existingCleanupForAttempt.has(
+            `${cleanup.attempt_id}\0${cleanup.transcript_ref}\0${cleanup.transcript_sha256}`,
+          )
+        ) return state;
+        cleanupIds.add(cleanup.cleanup_id);
+      }
+      if (payload.cleanup.length !== requiredCleanupCount) return state;
+      const next = deleteConversationState(state, conversation.id);
+      return {
+        ...next,
+        agentTranscriptCleanupOutbox: [
+          ...(state.agentTranscriptCleanupOutbox ?? []),
+          ...payload.cleanup.map(cleanup => ({ ...cleanup })),
+        ],
+      };
     }
 
     case 'conversation/set-model': {
@@ -1873,6 +5706,7 @@ export function chatReducer(state: ChatState, action: ChatAction): ChatState {
         !isProjectId(action.payload.projectId) ||
         !isCanonicalTimestamp(action.payload.at) ||
         hasLiveAttempt(conversation) ||
+        hasAgentRecoveryOwner(conversation) ||
         requiresDestructiveLifecycle(conversation) ||
         conversation.workspaceBinding !== null ||
         conversation.workspaceId !== null ||
@@ -1885,6 +5719,7 @@ export function chatReducer(state: ChatState, action: ChatAction): ChatState {
         projectId: action.payload.projectId,
         workspaceBootstrapState: 'pending_legacy_project',
         projectContext: createProjectContextState(action.payload.projectId),
+        agentGrants: [],
         updatedAt: laterTimestamp(conversation.updatedAt, action.payload.at),
       });
     }
@@ -1895,6 +5730,7 @@ export function chatReducer(state: ChatState, action: ChatAction): ChatState {
         conversation === undefined ||
         conversation.projectId === null ||
         hasLiveAttempt(conversation) ||
+        hasAgentRecoveryOwner(conversation) ||
         requiresDestructiveLifecycle(conversation) ||
         conversation.workspaceBinding !== null ||
         conversation.workspaceId !== null ||
@@ -1907,6 +5743,7 @@ export function chatReducer(state: ChatState, action: ChatAction): ChatState {
         projectId: null,
         workspaceBootstrapState: 'none',
         projectContext: null,
+        agentGrants: [],
         updatedAt: laterTimestamp(conversation.updatedAt, action.payload.at),
       });
     }
@@ -1918,6 +5755,7 @@ export function chatReducer(state: ChatState, action: ChatAction): ChatState {
         !isWorkspaceId(action.payload.workspaceId) ||
         !isCanonicalTimestamp(action.payload.at) ||
         hasLiveAttempt(conversation) ||
+        hasAgentRecoveryOwner(conversation) ||
         hasWorkspaceAuthorityOutboxEntry(state, action.payload.workspaceId) ||
         conversation.workspaceBinding !== null ||
         conversation.workspaceId === action.payload.workspaceId
@@ -1931,6 +5769,7 @@ export function chatReducer(state: ChatState, action: ChatAction): ChatState {
           conversation.projectId === null
             ? 'pending_registry_resolution'
             : 'pending_legacy_project',
+        agentGrants: [],
         updatedAt: laterTimestamp(conversation.updatedAt, action.payload.at),
       });
     }
@@ -1941,6 +5780,7 @@ export function chatReducer(state: ChatState, action: ChatAction): ChatState {
         conversation === undefined ||
         conversation.workspaceId === null ||
         hasLiveAttempt(conversation) ||
+        hasAgentRecoveryOwner(conversation) ||
         hasWorkspaceAuthorityOutboxEntry(state, conversation.workspaceId) ||
         conversation.workspaceBinding !== null ||
         !isCanonicalTimestamp(action.payload.at)
@@ -1952,6 +5792,7 @@ export function chatReducer(state: ChatState, action: ChatAction): ChatState {
         workspaceId: null,
         workspaceBootstrapState:
           conversation.projectId === null ? 'none' : 'pending_legacy_project',
+        agentGrants: [],
         updatedAt: laterTimestamp(conversation.updatedAt, action.payload.at),
       });
     }
@@ -1985,6 +5826,7 @@ export function chatReducer(state: ChatState, action: ChatAction): ChatState {
         owner.expectedProjectContext !== conversation.projectContext ||
         !conversationWorkspaceStateIsValid(conversation) ||
         hasLiveAttempt(conversation) ||
+        hasAgentRecoveryOwner(conversation) ||
         requiresDestructiveLifecycle(conversation)
       ) {
         return state;
@@ -2043,6 +5885,7 @@ export function chatReducer(state: ChatState, action: ChatAction): ChatState {
           targetProjectId === null ? 'none' : 'pending_legacy_project' : 'none',
         runtimeContextId: nextRuntimeContextId,
         projectContext: nextProjectContext,
+        agentGrants: [],
         updatedAt: laterTimestamp(conversation.updatedAt, payload.at),
       });
     }
@@ -2578,6 +6421,7 @@ export function chatReducer(state: ChatState, action: ChatAction): ChatState {
       const attempt = conversation.attempts[index];
       if (
         attempt === undefined ||
+        (attempt.agent !== undefined && attempt.agent !== null) ||
         attempt.status !== 'prepared' ||
         !preparedAttemptIsApplicable(conversation, attempt) ||
         attempt.activeRound !== null ||
@@ -2617,6 +6461,7 @@ export function chatReducer(state: ChatState, action: ChatAction): ChatState {
       const receipt = action.payload.receipt;
       if (
         attempt === undefined ||
+        (attempt.agent !== undefined && attempt.agent !== null) ||
         attempt.status !== 'sending' ||
         attempt.activeRound === null ||
         !receiptIsValid(attempt, receipt) ||
@@ -2650,6 +6495,9 @@ export function chatReducer(state: ChatState, action: ChatAction): ChatState {
       const normalized = normalizedMessage(conversation, action.payload.message);
       if (
         attempt === undefined ||
+        (attempt.agent !== undefined &&
+          attempt.agent !== null &&
+          attempt.agent.phase !== 'final_response') ||
         attempt.status !== 'prepared' ||
         attempt.activeRound !== null ||
         lastReceipt === undefined ||
@@ -2690,6 +6538,7 @@ export function chatReducer(state: ChatState, action: ChatAction): ChatState {
       const attempt = conversation.attempts[index];
       if (
         attempt === undefined ||
+        (attempt.agent !== undefined && attempt.agent !== null) ||
         (attempt.status !== 'prepared' && attempt.status !== 'sending')
       ) {
         return state;
@@ -2719,6 +6568,7 @@ export function chatReducer(state: ChatState, action: ChatAction): ChatState {
       const attempt = conversation.attempts[index];
       if (
         attempt === undefined ||
+        (attempt.agent !== undefined && attempt.agent !== null) ||
         (attempt.status !== 'prepared' && attempt.status !== 'sending')
       ) {
         return state;
@@ -2761,6 +6611,7 @@ export function chatReducer(state: ChatState, action: ChatAction): ChatState {
       if (
         source === undefined ||
         (source.status !== 'failed' && source.status !== 'cancelled') ||
+        (source !== undefined && hasAgentJournalOrReceipt(source)) ||
         turn === undefined ||
         hasPendingAttempt ||
         !sourceIsCurrentVisibleHistory ||
@@ -2803,5 +6654,217 @@ export function chatReducer(state: ChatState, action: ChatAction): ChatState {
         updatedAt: laterTimestamp(conversation.updatedAt, attempt.createdAt),
       });
     }
+
+    case 'attempt/agent-checkpoint': {
+      const payload = action.payload;
+      // The reducer is a final-schema authority boundary.  Schema-2 journals
+      // are accepted only by persistence bootstrap/migration and must never
+      // be applied as a live state action.
+      if (payload.journal === null || !isAgentAttemptJournalV3(payload.journal)) {
+        return state;
+      }
+      return applyFinalAgentCheckpoint(state, payload);
+    }
+
+    case 'attempt/agent-advance-call':
+      return applyAgentCallAdvance(state, action.payload);
+
+    case 'attempt/agent-final-checkpoint':
+      return applyAtomicAgentFinalCheckpoint(state, action.payload);
+
+    case 'conversation/agent-grants': {
+      const payload = action.payload;
+      const conversation = state.conversations[payload.conversationId];
+      if (
+        conversation === undefined ||
+        payload.expectedConversation !== conversation ||
+        !isCanonicalTimestamp(payload.at) ||
+        !isExactDataArray(payload.grants, MAX_AGENT_GRANTS_PER_CONVERSATION) ||
+        payload.grants.some(grant => !agentGrantIsValid(grant))
+      ) return state;
+      const grants = payload.grants.map(grant => ({
+        ...grant,
+        issued_for: { ...grant.issued_for },
+      }));
+      const conversationBinding = conversation.workspaceBinding ?? null;
+      const ids = new Set<string>();
+      const currentGrantIds = new Set(
+        (conversation.agentGrants ?? []).map(grant => grant.grant_id),
+      );
+      if (
+        grants.some(grant => {
+          if (ids.has(grant.grant_id)) return true;
+          ids.add(grant.grant_id);
+          return (
+            (hasLifecycleId(state, grant.grant_id) &&
+              !currentGrantIds.has(grant.grant_id)) ||
+            grant.conversation_id !== conversation.id ||
+            grant.project_id !== conversation.projectId ||
+            conversationBinding === null ||
+            grant.workspace_id !== conversationBinding.workspaceId ||
+            grant.binding_revision !== conversationBinding.bindingRevision ||
+            grant.root_fingerprint_sha256.length !== 64 ||
+            !conversation.attempts.some(
+              attempt =>
+                attempt.attemptId === grant.issued_for.attempt_id &&
+                attempt.turnId === grant.issued_for.task_id,
+            )
+          );
+        })
+      ) return state;
+      const grantIdsAfter = new Set(grants.map(grant => grant.grant_id));
+      if (
+        conversation.attempts.some(attempt =>
+          attempt.agent?.frozen_grant_ids.some(
+            grantId => !grantIdsAfter.has(grantId),
+          ),
+        )
+      ) return state;
+      const conversations = {
+        ...state.conversations,
+        [conversation.id]: {
+          ...conversation,
+          agentGrants: grants,
+          updatedAt: laterTimestamp(conversation.updatedAt, payload.at),
+        },
+      };
+      return {
+        ...state,
+        conversations,
+        conversationOrder: orderConversationIds(conversations),
+      };
+    }
+
+    case 'agent/approval-checkpoint': {
+      const payload = action.payload;
+      const conversation = state.conversations[payload.conversationId];
+      const evidence = closedCheckpointEvidence(payload.evidence);
+      if (
+        conversation === undefined ||
+        payload.expectedConversation !== conversation ||
+        !isAgentAttemptJournalV3(payload.journal) ||
+        evidence === null ||
+        !approvalEvidenceGrantsMatch(
+          evidence,
+          payload.grants,
+          conversation.agentGrants ?? conversation.agent_grants ?? [],
+        )
+      ) return state;
+      const withJournal = applyFinalAgentCheckpoint(state, {
+        cas: payload.cas,
+        conversationId: payload.conversationId,
+        attemptId: payload.attemptId,
+        expectedAttempt: payload.expectedAttempt,
+        journal: payload.journal,
+        events: payload.events,
+        evidence: payload.evidence,
+        ...(payload.cleanup === undefined
+          ? {}
+          : { cleanup: payload.cleanup }),
+        ...(payload.journalRevision === undefined
+          ? {}
+          : { journalRevision: payload.journalRevision }),
+        at: payload.at,
+      });
+      if (withJournal === state) return state;
+      const nextConversation = withJournal.conversations[payload.conversationId];
+      return nextConversation === undefined
+        ? state
+        : chatReducer(withJournal, {
+            type: 'conversation/agent-grants',
+            payload: {
+              conversationId: payload.conversationId,
+              expectedConversation: nextConversation,
+              grants: payload.grants,
+              at: payload.at,
+            },
+          });
+    }
+
+    case 'agent/cleanup-enqueue': {
+      const payload = action.payload;
+      const conversation = state.conversations[payload.conversationId];
+      const ownedAttempt = conversation?.attempts.find(
+        attempt => attempt.attemptId === payload.attemptId,
+      );
+      const liveCleanupReason =
+        ownedAttempt?.agent === undefined || ownedAttempt.agent === null
+          ? null
+          : cleanupReasonForTerminalPhase(ownedAttempt.agent.phase);
+      const detachedDeletedCleanup =
+        conversation === undefined &&
+        typeof payload.cleanup === 'object' &&
+        payload.cleanup !== null &&
+        payload.cleanup.reason === 'conversation_deleted' &&
+        typeof payload.expectedAttempt === 'object' &&
+        payload.expectedAttempt !== null &&
+        payload.expectedAttempt.attemptId === payload.attemptId &&
+        payload.expectedAttempt.agent !== undefined &&
+        payload.expectedAttempt.agent !== null &&
+        isAgentAttemptJournalV3(payload.expectedAttempt.agent) &&
+        (payload.expectedAttempt.agent.phase === 'final_response' ||
+          payload.expectedAttempt.agent.phase === 'cancelled' ||
+          payload.expectedAttempt.agent.phase === 'failed') &&
+        !Object.values(state.conversations).some(candidate =>
+          candidate.attempts.some(attempt => attempt.attemptId === payload.attemptId),
+        );
+      if (
+        (!detachedDeletedCleanup &&
+          (conversation === undefined ||
+            ownedAttempt === undefined ||
+            payload.expectedAttempt !== ownedAttempt)) ||
+        typeof payload.expectedAttempt !== 'object' ||
+        payload.expectedAttempt === null ||
+        !isCanonicalTimestamp(payload.at) ||
+        typeof payload.cleanup !== 'object' ||
+        payload.cleanup === null ||
+        !cleanupEntryIsValid(payload.cleanup) ||
+        (!detachedDeletedCleanup &&
+          (liveCleanupReason === null ||
+            payload.cleanup.reason !== liveCleanupReason)) ||
+        (payload.expectedAttempt.agent !== undefined &&
+          payload.expectedAttempt.agent !== null &&
+          !isAgentAttemptJournalV3(payload.expectedAttempt.agent)) ||
+        payload.cleanup.conversation_id !== payload.conversationId ||
+        payload.cleanup.task_id !== payload.expectedAttempt.turnId ||
+        payload.cleanup.attempt_id !== payload.attemptId ||
+        payload.expectedAttempt.agent?.transcript.transcript_ref !==
+          payload.cleanup.transcript_ref ||
+        payload.expectedAttempt.agent?.transcript.transcript_sha256 !==
+          payload.cleanup.transcript_sha256
+      ) return state;
+      const outbox = state.agentTranscriptCleanupOutbox ?? [];
+      if (
+        outbox.length >= MAX_AGENT_CLEANUP_OUTBOX_ENTRIES ||
+        outbox.some(entry => entry.cleanup_id === payload.cleanup.cleanup_id)
+      ) return state;
+      return {
+        ...state,
+        agentTranscriptCleanupOutbox: [
+          ...outbox,
+          { ...payload.cleanup },
+        ],
+      };
+    }
+
+    case 'agent/cleanup-ack': {
+      const payload = action.payload;
+      const outbox = state.agentTranscriptCleanupOutbox ?? [];
+      const index = outbox.findIndex(
+        entry => entry.cleanup_id === payload.cleanupId,
+      );
+      if (
+        index < 0 ||
+        !cleanupEntryIsValid(payload.expectedCleanup) ||
+        outbox[index] !== payload.expectedCleanup
+      ) return state;
+      return {
+        ...state,
+        agentTranscriptCleanupOutbox: outbox.filter(
+          (_entry, entryIndex) => entryIndex !== index,
+        ),
+      };
+    }
+
   }
 }

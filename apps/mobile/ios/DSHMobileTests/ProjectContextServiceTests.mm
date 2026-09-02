@@ -5,6 +5,7 @@
 #import "../../../../modules/rish/ios/Sources/ProjectContextPolicy.h"
 #import "../../../../modules/rish/ios/Sources/ProjectContextService.h"
 #import "../../../../modules/rish/ios/Sources/ProjectContextStore.h"
+#import "DSHTestStorageFixture.h"
 
 #include <CommonCrypto/CommonDigest.h>
 #include <errno.h>
@@ -137,9 +138,15 @@ static NSString *DSHSHA256Hex(NSData *data) {
                                      NSError *error))reject;
 - (void)clonePublicRepository:(id)urlValue
                          name:(id)nameValue
+                      options:(id)optionsValue
                      resolver:(void (^)(id result))resolve
                      rejecter:(void (^)(NSString *code, NSString *message,
                                          NSError *error))reject;
+- (void)pushProject:(id)projectIdValue
+            options:(id)optionsValue
+           resolver:(void (^)(id result))resolve
+           rejecter:(void (^)(NSString *code, NSString *message,
+                               NSError *error))reject;
 - (BOOL)removePublishedOwnerMarkerAtDescriptor:(int)descriptor;
 - (BOOL)syncPublishedRootDescriptor:(int)descriptor;
 @end
@@ -446,6 +453,8 @@ static NSString *DSHSHA256Hex(NSData *data) {
 @property(nonatomic, strong) DSHProjectContextService *service;
 - (nullable NSDictionary *)listProjectsSynchronously:(LocalProjectsModule *)projects
                                              rejected:(BOOL *)rejected;
+- (NSString *)pushRejectionCodeForOptions:(id)options
+                                  message:(NSString **)message;
 - (BOOL)requireGitResult:(int)result operation:(NSString *)operation;
 - (BOOL)requirePointer:(const void *)pointer operation:(NSString *)operation;
 - (void)addConflictAtPath:(NSString *)relativePath
@@ -456,6 +465,29 @@ static NSString *DSHSHA256Hex(NSData *data) {
 @end
 
 @implementation ProjectContextServiceTests
+
+- (NSString *)pushRejectionCodeForOptions:(id)options
+                                  message:(NSString **)message {
+  LocalProjectsModule *projects =
+      [[NSClassFromString(@"LocalProjectsModule") alloc] init];
+  [projects setValue:self.access forKey:@"projectAccess"];
+  XCTestExpectation *finished =
+      [self expectationWithDescription:@"push rejects without network access"];
+  __block NSString *rejectionCode = nil;
+  __block NSString *rejectionMessage = nil;
+  [projects pushProject:@"not-a-project-id"
+      options:options
+      resolver:^(__unused id result) { [finished fulfill]; }
+      rejecter:^(NSString *code, NSString *rejectedMessage,
+                 __unused NSError *error) {
+        rejectionCode = code;
+        rejectionMessage = rejectedMessage;
+        [finished fulfill];
+      }];
+  [self waitForExpectations:@[finished] timeout:5.0];
+  if (message != nullptr) *message = rejectionMessage;
+  return rejectionCode;
+}
 
 - (BOOL)requireGitResult:(int)result operation:(NSString *)operation {
   if (result == 0) return YES;
@@ -476,9 +508,11 @@ static NSString *DSHSHA256Hex(NSData *data) {
 
 - (void)setUp {
   [super setUp];
-  self.temporaryURL = [NSURL fileURLWithPath:[NSTemporaryDirectory()
-      stringByAppendingPathComponent:NSUUID.UUID.UUIDString]
-                                      isDirectory:YES];
+  NSError *fixtureError = nil;
+  self.temporaryURL = DSHCreateTestStorageFixtureRoot(
+      @"ProjectContextServiceTests", &fixtureError);
+  XCTAssertNotNil(self.temporaryURL, @"%@", fixtureError);
+  if (self.temporaryURL == nil) return;
   self.projectsURL = [self.temporaryURL URLByAppendingPathComponent:@"projects"
                                                         isDirectory:YES];
   self.storeURL = [self.temporaryURL URLByAppendingPathComponent:@"context-store"
@@ -487,7 +521,7 @@ static NSString *DSHSHA256Hex(NSData *data) {
       createDirectoryAtURL:self.projectsURL
       withIntermediateDirectories:YES
       attributes:@{NSFilePosixPermissions : @0700}
-      error:nil]);
+      error:&fixtureError], @"%@", fixtureError);
   self.now = [NSDate dateWithTimeIntervalSince1970:1'777'777'777.125];
   self.nextIdentifier = 0;
   self.access = [[DSHLocalProjectAccess alloc]
@@ -521,7 +555,9 @@ static NSString *DSHSHA256Hex(NSData *data) {
   self.service = nil;
   self.store = nil;
   self.access = nil;
-  [[NSFileManager defaultManager] removeItemAtURL:self.temporaryURL error:nil];
+  if (self.temporaryURL != nil) {
+    [[NSFileManager defaultManager] removeItemAtURL:self.temporaryURL error:nil];
+  }
   [super tearDown];
 }
 
@@ -4608,124 +4644,16 @@ static NSString *DSHSHA256Hex(NSData *data) {
   XCTAssertNotNil([ordered leaseForProjectId:DSHFixtureProjectB]);
 }
 
-- (void)testWorkspaceProjectPathsPinRepoAndRejectMetadataMutationSurface {
-  DSHProjectFixture *fixture = [self createProject:DSHFixtureProjectA
-                                             name:@"Alpha"
-                                      initialFile:@"README.md"
-                                          content:@"pinned repo\n"
-                                           commit:YES];
+- (void)testLegacyWorkspaceProjectPathAuthorityIsNotExposed {
   LocalWorkspaceModule *workspace =
       [[NSClassFromString(@"LocalWorkspaceModule") alloc] init];
   XCTAssertNotNil(workspace);
-  [workspace setValue:self.access forKey:@"projectAccess"];
-  NSString *repositoryPath = [NSString
-      stringWithFormat:@"projects/%@/repo", fixture.projectId];
-  NSString *metadataPath = [NSString
-      stringWithFormat:@"projects/%@/project.json", fixture.projectId];
-  NSError *error = nil;
-  XCTAssertNil([workspace componentsForPath:metadataPath
-                                   allowRoot:NO
-                                       error:&error]);
-  XCTAssertNotNil(error);
-  XCTAssertNotNil([workspace componentsForPath:
-      [repositoryPath stringByAppendingString:@"/README.md"]
-                                      allowRoot:NO error:&error]);
-  NSString *uppercaseMetadataPath = [NSString stringWithFormat:
-      @"PROJECTS/%@/project.json", fixture.projectId];
-  NSString *longSProjectsPath = [NSString stringWithFormat:
-      @"projectſ/%@/repo/README.md", fixture.projectId];
-  NSString *fullwidthProjectsPath = [NSString stringWithFormat:
-      @"ｐｒｏｊｅｃｔｓ/%@/repo/README.md", fixture.projectId];
-  NSString *stagingAliasPath = [NSString stringWithFormat:
-      @".STAGING-%@/payload", fixture.projectId];
-  NSString *longSStagingPath = [NSString stringWithFormat:
-      @".ſtaging-%@/payload", fixture.projectId];
-  NSString *ligatureStagingPath = [NSString stringWithFormat:
-      @".ﬆaging-%@/payload", fixture.projectId];
-  XCTAssertNil([workspace componentsForPath:uppercaseMetadataPath
-                                   allowRoot:NO error:&error]);
-  XCTAssertNil([workspace componentsForPath:longSProjectsPath
-                                   allowRoot:NO error:&error]);
-  XCTAssertNil([workspace componentsForPath:fullwidthProjectsPath
-                                   allowRoot:NO error:&error]);
-  XCTAssertNil([workspace componentsForPath:[repositoryPath
-      stringByAppendingString:@"/.GIT/config"] allowRoot:NO error:&error]);
-  XCTAssertNil([workspace componentsForPath:stagingAliasPath
-                                   allowRoot:NO error:&error]);
-  XCTAssertNil([workspace componentsForPath:longSStagingPath
-                                   allowRoot:NO error:&error]);
-  XCTAssertNil([workspace componentsForPath:ligatureStagingPath
-                                   allowRoot:NO error:&error]);
-  XCTAssertNil([workspace componentsForPath:@".traſh/entry"
-                                   allowRoot:NO error:&error]);
-  XCTAssertNil([workspace componentsForPath:
-      [repositoryPath stringByAppendingString:@"/.ＧＩＴ/config"]
-                                   allowRoot:NO error:&error]);
-  XCTAssertNil([DSHLocalProjectAccess projectIdForWorkspacePath:longSProjectsPath
-                                                           error:&error]);
-  XCTAssertEqual(error.code, DSHLocalProjectAccessErrorInvalidIdentifier);
-  NSString *decomposedName = @"Cafe\u0301.swift";
-  NSString *decomposedPath = [repositoryPath stringByAppendingPathComponent:
-      decomposedName];
-  error = nil;
-  XCTAssertNotNil([workspace componentsForPath:decomposedPath
-                                      allowRoot:NO error:&error]);
-  XCTAssertNil(error);
-  XCTAssertEqualObjects(
-      [DSHLocalProjectAccess projectIdForWorkspacePath:decomposedPath
-                                                 error:&error],
-      fixture.projectId);
-
-  DSHLocalProjectLeaseSet *leases = [self.access
-      leaseWorkspaceReadPaths:@[repositoryPath]
-                    writePaths:@[]
-                       timeout:0
-                         error:&error];
-  XCTAssertNotNil(leases);
-  [self writeString:@"ascii\n" relativePath:@"Case.swift" fixture:fixture];
-  [self writeString:@"width alias\n" relativePath:@"Ｃase.swift" fixture:fixture];
-  NSString *collisionPath = [repositoryPath
-      stringByAppendingPathComponent:@"CASE.swift"];
-  NSString *collisionName = nil;
-  int collisionParent = [workspace
-      openParentDirectoryForPath:collisionPath name:&collisionName
-      relativePath:nil leaseSet:leases error:&error];
-  XCTAssertLessThan(collisionParent, 0);
-  if (collisionParent >= 0) close(collisionParent);
-  NSString *projectsName = nil;
-  int projectsParent = [workspace openParentDirectoryForPath:@"projects"
-                                                        name:&projectsName
-                                                relativePath:nil
-                                                    leaseSet:leases
-                                                       error:&error];
-  XCTAssertLessThan(projectsParent, 0);
-  if (projectsParent >= 0) close(projectsParent);
-  NSURL *pinnedRepository = [fixture.projectURL
-      URLByAppendingPathComponent:@"repo-pinned" isDirectory:YES];
-  XCTAssertEqual(rename(fixture.repositoryURL.fileSystemRepresentation,
-                        pinnedRepository.fileSystemRepresentation),
-                 0);
-  XCTAssertTrue([[NSFileManager defaultManager]
-      createDirectoryAtURL:fixture.repositoryURL
-      withIntermediateDirectories:NO
-      attributes:@{NSFilePosixPermissions : @0700}
-      error:&error]);
-  NSArray<NSString *> *repositoryComponents =
-      [repositoryPath componentsSeparatedByString:@"/"];
-  int opened = [workspace openDirectoryComponents:repositoryComponents
-                                           leaseSet:leases
-                                              error:&error];
-  XCTAssertLessThan(opened, 0);
-  if (opened >= 0) close(opened);
-
-  NSString *name = nil;
-  int projectParent = [workspace openParentDirectoryForPath:repositoryPath
-                                                       name:&name
-                                               relativePath:nil
-                                                   leaseSet:leases
-                                                      error:&error];
-  XCTAssertLessThan(projectParent, 0);
-  if (projectParent >= 0) close(projectParent);
+  XCTAssertFalse([workspace respondsToSelector:
+      @selector(componentsForPath:allowRoot:error:)]);
+  XCTAssertFalse([workspace respondsToSelector:
+      @selector(openParentDirectoryForPath:name:relativePath:leaseSet:error:)]);
+  XCTAssertFalse([workspace respondsToSelector:
+      @selector(openDirectoryComponents:leaseSet:error:)]);
 }
 
 - (void)testProjectRootTraversalRejectsIntermediateWorkspaceSwap {
@@ -4769,87 +4697,18 @@ static NSString *DSHSHA256Hex(NSData *data) {
   XCTAssertNotNil(error);
 }
 
-- (void)testLargeWorkspaceDirectoryExactPathSupportsReadWriteRenameAndTool {
-  DSHProjectFixture *fixture = [self createProject:DSHFixtureProjectA
-                                             name:@"Alpha"
-                                      initialFile:@"README.md"
-                                          content:@"large exact initial\n"
-                                           commit:YES];
-  for (NSUInteger index = 0; index < 5001; index++) {
-    [self writeString:@"x\n"
-        relativePath:[NSString stringWithFormat:@"filler-%04lu.txt",
-                                                (unsigned long)index]
-             fixture:fixture];
-  }
+- (void)testLegacyWorkspaceProjectFileAndToolBridgeIsNotExposed {
   DSHInjectedWorkspaceModule *workspace =
       [[DSHInjectedWorkspaceModule alloc] init];
-  workspace.injectedWorkspaceRoot = self.projectsURL.URLByDeletingLastPathComponent;
-  [workspace setValue:self.access forKey:@"projectAccess"];
-  NSString *readme = [NSString stringWithFormat:@"projects/%@/repo/README.md",
-                                                fixture.projectId];
-  NSString *renamed = [NSString stringWithFormat:@"projects/%@/repo/RENAMED.md",
-                                                 fixture.projectId];
-  XCTestExpectation *finished = [self expectationWithDescription:
-      @"large exact workspace operations"];
-  __block NSString *failure = nil;
-  [workspace readTextPath:readme
-      resolver:^(NSDictionary *readResult) {
-        NSString *revision = readResult[@"file"][@"revision"];
-        if (![readResult[@"content"] isEqual:@"large exact initial\n"] ||
-            revision.length == 0) {
-          failure = @"read";
-          [finished fulfill];
-          return;
-        }
-        [workspace writeTextPath:readme content:@"large exact updated\n"
-            createOnly:NO expectedRevision:revision
-            resolver:^(__unused id writeResult) {
-              [workspace renameEntrySource:readme destination:renamed
-                  resolver:^(__unused id renameResult) {
-                    [workspace executePortableToolName:@"cat" path:renamed
-                        options:@{}
-                        resolver:^(NSDictionary *toolResult) {
-                          if (![toolResult[@"stdout"]
-                                  isEqual:@"large exact updated\n"]) {
-                            failure = @"tool";
-                          }
-                          [finished fulfill];
-                        }
-                        rejecter:^(__unused NSString *code,
-                                   __unused NSString *message,
-                                   __unused NSError *toolError) {
-                          failure = @"tool-reject";
-                          [finished fulfill];
-                        }];
-                  }
-                  rejecter:^(__unused NSString *code,
-                             __unused NSString *message,
-                             __unused NSError *renameError) {
-                    failure = @"rename";
-                    [finished fulfill];
-                  }];
-            }
-            rejecter:^(__unused NSString *code,
-                       __unused NSString *message,
-                       __unused NSError *writeError) {
-              failure = @"write";
-              [finished fulfill];
-            }];
-      }
-      rejecter:^(__unused NSString *code,
-                 __unused NSString *message,
-                 __unused NSError *readError) {
-        failure = @"read-reject";
-        [finished fulfill];
-      }];
-  [self waitForExpectations:@[finished] timeout:15.0];
-  XCTAssertNil(failure);
-  XCTAssertFalse([[NSFileManager defaultManager]
-      fileExistsAtPath:[fixture.repositoryURL
-          URLByAppendingPathComponent:@"README.md"].path]);
-  XCTAssertTrue([[NSFileManager defaultManager]
-      fileExistsAtPath:[fixture.repositoryURL
-          URLByAppendingPathComponent:@"RENAMED.md"].path]);
+  XCTAssertNotNil(workspace);
+  XCTAssertFalse([workspace respondsToSelector:
+      @selector(readTextPath:resolver:rejecter:)]);
+  XCTAssertFalse([workspace respondsToSelector:
+      @selector(writeTextPath:content:createOnly:expectedRevision:resolver:rejecter:)]);
+  XCTAssertFalse([workspace respondsToSelector:
+      @selector(renameEntrySource:destination:resolver:rejecter:)]);
+  XCTAssertFalse([workspace respondsToSelector:
+      @selector(executePortableToolName:path:options:resolver:rejecter:)]);
 }
 
 - (void)testFreshInstallProjectListReturnsEmptyWithoutCreatingRoot {
@@ -5391,6 +5250,55 @@ static NSString *DSHSHA256Hex(NSData *data) {
       fileExistsAtPath:movedReplacementSentinel.path]);
 }
 
+- (void)testGitTransportProxyValidationRejectsUnsafeExplicitValues {
+  NSString *oversized = [@"http://localhost:8080/" stringByPaddingToLength:2049
+      withString:@"x" startingAtIndex:0];
+  NSArray *invalidOptions = @[
+    @"http://localhost:8080/",
+    @{ @"httpsProxyUrl" : @42 },
+    @{ @"httpsProxyUrl" : @" http://localhost:8080/" },
+    @{ @"httpsProxyUrl" : @"http://localhost:8080/ " },
+    @{ @"httpsProxyUrl" : @"http://local\nhost:8080/" },
+    @{ @"httpsProxyUrl" : oversized },
+    @{ @"httpsProxyUrl" : @"ftp://localhost:8080/" },
+    @{ @"httpsProxyUrl" : @"http://localhost/" },
+    @{ @"httpsProxyUrl" : @"http://localhost:0/" },
+    @{ @"httpsProxyUrl" : @"http://localhost:65536/" },
+    @{ @"httpsProxyUrl" : @"http://localhost:8080/git" },
+    @{ @"httpsProxyUrl" : @"http://user@localhost:8080/" },
+    @{ @"httpsProxyUrl" : @"http://localhost:8080/?token=secret" },
+    @{ @"httpsProxyUrl" : @"http://localhost:8080/#fragment" },
+    @{ @"httpsProxyUrl" : @"http://:8080/" },
+  ];
+  for (id options in invalidOptions) {
+    NSString *message = nil;
+    XCTAssertEqualObjects([self pushRejectionCodeForOptions:options
+                                                    message:&message],
+                          @"validation");
+    XCTAssertTrue([message hasPrefix:@"HTTPS proxy"]);
+    XCTAssertFalse([message containsString:@"token=secret"]);
+  }
+}
+
+- (void)testGitTransportProxyValidationAllowsDirectPrivateAndLoopbackEndpoints {
+  NSArray *acceptedOptions = @[
+    @{},
+    @{ @"httpsProxyUrl" : NSNull.null },
+    @{ @"httpsProxyUrl" : @"" },
+    @{ @"httpsProxyUrl" : @"http://127.0.0.1:8080" },
+    @{ @"httpsProxyUrl" : @"http://localhost:7890/" },
+    @{ @"httpsProxyUrl" : @"https://10.0.0.2:443/" },
+    @{ @"httpsProxyUrl" : @"https://[::1]:8443" },
+  ];
+  for (id options in acceptedOptions) {
+    NSString *message = nil;
+    XCTAssertEqualObjects([self pushRejectionCodeForOptions:options
+                                                    message:&message],
+                          @"project");
+    XCTAssertFalse([message hasPrefix:@"HTTPS proxy"]);
+  }
+}
+
 - (void)testCloneRootSwapLeavesOnlyRecoverableOwnedStaging {
   DSHRootSwappingLocalProjectsModule *projects =
       [[DSHRootSwappingLocalProjectsModule alloc] init];
@@ -5420,6 +5328,7 @@ static NSString *DSHSHA256Hex(NSData *data) {
   __block BOOL rejected = NO;
   [projects clonePublicRepository:@"https://example.com/repository.git"
       name:@"Swapped clone"
+      options:@{}
       resolver:^(__unused id result) { [finished fulfill]; }
       rejecter:^(__unused NSString *code, __unused NSString *message,
                  __unused NSError *error) {

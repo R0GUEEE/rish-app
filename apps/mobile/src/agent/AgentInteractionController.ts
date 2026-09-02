@@ -36,6 +36,43 @@ export type AgentInteractionController = {
   cancelPending(): void;
 };
 
+function isDecisionRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null && !Array.isArray(value);
+}
+
+/**
+ * UI actions carry the approval id out-of-band. Once the id matches the live
+ * wait, the broker must be the source of truth for the protocol id rather
+ * than trusting an id (or extra fields) in the UI payload.
+ */
+function exactApprovalDecision(
+  spec: ApprovalRequestSpec,
+  decision: unknown,
+): unknown {
+  if (!isDecisionRecord(decision)) return undefined;
+  try {
+    if (decision.status === 'denied') {
+      return { status: 'denied', approval_id: spec.approvalId };
+    }
+    if (
+      decision.status !== 'approved' ||
+      (decision.scope !== 'once' && decision.scope !== 'conversation') ||
+      !spec.scopes.includes(decision.scope) ||
+      (spec.toolName === 'git_push' && decision.scope !== 'once')
+    ) {
+      return undefined;
+    }
+    return {
+      status: 'approved',
+      approval_id: spec.approvalId,
+      scope: decision.scope,
+    };
+  } catch {
+    // Hostile/malformed UI values never become an approval.
+    return undefined;
+  }
+}
+
 export function createAgentInteractionController(options: {
   readonly approvalTimeoutMs?: number;
   readonly questionTimeoutMs?: number;
@@ -135,8 +172,12 @@ export function createAgentInteractionController(options: {
     decideApproval: (approvalId, decision) => {
       const wait = approvalWait;
       if (wait === null || wait.spec.approvalId !== approvalId) return;
+      const exactDecision = exactApprovalDecision(
+        wait.spec,
+        decision,
+      );
       clearApproval();
-      wait.settle(decision);
+      wait.settle(exactDecision);
     },
     answerQuestion: (questionId, answer) => {
       const wait = questionWait;

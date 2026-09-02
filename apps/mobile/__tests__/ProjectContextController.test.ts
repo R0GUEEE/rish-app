@@ -7,7 +7,9 @@ import {
   projectContextReducer,
   type ProjectContextAction,
   type ProjectContextCandidatePageV1,
+  type ProjectContextCandidatePageV2,
   type ProjectContextConsentV1,
+  type ProjectContextManifestV2,
   type ProjectContextManifestV1,
   type ProjectContextState,
 } from '../src/project-context';
@@ -90,6 +92,47 @@ function manifest(
   };
 }
 
+function manifestV2(
+  root: {
+    readonly schema_version: 1;
+    readonly workspace_id: string;
+    readonly binding_revision: number;
+    readonly project_id: string;
+  },
+  snapshotId = SNAPSHOT_A,
+): ProjectContextManifestV2 {
+  const legacy = manifest(snapshotId);
+  return {
+    schema_version: 2,
+    snapshot_id: legacy.snapshot_id,
+    root,
+    project: {
+      schema_version: 2,
+      project_id: root.project_id,
+      workspace_id: root.workspace_id,
+      workspace_binding_revision: root.binding_revision,
+      display_name: legacy.project_name,
+      git_topology: 'private_split_gitdir',
+    },
+    project_id: root.project_id,
+    conversation_id: RUNTIME_CONTEXT_ID,
+    model_id: legacy.model,
+    policy: 'chat-read-v1',
+    branch: legacy.branch,
+    head_oid: legacy.head_oid,
+    clean: legacy.clean,
+    conflicted: legacy.conflicted,
+    captured_at: legacy.captured_at,
+    policy_version: legacy.policy_version,
+    included: legacy.included.map(item => ({ ...item })),
+    omitted: legacy.omitted.map(item => ({ ...item })),
+    context_bytes: legacy.context_bytes,
+    estimated_tokens: legacy.estimated_tokens,
+    snapshot_sha256: legacy.snapshot_sha256,
+    source_fingerprint: legacy.source_fingerprint,
+  };
+}
+
 function consent(
   snapshotId: string,
   receiptId: string,
@@ -135,6 +178,8 @@ function conversation(
     id,
     projectId,
     workspaceId: null,
+    workspaceBootstrapState:
+      projectId === null ? 'none' : 'pending_legacy_project',
     runtimeContextId,
     projectContext: context,
     title: 'Project chat',
@@ -184,7 +229,17 @@ type StoreHarness = {
   readonly serializeContext: (conversationId?: string) => string;
   readonly mutateConversation: (
     conversationId: string,
-    patch: Partial<Pick<Conversation, 'projectId' | 'runtimeContextId' | 'modelId'>>,
+    patch: Partial<
+      Pick<
+        Conversation,
+        | 'projectId'
+        | 'runtimeContextId'
+        | 'modelId'
+        | 'workspaceId'
+        | 'workspaceBinding'
+        | 'workspaceBootstrapState'
+      >
+    >,
   ) => void;
   readonly replaceContext: (
     conversationId: string,
@@ -464,6 +519,11 @@ function storeHarness(options: {
 
 type NativeHarness = {
   readonly listCandidates: jest.Mock;
+  readonly listCandidatesV2?: jest.Mock;
+  readonly prepareV2?: jest.Mock;
+  readonly confirmV2?: jest.Mock;
+  readonly inspectV2?: jest.Mock;
+  readonly discardV2?: jest.Mock;
   readonly prepare: jest.Mock;
   readonly confirm: jest.Mock;
   readonly inspect: jest.Mock;
@@ -710,6 +770,197 @@ describe('ProjectContextController V1', () => {
       ...before,
       listGeneration: before.listGeneration + 1,
     });
+  });
+
+  test('fails closed for a null root outside the explicit legacy bootstrap adapter', async () => {
+    const harness = controllerHarness({ ready: true });
+    harness.store.mutateConversation(CONVERSATION_ID, {
+      workspaceBootstrapState: 'none',
+    });
+
+    await expect(
+      harness.controller.attachConversation(CONVERSATION_ID),
+    ).resolves.toEqual({
+      status: 'blocked',
+      code: 'E_CONTEXT_OWNER_STALE',
+    });
+    expect(harness.controller.getState().owner).toBeNull();
+    expect(harness.native.listCandidates).not.toHaveBeenCalled();
+    expect(harness.native.prepare).not.toHaveBeenCalled();
+  });
+
+  test('routes workspace-bound search through the exact V2 list request', async () => {
+    const routedRoot = {
+      schema_version: 1 as const,
+      workspace_id: 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa',
+      binding_revision: 7,
+      project_id: PROJECT_ID,
+    };
+    const routedProject = {
+      schema_version: 2 as const,
+      project_id: PROJECT_ID,
+      workspace_id: routedRoot.workspace_id,
+      workspace_binding_revision: routedRoot.binding_revision,
+      display_name: 'demo',
+      git_topology: 'private_split_gitdir' as const,
+    };
+    const listCandidatesV2 = jest.fn(
+      async (
+        request: {
+          readonly schema_version: 1;
+          readonly root: typeof routedRoot;
+          readonly query: string;
+          readonly cursor: string | null;
+        },
+      ): Promise<ProjectContextCandidatePageV2> => ({
+        schema_version: 2,
+        root: request.root,
+        project: routedProject,
+        candidates: page(request.query).candidates,
+        next_cursor: request.cursor,
+      }),
+    );
+    const harness = controllerHarness({
+      native: { listCandidatesV2 },
+    });
+    harness.store.mutateConversation(
+      CONVERSATION_ID,
+      {
+        workspaceId: routedRoot.workspace_id,
+        workspaceBinding: {
+          schemaVersion: 1,
+          workspaceId: routedRoot.workspace_id,
+          bindingRevision: routedRoot.binding_revision,
+          projectId: PROJECT_ID,
+        },
+      },
+    );
+    await attach(harness);
+
+    await expect(
+      harness.controller.search(actionToken(harness), 'src'),
+    ).resolves.toEqual({ status: 'completed' });
+    expect(listCandidatesV2).toHaveBeenCalledWith({
+      schema_version: 1,
+      root: routedRoot,
+      query: 'src',
+      cursor: null,
+    });
+    expect(harness.native.listCandidates).not.toHaveBeenCalled();
+  });
+
+  test('uses the exact V2 discard request for workspace-bound disable cleanup', async () => {
+    const routedRoot = {
+      schema_version: 1 as const,
+      workspace_id: 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa',
+      binding_revision: 7,
+      project_id: PROJECT_ID,
+    };
+    const inspectV2 = jest.fn(async () => ({
+      schema_version: 2 as const,
+      state: 'confirmed' as const,
+      manifest: manifestV2(routedRoot),
+    }));
+    const discardV2 = jest.fn(async (request: {
+      readonly schema_version: 2;
+      readonly snapshot_id: string;
+      readonly root: typeof routedRoot;
+    }) => ({
+      schema_version: 2 as const,
+      status: 'discarded' as const,
+      snapshot_id: request.snapshot_id,
+      root: request.root,
+      workspace_id: request.root.workspace_id,
+      workspace_binding_revision: request.root.binding_revision,
+    }));
+    const harness = controllerHarness({
+      ready: true,
+      native: { inspectV2, discardV2 },
+    });
+    harness.store.mutateConversation(CONVERSATION_ID, {
+      workspaceId: routedRoot.workspace_id,
+      workspaceBinding: {
+        schemaVersion: 1,
+        workspaceId: routedRoot.workspace_id,
+        bindingRevision: routedRoot.binding_revision,
+        projectId: PROJECT_ID,
+      },
+      workspaceBootstrapState: 'none',
+    });
+
+    await expect(harness.controller.attachConversation(CONVERSATION_ID)).resolves.toEqual({
+      status: 'completed',
+    });
+    await expect(harness.controller.disable(actionToken(harness))).resolves.toEqual({
+      status: 'completed',
+    });
+    expect(discardV2).toHaveBeenCalledWith({
+      schema_version: 2,
+      snapshot_id: SNAPSHOT_A,
+      root: routedRoot,
+    });
+    expect(harness.native.discard).not.toHaveBeenCalled();
+  });
+
+  test('does not settle V2 cleanup after the workspace binding drifts', async () => {
+    const routedRoot = {
+      schema_version: 1 as const,
+      workspace_id: 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa',
+      binding_revision: 7,
+      project_id: PROJECT_ID,
+    };
+    const inspectV2 = jest.fn(async () => ({
+      schema_version: 2 as const,
+      state: 'confirmed' as const,
+      manifest: manifestV2(routedRoot),
+    }));
+    let harness!: ControllerHarness;
+    const discardV2 = jest.fn(async (request: {
+      readonly schema_version: 2;
+      readonly snapshot_id: string;
+      readonly root: typeof routedRoot;
+    }) => {
+      harness.store.mutateConversation(CONVERSATION_ID, {
+        workspaceBinding: {
+          schemaVersion: 1,
+          workspaceId: routedRoot.workspace_id,
+          bindingRevision: routedRoot.binding_revision + 1,
+          projectId: PROJECT_ID,
+        },
+      });
+      return {
+        schema_version: 2 as const,
+        status: 'discarded' as const,
+        snapshot_id: request.snapshot_id,
+        root: request.root,
+        workspace_id: request.root.workspace_id,
+        workspace_binding_revision: request.root.binding_revision,
+      };
+    });
+    harness = controllerHarness({
+      ready: true,
+      native: { inspectV2, discardV2 },
+    });
+    harness.store.mutateConversation(CONVERSATION_ID, {
+      workspaceId: routedRoot.workspace_id,
+      workspaceBinding: {
+        schemaVersion: 1,
+        workspaceId: routedRoot.workspace_id,
+        bindingRevision: routedRoot.binding_revision,
+        projectId: PROJECT_ID,
+      },
+      workspaceBootstrapState: 'none',
+    });
+
+    await harness.controller.attachConversation(CONVERSATION_ID);
+    await expect(
+      harness.controller.disable(actionToken(harness)),
+    ).resolves.toEqual({
+      status: 'blocked',
+      code: 'E_CONTEXT_OWNER_STALE',
+    });
+    expect(discardV2).toHaveBeenCalledTimes(1);
+    expect(harness.native.discard).not.toHaveBeenCalled();
   });
 
   test('keeps only the newest query generation and passes cursor unchanged', async () => {

@@ -39,6 +39,7 @@ export type AppPreferences = {
   readonly showReasoning: boolean;
   readonly autoExpandTools: boolean;
   readonly confirmDestructiveFileActions: boolean;
+  readonly gitHttpsProxyUrl: string | null;
   readonly mirrors: MirrorPreferences;
 };
 
@@ -53,6 +54,7 @@ export type PersistedAppPreferencesV1 = {
   readonly show_reasoning: boolean;
   readonly auto_expand_tools: boolean;
   readonly confirm_destructive_file_actions: boolean;
+  readonly git_https_proxy_url?: string | null;
   readonly mirrors?: Readonly<
     Record<
       MirrorCategory,
@@ -97,6 +99,10 @@ export type PreferencesAction =
   | {
       readonly type: 'preferences/set-confirm-destructive-file-actions';
       readonly payload: { readonly confirm: boolean };
+    }
+  | {
+      readonly type: 'preferences/set-git-https-proxy-url';
+      readonly payload: { readonly gitHttpsProxyUrl: string | null };
     }
   | {
       readonly type: 'preferences/set-mirror';

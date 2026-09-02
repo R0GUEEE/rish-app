@@ -30,6 +30,7 @@ export type PreferencesStore = {
   setShowReasoning(showReasoning: boolean): void;
   setAutoExpandTools(autoExpandTools: boolean): void;
   setConfirmDestructiveFileActions(confirm: boolean): void;
+  setGitHttpsProxyUrl(gitHttpsProxyUrl: string | null): void;
   setMirror(
     category: MirrorCategory,
     preference: { enabled: boolean; baseUrl: string },
@@ -55,6 +56,7 @@ function preferencesEqual(
     left.autoExpandTools === right.autoExpandTools &&
     left.confirmDestructiveFileActions ===
       right.confirmDestructiveFileActions &&
+    left.gitHttpsProxyUrl === right.gitHttpsProxyUrl &&
     (['alpine', 'pip', 'npm'] as const).every(
       category =>
         left.mirrors[category].enabled === right.mirrors[category].enabled &&
@@ -133,6 +135,12 @@ export function createPreferencesStore(
       dispatch({
         type: 'preferences/set-confirm-destructive-file-actions',
         payload: { confirm },
+      });
+    },
+    setGitHttpsProxyUrl: gitHttpsProxyUrl => {
+      dispatch({
+        type: 'preferences/set-git-https-proxy-url',
+        payload: { gitHttpsProxyUrl },
       });
     },
     setMirror: (category, preference) => {

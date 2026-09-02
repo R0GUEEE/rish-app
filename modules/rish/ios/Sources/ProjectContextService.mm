@@ -1,12 +1,143 @@
 #import "ProjectContextService.h"
+#import "LegacyBoundProjectRootAccess.h"
 
 #import <CommonCrypto/CommonDigest.h>
 
+#import "DSHWorkspaceCanonical.h"
+#import "LocalProjectAccessInternals.h"
+#import "LocalWorkspaceAccess.h"
+
 #include <fcntl.h>
 #include <git2.h>
+#include <limits.h>
 #include <math.h>
 #include <sys/stat.h>
 #include <unistd.h>
+
+static NSString *DSHServiceSHA256(NSData *data);
+static NSData *DSHCanonicalJSON(id object);
+
+@interface DSHLocalWorkspaceAccess (DSHContextLegacyBoundPrivate)
+- (BOOL)ensurePrivateLayoutLocked:(NSError **)error;
+- (nullable NSDictionary *)loadRegistry:(NSError **)error
+                                  digest:(NSString *_Nullable *_Nullable)digest;
+- (nullable NSDictionary *)recordInRegistry:(NSDictionary *)registry
+                                  workspaceId:(NSString *)workspaceId;
+- (nullable NSDictionary *)loadAuthorityForRecord:(NSDictionary *)record
+                                             error:(NSError **)error;
+- (nullable NSSet<NSString *> *)verifiedLegacyCapabilitiesForRecord:
+    (NSDictionary *)record authority:(NSDictionary *)authority;
+@end
+
+@interface DSHLocalWorkspaceAuthorityMutationGuard (DSHContextLegacyBoundPrivate)
+@property(nonatomic, weak, readonly) DSHLocalWorkspaceAccess *owner;
+@end
+
+@interface DSHBorrowedProjectContextLease : NSObject
+@property(nonatomic, copy) NSString *projectId;
+@property(nonatomic, copy) NSDictionary *metadata;
+@property(nonatomic, copy) NSString *workspaceId;
+@property(nonatomic) NSUInteger workspaceBindingRevision;
+@property(nonatomic, copy) NSString *rootFingerprintSHA256;
+@property(nonatomic, copy) NSString *rootFingerprint;
+@property(nonatomic, copy) NSDictionary *workspaceRootRef;
+@property(nonatomic, copy) NSString *gitTopology;
+@property(nonatomic, copy) NSString *workspaceBindingDigest;
+@property(nonatomic) int repositoryDescriptor;
+@property(nonatomic) int workspaceRootDescriptor;
+@property(nonatomic) dev_t projectsRootDevice;
+@property(nonatomic) ino_t projectsRootInode;
+@property(nonatomic) dev_t projectDevice;
+@property(nonatomic) ino_t projectInode;
+@property(nonatomic) dev_t repositoryDevice;
+@property(nonatomic) ino_t repositoryInode;
+@property(nonatomic) dev_t workspaceRootDevice;
+@property(nonatomic) ino_t workspaceRootInode;
+@property(nonatomic) dev_t gitDevice;
+@property(nonatomic) ino_t gitInode;
+@property(nonatomic) dev_t objectsDevice;
+@property(nonatomic) ino_t objectsInode;
+@property(nonatomic) git_repository *repository;
+- (nullable instancetype)initWithBorrowedDescriptor:(int)descriptor
+                                                root:(NSDictionary *)root
+                                         fingerprint:(NSString *)fingerprint
+                                               error:(NSError **)error;
+- (BOOL)validateIdentity;
+@end
+
+@implementation DSHBorrowedProjectContextLease
+- (instancetype)initWithBorrowedDescriptor:(int)descriptor
+                                       root:(NSDictionary *)root
+                                fingerprint:(NSString *)fingerprint
+                                      error:(NSError **)error {
+  self = [super init];
+  if (self == nil) return nil;
+  _repositoryDescriptor = dup(descriptor);
+  if (_repositoryDescriptor < 0) return nil;
+  struct stat repositoryState = {};
+  if (fstat(_repositoryDescriptor, &repositoryState) != 0 ||
+      !S_ISDIR(repositoryState.st_mode)) return nil;
+  int gitDescriptor = openat(_repositoryDescriptor, ".git",
+      O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW);
+  int objectsDescriptor = gitDescriptor < 0 ? -1 : openat(gitDescriptor,
+      "objects", O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW);
+  struct stat gitState = {}, objectsState = {};
+  if (gitDescriptor < 0 || objectsDescriptor < 0 ||
+      fstat(gitDescriptor, &gitState) != 0 ||
+      fstat(objectsDescriptor, &objectsState) != 0) {
+    if (gitDescriptor >= 0) close(gitDescriptor);
+    if (objectsDescriptor >= 0) close(objectsDescriptor);
+    return nil;
+  }
+  close(gitDescriptor);
+  close(objectsDescriptor);
+  char descriptorPath[PATH_MAX] = {};
+  if (fcntl(_repositoryDescriptor, F_GETPATH, descriptorPath) != 0) return nil;
+  git_repository *repository = nullptr;
+  if (git_repository_open_ext(&repository, descriptorPath,
+                              GIT_REPOSITORY_OPEN_NO_SEARCH, nullptr) != 0 ||
+      repository == nullptr) return nil;
+  _repository = repository;
+  _projectId = [root[@"project_id"] copy];
+  _metadata = @{
+    @"schema_version" : @1,
+    @"name" : _projectId,
+    @"origin_url" : NSNull.null,
+  };
+  _workspaceId = [root[@"workspace_id"] copy];
+  _workspaceBindingRevision = [root[@"binding_revision"] unsignedIntegerValue];
+  _rootFingerprintSHA256 = [fingerprint copy];
+  _rootFingerprint = [fingerprint copy];
+  _workspaceRootRef = [root copy];
+  // `legacy_app_owned` is the workspace locator/origin vocabulary.  The
+  // public Project Context V2 descriptor uses the Git topology vocabulary
+  // accepted by LocalProjectContextModule.
+  _gitTopology = @"legacy_embedded";
+  _workspaceBindingDigest = DSHServiceSHA256(
+      DSHCanonicalJSON(@{@"root" : root, @"fingerprint" : fingerprint})
+          ?: NSData.data);
+  _projectsRootDevice = _projectDevice = _repositoryDevice =
+      _workspaceRootDevice = repositoryState.st_dev;
+  _projectsRootInode = _projectInode = _repositoryInode =
+      _workspaceRootInode = repositoryState.st_ino;
+  _gitDevice = gitState.st_dev;
+  _gitInode = gitState.st_ino;
+  _objectsDevice = objectsState.st_dev;
+  _objectsInode = objectsState.st_ino;
+  _workspaceRootDescriptor = _repositoryDescriptor;
+  return self;
+}
+- (void)dealloc {
+  if (_repository != nullptr) git_repository_free(_repository);
+  if (_repositoryDescriptor >= 0) close(_repositoryDescriptor);
+}
+- (BOOL)validateIdentity {
+  struct stat state = {};
+  return _repositoryDescriptor >= 0 &&
+      fstat(_repositoryDescriptor, &state) == 0 && S_ISDIR(state.st_mode) &&
+      state.st_dev == _repositoryDevice && state.st_ino == _repositoryInode;
+}
+@end
 
 NSErrorDomain const DSHProjectContextServiceErrorDomain =
     @"dev.zseven.rish.project-context-service";
@@ -63,6 +194,9 @@ static DSHProjectContextServiceErrorCode DSHServiceSnapshotStoreError(
     if (storeError.code == DSHProjectContextStoreErrorIntegrity) {
       return DSHProjectContextServiceErrorIntegrity;
     }
+    if (storeError.code == DSHProjectContextStoreErrorCapacity) {
+      return DSHProjectContextServiceErrorBudgetExceeded;
+    }
   }
   return DSHProjectContextServiceErrorStorage;
 }
@@ -107,6 +241,15 @@ static BOOL DSHServiceCanonicalIdentifier(NSString *value) {
          [uuid.UUIDString.lowercaseString isEqualToString:value];
 }
 
+static NSString *DSHServiceCanonicalIdentifierString(id value) {
+  NSString *candidate = [value isKindOfClass:NSString.class] ? value : nil;
+  return DSHServiceCanonicalIdentifier(candidate) ? [candidate copy] : nil;
+}
+
+static NSString *DSHServiceCanonicalUInt64String(unsigned long long value) {
+  return [NSString stringWithFormat:@"%llu", value];
+}
+
 static BOOL DSHServiceExactKeys(NSDictionary *object,
                                 NSArray<NSString *> *keys) {
   if (![object isKindOfClass:NSDictionary.class] || object.count != keys.count) {
@@ -120,6 +263,130 @@ static BOOL DSHServiceExactKeys(NSDictionary *object,
   }
   return YES;
 }
+
+static BOOL DSHServiceIsBoolean(id value) {
+  return [value isKindOfClass:NSNumber.class] &&
+         CFGetTypeID((__bridge CFTypeRef)value) == CFBooleanGetTypeID();
+}
+
+static BOOL DSHServiceSafeRevision(id value, NSUInteger *revisionOut) {
+  if (![value isKindOfClass:NSNumber.class] || DSHServiceIsBoolean(value) ||
+      [value isKindOfClass:NSDecimalNumber.class]) {
+    return NO;
+  }
+  NSNumber *number = value;
+  double decimal = number.doubleValue;
+  if (!isfinite(decimal) || signbit(decimal) || floor(decimal) != decimal ||
+      decimal < 1.0 || decimal > 9007199254740991.0 ||
+      number.unsignedLongLongValue != (unsigned long long)decimal) {
+    return NO;
+  }
+  if (revisionOut != nullptr) *revisionOut = (NSUInteger)decimal;
+  return YES;
+}
+
+static NSDictionary *DSHServiceV2RootRef(id value, BOOL projectRequired) {
+  NSDictionary *root = [value isKindOfClass:NSDictionary.class] ? value : nil;
+  if (!DSHServiceExactKeys(root, @[
+        @"schema_version", @"workspace_id", @"binding_revision", @"project_id"
+      ]) ||
+      ![root[@"schema_version"] isKindOfClass:NSNumber.class] ||
+      DSHServiceIsBoolean(root[@"schema_version"]) ||
+      [root[@"schema_version"] isKindOfClass:NSDecimalNumber.class] ||
+      ![root[@"schema_version"] isEqual:@1] ||
+      ![DSHLocalProjectAccess isCanonicalProjectId:root[@"workspace_id"]]) {
+    return nil;
+  }
+  NSUInteger revision = 0;
+  if (!DSHServiceSafeRevision(root[@"binding_revision"], &revision)) return nil;
+  id project = root[@"project_id"];
+  if (project == NSNull.null) {
+    if (projectRequired) return nil;
+  } else if (![DSHLocalProjectAccess isCanonicalProjectId:project]) {
+    return nil;
+  }
+  return @{
+    @"schema_version" : @1,
+    @"workspace_id" : [root[@"workspace_id"] copy],
+    @"binding_revision" : @(revision),
+    @"project_id" : project == NSNull.null ? NSNull.null : [project copy],
+  };
+}
+
+static NSString *DSHServiceV2Model(id value) {
+  NSArray *models = @[
+    @"deepseek-v4-flash", @"deepseek-v4-pro",
+    @"deepseek-v4-flash-vision-exp"
+  ];
+  return [value isKindOfClass:NSString.class] && [models containsObject:value]
+      ? [value copy] : nil;
+}
+
+static NSString *DSHServiceV2BoundedString(id value, NSUInteger maxBytes,
+                                            BOOL allowEmpty) {
+  if (![value isKindOfClass:NSString.class]) return nil;
+  NSString *string = value;
+  NSData *data = [string dataUsingEncoding:NSUTF8StringEncoding
+                         allowLossyConversion:NO];
+  if (data == nil || data.length > maxBytes ||
+      (!allowEmpty && string.length == 0) ||
+      [string rangeOfCharacterFromSet:NSCharacterSet.controlCharacterSet]
+              .location != NSNotFound) {
+    return nil;
+  }
+  return [string copy];
+}
+
+static BOOL DSHServiceV2RootsEqual(NSDictionary *left, NSDictionary *right) {
+  NSDictionary *a = DSHServiceV2RootRef(left, NO);
+  NSDictionary *b = DSHServiceV2RootRef(right, NO);
+  return a != nil && b != nil && [a isEqual:b];
+}
+
+static BOOL DSHServiceCanonicalDigest(id value) {
+  if (![value isKindOfClass:NSString.class] || [value length] != 64) {
+    return NO;
+  }
+  NSCharacterSet *hex =
+      [NSCharacterSet characterSetWithCharactersInString:@"0123456789abcdef"];
+  return [value rangeOfCharacterFromSet:hex.invertedSet].location == NSNotFound;
+}
+
+// ProjectContextStore's prepare protocol names its transaction by the suffix
+// of an active:<uuid> key. Derive that UUID from the complete V2 authority
+// tuple so two workspaces using the same conversation UUID can never evict or
+// authorize one another's snapshot. The derived UUID is private and never
+// returned to JavaScript.
+static NSString *DSHServiceV2ReferenceId(NSDictionary *root,
+                                         NSString *rootFingerprint,
+                                         NSString *conversationId) {
+  if (root == nil || !DSHServiceCanonicalDigest(rootFingerprint) ||
+      !DSHServiceCanonicalIdentifier(conversationId)) {
+    return nil;
+  }
+  NSData *body = DSHWorkspaceCanonicalJSONData(@{
+    @"root" : root,
+    @"root_fingerprint_sha256" : rootFingerprint,
+    @"conversation_id" : conversationId,
+  }, nil);
+  if (body == nil) return nil;
+  NSData *domain = [@"rish.project-context-reference.v2\0"
+      dataUsingEncoding:NSUTF8StringEncoding];
+  NSMutableData *preimage = [NSMutableData dataWithData:domain];
+  [preimage appendData:body];
+  uint8_t digest[CC_SHA256_DIGEST_LENGTH] = {};
+  CC_SHA256(preimage.bytes, (CC_LONG)preimage.length, digest);
+  digest[6] = (uint8_t)((digest[6] & 0x0f) | 0x40);
+  digest[8] = (uint8_t)((digest[8] & 0x3f) | 0x80);
+  return [NSString stringWithFormat:
+      @"%02x%02x%02x%02x-%02x%02x-%02x%02x-%02x%02x-%02x%02x%02x%02x%02x%02x",
+      digest[0], digest[1], digest[2], digest[3], digest[4], digest[5],
+      digest[6], digest[7], digest[8], digest[9], digest[10], digest[11],
+      digest[12], digest[13], digest[14], digest[15]];
+}
+
+static NSString *const DSHServiceV2PrepareNoPriorSnapshotId =
+    @"00000000-0000-0000-0000-000000000000";
 
 static BOOL DSHServiceSameStat(const struct stat &left,
                                const struct stat &right) {
@@ -174,17 +441,41 @@ static NSString *DSHServiceGitState(BOOL staged,
 
 @interface DSHProjectContextService ()
 @property(nonatomic, strong) DSHLocalProjectAccess *projectAccess;
+@property(nonatomic, strong, nullable) DSHLocalWorkspaceAccess *workspaceAccess;
 @property(nonatomic, strong) DSHProjectContextStore *store;
 @property(nonatomic, strong) DSHProjectContextPolicy *policy;
 @property(nonatomic, copy) DSHProjectContextClock clock;
 @property(nonatomic, copy) DSHProjectContextIdentifierGenerator identifierGenerator;
 @property(nonatomic, copy, nullable) DSHProjectContextServiceHook hook;
+@property(nonatomic, strong, nullable) DSHBorrowedProjectContextLease *borrowedLegacyLease;
+- (nullable DSHLocalProjectLease *)v2LeaseForRoot:(NSDictionary *)rootRef
+                                  includeMetadata:(BOOL)includeMetadata
+                                           error:(NSError **)error;
+- (BOOL)verifyLiveSnapshotV2:(NSDictionary *)snapshot
+                       root:(NSDictionary *)rootRef
+              retainedLease:(DSHLocalProjectLease *_Nullable *_Nullable)lease
+                       error:(NSError **)error;
+- (nullable NSDictionary *)captureV2ForLease:(DSHLocalProjectLease *)lease
+                                selectedPaths:(NSArray<NSString *> *)selectedPaths
+                                       blocks:(BOOL)includeBlocks
+                                        start:(NSDate *)start
+                                        error:(NSError **)error;
+- (BOOL)validateV2Lease:(DSHLocalProjectLease *)lease
+                   root:(NSDictionary *)root
+                  error:(NSError **)error;
+- (nullable NSDictionary *)legacyBoundRootForV2Root:(NSDictionary *)root
+                                            locator:(NSString *_Nullable *_Nullable)locator
+                                              error:(NSError **)error;
+- (DSHLegacyBoundProjectRootDisposition)performLegacyContextForRoot:
+    (NSDictionary *)root operation:(BOOL (^)(NSError **error))operation
+    error:(NSError **)error;
 @end
 
 @implementation DSHProjectContextService
 
 - (instancetype)init {
   return [self initWithProjectAccess:DSHLocalProjectAccess.sharedAccess
+                     workspaceAccess:nil
                                store:[[DSHProjectContextStore alloc] init]
                               policy:[[DSHProjectContextPolicy alloc] init]
                                clock:^NSDate * {
@@ -203,9 +494,27 @@ static NSString *DSHServiceGitState(BOOL staged,
                     identifierGenerator:
                         (DSHProjectContextIdentifierGenerator)identifierGenerator
                                    hook:(DSHProjectContextServiceHook)hook {
+  return [self initWithProjectAccess:projectAccess
+                     workspaceAccess:nil
+                                store:store
+                               policy:policy
+                                clock:clock
+                  identifierGenerator:identifierGenerator
+                                 hook:hook];
+}
+
+- (instancetype)initWithProjectAccess:(DSHLocalProjectAccess *)projectAccess
+                       workspaceAccess:(DSHLocalWorkspaceAccess *)workspaceAccess
+                                  store:(DSHProjectContextStore *)store
+                                 policy:(DSHProjectContextPolicy *)policy
+                                  clock:(DSHProjectContextClock)clock
+                    identifierGenerator:
+                        (DSHProjectContextIdentifierGenerator)identifierGenerator
+                                   hook:(DSHProjectContextServiceHook)hook {
   self = [super init];
   if (self) {
     _projectAccess = projectAccess;
+    _workspaceAccess = workspaceAccess;
     _store = store;
     _policy = policy;
     _clock = [clock copy];
@@ -223,6 +532,145 @@ static NSString *DSHServiceGitState(BOOL staged,
     return NO;
   }
   return YES;
+}
+
+- (BOOL)validateV2Lease:(DSHLocalProjectLease *)lease
+                   root:(NSDictionary *)root
+                  error:(NSError **)error {
+  if ((id)lease == self.borrowedLegacyLease) {
+    BOOL valid = [self.borrowedLegacyLease validateIdentity] &&
+        [self.borrowedLegacyLease.workspaceRootRef isEqual:root];
+    if (!valid) DSHSetServiceError(error, DSHProjectContextServiceErrorChanged);
+    return valid;
+  }
+  return [self.projectAccess validateWorkspaceLeaseIdentity:lease
+                                                     rootRef:root
+                                                       error:error];
+}
+
+- (NSDictionary *)legacyBoundRootForV2Root:(NSDictionary *)root
+                                    locator:(NSString **)locatorOut
+                                      error:(NSError **)error {
+  NSError *authorityError = nil;
+  __attribute__((objc_precise_lifetime))
+  DSHLocalWorkspaceAuthorityMutationGuard *guard =
+      [self.workspaceAccess acquireAuthorityMutationGuard:&authorityError];
+  if (guard == nil || guard.owner != self.workspaceAccess ||
+      ![self.workspaceAccess ensurePrivateLayoutLocked:&authorityError]) {
+    DSHSetServiceError(error, DSHProjectContextServiceErrorProjectUnavailable);
+    return nil;
+  }
+  NSDictionary *registry = [self.workspaceAccess loadRegistry:&authorityError
+                                                        digest:nil];
+  NSDictionary *record = registry == nil ? nil :
+      [self.workspaceAccess recordInRegistry:registry
+                                  workspaceId:root[@"workspace_id"]];
+  if (record == nil ||
+      ![record[@"binding_revision"] isEqual:root[@"binding_revision"]]) {
+    DSHSetServiceError(error, DSHProjectContextServiceErrorChanged);
+    return nil;
+  }
+  NSString *locator = record[@"root_locator_kind"];
+  if (locatorOut != nil) *locatorOut = [locator copy];
+  if ([locator isEqual:@"documents_owned"]) return nil;
+  if (![locator isEqual:@"legacy_app_owned"] ||
+      ![record[@"origin"] isEqual:@"legacy_app_owned"] ||
+      ![record[@"legacy_project_id"] isEqual:root[@"project_id"]]) {
+    DSHSetServiceError(error, DSHProjectContextServiceErrorProjectUnavailable);
+    return nil;
+  }
+  NSDictionary *authority = [self.workspaceAccess
+      loadAuthorityForRecord:record error:&authorityError];
+  NSSet *available = authority == nil ? nil : [self.workspaceAccess
+      verifiedLegacyCapabilitiesForRecord:record authority:authority];
+  NSString *fingerprint = authority[@"root_fingerprint_sha256"];
+  if (available == nil || ![available containsObject:@"read"] ||
+      ![available containsObject:@"project_context"] ||
+      ![fingerprint isKindOfClass:NSString.class] || fingerprint.length != 64) {
+    DSHSetServiceError(error, DSHProjectContextServiceErrorChanged);
+    return nil;
+  }
+  NSMutableArray *capabilities = [NSMutableArray arrayWithObject:@"file_read"];
+  if ([available containsObject:@"write"]) [capabilities addObject:@"file_write"];
+  if ([available containsObject:@"git"]) {
+    [capabilities addObjectsFromArray:@[@"git_status", @"git_commit", @"git_push"]];
+  }
+  return @{
+    @"schema_version" : @1,
+    @"kind" : @"project",
+    @"workspace_id" : root[@"workspace_id"],
+    @"workspace_binding_revision" : root[@"binding_revision"],
+    @"project_id" : root[@"project_id"],
+    @"root_fingerprint_sha256" : fingerprint,
+    @"capabilities" : capabilities,
+  };
+}
+
+- (DSHLegacyBoundProjectRootDisposition)performLegacyContextForRoot:
+    (NSDictionary *)root operation:(BOOL (^)(NSError **error))operation
+    error:(NSError **)error {
+  if (self.borrowedLegacyLease != nil || self.workspaceAccess == nil) {
+    if (error != nil) *error = nil;
+    return DSHLegacyBoundProjectRootDispositionNotHandled;
+  }
+  NSString *locator = nil;
+  NSError *boundError = nil;
+  NSDictionary *boundRoot = [self legacyBoundRootForV2Root:root
+                                                   locator:&locator
+                                                     error:&boundError];
+  if ([locator isEqual:@"documents_owned"]) {
+    if (error != nil) *error = nil;
+    return DSHLegacyBoundProjectRootDispositionNotHandled;
+  }
+  if (boundRoot == nil) {
+    if (error != nil) *error = boundError ?: DSHServiceError(
+        DSHProjectContextServiceErrorProjectUnavailable);
+    return DSHLegacyBoundProjectRootDispositionFailed;
+  }
+  DSHLegacyBoundProjectRootAccess *adapter =
+      [[DSHLegacyBoundProjectRootAccess alloc]
+          initWithWorkspaceAccess:self.workspaceAccess
+                     projectAccess:self.projectAccess];
+  DSHLegacyBoundProjectRootDisposition disposition = [adapter
+      performRepositoryRootOperationForBoundRoot:boundRoot
+                                            mode:
+                                                DSHLegacyBoundProjectRootOperationModeProjectContext
+                                         timeout:DSHProjectContextDeadlineSeconds
+                                           block:^BOOL(int descriptor,
+                                                       NSError **blockError) {
+    DSHBorrowedProjectContextLease *borrowed =
+        [[DSHBorrowedProjectContextLease alloc]
+            initWithBorrowedDescriptor:descriptor
+                                  root:root
+                           fingerprint:boundRoot[@"root_fingerprint_sha256"]
+                                 error:blockError];
+    if (borrowed == nil) {
+      DSHSetServiceError(blockError,
+                         DSHProjectContextServiceErrorProjectUnavailable);
+      return NO;
+    }
+    @synchronized(self) {
+      self.borrowedLegacyLease = borrowed;
+      BOOL succeeded = operation(blockError);
+      self.borrowedLegacyLease = nil;
+      return succeeded;
+    }
+  } error:&boundError];
+  if (disposition == DSHLegacyBoundProjectRootDispositionFailed) {
+    if (error != nil) {
+      if ([boundError.domain isEqual:DSHProjectContextServiceErrorDomain]) {
+        *error = boundError;
+      } else {
+        *error = DSHServiceError(
+            boundError.code == DSHLegacyBoundProjectRootAccessErrorUnavailable
+                ? DSHProjectContextServiceErrorProjectUnavailable
+                : DSHProjectContextServiceErrorChanged);
+      }
+    }
+  } else if (error != nil) {
+    *error = nil;
+  }
+  return disposition;
 }
 
 - (NSDictionary *)validatedSelection:(NSDictionary *)selection
@@ -1017,8 +1465,9 @@ static int DSHAppendSerializedPatchLine(__unused const git_diff_delta *delta,
 
     NSString *indexChecksum =
         DSHServiceOid(git_index_checksum(index)) ?: @"none";
-    NSString *projectMetadataDigest =
-        [self.projectAccess projectMetadataDigestFromLease:lease error:nil];
+    NSString *projectMetadataDigest = (id)lease == self.borrowedLegacyLease
+        ? DSHServiceSHA256(DSHCanonicalJSON(lease.metadata) ?: NSData.data)
+        : [self.projectAccess projectMetadataDigestFromLease:lease error:nil];
     if (projectMetadataDigest == nil) {
       DSHSetServiceError(error, DSHProjectContextServiceErrorIntegrity);
       return nil;
@@ -1082,7 +1531,12 @@ static int DSHAppendSerializedPatchLine(__unused const git_diff_delta *delta,
                            includeBlocks:(BOOL)includeBlocks
                                    start:(NSDate *)start
                                    error:(NSError **)error {
-  if (![self.projectAccess validateLeaseIdentity:lease error:nil]) {
+  BOOL (^valid)(void) = ^BOOL {
+    return (id)lease == self.borrowedLegacyLease
+        ? [self.borrowedLegacyLease validateIdentity]
+        : [self.projectAccess validateLeaseIdentity:lease error:nil];
+  };
+  if (!valid()) {
     DSHSetServiceError(error, DSHProjectContextServiceErrorChanged);
     return nil;
   }
@@ -1093,7 +1547,7 @@ static int DSHAppendSerializedPatchLine(__unused const git_diff_delta *delta,
                                         error:error];
   if (capture == nil) return nil;
   if (self.hook != nil) self.hook(@"before_fingerprint_recheck", nil);
-  if (![self.projectAccess validateLeaseIdentity:lease error:nil]) {
+  if (!valid()) {
     DSHSetServiceError(error, DSHProjectContextServiceErrorChanged);
     return nil;
   }
@@ -1103,7 +1557,7 @@ static int DSHAppendSerializedPatchLine(__unused const git_diff_delta *delta,
                                              start:start
                                              error:error];
   if (verification == nil) return nil;
-  if (![self.projectAccess validateLeaseIdentity:lease error:nil]) {
+  if (!valid()) {
     DSHSetServiceError(error, DSHProjectContextServiceErrorChanged);
     return nil;
   }
@@ -1177,7 +1631,9 @@ static int DSHAppendSerializedPatchLine(__unused const git_diff_delta *delta,
 - (NSDictionary *)metadataCandidateCaptureLease:(DSHLocalProjectLease *)lease
                                             start:(NSDate *)start
                                             error:(NSError **)error {
-  if (![self.projectAccess validateLeaseIdentity:lease error:nil]) {
+  BOOL borrowed = (id)lease == self.borrowedLegacyLease;
+  if (!(borrowed ? [self.borrowedLegacyLease validateIdentity]
+                 : [self.projectAccess validateLeaseIdentity:lease error:nil])) {
     DSHSetServiceError(error, DSHProjectContextServiceErrorChanged);
     return nil;
   }
@@ -1310,16 +1766,7 @@ static int DSHAppendSerializedPatchLine(__unused const git_diff_delta *delta,
       BOOL indexRegular = entry->mode == GIT_FILEMODE_BLOB ||
                           entry->mode == GIT_FILEMODE_BLOB_EXECUTABLE;
       BOOL liveRegular = [live[@"safe_regular"] boolValue];
-      unsigned long long liveSize = [live[@"size"] unsignedLongLongValue];
-      BOOL eligible = decision.eligible && indexRegular && liveRegular &&
-                      liveSize <= DSHProjectContextMaxFileBytes;
-      NSString *reason = decision.omissionReason;
-      if (decision.eligible && (!indexRegular || !liveRegular)) {
-        reason = DSHProjectContextOmissionReasonPolicy;
-      } else if (decision.eligible && indexRegular && liveRegular &&
-                 liveSize > DSHProjectContextMaxFileBytes) {
-        reason = DSHProjectContextOmissionReasonBudgetExceeded;
-      }
+      unsigned long long liveSize = 0;
       BOOL staged = headTree == nullptr;
       if (headTree != nullptr) {
         git_tree_entry *treeEntry = nullptr;
@@ -1336,14 +1783,36 @@ static int DSHAppendSerializedPatchLine(__unused const git_diff_delta *delta,
         }
       }
       NSDictionary *metadata = live[@"metadata"];
-      uint32_t liveGitMode = ([metadata[@"mode"] unsignedLongLongValue] &
+      unsigned long long liveMode = 0;
+      unsigned long long liveDevice = 0;
+      unsigned long long liveInode = 0;
+      BOOL liveMetadataValid =
+          DSHLocalProjectAccessParseCanonicalUInt64(live[@"size"],
+                                                    &liveSize) &&
+          DSHLocalProjectAccessParseCanonicalUInt64(metadata[@"mode"],
+                                                    &liveMode) &&
+          DSHLocalProjectAccessParseCanonicalUInt64(metadata[@"device"],
+                                                    &liveDevice) &&
+          DSHLocalProjectAccessParseCanonicalUInt64(metadata[@"inode"],
+                                                    &liveInode);
+      BOOL eligible = decision.eligible && indexRegular && liveRegular &&
+                      liveSize <= DSHProjectContextMaxFileBytes;
+      NSString *reason = decision.omissionReason;
+      if (decision.eligible && (!indexRegular || !liveRegular)) {
+        reason = DSHProjectContextOmissionReasonPolicy;
+      } else if (decision.eligible && indexRegular && liveRegular &&
+                 liveSize > DSHProjectContextMaxFileBytes) {
+        reason = DSHProjectContextOmissionReasonBudgetExceeded;
+      }
+      uint32_t liveGitMode = (liveMode &
                               (S_IXUSR | S_IXGRP | S_IXOTH)) != 0
           ? GIT_FILEMODE_BLOB_EXECUTABLE : GIT_FILEMODE_BLOB;
       BOOL unstaged = ![live[@"exists"] boolValue] || !liveRegular ||
+          !liveMetadataValid ||
           entry->file_size != liveSize ||
           entry->mode != liveGitMode ||
-          entry->dev != (uint32_t)[metadata[@"device"] unsignedLongLongValue] ||
-          entry->ino != (uint32_t)[metadata[@"inode"] unsignedLongLongValue] ||
+          entry->dev != (uint32_t)liveDevice ||
+          entry->ino != (uint32_t)liveInode ||
           entry->mtime.seconds != [metadata[@"mtime_seconds"] intValue] ||
           entry->mtime.nanoseconds != [metadata[@"mtime_nanoseconds"] unsignedIntValue] ||
           entry->ctime.seconds != [metadata[@"ctime_seconds"] intValue] ||
@@ -1361,7 +1830,8 @@ static int DSHAppendSerializedPatchLine(__unused const git_diff_delta *delta,
         @"live_observation_sha256" : live[@"observation_sha256"],
       }];
     }
-    if (![self.projectAccess validateLeaseIdentity:lease error:nil] ||
+    if (!(borrowed ? [self.borrowedLegacyLease validateIdentity]
+                   : [self.projectAccess validateLeaseIdentity:lease error:nil]) ||
         ![self deadlineFrom:start error:error]) {
       if (error != nil && *error == nil) {
         DSHSetServiceError(error, DSHProjectContextServiceErrorChanged);
@@ -1468,7 +1938,9 @@ static int DSHAppendSerializedPatchLine(__unused const git_diff_delta *delta,
     return nil;
   }
   NSMutableData *envelope = [NSMutableData data];
-  [envelope appendData:[@"RISH-PROJECT-CONTEXT/1\n"
+  NSString *wireVersion = [metadata[@"schema_version"] isEqual:@2] ? @"2" : @"1";
+  [envelope appendData:[[NSString stringWithFormat:
+                              @"RISH-PROJECT-CONTEXT/%@\n", wireVersion]
                            dataUsingEncoding:NSUTF8StringEncoding]];
   [envelope appendData:[[NSString
       stringWithFormat:@"META %lu\n", (unsigned long)metadataData.length]
@@ -1690,27 +2162,48 @@ static int DSHAppendSerializedPatchLine(__unused const git_diff_delta *delta,
      includeMetadata:NO
              timeout:DSHProjectContextDeadlineSeconds
                error:&accessError];
-  if (lease == nil ||
-      [descriptor[@"projects_root_device"] unsignedLongLongValue] !=
-          (unsigned long long)lease.projectsRootDevice ||
-      [descriptor[@"projects_root_inode"] unsignedLongLongValue] !=
-          (unsigned long long)lease.projectsRootInode ||
-      [descriptor[@"project_device"] unsignedLongLongValue] !=
-          (unsigned long long)lease.projectDevice ||
-      [descriptor[@"project_inode"] unsignedLongLongValue] !=
-          (unsigned long long)lease.projectInode ||
-      [descriptor[@"repository_device"] unsignedLongLongValue] !=
-          (unsigned long long)lease.repositoryDevice ||
-      [descriptor[@"repository_inode"] unsignedLongLongValue] !=
-          (unsigned long long)lease.repositoryInode ||
-      [descriptor[@"git_device"] unsignedLongLongValue] !=
-          (unsigned long long)lease.gitDevice ||
-      [descriptor[@"git_inode"] unsignedLongLongValue] !=
-          (unsigned long long)lease.gitInode ||
-      [descriptor[@"objects_device"] unsignedLongLongValue] !=
-          (unsigned long long)lease.objectsDevice ||
-      [descriptor[@"objects_inode"] unsignedLongLongValue] !=
-          (unsigned long long)lease.objectsInode) {
+  unsigned long long projectsRootDevice = 0;
+  unsigned long long projectsRootInode = 0;
+  unsigned long long projectDevice = 0;
+  unsigned long long projectInode = 0;
+  unsigned long long repositoryDevice = 0;
+  unsigned long long repositoryInode = 0;
+  unsigned long long gitDevice = 0;
+  unsigned long long gitInode = 0;
+  unsigned long long objectsDevice = 0;
+  unsigned long long objectsInode = 0;
+  BOOL descriptorIdentityValid =
+      DSHLocalProjectAccessParseCanonicalUInt64(
+          descriptor[@"projects_root_device"], &projectsRootDevice) &&
+      DSHLocalProjectAccessParseCanonicalUInt64(
+          descriptor[@"projects_root_inode"], &projectsRootInode) &&
+      DSHLocalProjectAccessParseCanonicalUInt64(
+          descriptor[@"project_device"], &projectDevice) &&
+      DSHLocalProjectAccessParseCanonicalUInt64(
+          descriptor[@"project_inode"], &projectInode) &&
+      DSHLocalProjectAccessParseCanonicalUInt64(
+          descriptor[@"repository_device"], &repositoryDevice) &&
+      DSHLocalProjectAccessParseCanonicalUInt64(
+          descriptor[@"repository_inode"], &repositoryInode) &&
+      DSHLocalProjectAccessParseCanonicalUInt64(
+          descriptor[@"git_device"], &gitDevice) &&
+      DSHLocalProjectAccessParseCanonicalUInt64(
+          descriptor[@"git_inode"], &gitInode) &&
+      DSHLocalProjectAccessParseCanonicalUInt64(
+          descriptor[@"objects_device"], &objectsDevice) &&
+      DSHLocalProjectAccessParseCanonicalUInt64(
+          descriptor[@"objects_inode"], &objectsInode);
+  if (lease == nil || !descriptorIdentityValid ||
+      projectsRootDevice != (unsigned long long)lease.projectsRootDevice ||
+      projectsRootInode != (unsigned long long)lease.projectsRootInode ||
+      projectDevice != (unsigned long long)lease.projectDevice ||
+      projectInode != (unsigned long long)lease.projectInode ||
+      repositoryDevice != (unsigned long long)lease.repositoryDevice ||
+      repositoryInode != (unsigned long long)lease.repositoryInode ||
+      gitDevice != (unsigned long long)lease.gitDevice ||
+      gitInode != (unsigned long long)lease.gitInode ||
+      objectsDevice != (unsigned long long)lease.objectsDevice ||
+      objectsInode != (unsigned long long)lease.objectsInode) {
     DSHSetServiceError(
         error,
         lease == nil &&
@@ -1964,23 +2457,1189 @@ static int DSHAppendSerializedPatchLine(__unused const git_diff_delta *delta,
   return verified;
 }
 
+- (DSHLocalProjectLease *)v2LeaseForRoot:(NSDictionary *)rootRef
+                          includeMetadata:(BOOL)includeMetadata
+                                   error:(NSError **)error {
+  NSDictionary *root = DSHServiceV2RootRef(rootRef, YES);
+  if (root == nil || self.projectAccess == nil || self.workspaceAccess == nil) {
+    DSHSetServiceError(error, DSHProjectContextServiceErrorInvalidArgument);
+    return nil;
+  }
+  if (self.borrowedLegacyLease != nil) {
+    if (![self.borrowedLegacyLease.workspaceRootRef isEqual:root] ||
+        ![self.borrowedLegacyLease validateIdentity]) {
+      DSHSetServiceError(error, DSHProjectContextServiceErrorChanged);
+      return nil;
+    }
+    return (DSHLocalProjectLease *)self.borrowedLegacyLease;
+  }
+  NSError *accessError = nil;
+  DSHLocalProjectLease *lease = [self.projectAccess
+      leaseWorkspaceRootRef:root
+             workspaceAccess:self.workspaceAccess
+                        mode:DSHLocalProjectAccessModeRead
+             includeMetadata:includeMetadata
+                     timeout:DSHProjectContextDeadlineSeconds
+                       error:&accessError];
+  if (lease == nil) {
+    if ([accessError.domain isEqual:DSHLocalProjectAccessErrorDomain] &&
+        accessError.code == DSHLocalProjectAccessErrorLockTimeout) {
+      DSHSetServiceError(error, DSHProjectContextServiceErrorTimeout);
+    } else if ([accessError.domain isEqual:DSHLocalProjectAccessErrorDomain] &&
+               (accessError.code == DSHLocalProjectAccessErrorInvalidIdentifier ||
+                accessError.code == DSHLocalProjectAccessErrorRepositoryUnavailable)) {
+      DSHSetServiceError(error, DSHProjectContextServiceErrorProjectUnavailable);
+    } else {
+      DSHSetServiceError(error, DSHProjectContextServiceErrorChanged);
+    }
+    return nil;
+  }
+  if (![self validateV2Lease:lease root:root error:&accessError]) {
+    DSHSetServiceError(error, DSHProjectContextServiceErrorChanged);
+    return nil;
+  }
+  return lease;
+}
+
+- (NSDictionary *)v2ProjectDescriptorForLease:(DSHLocalProjectLease *)lease
+                                          root:(NSDictionary *)root {
+  NSString *name = lease.metadata[@"name"];
+  NSData *nameData = [name dataUsingEncoding:NSUTF8StringEncoding
+                             allowLossyConversion:NO];
+  if (![name isKindOfClass:NSString.class] || name.length == 0 ||
+      nameData == nil || nameData.length > 120 ||
+      [name rangeOfCharacterFromSet:NSCharacterSet.controlCharacterSet]
+              .location != NSNotFound || [name containsString:@"/"] ||
+      [name containsString:@"\\"] || [name isEqual:@"."] ||
+      [name isEqual:@".."]) {
+    name = lease.projectId;
+  }
+  return @{
+    @"schema_version" : @2,
+    @"project_id" : lease.projectId,
+    @"workspace_id" : root[@"workspace_id"],
+    @"workspace_binding_revision" : root[@"binding_revision"],
+    @"display_name" : name,
+    @"git_topology" : lease.gitTopology,
+  };
+}
+
+- (NSDictionary *)captureV2ForLease:(DSHLocalProjectLease *)lease
+                       selectedPaths:(NSArray<NSString *> *)selectedPaths
+                              blocks:(BOOL)includeBlocks
+                               start:(NSDate *)start
+                               error:(NSError **)error {
+  NSDictionary *capture = [self captureAndVerifyLease:lease
+                                         selectedPaths:selectedPaths
+                                         includeBlocks:includeBlocks
+                                                 start:start
+                                                 error:error];
+  if (capture == nil) return nil;
+  if (![self validateV2Lease:lease root:lease.workspaceRootRef error:error]) {
+    DSHSetServiceError(error, DSHProjectContextServiceErrorChanged);
+    return nil;
+  }
+  NSDictionary *fingerprintInput = @{
+    @"workspace_root_fingerprint" : lease.rootFingerprintSHA256 ?: @"",
+    @"workspace_root" : lease.workspaceRootRef ?: @{},
+    @"capture_source_fingerprint" : capture[@"source_fingerprint"] ?: @"",
+  };
+  NSString *fingerprint = DSHServiceSHA256(
+      DSHCanonicalJSON(fingerprintInput) ?: NSData.data);
+  NSMutableDictionary *result = [capture mutableCopy];
+  result[@"source_fingerprint"] = fingerprint;
+  result[@"workspace_root_fingerprint"] = lease.rootFingerprintSHA256 ?: @"";
+  return result;
+}
+
+- (BOOL)verifyLiveSnapshotV2:(NSDictionary *)snapshot
+                         root:(NSDictionary *)rootRef
+                retainedLease:(DSHLocalProjectLease **)retainedLease
+                         error:(NSError **)error {
+  if (retainedLease != nil) *retainedLease = nil;
+  NSDictionary *root = DSHServiceV2RootRef(rootRef, YES);
+  NSDictionary *source = snapshot[@"source_descriptor"];
+  NSDictionary *manifest = snapshot[@"manifest"];
+  if (![source isKindOfClass:NSDictionary.class] ||
+      ![manifest isKindOfClass:NSDictionary.class]) {
+    DSHSetServiceError(error, DSHProjectContextServiceErrorIntegrity);
+    return NO;
+  }
+  if (!DSHServiceExactKeys(source, @[
+        @"schema_version", @"root", @"workspace_id",
+        @"workspace_binding_revision", @"project_id", @"conversation_id",
+        @"model_id", @"policy", @"selected_paths", @"source_fingerprint",
+        @"root_fingerprint_sha256", @"workspace_binding_sha256",
+        @"reference_id", @"root_device",
+        @"root_inode", @"repository_device", @"repository_inode",
+        @"git_device", @"git_inode", @"objects_device", @"objects_inode"
+      ]) ||
+      ![source[@"schema_version"] isEqual:@2]) {
+    DSHSetServiceError(error, DSHProjectContextServiceErrorIntegrity);
+    return NO;
+  }
+  NSDictionary *storedRoot = source[@"root"];
+  NSArray *paths = source[@"selected_paths"];
+  NSMutableSet<NSString *> *pathSet = [NSMutableSet set];
+  BOOL pathsValid = [paths isKindOfClass:NSArray.class] &&
+      paths.count <= DSHProjectContextMaxEntries;
+  for (id rawPath in paths) {
+    NSString *path = DSHServiceV2BoundedString(
+        rawPath, DSHProjectContextMaxRelativePathCharacters, NO);
+    DSHProjectContextPathDecision *decision = path == nil
+        ? nil : [self.policy decisionForRelativePath:path];
+    if (decision == nil ||
+        ![decision.normalizedPath isEqual:path] ||
+        [pathSet containsObject:path]) {
+      pathsValid = NO;
+      break;
+    }
+    [pathSet addObject:path];
+  }
+  if (root == nil || ![storedRoot isKindOfClass:NSDictionary.class] ||
+      !DSHServiceV2RootsEqual(root, storedRoot) ||
+      !pathsValid ||
+      ![manifest[@"snapshot_id"] isKindOfClass:NSString.class] ||
+      !DSHServiceCanonicalIdentifier(manifest[@"snapshot_id"]) ||
+      ![manifest[@"schema_version"] isKindOfClass:NSNumber.class] ||
+      DSHServiceIsBoolean(manifest[@"schema_version"]) ||
+      [manifest[@"schema_version"] isKindOfClass:NSDecimalNumber.class] ||
+      ![manifest[@"schema_version"] isEqual:@2] ||
+      !DSHServiceV2RootsEqual(root, manifest[@"root"]) ||
+      ![manifest[@"project_id"] isEqual:root[@"project_id"]] ||
+      ![manifest[@"conversation_id"] isEqual:source[@"conversation_id"]] ||
+      ![manifest[@"model_id"] isEqual:source[@"model_id"]] ||
+      ![manifest[@"policy"] isEqual:source[@"policy"]] ||
+      ![DSHLocalProjectAccess isCanonicalProjectId:source[@"project_id"]] ||
+      ![source[@"project_id"] isEqual:root[@"project_id"]] ||
+      ![DSHLocalProjectAccess isCanonicalProjectId:source[@"workspace_id"]] ||
+      ![source[@"workspace_id"] isEqual:root[@"workspace_id"]] ||
+      ![source[@"workspace_binding_revision"] isEqual:root[@"binding_revision"]] ||
+      !DSHServiceCanonicalDigest(source[@"root_fingerprint_sha256"]) ||
+      !DSHServiceCanonicalDigest(source[@"workspace_binding_sha256"]) ||
+      !DSHServiceCanonicalIdentifierString(source[@"conversation_id"]) ||
+      DSHServiceV2Model(source[@"model_id"]) == nil ||
+      ![source[@"policy"] isEqual:@"chat-read-v1"] ||
+      !DSHServiceCanonicalIdentifierString(source[@"reference_id"]) ||
+      ![source[@"reference_id"] isEqual:DSHServiceV2ReferenceId(
+          root, source[@"root_fingerprint_sha256"], source[@"conversation_id"])] ||
+      ![manifest[@"included"] isKindOfClass:NSArray.class] ||
+      ![manifest[@"omitted"] isKindOfClass:NSArray.class] ||
+      !DSHServiceCanonicalDigest(source[@"source_fingerprint"]) ||
+      ![source[@"source_fingerprint"]
+          isEqual:manifest[@"source_fingerprint"]] ||
+      ![manifest[@"source_fingerprint"] isKindOfClass:NSString.class] ||
+      !DSHServiceCanonicalDigest(manifest[@"source_fingerprint"]) ||
+      !DSHServiceCanonicalDigest(manifest[@"snapshot_sha256"]) ||
+      ![source[@"workspace_id"] isEqual:root[@"workspace_id"]] ||
+      ![source[@"workspace_binding_revision"] isEqual:root[@"binding_revision"]]) {
+    DSHSetServiceError(error, DSHProjectContextServiceErrorIntegrity);
+    return NO;
+  }
+  NSDate *start = self.clock();
+  DSHLocalProjectLease *lease = [self v2LeaseForRoot:root
+                                      includeMetadata:YES
+                                               error:error];
+  if (lease == nil) return NO;
+  unsigned long long rootDevice = 0;
+  unsigned long long rootInode = 0;
+  unsigned long long repositoryDevice = 0;
+  unsigned long long repositoryInode = 0;
+  unsigned long long gitDevice = 0;
+  unsigned long long gitInode = 0;
+  unsigned long long objectsDevice = 0;
+  unsigned long long objectsInode = 0;
+  BOOL sourceIdentityValid =
+      DSHLocalProjectAccessParseCanonicalUInt64(source[@"root_device"],
+                                                &rootDevice) &&
+      DSHLocalProjectAccessParseCanonicalUInt64(source[@"root_inode"],
+                                                &rootInode) &&
+      DSHLocalProjectAccessParseCanonicalUInt64(source[@"repository_device"],
+                                                &repositoryDevice) &&
+      DSHLocalProjectAccessParseCanonicalUInt64(source[@"repository_inode"],
+                                                &repositoryInode) &&
+      DSHLocalProjectAccessParseCanonicalUInt64(source[@"git_device"],
+                                                &gitDevice) &&
+      DSHLocalProjectAccessParseCanonicalUInt64(source[@"git_inode"],
+                                                &gitInode) &&
+      DSHLocalProjectAccessParseCanonicalUInt64(source[@"objects_device"],
+                                                &objectsDevice) &&
+      DSHLocalProjectAccessParseCanonicalUInt64(source[@"objects_inode"],
+                                                &objectsInode);
+  if (![source[@"root_fingerprint_sha256"]
+          isEqual:lease.rootFingerprintSHA256] ||
+      ![source[@"workspace_binding_sha256"]
+          isEqual:lease.workspaceBindingDigest] ||
+      !sourceIdentityValid ||
+      rootDevice != (unsigned long long)lease.workspaceRootDevice ||
+      rootInode != (unsigned long long)lease.workspaceRootInode ||
+      repositoryDevice != (unsigned long long)lease.repositoryDevice ||
+      repositoryInode != (unsigned long long)lease.repositoryInode ||
+      gitDevice != (unsigned long long)lease.gitDevice ||
+      gitInode != (unsigned long long)lease.gitInode ||
+      objectsDevice != (unsigned long long)lease.objectsDevice ||
+      objectsInode != (unsigned long long)lease.objectsInode) {
+    DSHSetServiceError(error, DSHProjectContextServiceErrorIntegrity);
+    return NO;
+  }
+  NSDictionary *capture = [self captureV2ForLease:lease
+                                     selectedPaths:paths
+                                            blocks:NO
+                                             start:start
+                                             error:error];
+  if (capture == nil ||
+      ![capture[@"source_fingerprint"]
+          isEqual:snapshot[@"manifest"][@"source_fingerprint"]] ||
+      ![self validateV2Lease:lease root:root error:error]) {
+    if (capture != nil && error != nil && *error == nil) {
+      DSHSetServiceError(error, DSHProjectContextServiceErrorChanged);
+    }
+    return NO;
+  }
+  if (retainedLease != nil) *retainedLease = lease;
+  return YES;
+}
+
+- (NSDictionary *)v2ManifestForSnapshot:(NSDictionary *)snapshot {
+  NSDictionary *manifest = snapshot[@"manifest"];
+  return [manifest isKindOfClass:NSDictionary.class] ? manifest : nil;
+}
+
+- (NSDictionary *)listCandidatesV2:(NSDictionary *)request
+                              error:(NSError **)error {
+  NSArray *keys = @[
+    @"schema_version", @"root", @"query", @"cursor"
+  ];
+  if (!DSHServiceExactKeys(request, keys) ||
+      ![request[@"schema_version"] isKindOfClass:NSNumber.class] ||
+      DSHServiceIsBoolean(request[@"schema_version"]) ||
+      [request[@"schema_version"] isKindOfClass:NSDecimalNumber.class] ||
+      ![request[@"schema_version"] isEqual:@1] ||
+      DSHServiceV2RootRef(request[@"root"], YES) == nil ||
+      DSHServiceV2BoundedString(request[@"query"], 256, YES) == nil ||
+      (request[@"cursor"] != NSNull.null &&
+       DSHServiceV2BoundedString(request[@"cursor"], 256, NO) == nil)) {
+    DSHSetServiceError(error, DSHProjectContextServiceErrorInvalidArgument);
+    return nil;
+  }
+  NSDictionary *root = DSHServiceV2RootRef(request[@"root"], YES);
+  NSString *query = DSHServiceV2BoundedString(request[@"query"], 256, YES);
+  NSString *cursor = request[@"cursor"] == NSNull.null
+      ? nil : DSHServiceV2BoundedString(request[@"cursor"], 256, NO);
+  return [self listCandidatesV2ForRoot:root query:query cursor:cursor error:error];
+}
+
+- (NSDictionary *)listCandidatesV2ForRoot:(NSDictionary *)rootRef
+                                     query:(NSString *)query
+                                    cursor:(NSString *)cursor
+                                     error:(NSError **)error {
+  if ((id)cursor == NSNull.null) cursor = nil;
+  NSDictionary *root = DSHServiceV2RootRef(rootRef, YES);
+  if (root == nil || DSHServiceV2BoundedString(query, 256, YES) == nil ||
+      (cursor != nil && DSHServiceV2BoundedString(cursor, 256, NO) == nil)) {
+    DSHSetServiceError(error, DSHProjectContextServiceErrorInvalidArgument);
+    return nil;
+  }
+  if (self.borrowedLegacyLease == nil) {
+    __block NSDictionary *legacyResult = nil;
+    DSHLegacyBoundProjectRootDisposition disposition =
+        [self performLegacyContextForRoot:root
+            operation:^BOOL(NSError **operationError) {
+              legacyResult = [self listCandidatesV2ForRoot:root
+                                                     query:query
+                                                    cursor:cursor
+                                                     error:operationError];
+              return legacyResult != nil;
+            } error:error];
+    if (disposition == DSHLegacyBoundProjectRootDispositionHandled) {
+      return legacyResult;
+    }
+    if (disposition == DSHLegacyBoundProjectRootDispositionFailed) return nil;
+  }
+  NSDate *start = self.clock();
+  DSHLocalProjectLease *lease = [self v2LeaseForRoot:root
+                                      includeMetadata:YES
+                                               error:error];
+  if (lease == nil) return nil;
+  NSDictionary *capture = [self metadataCandidateCaptureLease:lease
+                                                         start:start
+                                                         error:error];
+  if (capture == nil ||
+      ![self validateV2Lease:lease root:root error:error]) {
+    if (capture != nil && error != nil && *error == nil) {
+      DSHSetServiceError(error, DSHProjectContextServiceErrorChanged);
+    }
+    return nil;
+  }
+  NSDictionary *candidateFingerprintInput = @{
+    @"workspace_root" : root,
+    @"workspace_root_fingerprint" : lease.rootFingerprintSHA256 ?: @"",
+    @"candidate_source_fingerprint" : capture[@"source_fingerprint"] ?: @"",
+  };
+  NSMutableDictionary *candidateCapture = [capture mutableCopy];
+  candidateCapture[@"source_fingerprint"] = DSHServiceSHA256(
+      DSHCanonicalJSON(candidateFingerprintInput) ?: NSData.data);
+  NSError *policyError = nil;
+  NSDictionary *page = [self.policy
+      candidatePageForCandidates:candidateCapture[@"candidates"]
+                           query:query
+               sourceFingerprint:candidateCapture[@"source_fingerprint"]
+                          cursor:cursor
+                           limit:DSHProjectContextMaxCandidatePageSize
+                           error:&policyError];
+  if (page == nil) {
+    DSHSetServiceError(error,
+        policyError.code == DSHProjectContextPolicyErrorBudgetExceeded
+            ? DSHProjectContextServiceErrorBudgetExceeded
+            : (policyError.code == DSHProjectContextPolicyErrorStaleCursor
+                   ? DSHProjectContextServiceErrorChanged
+                   : DSHProjectContextServiceErrorInvalidArgument));
+    return nil;
+  }
+  if (![self validateV2Lease:lease root:root error:error] ||
+      ![self deadlineFrom:start error:error]) {
+    if (error != nil && *error == nil) {
+      DSHSetServiceError(error, DSHProjectContextServiceErrorChanged);
+    }
+    return nil;
+  }
+  return @{
+    @"schema_version" : @2,
+    @"root" : root,
+    @"project" : [self v2ProjectDescriptorForLease:lease root:root],
+    @"candidates" : page[@"candidates"] ?: @[],
+    @"next_cursor" : page[@"next_cursor"] ?: NSNull.null,
+  };
+}
+
+- (NSDictionary *)prepareCandidateV2:(NSDictionary *)request
+                                error:(NSError **)error {
+  NSArray *keys = @[
+    @"schema_version", @"root", @"conversation_id", @"model_id", @"policy",
+    @"selected_paths"
+  ];
+  NSDictionary *root = DSHServiceV2RootRef(request[@"root"], YES);
+  NSString *conversation = DSHServiceV2BoundedString(request[@"conversation_id"],
+                                                       128, NO);
+  NSString *model = DSHServiceV2Model(request[@"model_id"]);
+  NSString *policy = DSHServiceV2BoundedString(request[@"policy"], 64, NO);
+  NSArray *paths = request[@"selected_paths"];
+  if (!DSHServiceExactKeys(request, keys) ||
+      ![request[@"schema_version"] isKindOfClass:NSNumber.class] ||
+      DSHServiceIsBoolean(request[@"schema_version"]) ||
+      [request[@"schema_version"] isKindOfClass:NSDecimalNumber.class] ||
+      ![request[@"schema_version"] isEqual:@2] || root == nil ||
+      !DSHServiceCanonicalIdentifier(conversation) || model == nil ||
+      ![policy isEqual:@"chat-read-v1"] ||
+      ![paths isKindOfClass:NSArray.class] || paths.count > DSHProjectContextMaxEntries) {
+    DSHSetServiceError(error, DSHProjectContextServiceErrorInvalidArgument);
+    return nil;
+  }
+  NSMutableArray<NSString *> *normalized = [NSMutableArray array];
+  NSMutableSet<NSString *> *seen = [NSMutableSet set];
+  for (id value in paths) {
+    NSString *path = DSHServiceV2BoundedString(value,
+                                               DSHProjectContextMaxRelativePathCharacters,
+                                               NO);
+    DSHProjectContextPathDecision *decision = path == nil
+        ? nil : [self.policy decisionForRelativePath:path];
+    if (decision == nil || decision.normalizedPath.length == 0 ||
+        [seen containsObject:decision.normalizedPath]) {
+      DSHSetServiceError(error, DSHProjectContextServiceErrorInvalidArgument);
+      return nil;
+    }
+    [seen addObject:decision.normalizedPath];
+    [normalized addObject:decision.normalizedPath];
+  }
+  [normalized sortUsingSelector:@selector(compare:)];
+  if (self.borrowedLegacyLease == nil) {
+    __block NSDictionary *legacyResult = nil;
+    DSHLegacyBoundProjectRootDisposition disposition =
+        [self performLegacyContextForRoot:root
+            operation:^BOOL(NSError **operationError) {
+              legacyResult = [self prepareCandidateV2:request
+                                                error:operationError];
+              return legacyResult != nil;
+            } error:error];
+    if (disposition == DSHLegacyBoundProjectRootDispositionHandled) {
+      return legacyResult;
+    }
+    if (disposition == DSHLegacyBoundProjectRootDispositionFailed) return nil;
+  }
+  NSDate *start = self.clock();
+  DSHLocalProjectLease *lease = [self v2LeaseForRoot:root
+                                      includeMetadata:YES
+                                               error:error];
+  if (lease == nil) return nil;
+  NSDictionary *capture = [self captureV2ForLease:lease
+                                     selectedPaths:normalized
+                                            blocks:YES
+                                             start:start
+                                             error:error];
+  if (capture == nil) return nil;
+  NSString *referenceId = DSHServiceV2ReferenceId(
+      root, lease.rootFingerprintSHA256, conversation);
+  if (referenceId == nil) {
+    DSHSetServiceError(error, DSHProjectContextServiceErrorIntegrity);
+    return nil;
+  }
+  NSString *snapshotId = self.identifierGenerator();
+  if (!DSHServiceCanonicalIdentifier(snapshotId)) {
+    DSHSetServiceError(error, DSHProjectContextServiceErrorInvalidArgument);
+    return nil;
+  }
+  NSString *capturedAt = DSHServiceISO8601(self.clock());
+  NSDictionary *metadata = @{
+    @"schema_version" : @2,
+    @"snapshot_id" : snapshotId,
+    @"root" : root,
+    @"project" : [self v2ProjectDescriptorForLease:lease root:root],
+    @"project_id" : root[@"project_id"],
+    @"conversation_id" : conversation,
+    @"model_id" : model,
+    @"policy" : policy,
+    @"policy_version" : DSHProjectContextPolicyVersion,
+    @"branch" : capture[@"branch"] ?: NSNull.null,
+    @"head_oid" : capture[@"head_oid"] ?: NSNull.null,
+    @"clean" : capture[@"clean"] ?: @NO,
+    @"conflicted" : capture[@"conflicted"] ?: @NO,
+    @"captured_at" : capturedAt ?: @"",
+    @"source_fingerprint" : capture[@"source_fingerprint"],
+    @"selected_paths" : capture[@"expanded_paths"] ?: @[],
+    @"tracked_status" : capture[@"tracked_status"] ?: @[],
+  };
+  NSMutableArray *included = [NSMutableArray array];
+  NSMutableArray *omitted = [capture[@"omitted"] mutableCopy] ?: [NSMutableArray array];
+  NSData *envelope = [self framedEnvelopeMetadata:metadata
+                                           blocks:capture[@"blocks"]
+                                         included:included
+                                          omitted:omitted
+                                            error:error];
+  if (envelope == nil || ![self deadlineFrom:start error:error]) return nil;
+  NSString *snapshotDigest = DSHServiceSHA256(envelope);
+  NSDictionary *manifest = @{
+    @"schema_version" : @2,
+    @"snapshot_id" : snapshotId,
+    @"root" : root,
+    @"project" : [self v2ProjectDescriptorForLease:lease root:root],
+    @"project_id" : root[@"project_id"],
+    @"conversation_id" : conversation,
+    @"model_id" : model,
+    @"policy" : policy,
+    @"branch" : capture[@"branch"] ?: NSNull.null,
+    @"head_oid" : capture[@"head_oid"] ?: NSNull.null,
+    @"clean" : capture[@"clean"] ?: @NO,
+    @"conflicted" : capture[@"conflicted"] ?: @NO,
+    @"captured_at" : capturedAt ?: @"",
+    @"policy_version" : DSHProjectContextPolicyVersion,
+    @"included" : included,
+    @"omitted" : omitted,
+    @"context_bytes" : @(envelope.length),
+    @"estimated_tokens" : @((envelope.length + 3) / 4),
+    @"snapshot_sha256" : snapshotDigest,
+    @"source_fingerprint" : capture[@"source_fingerprint"],
+  };
+  NSDictionary *sourceDescriptor = @{
+    @"schema_version" : @2,
+    @"root" : root,
+    @"workspace_id" : root[@"workspace_id"],
+    @"workspace_binding_revision" : root[@"binding_revision"],
+    @"project_id" : root[@"project_id"],
+    @"conversation_id" : conversation,
+    @"model_id" : model,
+    @"policy" : policy,
+    @"selected_paths" : normalized,
+    @"source_fingerprint" : capture[@"source_fingerprint"],
+    @"root_fingerprint_sha256" : lease.rootFingerprintSHA256,
+    @"workspace_binding_sha256" : lease.workspaceBindingDigest,
+    @"reference_id" : referenceId,
+    @"root_device" : DSHServiceCanonicalUInt64String(
+        (unsigned long long)lease.workspaceRootDevice),
+    @"root_inode" : DSHServiceCanonicalUInt64String(
+        (unsigned long long)lease.workspaceRootInode),
+    @"repository_device" : DSHServiceCanonicalUInt64String(
+        (unsigned long long)lease.repositoryDevice),
+    @"repository_inode" : DSHServiceCanonicalUInt64String(
+        (unsigned long long)lease.repositoryInode),
+    @"git_device" : DSHServiceCanonicalUInt64String(
+        (unsigned long long)lease.gitDevice),
+    @"git_inode" : DSHServiceCanonicalUInt64String(
+        (unsigned long long)lease.gitInode),
+    @"objects_device" : DSHServiceCanonicalUInt64String(
+        (unsigned long long)lease.objectsDevice),
+    @"objects_inode" : DSHServiceCanonicalUInt64String(
+        (unsigned long long)lease.objectsInode),
+  };
+  // ProjectContextStore's transaction protocol accepts an active:<uuid>
+  // suffix. The UUID is a private digest of the complete V2 root tuple,
+  // root fingerprint, and conversation, preventing cross-workspace UUID
+  // collisions while preserving the store's one-shot transaction primitive.
+  NSString *activeReferenceKey = [@"active:" stringByAppendingString:referenceId];
+  if (self.hook != nil) self.hook(@"before_v2_store_cas", nil);
+  NSError *storeError = nil;
+  BOOL workspaceStillValid = [self validateV2Lease:lease root:root error:error];
+  BOOL transactionStarted = workspaceStillValid &&
+      [self.store beginPrepareTransactionWithEnvelope:envelope
+                                               manifest:manifest
+                                        sourceDescriptor:sourceDescriptor
+                                             snapshotId:snapshotId
+                                      activeReferenceKey:activeReferenceKey
+                                                  error:&storeError];
+  if (!transactionStarted) {
+    if (!workspaceStillValid) {
+      DSHSetServiceError(error, DSHProjectContextServiceErrorChanged);
+    } else {
+      DSHSetServiceError(error, DSHServiceSnapshotStoreError(storeError));
+    }
+    return nil;
+  }
+  if (self.hook != nil) self.hook(@"after_v2_store_cas", nil);
+  if (![self validateV2Lease:lease root:root error:error]) {
+    NSError *abortError = nil;
+    if (![self.store abortPrepareTransactionForSnapshotId:snapshotId
+                                       activeReferenceKey:activeReferenceKey
+                                                    error:&abortError]) {
+      DSHSetServiceError(error, DSHProjectContextServiceErrorStorage);
+    } else if (error != nil && *error == nil) {
+      DSHSetServiceError(error, DSHProjectContextServiceErrorChanged);
+    }
+    return nil;
+  }
+  if (![self deadlineFrom:start error:error]) {
+    [self.store abortPrepareTransactionForSnapshotId:snapshotId
+                                   activeReferenceKey:activeReferenceKey
+                                                error:nil];
+    return nil;
+  }
+  return manifest;
+}
+
+- (NSDictionary *)confirmSnapshotV2:(NSDictionary *)request
+                               error:(NSError **)error {
+  NSArray *keys = @[@"schema_version", @"snapshot_id", @"root"];
+  NSDictionary *root = DSHServiceV2RootRef(request[@"root"], YES);
+  NSString *snapshotId = DSHServiceCanonicalIdentifierString(request[@"snapshot_id"]);
+  if (!DSHServiceExactKeys(request, keys) ||
+      ![request[@"schema_version"] isKindOfClass:NSNumber.class] ||
+      DSHServiceIsBoolean(request[@"schema_version"]) ||
+      [request[@"schema_version"] isKindOfClass:NSDecimalNumber.class] ||
+      ![request[@"schema_version"] isEqual:@2] || snapshotId == nil ||
+      root == nil) {
+    DSHSetServiceError(error, DSHProjectContextServiceErrorInvalidArgument);
+    return nil;
+  }
+  if (self.borrowedLegacyLease == nil) {
+    __block NSDictionary *legacyResult = nil;
+    DSHLegacyBoundProjectRootDisposition disposition =
+        [self performLegacyContextForRoot:root
+            operation:^BOOL(NSError **operationError) {
+              legacyResult = [self confirmSnapshotV2:request error:operationError];
+              return legacyResult != nil;
+            } error:error];
+    if (disposition == DSHLegacyBoundProjectRootDispositionHandled) return legacyResult;
+    if (disposition == DSHLegacyBoundProjectRootDispositionFailed) return nil;
+  }
+  NSError *storeError = nil;
+  NSDictionary *snapshot = [self.store loadSnapshotId:snapshotId error:&storeError];
+  if (snapshot == nil) {
+    DSHSetServiceError(error, DSHServiceSnapshotStoreError(storeError));
+    return nil;
+  }
+  NSDictionary *manifest = snapshot[@"manifest"];
+  if (!DSHServiceV2RootsEqual(root, manifest[@"root"])) {
+    DSHSetServiceError(error, DSHProjectContextServiceErrorChanged);
+    return nil;
+  }
+  for (NSDictionary *omission in manifest[@"omitted"]) {
+    if ([omission[@"reason"] isEqual:DSHProjectContextOmissionReasonBudgetExceeded]) {
+      DSHSetServiceError(error, DSHProjectContextServiceErrorBudgetExceeded);
+      return nil;
+    }
+  }
+  DSHLocalProjectLease *lease = nil;
+  if (![self verifyLiveSnapshotV2:snapshot root:root retainedLease:&lease error:error]) {
+    return nil;
+  }
+  NSDictionary *source = snapshot[@"source_descriptor"];
+  NSString *referenceId = source[@"reference_id"];
+  NSString *activeKey = [@"active:" stringByAppendingString:referenceId ?: @""];
+  NSString *transactionKey = [@"txn:prepare:" stringByAppendingString:referenceId ?: @""];
+  NSError *authorizationError = nil;
+  DSHProjectContextAuthorizationLease *authorization = [self.store
+      beginAuthorizationForSnapshotId:snapshotId activeReferenceKey:nil
+                                 error:&authorizationError];
+  if (authorization == nil) {
+    DSHSetServiceError(error, DSHProjectContextServiceErrorConsent);
+    return nil;
+  }
+  if (![self validateV2Lease:lease root:root error:error]) {
+    [self.store cancelAuthorizationLease:authorization];
+    return nil;
+  }
+  if (self.hook != nil) self.hook(@"before_v2_authorization_complete", nil);
+  authorizationError = nil;
+  NSDictionary *baseReceipt = [self.store
+      completeAuthorizationLease:authorization
+             activeReferenceKey:activeKey
+                      operation:^id(NSDictionary *current, NSError **storeError) {
+                        if ([self.store snapshotIdForReferenceKey:transactionKey
+                                                           error:nil] == nil) {
+                          if (storeError != nil) {
+                            *storeError = [NSError errorWithDomain:
+                                DSHProjectContextStoreErrorDomain
+                                                             code:DSHProjectContextStoreErrorNotFound
+                                                         userInfo:@{}];
+                          }
+                          return nil;
+                        }
+                        if (![self validateV2Lease:lease root:root error:nil]) {
+                          if (storeError != nil) {
+                            *storeError = [NSError errorWithDomain:
+                                DSHProjectContextStoreErrorDomain
+                                                             code:DSHProjectContextStoreErrorIntegrity
+                                                         userInfo:@{}];
+                          }
+                          return nil;
+                        }
+                        return [self.store
+                            commitPrepareTransactionForSnapshotId:snapshotId
+                              activeReferenceKey:activeKey
+                                  snapshotDigest:current[@"manifest"][@"snapshot_sha256"]
+                                           error:storeError];
+                      }
+                          error:&authorizationError];
+  if (baseReceipt == nil) {
+    DSHSetServiceError(error,
+        authorizationError.code == DSHProjectContextStoreErrorIntegrity
+            ? DSHProjectContextServiceErrorChanged
+            : (authorizationError.code == DSHProjectContextStoreErrorCapacity
+                   ? DSHProjectContextServiceErrorBudgetExceeded
+                   : DSHProjectContextServiceErrorConsent));
+    return nil;
+  }
+  if (self.hook != nil) self.hook(@"after_v2_authorization_complete", nil);
+  if (![self validateV2Lease:lease root:root error:error]) {
+    DSHSetServiceError(error, DSHProjectContextServiceErrorChanged);
+    return nil;
+  }
+  NSMutableDictionary *receipt = [baseReceipt mutableCopy];
+  receipt[@"schema_version"] = @2;
+  receipt[@"root"] = root;
+  receipt[@"workspace_id"] = root[@"workspace_id"];
+  receipt[@"workspace_binding_revision"] = root[@"binding_revision"];
+  return receipt;
+}
+
+- (NSDictionary *)inspectSnapshotV2:(NSDictionary *)request
+                               error:(NSError **)error {
+  NSArray *keys = @[@"schema_version", @"snapshot_id", @"root"];
+  NSDictionary *root = DSHServiceV2RootRef(request[@"root"], YES);
+  NSString *snapshotId = DSHServiceCanonicalIdentifierString(request[@"snapshot_id"]);
+  if (!DSHServiceExactKeys(request, keys) ||
+      ![request[@"schema_version"] isKindOfClass:NSNumber.class] ||
+      DSHServiceIsBoolean(request[@"schema_version"]) ||
+      [request[@"schema_version"] isKindOfClass:NSDecimalNumber.class] ||
+      ![request[@"schema_version"] isEqual:@2] || snapshotId == nil ||
+      root == nil) {
+    DSHSetServiceError(error, DSHProjectContextServiceErrorInvalidArgument);
+    return nil;
+  }
+  if (self.borrowedLegacyLease == nil) {
+    __block NSDictionary *legacyResult = nil;
+    DSHLegacyBoundProjectRootDisposition disposition =
+        [self performLegacyContextForRoot:root
+            operation:^BOOL(NSError **operationError) {
+              legacyResult = [self inspectSnapshotV2:request error:operationError];
+              return legacyResult != nil;
+            } error:error];
+    if (disposition == DSHLegacyBoundProjectRootDispositionHandled) return legacyResult;
+    if (disposition == DSHLegacyBoundProjectRootDispositionFailed) return nil;
+  }
+  NSError *storeError = nil;
+  NSDictionary *snapshot = [self.store loadSnapshotId:snapshotId error:&storeError];
+  if (snapshot == nil) {
+    DSHSetServiceError(error, DSHServiceSnapshotStoreError(storeError));
+    return nil;
+  }
+  if (!DSHServiceV2RootsEqual(root, snapshot[@"manifest"][@"root"])) {
+    DSHSetServiceError(error, DSHProjectContextServiceErrorChanged);
+    return nil;
+  }
+  NSError *verificationError = nil;
+  BOOL live = [self verifyLiveSnapshotV2:snapshot
+                                   root:root
+                          retainedLease:nil
+                                   error:&verificationError];
+  if (!live && verificationError.code == DSHProjectContextServiceErrorIntegrity) {
+    DSHSetServiceError(error, DSHProjectContextServiceErrorIntegrity);
+    return nil;
+  }
+  if (live) {
+    DSHLocalProjectLease *resultLease = [self v2LeaseForRoot:root
+                                              includeMetadata:NO
+                                                       error:error];
+    if (resultLease == nil ||
+        ![self validateV2Lease:resultLease root:root error:error]) {
+      DSHSetServiceError(error, DSHProjectContextServiceErrorChanged);
+      return nil;
+    }
+  }
+  NSMutableDictionary *inspection = [snapshot[@"manifest"] mutableCopy];
+  NSDictionary *source = snapshot[@"source_descriptor"];
+  NSString *referenceId = source[@"reference_id"];
+  NSString *activeKey = [@"active:" stringByAppendingString:referenceId ?: @""];
+  NSString *transactionKey = [@"txn:prepare:" stringByAppendingString:referenceId ?: @""];
+  BOOL prepared = [self.store snapshotIdForReferenceKey:transactionKey error:nil] != nil &&
+      [[self.store snapshotIdForReferenceKey:activeKey error:nil] isEqual:snapshotId];
+  BOOL confirmed = NO;
+  if (live && !prepared) {
+    for (NSURL *url in [self.store fileURLsForSnapshotId:snapshotId error:nil]) {
+      if (![url.URLByDeletingLastPathComponent.lastPathComponent isEqual:@"consents"]) {
+        continue;
+      }
+      NSDictionary *consent = [self.store loadConsentReceiptId:url.lastPathComponent.stringByDeletingPathExtension
+                                                          error:nil];
+      if ([consent[@"snapshot_id"] isEqual:snapshotId] &&
+          [consent[@"snapshot_sha256"] isEqual:snapshot[@"manifest"][@"snapshot_sha256"]]) {
+        confirmed = YES;
+        break;
+      }
+    }
+  }
+  inspection[@"state"] = live ? (confirmed ? @"confirmed" : @"prepared") : @"stale";
+  return inspection;
+}
+
+- (NSDictionary *)discardSnapshotV2:(NSDictionary *)request
+                               error:(NSError **)error {
+  NSArray *keys = @[@"schema_version", @"snapshot_id", @"root"];
+  NSDictionary *root = DSHServiceV2RootRef(request[@"root"], YES);
+  NSString *snapshotId =
+      DSHServiceCanonicalIdentifierString(request[@"snapshot_id"]);
+  if (!DSHServiceExactKeys(request, keys) ||
+      ![request[@"schema_version"] isKindOfClass:NSNumber.class] ||
+      DSHServiceIsBoolean(request[@"schema_version"]) ||
+      [request[@"schema_version"] isKindOfClass:NSDecimalNumber.class] ||
+      ![request[@"schema_version"] isEqual:@2] || snapshotId == nil ||
+      root == nil) {
+    DSHSetServiceError(error, DSHProjectContextServiceErrorInvalidArgument);
+    return nil;
+  }
+  if (self.borrowedLegacyLease == nil) {
+    __block NSDictionary *legacyResult = nil;
+    DSHLegacyBoundProjectRootDisposition disposition =
+        [self performLegacyContextForRoot:root
+            operation:^BOOL(NSError **operationError) {
+              legacyResult = [self discardSnapshotV2:request error:operationError];
+              return legacyResult != nil;
+            } error:error];
+    if (disposition == DSHLegacyBoundProjectRootDispositionHandled) return legacyResult;
+    if (disposition == DSHLegacyBoundProjectRootDispositionFailed) return nil;
+  }
+
+  NSError *storeError = nil;
+  NSDictionary *snapshot = [self.store loadSnapshotId:snapshotId
+                                                  error:&storeError];
+  if (snapshot == nil) {
+    DSHSetServiceError(error, DSHServiceSnapshotStoreError(storeError));
+    return nil;
+  }
+  NSDictionary *manifest = snapshot[@"manifest"];
+  NSDictionary *source = snapshot[@"source_descriptor"];
+  if (![manifest isKindOfClass:NSDictionary.class] ||
+      ![source isKindOfClass:NSDictionary.class]) {
+    DSHSetServiceError(error, DSHProjectContextServiceErrorIntegrity);
+    return nil;
+  }
+  if (!DSHServiceV2RootsEqual(root, manifest[@"root"])) {
+    DSHSetServiceError(error, DSHProjectContextServiceErrorChanged);
+    return nil;
+  }
+  // The source relation is private store integrity, not a caller-selected
+  // path. Refuse to detach anything when the snapshot's root/project binding
+  // is internally inconsistent.
+  if (!DSHServiceV2RootsEqual(root, source[@"root"]) ||
+      ![manifest[@"snapshot_id"] isEqual:snapshotId] ||
+      ![manifest[@"project_id"] isEqual:root[@"project_id"]] ||
+      ![source[@"project_id"] isEqual:root[@"project_id"]] ||
+      ![source[@"workspace_id"] isEqual:root[@"workspace_id"]] ||
+      ![source[@"workspace_binding_revision"]
+          isEqual:root[@"binding_revision"]]) {
+    DSHSetServiceError(error, DSHProjectContextServiceErrorIntegrity);
+    return nil;
+  }
+
+  DSHLocalProjectLease *lease = nil;
+  if (![self verifyLiveSnapshotV2:snapshot
+                              root:root
+                     retainedLease:&lease
+                              error:error]) {
+    return nil;
+  }
+  NSString *referenceId = source[@"reference_id"];
+  NSString *activeKey = [@"active:" stringByAppendingString:referenceId ?: @""];
+  NSString *transactionKey =
+      [@"txn:prepare:" stringByAppendingString:referenceId ?: @""];
+  NSError *referenceError = nil;
+  NSString *activeSnapshot = [self.store snapshotIdForReferenceKey:activeKey
+                                                               error:&referenceError];
+  if (referenceError != nil) {
+    DSHSetServiceError(error, DSHServiceSnapshotStoreError(referenceError));
+    return nil;
+  }
+  NSString *transactionValue =
+      [self.store snapshotIdForReferenceKey:transactionKey error:&referenceError];
+  if (referenceError != nil) {
+    DSHSetServiceError(error, DSHServiceSnapshotStoreError(referenceError));
+    return nil;
+  }
+  if (![activeSnapshot isEqual:snapshotId] ||
+      (transactionValue != nil &&
+       ![transactionValue isEqual:DSHServiceV2PrepareNoPriorSnapshotId] &&
+       !DSHServiceCanonicalIdentifier(transactionValue))) {
+    DSHSetServiceError(error, DSHProjectContextServiceErrorChanged);
+    return nil;
+  }
+
+  if (self.hook != nil) self.hook(@"before_v2_discard", nil);
+  BOOL applied = NO;
+  NSError *effectError = nil;
+  if (transactionValue != nil) {
+    applied = [self.store abortPrepareTransactionForSnapshotId:snapshotId
+                                             activeReferenceKey:activeKey
+                                                          error:&effectError];
+  } else {
+    applied = [self.store clearReferenceKey:activeKey error:&effectError];
+  }
+  if (!applied) {
+    if (effectError.code == DSHProjectContextStoreErrorIntegrity ||
+        effectError.code == DSHProjectContextStoreErrorNotFound) {
+      DSHSetServiceError(error, DSHProjectContextServiceErrorChanged);
+    } else {
+      DSHSetServiceError(error, DSHServiceSnapshotStoreError(effectError));
+    }
+    return nil;
+  }
+  if (self.hook != nil) self.hook(@"after_v2_discard", nil);
+  if (![self validateV2Lease:lease root:root error:error]) {
+    DSHSetServiceError(error, DSHProjectContextServiceErrorChanged);
+    return nil;
+  }
+
+  NSError *remainingError = nil;
+  NSDictionary *remaining = [self.store loadSnapshotId:snapshotId
+                                                  error:&remainingError];
+  if (remaining != nil) {
+    // A different reference may still retain this snapshot. The requested
+    // root relation was detached, but claiming deletion would be false.
+    DSHSetServiceError(error, DSHProjectContextServiceErrorChanged);
+    return nil;
+  }
+  if (remainingError != nil &&
+      remainingError.code != DSHProjectContextStoreErrorNotFound) {
+    DSHSetServiceError(error, DSHServiceSnapshotStoreError(remainingError));
+    return nil;
+  }
+  return @{
+    @"schema_version" : @2,
+    @"status" : @"discarded",
+    @"snapshot_id" : snapshotId,
+    @"root" : root,
+    @"workspace_id" : root[@"workspace_id"],
+    @"workspace_binding_revision" : root[@"binding_revision"],
+  };
+}
+
+- (NSData *)verifiedEnvelopeV2:(NSDictionary *)request
+                        receipt:(NSDictionary **)receipt
+                          error:(NSError **)error {
+  NSArray *keys = @[
+    @"schema_version", @"snapshot_id", @"consent_receipt_id", @"root",
+    @"conversation_id", @"model_id", @"policy"
+  ];
+  NSDictionary *root = DSHServiceV2RootRef(request[@"root"], YES);
+  NSString *snapshotId = DSHServiceCanonicalIdentifierString(request[@"snapshot_id"]);
+  NSString *consentId = DSHServiceCanonicalIdentifierString(request[@"consent_receipt_id"]);
+  NSString *conversation = DSHServiceCanonicalIdentifierString(request[@"conversation_id"]);
+  NSString *model = DSHServiceV2Model(request[@"model_id"]);
+  NSString *policy = DSHServiceV2BoundedString(request[@"policy"], 64, NO);
+  if (!DSHServiceExactKeys(request, keys) ||
+      ![request[@"schema_version"] isKindOfClass:NSNumber.class] ||
+      DSHServiceIsBoolean(request[@"schema_version"]) ||
+      [request[@"schema_version"] isKindOfClass:NSDecimalNumber.class] ||
+      ![request[@"schema_version"] isEqual:@2] || snapshotId == nil ||
+      consentId == nil || root == nil || conversation == nil || model == nil ||
+      ![policy isEqual:@"chat-read-v1"]) {
+    DSHSetServiceError(error, DSHProjectContextServiceErrorInvalidArgument);
+    return nil;
+  }
+  if (self.borrowedLegacyLease == nil) {
+    __block NSData *legacyResult = nil;
+    __block NSDictionary *legacyReceipt = nil;
+    DSHLegacyBoundProjectRootDisposition disposition =
+        [self performLegacyContextForRoot:root
+            operation:^BOOL(NSError **operationError) {
+              legacyResult = [self verifiedEnvelopeV2:request
+                                              receipt:&legacyReceipt
+                                                error:operationError];
+              return legacyResult != nil;
+            } error:error];
+    if (disposition == DSHLegacyBoundProjectRootDispositionHandled) {
+      if (receipt != nil) *receipt = legacyReceipt;
+      return legacyResult;
+    }
+    if (disposition == DSHLegacyBoundProjectRootDispositionFailed) return nil;
+  }
+  NSError *authorizationError = nil;
+  DSHProjectContextAuthorizationLease *authorization = [self.store
+      beginAuthorizationForSnapshotId:snapshotId activeReferenceKey:nil
+                                 error:&authorizationError];
+  if (authorization == nil) {
+    DSHSetServiceError(error, DSHServiceSnapshotStoreError(authorizationError));
+    return nil;
+  }
+  NSDictionary *snapshot = authorization.snapshot;
+  NSDictionary *manifest = snapshot[@"manifest"];
+  NSDictionary *source = snapshot[@"source_descriptor"];
+  NSDictionary *storedRoot = source[@"root"];
+  NSDictionary *consent = [self.store loadConsentReceiptId:consentId error:nil];
+  NSString *referenceId = source[@"reference_id"];
+  NSString *transactionKey = [@"txn:prepare:" stringByAppendingString:referenceId ?: @""];
+  NSString *activeKey = [@"active:" stringByAppendingString:referenceId ?: @""];
+  if (!DSHServiceV2RootsEqual(root, storedRoot) ||
+      ![referenceId isKindOfClass:NSString.class] ||
+      ![referenceId isEqual:DSHServiceV2ReferenceId(
+          root, source[@"root_fingerprint_sha256"], conversation)] ||
+      ![conversation isEqual:source[@"conversation_id"]] ||
+      ![model isEqual:source[@"model_id"]] ||
+      ![policy isEqual:source[@"policy"]] ||
+      ![consent[@"snapshot_id"] isEqual:snapshotId] ||
+      ![consent[@"snapshot_sha256"] isEqual:manifest[@"snapshot_sha256"]]) {
+    [self.store cancelAuthorizationLease:authorization];
+    DSHSetServiceError(error, DSHProjectContextServiceErrorConsent);
+    return nil;
+  }
+  if ([self.store snapshotIdForReferenceKey:transactionKey error:nil] != nil &&
+      [[self.store snapshotIdForReferenceKey:activeKey error:nil] isEqual:snapshotId]) {
+    [self.store cancelAuthorizationLease:authorization];
+    DSHSetServiceError(error, DSHProjectContextServiceErrorConsent);
+    return nil;
+  }
+  DSHLocalProjectLease *liveLease = nil;
+  if (![self verifyLiveSnapshotV2:snapshot root:root retainedLease:&liveLease error:error]) {
+    [self.store cancelAuthorizationLease:authorization];
+    return nil;
+  }
+  if (self.hook != nil) self.hook(@"before_v2_authorization_complete", nil);
+  __block NSDictionary *verifiedReceipt = nil;
+  authorizationError = nil;
+  NSData *verified = [self.store
+      completeAuthorizationLease:authorization
+             activeReferenceKey:activeKey
+                      operation:^id(NSDictionary *current, NSError **storeError) {
+                        if (![self validateV2Lease:liveLease root:root error:nil]) {
+                          if (storeError != nil) {
+                            *storeError = [NSError errorWithDomain:
+                                DSHProjectContextStoreErrorDomain
+                                                             code:DSHProjectContextStoreErrorIntegrity
+                                                         userInfo:@{}];
+                          }
+                          return nil;
+                        }
+                        NSDictionary *finalConsent = [self.store
+                            loadConsentReceiptId:consentId error:storeError];
+                        if (![finalConsent[@"snapshot_id"] isEqual:snapshotId] ||
+                            ![finalConsent[@"snapshot_sha256"]
+                                isEqual:current[@"manifest"][@"snapshot_sha256"]]) {
+                          if (storeError != nil && *storeError == nil) {
+                            *storeError = [NSError errorWithDomain:
+                                DSHProjectContextStoreErrorDomain
+                                                             code:DSHProjectContextStoreErrorIntegrity
+                                                         userInfo:@{}];
+                          }
+                          return nil;
+                        }
+                        verifiedReceipt = @{
+                          @"schema_version" : @2,
+                          @"snapshot_id" : snapshotId,
+                          @"root" : root,
+                          @"snapshot_sha256" : current[@"manifest"][@"snapshot_sha256"],
+                          @"source_fingerprint" : current[@"manifest"][@"source_fingerprint"],
+                          @"context_bytes" : current[@"manifest"][@"context_bytes"],
+                          @"verified_at" : DSHServiceISO8601(self.clock()),
+                        };
+                        return [current[@"envelope"] copy];
+                      }
+                          error:&authorizationError];
+  if (verified == nil) {
+    DSHSetServiceError(error,
+        authorizationError.code == DSHProjectContextStoreErrorIntegrity
+            ? DSHProjectContextServiceErrorChanged
+            : (authorizationError.code == DSHProjectContextStoreErrorCapacity
+                   ? DSHProjectContextServiceErrorBudgetExceeded
+                   : (authorizationError.code == DSHProjectContextStoreErrorNotFound
+                          ? DSHProjectContextServiceErrorConsent
+                          : DSHProjectContextServiceErrorStorage)));
+    return nil;
+  }
+  if (self.hook != nil) self.hook(@"after_v2_authorization_complete", nil);
+  if (![self validateV2Lease:liveLease root:root error:error]) {
+    DSHSetServiceError(error, DSHProjectContextServiceErrorChanged);
+    return nil;
+  }
+  if (receipt != nil) *receipt = verifiedReceipt;
+  return verified;
+}
+
+- (NSDictionary *)prepareCandidateV2WithRoot:(NSDictionary *)rootRef
+                               conversationId:(NSString *)conversationId
+                                      modelId:(NSString *)modelId
+                                       policy:(NSString *)policy
+                                selectedPaths:(NSArray<NSString *> *)selectedPaths
+                                        error:(NSError **)error {
+  return [self prepareCandidateV2:@{
+    @"schema_version" : @2,
+    @"root" : rootRef ?: NSNull.null,
+    @"conversation_id" : conversationId ?: NSNull.null,
+    @"model_id" : modelId ?: NSNull.null,
+    @"policy" : policy ?: NSNull.null,
+    @"selected_paths" : selectedPaths ?: NSNull.null,
+  } error:error];
+}
+
+- (NSDictionary *)confirmSnapshotV2Id:(NSString *)snapshotId
+                                   root:(NSDictionary *)rootRef
+                                   error:(NSError **)error {
+  return [self confirmSnapshotV2:@{
+    @"schema_version" : @2,
+    @"snapshot_id" : snapshotId ?: NSNull.null,
+    @"root" : rootRef ?: NSNull.null,
+  } error:error];
+}
+
+- (NSDictionary *)inspectSnapshotV2Id:(NSString *)snapshotId
+                                   root:(NSDictionary *)rootRef
+                                   error:(NSError **)error {
+  return [self inspectSnapshotV2:@{
+    @"schema_version" : @2,
+    @"snapshot_id" : snapshotId ?: NSNull.null,
+    @"root" : rootRef ?: NSNull.null,
+  } error:error];
+}
+
+- (NSDictionary *)discardSnapshotV2Id:(NSString *)snapshotId
+                                  root:(NSDictionary *)rootRef
+                                 error:(NSError **)error {
+  return [self discardSnapshotV2:@{
+    @"schema_version" : @2,
+    @"snapshot_id" : snapshotId ?: NSNull.null,
+    @"root" : rootRef ?: NSNull.null,
+  } error:error];
+}
+
+- (NSData *)verifiedEnvelopeV2ForSnapshotId:(NSString *)snapshotId
+                            consentReceiptId:(NSString *)consentReceiptId
+                                         root:(NSDictionary *)rootRef
+                              conversationId:(NSString *)conversationId
+                                     modelId:(NSString *)modelId
+                                      policy:(NSString *)policy
+                                     receipt:(NSDictionary **)receipt
+                                       error:(NSError **)error {
+  return [self verifiedEnvelopeV2:@{
+    @"schema_version" : @2,
+    @"snapshot_id" : snapshotId ?: NSNull.null,
+    @"consent_receipt_id" : consentReceiptId ?: NSNull.null,
+    @"root" : rootRef ?: NSNull.null,
+    @"conversation_id" : conversationId ?: NSNull.null,
+    @"model_id" : modelId ?: NSNull.null,
+    @"policy" : policy ?: NSNull.null,
+  } receipt:receipt error:error];
+}
+
+- (NSData *)verifiedEnvelopeV2ForSnapshotId:(NSString *)snapshotId
+                            consentReceiptId:(NSString *)consentReceiptId
+                                 requestBind:(NSDictionary *)requestBind
+                                     receipt:(NSDictionary **)receipt
+                                       error:(NSError **)error {
+  if (!DSHServiceExactKeys(requestBind, @[
+        @"schema_version", @"root", @"conversation_id", @"model_id", @"policy"
+      ]) ||
+      ![requestBind[@"schema_version"] isKindOfClass:NSNumber.class] ||
+      DSHServiceIsBoolean(requestBind[@"schema_version"]) ||
+      [requestBind[@"schema_version"] isKindOfClass:NSDecimalNumber.class] ||
+      ![requestBind[@"schema_version"] isEqual:@2]) {
+    DSHSetServiceError(error, DSHProjectContextServiceErrorInvalidArgument);
+    return nil;
+  }
+  NSMutableDictionary *request = [requestBind mutableCopy];
+  request[@"snapshot_id"] = snapshotId ?: NSNull.null;
+  request[@"consent_receipt_id"] = consentReceiptId ?: NSNull.null;
+  return [self verifiedEnvelopeV2:request receipt:receipt error:error];
+}
+
 @end
+
+static DSHLocalWorkspaceAccess *DSHSharedProjectContextWorkspaceAccess(void) {
+  static DSHLocalWorkspaceAccess *access = nil;
+  static dispatch_once_t onceToken;
+  dispatch_once(&onceToken, ^{
+    NSError *error = nil;
+    NSURL *support = [[NSFileManager defaultManager]
+        URLForDirectory:NSApplicationSupportDirectory
+               inDomain:NSUserDomainMask
+      appropriateForURL:nil
+                 create:YES
+                  error:&error];
+    if (support == nil) return;
+    access = [[DSHLocalWorkspaceAccess alloc]
+        initWithPrivateRootURL:support
+        clock:^NSDate * {
+          return NSDate.date;
+        }
+        UUIDGenerator:^NSString * {
+          return NSUUID.UUID.UUIDString.lowercaseString;
+        }
+        legacyResolver:^BOOL(NSString *projectId,
+                             NSDictionary **evidence,
+                             NSError **resolverError) {
+          NSError *projectError = nil;
+          NSDictionary *resolved = [[DSHLocalProjectAccess sharedAccess]
+              legacyWorkspaceBootstrapEvidenceForProjectId:projectId
+                                                     error:&projectError];
+          if (resolved == nil) {
+            if (resolverError != nil) *resolverError = projectError;
+            return NO;
+          }
+          if (evidence != nil) *evidence = [resolved copy];
+          return YES;
+        }
+        faultHook:nil];
+  });
+  return access;
+}
 
 DSHProjectContextService *DSHSharedProjectContextService(void) {
   static DSHProjectContextService *shared = nil;
   static dispatch_once_t onceToken;
   dispatch_once(&onceToken, ^{
+    DSHLocalWorkspaceAccess *workspaceAccess =
+        DSHSharedProjectContextWorkspaceAccess();
+    DSHLocalProjectAccess *projectAccess = [[DSHLocalProjectAccess alloc]
+        initWithWorkspaceAccess:workspaceAccess
+              bindingResolver:nil
+                          hook:nil];
     shared = [[DSHProjectContextService alloc]
-        initWithProjectAccess:DSHLocalProjectAccess.sharedAccess
-                       store:[[DSHProjectContextStore alloc] init]
-                      policy:[[DSHProjectContextPolicy alloc] init]
-                       clock:^NSDate * {
-                         return NSDate.date;
-                       }
-         identifierGenerator:^NSString * {
-           return NSUUID.UUID.UUIDString.lowercaseString;
-         }
-                        hook:nil];
+        initWithProjectAccess:projectAccess
+               workspaceAccess:workspaceAccess
+                          store:[[DSHProjectContextStore alloc] init]
+                         policy:[[DSHProjectContextPolicy alloc] init]
+                          clock:^NSDate * {
+                            return NSDate.date;
+                          }
+            identifierGenerator:^NSString * {
+              return NSUUID.UUID.UUIDString.lowercaseString;
+            }
+                             hook:nil];
   });
   return shared;
 }

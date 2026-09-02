@@ -9,6 +9,7 @@ import {
   createPreferencesStore,
   createTranslator,
   hydrateAppPreferences,
+  normalizeGitHttpsProxyUrl,
   normalizeSystemLocale,
   preferencesReducer,
   resolveLocalePreference,
@@ -18,6 +19,7 @@ import {
   selectAutoExpandTools,
   selectConfirmDestructiveFileActions,
   selectDefaultModel,
+  selectGitHttpsProxyUrl,
   selectLocalePreference,
   selectResolvedLocale,
   selectResolvedTheme,
@@ -47,6 +49,7 @@ describe('app preferences reducer and selectors', () => {
       showReasoning: false,
       autoExpandTools: false,
       confirmDestructiveFileActions: true,
+      gitHttpsProxyUrl: null,
       mirrors: {
         alpine: {
           enabled: false,
@@ -93,6 +96,10 @@ describe('app preferences reducer and selectors', () => {
         payload: { confirm: false },
       },
       {
+        type: 'preferences/set-git-https-proxy-url',
+        payload: { gitHttpsProxyUrl: 'http://127.0.0.1:7890' },
+      },
+      {
         type: 'preferences/set-mirror',
         payload: {
           category: 'npm',
@@ -114,6 +121,7 @@ describe('app preferences reducer and selectors', () => {
     expect(selectShowReasoning(preferences)).toBe(true);
     expect(selectAutoExpandTools(preferences)).toBe(true);
     expect(selectConfirmDestructiveFileActions(preferences)).toBe(false);
+    expect(selectGitHttpsProxyUrl(preferences)).toBe('http://127.0.0.1:7890/');
     expect(preferences.mirrors.npm).toEqual({
       enabled: true,
       baseUrl: 'https://registry.npmmirror.com/',
@@ -164,6 +172,7 @@ describe('strict preferences persistence', () => {
       showReasoning: true,
       autoExpandTools: true,
       confirmDestructiveFileActions: false,
+      gitHttpsProxyUrl: 'https://proxy.example.com:8443/',
       mirrors: {
         alpine: {
           enabled: true,
@@ -199,6 +208,7 @@ describe('strict preferences persistence', () => {
       show_reasoning: true,
       auto_expand_tools: true,
       confirm_destructive_file_actions: false,
+      git_https_proxy_url: 'https://proxy.example.com:8443/',
       mirrors: {
         alpine: {
           enabled: true,
@@ -227,6 +237,15 @@ describe('strict preferences persistence', () => {
       'https://dl-cdn.alpinelinux.org/alpine/',
     );
     expect(hydrated.mirrors.npm.enabled).toBe(false);
+  });
+
+  test('hydrates pre-proxy schema v1 preferences with a disabled proxy', () => {
+    const legacy = JSON.parse(
+      serializeAppPreferences(configuredPreferences()),
+    ) as Record<string, unknown>;
+    delete legacy.git_https_proxy_url;
+
+    expect(hydrateAppPreferences(legacy).gitHttpsProxyUrl).toBeNull();
   });
 
   test.each([
@@ -292,6 +311,13 @@ describe('strict preferences persistence', () => {
         auto_expand_tools: 1,
       },
     ],
+    [
+      'unsafe Git HTTPS proxy URL',
+      {
+        ...JSON.parse(serializeAppPreferences(configuredPreferences())),
+        git_https_proxy_url: 'http://user:secret@proxy.example.com:8080/',
+      },
+    ],
   ])('rejects %s', (_label, input) => {
     expect(() => hydrateAppPreferences(input)).toThrow(
       PreferencesValidationError,
@@ -305,6 +331,63 @@ describe('strict preferences persistence', () => {
       expect(result.error).toBeInstanceOf(PreferencesValidationError);
       expect(result.error.path).toBe('$.theme_mode');
     }
+  });
+});
+
+describe('Git HTTPS proxy URL validation', () => {
+  test.each([
+    ['http://127.0.0.1:7890', 'http://127.0.0.1:7890/'],
+    ['http://localhost:8080/', 'http://localhost:8080/'],
+    ['http://192.168.1.20:3128', 'http://192.168.1.20:3128/'],
+    ['http://[::1]:8080', 'http://[::1]:8080/'],
+    ['HTTPS://PROXY.EXAMPLE.COM:443', 'https://proxy.example.com:443/'],
+    ['https://proxy.example.com:8443/', 'https://proxy.example.com:8443/'],
+  ])('normalizes %s', (input, expected) => {
+    expect(normalizeGitHttpsProxyUrl(input)).toBe(expected);
+  });
+
+  test.each([
+    ['missing port', 'https://proxy.example.com'],
+    ['port zero', 'http://proxy.example.com:0'],
+    ['port too high', 'http://proxy.example.com:65536'],
+    ['non-numeric port', 'http://proxy.example.com:http'],
+    ['unsupported scheme', 'socks5://proxy.example.com:1080'],
+    ['missing host', 'http://:8080'],
+    ['username', 'http://user@proxy.example.com:8080'],
+    ['empty username', 'http://@proxy.example.com:8080'],
+    ['password', 'http://user:secret@proxy.example.com:8080'],
+    ['path', 'http://proxy.example.com:8080/connect'],
+    ['query', 'http://proxy.example.com:8080/?mode=tunnel'],
+    ['fragment', 'http://proxy.example.com:8080/#proxy'],
+    ['leading whitespace', ' http://proxy.example.com:8080'],
+    ['trailing whitespace', 'http://proxy.example.com:8080 '],
+    ['control character', 'http://proxy.example.com:8080\n'],
+    ['C1 control character', 'http://proxy\u0085.example.com:8080'],
+    ['empty string', ''],
+    ['too long', `http://${'a'.repeat(2048)}:8080`],
+  ])('rejects %s', (_label, input) => {
+    expect(normalizeGitHttpsProxyUrl(input)).toBeNull();
+  });
+
+  test('reducer ignores invalid values and accepts null as an explicit clear', () => {
+    const defaults = createDefaultPreferences();
+    const configured = preferencesReducer(defaults, {
+      type: 'preferences/set-git-https-proxy-url',
+      payload: { gitHttpsProxyUrl: 'http://localhost:7890' },
+    });
+    expect(configured.gitHttpsProxyUrl).toBe('http://localhost:7890/');
+    expect(
+      preferencesReducer(configured, {
+        type: 'preferences/set-git-https-proxy-url',
+        payload: { gitHttpsProxyUrl: 'http://localhost' },
+      }),
+    ).toBe(configured);
+    expect(
+      preferencesReducer(configured, {
+        type: 'preferences/set-git-https-proxy-url',
+        payload: { gitHttpsProxyUrl: null },
+      }).gitHttpsProxyUrl,
+    ).toBeNull();
   });
 });
 
@@ -400,18 +483,19 @@ describe('preferences store', () => {
     store.setShowReasoning(true);
     store.setAutoExpandTools(true);
     store.setConfirmDestructiveFileActions(false);
+    store.setGitHttpsProxyUrl('http://127.0.0.1:7890');
 
-    expect(listener).toHaveBeenCalledTimes(7);
+    expect(listener).toHaveBeenCalledTimes(8);
     const serialized = store.serialize();
     store.hydrate(serialized);
-    expect(listener).toHaveBeenCalledTimes(7);
+    expect(listener).toHaveBeenCalledTimes(8);
 
     store.reset();
-    expect(listener).toHaveBeenCalledTimes(8);
+    expect(listener).toHaveBeenCalledTimes(9);
     expect(store.getState()).toEqual(createDefaultPreferences());
 
     unsubscribe();
     store.setLocale('en-US');
-    expect(listener).toHaveBeenCalledTimes(8);
+    expect(listener).toHaveBeenCalledTimes(9);
   });
 });

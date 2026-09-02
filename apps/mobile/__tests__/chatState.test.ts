@@ -6,6 +6,9 @@ import {
   createEmptyChatState,
   deriveAutoTitle,
   hydrateChatState,
+  migrateAgentApprovalTokenV3,
+  parsePersistedAgentCallJournalV3,
+  parsePersistedAgentAttemptJournalV3,
   safeHydrateChatState,
   selectActiveConversation,
   selectActiveMessages,
@@ -19,13 +22,36 @@ import {
   type CompletionRoundReceiptV1,
   type ChatState,
   type PersistedChatStateV7,
+  type PersistedAgentAttemptJournalV3,
+  type AgentControllerCASV1,
+  type AgentToolReceiptV1,
+  type AgentCASCheckpointInput,
+  type AgentTranscriptCleanupV1,
+  type NativeSessionCommitProofV1,
+  type NativeAgentDiscardProofV1,
+  type SessionEventV2,
+  type PersistedAgentCallJournalV3,
+  type TurnAttemptV1,
   type ProjectContextMutationScope,
   type ScopedProjectContextTransaction,
 } from '../src/state';
+import {
+  agentTextSHA256,
+  sessionSnapshotSHA256,
+} from '../src/completion/SessionPersistence';
 import type {
   ProjectContextConsentV1,
   ProjectContextManifestV1,
 } from '../src/project-context';
+import {
+  validateAgentStoreTransition,
+  type AgentStoreTransitionEvidence,
+} from '../src/agent/AgentStoreTransitions';
+import {
+  validateAgentControllerPreflight,
+  type AgentControllerPreflightV1,
+} from '../src/agent/AgentControllerPreflight';
+import { projectAgentVisibleHistory } from '../src/agent/AgentVisibleHistory';
 
 const T0 = '2026-08-24T01:00:00.000Z';
 const T1 = '2026-08-24T01:01:00.000Z';
@@ -41,6 +67,68 @@ const IMAGE_ATTACHMENT: ChatAttachment = {
   size: 2048,
   thumbnail_data_url: 'data:image/png;base64,cHJldmlldw==',
 };
+
+function beginRoundPreflightForAttempt(
+  attempt: TurnAttemptV1,
+  journal: PersistedAgentAttemptJournalV3,
+  cas: AgentControllerCASV1,
+  operationId: string,
+): AgentControllerPreflightV1 {
+  const round = journal.round_lineage;
+  if (round === null) throw new Error('test preflight requires round lineage');
+  const preflight = validateAgentControllerPreflight({
+    schema_version: 1,
+    source: 'completion_controller',
+    kind: 'begin_round',
+    operation_id: operationId,
+    base_cas: cas,
+    conversation_id: cas.conversation_id,
+    task_id: cas.task_id,
+    attempt_id: cas.attempt_id,
+    round_id: round.round_id,
+    round_index: journal.round_index,
+    launch_attempt: round.launch_attempt,
+    expected_round_revision: round.native_row_revision ?? 0,
+    transport_schema_version: 2,
+    model: attempt.modelId,
+    thinking_mode: attempt.thinkingMode,
+    visible_history_sha256: attempt.visibleHistorySha256 ?? 'f'.repeat(64),
+    visible_message_count: attempt.visibleMessageIds.length,
+    project_context_sha256: null,
+    transcript: journal.transcript,
+    root: journal.root,
+    registry_version: 1,
+    toolset_sha256: journal.toolset_sha256,
+  });
+  if (preflight === null) throw new Error('invalid test begin-round preflight');
+  return preflight;
+}
+
+function stripSchema9Fields(root: Record<string, unknown>): void {
+  delete root.workspace_authority_outbox;
+  delete root.agent_transcript_cleanup_outbox;
+  delete root.session_events;
+  delete root.preferences;
+  delete root.project_context_destructive_epoch;
+  delete root.project_context_destructive_transition;
+  for (const conversation of root.conversations as Array<
+    Record<string, unknown>
+  >) {
+    delete conversation.agent_grants;
+    delete conversation.workspace_id;
+    delete conversation.workspace_binding;
+    delete conversation.workspace_bootstrap_state;
+    for (const attempt of (conversation.attempts ?? []) as Array<
+      Record<string, unknown>
+    >) {
+      attempt.schema_version = 1;
+      delete attempt.journal_revision;
+      delete attempt.agent;
+      delete attempt.workspace_id;
+      delete attempt.workspace_binding_revision;
+    }
+  }
+}
 
 function projectContextScope(
   store: ChatStore,
@@ -91,6 +179,37 @@ function appendUser(
       message: { id, role: 'user', text, createdAt, attachments },
     },
   });
+}
+
+/** Native-shaped test double: the Store must consume this ref, never derive it. */
+function nativeCommittedProof(
+  store: ChatStore,
+  generation: number,
+): NativeSessionCommitProofV1 {
+  const sessionSha256 = sessionSnapshotSHA256(store.serialize());
+  if (sessionSha256 === null) throw new Error('test candidate is not serializable');
+  return {
+    schema_version: 1,
+    status: 'committed',
+    snapshot: { schema_version: 1, generation, session_sha256: sessionSha256 },
+  };
+}
+
+function nativeDiscardProof(
+  cleanup: AgentTranscriptCleanupV1,
+  taskId: string,
+): NativeAgentDiscardProofV1 {
+  return {
+    schema_version: 2,
+    status: 'already_missing',
+    operation_id: '77777777-7777-4777-8777-777777777777',
+    cleanup_id: cleanup.cleanup_id,
+    task_id: taskId,
+    conversation_id: cleanup.conversation_id,
+    attempt_id: cleanup.attempt_id,
+    transcript_ref: cleanup.transcript_ref,
+    transcript_sha256: cleanup.transcript_sha256,
+  };
 }
 
 describe('chat reducer', () => {
@@ -219,15 +338,14 @@ describe('chat reducer', () => {
       },
     });
 
-    expect(state.conversations.chat?.messages.map(message => message.text)).toEqual([
-      '  raw user text  ',
-      '\nraw assistant text\t',
-    ]);
+    expect(
+      state.conversations.chat?.messages.map(message => message.text),
+    ).toEqual(['  raw user text  ', '\nraw assistant text\t']);
     expect(state.conversations.chat?.title).toBe('raw user text');
     expect(
-      hydrateChatState(serializeChatState(state)).conversations.chat?.messages.map(
-        message => message.text,
-      ),
+      hydrateChatState(
+        serializeChatState(state),
+      ).conversations.chat?.messages.map(message => message.text),
     ).toEqual(['  raw user text  ', '\nraw assistant text\t']);
 
     const blankUser = appendUser(state, 'chat', 'm3', ' \n\t ', T3);
@@ -275,14 +393,9 @@ describe('chat reducer', () => {
 
   test('titles a whitespace-only attachment message from the attachment name', () => {
     const state = createConversation(createEmptyChatState(), 'chat', T0);
-    const next = appendUser(
-      state,
-      'chat',
-      'm1',
-      ' \n\t ',
-      T1,
-      [IMAGE_ATTACHMENT],
-    );
+    const next = appendUser(state, 'chat', 'm1', ' \n\t ', T1, [
+      IMAGE_ATTACHMENT,
+    ]);
 
     expect(next.conversations.chat?.messages[0]?.text).toBe(' \n\t ');
     expect(next.conversations.chat?.title).toBe('receipt.png');
@@ -427,11 +540,14 @@ describe('schema v4 persistence', () => {
       [
         'schema_version',
         'workspace_authority_outbox',
+        'agent_transcript_cleanup_outbox',
         'project_context_destructive_epoch',
         'project_context_destructive_transition',
         'active_conversation_id',
         'conversations',
         'messages',
+        'session_events',
+        'preferences',
       ].sort(),
     );
     expect(decoded.project_context_destructive_epoch).toBe(0);
@@ -480,11 +596,26 @@ describe('schema v4 persistence', () => {
     const legacy = JSON.parse(serializeChatState(populatedState())) as {
       schema_version: number;
       conversations: Array<Record<string, unknown>>;
+      messages: Array<Record<string, unknown>>;
     };
+    stripSchema9Fields(legacy);
     legacy.schema_version = 2;
     legacy.conversations.forEach(conversation => {
       delete conversation.project_id;
       delete conversation.thinking_mode;
+      delete conversation.runtime_context_id;
+      delete conversation.project_context;
+      delete conversation.turns;
+      delete conversation.attempts;
+    });
+    legacy.messages = (legacy.messages ?? []).map(message => {
+      delete message.attachments;
+      return message;
+    });
+    legacy.conversations.forEach(conversation => {
+      (conversation.messages as Array<Record<string, unknown>>).forEach(
+        message => delete message.attachments,
+      );
     });
 
     const first = hydrateChatState(legacy);
@@ -521,11 +652,19 @@ describe('schema v4 persistence', () => {
       messages: Array<Record<string, unknown>>;
       conversations: Array<{ messages: Array<Record<string, unknown>> }>;
     };
+    stripSchema9Fields(legacy as unknown as Record<string, unknown>);
     legacy.schema_version = 3;
     legacy.messages.forEach(message => delete message.attachments);
     legacy.conversations.forEach(conversation =>
       conversation.messages.forEach(message => delete message.attachments),
     );
+    legacy.conversations.forEach(conversation => {
+      const row = conversation as unknown as Record<string, unknown>;
+      delete row.runtime_context_id;
+      delete row.project_context;
+      delete row.turns;
+      delete row.attempts;
+    });
 
     const hydrated = hydrateChatState(legacy);
     expect(hydrated.schemaVersion).toBe(CHAT_STATE_SCHEMA_VERSION);
@@ -562,10 +701,29 @@ describe('schema v4 persistence', () => {
     const decoded = JSON.parse(serializeChatState(populatedState())) as {
       schema_version: number;
       conversations: Array<{ thinking_mode?: string }>;
+      messages: Array<Record<string, unknown>>;
     };
-    decoded.schema_version = 5;
+    stripSchema9Fields(decoded as unknown as Record<string, unknown>);
+    decoded.schema_version = 2;
     delete decoded.conversations[0]?.thinking_mode;
     delete decoded.conversations[1]?.thinking_mode;
+    decoded.conversations.forEach(conversation => {
+      const row = conversation as unknown as Record<string, unknown>;
+      delete row.project_id;
+      delete row.runtime_context_id;
+      delete row.project_context;
+      delete row.turns;
+      delete row.attempts;
+    });
+    decoded.messages.forEach(
+      message => delete (message as Record<string, unknown>).attachments,
+    );
+    decoded.conversations.forEach(conversation => {
+      const row = conversation as unknown as Record<string, unknown>;
+      (row.messages as Array<Record<string, unknown>>).forEach(
+        message => delete message.attachments,
+      );
+    });
 
     const hydrated = hydrateChatState(decoded);
     expect(
@@ -713,6 +871,4574 @@ describe('schema v4 persistence', () => {
   });
 });
 
+describe('schema-9 final Agent V3 contract', () => {
+  const finalCall: PersistedAgentCallJournalV3 = {
+    schema_version: 3,
+    call_id: 'call-v3',
+    call_index: 0,
+    name: 'write_file',
+    arguments_sha256: 'a'.repeat(64),
+    safe_summary_key: 'agent.write_file',
+    access: 'conversation_confirm',
+    approval_token: 'approval-v3-token',
+    approval_decision: 'pending',
+    approval_reference: null,
+    idempotency_key: null,
+    native_row_revision: null,
+    receipt: null,
+  };
+
+  test('accepts an opaque final token and rejects a structured token object', () => {
+    expect(parsePersistedAgentCallJournalV3(finalCall)).toEqual(finalCall);
+    expect(() =>
+      parsePersistedAgentCallJournalV3({
+        ...finalCall,
+        approval_token: { schema_version: 1 },
+      }),
+    ).toThrow(/approval_token/);
+  });
+
+  test('classifies a legacy live object as cancelled, non-authority history', () => {
+    const legacy = {
+      schema_version: 1 as const,
+      controller_cas: {
+        schema_version: 1 as const,
+        conversation_id: 'conversation-v3',
+        task_id: '11111111-1111-4111-8111-111111111111',
+        attempt_id: '22222222-2222-4222-8222-222222222222',
+        expected_controller_generation: 0,
+        expected_journal_revision: 1,
+        expected_session_generation: 1,
+        expected_session_sha256: 'b'.repeat(64),
+      },
+      round_id: '33333333-3333-4333-8333-333333333333',
+      round_index: 0,
+      batch_call_ids: ['call-v3'],
+      batch_arguments_sha256: ['a'.repeat(64)],
+      call_index: 0,
+      call_id: 'call-v3',
+      name: 'write_file',
+      access: 'conversation_confirm' as const,
+      arguments_sha256: 'a'.repeat(64),
+      root_fingerprint_sha256: 'c'.repeat(64),
+      binding_revision: 1,
+      policy_version: 'agent-v1',
+      registry_version: 1 as const,
+      allowed_decisions: [
+        'denied',
+        'allow_once',
+        'allow_conversation',
+        'cancelled',
+      ] as const,
+    };
+    const migrated = migrateAgentApprovalTokenV3(legacy, 'allow_once', {
+      call_id: 'call-v3',
+      call_index: 0,
+      name: 'write_file',
+      access: 'conversation_confirm',
+      arguments_sha256: 'a'.repeat(64),
+    });
+    expect(migrated.status).toBe('needs_reprepare');
+    expect(migrated.decision).toBe('cancelled');
+    expect(migrated.approval_token).toBeNull();
+    expect(migrated.historical_decision).toBe('allow_once');
+    const call = {
+      call_id: 'call-v3',
+      call_index: 0,
+      name: 'write_file',
+      access: 'conversation_confirm' as const,
+      arguments_sha256: 'a'.repeat(64),
+    };
+    const containingCAS = legacy.controller_cas;
+    const casMismatches: readonly [string, unknown][] = [
+      ['conversation_id', 'other-conversation'],
+      ['expected_journal_revision', 2],
+      ['expected_session_generation', 2],
+      ['expected_session_sha256', 'c'.repeat(64)],
+    ];
+    for (const [field, value] of casMismatches) {
+      expect(() =>
+        migrateAgentApprovalTokenV3(legacy, 'allow_once', call, {
+          ...containingCAS,
+          [field]: value,
+        }),
+      ).toThrow(/complete containing controller CAS/);
+    }
+  });
+
+  test('hydrates legacy live approvals as terminal inert calls for stable V3 round-trips', () => {
+    const legacyToken = {
+      schema_version: 1 as const,
+      controller_cas: {
+        schema_version: 1 as const,
+        conversation_id: 'conversation-v3',
+        task_id: '11111111-1111-4111-8111-111111111111',
+        attempt_id: '22222222-2222-4222-8222-222222222222',
+        expected_controller_generation: 0,
+        expected_journal_revision: 1,
+        expected_session_generation: 1,
+        expected_session_sha256: 'b'.repeat(64),
+      },
+      round_id: '33333333-3333-4333-8333-333333333333',
+      round_index: 0,
+      batch_call_ids: ['call-v3'],
+      batch_arguments_sha256: ['a'.repeat(64)],
+      call_index: 0,
+      call_id: 'call-v3',
+      name: 'write_file',
+      access: 'conversation_confirm' as const,
+      arguments_sha256: 'a'.repeat(64),
+      root_fingerprint_sha256: 'c'.repeat(64),
+      binding_revision: 1,
+      policy_version: 'agent-v1',
+      registry_version: 1 as const,
+      allowed_decisions: [
+        'denied',
+        'allow_once',
+        'allow_conversation',
+        'cancelled',
+      ] as const,
+    };
+    const raw = {
+      schema_version: 2,
+      phase: 'approval_pending',
+      controller_generation: 1,
+      policy: {
+        schema_version: 1,
+        policy_version: 'agent-v1',
+        max_single_write_bytes: 32768,
+        max_batch_write_bytes: 32768,
+        max_attempt_write_bytes: 32768,
+      },
+      root: {
+        schema_version: 1,
+        kind: 'project',
+        workspace_id: '11111111-1111-4111-8111-111111111111',
+        workspace_binding_revision: 1,
+        project_id: '22222222-2222-4222-8222-222222222222',
+        root_fingerprint_sha256: 'c'.repeat(64),
+        capabilities: ['file_read', 'file_write'],
+      },
+      tool_registry_version: 1,
+      toolset_sha256: 'd'.repeat(64),
+      transcript: {
+        schema_version: 1,
+        transcript_ref: '44444444-4444-4444-8444-444444444444',
+        generation: 0,
+        transcript_sha256: 'e'.repeat(64),
+        transcript_bytes: 0,
+      },
+      round_index: 0,
+      round_lineage: {
+        schema_version: 2,
+        round_id: legacyToken.round_id,
+        round_index: 0,
+        launch_attempt: 1,
+        status: 'completed',
+        native_row_revision: 2,
+      },
+      call_index: 0,
+      batch: [
+        {
+          schema_version: 2,
+          call_id: 'call-v3',
+          call_index: 0,
+          name: 'write_file',
+          arguments_sha256: 'a'.repeat(64),
+          safe_summary_key: 'agent.write_file',
+          access: 'conversation_confirm',
+          approval_token: legacyToken,
+          approval_decision: 'allow_once',
+          approval_reference: null,
+          idempotency_key: null,
+          native_row_revision: null,
+          receipt: null,
+        },
+      ],
+      frozen_grant_ids: [],
+      reserved_write_bytes: 0,
+      updated_at: T0,
+    };
+    const hydrated = parsePersistedAgentAttemptJournalV3(raw);
+    expect(hydrated.schema_version).toBe(3);
+    expect(hydrated.phase).toBe('cancelled');
+    expect(hydrated.round_lineage?.status).toBe('completed');
+    expect(hydrated.batch[0]).toMatchObject({
+      schema_version: 3,
+      approval_token: null,
+      approval_decision: 'cancelled',
+      approval_reference: null,
+    });
+    expect(() =>
+      parsePersistedAgentAttemptJournalV3(raw, '$', {
+        taskId: legacyToken.controller_cas.task_id,
+        attemptId: legacyToken.controller_cas.attempt_id,
+        controllerCAS: legacyToken.controller_cas,
+      }),
+    ).not.toThrow();
+    const legacyBindingMismatches: readonly [
+      string,
+      (token: Record<string, unknown>) => void,
+    ][] = [
+      ['round', token => { token.round_id = '99999999-9999-4999-8999-999999999999'; }],
+      ['root', token => { token.root_fingerprint_sha256 = 'f'.repeat(64); }],
+      ['binding', token => { token.binding_revision = 2; }],
+      ['policy', token => { token.policy_version = 'other-policy'; }],
+      ['registry', token => { token.registry_version = 2; }],
+      ['complete batch', token => {
+        token.batch_call_ids = ['call-v3', 'call-other'];
+        token.batch_arguments_sha256 = ['a'.repeat(64), 'b'.repeat(64)];
+      }],
+    ];
+    for (const [label, mutate] of legacyBindingMismatches) {
+      const candidate = JSON.parse(JSON.stringify(raw)) as {
+        batch: Array<{ approval_token: Record<string, unknown> }>;
+      };
+      mutate(candidate.batch[0]!.approval_token);
+      expect(() => parsePersistedAgentAttemptJournalV3(candidate)).toThrow(
+        label === 'registry' ? /registry_version|schema_version/ : /complete journal authority/,
+      );
+    }
+    const legacyStore = createChatStore({ now: () => T0 });
+    const legacyConversationId = legacyStore.createConversation();
+    legacyStore.prepareTurnAttempt(legacyConversationId, 'legacy live');
+    const legacyRoot = JSON.parse(legacyStore.serialize()) as {
+      conversations: Array<Record<string, unknown>>;
+    };
+    const legacyConversation = legacyRoot.conversations[0]!;
+    const legacyAttempt = (legacyConversation.attempts as Array<Record<string, unknown>>)[0];
+    if (legacyAttempt === undefined) throw new Error('legacy attempt fixture missing');
+    const legacyRootJournal = JSON.parse(JSON.stringify(raw)) as Record<string, unknown>;
+    const roundTripLegacyToken = (
+      (legacyRootJournal.batch as Array<Record<string, unknown>>)[0]!
+        .approval_token as Record<string, unknown>
+    );
+    const legacyControllerCas = roundTripLegacyToken.controller_cas as Record<string, unknown>;
+    legacyControllerCas.conversation_id = legacyConversation.id;
+    legacyControllerCas.task_id = legacyAttempt.turn_id;
+    legacyControllerCas.attempt_id = legacyAttempt.attempt_id;
+    const legacyJournalRoot = legacyRootJournal.root as Record<string, unknown>;
+    legacyJournalRoot.kind = 'workspace';
+    legacyJournalRoot.workspace_id = '11111111-1111-4111-8111-111111111111';
+    legacyJournalRoot.project_id = null;
+    legacyJournalRoot.capabilities = ['file_read'];
+    legacyConversation.workspace_id = '11111111-1111-4111-8111-111111111111';
+    legacyConversation.workspace_binding = {
+      schema_version: 1,
+      workspace_id: '11111111-1111-4111-8111-111111111111',
+      binding_revision: 1,
+      project_id: null,
+    };
+    legacyConversation.workspace_bootstrap_state = 'none';
+    legacyAttempt.workspace_id = '11111111-1111-4111-8111-111111111111';
+    legacyAttempt.workspace_binding_revision = 1;
+    legacyAttempt.status = 'cancelled';
+    legacyAttempt.active_round = null;
+    legacyAttempt.failure_code = null;
+    legacyAttempt.assistant_message_id = null;
+    legacyAttempt.journal_revision = 2;
+    legacyAttempt.agent = legacyRootJournal;
+    const legacyNativeEnvelope = {
+      schema_version: 1 as const,
+      journal_revision: 1,
+      session_generation: 1,
+      session_sha256: 'b'.repeat(64),
+    };
+    const migratedRoot = hydrateChatState(legacyRoot, {
+      nativeEnvelope: legacyNativeEnvelope,
+    });
+    const persistedMigratedRoot = serializeChatState(migratedRoot);
+    const restoredMigratedRoot = hydrateChatState(persistedMigratedRoot, {
+      nativeEnvelope: legacyNativeEnvelope,
+    });
+    expect(restoredMigratedRoot.conversations).toEqual(
+      migratedRoot.conversations,
+    );
+    expect(serializeChatState(restoredMigratedRoot)).toBe(persistedMigratedRoot);
+    const persistedCASMismatches: readonly [
+      string,
+      (cas: Record<string, unknown>) => void,
+    ][] = [
+      ['conversation', cas => { cas.conversation_id = 'other-conversation'; }],
+      ['task', cas => { cas.task_id = '99999999-9999-4999-8999-999999999999'; }],
+      ['attempt', cas => { cas.attempt_id = '99999999-9999-4999-8999-999999999998'; }],
+      ['journal', cas => { cas.expected_journal_revision = 2; }],
+      ['session generation', cas => { cas.expected_session_generation = 2; }],
+      ['session digest', cas => { cas.expected_session_sha256 = 'c'.repeat(64); }],
+    ];
+    for (const [, mutate] of persistedCASMismatches) {
+      const candidate = JSON.parse(JSON.stringify(legacyRoot)) as {
+        conversations: Array<{ attempts: Array<{ agent: { batch: Array<Record<string, unknown>> } }> }>;
+      };
+      const token = candidate.conversations[0]!.attempts[0]!.agent.batch[0]!
+        .approval_token as Record<string, unknown>;
+      mutate(token.controller_cas as Record<string, unknown>);
+      expect(() => hydrateChatState(candidate, { nativeEnvelope: legacyNativeEnvelope })).toThrow(
+        /complete journal authority/,
+      );
+    }
+  });
+
+  test('never hydrates a runtime V2 token without native revalidation', () => {
+    const runtimeToken = {
+      schema_version: 2,
+      token: '55555555-5555-4555-8555-555555555555',
+      controller_cas: {
+        schema_version: 1,
+        conversation_id: 'conversation-v3',
+        task_id: '11111111-1111-4111-8111-111111111111',
+        attempt_id: '22222222-2222-4222-8222-222222222222',
+        expected_controller_generation: 0,
+        expected_journal_revision: 1,
+        expected_session_generation: 1,
+        expected_session_sha256: 'b'.repeat(64),
+      },
+      task_id: '11111111-1111-4111-8111-111111111111',
+      attempt_id: '22222222-2222-4222-8222-222222222222',
+      round_id: '33333333-3333-4333-8333-333333333333',
+      round_index: 0,
+      batch_call_ids: ['call-v3'],
+      batch_arguments_sha256: ['a'.repeat(64)],
+      batch_revision: 1,
+      manifest_sha256: 'c'.repeat(64),
+      call_index: 0,
+      call_id: 'call-v3',
+      name: 'write_file',
+      arguments_sha256: 'a'.repeat(64),
+      idempotency_key: 'd'.repeat(64),
+      root_fingerprint_sha256: 'e'.repeat(64),
+      binding_revision: 1,
+      policy_version: 'agent-v1',
+      registry_version: 1,
+      access: 'conversation_confirm',
+      allowed_decisions: [
+        'denied',
+        'allow_once',
+        'allow_conversation',
+        'cancelled',
+      ],
+    };
+    expect(() =>
+      migrateAgentApprovalTokenV3(runtimeToken, 'allow_once', {
+        call_id: 'call-v3',
+        call_index: 0,
+        name: 'write_file',
+        access: 'conversation_confirm',
+        arguments_sha256: 'a'.repeat(64),
+      }),
+    ).not.toThrow();
+    const migration = migrateAgentApprovalTokenV3(runtimeToken, 'allow_once', {
+      call_id: 'call-v3',
+      call_index: 0,
+      name: 'write_file',
+      access: 'conversation_confirm',
+      arguments_sha256: 'a'.repeat(64),
+    });
+    expect(migration.approval_token).toBeNull();
+    expect(migration.status).toBe('needs_reprepare');
+  });
+
+  test.each([
+    [
+      'controller task',
+      (token: Record<string, unknown>) => {
+        token.controller_cas = {
+          ...(token.controller_cas as Record<string, unknown>),
+          task_id: '99999999-9999-4999-8999-999999999999',
+        };
+      },
+    ],
+    [
+      'token task',
+      (token: Record<string, unknown>) => {
+        token.task_id = '99999999-9999-4999-8999-999999999999';
+      },
+    ],
+    [
+      'idempotency digest',
+      (token: Record<string, unknown>) => {
+        token.idempotency_key = 'not-a-sha256';
+      },
+    ],
+    [
+      'manifest digest',
+      (token: Record<string, unknown>) => {
+        token.manifest_sha256 = 'not-a-sha256';
+      },
+    ],
+  ])(
+    'rejects a runtime V2 source with a wrong %s binding',
+    (_label, mutate) => {
+      const token: Record<string, unknown> = {
+        schema_version: 2,
+        token: '55555555-5555-4555-8555-555555555555',
+        controller_cas: {
+          schema_version: 1,
+          conversation_id: 'conversation-v3',
+          task_id: '11111111-1111-4111-8111-111111111111',
+          attempt_id: '22222222-2222-4222-8222-222222222222',
+          expected_controller_generation: 0,
+          expected_journal_revision: 1,
+          expected_session_generation: 1,
+          expected_session_sha256: 'b'.repeat(64),
+        },
+        task_id: '11111111-1111-4111-8111-111111111111',
+        attempt_id: '22222222-2222-4222-8222-222222222222',
+        round_id: '33333333-3333-4333-8333-333333333333',
+        round_index: 0,
+        batch_call_ids: ['call-v3'],
+        batch_arguments_sha256: ['a'.repeat(64)],
+        batch_revision: 1,
+        manifest_sha256: 'c'.repeat(64),
+        call_index: 0,
+        call_id: 'call-v3',
+        name: 'write_file',
+        arguments_sha256: 'a'.repeat(64),
+        idempotency_key: 'd'.repeat(64),
+        root_fingerprint_sha256: 'e'.repeat(64),
+        binding_revision: 1,
+        policy_version: 'agent-v1',
+        registry_version: 1,
+        access: 'conversation_confirm',
+        allowed_decisions: [
+          'denied',
+          'allow_once',
+          'allow_conversation',
+          'cancelled',
+        ],
+      };
+      mutate(token);
+      expect(() =>
+        migrateAgentApprovalTokenV3(token, 'allow_once', {
+          call_id: 'call-v3',
+          call_index: 0,
+          name: 'write_file',
+          access: 'conversation_confirm',
+          arguments_sha256: 'a'.repeat(64),
+        }),
+      ).toThrow();
+    },
+  );
+
+  test('rejects schema-2 Agent journals during serialization instead of flattening them', () => {
+    const store = createChatStore({ now: () => T0 });
+    const conversationId = store.createConversation();
+    const prepared = store.prepareTurnAttempt(
+      conversationId,
+      'legacy journal',
+    )!;
+    const state = store.getState();
+    const conversation = state.conversations[conversationId]!;
+    const legacyJournal = {
+      schema_version: 2,
+      phase: 'ready_for_round',
+      controller_generation: 0,
+      policy: {
+        schema_version: 1,
+        policy_version: 'agent-v1',
+        max_single_write_bytes: 32768,
+        max_batch_write_bytes: 32768,
+        max_attempt_write_bytes: 32768,
+      },
+      root: {
+        schema_version: 1,
+        kind: 'project',
+        workspace_id: '11111111-1111-4111-8111-111111111111',
+        workspace_binding_revision: 1,
+        project_id: '22222222-2222-4222-8222-222222222222',
+        root_fingerprint_sha256: 'a'.repeat(64),
+        capabilities: ['file_read'],
+      },
+      tool_registry_version: 1,
+      toolset_sha256: 'b'.repeat(64),
+      transcript: {
+        schema_version: 1,
+        transcript_ref: '33333333-3333-4333-8333-333333333333',
+        generation: 0,
+        transcript_sha256: 'c'.repeat(64),
+        transcript_bytes: 0,
+      },
+      round_index: 0,
+      round_lineage: null,
+      call_index: null,
+      batch: [],
+      frozen_grant_ids: [],
+      reserved_write_bytes: 0,
+      updated_at: T0,
+    };
+    const mutated = {
+      ...state,
+      conversations: {
+        ...state.conversations,
+        [conversationId]: {
+          ...conversation,
+          attempts: [
+            {
+              ...prepared,
+              journalRevision: 1,
+              agent: legacyJournal,
+            },
+          ],
+        },
+      },
+    } as unknown as ChatState;
+    expect(() => serializeChatState(mutated)).toThrow(
+      /schema-2 Agent journals/,
+    );
+  });
+});
+
+describe('schema 9 Agent journal persistence', () => {
+  const UUID_A = '11111111-1111-4111-8111-111111111111';
+  const UUID_B = '22222222-2222-4222-8222-222222222222';
+  const UUID_C = '33333333-3333-4333-8333-333333333333';
+  const UUID_D = '55555555-5555-4555-8555-555555555555';
+
+  /** Build a closed prepare projection for a schema-9 journal candidate. */
+  const prepareEvidence = (
+    cas: AgentControllerCASV1,
+    journal: PersistedAgentAttemptJournalV3,
+  ): AgentStoreTransitionEvidence => {
+    const operationId = '66666666-6666-4666-8666-666666666660';
+    const request = {
+      schema_version: 2 as const,
+      operation_id: operationId,
+      controller_cas: cas,
+      committed_checkpoint: {
+        schema_version: 1 as const,
+        journal_revision: cas.expected_journal_revision,
+        session_generation: cas.expected_session_generation,
+        session_sha256: cas.expected_session_sha256,
+      },
+      task_id: cas.task_id,
+      conversation_id: cas.conversation_id,
+      attempt_id: cas.attempt_id,
+      workspace_id: journal.root.workspace_id,
+      project_id: journal.root.project_id,
+      workspace_binding_revision: journal.root.workspace_binding_revision,
+      transport_schema_version: 2 as const,
+      model: 'deepseek-v4-flash' as const,
+      thinking_mode: 'high' as const,
+      visible_message_ids: [],
+      visible_history_sha256: 'f'.repeat(64),
+      visible_message_count: 0,
+      project_context_sha256: null,
+      registry_version: 1 as const,
+      expected_policy_version: journal.policy.policy_version,
+      expected_transcript: null,
+    };
+    const registry = {
+      schema_version: 2 as const,
+      registry_version: 1 as const,
+      toolset_sha256: journal.toolset_sha256,
+      tools: journal.batch.map(call => ({
+        schema_version: 2 as const,
+        name: call.name,
+        safe_summary_key: call.safe_summary_key,
+        access: call.access,
+      })),
+    };
+    const batch = journal.batch.map(call => ({
+      schema_version: 2 as const,
+      call_index: call.call_index,
+      call_id: call.call_id,
+      name: call.name,
+      arguments_sha256: call.arguments_sha256,
+      idempotency_key: call.idempotency_key,
+      safe_summary_key: call.safe_summary_key,
+      access: call.access,
+      approval_state:
+        call.access === 'auto'
+          ? 'not_required' as const
+          : call.access === 'durable_deny'
+            ? 'denied' as const
+            : call.approval_decision === 'pending'
+              ? 'pending' as const
+              : call.approval_decision === 'denied'
+                ? 'denied' as const
+                : call.approval_decision === 'cancelled'
+                  ? 'cancelled' as const
+                  : 'bound' as const,
+      approval_token:
+        call.approval_token === null
+          ? null
+          : {
+              schema_version: 2 as const,
+              token: call.approval_token,
+              controller_cas: cas,
+              task_id: cas.task_id,
+              attempt_id: cas.attempt_id,
+              round_id: journal.round_lineage?.round_id ?? UUID_D,
+              round_index: journal.round_index,
+              batch_call_ids: journal.batch.map(item => item.call_id),
+              batch_arguments_sha256: journal.batch.map(item => item.arguments_sha256),
+              batch_revision: 1,
+              manifest_sha256: 'a'.repeat(64),
+              call_index: call.call_index,
+              call_id: call.call_id,
+              name: call.name,
+              arguments_sha256: call.arguments_sha256,
+              idempotency_key: call.idempotency_key ?? 'b'.repeat(64),
+              root_fingerprint_sha256: journal.root.root_fingerprint_sha256,
+              binding_revision: journal.root.workspace_binding_revision,
+              policy_version: 'agent-v1' as const,
+              registry_version: 1 as const,
+              access:
+                call.access === 'confirm_once'
+                  ? 'confirm_once' as const
+                  : 'conversation_confirm' as const,
+              allowed_decisions:
+                call.access === 'confirm_once'
+                  ? ['denied', 'allow_once', 'cancelled'] as const
+                  : ['denied', 'allow_once', 'allow_conversation', 'cancelled'] as const,
+            },
+      approval_reference: call.approval_reference,
+      execution_status:
+        call.receipt === null
+          ? 'not_started' as const
+          : call.receipt.outcome === 'ok'
+            ? 'completed' as const
+            : call.receipt.outcome,
+      execution_revision: call.receipt === null ? null : call.native_row_revision,
+      native_row_revision: call.native_row_revision,
+      receipt: call.receipt,
+    }));
+    const result = {
+      schema_version: 2 as const,
+      status: 'prepared' as const,
+      operation_id: operationId,
+      attempt: {
+        schema_version: 2 as const,
+        task_id: cas.task_id,
+        conversation_id: cas.conversation_id,
+        attempt_id: cas.attempt_id,
+        phase: journal.phase,
+        controller_generation: journal.controller_generation,
+        journal_revision: cas.expected_journal_revision,
+        authority_revision: journal.round_lineage?.native_row_revision ?? 0,
+        root: journal.root,
+        policy: journal.policy,
+        registry,
+        transcript: journal.transcript,
+        round_index: journal.round_index,
+        round_id: journal.round_lineage?.round_id ?? null,
+        round_revision: journal.round_lineage?.native_row_revision ?? null,
+        round_status: journal.round_lineage?.status ?? null,
+        batch_kind:
+          journal.batch.length === 0
+            ? null
+            : journal.batch.some(call => call.access !== 'auto')
+              ? 'write_batch' as const
+              : 'read_only_batch' as const,
+        batch_revision: journal.batch.length === 0 ? null : 1,
+        manifest_sha256: journal.batch.length === 0 ? null : 'a'.repeat(64),
+        call_index: journal.call_index,
+        batch,
+        frozen_grant_ids: journal.frozen_grant_ids,
+        reserved_write_bytes: journal.reserved_write_bytes,
+        cancel_source_event_id: null,
+        cleanup_id: null,
+      },
+      observed_checkpoint: {
+        schema_version: 1 as const,
+        journal_revision: cas.expected_journal_revision,
+        session_generation: cas.expected_session_generation,
+        session_sha256: cas.expected_session_sha256,
+      },
+    };
+    const mapped = validateAgentStoreTransition({
+      operation: 'prepare_agent_attempt',
+      request,
+      result,
+    });
+    if (mapped === null) throw new Error('invalid test Agent evidence');
+    return mapped;
+  };
+
+  const completeEvidence = (
+    cas: AgentControllerCASV1,
+    current: PersistedAgentAttemptJournalV3,
+    next: PersistedAgentAttemptJournalV3,
+    outcomeKind: 'in_flight' | 'tool_batch' | 'blocked' | 'final',
+  ): AgentStoreTransitionEvidence => {
+    const operationId = '66666666-6666-4666-8666-666666666661';
+    const lineage = current.round_lineage;
+    if (lineage === null) throw new Error('test evidence requires round lineage');
+    const request = {
+      schema_version: 2 as const,
+      operation_id: operationId,
+      controller_cas: cas,
+      committed_checkpoint: {
+        schema_version: 1 as const,
+        journal_revision: cas.expected_journal_revision,
+        session_generation: cas.expected_session_generation,
+        session_sha256: cas.expected_session_sha256,
+      },
+      task_id: cas.task_id,
+      conversation_id: cas.conversation_id,
+      attempt_id: cas.attempt_id,
+      round_id: lineage.round_id,
+      round_index: lineage.round_index,
+      launch_attempt: lineage.launch_attempt,
+      expected_round_revision: lineage.native_row_revision ?? 0,
+      transport_schema_version: 2 as const,
+      model: 'deepseek-v4-flash' as const,
+      thinking_mode: 'high' as const,
+      visible_history_sha256: 'f'.repeat(64),
+      visible_message_count: 0,
+      project_context_sha256: null,
+      transcript: current.transcript,
+      root: current.root,
+      registry_version: 1 as const,
+      toolset_sha256: current.toolset_sha256,
+    };
+    if (outcomeKind === 'in_flight') {
+      const result = {
+        schema_version: 2 as const,
+        status: 'in_flight' as const,
+        operation_id: operationId,
+        task_id: cas.task_id,
+        attempt_id: cas.attempt_id,
+        round_id: lineage.round_id,
+        round_index: lineage.round_index,
+        launch_attempt: lineage.launch_attempt,
+        result_round_revision: (lineage.native_row_revision ?? 0) + 1,
+        transcript: current.transcript,
+      };
+      const mapped = validateAgentStoreTransition({
+        operation: 'complete_agent_round_v2',
+        request,
+        result,
+      });
+      if (mapped === null) throw new Error('invalid in-flight test Agent evidence');
+      return mapped;
+    }
+    const blocked = outcomeKind === 'blocked';
+    const final = outcomeKind === 'final';
+    const receipt = {
+      schema_version: 2 as const,
+      transport_schema_version: 2 as const,
+      turn_id: cas.task_id,
+      task_id: cas.task_id,
+      attempt_id: cas.attempt_id,
+      round_id: lineage.round_id,
+      round_index: lineage.round_index,
+      provider_request_id: 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa',
+      provider_response_id: blocked
+        ? 'resp-blocked'
+        : final
+          ? 'resp-final'
+          : 'resp-tool-batch',
+      requested_model: 'deepseek-v4-flash' as const,
+      model: 'deepseek-v4-flash' as const,
+      thinking_mode: 'high' as const,
+      finish_reason: blocked
+        ? 'length' as const
+        : final
+          ? 'stop' as const
+          : 'tool_calls' as const,
+      latency_ms: 1,
+      visible_history_sha256: 'f'.repeat(64),
+      model_input_sha256: '1'.repeat(64),
+      request_body_sha256: '2'.repeat(64),
+      project_context_receipt: null,
+    };
+    const outcome = blocked
+      ? {
+          schema_version: 3 as const,
+          kind: 'blocked' as const,
+          finish_reason: 'length' as const,
+          completion_receipt: receipt,
+          transcript: next.transcript,
+          failure_code: 'E_COMPLETION_LENGTH' as const,
+        }
+      : final
+        ? {
+            schema_version: 3 as const,
+            kind: 'final' as const,
+            finish_reason: 'stop' as const,
+            completion_receipt: receipt,
+            transcript: next.transcript,
+            text: 'atomic final',
+            reasoning: 'checked atomically',
+          }
+        : {
+          schema_version: 3 as const,
+          kind: 'tool_batch' as const,
+          finish_reason: 'tool_calls' as const,
+          completion_receipt: receipt,
+          transcript: next.transcript,
+          calls: next.batch.map(call => ({
+            schema_version: 3 as const,
+            call_index: call.call_index,
+            call_id: call.call_id,
+            name: call.name,
+            arguments_sha256: call.arguments_sha256,
+            safe_summary_key: call.safe_summary_key,
+            access: call.access === 'durable_deny' ? 'durable_deny' as const : call.access,
+            approval_state: call.access === 'durable_deny' ? 'durable_denied' as const : 'deferred' as const,
+          })),
+          batch_class: 'executable' as const,
+          executable_call_count: next.batch.length,
+          denied_call_count: 0,
+          reasoning: '',
+        };
+    const result = {
+      schema_version: 2 as const,
+      status: 'completed' as const,
+      operation_id: operationId,
+      task_id: cas.task_id,
+      attempt_id: cas.attempt_id,
+      round_id: lineage.round_id,
+      round_index: lineage.round_index,
+      launch_attempt: lineage.launch_attempt,
+      result_round_revision: next.round_lineage?.native_row_revision ?? 1,
+      transcript: next.transcript,
+      outcome,
+    };
+    const mapped = validateAgentStoreTransition({
+      operation: 'complete_agent_round_v2',
+      request,
+      result,
+    });
+    if (mapped === null) throw new Error('invalid completed test Agent evidence');
+    return mapped;
+  };
+
+  const preparedBatchEvidence = (
+    cas: AgentControllerCASV1,
+    current: PersistedAgentAttemptJournalV3,
+    next: PersistedAgentAttemptJournalV3,
+  ): AgentStoreTransitionEvidence => {
+    const operationId = '66666666-6666-4666-8666-666666666664';
+    const lineage = current.round_lineage;
+    if (lineage === null || lineage.native_row_revision === null) {
+      throw new Error('test batch evidence requires completed round lineage');
+    }
+    const manifestSha256 = 'a'.repeat(64);
+    const callIds = next.batch.map(call => call.call_id);
+    const argumentDigests = next.batch.map(call => call.arguments_sha256);
+    const batchRevision = 1;
+    const calls = next.batch.map(call => ({
+      schema_version: 2 as const,
+      call_index: call.call_index,
+      call_id: call.call_id,
+      name: call.name,
+      arguments_sha256: call.arguments_sha256,
+      idempotency_key: call.idempotency_key,
+      safe_summary_key: call.safe_summary_key,
+      access: call.access,
+      approval_state:
+        call.access === 'auto'
+          ? 'not_required' as const
+          : call.access === 'durable_deny'
+            ? 'denied' as const
+            : 'pending' as const,
+      approval_token:
+        call.approval_token === null
+          ? null
+          : {
+              schema_version: 2 as const,
+              token: call.approval_token,
+              controller_cas: cas,
+              task_id: cas.task_id,
+              attempt_id: cas.attempt_id,
+              round_id: lineage.round_id,
+              round_index: lineage.round_index,
+              batch_call_ids: callIds,
+              batch_arguments_sha256: argumentDigests,
+              batch_revision: batchRevision,
+              manifest_sha256: manifestSha256,
+              call_index: call.call_index,
+              call_id: call.call_id,
+              name: call.name,
+              arguments_sha256: call.arguments_sha256,
+              idempotency_key: call.idempotency_key!,
+              root_fingerprint_sha256: current.root.root_fingerprint_sha256,
+              binding_revision: current.root.workspace_binding_revision,
+              policy_version: 'agent-v1' as const,
+              registry_version: 1 as const,
+              access: call.access === 'confirm_once'
+                ? 'confirm_once' as const
+                : 'conversation_confirm' as const,
+              allowed_decisions: call.access === 'confirm_once'
+                ? ['denied', 'allow_once', 'cancelled'] as const
+                : ['denied', 'allow_once', 'allow_conversation', 'cancelled'] as const,
+            },
+      approval_reference: call.approval_reference,
+      execution_status: call.access === 'durable_deny'
+        ? 'denied' as const
+        : 'intent' as const,
+      execution_revision: call.access === 'durable_deny'
+        ? null
+        : 1,
+      native_row_revision: call.native_row_revision,
+      receipt: call.receipt,
+    }));
+    const request = {
+      schema_version: 2 as const,
+      operation_id: operationId,
+      controller_cas: cas,
+      committed_checkpoint: {
+        schema_version: 1 as const,
+        journal_revision: cas.expected_journal_revision,
+        session_generation: cas.expected_session_generation,
+        session_sha256: cas.expected_session_sha256,
+      },
+      task_id: cas.task_id,
+      conversation_id: cas.conversation_id,
+      attempt_id: cas.attempt_id,
+      round_id: lineage.round_id,
+      round_index: lineage.round_index,
+      expected_round_revision: lineage.native_row_revision,
+      transcript: current.transcript,
+      root: current.root,
+      registry_version: 1 as const,
+      toolset_sha256: current.toolset_sha256,
+      policy_version: 'agent-v1' as const,
+      expected_batch_revision: 0,
+      expected_reserved_write_bytes: current.reserved_write_bytes,
+    };
+    const result = {
+      schema_version: 2 as const,
+      status: 'prepared' as const,
+      operation_id: operationId,
+      receipt: {
+        schema_version: 2 as const,
+        task_id: cas.task_id,
+        attempt_id: cas.attempt_id,
+        round_id: lineage.round_id,
+        round_index: lineage.round_index,
+        batch_kind: 'write_batch' as const,
+        batch_revision: batchRevision,
+        manifest_sha256: manifestSha256,
+        transcript: next.transcript,
+        calls,
+        batch_new_write_bytes:
+          next.reserved_write_bytes - current.reserved_write_bytes,
+        reserved_write_bytes: next.reserved_write_bytes,
+        effect_gate: 'closed' as const,
+      },
+      observed_checkpoint: request.committed_checkpoint,
+    };
+    const mapped = validateAgentStoreTransition({
+      operation: 'prepare_agent_tool_batch',
+      request,
+      result,
+    });
+    if (mapped === null) throw new Error('invalid prepared-batch test evidence');
+    return mapped;
+  };
+
+  const bindEvidence = (
+    cas: AgentControllerCASV1,
+    journal: PersistedAgentAttemptJournalV3,
+    callIndex: number,
+    decision: 'allow_once' | 'allow_conversation' | 'denied' | 'cancelled',
+    operationId = '66666666-6666-4666-8666-666666666663',
+  ): AgentStoreTransitionEvidence => {
+    const call = journal.batch[callIndex];
+    const lineage = journal.round_lineage;
+    if (call === undefined || lineage === null || call.approval_token === null) {
+      throw new Error('test bind evidence requires a gated call');
+    }
+    const manifestSha256 = 'a'.repeat(64);
+    const token = {
+      schema_version: 2 as const,
+      token: call.approval_token,
+      controller_cas: cas,
+      task_id: cas.task_id,
+      attempt_id: cas.attempt_id,
+      round_id: lineage.round_id,
+      round_index: lineage.round_index,
+      batch_call_ids: journal.batch.map(item => item.call_id),
+      batch_arguments_sha256: journal.batch.map(item => item.arguments_sha256),
+      batch_revision: 1,
+      manifest_sha256: manifestSha256,
+      call_index: callIndex,
+      call_id: call.call_id,
+      name: call.name,
+      arguments_sha256: call.arguments_sha256,
+      idempotency_key: call.idempotency_key ?? 'b'.repeat(64),
+      root_fingerprint_sha256: journal.root.root_fingerprint_sha256,
+      binding_revision: journal.root.workspace_binding_revision,
+      policy_version: 'agent-v1' as const,
+      registry_version: 1 as const,
+      access: call.access === 'confirm_once' ? 'confirm_once' as const : 'conversation_confirm' as const,
+      allowed_decisions: call.access === 'confirm_once'
+        ? ['denied', 'allow_once', 'cancelled'] as const
+        : ['denied', 'allow_once', 'allow_conversation', 'cancelled'] as const,
+    };
+    const request = {
+      schema_version: 2 as const,
+      operation_id: operationId,
+      controller_cas: cas,
+      committed_checkpoint: {
+        schema_version: 1 as const,
+        journal_revision: cas.expected_journal_revision,
+        session_generation: cas.expected_session_generation,
+        session_sha256: cas.expected_session_sha256,
+      },
+      task_id: cas.task_id,
+      conversation_id: cas.conversation_id,
+      attempt_id: cas.attempt_id,
+      round_id: lineage.round_id,
+      round_index: lineage.round_index,
+      manifest_sha256: manifestSha256,
+      batch_revision: 1,
+      call_index: callIndex,
+      call_id: call.call_id,
+      token,
+      decision,
+    };
+    const result = {
+      schema_version: 2 as const,
+      status: 'bound' as const,
+      operation_id: operationId,
+      task_id: cas.task_id,
+      attempt_id: cas.attempt_id,
+      round_id: lineage.round_id,
+      call_index: callIndex,
+      call_id: call.call_id,
+      decision,
+      approval_reference:
+        decision === 'allow_once' || decision === 'allow_conversation'
+          ? operationId
+          : null,
+      grant: null,
+      result_batch_revision: 1,
+      observed_checkpoint: request.committed_checkpoint,
+    };
+    const mapped = validateAgentStoreTransition({
+      operation: 'bind_agent_approval',
+      request,
+      result,
+    });
+    if (mapped === null) throw new Error('invalid bind test Agent evidence');
+    return mapped;
+  };
+
+  const approvalPreflight = (
+    cas: AgentControllerCASV1,
+    journal: PersistedAgentAttemptJournalV3,
+    callIndex: number,
+    decision: 'allow_once' | 'allow_conversation' | 'denied' | 'cancelled',
+    operationId = '66666666-6666-4666-8666-666666666663',
+  ): AgentControllerPreflightV1 => {
+    const call = journal.batch[callIndex];
+    const lineage = journal.round_lineage;
+    if (call === undefined || lineage === null || call.approval_token === null) {
+      throw new Error('test approval preflight requires a gated call');
+    }
+    const preflight = validateAgentControllerPreflight({
+      schema_version: 1,
+      source: 'completion_controller',
+      kind: 'decide_approval',
+      operation_id: operationId,
+      base_cas: cas,
+      conversation_id: cas.conversation_id,
+      task_id: cas.task_id,
+      attempt_id: cas.attempt_id,
+      round_id: lineage.round_id,
+      round_index: lineage.round_index,
+      batch_revision: 1,
+      manifest_sha256: 'a'.repeat(64),
+      call_index: callIndex,
+      call_id: call.call_id,
+      name: call.name,
+      arguments_sha256: call.arguments_sha256,
+      approval_token: call.approval_token,
+      decision,
+      source_event_id: operationId,
+      access: call.access,
+      workspace_id: journal.root.workspace_id,
+      project_id: journal.root.project_id,
+      binding_revision: journal.root.workspace_binding_revision,
+      root_fingerprint_sha256: journal.root.root_fingerprint_sha256,
+      policy_version: journal.policy.policy_version,
+      registry_version: journal.tool_registry_version,
+      tool_family: 'file_write',
+      grant: null,
+    });
+    if (preflight === null) throw new Error('invalid approval test preflight');
+    return preflight;
+  };
+
+  test('requires a native committed session ref before settling an Agent candidate', () => {
+    const baseStore = createChatStore({
+      now: () => T0,
+      createId: () => UUID_A,
+      createLifecycleId: kind =>
+        kind === 'turn' ? UUID_B : kind === 'attempt' ? UUID_C : UUID_A,
+    });
+    const conversationId = baseStore.createConversation();
+    const source = baseStore.getState().conversations[conversationId]!;
+    const store = createChatStore({
+      now: () => T0,
+      sessionAuthority: { generation: 1, sessionSha256: 'd'.repeat(64) },
+      initialState: {
+        ...baseStore.getState(),
+        conversations: {
+          [conversationId]: {
+            ...source,
+            workspaceId: UUID_A,
+            workspaceBinding: {
+              schemaVersion: 1,
+              workspaceId: UUID_A,
+              bindingRevision: 1,
+              projectId: null,
+            },
+            workspaceBootstrapState: 'none',
+          },
+        },
+      },
+    });
+    store.prepareTurnAttempt(conversationId, 'requires native proof');
+    const attempt = store.getState().conversations[conversationId]!.attempts[0]!;
+    const journal: PersistedAgentAttemptJournalV3 = {
+      schema_version: 3,
+      phase: 'ready_for_round',
+      controller_generation: 0,
+      policy: {
+        schema_version: 1,
+        policy_version: 'agent-v1',
+        max_single_write_bytes: 32768,
+        max_batch_write_bytes: 512 * 1024,
+        max_attempt_write_bytes: 4 * 1024 * 1024,
+      },
+      root: {
+        schema_version: 1,
+        kind: 'workspace',
+        workspace_id: UUID_A,
+        workspace_binding_revision: 1,
+        project_id: null,
+        root_fingerprint_sha256: 'a'.repeat(64),
+        capabilities: ['file_read'],
+      },
+      tool_registry_version: 1,
+      toolset_sha256: 'b'.repeat(64),
+      transcript: {
+        schema_version: 1,
+        transcript_ref: UUID_C,
+        generation: 0,
+        transcript_sha256: 'c'.repeat(64),
+        transcript_bytes: 0,
+      },
+      round_index: 0,
+      round_lineage: {
+        schema_version: 2,
+        round_id: UUID_D,
+        round_index: 0,
+        launch_attempt: 1,
+        status: 'ready',
+        native_row_revision: null,
+      },
+      call_index: null,
+      batch: [],
+      frozen_grant_ids: [],
+      reserved_write_bytes: 0,
+      updated_at: T0,
+    };
+    const transaction = store.checkpointAgentAttemptCAS({
+      cas: {
+        schema_version: 1,
+        conversation_id: conversationId,
+        task_id: attempt.turnId,
+        attempt_id: attempt.attemptId,
+        expected_controller_generation: 0,
+        expected_journal_revision: 0,
+        expected_session_generation: 1,
+        expected_session_sha256: 'd'.repeat(64),
+      },
+      expectedAttempt: attempt,
+      journal,
+      evidence: prepareEvidence(
+        {
+          schema_version: 1,
+          conversation_id: conversationId,
+          task_id: attempt.turnId,
+          attempt_id: attempt.attemptId,
+          expected_controller_generation: 0,
+          expected_journal_revision: 0,
+          expected_session_generation: 1,
+          expected_session_sha256: 'd'.repeat(64),
+        },
+        journal,
+      ),
+      events: [
+        {
+          schema_version: 2,
+          event_id: '99999999-9999-4999-8999-999999999991',
+          attempt_id: attempt.attemptId,
+          seq: 0,
+          kind: 'round',
+          round_index: 0,
+          call_id: null,
+          status: 'waiting',
+          safe_summary_key: null,
+          arguments_sha256: null,
+          result_sha256: null,
+          approval_reference: null,
+          failure_code: null,
+          created_at: T0,
+        },
+      ],
+    });
+    expect(transaction).not.toBeNull();
+    expect(
+      transaction?.commit(undefined as unknown as NativeSessionCommitProofV1),
+    ).toBe(false);
+    expect(transaction?.commit(nativeCommittedProof(store, 3))).toBe(false);
+    let snapshotEvaluated = false;
+    const hostileProof = {
+      schema_version: 1,
+      status: 'committed',
+    } as Record<string, unknown>;
+    Object.defineProperty(hostileProof, 'snapshot', {
+      enumerable: true,
+      get: () => {
+        snapshotEvaluated = true;
+        const proof = nativeCommittedProof(store, 2);
+        return 'snapshot' in proof ? proof.snapshot : proof;
+      },
+    });
+    expect(
+      transaction?.commit(hostileProof as unknown as NativeSessionCommitProofV1),
+    ).toBe(false);
+    expect(snapshotEvaluated).toBe(false);
+    expect(transaction?.rollback()).toBe(true);
+  });
+
+  test('does not expose raw Agent grant mutations through dispatch', () => {
+    const store = createChatStore({ now: () => T0 });
+    const conversationId = store.createConversation();
+    const before = store.getState();
+    const expectedConversation = before.conversations[conversationId]!;
+    store.dispatch({
+      type: 'conversation/agent-grants',
+      payload: {
+        conversationId,
+        expectedConversation,
+        grants: [],
+        at: T0,
+      },
+    });
+    expect(store.getState()).toBe(before);
+  });
+
+  test('writes the exact schema-9 root and empty migration authority', () => {
+    const store = createChatStore({
+      now: () => T0,
+      createId: kind => `${kind}-schema9`,
+      createLifecycleId: kind =>
+        kind === 'turn' ? UUID_B : kind === 'attempt' ? UUID_C : UUID_A,
+    });
+    const conversationId = store.createConversation();
+    const root = JSON.parse(store.serialize()) as Record<string, unknown>;
+    expect(Object.keys(root).sort()).toEqual(
+      [
+        'schema_version',
+        'workspace_authority_outbox',
+        'agent_transcript_cleanup_outbox',
+        'project_context_destructive_epoch',
+        'project_context_destructive_transition',
+        'active_conversation_id',
+        'conversations',
+        'messages',
+        'session_events',
+        'preferences',
+      ].sort(),
+    );
+    expect(root.schema_version).toBe(9);
+    const conversation = (
+      root.conversations as Array<Record<string, unknown>>
+    )[0]!;
+    expect(conversation.agent_grants).toEqual([]);
+    expect(conversationId).toBe(conversation.id);
+
+    const legacy = JSON.parse(JSON.stringify(root)) as Record<string, unknown>;
+    legacy.schema_version = 8;
+    delete legacy.agent_transcript_cleanup_outbox;
+    delete legacy.session_events;
+    delete legacy.preferences;
+    for (const row of legacy.conversations as Array<Record<string, unknown>>) {
+      delete row.agent_grants;
+      for (const attempt of row.attempts as Array<Record<string, unknown>>) {
+        delete attempt.journal_revision;
+        delete attempt.agent;
+        attempt.schema_version = 1;
+      }
+    }
+    const migrated = hydrateChatState(legacy);
+    expect(migrated.schemaVersion).toBe(9);
+    expect(migrated.agentTranscriptCleanupOutbox).toEqual([]);
+    expect(migrated.sessionEvents).toEqual([]);
+    expect(migrated.conversations[conversationId]?.agentGrants).toEqual([]);
+  });
+
+  test('rejects duplicate JSON keys and malformed schema-9 event rows', () => {
+    expect(() =>
+      hydrateChatState('{"schema_version":9,"schema_version":9}'),
+    ).toThrow(ChatStateValidationError);
+    const store = createChatStore({ now: () => T0 });
+    const payload = JSON.parse(store.serialize()) as Record<string, unknown>;
+    payload.session_events = [
+      {
+        schema_version: 2,
+        event_id: UUID_A,
+        attempt_id: UUID_B,
+        seq: 0,
+        kind: 'round',
+        round_index: null,
+        call_id: null,
+        status: 'waiting',
+        safe_summary_key: null,
+        arguments_sha256: null,
+        result_sha256: null,
+        approval_reference: null,
+        failure_code: null,
+        created_at: T0,
+        unexpected: true,
+      },
+    ];
+    expect(() => hydrateChatState(payload)).toThrow(/unexpected/);
+  });
+
+  test('guards Agent checkpoint transactions by exact attempt reference', () => {
+    const baseStore = createChatStore({
+      now: () => T0,
+      createId: () => UUID_A,
+      createLifecycleId: kind =>
+        kind === 'turn' ? UUID_B : kind === 'attempt' ? UUID_C : UUID_A,
+    });
+    const conversationId = baseStore.createConversation();
+    const baseConversation =
+      baseStore.getState().conversations[conversationId]!;
+    const store = createChatStore({
+      now: () => T0,
+      sessionAuthority: {
+        generation: 1,
+        sessionSha256: 'd'.repeat(64),
+      },
+      initialState: {
+        ...baseStore.getState(),
+        conversations: {
+          [conversationId]: {
+            ...baseConversation,
+            workspaceId: UUID_A,
+            workspaceBinding: {
+              schemaVersion: 1,
+              workspaceId: UUID_A,
+              bindingRevision: 1,
+              projectId: null,
+            },
+            workspaceBootstrapState: 'none',
+          },
+        },
+      },
+    });
+    const prepared = store.prepareTurnAttempt(conversationId, 'agent task');
+    expect(prepared).not.toBeNull();
+    const attempt =
+      store.getState().conversations[conversationId]!.attempts[0]!;
+    const journal: PersistedAgentAttemptJournalV3 = {
+      schema_version: 3 as const,
+      phase: 'ready_for_round' as const,
+      controller_generation: 0,
+      policy: {
+        schema_version: 1 as const,
+        policy_version: 'agent-v1',
+        max_single_write_bytes: 32768,
+        max_batch_write_bytes: 512 * 1024,
+        max_attempt_write_bytes: 4 * 1024 * 1024,
+      },
+      root: {
+        schema_version: 1 as const,
+        kind: 'workspace' as const,
+        workspace_id: UUID_A,
+        workspace_binding_revision: 1,
+        project_id: null,
+        root_fingerprint_sha256: 'a'.repeat(64),
+        capabilities: ['file_read'] as const,
+      },
+      tool_registry_version: 1 as const,
+      toolset_sha256: 'b'.repeat(64),
+      transcript: {
+        schema_version: 1 as const,
+        transcript_ref: UUID_C,
+        generation: 0,
+        transcript_sha256: 'c'.repeat(64),
+        transcript_bytes: 0,
+      },
+      round_index: 0,
+      round_lineage: {
+        schema_version: 2 as const,
+        round_id: UUID_D,
+        round_index: 0,
+        launch_attempt: 1,
+        status: 'ready',
+        native_row_revision: null,
+      },
+      call_index: null,
+      batch: [],
+      frozen_grant_ids: [],
+      reserved_write_bytes: 0,
+      updated_at: T0,
+    };
+    const cas: AgentControllerCASV1 = {
+      schema_version: 1,
+      conversation_id: conversationId,
+      task_id: attempt.turnId,
+      attempt_id: attempt.attemptId,
+      expected_controller_generation: 0,
+      expected_journal_revision: 0,
+      expected_session_generation: 1,
+      expected_session_sha256: 'd'.repeat(64),
+    };
+    const events: SessionEventV2[] = [
+      {
+        schema_version: 2,
+        event_id: '99999999-9999-4999-8999-999999999991',
+        attempt_id: attempt.attemptId,
+        seq: 0,
+        kind: 'round',
+        round_index: 0,
+        call_id: null,
+        status: 'waiting',
+        safe_summary_key: null,
+        arguments_sha256: null,
+        result_sha256: null,
+        approval_reference: null,
+        failure_code: null,
+        created_at: T0,
+      },
+    ];
+    const transaction = store.checkpointAgentAttemptCAS({
+      cas,
+      expectedAttempt: attempt,
+      journal,
+      evidence: prepareEvidence(cas, journal),
+      events,
+    });
+    expect(
+      store.checkpointAgentRound({
+        cas,
+        expectedAttempt: attempt,
+        journal,
+        evidence: prepareEvidence(cas, journal),
+        events,
+      }),
+    ).toBeNull();
+    expect(
+      store.checkpointAgentAttemptCAS({
+        cas,
+        expectedAttempt: attempt,
+        journal,
+        events,
+        evidence: {
+          operation: 'prepare_agent_attempt',
+          request: {},
+          result: {},
+        } as unknown as AgentStoreTransitionEvidence,
+      }),
+    ).toBeNull();
+    expect(transaction?.commit(nativeCommittedProof(store, 2))).toBe(true);
+    expect(
+      store.getState().conversations[conversationId]!.attempts[0]!.agent?.phase,
+    ).toBe('ready_for_round');
+    expect(
+      hydrateChatState(store.serialize()).conversations[conversationId]!
+        .attempts[0]!.agent?.phase,
+    ).toBe('ready_for_round');
+  });
+
+  test('checkpoints prepared native intent projections without opening the approval gate', () => {
+    const setup = () => {
+      const seed = createChatStore({
+        now: () => T0,
+        createId: () => UUID_A,
+        createLifecycleId: kind =>
+          kind === 'turn' ? UUID_B : kind === 'attempt' ? UUID_C : UUID_D,
+      });
+      const conversationId = seed.createConversation();
+      expect(seed.prepareTurnAttempt(conversationId, 'prepare native batch')).not.toBeNull();
+      const source = seed.getState().conversations[conversationId]!;
+      const prepared = source.attempts[0]!;
+      const currentJournal: PersistedAgentAttemptJournalV3 = {
+        schema_version: 3,
+        phase: 'batch_frozen',
+        controller_generation: 2,
+        policy: {
+          schema_version: 1,
+          policy_version: 'agent-v1',
+          max_single_write_bytes: 32768,
+          max_batch_write_bytes: 512 * 1024,
+          max_attempt_write_bytes: 4 * 1024 * 1024,
+        },
+        root: {
+          schema_version: 1,
+          kind: 'workspace',
+          workspace_id: UUID_A,
+          workspace_binding_revision: 1,
+          project_id: null,
+          root_fingerprint_sha256: '9'.repeat(64),
+          capabilities: ['file_read', 'file_write'],
+        },
+        tool_registry_version: 1,
+        toolset_sha256: '8'.repeat(64),
+        transcript: {
+          schema_version: 1,
+          transcript_ref: '44444444-4444-4444-8444-444444444444',
+          generation: 1,
+          transcript_sha256: '7'.repeat(64),
+          transcript_bytes: 32,
+        },
+        round_index: 0,
+        round_lineage: {
+          schema_version: 2,
+          round_id: UUID_D,
+          round_index: 0,
+          launch_attempt: 1,
+          status: 'completed',
+          native_row_revision: 1,
+        },
+        call_index: null,
+        batch: [],
+        frozen_grant_ids: [],
+        reserved_write_bytes: 0,
+        updated_at: T0,
+      };
+      const currentAttempt: TurnAttemptV1 = {
+        ...prepared,
+        journalRevision: 2,
+        agent: currentJournal,
+      };
+      const existingEvents: SessionEventV2[] = [
+        {
+          schema_version: 2,
+          event_id: '99999999-9999-4999-8999-999999999991',
+          attempt_id: currentAttempt.attemptId,
+          seq: 0,
+          kind: 'round',
+          round_index: 0,
+          call_id: null,
+          status: 'waiting',
+          safe_summary_key: null,
+          arguments_sha256: null,
+          result_sha256: null,
+          approval_reference: null,
+          failure_code: null,
+          created_at: T0,
+        },
+        {
+          schema_version: 2,
+          event_id: '99999999-9999-4999-8999-999999999992',
+          attempt_id: currentAttempt.attemptId,
+          seq: 1,
+          kind: 'round',
+          round_index: 0,
+          call_id: null,
+          status: 'running',
+          safe_summary_key: null,
+          arguments_sha256: null,
+          result_sha256: null,
+          approval_reference: null,
+          failure_code: null,
+          created_at: T0,
+        },
+      ];
+      const store = createChatStore({
+        now: () => T1,
+        sessionAuthority: {
+          generation: 3,
+          sessionSha256: 'd'.repeat(64),
+        },
+        initialState: {
+          ...seed.getState(),
+          sessionEvents: existingEvents,
+          conversations: {
+            [conversationId]: {
+              ...source,
+              workspaceId: UUID_A,
+              workspaceBinding: {
+                schemaVersion: 1,
+                workspaceId: UUID_A,
+                bindingRevision: 1,
+                projectId: null,
+              },
+              workspaceBootstrapState: 'none',
+              attempts: [currentAttempt],
+            },
+          },
+        },
+      });
+      const expectedAttempt =
+        store.getState().conversations[conversationId]!.attempts[0]!;
+      const cas: AgentControllerCASV1 = {
+        schema_version: 1,
+        conversation_id: conversationId,
+        task_id: expectedAttempt.turnId,
+        attempt_id: expectedAttempt.attemptId,
+        expected_controller_generation: 2,
+        expected_journal_revision: 2,
+        expected_session_generation: 3,
+        expected_session_sha256: 'd'.repeat(64),
+      };
+      const deniedReceipt: AgentToolReceiptV1 = {
+        schema_version: 1,
+        call_id: 'call-denied',
+        name: 'shell_exec',
+        arguments_sha256: '3'.repeat(64),
+        result_sha256: '6'.repeat(64),
+        result_bytes: 16,
+        truncated: false,
+        duration_ms: 0,
+        outcome: 'denied',
+        failure_code: 'E_AGENT_UNKNOWN_TOOL',
+        approval_reference: null,
+      };
+      const nextJournal: PersistedAgentAttemptJournalV3 = {
+        ...currentJournal,
+        phase: 'approval_pending',
+        controller_generation: 3,
+        transcript: {
+          ...currentJournal.transcript,
+          generation: 2,
+          transcript_sha256: 'e'.repeat(64),
+          transcript_bytes: 64,
+        },
+        call_index: 0,
+        batch: [
+          {
+            schema_version: 3,
+            call_index: 0,
+            call_id: 'call-auto',
+            name: 'read_file',
+            arguments_sha256: '1'.repeat(64),
+            safe_summary_key: 'agent.read_file',
+            access: 'auto',
+            approval_token: null,
+            approval_decision: 'pending',
+            approval_reference: null,
+            idempotency_key: '4'.repeat(64),
+            native_row_revision: null,
+            receipt: null,
+          },
+          {
+            schema_version: 3,
+            call_index: 1,
+            call_id: 'call-gated',
+            name: 'write_file',
+            arguments_sha256: '2'.repeat(64),
+            safe_summary_key: 'agent.write_file',
+            access: 'conversation_confirm',
+            approval_token: '77777777-7777-4777-8777-777777777777',
+            approval_decision: 'pending',
+            approval_reference: null,
+            idempotency_key: '5'.repeat(64),
+            native_row_revision: null,
+            receipt: null,
+          },
+          {
+            schema_version: 3,
+            call_index: 2,
+            call_id: 'call-denied',
+            name: 'shell_exec',
+            arguments_sha256: '3'.repeat(64),
+            safe_summary_key: 'agent.unknown',
+            access: 'durable_deny',
+            approval_token: null,
+            approval_decision: 'denied',
+            approval_reference: null,
+            idempotency_key: null,
+            native_row_revision: 1,
+            receipt: deniedReceipt,
+          },
+        ],
+        reserved_write_bytes: 32,
+        updated_at: T1,
+      };
+      const evidence = preparedBatchEvidence(cas, currentJournal, nextJournal);
+      const batchEvent: SessionEventV2 = {
+        schema_version: 2,
+        event_id: evidence.operation_id,
+        attempt_id: expectedAttempt.attemptId,
+        seq: 2,
+        kind: 'round',
+        round_index: 0,
+        call_id: null,
+        status: 'running',
+        safe_summary_key: null,
+        arguments_sha256: null,
+        result_sha256: null,
+        approval_reference: null,
+        failure_code: null,
+        created_at: T1,
+      };
+      return {
+        store,
+        conversationId,
+        expectedAttempt,
+        cas,
+        nextJournal,
+        evidence,
+        batchEvent,
+      };
+    };
+    const checkpoint = (
+      fixture: ReturnType<typeof setup>,
+      evidence: AgentStoreTransitionEvidence,
+      journal = fixture.nextJournal,
+    ) => chatReducer(fixture.store.getState(), {
+      type: 'attempt/agent-checkpoint',
+      payload: {
+        cas: fixture.cas,
+        conversationId: fixture.conversationId,
+        attemptId: fixture.expectedAttempt.attemptId,
+        expectedAttempt: fixture.expectedAttempt,
+        journal,
+        evidence,
+        events: [fixture.batchEvent],
+        at: T1,
+      },
+    });
+
+    const valid = setup();
+    const nextState = checkpoint(valid, valid.evidence);
+    expect(nextState).not.toBe(valid.store.getState());
+    expect(
+      nextState.conversations[valid.conversationId]!.attempts[0]!.agent,
+    ).toMatchObject({
+      phase: 'approval_pending',
+      call_index: 0,
+      batch: [
+        { idempotency_key: '4'.repeat(64) },
+        {
+          approval_decision: 'pending',
+          approval_reference: null,
+          idempotency_key: '5'.repeat(64),
+        },
+        {
+          approval_decision: 'denied',
+          receipt: { outcome: 'denied' },
+        },
+      ],
+    });
+
+    const routed = setup();
+    const routedTransaction = routed.store.checkpointAgentRound({
+      cas: routed.cas,
+      expectedAttempt: routed.expectedAttempt,
+      journal: routed.nextJournal,
+      events: [routed.batchEvent],
+      evidence: routed.evidence,
+    });
+    expect(routedTransaction).not.toBeNull();
+    expect(
+      routedTransaction?.commit(nativeCommittedProof(routed.store, 4)),
+    ).toBe(true);
+    expect(
+      routed.store.getState().conversations[routed.conversationId]!.attempts[0]!
+        .agent?.phase,
+    ).toBe('approval_pending');
+
+    const wrongCurrentPhase = setup();
+    const wrongCurrentAttempt: TurnAttemptV1 = {
+      ...wrongCurrentPhase.expectedAttempt,
+      status: 'sending',
+      activeRound: {
+        roundId:
+          wrongCurrentPhase.expectedAttempt.agent!.round_lineage!.round_id,
+        roundIndex: wrongCurrentPhase.expectedAttempt.agent!.round_index,
+      },
+      agent: {
+        ...wrongCurrentPhase.expectedAttempt.agent!,
+        phase: 'round_in_flight',
+        round_lineage: {
+          ...wrongCurrentPhase.expectedAttempt.agent!.round_lineage!,
+          status: 'active',
+        },
+      },
+    };
+    const wrongCurrentState = wrongCurrentPhase.store.getState();
+    const wrongCurrentStore = createChatStore({
+      now: () => T1,
+      sessionAuthority: {
+        generation: 3,
+        sessionSha256: 'd'.repeat(64),
+      },
+      initialState: {
+        ...wrongCurrentState,
+        conversations: {
+          ...wrongCurrentState.conversations,
+          [wrongCurrentPhase.conversationId]: {
+            ...wrongCurrentState.conversations[
+              wrongCurrentPhase.conversationId
+            ]!,
+            attempts: [wrongCurrentAttempt],
+          },
+        },
+      },
+    });
+    expect(
+      wrongCurrentStore.checkpointAgentRound({
+        cas: wrongCurrentPhase.cas,
+        expectedAttempt: wrongCurrentAttempt,
+        journal: wrongCurrentPhase.nextJournal,
+        events: [wrongCurrentPhase.batchEvent],
+        evidence: wrongCurrentPhase.evidence,
+      }),
+    ).toBeNull();
+
+    const wrongEvidence = setup();
+    expect(
+      wrongEvidence.store.checkpointAgentRound({
+        cas: wrongEvidence.cas,
+        expectedAttempt: wrongEvidence.expectedAttempt,
+        journal: wrongEvidence.nextJournal,
+        events: [wrongEvidence.batchEvent],
+        evidence: {
+          ...wrongEvidence.evidence,
+          kind: 'execute_agent_tool',
+        } as AgentStoreTransitionEvidence,
+      }),
+    ).toBeNull();
+
+    const withCall = (
+      fixture: ReturnType<typeof setup>,
+      index: number,
+      change: (call: Record<string, unknown>) => Record<string, unknown>,
+    ): AgentStoreTransitionEvidence => {
+      if (fixture.evidence.kind !== 'prepare_agent_tool_batch' ||
+        fixture.evidence.result.status === 'rejected') {
+        throw new Error('expected prepared batch evidence');
+      }
+      const calls = fixture.evidence.result.receipt.calls.map(call => ({ ...call }));
+      calls[index] = change(calls[index] as unknown as Record<string, unknown>) as never;
+      return {
+        ...fixture.evidence,
+        result: {
+          ...fixture.evidence.result,
+          receipt: { ...fixture.evidence.result.receipt, calls },
+        },
+      } as AgentStoreTransitionEvidence;
+    };
+    const notStarted = setup();
+    expect(checkpoint(notStarted, withCall(notStarted, 0, call => ({
+      ...call,
+      execution_status: 'not_started',
+      execution_revision: null,
+    })))).toBe(notStarted.store.getState());
+    const running = setup();
+    expect(checkpoint(running, withCall(running, 0, call => ({
+      ...call,
+      execution_status: 'running',
+    })))).toBe(running.store.getState());
+    const revisionDrift = setup();
+    expect(checkpoint(revisionDrift, withCall(revisionDrift, 0, call => ({
+      ...call,
+      execution_revision: 2,
+    })))).toBe(revisionDrift.store.getState());
+    const tokenDrift = setup();
+    expect(checkpoint(tokenDrift, withCall(tokenDrift, 1, call => ({
+      ...call,
+      approval_token: {
+        ...(call.approval_token as Record<string, unknown>),
+        token: '88888888-8888-4888-8888-888888888888',
+      },
+    })))).toBe(tokenDrift.store.getState());
+    const callDrift = setup();
+    expect(checkpoint(callDrift, withCall(callDrift, 0, call => ({
+      ...call,
+      call_id: 'call-auto-drift',
+    })))).toBe(callDrift.store.getState());
+    const terminalDrift = setup();
+    expect(checkpoint(terminalDrift, withCall(terminalDrift, 2, call => ({
+      ...call,
+      receipt: null,
+      native_row_revision: null,
+    })))).toBe(terminalDrift.store.getState());
+    const wrongPhase = setup();
+    expect(checkpoint(
+      wrongPhase,
+      wrongPhase.evidence,
+      { ...wrongPhase.nextJournal, phase: 'batch_frozen' },
+    )).toBe(wrongPhase.store.getState());
+  });
+
+  test('keeps an issued approval token immutable across CAS revisions', () => {
+    const baseStore = createChatStore({
+      now: () => T0,
+      createId: () => UUID_A,
+    });
+    const conversationId = baseStore.createConversation();
+    const source = baseStore.getState().conversations[conversationId]!;
+    const store = createChatStore({
+      now: () => T0,
+      sessionAuthority: { generation: 1, sessionSha256: 'd'.repeat(64) },
+      initialState: {
+        ...baseStore.getState(),
+        conversations: {
+          [conversationId]: {
+            ...source,
+            workspaceId: UUID_A,
+            workspaceBinding: {
+              schemaVersion: 1,
+              workspaceId: UUID_A,
+              bindingRevision: 1,
+              projectId: null,
+            },
+            workspaceBootstrapState: 'none',
+          },
+        },
+      },
+    });
+    const prepared = store.prepareTurnAttempt(conversationId, 'approval');
+    expect(prepared).not.toBeNull();
+    const attempt =
+      store.getState().conversations[conversationId]!.attempts[0]!;
+    const root = {
+      schema_version: 1 as const,
+      kind: 'workspace' as const,
+      workspace_id: UUID_A,
+      workspace_binding_revision: 1,
+      project_id: null,
+      root_fingerprint_sha256: 'a'.repeat(64),
+      capabilities: ['file_read', 'file_write'] as const,
+    };
+    const transcript = {
+      schema_version: 1 as const,
+      transcript_ref: '33333333-3333-4333-8333-333333333333',
+      generation: 0,
+      transcript_sha256: 'b'.repeat(64),
+      transcript_bytes: 0,
+    };
+    const policy = {
+      schema_version: 1 as const,
+      policy_version: 'agent-v1',
+      max_single_write_bytes: 32768 as const,
+      max_batch_write_bytes: 512 * 1024,
+      max_attempt_write_bytes: 4 * 1024 * 1024,
+    };
+    const baseJournal: PersistedAgentAttemptJournalV3 = {
+      schema_version: 3,
+      phase: 'ready_for_round',
+      controller_generation: 0,
+      policy,
+      root,
+      tool_registry_version: 1,
+      toolset_sha256: 'c'.repeat(64),
+      transcript,
+      round_index: 0,
+      round_lineage: {
+        schema_version: 2,
+        round_id: UUID_D,
+        round_index: 0,
+        launch_attempt: 1,
+        status: 'ready',
+        native_row_revision: null,
+      },
+      call_index: null,
+      batch: [],
+      frozen_grant_ids: [],
+      reserved_write_bytes: 0,
+      updated_at: T0,
+    };
+    const event = (
+      eventId: string,
+      seq: number,
+      kind: SessionEventV2['kind'],
+      status: SessionEventV2['status'],
+      callId: string | null = null,
+      safeSummaryKey: string | null = null,
+      argumentsSha256: string | null = null,
+      approvalReference: string | null = null,
+    ): SessionEventV2 => ({
+      schema_version: 2,
+      event_id: eventId,
+      attempt_id: attempt.attemptId,
+      seq,
+      kind,
+      round_index: kind === 'terminal' ? null : 0,
+      call_id: callId,
+      status,
+      safe_summary_key: safeSummaryKey,
+      arguments_sha256: argumentsSha256,
+      result_sha256: null,
+      approval_reference: approvalReference,
+      failure_code: null,
+      created_at: T0,
+    });
+    const readyEvents = [
+      event('99999999-9999-4999-8999-999999999995', 0, 'round', 'waiting'),
+    ];
+    const initial = store.checkpointAgentAttemptCAS({
+      cas: {
+        schema_version: 1,
+        conversation_id: conversationId,
+        task_id: attempt.turnId,
+        attempt_id: attempt.attemptId,
+        expected_controller_generation: 0,
+        expected_journal_revision: 0,
+        expected_session_generation: 1,
+        expected_session_sha256: 'd'.repeat(64),
+      },
+      expectedAttempt: attempt,
+      journal: baseJournal,
+      evidence: prepareEvidence(
+        {
+          schema_version: 1,
+          conversation_id: conversationId,
+          task_id: attempt.turnId,
+          attempt_id: attempt.attemptId,
+          expected_controller_generation: 0,
+          expected_journal_revision: 0,
+          expected_session_generation: 1,
+          expected_session_sha256: 'd'.repeat(64),
+        },
+        baseJournal,
+      ),
+      events: readyEvents,
+    });
+    expect(initial?.commit(nativeCommittedProof(store, 2))).toBe(true);
+    let currentAttempt =
+      store.getState().conversations[conversationId]!.attempts[0]!;
+    const activeJournal: PersistedAgentAttemptJournalV3 = {
+      ...baseJournal,
+      phase: 'round_in_flight',
+      controller_generation: 1,
+      round_lineage: {
+        ...baseJournal.round_lineage!,
+        status: 'active',
+        native_row_revision: null,
+      },
+    };
+    const activeCas: AgentControllerCASV1 = {
+      schema_version: 1,
+      conversation_id: conversationId,
+      task_id: currentAttempt.turnId,
+      attempt_id: currentAttempt.attemptId,
+      expected_controller_generation: 0,
+      expected_journal_revision: 1,
+      expected_session_generation: 2,
+      expected_session_sha256: store.getSessionAuthority()!.sessionSha256,
+    };
+    const beginRound = beginRoundPreflightForAttempt(
+      currentAttempt,
+      baseJournal,
+      activeCas,
+      '66666666-6666-4666-8666-666666666661',
+    );
+    const active = store.checkpointAgentAttemptCAS({
+      cas: activeCas,
+      expectedAttempt: currentAttempt,
+      journal: activeJournal,
+      evidence: beginRound,
+      events: readyEvents,
+    });
+    expect(active?.commit(nativeCommittedProof(store, 3))).toBe(true);
+    currentAttempt =
+      store.getState().conversations[conversationId]!.attempts[0]!;
+    const callId = 'store-call';
+    const secondCallId = 'store-call-2';
+    const argumentsSha256 = 'e'.repeat(64);
+    const secondArgumentsSha256 = 'f'.repeat(64);
+    const issuedCas: AgentControllerCASV1 = {
+      schema_version: 1,
+      conversation_id: conversationId,
+      task_id: currentAttempt.turnId,
+      attempt_id: currentAttempt.attemptId,
+      expected_controller_generation: 1,
+      expected_journal_revision: 2,
+      expected_session_generation: 3,
+      expected_session_sha256: store.getSessionAuthority()!.sessionSha256,
+    };
+    const token = '77777777-7777-4777-8777-777777777777';
+    const secondToken = '88888888-8888-4888-8888-888888888888';
+    const frozenJournal: PersistedAgentAttemptJournalV3 = {
+      ...activeJournal,
+      phase: 'approval_pending',
+      controller_generation: 2,
+      round_lineage: {
+        ...activeJournal.round_lineage!,
+        status: 'completed',
+        native_row_revision: 1,
+      },
+      transcript: {
+        ...activeJournal.transcript,
+        generation: 1,
+        transcript_sha256: '9'.repeat(64),
+        transcript_bytes: 42,
+      },
+      batch: [
+        {
+          schema_version: 3,
+          call_id: callId,
+          call_index: 0,
+          name: 'write_file',
+          arguments_sha256: argumentsSha256,
+          safe_summary_key: 'agent.write_file',
+          access: 'conversation_confirm',
+          approval_token: token,
+          approval_decision: 'pending',
+          approval_reference: null,
+          idempotency_key: null,
+          native_row_revision: null,
+          receipt: null,
+        },
+        {
+          schema_version: 3,
+          call_id: secondCallId,
+          call_index: 1,
+          name: 'write_file',
+          arguments_sha256: secondArgumentsSha256,
+          safe_summary_key: 'agent.write_file',
+          access: 'conversation_confirm',
+          approval_token: secondToken,
+          approval_decision: 'pending',
+          approval_reference: null,
+          idempotency_key: null,
+          native_row_revision: null,
+          receipt: null,
+        },
+      ],
+      call_index: 0,
+    };
+    const frozenInput = {
+      cas: issuedCas,
+      expectedAttempt: currentAttempt,
+      journal: frozenJournal,
+      evidence: completeEvidence(
+        issuedCas,
+        activeJournal,
+        frozenJournal,
+        'tool_batch',
+      ),
+      events: [
+        ...readyEvents,
+        event('66666666-6666-4666-8666-666666666661', 1, 'round', 'running'),
+        event(
+          '66666666-6666-4666-8666-666666666662',
+          2,
+          'approval',
+          'approval',
+          callId,
+          'agent.write_file',
+          argumentsSha256,
+        ),
+      ],
+    };
+    expect(
+      store.checkpointAgentAttemptCAS({
+        ...frozenInput,
+        evidence: undefined,
+      } as unknown as AgentCASCheckpointInput),
+    ).toBeNull();
+    expect(
+      store.checkpointAgentAttemptCAS({
+        ...frozenInput,
+        evidence: {
+          ...frozenInput.evidence,
+          operation_id: UUID_D,
+        } as AgentStoreTransitionEvidence,
+      }),
+    ).toBeNull();
+    const frozen = store.checkpointAgentAttemptCAS(frozenInput);
+    expect(frozen?.commit(nativeCommittedProof(store, 4))).toBe(true);
+    currentAttempt =
+      store.getState().conversations[conversationId]!.attempts[0]!;
+    expect(currentAttempt.agent?.transcript.generation).toBe(1);
+    expect(currentAttempt.agent?.transcript.transcript_sha256).toBe(
+      '9'.repeat(64),
+    );
+    expect(currentAttempt.agent?.round_lineage?.native_row_revision).toBe(1);
+    const recoveredAfterProvider = hydrateChatState(store.serialize());
+    const recoveredAttempt =
+      recoveredAfterProvider.conversations[conversationId]!.attempts[0]!;
+    expect(recoveredAttempt.agent?.transcript).toEqual(
+      currentAttempt.agent?.transcript,
+    );
+    expect(recoveredAttempt.agent?.round_lineage?.native_row_revision).toBe(1);
+    const decisionJournal: PersistedAgentAttemptJournalV3 = {
+      ...frozenJournal,
+      phase: 'batch_frozen',
+      controller_generation: 3,
+      batch: frozenJournal.batch.map((call, index) =>
+        index === 0
+          ? {
+              ...call,
+              approval_decision: 'allow_once' as const,
+              approval_reference: '66666666-6666-4666-8666-666666666663',
+            }
+          : call,
+      ),
+    };
+    const currentAuthority = store.getSessionAuthority()!;
+    const decisionCas: AgentControllerCASV1 = {
+      schema_version: 1,
+      conversation_id: conversationId,
+      task_id: currentAttempt.turnId,
+      attempt_id: currentAttempt.attemptId,
+      expected_controller_generation: 2,
+      expected_journal_revision: 3,
+      expected_session_generation: currentAuthority.generation,
+      expected_session_sha256: currentAuthority.sessionSha256,
+    };
+    const directBind = store.checkpointAgentApproval({
+      cas: decisionCas,
+      expectedConversation: store.getState().conversations[conversationId]!,
+      expectedAttempt: currentAttempt,
+      journal: decisionJournal,
+      evidence: bindEvidence(decisionCas, decisionJournal, 0, 'allow_once'),
+      grants: [],
+      events: [
+        event(
+          '99999999-9999-4999-8999-999999999998',
+          3,
+          'approval',
+          'approval',
+          callId,
+          'agent.write_file',
+          argumentsSha256,
+          '66666666-6666-4666-8666-666666666663',
+        ),
+      ],
+    });
+    expect(directBind).toBeNull();
+
+    const decision = store.decideAgentApproval({
+      cas: decisionCas,
+      expectedConversation: store.getState().conversations[conversationId]!,
+      expectedAttempt: currentAttempt,
+      journal: decisionJournal,
+      evidence: approvalPreflight(
+        decisionCas,
+        frozenJournal,
+        0,
+        'allow_once',
+      ),
+      grants: [],
+      events: [],
+    });
+    expect(decision?.commit(nativeCommittedProof(store, 5))).toBe(true);
+    currentAttempt =
+      store.getState().conversations[conversationId]!.attempts[0]!;
+    expect(currentAttempt.agent?.phase).toBe('batch_frozen');
+    expect(currentAttempt.agent?.batch[1]).toMatchObject({
+      call_id: secondCallId,
+      approval_decision: 'pending',
+      approval_reference: null,
+    });
+
+    const postAuthority = store.getSessionAuthority()!;
+    const postCas: AgentControllerCASV1 = {
+      schema_version: 1,
+      conversation_id: conversationId,
+      task_id: currentAttempt.turnId,
+      attempt_id: currentAttempt.attemptId,
+      expected_controller_generation: 3,
+      expected_journal_revision: 4,
+      expected_session_generation: postAuthority.generation,
+      expected_session_sha256: postAuthority.sessionSha256,
+    };
+    const postJournal: PersistedAgentAttemptJournalV3 = {
+      ...currentAttempt.agent!,
+      controller_generation: 4,
+    };
+    const postEvidence = bindEvidence(
+      postCas,
+      currentAttempt.agent!,
+      0,
+      'allow_once',
+    );
+    const post = store.checkpointAgentApproval({
+      cas: postCas,
+      expectedConversation: store.getState().conversations[conversationId]!,
+      expectedAttempt: currentAttempt,
+      journal: postJournal,
+      evidence: postEvidence,
+      grants: [],
+      events: [
+        event(
+          '99999999-9999-4999-8999-999999999998',
+          4,
+          'approval',
+          'approval',
+          callId,
+          'agent.write_file',
+          argumentsSha256,
+          '66666666-6666-4666-8666-666666666663',
+        ),
+      ],
+    });
+    expect(post?.commit(nativeCommittedProof(store, 6))).toBe(true);
+    const committedConversation =
+      store.getState().conversations[conversationId]!;
+    const committedAttempt = committedConversation.attempts[0]!;
+    const committedAuthority = store.getSessionAuthority()!;
+    expect(committedAttempt.agent?.phase).toBe('batch_frozen');
+    expect(committedAttempt.agent?.batch[1]?.approval_decision).toBe('pending');
+    expect(
+      store.checkpointAgentApproval({
+        cas: postCas,
+        expectedConversation: committedConversation,
+        expectedAttempt: committedAttempt,
+        journal: postJournal,
+        evidence: postEvidence,
+        grants: [],
+        events: [],
+      }),
+    ).toBeNull();
+    const substituted = {
+      ...postJournal,
+      batch: postJournal.batch.map((call, index) =>
+        index === 0
+          ? {
+              ...call,
+              approval_token: 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa',
+            }
+          : call,
+      ),
+      controller_generation: 5,
+    };
+    const substitutedCas: AgentControllerCASV1 = {
+      schema_version: 1,
+      conversation_id: conversationId,
+      task_id: committedAttempt.turnId,
+      attempt_id: committedAttempt.attemptId,
+      expected_controller_generation: 4,
+      expected_journal_revision: 5,
+      expected_session_generation: committedAuthority.generation,
+      expected_session_sha256: committedAuthority.sessionSha256,
+    };
+    expect(
+      store.checkpointAgentApproval({
+        cas: substitutedCas,
+        expectedConversation: store.getState().conversations[conversationId]!,
+        expectedAttempt: committedAttempt,
+        journal: substituted,
+        evidence: bindEvidence(
+          substitutedCas,
+          substituted,
+          0,
+          'allow_once',
+        ),
+        grants: [],
+        events: [
+          event(
+            '99999999-9999-4999-8999-999999999997',
+            5,
+            'approval',
+            'approval',
+            callId,
+            'agent.write_file',
+            argumentsSha256,
+            '66666666-6666-4666-8666-666666666663',
+          ),
+        ],
+      }),
+    ).toBeNull();
+  });
+
+  test('validates and preserves a legacy preference while dropping its event attachment', () => {
+    const store = createChatStore({ now: () => T0 });
+    const legacy = JSON.parse(store.serialize()) as Record<string, unknown>;
+    stripSchema9Fields(legacy);
+    legacy.schema_version = 7;
+    legacy.project_context_destructive_epoch = 0;
+    legacy.project_context_destructive_transition = null;
+    legacy.preferences = {
+      schema_version: 1,
+      theme_mode: 'dark',
+      locale: 'zh-CN',
+      default_model: 'deepseek-v4-flash',
+      thinking_mode: 'high',
+      tool_permission: 'workspace-write',
+      show_reasoning: true,
+      auto_expand_tools: false,
+      confirm_destructive_file_actions: true,
+    };
+    legacy.session_events = [{ raw: 'must be dropped' }];
+    const migrated = hydrateChatState(legacy);
+    expect(migrated.preferences).toMatchObject({
+      theme_mode: 'dark',
+      locale: 'zh-CN',
+    });
+    expect(migrated.sessionEvents).toEqual([]);
+    expect(JSON.parse(serializeChatState(migrated)).preferences).toMatchObject({
+      theme_mode: 'dark',
+      locale: 'zh-CN',
+    });
+    expect(migrated.migrationDiagnostics).toEqual({
+      dropped_legacy_session_events: true,
+    });
+  });
+
+  test('defaults missing legacy preferences and reports the migration fact', () => {
+    const legacy = JSON.parse(
+      serializeChatState(createEmptyChatState()),
+    ) as Record<string, unknown>;
+    stripSchema9Fields(legacy);
+    legacy.schema_version = 8;
+    legacy.workspace_authority_outbox = [];
+    legacy.project_context_destructive_epoch = 0;
+    legacy.project_context_destructive_transition = null;
+    const migrated = hydrateChatState(legacy);
+    expect(migrated.preferences).toMatchObject({
+      schema_version: 1,
+      theme_mode: 'system',
+      locale: 'system',
+    });
+    expect(migrated.migrationDiagnostics).toEqual({
+      defaulted_legacy_preferences: true,
+    });
+    const persisted = JSON.parse(serializeChatState(migrated)) as Record<
+      string,
+      unknown
+    >;
+    expect(persisted.preferences).toMatchObject({
+      schema_version: 1,
+      selected_harness_id: 'dsh',
+    });
+  });
+
+  test('retains terminal cleanup ownership while deleting an Agent conversation', () => {
+    const baseStore = createChatStore({
+      now: () => T0,
+      createId: () => UUID_A,
+      createLifecycleId: kind =>
+        kind === 'turn' ? UUID_B : kind === 'attempt' ? UUID_C : UUID_A,
+    });
+    const conversationId = baseStore.createConversation();
+    const source = baseStore.getState().conversations[conversationId]!;
+    const store = createChatStore({
+      now: () => T0,
+      sessionAuthority: {
+        generation: 1,
+        sessionSha256: 'd'.repeat(64),
+      },
+      initialState: {
+        ...baseStore.getState(),
+        conversations: {
+          [conversationId]: {
+            ...source,
+            workspaceId: UUID_A,
+            workspaceBinding: {
+              schemaVersion: 1,
+              workspaceId: UUID_A,
+              bindingRevision: 1,
+              projectId: null,
+            },
+            workspaceBootstrapState: 'none',
+          },
+        },
+      },
+    });
+    const prepared = store.prepareTurnAttempt(conversationId, 'delete me');
+    expect(prepared).not.toBeNull();
+    const attempt =
+      store.getState().conversations[conversationId]!.attempts[0]!;
+    const initialJournal: PersistedAgentAttemptJournalV3 = {
+      schema_version: 3,
+      phase: 'ready_for_round',
+      controller_generation: 0,
+      policy: {
+        schema_version: 1,
+        policy_version: 'agent-v1',
+        max_single_write_bytes: 32768,
+        max_batch_write_bytes: 512 * 1024,
+        max_attempt_write_bytes: 4 * 1024 * 1024,
+      },
+      root: {
+        schema_version: 1,
+        kind: 'workspace',
+        workspace_id: UUID_A,
+        workspace_binding_revision: 1,
+        project_id: null,
+        root_fingerprint_sha256: 'a'.repeat(64),
+        capabilities: ['file_read'],
+      },
+      tool_registry_version: 1,
+      toolset_sha256: 'b'.repeat(64),
+      transcript: {
+        schema_version: 1,
+        transcript_ref: UUID_C,
+        generation: 0,
+        transcript_sha256: 'c'.repeat(64),
+        transcript_bytes: 0,
+      },
+      round_index: 0,
+      round_lineage: {
+        schema_version: 2,
+        round_id: UUID_D,
+        round_index: 0,
+        launch_attempt: 1,
+        status: 'ready',
+        native_row_revision: null,
+      },
+      call_index: null,
+      batch: [],
+      frozen_grant_ids: [],
+      reserved_write_bytes: 0,
+      updated_at: T0,
+    };
+    const initialEvents: SessionEventV2[] = [
+      {
+        schema_version: 2,
+        event_id: '99999999-9999-4999-8999-999999999992',
+        attempt_id: attempt.attemptId,
+        seq: 0,
+        kind: 'round',
+        round_index: 0,
+        call_id: null,
+        status: 'waiting',
+        safe_summary_key: null,
+        arguments_sha256: null,
+        result_sha256: null,
+        approval_reference: null,
+        failure_code: null,
+        created_at: T0,
+      },
+    ];
+    const initial = store.checkpointAgentAttemptCAS({
+      cas: {
+        schema_version: 1,
+        conversation_id: conversationId,
+        task_id: attempt.turnId,
+        attempt_id: attempt.attemptId,
+        expected_controller_generation: 0,
+        expected_journal_revision: 0,
+        expected_session_generation: 1,
+        expected_session_sha256: 'd'.repeat(64),
+      },
+      expectedAttempt: attempt,
+      journal: initialJournal,
+      evidence: prepareEvidence(
+        {
+          schema_version: 1,
+          conversation_id: conversationId,
+          task_id: attempt.turnId,
+          attempt_id: attempt.attemptId,
+          expected_controller_generation: 0,
+          expected_journal_revision: 0,
+          expected_session_generation: 1,
+          expected_session_sha256: 'd'.repeat(64),
+        },
+        initialJournal,
+      ),
+      events: initialEvents,
+    });
+    expect(initial?.commit(nativeCommittedProof(store, 2))).toBe(true);
+    const currentAttempt =
+      store.getState().conversations[conversationId]!.attempts[0]!;
+    const activeJournal: PersistedAgentAttemptJournalV3 = {
+      ...initialJournal,
+      phase: 'round_in_flight',
+      controller_generation: 1,
+      round_lineage: {
+        ...initialJournal.round_lineage!,
+        status: 'active',
+        native_row_revision: null,
+      },
+    };
+    const activeCas: AgentControllerCASV1 = {
+      schema_version: 1,
+      conversation_id: conversationId,
+      task_id: currentAttempt.turnId,
+      attempt_id: currentAttempt.attemptId,
+      expected_controller_generation: 0,
+      expected_journal_revision: 1,
+      expected_session_generation: 2,
+      expected_session_sha256: store.getSessionAuthority()!.sessionSha256,
+    };
+    const beginRound = beginRoundPreflightForAttempt(
+      currentAttempt,
+      initialJournal,
+      activeCas,
+      '66666666-6666-4666-8666-666666666661',
+    );
+    const active = store.checkpointAgentAttemptCAS({
+      cas: activeCas,
+      expectedAttempt: currentAttempt,
+      journal: activeJournal,
+      evidence: beginRound,
+      events: initialEvents,
+    });
+    expect(active?.commit(nativeCommittedProof(store, 3))).toBe(true);
+    const afterActive =
+      store.getState().conversations[conversationId]!.attempts[0]!;
+    const terminalJournal: PersistedAgentAttemptJournalV3 = {
+      ...activeJournal,
+      phase: 'failed',
+      controller_generation: 2,
+      round_lineage: {
+        ...activeJournal.round_lineage!,
+        status: 'completed',
+        native_row_revision: 1,
+      },
+      transcript: {
+        ...activeJournal.transcript,
+        generation: 1,
+        transcript_sha256: 'e'.repeat(64),
+        transcript_bytes: 1,
+      },
+    };
+    const authority = store.getSessionAuthority()!;
+    const terminalCas: AgentControllerCASV1 = {
+      schema_version: 1,
+      conversation_id: conversationId,
+      task_id: currentAttempt.turnId,
+      attempt_id: currentAttempt.attemptId,
+      expected_controller_generation: 1,
+      expected_journal_revision: 2,
+      expected_session_generation: authority.generation,
+      expected_session_sha256: authority.sessionSha256,
+    };
+    expect(
+      store.enqueueAgentTranscriptCleanup({
+        conversationId,
+        attemptId: afterActive.attemptId,
+        expectedAttempt: afterActive,
+        cleanup: {
+          schema_version: 1,
+          cleanup_id: '66666666-6666-4666-8666-666666666664',
+          conversation_id: conversationId,
+          task_id: afterActive.turnId,
+          attempt_id: afterActive.attemptId,
+          transcript_ref: UUID_C,
+          transcript_sha256: activeJournal.transcript.transcript_sha256,
+          reason: 'failed',
+          created_at: T0,
+        },
+      }),
+    ).toBeNull();
+    expect(store.getState().agentTranscriptCleanupOutbox).toEqual([]);
+    const terminalCleanup: AgentTranscriptCleanupV1 = {
+      schema_version: 1,
+      cleanup_id: '66666666-6666-4666-8666-666666666665',
+      conversation_id: conversationId,
+      task_id: afterActive.turnId,
+      attempt_id: afterActive.attemptId,
+      transcript_ref: UUID_C,
+      transcript_sha256: 'e'.repeat(64),
+      reason: 'failed',
+      created_at: T0,
+    };
+    const terminalInput: AgentCASCheckpointInput = {
+      cas: terminalCas,
+      expectedAttempt: afterActive,
+      journal: terminalJournal,
+      evidence: completeEvidence(
+        terminalCas,
+        activeJournal,
+        terminalJournal,
+        'blocked',
+      ),
+      events: [
+        ...initialEvents,
+        {
+          ...initialEvents[0]!,
+          event_id: '66666666-6666-4666-8666-666666666661',
+          seq: 1,
+          status: 'running',
+        },
+        {
+          ...initialEvents[0]!,
+          event_id: '99999999-9999-4999-8999-999999999994',
+          seq: 2,
+          kind: 'terminal',
+          round_index: null,
+          status: 'failed',
+          failure_code: 'E_COMPLETION_LENGTH',
+        },
+      ],
+    };
+
+    const finalJournal: PersistedAgentAttemptJournalV3 = {
+      ...terminalJournal,
+      phase: 'final_response',
+    };
+    const finalEvidence = completeEvidence(
+      terminalCas,
+      activeJournal,
+      finalJournal,
+      'final',
+    );
+    const finalCleanup: AgentTranscriptCleanupV1 = {
+      ...terminalCleanup,
+      cleanup_id: '66666666-6666-4666-8666-666666666666',
+      reason: 'completed',
+    };
+    const finalEvent: SessionEventV2 = {
+      ...initialEvents[0]!,
+      event_id: '99999999-9999-4999-8999-999999999993',
+      seq: 2,
+      kind: 'terminal',
+      round_index: null,
+      status: 'ok',
+      failure_code: null,
+    };
+    const finalInput = {
+      cas: terminalCas,
+      expectedAttempt: afterActive,
+      journal: finalJournal,
+      evidence: finalEvidence,
+      events: [
+        ...initialEvents,
+        {
+          ...initialEvents[0]!,
+          event_id: '66666666-6666-4666-8666-666666666661',
+          seq: 1,
+          status: 'running' as const,
+        },
+        finalEvent,
+      ],
+      assistantMessage: {
+        id: 'atomic-final-message',
+        role: 'assistant' as const,
+        text: 'atomic final',
+        createdAt: T0,
+        attachments: [],
+        metadata: {
+          modelId: 'deepseek-v4-flash' as const,
+          latencyMs: 1,
+          finishReason: 'stop',
+          reasoning: 'checked atomically',
+        },
+      },
+      cleanup: finalCleanup,
+    };
+    const makeFinalStore = () =>
+      createChatStore({
+        now: () => T0,
+        sessionAuthority: authority,
+        initialState: store.getState(),
+      });
+
+    const committedFinalStore = makeFinalStore();
+    const committedFinal = committedFinalStore.completeAgentAttempt(finalInput);
+    expect(committedFinal).not.toBeNull();
+    expect(
+      committedFinal?.commit(nativeCommittedProof(committedFinalStore, 4)),
+    ).toBe(true);
+    const committedConversation =
+      committedFinalStore.getState().conversations[conversationId]!;
+    expect(committedConversation.attempts[0]).toMatchObject({
+      status: 'completed',
+      assistantMessageId: 'atomic-final-message',
+      failureCode: null,
+      agent: { phase: 'final_response' },
+    });
+    expect(committedConversation.messages.at(-1)?.text).toBe('atomic final');
+    expect(committedFinalStore.getState().sessionEvents?.at(-1)).toEqual(
+      finalEvent,
+    );
+    expect(committedFinalStore.getState().agentTranscriptCleanupOutbox).toEqual([
+      finalCleanup,
+    ]);
+    const committedSnapshot = committedFinalStore.getState();
+    expect(committedFinalStore.completeAgentAttempt(finalInput)).toBeNull();
+    expect(committedFinalStore.getState()).toBe(committedSnapshot);
+
+    const rolledBackFinalStore = makeFinalStore();
+    const beforeRollback = rolledBackFinalStore.getState();
+    const rolledBackFinal = rolledBackFinalStore.completeAgentAttempt(finalInput);
+    expect(rolledBackFinal).not.toBeNull();
+    expect(rolledBackFinal?.rollback()).toBe(true);
+    const rolledBackState = rolledBackFinalStore.getState();
+    expect(
+      rolledBackState.conversations[conversationId]?.attempts[0],
+    ).toBe(afterActive);
+    expect(rolledBackState.conversations[conversationId]?.messages).toBe(
+      beforeRollback.conversations[conversationId]?.messages,
+    );
+    expect(rolledBackState.sessionEvents).toBe(beforeRollback.sessionEvents);
+    expect(rolledBackState.agentTranscriptCleanupOutbox).toBe(
+      beforeRollback.agentTranscriptCleanupOutbox,
+    );
+
+    const projectionEvidence = prepareEvidence(terminalCas, finalJournal);
+    if (
+      projectionEvidence.kind !== 'prepare_agent_attempt' ||
+      finalEvidence.kind !== 'complete_agent_round_v2' ||
+      finalEvidence.result.status !== 'completed' ||
+      finalEvidence.result.outcome.kind !== 'final'
+    ) throw new Error('invalid recovery fixture');
+    const recoveryOperationId = '77777777-7777-4777-8777-777777777770';
+    const recoveryRequest = {
+      schema_version: 2 as const,
+      operation_id: recoveryOperationId,
+      controller_cas: terminalCas,
+      committed_checkpoint: {
+        schema_version: 1 as const,
+        journal_revision: terminalCas.expected_journal_revision,
+        session_generation: terminalCas.expected_session_generation,
+        session_sha256: terminalCas.expected_session_sha256,
+      },
+      target: {
+        schema_version: 2 as const,
+        kind: 'round' as const,
+        task_id: terminalCas.task_id,
+        attempt_id: terminalCas.attempt_id,
+        round_id: activeJournal.round_lineage!.round_id,
+        round_index: activeJournal.round_index,
+      },
+      action: 'reconcile' as const,
+      expected_round_revision: 1,
+      expected_execution_revision: null,
+      expected_transcript: activeJournal.transcript,
+      root: activeJournal.root,
+    };
+    const recoveredRound = {
+      schema_version: 2 as const,
+      kind: 'final' as const,
+      task_id: terminalCas.task_id,
+      attempt_id: terminalCas.attempt_id,
+      round_id: finalJournal.round_lineage!.round_id,
+      round_index: finalJournal.round_index,
+      launch_attempt: finalJournal.round_lineage!.launch_attempt,
+      result_round_revision:
+        finalJournal.round_lineage!.native_row_revision!,
+      transcript: finalJournal.transcript,
+      completion_receipt:
+        finalEvidence.result.outcome.completion_receipt,
+      text: finalEvidence.result.outcome.text,
+      reasoning: finalEvidence.result.outcome.reasoning,
+      assistant_text_sha256:
+        agentTextSHA256(finalEvidence.result.outcome.text)!,
+      reasoning_text_sha256:
+        agentTextSHA256(finalEvidence.result.outcome.reasoning)!,
+    };
+    const recoveryResult = {
+      schema_version: 2 as const,
+      status: 'resumed' as const,
+      operation_id: recoveryOperationId,
+      next_action: 'persist_final' as const,
+      attempt: projectionEvidence.result.attempt,
+      completed_round: recoveredRound,
+    };
+    const recoveryEvidence = validateAgentStoreTransition({
+      operation: 'recover_agent_attempt',
+      request: recoveryRequest,
+      result: recoveryResult,
+    });
+    if (recoveryEvidence === null) throw new Error('invalid recovery evidence');
+    const recoveredFinalStore = makeFinalStore();
+    const recoveredFinal = recoveredFinalStore.completeAgentAttempt({
+      ...finalInput,
+      evidence: recoveryEvidence,
+    });
+    expect(recoveredFinal).not.toBeNull();
+    expect(recoveredFinal?.rollback()).toBe(true);
+    const badDigestEvidence = {
+      ...recoveryEvidence,
+      result: {
+        ...recoveryResult,
+        completed_round: {
+          ...recoveredRound,
+          assistant_text_sha256: '0'.repeat(64),
+        },
+      },
+    } as AgentStoreTransitionEvidence;
+    const badDigestStore = makeFinalStore();
+    const badDigestBefore = badDigestStore.getState();
+    expect(
+      badDigestStore.completeAgentAttempt({
+        ...finalInput,
+        evidence: badDigestEvidence,
+      }),
+    ).toBeNull();
+    expect(badDigestStore.getState()).toBe(badDigestBefore);
+
+    const cancelOperationId = '77777777-7777-4777-8777-777777777771';
+    const cancelSourceEvent = {
+      schema_version: 2 as const,
+      event_id: cancelOperationId,
+      attempt_id: afterActive.attemptId,
+      seq: 2,
+      kind: 'cancel' as const,
+      round_index: 0,
+      call_id: null,
+      status: 'cancelled' as const,
+      safe_summary_key: null,
+      arguments_sha256: null,
+      result_sha256: null,
+      approval_reference: cancelOperationId,
+      failure_code: 'E_AGENT_CANCELLED' as const,
+      created_at: T0,
+    };
+    const cancelBaseState: ChatState = {
+      ...store.getState(),
+      sessionEvents: [
+        ...(store.getState().sessionEvents ?? []),
+        cancelSourceEvent,
+      ],
+    };
+    const cancelBaseSha = sessionSnapshotSHA256(
+      serializeChatState(cancelBaseState),
+    );
+    if (cancelBaseSha === null) throw new Error('invalid cancel base state');
+    const cancelAuthority = {
+      generation: 3,
+      sessionSha256: cancelBaseSha,
+    };
+    const cancelCas: AgentControllerCASV1 = {
+      ...terminalCas,
+      expected_session_generation: cancelAuthority.generation,
+      expected_session_sha256: cancelAuthority.sessionSha256,
+    };
+    const cancelledJournal: PersistedAgentAttemptJournalV3 = {
+      ...terminalJournal,
+      phase: 'cancelled',
+      round_lineage: {
+        ...terminalJournal.round_lineage!,
+        status: 'cancelled',
+        native_row_revision: 2,
+      },
+    };
+    const cancelTarget = {
+      schema_version: 2 as const,
+      kind: 'round' as const,
+      task_id: cancelCas.task_id,
+      attempt_id: cancelCas.attempt_id,
+      round_id: cancelledJournal.round_lineage!.round_id,
+      round_index: cancelledJournal.round_index,
+    };
+    const cancelRequest = {
+      schema_version: 2 as const,
+      operation_id: cancelOperationId,
+      controller_cas: cancelCas,
+      committed_checkpoint: {
+        schema_version: 1 as const,
+        journal_revision: cancelCas.expected_journal_revision,
+        session_generation: cancelCas.expected_session_generation,
+        session_sha256: cancelCas.expected_session_sha256,
+      },
+      target: cancelTarget,
+      cancel_token: {
+        schema_version: 2 as const,
+        issuer: 'completion_controller' as const,
+        source_event_id: cancelOperationId,
+        token: cancelOperationId,
+        task_id: cancelCas.task_id,
+        attempt_id: cancelCas.attempt_id,
+        expected_phase: 'round_in_flight' as const,
+        reason_code: 'E_AGENT_CANCELLED' as const,
+      },
+      expected_round_revision: 1,
+      expected_execution_revision: null,
+      expected_transcript: activeJournal.transcript,
+      root: activeJournal.root,
+    };
+    const cancelResult = {
+      schema_version: 2 as const,
+      status: 'cancelled' as const,
+      operation_id: cancelOperationId,
+      target: cancelTarget,
+      result_round_revision: 2,
+      result_execution_revision: null,
+      transcript: cancelledJournal.transcript,
+      receipt: null,
+      effect_may_have_occurred: false,
+      observed_checkpoint: cancelRequest.committed_checkpoint,
+    };
+    const cancelEvidence = validateAgentStoreTransition({
+      operation: 'cancel_agent_attempt',
+      request: cancelRequest,
+      result: cancelResult,
+    });
+    if (cancelEvidence === null) throw new Error('invalid cancel evidence');
+    const cancelCleanup: AgentTranscriptCleanupV1 = {
+      ...terminalCleanup,
+      cleanup_id: '66666666-6666-4666-8666-666666666667',
+      transcript_sha256: cancelledJournal.transcript.transcript_sha256,
+      reason: 'cancelled',
+    };
+    const cancelTerminalEvent: SessionEventV2 = {
+      ...initialEvents[0]!,
+      event_id: '99999999-9999-4999-8999-999999999990',
+      seq: 3,
+      kind: 'terminal',
+      round_index: null,
+      status: 'cancelled',
+      failure_code: 'E_AGENT_CANCELLED',
+    };
+    const cancelInput = {
+      cas: cancelCas,
+      expectedAttempt: afterActive,
+      journal: cancelledJournal,
+      evidence: cancelEvidence,
+      events: [...cancelBaseState.sessionEvents!, cancelTerminalEvent],
+      assistantMessage: null,
+      cleanup: cancelCleanup,
+    };
+    const makeCancelStore = () =>
+      createChatStore({
+        now: () => T0,
+        sessionAuthority: cancelAuthority,
+        initialState: cancelBaseState,
+      });
+    const cancelledStore = makeCancelStore();
+    const cancelled = cancelledStore.completeAgentAttempt(cancelInput);
+    expect(cancelled).not.toBeNull();
+    expect(cancelled?.commit(nativeCommittedProof(cancelledStore, 4))).toBe(true);
+    expect(cancelledStore.getState().conversations[conversationId]?.attempts[0]).toMatchObject({
+      status: 'cancelled',
+      assistantMessageId: null,
+      failureCode: null,
+      agent: { phase: 'cancelled' },
+    });
+    expect(cancelledStore.getState().sessionEvents?.at(-1)).toEqual(
+      cancelTerminalEvent,
+    );
+    expect(cancelledStore.getState().agentTranscriptCleanupOutbox).toEqual([
+      cancelCleanup,
+    ]);
+
+    const cancelledNegativeStore = makeCancelStore();
+    const cancelledNegativeBefore = cancelledNegativeStore.getState();
+    const cancelRequestedEvidence = validateAgentStoreTransition({
+      operation: 'cancel_agent_attempt',
+      request: cancelRequest,
+      result: {
+        ...cancelResult,
+        status: 'cancel_requested',
+      },
+    });
+    if (cancelRequestedEvidence === null) {
+      throw new Error('invalid cancel-requested evidence');
+    }
+    expect(
+      cancelledNegativeStore.completeAgentAttempt({
+        ...cancelInput,
+        evidence: cancelRequestedEvidence,
+      }),
+    ).toBeNull();
+    expect(
+      cancelledNegativeStore.completeAgentAttempt({
+        ...cancelInput,
+        assistantMessage: finalInput.assistantMessage,
+      }),
+    ).toBeNull();
+    expect(
+      cancelledNegativeStore.completeAgentAttempt({
+        ...cancelInput,
+        cleanup: undefined,
+      } as unknown as Parameters<ChatStore['completeAgentAttempt']>[0]),
+    ).toBeNull();
+    expect(cancelledNegativeStore.getState()).toBe(cancelledNegativeBefore);
+
+    const executeOperationId = '77777777-7777-4777-8777-777777777772';
+    const executeCallId = 'call-cancelled-by-executor';
+    const executeArgumentsSha = '6'.repeat(64);
+    const executeIdempotencyKey = '7'.repeat(64);
+    const executeRoundReceipt: CompletionRoundReceiptV1 = {
+      schemaVersion: 1,
+      transportSchemaVersion: 2,
+      turnId: afterActive.turnId,
+      attemptId: afterActive.attemptId,
+      roundId: activeJournal.round_lineage!.round_id,
+      roundIndex: 0,
+      providerRequestId: 'provider-execute-request',
+      providerResponseId: 'provider-execute-response',
+      requestedModel: 'deepseek-v4-flash',
+      model: 'deepseek-v4-flash',
+      thinkingMode: 'high',
+      finishReason: 'tool_calls',
+      latencyMs: 2,
+      visibleHistorySha256: 'f'.repeat(64),
+      modelInputSha256: '1'.repeat(64),
+      requestBodySha256: '2'.repeat(64),
+      projectContextReceipt: null,
+    };
+    const executionJournal: PersistedAgentAttemptJournalV3 = {
+      ...activeJournal,
+      phase: 'execution_intent',
+      controller_generation: 2,
+      round_lineage: {
+        ...activeJournal.round_lineage!,
+        status: 'completed',
+        native_row_revision: 1,
+      },
+      transcript: {
+        ...activeJournal.transcript,
+        generation: 1,
+        transcript_sha256: '4'.repeat(64),
+        transcript_bytes: 40,
+      },
+      call_index: 0,
+      batch: [
+        {
+          schema_version: 3,
+          call_id: executeCallId,
+          call_index: 0,
+          name: 'read_file',
+          arguments_sha256: executeArgumentsSha,
+          safe_summary_key: 'agent.read_file',
+          access: 'auto',
+          approval_token: null,
+          approval_decision: 'pending',
+          approval_reference: null,
+          idempotency_key: executeIdempotencyKey,
+          native_row_revision: 1,
+          receipt: null,
+        },
+      ],
+    };
+    const executionAttempt: TurnAttemptV1 = {
+      ...afterActive,
+      status: 'prepared',
+      visibleHistorySha256: executeRoundReceipt.visibleHistorySha256,
+      activeRound: null,
+      rounds: [executeRoundReceipt],
+      journalRevision: 3,
+      agent: executionJournal,
+    };
+    const executeRunningEvent: SessionEventV2 = {
+      schema_version: 2,
+      event_id: executeOperationId,
+      attempt_id: executionAttempt.attemptId,
+      seq: 2,
+      kind: 'tool_call',
+      round_index: 0,
+      call_id: executeCallId,
+      status: 'running',
+      safe_summary_key: 'agent.read_file',
+      arguments_sha256: executeArgumentsSha,
+      result_sha256: null,
+      approval_reference: null,
+      failure_code: null,
+      created_at: T0,
+    };
+    const executeBaseState: ChatState = {
+      ...store.getState(),
+      conversations: {
+        ...store.getState().conversations,
+        [conversationId]: {
+          ...store.getState().conversations[conversationId]!,
+          attempts: [executionAttempt],
+        },
+      },
+      sessionEvents: [
+        ...(store.getState().sessionEvents ?? []),
+        executeRunningEvent,
+      ],
+    };
+    const executeBaseSha = sessionSnapshotSHA256(
+      serializeChatState(executeBaseState),
+    );
+    if (executeBaseSha === null) throw new Error('invalid execute base state');
+    const executeAuthority = {
+      generation: 4,
+      sessionSha256: executeBaseSha,
+    };
+    const executeCas: AgentControllerCASV1 = {
+      schema_version: 1,
+      conversation_id: conversationId,
+      task_id: executionAttempt.turnId,
+      attempt_id: executionAttempt.attemptId,
+      expected_controller_generation: 2,
+      expected_journal_revision: 3,
+      expected_session_generation: executeAuthority.generation,
+      expected_session_sha256: executeAuthority.sessionSha256,
+    };
+    const executeRequest = {
+      schema_version: 2 as const,
+      operation_id: executeOperationId,
+      controller_cas: executeCas,
+      committed_checkpoint: {
+        schema_version: 1 as const,
+        journal_revision: executeCas.expected_journal_revision,
+        session_generation: executeCas.expected_session_generation,
+        session_sha256: executeCas.expected_session_sha256,
+      },
+      task_id: executeCas.task_id,
+      conversation_id: executeCas.conversation_id,
+      attempt_id: executeCas.attempt_id,
+      round_id: executionJournal.round_lineage!.round_id,
+      round_index: executionJournal.round_index,
+      batch_kind: 'read_only_batch' as const,
+      manifest_sha256: null,
+      expected_batch_revision: 1,
+      call_index: 0,
+      call_id: executeCallId,
+      name: 'read_file',
+      arguments_sha256: executeArgumentsSha,
+      idempotency_key: executeIdempotencyKey,
+      expected_execution_revision: 1,
+      transcript: executionJournal.transcript,
+      root: executionJournal.root,
+      approval_reference: null,
+    };
+    const executeCancelledReceipt = {
+      schema_version: 1 as const,
+      call_id: executeCallId,
+      name: 'read_file',
+      arguments_sha256: executeArgumentsSha,
+      result_sha256: '8'.repeat(64),
+      result_bytes: 0,
+      truncated: false,
+      duration_ms: 3,
+      outcome: 'cancelled' as const,
+      failure_code: 'E_AGENT_CANCELLED' as const,
+      approval_reference: null,
+    };
+    const executedTranscript = {
+      ...executionJournal.transcript,
+      generation: 2,
+      transcript_sha256: '5'.repeat(64),
+      transcript_bytes: 64,
+    };
+    const executeCancelledResult = {
+      schema_version: 2 as const,
+      status: 'cancelled' as const,
+      operation_id: executeOperationId,
+      task_id: executeCas.task_id,
+      attempt_id: executeCas.attempt_id,
+      round_id: executeRequest.round_id,
+      round_index: executeRequest.round_index,
+      call_index: 0,
+      call_id: executeCallId,
+      name: 'read_file',
+      idempotency_key: executeIdempotencyKey,
+      result_execution_revision: 2,
+      transcript: executedTranscript,
+      receipt: executeCancelledReceipt,
+      effect_may_have_occurred: false as const,
+    };
+    const executeCancelledEvidence = validateAgentStoreTransition({
+      operation: 'execute_agent_tool',
+      request: executeRequest,
+      result: executeCancelledResult,
+    });
+    if (executeCancelledEvidence === null) {
+      throw new Error('invalid execute-cancelled evidence');
+    }
+    const executedCancelledJournal: PersistedAgentAttemptJournalV3 = {
+      ...executionJournal,
+      phase: 'cancelled',
+      controller_generation: 3,
+      transcript: executedTranscript,
+      batch: [
+        {
+          ...executionJournal.batch[0]!,
+          native_row_revision: 2,
+          receipt: executeCancelledReceipt,
+        },
+      ],
+    };
+    const executeCleanup: AgentTranscriptCleanupV1 = {
+      ...terminalCleanup,
+      cleanup_id: '66666666-6666-4666-8666-666666666668',
+      transcript_sha256: executedTranscript.transcript_sha256,
+      reason: 'cancelled',
+    };
+    const executeResultEvent: SessionEventV2 = {
+      schema_version: 2,
+      event_id: '99999999-9999-4999-8999-999999999988',
+      attempt_id: executionAttempt.attemptId,
+      seq: 3,
+      kind: 'tool_result',
+      round_index: 0,
+      call_id: executeCallId,
+      status: 'cancelled',
+      safe_summary_key: 'agent.read_file',
+      arguments_sha256: executeArgumentsSha,
+      result_sha256: executeCancelledReceipt.result_sha256,
+      approval_reference: null,
+      failure_code: executeCancelledReceipt.failure_code,
+      created_at: T0,
+    };
+    const executeTerminalEvent: SessionEventV2 = {
+      ...initialEvents[0]!,
+      event_id: '99999999-9999-4999-8999-999999999989',
+      seq: 4,
+      kind: 'terminal',
+      round_index: null,
+      status: 'cancelled',
+      failure_code: executeCancelledReceipt.failure_code,
+    };
+    const executeFinalInput = {
+      cas: executeCas,
+      expectedAttempt: executionAttempt,
+      journal: executedCancelledJournal,
+      evidence: executeCancelledEvidence,
+      // A is already durable; this candidate atomically owns B then C.
+      events: [executeResultEvent, executeTerminalEvent],
+      assistantMessage: null,
+      cleanup: executeCleanup,
+    };
+    const makeExecuteStore = () =>
+      createChatStore({
+        now: () => T0,
+        sessionAuthority: executeAuthority,
+        initialState: executeBaseState,
+      });
+    const executeCancelledStore = makeExecuteStore();
+    const executeCancelled =
+      executeCancelledStore.completeAgentAttempt(executeFinalInput);
+    expect(executeCancelled).not.toBeNull();
+    expect(
+      executeCancelled?.commit(nativeCommittedProof(executeCancelledStore, 5)),
+    ).toBe(true);
+    expect(
+      executeCancelledStore.getState().conversations[conversationId]?.attempts[0],
+    ).toMatchObject({
+      status: 'cancelled',
+      assistantMessageId: null,
+      failureCode: null,
+      agent: {
+        phase: 'cancelled',
+        transcript: executedTranscript,
+        batch: [{ receipt: executeCancelledReceipt }],
+      },
+    });
+    expect(executeCancelledStore.getState().agentTranscriptCleanupOutbox).toEqual([
+      executeCleanup,
+    ]);
+
+    const executeNegativeStore = makeExecuteStore();
+    const executeNegativeBefore = executeNegativeStore.getState();
+    for (const invalidEvents of [
+      [executeTerminalEvent],
+      [executeResultEvent],
+      [
+        { ...executeResultEvent, event_id: executeOperationId },
+        executeTerminalEvent,
+      ],
+      [executeTerminalEvent, executeResultEvent],
+    ]) {
+      expect(
+        executeNegativeStore.completeAgentAttempt({
+          ...executeFinalInput,
+          events: invalidEvents,
+        }),
+      ).toBeNull();
+    }
+    const nonterminalResults = [
+      {
+        ...executeCancelledResult,
+        status: 'running' as const,
+        receipt: null,
+        effect_may_have_occurred: false,
+      },
+      {
+        ...executeCancelledResult,
+        status: 'cancel_requested' as const,
+        receipt: null,
+        effect_may_have_occurred: true,
+      },
+      {
+        ...executeCancelledResult,
+        status: 'unknown' as const,
+        receipt: null,
+        effect_may_have_occurred: false as const,
+        failure_code: 'E_AGENT_LEDGER' as const,
+      },
+      {
+        ...executeCancelledResult,
+        status: 'ambiguous' as const,
+        receipt: {
+          ...executeCancelledReceipt,
+          outcome: 'ambiguous' as const,
+          failure_code: 'E_AGENT_EXECUTION_AMBIGUOUS' as const,
+        },
+        effect_may_have_occurred: true as const,
+        failure_code: 'E_AGENT_EXECUTION_AMBIGUOUS' as const,
+      },
+    ];
+    for (const nonterminalResult of nonterminalResults) {
+      const nonterminalEvidence = validateAgentStoreTransition({
+        operation: 'execute_agent_tool',
+        request: executeRequest,
+        result: nonterminalResult,
+      });
+      if (nonterminalEvidence === null) {
+        throw new Error('invalid nonterminal execute evidence');
+      }
+      expect(
+        executeNegativeStore.completeAgentAttempt({
+          ...executeFinalInput,
+          evidence: nonterminalEvidence,
+        }),
+      ).toBeNull();
+    }
+    expect(
+      executeNegativeStore.completeAgentAttempt({
+        ...executeFinalInput,
+        assistantMessage: finalInput.assistantMessage,
+      }),
+    ).toBeNull();
+    expect(
+      executeNegativeStore.completeAgentAttempt({
+        ...executeFinalInput,
+        cleanup: undefined,
+      } as unknown as Parameters<ChatStore['completeAgentAttempt']>[0]),
+    ).toBeNull();
+    expect(executeNegativeStore.getState()).toBe(executeNegativeBefore);
+
+    const rejectedFinalStore = makeFinalStore();
+    const rejectedBefore = rejectedFinalStore.getState();
+    expect(
+      rejectedFinalStore.completeAgentAttempt({
+        ...finalInput,
+        cleanup: undefined,
+      } as unknown as Parameters<ChatStore['completeAgentAttempt']>[0]),
+    ).toBeNull();
+    if (
+      finalEvidence.kind !== 'complete_agent_round_v2' ||
+      finalEvidence.result.status !== 'completed' ||
+      finalEvidence.result.outcome.kind !== 'final'
+    ) throw new Error('invalid final evidence fixture');
+    const finalResult = finalEvidence.result;
+    if (
+      finalResult.status !== 'completed' ||
+      finalResult.outcome.kind !== 'final'
+    ) throw new Error('invalid final evidence fixture');
+    expect(
+      rejectedFinalStore.completeAgentAttempt({
+        ...finalInput,
+        evidence: {
+          ...finalEvidence,
+          result: {
+            ...finalResult,
+            outcome: {
+              ...finalResult.outcome,
+              completion_receipt: {
+                ...finalResult.outcome.completion_receipt,
+                latency_ms: 2,
+              },
+            },
+          },
+        } as AgentStoreTransitionEvidence,
+      }),
+    ).toBeNull();
+    expect(
+      rejectedFinalStore.completeAgentAttempt({
+        ...finalInput,
+        assistantMessage: {
+          ...finalInput.assistantMessage,
+          text: 'digest-mismatched text',
+        },
+      }),
+    ).toBeNull();
+    expect(
+      rejectedFinalStore.completeAgentAttempt({
+        ...finalInput,
+        cas: {
+          ...terminalCas,
+          expected_journal_revision:
+            terminalCas.expected_journal_revision - 1,
+        },
+      }),
+    ).toBeNull();
+    expect(rejectedFinalStore.getState()).toBe(rejectedBefore);
+
+    const terminalWithoutCleanup = store.checkpointAgentAttemptCAS(terminalInput);
+    expect(terminalWithoutCleanup).toBeNull();
+    const terminal = store.completeAgentAttempt({
+      ...terminalInput,
+      journal: terminalJournal,
+      evidence: terminalInput.evidence as AgentStoreTransitionEvidence,
+      assistantMessage: null,
+      cleanup: terminalCleanup,
+    });
+    expect(terminal?.commit(nativeCommittedProof(store, 4))).toBe(true);
+    expect(store.getState().agentTranscriptCleanupOutbox).toEqual([
+      terminalCleanup,
+    ]);
+    const wrongCleanupReason = JSON.parse(store.serialize()) as {
+      agent_transcript_cleanup_outbox: Array<{ reason: string }>;
+    };
+    wrongCleanupReason.agent_transcript_cleanup_outbox[0]!.reason = 'completed';
+    expect(() => hydrateChatState(wrongCleanupReason)).toThrow(/terminal attempt phase/);
+    const storedTerminalCleanup = store.getState().agentTranscriptCleanupOutbox![0]!;
+    expect(
+      store.acknowledgeAgentTranscriptCleanup(
+        storedTerminalCleanup.cleanup_id,
+        storedTerminalCleanup,
+        undefined as unknown as NativeSessionCommitProofV1,
+        undefined as unknown as NativeAgentDiscardProofV1,
+      ),
+    ).toBe(false);
+    expect(store.getState().agentTranscriptCleanupOutbox).toEqual([
+      terminalCleanup,
+    ]);
+    const withoutDiscardEvidence =
+      store.acknowledgeAgentTranscriptCleanupTransaction(
+        storedTerminalCleanup.cleanup_id,
+        storedTerminalCleanup,
+      );
+    expect(
+      withoutDiscardEvidence?.commit(
+        nativeCommittedProof(store, 5),
+        undefined as unknown as NativeAgentDiscardProofV1,
+      ),
+    ).toBe(false);
+    expect(withoutDiscardEvidence?.rollback()).toBe(true);
+    const mismatchedDiscardEvidence =
+      store.acknowledgeAgentTranscriptCleanupTransaction(
+        storedTerminalCleanup.cleanup_id,
+        storedTerminalCleanup,
+      );
+    expect(
+      mismatchedDiscardEvidence?.commit(nativeCommittedProof(store, 5), {
+        ...nativeDiscardProof(storedTerminalCleanup, afterActive.turnId),
+        transcript_ref: UUID_D,
+      }),
+    ).toBe(false);
+    expect(mismatchedDiscardEvidence?.rollback()).toBe(true);
+    const acknowledgement = store.acknowledgeAgentTranscriptCleanupTransaction(
+      storedTerminalCleanup.cleanup_id,
+      storedTerminalCleanup,
+    );
+    expect(
+      acknowledgement?.commit(
+        nativeCommittedProof(store, 5),
+        nativeDiscardProof(storedTerminalCleanup, afterActive.turnId),
+      ),
+    ).toBe(true);
+    expect(store.getState().agentTranscriptCleanupOutbox).toEqual([]);
+    const owned = store.getState().conversations[conversationId]!;
+    expect(owned.attempts[0]?.status).toBe('failed');
+    expect(owned.attempts[0]?.failureCode).toBe('E_COMPLETION_LENGTH');
+    const recoveredBlocked = hydrateChatState(store.serialize());
+    expect(
+      recoveredBlocked.conversations[conversationId]?.attempts[0]?.failureCode,
+    ).toBe('E_COMPLETION_LENGTH');
+    expect((recoveredBlocked.sessionEvents ?? []).at(-1)?.failure_code).toBe(
+      'E_COMPLETION_LENGTH',
+    );
+    const cleanup: AgentTranscriptCleanupV1 = {
+      schema_version: 1,
+      cleanup_id: '66666666-6666-4666-8666-666666666666',
+      conversation_id: conversationId,
+      task_id: afterActive.turnId,
+      attempt_id: afterActive.attemptId,
+      transcript_ref: UUID_C,
+      transcript_sha256: 'e'.repeat(64),
+      reason: 'conversation_deleted',
+      created_at: T0,
+    };
+    const eventsBeforeDeletion = store.getState().sessionEvents;
+    const deletion = store.deleteConversationWithAgentCleanup({
+      conversationId,
+      expectedConversation: owned,
+      cleanup: [cleanup],
+    });
+    expect(deletion?.rollback()).toBe(true);
+    expect(store.getState().sessionEvents).toBe(eventsBeforeDeletion);
+    const committedDeletion = store.deleteConversationWithAgentCleanup({
+      conversationId,
+      expectedConversation: owned,
+      cleanup: [cleanup],
+    });
+    expect(committedDeletion?.commit(nativeCommittedProof(store, 6))).toBe(true);
+    expect(store.getState().conversations[conversationId]).toBeUndefined();
+    expect(store.getState().agentTranscriptCleanupOutbox).toEqual([cleanup]);
+    expect(
+      hydrateChatState(store.serialize()).agentTranscriptCleanupOutbox,
+    ).toEqual([cleanup]);
+    const restarted = createChatStore({
+      initialState: hydrateChatState(store.serialize()),
+      sessionAuthority: store.getSessionAuthority()!,
+    });
+    const detachedCleanup = restarted.getState().agentTranscriptCleanupOutbox![0]!;
+    const restartedAcknowledgement =
+      restarted.acknowledgeAgentTranscriptCleanupTransaction(
+        detachedCleanup.cleanup_id,
+        detachedCleanup,
+      );
+    expect(
+      restartedAcknowledgement?.commit(
+        nativeCommittedProof(restarted, 7),
+        nativeDiscardProof(detachedCleanup, '99999999-9999-4999-8999-999999999999'),
+      ),
+    ).toBe(false);
+    expect(restartedAcknowledgement?.rollback()).toBe(true);
+    const restartedCommit =
+      restarted.acknowledgeAgentTranscriptCleanupTransaction(
+        detachedCleanup.cleanup_id,
+        detachedCleanup,
+      );
+    expect(
+      restartedCommit?.commit(
+        nativeCommittedProof(restarted, 7),
+        nativeDiscardProof(detachedCleanup, detachedCleanup.task_id),
+      ),
+    ).toBe(true);
+    expect(restarted.getState().agentTranscriptCleanupOutbox).toEqual([]);
+  });
+
+  test('persists a begin-round preflight event before any post result', () => {
+    const baseStore = createChatStore({
+      now: () => T0,
+      createId: () => UUID_A,
+      createLifecycleId: kind =>
+        kind === 'turn' ? UUID_B : kind === 'attempt' ? UUID_C : UUID_D,
+    });
+    const conversationId = baseStore.createConversation();
+    const source = baseStore.getState().conversations[conversationId]!;
+    const store = createChatStore({
+      now: () => T0,
+      sessionAuthority: { generation: 1, sessionSha256: 'd'.repeat(64) },
+      initialState: {
+        ...baseStore.getState(),
+        conversations: {
+          [conversationId]: {
+            ...source,
+            workspaceId: UUID_A,
+            workspaceBinding: {
+              schemaVersion: 1,
+              workspaceId: UUID_A,
+              bindingRevision: 1,
+              projectId: null,
+            },
+            workspaceBootstrapState: 'none',
+          },
+        },
+      },
+    });
+    expect(store.prepareTurnAttempt(conversationId, 'preflight')).not.toBeNull();
+    const attempt = store.getState().conversations[conversationId]!.attempts[0]!;
+    const frozenHistory = projectAgentVisibleHistory(
+      store.getState().conversations[conversationId]!,
+      attempt,
+    );
+    if (frozenHistory === null) throw new Error('invalid frozen history fixture');
+    const root = {
+      schema_version: 1 as const,
+      kind: 'workspace' as const,
+      workspace_id: UUID_A,
+      workspace_binding_revision: 1,
+      project_id: null,
+      root_fingerprint_sha256: 'a'.repeat(64),
+      capabilities: ['file_read'] as const,
+    };
+    const transcript = {
+      schema_version: 1 as const,
+      transcript_ref: UUID_C,
+      generation: 0,
+      transcript_sha256: 'c'.repeat(64),
+      transcript_bytes: 0,
+    };
+    const journal: PersistedAgentAttemptJournalV3 = {
+      schema_version: 3,
+      phase: 'round_in_flight',
+      controller_generation: 1,
+      policy: {
+        schema_version: 1,
+        policy_version: 'agent-v1',
+        max_single_write_bytes: 32768,
+        max_batch_write_bytes: 512 * 1024,
+        max_attempt_write_bytes: 4 * 1024 * 1024,
+      },
+      root,
+      tool_registry_version: 1,
+      toolset_sha256: 'b'.repeat(64),
+      transcript,
+      round_index: 0,
+      round_lineage: {
+        schema_version: 2,
+        round_id: UUID_D,
+        round_index: 0,
+        launch_attempt: 1,
+        status: 'active',
+        native_row_revision: null,
+      },
+      call_index: null,
+      batch: [],
+      frozen_grant_ids: [],
+      reserved_write_bytes: 0,
+      updated_at: T0,
+    };
+    const readyJournal: PersistedAgentAttemptJournalV3 = {
+      ...journal,
+      phase: 'ready_for_round',
+      controller_generation: 0,
+      round_lineage: null,
+    };
+    const prepareCas: AgentControllerCASV1 = {
+      schema_version: 1,
+      conversation_id: conversationId,
+      task_id: attempt.turnId,
+      attempt_id: attempt.attemptId,
+      expected_controller_generation: 0,
+      expected_journal_revision: 0,
+      expected_session_generation: 1,
+      expected_session_sha256: 'd'.repeat(64),
+    };
+    const readyEvent: SessionEventV2 = {
+      schema_version: 2,
+      event_id: '99999999-9999-4999-8999-999999999995',
+      attempt_id: attempt.attemptId,
+      seq: 0,
+      kind: 'round',
+      round_index: 0,
+      call_id: null,
+      status: 'waiting',
+      safe_summary_key: null,
+      arguments_sha256: null,
+      result_sha256: null,
+      approval_reference: null,
+      failure_code: null,
+      created_at: T0,
+    };
+    const unpreparedPreflight = beginRoundPreflightForAttempt(
+      attempt,
+      journal,
+      prepareCas,
+      '66666666-6666-4666-8666-66666666665f',
+    );
+    expect(
+      store.checkpointAgentRound({
+        cas: prepareCas,
+        expectedAttempt: attempt,
+        journal,
+        events: [],
+        evidence: unpreparedPreflight,
+      }),
+    ).toBeNull();
+    const prepared = store.initializeAgentAttempt({
+      cas: prepareCas,
+      expectedAttempt: attempt,
+      journal: readyJournal,
+      evidence: prepareEvidence(prepareCas, readyJournal),
+      events: [readyEvent],
+    });
+    expect(prepared?.commit(nativeCommittedProof(store, 2))).toBe(true);
+    const preparedAttempt = store.getState().conversations[conversationId]!.attempts[0]!;
+    const preflightCas: AgentControllerCASV1 = {
+      schema_version: 1,
+      conversation_id: conversationId,
+      task_id: preparedAttempt.turnId,
+      attempt_id: preparedAttempt.attemptId,
+      expected_controller_generation: 0,
+      expected_journal_revision: 1,
+      expected_session_generation: 2,
+      expected_session_sha256: store.getSessionAuthority()!.sessionSha256,
+    };
+    const initialRoundPreflight = (
+      roundIndex: number,
+      expectedRoundRevision: number,
+      operationId: string,
+    ): AgentControllerPreflightV1 | null =>
+      validateAgentControllerPreflight({
+        schema_version: 1,
+        source: 'completion_controller',
+        kind: 'begin_round',
+        operation_id: operationId,
+        base_cas: preflightCas,
+        conversation_id: conversationId,
+        task_id: preparedAttempt.turnId,
+        attempt_id: preparedAttempt.attemptId,
+        round_id: UUID_D,
+        round_index: roundIndex,
+        launch_attempt: 1,
+        expected_round_revision: expectedRoundRevision,
+        transport_schema_version: 2,
+        model: preparedAttempt.modelId,
+        thinking_mode: preparedAttempt.thinkingMode,
+        visible_history_sha256: frozenHistory.digest,
+        visible_message_count: frozenHistory.count,
+        project_context_sha256: null,
+        transcript,
+        root,
+        registry_version: 1,
+        toolset_sha256: readyJournal.toolset_sha256,
+      });
+    const preflight = initialRoundPreflight(
+      0,
+      0,
+      '66666666-6666-4666-8666-666666666660',
+    );
+    expect(preflight).not.toBeNull();
+    if (preflight === null) throw new Error('invalid initial-round preflight');
+    expect(
+      store.checkpointAgentRound({
+        cas: {
+          ...preflight.base_cas,
+          expected_journal_revision: 0,
+          expected_session_generation: 1,
+          expected_session_sha256: 'd'.repeat(64),
+        },
+        expectedAttempt: preparedAttempt,
+        journal,
+        events: [readyEvent],
+        evidence: preflight,
+      }),
+    ).toBeNull();
+    const wrongIndexPreflight = initialRoundPreflight(
+      1,
+      0,
+      '66666666-6666-4666-8666-666666666661',
+    );
+    const wrongRevisionPreflight = initialRoundPreflight(
+      0,
+      1,
+      '66666666-6666-4666-8666-666666666662',
+    );
+    if (wrongIndexPreflight === null || wrongRevisionPreflight === null) {
+      throw new Error('invalid rejected initial-round preflight fixture');
+    }
+    expect(
+      store.checkpointAgentRound({
+        cas: preflightCas,
+        expectedAttempt: preparedAttempt,
+        journal: {
+          ...journal,
+          round_index: 1,
+          round_lineage: {
+            ...journal.round_lineage!,
+            round_index: 1,
+          },
+        },
+        events: [readyEvent],
+        evidence: wrongIndexPreflight,
+      }),
+    ).toBeNull();
+    expect(
+      store.checkpointAgentRound({
+        cas: preflightCas,
+        expectedAttempt: preparedAttempt,
+        journal,
+        events: [readyEvent],
+        evidence: wrongRevisionPreflight,
+      }),
+    ).toBeNull();
+    const transaction = store.checkpointAgentRound({
+      cas: preflight.base_cas,
+      expectedAttempt: preparedAttempt,
+      journal,
+      events: [readyEvent],
+      evidence: preflight,
+    });
+    expect(transaction).not.toBeNull();
+    expect(
+      transaction?.commit(nativeCommittedProof(store, 3)),
+    ).toBe(true);
+    expect(
+      store.getState().sessionEvents?.some(
+        event =>
+          event.event_id === preflight.operation_id &&
+          event.kind === 'round' &&
+          event.status === 'running',
+      ),
+    ).toBe(true);
+  });
+
+  test('starts the next round directly from a fully settled tool batch', () => {
+    const seed = createChatStore({
+      now: () => T0,
+      createId: () => UUID_A,
+      createLifecycleId: kind =>
+        kind === 'turn' ? UUID_B : kind === 'attempt' ? UUID_C : UUID_D,
+    });
+    const conversationId = seed.createConversation();
+    const source = seed.getState().conversations[conversationId]!;
+    const preparer = createChatStore({
+      now: () => T0,
+      sessionAuthority: { generation: 1, sessionSha256: 'd'.repeat(64) },
+      initialState: {
+        ...seed.getState(),
+        conversations: {
+          [conversationId]: {
+            ...source,
+            workspaceId: UUID_A,
+            workspaceBinding: {
+              schemaVersion: 1,
+              workspaceId: UUID_A,
+              bindingRevision: 1,
+              projectId: null,
+            },
+            workspaceBootstrapState: 'none',
+          },
+        },
+      },
+    });
+    expect(preparer.prepareTurnAttempt(conversationId, 'next round')).not.toBeNull();
+    const preparedAttempt = preparer.getState().conversations[conversationId]!.attempts[0]!;
+    const root = {
+      schema_version: 1 as const,
+      kind: 'workspace' as const,
+      workspace_id: UUID_A,
+      workspace_binding_revision: 1,
+      project_id: null,
+      root_fingerprint_sha256: 'a'.repeat(64),
+      capabilities: ['file_read', 'file_write'] as const,
+    };
+    const transcript = {
+      schema_version: 1 as const,
+      transcript_ref: UUID_C,
+      generation: 1,
+      transcript_sha256: 'b'.repeat(64),
+      transcript_bytes: 12,
+    };
+    const callId = 'call-direct';
+    const argumentsSha256 = 'c'.repeat(64);
+    const resultSha256 = 'e'.repeat(64);
+    const currentJournal: PersistedAgentAttemptJournalV3 = {
+      schema_version: 3,
+      phase: 'tool_result_pending',
+      controller_generation: 0,
+      policy: {
+        schema_version: 1,
+        policy_version: 'agent-v1',
+        max_single_write_bytes: 32768,
+        max_batch_write_bytes: 512 * 1024,
+        max_attempt_write_bytes: 4 * 1024 * 1024,
+      },
+      root,
+      tool_registry_version: 1,
+      toolset_sha256: 'f'.repeat(64),
+      transcript,
+      round_index: 0,
+      round_lineage: {
+        schema_version: 2,
+        round_id: UUID_D,
+        round_index: 0,
+        launch_attempt: 1,
+        status: 'completed',
+        native_row_revision: 1,
+      },
+      call_index: 0,
+      batch: [
+        {
+          schema_version: 3,
+          call_index: 0,
+          call_id: callId,
+          name: 'write_file',
+          arguments_sha256: argumentsSha256,
+          safe_summary_key: 'agent.write_file',
+          access: 'conversation_confirm',
+          approval_token: 'approval-next-round',
+          approval_decision: 'allow_once',
+          approval_reference: '99999999-9999-4999-8999-999999999994',
+          idempotency_key: '1'.repeat(64),
+          native_row_revision: 1,
+          receipt: {
+            schema_version: 1,
+            call_id: callId,
+            name: 'write_file',
+            arguments_sha256: argumentsSha256,
+            result_sha256: resultSha256,
+            result_bytes: 12,
+            truncated: false,
+            duration_ms: 1,
+            outcome: 'ok',
+            failure_code: null,
+            approval_reference: '99999999-9999-4999-8999-999999999994',
+          },
+        },
+      ],
+      frozen_grant_ids: [],
+      reserved_write_bytes: 123,
+      updated_at: T0,
+    };
+    const attempt: TurnAttemptV1 = {
+      ...preparedAttempt,
+      visibleHistorySha256: '9'.repeat(64),
+      rounds: [
+        {
+          schemaVersion: 1,
+          transportSchemaVersion: 2,
+          turnId: preparedAttempt.turnId,
+          attemptId: preparedAttempt.attemptId,
+          roundId: UUID_D,
+          roundIndex: 0,
+          providerRequestId: '77777777-7777-4777-8777-777777777771',
+          providerResponseId: '77777777-7777-4777-8777-777777777772',
+          requestedModel: 'deepseek-v4-flash',
+          model: 'deepseek-v4-flash',
+          thinkingMode: 'high',
+          finishReason: 'tool_calls',
+          latencyMs: 1,
+          visibleHistorySha256: '9'.repeat(64),
+          modelInputSha256: '1'.repeat(64),
+          requestBodySha256: '2'.repeat(64),
+          projectContextReceipt: null,
+        },
+      ],
+      agent: currentJournal,
+      journalRevision: 0,
+    };
+    const roundEvent: SessionEventV2 = {
+      schema_version: 2,
+      event_id: '99999999-9999-4999-8999-999999999995',
+      attempt_id: attempt.attemptId,
+      seq: 0,
+      kind: 'round',
+      round_index: 0,
+      call_id: null,
+      status: 'running',
+      safe_summary_key: null,
+      arguments_sha256: null,
+      result_sha256: null,
+      approval_reference: null,
+      failure_code: null,
+      created_at: T0,
+    };
+    const approvalEvent: SessionEventV2 = {
+      schema_version: 2,
+      event_id: '99999999-9999-4999-8999-999999999994',
+      attempt_id: attempt.attemptId,
+      seq: 1,
+      kind: 'approval',
+      round_index: 0,
+      call_id: callId,
+      status: 'approval',
+      safe_summary_key: 'agent.write_file',
+      arguments_sha256: argumentsSha256,
+      result_sha256: null,
+      approval_reference: '99999999-9999-4999-8999-999999999994',
+      failure_code: null,
+      created_at: T0,
+    };
+    const toolEvent: SessionEventV2 = {
+      schema_version: 2,
+      event_id: '99999999-9999-4999-8999-999999999996',
+      attempt_id: attempt.attemptId,
+      seq: 2,
+      kind: 'tool_call',
+      round_index: 0,
+      call_id: callId,
+      status: 'waiting',
+      safe_summary_key: 'agent.write_file',
+      arguments_sha256: argumentsSha256,
+      result_sha256: null,
+      approval_reference: null,
+      failure_code: null,
+      created_at: T0,
+    };
+    const settledResultEvent: SessionEventV2 = {
+      ...toolEvent,
+      event_id: '99999999-9999-4999-8999-999999999997',
+      seq: 3,
+      kind: 'tool_result',
+      status: 'ok',
+      result_sha256: resultSha256,
+      approval_reference: approvalEvent.event_id,
+    };
+    const settledEvents = [
+      roundEvent,
+      approvalEvent,
+      toolEvent,
+      settledResultEvent,
+    ];
+    const store = createChatStore({
+      now: () => T0,
+      sessionAuthority: { generation: 1, sessionSha256: 'd'.repeat(64) },
+      initialState: {
+        ...preparer.getState(),
+        conversations: {
+          [conversationId]: {
+            ...preparer.getState().conversations[conversationId]!,
+            attempts: [attempt],
+          },
+        },
+        sessionEvents: settledEvents,
+      },
+    });
+    const nextRoundId = '88888888-8888-4888-8888-888888888888';
+    const nextJournal: PersistedAgentAttemptJournalV3 = {
+      ...currentJournal,
+      phase: 'round_in_flight',
+      controller_generation: 1,
+      round_index: 1,
+      round_lineage: {
+        schema_version: 2,
+        round_id: nextRoundId,
+        round_index: 1,
+        launch_attempt: 1,
+        status: 'active',
+        native_row_revision: null,
+      },
+      batch: [],
+      call_index: null,
+    };
+    const cas: AgentControllerCASV1 = {
+      schema_version: 1,
+      conversation_id: conversationId,
+      task_id: attempt.turnId,
+      attempt_id: attempt.attemptId,
+      expected_controller_generation: 0,
+      expected_journal_revision: 0,
+      expected_session_generation: 1,
+      expected_session_sha256: 'd'.repeat(64),
+    };
+    const preflight = validateAgentControllerPreflight({
+      schema_version: 1,
+      source: 'completion_controller',
+      kind: 'begin_round',
+      operation_id: '99999999-9999-4999-8999-999999999998',
+      base_cas: cas,
+      conversation_id: conversationId,
+      task_id: attempt.turnId,
+      attempt_id: attempt.attemptId,
+      round_id: nextRoundId,
+      round_index: 1,
+      launch_attempt: 1,
+      expected_round_revision: 0,
+      transport_schema_version: 2,
+      model: 'deepseek-v4-flash',
+      thinking_mode: 'high',
+      visible_history_sha256: attempt.visibleHistorySha256,
+      visible_message_count: attempt.visibleMessageIds.length,
+      project_context_sha256: null,
+      transcript,
+      root,
+      registry_version: 1,
+      toolset_sha256: currentJournal.toolset_sha256,
+    });
+    if (preflight === null) throw new Error('invalid next-round preflight');
+
+    const unsettledJournal: PersistedAgentAttemptJournalV3 = {
+      ...currentJournal,
+      call_index: 1,
+      batch: [
+        {
+          ...currentJournal.batch[0]!,
+          call_id: 'call-unsettled',
+          call_index: 0,
+          arguments_sha256: '8'.repeat(64),
+          approval_token: 'approval-unsettled',
+          approval_reference: '99999999-9999-4999-8999-999999999990',
+          idempotency_key: '7'.repeat(64),
+          receipt: null,
+        },
+        {
+          ...currentJournal.batch[0]!,
+          call_index: 1,
+        },
+      ],
+    };
+    const unsettledAttempt: TurnAttemptV1 = {
+      ...attempt,
+      agent: unsettledJournal,
+    };
+    const unsettledStore = createChatStore({
+      now: () => T0,
+      sessionAuthority: { generation: 1, sessionSha256: 'd'.repeat(64) },
+      initialState: {
+        ...store.getState(),
+        conversations: {
+          [conversationId]: {
+            ...store.getState().conversations[conversationId]!,
+            attempts: [unsettledAttempt],
+          },
+        },
+      },
+    });
+    expect(
+      unsettledStore.checkpointAgentRound({
+        cas,
+        expectedAttempt: unsettledAttempt,
+        journal: nextJournal,
+        events: settledEvents,
+        evidence: preflight,
+      }),
+    ).toBeNull();
+
+    for (const [roundIndex, roundId, operationId] of [
+      [1, UUID_D, '99999999-9999-4999-8999-999999999991'],
+      [2, nextRoundId, '99999999-9999-4999-8999-999999999992'],
+    ] as const) {
+      const invalidRoundPreflight = validateAgentControllerPreflight({
+        ...preflight,
+        operation_id: operationId,
+        round_id: roundId,
+        round_index: roundIndex,
+      });
+      if (invalidRoundPreflight === null) {
+        throw new Error('invalid rejected next-round preflight fixture');
+      }
+      expect(
+        store.checkpointAgentRound({
+          cas,
+          expectedAttempt: attempt,
+          journal: {
+            ...nextJournal,
+            round_index: roundIndex,
+            round_lineage: {
+              ...nextJournal.round_lineage!,
+              round_id: roundId,
+              round_index: roundIndex,
+            },
+          },
+          events: settledEvents,
+          evidence: invalidRoundPreflight,
+        }),
+      ).toBeNull();
+    }
+
+    const staleCas: AgentControllerCASV1 = {
+      ...cas,
+      expected_session_generation: 2,
+    };
+    const stalePreflight = validateAgentControllerPreflight({
+      ...preflight,
+      operation_id: '99999999-9999-4999-8999-999999999993',
+      base_cas: staleCas,
+    });
+    if (stalePreflight === null) {
+      throw new Error('invalid stale-authority preflight fixture');
+    }
+    expect(
+      store.checkpointAgentRound({
+        cas: staleCas,
+        expectedAttempt: attempt,
+        journal: nextJournal,
+        events: settledEvents,
+        evidence: stalePreflight,
+      }),
+    ).toBeNull();
+
+    const before = store.getState();
+    const transaction = store.checkpointAgentRound({
+      cas,
+      expectedAttempt: attempt,
+      journal: nextJournal,
+      events: settledEvents,
+      evidence: preflight,
+    });
+    expect(transaction).not.toBeNull();
+    expect(transaction?.commit(nativeCommittedProof(store, 2))).toBe(true);
+    const nextAttempt = store.getState().conversations[conversationId]!.attempts[0]!;
+    expect(nextAttempt.agent?.phase).toBe('round_in_flight');
+    expect(nextAttempt.agent?.round_index).toBe(1);
+    expect(nextAttempt.agent?.round_lineage?.round_id).toBe(nextRoundId);
+    expect(nextAttempt.agent?.round_lineage).toMatchObject({
+      round_index: 1,
+      launch_attempt: 1,
+      status: 'active',
+      native_row_revision: null,
+    });
+    expect(nextAttempt.agent?.batch).toEqual([]);
+    expect(nextAttempt.agent?.call_index).toBeNull();
+    expect(nextAttempt.agent?.reserved_write_bytes).toBe(123);
+    expect(nextAttempt.agent?.root).toEqual(currentJournal.root);
+    expect(nextAttempt.agent?.transcript).toEqual(currentJournal.transcript);
+    expect(nextAttempt.agent?.toolset_sha256).toBe(
+      currentJournal.toolset_sha256,
+    );
+    expect(before.conversations[conversationId]!.attempts[0]!.agent?.phase).toBe('tool_result_pending');
+  });
+
+  test('advances an evidence-free tool cursor to gated and automatic calls', () => {
+    const setup = (
+      nextCall: PersistedAgentCallJournalV3,
+      middleCalls: readonly PersistedAgentCallJournalV3[] = [],
+    ) => {
+      const seed = createChatStore({
+        now: () => T0,
+        createId: () => UUID_A,
+        createLifecycleId: kind =>
+          kind === 'turn' ? UUID_B : kind === 'attempt' ? UUID_C : UUID_D,
+      });
+      const conversationId = seed.createConversation();
+      const source = seed.getState().conversations[conversationId]!;
+      const preparer = createChatStore({
+        now: () => T0,
+        initialState: {
+          ...seed.getState(),
+          conversations: {
+            [conversationId]: {
+              ...source,
+              workspaceId: UUID_A,
+              workspaceBinding: {
+                schemaVersion: 1,
+                workspaceId: UUID_A,
+                bindingRevision: 1,
+                projectId: null,
+              },
+              workspaceBootstrapState: 'none',
+            },
+          },
+        },
+      });
+      expect(preparer.prepareTurnAttempt(conversationId, 'advance call')).not.toBeNull();
+      const prepared = preparer.getState().conversations[conversationId]!.attempts[0]!;
+      const firstCall: PersistedAgentCallJournalV3 = {
+        schema_version: 3,
+        call_id: 'call-0',
+        call_index: 0,
+        name: 'read_file',
+        arguments_sha256: '1'.repeat(64),
+        safe_summary_key: 'agent.read_file',
+        access: 'auto',
+        approval_token: null,
+        approval_decision: 'pending',
+        approval_reference: null,
+        idempotency_key: '2'.repeat(64),
+        native_row_revision: 2,
+        receipt: {
+          schema_version: 1,
+          call_id: 'call-0',
+          name: 'read_file',
+          arguments_sha256: '1'.repeat(64),
+          result_sha256: '3'.repeat(64),
+          result_bytes: 8,
+          truncated: false,
+          duration_ms: 1,
+          outcome: 'ok',
+          failure_code: null,
+          approval_reference: null,
+        },
+      };
+      const batch = [firstCall, ...middleCalls, nextCall].map((call, index) => ({
+        ...call,
+        call_index: index,
+      }));
+      const journal: PersistedAgentAttemptJournalV3 = {
+        schema_version: 3,
+        phase: 'tool_result_pending',
+        controller_generation: 4,
+        policy: {
+          schema_version: 1,
+          policy_version: 'agent-v1',
+          max_single_write_bytes: 32768,
+          max_batch_write_bytes: 512 * 1024,
+          max_attempt_write_bytes: 4 * 1024 * 1024,
+        },
+        root: {
+          schema_version: 1,
+          kind: 'workspace',
+          workspace_id: UUID_A,
+          workspace_binding_revision: 1,
+          project_id: null,
+          root_fingerprint_sha256: '4'.repeat(64),
+          capabilities: ['file_read', 'file_write'],
+        },
+        tool_registry_version: 1,
+        toolset_sha256: '5'.repeat(64),
+        transcript: {
+          schema_version: 1,
+          transcript_ref: UUID_D,
+          generation: 2,
+          transcript_sha256: '6'.repeat(64),
+          transcript_bytes: 32,
+        },
+        round_index: 0,
+        round_lineage: {
+          schema_version: 2,
+          round_id: '66666666-6666-4666-8666-666666666666',
+          round_index: 0,
+          launch_attempt: 1,
+          status: 'completed',
+          native_row_revision: 3,
+        },
+        call_index: 0,
+        batch,
+        frozen_grant_ids: [],
+        reserved_write_bytes: 17,
+        updated_at: T0,
+      };
+      const expectedAttempt: TurnAttemptV1 = {
+        ...prepared,
+        journalRevision: 4,
+        agent: journal,
+      };
+      const state: ChatState = {
+        ...preparer.getState(),
+        conversations: {
+          [conversationId]: {
+            ...preparer.getState().conversations[conversationId]!,
+            attempts: [expectedAttempt],
+          },
+        },
+      };
+      const store = createChatStore({
+        now: () => T1,
+        sessionAuthority: { generation: 1, sessionSha256: 'd'.repeat(64) },
+        initialState: state,
+      });
+      const cas: AgentControllerCASV1 = {
+        schema_version: 1,
+        conversation_id: conversationId,
+        task_id: expectedAttempt.turnId,
+        attempt_id: expectedAttempt.attemptId,
+        expected_controller_generation: 4,
+        expected_journal_revision: 4,
+        expected_session_generation: 1,
+        expected_session_sha256: 'd'.repeat(64),
+      };
+      const candidate = (
+        phase: 'batch_frozen' | 'approval_pending',
+        callIndex = batch.length - 1,
+      ): PersistedAgentAttemptJournalV3 => ({
+        ...journal,
+        phase,
+        controller_generation: 5,
+        call_index: callIndex,
+        updated_at: T1,
+      });
+      return { store, conversationId, expectedAttempt, cas, journal, candidate };
+    };
+    const gatedCall: PersistedAgentCallJournalV3 = {
+      schema_version: 3,
+      call_id: 'call-gated',
+      call_index: 1,
+      name: 'write_file',
+      arguments_sha256: '7'.repeat(64),
+      safe_summary_key: 'agent.write_file',
+      access: 'conversation_confirm',
+      approval_token: 'opaque-approval-token',
+      approval_decision: 'pending',
+      approval_reference: null,
+      idempotency_key: null,
+      native_row_revision: null,
+      receipt: null,
+    };
+    const gated = setup(gatedCall);
+    const beforeEvents = gated.store.getState().sessionEvents;
+    const gatedTransaction = gated.store.advanceAgentCall({
+      cas: gated.cas,
+      expectedAttempt: gated.expectedAttempt,
+      journal: gated.candidate('approval_pending'),
+    });
+    expect(gatedTransaction).not.toBeNull();
+    expect(gated.store.getState().sessionEvents).toBe(beforeEvents);
+    expect(
+      gated.store.getState().conversations[gated.conversationId]!.attempts[0]!.agent,
+    ).toMatchObject({
+      phase: 'approval_pending',
+      controller_generation: 5,
+      call_index: 1,
+      reserved_write_bytes: 17,
+    });
+    expect(gatedTransaction?.rollback()).toBe(true);
+    expect(
+      gated.store.getState().conversations[gated.conversationId]!.attempts[0],
+    ).toBe(gated.expectedAttempt);
+
+    const autoCall: PersistedAgentCallJournalV3 = {
+      ...gatedCall,
+      call_id: 'call-auto',
+      name: 'read_file',
+      safe_summary_key: 'agent.read_file',
+      access: 'auto',
+      approval_token: null,
+    };
+    const automatic = setup(autoCall);
+    const automaticTransaction = automatic.store.advanceAgentCall({
+      cas: automatic.cas,
+      expectedAttempt: automatic.expectedAttempt,
+      journal: automatic.candidate('batch_frozen'),
+    });
+    expect(automaticTransaction).not.toBeNull();
+    expect(automaticTransaction?.commit(nativeCommittedProof(automatic.store, 2))).toBe(true);
+    expect(
+      automatic.store.getState().conversations[automatic.conversationId]!.attempts[0]!.agent,
+    ).toMatchObject({ phase: 'batch_frozen', call_index: 1 });
+
+    const deniedReceipt: PersistedAgentCallJournalV3 = {
+      ...gatedCall,
+      call_id: 'call-denied',
+      name: 'unknown_tool',
+      safe_summary_key: 'agent.unknown',
+      access: 'durable_deny',
+      approval_token: null,
+      approval_decision: 'denied',
+      idempotency_key: null,
+      native_row_revision: 1,
+      receipt: {
+        schema_version: 1,
+        call_id: 'call-denied',
+        name: 'unknown_tool',
+        arguments_sha256: gatedCall.arguments_sha256,
+        result_sha256: '8'.repeat(64),
+        result_bytes: 0,
+        truncated: false,
+        duration_ms: 0,
+        outcome: 'denied',
+        failure_code: 'E_AGENT_UNKNOWN_TOOL',
+        approval_reference: null,
+      },
+    };
+    const skipped = setup(autoCall, [deniedReceipt]);
+    const skippedTransaction = skipped.store.advanceAgentCall({
+      cas: skipped.cas,
+      expectedAttempt: skipped.expectedAttempt,
+      journal: skipped.candidate('batch_frozen'),
+    });
+    expect(skippedTransaction).not.toBeNull();
+    expect(
+      skipped.store.getState().conversations[skipped.conversationId]!.attempts[0]!.agent?.call_index,
+    ).toBe(2);
+
+    const drifted = setup(autoCall);
+    expect(drifted.store.advanceAgentCall({
+      cas: drifted.cas,
+      expectedAttempt: drifted.expectedAttempt,
+      journal: {
+        ...drifted.candidate('batch_frozen'),
+        batch: drifted.journal.batch.map((call, index) =>
+          index === 1 ? { ...call, arguments_sha256: '9'.repeat(64) } : call,
+        ),
+      },
+    })).toBeNull();
+    expect(drifted.store.advanceAgentCall({
+      cas: drifted.cas,
+      expectedAttempt: drifted.expectedAttempt,
+      journal: drifted.candidate('batch_frozen', drifted.journal.batch.length),
+    })).toBeNull();
+    expect(drifted.store.advanceAgentCall({
+      cas: drifted.cas,
+      expectedAttempt: { ...drifted.expectedAttempt },
+      journal: drifted.candidate('batch_frozen'),
+    })).toBeNull();
+    expect(drifted.store.advanceAgentCall({
+      cas: { ...drifted.cas, expected_journal_revision: 3 },
+      expectedAttempt: drifted.expectedAttempt,
+      journal: drifted.candidate('batch_frozen'),
+    })).toBeNull();
+
+    const settledNext: PersistedAgentCallJournalV3 = {
+      ...autoCall,
+      idempotency_key: 'a'.repeat(64),
+      native_row_revision: 1,
+      receipt: {
+        schema_version: 1,
+        call_id: autoCall.call_id,
+        name: autoCall.name,
+        arguments_sha256: autoCall.arguments_sha256,
+        result_sha256: 'b'.repeat(64),
+        result_bytes: 4,
+        truncated: false,
+        duration_ms: 1,
+        outcome: 'ok',
+        failure_code: null,
+        approval_reference: null,
+      },
+    };
+    const exhausted = setup(settledNext);
+    expect(exhausted.store.advanceAgentCall({
+      cas: exhausted.cas,
+      expectedAttempt: exhausted.expectedAttempt,
+      journal: exhausted.candidate('batch_frozen'),
+    })).toBeNull();
+
+    const missing = setup(autoCall);
+    expect(missing.store.advanceAgentCall({
+      cas: missing.cas,
+      expectedAttempt: missing.expectedAttempt,
+      journal: {
+        ...missing.candidate('batch_frozen'),
+        batch: missing.journal.batch.map((call, index) =>
+          index === 0 ? { ...call, receipt: null } : call,
+        ),
+      },
+    })).toBeNull();
+
+    expect(drifted.store.advanceAgentCall({
+      cas: drifted.cas,
+      expectedAttempt: drifted.expectedAttempt,
+      journal: drifted.candidate('batch_frozen'),
+      evidence: {},
+    } as unknown as Parameters<ChatStore['advanceAgentCall']>[0])).toBeNull();
+  });
+});
+
 describe('framework-neutral chat store', () => {
   test('provides deterministic high-level operations and subscriptions', () => {
     const times = [T0, T1, T2, T3];
@@ -799,9 +5525,7 @@ describe('framework-neutral chat store', () => {
     );
 
     store.unbindConversationFromWorkspace(conversationId);
-    expect(
-      selectActiveConversation(store.getState())?.workspaceId,
-    ).toBeNull();
+    expect(selectActiveConversation(store.getState())?.workspaceId).toBeNull();
   });
 });
 
@@ -889,9 +5613,14 @@ describe('workspace binding persistence', () => {
       schema_version: number;
       conversations: Array<Record<string, unknown>>;
     };
+    stripSchema9Fields(legacy);
     legacy.schema_version = 4;
     legacy.conversations.forEach(conversation => {
       delete conversation.workspace_id;
+      delete conversation.runtime_context_id;
+      delete conversation.project_context;
+      delete conversation.turns;
+      delete conversation.attempts;
     });
 
     const first = hydrateChatState(legacy);
@@ -914,23 +5643,23 @@ describe('workspace binding persistence', () => {
     };
     expect(migrated.schema_version).toBe(CHAT_STATE_SCHEMA_VERSION);
     expect(
-      migrated.conversations.every(conversation =>
-        conversation.workspace_id === null,
+      migrated.conversations.every(
+        conversation => conversation.workspace_id === null,
       ),
     ).toBe(true);
   });
 
   test('strictly validates the required v6 workspace_id field', () => {
-    const missing = JSON.parse(
-      serializeChatState(workspaceBoundState()),
-    ) as { conversations: Array<Record<string, unknown>> };
+    const missing = JSON.parse(serializeChatState(workspaceBoundState())) as {
+      conversations: Array<Record<string, unknown>>;
+    };
     delete missing.conversations[0]?.workspace_id;
     expect(() => hydrateChatState(missing)).toThrow(/workspace_id/);
 
     for (const invalidWorkspaceId of ['', '   ', 'x'.repeat(257), 42]) {
-      const invalid = JSON.parse(
-        serializeChatState(workspaceBoundState()),
-      ) as { conversations: Array<Record<string, unknown>> };
+      const invalid = JSON.parse(serializeChatState(workspaceBoundState())) as {
+        conversations: Array<Record<string, unknown>>;
+      };
       invalid.conversations[0]!.workspace_id = invalidWorkspaceId;
       expect(() => hydrateChatState(invalid)).toThrow(/workspace_id/);
     }
@@ -947,12 +5676,9 @@ describe('schema v6 attempts and project context', () => {
   const OTHER_PROJECT_ID = 'eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee';
   const SNAPSHOT_ID = '77777777-7777-4777-8777-777777777777';
   const CONSENT_ID = '88888888-8888-4888-8888-888888888888';
-  const REPLACEMENT_SNAPSHOT_ID =
-    'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa';
-  const REPLACEMENT_CONSENT_ID =
-    'bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb';
-  const REPLACEMENT_PREPARATION_ID =
-    'cccccccc-cccc-4ccc-8ccc-cccccccccccc';
+  const REPLACEMENT_SNAPSHOT_ID = 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa';
+  const REPLACEMENT_CONSENT_ID = 'bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb';
+  const REPLACEMENT_PREPARATION_ID = 'cccccccc-cccc-4ccc-8ccc-cccccccccccc';
   const LIFECYCLE_ID = 'dddddddd-dddd-4ddd-8ddd-dddddddddddd';
 
   const contextManifest: ProjectContextManifestV1 = {
@@ -1095,11 +5821,14 @@ describe('schema v6 attempts and project context', () => {
 
   function schema6Payload(store: ChatStore) {
     const payload = JSON.parse(store.serialize()) as Record<string, unknown>;
+    stripSchema9Fields(payload);
     payload.schema_version = 6;
     delete payload.workspace_authority_outbox;
     delete payload.project_context_destructive_epoch;
     delete payload.project_context_destructive_transition;
     (payload.conversations as Array<Record<string, unknown>>).forEach(row => {
+      const source = store.getState().conversations[String(row.id)];
+      row.workspace_id = source?.workspaceId ?? null;
       delete row.workspace_binding;
       delete row.workspace_bootstrap_state;
       (row.attempts as Array<Record<string, unknown>> | undefined)?.forEach(
@@ -1177,9 +5906,13 @@ describe('schema v6 attempts and project context', () => {
       JSON.stringify(serialized.conversations),
     ) as Array<Record<string, unknown>>;
     legacyProjection.forEach(row => {
+      delete row.agent_grants;
       delete row.workspace_binding;
       delete row.workspace_bootstrap_state;
       (row.attempts as Array<Record<string, unknown>>).forEach(attempt => {
+        delete attempt.agent;
+        delete attempt.journal_revision;
+        attempt.schema_version = 1;
         delete attempt.workspace_id;
         delete attempt.workspace_binding_revision;
       });
@@ -1212,31 +5945,33 @@ describe('schema v6 attempts and project context', () => {
     const serialized = JSON.parse(serializeChatState(hydrated)) as {
       project_context_destructive_transition: Record<string, unknown>;
     };
-    expect(Object.keys(serialized.project_context_destructive_transition).sort())
-      .toEqual(
-        [
-          'schema_version',
-          'lifecycle_id',
-          'epoch',
-          'action',
-          'phase',
-          'conversation_id',
-          'source_project_id',
-          'source_runtime_context_id',
-          'source_model_id',
-          'snapshot_id',
-          'snapshot_sha256',
-          'consent_receipt_id',
-          'target_project_id',
-          'created_at',
-          'updated_at',
-        ].sort(),
-      );
+    expect(
+      Object.keys(serialized.project_context_destructive_transition).sort(),
+    ).toEqual(
+      [
+        'schema_version',
+        'lifecycle_id',
+        'epoch',
+        'action',
+        'phase',
+        'conversation_id',
+        'source_project_id',
+        'source_runtime_context_id',
+        'source_model_id',
+        'snapshot_id',
+        'snapshot_sha256',
+        'consent_receipt_id',
+        'target_project_id',
+        'created_at',
+        'updated_at',
+      ].sort(),
+    );
     expect(serializeChatState(hydrateChatState(serialized))).toBe(
       JSON.stringify(serialized),
     );
-    expect(JSON.stringify(serialized.project_context_destructive_transition))
-      .not.toMatch(/selected_paths|manifest|content|attachment|native|error/);
+    expect(
+      JSON.stringify(serialized.project_context_destructive_transition),
+    ).not.toMatch(/selected_paths|manifest|content|attachment|native|error/);
   });
 
   test('accepts exact nullable runtime and consent from a stale source snapshot', () => {
@@ -1277,8 +6012,12 @@ describe('schema v6 attempts and project context', () => {
     extraRoot.raw_context = 'RAW_CONTEXT_SENTINEL';
     cases.push(extraRoot);
     const extraJournal = schema7IntentPayload(store, conversationId);
-    (extraJournal.project_context_destructive_transition as Record<string, unknown>)
-      .path = '/private/raw-path-sentinel';
+    (
+      extraJournal.project_context_destructive_transition as Record<
+        string,
+        unknown
+      >
+    ).path = '/private/raw-path-sentinel';
     cases.push(extraJournal);
     const symbolJournal = schema7IntentPayload(store, conversationId);
     Object.defineProperty(
@@ -1302,13 +6041,17 @@ describe('schema v6 attempts and project context', () => {
     cases.push(hiddenJournal);
     let getterCalls = 0;
     const getterRoot = schema7IntentPayload(store, conversationId);
-    Object.defineProperty(getterRoot, 'project_context_destructive_transition', {
-      enumerable: true,
-      get: () => {
-        getterCalls += 1;
-        throw new Error('RAW_GETTER_SENTINEL');
+    Object.defineProperty(
+      getterRoot,
+      'project_context_destructive_transition',
+      {
+        enumerable: true,
+        get: () => {
+          getterCalls += 1;
+          throw new Error('RAW_GETTER_SENTINEL');
+        },
       },
-    });
+    );
     cases.push(getterRoot);
 
     cases.forEach(candidate =>
@@ -1477,18 +6220,10 @@ describe('schema v6 attempts and project context', () => {
     )!;
     expect(tombstone.commit()).toBe(true);
     expect(hydrateChatState(store.serialize())).toEqual(store.getState());
-    const ready = cleanupLifecycle(
-      store,
-      begun.lifecycleId,
-      begun.epoch,
-    )!;
+    const ready = cleanupLifecycle(store, begun.lifecycleId, begun.epoch)!;
     expect(ready.commit()).toBe(true);
     expect(hydrateChatState(store.serialize())).toEqual(store.getState());
-    const finalize = finalizeLifecycle(
-      store,
-      begun.lifecycleId,
-      begun.epoch,
-    )!;
+    const finalize = finalizeLifecycle(store, begun.lifecycleId, begun.epoch)!;
     expect(finalize.commit()).toBe(true);
     const finalized = hydrateChatState(store.serialize());
     expect(finalized).toMatchObject({
@@ -1579,8 +6314,7 @@ describe('schema v6 attempts and project context', () => {
     store: ChatStore,
     lifecycleId: string,
     epoch: number,
-    expectedTransition = store.getState()
-      .projectContextDestructiveTransition!,
+    expectedTransition = store.getState().projectContextDestructiveTransition!,
   ): LifecycleAdvanceScopeHarness {
     return {
       lifecycleId,
@@ -1606,9 +6340,7 @@ describe('schema v6 attempts and project context', () => {
     lifecycleId: string,
     epoch: number,
   ) {
-    return lifecycleStore(
-      store,
-    ).markProjectContextDestructiveCleanupComplete(
+    return lifecycleStore(store).markProjectContextDestructiveCleanupComplete(
       lifecycleAdvanceScope(store, lifecycleId, epoch),
     );
   }
@@ -1761,8 +6493,8 @@ describe('schema v6 attempts and project context', () => {
     const { store, conversationId } = readyProjectStore();
     const begun = beginLifecycle(store, conversationId)!;
     expect(begun.commit()).toBe(true);
-    const sourceContext = store.getState().conversations[conversationId]!
-      .projectContext;
+    const sourceContext =
+      store.getState().conversations[conversationId]!.projectContext;
 
     const tombstone = tombstoneLifecycle(
       store,
@@ -1779,9 +6511,9 @@ describe('schema v6 attempts and project context', () => {
       },
     });
     expect(tombstone.rollback()).toBe(true);
-    expect(
-      store.getState().conversations[conversationId]?.projectContext,
-    ).toBe(sourceContext);
+    expect(store.getState().conversations[conversationId]?.projectContext).toBe(
+      sourceContext,
+    );
     expect(store.getState()).toMatchObject({
       projectContextDestructiveTransition: { phase: 'intent' },
     });
@@ -1792,11 +6524,7 @@ describe('schema v6 attempts and project context', () => {
       begun.epoch,
     )!;
     expect(tombstoneAgain.commit()).toBe(true);
-    const cleanup = cleanupLifecycle(
-      store,
-      begun.lifecycleId,
-      begun.epoch,
-    )!;
+    const cleanup = cleanupLifecycle(store, begun.lifecycleId, begun.epoch)!;
     expect(store.getState()).toMatchObject({
       projectContextDestructiveTransition: { phase: 'ready_to_finalize' },
     });
@@ -1818,11 +6546,7 @@ describe('schema v6 attempts and project context', () => {
       fixture.action,
       fixture.targetProjectId,
     );
-    const finalize = finalizeLifecycle(
-      store,
-      ready.lifecycleId,
-      ready.epoch,
-    )!;
+    const finalize = finalizeLifecycle(store, ready.lifecycleId, ready.epoch)!;
     expect(finalize).not.toBeNull();
     expect(store.getState().projectContextDestructiveTransition).toBeNull();
     expect(store.getState().projectContextDestructiveEpoch).toBe(1);
@@ -1851,11 +6575,7 @@ describe('schema v6 attempts and project context', () => {
     const { store, conversationId } = readyProjectStore();
     const selected = store.createConversation({ title: 'Keep selected' });
     const ready = advanceLifecycleToReady(store, conversationId, 'delete');
-    const finalize = finalizeLifecycle(
-      store,
-      ready.lifecycleId,
-      ready.epoch,
-    )!;
+    const finalize = finalizeLifecycle(store, ready.lifecycleId, ready.epoch)!;
     expect(store.getState().conversations[conversationId]).toBeUndefined();
     expect(store.getState().selectedConversationId).toBe(selected);
     expect(finalize.rollback()).toBe(true);
@@ -1878,7 +6598,9 @@ describe('schema v6 attempts and project context', () => {
       activeReady.lifecycleId,
       activeReady.epoch,
     )!;
-    expect(activeFixture.store.getState().selectedConversationId).toBe(fallback);
+    expect(activeFixture.store.getState().selectedConversationId).toBe(
+      fallback,
+    );
     expect(activeFinalize.commit()).toBe(true);
   });
 
@@ -1888,7 +6610,10 @@ describe('schema v6 attempts and project context', () => {
 
     const preparedFixture = setupProjectStore();
     const prepared = preparedFixture.store.replaceProjectContextPrepared(
-      projectContextScope(preparedFixture.store, preparedFixture.conversationId),
+      projectContextScope(
+        preparedFixture.store,
+        preparedFixture.conversationId,
+      ),
       {
         preparationId: REPLACEMENT_PREPARATION_ID,
         selectedPaths: [],
@@ -1958,10 +6683,14 @@ describe('schema v6 attempts and project context', () => {
       projectId: OTHER_PROJECT_ID,
       runtimeContextId: OTHER_PROJECT_ID,
     });
-    expect(beginLifecycle(mismatched.store, mismatched.conversationId)).toBeNull();
+    expect(
+      beginLifecycle(mismatched.store, mismatched.conversationId),
+    ).toBeNull();
 
     const malformed = makeCorruptStore({ raw_content: 'RAW_BINDING_SENTINEL' });
-    expect(beginLifecycle(malformed.store, malformed.conversationId)).toBeNull();
+    expect(
+      beginLifecycle(malformed.store, malformed.conversationId),
+    ).toBeNull();
 
     const wrongDisposition = makeCorruptStore({});
     const wrongDispositionState = wrongDisposition.store.getState();
@@ -2001,14 +6730,14 @@ describe('schema v6 attempts and project context', () => {
           ...unknownStatusState.conversations,
           [unknownStatus.conversationId]: {
             ...unknownStatusConversation,
-            attempts: [
-              { ...unknownStatusAttempt, status: 'unknown-status' },
-            ],
+            attempts: [{ ...unknownStatusAttempt, status: 'unknown-status' }],
           },
         },
       } as ChatState,
     });
-    expect(beginLifecycle(unknownStatusStore, unknownStatus.conversationId)).toBeNull();
+    expect(
+      beginLifecycle(unknownStatusStore, unknownStatus.conversationId),
+    ).toBeNull();
   });
 
   test('rejects timestamp regression at tombstone, cleanup-complete, and finalize', () => {
@@ -2041,11 +6770,7 @@ describe('schema v6 attempts and project context', () => {
     });
     expect(store.getState()).toBe(before);
 
-    const cleanup = cleanupLifecycle(
-      store,
-      begun.lifecycleId,
-      begun.epoch,
-    )!;
+    const cleanup = cleanupLifecycle(store, begun.lifecycleId, begun.epoch)!;
     expect(cleanup.commit()).toBe(true);
     before = store.getState();
     store.dispatch({
@@ -2070,7 +6795,9 @@ describe('schema v6 attempts and project context', () => {
     store.applyProjectContextAction(conversationId, {
       type: 'project_changed',
     });
-    expect(store.prepareTurnAttempt(conversationId, 'must be blocked')).toBeNull();
+    expect(
+      store.prepareTurnAttempt(conversationId, 'must be blocked'),
+    ).toBeNull();
     store.deleteConversation(conversationId);
 
     expect(store.getState().conversations[conversationId]).toBe(before);
@@ -2146,7 +6873,9 @@ describe('schema v6 attempts and project context', () => {
     const deleteFixture = setupProjectStore();
     deleteFixture.store.deleteConversation(deleteFixture.conversationId);
     expect(
-      deleteFixture.store.getState().conversations[deleteFixture.conversationId],
+      deleteFixture.store.getState().conversations[
+        deleteFixture.conversationId
+      ],
     ).toBeUndefined();
   });
 
@@ -2154,38 +6883,34 @@ describe('schema v6 attempts and project context', () => {
     { action: 'unbind' as const, targetProjectId: null },
     { action: 'rebind' as const, targetProjectId: OTHER_PROJECT_ID },
     { action: 'delete' as const, targetProjectId: null },
-  ])(
-    'returns an exact one-shot snapshot-free $action transaction',
-    fixture => {
-      const value = setupProjectStore();
-      const beforeState = value.store.getState();
-      const beforeConversation =
-        beforeState.conversations[value.conversationId]!;
-      const transaction = snapshotFreeStore(
-        value.store,
-      ).applySnapshotFreeProjectMutation({
-        action: fixture.action,
-        conversationId: value.conversationId,
-        targetProjectId: fixture.targetProjectId,
-        expectedConversation: beforeConversation,
-      });
-      expect(transaction).not.toBeNull();
-      const applied = value.store.getState();
-      if (fixture.action === 'delete') {
-        expect(applied.conversations[value.conversationId]).toBeUndefined();
-      } else {
-        expect(applied.conversations[value.conversationId]?.projectId).toBe(
-          fixture.targetProjectId,
-        );
-      }
-      expect(transaction?.rollback()).toBe(true);
-      expect(
-        value.store.getState().conversations[value.conversationId],
-      ).toBe(beforeConversation);
-      expect(transaction?.rollback()).toBe(false);
-      expect(transaction?.commit()).toBe(false);
-    },
-  );
+  ])('returns an exact one-shot snapshot-free $action transaction', fixture => {
+    const value = setupProjectStore();
+    const beforeState = value.store.getState();
+    const beforeConversation = beforeState.conversations[value.conversationId]!;
+    const transaction = snapshotFreeStore(
+      value.store,
+    ).applySnapshotFreeProjectMutation({
+      action: fixture.action,
+      conversationId: value.conversationId,
+      targetProjectId: fixture.targetProjectId,
+      expectedConversation: beforeConversation,
+    });
+    expect(transaction).not.toBeNull();
+    const applied = value.store.getState();
+    if (fixture.action === 'delete') {
+      expect(applied.conversations[value.conversationId]).toBeUndefined();
+    } else {
+      expect(applied.conversations[value.conversationId]?.projectId).toBe(
+        fixture.targetProjectId,
+      );
+    }
+    expect(transaction?.rollback()).toBe(true);
+    expect(value.store.getState().conversations[value.conversationId]).toBe(
+      beforeConversation,
+    );
+    expect(transaction?.rollback()).toBe(false);
+    expect(transaction?.commit()).toBe(false);
+  });
 
   test('commits snapshot-free mutation once and rejects stale, hostile, or unsafe input', () => {
     const ready = readyProjectStore();
@@ -2201,7 +6926,8 @@ describe('schema v6 attempts and project context', () => {
     ).toBeNull();
 
     const setup = setupProjectStore();
-    const expected = setup.store.getState().conversations[setup.conversationId]!;
+    const expected =
+      setup.store.getState().conversations[setup.conversationId]!;
     setup.store.renameConversation(setup.conversationId, 'Drifted');
     expect(
       snapshotFreeStore(setup.store).applySnapshotFreeProjectMutation({
@@ -2336,7 +7062,9 @@ describe('schema v6 attempts and project context', () => {
     expect(lifecycle).not.toBeNull();
     expect(transaction?.rollback()).toBe(true);
     expect(value.store.getState().conversations[directId]).toBe(beforeDirect);
-    expect(value.store.getState().projectContextDestructiveTransition).toMatchObject({
+    expect(
+      value.store.getState().projectContextDestructiveTransition,
+    ).toMatchObject({
       conversationId: value.conversationId,
       phase: 'intent',
     });
@@ -2388,13 +7116,14 @@ describe('schema v6 attempts and project context', () => {
       now: () => {
         if (journalReentry) {
           journalReentry = false;
-          expect(beginLifecycle(journalStore, ready.conversationId)).not.toBeNull();
+          expect(
+            beginLifecycle(journalStore, ready.conversationId),
+          ).not.toBeNull();
         }
         return T2;
       },
     });
-    const directConversation =
-      journalStore.getState().conversations[directId]!;
+    const directConversation = journalStore.getState().conversations[directId]!;
     expect(
       snapshotFreeStore(journalStore).applySnapshotFreeProjectMutation({
         action: 'rebind',
@@ -2506,13 +7235,7 @@ describe('schema v6 attempts and project context', () => {
       ROUND_ID,
     ]) {
       expect(
-        beginLifecycle(
-          store,
-          conversationId,
-          'unbind',
-          null,
-          claimed,
-        ),
+        beginLifecycle(store, conversationId, 'unbind', null, claimed),
       ).toBeNull();
     }
   });
@@ -2530,11 +7253,10 @@ describe('schema v6 attempts and project context', () => {
       projectId: OTHER_PROJECT_ID,
       select: false,
     });
-    const emptyConversation = fixture.store.createConversation({ select: false });
-    const begun = beginLifecycle(
-      fixture.store,
-      fixture.conversationId,
-    )!;
+    const emptyConversation = fixture.store.createConversation({
+      select: false,
+    });
+    const begun = beginLifecycle(fixture.store, fixture.conversationId)!;
     expect(begun.commit()).toBe(true);
     const store = createChatStore({
       initialState: fixture.store.getState(),
@@ -2623,11 +7345,7 @@ describe('schema v6 attempts and project context', () => {
     });
     const beforeAdvance = referencedStore.getState();
     expect(
-      cleanupLifecycle(
-        referencedStore,
-        begun.lifecycleId,
-        begun.epoch,
-      ),
+      cleanupLifecycle(referencedStore, begun.lifecycleId, begun.epoch),
     ).toBeNull();
     expect(referencedStore.getState()).toBe(beforeAdvance);
   });
@@ -2637,9 +7355,9 @@ describe('schema v6 attempts and project context', () => {
     const ready = advanceLifecycleToReady(store, conversationId);
     const readyState = store.getState();
     const tombstoned = readyState.conversations[conversationId]!;
-    const sourceContext = readyProjectStore().store.getState().conversations[
-      conversationId
-    ]!.projectContext!;
+    const sourceContext =
+      readyProjectStore().store.getState().conversations[conversationId]!
+        .projectContext!;
     for (const patch of [
       { projectContext: sourceContext },
       { modelId: 'deepseek-v4-pro' as const },
@@ -2656,11 +7374,7 @@ describe('schema v6 attempts and project context', () => {
         },
       });
       expect(
-        finalizeLifecycle(
-          drifted,
-          ready.lifecycleId,
-          ready.epoch,
-        ),
+        finalizeLifecycle(drifted, ready.lifecycleId, ready.epoch),
       ).toBeNull();
     }
 
@@ -2749,12 +7463,7 @@ describe('schema v6 attempts and project context', () => {
     });
     const beforeAction = actionDrift.getState();
     expect(
-      finalizeLifecycle(
-        actionDrift,
-        ready.lifecycleId,
-        ready.epoch,
-        original,
-      ),
+      finalizeLifecycle(actionDrift, ready.lifecycleId, ready.epoch, original),
     ).toBeNull();
     expect(actionDrift.getState()).toBe(beforeAction);
 
@@ -2949,16 +7658,17 @@ describe('schema v6 attempts and project context', () => {
           },
         } as ChatState,
       });
+      expect(beginLifecycle(corruptStore, fixture.conversationId)).toBeNull();
       expect(
-        beginLifecycle(corruptStore, fixture.conversationId),
+        corruptStore.getState().projectContextDestructiveTransition,
       ).toBeNull();
-      expect(corruptStore.getState().projectContextDestructiveTransition).toBeNull();
     });
   });
 
-  function schema3Receipt(
-    prepared: { turnId: string; attemptId: string },
-  ): CompletionRoundReceiptV1 {
+  function schema3Receipt(prepared: {
+    turnId: string;
+    attemptId: string;
+  }): CompletionRoundReceiptV1 {
     return {
       ...schema2Receipt(prepared),
       transportSchemaVersion: 3,
@@ -2984,8 +7694,12 @@ describe('schema v6 attempts and project context', () => {
       ),
     ) as Record<string, unknown>;
     legacy.schema_version = 5;
-    const conversations = legacy.conversations as Array<Record<string, unknown>>;
+    stripSchema9Fields(legacy);
+    const conversations = legacy.conversations as Array<
+      Record<string, unknown>
+    >;
     conversations.forEach(row => {
+      row.workspace_id = null;
       delete row.runtime_context_id;
       delete row.project_context;
       delete row.turns;
@@ -3023,7 +7737,19 @@ describe('schema v6 attempts and project context', () => {
         schema_version: number;
         conversations: Array<Record<string, unknown>>;
       };
+      stripSchema9Fields(legacy as unknown as Record<string, unknown>);
       legacy.schema_version = schemaVersion;
+      if (schemaVersion === 5) {
+        legacy.conversations.forEach(row => {
+          row.workspace_id = null;
+        });
+      }
+      legacy.conversations.forEach(row => {
+        delete row.runtime_context_id;
+        delete row.project_context;
+        delete row.turns;
+        delete row.attempts;
+      });
       if (schemaVersion < 5) {
         legacy.conversations.forEach(row => delete row.workspace_id);
       }
@@ -3043,19 +7769,23 @@ describe('schema v6 attempts and project context', () => {
   test('late-allocates one canonical runtime context id atomically', () => {
     const store = v6Store();
     const conversationId = store.createConversation({ projectId: 'project-a' });
-    expect(store.getState().conversations[conversationId]?.runtimeContextId).toBeNull();
+    expect(
+      store.getState().conversations[conversationId]?.runtimeContextId,
+    ).toBeNull();
     expect(store.ensureRuntimeContextId(conversationId)).toBe(RUNTIME_ID);
     expect(store.ensureRuntimeContextId(conversationId)).toBe(RUNTIME_ID);
-    expect(store.getState().conversations[conversationId]?.runtimeContextId).toBe(
-      RUNTIME_ID,
-    );
+    expect(
+      store.getState().conversations[conversationId]?.runtimeContextId,
+    ).toBe(RUNTIME_ID);
   });
 
   test('requires an explicit durable disposition to bypass project context', () => {
     const store = v6Store();
     const conversationId = store.createConversation({ projectId: 'project-a' });
     const before = store.getState();
-    expect(store.prepareTurnAttempt(conversationId, 'default blocked')).toBeNull();
+    expect(
+      store.prepareTurnAttempt(conversationId, 'default blocked'),
+    ).toBeNull();
     expect(store.getState()).toBe(before);
 
     const explicit = store.prepareTurnAttempt(
@@ -3076,12 +7806,7 @@ describe('schema v6 attempts and project context', () => {
       '"context_disposition":"explicit_without_context"',
     );
     expect(hydrateChatState(serialized)).toEqual(store.getState());
-    store.startAttemptRound(
-      conversationId,
-      explicit!.attemptId,
-      ROUND_ID,
-      0,
-    );
+    store.startAttemptRound(conversationId, explicit!.attemptId, ROUND_ID, 0);
     expect(
       store.recordAttemptRound(
         conversationId,
@@ -3145,9 +7870,9 @@ describe('schema v6 attempts and project context', () => {
       store.getState().conversations[conversationId]?.messages.at(-1)?.text,
     ).toBe('  exact prepared text  ');
     expect(
-      hydrateChatState(store.serialize()).conversations[conversationId]?.messages.at(
-        -1,
-      )?.text,
+      hydrateChatState(store.serialize()).conversations[
+        conversationId
+      ]?.messages.at(-1)?.text,
     ).toBe('  exact prepared text  ');
   });
 
@@ -3249,9 +7974,9 @@ describe('schema v6 attempts and project context', () => {
     const store = v6Store();
     const conversationId = store.createConversation();
     const prepared = store.prepareTurnAttempt(conversationId, 'retry me')!;
-    expect(store.startAttemptRound(conversationId, prepared.attemptId, ROUND_ID, 0)).toBe(
-      true,
-    );
+    expect(
+      store.startAttemptRound(conversationId, prepared.attemptId, ROUND_ID, 0),
+    ).toBe(true);
     const hydrated = hydrateChatState(store.serialize());
     expect(hydrated.conversations[conversationId]?.attempts[0]).toMatchObject({
       status: 'failed',
@@ -3269,10 +7994,9 @@ describe('schema v6 attempts and project context', () => {
     const retry = resumed.retryAttempt(conversationId, prepared.attemptId);
     expect(retry?.turnId).toBe(prepared.turnId);
     expect(retry?.attemptId).toBe(RETRY_ID);
-    expect(resumed.getState().conversations[conversationId]?.turns[0]?.attemptIds).toEqual([
-      prepared.attemptId,
-      RETRY_ID,
-    ]);
+    expect(
+      resumed.getState().conversations[conversationId]?.turns[0]?.attemptIds,
+    ).toEqual([prepared.attemptId, RETRY_ID]);
     expect(
       resumed.getState().conversations[conversationId]?.attempts[1],
     ).toMatchObject({
@@ -3324,8 +8048,7 @@ describe('schema v6 attempts and project context', () => {
   test('freezes a confirmed context binding and rejects correlation mismatch', () => {
     const { store, conversationId } = readyProjectStore();
     const prepared = store.prepareTurnAttempt(conversationId, 'frozen')!;
-    const attempt =
-      store.getState().conversations[conversationId]?.attempts[0];
+    const attempt = store.getState().conversations[conversationId]?.attempts[0];
     expect(attempt?.projectContext).toEqual({
       schemaVersion: 1,
       runtimeContextId: RUNTIME_ID,
@@ -3342,12 +8065,7 @@ describe('schema v6 attempts and project context', () => {
     expect(attempt?.contextDisposition).toBe('verified');
     expect(attempt?.contextProjectId).toBe(PROJECT_ID);
     expect(
-      store.startAttemptRound(
-        conversationId,
-        prepared.attemptId,
-        ROUND_ID,
-        0,
-      ),
+      store.startAttemptRound(conversationId, prepared.attemptId, ROUND_ID, 0),
     ).toBe(true);
     const before = store.getState();
     expect(
@@ -3388,19 +8106,14 @@ describe('schema v6 attempts and project context', () => {
     store.startAttemptRound(conversationId, prepared.attemptId, ROUND_ID, 0);
     const before = store.getState();
     expect(
-      store.recordAttemptRound(
-        conversationId,
-        prepared.attemptId,
-        {
-          ...schema2Receipt(prepared),
-          raw_content: 'UNIQUE_RECEIPT_SECRET',
-        } as CompletionRoundReceiptV1,
-      ),
+      store.recordAttemptRound(conversationId, prepared.attemptId, {
+        ...schema2Receipt(prepared),
+        raw_content: 'UNIQUE_RECEIPT_SECRET',
+      } as CompletionRoundReceiptV1),
     ).toBe(false);
     expect(store.getState()).toBe(before);
 
-    const { store: verified, conversationId: verifiedId } =
-      readyProjectStore();
+    const { store: verified, conversationId: verifiedId } = readyProjectStore();
     const verifiedAttempt = verified.prepareTurnAttempt(
       verifiedId,
       'verified receipt',
@@ -3467,12 +8180,7 @@ describe('schema v6 attempts and project context', () => {
     ]) {
       const { store, conversationId } = readyProjectStore();
       const prepared = store.prepareTurnAttempt(conversationId, 'source')!;
-      store.startAttemptRound(
-        conversationId,
-        prepared.attemptId,
-        ROUND_ID,
-        0,
-      );
+      store.startAttemptRound(conversationId, prepared.attemptId, ROUND_ID, 0);
       const before = store.getState();
       expect(
         store.recordAttemptRound(conversationId, prepared.attemptId, {
@@ -3511,8 +8219,7 @@ describe('schema v6 attempts and project context', () => {
       OTHER_PROJECT_ID,
     );
     expect(
-      finalizeLifecycle(store, ready.lifecycleId, ready.epoch)
-        ?.commit(),
+      finalizeLifecycle(store, ready.lifecycleId, ready.epoch)?.commit(),
     ).toBe(true);
     store.bindConversationToProject(conversationId, PROJECT_ID);
     const before = store.getState();
@@ -3609,9 +8316,7 @@ describe('schema v6 attempts and project context', () => {
     for (const mutate of mutations) {
       const payload = JSON.parse(JSON.stringify(baseline)) as typeof baseline;
       mutate(payload.conversations[0]!);
-      expect(() => hydrateChatState(payload)).toThrow(
-        ChatStateValidationError,
-      );
+      expect(() => hydrateChatState(payload)).toThrow(ChatStateValidationError);
     }
   });
 
@@ -3619,8 +8324,7 @@ describe('schema v6 attempts and project context', () => {
     const store = createChatStore({
       now: () => T1,
       createId: () => 'message-1',
-      createLifecycleId: kind =>
-        kind === 'turn' ? 'not-a-uuid' : ATTEMPT_ID,
+      createLifecycleId: kind => (kind === 'turn' ? 'not-a-uuid' : ATTEMPT_ID),
     });
     const conversationId = store.createConversation();
     const before = store.getState();
@@ -3790,16 +8494,13 @@ describe('schema v6 attempts and project context', () => {
     ) as (typeof conversation.attempts)[number];
     duplicate.attempt_id = '77777777-7777-4777-8777-777777777777';
     duplicate.rounds[0]!.attempt_id = duplicate.attempt_id;
-    duplicate.rounds[0]!.round_id =
-      '66666666-6666-4666-8666-666666666666';
+    duplicate.rounds[0]!.round_id = '66666666-6666-4666-8666-666666666666';
     duplicate.rounds[0]!.provider_request_id =
       'bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb';
     duplicate.rounds[0]!.provider_response_id = 'resp_2';
     conversation.turns[0]!.attempt_ids.push(duplicate.attempt_id);
     conversation.attempts.push(duplicate);
-    expect(() => hydrateChatState(payload)).toThrow(
-      ChatStateValidationError,
-    );
+    expect(() => hydrateChatState(payload)).toThrow(ChatStateValidationError);
   });
 
   test('requires a completed assistant message after its user turn', () => {
@@ -3834,9 +8535,7 @@ describe('schema v6 attempts and project context', () => {
     const attempt = payload.conversations[0]!.attempts[0]!;
     attempt.status = 'completed';
     attempt.assistant_message_id = olderAssistantId;
-    expect(() => hydrateChatState(payload)).toThrow(
-      ChatStateValidationError,
-    );
+    expect(() => hydrateChatState(payload)).toThrow(ChatStateValidationError);
   });
 
   test('persists cancellation without manufacturing a failure code', () => {
@@ -3859,11 +8558,7 @@ describe('schema v6 attempts and project context', () => {
     const prepared = store.prepareTurnAttempt(conversationId, 'failure')!;
     const before = store.getState();
     expect(
-      store.failAttempt(
-        conversationId,
-        prepared.attemptId,
-        'E_API_KEY_SECRET',
-      ),
+      store.failAttempt(conversationId, prepared.attemptId, 'E_API_KEY_SECRET'),
     ).toBe(false);
     expect(store.getState()).toBe(before);
 
@@ -3879,8 +8574,7 @@ describe('schema v6 attempts and project context', () => {
         attempts: Array<{ failure_code: string | null }>;
       }>;
     };
-    payload.conversations[0]!.attempts[0]!.failure_code =
-      'E_API_KEY_SECRET';
+    payload.conversations[0]!.attempts[0]!.failure_code = 'E_API_KEY_SECRET';
     expect(() => hydrateChatState(payload)).toThrow(/failure_code/);
   });
 
@@ -3977,11 +8671,8 @@ describe('schema v6 attempts and project context', () => {
         attempts: Array<{ model_id: string }>;
       }>;
     };
-    tampered.conversations[0]!.attempts[1]!.model_id =
-      'deepseek-v4-pro';
-    expect(() => hydrateChatState(tampered)).toThrow(
-      ChatStateValidationError,
-    );
+    tampered.conversations[0]!.attempts[1]!.model_id = 'deepseek-v4-pro';
+    expect(() => hydrateChatState(tampered)).toThrow(ChatStateValidationError);
 
     const droppedDigest = JSON.parse(store.serialize()) as {
       conversations: Array<{
@@ -3997,15 +8688,13 @@ describe('schema v6 attempts and project context', () => {
   test('roundtrips the first known visible digest after an unknown failed attempt', () => {
     const store = v6Store();
     const conversationId = store.createConversation();
-    const first = store.prepareTurnAttempt(conversationId, 'retry before receipt')!;
+    const first = store.prepareTurnAttempt(
+      conversationId,
+      'retry before receipt',
+    )!;
     expect(first.commit()).toBe(true);
     expect(
-      store.startAttemptRound(
-        conversationId,
-        first.attemptId,
-        ROUND_ID,
-        0,
-      ),
+      store.startAttemptRound(conversationId, first.attemptId, ROUND_ID, 0),
     ).toBe(true);
     expect(
       store.failAttempt(
@@ -4018,12 +8707,7 @@ describe('schema v6 attempts and project context', () => {
     expect(retry.commit()).toBe(true);
     const retryRoundId = '66666666-6666-4666-8666-666666666666';
     expect(
-      store.startAttemptRound(
-        conversationId,
-        retry.attemptId,
-        retryRoundId,
-        0,
-      ),
+      store.startAttemptRound(conversationId, retry.attemptId, retryRoundId, 0),
     ).toBe(true);
     expect(
       store.recordAttemptRound(conversationId, retry.attemptId, {
@@ -4044,9 +8728,11 @@ describe('schema v6 attempts and project context', () => {
     ).not.toBeNull();
 
     expect(
-      store.getState().conversations[conversationId]?.attempts.map(attempt =>
-        attempt.visibleHistorySha256,
-      ),
+      store
+        .getState()
+        .conversations[conversationId]?.attempts.map(
+          attempt => attempt.visibleHistorySha256,
+        ),
     ).toEqual([null, 'a'.repeat(64)]);
     const serialized = store.serialize();
     expect(serializeChatState(hydrateChatState(serialized))).toBe(serialized);
@@ -4068,12 +8754,7 @@ describe('schema v6 attempts and project context', () => {
     );
     const retry = store.retryAttempt(conversationId, first.attemptId)!;
     const retryRoundId = '66666666-6666-4666-8666-666666666666';
-    store.startAttemptRound(
-      conversationId,
-      retry.attemptId,
-      retryRoundId,
-      0,
-    );
+    store.startAttemptRound(conversationId, retry.attemptId, retryRoundId, 0);
     store.recordAttemptRound(conversationId, retry.attemptId, {
       ...schema2Receipt(retry),
       roundId: retryRoundId,
@@ -4091,9 +8772,7 @@ describe('schema v6 attempts and project context', () => {
     const persistedRetry = payload.conversations[0]!.attempts[1]!;
     persistedRetry.visible_history_sha256 = 'f'.repeat(64);
     persistedRetry.rounds[0]!.visible_history_sha256 = 'f'.repeat(64);
-    expect(() => hydrateChatState(payload)).toThrow(
-      ChatStateValidationError,
-    );
+    expect(() => hydrateChatState(payload)).toThrow(ChatStateValidationError);
   });
 
   test('copies a recorded receipt instead of retaining mutable caller input', () => {
@@ -4202,17 +8881,13 @@ describe('schema v6 attempts and project context', () => {
         ChatStateValidationError,
       );
     }
-    expect(JSON.stringify(conversation)).not.toContain(
-      'UNIQUE_PROJECT_SECRET',
-    );
+    expect(JSON.stringify(conversation)).not.toContain('UNIQUE_PROJECT_SECRET');
     const rootExtra = JSON.parse(JSON.stringify(baseline)) as Record<
       string,
       unknown
     >;
     rootExtra.raw_context = 'UNIQUE_PROJECT_SECRET';
-    expect(() => hydrateChatState(rootExtra)).toThrow(
-      ChatStateValidationError,
-    );
+    expect(() => hydrateChatState(rootExtra)).toThrow(ChatStateValidationError);
   });
 
   test('reports the global attempt index for a later turn validation failure', () => {
@@ -4303,9 +8978,7 @@ describe('schema v6 attempts and project context', () => {
         },
       },
     };
-    expect(() => serializeChatState(unsafe)).toThrow(
-      ChatStateValidationError,
-    );
+    expect(() => serializeChatState(unsafe)).toThrow(ChatStateValidationError);
   });
 
   test('rejects more than one live attempt after hydration', () => {
@@ -4335,9 +9008,7 @@ describe('schema v6 attempts and project context', () => {
       attempt.status = 'prepared';
       attempt.failure_code = null;
     });
-    expect(() => hydrateChatState(payload)).toThrow(
-      ChatStateValidationError,
-    );
+    expect(() => hydrateChatState(payload)).toThrow(ChatStateValidationError);
   });
 
   test('rejects an unreachable nonterminal attempt before a later retry', () => {
@@ -4365,9 +9036,7 @@ describe('schema v6 attempts and project context', () => {
     };
     payload.conversations[0]!.attempts[0]!.status = 'prepared';
     payload.conversations[0]!.attempts[0]!.failure_code = null;
-    expect(() => hydrateChatState(payload)).toThrow(
-      ChatStateValidationError,
-    );
+    expect(() => hydrateChatState(payload)).toThrow(ChatStateValidationError);
   });
 
   test('rejects nested project context accessors without evaluating them', () => {
@@ -4409,9 +9078,7 @@ describe('schema v6 attempts and project context', () => {
       enumerable: false,
       value: CONSENT_ID,
     });
-    expect(() => hydrateChatState(payload)).toThrow(
-      ChatStateValidationError,
-    );
+    expect(() => hydrateChatState(payload)).toThrow(ChatStateValidationError);
   });
 
   test('rejects oversized arrays before enumerating their elements', () => {
@@ -4447,15 +9114,13 @@ describe('schema v6 attempts and project context', () => {
     const conversationId = store.createConversation();
     const prepared = store.prepareTurnAttempt(conversationId, 'many')!;
     expect(
-      store.startAttemptRound(
-        conversationId,
-        prepared.attemptId,
-        ROUND_ID,
-        1,
-      ),
+      store.startAttemptRound(conversationId, prepared.attemptId, ROUND_ID, 1),
     ).toBe(false);
     for (let index = 0; index < 8; index += 1) {
-      const roundId = `${String(index + 1).padStart(8, '0')}-0000-4000-8000-000000000000`;
+      const roundId = `${String(index + 1).padStart(
+        8,
+        '0',
+      )}-0000-4000-8000-000000000000`;
       expect(
         store.startAttemptRound(
           conversationId,
@@ -4557,9 +9222,7 @@ describe('schema v6 attempts and project context', () => {
                 ? 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa'
                 : 'bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb',
             providerResponseId:
-              duplicateField === 'provider_response_id'
-                ? 'resp_1'
-                : 'resp_2',
+              duplicateField === 'provider_response_id' ? 'resp_1' : 'resp_2',
           },
         ),
       ).toBe(false);
@@ -4573,8 +9236,7 @@ describe('schema v6 attempts and project context', () => {
           {
             ...schema2Receipt(persisted.second),
             roundId: persisted.secondRoundId,
-            providerRequestId:
-              'bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb',
+            providerRequestId: 'bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb',
             providerResponseId: 'resp_2',
           },
         ),
@@ -4590,9 +9252,7 @@ describe('schema v6 attempts and project context', () => {
         conversation.attempts.flatMap(attempt => attempt.rounds),
       );
       allReceipts[1]![duplicateField] = allReceipts[0]![duplicateField];
-      expect(() => hydrateChatState(payload)).toThrow(
-        ChatStateValidationError,
-      );
+      expect(() => hydrateChatState(payload)).toThrow(ChatStateValidationError);
     },
   );
 
@@ -4619,19 +9279,12 @@ describe('schema v6 attempts and project context', () => {
       JSON.stringify(payload.conversations[0]),
     ) as (typeof payload.conversations)[number];
     copy.id = 'conversation-copy';
-    copy.turns[0]!.turn_id =
-      '66666666-6666-4666-8666-666666666666';
-    copy.turns[0]!.attempt_ids = [
-      '77777777-7777-4777-8777-777777777777',
-    ];
-    copy.attempts[0]!.turn_id =
-      '66666666-6666-4666-8666-666666666666';
-    copy.attempts[0]!.attempt_id =
-      '77777777-7777-4777-8777-777777777777';
+    copy.turns[0]!.turn_id = '66666666-6666-4666-8666-666666666666';
+    copy.turns[0]!.attempt_ids = ['77777777-7777-4777-8777-777777777777'];
+    copy.attempts[0]!.turn_id = '66666666-6666-4666-8666-666666666666';
+    copy.attempts[0]!.attempt_id = '77777777-7777-4777-8777-777777777777';
     payload.conversations.push(copy);
-    expect(() => hydrateChatState(payload)).toThrow(
-      ChatStateValidationError,
-    );
+    expect(() => hydrateChatState(payload)).toThrow(ChatStateValidationError);
   });
 
   test('returns a one-shot exact rollback transaction for a prepared turn', () => {
@@ -4689,10 +9342,7 @@ describe('schema v6 attempts and project context', () => {
       reentered = true;
       store.renameConversation(conversationId, 'listener update');
     });
-    const transaction = store.prepareTurnAttempt(
-      conversationId,
-      'reentrant',
-    )!;
+    const transaction = store.prepareTurnAttempt(conversationId, 'reentrant')!;
     expect(transaction.rollback()).toBe(false);
     expect(transaction.commit()).toBe(false);
     expect(store.getState().conversations[conversationId]).toMatchObject({
@@ -4711,9 +9361,7 @@ describe('schema v6 attempts and project context', () => {
     });
     store.subscribe(state => observed.push(state));
 
-    let transaction:
-      | ReturnType<typeof store.prepareTurnAttempt>
-      | undefined;
+    let transaction: ReturnType<typeof store.prepareTurnAttempt> | undefined;
     expect(() => {
       transaction = store.prepareTurnAttempt(conversationId, 'safe');
     }).not.toThrow();
@@ -4911,9 +9559,8 @@ describe('schema v6 attempts and project context', () => {
       'model',
     )!;
     const legalModelState = modelStore.getState();
-    const legalModelConversation = legalModelState.conversations[
-      modelConversation
-    ]!;
+    const legalModelConversation =
+      legalModelState.conversations[modelConversation]!;
     const hostileModelState: ChatState = {
       ...legalModelState,
       conversations: {
@@ -4991,11 +9638,13 @@ describe('schema v6 attempts and project context', () => {
     expect(observed).toHaveLength(1);
     expect(
       observed.map(
-        state => state.conversations[setup.conversationId]?.projectContext?.status,
+        state =>
+          state.conversations[setup.conversationId]?.projectContext?.status,
       ),
     ).toEqual(['setup_required']);
     expect(
-      setup.store.getState().conversations[setup.conversationId]?.projectContext,
+      setup.store.getState().conversations[setup.conversationId]
+        ?.projectContext,
     ).toMatchObject({
       activePreparationId: REPLACEMENT_PREPARATION_ID,
       snapshot: { snapshot_id: REPLACEMENT_SNAPSHOT_ID },
@@ -5493,7 +10142,9 @@ describe('schema v6 attempts and project context', () => {
       conversationId: hostileConversationId as unknown as string,
     };
     const before = fixture.store.getState();
-    expect(() => fixture.store.disableProjectContext(hostileScope)).not.toThrow();
+    expect(() =>
+      fixture.store.disableProjectContext(hostileScope),
+    ).not.toThrow();
     expect(fixture.store.disableProjectContext(hostileScope)).toBeNull();
     expect(coercions).toBe(0);
     expect(fixture.store.getState()).toBe(before);
@@ -5702,7 +10353,9 @@ describe('schema v6 attempts and project context', () => {
     const source = conversation.attempts[0]!;
     const attempts = Array.from({ length: 2_000 }, (_, index) => ({
       ...source,
-      attemptId: `${index.toString(16).padStart(8, '0')}-0000-4000-8000-000000000000`,
+      attemptId: `${index
+        .toString(16)
+        .padStart(8, '0')}-0000-4000-8000-000000000000`,
     }));
     const adversarialState: ChatState = {
       ...state,
@@ -5809,5 +10462,22 @@ describe('schema v6 attempts and project context', () => {
       ),
     ).toEqual([]);
     expect(getterCalls).toBe(0);
+  });
+
+  test('session authority has one store owner and can be explicitly cleared', () => {
+    const store = createChatStore();
+    expect(store.getSessionAuthority()).toBeNull();
+    expect(
+      store.setSessionAuthority({
+        generation: 18,
+        sessionSha256: 'a'.repeat(64),
+      }),
+    ).toBe(true);
+    expect(store.getSessionAuthority()).toEqual({
+      generation: 18,
+      sessionSha256: 'a'.repeat(64),
+    });
+    expect(store.setSessionAuthority(null)).toBe(true);
+    expect(store.getSessionAuthority()).toBeNull();
   });
 });

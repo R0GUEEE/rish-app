@@ -5,8 +5,27 @@ import type {
   ProjectContextManifestV1,
   ProjectContextState,
 } from '../project-context/types';
+import type { PersistedAppPreferencesV1 } from '../preferences/types';
 
-export const CHAT_STATE_SCHEMA_VERSION = 8 as const;
+/** Closed high-level native evidence; the mapper owns its runtime validation. */
+export type AgentStoreTransitionEvidence = import(
+  '../agent/AgentStoreTransitions'
+).AgentStoreTransitionEvidence;
+/** Closed controller intent seed used before the native post-result evidence. */
+export type AgentControllerPreflightV1 = import(
+  '../agent/AgentControllerPreflight'
+).AgentControllerPreflightV1;
+export type AgentCheckpointEvidence =
+  | AgentStoreTransitionEvidence
+  | AgentControllerPreflightV1;
+
+/**
+ * Schema 8 is kept as a first-class migration input.  Schema 9 is the first
+ * session root that owns the Agent journal and event projection.
+ */
+export const CHAT_STATE_SCHEMA_VERSION = 9 as const;
+export const AGENT_CHAT_STATE_SCHEMA_VERSION = CHAT_STATE_SCHEMA_VERSION;
+export const CHAT_STATE_SCHEMA_VERSION_V8 = 8 as const;
 export const PREVIOUS_CHAT_STATE_SCHEMA_VERSION = 7 as const;
 export const WORKSPACE_CHAT_STATE_SCHEMA_VERSION = 5 as const;
 export const PROJECT_CONTEXT_CHAT_STATE_SCHEMA_VERSION = 6 as const;
@@ -21,6 +40,45 @@ export const COMPLETION_ROUND_RECEIPT_SCHEMA_VERSION = 1 as const;
 export const PROJECT_CONTEXT_DESTRUCTIVE_TRANSITION_SCHEMA_VERSION = 1 as const;
 export const CONVERSATION_WORKSPACE_BINDING_SCHEMA_VERSION = 1 as const;
 export const WORKSPACE_AUTHORITY_OUTBOX_SCHEMA_VERSION = 1 as const;
+export const AGENT_TRANSCRIPT_REFERENCE_SCHEMA_VERSION = 1 as const;
+export const AGENT_ROOT_SCHEMA_VERSION = 1 as const;
+export const AGENT_WRITE_POLICY_SCHEMA_VERSION = 1 as const;
+export const AGENT_GRANT_SCHEMA_VERSION = 2 as const;
+export const AGENT_ATTEMPT_JOURNAL_SCHEMA_VERSION = 2 as const;
+export const AGENT_ROUND_LINEAGE_SCHEMA_VERSION = 2 as const;
+export const AGENT_CALL_JOURNAL_SCHEMA_VERSION = 2 as const;
+/** Final schema-9 nested Agent journal versions.  V2 remains a migration/runtime input. */
+export const AGENT_ATTEMPT_JOURNAL_SCHEMA_VERSION_V3 = 3 as const;
+export const AGENT_CALL_JOURNAL_SCHEMA_VERSION_V3 = 3 as const;
+export const AGENT_CLEANUP_SCHEMA_VERSION = 1 as const;
+export const SESSION_EVENT_V2_SCHEMA_VERSION = 2 as const;
+export const PERSISTED_TURN_ATTEMPT_SCHEMA_VERSION = 2 as const;
+export const PERSISTED_TURN_ATTEMPT_SCHEMA_VERSION_V3 = 3 as const;
+
+export const MAX_AGENT_ROUNDS = 8 as const;
+export const MAX_AGENT_CALLS_PER_BATCH = 16 as const;
+export const MAX_AGENT_GRANTS_PER_CONVERSATION = 2 as const;
+export const MAX_AGENT_CLEANUP_OUTBOX_ENTRIES = 64 as const;
+export const MAX_SESSION_EVENT_ROWS = 512 as const;
+export const MAX_AGENT_SINGLE_WRITE_BYTES = 32768 as const;
+export const MAX_AGENT_BATCH_WRITE_BYTES = 512 * 1024;
+export const MAX_AGENT_ATTEMPT_WRITE_BYTES = 4 * 1024 * 1024;
+export const MAX_AGENT_TRANSCRIPT_BYTES = 2 * 1024 * 1024;
+export const MAX_AGENT_RESULT_BYTES = 32 * 1024 * 1024;
+export const MAX_AGENT_SUMMARY_KEY_LENGTH = 128;
+export const AGENT_SAFE_SUMMARY_KEYS = [
+  'agent.list_dir',
+  'agent.read_file',
+  'agent.write_file',
+  'agent.git_status',
+  'agent.git_commit',
+  'agent.git_push',
+  'agent.unknown',
+] as const;
+export const MAX_AGENT_TRANSCRIPT_COUNT = 128;
+export const MAX_AGENT_LEDGER_ROWS_PER_ATTEMPT = 128;
+export const MAX_AGENT_STORE_BYTES = 64 * 1024 * 1024;
+export const MAX_AGENT_DURATION_MS = 24 * 60 * 60 * 1000;
 
 export const ATTACHMENT_KINDS = ['image', 'text', 'pdf'] as const;
 
@@ -126,6 +184,25 @@ export const ATTEMPT_FAILURE_CODES = [
   'E_CONTEXT_BUSY',
   'E_CONTEXT_NATIVE',
   'E_WORKSPACE_REVOKED',
+  'E_AGENT_UNKNOWN_TOOL',
+  'E_AGENT_BAD_ARGUMENTS',
+  'E_AGENT_BAD_PATH',
+  'E_AGENT_NO_ROOT',
+  'E_AGENT_ROOT_STALE',
+  'E_AGENT_CAPABILITY',
+  'E_AGENT_APPROVAL',
+  'E_AGENT_TRANSCRIPT',
+  'E_AGENT_LEDGER',
+  'E_AGENT_ROUND_AMBIGUOUS',
+  'E_AGENT_EXECUTION_AMBIGUOUS',
+  'E_AGENT_RETRY_LINEAGE',
+  'E_AGENT_PERSISTENCE',
+  'E_AGENT_CONFLICT',
+  'E_AGENT_ROUND_LIMIT',
+  'E_AGENT_CANCELLED',
+  'E_AGENT_TOOL_FAILED',
+  'E_COMPLETION_LENGTH',
+  'E_COMPLETION_CONTENT_FILTER',
 ] as const;
 
 export type ModelId = (typeof SUPPORTED_MODEL_IDS)[number];
@@ -135,8 +212,7 @@ export type ChatRole = 'user' | 'assistant';
 export type ConversationTitleSource = 'auto' | 'manual';
 export type ChatAttachmentKind = (typeof ATTACHMENT_KINDS)[number];
 export type TurnAttemptStatus = (typeof TURN_ATTEMPT_STATUSES)[number];
-export type CompletionFinishReason =
-  (typeof COMPLETION_FINISH_REASONS)[number];
+export type CompletionFinishReason = (typeof COMPLETION_FINISH_REASONS)[number];
 export type AttemptContextDisposition =
   (typeof ATTEMPT_CONTEXT_DISPOSITIONS)[number];
 export type AttemptFailureCode = (typeof ATTEMPT_FAILURE_CODES)[number];
@@ -146,6 +222,666 @@ export type ProjectContextDestructivePhase =
   (typeof PROJECT_CONTEXT_DESTRUCTIVE_PHASES)[number];
 export type ConversationWorkspaceBootstrapState =
   (typeof CONVERSATION_WORKSPACE_BOOTSTRAP_STATES)[number];
+
+/** Stable, value-free failures shared by the JS Agent journal and native WAL. */
+export type AgentFailureCode =
+  | 'E_AGENT_UNKNOWN_TOOL'
+  | 'E_AGENT_BAD_ARGUMENTS'
+  | 'E_AGENT_BAD_PATH'
+  | 'E_AGENT_NO_ROOT'
+  | 'E_AGENT_ROOT_STALE'
+  | 'E_AGENT_CAPABILITY'
+  | 'E_AGENT_APPROVAL'
+  | 'E_AGENT_TRANSCRIPT'
+  | 'E_AGENT_LEDGER'
+  | 'E_AGENT_ROUND_AMBIGUOUS'
+  | 'E_AGENT_EXECUTION_AMBIGUOUS'
+  | 'E_AGENT_RETRY_LINEAGE'
+  | 'E_AGENT_PERSISTENCE'
+  | 'E_AGENT_CONFLICT'
+  | 'E_AGENT_ROUND_LIMIT'
+  | 'E_AGENT_CANCELLED'
+  | 'E_AGENT_TOOL_FAILED'
+  | 'E_COMPLETION_LENGTH'
+  | 'E_COMPLETION_CONTENT_FILTER';
+
+export const AGENT_FAILURE_CODES = [
+  'E_AGENT_UNKNOWN_TOOL',
+  'E_AGENT_BAD_ARGUMENTS',
+  'E_AGENT_BAD_PATH',
+  'E_AGENT_NO_ROOT',
+  'E_AGENT_ROOT_STALE',
+  'E_AGENT_CAPABILITY',
+  'E_AGENT_APPROVAL',
+  'E_AGENT_TRANSCRIPT',
+  'E_AGENT_LEDGER',
+  'E_AGENT_ROUND_AMBIGUOUS',
+  'E_AGENT_EXECUTION_AMBIGUOUS',
+  'E_AGENT_RETRY_LINEAGE',
+  'E_AGENT_PERSISTENCE',
+  'E_AGENT_CONFLICT',
+  'E_AGENT_ROUND_LIMIT',
+  'E_AGENT_CANCELLED',
+  'E_AGENT_TOOL_FAILED',
+  'E_COMPLETION_LENGTH',
+  'E_COMPLETION_CONTENT_FILTER',
+] as const satisfies readonly AgentFailureCode[];
+
+export type AgentCapability =
+  | 'file_read'
+  | 'file_write'
+  | 'git_status'
+  | 'git_commit'
+  | 'git_push';
+
+export type AgentAccess =
+  | 'auto'
+  | 'conversation_confirm'
+  | 'confirm_once'
+  | 'durable_deny';
+
+export type AgentApprovalDecision =
+  | 'pending'
+  | 'denied'
+  | 'allow_once'
+  | 'allow_conversation'
+  | 'cancelled';
+
+/**
+ * Exact approval capability. The token is intentionally structured rather
+ * than an opaque provider string: every field that can change the decision is
+ * bound to the controller CAS and frozen Agent authority.
+ */
+export type AgentApprovalTokenV1 = {
+  readonly schema_version: 1;
+  readonly controller_cas: AgentControllerCASV1;
+  readonly round_id: string;
+  readonly round_index: number;
+  readonly batch_call_ids: readonly string[];
+  readonly batch_arguments_sha256: readonly string[];
+  readonly call_index: number;
+  readonly call_id: string;
+  readonly name: string;
+  readonly access: AgentAccess;
+  readonly arguments_sha256: string;
+  readonly root_fingerprint_sha256: string;
+  readonly binding_revision: number;
+  readonly policy_version: string;
+  readonly registry_version: 1;
+  readonly allowed_decisions: readonly Exclude<
+    AgentApprovalDecision,
+    'pending'
+  >[];
+};
+
+/**
+ * The object accepted from the pre-V3 schema-9 Store.  It is intentionally
+ * retained as a legacy source type; it is never emitted by the final
+ * persisted serializer.
+ */
+export type AgentApprovalTokenV1Legacy = AgentApprovalTokenV1;
+
+/** Native-only structured binding.  The Store persists only `token`. */
+export type AgentApprovalBindingTokenV2 = {
+  readonly schema_version: 2;
+  readonly token: string;
+  readonly controller_cas: AgentControllerCASV1;
+  readonly task_id: string;
+  readonly attempt_id: string;
+  readonly round_id: string;
+  readonly round_index: number;
+  readonly batch_call_ids: readonly string[];
+  readonly batch_arguments_sha256: readonly string[];
+  readonly batch_revision: number;
+  readonly manifest_sha256: string;
+  readonly call_index: number;
+  readonly call_id: string;
+  readonly name: string;
+  readonly arguments_sha256: string;
+  readonly idempotency_key: string;
+  readonly root_fingerprint_sha256: string;
+  readonly binding_revision: number;
+  readonly policy_version: 'agent-v1';
+  readonly registry_version: 1;
+  readonly access: 'conversation_confirm' | 'confirm_once';
+  readonly allowed_decisions: readonly (
+    | 'denied'
+    | 'allow_once'
+    | 'allow_conversation'
+    | 'cancelled'
+  )[];
+};
+
+export type AgentApprovalTokenSourceV2 =
+  | {
+      readonly schema_version: 2;
+      readonly source_kind: 'approved_opaque_string';
+      readonly approval_token: string | null;
+    }
+  | {
+      readonly schema_version: 2;
+      readonly source_kind: 'current_object_legacy';
+      readonly approval_token: AgentApprovalTokenV1Legacy;
+    }
+  | {
+      readonly schema_version: 2;
+      readonly source_kind: 'runtime_object_v2';
+      readonly approval_token: AgentApprovalBindingTokenV2;
+    };
+
+/** Pure migration classification; this is never authority or an execution token. */
+export type AgentApprovalTokenMigrationV3 =
+  | {
+      readonly schema_version: 3;
+      readonly source_schema_version: 2;
+      readonly source: Extract<
+        AgentApprovalTokenSourceV2,
+        { readonly source_kind: 'approved_opaque_string' }
+      >;
+      readonly status: 'preserved';
+      readonly approval_token: string | null;
+      readonly decision: AgentApprovalDecision;
+      readonly historical_decision: null;
+      readonly failure_code: null;
+    }
+  | {
+      readonly schema_version: 3;
+      readonly source_schema_version: 2;
+      readonly source: Extract<
+        AgentApprovalTokenSourceV2,
+        {
+          readonly source_kind:
+            | 'approved_opaque_string'
+            | 'current_object_legacy';
+        }
+      >;
+      readonly status: 'needs_reprepare' | 'cancelled';
+      readonly approval_token: null;
+      readonly decision: 'denied' | 'cancelled';
+      readonly historical_decision: AgentApprovalDecision;
+      readonly failure_code:
+        | 'E_AGENT_APPROVAL'
+        | 'E_AGENT_TRANSCRIPT'
+        | 'E_AGENT_CONFLICT';
+    }
+  | {
+      readonly schema_version: 3;
+      readonly source_schema_version: 2;
+      readonly source: Extract<
+        AgentApprovalTokenSourceV2,
+        { readonly source_kind: 'runtime_object_v2' }
+      >;
+      readonly status: 'needs_reprepare';
+      readonly approval_token: null;
+      readonly decision: 'denied' | 'cancelled';
+      readonly historical_decision: AgentApprovalDecision;
+      readonly failure_code: 'E_AGENT_APPROVAL' | 'E_AGENT_TRANSCRIPT' | 'E_AGENT_CONFLICT';
+    };
+
+export type AgentAttemptPhase =
+  | 'ready_for_round'
+  | 'round_in_flight'
+  | 'batch_frozen'
+  | 'approval_pending'
+  | 'execution_intent'
+  | 'tool_result_pending'
+  | 'final_response'
+  | 'cancelled'
+  | 'failed'
+  | 'unknown'
+  | 'ambiguous';
+
+export const AGENT_ATTEMPT_PHASES = [
+  'ready_for_round',
+  'round_in_flight',
+  'batch_frozen',
+  'approval_pending',
+  'execution_intent',
+  'tool_result_pending',
+  'final_response',
+  'cancelled',
+  'failed',
+  'unknown',
+  'ambiguous',
+] as const satisfies readonly AgentAttemptPhase[];
+
+/**
+ * Closed phase/lineage relation shared by the persistence parser and the
+ * reducer.  A ready Agent attempt may not have allocated a native round yet;
+ * every later phase must carry exactly the native lineage state that explains
+ * it.  Keeping this table in the state contract prevents the two validators
+ * from drifting and admitting an authority transition at only one boundary.
+ */
+export const AGENT_PHASE_LINEAGE_MATRIX: Readonly<
+  Record<
+    AgentAttemptPhase,
+    readonly PersistedAgentRoundLineageV2['status'][] | null
+  >
+> = {
+  ready_for_round: ['ready'],
+  round_in_flight: ['active', 'cancel_requested'],
+  batch_frozen: ['completed'],
+  approval_pending: ['completed'],
+  execution_intent: ['completed', 'cancel_requested'],
+  tool_result_pending: ['completed'],
+  final_response: ['completed'],
+  cancelled: ['completed', 'cancelled'],
+  failed: ['completed', 'failed_retryable'],
+  unknown: ['unknown'],
+  ambiguous: ['ambiguous'],
+};
+
+/** Returns whether a final Agent phase has a permitted native lineage state. */
+export function isAgentPhaseLineageValid(
+  phase: AgentAttemptPhase,
+  lineageStatus: PersistedAgentRoundLineageV2['status'] | null,
+): boolean {
+  const allowed = AGENT_PHASE_LINEAGE_MATRIX[phase];
+  if (phase === 'ready_for_round' && lineageStatus === null) return true;
+  return (
+    lineageStatus !== null &&
+    allowed !== null &&
+    allowed.includes(lineageStatus)
+  );
+}
+
+/** Root authority frozen before a provider round.  It never contains a path. */
+export type FrozenAgentRootV1 = {
+  readonly schema_version: typeof AGENT_ROOT_SCHEMA_VERSION;
+  readonly kind: 'project' | 'workspace';
+  readonly workspace_id: string;
+  readonly workspace_binding_revision: number;
+  readonly project_id: string | null;
+  readonly root_fingerprint_sha256: string;
+  readonly capabilities: readonly AgentCapability[];
+};
+export type AgentRootV1 = FrozenAgentRootV1;
+
+export type AgentWritePolicyV1 = {
+  readonly schema_version: typeof AGENT_WRITE_POLICY_SCHEMA_VERSION;
+  readonly policy_version: string;
+  readonly max_single_write_bytes: 32768;
+  readonly max_batch_write_bytes: number;
+  readonly max_attempt_write_bytes: number;
+};
+
+/** Names used by the high-level Agent Runtime addendum. */
+export type AgentRuntimePolicyV1 = AgentWritePolicyV1;
+
+export type AgentTranscriptReferenceV1 = {
+  readonly schema_version: typeof AGENT_TRANSCRIPT_REFERENCE_SCHEMA_VERSION;
+  readonly transcript_ref: string;
+  readonly generation: number;
+  readonly transcript_sha256: string;
+  readonly transcript_bytes: number;
+};
+
+export type AgentRuntimeTranscriptHandleV1 = AgentTranscriptReferenceV1;
+export type AgentRuntimeRootV1 = FrozenAgentRootV1;
+
+export type AgentConversationGrantV2 = {
+  readonly schema_version: typeof AGENT_GRANT_SCHEMA_VERSION;
+  readonly grant_id: string;
+  readonly conversation_id: string;
+  readonly workspace_id: string;
+  readonly project_id: string | null;
+  readonly binding_revision: number;
+  readonly root_fingerprint_sha256: string;
+  readonly tool_family: 'file_write' | 'git_commit';
+  readonly registry_version: 1;
+  readonly policy_version: string;
+  readonly issued_for: {
+    readonly schema_version: 1;
+    readonly task_id: string;
+    readonly attempt_id: string;
+  };
+  readonly created_at: string;
+};
+
+
+export type AgentControllerCASV1 = {
+  readonly schema_version: 1;
+  readonly conversation_id: string;
+  readonly task_id: string;
+  readonly attempt_id: string;
+  readonly expected_controller_generation: number;
+  readonly expected_journal_revision: number;
+  readonly expected_session_generation: number;
+  readonly expected_session_sha256: string;
+};
+
+
+export type AgentToolCallPresentationV1 = {
+  readonly schema_version: 1;
+  readonly call_id: string;
+  readonly name: string;
+  readonly arguments_sha256: string;
+  readonly safe_summary_key: string;
+  readonly access: AgentAccess;
+};
+
+export type AgentWritePriorV1 =
+  | { readonly schema_version: 1; readonly kind: 'absent' }
+  | {
+      readonly schema_version: 1;
+      readonly kind: 'known';
+      readonly revision: string;
+    }
+  | {
+      readonly schema_version: 1;
+      readonly kind: 'unknown';
+      readonly failure_code: AgentFailureCode;
+    };
+
+export type AgentOperationPreconditionV2 =
+  | {
+      readonly schema_version: 1;
+      readonly kind: 'read_file';
+      readonly source_revision: string;
+    }
+  | {
+      readonly schema_version: 1;
+      readonly kind: 'list_dir';
+      readonly directory_fingerprint_sha256: string;
+    }
+  | {
+      readonly schema_version: 2;
+      readonly kind: 'write_file';
+      readonly relative_path_sha256: string;
+      readonly prior: AgentWritePriorV1;
+      readonly content_sha256: string;
+      readonly content_bytes: number;
+    }
+  | {
+      readonly schema_version: 2;
+      readonly kind: 'git_commit';
+      readonly object_format: 'sha1' | 'sha256';
+      readonly pre_head_oid: string | null;
+      readonly ordered_parent_oids: readonly string[];
+      readonly staged_index_sha256: string;
+      readonly tree_oid: string;
+      readonly author: AgentGitIdentityV1;
+      readonly committer: AgentGitIdentityV1;
+      readonly message_blob_ref: string;
+      readonly message_sha256: string;
+      readonly message_bytes: number;
+      readonly encoding_header: null | 'UTF-8';
+      readonly signature_policy: 'unsigned';
+      readonly extra_headers: readonly [];
+      readonly stage_all: true;
+      readonly commit_payload_sha256: string;
+      readonly expected_commit_oid: string;
+    }
+  | {
+      readonly schema_version: 1;
+      readonly kind: 'git_push';
+      readonly remote: 'origin';
+      readonly remote_ref: string;
+      readonly pre_remote_oid: string | null;
+      readonly target_oid: string;
+    };
+
+export type AgentGitIdentityV1 = {
+  readonly schema_version: 1;
+  readonly name: 'Rish Agent';
+  readonly email: 'agent@rish.local';
+  readonly timestamp_seconds: number;
+  readonly timezone_offset: string;
+};
+
+export type AgentOperationSettledFactsV1 =
+  | {
+      readonly schema_version: 1;
+      readonly kind: 'read_file';
+      readonly source_revision: string;
+    }
+  | {
+      readonly schema_version: 1;
+      readonly kind: 'list_dir';
+      readonly directory_fingerprint_sha256: string;
+    }
+  | {
+      readonly schema_version: 1;
+      readonly kind: 'write_file';
+      readonly actual_revision: string;
+      readonly content_sha256: string;
+    }
+  | {
+      readonly schema_version: 1;
+      readonly kind: 'git_commit';
+      readonly actual_commit_oid: string;
+    }
+  | {
+      readonly schema_version: 1;
+      readonly kind: 'git_push';
+      readonly actual_remote_oid: string;
+    };
+
+export type AgentToolReceiptV1 = {
+  readonly schema_version: 1;
+  readonly call_id: string;
+  readonly name: string;
+  readonly arguments_sha256: string;
+  readonly result_sha256: string;
+  readonly result_bytes: number;
+  readonly truncated: boolean;
+  readonly duration_ms: number;
+  readonly outcome: 'ok' | 'failed' | 'denied' | 'cancelled' | 'ambiguous';
+  readonly failure_code: AgentFailureCode | null;
+  readonly approval_reference: string | null;
+};
+
+export type PersistedAgentRoundLineageV2 = {
+  readonly schema_version: typeof AGENT_ROUND_LINEAGE_SCHEMA_VERSION;
+  readonly round_id: string;
+  readonly round_index: number;
+  readonly launch_attempt: number;
+  readonly status:
+    | 'ready'
+    | 'active'
+    | 'failed_retryable'
+    | 'completed'
+    | 'cancel_requested'
+    | 'cancelled'
+    | 'unknown'
+    | 'ambiguous';
+  readonly native_row_revision: number | null;
+};
+
+export type PersistedAgentCallJournalV2 = {
+  readonly schema_version: typeof AGENT_CALL_JOURNAL_SCHEMA_VERSION;
+  readonly call_id: string;
+  readonly call_index: number;
+  readonly name: string;
+  readonly arguments_sha256: string;
+  readonly safe_summary_key: string;
+  readonly access: AgentAccess;
+  readonly approval_token: AgentApprovalTokenV1 | null;
+  readonly approval_decision: AgentApprovalDecision;
+  readonly approval_reference: string | null;
+  readonly idempotency_key: string | null;
+  readonly native_row_revision: number | null;
+  readonly receipt: AgentToolReceiptV1 | null;
+};
+
+/** Final schema-9 call projection.  `approval_token` is deliberately opaque. */
+export type PersistedAgentCallJournalV3 = {
+  readonly schema_version: typeof AGENT_CALL_JOURNAL_SCHEMA_VERSION_V3;
+  readonly call_id: string;
+  readonly call_index: number;
+  readonly name: string;
+  readonly arguments_sha256: string;
+  readonly safe_summary_key: string;
+  readonly access: AgentAccess;
+  readonly approval_token: string | null;
+  readonly approval_decision: AgentApprovalDecision;
+  readonly approval_reference: string | null;
+  readonly idempotency_key: string | null;
+  readonly native_row_revision: number | null;
+  readonly receipt: AgentToolReceiptV1 | null;
+};
+
+export type PersistedAgentAttemptJournalV2 = {
+  readonly schema_version: typeof AGENT_ATTEMPT_JOURNAL_SCHEMA_VERSION;
+  readonly phase:
+    | 'ready_for_round'
+    | 'round_in_flight'
+    | 'batch_frozen'
+    | 'approval_pending'
+    | 'execution_intent'
+    | 'tool_result_pending'
+    | 'final_response'
+    | 'cancelled'
+    | 'failed'
+    | 'unknown'
+    | 'ambiguous';
+  readonly controller_generation: number;
+  readonly policy: AgentWritePolicyV1;
+  readonly root: FrozenAgentRootV1;
+  readonly tool_registry_version: 1;
+  readonly toolset_sha256: string;
+  readonly transcript: AgentTranscriptReferenceV1;
+  readonly round_index: number;
+  readonly round_lineage: PersistedAgentRoundLineageV2 | null;
+  readonly call_index: number | null;
+  readonly batch: readonly PersistedAgentCallJournalV2[];
+  readonly frozen_grant_ids: readonly string[];
+  readonly reserved_write_bytes: number;
+  readonly updated_at: string;
+};
+
+/** Final schema-9 Agent journal projection. */
+export type PersistedAgentAttemptJournalV3 = {
+  readonly schema_version: typeof AGENT_ATTEMPT_JOURNAL_SCHEMA_VERSION_V3;
+  readonly phase: AgentAttemptPhase;
+  readonly controller_generation: number;
+  readonly policy: AgentRuntimePolicyV1;
+  readonly root: AgentRuntimeRootV1;
+  readonly tool_registry_version: 1;
+  readonly toolset_sha256: string;
+  readonly transcript: AgentRuntimeTranscriptHandleV1;
+  readonly round_index: number;
+  readonly round_lineage: PersistedAgentRoundLineageV2 | null;
+  readonly call_index: number | null;
+  readonly batch: readonly PersistedAgentCallJournalV3[];
+  readonly frozen_grant_ids: readonly string[];
+  readonly reserved_write_bytes: number;
+  readonly updated_at: string;
+};
+
+export type AgentTranscriptCleanupV1 = {
+  readonly schema_version: typeof AGENT_CLEANUP_SCHEMA_VERSION;
+  readonly cleanup_id: string;
+  readonly conversation_id: string;
+  readonly task_id: string;
+  readonly attempt_id: string;
+  readonly transcript_ref: string;
+  readonly transcript_sha256: string;
+  readonly reason:
+    | 'completed'
+    | 'cancelled'
+    | 'failed'
+    | 'conversation_deleted';
+  readonly created_at: string;
+};
+
+/** Exact schema-9 event projection; no raw provider/tool payload is allowed. */
+export type SessionEventV2 = {
+  readonly schema_version: typeof SESSION_EVENT_V2_SCHEMA_VERSION;
+  readonly event_id: string;
+  readonly attempt_id: string;
+  readonly seq: number;
+  readonly kind:
+    | 'round'
+    | 'tool_call'
+    | 'tool_result'
+    | 'approval'
+    | 'terminal';
+  readonly round_index: number | null;
+  readonly call_id: string | null;
+  readonly status:
+    | 'waiting'
+    | 'approval'
+    | 'running'
+    | 'ok'
+    | 'failed'
+    | 'denied'
+    | 'cancelled'
+    | 'unknown'
+    | 'ambiguous';
+  readonly safe_summary_key: string | null;
+  readonly arguments_sha256: string | null;
+  readonly result_sha256: string | null;
+  readonly approval_reference: string | null;
+  readonly failure_code: AgentFailureCode | null;
+  readonly created_at: string;
+};
+
+/**
+ * The cancellation source event is a closed schema-9 union branch.  It uses
+ * the existing event envelope and deliberately carries no result/receipt;
+ * `approval_reference` is the source event identity itself.
+ */
+export type AgentCancelEventV2 =
+  | {
+      readonly schema_version: typeof SESSION_EVENT_V2_SCHEMA_VERSION;
+      readonly event_id: string;
+      readonly attempt_id: string;
+      readonly seq: number;
+      readonly kind: 'cancel';
+      readonly round_index: null;
+      readonly call_id: null;
+      readonly status: 'cancelled';
+      readonly safe_summary_key: null;
+      readonly arguments_sha256: null;
+      readonly result_sha256: null;
+      readonly approval_reference: string;
+      readonly failure_code:
+        | 'E_AGENT_CANCELLED'
+        | 'E_AGENT_ROOT_STALE'
+        | 'E_AGENT_PERSISTENCE';
+      readonly created_at: string;
+    }
+  | {
+      readonly schema_version: typeof SESSION_EVENT_V2_SCHEMA_VERSION;
+      readonly event_id: string;
+      readonly attempt_id: string;
+      readonly seq: number;
+      readonly kind: 'cancel';
+      readonly round_index: number;
+      readonly call_id: null;
+      readonly status: 'cancelled';
+      readonly safe_summary_key: null;
+      readonly arguments_sha256: null;
+      readonly result_sha256: null;
+      readonly approval_reference: string;
+      readonly failure_code:
+        | 'E_AGENT_CANCELLED'
+        | 'E_AGENT_ROOT_STALE'
+        | 'E_AGENT_PERSISTENCE';
+      readonly created_at: string;
+    }
+  | {
+      readonly schema_version: typeof SESSION_EVENT_V2_SCHEMA_VERSION;
+      readonly event_id: string;
+      readonly attempt_id: string;
+      readonly seq: number;
+      readonly kind: 'cancel';
+      readonly round_index: number;
+      readonly call_id: string;
+      readonly status: 'cancelled';
+      readonly safe_summary_key: null;
+      readonly arguments_sha256: string;
+      readonly result_sha256: null;
+      readonly approval_reference: string;
+      readonly failure_code:
+        | 'E_AGENT_CANCELLED'
+        | 'E_AGENT_ROOT_STALE'
+        | 'E_AGENT_PERSISTENCE';
+      readonly created_at: string;
+    };
+
+export type PersistedSessionEventV3 = SessionEventV2 | AgentCancelEventV2;
 
 export type ChatAttachment = {
   readonly schema_version: typeof ATTACHMENT_DESCRIPTOR_SCHEMA_VERSION;
@@ -255,6 +991,10 @@ export type TurnAttemptV1 = {
   readonly failureCode: AttemptFailureCode | null;
   readonly createdAt: string;
   readonly updatedAt: string;
+  /** Schema-9 journal.  Optional for callers that still construct schema-8 rows. */
+  readonly journalRevision?: number;
+  /** Final in-memory schema-9 state is V3-only. V2 is bootstrap input only. */
+  readonly agent?: PersistedAgentAttemptJournalV3 | null;
 };
 
 export type Conversation = {
@@ -274,6 +1014,10 @@ export type Conversation = {
   readonly attempts: readonly TurnAttemptV1[];
   readonly createdAt: string;
   readonly updatedAt: string;
+  /** Schema-9 conversation-owned grants; absent means the legacy empty set. */
+  readonly agentGrants?: readonly AgentConversationGrantV2[];
+  /** Wire-key alias accepted only for compatibility with early schema-9 drafts. */
+  readonly agent_grants?: readonly AgentConversationGrantV2[];
 };
 
 export type ConversationWorkspaceBindingV1 = {
@@ -393,12 +1137,27 @@ export type ChatState = {
   readonly schemaVersion: typeof CHAT_STATE_SCHEMA_VERSION;
   readonly workspaceAuthorityOutbox?: readonly WorkspaceAuthorityOutboxV1[];
   readonly projectContextDestructiveEpoch: number;
-  readonly projectContextDestructiveTransition:
-    | ProjectContextDestructiveTransitionV1
-    | null;
+  readonly projectContextDestructiveTransition: ProjectContextDestructiveTransitionV1 | null;
   readonly conversations: Readonly<Record<string, Conversation>>;
   readonly conversationOrder: readonly string[];
   readonly selectedConversationId: string | null;
+  /** Session schema-9 fields are optional in the in-memory chat projection. */
+  readonly agentTranscriptCleanupOutbox?: readonly AgentTranscriptCleanupV1[];
+  readonly sessionEvents?: readonly PersistedSessionEventV3[];
+  readonly preferences?: PersistedAppPreferencesV1;
+  /** Migration facts are in-memory diagnostics and are never serialized. */
+  readonly migrationDiagnostics?: ChatStateMigrationDiagnostics;
+};
+
+export type ChatStateMigrationDiagnostics = {
+  readonly defaulted_legacy_preferences?: true;
+  readonly dropped_legacy_session_events?: true;
+};
+
+export type AgentConversationDeleteWithCleanupInput = {
+  readonly conversationId: string;
+  readonly expectedConversation: Conversation;
+  readonly cleanup: readonly AgentTranscriptCleanupV1[];
 };
 
 export type ChatAction =
@@ -438,6 +1197,15 @@ export type ChatAction =
   | {
       readonly type: 'conversation/delete';
       readonly payload: { readonly id: string };
+    }
+  | {
+      /** Atomically retain terminal transcript owners while deleting a chat. */
+      readonly type: 'conversation/delete-with-agent-cleanup';
+      readonly payload: {
+        readonly conversationId: string;
+        readonly expectedConversation: Conversation;
+        readonly cleanup: readonly AgentTranscriptCleanupV1[];
+      };
     }
   | {
       readonly type: 'conversation/set-model';
@@ -633,6 +1401,106 @@ export type ChatAction =
         readonly conversationId: string;
         readonly sourceAttemptId: string;
         readonly attempt: TurnAttemptV1;
+      };
+    }
+  | {
+      /** Replace one immutable Agent journal checkpoint under an exact CAS. */
+      readonly type: 'attempt/agent-checkpoint';
+      readonly payload: {
+        readonly cas: AgentControllerCASV1;
+        readonly conversationId: string;
+        readonly attemptId: string;
+        readonly expectedAttempt: TurnAttemptV1;
+        readonly journal: PersistedAgentAttemptJournalV3 | null;
+        readonly journalRevision?: number;
+        readonly events: readonly PersistedSessionEventV3[];
+        readonly evidence: AgentCheckpointEvidence;
+        /** Terminal cleanup ownership is part of this same session candidate. */
+        readonly cleanup?: AgentTranscriptCleanupV1;
+        readonly at: string;
+      };
+    }
+  | {
+      /**
+       * Advances only the cursor within an already-frozen native tool batch.
+       * This local session checkpoint deliberately carries no native evidence
+       * and cannot create approval or execution events.
+       */
+      readonly type: 'attempt/agent-advance-call';
+      readonly payload: {
+        readonly cas: AgentControllerCASV1;
+        readonly conversationId: string;
+        readonly attemptId: string;
+        readonly expectedAttempt: TurnAttemptV1;
+        readonly journal: PersistedAgentAttemptJournalV3;
+        readonly journalRevision?: number;
+        readonly at: string;
+      };
+    }
+  | {
+      /**
+       * Atomically installs the first terminal Agent checkpoint together with
+       * its user-visible response (when any), terminal event, and transcript
+       * cleanup ownership.
+       */
+      readonly type: 'attempt/agent-final-checkpoint';
+      readonly payload: {
+        readonly cas: AgentControllerCASV1;
+        readonly conversationId: string;
+        readonly attemptId: string;
+        readonly expectedAttempt: TurnAttemptV1;
+        readonly journal: PersistedAgentAttemptJournalV3;
+        readonly journalRevision?: number;
+        readonly events: readonly PersistedSessionEventV3[];
+        readonly evidence: AgentStoreTransitionEvidence;
+        readonly assistantMessage: ChatMessage | null;
+        readonly cleanup: AgentTranscriptCleanupV1;
+        readonly at: string;
+      };
+    }
+  | {
+      /** Atomically replace conversation-owned grants under an exact CAS. */
+      readonly type: 'conversation/agent-grants';
+      readonly payload: {
+        readonly conversationId: string;
+        readonly expectedConversation: Conversation;
+        readonly grants: readonly AgentConversationGrantV2[];
+        readonly at: string;
+      };
+    }
+  | {
+      /** One candidate updates the decision and its conversation grant. */
+      readonly type: 'agent/approval-checkpoint';
+      readonly payload: {
+        readonly cas: AgentControllerCASV1;
+        readonly conversationId: string;
+        readonly attemptId: string;
+        readonly expectedAttempt: TurnAttemptV1;
+        readonly expectedConversation: Conversation;
+        readonly journal: PersistedAgentAttemptJournalV3;
+        readonly grants: readonly AgentConversationGrantV2[];
+        readonly events: readonly PersistedSessionEventV3[];
+        readonly evidence: AgentCheckpointEvidence;
+        readonly journalRevision?: number;
+        readonly cleanup?: AgentTranscriptCleanupV1;
+        readonly at: string;
+      };
+    }
+  | {
+      readonly type: 'agent/cleanup-enqueue';
+      readonly payload: {
+        readonly conversationId: string;
+        readonly attemptId: string;
+        readonly cleanup: AgentTranscriptCleanupV1;
+        readonly expectedAttempt: TurnAttemptV1;
+        readonly at: string;
+      };
+    }
+  | {
+      readonly type: 'agent/cleanup-ack';
+      readonly payload: {
+        readonly cleanupId: string;
+        readonly expectedCleanup: AgentTranscriptCleanupV1;
       };
     };
 
@@ -839,9 +1707,7 @@ export type PersistedConversationV7 = PersistedConversationV6;
 export type PersistedChatStateV7 = {
   readonly schema_version: typeof PREVIOUS_CHAT_STATE_SCHEMA_VERSION;
   readonly project_context_destructive_epoch: number;
-  readonly project_context_destructive_transition:
-    | PersistedProjectContextDestructiveTransitionV1
-    | null;
+  readonly project_context_destructive_transition: PersistedProjectContextDestructiveTransitionV1 | null;
   readonly active_conversation_id: string | null;
   readonly conversations: readonly PersistedConversationV7[];
   readonly messages: readonly PersistedChatMessageV4[];
@@ -888,16 +1754,111 @@ export type PersistedConversationV8 = PersistedConversationV6 & {
 };
 
 export type PersistedChatStateV8 = {
-  readonly schema_version: typeof CHAT_STATE_SCHEMA_VERSION;
+  readonly schema_version: typeof CHAT_STATE_SCHEMA_VERSION_V8;
   readonly workspace_authority_outbox: readonly PersistedWorkspaceAuthorityOutboxV1[];
   readonly project_context_destructive_epoch: number;
-  readonly project_context_destructive_transition:
-    | PersistedProjectContextDestructiveTransitionV1
-    | null;
+  readonly project_context_destructive_transition: PersistedProjectContextDestructiveTransitionV1 | null;
   readonly active_conversation_id: string | null;
   readonly conversations: readonly PersistedConversationV8[];
   readonly messages: readonly PersistedChatMessageV4[];
 };
+
+/**
+ * The exact schema-9 session root.  Preferences are deliberately typed as an
+ * opaque value here: the preferences package owns its parser and schema; the
+ * chat parser only preserves the value and rejects malformed/non-record roots.
+ */
+export type PersistedSessionSnapshotV9 = {
+  readonly schema_version: typeof CHAT_STATE_SCHEMA_VERSION;
+  readonly workspace_authority_outbox: readonly PersistedWorkspaceAuthorityOutboxV1[];
+  readonly agent_transcript_cleanup_outbox: readonly AgentTranscriptCleanupV1[];
+  readonly project_context_destructive_epoch: number;
+  readonly project_context_destructive_transition: PersistedProjectContextDestructiveTransitionV1 | null;
+  readonly active_conversation_id: string | null;
+  readonly conversations: readonly PersistedConversationV9Final[];
+  readonly messages: readonly PersistedChatMessageV4[];
+  readonly session_events: readonly PersistedSessionEventV3[];
+  readonly preferences: PersistedAppPreferencesV1;
+};
+
+export type PersistedChatStateV9 = PersistedSessionSnapshotV9;
+
+export type PersistedConversationV9 = {
+  readonly id: string;
+  readonly project_id: string | null;
+  readonly workspace_id: string | null;
+  readonly title: string;
+  readonly title_source: ConversationTitleSource;
+  readonly model_id: ModelId;
+  readonly thinking_mode: ConversationThinkingMode;
+  readonly messages: readonly PersistedChatMessageV4[];
+  readonly created_at: string;
+  readonly updated_at: string;
+  readonly runtime_context_id: string | null;
+  readonly project_context: PersistedProjectContextStateV1 | null;
+  readonly turns: readonly PersistedConversationTurnV1[];
+  readonly attempts: readonly PersistedTurnAttemptV3[];
+  readonly workspace_binding: PersistedConversationWorkspaceBindingV1 | null;
+  readonly workspace_bootstrap_state: ConversationWorkspaceBootstrapState;
+  readonly agent_grants: readonly AgentConversationGrantV2[];
+};
+
+export type PersistedTurnAttemptV2 = {
+  readonly schema_version: typeof PERSISTED_TURN_ATTEMPT_SCHEMA_VERSION;
+  readonly attempt_id: string;
+  readonly turn_id: string;
+  readonly status: TurnAttemptStatus;
+  readonly visible_message_ids: readonly string[];
+  readonly visible_history_sha256: string | null;
+  readonly attachment_ids: readonly string[];
+  readonly model_id: ModelId;
+  readonly thinking_mode: ConversationThinkingMode;
+  readonly context_disposition: AttemptContextDisposition;
+  readonly context_project_id: string | null;
+  readonly workspace_id: string | null;
+  readonly workspace_binding_revision: number | null;
+  readonly project_context: PersistedAttemptProjectContextV1 | null;
+  readonly active_round: {
+    readonly round_id: string;
+    readonly round_index: number;
+  } | null;
+  readonly rounds: readonly PersistedCompletionRoundReceiptV1[];
+  readonly assistant_message_id: string | null;
+  readonly failure_code: AttemptFailureCode | null;
+  readonly created_at: string;
+  readonly updated_at: string;
+  readonly journal_revision: number;
+  readonly agent: PersistedAgentAttemptJournalV2 | null;
+};
+
+/** Final schema-9 conversation and attempt shapes. */
+export type PersistedConversationV9Final = Omit<
+  PersistedConversationV9,
+  'attempts'
+> & {
+  readonly attempts: readonly PersistedTurnAttemptV3[];
+};
+
+export type PersistedTurnAttemptV3 = Omit<
+  PersistedTurnAttemptV2,
+  'schema_version' | 'agent'
+> & {
+  readonly schema_version: typeof PERSISTED_TURN_ATTEMPT_SCHEMA_VERSION_V3;
+  readonly agent: PersistedAgentAttemptJournalV3 | null;
+};
+
+/** Public aliases used by reducer/store consumers; wire keys stay snake-case. */
+export type AgentAttemptJournalV2 = PersistedAgentAttemptJournalV2;
+export type AgentCallJournalV2 = PersistedAgentCallJournalV2;
+export type AgentAttemptJournalV3 = PersistedAgentAttemptJournalV3;
+export type AgentCallJournalV3 = PersistedAgentCallJournalV3;
+export type AgentConversationGrant = AgentConversationGrantV2;
+/** Compatibility names from the original schema-9 draft; wire shape is V2. */
+export type AgentAttemptJournalV1 = PersistedAgentAttemptJournalV2;
+export type AgentCallJournalV1 = PersistedAgentCallJournalV2;
+export type AgentConversationGrantV1 = AgentConversationGrantV2;
+export type ChatStateV9 = ChatState;
+export type ConversationV9 = Conversation;
 
 export type HydrationResult =
   | { readonly ok: true; readonly state: ChatState }

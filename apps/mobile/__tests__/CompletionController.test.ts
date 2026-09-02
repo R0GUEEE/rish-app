@@ -9,6 +9,31 @@ import type {
   CompleteRoundV3Result,
 } from '../src/completion/types';
 import type { SessionDurabilityResult } from '../src/completion/SessionPersistence';
+import { sessionSnapshotSHA256 } from '../src/completion/SessionPersistence';
+import type {
+  AgentRuntimeFacadeV2,
+  AgentAttemptProjectionV2,
+  AgentBatchReceiptV2,
+  AgentBatchCallProjectionV2,
+  AgentRuntimeRootV1,
+  AgentRuntimePolicyV1,
+  AgentRuntimeRegistryV2,
+  AgentRuntimeTranscriptHandleV1,
+  AgentApprovalBindingTokenV2,
+  AgentToolReceiptV1,
+  AgentRoundReceiptV2,
+  CompleteAgentRoundRequestV2,
+  CompleteAgentRoundResultV2,
+  PrepareAgentAttemptRequestV2,
+  PrepareAgentToolBatchRequestV2,
+  BindAgentApprovalRequestV2,
+  ExecuteAgentToolRequestV2,
+  ExecuteAgentToolResultV2,
+  CancelAgentAttemptResultV2,
+  QueryAgentAttemptResultV2,
+  RecoverAgentAttemptResultV2,
+} from '../src/native/AgentRuntime';
+import type { CompletionPersistenceResult } from '../src/completion/CompletionController';
 import {
   createSessionEventJournal,
   type SessionEventEmission,
@@ -21,6 +46,7 @@ import {
 import type {
   ProjectContextConsentV1,
   ProjectContextManifestV1,
+  ProjectContextState,
 } from '../src/project-context';
 
 const NOW = '2026-08-28T01:00:00.000Z';
@@ -1360,4 +1386,900 @@ test('completing a round emits reasoning before text session events', async () =
   if (reasoningIdx !== -1) {
     expect(reasoningIdx).toBeLessThan(textIdx);
   }
+});
+
+describe('project Agent completion controller', () => {
+  const AGENT_CONVERSATION = '10101010-1010-4101-8101-101010101010';
+  const AGENT_MESSAGE = '20202020-2020-4202-8202-202020202020';
+  const AGENT_TURN = '30303030-3030-4303-8303-303030303030';
+  const AGENT_ATTEMPT = '40404040-4040-4404-8404-404040404040';
+  const AGENT_WORKSPACE = '50505050-5050-4505-8505-505050505050';
+  const AGENT_PROJECT = '60606060-6060-4606-8606-606060606060';
+  const AGENT_TRANSCRIPT = '70707070-7070-4707-8707-707070707070';
+  const SHA = 'a'.repeat(64);
+  const ROOT_SHA = 'b'.repeat(64);
+  const TOOLSET_SHA = 'c'.repeat(64);
+  const MANIFEST_SHA = 'd'.repeat(64);
+  const IDS = [
+    '80808080-8080-4808-8808-808080808080',
+    '90909090-9090-4909-8909-909090909090',
+    'a0a0a0a0-a0a0-40a0-80a0-a0a0a0a0a0a0',
+    'b0b0b0b0-b0b0-40b0-80b0-b0b0b0b0b0b0',
+    'c0c0c0c0-c0c0-40c0-80c0-c0c0c0c0c0c0',
+    'd0d0d0d0-d0d0-40d0-80d0-d0d0d0d0d0d0',
+    'e0e0e0e0-e0e0-40e0-80e0-e0e0e0e0e0e0',
+    'f0f0f0f0-f0f0-40f0-80f0-f0f0f0f0f0f0',
+    '81818181-8181-4181-8181-818181818181',
+    '82828282-8282-4282-8282-828282828282',
+    '83838383-8383-4383-8383-838383838383',
+    '84848484-8484-4484-8484-848484848484',
+    '85858585-8585-4585-8585-858585858585',
+    '86868686-8686-4686-8686-868686868686',
+    '87878787-8787-4787-8787-878787878787',
+    '88888888-8888-4888-8888-888888888888',
+    '89898989-8989-4989-8989-898989898989',
+    '8a8a8a8a-8a8a-4a8a-8a8a-8a8a8a8a8a8a',
+    '8b8b8b8b-8b8b-4b8b-8b8b-8b8b8b8b8b8b',
+    '8c8c8c8c-8c8c-4c8c-8c8c-8c8c8c8c8c8c',
+  ];
+
+  function agentStore() {
+    let messageUsed = false;
+    const options: Parameters<typeof createChatStore>[0] = {
+      now: () => NOW,
+      sessionAuthority: { generation: 1, sessionSha256: SHA },
+      createId: kind => {
+        if (kind === 'conversation') return AGENT_CONVERSATION;
+        if (!messageUsed) {
+          messageUsed = true;
+          return AGENT_MESSAGE;
+        }
+        return IDS.shift() ?? AGENT_MESSAGE;
+      },
+      createLifecycleId: kind =>
+        kind === 'turn' ? AGENT_TURN : kind === 'attempt' ? AGENT_ATTEMPT : (IDS.shift() ?? AGENT_TURN),
+    };
+    const base = createChatStore(options);
+    const conversationId = base.createConversation({ workspaceId: AGENT_WORKSPACE, projectId: AGENT_PROJECT });
+    const source = base.getState().conversations[conversationId]!;
+    const manifest: ProjectContextManifestV1 = {
+      schema_version: 1 as const,
+      snapshot_id: '91919191-9191-4919-8919-919191919191',
+      project_id: AGENT_PROJECT,
+      project_name: 'agent-project',
+      branch: 'main',
+      head_oid: '0'.repeat(40),
+      clean: true,
+      conflicted: false,
+      captured_at: NOW,
+      policy_version: 'chat-read-v1.0.0',
+      provider_host: 'api.deepseek.com',
+      model: 'deepseek-v4-flash',
+      included: [{ path: 'README.md', source: 'tracked_file' as const, bytes: 1, sha256: 'c'.repeat(64) }],
+      omitted: [],
+      context_bytes: 1,
+      estimated_tokens: 1,
+      snapshot_sha256: 'a'.repeat(64),
+      source_fingerprint: 'b'.repeat(64),
+    };
+    const context: ProjectContextState = {
+      schemaVersion: 1 as const,
+      projectId: AGENT_PROJECT,
+      status: 'ready' as const,
+      selectedPaths: [],
+      activePreparationId: null,
+      snapshot: manifest,
+      consent: {
+        schema_version: 1 as const,
+        consent_receipt_id: '92929292-9292-4929-8929-929292929292',
+        snapshot_id: manifest.snapshot_id,
+        snapshot_sha256: manifest.snapshot_sha256,
+        confirmed_at: LATER,
+      },
+      staleReason: null,
+      errorCode: null,
+    };
+    const state = base.getState();
+    return createChatStore({
+      ...options,
+      initialState: {
+        ...state,
+        conversations: {
+          ...state.conversations,
+          [conversationId]: {
+            ...source,
+            workspaceId: AGENT_WORKSPACE,
+            runtimeContextId: AGENT_WORKSPACE,
+            workspaceBinding: {
+              schemaVersion: 1 as const,
+              workspaceId: AGENT_WORKSPACE,
+              bindingRevision: 1,
+              projectId: AGENT_PROJECT,
+            },
+            workspaceBootstrapState: 'none' as const,
+            projectContext: context,
+          },
+        },
+      },
+    });
+  }
+
+  type AgentRuntimeFixtureCall = {
+    readonly callId: string;
+    readonly name: string;
+    readonly argumentsSha256: string;
+    readonly access: 'auto' | 'conversation_confirm' | 'confirm_once' | 'durable_deny';
+  };
+
+  type AgentRuntimeFixtureOptions = {
+    readonly batchRounds?: readonly (readonly AgentRuntimeFixtureCall[])[];
+    readonly finalRoundIndex?: number;
+    readonly cancelledCallIds?: readonly string[];
+  };
+
+  const defaultBatchCalls: readonly AgentRuntimeFixtureCall[] = [
+    { callId: 'write-call', name: 'write_file', argumentsSha256: '2'.repeat(64), access: 'conversation_confirm' },
+    { callId: 'commit-call', name: 'git_commit', argumentsSha256: '3'.repeat(64), access: 'conversation_confirm' },
+  ];
+  const tokenIds = [
+    '93939393-9393-4939-8939-939393939393',
+    '94949494-9494-4949-8949-949494949494',
+    '95959595-9595-4959-8959-959595959595',
+    '96969696-9696-4969-8969-969696969696',
+    '97979797-9797-4979-8979-979797979797',
+    '98989898-9898-4989-8989-989898989898',
+  ];
+
+  function makeRuntime(
+    operations: ReturnType<typeof jest.fn>[],
+    options: AgentRuntimeFixtureOptions = {},
+  ): AgentRuntimeFacadeV2 {
+    const root: AgentRuntimeRootV1 = {
+      schema_version: 1,
+      kind: 'project',
+      workspace_id: AGENT_WORKSPACE,
+      workspace_binding_revision: 1,
+      project_id: AGENT_PROJECT,
+      root_fingerprint_sha256: ROOT_SHA,
+      capabilities: ['file_read', 'file_write', 'git_commit'],
+    };
+    const policy: AgentRuntimePolicyV1 = {
+      schema_version: 1,
+      policy_version: 'agent-v1',
+      max_single_write_bytes: 32768,
+      max_batch_write_bytes: 512 * 1024,
+      max_attempt_write_bytes: 4 * 1024 * 1024,
+    };
+    const registry: AgentRuntimeRegistryV2 = {
+      schema_version: 2,
+      registry_version: 1,
+      toolset_sha256: TOOLSET_SHA,
+      tools: [
+        { schema_version: 2, name: 'write_file', safe_summary_key: 'agent.write_file', access: 'conversation_confirm' },
+        { schema_version: 2, name: 'git_commit', safe_summary_key: 'agent.git_commit', access: 'conversation_confirm' },
+      ],
+    };
+    const transcript = (generation: number, digest: string): AgentRuntimeTranscriptHandleV1 => ({
+      schema_version: 1,
+      transcript_ref: AGENT_TRANSCRIPT,
+      generation,
+      transcript_sha256: digest,
+      transcript_bytes: generation * 10,
+    });
+    const prepareAgentAttempt = jest.fn(async (request: PrepareAgentAttemptRequestV2) => ({
+      schema_version: 2 as const,
+      status: 'prepared' as const,
+      operation_id: request.operation_id,
+      attempt: {
+        schema_version: 2 as const,
+        task_id: request.task_id,
+        conversation_id: request.conversation_id,
+        attempt_id: request.attempt_id,
+        phase: 'ready_for_round' as const,
+        controller_generation: request.controller_cas.expected_controller_generation,
+        journal_revision: request.controller_cas.expected_journal_revision,
+        authority_revision: 1,
+        root,
+        policy,
+        registry,
+        transcript: transcript(0, SHA),
+        round_index: 0,
+        round_id: null,
+        round_revision: null,
+        round_status: null,
+        batch_kind: null,
+        batch_revision: null,
+        manifest_sha256: null,
+        call_index: null,
+        batch: [],
+        frozen_grant_ids: [],
+        reserved_write_bytes: 0,
+        cancel_source_event_id: null,
+        cleanup_id: null,
+      } as AgentAttemptProjectionV2,
+      observed_checkpoint: request.committed_checkpoint,
+    }));
+    const completeAgentRoundV2 = jest.fn(async (request: CompleteAgentRoundRequestV2): Promise<CompleteAgentRoundResultV2> => {
+      operations.push(completeAgentRoundV2);
+      const final = request.round_index >= (options.finalRoundIndex ?? 1);
+      const nextGeneration = request.transcript.generation + 1;
+      const nextTranscript = transcript(
+        nextGeneration,
+        final ? '9'.repeat(64) : `${nextGeneration}`.repeat(64),
+      );
+      const completionReceipt: AgentRoundReceiptV2 = {
+        schema_version: 2,
+        transport_schema_version: request.transport_schema_version,
+        turn_id: request.task_id,
+        task_id: request.task_id,
+        attempt_id: request.attempt_id,
+        round_id: request.round_id,
+        round_index: request.round_index,
+        provider_request_id: `provider-${request.round_index}`,
+        provider_response_id: `response-${request.round_index}`,
+        requested_model: request.model,
+        model: request.model,
+        thinking_mode: request.thinking_mode,
+        finish_reason: final ? 'stop' : 'tool_calls',
+        latency_ms: 1,
+        visible_history_sha256: request.visible_history_sha256,
+        model_input_sha256: SHA,
+        request_body_sha256: SHA,
+        project_context_receipt: request.transport_schema_version === 3 ? {
+          schema_version: 1,
+          snapshot_id: '91919191-9191-4919-8919-919191919191',
+          snapshot_sha256: SHA,
+          source_fingerprint: 'b'.repeat(64),
+          context_bytes: 1,
+          verified_at: NOW,
+        } : null,
+      };
+      if (final) {
+        return {
+          schema_version: 2,
+          status: 'completed',
+          operation_id: request.operation_id,
+          task_id: request.task_id,
+          attempt_id: request.attempt_id,
+          round_id: request.round_id,
+          round_index: request.round_index,
+          launch_attempt: request.launch_attempt,
+          result_round_revision: 1,
+          transcript: nextTranscript,
+          outcome: {
+            schema_version: 3,
+            kind: 'final',
+            finish_reason: 'stop',
+            completion_receipt: completionReceipt,
+            transcript: nextTranscript,
+            text: 'Agent final',
+            reasoning: 'Agent reasoning',
+          },
+        };
+      }
+      const callsForRound = options.batchRounds?.[request.round_index] ?? defaultBatchCalls;
+      const executableCallCount = callsForRound.filter(call => call.access !== 'durable_deny').length;
+      const deniedCallCount = callsForRound.length - executableCallCount;
+      return {
+        schema_version: 2,
+        status: 'completed',
+        operation_id: request.operation_id,
+        task_id: request.task_id,
+        attempt_id: request.attempt_id,
+        round_id: request.round_id,
+        round_index: request.round_index,
+        launch_attempt: request.launch_attempt,
+        result_round_revision: 1,
+        transcript: nextTranscript,
+        outcome: {
+          schema_version: 3,
+          kind: 'tool_batch',
+          finish_reason: 'tool_calls',
+          completion_receipt: completionReceipt,
+          transcript: nextTranscript,
+          calls: [
+            ...callsForRound.map((call, callIndex) => ({
+              schema_version: 3 as const,
+              call_index: callIndex,
+              call_id: call.callId,
+              name: call.name,
+              arguments_sha256: call.argumentsSha256,
+              safe_summary_key: call.access === 'durable_deny' ? 'agent.unknown' : `agent.${call.name}`,
+              access: call.access,
+              approval_state: call.access === 'durable_deny' ? 'durable_denied' as const : 'deferred' as const,
+            })),
+          ],
+          batch_class: deniedCallCount === 0 ? 'executable' : deniedCallCount === callsForRound.length ? 'denied_only' : 'mixed',
+          executable_call_count: executableCallCount,
+          denied_call_count: deniedCallCount,
+          reasoning: '',
+        },
+      };
+    });
+    const prepareAgentToolBatch = jest.fn(async (request: PrepareAgentToolBatchRequestV2) => {
+      operations.push(prepareAgentToolBatch);
+      const callsForRound = options.batchRounds?.[request.round_index] ?? defaultBatchCalls;
+      const hasMutation = callsForRound.some(call => call.name === 'write_file' || call.name === 'git_commit' || call.name === 'git_push');
+      const batchRevision = hasMutation
+        ? request.expected_batch_revision + 1
+        : request.expected_round_revision;
+      const makeToken = (index: number, call: AgentRuntimeFixtureCall): AgentApprovalBindingTokenV2 => ({
+        schema_version: 2,
+        token: tokenIds[request.round_index * 2 + index] ?? tokenIds[index]!,
+        controller_cas: request.controller_cas,
+        task_id: request.task_id,
+        attempt_id: request.attempt_id,
+        round_id: request.round_id,
+        round_index: request.round_index,
+        batch_call_ids: callsForRound.map(candidate => candidate.callId),
+        batch_arguments_sha256: callsForRound.map(candidate => candidate.argumentsSha256),
+        batch_revision: batchRevision,
+        manifest_sha256: MANIFEST_SHA,
+        call_index: index,
+        call_id: call.callId,
+        name: call.name,
+        arguments_sha256: call.argumentsSha256,
+        idempotency_key: `${request.round_index + index + 4}`.repeat(64),
+        root_fingerprint_sha256: ROOT_SHA,
+        binding_revision: 1,
+        policy_version: 'agent-v1',
+        registry_version: 1,
+        access: call.access === 'confirm_once' ? 'confirm_once' : 'conversation_confirm',
+        allowed_decisions: call.access === 'confirm_once'
+          ? ['denied', 'allow_once', 'cancelled']
+          : ['denied', 'allow_once', 'allow_conversation', 'cancelled'],
+      });
+      const calls: AgentBatchCallProjectionV2[] = callsForRound.map((call, callIndex) => {
+        const durableDeny = call.access === 'durable_deny';
+        const idempotencyKey = durableDeny ? null : `${request.round_index + callIndex + 4}`.repeat(64);
+        const deniedReceipt: AgentToolReceiptV1 | null = durableDeny
+          ? {
+              schema_version: 1,
+              call_id: call.callId,
+              name: call.name,
+              arguments_sha256: call.argumentsSha256,
+              result_sha256: 'e'.repeat(64),
+              result_bytes: 0,
+              truncated: false,
+              duration_ms: 0,
+              outcome: 'denied',
+              failure_code: 'E_AGENT_UNKNOWN_TOOL',
+              approval_reference: null,
+            }
+          : null;
+        return {
+          schema_version: 2,
+          call_index: callIndex,
+          call_id: call.callId,
+          name: call.name,
+          arguments_sha256: call.argumentsSha256,
+          idempotency_key: idempotencyKey,
+          safe_summary_key: durableDeny ? 'agent.unknown' : `agent.${call.name}`,
+          access: call.access,
+          approval_state: durableDeny ? 'denied' : call.access === 'auto' ? 'not_required' : 'pending',
+          approval_token: durableDeny || call.access === 'auto' ? null : makeToken(callIndex, call),
+          approval_reference: null,
+          execution_status: durableDeny ? 'denied' : 'intent',
+          execution_revision: durableDeny ? null : 1,
+          native_row_revision: 1,
+          receipt: deniedReceipt,
+        };
+      });
+      const batchKind = hasMutation ? 'write_batch' : 'read_only_batch';
+      const batchNewWriteBytes = hasMutation ? 1 : 0;
+      const receipt: AgentBatchReceiptV2 = {
+        schema_version: 2,
+        task_id: request.task_id,
+        attempt_id: request.attempt_id,
+        round_id: request.round_id,
+        round_index: request.round_index,
+        batch_kind: batchKind,
+        batch_revision: batchRevision,
+        manifest_sha256: hasMutation ? MANIFEST_SHA : null,
+        transcript: request.transcript,
+        calls,
+        batch_new_write_bytes: batchNewWriteBytes,
+        reserved_write_bytes: request.expected_reserved_write_bytes + batchNewWriteBytes,
+        effect_gate: hasMutation ? 'closed' : 'not_applicable',
+      };
+      return { schema_version: 2 as const, status: 'prepared' as const, operation_id: request.operation_id, receipt, observed_checkpoint: request.committed_checkpoint };
+    });
+    const bindAgentApproval = jest.fn(async (request: BindAgentApprovalRequestV2) => {
+      operations.push(bindAgentApproval);
+      return { schema_version: 2 as const, status: 'bound' as const, operation_id: request.operation_id, task_id: request.task_id, attempt_id: request.attempt_id, round_id: request.round_id, call_index: request.call_index, call_id: request.call_id, decision: request.decision, approval_reference: request.operation_id, grant: null, result_batch_revision: request.batch_revision, observed_checkpoint: request.committed_checkpoint };
+    });
+    const executeAgentTool = jest.fn(async (request: ExecuteAgentToolRequestV2): Promise<ExecuteAgentToolResultV2> => {
+      operations.push(executeAgentTool);
+      const cancelled = options.cancelledCallIds?.includes(request.call_id) === true;
+      const receipt: AgentToolReceiptV1 = { schema_version: 1, call_id: request.call_id, name: request.name, arguments_sha256: request.arguments_sha256, result_sha256: `${request.call_index + 6}`.repeat(64), result_bytes: 1, truncated: false, duration_ms: 1, outcome: cancelled ? 'cancelled' : 'ok', failure_code: cancelled ? 'E_AGENT_CANCELLED' : null, approval_reference: request.approval_reference };
+      const nextGeneration = request.transcript.generation + 1;
+      const commonResult = { operation_id: request.operation_id, task_id: request.task_id, attempt_id: request.attempt_id, round_id: request.round_id, round_index: request.round_index, call_index: request.call_index, call_id: request.call_id, name: request.name, idempotency_key: request.idempotency_key, result_execution_revision: request.expected_execution_revision + 3, transcript: { schema_version: 1 as const, transcript_ref: AGENT_TRANSCRIPT, generation: nextGeneration, transcript_sha256: `${nextGeneration}`.repeat(64), transcript_bytes: nextGeneration * 10 }, receipt };
+      if (cancelled) {
+        return { schema_version: 2, status: 'cancelled', ...commonResult, effect_may_have_occurred: false };
+      }
+      return { schema_version: 2, status: 'completed', ...commonResult, effect_may_have_occurred: true };
+    });
+    const finalizeAgentAttempt = jest.fn(async (request: any) => ({ schema_version: 2 as const, status: 'terminal' as const, operation_id: request.operation_id, cleanup_id: request.cleanup_id, transcript: request.transcript }));
+    const discardAgentAttempt = jest.fn(async (request: any) => ({ schema_version: 2 as const, status: 'discarded' as const, operation_id: request.operation_id, cleanup_id: request.cleanup_id }));
+    const runtime: AgentRuntimeFacadeV2 = {
+      isAvailable: () => true,
+      prepareAgentAttempt,
+      completeAgentRoundV2,
+      prepareAgentToolBatch,
+      bindAgentApproval,
+      executeAgentTool,
+      cancelAgentAttempt: jest.fn(),
+      queryAgentAttempt: jest.fn(),
+      queryAgentTool: jest.fn(),
+      recoverAgentAttempt: jest.fn(),
+      finalizeAgentAttempt,
+      discardAgentAttempt,
+      queryAgentCleanup: jest.fn(),
+    };
+    return runtime;
+  }
+
+  function committedPersistence(store: ChatStore) {
+    return jest.fn(async (): Promise<CompletionPersistenceResult> => {
+      const digest = sessionSnapshotSHA256(store.serialize())!;
+      const generation = (store.getSessionAuthority()?.generation ?? 1) + 1;
+      const snapshot = { schema_version: 1 as const, generation, session_sha256: digest };
+      store.setSessionAuthority({ generation, sessionSha256: digest });
+      return { status: 'committed', snapshot };
+    });
+  }
+
+  function agentController(
+    store: ChatStore,
+    runtime: AgentRuntimeFacadeV2,
+    persistCurrent: () => Promise<CompletionPersistenceResult>,
+    operationIds = [...IDS],
+  ) {
+    return createCompletionController({
+      chat: store,
+      persistCurrent,
+      completeRoundV2: jest.fn(),
+      completeRoundV3: jest.fn(),
+      cancelRoundV2: jest.fn(),
+      cancelRoundV3: jest.fn(),
+      createRoundId: jest.fn(() => operationIds.shift() ?? AGENT_TURN),
+      createOperationId: jest.fn(() => operationIds.shift() ?? AGENT_ATTEMPT),
+      agentRuntime: runtime,
+      requestAgentApproval: jest.fn(async () => ({ status: 'approved', scope: 'once' })),
+      now: () => NOW,
+    });
+  }
+
+  test('does not invoke Agent native effects when outer preparation is not durable', async () => {
+    const store = agentStore();
+    const runtime = makeRuntime([]);
+    const persistCurrent = jest.fn(async (): Promise<CompletionPersistenceResult> => ({ status: 'not_committed' }));
+    const controller = agentController(store, runtime, persistCurrent);
+    const conversationId = store.getState().selectedConversationId!;
+
+    const result = await controller.send({ conversationId, text: 'write', attachments: [] });
+
+    expect(result).toMatchObject({ status: 'blocked', code: 'E_ATTEMPT_PERSISTENCE' });
+    expect(runtime.prepareAgentAttempt).not.toHaveBeenCalled();
+    expect(runtime.completeAgentRoundV2).not.toHaveBeenCalled();
+    expect(store.getState().conversations[conversationId]?.attempts).toHaveLength(0);
+  });
+
+  test('cancel persists request_cancel before native cancel and never runs the held round', async () => {
+    const store = agentStore();
+    const runtime = makeRuntime([]);
+    const round = deferred<CompleteAgentRoundResultV2>();
+    (runtime.completeAgentRoundV2 as jest.Mock).mockImplementationOnce(() => round.promise);
+    (runtime.cancelAgentAttempt as jest.Mock).mockImplementation(async (request: any): Promise<CancelAgentAttemptResultV2> => ({
+      schema_version: 2,
+      status: 'cancelled',
+      operation_id: request.operation_id,
+      target: request.target,
+      result_round_revision: request.target.kind === 'round' ? 1 : null,
+      result_execution_revision: null,
+      transcript: request.expected_transcript,
+      receipt: null,
+      effect_may_have_occurred: false,
+      observed_checkpoint: request.committed_checkpoint,
+    }));
+    const persistCurrent = committedPersistence(store);
+    const controller = agentController(store, runtime, persistCurrent);
+    const conversationId = store.getState().selectedConversationId!;
+    const sendPromise = controller.send({ conversationId, text: 'cancel me', attachments: [] });
+    for (let index = 0; index < 20 && !(runtime.completeAgentRoundV2 as jest.Mock).mock.calls.length; index += 1) {
+      await Promise.resolve();
+    }
+    expect(runtime.completeAgentRoundV2).toHaveBeenCalledTimes(1);
+
+    await controller.cancel();
+    expect(runtime.cancelAgentAttempt).toHaveBeenCalledTimes(1);
+    expect((runtime.cancelAgentAttempt as jest.Mock).mock.invocationCallOrder[0]).toBeGreaterThan(
+      (runtime.completeAgentRoundV2 as jest.Mock).mock.invocationCallOrder[0] ?? 0,
+    );
+    expect(
+      persistCurrent.mock.invocationCallOrder.some(
+        order => order < (runtime.cancelAgentAttempt as jest.Mock).mock.invocationCallOrder[0]!,
+      ),
+    ).toBe(true);
+    expect(runtime.finalizeAgentAttempt).toHaveBeenCalledTimes(1);
+    expect(runtime.discardAgentAttempt).toHaveBeenCalledTimes(1);
+    expect(store.getState().agentTranscriptCleanupOutbox).toEqual([]);
+
+    // The round was still in flight when cancel committed; its late result
+    // must be ignored and cannot trigger another native call.
+    round.resolve({} as CompleteAgentRoundResultV2);
+    await sendPromise;
+    expect(runtime.completeAgentRoundV2).toHaveBeenCalledTimes(1);
+  });
+
+  test('restarts through query/recover without replaying an in-flight round', async () => {
+    const store = agentStore();
+    const runtime = makeRuntime([]);
+    (runtime.completeAgentRoundV2 as jest.Mock).mockImplementationOnce(async (request: CompleteAgentRoundRequestV2) => ({
+      schema_version: 2,
+      status: 'in_flight',
+      operation_id: request.operation_id,
+      task_id: request.task_id,
+      attempt_id: request.attempt_id,
+      round_id: request.round_id,
+      round_index: request.round_index,
+      launch_attempt: request.launch_attempt,
+      result_round_revision: 1,
+      transcript: request.transcript,
+    }));
+    const firstController = agentController(store, runtime, committedPersistence(store));
+    const conversationId = store.getState().selectedConversationId!;
+    const first = await firstController.send({ conversationId, text: 'resume me', attachments: [] });
+    expect(first.status).toBe('retryable');
+    expect(firstController.getState().phase).toBe('resume_available');
+    expect(runtime.completeAgentRoundV2).toHaveBeenCalledTimes(1);
+
+    const attempt = store.getState().conversations[conversationId]!.attempts[0]!;
+    const journal = attempt.agent!;
+    const projection: AgentAttemptProjectionV2 = {
+      schema_version: 2,
+      task_id: attempt.turnId,
+      conversation_id: conversationId,
+      attempt_id: attempt.attemptId,
+      phase: journal.phase,
+      controller_generation: journal.controller_generation,
+      journal_revision: attempt.journalRevision ?? 0,
+      authority_revision: 1,
+      root: journal.root,
+      policy: {
+        schema_version: 1,
+        policy_version: 'agent-v1',
+        max_single_write_bytes: journal.policy.max_single_write_bytes,
+        max_batch_write_bytes: journal.policy.max_batch_write_bytes,
+        max_attempt_write_bytes: journal.policy.max_attempt_write_bytes,
+      },
+      registry: {
+        schema_version: 2,
+        registry_version: journal.tool_registry_version,
+        toolset_sha256: journal.toolset_sha256,
+        tools: [],
+      },
+      transcript: journal.transcript,
+      round_index: journal.round_index,
+      round_id: journal.round_lineage?.round_id ?? null,
+      round_revision: journal.round_lineage?.native_row_revision ?? null,
+      round_status: journal.round_lineage?.status ?? null,
+      batch_kind: null,
+      batch_revision: null,
+      manifest_sha256: null,
+      call_index: null,
+      batch: [],
+      frozen_grant_ids: [...journal.frozen_grant_ids],
+      reserved_write_bytes: journal.reserved_write_bytes,
+      cancel_source_event_id: null,
+      cleanup_id: null,
+    };
+    (runtime.queryAgentAttempt as jest.Mock).mockResolvedValue({
+      schema_version: 2,
+      status: 'active',
+      attempt: projection,
+    } as QueryAgentAttemptResultV2);
+    (runtime.recoverAgentAttempt as jest.Mock).mockImplementation(async (request: any): Promise<RecoverAgentAttemptResultV2> => ({
+      schema_version: 2,
+      status: 'manual_reconciliation',
+      operation_id: request.operation_id,
+      next_action: 'inspect_native_state',
+      attempt: projection,
+      completed_round: null,
+    }));
+
+    const restarted = agentController(store, runtime, committedPersistence(store));
+    const recovered = await restarted.resume(conversationId, attempt.attemptId);
+    expect(recovered.status).toBe('retryable');
+    expect(restarted.getState().phase).toBe('resume_available');
+    expect(runtime.queryAgentAttempt).toHaveBeenCalledTimes(1);
+    expect(runtime.recoverAgentAttempt).toHaveBeenCalledTimes(1);
+    expect(runtime.completeAgentRoundV2).toHaveBeenCalledTimes(1);
+    expect(runtime.prepareAgentToolBatch).not.toHaveBeenCalled();
+    expect(runtime.executeAgentTool).not.toHaveBeenCalled();
+  });
+
+  test('drives write approval, commit, next round, and atomic final cleanup', async () => {
+    const store = agentStore();
+    const conversationId = store.getState().selectedConversationId!;
+    const operations: ReturnType<typeof jest.fn>[] = [];
+    const runtime = makeRuntime(operations);
+    const originalCheckpointAgentRound = store.checkpointAgentRound.bind(store);
+    const roundCommitByOperationId = new Map<string, jest.Mock>();
+    const roundStore = jest
+      .spyOn(store, 'checkpointAgentRound')
+      .mockImplementation(input => {
+        const transaction = originalCheckpointAgentRound(input);
+        if (transaction === null) return null;
+        const originalCommit = transaction.commit.bind(transaction);
+        const commit = jest.fn(
+          (proof: Parameters<typeof transaction.commit>[0]) =>
+            originalCommit(proof),
+        );
+        roundCommitByOperationId.set(input.evidence.operation_id, commit);
+        return { ...transaction, commit };
+      });
+    const executionStore = jest.spyOn(store, 'insertAgentExecutionIntent');
+    const receiptStore = jest.spyOn(store, 'recordAgentToolResult');
+    const opIds = [...IDS];
+    const committedSnapshots: NonNullable<
+      CompletionPersistenceResult['snapshot']
+    >[] = [];
+    const persistCurrent = jest.fn(async (): Promise<CompletionPersistenceResult> => {
+      const digest = sessionSnapshotSHA256(store.serialize())!;
+      const generation = (store.getSessionAuthority()?.generation ?? 1) + 1;
+      const snapshot = { schema_version: 1 as const, generation, session_sha256: digest };
+      committedSnapshots.push(snapshot);
+      store.setSessionAuthority({ generation, sessionSha256: digest });
+      return { status: 'committed', snapshot };
+    });
+    const controller = createCompletionController({
+      chat: store,
+      persistCurrent,
+      completeRoundV2: jest.fn(),
+      completeRoundV3: jest.fn(),
+      cancelRoundV2: jest.fn(),
+      cancelRoundV3: jest.fn(),
+      createRoundId: jest.fn(() => opIds.shift() ?? AGENT_TURN),
+      createOperationId: jest.fn(() => opIds.shift() ?? AGENT_ATTEMPT),
+      agentRuntime: runtime,
+      requestAgentApproval: jest.fn(async () => ({ status: 'approved', scope: 'once' })),
+      now: () => NOW,
+    });
+    const result = await controller.send({ conversationId, text: 'write and commit', attachments: [] });
+    expect(result.status).toBe('completed');
+    expect(runtime.prepareAgentAttempt).toHaveBeenCalledTimes(1);
+    expect(runtime.completeAgentRoundV2).toHaveBeenCalledTimes(2);
+    expect(runtime.prepareAgentToolBatch).toHaveBeenCalledTimes(1);
+    expect(runtime.bindAgentApproval).toHaveBeenCalledTimes(2);
+    expect(runtime.executeAgentTool).toHaveBeenCalledTimes(2);
+    expect(runtime.finalizeAgentAttempt).toHaveBeenCalledTimes(1);
+    expect(runtime.discardAgentAttempt).toHaveBeenCalledTimes(1);
+    expect(roundStore.mock.calls.map(call => call[0]?.evidence?.kind)).toEqual([
+      'begin_round',
+      'complete_agent_round_v2',
+      'prepare_agent_tool_batch',
+      'begin_round',
+    ]);
+    const completeRoundCheckpoint = roundStore.mock.calls.find(
+      call => call[0]?.evidence?.kind === 'complete_agent_round_v2',
+    );
+    const batchCheckpoint = roundStore.mock.calls.find(
+      call => call[0]?.evidence?.kind === 'prepare_agent_tool_batch',
+    );
+    const completeRoundEvidence = completeRoundCheckpoint?.[0]?.evidence;
+    const batchEvidence = batchCheckpoint?.[0]?.evidence;
+    if (
+      completeRoundEvidence?.kind !== 'complete_agent_round_v2' ||
+      batchEvidence?.kind !== 'prepare_agent_tool_batch'
+    ) throw new Error('missing exact round/batch evidence');
+    const batchNative = runtime.prepareAgentToolBatch as jest.Mock;
+    const batchRequest = batchNative.mock.calls[0]?.[0];
+    const batchResult = await batchNative.mock.results[0]?.value;
+    expect(completeRoundEvidence.operation_id).not.toBe(batchEvidence.operation_id);
+    expect(batchEvidence.operation_id).toBe(batchRequest.operation_id);
+    expect(batchEvidence.request).toStrictEqual(batchRequest);
+    expect(batchEvidence.result).toStrictEqual(batchResult);
+
+    const completeRoundCommit = roundCommitByOperationId.get(
+      completeRoundEvidence.operation_id,
+    );
+    const batchCommit = roundCommitByOperationId.get(batchEvidence.operation_id);
+    expect(completeRoundCommit).toHaveBeenCalledTimes(1);
+    expect(batchCommit).toHaveBeenCalledTimes(1);
+    expect(completeRoundCommit!.mock.results[0]?.value).toBe(true);
+    expect(batchCommit!.mock.results[0]?.value).toBe(true);
+    const completeRoundProof = completeRoundCommit!.mock.calls[0]?.[0];
+    const batchProof = batchCommit!.mock.calls[0]?.[0];
+    expect(committedSnapshots).toContain(completeRoundProof);
+    expect(committedSnapshots).toContain(batchProof);
+    expect(batchRequest.committed_checkpoint).toMatchObject({
+      session_generation: completeRoundProof.generation,
+      session_sha256: completeRoundProof.session_sha256,
+    });
+    expect(completeRoundCommit!.mock.invocationCallOrder[0]!).toBeLessThan(
+      batchNative.mock.invocationCallOrder[0]!,
+    );
+    for (const native of [runtime.bindAgentApproval, runtime.executeAgentTool]) {
+      for (const invocation of (native as jest.Mock).mock.invocationCallOrder) {
+        expect(batchCommit!.mock.invocationCallOrder[0]!).toBeLessThan(invocation);
+      }
+    }
+    expect(executionStore.mock.calls).toHaveLength(2);
+    expect(executionStore.mock.calls.map(call => call[0]?.evidence?.operation_id)).toEqual(
+      (runtime.executeAgentTool as jest.Mock).mock.calls.map(call => call[0]?.operation_id),
+    );
+    expect(receiptStore.mock.calls.map(call => call[0]?.events[0]?.event_id)).toEqual(
+      (runtime.executeAgentTool as jest.Mock).mock.calls.map(call => call[0]?.operation_id),
+    );
+    expect(persistCurrent).toHaveBeenCalled();
+    const committedPersistOrders = persistCurrent.mock.invocationCallOrder;
+    for (const native of [
+      runtime.prepareAgentAttempt,
+      runtime.completeAgentRoundV2,
+      runtime.prepareAgentToolBatch,
+      runtime.bindAgentApproval,
+      runtime.executeAgentTool,
+      runtime.finalizeAgentAttempt,
+      runtime.discardAgentAttempt,
+    ]) {
+      for (const invocation of (native as jest.Mock).mock.invocationCallOrder) {
+        expect(committedPersistOrders.some(order => order < invocation)).toBe(true);
+      }
+    }
+    expect(store.getState().agentTranscriptCleanupOutbox).toEqual([]);
+    expect(store.getState().conversations[conversationId]?.attempts[0]).toMatchObject({ status: 'completed', agent: { phase: 'final_response' } });
+  });
+
+  test('carries the persisted batch authority into a second write batch', async () => {
+    const store = agentStore();
+    const conversationId = store.getState().selectedConversationId!;
+    const operations: ReturnType<typeof jest.fn>[] = [];
+    const secondBatch: readonly AgentRuntimeFixtureCall[] = [
+      { callId: 'write-call-2', name: 'write_file', argumentsSha256: '6'.repeat(64), access: 'conversation_confirm' },
+    ];
+    const runtime = makeRuntime(operations, {
+      batchRounds: [defaultBatchCalls, secondBatch],
+      finalRoundIndex: 2,
+    });
+    const persistCurrent = committedPersistence(store);
+    const additionalOperationIds = Array.from({ length: 40 }, (_, index) => {
+      const suffix = (index + 1).toString(16).padStart(12, '0');
+      return `${suffix.slice(0, 8)}-${suffix.slice(0, 4)}-4${suffix.slice(0, 3)}-8${suffix.slice(0, 3)}-${suffix}`;
+    });
+    const controller = agentController(store, runtime, persistCurrent, [...IDS, ...additionalOperationIds]);
+
+    const result = await controller.send({ conversationId, text: 'two write batches', attachments: [] });
+    expect(result.status).toBe('completed');
+    expect(runtime.completeAgentRoundV2).toHaveBeenCalledTimes(3);
+    expect(runtime.prepareAgentToolBatch).toHaveBeenCalledTimes(2);
+    expect(runtime.executeAgentTool).toHaveBeenCalledTimes(3);
+    const batchRequests = (runtime.prepareAgentToolBatch as jest.Mock).mock.calls.map(call => call[0]);
+    expect(batchRequests.map(request => request.expected_batch_revision)).toEqual([0, 1]);
+    expect(batchRequests.every(request => request.expected_batch_revision >= 0)).toBe(true);
+    const batchResults = await Promise.all(
+      (runtime.prepareAgentToolBatch as jest.Mock).mock.results.map(resultValue => resultValue.value),
+    );
+    const executeRequests = (runtime.executeAgentTool as jest.Mock).mock.calls.map(call => call[0]);
+    expect(executeRequests.map(request => request.expected_batch_revision)).toEqual([1, 1, 2]);
+    expect(executeRequests.every(request => request.manifest_sha256 === MANIFEST_SHA)).toBe(true);
+    expect(batchResults.map(resultValue => resultValue.receipt.batch_revision)).toEqual([1, 2]);
+  });
+
+  test('uses batch authority for a mixed auto and write batch', async () => {
+    const store = agentStore();
+    const conversationId = store.getState().selectedConversationId!;
+    const runtime = makeRuntime([], {
+      batchRounds: [[
+        { callId: 'read-call', name: 'read_file', argumentsSha256: '8'.repeat(64), access: 'auto' },
+        { callId: 'write-call-mixed', name: 'write_file', argumentsSha256: '9'.repeat(64), access: 'conversation_confirm' },
+      ]],
+      finalRoundIndex: 1,
+    });
+    const persistCurrent = committedPersistence(store);
+    const controller = agentController(store, runtime, persistCurrent, [...IDS, ...Array.from({ length: 30 }, (_, index) => {
+      const suffix = (index + 1).toString(16).padStart(12, '0');
+      return `${suffix.slice(0, 8)}-${suffix.slice(0, 4)}-4${suffix.slice(0, 3)}-8${suffix.slice(0, 3)}-${suffix}`;
+    })]);
+
+    const result = await controller.send({ conversationId, text: 'read then write', attachments: [] });
+
+    expect(result.status).toBe('completed');
+    expect(runtime.prepareAgentToolBatch).toHaveBeenCalledTimes(1);
+    expect(runtime.bindAgentApproval).toHaveBeenCalledTimes(1);
+    expect(runtime.executeAgentTool).toHaveBeenCalledTimes(2);
+    expect((runtime.prepareAgentToolBatch as jest.Mock).mock.calls[0]?.[0].expected_batch_revision).toBe(0);
+    expect((runtime.executeAgentTool as jest.Mock).mock.calls.every(call => call[0].expected_batch_revision === 1)).toBe(true);
+    expect((runtime.executeAgentTool as jest.Mock).mock.calls[0]?.[0].name).toBe('read_file');
+    expect((runtime.executeAgentTool as jest.Mock).mock.calls[1]?.[0].name).toBe('write_file');
+  });
+
+  test('keeps durable-deny calls terminal without executing them', async () => {
+    const store = agentStore();
+    const conversationId = store.getState().selectedConversationId!;
+    const runtime = makeRuntime([], {
+      batchRounds: [[
+        { callId: 'unknown-call', name: 'unknown_tool', argumentsSha256: 'b'.repeat(64), access: 'durable_deny' },
+        { callId: 'read-call-deny', name: 'read_file', argumentsSha256: 'a'.repeat(64), access: 'auto' },
+      ]],
+      finalRoundIndex: 1,
+    });
+    const persistCurrent = committedPersistence(store);
+    const controller = agentController(store, runtime, persistCurrent, [...IDS, ...Array.from({ length: 30 }, (_, index) => {
+      const suffix = (index + 1).toString(16).padStart(12, '0');
+      return `${suffix.slice(0, 8)}-${suffix.slice(0, 4)}-4${suffix.slice(0, 3)}-8${suffix.slice(0, 3)}-${suffix}`;
+    })]);
+
+    const result = await controller.send({ conversationId, text: 'read with denied tool', attachments: [] });
+
+    expect(result.status).toBe('completed');
+    expect(runtime.bindAgentApproval).not.toHaveBeenCalled();
+    expect(runtime.executeAgentTool).toHaveBeenCalledTimes(1);
+    expect((runtime.executeAgentTool as jest.Mock).mock.calls[0]?.[0].name).toBe('read_file');
+    expect((runtime.prepareAgentToolBatch as jest.Mock).mock.calls[0]?.[0].expected_batch_revision).toBe(0);
+  });
+
+  test('atomically finalizes a cancelled tool result with cleanup', async () => {
+    const store = agentStore();
+    const conversationId = store.getState().selectedConversationId!;
+    const runtime = makeRuntime([], {
+      batchRounds: [[
+        { callId: 'cancelled-write', name: 'write_file', argumentsSha256: 'c'.repeat(64), access: 'conversation_confirm' },
+      ]],
+      finalRoundIndex: 1,
+      cancelledCallIds: ['cancelled-write'],
+    });
+    const persistCurrent = committedPersistence(store);
+    const finalStore = jest.spyOn(store, 'completeAgentAttempt');
+    const receiptStore = jest.spyOn(store, 'recordAgentToolResult');
+    const cleanupAck = jest.spyOn(store, 'acknowledgeAgentTranscriptCleanupTransaction');
+    const controller = agentController(store, runtime, persistCurrent, [...IDS, ...Array.from({ length: 30 }, (_, index) => {
+      const suffix = (index + 1).toString(16).padStart(12, '0');
+      return `${suffix.slice(0, 8)}-${suffix.slice(0, 4)}-4${suffix.slice(0, 3)}-8${suffix.slice(0, 3)}-${suffix}`;
+    })]);
+
+    const result = await controller.send({ conversationId, text: 'cancelled tool', attachments: [] });
+
+    expect(result.status).toBe('completed');
+    expect(runtime.executeAgentTool).toHaveBeenCalledTimes(1);
+    expect(receiptStore).not.toHaveBeenCalled();
+    expect(finalStore).toHaveBeenCalledTimes(1);
+    expect(finalStore.mock.calls[0]?.[0]).toMatchObject({
+      assistantMessage: null,
+      journal: { phase: 'cancelled' },
+      evidence: { kind: 'execute_agent_tool' },
+      cleanup: { reason: 'cancelled' },
+    });
+    const executeRequest = (runtime.executeAgentTool as jest.Mock).mock.calls[0]?.[0];
+    const finalEvents = finalStore.mock.calls[0]?.[0]?.events ?? [];
+    expect(finalEvents).toHaveLength(3);
+    expect(finalEvents[0]).toMatchObject({
+      event_id: executeRequest.operation_id,
+      kind: 'tool_call',
+      status: 'running',
+      call_id: 'cancelled-write',
+    });
+    expect(finalEvents[1]).toMatchObject({
+      kind: 'tool_result',
+      status: 'cancelled',
+      call_id: 'cancelled-write',
+    });
+    expect(finalEvents[1]?.event_id).not.toBe(executeRequest.operation_id);
+    expect(finalEvents[2]).toMatchObject({
+      kind: 'terminal',
+      status: 'cancelled',
+      call_id: null,
+    });
+    expect(new Set(finalEvents.map(event => event.event_id)).size).toBe(3);
+    expect(runtime.finalizeAgentAttempt).toHaveBeenCalledTimes(1);
+    expect(runtime.discardAgentAttempt).toHaveBeenCalledTimes(1);
+    expect(cleanupAck).toHaveBeenCalledTimes(1);
+    expect(store.getState().agentTranscriptCleanupOutbox).toEqual([]);
+    expect(store.getState().conversations[conversationId]?.messages).toHaveLength(1);
+    expect(store.getState().conversations[conversationId]?.attempts[0]).toMatchObject({
+      status: 'cancelled',
+      assistantMessageId: null,
+      agent: { phase: 'cancelled' },
+    });
+  });
 });

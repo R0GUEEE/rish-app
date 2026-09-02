@@ -1,5 +1,11 @@
 import { NativeModules } from 'react-native';
 
+import {
+  assertWorkspaceRootRefV1,
+  type WorkspaceRootRefV1,
+} from './WorkspaceRoot';
+import { normalizeGitHttpsProxyUrl } from '../preferences/gitProxy';
+
 export type LocalProject = {
   schema_version: 1;
   id: string;
@@ -101,10 +107,114 @@ export type ProjectPushResult = {
   pushed_at: string;
 };
 
+export type LocalProjectDescriptorV2 = {
+  schema_version: 2;
+  project_id: string;
+  workspace_id: string;
+  workspace_binding_revision: number;
+  display_name: string;
+  git_topology: 'legacy_embedded' | 'private_split_gitdir';
+};
+
+export type AttachWorkspaceProjectRequestV1 = {
+  schema_version: 1;
+  operation_id: string;
+  root: WorkspaceRootRefV1;
+  mode: 'open' | 'init';
+};
+
+export type AttachWorkspaceProjectResultV1 = {
+  schema_version: 1;
+  status: 'attached' | 'already_attached';
+  project: LocalProjectDescriptorV2;
+};
+
+export type ProjectForWorkspaceResultV1 =
+  | { schema_version: 1; status: 'none' }
+  | { schema_version: 1; status: 'attached'; project: LocalProjectDescriptorV2 };
+
+export type ProjectDetachCheckpointV1 = {
+  schema_version: 1;
+  checkpoint_id: string;
+  project_id: string;
+  workspace_id: string;
+  binding_revision: number;
+  gitdir_sha256: string;
+  mode: 'retain_private_gitdir' | 'delete_private_gitdir';
+  created_at: string;
+};
+
+export type PrepareProjectDetachRequestV1 = {
+  schema_version: 1;
+  operation_id: string;
+  root: WorkspaceRootRefV1;
+  mode: ProjectDetachCheckpointV1['mode'];
+};
+
+export type CommitProjectDetachRequestV1 = {
+  schema_version: 1;
+  operation_id: string;
+  checkpoint: ProjectDetachCheckpointV1;
+  clearance_receipt_id: string;
+};
+
+export type GitWorkspaceRequestV1 = {
+  schema_version: 1;
+  root: WorkspaceRootRefV1;
+};
+
+export type GitDiffRequestV1 = GitWorkspaceRequestV1 & {
+  max_bytes: number;
+};
+
+export type GitCommitRequestV1 = GitWorkspaceRequestV1 & {
+  operation_id: string;
+  message: string;
+  author_name: string;
+  author_email: string;
+  expected_head_oid: string | null;
+};
+
+export type GitPushRequestV1 = GitWorkspaceRequestV1 & {
+  operation_id: string;
+  remote: 'origin';
+  expected_local_oid: string;
+  credential_reference: string;
+  https_proxy_url: string | null;
+};
+
+export type ProjectGitStatusV2 = Omit<ProjectGitStatus, 'schema_version'> & {
+  schema_version: 2;
+  root: WorkspaceRootRefV1;
+};
+
+export type ProjectDiffV2 = Omit<ProjectDiff, 'schema_version'> & {
+  schema_version: 2;
+  root: WorkspaceRootRefV1;
+};
+
+export type ProjectCommitV2 = Omit<ProjectCommit, 'schema_version'> & {
+  schema_version: 2;
+  root: WorkspaceRootRefV1;
+};
+
+export type ProjectPushResultV2 = Omit<ProjectPushResult, 'schema_version'> & {
+  schema_version: 2;
+  root: WorkspaceRootRefV1;
+};
+
+export type ProjectGitTransportOptions = {
+  httpsProxyUrl?: string | null;
+};
+
 type NativeLocalProjects = {
   list(): Promise<LocalProjectListing>;
   create(name: string): Promise<LocalProject>;
-  clone(url: string, name: string | null): Promise<LocalProject>;
+  clone(
+    url: string,
+    name: string | null,
+    options: ProjectGitTransportOptions,
+  ): Promise<LocalProject>;
   status(projectId: string): Promise<ProjectGitStatus>;
   diff(
     projectId: string,
@@ -125,10 +235,959 @@ type NativeLocalProjects = {
     locale: string,
   ): Promise<ProjectCredentialStatus>;
   clearCredential(projectId: string): Promise<ProjectCredentialStatus>;
-  push(projectId: string): Promise<ProjectPushResult>;
+  push(
+    projectId: string,
+    options: ProjectGitTransportOptions,
+  ): Promise<ProjectPushResult>;
+  attachWorkspaceProject?(
+    request: AttachWorkspaceProjectRequestV1,
+  ): Promise<unknown>;
+  projectForWorkspaceV2?(root: WorkspaceRootRefV1): Promise<unknown>;
+  prepareProjectDetachV1?(
+    request: PrepareProjectDetachRequestV1,
+  ): Promise<unknown>;
+  commitProjectDetachV1?(
+    request: CommitProjectDetachRequestV1,
+  ): Promise<unknown>;
+  statusV2?(request: GitWorkspaceRequestV1): Promise<unknown>;
+  diffV2?(request: GitDiffRequestV1): Promise<unknown>;
+  stageAllV2?(request: GitWorkspaceRequestV1): Promise<unknown>;
+  commitV2?(request: GitCommitRequestV1): Promise<unknown>;
+  pushV2?(request: GitPushRequestV1): Promise<unknown>;
 };
 
 const native = NativeModules.LocalProjects as unknown;
+
+const projectV2ErrorCodes = new Set([
+  'E_PROJECT_REQUEST_INVALID',
+  'E_PROJECT_RESULT_INVALID',
+  'E_PROJECT_NATIVE',
+  'E_PROJECT_BUSY',
+  'E_PROJECT_UNAVAILABLE',
+  'E_PROJECT_STORAGE_UNSAFE',
+  'E_PROJECT_CONFLICT',
+  'E_WORKSPACE_INVALID',
+  'E_WORKSPACE_NOT_FOUND',
+  'E_WORKSPACE_BUSY',
+  'E_WORKSPACE_REVISION_STALE',
+  'E_WORKSPACE_REVOKED',
+  'E_WORKSPACE_UNAVAILABLE',
+  'E_WORKSPACE_CAPABILITY',
+  'E_WORKSPACE_ROOT_CHANGED',
+  'E_WORKSPACE_CONFLICT',
+  'E_WORKSPACE_CONFIRMATION',
+  'E_WORKSPACE_PERSISTENCE',
+  'E_WORKSPACE_IO',
+]);
+
+export class ProjectGitBridgeError extends Error {
+  readonly code: string;
+
+  constructor(code: string) {
+    super(code);
+    this.name = 'ProjectGitBridgeError';
+    this.code = code;
+  }
+}
+
+function projectV2Fail(code: string): never {
+  throw new ProjectGitBridgeError(code);
+}
+
+function projectV2Error(error: unknown): ProjectGitBridgeError {
+  try {
+    if (typeof error === 'object' && error !== null) {
+      const descriptor = Object.getOwnPropertyDescriptor(error, 'code');
+      if (
+        descriptor !== undefined &&
+        'value' in descriptor &&
+        typeof descriptor.value === 'string' &&
+        projectV2ErrorCodes.has(descriptor.value)
+      ) {
+        return new ProjectGitBridgeError(descriptor.value);
+      }
+    }
+  } catch {
+    // Hostile errors collapse to the value-free project code.
+  }
+  return new ProjectGitBridgeError('E_PROJECT_NATIVE');
+}
+
+type ProjectV2Record = Record<string, unknown>;
+const projectV2ObjectPrototype = Object.prototype;
+const projectV2ArrayPrototype = Array.prototype;
+const projectV2ArrayMap = Array.prototype.map;
+
+function projectV2ExactRecord(
+  value: unknown,
+  keys: readonly string[],
+  code: string,
+): ProjectV2Record {
+  if (
+    typeof value !== 'object' ||
+    value === null ||
+    Array.isArray(value) ||
+    Object.getPrototypeOf(value) !== projectV2ObjectPrototype ||
+    Object.getPrototypeOf(projectV2ObjectPrototype) !== null ||
+    Object.getPrototypeOf(projectV2ArrayPrototype) !== projectV2ObjectPrototype ||
+    Object.prototype.hasOwnProperty.call(projectV2ObjectPrototype, 'toJSON') ||
+    Object.prototype.hasOwnProperty.call(projectV2ArrayPrototype, 'toJSON')
+  ) {
+    return projectV2Fail(code);
+  }
+  const names = Object.getOwnPropertyNames(value);
+  if (names.length !== keys.length || names.some(name => !keys.includes(name))) {
+    return projectV2Fail(code);
+  }
+  if (Object.getOwnPropertySymbols(value).length > 0) return projectV2Fail(code);
+  const result = Object.create(null) as ProjectV2Record;
+  for (const key of keys) {
+    const descriptor = Object.getOwnPropertyDescriptor(value, key);
+    if (
+      descriptor === undefined ||
+      !('value' in descriptor) ||
+      descriptor.enumerable !== true
+    ) {
+      return projectV2Fail(code);
+    }
+    result[key] = descriptor.value;
+  }
+  return result;
+}
+
+function projectV2Array(
+  value: unknown,
+  maximum: number,
+  code: string,
+): unknown[] {
+  if (
+    !Array.isArray(value) ||
+    Object.getPrototypeOf(value) !== projectV2ArrayPrototype
+  ) {
+    return projectV2Fail(code);
+  }
+  const lengthDescriptor = Object.getOwnPropertyDescriptor(value, 'length');
+  if (
+    lengthDescriptor === undefined ||
+    !('value' in lengthDescriptor) ||
+    !Number.isSafeInteger(lengthDescriptor.value) ||
+    lengthDescriptor.value < 0 ||
+    lengthDescriptor.value > maximum ||
+    Object.getOwnPropertySymbols(value).length > 0 ||
+    Object.getOwnPropertyDescriptor(projectV2ArrayPrototype, 'map')?.value !==
+      projectV2ArrayMap ||
+    Object.prototype.hasOwnProperty.call(projectV2ArrayPrototype, 'toJSON') ||
+    Object.prototype.hasOwnProperty.call(projectV2ObjectPrototype, 'toJSON')
+  ) {
+    return projectV2Fail(code);
+  }
+  const length = lengthDescriptor.value as number;
+  const result: unknown[] = [];
+  const allowed = new Set(['length']);
+  for (let index = 0; index < length; index += 1) {
+    const key = String(index);
+    allowed.add(key);
+    const descriptor = Object.getOwnPropertyDescriptor(value, key);
+    if (
+      descriptor === undefined ||
+      !('value' in descriptor) ||
+      descriptor.enumerable !== true
+    ) {
+      return projectV2Fail(code);
+    }
+    result[index] = descriptor.value;
+  }
+  if (Object.getOwnPropertyNames(value).some(name => !allowed.has(name))) {
+    return projectV2Fail(code);
+  }
+  return result;
+}
+
+function projectV2UUID(value: unknown): value is string {
+  return (
+    typeof value === 'string' &&
+    /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/u.test(value)
+  );
+}
+
+function projectV2Digest(value: unknown): value is string {
+  return typeof value === 'string' && /^[0-9a-f]{64}$/u.test(value);
+}
+
+function projectV2OID(value: unknown, nullable = false): value is string | null {
+  return value === null && nullable ||
+    typeof value === 'string' && /^[0-9a-f]{40}$/u.test(value);
+}
+
+function projectV2Timestamp(value: unknown): value is string {
+  if (
+    typeof value !== 'string' ||
+    !/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?Z$/u.test(value)
+  ) {
+    return false;
+  }
+  const parsed = Date.parse(value);
+  return Number.isFinite(parsed);
+}
+
+function projectV2SafeInteger(value: unknown, minimum = 0): value is number {
+  return (
+    typeof value === 'number' &&
+    Number.isSafeInteger(value) &&
+    !Object.is(value, -0) &&
+    value >= minimum
+  );
+}
+
+function projectV2UTF8Bytes(value: string): number | null {
+  let bytes = 0;
+  for (let index = 0; index < value.length; index += 1) {
+    const unit = value.charCodeAt(index);
+    if (unit <= 0x7f) bytes += 1;
+    else if (unit <= 0x7ff) bytes += 2;
+    else if (unit >= 0xd800 && unit <= 0xdbff) {
+      const low = value.charCodeAt(index + 1);
+      if (low < 0xdc00 || low > 0xdfff) return null;
+      bytes += 4;
+      index += 1;
+    } else if (unit >= 0xdc00 && unit <= 0xdfff) {
+      return null;
+    } else bytes += 3;
+  }
+  return bytes;
+}
+
+function projectV2String(value: unknown, maximum: number, allowEmpty = false): value is string {
+  if (typeof value !== 'string' || (!allowEmpty && value.length === 0)) return false;
+  const bytes = projectV2UTF8Bytes(value);
+  if (bytes === null || bytes > maximum) return false;
+  for (let index = 0; index < value.length; index += 1) {
+    const unit = value.charCodeAt(index);
+    if (unit <= 0x1f || (unit >= 0x7f && unit <= 0x9f)) return false;
+  }
+  return true;
+}
+
+function projectV2Text(value: unknown, maximum: number, allowEmpty = false): value is string {
+  if (typeof value !== 'string' || (!allowEmpty && value.length === 0)) return false;
+  const bytes = projectV2UTF8Bytes(value);
+  if (bytes === null || bytes > maximum) return false;
+  for (let index = 0; index < value.length; index += 1) {
+    const unit = value.charCodeAt(index);
+    if ((unit <= 0x1f && unit !== 0x09 && unit !== 0x0a && unit !== 0x0d) ||
+        (unit >= 0x7f && unit <= 0x9f)) return false;
+  }
+  return true;
+}
+
+function projectV2Email(value: unknown): value is string {
+  if (!projectV2String(value, 254)) return false;
+  const parts = value.split('@');
+  return (
+    parts.length === 2 &&
+    parts[0] !== undefined &&
+    parts[1] !== undefined &&
+    parts[0].length > 0 &&
+    parts[1].length > 0 &&
+    !value.includes(' ') &&
+    !value.includes('<') &&
+    !value.includes('>')
+  );
+}
+
+function projectV2ProxyURL(value: unknown): string | null {
+  if (value === null) return null;
+  const normalized = normalizeGitHttpsProxyUrl(value);
+  if (normalized === null) return projectV2Fail('E_PROJECT_REQUEST_INVALID');
+  return normalized;
+}
+
+function projectV2ResultRoot(value: unknown): WorkspaceRootRefV1 {
+  try {
+    const root = assertWorkspaceRootRefV1(value);
+    if (root.project_id === null) return projectV2Fail('E_PROJECT_RESULT_INVALID');
+    return root;
+  } catch {
+    return projectV2Fail('E_PROJECT_RESULT_INVALID');
+  }
+}
+
+function projectV2SameRoot(left: WorkspaceRootRefV1, right: WorkspaceRootRefV1): boolean {
+  return left.workspace_id === right.workspace_id &&
+    left.binding_revision === right.binding_revision &&
+    left.project_id === right.project_id;
+}
+
+function projectV2DisplayName(value: unknown): value is string {
+  return (
+    projectV2String(value, 120) &&
+    value.trim() === value &&
+    value !== '.' &&
+    value !== '..' &&
+    !value.includes('/') &&
+    !value.includes('\\')
+  );
+}
+
+function projectV2Branch(value: unknown): value is string | null {
+  if (value === null) return true;
+  if (!projectV2String(value, 1024)) return false;
+  return (
+    value !== '@' &&
+    !value.includes('..') &&
+    !value.includes(' ') &&
+    !value.startsWith('/') &&
+    !value.endsWith('/') &&
+    !value.startsWith('.') &&
+    !value.endsWith('.') &&
+    !value.includes('@{') &&
+    !value.includes('~') &&
+    !value.includes('^') &&
+    !value.includes(':') &&
+    !value.includes('?') &&
+    !value.includes('*') &&
+    !value.includes('[') &&
+    value.split('/').every(part => part.length > 0 && !part.endsWith('.lock'))
+  );
+}
+
+function projectV2Descriptor(
+  value: unknown,
+  expectedRoot?: WorkspaceRootRefV1,
+): LocalProjectDescriptorV2 {
+  const row = projectV2ExactRecord(value, [
+    'schema_version',
+    'project_id',
+    'workspace_id',
+    'workspace_binding_revision',
+    'display_name',
+    'git_topology',
+  ], 'E_PROJECT_RESULT_INVALID');
+  if (
+    row.schema_version !== 2 ||
+    !projectV2UUID(row.project_id) ||
+    !projectV2UUID(row.workspace_id) ||
+    !projectV2SafeInteger(row.workspace_binding_revision, 1) ||
+    !projectV2DisplayName(row.display_name) ||
+    (row.git_topology !== 'legacy_embedded' &&
+      row.git_topology !== 'private_split_gitdir') ||
+    (expectedRoot !== undefined &&
+      (row.workspace_id !== expectedRoot.workspace_id ||
+        row.workspace_binding_revision !== expectedRoot.binding_revision ||
+        (expectedRoot.project_id !== null &&
+          row.project_id !== expectedRoot.project_id)))
+  ) {
+    return projectV2Fail('E_PROJECT_RESULT_INVALID');
+  }
+  return {
+    schema_version: 2,
+    project_id: row.project_id,
+    workspace_id: row.workspace_id,
+    workspace_binding_revision: row.workspace_binding_revision,
+    display_name: row.display_name,
+    git_topology: row.git_topology,
+  };
+}
+
+function projectV2Candidate(value: unknown): ProjectStatusEntry {
+  const row = projectV2ExactRecord(value, [
+    'path',
+    'index_status',
+    'worktree_status',
+    'conflicted',
+  ], 'E_PROJECT_RESULT_INVALID');
+  if (
+    !projectV2String(row.path, 4096) ||
+    row.path.startsWith('/') ||
+    row.path.includes('\\') ||
+    row.path.split('/').some(part => part === '' || part === '.' || part === '..') ||
+    typeof row.index_status !== 'string' ||
+    typeof row.worktree_status !== 'string' ||
+    typeof row.conflicted !== 'boolean'
+  ) {
+    return projectV2Fail('E_PROJECT_RESULT_INVALID');
+  }
+  const statuses: readonly string[] = [
+    'unmodified', 'added', 'modified', 'deleted', 'renamed', 'typechange', 'unreadable',
+  ];
+  if (!statuses.includes(row.index_status) || !statuses.includes(row.worktree_status)) {
+    return projectV2Fail('E_PROJECT_RESULT_INVALID');
+  }
+  return {
+    path: row.path,
+    index_status: row.index_status as ProjectFileStatus,
+    worktree_status: row.worktree_status as ProjectFileStatus,
+    conflicted: row.conflicted,
+  };
+}
+
+function projectV2RootResult(
+  value: unknown,
+  expected?: WorkspaceRootRefV1,
+): WorkspaceRootRefV1 {
+  const root = projectV2ResultRoot(value);
+  if (expected !== undefined && !projectV2SameRoot(root, expected)) {
+    return projectV2Fail('E_PROJECT_RESULT_INVALID');
+  }
+  return root;
+}
+
+function projectV2Status(
+  value: unknown,
+  expectedRoot: WorkspaceRootRefV1,
+): ProjectGitStatusV2 {
+  const row = projectV2ExactRecord(value, [
+    'schema_version',
+    'root',
+    'project_id',
+    'branch',
+    'head_oid',
+    'clean',
+    'has_conflicts',
+    'ahead',
+    'behind',
+    'entries',
+  ], 'E_PROJECT_RESULT_INVALID');
+  const root = projectV2RootResult(row.root, expectedRoot);
+  const branch = projectV2Branch(row.branch)
+    ? row.branch as string | null
+    : projectV2Fail('E_PROJECT_RESULT_INVALID');
+  if (
+    row.schema_version !== 2 ||
+    row.project_id !== expectedRoot.project_id ||
+    !projectV2OID(row.head_oid, true) ||
+    typeof row.clean !== 'boolean' ||
+    typeof row.has_conflicts !== 'boolean' ||
+    !projectV2SafeInteger(row.ahead) ||
+    !projectV2SafeInteger(row.behind)
+  ) {
+    return projectV2Fail('E_PROJECT_RESULT_INVALID');
+  }
+  const entries = projectV2Array(row.entries, 10000, 'E_PROJECT_RESULT_INVALID').map(
+    projectV2Candidate,
+  );
+  return {
+    schema_version: 2,
+    root,
+    project_id: expectedRoot.project_id as string,
+    branch,
+    head_oid: row.head_oid as string | null,
+    clean: row.clean,
+    has_conflicts: row.has_conflicts,
+    ahead: row.ahead,
+    behind: row.behind,
+    entries,
+  };
+}
+
+function projectV2DiffFile(value: unknown): ProjectDiffFile {
+  const row = projectV2ExactRecord(value, [
+    'path', 'status', 'additions', 'deletions',
+  ], 'E_PROJECT_RESULT_INVALID');
+  const statuses: readonly string[] = [
+    'unmodified', 'added', 'modified', 'deleted', 'renamed', 'typechange', 'unreadable',
+  ];
+  if (
+    !projectV2String(row.path, 4096) ||
+    row.path.startsWith('/') ||
+    row.path.includes('\\') ||
+    row.path.split('/').some(part => part === '' || part === '.' || part === '..') ||
+    typeof row.status !== 'string' ||
+    !statuses.includes(row.status) ||
+    !projectV2SafeInteger(row.additions) ||
+    !projectV2SafeInteger(row.deletions)
+  ) {
+    return projectV2Fail('E_PROJECT_RESULT_INVALID');
+  }
+  return {
+    path: row.path,
+    status: row.status as ProjectFileStatus,
+    additions: row.additions,
+    deletions: row.deletions,
+  };
+}
+
+function projectV2Diff(
+  value: unknown,
+  expectedRoot: WorkspaceRootRefV1,
+): ProjectDiffV2 {
+  const row = projectV2ExactRecord(value, [
+    'schema_version', 'root', 'project_id', 'staged', 'truncated', 'patch', 'files',
+  ], 'E_PROJECT_RESULT_INVALID');
+  const root = projectV2RootResult(row.root, expectedRoot);
+  if (
+    row.schema_version !== 2 ||
+    row.project_id !== expectedRoot.project_id ||
+    typeof row.staged !== 'boolean' ||
+    typeof row.truncated !== 'boolean' ||
+    !projectV2Text(row.patch, 1024 * 1024, true)
+  ) {
+    return projectV2Fail('E_PROJECT_RESULT_INVALID');
+  }
+  const files = projectV2Array(row.files, 1000, 'E_PROJECT_RESULT_INVALID').map(
+    projectV2DiffFile,
+  );
+  return {
+    schema_version: 2,
+    root,
+    project_id: expectedRoot.project_id as string,
+    staged: row.staged,
+    truncated: row.truncated,
+    patch: row.patch,
+    files,
+  };
+}
+
+function projectV2Commit(
+  value: unknown,
+  expectedRoot: WorkspaceRootRefV1,
+): ProjectCommitV2 {
+  const row = projectV2ExactRecord(value, [
+    'schema_version', 'root', 'project_id', 'oid', 'summary', 'committed_at',
+  ], 'E_PROJECT_RESULT_INVALID');
+  const root = projectV2RootResult(row.root, expectedRoot);
+  if (
+    row.schema_version !== 2 ||
+    row.project_id !== expectedRoot.project_id ||
+    !projectV2OID(row.oid) ||
+    !projectV2String(row.summary, 500, true) ||
+    !projectV2Timestamp(row.committed_at)
+  ) {
+    return projectV2Fail('E_PROJECT_RESULT_INVALID');
+  }
+  return {
+    schema_version: 2,
+    root,
+    project_id: expectedRoot.project_id as string,
+    oid: row.oid as string,
+    summary: row.summary,
+    committed_at: row.committed_at,
+  };
+}
+
+function projectV2Push(
+  value: unknown,
+  expectedRoot: WorkspaceRootRefV1,
+): ProjectPushResultV2 {
+  const row = projectV2ExactRecord(value, [
+    'schema_version', 'root', 'project_id', 'remote', 'branch', 'oid', 'pushed_at',
+  ], 'E_PROJECT_RESULT_INVALID');
+  const root = projectV2RootResult(row.root, expectedRoot);
+  if (
+    row.schema_version !== 2 ||
+    row.project_id !== expectedRoot.project_id ||
+    row.remote !== 'origin' ||
+    typeof row.branch !== 'string' ||
+    !projectV2Branch(row.branch) ||
+    !projectV2OID(row.oid) ||
+    !projectV2Timestamp(row.pushed_at)
+  ) {
+    return projectV2Fail('E_PROJECT_RESULT_INVALID');
+  }
+  return {
+    schema_version: 2,
+    root,
+    project_id: expectedRoot.project_id as string,
+    remote: 'origin',
+    branch: row.branch as string,
+    oid: row.oid as string,
+    pushed_at: row.pushed_at,
+  };
+}
+
+function projectV2Attach(
+  value: unknown,
+  expectedRoot: WorkspaceRootRefV1,
+): AttachWorkspaceProjectResultV1 {
+  const row = projectV2ExactRecord(value, [
+    'schema_version', 'status', 'project',
+  ], 'E_PROJECT_RESULT_INVALID');
+  if (
+    row.schema_version !== 1 ||
+    (row.status !== 'attached' && row.status !== 'already_attached')
+  ) {
+    return projectV2Fail('E_PROJECT_RESULT_INVALID');
+  }
+  return {
+    schema_version: 1,
+    status: row.status,
+    project: projectV2Descriptor(row.project, expectedRoot),
+  };
+}
+
+function projectV2ForWorkspace(
+  value: unknown,
+  expectedRoot?: WorkspaceRootRefV1,
+): ProjectForWorkspaceResultV1 {
+  if (
+    typeof value !== 'object' ||
+    value === null ||
+    Array.isArray(value) ||
+    Object.getPrototypeOf(value) !== projectV2ObjectPrototype ||
+    Object.getOwnPropertySymbols(value).length > 0
+  ) {
+    return projectV2Fail('E_PROJECT_RESULT_INVALID');
+  }
+  const names = Object.getOwnPropertyNames(value);
+  const hasProject = names.includes('project');
+  const row = projectV2ExactRecord(
+    value,
+    hasProject ? ['schema_version', 'status', 'project'] : ['schema_version', 'status'],
+    'E_PROJECT_RESULT_INVALID',
+  );
+  if (row.schema_version !== 1 || row.status === 'none') {
+    if (row.schema_version === 1 && row.status === 'none' && !hasProject) {
+      return { schema_version: 1, status: 'none' };
+    }
+    return projectV2Fail('E_PROJECT_RESULT_INVALID');
+  }
+  if (row.status !== 'attached' || !hasProject) {
+    return projectV2Fail('E_PROJECT_RESULT_INVALID');
+  }
+  return {
+    schema_version: 1,
+    status: 'attached',
+    project: projectV2Descriptor(row.project, expectedRoot),
+  };
+}
+
+function projectV2Checkpoint(
+  value: unknown,
+  code = 'E_PROJECT_RESULT_INVALID',
+): ProjectDetachCheckpointV1 {
+  const row = projectV2ExactRecord(value, [
+    'schema_version', 'checkpoint_id', 'project_id', 'workspace_id',
+    'binding_revision', 'gitdir_sha256', 'mode', 'created_at',
+  ], code);
+  if (
+    row.schema_version !== 1 ||
+    !projectV2UUID(row.checkpoint_id) ||
+    !projectV2UUID(row.project_id) ||
+    !projectV2UUID(row.workspace_id) ||
+    !projectV2SafeInteger(row.binding_revision, 1) ||
+    !projectV2Digest(row.gitdir_sha256) ||
+    (row.mode !== 'retain_private_gitdir' && row.mode !== 'delete_private_gitdir') ||
+    !projectV2Timestamp(row.created_at)
+  ) {
+    return projectV2Fail(code);
+  }
+  return {
+    schema_version: 1,
+    checkpoint_id: row.checkpoint_id,
+    project_id: row.project_id,
+    workspace_id: row.workspace_id,
+    binding_revision: row.binding_revision,
+    gitdir_sha256: row.gitdir_sha256,
+    mode: row.mode,
+    created_at: row.created_at,
+  };
+}
+
+function projectV2PrepareDetach(value: unknown): ProjectDetachCheckpointV1 {
+  return projectV2Checkpoint(value);
+}
+
+function projectV2CommitDetach(value: unknown): { schema_version: 1; status: 'detached' } {
+  const row = projectV2ExactRecord(value, ['schema_version', 'status'], 'E_PROJECT_RESULT_INVALID');
+  if (row.schema_version !== 1 || row.status !== 'detached') {
+    return projectV2Fail('E_PROJECT_RESULT_INVALID');
+  }
+  return { schema_version: 1, status: 'detached' };
+}
+
+function projectV2OperationId(value: unknown): string {
+  if (!projectV2UUID(value)) return projectV2Fail('E_PROJECT_REQUEST_INVALID');
+  return value;
+}
+
+function projectV2Bounded(value: unknown, maximum: number, allowEmpty = false): string {
+  if (!projectV2String(value, maximum, allowEmpty)) {
+    return projectV2Fail('E_PROJECT_REQUEST_INVALID');
+  }
+  return value;
+}
+
+function projectV2RequestRoot(value: unknown): WorkspaceRootRefV1 {
+  try {
+    const root = assertWorkspaceRootRefV1(value);
+    if (root.project_id === null) return projectV2Fail('E_PROJECT_REQUEST_INVALID');
+    return {
+      schema_version: 1,
+      workspace_id: root.workspace_id,
+      binding_revision: root.binding_revision,
+      project_id: root.project_id,
+    };
+  } catch {
+    return projectV2Fail('E_PROJECT_REQUEST_INVALID');
+  }
+}
+
+function projectV2DiffMaxBytes(value: unknown): number {
+  if (!projectV2SafeInteger(value, 1) || value > 1024 * 1024) {
+    return projectV2Fail('E_PROJECT_REQUEST_INVALID');
+  }
+  return value;
+}
+
+function projectV2ExpectedHead(value: unknown): string | null {
+  if (value === null) return null;
+  if (!projectV2OID(value)) return projectV2Fail('E_PROJECT_REQUEST_INVALID');
+  return value;
+}
+
+function projectV2CommitRequest(value: unknown): GitCommitRequestV1 {
+  const row = projectV2ExactRecord(value, [
+    'schema_version', 'root', 'operation_id', 'message', 'author_name',
+    'author_email', 'expected_head_oid',
+  ], 'E_PROJECT_REQUEST_INVALID');
+  if (
+    row.schema_version !== 1 ||
+    !projectV2Text(row.message, 500) ||
+    !projectV2String(row.author_name, 120) ||
+    !projectV2Email(row.author_email)
+  ) {
+    return projectV2Fail('E_PROJECT_REQUEST_INVALID');
+  }
+  return {
+    schema_version: 1,
+    root: projectV2RequestRoot(row.root),
+    operation_id: projectV2OperationId(row.operation_id),
+    message: row.message as string,
+    author_name: projectV2Bounded(row.author_name, 120),
+    author_email: row.author_email as string,
+    expected_head_oid: projectV2ExpectedHead(row.expected_head_oid),
+  };
+}
+
+function projectV2PushRequest(value: unknown): GitPushRequestV1 {
+  const row = projectV2ExactRecord(value, [
+    'schema_version', 'root', 'operation_id', 'remote',
+    'expected_local_oid', 'credential_reference', 'https_proxy_url',
+  ], 'E_PROJECT_REQUEST_INVALID');
+  if (
+    row.schema_version !== 1 ||
+    row.remote !== 'origin' ||
+    !projectV2OID(row.expected_local_oid) ||
+    !projectV2String(row.credential_reference, 256) ||
+    (row.https_proxy_url !== null &&
+      !projectV2String(row.https_proxy_url, 2048))
+  ) {
+    return projectV2Fail('E_PROJECT_REQUEST_INVALID');
+  }
+  return {
+    schema_version: 1,
+    root: projectV2RequestRoot(row.root),
+    operation_id: projectV2OperationId(row.operation_id),
+    remote: 'origin',
+    expected_local_oid: row.expected_local_oid as string,
+    credential_reference: row.credential_reference as string,
+    https_proxy_url: projectV2ProxyURL(row.https_proxy_url),
+  };
+}
+
+function projectV2WorkspaceRequest(value: unknown): GitWorkspaceRequestV1 {
+  const row = projectV2ExactRecord(value, ['schema_version', 'root'], 'E_PROJECT_REQUEST_INVALID');
+  if (row.schema_version !== 1) return projectV2Fail('E_PROJECT_REQUEST_INVALID');
+  return { schema_version: 1, root: projectV2RequestRoot(row.root) };
+}
+
+function projectV2DiffRequest(value: unknown): GitDiffRequestV1 {
+  const row = projectV2ExactRecord(value, ['schema_version', 'root', 'max_bytes'], 'E_PROJECT_REQUEST_INVALID');
+  if (row.schema_version !== 1) return projectV2Fail('E_PROJECT_REQUEST_INVALID');
+  return {
+    schema_version: 1,
+    root: projectV2RequestRoot(row.root),
+    max_bytes: projectV2DiffMaxBytes(row.max_bytes),
+  };
+}
+
+function projectV2AttachRequest(value: unknown): AttachWorkspaceProjectRequestV1 {
+  const row = projectV2ExactRecord(value, [
+    'schema_version', 'operation_id', 'root', 'mode',
+  ], 'E_PROJECT_REQUEST_INVALID');
+  if (
+    row.schema_version !== 1 ||
+    (row.mode !== 'open' && row.mode !== 'init')
+  ) {
+    return projectV2Fail('E_PROJECT_REQUEST_INVALID');
+  }
+  try {
+    const root = assertWorkspaceRootRefV1(row.root);
+    return {
+      schema_version: 1,
+      operation_id: projectV2OperationId(row.operation_id),
+      root: {
+        schema_version: 1,
+        workspace_id: root.workspace_id,
+        binding_revision: root.binding_revision,
+        project_id: root.project_id,
+      },
+      mode: row.mode,
+    };
+  } catch {
+    return projectV2Fail('E_PROJECT_REQUEST_INVALID');
+  }
+}
+
+function projectV2ProjectForWorkspaceRequest(value: unknown): WorkspaceRootRefV1 {
+  try {
+    const root = assertWorkspaceRootRefV1(value);
+    return {
+      schema_version: 1,
+      workspace_id: root.workspace_id,
+      binding_revision: root.binding_revision,
+      project_id: root.project_id,
+    };
+  } catch {
+    return projectV2Fail('E_PROJECT_REQUEST_INVALID');
+  }
+}
+
+function projectV2PrepareDetachRequest(value: unknown): PrepareProjectDetachRequestV1 {
+  const row = projectV2ExactRecord(value, [
+    'schema_version', 'operation_id', 'root', 'mode',
+  ], 'E_PROJECT_REQUEST_INVALID');
+  if (
+    row.schema_version !== 1 ||
+    (row.mode !== 'retain_private_gitdir' && row.mode !== 'delete_private_gitdir')
+  ) {
+    return projectV2Fail('E_PROJECT_REQUEST_INVALID');
+  }
+  return {
+    schema_version: 1,
+    operation_id: projectV2OperationId(row.operation_id),
+    root: projectV2RequestRoot(row.root),
+    mode: row.mode,
+  };
+}
+
+function projectV2CommitDetachRequest(value: unknown): CommitProjectDetachRequestV1 {
+  const row = projectV2ExactRecord(value, [
+    'schema_version', 'operation_id', 'checkpoint', 'clearance_receipt_id',
+  ], 'E_PROJECT_REQUEST_INVALID');
+  if (row.schema_version !== 1) return projectV2Fail('E_PROJECT_REQUEST_INVALID');
+  const checkpoint = projectV2Checkpoint(row.checkpoint, 'E_PROJECT_REQUEST_INVALID');
+  return {
+    schema_version: 1,
+    operation_id: projectV2OperationId(row.operation_id),
+    checkpoint,
+    clearance_receipt_id: projectV2OperationId(row.clearance_receipt_id),
+  };
+}
+
+function legacyProjectTimestamp(value: unknown): value is string {
+  if (
+    typeof value !== 'string' ||
+    !/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/u.test(value)
+  ) {
+    return false;
+  }
+  const parsed = new Date(value);
+  return !Number.isNaN(parsed.valueOf()) && parsed.toISOString() === value;
+}
+
+function legacyProjectOriginURL(value: unknown): value is string | null {
+  if (value === null) return true;
+  if (
+    !projectV2String(value, 4096) ||
+    value.trim() !== value ||
+    value.includes('\\') ||
+    value.includes('?') ||
+    value.includes('#')
+  ) {
+    return false;
+  }
+  const match = /^https:\/\/([^/:]+)(?::(443))?(\/.*)$/u.exec(value);
+  if (match === null) return false;
+  const host = match[1];
+  const path = match[3];
+  if (
+    host === undefined ||
+    path === undefined ||
+    host !== host.toLowerCase() ||
+    host.length > 253 ||
+    path.length <= 1 ||
+    projectV2UTF8Bytes(path) === null ||
+    (projectV2UTF8Bytes(path) ?? Number.POSITIVE_INFINITY) > 2048
+  ) {
+    return false;
+  }
+  const labels = host.split('.');
+  if (
+    labels.length < 2 ||
+    labels.some(
+      label =>
+        label.length === 0 ||
+        label.length > 63 ||
+        !/^[a-z0-9](?:[a-z0-9-]*[a-z0-9])?$/u.test(label),
+    )
+  ) {
+    return false;
+  }
+  return path.split('/').every(component => {
+    if (component === '') return true;
+    try {
+      const decoded = decodeURIComponent(component);
+      return decoded !== '.' && decoded !== '..';
+    } catch {
+      return false;
+    }
+  });
+}
+
+function legacyProject(value: unknown): LocalProject {
+  const row = projectV2ExactRecord(
+    value,
+    [
+      'schema_version',
+      'id',
+      'name',
+      'workspace_path',
+      'created_at',
+      'updated_at',
+      'origin_url',
+    ],
+    'E_PROJECT_RESULT_INVALID',
+  );
+  if (
+    row.schema_version !== 1 ||
+    !projectV2UUID(row.id) ||
+    !projectV2DisplayName(row.name) ||
+    row.workspace_path !== `projects/${row.id}/repo` ||
+    !legacyProjectTimestamp(row.created_at) ||
+    !legacyProjectTimestamp(row.updated_at) ||
+    row.updated_at < row.created_at ||
+    !legacyProjectOriginURL(row.origin_url)
+  ) {
+    return projectV2Fail('E_PROJECT_RESULT_INVALID');
+  }
+  return {
+    schema_version: 1,
+    id: row.id,
+    name: row.name,
+    workspace_path: `projects/${row.id}/repo`,
+    created_at: row.created_at,
+    updated_at: row.updated_at,
+    origin_url: row.origin_url,
+  };
+}
+
+function legacyProjectListing(value: unknown): LocalProjectListing {
+  const row = projectV2ExactRecord(
+    value,
+    ['schema_version', 'projects'],
+    'E_PROJECT_RESULT_INVALID',
+  );
+  if (row.schema_version !== 1) {
+    return projectV2Fail('E_PROJECT_RESULT_INVALID');
+  }
+  const projects = projectV2Array(
+    row.projects,
+    4096,
+    'E_PROJECT_RESULT_INVALID',
+  ).map(legacyProject);
+  return { schema_version: 1, projects };
+}
 
 function hasNativeCapabilities(value: unknown): value is NativeLocalProjects {
   if (typeof value !== 'object' || value === null) return false;
@@ -158,11 +1217,51 @@ function required(): NativeLocalProjects {
   return native;
 }
 
+function hasV2Capabilities(value: unknown): value is NativeLocalProjects {
+  try {
+    if (typeof value !== 'object' || value === null) return false;
+    const row = value as Partial<NativeLocalProjects>;
+    return (
+      typeof row.attachWorkspaceProject === 'function' &&
+      typeof row.projectForWorkspaceV2 === 'function' &&
+      typeof row.prepareProjectDetachV1 === 'function' &&
+      typeof row.commitProjectDetachV1 === 'function' &&
+      typeof row.statusV2 === 'function' &&
+      typeof row.diffV2 === 'function' &&
+      typeof row.stageAllV2 === 'function' &&
+      typeof row.commitV2 === 'function' &&
+      typeof row.pushV2 === 'function'
+    );
+  } catch {
+    return false;
+  }
+}
+
+function requiredV2(): NativeLocalProjects {
+  if (!hasV2Capabilities(native)) projectV2Fail('E_PROJECT_NATIVE');
+  return native;
+}
+
+async function projectV2Boundary<T>(
+  operation: () => Promise<unknown>,
+  project: (value: unknown) => T,
+): Promise<T> {
+  try {
+    return project(await operation());
+  } catch (error) {
+    throw projectV2Error(error);
+  }
+}
+
 export const LocalProjects = {
   isAvailable: () => hasNativeCapabilities(native),
-  list: () => required().list(),
+  list: async () => legacyProjectListing(await required().list()),
   create: (name: string) => required().create(name),
-  clone: (url: string, name?: string) => required().clone(url, name ?? null),
+  clone: (
+    url: string,
+    name?: string,
+    options: ProjectGitTransportOptions = {},
+  ) => required().clone(url, name ?? null, options),
   status: (projectId: string) => required().status(projectId),
   diff: (projectId: string, options: ProjectDiffOptions = {}) =>
     required().diff(
@@ -185,5 +1284,133 @@ export const LocalProjects = {
   presentCredentialPrompt: (projectId: string, locale: 'zh-CN' | 'en' = 'en') =>
     required().presentCredentialPrompt(projectId, locale),
   clearCredential: (projectId: string) => required().clearCredential(projectId),
-  push: (projectId: string) => required().push(projectId),
+  push: (projectId: string, options: ProjectGitTransportOptions = {}) =>
+    required().push(projectId, options),
+  isV2Available: () => hasV2Capabilities(native),
+  attachWorkspaceProject: async (
+    requestValue: unknown,
+  ): Promise<AttachWorkspaceProjectResultV1> => {
+    try {
+      const request = projectV2AttachRequest(requestValue);
+      return await projectV2Boundary(
+        () => requiredV2().attachWorkspaceProject!(request),
+        raw => projectV2Attach(raw, request.root),
+      );
+    } catch (error) {
+      throw projectV2Error(error);
+    }
+  },
+  projectForWorkspaceV2: async (
+    rootValue: unknown,
+  ): Promise<ProjectForWorkspaceResultV1> => {
+    try {
+      const root = projectV2ProjectForWorkspaceRequest(rootValue);
+      return await projectV2Boundary(
+        () => requiredV2().projectForWorkspaceV2!(root),
+        raw => projectV2ForWorkspace(raw, root),
+      );
+    } catch (error) {
+      throw projectV2Error(error);
+    }
+  },
+  prepareProjectDetachV1: async (
+    requestValue: unknown,
+  ): Promise<ProjectDetachCheckpointV1> => {
+    try {
+      const request = projectV2PrepareDetachRequest(requestValue);
+      return await projectV2Boundary(
+        () => requiredV2().prepareProjectDetachV1!(request),
+        raw => {
+          const checkpoint = projectV2PrepareDetach(raw);
+          if (
+            checkpoint.project_id !== request.root.project_id ||
+            checkpoint.workspace_id !== request.root.workspace_id ||
+            checkpoint.binding_revision !== request.root.binding_revision ||
+            checkpoint.mode !== request.mode
+          ) {
+            return projectV2Fail('E_PROJECT_RESULT_INVALID');
+          }
+          return checkpoint;
+        },
+      );
+    } catch (error) {
+      throw projectV2Error(error);
+    }
+  },
+  commitProjectDetachV1: async (
+    requestValue: unknown,
+  ): Promise<{ schema_version: 1; status: 'detached' }> => {
+    try {
+      const request = projectV2CommitDetachRequest(requestValue);
+      return await projectV2Boundary(
+        () => requiredV2().commitProjectDetachV1!(request),
+        projectV2CommitDetach,
+      );
+    } catch (error) {
+      throw projectV2Error(error);
+    }
+  },
+  statusV2: async (
+    requestValue: unknown,
+  ): Promise<ProjectGitStatusV2> => {
+    try {
+      const request = projectV2WorkspaceRequest(requestValue);
+      return await projectV2Boundary(
+        () => requiredV2().statusV2!(request),
+        raw => projectV2Status(raw, request.root),
+      );
+    } catch (error) {
+      throw projectV2Error(error);
+    }
+  },
+  diffV2: async (requestValue: unknown): Promise<ProjectDiffV2> => {
+    try {
+      const request = projectV2DiffRequest(requestValue);
+      return await projectV2Boundary(
+        () => requiredV2().diffV2!(request),
+        raw => projectV2Diff(raw, request.root),
+      );
+    } catch (error) {
+      throw projectV2Error(error);
+    }
+  },
+  stageAllV2: async (
+    requestValue: unknown,
+  ): Promise<ProjectGitStatusV2> => {
+    try {
+      const request = projectV2WorkspaceRequest(requestValue);
+      return await projectV2Boundary(
+        () => requiredV2().stageAllV2!(request),
+        raw => projectV2Status(raw, request.root),
+      );
+    } catch (error) {
+      throw projectV2Error(error);
+    }
+  },
+  commitV2: async (
+    requestValue: unknown,
+  ): Promise<ProjectCommitV2> => {
+    try {
+      const request = projectV2CommitRequest(requestValue);
+      return await projectV2Boundary(
+        () => requiredV2().commitV2!(request),
+        raw => projectV2Commit(raw, request.root),
+      );
+    } catch (error) {
+      throw projectV2Error(error);
+    }
+  },
+  pushV2: async (
+    requestValue: unknown,
+  ): Promise<ProjectPushResultV2> => {
+    try {
+      const request = projectV2PushRequest(requestValue);
+      return await projectV2Boundary(
+        () => requiredV2().pushV2!(request),
+        raw => projectV2Push(raw, request.root),
+      );
+    } catch (error) {
+      throw projectV2Error(error);
+    }
+  },
 };

@@ -1,289 +1,373 @@
 import {
   createSessionPersistenceCoordinator,
-  type SessionDurabilityResult,
+  agentTextSHA256,
+  sessionSnapshotSHA256,
+  type SessionSnapshotAuthorityV1,
 } from '../src/completion/SessionPersistence';
+import { createEmptyChatState, serializeChatState } from '../src/state';
 
-function deferred<T>() {
-  let resolve!: (value: T) => void;
-  let reject!: (error: unknown) => void;
-  const promise = new Promise<T>((resolvePromise, rejectPromise) => {
-    resolve = resolvePromise;
-    reject = rejectPromise;
-  });
-  return { promise, resolve, reject };
-}
+const OPERATION_ID = '11111111-1111-4111-8111-111111111111';
+const SECOND_OPERATION_ID = '22222222-2222-4222-8222-222222222222';
+const CANDIDATE = serializeChatState(createEmptyChatState());
+const CANDIDATE_DIGEST = sessionSnapshotSHA256(CANDIDATE)!;
 
-const CANDIDATE = JSON.stringify({
-  schema_version: 7,
-  project_context_destructive_epoch: 0,
-  project_context_destructive_transition: null,
-  active_conversation_id: null,
-  conversations: [],
-  messages: [],
-  preferences: { locale: 'en-US', theme_mode: 'system' },
-});
+const MISSING: SessionSnapshotAuthorityV1 = {
+  schema_version: 1,
+  kind: 'missing',
+};
+const PRESENT: SessionSnapshotAuthorityV1 = {
+  schema_version: 1,
+  kind: 'present',
+  snapshot: {
+    schema_version: 1,
+    generation: 4,
+    session_sha256: CANDIDATE_DIGEST,
+  },
+};
 
-function coordinator(options: {
-  persist?: jest.Mock;
-  load?: jest.Mock;
-}) {
-  const persist = options.persist ?? jest.fn().mockResolvedValue(true);
-  const load = options.load ?? jest.fn().mockResolvedValue(null);
+function nativeLoaded(
+  authority: SessionSnapshotAuthorityV1,
+): Record<string, unknown> {
+  if (authority.kind === 'missing') {
+    return {
+      schema_version: 1,
+      status: 'missing',
+      snapshot: null,
+      session_json: null,
+    };
+  }
+  if (authority.kind === 'legacy_present') {
+    return {
+      schema_version: 1,
+      status: 'legacy_present',
+      legacy: authority.legacy,
+      session_json: '{}',
+    };
+  }
   return {
-    persist,
-    load,
-    value: createSessionPersistenceCoordinator({
-      persistSession: persist,
-      loadSession: load,
-    }),
+    schema_version: 1,
+    status: 'present',
+    snapshot: authority.snapshot,
+    session_json: CANDIDATE,
   };
 }
 
-describe('session persistence coordinator', () => {
-  test('returns exact committed result only for native true', async () => {
-    const fixture = coordinator({});
-    await expect(fixture.value.write(CANDIDATE)).resolves.toEqual({
+describe('schema-9 native session persistence coordinator', () => {
+  test('uses the raw UTF-8 Runtime Proof SHA-256 for recovered text', () => {
+    expect(agentTextSHA256('recovered')).toBe(
+      'f6e09cc89f85dcd21d987a4c4af142fe5bbb741de93d375af548f1d4f1d2063b',
+    );
+    expect(agentTextSHA256('durable native receipt')).toBe(
+      '5203f7706b13e7c81c22a5d3609059b75177f19c2ff5dc505684d4e69692e0cb',
+    );
+    expect(agentTextSHA256('\ud800')).toBeNull();
+  });
+
+  test('loads exact native authority and commits only a correlated HJ snapshot', async () => {
+    const loadSessionSnapshot = jest.fn().mockResolvedValue(nativeLoaded(MISSING));
+    const casPersistSession = jest.fn().mockResolvedValue({
+      schema_version: 1,
       status: 'committed',
-    } satisfies SessionDurabilityResult);
-    expect(fixture.persist).toHaveBeenCalledWith(CANDIDATE);
-    expect(fixture.load).not.toHaveBeenCalled();
+      snapshot: {
+        schema_version: 1,
+        generation: 1,
+        session_sha256: CANDIDATE_DIGEST,
+      },
+    });
+    const coordinator = createSessionPersistenceCoordinator({
+      loadSessionSnapshot,
+      casPersistSession,
+    });
+
+    await expect(
+      coordinator.write(CANDIDATE, { operation_id: OPERATION_ID }),
+    ).resolves.toEqual({ status: 'committed' });
+    expect(loadSessionSnapshot).toHaveBeenCalledTimes(1);
+    expect(casPersistSession).toHaveBeenCalledWith({
+      schema_version: 1,
+      operation_id: OPERATION_ID,
+      expected: MISSING,
+      candidate_json: CANDIDATE,
+    });
   });
 
   test.each([
-    ['false', jest.fn().mockResolvedValue(false)],
-    ['reject', jest.fn().mockRejectedValue(new Error('PROOF_SECRET'))],
-  ])(
-    'detects session-only durability after native %s',
-    async (_label, persist) => {
-      const reordered = JSON.stringify({
-        preferences: { theme_mode: 'system', locale: 'en-US' },
-        messages: [],
-        conversations: [],
-        active_conversation_id: null,
-        project_context_destructive_transition: null,
-        project_context_destructive_epoch: 0,
-        schema_version: 7,
-      });
-      const fixture = coordinator({
-        persist,
-        load: jest.fn().mockResolvedValue(reordered),
-      });
-      await expect(fixture.value.write(CANDIDATE)).resolves.toEqual({
-        status: 'session_only',
-      });
-    },
-  );
-
-  test.each([null, JSON.stringify({ schema_version: 5 })])(
-    'confirms not-committed when stored session differs: %p',
-    async stored => {
-      const fixture = coordinator({
-        persist: jest.fn().mockResolvedValue(false),
-        load: jest.fn().mockResolvedValue(stored),
-      });
-      await expect(fixture.value.write(CANDIDATE)).resolves.toEqual({
-        status: 'not_committed',
-      });
-    },
-  );
-
-  test.each([
-    ['load rejection', jest.fn().mockRejectedValue(new Error('LOAD_SECRET'))],
-    ['invalid JSON', jest.fn().mockResolvedValue('{')],
-    ['non-string native value', jest.fn().mockResolvedValue({ raw: true })],
-  ])('returns unknown for %s without leaking values', async (_label, load) => {
-    const fixture = coordinator({
-      persist: jest.fn().mockRejectedValue(new Error('PERSIST_SECRET')),
-      load,
+    ['wrong digest', 'f'.repeat(64), 1],
+    ['wrong generation', CANDIDATE_DIGEST, 2],
+  ])('rejects a committed ref with %s', async (_label, digest, generation) => {
+    const coordinator = createSessionPersistenceCoordinator({
+      loadSessionSnapshot: jest.fn().mockResolvedValue(nativeLoaded(MISSING)),
+      casPersistSession: jest.fn().mockResolvedValue({
+        schema_version: 1,
+        status: 'committed',
+        snapshot: {
+          schema_version: 1,
+          generation,
+          session_sha256: digest,
+        },
+      }),
     });
-    const result = await fixture.value.write(CANDIDATE);
-    expect(result).toEqual({ status: 'unknown' });
-    expect(JSON.stringify(result)).not.toMatch(/SECRET|raw/);
+    await expect(
+      coordinator.write(CANDIDATE, { operation_id: OPERATION_ID }),
+    ).resolves.toEqual({ status: 'unknown' });
   });
 
-  test('serializes persist and verification across concurrent callers', async () => {
-    const first = deferred<boolean>();
-    const persist = jest
-      .fn()
-      .mockImplementationOnce(() => first.promise)
-      .mockResolvedValueOnce(true);
-    const fixture = coordinator({ persist });
-
-    const firstWrite = fixture.value.write(CANDIDATE);
-    const secondCandidate = JSON.stringify({ ...JSON.parse(CANDIDATE), n: 2 });
-    const secondWrite = fixture.value.write(secondCandidate);
-    await Promise.resolve();
-    expect(persist).toHaveBeenCalledTimes(1);
-
-    first.resolve(true);
-    await expect(firstWrite).resolves.toEqual({ status: 'committed' });
-    await expect(secondWrite).resolves.toEqual({ status: 'committed' });
-    expect(persist.mock.calls.map(call => call[0])).toEqual([
-      CANDIDATE,
-      secondCandidate,
-    ]);
-  });
-
-  test('keeps the second persist blocked through first-load verification', async () => {
-    const verification = deferred<unknown>();
-    const persist = jest
-      .fn()
-      .mockResolvedValueOnce(false)
-      .mockResolvedValueOnce(true);
-    const load = jest.fn().mockImplementationOnce(() => verification.promise);
-    const fixture = coordinator({ persist, load });
-    const first = fixture.value.write(CANDIDATE);
-    const second = fixture.value.write(CANDIDATE);
-    await Promise.resolve();
-    await Promise.resolve();
-    expect(persist).toHaveBeenCalledTimes(1);
-    expect(load).toHaveBeenCalledTimes(1);
-
-    verification.resolve(CANDIDATE);
-    await expect(first).resolves.toEqual({ status: 'session_only' });
-    await expect(second).resolves.toEqual({ status: 'committed' });
-    expect(persist).toHaveBeenCalledTimes(2);
-  });
-
-  test('caps active plus queued writes at sixteen without retaining overflow', async () => {
-    const active = deferred<boolean>();
-    const persist = jest
-      .fn()
-      .mockImplementationOnce(() => active.promise)
-      .mockResolvedValue(true);
-    const fixture = coordinator({ persist });
-    const accepted = Array.from({ length: 16 }, (_, index) =>
-      fixture.value.write(
-        JSON.stringify(
-          Object.assign({}, JSON.parse(CANDIDATE), { sequence: index }),
-        ),
-      ),
-    );
-    const overflow = fixture.value.write(
-      JSON.stringify(
-        Object.assign({}, JSON.parse(CANDIDATE), { sequence: 16 }),
-      ),
-    );
-    let overflowResult: SessionDurabilityResult | undefined;
-    overflow.then(result => {
-      overflowResult = result;
+  test('uses the current generation plus one for a present authority', async () => {
+    const casPersistSession = jest.fn().mockResolvedValue({
+      schema_version: 1,
+      status: 'committed',
+      snapshot: {
+        schema_version: 1,
+        generation: 5,
+        session_sha256: CANDIDATE_DIGEST,
+      },
     });
-    await Promise.resolve();
-    await Promise.resolve();
-    expect(overflowResult).toEqual({ status: 'unknown' });
-    expect(persist).toHaveBeenCalledTimes(1);
-
-    active.resolve(true);
-    await expect(Promise.all(accepted)).resolves.toHaveLength(16);
-    expect(persist).toHaveBeenCalledTimes(16);
-  });
-
-  test('preflights invalid candidates before a hung active write queue', async () => {
-    const active = deferred<boolean>();
-    const persist = jest.fn().mockImplementationOnce(() => active.promise);
-    const fixture = coordinator({ persist });
-    const first = fixture.value.write(CANDIDATE);
-    const tooDeep = '['.repeat(65) + '0' + ']'.repeat(65);
-    const invalid = fixture.value.write(tooDeep);
-    let invalidResult: SessionDurabilityResult | undefined;
-    invalid.then(result => {
-      invalidResult = result;
+    const coordinator = createSessionPersistenceCoordinator({
+      loadSessionSnapshot: jest.fn().mockResolvedValue(nativeLoaded(PRESENT)),
+      casPersistSession,
     });
-    await Promise.resolve();
-    await Promise.resolve();
-    expect(invalidResult).toEqual({ status: 'unknown' });
-    expect(persist).toHaveBeenCalledTimes(1);
-    active.resolve(true);
-    await first;
+    await expect(
+      coordinator.write(CANDIDATE, { operation_id: OPERATION_ID }),
+    ).resolves.toEqual({ status: 'committed' });
+    expect(casPersistSession.mock.calls[0]?.[0].expected).toEqual(PRESENT);
   });
 
-  test('continues the queue after an indeterminate first write', async () => {
-    const persist = jest
-      .fn()
-      .mockRejectedValueOnce(new Error('FIRST'))
-      .mockResolvedValueOnce(true);
-    const load = jest.fn().mockRejectedValueOnce(new Error('VERIFY'));
-    const fixture = coordinator({ persist, load });
-    const first = fixture.value.write(CANDIDATE);
-    const second = fixture.value.write(CANDIDATE);
-    await expect(first).resolves.toEqual({ status: 'unknown' });
-    await expect(second).resolves.toEqual({ status: 'committed' });
-  });
-
-  test('rejects oversized or deeply nested candidates before native writes', async () => {
-    const fixture = coordinator({});
-    const oversized = `"${'x'.repeat(16 * 1024 * 1024)}"`;
-    await expect(fixture.value.write(oversized)).resolves.toEqual({
-      status: 'unknown',
-    });
-    expect(fixture.persist).not.toHaveBeenCalled();
-
-    let deep: unknown = 0;
-    for (let index = 0; index < 70; index += 1) deep = [deep];
-    await expect(fixture.value.write(JSON.stringify(deep))).resolves.toEqual({
-      status: 'unknown',
-    });
-    expect(fixture.persist).not.toHaveBeenCalled();
-  });
-
-  test('rejects depth and token excess before JSON.parse for candidate and load', async () => {
-    const tooDeep = '['.repeat(65) + '0' + ']'.repeat(65);
-    const tooManyTokens = '[' + '0,'.repeat(250_000) + '0]';
-    const parse = jest.spyOn(JSON, 'parse');
-    try {
-      const candidateFixture = coordinator({});
-      await expect(candidateFixture.value.write(tooDeep)).resolves.toEqual({
-        status: 'unknown',
+  test('does not invent authority when native load is missing, bare, malformed, or boolean', async () => {
+    for (const loadSessionSnapshot of [
+      undefined,
+      jest.fn().mockResolvedValue(null),
+      jest.fn().mockResolvedValue(CANDIDATE),
+      jest.fn().mockResolvedValue(true),
+      jest.fn().mockResolvedValue({ schema_version: 1, status: 'missing' }),
+    ]) {
+      const casPersistSession = jest.fn();
+      const coordinator = createSessionPersistenceCoordinator({
+        ...(loadSessionSnapshot === undefined ? {} : { loadSessionSnapshot }),
+        casPersistSession,
       });
       await expect(
-        candidateFixture.value.write(tooManyTokens),
+        coordinator.write(CANDIDATE, { operation_id: OPERATION_ID }),
       ).resolves.toEqual({ status: 'unknown' });
-      expect(parse).not.toHaveBeenCalled();
-      expect(candidateFixture.persist).not.toHaveBeenCalled();
-
-      const loadFixture = coordinator({
-        persist: jest.fn().mockResolvedValue(false),
-        load: jest.fn().mockResolvedValue(tooDeep),
-      });
-      await expect(loadFixture.value.write(CANDIDATE)).resolves.toEqual({
-        status: 'unknown',
-      });
-      expect(parse).toHaveBeenCalledTimes(1);
-    } finally {
-      parse.mockRestore();
+      expect(casPersistSession).not.toHaveBeenCalled();
     }
   });
 
-  test('treats quoted and escaped brackets as string content in lexical scan', async () => {
-    const quoted = JSON.stringify({
-      text:
-        '['.repeat(100) +
-        ' escaped quote: \\" ' +
-        ']'.repeat(100),
+  test('uses only the exact native load method, even when legacy aliases are supplied', async () => {
+    const loadSessionAuthority = jest.fn().mockResolvedValue(nativeLoaded(MISSING));
+    const casPersistSession = jest.fn();
+    const coordinator = createSessionPersistenceCoordinator({
+      loadSessionAuthority,
+      casPersistSession,
     });
-    const fixture = coordinator({});
-    await expect(fixture.value.write(quoted)).resolves.toEqual({
+    await expect(
+      coordinator.write(CANDIDATE, { operation_id: OPERATION_ID }),
+    ).resolves.toEqual({ status: 'unknown' });
+    expect(loadSessionAuthority).not.toHaveBeenCalled();
+    expect(casPersistSession).not.toHaveBeenCalled();
+  });
+
+  test('rejects a caller expected token that does not match the native load', async () => {
+    const casPersistSession = jest.fn();
+    const coordinator = createSessionPersistenceCoordinator({
+      loadSessionSnapshot: jest.fn().mockResolvedValue(nativeLoaded(MISSING)),
+      casPersistSession,
+    });
+    await expect(
+      coordinator.write(CANDIDATE, {
+        operation_id: OPERATION_ID,
+        expected: PRESENT,
+      }),
+    ).resolves.toEqual({ status: 'not_committed' });
+    expect(casPersistSession).not.toHaveBeenCalled();
+  });
+
+  test('rejects malformed nested session JSON returned by native load', async () => {
+    const coordinator = createSessionPersistenceCoordinator({
+      loadSessionSnapshot: jest.fn().mockResolvedValue({
+        schema_version: 1,
+        status: 'present',
+        snapshot: {
+          schema_version: 1,
+          generation: 4,
+          session_sha256: 'a'.repeat(64),
+        },
+        session_json: '{}',
+      }),
+      casPersistSession: jest.fn(),
+    });
+    await expect(
+      coordinator.write(CANDIDATE, { operation_id: OPERATION_ID }),
+    ).resolves.toEqual({ status: 'unknown' });
+  });
+
+  test('requires the loaded present digest to equal HJ(chat-session, root)', async () => {
+    const loadSessionSnapshot = jest.fn().mockResolvedValue({
+      schema_version: 1,
+      status: 'present',
+      snapshot: {
+        schema_version: 1,
+        generation: 4,
+        session_sha256: 'f'.repeat(64),
+      },
+      session_json: CANDIDATE,
+    });
+    const coordinator = createSessionPersistenceCoordinator({
+      loadSessionSnapshot,
+      casPersistSession: jest.fn(),
+    });
+    await expect(coordinator.loadAuthority()).rejects.toThrow(
+      'session authority unavailable',
+    );
+    await expect(
+      coordinator.write(CANDIDATE, { operation_id: OPERATION_ID }),
+    ).resolves.toEqual({ status: 'unknown' });
+  });
+
+  test('reports session_only only when native says the candidate is current', async () => {
+    const candidateCurrent = {
+      schema_version: 1,
+      kind: 'present' as const,
+      snapshot: {
+        schema_version: 1 as const,
+        generation: 1,
+        session_sha256: CANDIDATE_DIGEST,
+      },
+    };
+    const coordinator = createSessionPersistenceCoordinator({
+      loadSessionSnapshot: jest.fn().mockResolvedValue(nativeLoaded(MISSING)),
+      casPersistSession: jest.fn().mockResolvedValue({
+        schema_version: 1,
+        status: 'session_only',
+        current: candidateCurrent,
+      }),
+    });
+    await expect(
+      coordinator.write(CANDIDATE, { operation_id: OPERATION_ID }),
+    ).resolves.toEqual({ status: 'session_only' });
+  });
+
+  test('maps a proven not_started operation query to not_committed', async () => {
+    const coordinator = createSessionPersistenceCoordinator({
+      loadSessionSnapshot: jest.fn().mockResolvedValue(nativeLoaded(MISSING)),
+      casPersistSession: jest.fn().mockRejectedValue(new Error('lost response')),
+      querySessionCommit: jest.fn().mockResolvedValue({
+        schema_version: 1,
+        status: 'not_started',
+      }),
+    });
+    await expect(
+      coordinator.write(CANDIDATE, { operation_id: OPERATION_ID }),
+    ).resolves.toEqual({ status: 'not_committed' });
+  });
+
+  test('generates a canonical UUID operation id when one is omitted', async () => {
+    const casPersistSession = jest.fn().mockResolvedValue({
+      schema_version: 1,
       status: 'committed',
+      snapshot: {
+        schema_version: 1,
+        generation: 1,
+        session_sha256: CANDIDATE_DIGEST,
+      },
+    });
+    const coordinator = createSessionPersistenceCoordinator({
+      loadSessionSnapshot: jest.fn().mockResolvedValue(nativeLoaded(MISSING)),
+      casPersistSession,
+    });
+    await expect(coordinator.write(CANDIDATE)).resolves.toEqual({
+      status: 'committed',
+    });
+    expect(casPersistSession.mock.calls[0]?.[0].operation_id).toMatch(
+      /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/u,
+    );
+  });
+
+  test('rejects schema-9 duplicate keys, negative zero, unsafe integers, and malformed roots before CAS', async () => {
+    const casPersistSession = jest.fn();
+    const coordinator = createSessionPersistenceCoordinator({
+      loadSessionSnapshot: jest.fn().mockResolvedValue(nativeLoaded(MISSING)),
+      casPersistSession,
+    });
+    for (const candidate of [
+      CANDIDATE.replace('{"schema_version":9', '{"schema_version":9,"schema_version":9'),
+      CANDIDATE.replace('"schema_version":9', '"schema_version":-0'),
+      CANDIDATE.replace('"schema_version":9', '"schema_version":9007199254740992'),
+      JSON.stringify({ schema_version: 9 }),
+    ]) {
+      await expect(
+        coordinator.write(candidate, { operation_id: OPERATION_ID }),
+      ).resolves.toEqual({ status: 'unknown' });
+    }
+    expect(casPersistSession).not.toHaveBeenCalled();
+  });
+
+  test('queries the exact operation after an indeterminate CAS response', async () => {
+    const casPersistSession = jest.fn().mockRejectedValue(new Error('native detail'));
+    const querySessionCommit = jest.fn().mockResolvedValue({
+      schema_version: 1,
+      status: 'committed',
+      snapshot: {
+        schema_version: 1,
+        generation: 1,
+        session_sha256: CANDIDATE_DIGEST,
+      },
+    });
+    const coordinator = createSessionPersistenceCoordinator({
+      loadSessionSnapshot: jest.fn().mockResolvedValue(nativeLoaded(MISSING)),
+      casPersistSession,
+      querySessionCommit,
+    });
+    await expect(
+      coordinator.write(CANDIDATE, { operation_id: SECOND_OPERATION_ID }),
+    ).resolves.toEqual({ status: 'committed' });
+    expect(querySessionCommit).toHaveBeenCalledWith({
+      schema_version: 1,
+      operation_id: SECOND_OPERATION_ID,
     });
   });
 
-  test('does not inspect hostile non-string load results', async () => {
-    let getterCalls = 0;
-    const hostile = {};
-    Object.defineProperty(hostile, 'raw', {
-      enumerable: true,
-      get: () => {
-        getterCalls += 1;
-        throw new Error('HOSTILE_GETTER');
-      },
+  test('serializes native CAS writes and does not retain an overflow queue', async () => {
+    let release!: () => void;
+    const gate = new Promise<void>(resolve => {
+      release = resolve;
     });
-    const fixture = coordinator({
-      persist: jest.fn().mockResolvedValue(false),
-      load: jest.fn().mockResolvedValue(hostile),
+    const casPersistSession = jest
+      .fn()
+      .mockImplementationOnce(async () => {
+        await gate;
+        return {
+          schema_version: 1,
+          status: 'committed',
+          snapshot: {
+            schema_version: 1,
+            generation: 1,
+            session_sha256: CANDIDATE_DIGEST,
+          },
+        };
+      })
+      .mockResolvedValue({
+        schema_version: 1,
+        status: 'committed',
+        snapshot: {
+          schema_version: 1,
+          generation: 1,
+          session_sha256: CANDIDATE_DIGEST,
+        },
+      });
+    const loadSessionSnapshot = jest.fn().mockResolvedValue(nativeLoaded(MISSING));
+    const coordinator = createSessionPersistenceCoordinator({
+      loadSessionSnapshot,
+      casPersistSession,
     });
-    await expect(fixture.value.write(CANDIDATE)).resolves.toEqual({
-      status: 'unknown',
-    });
-    expect(getterCalls).toBe(0);
+    const first = coordinator.write(CANDIDATE, { operation_id: OPERATION_ID });
+    const second = coordinator.write(CANDIDATE, { operation_id: SECOND_OPERATION_ID });
+    await Promise.resolve();
+    await Promise.resolve();
+    await Promise.resolve();
+    expect(casPersistSession).toHaveBeenCalledTimes(1);
+    release();
+    await expect(first).resolves.toEqual({ status: 'committed' });
+    await expect(second).resolves.toEqual({ status: 'committed' });
+    expect(casPersistSession).toHaveBeenCalledTimes(2);
   });
 });

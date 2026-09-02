@@ -56,6 +56,13 @@ static BOOL DSHPCBoolean(id value, BOOL *output) {
   return YES;
 }
 
+// V2 projections share the hardened V1 candidate/item validators declared
+// below; keep forward declarations next to the V2 boundary so the compiler
+// cannot accidentally resolve an unvalidated dictionary helper.
+static NSDictionary *DSHPCCandidate(id raw);
+static NSDictionary *DSHPCIncluded(id raw);
+static NSDictionary *DSHPCOmitted(id raw);
+
 static NSString *DSHPCBoundedString(id value, NSUInteger maximumBytes,
                                     BOOL allowEmpty) {
   NSString *string = DSHPCString(value);
@@ -230,6 +237,442 @@ static NSDictionary *DSHPCSelection(id raw) {
     @"model": [model copy],
     @"policy": @"chat-read-v1",
     @"selected_paths": [normalized copy],
+  };
+}
+
+static NSDictionary *DSHPCWorkspaceRoot(id raw, BOOL projectRequired) {
+  NSDictionary *root = DSHPCDictionary(raw);
+  NSArray *keys = @[
+    @"schema_version", @"workspace_id", @"binding_revision", @"project_id"
+  ];
+  uint64_t revision = 0;
+  id project = root[@"project_id"];
+  if (!DSHPCExactKeys(root, keys) ||
+      !DSHPCSafeInteger(root[@"schema_version"], 1, nullptr) ||
+      ![root[@"schema_version"] isEqual:@1] ||
+      DSHPCCanonicalIdentifier(root[@"workspace_id"] ) == nil ||
+      !DSHPCSafeInteger(root[@"binding_revision"], 9007199254740991ULL,
+                        &revision) ||
+      revision == 0 ||
+      (project == NSNull.null
+          ? projectRequired
+          : DSHPCCanonicalIdentifier(project) == nil)) {
+    return nil;
+  }
+  return @{
+    @"schema_version" : @1,
+    @"workspace_id" : [root[@"workspace_id"] copy],
+    @"binding_revision" : @(revision),
+    @"project_id" : project == NSNull.null ? NSNull.null : [project copy],
+  };
+}
+
+static NSDictionary *DSHPCV2ProjectDescriptor(id raw,
+                                              NSDictionary *expectedRoot) {
+  NSDictionary *project = DSHPCDictionary(raw);
+  NSArray *keys = @[
+    @"schema_version", @"project_id", @"workspace_id",
+    @"workspace_binding_revision", @"display_name", @"git_topology"
+  ];
+  uint64_t revision = 0;
+  NSString *name = DSHPCProjectName(project[@"display_name"]);
+  if (!DSHPCExactKeys(project, keys) ||
+      !DSHPCSafeInteger(project[@"schema_version"], 2, nullptr) ||
+      ![project[@"schema_version"] isEqual:@2] ||
+      DSHPCCanonicalIdentifier(project[@"project_id"]) == nil ||
+      DSHPCCanonicalIdentifier(project[@"workspace_id"]) == nil ||
+      !DSHPCSafeInteger(project[@"workspace_binding_revision"],
+                        9007199254740991ULL, &revision) ||
+      revision == 0 || name == nil ||
+      (![project[@"git_topology"] isEqual:@"legacy_embedded"] &&
+       ![project[@"git_topology"] isEqual:@"private_split_gitdir"]) ||
+      (expectedRoot != nil &&
+       (![project[@"project_id"] isEqual:expectedRoot[@"project_id"]] ||
+        ![project[@"workspace_id"] isEqual:expectedRoot[@"workspace_id"]] ||
+        revision != [expectedRoot[@"binding_revision"] unsignedLongLongValue]))) {
+    return nil;
+  }
+  return @{
+    @"schema_version" : @2,
+    @"project_id" : [project[@"project_id"] copy],
+    @"workspace_id" : [project[@"workspace_id"] copy],
+    @"workspace_binding_revision" : @(revision),
+    @"display_name" : name,
+    @"git_topology" : [project[@"git_topology"] copy],
+  };
+}
+
+static NSDictionary *DSHPCV2CandidatePage(id raw, NSDictionary *expectedRoot) {
+  NSDictionary *page = DSHPCDictionary(raw);
+  NSArray *keys = @[
+    @"schema_version", @"root", @"project", @"candidates", @"next_cursor"
+  ];
+  uint64_t schema = 0;
+  NSDictionary *root = DSHPCWorkspaceRoot(page[@"root"], YES);
+  NSArray *candidates = DSHPCArray(page[@"candidates"]);
+  NSString *cursor = DSHPCCursor(page[@"next_cursor"], YES);
+  if (!DSHPCExactKeys(page, keys) ||
+      !DSHPCSafeInteger(page[@"schema_version"], 2, &schema) || schema != 2 ||
+      root == nil || expectedRoot == nil || ![root isEqual:expectedRoot] ||
+      candidates == nil || candidates.count > 100 || cursor == nil ||
+      DSHPCV2ProjectDescriptor(page[@"project"], root) == nil) {
+    return nil;
+  }
+  NSMutableArray *projected = [NSMutableArray arrayWithCapacity:candidates.count];
+  NSMutableSet *paths = [NSMutableSet set];
+  for (id value in candidates) {
+    NSDictionary *candidate = DSHPCCandidate(value);
+    if (candidate == nil || [paths containsObject:candidate[@"path"]]) return nil;
+    [paths addObject:candidate[@"path"]];
+    [projected addObject:candidate];
+  }
+  return @{
+    @"schema_version" : @2,
+    @"root" : root,
+    @"project" : DSHPCV2ProjectDescriptor(page[@"project"], root),
+    @"candidates" : [projected copy],
+    @"next_cursor" : cursor,
+  };
+}
+
+static NSDictionary *DSHPCV2Manifest(id raw, NSDictionary *expectedRoot,
+                                     NSString *expectedSnapshotId,
+                                     NSString *expectedConversationId,
+                                     NSString *expectedModel) {
+  NSDictionary *manifest = DSHPCDictionary(raw);
+  NSArray *keys = @[
+    @"schema_version", @"snapshot_id", @"root", @"project", @"project_id",
+    @"conversation_id", @"model_id", @"policy", @"branch", @"head_oid",
+    @"clean", @"conflicted", @"captured_at", @"policy_version", @"included",
+    @"omitted", @"context_bytes", @"estimated_tokens", @"snapshot_sha256",
+    @"source_fingerprint"
+  ];
+  uint64_t contextBytes = 0;
+  uint64_t estimatedTokens = 0;
+  NSDictionary *root = DSHPCWorkspaceRoot(manifest[@"root"], YES);
+  NSDictionary *project = DSHPCV2ProjectDescriptor(manifest[@"project"], root);
+  NSString *snapshotId = DSHPCCanonicalIdentifier(manifest[@"snapshot_id"]);
+  NSString *projectId = DSHPCCanonicalIdentifier(manifest[@"project_id"]);
+  NSString *conversation = DSHPCCanonicalIdentifier(manifest[@"conversation_id"]);
+  NSString *model = DSHPCString(manifest[@"model_id"]);
+  NSString *branch = DSHPCGitBranch(manifest[@"branch"]);
+  NSString *head = DSHPCHeadOid(manifest[@"head_oid"]);
+  NSArray *included = DSHPCArray(manifest[@"included"]);
+  NSArray *omitted = DSHPCArray(manifest[@"omitted"]);
+  BOOL clean = NO;
+  BOOL conflicted = NO;
+  if (!DSHPCExactKeys(manifest, keys) ||
+      !DSHPCSafeInteger(manifest[@"schema_version"], 2, nullptr) ||
+      ![manifest[@"schema_version"] isEqual:@2] || snapshotId == nil ||
+      (expectedSnapshotId != nil && ![snapshotId isEqual:expectedSnapshotId]) ||
+      root == nil || expectedRoot == nil || ![root isEqual:expectedRoot] ||
+      project == nil || projectId == nil ||
+      ![projectId isEqual:root[@"project_id"]] ||
+      conversation == nil ||
+      (expectedConversationId != nil && ![conversation isEqual:expectedConversationId]) ||
+      model == nil || ![DSHPCModels() containsObject:model] ||
+      (expectedModel != nil && ![model isEqual:expectedModel]) ||
+      ![manifest[@"policy"] isEqual:@"chat-read-v1"] ||
+      (manifest[@"branch"] != NSNull.null && branch == nil) ||
+      (manifest[@"head_oid"] != NSNull.null && head == nil) ||
+      !DSHPCBoolean(manifest[@"clean"], &clean) ||
+      !DSHPCBoolean(manifest[@"conflicted"], &conflicted) ||
+      (clean && conflicted) || !DSHPCTimestamp(manifest[@"captured_at"]) ||
+      ![manifest[@"policy_version"] isEqual:@"chat-read-v1.0.0"] ||
+      included == nil || included.count > 32 || omitted == nil || omitted.count > 5000 ||
+      !DSHPCSafeInteger(manifest[@"context_bytes"], 256 * 1024, &contextBytes) ||
+      contextBytes == 0 ||
+      !DSHPCSafeInteger(manifest[@"estimated_tokens"], 65536, &estimatedTokens) ||
+      estimatedTokens != (contextBytes + 3) / 4 ||
+      DSHPCDigest(manifest[@"snapshot_sha256"]) == nil ||
+      DSHPCDigest(manifest[@"source_fingerprint"]) == nil) {
+    return nil;
+  }
+  NSMutableArray *projectedIncluded = [NSMutableArray arrayWithCapacity:included.count];
+  NSMutableSet *includedIds = [NSMutableSet set];
+  for (id value in included) {
+    NSDictionary *item = DSHPCIncluded(value);
+    NSString *identity = item == nil ? nil
+        : [NSString stringWithFormat:@"%@\n%@", item[@"path"], item[@"source"]];
+    if (item == nil || [includedIds containsObject:identity]) return nil;
+    [includedIds addObject:identity];
+    [projectedIncluded addObject:item];
+  }
+  NSMutableArray *projectedOmitted = [NSMutableArray arrayWithCapacity:omitted.count];
+  NSMutableSet *omittedIds = [NSMutableSet set];
+  for (id value in omitted) {
+    NSDictionary *item = DSHPCOmitted(value);
+    NSString *identity = item == nil ? nil
+        : [NSString stringWithFormat:@"%@\n%@", item[@"path"], item[@"reason"]];
+    if (item == nil || [omittedIds containsObject:identity]) return nil;
+    [omittedIds addObject:identity];
+    [projectedOmitted addObject:item];
+  }
+  return @{
+    @"schema_version" : @2,
+    @"snapshot_id" : snapshotId,
+    @"root" : root,
+    @"project" : project,
+    @"project_id" : projectId,
+    @"conversation_id" : conversation,
+    @"model_id" : [model copy],
+    @"policy" : @"chat-read-v1",
+    @"branch" : branch,
+    @"head_oid" : head,
+    @"clean" : @(clean),
+    @"conflicted" : @(conflicted),
+    @"captured_at" : [manifest[@"captured_at"] copy],
+    @"policy_version" : @"chat-read-v1.0.0",
+    @"included" : [projectedIncluded copy],
+    @"omitted" : [projectedOmitted copy],
+    @"context_bytes" : @(contextBytes),
+    @"estimated_tokens" : @(estimatedTokens),
+    @"snapshot_sha256" : DSHPCDigest(manifest[@"snapshot_sha256"]),
+    @"source_fingerprint" : DSHPCDigest(manifest[@"source_fingerprint"]),
+  };
+}
+
+static NSDictionary *DSHPCV2Consent(id raw, NSDictionary *expectedRoot,
+                                    NSString *expectedSnapshotId) {
+  NSDictionary *consent = DSHPCDictionary(raw);
+  NSArray *keys = @[
+    @"schema_version", @"consent_receipt_id", @"snapshot_id", @"root",
+    @"workspace_id", @"workspace_binding_revision", @"snapshot_sha256",
+    @"confirmed_at"
+  ];
+  uint64_t revision = 0;
+  NSDictionary *root = DSHPCWorkspaceRoot(consent[@"root"], YES);
+  NSString *snapshotId = DSHPCCanonicalIdentifier(consent[@"snapshot_id"]);
+  if (!DSHPCExactKeys(consent, keys) ||
+      !DSHPCSafeInteger(consent[@"schema_version"], 2, nullptr) ||
+      ![consent[@"schema_version"] isEqual:@2] ||
+      DSHPCCanonicalIdentifier(consent[@"consent_receipt_id"]) == nil ||
+      snapshotId == nil || (expectedSnapshotId != nil &&
+                            ![snapshotId isEqual:expectedSnapshotId]) ||
+      root == nil || expectedRoot == nil || ![root isEqual:expectedRoot] ||
+      ![consent[@"workspace_id"] isEqual:root[@"workspace_id"]] ||
+      !DSHPCSafeInteger(consent[@"workspace_binding_revision"],
+                        9007199254740991ULL, &revision) ||
+      revision != [root[@"binding_revision"] unsignedLongLongValue] ||
+      DSHPCDigest(consent[@"snapshot_sha256"]) == nil ||
+      !DSHPCTimestamp(consent[@"confirmed_at"])) {
+    return nil;
+  }
+  return @{
+    @"schema_version" : @2,
+    @"consent_receipt_id" : [consent[@"consent_receipt_id"] copy],
+    @"snapshot_id" : snapshotId,
+    @"root" : root,
+    @"workspace_id" : [consent[@"workspace_id"] copy],
+    @"workspace_binding_revision" : @(revision),
+    @"snapshot_sha256" : DSHPCDigest(consent[@"snapshot_sha256"]),
+    @"confirmed_at" : [consent[@"confirmed_at"] copy],
+  };
+}
+
+static NSDictionary *DSHPCV2Inspection(id raw, NSDictionary *expectedRoot,
+                                       NSString *expectedSnapshotId) {
+  NSDictionary *inspection = DSHPCDictionary(raw);
+  NSArray *manifestKeys = @[
+    @"schema_version", @"snapshot_id", @"root", @"project", @"project_id",
+    @"conversation_id", @"model_id", @"policy", @"branch", @"head_oid",
+    @"clean", @"conflicted", @"captured_at", @"policy_version", @"included",
+    @"omitted", @"context_bytes", @"estimated_tokens", @"snapshot_sha256",
+    @"source_fingerprint"
+  ];
+  NSMutableArray *keys = [manifestKeys mutableCopy];
+  [keys addObject:@"state"];
+  if (!DSHPCExactKeys(inspection, keys) ||
+      (![inspection[@"state"] isEqual:@"prepared"] &&
+       ![inspection[@"state"] isEqual:@"confirmed"] &&
+       ![inspection[@"state"] isEqual:@"stale"])) {
+    return nil;
+  }
+  NSMutableDictionary *manifest = [inspection mutableCopy];
+  [manifest removeObjectForKey:@"state"];
+  NSDictionary *projected = DSHPCV2Manifest(manifest, expectedRoot,
+                                            expectedSnapshotId, nil, nil);
+  return projected == nil ? nil : @{
+    @"schema_version" : @2,
+    @"state" : [inspection[@"state"] copy],
+    @"manifest" : projected,
+  };
+}
+
+static NSDictionary *DSHPCV2VerifiedReceipt(id raw, NSDictionary *expectedRoot,
+                                            NSString *expectedSnapshotId) {
+  NSDictionary *receipt = DSHPCDictionary(raw);
+  NSArray *keys = @[
+    @"schema_version", @"snapshot_id", @"root", @"snapshot_sha256",
+    @"source_fingerprint", @"context_bytes", @"verified_at"
+  ];
+  uint64_t bytes = 0;
+  NSDictionary *root = DSHPCWorkspaceRoot(receipt[@"root"], YES);
+  NSString *snapshotId = DSHPCCanonicalIdentifier(receipt[@"snapshot_id"]);
+  if (!DSHPCExactKeys(receipt, keys) ||
+      !DSHPCSafeInteger(receipt[@"schema_version"], 2, nullptr) ||
+      ![receipt[@"schema_version"] isEqual:@2] || snapshotId == nil ||
+      (expectedSnapshotId != nil && ![snapshotId isEqual:expectedSnapshotId]) ||
+      root == nil || expectedRoot == nil || ![root isEqual:expectedRoot] ||
+      DSHPCDigest(receipt[@"snapshot_sha256"]) == nil ||
+      DSHPCDigest(receipt[@"source_fingerprint"]) == nil ||
+      !DSHPCSafeInteger(receipt[@"context_bytes"], 256 * 1024, &bytes) ||
+      bytes == 0 || !DSHPCTimestamp(receipt[@"verified_at"])) {
+    return nil;
+  }
+  return @{
+    @"schema_version" : @2,
+    @"snapshot_id" : snapshotId,
+    @"root" : root,
+    @"snapshot_sha256" : DSHPCDigest(receipt[@"snapshot_sha256"]),
+    @"source_fingerprint" : DSHPCDigest(receipt[@"source_fingerprint"]),
+    @"context_bytes" : @(bytes),
+    @"verified_at" : [receipt[@"verified_at"] copy],
+  };
+}
+
+static NSDictionary *DSHPCV2DiscardResult(id raw, NSDictionary *expectedRoot,
+                                          NSString *expectedSnapshotId) {
+  NSDictionary *result = DSHPCDictionary(raw);
+  NSArray *keys = @[
+    @"schema_version", @"status", @"snapshot_id", @"root",
+    @"workspace_id", @"workspace_binding_revision"
+  ];
+  uint64_t schema = 0;
+  uint64_t revision = 0;
+  NSDictionary *root = DSHPCWorkspaceRoot(result[@"root"], YES);
+  if (!DSHPCExactKeys(result, keys) ||
+      !DSHPCSafeInteger(result[@"schema_version"], 2, &schema) ||
+      schema != 2 || root == nil || expectedRoot == nil ||
+      ![root isEqual:expectedRoot] ||
+      ![result[@"status"] isEqual:@"discarded"] ||
+      ![result[@"snapshot_id"] isEqual:expectedSnapshotId] ||
+      ![result[@"workspace_id"] isEqual:root[@"workspace_id"]] ||
+      !DSHPCSafeInteger(result[@"workspace_binding_revision"],
+                        9007199254740991ULL, &revision) ||
+      revision != [root[@"binding_revision"] unsignedLongLongValue]) {
+    return nil;
+  }
+  return @{
+    @"schema_version" : @2,
+    @"status" : @"discarded",
+    @"snapshot_id" : [expectedSnapshotId copy],
+    @"root" : root,
+    @"workspace_id" : [root[@"workspace_id"] copy],
+    @"workspace_binding_revision" : @(revision),
+  };
+}
+
+static NSDictionary *DSHPCV2ListRequest(id raw) {
+  NSDictionary *request = DSHPCDictionary(raw);
+  NSArray *keys = @[@"schema_version", @"root", @"query", @"cursor"];
+  uint64_t schema = 0;
+  NSString *query = DSHPCString(request[@"query"]);
+  NSData *queryData = [query dataUsingEncoding:NSUTF8StringEncoding
+                              allowLossyConversion:NO];
+  NSString *cursor = DSHPCCursor(request[@"cursor"], YES);
+  NSDictionary *root = DSHPCWorkspaceRoot(request[@"root"], YES);
+  if (!DSHPCExactKeys(request, keys) ||
+      !DSHPCSafeInteger(request[@"schema_version"], 1, &schema) || schema != 1 ||
+      root == nil || query == nil || queryData == nil || query.length > 256 ||
+      queryData.length > 256 ||
+      [query rangeOfCharacterFromSet:NSCharacterSet.controlCharacterSet]
+              .location != NSNotFound || cursor == nil) {
+    return nil;
+  }
+  return @{
+    @"schema_version" : @1,
+    @"root" : root,
+    @"query" : [query copy],
+    @"cursor" : cursor == (id)NSNull.null ? NSNull.null : [cursor copy],
+  };
+}
+
+static NSDictionary *DSHPCV2Selection(id raw) {
+  NSDictionary *selection = DSHPCDictionary(raw);
+  NSArray *keys = @[
+    @"schema_version", @"root", @"conversation_id", @"model_id", @"policy",
+    @"selected_paths"
+  ];
+  uint64_t schema = 0;
+  NSDictionary *root = DSHPCWorkspaceRoot(selection[@"root"], YES);
+  NSString *conversation = DSHPCCanonicalIdentifier(selection[@"conversation_id"]);
+  NSString *model = DSHPCString(selection[@"model_id"]);
+  NSArray *paths = DSHPCArray(selection[@"selected_paths"]);
+  if (!DSHPCExactKeys(selection, keys) ||
+      !DSHPCSafeInteger(selection[@"schema_version"], 2, &schema) || schema != 2 ||
+      root == nil || conversation == nil || ![DSHPCModels() containsObject:model] ||
+      ![selection[@"policy"] isEqual:@"chat-read-v1"] || paths == nil ||
+      paths.count > 5000) {
+    return nil;
+  }
+  NSMutableArray<NSString *> *normalized =
+      [NSMutableArray arrayWithCapacity:paths.count];
+  NSMutableSet<NSString *> *seen = [NSMutableSet setWithCapacity:paths.count];
+  for (id value in paths) {
+    NSString *path = DSHPCSafeRelativePath(value);
+    if (path == nil || [seen containsObject:path]) return nil;
+    [seen addObject:path];
+    [normalized addObject:path];
+  }
+  [normalized sortUsingSelector:@selector(compare:)];
+  return @{
+    @"schema_version" : @2,
+    @"root" : root,
+    @"conversation_id" : conversation,
+    @"model_id" : [model copy],
+    @"policy" : @"chat-read-v1",
+    @"selected_paths" : [normalized copy],
+  };
+}
+
+static NSDictionary *DSHPCV2SnapshotRequest(id raw) {
+  NSDictionary *request = DSHPCDictionary(raw);
+  NSArray *keys = @[@"schema_version", @"snapshot_id", @"root"];
+  uint64_t schema = 0;
+  NSString *snapshotId = DSHPCCanonicalIdentifier(request[@"snapshot_id"]);
+  NSDictionary *root = DSHPCWorkspaceRoot(request[@"root"], YES);
+  if (!DSHPCExactKeys(request, keys) ||
+      !DSHPCSafeInteger(request[@"schema_version"], 2, &schema) || schema != 2 ||
+      snapshotId == nil || root == nil) {
+    return nil;
+  }
+  return @{
+    @"schema_version" : @2,
+    @"snapshot_id" : snapshotId,
+    @"root" : root,
+  };
+}
+
+static NSDictionary *DSHPCV2VerifiedRequest(id raw) {
+  NSDictionary *request = DSHPCDictionary(raw);
+  NSArray *keys = @[
+    @"schema_version", @"snapshot_id", @"consent_receipt_id", @"root",
+    @"conversation_id", @"model_id", @"policy"
+  ];
+  uint64_t schema = 0;
+  NSString *snapshotId = DSHPCCanonicalIdentifier(request[@"snapshot_id"]);
+  NSString *consentId =
+      DSHPCCanonicalIdentifier(request[@"consent_receipt_id"]);
+  NSString *conversation =
+      DSHPCCanonicalIdentifier(request[@"conversation_id"]);
+  NSString *model = DSHPCString(request[@"model_id"]);
+  NSDictionary *root = DSHPCWorkspaceRoot(request[@"root"], YES);
+  if (!DSHPCExactKeys(request, keys) ||
+      !DSHPCSafeInteger(request[@"schema_version"], 2, &schema) || schema != 2 ||
+      snapshotId == nil || consentId == nil || conversation == nil ||
+      root == nil || ![DSHPCModels() containsObject:model] ||
+      ![request[@"policy"] isEqual:@"chat-read-v1"]) {
+    return nil;
+  }
+  return @{
+    @"schema_version" : @2,
+    @"snapshot_id" : snapshotId,
+    @"consent_receipt_id" : consentId,
+    @"root" : root,
+    @"conversation_id" : conversation,
+    @"model_id" : [model copy],
+    @"policy" : @"chat-read-v1",
   };
 }
 
@@ -794,6 +1237,162 @@ RCT_REMAP_METHOD(discardProjectContext,
   } projection:^id(id raw) {
     return [raw isEqual:@YES]
         ? @{@"schema_version": @1, @"status": @"discarded"} : nil;
+  } resolver:resolve rejecter:reject];
+}
+
+RCT_REMAP_METHOD(listCandidatesV2,
+                 listCandidatesV2Request:(id)requestValue
+                 resolver:(RCTPromiseResolveBlock)resolve
+                 rejecter:(RCTPromiseRejectBlock)reject) {
+  NSDictionary *request = nil;
+  @try {
+    request = DSHPCV2ListRequest(requestValue);
+  } @catch (__unused NSException *exception) {
+    DSHPCReject(reject, DSHPCNative);
+    return;
+  }
+  if (request == nil) {
+    DSHPCReject(reject, DSHPCRequestInvalid);
+    return;
+  }
+  NSDictionary *root = request[@"root"];
+  NSString *query = [request[@"query"] copy];
+  id cursor = request[@"cursor"] == NSNull.null ? nil : [request[@"cursor"] copy];
+  [self enqueueOperation:^id(NSError **error) {
+    return [self.service listCandidatesV2:@{
+      @"schema_version" : @1,
+      @"root" : root,
+      @"query" : query,
+      @"cursor" : cursor ?: NSNull.null,
+    } error:error];
+  } projection:^id(id raw) {
+    return DSHPCV2CandidatePage(raw, root);
+  } resolver:resolve rejecter:reject];
+}
+
+RCT_REMAP_METHOD(prepareCandidateV2,
+                 prepareCandidateV2Request:(id)selectionValue
+                 resolver:(RCTPromiseResolveBlock)resolve
+                 rejecter:(RCTPromiseRejectBlock)reject) {
+  NSDictionary *selection = nil;
+  @try {
+    selection = DSHPCV2Selection(selectionValue);
+  } @catch (__unused NSException *exception) {
+    DSHPCReject(reject, DSHPCNative);
+    return;
+  }
+  if (selection == nil) {
+    DSHPCReject(reject, DSHPCRequestInvalid);
+    return;
+  }
+  NSDictionary *root = selection[@"root"];
+  NSString *conversation = selection[@"conversation_id"];
+  NSString *model = selection[@"model_id"];
+  [self enqueueOperation:^id(NSError **error) {
+    return [self.service prepareCandidateV2:selection error:error];
+  } projection:^id(id raw) {
+    return DSHPCV2Manifest(raw, root, nil, conversation, model);
+  } resolver:resolve rejecter:reject];
+}
+
+RCT_REMAP_METHOD(confirmSnapshotV2,
+                 confirmSnapshotV2Request:(id)requestValue
+                 resolver:(RCTPromiseResolveBlock)resolve
+                 rejecter:(RCTPromiseRejectBlock)reject) {
+  NSDictionary *request = nil;
+  @try {
+    request = DSHPCV2SnapshotRequest(requestValue);
+  } @catch (__unused NSException *exception) {
+    DSHPCReject(reject, DSHPCNative);
+    return;
+  }
+  if (request == nil) {
+    DSHPCReject(reject, DSHPCRequestInvalid);
+    return;
+  }
+  NSDictionary *root = request[@"root"];
+  NSString *snapshotId = request[@"snapshot_id"];
+  [self enqueueOperation:^id(NSError **error) {
+    return [self.service confirmSnapshotV2:request error:error];
+  } projection:^id(id raw) {
+    return DSHPCV2Consent(raw, root, snapshotId);
+  } resolver:resolve rejecter:reject];
+}
+
+RCT_REMAP_METHOD(inspectSnapshotV2,
+                 inspectSnapshotV2Request:(id)requestValue
+                 resolver:(RCTPromiseResolveBlock)resolve
+                 rejecter:(RCTPromiseRejectBlock)reject) {
+  NSDictionary *request = nil;
+  @try {
+    request = DSHPCV2SnapshotRequest(requestValue);
+  } @catch (__unused NSException *exception) {
+    DSHPCReject(reject, DSHPCNative);
+    return;
+  }
+  if (request == nil) {
+    DSHPCReject(reject, DSHPCRequestInvalid);
+    return;
+  }
+  NSDictionary *root = request[@"root"];
+  NSString *snapshotId = request[@"snapshot_id"];
+  [self enqueueOperation:^id(NSError **error) {
+    return [self.service inspectSnapshotV2:request error:error];
+  } projection:^id(id raw) {
+    return DSHPCV2Inspection(raw, root, snapshotId);
+  } resolver:resolve rejecter:reject];
+}
+
+RCT_REMAP_METHOD(discardProjectContextV2,
+                 discardProjectContextV2Request:(id)requestValue
+                 resolver:(RCTPromiseResolveBlock)resolve
+                 rejecter:(RCTPromiseRejectBlock)reject) {
+  NSDictionary *request = nil;
+  @try {
+    request = DSHPCV2SnapshotRequest(requestValue);
+  } @catch (__unused NSException *exception) {
+    DSHPCReject(reject, DSHPCNative);
+    return;
+  }
+  if (request == nil) {
+    DSHPCReject(reject, DSHPCRequestInvalid);
+    return;
+  }
+  NSDictionary *root = request[@"root"];
+  [self enqueueOperation:^id(NSError **error) {
+    return [self.service discardSnapshotV2:request error:error];
+  } projection:^id(id raw) {
+    return DSHPCV2DiscardResult(raw, root, request[@"snapshot_id"]);
+  } resolver:resolve rejecter:reject];
+}
+
+RCT_REMAP_METHOD(verifiedSendProjectContextV2,
+                 verifiedSendProjectContextV2Request:(id)requestValue
+                 resolver:(RCTPromiseResolveBlock)resolve
+                 rejecter:(RCTPromiseRejectBlock)reject) {
+  NSDictionary *request = nil;
+  @try {
+    request = DSHPCV2VerifiedRequest(requestValue);
+  } @catch (__unused NSException *exception) {
+    DSHPCReject(reject, DSHPCNative);
+    return;
+  }
+  if (request == nil) {
+    DSHPCReject(reject, DSHPCRequestInvalid);
+    return;
+  }
+  NSDictionary *root = request[@"root"];
+  NSString *snapshotId = request[@"snapshot_id"];
+  [self enqueueOperation:^id(NSError **error) {
+    __block NSDictionary *receipt = nil;
+    NSData *envelope = [self.service verifiedEnvelopeV2:request
+                                                   receipt:&receipt
+                                                     error:error];
+    // The envelope is deliberately consumed inside native code. Only its
+    // redacted receipt is projected through React Native.
+    return envelope == nil ? nil : receipt;
+  } projection:^id(id raw) {
+    return DSHPCV2VerifiedReceipt(raw, root, snapshotId);
   } resolver:resolve rejecter:reject];
 }
 

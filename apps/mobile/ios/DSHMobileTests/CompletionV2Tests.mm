@@ -615,6 +615,114 @@ static NSData *DSHTestRequestBody(NSURLRequest *request) {
   XCTAssertNil(error);
 }
 
+- (void)testContentEncodedFunctionCallIsStrictlyProjectedAsToolCall {
+  NSString *encoded = @"{\"type\":\"function_call\",\"function\":\"write_file\",\"parameters\":{\"path\":\"proof.md\",\"content\":\"proof\"}}";
+  NSError *error = nil;
+  NSDictionary *parsed = DSHParseCompletionResponseSchema2(
+      [self providerSuccessWithFinish:@"tool_calls" text:encoded reasoning:nil
+                            toolCalls:nil],
+      @"deepseek-v4-flash", @"high", &error);
+  XCTAssertNotNil(parsed, @"%@", error);
+  XCTAssertNil(error);
+  XCTAssertEqualObjects(parsed[@"finish_reason"], @"tool_calls");
+  XCTAssertEqualObjects(parsed[@"text"], @"");
+  NSArray *expectedCalls = @[@{
+    @"id" : @"compat:resp_123",
+    @"name" : @"write_file",
+    @"arguments" : @"{\"content\":\"proof\",\"expected_revision\":null,\"path\":\"proof.md\"}",
+  }];
+  XCTAssertEqualObjects(parsed[@"tool_calls"], expectedCalls);
+
+  NSString *shortEncoded = @"{\"name\":\"write_file\",\"arguments\":{\"path\":\"proof.md\",\"content\":\"proof\"}}";
+  parsed = DSHParseCompletionResponseSchema2(
+      [self providerSuccessWithFinish:@"stop" text:shortEncoded reasoning:nil
+                            toolCalls:nil],
+      @"deepseek-v4-flash", @"high", &error);
+  XCTAssertEqualObjects(parsed[@"finish_reason"], @"tool_calls");
+  XCTAssertEqualObjects(parsed[@"tool_calls"], expectedCalls);
+
+  NSArray *nativeCalls = @[@{
+    @"id" : @"native-call", @"type" : @"function", @"index" : @0,
+    @"function" : @{
+      @"name" : @"write_file",
+      @"arguments" : @"{\"path\":\"proof.md\",\"content\":\"proof\"}",
+    },
+  }];
+  parsed = DSHParseCompletionResponseSchema2(
+      [self providerSuccessWithFinish:@"tool_calls" text:@"" reasoning:@"r"
+                            toolCalls:nativeCalls],
+      @"deepseek-v4-flash", @"high", &error);
+  XCTAssertEqualObjects(parsed[@"tool_calls"][0][@"arguments"],
+      @"{\"content\":\"proof\",\"expected_revision\":null,\"path\":\"proof.md\"}");
+  XCTAssertFalse([[(NSDictionary *)parsed[@"tool_calls"][0] allKeys]
+      containsObject:@"index"]);
+
+  for (NSDictionary *invalidCall in @[
+    @{
+      @"id" : @"wrong-index", @"type" : @"function", @"index" : @1,
+      @"function" : @{
+        @"name" : @"write_file", @"arguments" : @"{}",
+      },
+    },
+    @{
+      @"id" : @"fractional-index", @"type" : @"function", @"index" : @0.5,
+      @"function" : @{
+        @"name" : @"write_file", @"arguments" : @"{}",
+      },
+    },
+    @{
+      @"id" : @"extra-key", @"type" : @"function", @"index" : @0,
+      @"function" : @{
+        @"name" : @"write_file", @"arguments" : @"{}",
+      },
+      @"extra" : @YES,
+    },
+  ]) {
+    error = nil;
+    XCTAssertNil(DSHParseCompletionResponseSchema2(
+        [self providerSuccessWithFinish:@"tool_calls" text:@"" reasoning:@"r"
+                              toolCalls:@[invalidCall]],
+        @"deepseek-v4-flash", @"high", &error));
+    XCTAssertEqualObjects(error.localizedDescription,
+                          @"E_COMPLETION_TOOL_CALL_INVALID");
+  }
+
+  NSArray *extraNativeCalls = @[@{
+    @"id" : @"native-extra", @"type" : @"function",
+    @"function" : @{
+      @"name" : @"write_file",
+      @"arguments" : @"{\"path\":\"proof.md\",\"content\":\"proof\",\"extra\":true}",
+    },
+  }];
+  parsed = DSHParseCompletionResponseSchema2(
+      [self providerSuccessWithFinish:@"tool_calls" text:@"" reasoning:@"r"
+                            toolCalls:extraNativeCalls],
+      @"deepseek-v4-flash", @"high", &error);
+  XCTAssertEqualObjects(parsed[@"tool_calls"][0][@"arguments"],
+      @"{\"path\":\"proof.md\",\"content\":\"proof\",\"extra\":true}");
+
+  NSArray *malformedNativeCalls = @[@{
+    @"id" : @"native-malformed", @"type" : @"function",
+    @"function" : @{
+      @"name" : @"write_file", @"arguments" : @"{not-json",
+    },
+  }];
+  parsed = DSHParseCompletionResponseSchema2(
+      [self providerSuccessWithFinish:@"tool_calls" text:@"" reasoning:@"r"
+                            toolCalls:malformedNativeCalls],
+      @"deepseek-v4-flash", @"high", &error);
+  XCTAssertEqualObjects(parsed[@"tool_calls"][0][@"arguments"], @"{not-json");
+
+  NSString *extra = @"{\"type\":\"function_call\",\"function\":\"write_file\",\"parameters\":{},\"extra\":true}";
+  parsed = DSHParseCompletionResponseSchema2(
+      [self providerSuccessWithFinish:@"stop" text:extra reasoning:@""
+                            toolCalls:nil],
+      @"deepseek-v4-flash", @"high", &error);
+  XCTAssertEqualObjects(parsed[@"finish_reason"], @"stop");
+  XCTAssertEqual([parsed[@"tool_calls"] count], 0u);
+  XCTAssertEqualObjects(parsed[@"text"], extra);
+}
+
 - (void)testProviderResponseIdIsMandatoryAndStrict {
   NSArray *invalidIds = @[NSNull.null, @"", @"bad id", @"bad/value"];
   for (id identifier in invalidIds) {

@@ -137,7 +137,7 @@ function blockedBootstrapStore(
   };
 }
 
-describe('schema 8 workspace routing state', () => {
+describe('schema 9 workspace routing state', () => {
   test('migrates schema 7 workspace strings to pending bootstrap without inventing a revision', () => {
     const source = createChatStore({
       now: () => T0,
@@ -147,15 +147,19 @@ describe('schema 8 workspace routing state', () => {
     const payload = JSON.parse(source.serialize()) as Record<string, unknown>;
     payload.schema_version = 7;
     delete payload.workspace_authority_outbox;
+    delete payload.agent_transcript_cleanup_outbox;
+    delete payload.session_events;
+    delete payload.preferences;
     (payload.conversations as Array<Record<string, unknown>>).forEach(
       conversation => {
         delete conversation.workspace_binding;
         delete conversation.workspace_bootstrap_state;
+        delete conversation.agent_grants;
       },
     );
     const migrated = hydrateChatState(payload);
 
-    expect(CHAT_STATE_SCHEMA_VERSION).toBe(8);
+    expect(CHAT_STATE_SCHEMA_VERSION).toBe(9);
     expect(migrated.workspaceAuthorityOutbox).toEqual([]);
     expect(migrated.conversations['conversation-1']).toMatchObject({
       workspaceId: null,
@@ -343,11 +347,15 @@ describe('schema 8 workspace routing state', () => {
     const payload = JSON.parse(source.serialize()) as Record<string, unknown>;
     payload.schema_version = 7;
     delete payload.workspace_authority_outbox;
+    delete payload.agent_transcript_cleanup_outbox;
+    delete payload.session_events;
+    delete payload.preferences;
     (payload.conversations as Array<Record<string, unknown>>).forEach(
       conversation => {
         conversation.workspace_id = 'legacy-invalid';
         delete conversation.workspace_binding;
         delete conversation.workspace_bootstrap_state;
+        delete conversation.agent_grants;
       },
     );
     const migrated = hydrateChatState(payload);

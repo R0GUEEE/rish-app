@@ -16,6 +16,9 @@ import {
   type ThinkingMode,
   type ToolPermissionMode,
 } from './types';
+import { normalizeGitHttpsProxyUrl } from './gitProxy';
+
+export { isGitHttpsProxyUrl, normalizeGitHttpsProxyUrl } from './gitProxy';
 
 export const DEFAULT_MIRROR_URLS: Readonly<Record<MirrorCategory, string>> = {
   alpine: 'https://dl-cdn.alpinelinux.org/alpine/',
@@ -40,6 +43,7 @@ export const DEFAULT_APP_PREFERENCES: AppPreferences = Object.freeze({
   showReasoning: false,
   autoExpandTools: false,
   confirmDestructiveFileActions: true,
+  gitHttpsProxyUrl: null,
   mirrors: DEFAULT_MIRROR_PREFERENCES,
 });
 
@@ -196,6 +200,14 @@ export function preferencesReducer(
             action.payload.confirm,
           )
         : preferences;
+    case 'preferences/set-git-https-proxy-url': {
+      const candidate = action.payload.gitHttpsProxyUrl;
+      const normalized =
+        candidate === null ? null : normalizeGitHttpsProxyUrl(candidate);
+      return candidate === null || normalized !== null
+        ? setPreference(preferences, 'gitHttpsProxyUrl', normalized)
+        : preferences;
+    }
     case 'preferences/set-mirror': {
       const { category, enabled, baseUrl } = action.payload;
       const normalized = normalizeMirrorBaseUrl(baseUrl);
@@ -265,3 +277,7 @@ export const selectAutoExpandTools = (preferences: AppPreferences): boolean =>
 export const selectConfirmDestructiveFileActions = (
   preferences: AppPreferences,
 ): boolean => preferences.confirmDestructiveFileActions;
+
+export const selectGitHttpsProxyUrl = (
+  preferences: AppPreferences,
+): string | null => preferences.gitHttpsProxyUrl;

@@ -420,6 +420,17 @@ const enUS = {
   'settings.packageMirrors': 'Package mirrors',
   'settings.packageMirrors.description':
     'Configure Alpine, pip, and npm sources for the local rish guest.',
+  'settings.gitHttpsProxy': 'Git HTTPS proxy',
+  'settings.gitHttpsProxy.description':
+    'Use an explicit HTTP(S) proxy for Git clone and push.',
+  'settings.gitHttpsProxy.input': 'Git HTTPS proxy URL',
+  'settings.gitHttpsProxy.placeholder': 'http://127.0.0.1:1082',
+  'settings.gitHttpsProxy.hint':
+    'Shadowrocket example: http://127.0.0.1:1082. Include http:// or https:// and an explicit port. Leave empty for a direct connection.',
+  'settings.gitHttpsProxy.save': 'Save Git proxy',
+  'settings.gitHttpsProxy.clear': 'Clear Git proxy',
+  'settings.gitHttpsProxy.invalid':
+    'Enter http:// or https:// with a host and explicit port, without credentials, a path, query, fragment, or surrounding spaces.',
   'settings.section.execution': 'Execution',
   'settings.openRuntimeEvidence': 'Open runtime evidence',
   'settings.runtimeEvidence': 'Runtime evidence',
@@ -1072,6 +1083,17 @@ const zhCN: Readonly<Record<TranslationKey, string>> = {
   'settings.packageMirrors': '软件源镜像',
   'settings.packageMirrors.description':
     '配置本地 rish guest 使用的 Alpine、pip 和 npm 软件源。',
+  'settings.gitHttpsProxy': 'Git HTTPS 代理',
+  'settings.gitHttpsProxy.description':
+    '为 Git 克隆和推送指定 HTTP(S) 代理。',
+  'settings.gitHttpsProxy.input': 'Git HTTPS 代理地址',
+  'settings.gitHttpsProxy.placeholder': 'http://127.0.0.1:1082',
+  'settings.gitHttpsProxy.hint':
+    'Shadowrocket 示例：http://127.0.0.1:1082。必须包含 http:// 或 https:// 和明确端口；留空表示直连。',
+  'settings.gitHttpsProxy.save': '保存 Git 代理',
+  'settings.gitHttpsProxy.clear': '清除 Git 代理',
+  'settings.gitHttpsProxy.invalid':
+    '请输入包含主机和明确端口的 http:// 或 https:// 地址，且不能包含凭据、路径、查询参数、片段或首尾空格。',
   'settings.section.execution': '运行环境',
   'settings.openRuntimeEvidence': '打开运行证据',
   'settings.runtimeEvidence': '运行证据',
