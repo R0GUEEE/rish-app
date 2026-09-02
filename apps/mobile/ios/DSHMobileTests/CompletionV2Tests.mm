@@ -2,6 +2,8 @@
 #import <CommonCrypto/CommonDigest.h>
 #import <Security/Security.h>
 
+#include <sys/stat.h>
+
 // The host application keeps its symbol table for simulator builds, so the
 // completionV2 helpers resolve from the linked pod like every other native
 // symbol.
@@ -35,6 +37,8 @@
                          resolver:(void (^)(id result))resolve
                          rejecter:(void (^)(NSString *code, NSString *message,
                                             NSError *error))reject;
+- (NSURL *)resolvedSandboxRootURLForWorkspace:(NSURL *)workspace
+                                         error:(NSError **)error;
 @end
 
 @interface DSHTestLocalRuntimeModule : LocalRuntimeModule
@@ -170,6 +174,79 @@ static NSData *DSHTestRequestBody(NSURLRequest *request) {
 - (void)tearDown {
   [DSHCompletionURLProtocol reset];
   [super tearDown];
+}
+
+- (void)testSandboxRootResolutionReturnsPhysicalDirectoryForSymlinkAlias {
+  NSFileManager *manager = NSFileManager.defaultManager;
+  NSURL *root = [manager.temporaryDirectory
+      URLByAppendingPathComponent:NSUUID.UUID.UUIDString
+                      isDirectory:YES];
+  NSURL *target = [root URLByAppendingPathComponent:@"physical" isDirectory:YES];
+  NSURL *alias = [root URLByAppendingPathComponent:@"alias" isDirectory:YES];
+  NSError *error = nil;
+  XCTAssertTrue([manager createDirectoryAtURL:target
+                  withIntermediateDirectories:YES
+                                   attributes:nil
+                                        error:&error]);
+  XCTAssertNil(error);
+  XCTAssertTrue([manager createSymbolicLinkAtPath:alias.path
+                              withDestinationPath:target.path
+                                             error:&error]);
+  XCTAssertNil(error);
+
+  LocalRuntimeModule *module = [DSHTestLocalRuntimeModule new];
+  NSURL *resolved = [module resolvedSandboxRootURLForWorkspace:alias
+                                                          error:&error];
+  XCTAssertNotNil(resolved);
+  XCTAssertNil(error);
+  struct stat targetStat = {};
+  struct stat resolvedStat = {};
+  struct stat linkStat = {};
+  XCTAssertEqual(stat(target.fileSystemRepresentation, &targetStat), 0);
+  XCTAssertEqual(stat(resolved.fileSystemRepresentation, &resolvedStat), 0);
+  XCTAssertEqual(lstat(resolved.fileSystemRepresentation, &linkStat), 0);
+  XCTAssertEqual(targetStat.st_dev, resolvedStat.st_dev);
+  XCTAssertEqual(targetStat.st_ino, resolvedStat.st_ino);
+  XCTAssertFalse(S_ISLNK(linkStat.st_mode));
+  [manager removeItemAtURL:root error:nil];
+}
+
+- (void)testSandboxRootResolutionFailsClosedForMissingPath {
+  NSURL *missing = [NSFileManager.defaultManager.temporaryDirectory
+      URLByAppendingPathComponent:NSUUID.UUID.UUIDString
+                      isDirectory:YES];
+  NSError *error = nil;
+  LocalRuntimeModule *module = [DSHTestLocalRuntimeModule new];
+  XCTAssertNil([module resolvedSandboxRootURLForWorkspace:missing error:&error]);
+  XCTAssertEqualObjects(error.domain, @"LocalRuntime");
+  XCTAssertEqual(error.code, 1001);
+}
+
+- (void)testSandboxRootResolutionPreservesUnicodeFilesystemIdentity {
+  NSFileManager *manager = NSFileManager.defaultManager;
+  NSURL *root = [manager.temporaryDirectory
+      URLByAppendingPathComponent:NSUUID.UUID.UUIDString
+                      isDirectory:YES];
+  NSURL *workspace = [root URLByAppendingPathComponent:@"测试-é-🚀"
+                                           isDirectory:YES];
+  NSError *error = nil;
+  XCTAssertTrue([manager createDirectoryAtURL:workspace
+                  withIntermediateDirectories:YES
+                                   attributes:nil
+                                        error:&error]);
+  XCTAssertNil(error);
+  LocalRuntimeModule *module = [DSHTestLocalRuntimeModule new];
+  NSURL *resolved = [module resolvedSandboxRootURLForWorkspace:workspace
+                                                          error:&error];
+  XCTAssertNotNil(resolved);
+  XCTAssertNil(error);
+  struct stat workspaceStat = {};
+  struct stat resolvedStat = {};
+  XCTAssertEqual(stat(workspace.fileSystemRepresentation, &workspaceStat), 0);
+  XCTAssertEqual(stat(resolved.fileSystemRepresentation, &resolvedStat), 0);
+  XCTAssertEqual(workspaceStat.st_dev, resolvedStat.st_dev);
+  XCTAssertEqual(workspaceStat.st_ino, resolvedStat.st_ino);
+  [manager removeItemAtURL:root error:nil];
 }
 
 - (NSDictionary *)validSchema2Tool {

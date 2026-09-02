@@ -18,7 +18,9 @@
 #include <arpa/inet.h>
 #include <errno.h>
 #include <fcntl.h>
+#include <limits.h>
 #include <math.h>
+#include <stdlib.h>
 #include <string.h>
 #include <netinet/in.h>
 #include <sys/select.h>
@@ -1231,6 +1233,30 @@ RCT_EXPORT_MODULE(LocalRuntime)
 #endif
 }
 
+- (NSURL *)resolvedSandboxRootURLForWorkspace:(NSURL *)workspace
+                                         error:(NSError **)error {
+  // Foundation's path helper can strip the physical /private prefix and hand
+  // the applet /var/mobile again, which is itself a symlink. Resolve exactly
+  // once through realpath(3) and fail closed if the physical path is missing.
+  char physicalPath[PATH_MAX] = {};
+  if (realpath(workspace.fileSystemRepresentation, physicalPath) == nullptr) {
+    if (error != nil) {
+      *error = DSHLocalRuntimeError(1001, @"Sandbox root resolution failed");
+    }
+    return nil;
+  }
+  NSString *resolvedPath = [NSFileManager.defaultManager
+      stringWithFileSystemRepresentation:physicalPath
+                                  length:strlen(physicalPath)];
+  if (resolvedPath.length == 0) {
+    if (error != nil) {
+      *error = DSHLocalRuntimeError(1001, @"Sandbox root resolution failed");
+    }
+    return nil;
+  }
+  return [NSURL fileURLWithPath:resolvedPath isDirectory:YES];
+}
+
 - (NSDictionary *)runRishProbe:(NSError **)error {
   NSURL *support = [self applicationSupportURL:error];
   if (support == nil) return nil;
@@ -1241,13 +1267,9 @@ RCT_EXPORT_MODULE(LocalRuntime)
                                                       error:error]) {
     return nil;
   }
-
-  // The rish applet rejects sandbox roots whose path traverses a symbolic
-  // link. On hardware the container's visible path goes through /var (a
-  // symlink to /private/var), so hand the applet the fully resolved
-  // physical path instead of the visible one.
-  NSURL *resolvedWorkspace = [NSURL fileURLWithPath:
-      [workspace.path stringByResolvingSymlinksInPath] isDirectory:YES];
+  NSURL *resolvedWorkspace = [self resolvedSandboxRootURLForWorkspace:workspace
+                                                                  error:error];
+  if (resolvedWorkspace == nil) return nil;
 
   NSData *stdinData = [@"dsh-mobile-local-proof" dataUsingEncoding:NSUTF8StringEncoding];
   NSMutableArray<NSNumber *> *stdinBytes = [NSMutableArray arrayWithCapacity:stdinData.length];
