@@ -1622,7 +1622,9 @@ describe('project Agent completion controller', () => {
         thinking_mode: request.thinking_mode,
         finish_reason: final ? 'stop' : 'tool_calls',
         latency_ms: 1,
-        visible_history_sha256: request.visible_history_sha256,
+        // Native separately proves the controller HJ digest and the provider
+        // transport body digest; exercise the intentionally distinct values.
+        visible_history_sha256: 'f'.repeat(64),
         model_input_sha256: SHA,
         request_body_sha256: SHA,
         project_context_receipt: request.transport_schema_version === 3 ? {
@@ -2128,7 +2130,12 @@ describe('project Agent completion controller', () => {
       }
     }
     expect(store.getState().agentTranscriptCleanupOutbox).toEqual([]);
-    expect(store.getState().conversations[conversationId]?.attempts[0]).toMatchObject({ status: 'completed', agent: { phase: 'final_response' } });
+    const completedAttempt = store.getState().conversations[conversationId]?.attempts[0];
+    expect(completedAttempt).toMatchObject({ status: 'completed', agent: { phase: 'final_response' } });
+    expect(completedAttempt?.visibleHistorySha256).not.toBe('f'.repeat(64));
+    expect(completedAttempt?.rounds.every(
+      round => round.visibleHistorySha256 === 'f'.repeat(64),
+    )).toBe(true);
   });
 
   test('carries the persisted batch authority into a second write batch', async () => {

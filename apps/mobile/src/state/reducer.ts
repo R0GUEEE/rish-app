@@ -1223,7 +1223,8 @@ function receiptIsValid(
     isSha256Digest(receipt.visibleHistorySha256) &&
     isSha256Digest(receipt.modelInputSha256) &&
     isSha256Digest(receipt.requestBodySha256) &&
-    (attempt.visibleHistorySha256 === null ||
+    ((attempt.agent !== undefined && attempt.agent !== null) ||
+      attempt.visibleHistorySha256 === null ||
       attempt.visibleHistorySha256 === receipt.visibleHistorySha256) &&
     contextMatches
   );
@@ -2711,6 +2712,10 @@ function applyFinalAgentCheckpoint(
   if (nextAgentAttempt === null) return state;
   const nextAttempt: TurnAttemptV1 = {
     ...nextAgentAttempt,
+    visibleHistorySha256:
+      isControllerPreflight(evidence) && evidence.kind === 'begin_round'
+        ? (attempt.visibleHistorySha256 ?? evidence.visible_history_sha256)
+        : attempt.visibleHistorySha256,
     journalRevision: (attempt.journalRevision ?? 0) + 1,
     agent: copyAgentJournalV3(payload.journal),
   };
@@ -4541,10 +4546,10 @@ function agentOuterAttemptCheckpoint(
     status,
     activeRound,
     rounds,
-    visibleHistorySha256:
-      roundReceipt === undefined
-        ? attempt.visibleHistorySha256
-        : roundReceipt.visibleHistorySha256,
+    // Agent attempts freeze the controller's HJ(visible-history) at the first
+    // begin-round checkpoint. Provider receipts carry a distinct transport
+    // body digest and must never replace that controller authority.
+    visibleHistorySha256: attempt.visibleHistorySha256,
     assistantMessageId: null,
     failureCode,
     updatedAt: laterTimestamp(attempt.updatedAt, at),

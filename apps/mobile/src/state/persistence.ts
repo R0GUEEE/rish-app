@@ -4764,7 +4764,8 @@ function parseConversation(
       }
       if (
         attempt.rounds.length === 0 &&
-        attempt.visibleHistorySha256 !== null
+        attempt.visibleHistorySha256 !== null &&
+        (attempt.agent === undefined || attempt.agent === null)
       ) {
         const hasDigestProvenance =
           attemptIndexValue > 0 &&
@@ -4868,7 +4869,8 @@ function parseConversation(
         receipt.requestedModel !== attempt.modelId ||
         receipt.model !== attempt.modelId ||
         receipt.thinkingMode !== attempt.thinkingMode ||
-        receipt.visibleHistorySha256 !== attempt.visibleHistorySha256 ||
+        ((attempt.agent === undefined || attempt.agent === null) &&
+          receipt.visibleHistorySha256 !== attempt.visibleHistorySha256) ||
         (binding === null
           ? receipt.transportSchemaVersion !== 2 || projectReceipt !== null
           : receipt.transportSchemaVersion !== 3 ||
