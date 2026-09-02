@@ -2549,7 +2549,19 @@ static BOOL DSHSessionValidateEventCorrelations(
       continue;
     }
     if (event[@"call_id"] == NSNull.null) return NO;
-    if (journalCall == nil && previous == nil) return NO;
+    BOOL historicalEvent = NO;
+    if (journalCall == nil && previous == nil && roundIndex != nil &&
+        journal != nil && [journal[@"schema_version"] isEqual:@3] &&
+        journalRoundIndex != nil &&
+        roundIndex.unsignedIntegerValue < journalRoundIndex.unsignedIntegerValue) {
+      for (NSDictionary *round in attempt[@"rounds"]) {
+        if ([round[@"round_index"] isEqual:roundIndex]) {
+          historicalEvent = YES;
+          break;
+        }
+      }
+    }
+    if (journalCall == nil && previous == nil && !historicalEvent) return NO;
     if (journalCall != nil && journalRoundIndex != nil &&
         (roundIndex == nil ||
          roundIndex.unsignedIntegerValue != journalRoundIndex.unsignedIntegerValue)) {
@@ -2568,6 +2580,11 @@ static BOOL DSHSessionValidateEventCorrelations(
     if (event[@"safe_summary_key"] != NSNull.null && knownSummary != nil &&
         ![event[@"safe_summary_key"] isEqual:knownSummary]) return NO;
     if (journalCall != nil && ![kind isEqual:@"tool_call"] &&
+        !([kind isEqual:@"approval"] &&
+          event[@"approval_reference"] == NSNull.null) &&
+        ![event[@"approval_reference"] isEqual:knownApproval]) return NO;
+    if (journalCall == nil && previous != nil &&
+        ![kind isEqual:@"tool_call"] &&
         ![event[@"approval_reference"] isEqual:knownApproval]) return NO;
     if ([kind isEqual:@"tool_call"]) {
       if (event[@"arguments_sha256"] == NSNull.null ||
@@ -2577,13 +2594,21 @@ static BOOL DSHSessionValidateEventCorrelations(
           (![event[@"status"] isEqual:@"waiting"] &&
            ![event[@"status"] isEqual:@"approval"] &&
            ![event[@"status"] isEqual:@"running"])) return NO;
-      eventCalls[eventCallKey] = @{
-        @"attempt_id" : attemptId,
-        @"round_index" : event[@"round_index"],
-        @"safe_summary_key" : event[@"safe_summary_key"],
-        @"arguments_sha256" : event[@"arguments_sha256"],
-        @"approval_reference" : NSNull.null,
-      };
+      NSMutableDictionary *row = previous != nil
+          ? [previous mutableCopy] : [NSMutableDictionary dictionaryWithDictionary:@{
+              @"attempt_id" : attemptId,
+              @"round_index" : event[@"round_index"],
+            }];
+      row[@"safe_summary_key"] = event[@"safe_summary_key"];
+      row[@"arguments_sha256"] = event[@"arguments_sha256"];
+      // A repeated presentation event must not erase approval authority
+      // established earlier in the historical call chain.
+      id approvalAuthority = previous[@"approval_reference"];
+      if (approvalAuthority == nil || approvalAuthority == NSNull.null) {
+        approvalAuthority = journalCall[@"approval_reference"];
+      }
+      row[@"approval_reference"] = approvalAuthority ?: NSNull.null;
+      eventCalls[eventCallKey] = [row copy];
       continue;
     }
     if ([kind isEqual:@"approval"]) {

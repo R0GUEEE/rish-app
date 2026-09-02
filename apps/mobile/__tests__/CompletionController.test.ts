@@ -2116,25 +2116,35 @@ describe('project Agent completion controller', () => {
     const beginRoundCommit = roundCommits.find(
       entry => entry.kind === 'begin_round',
     )?.commit;
+    const nextRoundCommit = roundCommits.filter(
+      entry => entry.kind === 'begin_round',
+    )[1]?.commit;
     const batchCommit = roundCommitByOperationId.get(batchEvidence.operation_id);
     expect(beginRoundCommit).toHaveBeenCalledTimes(1);
+    expect(nextRoundCommit).toHaveBeenCalledTimes(1);
     expect(completeRoundCommit).toHaveBeenCalledTimes(1);
     expect(batchCommit).toHaveBeenCalledTimes(1);
     expect(completeRoundCommit!.mock.results[0]?.value).toBe(true);
     expect(batchCommit!.mock.results[0]?.value).toBe(true);
     const completeRoundProof = completeRoundCommit!.mock.calls[0]?.[0];
     const beginRoundProof = beginRoundCommit!.mock.calls[0]?.[0];
+    const nextRoundProof = nextRoundCommit!.mock.calls[0]?.[0];
     const batchProof = batchCommit!.mock.calls[0]?.[0];
     expect(committedSnapshots).toContain(completeRoundProof);
     expect(committedSnapshots).toContain(batchProof);
+    expect(committedSnapshots).toContain(nextRoundProof);
     const beginSession = committedSessions.find(
       entry => entry.snapshot === beginRoundProof,
     )?.session;
     const completeSession = committedSessions.find(
       entry => entry.snapshot === completeRoundProof,
     )?.session;
+    const nextRoundSession = committedSessions.find(
+      entry => entry.snapshot === nextRoundProof,
+    )?.session;
     expect(beginSession).toBeDefined();
     expect(completeSession).toBeDefined();
+    expect(nextRoundSession).toBeDefined();
     const fixtures = nodePath.resolve(
       __dirname,
       '../ios/DSHMobileTests/Fixtures',
@@ -2145,6 +2155,10 @@ describe('project Agent completion controller', () => {
     ));
     expect(`${completeSession}\n`).toBe(nodeFs.readFileSync(
       nodePath.resolve(fixtures, 'agent-first-round-complete-session.json'),
+      'utf8',
+    ));
+    expect(`${nextRoundSession}\n`).toBe(nodeFs.readFileSync(
+      nodePath.resolve(fixtures, 'agent-next-round-after-tool-session.json'),
       'utf8',
     ));
     expect(batchRequest.committed_checkpoint).toMatchObject({

@@ -624,6 +624,27 @@ static NSString *const DSHSessionTestOperationB =
   return [value isKindOfClass:NSDictionary.class] ? value : nil;
 }
 
+- (NSMutableDictionary *)mutableJSONCopyOfDictionary:(NSDictionary *)source {
+  NSError *error = nil;
+  NSData *data = [NSJSONSerialization dataWithJSONObject:source
+                                                 options:0
+                                                   error:&error];
+  XCTAssertNotNil(data);
+  XCTAssertNil(error);
+  id value = data == nil ? nil : [NSJSONSerialization
+      JSONObjectWithData:data
+                  options:NSJSONReadingMutableContainers
+                    error:&error];
+  XCTAssertTrue([value isKindOfClass:NSMutableDictionary.class]);
+  XCTAssertNil(error);
+  return [value isKindOfClass:NSMutableDictionary.class] ? value : nil;
+}
+
+- (NSMutableDictionary *)mutableSharedFixtureNamed:(NSString *)name {
+  NSDictionary *fixture = [self sharedFixtureNamed:name];
+  return fixture == nil ? nil : [self mutableJSONCopyOfDictionary:fixture];
+}
+
 - (id)objectByReplacingCanonicalMilliseconds:(id)object
                                   milliseconds:(NSString *)milliseconds {
   if ([object isKindOfClass:NSString.class] &&
@@ -1735,6 +1756,66 @@ static NSString *const DSHSessionTestOperationB =
   XCTAssertEqual(error.code, DSHSessionSnapshotStoreErrorInvalidArgument);
 }
 
+- (void)testRepeatedToolCallFallsBackFromNullPreviousApprovalToJournalAuthority {
+  NSMutableDictionary *candidate =
+      [self mutableJSONCopyOfDictionary:[self candidateWithAgentToolEvent]];
+  NSMutableDictionary *conversation = candidate[@"conversations"][0];
+  NSMutableDictionary *attempt = conversation[@"attempts"][0];
+  NSMutableDictionary *journal = attempt[@"agent"];
+  NSMutableDictionary *root = journal[@"root"];
+  root[@"capabilities"] = @[ @"file_read", @"file_write" ];
+  NSMutableDictionary *call = journal[@"batch"][0];
+  NSString *approval = @"abababab-abab-4bab-8bab-abababababab";
+  NSString *resultDigest =
+      @"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
+  call[@"name"] = @"write_file";
+  call[@"safe_summary_key"] = @"agent.write_file";
+  call[@"access"] = @"conversation_confirm";
+  call[@"approval_token"] = @"bound-approval-token";
+  call[@"approval_decision"] = @"allow_once";
+  call[@"approval_reference"] = approval;
+  call[@"native_row_revision"] = @1;
+  call[@"receipt"] = @{
+    @"schema_version" : @1,
+    @"call_id" : call[@"call_id"],
+    @"name" : call[@"name"],
+    @"arguments_sha256" : call[@"arguments_sha256"],
+    @"result_sha256" : resultDigest,
+    @"result_bytes" : @1,
+    @"truncated" : @NO,
+    @"duration_ms" : @1,
+    @"outcome" : @"ok",
+    @"failure_code" : NSNull.null,
+    @"approval_reference" : approval,
+  };
+  NSMutableDictionary *presentation = candidate[@"session_events"][0];
+  presentation[@"safe_summary_key"] = @"agent.write_file";
+  NSMutableDictionary *repeatedPresentation = [presentation mutableCopy];
+  repeatedPresentation[@"event_id"] =
+      @"77777777-7777-4777-8777-777777777777";
+  repeatedPresentation[@"seq"] = @1;
+  repeatedPresentation[@"status"] = @"running";
+  NSMutableDictionary *result = [presentation mutableCopy];
+  result[@"event_id"] = @"88888888-8888-4888-8888-888888888888";
+  result[@"seq"] = @2;
+  result[@"kind"] = @"tool_result";
+  result[@"status"] = @"ok";
+  result[@"result_sha256"] = resultDigest;
+  result[@"approval_reference"] = approval;
+  candidate[@"session_events"] = @[
+    presentation,
+    repeatedPresentation,
+    result,
+  ];
+
+  NSError *error = nil;
+  NSDictionary *commit = [self casWithOperation:DSHSessionTestOperationA
+      expected:@{ @"schema_version" : @1, @"kind" : @"missing" }
+      candidate:candidate error:&error];
+  XCTAssertNil(error);
+  XCTAssertEqualObjects(commit[@"status"], @"committed");
+}
+
 - (void)testAgentAttemptAcceptsFrozenVisibleHistoryBeforeFirstRound {
   NSError *error = nil;
   NSDictionary *result = [self casWithOperation:DSHSessionTestOperationA
@@ -1796,6 +1877,78 @@ static NSString *const DSHSessionTestOperationB =
       candidate:candidate error:&error];
   XCTAssertNil(error);
   XCTAssertEqualObjects(result[@"status"], @"committed");
+}
+
+- (void)testSharedJSNextRoundAfterToolFixtureCommitsThroughNativeStore {
+  NSDictionary *candidate =
+      [self sharedFixtureNamed:@"agent-next-round-after-tool-session"];
+  XCTAssertNotNil(candidate);
+  if (candidate == nil) return;
+  NSError *error = nil;
+  NSDictionary *result = [self casWithOperation:DSHSessionTestOperationA
+      expected:@{ @"schema_version" : @1, @"kind" : @"missing" }
+      candidate:candidate error:&error];
+  XCTAssertNil(error);
+  XCTAssertEqualObjects(result[@"status"], @"committed");
+}
+
+- (void)testHistoricalToolEventRejectsRoundMissingFromAttemptReceipts {
+  NSMutableDictionary *candidate =
+      [self mutableSharedFixtureNamed:@"agent-next-round-after-tool-session"];
+  XCTAssertNotNil(candidate);
+  if (candidate == nil) return;
+  for (NSMutableDictionary *event in candidate[@"session_events"]) {
+    if ([event[@"kind"] isEqual:@"approval"] &&
+        [event[@"call_id"] isEqual:@"write-call"]) {
+      event[@"round_index"] = @2;
+      break;
+    }
+  }
+  NSError *error = nil;
+  XCTAssertNil(([self casWithOperation:DSHSessionTestOperationA
+      expected:@{ @"schema_version" : @1, @"kind" : @"missing" }
+      candidate:candidate error:&error]));
+  XCTAssertEqual(error.code, DSHSessionSnapshotStoreErrorInvalidArgument);
+}
+
+- (void)testHistoricalToolResultRejectsDigestMismatchAfterToolCallReplay {
+  NSMutableDictionary *candidate =
+      [self mutableSharedFixtureNamed:@"agent-next-round-after-tool-session"];
+  XCTAssertNotNil(candidate);
+  if (candidate == nil) return;
+  for (NSMutableDictionary *event in candidate[@"session_events"]) {
+    if ([event[@"kind"] isEqual:@"tool_result"] &&
+        [event[@"call_id"] isEqual:@"write-call"]) {
+      event[@"arguments_sha256"] =
+          @"4444444444444444444444444444444444444444444444444444444444444444";
+      break;
+    }
+  }
+  NSError *error = nil;
+  XCTAssertNil(([self casWithOperation:DSHSessionTestOperationA
+      expected:@{ @"schema_version" : @1, @"kind" : @"missing" }
+      candidate:candidate error:&error]));
+  XCTAssertEqual(error.code, DSHSessionSnapshotStoreErrorInvalidArgument);
+}
+
+- (void)testHistoricalToolResultRejectsApprovalMismatchAfterToolCallReplay {
+  NSMutableDictionary *candidate =
+      [self mutableSharedFixtureNamed:@"agent-next-round-after-tool-session"];
+  XCTAssertNotNil(candidate);
+  if (candidate == nil) return;
+  for (NSMutableDictionary *event in candidate[@"session_events"]) {
+    if ([event[@"kind"] isEqual:@"tool_result"] &&
+        [event[@"call_id"] isEqual:@"write-call"]) {
+      event[@"approval_reference"] =
+          @"abababab-abab-4bab-8bab-abababababab";
+      break;
+    }
+  }
+  NSError *error = nil;
+  XCTAssertNil(([self casWithOperation:DSHSessionTestOperationA
+      expected:@{ @"schema_version" : @1, @"kind" : @"missing" }
+      candidate:candidate error:&error]));
+  XCTAssertEqual(error.code, DSHSessionSnapshotStoreErrorInvalidArgument);
 }
 
 - (void)testSchema8HydrateCanPersistExactCurrentAgentV3Shape {
