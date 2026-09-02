@@ -570,11 +570,14 @@ static NSDictionary *DSHAgentBatchConversationGrant(
                 [raw[@"name"] isEqualToString:@"read_file"] ||
                 [raw[@"name"] isEqualToString:@"write_file"])
                 ? @"E_AGENT_BAD_PATH" : @"E_AGENT_BAD_ARGUMENTS")
-            : (code == DSHAgentNativeStoreErrorOwnerLost
-                ? @"E_AGENT_ROOT_STALE" : @"E_AGENT_CAPABILITY");
+            : (code == DSHAgentNativeStoreErrorConflict
+                ? @"E_AGENT_CONFLICT"
+                : (code == DSHAgentNativeStoreErrorOwnerLost
+                    ? @"E_AGENT_ROOT_STALE" : @"E_AGENT_CAPABILITY"));
         return DSHAgentBatchCommitRejected(
             self.wal, request, started, failure, mutationBatch,
-            [failure isEqualToString:@"E_AGENT_ROOT_STALE"]
+            ([failure isEqualToString:@"E_AGENT_CONFLICT"] ||
+             [failure isEqualToString:@"E_AGENT_ROOT_STALE"])
                 ? @"requery" : @"none", error);
       }
     }

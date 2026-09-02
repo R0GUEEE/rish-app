@@ -170,12 +170,17 @@
 
 @interface AgentEffectsWorkspaceExecutor : DSHAgentWorkspaceToolExecutor
 @property(nonatomic) NSUInteger effectCount;
+@property(nonatomic) DSHAgentNativeStoreErrorCode prepareFailureCode;
 @end
 
 @implementation AgentEffectsWorkspaceExecutor
 - (NSDictionary *)prepareToolNamed:(NSString *)name arguments:(NSDictionary *)arguments
                                root:(NSDictionary *)root error:(NSError **)error {
   (void)root;
+  if (self.prepareFailureCode != 0) {
+    DSHSetAgentNativeStoreError(error, self.prepareFailureCode);
+    return nil;
+  }
   if ([name isEqualToString:@"write_file"]) {
     NSData *path = [arguments[@"path"] dataUsingEncoding:NSUTF8StringEncoding];
     NSData *content = [arguments[@"content"] dataUsingEncoding:NSUTF8StringEncoding];
@@ -822,6 +827,83 @@
   XCTAssertEqualObjects(snapshot[@"batches"][0][@"kind"], @"read_only_batch");
 }
 
+- (void)testBatchAuthorityFollowsLatestCommittedBatchWithoutAssumingMonotonicity {
+  NSDictionary *root = [self projectRootWithCapabilities:@[
+    @"file_read", @"file_write",
+  ]];
+  NSDictionary *transcript = [self transcriptForRoot:root];
+  NSDictionary *policy = [self policyWithBatch:32768 attempt:65536];
+  NSError *error = nil;
+
+  NSMutableDictionary *first = [[self batchRequestWithRoot:root
+      transcript:transcript
+      calls:@[[self writeCallAtIndex:0 path:@"first.txt" content:@"hello"]]
+      policy:policy roundIndex:0] mutableCopy];
+  NSDictionary *firstResult = [self.ledger
+      prepareAgentToolBatchWithRequest:first error:&error];
+  XCTAssertNil(error);
+  XCTAssertEqualObjects(firstResult[@"status"], @"prepared");
+  XCTAssertEqualObjects(firstResult[@"batch_kind"], @"write_batch");
+  XCTAssertEqualObjects(firstResult[@"batch_revision"], @1);
+  XCTAssertEqualObjects(firstResult[@"reserved_write_bytes"], @5);
+
+  NSDictionary *readCall = [self readCallAtIndex:0 name:@"read_file"
+      arguments:@"{\"path\":\"first.txt\"}"
+      precondition:@{ @"schema_version" : @1, @"kind" : @"read_file",
+                      @"source_revision" : @"r1" }];
+  NSMutableDictionary *second = [[self batchRequestWithRoot:root
+      transcript:transcript calls:@[readCall] policy:policy roundIndex:1]
+      mutableCopy];
+  second[@"round_id"] = @"55555555-5555-4555-8555-555555555555";
+  second[@"round_revision"] = @7;
+  second[@"expected_reserved_write_bytes"] = @5;
+
+  NSMutableDictionary *stale = [second mutableCopy];
+  stale[@"expected_batch_revision"] = @0;
+  XCTAssertNil([self.ledger prepareAgentToolBatchWithRequest:stale error:&error]);
+  XCTAssertEqual(error.code, DSHAgentNativeStoreErrorConflict);
+  NSDictionary *afterStale = [self.wal snapshotWithError:nil];
+  XCTAssertEqual([afterStale[@"batches"] count], 1U);
+  XCTAssertEqual([afterStale[@"ledger"] count], 1U);
+
+  error = nil;
+  NSMutableDictionary *wrong = [second mutableCopy];
+  wrong[@"expected_batch_revision"] = @2;
+  XCTAssertNil([self.ledger prepareAgentToolBatchWithRequest:wrong error:&error]);
+  XCTAssertEqual(error.code, DSHAgentNativeStoreErrorConflict);
+  NSDictionary *afterWrong = [self.wal snapshotWithError:nil];
+  XCTAssertEqual([afterWrong[@"batches"] count], 1U);
+  XCTAssertEqual([afterWrong[@"ledger"] count], 1U);
+
+  error = nil;
+  second[@"expected_batch_revision"] = @1;
+  NSDictionary *secondResult = [self.ledger
+      prepareAgentToolBatchWithRequest:second error:&error];
+  XCTAssertNil(error);
+  XCTAssertEqualObjects(secondResult[@"status"], @"prepared");
+  XCTAssertEqualObjects(secondResult[@"batch_kind"], @"read_only_batch");
+  XCTAssertEqualObjects(secondResult[@"batch_revision"], @7);
+  XCTAssertEqualObjects(secondResult[@"reserved_write_bytes"], @5);
+
+  // The next mutation consumes the latest opaque authority (7), but its own
+  // reservation revision is 2. This intentionally demonstrates why max() or
+  // an increment assumption would reject a valid later round.
+  NSMutableDictionary *third = [[self batchRequestWithRoot:root
+      transcript:transcript
+      calls:@[[self writeCallAtIndex:0 path:@"second.txt" content:@"world"]]
+      policy:policy roundIndex:2] mutableCopy];
+  third[@"round_id"] = @"66666666-6666-4666-8666-666666666666";
+  third[@"expected_batch_revision"] = @7;
+  third[@"expected_reserved_write_bytes"] = @5;
+  NSDictionary *thirdResult = [self.ledger
+      prepareAgentToolBatchWithRequest:third error:&error];
+  XCTAssertNil(error);
+  XCTAssertEqualObjects(thirdResult[@"status"], @"prepared");
+  XCTAssertEqualObjects(thirdResult[@"batch_kind"], @"write_batch");
+  XCTAssertEqualObjects(thirdResult[@"batch_revision"], @2);
+  XCTAssertEqualObjects(thirdResult[@"reserved_write_bytes"], @10);
+}
+
 - (NSDictionary *)writeCallAtIndex:(NSUInteger)index
                                path:(NSString *)path
                             content:(NSString *)content {
@@ -1443,6 +1525,60 @@
   XCTAssertEqualObjects(operation[@"state"], @"rejected");
 }
 
+- (void)testExistingFileWithAbsentWritePreconditionIsARequeryableConflict {
+  NSDictionary *rawWrite = @{
+    @"schema_version" : @1,
+    @"call_id" : @"write-existing-call",
+    @"name" : @"write_file",
+    @"arguments_json" :
+        @"{\"content\":\"provider smoke 0903\",\"expected_revision\":null,\"path\":\"SMOKE-1.md\"}",
+  };
+  NSDictionary *fixture = [self serviceFixtureForRawCalls:@[rawWrite]];
+  AgentEffectsWorkspaceExecutor *workspace = fixture[@"workspace_executor"];
+  // The concrete workspace executor returns Conflict for this exact shape
+  // when SMOKE-1.md already exists. Exercise the batch-service translation
+  // without weakening any of its authority or transcript checks.
+  workspace.prepareFailureCode = DSHAgentNativeStoreErrorConflict;
+
+  NSError *error = nil;
+  NSDictionary *result = [fixture[@"batch_service"]
+      prepareAgentToolBatchWithRequest:fixture[@"batch_request"] error:&error];
+
+  XCTAssertNil(error);
+  XCTAssertEqualObjects(result[@"status"], @"rejected");
+  XCTAssertEqualObjects(result[@"failure_code"], @"E_AGENT_CONFLICT");
+  XCTAssertEqualObjects(result[@"retry_advice"], @"requery");
+  XCTAssertEqualObjects(result[@"effect_gate"], @"closed");
+  XCTAssertEqualObjects(result[@"effect_dispatched"], @NO);
+  NSDictionary *state = [self.wal snapshotWithError:&error];
+  XCTAssertNil(error);
+  XCTAssertEqual([state[@"batches"] count], 0U);
+  XCTAssertEqual([state[@"ledger"] count], 0U);
+}
+
+- (void)testWorkspaceUnavailablePreflightRetainsCapabilityRejection {
+  NSDictionary *rawRead = @{
+    @"schema_version" : @1,
+    @"call_id" : @"read-unavailable-call",
+    @"name" : @"read_file",
+    @"arguments_json" : @"{\"path\":\"README.md\"}",
+  };
+  NSDictionary *fixture = [self serviceFixtureForRawCalls:@[rawRead]];
+  AgentEffectsWorkspaceExecutor *workspace = fixture[@"workspace_executor"];
+  workspace.prepareFailureCode = DSHAgentNativeStoreErrorUnavailable;
+
+  NSError *error = nil;
+  NSDictionary *result = [fixture[@"batch_service"]
+      prepareAgentToolBatchWithRequest:fixture[@"batch_request"] error:&error];
+
+  XCTAssertNil(error);
+  XCTAssertEqualObjects(result[@"status"], @"rejected");
+  XCTAssertEqualObjects(result[@"failure_code"], @"E_AGENT_CAPABILITY");
+  XCTAssertEqualObjects(result[@"retry_advice"], @"none");
+  XCTAssertEqualObjects(result[@"effect_gate"], @"not_applicable");
+  XCTAssertEqualObjects(result[@"effect_dispatched"], @NO);
+}
+
 - (void)testSettlementFaultOwnerLossReplayAndRecoveryNeverDuplicateGitEffect {
   __block BOOL failCompoundCommit = NO;
   [self resetStoresWithFaultHook:^BOOL(NSString *stage) {
@@ -1858,6 +1994,11 @@
                                                error:&error];
   XCTAssertEqualObjects(effect[@"status"], @"ok");
   XCTAssertNil(error);
+  NSDictionary *conflictingPrepare = [executor prepareToolNamed:@"write_file"
+      arguments:arguments root:writeRoot error:&error];
+  XCTAssertNil(conflictingPrepare);
+  XCTAssertEqual(error.code, DSHAgentNativeStoreErrorConflict);
+  error = nil;
   NSDictionary *recovered = [executor recoverToolNamed:@"write_file"
                                              arguments:arguments root:writeRoot
                                           precondition:prepared[@"precondition"]

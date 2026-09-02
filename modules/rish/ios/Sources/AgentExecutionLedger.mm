@@ -2654,6 +2654,27 @@ static BOOL DSHAgentLedgerAdvanceAuthority(
         return NO;
       }
     }
+    // Batch revisions are opaque authorities, not counters. A read-only
+    // batch uses its round revision while a mutation batch uses the write
+    // reservation version, so the numeric value may stay flat or decrease.
+    // Validate against the most recently committed batch for this attempt in
+    // WAL order while holding the atomic transaction. With no prior batch,
+    // the only valid authority is the initial revision zero.
+    NSDictionary *latestAttemptBatch = nil;
+    for (NSDictionary *batch in batches) {
+      if ([batch[@"task_id"] isEqual:request[@"task_id"]] &&
+          [batch[@"attempt_id"] isEqual:request[@"attempt_id"]]) {
+        latestAttemptBatch = batch;
+      }
+    }
+    NSNumber *expectedPriorBatchRevision = latestAttemptBatch == nil
+        ? @0 : latestAttemptBatch[@"batch_revision"];
+    if (![request[@"expected_batch_revision"]
+            isEqual:expectedPriorBatchRevision]) {
+      DSHSetAgentNativeStoreError(mutationError,
+                                  DSHAgentNativeStoreErrorConflict);
+      return NO;
+    }
     NSUInteger existingAttemptRows = 0;
     for (NSDictionary *row in rows) {
       if ([row[@"locator"][@"attempt_id"] isEqual:request[@"attempt_id"]]) {
@@ -2785,10 +2806,6 @@ static BOOL DSHAgentLedgerAdvanceAuthority(
     }
     NSUInteger batchRevision = manifestCalls.count > 0
         ? reservationVersion : [request[@"round_revision"] unsignedIntegerValue];
-    if ([request[@"expected_batch_revision"] unsignedIntegerValue] != 0) {
-      DSHSetAgentNativeStoreError(mutationError, DSHAgentNativeStoreErrorConflict);
-      return NO;
-    }
     if (manifestCalls.count > 0) {
       reservation[@"reserved_write_bytes"] = @(reserved);
       reservation[@"reservation_version"] = @(reservationVersion);

@@ -1509,6 +1509,25 @@ export function createCompletionController(
       publish(stateFor('blocked', { conversationId, attemptId, failureCode: code }));
       return outcome('blocked', state);
     }
+    // Agent attempts are reducer-owned by their native checkpoint evidence.
+    // A local/native rejection such as a preflight conflict has no matching
+    // terminal Agent evidence, so the generic attempt/fail reducer correctly
+    // refuses it. Keep the last durable Agent checkpoint recoverable and expose
+    // the original failure instead of misreporting that refusal as correlation.
+    if (located.attempt.agent !== undefined && located.attempt.agent !== null) {
+      agentRun = null;
+      publish(
+        stateFor('resume_available', {
+          conversationId,
+          turnId: located.attempt.turnId,
+          attemptId,
+          roundId: located.attempt.agent.round_lineage?.round_id ?? null,
+          transportSchemaVersion: agentTransportSchema(located.attempt),
+          failureCode: code,
+        }),
+      );
+      return outcome('retryable', state);
+    }
     const failed = dependencies.chat.failAttempt(conversationId, attemptId, code);
     if (!failed) {
       publish(

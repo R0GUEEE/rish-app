@@ -26,6 +26,7 @@ import type {
   CompleteAgentRoundResultV2,
   PrepareAgentAttemptRequestV2,
   PrepareAgentToolBatchRequestV2,
+  PrepareAgentToolBatchResultV2,
   BindAgentApprovalRequestV2,
   ExecuteAgentToolRequestV2,
   ExecuteAgentToolResultV2,
@@ -1846,6 +1847,7 @@ describe('project Agent completion controller', () => {
     runtime: AgentRuntimeFacadeV2,
     persistCurrent: () => Promise<CompletionPersistenceResult>,
     operationIds = [...IDS],
+    requestAgentApproval = jest.fn(async () => ({ status: 'approved' as const, scope: 'once' as const })),
   ) {
     return createCompletionController({
       chat: store,
@@ -1857,7 +1859,7 @@ describe('project Agent completion controller', () => {
       createRoundId: jest.fn(() => operationIds.shift() ?? AGENT_TURN),
       createOperationId: jest.fn(() => operationIds.shift() ?? AGENT_ATTEMPT),
       agentRuntime: runtime,
-      requestAgentApproval: jest.fn(async () => ({ status: 'approved', scope: 'once' })),
+      requestAgentApproval,
       now: () => NOW,
     });
   }
@@ -2202,6 +2204,72 @@ describe('project Agent completion controller', () => {
     expect(completedAttempt?.rounds.every(
       round => round.visibleHistorySha256 === 'f'.repeat(64),
     )).toBe(true);
+  });
+
+  test('keeps a rejected Agent batch recoverable with its native failure code', async () => {
+    const store = agentStore();
+    const conversationId = store.getState().selectedConversationId!;
+    const runtime = makeRuntime([]);
+    const requestAgentApproval = jest.fn(async () => ({
+      status: 'approved' as const,
+      scope: 'once' as const,
+    }));
+    (runtime.prepareAgentToolBatch as jest.Mock).mockImplementationOnce(
+      async (request: PrepareAgentToolBatchRequestV2): Promise<PrepareAgentToolBatchResultV2> => ({
+        schema_version: 2,
+        status: 'rejected',
+        operation_id: request.operation_id,
+        failure_code: 'E_AGENT_CONFLICT',
+        expected_batch_revision: request.expected_batch_revision,
+        expected_reserved_write_bytes: request.expected_reserved_write_bytes,
+        result_reserved_write_bytes: request.expected_reserved_write_bytes,
+        effect_gate: 'closed',
+        reservation_status: 'unchanged',
+        effect_dispatched: false,
+        retry_advice: 'requery',
+      }),
+    );
+    (runtime.queryAgentAttempt as jest.Mock).mockResolvedValue({
+      schema_version: 2,
+      status: 'not_found',
+      failure_code: 'E_AGENT_NOT_FOUND',
+    } satisfies QueryAgentAttemptResultV2);
+    const failAttempt = jest.spyOn(store, 'failAttempt');
+    const controller = agentController(
+      store,
+      runtime,
+      committedPersistence(store),
+      [...IDS],
+      requestAgentApproval,
+    );
+
+    const result = await controller.send({
+      conversationId,
+      text: 'write an existing file',
+      attachments: [],
+    });
+
+    expect(result).toMatchObject({ status: 'retryable', code: 'E_AGENT_CONFLICT' });
+    expect(controller.getState()).toMatchObject({
+      phase: 'resume_available',
+      conversationId,
+      failureCode: 'E_AGENT_CONFLICT',
+    });
+    expect(failAttempt).not.toHaveBeenCalled();
+    expect(requestAgentApproval).not.toHaveBeenCalled();
+    expect(runtime.bindAgentApproval).not.toHaveBeenCalled();
+    expect(runtime.executeAgentTool).not.toHaveBeenCalled();
+    expect(store.getState().conversations[conversationId]?.attempts[0]).toMatchObject({
+      status: 'prepared',
+      failureCode: null,
+      agent: { phase: 'batch_frozen' },
+    });
+    const resumed = await controller.resume(
+      conversationId,
+      result.attemptId!,
+    );
+    expect(resumed).toMatchObject({ status: 'retryable', code: 'E_COMPLETION_HISTORY' });
+    expect(runtime.queryAgentAttempt).toHaveBeenCalledTimes(1);
   });
 
   test('carries the persisted batch authority into a second write batch', async () => {
