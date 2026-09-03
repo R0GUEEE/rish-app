@@ -1945,7 +1945,6 @@ function agentCallIsValid(value: unknown): value is PersistedAgentCallJournalV2 
     call.receipt.outcome !== 'denied'
   ) return false;
   if (call.access === 'durable_deny' && call.approval_decision !== 'denied') return false;
-  if (call.name === 'git_push' && call.approval_decision === 'allow_conversation') return false;
   if (
     (call.access === 'conversation_confirm' || call.access === 'confirm_once') &&
     call.approval_token === null
@@ -2179,8 +2178,7 @@ function agentCallV3IsValid(value: unknown): value is PersistedAgentCallJournalV
     (!gated ||
       (call.approval_decision === 'denied' || call.approval_decision === 'cancelled'
         ? call.approval_token === null && call.approval_reference === null
-        : call.approval_token !== null)) &&
-    (call.name !== 'git_push' || call.approval_decision !== 'allow_conversation')
+        : call.approval_token !== null))
   );
 }
 
@@ -2332,8 +2330,10 @@ function agentGrantIsValid(value: unknown): value is AgentConversationGrantV2 {
     grant.binding_revision > 0 &&
     grant.binding_revision < Number.MAX_SAFE_INTEGER &&
     isSha256Digest(grant.root_fingerprint_sha256) &&
-    (grant.tool_family === 'file_write' || grant.tool_family === 'git_commit') &&
-    (grant.tool_family !== 'git_commit' || grant.project_id !== null) &&
+    (grant.tool_family === 'file_write' ||
+      grant.tool_family === 'git_commit' ||
+      grant.tool_family === 'git_push') &&
+    (grant.tool_family === 'file_write' || grant.project_id !== null) &&
     grant.registry_version === 1 &&
     validIdentifier(grant.policy_version) &&
     isExactDataRecord(grant.issued_for, ['schema_version', 'task_id', 'attempt_id']) &&
@@ -2370,9 +2370,7 @@ function agentJournalMatchesConversation(
       grant.registry_version === journal.tool_registry_version &&
       grant.policy_version === journal.policy.policy_version &&
       grant.root_fingerprint_sha256 === journal.root.root_fingerprint_sha256 &&
-      journal.root.capabilities.includes(
-        grant.tool_family === 'file_write' ? 'file_write' : 'git_commit',
-      )
+      journal.root.capabilities.includes(grant.tool_family)
     );
   });
 }
@@ -2585,6 +2583,12 @@ function applyFinalAgentCheckpoint(
   state: ChatState,
   payload: Extract<ChatAction, { readonly type: 'attempt/agent-checkpoint' }>['payload'],
   allowFirstTerminal = false,
+  /**
+   * Grants carried by the same approval checkpoint. A conversation-scoped
+   * decision freezes the new grant id in the journal before the grant is
+   * recorded on the conversation, so the frozen-grant check must see both.
+   */
+  pendingGrants: readonly AgentConversationGrantV2[] | null = null,
 ): ChatState {
   if (
     payload.journal === null ||
@@ -2648,7 +2652,12 @@ function applyFinalAgentCheckpoint(
     payload.expectedAttempt !== attempt ||
     !agentControllerCASMatchesAttempt(payload.cas, conversation, attempt) ||
     (current !== null && current !== undefined && current.schema_version !== 3) ||
-    !agentJournalMatchesConversation(conversation, payload.journal) ||
+    !agentJournalMatchesConversation(
+      pendingGrants === null
+        ? conversation
+        : { ...conversation, agentGrants: pendingGrants },
+      payload.journal,
+    ) ||
     (payload.journalRevision !== undefined &&
       payload.journalRevision !== (attempt.journalRevision ?? 0) + 1) ||
     payload.journal.controller_generation !==
@@ -6786,7 +6795,7 @@ export function chatReducer(state: ChatState, action: ChatAction): ChatState {
           ? {}
           : { journalRevision: payload.journalRevision }),
         at: payload.at,
-      });
+      }, false, payload.grants);
       if (withJournal === state) return state;
       const nextConversation = withJournal.conversations[payload.conversationId];
       return nextConversation === undefined

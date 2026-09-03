@@ -1534,6 +1534,8 @@ describe('project Agent completion controller', () => {
     readonly finalRoundIndex?: number;
     readonly finalReasoning?: string;
     readonly cancelledCallIds?: readonly string[];
+    /** Adds git_push to the frozen root capabilities and registry. */
+    readonly pushCapable?: boolean;
   };
 
   const defaultBatchCalls: readonly AgentRuntimeFixtureCall[] = [
@@ -1560,7 +1562,9 @@ describe('project Agent completion controller', () => {
       workspace_binding_revision: 1,
       project_id: AGENT_PROJECT,
       root_fingerprint_sha256: ROOT_SHA,
-      capabilities: ['file_read', 'file_write', 'git_commit'],
+      capabilities: options.pushCapable
+        ? ['file_read', 'file_write', 'git_commit', 'git_push']
+        : ['file_read', 'file_write', 'git_commit'],
     };
     const policy: AgentRuntimePolicyV1 = {
       schema_version: 1,
@@ -1576,6 +1580,9 @@ describe('project Agent completion controller', () => {
       tools: [
         { schema_version: 2, name: 'write_file', safe_summary_key: 'agent.write_file', access: 'conversation_confirm' },
         { schema_version: 2, name: 'git_commit', safe_summary_key: 'agent.git_commit', access: 'conversation_confirm' },
+        ...(options.pushCapable
+          ? [{ schema_version: 2 as const, name: 'git_push', safe_summary_key: 'agent.git_push', access: 'conversation_confirm' as const }]
+          : []),
       ],
     };
     const transcript = (generation: number, digest: string): AgentRuntimeTranscriptHandleV1 => ({
@@ -2476,6 +2483,96 @@ describe('project Agent completion controller', () => {
     expect(result.status).toBe('completed');
     return { sessions, store, runtime };
   }
+
+  test('persists a git_push conversation grant in the shared native fixture', async () => {
+    // git_push follows the git_commit pattern: a conversation-scoped approval
+    // issues a grant whose tool_family is git_push. The committed session is
+    // the JS-to-native parity fixture the native SessionSnapshotStore test
+    // replays (regenerate with RISH_UPDATE_FIXTURES=1 like the others).
+    const store = agentStore();
+    const conversationId = store.getState().selectedConversationId!;
+    const runtime = makeRuntime([], {
+      pushCapable: true,
+      batchRounds: [[
+        { callId: 'push-call', name: 'git_push', argumentsSha256: '5'.repeat(64), access: 'conversation_confirm' },
+      ]],
+    });
+    const committedSessions: string[] = [];
+    const persistCurrent = jest.fn(async (): Promise<CompletionPersistenceResult> => {
+      const session = store.serialize();
+      const digest = sessionSnapshotSHA256(session)!;
+      const generation = (store.getSessionAuthority()?.generation ?? 1) + 1;
+      committedSessions.push(session);
+      store.setSessionAuthority({ generation, sessionSha256: digest });
+      return { status: 'committed', snapshot: { schema_version: 1, generation, session_sha256: digest } };
+    });
+    const requestAgentApproval = jest.fn(async () => ({
+      status: 'approved' as const,
+      scope: 'conversation' as const,
+    }));
+    // Native binds a conversation decision by echoing the grant the controller
+    // recorded at decide time; the mock reads it back from the store.
+    (runtime.bindAgentApproval as jest.Mock).mockImplementation(
+      async (request: BindAgentApprovalRequestV2) => {
+        const conversation = store.getState().conversations[conversationId]!;
+        const grant =
+          (conversation.agentGrants ?? conversation.agent_grants ?? []).find(
+            candidate => candidate.tool_family === 'git_push',
+          ) ?? null;
+        return {
+          schema_version: 2 as const,
+          status: 'bound' as const,
+          operation_id: request.operation_id,
+          task_id: request.task_id,
+          attempt_id: request.attempt_id,
+          round_id: request.round_id,
+          call_index: request.call_index,
+          call_id: request.call_id,
+          decision: request.decision,
+          approval_reference: request.operation_id,
+          grant: request.decision === 'allow_conversation' ? grant : null,
+          result_batch_revision: request.batch_revision,
+          observed_checkpoint: request.committed_checkpoint,
+        };
+      },
+    );
+    const opIds = [...IDS];
+    const controller = createCompletionController({
+      chat: store,
+      persistCurrent,
+      completeRoundV2: jest.fn(),
+      completeRoundV3: jest.fn(),
+      cancelRoundV2: jest.fn(),
+      cancelRoundV3: jest.fn(),
+      createRoundId: jest.fn(() => opIds.shift() ?? AGENT_TURN),
+      createOperationId: jest.fn(() => opIds.shift() ?? AGENT_ATTEMPT),
+      agentRuntime: runtime,
+      requestAgentApproval,
+      now: () => NOW,
+    });
+    const result = await controller.send({ conversationId, text: 'push it', attachments: [] });
+    expect(result.status).toBe('completed');
+    expect(requestAgentApproval).toHaveBeenCalledTimes(1);
+    expect(runtime.bindAgentApproval).toHaveBeenCalledWith(expect.objectContaining({
+      call_id: 'push-call',
+      decision: 'allow_conversation',
+      token: expect.objectContaining({ name: 'git_push', access: 'conversation_confirm' }),
+    }));
+    expect(runtime.executeAgentTool).toHaveBeenCalledWith(expect.objectContaining({
+      name: 'git_push',
+      call_id: 'push-call',
+    }));
+    // The last mid-flow session that still carries the bound git_push call:
+    // it holds both the conversation grant and the allow_conversation decision.
+    const session = [...committedSessions]
+      .reverse()
+      .find(candidate => /"approval_decision":\s*"allow_conversation"/u.test(candidate));
+    expect(session).toBeDefined();
+    expect(session).toMatch(/"tool_family":\s*"git_push"/u);
+    expect(session).toMatch(/"name":\s*"git_push"/u);
+    expect(committedSessions[committedSessions.length - 1]).toMatch(/"tool_family":\s*"git_push"/u);
+    assertSharedFixture(session!, 'agent-git-push-conversation-session.json');
+  });
 
   test('serializes Claude Code and Codex Agent sessions into the shared native fixtures', async () => {
     const claude = await captureHarnessSessions('claude-code', 'claude-sonnet-5', 1);

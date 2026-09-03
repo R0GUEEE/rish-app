@@ -2244,9 +2244,6 @@ export function parsePersistedAgentCallJournalV3(
       );
     }
   }
-  if (name === 'git_push' && decision === 'allow_conversation') {
-    return invalid(`${path}.approval_decision`, 'git_push is once-only');
-  }
   if (
     receipt !== null &&
     (receipt.call_id !== callId ||
@@ -3253,15 +3250,22 @@ function parseAgentGrant(
   ]);
   if (raw.schema_version !== AGENT_GRANT_SCHEMA_VERSION)
     return invalid(`${path}.schema_version`, 'must equal 2');
-  if (raw.tool_family !== 'file_write' && raw.tool_family !== 'git_commit')
-    return invalid(`${path}.tool_family`, 'must be file_write or git_commit');
+  if (
+    raw.tool_family !== 'file_write' &&
+    raw.tool_family !== 'git_commit' &&
+    raw.tool_family !== 'git_push'
+  )
+    return invalid(
+      `${path}.tool_family`,
+      'must be file_write, git_commit, or git_push',
+    );
   if (raw.registry_version !== 1)
     return invalid(`${path}.registry_version`, 'must equal 1');
   const projectId =
     raw.project_id === null
       ? null
       : canonicalLifecycleId(raw.project_id, `${path}.project_id`);
-  if (raw.tool_family === 'git_commit' && projectId === null)
+  if (raw.tool_family !== 'file_write' && projectId === null)
     return invalid(`${path}.project_id`, 'Git grants require a project');
   const issued = exactRecord(raw.issued_for, `${path}.issued_for`, [
     'schema_version',
@@ -4640,9 +4644,7 @@ function parseConversation(
           grant.policy_version !== journal.policy.policy_version ||
           grant.root_fingerprint_sha256 !==
             journal.root.root_fingerprint_sha256 ||
-          !journal.root.capabilities.includes(
-            grant.tool_family === 'file_write' ? 'file_write' : 'git_commit',
-          )
+          !journal.root.capabilities.includes(grant.tool_family)
         ) {
           invalid(
             `${path}.attempts[${index}].agent.frozen_grant_ids[${grantIndex}]`,

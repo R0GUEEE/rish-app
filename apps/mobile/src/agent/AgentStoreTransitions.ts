@@ -1421,7 +1421,7 @@ function validateBindResult(value: unknown, request: BindAgentApprovalRequestV2)
 
 function validateGrant(value: unknown): AgentConversationGrantV2 | null {
   const raw = exact(value, ['schema_version', 'grant_id', 'conversation_id', 'workspace_id', 'project_id', 'binding_revision', 'root_fingerprint_sha256', 'tool_family', 'registry_version', 'policy_version', 'issued_for', 'created_at']);
-  if (raw === null || raw.schema_version !== 2 || !uuid(raw.grant_id) || !uuid(raw.conversation_id) || !uuid(raw.workspace_id) || !nullableUuid(raw.project_id) || !safeInteger(raw.binding_revision, Number.MAX_SAFE_INTEGER - 1, false) || !digest(raw.root_fingerprint_sha256) || !enumValue(raw.tool_family, ['file_write', 'git_commit'] as const) || raw.registry_version !== 1 || raw.policy_version !== 'agent-v1' || !timestamp(raw.created_at)) return null;
+  if (raw === null || raw.schema_version !== 2 || !uuid(raw.grant_id) || !uuid(raw.conversation_id) || !uuid(raw.workspace_id) || !nullableUuid(raw.project_id) || !safeInteger(raw.binding_revision, Number.MAX_SAFE_INTEGER - 1, false) || !digest(raw.root_fingerprint_sha256) || !enumValue(raw.tool_family, ['file_write', 'git_commit', 'git_push'] as const) || raw.registry_version !== 1 || raw.policy_version !== 'agent-v1' || !timestamp(raw.created_at)) return null;
   const issued = exact(raw.issued_for, ['schema_version', 'task_id', 'attempt_id']);
   return issued !== null && issued.schema_version === 1 && uuid(issued.task_id) && uuid(issued.attempt_id) ? raw as unknown as AgentConversationGrantV2 : null;
 }

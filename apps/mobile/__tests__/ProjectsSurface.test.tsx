@@ -452,3 +452,94 @@ test('stores credentials natively and never pushes before confirmation', async (
     httpsProxyUrl: gitHttpsProxyUrl,
   });
 });
+
+test('shows the non-fast-forward message and pushes a named new branch', async () => {
+  const alert = jest.spyOn(Alert, 'alert').mockImplementation(() => undefined);
+  const renderer = await renderSurface();
+  await openProject(renderer);
+  await act(async () => {
+    inputByLabel(renderer.root, 'Push as new branch (optional)').props.onChangeText(
+      'feature/g2',
+    );
+    await settle();
+  });
+  mockLocalProjects.push.mockRejectedValueOnce(
+    Object.assign(new Error('non-fast-forward'), { code: 'non-fast-forward' }),
+  );
+  await act(async () => actionByLabel(renderer.root, 'Push').props.onPress());
+  expect(alert).toHaveBeenCalledWith(
+    'Push this branch?',
+    expect.stringContaining('new branch feature/g2 on github.com'),
+    expect.any(Array),
+  );
+  const buttons = alert.mock.calls[0]?.[2];
+  const confirm = Array.isArray(buttons)
+    ? buttons.find(button => button.text === 'Push now')
+    : undefined;
+  await act(async () => {
+    confirm?.onPress?.();
+    await settle();
+  });
+  expect(mockLocalProjects.push).toHaveBeenCalledWith(project.id, {
+    httpsProxyUrl: null,
+    branch: 'feature/g2',
+  });
+  expect(
+    renderer.root.findAllByProps({
+      children: translate('en-US', 'projects.pushNonFastForward'),
+    }).length,
+  ).toBeGreaterThan(0);
+  expect(mockLocalProjects.cancelPush).not.toHaveBeenCalled();
+});
+
+test('renders the native push receipt after a successful push', async () => {
+  const alert = jest.spyOn(Alert, 'alert').mockImplementation(() => undefined);
+  const renderer = await renderSurface();
+  await openProject(renderer);
+  expect(
+    renderer.root.findAllByProps({ children: 'No push receipt recorded yet.' })
+      .length,
+  ).toBeGreaterThan(0);
+  const receipt = {
+    schema_version: 1,
+    remote: 'origin',
+    host: 'github.com',
+    branch: 'main',
+    local_oid: '0123456789abcdef0123456789abcdef01234567',
+    remote_oid: '0123456789abcdef0123456789abcdef01234567',
+    pushed_at: '2026-09-03T12:00:00.000Z',
+  };
+  mockLocalProjects.push.mockResolvedValueOnce({
+    schema_version: 1,
+    project_id: project.id,
+    remote: 'origin',
+    branch: 'main',
+    oid: receipt.local_oid,
+    pushed_at: receipt.pushed_at,
+    receipt,
+  });
+  mockLocalProjects.pushReceipts.mockResolvedValue({
+    schema_version: 1,
+    project_id: project.id,
+    receipts: [receipt],
+  });
+  await act(async () => actionByLabel(renderer.root, 'Push').props.onPress());
+  const buttons = alert.mock.calls[0]?.[2];
+  const confirm = Array.isArray(buttons)
+    ? buttons.find(button => button.text === 'Push now')
+    : undefined;
+  await act(async () => {
+    confirm?.onPress?.();
+    await settle();
+  });
+  const rendered = renderer.root.findAll(
+    node =>
+      typeof node.props.children === 'string' &&
+      node.props.children.startsWith('main → github.com · local 0123456789ab'),
+  );
+  expect(rendered.length).toBeGreaterThan(0);
+  expect(
+    renderer.root.findAllByProps({ children: 'Branch pushed successfully.' })
+      .length,
+  ).toBeGreaterThan(0);
+});
