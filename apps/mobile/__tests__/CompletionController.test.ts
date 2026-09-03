@@ -3032,10 +3032,7 @@ describe('project Agent completion controller', () => {
       null,
       'denied',
     ]);
-    expect(`${deniedSession}\n`).toBe(nodeFs.readFileSync(
-      nodePath.resolve(__dirname, '../ios/DSHMobileTests/Fixtures', 'agent-denied-call-session.json'),
-      'utf8',
-    ));
+    assertSharedFixture(deniedSession!, 'agent-denied-call-session.json');
   });
 
   test('a batch answer list of the wrong length fails closed into denials', async () => {
