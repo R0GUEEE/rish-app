@@ -1615,6 +1615,7 @@ export function isAgentFailureCode(value: unknown): value is AgentFailureCode {
       'E_AGENT_ROUND_LIMIT',
       'E_AGENT_CANCELLED',
       'E_AGENT_TOOL_FAILED',
+      'E_AGENT_DENIED_BY_USER',
       'E_COMPLETION_LENGTH',
       'E_COMPLETION_CONTENT_FILTER',
     ].includes(value)
@@ -3355,7 +3356,13 @@ function preflightEventMatchesJournal(
       current.round_lineage === null ||
       next.round_lineage === null ||
       current.batch.length === 0 ||
-      current.call_index !== current.batch.length - 1 ||
+      // The cursor rests on the last call that settled by execution; calls
+      // after it may already carry a user-denial receipt settled at decision
+      // time, so the whole batch (checked below) rather than the cursor
+      // position proves completion.
+      current.call_index === null ||
+      current.call_index < 0 ||
+      current.call_index >= current.batch.length ||
       current.batch.some(call =>
         call.receipt === null ||
         (call.receipt.outcome !== 'ok' &&
@@ -4216,9 +4223,15 @@ function highLevelEvidenceSupportsTransition(
           call.access !== 'durable_deny' &&
           call.approval_decision === 'pending',
       );
+      const allSettled = next.batch.every(call => call.receipt !== null);
       const expectedNextPhase = remainingPending
         ? 'approval_pending'
-        : 'batch_frozen';
+        : allSettled
+          ? 'tool_result_pending'
+          : 'batch_frozen';
+      const expectedNextCallIndex = allSettled
+        ? request.call_index
+        : next.batch.findIndex(call => call.receipt === null);
       if (
         (current.phase !== 'batch_frozen' &&
           current.phase !== 'approval_pending') ||
@@ -4246,7 +4259,8 @@ function highLevelEvidenceSupportsTransition(
         beforeCall.name !== token.name ||
         beforeCall.arguments_sha256 !== token.arguments_sha256 ||
         beforeCall.access !== token.access ||
-        beforeCall.approval_token === null ||
+        // The denial preflight already dropped the executable token.
+        beforeCall.approval_token !== null ||
         beforeCall.approval_decision !== 'denied' ||
         beforeCall.approval_reference !== null ||
         beforeCall.receipt !== null ||
@@ -4269,8 +4283,7 @@ function highLevelEvidenceSupportsTransition(
           afterCall.receipt,
           bind.receipt as unknown as AgentToolReceiptV1,
         ) ||
-        next.call_index !==
-          next.batch.findIndex(call => call.receipt === null) ||
+        next.call_index !== expectedNextCallIndex ||
         request.batch_revision !== token.batch_revision ||
         bind.result_batch_revision !== request.batch_revision ||
         token.round_id !== request.round_id ||
@@ -5015,6 +5028,17 @@ function sessionEventsMatchState(
       journalCall !== undefined
         ? journalCall.approval_reference
         : previous?.approvalReference;
+    // A denied/cancelled decision persists a null approval reference; its
+    // durable marker is the decide_approval preflight event whose reference
+    // equals its own event id (the bind operation id).  Accept that marker
+    // against the null-reference call it closed.
+    const denialMarker =
+      journalCall !== undefined &&
+      event.kind === 'approval' &&
+      event.approval_reference === event.event_id &&
+      journalCall.approval_reference === null &&
+      (journalCall.approval_decision === 'denied' ||
+        journalCall.approval_decision === 'cancelled');
     if (
       event.arguments_sha256 !== null &&
       expectedArgs !== undefined &&
@@ -5028,13 +5052,25 @@ function sessionEventsMatchState(
     if (
       journalCall !== undefined &&
       event.kind !== 'tool_call' &&
+      !denialMarker &&
       !(event.kind === 'approval' && event.approval_reference === null) &&
       event.approval_reference !== expectedApproval
     ) return false;
+    // A user denial settles with a null approval reference after its
+    // decide_approval marker; the exact denied receipt shape identifies it
+    // once the journal batch has been cleared for the next round.
+    const historicalUserDenial =
+      journalCall === undefined &&
+      previous !== undefined &&
+      event.kind === 'tool_result' &&
+      event.status === 'denied' &&
+      event.failure_code === 'E_AGENT_DENIED_BY_USER' &&
+      event.approval_reference === null;
     if (
       journalCall === undefined &&
       previous !== undefined &&
       event.kind !== 'tool_call' &&
+      !historicalUserDenial &&
       event.approval_reference !== expectedApproval
     ) return false;
     if (event.kind === 'tool_call') {

@@ -1574,12 +1574,22 @@ export function createCompletionController(
         candidate.access !== 'durable_deny' &&
         candidate.approval_decision === 'pending',
     );
+    // A denial that settles the last open call completes the batch: the
+    // cursor rests on the denied call and the phase is tool_result_pending so
+    // the next provider round starts from the denied tool result.
+    const allSettled = batch.every(candidate => candidate.receipt !== null);
     return {
       ...copyAgentJournal(journal),
-      phase: remainingPending ? 'approval_pending' : 'batch_frozen',
+      phase: remainingPending
+        ? 'approval_pending'
+        : allSettled
+          ? 'tool_result_pending'
+          : 'batch_frozen',
       controller_generation: journal.controller_generation + 1,
       transcript: copyAgentTranscript(transcript),
-      call_index: batch.findIndex(candidate => candidate.receipt === null),
+      call_index: allSettled
+        ? callIndex
+        : batch.findIndex(candidate => candidate.receipt === null),
       batch,
       updated_at: updatedAt,
     };
@@ -2888,6 +2898,7 @@ export function createCompletionController(
       attemptId,
       runEpoch,
       callIndex,
+      bundle.approvalId,
       decision,
       denyMessage,
       true,
@@ -2943,6 +2954,7 @@ export function createCompletionController(
         attemptId,
         runEpoch,
         bundle.call.call_index,
+        bundle.approvalId,
         decision,
         denyMessage,
         index === complete.length - 1,
@@ -2958,6 +2970,7 @@ export function createCompletionController(
     attemptId: string,
     runEpoch: number,
     callIndex: number,
+    approvalId: string,
     decision: 'denied' | 'allow_once' | 'allow_conversation' | 'cancelled',
     denyMessage: string | null,
     resume: boolean,
@@ -2979,9 +2992,10 @@ export function createCompletionController(
       call.approval_token !== token.token ||
       (call.access !== 'conversation_confirm' && call.access !== 'confirm_once')
     ) return await failAgentWithoutNative(conversationId, attemptId, 'E_AGENT_APPROVAL');
-    const approvalId = freshOperationId();
+    // The presented approval id is the preflight event identity and the
+    // native bind operation id; it is drawn exactly once per presented call.
     const allowedDecisions = token.allowed_decisions;
-    if (approvalId === null || !allowedDecisions.includes(decision)) {
+    if (!AGENT_UUID.test(approvalId) || !allowedDecisions.includes(decision)) {
       return await failAgentWithoutNative(conversationId, attemptId, 'E_AGENT_APPROVAL');
     }
     const grant =

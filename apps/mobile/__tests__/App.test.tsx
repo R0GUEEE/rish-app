@@ -7924,7 +7924,11 @@ async function waitForAgentApproval(
   for (let index = 0; index < 100; index += 1) {
     const composer = renderer.root
       .findAllByType(ApprovalComposer)
-      .find(candidate => candidate.props.request.toolName === toolName);
+      .find(candidate =>
+        candidate.props.requests.some(
+          (request: { toolName: string }) => request.toolName === toolName,
+        ),
+      );
     if (composer !== undefined) return composer;
     await act(async () => settle());
   }
@@ -7982,22 +7986,38 @@ test('runs a project Agent task through two safe approvals and restores it witho
   expect(mockLocalRuntime.completeV2).not.toHaveBeenCalled();
   expect(mockAgentRuntime.prepareAgentAttempt).toHaveBeenCalledTimes(1);
 
-  const writeApproval = await waitForAgentApproval(renderer, 'write_file');
-  expect(JSON.parse(writeApproval.props.request.argumentsJson)).toEqual({
+  // Both gated calls of the batch are presented as one list with per-item
+  // decisions and a single commit.
+  const batchApproval = await waitForAgentApproval(renderer, 'write_file');
+  const presented = batchApproval.props.requests as Array<{
+    toolName: string;
+    argumentsJson: string;
+    preview: { kind: string; paths: string[] } | null;
+  }>;
+  expect(presented.map(request => request.toolName)).toEqual([
+    'write_file',
+    'git_commit',
+  ]);
+  expect(JSON.parse(presented[0]!.argumentsJson)).toEqual({
     arguments_sha256: '2'.repeat(64),
   });
-  expect(writeApproval.props.request.argumentsJson).not.toContain('path');
-  await act(async () => {
-    renderer.root.findByProps({ testID: 'approval-allow' }).props.onPress();
-    await settle();
+  expect(presented[0]!.argumentsJson).not.toContain('path');
+  expect(presented[0]!.preview).toMatchObject({
+    kind: 'write_file',
+    paths: ['notes.md'],
   });
-
-  const commitApproval = await waitForAgentApproval(renderer, 'git_commit');
-  expect(JSON.parse(commitApproval.props.request.argumentsJson)).toEqual({
+  expect(JSON.parse(presented[1]!.argumentsJson)).toEqual({
     arguments_sha256: '3'.repeat(64),
   });
+  expect(presented[1]!.preview).toMatchObject({ kind: 'git_commit' });
   await act(async () => {
-    renderer.root.findByProps({ testID: 'approval-allow' }).props.onPress();
+    renderer.root.findByProps({ testID: 'approval-item-0-once' }).props.onPress();
+  });
+  await act(async () => {
+    renderer.root.findByProps({ testID: 'approval-item-1-once' }).props.onPress();
+  });
+  await act(async () => {
+    renderer.root.findByProps({ testID: 'approval-batch-commit' }).props.onPress();
     await settle();
   });
   await waitForRenderedText(renderer, 'Agent final');

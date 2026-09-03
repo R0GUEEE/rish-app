@@ -3660,17 +3660,40 @@ function validateSessionEventCorrelations(
       event.safe_summary_key !== knownSummary
     )
       invalid(`${path}.safe_summary_key`, 'must match the journal call');
+    // A denied/cancelled decision persists a null approval reference; its
+    // durable marker is the decide_approval preflight event whose reference
+    // equals its own event id (the bind operation id).  Accept that marker
+    // against the null-reference call it closed.
+    const denialMarker =
+      journalCall !== undefined &&
+      event.kind === 'approval' &&
+      event.approval_reference === event.event_id &&
+      journalCall.approval_reference === null &&
+      (journalCall.approval_decision === 'denied' ||
+        journalCall.approval_decision === 'cancelled');
     if (
       journalCall !== undefined &&
       event.kind !== 'tool_call' &&
+      !denialMarker &&
       !(event.kind === 'approval' && event.approval_reference === null) &&
       event.approval_reference !== knownApproval
     )
       invalid(`${path}.approval_reference`, 'must match the journal call');
+    // A user denial settles with a null approval reference after its
+    // decide_approval marker; the exact denied receipt shape identifies it
+    // once the journal batch has been cleared for the next round.
+    const historicalUserDenial =
+      journalCall === undefined &&
+      previous !== undefined &&
+      event.kind === 'tool_result' &&
+      event.status === 'denied' &&
+      event.failure_code === 'E_AGENT_DENIED_BY_USER' &&
+      event.approval_reference === null;
     if (
       journalCall === undefined &&
       previous !== undefined &&
       event.kind !== 'tool_call' &&
+      !historicalUserDenial &&
       event.approval_reference !== knownApproval
     ) {
       invalid(

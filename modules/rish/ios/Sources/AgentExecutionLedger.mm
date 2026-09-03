@@ -1335,13 +1335,16 @@ static BOOL DSHAgentMutationBatchApprovalsBound(NSDictionary *state,
         bound = YES;
         break;
       }
-      if (([result[@"decision"] isEqualToString:@"denied"] ||
-           [result[@"decision"] isEqualToString:@"cancelled"]) &&
-          result[@"approval_reference"] == NSNull.null) {
-        // A persisted user denial settles the call: it can never dispatch.
-        // The gate opens for the remaining allowed mutations, and every
-        // mutation still revalidates its own immutable binding at execution
-        // time, so a denied call stays impossible to run.
+      if ([result[@"decision"] isEqualToString:@"denied"] &&
+          result[@"approval_reference"] == NSNull.null &&
+          [result[@"receipt"] isKindOfClass:NSDictionary.class] &&
+          [result[@"receipt"][@"outcome"] isEqualToString:@"denied"]) {
+        // A persisted user denial settled the call natively (denied receipt,
+        // never dispatched): it can never open its own gate, but it no
+        // longer blocks the remaining allowed mutations.  Every mutation
+        // still revalidates its own immutable binding at execution time, so
+        // the denied call stays impossible to run.  A cancelled decision
+        // keeps the gate closed.
         deniedSettled = YES;
         break;
       }

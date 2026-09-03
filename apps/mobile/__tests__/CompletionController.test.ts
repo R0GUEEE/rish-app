@@ -1730,6 +1730,7 @@ describe('project Agent completion controller', () => {
         },
       };
     });
+    let lastBatchTranscript: AgentRuntimeTranscriptHandleV1 | null = null;
     const prepareAgentToolBatch = jest.fn(async (request: PrepareAgentToolBatchRequestV2) => {
       operations.push(prepareAgentToolBatch);
       const callsForRound = options.batchRounds?.[request.round_index] ?? defaultBatchCalls;
@@ -1837,10 +1838,15 @@ describe('project Agent completion controller', () => {
         reserved_write_bytes: request.expected_reserved_write_bytes + batchNewWriteBytes,
         effect_gate: hasMutation ? 'closed' : 'not_applicable',
       };
+      lastBatchTranscript = request.transcript;
       return { schema_version: 2 as const, status: 'prepared' as const, operation_id: request.operation_id, receipt, observed_checkpoint: request.committed_checkpoint };
     });
     const bindAgentApproval = jest.fn(async (request: BindAgentApprovalRequestV2) => {
       operations.push(bindAgentApproval);
+      // A native denial appends the protected feedback message, so the
+      // settlement transcript is exactly one generation past the prepared
+      // batch transcript (the mock keeps single-digit generations).
+      const deniedGeneration = (lastBatchTranscript?.generation ?? 0) + 1;
       const boundReceipt = request.decision === 'denied'
         ? {
             schema_version: 1 as const,
@@ -1860,12 +1866,15 @@ describe('project Agent completion controller', () => {
         ? {
             schema_version: 1 as const,
             transcript_ref: AGENT_TRANSCRIPT,
-            generation: request.controller_cas.expected_controller_generation + 10,
-            transcript_sha256: 'c'.repeat(64),
-            transcript_bytes: 100,
+            generation: deniedGeneration,
+            transcript_sha256: `${deniedGeneration}`.repeat(64),
+            transcript_bytes: deniedGeneration * 10,
           }
         : null;
-      return { schema_version: 2 as const, status: 'bound' as const, operation_id: request.operation_id, task_id: request.task_id, attempt_id: request.attempt_id, round_id: request.round_id, call_index: request.call_index, call_id: request.call_id, decision: request.decision, approval_reference: request.operation_id, grant: null, result_batch_revision: request.batch_revision, observed_checkpoint: request.committed_checkpoint, receipt: boundReceipt, transcript: boundTranscript };
+      const boundReference = request.decision === 'denied' || request.decision === 'cancelled'
+        ? null
+        : request.operation_id;
+      return { schema_version: 2 as const, status: 'bound' as const, operation_id: request.operation_id, task_id: request.task_id, attempt_id: request.attempt_id, round_id: request.round_id, call_index: request.call_index, call_id: request.call_id, decision: request.decision, approval_reference: boundReference, grant: null, result_batch_revision: request.batch_revision, observed_checkpoint: request.committed_checkpoint, receipt: boundReceipt, transcript: boundTranscript };
     });
     const executeAgentTool = jest.fn(async (request: ExecuteAgentToolRequestV2): Promise<ExecuteAgentToolResultV2> => {
       operations.push(executeAgentTool);
@@ -2945,32 +2954,45 @@ describe('project Agent completion controller', () => {
     const executeMock = runtime.executeAgentTool as jest.Mock;
     expect(executeMock).toHaveBeenCalledTimes(1);
     expect(executeMock.mock.calls[0]?.[0].call_id).toBe('write-call');
-    // The denial is persisted into the journal as a structured tool result
-    // with the native denied receipt and the advanced transcript.
+    // The completed attempt cleared its batch, but the denial settlement is
+    // durable in the session events: a decide_approval marker followed by a
+    // structured denied tool result carrying the native denied receipt digest
+    // and the user-denial failure code, with no approval reference.
     const conversation = store.getState().conversations[conversationId]!;
-    const journal = conversation.attempts[0]?.agent;
-    const deniedCall = journal?.batch.find(call => call.call_id === 'commit-call');
-    expect(deniedCall?.approval_decision).toBe('denied');
-    expect(deniedCall?.approval_token).toBeNull();
-    expect(deniedCall?.approval_reference).toBeNull();
-    expect(deniedCall?.receipt).toMatchObject({
-      outcome: 'denied',
-      failure_code: 'E_AGENT_DENIED_BY_USER',
-      approval_reference: null,
+    const attemptId = conversation.attempts[0]!.attemptId;
+    expect(conversation.attempts[0]).toMatchObject({
+      status: 'completed',
+      agent: { phase: 'final_response' },
     });
-    // Rehydration preserves the denial settlement and its failure code.
+    const commitEvents = (store.getState().sessionEvents ?? []).filter(
+      event => event.attempt_id === attemptId && event.call_id === 'commit-call',
+    );
+    expect(commitEvents.map(event => `${event.kind}:${event.status}`)).toEqual([
+      'approval:approval',
+      'tool_result:denied',
+    ]);
+    expect(commitEvents[0]?.approval_reference).toBe(commitEvents[0]?.event_id);
+    expect(commitEvents[1]).toMatchObject({
+      result_sha256: 'd'.repeat(64),
+      approval_reference: null,
+      failure_code: 'E_AGENT_DENIED_BY_USER',
+    });
+    // The allowed write executed and settled normally after the denial.
+    const writeEvents = (store.getState().sessionEvents ?? []).filter(
+      event => event.attempt_id === attemptId && event.call_id === 'write-call',
+    );
+    expect(writeEvents.map(event => `${event.kind}:${event.status}`)).toEqual([
+      'approval:approval',
+      'approval:approval',
+      'tool_call:running',
+      'tool_result:ok',
+    ]);
+    // Rehydration through the schema-9 serializer preserves the denial.
     const hydrated = hydrateChatState(store.serialize());
-    const hydratedCall = hydrated.conversations[conversationId]!.attempts[0]!.agent?.batch.find(
-      call => call.call_id === 'commit-call',
+    const hydratedEvents = (hydrated.sessionEvents ?? []).filter(
+      event => event.attempt_id === attemptId && event.call_id === 'commit-call',
     );
-    expect(hydratedCall?.receipt?.failure_code).toBe('E_AGENT_DENIED_BY_USER');
-    expect(hydratedCall?.approval_decision).toBe('denied');
-    // A deny message outside the single-card flow still fails closed: a
-    // malformed batch answer list is rejected by the driver.
-    const events = (hydrated.sessionEvents ?? []).filter(
-      event => event.attempt_id === hydrated.conversations[conversationId]!.attempts[0]!.attemptId,
-    );
-    expect(events.some(event => event.kind === 'tool_result' && event.status === 'denied' && event.call_id === 'commit-call')).toBe(true);
+    expect(hydratedEvents).toEqual(commitEvents);
   });
 
   test('a batch answer list of the wrong length fails closed into denials', async () => {

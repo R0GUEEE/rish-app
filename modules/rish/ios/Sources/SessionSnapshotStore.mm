@@ -2618,12 +2618,29 @@ static BOOL DSHSessionValidateEventCorrelations(
         ![event[@"arguments_sha256"] isEqual:knownArguments]) return NO;
     if (event[@"safe_summary_key"] != NSNull.null && knownSummary != nil &&
         ![event[@"safe_summary_key"] isEqual:knownSummary]) return NO;
-    if (journalCall != nil && ![kind isEqual:@"tool_call"] &&
+    // A denied/cancelled decision persists a null approval reference; its
+    // durable marker is the decide_approval preflight event whose reference
+    // equals its own event id (the bind operation id).  Accept that marker
+    // against the null-reference call it closed.
+    BOOL denialMarker = journalCall != nil && [kind isEqual:@"approval"] &&
+        [event[@"approval_reference"] isEqual:event[@"event_id"]] &&
+        journalCall[@"approval_reference"] == NSNull.null &&
+        ([journalCall[@"approval_decision"] isEqual:@"denied"] ||
+         [journalCall[@"approval_decision"] isEqual:@"cancelled"]);
+    if (journalCall != nil && ![kind isEqual:@"tool_call"] && !denialMarker &&
         !([kind isEqual:@"approval"] &&
           event[@"approval_reference"] == NSNull.null) &&
         ![event[@"approval_reference"] isEqual:knownApproval]) return NO;
+    // A user denial settles with a null approval reference after its
+    // decide_approval marker; the exact denied receipt shape identifies it
+    // once the journal batch has been cleared for the next round.
+    BOOL historicalUserDenial = journalCall == nil && previous != nil &&
+        [kind isEqual:@"tool_result"] &&
+        [event[@"status"] isEqual:@"denied"] &&
+        [event[@"failure_code"] isEqual:@"E_AGENT_DENIED_BY_USER"] &&
+        event[@"approval_reference"] == NSNull.null;
     if (journalCall == nil && previous != nil &&
-        ![kind isEqual:@"tool_call"] &&
+        ![kind isEqual:@"tool_call"] && !historicalUserDenial &&
         ![event[@"approval_reference"] isEqual:knownApproval]) return NO;
     if ([kind isEqual:@"tool_call"]) {
       if (event[@"arguments_sha256"] == NSNull.null ||

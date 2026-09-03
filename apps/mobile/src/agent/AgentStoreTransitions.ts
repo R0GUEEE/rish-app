@@ -183,6 +183,7 @@ const RECEIPT_FAILURE_CODES = new Set<Exclude<AgentRuntimeFailureCode, 'E_AGENT_
   'E_AGENT_ROUND_LIMIT',
   'E_AGENT_CANCELLED',
   'E_AGENT_TOOL_FAILED',
+  'E_AGENT_DENIED_BY_USER',
   'E_COMPLETION_LENGTH',
   'E_COMPLETION_CONTENT_FILTER',
 ]);
@@ -960,9 +961,20 @@ function validateBatchRequest(value: unknown): PrepareAgentToolBatchRequestV2 | 
 
 function validateBindRequest(value: unknown): BindAgentApprovalRequestV2 | null {
   // `deny_message` is tolerated as absent (older evidence) and defaults to
-  // null; the runtime always supplies it.
-  const raw = exact(value, BIND_REQUEST_KEYS);
-  if (raw === null || raw.schema_version !== 2 || !uuid(raw.operation_id) || !uuid(raw.task_id) || !uuid(raw.conversation_id) || !uuid(raw.attempt_id) || !uuid(raw.round_id) ||
+  // null; the runtime always supplies it.  Mapped evidence is re-validated
+  // at the reducer boundary, so the validator must also accept its own
+  // output: the 15-key base plus at most one bounded `deny_message`.
+  const record = ownRecord(value);
+  if (record === null) return null;
+  const names = Object.keys(record);
+  const allowedKeys = new Set<string>([...BIND_REQUEST_KEYS, 'deny_message']);
+  if (
+    names.length < BIND_REQUEST_KEYS.length ||
+    names.length > BIND_REQUEST_KEYS.length + 1 ||
+    names.some(key => !allowedKeys.has(key))
+  ) return null;
+  const raw = record;
+  if (raw.schema_version !== 2 || !uuid(raw.operation_id) || !uuid(raw.task_id) || !uuid(raw.conversation_id) || !uuid(raw.attempt_id) || !uuid(raw.round_id) ||
     !safeInteger(raw.round_index, 7) || !digest(raw.manifest_sha256) || !safeInteger(raw.batch_revision, Number.MAX_SAFE_INTEGER - 1, false) || !safeInteger(raw.call_index, 15) || !opaque(raw.call_id) ||
     !enumValue(raw.decision, ['denied', 'allow_once', 'allow_conversation', 'cancelled'] as const) || !requestIdentity(raw, { task_id: raw.task_id, conversation_id: raw.conversation_id, attempt_id: raw.attempt_id })) return null;
   const denyMessage = raw.deny_message ?? null;
@@ -1301,8 +1313,26 @@ function validateApprovalPreview(value: unknown): AgentApprovalPreviewV1 | null 
 function validateBatchCall(value: unknown): AgentBatchCallProjectionV2 | null {
   // `approval_preview` is tolerated as absent so evidence produced by
   // older callers still validates; the native bridge always supplies it.
-  const raw = exact(value, ['schema_version', 'call_index', 'call_id', 'name', 'arguments_sha256', 'idempotency_key', 'safe_summary_key', 'access', 'approval_state', 'approval_token', 'approval_reference', 'execution_status', 'execution_revision', 'native_row_revision', 'receipt']);
-  if (raw === null || raw.schema_version !== 2 || !safeInteger(raw.call_index, 15) || !opaque(raw.call_id) || !name(raw.name) || !digest(raw.arguments_sha256) || !nullableDigest(raw.idempotency_key) || !name(raw.safe_summary_key) || !SAFE_SUMMARY.has(raw.safe_summary_key) || !enumValue(raw.access, ['auto', 'conversation_confirm', 'confirm_once', 'durable_deny'] as const) || !enumValue(raw.approval_state, ['not_required', 'pending', 'bound', 'denied', 'cancelled'] as const) || !enumValue(raw.execution_status, ['not_started', 'intent', 'running', 'cancel_requested', 'completed', 'failed', 'denied', 'cancelled', 'unknown', 'ambiguous'] as const) || (raw.execution_revision !== null && !safeInteger(raw.execution_revision, Number.MAX_SAFE_INTEGER - 1, false)) || (raw.native_row_revision !== null && !safeInteger(raw.native_row_revision, Number.MAX_SAFE_INTEGER - 1, false)) || (raw.receipt !== null && validateReceipt(raw.receipt) === null) || !nullableUuid(raw.approval_reference)) return null;
+  // Mapped evidence is re-validated at the reducer boundary, so the
+  // validator must also accept its own output: the key set is the 16-key
+  // base plus at most one bounded `approval_preview`.
+  const record = ownRecord(value);
+  if (record === null) return null;
+  const names = Object.keys(record);
+  const allowedKeys = new Set([
+    'schema_version', 'call_index', 'call_id', 'name', 'arguments_sha256',
+    'idempotency_key', 'safe_summary_key', 'access', 'approval_state',
+    'approval_token', 'approval_reference', 'execution_status',
+    'execution_revision', 'native_row_revision', 'receipt',
+    'approval_preview',
+  ]);
+  if (
+    names.length < 15 ||
+    names.length > 16 ||
+    names.some(key => !allowedKeys.has(key))
+  ) return null;
+  const raw = record;
+  if (raw.schema_version !== 2 || !safeInteger(raw.call_index, 15) || !opaque(raw.call_id) || !name(raw.name) || !digest(raw.arguments_sha256) || !nullableDigest(raw.idempotency_key) || !name(raw.safe_summary_key) || !SAFE_SUMMARY.has(raw.safe_summary_key) || !enumValue(raw.access, ['auto', 'conversation_confirm', 'confirm_once', 'durable_deny'] as const) || !enumValue(raw.approval_state, ['not_required', 'pending', 'bound', 'denied', 'cancelled'] as const) || !enumValue(raw.execution_status, ['not_started', 'intent', 'running', 'cancel_requested', 'completed', 'failed', 'denied', 'cancelled', 'unknown', 'ambiguous'] as const) || (raw.execution_revision !== null && !safeInteger(raw.execution_revision, Number.MAX_SAFE_INTEGER - 1, false)) || (raw.native_row_revision !== null && !safeInteger(raw.native_row_revision, Number.MAX_SAFE_INTEGER - 1, false)) || (raw.receipt !== null && validateReceipt(raw.receipt) === null) || !nullableUuid(raw.approval_reference)) return null;
   const knownTool = TOOL_NAMES.has(raw.name);
   const expected = knownTool ? expectedAccess(raw.name) : 'durable_deny';
   if (raw.access !== expected || raw.safe_summary_key !== (knownTool ? `agent.${raw.name}` : 'agent.unknown')) return null;
@@ -1335,7 +1365,15 @@ function validateBatchCall(value: unknown): AgentBatchCallProjectionV2 | null {
   if (raw.execution_status === 'cancelled' && receipt?.outcome !== 'cancelled') return null;
   if (raw.execution_status === 'ambiguous' && receipt?.outcome !== 'ambiguous') return null;
   if (raw.execution_status === 'unknown' && receipt !== null) return null;
-  const preview = validateApprovalPreview(raw.approval_preview ?? null);
+  const preview =
+    raw.approval_preview === undefined || raw.approval_preview === null
+      ? null
+      : validateApprovalPreview(raw.approval_preview);
+  if (
+    raw.approval_preview !== undefined &&
+    raw.approval_preview !== null &&
+    preview === null
+  ) return null;
   return { ...raw, approval_token: token, receipt, approval_preview: preview } as unknown as AgentBatchCallProjectionV2;
 }
 
@@ -1469,8 +1507,23 @@ function validateBindResult(value: unknown, request: BindAgentApprovalRequestV2)
   if (raw === null || raw.status === 'conflict' || (raw.status !== 'bound' && raw.status !== 'already_bound')) return null;
   // `receipt`/`transcript` are tolerated as absent (older evidence) and
   // default to null; a denied decision still requires the real settlement.
-  const result = exact(raw, ['schema_version', 'status', 'operation_id', 'task_id', 'attempt_id', 'round_id', 'call_index', 'call_id', 'decision', 'approval_reference', 'grant', 'result_batch_revision', 'observed_checkpoint']);
-  if (result === null || result.schema_version !== 2 || result.operation_id !== request.operation_id || result.task_id !== request.task_id || result.attempt_id !== request.attempt_id || result.round_id !== request.round_id || result.call_index !== request.call_index || result.call_id !== request.call_id || result.decision !== request.decision || !nullableUuid(result.approval_reference) || !safeInteger(result.result_batch_revision, Number.MAX_SAFE_INTEGER - 1, false) || result.result_batch_revision !== request.batch_revision) return null;
+  // Mapped evidence is re-validated at the reducer boundary, so the
+  // validator must also accept its own output: the 13-key base plus at most
+  // the two denial-settlement keys.
+  const names = Object.keys(raw);
+  const allowedKeys = new Set([
+    'schema_version', 'status', 'operation_id', 'task_id', 'attempt_id',
+    'round_id', 'call_index', 'call_id', 'decision', 'approval_reference',
+    'grant', 'result_batch_revision', 'observed_checkpoint', 'receipt',
+    'transcript',
+  ]);
+  if (
+    names.length < 13 ||
+    names.length > 15 ||
+    names.some(key => !allowedKeys.has(key))
+  ) return null;
+  const result = raw;
+  if (result.schema_version !== 2 || result.operation_id !== request.operation_id || result.task_id !== request.task_id || result.attempt_id !== request.attempt_id || result.round_id !== request.round_id || result.call_index !== request.call_index || result.call_id !== request.call_id || result.decision !== request.decision || !nullableUuid(result.approval_reference) || !safeInteger(result.result_batch_revision, Number.MAX_SAFE_INTEGER - 1, false) || result.result_batch_revision !== request.batch_revision) return null;
   const observed = validateCheckpoint(result.observed_checkpoint);
   if (observed === null || !equalCheckpoint(observed, validateCheckpoint(request.committed_checkpoint)!)) return null;
   const grant = result.grant === null ? null : validateGrant(result.grant);
