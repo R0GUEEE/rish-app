@@ -1,5 +1,13 @@
 import React, { useMemo } from 'react';
-import { Modal, Pressable, ScrollView, StyleSheet, Text, View } from 'react-native';
+import {
+  Modal,
+  Pressable,
+  ScrollView,
+  StyleSheet,
+  Text,
+  useWindowDimensions,
+  View,
+} from 'react-native';
 import X from 'lucide-react-native/icons/x';
 
 import type { AgentCapability, AgentConversationGrantV2 } from '../state';
@@ -152,7 +160,11 @@ export function AgentPolicySheet({
   onRevoke,
 }: Props) {
   const { colors, t } = useAppPresentation();
+  const { height: windowHeight } = useWindowDimensions();
   const styles = useMemo(() => createStyles(colors), [colors]);
+  // The panel scrolls inside a bounded sheet; taller windows get more of it
+  // without ever covering the whole screen.
+  const scrollMaxHeight = Math.max(320, Math.min(windowHeight * 0.66, 720));
   if (!visible) return null;
   const access = agentToolAccess(capabilities);
   return (
@@ -192,7 +204,10 @@ export function AgentPolicySheet({
                 <AppIcon color={colors.muted} icon={X} size={18} />
               </Pressable>
             </View>
-            <ScrollView bounces={false} style={styles.scroll}>
+            <ScrollView
+              bounces={false}
+              style={[styles.scroll, { maxHeight: scrollMaxHeight }]}
+            >
               <Text style={styles.sectionLabel}>{t('agent.policy.workspace')}</Text>
               <Text style={styles.workspaceName} testID="agent-policy-workspace">
                 {workspaceName ?? t('agent.policy.noWorkspace')}
@@ -367,7 +382,7 @@ const createStyles = (colors: ThemePalette) =>
       justifyContent: 'center',
       backgroundColor: colors.surfaceRaised,
     },
-    scroll: { maxHeight: 440, marginTop: 6 },
+    scroll: { marginTop: 6 },
     sectionLabel: {
       color: colors.muted,
       fontSize: 10,
