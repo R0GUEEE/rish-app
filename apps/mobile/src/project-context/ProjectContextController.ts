@@ -2,6 +2,7 @@ import {
   LocalProjectContext,
   ProjectContextBridgeError,
 } from '../native/LocalProjectContext';
+import { providerForModel, providerHostForModel } from '../harness/types';
 import {
   workspaceRoot,
   type WorkspaceRootRefV1,
@@ -404,7 +405,7 @@ function manifestV2ForController(
     conflicted: manifest.conflicted,
     captured_at: manifest.captured_at,
     policy_version: manifest.policy_version,
-    provider_host: 'api.deepseek.com',
+    provider_host: providerHostForModel(manifest.model_id),
     model: manifest.model_id,
     included: manifest.included.map(item => ({ ...item })),
     omitted: manifest.omitted.map(item => ({ ...item })),
@@ -1321,7 +1322,7 @@ export function createProjectContextController(
       schema_version: 1,
       project_id: operation.projectId,
       conversation_id: operation.runtimeContextId!,
-      provider: 'deepseek',
+      provider: providerForModel(operation.modelId),
       model: operation.modelId,
       policy: 'chat-read-v1',
       selected_paths: intent.selectedPaths,

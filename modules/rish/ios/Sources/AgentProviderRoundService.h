@@ -10,8 +10,11 @@ NS_ASSUME_NONNULL_BEGIN
 
 /// Native-only credential/history/body providers.  They are injected by the
 /// existing LocalRuntime owner; none of these values are part of the RN
-/// request or any service result.
-typedef NSString * _Nullable (^DSHAgentProviderRoundCredentialProvider)(NSUInteger *generation);
+/// request or any service result. The credential provider receives the
+/// harness id from the round request so the generic runtime can key the
+/// Keychain slot (DEEPSEEK_API_KEY / ANTHROPIC_API_KEY / OPENAI_API_KEY).
+typedef NSString * _Nullable (^DSHAgentProviderRoundCredentialProvider)(
+    NSString *harnessId, NSUInteger *generation);
 typedef NSArray<NSDictionary *> * _Nullable (^DSHAgentProviderRoundVisibleHistoryProvider)(
     NSDictionary *authority, NSError **error);
 typedef NSDictionary * _Nullable (^DSHAgentProviderRoundContextReceiptProvider)(
@@ -55,6 +58,21 @@ typedef NSDictionary * _Nullable (^DSHAgentProviderRoundContextReceiptProvider)(
        contextReceiptProvider:(nullable DSHAgentProviderRoundContextReceiptProvider)contextReceiptProvider
     NS_DESIGNATED_INITIALIZER;
 
+/// Provider-agnostic coordinator entry point. `transport` remains the DSH
+/// transport for legacy callers and tests; `claudeTransport` and
+/// `codexTransport` serve the other two builtin harnesses. A request for a
+/// harness whose transport is nil fails closed as unavailable.
+- (instancetype)initWithWAL:(DSHAgentNativeWAL *)wal
+                preparedStore:(DSHAgentPreparedAttemptStore *)preparedStore
+                   transcripts:(DSHAgentTranscriptStore *)transcripts
+                        rounds:(DSHAgentRoundJournal *)rounds
+                     transport:(DSHCompletionProviderTransport *)transport
+              claudeTransport:(nullable DSHCompletionProviderTransport *)claudeTransport
+               codexTransport:(nullable DSHCompletionProviderTransport *)codexTransport
+          credentialProvider:(nullable DSHAgentProviderRoundCredentialProvider)credentialProvider
+       visibleHistoryProvider:(nullable DSHAgentProviderRoundVisibleHistoryProvider)visibleHistoryProvider
+       contextReceiptProvider:(nullable DSHAgentProviderRoundContextReceiptProvider)contextReceiptProvider;
+
 /// Synchronously composes one native round around the asynchronous provider
 /// transport.  The blocking wait is confined to this native-private helper;
 /// the future RN facade should invoke it off the main thread.
@@ -80,6 +98,11 @@ typedef NSDictionary * _Nullable (^DSHAgentProviderRoundContextReceiptProvider)(
 @property(nonatomic, strong, readonly) DSHAgentTranscriptStore *transcripts;
 @property(nonatomic, strong, readonly) DSHAgentRoundJournal *rounds;
 @property(nonatomic, strong, readonly) DSHCompletionProviderTransport *transport;
+@property(nonatomic, strong, readonly, nullable) DSHCompletionProviderTransport *claudeTransport;
+@property(nonatomic, strong, readonly, nullable) DSHCompletionProviderTransport *codexTransport;
+
+/// Selects the transport for the request's harness_id (defaults to dsh).
+- (nullable DSHCompletionProviderTransport *)transportForRequest:(NSDictionary *)request;
 
 @end
 

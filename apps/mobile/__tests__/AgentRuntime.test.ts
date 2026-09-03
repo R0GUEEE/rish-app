@@ -142,6 +142,7 @@ const prepareRequest = {
   project_id: null,
   workspace_binding_revision: 1,
   transport_schema_version: 2 as const,
+  harness_id: 'dsh' as const,
   model: 'deepseek-v4-flash' as const,
   thinking_mode: 'off' as const,
   visible_message_ids: [],
@@ -176,6 +177,7 @@ const completeRequest = {
   launch_attempt: 1,
   expected_round_revision: 0,
   transport_schema_version: 2 as const,
+  harness_id: 'dsh' as const,
   model: 'deepseek-v4-flash' as const,
   thinking_mode: 'off' as const,
   visible_history_sha256: SHA256,
@@ -190,6 +192,7 @@ const completeRequest = {
 const roundReceipt = {
   schema_version: 2 as const,
   transport_schema_version: 2 as const,
+  harness_id: 'dsh' as const,
   turn_id: TASK_ID,
   task_id: TASK_ID,
   attempt_id: ATTEMPT_ID,

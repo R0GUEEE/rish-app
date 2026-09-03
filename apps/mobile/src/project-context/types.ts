@@ -1,4 +1,5 @@
-import type { DeepSeekModelId } from '../native/LocalRuntime';
+import type { HarnessModelId } from '../native/LocalRuntime';
+import type { ProviderHost, ProviderId } from '../harness/types';
 import type { WorkspaceRootRefV1 } from '../native/WorkspaceRoot';
 
 export const PROJECT_CONTEXT_SCHEMA_VERSION = 1 as const;
@@ -105,8 +106,8 @@ export type ProjectContextManifestV1 = {
   readonly conflicted: boolean;
   readonly captured_at: string;
   readonly policy_version: string;
-  readonly provider_host: 'api.deepseek.com';
-  readonly model: DeepSeekModelId;
+  readonly provider_host: ProviderHost;
+  readonly model: HarnessModelId;
   readonly included: readonly ProjectContextIncludedItemV1[];
   readonly omitted: readonly {
     readonly path: string;
@@ -162,8 +163,8 @@ export type ProjectContextSelectionV1 = {
   readonly schema_version: typeof PROJECT_CONTEXT_SCHEMA_VERSION;
   readonly project_id: string;
   readonly conversation_id: string;
-  readonly provider: 'deepseek';
-  readonly model: DeepSeekModelId;
+  readonly provider: ProviderId;
+  readonly model: HarnessModelId;
   readonly policy: 'chat-read-v1';
   readonly selected_paths: readonly string[];
 };
@@ -188,7 +189,7 @@ export type ProjectContextSelectionV2 = {
   readonly schema_version: 2;
   readonly root: ProjectContextWorkspaceRootRefV1;
   readonly conversation_id: string;
-  readonly model_id: DeepSeekModelId;
+  readonly model_id: HarnessModelId;
   readonly policy: 'chat-read-v1';
   readonly selected_paths: readonly string[];
 };
@@ -200,7 +201,7 @@ export type ProjectContextManifestV2 = {
   readonly project: ProjectContextProjectDescriptorV2;
   readonly project_id: string;
   readonly conversation_id: string;
-  readonly model_id: DeepSeekModelId;
+  readonly model_id: HarnessModelId;
   readonly policy: 'chat-read-v1';
   readonly branch: string | null;
   readonly head_oid: string | null;
@@ -270,7 +271,7 @@ export type ProjectContextVerifiedSendRequestV2 = {
   readonly consent_receipt_id: string;
   readonly root: ProjectContextWorkspaceRootRefV1;
   readonly conversation_id: string;
-  readonly model_id: DeepSeekModelId;
+  readonly model_id: HarnessModelId;
   readonly policy: 'chat-read-v1';
 };
 
@@ -344,7 +345,7 @@ export type ProjectContextAction =
       readonly consent: ProjectContextConsentV1;
     }
   | { readonly type: 'project_changed' }
-  | { readonly type: 'model_changed'; readonly model: DeepSeekModelId }
+  | { readonly type: 'model_changed'; readonly model: HarnessModelId }
   | { readonly type: 'provider_changed'; readonly providerHost: string }
   | { readonly type: 'policy_changed'; readonly policyVersion: string }
   | {

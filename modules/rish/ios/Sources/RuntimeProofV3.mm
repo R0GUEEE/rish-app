@@ -1,4 +1,5 @@
 #import "RuntimeProofV3.h"
+#import "RishHarnessCatalog.h"
 
 #import <CommonCrypto/CommonDigest.h>
 #import <objc/runtime.h>
@@ -649,13 +650,22 @@ static BOOL DSHProofV3ValidateRounds(NSArray *entries, NSError **error) {
   NSMutableSet<NSString *> *responseIdentifiers = [NSMutableSet set];
   for (NSUInteger index = 0; index < entries.count; index += 1) {
     id value = entries[index];
-    NSArray *keys = @[
+    NSMutableArray *keys = [@[
       @"round_id", @"provider_request_id", @"provider_response_id",
       @"round_index", @"model_input_sha256", @"request_body_sha256",
       @"finish_reason", @"outcome",
-    ];
+    ] mutableCopy];
+    // Rounds minted after the Harness split name the Harness that produced
+    // the model response; pre-split rounds omit the key and mean DSH.
+    BOOL namesHarness = [value isKindOfClass:NSDictionary.class] &&
+        ((NSDictionary *)value)[@"harness_id"] != nil;
+    if (namesHarness) [keys addObject:@"harness_id"];
     if (!DSHProofV3ExactKeys(value, keys, error)) return NO;
     NSDictionary *entry = value;
+    if (namesHarness &&
+        !DSHProofV3Enum(entry[@"harness_id"], DSHHarnessSupportedHarnessIds())) {
+      return DSHProofV3Fail(error, DSHRuntimeProofV3ErrorEnum);
+    }
     NSString *roundId = entry[@"round_id"];
     NSString *requestId = entry[@"provider_request_id"];
     NSUInteger roundIndex = NSNotFound;
@@ -837,10 +847,7 @@ static BOOL DSHProofV3ValidateAttestation(NSDictionary *attestation,
       !DSHProofV3ProviderHost(attestation[@"provider_host"])) {
     return DSHProofV3Fail(error, DSHRuntimeProofV3ErrorText);
   }
-  NSSet *models = [NSSet setWithArray:@[
-    @"deepseek-v4-flash", @"deepseek-v4-pro",
-    @"deepseek-v4-flash-vision-exp",
-  ]];
+  NSSet *models = DSHHarnessSupportedModels();
   NSSet *thinkingModes = [NSSet setWithArray:@[ @"off", @"high", @"max" ]];
   if (!DSHProofV3BoundedText(attestation[@"model"], 256) ||
       !DSHProofV3BoundedText(attestation[@"thinking_mode"], 16)) {

@@ -1,0 +1,470 @@
+#import <XCTest/XCTest.h>
+
+#import "../../../../modules/rish/ios/Sources/ClaudeProviderTransport.h"
+#import "../../../../modules/rish/ios/Sources/DSHCompletionV2.h"
+#import "../../../../modules/rish/ios/Sources/RishHarnessCatalog.h"
+
+@interface ClaudeTransportURLProtocol : NSURLProtocol
++ (void)setHandler:(void (^)(NSURLProtocol *, NSURLRequest *))handler;
++ (void)reset;
++ (NSUInteger)requestCount;
+@end
+
+@implementation ClaudeTransportURLProtocol
+
+static void (^ClaudeTransportHandler)(NSURLProtocol *, NSURLRequest *);
+static NSUInteger ClaudeTransportRequestCount = 0;
+
++ (void)setHandler:(void (^)(NSURLProtocol *, NSURLRequest *))handler {
+  @synchronized (self) { ClaudeTransportHandler = [handler copy]; }
+}
+
++ (void)reset {
+  @synchronized (self) {
+    ClaudeTransportHandler = nil;
+    ClaudeTransportRequestCount = 0;
+  }
+}
+
++ (NSUInteger)requestCount {
+  @synchronized (self) { return ClaudeTransportRequestCount; }
+}
+
++ (BOOL)canInitWithRequest:(NSURLRequest *)request {
+  NSString *scheme = request.URL.scheme.lowercaseString;
+  return [scheme isEqualToString:@"http"] || [scheme isEqualToString:@"https"];
+}
+
++ (NSURLRequest *)canonicalRequestForRequest:(NSURLRequest *)request {
+  return request;
+}
+
+- (void)startLoading {
+  void (^handler)(NSURLProtocol *, NSURLRequest *) = nil;
+  @synchronized (self.class) {
+    ClaudeTransportRequestCount += 1;
+    handler = [ClaudeTransportHandler copy];
+  }
+  if (handler != nil) {
+    handler(self, self.request);
+    return;
+  }
+  [self.client URLProtocol:self didFailWithError:
+      [NSError errorWithDomain:@"ClaudeTransportTests" code:1 userInfo:nil]];
+}
+
+- (void)stopLoading {}
+
+@end
+
+@interface ClaudeProviderTransportTests : XCTestCase
+@property(nonatomic, strong) NSURLSession *session;
+@property(nonatomic, strong) ClaudeProviderTransport *transport;
+@end
+
+@implementation ClaudeProviderTransportTests
+
+- (void)setUp {
+  [super setUp];
+  [ClaudeTransportURLProtocol reset];
+  NSURLSessionConfiguration *configuration =
+      NSURLSessionConfiguration.ephemeralSessionConfiguration;
+  configuration.protocolClasses = @[ClaudeTransportURLProtocol.class];
+  self.session = [NSURLSession sessionWithConfiguration:configuration];
+  self.transport = [[ClaudeProviderTransport alloc]
+      initWithSession:self.session uuidGenerator:nil monotonicClock:nil];
+}
+
+- (void)tearDown {
+  [self.session invalidateAndCancel];
+  self.transport = nil;
+  self.session = nil;
+  [ClaudeTransportURLProtocol reset];
+  [super tearDown];
+}
+
+- (NSData *)jsonData:(id)value {
+  return [NSJSONSerialization dataWithJSONObject:value options:0 error:nil];
+}
+
+- (void)respond:(NSURLProtocol *)protocol
+        request:(NSURLRequest *)request
+           data:(NSData *)data
+         status:(NSInteger)status {
+  NSHTTPURLResponse *response = [[NSHTTPURLResponse alloc]
+      initWithURL:request.URL statusCode:status HTTPVersion:@"HTTP/1.1"
+     headerFields:@{ @"Content-Type": @"application/json" }];
+  [protocol.client URLProtocol:protocol didReceiveResponse:response
+            cacheStoragePolicy:NSURLCacheStorageNotAllowed];
+  if (data.length > 0) [protocol.client URLProtocol:protocol didLoadData:data];
+  [protocol.client URLProtocolDidFinishLoading:protocol];
+}
+
+- (NSDictionary *)bodyForModel:(NSString *)model
+                       thinking:(NSString *)mode
+                       messages:(NSArray *)messages
+                          tools:(NSArray *)tools {
+  NSError *error = nil;
+  NSDictionary *body = [self.transport providerRequestBodyForModel:model
+      thinkingMode:mode messages:messages tools:tools streaming:NO error:&error];
+  XCTAssertNotNil(body, @"%@ %@: %@", model, mode, error);
+  return body;
+}
+
+- (void)testHeadersCarryApiKeyAndAnthropicVersion {
+  XCTAssertEqualObjects([self.transport providerBaseURL].absoluteString,
+                        @"https://api.anthropic.com/v1/messages");
+  NSDictionary *headers = [self.transport providerHeadersWithCredential:@"sk-ant-test"];
+  XCTAssertEqualObjects(headers[@"x-api-key"], @"sk-ant-test");
+  XCTAssertEqualObjects(headers[@"anthropic-version"], @"2023-06-01");
+  XCTAssertNil(headers[@"Authorization"]);
+  XCTAssertEqualObjects([self.transport providerHarnessId], @"claude-code");
+  XCTAssertTrue([self.transport providerSupportsModel:@"claude-fable-5-1"]);
+  XCTAssertFalse([self.transport providerSupportsModel:@"gpt-5.6"]);
+  XCTAssertFalse([self.transport providerSupportsModel:@"deepseek-v4-flash"]);
+}
+
+- (void)testAdaptiveFamilyMapsThinkingModesWithoutBudgetTokens {
+  NSArray *messages = @[
+    @{ @"role": @"system", @"content": @"system policy" },
+    @{ @"role": @"user", @"content": @"hello" },
+  ];
+  NSArray *tools = @[@{ @"type": @"function", @"function": @{
+    @"name": @"write_file", @"description": @"Writes a file",
+    @"parameters": @{ @"type": @"object" } } }];
+  for (NSString *model in @[ @"claude-sonnet-5", @"claude-opus-5" ]) {
+    NSDictionary *max = [self bodyForModel:model thinking:@"max"
+                                  messages:messages tools:tools];
+    XCTAssertEqualObjects(max[@"model"], model);
+    XCTAssertEqualObjects(max[@"stream"], @NO);
+    XCTAssertEqualObjects(max[@"thinking"], (@{ @"type": @"adaptive",
+                                                 @"display": @"summarized" }));
+    XCTAssertEqualObjects(max[@"output_config"], @{ @"effort": @"max" });
+    XCTAssertEqualObjects(max[@"max_tokens"], @16384);
+    XCTAssertNil(max[@"thinking"][@"budget_tokens"]);
+    XCTAssertEqualObjects(max[@"system"], (@[ @{ @"type": @"text",
+                                                  @"text": @"system policy" } ]));
+    XCTAssertEqual([max[@"messages"] count], 1u);
+    NSDictionary *tool = [max[@"tools"] firstObject];
+    XCTAssertEqualObjects(tool[@"name"], @"write_file");
+    XCTAssertEqualObjects(tool[@"description"], @"Writes a file");
+    XCTAssertEqualObjects(tool[@"input_schema"][@"type"], @"object");
+    XCTAssertNil(tool[@"parameters"]);
+
+    NSDictionary *high = [self bodyForModel:model thinking:@"high"
+                                   messages:messages tools:@[]];
+    XCTAssertEqualObjects(high[@"output_config"], @{ @"effort": @"high" });
+    XCTAssertNil(high[@"tools"]);
+
+    NSDictionary *off = [self bodyForModel:model thinking:@"off"
+                                  messages:messages tools:@[]];
+    XCTAssertEqualObjects(off[@"thinking"], @{ @"type": @"disabled" });
+    XCTAssertNil(off[@"output_config"]);
+    XCTAssertEqualObjects(off[@"max_tokens"], @8192);
+  }
+}
+
+- (void)testAlwaysOnFamilyNeverDisablesThinking {
+  NSArray *messages = @[ @{ @"role": @"user", @"content": @"hello" } ];
+  NSDictionary *off = [self bodyForModel:@"claude-fable-5-1" thinking:@"off"
+                                messages:messages tools:@[]];
+  XCTAssertNil(off[@"thinking"]);
+  XCTAssertEqualObjects(off[@"output_config"], @{ @"effort": @"low" });
+  XCTAssertEqualObjects(off[@"max_tokens"], @8192);
+  NSDictionary *high = [self bodyForModel:@"claude-fable-5-1" thinking:@"high"
+                                 messages:messages tools:@[]];
+  XCTAssertEqualObjects(high[@"thinking"][@"type"], @"adaptive");
+  XCTAssertEqualObjects(high[@"thinking"][@"display"], @"summarized");
+  XCTAssertEqualObjects(high[@"output_config"], @{ @"effort": @"high" });
+  XCTAssertEqualObjects(high[@"max_tokens"], @16384);
+}
+
+- (void)testBudgetFamilyUsesBudgetTokensAndSkipsThinkingOnToolContinuation {
+  NSArray *fresh = @[ @{ @"role": @"user", @"content": @"hello" } ];
+  NSDictionary *high = [self bodyForModel:@"claude-haiku-4-5-20251001" thinking:@"high"
+                                 messages:fresh tools:@[]];
+  XCTAssertEqualObjects(high[@"thinking"], (@{ @"type": @"enabled",
+                                                @"budget_tokens": @4096 }));
+  XCTAssertEqualObjects(high[@"max_tokens"], @(4096 + 8192));
+  XCTAssertNil(high[@"output_config"]);
+  NSDictionary *max = [self bodyForModel:@"claude-haiku-4-5-20251001" thinking:@"max"
+                                messages:fresh tools:@[]];
+  XCTAssertEqualObjects(max[@"thinking"][@"budget_tokens"], @16000);
+  XCTAssertEqualObjects(max[@"max_tokens"], @(16000 + 8192));
+  NSDictionary *off = [self bodyForModel:@"claude-haiku-4-5-20251001" thinking:@"off"
+                                messages:fresh tools:@[]];
+  XCTAssertNil(off[@"thinking"]);
+  XCTAssertEqualObjects(off[@"max_tokens"], @8192);
+
+  // A continuation round replays a tool_use turn whose thinking block (and
+  // signature) the closed transcript never carried; thinking stays off.
+  NSArray *continuation = @[
+    @{ @"role": @"user", @"content": @"write it" },
+    @{ @"role": @"assistant", @"content": @"", @"reasoning_content": @"plan",
+       @"tool_calls": @[ @{ @"id": @"toolu_1", @"type": @"function",
+         @"function": @{ @"name": @"write_file",
+                         @"arguments": @"{\"path\":\"a.txt\",\"content\":\"x\"}" } } ] },
+    @{ @"role": @"tool", @"tool_call_id": @"toolu_1", @"content": @"ok" },
+  ];
+  NSDictionary *round2 = [self bodyForModel:@"claude-haiku-4-5-20251001" thinking:@"high"
+                                   messages:continuation tools:@[]];
+  XCTAssertNil(round2[@"thinking"]);
+  XCTAssertEqualObjects(round2[@"max_tokens"], @8192);
+  // The adaptive family keeps thinking on for the same continuation.
+  NSDictionary *sonnet = [self bodyForModel:@"claude-sonnet-5" thinking:@"high"
+                                   messages:continuation tools:@[]];
+  XCTAssertEqualObjects(sonnet[@"thinking"][@"type"], @"adaptive");
+}
+
+- (void)testTranscriptConvertsToolRoundsWithoutReplayingReasoning {
+  NSArray *messages = @[
+    @{ @"role": @"user", @"content": @"write both" },
+    @{ @"role": @"assistant", @"content": @"On it.", @"reasoning_content": @"secret plan",
+       @"tool_calls": @[
+         @{ @"id": @"toolu_1", @"type": @"function",
+            @"function": @{ @"name": @"write_file", @"arguments": @"{\"path\":\"a.txt\"}" } },
+         @{ @"id": @"toolu_2", @"type": @"function",
+            @"function": @{ @"name": @"read_file", @"arguments": @"{\"path\":\"b.txt\"}" } },
+       ] },
+    @{ @"role": @"tool", @"tool_call_id": @"toolu_1", @"content": @"written" },
+    @{ @"role": @"tool", @"tool_call_id": @"toolu_2", @"content": @"file contents" },
+    @{ @"role": @"assistant", @"content": @"", @"reasoning_content": @"only thoughts",
+       @"tool_calls": @[] },
+  ];
+  NSDictionary *body = [self bodyForModel:@"claude-opus-5" thinking:@"high"
+                                 messages:messages tools:@[]];
+  NSArray *converted = body[@"messages"];
+  XCTAssertEqual([converted count], 4u);
+  XCTAssertEqualObjects(converted[0][@"role"], @"user");
+  XCTAssertEqualObjects(converted[1][@"role"], @"assistant");
+  NSArray *assistantBlocks = converted[1][@"content"];
+  XCTAssertEqual([assistantBlocks count], 3u);
+  XCTAssertEqualObjects(assistantBlocks[0], (@{ @"type": @"text", @"text": @"On it." }));
+  XCTAssertEqualObjects(assistantBlocks[1][@"type"], @"tool_use");
+  XCTAssertEqualObjects(assistantBlocks[1][@"id"], @"toolu_1");
+  XCTAssertEqualObjects(assistantBlocks[1][@"name"], @"write_file");
+  XCTAssertEqualObjects(assistantBlocks[1][@"input"], @{ @"path": @"a.txt" });
+  XCTAssertEqualObjects(assistantBlocks[2][@"id"], @"toolu_2");
+  for (NSDictionary *block in assistantBlocks) {
+    XCTAssertFalse([block[@"type"] isEqual:@"thinking"], @"reasoning must not be replayed");
+  }
+  // Both tool results answer one assistant turn inside a single user turn.
+  XCTAssertEqualObjects(converted[2][@"role"], @"user");
+  NSArray *results = converted[2][@"content"];
+  XCTAssertEqual([results count], 2u);
+  XCTAssertEqualObjects(results[0], (@{ @"type": @"tool_result",
+                                        @"tool_use_id": @"toolu_1",
+                                        @"content": @"written" }));
+  XCTAssertEqualObjects(results[1][@"tool_use_id"], @"toolu_2");
+  // A reasoning-only assistant turn keeps its slot with placeholder text.
+  XCTAssertEqualObjects(converted[3][@"role"], @"assistant");
+  XCTAssertEqualObjects(converted[3][@"content"][0][@"type"], @"text");
+  XCTAssertEqual([converted[3][@"content"] count], 1u);
+}
+
+- (void)testRejectsForeignModelsAndMalformedTranscripts {
+  NSError *error = nil;
+  XCTAssertNil(([self.transport providerRequestBodyForModel:@"gpt-5.6" thinkingMode:@"off"
+      messages:@[ @{ @"role": @"user", @"content": @"x" } ] tools:@[] streaming:NO error:&error]));
+  XCTAssertEqualObjects(error.localizedDescription, @"E_COMPLETION_MODEL");
+  error = nil;
+  XCTAssertNil(([self.transport providerRequestBodyForModel:@"claude-sonnet-5" thinkingMode:@"off"
+      messages:@[ @{ @"role": @"assistant", @"tool_calls": @[ @{ @"id": @"x" } ] } ]
+      tools:@[] streaming:NO error:&error]));
+  XCTAssertEqualObjects(error.localizedDescription, @"E_COMPLETION_TRANSCRIPT");
+  error = nil;
+  XCTAssertNil(([self.transport providerRequestBodyForModel:@"claude-sonnet-5" thinkingMode:@"off"
+      messages:@[ @{ @"role": @"user", @"content": @"x" } ]
+      tools:@[ @{ @"type": @"function", @"function": @{ @"name": @"broken" } } ]
+      streaming:NO error:&error]));
+  XCTAssertEqualObjects(error.localizedDescription, @"E_COMPLETION_TOOLS");
+}
+
+- (NSDictionary *)parse:(NSDictionary *)payload model:(NSString *)model error:(NSError **)error {
+  return [self.transport providerParseResponseData:[self jsonData:payload]
+                                    requestedModel:model thinkingMode:@"high" error:error];
+}
+
+- (void)testParsesContentBlocksAndMapsStopReasons {
+  NSError *error = nil;
+  NSDictionary *parsed = [self parse:@{
+    @"id": @"msg_123", @"type": @"message", @"role": @"assistant",
+    @"model": @"claude-sonnet-5-20260415",
+    @"content": @[
+      @{ @"type": @"thinking", @"thinking": @"reasoned", @"signature": @"sig" },
+      @{ @"type": @"redacted_thinking", @"data": @"opaque" },
+      @{ @"type": @"text", @"text": @"done" },
+    ],
+    @"stop_reason": @"end_turn", @"stop_sequence": NSNull.null,
+    @"usage": @{ @"input_tokens": @10, @"output_tokens": @5 },
+  } model:@"claude-sonnet-5" error:&error];
+  XCTAssertNil(error);
+  XCTAssertEqualObjects(parsed[@"provider_response_id"], @"msg_123");
+  XCTAssertEqualObjects(parsed[@"model"], @"claude-sonnet-5",
+                        @"a dated snapshot of the requested alias counts as the requested model");
+  XCTAssertEqualObjects(parsed[@"text"], @"done");
+  XCTAssertEqualObjects(parsed[@"reasoning"], @"reasoned");
+  XCTAssertEqualObjects(parsed[@"finish_reason"], @"stop");
+  XCTAssertEqualObjects(parsed[@"tool_calls"], @[]);
+
+  parsed = [self parse:@{
+    @"id": @"msg_456", @"model": @"claude-sonnet-5",
+    @"content": @[
+      @{ @"type": @"text", @"text": @"Listing." },
+      @{ @"type": @"tool_use", @"id": @"toolu_9", @"name": @"list_dir", @"input": @{ @"path": @"." } },
+    ],
+    @"stop_reason": @"tool_use",
+  } model:@"claude-sonnet-5" error:&error];
+  XCTAssertEqualObjects(parsed[@"finish_reason"], @"tool_calls");
+  XCTAssertEqualObjects(parsed[@"tool_calls"], (@[ @{ @"id": @"toolu_9", @"name": @"list_dir",
+                                                      @"arguments": @"{\"path\":\".\"}" } ]));
+
+  parsed = [self parse:@{ @"id": @"msg_789", @"model": @"claude-haiku-4-5-20251001",
+    @"content": @[ @{ @"type": @"text", @"text": @"partial" } ], @"stop_reason": @"max_tokens" }
+    model:@"claude-haiku-4-5-20251001" error:&error];
+  XCTAssertEqualObjects(parsed[@"finish_reason"], @"length");
+
+  parsed = [self parse:@{ @"id": @"msg_r", @"model": @"claude-fable-5-1", @"content": @[],
+    @"stop_reason": @"refusal", @"stop_details": @{ @"type": @"refusal", @"category": @"cyber" } }
+    model:@"claude-fable-5-1" error:&error];
+  XCTAssertNil(error);
+  XCTAssertEqualObjects(parsed[@"finish_reason"], @"content_filter");
+  XCTAssertEqualObjects(parsed[@"text"], @"");
+
+  parsed = [self parse:@{ @"id": @"msg_p", @"model": @"claude-opus-5",
+    @"content": @[ @{ @"type": @"text", @"text": @"still going" } ], @"stop_reason": @"pause_turn" }
+    model:@"claude-opus-5" error:&error];
+  XCTAssertEqualObjects(parsed[@"finish_reason"], @"stop");
+}
+
+- (void)testParserFailsClosedOnMismatchesAndProviderErrors {
+  NSError *error = nil;
+  XCTAssertNil(([self parse:@{ @"id": @"m", @"model": @"claude-opus-5",
+    @"content": @[ @{ @"type": @"text", @"text": @"x" } ], @"stop_reason": @"end_turn" }
+    model:@"claude-sonnet-5" error:&error]));
+  XCTAssertEqualObjects(error.localizedDescription, @"E_COMPLETION_MODEL_MISMATCH");
+  error = nil;
+  XCTAssertNil(([self parse:@{ @"type": @"error",
+    @"error": @{ @"type": @"rate_limit_error", @"message": @"slow down" } }
+    model:@"claude-sonnet-5" error:&error]));
+  XCTAssertEqualObjects(error.localizedDescription, @"E_COMPLETION_RESPONSE_JSON");
+  error = nil;
+  XCTAssertNil(([self parse:@{ @"model": @"claude-sonnet-5",
+    @"content": @[ @{ @"type": @"text", @"text": @"x" } ], @"stop_reason": @"end_turn" }
+    model:@"claude-sonnet-5" error:&error]));
+  XCTAssertEqualObjects(error.localizedDescription, @"E_COMPLETION_PROVIDER_RESPONSE_ID");
+  error = nil;
+  XCTAssertNil(([self parse:@{ @"id": @"m", @"model": @"claude-sonnet-5",
+    @"content": @[ @{ @"type": @"text", @"text": @"x" } ], @"stop_reason": @"tool_use" }
+    model:@"claude-sonnet-5" error:&error]));
+  XCTAssertEqualObjects(error.localizedDescription, @"E_COMPLETION_FINISH_RELATION");
+  error = nil;
+  XCTAssertNil(([self parse:@{ @"id": @"m", @"model": @"claude-sonnet-5",
+    @"content": @[ @{ @"type": @"tool_use", @"id": @"t", @"name": @"x" } ],
+    @"stop_reason": @"tool_use" } model:@"claude-sonnet-5" error:&error]));
+  XCTAssertEqualObjects(error.localizedDescription, @"E_COMPLETION_TOOL_CALL_INVALID");
+  error = nil;
+  XCTAssertNil(([self parse:@{ @"id": @"m", @"model": @"claude-sonnet-5",
+    @"content": @[], @"stop_reason": @"end_turn" } model:@"claude-sonnet-5" error:&error]));
+  XCTAssertEqualObjects(error.localizedDescription, @"E_COMPLETION_EMPTY_RESPONSE");
+  error = nil;
+  XCTAssertNil(([self parse:@{ @"id": @"m", @"model": @"claude-sonnet-5",
+    @"content": @[ @{ @"type": @"text", @"text": @"x" } ], @"stop_reason": @"future_reason" }
+    model:@"claude-sonnet-5" error:&error]));
+  XCTAssertEqualObjects(error.localizedDescription, @"E_COMPLETION_FINISH_RELATION");
+}
+
+- (void)testHTTPStatusMappingNamesRateLimitsAndBadCredentials {
+  XCTAssertEqualObjects([self.transport providerErrorCodeForHTTPStatus:401 data:nil],
+                        @"E_COMPLETION_CREDENTIAL_UNAVAILABLE");
+  XCTAssertEqualObjects([self.transport providerErrorCodeForHTTPStatus:403 data:nil],
+                        @"E_COMPLETION_CREDENTIAL_UNAVAILABLE");
+  XCTAssertEqualObjects([self.transport providerErrorCodeForHTTPStatus:429 data:nil],
+                        @"E_COMPLETION_HTTP_429");
+  XCTAssertEqualObjects([self.transport providerErrorCodeForHTTPStatus:529 data:nil],
+                        @"E_COMPLETION_HTTP_429");
+  XCTAssertEqualObjects([self.transport providerErrorCodeForHTTPStatus:500 data:nil],
+                        @"E_COMPLETION_HTTP_STATUS");
+  XCTAssertEqualObjects([self.transport providerErrorCodeForHTTPStatus:400 data:nil],
+                        @"E_COMPLETION_HTTP_STATUS");
+}
+
+- (void)startRoundExpectingResult:(NSDictionary **)result errorCode:(NSString **)errorCode {
+  NSString *roundId = @"33333333-3333-4333-8333-333333333333";
+  NSString *providerId = @"44444444-4444-4444-8444-444444444444";
+  NSData *body = [self jsonData:@{ @"model": @"claude-sonnet-5" }];
+  __block NSDictionary *value = nil;
+  __block NSString *code = nil;
+  XCTestExpectation *done = [self expectationWithDescription:@"round"];
+  [self.transport startRequestWithSchemaVersion:2 roundId:roundId generation:1
+      credentialGeneration:1 providerRequestId:providerId
+      credential:@"sk-ant-test" requestedModel:@"claude-sonnet-5"
+      thinkingMode:@"off" credentialGenerationIsCurrent:^BOOL(__unused NSUInteger g) { return YES; }
+      startedAt:1.0 bodyData:body visibleHistory:@[] modelInput:@[]
+      bindTask:^BOOL(__unused NSURLSessionDataTask *t) { return YES; }
+      claimRound:^BOOL(__unused BOOL *redirected) { return YES; }
+      markRedirected:nil redirectDecision:nil
+      completion:^(NSDictionary *v, NSString *c) {
+        value = v; code = c; [done fulfill];
+      }];
+  [self waitForExpectations:@[done] timeout:5];
+  if (result != NULL) *result = value;
+  if (errorCode != NULL) *errorCode = code;
+}
+
+- (void)testRoundTripThroughStubServerCarriesHarnessIdAndHeaders {
+  __block NSDictionary *captured = nil;
+  [ClaudeTransportURLProtocol setHandler:^(NSURLProtocol *protocol, NSURLRequest *request) {
+    captured = request.allHTTPHeaderFields;
+    [self respond:protocol request:request data:[self jsonData:@{
+      @"id": @"msg-round", @"model": @"claude-sonnet-5",
+      @"content": @[ @{ @"type": @"text", @"text": @"answer" } ],
+      @"stop_reason": @"end_turn",
+    }] status:200];
+  }];
+  NSDictionary *result = nil;
+  NSString *errorCode = nil;
+  [self startRoundExpectingResult:&result errorCode:&errorCode];
+  XCTAssertNil(errorCode);
+  XCTAssertEqualObjects(result[@"harness_id"], @"claude-code");
+  XCTAssertEqualObjects(result[@"text"], @"answer");
+  XCTAssertEqualObjects(result[@"requested_model"], @"claude-sonnet-5");
+  XCTAssertEqualObjects(captured[@"x-api-key"], @"sk-ant-test");
+  XCTAssertEqualObjects(captured[@"anthropic-version"], @"2023-06-01");
+  XCTAssertEqual([ClaudeTransportURLProtocol requestCount], 1u);
+}
+
+- (void)testRateLimitedRoundSurfacesStableCodeWithoutBody {
+  [ClaudeTransportURLProtocol setHandler:^(NSURLProtocol *protocol, NSURLRequest *request) {
+    [self respond:protocol request:request data:[self jsonData:@{
+      @"type": @"error", @"error": @{ @"type": @"rate_limit_error", @"message": @"secret" } }]
+      status:429];
+  }];
+  NSDictionary *result = nil;
+  NSString *errorCode = nil;
+  [self startRoundExpectingResult:&result errorCode:&errorCode];
+  XCTAssertNil(result);
+  XCTAssertEqualObjects(errorCode, @"E_COMPLETION_HTTP_429");
+}
+
+- (void)testStreamingParserEmitsTextThinkingAndFinishDeltas {
+  id<DSHProviderStreamEventParsing> parser = [self.transport providerNewStreamEventParser];
+  NSData *chunk = [@"event: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"delta\":{\"type\":\"text_delta\",\"text\":\"hel\"}}\n\n"
+      dataUsingEncoding:NSUTF8StringEncoding];
+  NSError *error = nil;
+  NSArray *deltas = [parser appendBytes:(const uint8_t *)chunk.bytes length:chunk.length error:&error];
+  XCTAssertNil(error);
+  XCTAssertEqualObjects(deltas, (@[ @{ @"type": @"delta", @"content": @"hel" } ]));
+  NSData *thinking = [@"event: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"delta\":{\"type\":\"thinking_delta\",\"thinking\":\"plan\"}}\n\n"
+      dataUsingEncoding:NSUTF8StringEncoding];
+  deltas = [parser appendBytes:(const uint8_t *)thinking.bytes length:thinking.length error:&error];
+  XCTAssertEqualObjects(deltas, (@[ @{ @"type": @"delta", @"reasoning": @"plan" } ]));
+  NSData *stop = [@"event: message_delta\ndata: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"refusal\"}}\n\n"
+      dataUsingEncoding:NSUTF8StringEncoding];
+  deltas = [parser appendBytes:(const uint8_t *)stop.bytes length:stop.length error:&error];
+  XCTAssertEqualObjects(deltas, (@[ @{ @"type": @"delta", @"finish_reason": @"content_filter" } ]));
+  XCTAssertEqualObjects([parser finish:&error], @[]);
+  XCTAssertNil(error);
+}
+
+@end

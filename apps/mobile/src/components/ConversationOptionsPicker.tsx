@@ -13,7 +13,7 @@ import {
 } from './ModelPicker';
 import { AppIcon } from './AppIcon';
 
-const MODELS = Object.keys(modelDetails) as SupportedModel[];
+const ALL_MODELS = Object.keys(modelDetails) as SupportedModel[];
 const THINKING_MODES: readonly ConversationThinkingMode[] = [
   'off',
   'high',
@@ -35,6 +35,8 @@ type Props = {
   disabled?: boolean;
   model: SupportedModel;
   thinkingMode: ConversationThinkingMode;
+  /** Model catalog of the selected Harness; defaults to every known model. */
+  models?: readonly SupportedModel[];
   visible: boolean;
   onClose: () => void;
   onSelectModel: (model: SupportedModel) => void;
@@ -50,6 +52,7 @@ export function ConversationOptionsPicker({
   disabled = false,
   model,
   thinkingMode,
+  models: modelsProp,
   visible,
   onClose,
   onSelectModel,
@@ -92,7 +95,7 @@ export function ConversationOptionsPicker({
               accessibilityLabel={t('model.title')}
               accessibilityRole="radiogroup"
             >
-              {MODELS.map((candidate, index) => {
+              {(modelsProp ?? ALL_MODELS).map((candidate, index) => {
                 const details = localizedModelDetails(candidate, t);
                 const isSelected = candidate === model;
                 return (

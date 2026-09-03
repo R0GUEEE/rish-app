@@ -15,6 +15,22 @@ typedef BOOL (^DSHCompletionProviderTransportCredentialGenerationIsCurrentBlock)
 typedef void (^DSHCompletionProviderTransportMarkRedirectedBlock)(NSURLSessionDataTask *task);
 typedef void (^DSHCompletionProviderTransportRedirectDecisionBlock)(BOOL rejected);
 
+@protocol DSHProviderStreamEventParsing <NSObject>
+
+/// Feed raw chunk bytes. Returns the deltas decoded from complete SSE
+/// events, or nil with *error on malformed/oversized input.
+- (nullable NSArray<NSDictionary<NSString *, id> *> *)appendBytes:(const uint8_t *)bytes
+                                                             length:(NSUInteger)length
+                                                               error:(NSError **)error;
+
+/// Flush any complete-but-unfed events at stream end.
+- (nullable NSArray<NSDictionary<NSString *, id> *> *)finish:(NSError **)error;
+
+/// Resets to a clean state for reuse.
+- (void)reset;
+
+@end
+
 /// Completion carries only a sanitized provider result or a stable,
 /// value-free error code.  Provider response bodies, request bytes, and
 /// credentials never cross this seam.
@@ -85,6 +101,46 @@ typedef void (^DSHCompletionProviderTransportCompletionBlock)(
                           newRequest:(NSURLRequest *)request
                    completionHandler:(void (^)(NSURLRequest * _Nullable))completionHandler;
 
+/// Provider hooks. The base class implements the DeepSeek dialect;
+/// ClaudeProviderTransport and CodexProviderTransport override these to
+/// produce the Anthropic and OpenAI wire dialects while inheriting the
+/// shared slot, digest, cancellation, and redirect orchestration above.
+/// Streaming parsers conform to DSHProviderStreamEventParsing and emit the
+/// same delta vocabulary {type, content?, reasoning?, finish_reason?}.
+- (NSURL *)providerBaseURL;
+
+- (NSDictionary<NSString *, NSString *> *)providerHeadersWithCredential:(NSString *)credential;
+
+/// Builds the provider request body from neutral message/tool inputs.
+- (NSDictionary<NSString *, id> *)providerRequestBodyForModel:(NSString *)model
+                                                 thinkingMode:(NSString *)thinkingMode
+                                                     messages:(NSArray<NSDictionary<NSString *, id> *> *)messages
+                                                        tools:(NSArray<NSDictionary<NSString *, id> *> *)tools
+                                                    streaming:(BOOL)streaming
+                                                        error:(NSError **)error;
+
+/// Parses one complete provider response body into the canonical fragment
+/// {provider_response_id, model, text, reasoning, tool_calls, finish_reason}.
+- (NSDictionary<NSString *, id> *)providerParseResponseData:(NSData *)data
+                                              requestedModel:(NSString *)requestedModel
+                                                thinkingMode:(NSString *)thinkingMode
+                                                      error:(NSError **)error;
+
+/// Maps a non-2xx HTTP status to a stable error code.
+- (NSString *)providerErrorCodeForHTTPStatus:(NSInteger)statusCode
+                                         data:(NSData * _Nullable)data;
+
+/// Fresh streaming parser for this provider's SSE dialect.
+- (id<DSHProviderStreamEventParsing>)providerNewStreamEventParser;
+
+/// Whether this transport serves the given model id.
+- (BOOL)providerSupportsModel:(NSString *)model;
+
+/// Request timeout for the streaming or single-shot flavor.
+- (NSTimeInterval)providerTimeoutIntervalForStreaming:(BOOL)streaming;
+
+/// Stable harness id recorded on results this transport produces.
+- (NSString *)providerHarnessId;
 @end
 
 NS_ASSUME_NONNULL_END

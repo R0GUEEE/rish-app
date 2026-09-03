@@ -1,4 +1,5 @@
 #import "AgentRoundJournal.h"
+#import "RishHarnessCatalog.h"
 
 #import "AgentTranscriptStore.h"
 
@@ -241,13 +242,13 @@ static BOOL DSHAgentRoundMessagesMatchCalls(NSArray *messages,
 
 static BOOL DSHAgentCompletionReceipt(NSDictionary *receipt,
                                       NSDictionary *locator) {
-  if (!DSHAgentExactDictionaryKeys(receipt, @[
+  if (!DSHAgentExactDictionaryKeysWithOptional(receipt, @[
         @"schema_version", @"transport_schema_version", @"turn_id",
         @"attempt_id", @"round_id", @"round_index", @"provider_request_id",
         @"provider_response_id", @"requested_model", @"model", @"thinking_mode",
         @"finish_reason", @"latency_ms", @"visible_history_sha256",
         @"model_input_sha256", @"request_body_sha256", @"project_context_receipt",
-      ]) || !DSHAgentSafeInteger(receipt[@"schema_version"], 1, NO) ||
+      ], @[@"harness_id"]) || !DSHAgentSafeInteger(receipt[@"schema_version"], 1, NO) ||
       (![receipt[@"transport_schema_version"] isEqual:@2] &&
        ![receipt[@"transport_schema_version"] isEqual:@3]) ||
       !DSHAgentCanonicalUUID(receipt[@"turn_id"]) ||
@@ -270,9 +271,11 @@ static BOOL DSHAgentCompletionReceipt(NSDictionary *receipt,
       !DSHAgentCanonicalSHA256(receipt[@"request_body_sha256"])) {
     return NO;
   }
-  NSSet *models = [NSSet setWithArray:@[
-    @"deepseek-v4-flash", @"deepseek-v4-pro", @"deepseek-v4-flash-vision-exp",
-  ]];
+  NSSet *models = DSHHarnessSupportedModels();
+  if (receipt[@"harness_id"] != nil &&
+      ![DSHHarnessIdForModel(receipt[@"model"]) isEqual:receipt[@"harness_id"]]) {
+    return NO;
+  }
   if (![models containsObject:receipt[@"requested_model"]] ||
       ![models containsObject:receipt[@"model"]] ||
       ![receipt[@"requested_model"] isEqual:receipt[@"model"]] ||

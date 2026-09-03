@@ -1,5 +1,6 @@
 import { NativeModules } from 'react-native';
 
+import type { CredentialSlot, HarnessId } from '../harness/types';
 import {
   CompletionBridgeError,
   encodeCompleteV2Request,
@@ -17,6 +18,7 @@ import type {
   CompleteV2Request,
   CompleteV2Result,
   CompletionMessage,
+  HarnessModelId,
   DeepSeekModelId,
   DeepSeekThinkingMode,
 } from '../completion/types';
@@ -34,6 +36,7 @@ export type {
   CompleteV2ToolCall,
   DeepSeekModelId,
   DeepSeekThinkingMode,
+  HarnessModelId,
 } from '../completion/types';
 
 export type RuntimeProofChecks = {
@@ -149,6 +152,8 @@ export type CredentialPromptResult = {
   status: 'configured' | 'cancelled';
 };
 
+export type { CredentialSlot } from '../harness/types';
+
 export type ClearCredentialResult = {
   status: 'cleared';
 };
@@ -178,8 +183,8 @@ export type ModelTransitionSource =
 
 export type ModelTransitionProofEntry = {
   conversation_id: string;
-  from_model: DeepSeekModelId;
-  to_model: DeepSeekModelId;
+  from_model: HarnessModelId;
+  to_model: HarnessModelId;
   source: ModelTransitionSource;
   request_epoch: number;
   request_state: 'idle' | 'sending';
@@ -195,6 +200,12 @@ type NativeLocalRuntime = {
     locale: CredentialPromptLocale,
   ): Promise<CredentialPromptResult>;
   clearCredential(): Promise<ClearCredentialResult>;
+  credentialStatusForSlot?(slot: CredentialSlot): Promise<CredentialStatus>;
+  presentCredentialPromptForSlot?(
+    slot: CredentialSlot,
+    locale: CredentialPromptLocale,
+  ): Promise<CredentialPromptResult>;
+  clearCredentialForSlot?(slot: CredentialSlot): Promise<ClearCredentialResult>;
   complete(
     model: DeepSeekModelId,
     history: CompletionMessage[],
@@ -279,15 +290,19 @@ function classifyCompleteV2Request(
 
 async function completeV2(
   request: CompleteV2Request,
+  harnessId?: HarnessId,
 ): Promise<CompleteV2Result>;
 async function completeV2(
   request: CompleteRoundV2Request,
+  harnessId?: HarnessId,
 ): Promise<CompleteRoundV2Result>;
 async function completeV2(
   request: CompleteRoundV3Request,
+  harnessId?: HarnessId,
 ): Promise<CompleteRoundV3Result>;
 async function completeV2(
   request: CompleteV2Request | CompleteRoundV2Request | CompleteRoundV3Request,
+  harnessId: HarnessId = 'dsh',
 ): Promise<CompleteV2Result | CompleteRoundV2Result | CompleteRoundV3Result> {
   let classified:
     | { readonly kind: 'legacy'; readonly request: CompleteV2Request }
@@ -326,11 +341,14 @@ async function completeV2(
       throw new CompletionBridgeError('E_COMPLETION_NATIVE');
     }
     if (classified.kind === 'schema3') {
-      const envelope = encodeCompleteV3Request(classified.request);
+      const envelope = encodeCompleteV3Request(
+        classified.request,
+        harnessId,
+      );
       const raw = await nativeModule.completeV2(envelope);
       return validateCompleteV3Result(raw, classified.request);
     }
-    const envelope = encodeCompleteV2Request(classified.request);
+    const envelope = encodeCompleteV2Request(classified.request, harnessId);
     const raw = await nativeModule.completeV2(envelope);
     return validateCompleteV2Result(raw, classified.request);
   } catch (error) {
@@ -346,6 +364,50 @@ export const LocalRuntime = {
   presentCredentialPrompt: (locale: CredentialPromptLocale) =>
     required().presentCredentialPrompt(safeCredentialPromptLocale(locale)),
   clearCredential: () => required().clearCredential(),
+  credentialStatusForSlot: (slot: CredentialSlot) => {
+    const module = required() as NativeLocalRuntime & {
+      credentialStatusForSlot?: (slot: CredentialSlot) => Promise<CredentialStatus>;
+    };
+    if (typeof module.credentialStatusForSlot !== 'function') {
+      return required().credentialStatus();
+    }
+    return module.credentialStatusForSlot(slot);
+  },
+  presentCredentialPromptForSlot: (
+    slot: CredentialSlot,
+    locale: CredentialPromptLocale,
+  ) => {
+    const module = required() as NativeLocalRuntime & {
+      presentCredentialPromptForSlot?: (
+        slot: CredentialSlot,
+        locale: CredentialPromptLocale,
+      ) => Promise<CredentialPromptResult>;
+    };
+    if (typeof module.presentCredentialPromptForSlot !== 'function') {
+      return required().presentCredentialPrompt(
+        safeCredentialPromptLocale(locale),
+      );
+    }
+    return module.presentCredentialPromptForSlot(
+      slot,
+      safeCredentialPromptLocale(locale),
+    );
+  },
+  clearCredentialForSlot: (slot: CredentialSlot) => {
+    const module = required() as NativeLocalRuntime & {
+      clearCredentialForSlot?: (slot: CredentialSlot) => Promise<ClearCredentialResult>;
+    };
+    if (typeof module.clearCredentialForSlot !== 'function') {
+      return required().clearCredential();
+    }
+    return module.clearCredentialForSlot(slot);
+  },
+  isCredentialSlotAvailable: () => {
+    const module = NativeModules.LocalRuntime as
+      | Partial<NativeLocalRuntime>
+      | undefined;
+    return typeof module?.credentialStatusForSlot === 'function';
+  },
   complete: (
     model: DeepSeekModelId,
     history: CompletionMessage[],
@@ -375,6 +437,7 @@ export const LocalRuntime = {
   },
   completeV2Stream: async (
     request: CompleteV2Request,
+    harnessId: HarnessId = 'dsh',
   ): Promise<CompleteV2Result> => {
     const nativeModule = required() as NativeLocalRuntime & {
       completeV2Stream?: (envelopeJSON: string) => Promise<Record<string, unknown>>;
@@ -384,6 +447,7 @@ export const LocalRuntime = {
     }
     const envelope = JSON.stringify({
       schema_version: 1,
+      harness_id: harnessId,
       model: request.model,
       request_id: request.requestId,
       thinking_mode: request.thinkingMode,

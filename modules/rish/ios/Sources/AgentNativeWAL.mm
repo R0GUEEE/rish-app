@@ -1,4 +1,5 @@
 #import "AgentNativeWAL.h"
+#import "RishHarnessCatalog.h"
 
 #import "DSHWorkspaceCanonical.h"
 #import "AgentExecutionLedger.h"
@@ -173,6 +174,29 @@ BOOL DSHAgentExactDictionaryKeys(NSDictionary *value,
       return NO;
     }
   }
+  return YES;
+}
+
+BOOL DSHAgentExactDictionaryKeysWithOptional(NSDictionary *value,
+                                             NSArray<NSString *> *keys,
+                                             NSArray<NSString *> *optionalKeys) {
+  if (![value isKindOfClass:NSDictionary.class] ||
+      ![keys isKindOfClass:NSArray.class] ||
+      ![optionalKeys isKindOfClass:NSArray.class]) {
+    return NO;
+  }
+  NSSet *allowed = [NSSet setWithArray:
+      [keys arrayByAddingObjectsFromArray:optionalKeys]];
+  NSSet *required = [NSSet setWithArray:keys];
+  for (id key in value) {
+    if (![key isKindOfClass:NSString.class] || ![allowed containsObject:key]) {
+      return NO;
+    }
+  }
+  for (NSString *key in keys) {
+    if (value[key] == nil) return NO;
+  }
+  (void)required;
   return YES;
 }
 
@@ -1737,9 +1761,7 @@ static BOOL DSHAgentWALAuthorityShape(NSDictionary *authority) {
   static NSSet *thinkingModes;
   static dispatch_once_t onceToken;
   dispatch_once(&onceToken, ^{
-    models = [NSSet setWithArray:@[
-      @"deepseek-v4-flash", @"deepseek-v4-pro", @"deepseek-v4-flash-vision-exp",
-    ]];
+    models = DSHHarnessSupportedModels();
     thinkingModes = [NSSet setWithArray:@[@"off", @"high", @"max"]];
   });
   if (![models containsObject:authority[@"model"]] ||

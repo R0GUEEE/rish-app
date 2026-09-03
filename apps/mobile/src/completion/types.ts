@@ -1,7 +1,11 @@
-export type DeepSeekModelId =
-  | 'deepseek-v4-flash'
-  | 'deepseek-v4-pro'
-  | 'deepseek-v4-flash-vision-exp';
+import type { HarnessId, HarnessModelId, ProviderId } from '../harness/types';
+
+export type {
+  DeepSeekModelId,
+  ClaudeModelId,
+  CodexModelId,
+  HarnessModelId,
+} from '../harness/types';
 
 export type DeepSeekThinkingMode = 'off' | 'high' | 'max';
 
@@ -28,7 +32,7 @@ export type CompletionToolDefinitionV2 = {
 };
 
 export type CompleteV2Request = {
-  readonly model: DeepSeekModelId;
+  readonly model: HarnessModelId;
   readonly requestId: string;
   readonly thinkingMode: DeepSeekThinkingMode;
   readonly history: readonly CompletionMessage[];
@@ -96,11 +100,13 @@ export type CompletionRoundTranscriptMessageV2 =
 
 export type CompleteRoundV2Request = {
   readonly schemaVersion: 2;
+  /** Harness that owns this round; the adapter routes the native provider by it. */
+  readonly harnessId: HarnessId;
   readonly turnId: string;
   readonly attemptId: string;
   readonly roundId: string;
   readonly roundIndex: number;
-  readonly model: DeepSeekModelId;
+  readonly model: HarnessModelId;
   readonly thinkingMode: DeepSeekThinkingMode;
   readonly visibleHistory: readonly CompletionVisibleMessageV2[];
   readonly roundTranscript: readonly CompletionRoundTranscriptMessageV2[];
@@ -114,7 +120,7 @@ export type CompletionProjectContextV3 = {
   readonly consentReceiptId: string;
   readonly conversationId: string;
   readonly projectId: string;
-  readonly provider: 'deepseek';
+  readonly provider: ProviderId;
   readonly policy: 'chat-read-v1';
 };
 
@@ -134,14 +140,20 @@ export type CompletionFinishReasonV2 =
 
 export type CompleteRoundV2Result = {
   readonly schema_version: 2;
+  /**
+   * Which built-in Harness produced this model response. Optional on the
+   * wire so pre-adapter records hydrate as DSH; the validator normalizes
+   * and always returns a value.
+   */
+  readonly harness_id: HarnessId;
   readonly turn_id: string;
   readonly attempt_id: string;
   readonly round_id: string;
   readonly round_index: number;
   readonly provider_request_id: string;
   readonly provider_response_id: string;
-  readonly requested_model: DeepSeekModelId;
-  readonly model: DeepSeekModelId;
+  readonly requested_model: HarnessModelId;
+  readonly model: HarnessModelId;
   readonly thinking_mode: DeepSeekThinkingMode;
   readonly text: string;
   readonly reasoning: string;

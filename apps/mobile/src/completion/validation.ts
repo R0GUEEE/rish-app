@@ -1,4 +1,16 @@
 import type {
+  HarnessId,
+  HarnessModelId,
+  ProviderId,
+} from '../harness/types';
+import {
+  PROVIDER_MODEL_IDS,
+  harnessForModel,
+  isHarnessId,
+  isProviderId,
+  providerForModel,
+} from '../harness/types';
+import type {
   CompleteRoundV2Request,
   CompleteRoundV2Result,
   CompleteRoundV3Request,
@@ -12,7 +24,6 @@ import type {
   CompletionProjectContextV3,
   CompletionRoundTranscriptMessageV2,
   CompletionVisibleMessageV2,
-  DeepSeekModelId,
   DeepSeekThinkingMode,
 } from './types';
 
@@ -55,6 +66,7 @@ type NativeCompletionErrorCode =
   | 'E_COMPLETION_REDIRECT'
   | 'E_COMPLETION_TRANSPORT'
   | 'E_COMPLETION_HTTP_STATUS'
+  | 'E_COMPLETION_HTTP_429'
   | 'E_COMPLETION_RESPONSE_SIZE'
   | 'E_COMPLETION_RESPONSE_JSON'
   | 'E_COMPLETION_PROVIDER_REQUEST_ID'
@@ -119,11 +131,7 @@ const SHA256_PATTERN = /^[0-9a-f]{64}$/;
 const OPAQUE_ID_PATTERN = /^[A-Za-z0-9._:-]+$/;
 const TOOL_NAME_PATTERN = /^[A-Za-z0-9_-]+$/;
 
-const MODELS: ReadonlySet<string> = new Set([
-  'deepseek-v4-flash',
-  'deepseek-v4-pro',
-  'deepseek-v4-flash-vision-exp',
-]);
+const MODELS: ReadonlySet<string> = new Set(PROVIDER_MODEL_IDS);
 const THINKING_MODES: ReadonlySet<string> = new Set(['off', 'high', 'max']);
 const FINISH_REASONS: ReadonlySet<string> = new Set([
   'stop',
@@ -152,6 +160,7 @@ const NATIVE_ERROR_CODES: ReadonlySet<string> = new Set([
   'E_COMPLETION_REDIRECT',
   'E_COMPLETION_TRANSPORT',
   'E_COMPLETION_HTTP_STATUS',
+  'E_COMPLETION_HTTP_429',
   'E_COMPLETION_RESPONSE_SIZE',
   'E_COMPLETION_RESPONSE_JSON',
   'E_COMPLETION_PROVIDER_REQUEST_ID',
@@ -371,8 +380,12 @@ function validToolName(value: unknown): value is string {
   return size !== null && size >= 1 && size <= MAX_TOOL_NAME_BYTES;
 }
 
-function validModel(value: unknown): value is DeepSeekModelId {
+function validModel(value: unknown): value is HarnessModelId {
   return typeof value === 'string' && MODELS.has(value);
+}
+
+function validHarnessId(value: unknown): value is HarnessId {
+  return isHarnessId(value);
 }
 
 function validThinkingMode(value: unknown): value is DeepSeekThinkingMode {
@@ -497,7 +510,7 @@ function projectAttachment(value: unknown): CompletionAttachmentReference {
 
 function projectVisibleHistory(
   value: unknown,
-  model: DeepSeekModelId,
+  model: HarnessModelId,
 ): CompletionVisibleMessageV2[] {
   if (
     !Array.isArray(value) ||
@@ -723,7 +736,7 @@ function projectSchema3Context(
     !canonicalUUID(value.consentReceiptId) ||
     !canonicalUUID(value.conversationId) ||
     !canonicalUUID(value.projectId) ||
-    value.provider !== 'deepseek' ||
+    !isProviderId(value.provider) ||
     value.policy !== 'chat-read-v1'
   ) {
     fail('E_COMPLETION_CONTEXT_INVALID');
@@ -734,14 +747,15 @@ function projectSchema3Context(
     consentReceiptId: value.consentReceiptId,
     conversationId: value.conversationId,
     projectId: value.projectId,
-    provider: 'deepseek',
+    provider: value.provider as ProviderId,
     policy: 'chat-read-v1',
   };
 }
 
-/** Projects a typed request into the exact native 11-key snake-case wire. */
+/** Projects a typed request into the exact native snake-case wire. */
 function encodeCompleteV2RequestUnsafe(
   request: CompleteRoundV2Request,
+  harnessId: HarnessId,
 ): string {
   if (request.schemaVersion !== 2) fail('E_COMPLETION_SCHEMA');
   const identifiersValid = withStableFailure('E_COMPLETION_IDENTIFIER', () =>
@@ -772,6 +786,16 @@ function encodeCompleteV2RequestUnsafe(
   }
   if (
     !withStableFailure(
+      'E_COMPLETION_MODEL',
+      () =>
+        validHarnessId(harnessId) &&
+        harnessForModel(request.model) === harnessId,
+    )
+  ) {
+    fail('E_COMPLETION_MODEL');
+  }
+  if (
+    !withStableFailure(
       'E_COMPLETION_CONTEXT_UNSUPPORTED',
       () => request.projectContext === null,
     )
@@ -791,6 +815,7 @@ function encodeCompleteV2RequestUnsafe(
   return safeJSONStringify(
     {
       schema_version: 2,
+      harness_id: harnessId,
       turn_id: request.turnId,
       attempt_id: request.attemptId,
       round_id: request.roundId,
@@ -808,14 +833,16 @@ function encodeCompleteV2RequestUnsafe(
 
 export function encodeCompleteV2Request(
   request: CompleteRoundV2Request,
+  harnessId: HarnessId = 'dsh',
 ): string {
   return withStableFailure('E_COMPLETION_SCHEMA', () =>
-    encodeCompleteV2RequestUnsafe(request),
+    encodeCompleteV2RequestUnsafe(request, harnessId),
   );
 }
 
 function encodeCompleteV3RequestUnsafe(
   request: CompleteRoundV3Request,
+  harnessId: HarnessId,
 ): string {
   if (request.schemaVersion !== 3) fail('E_COMPLETION_SCHEMA');
   const identifiersValid = withStableFailure('E_COMPLETION_IDENTIFIER', () =>
@@ -844,9 +871,27 @@ function encodeCompleteV3RequestUnsafe(
   ) {
     fail('E_COMPLETION_THINKING');
   }
+  if (
+    !withStableFailure(
+      'E_COMPLETION_MODEL',
+      () =>
+        validHarnessId(harnessId) &&
+        harnessForModel(request.model) === harnessId,
+    )
+  ) {
+    fail('E_COMPLETION_MODEL');
+  }
   const context = withStableFailure('E_COMPLETION_CONTEXT_INVALID', () =>
     projectSchema3Context(request.projectContext),
   );
+  if (
+    !withStableFailure(
+      'E_COMPLETION_CONTEXT_INVALID',
+      () => providerForModel(request.model) === context.provider,
+    )
+  ) {
+    fail('E_COMPLETION_CONTEXT_INVALID');
+  }
   const visibleHistory = withStableFailure('E_COMPLETION_HISTORY', () =>
     projectVisibleHistory(request.visibleHistory, request.model),
   );
@@ -859,6 +904,7 @@ function encodeCompleteV3RequestUnsafe(
   return safeJSONStringify(
     {
       schema_version: 3,
+      harness_id: harnessId,
       turn_id: request.turnId,
       attempt_id: request.attemptId,
       round_id: request.roundId,
@@ -884,9 +930,10 @@ function encodeCompleteV3RequestUnsafe(
 
 export function encodeCompleteV3Request(
   request: CompleteRoundV3Request,
+  harnessId: HarnessId = 'dsh',
 ): string {
   return withStableFailure('E_COMPLETION_SCHEMA', () =>
-    encodeCompleteV3RequestUnsafe(request),
+    encodeCompleteV3RequestUnsafe(request, harnessId),
   );
 }
 
@@ -897,6 +944,34 @@ function resultRecord(
   if (!isRecord(value) || !hasExactKeys(value, keys)) {
     fail('E_COMPLETION_RESULT_KEYS');
   }
+  return value;
+}
+
+/// Like resultRecord, but tolerates optional wire keys added after the
+/// schema shipped (currently only `harness_id`). Optional keys are
+/// validated when present and normalized to a default when absent.
+function resultRecordWithOptionalKeys(
+  value: unknown,
+  keys: readonly string[],
+  optionalKeys: readonly string[],
+): Record<string, unknown> {
+  if (!isRecord(value)) fail('E_COMPLETION_RESULT_KEYS');
+  for (const key of Object.keys(value)) {
+    if (!keys.includes(key) && !optionalKeys.includes(key)) {
+      fail('E_COMPLETION_RESULT_KEYS');
+    }
+  }
+  for (const key of keys) {
+    if (!Object.prototype.hasOwnProperty.call(value, key)) {
+      fail('E_COMPLETION_RESULT_KEYS');
+    }
+  }
+  return value;
+}
+
+function projectResultHarnessId(value: unknown): HarnessId {
+  if (value === undefined) return 'dsh';
+  if (!validHarnessId(value)) fail('E_COMPLETION_RESULT_ENUM');
   return value;
 }
 
@@ -958,7 +1033,11 @@ function validateCompleteV2ResultUnsafe(
   value: unknown,
   request: CompleteRoundV2Request,
 ): CompleteRoundV2Result {
-  const result = resultRecord(value, SCHEMA2_RESULT_KEYS);
+  const result = resultRecordWithOptionalKeys(value, SCHEMA2_RESULT_KEYS, [
+    'harness_id',
+  ]);
+  const harnessId = projectResultHarnessId(result.harness_id);
+  if (harnessId !== request.harnessId) fail('E_COMPLETION_MODEL_MISMATCH');
   if (
     typeof result.schema_version !== 'number' ||
     typeof result.round_index !== 'number' ||
@@ -1040,6 +1119,7 @@ function validateCompleteV2ResultUnsafe(
   }
   return {
     schema_version: 2,
+    harness_id: harnessId,
     turn_id: result.turn_id,
     attempt_id: result.attempt_id,
     round_id: result.round_id,
@@ -1120,7 +1200,11 @@ function validateCompleteV3ResultUnsafe(
   value: unknown,
   request: CompleteRoundV3Request,
 ): CompleteRoundV3Result {
-  const result = resultRecord(value, SCHEMA2_RESULT_KEYS);
+  const result = resultRecordWithOptionalKeys(value, SCHEMA2_RESULT_KEYS, [
+    'harness_id',
+  ]);
+  const harnessId = projectResultHarnessId(result.harness_id);
+  if (harnessId !== request.harnessId) fail('E_COMPLETION_MODEL_MISMATCH');
   if (
     typeof result.schema_version !== 'number' ||
     typeof result.round_index !== 'number' ||
@@ -1208,6 +1292,7 @@ function validateCompleteV3ResultUnsafe(
   );
   return {
     schema_version: 3,
+    harness_id: harnessId,
     turn_id: result.turn_id,
     attempt_id: result.attempt_id,
     round_id: result.round_id,

@@ -14,6 +14,7 @@
 #import "../../../../modules/rish/ios/Sources/AgentTranscriptStore.h"
 #import "../../../../modules/rish/ios/Sources/AgentWorkspaceToolExecutor.h"
 #import "../../../../modules/rish/ios/Sources/DSHCompletionProviderTransport.h"
+#import "../../../../modules/rish/ios/Sources/DshProviderTransport.h"
 #import "../../../../modules/rish/ios/Sources/SessionSnapshotStore.h"
 
 #import <objc/message.h>
@@ -450,12 +451,12 @@ DSH_RECORD(queryAgentCleanup)
   NSURLSession *session = [NSURLSession sessionWithConfiguration:
       NSURLSessionConfiguration.ephemeralSessionConfiguration];
   DSHCompletionProviderTransport *transport =
-      [[DSHCompletionProviderTransport alloc] initWithSession:session
+      [[DshProviderTransport alloc] initWithSession:session
           uuidGenerator:nil monotonicClock:nil];
   DSHAgentProviderRoundService *roundService = [[DSHAgentProviderRoundService alloc]
       initWithWAL:wal preparedStore:prepared transcripts:transcripts
       rounds:rounds transport:transport
-      credentialProvider:^NSString *(NSUInteger *generation) {
+      credentialProvider:^NSString *(NSString *harnessId, NSUInteger *generation) {
         if (generation != nullptr) *generation = 1;
         return @"test-credential";
       }

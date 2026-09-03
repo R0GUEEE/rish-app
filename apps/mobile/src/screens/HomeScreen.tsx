@@ -37,7 +37,11 @@ import { MirrorSettingsSheet } from '../components/MirrorSettingsSheet';
 import { ConversationOptionsPicker } from '../components/ConversationOptionsPicker';
 import { HarnessPicker } from '../components/HarnessPicker';
 import type { StructuredBlock } from '../components/StructuredContent';
-import { ModelPicker, type SupportedModel } from '../components/ModelPicker';
+import {
+  ModelPicker,
+  modelDetails,
+  type SupportedModel,
+} from '../components/ModelPicker';
 import { LocalWorkspaces } from '../native/LocalWorkspaces';
 import { ProjectsSurface } from '../components/ProjectsSurface';
 import {
@@ -111,7 +115,12 @@ import { readRuntimeEvidence } from '../runtime/evidence';
 import { LocalProjects, type LocalProject } from '../native/LocalProjects';
 import { LocalProjectContext } from '../native/LocalProjectContext';
 import { LocalAttachments } from '../native/LocalAttachments';
-import { BUILTIN_HARNESSES, DSH_HARNESS, DshHarnessAdapter } from '../harness';
+import {
+  BUILTIN_HARNESSES,
+  DSH_HARNESS,
+  getHarnessAdapter,
+  isHarnessId,
+} from '../harness';
 import {
   createProjectContextController,
   createProjectContextLifecycleController,
@@ -729,7 +738,7 @@ export function HomeScreen({
   const completionUiEpoch = useRef(0);
   const retryActionInFlight = useRef(false);
   const started = useRef(false);
-  const nativeAvailable = useMemo(() => DshHarnessAdapter.isAvailable(), []);
+  const nativeAvailable = useMemo(() => LocalRuntime.isAvailable(), []);
   const [sessionSnapshotsAvailable, setSessionSnapshotsAvailable] = useState<
     boolean | null
   >(
@@ -737,6 +746,19 @@ export function HomeScreen({
   );
   const activeHarness =
     BUILTIN_HARNESSES.get(preferences.selectedHarnessId) ?? DSH_HARNESS;
+  const activeHarnessId = isHarnessId(activeHarness.id)
+    ? activeHarness.id
+    : 'dsh';
+  const activeAdapter = getHarnessAdapter(activeHarnessId);
+  const activeModels = useMemo(
+    () =>
+      activeHarness.models
+        .map(model => model.id)
+        .filter((id): id is SupportedModel =>
+          (Object.keys(modelDetails) as string[]).includes(id),
+        ),
+    [activeHarness],
+  );
 
   useEffect(() => store.subscribe(setChatState), [store]);
 
@@ -1325,13 +1347,13 @@ export function HomeScreen({
         chat: store,
         persistCurrent: () => persistCurrentRef.current(),
         completeRoundV2: request =>
-          DshHarnessAdapter.completeRoundV2(request),
+          getHarnessAdapter(request.harnessId).completeRoundV2(request),
         completeRoundV3: request =>
-          DshHarnessAdapter.completeRoundV3(request),
+          getHarnessAdapter(request.harnessId).completeRoundV3(request),
         cancelRoundV2: roundId =>
-          DshHarnessAdapter.cancelRoundV2(roundId),
+          getHarnessAdapter('dsh').cancelRoundV2(roundId),
         cancelRoundV3: roundId =>
-          DshHarnessAdapter.cancelRoundV3(roundId),
+          getHarnessAdapter('dsh').cancelRoundV3(roundId),
         createRoundId: () => LocalRuntime.createCompletionRequestId(),
         createOperationId: () => LocalRuntime.createCompletionRequestId(),
         agentRuntime: AgentRuntime,
@@ -1768,7 +1790,7 @@ export function HomeScreen({
       return;
     }
     try {
-      const credential = await DshHarnessAdapter.credentialStatus();
+      const credential = await activeAdapter.credentialStatus();
       const configured = credential.status === 'configured';
       setCredentialConfigured(configured);
       let initialProof: RuntimeProof | null = null;
@@ -1869,6 +1891,7 @@ export function HomeScreen({
       setRuntimeChecking(false);
     }
   }, [
+    activeAdapter,
     ensureConversation,
     hydrateStoredState,
     nativeAvailable,
@@ -2205,7 +2228,7 @@ export function HomeScreen({
   const refreshProof = useCallback(async () => {
     if (!nativeAvailable) return;
     try {
-      const credential = await DshHarnessAdapter.credentialStatus();
+      const credential = await activeAdapter.credentialStatus();
       const configured = credential.status === 'configured';
       setCredentialConfigured(configured);
       if (!configured) {
@@ -2218,7 +2241,7 @@ export function HomeScreen({
     } catch (error) {
       setRuntimeFailure(errorText(error));
     }
-  }, [nativeAvailable]);
+  }, [activeAdapter, nativeAvailable]);
 
   const changeConversationModel = useCallback(
     (
@@ -2252,18 +2275,18 @@ export function HomeScreen({
       const fromModel = conversation.modelId;
       store.setModel(conversationId, model);
       LocalRuntime.recordModelTransition({
-        conversation_id: conversationId,
-        from_model: fromModel,
-        to_model: model,
-        source,
-        request_epoch: controllerState.epoch,
-        request_state: completionBusy(controllerState)
-          ? 'sending'
-          : 'idle',
-        attachment_busy: activeAttachmentOperation.current !== null,
-        draft_image_count: draftImageCount,
-        history_image_count: historyImageCount,
-      }).catch(() => undefined);
+          conversation_id: conversationId,
+          from_model: fromModel,
+          to_model: model,
+          source,
+          request_epoch: controllerState.epoch,
+          request_state: completionBusy(controllerState)
+            ? 'sending'
+            : 'idle',
+          attachment_busy: activeAttachmentOperation.current !== null,
+          draft_image_count: draftImageCount,
+          history_image_count: historyImageCount,
+        }).catch(() => undefined);
       return true;
     },
     [completionController, draftAttachments, store],
@@ -2568,6 +2591,7 @@ export function HomeScreen({
           conversationId,
           text,
           attachments,
+          harnessId: activeHarnessId,
           ...(sendWithoutProjectContext ? { sendWithoutProjectContext: true } : {}),
         },
         {
@@ -2592,7 +2616,12 @@ export function HomeScreen({
       );
       applyCompletionOutcome(result, outcomeEpoch);
     },
-    [applyCompletionOutcome, completionController, refreshProof],
+    [
+      activeHarnessId,
+      applyCompletionOutcome,
+      completionController,
+      refreshProof,
+    ],
   );
 
   const send = useCallback(async () => {
@@ -4979,12 +5008,31 @@ export function HomeScreen({
   const selectHarness = useCallback(
     (harnessId: string) => {
       if (!BUILTIN_HARNESSES.has(harnessId)) return;
+      const manifest = BUILTIN_HARNESSES.get(harnessId);
+      const catalog = (manifest?.models ?? [])
+        .map(model => model.id)
+        .filter((id): id is SupportedModel =>
+          (Object.keys(modelDetails) as string[]).includes(id),
+        );
+      const conversation = selectActiveConversation(store.getState());
+      if (
+        conversation !== null &&
+        catalog.length > 0 &&
+        !catalog.includes(conversation.modelId)
+      ) {
+        store.setModel(conversation.id, catalog[0]);
+      }
       invalidatePendingProjectSend();
       preferencesStore.setSelectedHarness(harnessId);
       setHarnessesVisible(false);
       persist().catch(() => undefined);
     },
-    [invalidatePendingProjectSend, persist, preferencesStore],
+    [
+      invalidatePendingProjectSend,
+      persist,
+      preferencesStore,
+      store,
+    ],
   );
 
   const configureCredential = useCallback(async () => {
@@ -4994,7 +5042,7 @@ export function HomeScreen({
     }
     setCredentialBusy(true);
     try {
-      const result = await DshHarnessAdapter.presentCredentialPrompt(locale);
+      const result = await activeAdapter.presentCredentialPrompt(locale);
       if (result.status === 'configured') {
         setCredentialConfigured(true);
         setProof((await LocalRuntime.bootstrap()).proof);
@@ -5005,7 +5053,7 @@ export function HomeScreen({
     } finally {
       setCredentialBusy(false);
     }
-  }, [locale, nativeAvailable, t]);
+  }, [activeAdapter, locale, nativeAvailable, t]);
 
   const clearCredential = useCallback(() => {
     Alert.alert(t('home.clearKeyTitle'), t('home.clearKeyBody'), [
@@ -5015,7 +5063,7 @@ export function HomeScreen({
         style: 'destructive',
         onPress: () => {
           setCredentialBusy(true);
-          DshHarnessAdapter.clearCredential()
+          activeAdapter.clearCredential()
             .then(() => {
               setCredentialConfigured(false);
               setProof(null);
@@ -5026,7 +5074,7 @@ export function HomeScreen({
         },
       },
     ]);
-  }, [closeSettingsSurface, t]);
+  }, [activeAdapter, closeSettingsSurface, t]);
 
   const openAfterDrawerDismiss = useCallback((
     expectedEpoch: number,
@@ -5547,6 +5595,7 @@ export function HomeScreen({
           attachmentBusy ||
           projectContextLocksComposer
         }
+        models={activeModels}
         placement="settings"
         selected={activeModel}
         visible={modelVisible}
@@ -5559,6 +5608,7 @@ export function HomeScreen({
           attachmentBusy ||
           projectContextLocksComposer
         }
+        models={activeModels}
         model={activeModel}
         thinkingMode={activeThinkingMode}
         visible={composerOptionsVisible}

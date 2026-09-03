@@ -1,14 +1,18 @@
 import { NativeModules, TurboModuleRegistry } from 'react-native';
 
 import type {
-  DeepSeekModelId,
   DeepSeekThinkingMode,
+  HarnessModelId,
 } from '../completion/types';
+import type { HarnessId } from '../harness/types';
+import { isHarnessId } from '../harness/types';
 
 export type {
   DeepSeekModelId,
   DeepSeekThinkingMode,
+  HarnessModelId,
 } from '../completion/types';
+export type { HarnessId } from '../harness/types';
 
 /** Closed failure vocabulary exposed by the high-level Agent bridge. */
 export type AgentRuntimeFailureCode =
@@ -267,8 +271,10 @@ export type AgentRoundReceiptV2 = {
   readonly round_index: number;
   readonly provider_request_id: string;
   readonly provider_response_id: string;
-  readonly requested_model: DeepSeekModelId;
-  readonly model: DeepSeekModelId;
+  /** Harness that produced this response; absent on legacy receipts (dsh). */
+  readonly harness_id?: HarnessId;
+  readonly requested_model: HarnessModelId;
+  readonly model: HarnessModelId;
   readonly thinking_mode: DeepSeekThinkingMode;
   readonly finish_reason: 'stop' | 'tool_calls' | 'length' | 'content_filter';
   readonly latency_ms: number;
@@ -345,7 +351,8 @@ export type PrepareAgentAttemptRequestV2 = {
   readonly project_id: string | null;
   readonly workspace_binding_revision: number | null;
   readonly transport_schema_version: 2 | 3;
-  readonly model: DeepSeekModelId;
+  readonly harness_id: HarnessId;
+  readonly model: HarnessModelId;
   readonly thinking_mode: DeepSeekThinkingMode;
   readonly visible_message_ids: readonly string[];
   readonly visible_history_sha256: string;
@@ -403,7 +410,8 @@ export type CompleteAgentRoundRequestV2 = {
   readonly launch_attempt: number;
   readonly expected_round_revision: number;
   readonly transport_schema_version: 2 | 3;
-  readonly model: DeepSeekModelId;
+  readonly harness_id: HarnessId;
+  readonly model: HarnessModelId;
   readonly thinking_mode: DeepSeekThinkingMode;
   readonly visible_history_sha256: string;
   readonly visible_message_count: number;
@@ -1421,6 +1429,59 @@ function exactRecord(
   return output;
 }
 
+/**
+ * exactRecord plus a closed set of optional keys. Optional keys are copied
+ * when present and validated by the caller; they let post-ship wire fields
+ * (currently only `harness_id`) hydrate legacy rows without weakening the
+ * closed-shape guarantee.
+ */
+function exactRecordWithOptional(
+  value: unknown,
+  keys: readonly string[],
+  optionalKeys: readonly string[],
+  code: AgentRuntimeFailureCode = 'E_AGENT_BAD_ARGUMENTS',
+): Record<string, unknown> {
+  if (typeof value !== 'object' || value === null || Array.isArray(value))
+    fail(code);
+  const object = value as object;
+  let prototype: object | null;
+  let names: string[];
+  let symbols: symbol[];
+  try {
+    prototype = Object.getPrototypeOf(object) as object | null;
+    names = Object.getOwnPropertyNames(object);
+    symbols = Object.getOwnPropertySymbols(object);
+  } catch {
+    fail(code);
+  }
+  if (prototype !== objectPrototype && prototype !== null) fail(code);
+  const allowed = [...keys, ...optionalKeys];
+  if (
+    symbols.length !== 0 ||
+    names.some(propertyName => !allowed.includes(propertyName)) ||
+    keys.some(key => !names.includes(key))
+  )
+    fail(code);
+  const output = Object.create(null) as Record<string, unknown>;
+  for (const key of allowed) {
+    if (!names.includes(key)) continue;
+    let descriptor: PropertyDescriptor | undefined;
+    try {
+      descriptor = Object.getOwnPropertyDescriptor(object, key);
+    } catch {
+      fail(code);
+    }
+    if (
+      descriptor === undefined ||
+      !('value' in descriptor) ||
+      descriptor.enumerable !== true
+    )
+      fail(code);
+    output[key] = descriptor.value;
+  }
+  return output;
+}
+
 /** Read a discriminant without treating the full tagged union as that shape. */
 function peekRecord(
   value: unknown,
@@ -1608,12 +1669,23 @@ function timestamp(value: unknown): value is string {
   return Number.isFinite(parsed) && new Date(parsed).toISOString() === value;
 }
 
-function model(value: unknown): value is DeepSeekModelId {
+function model(value: unknown): value is HarnessModelId {
   return (
     value === 'deepseek-v4-flash' ||
     value === 'deepseek-v4-pro' ||
-    value === 'deepseek-v4-flash-vision-exp'
+    value === 'deepseek-v4-flash-vision-exp' ||
+    value === 'claude-sonnet-5' ||
+    value === 'claude-opus-5' ||
+    value === 'claude-haiku-4-5-20251001' ||
+    value === 'claude-fable-5-1' ||
+    value === 'gpt-5.6' ||
+    value === 'gpt-5.6-mini' ||
+    value === 'gpt-5.6-nano'
   );
+}
+
+function harness(value: unknown): value is HarnessId {
+  return isHarnessId(value);
 }
 
 function thinkingMode(value: unknown): value is DeepSeekThinkingMode {
@@ -1884,7 +1956,7 @@ function validateProjectContextReceipt(
 }
 
 function validateRoundReceipt(value: unknown): AgentRoundReceiptV2 {
-  const receipt = exactRecord(
+  const receipt = exactRecordWithOptional(
     value,
     [
       'schema_version',
@@ -1906,8 +1978,14 @@ function validateRoundReceipt(value: unknown): AgentRoundReceiptV2 {
       'request_body_sha256',
       'project_context_receipt',
     ],
+    ['harness_id'],
     'E_AGENT_LEDGER',
   );
+  if (
+    receipt.harness_id !== undefined &&
+    !harness(receipt.harness_id)
+  )
+    fail('E_AGENT_LEDGER');
   if (
     receipt.schema_version !== 2 ||
     (receipt.transport_schema_version !== 2 &&
@@ -1940,6 +2018,9 @@ function validateRoundReceipt(value: unknown): AgentRoundReceiptV2 {
   )
     fail('E_AGENT_LEDGER');
   assign(receipt, 'project_context_receipt', context);
+  if (receipt.harness_id === undefined) {
+    assign(receipt, 'harness_id', 'dsh');
+  }
   return receipt as AgentRoundReceiptV2;
 }
 
@@ -2958,6 +3039,7 @@ function validateAttemptRequest(value: unknown): PrepareAgentAttemptRequestV2 {
     'project_id',
     'workspace_binding_revision',
     'transport_schema_version',
+    'harness_id',
     'model',
     'thinking_mode',
     'visible_message_ids',
@@ -2976,6 +3058,7 @@ function validateAttemptRequest(value: unknown): PrepareAgentAttemptRequestV2 {
     !uuid(request.attempt_id) ||
     (request.transport_schema_version !== 2 &&
       request.transport_schema_version !== 3) ||
+    !harness(request.harness_id) ||
     !model(request.model) ||
     !thinkingMode(request.thinking_mode) ||
     !digest(request.visible_history_sha256) ||
@@ -3046,6 +3129,7 @@ function validateCompleteRequest(value: unknown): CompleteAgentRoundRequestV2 {
     'launch_attempt',
     'expected_round_revision',
     'transport_schema_version',
+    'harness_id',
     'model',
     'thinking_mode',
     'visible_history_sha256',
@@ -3068,6 +3152,7 @@ function validateCompleteRequest(value: unknown): CompleteAgentRoundRequestV2 {
     !safeInteger(request.expected_round_revision, MAX_SAFE) ||
     (request.transport_schema_version !== 2 &&
       request.transport_schema_version !== 3) ||
+    !harness(request.harness_id) ||
     !model(request.model) ||
     !thinkingMode(request.thinking_mode) ||
     !digest(request.visible_history_sha256) ||

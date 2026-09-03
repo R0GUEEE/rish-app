@@ -37,10 +37,12 @@ function legacyToolDefinition(value: unknown): CompletionToolDefinitionV2 {
 export const DshHarnessAdapter = {
   manifest: DSH_HARNESS,
   isAvailable: () => LocalRuntime.isAvailable(),
-  credentialStatus: () => LocalRuntime.credentialStatus(),
+  credentialStatus: () =>
+    LocalRuntime.credentialStatusForSlot('DEEPSEEK_API_KEY'),
   presentCredentialPrompt: (locale: CredentialPromptLocale) =>
-    LocalRuntime.presentCredentialPrompt(locale),
-  clearCredential: () => LocalRuntime.clearCredential(),
+    LocalRuntime.presentCredentialPromptForSlot('DEEPSEEK_API_KEY', locale),
+  clearCredential: () =>
+    LocalRuntime.clearCredentialForSlot('DEEPSEEK_API_KEY'),
   complete: (
     model: DeepSeekModelId,
     history: CompletionMessage[],
@@ -63,9 +65,9 @@ export const DshHarnessAdapter = {
       tools: tools.map(legacyToolDefinition),
     }),
   completeRoundV2: (request: CompleteRoundV2Request) =>
-    LocalRuntime.completeV2(request),
+    LocalRuntime.completeV2(request, request.harnessId),
   completeRoundV3: (request: CompleteRoundV3Request) =>
-    LocalRuntime.completeV2(request),
+    LocalRuntime.completeV2(request, request.harnessId),
   cancelRoundV2: async (roundId: string) => {
     try {
       return await LocalRuntime.cancelCompletion(roundId);

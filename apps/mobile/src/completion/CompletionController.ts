@@ -51,6 +51,7 @@ import type {
   AgentCancelTargetV2,
   AgentCancelTokenV2,
 } from '../native/AgentRuntime';
+import type { HarnessId } from '../harness/types';
 import {
   ATTEMPT_FAILURE_CODES,
   type AgentCheckpointTransaction,
@@ -104,6 +105,8 @@ export type CompletionControllerInput = {
   readonly text: string;
   readonly attachments: readonly ChatAttachment[];
   readonly sendWithoutProjectContext?: boolean;
+  /** Builtin harness that owns this turn; omitted by legacy callers and dsh. */
+  readonly harnessId?: HarnessId;
 };
 
 /**
@@ -418,6 +421,7 @@ function receipt(
   return {
     schemaVersion: 1,
     transportSchemaVersion: result.schema_version,
+    harnessId: result.harness_id,
     turnId: result.turn_id,
     attemptId: result.attempt_id,
     roundId: result.round_id,
@@ -1268,6 +1272,7 @@ export function createCompletionController(
     project_id: agentProjectId(attempt),
     workspace_binding_revision: attempt.workspaceBindingRevision,
     transport_schema_version: agentTransportSchema(attempt),
+    harness_id: attempt.harnessId,
     model: attempt.modelId,
     thinking_mode: attempt.thinkingMode,
     visible_message_ids: [...attempt.visibleMessageIds],
@@ -1900,6 +1905,7 @@ export function createCompletionController(
           launch_attempt: currentJournal.round_lineage.launch_attempt,
           expected_round_revision: preflight.expected_round_revision,
           transport_schema_version: current.attempt.contextDisposition === 'verified' ? 3 : 2,
+          harness_id: current.attempt.harnessId,
           model: current.attempt.modelId,
           thinking_mode: current.attempt.thinkingMode,
           visible_history_sha256: currentVisible.digest,
@@ -2029,6 +2035,11 @@ export function createCompletionController(
       return await failAgentWithoutNative(conversationId, attemptId, 'E_AGENT_CONFLICT');
     }
     const completionReceipt = roundOutcome.completion_receipt;
+    if ((completionReceipt.harness_id ?? 'dsh') !== located.attempt.harnessId) {
+      // A receipt minted by a different Harness than the attempt owner can
+      // never be replayed as this attempt's model response.
+      return await failAgentWithoutNative(conversationId, attemptId, 'E_AGENT_TRANSCRIPT');
+    }
     const terminalCreatedAt = canonicalNow(dependencies.now);
     const nextJournal: PersistedAgentAttemptJournalV3 = {
       ...copyAgentJournal(currentJournal),
@@ -3385,6 +3396,7 @@ export function createCompletionController(
         }
         result = await dependencies.completeRoundV3({
           schemaVersion: 3,
+          harnessId: attempt.harnessId,
           turnId,
           attemptId,
           roundId,
@@ -3407,6 +3419,7 @@ export function createCompletionController(
       } else {
         result = await dependencies.completeRoundV2({
           schemaVersion: 2,
+          harnessId: attempt.harnessId,
           turnId,
           attemptId,
           roundId,
@@ -3757,6 +3770,7 @@ export function createCompletionController(
       launch_attempt: completed.launch_attempt,
       expected_round_revision: request.expected_round_revision ?? 0,
       transport_schema_version: completed.completion_receipt.transport_schema_version,
+      harness_id: completed.completion_receipt.harness_id ?? 'dsh',
       model: completed.completion_receipt.model,
       thinking_mode: completed.completion_receipt.thinking_mode,
       visible_history_sha256: completed.completion_receipt.visible_history_sha256,
@@ -4286,6 +4300,9 @@ export function createCompletionController(
           attachments: input.attachments,
           sendWithoutProjectContext:
             input.sendWithoutProjectContext === true,
+          ...(input.harnessId === undefined
+            ? {}
+            : { harnessId: input.harnessId }),
         },
       );
       if (transaction === null) {

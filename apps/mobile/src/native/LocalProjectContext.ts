@@ -27,7 +27,16 @@ import {
   type ProjectContextVerifiedSendReceiptV2,
   type ProjectContextVerifiedSendRequestV2,
 } from '../project-context/types';
-import type { DeepSeekModelId } from './LocalRuntime';
+import type { HarnessModelId } from './LocalRuntime';
+import {
+  PROVIDER_MODEL_IDS,
+  isProviderHost,
+  isProviderId,
+  providerForModel,
+  providerHostForModel,
+  type ProviderHost,
+  type ProviderId,
+} from '../harness/types';
 import {
   assertWorkspaceRootRefV1,
   type WorkspaceRootRefV1,
@@ -65,11 +74,7 @@ const knownCodes: ReadonlySet<string> = new Set([
 const omissionReasons: ReadonlySet<string> = new Set(
   PROJECT_CONTEXT_OMISSION_REASONS,
 );
-const models: ReadonlySet<string> = new Set([
-  'deepseek-v4-flash',
-  'deepseek-v4-pro',
-  'deepseek-v4-flash-vision-exp',
-]);
+const models: ReadonlySet<string> = new Set(PROVIDER_MODEL_IDS);
 const gitStates: ReadonlySet<string> = new Set([
   'unchanged',
   'staged',
@@ -453,9 +458,10 @@ function projectSelection(value: unknown): ProjectContextSelectionV1 {
     row.schema_version !== 1 ||
     !canonicalUUID(row.project_id) ||
     !canonicalUUID(row.conversation_id) ||
-    row.provider !== 'deepseek' ||
+    !isProviderId(row.provider) ||
     typeof row.model !== 'string' ||
     !models.has(row.model) ||
+    providerForModel(row.model as HarnessModelId) !== row.provider ||
     row.policy !== 'chat-read-v1'
   ) {
     fail('E_CONTEXT_REQUEST_INVALID');
@@ -476,8 +482,8 @@ function projectSelection(value: unknown): ProjectContextSelectionV1 {
     schema_version: 1,
     project_id: row.project_id,
     conversation_id: row.conversation_id,
-    provider: 'deepseek',
-    model: row.model as DeepSeekModelId,
+    provider: row.provider as ProviderId,
+    model: row.model as HarnessModelId,
     policy: 'chat-read-v1',
     selected_paths: paths,
   };
@@ -564,7 +570,7 @@ function projectManifest(
   correlation: {
     projectId?: string;
     snapshotId?: string;
-    model?: DeepSeekModelId;
+    model?: HarnessModelId;
   } = {},
 ): ProjectContextManifestV1 {
   const row = exactRecord(value, manifestKeys, 'E_CONTEXT_RESULT_INVALID');
@@ -583,9 +589,10 @@ function projectManifest(
     (row.clean && row.conflicted) ||
     !timestamp(row.captured_at) ||
     row.policy_version !== 'chat-read-v1.0.0' ||
-    row.provider_host !== 'api.deepseek.com' ||
+    !isProviderHost(row.provider_host) ||
     typeof row.model !== 'string' ||
     !models.has(row.model) ||
+    providerHostForModel(row.model as HarnessModelId) !== row.provider_host ||
     !nonNegativeInteger(row.context_bytes, 256 * 1024) ||
     row.context_bytes < 1 ||
     !nonNegativeInteger(row.estimated_tokens, 65536) ||
@@ -641,8 +648,8 @@ function projectManifest(
     conflicted: row.conflicted,
     captured_at: row.captured_at,
     policy_version: 'chat-read-v1.0.0',
-    provider_host: 'api.deepseek.com',
-    model: row.model as DeepSeekModelId,
+    provider_host: row.provider_host as ProviderHost,
+    model: row.model as HarnessModelId,
     included,
     omitted,
     context_bytes: row.context_bytes,
@@ -845,7 +852,7 @@ function projectManifestV2(
     readonly expectedRoot?: WorkspaceRootRefV1;
     readonly expectedSnapshotId?: string;
     readonly expectedConversationId?: string;
-    readonly expectedModel?: DeepSeekModelId;
+    readonly expectedModel?: HarnessModelId;
   } = {},
 ): ProjectContextManifestV2 {
   const {
@@ -930,7 +937,7 @@ function projectManifestV2(
     project,
     project_id: row.project_id,
     conversation_id: row.conversation_id,
-    model_id: row.model_id as DeepSeekModelId,
+    model_id: row.model_id as HarnessModelId,
     policy: 'chat-read-v1',
     branch,
     head_oid: row.head_oid as string | null,
@@ -1344,7 +1351,7 @@ export const LocalProjectContext = {
         schema_version: 2,
         root,
         conversation_id: row.conversation_id,
-        model_id: row.model_id as DeepSeekModelId,
+        model_id: row.model_id as HarnessModelId,
         policy: 'chat-read-v1',
         selected_paths: paths,
       };
@@ -1359,7 +1366,7 @@ export const LocalProjectContext = {
           projectManifestV2(raw, {
             expectedRoot: root,
             expectedConversationId: row.conversation_id as string,
-            expectedModel: row.model_id as DeepSeekModelId,
+            expectedModel: row.model_id as HarnessModelId,
           }),
       );
     } catch (error) {
@@ -1491,7 +1498,7 @@ export const LocalProjectContext = {
         consent_receipt_id: row.consent_receipt_id as string,
         root,
         conversation_id: row.conversation_id as string,
-        model_id: row.model_id as DeepSeekModelId,
+        model_id: row.model_id as HarnessModelId,
         policy: 'chat-read-v1',
       };
       const nativeModule = requiredV2();

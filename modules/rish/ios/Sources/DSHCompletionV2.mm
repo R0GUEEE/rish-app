@@ -1,4 +1,5 @@
 #import "DSHCompletionV2.h"
+#import "RishHarnessCatalog.h"
 
 #include <math.h>
 #include <string.h>
@@ -61,6 +62,20 @@ static BOOL DSHSchema2ExactKeys(NSDictionary *value, NSArray<NSString *> *keys) 
   if (![value isKindOfClass:NSDictionary.class]) return NO;
   return [[NSSet setWithArray:value.allKeys]
       isEqualToSet:[NSSet setWithArray:keys]];
+}
+
+static BOOL DSHSchema2ExactKeysWithOptional(NSDictionary *value,
+                                            NSArray<NSString *> *keys,
+                                            NSArray<NSString *> *optional) {
+  if (![value isKindOfClass:NSDictionary.class]) return NO;
+  NSSet *allowed = [NSSet setWithArray:[keys arrayByAddingObjectsFromArray:optional]];
+  NSSet *required = [NSSet setWithArray:keys];
+  NSSet *actual = [NSSet setWithArray:value.allKeys];
+  return [required isSubsetOfSet:actual] && [actual isSubsetOfSet:allowed];
+}
+
+static BOOL DSHSchema2SupportedHarness(NSString *harness) {
+  return DSHHarnessIsSupportedHarnessId(harness);
 }
 
 static NSString *_Nullable DSHSchema2CanonicalUUID(id value) {
@@ -195,9 +210,7 @@ static NSDictionary *DSHSchema2NormalizeCreateOnlyWriteParameters(
 }
 
 static BOOL DSHSchema2SupportedModel(NSString *model) {
-  return [model isEqualToString:@"deepseek-v4-flash"] ||
-      [model isEqualToString:@"deepseek-v4-pro"] ||
-      [model isEqualToString:@"deepseek-v4-flash-vision-exp"];
+  return DSHHarnessIsSupportedModel(model);
 }
 
 static BOOL DSHSchema2ThinkingMode(NSString *mode) {
@@ -718,10 +731,17 @@ DSHCompletionEnvelopeSchema2FromDictionary(NSDictionary *envelope,
     @"round_transcript", @"tools", @"project_context",
   ];
   NSInteger schemaVersion = 0;
-  if (!DSHSchema2ExactKeys(envelope, keys) ||
+  if (!DSHSchema2ExactKeysWithOptional(envelope, keys, @[@"harness_id"]) ||
       !DSHSchema2Integer(envelope[@"schema_version"], 2, 2,
                          &schemaVersion)) {
     DSHSchema2Fail(error, @"E_COMPLETION_SCHEMA");
+    return nil;
+  }
+  NSString *harnessId = DSHV2String(envelope[@"harness_id"]);
+  if (harnessId == nil) {
+    harnessId = @"dsh";
+  } else if (!DSHSchema2SupportedHarness(harnessId)) {
+    DSHSchema2Fail(error, @"E_COMPLETION_MODEL");
     return nil;
   }
   if (envelope[@"project_context"] != NSNull.null) {
@@ -741,7 +761,8 @@ DSHCompletionEnvelopeSchema2FromDictionary(NSDictionary *envelope,
     return nil;
   }
   NSString *model = DSHV2String(envelope[@"model"]);
-  if (!DSHSchema2SupportedModel(model)) {
+  if (!DSHSchema2SupportedModel(model) ||
+      ![DSHHarnessIdForModel(model) isEqualToString:harnessId]) {
     DSHSchema2Fail(error, @"E_COMPLETION_MODEL");
     return nil;
   }
@@ -760,6 +781,7 @@ DSHCompletionEnvelopeSchema2FromDictionary(NSDictionary *envelope,
   if (tools == nil) return nil;
   return @{
     @"schema_version": @2,
+    @"harness_id": harnessId,
     @"turn_id": turnId,
     @"attempt_id": attemptId,
     @"round_id": roundId,
@@ -783,10 +805,17 @@ DSHCompletionEnvelopeSchema3FromDictionary(NSDictionary *envelope,
     @"round_transcript", @"tools", @"project_context",
   ];
   NSInteger schemaVersion = 0;
-  if (!DSHSchema2ExactKeys(envelope, keys) ||
+  if (!DSHSchema2ExactKeysWithOptional(envelope, keys, @[@"harness_id"]) ||
       !DSHSchema2Integer(envelope[@"schema_version"], 3, 3,
                          &schemaVersion)) {
     DSHSchema2Fail(error, @"E_COMPLETION_SCHEMA");
+    return nil;
+  }
+  NSString *harnessId = DSHV2String(envelope[@"harness_id"]);
+  if (harnessId == nil) {
+    harnessId = @"dsh";
+  } else if (!DSHSchema2SupportedHarness(harnessId)) {
+    DSHSchema2Fail(error, @"E_COMPLETION_MODEL");
     return nil;
   }
   NSString *turnId = DSHSchema2CanonicalUUID(envelope[@"turn_id"]);
@@ -802,7 +831,8 @@ DSHCompletionEnvelopeSchema3FromDictionary(NSDictionary *envelope,
     return nil;
   }
   NSString *model = DSHV2String(envelope[@"model"]);
-  if (!DSHSchema2SupportedModel(model)) {
+  if (!DSHSchema2SupportedModel(model) ||
+      ![DSHHarnessIdForModel(model) isEqualToString:harnessId]) {
     DSHSchema2Fail(error, @"E_COMPLETION_MODEL");
     return nil;
   }
@@ -830,7 +860,8 @@ DSHCompletionEnvelopeSchema3FromDictionary(NSDictionary *envelope,
                          &contextSchema) ||
       snapshotId == nil || consentReceiptId == nil ||
       conversationId == nil || projectId == nil ||
-      ![DSHV2String(rawContext[@"provider"]) isEqualToString:@"deepseek"] ||
+      ![DSHV2String(rawContext[@"provider"])
+          isEqualToString:DSHProviderIdForModel(model)] ||
       ![DSHV2String(rawContext[@"policy"])
           isEqualToString:@"chat-read-v1"]) {
     DSHSchema2Fail(error, @"E_COMPLETION_CONTEXT_INVALID");
@@ -846,6 +877,7 @@ DSHCompletionEnvelopeSchema3FromDictionary(NSDictionary *envelope,
   if (tools == nil) return nil;
   return @{
     @"schema_version": @3,
+    @"harness_id": harnessId,
     @"turn_id": turnId,
     @"attempt_id": attemptId,
     @"round_id": roundId,
@@ -861,7 +893,7 @@ DSHCompletionEnvelopeSchema3FromDictionary(NSDictionary *envelope,
       @"consent_receipt_id": consentReceiptId,
       @"conversation_id": conversationId,
       @"project_id": projectId,
-      @"provider": @"deepseek",
+      @"provider": DSHProviderIdForModel(model),
       @"policy": @"chat-read-v1",
     },
   };
@@ -1078,4 +1110,42 @@ DSHParseCompletionResponseSchema2(
     @"tool_calls": toolCalls,
     @"finish_reason": finish,
   };
+}
+
+NSArray<NSDictionary<NSString *, id> *> *DSHCompletionNormalizeToolCalls(
+    NSArray<NSDictionary<NSString *, id> *> *toolCalls) {
+  if (![toolCalls isKindOfClass:NSArray.class]) return @[];
+  NSMutableArray *normalizedCalls = [NSMutableArray arrayWithCapacity:toolCalls.count];
+  for (id rawCall in toolCalls) {
+    NSDictionary *call = [rawCall isKindOfClass:NSDictionary.class] ? rawCall : nil;
+    NSString *name = DSHV2String(call[@"name"]);
+    NSString *arguments = DSHV2String(call[@"arguments"]);
+    if (call == nil || ![name isEqualToString:@"write_file"] || arguments == nil) {
+      if (call != nil) [normalizedCalls addObject:call];
+      continue;
+    }
+    NSData *argumentBytes = [arguments dataUsingEncoding:NSUTF8StringEncoding];
+    id value = argumentBytes == nil ? nil :
+        [NSJSONSerialization JSONObjectWithData:argumentBytes options:0 error:nil];
+    NSDictionary *parameters = [value isKindOfClass:NSDictionary.class] ? value : nil;
+    NSDictionary *normalized = parameters == nil ? nil :
+        DSHSchema2NormalizeCreateOnlyWriteParameters(name, parameters);
+    if (normalized == nil || normalized == parameters) {
+      [normalizedCalls addObject:call];
+      continue;
+    }
+    NSData *normalizedBytes = [NSJSONSerialization
+        dataWithJSONObject:normalized options:NSJSONWritingSortedKeys error:nil];
+    NSString *normalizedArguments = normalizedBytes == nil ? nil :
+        [[NSString alloc] initWithData:normalizedBytes encoding:NSUTF8StringEncoding];
+    if (normalizedArguments == nil ||
+        normalizedBytes.length > (NSUInteger)DSHCompletionV2MaxArgumentsBytes) {
+      [normalizedCalls addObject:call];
+      continue;
+    }
+    NSMutableDictionary *updated = [call mutableCopy];
+    updated[@"arguments"] = normalizedArguments;
+    [normalizedCalls addObject:[updated copy]];
+  }
+  return [normalizedCalls copy];
 }

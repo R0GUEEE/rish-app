@@ -249,6 +249,11 @@ FOUNDATION_EXPORT BOOL DSHAgentCanonicalTimestamp(id value);
 FOUNDATION_EXPORT BOOL DSHAgentFailureCode(id value);
 FOUNDATION_EXPORT BOOL DSHAgentExactDictionaryKeys(NSDictionary *value,
                                                    NSArray<NSString *> *keys);
+/// Exact keys plus a closed optional-key allowance for post-ship wire
+/// fields (currently only `harness_id`).
+FOUNDATION_EXPORT BOOL DSHAgentExactDictionaryKeysWithOptional(
+    NSDictionary *value, NSArray<NSString *> *keys,
+    NSArray<NSString *> *optionalKeys);
 FOUNDATION_EXPORT BOOL DSHAgentIsImmutableFoundationJSON(id value);
 
 /// Domain-separated digest helpers. They use the shared

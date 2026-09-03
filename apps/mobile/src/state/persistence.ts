@@ -132,6 +132,7 @@ import {
 } from '../project-context/persistence';
 import type { ProjectContextState } from '../project-context/types';
 import { DEFAULT_APP_PREFERENCES } from '../preferences/reducer';
+import { isHarnessId, isProviderId, type ProviderId } from '../harness/types';
 import {
   hydrateAppPreferences,
   serializeAppPreferences,
@@ -355,7 +356,7 @@ function exactRecord(
   if (Object.getOwnPropertySymbols(value).length > 0) {
     return invalid(path, 'must not contain symbol properties');
   }
-  const allowed = new Set(keys);
+  const allowed = new Set([...keys, ...optionalKeys]);
   const optional = new Set(optionalKeys);
   Object.getOwnPropertyNames(value).forEach(key => {
     if (!allowed.has(key)) invalid(`${path}.${key}`, 'is not recognized');
@@ -1329,8 +1330,8 @@ function parseAttemptProjectContext(
   if (raw.schema_version !== ATTEMPT_PROJECT_CONTEXT_SCHEMA_VERSION) {
     return invalid(`${path}.schema_version`, 'must equal 1');
   }
-  if (raw.provider !== 'deepseek') {
-    return invalid(`${path}.provider`, 'must equal deepseek');
+  if (!isProviderId(raw.provider)) {
+    return invalid(`${path}.provider`, 'must be a supported provider');
   }
   if (raw.policy !== 'chat-read-v1') {
     return invalid(`${path}.policy`, 'must equal chat-read-v1');
@@ -1374,7 +1375,7 @@ function parseAttemptProjectContext(
       raw.consent_receipt_id,
       `${path}.consent_receipt_id`,
     ),
-    provider: 'deepseek',
+    provider: raw.provider as ProviderId,
     policy: 'chat-read-v1',
     policyVersion: 'chat-read-v1.0.0',
   };
@@ -1428,25 +1429,36 @@ function parseRoundReceipt(
   value: unknown,
   path: string,
 ): CompletionRoundReceiptV1 {
-  const raw = exactRecord(value, path, [
-    'schema_version',
-    'transport_schema_version',
-    'turn_id',
-    'attempt_id',
-    'round_id',
-    'round_index',
-    'provider_request_id',
-    'provider_response_id',
-    'requested_model',
-    'model',
-    'thinking_mode',
-    'finish_reason',
-    'latency_ms',
-    'visible_history_sha256',
-    'model_input_sha256',
-    'request_body_sha256',
-    'project_context_receipt',
-  ]);
+  const raw = exactRecord(
+    value,
+    path,
+    [
+      'schema_version',
+      'transport_schema_version',
+      'turn_id',
+      'attempt_id',
+      'round_id',
+      'round_index',
+      'provider_request_id',
+      'provider_response_id',
+      'requested_model',
+      'model',
+      'thinking_mode',
+      'finish_reason',
+      'latency_ms',
+      'visible_history_sha256',
+      'model_input_sha256',
+      'request_body_sha256',
+      'project_context_receipt',
+    ],
+    ['harness_id'],
+  );
+  const harnessId =
+    raw.harness_id === undefined
+      ? 'dsh'
+      : isHarnessId(raw.harness_id)
+      ? raw.harness_id
+      : invalid(path + '.harness_id', 'must be a supported harness');
   if (raw.schema_version !== COMPLETION_ROUND_RECEIPT_SCHEMA_VERSION) {
     return invalid(`${path}.schema_version`, 'must equal 1');
   }
@@ -1478,6 +1490,7 @@ function parseRoundReceipt(
   return {
     schemaVersion: COMPLETION_ROUND_RECEIPT_SCHEMA_VERSION,
     transportSchemaVersion: raw.transport_schema_version,
+    harnessId,
     turnId: canonicalLifecycleId(raw.turn_id, `${path}.turn_id`),
     attemptId: canonicalLifecycleId(raw.attempt_id, `${path}.attempt_id`),
     roundId: canonicalLifecycleId(raw.round_id, `${path}.round_id`),
@@ -3843,7 +3856,13 @@ function parseAttempt(
     'updated_at',
     ...(agentSchema ? ['journal_revision', 'agent'] : []),
   ] as const;
-  const raw = exactRecord(value, path, attemptKeys);
+  const raw = exactRecord(value, path, attemptKeys, ['harness_id']);
+  const harnessId =
+    raw.harness_id === undefined
+      ? 'dsh'
+      : isHarnessId(raw.harness_id)
+      ? raw.harness_id
+      : invalid(path + '.harness_id', 'must be a supported harness');
   if (
     agentSchema
       ? raw.schema_version !== PERSISTED_TURN_ATTEMPT_SCHEMA_VERSION &&
@@ -4027,6 +4046,7 @@ function parseAttempt(
       `${path}.attachment_ids`,
       MAX_ATTEMPT_ATTACHMENT_IDS,
     ),
+    harnessId,
     modelId: raw.model_id,
     thinkingMode: raw.thinking_mode,
     contextDisposition: raw.context_disposition as AttemptContextDisposition,
@@ -5148,6 +5168,7 @@ function toPersistedRoundReceipt(
   return {
     schema_version: receipt.schemaVersion,
     transport_schema_version: receipt.transportSchemaVersion,
+    harness_id: receipt.harnessId,
     turn_id: receipt.turnId,
     attempt_id: receipt.attemptId,
     round_id: receipt.roundId,
@@ -5230,6 +5251,7 @@ function toPersistedAttempt(attempt: TurnAttemptV1): PersistedTurnAttemptV3 {
     attempt_id: attempt.attemptId,
     turn_id: attempt.turnId,
     status: attempt.status,
+    harness_id: attempt.harnessId,
     visible_message_ids: [...attempt.visibleMessageIds],
     visible_history_sha256: attempt.visibleHistorySha256,
     attachment_ids: [...attempt.attachmentIds],

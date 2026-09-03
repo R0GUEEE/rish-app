@@ -318,7 +318,8 @@ static NSData *DSHV3RequestBody(NSURLRequest *request) {
       [self validSchema3Envelope], &error);
   XCTAssertNotNil(projected);
   XCTAssertNil(error);
-  XCTAssertEqual(projected.count, 11u);
+  XCTAssertEqual(projected.count, 12u);
+  XCTAssertEqualObjects(projected[@"harness_id"], @"dsh");
   XCTAssertEqual([projected[@"project_context"] count], 7u);
 
   NSMutableDictionary *schema2 = [[self validSchema3Envelope] mutableCopy];
@@ -482,7 +483,8 @@ static NSData *DSHV3RequestBody(NSURLRequest *request) {
   XCTAssertFalse([bodyText containsString:DSHV3ConsentId]);
   XCTAssertFalse([bodyText containsString:
       @"44444444-4444-4444-8444-444444444444"]);
-  XCTAssertEqual(result.count, 19u);
+  XCTAssertEqual(result.count, 20u);
+  XCTAssertEqualObjects(result[@"harness_id"], @"dsh");
   XCTAssertEqualObjects(result[@"schema_version"], @3);
   XCTAssertEqual([result[@"project_context_receipt"] count], 6u);
   XCTAssertEqualObjects(result[@"project_context_receipt"][@"snapshot_id"],
@@ -1228,7 +1230,7 @@ static NSData *DSHV3RequestBody(NSURLRequest *request) {
       [self jsonString:[self validSchema3Envelope]]
       resolver:^(__unused id value) { XCTFail(@"must not resolve"); }
       rejecter:^(NSString *code, NSString *message, NSError *error) {
-        XCTAssertEqualObjects(code, @"E_COMPLETION_HTTP_STATUS");
+        XCTAssertEqualObjects(code, @"E_COMPLETION_HTTP_429");
         XCTAssertEqualObjects(message, code);
         XCTAssertNil(error);
         NSString *all = [NSString stringWithFormat:@"%@ %@ %@",

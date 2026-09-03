@@ -1,5 +1,7 @@
 #import <Foundation/Foundation.h>
 
+#import "DSHCompletionProviderTransport.h"
+
 NS_ASSUME_NONNULL_BEGIN
 
 // Incremental Server-Sent-Events parser for DeepSeek streaming chunks.
@@ -16,7 +18,7 @@ extern NSString * const DSHStreamEventErrorDomain;
 /// A parsed streaming delta emitted to JS.
 typedef NSDictionary<NSString *, id> DSHStreamDelta;
 
-@interface DSHStreamEventParser : NSObject
+@interface DSHStreamEventParser : NSObject <DSHProviderStreamEventParsing>
 
 /// Feed raw chunk bytes. Returns the deltas decoded from complete SSE
 /// events, or nil with *error on malformed/oversized input.

@@ -11,7 +11,14 @@ import { AppIcon } from './AppIcon';
 export type SupportedModel =
   | 'deepseek-v4-flash'
   | 'deepseek-v4-pro'
-  | 'deepseek-v4-flash-vision-exp';
+  | 'deepseek-v4-flash-vision-exp'
+  | 'claude-sonnet-5'
+  | 'claude-opus-5'
+  | 'claude-haiku-4-5-20251001'
+  | 'claude-fable-5-1'
+  | 'gpt-5.6'
+  | 'gpt-5.6-mini'
+  | 'gpt-5.6-nano';
 
 export const modelDetails: Record<
   SupportedModel,
@@ -31,6 +38,41 @@ export const modelDetails: Record<
     name: 'Flash Exp',
     eyebrow: 'VISION · EXPERIMENTAL',
     description: 'Multimodal image and text understanding.',
+  },
+  'claude-sonnet-5': {
+    name: 'Sonnet 5',
+    eyebrow: 'CLAUDE · DEFAULT',
+    description: 'Balanced Claude Code work with dependable tool use.',
+  },
+  'claude-opus-5': {
+    name: 'Opus 5',
+    eyebrow: 'DEEP · DELIBERATE',
+    description: 'Deepest reasoning for the hardest tasks.',
+  },
+  'claude-haiku-4-5-20251001': {
+    name: 'Haiku 4.5',
+    eyebrow: 'FAST · LIGHT',
+    description: 'Quick, light Claude Code rounds.',
+  },
+  'claude-fable-5-1': {
+    name: 'Fable 5.1',
+    eyebrow: 'CREATIVE · EXPERIMENTAL',
+    description: 'Experimental Claude Code model for creative work.',
+  },
+  'gpt-5.6': {
+    name: 'GPT-5.6',
+    eyebrow: 'CODEX · DEFAULT',
+    description: 'OpenAI Codex work with reasoning and tools.',
+  },
+  'gpt-5.6-mini': {
+    name: 'GPT-5.6 Mini',
+    eyebrow: 'FAST · COMPACT',
+    description: 'Faster Codex rounds for everyday work.',
+  },
+  'gpt-5.6-nano': {
+    name: 'GPT-5.6 Nano',
+    eyebrow: 'FASTEST · NANO',
+    description: 'Smallest and fastest Codex model.',
   },
 };
 
@@ -57,12 +99,56 @@ export function localizedModelDetails(
         eyebrow: t('model.vision.eyebrow'),
         description: t('model.vision.description'),
       };
+    case 'claude-sonnet-5':
+      return {
+        name: t('model.sonnet.name'),
+        eyebrow: t('model.sonnet.eyebrow'),
+        description: t('model.sonnet.description'),
+      };
+    case 'claude-opus-5':
+      return {
+        name: t('model.opus.name'),
+        eyebrow: t('model.opus.eyebrow'),
+        description: t('model.opus.description'),
+      };
+    case 'claude-haiku-4-5-20251001':
+      return {
+        name: t('model.haiku.name'),
+        eyebrow: t('model.haiku.eyebrow'),
+        description: t('model.haiku.description'),
+      };
+    case 'claude-fable-5-1':
+      return {
+        name: t('model.fable.name'),
+        eyebrow: t('model.fable.eyebrow'),
+        description: t('model.fable.description'),
+      };
+    case 'gpt-5.6':
+      return {
+        name: t('model.gpt56.name'),
+        eyebrow: t('model.gpt56.eyebrow'),
+        description: t('model.gpt56.description'),
+      };
+    case 'gpt-5.6-mini':
+      return {
+        name: t('model.gpt56mini.name'),
+        eyebrow: t('model.gpt56mini.eyebrow'),
+        description: t('model.gpt56mini.description'),
+      };
+    case 'gpt-5.6-nano':
+      return {
+        name: t('model.gpt56nano.name'),
+        eyebrow: t('model.gpt56nano.eyebrow'),
+        description: t('model.gpt56nano.description'),
+      };
   }
 }
 
 type Props = {
   disabled?: boolean;
   placement?: 'composer' | 'settings';
+  /** Model catalog of the selected Harness; defaults to every known model. */
+  models?: readonly SupportedModel[];
   selected: SupportedModel;
   visible: boolean;
   onClose: () => void;
@@ -72,6 +158,7 @@ type Props = {
 export function ModelPicker({
   disabled = false,
   placement = 'composer',
+  models: modelsProp,
   selected,
   visible,
   onClose,
@@ -80,7 +167,8 @@ export function ModelPicker({
   const insets = useSafeAreaInsets();
   const { colors, t } = useAppPresentation();
   const styles = useMemo(() => createStyles(colors), [colors]);
-  const models = Object.keys(modelDetails) as SupportedModel[];
+  const models =
+    modelsProp ?? (Object.keys(modelDetails) as SupportedModel[]);
 
   return (
     <Modal

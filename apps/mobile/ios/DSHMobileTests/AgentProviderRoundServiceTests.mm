@@ -1,6 +1,8 @@
 #import <XCTest/XCTest.h>
 
 #import "../../../../modules/rish/ios/Sources/AgentProviderRoundService.h"
+#import "../../../../modules/rish/ios/Sources/DshProviderTransport.h"
+#import "../../../../modules/rish/ios/Sources/ClaudeProviderTransport.h"
 #import "../../../../modules/rish/ios/Sources/AgentProviderRoundServiceInternals.h"
 #import "../../../../modules/rish/ios/Sources/DSHCompletionV2.h"
 #import "../../../../modules/rish/ios/Sources/DSHWorkspaceCanonical.h"
@@ -272,7 +274,7 @@ static NSString *const DSHProviderSmokeDigest =
 }
 @end
 
-@interface DSHProviderSmokeTransport : DSHCompletionProviderTransport
+@interface DSHProviderSmokeTransport : DshProviderTransport
 @property(nonatomic, copy) NSDictionary *result;
 @property(nonatomic, copy) void (^pendingCompletion)(NSDictionary *, NSString *);
 @property(nonatomic) NSUInteger startCount;
@@ -533,7 +535,7 @@ static NSDictionary *DSHProviderSmokeQueryRequest(NSDictionary *root,
         transcripts:_transcripts
         rounds:_rounds
         transport:_transport
-        credentialProvider:^NSString *(NSUInteger *generation) {
+        credentialProvider:^NSString *(NSString *harnessId, NSUInteger *generation) {
           weakSelf.credentialCalls += 1;
           if (!weakSelf.credentialAvailable) return nil;
           if (generation != nullptr) *generation = 7;
@@ -589,7 +591,7 @@ static NSDictionary *DSHProviderSmokeQueryRequest(NSDictionary *root,
                                                           delegate:delegate
                                                      delegateQueue:nil];
   DSHCompletionProviderTransport *transport =
-      [[DSHCompletionProviderTransport alloc]
+      [[DshProviderTransport alloc]
           initWithSession:session
           uuidGenerator:^NSString *{
             return @"66666666-6666-4666-8666-666666666666";
@@ -1088,7 +1090,7 @@ static NSDictionary *DSHProviderSmokeQueryRequest(NSDictionary *root,
       transcripts:fixture.transcripts
       rounds:fixture.rounds
       transport:fixture.transport
-      credentialProvider:^NSString *(NSUInteger *generation) {
+      credentialProvider:^NSString *(NSString *harnessId, NSUInteger *generation) {
         if (generation != nullptr) *generation = 7;
         return @"credential";
       }
@@ -1146,7 +1148,7 @@ static NSDictionary *DSHProviderSmokeQueryRequest(NSDictionary *root,
       transcripts:fixture.transcripts
       rounds:fixture.rounds
       transport:fixture.transport
-      credentialProvider:^NSString *(NSUInteger *generation) {
+      credentialProvider:^NSString *(NSString *harnessId, NSUInteger *generation) {
         if (generation != nullptr) *generation = 7;
         return @"credential";
       }
@@ -1288,7 +1290,7 @@ static NSDictionary *DSHProviderSmokeQueryRequest(NSDictionary *root,
                                                           delegate:delegate
                                                      delegateQueue:nil];
   DSHCompletionProviderTransport *transport =
-      [[DSHCompletionProviderTransport alloc]
+      [[DshProviderTransport alloc]
           initWithSession:session
           uuidGenerator:^NSString *{
             return @"66666666-6666-4666-8666-666666666666";
@@ -1339,7 +1341,7 @@ static NSDictionary *DSHProviderSmokeQueryRequest(NSDictionary *root,
           transcripts:transcripts
           rounds:rounds
           transport:transport
-          credentialProvider:^NSString *(NSUInteger *generation) {
+          credentialProvider:^NSString *(NSString *harnessId, NSUInteger *generation) {
             if (generation != nullptr) *generation = 7;
             return @"credential";
           }
@@ -1375,6 +1377,169 @@ static NSDictionary *DSHProviderSmokeQueryRequest(NSDictionary *root,
   XCTAssertNil(error);
   XCTAssertEqualObjects(replay, result);
   XCTAssertEqual([DSHProviderURLProtocol requestCount], (NSUInteger)1);
+  [session invalidateAndCancel];
+  [NSFileManager.defaultManager removeItemAtURL:walRoot error:nil];
+  [DSHProviderURLProtocol reset];
+}
+
+- (void)testClaudeCodeToolRoundComposesThroughTheProviderAgnosticService {
+  [DSHProviderURLProtocol reset];
+  NSURL *walRoot = [NSURL fileURLWithPath:[NSTemporaryDirectory()
+      stringByAppendingPathComponent:NSUUID.UUID.UUIDString]];
+  DSHAgentNativeWAL *wal = [[DSHAgentNativeWAL alloc]
+      initWithRootURL:walRoot
+      clock:^NSDate *{
+        return [NSDate dateWithTimeIntervalSince1970:1700000000];
+      }
+      identifierGenerator:^NSString *{
+        return @"aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
+      }
+      faultHook:nil];
+  NSError *error = nil;
+  NSDictionary *root = DSHProviderSmokeRoot();
+  DSHAgentTranscriptStore *transcripts = [[DSHAgentTranscriptStore alloc]
+      initWithWAL:wal];
+  NSDictionary *transcript = [transcripts
+      createAgentTranscriptWithRequest:@{
+        @"schema_version" : @1,
+        @"attempt_id" : DSHProviderSmokeAttempt,
+        @"root" : root,
+      }
+      error:&error];
+  XCTAssertNotNil(transcript);
+  DSHAgentToolRegistry *registry = [[DSHAgentToolRegistry alloc] init];
+  NSDictionary *registryProjection = [registry registryForRoot:root error:&error];
+  XCTAssertNotNil(registryProjection);
+  NSMutableDictionary *authority = [DSHProviderSmokeAuthority(
+      root, transcript, registryProjection) mutableCopy];
+  authority[@"model"] = @"claude-sonnet-5";
+  DSHProviderSmokePreparedStore *prepared =
+      [[DSHProviderSmokePreparedStore alloc] initWithAuthority:authority
+                                                           root:root
+                                                            wal:wal];
+  DSHAgentRoundJournal *rounds = [[DSHAgentRoundJournal alloc] initWithWAL:wal];
+  NSURLSessionConfiguration *configuration =
+      NSURLSessionConfiguration.ephemeralSessionConfiguration;
+  configuration.protocolClasses = @[ DSHProviderURLProtocol.class ];
+  DSHProviderURLSessionDelegate *delegate =
+      [[DSHProviderURLSessionDelegate alloc] init];
+  NSURLSession *session = [NSURLSession sessionWithConfiguration:configuration
+                                                          delegate:delegate
+                                                     delegateQueue:nil];
+  NSString *(^uuid)(void) = ^NSString *{
+    return @"66666666-6666-4666-8666-666666666666";
+  };
+  NSTimeInterval (^clock)(void) = ^NSTimeInterval { return 3.0; };
+  DshProviderTransport *dsh = [[DshProviderTransport alloc]
+      initWithSession:session uuidGenerator:uuid monotonicClock:clock];
+  ClaudeProviderTransport *claude = [[ClaudeProviderTransport alloc]
+      initWithSession:session uuidGenerator:uuid monotonicClock:clock];
+  delegate.transport = claude;
+  __block NSDictionary *requestBody = nil;
+  __block NSDictionary *requestHeaders = nil;
+  __block NSURL *requestURL = nil;
+  [DSHProviderURLProtocol setHandler:^(NSURLProtocol *protocol,
+                                        NSURLRequest *request) {
+    requestURL = request.URL;
+    requestHeaders = request.allHTTPHeaderFields;
+    requestBody = [NSJSONSerialization
+        JSONObjectWithData:DSHProviderCapturedRequestBody(request)
+                   options:0
+                     error:nil];
+    NSDictionary *payload = @{
+      @"id" : @"msg_claude_round",
+      @"type" : @"message",
+      @"role" : @"assistant",
+      @"model" : @"claude-sonnet-5",
+      @"content" : @[
+        @{ @"type" : @"text", @"text" : @"Writing the proof." },
+        @{ @"type" : @"tool_use", @"id" : @"toolu_01", @"name" : @"write_file",
+           @"input" : @{ @"path" : @"RISH_HARNESS_PROOF_20260901.md",
+                         @"content" : @"Rish real-device harness proof." } },
+      ],
+      @"stop_reason" : @"tool_use",
+      @"stop_sequence" : NSNull.null,
+      @"usage" : @{ @"input_tokens" : @20, @"output_tokens" : @30 },
+    };
+    NSData *data = [NSJSONSerialization dataWithJSONObject:payload
+                                                     options:0
+                                                       error:nil];
+    NSHTTPURLResponse *response = [[NSHTTPURLResponse alloc]
+        initWithURL:request.URL statusCode:200 HTTPVersion:@"HTTP/1.1"
+        headerFields:@{ @"Content-Type" : @"application/json" }];
+    [protocol.client URLProtocol:protocol didReceiveResponse:response
+             cacheStoragePolicy:NSURLCacheStorageNotAllowed];
+    [protocol.client URLProtocol:protocol didLoadData:data];
+    [protocol.client URLProtocolDidFinishLoading:protocol];
+  }];
+  __block NSString *credentialHarness = nil;
+  DSHAgentProviderRoundService *service =
+      [[DSHAgentProviderRoundService alloc]
+          initWithWAL:wal
+          preparedStore:prepared
+          transcripts:transcripts
+          rounds:rounds
+          transport:dsh
+          claudeTransport:claude
+          codexTransport:nil
+          credentialProvider:^NSString *(NSString *harnessId, NSUInteger *generation) {
+            credentialHarness = harnessId;
+            if (generation != nullptr) *generation = 7;
+            return @"sk-ant-credential";
+          }
+          visibleHistoryProvider:^NSArray *(NSDictionary *nativeAuthority,
+                                             NSError **historyError) {
+            if (historyError != nullptr) *historyError = nil;
+            return @[ @{ @"role" : @"user", @"content" : @"hello" } ];
+          }
+          contextReceiptProvider:nil];
+  NSMutableDictionary *request = [DSHProviderSmokeRequest(
+      root, transcript, registryProjection[@"toolset_sha256"],
+      DSHProviderSmokeOperation) mutableCopy];
+  request[@"model"] = @"claude-sonnet-5";
+  request[@"harness_id"] = @"claude-code";
+  NSDictionary *result = [service completeAgentRoundV2WithRequest:request
+                                                             error:&error];
+  XCTAssertNil(error);
+  XCTAssertEqualObjects(result[@"status"], @"completed");
+  XCTAssertEqual([DSHProviderURLProtocol requestCount], (NSUInteger)1);
+  // The Anthropic dialect went over the wire with the shared tool registry.
+  XCTAssertEqualObjects(credentialHarness, @"claude-code");
+  XCTAssertEqualObjects(requestURL.host, @"api.anthropic.com");
+  XCTAssertEqualObjects(requestHeaders[@"x-api-key"], @"sk-ant-credential");
+  XCTAssertEqualObjects(requestHeaders[@"anthropic-version"], @"2023-06-01");
+  XCTAssertNil(requestHeaders[@"Authorization"]);
+  XCTAssertEqualObjects(requestBody[@"model"], @"claude-sonnet-5");
+  XCTAssertEqualObjects(requestBody[@"thinking"], @{ @"type" : @"disabled" });
+  XCTAssertEqualObjects(requestBody[@"messages"][0][@"role"], @"user");
+  XCTAssertEqualObjects(requestBody[@"messages"][0][@"content"][0][@"type"], @"text");
+  NSDictionary *writeTool = nil;
+  for (NSDictionary *tool in requestBody[@"tools"]) {
+    if ([tool[@"name"] isEqualToString:@"write_file"]) writeTool = tool;
+  }
+  XCTAssertNotNil(writeTool);
+  XCTAssertNotNil(writeTool[@"input_schema"][@"properties"][@"expected_revision"]);
+  XCTAssertNil(writeTool[@"function"], @"Anthropic tools are flat, not OpenAI-wrapped");
+  // The round result is the same provider-agnostic tool batch DSH produces.
+  NSDictionary *outcome = result[@"outcome"];
+  XCTAssertEqualObjects(outcome[@"kind"], @"tool_batch");
+  XCTAssertEqualObjects(outcome[@"finish_reason"], @"tool_calls");
+  XCTAssertEqualObjects(outcome[@"calls"][0][@"name"], @"write_file");
+  XCTAssertEqualObjects(outcome[@"calls"][0][@"call_id"], @"toolu_01");
+  NSDictionary *receipt = outcome[@"completion_receipt"];
+  XCTAssertEqualObjects(receipt[@"harness_id"], @"claude-code");
+  XCTAssertEqualObjects(receipt[@"model"], @"claude-sonnet-5");
+  XCTAssertEqualObjects(receipt[@"requested_model"], @"claude-sonnet-5");
+  XCTAssertEqualObjects(receipt[@"provider_response_id"], @"msg_claude_round");
+  NSDictionary *state = [wal snapshotWithError:&error];
+  XCTAssertNil(error);
+  XCTAssertEqualObjects(state[@"operations"][0][@"state"], @"committed");
+  XCTAssertEqualObjects(state[@"rounds"][0][@"state"], @"completed");
+  NSArray *messages = state[@"transcripts"][0][@"messages"];
+  XCTAssertEqual(messages.count, (NSUInteger)1);
+  XCTAssertEqualObjects(messages[0][@"tool_calls"][0][@"name"], @"write_file");
+  XCTAssertEqualObjects(messages[0][@"tool_calls"][0][@"arguments_json"],
+      @"{\"content\":\"Rish real-device harness proof.\",\"expected_revision\":null,\"path\":\"RISH_HARNESS_PROOF_20260901.md\"}");
   [session invalidateAndCancel];
   [NSFileManager.defaultManager removeItemAtURL:walRoot error:nil];
   [DSHProviderURLProtocol reset];
@@ -1439,7 +1604,7 @@ static NSDictionary *DSHProviderSmokeQueryRequest(NSDictionary *root,
           transcripts:transcripts
           rounds:rounds
           transport:transport
-          credentialProvider:^NSString *(NSUInteger *generation) {
+          credentialProvider:^NSString *(NSString *harnessId, NSUInteger *generation) {
             if (generation != nullptr) *generation = 7;
             return @"credential";
           }

@@ -35,9 +35,15 @@ typedef NSDictionary *_Nullable (^DSHRuntimeModuleInvoke)(
 @property(nonatomic, strong, readonly)
     DSHCompletionProviderTransport *completionProviderTransport;
 @property(nonatomic, strong, readonly)
+    DSHCompletionProviderTransport *claudeProviderTransport;
+@property(nonatomic, strong, readonly)
+    DSHCompletionProviderTransport *codexProviderTransport;
+@property(nonatomic, strong, readonly)
     DSHProjectContextService *projectContextService;
 @property(nonatomic, readonly) NSUInteger credentialGeneration;
 - (nullable NSString *)credential;
+- (nullable NSString *)credentialForHarnessId:(NSString *)harnessId
+                                   generation:(NSUInteger *)generation;
 @end
 
 static DSHAgentNativeWAL *DSHRuntimeSharedWAL(void) {
@@ -248,6 +254,10 @@ RCT_EXPORT_MODULE(AgentRuntime)
                          lazilyLoadIfNecessary:YES];
   DSHCompletionProviderTransport *transport =
       [localRuntime completionProviderTransport];
+  DSHCompletionProviderTransport *claudeTransport =
+      [localRuntime claudeProviderTransport];
+  DSHCompletionProviderTransport *codexTransport =
+      [localRuntime codexProviderTransport];
   DSHProjectContextService *projectContext =
       [localRuntime projectContextService] ?: DSHSharedProjectContextService();
   DSHLocalWorkspaceAccess *workspaceAccess = projectContext.workspaceAccess;
@@ -269,12 +279,11 @@ RCT_EXPORT_MODULE(AgentRuntime)
       transcriptStore:transcripts];
   __weak id weakRuntime = localRuntime;
   DSHAgentProviderRoundCredentialProvider credentials =
-      ^NSString *(NSUInteger *generation) {
+      ^NSString *(NSString *harnessId, NSUInteger *generation) {
     id runtime = weakRuntime;
     if (runtime == nil) return nil;
     @synchronized (runtime) {
-      if (generation != nullptr) *generation = [runtime credentialGeneration];
-      return [runtime credential];
+      return [runtime credentialForHarnessId:harnessId generation:generation];
     }
   };
   DSHAgentProviderRoundVisibleHistoryProvider history =
@@ -288,7 +297,8 @@ RCT_EXPORT_MODULE(AgentRuntime)
   };
   DSHAgentProviderRoundService *roundService = [[DSHAgentProviderRoundService alloc]
       initWithWAL:wal preparedStore:prepared transcripts:transcripts rounds:rounds
-      transport:transport credentialProvider:credentials
+      transport:transport claudeTransport:claudeTransport
+      codexTransport:codexTransport credentialProvider:credentials
       visibleHistoryProvider:history contextReceiptProvider:context];
   DSHAgentWorkspaceToolExecutor *workspaceExecutor =
       [[DSHAgentWorkspaceToolExecutor alloc] initWithRootResolver:rootResolver];

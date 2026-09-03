@@ -213,15 +213,22 @@ static NSString *DSHCompletionTransportParserErrorCode(NSError *error) {
     return nil;
   }
 
-  NSURL *url = [NSURL URLWithString:@"https://api.deepseek.com/chat/completions"];
+  NSURL *url = [self providerBaseURL];
+  if (url == nil || [self providerHarnessId].length == 0) {
+    [self settleStartFailure:@"E_COMPLETION_TRANSPORT"
+                   claimRound:claimRound completion:completion];
+    return nil;
+  }
   NSMutableURLRequest *request = [NSMutableURLRequest requestWithURL:url];
   request.HTTPMethod = @"POST";
   request.HTTPShouldHandleCookies = NO;
   request.cachePolicy = NSURLRequestReloadIgnoringLocalCacheData;
-  request.timeoutInterval = 90;
-  [request setValue:@"application/json" forHTTPHeaderField:@"Content-Type"];
-  [request setValue:[@"Bearer " stringByAppendingString:credential]
-      forHTTPHeaderField:@"Authorization"];
+  request.timeoutInterval = [self providerTimeoutIntervalForStreaming:NO];
+  NSDictionary<NSString *, NSString *> *headers =
+      [self providerHeadersWithCredential:credential];
+  for (NSString *field in headers) {
+    [request setValue:headers[field] forHTTPHeaderField:field];
+  }
   request.HTTPBody = bodyData;
 
   DSHCompletionProviderTransportContext *context =
@@ -285,7 +292,8 @@ static NSString *DSHCompletionTransportParserErrorCode(NSError *error) {
       NSHTTPURLResponse *http = (NSHTTPURLResponse *)response;
       if (http.statusCode < 200 || http.statusCode >= 300) {
         if (owned.completion != nil) {
-          owned.completion(nil, @"E_COMPLETION_HTTP_STATUS");
+          owned.completion(nil, [self providerErrorCodeForHTTPStatus:http.statusCode
+                                                                 data:data]);
         }
         return;
       }
@@ -295,18 +303,11 @@ static NSString *DSHCompletionTransportParserErrorCode(NSError *error) {
         }
         return;
       }
-      NSError *decodeError = nil;
-      NSDictionary *decoded = [NSJSONSerialization
-          JSONObjectWithData:data options:0 error:&decodeError];
-      if (![decoded isKindOfClass:NSDictionary.class]) {
-        if (owned.completion != nil) {
-          owned.completion(nil, @"E_COMPLETION_RESPONSE_JSON");
-        }
-        return;
-      }
       NSError *parseError = nil;
-      NSDictionary *parsed = DSHParseCompletionResponseSchema2(
-          decoded, requestedModel, thinkingMode, &parseError);
+      NSDictionary *parsed = [self providerParseResponseData:data
+                                              requestedModel:requestedModel
+                                                thinkingMode:thinkingMode
+                                                      error:&parseError];
       if (parsed == nil) {
         if (owned.completion != nil) {
           owned.completion(nil, DSHCompletionTransportParserErrorCode(parseError));
@@ -324,12 +325,13 @@ static NSString *DSHCompletionTransportParserErrorCode(NSError *error) {
       NSDictionary *result = @{
         @"provider_request_id": providerRequestId,
         @"provider_response_id": parsed[@"provider_response_id"],
+        @"harness_id": [self providerHarnessId],
         @"requested_model": requestedModel,
         @"model": parsed[@"model"],
         @"thinking_mode": thinkingMode,
         @"text": parsed[@"text"],
         @"reasoning": parsed[@"reasoning"],
-        @"tool_calls": parsed[@"tool_calls"],
+        @"tool_calls": DSHCompletionNormalizeToolCalls(parsed[@"tool_calls"]),
         @"finish_reason": parsed[@"finish_reason"],
         @"latency_ms": @(latencyMs),
         @"visible_history_sha256": visibleDigest,
@@ -416,6 +418,80 @@ static NSString *DSHCompletionTransportParserErrorCode(NSError *error) {
   } @catch (__unused NSException *exception) {
   }
   completionHandler(nil);
+}
+
+#pragma mark Provider hooks (abstract)
+
+/// The base class owns the generic completion-slot, digest, cancellation,
+/// and redirect orchestration only. Every provider dialect lives in a
+/// subclass (DshProviderTransport, ClaudeProviderTransport,
+/// CodexProviderTransport); an unimplemented hook fails closed.
+
+- (NSURL *)providerBaseURL {
+  return nil;
+}
+
+- (NSDictionary<NSString *, NSString *> *)providerHeadersWithCredential:(NSString *)credential {
+  return @{};
+}
+
+- (NSDictionary<NSString *, id> *)providerRequestBodyForModel:(NSString *)model
+                                                 thinkingMode:(NSString *)thinkingMode
+                                                     messages:(NSArray<NSDictionary<NSString *, id> *> *)messages
+                                                        tools:(NSArray<NSDictionary<NSString *, id> *> *)tools
+                                                    streaming:(BOOL)streaming
+                                                        error:(NSError **)error {
+  if (error != nil) {
+    *error = [NSError errorWithDomain:@"DSHCompletionTransportError"
+                                 code:2001
+                             userInfo:@{NSLocalizedDescriptionKey:
+                                 @"E_COMPLETION_BODY_INVALID"}];
+  }
+  return nil;
+}
+
+- (NSDictionary<NSString *, id> *)providerParseResponseData:(NSData *)data
+                                              requestedModel:(NSString *)requestedModel
+                                                thinkingMode:(NSString *)thinkingMode
+                                                      error:(NSError **)error {
+  if (error != nil) {
+    *error = [NSError errorWithDomain:@"DSHCompletionTransportError"
+                                 code:2002
+                             userInfo:@{NSLocalizedDescriptionKey:
+                                 @"E_COMPLETION_RESPONSE_JSON"}];
+  }
+  return nil;
+}
+
+- (NSString *)providerErrorCodeForHTTPStatus:(NSInteger)statusCode
+                                         data:(NSData *)data {
+  // Shared mapping: an unauthenticated or forbidden call means the stored
+  // credential is unusable; a rate limit or provider overload is reported
+  // as its own stable code so the caller can back off instead of retrying
+  // as a generic transport-status failure.
+  if (statusCode == 401 || statusCode == 403) {
+    return @"E_COMPLETION_CREDENTIAL_UNAVAILABLE";
+  }
+  if (statusCode == 429 || statusCode == 529) {
+    return @"E_COMPLETION_HTTP_429";
+  }
+  return @"E_COMPLETION_HTTP_STATUS";
+}
+
+- (id<DSHProviderStreamEventParsing>)providerNewStreamEventParser {
+  return nil;
+}
+
+- (BOOL)providerSupportsModel:(NSString *)model {
+  return NO;
+}
+
+- (NSTimeInterval)providerTimeoutIntervalForStreaming:(BOOL)streaming {
+  return streaming ? 120 : 90;
+}
+
+- (NSString *)providerHarnessId {
+  return nil;
 }
 
 @end

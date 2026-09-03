@@ -1,4 +1,5 @@
 #import "ProjectContextService.h"
+#import "RishHarnessCatalog.h"
 
 #import <React/RCTBridgeModule.h>
 #import <React/RCTInvalidating.h>
@@ -174,15 +175,7 @@ static NSString *DSHPCCursor(id value, BOOL allowNull) {
 }
 
 static NSSet<NSString *> *DSHPCModels(void) {
-  static NSSet<NSString *> *values = nil;
-  static dispatch_once_t onceToken;
-  dispatch_once(&onceToken, ^{
-    values = [NSSet setWithArray:@[
-      @"deepseek-v4-flash", @"deepseek-v4-pro",
-      @"deepseek-v4-flash-vision-exp",
-    ]];
-  });
-  return values;
+  return DSHHarnessSupportedModels();
 }
 
 static NSSet<NSString *> *DSHPCOmissionReasons(void) {
@@ -213,7 +206,7 @@ static NSDictionary *DSHPCSelection(id raw) {
   if (!DSHPCExactKeys(selection, keys) ||
       !DSHPCSafeInteger(selection[@"schema_version"], 1, &schema) ||
       schema != 1 || projectId == nil || conversationId == nil ||
-      ![selection[@"provider"] isEqual:@"deepseek"] ||
+      ![selection[@"provider"] isEqual:DSHProviderIdForModel(model)] ||
       ![DSHPCModels() containsObject:model] ||
       ![selection[@"policy"] isEqual:@"chat-read-v1"] || paths == nil ||
       paths.count > 5000) {
@@ -233,7 +226,7 @@ static NSDictionary *DSHPCSelection(id raw) {
     @"schema_version": @1,
     @"project_id": projectId,
     @"conversation_id": conversationId,
-    @"provider": @"deepseek",
+    @"provider": DSHProviderIdForModel(model),
     @"model": [model copy],
     @"policy": @"chat-read-v1",
     @"selected_paths": [normalized copy],
@@ -805,7 +798,7 @@ static NSDictionary *DSHPCManifest(id raw, NSString *expectedProjectId,
       !DSHPCBoolean(manifest[@"conflicted"], &conflicted) ||
       (clean && conflicted) || !DSHPCTimestamp(manifest[@"captured_at"]) ||
       ![manifest[@"policy_version"] isEqual:@"chat-read-v1.0.0"] ||
-      ![manifest[@"provider_host"] isEqual:@"api.deepseek.com"] ||
+      ![manifest[@"provider_host"] isEqual:DSHProviderHostForModel(model)] ||
       ![DSHPCModels() containsObject:model] || included == nil ||
       included.count > 32 || omitted == nil || omitted.count > 5000 ||
       !DSHPCSafeInteger(manifest[@"context_bytes"], 256 * 1024,
@@ -853,7 +846,7 @@ static NSDictionary *DSHPCManifest(id raw, NSString *expectedProjectId,
     @"conflicted": @(conflicted),
     @"captured_at": [manifest[@"captured_at"] copy],
     @"policy_version": @"chat-read-v1.0.0",
-    @"provider_host": @"api.deepseek.com",
+    @"provider_host": DSHProviderHostForModel(model),
     @"model": [model copy],
     @"included": [projectedIncluded copy],
     @"omitted": [projectedOmitted copy],

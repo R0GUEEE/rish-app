@@ -1,4 +1,5 @@
 #import "ProjectContextService.h"
+#import "RishHarnessCatalog.h"
 #import "LegacyBoundProjectRootAccess.h"
 
 #import <CommonCrypto/CommonDigest.h>
@@ -314,12 +315,7 @@ static NSDictionary *DSHServiceV2RootRef(id value, BOOL projectRequired) {
 }
 
 static NSString *DSHServiceV2Model(id value) {
-  NSArray *models = @[
-    @"deepseek-v4-flash", @"deepseek-v4-pro",
-    @"deepseek-v4-flash-vision-exp"
-  ];
-  return [value isKindOfClass:NSString.class] && [models containsObject:value]
-      ? [value copy] : nil;
+  return DSHHarnessIsSupportedModel(value) ? [value copy] : nil;
 }
 
 static NSString *DSHServiceV2BoundedString(id value, NSUInteger maxBytes,
@@ -679,16 +675,12 @@ static NSString *DSHServiceGitState(BOOL staged,
     @"schema_version", @"project_id", @"conversation_id", @"provider",
     @"model", @"policy", @"selected_paths"
   ];
-  NSArray *models = @[
-    @"deepseek-v4-flash", @"deepseek-v4-pro",
-    @"deepseek-v4-flash-vision-exp"
-  ];
   if (!DSHServiceExactKeys(selection, keys) ||
       ![selection[@"schema_version"] isEqual:@1] ||
       ![DSHLocalProjectAccess isCanonicalProjectId:selection[@"project_id"]] ||
       !DSHServiceCanonicalIdentifier(selection[@"conversation_id"]) ||
-      ![selection[@"provider"] isEqual:@"deepseek"] ||
-      ![models containsObject:selection[@"model"]] ||
+      !DSHHarnessIsSupportedModel(selection[@"model"]) ||
+      ![selection[@"provider"] isEqual:DSHProviderIdForModel(selection[@"model"])] ||
       ![selection[@"policy"] isEqual:@"chat-read-v1"] ||
       ![selection[@"selected_paths"] isKindOfClass:NSArray.class] ||
       [selection[@"selected_paths"] count] > DSHProjectContextMaxEntries) {
@@ -2089,7 +2081,7 @@ static int DSHAppendSerializedPatchLine(__unused const git_diff_delta *delta,
     @"conflicted" : capture[@"conflicted"],
     @"captured_at" : capturedAt,
     @"policy_version" : DSHProjectContextPolicyVersion,
-    @"provider_host" : @"api.deepseek.com",
+    @"provider_host" : DSHProviderHostForModel(validated[@"model"]),
     @"model" : validated[@"model"],
     @"included" : included,
     @"omitted" : omitted,

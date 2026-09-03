@@ -1,4 +1,5 @@
 #import "SessionSnapshotStore.h"
+#import "RishHarnessCatalog.h"
 
 #import "DSHWorkspaceCanonical.h"
 #import "LocalWorkspaceAccess.h"
@@ -221,6 +222,10 @@ static BOOL DSHSessionFiniteNumber(id value) {
       fabs(number) <= (double)DSHSessionSnapshotMaximumSafeInteger;
 }
 
+static BOOL DSHSessionExactKeysWithOptional(NSDictionary *dictionary,
+                                            NSArray<NSString *> *keys,
+                                            NSArray<NSString *> *optionalKeys);
+
 static BOOL DSHSessionExactKeys(NSDictionary *dictionary,
                                 NSArray<NSString *> *keys) {
   if (!DSHSessionTrustedDictionary(dictionary) ||
@@ -233,6 +238,28 @@ static BOOL DSHSessionExactKeys(NSDictionary *dictionary,
       return NO;
     }
   }
+  return YES;
+}
+
+static BOOL DSHSessionExactKeysWithOptional(NSDictionary *dictionary,
+                                            NSArray<NSString *> *keys,
+                                            NSArray<NSString *> *optionalKeys) {
+  // `keys` and `optionalKeys` are this file's own literals (sometimes built
+  // in a mutable array), exactly like DSHSessionExactKeys; only the
+  // candidate dictionary is untrusted input.
+  if (!DSHSessionTrustedDictionary(dictionary)) return NO;
+  NSSet *allowed = [NSSet setWithArray:
+      [keys arrayByAddingObjectsFromArray:optionalKeys]];
+  NSSet *required = [NSSet setWithArray:keys];
+  for (id key in dictionary) {
+    if (!DSHSessionTrustedString(key) || ![allowed containsObject:key]) {
+      return NO;
+    }
+  }
+  for (NSString *key in keys) {
+    if (dictionary[key] == nil) return NO;
+  }
+  (void)required;
   return YES;
 }
 
@@ -726,9 +753,7 @@ static BOOL DSHSessionValidatePreferences(NSDictionary *preferences) {
           containsObject:preferences[@"theme_mode"]] ||
       ![@[@"system", @"zh-CN", @"en-US"]
           containsObject:preferences[@"locale"]] ||
-      ![@[@"deepseek-v4-flash", @"deepseek-v4-pro",
-          @"deepseek-v4-flash-vision-exp"]
-          containsObject:preferences[@"default_model"]] ||
+      !DSHHarnessIsSupportedModel(preferences[@"default_model"]) ||
       ![@[@"off", @"high", @"max"]
           containsObject:preferences[@"thinking_mode"]] ||
       ![@[@"read-only", @"workspace-write"]
@@ -871,8 +896,7 @@ static BOOL DSHSessionValidOpaqueIdentifier(id value) {
 }
 
 static BOOL DSHSessionValidModel(id value) {
-  return [@[@"deepseek-v4-flash", @"deepseek-v4-pro",
-            @"deepseek-v4-flash-vision-exp"] containsObject:value];
+  return DSHHarnessIsSupportedModel(value);
 }
 
 static BOOL DSHSessionValidThinkingMode(id value) {
@@ -1029,6 +1053,7 @@ static BOOL DSHSessionValidAttemptFailureCode(id value) {
       @"E_COMPLETION_BODY_TOO_LARGE", @"E_COMPLETION_BUSY",
       @"E_COMPLETION_CANCELLED", @"E_COMPLETION_REDIRECT",
       @"E_COMPLETION_TRANSPORT", @"E_COMPLETION_HTTP_STATUS",
+      @"E_COMPLETION_HTTP_429",
       @"E_COMPLETION_RESPONSE_SIZE", @"E_COMPLETION_RESPONSE_JSON",
       @"E_COMPLETION_PROVIDER_REQUEST_ID",
       @"E_COMPLETION_PROVIDER_RESPONSE_ID", @"E_COMPLETION_RESPONSE_MODEL",
@@ -1193,7 +1218,7 @@ static BOOL DSHSessionValidateProjectContextManifest(NSDictionary *manifest,
        [manifest[@"conflicted"] boolValue]) ||
       !DSHSessionCanonicalTimestamp(manifest[@"captured_at"]) ||
       ![manifest[@"policy_version"] isEqual:@"chat-read-v1.0.0"] ||
-      ![manifest[@"provider_host"] isEqual:@"api.deepseek.com"] ||
+      ![manifest[@"provider_host"] isEqual:DSHProviderHostForModel(manifest[@"model"])] ||
       !DSHSessionValidModel(manifest[@"model"]) ||
       !DSHSessionTrustedArray(manifest[@"included"]) ||
       [(NSArray *)manifest[@"included"] count] > 32 ||
@@ -1806,19 +1831,21 @@ static BOOL DSHSessionValidateAttemptProjectContext(NSDictionary *context) {
       [context[@"context_bytes"] unsignedIntegerValue] <=
           DSHSessionSnapshotMaximumContextBytes &&
       DSHSessionCanonicalUUID(context[@"consent_receipt_id"]) &&
-      [context[@"provider"] isEqual:@"deepseek"] &&
+      DSHHarnessIsProviderId(context[@"provider"]) &&
       [context[@"policy"] isEqual:@"chat-read-v1"] &&
       [context[@"policy_version"] isEqual:@"chat-read-v1.0.0"];
 }
 
 static BOOL DSHSessionValidateRoundReceipt(NSDictionary *receipt) {
-  if (!DSHSessionExactKeys(receipt, @[
+  if (!DSHSessionExactKeysWithOptional(receipt, @[
         @"schema_version", @"transport_schema_version", @"turn_id",
         @"attempt_id", @"round_id", @"round_index", @"provider_request_id",
         @"provider_response_id", @"requested_model", @"model", @"thinking_mode",
         @"finish_reason", @"latency_ms", @"visible_history_sha256",
         @"model_input_sha256", @"request_body_sha256", @"project_context_receipt",
-      ]) ||
+      ], @[@"harness_id"]) ||
+      (receipt[@"harness_id"] != nil &&
+       ![DSHHarnessIdForModel(receipt[@"model"]) isEqual:receipt[@"harness_id"]]) ||
       !DSHSessionExactSchema(receipt[@"schema_version"], 1) ||
       !DSHSessionSafeInteger(receipt[@"transport_schema_version"], NO) ||
       (![receipt[@"transport_schema_version"] isEqual:@2] &&
@@ -1889,7 +1916,9 @@ static BOOL DSHSessionValidateAttempt(NSDictionary *attempt,
     [keys addObject:@"journal_revision"];
     [keys addObject:@"agent"];
   }
-  if (!DSHSessionExactKeys(attempt, keys) ||
+  if (!DSHSessionExactKeysWithOptional(attempt, keys, @[@"harness_id"]) ||
+      (attempt[@"harness_id"] != nil &&
+       ![DSHHarnessIdForModel(attempt[@"model_id"]) isEqual:attempt[@"harness_id"]]) ||
       !DSHSessionExactSchema(attempt[@"schema_version"], agentSchema ? 3 : 1) ||
       !DSHSessionCanonicalUUID(attempt[@"attempt_id"]) ||
       !DSHSessionCanonicalUUID(attempt[@"turn_id"]) ||

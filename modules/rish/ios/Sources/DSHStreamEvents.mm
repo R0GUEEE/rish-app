@@ -222,6 +222,7 @@ static DSHStreamDelta * _Nullable DSHDecodeEventLines(
     DSHStreamDelta *delta = DSHDecodeEventLines(self.eventLines, error);
     [self.eventLines removeAllObjects];
     if (delta != nil) [deltas addObject:delta];
+    else if (error != nil && *error != nil) return nil;
   }
   return deltas;
 }

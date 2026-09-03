@@ -467,7 +467,7 @@ static NSData *DSHTestRequestBody(NSURLRequest *request) {
   XCTAssertNotNil(valid);
   XCTAssertNil(error);
   NSSet *expectedRootKeys = [NSSet setWithArray:@[
-    @"schema_version", @"turn_id", @"attempt_id", @"round_id",
+    @"schema_version", @"harness_id", @"turn_id", @"attempt_id", @"round_id",
     @"round_index", @"model", @"thinking_mode", @"visible_history",
     @"round_transcript", @"tools", @"project_context",
   ]];
@@ -938,7 +938,7 @@ static NSData *DSHTestRequestBody(NSURLRequest *request) {
   [module completeV2EnvelopeJSON:[self jsonString:[self validSchema2Envelope]]
       resolver:^(NSDictionary *result) {
         NSSet *expected = [NSSet setWithArray:@[
-          @"schema_version", @"turn_id", @"attempt_id", @"round_id",
+          @"schema_version", @"harness_id", @"turn_id", @"attempt_id", @"round_id",
           @"round_index", @"provider_request_id", @"provider_response_id",
           @"requested_model", @"model", @"thinking_mode", @"text",
           @"reasoning", @"tool_calls", @"finish_reason", @"latency_ms",
@@ -1321,8 +1321,9 @@ static NSData *DSHTestRequestBody(NSURLRequest *request) {
   [module completeV2EnvelopeJSON:[self jsonString:[self validSchema2Envelope]]
       resolver:^(__unused id value) { XCTFail(@"must not resolve"); }
       rejecter:^(NSString *code, NSString *message, NSError *error) {
-        XCTAssertEqualObjects(code, @"E_COMPLETION_HTTP_STATUS");
-        XCTAssertEqualObjects(message, @"E_COMPLETION_HTTP_STATUS");
+        // 429 is reported as its own stable code; still value-free.
+        XCTAssertEqualObjects(code, @"E_COMPLETION_HTTP_429");
+        XCTAssertEqualObjects(message, @"E_COMPLETION_HTTP_429");
         XCTAssertNil(error);
         NSString *description = [NSString stringWithFormat:@"%@ %@ %@",
             code, message, error];

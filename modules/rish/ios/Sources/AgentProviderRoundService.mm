@@ -10,6 +10,8 @@
 @property(nonatomic, strong, readwrite) DSHAgentTranscriptStore *transcripts;
 @property(nonatomic, strong, readwrite) DSHAgentRoundJournal *rounds;
 @property(nonatomic, strong, readwrite) DSHCompletionProviderTransport *transport;
+@property(nonatomic, strong, readwrite) DSHCompletionProviderTransport *claudeTransport;
+@property(nonatomic, strong, readwrite) DSHCompletionProviderTransport *codexTransport;
 @property(nonatomic, copy) DSHAgentProviderRoundCredentialProvider credentialProvider;
 @property(nonatomic, copy) DSHAgentProviderRoundVisibleHistoryProvider visibleHistoryProvider;
 @property(nonatomic, copy) DSHAgentProviderRoundContextReceiptProvider contextReceiptProvider;
@@ -41,6 +43,8 @@
                  transcripts:transcripts
                       rounds:rounds
                    transport:transport
+            claudeTransport:nil
+             codexTransport:nil
         credentialProvider:nil
      visibleHistoryProvider:nil
       contextReceiptProvider:nil];
@@ -57,6 +61,8 @@
                  transcripts:transcripts
                       rounds:rounds
                    transport:transport
+            claudeTransport:nil
+             codexTransport:nil
         credentialProvider:credentialProvider
      visibleHistoryProvider:visibleHistoryProvider
       contextReceiptProvider:nil];
@@ -69,6 +75,28 @@
           credentialProvider:(DSHAgentProviderRoundCredentialProvider)credentialProvider
        visibleHistoryProvider:(DSHAgentProviderRoundVisibleHistoryProvider)visibleHistoryProvider
        contextReceiptProvider:(DSHAgentProviderRoundContextReceiptProvider)contextReceiptProvider {
+  return [self initWithWAL:wal
+              preparedStore:preparedStore
+                 transcripts:transcripts
+                      rounds:rounds
+                   transport:transport
+            claudeTransport:nil
+             codexTransport:nil
+        credentialProvider:credentialProvider
+     visibleHistoryProvider:visibleHistoryProvider
+      contextReceiptProvider:contextReceiptProvider];
+}
+
+- (instancetype)initWithWAL:(DSHAgentNativeWAL *)wal
+                preparedStore:(DSHAgentPreparedAttemptStore *)preparedStore
+                   transcripts:(DSHAgentTranscriptStore *)transcripts
+                        rounds:(DSHAgentRoundJournal *)rounds
+                     transport:(DSHCompletionProviderTransport *)transport
+              claudeTransport:(DSHCompletionProviderTransport *)claudeTransport
+               codexTransport:(DSHCompletionProviderTransport *)codexTransport
+          credentialProvider:(DSHAgentProviderRoundCredentialProvider)credentialProvider
+       visibleHistoryProvider:(DSHAgentProviderRoundVisibleHistoryProvider)visibleHistoryProvider
+       contextReceiptProvider:(DSHAgentProviderRoundContextReceiptProvider)contextReceiptProvider {
   self = [super init];
   if (self != nil) {
     _wal = wal;
@@ -76,12 +104,22 @@
     _transcripts = transcripts;
     _rounds = rounds;
     _transport = transport;
+    _claudeTransport = claudeTransport;
+    _codexTransport = codexTransport;
     _credentialProvider = [credentialProvider copy];
     _visibleHistoryProvider = [visibleHistoryProvider copy];
     _contextReceiptProvider = [contextReceiptProvider copy];
     _contexts = [NSMutableDictionary dictionary];
   }
   return self;
+}
+
+- (nullable DSHCompletionProviderTransport *)transportForRequest:(NSDictionary *)request {
+  NSString *harnessId = [request[@"harness_id"] isKindOfClass:NSString.class]
+      ? request[@"harness_id"] : @"dsh";
+  if ([harnessId isEqualToString:@"claude-code"]) return self.claudeTransport;
+  if ([harnessId isEqualToString:@"codex"]) return self.codexTransport;
+  return self.transport;
 }
 
 - (nullable NSDictionary *)commitStartedOperationForRequest:(NSDictionary *)request
@@ -428,7 +466,11 @@
     DSHSetProviderError(error, DSHAgentNativeStoreErrorPersistence);
     return nil;
   }
-  if (self.visibleHistoryProvider == nil || self.transport == nil ||
+  NSString *harnessId = [request[@"harness_id"] isKindOfClass:NSString.class]
+      ? request[@"harness_id"] : @"dsh";
+  DSHCompletionProviderTransport *providerTransport =
+      [self transportForRequest:request];
+  if (self.visibleHistoryProvider == nil || providerTransport == nil ||
       self.rounds == nil || self.transcripts == nil) {
     NSError *commitError = nil;
     if ([self commitStartedOperationForRequest:request
@@ -538,8 +580,15 @@
   NSError *toolsError = nil;
   NSArray *tools = DSHProviderToolsForAuthority(
       authority, self.preparedStore.toolRegistry, &toolsError);
-  NSDictionary *body = tools == nil ? nil : DSHCompletionRequestBodyV2(
-      request[@"model"], request[@"thinking_mode"], messages, tools);
+  NSError *bodyBuildError = nil;
+  NSDictionary *body = tools == nil ? nil : [providerTransport
+      providerRequestBodyForModel:request[@"model"]
+                     thinkingMode:request[@"thinking_mode"]
+                         messages:messages
+                            tools:tools
+                        streaming:NO
+                            error:&bodyBuildError];
+  if (body == nil && bodyBuildError != nil) toolsError = bodyBuildError;
   NSData *bodyData = body == nil ? nil : [NSJSONSerialization
       dataWithJSONObject:body options:NSJSONWritingSortedKeys error:&toolsError];
   if (bodyData == nil || bodyData.length == 0 || bodyData.length > 40 * 1024 * 1024) {
@@ -723,7 +772,7 @@
   NSString *credential = nil;
   @try {
     credential = self.credentialProvider == nil
-        ? nil : self.credentialProvider(&credentialGeneration);
+        ? nil : self.credentialProvider(harnessId, &credentialGeneration);
   } @catch (__unused NSException *exception) {
     credential = nil;
   }
@@ -748,7 +797,7 @@
     return nil;
   }
   NSString *providerRequestErrorCode = nil;
-  NSString *providerRequestId = [self.transport nextProviderRequestId:
+  NSString *providerRequestId = [providerTransport nextProviderRequestId:
       &providerRequestErrorCode];
   if (providerRequestId == nil) {
     NSError *commitError = nil;
@@ -787,7 +836,7 @@
   context.semaphore = semaphore;
   if (contextKey != nil) @synchronized (self) { self.contexts[contextKey] = context; }
   __block BOOL redirected = NO;
-  NSURLSessionDataTask *task = [self.transport
+  NSURLSessionDataTask *task = [providerTransport
       startRequestWithSchemaVersion:[request[@"transport_schema_version"] integerValue]
                               roundId:request[@"round_id"]
                             generation:1
@@ -801,7 +850,7 @@
          NSString *currentCredential = nil;
          @try {
            currentCredential = self.credentialProvider == nil
-               ? nil : self.credentialProvider(&currentGeneration);
+               ? nil : self.credentialProvider(harnessId, &currentGeneration);
          } @catch (__unused NSException *exception) {
            currentCredential = nil;
          }
@@ -845,10 +894,10 @@
                             DSHProviderFinishContext(context, result, errorCode);
                           }];
   @synchronized (context) { context.task = task; }
-  if (context.finished && task != nil) [self.transport cancelTask:task];
+  if (context.finished && task != nil) [providerTransport cancelTask:task];
   dispatch_time_t deadline = dispatch_time(DISPATCH_TIME_NOW, 120LL * NSEC_PER_SEC);
   BOOL signaled = dispatch_semaphore_wait(semaphore, deadline) == 0;
-  if (!signaled && task != nil) [self.transport cancelTask:task];
+  if (!signaled && task != nil) [providerTransport cancelTask:task];
   if (contextKey != nil) @synchronized (self) { [self.contexts removeObjectForKey:contextKey]; }
   [self.wal unregisterNativeTaskId:nativeTaskId error:nil];
   NSDictionary *providerResult = nil;
@@ -1001,6 +1050,10 @@
     @"attempt_id" : request[@"attempt_id"],
     @"round_id" : request[@"round_id"],
     @"round_index" : request[@"round_index"],
+    @"harness_id" : [providerResult[@"harness_id"] isKindOfClass:NSString.class]
+        ? providerResult[@"harness_id"]
+        : ([request[@"harness_id"] isKindOfClass:NSString.class]
+            ? request[@"harness_id"] : @"dsh"),
     @"provider_request_id" : providerRequestId,
     @"provider_response_id" : providerResult[@"provider_response_id"],
     @"requested_model" : request[@"model"],
@@ -1257,7 +1310,11 @@
   DSHAgentProviderRoundContext *context = nil;
   if (key != nil) @synchronized (self) { context = self.contexts[key]; }
   if (context != nil) {
-    if (context.task != nil) [self.transport cancelTask:context.task];
+    if (context.task != nil) {
+      [self.transport cancelTask:context.task];
+      [self.claudeTransport cancelTask:context.task];
+      [self.codexTransport cancelTask:context.task];
+    }
     BOOL signal = NO;
     @synchronized (context) {
       if (!context.finished) {

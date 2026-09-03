@@ -1,4 +1,9 @@
 import {
+  PROVIDER_MODEL_IDS,
+  isProviderHost,
+  providerHostForModel,
+} from '../harness/types';
+import {
   PROJECT_CONTEXT_ERROR_CODES,
   PROJECT_CONTEXT_OMISSION_REASONS,
   PROJECT_CONTEXT_SCHEMA_VERSION,
@@ -47,11 +52,7 @@ const includedSources: ReadonlySet<string> = new Set([
   'staged_diff',
   'worktree_diff',
 ]);
-const deepSeekModels: ReadonlySet<string> = new Set([
-  'deepseek-v4-flash',
-  'deepseek-v4-pro',
-  'deepseek-v4-flash-vision-exp',
-]);
+const harnessModels: ReadonlySet<string> = new Set(PROVIDER_MODEL_IDS);
 const manifestKeys: ReadonlySet<string> = new Set([
   'schema_version',
   'snapshot_id',
@@ -308,8 +309,11 @@ function manifest(value: unknown): ProjectContextManifestV1 | null {
   if (raw.schema_version !== PROJECT_CONTEXT_SCHEMA_VERSION) {
     return invalid('$.manifest.schema_version', 'must equal 1');
   }
-  if (raw.provider_host !== 'api.deepseek.com') {
-    return invalid('$.manifest.provider_host', 'must equal api.deepseek.com');
+  if (!isProviderHost(raw.provider_host)) {
+    return invalid(
+      '$.manifest.provider_host',
+      'must be a supported provider host',
+    );
   }
   const includedEntries = strictArray(
     raw.included,
@@ -344,6 +348,17 @@ function manifest(value: unknown): ProjectContextManifestV1 | null {
       `$.manifest.omitted[${index}]`,
     );
   }
+  const model = enumValue<ProjectContextManifestV1['model']>(
+    raw.model,
+    '$.manifest.model',
+    harnessModels,
+  );
+  if (providerHostForModel(model) !== raw.provider_host) {
+    return invalid(
+      '$.manifest.provider_host',
+      'must match the provider of the manifest model',
+    );
+  }
   return {
     schema_version: PROJECT_CONTEXT_SCHEMA_VERSION,
     snapshot_id: nonEmptyString(raw.snapshot_id, '$.manifest.snapshot_id'),
@@ -358,12 +373,8 @@ function manifest(value: unknown): ProjectContextManifestV1 | null {
       raw.policy_version,
       '$.manifest.policy_version',
     ),
-    provider_host: 'api.deepseek.com',
-    model: enumValue<ProjectContextManifestV1['model']>(
-      raw.model,
-      '$.manifest.model',
-      deepSeekModels,
-    ),
+    provider_host: raw.provider_host,
+    model,
     included,
     omitted,
     context_bytes: nonNegativeInteger(

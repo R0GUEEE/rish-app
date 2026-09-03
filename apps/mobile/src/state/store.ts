@@ -63,6 +63,7 @@ import {
 } from '../agent/AgentControllerPreflight';
 import { projectAgentVisibleHistory } from '../agent/AgentVisibleHistory';
 import { isProjectContextSendable } from '../project-context/reducer';
+import { isHarnessId, providerForModel } from '../harness/types';
 import type {
   ProjectContextAction,
   ProjectContextConsentV1,
@@ -142,6 +143,8 @@ export type AppendMessageOptions = {
 export type PrepareTurnAttemptOptions = AppendMessageOptions & {
   /** Explicit user choice to send a project-bound turn without local context. */
   readonly sendWithoutProjectContext?: boolean;
+  /** Harness that owns this attempt; omitted by legacy callers and dsh. */
+  readonly harnessId?: string;
 };
 
 export type PreparedTurnAttempt = {
@@ -1642,7 +1645,7 @@ function frozenProjectContext(
       sourceFingerprint: context.snapshot.source_fingerprint,
       contextBytes: context.snapshot.context_bytes,
       consentReceiptId: context.consent.consent_receipt_id,
-      provider: 'deepseek',
+      provider: providerForModel(context.snapshot.model),
       policy: 'chat-read-v1',
       policyVersion: 'chat-read-v1.0.0',
     },
@@ -3004,6 +3007,13 @@ export function createChatStore(options: ChatStoreOptions = {}): ChatStore {
     prepareTurnAttempt: (conversationId, text, appendOptions = {}) => {
       const conversation = state.conversations[conversationId];
       if (conversation === undefined) return null;
+      const harnessId =
+        appendOptions.harnessId === undefined
+          ? 'dsh'
+          : appendOptions.harnessId;
+      if (typeof harnessId !== 'string' || !isHarnessId(harnessId)) {
+        return null;
+      }
       const contextChoice = frozenProjectContext(
         conversation,
         appendOptions.sendWithoutProjectContext === true,
@@ -3046,6 +3056,7 @@ export function createChatStore(options: ChatStoreOptions = {}): ChatStore {
         attemptId,
         turnId,
         status: 'prepared',
+        harnessId,
         visibleMessageIds: visibleMessages.map(item => item.id),
         visibleHistorySha256: null,
         attachmentIds,

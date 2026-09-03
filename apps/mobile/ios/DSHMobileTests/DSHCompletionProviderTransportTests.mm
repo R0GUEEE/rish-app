@@ -1,6 +1,7 @@
 #import <XCTest/XCTest.h>
 
 #import "../../../../modules/rish/ios/Sources/DSHCompletionProviderTransport.h"
+#import "../../../../modules/rish/ios/Sources/DshProviderTransport.h"
 
 typedef void (^DSHTransportURLProtocolHandler)(NSURLProtocol *protocol,
                                                NSURLRequest *request);
@@ -101,7 +102,7 @@ static NSString *const DSHTransportProviderRequestId =
   self.session = [NSURLSession sessionWithConfiguration:configuration
                                                 delegate:self.sessionDelegate
                                            delegateQueue:nil];
-  self.transport = [[DSHCompletionProviderTransport alloc]
+  self.transport = [[DshProviderTransport alloc]
       initWithSession:self.session
       uuidGenerator:^NSString *{
         return DSHTransportProviderRequestId;
@@ -247,7 +248,7 @@ static NSString *const DSHTransportProviderRequestId =
 }
 
 - (void)testProviderRequestIdGeneratorIsValidatedAndValueFree {
-  DSHCompletionProviderTransport *invalid = [[DSHCompletionProviderTransport alloc]
+  DSHCompletionProviderTransport *invalid = [[DshProviderTransport alloc]
       initWithSession:self.session
       uuidGenerator:^NSString *{
         return @"provider-request-id-sentinel";
@@ -257,7 +258,7 @@ static NSString *const DSHTransportProviderRequestId =
   XCTAssertNil([invalid nextProviderRequestId:&errorCode]);
   XCTAssertEqualObjects(errorCode, @"E_COMPLETION_PROVIDER_REQUEST_ID");
 
-  DSHCompletionProviderTransport *throwing = [[DSHCompletionProviderTransport alloc]
+  DSHCompletionProviderTransport *throwing = [[DshProviderTransport alloc]
       initWithSession:self.session
       uuidGenerator:^NSString *{
         @throw [NSException exceptionWithName:@"transport-test"
@@ -313,7 +314,7 @@ static NSString *const DSHTransportProviderRequestId =
   XCTAssertFalse([self.transport handlesTask:task]);
   XCTAssertEqualObjects([NSSet setWithArray:result.allKeys],
       ([NSSet setWithArray:@[
-        @"provider_request_id", @"provider_response_id", @"requested_model",
+        @"provider_request_id", @"provider_response_id", @"harness_id", @"requested_model",
         @"model", @"thinking_mode", @"text", @"reasoning", @"tool_calls",
         @"finish_reason", @"latency_ms", @"visible_history_sha256",
         @"model_input_sha256", @"request_body_sha256",
@@ -441,6 +442,8 @@ static NSString *const DSHTransportProviderRequestId =
     @{ @"name": @"transport", @"error": @"E_COMPLETION_TRANSPORT" },
     @{ @"name": @"non-http", @"error": @"E_COMPLETION_TRANSPORT" },
     @{ @"name": @"status", @"error": @"E_COMPLETION_HTTP_STATUS" },
+    @{ @"name": @"rate-limit", @"error": @"E_COMPLETION_HTTP_429" },
+    @{ @"name": @"unauthorized", @"error": @"E_COMPLETION_CREDENTIAL_UNAVAILABLE" },
     @{ @"name": @"size", @"error": @"E_COMPLETION_RESPONSE_SIZE" },
     @{ @"name": @"json", @"error": @"E_COMPLETION_RESPONSE_JSON" },
   ];
@@ -462,10 +465,14 @@ static NSString *const DSHTransportProviderRequestId =
         [protocol.client URLProtocol:protocol didLoadData:[@"{}"
             dataUsingEncoding:NSUTF8StringEncoding]];
         [protocol.client URLProtocolDidFinishLoading:protocol];
-      } else if ([name isEqualToString:@"status"]) {
+      } else if ([name isEqualToString:@"status"] ||
+                 [name isEqualToString:@"rate-limit"] ||
+                 [name isEqualToString:@"unauthorized"]) {
+        NSInteger status = [name isEqualToString:@"status"] ? 500
+            : ([name isEqualToString:@"rate-limit"] ? 429 : 401);
         [self respondJSONFromProtocol:protocol request:request
                                payload:@{ @"error": @{ @"message": @"secret" } }
-                                status:429];
+                                status:status];
       } else if ([name isEqualToString:@"size"]) {
         NSMutableData *data = [NSMutableData dataWithLength:8 * 1024 * 1024 + 1];
         [self respondFromProtocol:protocol request:request data:data status:200];

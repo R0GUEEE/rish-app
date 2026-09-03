@@ -45,6 +45,7 @@ import type {
   AgentRuntimeFailureCode,
 } from '../native/AgentRuntime';
 import { agentTextSHA256 } from '../completion/SessionPersistence';
+import { HARNESS_IDS, PROVIDER_MODEL_IDS } from '../harness/types';
 
 export type AgentStoreOperation =
   | 'prepare_agent_attempt'
@@ -384,6 +385,39 @@ function exact(value: unknown, keys: readonly string[]): RecordValue | null {
   const names = Object.keys(record);
   if (names.length !== keys.length || names.some(key => !allowed.has(key))) return null;
   return record;
+}
+
+/**
+ * exact() plus a closed optional-key allowance so post-ship wire fields
+ * (currently only `harness_id`) hydrate legacy rows without reopening the
+ * closed-shape guarantee. Optional keys are validated by the caller.
+ */
+function exactWithOptional(
+  value: unknown,
+  keys: readonly string[],
+  optionalKeys: readonly string[],
+): RecordValue | null {
+  const record = ownRecord(value);
+  if (record === null) return null;
+  const allowed = new Set([...keys, ...optionalKeys]);
+  const names = Object.keys(record);
+  if (
+    names.some(key => !allowed.has(key)) ||
+    keys.some(key => !names.includes(key))
+  )
+    return null;
+  return record;
+}
+
+function validHarnessId(value: unknown): value is string {
+  return typeof value === 'string' && (HARNESS_IDS as readonly string[]).includes(value);
+}
+
+function validProviderModel(value: unknown): value is string {
+  return (
+    typeof value === 'string' &&
+    (PROVIDER_MODEL_IDS as readonly string[]).includes(value)
+  );
 }
 
 function arrayValue(value: unknown, maximum: number, minimum = 0): unknown[] | null {
@@ -819,12 +853,12 @@ function targetRevisionRelation(
 }
 
 function validatePrepareRequest(value: unknown): PrepareAgentAttemptRequestV2 | null {
-  const raw = exact(value, PREPARE_REQUEST_KEYS);
+  const raw = exactWithOptional(value, PREPARE_REQUEST_KEYS, ['harness_id']);
   if (raw === null || raw.schema_version !== 2 || !uuid(raw.operation_id) || !uuid(raw.task_id) || !uuid(raw.conversation_id) ||
     !uuid(raw.attempt_id) || !nullableUuid(raw.workspace_id) || !nullableUuid(raw.project_id) ||
     (raw.workspace_binding_revision !== null && !safeInteger(raw.workspace_binding_revision, Number.MAX_SAFE_INTEGER - 1, false)) ||
     !validateTransport(raw.transport_schema_version, raw.project_id, raw.project_context_sha256) ||
-    !enumValue(raw.model, ['deepseek-v4-flash', 'deepseek-v4-pro', 'deepseek-v4-flash-vision-exp'] as const) ||
+    (raw.harness_id !== undefined && !validHarnessId(raw.harness_id)) || !validProviderModel(raw.model) ||
     !enumValue(raw.thinking_mode, ['off', 'high', 'max'] as const) || !digest(raw.visible_history_sha256) ||
     !safeInteger(raw.visible_message_count, 96) || raw.registry_version !== 1 ||
     (raw.expected_policy_version !== null && raw.expected_policy_version !== 'agent-v1')) return null;
@@ -855,6 +889,7 @@ function validatePrepareRequest(value: unknown): PrepareAgentAttemptRequestV2 | 
     project_id: raw.project_id,
     workspace_binding_revision: raw.workspace_binding_revision,
     transport_schema_version: raw.transport_schema_version,
+    harness_id: raw.harness_id === undefined ? 'dsh' : raw.harness_id,
     model: raw.model,
     thinking_mode: raw.thinking_mode,
     visible_message_ids: ids,
@@ -868,11 +903,11 @@ function validatePrepareRequest(value: unknown): PrepareAgentAttemptRequestV2 | 
 }
 
 function validateRoundRequest(value: unknown): CompleteAgentRoundRequestV2 | null {
-  const raw = exact(value, COMPLETE_REQUEST_KEYS);
+  const raw = exactWithOptional(value, COMPLETE_REQUEST_KEYS, ['harness_id']);
   if (raw === null || raw.schema_version !== 2 || !uuid(raw.operation_id) || !uuid(raw.task_id) || !uuid(raw.conversation_id) ||
     !uuid(raw.attempt_id) || !uuid(raw.round_id) || !safeInteger(raw.round_index, 7) || !safeInteger(raw.launch_attempt, 8, false) ||
     !safeInteger(raw.expected_round_revision) ||
-    !enumValue(raw.model, ['deepseek-v4-flash', 'deepseek-v4-pro', 'deepseek-v4-flash-vision-exp'] as const) ||
+    (raw.harness_id !== undefined && !validHarnessId(raw.harness_id)) || !validProviderModel(raw.model) ||
     !enumValue(raw.thinking_mode, ['off', 'high', 'max'] as const) || !digest(raw.visible_history_sha256) || !safeInteger(raw.visible_message_count, 96) ||
     raw.registry_version !== 1 || !digest(raw.toolset_sha256)) return null;
   const transcript = validateTranscript(raw.transcript);
@@ -897,6 +932,7 @@ function validateRoundRequest(value: unknown): CompleteAgentRoundRequestV2 | nul
     launch_attempt: raw.launch_attempt,
     expected_round_revision: raw.expected_round_revision,
     transport_schema_version: raw.transport_schema_version,
+    harness_id: raw.harness_id === undefined ? 'dsh' : raw.harness_id,
     model: raw.model,
     thinking_mode: raw.thinking_mode,
     visible_history_sha256: raw.visible_history_sha256,
@@ -1057,11 +1093,12 @@ function transcriptRelation(before: AgentRuntimeTranscriptHandleV1, after: Agent
 }
 
 function validateRoundReceipt(value: unknown): AgentRoundReceiptV2 | null {
-  const raw = exact(value, ['schema_version', 'transport_schema_version', 'turn_id', 'task_id', 'attempt_id', 'round_id', 'round_index', 'provider_request_id', 'provider_response_id', 'requested_model', 'model', 'thinking_mode', 'finish_reason', 'latency_ms', 'visible_history_sha256', 'model_input_sha256', 'request_body_sha256', 'project_context_receipt']);
-  if (raw === null || raw.schema_version !== 2 || (raw.transport_schema_version !== 2 && raw.transport_schema_version !== 3) || !uuid(raw.turn_id) || !uuid(raw.task_id) || !uuid(raw.attempt_id) || !uuid(raw.round_id) || !safeInteger(raw.round_index, 7) || !opaque(raw.provider_request_id) || !opaque(raw.provider_response_id) || !enumValue(raw.requested_model, ['deepseek-v4-flash', 'deepseek-v4-pro', 'deepseek-v4-flash-vision-exp'] as const) || !enumValue(raw.model, ['deepseek-v4-flash', 'deepseek-v4-pro', 'deepseek-v4-flash-vision-exp'] as const) || !enumValue(raw.thinking_mode, ['off', 'high', 'max'] as const) || !enumValue(raw.finish_reason, ['stop', 'tool_calls', 'length', 'content_filter'] as const) || !safeInteger(raw.latency_ms, 24 * 60 * 60 * 1000) || !digest(raw.visible_history_sha256) || !digest(raw.model_input_sha256) || !digest(raw.request_body_sha256) || !validateProjectReceipt(raw.project_context_receipt)) return null;
+  const raw = exactWithOptional(value, ['schema_version', 'transport_schema_version', 'turn_id', 'task_id', 'attempt_id', 'round_id', 'round_index', 'provider_request_id', 'provider_response_id', 'requested_model', 'model', 'thinking_mode', 'finish_reason', 'latency_ms', 'visible_history_sha256', 'model_input_sha256', 'request_body_sha256', 'project_context_receipt'], ['harness_id']);
+  if (raw === null || raw.schema_version !== 2 || (raw.transport_schema_version !== 2 && raw.transport_schema_version !== 3) || !uuid(raw.turn_id) || !uuid(raw.task_id) || !uuid(raw.attempt_id) || !uuid(raw.round_id) || !safeInteger(raw.round_index, 7) || !opaque(raw.provider_request_id) || !opaque(raw.provider_response_id) || (raw.harness_id !== undefined && !validHarnessId(raw.harness_id)) || !validProviderModel(raw.requested_model) || !validProviderModel(raw.model) || !enumValue(raw.thinking_mode, ['off', 'high', 'max'] as const) || !enumValue(raw.finish_reason, ['stop', 'tool_calls', 'length', 'content_filter'] as const) || !safeInteger(raw.latency_ms, 24 * 60 * 60 * 1000) || !digest(raw.visible_history_sha256) || !digest(raw.model_input_sha256) || !digest(raw.request_body_sha256) || !validateProjectReceipt(raw.project_context_receipt)) return null;
   if ((raw.transport_schema_version === 2 && raw.project_context_receipt !== null) ||
     (raw.transport_schema_version === 3 && raw.project_context_receipt === null)) return null;
-  return raw as unknown as AgentRoundReceiptV2;
+  const normalized = raw.harness_id === undefined ? { ...raw, harness_id: 'dsh' } : raw;
+  return normalized as unknown as AgentRoundReceiptV2;
 }
 
 function validateProjectReceipt(value: unknown): boolean {

@@ -2113,6 +2113,83 @@ static NSString *const DSHSessionTestOperationB =
   XCTAssertEqualObjects(result[@"status"], @"committed");
 }
 
+- (void)testSharedClaudeCodeToolRoundFixtureCommitsThroughNativeStore {
+  NSDictionary *candidate =
+      [self sharedFixtureNamed:@"claude-code-tool-round-session"];
+  XCTAssertNotNil(candidate);
+  if (candidate == nil) return;
+  NSError *error = nil;
+  NSDictionary *result = [self casWithOperation:DSHSessionTestOperationA
+      expected:@{ @"schema_version" : @1, @"kind" : @"missing" }
+      candidate:candidate error:&error];
+  XCTAssertNil(error);
+  XCTAssertEqualObjects(result[@"status"], @"committed");
+}
+
+- (void)testSharedCodexRoundFixtureCommitsThroughNativeStore {
+  NSDictionary *candidate = [self sharedFixtureNamed:@"codex-round-session"];
+  XCTAssertNotNil(candidate);
+  if (candidate == nil) return;
+  NSError *error = nil;
+  NSDictionary *result = [self casWithOperation:DSHSessionTestOperationA
+      expected:@{ @"schema_version" : @1, @"kind" : @"missing" }
+      candidate:candidate error:&error];
+  XCTAssertNil(error);
+  XCTAssertEqualObjects(result[@"status"], @"committed");
+}
+
+- (void)testLegacySessionWithoutHarnessIdStillCommitsThroughNativeStore {
+  // The pre-adapter snapshot carries no harness_id on attempts or receipts;
+  // the native store must keep accepting it so old sessions hydrate as DSH.
+  NSDictionary *candidate =
+      [self sharedFixtureNamed:@"legacy-pre-harness-session"];
+  XCTAssertNotNil(candidate);
+  if (candidate == nil) return;
+  NSDictionary *attempt = candidate[@"conversations"][0][@"attempts"][0];
+  XCTAssertNil(attempt[@"harness_id"]);
+  XCTAssertNotNil(candidate);
+  if (candidate == nil) return;
+  NSError *error = nil;
+  NSDictionary *result = [self casWithOperation:DSHSessionTestOperationA
+      expected:@{ @"schema_version" : @1, @"kind" : @"missing" }
+      candidate:candidate error:&error];
+  XCTAssertNil(error);
+  XCTAssertEqualObjects(result[@"status"], @"committed");
+}
+
+- (void)testRejectsReceiptWhoseHarnessDoesNotOwnItsModel {
+  NSMutableDictionary *candidate =
+      [self mutableSharedFixtureNamed:@"claude-code-tool-round-session"];
+  XCTAssertNotNil(candidate);
+  if (candidate == nil) return;
+  NSMutableDictionary *attempt = candidate[@"conversations"][0][@"attempts"][0];
+  XCTAssertEqualObjects(attempt[@"harness_id"], @"claude-code");
+  NSMutableDictionary *round = attempt[@"rounds"][0];
+  XCTAssertEqualObjects(round[@"harness_id"], @"claude-code");
+  XCTAssertEqualObjects(round[@"model"], @"claude-sonnet-5");
+  round[@"harness_id"] = @"codex";
+  NSError *error = nil;
+  XCTAssertNil(([self casWithOperation:DSHSessionTestOperationA
+      expected:@{ @"schema_version" : @1, @"kind" : @"missing" }
+      candidate:candidate error:&error]));
+  XCTAssertEqual(error.code, DSHSessionSnapshotStoreErrorInvalidArgument);
+}
+
+- (void)testRejectsAttemptWhoseHarnessDoesNotOwnItsModel {
+  NSMutableDictionary *candidate =
+      [self mutableSharedFixtureNamed:@"codex-round-session"];
+  XCTAssertNotNil(candidate);
+  if (candidate == nil) return;
+  NSMutableDictionary *attempt = candidate[@"conversations"][0][@"attempts"][0];
+  XCTAssertEqualObjects(attempt[@"harness_id"], @"codex");
+  attempt[@"harness_id"] = @"dsh";
+  NSError *error = nil;
+  XCTAssertNil(([self casWithOperation:DSHSessionTestOperationA
+      expected:@{ @"schema_version" : @1, @"kind" : @"missing" }
+      candidate:candidate error:&error]));
+  XCTAssertEqual(error.code, DSHSessionSnapshotStoreErrorInvalidArgument);
+}
+
 - (void)testHistoricalToolEventRejectsRoundMissingFromAttemptReceipts {
   NSMutableDictionary *candidate =
       [self mutableSharedFixtureNamed:@"agent-next-round-after-tool-session"];

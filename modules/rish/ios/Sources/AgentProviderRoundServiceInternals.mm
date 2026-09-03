@@ -1,4 +1,5 @@
 #import "AgentProviderRoundServiceInternals.h"
+#import "RishHarnessCatalog.h"
 
 #import "AgentToolRegistry.h"
 #import "DSHCompletionV2.h"
@@ -57,12 +58,12 @@ BOOL DSHProviderOpaqueId(id value) {
 }
 
 BOOL DSHProviderResultShape(NSDictionary *result) {
-  if (!DSHAgentExactDictionaryKeys(result, @[
+  if (!DSHAgentExactDictionaryKeysWithOptional(result, @[
         @"provider_request_id", @"provider_response_id", @"requested_model",
         @"model", @"thinking_mode", @"text", @"reasoning", @"tool_calls",
         @"finish_reason", @"latency_ms", @"visible_history_sha256",
         @"model_input_sha256", @"request_body_sha256",
-      ]) || !DSHProviderOpaqueId(result[@"provider_request_id"]) ||
+      ], @[@"harness_id"]) || !DSHProviderOpaqueId(result[@"provider_request_id"]) ||
       !DSHProviderOpaqueId(result[@"provider_response_id"]) ||
       !DSHAgentBoundedUTF8String(result[@"requested_model"], 128, NO, nullptr) ||
       !DSHAgentBoundedUTF8String(result[@"model"], 128, NO, nullptr) ||
@@ -82,9 +83,11 @@ BOOL DSHProviderResultShape(NSDictionary *result) {
       ![result[@"finish_reason"] isEqualToString:@"tool_calls"] &&
       ![result[@"finish_reason"] isEqualToString:@"length"] &&
       ![result[@"finish_reason"] isEqualToString:@"content_filter"]) return NO;
-  NSSet *models = [NSSet setWithArray:@[
-    @"deepseek-v4-flash", @"deepseek-v4-pro", @"deepseek-v4-flash-vision-exp",
-  ]];
+  NSSet *models = DSHHarnessSupportedModels();
+  if (result[@"harness_id"] != nil &&
+      ![DSHHarnessIdForModel(result[@"model"]) isEqual:result[@"harness_id"]]) {
+    return NO;
+  }
   return [models containsObject:result[@"requested_model"]] &&
       [models containsObject:result[@"model"]] &&
       [result[@"requested_model"] isEqual:result[@"model"]] &&
@@ -168,7 +171,11 @@ NSDictionary *DSHProviderRoundRequestCopy(NSDictionary *request,
   ];
   NSError *copyError = nil;
   NSDictionary *copy = DSHAgentImmutableJSONCopy(request, &copyError);
-  if (!DSHAgentExactDictionaryKeys(copy, keys) ||
+  // harness_id names the built-in Harness that owns the round; it must
+  // catalog the requested model. Pre-split callers omit it (DSH).
+  if (!DSHAgentExactDictionaryKeysWithOptional(copy, keys, @[ @"harness_id" ]) ||
+      (copy[@"harness_id"] != nil &&
+       ![DSHHarnessIdForModel(copy[@"model"]) isEqual:copy[@"harness_id"]]) ||
       !DSHProviderSchema(copy[@"schema_version"], 2) ||
       !DSHProviderUUID(copy[@"operation_id"]) ||
       !DSHProviderUUID(copy[@"task_id"]) || !DSHProviderUUID(copy[@"conversation_id"]) ||
@@ -300,6 +307,10 @@ NSDictionary *DSHProviderPublicReceipt(NSDictionary *provider,
     @"round_index" : request[@"round_index"],
     @"provider_request_id" : providerRequestId,
     @"provider_response_id" : provider[@"provider_response_id"],
+    @"harness_id" : [provider[@"harness_id"] isKindOfClass:NSString.class]
+        ? provider[@"harness_id"]
+        : ([request[@"harness_id"] isKindOfClass:NSString.class]
+            ? request[@"harness_id"] : @"dsh"),
     @"requested_model" : request[@"model"],
     @"model" : request[@"model"],
     @"thinking_mode" : request[@"thinking_mode"],

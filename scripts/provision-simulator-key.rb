@@ -8,9 +8,11 @@ require 'yaml'
 
 secure_stdin = ARGV.delete('--secure-stdin')
 udid = ARGV.fetch(0) do
-  abort 'usage: provision-simulator-key.rb [--secure-stdin] <simulator-udid> [bundle-id]'
+  abort 'usage: provision-simulator-key.rb [--secure-stdin] <simulator-udid> [bundle-id] [credential-slot]'
 end
 bundle_id = ARGV.fetch(1, 'dev.zseven.dsh.mobile')
+slot = ARGV.fetch(2, 'DEEPSEEK_API_KEY')
+abort 'unknown credential slot' unless %w[DEEPSEEK_API_KEY ANTHROPIC_API_KEY OPENAI_API_KEY].include?(slot)
 credentials_path = ENV.fetch(
   'DSH_CREDENTIALS',
   File.expand_path('~/.dsh/.credentials.yaml'),
@@ -18,7 +20,7 @@ credentials_path = ENV.fetch(
 
 key = if secure_stdin
         abort '--secure-stdin requires an interactive terminal' unless $stdin.tty?
-        $stderr.print 'DeepSeek API key (input hidden): '
+        $stderr.print "#{slot} (input hidden): "
         value = $stdin.noecho(&:gets)&.strip
         $stderr.puts
         value
@@ -35,9 +37,9 @@ key = if secure_stdin
           aliases: false,
         )
         abort 'managed credential schema version must be 1' unless credentials['version'] == 1
-        credentials.dig('refs', 'DEEPSEEK_API_KEY')
+        credentials.dig('refs', slot)
       end
-abort 'DEEPSEEK_API_KEY is absent or invalid' unless key.is_a?(String) && key.length.between?(16, 512)
+abort "#{slot} is absent or invalid" unless key.is_a?(String) && key.length.between?(16, 512)
 
 container, status = Open3.capture2e(
   'xcrun', 'simctl', 'get_app_container', udid, bundle_id, 'data',
@@ -46,9 +48,11 @@ abort "cannot resolve Simulator app container: #{container.strip}" unless status
 
 temporary = File.join(container.strip, 'tmp')
 staged = File.join(temporary, '.dsh-provision-key')
+staged_slot = File.join(temporary, '.dsh-provision-slot')
 acknowledgement = File.join(temporary, '.dsh-provision-ack')
 FileUtils.mkdir_p(temporary, mode: 0o700)
 abort 'a staged credential already exists; remove it only after auditing the failed import' if File.exist?(staged) || File.symlink?(staged)
+abort 'a staged credential slot already exists; remove it only after auditing the failed import' if File.exist?(staged_slot) || File.symlink?(staged_slot)
 FileUtils.rm_f(acknowledgement)
 no_follow = File.const_defined?(:NOFOLLOW) ? File::NOFOLLOW : 0
 File.open(staged, File::WRONLY | File::CREAT | File::EXCL | no_follow, 0o600) do |file|
@@ -57,9 +61,19 @@ File.open(staged, File::WRONLY | File::CREAT | File::EXCL | no_follow, 0o600) do
   file.flush
   file.fsync
 end
+File.open(staged_slot, File::WRONLY | File::CREAT | File::EXCL | no_follow, 0o600) do |file|
+  file.write(slot)
+  file.write("\n")
+  file.flush
+  file.fsync
+end
 key.replace("\0" * key.bytesize)
 File.chmod(0o600, staged)
-at_exit { FileUtils.rm_f(staged) }
+File.chmod(0o600, staged_slot)
+at_exit do
+  FileUtils.rm_f(staged)
+  FileUtils.rm_f(staged_slot)
+end
 
 launch, launch_status = Open3.capture2e(
   'xcrun', 'simctl', 'launch', '--terminate-running-process', udid, bundle_id,
@@ -72,4 +86,4 @@ until File.file?(acknowledgement) && !File.exist?(staged)
   sleep 0.1
 end
 FileUtils.rm_f(acknowledgement)
-puts 'managed DeepSeek credential imported into the Simulator Keychain; value not printed'
+puts "managed #{slot} credential imported into the Simulator Keychain; value not printed"

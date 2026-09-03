@@ -3992,6 +3992,7 @@ describe('schema 9 Agent journal persistence', () => {
     const executeRoundReceipt: CompletionRoundReceiptV1 = {
       schemaVersion: 1,
       transportSchemaVersion: 2,
+      harnessId: 'dsh',
       turnId: afterActive.turnId,
       attemptId: afterActive.attemptId,
       roundId: activeJournal.round_lineage!.round_id,
@@ -4899,6 +4900,7 @@ describe('schema 9 Agent journal persistence', () => {
         {
           schemaVersion: 1,
           transportSchemaVersion: 2,
+          harnessId: 'dsh',
           turnId: preparedAttempt.turnId,
           attemptId: preparedAttempt.attemptId,
           roundId: UUID_D,
@@ -5871,6 +5873,7 @@ describe('schema v6 attempts and project context', () => {
       visibleHistorySha256: 'a'.repeat(64),
       modelInputSha256: 'b'.repeat(64),
       requestBodySha256: 'c'.repeat(64),
+      harnessId: 'dsh',
       projectContextReceipt: null,
       ...overrides,
     };
@@ -7366,6 +7369,7 @@ describe('schema v6 attempts and project context', () => {
                 attemptId: ATTEMPT_ID,
                 turnId: TURN_ID,
                 status: 'prepared',
+                harnessId: 'dsh',
                 visibleMessageIds: [],
                 visibleHistorySha256: null,
                 attachmentIds: [],
@@ -8078,6 +8082,7 @@ describe('schema v6 attempts and project context', () => {
         roundIndex: 0,
         providerRequestId: '66666666-6666-4666-8666-666666666666',
         providerResponseId: 'resp_1',
+        harnessId: 'dsh',
         requestedModel: 'deepseek-v4-flash',
         model: 'deepseek-v4-flash',
         thinkingMode: 'high',
@@ -8133,6 +8138,7 @@ describe('schema v6 attempts and project context', () => {
         attemptId: prepared.attemptId,
         roundId: ROUND_ID,
         roundIndex: 0,
+        harnessId: 'dsh',
         providerRequestId: 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa',
         providerResponseId: 'resp_1',
         requestedModel: 'deepseek-v4-flash',
@@ -8444,6 +8450,7 @@ describe('schema v6 attempts and project context', () => {
       visibleHistorySha256: 'a'.repeat(64),
       modelInputSha256: 'b'.repeat(64),
       requestBodySha256: 'c'.repeat(64),
+      harnessId: 'dsh',
       projectContextReceipt: null,
     });
     const messageId = store.completeAttempt(
@@ -8695,6 +8702,7 @@ describe('schema v6 attempts and project context', () => {
       roundIndex: 0,
       providerRequestId: 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa',
       providerResponseId: 'resp_0',
+      harnessId: 'dsh',
       requestedModel: 'deepseek-v4-flash',
       model: 'deepseek-v4-flash',
       thinkingMode: 'high',
@@ -9194,6 +9202,7 @@ describe('schema v6 attempts and project context', () => {
           attemptId: prepared.attemptId,
           roundId,
           roundIndex: index,
+          harnessId: 'dsh',
           providerRequestId: `${String(index + 101).padStart(
             8,
             '0',

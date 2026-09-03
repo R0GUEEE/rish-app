@@ -1,0 +1,145 @@
+{
+  "schema_version": 1,
+  "harness_id": "dsh",
+  "provider": "deepseek",
+  "dialect": "openai-chat-completions-sse",
+  "cases": [
+    {
+      "name": "text_stream",
+      "chunks": [
+        "data: {\"id\":\"chatcmpl-01\",\"object\":\"chat.completion.chunk\",\"model\":\"deepseek-v4-flash\",\"choices\":[{\"index\":0,\"delta\":{\"role\":\"assistant\",\"content\":\"\"},\"finish_reason\":null}]}\n\ndata: {\"id\":\"chatcmpl-01\",\"object\":\"chat.completion.chunk\",\"model\":\"deepseek-v4-flash\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"Hel\"},\"finish_reason\":null}]}\n\ndata: {\"id\":\"chatcmpl-01\",\"object\":\"chat.completion.chunk\",\"model\":\"deepseek-v4-flash\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"lo\"},\"finish_reason\":null}]}\n\ndata: {\"id\":\"chatcmpl-01\",\"object\":\"chat.completion.chunk\",\"model\":\"deepseek-v4-flash\",\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"stop\"}],\"usage\":{\"prompt_tokens\":10,\"completion_tokens\":2}}\n\ndata: [DONE]\n\n"
+      ],
+      "expected": [
+        {
+          "type": "delta",
+          "content": "Hel"
+        },
+        {
+          "type": "delta",
+          "content": "lo"
+        },
+        {
+          "type": "delta",
+          "finish_reason": "stop"
+        },
+        {
+          "type": "done"
+        }
+      ],
+      "error": false
+    },
+    {
+      "name": "reasoning_then_text",
+      "chunks": [
+        "data: {\"choices\":[{\"index\":0,\"delta\":{\"reasoning_content\":\"plan\"},\"finish_reason\":null}]}\n\ndata: {\"choices\":[{\"index\":0,\"delta\":{\"reasoning_content\":\" more\"},\"finish_reason\":null}]}\n\ndata: {\"choices\":[{\"index\":0,\"delta\":{\"content\":\"answer\"},\"finish_reason\":null}]}\n\ndata: {\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"stop\"}]}\n\ndata: [DONE]\n\n"
+      ],
+      "expected": [
+        {
+          "type": "delta",
+          "reasoning": "plan"
+        },
+        {
+          "type": "delta",
+          "reasoning": " more"
+        },
+        {
+          "type": "delta",
+          "content": "answer"
+        },
+        {
+          "type": "delta",
+          "finish_reason": "stop"
+        },
+        {
+          "type": "done"
+        }
+      ],
+      "error": false
+    },
+    {
+      "name": "tool_call_round",
+      "chunks": [
+        "data: {\"choices\":[{\"index\":0,\"delta\":{\"content\":\"Writing the file.\"},\"finish_reason\":null}]}\n\ndata: {\"choices\":[{\"index\":0,\"delta\":{\"tool_calls\":[{\"index\":0,\"id\":\"call_01\",\"type\":\"function\",\"function\":{\"name\":\"write_file\",\"arguments\":\"\"}}]},\"finish_reason\":null}]}\n\ndata: {\"choices\":[{\"index\":0,\"delta\":{\"tool_calls\":[{\"index\":0,\"function\":{\"arguments\":\"{\\\"path\\\":\\\"notes.md\\\",\\\"content\\\":\\\"hi\\\"}\"}}]},\"finish_reason\":null}]}\n\ndata: {\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"tool_calls\"}]}\n\ndata: [DONE]\n\n"
+      ],
+      "expected": [
+        {
+          "type": "delta",
+          "content": "Writing the file."
+        },
+        {
+          "type": "delta",
+          "finish_reason": "tool_calls"
+        },
+        {
+          "type": "done"
+        }
+      ],
+      "error": false
+    },
+    {
+      "name": "length_stop",
+      "chunks": [
+        "data: {\"choices\":[{\"index\":0,\"delta\":{\"content\":\"partial\"},\"finish_reason\":null}]}\n\ndata: {\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"length\"}]}\n\n"
+      ],
+      "expected": [
+        {
+          "type": "delta",
+          "content": "partial"
+        },
+        {
+          "type": "delta",
+          "finish_reason": "length"
+        }
+      ],
+      "error": false
+    },
+    {
+      "name": "error_chunk_without_choices_is_silent",
+      "chunks": [
+        "data: {\"error\":{\"message\":\"Rate limit reached\",\"type\":\"rate_limit_error\",\"code\":\"429\"}}\n\ndata: {\"choices\":[{\"index\":0,\"delta\":{\"content\":\"after\"},\"finish_reason\":null}]}\n\n"
+      ],
+      "expected": [
+        {
+          "type": "delta",
+          "content": "after"
+        }
+      ],
+      "error": false
+    },
+    {
+      "name": "keepalive_and_comment",
+      "chunks": [
+        ": keep-alive\n\ndata: \n\ndata: {\"choices\":[{\"index\":0,\"delta\":{\"content\":\"ok\"},\"finish_reason\":null}]}\n\n"
+      ],
+      "expected": [
+        {
+          "type": "delta",
+          "content": "ok"
+        }
+      ],
+      "error": false
+    },
+    {
+      "name": "event_split_across_chunks",
+      "chunks": [
+        "data: {\"choices\":[{\"index\":0,\"delta\":{\"con",
+        "tent\":\"joined\"},\"finish_reason\":null}]}\n\n"
+      ],
+      "expected": [
+        {
+          "type": "delta",
+          "content": "joined"
+        }
+      ],
+      "error": false
+    },
+    {
+      "name": "truncated_tail",
+      "chunks": [
+        "data: {\"choices\":[{\"index\":0,\"delta\":{\"content\":\"cut"
+      ],
+      "expected": [],
+      "error": true
+    }
+  ]
+}

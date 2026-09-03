@@ -1,4 +1,5 @@
 #import "AgentPreparedAttemptStore.h"
+#import "RishHarnessCatalog.h"
 
 #import "DSHWorkspaceCanonical.h"
 
@@ -106,7 +107,8 @@ static BOOL DSHPreparedControllerCheckpointRelation(NSDictionary *request) {
 
 static BOOL DSHPreparedRequestShape(NSDictionary *request) {
   if (!DSHAgentIsImmutableFoundationJSON(request) ||
-      !DSHAgentExactDictionaryKeys(request, DSHAgentPreparedRequestKeys()) ||
+      !DSHAgentExactDictionaryKeysWithOptional(request, DSHAgentPreparedRequestKeys(),
+                                               @[ @"harness_id" ]) ||
       !DSHPreparedSchema(request[@"schema_version"], 2) ||
       !DSHAgentCanonicalUUID(request[@"operation_id"]) ||
       !DSHAgentCanonicalUUID(request[@"task_id"]) ||
@@ -149,11 +151,11 @@ static BOOL DSHPreparedRequestShape(NSDictionary *request) {
         DSHPreparedExactReference(request[@"expected_transcript"]))) {
     return NO;
   }
-  NSSet *models = [NSSet setWithArray:@[
-    @"deepseek-v4-flash", @"deepseek-v4-pro", @"deepseek-v4-flash-vision-exp",
-  ]];
+  NSSet *models = DSHHarnessSupportedModels();
   NSSet *thinkingModes = [NSSet setWithArray:@[@"off", @"high", @"max"]];
   if (![models containsObject:request[@"model"]] ||
+      (request[@"harness_id"] != nil &&
+       ![DSHHarnessIdForModel(request[@"model"]) isEqual:request[@"harness_id"]]) ||
       ![thinkingModes containsObject:request[@"thinking_mode"]]) return NO;
   NSMutableSet *visibleIds = [NSMutableSet set];
   for (id value in request[@"visible_message_ids"]) {

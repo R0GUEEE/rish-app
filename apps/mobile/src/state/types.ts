@@ -5,6 +5,7 @@ import type {
   ProjectContextManifestV1,
   ProjectContextState,
 } from '../project-context/types';
+import type { HarnessId, ProviderId } from '../harness/types';
 import type { PersistedAppPreferencesV1 } from '../preferences/types';
 
 /** Closed high-level native evidence; the mapper owns its runtime validation. */
@@ -86,6 +87,13 @@ export const SUPPORTED_MODEL_IDS = [
   'deepseek-v4-flash',
   'deepseek-v4-pro',
   'deepseek-v4-flash-vision-exp',
+  'claude-sonnet-5',
+  'claude-opus-5',
+  'claude-haiku-4-5-20251001',
+  'claude-fable-5-1',
+  'gpt-5.6',
+  'gpt-5.6-mini',
+  'gpt-5.6-nano',
 ] as const;
 
 export const CONVERSATION_THINKING_MODES = ['off', 'high', 'max'] as const;
@@ -156,6 +164,7 @@ export const ATTEMPT_FAILURE_CODES = [
   'E_COMPLETION_REDIRECT',
   'E_COMPLETION_TRANSPORT',
   'E_COMPLETION_HTTP_STATUS',
+  'E_COMPLETION_HTTP_429',
   'E_COMPLETION_RESPONSE_SIZE',
   'E_COMPLETION_RESPONSE_JSON',
   'E_COMPLETION_PROVIDER_REQUEST_ID',
@@ -921,7 +930,7 @@ export type AttemptProjectContextBindingV1 = {
   readonly sourceFingerprint: string;
   readonly contextBytes: number;
   readonly consentReceiptId: string;
-  readonly provider: 'deepseek';
+  readonly provider: ProviderId;
   readonly policy: 'chat-read-v1';
   readonly policyVersion: 'chat-read-v1.0.0';
 };
@@ -939,6 +948,8 @@ export type CompletionProjectContextReceiptV1 = {
 export type CompletionRoundReceiptV1 = {
   readonly schemaVersion: typeof COMPLETION_ROUND_RECEIPT_SCHEMA_VERSION;
   readonly transportSchemaVersion: 2 | 3;
+  /** Harness that produced this model response; legacy rows hydrate as dsh. */
+  readonly harnessId: HarnessId;
   readonly turnId: string;
   readonly attemptId: string;
   readonly roundId: string;
@@ -974,6 +985,8 @@ export type TurnAttemptV1 = {
   readonly attemptId: string;
   readonly turnId: string;
   readonly status: TurnAttemptStatus;
+  /** Harness that runs this attempt; legacy rows hydrate as dsh. */
+  readonly harnessId: HarnessId;
   readonly visibleMessageIds: readonly string[];
   readonly visibleHistorySha256: string | null;
   readonly attachmentIds: readonly string[];
@@ -1634,7 +1647,7 @@ export type PersistedAttemptProjectContextV1 = {
   readonly source_fingerprint: string;
   readonly context_bytes: number;
   readonly consent_receipt_id: string;
-  readonly provider: 'deepseek';
+  readonly provider: ProviderId;
   readonly policy: 'chat-read-v1';
   readonly policy_version: 'chat-read-v1.0.0';
 };
@@ -1642,6 +1655,8 @@ export type PersistedAttemptProjectContextV1 = {
 export type PersistedCompletionRoundReceiptV1 = {
   readonly schema_version: 1;
   readonly transport_schema_version: 2 | 3;
+  /** Omitted by legacy snapshots; hydration defaults to dsh. */
+  readonly harness_id?: string;
   readonly turn_id: string;
   readonly attempt_id: string;
   readonly round_id: string;
@@ -1664,6 +1679,8 @@ export type PersistedTurnAttemptV1 = {
   readonly attempt_id: string;
   readonly turn_id: string;
   readonly status: TurnAttemptStatus;
+  /** Omitted by legacy snapshots; hydration defaults to dsh. */
+  readonly harness_id?: string;
   readonly visible_message_ids: readonly string[];
   readonly visible_history_sha256: string | null;
   readonly attachment_ids: readonly string[];
@@ -1808,6 +1825,8 @@ export type PersistedTurnAttemptV2 = {
   readonly attempt_id: string;
   readonly turn_id: string;
   readonly status: TurnAttemptStatus;
+  /** Omitted by legacy snapshots; hydration defaults to dsh. */
+  readonly harness_id?: string;
   readonly visible_message_ids: readonly string[];
   readonly visible_history_sha256: string | null;
   readonly attachment_ids: readonly string[];

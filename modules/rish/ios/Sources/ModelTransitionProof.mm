@@ -1,4 +1,5 @@
 #import "ModelTransitionProof.h"
+#import "RishHarnessCatalog.h"
 
 #import <CommonCrypto/CommonDigest.h>
 
@@ -17,9 +18,7 @@ static BOOL DSHExactKeys(NSDictionary *value, NSArray<NSString *> *keys) {
 }
 
 static BOOL DSHSupportedTransitionModel(NSString *value) {
-  return [value isEqualToString:@"deepseek-v4-flash"]
-      || [value isEqualToString:@"deepseek-v4-pro"]
-      || [value isEqualToString:@"deepseek-v4-flash-vision-exp"];
+  return DSHHarnessIsSupportedModel(value);
 }
 
 static BOOL DSHStrictBoolean(id value) {

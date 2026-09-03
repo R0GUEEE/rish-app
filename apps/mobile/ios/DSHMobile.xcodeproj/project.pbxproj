@@ -12,6 +12,7 @@
 		0594E09A6912F74E7DD3CD7E /* StreamEventParserTests.mm in Sources */ = {isa = PBXBuildFile; fileRef = BEAB33D4FD608B29CABFBC8D /* StreamEventParserTests.mm */; };
 		0C80B921A6F3F58F76C31292 /* libPods-DSHMobile.a in Frameworks */ = {isa = PBXBuildFile; fileRef = 5DCACB8F33CDC322A6C60F78 /* libPods-DSHMobile.a */; };
 		0FB00ADC1B871CFEE69D14D1 /* DeviceCloneDriveUITests.m in Sources */ = {isa = PBXBuildFile; fileRef = 2CC0852742D4D62FB4839A6D /* DeviceCloneDriveUITests.m */; };
+		0FB00ADC1B871CFEE69D14D2 /* HarnessEvidenceUITests.m in Sources */ = {isa = PBXBuildFile; fileRef = 2CC0852742D4D62FB4839A6E /* HarnessEvidenceUITests.m */; };
 		0FD535F546494316DAC7D8C8 /* Foundation.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = 83D13607DBF7D23FF1349ED7 /* Foundation.framework */; };
 		13B07FBF1A68108700A75B9A /* Images.xcassets in Resources */ = {isa = PBXBuildFile; fileRef = 13B07FB51A68108700A75B9A /* Images.xcassets */; };
 		22A08E972B0819769FA015A3 /* WorkspaceBootstrapFreshInstallTests.mm in Sources */ = {isa = PBXBuildFile; fileRef = 3175292C9FC14967A3F72251 /* WorkspaceBootstrapFreshInstallTests.mm */; };
@@ -37,6 +38,15 @@
 		C0F400021AD99517003FC87E /* agent-begin-round-session.json in Resources */ = {isa = PBXBuildFile; fileRef = C0F400011AD99517003FC87E /* agent-begin-round-session.json */; };
 		C1F400021AD99517003FC87E /* agent-first-round-complete-session.json in Resources */ = {isa = PBXBuildFile; fileRef = C1F400011AD99517003FC87E /* agent-first-round-complete-session.json */; };
 		C2F400021AD99517003FC87E /* agent-next-round-after-tool-session.json in Resources */ = {isa = PBXBuildFile; fileRef = C2F400011AD99517003FC87E /* agent-next-round-after-tool-session.json */; };
+		D1F400021AD99517003FC87E /* claude-code-tool-round-session.json in Resources */ = {isa = PBXBuildFile; fileRef = D1F400011AD99517003FC87E /* claude-code-tool-round-session.json */; };
+		D2F400021AD99517003FC87E /* codex-round-session.json in Resources */ = {isa = PBXBuildFile; fileRef = D2F400011AD99517003FC87E /* codex-round-session.json */; };
+		D3F400021AD99517003FC87E /* legacy-pre-harness-session.json in Resources */ = {isa = PBXBuildFile; fileRef = D3F400011AD99517003FC87E /* legacy-pre-harness-session.json */; };
+		D4F400021AD99517003FC87E /* claude-stream-cases.json in Resources */ = {isa = PBXBuildFile; fileRef = D4F400011AD99517003FC87E /* claude-stream-cases.json */; };
+		D5F400021AD99517003FC87E /* codex-stream-cases.json in Resources */ = {isa = PBXBuildFile; fileRef = D5F400011AD99517003FC87E /* codex-stream-cases.json */; };
+		D6F400021AD99517003FC87E /* deepseek-stream-cases.json in Resources */ = {isa = PBXBuildFile; fileRef = D6F400011AD99517003FC87E /* deepseek-stream-cases.json */; };
+		E1C400021AD99517003FC87E /* ClaudeProviderTransportTests.mm in Sources */ = {isa = PBXBuildFile; fileRef = E1C400011AD99517003FC87E /* ClaudeProviderTransportTests.mm */; };
+		E2C400021AD99517003FC87E /* CodexProviderTransportTests.mm in Sources */ = {isa = PBXBuildFile; fileRef = E2C400011AD99517003FC87E /* CodexProviderTransportTests.mm */; };
+		E3C400021AD99517003FC87E /* ProviderStreamFixtureTests.mm in Sources */ = {isa = PBXBuildFile; fileRef = E3C400011AD99517003FC87E /* ProviderStreamFixtureTests.mm */; };
 		C3F400021AD99517003FC87E /* agent-interrupted-recovery-session.json in Resources */ = {isa = PBXBuildFile; fileRef = C3F400011AD99517003FC87E /* agent-interrupted-recovery-session.json */; };
 		C4F400021AD99517003FC87E /* scenario-a4-wal.json in Resources */ = {isa = PBXBuildFile; fileRef = C4F400011AD99517003FC87E /* scenario-a4-wal.json */; };
 		C5F400021AD99517003FC87E /* scenario-a4-session-envelope.json in Resources */ = {isa = PBXBuildFile; fileRef = C5F400011AD99517003FC87E /* scenario-a4-session-envelope.json */; };
@@ -82,6 +92,7 @@
 		1626FED4935CCF1E6723D53C /* DSHMobile.app */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = wrapper.application; path = DSHMobile.app; sourceTree = "<group>"; };
 		1AE248E2C179C9B712622942 /* Pods-DSHMobileTests.release.xcconfig */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = text.xcconfig; name = "Pods-DSHMobileTests.release.xcconfig"; path = "Target Support Files/Pods-DSHMobileTests/Pods-DSHMobileTests.release.xcconfig"; sourceTree = "<group>"; };
 		2CC0852742D4D62FB4839A6D /* DeviceCloneDriveUITests.m */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.c.objc; path = DeviceCloneDriveUITests.m; sourceTree = "<group>"; };
+		2CC0852742D4D62FB4839A6E /* HarnessEvidenceUITests.m */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.c.objc; path = HarnessEvidenceUITests.m; sourceTree = "<group>"; };
 		3175292C9FC14967A3F72251 /* WorkspaceBootstrapFreshInstallTests.mm */ = {isa = PBXFileReference; includeInIndex = 1; path = WorkspaceBootstrapFreshInstallTests.mm; sourceTree = "<group>"; };
 		3B4392A12AC88292D35C810B /* Pods-DSHMobile.debug.xcconfig */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = text.xcconfig; name = "Pods-DSHMobile.debug.xcconfig"; path = "Target Support Files/Pods-DSHMobile/Pods-DSHMobile.debug.xcconfig"; sourceTree = "<group>"; };
 		5709B34CF0A7D63546082F79 /* Pods-DSHMobile.release.xcconfig */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = text.xcconfig; name = "Pods-DSHMobile.release.xcconfig"; path = "Target Support Files/Pods-DSHMobile/Pods-DSHMobile.release.xcconfig"; sourceTree = "<group>"; };
@@ -111,6 +122,15 @@
 		C0F400011AD99517003FC87E /* agent-begin-round-session.json */ = {isa = PBXFileReference; lastKnownFileType = text.json; path = "Fixtures/agent-begin-round-session.json"; sourceTree = "<group>"; };
 		C1F400011AD99517003FC87E /* agent-first-round-complete-session.json */ = {isa = PBXFileReference; lastKnownFileType = text.json; path = "Fixtures/agent-first-round-complete-session.json"; sourceTree = "<group>"; };
 		C2F400011AD99517003FC87E /* agent-next-round-after-tool-session.json */ = {isa = PBXFileReference; lastKnownFileType = text.json; path = "Fixtures/agent-next-round-after-tool-session.json"; sourceTree = "<group>"; };
+		D1F400011AD99517003FC87E /* claude-code-tool-round-session.json */ = {isa = PBXFileReference; lastKnownFileType = text.json; path = "Fixtures/claude-code-tool-round-session.json"; sourceTree = "<group>"; };
+		D2F400011AD99517003FC87E /* codex-round-session.json */ = {isa = PBXFileReference; lastKnownFileType = text.json; path = "Fixtures/codex-round-session.json"; sourceTree = "<group>"; };
+		D3F400011AD99517003FC87E /* legacy-pre-harness-session.json */ = {isa = PBXFileReference; lastKnownFileType = text.json; path = "Fixtures/legacy-pre-harness-session.json"; sourceTree = "<group>"; };
+		D4F400011AD99517003FC87E /* claude-stream-cases.json */ = {isa = PBXFileReference; lastKnownFileType = text.json; path = "Fixtures/claude-stream-cases.json"; sourceTree = "<group>"; };
+		D5F400011AD99517003FC87E /* codex-stream-cases.json */ = {isa = PBXFileReference; lastKnownFileType = text.json; path = "Fixtures/codex-stream-cases.json"; sourceTree = "<group>"; };
+		D6F400011AD99517003FC87E /* deepseek-stream-cases.json */ = {isa = PBXFileReference; lastKnownFileType = text.json; path = "Fixtures/deepseek-stream-cases.json"; sourceTree = "<group>"; };
+		E1C400011AD99517003FC87E /* ClaudeProviderTransportTests.mm */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.cpp.objcpp; path = ClaudeProviderTransportTests.mm; sourceTree = "<group>"; };
+		E2C400011AD99517003FC87E /* CodexProviderTransportTests.mm */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.cpp.objcpp; path = CodexProviderTransportTests.mm; sourceTree = "<group>"; };
+		E3C400011AD99517003FC87E /* ProviderStreamFixtureTests.mm */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.cpp.objcpp; path = ProviderStreamFixtureTests.mm; sourceTree = "<group>"; };
 		C3F400011AD99517003FC87E /* agent-interrupted-recovery-session.json */ = {isa = PBXFileReference; lastKnownFileType = text.json; path = "Fixtures/agent-interrupted-recovery-session.json"; sourceTree = "<group>"; };
 		C4F400011AD99517003FC87E /* scenario-a4-wal.json */ = {isa = PBXFileReference; lastKnownFileType = text.json; path = "Fixtures/scenario-a4-wal.json"; sourceTree = "<group>"; };
 		C5F400011AD99517003FC87E /* scenario-a4-session-envelope.json */ = {isa = PBXFileReference; lastKnownFileType = text.json; path = "Fixtures/scenario-a4-session-envelope.json"; sourceTree = "<group>"; };
@@ -170,6 +190,12 @@
 				C0F400011AD99517003FC87E /* agent-begin-round-session.json */,
 				C1F400011AD99517003FC87E /* agent-first-round-complete-session.json */,
 				C2F400011AD99517003FC87E /* agent-next-round-after-tool-session.json */,
+				D1F400011AD99517003FC87E /* claude-code-tool-round-session.json */,
+				D2F400011AD99517003FC87E /* codex-round-session.json */,
+				D3F400011AD99517003FC87E /* legacy-pre-harness-session.json */,
+				D4F400011AD99517003FC87E /* claude-stream-cases.json */,
+				D5F400011AD99517003FC87E /* codex-stream-cases.json */,
+				D6F400011AD99517003FC87E /* deepseek-stream-cases.json */,
 				C3F400011AD99517003FC87E /* agent-interrupted-recovery-session.json */,
 				C4F400011AD99517003FC87E /* scenario-a4-wal.json */,
 				C5F400011AD99517003FC87E /* scenario-a4-session-envelope.json */,
@@ -182,6 +208,9 @@
 				A9C400011AD99517003FC87E /* LocalProjectsModuleV2Tests.mm */,
 				AAC400011AD99517003FC87E /* AgentToolEffectsTests.mm */,
 				ABC400011AD99517003FC87E /* DSHCompletionProviderTransportTests.mm */,
+				E1C400011AD99517003FC87E /* ClaudeProviderTransportTests.mm */,
+				E2C400011AD99517003FC87E /* CodexProviderTransportTests.mm */,
+				E3C400011AD99517003FC87E /* ProviderStreamFixtureTests.mm */,
 				ABD400011AD99517003FC87E /* AgentPreparedAttemptStoreTests.mm */,
 				ABE400011AD99517003FC87E /* AgentProviderRoundServiceTests.mm */,
 				ABF400011AD99517003FC87E /* LegacyBoundProjectRootAccessTests.mm */,
@@ -228,6 +257,7 @@
 			isa = PBXGroup;
 			children = (
 				2CC0852742D4D62FB4839A6D /* DeviceCloneDriveUITests.m */,
+				2CC0852742D4D62FB4839A6E /* HarnessEvidenceUITests.m */,
 			);
 			name = DSHMobileUITests;
 			path = DSHMobileUITests;
@@ -406,6 +436,12 @@
 				C0F400021AD99517003FC87E /* agent-begin-round-session.json in Resources */,
 				C1F400021AD99517003FC87E /* agent-first-round-complete-session.json in Resources */,
 				C2F400021AD99517003FC87E /* agent-next-round-after-tool-session.json in Resources */,
+				D1F400021AD99517003FC87E /* claude-code-tool-round-session.json in Resources */,
+				D2F400021AD99517003FC87E /* codex-round-session.json in Resources */,
+				D3F400021AD99517003FC87E /* legacy-pre-harness-session.json in Resources */,
+				D4F400021AD99517003FC87E /* claude-stream-cases.json in Resources */,
+				D5F400021AD99517003FC87E /* codex-stream-cases.json in Resources */,
+				D6F400021AD99517003FC87E /* deepseek-stream-cases.json in Resources */,
 				C3F400021AD99517003FC87E /* agent-interrupted-recovery-session.json in Resources */,
 				C4F400021AD99517003FC87E /* scenario-a4-wal.json in Resources */,
 				C5F400021AD99517003FC87E /* scenario-a4-session-envelope.json in Resources */,
@@ -550,6 +586,9 @@
 				A9C400021AD99517003FC87E /* LocalProjectsModuleV2Tests.mm in Sources */,
 				AAC400021AD99517003FC87E /* AgentToolEffectsTests.mm in Sources */,
 				ABC400021AD99517003FC87E /* DSHCompletionProviderTransportTests.mm in Sources */,
+				E1C400021AD99517003FC87E /* ClaudeProviderTransportTests.mm in Sources */,
+				E2C400021AD99517003FC87E /* CodexProviderTransportTests.mm in Sources */,
+				E3C400021AD99517003FC87E /* ProviderStreamFixtureTests.mm in Sources */,
 				ABD400021AD99517003FC87E /* AgentPreparedAttemptStoreTests.mm in Sources */,
 				ABE400021AD99517003FC87E /* AgentProviderRoundServiceTests.mm in Sources */,
 				ABF400021AD99517003FC87E /* LegacyBoundProjectRootAccessTests.mm in Sources */,
@@ -580,6 +619,7 @@
 			buildActionMask = 2147483647;
 			files = (
 				0FB00ADC1B871CFEE69D14D1 /* DeviceCloneDriveUITests.m in Sources */,
+				0FB00ADC1B871CFEE69D14D2 /* HarnessEvidenceUITests.m in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};

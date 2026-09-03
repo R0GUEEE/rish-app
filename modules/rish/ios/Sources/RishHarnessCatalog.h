@@ -1,0 +1,42 @@
+#import <Foundation/Foundation.h>
+
+NS_ASSUME_NONNULL_BEGIN
+
+/// Closed catalog of the built-in Rish Harnesses, the provider models they
+/// serve, and the provider identity recorded on receipts, project-context
+/// consent, and runtime proof. This is the single native mirror of
+/// apps/mobile/src/harness/types.ts; every closed-shape validator resolves
+/// model ids, harness ids, provider ids, and provider hosts through it
+/// instead of carrying its own list. Pure functions only: no I/O, no state.
+
+/// All model ids across the three built-in Harnesses.
+FOUNDATION_EXPORT NSSet<NSString *> *DSHHarnessSupportedModels(void);
+FOUNDATION_EXPORT BOOL DSHHarnessIsSupportedModel(id _Nullable value);
+
+/// "dsh" | "claude-code" | "codex".
+FOUNDATION_EXPORT NSSet<NSString *> *DSHHarnessSupportedHarnessIds(void);
+FOUNDATION_EXPORT BOOL DSHHarnessIsSupportedHarnessId(id _Nullable value);
+
+/// The Harness that catalogs `model`, or nil for an unknown model.
+FOUNDATION_EXPORT NSString *_Nullable DSHHarnessIdForModel(id _Nullable model);
+
+/// "deepseek" | "anthropic" | "openai".
+FOUNDATION_EXPORT NSSet<NSString *> *DSHHarnessSupportedProviderIds(void);
+FOUNDATION_EXPORT BOOL DSHHarnessIsProviderId(id _Nullable value);
+FOUNDATION_EXPORT NSString *_Nullable DSHProviderIdForHarnessId(id _Nullable harnessId);
+FOUNDATION_EXPORT NSString *_Nullable DSHProviderIdForModel(id _Nullable model);
+
+/// "api.deepseek.com" | "api.anthropic.com" | "api.openai.com".
+FOUNDATION_EXPORT NSSet<NSString *> *DSHHarnessSupportedProviderHosts(void);
+FOUNDATION_EXPORT BOOL DSHHarnessIsProviderHost(id _Nullable value);
+FOUNDATION_EXPORT NSString *_Nullable DSHProviderHostForProviderId(id _Nullable providerId);
+FOUNDATION_EXPORT NSString *_Nullable DSHProviderHostForModel(id _Nullable model);
+
+/// Keychain account (credential slot) for a Harness:
+/// DEEPSEEK_API_KEY | ANTHROPIC_API_KEY | OPENAI_API_KEY. The Keychain
+/// service name stays owned by LocalRuntimeModule and never changes.
+FOUNDATION_EXPORT NSSet<NSString *> *DSHHarnessCredentialAccounts(void);
+FOUNDATION_EXPORT BOOL DSHHarnessIsCredentialAccount(id _Nullable value);
+FOUNDATION_EXPORT NSString *_Nullable DSHCredentialAccountForHarnessId(id _Nullable harnessId);
+
+NS_ASSUME_NONNULL_END

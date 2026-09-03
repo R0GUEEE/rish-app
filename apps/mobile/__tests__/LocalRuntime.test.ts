@@ -38,6 +38,7 @@ const SHA256 = 'a'.repeat(64);
 function schema2Request() {
   return {
     schemaVersion: 2 as const,
+    harnessId: 'dsh' as const,
     turnId: TURN_ID,
     attemptId: ATTEMPT_ID,
     roundId: ROUND_ID,
@@ -99,6 +100,7 @@ function schema2Request() {
 function schema2Result(): Record<string, unknown> {
   return {
     schema_version: 2,
+    harness_id: 'dsh',
     turn_id: TURN_ID,
     attempt_id: ATTEMPT_ID,
     round_id: ROUND_ID,
@@ -432,7 +434,7 @@ test('fails closed when model transition proof storage is not linked', async () 
 });
 
 describe('strict completion schema 2 bridge', () => {
-  test('projects the exact 11-key wire envelope without stringifying caller fields', async () => {
+  test('projects the exact 12-key wire envelope without stringifying caller fields', async () => {
     mockNativeLocalRuntime.completeV2.mockResolvedValueOnce(schema2Result());
     const request = {
       ...schema2Request(),
@@ -448,6 +450,7 @@ describe('strict completion schema 2 bridge', () => {
     expect(Object.keys(wire).sort()).toEqual(
       [
         'schema_version',
+        'harness_id',
         'turn_id',
         'attempt_id',
         'round_id',
@@ -462,6 +465,7 @@ describe('strict completion schema 2 bridge', () => {
     );
     expect(wire).toEqual({
       schema_version: 2,
+      harness_id: 'dsh',
       turn_id: TURN_ID,
       attempt_id: ATTEMPT_ID,
       round_id: ROUND_ID,
@@ -484,7 +488,7 @@ describe('strict completion schema 2 bridge', () => {
     expect(result).toEqual(schema2Result());
   });
 
-  test('accepts only the exact 19-key result shape', async () => {
+  test('accepts only the exact 20-key result shape', async () => {
     const expectedKeys = Object.keys(schema2Result()).sort();
     mockNativeLocalRuntime.completeV2.mockResolvedValueOnce(schema2Result());
 
@@ -1056,6 +1060,7 @@ describe('context-bound completion schema 3 bridge', () => {
     expect(Object.keys(wire).sort()).toEqual(
       [
         'schema_version',
+        'harness_id',
         'turn_id',
         'attempt_id',
         'round_id',
@@ -1114,6 +1119,7 @@ describe('context-bound completion schema 3 bridge', () => {
     expect(mockNativeLocalRuntime.completeV2).toHaveBeenLastCalledWith(
       JSON.stringify({
         schema_version: 2,
+        harness_id: 'dsh',
         turn_id: TURN_ID,
         attempt_id: ATTEMPT_ID,
         round_id: ROUND_ID,

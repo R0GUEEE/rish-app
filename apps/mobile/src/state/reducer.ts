@@ -68,6 +68,12 @@ import {
   type AgentAttemptPhase,
 } from './types';
 import {
+  isHarnessId,
+  isProviderId,
+  providerForModel,
+  providerHostForModel,
+} from '../harness/types';
+import {
   validateAgentStoreTransition,
   type AgentStoreTransitionEvidence,
 } from '../agent/AgentStoreTransitions';
@@ -162,6 +168,7 @@ const workspaceBindingActionKeys = ['owner', 'binding', 'at'] as const;
 const roundReceiptKeys = [
   'schemaVersion',
   'transportSchemaVersion',
+  'harnessId',
   'turnId',
   'attemptId',
   'roundId',
@@ -192,6 +199,7 @@ const attemptReferenceProjectionKeys = [
   'attemptId',
   'turnId',
   'status',
+  'harnessId',
   'visibleMessageIds',
   'visibleHistorySha256',
   'attachmentIds',
@@ -730,7 +738,8 @@ function attemptBindingIsValid(
     binding.sourceFingerprint === context.snapshot?.source_fingerprint &&
     binding.contextBytes === context.snapshot?.context_bytes &&
     binding.consentReceiptId === context.consent?.consent_receipt_id &&
-    binding.provider === 'deepseek' &&
+    context.snapshot !== null &&
+    binding.provider === providerForModel(context.snapshot.model) &&
     binding.policy === 'chat-read-v1' &&
     binding.policyVersion === 'chat-read-v1.0.0' &&
     binding.policyVersion === context.snapshot?.policy_version &&
@@ -837,6 +846,7 @@ function copyRoundReceipt(
     roundIndex: receipt.roundIndex,
     providerRequestId: receipt.providerRequestId,
     providerResponseId: receipt.providerResponseId,
+    harnessId: receipt.harnessId,
     requestedModel: receipt.requestedModel,
     model: receipt.model,
     thinkingMode: receipt.thinkingMode,
@@ -855,6 +865,7 @@ function copyAttempt(attempt: TurnAttemptV1): TurnAttemptV1 {
     attemptId: attempt.attemptId,
     turnId: attempt.turnId,
     status: attempt.status,
+    harnessId: attempt.harnessId,
     visibleMessageIds: [...attempt.visibleMessageIds],
     visibleHistorySha256: attempt.visibleHistorySha256,
     attachmentIds: [...attempt.attachmentIds],
@@ -1162,7 +1173,7 @@ function contextAuthorityMatches(
     context.projectId === conversation.projectId &&
     snapshot.project_id === conversation.projectId &&
     snapshot.model === conversation.modelId &&
-    snapshot.provider_host === 'api.deepseek.com' &&
+    snapshot.provider_host === providerHostForModel(snapshot.model) &&
     snapshot.policy_version === 'chat-read-v1.0.0' &&
     isCanonicalLifecycleId(snapshot.snapshot_id) &&
     (confirmed
@@ -1321,7 +1332,7 @@ function verifiedAttemptSnapshotId(attempt: TurnAttemptV1): string | null {
     binding.contextBytes < 1 ||
     binding.contextBytes > MAX_PROJECT_CONTEXT_RECEIPT_BYTES ||
     !isCanonicalLifecycleId(binding.consentReceiptId) ||
-    binding.provider !== 'deepseek' ||
+    !isProviderId(binding.provider) ||
     binding.policy !== 'chat-read-v1' ||
     binding.policyVersion !== 'chat-read-v1.0.0'
   ) {
@@ -3711,7 +3722,7 @@ function evidenceTranscript(value: unknown): AgentEvidenceTranscript | null {
 }
 
 function evidenceRoundReceipt(value: unknown): CompletionRoundReceiptV1 | null {
-  if (!isExactDataRecord(value, [
+  if (!isExactDataRecordWithOptional(value, [
     'schema_version',
     'transport_schema_version',
     'turn_id',
@@ -3730,7 +3741,10 @@ function evidenceRoundReceipt(value: unknown): CompletionRoundReceiptV1 | null {
     'model_input_sha256',
     'request_body_sha256',
     'project_context_receipt',
-  ])) return null;
+  ], ['harness_id'])) return null;
+  if (value.harness_id !== undefined && !isHarnessId(value.harness_id)) {
+    return null;
+  }
   const receipt = value as unknown as {
     readonly schema_version: number;
     readonly transport_schema_version: 2 | 3;
@@ -3741,6 +3755,7 @@ function evidenceRoundReceipt(value: unknown): CompletionRoundReceiptV1 | null {
     readonly round_index: number;
     readonly provider_request_id: string;
     readonly provider_response_id: string;
+    readonly harness_id?: CompletionRoundReceiptV1['harnessId'];
     readonly requested_model: CompletionRoundReceiptV1['requestedModel'];
     readonly model: CompletionRoundReceiptV1['model'];
     readonly thinking_mode: CompletionRoundReceiptV1['thinkingMode'];
@@ -3755,6 +3770,7 @@ function evidenceRoundReceipt(value: unknown): CompletionRoundReceiptV1 | null {
   return {
     schemaVersion: 1,
     transportSchemaVersion: receipt.transport_schema_version,
+    harnessId: receipt.harness_id ?? 'dsh',
     turnId: receipt.turn_id,
     attemptId: receipt.attempt_id,
     roundId: receipt.round_id,

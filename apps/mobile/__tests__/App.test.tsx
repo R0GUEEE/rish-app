@@ -63,6 +63,10 @@ jest.mock('../src/native/LocalRuntime', () => ({
     credentialStatus: jest.fn(),
     presentCredentialPrompt: jest.fn(),
     clearCredential: jest.fn(),
+    credentialStatusForSlot: jest.fn(),
+    presentCredentialPromptForSlot: jest.fn(),
+    clearCredentialForSlot: jest.fn(),
+    isCredentialSlotAvailable: jest.fn(),
     complete: jest.fn(),
     completeV2: jest.fn(),
     recordModelTransition: jest.fn(),
@@ -218,6 +222,10 @@ type MockLocalRuntime = Record<
   | 'credentialStatus'
   | 'presentCredentialPrompt'
   | 'clearCredential'
+  | 'credentialStatusForSlot'
+  | 'presentCredentialPromptForSlot'
+  | 'clearCredentialForSlot'
+  | 'isCredentialSlotAvailable'
   | 'complete'
   | 'completeV2'
   | 'isCompletionV2Available'
@@ -302,6 +310,7 @@ const proof = {
 
 type StrictCompletionRequest = {
   schemaVersion: 2 | 3;
+  harnessId?: string;
   turnId: string;
   attemptId: string;
   roundId: string;
@@ -326,6 +335,7 @@ function strictCompletionResult(
 ) {
   return {
     schema_version: request.schemaVersion,
+    harness_id: request.harnessId ?? 'dsh',
     turn_id: request.turnId,
     attempt_id: request.attemptId,
     round_id: request.roundId,
@@ -1538,6 +1548,14 @@ beforeEach(() => {
       )}-0000-4000-8000-000000000000`,
   );
   mockLocalRuntime.credentialStatus.mockResolvedValue({ status: 'configured' });
+  mockLocalRuntime.credentialStatusForSlot.mockResolvedValue({
+    status: 'configured',
+  });
+  mockLocalRuntime.presentCredentialPromptForSlot.mockResolvedValue({
+    status: 'configured',
+  });
+  mockLocalRuntime.clearCredentialForSlot.mockResolvedValue({ status: 'cleared' });
+  mockLocalRuntime.isCredentialSlotAvailable.mockReturnValue(true);
   mockLocalRuntime.bootstrap.mockResolvedValue({ proof, rish: {} });
   mockSessionSnapshots.isAvailable.mockReturnValue(true);
   mockAgentRuntime.isAvailable.mockReturnValue(false);
@@ -3183,6 +3201,7 @@ describe('project context Home integration H2', () => {
           expect.objectContaining({ content: '  explicit raw text  ' }),
         ],
       }),
+      'dsh',
     );
     await act(async () => sendWithout());
     await act(async () => dismiss());
@@ -3277,6 +3296,7 @@ describe('project context Home integration H2', () => {
           projectId: CONTEXT_PROJECT_ID,
         }),
       }),
+      'dsh',
     );
     await act(async () => confirm());
     expect(mockLocalRuntime.completeV2).toHaveBeenCalledTimes(1);
@@ -5335,6 +5355,7 @@ test('sends verified project context through schema3 without AgentLoop', async (
         policy: 'chat-read-v1',
       },
     }),
+    'dsh',
   );
   expect(mockRunAgentTurn).not.toHaveBeenCalled();
   expect(lastPersistedState().messages.at(-1)?.text).toBe(
@@ -5369,6 +5390,7 @@ test('sends the complete conversation history and persists both messages', async
       tools: [],
       projectContext: null,
     }),
+    'dsh',
   );
   const persisted = lastPersistedState();
   expect(persisted.messages.map(message => message.role)).toEqual([
@@ -5623,6 +5645,7 @@ test('adds an image attachment, switches to Flash Exp, and sends without text', 
         },
       ],
     }),
+    'dsh',
   );
   const persisted = lastPersistedState();
   expect(persisted.conversations[0]?.model_id).toBe(
@@ -9296,7 +9319,7 @@ test('persists cancellation before deleting the active chat and ignores late out
 });
 
 test('offers native credential recovery when no key is configured', async () => {
-  mockLocalRuntime.credentialStatus.mockResolvedValue({ status: 'missing' });
+  mockLocalRuntime.credentialStatusForSlot.mockResolvedValue({ status: 'missing' });
   const renderer = await renderApp();
   const root = renderer.root;
 
@@ -9314,7 +9337,11 @@ test('offers native credential recovery when no key is configured', async () => 
     await settle();
   });
 
-  expect(mockLocalRuntime.presentCredentialPrompt).toHaveBeenCalledTimes(1);
+  expect(mockLocalRuntime.presentCredentialPromptForSlot).toHaveBeenCalledTimes(1);
+  expect(mockLocalRuntime.presentCredentialPromptForSlot).toHaveBeenCalledWith(
+    'DEEPSEEK_API_KEY',
+    'en-US',
+  );
   expect(
     root.findByProps({ accessibilityLabel: 'Message DSH' }).props.editable,
   ).toBe(true);

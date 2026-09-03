@@ -10,6 +10,10 @@ import type {
 } from '../src/completion/types';
 import type { SessionDurabilityResult } from '../src/completion/SessionPersistence';
 import { sessionSnapshotSHA256 } from '../src/completion/SessionPersistence';
+import {
+  providerHostForModel,
+  type HarnessModelId,
+} from '../src/harness/types';
 import type {
   AgentRuntimeFacadeV2,
   AgentAttemptProjectionV2,
@@ -54,6 +58,7 @@ declare const __dirname: string;
 
 const nodeFs = jest.requireActual('node:fs') as {
   readFileSync(path: string, encoding: 'utf8'): string;
+  writeFileSync(path: string, data: string): void;
 };
 const nodePath = jest.requireActual('node:path') as {
   resolve(...paths: string[]): string;
@@ -94,6 +99,7 @@ function storeWithIds(ids = [TURN_ID, ATTEMPT_ID, RETRY_ID]): ChatStore {
 function v2Result(request: CompleteRoundV2Request): CompleteRoundV2Result {
   return {
     schema_version: 2,
+    harness_id: request.harnessId,
     turn_id: request.turnId,
     attempt_id: request.attemptId,
     round_id: request.roundId,
@@ -422,6 +428,7 @@ describe('transactional completion controller', () => {
     expect(onCommitted).toHaveBeenCalledTimes(1);
     expect(value.completeRoundV2).toHaveBeenCalledWith({
       schemaVersion: 2,
+      harnessId: 'dsh',
       turnId: TURN_ID,
       attemptId: ATTEMPT_ID,
       roundId: ROUND_ID,
@@ -1433,7 +1440,7 @@ describe('project Agent completion controller', () => {
     '8c8c8c8c-8c8c-4c8c-8c8c-8c8c8c8c8c8c',
   ];
 
-  function agentStore() {
+  function agentStore(model: HarnessModelId = 'deepseek-v4-flash') {
     let messageUsed = false;
     const options: Parameters<typeof createChatStore>[0] = {
       now: () => NOW,
@@ -1463,8 +1470,8 @@ describe('project Agent completion controller', () => {
       conflicted: false,
       captured_at: NOW,
       policy_version: 'chat-read-v1.0.0',
-      provider_host: 'api.deepseek.com',
-      model: 'deepseek-v4-flash',
+      provider_host: providerHostForModel(model),
+      model,
       included: [{ path: 'README.md', source: 'tracked_file' as const, bytes: 1, sha256: 'c'.repeat(64) }],
       omitted: [],
       context_bytes: 1,
@@ -1498,6 +1505,7 @@ describe('project Agent completion controller', () => {
           ...state.conversations,
           [conversationId]: {
             ...source,
+            modelId: model,
             workspaceId: AGENT_WORKSPACE,
             runtimeContextId: AGENT_WORKSPACE,
             workspaceBinding: {
@@ -1621,6 +1629,7 @@ describe('project Agent completion controller', () => {
       const completionReceipt: AgentRoundReceiptV2 = {
         schema_version: 2,
         transport_schema_version: request.transport_schema_version,
+        harness_id: request.harness_id,
         turn_id: request.task_id,
         task_id: request.task_id,
         attempt_id: request.attempt_id,
@@ -2275,8 +2284,7 @@ describe('project Agent completion controller', () => {
       requestAgentApproval: jest.fn(async () => ({ status: 'approved', scope: 'once' })),
       now: () => NOW,
     });
-    const result = await controller.send({ conversationId, text: 'write and commit', attachments: [] });
-    expect(result.status).toBe('completed');
+    const result = await controller.send({ conversationId, text: 'write and commit', attachments: [] });    expect(result.status).toBe('completed');
     expect(runtime.prepareAgentAttempt).toHaveBeenCalledTimes(1);
     expect(runtime.completeAgentRoundV2).toHaveBeenCalledTimes(2);
     expect(runtime.prepareAgentToolBatch).toHaveBeenCalledTimes(1);
@@ -2351,22 +2359,9 @@ describe('project Agent completion controller', () => {
     expect(beginSession).toBeDefined();
     expect(completeSession).toBeDefined();
     expect(nextRoundSession).toBeDefined();
-    const fixtures = nodePath.resolve(
-      __dirname,
-      '../ios/DSHMobileTests/Fixtures',
-    );
-    expect(`${beginSession}\n`).toBe(nodeFs.readFileSync(
-      nodePath.resolve(fixtures, 'agent-begin-round-session.json'),
-      'utf8',
-    ));
-    expect(`${completeSession}\n`).toBe(nodeFs.readFileSync(
-      nodePath.resolve(fixtures, 'agent-first-round-complete-session.json'),
-      'utf8',
-    ));
-    expect(`${nextRoundSession}\n`).toBe(nodeFs.readFileSync(
-      nodePath.resolve(fixtures, 'agent-next-round-after-tool-session.json'),
-      'utf8',
-    ));
+    assertSharedFixture(beginSession!, 'agent-begin-round-session.json');
+    assertSharedFixture(completeSession!, 'agent-first-round-complete-session.json');
+    assertSharedFixture(nextRoundSession!, 'agent-next-round-after-tool-session.json');
     expect(batchRequest.committed_checkpoint).toMatchObject({
       session_generation: completeRoundProof.generation,
       session_sha256: completeRoundProof.session_sha256,
@@ -2408,6 +2403,128 @@ describe('project Agent completion controller', () => {
     expect(completedAttempt?.rounds.every(
       round => round.visibleHistorySha256 === 'f'.repeat(64),
     )).toBe(true);
+  });
+
+  /**
+   * Byte-exact parity with the native SessionSnapshotStoreTests fixtures.
+   * `RISH_UPDATE_FIXTURES=1 npx jest CompletionController` rewrites them
+   * after an intentional persisted-shape change; the native suite must then
+   * still validate and CAS-commit every file.
+   */
+  function assertSharedFixture(session: string, name: string): void {
+    const file = nodePath.resolve(
+      __dirname,
+      '../ios/DSHMobileTests/Fixtures',
+      name,
+    );
+    const env = process.env as Record<string, string | undefined>;
+    if (env.RISH_UPDATE_FIXTURES === '1') {
+      nodeFs.writeFileSync(file, `${session}\n`);
+    }
+    expect(`${session}\n`).toBe(nodeFs.readFileSync(file, 'utf8'));
+  }
+
+  async function captureHarnessSessions(
+    harnessId: 'claude-code' | 'codex',
+    model: 'claude-sonnet-5' | 'gpt-5.6',
+    finalRoundIndex: number,
+  ): Promise<{
+    readonly sessions: ReadonlyArray<{ readonly kind: string; readonly session: string }>;
+    readonly store: ChatStore;
+    readonly runtime: AgentRuntimeFacadeV2;
+  }> {
+    const store = agentStore(model);
+    const conversationId = store.getState().selectedConversationId!;
+    const operations: ReturnType<typeof jest.fn>[] = [];
+    const runtime = makeRuntime(operations, { finalRoundIndex });
+    const roundKinds: string[] = [];
+    const originalCheckpointAgentRound = store.checkpointAgentRound.bind(store);
+    jest.spyOn(store, 'checkpointAgentRound').mockImplementation(input => {
+      roundKinds.push(input.evidence.kind);
+      return originalCheckpointAgentRound(input);
+    });
+    const sessions: Array<{ readonly kind: string; readonly session: string }> = [];
+    const persistCurrent = jest.fn(async (): Promise<CompletionPersistenceResult> => {
+      const session = store.serialize();
+      const digest = sessionSnapshotSHA256(session)!;
+      const generation = (store.getSessionAuthority()?.generation ?? 1) + 1;
+      const snapshot = { schema_version: 1 as const, generation, session_sha256: digest };
+      sessions.push({ kind: roundKinds[roundKinds.length - 1] ?? 'none', session });
+      store.setSessionAuthority({ generation, sessionSha256: digest });
+      return { status: 'committed', snapshot };
+    });
+    const opIds = [...IDS];
+    const controller = createCompletionController({
+      chat: store,
+      persistCurrent,
+      completeRoundV2: jest.fn(),
+      completeRoundV3: jest.fn(),
+      cancelRoundV2: jest.fn(),
+      cancelRoundV3: jest.fn(),
+      createRoundId: jest.fn(() => opIds.shift() ?? AGENT_TURN),
+      createOperationId: jest.fn(() => opIds.shift() ?? AGENT_ATTEMPT),
+      agentRuntime: runtime,
+      requestAgentApproval: jest.fn(async () => ({ status: 'approved', scope: 'once' })),
+      now: () => NOW,
+    });
+    const result = await controller.send({
+      conversationId,
+      text: 'write and commit',
+      attachments: [],
+      harnessId,
+    });
+    expect(result.status).toBe('completed');
+    return { sessions, store, runtime };
+  }
+
+  test('serializes Claude Code and Codex Agent sessions into the shared native fixtures', async () => {
+    const claude = await captureHarnessSessions('claude-code', 'claude-sonnet-5', 1);
+    expect(claude.runtime.completeAgentRoundV2).toHaveBeenCalledTimes(2);
+    const claudeRequests = (claude.runtime.completeAgentRoundV2 as jest.Mock).mock.calls.map(
+      call => call[0] as CompleteAgentRoundRequestV2,
+    );
+    expect(claudeRequests.map(request => [request.harness_id, request.model, request.transport_schema_version])).toEqual([
+      ['claude-code', 'claude-sonnet-5', 3],
+      ['claude-code', 'claude-sonnet-5', 3],
+    ]);
+    const claudeAttempt = claude.store.getState().conversations[
+      claude.store.getState().selectedConversationId!
+    ]!.attempts[0]!;
+    expect(claudeAttempt.harnessId).toBe('claude-code');
+    expect(claudeAttempt.rounds.map(round => round.harnessId)).toEqual(['claude-code', 'claude-code']);
+    // The second begin_round commit is the session after the write tool
+    // round settled and before the final round started.
+    const claudeToolRound = claude.sessions.filter(entry => entry.kind === 'begin_round')[1];
+    expect(claudeToolRound).toBeDefined();
+    assertSharedFixture(claudeToolRound!.session, 'claude-code-tool-round-session.json');
+
+    const codex = await captureHarnessSessions('codex', 'gpt-5.6', 0);
+    expect(codex.runtime.completeAgentRoundV2).toHaveBeenCalledTimes(1);
+    const codexRequest = (codex.runtime.completeAgentRoundV2 as jest.Mock).mock.calls[0]?.[0] as CompleteAgentRoundRequestV2;
+    expect([codexRequest.harness_id, codexRequest.model]).toEqual(['codex', 'gpt-5.6']);
+    const codexAttempt = codex.store.getState().conversations[
+      codex.store.getState().selectedConversationId!
+    ]!.attempts[0]!;
+    expect(codexAttempt).toMatchObject({ status: 'completed', harnessId: 'codex' });
+    expect(codexAttempt.rounds.map(round => round.harnessId)).toEqual(['codex']);
+    // The final persisted session carries the completed single-round attempt
+    // with its Codex receipt and final assistant message.
+    const codexComplete = codex.sessions[codex.sessions.length - 1];
+    expect(codexComplete).toBeDefined();
+    assertSharedFixture(codexComplete!.session, 'codex-round-session.json');
+  });
+
+  test('hydrates a pre-harness Agent session as DSH', () => {
+    const legacy = nodeFs.readFileSync(
+      nodePath.resolve(__dirname, '../ios/DSHMobileTests/Fixtures/legacy-pre-harness-session.json'),
+      'utf8',
+    );
+    expect(legacy.includes('"harness_id"')).toBe(false);
+    const store = createChatStore({ now: () => NOW });
+    const hydrated = store.hydrate(legacy);
+    const conversation = Object.values(hydrated.conversations)[0]!;
+    expect(conversation.attempts[0]?.harnessId).toBe('dsh');
+    expect(conversation.attempts[0]?.rounds.every(round => round.harnessId === 'dsh')).toBe(true);
   });
 
   test('keeps a rejected Agent batch recoverable with its native failure code', async () => {

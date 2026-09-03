@@ -52,6 +52,14 @@ NSDictionary<NSString *, id> * DSHCompletionRequestBodyV2(
 NSDictionary<NSString *, id> * _Nullable DSHParseCompletionResponseV2(
     NSDictionary *decoded, NSError **error);
 
+/// Applies the registry's create-only write default (a `write_file` call
+/// carrying only `path` and `content` gains `expected_revision: null`, keys
+/// sorted) to provider tool calls of the canonical {id, name, arguments}
+/// shape. Every provider transport runs its parsed calls through this so
+/// the Agent tool registry sees one argument shape regardless of dialect.
+NSArray<NSDictionary<NSString *, id> *> *DSHCompletionNormalizeToolCalls(
+    NSArray<NSDictionary<NSString *, id> *> * _Nullable toolCalls);
+
 /// Strict schema-2 contracts. These helpers are side-effect free so the
 /// bridge and its Release XCTest target share one fail-closed definition.
 NSDictionary<NSString *, id> * _Nullable DSHCompletionEnvelopeSchema2FromDictionary(

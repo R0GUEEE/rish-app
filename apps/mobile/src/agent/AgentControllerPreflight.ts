@@ -5,6 +5,7 @@
  * seed. It does not read the Store, call native code, execute an effect, or
  * accept post-dispatch evidence.
  */
+import { isHarnessModelId, type HarnessModelId } from '../harness/types';
 import type {
   AgentCancelTargetV2,
   AgentCancelTokenV2,
@@ -12,7 +13,6 @@ import type {
   AgentRuntimeControllerCASV1,
   AgentRuntimeRootV1,
   AgentRuntimeTranscriptHandleV1,
-  DeepSeekModelId,
   DeepSeekThinkingMode,
 } from '../native/AgentRuntime';
 
@@ -33,7 +33,7 @@ export type AgentBeginRoundPreflightV1 = AgentControllerPreflightBaseV1 & {
   readonly launch_attempt: number;
   readonly expected_round_revision: number;
   readonly transport_schema_version: 2 | 3;
-  readonly model: DeepSeekModelId;
+  readonly model: HarnessModelId;
   readonly thinking_mode: DeepSeekThinkingMode;
   readonly visible_history_sha256: string;
   readonly visible_message_count: number;
@@ -334,12 +334,8 @@ function timestamp(value: unknown): value is string {
   );
 }
 
-function model(value: unknown): value is DeepSeekModelId {
-  return (
-    value === 'deepseek-v4-flash' ||
-    value === 'deepseek-v4-pro' ||
-    value === 'deepseek-v4-flash-vision-exp'
-  );
+function model(value: unknown): value is HarnessModelId {
+  return isHarnessModelId(value);
 }
 
 function thinkingMode(value: unknown): value is DeepSeekThinkingMode {

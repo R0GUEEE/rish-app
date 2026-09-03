@@ -1,6 +1,10 @@
 #import <React/RCTEventEmitter.h>
 #import "DSHCompletionV2.h"
 #import "DSHCompletionProviderTransport.h"
+#import "DshProviderTransport.h"
+#import "ClaudeProviderTransport.h"
+#import "CodexProviderTransport.h"
+#import "RishHarnessCatalog.h"
 #import "DSHStreamEvents.h"
 #import "LocalAttachmentStore.h"
 #import "ModelTransitionProof.h"
@@ -591,7 +595,7 @@ static BOOL DSHCanConnectToMacProxy(void) {
 
 @interface LocalRuntimeModule : RCTEventEmitter <NSURLSessionTaskDelegate>
 @property(nonatomic, assign) NSUInteger streamObserverCount;
-@property(nonatomic, strong) DSHStreamEventParser *streamParser;
+@property(nonatomic, strong) id<DSHProviderStreamEventParsing> streamParser;
 @property(nonatomic, strong) NSURLSessionDataTask *streamTask;
 @property(nonatomic) NSUInteger streamGeneration;
 @property(nonatomic, copy) NSString *streamRequestId;
@@ -605,15 +609,20 @@ static BOOL DSHCanConnectToMacProxy(void) {
 @property(nonatomic, readonly) BOOL hasStreamingObservers;
 @property(nonatomic, strong) dispatch_queue_t stateQueue;
 @property(nonatomic, strong) NSURLSession *modelSession;
-/// Strict schema 2/3 HTTP work is delegated here while this module keeps the
-/// existing completion slot and credential store as the single owner.
+/// Strict schema 2/3 HTTP work is delegated to the per-provider transports
+/// while this module keeps the existing completion slot and the generic
+/// credential store (keyed by credential slot) as the single owner.
 @property(nonatomic, strong) DSHCompletionProviderTransport *completionProviderTransport;
+@property(nonatomic, strong) ClaudeProviderTransport *claudeProviderTransport;
+@property(nonatomic, strong) CodexProviderTransport *codexProviderTransport;
 @property(nonatomic, strong) NSURLSessionDataTask *activeCompletionTask;
 @property(nonatomic, copy) NSString *activeCompletionRequestId;
 @property(nonatomic) NSUInteger activeCompletionGeneration;
 @property(nonatomic) NSUInteger completionGeneration;
 @property(nonatomic) NSUInteger credentialGeneration;
+@property(nonatomic, strong) NSMutableDictionary<NSString *, NSNumber *> *slotCredentialGenerations;
 @property(nonatomic) NSInteger activeCompletionSchemaVersion;
+@property(nonatomic, copy) NSString *activeCompletionCredentialSlot;
 @property(nonatomic, copy) RCTPromiseRejectBlock activeCompletionRejecter;
 @property(nonatomic, copy) RCTPromiseRejectBlock activeCompletionStreamRejecter;
 @property(nonatomic) BOOL activeCompletionRedirected;
@@ -732,14 +741,69 @@ RCT_EXPORT_MODULE(LocalRuntime)
     _modelSession = [NSURLSession sessionWithConfiguration:configuration
                                                   delegate:self
                                              delegateQueue:nil];
-    _completionProviderTransport = [[DSHCompletionProviderTransport alloc]
+    _completionProviderTransport = [[DshProviderTransport alloc]
         initWithSession:_modelSession
         uuidGenerator:_completionV2UUIDGenerator
         monotonicClock:_completionV2MonotonicClock];
+    _claudeProviderTransport = [[ClaudeProviderTransport alloc]
+        initWithSession:_modelSession
+        uuidGenerator:_completionV2UUIDGenerator
+        monotonicClock:_completionV2MonotonicClock];
+    _codexProviderTransport = [[CodexProviderTransport alloc]
+        initWithSession:_modelSession
+        uuidGenerator:_completionV2UUIDGenerator
+        monotonicClock:_completionV2MonotonicClock];
+    _slotCredentialGenerations = [NSMutableDictionary dictionary];
+    for (NSString *account in DSHHarnessCredentialAccounts()) {
+      _slotCredentialGenerations[account] = @0;
+    }
   }
   return self;
 }
 
+- (DSHCompletionProviderTransport *)providerTransportForHarnessId:(NSString *)harnessId {
+  if ([harnessId isEqualToString:@"claude-code"]) return self.claudeProviderTransport;
+  if ([harnessId isEqualToString:@"codex"]) return self.codexProviderTransport;
+  return self.completionProviderTransport;
+}
+
+- (NSString *)credentialAccountForHarnessId:(NSString *)harnessId {
+  return DSHCredentialAccountForHarnessId(harnessId) ?: DSHCredentialAccount;
+}
+
+/// Credential + generation for the harness's Keychain slot. Used by the
+/// provider-agnostic agent round coordinator.
+- (NSString *)credentialForHarnessId:(NSString *)harnessId
+                          generation:(NSUInteger *)generation {
+  NSString *account = [self credentialAccountForHarnessId:harnessId];
+  return [self credentialForAccount:account generation:generation];
+}
+
+- (BOOL)isSupportedHarnessId:(NSString *)harnessId {
+  return DSHHarnessIsSupportedHarnessId(harnessId);
+}
+
+- (NSUInteger)credentialGenerationForSlot:(NSString *)account {
+  // Legacy v1 completions never name a slot; they are DeepSeek by design.
+  if (account == nil) account = DSHCredentialAccount;
+  @synchronized(self) {
+    NSNumber *value = self.slotCredentialGenerations[account];
+    return value == nil ? 0 : value.unsignedIntegerValue;
+  }
+}
+
+- (void)credentialDidChangeForSlot:(NSString *)account {
+  NSUInteger next = 0;
+  @synchronized(self) {
+    NSUInteger current = [self credentialGenerationForSlot:account];
+    next = current == NSUIntegerMax ? 1 : current + 1;
+    self.slotCredentialGenerations[account] = @(next);
+  }
+  // A credential change cancels the active completion only when that
+  // completion was minted against the same slot; another Harness's round
+  // keeps running on its own, unchanged credential.
+  [self cancelActiveCompletionForCredentialSlot:account];
+}
 - (NSArray<NSString *> *)documentDirectories {
   return NSSearchPathForDirectoriesInDomains(NSDocumentDirectory, NSUserDomainMask, YES);
 }
@@ -776,26 +840,41 @@ RCT_EXPORT_MODULE(LocalRuntime)
   return created;
 }
 
-- (NSMutableDictionary *)keychainQuery {
+- (NSMutableDictionary *)keychainQueryForAccount:(NSString *)account {
   return [@{
     (__bridge id)kSecClass: (__bridge id)kSecClassGenericPassword,
     (__bridge id)kSecAttrService: DSHCredentialService,
-    (__bridge id)kSecAttrAccount: DSHCredentialAccount,
+    (__bridge id)kSecAttrAccount: account,
     (__bridge id)kSecAttrSynchronizable: @NO,
   } mutableCopy];
 }
 
-- (OSStatus)credentialLookupStatus {
-  NSMutableDictionary *query = [self keychainQuery];
+- (NSMutableDictionary *)keychainQuery {
+  return [self keychainQueryForAccount:DSHCredentialAccount];
+}
+
+- (OSStatus)credentialLookupStatusForAccount:(NSString *)account {
+  NSMutableDictionary *query = [self keychainQueryForAccount:account];
   query[(__bridge id)kSecMatchLimit] = (__bridge id)kSecMatchLimitOne;
   return SecItemCopyMatching((__bridge CFDictionaryRef)query, nil);
 }
 
-- (NSString *)credential {
-  if (self.completionV2TestCredential != nil) {
+- (OSStatus)credentialLookupStatus {
+  return [self credentialLookupStatusForAccount:DSHCredentialAccount];
+}
+
+- (NSString *)credentialForAccount:(NSString *)account
+                        generation:(NSUInteger *)generation {
+  if (generation != nil) {
+    @synchronized(self) {
+      *generation = [self credentialGenerationForSlot:account];
+    }
+  }
+  if ([account isEqualToString:DSHCredentialAccount] &&
+      self.completionV2TestCredential != nil) {
     return self.completionV2TestCredential;
   }
-  NSMutableDictionary *query = [self keychainQuery];
+  NSMutableDictionary *query = [self keychainQueryForAccount:account];
   query[(__bridge id)kSecReturnData] = @YES;
   query[(__bridge id)kSecMatchLimit] = (__bridge id)kSecMatchLimitOne;
   CFTypeRef result = nil;
@@ -805,14 +884,31 @@ RCT_EXPORT_MODULE(LocalRuntime)
   return [[NSString alloc] initWithData:data encoding:NSUTF8StringEncoding];
 }
 
+- (NSString *)credential {
+  return [self credentialForAccount:DSHCredentialAccount generation:nil];
+}
+
 - (void)credentialDidChange {
+  [self credentialDidChangeForSlot:DSHCredentialAccount];
+}
+
+- (void)cancelActiveCompletionForCredentialSlot:(NSString *)account {
   NSURLSessionDataTask *task = nil;
   RCTPromiseRejectBlock strictRejecter = nil;
   RCTPromiseRejectBlock streamRejecter = nil;
   NSString *streamRequestId = nil;
   NSUInteger streamGeneration = 0;
   @synchronized (self) {
-    self.credentialGeneration += 1;
+    if ([account isEqualToString:DSHCredentialAccount]) {
+      // The legacy v1 paths still compare against this module-wide
+      // counter; it moves in lockstep with the DeepSeek slot generation.
+      self.credentialGeneration += 1;
+    }
+    NSString *activeSlot = self.activeCompletionCredentialSlot ?: DSHCredentialAccount;
+    if (self.activeCompletionRequestId != nil &&
+        ![activeSlot isEqualToString:account]) {
+      return;
+    }
     task = self.activeCompletionTask;
     if (self.activeCompletionSchemaVersion == 2 ||
         self.activeCompletionSchemaVersion == 3) {
@@ -826,7 +922,11 @@ RCT_EXPORT_MODULE(LocalRuntime)
   if (self.completionV2BeforeTaskCancelForTesting != nil) {
     self.completionV2BeforeTaskCancelForTesting();
   }
-  [self.completionProviderTransport cancelTask:task];
+  if (task != nil) {
+    [self.completionProviderTransport cancelTask:task];
+    [self.claudeProviderTransport cancelTask:task];
+    [self.codexProviderTransport cancelTask:task];
+  }
   if (strictRejecter != nil) {
     DSHRejectCompletionSchema2(
         strictRejecter, @"E_COMPLETION_CREDENTIAL_CHANGED");
@@ -841,20 +941,23 @@ RCT_EXPORT_MODULE(LocalRuntime)
                           generation:streamGeneration];
 }
 
-- (BOOL)storeCredential:(NSString *)credential error:(NSError **)error {
+- (BOOL)storeCredential:(NSString *)credential
+              forAccount:(NSString *)account
+                   error:(NSError **)error {
   NSString *trimmed = [credential stringByTrimmingCharactersInSet:
     [NSCharacterSet whitespaceAndNewlineCharacterSet]];
   BOOL containsWhitespace = [trimmed rangeOfCharacterFromSet:
     [NSCharacterSet whitespaceAndNewlineCharacterSet]].location != NSNotFound;
   if (trimmed.length < 16 || trimmed.length > 512 || containsWhitespace) {
     if (error != nil) {
-      *error = DSHLocalRuntimeError(1004, @"DeepSeek credential format is invalid");
+      *error = DSHLocalRuntimeError(1004,
+          [NSString stringWithFormat:@"%@ credential format is invalid", account]);
     }
     return NO;
   }
 
   NSData *data = [trimmed dataUsingEncoding:NSUTF8StringEncoding];
-  NSMutableDictionary *query = [self keychainQuery];
+  NSMutableDictionary *query = [self keychainQueryForAccount:account];
   OSStatus status = SecItemUpdate(
     (__bridge CFDictionaryRef)query,
     (__bridge CFDictionaryRef)@{
@@ -869,7 +972,23 @@ RCT_EXPORT_MODULE(LocalRuntime)
     status = SecItemAdd((__bridge CFDictionaryRef)query, nil);
   }
   if (status == errSecSuccess) {
-    [self credentialDidChange];
+    [self credentialDidChangeForSlot:account];
+    return YES;
+  }
+  if (error != nil) {
+    *error = [NSError errorWithDomain:NSOSStatusErrorDomain code:status userInfo:nil];
+  }
+  return NO;
+}
+
+- (BOOL)storeCredential:(NSString *)credential error:(NSError **)error {
+  return [self storeCredential:credential forAccount:DSHCredentialAccount error:error];
+}
+
+- (BOOL)deleteCredentialForAccount:(NSString *)account error:(NSError **)error {
+  OSStatus status = SecItemDelete((__bridge CFDictionaryRef)[self keychainQueryForAccount:account]);
+  if (status == errSecSuccess || status == errSecItemNotFound) {
+    [self credentialDidChangeForSlot:account];
     return YES;
   }
   if (error != nil) {
@@ -879,15 +998,7 @@ RCT_EXPORT_MODULE(LocalRuntime)
 }
 
 - (BOOL)deleteCredential:(NSError **)error {
-  OSStatus status = SecItemDelete((__bridge CFDictionaryRef)[self keychainQuery]);
-  if (status == errSecSuccess || status == errSecItemNotFound) {
-    [self credentialDidChange];
-    return YES;
-  }
-  if (error != nil) {
-    *error = [NSError errorWithDomain:NSOSStatusErrorDomain code:status userInfo:nil];
-  }
-  return NO;
+  return [self deleteCredentialForAccount:DSHCredentialAccount error:error];
 }
 
 - (NSArray<NSDictionary *> *)validatedMessagesFromHistory:(id)history
@@ -1222,7 +1333,23 @@ RCT_EXPORT_MODULE(LocalRuntime)
     if (error != nil) *error = DSHLocalRuntimeError(1001, @"Staged credential has an invalid value");
     return NO;
   }
-  if (![self storeCredential:value error:error]) return NO;
+  // Optional companion file names the Keychain slot. Absent (legacy
+  // provisioning flow) imports into the DeepSeek slot unchanged.
+  NSString *slot = DSHCredentialAccount;
+  NSURL *slotURL = [NSURL fileURLWithPath:[temporary stringByAppendingPathComponent:@".dsh-provision-slot"]];
+  NSString *slotName = [NSString stringWithContentsOfURL:slotURL
+                                               encoding:NSUTF8StringEncoding
+                                                  error:nil];
+  slotName = [slotName stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceAndNewlineCharacterSet]];
+  if (slotName != nil && slotName.length > 0) {
+    if (!DSHHarnessIsCredentialAccount(slotName)) {
+      if (error != nil) *error = DSHLocalRuntimeError(1001, @"Staged credential slot is invalid");
+      return NO;
+    }
+    slot = slotName;
+  }
+  [[NSFileManager defaultManager] removeItemAtURL:slotURL error:nil];
+  if (![self storeCredential:value forAccount:slot error:error]) return NO;
   NSData *ack = [@"ok\n" dataUsingEncoding:NSUTF8StringEncoding];
   if (![ack writeToURL:acknowledgement options:NSDataWritingAtomic error:error]) return NO;
   [[NSFileManager defaultManager] setAttributes:@{NSFilePosixPermissions: @0600}
@@ -1455,7 +1582,8 @@ RCT_EXPORT_MODULE(LocalRuntime)
   @synchronized (self) {
     if (![self.activeCompletionRequestId isEqualToString:requestId]
       || self.activeCompletionGeneration != completionGeneration
-      || self.credentialGeneration != credentialGeneration) {
+      || [self credentialGenerationForSlot:self.activeCompletionCredentialSlot] !=
+          credentialGeneration) {
       return NO;
     }
     [self clearActiveCompletionLocked];
@@ -1471,6 +1599,7 @@ RCT_EXPORT_MODULE(LocalRuntime)
   self.activeCompletionRejecter = nil;
   self.activeCompletionStreamRejecter = nil;
   self.activeCompletionRedirected = NO;
+  self.activeCompletionCredentialSlot = nil;
   // The stream task belongs to the completion slot: clear it together with
   // the slot so a cancelled round never leaves a dangling task for a
   // successor stream's reset to discover, and a stale delegate callback
@@ -1505,6 +1634,7 @@ RCT_EXPORT_MODULE(LocalRuntime)
 
 - (NSString *)reserveStrictRound:(NSInteger)schemaVersion
                          roundId:(NSString *)roundId
+                       harnessId:(NSString *)harnessId
              credentialGeneration:(NSUInteger)credentialGeneration
                          rejecter:(RCTPromiseRejectBlock)rejecter
                 generationOutput:(NSUInteger *)generationOutput
@@ -1520,7 +1650,8 @@ RCT_EXPORT_MODULE(LocalRuntime)
       if (errorCode != nil) *errorCode = @"E_COMPLETION_BUSY";
       return nil;
     }
-    if (credentialGeneration != self.credentialGeneration) {
+    NSString *account = [self credentialAccountForHarnessId:harnessId];
+    if (credentialGeneration != [self credentialGenerationForSlot:account]) {
       if (errorCode != nil) {
         *errorCode = @"E_COMPLETION_CREDENTIAL_CHANGED";
       }
@@ -1530,13 +1661,14 @@ RCT_EXPORT_MODULE(LocalRuntime)
     self.activeCompletionGeneration = self.completionGeneration;
     self.activeCompletionSchemaVersion = schemaVersion;
     self.activeCompletionRequestId = roundId;
+    self.activeCompletionCredentialSlot = account;
     self.activeCompletionRejecter = rejecter;
     self.activeCompletionStreamRejecter = nil;
     self.activeCompletionRedirected = NO;
     // Correlation is minted only after this caller atomically owns the slot,
     // and before dataTaskWithRequest is allowed to run.
     NSString *providerError = nil;
-    NSString *providerRequestId = [self.completionProviderTransport
+    NSString *providerRequestId = [[self providerTransportForHarnessId:harnessId]
         nextProviderRequestId:&providerError];
     if (providerRequestId == nil) {
       [self clearActiveCompletionLocked];
@@ -1588,7 +1720,8 @@ RCT_EXPORT_MODULE(LocalRuntime)
         (schemaVersion != 2 && schemaVersion != 3) ||
         ![self.activeCompletionRequestId isEqualToString:roundId] ||
         self.activeCompletionGeneration != generation ||
-        self.credentialGeneration != credentialGeneration) {
+        [self credentialGenerationForSlot:self.activeCompletionCredentialSlot] !=
+            credentialGeneration) {
       return NO;
     }
     if (redirected != nil) *redirected = self.activeCompletionRedirected;
@@ -1605,7 +1738,8 @@ RCT_EXPORT_MODULE(LocalRuntime)
     return self.activeCompletionSchemaVersion == schemaVersion &&
         [self.activeCompletionRequestId isEqualToString:roundId] &&
         self.activeCompletionGeneration == generation &&
-        self.credentialGeneration == credentialGeneration;
+        [self credentialGenerationForSlot:self.activeCompletionCredentialSlot] ==
+            credentialGeneration;
   }
 }
 
@@ -1639,9 +1773,15 @@ RCT_EXPORT_MODULE(LocalRuntime)
 willPerformHTTPRedirection:(__unused NSHTTPURLResponse *)response
         newRequest:(NSURLRequest *)request
  completionHandler:(void (^)(NSURLRequest * _Nullable))completionHandler {
-  if ([self.completionProviderTransport handlesTask:task]) {
-    [self.completionProviderTransport
-        handleHTTPRedirectionForTask:task
+  DSHCompletionProviderTransport *owningTransport =
+      [self.completionProviderTransport handlesTask:task]
+          ? self.completionProviderTransport
+          : ([self.claudeProviderTransport handlesTask:task]
+              ? self.claudeProviderTransport
+              : ([self.codexProviderTransport handlesTask:task]
+                  ? self.codexProviderTransport : nil));
+  if (owningTransport != nil) {
+    [owningTransport handleHTTPRedirectionForTask:task
         newRequest:request
         completionHandler:completionHandler];
     return;
@@ -1664,10 +1804,37 @@ willPerformHTTPRedirection:(__unused NSHTTPURLResponse *)response
   completionHandler(rejectStrictRedirect ? nil : request);
 }
 
+static NSString *DSHCredentialPromptTitle(NSString *account, BOOL chinese) {
+  if ([account isEqualToString:@"ANTHROPIC_API_KEY"]) {
+    return chinese ? @"Anthropic API 密钥" : @"Anthropic API key";
+  }
+  if ([account isEqualToString:@"OPENAI_API_KEY"]) {
+    return chinese ? @"OpenAI API 密钥" : @"OpenAI API key";
+  }
+  return chinese ? @"DeepSeek API 密钥" : @"DeepSeek API key";
+}
+
+static NSString *DSHCredentialPromptPlaceholder(NSString *account) {
+  if ([account isEqualToString:@"ANTHROPIC_API_KEY"]) return @"sk-ant-…";
+  if ([account isEqualToString:@"OPENAI_API_KEY"]) return @"sk-…";
+  return @"sk-…";
+}
+
 RCT_REMAP_METHOD(credentialStatus,
                  credentialStatusWithResolver:(RCTPromiseResolveBlock)resolve
                  rejecter:(RCTPromiseRejectBlock)reject) {
+  [self credentialStatusForSlot:DSHCredentialAccount resolver:resolve rejecter:reject];
+}
+
+RCT_REMAP_METHOD(credentialStatusForSlot,
+                 credentialStatusForSlot:(NSString *)slot
+                 resolver:(RCTPromiseResolveBlock)resolve
+                 rejecter:(RCTPromiseRejectBlock)reject) {
   dispatch_async(self.stateQueue, ^{
+    if (!DSHHarnessIsCredentialAccount(slot)) {
+      reject(@"credential", @"Unknown credential slot", nil);
+      return;
+    }
     NSError *importError = nil;
     [self importStagedCredential:&importError];
     if (importError != nil) {
@@ -1676,7 +1843,7 @@ RCT_REMAP_METHOD(credentialStatus,
              importError);
       return;
     }
-    OSStatus status = [self credentialLookupStatus];
+    OSStatus status = [self credentialLookupStatusForAccount:slot];
     if (status == errSecSuccess) {
       resolve(@{@"status": @"configured"});
     } else if (status == errSecItemNotFound) {
@@ -1692,15 +1859,29 @@ RCT_REMAP_METHOD(presentCredentialPrompt,
                  presentCredentialPromptForLocale:(id)localeValue
                  resolver:(RCTPromiseResolveBlock)resolve
                  rejecter:(RCTPromiseRejectBlock)reject) {
+  [self presentCredentialPromptForSlot:DSHCredentialAccount locale:localeValue
+       resolver:resolve rejecter:reject];
+}
+
+RCT_REMAP_METHOD(presentCredentialPromptForSlot,
+                 presentCredentialPromptForSlot:(NSString *)slot
+                 locale:(id)localeValue
+                 resolver:(RCTPromiseResolveBlock)resolve
+                 rejecter:(RCTPromiseRejectBlock)reject) {
+  if (!DSHHarnessIsCredentialAccount(slot)) {
+    reject(@"credential", @"Unknown credential slot", nil);
+    return;
+  }
   // The app passes its resolved locale. Any absent, malformed, or unsupported
   // value falls back to English instead of consulting mutable device state.
   BOOL usesChinese = DSHCredentialPromptUsesChinese(localeValue);
-  NSString *title = usesChinese ? @"DeepSeek API 密钥" : @"DeepSeek API key";
+  NSString *title = DSHCredentialPromptTitle(slot, usesChinese);
   NSString *message = usesChinese
     ? @"仅保存在此设备的钥匙串中。Rish 不会将密钥发送到 JavaScript。"
     : @"Saved only in this device's Keychain. Rish never sends the key to JavaScript.";
   NSString *cancelTitle = usesChinese ? @"取消" : @"Cancel";
   NSString *saveTitle = usesChinese ? @"安全保存" : @"Save securely";
+  NSString *placeholder = DSHCredentialPromptPlaceholder(slot);
   dispatch_async(dispatch_get_main_queue(), ^{
     UIViewController *presenter = RCTPresentedViewController();
     if (presenter == nil || [presenter isKindOfClass:UIAlertController.class]) {
@@ -1713,7 +1894,7 @@ RCT_REMAP_METHOD(presentCredentialPrompt,
                        message:message
                 preferredStyle:UIAlertControllerStyleAlert];
     [alert addTextFieldWithConfigurationHandler:^(UITextField *textField) {
-      textField.placeholder = @"sk-…";
+      textField.placeholder = placeholder;
       textField.secureTextEntry = YES;
       textField.autocorrectionType = UITextAutocorrectionTypeNo;
       textField.autocapitalizationType = UITextAutocapitalizationTypeNone;
@@ -1736,7 +1917,7 @@ RCT_REMAP_METHOD(presentCredentialPrompt,
       field.text = @"";
       dispatch_async(self.stateQueue, ^{
         NSError *error = nil;
-        if (![self storeCredential:value error:&error]) {
+        if (![self storeCredential:value forAccount:slot error:&error]) {
           reject(@"credential", error.localizedDescription ?: @"Unable to save credential", error);
           return;
         }
@@ -1753,9 +1934,20 @@ RCT_REMAP_METHOD(presentCredentialPrompt,
 RCT_REMAP_METHOD(clearCredential,
                  clearCredentialWithResolver:(RCTPromiseResolveBlock)resolve
                  rejecter:(RCTPromiseRejectBlock)reject) {
+  [self clearCredentialForSlot:DSHCredentialAccount resolver:resolve rejecter:reject];
+}
+
+RCT_REMAP_METHOD(clearCredentialForSlot,
+                 clearCredentialForSlot:(NSString *)slot
+                 resolver:(RCTPromiseResolveBlock)resolve
+                 rejecter:(RCTPromiseRejectBlock)reject) {
   dispatch_async(self.stateQueue, ^{
+    if (!DSHHarnessIsCredentialAccount(slot)) {
+      reject(@"credential", @"Unknown credential slot", nil);
+      return;
+    }
     NSError *error = nil;
-    if (![self deleteCredential:&error]) {
+    if (![self deleteCredentialForAccount:slot error:&error]) {
       reject(@"keychain", @"Unable to clear credential", error);
       return;
     }
@@ -2045,6 +2237,7 @@ RCT_REMAP_METHOD(complete,
         @"launch_instance_id": DSHLaunchInstanceId(),
         @"received_at": DSHNow(),
         @"http_status": @(http.statusCode),
+        @"harness_id": @"dsh",
         @"model": model,
         @"requested_model": requestedModel,
         @"request_id": requestId,
@@ -2089,6 +2282,7 @@ RCT_REMAP_METHOD(complete,
     previousTask = self.activeCompletionTask;
     self.activeCompletionTask = task;
     self.activeCompletionRequestId = requestId;
+    self.activeCompletionCredentialSlot = DSHCredentialAccount;
     self.activeCompletionGeneration = completionGeneration;
     self.activeCompletionSchemaVersion = 1;
     self.activeCompletionRejecter = nil;
@@ -2113,6 +2307,15 @@ RCT_REMAP_METHOD(complete,
   NSString *requestedModel = envelope[@"model"];
   NSString *thinkingMode = envelope[@"thinking_mode"];
   NSString *roundId = envelope[@"round_id"];
+  NSString *harnessId = envelope[@"harness_id"];
+  DSHCompletionProviderTransport *transport =
+      [self providerTransportForHarnessId:harnessId];
+  if (![self isSupportedHarnessId:harnessId] || transport == nil ||
+      ![transport providerSupportsModel:requestedModel]) {
+    DSHRejectCompletionSchema2(reject, @"E_COMPLETION_MODEL");
+    return;
+  }
+  NSString *credentialAccount = [self credentialAccountForHarnessId:harnessId];
   NSArray<NSDictionary *> *visibleProviderMessages =
       [self validatedMessagesFromHistory:envelope[@"visible_history"]
                                    model:requestedModel
@@ -2126,13 +2329,18 @@ RCT_REMAP_METHOD(complete,
       [visibleProviderMessages mutableCopy];
   [modelInput addObjectsFromArray:envelope[@"round_transcript"]];
 
-  NSDictionary *body = DSHCompletionRequestBodyV2(
-      requestedModel, thinkingMode, modelInput, envelope[@"tools"]);
+  NSError *bodyError = nil;
+  NSDictionary *body = [transport
+      providerRequestBodyForModel:requestedModel
+                     thinkingMode:thinkingMode
+                         messages:modelInput
+                            tools:envelope[@"tools"]
+                        streaming:NO
+                            error:&bodyError];
   if (body == nil) {
     DSHRejectCompletionSchema2(reject, @"E_COMPLETION_BODY_INVALID");
     return;
   }
-  NSError *bodyError = nil;
   NSData *bodyData = [NSJSONSerialization dataWithJSONObject:body
                                                      options:NSJSONWritingSortedKeys
                                                        error:&bodyError];
@@ -2146,10 +2354,8 @@ RCT_REMAP_METHOD(complete,
   }
   __block NSString *apiKey = nil;
   __block NSUInteger credentialGeneration = 0;
-  @synchronized (self) {
-    apiKey = self.credential;
-    credentialGeneration = self.credentialGeneration;
-  }
+  apiKey = [self credentialForAccount:credentialAccount
+                            generation:&credentialGeneration];
   if (apiKey.length == 0) {
     DSHRejectCompletionSchema2(
         reject, @"E_COMPLETION_CREDENTIAL_UNAVAILABLE");
@@ -2160,6 +2366,7 @@ RCT_REMAP_METHOD(complete,
   NSString *reserveError = nil;
   NSString *providerRequestId = [self reserveStrictRound:2
       roundId:roundId
+      harnessId:harnessId
       credentialGeneration:credentialGeneration
       rejecter:reject
       generationOutput:&generation
@@ -2171,7 +2378,8 @@ RCT_REMAP_METHOD(complete,
   }
   NSTimeInterval started = self.completionV2MonotonicClock();
   __weak LocalRuntimeModule *weakSelf = self;
-  [self.completionProviderTransport
+  NSString *claimedAccount = [credentialAccount copy];
+  [transport
       startRequestWithSchemaVersion:2
       roundId:roundId
       generation:generation
@@ -2183,7 +2391,7 @@ RCT_REMAP_METHOD(complete,
       credentialGenerationIsCurrent:^BOOL(NSUInteger candidate) {
         if (weakSelf == nil) return NO;
         @synchronized (weakSelf) {
-          return weakSelf.credentialGeneration == candidate;
+          return [weakSelf credentialGenerationForSlot:claimedAccount] == candidate;
         }
       }
       startedAt:started
@@ -2242,13 +2450,20 @@ RCT_REMAP_METHOD(complete,
   NSString *requestedModel = envelope[@"model"];
   NSString *thinkingMode = envelope[@"thinking_mode"];
   NSString *roundId = envelope[@"round_id"];
+  NSString *harnessId = envelope[@"harness_id"];
   NSDictionary *context = envelope[@"project_context"];
+  DSHCompletionProviderTransport *transport =
+      [self providerTransportForHarnessId:harnessId];
+  if (![self isSupportedHarnessId:harnessId] || transport == nil ||
+      ![transport providerSupportsModel:requestedModel]) {
+    DSHRejectCompletionSchema2(reject, @"E_COMPLETION_MODEL");
+    return;
+  }
+  NSString *credentialAccount = [self credentialAccountForHarnessId:harnessId];
   __block NSString *apiKey = nil;
   __block NSUInteger credentialGeneration = 0;
-  @synchronized (self) {
-    apiKey = self.credential;
-    credentialGeneration = self.credentialGeneration;
-  }
+  apiKey = [self credentialForAccount:credentialAccount
+                            generation:&credentialGeneration];
   if (apiKey.length == 0) {
     DSHRejectCompletionSchema2(
         reject, @"E_COMPLETION_CREDENTIAL_UNAVAILABLE");
@@ -2259,6 +2474,7 @@ RCT_REMAP_METHOD(complete,
   NSString *reserveError = nil;
   NSString *providerRequestId = [self reserveStrictRound:3
       roundId:roundId
+      harnessId:harnessId
       credentialGeneration:credentialGeneration
       rejecter:reject
       generationOutput:&generation
@@ -2373,9 +2589,14 @@ RCT_REMAP_METHOD(complete,
     [modelInput addObject:visibleProviderMessages.lastObject];
     [modelInput addObjectsFromArray:envelope[@"round_transcript"]];
 
-    NSDictionary *body = DSHCompletionRequestBodyV2(
-        requestedModel, thinkingMode, modelInput, envelope[@"tools"]);
     NSError *bodyError = nil;
+    NSDictionary *body = [transport
+        providerRequestBodyForModel:requestedModel
+                       thinkingMode:thinkingMode
+                           messages:modelInput
+                              tools:envelope[@"tools"]
+                          streaming:NO
+                              error:&bodyError];
     NSData *bodyData = body == nil ? nil : [NSJSONSerialization
         dataWithJSONObject:body options:NSJSONWritingSortedKeys
         error:&bodyError];
@@ -2400,7 +2621,8 @@ RCT_REMAP_METHOD(complete,
     }
 
     __weak LocalRuntimeModule *weakSelf = self;
-    [self.completionProviderTransport
+    NSString *claimedAccount = [credentialAccount copy];
+    [transport
         startRequestWithSchemaVersion:3
         roundId:roundId
         generation:generation
@@ -2412,7 +2634,7 @@ RCT_REMAP_METHOD(complete,
         credentialGenerationIsCurrent:^BOOL(NSUInteger candidate) {
           if (weakSelf == nil) return NO;
           @synchronized (weakSelf) {
-            return weakSelf.credentialGeneration == candidate;
+            return [weakSelf credentialGenerationForSlot:claimedAccount] == candidate;
           }
         }
         startedAt:started
@@ -2499,8 +2721,13 @@ RCT_REMAP_METHOD(completeV2Stream,
   NSString *requestedModel = DSHString(envelope[@"model"]);
   NSString *requestId = DSHString(envelope[@"request_id"]);
   NSString *thinkingMode = DSHString(envelope[@"thinking_mode"]);
+  NSString *harnessId = DSHString(envelope[@"harness_id"]);
+  if (harnessId == nil) harnessId = @"dsh";
+  DSHCompletionProviderTransport *transport =
+      [self providerTransportForHarnessId:harnessId];
   NSArray *history = DSHArray(envelope[@"history"]);
-  if (!DSHIsSupportedModel(requestedModel) ||
+  if (![self isSupportedHarnessId:harnessId] || transport == nil ||
+      ![transport providerSupportsModel:requestedModel] ||
       !DSHIsValidRequestId(requestId) ||
       !DSHIsThinkingMode(thinkingMode)) {
     reject(@"validation", @"Streaming envelope fields are invalid", nil);
@@ -2522,32 +2749,37 @@ RCT_REMAP_METHOD(completeV2Stream,
     reject(@"tools", validationError.localizedDescription, validationError);
     return;
   }
+  NSString *credentialAccount = [self credentialAccountForHarnessId:harnessId];
   __block NSString *apiKey = nil;
   __block NSUInteger credentialGeneration = 0;
-  @synchronized(self) {
-    apiKey = self.credential;
-    credentialGeneration = self.credentialGeneration;
-  }
+  apiKey = [self credentialForAccount:credentialAccount
+                            generation:&credentialGeneration];
   if (apiKey.length == 0) {
-    reject(@"credential", @"DeepSeek credential is unavailable", nil);
+    reject(@"credential", @"Provider credential is unavailable", nil);
     return;
   }
   NSMutableURLRequest *request = [NSMutableURLRequest requestWithURL:
-      [NSURL URLWithString:@"https://api.deepseek.com/chat/completions"]];
+      [transport providerBaseURL]];
   request.HTTPMethod = @"POST";
   request.HTTPShouldHandleCookies = NO;
   request.cachePolicy = NSURLRequestReloadIgnoringLocalCacheData;
-  request.timeoutInterval = 120;
-  [request setValue:@"application/json" forHTTPHeaderField:@"Content-Type"];
+  request.timeoutInterval = [transport providerTimeoutIntervalForStreaming:YES];
+  NSDictionary<NSString *, NSString *> *headers =
+      [transport providerHeadersWithCredential:apiKey];
+  for (NSString *field in headers) {
+    [request setValue:headers[field] forHTTPHeaderField:field];
+  }
   [request setValue:@"text/event-stream" forHTTPHeaderField:@"Accept"];
-  [request setValue:[@"Bearer " stringByAppendingString:apiKey]
-      forHTTPHeaderField:@"Authorization"];
-  NSMutableDictionary *body = [DSHCompletionRequestBodyV2(
-      requestedModel, thinkingMode, messages, tools) mutableCopy];
-  body[@"stream"] = @YES;
   NSError *bodyError = nil;
-  request.HTTPBody = [NSJSONSerialization dataWithJSONObject:body
-      options:0 error:&bodyError];
+  NSDictionary *body = [transport
+      providerRequestBodyForModel:requestedModel
+                     thinkingMode:thinkingMode
+                         messages:messages
+                            tools:tools
+                        streaming:YES
+                            error:&bodyError];
+  request.HTTPBody = body == nil ? nil : [NSJSONSerialization
+      dataWithJSONObject:body options:0 error:&bodyError];
   if (request.HTTPBody == nil ||
       request.HTTPBody.length > DSHMaximumRequestBodyBytes) {
     reject(@"request",
@@ -2568,7 +2800,8 @@ RCT_REMAP_METHOD(completeV2Stream,
       DSHRejectCompletionSchema2(reject, @"E_COMPLETION_BUSY");
       return;
     }
-    if (credentialGeneration != self.credentialGeneration) {
+    if (credentialGeneration !=
+        [self credentialGenerationForSlot:credentialAccount]) {
       reject(@"credential", @"Credential changed before the stream started",
              nil);
       return;
@@ -2577,6 +2810,7 @@ RCT_REMAP_METHOD(completeV2Stream,
     completionGeneration = self.completionGeneration;
     self.activeCompletionGeneration = completionGeneration;
     self.activeCompletionRequestId = requestId;
+    self.activeCompletionCredentialSlot = credentialAccount;
     // Schema value 2 makes the legacy complete() and completeV2 busy
     // guards treat the streaming round like any in-flight completion.
     self.activeCompletionSchemaVersion = 2;
@@ -2610,7 +2844,7 @@ RCT_REMAP_METHOD(completeV2Stream,
     if (!current) {
       return;
     }
-    self.streamParser = [[DSHStreamEventParser alloc] init];
+    self.streamParser = [transport providerNewStreamEventParser];
     self.streamContent = [NSMutableString string];
     self.streamReasoning = [NSMutableString string];
     self.streamContentBytes = 0;
@@ -3038,6 +3272,7 @@ RCT_REMAP_METHOD(completeV2,
         @"launch_instance_id": DSHLaunchInstanceId(),
         @"received_at": DSHNow(),
         @"http_status": @(http.statusCode),
+        @"harness_id": @"dsh",
         @"model": model,
         @"requested_model": requestedModel,
         @"request_id": requestId,
@@ -3086,6 +3321,7 @@ RCT_REMAP_METHOD(completeV2,
     previousTask = self.activeCompletionTask;
     self.activeCompletionTask = task;
     self.activeCompletionRequestId = requestId;
+    self.activeCompletionCredentialSlot = DSHCredentialAccount;
     self.activeCompletionGeneration = completionGeneration;
     self.activeCompletionSchemaVersion = 1;
     self.activeCompletionRejecter = nil;
