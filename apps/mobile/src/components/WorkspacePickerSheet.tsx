@@ -523,6 +523,7 @@ export function WorkspacePickerSheet({
                             row.status !== 'ok' && styles.disabledRow,
                             pressed && styles.pressed,
                           ]}
+                          testID={`workspace-picker-row-${row.workspace_id}`}
                         >
                           <View style={styles.check}>
                             {isActive && (
@@ -602,6 +603,7 @@ export function WorkspacePickerSheet({
                 placeholder={t('workspaces.namePlaceholder')}
                 placeholderTextColor={colors.faint}
                 style={styles.input}
+                testID="workspace-picker-name-input"
                 value={draftName}
               />
               <Pressable
@@ -616,6 +618,7 @@ export function WorkspacePickerSheet({
                   draftName.trim().length === 0 && styles.actionDisabled,
                   pressed && styles.pressed,
                 ]}
+                testID="workspace-picker-new"
               >
                 {busy ? (
                   <ActivityIndicator color={colors.text} size="small" />

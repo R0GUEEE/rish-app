@@ -471,11 +471,12 @@ export function ProjectsSurface({
                 styles.headerButton,
                 pressed && styles.pressed,
               ]}
+              testID="projects-back"
             >
               <AppIcon color={colors.text} icon={ChevronLeft} size={21} />
             </Pressable>
           )}
-          <View style={styles.headerTitleWrap}>
+          <View style={styles.headerTitleWrap} testID="projects-detail-title">
             <Text numberOfLines={1} style={styles.headerTitle}>
               {title}
             </Text>
@@ -888,6 +889,7 @@ function ProjectList({
             styles.creationButton,
             pressed && styles.pressed,
           ]}
+          testID="projects-new-project"
         >
           <AppIcon color={colors.accent} icon={FolderPlus} size={23} />
           <Text style={styles.creationTitle}>{t('projects.newProject')}</Text>
@@ -900,6 +902,7 @@ function ProjectList({
             styles.creationButton,
             pressed && styles.pressed,
           ]}
+          testID="projects-clone-repository"
         >
           <AppIcon color={colors.accent} icon={FolderDown} size={23} />
           <Text style={styles.creationTitle}>
@@ -915,6 +918,7 @@ function ProjectList({
             label={t('projects.name')}
             placeholder={t('projects.namePlaceholder')}
             styles={styles}
+            testID="projects-name-input"
             value={name}
             onChangeText={onChangeName}
           />
@@ -926,6 +930,7 @@ function ProjectList({
                 label={t('projects.remoteUrl')}
                 placeholder={t('projects.remoteUrlPlaceholder')}
                 styles={styles}
+                testID="projects-remote-url-input"
                 value={cloneUrl}
                 onChangeText={onChangeCloneUrl}
               />
@@ -944,6 +949,7 @@ function ProjectList({
               accessibilityRole="button"
               onPress={() => onChooseMode(null)}
               style={styles.formCancel}
+              testID="projects-clone-cancel"
             >
               <Text style={styles.formCancelText}>{t('common.cancel')}</Text>
             </Pressable>
@@ -973,6 +979,7 @@ function ProjectList({
                 busy && styles.disabled,
                 pressed && styles.pressed,
               ]}
+              testID="projects-clone-submit"
             >
               <Text style={styles.formSubmitText}>
                 {createMode === 'clone'
@@ -1001,6 +1008,7 @@ function ProjectList({
                 styles.projectRow,
                 pressed && styles.pressed,
               ]}
+              testID={`projects-row-${project.name}`}
             >
               <View style={styles.projectIcon}>
                 <AppIcon color={colors.accent} icon={FolderGit2} size={18} />

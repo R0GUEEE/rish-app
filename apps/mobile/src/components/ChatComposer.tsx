@@ -259,6 +259,9 @@ export function ChatComposer(props: Props) {
               disabled: locked,
               expanded: props.workspacePickerVisible,
             }}
+            accessibilityValue={{
+              text: props.workspaceName ?? t('messages.workspaceLabel'),
+            }}
             disabled={locked}
             onPress={() => {
               Keyboard.dismiss();

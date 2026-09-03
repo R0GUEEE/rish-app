@@ -125,6 +125,7 @@ export function ChatDrawer(props: Props) {
               styles.closeButton,
               pressed && styles.pressed,
             ]}
+            testID="drawer-close"
           >
             <AppIcon color={colors.text} icon={X} size={20} />
           </Pressable>
@@ -135,6 +136,7 @@ export function ChatDrawer(props: Props) {
           accessibilityRole="button"
           onPress={props.onNewChat}
           style={({ pressed }) => [styles.newChat, pressed && styles.pressed]}
+          testID="drawer-new-chat"
         >
           <AppIcon
             color={colors.background}
@@ -181,21 +183,25 @@ export function ChatDrawer(props: Props) {
             icon={FolderKanban}
             label={t('drawer.projects')}
             onPress={props.onOpenProjects}
+            testID="drawer-projects"
           />
           <UtilityRow
             icon={Boxes}
             label={t('drawer.harnesses')}
             onPress={props.onOpenHarnesses}
+            testID="drawer-harnesses"
           />
           <UtilityRow
             icon={FolderOpen}
             label={t('drawer.files')}
             onPress={props.onOpenFiles}
+            testID="drawer-files"
           />
           <UtilityRow
             icon={BadgeCheck}
             label={t('drawer.runtimeProof')}
             onPress={props.onOpenRuntime}
+            testID="drawer-runtime-proof"
           />
         </View>
 
@@ -335,10 +341,12 @@ function UtilityRow({
   icon,
   label,
   onPress,
+  testID,
 }: {
   icon: LucideIcon;
   label: string;
   onPress: () => void;
+  testID?: string;
 }) {
   const { colors } = useAppPresentation();
   const styles = useMemo(() => createStyles(colors), [colors]);
@@ -348,6 +356,7 @@ function UtilityRow({
       accessibilityRole="button"
       onPress={onPress}
       style={({ pressed }) => [styles.utilityRow, pressed && styles.pressed]}
+      testID={testID}
     >
       <View style={styles.utilityIcon}>
         <AppIcon color={colors.accent} icon={icon} size={19} />

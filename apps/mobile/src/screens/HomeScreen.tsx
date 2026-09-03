@@ -5029,6 +5029,7 @@ export function HomeScreen() {
         <View style={styles.topBar}>
           <RoundButton
             accessibilityLabel={t('home.openNavigation')}
+            testID="home-open-navigation"
             onPress={() => {
               if (!rootSurfaceAdmissionAllowed(true)) return;
               drawerSurfaceEpoch.current += 1;
@@ -5790,9 +5791,11 @@ function RoundButton({
   accessibilityLabel,
   children,
   onPress,
+  testID,
 }: React.PropsWithChildren<{
   accessibilityLabel: string;
   onPress: () => void;
+  testID?: string;
 }>) {
   const { colors } = useAppPresentation();
   const styles = useMemo(() => createStyles(colors), [colors]);
@@ -5803,6 +5806,7 @@ function RoundButton({
       hitSlop={hitSlop}
       onPress={onPress}
       style={({ pressed }) => [styles.roundButton, pressed && styles.pressed]}
+      testID={testID}
     >
       {children}
     </Pressable>
