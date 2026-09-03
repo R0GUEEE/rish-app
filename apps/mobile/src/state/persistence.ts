@@ -188,11 +188,21 @@ export type ChatHydrationOptionsV1 = {
   readonly sessionAuthority?: AgentHydrationAuthorityV1;
   /** Committed checkpoint envelope used by production root hydration. */
   readonly nativeEnvelope?: AgentHydrationNativeEnvelopeV1;
+  /**
+   * True when the persisted envelope was written by a previous process
+   * launch.  Every non-terminal attempt then belongs to a dead writer and
+   * is interrupted deterministically at hydration: marked failed with
+   * E_ATTEMPT_INTERRUPTED, its Agent journal dropped so it can never be
+   * resumed, and a transcript-cleanup outbox entry enqueued for native
+   * discard.  Defaults to false so existing hydration semantics hold.
+   */
+  readonly staleWriterLaunch?: boolean;
 };
 
 type NormalizedChatHydrationOptions = {
   readonly sessionAuthority?: AgentHydrationAuthorityV1;
   readonly nativeJournalRevision?: number;
+  readonly staleWriterLaunch: boolean;
 };
 
 function parseHydrationAuthority(
@@ -445,6 +455,30 @@ function canonicalLifecycleId(value: unknown, path: string): string {
     return invalid(path, 'must be a canonical lowercase UUID');
   }
   return value;
+}
+
+/**
+ * Deterministic cleanup identity for an interrupted attempt.  The derived id
+ * is a canonical lowercase UUID that differs from the source attempt id in
+ * its version and variant nibbles, so repeated hydration of the same
+ * persisted session enqueues byte-identical entries and the identity can
+ * never collide with the attempt id it belongs to.  Attempt ids are always
+ * generated with version nibble '4' and variant nibble in 8-b, while this
+ * derivation pins 'd' and 'c', so a derived id can never equal any generated
+ * attempt id.
+ */
+function interruptedCleanupIdForAttempt(attemptId: string): string {
+  const versionNibble = attemptId.charAt(14);
+  const variantNibble = attemptId.charAt(19);
+  const version = versionNibble === 'd' ? '4' : 'd';
+  const variant = variantNibble === 'c' ? '8' : 'c';
+  return (
+    attemptId.slice(0, 14) +
+    version +
+    attemptId.slice(15, 19) +
+    variant +
+    attemptId.slice(20)
+  );
 }
 
 function sha256(value: unknown, path: string): string {
@@ -4473,6 +4507,17 @@ function parseConversation(
           'must match the containing attempt workspace/root and rounds',
         );
       }
+      if (
+        attempt.status === 'failed' &&
+        attempt.failureCode === 'E_ATTEMPT_INTERRUPTED'
+      ) {
+        // A stale attempt interrupted at hydration keeps its journal phase as
+        // forensic evidence of where its dead writer stopped.  The phase can
+        // no longer be interpreted as a live authority, so the phase/status
+        // cross-checks below apply only to live or normally terminalized
+        // attempts.
+        return;
+      }
       const lineage = journal.round_lineage;
       if (
         journal.phase === 'round_in_flight' &&
@@ -5604,6 +5649,7 @@ export function hydrateChatState(
     );
   }
   const hydrationOptions: NormalizedChatHydrationOptions = {
+    staleWriterLaunch: options.staleWriterLaunch === true,
     ...(explicitAuthority === undefined && nativeEnvelope === undefined
       ? {}
       : {
@@ -5777,7 +5823,7 @@ export function hydrateChatState(
     }
     workspaceOperationIds.add(entry.operationId);
   });
-  const agentTranscriptCleanupOutbox = hasAgentSchema(schemaVersion)
+  let agentTranscriptCleanupOutbox = hasAgentSchema(schemaVersion)
     ? array(
         raw.agent_transcript_cleanup_outbox,
         '$.agent_transcript_cleanup_outbox',
@@ -5933,6 +5979,29 @@ export function hydrateChatState(
           `$.agent_transcript_cleanup_outbox[${index}]`,
           'must reference an existing attempt',
         );
+      if (
+        attempt.status === 'failed' &&
+        attempt.failureCode === 'E_ATTEMPT_INTERRUPTED' &&
+        cleanup.reason === 'failed' &&
+        cleanup.task_id === attempt.turnId
+      ) {
+        // Interruption recovery keeps the journal as round evidence but the
+        // attempt phase is no longer a terminal-phase reason; the transcript
+        // must still match the entry exactly.
+        const transcript = attempt.agent?.transcript;
+        if (
+          transcript === undefined ||
+          transcript === null ||
+          transcript.transcript_ref !== cleanup.transcript_ref ||
+          transcript.transcript_sha256 !== cleanup.transcript_sha256
+        ) {
+          invalid(
+            `$.agent_transcript_cleanup_outbox[${index}]`,
+            'must match the attempt transcript',
+          );
+        }
+        return;
+      }
       const transcript = attempt.agent?.transcript;
       const expectedReason =
         attempt.agent?.phase === 'final_response'
@@ -6079,24 +6148,92 @@ export function hydrateChatState(
     );
   }
 
+  // Interruption recovery is deterministic at hydration time.  A non-terminal
+  // attempt persisted by a previous process launch can never be resumed:
+  // its writer is dead, its provider round can no longer complete, and its
+  // native reservation/authority residue must be discarded, never replayed.
+  // Marking it failed with E_ATTEMPT_INTERRUPTED and dropping the Agent
+  // journal routes every later Retry through the legacy retry path (a fresh
+  // attempt in the same turn) instead of native recovery of the stale one.
+  const interruptedCleanupEntries: AgentTranscriptCleanupV1[] = [];
   const hydratedConversations: Record<string, Conversation> = {};
   Object.values(conversations).forEach(conversation => {
     hydratedConversations[conversation.id] = {
       ...conversation,
-      attempts: conversation.attempts.map(attempt =>
-        (!hasAgentSchema(schemaVersion) || attempt.agent === null) &&
-        (attempt.status === 'sending' ||
-          (attempt.status === 'prepared' && attempt.rounds.length > 0))
+      attempts: conversation.attempts.map(attempt => {
+        const nonTerminal =
+          attempt.status === 'sending' || attempt.status === 'prepared';
+        if (hydrationOptions.staleWriterLaunch && nonTerminal) {
+          if (attempt.agent !== undefined && attempt.agent !== null) {
+            // The journal stays as the round/transcript audit evidence, but
+            // the attempt itself is terminal: its writer launch is dead, so
+            // neither the provider round nor any tool effect may continue.
+            // The cleanup entry retains the transcript identity for the
+            // native discard proof.  The controller retry/resume paths treat
+            // E_ATTEMPT_INTERRUPTED as legacy, so Retry always prepares a
+            // fresh attempt in the same turn instead of resuming this one.
+            interruptedCleanupEntries.push({
+              schema_version: AGENT_CLEANUP_SCHEMA_VERSION,
+              cleanup_id: interruptedCleanupIdForAttempt(attempt.attemptId),
+              conversation_id: conversation.id,
+              task_id: attempt.turnId,
+              attempt_id: attempt.attemptId,
+              transcript_ref: attempt.agent.transcript.transcript_ref,
+              transcript_sha256: attempt.agent.transcript.transcript_sha256,
+              reason: 'failed',
+              created_at: attempt.updatedAt,
+            });
+          }
+          return {
+            ...attempt,
+            status: 'failed' as const,
+            activeRound: null,
+            failureCode: 'E_ATTEMPT_INTERRUPTED' as const,
+          };
+        }
+        return (!hasAgentSchema(schemaVersion) || attempt.agent === null) &&
+          (attempt.status === 'sending' ||
+            (attempt.status === 'prepared' && attempt.rounds.length > 0))
           ? {
               ...attempt,
               status: 'failed' as const,
               activeRound: null,
               failureCode: 'E_ATTEMPT_INTERRUPTED' as const,
             }
-          : attempt,
-      ),
+          : attempt;
+      }),
     };
   });
+  if (interruptedCleanupEntries.length > 0) {
+    const finalCleanupEntries = [
+      ...agentTranscriptCleanupOutbox,
+      ...interruptedCleanupEntries,
+    ];
+    if (finalCleanupEntries.length > MAX_AGENT_CLEANUP_OUTBOX_ENTRIES) {
+      return invalid(
+        '$.agent_transcript_cleanup_outbox',
+        'must not exceed the cleanup entry capacity after interruption recovery',
+      );
+    }
+    interruptedCleanupEntries.forEach(entry => {
+      if (
+        agentTranscriptCleanupOutbox.some(
+          existing => existing.cleanup_id === entry.cleanup_id,
+        ) ||
+        lifecycleIds.has(entry.cleanup_id)
+      ) {
+        invalid(
+          '$.agent_transcript_cleanup_outbox',
+          'interrupted cleanup identity must be globally unique',
+        );
+      }
+      claimLifecycleId(
+        entry.cleanup_id,
+        '$.agent_transcript_cleanup_outbox[interrupted]',
+      );
+    });
+    agentTranscriptCleanupOutbox = finalCleanupEntries;
+  }
 
   if (workspaceAuthorityOutbox.length > 0) {
     const outboxReferenceState: ChatState = {

@@ -6616,7 +6616,9 @@ export function chatReducer(state: ChatState, action: ChatAction): ChatState {
       if (
         source === undefined ||
         (source.status !== 'failed' && source.status !== 'cancelled') ||
-        (source !== undefined && hasAgentJournalOrReceipt(source)) ||
+        (source !== undefined &&
+          hasAgentJournalOrReceipt(source) &&
+          source.failureCode !== 'E_ATTEMPT_INTERRUPTED') ||
         turn === undefined ||
         hasPendingAttempt ||
         !sourceIsCurrentVisibleHistory ||

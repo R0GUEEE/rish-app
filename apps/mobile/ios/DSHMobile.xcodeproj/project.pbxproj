@@ -31,12 +31,15 @@
 		A9C400021AD99517003FC87E /* LocalProjectsModuleV2Tests.mm in Sources */ = {isa = PBXBuildFile; fileRef = A9C400011AD99517003FC87E /* LocalProjectsModuleV2Tests.mm */; };
 		AAC400021AD99517003FC87E /* AgentToolEffectsTests.mm in Sources */ = {isa = PBXBuildFile; fileRef = AAC400011AD99517003FC87E /* AgentToolEffectsTests.mm */; };
 		ABC400021AD99517003FC87E /* DSHCompletionProviderTransportTests.mm in Sources */ = {isa = PBXBuildFile; fileRef = ABC400011AD99517003FC87E /* DSHCompletionProviderTransportTests.mm */; };
-		C0F400021AD99517003FC87E /* agent-begin-round-session.json in Resources */ = {isa = PBXBuildFile; fileRef = C0F400011AD99517003FC87E /* agent-begin-round-session.json */; };
-		C1F400021AD99517003FC87E /* agent-first-round-complete-session.json in Resources */ = {isa = PBXBuildFile; fileRef = C1F400011AD99517003FC87E /* agent-first-round-complete-session.json */; };
-		C2F400021AD99517003FC87E /* agent-next-round-after-tool-session.json in Resources */ = {isa = PBXBuildFile; fileRef = C2F400011AD99517003FC87E /* agent-next-round-after-tool-session.json */; };
 		ABD400021AD99517003FC87E /* AgentPreparedAttemptStoreTests.mm in Sources */ = {isa = PBXBuildFile; fileRef = ABD400011AD99517003FC87E /* AgentPreparedAttemptStoreTests.mm */; };
 		ABE400021AD99517003FC87E /* AgentProviderRoundServiceTests.mm in Sources */ = {isa = PBXBuildFile; fileRef = ABE400011AD99517003FC87E /* AgentProviderRoundServiceTests.mm */; };
 		ABF400021AD99517003FC87E /* LegacyBoundProjectRootAccessTests.mm in Sources */ = {isa = PBXBuildFile; fileRef = ABF400011AD99517003FC87E /* LegacyBoundProjectRootAccessTests.mm */; };
+		C0F400021AD99517003FC87E /* agent-begin-round-session.json in Resources */ = {isa = PBXBuildFile; fileRef = C0F400011AD99517003FC87E /* agent-begin-round-session.json */; };
+		C1F400021AD99517003FC87E /* agent-first-round-complete-session.json in Resources */ = {isa = PBXBuildFile; fileRef = C1F400011AD99517003FC87E /* agent-first-round-complete-session.json */; };
+		C2F400021AD99517003FC87E /* agent-next-round-after-tool-session.json in Resources */ = {isa = PBXBuildFile; fileRef = C2F400011AD99517003FC87E /* agent-next-round-after-tool-session.json */; };
+		C3F400021AD99517003FC87E /* agent-interrupted-recovery-session.json in Resources */ = {isa = PBXBuildFile; fileRef = C3F400011AD99517003FC87E /* agent-interrupted-recovery-session.json */; };
+		C4F400021AD99517003FC87E /* scenario-a4-wal.json in Resources */ = {isa = PBXBuildFile; fileRef = C4F400011AD99517003FC87E /* scenario-a4-wal.json */; };
+		C5F400021AD99517003FC87E /* scenario-a4-session-envelope.json in Resources */ = {isa = PBXBuildFile; fileRef = C5F400011AD99517003FC87E /* scenario-a4-session-envelope.json */; };
 		C91A46F4761A4A3EA8F34780 /* CompletionV2StreamTests.mm in Sources */ = {isa = PBXBuildFile; fileRef = 94F13054405C479482FDBF90 /* CompletionV2StreamTests.mm */; };
 		D4C400021AD99517003FC87E /* ProjectContextServiceTests.mm in Sources */ = {isa = PBXBuildFile; fileRef = D4C400011AD99517003FC87E /* ProjectContextServiceTests.mm */; };
 		D5C400021AD99517003FC87E /* CompletionV2Tests.mm in Sources */ = {isa = PBXBuildFile; fileRef = D5C400011AD99517003FC87E /* CompletionV2Tests.mm */; };
@@ -100,13 +103,16 @@
 		A9C400011AD99517003FC87E /* LocalProjectsModuleV2Tests.mm */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.cpp.objcpp; path = LocalProjectsModuleV2Tests.mm; sourceTree = "<group>"; };
 		AAC400011AD99517003FC87E /* AgentToolEffectsTests.mm */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.cpp.objcpp; path = AgentToolEffectsTests.mm; sourceTree = "<group>"; };
 		ABC400011AD99517003FC87E /* DSHCompletionProviderTransportTests.mm */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.cpp.objcpp; path = DSHCompletionProviderTransportTests.mm; sourceTree = "<group>"; };
-		C0F400011AD99517003FC87E /* agent-begin-round-session.json */ = {isa = PBXFileReference; lastKnownFileType = text.json; path = "Fixtures/agent-begin-round-session.json"; sourceTree = "<group>"; };
-		C1F400011AD99517003FC87E /* agent-first-round-complete-session.json */ = {isa = PBXFileReference; lastKnownFileType = text.json; path = "Fixtures/agent-first-round-complete-session.json"; sourceTree = "<group>"; };
-		C2F400011AD99517003FC87E /* agent-next-round-after-tool-session.json */ = {isa = PBXFileReference; lastKnownFileType = text.json; path = "Fixtures/agent-next-round-after-tool-session.json"; sourceTree = "<group>"; };
 		ABD400011AD99517003FC87E /* AgentPreparedAttemptStoreTests.mm */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.cpp.objcpp; path = AgentPreparedAttemptStoreTests.mm; sourceTree = "<group>"; };
 		ABE400011AD99517003FC87E /* AgentProviderRoundServiceTests.mm */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.cpp.objcpp; path = AgentProviderRoundServiceTests.mm; sourceTree = "<group>"; };
 		ABF400011AD99517003FC87E /* LegacyBoundProjectRootAccessTests.mm */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.cpp.objcpp; path = LegacyBoundProjectRootAccessTests.mm; sourceTree = "<group>"; };
 		BEAB33D4FD608B29CABFBC8D /* StreamEventParserTests.mm */ = {isa = PBXFileReference; includeInIndex = 1; path = StreamEventParserTests.mm; sourceTree = "<group>"; };
+		C0F400011AD99517003FC87E /* agent-begin-round-session.json */ = {isa = PBXFileReference; lastKnownFileType = text.json; path = "Fixtures/agent-begin-round-session.json"; sourceTree = "<group>"; };
+		C1F400011AD99517003FC87E /* agent-first-round-complete-session.json */ = {isa = PBXFileReference; lastKnownFileType = text.json; path = "Fixtures/agent-first-round-complete-session.json"; sourceTree = "<group>"; };
+		C2F400011AD99517003FC87E /* agent-next-round-after-tool-session.json */ = {isa = PBXFileReference; lastKnownFileType = text.json; path = "Fixtures/agent-next-round-after-tool-session.json"; sourceTree = "<group>"; };
+		C3F400011AD99517003FC87E /* agent-interrupted-recovery-session.json */ = {isa = PBXFileReference; lastKnownFileType = text.json; path = "Fixtures/agent-interrupted-recovery-session.json"; sourceTree = "<group>"; };
+		C4F400011AD99517003FC87E /* scenario-a4-wal.json */ = {isa = PBXFileReference; lastKnownFileType = text.json; path = "Fixtures/scenario-a4-wal.json"; sourceTree = "<group>"; };
+		C5F400011AD99517003FC87E /* scenario-a4-session-envelope.json */ = {isa = PBXFileReference; lastKnownFileType = text.json; path = "Fixtures/scenario-a4-session-envelope.json"; sourceTree = "<group>"; };
 		D4C400011AD99517003FC87E /* ProjectContextServiceTests.mm */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.cpp.objcpp; path = ProjectContextServiceTests.mm; sourceTree = "<group>"; };
 		D5C400011AD99517003FC87E /* CompletionV2Tests.mm */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.cpp.objcpp; path = CompletionV2Tests.mm; sourceTree = "<group>"; };
 		D5E1000000000000000000A1 /* vmlinuz-virt-6.18.35 */ = {isa = PBXFileReference; lastKnownFileType = file; path = "vmlinuz-virt-6.18.35"; sourceTree = "<group>"; };
@@ -162,6 +168,9 @@
 				C0F400011AD99517003FC87E /* agent-begin-round-session.json */,
 				C1F400011AD99517003FC87E /* agent-first-round-complete-session.json */,
 				C2F400011AD99517003FC87E /* agent-next-round-after-tool-session.json */,
+				C3F400011AD99517003FC87E /* agent-interrupted-recovery-session.json */,
+				C4F400011AD99517003FC87E /* scenario-a4-wal.json */,
+				C5F400011AD99517003FC87E /* scenario-a4-session-envelope.json */,
 				A4C400011AD99517003FC87E /* SessionSnapshotsModuleTests.mm */,
 				A5C400011AD99517003FC87E /* LocalWorkspaceModuleV2Tests.mm */,
 				A6C400011AD99517003FC87E /* LocalDocumentsModuleV2Tests.mm */,
@@ -394,6 +403,9 @@
 				C0F400021AD99517003FC87E /* agent-begin-round-session.json in Resources */,
 				C1F400021AD99517003FC87E /* agent-first-round-complete-session.json in Resources */,
 				C2F400021AD99517003FC87E /* agent-next-round-after-tool-session.json in Resources */,
+				C3F400021AD99517003FC87E /* agent-interrupted-recovery-session.json in Resources */,
+				C4F400021AD99517003FC87E /* scenario-a4-wal.json in Resources */,
+				C5F400021AD99517003FC87E /* scenario-a4-session-envelope.json in Resources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};

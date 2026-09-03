@@ -83,6 +83,8 @@ test('uses cached native method references after same-object replacement', async
     status: 'missing',
     snapshot: null,
     session_json: null,
+    writer_launch_instance_id: null,
+    current_launch_instance_id: '11111111-1111-4111-8111-111111111111',
   });
   const replacement = jest.fn().mockRejectedValue(new Error('replacement'));
   Object.defineProperty(mockNativeSessionSnapshots, 'loadSessionSnapshot', {
@@ -158,6 +160,8 @@ test('forwards load, CAS, and query envelopes without translating native states'
       legacy_bytes_sha256: 'a'.repeat(64),
     },
     session_json: '{"schema_version":8}',
+    writer_launch_instance_id: '22222222-2222-4222-8222-222222222222',
+    current_launch_instance_id: '33333333-3333-4333-8333-333333333333',
   };
   const committed = {
     schema_version: 1 as const,
@@ -370,6 +374,8 @@ test('sanitizes native failures and malformed public results', async () => {
     status: 'missing',
     snapshot: { unexpected: true },
     session_json: null,
+    writer_launch_instance_id: null,
+    current_launch_instance_id: '44444444-4444-4444-8444-444444444444',
   });
   await expect(SessionSnapshots.loadSessionSnapshot()).rejects.toMatchObject({
     code: 'E_SESSION_CORRUPT',

@@ -2009,6 +2009,99 @@ static NSString *const DSHSessionTestOperationB =
   XCTAssertEqualObjects(result[@"status"], @"committed");
 }
 
+- (void)testSharedJSInterruptedRecoveryFixtureCommitsThroughNativeStore {
+  NSDictionary *candidate =
+      [self sharedFixtureNamed:@"agent-interrupted-recovery-session"];
+  XCTAssertNotNil(candidate);
+  if (candidate == nil) return;
+  NSError *error = nil;
+  NSDictionary *result = [self casWithOperation:DSHSessionTestOperationA
+      expected:@{ @"schema_version" : @1, @"kind" : @"missing" }
+      candidate:candidate error:&error];
+  XCTAssertNil(error);
+  XCTAssertEqualObjects(result[@"status"], @"committed");
+  // Every recovered attempt must survive the exact schema-9 root validator:
+  // interrupted attempts keep their journal phase as forensic evidence and
+  // their failed/E_ATTEMPT_INTERRUPTED status, while their cleanup entries
+  // reference the same journal transcript.
+  NSDictionary *loaded = [self.store loadSessionSnapshotWithError:&error];
+  XCTAssertNil(error);
+  XCTAssertEqualObjects(loaded[@"status"], @"present");
+}
+
+- (void)testLoadResultExposesWriterAndCurrentLaunchInstanceIds {
+  NSError *error = nil;
+  NSDictionary *missing = [self.store loadSessionSnapshotWithError:&error];
+  XCTAssertNil(error);
+  XCTAssertEqualObjects(missing[@"writer_launch_instance_id"], NSNull.null);
+  XCTAssertEqualObjects(missing[@"current_launch_instance_id"],
+                        DSHSessionTestLaunch);
+
+  NSDictionary *committed = [self casWithOperation:DSHSessionTestOperationA
+      expected:@{ @"schema_version" : @1, @"kind" : @"missing" }
+      candidate:[self candidate:1] error:&error];
+  XCTAssertNil(error);
+  XCTAssertEqualObjects(committed[@"status"], @"committed");
+  NSDictionary *loaded = [self.store loadSessionSnapshotWithError:&error];
+  XCTAssertNil(error);
+  XCTAssertEqualObjects(loaded[@"status"], @"present");
+  XCTAssertEqualObjects(loaded[@"writer_launch_instance_id"],
+                        DSHSessionTestLaunch);
+  XCTAssertEqualObjects(loaded[@"current_launch_instance_id"],
+                        DSHSessionTestLaunch);
+
+  // A second store modelling the next process launch sees the persisted
+  // writer id and its own current id, which is what the JS hydration layer
+  // compares to decide stale-launch interruption.
+  NSString *secondLaunch = @"99999999-9999-4999-8999-999999999999";
+  DSHSessionSnapshotStore *relaunch = [[DSHSessionSnapshotStore alloc]
+      initWithRootURL:self.rootURL
+           sessionURL:self.store.sessionURL
+      launchInstanceId:secondLaunch
+            coordinator:nil
+              faultHook:nil];
+  XCTAssertNotNil(relaunch);
+  NSError *relaunchError = nil;
+  NSDictionary *relaunchLoad = [relaunch loadSessionSnapshotWithError:&relaunchError];
+  XCTAssertNil(relaunchError);
+  XCTAssertEqualObjects(relaunchLoad[@"status"], @"present");
+  XCTAssertEqualObjects(relaunchLoad[@"writer_launch_instance_id"],
+                        DSHSessionTestLaunch);
+  XCTAssertEqualObjects(relaunchLoad[@"current_launch_instance_id"],
+                        secondLaunch);
+}
+
+- (void)testInterruptedAttemptWithKeptJournalAndCleanupEntryValidates {
+  // The hydration recovery keeps the Agent journal phase as forensic evidence
+  // while marking the attempt failed with E_ATTEMPT_INTERRUPTED and enqueuing
+  // a reason-"failed" cleanup entry.  The exact shape is exercised through the
+  // shared parity fixture above; this test pins the narrower rule that a
+  // failed interrupted attempt may retain any live journal phase and an
+  // active_round-free projection.
+  NSError *error = nil;
+  NSDictionary *candidate =
+      [self mutableSharedFixtureNamed:@"agent-interrupted-recovery-session"];
+  XCTAssertNotNil(candidate);
+  if (candidate == nil) return;
+  NSUInteger interrupted = 0;
+  for (NSMutableDictionary *conversation in candidate[@"conversations"]) {
+    for (NSMutableDictionary *attempt in conversation[@"attempts"]) {
+      if ([attempt[@"status"] isEqual:@"failed"] &&
+          [attempt[@"failure_code"] isEqual:@"E_ATTEMPT_INTERRUPTED"]) {
+        interrupted += 1;
+        XCTAssertEqualObjects(attempt[@"active_round"], NSNull.null);
+        XCTAssertTrue([attempt[@"agent"] isKindOfClass:NSDictionary.class]);
+      }
+    }
+  }
+  XCTAssertGreaterThanOrEqual(interrupted, 30U);
+  NSDictionary *result = [self casWithOperation:DSHSessionTestOperationA
+      expected:@{ @"schema_version" : @1, @"kind" : @"missing" }
+      candidate:candidate error:&error];
+  XCTAssertNil(error);
+  XCTAssertEqualObjects(result[@"status"], @"committed");
+}
+
 - (void)testHistoricalToolEventRejectsRoundMissingFromAttemptReceipts {
   NSMutableDictionary *candidate =
       [self mutableSharedFixtureNamed:@"agent-next-round-after-tool-session"];

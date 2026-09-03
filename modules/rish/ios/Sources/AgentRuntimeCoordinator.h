@@ -23,6 +23,7 @@ NS_ASSUME_NONNULL_BEGIN
 - (nullable NSDictionary *)recoverAgentAttempt:(NSDictionary *)request error:(NSError **)error;
 - (nullable NSDictionary *)finalizeAgentAttempt:(NSDictionary *)request error:(NSError **)error;
 - (nullable NSDictionary *)discardAgentAttempt:(NSDictionary *)request error:(NSError **)error;
+- (nullable NSDictionary *)interruptAgentAttempt:(NSDictionary *)request error:(NSError **)error;
 - (nullable NSDictionary *)queryAgentCleanup:(NSDictionary *)request error:(NSError **)error;
 @property(nonatomic, readonly, getter=isAvailable) BOOL available;
 @end
@@ -74,6 +75,8 @@ NS_ASSUME_NONNULL_BEGIN
 - (nullable NSDictionary *)finalizeAgentAttempt:(NSDictionary *)request
                                             error:(NSError **)error;
 - (nullable NSDictionary *)discardAgentAttempt:(NSDictionary *)request
+                                           error:(NSError **)error;
+- (nullable NSDictionary *)interruptAgentAttempt:(NSDictionary *)request
                                            error:(NSError **)error;
 - (nullable NSDictionary *)queryAgentCleanup:(NSDictionary *)request
                                          error:(NSError **)error;

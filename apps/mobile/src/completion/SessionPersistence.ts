@@ -41,18 +41,24 @@ export type LoadSessionSnapshotResultV1 =
       readonly status: 'missing';
       readonly snapshot: null;
       readonly session_json: null;
+      readonly writer_launch_instance_id: null;
+      readonly current_launch_instance_id: string;
     }
   | {
       readonly schema_version: 1;
       readonly status: 'legacy_present';
       readonly legacy: LegacySessionSnapshotRefV1;
       readonly session_json: string;
+      readonly writer_launch_instance_id: string;
+      readonly current_launch_instance_id: string;
     }
   | {
       readonly schema_version: 1;
       readonly status: 'present';
       readonly snapshot: SessionSnapshotRefV1;
       readonly session_json: string;
+      readonly writer_launch_instance_id: string;
+      readonly current_launch_instance_id: string;
     };
 
 export type SessionCASPersistRequestV1 = {
@@ -904,24 +910,69 @@ function parseAuthority(value: unknown): SessionSnapshotAuthorityV1 | null {
   return null;
 }
 
+const launchInstanceIdPattern = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/u;
+
+function isLaunchInstanceId(value: unknown): value is string {
+  return typeof value === 'string' && launchInstanceIdPattern.test(value);
+}
+
 function parseLoadSnapshot(value: unknown): LoadSessionSnapshotResultV1 | null {
   const raw = plainRecord(value);
   if (raw === null || raw.schema_version !== 1 || typeof raw.status !== 'string') return null;
   if (raw.status === 'missing') {
-    if (!exactKeys(raw, ['schema_version', 'status', 'snapshot', 'session_json'])) return null;
-    if (raw.snapshot !== null || raw.session_json !== null) return null;
-    return { schema_version: 1, status: 'missing', snapshot: null, session_json: null };
+    if (
+      !exactKeys(raw, [
+        'schema_version',
+        'status',
+        'snapshot',
+        'session_json',
+        'writer_launch_instance_id',
+        'current_launch_instance_id',
+      ])
+    ) return null;
+    if (
+      raw.snapshot !== null ||
+      raw.session_json !== null ||
+      raw.writer_launch_instance_id !== null ||
+      !isLaunchInstanceId(raw.current_launch_instance_id)
+    ) return null;
+    return {
+      schema_version: 1,
+      status: 'missing',
+      snapshot: null,
+      session_json: null,
+      writer_launch_instance_id: null,
+      current_launch_instance_id: raw.current_launch_instance_id,
+    };
   }
   if (raw.status === 'legacy_present' || raw.status === 'present') {
     if (
       !exactKeys(
         raw,
         raw.status === 'legacy_present'
-          ? ['schema_version', 'status', 'legacy', 'session_json']
-          : ['schema_version', 'status', 'snapshot', 'session_json'],
+          ? [
+              'schema_version',
+              'status',
+              'legacy',
+              'session_json',
+              'writer_launch_instance_id',
+              'current_launch_instance_id',
+            ]
+          : [
+              'schema_version',
+              'status',
+              'snapshot',
+              'session_json',
+              'writer_launch_instance_id',
+              'current_launch_instance_id',
+            ],
       )
     ) return null;
-    if (typeof raw.session_json !== 'string') return null;
+    if (
+      typeof raw.session_json !== 'string' ||
+      !isLaunchInstanceId(raw.writer_launch_instance_id) ||
+      !isLaunchInstanceId(raw.current_launch_instance_id)
+    ) return null;
     if (
       !loadedSessionJSONMatchesStatus(
         raw.status,
@@ -940,6 +991,8 @@ function parseLoadSnapshot(value: unknown): LoadSessionSnapshotResultV1 | null {
         status: 'legacy_present',
         legacy: authority.legacy,
         session_json: raw.session_json,
+        writer_launch_instance_id: raw.writer_launch_instance_id,
+        current_launch_instance_id: raw.current_launch_instance_id,
       };
     }
     const authority = parseAuthority({
@@ -955,6 +1008,8 @@ function parseLoadSnapshot(value: unknown): LoadSessionSnapshotResultV1 | null {
       status: 'present',
       snapshot: authority.snapshot,
       session_json: raw.session_json,
+      writer_launch_instance_id: raw.writer_launch_instance_id,
+      current_launch_instance_id: raw.current_launch_instance_id,
     };
   }
   return null;

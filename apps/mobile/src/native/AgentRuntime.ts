@@ -1181,6 +1181,35 @@ export type DiscardAgentAttemptResultV2 =
       readonly failure_code: 'E_AGENT_PERSISTENCE' | 'E_AGENT_TRANSCRIPT';
     };
 
+export type InterruptAgentAttemptRequestV2 = {
+  readonly schema_version: 2;
+  readonly operation_id: string;
+  readonly cleanup_id: string;
+  readonly task_id: string;
+  readonly conversation_id: string;
+  readonly attempt_id: string;
+  readonly transcript_ref: string;
+  readonly transcript_sha256: string;
+  readonly reason: 'completed' | 'cancelled' | 'failed';
+  readonly expected_session_generation: number;
+  readonly expected_session_sha256: string;
+};
+
+export type InterruptAgentAttemptResultV2 =
+  | {
+      readonly schema_version: 2;
+      readonly status: 'discarded' | 'already_missing';
+      readonly operation_id: string;
+      readonly cleanup_id: string;
+    }
+  | {
+      readonly schema_version: 2;
+      readonly status: 'pending' | 'unknown';
+      readonly operation_id: string;
+      readonly cleanup_id: string;
+      readonly failure_code: 'E_AGENT_PERSISTENCE' | 'E_AGENT_TRANSCRIPT';
+    };
+
 export type QueryAgentCleanupRequestV2 = {
   readonly schema_version: 2;
   readonly cleanup_id: string;
@@ -1227,6 +1256,9 @@ export type AgentRuntimeFacadeV2 = {
   discardAgentAttempt(
     request: DiscardAgentAttemptRequestV2,
   ): Promise<DiscardAgentAttemptResultV2>;
+  interruptAgentAttempt(
+    request: InterruptAgentAttemptRequestV2,
+  ): Promise<InterruptAgentAttemptResultV2>;
   queryAgentCleanup(
     request: QueryAgentCleanupRequestV2,
   ): Promise<QueryAgentCleanupResultV2>;
@@ -1316,6 +1348,7 @@ const operationIds = [
   'recover_agent_attempt',
   'finalize_agent_attempt',
   'discard_agent_attempt',
+  'interrupt_agent_attempt',
   'query_agent_cleanup',
 ] as const;
 
@@ -3528,6 +3561,39 @@ function validateCleanupRequest(value: unknown): QueryAgentCleanupRequestV2 {
   return request as QueryAgentCleanupRequestV2;
 }
 
+function validateInterruptRequest(
+  value: unknown,
+): InterruptAgentAttemptRequestV2 {
+  const request = requestRecord(value, [
+    'schema_version',
+    'operation_id',
+    'cleanup_id',
+    'task_id',
+    'conversation_id',
+    'attempt_id',
+    'transcript_ref',
+    'transcript_sha256',
+    'reason',
+    'expected_session_generation',
+    'expected_session_sha256',
+  ]);
+  if (
+    request.schema_version !== 2 ||
+    !uuid(request.operation_id) ||
+    !uuid(request.cleanup_id) ||
+    !uuid(request.task_id) ||
+    !uuid(request.conversation_id) ||
+    !uuid(request.attempt_id) ||
+    !uuid(request.transcript_ref) ||
+    !digest(request.transcript_sha256) ||
+    !['completed', 'cancelled', 'failed'].includes(request.reason as string) ||
+    !safeInteger(request.expected_session_generation, MAX_SAFE, false) ||
+    !digest(request.expected_session_sha256)
+  )
+    fail();
+  return request as InterruptAgentAttemptRequestV2;
+}
+
 function validateCommonResultIdentity(
   result: Record<string, unknown>,
   request: {
@@ -5085,6 +5151,53 @@ function validateDiscardResult(
   fail('E_AGENT_LEDGER');
 }
 
+function validateInterruptResult(
+  value: unknown,
+  request: InterruptAgentAttemptRequestV2,
+): InterruptAgentAttemptResultV2 {
+  const header = peekRecord(
+    value,
+    ['schema_version', 'status'],
+    'E_AGENT_LEDGER',
+  );
+  if (header.schema_version !== 2) fail('E_AGENT_LEDGER');
+  if (header.status === 'discarded' || header.status === 'already_missing') {
+    const result = exactRecord(
+      value,
+      ['schema_version', 'status', 'operation_id', 'cleanup_id'],
+      'E_AGENT_LEDGER',
+    );
+    if (!uuid(result.cleanup_id) || result.cleanup_id !== request.cleanup_id)
+      fail('E_AGENT_LEDGER');
+    validateCommonResultIdentity(result, request);
+    return result as InterruptAgentAttemptResultV2;
+  }
+  if (header.status === 'pending' || header.status === 'unknown') {
+    const result = exactRecord(
+      value,
+      [
+        'schema_version',
+        'status',
+        'operation_id',
+        'cleanup_id',
+        'failure_code',
+      ],
+      'E_AGENT_LEDGER',
+    );
+    if (
+      !uuid(result.cleanup_id) ||
+      result.cleanup_id !== request.cleanup_id ||
+      !['E_AGENT_PERSISTENCE', 'E_AGENT_TRANSCRIPT'].includes(
+        result.failure_code as string,
+      )
+    )
+      fail('E_AGENT_LEDGER');
+    validateCommonResultIdentity(result, request);
+    return result as InterruptAgentAttemptResultV2;
+  }
+  fail('E_AGENT_LEDGER');
+}
+
 function validateCleanupResult(
   value: unknown,
   request: QueryAgentCleanupRequestV2,
@@ -5278,6 +5391,13 @@ export const AgentRuntime: AgentRuntimeFacadeV2 = Object.freeze({
       request,
       validateDiscardRequest,
       validateDiscardResult,
+    ),
+  interruptAgentAttempt: (request: InterruptAgentAttemptRequestV2) =>
+    invokeNative(
+      'interrupt_agent_attempt',
+      request,
+      validateInterruptRequest,
+      validateInterruptResult,
     ),
   queryAgentCleanup: (request: QueryAgentCleanupRequestV2) =>
     invokeNative(

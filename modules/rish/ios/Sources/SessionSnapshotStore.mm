@@ -2453,14 +2453,23 @@ static BOOL DSHSessionValidateConversation(NSDictionary *conversation,
               [(NSArray *)attempt[@"rounds"] count]) return NO;
       NSDictionary *lineage = journal[@"round_lineage"] == NSNull.null
           ? nil : journal[@"round_lineage"];
+      BOOL interruptedAttempt =
+          [attempt[@"status"] isEqual:@"failed"] &&
+          [attempt[@"failure_code"] isEqual:@"E_ATTEMPT_INTERRUPTED"];
       NSDictionary *activeRound = attempt[@"active_round"] == NSNull.null
           ? nil : attempt[@"active_round"];
-      if ([journal[@"phase"] isEqual:@"round_in_flight"] &&
-          (activeRound == nil || lineage == nil ||
-           ![activeRound[@"round_id"] isEqual:lineage[@"round_id"]] ||
-           ![activeRound[@"round_index"] isEqual:lineage[@"round_index"]])) return NO;
-      if (![journal[@"phase"] isEqual:@"round_in_flight"] && activeRound != nil) {
-        return NO;
+      if (!interruptedAttempt) {
+        // A stale attempt interrupted at hydration keeps its journal phase
+        // as forensic evidence of where its dead writer stopped; the phase
+        // is no longer a live authority, so the live phase/active-round
+        // cross-checks do not apply to it.
+        if ([journal[@"phase"] isEqual:@"round_in_flight"] &&
+            (activeRound == nil || lineage == nil ||
+             ![activeRound[@"round_id"] isEqual:lineage[@"round_id"]] ||
+             ![activeRound[@"round_index"] isEqual:lineage[@"round_index"]])) return NO;
+        if (![journal[@"phase"] isEqual:@"round_in_flight"] && activeRound != nil) {
+          return NO;
+        }
       }
       for (NSString *grantId in journal[@"frozen_grant_ids"]) {
         NSDictionary *grant = nil;
@@ -2931,12 +2940,20 @@ static BOOL DSHSessionValidateSchema9Root(NSDictionary *session) {
     }
     if (attempt == nil ||
         ![conversation[@"attempts"] containsObject:attempt] ||
-        ![attempt[@"turn_id"] isEqual:item[@"task_id"]] ||
-        attempt[@"agent"] == NSNull.null ||
+        ![attempt[@"turn_id"] isEqual:item[@"task_id"]]) return NO;
+    if (attempt[@"agent"] == NSNull.null) {
+      // Interruption recovery drops the journal; the cleanup entry itself
+      // retains the transcript identity for the native discard proof.
+      if (![attempt[@"status"] isEqual:@"failed"] ||
+          ![attempt[@"failure_code"] isEqual:@"E_ATTEMPT_INTERRUPTED"] ||
+          ![item[@"reason"] isEqual:@"failed"]) return NO;
+    } else if (
         ![attempt[@"agent"][@"transcript"][@"transcript_ref"]
             isEqual:item[@"transcript_ref"]] ||
         ![attempt[@"agent"][@"transcript"][@"transcript_sha256"]
-            isEqual:item[@"transcript_sha256"]]) return NO;
+            isEqual:item[@"transcript_sha256"]]) {
+      return NO;
+    }
     [cleanupIds addObject:item[@"cleanup_id"]];
     [lifecycleIds addObject:item[@"cleanup_id"]];
   }
@@ -3272,12 +3289,14 @@ static NSDictionary *DSHSessionPresentAuthority(NSUInteger generation,
   };
 }
 
-static NSDictionary *DSHSessionLoadMissingResult(void) {
+static NSDictionary *DSHSessionLoadMissingResult(NSString *currentLaunchInstanceId) {
   return @{
     @"schema_version" : @1,
     @"status" : @"missing",
     @"snapshot" : NSNull.null,
     @"session_json" : NSNull.null,
+    @"writer_launch_instance_id" : NSNull.null,
+    @"current_launch_instance_id" : currentLaunchInstanceId,
   };
 }
 
@@ -3293,6 +3312,7 @@ static NSDictionary *DSHSessionLoadMissingResult(void) {
 @property(nonatomic, strong) NSArray<NSDictionary *> *recentCommits;
 @property(nonatomic, copy) NSString *legacyBytesDigest;
 @property(nonatomic, copy) NSString *sessionDigest;
+@property(nonatomic, copy) NSString *writerLaunchInstanceId;
 @property(nonatomic) NSUInteger generation;
 @property(nonatomic, copy) NSDictionary *authority;
 @property(nonatomic) BOOL tombstoneAvailable;
@@ -4297,6 +4317,7 @@ NSString *DSHSessionSnapshotStoreLaunchInstanceId(void) {
     state.rawBytes = raw;
     state.session = session;
     state.legacyBytesDigest = legacyDigest;
+    state.writerLaunchInstanceId = envelope[@"writer_launch_instance_id"];
     NSError *hardenError = nil;
     BOOL hardened =
         [self hardenLegacyFileWithIdentity:&identity error:&hardenError];
@@ -4335,6 +4356,7 @@ NSString *DSHSessionSnapshotStoreLaunchInstanceId(void) {
     state.rawBytes = raw;
     state.session = session;
     state.sessionDigest = digest;
+    state.writerLaunchInstanceId = envelope[@"writer_launch_instance_id"];
     state.generation = generation;
     state.recentCommits = commits;
     state.authority = DSHSessionPresentAuthority(generation, digest);
@@ -4363,7 +4385,9 @@ NSString *DSHSessionSnapshotStoreLaunchInstanceId(void) {
 
 - (NSDictionary *)loadResultForState:(DSHSessionLoadedState *)state
                                 error:(NSError **)error {
-  if (state.missing) return DSHSessionLoadMissingResult();
+  if (state.missing) {
+    return DSHSessionLoadMissingResult(self.launchInstanceId);
+  }
   NSData *sessionData = DSHSessionCanonicalJSON(
       state.session, error, DSHSessionSnapshotStoreErrorCorrupt);
   if (sessionData == nil) return nil;
@@ -4379,6 +4403,8 @@ NSString *DSHSessionSnapshotStoreLaunchInstanceId(void) {
       @"status" : @"legacy_present",
       @"legacy" : DSHSessionLegacyRef(state.legacyBytesDigest),
       @"session_json" : sessionJSON,
+      @"writer_launch_instance_id" : state.writerLaunchInstanceId ?: NSNull.null,
+      @"current_launch_instance_id" : self.launchInstanceId,
     };
   }
   return @{
@@ -4386,6 +4412,8 @@ NSString *DSHSessionSnapshotStoreLaunchInstanceId(void) {
     @"status" : @"present",
     @"snapshot" : DSHSessionSnapshotRef(state.generation, state.sessionDigest),
     @"session_json" : sessionJSON,
+    @"writer_launch_instance_id" : state.writerLaunchInstanceId ?: NSNull.null,
+    @"current_launch_instance_id" : self.launchInstanceId,
   };
 }
 

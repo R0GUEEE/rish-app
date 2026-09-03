@@ -71,9 +71,11 @@ import {
   type ChatState,
   type Conversation,
   type AttachmentDescriptor,
+  type NativeAgentDiscardProofV1,
   type SessionAuthority,
   type SnapshotFreeProjectMutationTransaction,
 } from '../state';
+import type { InterruptAgentAttemptResultV2 } from '../native/AgentRuntime';
 import {
   LocalRuntime,
   type ModelTransitionSource,
@@ -495,6 +497,7 @@ function completionOwnershipKey(
 
 function summaryFor(conversation: Conversation): ConversationSummary {
   const last = conversation.messages.at(-1);
+  const latestAttempt = conversation.attempts.at(-1);
   return {
     id: conversation.id,
     title: conversation.title,
@@ -504,6 +507,10 @@ function summaryFor(conversation: Conversation): ConversationSummary {
       '',
     updatedAt: Date.parse(conversation.updatedAt),
     messageCount: conversation.messages.length,
+    ...(latestAttempt?.status === 'failed' &&
+    latestAttempt.failureCode === 'E_ATTEMPT_INTERRUPTED'
+      ? { interrupted: true }
+      : {}),
   };
 }
 
@@ -899,6 +906,7 @@ export function HomeScreen() {
   );
   const pendingSessionWritesRef = useRef(new Map<string, PendingSessionWrite>());
   const sessionWriteTailRef = useRef(Promise.resolve());
+  const drainInterruptedCleanupRef = useRef(false);
 
   /**
    * Preferences have a presentation store of their own, while the schema-9
@@ -967,6 +975,8 @@ export function HomeScreen() {
           generation: loaded.snapshot.generation,
           session_sha256: loaded.snapshot.session_sha256,
         },
+        staleWriterLaunch: loaded.writer_launch_instance_id !==
+          loaded.current_launch_instance_id,
       });
       if (!hydrated.ok) return false;
       let durableCandidate: string;
@@ -1123,6 +1133,122 @@ export function HomeScreen() {
     },
     [performSessionCandidate],
   );
+
+  /**
+   * Launch-time drain of the transcript cleanup outbox.  Entries that
+   * reference interrupted attempts (failed + E_ATTEMPT_INTERRUPTED with the
+   * Agent journal dropped at hydration) or terminal attempts whose native
+   * finalize/discard never completed are closed through the dedicated native
+   * interrupt operation, which discards the native authority, transcript,
+   * reservations, batches, and ledger rows in one fail-closed transaction.
+   * The outbox entry is then acknowledged with the committed session proof.
+   */
+  const drainInterruptedAgentCleanup = useCallback(async (): Promise<void> => {
+    if (!nativeAvailable || sessionSnapshotsAvailable !== true) return;
+    if (drainInterruptedCleanupRef.current) return;
+    drainInterruptedCleanupRef.current = true;
+    try {
+      for (;;) {
+        const state = store.getState();
+        const outbox = state.agentTranscriptCleanupOutbox ?? [];
+        let progressed = false;
+        for (const entry of outbox) {
+          const conversation = state.conversations[entry.conversation_id];
+          const attempt = conversation?.attempts.find(
+            candidate => candidate.attemptId === entry.attempt_id,
+          );
+          if (attempt === undefined) continue;
+          const interrupted =
+            attempt.status === 'failed' &&
+            attempt.failureCode === 'E_ATTEMPT_INTERRUPTED';
+          const journalTerminal =
+            attempt.agent !== undefined &&
+            attempt.agent !== null &&
+            (attempt.status === 'completed' ||
+              attempt.status === 'cancelled' ||
+              attempt.status === 'failed');
+          if (!interrupted && !journalTerminal) continue;
+          const authority = store.getSessionAuthority();
+          if (authority === null) return;
+          let operationId: string | null;
+          try {
+            operationId = LocalRuntime.createCompletionRequestId();
+          } catch {
+            return;
+          }
+          if (operationId === null) return;
+          let discarded: InterruptAgentAttemptResultV2;
+          try {
+            discarded = await AgentRuntime.interruptAgentAttempt({
+              schema_version: 2,
+              operation_id: operationId,
+              cleanup_id: entry.cleanup_id,
+              task_id: entry.task_id,
+              conversation_id: entry.conversation_id,
+              attempt_id: entry.attempt_id,
+              transcript_ref: entry.transcript_ref,
+              transcript_sha256: entry.transcript_sha256,
+              reason: interrupted
+                ? 'failed'
+                : attempt.status === 'completed'
+                  ? 'completed'
+                  : 'cancelled',
+              expected_session_generation: authority.generation,
+              expected_session_sha256: authority.sessionSha256,
+            });
+          } catch {
+            // Native rejected or is unavailable; fail closed and retry on the
+            // next launch.  The entry and the interrupted attempt stay
+            // durable, and the stale attempt can never be resumed.
+            return;
+          }
+          if (
+            discarded.status !== 'discarded' &&
+            discarded.status !== 'already_missing'
+          ) {
+            continue;
+          }
+          const transaction =
+            store.acknowledgeAgentTranscriptCleanupTransaction(
+              entry.cleanup_id,
+              entry,
+            );
+          if (transaction === null) continue;
+          const candidateJSON = store.serialize();
+          const durability = await persistSessionCandidate(candidateJSON, {
+            schema_version: 1,
+            kind: 'present',
+            snapshot: {
+              schema_version: 1,
+              generation: authority.generation,
+              session_sha256: authority.sessionSha256,
+            },
+          });
+          if (
+            durability.status !== 'committed' ||
+            durability.snapshot === undefined
+          ) {
+            transaction.rollback();
+            return;
+          }
+          const nativeProof: NativeAgentDiscardProofV1 = {
+            ...discarded,
+            task_id: entry.task_id,
+            conversation_id: entry.conversation_id,
+            attempt_id: entry.attempt_id,
+            transcript_ref: entry.transcript_ref,
+            transcript_sha256: entry.transcript_sha256,
+          };
+          if (!transaction.commit(durability.snapshot, nativeProof)) return;
+          progressed = true;
+          break;
+        }
+        if (!progressed) return;
+      }
+    } finally {
+      drainInterruptedCleanupRef.current = false;
+    }
+  }, [nativeAvailable, persistSessionCandidate, sessionSnapshotsAvailable, store]);
 
   const persistCurrent = useCallback(
     async (): Promise<CompletionPersistenceResult> => {
@@ -1380,7 +1506,8 @@ export function HomeScreen() {
       attempt =>
         attempt.attemptId === completionState.attemptId &&
         attempt.agent !== undefined &&
-        attempt.agent !== null,
+        attempt.agent !== null &&
+        attempt.failureCode !== 'E_ATTEMPT_INTERRUPTED',
     ) === true;
   const completionRetryVisible =
     (completionState.phase === 'retryable' && !completionAgentRetryBlocked) ||
@@ -1490,13 +1617,18 @@ export function HomeScreen() {
 
       const hydrated = safeHydrateChatState(
         loaded.session_json,
-        loaded.status === 'present'
+        loaded.status === 'present' || loaded.status === 'legacy_present'
           ? {
-              sessionAuthority: {
-                schema_version: 1,
-                generation: loaded.snapshot.generation,
-                session_sha256: loaded.snapshot.session_sha256,
-              },
+              sessionAuthority:
+                loaded.status === 'present'
+                  ? {
+                      schema_version: 1,
+                      generation: loaded.snapshot.generation,
+                      session_sha256: loaded.snapshot.session_sha256,
+                    }
+                  : undefined,
+              staleWriterLaunch: loaded.writer_launch_instance_id !==
+                loaded.current_launch_instance_id,
             }
           : {},
       );
@@ -1590,8 +1722,12 @@ export function HomeScreen() {
       if (migratedFromLegacy) {
         setStorageWarning(t('home.legacySessionUpgraded'));
       }
+      if (store.getSessionAuthority() !== null) {
+        drainInterruptedAgentCleanup().catch(() => undefined);
+      }
     },
     [
+      drainInterruptedAgentCleanup,
       ensureConversation,
       installSessionAuthority,
       preferencesStore,

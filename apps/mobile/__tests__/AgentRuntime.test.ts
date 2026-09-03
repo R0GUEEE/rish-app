@@ -12,6 +12,7 @@ const native = {
   recover_agent_attempt: jest.fn(),
   finalize_agent_attempt: jest.fn(),
   discard_agent_attempt: jest.fn(),
+  interrupt_agent_attempt: jest.fn(),
   query_agent_cleanup: jest.fn(),
 };
 
@@ -479,6 +480,7 @@ test('exposes exactly the approved high-level facade inventory', () => {
     'discardAgentAttempt',
     'executeAgentTool',
     'finalizeAgentAttempt',
+    'interruptAgentAttempt',
     'isAvailable',
     'prepareAgentAttempt',
     'prepareAgentToolBatch',
@@ -737,6 +739,12 @@ test('maps every approved high-level method to its snake-case selector', async (
     operation_id: CLEANUP_ID,
     cleanup_id: CLEANUP_ID,
   });
+  native.interrupt_agent_attempt.mockResolvedValueOnce({
+    schema_version: 2,
+    status: 'discarded',
+    operation_id: CLEANUP_ID,
+    cleanup_id: CLEANUP_ID,
+  });
   native.query_agent_cleanup.mockResolvedValueOnce({
     schema_version: 2,
     status: 'pending',
@@ -789,6 +797,23 @@ test('maps every approved high-level method to its snake-case selector', async (
     status: 'discarded',
   });
   await expect(
+    AgentRuntime.interruptAgentAttempt({
+      schema_version: 2,
+      operation_id: CLEANUP_ID,
+      cleanup_id: CLEANUP_ID,
+      task_id: TASK_ID,
+      conversation_id: CONVERSATION_ID,
+      attempt_id: ATTEMPT_ID,
+      transcript_ref: transcript.transcript_ref,
+      transcript_sha256: transcript.transcript_sha256,
+      reason: 'failed',
+      expected_session_generation: 1,
+      expected_session_sha256: SHA256,
+    }),
+  ).resolves.toMatchObject({
+    status: 'discarded',
+  });
+  await expect(
     AgentRuntime.queryAgentCleanup({
       schema_version: 2,
       cleanup_id: CLEANUP_ID,
@@ -809,6 +834,7 @@ test('maps every approved high-level method to its snake-case selector', async (
   expect(native.recover_agent_attempt).toHaveBeenCalledTimes(1);
   expect(native.finalize_agent_attempt).toHaveBeenCalledTimes(1);
   expect(native.discard_agent_attempt).toHaveBeenCalledTimes(1);
+  expect(native.interrupt_agent_attempt).toHaveBeenCalledTimes(1);
   expect(native.query_agent_cleanup).toHaveBeenCalledTimes(1);
 });
 

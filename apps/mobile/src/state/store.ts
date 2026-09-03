@@ -19,7 +19,10 @@ import {
   type SessionCASPersistResultV1,
   type SessionSnapshotRefV1,
 } from '../completion/SessionPersistence';
-import type { DiscardAgentAttemptResultV2 } from '../native/AgentRuntime';
+import type {
+  DiscardAgentAttemptResultV2,
+  InterruptAgentAttemptResultV2,
+} from '../native/AgentRuntime';
 import type {
   ChatAction,
   ChatAttachment,
@@ -112,7 +115,7 @@ export type NativeSessionCommitProofV1 =
  * must carry the request binding into this closed proof envelope.
  */
 export type NativeAgentDiscardProofV1 = Extract<
-  DiscardAgentAttemptResultV2,
+  DiscardAgentAttemptResultV2 | InterruptAgentAttemptResultV2,
   { readonly status: 'discarded' | 'already_missing' }
 > & {
   readonly task_id: string;
@@ -3175,7 +3178,16 @@ export function createChatStore(options: ChatStoreOptions = {}): ChatStore {
       if (conversation === undefined || source === undefined || turn === undefined) {
         return null;
       }
-      if (source.agent !== undefined && source.agent !== null) return null;
+      if (
+        source.agent !== undefined &&
+        source.agent !== null &&
+        source.failureCode !== 'E_ATTEMPT_INTERRUPTED'
+      ) {
+        // Live Agent attempts own their native recovery path; an interrupted
+        // attempt's writer is dead, so it must never be resumed and retry
+        // always prepares a fresh legacy attempt in the same turn.
+        return null;
+      }
       const attemptId = createLifecycleId('attempt');
       if (!isCanonicalLifecycleId(attemptId)) return null;
       const at = canonicalNow(now);

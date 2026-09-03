@@ -3818,6 +3818,12 @@ export function createCompletionController(
       return outcome('blocked', state);
     }
     const { attempt } = located;
+    if (attempt.failureCode === 'E_ATTEMPT_INTERRUPTED') {
+      // An interrupted attempt belongs to a dead writer launch.  It must
+      // never re-enter provider/tool recovery; retry creates a fresh attempt
+      // in the same turn through the legacy retry path.
+      return outcome('blocked', state);
+    }
     const journal = attempt.agent;
     if (journal === undefined || journal === null) {
       return await failAgentWithoutNative(conversationId, attemptId, 'E_AGENT_CONFLICT');
@@ -4324,7 +4330,11 @@ export function createCompletionController(
         return busyOutcome(conversationId, attemptId);
       }
       const source = getConversationAttempt(conversationId, attemptId);
-      if (source?.attempt.agent !== undefined && source.attempt.agent !== null) {
+      if (
+        source?.attempt.agent !== undefined &&
+        source.attempt.agent !== null &&
+        source.attempt.failureCode !== 'E_ATTEMPT_INTERRUPTED'
+      ) {
         epoch += 1;
         agentRun = {
           epoch,
@@ -4383,7 +4393,11 @@ export function createCompletionController(
       }
       const conversation = dependencies.chat.getState().conversations[conversationId];
       const attempt = conversation?.attempts.find(item => item.attemptId === attemptId);
-      if (attempt?.agent !== undefined && attempt.agent !== null) {
+      if (
+        attempt?.agent !== undefined &&
+        attempt.agent !== null &&
+        attempt.failureCode !== 'E_ATTEMPT_INTERRUPTED'
+      ) {
         epoch += 1;
         agentRun = {
           epoch,
@@ -4692,7 +4706,11 @@ export function createCompletionController(
         // if still present in the durable outbox, remains independently owned
         // by that outbox and does not make the completed attempt resumable.
         publish(stateFor('idle'));
-      } else if (attempt?.agent !== undefined && attempt.agent !== null) {
+      } else if (
+        attempt?.agent !== undefined &&
+        attempt.agent !== null &&
+        attempt.failureCode !== 'E_ATTEMPT_INTERRUPTED'
+      ) {
         publish(
           stateFor('resume_available', {
             conversationId,

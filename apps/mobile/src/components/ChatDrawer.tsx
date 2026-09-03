@@ -37,6 +37,8 @@ export type ConversationSummary = {
   updatedAt: number;
   /** Entries without at least one message are working drafts, not history. */
   messageCount?: number;
+  /** Latest attempt belongs to a dead writer launch and was interrupted. */
+  interrupted?: boolean;
 };
 
 type Props = {
@@ -255,8 +257,16 @@ export function ChatDrawer(props: Props) {
                         {timeLabel(item.updatedAt, locale, t)}
                       </Text>
                     </View>
-                    <Text numberOfLines={1} style={styles.conversationPreview}>
-                      {item.preview || t('drawer.emptyConversation')}
+                    <Text
+                      numberOfLines={1}
+                      style={[
+                        styles.conversationPreview,
+                        item.interrupted === true && styles.interruptedPreview,
+                      ]}
+                    >
+                      {item.interrupted === true
+                        ? t('drawer.interrupted')
+                        : item.preview || t('drawer.emptyConversation')}
                     </Text>
                   </Pressable>
                   <Pressable
@@ -501,6 +511,7 @@ const createStyles = (colors: ThemePalette) =>
       marginLeft: 8,
     },
     conversationPreview: { color: colors.muted, fontSize: 11, marginTop: 5 },
+    interruptedPreview: { color: colors.warning, fontWeight: '700' },
     moreButton: {
       width: 42,
       height: 52,

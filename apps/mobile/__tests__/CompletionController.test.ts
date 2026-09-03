@@ -1828,6 +1828,7 @@ describe('project Agent completion controller', () => {
       recoverAgentAttempt: jest.fn(),
       finalizeAgentAttempt,
       discardAgentAttempt,
+      interruptAgentAttempt: jest.fn(),
       queryAgentCleanup: jest.fn(),
     };
     return runtime;

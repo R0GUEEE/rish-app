@@ -374,6 +374,8 @@ DSH_RUNTIME_EXPORT(finalize_agent_attempt, finalizeAgentAttemptRequest,
                    finalizeAgentAttempt)
 DSH_RUNTIME_EXPORT(discard_agent_attempt, discardAgentAttemptRequest,
                    discardAgentAttempt)
+DSH_RUNTIME_EXPORT(interrupt_agent_attempt, interruptAgentAttemptRequest,
+                   interruptAgentAttempt)
 DSH_RUNTIME_EXPORT(query_agent_cleanup, queryAgentCleanupRequest,
                    queryAgentCleanup)
 

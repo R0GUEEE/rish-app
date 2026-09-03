@@ -30,18 +30,24 @@ export type LoadSessionSnapshotResult =
       status: 'missing';
       snapshot: null;
       session_json: null;
+      writer_launch_instance_id: null;
+      current_launch_instance_id: string;
     }
   | {
       schema_version: 1;
       status: 'legacy_present';
       legacy: LegacySessionSnapshotRefV1;
       session_json: string;
+      writer_launch_instance_id: string;
+      current_launch_instance_id: string;
     }
   | {
       schema_version: 1;
       status: 'present';
       snapshot: SessionSnapshotRefV1;
       session_json: string;
+      writer_launch_instance_id: string;
+      current_launch_instance_id: string;
     };
 
 export type SessionSnapshotCASRequest = {
@@ -368,15 +374,34 @@ function validateLoadResult(value: unknown): LoadSessionSnapshotResult {
       'status',
       'snapshot',
       'session_json',
+      'writer_launch_instance_id',
+      'current_launch_instance_id',
     ]);
-    if (result.snapshot !== null || result.session_json !== null)
+    if (
+      result.snapshot !== null ||
+      result.session_json !== null ||
+      result.writer_launch_instance_id !== null ||
+      !uuid(result.current_launch_instance_id)
+    )
       fail('E_SESSION_CORRUPT');
     return result as LoadSessionSnapshotResult;
   }
   if (result.status === 'legacy_present') {
-    exactRecord(result, ['schema_version', 'status', 'legacy', 'session_json']);
+    exactRecord(result, [
+      'schema_version',
+      'status',
+      'legacy',
+      'session_json',
+      'writer_launch_instance_id',
+      'current_launch_instance_id',
+    ]);
     result.legacy = validateLegacyRef(result.legacy);
-    if (!boundedJSON(result.session_json)) fail('E_SESSION_CORRUPT');
+    if (
+      !boundedJSON(result.session_json) ||
+      !uuid(result.writer_launch_instance_id) ||
+      !uuid(result.current_launch_instance_id)
+    )
+      fail('E_SESSION_CORRUPT');
     return result as LoadSessionSnapshotResult;
   }
   if (result.status === 'present') {
@@ -385,9 +410,16 @@ function validateLoadResult(value: unknown): LoadSessionSnapshotResult {
       'status',
       'snapshot',
       'session_json',
+      'writer_launch_instance_id',
+      'current_launch_instance_id',
     ]);
     result.snapshot = validateRef(result.snapshot);
-    if (!boundedJSON(result.session_json)) fail('E_SESSION_CORRUPT');
+    if (
+      !boundedJSON(result.session_json) ||
+      !uuid(result.writer_launch_instance_id) ||
+      !uuid(result.current_launch_instance_id)
+    )
+      fail('E_SESSION_CORRUPT');
     return result as LoadSessionSnapshotResult;
   }
   fail('E_SESSION_PERSISTENCE');
