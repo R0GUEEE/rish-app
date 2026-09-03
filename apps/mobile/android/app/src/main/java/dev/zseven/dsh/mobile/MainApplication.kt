@@ -14,8 +14,11 @@ class MainApplication : Application(), ReactApplication {
       context = applicationContext,
       packageList =
         PackageList(this).packages.apply {
-          // Packages that cannot be autolinked yet can be added manually here, for example:
-          // add(MyReactNativePackage())
+          // Phase-1 Android bring-up: register the Rish native package that
+          // mirrors the 11 iOS modules (modules/rish/ios/Sources). Every method
+          // rejects with its JS-recognized "native unavailable" code so the
+          // capability probes in apps/mobile/src/native/*.ts stay honest.
+          add(dev.zseven.rish.RishNativePackage())
         },
     )
   }
