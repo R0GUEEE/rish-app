@@ -1600,17 +1600,40 @@ static BOOL DSHSessionValidateAgentCall(NSDictionary *call) {
        call[@"approval_reference"] != NSNull.null)) {
     return NO;
   }
+  // A gated call keeps its executable token while pending or allowed; a
+  // denied/cancelled decision is terminal fail-closed with a null token.
+  BOOL terminalDecision = [call[@"approval_decision"] isEqual:@"denied"] ||
+      [call[@"approval_decision"] isEqual:@"cancelled"];
   if (([call[@"access"] isEqual:@"conversation_confirm"] ||
        [call[@"access"] isEqual:@"confirm_once"]) &&
-      call[@"approval_token"] == NSNull.null) {
+      call[@"approval_token"] == NSNull.null && !terminalDecision) {
+    return NO;
+  }
+  if (([call[@"access"] isEqual:@"conversation_confirm"] ||
+       [call[@"access"] isEqual:@"confirm_once"]) &&
+      terminalDecision &&
+      (call[@"approval_token"] != NSNull.null ||
+       call[@"approval_reference"] != NSNull.null)) {
     return NO;
   }
   NSDictionary *receipt = call[@"receipt"] == NSNull.null ? nil : call[@"receipt"];
-  return receipt == nil ||
-      (DSHSessionValidateAgentReceipt(receipt) &&
-       [receipt[@"call_id"] isEqual:call[@"call_id"]] &&
-       [receipt[@"name"] isEqual:call[@"name"]] &&
-       [receipt[@"arguments_sha256"] isEqual:call[@"arguments_sha256"]]);
+  if (receipt == nil) return YES;
+  if (!(DSHSessionValidateAgentReceipt(receipt) &&
+        [receipt[@"call_id"] isEqual:call[@"call_id"]] &&
+        [receipt[@"name"] isEqual:call[@"name"]] &&
+        [receipt[@"arguments_sha256"] isEqual:call[@"arguments_sha256"]])) {
+    return NO;
+  }
+  // A gated call the user denied can only settle as the exact user-denial
+  // receipt: denied outcome, E_AGENT_DENIED_BY_USER, no approval reference.
+  if (![call[@"access"] isEqual:@"durable_deny"] &&
+      [call[@"approval_decision"] isEqual:@"denied"] &&
+      (![receipt[@"outcome"] isEqual:@"denied"] ||
+       ![receipt[@"failure_code"] isEqual:@"E_AGENT_DENIED_BY_USER"] ||
+       receipt[@"approval_reference"] != NSNull.null)) {
+    return NO;
+  }
+  return YES;
 }
 
 static BOOL DSHSessionValidateAgentJournal(NSDictionary *journal) {

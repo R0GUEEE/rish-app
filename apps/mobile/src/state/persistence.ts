@@ -2259,6 +2259,18 @@ export function parsePersistedAgentCallJournalV3(
       'settled receipts require a native row revision',
     );
   }
+  // A gated call the user denied can only settle as the exact user-denial
+  // receipt: denied outcome, E_AGENT_DENIED_BY_USER, no approval reference.
+  if (
+    receipt !== null &&
+    access !== 'durable_deny' &&
+    decision === 'denied' &&
+    (receipt.outcome !== 'denied' ||
+      receipt.failure_code !== 'E_AGENT_DENIED_BY_USER' ||
+      receipt.approval_reference !== null)
+  ) {
+    return invalid(`${path}.receipt`, 'a user denial settles only as a denied-by-user receipt');
+  }
   return {
     schema_version: AGENT_CALL_JOURNAL_SCHEMA_VERSION_V3,
     call_id: callId,

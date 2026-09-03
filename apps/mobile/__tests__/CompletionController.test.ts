@@ -2908,7 +2908,16 @@ describe('project Agent completion controller', () => {
     const store = agentStore();
     const conversationId = store.getState().selectedConversationId!;
     const runtime = makeRuntime([]);
-    const persistCurrent = committedPersistence(store);
+    const committedSessions: string[] = [];
+    const persistCurrent = jest.fn(async (): Promise<CompletionPersistenceResult> => {
+      const session = store.serialize();
+      const digest = sessionSnapshotSHA256(session)!;
+      const generation = (store.getSessionAuthority()?.generation ?? 1) + 1;
+      const snapshot = { schema_version: 1 as const, generation, session_sha256: digest };
+      committedSessions.push(session);
+      store.setSessionAuthority({ generation, sessionSha256: digest });
+      return { status: 'committed', snapshot };
+    });
     const requestBatchApprovals = jest.fn(
       async (requests: readonly CompletionAgentApprovalRequest[]) => {
         expect(requests).toHaveLength(2);
@@ -2993,6 +3002,40 @@ describe('project Agent completion controller', () => {
       event => event.attempt_id === attemptId && event.call_id === 'commit-call',
     );
     expect(hydratedEvents).toEqual(commitEvents);
+    // JS-to-native parity: the first checkpoint that persists the denial
+    // (journal still frozen on the batch, denied receipt on the commit call,
+    // structured denied tool result) is the shared fixture the native
+    // SessionSnapshotStore must accept byte-for-byte.
+    const deniedSession = committedSessions.find(session => {
+      const parsed = JSON.parse(session) as {
+        session_events: Array<{ status: string; call_id: string | null }>;
+      };
+      return parsed.session_events.some(
+        event => event.status === 'denied' && event.call_id === 'commit-call',
+      );
+    });
+    expect(deniedSession).toBeDefined();
+    const deniedJournal = (JSON.parse(deniedSession!) as {
+      conversations: Array<{
+        attempts: Array<{
+          agent: {
+            phase: string;
+            call_index: number;
+            batch: Array<{ call_id: string; receipt: { outcome: string } | null }>;
+          };
+        }>;
+      }>;
+    }).conversations[0]!.attempts[0]!.agent;
+    expect(deniedJournal.phase).toBe('batch_frozen');
+    expect(deniedJournal.call_index).toBe(0);
+    expect(deniedJournal.batch.map(call => call.receipt?.outcome ?? null)).toEqual([
+      null,
+      'denied',
+    ]);
+    expect(`${deniedSession}\n`).toBe(nodeFs.readFileSync(
+      nodePath.resolve(__dirname, '../ios/DSHMobileTests/Fixtures', 'agent-denied-call-session.json'),
+      'utf8',
+    ));
   });
 
   test('a batch answer list of the wrong length fails closed into denials', async () => {

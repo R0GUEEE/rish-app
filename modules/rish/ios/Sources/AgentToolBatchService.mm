@@ -315,8 +315,13 @@ static BOOL DSHAgentBatchApprovalEventMatches(
         [event[@"status"] isEqualToString:@"approval"] &&
         [event[@"arguments_sha256"] isEqual:call[@"arguments_sha256"]] &&
         [event[@"safe_summary_key"] isEqual:call[@"safe_summary_key"]] &&
-        [event[@"approval_reference"]
-            isEqual:call[@"approval_reference"]] &&
+        // An allowed decision's event references the bind identity; a
+        // denied/cancelled decision persists a null call reference and its
+        // durable marker is the decide_approval event whose reference is its
+        // own event id.
+        ([event[@"approval_reference"] isEqual:call[@"approval_reference"]] ||
+         (call[@"approval_reference"] == NSNull.null &&
+          [event[@"approval_reference"] isEqual:event[@"event_id"]])) &&
         event[@"result_sha256"] == NSNull.null) {
       if (call[@"approval_reference"] != NSNull.null &&
           ![event[@"event_id"] isEqual:call[@"approval_reference"]]) return NO;

@@ -1215,8 +1215,19 @@ static BOOL DSHAgentBatchEffectGateRevalidated(NSDictionary *state,
           @"schema_version" : @1, @"name" : row[@"name"],
           @"precondition" : precondition,
         }, error);
+    // Every manifest row must still be its never-dispatched intent, except a
+    // call the user denied: native settled that row in the bind transaction
+    // (denied receipt, no dispatch, no effect) and it can never run.
+    NSDictionary *rowReceipt = [row[@"receipt"] isKindOfClass:NSDictionary.class]
+        ? row[@"receipt"] : nil;
+    BOOL userDeniedRow = [row[@"state"] isEqualToString:@"settled"] &&
+        rowReceipt != nil &&
+        [rowReceipt[@"outcome"] isEqualToString:@"denied"] &&
+        [rowReceipt[@"failure_code"] isEqualToString:@"E_AGENT_DENIED_BY_USER"] &&
+        rowReceipt[@"approval_reference"] == NSNull.null &&
+        row[@"settled_facts"] == NSNull.null;
     if (row == nil || !DSHAgentLedgerRow(row) ||
-        ![row[@"state"] isEqualToString:@"intent"] ||
+        (![row[@"state"] isEqualToString:@"intent"] && !userDeniedRow) ||
         ![row[@"locator"][@"task_id"] isEqual:batch[@"task_id"]] ||
         ![row[@"locator"][@"attempt_id"] isEqual:batch[@"attempt_id"]] ||
         ![row[@"root_fingerprint_sha256"]
@@ -2473,10 +2484,17 @@ static BOOL DSHAgentLedgerAdvanceAuthority(
     NSMutableArray *callKeys = [@[
           @"call_index", @"call_id", @"name", @"arguments_json",
           @"arguments_sha256", @"safe_summary_key", @"access",
-          @"precondition", @"reserved_write_bytes", @"approval_preview",
+          @"precondition", @"reserved_write_bytes",
         ] mutableCopy];
     if (compoundOperation) [callKeys addObject:@"grant_reference"];
-    if (!DSHAgentExactDictionaryKeys(call, callKeys) ||
+    // The display preview is optional on the prepared call: the batch
+    // service always supplies it (null for calls without one), while direct
+    // ledger callers may omit it.
+    NSMutableArray *callKeysWithPreview = [callKeys mutableCopy];
+    [callKeysWithPreview addObject:@"approval_preview"];
+    id approvalPreview = call[@"approval_preview"] ?: NSNull.null;
+    if (!(DSHAgentExactDictionaryKeys(call, callKeys) ||
+          DSHAgentExactDictionaryKeys(call, callKeysWithPreview)) ||
         ![call[@"call_index"] isEqual:@(index)] ||
         !DSHAgentBoundedUTF8String(call[@"call_id"], 128, NO, nullptr) ||
         !DSHAgentToolName(call[@"name"]) ||
@@ -2488,8 +2506,8 @@ static BOOL DSHAgentLedgerAdvanceAuthority(
         ![call[@"access"] isKindOfClass:NSString.class] ||
         !DSHAgentSafeInteger(call[@"reserved_write_bytes"],
                             DSHAgentNativeWALMaxSingleWriteBytes, YES) ||
-        (call[@"approval_preview"] != NSNull.null &&
-         !DSHAgentApprovalPreview(call[@"approval_preview"])) ||
+        (approvalPreview != NSNull.null &&
+         !DSHAgentApprovalPreview(approvalPreview)) ||
         (compoundOperation &&
          !(call[@"grant_reference"] == NSNull.null ||
            DSHAgentCanonicalUUID(call[@"grant_reference"]))) ||
@@ -2632,7 +2650,7 @@ static BOOL DSHAgentLedgerAdvanceAuthority(
       @"approval_reference" : NSNull.null,
       @"execution_status" : @"intent", @"execution_revision" : @1,
       @"native_row_revision" : @1, @"receipt" : NSNull.null,
-      @"approval_preview" : call[@"approval_preview"],
+      @"approval_preview" : call[@"approval_preview"] ?: NSNull.null,
     } mutableCopy]];
   }
 

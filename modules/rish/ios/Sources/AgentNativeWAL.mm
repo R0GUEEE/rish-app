@@ -3258,8 +3258,22 @@ static BOOL DSHAgentWALRowsShape(NSDictionary *state, NSError **error) {
     }
     if ([ledger[@"state"] isEqualToString:@"settled"] &&
         ![dispatchState isEqualToString:@"dispatched"]) {
-      DSHSetAgentNativeStoreError(error, DSHAgentNativeStoreErrorCorrupt);
-      return NO;
+      // The only settlement without a dispatch is a user denial: the intent
+      // row was never dispatched, carries no settled facts or approval
+      // reference, and its receipt is exactly the denied-by-user shape.
+      NSDictionary *receipt = [ledger[@"receipt"] isKindOfClass:NSDictionary.class]
+          ? ledger[@"receipt"] : nil;
+      BOOL userDenial = [dispatchState isEqualToString:@"not_dispatched"] &&
+          receipt != nil &&
+          [receipt[@"outcome"] isEqualToString:@"denied"] &&
+          [receipt[@"failure_code"] isEqualToString:@"E_AGENT_DENIED_BY_USER"] &&
+          receipt[@"approval_reference"] == NSNull.null &&
+          ledger[@"settled_facts"] == NSNull.null &&
+          ledger[@"owner"] == NSNull.null;
+      if (!userDenial) {
+        DSHSetAgentNativeStoreError(error, DSHAgentNativeStoreErrorCorrupt);
+        return NO;
+      }
     }
   }
   // Dispatch markers are a bijection with typed rows.  An orphan marker is

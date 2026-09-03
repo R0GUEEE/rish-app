@@ -2238,6 +2238,84 @@ static NSString *const DSHSessionTestOperationB =
   XCTAssertEqual(error.code, DSHSessionSnapshotStoreErrorInvalidArgument);
 }
 
+- (void)testSharedJSDeniedCallFixtureCommitsThroughNativeStore {
+  // JS-to-native parity for a user denial: the journal is still frozen on
+  // the batch, the denied call carries a native denied receipt with
+  // E_AGENT_DENIED_BY_USER and a null approval reference, and the session
+  // events hold the decide_approval marker followed by the structured denied
+  // tool result.
+  NSDictionary *candidate = [self sharedFixtureNamed:@"agent-denied-call-session"];
+  XCTAssertNotNil(candidate);
+  if (candidate == nil) return;
+  NSError *error = nil;
+  NSDictionary *result = [self casWithOperation:DSHSessionTestOperationA
+      expected:@{ @"schema_version" : @1, @"kind" : @"missing" }
+      candidate:candidate error:&error];
+  XCTAssertNil(error);
+  XCTAssertEqualObjects(result[@"status"], @"committed");
+  NSDictionary *journal = candidate[@"conversations"][0][@"attempts"][0][@"agent"];
+  NSDictionary *deniedCall = nil;
+  for (NSDictionary *call in journal[@"batch"]) {
+    if ([call[@"call_id"] isEqual:@"commit-call"]) deniedCall = call;
+  }
+  XCTAssertEqualObjects(deniedCall[@"approval_decision"], @"denied");
+  XCTAssertEqualObjects(deniedCall[@"approval_token"], NSNull.null);
+  XCTAssertEqualObjects(deniedCall[@"approval_reference"], NSNull.null);
+  XCTAssertEqualObjects(deniedCall[@"receipt"][@"outcome"], @"denied");
+  XCTAssertEqualObjects(deniedCall[@"receipt"][@"failure_code"],
+                        @"E_AGENT_DENIED_BY_USER");
+}
+
+- (void)testSharedJSDeniedCallFixtureRejectsReferenceOnDeniedResult {
+  // A denied result that claims an approval reference is not a user denial:
+  // the exact denied shape is the only accepted null-reference settlement.
+  NSMutableDictionary *candidate =
+      [self mutableSharedFixtureNamed:@"agent-denied-call-session"];
+  XCTAssertNotNil(candidate);
+  if (candidate == nil) return;
+  for (NSMutableDictionary *event in candidate[@"session_events"]) {
+    if ([event[@"kind"] isEqual:@"tool_result"] &&
+        [event[@"call_id"] isEqual:@"commit-call"]) {
+      event[@"approval_reference"] = @"abababab-abab-4bab-8bab-abababababab";
+      break;
+    }
+  }
+  NSError *error = nil;
+  XCTAssertNil(([self casWithOperation:DSHSessionTestOperationA
+      expected:@{ @"schema_version" : @1, @"kind" : @"missing" }
+      candidate:candidate error:&error]));
+  XCTAssertEqual(error.code, DSHSessionSnapshotStoreErrorInvalidArgument);
+}
+
+- (void)testSharedJSDeniedCallFixtureRejectsForeignFailureCodeOnDeniedResult {
+  // Only the user-denial failure code may settle a denied call with a null
+  // approval reference after its decide_approval marker.
+  NSMutableDictionary *candidate =
+      [self mutableSharedFixtureNamed:@"agent-denied-call-session"];
+  XCTAssertNotNil(candidate);
+  if (candidate == nil) return;
+  for (NSMutableDictionary *event in candidate[@"session_events"]) {
+    if ([event[@"kind"] isEqual:@"tool_result"] &&
+        [event[@"call_id"] isEqual:@"commit-call"]) {
+      event[@"failure_code"] = @"E_AGENT_TOOL_FAILED";
+      break;
+    }
+  }
+  NSMutableArray *conversations = candidate[@"conversations"];
+  NSMutableDictionary *attempt = conversations[0][@"attempts"][0];
+  for (NSMutableDictionary *call in attempt[@"agent"][@"batch"]) {
+    if ([call[@"call_id"] isEqual:@"commit-call"]) {
+      call[@"receipt"][@"failure_code"] = @"E_AGENT_TOOL_FAILED";
+      break;
+    }
+  }
+  NSError *error = nil;
+  XCTAssertNil(([self casWithOperation:DSHSessionTestOperationA
+      expected:@{ @"schema_version" : @1, @"kind" : @"missing" }
+      candidate:candidate error:&error]));
+  XCTAssertEqual(error.code, DSHSessionSnapshotStoreErrorInvalidArgument);
+}
+
 - (void)testHistoricalToolEventRejectsRoundMissingFromAttemptReceipts {
   NSMutableDictionary *candidate =
       [self mutableSharedFixtureNamed:@"agent-next-round-after-tool-session"];

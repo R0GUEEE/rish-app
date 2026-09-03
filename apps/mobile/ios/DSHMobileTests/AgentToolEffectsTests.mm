@@ -2125,4 +2125,488 @@
   }
 }
 
+- (NSDictionary *)persistedCallForProjection:(NSDictionary *)call
+                                    decision:(NSString *)decision
+                                   reference:(id)reference {
+  NSDictionary *token = call[@"approval_token"];
+  BOOL allowed = [decision hasPrefix:@"allow_"];
+  return @{ @"schema_version" : @3, @"call_id" : call[@"call_id"],
+    @"call_index" : call[@"call_index"], @"name" : call[@"name"],
+    @"arguments_sha256" : call[@"arguments_sha256"],
+    @"safe_summary_key" : call[@"safe_summary_key"], @"access" : call[@"access"],
+    @"approval_token" : allowed && [token isKindOfClass:NSDictionary.class]
+        ? token[@"token"] : NSNull.null,
+    @"approval_decision" : decision,
+    @"approval_reference" : reference ?: NSNull.null,
+    @"idempotency_key" : call[@"idempotency_key"],
+    @"native_row_revision" : call[@"native_row_revision"],
+    @"receipt" : NSNull.null };
+}
+
+- (NSDictionary *)persistedCallForProjection:(NSDictionary *)call
+                                    decision:(NSString *)decision
+                                   reference:(id)reference
+                                     receipt:(NSDictionary *)receipt
+                                 rowRevision:(NSNumber *)rowRevision {
+  NSMutableDictionary *persisted = [[self persistedCallForProjection:call
+      decision:decision reference:reference] mutableCopy];
+  persisted[@"receipt"] = receipt ?: NSNull.null;
+  persisted[@"native_row_revision"] = rowRevision;
+  return persisted;
+}
+
+- (NSDictionary *)approvalEventForCall:(NSDictionary *)call
+                               attempt:(NSString *)attempt
+                               eventId:(NSString *)eventId
+                                   seq:(NSNumber *)seq {
+  // The JS decide_approval preflight marker: its reference is its own id for
+  // every decision; an allowed bind later returns that id as the approval
+  // reference while a denial keeps the call reference null.
+  return @{ @"schema_version" : @2, @"event_id" : eventId,
+    @"attempt_id" : attempt, @"seq" : seq, @"kind" : @"approval",
+    @"round_index" : @0, @"call_id" : call[@"call_id"],
+    @"status" : @"approval", @"safe_summary_key" : call[@"safe_summary_key"],
+    @"arguments_sha256" : call[@"arguments_sha256"],
+    @"result_sha256" : NSNull.null, @"approval_reference" : eventId,
+    @"failure_code" : NSNull.null,
+    @"created_at" : @"2026-08-31T00:00:00.000Z" };
+}
+
+- (NSDictionary *)bindRequestForFixture:(NSDictionary *)fixture
+                                 receipt:(NSDictionary *)receipt
+                                    call:(NSDictionary *)call
+                             operationId:(NSString *)operationId
+                                decision:(NSString *)decision
+                             denyMessage:(id)denyMessage {
+  return @{ @"schema_version" : @2, @"operation_id" : operationId,
+    @"controller_cas" : fixture[@"controller"],
+    @"committed_checkpoint" : fixture[@"checkpoint"],
+    @"task_id" : fixture[@"task"], @"conversation_id" : fixture[@"conversation"],
+    @"attempt_id" : fixture[@"attempt"], @"round_id" : fixture[@"round_id"],
+    @"round_index" : @0, @"manifest_sha256" : receipt[@"manifest_sha256"],
+    @"batch_revision" : receipt[@"batch_revision"],
+    @"call_index" : call[@"call_index"], @"call_id" : call[@"call_id"],
+    @"token" : call[@"approval_token"], @"decision" : decision,
+    @"deny_message" : denyMessage ?: NSNull.null };
+}
+
+- (NSDictionary *)executeRequestForFixture:(NSDictionary *)fixture
+                                    receipt:(NSDictionary *)receipt
+                                       call:(NSDictionary *)call
+                                operationId:(NSString *)operationId
+                          approvalReference:(id)approvalReference {
+  return @{ @"schema_version" : @2, @"operation_id" : operationId,
+    @"controller_cas" : fixture[@"controller"],
+    @"committed_checkpoint" : fixture[@"checkpoint"],
+    @"task_id" : fixture[@"task"], @"conversation_id" : fixture[@"conversation"],
+    @"attempt_id" : fixture[@"attempt"], @"round_id" : fixture[@"round_id"],
+    @"round_index" : @0, @"batch_kind" : @"write_batch",
+    @"manifest_sha256" : receipt[@"manifest_sha256"],
+    @"expected_batch_revision" : receipt[@"batch_revision"],
+    @"call_index" : call[@"call_index"], @"call_id" : call[@"call_id"],
+    @"name" : call[@"name"], @"arguments_sha256" : call[@"arguments_sha256"],
+    @"idempotency_key" : call[@"idempotency_key"],
+    @"expected_execution_revision" : call[@"native_row_revision"],
+    @"transcript" : receipt[@"transcript"], @"root" : fixture[@"root"],
+    @"approval_reference" : approvalReference ?: NSNull.null };
+}
+
+- (NSDictionary *)sessionForFixture:(NSDictionary *)fixture
+                              phase:(NSString *)phase
+                         transcript:(NSDictionary *)transcript
+                              calls:(NSArray<NSDictionary *> *)calls
+                             events:(NSArray<NSDictionary *> *)events
+                             grants:(NSArray<NSDictionary *> *)grants {
+  return @{ @"schema_version" : @9,
+    @"conversations" : @[@{ @"id" : fixture[@"conversation"],
+      @"agent_grants" : grants,
+      @"attempts" : @[@{ @"attempt_id" : fixture[@"attempt"],
+        @"journal_revision" : @1,
+        @"agent" : @{ @"schema_version" : @3, @"phase" : phase,
+          @"root" : fixture[@"root"], @"transcript" : transcript,
+          @"round_lineage" : @{ @"round_id" : fixture[@"round_id"],
+                                 @"round_index" : @0 },
+          @"batch" : calls } }] }],
+    @"session_events" : events };
+}
+
+- (void)testUserDenialBindSettlesDeniedReceiptAndProtectedFeedbackOnce {
+  NSDictionary *rawCommit = @{ @"schema_version" : @1,
+    @"call_id" : @"commit-call", @"name" : @"git_commit",
+    @"arguments_json" : @"{\"message\":\"m\"}" };
+  NSDictionary *fixture = [self serviceFixtureForRawCalls:@[rawCommit]];
+  DSHAgentToolBatchService *batchService = fixture[@"batch_service"];
+  NSError *error = nil;
+  NSDictionary *prepared = [batchService
+      prepareAgentToolBatchWithRequest:fixture[@"batch_request"] error:&error];
+  XCTAssertNil(error);
+  XCTAssertEqualObjects(prepared[@"status"], @"prepared", @"%@", prepared);
+  if (![prepared[@"status"] isEqualToString:@"prepared"]) return;
+  NSDictionary *receipt = prepared[@"receipt"];
+  NSDictionary *call = receipt[@"calls"][0];
+  XCTAssertEqualObjects(call[@"approval_preview"][@"kind"], @"git_commit");
+  XCTAssertEqualObjects(call[@"approval_preview"][@"paths"], @[]);
+
+  // The Store committed the denial preflight: decision denied, token and
+  // reference null, one decide_approval marker event.
+  NSString *marker = @"75757575-7575-4575-8575-757575757575";
+  NSDictionary *session = [self sessionForFixture:fixture
+      phase:@"approval_pending" transcript:receipt[@"transcript"]
+      calls:@[[self persistedCallForProjection:call decision:@"denied"
+                                     reference:nil]]
+      events:@[[self approvalEventForCall:call attempt:fixture[@"attempt"]
+                                  eventId:marker seq:@1]]
+      grants:@[]];
+  AgentEffectsSessionStore *sessionStore = fixture[@"session_store"];
+  sessionStore.fakeLoadResult = [self loadResultForSession:session generation:@3
+      digest:fixture[@"checkpoint"][@"session_sha256"]];
+  NSDictionary *request = [self bindRequestForFixture:fixture receipt:receipt
+      call:call operationId:marker decision:@"denied"
+      denyMessage:@"no commits today"];
+  NSDictionary *bound = [batchService bindAgentApprovalWithRequest:request
+                                                              error:&error];
+  XCTAssertNil(error);
+  XCTAssertEqualObjects(bound[@"status"], @"bound", @"%@", bound);
+  if (![bound[@"status"] isEqualToString:@"bound"]) return;
+  XCTAssertEqualObjects(bound[@"decision"], @"denied");
+  XCTAssertEqualObjects(bound[@"approval_reference"], NSNull.null);
+  XCTAssertEqualObjects(bound[@"grant"], NSNull.null);
+  NSDictionary *deniedReceipt = bound[@"receipt"];
+  XCTAssertEqualObjects(deniedReceipt[@"outcome"], @"denied");
+  XCTAssertEqualObjects(deniedReceipt[@"failure_code"], @"E_AGENT_DENIED_BY_USER");
+  XCTAssertEqualObjects(deniedReceipt[@"call_id"], call[@"call_id"]);
+  XCTAssertEqualObjects(deniedReceipt[@"name"], @"git_commit");
+  XCTAssertEqualObjects(deniedReceipt[@"arguments_sha256"],
+                        call[@"arguments_sha256"]);
+  XCTAssertEqualObjects(deniedReceipt[@"approval_reference"], NSNull.null);
+  NSDictionary *settledTranscript = bound[@"transcript"];
+  XCTAssertEqualObjects(settledTranscript[@"transcript_ref"],
+                        receipt[@"transcript"][@"transcript_ref"]);
+  XCTAssertEqual([settledTranscript[@"generation"] unsignedIntegerValue],
+                 [receipt[@"transcript"][@"generation"] unsignedIntegerValue] + 1);
+
+  // The WAL settled the never-dispatched intent row and appended exactly one
+  // protected tool message carrying the bounded user message.
+  NSDictionary *state = [self.wal snapshotWithError:&error];
+  NSDictionary *row = [state[@"ledger"]
+      filteredArrayUsingPredicate:[NSPredicate
+          predicateWithFormat:@"locator.call_id == %@", call[@"call_id"]]]
+      .firstObject;
+  XCTAssertEqualObjects(row[@"state"], @"settled");
+  XCTAssertEqualObjects(row[@"row_revision"], @2);
+  XCTAssertEqualObjects(row[@"receipt"], deniedReceipt);
+  XCTAssertEqualObjects(row[@"transcript_after"], settledTranscript);
+  XCTAssertEqualObjects(row[@"settled_facts"], NSNull.null);
+  XCTAssertEqualObjects([self.wal dispatchStateForKind:@"execution"
+                                               locator:row[@"locator"]
+                                                 error:&error], @"not_dispatched");
+  NSDictionary *transcript = [state[@"transcripts"]
+      filteredArrayUsingPredicate:[NSPredicate
+          predicateWithFormat:@"transcript_ref == %@",
+          settledTranscript[@"transcript_ref"]]].firstObject;
+  XCTAssertEqualObjects(transcript[@"generation"], settledTranscript[@"generation"]);
+  NSDictionary *message = [transcript[@"messages"] lastObject];
+  XCTAssertEqualObjects(message[@"role"], @"tool");
+  XCTAssertEqualObjects(message[@"call_id"], call[@"call_id"]);
+  NSDictionary *feedback = [NSJSONSerialization JSONObjectWithData:
+      [message[@"content"] dataUsingEncoding:NSUTF8StringEncoding]
+      options:0 error:&error];
+  XCTAssertEqualObjects(feedback[@"outcome"], @"denied");
+  XCTAssertEqualObjects(feedback[@"name"], @"git_commit");
+  XCTAssertEqualObjects(feedback[@"payload"][@"failure_code"],
+                        @"E_AGENT_DENIED_BY_USER");
+  XCTAssertEqualObjects(feedback[@"payload"][@"user_message"], @"no commits today");
+  NSDictionary *authority = [state[@"authorities"]
+      filteredArrayUsingPredicate:[NSPredicate
+          predicateWithFormat:@"attempt_id == %@", fixture[@"attempt"]]]
+      .firstObject;
+  XCTAssertEqualObjects(authority[@"transcript"], settledTranscript);
+
+  // Replaying the exact bind is idempotent: same settlement, no new message.
+  NSDictionary *replayed = [batchService bindAgentApprovalWithRequest:request
+                                                                 error:&error];
+  XCTAssertNil(error);
+  XCTAssertEqualObjects(replayed, bound);
+  NSDictionary *replayState = [self.wal snapshotWithError:&error];
+  NSDictionary *replayTranscript = [replayState[@"transcripts"]
+      filteredArrayUsingPredicate:[NSPredicate
+          predicateWithFormat:@"transcript_ref == %@",
+          settledTranscript[@"transcript_ref"]]].firstObject;
+  XCTAssertEqual([replayTranscript[@"messages"] count],
+                 [transcript[@"messages"] count]);
+
+  // A different decision for the same call is a conflict with zero effect.
+  NSMutableDictionary *flipped = [request mutableCopy];
+  flipped[@"operation_id"] = @"76767676-7676-4676-8676-767676767676";
+  flipped[@"decision"] = @"allow_once";
+  flipped[@"deny_message"] = NSNull.null;
+  NSDictionary *conflict = [batchService bindAgentApprovalWithRequest:flipped
+                                                                 error:&error];
+  XCTAssertEqualObjects(conflict[@"status"], @"conflict", @"%@", conflict);
+
+  // The denied call can never execute, even from a session that claims an
+  // execution intent for it: no bind or grant ever authorised it.
+  sessionStore.fakeLoadResult = [self loadResultForSession:
+      [self sessionForFixture:fixture phase:@"execution_intent"
+          transcript:receipt[@"transcript"]
+          calls:@[[self persistedCallForProjection:call decision:@"denied"
+                      reference:nil receipt:deniedReceipt rowRevision:@2]]
+          events:@[] grants:@[]] generation:@3
+      digest:fixture[@"checkpoint"][@"session_sha256"]];
+  AgentEffectsGitExecutor *git = fixture[@"git_executor"];
+  DSHAgentToolExecutionService *execution = [[DSHAgentToolExecutionService alloc]
+      initWithWAL:self.wal ledger:self.ledger
+      preparedStore:fixture[@"prepared_store"] transcripts:self.transcripts
+      workspaceExecutor:fixture[@"workspace_executor"] gitExecutor:git];
+  NSMutableDictionary *deniedExecute = [[self executeRequestForFixture:fixture
+      receipt:receipt call:call
+      operationId:@"77777777-7777-4777-8777-777777777777"
+      approvalReference:nil] mutableCopy];
+  deniedExecute[@"expected_execution_revision"] = @2;
+  NSDictionary *executed = [execution executeAgentToolWithRequest:deniedExecute
+                                                             error:&error];
+  XCTAssertEqualObjects(executed[@"status"], @"conflict", @"%@", executed);
+  XCTAssertEqualObjects(executed[@"failure_code"], @"E_AGENT_APPROVAL");
+  XCTAssertEqual(git.effectCount, 0U);
+}
+
+- (void)testBatchDecisionsAreCheckpointedBeforeAnyEffectAndDeniedCallNeverRuns {
+  NSDictionary *firstCommit = @{ @"schema_version" : @1,
+    @"call_id" : @"commit-one", @"name" : @"git_commit",
+    @"arguments_json" : @"{\"message\":\"one\"}" };
+  NSDictionary *secondCommit = @{ @"schema_version" : @1,
+    @"call_id" : @"commit-two", @"name" : @"git_commit",
+    @"arguments_json" : @"{\"message\":\"two\"}" };
+  NSDictionary *fixture = [self serviceFixtureForRawCalls:@[firstCommit,
+                                                            secondCommit]];
+  DSHAgentToolBatchService *batchService = fixture[@"batch_service"];
+  NSError *error = nil;
+  NSDictionary *prepared = [batchService
+      prepareAgentToolBatchWithRequest:fixture[@"batch_request"] error:&error];
+  XCTAssertNil(error);
+  XCTAssertEqualObjects(prepared[@"status"], @"prepared", @"%@", prepared);
+  if (![prepared[@"status"] isEqualToString:@"prepared"]) return;
+  NSDictionary *receipt = prepared[@"receipt"];
+  XCTAssertEqualObjects(receipt[@"effect_gate"], @"closed");
+  NSDictionary *first = receipt[@"calls"][0];
+  NSDictionary *second = receipt[@"calls"][1];
+  XCTAssertEqualObjects(first[@"approval_state"], @"pending");
+  XCTAssertEqualObjects(second[@"approval_state"], @"pending");
+  AgentEffectsSessionStore *sessionStore = fixture[@"session_store"];
+  AgentEffectsGitExecutor *git = fixture[@"git_executor"];
+  DSHAgentToolExecutionService *execution = [[DSHAgentToolExecutionService alloc]
+      initWithWAL:self.wal ledger:self.ledger
+      preparedStore:fixture[@"prepared_store"] transcripts:self.transcripts
+      workspaceExecutor:fixture[@"workspace_executor"] gitExecutor:git];
+
+  // Decision 1 of 2 checkpointed and bound: allow_once for the first call.
+  NSString *firstMarker = @"78787878-7878-4878-8878-787878787878";
+  NSDictionary *firstSession = [self sessionForFixture:fixture
+      phase:@"approval_pending" transcript:receipt[@"transcript"]
+      calls:@[[self persistedCallForProjection:first decision:@"allow_once"
+                                     reference:firstMarker],
+              [self persistedCallForProjection:second decision:@"pending"
+                                     reference:nil]]
+      events:@[[self approvalEventForCall:first attempt:fixture[@"attempt"]
+                                  eventId:firstMarker seq:@1]]
+      grants:@[]];
+  sessionStore.fakeLoadResult = [self loadResultForSession:firstSession generation:@3
+      digest:fixture[@"checkpoint"][@"session_sha256"]];
+  NSDictionary *firstBound = [batchService bindAgentApprovalWithRequest:
+      [self bindRequestForFixture:fixture receipt:receipt call:first
+          operationId:firstMarker decision:@"allow_once" denyMessage:nil]
+      error:&error];
+  XCTAssertNil(error);
+  XCTAssertEqualObjects(firstBound[@"status"], @"bound", @"%@", firstBound);
+  XCTAssertEqualObjects(firstBound[@"approval_reference"], firstMarker);
+  XCTAssertEqualObjects(firstBound[@"receipt"], NSNull.null);
+  XCTAssertEqualObjects(firstBound[@"transcript"], NSNull.null);
+
+  // The gate stays closed while the second decision is not checkpointed:
+  // even with an execution intent persisted for the bound first call, the
+  // batch effect gate refuses to open.
+  sessionStore.fakeLoadResult = [self loadResultForSession:
+      [self sessionForFixture:fixture phase:@"execution_intent"
+          transcript:receipt[@"transcript"]
+          calls:@[[self persistedCallForProjection:first decision:@"allow_once"
+                                         reference:firstMarker],
+                  [self persistedCallForProjection:second decision:@"pending"
+                                         reference:nil]]
+          events:@[[self approvalEventForCall:first attempt:fixture[@"attempt"]
+                                      eventId:firstMarker seq:@1]]
+          grants:@[]] generation:@3
+      digest:fixture[@"checkpoint"][@"session_sha256"]];
+  NSDictionary *early = [execution executeAgentToolWithRequest:
+      [self executeRequestForFixture:fixture receipt:receipt call:first
+          operationId:@"79797979-7979-4979-8979-797979797979"
+          approvalReference:firstMarker] error:&error];
+  XCTAssertNotEqualObjects(early[@"status"], @"completed", @"%@", early);
+  XCTAssertNotEqualObjects(early[@"failure_code"], @"E_AGENT_ROOT_STALE", @"%@", early);
+  XCTAssertEqual(git.effectCount, 0U);
+
+  // Decision 2 of 2 checkpointed and bound: the second call is denied.
+  NSString *secondMarker = @"80808080-8080-4080-8080-808080808080";
+  NSDictionary *secondSession = [self sessionForFixture:fixture
+      phase:@"approval_pending" transcript:receipt[@"transcript"]
+      calls:@[[self persistedCallForProjection:first decision:@"allow_once"
+                                     reference:firstMarker],
+              [self persistedCallForProjection:second decision:@"denied"
+                                     reference:nil]]
+      events:@[[self approvalEventForCall:first attempt:fixture[@"attempt"]
+                                  eventId:firstMarker seq:@1],
+               [self approvalEventForCall:second attempt:fixture[@"attempt"]
+                                  eventId:secondMarker seq:@2]]
+      grants:@[]];
+  sessionStore.fakeLoadResult = [self loadResultForSession:secondSession generation:@3
+      digest:fixture[@"checkpoint"][@"session_sha256"]];
+  NSDictionary *secondBound = [batchService bindAgentApprovalWithRequest:
+      [self bindRequestForFixture:fixture receipt:receipt call:second
+          operationId:secondMarker decision:@"denied"
+          denyMessage:@"only one commit"] error:&error];
+  XCTAssertNil(error);
+  XCTAssertEqualObjects(secondBound[@"status"], @"bound", @"%@", secondBound);
+  XCTAssertEqualObjects(secondBound[@"receipt"][@"outcome"], @"denied");
+  XCTAssertEqual(git.effectCount, 0U);
+
+  // Both decisions are durable: the allowed call runs exactly once, the
+  // denied call never runs, and replay is idempotent.
+  NSArray *settledCalls = @[
+    [self persistedCallForProjection:first decision:@"allow_once"
+                           reference:firstMarker],
+    [self persistedCallForProjection:second decision:@"denied" reference:nil
+                             receipt:secondBound[@"receipt"] rowRevision:@2],
+  ];
+  sessionStore.fakeLoadResult = [self loadResultForSession:
+      [self sessionForFixture:fixture phase:@"execution_intent"
+          transcript:secondBound[@"transcript"] calls:settledCalls
+          events:@[] grants:@[]] generation:@3
+      digest:fixture[@"checkpoint"][@"session_sha256"]];
+  NSMutableDictionary *firstExecute = [[self executeRequestForFixture:fixture
+      receipt:receipt call:first
+      operationId:@"81818181-8181-4181-8181-818181818182"
+      approvalReference:firstMarker] mutableCopy];
+  // The denial advanced the authority transcript; execution starts from it.
+  firstExecute[@"transcript"] = secondBound[@"transcript"];
+  NSDictionary *executed = [execution executeAgentToolWithRequest:firstExecute
+                                                             error:&error];
+  XCTAssertNil(error);
+  XCTAssertEqualObjects(executed[@"status"], @"completed", @"%@", executed);
+  XCTAssertEqual(git.effectCount, 1U);
+  NSMutableDictionary *deniedExecute = [[self executeRequestForFixture:fixture
+      receipt:receipt call:second
+      operationId:@"82828282-8282-4282-8282-828282828283"
+      approvalReference:nil] mutableCopy];
+  deniedExecute[@"expected_execution_revision"] = @2;
+  deniedExecute[@"transcript"] = executed[@"transcript"];
+  NSDictionary *deniedRun = [execution executeAgentToolWithRequest:deniedExecute
+                                                             error:&error];
+  XCTAssertNotEqualObjects(deniedRun[@"status"], @"completed", @"%@", deniedRun);
+  XCTAssertEqual(git.effectCount, 1U);
+  NSDictionary *replayed = [execution executeAgentToolWithRequest:firstExecute
+                                                             error:&error];
+  XCTAssertEqualObjects(replayed, executed);
+  XCTAssertEqual(git.effectCount, 1U);
+
+  // The recovered batch projection replays both persisted decisions.
+  NSDictionary *state = [self.wal snapshotWithError:&error];
+  NSDictionary *deniedRow = [state[@"ledger"]
+      filteredArrayUsingPredicate:[NSPredicate
+          predicateWithFormat:@"locator.call_id == %@", second[@"call_id"]]]
+      .firstObject;
+  XCTAssertEqualObjects(deniedRow[@"state"], @"settled");
+  XCTAssertEqualObjects(deniedRow[@"receipt"][@"outcome"], @"denied");
+  XCTAssertEqualObjects([self.wal dispatchStateForKind:@"execution"
+                                               locator:deniedRow[@"locator"]
+                                                 error:&error], @"not_dispatched");
+}
+
+- (void)testRevokedGrantBlocksGrantBoundExecutionUntilRegranted {
+  NSDictionary *rawCommit = @{ @"schema_version" : @1,
+    @"call_id" : @"commit-call", @"name" : @"git_commit",
+    @"arguments_json" : @"{\"message\":\"m\"}" };
+  NSDictionary *fixture = [self serviceFixtureForRawCalls:@[rawCommit]];
+  NSString *grantID = @"83838383-8383-4383-8383-838383838383";
+  NSDictionary *grant = @{ @"schema_version" : @2, @"grant_id" : grantID,
+    @"conversation_id" : fixture[@"conversation"],
+    @"workspace_id" : fixture[@"root"][@"workspace_id"],
+    @"project_id" : fixture[@"root"][@"project_id"],
+    @"binding_revision" : fixture[@"root"][@"workspace_binding_revision"],
+    @"root_fingerprint_sha256" : fixture[@"root"][@"root_fingerprint_sha256"],
+    @"tool_family" : @"git_commit", @"registry_version" : @1,
+    @"policy_version" : @"agent-v1",
+    @"issued_for" : @{ @"schema_version" : @1,
+                        @"task_id" : fixture[@"task"],
+                        @"attempt_id" : fixture[@"attempt"] },
+    @"created_at" : @"2026-08-31T00:00:00.000Z" };
+  AgentEffectsSessionStore *sessionStore = fixture[@"session_store"];
+  sessionStore.fakeLoadResult = [self loadResultForSession:@{
+      @"schema_version" : @9,
+      @"conversations" : @[@{ @"id" : fixture[@"conversation"],
+        @"agent_grants" : @[grant],
+        @"attempts" : @[@{ @"attempt_id" : fixture[@"attempt"],
+          @"journal_revision" : @1, @"agent" : NSNull.null }] }],
+      @"session_events" : @[] } generation:@3
+      digest:fixture[@"checkpoint"][@"session_sha256"]];
+  NSError *error = nil;
+  NSDictionary *prepared = [fixture[@"batch_service"]
+      prepareAgentToolBatchWithRequest:fixture[@"batch_request"] error:&error];
+  XCTAssertNil(error);
+  XCTAssertEqualObjects(prepared[@"status"], @"prepared", @"%@", prepared);
+  if (![prepared[@"status"] isEqualToString:@"prepared"]) return;
+  NSDictionary *receipt = prepared[@"receipt"];
+  NSDictionary *call = receipt[@"calls"][0];
+  XCTAssertEqualObjects(call[@"approval_state"], @"bound");
+  XCTAssertEqualObjects(call[@"approval_reference"], grantID);
+  NSDictionary *journalCall = [self persistedCallForProjection:call
+      decision:@"allow_conversation" reference:grantID];
+
+  // The user revoked the grant as a persisted checkpoint before execution:
+  // the grant-bound call fails closed with zero effect.
+  sessionStore.fakeLoadResult = [self loadResultForSession:
+      [self sessionForFixture:fixture phase:@"execution_intent"
+          transcript:receipt[@"transcript"] calls:@[journalCall] events:@[]
+          grants:@[]] generation:@3
+      digest:fixture[@"checkpoint"][@"session_sha256"]];
+  AgentEffectsGitExecutor *git = fixture[@"git_executor"];
+  DSHAgentToolExecutionService *execution = [[DSHAgentToolExecutionService alloc]
+      initWithWAL:self.wal ledger:self.ledger
+      preparedStore:fixture[@"prepared_store"] transcripts:self.transcripts
+      workspaceExecutor:fixture[@"workspace_executor"] gitExecutor:git];
+  NSDictionary *revokedRequest = [self executeRequestForFixture:fixture
+      receipt:receipt call:call
+      operationId:@"84848484-8484-4484-8484-848484848484"
+      approvalReference:grantID];
+  NSDictionary *blocked = [execution executeAgentToolWithRequest:revokedRequest
+                                                            error:&error];
+  XCTAssertEqualObjects(blocked[@"status"], @"conflict", @"%@", blocked);
+  XCTAssertEqualObjects(blocked[@"failure_code"], @"E_AGENT_APPROVAL");
+  XCTAssertEqual(git.effectCount, 0U);
+  // Replaying the blocked operation stays blocked.
+  NSDictionary *blockedReplay = [execution executeAgentToolWithRequest:revokedRequest
+                                                                  error:&error];
+  XCTAssertEqualObjects(blockedReplay[@"status"], @"conflict");
+  XCTAssertEqual(git.effectCount, 0U);
+
+  // A grant present again in the committed session re-opens execution for a
+  // fresh operation, exactly once.
+  sessionStore.fakeLoadResult = [self loadResultForSession:
+      [self sessionForFixture:fixture phase:@"execution_intent"
+          transcript:receipt[@"transcript"] calls:@[journalCall] events:@[]
+          grants:@[grant]] generation:@3
+      digest:fixture[@"checkpoint"][@"session_sha256"]];
+  NSDictionary *regrantedRequest = [self executeRequestForFixture:fixture
+      receipt:receipt call:call
+      operationId:@"85858585-8585-4585-8585-858585858585"
+      approvalReference:grantID];
+  NSDictionary *executed = [execution executeAgentToolWithRequest:regrantedRequest
+                                                             error:&error];
+  XCTAssertNil(error);
+  XCTAssertEqualObjects(executed[@"status"], @"completed", @"%@", executed);
+  XCTAssertEqual(git.effectCount, 1U);
+  NSDictionary *replayed = [execution executeAgentToolWithRequest:regrantedRequest
+                                                             error:&error];
+  XCTAssertEqualObjects(replayed, executed);
+  XCTAssertEqual(git.effectCount, 1U);
+}
+
 @end
