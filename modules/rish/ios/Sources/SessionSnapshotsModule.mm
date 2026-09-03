@@ -496,31 +496,50 @@ static NSDictionary *DSHSessionBridgeSanitizeResult(
   }
 
   if (operation == DSHSessionBridgeOperationLoad) {
+    // Every load result also reports which process launch wrote the stored
+    // envelope and which launch is reading it; JS hydration compares the two
+    // to interrupt attempts left behind by a dead writer.
     if ([status isEqualToString:@"missing"]) {
-      NSArray<NSString *> *keys =
-          @[@"schema_version", @"status", @"snapshot", @"session_json"];
+      NSArray<NSString *> *keys = @[
+        @"schema_version", @"status", @"snapshot", @"session_json",
+        @"writer_launch_instance_id", @"current_launch_instance_id",
+      ];
       if (!DSHSessionBridgeHasExactCapturedKeys(captured, keys)) {
         if (failureCode != nullptr) *failureCode = DSHSessionBridgeInvalid;
         return nil;
       }
       if (captured[@"snapshot"] != NSNull.null ||
-          captured[@"session_json"] != NSNull.null) {
+          captured[@"session_json"] != NSNull.null ||
+          captured[@"writer_launch_instance_id"] != NSNull.null) {
         if (failureCode != nullptr) *failureCode = DSHSessionBridgeCorrupt;
         return nil;
       }
+      NSString *currentLaunch = DSHSessionBridgeCopyUUID(
+          captured[@"current_launch_instance_id"], &failure);
+      if (currentLaunch == nil) {
+        if (failureCode != nullptr) *failureCode = DSHSessionBridgeInvalid;
+        return nil;
+      }
       return DSHSessionBridgeFreshDictionary(
-          keys, @[schema, status, NSNull.null, NSNull.null]);
+          keys, @[schema, status, NSNull.null, NSNull.null, NSNull.null,
+                  currentLaunch]);
     }
     if ([status isEqualToString:@"legacy_present"]) {
-      NSArray<NSString *> *keys =
-          @[@"schema_version", @"status", @"legacy", @"session_json"];
+      NSArray<NSString *> *keys = @[
+        @"schema_version", @"status", @"legacy", @"session_json",
+        @"writer_launch_instance_id", @"current_launch_instance_id",
+      ];
       if (!DSHSessionBridgeHasExactCapturedKeys(captured, keys)) {
         if (failureCode != nullptr) *failureCode = DSHSessionBridgeInvalid;
         return nil;
       }
       NSDictionary *legacy = DSHSessionBridgeSanitizeLegacyRef(
           captured[@"legacy"], &failure);
-      if (legacy == nil) {
+      NSString *writerLaunch = DSHSessionBridgeCopyUUID(
+          captured[@"writer_launch_instance_id"], &failure);
+      NSString *currentLaunch = DSHSessionBridgeCopyUUID(
+          captured[@"current_launch_instance_id"], &failure);
+      if (legacy == nil || writerLaunch == nil || currentLaunch == nil) {
         if (failureCode != nullptr) *failureCode = DSHSessionBridgeInvalid;
         return nil;
       }
@@ -531,18 +550,25 @@ static NSDictionary *DSHSessionBridgeSanitizeResult(
         return nil;
       }
       return DSHSessionBridgeFreshDictionary(
-          keys, @[schema, status, legacy, sessionJSON]);
+          keys, @[schema, status, legacy, sessionJSON, writerLaunch,
+                  currentLaunch]);
     }
     if ([status isEqualToString:@"present"]) {
-      NSArray<NSString *> *keys =
-          @[@"schema_version", @"status", @"snapshot", @"session_json"];
+      NSArray<NSString *> *keys = @[
+        @"schema_version", @"status", @"snapshot", @"session_json",
+        @"writer_launch_instance_id", @"current_launch_instance_id",
+      ];
       if (!DSHSessionBridgeHasExactCapturedKeys(captured, keys)) {
         if (failureCode != nullptr) *failureCode = DSHSessionBridgeInvalid;
         return nil;
       }
       NSDictionary *snapshot = DSHSessionBridgeSanitizeSnapshotRef(
           captured[@"snapshot"], &failure);
-      if (snapshot == nil) {
+      NSString *writerLaunch = DSHSessionBridgeCopyUUID(
+          captured[@"writer_launch_instance_id"], &failure);
+      NSString *currentLaunch = DSHSessionBridgeCopyUUID(
+          captured[@"current_launch_instance_id"], &failure);
+      if (snapshot == nil || writerLaunch == nil || currentLaunch == nil) {
         if (failureCode != nullptr) *failureCode = DSHSessionBridgeInvalid;
         return nil;
       }
@@ -553,7 +579,8 @@ static NSDictionary *DSHSessionBridgeSanitizeResult(
         return nil;
       }
       return DSHSessionBridgeFreshDictionary(
-          keys, @[schema, status, snapshot, sessionJSON]);
+          keys, @[schema, status, snapshot, sessionJSON, writerLaunch,
+                  currentLaunch]);
     }
     if (failureCode != nullptr) *failureCode = DSHSessionBridgePersistence;
     return nil;

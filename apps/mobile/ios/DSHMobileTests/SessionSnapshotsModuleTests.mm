@@ -347,6 +347,8 @@ static NSString *const DSHSessionModuleOperation =
           @"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
     },
     @"session_json" : @"{\"schema_version\":8}",
+    @"writer_launch_instance_id" : @"33333333-3333-4333-8333-333333333333",
+    @"current_launch_instance_id" : @"33333333-3333-4333-8333-333333333333",
   };
   store.queryResult = @{
     @"schema_version" : @1,
@@ -396,6 +398,8 @@ static NSString *const DSHSessionModuleOperation =
     @"legacy" : [[DSHSingleReadSessionDictionary alloc]
         initWithDictionary:legacy],
     @"session_json" : @"{\"schema_version\":8}",
+    @"writer_launch_instance_id" : @"77777777-7777-4777-8777-777777777777",
+    @"current_launch_instance_id" : @"77777777-7777-4777-8777-777777777777",
   } mutableCopy];
   DSHSingleReadSessionDictionary *result = [[DSHSingleReadSessionDictionary alloc]
       initWithDictionary:source];
@@ -446,6 +450,8 @@ static NSString *const DSHSessionModuleOperation =
       @"status" : @"missing",
       @"snapshot" : NSNull.null,
       @"session_json" : NSNull.null,
+      @"writer_launch_instance_id" : NSNull.null,
+      @"current_launch_instance_id" : self.store.launchInstanceId,
     }));
     [loaded fulfill];
   } rejecter:^(__unused NSString *code, __unused NSString *message,
@@ -488,6 +494,8 @@ static NSString *const DSHSessionModuleOperation =
     @"status" : @"missing",
     @"snapshot" : NSNull.null,
     @"session_json" : NSNull.null,
+    @"writer_launch_instance_id" : NSNull.null,
+    @"current_launch_instance_id" : @"88888888-8888-4888-8888-888888888888",
   };
   store.queryResult = @{
     @"schema_version" : @1,
@@ -880,6 +888,8 @@ static NSString *const DSHSessionModuleOperation =
     @"status" : @"missing",
     @"snapshot" : @{},
     @"session_json" : NSNull.null,
+    @"writer_launch_instance_id" : NSNull.null,
+    @"current_launch_instance_id" : @"99999999-9999-4999-8999-999999999999",
   }
           rejectsWithCode:@"E_SESSION_CORRUPT"];
 
@@ -888,6 +898,8 @@ static NSString *const DSHSessionModuleOperation =
     @"status" : @"missing",
     @"snapshot" : NSNull.null,
     @"session_json" : NSNull.null,
+    @"writer_launch_instance_id" : NSNull.null,
+    @"current_launch_instance_id" : @"99999999-9999-4999-8999-999999999999",
   }
           rejectsWithCode:@"E_SESSION_PERSISTENCE"];
 
@@ -898,8 +910,43 @@ static NSString *const DSHSessionModuleOperation =
       @"schema_version" : @1,
     },
     @"session_json" : @"{\"schema_version\":8}",
+    @"writer_launch_instance_id" : @"99999999-9999-4999-8999-999999999999",
+    @"current_launch_instance_id" : @"99999999-9999-4999-8999-999999999999",
   }
           rejectsWithCode:@"E_SESSION_INVALID"];
+
+  // A load result without the launch instance ids (the pre-recovery store
+  // shape) or with a malformed writer id never reaches JS.
+  [self assertLoadResult:@{
+    @"schema_version" : @1,
+    @"status" : @"missing",
+    @"snapshot" : NSNull.null,
+    @"session_json" : NSNull.null,
+  }
+          rejectsWithCode:@"E_SESSION_INVALID"];
+  [self assertLoadResult:@{
+    @"schema_version" : @1,
+    @"status" : @"present",
+    @"snapshot" : @{
+      @"schema_version" : @1,
+      @"generation" : @1,
+      @"session_sha256" :
+          @"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    },
+    @"session_json" : @"{\"schema_version\":9}",
+    @"writer_launch_instance_id" : @"not-a-launch-id",
+    @"current_launch_instance_id" : @"99999999-9999-4999-8999-999999999999",
+  }
+          rejectsWithCode:@"E_SESSION_INVALID"];
+  [self assertLoadResult:@{
+    @"schema_version" : @1,
+    @"status" : @"missing",
+    @"snapshot" : NSNull.null,
+    @"session_json" : NSNull.null,
+    @"writer_launch_instance_id" : @"99999999-9999-4999-8999-999999999999",
+    @"current_launch_instance_id" : @"99999999-9999-4999-8999-999999999999",
+  }
+          rejectsWithCode:@"E_SESSION_CORRUPT"];
 }
 
 - (void)testHostileStoreResultIsContainedAsAStableNativeFailure {
