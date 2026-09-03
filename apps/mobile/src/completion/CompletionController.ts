@@ -2081,10 +2081,12 @@ export function createCompletionController(
                   createdAt: terminalCreatedAt,
                   attachments: [],
                   metadata: {
-        modelId: completionReceipt.model,
-        latencyMs: completionReceipt.latency_ms,
-        finishReason: completionReceipt.finish_reason,
-                    reasoning: roundOutcome.reasoning,
+                    modelId: completionReceipt.model,
+                    latencyMs: completionReceipt.latency_ms,
+                    finishReason: completionReceipt.finish_reason,
+                    ...(roundOutcome.reasoning.trim().length === 0
+                      ? {}
+                      : { reasoning: roundOutcome.reasoning }),
                   },
                 };
           })()

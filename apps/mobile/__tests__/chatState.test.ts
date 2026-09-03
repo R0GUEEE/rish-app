@@ -1560,6 +1560,7 @@ describe('schema 9 Agent journal persistence', () => {
     current: PersistedAgentAttemptJournalV3,
     next: PersistedAgentAttemptJournalV3,
     outcomeKind: 'in_flight' | 'tool_batch' | 'blocked' | 'final',
+    finalReasoning = 'checked atomically',
   ): AgentStoreTransitionEvidence => {
     const operationId = '66666666-6666-4666-8666-666666666661';
     const lineage = current.round_lineage;
@@ -1660,7 +1661,7 @@ describe('schema 9 Agent journal persistence', () => {
             completion_receipt: receipt,
             transcript: next.transcript,
             text: 'atomic final',
-            reasoning: 'checked atomically',
+            reasoning: finalReasoning,
           }
         : {
           schema_version: 3 as const,
@@ -3636,6 +3637,62 @@ describe('schema 9 Agent journal persistence', () => {
     expect(committedFinalStore.getState().agentTranscriptCleanupOutbox).toEqual([
       finalCleanup,
     ]);
+
+    const whitespaceEvidence = completeEvidence(
+      terminalCas,
+      activeJournal,
+      finalJournal,
+      'final',
+      ' \n\t',
+    );
+    const whitespaceFinalInput = {
+      ...finalInput,
+      evidence: whitespaceEvidence,
+      assistantMessage: {
+        ...finalInput.assistantMessage,
+        metadata: {
+          modelId: 'deepseek-v4-flash' as const,
+          latencyMs: 1,
+          finishReason: 'stop',
+        },
+      },
+    };
+    const whitespaceFinalStore = makeFinalStore();
+    const whitespaceFinal = whitespaceFinalStore.completeAgentAttempt(
+      whitespaceFinalInput,
+    );
+    expect(whitespaceFinal).not.toBeNull();
+    expect(whitespaceFinal?.rollback()).toBe(true);
+
+    const explicitWhitespaceStore = makeFinalStore();
+    expect(
+      explicitWhitespaceStore.completeAgentAttempt({
+        ...whitespaceFinalInput,
+        assistantMessage: {
+          ...whitespaceFinalInput.assistantMessage,
+          metadata: {
+            ...whitespaceFinalInput.assistantMessage.metadata,
+            reasoning: ' \n\t',
+          },
+        },
+      }),
+    ).toBeNull();
+
+    const missingNonemptyReasoningStore = makeFinalStore();
+    expect(
+      missingNonemptyReasoningStore.completeAgentAttempt({
+        ...finalInput,
+        assistantMessage: {
+          ...finalInput.assistantMessage,
+          metadata: {
+            modelId: 'deepseek-v4-flash',
+            latencyMs: 1,
+            finishReason: 'stop',
+          },
+        },
+      }),
+    ).toBeNull();
+
     const committedSnapshot = committedFinalStore.getState();
     expect(committedFinalStore.completeAgentAttempt(finalInput)).toBeNull();
     expect(committedFinalStore.getState()).toBe(committedSnapshot);

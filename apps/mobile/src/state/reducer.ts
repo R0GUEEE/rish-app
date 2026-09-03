@@ -2860,6 +2860,11 @@ function exactFinalAssistantMessage(
   if (material.text === null || material.reasoning === null) {
     return null;
   }
+  const hasReasoning = material.reasoning.trim().length > 0;
+  const metadataKeys =
+    !hasReasoning
+      ? ['modelId', 'latencyMs', 'finishReason'] as const
+      : ['modelId', 'latencyMs', 'finishReason', 'reasoning'] as const;
   if (
     value === null ||
     !isExactDataRecordWithOptional(
@@ -2870,17 +2875,12 @@ function exactFinalAssistantMessage(
     value.role !== 'assistant' ||
     value.text !== material.text ||
     !isExactDataArray(value.attachments, 0) ||
-    !isExactDataRecord(value.metadata, [
-      'modelId',
-      'latencyMs',
-      'finishReason',
-      'reasoning',
-    ]) ||
+    !isExactDataRecord(value.metadata, metadataKeys) ||
     material.receipt === undefined ||
     value.metadata.modelId !== material.receipt.model ||
     value.metadata.latencyMs !== material.receipt.latencyMs ||
     value.metadata.finishReason !== material.receipt.finishReason ||
-    value.metadata.reasoning !== material.reasoning
+    (hasReasoning && value.metadata.reasoning !== material.reasoning)
   ) return null;
   return normalizedMessage(conversation, value);
 }

@@ -1524,6 +1524,7 @@ describe('project Agent completion controller', () => {
   type AgentRuntimeFixtureOptions = {
     readonly batchRounds?: readonly (readonly AgentRuntimeFixtureCall[])[];
     readonly finalRoundIndex?: number;
+    readonly finalReasoning?: string;
     readonly cancelledCallIds?: readonly string[];
   };
 
@@ -1666,7 +1667,7 @@ describe('project Agent completion controller', () => {
             completion_receipt: completionReceipt,
             transcript: nextTranscript,
             text: 'Agent final',
-            reasoning: 'Agent reasoning',
+            reasoning: options.finalReasoning ?? 'Agent reasoning',
           },
         };
       }
@@ -2056,6 +2057,76 @@ describe('project Agent completion controller', () => {
       agent: { phase: 'final_response' },
     });
   });
+
+  test.each([
+    ['empty', ''],
+    ['whitespace-only', ' \n\t'],
+  ] as const)(
+    'completes and round-trips an %s-reasoning final checkpoint while the clock advances',
+    async (_label, finalReasoning) => {
+      const store = agentStore();
+      const conversationId = store.getState().selectedConversationId!;
+      const runtime = makeRuntime([], {
+        finalRoundIndex: 0,
+        finalReasoning,
+      });
+      let tick = 0;
+      const advancingNow = jest.fn(() => {
+        const value = new Date(Date.parse(NOW) + tick).toISOString();
+        tick += 1;
+        return value;
+      });
+      const controller = agentController(
+        store,
+        runtime,
+        committedPersistence(store),
+        [...IDS],
+        undefined,
+        advancingNow,
+      );
+
+      const result = await controller.send({
+        conversationId,
+        text: 'finish without reasoning while the clock advances',
+        attachments: [],
+      });
+
+      expect(result.status).toBe('completed');
+      expect(advancingNow).toHaveBeenCalled();
+      const conversation = store.getState().conversations[conversationId]!;
+      expect(conversation.attempts[0]).toMatchObject({
+        status: 'completed',
+        agent: { phase: 'final_response' },
+      });
+      const assistant = conversation.messages.find(
+        message => message.id === conversation.attempts[0]?.assistantMessageId,
+      );
+      expect(assistant?.metadata).toEqual({
+        modelId: 'deepseek-v4-flash',
+        latencyMs: 1,
+        finishReason: 'stop',
+      });
+      expect(assistant?.metadata).not.toHaveProperty('reasoning');
+
+      const serialized = store.serialize();
+      const hydrated = hydrateChatState(serialized);
+      const hydratedConversation = hydrated.conversations[conversationId]!;
+      expect(hydratedConversation.attempts[0]).toMatchObject({
+        status: 'completed',
+        agent: { phase: 'final_response' },
+      });
+      const hydratedAssistant = hydratedConversation.messages.find(
+        message =>
+          message.id === hydratedConversation.attempts[0]?.assistantMessageId,
+      );
+      expect(hydratedAssistant?.metadata).toEqual({
+        modelId: 'deepseek-v4-flash',
+        latencyMs: 1,
+        finishReason: 'stop',
+      });
+      expect(hydratedAssistant?.metadata).not.toHaveProperty('reasoning');
+    },
+  );
 
   test('drives write approval, commit, next round, and atomic final cleanup', async () => {
     const store = agentStore();
