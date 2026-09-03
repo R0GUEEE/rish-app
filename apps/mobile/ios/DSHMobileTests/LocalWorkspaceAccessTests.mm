@@ -1,7 +1,8 @@
 #import <XCTest/XCTest.h>
 
 #import <CommonCrypto/CommonDigest.h>
-#import <TargetConditionals.h>
+
+#import "DSHTestHost.h"
 
 #import "../../../../modules/rish/ios/Sources/LocalWorkspaceAccess.h"
 #import "../../../../modules/rish/ios/Sources/DSHWorkspaceCanonical.h"
@@ -597,16 +598,74 @@ static NSString *const DSHDigestB =
         attributesOfItemAtPath:file.path error:&error];
     XCTAssertEqual([attributes[NSFilePosixPermissions] unsignedShortValue] & 0777,
                    0600);
-#if TARGET_OS_SIMULATOR
-    if (attributes[NSFileProtectionKey] != nil) {
+    // The workspace store is read by AgentRootResolver while the phone is
+    // locked after first unlock, so it must carry the same class as
+    // sessions.json, agent-runtime/ and the workspace files it indexes.
+    if (DSHTestHostIsSimulator()) {
+      // CoreSimulator may not report a protection class; enforce it only
+      // when the filesystem exposes one.
+      if (attributes[NSFileProtectionKey] != nil) {
+        XCTAssertEqualObjects(attributes[NSFileProtectionKey],
+            NSFileProtectionCompleteUntilFirstUserAuthentication);
+      }
+    } else {
       XCTAssertEqualObjects(attributes[NSFileProtectionKey],
-                            NSFileProtectionComplete);
+          NSFileProtectionCompleteUntilFirstUserAuthentication);
+      XCTAssertNotEqualObjects(attributes[NSFileProtectionKey],
+                               NSFileProtectionComplete);
     }
-#else
-    XCTAssertEqualObjects(attributes[NSFileProtectionKey], NSFileProtectionComplete);
-#endif
     NSNumber *excluded = nil;
     XCTAssertTrue([file getResourceValue:&excluded
+                                  forKey:NSURLIsExcludedFromBackupKey
+                                   error:&error]);
+    XCTAssertTrue(excluded.boolValue);
+  }
+}
+
+// Regression: earlier builds wrote local-workspaces/ with
+// NSFileProtectionComplete, which the kernel refuses while the phone is
+// locked (evidence: locked-phone copy of receipts-v1.json failed with EPERM
+// while sessions.json and agent-runtime/ copied). The store must migrate
+// such items to CompleteUntilFirstUserAuthentication in place on the next
+// unlocked access instead of rejecting them or leaving them locked-out.
+- (void)testLegacyCompleteProtectionMigratesToUntilFirstUserAuthentication {
+  if (DSHTestHostIsSimulator()) {
+    XCTSkip(@"CoreSimulator does not report NSFileProtectionKey through "
+        @"NSFileManager, so a legacy Complete class cannot be observed or "
+        @"migrated there; the migration is verified on a physical device.");
+  }
+  NSError *error = nil;
+  XCTAssertTrue([[self access] ensurePrivateLayoutWithError:&error], @"%@", error);
+  NSURL *store = [self.rootURL URLByAppendingPathComponent:@"local-workspaces"
+                                                isDirectory:YES];
+  NSURL *authorityLock = [store URLByAppendingPathComponent:@"authority.lock"];
+  NSURL *layoutManifest = [store URLByAppendingPathComponent:@"layout-v1.json"];
+  NSArray<NSURL *> *items = @[
+    store, [self registryURLForRoot:self.rootURL],
+    [self receiptsURLForRoot:self.rootURL], authorityLock, layoutManifest,
+  ];
+  for (NSURL *item in items) {
+    XCTAssertTrue([NSFileManager.defaultManager
+        setAttributes:@{NSFileProtectionKey : NSFileProtectionComplete}
+         ofItemAtPath:item.path error:&error], @"%@ %@", item, error);
+    XCTAssertEqualObjects([NSFileManager.defaultManager
+        attributesOfItemAtPath:item.path error:nil][NSFileProtectionKey],
+        NSFileProtectionComplete);
+  }
+
+  // A fresh store instance models the next launch after the update. Listing
+  // metadata reads the registry, receipts and layout through the protected
+  // reader and reacquires the authority lock.
+  DSHLocalWorkspaceAccess *restarted = [self accessWithRoot:self.rootURL fault:nil];
+  XCTAssertNotNil([restarted listWorkspaceMetadataWithError:&error], @"%@", error);
+  XCTAssertNil(error);
+  for (NSURL *item in items) {
+    NSDictionary *attributes = [NSFileManager.defaultManager
+        attributesOfItemAtPath:item.path error:&error];
+    XCTAssertEqualObjects(attributes[NSFileProtectionKey],
+        NSFileProtectionCompleteUntilFirstUserAuthentication, @"%@", item);
+    NSNumber *excluded = nil;
+    XCTAssertTrue([item getResourceValue:&excluded
                                   forKey:NSURLIsExcludedFromBackupKey
                                    error:&error]);
     XCTAssertTrue(excluded.boolValue);

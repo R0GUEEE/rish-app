@@ -25,6 +25,47 @@ static const NSTimeInterval DSHWorkspaceReceiptTTL = 30 * 24 * 60 * 60;
 static const unsigned long long DSHWorkspaceMaxSafeInteger =
     9007199254740991ULL;
 
+// Protection class for everything under local-workspaces/ and
+// workspace-bindings/. The store is an index (registry, receipts, authority
+// journals, bindings) over Documents-owned workspace files. Every durable
+// store the Agent reads while it keeps working on a locked phone after the
+// first unlock (sessions.json, agent-runtime/, the workspace files
+// themselves) uses CompleteUntilFirstUserAuthentication; AgentRootResolver
+// cannot resolve a workspace root without the registry, so the index must not
+// be stricter than the data it points at. Earlier builds wrote
+// NSFileProtectionComplete; those items are migrated in place on the next
+// unlocked access.
+static NSString *DSHWorkspaceStoreProtectionClass(void) {
+  return NSFileProtectionCompleteUntilFirstUserAuthentication;
+}
+
+// YES when `url` carries the store protection class, migrating a legacy
+// NSFileProtectionComplete item in place first. CoreSimulator does not report
+// NSFileProtectionKey through NSFileManager, so an absent value is accepted
+// there only; a physical device must report the exact class.
+static BOOL DSHWorkspaceStoreProtectionValidAtURL(NSURL *url) {
+  NSDictionary *attributes =
+      [NSFileManager.defaultManager attributesOfItemAtPath:url.path error:nil];
+  id protection = attributes[NSFileProtectionKey];
+  if ([protection isEqual:DSHWorkspaceStoreProtectionClass()]) return YES;
+  if ([protection isEqual:NSFileProtectionComplete]) {
+    if (![NSFileManager.defaultManager
+            setAttributes:@{NSFileProtectionKey : DSHWorkspaceStoreProtectionClass()}
+             ofItemAtPath:url.path error:nil]) {
+      return NO;
+    }
+    attributes = [NSFileManager.defaultManager attributesOfItemAtPath:url.path
+                                                                error:nil];
+    return [attributes[NSFileProtectionKey]
+        isEqual:DSHWorkspaceStoreProtectionClass()];
+  }
+#if TARGET_OS_SIMULATOR
+  return protection == nil;
+#else
+  return NO;
+#endif
+}
+
 static NSString *DSHWorkspacePublicCode(
     DSHLocalWorkspaceAccessErrorCode code) {
   switch (code) {
@@ -1474,7 +1515,7 @@ static NSString *DSHTruncateDisplayNameForSuffix(NSString *base,
   if (!S_ISDIR(state.st_mode) || S_ISLNK(state.st_mode) ||
       chmod(url.fileSystemRepresentation, 0700) != 0 ||
       ![NSFileManager.defaultManager
-          setAttributes:@{NSFileProtectionKey : NSFileProtectionComplete}
+          setAttributes:@{NSFileProtectionKey : DSHWorkspaceStoreProtectionClass()}
            ofItemAtPath:url.path error:nil] ||
       ![url setResourceValue:@YES forKey:NSURLIsExcludedFromBackupKey error:nil]) {
     DSHSetWorkspaceError(error, DSHLocalWorkspaceAccessErrorPersistence);
@@ -1511,7 +1552,8 @@ static NSString *DSHTruncateDisplayNameForSuffix(NSString *base,
   if (created) {
     if (![NSFileManager.defaultManager
             setAttributes:@{NSFilePosixPermissions : @0600,
-                            NSFileProtectionKey : NSFileProtectionComplete}
+                            NSFileProtectionKey :
+                                DSHWorkspaceStoreProtectionClass()}
              ofItemAtPath:url.path error:nil] ||
         ![url setResourceValue:@YES
                         forKey:NSURLIsExcludedFromBackupKey error:nil]) {
@@ -1529,16 +1571,8 @@ static NSString *DSHTruncateDisplayNameForSuffix(NSString *base,
       return nil;
     }
   } else {
-    NSDictionary *attributes =
-        [NSFileManager.defaultManager attributesOfItemAtPath:url.path error:nil];
     NSNumber *excluded = nil;
-    BOOL protectionValid =
-#if TARGET_OS_SIMULATOR
-        attributes[NSFileProtectionKey] == nil ||
-        [attributes[NSFileProtectionKey] isEqual:NSFileProtectionComplete];
-#else
-        [attributes[NSFileProtectionKey] isEqual:NSFileProtectionComplete];
-#endif
+    BOOL protectionValid = DSHWorkspaceStoreProtectionValidAtURL(url);
     if (!protectionValid ||
         ![url getResourceValue:&excluded
                         forKey:NSURLIsExcludedFromBackupKey error:nil] ||
@@ -1647,7 +1681,8 @@ static NSString *DSHTruncateDisplayNameForSuffix(NSString *base,
   }
   if (![NSFileManager.defaultManager
           setAttributes:@{NSFilePosixPermissions : @0600,
-                          NSFileProtectionKey : NSFileProtectionComplete}
+                          NSFileProtectionKey :
+                              DSHWorkspaceStoreProtectionClass()}
            ofItemAtPath:temporary.path error:nil] ||
       ![temporary setResourceValue:@YES
                             forKey:NSURLIsExcludedFromBackupKey
@@ -1656,7 +1691,8 @@ static NSString *DSHTruncateDisplayNameForSuffix(NSString *base,
           0 ||
       ![NSFileManager.defaultManager
           setAttributes:@{NSFilePosixPermissions : @0600,
-                          NSFileProtectionKey : NSFileProtectionComplete}
+                          NSFileProtectionKey :
+                              DSHWorkspaceStoreProtectionClass()}
            ofItemAtPath:url.path error:nil] ||
       ![url setResourceValue:@YES
                       forKey:NSURLIsExcludedFromBackupKey
@@ -1699,16 +1735,8 @@ static NSString *DSHTruncateDisplayNameForSuffix(NSString *base,
     DSHSetWorkspaceError(error, DSHLocalWorkspaceAccessErrorPersistence);
     return nil;
   }
-  NSDictionary *attributes =
-      [NSFileManager.defaultManager attributesOfItemAtPath:url.path error:nil];
   NSNumber *excluded = nil;
-  BOOL protectionValid =
-#if TARGET_OS_SIMULATOR
-      attributes[NSFileProtectionKey] == nil ||
-      [attributes[NSFileProtectionKey] isEqual:NSFileProtectionComplete];
-#else
-      [attributes[NSFileProtectionKey] isEqual:NSFileProtectionComplete];
-#endif
+  BOOL protectionValid = DSHWorkspaceStoreProtectionValidAtURL(url);
   if (!protectionValid ||
       ![url getResourceValue:&excluded
                       forKey:NSURLIsExcludedFromBackupKey error:nil] ||
