@@ -3676,15 +3676,28 @@ function postEvidenceOrderingIsValid(
         event.attempt_id === attemptId &&
         !events.some(existing => existing.event_id === event.event_id),
     );
+    if (fresh.length !== 1 ||
+        fresh[0]!.event_id === evidence.operation_id ||
+        fresh[0]!.round_index !== request.round_index ||
+        fresh[0]!.call_id !== request.call_id ||
+        fresh[0]!.safe_summary_key !== `agent.${request.token.name}` ||
+        fresh[0]!.arguments_sha256 !== request.token.arguments_sha256) {
+      return false;
+    }
+    if (request.decision === 'denied') {
+      // A user denial settles as a structured denied tool result.
+      return (
+        fresh[0]!.kind === 'tool_result' &&
+        fresh[0]!.status === 'denied' &&
+        result.receipt !== null &&
+        fresh[0]!.result_sha256 === result.receipt.result_sha256 &&
+        fresh[0]!.approval_reference === null &&
+        fresh[0]!.failure_code === 'E_AGENT_DENIED_BY_USER'
+      );
+    }
     return (
-      fresh.length === 1 &&
-      fresh[0]!.event_id !== evidence.operation_id &&
       fresh[0]!.kind === 'approval' &&
-      fresh[0]!.round_index === request.round_index &&
-      fresh[0]!.call_id === request.call_id &&
       fresh[0]!.status === 'approval' &&
-      fresh[0]!.safe_summary_key === `agent.${request.token.name}` &&
-      fresh[0]!.arguments_sha256 === request.token.arguments_sha256 &&
       fresh[0]!.result_sha256 === null &&
       fresh[0]!.approval_reference === result.approval_reference &&
       fresh[0]!.failure_code === null
@@ -3994,6 +4007,7 @@ function evidenceAttemptProjectionMatchesJournal(
       'arguments_sha256',
       'idempotency_key',
       'safe_summary_key',
+      'approval_preview',
       'access',
       'approval_state',
       'approval_token',
@@ -4190,6 +4204,101 @@ function highLevelEvidenceSupportsTransition(
     const allowedDecision =
       request.decision === 'allow_once' ||
       request.decision === 'allow_conversation';
+    if (request.decision === 'denied') {
+      // A user denial is a settled tool result: the native bind appended the
+      // protected denial feedback, settled the intent row with a denied
+      // receipt, and returned the exact settlement for persistence. The next
+      // journal carries that receipt and transcript; execution of this call
+      // is impossible and the remaining batch may continue.
+      const remainingPending = next.batch.some(
+        call =>
+          call.access !== 'auto' &&
+          call.access !== 'durable_deny' &&
+          call.approval_decision === 'pending',
+      );
+      const expectedNextPhase = remainingPending
+        ? 'approval_pending'
+        : 'batch_frozen';
+      if (
+        (current.phase !== 'batch_frozen' &&
+          current.phase !== 'approval_pending') ||
+        next.phase !== expectedNextPhase ||
+        bind.task_id !== requestCas.task_id ||
+        bind.attempt_id !== requestCas.attempt_id ||
+        bind.round_id !== request.round_id ||
+        current.round_lineage === null ||
+        next.round_lineage === null ||
+        current.round_lineage.round_id !== request.round_id ||
+        next.round_lineage.round_id !== request.round_id ||
+        current.round_lineage.round_index !== request.round_index ||
+        next.round_lineage.round_index !== request.round_index ||
+        current.round_lineage.launch_attempt !== next.round_lineage.launch_attempt ||
+        current.round_lineage.status !== next.round_lineage.status ||
+        current.round_lineage.native_row_revision !== next.round_lineage.native_row_revision ||
+        current.round_index !== request.round_index ||
+        next.round_index !== request.round_index ||
+        firstUnsettledCall < 0 ||
+        current.call_index !== firstUnsettledCall ||
+        beforeCall === undefined ||
+        afterCall === undefined ||
+        beforeCall.call_id !== request.call_id ||
+        beforeCall.call_id !== bind.call_id ||
+        beforeCall.name !== token.name ||
+        beforeCall.arguments_sha256 !== token.arguments_sha256 ||
+        beforeCall.access !== token.access ||
+        beforeCall.approval_token === null ||
+        beforeCall.approval_decision !== 'denied' ||
+        beforeCall.approval_reference !== null ||
+        beforeCall.receipt !== null ||
+        bind.approval_reference !== null ||
+        bind.receipt === null ||
+        bind.transcript === null ||
+        bind.receipt.call_id !== request.call_id ||
+        bind.receipt.name !== token.name ||
+        bind.receipt.arguments_sha256 !== token.arguments_sha256 ||
+        bind.receipt.outcome !== 'denied' ||
+        bind.receipt.failure_code !== 'E_AGENT_DENIED_BY_USER' ||
+        bind.receipt.approval_reference !== null ||
+        !sameAgentTranscript(bind.transcript, next.transcript) ||
+        afterCall.approval_decision !== 'denied' ||
+        afterCall.approval_token !== null ||
+        afterCall.approval_reference !== null ||
+        afterCall.native_row_revision !== 2 ||
+        afterCall.receipt === null ||
+        !sameAgentReceipt(
+          afterCall.receipt,
+          bind.receipt as unknown as AgentToolReceiptV1,
+        ) ||
+        next.call_index !==
+          next.batch.findIndex(call => call.receipt === null) ||
+        request.batch_revision !== token.batch_revision ||
+        bind.result_batch_revision !== request.batch_revision ||
+        token.round_id !== request.round_id ||
+        token.round_index !== request.round_index ||
+        token.call_index !== request.call_index ||
+        token.call_id !== request.call_id ||
+        token.batch_call_ids.length !== current.batch.length ||
+        token.batch_arguments_sha256.length !== current.batch.length ||
+        !current.batch.every(
+          (call, index) =>
+            token.batch_call_ids[index] === call.call_id &&
+            token.batch_arguments_sha256[index] === call.arguments_sha256,
+        ) ||
+        token.root_fingerprint_sha256 !== current.root.root_fingerprint_sha256 ||
+        token.binding_revision !== current.root.workspace_binding_revision ||
+        token.policy_version !== current.policy.policy_version ||
+        token.registry_version !== current.tool_registry_version ||
+        current.batch.length !== next.batch.length ||
+        !current.batch.every((call, index) =>
+          index === request.call_index ||
+          sameAgentCallJournal(call, next.batch[index]!),
+        ) ||
+        current.reserved_write_bytes !== next.reserved_write_bytes
+      ) {
+        return false;
+      }
+      return true;
+    }
     if (
       !allowedDecision ||
       (current.phase !== 'batch_frozen' && current.phase !== 'approval_pending') ||

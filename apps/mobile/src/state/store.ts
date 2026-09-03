@@ -208,6 +208,12 @@ export type AgentApprovalCheckpointInput = Omit<AgentCheckpointInput, 'journal'>
   readonly grants: readonly AgentConversationGrantV2[];
 };
 
+export type RevokeAgentGrantInput = {
+  readonly conversationId: string;
+  readonly grantId: string;
+  readonly expectedConversation: Conversation;
+};
+
 export type AgentExecutionIntentInput = AgentCheckpointInput & {
   readonly callIndex: number;
 };
@@ -392,6 +398,11 @@ export type ChatStore = {
   applyConversationWorkspaceBinding(
     input: ApplyWorkspaceBindingInputV1,
   ): OneShotChatTransaction | null;
+  /** Persisted-checkpoint grant revocation: removes one conversation grant
+   * with an exact expected-conversation guard. Returns null on any mismatch
+   * (including a grant frozen into a live attempt) so the caller fails
+   * closed; the caller must CAS-persist and roll back on failure. */
+  revokeAgentGrant(input: RevokeAgentGrantInput): OneShotChatTransaction | null;
   applyWorkspaceAuthorityMutation(
     input: WorkspaceAuthorityMutationInputV1,
   ): WorkspaceAuthorityMutationTransaction | null;
@@ -2856,6 +2867,29 @@ export function createChatStore(options: ChatStoreOptions = {}): ChatStore {
         },
       });
       return workspaceBindingTransaction(applied, owner.conversationId);
+    },
+    revokeAgentGrant: input => {
+      if (notificationDepth > 0) return null;
+      const conversation = state.conversations[input.conversationId];
+      if (
+        conversation === undefined ||
+        input.expectedConversation !== conversation
+      ) {
+        return null;
+      }
+      const grants = conversation.agentGrants ?? conversation.agent_grants ?? [];
+      if (!grants.some(grant => grant.grant_id === input.grantId)) return null;
+      const next = grants.filter(grant => grant.grant_id !== input.grantId);
+      const applied = applyAction({
+        type: 'conversation/agent-grants',
+        payload: {
+          conversationId: input.conversationId,
+          grants: next,
+          expectedConversation: conversation,
+          at: canonicalNow(now),
+        },
+      });
+      return workspaceBindingTransaction(applied, input.conversationId);
     },
     applyWorkspaceAuthorityMutation: input => {
       if (notificationDepth > 0) return null;

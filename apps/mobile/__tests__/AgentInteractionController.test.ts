@@ -10,6 +10,7 @@ const approvalSpec: ApprovalRequestSpec = {
   toolCallId: 'c1',
   toolName: 'write_file',
   argumentsJson: '{"path":"a"}',
+  preview: null,
   scopes: ['once', 'conversation'],
   expiresAtMs: Date.now() + 120_000,
 };
@@ -24,12 +25,12 @@ const questionSpec: QuestionSpec = {
 
 test('requestApproval publishes the pending card and settles on decide', async () => {
   const controller = createAgentInteractionController();
-  const seen: (ApprovalRequestSpec | null)[] = [];
-  controller.subscribe(state => seen.push(state.pendingApproval));
+  const seen: ApprovalRequestSpec[][] = [];
+  controller.subscribe(state => seen.push([...state.pendingApprovals]));
 
   const decisionPromise = controller.requestApproval(approvalSpec);
-  expect(controller.getState().pendingApproval).toEqual(approvalSpec);
-  expect(seen.at(-1)).toEqual(approvalSpec);
+  expect(controller.getState().pendingApprovals).toEqual([approvalSpec]);
+  expect(seen.at(-1)).toEqual([approvalSpec]);
 
   controller.decideApproval('ap-1', {
     status: 'approved',
@@ -41,8 +42,8 @@ test('requestApproval publishes the pending card and settles on decide', async (
     approval_id: 'ap-1',
     scope: 'once',
   });
-  expect(controller.getState().pendingApproval).toBeNull();
-  expect(seen.at(-1)).toBeNull();
+  expect(controller.getState().pendingApprovals).toEqual([]);
+  expect(seen.at(-1)).toEqual([]);
 });
 
 test('the broker adds the matched approval id to a UI allow decision', async () => {
@@ -110,7 +111,7 @@ test('decisions for unknown ids are ignored', async () => {
   const controller = createAgentInteractionController();
   const decisionPromise = controller.requestApproval(approvalSpec);
   controller.decideApproval('someone-else', { status: 'denied' });
-  expect(controller.getState().pendingApproval).toEqual(approvalSpec);
+  expect(controller.getState().pendingApprovals).toEqual([approvalSpec]);
   controller.decideApproval('ap-1', { status: 'denied' });
   await expect(decisionPromise).resolves.toEqual({
     status: 'denied',
@@ -125,10 +126,10 @@ test('an unanswered approval clears its card after the timeout', async () => {
       approvalTimeoutMs: 1000,
     });
     const decisionPromise = controller.requestApproval(approvalSpec);
-    expect(controller.getState().pendingApproval).toEqual(approvalSpec);
+    expect(controller.getState().pendingApprovals).toEqual([approvalSpec]);
     await jest.advanceTimersByTimeAsync(1100);
     await expect(decisionPromise).resolves.toBeUndefined();
-    expect(controller.getState().pendingApproval).toBeNull();
+    expect(controller.getState().pendingApprovals).toEqual([]);
   } finally {
     jest.useRealTimers();
   }
@@ -151,7 +152,7 @@ test('a late decision for an expired approval id is ignored', async () => {
       scope: 'once',
     });
     await expect(decisionPromise).resolves.toBeUndefined();
-    expect(controller.getState().pendingApproval).toBeNull();
+    expect(controller.getState().pendingApprovals).toEqual([]);
   } finally {
     jest.useRealTimers();
   }
@@ -163,7 +164,7 @@ test('a second approval request settles the first fail-closed', async () => {
   const secondSpec = { ...approvalSpec, approvalId: 'ap-2' };
   const second = controller.requestApproval(secondSpec);
   await expect(first).resolves.toBeUndefined();
-  expect(controller.getState().pendingApproval).toEqual(secondSpec);
+  expect(controller.getState().pendingApprovals).toEqual([secondSpec]);
   controller.decideApproval('ap-2', { status: 'denied', approval_id: 'ap-2' });
   await expect(second).resolves.toEqual({
     status: 'denied',
@@ -212,6 +213,100 @@ test('an unanswered question clears its composer after the timeout', async () =>
   }
 });
 
+
+test('requestBatchApprovals presents every item and settles one decision list', async () => {
+  const controller = createAgentInteractionController();
+  const secondSpec: ApprovalRequestSpec = {
+    ...approvalSpec,
+    approvalId: 'ap-2',
+    toolCallId: 'c2',
+    toolName: 'git_commit',
+    preview: null,
+  };
+  const batch = controller.requestBatchApprovals([approvalSpec, secondSpec]);
+  expect(controller.getState().pendingApprovals).toEqual([
+    approvalSpec,
+    secondSpec,
+  ]);
+  controller.decideBatchApprovals([
+    { approvalId: 'ap-1', decision: { status: 'approved', scope: 'once' } },
+    {
+      approvalId: 'ap-2',
+      decision: { status: 'denied', message: 'no commits today' },
+    },
+  ]);
+  await expect(batch).resolves.toEqual([
+    { status: 'approved', approval_id: 'ap-1', scope: 'once' },
+    { status: 'denied', approval_id: 'ap-2', message: 'no commits today' },
+  ]);
+  expect(controller.getState().pendingApprovals).toEqual([]);
+});
+
+test('a batch decision for an unknown id fails closed for that item', async () => {
+  const controller = createAgentInteractionController();
+  const secondSpec: ApprovalRequestSpec = {
+    ...approvalSpec,
+    approvalId: 'ap-2',
+    toolCallId: 'c2',
+    toolName: 'git_commit',
+    preview: null,
+  };
+  const batch = controller.requestBatchApprovals([approvalSpec, secondSpec]);
+  controller.decideBatchApprovals([
+    { approvalId: 'someone-else', decision: { status: 'approved', scope: 'once' } },
+  ]);
+  await expect(batch).resolves.toEqual([undefined, undefined]);
+  expect(controller.getState().pendingApprovals).toEqual([]);
+});
+
+test('an unanswered batch clears every card after the timeout', async () => {
+  jest.useFakeTimers();
+  try {
+    const controller = createAgentInteractionController({
+      approvalTimeoutMs: 1000,
+    });
+    const secondSpec: ApprovalRequestSpec = {
+      ...approvalSpec,
+      approvalId: 'ap-2',
+      toolCallId: 'c2',
+      toolName: 'git_commit',
+      preview: null,
+    };
+    const batch = controller.requestBatchApprovals([approvalSpec, secondSpec]);
+    expect(controller.getState().pendingApprovals).toHaveLength(2);
+    await jest.advanceTimersByTimeAsync(1100);
+    await expect(batch).resolves.toEqual([undefined, undefined]);
+    expect(controller.getState().pendingApprovals).toEqual([]);
+  } finally {
+    jest.useRealTimers();
+  }
+});
+
+test('a deny message is carried through the batch broker', async () => {
+  const controller = createAgentInteractionController();
+  const batch = controller.requestBatchApprovals([approvalSpec]);
+  controller.decideBatchApprovals([
+    { approvalId: 'ap-1', decision: { status: 'denied', message: 'leave it' } },
+  ]);
+  await expect(batch).resolves.toEqual([
+    { status: 'denied', approval_id: 'ap-1', message: 'leave it' },
+  ]);
+});
+
+test('an oversized deny message is dropped by the broker', async () => {
+  const controller = createAgentInteractionController();
+  const batch = controller.requestBatchApprovals([approvalSpec]);
+  controller.decideBatchApprovals([
+    {
+      approvalId: 'ap-1',
+      decision: { status: 'denied', message: 'x'.repeat(3000) },
+    },
+  ]);
+  await expect(batch).resolves.toEqual([
+    { status: 'denied', approval_id: 'ap-1' },
+  ]);
+});
+
 test('cancelPending settles every open wait without fabricating answers', async () => {
   const controller = createAgentInteractionController();
   const approval = controller.requestApproval(approvalSpec);
@@ -220,7 +315,7 @@ test('cancelPending settles every open wait without fabricating answers', async 
   await expect(approval).resolves.toBeUndefined();
   await expect(question).resolves.toBeUndefined();
   expect(controller.getState()).toEqual({
-    pendingApproval: null,
+    pendingApprovals: [],
     pendingQuestion: null,
   });
 });

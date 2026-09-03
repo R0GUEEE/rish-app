@@ -1,3 +1,4 @@
+import type { AgentApprovalPreviewV1 } from '../native/AgentRuntime';
 import {
   APPROVAL_SCOPE_VALUES,
   type ApprovalResolutionValue,
@@ -28,6 +29,9 @@ export type ApprovalRequestSpec = {
   readonly toolCallId: string;
   readonly toolName: string;
   readonly argumentsJson: string;
+  /** Bounded native-computed display preview: workspace-relative paths, byte
+   * sizes, and the write_file diff preview. Never raw model text. */
+  readonly preview: AgentApprovalPreviewV1 | null;
   /** Scopes offered to the user; validated before the request is emitted. */
   readonly scopes: readonly ApprovalScopeValue[];
   /** Fail-closed deadline: any settlement after this is a timeout denial. */

@@ -340,6 +340,7 @@ static BOOL DSHSessionValidAgentFailureCode(id value) {
       @"E_AGENT_ROUND_AMBIGUOUS", @"E_AGENT_EXECUTION_AMBIGUOUS",
       @"E_AGENT_RETRY_LINEAGE", @"E_AGENT_PERSISTENCE", @"E_AGENT_CONFLICT",
       @"E_AGENT_ROUND_LIMIT", @"E_AGENT_CANCELLED", @"E_AGENT_TOOL_FAILED",
+      @"E_AGENT_DENIED_BY_USER",
     ]];
   });
   return string.length > 0 && string.length <= 128 && [codes containsObject:string];

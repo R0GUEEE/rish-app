@@ -33,6 +33,7 @@ export type AgentRuntimeFailureCode =
   | 'E_AGENT_ROUND_LIMIT'
   | 'E_AGENT_CANCELLED'
   | 'E_AGENT_TOOL_FAILED'
+  | 'E_AGENT_DENIED_BY_USER'
   | 'E_AGENT_NATIVE'
   | 'E_AGENT_NOT_FOUND'
   | 'E_AGENT_CAPACITY'
@@ -175,6 +176,30 @@ export type AgentApprovalBindingTokenV2 = {
   )[];
 };
 
+/** Bounded native-computed approval preview. Paths are workspace-relative
+ * validated strings; the diff preview is display-only text derived from the
+ * prepared intent, never from unvalidated model output. */
+export type AgentApprovalPreviewV1 = {
+  readonly schema_version: 1;
+  readonly kind:
+    | 'list_dir'
+    | 'read_file'
+    | 'write_file'
+    | 'git_commit'
+    | 'git_push';
+  readonly paths: readonly string[];
+  readonly content_bytes: number | null;
+  readonly prior:
+    | {
+        readonly schema_version: 1;
+        readonly kind: 'absent' | 'known';
+        readonly bytes: number | null;
+      }
+    | null;
+  readonly diff_preview: string | null;
+  readonly diff_truncated: boolean;
+};
+
 export type AgentBatchCallProjectionV2 = {
   readonly schema_version: 2;
   readonly call_index: number;
@@ -183,6 +208,7 @@ export type AgentBatchCallProjectionV2 = {
   readonly arguments_sha256: string;
   readonly idempotency_key: string | null;
   readonly safe_summary_key: string;
+  readonly approval_preview: AgentApprovalPreviewV1 | null;
   readonly access:
     | 'auto'
     | 'conversation_confirm'
@@ -589,6 +615,9 @@ export type BindAgentApprovalRequestV2 = {
     | 'allow_once'
     | 'allow_conversation'
     | 'cancelled';
+  /** Bounded model-directed message for a `denied` decision; must be null
+   * for every other decision. */
+  readonly deny_message: string | null;
 };
 
 export type BindAgentApprovalResultV2 =
@@ -610,6 +639,11 @@ export type BindAgentApprovalResultV2 =
       readonly grant: AgentConversationGrantV2 | null;
       readonly result_batch_revision: number;
       readonly observed_checkpoint: AgentRuntimeCommittedCheckpointV1;
+      /** Settlement of a user denial: the appended-feedback transcript
+       * handle and the redacted denied receipt. Both are null for every
+       * allow/cancelled decision. */
+      readonly receipt: AgentToolReceiptV1 | null;
+      readonly transcript: AgentRuntimeTranscriptHandleV1 | null;
     }
   | {
       readonly schema_version: 2;
@@ -1292,6 +1326,7 @@ const MAX_CALLS = 15;
 const MAX_TRANSCRIPT_BYTES = 2 * 1024 * 1024;
 const MAX_RESULT_BYTES = 32 * 1024 * 1024;
 const MAX_ATTEMPT_WRITE_BYTES = 4 * 1024 * 1024;
+const MAX_SINGLE_WRITE_BYTES = 32768;
 const MAX_SUMMARY_BYTES = 128;
 const MAX_TEXT_BYTES = 256 * 1024;
 const MAX_PROVIDER_ID_BYTES = 128;
@@ -1320,6 +1355,7 @@ const runtimeFailureCodes = new Set<AgentRuntimeFailureCode>([
   'E_AGENT_CAPACITY',
   'E_COMPLETION_LENGTH',
   'E_COMPLETION_CONTENT_FILTER',
+  'E_AGENT_DENIED_BY_USER',
 ]);
 
 const agentFailureCodes = new Set<AgentFailureCode>([
@@ -1342,6 +1378,7 @@ const agentFailureCodes = new Set<AgentFailureCode>([
   'E_AGENT_CAPACITY',
   'E_COMPLETION_LENGTH',
   'E_COMPLETION_CONTENT_FILTER',
+  'E_AGENT_DENIED_BY_USER',
 ]);
 
 const operationIds = [
@@ -2298,6 +2335,105 @@ function validateOrderedRoundCalls(
   return calls;
 }
 
+function validatePreviewPath(value: unknown): value is string {
+  if (
+    typeof value !== 'string' ||
+    value.length === 0 ||
+    utf8Bytes(value) === null ||
+    utf8Bytes(value)! > 512 ||
+    value.startsWith('/') ||
+    value.includes('\\') ||
+    value.includes('\u0000')
+  )
+    return false;
+  for (let index = 0; index < value.length; index += 1) {
+    const unit = value.charCodeAt(index);
+    if (unit < 0x20 || unit === 0x7f) return false;
+  }
+  return true;
+}
+
+function validateApprovalPreview(
+  value: unknown,
+): AgentApprovalPreviewV1 | null {
+  if (value === null) return null;
+  const preview = exactRecord(
+    value,
+    [
+      'schema_version',
+      'kind',
+      'paths',
+      'content_bytes',
+      'prior',
+      'diff_preview',
+      'diff_truncated',
+    ],
+    'E_AGENT_LEDGER',
+  );
+  if (
+    preview.schema_version !== 1 ||
+    ![
+      'list_dir',
+      'read_file',
+      'write_file',
+      'git_commit',
+      'git_push',
+    ].includes(preview.kind as string) ||
+    !Array.isArray(preview.paths) ||
+    preview.paths.length > 8 ||
+    !preview.paths.every(validatePreviewPath) ||
+    (preview.content_bytes !== null &&
+      !safeInteger(preview.content_bytes, MAX_SINGLE_WRITE_BYTES)) ||
+    !booleanValue(preview.diff_truncated) ||
+    (preview.diff_preview !== null &&
+      !boundedString(preview.diff_preview, 4096, true))
+  )
+    fail('E_AGENT_LEDGER');
+  let prior: AgentApprovalPreviewV1['prior'];
+  if (preview.prior === null) {
+    prior = null;
+  } else {
+    const record = exactRecord(
+      preview.prior,
+      ['schema_version', 'kind', 'bytes'],
+      'E_AGENT_LEDGER',
+    );
+    if (
+      record.schema_version !== 1 ||
+      !['absent', 'known'].includes(record.kind as string) ||
+      (record.bytes !== null &&
+        !safeInteger(record.bytes, MAX_SINGLE_WRITE_BYTES * 2))
+    )
+      fail('E_AGENT_LEDGER');
+    prior = record as unknown as AgentApprovalPreviewV1['prior'];
+  }
+  assign(preview, 'paths', preview.paths);
+  assign(preview, 'prior', prior);
+  if (preview.kind === 'write_file') {
+    if (
+      preview.paths.length !== 1 ||
+      preview.content_bytes === null ||
+      preview.prior === null
+    )
+      fail('E_AGENT_LEDGER');
+  } else if (preview.kind === 'git_commit' || preview.kind === 'git_push') {
+    if (
+      preview.paths.length !== 0 ||
+      preview.content_bytes !== null ||
+      preview.prior !== null ||
+      preview.diff_preview !== null
+    )
+      fail('E_AGENT_LEDGER');
+  } else if (
+    preview.content_bytes !== null ||
+    preview.prior !== null ||
+    preview.diff_preview !== null
+  ) {
+    fail('E_AGENT_LEDGER');
+  }
+  return preview as unknown as AgentApprovalPreviewV1;
+}
+
 function validateBatchCall(value: unknown): AgentBatchCallProjectionV2 {
   const call = exactRecord(
     value,
@@ -2309,6 +2445,7 @@ function validateBatchCall(value: unknown): AgentBatchCallProjectionV2 {
       'arguments_sha256',
       'idempotency_key',
       'safe_summary_key',
+      'approval_preview',
       'access',
       'approval_state',
       'approval_token',
@@ -2360,8 +2497,10 @@ function validateBatchCall(value: unknown): AgentBatchCallProjectionV2 {
       : validateApprovalToken(call.approval_token);
   const receipt =
     call.receipt === null ? null : validateToolReceipt(call.receipt);
+  const approvalPreview = validateApprovalPreview(call.approval_preview);
   assign(call, 'approval_token', approvalToken);
   assign(call, 'receipt', receipt);
+  assign(call, 'approval_preview', approvalPreview);
   if (call.access === 'durable_deny') {
     if (
       call.safe_summary_key !== 'agent.unknown' ||
@@ -3250,6 +3389,7 @@ function validateBindRequest(value: unknown): BindAgentApprovalRequestV2 {
     'call_id',
     'token',
     'decision',
+    'deny_message',
   ]);
   if (
     request.schema_version !== 2 ||
@@ -3268,6 +3408,15 @@ function validateBindRequest(value: unknown): BindAgentApprovalRequestV2 {
     )
   )
     fail();
+  if (request.decision === 'denied') {
+    if (
+      request.deny_message !== null &&
+      !boundedString(request.deny_message, 2000, true)
+    )
+      fail();
+  } else if (request.deny_message !== null) {
+    fail();
+  }
   const cas = validateControllerCAS(request.controller_cas);
   const checkpoint = validateCheckpoint(request.committed_checkpoint);
   const token = validateApprovalToken(request.token);
@@ -4298,6 +4447,8 @@ function validateBindResult(
         'grant',
         'result_batch_revision',
         'observed_checkpoint',
+        'receipt',
+        'transcript',
       ],
       'E_AGENT_LEDGER',
     );
@@ -4315,6 +4466,30 @@ function validateBindResult(
       !safeInteger(result.result_batch_revision, MAX_SAFE, false)
     )
       fail('E_AGENT_LEDGER');
+    const deniedReceipt =
+      result.receipt === null ? null : validateToolReceipt(result.receipt);
+    const deniedTranscript =
+      result.transcript === null ? null : validateTranscript(result.transcript);
+    assign(result, 'receipt', deniedReceipt);
+    assign(result, 'transcript', deniedTranscript);
+    if (result.decision === 'denied') {
+      if (deniedReceipt === null || deniedTranscript === null)
+        fail('E_AGENT_LEDGER');
+      validateReceiptBinding(
+        deniedReceipt,
+        result.call_id as string,
+        request.token.name,
+        request.token.arguments_sha256,
+        null,
+      );
+      if (
+        deniedReceipt.outcome !== 'denied' ||
+        deniedReceipt.failure_code !== 'E_AGENT_DENIED_BY_USER'
+      )
+        fail('E_AGENT_LEDGER');
+    } else if (deniedReceipt !== null || deniedTranscript !== null) {
+      fail('E_AGENT_LEDGER');
+    }
     assign(
       result,
       'grant',

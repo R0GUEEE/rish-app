@@ -613,6 +613,7 @@ static NSDictionary *DSHRuntimeCommitRecoveryResult(
 static NSArray *DSHRuntimeLatestBatchCalls(NSDictionary *state,
                                           NSDictionary *batch) {
   if (batch == nil) return @[];
+  NSArray *prepared = nil;
   for (NSDictionary *snapshot in [state[@"operation_results"] reverseObjectEnumerator]) {
     NSDictionary *wrapper = snapshot[@"result"];
     NSDictionary *result = wrapper[@"result"];
@@ -622,10 +623,68 @@ static NSArray *DSHRuntimeLatestBatchCalls(NSDictionary *state,
         [receipt[@"attempt_id"] isEqual:batch[@"attempt_id"]] &&
         [receipt[@"round_id"] isEqual:batch[@"round_id"]] &&
         [receipt[@"batch_revision"] isEqual:batch[@"batch_revision"]]) {
-      return receipt[@"calls"] ?: @[];
+      prepared = receipt[@"calls"];
+      break;
     }
   }
-  return @[];
+  if (prepared == nil) return @[];
+  // Merge the persisted native bind decisions and ledger settlements into the
+  // prepare-time projection so recovery after a kill replays decisions and
+  // denial receipts instead of re-presenting already-settled calls.  The
+  // prepare projection stays the source of safe summaries, previews, and the
+  // native approval token envelopes.
+  NSMutableArray *merged = [NSMutableArray arrayWithCapacity:prepared.count];
+  for (NSDictionary *projection in prepared) {
+    NSMutableDictionary *call = [projection mutableCopy];
+    for (NSDictionary *snapshot in [state[@"operation_results"] reverseObjectEnumerator]) {
+      NSDictionary *wrapper = snapshot[@"result"];
+      if (![wrapper[@"result_kind"] isEqualToString:@"bind_agent_approval"]) continue;
+      NSDictionary *result = wrapper[@"result"][@"result"];
+      NSString *bindStatus = result[@"status"];
+      if (![bindStatus isEqualToString:@"bound"] &&
+          ![bindStatus isEqualToString:@"already_bound"]) continue;
+      if (![result[@"task_id"] isEqual:batch[@"task_id"]] ||
+          ![result[@"attempt_id"] isEqual:batch[@"attempt_id"]] ||
+          ![result[@"round_id"] isEqual:batch[@"round_id"]] ||
+          ![result[@"call_index"] isEqual:call[@"call_index"]] ||
+          ![result[@"call_id"] isEqual:call[@"call_id"]]) continue;
+      NSString *decision = result[@"decision"];
+      if ([decision isEqualToString:@"denied"] ||
+          [decision isEqualToString:@"cancelled"]) {
+        call[@"approval_state"] = decision;
+        call[@"approval_token"] = NSNull.null;
+        call[@"approval_reference"] = NSNull.null;
+      } else {
+        call[@"approval_state"] = @"bound";
+        call[@"approval_reference"] = result[@"approval_reference"];
+      }
+      if ([decision isEqualToString:@"denied"] &&
+          [result[@"receipt"] isKindOfClass:NSDictionary.class]) {
+        call[@"execution_status"] = @"denied";
+        call[@"receipt"] = result[@"receipt"];
+      }
+      break;
+    }
+    for (NSDictionary *row in state[@"ledger"]) {
+      NSDictionary *locator = row[@"locator"];
+      if (![locator[@"task_id"] isEqual:batch[@"task_id"]] ||
+          ![locator[@"attempt_id"] isEqual:batch[@"attempt_id"]] ||
+          ![locator[@"round_id"] isEqual:batch[@"round_id"]] ||
+          ![locator[@"round_index"] isEqual:batch[@"round_index"]] ||
+          ![locator[@"call_index"] isEqual:call[@"call_index"]] ||
+          ![locator[@"call_id"] isEqual:call[@"call_id"]] ||
+          ![locator[@"idempotency_key"] isEqual:call[@"idempotency_key"]]) continue;
+      call[@"native_row_revision"] = row[@"row_revision"];
+      if ([row[@"state"] isEqualToString:@"settled"]) {
+        call[@"execution_status"] = DSHRuntimeToolStatus(row);
+        call[@"receipt"] = row[@"receipt"];
+        call[@"execution_revision"] = row[@"row_revision"];
+      }
+      break;
+    }
+    [merged addObject:call];
+  }
+  return merged;
 }
 
 @interface DSHAgentRuntimeCoordinator ()

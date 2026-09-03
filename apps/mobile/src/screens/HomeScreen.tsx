@@ -72,6 +72,7 @@ import {
   selectProjectContextSnapshotReferences,
   selectOrderedConversations,
   serializeChatState,
+  type AgentCapability,
   type ChatState,
   type Conversation,
   type AttachmentDescriptor,
@@ -99,6 +100,10 @@ import {
   type AgentInteractionState,
 } from '../agent/AgentInteractionController';
 import { ApprovalComposer } from '../components/ApprovalComposer';
+import {
+  AgentPolicySheet,
+  AGENT_POLICY_DEFAULT_BUDGET,
+} from '../components/AgentPolicySheet';
 import { QuestionComposer } from '../components/QuestionComposer';
 import { DEFAULT_APPROVAL_TIMEOUT_MS } from '../agent/AgentApprovals';
 import {
@@ -113,6 +118,7 @@ import {
 } from '../completion/SessionPersistence';
 import { readRuntimeEvidence } from '../runtime/evidence';
 import { LocalProjects, type LocalProject } from '../native/LocalProjects';
+import type { WorkspaceDescriptorV2 } from '../native/LocalWorkspaces';
 import { LocalProjectContext } from '../native/LocalProjectContext';
 import { LocalAttachments } from '../native/LocalAttachments';
 import {
@@ -627,6 +633,14 @@ export function HomeScreen({
   const [workspaceNames, setWorkspaceNames] = useState<
     Readonly<Record<string, string>>
   >({});
+  const [workspaceDescriptors, setWorkspaceDescriptors] = useState<
+    Readonly<Record<string, WorkspaceDescriptorV2>>
+  >({});
+  const [agentPolicyVisible, setAgentPolicyVisible] = useState(false);
+  const [agentPolicyRevokeBusy, setAgentPolicyRevokeBusy] = useState(false);
+  const [agentPolicyRevokeFailed, setAgentPolicyRevokeFailed] = useState<
+    string | null
+  >(null);
   const [workspaceRefreshToken, setWorkspaceRefreshToken] = useState(0);
   const workspacePickerGenerationRef = useRef(0);
   const [workspacePickerGeneration, setWorkspacePickerGeneration] =
@@ -1376,10 +1390,38 @@ export function HomeScreen({
             argumentsJson: JSON.stringify({
               arguments_sha256: request.argumentsSha256,
             }),
+            preview: request.preview,
             scopes,
             expiresAtMs: Date.now() + DEFAULT_APPROVAL_TIMEOUT_MS,
           });
         },
+        requestBatchApprovals: requests =>
+          agentInteractions.requestBatchApprovals(
+            requests.map(request => {
+              const scopes = [
+                ...(request.allowedDecisions.includes('allow_once')
+                  ? (['once'] as const)
+                  : []),
+                ...(request.allowedDecisions.includes('allow_conversation')
+                  ? (['conversation'] as const)
+                  : []),
+              ];
+              return {
+                approvalId: request.approvalId,
+                toolCallId: request.callId,
+                toolName: request.name,
+                argumentsJson: JSON.stringify({
+                  arguments_sha256: request.argumentsSha256,
+                }),
+                preview: request.preview,
+                scopes:
+                  scopes.length > 0
+                    ? scopes
+                    : (['once'] as const),
+                expiresAtMs: Date.now() + DEFAULT_APPROVAL_TIMEOUT_MS,
+              };
+            }),
+          ),
         askAgentQuestion: (request: CompletionAgentQuestionRequest) =>
           agentInteractions.askQuestion({
             questionId: request.questionId,
@@ -3753,6 +3795,75 @@ export function HomeScreen({
     ],
   );
 
+  // Effective policy projection for the read-only Agent policy panel. This
+  // is display context only: native revalidates every capability and grant
+  // before any effect.
+  const agentPolicyCapabilities: readonly AgentCapability[] = (() => {
+    if (activeWorkspaceId === null) return [];
+    const descriptor = workspaceDescriptors[activeWorkspaceId];
+    const binding = activeConversation?.workspaceBinding ?? null;
+    const projectBound =
+      (binding?.projectId ?? null) !== null ||
+      (activeConversation?.projectId ?? null) !== null;
+    if (descriptor !== undefined) {
+      return [
+        ...(descriptor.capabilities.read ? (['file_read'] as const) : []),
+        ...(descriptor.capabilities.write ? (['file_write'] as const) : []),
+        ...(descriptor.capabilities.git && projectBound
+          ? (['git_status', 'git_commit', 'git_push'] as const)
+          : []),
+      ];
+    }
+    return [
+      'file_read',
+      'file_write',
+      ...(projectBound
+        ? (['git_status', 'git_commit', 'git_push'] as const)
+        : []),
+    ];
+  })();
+  const agentPolicyBudget = (() => {
+    const journal = activeConversation?.attempts.find(
+      attempt => attempt.agent !== null && attempt.agent !== undefined,
+    )?.agent;
+    return journal?.policy ?? AGENT_POLICY_DEFAULT_BUDGET;
+  })();
+
+  const revokeAgentGrant = useCallback(
+    async (grantId: string): Promise<void> => {
+      if (agentPolicyRevokeBusy) return;
+      const conversation = selectActiveConversation(store.getState());
+      if (conversation === null) return;
+      setAgentPolicyRevokeBusy(true);
+      setAgentPolicyRevokeFailed(null);
+      const transaction = store.revokeAgentGrant({
+        conversationId: conversation.id,
+        grantId,
+        expectedConversation: conversation,
+      });
+      if (transaction === null) {
+        setAgentPolicyRevokeFailed('conflict');
+        setAgentPolicyRevokeBusy(false);
+        return;
+      }
+      try {
+        const persisted = await persistCurrent();
+        if (persisted.status === 'committed') {
+          transaction.commit();
+          setChatState(store.getState());
+        } else {
+          transaction.rollback();
+          setAgentPolicyRevokeFailed('persistence');
+        }
+      } catch {
+        transaction.rollback();
+        setAgentPolicyRevokeFailed('persistence');
+      }
+      setAgentPolicyRevokeBusy(false);
+    },
+    [agentPolicyRevokeBusy, persistCurrent, store],
+  );
+
   const requestDeleteConversation = useCallback(() => {
     if (
       actionConversationId === null ||
@@ -3904,6 +4015,14 @@ export function HomeScreen({
             ]),
           ),
         );
+        setWorkspaceDescriptors(
+          Object.fromEntries(
+            listing.workspaces.map(workspace => [
+              workspace.workspace_id,
+              workspace,
+            ]),
+          ),
+        );
       })
       .catch(() => undefined);
     return () => {
@@ -4014,6 +4133,10 @@ export function HomeScreen({
           setWorkspaceNames(previous => ({
             ...previous,
             [outcome.workspace.workspace_id]: outcome.workspace.display_name,
+          }));
+          setWorkspaceDescriptors(previous => ({
+            ...previous,
+            [outcome.workspace.workspace_id]: outcome.workspace,
           }));
           setWorkspaceBindingRecoveryVisible(false);
           closeWorkspacePicker();
@@ -4443,6 +4566,10 @@ export function HomeScreen({
           setWorkspaceNames(previous => ({
             ...previous,
             [outcome.workspace.workspace_id]: outcome.workspace.display_name,
+          }));
+          setWorkspaceDescriptors(previous => ({
+            ...previous,
+            [outcome.workspace.workspace_id]: outcome.workspace,
           }));
         }
         setActiveProjectName(project.name);
@@ -5395,6 +5522,33 @@ export function HomeScreen({
               {runtimeLabel.toLocaleUpperCase()}
             </Text>
           </Pressable>
+          {activeWorkspaceId !== null && (
+            <Pressable
+              accessibilityLabel={t('agent.policy.title')}
+              accessibilityRole="button"
+              hitSlop={hitSlop}
+              onPress={() => {
+                if (!rootSurfaceAdmissionAllowed()) return;
+                setAgentPolicyRevokeFailed(null);
+                setAgentPolicyVisible(true);
+              }}
+              style={({ pressed }) => [
+                styles.proofChip,
+                pressed && styles.pressed,
+              ]}
+              testID="agent-policy-chip"
+            >
+              <View
+                style={[
+                  styles.proofDot,
+                  styles.agentPolicyDot,
+                ]}
+              />
+              <Text style={styles.proofText}>
+                {t('agent.policy.title').toLocaleUpperCase()}
+              </Text>
+            </Pressable>
+          )}
           {activeConversation?.projectContext !== null &&
             activeConversation?.projectContext !== undefined &&
             activeConversation.projectId !== null && (
@@ -5519,12 +5673,24 @@ export function HomeScreen({
         onOpenSettings={() => openSettingsFromDrawer(drawerRenderEpoch)}
         onSelect={id => selectConversation(id, drawerRenderEpoch)}
       />
-      {agentInteractionState.pendingApproval !== null && (
+      {agentInteractionState.pendingApprovals.length > 0 && (
         <ApprovalComposer
-          request={agentInteractionState.pendingApproval}
-          onDecide={(approvalId, decision) =>
-            agentInteractions.decideApproval(approvalId, decision)
-          }
+          requests={agentInteractionState.pendingApprovals}
+          onDecide={decisions => {
+            if (decisions.length === 1) {
+              agentInteractions.decideApproval(
+                decisions[0].approvalId,
+                decisions[0].decision,
+              );
+            } else {
+              agentInteractions.decideBatchApprovals(
+                decisions.map(entry => ({
+                  approvalId: entry.approvalId,
+                  decision: entry.decision,
+                })),
+              );
+            }
+          }}
         />
       )}
       {agentInteractionState.pendingQuestion !== null && (
@@ -5538,6 +5704,21 @@ export function HomeScreen({
           }
         />
       )}
+      <AgentPolicySheet
+        visible={agentPolicyVisible}
+        workspaceName={
+          activeWorkspaceId === null
+            ? null
+            : workspaceNames[activeWorkspaceId] ?? null
+        }
+        capabilities={agentPolicyCapabilities}
+        budget={agentPolicyBudget}
+        grants={activeConversation?.agentGrants ?? activeConversation?.agent_grants ?? []}
+        revokeBusy={agentPolicyRevokeBusy}
+        revokeFailed={agentPolicyRevokeFailed}
+        onClose={() => setAgentPolicyVisible(false)}
+        onRevoke={revokeAgentGrant}
+      />
       <ConversationActionSheet
         title={actionConversation?.title ?? ''}
         visible={actionConversation !== null}
@@ -6128,6 +6309,7 @@ const createStyles = (colors: ThemePalette) =>
     },
     proofDotReady: { backgroundColor: colors.success },
     proofDotFailed: { backgroundColor: colors.danger },
+    agentPolicyDot: { backgroundColor: colors.accent },
     proofText: {
       color: colors.muted,
       fontFamily: fonts.mono,

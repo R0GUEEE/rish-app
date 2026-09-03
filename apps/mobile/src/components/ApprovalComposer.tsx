@@ -1,41 +1,135 @@
 import React, { useMemo, useState } from 'react';
-import { Modal, Pressable, StyleSheet, Text, View } from 'react-native';
+import {
+  Modal,
+  Pressable,
+  ScrollView,
+  StyleSheet,
+  Text,
+  TextInput,
+  View,
+} from 'react-native';
 import Check from 'lucide-react-native/icons/check';
+import X from 'lucide-react-native/icons/x';
 
 import type { ApprovalRequestSpec } from '../agent/AgentApprovals';
+import type { AgentApprovalPreviewV1 } from '../native/AgentRuntime';
 import type { ApprovalScopeValue } from '../agent/SessionEvents';
 import { useAppPresentation } from '../presentation/AppPresentation';
-import type { ThemePalette } from '../theme';
+import { fonts, type ThemePalette } from '../theme';
 import { AppIcon } from './AppIcon';
 
+export type AgentApprovalDecisionInput =
+  | { readonly status: 'approved'; readonly scope: ApprovalScopeValue }
+  | { readonly status: 'denied'; readonly message?: string };
+
 type Props = {
-  request: ApprovalRequestSpec;
+  requests: readonly ApprovalRequestSpec[];
   onDecide: (
-    approvalId: string,
-    decision:
-      | { status: 'approved'; scope: ApprovalScopeValue }
-      | { status: 'denied' },
+    decisions: readonly {
+      approvalId: string;
+      decision: AgentApprovalDecisionInput;
+    }[],
   ) => void;
 };
 
+type ItemDecision =
+  | { readonly kind: 'approve'; readonly scope: ApprovalScopeValue }
+  | { readonly kind: 'deny'; readonly message: string };
+
+const MAX_DENY_MESSAGE_BYTES = 2000;
+
+function toolSummaryKey(name: string): string {
+  switch (name) {
+    case 'list_dir':
+      return 'agent.tool.list_dir';
+    case 'read_file':
+      return 'agent.tool.read_file';
+    case 'write_file':
+      return 'agent.tool.write_file';
+    case 'git_status':
+      return 'agent.tool.git_status';
+    case 'git_commit':
+      return 'agent.tool.git_commit';
+    case 'git_push':
+      return 'agent.tool.git_push';
+    default:
+      return 'agent.tool.read_file';
+  }
+}
+
+type ComposerTranslator = (
+  key: Parameters<ReturnType<typeof useAppPresentation>['t']>[0],
+  params?: Record<string, string | number>,
+) => string;
+
 /**
- * DSH-style approval composer: shows the gated tool call, offers the
- * scope choice, and settles with allow or deny. The deny path is the
- * fail-closed default; the driver re-validates whatever is submitted.
+ * DSH-style approval composer. One gated call renders the single-card flow;
+ * a batch of gated calls renders one list with per-item decisions and a
+ * single commit. All decisions are re-validated by the driver; a malformed
+ * or expired settlement always fails closed into a denial.
  */
-export function ApprovalComposer({ request, onDecide }: Props) {
+export function ApprovalComposer({ requests, onDecide }: Props) {
   const { colors, t } = useAppPresentation();
   const styles = useMemo(() => createStyles(colors), [colors]);
-  const [scope, setScope] = useState<ApprovalScopeValue>(
-    request.scopes[0] ?? 'once',
+  const batch = requests.length > 1;
+  const [decisions, setDecisions] = useState<Record<string, ItemDecision>>(
+    () => {
+      const initial: Record<string, ItemDecision> = {};
+      requests.forEach(request => {
+        initial[request.approvalId] = { kind: 'deny', message: '' };
+      });
+      return initial;
+    },
   );
+
+  const setDecision = (approvalId: string, decision: ItemDecision) => {
+    setDecisions(current => ({ ...current, [approvalId]: decision }));
+  };
+
+  const submitAll = () => {
+    onDecide(
+      requests.map(request => {
+        const decision = decisions[request.approvalId];
+        const approval: AgentApprovalDecisionInput =
+          decision !== undefined && decision.kind === 'approve'
+            ? { status: 'approved', scope: decision.scope }
+            : {
+                status: 'denied',
+                ...(decision !== undefined &&
+                decision.message.trim().length > 0
+                  ? { message: decision.message.slice(0, MAX_DENY_MESSAGE_BYTES) }
+                  : {}),
+              };
+        return { approvalId: request.approvalId, decision: approval };
+      }),
+    );
+  };
+
+  const submitSingle = (
+    request: ApprovalRequestSpec,
+    decision: AgentApprovalDecisionInput,
+  ) => {
+    onDecide([{ approvalId: request.approvalId, decision }]);
+  };
+
+  const closeAll = () => {
+    onDecide(
+      requests.map(request => ({
+        approvalId: request.approvalId,
+        decision: { status: 'denied' as const },
+      })),
+    );
+  };
+
+  const approvedCount = requests.filter(request => {
+    const decision = decisions[request.approvalId];
+    return decision !== undefined && decision.kind === 'approve';
+  }).length;
 
   return (
     <Modal
       animationType="fade"
-      onRequestClose={() =>
-        onDecide(request.approvalId, { status: 'denied' })
-      }
+      onRequestClose={closeAll}
       presentationStyle="overFullScreen"
       statusBarTranslucent
       testID="approval-composer-modal"
@@ -45,98 +139,428 @@ export function ApprovalComposer({ request, onDecide }: Props) {
       <View accessibilityViewIsModal style={styles.overlay}>
         <View pointerEvents="box-none" style={styles.anchor}>
           <View
-            accessibilityLabel={t('agent.approvalTitle')}
+            accessibilityLabel={
+              batch
+                ? t('agent.approvalBatchTitle', { count: requests.length })
+                : t('agent.approvalTitle')
+            }
             accessibilityRole="dialog"
             style={styles.card}
             testID="approval-composer-card"
           >
-            <Text style={styles.eyebrow}>{t('agent.approvalEyebrow')}</Text>
-            <Text style={styles.title}>{t('agent.approvalTitle')}</Text>
-            <Text style={styles.toolName}>{request.toolName}</Text>
-            <Text numberOfLines={4} style={styles.arguments}>
-              {request.argumentsJson}
+            <Text style={styles.eyebrow}>
+              {batch
+                ? t('agent.approvalBatchEyebrow')
+                : t('agent.approvalEyebrow')}
             </Text>
-            <Text style={styles.scopeLabel}>{t('agent.approvalScopeLabel')}</Text>
-            <View
-              accessibilityLabel={t('agent.approvalScopeLabel')}
-              accessibilityRole="radiogroup"
-              testID="approval-scope-group"
-            >
-              {request.scopes.map(scopeValue => {
-                const isSelected = scopeValue === scope;
-                return (
-                  <Pressable
-                    accessibilityRole="radio"
-                    accessibilityState={{ checked: isSelected }}
-                    key={scopeValue}
-                    onPress={() => setScope(scopeValue)}
-                    style={({ pressed }) => [
-                      styles.scopeOption,
-                      isSelected && styles.scopeSelected,
-                      pressed && styles.pressed,
-                    ]}
-                    testID={
-                      scopeValue === 'once'
-                        ? 'approval-scope-once'
-                        : 'approval-scope-conversation'
+            <Text style={styles.title}>
+              {batch
+                ? t('agent.approvalBatchTitle', { count: requests.length })
+                : t('agent.approvalTitle')}
+            </Text>
+            {batch ? (
+              <ScrollView
+                bounces={false}
+                style={styles.batchList}
+                testID="approval-batch-list"
+              >
+                {requests.map((request, index) => (
+                  <BatchItem
+                    key={request.approvalId}
+                    colors={colors}
+                    decision={decisions[request.approvalId]}
+                    index={index}
+                    request={request}
+                    styles={styles}
+                    t={t}
+                    onDecision={decision =>
+                      setDecision(request.approvalId, decision)
                     }
-                  >
-                    <View style={styles.check}>
-                      {isSelected && (
-                        <AppIcon color={colors.accent} icon={Check} size={16} />
-                      )}
-                    </View>
-                    <View style={styles.scopeCopy}>
-                      <Text style={styles.scopeTitle}>
-                        {scopeValue === 'once'
-                          ? t('agent.approvalScope.once')
-                          : t('agent.approvalScope.conversation')}
-                      </Text>
-                      <Text style={styles.scopeBody}>
-                        {scopeValue === 'once'
-                          ? t('agent.approvalScope.onceBody')
-                          : t('agent.approvalScope.conversationBody')}
-                      </Text>
-                    </View>
-                  </Pressable>
-                );
-              })}
-            </View>
-            <View style={styles.buttonRow}>
-              <Pressable
-                accessibilityRole="button"
-                onPress={() =>
-                  onDecide(request.approvalId, { status: 'denied' })
-                }
-                style={({ pressed }) => [
-                  styles.denyButton,
-                  pressed && styles.pressed,
-                ]}
-                testID="approval-deny"
-              >
-                <Text style={styles.denyText}>{t('agent.approvalDeny')}</Text>
-              </Pressable>
-              <Pressable
-                accessibilityRole="button"
-                onPress={() =>
-                  onDecide(request.approvalId, {
-                    status: 'approved',
-                    scope,
-                  })
-                }
-                style={({ pressed }) => [
-                  styles.allowButton,
-                  pressed && styles.pressed,
-                ]}
-                testID="approval-allow"
-              >
-                <Text style={styles.allowText}>{t('agent.approvalAllow')}</Text>
-              </Pressable>
-            </View>
+                  />
+                ))}
+              </ScrollView>
+            ) : (
+              <SingleItem
+                colors={colors}
+                request={requests[0]}
+                styles={styles}
+                t={t}
+                onSubmit={submitSingle}
+              />
+            )}
+            {batch && (
+              <>
+                <Text style={styles.batchSummary}>
+                  {t('agent.approvalBatchSummary', {
+                    approved: approvedCount,
+                    denied: requests.length - approvedCount,
+                  })}
+                </Text>
+                <Pressable
+                  accessibilityRole="button"
+                  onPress={submitAll}
+                  style={({ pressed }) => [
+                    styles.commitButton,
+                    pressed && styles.pressed,
+                  ]}
+                  testID="approval-batch-commit"
+                >
+                  <Text style={styles.commitText}>
+                    {t('agent.approvalBatchCommit')}
+                  </Text>
+                </Pressable>
+              </>
+            )}
           </View>
         </View>
       </View>
     </Modal>
+  );
+}
+
+function PreviewBlock({
+  preview,
+  styles,
+  t,
+}: {
+  preview: AgentApprovalPreviewV1;
+  styles: ReturnType<typeof createStyles>;
+  t: ComposerTranslator;
+}) {
+  if (preview.kind === 'write_file') {
+    return (
+      <View testID="approval-preview">
+        <Text style={styles.previewLabel}>{t('agent.approvalPathLabel')}</Text>
+        <Text
+          numberOfLines={2}
+          style={styles.previewPath}
+          testID="approval-preview-path"
+        >
+          {preview.paths[0] ?? ''}
+        </Text>
+        <Text style={styles.previewMeta} testID="approval-preview-bytes">
+          {preview.prior === null
+            ? t('agent.approvalPriorAbsent')
+            : t('agent.approvalPriorKnown', {
+                bytes:
+                  preview.prior.bytes === null ? 0 : preview.prior.bytes,
+              })}
+          {` · ${t('agent.approvalBytes', { bytes: preview.content_bytes ?? 0 })}`}
+        </Text>
+        <Text style={styles.previewLabel}>{t('agent.approvalDiffTitle')}</Text>
+        <DiffPreview preview={preview} styles={styles} t={t} />
+      </View>
+    );
+  }
+  return (
+    <View testID="approval-preview">
+      <Text style={styles.previewLabel}>{t('agent.approvalPathLabel')}</Text>
+      <Text
+        numberOfLines={2}
+        style={styles.previewPath}
+        testID="approval-preview-path"
+      >
+        {preview.paths.join(', ') || '—'}
+      </Text>
+    </View>
+  );
+}
+
+function DiffPreview({
+  preview,
+  styles,
+  t,
+}: {
+  preview: AgentApprovalPreviewV1;
+  styles: ReturnType<typeof createStyles>;
+  t: ComposerTranslator;
+}) {
+  if (preview.diff_preview === null) {
+    return (
+      <Text style={styles.diffEmpty} testID="approval-diff-binary">
+        {t('agent.approvalDiffBinary')}
+      </Text>
+    );
+  }
+  if (preview.diff_preview.length === 0) {
+    return (
+      <Text style={styles.diffEmpty} testID="approval-diff-empty">
+        {t('agent.approvalDiffEmpty')}
+      </Text>
+    );
+  }
+  return (
+    <View testID="approval-diff">
+      <ScrollView
+        bounces={false}
+        horizontal
+        nestedScrollEnabled
+        style={styles.diffBox}
+      >
+        <Text style={styles.diffText}>{preview.diff_preview}</Text>
+      </ScrollView>
+      {preview.diff_truncated && (
+        <Text style={styles.diffTruncated}>
+          {t('agent.approvalDiffTruncated')}
+        </Text>
+      )}
+    </View>
+  );
+}
+
+function BatchItem({
+  colors,
+  decision,
+  index,
+  onDecision,
+  request,
+  styles,
+  t,
+}: {
+  colors: ThemePalette;
+  decision: ItemDecision | undefined;
+  index: number;
+  onDecision: (decision: ItemDecision) => void;
+  request: ApprovalRequestSpec;
+  styles: ReturnType<typeof createStyles>;
+  t: ComposerTranslator;
+}) {
+  const [denyMessage, setDenyMessage] = useState('');
+  const current = decision ?? { kind: 'deny', message: '' };
+  const approve = (value: ApprovalScopeValue) =>
+    onDecision({ kind: 'approve', scope: value });
+  const deny = () => onDecision({ kind: 'deny', message: denyMessage });
+  return (
+    <View style={styles.batchItem} testID={`approval-batch-item-${index}`}>
+      <Text style={styles.itemIndex}>
+        {t('agent.approvalBatchItem', { index: index + 1 })}
+      </Text>
+      <Text style={styles.toolName}>{request.toolName}</Text>
+      <Text style={styles.toolSummary}>
+        {t(toolSummaryKey(request.toolName) as never)}
+      </Text>
+      {request.preview !== null && (
+        <PreviewBlock preview={request.preview} styles={styles} t={t} />
+      )}
+      <View style={styles.itemActions}>
+        {request.scopes.map(value => (
+          <Pressable
+            accessibilityRole="button"
+            accessibilityState={{
+              selected: current.kind === 'approve' && current.scope === value,
+            }}
+            key={value}
+            onPress={() => approve(value)}
+            style={({ pressed }) => [
+              styles.itemApprove,
+              current.kind === 'approve' &&
+                current.scope === value &&
+                styles.itemApproveSelected,
+              pressed && styles.pressed,
+            ]}
+            testID={`approval-item-${index}-${value}`}
+          >
+            <AppIcon
+              color={
+                current.kind === 'approve' && current.scope === value
+                  ? colors.background
+                  : colors.accent
+              }
+              icon={Check}
+              size={13}
+            />
+            <Text
+              style={[
+                styles.itemApproveText,
+                current.kind === 'approve' &&
+                  current.scope === value &&
+                  styles.itemApproveTextSelected,
+              ]}
+            >
+              {value === 'once'
+                ? t('agent.approvalScope.once')
+                : t('agent.approvalScope.conversation')}
+            </Text>
+          </Pressable>
+        ))}
+        <Pressable
+          accessibilityRole="button"
+          accessibilityState={{ selected: current.kind === 'deny' }}
+          onPress={deny}
+          style={({ pressed }) => [
+            styles.itemDeny,
+            current.kind === 'deny' && styles.itemDenySelected,
+            pressed && styles.pressed,
+          ]}
+          testID={`approval-item-${index}-deny`}
+        >
+          <AppIcon
+            color={current.kind === 'deny' ? colors.background : colors.danger}
+            icon={X}
+            size={13}
+          />
+          <Text
+            style={[
+              styles.itemDenyText,
+              current.kind === 'deny' && styles.itemDenyTextSelected,
+            ]}
+          >
+            {t('agent.approvalDeny')}
+          </Text>
+        </Pressable>
+      </View>
+      {current.kind === 'deny' && (
+        <View style={styles.denyMessageRow}>
+          <TextInput
+            accessibilityLabel={t('agent.approvalDenyWithMessage')}
+            maxLength={MAX_DENY_MESSAGE_BYTES}
+            multiline
+            onChangeText={value => {
+              setDenyMessage(value);
+              onDecision({ kind: 'deny', message: value });
+            }}
+            placeholder={t('agent.approvalDenyMessagePlaceholder')}
+            placeholderTextColor={colors.muted}
+            style={styles.denyInput}
+            testID={`approval-item-${index}-deny-message`}
+            value={denyMessage}
+          />
+          <Text style={styles.denyHint}>
+            {t('agent.approvalDenyMessageHint')}
+          </Text>
+        </View>
+      )}
+    </View>
+  );
+}
+
+function SingleItem({
+  colors,
+  onSubmit,
+  request,
+  styles,
+  t,
+}: {
+  colors: ThemePalette;
+  onSubmit: (
+    request: ApprovalRequestSpec,
+    decision: AgentApprovalDecisionInput,
+  ) => void;
+  request: ApprovalRequestSpec;
+  styles: ReturnType<typeof createStyles>;
+  t: ComposerTranslator;
+}) {
+  const [scope, setScope] = useState<ApprovalScopeValue>(
+    request.scopes[0] ?? 'once',
+  );
+  const [denyMessage, setDenyMessage] = useState('');
+  return (
+    <>
+      <Text style={styles.toolName}>{request.toolName}</Text>
+      <Text style={styles.toolSummary}>
+        {t(toolSummaryKey(request.toolName) as never)}
+      </Text>
+      {request.preview !== null && (
+        <PreviewBlock preview={request.preview} styles={styles} t={t} />
+      )}
+      <Text style={styles.scopeLabel}>{t('agent.approvalScopeLabel')}</Text>
+      <View
+        accessibilityLabel={t('agent.approvalScopeLabel')}
+        accessibilityRole="radiogroup"
+        testID="approval-scope-group"
+      >
+        {request.scopes.map(scopeValue => {
+          const isSelected = scopeValue === scope;
+          return (
+            <Pressable
+              accessibilityRole="radio"
+              accessibilityState={{ checked: isSelected }}
+              key={scopeValue}
+              onPress={() => setScope(scopeValue)}
+              style={({ pressed }) => [
+                styles.scopeOption,
+                isSelected && styles.scopeSelected,
+                pressed && styles.pressed,
+              ]}
+              testID={
+                scopeValue === 'once'
+                  ? 'approval-scope-once'
+                  : 'approval-scope-conversation'
+              }
+            >
+              <View style={styles.check}>
+                {isSelected && (
+                  <AppIcon color={colors.accent} icon={Check} size={16} />
+                )}
+              </View>
+              <View style={styles.scopeCopy}>
+                <Text style={styles.scopeTitle}>
+                  {scopeValue === 'once'
+                    ? t('agent.approvalScope.once')
+                    : t('agent.approvalScope.conversation')}
+                </Text>
+                <Text style={styles.scopeBody}>
+                  {scopeValue === 'once'
+                    ? t('agent.approvalScope.onceBody')
+                    : t('agent.approvalScope.conversationBody')}
+                </Text>
+              </View>
+            </Pressable>
+          );
+        })}
+      </View>
+      <TextInput
+        accessibilityLabel={t('agent.approvalDenyWithMessage')}
+        maxLength={MAX_DENY_MESSAGE_BYTES}
+        multiline
+        onChangeText={setDenyMessage}
+        placeholder={t('agent.approvalDenyMessagePlaceholder')}
+        placeholderTextColor={colors.muted}
+        style={styles.denyInput}
+        testID="approval-deny-message"
+        value={denyMessage}
+      />
+      {denyMessage.trim().length > 0 && (
+        <Text style={styles.denyHint}>
+          {t('agent.approvalDenyMessageHint')}
+        </Text>
+      )}
+      <View style={styles.buttonRow}>
+        <Pressable
+          accessibilityRole="button"
+          onPress={() =>
+            onSubmit(request, {
+              status: 'denied',
+              ...(denyMessage.trim().length > 0
+                ? { message: denyMessage }
+                : {}),
+            })
+          }
+          style={({ pressed }) => [
+            styles.denyButton,
+            pressed && styles.pressed,
+          ]}
+          testID="approval-deny"
+        >
+          <Text style={styles.denyText}>
+            {denyMessage.trim().length > 0
+              ? t('agent.approvalDenyWithMessage')
+              : t('agent.approvalDeny')}
+          </Text>
+        </Pressable>
+        <Pressable
+          accessibilityRole="button"
+          onPress={() => onSubmit(request, { status: 'approved', scope })}
+          style={({ pressed }) => [
+            styles.allowButton,
+            pressed && styles.pressed,
+          ]}
+          testID="approval-allow"
+        >
+          <Text style={styles.allowText}>{t('agent.approvalAllow')}</Text>
+        </Pressable>
+      </View>
+    </>
   );
 }
 
@@ -148,7 +572,7 @@ const createStyles = (colors: ThemePalette) =>
       justifyContent: 'flex-end',
       alignItems: 'stretch',
       paddingHorizontal: 18,
-      paddingBottom: 96,
+      paddingBottom: 72,
     },
     card: {
       backgroundColor: colors.surface,
@@ -176,12 +600,131 @@ const createStyles = (colors: ThemePalette) =>
       fontWeight: '700',
       marginTop: 6,
     },
-    arguments: {
+    toolSummary: {
       color: colors.muted,
       fontSize: 11,
       lineHeight: 15,
+      marginTop: 2,
+    },
+    previewLabel: {
+      color: colors.muted,
+      fontSize: 10,
+      fontWeight: '700',
+      marginTop: 8,
+      marginBottom: 2,
+    },
+    previewPath: {
+      color: colors.text,
+      fontSize: 12,
+      fontFamily: fonts.mono,
+      lineHeight: 16,
+    },
+    previewMeta: {
+      color: colors.muted,
+      fontSize: 11,
+      lineHeight: 15,
+      marginTop: 2,
+    },
+    diffBox: {
+      backgroundColor: colors.surfaceRaised,
+      borderRadius: 10,
+      padding: 8,
+      marginTop: 2,
+      maxHeight: 128,
+    },
+    diffText: {
+      color: colors.text,
+      fontSize: 10,
+      fontFamily: fonts.mono,
+      lineHeight: 14,
+    },
+    diffEmpty: {
+      color: colors.muted,
+      fontSize: 11,
+      fontStyle: 'italic',
+      marginTop: 2,
+    },
+    diffTruncated: {
+      color: colors.warning ?? colors.accent,
+      fontSize: 10,
+      marginTop: 2,
+    },
+    batchList: { maxHeight: 320, marginTop: 8 },
+    batchItem: {
+      borderWidth: StyleSheet.hairlineWidth,
+      borderColor: colors.line,
+      borderRadius: 12,
+      padding: 10,
+      marginBottom: 8,
+    },
+    itemIndex: {
+      color: colors.muted,
+      fontSize: 9,
+      fontWeight: '800',
+      letterSpacing: 1,
+    },
+    itemActions: { flexDirection: 'row', flexWrap: 'wrap', gap: 6, marginTop: 8 },
+    itemApprove: {
+      flexDirection: 'row',
+      alignItems: 'center',
+      gap: 4,
+      borderRadius: 10,
+      borderWidth: StyleSheet.hairlineWidth,
+      borderColor: colors.accent,
+      paddingHorizontal: 8,
+      paddingVertical: 6,
+    },
+    itemApproveSelected: { backgroundColor: colors.accent },
+    itemApproveText: { color: colors.accent, fontSize: 11, fontWeight: '700' },
+    itemApproveTextSelected: { color: colors.background },
+    itemDeny: {
+      flexDirection: 'row',
+      alignItems: 'center',
+      gap: 4,
+      borderRadius: 10,
+      borderWidth: StyleSheet.hairlineWidth,
+      borderColor: colors.danger,
+      paddingHorizontal: 8,
+      paddingVertical: 6,
+    },
+    itemDenySelected: { backgroundColor: colors.danger },
+    itemDenyText: { color: colors.danger, fontSize: 11, fontWeight: '700' },
+    itemDenyTextSelected: { color: colors.background },
+    denyMessageRow: { marginTop: 6 },
+    denyInput: {
+      backgroundColor: colors.surfaceRaised,
+      borderRadius: 10,
+      borderWidth: StyleSheet.hairlineWidth,
+      borderColor: colors.line,
+      color: colors.text,
+      fontSize: 12,
+      lineHeight: 16,
+      minHeight: 38,
+      maxHeight: 84,
+      paddingHorizontal: 10,
+      paddingVertical: 8,
+    },
+    denyHint: {
+      color: colors.muted,
+      fontSize: 10,
+      lineHeight: 13,
       marginTop: 4,
     },
+    batchSummary: {
+      color: colors.muted,
+      fontSize: 11,
+      textAlign: 'center',
+      marginTop: 6,
+    },
+    commitButton: {
+      minHeight: 46,
+      borderRadius: 14,
+      alignItems: 'center',
+      justifyContent: 'center',
+      backgroundColor: colors.accent,
+      marginTop: 8,
+    },
+    commitText: { color: colors.background, fontSize: 14, fontWeight: '700' },
     scopeLabel: {
       color: colors.muted,
       fontSize: 10,

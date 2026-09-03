@@ -240,6 +240,9 @@ export async function runAgentTurn(
       toolCallId: call.id,
       toolName: call.name,
       argumentsJson: call.arguments,
+      // The legacy driver has no native batch projection; previews are only
+      // produced by the durable native runtime path.
+      preview: null,
       scopes: APPROVAL_SCOPES,
       expiresAtMs: Date.now() + approvalTimeoutMs,
     };

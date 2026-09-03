@@ -34,8 +34,33 @@ const request: ApprovalRequestSpec = {
   toolCallId: 'c1',
   toolName: 'write_file',
   argumentsJson: '{"path":"notes.md","content":"hi"}',
+  preview: {
+    schema_version: 1,
+    kind: 'write_file',
+    paths: ['notes.md'],
+    content_bytes: 12,
+    prior: { schema_version: 1, kind: 'absent', bytes: null },
+    diff_preview: '@@ -1,0 +1,1 @@\n+hello',
+    diff_truncated: false,
+  },
   scopes: ['once', 'conversation'],
   expiresAtMs: Date.now() + 120_000,
+};
+
+const secondRequest: ApprovalRequestSpec = {
+  ...request,
+  approvalId: 'ap-2',
+  toolCallId: 'c2',
+  toolName: 'git_commit',
+  preview: {
+    schema_version: 1,
+    kind: 'git_commit',
+    paths: [],
+    content_bytes: null,
+    prior: null,
+    diff_preview: null,
+    diff_truncated: false,
+  },
 };
 
 function byTestId(root: ReactTestInstance, testID: string) {
@@ -44,7 +69,9 @@ function byTestId(root: ReactTestInstance, testID: string) {
   return node;
 }
 
-async function renderComposer(): Promise<{
+async function renderComposer(
+  requests: readonly ApprovalRequestSpec[] = [request],
+): Promise<{
   renderer: Renderer;
   onDecide: jest.Mock;
 }> {
@@ -52,14 +79,16 @@ async function renderComposer(): Promise<{
   let renderer: Renderer | undefined;
   await act(async () => {
     renderer = ReactTestRenderer.create(
-      presentation(<ApprovalComposer request={request} onDecide={onDecide} />),
+      presentation(
+        <ApprovalComposer requests={requests} onDecide={onDecide} />,
+      ),
     );
   });
   if (renderer === undefined) throw new Error('renderer was not created');
   return { renderer, onDecide };
 }
 
-test('shows the tool call, the offered scopes, and allow/deny actions', async () => {
+test('shows the tool call, the preview, the offered scopes, and allow/deny actions', async () => {
   const { renderer } = await renderComposer();
   const root = renderer.root;
   expect(root.findByProps({ testID: 'approval-composer-card' })).toBeDefined();
@@ -67,9 +96,10 @@ test('shows the tool call, the offered scopes, and allow/deny actions', async ()
   expect(root.findByProps({ testID: 'approval-scope-conversation' })).toBeDefined();
   expect(root.findByProps({ testID: 'approval-allow' })).toBeDefined();
   expect(root.findByProps({ testID: 'approval-deny' })).toBeDefined();
-  // The gated tool is visible.
-  const labels = root.findAllByProps({ children: 'write_file' });
-  expect(labels.length).toBeGreaterThan(0);
+  // The gated tool and its native-computed preview are visible.
+  expect(root.findAllByProps({ children: 'write_file' }).length).toBeGreaterThan(0);
+  expect(root.findByProps({ testID: 'approval-preview-path' }).props.children).toBe('notes.md');
+  expect(root.findByProps({ testID: 'approval-diff' })).toBeDefined();
 });
 
 test('allow submits the selected scope (once by default)', async () => {
@@ -78,10 +108,9 @@ test('allow submits the selected scope (once by default)', async () => {
   await act(async () => {
     allow.props.onPress();
   });
-  expect(onDecide).toHaveBeenCalledWith('ap-1', {
-    status: 'approved',
-    scope: 'once',
-  });
+  expect(onDecide).toHaveBeenCalledWith([
+    { approvalId: 'ap-1', decision: { status: 'approved', scope: 'once' } },
+  ]);
 });
 
 test('allow submits the conversation scope after selection', async () => {
@@ -94,10 +123,9 @@ test('allow submits the conversation scope after selection', async () => {
   await act(async () => {
     allow.props.onPress();
   });
-  expect(onDecide).toHaveBeenCalledWith('ap-1', {
-    status: 'approved',
-    scope: 'conversation',
-  });
+  expect(onDecide).toHaveBeenCalledWith([
+    { approvalId: 'ap-1', decision: { status: 'approved', scope: 'conversation' } },
+  ]);
 });
 
 test('deny submits a denial and modal dismissal denies too', async () => {
@@ -106,11 +134,75 @@ test('deny submits a denial and modal dismissal denies too', async () => {
   await act(async () => {
     deny.props.onPress();
   });
-  expect(onDecide).toHaveBeenCalledWith('ap-1', { status: 'denied' });
+  expect(onDecide).toHaveBeenCalledWith([
+    { approvalId: 'ap-1', decision: { status: 'denied' } },
+  ]);
   const modal = byTestId(renderer.root, 'approval-composer-modal');
   await act(async () => {
     modal.props.onRequestClose();
   });
   expect(onDecide).toHaveBeenCalledTimes(2);
-  expect(onDecide).toHaveBeenLastCalledWith('ap-1', { status: 'denied' });
+  expect(onDecide).toHaveBeenLastCalledWith([
+    { approvalId: 'ap-1', decision: { status: 'denied' } },
+  ]);
+});
+
+test('a deny message is carried into the denial', async () => {
+  const { renderer, onDecide } = await renderComposer();
+  const input = byTestId(renderer.root, 'approval-deny-message');
+  await act(async () => {
+    input.props.onChangeText('do not touch prod.txt');
+  });
+  const deny = byTestId(renderer.root, 'approval-deny');
+  await act(async () => {
+    deny.props.onPress();
+  });
+  expect(onDecide).toHaveBeenCalledWith([
+    {
+      approvalId: 'ap-1',
+      decision: { status: 'denied', message: 'do not touch prod.txt' },
+    },
+  ]);
+});
+
+test('a batch presents every call with per-item decisions and one commit', async () => {
+  const { renderer, onDecide } = await renderComposer([request, secondRequest]);
+  const root = renderer.root;
+  expect(root.findByProps({ testID: 'approval-batch-list' })).toBeDefined();
+  expect(root.findByProps({ testID: 'approval-batch-item-0' })).toBeDefined();
+  expect(root.findByProps({ testID: 'approval-batch-item-1' })).toBeDefined();
+  // Per-item decisions: allow the first, deny the second with a message.
+  await act(async () => {
+    byTestId(root, 'approval-item-0-once').props.onPress();
+  });
+  await act(async () => {
+    byTestId(root, 'approval-item-1-deny').props.onPress();
+  });
+  await act(async () => {
+    byTestId(root, 'approval-item-1-deny-message').props.onChangeText(
+      'no commits right now',
+    );
+  });
+  await act(async () => {
+    byTestId(root, 'approval-batch-commit').props.onPress();
+  });
+  expect(onDecide).toHaveBeenCalledWith([
+    { approvalId: 'ap-1', decision: { status: 'approved', scope: 'once' } },
+    {
+      approvalId: 'ap-2',
+      decision: { status: 'denied', message: 'no commits right now' },
+    },
+  ]);
+});
+
+test('batch items default to denial until explicitly approved', async () => {
+  const { renderer, onDecide } = await renderComposer([request, secondRequest]);
+  const root = renderer.root;
+  await act(async () => {
+    byTestId(root, 'approval-batch-commit').props.onPress();
+  });
+  expect(onDecide).toHaveBeenCalledWith([
+    { approvalId: 'ap-1', decision: { status: 'denied' } },
+    { approvalId: 'ap-2', decision: { status: 'denied' } },
+  ]);
 });

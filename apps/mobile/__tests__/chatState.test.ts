@@ -23,6 +23,7 @@ import {
   type ChatState,
   type PersistedChatStateV7,
   type PersistedAgentAttemptJournalV3,
+  type AgentConversationGrantV2,
   type AgentControllerCASV1,
   type AgentToolReceiptV1,
   type AgentCASCheckpointInput,
@@ -2108,6 +2109,177 @@ describe('schema 9 Agent journal persistence', () => {
     ).toBe(false);
     expect(snapshotEvaluated).toBe(false);
     expect(transaction?.rollback()).toBe(true);
+  });
+
+  const revokeFixture = (
+    freeze: boolean,
+  ): {
+    store: ChatStore;
+    conversationId: string;
+    grant: AgentConversationGrantV2;
+  } => {
+    const baseStore = createChatStore({
+      now: () => T0,
+      createId: kind => (kind === 'conversation' ? UUID_A : UUID_B),
+      createLifecycleId: kind =>
+        kind === 'turn' ? UUID_B : kind === 'attempt' ? UUID_C : UUID_A,
+    });
+    const conversationId = baseStore.createConversation();
+    expect(baseStore.prepareTurnAttempt(conversationId, 'revoke me')).not.toBeNull();
+    const attempt =
+      baseStore.getState().conversations[conversationId]!.attempts[0]!;
+    const grant: AgentConversationGrantV2 = {
+      schema_version: 2,
+      grant_id: '77777777-7777-4777-8777-777777777777',
+      conversation_id: conversationId,
+      workspace_id: UUID_A,
+      project_id: null,
+      binding_revision: 1,
+      root_fingerprint_sha256: 'a'.repeat(64),
+      tool_family: 'file_write',
+      registry_version: 1,
+      policy_version: 'agent-v1',
+      issued_for: {
+        schema_version: 1,
+        task_id: attempt.turnId,
+        attempt_id: attempt.attemptId,
+      },
+      created_at: T0,
+    };
+    const wire = JSON.parse(baseStore.serialize()) as Record<string, unknown>;
+    const wireConversation = (
+      wire.conversations as Array<Record<string, unknown>>
+    )[0]!;
+    wireConversation.workspace_id = UUID_A;
+    wireConversation.workspace_binding = {
+      schema_version: 1,
+      workspace_id: UUID_A,
+      binding_revision: 1,
+      project_id: null,
+    };
+    wireConversation.agent_grants = [grant];
+    if (freeze) {
+      const wireAttempt = (
+        wireConversation.attempts as Array<Record<string, unknown>>
+      )[0]!;
+      wireAttempt.journal_revision = 1;
+      wireAttempt.agent = {
+        schema_version: 3,
+        phase: 'ready_for_round',
+        controller_generation: 0,
+        policy: {
+          schema_version: 1,
+          policy_version: 'agent-v1',
+          max_single_write_bytes: 32768,
+          max_batch_write_bytes: 524288,
+          max_attempt_write_bytes: 4194304,
+        },
+        root: {
+          schema_version: 1,
+          kind: 'workspace',
+          workspace_id: UUID_A,
+          workspace_binding_revision: 1,
+          project_id: null,
+          root_fingerprint_sha256: 'a'.repeat(64),
+          capabilities: ['file_read', 'file_write'],
+        },
+        tool_registry_version: 1,
+        toolset_sha256: 'b'.repeat(64),
+        transcript: {
+          schema_version: 1,
+          transcript_ref: 'dddddddd-dddd-4ddd-8ddd-dddddddddddd',
+          generation: 0,
+          transcript_sha256: 'c'.repeat(64),
+          transcript_bytes: 0,
+        },
+        round_index: 0,
+        round_lineage: null,
+        call_index: null,
+        batch: [],
+        frozen_grant_ids: [grant.grant_id],
+        reserved_write_bytes: 0,
+        updated_at: T0,
+      };
+    }
+    const hydrated = hydrateChatState(JSON.stringify(wire));
+    const store = createChatStore({
+      now: () => T0,
+      createId: kind => (kind === 'conversation' ? UUID_A : UUID_B),
+      createLifecycleId: kind =>
+        kind === 'turn' ? UUID_B : kind === 'attempt' ? UUID_C : UUID_A,
+      sessionAuthority: { generation: 1, sessionSha256: 'd'.repeat(64) },
+      initialState: hydrated,
+    });
+    return { store, conversationId, grant };
+  };
+
+  test('revokeAgentGrant removes a grant as a persisted checkpoint', () => {
+    const { store, conversationId, grant } = revokeFixture(false);
+    const withGrant = store.getState().conversations[conversationId]!;
+    expect(withGrant.agentGrants).toEqual([grant]);
+
+    // The revoke applies with an exact expected-conversation guard.
+    const transaction = store.revokeAgentGrant({
+      conversationId,
+      grantId: grant.grant_id,
+      expectedConversation: withGrant,
+    });
+    expect(transaction).not.toBeNull();
+    expect(transaction?.commit()).toBe(true);
+    const after = store.getState().conversations[conversationId]!;
+    expect(after.agentGrants).toEqual([]);
+    // The wire form persists the revocation too.
+    const wire = JSON.parse(store.serialize()) as Record<string, unknown>;
+    const wireConversation = (
+      wire.conversations as Array<Record<string, unknown>>
+    )[0]!;
+    expect(wireConversation.agent_grants).toEqual([]);
+    const hydrated = hydrateChatState(store.serialize());
+    expect(hydrated.conversations[conversationId]?.agentGrants).toEqual([]);
+  });
+
+  test('revokeAgentGrant fails closed on stale, missing, or frozen grants', () => {
+    const { store, conversationId, grant } = revokeFixture(false);
+    const withGrant = store.getState().conversations[conversationId]!;
+
+    // Unknown grant id: nothing to revoke.
+    expect(
+      store.revokeAgentGrant({
+        conversationId,
+        grantId: '88888888-8888-4888-8888-888888888888',
+        expectedConversation: withGrant,
+      }),
+    ).toBeNull();
+
+    // Stale expected conversation: rejected.
+    const stale = { ...withGrant, title: 'stale title' };
+    expect(
+      store.revokeAgentGrant({
+        conversationId,
+        grantId: grant.grant_id,
+        expectedConversation: stale,
+      }),
+    ).toBeNull();
+    expect(
+      store.getState().conversations[conversationId]?.agentGrants,
+    ).toEqual([grant]);
+
+    // A grant frozen into a live attempt journal cannot be revoked: the
+    // conversation grants replacement is rejected by the reducer.
+    const frozen = revokeFixture(true);
+    const frozenConversation =
+      frozen.store.getState().conversations[conversationId]!;
+    expect(frozenConversation.agentGrants).toEqual([grant]);
+    expect(
+      frozen.store.revokeAgentGrant({
+        conversationId,
+        grantId: grant.grant_id,
+        expectedConversation: frozenConversation,
+      }),
+    ).toBeNull();
+    expect(
+      frozen.store.getState().conversations[conversationId]?.agentGrants,
+    ).toEqual([grant]);
   });
 
   test('does not expose raw Agent grant mutations through dispatch', () => {

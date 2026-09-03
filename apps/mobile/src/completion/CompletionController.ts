@@ -18,6 +18,7 @@ import {
 } from '../agent/AgentStoreTransitions';
 import type {
   AgentApprovalBindingTokenV2,
+  AgentApprovalPreviewV1,
   AgentAttemptProjectionV2,
   AgentBatchCallProjectionV2,
   AgentBatchReceiptV2,
@@ -27,6 +28,7 @@ import type {
   AgentRuntimeControllerCASV1,
   AgentRuntimeRootV1,
   AgentRuntimeTranscriptHandleV1,
+  AgentToolReceiptV1,
   CompleteAgentRoundRequestV2,
   CompleteAgentRoundResultV2,
   PrepareAgentAttemptRequestV2,
@@ -135,6 +137,9 @@ export type CompletionAgentApprovalRequest = {
   readonly callId: string;
   readonly name: string;
   readonly argumentsSha256: string;
+  /** Bounded native-computed display preview: workspace-relative paths,
+   * byte sizes, and the diff preview for write_file. Never raw model text. */
+  readonly preview: AgentApprovalPreviewV1 | null;
   readonly access: 'conversation_confirm' | 'confirm_once';
   readonly allowedDecisions: readonly (
     | 'denied'
@@ -181,7 +186,10 @@ export type CompletionControllerOutcome = {
     | 'persistence_pending'
     | 'retryable'
     | 'commit_pending'
-    | 'cancelled';
+    | 'cancelled'
+    /** Internal batch marker: one decision of a multi-call approval batch
+     * committed; the batch loop alone consumes it and never surfaces it. */
+    | 'decision_committed';
   readonly conversationId: string | null;
   readonly turnId: string | null;
   readonly attemptId: string | null;
@@ -220,6 +228,13 @@ export type CompletionControllerDependencies = {
   readonly requestAgentApproval?: (
     request: CompletionAgentApprovalRequest,
   ) => Promise<unknown>;
+  /** Injected batch approval broker: presents all gated calls of one batch as
+   * a single list and resolves with one raw decision per request (same order).
+   * Absence falls back to per-call presentation; any malformed answer list
+   * fails closed into denials. */
+  readonly requestBatchApprovals?: (
+    requests: readonly CompletionAgentApprovalRequest[],
+  ) => Promise<readonly unknown[]>;
   /** Injected safe structured-question broker; reserved for ask_user. */
   readonly askAgentQuestion?: (
     request: CompletionAgentQuestionRequest,
@@ -328,6 +343,8 @@ type AgentRun = {
   readonly batchAuthority: AgentBatchAuthority | null;
   /** Full token objects are intentionally memory-only; Store keeps only token. */
   readonly approvalTokens: ReadonlyMap<number, AgentApprovalBindingTokenV2>;
+  /** Native-computed display previews per call index; memory-only. */
+  readonly approvalPreviews: ReadonlyMap<number, AgentApprovalPreviewV1>;
 };
 
 type PendingAgentPersistence = {
@@ -1138,15 +1155,23 @@ export function createCompletionController(
   ): AgentApprovalBindingTokenV2 | null =>
     run?.approvalTokens.get(index) ?? null;
 
+  const agentPreviewByIndex = (
+    run: AgentRun | null,
+    index: number,
+  ): AgentApprovalPreviewV1 | null =>
+    run?.approvalPreviews.get(index) ?? null;
+
   const rememberAgentTokens = (
     run: AgentRun,
     calls: readonly AgentBatchCallProjectionV2[],
   ): AgentRun => {
     const tokens = new Map(run.approvalTokens);
+    const previews = new Map(run.approvalPreviews);
     calls.forEach(call => {
       if (call.approval_token !== null) tokens.set(call.call_index, call.approval_token);
+      if (call.approval_preview !== null) previews.set(call.call_index, call.approval_preview);
     });
-    return { ...run, approvalTokens: tokens };
+    return { ...run, approvalTokens: tokens, approvalPreviews: previews };
   };
 
   const agentBatchAuthorityFromProjection = (
@@ -1186,6 +1211,35 @@ export function createCompletionController(
       return decision !== null && allowed.includes(decision) ? decision : 'denied';
     } catch {
       return 'denied';
+    }
+  };
+
+  /** Bounded model-directed deny message. Anything malformed is discarded so
+   * a hostile UI payload can never reach the protected transcript. */
+  const agentSafeDenyMessage = (raw: unknown): string | null => {
+    try {
+      if (typeof raw !== 'object' || raw === null || Array.isArray(raw)) return null;
+      const record = raw as Record<string, unknown>;
+      if (record.status !== 'denied' || record.message === undefined) return null;
+      if (typeof record.message !== 'string') return null;
+      const message = record.message;
+      let bytes = 0;
+      for (let index = 0; index < message.length; index += 1) {
+        const unit = message.charCodeAt(index);
+        if (unit <= 0x7f) bytes += 1;
+        else if (unit <= 0x7ff) bytes += 2;
+        else if (unit >= 0xd800 && unit <= 0xdbff) {
+          const next = message.charCodeAt(index + 1);
+          if (next < 0xdc00 || next > 0xdfff) return null;
+          bytes += 4;
+          index += 1;
+        } else if (unit >= 0xdc00 && unit <= 0xdfff) return null;
+        else bytes += 3;
+        if (bytes > 2000) return null;
+      }
+      return message;
+    } catch {
+      return null;
     }
   };
 
@@ -1496,6 +1550,41 @@ export function createCompletionController(
     };
   };
 
+  const journalForDeniedSettlement = (
+    journal: PersistedAgentAttemptJournalV3,
+    callIndex: number,
+    deniedReceipt: AgentToolReceiptV1,
+    transcript: AgentRuntimeTranscriptHandleV1,
+    updatedAt: string,
+  ): PersistedAgentAttemptJournalV3 | null => {
+    const call = journal.batch[callIndex];
+    if (call === undefined) return null;
+    const batch = journal.batch.map(copyAgentCall);
+    batch[callIndex] = {
+      ...call,
+      approval_decision: 'denied',
+      approval_token: null,
+      approval_reference: null,
+      native_row_revision: 2,
+      receipt: { ...deniedReceipt } as unknown as StoreAgentToolReceiptV1,
+    };
+    const remainingPending = batch.some(
+      candidate =>
+        candidate.access !== 'auto' &&
+        candidate.access !== 'durable_deny' &&
+        candidate.approval_decision === 'pending',
+    );
+    return {
+      ...copyAgentJournal(journal),
+      phase: remainingPending ? 'approval_pending' : 'batch_frozen',
+      controller_generation: journal.controller_generation + 1,
+      transcript: copyAgentTranscript(transcript),
+      call_index: batch.findIndex(candidate => candidate.receipt === null),
+      batch,
+      updated_at: updatedAt,
+    };
+  };
+
   let runAgentRound: (
     conversationId: string,
     attemptId: string,
@@ -1607,6 +1696,7 @@ export function createCompletionController(
       },
       batchAuthority: null,
       approvalTokens: new Map(),
+      approvalPreviews: new Map(),
     };
     const visible = agentVisible(conversation, attempt);
     const checkpoint = agentCheckpointForJournal(attempt);
@@ -1757,6 +1847,7 @@ export function createCompletionController(
       },
       batchAuthority: null,
       approvalTokens: new Map(),
+      approvalPreviews: new Map(),
     };
     return await safeAgentPersist(
       transaction,
@@ -2698,6 +2789,71 @@ export function createCompletionController(
     );
   };
 
+  type AgentApprovalRequestBundle = {
+    readonly approvalId: string;
+    readonly conversation: Conversation;
+    readonly attempt: TurnAttemptV1;
+    readonly journal: PersistedAgentAttemptJournalV3;
+    readonly call: PersistedAgentCallJournalV3;
+    readonly token: AgentApprovalBindingTokenV2;
+    readonly allowedDecisions: readonly (
+      | 'denied'
+      | 'allow_once'
+      | 'allow_conversation'
+      | 'cancelled'
+    )[];
+    readonly request: CompletionAgentApprovalRequest;
+  };
+
+  const agentApprovalRequestFor = (
+    conversationId: string,
+    attemptId: string,
+    callIndex: number,
+  ): AgentApprovalRequestBundle | null => {
+    const located = getConversationAttempt(conversationId, attemptId);
+    if (located === null || located.attempt.agent === undefined || located.attempt.agent === null) return null;
+    const { conversation, attempt } = located;
+    const journal = attempt.agent;
+    if (journal === undefined || journal === null) return null;
+    const call = journal.batch[callIndex];
+    const token = agentTokenByIndex(agentRun, callIndex);
+    const approvalId = freshOperationId();
+    if (
+      call === undefined ||
+      token === null ||
+      approvalId === null ||
+      call.approval_token !== token.token ||
+      (call.access !== 'conversation_confirm' && call.access !== 'confirm_once')
+    ) return null;
+    const allowedDecisions = token.allowed_decisions;
+    return {
+      approvalId,
+      conversation,
+      attempt,
+      journal,
+      call,
+      token,
+      allowedDecisions,
+      request: {
+        approvalId,
+        conversationId,
+        taskId: attempt.turnId,
+        attemptId,
+        roundId: token.round_id,
+        roundIndex: token.round_index,
+        batchRevision: token.batch_revision,
+        manifestSha256: token.manifest_sha256,
+        callIndex,
+        callId: call.call_id,
+        name: call.name,
+        argumentsSha256: call.arguments_sha256,
+        preview: agentPreviewByIndex(agentRun, callIndex),
+        access: call.access,
+        allowedDecisions,
+      },
+    };
+  };
+
   const bindAgentApproval = async (
     conversationId: string,
     attemptId: string,
@@ -2705,6 +2861,107 @@ export function createCompletionController(
     callIndex: number,
   ): Promise<CompletionControllerOutcome> => {
     if (agentRuntime === undefined) return await failAgentWithoutNative(conversationId, attemptId, 'E_AGENT_APPROVAL');
+    const bundle = agentApprovalRequestFor(conversationId, attemptId, callIndex);
+    if (bundle === null) return await failAgentWithoutNative(conversationId, attemptId, 'E_AGENT_APPROVAL');
+    publish(
+      stateFor('approval_pending', {
+        conversationId,
+        turnId: bundle.attempt.turnId,
+        attemptId,
+        roundId: bundle.token.round_id,
+        transportSchemaVersion: bundle.attempt.contextDisposition === 'verified' ? 3 : 2,
+      }),
+    );
+    let rawDecision: unknown;
+    try {
+      rawDecision = dependencies.requestAgentApproval === undefined
+        ? undefined
+        : await dependencies.requestAgentApproval(bundle.request);
+    } catch {
+      rawDecision = undefined;
+    }
+    if (runEpoch !== epoch) return outcome('cancelled', state);
+    const decision = agentSafeApprovalDecision(rawDecision, bundle.allowedDecisions);
+    const denyMessage = decision === 'denied' ? agentSafeDenyMessage(rawDecision) : null;
+    const committed = await commitAgentApprovalDecision(
+      conversationId,
+      attemptId,
+      runEpoch,
+      callIndex,
+      decision,
+      denyMessage,
+      true,
+    );
+    return committed;
+  };
+
+  const bindAgentBatchApprovals = async (
+    conversationId: string,
+    attemptId: string,
+    runEpoch: number,
+    callIndexes: readonly number[],
+  ): Promise<CompletionControllerOutcome> => {
+    if (agentRuntime === undefined) return await failAgentWithoutNative(conversationId, attemptId, 'E_AGENT_APPROVAL');
+    const bundles = callIndexes.map(index =>
+      agentApprovalRequestFor(conversationId, attemptId, index),
+    );
+    if (bundles.some(bundle => bundle === null)) {
+      return await failAgentWithoutNative(conversationId, attemptId, 'E_AGENT_APPROVAL');
+    }
+    const complete = bundles as AgentApprovalRequestBundle[];
+    const first = complete[0];
+    publish(
+      stateFor('approval_pending', {
+        conversationId,
+        turnId: first.attempt.turnId,
+        attemptId,
+        roundId: first.token.round_id,
+        transportSchemaVersion: first.attempt.contextDisposition === 'verified' ? 3 : 2,
+      }),
+    );
+    let answers: readonly unknown[];
+    try {
+      answers = dependencies.requestBatchApprovals === undefined
+        ? await Promise.all(complete.map(bundle =>
+            dependencies.requestAgentApproval === undefined
+              ? Promise.resolve(undefined)
+              : dependencies.requestAgentApproval(bundle.request)))
+        : await dependencies.requestBatchApprovals(complete.map(bundle => bundle.request));
+    } catch {
+      answers = complete.map(() => undefined);
+    }
+    if (!Array.isArray(answers) || answers.length !== complete.length) {
+      answers = complete.map(() => undefined);
+    }
+    if (runEpoch !== epoch) return outcome('cancelled', state);
+    for (let index = 0; index < complete.length; index += 1) {
+      const bundle = complete[index];
+      const decision = agentSafeApprovalDecision(answers[index], bundle.allowedDecisions);
+      const denyMessage = decision === 'denied' ? agentSafeDenyMessage(answers[index]) : null;
+      const committed = await commitAgentApprovalDecision(
+        conversationId,
+        attemptId,
+        runEpoch,
+        bundle.call.call_index,
+        decision,
+        denyMessage,
+        index === complete.length - 1,
+      );
+      if (committed.status === 'decision_committed') continue;
+      return committed;
+    }
+    return await runAgentBatch(conversationId, attemptId, runEpoch);
+  };
+
+  const commitAgentApprovalDecision = async (
+    conversationId: string,
+    attemptId: string,
+    runEpoch: number,
+    callIndex: number,
+    decision: 'denied' | 'allow_once' | 'allow_conversation' | 'cancelled',
+    denyMessage: string | null,
+    resume: boolean,
+  ): Promise<CompletionControllerOutcome> => {
     const located = getConversationAttempt(conversationId, attemptId);
     if (located === null || located.attempt.agent === undefined || located.attempt.agent === null) {
       return await failAgentWithoutNative(conversationId, attemptId, 'E_AGENT_CONFLICT');
@@ -2724,42 +2981,9 @@ export function createCompletionController(
     ) return await failAgentWithoutNative(conversationId, attemptId, 'E_AGENT_APPROVAL');
     const approvalId = freshOperationId();
     const allowedDecisions = token.allowed_decisions;
-    if (approvalId === null) return await failAgentWithoutNative(conversationId, attemptId, 'E_AGENT_PERSISTENCE');
-    publish(
-      stateFor('approval_pending', {
-        conversationId,
-        turnId: attempt.turnId,
-        attemptId,
-        roundId: token.round_id,
-        transportSchemaVersion: attempt.contextDisposition === 'verified' ? 3 : 2,
-      }),
-    );
-    const request: CompletionAgentApprovalRequest = {
-      approvalId,
-      conversationId,
-      taskId: attempt.turnId,
-      attemptId,
-      roundId: token.round_id,
-      roundIndex: token.round_index,
-      batchRevision: token.batch_revision,
-      manifestSha256: token.manifest_sha256,
-      callIndex,
-      callId: call.call_id,
-      name: call.name,
-      argumentsSha256: call.arguments_sha256,
-      access: call.access,
-      allowedDecisions,
-    };
-    let rawDecision: unknown;
-    try {
-      rawDecision = dependencies.requestAgentApproval === undefined
-        ? undefined
-        : await dependencies.requestAgentApproval(request);
-    } catch {
-      rawDecision = undefined;
+    if (approvalId === null || !allowedDecisions.includes(decision)) {
+      return await failAgentWithoutNative(conversationId, attemptId, 'E_AGENT_APPROVAL');
     }
-    if (runEpoch !== epoch) return outcome('cancelled', state);
-    const decision = agentSafeApprovalDecision(rawDecision, allowedDecisions);
     const grant =
       decision === 'allow_conversation'
         ? agentGrantFor(conversation, journal, call) ?? agentNewGrant(conversation, attempt, journal, call)
@@ -2855,6 +3079,7 @@ export function createCompletionController(
             // receipt. Top-level CAS advances with the persisted decision.
             token,
             decision,
+            deny_message: decision === 'denied' ? denyMessage : null,
           };
           try {
             deniedResult = await agentRuntime!.bindAgentApproval(deniedRequest);
@@ -2864,7 +3089,74 @@ export function createCompletionController(
           if (mapEvidence('bind_agent_approval', deniedRequest, deniedResult) === null) {
             return await failAgentWithoutNative(conversationId, attemptId, 'E_AGENT_TRANSCRIPT');
           }
-          return await runAgentBatch(conversationId, attemptId, runEpoch);
+          if (decision === 'denied' && deniedResult.status !== 'conflict') {
+            // The native bind already settled the denial atomically (feedback,
+            // receipt, transcript). Persist that settlement into the schema-9
+            // journal so it survives a kill and feeds the next provider round
+            // as a structured denied tool result.
+            const deniedReceipt = deniedResult.receipt;
+            const deniedTranscript = deniedResult.transcript;
+            if (deniedReceipt === null || deniedTranscript === null) {
+              return await failAgentWithoutNative(conversationId, attemptId, 'E_AGENT_TRANSCRIPT');
+            }
+            const settlementCurrent = getConversationAttempt(conversationId, attemptId);
+            const settlementCas = settlementCurrent === null
+              ? null
+              : authorityFor(settlementCurrent.attempt, conversationId);
+            if (settlementCas === null || settlementCurrent === null || settlementCurrent.attempt.agent === undefined || settlementCurrent.attempt.agent === null) {
+              return await failAgentWithoutNative(conversationId, attemptId, 'E_AGENT_PERSISTENCE');
+            }
+            const settlementJournal = journalForDeniedSettlement(
+              settlementCurrent.attempt.agent,
+              callIndex,
+              deniedReceipt,
+              deniedTranscript,
+              canonicalNow(dependencies.now),
+            );
+            if (settlementJournal === null) {
+              return await failAgentWithoutNative(conversationId, attemptId, 'E_AGENT_CONFLICT');
+            }
+            const settlementEvent = agentEvent(
+              attemptId,
+              freshOperationId() ?? deniedOperationId,
+              'tool_result',
+              token.round_index,
+              call.call_id,
+              'denied',
+              `agent.${call.name}`,
+              call.arguments_sha256,
+              deniedReceipt.result_sha256,
+              null,
+              'E_AGENT_DENIED_BY_USER',
+            );
+            const settlementConversation = getConversationAttempt(conversationId, attemptId)?.conversation;
+            if (settlementConversation === undefined) {
+              return await failAgentWithoutNative(conversationId, attemptId, 'E_AGENT_CONFLICT');
+            }
+            const settlementTransaction = dependencies.chat.checkpointAgentApproval({
+              cas: settlementCas,
+              expectedConversation: settlementConversation,
+              expectedAttempt: settlementCurrent.attempt,
+              journal: settlementJournal,
+              grants: settlementConversation.agentGrants ?? settlementConversation.agent_grants ?? [],
+              events: [settlementEvent],
+              evidence: mapEvidence('bind_agent_approval', deniedRequest, deniedResult)!,
+            });
+            if (settlementTransaction === null) {
+              return await failAgentWithoutNative(conversationId, attemptId, 'E_AGENT_CONFLICT');
+            }
+            return await safeAgentPersist(
+              settlementTransaction,
+              async () => resume
+                ? await runAgentBatch(conversationId, attemptId, runEpoch)
+                : outcome('decision_committed', state),
+              runEpoch,
+              { conversationId, turnId: attempt.turnId, attemptId },
+            );
+          }
+          return resume
+            ? await runAgentBatch(conversationId, attemptId, runEpoch)
+            : outcome('decision_committed', state);
         }
         // Reuse the approval preflight event identity for the native bind. The
         // post-checkpoint ordering guard intentionally requires that marker to
@@ -2895,6 +3187,7 @@ export function createCompletionController(
           // it against the newer top-level CAS and committed decision journal.
           token,
           decision,
+          deny_message: null,
         };
         updateAgentRun({ operationId: bindOperationId });
         let bindResult: BindAgentApprovalResultV2;
@@ -2956,7 +3249,9 @@ export function createCompletionController(
         if (postTransaction === null) return await failAgentWithoutNative(conversationId, attemptId, 'E_AGENT_CONFLICT');
         return await safeAgentPersist(
           postTransaction,
-          async () => await runAgentBatch(conversationId, attemptId, runEpoch),
+          async () => resume
+            ? await runAgentBatch(conversationId, attemptId, runEpoch)
+            : outcome('decision_committed', state),
           runEpoch,
           { conversationId, turnId: current.attempt.turnId, attemptId },
         );
@@ -3270,18 +3565,33 @@ export function createCompletionController(
     const located = getConversationAttempt(conversationId, attemptId);
     if (located === null || located.attempt.agent === undefined || located.attempt.agent === null) return await failAgentWithoutNative(conversationId, attemptId, 'E_AGENT_CONFLICT');
     const journal = located.attempt.agent;
-    const pendingApprovalIndex = journal.batch.findIndex(
-      call =>
+    const pendingApprovalIndexes: number[] = [];
+    journal.batch.forEach((call, index) => {
+      if (
         call.access !== 'auto' &&
         call.access !== 'durable_deny' &&
-        call.approval_decision === 'pending',
-    );
-    if (pendingApprovalIndex >= 0) {
+        call.approval_decision === 'pending'
+      ) {
+        pendingApprovalIndexes.push(index);
+      }
+    });
+    if (pendingApprovalIndexes.length === 1) {
       return await bindAgentApproval(
         conversationId,
         attemptId,
         runEpoch,
-        pendingApprovalIndex,
+        pendingApprovalIndexes[0],
+      );
+    }
+    if (pendingApprovalIndexes.length > 1) {
+      // Several gated calls freeze in one approval list with per-item
+      // decisions and a single commit; every decision is still persisted as
+      // its own approval checkpoint before any execution.
+      return await bindAgentBatchApprovals(
+        conversationId,
+        attemptId,
+        runEpoch,
+        pendingApprovalIndexes,
       );
     }
     const index = journal.batch.findIndex(call => call.receipt === null && (call.access === 'auto' || call.approval_decision === 'allow_once' || call.approval_decision === 'allow_conversation'));
@@ -4367,6 +4677,7 @@ export function createCompletionController(
           cancelTarget: agentRecoveryTarget(source.attempt),
           batchAuthority: null,
           approvalTokens: new Map(),
+      approvalPreviews: new Map(),
         };
         return await recoverAgentRun(conversationId, attemptId, events, epoch);
       }
@@ -4430,6 +4741,7 @@ export function createCompletionController(
           cancelTarget: agentRecoveryTarget(attempt),
           batchAuthority: null,
           approvalTokens: new Map(),
+      approvalPreviews: new Map(),
         };
         return await recoverAgentRun(conversationId, attemptId, events, epoch);
       }

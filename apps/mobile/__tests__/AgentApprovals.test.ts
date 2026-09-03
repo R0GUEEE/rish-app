@@ -18,6 +18,7 @@ const spec = (overrides: Partial<ApprovalRequestSpec> = {}): ApprovalRequestSpec
   toolCallId: 'c1',
   toolName: 'write_file',
   argumentsJson: '{"path":"a"}',
+  preview: null,
   scopes: ['once', 'conversation'],
   expiresAtMs: Date.now() + 60_000,
   ...overrides,

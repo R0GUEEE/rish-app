@@ -321,6 +321,7 @@ const bindRequest = {
   call_id: CALL_ID,
   token: approvalToken,
   decision: 'allow_once' as const,
+  deny_message: null,
 };
 
 const executeRequest = {
@@ -682,6 +683,8 @@ test('maps every approved high-level method to its snake-case selector', async (
     grant: null,
     result_batch_revision: 1,
     observed_checkpoint: checkpoint,
+    receipt: null,
+    transcript: null,
   });
   native.execute_agent_tool.mockResolvedValueOnce({
     schema_version: 2,
@@ -875,6 +878,8 @@ test('keeps an immutable batch approval token while the bind CAS advances', asyn
     grant: null,
     result_batch_revision: 1,
     observed_checkpoint: currentCheckpoint,
+    receipt: null,
+    transcript: null,
   });
 
   await expect(AgentRuntime.bindAgentApproval(request)).resolves.toMatchObject({

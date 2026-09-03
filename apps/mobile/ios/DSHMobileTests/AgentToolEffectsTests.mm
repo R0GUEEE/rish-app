@@ -1316,7 +1316,7 @@
     @"round_index" : @0, @"manifest_sha256" : receipt[@"manifest_sha256"],
     @"batch_revision" : receipt[@"batch_revision"], @"call_index" : @0,
     @"call_id" : call[@"call_id"], @"token" : token,
-    @"decision" : @"allow_once" };
+    @"decision" : @"allow_once", @"deny_message" : NSNull.null };
   NSArray<NSDictionary *> *tamperedTokens = @[
     ({ NSMutableDictionary *v = [token mutableCopy];
        v[@"token"] = @"91919191-9191-4191-8191-919191919191"; v; }),
@@ -2016,6 +2016,113 @@
                                                             options:0 error:&error];
   XCTAssertEqualObjects(feedback[@"payload"][@"content"], @"proof");
   XCTAssertNil(error);
+}
+
+- (void)testWorkspaceExecutorListDirHidesReservedNativeEntries {
+  // Real-device finding: list_dir("") leaked the reserved `.trash` directory.
+  // The entry list must hide the same reserved names the local-workspace path
+  // validator hides (.git, .trash, .staging-*, .rish-write-* case-folded)
+  // while ordinary dotfiles stay visible.
+  NSURL *privateRoot = [self.rootURL URLByAppendingPathComponent:@"listdir-private"
+                                                     isDirectory:YES];
+  NSURL *documents = [self.rootURL URLByAppendingPathComponent:@"listdir-documents"
+                                                   isDirectory:YES];
+  XCTAssertTrue([NSFileManager.defaultManager createDirectoryAtURL:privateRoot
+                                         withIntermediateDirectories:YES
+                                                          attributes:@{NSFilePosixPermissions : @0700}
+                                                               error:nil]);
+  XCTAssertTrue([NSFileManager.defaultManager createDirectoryAtURL:documents
+                                         withIntermediateDirectories:YES
+                                                          attributes:nil
+                                                               error:nil]);
+  DSHLocalWorkspaceAccess *access = [[DSHLocalWorkspaceAccess alloc]
+      initWithPrivateRootURL:privateRoot
+      documentsRootURL:documents
+      clock:^NSDate * { return [NSDate dateWithTimeIntervalSince1970:1788134400]; }
+      UUIDGenerator:^NSString * {
+        return @"55555555-5555-4555-8555-555555555556";
+      }
+      legacyResolver:^BOOL(NSString *projectId, NSDictionary **evidence,
+                           NSError **error) {
+        (void)projectId;
+        if (evidence != nil) *evidence = nil;
+        (void)error;
+        return NO;
+      }
+      faultHook:nil];
+  NSError *error = nil;
+  XCTAssertTrue([access ensurePrivateLayoutWithError:&error]);
+  XCTAssertNil(error);
+  NSDictionary *created = [access createRishOwnedWorkspaceWithDisplayName:@"Listdir"
+      operationId:@"66666666-6666-4666-8666-666666666667" error:&error];
+  XCTAssertNotNil(created);
+  XCTAssertNil(error);
+  if (created == nil) return;
+  DSHAgentRootResolver *resolver = [[DSHAgentRootResolver alloc]
+      initWithWorkspaceAccess:access projectAccess:nil];
+  DSHAgentWorkspaceToolExecutor *executor =
+      [[DSHAgentWorkspaceToolExecutor alloc] initWithRootResolver:resolver];
+  NSDictionary *root = [resolver resolveRootForWorkspaceId:created[@"workspace_id"]
+      projectId:nil bindingRevision:created[@"binding_revision"] error:&error];
+  XCTAssertNotNil(root);
+  XCTAssertNil(error);
+  if (root == nil) return;
+
+  // Locate the single owned workspace directory and seed reserved entries.
+  NSURL *container = [documents URLByAppendingPathComponent:@"Rish Workspaces"
+                                                isDirectory:YES];
+  NSArray<NSURL *> *workspaceDirs = [NSFileManager.defaultManager
+      contentsOfDirectoryAtURL:container
+      includingPropertiesForKeys:nil options:0 error:nil];
+  XCTAssertEqual(workspaceDirs.count, 1);
+  if (workspaceDirs.count != 1) return;
+  NSURL *workspaceURL = workspaceDirs.firstObject;
+  NSArray<NSString *> *reserved = @[
+    @".GIT", @".TRASH", @".STAGING-tmp", @".RISH-WRITE-x",
+  ];
+  for (NSString *name in reserved) {
+    NSURL *url = [workspaceURL URLByAppendingPathComponent:name isDirectory:YES];
+    XCTAssertTrue([NSFileManager.defaultManager createDirectoryAtURL:url
+                                           withIntermediateDirectories:YES
+                                                            attributes:nil
+                                                                 error:nil]);
+  }
+  for (NSString *name in @[ @".gitignore", @"notes.txt" ]) {
+    NSURL *url = [workspaceURL URLByAppendingPathComponent:name isDirectory:NO];
+    XCTAssertTrue([@"seed\n" writeToURL:url atomically:YES
+                              encoding:NSUTF8StringEncoding error:nil]);
+  }
+
+  NSDictionary *prepared = [executor prepareToolNamed:@"list_dir"
+                                             arguments:@{} root:root error:&error];
+  XCTAssertNotNil(prepared);
+  XCTAssertNil(error);
+  if (prepared == nil) return;
+  NSDictionary *effect = [executor executeToolNamed:@"list_dir"
+                                           arguments:@{} root:root
+                                        precondition:prepared[@"precondition"]
+                                               error:&error];
+  XCTAssertEqualObjects(effect[@"status"], @"ok");
+  XCTAssertNil(error);
+  NSData *feedbackBytes = [effect[@"feedback"] dataUsingEncoding:NSUTF8StringEncoding];
+  NSDictionary *feedback = [NSJSONSerialization JSONObjectWithData:feedbackBytes
+                                                            options:0 error:&error];
+  XCTAssertNil(error);
+  NSArray<NSDictionary *> *entries = feedback[@"payload"][@"entries"];
+  XCTAssertNotNil(entries);
+  if (entries == nil) return;
+  NSMutableSet<NSString *> *names = [NSMutableSet set];
+  for (NSDictionary *entry in entries) {
+    [names addObject:entry[@"name"]];
+  }
+  XCTAssertTrue([names containsObject:@"notes.txt"]);
+  XCTAssertTrue([names containsObject:@".gitignore"]);
+  for (NSString *name in names) {
+    NSString *folded = name.lowercaseString;
+    XCTAssertFalse([folded isEqual:@".git"] || [folded isEqual:@".trash"] ||
+        [folded hasPrefix:@".staging-"] || [folded hasPrefix:@".rish-write-"],
+        @"reserved native entry %@ leaked into list_dir", name);
+  }
 }
 
 @end

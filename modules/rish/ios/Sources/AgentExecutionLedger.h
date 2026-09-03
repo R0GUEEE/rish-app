@@ -102,6 +102,46 @@ NS_ASSUME_NONNULL_BEGIN
                                                     patch:(NSDictionary *)patch
                                                     error:(NSError **)error;
 
+/// Native-private in-transaction denial feedback used by
+/// DSHAgentToolBatchService for user denials.  It appends one exact protected
+/// tool message to the open transcript row and advances the prepared
+/// authority in the caller's WAL transaction, returning only the new
+/// transcript-after reference.  It never opens an effect gate and never
+/// mutates a ledger row.
+- (nullable NSDictionary *)appendDenialFeedbackInState:
+    (NSMutableDictionary *)state
+                                          taskId:(NSString *)taskId
+                                       attemptId:(NSString *)attemptId
+                                            root:(NSDictionary *)root
+                              expectedTranscript:(NSDictionary *)expectedTranscript
+                                          policy:(NSDictionary *)policy
+                          expectedReservedWriteBytes:(NSNumber *)expectedReservedWriteBytes
+                                           callId:(NSString *)callId
+                                      roundIndex:(NSNumber *)roundIndex
+                                     feedbackJSON:(NSString *)feedbackJSON
+                                       timestamp:(NSString *)timestamp
+                                           error:(NSError **)error;
+
+/// Native-private in-transaction settlement of a user-denied approval.
+/// Composes the feedback append above with a fail-closed ledger settlement:
+/// the matching `intent` row (never dispatched) becomes `settled` with a
+/// `denied` receipt whose failure code is `E_AGENT_DENIED_BY_USER`, its
+/// transcript-after is the appended-feedback reference, and the prepared
+/// authority advances to the same reference.  Returns
+/// `{receipt, transcript}` or nil; the caller owns the surrounding WAL
+/// transaction.  It never opens an effect gate and never fabricates an
+/// effect or settled facts.
+- (nullable NSDictionary *)settleDeniedApprovalInState:
+    (NSMutableDictionary *)state
+                                          locator:(NSDictionary *)locator
+                                             root:(NSDictionary *)root
+                              expectedTranscript:(NSDictionary *)expectedTranscript
+                                          policy:(NSDictionary *)policy
+                          expectedReservedWriteBytes:(NSNumber *)expectedReservedWriteBytes
+                                     feedbackJSON:(NSString *)feedbackJSON
+                                       timestamp:(NSString *)timestamp
+                                           error:(NSError **)error;
+
 @property(nonatomic, strong, readonly) DSHAgentNativeWAL *wal;
 
 @end

@@ -19,6 +19,15 @@ static const NSUInteger DSHAgentWorkspaceMaxReadBytes = 60 * 1024;
 static const NSUInteger DSHAgentWorkspaceMaxFeedbackBytes = 64 * 1024;
 static const NSUInteger DSHAgentWorkspaceMaxEntries = 1000;
 
+// Bounded native diff-preview limits.  The preview is computed from the
+// prepared intent (validated arguments + current file state), never from
+// unvalidated model text, and never exceeds these budgets.
+static const NSUInteger DSHAgentApprovalMaxPriorReadBytes = 64 * 1024;
+static const NSUInteger DSHAgentApprovalMaxDiffLines = 2000;
+static const NSUInteger DSHAgentApprovalMaxHunkLines = 24;
+static const NSUInteger DSHAgentApprovalMaxContextLines = 3;
+static const NSUInteger DSHAgentApprovalMaxPreviewBytes = 4096;
+
 static NSArray<NSString *> *DSHAgentWorkspacePathComponents(id value,
                                                              BOOL allowRoot) {
   if (![value isKindOfClass:NSString.class]) return nil;
@@ -66,6 +75,88 @@ static int DSHAgentWorkspaceOpenParent(int rootDescriptor,
       [components subarrayWithRange:NSMakeRange(0, components.count - 1)]);
   if (parent >= 0 && name != nullptr) *name = components.lastObject;
   return parent;
+}
+
+static NSArray<NSString *> *DSHAgentApprovalLines(NSString *text) {
+  if (text.length == 0) return @[];
+  return [text componentsSeparatedByString:@"\n"];
+}
+
+static BOOL DSHAgentApprovalLooksBinary(NSString *text) {
+  if (text == nil) return YES;
+  return [text rangeOfString:@"\0"].location != NSNotFound;
+}
+
+/// Anchored prefix/suffix line diff with a strict byte budget.  `truncatedOut`
+/// is set when the prior content, the hunk, or the final preview exceeded its
+/// bound, so the UI can mark the preview as incomplete.  Returns nil for
+/// binary content (a preview would leak bytes, not text).
+static NSString *DSHAgentApprovalUnifiedDiff(NSString *prior,
+                                              NSString *next,
+                                              BOOL *truncatedOut) {
+  if (truncatedOut != nullptr) *truncatedOut = NO;
+  if (DSHAgentApprovalLooksBinary(prior) ||
+      DSHAgentApprovalLooksBinary(next)) return nil;
+  NSArray<NSString *> *priorLines = DSHAgentApprovalLines(prior);
+  NSArray<NSString *> *nextLines = DSHAgentApprovalLines(next);
+  if (priorLines.count > DSHAgentApprovalMaxDiffLines ||
+      nextLines.count > DSHAgentApprovalMaxDiffLines) {
+    if (truncatedOut != nullptr) *truncatedOut = YES;
+    priorLines = [priorLines subarrayWithRange:
+        NSMakeRange(0, MIN(priorLines.count, DSHAgentApprovalMaxDiffLines))];
+    nextLines = [nextLines subarrayWithRange:
+        NSMakeRange(0, MIN(nextLines.count, DSHAgentApprovalMaxDiffLines))];
+  }
+  NSUInteger prefix = 0;
+  while (prefix < priorLines.count && prefix < nextLines.count &&
+         [priorLines[prefix] isEqual:nextLines[prefix]]) prefix += 1;
+  NSUInteger priorSuffix = 0;
+  NSUInteger nextSuffix = 0;
+  while (priorSuffix < priorLines.count - prefix &&
+         nextSuffix < nextLines.count - prefix &&
+         [priorLines[priorLines.count - 1 - priorSuffix]
+             isEqual:nextLines[nextLines.count - 1 - nextSuffix]]) {
+    priorSuffix += 1;
+    nextSuffix += 1;
+  }
+  NSUInteger removedCount = priorLines.count - prefix - priorSuffix;
+  NSUInteger addedCount = nextLines.count - prefix - nextSuffix;
+  if (removedCount == 0 && addedCount == 0) return @"";
+  NSMutableString *preview = [NSMutableString string];
+  [preview appendFormat:@"@@ -%lu,%lu +%lu,%lu @@",
+      (unsigned long)(prefix + 1), (unsigned long)removedCount,
+      (unsigned long)(prefix + 1), (unsigned long)addedCount];
+  NSUInteger contextStart = prefix >= DSHAgentApprovalMaxContextLines
+      ? prefix - DSHAgentApprovalMaxContextLines : 0;
+  for (NSUInteger index = contextStart; index < prefix; index += 1) {
+    [preview appendFormat:@"\n %@", priorLines[index]];
+  }
+  BOOL hunkTruncated = removedCount > DSHAgentApprovalMaxHunkLines ||
+      addedCount > DSHAgentApprovalMaxHunkLines;
+  NSUInteger shownRemoved = MIN(removedCount, DSHAgentApprovalMaxHunkLines);
+  NSUInteger shownAdded = MIN(addedCount, DSHAgentApprovalMaxHunkLines);
+  for (NSUInteger index = 0; index < shownRemoved; index += 1) {
+    [preview appendFormat:@"\n-%@", priorLines[prefix + index]];
+  }
+  for (NSUInteger index = 0; index < shownAdded; index += 1) {
+    [preview appendFormat:@"\n+%@", nextLines[prefix + index]];
+  }
+  if (hunkTruncated) [preview appendString:@"\n…"];
+  NSUInteger suffixStart = prefix + removedCount;
+  NSUInteger contextEnd = MIN(priorLines.count,
+      suffixStart + DSHAgentApprovalMaxContextLines);
+  for (NSUInteger index = suffixStart; index < contextEnd; index += 1) {
+    [preview appendFormat:@"\n %@", priorLines[index]];
+  }
+  NSData *previewBytes = [preview dataUsingEncoding:NSUTF8StringEncoding];
+  if (previewBytes.length > DSHAgentApprovalMaxPreviewBytes) {
+    if (truncatedOut != nullptr) *truncatedOut = YES;
+    NSString *clipped = [preview substringToIndex:
+        DSHAgentApprovalMaxPreviewBytes / 2];
+    return [clipped stringByAppendingString:@"\n…"];
+  }
+  if (truncatedOut != nullptr) *truncatedOut = hunkTruncated;
+  return preview;
 }
 
 static NSString *DSHAgentWorkspaceRevision(struct stat metadata) {
@@ -171,6 +262,24 @@ static BOOL DSHAgentWorkspaceEntryList(int directoryDescriptor,
     if (strcmp(entry->d_name, ".") == 0 || strcmp(entry->d_name, "..") == 0) {
       continue;
     }
+    NSData *nameBytes = [NSData dataWithBytes:entry->d_name
+                                       length:strlen(entry->d_name)];
+    NSString *name = [[NSString alloc] initWithData:nameBytes
+                                           encoding:NSUTF8StringEncoding];
+    if (name == nil) {
+      closedir(directory);
+      DSHSetAgentNativeStoreError(error, DSHAgentNativeStoreErrorInvalidArgument);
+      return NO;
+    }
+    // Hide the same reserved names the local-workspace path validator
+    // (LWPathName) hides, case-folded: native metadata is never a tool
+    // result.  Ordinary dotfiles such as .gitignore stay visible.
+    NSString *foldedName = name.lowercaseString;
+    if ([foldedName isEqual:@".git"] || [foldedName isEqual:@".trash"] ||
+        [foldedName hasPrefix:@".staging-"] ||
+        [foldedName hasPrefix:@".rish-write-"]) {
+      continue;
+    }
     if (privateEntries.count >= DSHAgentWorkspaceMaxEntries) {
       closedir(directory);
       DSHSetAgentNativeStoreError(error, DSHAgentNativeStoreErrorCapacity);
@@ -185,12 +294,7 @@ static BOOL DSHAgentWorkspaceEntryList(int directoryDescriptor,
       DSHSetAgentNativeStoreError(error, DSHAgentNativeStoreErrorConflict);
       return NO;
     }
-    NSData *nameBytes = [NSData dataWithBytes:entry->d_name
-                                       length:strlen(entry->d_name)];
-    NSString *name = [[NSString alloc] initWithData:nameBytes
-                                           encoding:NSUTF8StringEncoding];
-    if (name == nil ||
-        ![name isEqualToString:name.precomposedStringWithCanonicalMapping]) {
+    if (![name isEqualToString:name.precomposedStringWithCanonicalMapping]) {
       closedir(directory);
       DSHSetAgentNativeStoreError(error, DSHAgentNativeStoreErrorInvalidArgument);
       return NO;
@@ -298,6 +402,7 @@ static BOOL DSHAgentWorkspaceEntryList(int directoryDescriptor,
     return nil;
   }
   __block NSDictionary *precondition = nil;
+  __block NSDictionary *approvalPreview = nil;
   BOOL succeeded = [self.rootResolver performOperationForFrozenRoot:root
       mode:write ? DSHAgentRootOperationModeWrite
                  : DSHAgentRootOperationModeRead
@@ -316,6 +421,12 @@ static BOOL DSHAgentWorkspaceEntryList(int directoryDescriptor,
         @"schema_version" : @1,
         @"kind" : @"list_dir",
         @"directory_fingerprint_sha256" : fingerprint,
+      };
+      approvalPreview = @{
+        @"schema_version" : @1, @"kind" : @"list_dir",
+        @"paths" : @[path], @"content_bytes" : NSNull.null,
+        @"prior" : NSNull.null, @"diff_preview" : NSNull.null,
+        @"diff_truncated" : @NO,
       };
       return YES;
     }
@@ -339,6 +450,12 @@ static BOOL DSHAgentWorkspaceEntryList(int directoryDescriptor,
         @"schema_version" : @1,
         @"kind" : @"read_file",
         @"source_revision" : DSHAgentWorkspaceRevision(metadata),
+      };
+      approvalPreview = @{
+        @"schema_version" : @1, @"kind" : @"read_file",
+        @"paths" : @[path], @"content_bytes" : NSNull.null,
+        @"prior" : NSNull.null, @"diff_preview" : NSNull.null,
+        @"diff_truncated" : @NO,
       };
       close(parent);
       return YES;
@@ -382,6 +499,30 @@ static BOOL DSHAgentWorkspaceEntryList(int directoryDescriptor,
       close(parent);
       return NO;
     }
+    // Bounded prior-content read for the diff preview.  The precondition
+    // remains authoritative for the write; the preview is display-only.
+    NSData *priorContent = nil;
+    BOOL priorTruncated = NO;
+    if (statResult == 0) {
+      int file = openat(parent, leaf.fileSystemRepresentation,
+                        O_RDONLY | O_CLOEXEC | O_NOFOLLOW);
+      if (file >= 0) {
+        NSMutableData *data = [NSMutableData dataWithCapacity:
+            MIN((NSUInteger)metadata.st_size,
+                DSHAgentApprovalMaxPriorReadBytes)];
+        uint8_t buffer[8192];
+        ssize_t got;
+        while ((got = read(file, buffer, sizeof(buffer))) > 0) {
+          if (data.length + (NSUInteger)got > DSHAgentApprovalMaxPriorReadBytes) {
+            priorTruncated = YES;
+            break;
+          }
+          [data appendBytes:buffer length:(NSUInteger)got];
+        }
+        close(file);
+        priorContent = data;
+      }
+    }
     precondition = @{
       @"schema_version" : @2,
       @"kind" : @"write_file",
@@ -391,6 +532,26 @@ static BOOL DSHAgentWorkspaceEntryList(int directoryDescriptor,
       @"content_bytes" : @(content.length),
     };
     close(parent);
+    NSString *priorText = priorContent == nil ? nil
+        : [[NSString alloc] initWithData:priorContent
+                                encoding:NSUTF8StringEncoding];
+    BOOL diffTruncated = priorTruncated;
+    NSString *diffPreview = priorContent == nil ? nil
+        : DSHAgentApprovalUnifiedDiff(priorText, arguments[@"content"],
+                                      &diffTruncated);
+    approvalPreview = @{
+      @"schema_version" : @1,
+      @"kind" : @"write_file",
+      @"paths" : @[path],
+      @"content_bytes" : @(content.length),
+      @"prior" : statResult == 0
+          ? @{ @"schema_version" : @1, @"kind" : @"known",
+               @"bytes" : priorContent == nil ? NSNull.null
+                   : @(priorContent.length) }
+          : @{ @"schema_version" : @1, @"kind" : @"absent" },
+      @"diff_preview" : diffPreview ?: NSNull.null,
+      @"diff_truncated" : @(diffTruncated),
+    };
     return YES;
   } error:error];
   if (!succeeded || precondition == nil) return nil;
@@ -399,6 +560,7 @@ static BOOL DSHAgentWorkspaceEntryList(int directoryDescriptor,
     @"precondition" : precondition,
     @"reserved_write_bytes" : write
         ? precondition[@"content_bytes"] : @0,
+    @"approval_preview" : approvalPreview ?: NSNull.null,
   };
 }
 

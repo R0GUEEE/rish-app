@@ -6,28 +6,45 @@ import { DEFAULT_QUESTION_TIMEOUT_MS } from './AgentQuestions';
 /**
  * Broker between the agent-turn driver's wait states and the UI composers.
  *
- * The driver calls requestApproval / askQuestion and awaits. The controller
- * publishes the pending request to subscribers (the composers), settles the
- * promise when the user answers, and clears the pending UI when the request
- * expires so a stale card can never outlive its fail-closed deadline.
- * Settlement is synchronous from the user's tap, so cancellation semantics
- * elsewhere (native transport promises, turn cancel) stay untouched.
+ * The driver calls requestApproval / requestBatchApprovals / askQuestion and
+ * awaits. The controller publishes the pending requests to subscribers (the
+ * composers), settles the promise when the user answers, and clears the
+ * pending UI when the request expires so a stale card can never outlive its
+ * fail-closed deadline. A batch is presented as one list: every wait is
+ * registered before the first paint, and the batch promise resolves only when
+ * every item settled, so the driver can never advance a partially decided
+ * batch. Settlement is synchronous from the user's tap, so cancellation
+ * semantics elsewhere (native transport promises, turn cancel) stay
+ * untouched.
  */
 
 export type AgentInteractionState = {
-  readonly pendingApproval: ApprovalRequestSpec | null;
+  readonly pendingApprovals: readonly ApprovalRequestSpec[];
   readonly pendingQuestion: QuestionSpec | null;
 };
+
+export type AgentApprovalDecisionInput =
+  | { readonly status: 'approved'; readonly scope: 'once' | 'conversation' }
+  | { readonly status: 'denied'; readonly message?: string };
 
 export type AgentInteractionController = {
   getState(): AgentInteractionState;
   subscribe(listener: (state: AgentInteractionState) => void): () => void;
   /** Driver-side dep: presents the request and awaits a raw answer. */
   requestApproval(spec: ApprovalRequestSpec): Promise<unknown>;
+  /** Driver-side dep: presents several requests as one list; resolves with
+   * one raw answer per request, in order, once every item settled. */
+  requestBatchApprovals(
+    specs: readonly ApprovalRequestSpec[],
+  ): Promise<unknown[]>;
   /** Driver-side dep: presents the question and awaits a raw answer. */
   askQuestion(spec: QuestionSpec): Promise<unknown>;
   /** UI action: allow with one of the offered scopes, or deny. */
   decideApproval(approvalId: string, decision: unknown): void;
+  /** UI action: settle every item of the presented batch at once. */
+  decideBatchApprovals(
+    decisions: readonly { approvalId: string; decision: unknown }[],
+  ): void;
   /** UI action: submit a validated answer. */
   answerQuestion(questionId: string, answer: string): void;
   /** UI action: dismiss an optional question. */
@@ -38,6 +55,25 @@ export type AgentInteractionController = {
 
 function isDecisionRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value);
+}
+
+function isBoundedMessage(value: unknown): value is string {
+  if (typeof value !== 'string' || value.length > 2000) return false;
+  let bytes = 0;
+  for (let index = 0; index < value.length; index += 1) {
+    const unit = value.charCodeAt(index);
+    if (unit <= 0x7f) bytes += 1;
+    else if (unit <= 0x7ff) bytes += 2;
+    else if (unit >= 0xd800 && unit <= 0xdbff) {
+      const next = value.charCodeAt(index + 1);
+      if (next < 0xdc00 || next > 0xdfff) return false;
+      bytes += 4;
+      index += 1;
+    } else if (unit >= 0xdc00 && unit <= 0xdfff) return false;
+    else bytes += 3;
+    if (bytes > 2000) return false;
+  }
+  return true;
 }
 
 /**
@@ -52,7 +88,15 @@ function exactApprovalDecision(
   if (!isDecisionRecord(decision)) return undefined;
   try {
     if (decision.status === 'denied') {
-      return { status: 'denied', approval_id: spec.approvalId };
+      const message =
+        decision.message === undefined
+          ? undefined
+          : isBoundedMessage(decision.message)
+            ? decision.message
+            : undefined;
+      return message === undefined
+        ? { status: 'denied', approval_id: spec.approvalId }
+        : { status: 'denied', approval_id: spec.approvalId, message };
     }
     if (
       decision.status !== 'approved' ||
@@ -79,14 +123,15 @@ export function createAgentInteractionController(options: {
   const approvalTimeoutMs = options.approvalTimeoutMs ?? DEFAULT_APPROVAL_TIMEOUT_MS;
   const questionTimeoutMs = options.questionTimeoutMs ?? DEFAULT_QUESTION_TIMEOUT_MS;
   let state: AgentInteractionState = {
-    pendingApproval: null,
+    pendingApprovals: [],
     pendingQuestion: null,
   };
-  let approvalWait: {
+  let approvalWaits: {
     spec: ApprovalRequestSpec;
     settle: (value: unknown) => void;
-    timer: ReturnType<typeof setTimeout>;
-  } | null = null;
+  }[] = [];
+  let approvalTimer: ReturnType<typeof setTimeout> | null = null;
+  let batchResolve: ((values: readonly unknown[]) => void) | null = null;
   let questionWait: {
     spec: QuestionSpec;
     settle: (value: unknown) => void;
@@ -105,13 +150,38 @@ export function createAgentInteractionController(options: {
     });
   };
 
-  const clearApproval = () => {
-    const pending = approvalWait;
-    if (pending === null) return;
-    approvalWait = null;
-    clearTimeout(pending.timer);
-    if (state.pendingApproval?.approvalId === pending.spec.approvalId) {
-      publish({ ...state, pendingApproval: null });
+  const pendingSpecs = (): readonly ApprovalRequestSpec[] =>
+    approvalWaits.map(wait => wait.spec);
+
+  const settleAllApprovals = (raw: readonly unknown[]) => {
+    const waits = approvalWaits;
+    approvalWaits = [];
+    if (approvalTimer !== null) {
+      clearTimeout(approvalTimer);
+      approvalTimer = null;
+    }
+    const resolve = batchResolve;
+    batchResolve = null;
+    waits.forEach((wait, index) => wait.settle(raw[index]));
+    if (resolve !== null) resolve(raw);
+    publish({ ...state, pendingApprovals: [] });
+  };
+
+  const clearApprovals = () => {
+    if (approvalTimer !== null) {
+      clearTimeout(approvalTimer);
+      approvalTimer = null;
+    }
+    if (batchResolve !== null) {
+      const resolve = batchResolve;
+      batchResolve = null;
+      resolve(approvalWaits.map(() => undefined));
+    }
+    const waits = approvalWaits;
+    approvalWaits = [];
+    waits.forEach(wait => wait.settle(undefined));
+    if (state.pendingApprovals.length > 0) {
+      publish({ ...state, pendingApprovals: [] });
     }
   };
 
@@ -125,32 +195,60 @@ export function createAgentInteractionController(options: {
     }
   };
 
+  const registerApprovals = (
+    specs: readonly ApprovalRequestSpec[],
+  ): {
+    batch: Promise<unknown[]>;
+    perItem: readonly Promise<unknown>[];
+  } | null => {
+    if (approvalWaits.length > 0) {
+      // One presented approval batch at a time; the older one fails closed.
+      settleAllApprovals(approvalWaits.map(() => undefined));
+    }
+    if (specs.length === 0) return null;
+    const results: unknown[] = new Array<unknown>(specs.length).fill(undefined);
+    const batch = new Promise<unknown[]>(resolve => {
+      batchResolve = values => resolve([...values]);
+    });
+    const perItem: Promise<unknown>[] = [];
+    approvalWaits = specs.map((spec, index) => {
+      let settle: (value: unknown) => void = () => undefined;
+      const promise = new Promise<unknown>(resolve => {
+        settle = resolve;
+      });
+      perItem.push(promise);
+      return {
+        spec,
+        settle: (value: unknown) => {
+          results[index] = value;
+          settle(value);
+        },
+      };
+    });
+    if (approvalTimer !== null) clearTimeout(approvalTimer);
+    approvalTimer = setTimeout(() => {
+      // UI expiry: hide the batch; the driver's own deadline check
+      // (expiresAtMs) decides the actual resolution fail-closed.
+      settleAllApprovals(results.slice());
+    }, approvalTimeoutMs);
+    publish({ ...state, pendingApprovals: specs });
+    return { batch, perItem };
+  };
+
   return {
     getState: () => state,
     subscribe: listener => {
       listeners.add(listener);
       return () => listeners.delete(listener);
     },
-    requestApproval: spec =>
-      new Promise<unknown>(resolve => {
-        const existing = approvalWait;
-        if (existing !== null && existing.spec.approvalId !== spec.approvalId) {
-          // One pending approval at a time; the older one fails closed.
-          existing.settle(undefined);
-        }
-        clearApproval();
-        const timer = setTimeout(() => {
-          // UI expiry: hide the card; the driver's own deadline check
-          // (expiresAtMs) decides the actual resolution fail-closed.
-          const wait = approvalWait;
-          if (wait !== null && wait.spec.approvalId === spec.approvalId) {
-            wait.settle(undefined);
-          }
-          clearApproval();
-        }, approvalTimeoutMs);
-        approvalWait = { spec, settle: resolve, timer };
-        publish({ ...state, pendingApproval: spec });
-      }),
+    requestApproval: spec => {
+      const registered = registerApprovals([spec]);
+      return registered?.perItem[0] ?? Promise.resolve(undefined);
+    },
+    requestBatchApprovals: specs => {
+      const registered = registerApprovals(specs);
+      return registered?.batch ?? Promise.resolve([]);
+    },
     askQuestion: spec =>
       new Promise<unknown>(resolve => {
         const existing = questionWait;
@@ -169,14 +267,31 @@ export function createAgentInteractionController(options: {
         publish({ ...state, pendingQuestion: spec });
       }),
     decideApproval: (approvalId, decision) => {
-      const wait = approvalWait;
-      if (wait === null || wait.spec.approvalId !== approvalId) return;
-      const exactDecision = exactApprovalDecision(
-        wait.spec,
-        decision,
+      const wait = approvalWaits.find(candidate => candidate.spec.approvalId === approvalId);
+      if (wait === undefined) return;
+      const exactDecision = exactApprovalDecision(wait.spec, decision);
+      if (exactDecision === undefined) {
+        // A malformed UI decision fails closed: the whole presented list
+        // settles as absent answers, which the driver resolves to denials.
+        settleAllApprovals(pendingSpecs().map(() => undefined));
+        return;
+      }
+      // Single-item settlement: the whole presented list settles at once so
+      // the driver always observes a complete batch.
+      settleAllApprovals(
+        pendingSpecs().map(spec =>
+          spec.approvalId === approvalId ? exactDecision : undefined,
+        ),
       );
-      clearApproval();
-      wait.settle(exactDecision);
+    },
+    decideBatchApprovals: decisions => {
+      const settled: unknown[] = pendingSpecs().map(spec => {
+        const entry = decisions.find(candidate => candidate.approvalId === spec.approvalId);
+        if (entry === undefined) return undefined;
+        const exact = exactApprovalDecision(spec, entry.decision);
+        return exact === undefined ? { status: 'denied', approval_id: spec.approvalId } : exact;
+      });
+      settleAllApprovals(settled);
     },
     answerQuestion: (questionId, answer) => {
       const wait = questionWait;
@@ -191,11 +306,7 @@ export function createAgentInteractionController(options: {
       wait.settle({ status: 'cancelled', question_id: questionId });
     },
     cancelPending: () => {
-      const approval = approvalWait;
-      if (approval !== null) {
-        clearApproval();
-        approval.settle(undefined);
-      }
+      clearApprovals();
       const question = questionWait;
       if (question !== null) {
         clearQuestion();

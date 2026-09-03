@@ -9,6 +9,7 @@
  */
 import type {
   AgentApprovalBindingTokenV2,
+  AgentApprovalPreviewV1,
   AgentAttemptProjectionV2,
   AgentBatchCallProjectionV2,
   AgentBatchReceiptV2,
@@ -958,10 +959,14 @@ function validateBatchRequest(value: unknown): PrepareAgentToolBatchRequestV2 | 
 }
 
 function validateBindRequest(value: unknown): BindAgentApprovalRequestV2 | null {
+  // `deny_message` is tolerated as absent (older evidence) and defaults to
+  // null; the runtime always supplies it.
   const raw = exact(value, BIND_REQUEST_KEYS);
   if (raw === null || raw.schema_version !== 2 || !uuid(raw.operation_id) || !uuid(raw.task_id) || !uuid(raw.conversation_id) || !uuid(raw.attempt_id) || !uuid(raw.round_id) ||
     !safeInteger(raw.round_index, 7) || !digest(raw.manifest_sha256) || !safeInteger(raw.batch_revision, Number.MAX_SAFE_INTEGER - 1, false) || !safeInteger(raw.call_index, 15) || !opaque(raw.call_id) ||
     !enumValue(raw.decision, ['denied', 'allow_once', 'allow_conversation', 'cancelled'] as const) || !requestIdentity(raw, { task_id: raw.task_id, conversation_id: raw.conversation_id, attempt_id: raw.attempt_id })) return null;
+  const denyMessage = raw.deny_message ?? null;
+  if (raw.decision === 'denied' ? (denyMessage !== null && !boundedUTF8(denyMessage, 2000, true)) : denyMessage !== null) return null;
   const token = validateApprovalToken(raw.token);
   const controllerCas = validateCAS(raw.controller_cas);
   const checkpoint = validateCheckpoint(raw.committed_checkpoint);
@@ -971,7 +976,7 @@ function validateBindRequest(value: unknown): BindAgentApprovalRequestV2 | null 
     expectedToolFamily(token.name) === null ||
     token.access !== 'conversation_confirm' ||
     (raw.decision === 'allow_conversation' && token.access !== 'conversation_confirm')) return null;
-  return { ...raw, controller_cas: controllerCas, committed_checkpoint: checkpoint, token } as BindAgentApprovalRequestV2;
+  return { ...raw, deny_message: denyMessage, controller_cas: controllerCas, committed_checkpoint: checkpoint, token } as BindAgentApprovalRequestV2;
 }
 
 function sameControllerCAS(
@@ -1240,7 +1245,62 @@ function validateAttemptProjection(value: unknown): AgentAttemptProjectionV2 | n
   return { ...raw, root, policy, registry, transcript, batch: calls, frozen_grant_ids: grants } as unknown as AgentAttemptProjectionV2;
 }
 
+function boundedUTF8(value: unknown, maximum: number, allowEmpty = false): value is string {
+  if (typeof value !== 'string' || (!allowEmpty && value.length === 0)) return false;
+  let bytes = 0;
+  for (let index = 0; index < value.length; index += 1) {
+    const unit = value.charCodeAt(index);
+    if (unit <= 0x7f) bytes += 1;
+    else if (unit <= 0x7ff) bytes += 2;
+    else if (unit >= 0xd800 && unit <= 0xdbff) {
+      const next = value.charCodeAt(index + 1);
+      if (next < 0xdc00 || next > 0xdfff) return false;
+      bytes += 4;
+      index += 1;
+    } else if (unit >= 0xdc00 && unit <= 0xdfff) return false;
+    else bytes += 3;
+  }
+  return bytes <= maximum;
+}
+
+function previewPath(value: unknown): value is string {
+  if (typeof value !== 'string' || value.length === 0 ||
+      !boundedUTF8(value, 512) || value.startsWith('/') ||
+      value.includes('\\') || value.includes('\u0000')) return false;
+  for (let index = 0; index < value.length; index += 1) {
+    const unit = value.charCodeAt(index);
+    if (unit < 0x20 || unit === 0x7f) return false;
+  }
+  return true;
+}
+
+function validateApprovalPreview(value: unknown): AgentApprovalPreviewV1 | null {
+  if (value === null) return null;
+  const raw = exact(value, ['schema_version', 'kind', 'paths', 'content_bytes', 'prior', 'diff_preview', 'diff_truncated']);
+  if (raw === null || raw.schema_version !== 1 || !enumValue(raw.kind, ['list_dir', 'read_file', 'write_file', 'git_commit', 'git_push'] as const)) return null;
+  const paths = copyStringArray(raw.paths, 8, previewPath);
+  if (paths === null ||
+    (raw.content_bytes !== null && !safeInteger(raw.content_bytes, 32768)) || typeof raw.diff_truncated !== 'boolean' ||
+    (raw.diff_preview !== null && !boundedUTF8(raw.diff_preview, 4096, true))) return null;
+  let prior: AgentApprovalPreviewV1['prior'];
+  if (raw.prior === null) prior = null;
+  else {
+    const record = exact(raw.prior, ['schema_version', 'kind', 'bytes']);
+    if (record === null || record.schema_version !== 1 || !enumValue(record.kind, ['absent', 'known'] as const) ||
+      (record.bytes !== null && !safeInteger(record.bytes, 65536))) return null;
+    prior = record as unknown as AgentApprovalPreviewV1['prior'];
+  }
+  if (raw.kind === 'write_file') {
+    if (paths.length !== 1 || raw.content_bytes === null || prior === null) return null;
+  } else if (raw.kind === 'git_commit' || raw.kind === 'git_push') {
+    if (paths.length !== 0 || raw.content_bytes !== null || prior !== null || raw.diff_preview !== null) return null;
+  } else if (raw.content_bytes !== null || prior !== null || raw.diff_preview !== null) return null;
+  return { ...raw, paths, prior } as unknown as AgentApprovalPreviewV1;
+}
+
 function validateBatchCall(value: unknown): AgentBatchCallProjectionV2 | null {
+  // `approval_preview` is tolerated as absent so evidence produced by
+  // older callers still validates; the native bridge always supplies it.
   const raw = exact(value, ['schema_version', 'call_index', 'call_id', 'name', 'arguments_sha256', 'idempotency_key', 'safe_summary_key', 'access', 'approval_state', 'approval_token', 'approval_reference', 'execution_status', 'execution_revision', 'native_row_revision', 'receipt']);
   if (raw === null || raw.schema_version !== 2 || !safeInteger(raw.call_index, 15) || !opaque(raw.call_id) || !name(raw.name) || !digest(raw.arguments_sha256) || !nullableDigest(raw.idempotency_key) || !name(raw.safe_summary_key) || !SAFE_SUMMARY.has(raw.safe_summary_key) || !enumValue(raw.access, ['auto', 'conversation_confirm', 'confirm_once', 'durable_deny'] as const) || !enumValue(raw.approval_state, ['not_required', 'pending', 'bound', 'denied', 'cancelled'] as const) || !enumValue(raw.execution_status, ['not_started', 'intent', 'running', 'cancel_requested', 'completed', 'failed', 'denied', 'cancelled', 'unknown', 'ambiguous'] as const) || (raw.execution_revision !== null && !safeInteger(raw.execution_revision, Number.MAX_SAFE_INTEGER - 1, false)) || (raw.native_row_revision !== null && !safeInteger(raw.native_row_revision, Number.MAX_SAFE_INTEGER - 1, false)) || (raw.receipt !== null && validateReceipt(raw.receipt) === null) || !nullableUuid(raw.approval_reference)) return null;
   const knownTool = TOOL_NAMES.has(raw.name);
@@ -1275,7 +1335,8 @@ function validateBatchCall(value: unknown): AgentBatchCallProjectionV2 | null {
   if (raw.execution_status === 'cancelled' && receipt?.outcome !== 'cancelled') return null;
   if (raw.execution_status === 'ambiguous' && receipt?.outcome !== 'ambiguous') return null;
   if (raw.execution_status === 'unknown' && receipt !== null) return null;
-  return { ...raw, approval_token: token, receipt } as unknown as AgentBatchCallProjectionV2;
+  const preview = validateApprovalPreview(raw.approval_preview ?? null);
+  return { ...raw, approval_token: token, receipt, approval_preview: preview } as unknown as AgentBatchCallProjectionV2;
 }
 
 
@@ -1406,6 +1467,8 @@ function validateBatchReceipt(value: unknown, request: PrepareAgentToolBatchRequ
 function validateBindResult(value: unknown, request: BindAgentApprovalRequestV2): Exclude<BindAgentApprovalResultV2, { status: 'conflict' }> | null {
   const raw = ownRecord(value);
   if (raw === null || raw.status === 'conflict' || (raw.status !== 'bound' && raw.status !== 'already_bound')) return null;
+  // `receipt`/`transcript` are tolerated as absent (older evidence) and
+  // default to null; a denied decision still requires the real settlement.
   const result = exact(raw, ['schema_version', 'status', 'operation_id', 'task_id', 'attempt_id', 'round_id', 'call_index', 'call_id', 'decision', 'approval_reference', 'grant', 'result_batch_revision', 'observed_checkpoint']);
   if (result === null || result.schema_version !== 2 || result.operation_id !== request.operation_id || result.task_id !== request.task_id || result.attempt_id !== request.attempt_id || result.round_id !== request.round_id || result.call_index !== request.call_index || result.call_id !== request.call_id || result.decision !== request.decision || !nullableUuid(result.approval_reference) || !safeInteger(result.result_batch_revision, Number.MAX_SAFE_INTEGER - 1, false) || result.result_batch_revision !== request.batch_revision) return null;
   const observed = validateCheckpoint(result.observed_checkpoint);
@@ -1416,7 +1479,16 @@ function validateBindResult(value: unknown, request: BindAgentApprovalRequestV2)
   if ((request.decision === 'denied' || request.decision === 'cancelled') && result.approval_reference !== null) return null;
   if ((request.decision === 'allow_once' || request.decision === 'allow_conversation') && result.approval_reference === null) return null;
   if (grant !== null && (grant.conversation_id !== request.conversation_id || grant.issued_for.task_id !== request.task_id || grant.issued_for.attempt_id !== request.attempt_id || grant.root_fingerprint_sha256 !== request.token.root_fingerprint_sha256 || grant.binding_revision !== request.token.binding_revision || grant.registry_version !== request.token.registry_version || grant.policy_version !== request.token.policy_version || grant.tool_family !== expectedToolFamily(request.token.name))) return null;
-  return { ...result, grant, observed_checkpoint: observed } as unknown as Exclude<BindAgentApprovalResultV2, { status: 'conflict' }>;
+  const rawReceipt = result.receipt ?? null;
+  const rawTranscript = result.transcript ?? null;
+  const deniedReceipt = rawReceipt === null ? null : validateReceipt(rawReceipt);
+  if (rawReceipt !== null && deniedReceipt === null) return null;
+  const deniedTranscript = rawTranscript === null ? null : validateTranscript(rawTranscript);
+  if (rawTranscript !== null && deniedTranscript === null) return null;
+  if (request.decision === 'denied') {
+    if (deniedReceipt === null || deniedTranscript === null || deniedReceipt.outcome !== 'denied' || deniedReceipt.failure_code !== 'E_AGENT_DENIED_BY_USER' || deniedReceipt.approval_reference !== null || deniedReceipt.call_id !== request.call_id || deniedReceipt.name !== request.token.name || deniedReceipt.arguments_sha256 !== request.token.arguments_sha256) return null;
+  } else if (deniedReceipt !== null || deniedTranscript !== null) return null;
+  return { ...result, grant, observed_checkpoint: observed, receipt: deniedReceipt, transcript: deniedTranscript } as unknown as Exclude<BindAgentApprovalResultV2, { status: 'conflict' }>;
 }
 
 function validateGrant(value: unknown): AgentConversationGrantV2 | null {

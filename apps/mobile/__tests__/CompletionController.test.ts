@@ -38,7 +38,11 @@ import type {
   QueryAgentAttemptResultV2,
   RecoverAgentAttemptResultV2,
 } from '../src/native/AgentRuntime';
-import type { CompletionPersistenceResult } from '../src/completion/CompletionController';
+import type {
+  CompletionAgentApprovalRequest,
+  CompletionControllerDependencies,
+  CompletionPersistenceResult,
+} from '../src/completion/CompletionController';
 import {
   createSessionEventJournal,
   type SessionEventEmission,
@@ -1785,6 +1789,27 @@ describe('project Agent completion controller', () => {
           arguments_sha256: call.argumentsSha256,
           idempotency_key: idempotencyKey,
           safe_summary_key: durableDeny ? 'agent.unknown' : `agent.${call.name}`,
+          approval_preview: durableDeny
+            ? null
+            : call.name === 'write_file'
+              ? {
+                  schema_version: 1,
+                  kind: 'write_file',
+                  paths: ['notes.md'],
+                  content_bytes: 5,
+                  prior: { schema_version: 1, kind: 'absent', bytes: null },
+                  diff_preview: '@@ -1,0 +1,1 @@\n+hello',
+                  diff_truncated: false,
+                }
+              : {
+                  schema_version: 1,
+                  kind: call.name as 'list_dir' | 'read_file' | 'git_commit' | 'git_push',
+                  paths: [],
+                  content_bytes: null,
+                  prior: null,
+                  diff_preview: null,
+                  diff_truncated: false,
+                },
           access: call.access,
           approval_state: durableDeny ? 'denied' : call.access === 'auto' ? 'not_required' : 'pending',
           approval_token: durableDeny || call.access === 'auto' ? null : makeToken(callIndex, call),
@@ -1816,7 +1841,31 @@ describe('project Agent completion controller', () => {
     });
     const bindAgentApproval = jest.fn(async (request: BindAgentApprovalRequestV2) => {
       operations.push(bindAgentApproval);
-      return { schema_version: 2 as const, status: 'bound' as const, operation_id: request.operation_id, task_id: request.task_id, attempt_id: request.attempt_id, round_id: request.round_id, call_index: request.call_index, call_id: request.call_id, decision: request.decision, approval_reference: request.operation_id, grant: null, result_batch_revision: request.batch_revision, observed_checkpoint: request.committed_checkpoint };
+      const boundReceipt = request.decision === 'denied'
+        ? {
+            schema_version: 1 as const,
+            call_id: request.call_id,
+            name: request.token.name,
+            arguments_sha256: request.token.arguments_sha256,
+            result_sha256: 'd'.repeat(64),
+            result_bytes: 64,
+            truncated: false,
+            duration_ms: 0,
+            outcome: 'denied' as const,
+            failure_code: 'E_AGENT_DENIED_BY_USER' as const,
+            approval_reference: null,
+          }
+        : null;
+      const boundTranscript = request.decision === 'denied'
+        ? {
+            schema_version: 1 as const,
+            transcript_ref: AGENT_TRANSCRIPT,
+            generation: request.controller_cas.expected_controller_generation + 10,
+            transcript_sha256: 'c'.repeat(64),
+            transcript_bytes: 100,
+          }
+        : null;
+      return { schema_version: 2 as const, status: 'bound' as const, operation_id: request.operation_id, task_id: request.task_id, attempt_id: request.attempt_id, round_id: request.round_id, call_index: request.call_index, call_id: request.call_id, decision: request.decision, approval_reference: request.operation_id, grant: null, result_batch_revision: request.batch_revision, observed_checkpoint: request.committed_checkpoint, receipt: boundReceipt, transcript: boundTranscript };
     });
     const executeAgentTool = jest.fn(async (request: ExecuteAgentToolRequestV2): Promise<ExecuteAgentToolResultV2> => {
       operations.push(executeAgentTool);
@@ -1867,6 +1916,7 @@ describe('project Agent completion controller', () => {
     operationIds = [...IDS],
     requestAgentApproval = jest.fn(async () => ({ status: 'approved' as const, scope: 'once' as const })),
     now: () => string = () => NOW,
+    requestBatchApprovals?: CompletionControllerDependencies['requestBatchApprovals'],
   ) {
     return createCompletionController({
       chat: store,
@@ -1880,6 +1930,9 @@ describe('project Agent completion controller', () => {
       agentRuntime: runtime,
       requestAgentApproval,
       now,
+      ...(requestBatchApprovals === undefined
+        ? {}
+        : { requestBatchApprovals }),
     });
   }
 
@@ -2840,5 +2893,111 @@ describe('project Agent completion controller', () => {
       assistantMessageId: null,
       agent: { phase: 'cancelled' },
     });
+  });
+
+  test('presents a batch of gated calls as one list and persists each decision', async () => {
+    const store = agentStore();
+    const conversationId = store.getState().selectedConversationId!;
+    const runtime = makeRuntime([]);
+    const persistCurrent = committedPersistence(store);
+    const requestBatchApprovals = jest.fn(
+      async (requests: readonly CompletionAgentApprovalRequest[]) => {
+        expect(requests).toHaveLength(2);
+        expect(requests[0]?.preview?.kind).toBe('write_file');
+        expect(requests[0]?.preview?.paths).toEqual(['notes.md']);
+        expect(requests[1]?.preview?.kind).toBe('git_commit');
+        return [
+          { status: 'approved', scope: 'once' },
+          { status: 'denied', message: 'no commits right now' },
+        ];
+      },
+    );
+    const controller = agentController(
+      store,
+      runtime,
+      persistCurrent,
+      [...IDS],
+      jest.fn(),
+      () => NOW,
+      requestBatchApprovals,
+    );
+    const result = await controller.send({
+      conversationId,
+      text: 'write and commit',
+      attachments: [],
+    });
+    expect(result.status).toBe('completed');
+    // One batch presentation for both gated calls, never a single-card ask.
+    expect(requestBatchApprovals).toHaveBeenCalledTimes(1);
+    const bindMock = runtime.bindAgentApproval as jest.Mock;
+    expect(bindMock).toHaveBeenCalledTimes(2);
+    expect(bindMock.mock.calls[0]?.[0]).toMatchObject({
+      call_id: 'write-call',
+      decision: 'allow_once',
+      deny_message: null,
+    });
+    expect(bindMock.mock.calls[1]?.[0]).toMatchObject({
+      call_id: 'commit-call',
+      decision: 'denied',
+      deny_message: 'no commits right now',
+    });
+    // The denied call never executes; only the allowed write does.
+    const executeMock = runtime.executeAgentTool as jest.Mock;
+    expect(executeMock).toHaveBeenCalledTimes(1);
+    expect(executeMock.mock.calls[0]?.[0].call_id).toBe('write-call');
+    // The denial is persisted into the journal as a structured tool result
+    // with the native denied receipt and the advanced transcript.
+    const conversation = store.getState().conversations[conversationId]!;
+    const journal = conversation.attempts[0]?.agent;
+    const deniedCall = journal?.batch.find(call => call.call_id === 'commit-call');
+    expect(deniedCall?.approval_decision).toBe('denied');
+    expect(deniedCall?.approval_token).toBeNull();
+    expect(deniedCall?.approval_reference).toBeNull();
+    expect(deniedCall?.receipt).toMatchObject({
+      outcome: 'denied',
+      failure_code: 'E_AGENT_DENIED_BY_USER',
+      approval_reference: null,
+    });
+    // Rehydration preserves the denial settlement and its failure code.
+    const hydrated = hydrateChatState(store.serialize());
+    const hydratedCall = hydrated.conversations[conversationId]!.attempts[0]!.agent?.batch.find(
+      call => call.call_id === 'commit-call',
+    );
+    expect(hydratedCall?.receipt?.failure_code).toBe('E_AGENT_DENIED_BY_USER');
+    expect(hydratedCall?.approval_decision).toBe('denied');
+    // A deny message outside the single-card flow still fails closed: a
+    // malformed batch answer list is rejected by the driver.
+    const events = (hydrated.sessionEvents ?? []).filter(
+      event => event.attempt_id === hydrated.conversations[conversationId]!.attempts[0]!.attemptId,
+    );
+    expect(events.some(event => event.kind === 'tool_result' && event.status === 'denied' && event.call_id === 'commit-call')).toBe(true);
+  });
+
+  test('a batch answer list of the wrong length fails closed into denials', async () => {
+    const store = agentStore();
+    const conversationId = store.getState().selectedConversationId!;
+    const runtime = makeRuntime([]);
+    const persistCurrent = committedPersistence(store);
+    const requestBatchApprovals = jest.fn(async () => []);
+    const controller = agentController(
+      store,
+      runtime,
+      persistCurrent,
+      [...IDS],
+      jest.fn(),
+      () => NOW,
+      requestBatchApprovals,
+    );
+    const result = await controller.send({
+      conversationId,
+      text: 'write and commit',
+      attachments: [],
+    });
+    expect(result.status).toBe('completed');
+    const bindMock = runtime.bindAgentApproval as jest.Mock;
+    expect(bindMock).toHaveBeenCalledTimes(2);
+    expect(bindMock.mock.calls[0]?.[0].decision).toBe('denied');
+    expect(bindMock.mock.calls[1]?.[0].decision).toBe('denied');
+    expect(runtime.executeAgentTool).not.toHaveBeenCalled();
   });
 });

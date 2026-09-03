@@ -302,6 +302,7 @@ BOOL DSHAgentFailureCode(id value) {
       @"E_AGENT_CAPACITY",
       @"E_COMPLETION_LENGTH",
       @"E_COMPLETION_CONTENT_FILTER",
+      @"E_AGENT_DENIED_BY_USER",
     ]];
   });
   return [codes containsObject:value];
@@ -947,6 +948,16 @@ BOOL DSHAgentValidateNativeToolFeedbackString(NSString *feedbackJSON,
             @"schema_version", @"failure_code",
           ])) && DSHAgentSafeInteger(payload[@"schema_version"], 1, NO) &&
         DSHAgentFailureCode(payload[@"failure_code"]);
+    if (!validFailure && [outcome isEqualToString:@"denied"] &&
+        [payload[@"failure_code"] isEqualToString:@"E_AGENT_DENIED_BY_USER"]) {
+      // User denials optionally carry a bounded model-directed message.
+      validFailure = DSHAgentExactDictionaryKeys(payload, @[
+        @"schema_version", @"failure_code", @"user_message",
+      ]) && DSHAgentSafeInteger(payload[@"schema_version"], 1, NO) &&
+        (payload[@"user_message"] == NSNull.null ||
+         DSHAgentBoundedUTF8String(payload[@"user_message"], 2000, YES,
+                                   nullptr));
+    }
     if (!validFailure) {
       DSHSetAgentNativeStoreError(error, DSHAgentNativeStoreErrorInvalidArgument);
       return NO;
