@@ -3514,14 +3514,24 @@ NSString *DSHSessionSnapshotStoreLaunchInstanceId(void) {
     return nil;
   }
   NSString *rootPath = rootURL.path.stringByStandardizingPath;
-  NSString *sessionPath = sessionURL.path.stringByStandardizingPath;
+  // Standardize the session file's PARENT, not the file path itself, and
+  // derive the file path from it. `stringByStandardizingPath` drops a leading
+  // "/private" only when the path exists; on a physical device the app
+  // container is spelled "/private/var/...", so standardizing the root (which
+  // exists) and a not-yet-written sessions.json independently yields two
+  // spellings of the same directory and the containment check below fails.
+  // The parent directory exists exactly when the root does, so both sides
+  // standardize the same way.
+  NSString *sessionParentPath =
+      sessionURL.URLByDeletingLastPathComponent.path.stringByStandardizingPath;
   NSString *normalizedRootName = [NSURL fileURLWithPath:rootPath
                                           isDirectory:YES].lastPathComponent;
-  NSString *normalizedSessionName = [NSURL fileURLWithPath:sessionPath
+  NSString *normalizedSessionName = [NSURL fileURLWithPath:sessionURL.path
                                              isDirectory:NO].lastPathComponent;
-  if (![sessionPath hasPrefix:[rootPath stringByAppendingString:@"/"]] ||
-      ![[sessionURL.URLByDeletingLastPathComponent.path stringByStandardizingPath]
-          isEqualToString:rootPath] ||
+  NSString *sessionPath =
+      [sessionParentPath stringByAppendingPathComponent:normalizedSessionName];
+  if (![sessionParentPath isEqualToString:rootPath] ||
+      ![sessionPath hasPrefix:[rootPath stringByAppendingString:@"/"]] ||
       normalizedRootName.length == 0 || [normalizedRootName isEqual:@"."] ||
       [normalizedRootName isEqual:@".."] || normalizedSessionName.length == 0 ||
       [normalizedSessionName isEqual:@"."] || [normalizedSessionName isEqual:@".."] ||

@@ -1,5 +1,6 @@
 #import <XCTest/XCTest.h>
-#import <TargetConditionals.h>
+
+#import "DSHTestHost.h"
 
 #import "../../../../modules/rish/ios/Sources/DSHWorkspaceCanonical.h"
 #import "../../../../modules/rish/ios/Sources/LocalProjectAccess.h"
@@ -8,6 +9,8 @@
 #import "../../../../modules/rish/ios/Sources/WorkspaceClearanceStore.h"
 
 #include <fcntl.h>
+#include <limits.h>
+#include <stdlib.h>
 #include <sys/file.h>
 #include <sys/stat.h>
 #include <sys/wait.h>
@@ -165,9 +168,25 @@ static NSString *const DSHSessionTestOperationB =
   [super setUp];
   NSString *name = [NSString stringWithFormat:@"rish-session-%@",
                     NSUUID.UUID.UUIDString.lowercaseString];
-  self.rootURL = [NSURL fileURLWithPath:
+  NSURL *requestedRoot = [NSURL fileURLWithPath:
       [NSTemporaryDirectory() stringByAppendingPathComponent:name]
-                              isDirectory:YES];
+                                    isDirectory:YES];
+  // Manual legacy/downgrade fixtures write directly to sessions.json. Create
+  // the root before the store so those writes model a real private
+  // Application Support directory instead of silently failing on a
+  // nonexistent parent. Production hands the store a standardized root
+  // (URLForDirectory: never spells "/private"); NSTemporaryDirectory() on a
+  // physical device does, so standardize once here and use that single
+  // spelling for the store, the metadata mocks and every path assertion.
+  NSError *setupError = nil;
+  XCTAssertTrue([NSFileManager.defaultManager
+      createDirectoryAtURL:requestedRoot
+      withIntermediateDirectories:YES
+      attributes:@{ NSFilePosixPermissions : @0700 }
+      error:&setupError]);
+  XCTAssertNil(setupError);
+  self.rootURL = [NSURL fileURLWithPath:requestedRoot.path.stringByStandardizingPath
+                            isDirectory:YES];
   self.store = [[DSHSessionSnapshotStore alloc]
       initWithRootURL:self.rootURL
            sessionURL:[self.rootURL URLByAppendingPathComponent:@"sessions.json"]
@@ -175,17 +194,6 @@ static NSString *const DSHSessionTestOperationB =
            coordinator:nil
              faultHook:nil];
   XCTAssertNotNil(self.store);
-  // Manual legacy/downgrade fixtures write directly to sessions.json. Create
-  // and pass the root through the store first so those writes model a real
-  // private Application Support directory instead of silently failing on a
-  // nonexistent parent.
-  NSError *setupError = nil;
-  XCTAssertTrue([NSFileManager.defaultManager
-      createDirectoryAtURL:self.rootURL
-      withIntermediateDirectories:YES
-      attributes:@{ NSFilePosixPermissions : @0700 }
-      error:&setupError]);
-  XCTAssertNil(setupError);
   NSDictionary *initial = [self.store loadSessionSnapshotWithError:&setupError];
   XCTAssertNotNil(initial);
   XCTAssertEqualObjects(initial[@"status"], @"missing");
@@ -703,6 +711,53 @@ static NSString *const DSHSessionTestOperationB =
   } error:error];
 }
 
+// Applies the exact metadata shape a store-written session file must
+// carry. On a physical device data protection is enforced, so the class and
+// backup-exclusion attributes are asserted by READING THEM BACK through the
+// same NSURL resource keys the store validates (NSURLFileProtectionKey must
+// equal the class the store requires) instead of trusting the setter's
+// return value. On CoreSimulator the keys are not enforced and stay best
+// effort. NSFileManager takes the NSFileProtection* spelling; NSURL reports
+// the NSURLFileProtection* spelling, so both constants appear here on
+// purpose.
+- (void)applyPublishedSessionProtectionAtURL:(NSURL *)url {
+  if (DSHTestHostIsSimulator()) {
+    (void)[url setResourceValue:
+        NSURLFileProtectionCompleteUntilFirstUserAuthentication
+                          forKey:NSURLFileProtectionKey
+                           error:nil];
+    (void)[url setResourceValue:@YES
+                          forKey:NSURLIsExcludedFromBackupKey
+                           error:nil];
+    return;
+  }
+  NSError *error = nil;
+  XCTAssertTrue(([NSFileManager.defaultManager
+      setAttributes:@{
+        NSFileProtectionKey :
+            NSFileProtectionCompleteUntilFirstUserAuthentication,
+      }
+      ofItemAtPath:url.path
+      error:&error]), @"%@", error);
+  error = nil;
+  XCTAssertTrue(([url setResourceValue:@YES
+                                forKey:NSURLIsExcludedFromBackupKey
+                                 error:&error]), @"%@", error);
+  id protection = nil;
+  error = nil;
+  XCTAssertTrue(([url getResourceValue:&protection
+                                forKey:NSURLFileProtectionKey
+                                 error:&error]), @"%@", error);
+  XCTAssertEqualObjects(protection,
+      NSURLFileProtectionCompleteUntilFirstUserAuthentication);
+  NSNumber *excluded = nil;
+  error = nil;
+  XCTAssertTrue(([url getResourceValue:&excluded
+                                forKey:NSURLIsExcludedFromBackupKey
+                                 error:&error]), @"%@", error);
+  XCTAssertTrue(excluded.boolValue);
+}
+
 - (void)writeProtectedBytes:(NSData *)data toURL:(NSURL *)url {
   XCTAssertTrue([data writeToURL:url options:NSDataWritingAtomic error:nil]);
   XCTAssertTrue(([NSFileManager.defaultManager
@@ -711,26 +766,7 @@ static NSString *const DSHSessionTestOperationB =
       }
       ofItemAtPath:url.path
       error:nil]));
-#if TARGET_OS_SIMULATOR
-  (void)[url setResourceValue:
-      NSURLFileProtectionCompleteUntilFirstUserAuthentication
-                        forKey:NSURLFileProtectionKey
-                         error:nil];
-  (void)[url setResourceValue:@YES
-                        forKey:NSURLIsExcludedFromBackupKey
-                         error:nil];
-#else
-  XCTAssertTrue(([NSFileManager.defaultManager
-      setAttributes:@{
-        NSFileProtectionKey :
-            NSFileProtectionCompleteUntilFirstUserAuthentication,
-      }
-      ofItemAtPath:url.path
-      error:nil]));
-  XCTAssertTrue([url setResourceValue:@YES
-                               forKey:NSURLIsExcludedFromBackupKey
-                                error:nil]);
-#endif
+  [self applyPublishedSessionProtectionAtURL:url];
 }
 
 - (void)writePublishedV2Bytes:(NSData *)data toURL:(NSURL *)url {
@@ -916,6 +952,85 @@ static NSString *const DSHSessionTestOperationB =
   XCTAssertTrue(sawTombstoneTemporary);
 }
 
+// Regression for the physical-device init failure: a root spelled with the
+// "/private" prefix that already exists, paired with a sessions.json that does
+// not exist yet, made `stringByStandardizingPath` drop the prefix from the
+// root only, so the containment check failed and init returned nil. Every
+// later message went to nil and every CAS "result" was nil with a nil error.
+// NSTemporaryDirectory() is spelled that way on device; on the CoreSimulator
+// host the per-user temp dir provides the same spelling.
+- (void)testInitAcceptsPrivatePrefixedExistingRootBeforeSessionFileExists {
+  // Device: NSTemporaryDirectory() is already "/private/var/...". Simulator
+  // host: the container temp dir is under /Users, so fall back to the host's
+  // per-user temp dir and finally /private/tmp.
+  NSURL *root = nil;
+  NSError *error = nil;
+  for (NSString *candidate in @[ NSTemporaryDirectory(),
+                                  [self hostUserTemporaryDirectory],
+                                  @"/private/tmp" ]) {
+    if (candidate.length == 0) continue;
+    char resolved[PATH_MAX] = {0};
+    if (realpath(candidate.fileSystemRepresentation, resolved) == NULL) continue;
+    NSString *physical = [NSFileManager.defaultManager
+        stringWithFileSystemRepresentation:resolved length:strlen(resolved)];
+    if (![physical hasPrefix:@"/private/"]) continue;
+    // One extra level so the store's parent directory is a real directory:
+    // the store opens parents with O_NOFOLLOW and "/tmp" on the simulator
+    // host is itself a symlink.
+    NSURL *attempt = [[[NSURL fileURLWithPath:physical isDirectory:YES]
+        URLByAppendingPathComponent:
+            [NSString stringWithFormat:@"rish-private-%@",
+                NSUUID.UUID.UUIDString.lowercaseString] isDirectory:YES]
+        URLByAppendingPathComponent:@"store" isDirectory:YES];
+    if ([NSFileManager.defaultManager createDirectoryAtURL:attempt
+        withIntermediateDirectories:YES
+        attributes:@{ NSFilePosixPermissions : @0700 } error:&error]) {
+      root = attempt;
+      break;
+    }
+  }
+  if (root == nil) {
+    XCTSkip(@"No writable temporary directory on this host is spelled with "
+        @"the /private prefix, so the device path shape cannot be modeled.");
+  }
+  NSURL *sessionURL = [root URLByAppendingPathComponent:@"sessions.json"];
+  XCTAssertFalse([NSFileManager.defaultManager fileExistsAtPath:sessionURL.path]);
+  // The root exists, so its standardized spelling drops "/private"; the
+  // session file does not exist, so its own standardized spelling would not.
+  XCTAssertFalse([root.path.stringByStandardizingPath hasPrefix:@"/private/"]);
+  XCTAssertTrue([sessionURL.path.stringByStandardizingPath hasPrefix:@"/private/"]);
+
+  DSHSessionSnapshotStore *store = [[DSHSessionSnapshotStore alloc]
+      initWithRootURL:root
+           sessionURL:sessionURL
+     launchInstanceId:DSHSessionTestLaunch
+           coordinator:nil
+             faultHook:nil];
+  XCTAssertNotNil(store);
+  XCTAssertEqualObjects(store.sessionURL.URLByDeletingLastPathComponent.path,
+                        store.rootURL.path);
+  XCTAssertEqualObjects(store.sessionURL.lastPathComponent, @"sessions.json");
+  NSDictionary *result = [store casPersistSession:@{
+    @"schema_version" : @1,
+    @"operation_id" : DSHSessionTestOperationA,
+    @"expected" : @{ @"schema_version" : @1, @"kind" : @"missing" },
+    @"candidate_json" : [self jsonForCandidate:[self candidate:1]],
+  } error:&error];
+  XCTAssertNotNil(result, @"%@", error);
+  XCTAssertEqualObjects(result[@"status"], @"committed");
+  XCTAssertTrue([NSFileManager.defaultManager fileExistsAtPath:sessionURL.path]);
+  [NSFileManager.defaultManager
+      removeItemAtURL:root.URLByDeletingLastPathComponent error:nil];
+}
+
+- (NSString *)hostUserTemporaryDirectory {
+  char buffer[PATH_MAX] = {0};
+  size_t length = confstr(_CS_DARWIN_USER_TEMP_DIR, buffer, sizeof(buffer));
+  if (length == 0 || length > sizeof(buffer)) return @"";
+  return [NSFileManager.defaultManager
+      stringWithFileSystemRepresentation:buffer length:strlen(buffer)];
+}
+
 - (void)testFreshStoreLoadsAsMissingAndFirstCASCommitsV3 {
   NSError *error = nil;
   NSDictionary *loaded = [self.store loadSessionSnapshotWithError:&error];
@@ -1022,21 +1137,23 @@ static NSString *const DSHSessionTestOperationB =
   XCTAssertEqualObjects(legacy[@"legacy_bytes_sha256"],
                         @"ab32635dc1e3930cbbb9de5773fc46c544453f94921592ffa4b016ecc21d6e55");
   NSNumber *excluded = nil;
-#if TARGET_OS_SIMULATOR
-  // CoreSimulator filesystems may not implement the iOS backup-resource key;
-  // the native store still enforces mode/inode/no-follow and treats this key
-  // as best effort on simulator.
-  (void)[self.store.sessionURL
-      getResourceValue:&excluded
-                forKey:NSURLIsExcludedFromBackupKey
-                 error:nil];
-#else
-  XCTAssertTrue([self.store.sessionURL
-      getResourceValue:&excluded
-                forKey:NSURLIsExcludedFromBackupKey
-                error:nil]);
-  XCTAssertTrue(excluded.boolValue);
-#endif
+  if (DSHTestHostIsSimulator()) {
+    // CoreSimulator filesystems may not implement the iOS backup-resource
+    // key; the native store still enforces mode/inode/no-follow and treats
+    // this key as best effort on simulator.
+    (void)[self.store.sessionURL
+        getResourceValue:&excluded
+                  forKey:NSURLIsExcludedFromBackupKey
+                   error:nil];
+  } else {
+    // Device: the hardened legacy file must carry the actual backup
+    // exclusion attribute. Assert the read-back value, not the setter.
+    XCTAssertTrue(([self.store.sessionURL
+        getResourceValue:&excluded
+                  forKey:NSURLIsExcludedFromBackupKey
+                   error:nil]));
+    XCTAssertTrue(excluded.boolValue);
+  }
 
   NSDictionary *migrationExpected = @{
     @"schema_version" : @1,
@@ -2172,26 +2289,9 @@ static NSString *const DSHSessionTestOperationB =
       setAttributes:@{ NSFilePosixPermissions : @0600 }
       ofItemAtPath:url.path
       error:&error]));
-#if TARGET_OS_SIMULATOR
-  (void)[url setResourceValue:
-      NSURLFileProtectionCompleteUntilFirstUserAuthentication
-                        forKey:NSURLFileProtectionKey
-                         error:nil];
-  (void)[url setResourceValue:@YES
-                        forKey:NSURLIsExcludedFromBackupKey
-                         error:nil];
-#else
-  XCTAssertTrue(([NSFileManager.defaultManager
-      setAttributes:@{
-        NSFileProtectionKey :
-            NSFileProtectionCompleteUntilFirstUserAuthentication,
-      }
-      ofItemAtPath:url.path
-      error:&error]));
-  XCTAssertTrue([url setResourceValue:@YES
-                               forKey:NSURLIsExcludedFromBackupKey
-                                error:&error]);
-#endif
+  // Device host: asserts the ACTUAL protection class read back from the
+  // filesystem (see applyPublishedSessionProtectionAtURL).
+  [self applyPublishedSessionProtectionAtURL:url];
   XCTAssertNil(error);
   NSDictionary *loaded = [self.store loadSessionSnapshotWithError:&error];
   XCTAssertNil(error);
@@ -2273,6 +2373,12 @@ static NSString *const DSHSessionTestOperationB =
 }
 
 - (void)testSecondProcessCASWaitsOutTheRenameRollbackCheckpoint {
+  if (DSHTestHostIsDevice()) {
+    XCTSkip(@"fork(2) is not permitted for iOS app processes on a physical "
+        @"device. The same writer-lock/rollback property is verified "
+        @"in-process on both hosts by "
+        @"testIndependentStoreCASWaitsOutTheRenameRollbackCheckpoint.");
+  }
   NSError *error = nil;
   NSDictionary *first = [self casWithOperation:DSHSessionTestOperationA
                                         expected:@{
@@ -2327,6 +2433,11 @@ static NSString *const DSHSessionTestOperationB =
   XCTAssertEqual(pipe(pipeDescriptors), 0);
   pid_t child = fork();
   XCTAssertGreaterThanOrEqual(child, 0);
+  if (child < 0) {
+    close(pipeDescriptors[0]);
+    close(pipeDescriptors[1]);
+    return;
+  }
   if (child == 0) {
     int childWrite = dup2(pipeDescriptors[1], STDOUT_FILENO);
     close(pipeDescriptors[0]);
@@ -2373,6 +2484,100 @@ static NSString *const DSHSessionTestOperationB =
   XCTAssertGreaterThan(afterRelease, (ssize_t)0);
   status[afterRelease] = '\0';
   XCTAssertEqualObjects([NSString stringWithUTF8String:status], @"committed");
+}
+
+- (void)testIndependentStoreCASWaitsOutTheRenameRollbackCheckpoint {
+  // In-process counterpart of the fork(2)-based
+  // testSecondProcessCASWaitsOutTheRenameRollbackCheckpoint, which must
+  // skip on the physical device because iOS app processes cannot fork.
+  // Verifies the same property without a second process: while the writer
+  // holds the shared CAS lock at its rename rollback checkpoint, a second
+  // store on an independent coordinator must stay blocked, and it must
+  // commit once the writer releases the lock after the rollback.
+  NSError *error = nil;
+  NSDictionary *first = [self casWithOperation:DSHSessionTestOperationA
+                                        expected:@{
+                                          @"schema_version" : @1,
+                                          @"kind" : @"missing",
+                                        }
+                                       candidate:[self candidate:1]
+                                           error:&error];
+  XCTAssertNil(error);
+  XCTAssertEqualObjects(first[@"status"], @"committed");
+  NSData *oldBytes = [NSData dataWithContentsOfURL:self.store.sessionURL];
+  XCTAssertNotNil(oldBytes);
+  NSString *candidateJSON = [self jsonForCandidate:[self candidate:2]];
+  NSDictionary *expected = @{
+    @"schema_version" : @1,
+    @"kind" : @"present",
+    @"snapshot" : first[@"snapshot"],
+  };
+  dispatch_semaphore_t entered = dispatch_semaphore_create(0);
+  dispatch_semaphore_t release = dispatch_semaphore_create(0);
+  __block NSUInteger afterRenameCount = 0;
+  DSHSessionSnapshotStoreFaultHook hook =
+      ^BOOL(DSHSessionSnapshotStoreFaultPoint point) {
+        if (point == DSHSessionSnapshotStoreFaultPointAfterRename &&
+            ++afterRenameCount == 2) {
+          // Roll the already protected session inode back while the lock
+          // is held, then hold the lock at the rollback checkpoint.
+          [oldBytes writeToURL:self.store.sessionURL options:0 error:nil];
+          dispatch_semaphore_signal(entered);
+          dispatch_semaphore_wait(release, DISPATCH_TIME_FOREVER);
+          return NO;
+        }
+        return YES;
+      };
+  DSHSessionSnapshotStore *writer = [[DSHSessionSnapshotStore alloc]
+      initWithRootURL:self.rootURL
+           sessionURL:self.store.sessionURL
+     launchInstanceId:DSHSessionTestLaunch
+           coordinator:nil
+             faultHook:hook];
+  id allocated = [DSHSessionWorkspaceCoordinator alloc];
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Warc-performSelector-leaks"
+  DSHSessionWorkspaceCoordinator *secondCoordinator =
+      [allocated performSelector:NSSelectorFromString(@"initPrivate")];
+#pragma clang diagnostic pop
+  DSHSessionSnapshotStore *second = [[DSHSessionSnapshotStore alloc]
+      initWithRootURL:self.rootURL
+           sessionURL:self.store.sessionURL
+     launchInstanceId:DSHSessionTestLaunch
+           coordinator:secondCoordinator
+             faultHook:nil];
+  __block NSDictionary *writerResult = nil;
+  __block NSDictionary *secondResult = nil;
+  dispatch_queue_t queue = dispatch_get_global_queue(QOS_CLASS_DEFAULT, 0);
+  dispatch_async(queue, ^{
+    writerResult = [writer casPersistSession:@{
+      @"schema_version" : @1,
+      @"operation_id" : DSHSessionTestOperationB,
+      @"expected" : expected,
+      @"candidate_json" : candidateJSON,
+    } error:nil];
+  });
+  XCTAssertEqual(dispatch_semaphore_wait(entered,
+                                         dispatch_time(DISPATCH_TIME_NOW,
+                                                       5 * NSEC_PER_SEC)), 0);
+  dispatch_async(queue, ^{
+    secondResult = [second casPersistSession:@{
+      @"schema_version" : @1,
+      @"operation_id" : @"cccccccc-cccc-4ccc-8ccc-cccccccccccc",
+      @"expected" : expected,
+      @"candidate_json" : candidateJSON,
+    } error:nil];
+  });
+  // The second store must remain blocked behind the writer's lock.
+  usleep(100000);
+  XCTAssertNil(secondResult);
+  dispatch_semaphore_signal(release);
+  for (NSUInteger index = 0; index < 500 &&
+      (writerResult == nil || secondResult == nil); index += 1) {
+    usleep(10000);
+  }
+  XCTAssertEqualObjects(writerResult[@"status"], @"unknown");
+  XCTAssertEqualObjects(secondResult[@"status"], @"committed");
 }
 
 - (void)testConcurrentReaderCannotObserveAnInFlightRenameRollback {
