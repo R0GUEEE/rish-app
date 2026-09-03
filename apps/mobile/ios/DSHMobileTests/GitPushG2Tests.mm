@@ -74,12 +74,13 @@ typedef void (^G2Reject)(NSString *code, NSString *message, NSError *error);
           NSUUID.UUID.UUIDString.lowercaseString]] isDirectory:YES];
   XCTAssertTrue([NSFileManager.defaultManager createDirectoryAtURL:self.supportURL
       withIntermediateDirectories:YES attributes:nil error:nil]);
-  self.projectAccess = [[DSHLocalProjectAccess alloc] initWithProjectsRootURL:
-      [self.supportURL URLByAppendingPathComponent:@"projects" isDirectory:YES]];
+  // The drive uses the app's real project storage (Application Support in
+  // the app container) exactly as the production bridge does; only the
+  // runner-only repositories live under the temporary support directory.
+  self.projectAccess = [DSHLocalProjectAccess sharedAccess];
   Class moduleClass = NSClassFromString(@"LocalProjectsModule");
   XCTAssertNotNil(moduleClass);
-  self.module = [[moduleClass alloc] initWithSupportURL:self.supportURL
-                                          projectAccess:self.projectAccess];
+  self.module = [[moduleClass alloc] init];
 }
 
 - (void)tearDown {
@@ -224,8 +225,10 @@ static NSString *G2SHA256(NSData *data) {
   report[@"target_url"] = targetURL;
 
   // 1. Public clone without credentials through the production clone path.
+  NSString *projectName = [NSString stringWithFormat:@"g2-%@",
+      [[NSUUID.UUID.UUIDString.lowercaseString substringToIndex:8] copy]];
   NSDictionary *project = [self expectResolved:^(G2Resolve resolve, G2Reject reject) {
-    [self.module clonePublicRepository:publicURL name:@"g2-clone" options:nil
+    [self.module clonePublicRepository:publicURL name:projectName options:nil
                               resolver:resolve rejecter:reject];
   } step:@"clone public"];
   NSString *projectId = project[@"id"];
