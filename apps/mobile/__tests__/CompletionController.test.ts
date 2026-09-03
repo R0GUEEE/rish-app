@@ -2058,6 +2058,94 @@ describe('project Agent completion controller', () => {
     });
   });
 
+  test('reconciles a hydrated completed Agent attempt to idle without native recovery', async () => {
+    const source = agentStore();
+    const conversationId = source.getState().selectedConversationId!;
+    const sourceRuntime = makeRuntime([], { finalRoundIndex: 0 });
+    const sourceController = agentController(
+      source,
+      sourceRuntime,
+      committedPersistence(source),
+      [...IDS],
+    );
+
+    await expect(sourceController.send({
+      conversationId,
+      text: 'complete before restart',
+      attachments: [],
+    })).resolves.toMatchObject({ status: 'completed' });
+    expect(source.getState().agentTranscriptCleanupOutbox).toEqual([]);
+
+    const hydrated = createChatStore({
+      initialState: hydrateChatState(source.serialize()),
+      sessionAuthority: source.getSessionAuthority()!,
+    });
+    const restartedRuntime = makeRuntime([]);
+    const restarted = agentController(
+      hydrated,
+      restartedRuntime,
+      committedPersistence(hydrated),
+      [...IDS],
+    );
+
+    expect(restarted.reconcileHydrated(conversationId)).toMatchObject({
+      phase: 'idle',
+    });
+    expect(restartedRuntime.queryAgentAttempt).not.toHaveBeenCalled();
+    expect(restartedRuntime.recoverAgentAttempt).not.toHaveBeenCalled();
+    expect(restartedRuntime.completeAgentRoundV2).not.toHaveBeenCalled();
+    expect(restartedRuntime.prepareAgentToolBatch).not.toHaveBeenCalled();
+    expect(restartedRuntime.executeAgentTool).not.toHaveBeenCalled();
+  });
+
+  test('does not resume a hydrated completed Agent attempt with cleanup still pending', async () => {
+    const source = agentStore();
+    const conversationId = source.getState().selectedConversationId!;
+    const sourceRuntime = makeRuntime([], { finalRoundIndex: 0 });
+    (sourceRuntime.finalizeAgentAttempt as jest.Mock).mockRejectedValueOnce({
+      code: 'E_AGENT_PERSISTENCE',
+    });
+    const sourceController = agentController(
+      source,
+      sourceRuntime,
+      committedPersistence(source),
+      [...IDS],
+    );
+
+    await expect(sourceController.send({
+      conversationId,
+      text: 'complete with cleanup pending',
+      attachments: [],
+    })).resolves.toMatchObject({ status: 'retryable' });
+    expect(source.getState().conversations[conversationId]?.attempts[0]).toMatchObject({
+      status: 'completed',
+      agent: { phase: 'final_response' },
+    });
+    expect(source.getState().agentTranscriptCleanupOutbox).toHaveLength(1);
+
+    const hydrated = createChatStore({
+      initialState: hydrateChatState(source.serialize()),
+      sessionAuthority: source.getSessionAuthority()!,
+    });
+    const restartedRuntime = makeRuntime([]);
+    const restarted = agentController(
+      hydrated,
+      restartedRuntime,
+      committedPersistence(hydrated),
+      [...IDS],
+    );
+
+    expect(restarted.reconcileHydrated(conversationId)).toMatchObject({
+      phase: 'idle',
+    });
+    expect(hydrated.getState().agentTranscriptCleanupOutbox).toHaveLength(1);
+    expect(restartedRuntime.queryAgentAttempt).not.toHaveBeenCalled();
+    expect(restartedRuntime.recoverAgentAttempt).not.toHaveBeenCalled();
+    expect(restartedRuntime.completeAgentRoundV2).not.toHaveBeenCalled();
+    expect(restartedRuntime.prepareAgentToolBatch).not.toHaveBeenCalled();
+    expect(restartedRuntime.executeAgentTool).not.toHaveBeenCalled();
+  });
+
   test.each([
     ['empty', ''],
     ['whitespace-only', ' \n\t'],

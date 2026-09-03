@@ -4675,7 +4675,24 @@ export function createCompletionController(
       const turn = conversation?.turns.at(-1);
       const attemptId = turn?.attemptIds.at(-1);
       const attempt = conversation?.attempts.find(item => item.attemptId === attemptId);
-      if (attempt?.agent !== undefined && attempt.agent !== null) {
+      const completedAgentHasAssistant =
+        attempt?.agent !== undefined &&
+        attempt.agent !== null &&
+        attempt.status === 'completed' &&
+        attempt.agent.phase === 'final_response' &&
+        attempt.assistantMessageId !== null &&
+        conversation?.messages.some(
+          message =>
+            message.id === attempt.assistantMessageId &&
+            message.role === 'assistant',
+        ) === true;
+      if (completedAgentHasAssistant) {
+        // A terminal Agent checkpoint is already user-visible and must never
+        // re-enter provider/tool recovery after hydration. Transcript cleanup,
+        // if still present in the durable outbox, remains independently owned
+        // by that outbox and does not make the completed attempt resumable.
+        publish(stateFor('idle'));
+      } else if (attempt?.agent !== undefined && attempt.agent !== null) {
         publish(
           stateFor('resume_available', {
             conversationId,
