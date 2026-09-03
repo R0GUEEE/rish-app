@@ -1096,6 +1096,8 @@ static NSArray *DSHRuntimeLatestBatchCalls(NSDictionary *state,
     updated = [self.ledger cancelAgentExecutionWithCAS:DSHRuntimeExecutionCAS(row)
         patch:@{ @"state" : @"cancelled" } error:error][@"row"];
   } else if ([rowState isEqualToString:@"running"]) {
+    // Interrupt an in-flight bounded git_push network phase cooperatively.
+    [self.executionService requestCancelForExecutionLocator:row[@"locator"]];
     updated = [self.ledger casAgentExecutionWithCAS:DSHRuntimeExecutionCAS(row)
         patch:@{ @"state" : @"cancel_requested" } error:error][@"row"];
   } else {

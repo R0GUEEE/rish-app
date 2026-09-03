@@ -322,7 +322,7 @@ static NSDictionary *DSHPreparedTestRoot(BOOL project,
                         (@[ @"git_commit", @"git_push", @"git_status",
                             @"list_dir", @"read_file", @"write_file" ]));
   XCTAssertEqualObjects(projection[@"tools"][0][@"access"], @"conversation_confirm");
-  XCTAssertEqualObjects(projection[@"tools"][1][@"access"], @"confirm_once");
+  XCTAssertEqualObjects(projection[@"tools"][1][@"access"], @"conversation_confirm");
   XCTAssertEqualObjects(projection[@"tools"][2][@"access"], @"auto");
   NSDictionary *policy = [registry policyForRoot:root error:&error];
   XCTAssertNil(error);

@@ -8,6 +8,7 @@ NS_ASSUME_NONNULL_BEGIN
 @class DSHAgentPreparedAttemptStore;
 @class DSHAgentTranscriptStore;
 @class DSHAgentWorkspaceToolExecutor;
+@class DSHGitPushCancelToken;
 
 /// The sole native protected call protocol: validate -> claim -> dispatch ->
 /// one effect -> operation-specific reconciliation -> ledger/transcript settle.
@@ -29,6 +30,11 @@ NS_ASSUME_NONNULL_BEGIN
 /// effect and returns only a safe tool projection/result.
 - (nullable NSDictionary *)recoverAgentToolWithRequest:(NSDictionary *)request
                                                    error:(NSError **)error;
+
+/// Flips the cancellation token registered for an in-flight git_push execution.
+/// The locator carries the same task/attempt/round/call identity as the ledger
+/// row. A missing registration is a no-op.
+- (void)requestCancelForExecutionLocator:(NSDictionary *)locator;
 
 @end
 

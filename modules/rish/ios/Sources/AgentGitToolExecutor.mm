@@ -2,6 +2,7 @@
 
 #import "AgentNativeWAL.h"
 #import "AgentRootResolver.h"
+#import "DSHGitPushSupport.h"
 #import "LocalProjectAccess.h"
 #import "LocalWorkspaceAccess.h"
 
@@ -16,6 +17,17 @@ static NSString *DSHAgentGitOID(const git_oid *oid) {
   char value[65] = {};
   git_oid_tostr(value, sizeof(value), oid);
   return [NSString stringWithUTF8String:value];
+}
+
+static NSString *DSHAgentGitTimestamp(void) {
+  static NSISO8601DateFormatter *formatter = nil;
+  static dispatch_once_t onceToken;
+  dispatch_once(&onceToken, ^{
+    formatter = [[NSISO8601DateFormatter alloc] init];
+    formatter.formatOptions = NSISO8601DateFormatWithInternetDateTime
+      | NSISO8601DateFormatWithFractionalSeconds;
+  });
+  return [formatter stringFromDate:NSDate.date];
 }
 
 static NSString *DSHAgentGitCanonicalFeedback(NSDictionary *feedback,
@@ -53,36 +65,6 @@ static NSDictionary *DSHAgentGitFailure(NSString *name,
   };
 }
 
-/// Native-private observer for the receive-pack report-status response.  The
-/// server-provided status text is deliberately reduced to a boolean and is
-/// never retained, logged, or projected into tool feedback.
-typedef struct {
-  const char *targetRef;
-  size_t targetCount;
-  size_t unexpectedCount;
-  bool targetRejected;
-  bool malformed;
-} DSHAgentGitPushUpdateState;
-
-static int DSHAgentGitPushUpdateReference(const char *refname,
-                                           const char *status,
-                                           void *payload) {
-  DSHAgentGitPushUpdateState *state =
-      static_cast<DSHAgentGitPushUpdateState *>(payload);
-  if (state == nullptr || state->targetRef == nullptr) return 0;
-  if (refname == nullptr) {
-    state->malformed = true;
-    return 0;
-  }
-  if (strcmp(refname, state->targetRef) != 0) {
-    state->unexpectedCount += 1;
-    return 0;
-  }
-  state->targetCount += 1;
-  if (status != nullptr) state->targetRejected = true;
-  return 0;
-}
-
 static NSString *DSHAgentGitBranchReference(git_repository *repository,
                                              NSString **branchOut,
                                              NSString **headOIDOut) {
@@ -116,6 +98,26 @@ static NSString *DSHAgentGitHeadReferenceName(git_repository *repository) {
       : [NSString stringWithUTF8String:symbolic];
   git_reference_free(head);
   return [value hasPrefix:@"refs/heads/"] ? value : nil;
+}
+
+static NSString *DSHAgentGitOriginURL(git_repository *repository,
+                                         NSError **error) {
+  git_config *config = nullptr;
+  git_buf value = GIT_BUF_INIT;
+  int result = git_repository_config(&config, repository);
+  if (result == 0) {
+    result = git_config_get_string_buf(&value, config, "remote.origin.url");
+  }
+  NSString *raw = result == 0 && value.ptr != nullptr
+    ? [NSString stringWithUTF8String:value.ptr] : nil;
+  git_buf_dispose(&value);
+  if (config != nullptr) git_config_free(config);
+  NSURL *validated = DSHGitValidatedRemoteURL(raw, nil);
+  if (validated == nil) {
+    DSHSetAgentNativeStoreError(error, DSHAgentNativeStoreErrorConflict);
+    return nil;
+  }
+  return validated.absoluteString;
 }
 
 static BOOL DSHAgentGitRemoteOID(git_repository *repository,
@@ -317,6 +319,13 @@ static NSString *DSHAgentGitExpectedSHA1(NSData *payload) {
                                           git_repository *repository,
                                           NSError **error))operation
                                           error:(NSError **)error;
+- (nullable NSDictionary *)performPushForToolNamed:(NSString *)name
+                                              root:(NSDictionary *)root
+                                         operation:(NSDictionary *_Nullable (^)(
+                                             git_repository *repository,
+                                             DSHLocalProjectLease *lease,
+                                             NSError **error))operation
+                                             error:(NSError **)error;
 - (nullable NSDictionary *)prepareToolNamed:(NSString *)name
                                    arguments:(NSDictionary *)arguments
                                         root:(NSDictionary *)root
@@ -327,6 +336,14 @@ static NSString *DSHAgentGitExpectedSHA1(NSData *payload) {
                                         root:(NSDictionary *)root
                                 precondition:(NSDictionary *)precondition
                                   repository:(git_repository *)repository
+                                       error:(NSError **)error;
+- (nullable NSDictionary *)executeToolNamed:(NSString *)name
+                                   arguments:(NSDictionary *)arguments
+                                        root:(NSDictionary *)root
+                                precondition:(NSDictionary *)precondition
+                                 cancelToken:(nullable DSHGitPushCancelToken *)cancelToken
+                                  repository:(git_repository *)repository
+                                       lease:(nullable DSHLocalProjectLease *)lease
                                        error:(NSError **)error;
 - (nullable NSDictionary *)recoverToolNamed:(NSString *)name
                                    arguments:(NSDictionary *)arguments
@@ -367,10 +384,12 @@ static NSString *DSHAgentGitExpectedSHA1(NSData *payload) {
   // Push intentionally remains on the established split-git lease path. The
   // legacy adapter scope in this integration is status + commit only.
   if ([name isEqualToString:@"git_push"]) {
-    DSHLocalProjectLease *lease = [self leaseForRoot:root
-                                                mode:DSHLocalProjectAccessModeWrite
-                                               error:error];
-    return lease == nil ? nil : operation(lease.repository, error);
+    return [self performPushForToolNamed:name root:root
+        operation:^NSDictionary *(git_repository *repository,
+                                   __unused DSHLocalProjectLease *lease,
+                                   NSError **operationError) {
+          return operation(repository, operationError);
+        } error:error];
   }
   __block NSDictionary *result = nil;
   DSHAgentRootOperationMode mode = [name isEqualToString:@"git_status"]
@@ -388,6 +407,23 @@ static NSString *DSHAgentGitExpectedSHA1(NSData *payload) {
         return result != nil;
       } error:error];
   return succeeded ? result : nil;
+}
+
+- (NSDictionary *)performPushForToolNamed:(NSString *)name
+                                              root:(NSDictionary *)root
+                                         operation:(NSDictionary *(^)(
+                                             git_repository *repository,
+                                             DSHLocalProjectLease *lease,
+                                             NSError **error))operation
+                                             error:(NSError **)error {
+  if (operation == nil || ![name isEqualToString:@"git_push"]) {
+    DSHSetAgentNativeStoreError(error, DSHAgentNativeStoreErrorInvalidArgument);
+    return nil;
+  }
+  DSHLocalProjectLease *lease = [self leaseForRoot:root
+                                              mode:DSHLocalProjectAccessModeWrite
+                                             error:error];
+  return lease == nil ? nil : operation(lease.repository, lease, error);
 }
 
 - (NSDictionary *)prepareToolNamed:(NSString *)name
@@ -519,12 +555,32 @@ static NSString *DSHAgentGitExpectedSHA1(NSData *payload) {
                                root:(NSDictionary *)root
                        precondition:(NSDictionary *)precondition
                               error:(NSError **)error {
+  return [self executeToolNamed:name arguments:arguments root:root
+                   precondition:precondition cancelToken:nil error:error];
+}
+
+- (NSDictionary *)executeToolNamed:(NSString *)name
+                          arguments:(NSDictionary *)arguments
+                               root:(NSDictionary *)root
+                       precondition:(NSDictionary *)precondition
+                        cancelToken:(DSHGitPushCancelToken *)cancelToken
+                              error:(NSError **)error {
+  if ([name isEqualToString:@"git_push"]) {
+    return [self performPushForToolNamed:name root:root
+        operation:^NSDictionary *(git_repository *repository,
+                                   DSHLocalProjectLease *lease,
+                                   NSError **operationError) {
+          return [self executeToolNamed:name arguments:arguments root:root
+                       precondition:precondition cancelToken:cancelToken
+                           repository:repository lease:lease error:operationError];
+        } error:error];
+  }
   return [self performForToolNamed:name root:root
       operation:^NSDictionary *(git_repository *repository,
                                  NSError **operationError) {
         return [self executeToolNamed:name arguments:arguments root:root
-                         precondition:precondition repository:repository
-                                error:operationError];
+                         precondition:precondition cancelToken:nil
+                             repository:repository lease:nil error:operationError];
       } error:error];
 }
 
@@ -533,6 +589,19 @@ static NSString *DSHAgentGitExpectedSHA1(NSData *payload) {
                                root:(NSDictionary *)root
                        precondition:(NSDictionary *)precondition
                          repository:(git_repository *)repository
+                              error:(NSError **)error {
+  return [self executeToolNamed:name arguments:arguments root:root
+                   precondition:precondition cancelToken:nil
+                       repository:repository lease:nil error:error];
+}
+
+- (NSDictionary *)executeToolNamed:(NSString *)name
+                          arguments:(NSDictionary *)arguments
+                               root:(NSDictionary *)root
+                       precondition:(NSDictionary *)precondition
+                        cancelToken:(DSHGitPushCancelToken *)cancelToken
+                         repository:(git_repository *)repository
+                              lease:(DSHLocalProjectLease *)lease
                               error:(NSError **)error {
   if (![precondition[@"kind"] isEqual:name]) {
     DSHSetAgentNativeStoreError(error, DSHAgentNativeStoreErrorInvalidArgument);
@@ -664,30 +733,13 @@ static NSString *DSHAgentGitExpectedSHA1(NSData *payload) {
   git_remote *remote = nullptr;
   int resultCode = git_remote_lookup(&remote, repository, "origin");
   git_remote_connect_options connectOptions = {};
-  git_push_options pushOptions = {};
   if (resultCode == 0) {
     resultCode = git_remote_connect_options_init(
         &connectOptions, GIT_REMOTE_CONNECT_OPTIONS_VERSION);
   }
   if (resultCode == 0) {
-    resultCode = git_push_options_init(&pushOptions, GIT_PUSH_OPTIONS_VERSION);
-  }
-  DSHAgentGitPushUpdateState updateState = {
-    headRef.UTF8String, 0, 0, false, false,
-  };
-  if (resultCode == 0) {
-    pushOptions.callbacks.push_update_reference =
-        DSHAgentGitPushUpdateReference;
-    pushOptions.callbacks.payload = &updateState;
-    pushOptions.follow_redirects = GIT_REMOTE_REDIRECT_NONE;
-    pushOptions.proxy_opts.type = GIT_PROXY_NONE;
-    // git_remote_upload replaces the connected remote's option set when
-    // explicit push options are supplied.  Keep both option sets identical
-    // so the advertised-ref check and upload retain the same closed network
-    // policy on the same remote connection.
-    connectOptions.callbacks = pushOptions.callbacks;
-    connectOptions.follow_redirects = pushOptions.follow_redirects;
-    connectOptions.proxy_opts = pushOptions.proxy_opts;
+    connectOptions.follow_redirects = GIT_REMOTE_REDIRECT_NONE;
+    connectOptions.proxy_opts.type = GIT_PROXY_NONE;
   }
   if (resultCode == 0) {
     resultCode = git_remote_connect_ext(remote, GIT_DIRECTION_PUSH,
@@ -721,27 +773,78 @@ static NSString *DSHAgentGitExpectedSHA1(NSData *payload) {
         resultCode == 0 ? @"E_AGENT_CONFLICT" : @"E_AGENT_TOOL_FAILED", NO,
         error);
   }
-  NSString *refspec = [NSString stringWithFormat:@"%@:%@", headRef, headRef];
-  char *value = const_cast<char *>(refspec.UTF8String);
-  git_strarray refs = { &value, 1 };
-  resultCode = git_remote_upload(remote, &refs, &pushOptions);
   if (remote != nullptr) {
     git_remote_disconnect(remote);
     git_remote_free(remote);
   }
-  if (resultCode != 0) {
+  // The network phase runs through the bounded push runner: Keychain-backed
+  // credential callback, server-advertised OID verification, non-fast-forward
+  // detection, a hard time bound, and cooperative cancellation.
+  NSString *origin = DSHAgentGitOriginURL(repository, error);
+  if (origin == nil) {
+    return DSHAgentGitFailure(name, @"E_AGENT_TOOL_FAILED", NO, error);
+  }
+  NSString *host = [NSURLComponents componentsWithString:origin].host.lowercaseString;
+  NSDictionary *credential = DSHGitCredentialForScope(root[@"workspace_id"],
+                                                       host, error);
+  if (credential == nil) {
+    return DSHAgentGitFailure(name, @"E_AGENT_AUTH_FAILED", NO, error);
+  }
+  int projectDescriptor = lease == nil ? -1 : lease.projectDescriptor;
+  NSString *projectId = root[@"project_id"];
+  __attribute__((objc_precise_lifetime)) DSHGitPushRequest *pushRequest =
+      [[DSHGitPushRequest alloc] init];
+  pushRequest.repository = repository;
+  pushRequest.remoteName = @"origin";
+  pushRequest.remoteURL = origin;
+  pushRequest.host = host;
+  pushRequest.fullReference = headRef;
+  pushRequest.branch = branch;
+  pushRequest.localOID = headOID;
+  pushRequest.username = credential[@"username"];
+  pushRequest.token = credential[@"token"];
+  pushRequest.proxyURL = nil;
+  pushRequest.cancelToken = cancelToken;
+  pushRequest.timeout = 60.0;
+  __attribute__((objc_precise_lifetime)) DSHLocalProjectLease *heldLease = lease;
+  pushRequest.completion = ^(DSHGitPushOutcome outcome, NSString *remoteOID) {
+    (void)heldLease;
+    if (outcome == DSHGitPushOutcomeSuccess && remoteOID.length > 0 &&
+        projectDescriptor >= 0 && projectId.length > 0) {
+      NSDictionary *receipt = @{
+        @"schema_version" : @1,
+        @"remote" : @"origin",
+        @"host" : host,
+        @"branch" : branch,
+        @"local_oid" : headOID,
+        @"remote_oid" : remoteOID,
+        @"pushed_at" : DSHAgentGitTimestamp(),
+      };
+      (void)DSHGitPushRecordReceipt(projectDescriptor, projectId, receipt, nil);
+    }
+  };
+  DSHGitPushResult *pushResult = DSHGitPushRun(pushRequest);
+  if (pushResult.outcome == DSHGitPushOutcomeNonFastForward) {
+    return DSHAgentGitFailure(name, @"E_AGENT_NON_FAST_FORWARD", NO, error);
+  }
+  if (pushResult.outcome == DSHGitPushOutcomeAuthFailure) {
+    return DSHAgentGitFailure(name, @"E_AGENT_AUTH_FAILED", NO, error);
+  }
+  if (pushResult.outcome == DSHGitPushOutcomeTimedOut) {
+    return DSHAgentGitFailure(name, @"E_AGENT_TIMEOUT", NO, error);
+  }
+  if (pushResult.outcome == DSHGitPushOutcomeCancelled) {
+    return DSHAgentGitFailure(name, @"E_AGENT_CANCELLED", NO, error);
+  }
+  if (pushResult.outcome == DSHGitPushOutcomeRejected) {
+    return DSHAgentGitFailure(name, @"E_AGENT_TOOL_FAILED", NO, error);
+  }
+  if (pushResult.outcome != DSHGitPushOutcomeSuccess) {
     // Once libgit2 enters remote_push, a lost response cannot prove that the
     // server rejected the update.
     return DSHAgentGitFailure(name, @"E_AGENT_EXECUTION_AMBIGUOUS", YES, error);
   }
-  BOOL callbackShapeExact = !updateState.malformed &&
-      updateState.unexpectedCount == 0 && updateState.targetCount == 1;
-  if (!callbackShapeExact) {
-    return DSHAgentGitFailure(name, @"E_AGENT_EXECUTION_AMBIGUOUS", YES, error);
-  }
-  if (updateState.targetRejected) {
-    return DSHAgentGitFailure(name, @"E_AGENT_TOOL_FAILED", NO, error);
-  }
+  NSString *remoteOID = pushResult.remoteOID ?: headOID;
   NSString *trackingName = [@"refs/remotes/origin/" stringByAppendingString:branch];
   git_oid target = {};
   git_reference *tracking = nullptr;
@@ -757,6 +860,7 @@ static NSString *DSHAgentGitExpectedSHA1(NSData *payload) {
     @"payload" : @{
       @"schema_version" : @1, @"remote" : @"origin",
       @"remote_ref" : headRef, @"pushed_oid" : headOID,
+      @"remote_oid" : remoteOID,
     },
   }, error);
   if (feedback == nil) return nil;
@@ -764,7 +868,7 @@ static NSString *DSHAgentGitExpectedSHA1(NSData *payload) {
     @"schema_version" : @1, @"status" : @"ok", @"feedback" : feedback,
     @"settled_facts" : @{
       @"schema_version" : @1, @"kind" : @"git_push",
-      @"actual_remote_oid" : headOID,
+      @"actual_remote_oid" : remoteOID,
     },
     @"truncated" : @NO, @"effect_may_have_occurred" : @YES,
   };

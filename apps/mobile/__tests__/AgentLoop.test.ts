@@ -38,10 +38,10 @@ describe('agent tool policies', () => {
     expect(agentToolAccess('read_file')).toBe('auto');
     expect(agentToolAccess('git_status')).toBe('auto');
   });
-  test('mutations confirm per conversation, pushes once only', () => {
+  test('mutations and push confirm per conversation', () => {
     expect(agentToolAccess('write_file')).toBe('conversation_confirm');
     expect(agentToolAccess('git_commit')).toBe('conversation_confirm');
-    expect(agentToolAccess('git_push')).toBe('confirm_once');
+    expect(agentToolAccess('git_push')).toBe('conversation_confirm');
   });
   test('unknown names fail safe behind confirmation', () => {
     expect(agentToolAccess('deploy_prod')).toBe('confirm_once');

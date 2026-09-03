@@ -30,6 +30,8 @@ jest.mock('../src/native/LocalProjects', () => ({
     presentCredentialPrompt: jest.fn(),
     clearCredential: jest.fn(),
     push: jest.fn(),
+    pushReceipts: jest.fn(),
+    cancelPush: jest.fn(),
   },
 }));
 
@@ -224,6 +226,16 @@ beforeEach(() => {
     branch: 'main',
     oid: dirtyStatus.head_oid,
     pushed_at: '2026-08-24T00:00:00.000Z',
+  });
+  mockLocalProjects.pushReceipts.mockResolvedValue({
+    schema_version: 1,
+    project_id: project.id,
+    receipts: [],
+  });
+  mockLocalProjects.cancelPush.mockResolvedValue({
+    schema_version: 1,
+    project_id: project.id,
+    cancelled: true,
   });
 });
 

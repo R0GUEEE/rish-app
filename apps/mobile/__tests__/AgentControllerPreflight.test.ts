@@ -313,13 +313,12 @@ describe('AgentControllerPreflight', () => {
       tool_family: 'git_commit',
       grant: { ...grant, tool_family: 'git_commit' },
     }],
-    ['git_push once', {
+    ['git_push conversation', {
       ...decideApproval,
       name: 'git_push',
-      access: 'confirm_once',
-      tool_family: null,
-      decision: 'allow_once',
-      grant: null,
+      access: 'conversation_confirm',
+      tool_family: 'git_push',
+      grant: { ...grant, tool_family: 'git_push' },
     }],
   ])('accepts approval authority for %s', (_name, input) => {
     expect(validateAgentControllerPreflight(input)?.kind).toBe('decide_approval');
@@ -336,12 +335,13 @@ describe('AgentControllerPreflight', () => {
     ['tool-family mismatch', { ...decideApproval, tool_family: 'git_commit' }],
     ['access mismatch', { ...decideApproval, access: 'confirm_once' }],
     ['unknown tool', { ...decideApproval, name: 'delete_everything' }],
-    ['git_push conversation grant', {
+    ['git_push without project', {
       ...decideApproval,
       name: 'git_push',
-      access: 'confirm_once',
-      tool_family: null,
-      grant: null,
+      access: 'conversation_confirm',
+      tool_family: 'git_push',
+      project_id: null,
+      grant: { ...grant, tool_family: 'git_push', project_id: null },
     }],
   ])('rejects approval %s', (_name, input) => {
     expect(validateAgentControllerPreflight(input)).toBeNull();
@@ -367,7 +367,7 @@ describe('AgentControllerPreflight', () => {
     ['git_status', 'read_only_batch', null, 'auto', 'not_required', null],
     ['write_file', 'write_batch', SHA_C, 'conversation_confirm', 'bound', APPROVAL_REFERENCE],
     ['git_commit', 'write_batch', SHA_C, 'conversation_confirm', 'bound', APPROVAL_REFERENCE],
-    ['git_push', 'write_batch', SHA_C, 'confirm_once', 'bound', APPROVAL_REFERENCE],
+    ['git_push', 'write_batch', SHA_C, 'conversation_confirm', 'bound', APPROVAL_REFERENCE],
   ] as const)(
     'accepts execution authority for %s in %s',
     (name, batchKind, manifest, access, approvalState, approvalReference) => {
@@ -414,10 +414,10 @@ describe('AgentControllerPreflight', () => {
       access: 'auto',
       approval_state: 'not_required',
     }],
-    ['git_push conversation access', {
+    ['git_push once-only access', {
       ...beginExecution,
       name: 'git_push',
-      access: 'conversation_confirm',
+      access: 'confirm_once',
     }],
   ])('rejects execution %s', (_name, input) => {
     expect(validateAgentControllerPreflight(input)).toBeNull();
@@ -429,7 +429,7 @@ describe('AgentControllerPreflight', () => {
     ['git_status', 'git_status', 'read_only_batch', null, 'auto', 'not_required', null],
     ['write_file', 'file_write', 'write_batch', SHA_C, 'conversation_confirm', 'bound', APPROVAL_REFERENCE],
     ['git_commit', 'git_commit', 'write_batch', SHA_C, 'conversation_confirm', 'bound', APPROVAL_REFERENCE],
-    ['git_push', 'git_push', 'write_batch', SHA_C, 'confirm_once', 'bound', APPROVAL_REFERENCE],
+    ['git_push', 'git_push', 'write_batch', SHA_C, 'conversation_confirm', 'bound', APPROVAL_REFERENCE],
   ] as const)(
     'rejects %s when root lacks %s capability',
     (name, capability, batchKind, manifest, access, approvalState, approvalReference) => {

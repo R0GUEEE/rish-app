@@ -67,7 +67,7 @@ test('the broker adds the matched approval id to a UI allow decision', async () 
   });
 });
 
-test('git_push rejects conversation scope but accepts a once-scoped UI decision', async () => {
+test('git_push follows the git_commit pattern and accepts conversation scope', async () => {
   const controller = createAgentInteractionController();
   const conversationSpec: ApprovalRequestSpec = {
     ...approvalSpec,
@@ -82,11 +82,11 @@ test('git_push rejects conversation scope but accepts a once-scoped UI decision'
     scope: 'conversation',
   });
 
-  const rejected = await conversationDecision;
-  expect(rejected).toBeUndefined();
-  expect(
-    resolveApprovalDecision(conversationSpec, rejected, Date.now()),
-  ).toEqual({ status: 'denied', resolution: 'missing' });
+  await expect(conversationDecision).resolves.toEqual({
+    status: 'approved',
+    approval_id: 'ap-push-conversation',
+    scope: 'conversation',
+  });
 
   const onceSpec: ApprovalRequestSpec = {
     ...conversationSpec,

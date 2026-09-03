@@ -27,6 +27,7 @@ const AUTO_TOOLS: ReadonlySet<string> = new Set([
 const CONVERSATION_TOOLS: ReadonlySet<string> = new Set([
   'write_file',
   'git_commit',
+  'git_push',
 ]);
 
 /** Fail-safe classification: anything unknown requires confirmation once. */

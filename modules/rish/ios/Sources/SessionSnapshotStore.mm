@@ -1577,7 +1577,7 @@ static BOOL DSHSessionValidateAgentCall(NSDictionary *call) {
     @"git_push",
   ]];
   NSSet *autoTools = [NSSet setWithArray:@[@"list_dir", @"read_file", @"git_status"]];
-  NSSet *conversationTools = [NSSet setWithArray:@[@"write_file", @"git_commit"]];
+  NSSet *conversationTools = [NSSet setWithArray:@[@"write_file", @"git_commit", @"git_push"]];
   if (!DSHSessionAgentSummaryMatchesName(call[@"safe_summary_key"], name)) {
     return NO;
   }
@@ -1588,7 +1588,6 @@ static BOOL DSHSessionValidateAgentCall(NSDictionary *call) {
   if ([autoTools containsObject:name] && ![call[@"access"] isEqual:@"auto"]) return NO;
   if ([conversationTools containsObject:name] &&
       ![call[@"access"] isEqual:@"conversation_confirm"]) return NO;
-  if ([name isEqual:@"git_push"] && ![call[@"access"] isEqual:@"confirm_once"]) return NO;
   if ([call[@"access"] isEqual:@"durable_deny"] &&
       (![call[@"approval_decision"] isEqual:@"denied"] ||
        call[@"approval_token"] != NSNull.null ||
@@ -1603,10 +1602,6 @@ static BOOL DSHSessionValidateAgentCall(NSDictionary *call) {
   if (([call[@"access"] isEqual:@"conversation_confirm"] ||
        [call[@"access"] isEqual:@"confirm_once"]) &&
       call[@"approval_token"] == NSNull.null) {
-    return NO;
-  }
-  if ([name isEqual:@"git_push"] &&
-      [call[@"approval_decision"] isEqual:@"allow_conversation"]) {
     return NO;
   }
   NSDictionary *receipt = call[@"receipt"] == NSNull.null ? nil : call[@"receipt"];
@@ -1761,8 +1756,11 @@ static BOOL DSHSessionValidateAgentGrant(NSDictionary *grant) {
       [grant[@"binding_revision"] unsignedIntegerValue] >=
           DSHSessionSnapshotMaximumSafeInteger ||
       !DSHSessionCanonicalDigest(grant[@"root_fingerprint_sha256"]) ||
-      ![@[@"file_write", @"git_commit"] containsObject:grant[@"tool_family"]] ||
-      ([grant[@"tool_family"] isEqual:@"git_commit"] && grant[@"project_id"] == NSNull.null) ||
+      ![@[@"file_write", @"git_commit", @"git_push"]
+          containsObject:grant[@"tool_family"]] ||
+      (([grant[@"tool_family"] isEqual:@"git_commit"] ||
+        [grant[@"tool_family"] isEqual:@"git_push"]) &&
+       grant[@"project_id"] == NSNull.null) ||
       !DSHSessionExactSchema(grant[@"registry_version"], 1) ||
       !DSHSessionBoundedText(grant[@"policy_version"], 256, NO) ||
       !DSHSessionTrustedDictionary(grant[@"issued_for"]) ||
@@ -2514,8 +2512,10 @@ static BOOL DSHSessionValidateConversation(NSDictionary *conversation,
             ![grant[@"project_id"] isEqual:journal[@"root"][@"project_id"]] ||
             ![grant[@"registry_version"] isEqual:journal[@"tool_registry_version"]] ||
             ![grant[@"policy_version"] isEqual:journal[@"policy"][@"policy_version"]]) return NO;
-        NSString *requiredCapability = [grant[@"tool_family"] isEqual:@"file_write"]
-            ? @"file_write" : @"git_commit";
+        NSString *family = grant[@"tool_family"];
+        NSString *requiredCapability = [family isEqual:@"file_write"]
+            ? @"file_write"
+            : [family isEqual:@"git_commit"] ? @"git_commit" : @"git_push";
         if (![journal[@"root"][@"capabilities"] containsObject:requiredCapability]) return NO;
       }
     }

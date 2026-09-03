@@ -1191,12 +1191,14 @@ export function createCompletionController(
 
   const agentToolFamily = (
     name: string,
-  ): 'file_write' | 'git_commit' | null =>
+  ): 'file_write' | 'git_commit' | 'git_push' | null =>
     name === 'write_file'
       ? 'file_write'
       : name === 'git_commit'
         ? 'git_commit'
-        : null;
+        : name === 'git_push'
+          ? 'git_push'
+          : null;
 
   const agentGrantFor = (
     conversation: Conversation,

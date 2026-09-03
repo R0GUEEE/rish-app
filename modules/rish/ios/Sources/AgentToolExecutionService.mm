@@ -6,6 +6,7 @@
 #import "AgentPreparedAttemptStore.h"
 #import "AgentTranscriptStore.h"
 #import "AgentWorkspaceToolExecutor.h"
+#import "DSHGitPushSupport.h"
 
 static const unsigned long long DSHAgentExecutionMaximumSafeInteger =
     9007199254740991ULL;
@@ -220,7 +221,8 @@ static BOOL DSHAgentExecutionConversationGrantBound(
     NSDictionary *request) {
   NSString *family = [request[@"name"] isEqualToString:@"write_file"]
       ? @"file_write" : ([request[@"name"] isEqualToString:@"git_commit"]
-          ? @"git_commit" : nil);
+          ? @"git_commit" : ([request[@"name"] isEqualToString:@"git_push"]
+              ? @"git_push" : nil));
   if (family == nil || request[@"approval_reference"] == NSNull.null) return NO;
   NSDictionary *loaded = [preparedStore.sessionSnapshotStore
       loadSessionSnapshotWithError:nil];
@@ -454,6 +456,7 @@ static NSDictionary *DSHAgentExecutionHistoricalResult(
 @property(nonatomic, strong) DSHAgentTranscriptStore *transcripts;
 @property(nonatomic, strong) DSHAgentWorkspaceToolExecutor *workspaceExecutor;
 @property(nonatomic, strong) DSHAgentGitToolExecutor *gitExecutor;
+@property(nonatomic, strong) NSMutableDictionary<NSString *, DSHGitPushCancelToken *> *pushCancelTokens;
 @end
 
 @implementation DSHAgentToolExecutionService
@@ -472,6 +475,7 @@ static NSDictionary *DSHAgentExecutionHistoricalResult(
     _transcripts = transcripts;
     _workspaceExecutor = workspaceExecutor;
     _gitExecutor = gitExecutor;
+    _pushCancelTokens = [NSMutableDictionary dictionary];
   }
   return self;
 }
@@ -765,11 +769,31 @@ static NSDictionary *DSHAgentExecutionHistoricalResult(
                                           precondition:row[@"precondition"]
                                                  error:error];
   } else {
+    // git_push registers a cancellation token under the same locator identity
+    // as the ledger row, so the coordinator's cancel path can interrupt the
+    // bounded network phase cooperatively.
+    DSHGitPushCancelToken *cancelToken = nil;
+    NSString *locatorKey = nil;
+    if ([request[@"name"] isEqualToString:@"git_push"]) {
+      cancelToken = [[DSHGitPushCancelToken alloc] init];
+      locatorKey = DSHAgentExecutionLocatorKey(row[@"locator"]);
+      @synchronized (self) {
+        self.pushCancelTokens[locatorKey] = cancelToken;
+      }
+    }
     effect = [self.gitExecutor executeToolNamed:request[@"name"]
-                                       arguments:arguments
-                                            root:request[@"root"]
-                                    precondition:row[@"precondition"]
+                                      arguments:arguments
+                                           root:request[@"root"]
+                                   precondition:row[@"precondition"]
+                                    cancelToken:cancelToken
                                            error:error];
+    if (locatorKey != nil) {
+      @synchronized (self) {
+        if (self.pushCancelTokens[locatorKey] == cancelToken) {
+          [self.pushCancelTokens removeObjectForKey:locatorKey];
+        }
+      }
+    }
   }
   if (effect == nil) {
     if (error != nullptr) *error = nil;
@@ -1012,6 +1036,16 @@ static NSDictionary *DSHAgentExecutionHistoricalResult(
     @"effect_may_have_occurred" :
         @(![recovered[@"status"] isEqualToString:@"not_dispatched"]),
   };
+}
+
+- (void)requestCancelForExecutionLocator:(NSDictionary *)locator {
+  if (![locator isKindOfClass:NSDictionary.class]) return;
+  NSString *locatorKey = DSHAgentExecutionLocatorKey(locator);
+  DSHGitPushCancelToken *token = nil;
+  @synchronized (self) {
+    token = self.pushCancelTokens[locatorKey];
+  }
+  [token cancel];
 }
 
 @end

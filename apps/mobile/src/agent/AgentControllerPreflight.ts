@@ -69,7 +69,7 @@ export type AgentApprovalDecisionPreflightV1 =
     readonly root_fingerprint_sha256: string;
     readonly policy_version: 'agent-v1';
     readonly registry_version: 1;
-    readonly tool_family: 'file_write' | 'git_commit' | null;
+    readonly tool_family: 'file_write' | 'git_commit' | 'git_push' | null;
     readonly grant: AgentConversationGrantV2 | null;
   };
 
@@ -485,8 +485,8 @@ function validateGrant(value: unknown): AgentConversationGrantV2 | null {
     (grant.project_id !== null && !uuid(grant.project_id)) ||
     !safeInteger(grant.binding_revision, MAX_SAFE, false) ||
     !digest(grant.root_fingerprint_sha256) ||
-    (grant.tool_family !== 'file_write' && grant.tool_family !== 'git_commit') ||
-    (grant.tool_family === 'git_commit' && grant.project_id === null) ||
+    (grant.tool_family !== 'file_write' && grant.tool_family !== 'git_commit' && grant.tool_family !== 'git_push') ||
+    ((grant.tool_family === 'git_commit' || grant.tool_family === 'git_push') && grant.project_id === null) ||
     grant.registry_version !== 1 ||
     !opaque(grant.policy_version) ||
     !timestamp(grant.created_at)
@@ -762,6 +762,7 @@ function validateApproval(
     raw.registry_version !== 1 ||
     (raw.tool_family !== 'file_write' &&
       raw.tool_family !== 'git_commit' &&
+      raw.tool_family !== 'git_push' &&
       raw.tool_family !== null)
   )
     return null;
@@ -776,10 +777,9 @@ function validateApproval(
         raw.tool_family !== 'git_commit' ||
         raw.project_id === null)) ||
     (raw.name === 'git_push' &&
-      (raw.access !== 'confirm_once' ||
-        raw.tool_family !== null ||
-        raw.project_id === null ||
-        raw.decision === 'allow_conversation')) ||
+      (raw.access !== 'conversation_confirm' ||
+        raw.tool_family !== 'git_push' ||
+        raw.project_id === null)) ||
     (raw.name !== 'write_file' &&
       raw.name !== 'git_commit' &&
       raw.name !== 'git_push')
@@ -868,14 +868,9 @@ function validateExecution(
       (raw.access !== 'auto' ||
         raw.approval_state !== 'not_required' ||
         raw.approval_reference !== null)) ||
-    ((raw.name === 'write_file' || raw.name === 'git_commit') &&
+    ((raw.name === 'write_file' || raw.name === 'git_commit' || raw.name === 'git_push') &&
       (raw.batch_kind !== 'write_batch' ||
         raw.access !== 'conversation_confirm' ||
-        raw.approval_state !== 'bound' ||
-        raw.approval_reference === null)) ||
-    (raw.name === 'git_push' &&
-      (raw.batch_kind !== 'write_batch' ||
-        raw.access !== 'confirm_once' ||
         raw.approval_state !== 'bound' ||
         raw.approval_reference === null)) ||
     (raw.name !== 'list_dir' &&

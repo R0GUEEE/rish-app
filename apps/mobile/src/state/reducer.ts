@@ -1900,7 +1900,7 @@ function agentCallIsValid(value: unknown): value is PersistedAgentCallJournalV2 
       call.access !== 'auto') ||
     (['write_file', 'git_commit'].includes(call.name) &&
       call.access !== 'conversation_confirm') ||
-    (call.name === 'git_push' && call.access !== 'confirm_once') ||
+    (call.name === 'git_push' && call.access !== 'conversation_confirm') ||
     (!['list_dir', 'read_file', 'write_file', 'git_status', 'git_commit', 'git_push'].includes(call.name) &&
       call.access !== 'durable_deny') ||
     !agentAccessValues.has(call.access) ||
@@ -2135,9 +2135,7 @@ function agentCallV3IsValid(value: unknown): value is PersistedAgentCallJournalV
   const expectedAccess = knownTool
     ? call.name === 'list_dir' || call.name === 'read_file' || call.name === 'git_status'
       ? 'auto'
-      : call.name === 'git_push'
-        ? 'confirm_once'
-        : 'conversation_confirm'
+      : 'conversation_confirm'
     : 'durable_deny';
   const gated = call.access === 'conversation_confirm' || call.access === 'confirm_once';
   return (

@@ -2169,8 +2169,6 @@ export function parsePersistedAgentCallJournalV3(
   const expectedAccess = knownTool
     ? autoAgentTools.has(name)
       ? 'auto'
-      : name === 'git_push'
-      ? 'confirm_once'
       : 'conversation_confirm'
     : 'durable_deny';
   if (access !== expectedAccess) {
@@ -2224,7 +2222,7 @@ export function parsePersistedAgentCallJournalV3(
       'pending approvals cannot carry a decision reference',
     );
   }
-  const gated = access === 'conversation_confirm' || access === 'confirm_once';
+  const gated = access === 'conversation_confirm';
   if (
     gated &&
     (decision === 'pending' ||

@@ -772,14 +772,11 @@ static BOOL DSHAgentApprovalToken(NSDictionary *token) {
         [seenCalls containsObject:callIDs[index]]) return NO;
     [seenCalls addObject:callIDs[index]];
   }
-  if ([token[@"access"] isEqualToString:@"confirm_once"]) {
-    return [token[@"name"] isEqualToString:@"git_push"] &&
-        [token[@"allowed_decisions"] isEqual:@[
-          @"denied", @"allow_once", @"cancelled",
-        ]];
-  }
+  // git_push follows the git_commit pattern: conversation_confirm access
+  // with the full decision set.
   return ([token[@"name"] isEqualToString:@"write_file"] ||
-          [token[@"name"] isEqualToString:@"git_commit"]) &&
+          [token[@"name"] isEqualToString:@"git_commit"] ||
+          [token[@"name"] isEqualToString:@"git_push"]) &&
       [token[@"allowed_decisions"] isEqual:@[
         @"denied", @"allow_once", @"allow_conversation", @"cancelled",
       ]];

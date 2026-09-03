@@ -984,7 +984,7 @@
     @"call_id" : [NSString stringWithFormat:@"push_%lu", (unsigned long)index],
     @"name" : @"git_push", @"arguments_json" : @"{}",
     @"arguments_sha256" : DSHAgentArgumentsSHA256(@"git_push", @"{}", &error),
-    @"safe_summary_key" : @"agent.git_push", @"access" : @"confirm_once",
+    @"safe_summary_key" : @"agent.git_push", @"access" : @"conversation_confirm",
     @"precondition" : @{
       @"schema_version" : @1, @"kind" : @"git_push", @"remote" : @"origin",
       @"remote_ref" : @"refs/heads/main", @"pre_remote_oid" : NSNull.null,
@@ -1341,7 +1341,7 @@
     ({ NSMutableDictionary *v = [token mutableCopy]; v[@"name"] = @"write_file"; v; }),
     ({ NSMutableDictionary *v = [token mutableCopy]; v[@"name"] = @"git_push";
        v[@"access"] = @"confirm_once";
-       v[@"allowed_decisions"] = @[@"denied", @"allow_once", @"cancelled"]; v; }),
+       v[@"allowed_decisions"] = @[@"denied", @"allow_once", @"allow_conversation", @"cancelled"]; v; }),
     ({ NSMutableDictionary *v = [token mutableCopy];
        NSString *other = @"93939393-9393-4393-8393-939393939393";
        v[@"task_id"] = other;

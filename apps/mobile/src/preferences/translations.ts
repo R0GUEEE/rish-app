@@ -629,6 +629,17 @@ const enUS = {
   'projects.committedSuccess': 'Commit created locally.',
   'projects.remoteSaved': 'Origin saved.',
   'projects.pushSuccess': 'Branch pushed successfully.',
+  'projects.pushNonFastForward':
+    'The remote rejected the push: the branch is not fast-forward. The remote has commits you do not have locally, and Rish never rewrites history. Pull or merge the remote changes first, or push a different branch.',
+  'projects.pushTimeout': 'Push timed out. Check the network and try again.',
+  'projects.pushCancelled': 'Push cancelled.',
+  'projects.cancelPush': 'Cancel push',
+  'projects.pushReceiptTitle': 'Last push receipt',
+  'projects.pushReceiptNone': 'No push receipt recorded yet.',
+  'projects.pushReceiptBody':
+    '{branch} → {host} · local {local} · remote {remote} · {time}',
+  'projects.credentialExpires': 'Credential stored in Keychain · expires {time}',
+  'projects.credentialExpiresIn': 'Credential stored in Keychain · expires in {window}',
 
   'files.title': 'Files',
   'files.onDevice': 'On this device',
@@ -1308,6 +1319,17 @@ const zhCN: Readonly<Record<TranslationKey, string>> = {
   'projects.committedSuccess': '本地提交已创建。',
   'projects.remoteSaved': 'Origin 已保存。',
   'projects.pushSuccess': '分支已成功推送。',
+  'projects.pushNonFastForward':
+    '远程拒绝了推送：分支不是快进（non-fast-forward）。远程有本地没有的提交，Rish 绝不会改写历史。请先拉取或合并远程更改，或推送另一个分支。',
+  'projects.pushTimeout': '推送超时，请检查网络后重试。',
+  'projects.pushCancelled': '推送已取消。',
+  'projects.cancelPush': '取消推送',
+  'projects.pushReceiptTitle': '最近一次推送凭据',
+  'projects.pushReceiptNone': '还没有推送凭据记录。',
+  'projects.pushReceiptBody':
+    '{branch} → {host} · 本地 {local} · 远程 {remote} · {time}',
+  'projects.credentialExpires': '凭证已存入钥匙串 · 到期时间 {time}',
+  'projects.credentialExpiresIn': '凭证已存入钥匙串 · 剩余 {window}',
 
   'files.title': '文件',
   'files.onDevice': '在此设备上',

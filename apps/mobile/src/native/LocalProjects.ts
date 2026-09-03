@@ -96,6 +96,26 @@ export type ProjectCredentialStatus = {
   project_id: string;
   host: string;
   configured: boolean;
+  /** Absolute Keychain expiry (unix seconds) when configured. */
+  expires_at?: number;
+  /** Expiry window chosen at provisioning time, in seconds. */
+  expiry_seconds?: number;
+};
+
+export type ProjectPushReceipt = {
+  schema_version: 1;
+  remote: 'origin';
+  host: string;
+  branch: string;
+  local_oid: string;
+  remote_oid: string;
+  pushed_at: string;
+};
+
+export type ProjectPushReceipts = {
+  schema_version: 1;
+  project_id: string;
+  receipts: ProjectPushReceipt[];
 };
 
 export type ProjectPushResult = {
@@ -105,6 +125,7 @@ export type ProjectPushResult = {
   branch: string;
   oid: string;
   pushed_at: string;
+  receipt?: ProjectPushReceipt;
 };
 
 export type LocalProjectDescriptorV2 = {
@@ -239,6 +260,8 @@ type NativeLocalProjects = {
     projectId: string,
     options: ProjectGitTransportOptions,
   ): Promise<ProjectPushResult>;
+  pushReceipts(projectId: string): Promise<ProjectPushReceipts>;
+  cancelPush(projectId: string): Promise<{ cancelled: boolean }>;
   attachWorkspaceProject?(
     request: AttachWorkspaceProjectRequestV1,
   ): Promise<unknown>;
@@ -278,6 +301,9 @@ const projectV2ErrorCodes = new Set([
   'E_WORKSPACE_CONFIRMATION',
   'E_WORKSPACE_PERSISTENCE',
   'E_WORKSPACE_IO',
+  'E_PROJECT_NON_FAST_FORWARD',
+  'E_PROJECT_CREDENTIAL',
+  'E_PROJECT_TIMEOUT',
 ]);
 
 export class ProjectGitBridgeError extends Error {
@@ -1286,6 +1312,8 @@ export const LocalProjects = {
   clearCredential: (projectId: string) => required().clearCredential(projectId),
   push: (projectId: string, options: ProjectGitTransportOptions = {}) =>
     required().push(projectId, options),
+  pushReceipts: (projectId: string) => required().pushReceipts(projectId),
+  cancelPush: (projectId: string) => required().cancelPush(projectId),
   isV2Available: () => hasV2Capabilities(native),
   attachWorkspaceProject: async (
     requestValue: unknown,

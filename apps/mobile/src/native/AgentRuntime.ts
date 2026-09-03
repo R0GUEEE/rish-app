@@ -33,6 +33,9 @@ export type AgentRuntimeFailureCode =
   | 'E_AGENT_ROUND_LIMIT'
   | 'E_AGENT_CANCELLED'
   | 'E_AGENT_TOOL_FAILED'
+  | 'E_AGENT_NON_FAST_FORWARD'
+  | 'E_AGENT_AUTH_FAILED'
+  | 'E_AGENT_TIMEOUT'
   | 'E_AGENT_NATIVE'
   | 'E_AGENT_NOT_FOUND'
   | 'E_AGENT_CAPACITY'
@@ -98,7 +101,7 @@ export type AgentConversationGrantV2 = {
   readonly project_id: string | null;
   readonly binding_revision: number;
   readonly root_fingerprint_sha256: string;
-  readonly tool_family: 'file_write' | 'git_commit';
+  readonly tool_family: 'file_write' | 'git_commit' | 'git_push';
   readonly registry_version: 1;
   readonly policy_version: string;
   readonly issued_for: {

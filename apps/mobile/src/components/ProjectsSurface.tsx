@@ -28,6 +28,7 @@ import {
   type ProjectDiff,
   type ProjectFileStatus,
   type ProjectGitStatus,
+  type ProjectPushReceipt,
   type ProjectStatusEntry,
 } from '../native/LocalProjects';
 import { useAppPresentation } from '../presentation/AppPresentation';
@@ -148,6 +149,8 @@ export function ProjectsSurface({
   const [authorEmail, setAuthorEmail] = useState('');
   const [remoteUrl, setRemoteUrl] = useState('');
   const [busy, setBusy] = useState(false);
+  const [pushing, setPushing] = useState(false);
+  const [receipt, setReceipt] = useState<ProjectPushReceipt | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
 
@@ -179,16 +182,25 @@ export function ProjectsSurface({
       setBusy(true);
       setError(null);
       try {
-        const [nextStatus, nextDiff, nextCredential] = await Promise.all([
-          LocalProjects.status(project.id),
-          LocalProjects.diff(project.id),
-          project.origin_url === null
-            ? Promise.resolve(null)
-            : LocalProjects.credentialStatus(project.id),
-        ]);
+        const [nextStatus, nextDiff, nextCredential, nextReceipts] =
+          await Promise.all([
+            LocalProjects.status(project.id),
+            LocalProjects.diff(project.id),
+            project.origin_url === null
+              ? Promise.resolve(null)
+              : LocalProjects.credentialStatus(project.id),
+            project.origin_url === null
+              ? Promise.resolve(null)
+              : LocalProjects.pushReceipts(project.id),
+          ]);
         setStatus(nextStatus);
         setDiff(nextDiff);
         setCredential(nextCredential);
+        setReceipt(
+          nextReceipts === null || nextReceipts.receipts.length === 0
+            ? null
+            : nextReceipts.receipts[nextReceipts.receipts.length - 1],
+        );
         setRemoteUrl(project.origin_url ?? '');
       } catch (caught) {
         setError(t('projects.operationFailed', { error: errorText(caught) }));
@@ -410,28 +422,54 @@ export function ProjectsSurface({
           text: t('projects.confirmPush'),
           onPress: () => {
             setBusy(true);
+            setPushing(true);
             setError(null);
             setNotice(null);
             LocalProjects.push(selected.id, {
               httpsProxyUrl: preferences.gitHttpsProxyUrl,
             })
-              .then(() => {
+              .then(result => {
                 setNotice(t('projects.pushSuccess'));
+                if (result.receipt !== undefined) {
+                  setReceipt(result.receipt);
+                }
                 return loadDetail(selected);
               })
-              .catch(caught =>
-                setError(
-                  t('projects.operationFailed', {
-                    error: errorText(caught),
-                  }),
-                ),
-              )
-              .finally(() => setBusy(false));
+              .catch(caught => {
+                const code =
+                  typeof caught === 'object' &&
+                  caught !== null &&
+                  'code' in caught
+                    ? String((caught as { code?: unknown }).code)
+                    : '';
+                if (code === 'non-fast-forward') {
+                  setError(t('projects.pushNonFastForward'));
+                } else if (code === 'timeout') {
+                  setError(t('projects.pushTimeout'));
+                } else if (code === 'cancelled') {
+                  setError(t('projects.pushCancelled'));
+                } else {
+                  setError(
+                    t('projects.operationFailed', {
+                      error: errorText(caught),
+                    }),
+                  );
+                }
+              })
+              .finally(() => {
+                setPushing(false);
+                setBusy(false);
+              });
           },
         },
       ],
     );
   }, [busy, loadDetail, preferences.gitHttpsProxyUrl, selected, status, t]);
+
+  const cancelPush = useCallback(() => {
+    if (selected === null || !pushing) return;
+    LocalProjects.cancelPush(selected.id).catch(() => undefined);
+  }, [pushing, selected]);
 
   const title = selected?.name ?? t('projects.title');
 
@@ -750,7 +788,13 @@ export function ProjectsSurface({
                     <View style={styles.flex}>
                       <Text style={styles.cardTitle}>
                         {credential?.configured
-                          ? t('projects.credentialStored')
+                          ? credential.expires_at !== undefined
+                            ? t('projects.credentialExpires', {
+                                time: new Date(
+                                  credential.expires_at * 1000,
+                                ).toLocaleString(),
+                              })
+                            : t('projects.credentialStored')
                           : t('projects.configureCredential')}
                       </Text>
                       <Text style={styles.cardBody}>
@@ -821,6 +865,42 @@ export function ProjectsSurface({
                 </>
               )}
             </View>
+
+            {selected.origin_url !== null && (
+              <View style={styles.card}>
+                <Text style={styles.cardTitle}>
+                  {t('projects.pushReceiptTitle')}
+                </Text>
+                {receipt === null ? (
+                  <Text style={styles.cardBody}>
+                    {t('projects.pushReceiptNone')}
+                  </Text>
+                ) : (
+                  <Text
+                    accessibilityLabel={t('projects.pushReceiptBody', {
+                      branch: receipt.branch,
+                      host: receipt.host,
+                      local: receipt.local_oid.slice(0, 12),
+                      remote: receipt.remote_oid.slice(0, 12),
+                      time: new Date(
+                        receipt.pushed_at,
+                      ).toLocaleString(),
+                    })}
+                    style={styles.mono}
+                  >
+                    {t('projects.pushReceiptBody', {
+                      branch: receipt.branch,
+                      host: receipt.host,
+                      local: receipt.local_oid.slice(0, 12),
+                      remote: receipt.remote_oid.slice(0, 12),
+                      time: new Date(
+                        receipt.pushed_at,
+                      ).toLocaleString(),
+                    })}
+                  </Text>
+                )}
+              </View>
+            )}
           </ScrollView>
         )}
 
@@ -840,6 +920,21 @@ export function ProjectsSurface({
             >
               {error ?? notice ?? t('projects.loading')}
             </Text>
+            {pushing && (
+              <Pressable
+                accessibilityLabel={t('projects.cancelPush')}
+                accessibilityRole="button"
+                onPress={cancelPush}
+                style={({ pressed }) => [
+                  styles.toastCancel,
+                  pressed && styles.pressed,
+                ]}
+              >
+                <Text style={styles.toastCancelText}>
+                  {t('projects.cancelPush')}
+                </Text>
+              </Pressable>
+            )}
           </View>
         )}
       </View>
@@ -1508,6 +1603,15 @@ const createStyles = (colors: ThemePalette) =>
     },
     toastText: { flex: 1, color: colors.textDim, fontSize: 10, lineHeight: 15 },
     toastErrorText: { color: colors.danger },
+    toastCancel: {
+      borderRadius: 10,
+      backgroundColor: colors.surface,
+      borderWidth: StyleSheet.hairlineWidth,
+      borderColor: colors.line,
+      paddingHorizontal: 10,
+      paddingVertical: 7,
+    },
+    toastCancelText: { color: colors.textDim, fontSize: 10, fontWeight: '700' },
     disabled: { opacity: 0.42 },
     pressed: { opacity: 0.62, transform: [{ scale: 0.99 }] },
   });

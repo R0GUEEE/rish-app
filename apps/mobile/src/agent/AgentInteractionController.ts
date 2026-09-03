@@ -57,8 +57,7 @@ function exactApprovalDecision(
     if (
       decision.status !== 'approved' ||
       (decision.scope !== 'once' && decision.scope !== 'conversation') ||
-      !spec.scopes.includes(decision.scope) ||
-      (spec.toolName === 'git_push' && decision.scope !== 'once')
+      !spec.scopes.includes(decision.scope)
     ) {
       return undefined;
     }

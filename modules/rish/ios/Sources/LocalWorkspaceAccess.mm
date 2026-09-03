@@ -4255,6 +4255,47 @@ static void DSHWorkspaceSetOperationalStatusError(NSString *status,
   }
 }
 
+- (nullable NSString *)workspaceIdForLegacyProjectId:(NSString *)projectId
+                                                error:(NSError **)error {
+  @try {
+    @synchronized(DSHLocalWorkspaceAccess.class) {
+      if (!DSHCanonicalUUID(projectId)) {
+        DSHSetWorkspaceError(error, DSHLocalWorkspaceAccessErrorInvalid);
+        return nil;
+      }
+      __attribute__((objc_precise_lifetime))
+      DSHLocalWorkspaceAuthorityLock *lock = [self acquireAuthorityLock:error];
+      if (lock == nil || ![self ensurePrivateLayoutLocked:error]) return nil;
+      NSDictionary *registry = [self loadRegistry:error digest:nil];
+      if (registry == nil) return nil;
+      NSArray *records = registry[@"records"];
+      if (![records isKindOfClass:NSArray.class]) {
+        DSHSetWorkspaceError(error, DSHLocalWorkspaceAccessErrorConflict);
+        return nil;
+      }
+      for (NSDictionary *record in records) {
+        if (![record isKindOfClass:NSDictionary.class]) continue;
+        if (![record[@"origin"] isEqual:@"legacy_app_owned"] ||
+            ![record[@"root_locator_kind"] isEqual:@"legacy_app_owned"] ||
+            ![record[@"legacy_project_id"] isEqual:projectId]) {
+          continue;
+        }
+        NSString *workspaceId = record[@"workspace_id"];
+        if (!DSHCanonicalUUID(workspaceId)) {
+          DSHSetWorkspaceError(error, DSHLocalWorkspaceAccessErrorConflict);
+          return nil;
+        }
+        return [workspaceId copy];
+      }
+      // Unregistered legacy project: the caller treats this as out-of-scope.
+      return nil;
+    }
+  } @catch (__unused NSException *exception) {
+    DSHSetWorkspaceError(error, DSHLocalWorkspaceAccessErrorUnavailable);
+    return nil;
+  }
+}
+
 - (nullable NSDictionary *)createRishOwnedWorkspaceWithDisplayName:
     (NSString *)displayName
                                                     operationId:

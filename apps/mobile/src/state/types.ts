@@ -536,7 +536,7 @@ export type AgentConversationGrantV2 = {
   readonly project_id: string | null;
   readonly binding_revision: number;
   readonly root_fingerprint_sha256: string;
-  readonly tool_family: 'file_write' | 'git_commit';
+  readonly tool_family: 'file_write' | 'git_commit' | 'git_push';
   readonly registry_version: 1;
   readonly policy_version: string;
   readonly issued_for: {

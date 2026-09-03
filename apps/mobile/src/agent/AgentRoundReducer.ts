@@ -44,8 +44,8 @@ export type AgentRoundEvidence =
   | AgentControllerPreflightV1;
 
 export const AGENT_AUTO_TOOLS = ['list_dir', 'read_file', 'git_status'] as const;
-export const AGENT_CONFIRM_TOOLS = ['write_file', 'git_commit'] as const;
-export const AGENT_ONCE_ONLY_TOOLS = ['git_push'] as const;
+export const AGENT_CONFIRM_TOOLS = ['write_file', 'git_commit', 'git_push'] as const;
+export const AGENT_ONCE_ONLY_TOOLS = [] as const;
 export const AGENT_TOOL_NAMES = [
   ...AGENT_AUTO_TOOLS,
   ...AGENT_CONFIRM_TOOLS,
@@ -64,6 +64,7 @@ const failureCodes = new Set<string>([
   'E_AGENT_ROUND_AMBIGUOUS', 'E_AGENT_EXECUTION_AMBIGUOUS',
   'E_AGENT_RETRY_LINEAGE', 'E_AGENT_PERSISTENCE', 'E_AGENT_CONFLICT',
   'E_AGENT_ROUND_LIMIT', 'E_AGENT_CANCELLED', 'E_AGENT_TOOL_FAILED',
+  'E_AGENT_NON_FAST_FORWARD', 'E_AGENT_AUTH_FAILED', 'E_AGENT_TIMEOUT',
   'E_COMPLETION_LENGTH', 'E_COMPLETION_CONTENT_FILTER',
 ]);
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/u;
@@ -88,7 +89,7 @@ export function isAgentGrantUsable(
     readonly project_id: string | null;
     readonly binding_revision: number;
     readonly root_fingerprint_sha256: string;
-    readonly tool_family: 'file_write' | 'git_commit';
+    readonly tool_family: 'file_write' | 'git_commit' | 'git_push';
     readonly registry_version: 1;
     readonly policy_version: string;
   },
@@ -201,7 +202,6 @@ function validCall(call: PersistedAgentCallJournalV3, index: number): boolean {
   if (access === 'auto' && (call.approval_token !== null || call.approval_reference !== null || call.approval_decision !== 'pending')) return false;
   if (access === 'durable_deny' && (call.approval_token !== null || call.approval_reference !== null || call.idempotency_key !== null || call.approval_decision !== 'denied')) return false;
   if ((access === 'conversation_confirm' || access === 'confirm_once') && call.approval_decision === 'pending' && call.approval_token === null) return false;
-  if (call.name === 'git_push' && call.approval_decision === 'allow_conversation') return false;
   return call.approval_decision !== 'pending' || call.approval_reference === null;
 }
 function agentPhase(value: unknown): value is AgentAttemptPhase {

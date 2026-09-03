@@ -182,6 +182,9 @@ const RECEIPT_FAILURE_CODES = new Set<Exclude<AgentRuntimeFailureCode, 'E_AGENT_
   'E_AGENT_ROUND_LIMIT',
   'E_AGENT_CANCELLED',
   'E_AGENT_TOOL_FAILED',
+  'E_AGENT_NON_FAST_FORWARD',
+  'E_AGENT_AUTH_FAILED',
+  'E_AGENT_TIMEOUT',
   'E_COMPLETION_LENGTH',
   'E_COMPLETION_CONTENT_FILTER',
 ]);
@@ -601,8 +604,7 @@ function validatePolicy(value: unknown): AgentRuntimePolicyV1 | null {
 
 function expectedAccess(toolName: string): AgentRuntimeRegistryToolV2['access'] {
   if (toolName === 'list_dir' || toolName === 'read_file' || toolName === 'git_status') return 'auto';
-  if (toolName === 'write_file' || toolName === 'git_commit') return 'conversation_confirm';
-  if (toolName === 'git_push') return 'confirm_once';
+  if (toolName === 'write_file' || toolName === 'git_commit' || toolName === 'git_push') return 'conversation_confirm';
   return 'durable_deny';
 }
 
@@ -795,6 +797,7 @@ function sameRoot(left: AgentRuntimeRootV1, right: AgentRuntimeRootV1): boolean 
 function expectedToolFamily(toolName: string): AgentConversationGrantV2['tool_family'] | null {
   if (toolName === 'write_file') return 'file_write';
   if (toolName === 'git_commit') return 'git_commit';
+  if (toolName === 'git_push') return 'git_push';
   return null;
 }
 
@@ -968,9 +971,8 @@ function validateBindRequest(value: unknown): BindAgentApprovalRequestV2 | null 
   if (token === null || controllerCas === null || checkpoint === null || token.task_id !== raw.task_id || token.attempt_id !== raw.attempt_id || token.round_id !== raw.round_id || token.round_index !== raw.round_index ||
     token.batch_revision !== raw.batch_revision || token.manifest_sha256 !== raw.manifest_sha256 || token.call_index !== raw.call_index || token.call_id !== raw.call_id ||
     !controllerCASCanAdvance(token.controller_cas, controllerCas) || !token.allowed_decisions.includes(raw.decision) ||
-    expectedToolFamily(token.name) === null && token.name !== 'git_push' ||
-    (token.name === 'git_push' && token.access !== 'confirm_once') ||
-    (token.name !== 'git_push' && token.access !== 'conversation_confirm') ||
+    expectedToolFamily(token.name) === null ||
+    token.access !== 'conversation_confirm' ||
     (raw.decision === 'allow_conversation' && token.access !== 'conversation_confirm')) return null;
   return { ...raw, controller_cas: controllerCas, committed_checkpoint: checkpoint, token } as BindAgentApprovalRequestV2;
 }

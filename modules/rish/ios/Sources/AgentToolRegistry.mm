@@ -150,7 +150,9 @@ static NSString *DSHAgentRegistryAccessForName(NSString *name,
   if ([name isEqualToString:@"list_dir"] ||
       [name isEqualToString:@"read_file"] ||
       [name isEqualToString:@"git_status"]) return @"auto";
-  if ([name isEqualToString:@"git_push"]) return @"confirm_once";
+  // git_push follows the git_commit pattern: per-conversation confirmation,
+  // a recorded grant, and the same ledger/replay protection. Network effects
+  // are still covered by the write-batch effect gate.
   return @"conversation_confirm";
 }
 
