@@ -16,6 +16,7 @@ import {
   Image,
   Keyboard,
   Modal,
+  Platform,
   Pressable,
   ScrollView,
   StyleSheet,
@@ -376,7 +377,7 @@ export function ChatComposer(props: Props) {
         <View
           accessibilityLabel={t('messages.respondingLabel')}
           accessibilityLiveRegion="polite"
-          accessibilityRole="status"
+          accessibilityRole={Platform.OS === 'android' ? 'text' : 'status'}
           style={styles.progressRow}
         >
           <ActivityIndicator color={colors.accent} size="small" />

@@ -5298,7 +5298,7 @@ export function HomeScreen() {
           {attachmentNotice !== null && visibleRequestFailure === null && (
             <View
               accessibilityLiveRegion="polite"
-              accessibilityRole="status"
+              accessibilityRole={Platform.OS === 'android' ? 'text' : 'status'}
               style={styles.attachmentNotice}
             >
               <Text numberOfLines={2} style={styles.attachmentNoticeText}>

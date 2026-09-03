@@ -168,9 +168,9 @@ test('localizes status and empty output through the presentation locale', async 
   if (renderer === undefined) throw new Error('renderer missing');
   const root = renderer.root;
 
-  expect(root.findByProps({ children: '思考了 2.4 秒' }).props.role).toBe(
-    'status',
-  );
+  expect(
+    root.findByProps({ children: '思考了 2.4 秒' }).props.accessibilityRole,
+  ).toBe('status');
   expect(
     root.findByProps({ children: '等待中' }).props.accessibilityLabel,
   ).toBe('workspace.read 正在等待');
@@ -203,7 +203,7 @@ test('renders failed tool results as assertive errors without a success icon', a
   });
   if (renderer === undefined) throw new Error('renderer missing');
   const root = renderer.root;
-  const alert = root.findByProps({ role: 'alert' });
+  const alert = root.findByProps({ accessibilityRole: 'alert' });
 
   expect(alert.props.accessibilityLabel).toBe('workspace.write failed');
   expect(alert.props.accessibilityLiveRegion).toBe('assertive');
@@ -229,7 +229,7 @@ test('announces running tool calls as busy status updates', async () => {
     renderer = ReactTestRenderer.create(<StructuredContent blocks={running} />);
   });
   if (renderer === undefined) throw new Error('renderer missing');
-  const status = renderer.root.findByProps({ role: 'status' });
+  const status = renderer.root.findByProps({ accessibilityRole: 'status' });
   const button = renderer.root.findByProps({
     accessibilityLabel: 'Expand tool call details for sha256sum',
   });
