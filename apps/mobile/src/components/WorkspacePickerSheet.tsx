@@ -494,6 +494,7 @@ export function WorkspacePickerSheet({
               accessibilityLabel={t('workspaces.list')}
               style={styles.listScroll}
               contentContainerStyle={styles.listContent}
+              testID="workspace-picker-list"
             >
               {rows === null ? (
                 <View style={styles.loading}>

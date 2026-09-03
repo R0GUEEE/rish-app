@@ -1,12 +1,18 @@
-#import <UIKit/UIKit.h>
 #import <XCTest/XCTest.h>
 
 /**
  * Device / simulator UI acceptance:
  * 1) Public HTTPS clone through the Projects surface.
- * 2) New chat + bind an existing workspace via the composer chip.
+ * 2) New chat + create a workspace and bind it via the composer chip.
  *
- * Prefer accessibilityIdentifier (RN testID) over locale-specific labels.
+ * Rules that keep this green on a real, shared iPhone:
+ * - Never use UIPasteboard. The runner's pasteboard is not visible to the app
+ *   process on device, so "Paste" inserts the owner's real clipboard.
+ * - Type per character into the focused field and assert the field value
+ *   before continuing (bulk typeText is garbled by RN TextInput caret moves).
+ * - Every artifact the test creates carries a unique timestamp suffix, and the
+ *   test never selects or touches a pre-existing workspace or project.
+ * - Prefer accessibilityIdentifier (RN testID) over locale-specific labels.
  */
 
 @interface DeviceCloneDriveUITests : XCTestCase
@@ -15,6 +21,8 @@
 @implementation DeviceCloneDriveUITests {
   XCUIApplication *_app;
 }
+
+#pragma mark - Lookup helpers
 
 - (XCUIApplication *)app {
   if (_app == nil) {
@@ -62,75 +70,16 @@
 }
 
 - (XCUIElement *)requireIdentifier:(NSString *)identifier
-                      orLabels:(NSArray<NSString *> *)labels
-                       timeout:(NSTimeInterval)timeout {
-  XCUIElement *byId =
-      [self elementWithIdentifier:identifier timeout:timeout];
+                          orLabels:(NSArray<NSString *> *)labels
+                           timeout:(NSTimeInterval)timeout {
+  XCUIElement *byId = [self elementWithIdentifier:identifier timeout:timeout];
   if (byId != nil) {
     return byId;
   }
   XCUIElement *byLabel = [self elementMatchingAnyOf:labels timeout:2];
-  XCTAssertNotNil(byLabel,
-                  @"missing accessibilityIdentifier %@ and labels %@",
+  XCTAssertNotNil(byLabel, @"missing accessibilityIdentifier %@ and labels %@",
                   identifier, labels);
   return byLabel;
-}
-
-- (void)pasteText:(NSString *)text intoField:(XCUIElement *)field {
-  XCTAssertTrue(field.exists, @"paste target missing");
-  [field tap];
-
-  // Clear any existing value via select-all + paste overwrite.
-  UIPasteboard.generalPasteboard.string = text;
-
-  [field pressForDuration:1.1];
-
-  XCUIElement *selectAll = nil;
-  NSArray<NSString *> *selectAllLabels = @[ @"Select All", @"全选", @"Select all" ];
-  for (NSString *label in selectAllLabels) {
-    XCUIElement *candidate = self.app.menuItems[label];
-    if ([candidate waitForExistenceWithTimeout:1.5]) {
-      selectAll = candidate;
-      break;
-    }
-  }
-  if (selectAll != nil && selectAll.exists) {
-    [selectAll tap];
-  }
-
-  XCUIElement *paste = nil;
-  NSArray<NSString *> *pasteLabels = @[ @"Paste", @"粘贴" ];
-  for (NSString *label in pasteLabels) {
-    XCUIElement *candidate = self.app.menuItems[label];
-    if ([candidate waitForExistenceWithTimeout:2.0]) {
-      paste = candidate;
-      break;
-    }
-  }
-
-  if (paste != nil && paste.exists) {
-    [paste tap];
-    return;
-  }
-
-  // Fallback: character-wise typing with a short settle between keystrokes.
-  // Avoids RN TextInput caret reordering that garbles bulk typeText.
-  NSString *current = field.value;
-  if ([current isKindOfClass:[NSString class]] && current.length > 0 &&
-      ![current isEqualToString:text]) {
-    // Best-effort clear: delete characters one by one.
-    NSMutableString *deletes =
-        [NSMutableString stringWithCapacity:current.length];
-    for (NSUInteger i = 0; i < current.length; i++) {
-      [deletes appendString:@"\b"];
-    }
-    [field typeText:deletes];
-  }
-  for (NSUInteger i = 0; i < text.length; i++) {
-    unichar c = [text characterAtIndex:i];
-    NSString *ch = [NSString stringWithCharacters:&c length:1];
-    [field typeText:ch];
-  }
 }
 
 - (NSString *)stringValueOf:(XCUIElement *)element {
@@ -141,9 +90,98 @@
   if ([value isKindOfClass:[NSNumber class]]) {
     return [(NSNumber *)value stringValue];
   }
-  NSString *label = element.label;
-  return label ?: @"";
+  return element.label ?: @"";
 }
+
+/// Text currently in a text field. An empty field reports its placeholder as
+/// the value, so map that back to the empty string.
+- (NSString *)textOfField:(XCUIElement *)field {
+  NSString *value = [self stringValueOf:field];
+  NSString *placeholder = field.placeholderValue;
+  if (placeholder.length > 0 && [value isEqualToString:placeholder]) {
+    return @"";
+  }
+  return value;
+}
+
+- (NSString *)uniqueSuffix {
+  NSDateFormatter *formatter = [[NSDateFormatter alloc] init];
+  formatter.locale = [NSLocale localeWithLocaleIdentifier:@"en_US_POSIX"];
+  formatter.dateFormat = @"yyyyMMdd-HHmmss";
+  return [formatter stringFromDate:[NSDate date]];
+}
+
+#pragma mark - Typing helpers (no pasteboard)
+
+- (BOOL)waitForKeyboardWithTimeout:(NSTimeInterval)timeout {
+  NSDate *deadline = [NSDate dateWithTimeIntervalSinceNow:timeout];
+  while ([deadline timeIntervalSinceNow] > 0) {
+    if (self.app.keyboards.count > 0) {
+      return YES;
+    }
+    [NSThread sleepForTimeInterval:0.2];
+  }
+  return self.app.keyboards.count > 0;
+}
+
+- (void)focusField:(XCUIElement *)field {
+  // Tap near the trailing edge so the caret lands after any existing text.
+  XCUICoordinate *trailing =
+      [field coordinateWithNormalizedOffset:CGVectorMake(0.96, 0.5)];
+  [trailing tap];
+  [self waitForKeyboardWithTimeout:5];
+}
+
+- (void)clearField:(XCUIElement *)field {
+  NSString *current = [self textOfField:field];
+  if (current.length == 0) {
+    return;
+  }
+  [self focusField:field];
+  NSMutableString *deletes =
+      [NSMutableString stringWithCapacity:current.length + 4];
+  // A few extra backspaces are harmless and cover composed characters.
+  for (NSUInteger i = 0; i < current.length + 4; i++) {
+    [deletes appendString:XCUIKeyboardKeyDelete];
+  }
+  [field typeText:deletes];
+}
+
+- (void)typeCharacters:(NSString *)text intoField:(XCUIElement *)field {
+  for (NSUInteger i = 0; i < text.length; i++) {
+    unichar c = [text characterAtIndex:i];
+    NSString *ch = [NSString stringWithCharacters:&c length:1];
+    [field typeText:ch];
+  }
+}
+
+/// Type `text` into `field` per character and assert the field value equals
+/// `text`. If RN TextInput caret reordering garbles the result, clear and
+/// retype once, then fail clearly. Never touches UIPasteboard.
+- (void)enterText:(NSString *)text intoField:(XCUIElement *)field {
+  XCTAssertTrue(field.exists, @"typing target missing");
+  NSString *observed = @"";
+  for (NSUInteger attempt = 0; attempt < 2; attempt++) {
+    [self clearField:field];
+    [self focusField:field];
+    XCTAssertTrue(self.app.keyboards.count > 0,
+                  @"keyboard never appeared for typing target");
+    [self typeCharacters:text intoField:field];
+    // Let the RN bridge settle before reading the value back.
+    NSDate *deadline = [NSDate dateWithTimeIntervalSinceNow:3];
+    while ([deadline timeIntervalSinceNow] > 0) {
+      observed = [self textOfField:field];
+      if ([observed isEqualToString:text]) {
+        return;
+      }
+      [NSThread sleepForTimeInterval:0.3];
+    }
+  }
+  XCTFail(@"field value mismatch after retry: expected %@ but found %@", text,
+          observed);
+}
+
+#pragma mark - Lifecycle
 
 - (void)setUp {
   [super setUp];
@@ -151,13 +189,18 @@
   self.app.launchEnvironment = @{@"DSH_ANCHOR_TRACE" : @"1"};
 }
 
-- (void)testDrivePublicCloneEndToEnd {
-  [self.app launch];
-
+- (void)openNavigation {
   XCUIElement *nav = [self requireIdentifier:@"home-open-navigation"
                                     orLabels:@[ @"打开导航", @"Open navigation" ]
                                      timeout:60];
   [nav tap];
+}
+
+#pragma mark - Tests
+
+- (void)testDrivePublicCloneEndToEnd {
+  [self.app launch];
+  [self openNavigation];
 
   XCUIElement *projects =
       [self requireIdentifier:@"drawer-projects"
@@ -171,82 +214,59 @@
                       timeout:10];
   [cloneMode tap];
 
-  NSString *projectName = @"Hello-World";
+  // Unique per run so reruns never collide with an existing project.
+  NSString *projectName = [NSString
+      stringWithFormat:@"UITest-Hello-World-%@", [self uniqueSuffix]];
   NSString *remoteURL = @"https://github.com/octocat/Hello-World.git";
 
   XCUIElement *nameField =
       [self requireIdentifier:@"projects-name-input" timeout:8];
-  [self pasteText:projectName intoField:nameField];
-  XCTAssertEqualObjects([self stringValueOf:nameField], projectName,
+  [self enterText:projectName intoField:nameField];
+  XCTAssertEqualObjects([self textOfField:nameField], projectName,
                         @"project name field was not set correctly");
 
   XCUIElement *urlField =
       [self requireIdentifier:@"projects-remote-url-input" timeout:8];
-  [self pasteText:remoteURL intoField:urlField];
-  NSString *urlValue = [self stringValueOf:urlField];
-  XCTAssertEqualObjects(urlValue, remoteURL,
-                        @"remote URL field was garbled or incomplete: %@",
-                        urlValue);
+  [self enterText:remoteURL intoField:urlField];
+  XCTAssertEqualObjects([self textOfField:urlField], remoteURL,
+                        @"remote URL field was garbled or incomplete");
 
   XCUIElement *submit =
       [self requireIdentifier:@"projects-clone-submit" timeout:5];
+  XCTAssertTrue(submit.isEnabled, @"clone submit button is disabled");
   [submit tap];
 
-  // Clone opens the project detail. Wait for the title, then return to the
-  // list and assert the row (requirement: cloned project row within 120s).
-  XCUIElement *detailTitle =
-      [self requireIdentifier:@"projects-detail-title" timeout:120];
-  NSPredicate *titleHasName = [NSPredicate
-      predicateWithFormat:@"label CONTAINS %@ OR value CONTAINS %@",
-                          projectName, projectName];
-  XCUIElement *titled =
-      [[self.app descendantsMatchingType:XCUIElementTypeAny]
-          matchingPredicate:titleHasName]
-          .firstMatch;
-  BOOL detailReady = NO;
+  // A successful clone closes the form (the name input unmounts) and opens
+  // the project detail; a failed clone leaves the form open with an error.
+  // Wait for the form to close, return to the list, and assert the row
+  // (requirement: cloned project row within 120s).
+  NSString *rowIdentifier =
+      [NSString stringWithFormat:@"projects-row-%@", projectName];
+  BOOL formClosed = NO;
   NSDate *deadline = [NSDate dateWithTimeIntervalSinceNow:120];
   while ([deadline timeIntervalSinceNow] > 0) {
-    if (detailTitle.exists &&
-        ([[self stringValueOf:detailTitle] containsString:projectName] ||
-         titled.exists)) {
-      detailReady = YES;
-      break;
-    }
-    // Also accept the list row appearing without leaving detail.
-    XCUIElement *earlyRow =
-        [self elementWithIdentifier:[NSString
-                                        stringWithFormat:@"projects-row-%@",
-                                                         projectName]
-                            timeout:0.2];
-    if (earlyRow != nil) {
-      detailReady = YES;
+    if (!nameField.exists) {
+      formClosed = YES;
       break;
     }
     [NSThread sleepForTimeInterval:1.0];
   }
-  XCTAssertTrue(detailReady, @"clone never reached detail/list for %@",
+  XCTAssertTrue(formClosed, @"clone form never closed for %@ (clone failed?)",
                 projectName);
 
-  XCUIElement *back =
-      [self elementWithIdentifier:@"projects-back" timeout:5];
+  XCUIElement *back = [self elementWithIdentifier:@"projects-back" timeout:10];
   if (back != nil) {
     [back tap];
   }
 
-  XCUIElement *row = [self
-      requireIdentifier:[NSString stringWithFormat:@"projects-row-%@",
-                                                   projectName]
-                timeout:30];
+  XCUIElement *row = [self requireIdentifier:rowIdentifier timeout:30];
   XCTAssertTrue(row.exists, @"cloned project row never appeared");
+  // The app exposes no UI to delete a project, so the cloned project stays.
 }
 
 - (void)testNewChatBindsExistingWorkspaceToComposerChip {
   [self.app launch];
-
-  XCUIElement *nav = [self requireIdentifier:@"home-open-navigation"
-                                    orLabels:@[ @"打开导航", @"Open navigation" ]
-                                     timeout:60];
-  [nav tap];
+  [self openNavigation];
 
   XCUIElement *newChat =
       [self requireIdentifier:@"drawer-new-chat"
@@ -264,102 +284,95 @@
       [self requireIdentifier:@"workspace-picker-sheet" timeout:8];
   XCTAssertTrue(sheet.exists);
 
-  NSPredicate *rowPred = [NSPredicate
-      predicateWithFormat:@"identifier BEGINSWITH %@",
-                          @"workspace-picker-row-"];
-  XCUIElementQuery *rows =
-      [[self.app descendantsMatchingType:XCUIElementTypeAny]
-          matchingPredicate:rowPred];
-  XCUIElement *firstRow = rows.firstMatch;
-  NSString *workspaceName = @"UITest Workspace";
+  // Create a workspace owned by this run. Never touch pre-existing rows.
+  NSString *workspaceName =
+      [NSString stringWithFormat:@"UITest-%@", [self uniqueSuffix]];
 
-  if (![firstRow waitForExistenceWithTimeout:3]) {
-    // Fresh install: create a named workspace, then bind it.
-    XCUIElement *nameField =
-        [self requireIdentifier:@"workspace-picker-name-input"
-                       orLabels:@[ @"Workspace name", @"工作区名称" ]
-                        timeout:8];
-    [self pasteText:workspaceName intoField:nameField];
+  XCUIElement *nameField =
+      [self requireIdentifier:@"workspace-picker-name-input" timeout:8];
+  [self enterText:workspaceName intoField:nameField];
+  XCTAssertEqualObjects([self textOfField:nameField], workspaceName,
+                        @"workspace name field was not set correctly");
 
+  // Return submits the draft (onSubmitEditing) and dismisses the keyboard,
+  // which keeps the sheet's buttons unobstructed.
+  [nameField typeText:XCUIKeyboardKeyReturn];
+
+  // The row label is "Use {name}" / "使用{name}"; the identifier carries the
+  // opaque workspace id, so match this exact name in either locale.
+  NSPredicate *ownRow = [NSPredicate
+      predicateWithFormat:
+          @"identifier BEGINSWITH %@ AND (label == %@ OR label == %@)",
+          @"workspace-picker-row-",
+          [NSString stringWithFormat:@"Use %@", workspaceName],
+          [NSString stringWithFormat:@"使用%@", workspaceName]];
+  XCUIElement *row = [[self.app descendantsMatchingType:XCUIElementTypeAny]
+                         matchingPredicate:ownRow]
+                         .firstMatch;
+  if (![row waitForExistenceWithTimeout:10]) {
+    // Return may not have submitted; fall back to the explicit button.
     XCUIElement *createButton =
         [self requireIdentifier:@"workspace-picker-new"
                        orLabels:@[ @"New workspace", @"新建工作区" ]
                         timeout:5];
-    [createButton tap];
-
-    XCTAssertTrue([firstRow waitForExistenceWithTimeout:15],
-                  @"created workspace row never appeared");
-  }
-
-  NSString *rowLabel = firstRow.label ?: @"";
-  // Label is "Use {name}" / "使用{name}". Prefer parsed label when present.
-  NSArray<NSString *> *prefixes = @[ @"Use ", @"使用" ];
-  for (NSString *prefix in prefixes) {
-    if ([rowLabel hasPrefix:prefix]) {
-      workspaceName = [rowLabel substringFromIndex:prefix.length];
-      break;
+    if (createButton.isHittable && createButton.isEnabled) {
+      [createButton tap];
     }
   }
-  XCTAssertTrue(workspaceName.length > 0,
-                @"could not determine workspace name from %@", rowLabel);
+  XCTAssertTrue([row waitForExistenceWithTimeout:20],
+                @"created workspace row for %@ never appeared", workspaceName);
+  XCTAssertTrue(row.isEnabled,
+                @"created workspace %@ is not selectable (status not ok)",
+                workspaceName);
 
-  // Prefer an enabled/hittable match; RN Pressable may surface as Button or Other.
-  XCUIElement *rowToTap = firstRow;
-  if (!rowToTap.isHittable) {
-    XCUIElement *asButton =
-        [[self.app.buttons matchingPredicate:rowPred] firstMatch];
-    if ([asButton waitForExistenceWithTimeout:2] && asButton.isHittable) {
-      rowToTap = asButton;
+  // The list scrolls; bring our row into view without touching other rows.
+  XCUIElement *list =
+      [self elementWithIdentifier:@"workspace-picker-list" timeout:2];
+  for (NSUInteger swipe = 0; swipe < 6 && !row.isHittable; swipe++) {
+    if (list != nil && list.exists) {
+      [list swipeUp];
+    } else {
+      [sheet swipeUp];
     }
   }
-  XCTAssertTrue(rowToTap.isHittable,
-                @"workspace row is not hittable (status may not be ok): %@",
-                rowLabel);
-  [rowToTap tap];
-
-  // Some picker flows need an explicit confirm.
-  XCUIElement *confirm =
-      [self elementWithIdentifier:@"workspace-picker-confirm-selection"
-                          timeout:3];
-  if (confirm != nil && confirm.exists && confirm.isHittable) {
-    [confirm tap];
+  for (NSUInteger swipe = 0; swipe < 6 && !row.isHittable; swipe++) {
+    if (list != nil && list.exists) {
+      [list swipeDown];
+    } else {
+      [sheet swipeDown];
+    }
   }
+  XCTAssertTrue(row.isHittable, @"workspace row %@ is not hittable",
+                workspaceName);
+  [row tap];
 
   // Successful bind closes the picker sheet.
-  NSDate *sheetDeadline = [NSDate dateWithTimeIntervalSinceNow:15];
+  NSDate *sheetDeadline = [NSDate dateWithTimeIntervalSinceNow:20];
   while (sheet.exists && [sheetDeadline timeIntervalSinceNow] > 0) {
     [NSThread sleepForTimeInterval:0.4];
   }
   XCTAssertFalse(sheet.exists,
-                 @"workspace picker stayed open; bind likely failed");
+                 @"workspace picker stayed open; bind of %@ failed",
+                 workspaceName);
 
-  // Chip accessibilityValue carries the bound name (label stays Choose workspace).
-  BOOL chipBound = NO;
+  // Chip accessibilityValue carries the bound name exactly.
+  NSString *chipValue = @"";
   NSDate *deadline = [NSDate dateWithTimeIntervalSinceNow:20];
   while ([deadline timeIntervalSinceNow] > 0) {
     XCUIElement *boundChip =
         [self elementWithIdentifier:@"composer-workspace-chip" timeout:1];
-    if (boundChip == nil) {
-      [NSThread sleepForTimeInterval:0.5];
-      continue;
-    }
-    NSString *chipValue = [self stringValueOf:boundChip];
-    NSString *chipLabel = boundChip.label ?: @"";
-    if ([chipValue containsString:workspaceName] ||
-        [chipLabel containsString:workspaceName]) {
-      chipBound = YES;
-      break;
-    }
-    XCUIElement *nested = self.app.staticTexts[workspaceName];
-    if ([nested waitForExistenceWithTimeout:0.3]) {
-      chipBound = YES;
-      break;
+    if (boundChip != nil) {
+      chipValue = [self stringValueOf:boundChip];
+      if ([chipValue isEqualToString:workspaceName]) {
+        break;
+      }
     }
     [NSThread sleepForTimeInterval:0.5];
   }
-  XCTAssertTrue(chipBound,
-                @"composer chip did not show workspace name %@",
-                workspaceName);
+  XCTAssertEqualObjects(chipValue, workspaceName,
+                        @"composer chip value did not equal workspace name");
+  // The picker's Forget action needs a native clearance Home does not issue,
+  // so there is no working UI path to delete the created workspace.
 }
 
 @end
