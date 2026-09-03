@@ -1,5 +1,6 @@
 #import <XCTest/XCTest.h>
-#import <TargetConditionals.h>
+
+#import "DSHTestHost.h"
 
 #import "../../../../modules/rish/ios/Sources/LocalProjectAccess.h"
 #import "../../../../modules/rish/ios/Sources/ProjectContextPolicy.h"
@@ -3767,13 +3768,15 @@ static NSString *DSHSHA256Hex(NSData *data) {
         attributesOfItemAtPath:url.path
                          error:&error];
     XCTAssertEqual([attributes[NSFilePosixPermissions] unsignedShortValue], 0600);
-#if TARGET_OS_SIMULATOR
-    if (attributes[NSFileProtectionKey] != nil) {
+    if (DSHTestHostIsSimulator()) {
+      // CoreSimulator may not report a protection class; enforce it only
+      // when the filesystem exposes one.
+      if (attributes[NSFileProtectionKey] != nil) {
+        XCTAssertEqualObjects(attributes[NSFileProtectionKey], NSFileProtectionComplete);
+      }
+    } else {
       XCTAssertEqualObjects(attributes[NSFileProtectionKey], NSFileProtectionComplete);
     }
-#else
-    XCTAssertEqualObjects(attributes[NSFileProtectionKey], NSFileProtectionComplete);
-#endif
     NSNumber *excluded = nil;
     XCTAssertTrue([url getResourceValue:&excluded
                                  forKey:NSURLIsExcludedFromBackupKey

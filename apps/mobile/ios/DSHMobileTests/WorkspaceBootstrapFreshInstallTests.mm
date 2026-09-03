@@ -8,6 +8,7 @@
 
 #import <XCTest/XCTest.h>
 
+#import "DSHTestHost.h"
 #import "../../../../modules/rish/ios/Sources/LocalProjectAccess.h"
 #import "../../../../modules/rish/ios/Sources/ProjectContextPolicy.h"
 
@@ -51,7 +52,7 @@
 }
 
 - (void)testBootstrapCreatesWorkspaceProjectsWhenRootIsAbsent {
-  if (TARGET_OS_IPHONE && !TARGET_OS_SIMULATOR) {
+  if (DSHTestHostIsDevice()) {
     XCTSkip(@"Real-device test hosts have a stricter sandbox than the main "
         @"app and cannot open the data container; this regression is "
         @"verified by driving the shipped app instead. Reproduction "
@@ -98,7 +99,7 @@
 }
 
 - (void)testSecondLeaseReusesTheSameRootWithoutRefusing {
-  if (TARGET_OS_IPHONE && !TARGET_OS_SIMULATOR) {
+  if (DSHTestHostIsDevice()) {
     XCTSkip(@"Real-device test hosts have a stricter sandbox than the main "
         @"app; verified via the shipped app.");
   }
@@ -130,7 +131,7 @@
 
 
 - (void)testDefaultBranchOnDeviceUsesApplicationSupport {
-  if (TARGET_OS_IPHONE && !TARGET_OS_SIMULATOR) {
+  if (DSHTestHostIsDevice()) {
     XCTSkip(@"Real-device test hosts cannot open the data container; "
         @"verified via the shipped app.");
   }

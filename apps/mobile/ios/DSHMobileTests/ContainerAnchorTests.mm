@@ -7,7 +7,8 @@
 // refuses with EPERM.
 
 #import <XCTest/XCTest.h>
-#import <TargetConditionals.h>
+
+#import "DSHTestHost.h"
 
 #import "../../../../modules/rish/ios/Sources/LocalProjectAccess.h"
 #import "../../../../modules/rish/ios/Sources/LocalProjectAccessInternals.h"
@@ -50,7 +51,7 @@ static BOOL DSHContainerAnchorIsUUIDComponent(NSString *component) {
 //   simulator: <...>/CoreSimulator/Devices/<device-uuid>/data/
 //              Containers/Data/Application/<app-uuid>/...
 - (void)testSimulatorEnvironmentLayoutMatchesExpectedComponentSequence {
-  if (TARGET_OS_IPHONE && !TARGET_OS_SIMULATOR) {
+  if (DSHTestHostIsDevice()) {
     XCTSkip(@"Simulator-only environment probe.");
   }
   NSString *home = NSHomeDirectory();
@@ -192,7 +193,7 @@ static BOOL DSHContainerAnchorIsUUIDComponent(NSString *component) {
 // when the host filesystem happens to allow opening it (as the simulator
 // does). The broken walker happily anchored at /private/var or /Users.
 - (void)testRootOutsideAppContainerIsRejected {
-  if (TARGET_OS_IPHONE && !TARGET_OS_SIMULATOR) {
+  if (DSHTestHostIsDevice()) {
     XCTSkip(@"Real-device test hosts have a stricter sandbox than the main "
         @"app; cross-container refusal is exercised on the simulator.");
   }
@@ -212,7 +213,7 @@ static BOOL DSHContainerAnchorIsUUIDComponent(NSString *component) {
 // Cross-container roots must also be refused when creation is requested; the
 // anchored walker rejects before any bootstrap runs.
 - (void)testRootOutsideAppContainerIsRejectedWhenCreating {
-  if (TARGET_OS_IPHONE && !TARGET_OS_SIMULATOR) {
+  if (DSHTestHostIsDevice()) {
     XCTSkip(@"Real-device test hosts have a stricter sandbox than the main "
         @"app; cross-container refusal is exercised on the simulator.");
   }
@@ -232,7 +233,7 @@ static BOOL DSHContainerAnchorIsUUIDComponent(NSString *component) {
 // Control: injected roots under NSTemporaryDirectory() (inside the app
 // container) must keep working through the container-anchored walker.
 - (void)testRootInsideAppContainerStillOpens {
-  if (TARGET_OS_IPHONE && !TARGET_OS_SIMULATOR) {
+  if (DSHTestHostIsDevice()) {
     XCTSkip(@"Real-device test hosts have a stricter sandbox than the main "
         @"app; container-inside behavior is exercised on the simulator.");
   }
@@ -256,7 +257,7 @@ static BOOL DSHContainerAnchorIsUUIDComponent(NSString *component) {
 // Traversal components inside the container-relative tail must be refused:
 // the same directory addressed through a ".." hop is not the canonical root.
 - (void)testTraversalComponentsInsideContainerTailAreRejected {
-  if (TARGET_OS_IPHONE && !TARGET_OS_SIMULATOR) {
+  if (DSHTestHostIsDevice()) {
     XCTSkip(@"Real-device test hosts have a stricter sandbox than the main "
         @"app; traversal refusal is exercised on the simulator.");
   }
