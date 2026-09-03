@@ -7,6 +7,9 @@ NS_ASSUME_NONNULL_BEGIN
 /// Keychain service shared with the pre-existing git HTTPS credential store.
 extern NSString *const DSHGitPushCredentialService;
 
+/// Receipt journal filename inside the repository's private git directory.
+extern NSString *const DSHGitPushReceiptFilename;
+
 /// Expiry choices offered by the native credential prompt, in seconds.
 typedef NS_ENUM(NSInteger, DSHGitCredentialExpiry) {
   DSHGitCredentialExpiryOneHour = 3600,
@@ -15,24 +18,38 @@ typedef NS_ENUM(NSInteger, DSHGitCredentialExpiry) {
 };
 
 /// Validated remote URL for clone, set-origin, credential status, and push.
+/// Accepts credential-free `https://` DNS hosts on port 443, and plain
+/// `http://` only for loopback, RFC 1918, link-local, and ULA literals (the
+/// LAN test remote). Query, fragment, userinfo, and dot segments are rejected.
 NSURL *_Nullable DSHGitValidatedRemoteURL(id value, NSError **error);
 
-/// Keychain account key for the workspace-scoped credential.
-NSString *DSHGitCredentialAccountForScope(NSString *workspaceId,
-                                          NSString *host);
+/// YES when the validated remote host is a private literal reached over plain
+/// HTTP. Callers surface this so the user knows the token travels unencrypted
+/// on the local network only.
+BOOL DSHGitRemoteURLIsPlaintext(NSURL *url);
 
-/// Reads the credential for (workspaceId, host). Expired items are deleted.
-NSDictionary *_Nullable DSHGitCredentialForScope(NSString *workspaceId,
+/// YES for one of the three prompt expiry windows.
+BOOL DSHGitCredentialExpiryIsValid(NSInteger expirySeconds);
+
+/// Keychain account key for the (project scope, host) credential.
+NSString *DSHGitCredentialAccountForScope(NSString *scopeId, NSString *host);
+
+/// Reads the credential for (scopeId, host). Expired items are deleted and
+/// reported as absent. The returned dictionary carries `username`, `token`,
+/// `expires_at` (unix seconds) and `expiry_seconds`; it must never cross the
+/// React Native bridge.
+NSDictionary *_Nullable DSHGitCredentialForScope(NSString *scopeId,
                                                  NSString *host,
                                                  NSError **error);
 
-/// Stores or updates the credential with an absolute expiry.
-BOOL DSHGitStoreCredentialForScope(NSString *workspaceId, NSString *host,
+/// Stores or updates the credential with an absolute expiry derived from one
+/// of the three prompt windows.
+BOOL DSHGitStoreCredentialForScope(NSString *scopeId, NSString *host,
                                    NSString *username, NSString *token,
                                    NSInteger expirySeconds, NSError **error);
 
-/// Deletes the workspace-scoped credential for one host.
-BOOL DSHGitDeleteCredentialForScope(NSString *workspaceId, NSString *host,
+/// Deletes the scoped credential for one host.
+BOOL DSHGitDeleteCredentialForScope(NSString *scopeId, NSString *host,
                                     NSError **error);
 
 /// Deletes a legacy v1 host-only credential left behind by older builds.
@@ -40,7 +57,10 @@ BOOL DSHGitDeleteLegacyHostCredential(NSString *host, NSError **error);
 
 typedef NS_ENUM(NSInteger, DSHGitPushOutcome) {
   DSHGitPushOutcomeSuccess = 0,
+  /// The advertised remote reference did not match `expectedRemoteOID`.
+  DSHGitPushOutcomeConflict,
   DSHGitPushOutcomeNonFastForward,
+  /// The server reported a rejection for the target reference.
   DSHGitPushOutcomeRejected,
   DSHGitPushOutcomeAuthFailure,
   DSHGitPushOutcomeTimedOut,
@@ -57,37 +77,57 @@ typedef NS_ENUM(NSInteger, DSHGitPushOutcome) {
 @interface DSHGitPushRequest : NSObject
 @property(nonatomic) git_repository *repository;  // borrowed; caller keeps lease
 @property(nonatomic, copy) NSString *remoteName;  // origin
-@property(nonatomic, copy) NSString *remoteURL;   // validated absolute URL
-@property(nonatomic, copy) NSString *host;        // lowercase host
+/// Validated absolute URL applied to the remote instance. When nil the
+/// remote's configured URL is used verbatim (local filesystem remotes used by
+/// the native test fixtures).
+@property(nonatomic, copy, nullable) NSString *remoteURL;
+@property(nonatomic, copy, nullable) NSString *host;  // lowercase host
 @property(nonatomic, copy) NSString *fullReference;  // refs/heads/<branch>
-@property(nonatomic, copy) NSString *branch;
 @property(nonatomic, copy) NSString *localOID;
 @property(nonatomic, copy, nullable) NSString *username;
 @property(nonatomic, copy, nullable) NSString *token;
 @property(nonatomic, copy, nullable) NSString *proxyURL;
+/// nil: no precondition. NSNull: the reference must be absent on the remote.
+/// NSString: the advertised OID must equal this value.
+@property(nonatomic, strong, nullable) id expectedRemoteOID;
 @property(nonatomic, strong, nullable) DSHGitPushCancelToken *cancelToken;
 @property(nonatomic) NSTimeInterval timeout;  // default 60
-/// Fires exactly once on the push worker queue with the settled outcome.
+/// Fires exactly once on the push worker with the settled outcome, even after
+/// the caller already observed a timeout or cancellation.
 @property(nonatomic, copy, nullable) void (^completion)(
     DSHGitPushOutcome outcome, NSString *_Nullable remoteOID);
 @end
 
 @interface DSHGitPushResult : NSObject
 @property(nonatomic) DSHGitPushOutcome outcome;
+/// Advertised OID of the target reference before the push (nil when absent).
+@property(nonatomic, copy, nullable) NSString *advertisedOID;
+/// OID the server advertises for the target reference after the push.
 @property(nonatomic, copy, nullable) NSString *remoteOID;
+/// YES when `remoteOID` was read back from the server after the push.
+@property(nonatomic) BOOL verified;
+/// YES when the failure happened after bytes may have reached the server.
+@property(nonatomic) BOOL effectMayHaveOccurred;
 @end
 
-/// Runs the push bounded by timeout, polling the cancel token.
+/// Runs a non-force push bounded by `timeout`, polling the cancel token. The
+/// caller returns at the deadline or on cancellation; the network phase then
+/// aborts at its next libgit2 callback or socket timeout.
 DSHGitPushResult *DSHGitPushRun(DSHGitPushRequest *request);
 
-/// Appends a push receipt to the project's native receipt journal.
-BOOL DSHGitPushRecordReceipt(int projectDescriptor,
+/// Builds a receipt dictionary from the settled push facts.
+NSDictionary *DSHGitPushReceipt(NSString *host, NSString *branch,
+                                NSString *localOID, NSString *remoteOID,
+                                NSString *pushedAt);
+
+/// Appends a push receipt to the journal stored in the git directory.
+BOOL DSHGitPushRecordReceipt(int gitDirectoryDescriptor,
                              NSString *projectId,
                              NSDictionary *receipt,
                              NSError **error);
 
-/// Loads the receipt journal for a project (oldest first).
+/// Loads the receipt journal (oldest first). A missing journal is empty.
 NSArray<NSDictionary *> *_Nullable DSHGitPushLoadReceipts(
-    int projectDescriptor, NSString *projectId, NSError **error);
+    int gitDirectoryDescriptor, NSString *projectId, NSError **error);
 
 NS_ASSUME_NONNULL_END

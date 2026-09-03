@@ -620,7 +620,11 @@ const enUS = {
   'projects.push': 'Push',
   'projects.pushTitle': 'Push this branch?',
   'projects.pushBody':
-    'Push {branch} to {remote}. This contacts the remote Git server.',
+    'Push {branch} to {host} ({remote}). This contacts the remote Git server.',
+  'projects.pushBodyNewBranch':
+    'Publish {branch} as the new branch {target} on {host} ({remote}). This contacts the remote Git server.',
+  'projects.pushBranchLabel': 'Push as new branch (optional)',
+  'projects.pushBranchPlaceholder': 'feature/my-change',
   'projects.confirmPush': 'Push now',
   'projects.operationFailed': 'Git operation failed: {error}',
   'projects.created': 'Project created locally.',
@@ -638,8 +642,10 @@ const enUS = {
   'projects.pushReceiptNone': 'No push receipt recorded yet.',
   'projects.pushReceiptBody':
     '{branch} → {host} · local {local} · remote {remote} · {time}',
+  'projects.pushRejected': 'The remote rejected the push.',
+  'projects.pushBranchConflict':
+    'A local branch with that name already exists at a different commit.',
   'projects.credentialExpires': 'Credential stored in Keychain · expires {time}',
-  'projects.credentialExpiresIn': 'Credential stored in Keychain · expires in {window}',
 
   'files.title': 'Files',
   'files.onDevice': 'On this device',
@@ -1310,7 +1316,11 @@ const zhCN: Readonly<Record<TranslationKey, string>> = {
     '原生弹窗会为此 Host 保存 Token，Rish 不会把它返回 React Native。',
   'projects.push': '推送',
   'projects.pushTitle': '推送此分支？',
-  'projects.pushBody': '将 {branch} 推送到 {remote}，这会连接远程 Git 服务器。',
+  'projects.pushBody': '将 {branch} 推送到 {host}（{remote}），这会连接远程 Git 服务器。',
+  'projects.pushBodyNewBranch':
+    '将 {branch} 作为新分支 {target} 发布到 {host}（{remote}），这会连接远程 Git 服务器。',
+  'projects.pushBranchLabel': '以新分支推送（可选）',
+  'projects.pushBranchPlaceholder': 'feature/my-change',
   'projects.confirmPush': '立即推送',
   'projects.operationFailed': 'Git 操作失败：{error}',
   'projects.created': '项目已在本机创建。',
@@ -1328,8 +1338,9 @@ const zhCN: Readonly<Record<TranslationKey, string>> = {
   'projects.pushReceiptNone': '还没有推送凭据记录。',
   'projects.pushReceiptBody':
     '{branch} → {host} · 本地 {local} · 远程 {remote} · {time}',
+  'projects.pushRejected': '远程拒绝了本次推送。',
+  'projects.pushBranchConflict': '本地已存在同名分支，且指向不同的提交。',
   'projects.credentialExpires': '凭证已存入钥匙串 · 到期时间 {time}',
-  'projects.credentialExpiresIn': '凭证已存入钥匙串 · 剩余 {window}',
 
   'files.title': '文件',
   'files.onDevice': '在此设备上',

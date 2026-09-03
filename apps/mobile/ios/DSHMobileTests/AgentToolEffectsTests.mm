@@ -1846,7 +1846,8 @@
   XCTAssertEqualObjects(feedback, (@{
     @"schema_version" : @1, @"name" : @"git_push", @"outcome" : @"failed",
     @"payload" : @{ @"schema_version" : @1,
-                       @"failure_code" : @"E_AGENT_TOOL_FAILED" },
+                       @"failure_code" : @"E_AGENT_TOOL_FAILED",
+                       @"reason" : @"rejected" },
   }));
   XCTAssertFalse([effect[@"feedback"] containsString:@"lock"]);
   XCTAssertFalse([effect[@"feedback"] containsString:

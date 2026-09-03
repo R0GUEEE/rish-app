@@ -33,9 +33,6 @@ export type AgentRuntimeFailureCode =
   | 'E_AGENT_ROUND_LIMIT'
   | 'E_AGENT_CANCELLED'
   | 'E_AGENT_TOOL_FAILED'
-  | 'E_AGENT_NON_FAST_FORWARD'
-  | 'E_AGENT_AUTH_FAILED'
-  | 'E_AGENT_TIMEOUT'
   | 'E_AGENT_NATIVE'
   | 'E_AGENT_NOT_FOUND'
   | 'E_AGENT_CAPACITY'
@@ -2134,7 +2131,7 @@ function validateGrant(value: unknown): AgentConversationGrantV2 {
     !nullableUuid(grant.project_id) ||
     !safeInteger(grant.binding_revision, MAX_SAFE, false) ||
     !digest(grant.root_fingerprint_sha256) ||
-    !['file_write', 'git_commit'].includes(grant.tool_family as string) ||
+    !['file_write', 'git_commit', 'git_push'].includes(grant.tool_family as string) ||
     grant.registry_version !== 1 ||
     !boundedString(grant.policy_version, 128) ||
     !timestamp(grant.created_at)

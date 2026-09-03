@@ -228,6 +228,17 @@ export type ProjectGitTransportOptions = {
   httpsProxyUrl?: string | null;
 };
 
+export type ProjectPushOptions = ProjectGitTransportOptions & {
+  /** Publish HEAD under this new local branch name instead of the current one. */
+  branch?: string;
+};
+
+export type ProjectPushCancellation = {
+  schema_version: 1;
+  project_id: string;
+  cancelled: boolean;
+};
+
 type NativeLocalProjects = {
   list(): Promise<LocalProjectListing>;
   create(name: string): Promise<LocalProject>;
@@ -258,10 +269,10 @@ type NativeLocalProjects = {
   clearCredential(projectId: string): Promise<ProjectCredentialStatus>;
   push(
     projectId: string,
-    options: ProjectGitTransportOptions,
+    options: ProjectPushOptions,
   ): Promise<ProjectPushResult>;
   pushReceipts(projectId: string): Promise<ProjectPushReceipts>;
-  cancelPush(projectId: string): Promise<{ cancelled: boolean }>;
+  cancelPush(projectId: string): Promise<ProjectPushCancellation>;
   attachWorkspaceProject?(
     request: AttachWorkspaceProjectRequestV1,
   ): Promise<unknown>;
@@ -304,6 +315,7 @@ const projectV2ErrorCodes = new Set([
   'E_PROJECT_NON_FAST_FORWARD',
   'E_PROJECT_CREDENTIAL',
   'E_PROJECT_TIMEOUT',
+  'E_PROJECT_CANCELLED',
 ]);
 
 export class ProjectGitBridgeError extends Error {
@@ -1123,7 +1135,19 @@ function legacyProjectOriginURL(value: unknown): value is string | null {
   ) {
     return false;
   }
-  const match = /^https:\/\/([^/:]+)(?::(443))?(\/.*)$/u.exec(value);
+  // Mirrors the native remote policy: credential-free HTTPS on a DNS host,
+  // or plain HTTP only to a loopback / RFC 1918 / link-local / ULA literal
+  // (the LAN test remote), optionally with a port.
+  const httpsMatch = /^https:\/\/([^/:]+)(?::(443))?(\/.*)$/u.exec(value);
+  const privateLiteral =
+    '(?:localhost|127\\.\\d{1,3}\\.\\d{1,3}\\.\\d{1,3}|10\\.\\d{1,3}\\.\\d{1,3}\\.\\d{1,3}' +
+    '|192\\.168\\.\\d{1,3}\\.\\d{1,3}|172\\.(?:1[6-9]|2\\d|3[01])\\.\\d{1,3}\\.\\d{1,3}' +
+    '|169\\.254\\.\\d{1,3}\\.\\d{1,3}|\\[(?:::1|fe80:[0-9a-f:.%]*|f[cd][0-9a-f]{2}:[0-9a-f:]*)\\])';
+  const httpMatch = new RegExp(
+    `^http:\\/\\/(${privateLiteral})(?::(\\d{1,5}))?(\\/.*)$`,
+    'u',
+  ).exec(value);
+  const match = httpsMatch ?? httpMatch;
   if (match === null) return false;
   const host = match[1];
   const path = match[3];
@@ -1138,17 +1162,22 @@ function legacyProjectOriginURL(value: unknown): value is string | null {
   ) {
     return false;
   }
-  const labels = host.split('.');
-  if (
-    labels.length < 2 ||
-    labels.some(
-      label =>
-        label.length === 0 ||
-        label.length > 63 ||
-        !/^[a-z0-9](?:[a-z0-9-]*[a-z0-9])?$/u.test(label),
-    )
-  ) {
-    return false;
+  if (httpsMatch === null) {
+    const port = match[2] === undefined ? 80 : Number(match[2]);
+    if (!Number.isInteger(port) || port < 1 || port > 65535) return false;
+  } else {
+    const labels = host.split('.');
+    if (
+      labels.length < 2 ||
+      labels.some(
+        label =>
+          label.length === 0 ||
+          label.length > 63 ||
+          !/^[a-z0-9](?:[a-z0-9-]*[a-z0-9])?$/u.test(label),
+      )
+    ) {
+      return false;
+    }
   }
   return path.split('/').every(component => {
     if (component === '') return true;
@@ -1310,7 +1339,7 @@ export const LocalProjects = {
   presentCredentialPrompt: (projectId: string, locale: 'zh-CN' | 'en' = 'en') =>
     required().presentCredentialPrompt(projectId, locale),
   clearCredential: (projectId: string) => required().clearCredential(projectId),
-  push: (projectId: string, options: ProjectGitTransportOptions = {}) =>
+  push: (projectId: string, options: ProjectPushOptions = {}) =>
     required().push(projectId, options),
   pushReceipts: (projectId: string) => required().pushReceipts(projectId),
   cancelPush: (projectId: string) => required().cancelPush(projectId),

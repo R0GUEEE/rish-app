@@ -242,6 +242,8 @@ static NSString *LPV2StableErrorCode(NSError *error) {
         return @"E_PROJECT_UNAVAILABLE";
       case 3112:
         return @"E_WORKSPACE_CONFIRMATION";
+      case 3195:
+        return @"E_PROJECT_CANCELLED";
       case 3196:
         return @"E_PROJECT_NON_FAST_FORWARD";
       case 3197:
@@ -425,6 +427,36 @@ static BOOL LPIsSafeRepositoryPath(NSString *path) {
       || [component isEqualToString:@".."]
       || [component isEqualToString:@".git"]) return NO;
   }
+  return YES;
+}
+
+/// Optional `branch` push option: publish HEAD under a new local branch name.
+/// Absent or empty means "push the current branch".
+static BOOL LPValidatedPushBranchOption(id optionsValue, NSString **branchOut,
+                                        NSError **error) {
+  if (branchOut != nullptr) *branchOut = nil;
+  if (optionsValue == nil || optionsValue == NSNull.null) return YES;
+  NSDictionary *options = LPDictionary(optionsValue);
+  id value = options[@"branch"];
+  if (value == nil || value == NSNull.null) return YES;
+  NSString *branch = LPString(value);
+  if (branch != nil && branch.length == 0) return YES;
+  NSString *fullName = [@"refs/heads/" stringByAppendingString:branch ?: @""];
+  char normalized[2048] = {};
+  BOOL valid = branch != nil
+    && [branch lengthOfBytesUsingEncoding:NSUTF8StringEncoding] <= 1024
+    && !LPHasControlCharacter(branch) && ![branch containsString:@" "]
+    && ![branch containsString:@".."] && ![branch hasPrefix:@"-"]
+    && ![branch hasSuffix:@".lock"] && LPIsSafeRepositoryPath(branch)
+    && git_reference_normalize_name(normalized, sizeof(normalized),
+                                    fullName.UTF8String,
+                                    GIT_REFERENCE_FORMAT_NORMAL) == 0
+    && strcmp(normalized, fullName.UTF8String) == 0;
+  if (!valid) {
+    if (error != nil) *error = LPError(3004, @"Branch name is invalid");
+    return NO;
+  }
+  if (branchOut != nullptr) *branchOut = branch;
   return YES;
 }
 
@@ -783,8 +815,22 @@ static int LPPublicCloneCredentialCallback(git_credential **out,
   return GIT_EAUTH;
 }
 
+/// Native credential prompt result. `failureCode` nil means the user entered a
+/// username, token, and expiry window; "cancelled" and "presentation" are the
+/// only failure codes. Neither value is ever returned to React Native.
+typedef void (^LPCredentialPromptCompletion)(NSString *_Nullable username,
+                                             NSString *_Nullable token,
+                                             NSInteger expirySeconds,
+                                             NSString *_Nullable failureCode);
+/// Test seam replacing the UIAlertController interaction only; validation,
+/// origin re-check, Keychain storage, and the bridge result stay shared.
+typedef void (^LPCredentialPromptHook)(NSString *host, BOOL chinese,
+                                       BOOL plaintext,
+                                       LPCredentialPromptCompletion completion);
+
 @interface LocalProjectsModule : NSObject <RCTBridgeModule>
 @property(nonatomic, strong) dispatch_queue_t projectQueue;
+@property(nonatomic, copy, nullable) LPCredentialPromptHook credentialPromptHook;
 @property(nonatomic, strong) DSHLocalProjectAccess *projectAccess;
 @property(nonatomic, strong, nullable) DSHLocalWorkspaceAccess *workspaceAccessV2;
 @property(nonatomic, strong, nullable) DSHLocalProjectAccess *projectAccessV2;
@@ -846,9 +892,6 @@ static int LPPublicCloneCredentialCallback(git_credential **out,
                         gitURL:(NSURL *)gitURL
                  rootFingerprint:(NSString *)rootFingerprint
                            error:(NSError **)error;
-- (nullable NSDictionary *)credentialForReference:(NSString *)reference
-                                              host:(NSString *)host
-                                            status:(OSStatus *)statusOut;
 - (instancetype)initWithSupportURL:(nullable NSURL *)support
                        projectAccess:(DSHLocalProjectAccess *)projectAccess;
 @end
@@ -1066,81 +1109,21 @@ RCT_EXPORT_MODULE(LocalProjects)
   return updated;
 }
 
-// Credentials are Keychain items scoped to (workspace id, remote host) with
-// an absolute expiry. The token itself never crosses the bridge and is never
-// logged; it only reaches libgit2 through DSHGitPushSupport's callback.
-- (NSString *)workspaceIdForProjectId:(NSString *)projectId
-                                error:(NSError **)error {
-  NSString *workspaceId = [self.workspaceAccessV2
-      workspaceIdForLegacyProjectId:projectId error:error];
-  if (workspaceId == nil && error != nil && *error == nil) {
-    *error = LPError(3018, @"Project workspace scope is unavailable");
-  }
-  return workspaceId;
-}
-
-- (NSDictionary *)credentialForReference:(NSString *)reference
-                                    host:(NSString *)host
-                                  status:(OSStatus *)statusOut {
-  NSData *persistentReference = [[NSData alloc]
-      initWithBase64EncodedString:reference options:0];
-  if (persistentReference.length == 0 || host.length == 0) {
-    if (statusOut != nullptr) *statusOut = errSecItemNotFound;
+// Credentials are Keychain items scoped to (project id, remote host) with an
+// absolute expiry. The project id is the app's opaque per-workspace repository
+// identity and is present on every push path (legacy project API, V2 root,
+// agent root), so one provisioned token serves all of them. The token itself
+// never crosses the bridge and is never logged; it only reaches libgit2
+// through DSHGitPushSupport's callback.
+- (NSDictionary *)credentialStatusForScope:(NSString *)projectId
+                                      host:(NSString *)host
+                                     error:(NSError **)error {
+  NSError *lookupError = nil;
+  NSDictionary *credential = DSHGitCredentialForScope(projectId, host, &lookupError);
+  if (lookupError != nil) {
+    if (error != nil) *error = lookupError;
     return nil;
   }
-  NSMutableDictionary *query = [@{
-    (__bridge id)kSecClass : (__bridge id)kSecClassGenericPassword,
-    (__bridge id)kSecValuePersistentRef : persistentReference,
-    (__bridge id)kSecReturnAttributes : @YES,
-    (__bridge id)kSecReturnData : @YES,
-    (__bridge id)kSecMatchLimit : (__bridge id)kSecMatchLimitOne,
-  } mutableCopy];
-  CFTypeRef result = nullptr;
-  OSStatus status = SecItemCopyMatching((__bridge CFDictionaryRef)query,
-                                         &result);
-  if (statusOut != nullptr) *statusOut = status;
-  if (status != errSecSuccess || result == nullptr) {
-    if (result != nullptr) CFRelease(result);
-    return nil;
-  }
-  NSDictionary *item = CFBridgingRelease(result);
-  if (![item isKindOfClass:NSDictionary.class]) return nil;
-  NSString *service = LPString(item[(__bridge id)kSecAttrService]);
-  NSString *account = LPString(item[(__bridge id)kSecAttrAccount]);
-  NSData *data = [item[(__bridge id)kSecValueData] isKindOfClass:NSData.class]
-      ? item[(__bridge id)kSecValueData]
-      : nil;
-  // Accept both the legacy host-keyed items and the new workspace-scoped
-  // account form, but only for this exact host.
-  BOOL accountMatches = [account.lowercaseString isEqual:host.lowercaseString] ||
-      [account.lowercaseString hasSuffix:
-          [@"|host:" stringByAppendingString:host.lowercaseString]];
-  if (![service isEqual:DSHGitPushCredentialService] || !accountMatches ||
-      data == nil || data.length == 0 || data.length > 8192) {
-    return nil;
-  }
-  NSDictionary *payload = LPDictionary(
-      [NSJSONSerialization JSONObjectWithData:data options:0 error:nil]);
-  NSString *username = LPString(payload[@"username"]);
-  NSString *token = LPString(payload[@"token"]);
-  // Schema v2 items carry an absolute expiry; expired items are rejected here
-  // and deleted on the next scoped lookup.
-  NSNumber *expiresAt = [payload[@"expires_at"] isKindOfClass:NSNumber.class]
-      ? payload[@"expires_at"] : nil;
-  if ((username == nil || token == nil) ||
-      (expiresAt != nil &&
-       expiresAt.doubleValue <= NSDate.date.timeIntervalSince1970)) {
-    return nil;
-  }
-  return @{ @"username" : username, @"token" : token };
-}
-
-- (NSDictionary *)credentialStatusForScope:(NSString *)workspaceId
-                               projectId:(NSString *)projectId
-                                     host:(NSString *)host
-                                    error:(NSError **)error {
-  NSDictionary *credential = DSHGitCredentialForScope(workspaceId, host, error);
-  if (error != nil && *error != nil) return nil;
   NSMutableDictionary *status = [@{
     @"schema_version": @1,
     @"project_id": projectId,
@@ -1177,12 +1160,7 @@ RCT_EXPORT_MODULE(LocalProjects)
   NSString *origin = [self originURLForRepository:repository error:error];
   if (origin == nil) return nil;
   NSString *host = [NSURLComponents componentsWithString:origin].host.lowercaseString;
-  NSString *workspaceId = [self workspaceIdForProjectId:projectId error:error];
-  if (workspaceId == nil) return nil;
-  return [self credentialStatusForScope:workspaceId
-                              projectId:projectId
-                                   host:host
-                                  error:error];
+  return [self credentialStatusForScope:projectId host:host error:error];
 }
 
 - (NSURL *)createStagingDirectoryAtRoot:(NSURL *)root
@@ -3459,126 +3437,155 @@ RCT_REMAP_METHOD(presentCredentialPrompt,
       reject(@"project", error.localizedDescription, nil);
       return;
     }
-    git_repository *repository = lease.repository;
-    NSString *origin = [self originURLForRepository:repository error:&error];
-    NSString *workspaceId = [self workspaceIdForProjectId:projectId error:&error];
+    NSString *origin = [self originURLForRepository:lease.repository error:&error];
     lease = nil;
     if (origin == nil) {
       reject(@"remote", error.localizedDescription, nil);
       return;
     }
-    if (workspaceId == nil) {
-      reject(@"workspace", error.localizedDescription, nil);
-      return;
-    }
     NSString *host = [NSURLComponents componentsWithString:origin].host.lowercaseString;
+    BOOL plaintext = DSHGitRemoteURLIsPlaintext([NSURL URLWithString:origin]);
     BOOL chinese = [locale isEqualToString:@"zh-CN"];
-    dispatch_async(dispatch_get_main_queue(), ^{
-      UIViewController *presenter = RCTPresentedViewController();
-      if (presenter == nil || [presenter isKindOfClass:UIAlertController.class]) {
-        reject(@"presentation", @"Git credential prompt cannot be presented right now", nil);
+    // The username, token, and expiry choice travel from the native prompt
+    // into this completion only; the token is written to the Keychain and the
+    // bridge receives the credential status, never the secret.
+    LPCredentialPromptCompletion completion = ^(NSString *username,
+                                                NSString *token,
+                                                NSInteger expirySeconds,
+                                                NSString *failureCode) {
+      if (failureCode != nil || username == nil || token == nil) {
+        NSString *code = failureCode ?: @"cancelled";
+        reject(code, [code isEqualToString:@"presentation"]
+            ? @"Git credential prompt cannot be presented right now"
+            : @"Git credential prompt was cancelled", nil);
         return;
       }
-      NSString *title = chinese ? @"Git HTTPS 凭据" : @"Git HTTPS credential";
-      NSString *message = chinese
-        ? [NSString stringWithFormat:@"用于 %@ 的推送。PAT 仅保存在本机 Keychain，永不传回 React Native。接下来选择保存时长（1 小时 / 24 小时 / 7 天）。", host]
-        : [NSString stringWithFormat:@"Used to push to %@. The PAT stays in this device's Keychain and is never returned to React Native. Next, choose how long to keep it (1 hour / 24 hours / 7 days).", host];
-      UIAlertController *alert = [UIAlertController alertControllerWithTitle:title
-        message:message preferredStyle:UIAlertControllerStyleAlert];
-      [alert addTextFieldWithConfigurationHandler:^(UITextField *field) {
-        field.placeholder = chinese ? @"用户名" : @"Username";
-        field.autocorrectionType = UITextAutocorrectionTypeNo;
-        field.autocapitalizationType = UITextAutocapitalizationTypeNone;
-        field.textContentType = UITextContentTypeUsername;
-      }];
-      [alert addTextFieldWithConfigurationHandler:^(UITextField *field) {
-        field.placeholder = @"Personal access token";
-        field.secureTextEntry = YES;
-        field.autocorrectionType = UITextAutocorrectionTypeNo;
-        field.autocapitalizationType = UITextAutocapitalizationTypeNone;
-        field.textContentType = UITextContentTypePassword;
-      }];
-      [alert addAction:[UIAlertAction actionWithTitle:(chinese ? @"取消" : @"Cancel")
-        style:UIAlertActionStyleCancel handler:^(__unused UIAlertAction *action) {
-          for (UITextField *field in alert.textFields) field.text = @"";
-          reject(@"cancelled", @"Git credential prompt was cancelled", nil);
-        }]];
-      [alert addAction:[UIAlertAction actionWithTitle:(chinese ? @"保存" : @"Save")
-        style:UIAlertActionStyleDefault handler:^(__unused UIAlertAction *action) {
-          NSString *username = alert.textFields.firstObject.text ?: @"";
-          NSString *token = alert.textFields.lastObject.text ?: @"";
-          for (UITextField *field in alert.textFields) field.text = @"";
-          // The expiry is an explicit user choice in the same native prompt
-          // flow: 1 hour, 24 hours, or 7 days. Cancel clears the fields and
-          // abandons the whole provisioning.
-          UIAlertController *expiry = [UIAlertController alertControllerWithTitle:
-              (chinese ? @"令牌保存时长" : @"How long should this token stay stored?")
-              message:(chinese ? @"到期后推送会要求重新输入。"
-                               : @"Push will ask for a new token once it expires.")
-              preferredStyle:UIAlertControllerStyleActionSheet];
-          void (^finish)(NSInteger) = ^(NSInteger expirySeconds) {
-            dispatch_async(self.projectQueue, ^{
-              NSError *storeError = nil;
-              __attribute__((objc_precise_lifetime)) DSHLocalProjectLease *currentLease = [self leaseRepositoryForId:projectId
-                                                                         mode:DSHLocalProjectAccessModeRead
-                                                                     metadata:nil
-                                                                        error:&storeError];
-              NSString *currentOrigin = currentLease == nil ? nil
-                : [self originURLForRepository:currentLease.repository error:&storeError];
-              NSString *currentHost = [NSURLComponents
-                componentsWithString:currentOrigin].host.lowercaseString;
-              if (currentOrigin == nil || ![currentHost isEqualToString:host]) {
-                currentLease = nil;
-                reject(@"remote", @"Origin remote changed before credential save", nil);
-                return;
-              }
-              if (!DSHGitStoreCredentialForScope(workspaceId, host, username, token,
-                                                  expirySeconds, &storeError)) {
-                currentLease = nil;
-                reject(@"credential", storeError.localizedDescription, nil);
-                return;
-              }
-              currentLease = nil;
-              resolve(@{
-                @"schema_version": @1,
-                @"project_id": projectId,
-                @"host": host,
-                @"configured": @YES,
-                @"expiry_seconds": @(expirySeconds),
-              });
-            });
-          };
-          [expiry addAction:[UIAlertAction actionWithTitle:(chinese ? @"1 小时" : @"1 hour")
-            style:UIAlertActionStyleDefault handler:^(__unused UIAlertAction *ignored) {
-              finish(DSHGitCredentialExpiryOneHour);
-            }]];
-          [expiry addAction:[UIAlertAction actionWithTitle:(chinese ? @"24 小时" : @"24 hours")
-            style:UIAlertActionStyleDefault handler:^(__unused UIAlertAction *ignored) {
-              finish(DSHGitCredentialExpiryOneDay);
-            }]];
-          [expiry addAction:[UIAlertAction actionWithTitle:(chinese ? @"7 天" : @"7 days")
-            style:UIAlertActionStyleDefault handler:^(__unused UIAlertAction *ignored) {
-              finish(DSHGitCredentialExpirySevenDays);
-            }]];
-          [expiry addAction:[UIAlertAction actionWithTitle:(chinese ? @"取消" : @"Cancel")
-            style:UIAlertActionStyleCancel handler:^(__unused UIAlertAction *ignored) {
-              reject(@"cancelled", @"Git credential prompt was cancelled", nil);
-            }]];
-          // Let the credential alert finish dismissing before presenting the
-          // expiry sheet from the same presenter.
-          dispatch_after(dispatch_time(DISPATCH_TIME_NOW, 350 * NSEC_PER_MSEC),
-              dispatch_get_main_queue(), ^{
-            UIViewController *sheetPresenter = RCTPresentedViewController();
-            if (sheetPresenter == nil) {
-              reject(@"presentation", @"Git credential prompt cannot be presented right now", nil);
-              return;
-            }
-            [sheetPresenter presentViewController:expiry animated:YES completion:nil];
-          });
-        }]];
-      [presenter presentViewController:alert animated:YES completion:nil];
+      dispatch_async(self.projectQueue, ^{
+        NSError *storeError = nil;
+        __attribute__((objc_precise_lifetime)) DSHLocalProjectLease *currentLease = [self leaseRepositoryForId:projectId
+                                                                   mode:DSHLocalProjectAccessModeRead
+                                                               metadata:nil
+                                                                  error:&storeError];
+        NSString *currentOrigin = currentLease == nil ? nil
+          : [self originURLForRepository:currentLease.repository error:&storeError];
+        NSString *currentHost = [NSURLComponents
+          componentsWithString:currentOrigin].host.lowercaseString;
+        if (currentOrigin == nil || ![currentHost isEqualToString:host]) {
+          currentLease = nil;
+          reject(@"remote", @"Origin remote changed before credential save", nil);
+          return;
+        }
+        if (!DSHGitStoreCredentialForScope(projectId, host, username, token,
+                                            expirySeconds, &storeError)) {
+          currentLease = nil;
+          reject(@"credential", storeError.localizedDescription, nil);
+          return;
+        }
+        NSDictionary *status = [self credentialStatusForScope:projectId
+                                                         host:host
+                                                        error:&storeError];
+        currentLease = nil;
+        if (status == nil) {
+          reject(@"keychain", storeError.localizedDescription, nil);
+          return;
+        }
+        resolve(status);
+      });
+    };
+    LPCredentialPromptHook hook = self.credentialPromptHook;
+    if (hook != nil) {
+      hook(host, chinese, plaintext, completion);
+      return;
+    }
+    dispatch_async(dispatch_get_main_queue(), ^{
+      [self presentCredentialAlertForHost:host
+                                  chinese:chinese
+                                plaintext:plaintext
+                               completion:completion];
     });
   });
+}
+
+/// The native (non React Native) secure prompt: a username/token alert
+/// followed by an explicit expiry choice. Text fields are cleared as soon as
+/// their values are captured.
+- (void)presentCredentialAlertForHost:(NSString *)host
+                              chinese:(BOOL)chinese
+                            plaintext:(BOOL)plaintext
+                           completion:(LPCredentialPromptCompletion)completion {
+  UIViewController *presenter = RCTPresentedViewController();
+  if (presenter == nil || [presenter isKindOfClass:UIAlertController.class]) {
+    completion(nil, nil, 0, @"presentation");
+    return;
+  }
+  NSString *title = chinese ? @"Git HTTPS 凭据" : @"Git HTTPS credential";
+  NSString *transport = plaintext
+    ? (chinese ? @"该远程是局域网明文 HTTP 测试地址。" : @" This remote is a plain-HTTP address on the local network.")
+    : @"";
+  NSString *message = chinese
+    ? [NSString stringWithFormat:@"用于 %@ 的推送。PAT 仅保存在本机 Keychain，永不传回 React Native。%@接下来选择保存时长（1 小时 / 24 小时 / 7 天）。", host, transport]
+    : [NSString stringWithFormat:@"Used to push to %@. The PAT stays in this device's Keychain and is never returned to React Native.%@ Next, choose how long to keep it (1 hour / 24 hours / 7 days).", host, transport];
+  UIAlertController *alert = [UIAlertController alertControllerWithTitle:title
+    message:message preferredStyle:UIAlertControllerStyleAlert];
+  [alert addTextFieldWithConfigurationHandler:^(UITextField *field) {
+    field.placeholder = chinese ? @"用户名" : @"Username";
+    field.autocorrectionType = UITextAutocorrectionTypeNo;
+    field.autocapitalizationType = UITextAutocapitalizationTypeNone;
+    field.textContentType = UITextContentTypeUsername;
+  }];
+  [alert addTextFieldWithConfigurationHandler:^(UITextField *field) {
+    field.placeholder = @"Personal access token";
+    field.secureTextEntry = YES;
+    field.autocorrectionType = UITextAutocorrectionTypeNo;
+    field.autocapitalizationType = UITextAutocapitalizationTypeNone;
+    field.textContentType = UITextContentTypePassword;
+  }];
+  [alert addAction:[UIAlertAction actionWithTitle:(chinese ? @"取消" : @"Cancel")
+    style:UIAlertActionStyleCancel handler:^(__unused UIAlertAction *action) {
+      for (UITextField *field in alert.textFields) field.text = @"";
+      completion(nil, nil, 0, @"cancelled");
+    }]];
+  [alert addAction:[UIAlertAction actionWithTitle:(chinese ? @"保存" : @"Save")
+    style:UIAlertActionStyleDefault handler:^(__unused UIAlertAction *action) {
+      NSString *username = alert.textFields.firstObject.text ?: @"";
+      NSString *token = alert.textFields.lastObject.text ?: @"";
+      for (UITextField *field in alert.textFields) field.text = @"";
+      // The expiry is an explicit user choice in the same native flow.
+      // Cancelling here abandons the whole provisioning.
+      UIAlertController *expiry = [UIAlertController alertControllerWithTitle:
+          (chinese ? @"令牌保存时长" : @"How long should this token stay stored?")
+          message:(chinese ? @"到期后推送会要求重新输入。"
+                           : @"Push will ask for a new token once it expires.")
+          preferredStyle:UIAlertControllerStyleAlert];
+      [expiry addAction:[UIAlertAction actionWithTitle:(chinese ? @"1 小时" : @"1 hour")
+        style:UIAlertActionStyleDefault handler:^(__unused UIAlertAction *ignored) {
+          completion(username, token, DSHGitCredentialExpiryOneHour, nil);
+        }]];
+      [expiry addAction:[UIAlertAction actionWithTitle:(chinese ? @"24 小时" : @"24 hours")
+        style:UIAlertActionStyleDefault handler:^(__unused UIAlertAction *ignored) {
+          completion(username, token, DSHGitCredentialExpiryOneDay, nil);
+        }]];
+      [expiry addAction:[UIAlertAction actionWithTitle:(chinese ? @"7 天" : @"7 days")
+        style:UIAlertActionStyleDefault handler:^(__unused UIAlertAction *ignored) {
+          completion(username, token, DSHGitCredentialExpirySevenDays, nil);
+        }]];
+      [expiry addAction:[UIAlertAction actionWithTitle:(chinese ? @"取消" : @"Cancel")
+        style:UIAlertActionStyleCancel handler:^(__unused UIAlertAction *ignored) {
+          completion(nil, nil, 0, @"cancelled");
+        }]];
+      // Let the credential alert finish dismissing before presenting the
+      // expiry choice from the same presenter.
+      dispatch_after(dispatch_time(DISPATCH_TIME_NOW, 350 * NSEC_PER_MSEC),
+          dispatch_get_main_queue(), ^{
+        UIViewController *nextPresenter = RCTPresentedViewController();
+        if (nextPresenter == nil) {
+          completion(nil, nil, 0, @"presentation");
+          return;
+        }
+        [nextPresenter presentViewController:expiry animated:YES completion:nil];
+      });
+    }]];
+  [presenter presentViewController:alert animated:YES completion:nil];
 }
 
 RCT_REMAP_METHOD(clearCredential,
@@ -3604,11 +3611,9 @@ RCT_REMAP_METHOD(clearCredential,
       return;
     }
     NSString *host = [NSURLComponents componentsWithString:origin].host.lowercaseString;
-    NSString *workspaceId = [self workspaceIdForProjectId:projectId error:&error];
-    if (workspaceId == nil ||
-        !DSHGitDeleteCredentialForScope(workspaceId, host, &error)) {
+    if (!DSHGitDeleteCredentialForScope(projectId, host, &error)) {
       lease = nil;
-      reject(@"workspace", error.localizedDescription, nil);
+      reject(@"keychain", error.localizedDescription, nil);
       return;
     }
     // Older builds stored a host-only item; remove it too so clearing is total.
@@ -3632,6 +3637,10 @@ RCT_REMAP_METHOD(push,
     NSError *error = nil;
     __attribute__((objc_precise_lifetime)) NSString *proxyURL =
       LPValidatedHTTPSProxyURL(optionsValue, &error);
+    NSString *requestedBranch = nil;
+    if (error == nil) {
+      (void)LPValidatedPushBranchOption(optionsValue, &requestedBranch, &error);
+    }
     if (error != nil) {
       reject(@"validation", error.localizedDescription, nil);
       return;
@@ -3648,19 +3657,18 @@ RCT_REMAP_METHOD(push,
     }
     git_repository *repository = lease.repository;
     NSString *origin = [self originURLForRepository:repository error:&error];
-    NSString *host = origin == nil ? nil
-      : [NSURLComponents componentsWithString:origin].host.lowercaseString;
-    NSString *workspaceId = origin == nil ? nil
-      : [self workspaceIdForProjectId:projectId error:&error];
-    if (origin == nil || workspaceId == nil) {
+    if (origin == nil) {
       lease = nil;
       reject(@"remote", error.localizedDescription ?: @"Origin remote is unavailable or unsafe", nil);
       return;
     }
-    NSDictionary *credential = DSHGitCredentialForScope(workspaceId, host, &error);
+    NSString *host = [NSURLComponents componentsWithString:origin].host.lowercaseString;
+    NSError *credentialError = nil;
+    NSDictionary *credential = DSHGitCredentialForScope(projectId, host, &credentialError);
     if (credential == nil) {
       lease = nil;
-      reject(@"credential", @"Git credential is not configured for this host", nil);
+      reject(@"credential", credentialError.localizedDescription
+        ?: @"Git credential is not configured for this host", nil);
       return;
     }
     git_reference *head = nullptr;
@@ -3670,24 +3678,42 @@ RCT_REMAP_METHOD(push,
     BOOL localBranch = fullRef != nullptr && headTarget != nullptr
       && git_reference_is_branch(head) && strncmp(fullRef, "refs/heads/", 11) == 0;
     NSString *branch = localBranch ? [NSString stringWithUTF8String:fullRef + 11] : nil;
+    NSString *oid = LPOidString(headTarget);
     if (!localBranch || branch.length == 0 || !LPIsSafeRepositoryPath(branch)
-      || [branch containsString:@".."] || [branch containsString:@" "]) {
+      || [branch containsString:@".."] || [branch containsString:@" "] || oid == nil) {
       if (head != nullptr) git_reference_free(head);
+      lease = nil;
       reject(@"git", @"A local branch with at least one commit is required", nil);
       return;
     }
-    NSString *fullReference = [NSString stringWithUTF8String:fullRef];
-    NSString *oid = LPOidString(headTarget);
-    if ([fullReference hasPrefix:@"+"] || oid == nil) {
+    if (requestedBranch != nil && ![requestedBranch isEqualToString:branch]) {
+      // Publish HEAD under a new local branch and switch to it. Only a new
+      // reference is created; the commit graph and worktree are untouched.
+      git_oid target = *headTarget;
       git_reference_free(head);
-      reject(@"git", @"Force push is not supported", nil);
-      return;
+      head = nullptr;
+      NSString *created = [self createLocalBranchNamed:requestedBranch
+                                                 atOID:&target
+                                            repository:repository
+                                                 error:&error];
+      if (created == nil ||
+          git_reference_lookup(&head, repository, created.UTF8String) != 0) {
+        if (head != nullptr) git_reference_free(head);
+        lease = nil;
+        reject(error.code == 3030 ? @"conflict" : @"git",
+               error.localizedDescription ?: @"Branch cannot be created", nil);
+        return;
+      }
+      fullRef = git_reference_name(head);
+      headTarget = git_reference_target(head);
+      branch = requestedBranch;
     }
+    NSString *fullReference = [NSString stringWithUTF8String:fullRef];
     DSHGitPushCancelToken *cancelToken = [[DSHGitPushCancelToken alloc] init];
     @synchronized (self) {
       self.pushCancelTokens[projectId] = cancelToken;
     }
-    int projectDescriptor = lease.projectDescriptor;
+    int gitDescriptor = lease.gitDescriptor;
     __attribute__((objc_precise_lifetime)) DSHGitPushRequest *pushRequest =
         [[DSHGitPushRequest alloc] init];
     pushRequest.repository = repository;
@@ -3695,30 +3721,22 @@ RCT_REMAP_METHOD(push,
     pushRequest.remoteURL = origin;
     pushRequest.host = host;
     pushRequest.fullReference = fullReference;
-    pushRequest.branch = branch;
     pushRequest.localOID = oid;
     pushRequest.username = credential[@"username"];
     pushRequest.token = credential[@"token"];
     pushRequest.proxyURL = proxyURL;
     pushRequest.cancelToken = cancelToken;
     pushRequest.timeout = LPPushTimeoutSeconds;
-    // Keep the lease alive until the bounded network phase truly settles; the
-    // completion also records the receipt even when the caller already
-    // observed a timeout or cancellation.
+    // Keep the lease alive until the network phase truly settles; the
+    // completion records the receipt even when the caller already observed a
+    // timeout or cancellation, so a late success is still accounted for.
     __attribute__((objc_precise_lifetime)) DSHLocalProjectLease *heldLease = lease;
+    NSString *receiptBranch = branch;
     pushRequest.completion = ^(DSHGitPushOutcome outcome, NSString *remoteOID) {
       (void)heldLease;
       if (outcome == DSHGitPushOutcomeSuccess && remoteOID.length > 0) {
-        NSDictionary *receipt = @{
-          @"schema_version" : @1,
-          @"remote" : LPRemoteName,
-          @"host" : host,
-          @"branch" : branch,
-          @"local_oid" : oid,
-          @"remote_oid" : remoteOID,
-          @"pushed_at" : LPNow(),
-        };
-        (void)DSHGitPushRecordReceipt(projectDescriptor, projectId, receipt, nil);
+        (void)DSHGitPushRecordReceipt(gitDescriptor, projectId,
+            DSHGitPushReceipt(host, receiptBranch, oid, remoteOID, LPNow()), nil);
       }
     };
     DSHGitPushResult *pushResult = DSHGitPushRun(pushRequest);
@@ -3741,22 +3759,18 @@ RCT_REMAP_METHOD(push,
                   originURL:origin
                       lease:lease
                       error:nil];
+      NSDictionary *receipt = DSHGitPushLoadReceipts(gitDescriptor, projectId, nil).lastObject;
+      if (![receipt[@"local_oid"] isEqual:oid] || ![receipt[@"branch"] isEqual:branch]) {
+        receipt = DSHGitPushReceipt(host, branch, oid, pushResult.remoteOID ?: oid, LPNow());
+      }
       resolve(@{
         @"schema_version": @1,
         @"project_id": projectId,
         @"remote": LPRemoteName,
         @"branch": branch,
         @"oid": oid,
-        @"pushed_at": LPNow(),
-        @"receipt": @{
-          @"schema_version": @1,
-          @"remote": LPRemoteName,
-          @"host": host,
-          @"branch": branch,
-          @"local_oid": oid,
-          @"remote_oid": pushResult.remoteOID ?: oid,
-          @"pushed_at": LPNow(),
-        },
+        @"pushed_at": receipt[@"pushed_at"],
+        @"receipt": receipt,
       });
       return;
     }
@@ -3766,6 +3780,9 @@ RCT_REMAP_METHOD(push,
         reject(@"non-fast-forward",
           @"Remote rejected the push: the branch is not fast-forward. "
           "Pull the remote changes first or push a different branch.", nil);
+        return;
+      case DSHGitPushOutcomeRejected:
+        reject(@"rejected", @"Remote rejected the push", nil);
         return;
       case DSHGitPushOutcomeAuthFailure:
         reject(@"credential", @"Git credential was rejected by the remote", nil);
@@ -3781,6 +3798,42 @@ RCT_REMAP_METHOD(push,
         return;
     }
   });
+}
+
+/// Creates `refs/heads/<name>` at `target` (or accepts an existing branch
+/// already at `target`) and points HEAD at it without touching the worktree.
+- (NSString *)createLocalBranchNamed:(NSString *)name
+                               atOID:(const git_oid *)target
+                          repository:(git_repository *)repository
+                               error:(NSError **)error {
+  NSString *fullName = [@"refs/heads/" stringByAppendingString:name];
+  git_reference *existing = nullptr;
+  int lookup = git_reference_lookup(&existing, repository, fullName.UTF8String);
+  if (lookup == 0) {
+    const git_oid *existingTarget = git_reference_target(existing);
+    BOOL same = existingTarget != nullptr && git_oid_equal(existingTarget, target);
+    git_reference_free(existing);
+    if (!same) {
+      if (error != nil) *error = LPError(3030, @"A local branch with that name already exists");
+      return nil;
+    }
+  } else if (lookup == GIT_ENOTFOUND) {
+    git_reference *created = nullptr;
+    if (git_reference_create(&created, repository, fullName.UTF8String, target, 0,
+                             "rish push: new branch") != 0) {
+      if (error != nil) *error = LPError(3031, @"Branch cannot be created");
+      return nil;
+    }
+    git_reference_free(created);
+  } else {
+    if (error != nil) *error = LPError(3031, @"Branch cannot be created");
+    return nil;
+  }
+  if (git_repository_set_head(repository, fullName.UTF8String) != 0) {
+    if (error != nil) *error = LPError(3031, @"Branch cannot be created");
+    return nil;
+  }
+  return fullName;
 }
 
 RCT_REMAP_METHOD(cancelPush,
@@ -3822,9 +3875,9 @@ RCT_REMAP_METHOD(pushReceipts,
       return;
     }
     NSArray<NSDictionary *> *receipts =
-        DSHGitPushLoadReceipts(lease.projectDescriptor, projectId, &error);
-    if (receipts == nil && error != nil) {
-      reject(@"storage", error.localizedDescription, nil);
+        DSHGitPushLoadReceipts(lease.gitDescriptor, projectId, &error);
+    if (receipts == nil) {
+      reject(@"storage", error.localizedDescription ?: @"Receipt storage is unavailable", nil);
       return;
     }
     // Sanitize before crossing the bridge: hosts, branch names, OIDs, and
@@ -4452,17 +4505,12 @@ RCT_REMAP_METHOD(pushV2,
     NSString *origin = [self originURLForRepository:repository error:&error];
     NSString *host = origin == nil ? nil
       : [NSURLComponents componentsWithString:origin].host.lowercaseString;
-    // Primary: the workspace-scoped Keychain credential provisioned by the
-    // native prompt. The opaque persistent reference remains an accepted
-    // legacy fallback for items written by older builds.
+    // V2 resolves the credential from the same (project id, host) Keychain
+    // scope the native prompt writes. The opaque credential_reference field
+    // is validated for shape only; it never selects a different item.
+    NSString *projectId = root[@"project_id"];
     NSDictionary *credential = origin == nil ? nil
-        : DSHGitCredentialForScope(root[@"workspace_id"], host, &error);
-    if (credential == nil && origin != nil) {
-      OSStatus keychainStatus = errSecSuccess;
-      credential = [self credentialForReference:credentialReference
-                                           host:host
-                                         status:&keychainStatus];
-    }
+        : DSHGitCredentialForScope(projectId, host, nil);
     if (credential == nil) {
       if (head != nullptr) git_reference_free(head);
       LPV2Reject(reject, LPError(3111, @"Git credential is unavailable"));
@@ -4472,9 +4520,9 @@ RCT_REMAP_METHOD(pushV2,
     NSString *oid = LPOidString(target);
     DSHGitPushCancelToken *cancelToken = [[DSHGitPushCancelToken alloc] init];
     @synchronized (self) {
-      self.pushCancelTokens[root[@"project_id"]] = cancelToken;
+      self.pushCancelTokens[projectId] = cancelToken;
     }
-    int projectDescriptor = lease.projectDescriptor;
+    int gitDescriptor = lease.gitDescriptor;
     __attribute__((objc_precise_lifetime)) DSHLocalProjectLease *heldLease = lease;
     __attribute__((objc_precise_lifetime)) DSHGitPushRequest *pushRequest =
         [[DSHGitPushRequest alloc] init];
@@ -4483,7 +4531,6 @@ RCT_REMAP_METHOD(pushV2,
     pushRequest.remoteURL = origin;
     pushRequest.host = host;
     pushRequest.fullReference = fullReference;
-    pushRequest.branch = branch;
     pushRequest.localOID = oid;
     pushRequest.username = credential[@"username"];
     pushRequest.token = credential[@"token"];
@@ -4493,23 +4540,14 @@ RCT_REMAP_METHOD(pushV2,
     pushRequest.completion = ^(DSHGitPushOutcome outcome, NSString *remoteOID) {
       (void)heldLease;
       if (outcome == DSHGitPushOutcomeSuccess && remoteOID.length > 0) {
-        NSDictionary *receipt = @{
-          @"schema_version" : @1,
-          @"remote" : @"origin",
-          @"host" : host,
-          @"branch" : branch,
-          @"local_oid" : oid,
-          @"remote_oid" : remoteOID,
-          @"pushed_at" : LPNow(),
-        };
-        (void)DSHGitPushRecordReceipt(projectDescriptor, root[@"project_id"],
-                                      receipt, nil);
+        (void)DSHGitPushRecordReceipt(gitDescriptor, projectId,
+            DSHGitPushReceipt(host, branch, oid, remoteOID, LPNow()), nil);
       }
     };
     DSHGitPushResult *pushResult = DSHGitPushRun(pushRequest);
     @synchronized (self) {
-      if (self.pushCancelTokens[root[@"project_id"]] == cancelToken) {
-        [self.pushCancelTokens removeObjectForKey:root[@"project_id"]];
+      if (self.pushCancelTokens[projectId] == cancelToken) {
+        [self.pushCancelTokens removeObjectForKey:projectId];
       }
     }
     if (head != nullptr) git_reference_free(head);
@@ -4526,6 +4564,9 @@ RCT_REMAP_METHOD(pushV2,
           return;
         case DSHGitPushOutcomeTimedOut:
           LPV2Reject(reject, LPError(3198, @"Push timed out"));
+          return;
+        case DSHGitPushOutcomeCancelled:
+          LPV2Reject(reject, LPError(3195, @"Push was cancelled"));
           return;
         default:
           LPV2Reject(reject, error ?: LPError(3199, @"Git push failed"));

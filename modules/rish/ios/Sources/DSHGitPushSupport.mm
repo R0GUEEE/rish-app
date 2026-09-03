@@ -12,6 +12,17 @@
 #include <string.h>
 
 NSString *const DSHGitPushCredentialService = @"dev.zseven.rish.git.https";
+NSString *const DSHGitPushReceiptFilename = @"rish-push-receipts.json";
+
+static NSString *const DSHGitPushReceiptTempFilename =
+    @"rish-push-receipts.json.tmp";
+static NSUInteger const DSHGitPushMaxReceipts = 25;
+static NSUInteger const DSHGitPushMaxReceiptJournalBytes = 262144;
+static NSTimeInterval const DSHGitPushDefaultTimeout = 60.0;
+/// libgit2 socket bounds: a stalled connect or a silent server cannot hold
+/// the worker past these, independent of the caller-side deadline.
+static int const DSHGitPushConnectTimeoutMilliseconds = 20000;
+static int const DSHGitPushServerTimeoutMilliseconds = 60000;
 
 static NSError *DSHGitPushSupportError(NSInteger code, NSString *message) {
   return [NSError errorWithDomain:@"DSHGitPushSupport" code:code
@@ -28,12 +39,32 @@ static BOOL DSHGitPushHasControlCharacter(NSString *value) {
   return NO;
 }
 
+static NSString *DSHGitPushStripBrackets(NSString *host) {
+  if ([host hasPrefix:@"["] && [host hasSuffix:@"]"] && host.length > 2) {
+    return [host substringWithRange:NSMakeRange(1, host.length - 2)];
+  }
+  return host;
+}
+
+static BOOL DSHGitPushIsIPLiteral(NSString *host) {
+  const char *bytes = DSHGitPushStripBrackets(host).UTF8String;
+  if (bytes == nullptr) return NO;
+  struct in_addr ipv4 = {};
+  struct in6_addr ipv6 = {};
+  return inet_pton(AF_INET, bytes, &ipv4) == 1
+    || inet_pton(AF_INET6, bytes, &ipv6) == 1;
+}
+
 static BOOL DSHGitPushIsPublicDNSName(NSString *host) {
-  if (host.length == 0 || host.length > 253 || DSHGitPushHasControlCharacter(host)) return NO;
+  if (host.length == 0 || host.length > 253 || [host hasSuffix:@"."]
+    || DSHGitPushHasControlCharacter(host)
+    || [host isEqualToString:@"localhost"]
+    || [host hasSuffix:@".local"] || [host hasSuffix:@".internal"]
+    || DSHGitPushIsIPLiteral(host)) return NO;
   NSArray<NSString *> *labels = [host componentsSeparatedByString:@"."];
   if (labels.count < 2) return NO;
   NSCharacterSet *allowed = [NSCharacterSet characterSetWithCharactersInString:
-    @"abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-"];
+    @"abcdefghijklmnopqrstuvwxyz0123456789-"];
   for (NSString *label in labels) {
     if (label.length == 0 || label.length > 63 || [label hasPrefix:@"-"]
       || [label hasSuffix:@"-"]
@@ -42,11 +73,11 @@ static BOOL DSHGitPushIsPublicDNSName(NSString *host) {
   return YES;
 }
 
-/// Loopback, RFC1918, link-local, and site-local literals plus "localhost".
-/// These are the only hosts a plain http:// test remote may use.
+/// Loopback, RFC 1918, link-local, and ULA literals plus "localhost". These
+/// are the only hosts a plain http:// test remote may use.
 static BOOL DSHGitPushIsPrivateLiteral(NSString *host) {
   if ([host isEqualToString:@"localhost"]) return YES;
-  const char *bytes = host.UTF8String;
+  const char *bytes = DSHGitPushStripBrackets(host).UTF8String;
   if (bytes == nullptr) return NO;
   struct in_addr v4 = {};
   if (inet_pton(AF_INET, bytes, &v4) == 1) {
@@ -79,12 +110,11 @@ NSURL *DSHGitValidatedRemoteURL(id value, NSError **error) {
   NSString *scheme = components.scheme.lowercaseString;
   NSString *host = components.host.lowercaseString;
   NSString *path = components.path;
-  BOOL validPort = components.port == nil
-      ? YES : (components.port.integerValue >= 1 && components.port.integerValue <= 65535);
   BOOL httpsValid = [scheme isEqualToString:@"https"] && DSHGitPushIsPublicDNSName(host)
       && (components.port == nil || components.port.integerValue == 443);
   BOOL httpValid = [scheme isEqualToString:@"http"] && DSHGitPushIsPrivateLiteral(host)
-      && validPort;
+      && (components.port == nil
+          || (components.port.integerValue >= 1 && components.port.integerValue <= 65535));
   BOOL valid = (httpsValid || httpValid) && components.user == nil
     && components.password == nil && components.query == nil
     && components.fragment == nil && path.length > 1 && path.length <= 2048
@@ -99,6 +129,10 @@ NSURL *DSHGitValidatedRemoteURL(id value, NSError **error) {
   components.scheme = scheme;
   components.host = host;
   return components.URL;
+}
+
+BOOL DSHGitRemoteURLIsPlaintext(NSURL *url) {
+  return [url.scheme.lowercaseString isEqualToString:@"http"];
 }
 
 // MARK: - Keychain credential store
@@ -118,11 +152,20 @@ static BOOL DSHGitPushValidToken(NSString *token) {
       == NSNotFound;
 }
 
-NSString *DSHGitCredentialAccountForScope(NSString *workspaceId, NSString *host) {
-  return [NSString stringWithFormat:@"workspace:%@|host:%@", workspaceId,
+BOOL DSHGitCredentialExpiryIsValid(NSInteger expirySeconds) {
+  return expirySeconds == DSHGitCredentialExpiryOneHour ||
+      expirySeconds == DSHGitCredentialExpiryOneDay ||
+      expirySeconds == DSHGitCredentialExpirySevenDays;
+}
+
+NSString *DSHGitCredentialAccountForScope(NSString *scopeId, NSString *host) {
+  return [NSString stringWithFormat:@"project:%@|host:%@", scopeId.lowercaseString,
       host.lowercaseString];
 }
 
+/// Items are generic passwords in the app's default Keychain access group
+/// (the first `keychain-access-groups` entitlement), device-only and never
+/// synchronised, matching the DEEPSEEK_API_KEY convention.
 static NSMutableDictionary *DSHGitPushKeychainQuery(NSString *account) {
   return [@{
     (__bridge id)kSecClass : (__bridge id)kSecClassGenericPassword,
@@ -132,11 +175,11 @@ static NSMutableDictionary *DSHGitPushKeychainQuery(NSString *account) {
   } mutableCopy];
 }
 
-NSDictionary *DSHGitCredentialForScope(NSString *workspaceId, NSString *host,
+NSDictionary *DSHGitCredentialForScope(NSString *scopeId, NSString *host,
                                        NSError **error) {
-  if (workspaceId.length == 0 || host.length == 0) return nil;
+  if (scopeId.length == 0 || host.length == 0) return nil;
   NSMutableDictionary *query = DSHGitPushKeychainQuery(
-      DSHGitCredentialAccountForScope(workspaceId, host));
+      DSHGitCredentialAccountForScope(scopeId, host));
   query[(__bridge id)kSecReturnData] = @YES;
   query[(__bridge id)kSecMatchLimit] = (__bridge id)kSecMatchLimitOne;
   CFTypeRef result = nullptr;
@@ -162,24 +205,22 @@ NSDictionary *DSHGitCredentialForScope(NSString *workspaceId, NSString *host,
   NSNumber *expirySeconds = [payload[@"expiry_seconds"] isKindOfClass:NSNumber.class]
       ? payload[@"expiry_seconds"] : nil;
   if (!DSHGitPushValidUsername(username) || !DSHGitPushValidToken(token) ||
-      expiresAt == nil || expirySeconds == nil ||
-      expiresAt.doubleValue <= 0 || expirySeconds.integerValue <= 0) return nil;
+      expiresAt == nil || expirySeconds == nil || expiresAt.doubleValue <= 0 ||
+      !DSHGitCredentialExpiryIsValid(expirySeconds.integerValue)) return nil;
   if (expiresAt.doubleValue <= NSDate.date.timeIntervalSince1970) {
-    (void)DSHGitDeleteCredentialForScope(workspaceId, host, nil);
+    (void)DSHGitDeleteCredentialForScope(scopeId, host, nil);
     return nil;
   }
   return @{ @"username" : username, @"token" : token, @"expires_at" : expiresAt,
             @"expiry_seconds" : expirySeconds };
 }
 
-BOOL DSHGitStoreCredentialForScope(NSString *workspaceId, NSString *host,
+BOOL DSHGitStoreCredentialForScope(NSString *scopeId, NSString *host,
                                    NSString *username, NSString *token,
                                    NSInteger expirySeconds, NSError **error) {
   if (!DSHGitPushValidUsername(username) || !DSHGitPushValidToken(token) ||
-      (expirySeconds != DSHGitCredentialExpiryOneHour &&
-       expirySeconds != DSHGitCredentialExpiryOneDay &&
-       expirySeconds != DSHGitCredentialExpirySevenDays) ||
-      workspaceId.length == 0 || host.length == 0) {
+      !DSHGitCredentialExpiryIsValid(expirySeconds) ||
+      scopeId.length == 0 || host.length == 0) {
     if (error != nil) *error = DSHGitPushSupportError(3012, @"Git credential is invalid");
     return NO;
   }
@@ -195,7 +236,7 @@ BOOL DSHGitStoreCredentialForScope(NSString *workspaceId, NSString *host,
     return NO;
   }
   NSMutableDictionary *query = DSHGitPushKeychainQuery(
-      DSHGitCredentialAccountForScope(workspaceId, host));
+      DSHGitCredentialAccountForScope(scopeId, host));
   OSStatus status = SecItemUpdate((__bridge CFDictionaryRef)query,
     (__bridge CFDictionaryRef)@{ (__bridge id)kSecValueData : data });
   if (status == errSecItemNotFound) {
@@ -211,10 +252,10 @@ BOOL DSHGitStoreCredentialForScope(NSString *workspaceId, NSString *host,
   return YES;
 }
 
-BOOL DSHGitDeleteCredentialForScope(NSString *workspaceId, NSString *host,
+BOOL DSHGitDeleteCredentialForScope(NSString *scopeId, NSString *host,
                                     NSError **error) {
   OSStatus status = SecItemDelete((__bridge CFDictionaryRef)DSHGitPushKeychainQuery(
-      DSHGitCredentialAccountForScope(workspaceId, host)));
+      DSHGitCredentialAccountForScope(scopeId, host)));
   if (status != errSecSuccess && status != errSecItemNotFound) {
     if (error != nil) *error = DSHGitPushSupportError(3014, @"Git credential cannot be cleared");
     return NO;
@@ -258,7 +299,7 @@ BOOL DSHGitDeleteLegacyHostCredential(NSString *host, NSError **error) {
 
 - (instancetype)init {
   self = [super init];
-  if (self) _timeout = 60.0;
+  if (self) _timeout = DSHGitPushDefaultTimeout;
   return self;
 }
 
@@ -267,23 +308,74 @@ BOOL DSHGitDeleteLegacyHostCredential(NSString *host, NSError **error) {
 @implementation DSHGitPushResult
 @end
 
+/// Shared between the waiting caller and the worker: the caller flips the
+/// deadline flag when it gives up, so the worker's next callback aborts.
+@interface DSHGitPushControl : NSObject
+@property(nonatomic, strong, nullable) DSHGitPushCancelToken *cancelToken;
+- (BOOL)deadlinePassed;
+- (void)markDeadlinePassed;
+@end
+
+@implementation DSHGitPushControl {
+  std::atomic<bool> _deadlinePassed;
+}
+
+- (instancetype)init {
+  self = [super init];
+  if (self) _deadlinePassed = false;
+  return self;
+}
+
+- (BOOL)deadlinePassed {
+  return _deadlinePassed.load();
+}
+
+- (void)markDeadlinePassed {
+  _deadlinePassed.store(true);
+}
+
+@end
+
 typedef struct {
   __unsafe_unretained NSString *host;
   __unsafe_unretained NSString *username;
   __unsafe_unretained NSString *token;
   bool attempted;
-} DSHGitPushCredentialPayload;
+} DSHGitPushCredentialState;
 
+/// Native-private observer for the receive-pack report-status response. The
+/// server-provided status text is reduced to booleans and is never retained,
+/// logged, or projected into results.
 typedef struct {
   const char *targetRef;
+  size_t targetCount;
+  size_t unexpectedCount;
   bool targetRejected;
+  bool targetNonFastForward;
   bool malformed;
 } DSHGitPushUpdateState;
 
 typedef struct {
-  DSHGitPushCredentialPayload credential;
+  DSHGitPushCredentialState credential;
   DSHGitPushUpdateState update;
-} DSHGitPushCallbacksPayload;
+  __unsafe_unretained DSHGitPushControl *control;
+  bool interruptedByCancel;
+  bool interruptedByDeadline;
+  bool bytesMayHaveBeenSent;
+} DSHGitPushCallbackState;
+
+static int DSHGitPushAbortIfRequested(DSHGitPushCallbackState *state) {
+  if (state == nullptr || state->control == nil) return 0;
+  if (state->control.cancelToken != nil && state->control.cancelToken.cancelled) {
+    state->interruptedByCancel = true;
+    return GIT_EUSER;
+  }
+  if (state->control.deadlinePassed) {
+    state->interruptedByDeadline = true;
+    return GIT_EUSER;
+  }
+  return 0;
+}
 
 static int DSHGitPushCredentialCallback(git_credential **out,
                                          const char *url,
@@ -291,9 +383,10 @@ static int DSHGitPushCredentialCallback(git_credential **out,
                                          unsigned int allowedTypes,
                                          void *rawPayload) {
   (void)usernameFromURL;
-  DSHGitPushCallbacksPayload *payload =
-      static_cast<DSHGitPushCallbacksPayload *>(rawPayload);
-  DSHGitPushCredentialPayload *credential = &payload->credential;
+  DSHGitPushCallbackState *state = static_cast<DSHGitPushCallbackState *>(rawPayload);
+  if (DSHGitPushAbortIfRequested(state) != 0) return GIT_EUSER;
+  DSHGitPushCredentialState *credential = &state->credential;
+  if (credential->token == nil || credential->username == nil) return GIT_EAUTH;
   NSString *urlString = url == nullptr ? nil : [NSString stringWithUTF8String:url];
   NSURL *validated = DSHGitValidatedRemoteURL(urlString, nil);
   if (validated == nil ||
@@ -312,54 +405,79 @@ static int DSHGitPushCredentialCallback(git_credential **out,
   return GIT_PASSTHROUGH;
 }
 
+static int DSHGitPushSidebandCallback(const char *message, int length,
+                                       void *rawPayload) {
+  (void)message;
+  (void)length;
+  return DSHGitPushAbortIfRequested(
+      static_cast<DSHGitPushCallbackState *>(rawPayload));
+}
+
+static int DSHGitPushNegotiationCallback(const git_push_update **updates,
+                                          size_t count, void *rawPayload) {
+  (void)updates;
+  (void)count;
+  // Last cooperative checkpoint before the packfile is streamed.
+  return DSHGitPushAbortIfRequested(
+      static_cast<DSHGitPushCallbackState *>(rawPayload));
+}
+
+static int DSHGitPushTransferProgress(unsigned int current, unsigned int total,
+                                       size_t bytes, void *rawPayload) {
+  (void)current;
+  (void)total;
+  (void)bytes;
+  DSHGitPushCallbackState *state = static_cast<DSHGitPushCallbackState *>(rawPayload);
+  if (state != nullptr) state->bytesMayHaveBeenSent = true;
+  return DSHGitPushAbortIfRequested(state);
+}
+
 static int DSHGitPushUpdateReference(const char *refname,
                                       const char *status,
                                       void *rawPayload) {
-  DSHGitPushCallbacksPayload *payload =
-      static_cast<DSHGitPushCallbacksPayload *>(rawPayload);
-  DSHGitPushUpdateState *state = &payload->update;
+  DSHGitPushCallbackState *state = static_cast<DSHGitPushCallbackState *>(rawPayload);
+  if (state == nullptr || state->update.targetRef == nullptr) return 0;
   if (refname == nullptr) {
-    state->malformed = true;
+    state->update.malformed = true;
     return 0;
   }
-  if (strcmp(refname, state->targetRef) == 0 && status != nullptr) {
-    state->targetRejected = true;
+  if (strcmp(refname, state->update.targetRef) != 0) {
+    state->update.unexpectedCount += 1;
+    return 0;
+  }
+  state->update.targetCount += 1;
+  if (status != nullptr) {
+    state->update.targetRejected = true;
+    // Compared, never copied: the server text stays out of every result.
+    if (strstr(status, "non-fast-forward") != nullptr ||
+        strstr(status, "fetch first") != nullptr) {
+      state->update.targetNonFastForward = true;
+    }
   }
   return 0;
 }
 
-static dispatch_queue_t DSHGitPushWorkerQueue(void) {
-  static dispatch_queue_t queue;
+static void DSHGitPushConfigureTransportBounds(void) {
   static dispatch_once_t onceToken;
   dispatch_once(&onceToken, ^{
-    queue = dispatch_queue_create("dev.zseven.rish.git-push", DISPATCH_QUEUE_SERIAL);
+    git_libgit2_opts(GIT_OPT_SET_SERVER_CONNECT_TIMEOUT,
+                     DSHGitPushConnectTimeoutMilliseconds);
+    git_libgit2_opts(GIT_OPT_SET_SERVER_TIMEOUT,
+                     DSHGitPushServerTimeoutMilliseconds);
   });
-  return queue;
 }
 
-static NSString *DSHGitPushAdvertisedOID(git_repository *repository,
-                                          NSString *remoteName,
-                                          NSString *fullReference,
+static NSString *DSHGitPushAdvertisedOID(git_remote *remote,
+                                          const char *fullReference,
                                           int *codeOut) {
-  git_remote *remote = nullptr;
-  git_remote_callbacks callbacks = {};
-  git_proxy_options proxy = {};
-  callbacks.version = GIT_REMOTE_CALLBACKS_VERSION;
-  proxy.version = GIT_PROXY_OPTIONS_VERSION;
-  proxy.type = GIT_PROXY_NONE;
-  int code = git_remote_lookup(&remote, repository, remoteName.UTF8String);
-  if (code == 0) {
-    code = git_remote_connect(remote, GIT_DIRECTION_FETCH, &callbacks, &proxy,
-                              nullptr);
-  }
   const git_remote_head **heads = nullptr;
   size_t count = 0;
-  if (code == 0) code = git_remote_ls(&heads, &count, remote);
+  int code = git_remote_ls(&heads, &count, remote);
   NSString *resolved = nil;
   if (code == 0) {
     for (size_t index = 0; index < count; index += 1) {
       if (heads[index] != nullptr && heads[index]->name != nullptr &&
-          strcmp(heads[index]->name, fullReference.UTF8String) == 0) {
+          strcmp(heads[index]->name, fullReference) == 0) {
         char buffer[GIT_OID_SHA1_HEXSIZE + 1] = {};
         git_oid_tostr(buffer, sizeof(buffer), &heads[index]->oid);
         resolved = [NSString stringWithUTF8String:buffer];
@@ -367,132 +485,204 @@ static NSString *DSHGitPushAdvertisedOID(git_repository *repository,
       }
     }
   }
-  if (remote != nullptr) {
-    git_remote_disconnect(remote);
-    git_remote_free(remote);
-  }
   if (codeOut != nullptr) *codeOut = code;
   return resolved;
 }
 
-DSHGitPushResult *DSHGitPushRun(DSHGitPushRequest *request) {
+static void DSHGitPushFillCallbacks(git_remote_callbacks *callbacks,
+                                    DSHGitPushCallbackState *state,
+                                    BOOL withCredentials) {
+  if (withCredentials) callbacks->credentials = DSHGitPushCredentialCallback;
+  callbacks->sideband_progress = DSHGitPushSidebandCallback;
+  callbacks->push_transfer_progress = DSHGitPushTransferProgress;
+  callbacks->push_update_reference = DSHGitPushUpdateReference;
+  callbacks->push_negotiation = DSHGitPushNegotiationCallback;
+  callbacks->payload = state;
+}
+
+/// Executes the whole network phase on the worker. Returns the settled
+/// result; `state` reports interruptions and whether bytes may have left.
+static DSHGitPushResult *DSHGitPushExecute(DSHGitPushRequest *request,
+                                           DSHGitPushCallbackState *state) {
   DSHGitPushResult *result = [[DSHGitPushResult alloc] init];
   result.outcome = DSHGitPushOutcomeFailed;
-  if (request == nil || request.repository == nullptr ||
-      request.remoteName.length == 0 || request.remoteURL.length == 0 ||
-      request.fullReference.length == 0) {
+  const char *fullReference = request.fullReference.UTF8String;
+  BOOL withCredentials = request.token.length > 0 && request.username.length > 0;
+  git_remote *remote = nullptr;
+  int code = git_remote_lookup(&remote, request.repository,
+                               request.remoteName.UTF8String);
+  if (code == 0 && request.remoteURL.length > 0) {
+    code = git_remote_set_instance_url(remote, request.remoteURL.UTF8String);
+    if (code == 0) {
+      code = git_remote_set_instance_pushurl(remote, request.remoteURL.UTF8String);
+    }
+  }
+  git_push_options pushOptions = {};
+  git_remote_connect_options connectOptions = {};
+  if (code == 0) code = git_push_options_init(&pushOptions, GIT_PUSH_OPTIONS_VERSION);
+  if (code == 0) {
+    code = git_remote_connect_options_init(&connectOptions,
+                                           GIT_REMOTE_CONNECT_OPTIONS_VERSION);
+  }
+  if (code == 0) {
+    pushOptions.follow_redirects = GIT_REMOTE_REDIRECT_NONE;
+    pushOptions.proxy_opts.type = request.proxyURL.length > 0
+        ? GIT_PROXY_SPECIFIED : GIT_PROXY_NONE;
+    pushOptions.proxy_opts.url = request.proxyURL.UTF8String;
+    DSHGitPushFillCallbacks(&pushOptions.callbacks, state, withCredentials);
+    // git_remote_upload replaces the connected remote's option set when
+    // explicit push options are supplied. Keep both option sets identical so
+    // the advertised-ref check and the upload share one closed policy.
+    connectOptions.callbacks = pushOptions.callbacks;
+    connectOptions.follow_redirects = pushOptions.follow_redirects;
+    connectOptions.proxy_opts = pushOptions.proxy_opts;
+    code = git_remote_connect_ext(remote, GIT_DIRECTION_PUSH, &connectOptions);
+  }
+  int advertisedCode = 0;
+  NSString *advertisedBefore = code == 0
+      ? DSHGitPushAdvertisedOID(remote, fullReference, &advertisedCode) : nil;
+  if (code == 0) code = advertisedCode;
+  result.advertisedOID = advertisedBefore;
+  if (code != 0) {
+    if (remote != nullptr) git_remote_free(remote);
+    if (state->interruptedByCancel) result.outcome = DSHGitPushOutcomeCancelled;
+    else if (state->interruptedByDeadline) result.outcome = DSHGitPushOutcomeTimedOut;
+    else if (code == GIT_EAUTH) result.outcome = DSHGitPushOutcomeAuthFailure;
+    else result.outcome = DSHGitPushOutcomeFailed;
     return result;
   }
-  NSTimeInterval timeout = request.timeout > 0 ? request.timeout : 60.0;
-  __block DSHGitPushOutcome settledOutcome = DSHGitPushOutcomeFailed;
-  __block NSString *settledOID = nil;
-  __block BOOL settled = NO;
+  id expected = request.expectedRemoteOID;
+  if (expected != nil) {
+    BOOL matches = (expected == NSNull.null && advertisedBefore == nil) ||
+        ([expected isKindOfClass:NSString.class] &&
+         [expected isEqualToString:advertisedBefore]);
+    if (!matches) {
+      git_remote_disconnect(remote);
+      git_remote_free(remote);
+      result.outcome = DSHGitPushOutcomeConflict;
+      return result;
+    }
+  }
+  NSString *refspecValue = [NSString stringWithFormat:@"%@:%@",
+      request.fullReference, request.fullReference];
+  char *rawRefspec = const_cast<char *>(refspecValue.UTF8String);
+  git_strarray refspecs = { &rawRefspec, 1 };
+  code = git_remote_upload(remote, &refspecs, &pushOptions);
+  git_remote_disconnect(remote);
+  if (code != 0) {
+    git_remote_free(remote);
+    if (code == GIT_ENONFASTFORWARD) {
+      // Raised by libgit2 before any packfile bytes are produced.
+      result.outcome = DSHGitPushOutcomeNonFastForward;
+      return result;
+    }
+    result.effectMayHaveOccurred = state->bytesMayHaveBeenSent;
+    if (state->interruptedByCancel) result.outcome = DSHGitPushOutcomeCancelled;
+    else if (state->interruptedByDeadline) result.outcome = DSHGitPushOutcomeTimedOut;
+    else if (code == GIT_EAUTH) result.outcome = DSHGitPushOutcomeAuthFailure;
+    else {
+      result.outcome = DSHGitPushOutcomeFailed;
+      // A lost response after the request went out cannot prove rejection.
+      result.effectMayHaveOccurred = YES;
+    }
+    return result;
+  }
+  BOOL callbackShapeExact = !state->update.malformed &&
+      state->update.unexpectedCount == 0 && state->update.targetCount == 1;
+  if (!callbackShapeExact) {
+    git_remote_free(remote);
+    result.outcome = DSHGitPushOutcomeFailed;
+    result.effectMayHaveOccurred = YES;
+    return result;
+  }
+  if (state->update.targetRejected) {
+    git_remote_free(remote);
+    result.outcome = state->update.targetNonFastForward
+        ? DSHGitPushOutcomeNonFastForward : DSHGitPushOutcomeRejected;
+    return result;
+  }
+  // The server acknowledged the update. Read the reference back so the
+  // receipt carries the OID the server now advertises.
+  state->credential.attempted = false;
+  int verifyCode = git_remote_connect_ext(remote, GIT_DIRECTION_FETCH,
+                                          &connectOptions);
+  NSString *observed = verifyCode == 0
+      ? DSHGitPushAdvertisedOID(remote, fullReference, &verifyCode) : nil;
+  if (git_remote_connected(remote)) git_remote_disconnect(remote);
+  git_remote_free(remote);
+  result.outcome = DSHGitPushOutcomeSuccess;
+  result.verified = verifyCode == 0 && observed.length > 0;
+  result.remoteOID = result.verified ? observed : request.localOID;
+  return result;
+}
+
+DSHGitPushResult *DSHGitPushRun(DSHGitPushRequest *request) {
+  DSHGitPushResult *invalid = [[DSHGitPushResult alloc] init];
+  invalid.outcome = DSHGitPushOutcomeFailed;
+  if (request == nil || request.repository == nullptr ||
+      request.remoteName.length == 0 || request.fullReference.length == 0 ||
+      request.localOID.length == 0 ||
+      (request.remoteURL.length > 0 && request.host.length == 0)) {
+    return invalid;
+  }
+  DSHGitPushConfigureTransportBounds();
+  NSTimeInterval timeout = request.timeout > 0 ? request.timeout : DSHGitPushDefaultTimeout;
+  DSHGitPushControl *control = [[DSHGitPushControl alloc] init];
+  control.cancelToken = request.cancelToken;
+  __block DSHGitPushResult *settledResult = nil;
   dispatch_semaphore_t semaphore = dispatch_semaphore_create(0);
-  dispatch_async(DSHGitPushWorkerQueue(), ^{
+  dispatch_async(dispatch_get_global_queue(QOS_CLASS_UTILITY, 0), ^{
     @autoreleasepool {
-      DSHGitPushOutcome outcome = DSHGitPushOutcomeFailed;
-      NSString *remoteOID = nil;
-      DSHGitPushCallbacksPayload callbacksPayload = {
-        { request.host, request.username, request.token, false },
-        { request.fullReference.UTF8String, false, false },
-      };
-      git_remote *remote = nullptr;
-      int resultCode = git_remote_lookup(&remote, request.repository,
-                                         request.remoteName.UTF8String);
-      if (resultCode == 0) {
-        resultCode = git_remote_set_instance_url(remote,
-            request.remoteURL.UTF8String);
-      }
-      if (resultCode == 0) {
-        resultCode = git_remote_set_instance_pushurl(remote,
-            request.remoteURL.UTF8String);
-      }
-      git_push_options pushOptions = {};
-      if (resultCode == 0) {
-        resultCode = git_push_options_init(&pushOptions, GIT_PUSH_OPTIONS_VERSION);
-      }
-      if (resultCode == 0) {
-        pushOptions.follow_redirects = GIT_REMOTE_REDIRECT_NONE;
-        pushOptions.proxy_opts.type = request.proxyURL.length > 0
-            ? GIT_PROXY_SPECIFIED : GIT_PROXY_NONE;
-        pushOptions.proxy_opts.url = request.proxyURL.UTF8String;
-        if (request.token.length > 0) {
-          pushOptions.callbacks.credentials = DSHGitPushCredentialCallback;
-        }
-        pushOptions.callbacks.push_update_reference = DSHGitPushUpdateReference;
-        pushOptions.callbacks.payload = &callbacksPayload;
-      }
-      NSString *refspecValue = [NSString stringWithFormat:@"%@:%@",
-          request.fullReference, request.fullReference];
-      char *rawRefspec = const_cast<char *>(refspecValue.UTF8String);
-      git_strarray refspecs = { &rawRefspec, 1 };
-      if (resultCode == 0) {
-        resultCode = git_remote_upload(remote, &refspecs, &pushOptions);
-      }
-      if (remote != nullptr) {
-        git_remote_disconnect(remote);
-        git_remote_free(remote);
-      }
-      if (resultCode == GIT_ENONFASTFORWARD) {
-        outcome = DSHGitPushOutcomeNonFastForward;
-      } else if (resultCode == GIT_EAUTH) {
-        outcome = DSHGitPushOutcomeAuthFailure;
-      } else if (resultCode != 0) {
-        outcome = callbacksPayload.update.targetRejected
-            ? DSHGitPushOutcomeRejected : DSHGitPushOutcomeFailed;
-      } else if (callbacksPayload.update.targetRejected ||
-                 callbacksPayload.update.malformed) {
-        outcome = DSHGitPushOutcomeRejected;
-      } else {
-        int verifyCode = 0;
-        remoteOID = DSHGitPushAdvertisedOID(request.repository,
-            request.remoteName, request.fullReference, &verifyCode);
-        if (verifyCode == 0 && remoteOID.length > 0 &&
-            [remoteOID isEqualToString:request.localOID]) {
-          outcome = DSHGitPushOutcomeSuccess;
-        }
-      }
-      settledOutcome = outcome;
-      settledOID = remoteOID;
-      settled = YES;
+      DSHGitPushCallbackState state = {};
+      state.credential.host = request.host;
+      state.credential.username = request.username;
+      state.credential.token = request.token;
+      state.update.targetRef = request.fullReference.UTF8String;
+      state.control = control;
+      DSHGitPushResult *result = DSHGitPushExecute(request, &state);
+      // The completion (receipt recording) settles before the waiting caller
+      // is released, so a successful caller can read the receipt back.
+      if (request.completion != nil) request.completion(result.outcome, result.remoteOID);
+      settledResult = result;
       dispatch_semaphore_signal(semaphore);
-      if (request.completion != nil) request.completion(outcome, remoteOID);
     }
   });
   NSDate *deadline = [NSDate dateWithTimeIntervalSinceNow:timeout];
-  while (!settled) {
-    if (request.cancelToken != nil && request.cancelToken.cancelled) {
-      result.outcome = DSHGitPushOutcomeCancelled;
-      return result;
-    }
-    if ([NSDate.date compare:deadline] != NSOrderedAscending) {
-      result.outcome = DSHGitPushOutcomeTimedOut;
-      return result;
-    }
+  while (true) {
     dispatch_time_t step = dispatch_time(DISPATCH_TIME_NOW, 200 * NSEC_PER_MSEC);
     if (dispatch_semaphore_wait(semaphore, step) == 0) break;
+    if (request.cancelToken != nil && request.cancelToken.cancelled) {
+      // Give the worker one more poll to settle on the cancellation itself;
+      // otherwise report it here while the worker aborts at its next callback.
+      dispatch_time_t grace = dispatch_time(DISPATCH_TIME_NOW, 500 * NSEC_PER_MSEC);
+      if (dispatch_semaphore_wait(semaphore, grace) == 0) break;
+      DSHGitPushResult *cancelled = [[DSHGitPushResult alloc] init];
+      cancelled.outcome = DSHGitPushOutcomeCancelled;
+      cancelled.effectMayHaveOccurred = YES;
+      return cancelled;
+    }
+    if ([NSDate.date compare:deadline] != NSOrderedAscending) {
+      [control markDeadlinePassed];
+      DSHGitPushResult *timedOut = [[DSHGitPushResult alloc] init];
+      timedOut.outcome = DSHGitPushOutcomeTimedOut;
+      timedOut.effectMayHaveOccurred = YES;
+      return timedOut;
+    }
   }
-  result.outcome = settledOutcome;
-  result.remoteOID = settledOID;
-  return result;
+  return settledResult ?: invalid;
 }
 
 // MARK: - Receipt journal
 
-static NSString *const DSHGitPushReceiptFilename = @"git-push-receipts.json";
-static NSString *const DSHGitPushReceiptTempFilename = @"git-push-receipts.json.tmp";
-static NSUInteger const DSHGitPushMaxReceipts = 25;
-static NSUInteger const DSHGitPushMaxReceiptJournalBytes = 262144;
-
 static BOOL DSHGitPushValidOID(NSString *oid) {
-  if (oid.length != 40) return NO;
+  if (![oid isKindOfClass:NSString.class] || oid.length != 40) return NO;
   NSCharacterSet *hex = [NSCharacterSet characterSetWithCharactersInString:
       @"0123456789abcdef"];
   return [oid rangeOfCharacterFromSet:hex.invertedSet].location == NSNotFound;
 }
 
 static BOOL DSHGitPushValidReceipt(NSDictionary *receipt) {
-  if (![receipt isKindOfClass:NSDictionary.class] ||
+  if (![receipt isKindOfClass:NSDictionary.class] || receipt.count != 7 ||
       ![receipt[@"schema_version"] isEqual:@1] ||
       ![receipt[@"remote"] isEqual:@"origin"] ||
       ![receipt[@"host"] isKindOfClass:NSString.class] ||
@@ -504,8 +694,8 @@ static BOOL DSHGitPushValidReceipt(NSDictionary *receipt) {
       ((NSString *)receipt[@"branch"]).length > 1024 ||
       DSHGitPushHasControlCharacter(receipt[@"branch"]) ||
       [((NSString *)receipt[@"branch"]) containsString:@".."] ||
-      ![DSHGitPushValidOID(receipt[@"local_oid"])] ||
-      ![DSHGitPushValidOID(receipt[@"remote_oid"])] ||
+      !DSHGitPushValidOID(receipt[@"local_oid"]) ||
+      !DSHGitPushValidOID(receipt[@"remote_oid"]) ||
       ![receipt[@"pushed_at"] isKindOfClass:NSString.class] ||
       ((NSString *)receipt[@"pushed_at"]).length == 0 ||
       ((NSString *)receipt[@"pushed_at"]).length > 64 ||
@@ -515,17 +705,30 @@ static BOOL DSHGitPushValidReceipt(NSDictionary *receipt) {
   return YES;
 }
 
+NSDictionary *DSHGitPushReceipt(NSString *host, NSString *branch,
+                                NSString *localOID, NSString *remoteOID,
+                                NSString *pushedAt) {
+  return @{
+    @"schema_version" : @1,
+    @"remote" : @"origin",
+    @"host" : host ?: @"",
+    @"branch" : branch ?: @"",
+    @"local_oid" : localOID ?: @"",
+    @"remote_oid" : remoteOID ?: @"",
+    @"pushed_at" : pushedAt ?: @"",
+  };
+}
+
 static NSArray<NSDictionary *> *DSHGitPushLoadReceiptsInternal(
-    int projectDescriptor, NSString *projectId, BOOL allowMissing,
-    NSError **error) {
-  if (projectDescriptor < 0 || projectId.length == 0) {
+    int directoryDescriptor, NSString *projectId, NSError **error) {
+  if (directoryDescriptor < 0 || projectId.length == 0) {
     if (error != nil) *error = DSHGitPushSupportError(3020, @"Receipt storage is unavailable");
     return nil;
   }
-  int descriptor = openat(projectDescriptor, DSHGitPushReceiptFilename.UTF8String,
+  int descriptor = openat(directoryDescriptor, DSHGitPushReceiptFilename.UTF8String,
       O_RDONLY | O_CLOEXEC | O_NOFOLLOW);
   if (descriptor < 0) {
-    if (errno == ENOENT && allowMissing) return @[];
+    if (errno == ENOENT) return @[];
     if (error != nil) *error = DSHGitPushSupportError(3020, @"Receipt storage is unavailable");
     return nil;
   }
@@ -578,7 +781,7 @@ static BOOL DSHGitPushWriteAll(int descriptor, const void *bytes, size_t length)
   return YES;
 }
 
-BOOL DSHGitPushRecordReceipt(int projectDescriptor, NSString *projectId,
+BOOL DSHGitPushRecordReceipt(int directoryDescriptor, NSString *projectId,
                              NSDictionary *receipt, NSError **error) {
   if (!DSHGitPushValidReceipt(receipt)) {
     if (error != nil) *error = DSHGitPushSupportError(3021, @"Receipt journal is invalid");
@@ -586,7 +789,7 @@ BOOL DSHGitPushRecordReceipt(int projectDescriptor, NSString *projectId,
   }
   NSError *loadError = nil;
   NSArray<NSDictionary *> *existing = DSHGitPushLoadReceiptsInternal(
-      projectDescriptor, projectId, YES, &loadError);
+      directoryDescriptor, projectId, &loadError);
   if (existing == nil) {
     if (error != nil) *error = loadError ?: DSHGitPushSupportError(3020,
         @"Receipt storage is unavailable");
@@ -608,31 +811,28 @@ BOOL DSHGitPushRecordReceipt(int projectDescriptor, NSString *projectId,
     if (error != nil) *error = DSHGitPushSupportError(3021, @"Receipt journal is invalid");
     return NO;
   }
-  int descriptor = openat(projectDescriptor,
+  int descriptor = openat(directoryDescriptor,
       DSHGitPushReceiptTempFilename.UTF8String,
       O_WRONLY | O_CREAT | O_TRUNC | O_CLOEXEC | O_NOFOLLOW, 0600);
   if (descriptor < 0 || !DSHGitPushWriteAll(descriptor, data.bytes, data.length) ||
       fsync(descriptor) != 0 || close(descriptor) != 0) {
     if (descriptor >= 0) close(descriptor);
-    unlinkat(projectDescriptor, DSHGitPushReceiptTempFilename.UTF8String, 0);
+    unlinkat(directoryDescriptor, DSHGitPushReceiptTempFilename.UTF8String, 0);
     if (error != nil) *error = DSHGitPushSupportError(3020, @"Receipt storage is unavailable");
     return NO;
   }
-  if (renameat(projectDescriptor, DSHGitPushReceiptTempFilename.UTF8String,
-               projectDescriptor, DSHGitPushReceiptFilename.UTF8String) != 0 ||
-      fsync(projectDescriptor) != 0) {
-    unlinkat(projectDescriptor, DSHGitPushReceiptTempFilename.UTF8String, 0);
+  if (renameat(directoryDescriptor, DSHGitPushReceiptTempFilename.UTF8String,
+               directoryDescriptor, DSHGitPushReceiptFilename.UTF8String) != 0 ||
+      fsync(directoryDescriptor) != 0) {
+    unlinkat(directoryDescriptor, DSHGitPushReceiptTempFilename.UTF8String, 0);
     if (error != nil) *error = DSHGitPushSupportError(3020, @"Receipt storage is unavailable");
     return NO;
   }
   return YES;
 }
 
-NSArray<NSDictionary *> *DSHGitPushLoadReceipts(int projectDescriptor,
+NSArray<NSDictionary *> *DSHGitPushLoadReceipts(int directoryDescriptor,
                                                 NSString *projectId,
                                                 NSError **error) {
-  NSArray<NSDictionary *> *receipts = DSHGitPushLoadReceiptsInternal(
-      projectDescriptor, projectId, NO, error);
-  return receipts == nil ? nil : receipts;
+  return DSHGitPushLoadReceiptsInternal(directoryDescriptor, projectId, error);
 }
-

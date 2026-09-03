@@ -11,6 +11,14 @@
 static const unsigned long long DSHAgentExecutionMaximumSafeInteger =
     9007199254740991ULL;
 
+/// Stable in-memory key for the cancellation token of one execution row.
+static NSString *DSHAgentExecutionLocatorKey(NSDictionary *locator) {
+  if (![locator isKindOfClass:NSDictionary.class]) return @"";
+  return [NSString stringWithFormat:@"%@|%@|%@|%@|%@|%@",
+      locator[@"task_id"], locator[@"attempt_id"], locator[@"round_id"],
+      locator[@"round_index"], locator[@"call_index"], locator[@"call_id"]];
+}
+
 static BOOL DSHAgentExecutionRoot(NSDictionary *root) {
   return DSHAgentExactDictionaryKeys(root, @[
     @"schema_version", @"kind", @"workspace_id",

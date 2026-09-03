@@ -100,8 +100,7 @@ static NSString *DSHAgentGitHeadReferenceName(git_repository *repository) {
   return [value hasPrefix:@"refs/heads/"] ? value : nil;
 }
 
-static NSString *DSHAgentGitOriginURL(git_repository *repository,
-                                         NSError **error) {
+static NSString *DSHAgentGitRawOriginURL(git_repository *repository) {
   git_config *config = nullptr;
   git_buf value = GIT_BUF_INIT;
   int result = git_repository_config(&config, repository);
@@ -112,12 +111,36 @@ static NSString *DSHAgentGitOriginURL(git_repository *repository,
     ? [NSString stringWithUTF8String:value.ptr] : nil;
   git_buf_dispose(&value);
   if (config != nullptr) git_config_free(config);
-  NSURL *validated = DSHGitValidatedRemoteURL(raw, nil);
-  if (validated == nil) {
-    DSHSetAgentNativeStoreError(error, DSHAgentNativeStoreErrorConflict);
-    return nil;
-  }
-  return validated.absoluteString;
+  return raw;
+}
+
+/// git_push failures carry a value-free `reason` next to the stable failure
+/// code so the model can distinguish a non-fast-forward conflict from a
+/// moved remote or a rejected credential without any server text.
+static NSDictionary *DSHAgentGitPushFailure(NSString *name,
+                                             NSString *failureCode,
+                                             NSString *reason,
+                                             BOOL ambiguous,
+                                             NSError **error) {
+  NSString *feedback = DSHAgentGitCanonicalFeedback(@{
+    @"schema_version" : @1,
+    @"name" : name,
+    @"outcome" : ambiguous ? @"ambiguous" : @"failed",
+    @"payload" : @{
+      @"schema_version" : @1,
+      @"failure_code" : failureCode,
+      @"reason" : reason,
+    },
+  }, error);
+  if (feedback == nil) return nil;
+  return @{
+    @"schema_version" : @1,
+    @"status" : ambiguous ? @"ambiguous" : @"failed",
+    @"feedback" : feedback,
+    @"settled_facts" : NSNull.null,
+    @"truncated" : @NO,
+    @"effect_may_have_occurred" : @(ambiguous),
+  };
 }
 
 static BOOL DSHAgentGitRemoteOID(git_repository *repository,
@@ -730,119 +753,90 @@ static NSString *DSHAgentGitExpectedSHA1(NSData *payload) {
       ![headOID isEqual:precondition[@"target_oid"]]) {
     return DSHAgentGitFailure(name, @"E_AGENT_CONFLICT", NO, error);
   }
-  git_remote *remote = nullptr;
-  int resultCode = git_remote_lookup(&remote, repository, "origin");
-  git_remote_connect_options connectOptions = {};
-  if (resultCode == 0) {
-    resultCode = git_remote_connect_options_init(
-        &connectOptions, GIT_REMOTE_CONNECT_OPTIONS_VERSION);
+  // Origin policy: a validated HTTPS (or LAN-HTTP) URL is pushed with the
+  // project-scoped Keychain credential; an absolute local path (the native
+  // test fixture transport) needs none. Anything else is refused before any
+  // connection is attempted.
+  NSString *rawOrigin = DSHAgentGitRawOriginURL(repository);
+  NSURL *validatedOrigin = DSHGitValidatedRemoteURL(rawOrigin, nil);
+  BOOL localPathOrigin = validatedOrigin == nil && [rawOrigin hasPrefix:@"/"];
+  if (validatedOrigin == nil && !localPathOrigin) {
+    return DSHAgentGitPushFailure(name, @"E_AGENT_TOOL_FAILED",
+                                  @"origin_unsafe", NO, error);
   }
-  if (resultCode == 0) {
-    connectOptions.follow_redirects = GIT_REMOTE_REDIRECT_NONE;
-    connectOptions.proxy_opts.type = GIT_PROXY_NONE;
-  }
-  if (resultCode == 0) {
-    resultCode = git_remote_connect_ext(remote, GIT_DIRECTION_PUSH,
-                                        &connectOptions);
-  }
-  const git_remote_head **advertised = nullptr;
-  size_t advertisedCount = 0;
-  if (resultCode == 0) {
-    resultCode = git_remote_ls(&advertised, &advertisedCount, remote);
-  }
-  NSString *remoteBefore = nil;
-  if (resultCode == 0) {
-    for (size_t index = 0; index < advertisedCount; index += 1) {
-      if (advertised[index] != nullptr && advertised[index]->name != nullptr &&
-          strcmp(advertised[index]->name, headRef.UTF8String) == 0) {
-        remoteBefore = DSHAgentGitOID(&advertised[index]->oid);
-        break;
-      }
+  NSString *host = validatedOrigin.host.lowercaseString;
+  NSDictionary *credential = nil;
+  if (validatedOrigin != nil) {
+    credential = DSHGitCredentialForScope(root[@"project_id"], host, nil);
+    if (credential == nil) {
+      return DSHAgentGitPushFailure(name, @"E_AGENT_TOOL_FAILED",
+                                    @"credential_missing", NO, error);
     }
   }
-  id expectedRemote = precondition[@"pre_remote_oid"];
-  BOOL remoteMatches = resultCode == 0 &&
-      ((expectedRemote == NSNull.null && remoteBefore == nil) ||
-       [expectedRemote isEqual:remoteBefore]);
-  if (!remoteMatches) {
-    if (remote != nullptr) {
-      git_remote_disconnect(remote);
-      git_remote_free(remote);
-    }
-    return DSHAgentGitFailure(name,
-        resultCode == 0 ? @"E_AGENT_CONFLICT" : @"E_AGENT_TOOL_FAILED", NO,
-        error);
-  }
-  if (remote != nullptr) {
-    git_remote_disconnect(remote);
-    git_remote_free(remote);
-  }
-  // The network phase runs through the bounded push runner: Keychain-backed
-  // credential callback, server-advertised OID verification, non-fast-forward
-  // detection, a hard time bound, and cooperative cancellation.
-  NSString *origin = DSHAgentGitOriginURL(repository, error);
-  if (origin == nil) {
-    return DSHAgentGitFailure(name, @"E_AGENT_TOOL_FAILED", NO, error);
-  }
-  NSString *host = [NSURLComponents componentsWithString:origin].host.lowercaseString;
-  NSDictionary *credential = DSHGitCredentialForScope(root[@"workspace_id"],
-                                                       host, error);
-  if (credential == nil) {
-    return DSHAgentGitFailure(name, @"E_AGENT_AUTH_FAILED", NO, error);
-  }
-  int projectDescriptor = lease == nil ? -1 : lease.projectDescriptor;
+  // The whole network phase runs through the bounded push runner on one
+  // connection: advertised-ref check against the precondition, credential
+  // callback, non-force upload, report-status shape check, server read-back
+  // of the pushed OID, a hard time bound, and cooperative cancellation.
+  int gitDescriptor = lease == nil ? -1 : lease.gitDescriptor;
   NSString *projectId = root[@"project_id"];
+  NSString *receiptHost = host ?: @"localhost";
   __attribute__((objc_precise_lifetime)) DSHGitPushRequest *pushRequest =
       [[DSHGitPushRequest alloc] init];
   pushRequest.repository = repository;
   pushRequest.remoteName = @"origin";
-  pushRequest.remoteURL = origin;
+  pushRequest.remoteURL = validatedOrigin.absoluteString;
   pushRequest.host = host;
   pushRequest.fullReference = headRef;
-  pushRequest.branch = branch;
   pushRequest.localOID = headOID;
   pushRequest.username = credential[@"username"];
   pushRequest.token = credential[@"token"];
   pushRequest.proxyURL = nil;
+  pushRequest.expectedRemoteOID = precondition[@"pre_remote_oid"];
   pushRequest.cancelToken = cancelToken;
   pushRequest.timeout = 60.0;
   __attribute__((objc_precise_lifetime)) DSHLocalProjectLease *heldLease = lease;
   pushRequest.completion = ^(DSHGitPushOutcome outcome, NSString *remoteOID) {
     (void)heldLease;
     if (outcome == DSHGitPushOutcomeSuccess && remoteOID.length > 0 &&
-        projectDescriptor >= 0 && projectId.length > 0) {
-      NSDictionary *receipt = @{
-        @"schema_version" : @1,
-        @"remote" : @"origin",
-        @"host" : host,
-        @"branch" : branch,
-        @"local_oid" : headOID,
-        @"remote_oid" : remoteOID,
-        @"pushed_at" : DSHAgentGitTimestamp(),
-      };
-      (void)DSHGitPushRecordReceipt(projectDescriptor, projectId, receipt, nil);
+        gitDescriptor >= 0 && projectId.length > 0) {
+      (void)DSHGitPushRecordReceipt(gitDescriptor, projectId,
+          DSHGitPushReceipt(receiptHost, branch, headOID, remoteOID,
+                            DSHAgentGitTimestamp()), nil);
     }
   };
   DSHGitPushResult *pushResult = DSHGitPushRun(pushRequest);
-  if (pushResult.outcome == DSHGitPushOutcomeNonFastForward) {
-    return DSHAgentGitFailure(name, @"E_AGENT_NON_FAST_FORWARD", NO, error);
-  }
-  if (pushResult.outcome == DSHGitPushOutcomeAuthFailure) {
-    return DSHAgentGitFailure(name, @"E_AGENT_AUTH_FAILED", NO, error);
-  }
-  if (pushResult.outcome == DSHGitPushOutcomeTimedOut) {
-    return DSHAgentGitFailure(name, @"E_AGENT_TIMEOUT", NO, error);
-  }
-  if (pushResult.outcome == DSHGitPushOutcomeCancelled) {
-    return DSHAgentGitFailure(name, @"E_AGENT_CANCELLED", NO, error);
-  }
-  if (pushResult.outcome == DSHGitPushOutcomeRejected) {
-    return DSHAgentGitFailure(name, @"E_AGENT_TOOL_FAILED", NO, error);
-  }
-  if (pushResult.outcome != DSHGitPushOutcomeSuccess) {
-    // Once libgit2 enters remote_push, a lost response cannot prove that the
-    // server rejected the update.
-    return DSHAgentGitFailure(name, @"E_AGENT_EXECUTION_AMBIGUOUS", YES, error);
+  switch (pushResult.outcome) {
+    case DSHGitPushOutcomeSuccess:
+      break;
+    case DSHGitPushOutcomeConflict:
+      return DSHAgentGitPushFailure(name, @"E_AGENT_CONFLICT", @"remote_moved",
+                                    NO, error);
+    case DSHGitPushOutcomeNonFastForward:
+      return DSHAgentGitPushFailure(name, @"E_AGENT_CONFLICT",
+                                    @"non_fast_forward", NO, error);
+    case DSHGitPushOutcomeRejected:
+      return DSHAgentGitPushFailure(name, @"E_AGENT_TOOL_FAILED", @"rejected",
+                                    NO, error);
+    case DSHGitPushOutcomeAuthFailure:
+      return DSHAgentGitPushFailure(name, @"E_AGENT_TOOL_FAILED", @"auth_failed",
+                                    NO, error);
+    case DSHGitPushOutcomeTimedOut:
+      return DSHAgentGitPushFailure(name, @"E_AGENT_EXECUTION_AMBIGUOUS",
+                                    @"timeout", YES, error);
+    case DSHGitPushOutcomeCancelled:
+      return pushResult.effectMayHaveOccurred
+          ? DSHAgentGitPushFailure(name, @"E_AGENT_EXECUTION_AMBIGUOUS",
+                                   @"cancelled", YES, error)
+          : DSHAgentGitPushFailure(name, @"E_AGENT_CANCELLED", @"cancelled",
+                                   NO, error);
+    case DSHGitPushOutcomeFailed:
+      // Once the request went out, a lost response cannot prove that the
+      // server rejected the update.
+      return pushResult.effectMayHaveOccurred
+          ? DSHAgentGitPushFailure(name, @"E_AGENT_EXECUTION_AMBIGUOUS",
+                                   @"transport", YES, error)
+          : DSHAgentGitPushFailure(name, @"E_AGENT_TOOL_FAILED", @"transport",
+                                   NO, error);
   }
   NSString *remoteOID = pushResult.remoteOID ?: headOID;
   NSString *trackingName = [@"refs/remotes/origin/" stringByAppendingString:branch];
@@ -861,6 +855,7 @@ static NSString *DSHAgentGitExpectedSHA1(NSData *payload) {
       @"schema_version" : @1, @"remote" : @"origin",
       @"remote_ref" : headRef, @"pushed_oid" : headOID,
       @"remote_oid" : remoteOID,
+      @"remote_oid_verified" : @(pushResult.verified),
     },
   }, error);
   if (feedback == nil) return nil;

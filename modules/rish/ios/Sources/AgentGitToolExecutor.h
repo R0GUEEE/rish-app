@@ -3,6 +3,7 @@
 NS_ASSUME_NONNULL_BEGIN
 
 @class DSHAgentRootResolver;
+@class DSHGitPushCancelToken;
 
 /// Native-only Git executor over the current LocalWorkspace/LocalProjects
 /// authority services.  It never resolves a repository from project_id alone.
@@ -20,6 +21,14 @@ NS_ASSUME_NONNULL_BEGIN
                                   arguments:(NSDictionary *)arguments
                                        root:(NSDictionary *)root
                                precondition:(NSDictionary *)precondition
+                                      error:(NSError **)error;
+/// git_push only: the token lets the runtime coordinator interrupt the
+/// bounded network phase cooperatively. Ignored for other tools.
+- (nullable NSDictionary *)executeToolNamed:(NSString *)name
+                                  arguments:(NSDictionary *)arguments
+                                       root:(NSDictionary *)root
+                               precondition:(NSDictionary *)precondition
+                                cancelToken:(nullable DSHGitPushCancelToken *)cancelToken
                                       error:(NSError **)error;
 - (nullable NSDictionary *)recoverToolNamed:(NSString *)name
                                   arguments:(NSDictionary *)arguments

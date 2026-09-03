@@ -119,6 +119,12 @@ type Props = {
   onUnbindFromChat?: () => void;
 };
 
+/** Host shown in the push confirmation; the full URL is still displayed. */
+function remoteHost(url: string): string {
+  const match = /^[a-z]+:\/\/([^/]+)/iu.exec(url);
+  return match?.[1] ?? url;
+}
+
 export function ProjectsSurface({
   boundProjectId = null,
   covered = false,
@@ -150,6 +156,7 @@ export function ProjectsSurface({
   const [remoteUrl, setRemoteUrl] = useState('');
   const [busy, setBusy] = useState(false);
   const [pushing, setPushing] = useState(false);
+  const [pushBranch, setPushBranch] = useState('');
   const [receipt, setReceipt] = useState<ProjectPushReceipt | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
@@ -410,12 +417,23 @@ export function ProjectsSurface({
       busy
     )
       return;
+    const target = pushBranch.trim();
+    const host = remoteHost(selected.origin_url);
+    const newBranch = target.length > 0 && target !== status.branch;
     Alert.alert(
       t('projects.pushTitle'),
-      t('projects.pushBody', {
-        branch: status.branch,
-        remote: selected.origin_url,
-      }),
+      newBranch
+        ? t('projects.pushBodyNewBranch', {
+            branch: status.branch,
+            target,
+            host,
+            remote: selected.origin_url,
+          })
+        : t('projects.pushBody', {
+            branch: status.branch,
+            host,
+            remote: selected.origin_url,
+          }),
       [
         { text: t('common.cancel'), style: 'cancel' },
         {
@@ -427,9 +445,11 @@ export function ProjectsSurface({
             setNotice(null);
             LocalProjects.push(selected.id, {
               httpsProxyUrl: preferences.gitHttpsProxyUrl,
+              ...(newBranch ? { branch: target } : {}),
             })
               .then(result => {
                 setNotice(t('projects.pushSuccess'));
+                setPushBranch('');
                 if (result.receipt !== undefined) {
                   setReceipt(result.receipt);
                 }
@@ -444,6 +464,10 @@ export function ProjectsSurface({
                     : '';
                 if (code === 'non-fast-forward') {
                   setError(t('projects.pushNonFastForward'));
+                } else if (code === 'rejected') {
+                  setError(t('projects.pushRejected'));
+                } else if (code === 'conflict') {
+                  setError(t('projects.pushBranchConflict'));
                 } else if (code === 'timeout') {
                   setError(t('projects.pushTimeout'));
                 } else if (code === 'cancelled') {
@@ -464,7 +488,15 @@ export function ProjectsSurface({
         },
       ],
     );
-  }, [busy, loadDetail, preferences.gitHttpsProxyUrl, selected, status, t]);
+  }, [
+    busy,
+    loadDetail,
+    preferences.gitHttpsProxyUrl,
+    pushBranch,
+    selected,
+    status,
+    t,
+  ]);
 
   const cancelPush = useCallback(() => {
     if (selected === null || !pushing) return;
@@ -840,6 +872,15 @@ export function ProjectsSurface({
                       </Text>
                     </Pressable>
                   )}
+                  <Field
+                    autoCapitalize="none"
+                    autoCorrect={false}
+                    label={t('projects.pushBranchLabel')}
+                    placeholder={t('projects.pushBranchPlaceholder')}
+                    styles={styles}
+                    value={pushBranch}
+                    onChangeText={setPushBranch}
+                  />
                   <Pressable
                     accessibilityLabel={t('projects.push')}
                     accessibilityRole="button"

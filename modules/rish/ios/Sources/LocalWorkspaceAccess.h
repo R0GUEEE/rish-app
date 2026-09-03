@@ -148,12 +148,6 @@ FOUNDATION_EXPORT BOOL DSHLocalWorkspaceValidateBindingRevisionAdvance(
                               expectedBindingRevision:(NSUInteger)revision
                                                error:(NSError **)error;
 
-/// Reverse scan: the workspace id whose legacy-owned record carries the given
-/// legacy project UUID. Used to scope git push credentials per workspace.
-/// Returns nil (with *error nil) when the project is not registered yet.
-- (nullable NSString *)workspaceIdForLegacyProjectId:(NSString *)projectId
-                                                error:(NSError **)error;
-
 /// Task B Rish-owned Files-visible root creation. The native implementation
 /// accepts only the bounded fields from the bridge create request and returns
 /// metadata-only WorkspaceDescriptorV2 dictionaries.
