@@ -32,9 +32,18 @@ class AppDelegate: UIResponder, UIApplicationDelegate {
 
     window = UIWindow(frame: UIScreen.main.bounds)
 
+    // QA fixture gate: "simctl launch <udid> <bundle> -DSHSeedMarkdownDemo"
+    // seeds a markdown rendering demo conversation. Absent the argument,
+    // production launches are unchanged.
+    var initialProperties: [AnyHashable: Any] = [:]
+    if ProcessInfo.processInfo.arguments.contains("-DSHSeedMarkdownDemo") {
+      initialProperties["dshSeedMarkdownDemo"] = true
+    }
+
     factory.startReactNative(
       withModuleName: "DSHMobile",
       in: window,
+      initialProperties: initialProperties,
       launchOptions: launchOptions
     )
 

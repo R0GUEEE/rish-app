@@ -162,9 +162,13 @@ export function MessageList({
               <Text style={styles.role}>{t('messages.role.assistant')}</Text>
             </View>
             {message.blocks === undefined ? (
-              <MarkdownText markdown={message.text} />
+              <MarkdownText
+                attachments={message.attachments}
+                markdown={message.text}
+              />
             ) : (
               <StructuredContent
+                attachments={message.attachments}
                 autoExpandTools={autoExpandTools}
                 blocks={message.blocks}
                 labels={structuredLabels}

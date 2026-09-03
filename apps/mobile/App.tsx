@@ -9,25 +9,29 @@ import {
 } from './src/presentation/AppPresentation';
 import { HomeScreen } from './src/screens/HomeScreen';
 
-export default function App() {
+export default function App({
+  dshSeedMarkdownDemo,
+}: {
+  dshSeedMarkdownDemo?: boolean;
+}) {
   const preferencesStore = useMemo(() => createPreferencesStore(), []);
   return (
     <SafeAreaProvider>
       <AppPresentationProvider store={preferencesStore}>
-        <AppChrome />
+        <AppChrome seedMarkdownDemo={dshSeedMarkdownDemo === true} />
       </AppPresentationProvider>
     </SafeAreaProvider>
   );
 }
 
-function AppChrome() {
+function AppChrome({ seedMarkdownDemo }: { seedMarkdownDemo: boolean }) {
   const { resolvedTheme } = useAppPresentation();
   return (
     <>
       <StatusBar
         barStyle={resolvedTheme === 'dark' ? 'light-content' : 'dark-content'}
       />
-      <HomeScreen />
+      <HomeScreen seedMarkdownDemo={seedMarkdownDemo} />
     </>
   );
 }

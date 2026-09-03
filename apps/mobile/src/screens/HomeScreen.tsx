@@ -126,6 +126,7 @@ import {
 } from '../project-context';
 import { useAppPresentation } from '../presentation/AppPresentation';
 import { fonts, hitSlop, type ThemePalette } from '../theme';
+import { seedMarkdownDemoConversation } from '../dev/markdownDemo';
 import { SessionSnapshots } from '../native/SessionSnapshots';
 import { AgentRuntime } from '../native/AgentRuntime';
 import {
@@ -563,7 +564,11 @@ function displayMessages(
   });
 }
 
-export function HomeScreen() {
+export function HomeScreen({
+  seedMarkdownDemo = false,
+}: {
+  seedMarkdownDemo?: boolean;
+}) {
   const insets = useSafeAreaInsets();
   const {
     colors,
@@ -1883,6 +1888,17 @@ export function HomeScreen() {
     started.current = true;
     bootstrap().catch(() => undefined);
   }, [bootstrap, sessionSnapshotsAvailable]);
+
+  // QA fixture: with -DSHSeedMarkdownDemo the Simulator seeds one
+  // markdown-demo conversation after bootstrap, unless a session restored.
+  const markdownSeedAppliedRef = useRef(false);
+  useEffect(() => {
+    if (!seedMarkdownDemo || !lifecycleBootstrapReady) return;
+    if (markdownSeedAppliedRef.current) return;
+    markdownSeedAppliedRef.current = true;
+    seedMarkdownDemoConversation(store);
+    setChatState(store.getState());
+  }, [lifecycleBootstrapReady, seedMarkdownDemo, store]);
 
   const activeConversation = selectActiveConversation(chatState);
   const activeProjectId = activeConversation?.projectId ?? null;

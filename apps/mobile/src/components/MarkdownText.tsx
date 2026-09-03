@@ -1,184 +1,132 @@
 import React, { useMemo } from 'react';
 import { ScrollView, StyleSheet, Text, View } from 'react-native';
 
+import { parseMarkdownBlocks } from '../markdown/blocks';
+import { tokenizeInline } from '../markdown/inline';
 import { useAppPresentation } from '../presentation/AppPresentation';
+import type { AttachmentDescriptor } from '../state';
 import { fonts, type ThemePalette } from '../theme';
+import { InlineMarkdown } from './InlineMarkdown';
+import { MarkdownMathBlock } from './MarkdownMath';
+import { MarkdownTable } from './MarkdownTable';
+import { VerbatimSourceBlock } from './MarkdownMath';
 
-type Segment =
-  | { type: 'text'; value: string }
-  | { type: 'code'; value: string; language: string };
-
-function segments(markdown: string): Segment[] {
-  const result: Segment[] = [];
-  const fence = /```([^\n`]*)\n([\s\S]*?)```/gu;
-  let cursor = 0;
-  for (const match of markdown.matchAll(fence)) {
-    const index = match.index ?? 0;
-    if (index > cursor)
-      result.push({ type: 'text', value: markdown.slice(cursor, index) });
-    result.push({
-      type: 'code',
-      language: (match[1] ?? '').trim(),
-      value: (match[2] ?? '').replace(/\n$/u, ''),
-    });
-    cursor = index + match[0].length;
-  }
-  if (cursor < markdown.length)
-    result.push({ type: 'text', value: markdown.slice(cursor) });
-  return result;
-}
-
-function renderInline(
-  value: string,
-  styles: ReturnType<typeof createStyles>,
-  bold: boolean,
-  keyPrefix: string,
-): React.ReactNode[] {
-  const nodes: React.ReactNode[] = [];
-  let buffer = '';
-  let nodeCount = 0;
-  const flush = () => {
-    if (buffer.length > 0) {
-      const text = buffer;
-      nodeCount += 1;
-      nodes.push(
-        bold ? (
-          <Text key={`${keyPrefix}-t-${nodeCount}`} style={styles.bold}>
-            {text}
-          </Text>
-        ) : (
-          <Text key={`${keyPrefix}-t-${nodeCount}`}>{text}</Text>
-        ),
-      );
-      buffer = '';
-    }
-  };
-
-  let i = 0;
-  while (i < value.length) {
-    if (value[i] === '`') {
-      const end = value.indexOf('`', i + 1);
-      if (end > i + 1) {
-        flush();
-        nodeCount += 1;
-        nodes.push(
-          <Text
-            key={`${keyPrefix}-c-${nodeCount}`}
-            style={styles.inlineCode}
-          >
-            {value.slice(i + 1, end)}
-          </Text>,
-        );
-        i = end + 1;
-        continue;
-      }
-    }
-    if (!bold && value.startsWith('**', i)) {
-      // CommonMark spacing rule: the delimiter run may not be followed or
-      // preceded by a space, otherwise it stays literal.
-      const opensCleanly = value[i + 2] !== undefined && value[i + 2] !== ' ';
-      let end = opensCleanly ? value.indexOf('**', i + 2) : -1;
-      if (end !== -1 && (end === i + 2 || value[end - 1] === ' ')) end = -1;
-      if (end !== -1) {
-        flush();
-        nodeCount += 1;
-        const inner = value.slice(i + 2, end);
-        nodes.push(
-          <Text key={`${keyPrefix}-b-${nodeCount}`} style={styles.bold}>
-            {renderInline(inner, styles, true, `${keyPrefix}-b-${nodeCount}`)}
-          </Text>,
-        );
-        i = end + 2;
-        continue;
-      }
-    }
-    buffer += value[i];
-    i += 1;
-  }
-  flush();
-  return nodes;
-}
-
-function inlineRich(
-  value: string,
-  styles: ReturnType<typeof createStyles>,
-) {
-  return renderInline(value, styles, false, 'r');
-}
-
-export function MarkdownText({ markdown }: { markdown: string }) {
+export function MarkdownText({
+  markdown,
+  attachments,
+}: {
+  markdown: string;
+  attachments?: readonly AttachmentDescriptor[];
+}) {
   const { colors } = useAppPresentation();
   const styles = useMemo(() => createStyles(colors), [colors]);
+  const blocks = useMemo(() => parseMarkdownBlocks(markdown), [markdown]);
   return (
     <View style={styles.root}>
-      {segments(markdown).map((segment, segmentIndex) => {
-        if (segment.type === 'code') {
-          return (
-            <View key={`code-${segmentIndex}`} style={styles.codeCard}>
-              {segment.language.length > 0 && (
-                <Text style={styles.language}>
-                  {segment.language.toLocaleUpperCase()}
-                </Text>
-              )}
-              <ScrollView horizontal showsHorizontalScrollIndicator={false}>
-                <Text selectable style={styles.code}>
-                  {segment.value}
-                </Text>
-              </ScrollView>
-            </View>
-          );
-        }
-        return (
-          <View key={`text-${segmentIndex}`} style={styles.textGroup}>
-            {segment.value.split('\n').map((line, lineIndex) => {
-              const trimmed = line.trim();
-              if (trimmed.length === 0)
-                return <View key={`space-${lineIndex}`} style={styles.space} />;
-              if (/^#{1,3}\s/u.test(trimmed)) {
-                const level = trimmed.match(/^#+/u)?.[0].length ?? 1;
-                return (
-                  <Text
-                    key={`heading-${lineIndex}`}
-                    selectable
-                    style={[styles.heading, level > 1 && styles.headingSmall]}
-                  >
-                    {inlineRich(trimmed.replace(/^#{1,3}\s+/u, ''), styles)}
+      {blocks.map((block, blockIndex) => {
+        switch (block.kind) {
+          case 'code':
+            return (
+              <View key={'code-' + blockIndex} style={styles.codeCard}>
+                {block.language.length > 0 && (
+                  <Text style={styles.language}>
+                    {block.language.toLocaleUpperCase()}
                   </Text>
-                );
-              }
-              if (/^[-*]\s/u.test(trimmed)) {
-                return (
-                  <View key={`bullet-${lineIndex}`} style={styles.bulletRow}>
-                    <Text style={styles.bullet}>•</Text>
-                    <Text selectable style={styles.paragraph}>
-                      {inlineRich(trimmed.slice(2), styles)}
-                    </Text>
-                  </View>
-                );
-              }
-              if (/^>\s?/u.test(trimmed)) {
-                return (
-                  <View key={`quote-${lineIndex}`} style={styles.quote}>
-                    <Text selectable style={styles.quoteText}>
-                      {inlineRich(trimmed.replace(/^>\s?/u, ''), styles)}
-                    </Text>
-                  </View>
-                );
-              }
-              return (
-                <Text
-                  key={`line-${lineIndex}`}
-                  selectable
-                  style={styles.paragraph}
-                >
-                  {inlineRich(line, styles)}
-                </Text>
-              );
-            })}
-          </View>
-        );
+                )}
+                <ScrollView horizontal showsHorizontalScrollIndicator={false}>
+                  <Text selectable style={styles.code}>
+                    {block.value}
+                  </Text>
+                </ScrollView>
+              </View>
+            );
+          case 'math':
+            return (
+              <MarkdownMathBlock key={'math-' + blockIndex} source={block.source} />
+            );
+          case 'verbatim':
+            return (
+              <VerbatimSourceBlock
+                key={'verbatim-' + blockIndex}
+                source={block.source}
+              />
+            );
+          case 'table':
+            return (
+              <MarkdownTable
+                attachments={attachments}
+                key={'table-' + blockIndex}
+                table={block.table}
+              />
+            );
+          case 'lines':
+            return (
+              <View key={'text-' + blockIndex} style={styles.textGroup}>
+                {block.lines.map((line, lineIndex) =>
+                  renderLine(line, lineIndex, styles, attachments),
+                )}
+              </View>
+            );
+        }
       })}
     </View>
+  );
+}
+
+function renderLine(
+  line: string,
+  lineIndex: number,
+  styles: ReturnType<typeof createStyles>,
+  attachments: readonly AttachmentDescriptor[] | undefined,
+): React.ReactNode {
+  const trimmed = line.trim();
+  if (trimmed.length === 0)
+    return <View key={'space-' + lineIndex} style={styles.space} />;
+  if (/^#{1,3}\s/u.test(trimmed)) {
+    const level = trimmed.match(/^#+/u)?.[0].length ?? 1;
+    return (
+      <InlineMarkdown
+        attachments={attachments}
+        key={'heading-' + lineIndex}
+        selectable
+        textStyle={[styles.heading, level > 1 && styles.headingSmall]}
+        tokens={tokenizeInline(trimmed.replace(/^#{1,3}\s+/u, ''))}
+      />
+    );
+  }
+  if (/^[-*]\s/u.test(trimmed)) {
+    return (
+      <View key={'bullet-' + lineIndex} style={styles.bulletRow}>
+        <Text style={styles.bullet}>•</Text>
+        <InlineMarkdown
+          attachments={attachments}
+          selectable
+          textStyle={styles.paragraph}
+          tokens={tokenizeInline(trimmed.slice(2))}
+        />
+      </View>
+    );
+  }
+  if (/^>\s?/u.test(trimmed)) {
+    return (
+      <View key={'quote-' + lineIndex} style={styles.quote}>
+        <InlineMarkdown
+          attachments={attachments}
+          selectable
+          textStyle={styles.quoteText}
+          tokens={tokenizeInline(trimmed.replace(/^>\s?/u, ''))}
+        />
+      </View>
+    );
+  }
+  return (
+    <InlineMarkdown
+      attachments={attachments}
+      key={'line-' + lineIndex}
+      selectable
+      textStyle={styles.paragraph}
+      tokens={tokenizeInline(line)}
+    />
   );
 }
 
@@ -219,13 +167,6 @@ const createStyles = (colors: ThemePalette) =>
       fontFamily: fonts.body,
       fontSize: 15,
       lineHeight: 22,
-    },
-    bold: { fontWeight: '700' },
-    inlineCode: {
-      color: colors.accent,
-      fontFamily: fonts.mono,
-      fontSize: 14,
-      backgroundColor: colors.surfaceRaised,
     },
     codeCard: {
       borderRadius: 14,

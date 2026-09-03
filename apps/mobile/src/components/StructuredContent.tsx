@@ -10,6 +10,7 @@ import Clock from 'lucide-react-native/icons/clock';
 import LoaderCircle from 'lucide-react-native/icons/loader-circle';
 
 import { useAppPresentation } from '../presentation/AppPresentation';
+import type { AttachmentDescriptor } from '../state';
 import { fonts, type ThemePalette } from '../theme';
 import { AppIcon } from './AppIcon';
 import { MarkdownText } from './MarkdownText';
@@ -64,11 +65,13 @@ export function StructuredContent({
   autoExpandTools = false,
   showReasoning = true,
   labels: labelOverrides,
+  attachments,
 }: {
   blocks: readonly StructuredBlock[];
   autoExpandTools?: boolean;
   showReasoning?: boolean;
   labels?: LabelOverrides;
+  attachments?: readonly AttachmentDescriptor[];
 }) {
   const { t } = useAppPresentation();
   const labels = useMemo<Labels>(
@@ -128,7 +131,13 @@ export function StructuredContent({
     <View style={styles.root}>
       {blocks.map(block => {
         if (block.type === 'text') {
-          return <MarkdownText key={block.id} markdown={block.text} />;
+          return (
+            <MarkdownText
+              attachments={attachments}
+              key={block.id}
+              markdown={block.text}
+            />
+          );
         }
         if (block.type === 'reasoning') {
           return showReasoning ? (
