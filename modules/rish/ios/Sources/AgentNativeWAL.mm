@@ -1809,7 +1809,8 @@ static BOOL DSHAgentWALAuthorityShape(NSDictionary *authority) {
   }
   if ([root[@"kind"] isEqualToString:@"project"] &&
       [capabilities containsObject:@"git_push"]) {
-    expectedTools[@"git_push"] = @"confirm_once";
+    // git_push follows the git_commit pattern (see AgentToolRegistry).
+    expectedTools[@"git_push"] = @"conversation_confirm";
   }
   if (expectedTools.count != [(NSArray *)authority[@"registry"][@"tools"] count]) {
     return NO;
