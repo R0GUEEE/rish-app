@@ -1803,6 +1803,7 @@ static NSSet<NSString *> *DSHAgentWALOperationKinds(void) {
       @"prepare_agent_tool_batch", @"bind_agent_approval",
       @"execute_agent_tool", @"cancel_agent_attempt", @"recover_agent_attempt",
       @"finalize_agent_attempt", @"discard_agent_attempt",
+      @"interrupt_agent_attempt",
     ]];
   });
   return values;

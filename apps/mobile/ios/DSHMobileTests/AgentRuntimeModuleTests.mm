@@ -1857,37 +1857,96 @@ DSH_RECORD(queryAgentCleanup)
   return [value isKindOfClass:NSMutableDictionary.class] ? value : nil;
 }
 
-- (void)testEvidenceScenarioStaleAttemptsInterruptedThenFreshAttemptPrepares {
-  // Loads the real pulled device files (27-scenario-a4-persistence-block):
-  // the schema-9 session envelope written by launch
-  // fdefd001-889c-460d-9886-afd3886fc7f5 and the agent WAL with intent rows,
-  // closed write batches, and active reservations.  The session store is
-  // constructed with a different launch id, modelling the relaunch that must
-  // interrupt every non-terminal attempt.
+/// Evidence harness: the real pulled device files
+/// (27-scenario-a4-persistence-block): the schema-9 session envelope written
+/// by launch fdefd001-889c-460d-9886-afd3886fc7f5 and the agent WAL with
+/// intent rows, closed write batches, and active reservations.  The session
+/// store is constructed with a different launch id, modelling the relaunch
+/// that must interrupt every non-terminal attempt.  Returns nil when the
+/// bundle fixtures cannot be staged.
+- (NSDictionary *)evidenceHarnessNamed:(NSString *)name {
   NSData *envelopeBytes = [self bundleFixtureBytesNamed:
       @"scenario-a4-session-envelope"];
   NSData *walBytes = [self bundleFixtureBytesNamed:@"scenario-a4-wal"];
   XCTAssertNotNil(envelopeBytes);
   XCTAssertNotNil(walBytes);
-  if (envelopeBytes == nil || walBytes == nil) return;
+  if (envelopeBytes == nil || walBytes == nil) return nil;
 
   NSURL *sessionRoot = [self.rootURL
-      URLByAppendingPathComponent:@"evidence-session" isDirectory:YES];
+      URLByAppendingPathComponent:[name stringByAppendingString:@"-session"]
+                      isDirectory:YES];
   NSURL *sessionURL = [sessionRoot URLByAppendingPathComponent:@"sessions.json"];
   XCTAssertTrue([NSFileManager.defaultManager createDirectoryAtURL:sessionRoot
       withIntermediateDirectories:YES
       attributes:@{ NSFilePosixPermissions : @0700 } error:nil]);
   XCTAssertTrue([envelopeBytes writeToURL:sessionURL
                                  options:NSDataWritingAtomic error:nil]);
+  // Stage the pulled file exactly as the shipped store would have left it:
+  // private mode, first-unlock protection, excluded from backup.
+  XCTAssertTrue(([NSFileManager.defaultManager
+      setAttributes:@{ NSFilePosixPermissions : @0600 }
+       ofItemAtPath:sessionURL.path error:nil]));
+#if TARGET_OS_SIMULATOR
+  (void)[sessionURL setResourceValue:
+      NSURLFileProtectionCompleteUntilFirstUserAuthentication
+                              forKey:NSURLFileProtectionKey error:nil];
+  (void)[sessionURL setResourceValue:@YES
+                              forKey:NSURLIsExcludedFromBackupKey error:nil];
+#else
+  XCTAssertTrue(([NSFileManager.defaultManager
+      setAttributes:@{ NSFileProtectionKey :
+          NSFileProtectionCompleteUntilFirstUserAuthentication }
+       ofItemAtPath:sessionURL.path error:nil]));
+  XCTAssertTrue([sessionURL setResourceValue:@YES
+                                      forKey:NSURLIsExcludedFromBackupKey
+                                       error:nil]);
+#endif
+
+  // The device pull skipped the hidden commit-tombstone ledger next to
+  // sessions.json; the store refuses to advance a generation it cannot prove
+  // against that ledger, so stage a minimal valid ledger at the pulled
+  // generation with the same protection.
+  NSDictionary *pulledEnvelope = [NSJSONSerialization JSONObjectWithData:envelopeBytes
+      options:0 error:nil];
+  XCTAssertTrue([pulledEnvelope isKindOfClass:NSDictionary.class]);
+  NSString *tombstones = [NSString stringWithFormat:
+      @"{\"generation\":%@,\"operation_ids\":[],\"schema_version\":1}",
+      pulledEnvelope[@"generation"]];
+  NSURL *tombstoneURL = [sessionRoot
+      URLByAppendingPathComponent:@".sessions.commit-tombstones"];
+  XCTAssertTrue([[tombstones dataUsingEncoding:NSUTF8StringEncoding]
+      writeToURL:tombstoneURL options:NSDataWritingAtomic error:nil]);
+  XCTAssertTrue(([NSFileManager.defaultManager
+      setAttributes:@{ NSFilePosixPermissions : @0600 }
+       ofItemAtPath:tombstoneURL.path error:nil]));
+#if TARGET_OS_SIMULATOR
+  (void)[tombstoneURL setResourceValue:
+      NSURLFileProtectionCompleteUntilFirstUserAuthentication
+                                forKey:NSURLFileProtectionKey error:nil];
+  (void)[tombstoneURL setResourceValue:@YES
+                                forKey:NSURLIsExcludedFromBackupKey error:nil];
+#else
+  XCTAssertTrue(([NSFileManager.defaultManager
+      setAttributes:@{ NSFileProtectionKey :
+          NSFileProtectionCompleteUntilFirstUserAuthentication }
+       ofItemAtPath:tombstoneURL.path error:nil]));
+  XCTAssertTrue([tombstoneURL setResourceValue:@YES
+                                        forKey:NSURLIsExcludedFromBackupKey
+                                         error:nil]);
+#endif
 
   NSURL *walRoot = [self.rootURL
-      URLByAppendingPathComponent:@"evidence-wal" isDirectory:YES];
+      URLByAppendingPathComponent:[name stringByAppendingString:@"-wal"]
+                      isDirectory:YES];
   XCTAssertTrue([NSFileManager.defaultManager createDirectoryAtURL:walRoot
       withIntermediateDirectories:YES
       attributes:@{ NSFilePosixPermissions : @0700 } error:nil]);
-  XCTAssertTrue([walBytes writeToURL:[walRoot
-      URLByAppendingPathComponent:@"agent-native-wal-v1.json"]
-                             options:NSDataWritingAtomic error:nil]);
+  NSURL *walURL = [walRoot URLByAppendingPathComponent:@"agent-native-wal-v1.json"];
+  XCTAssertTrue([walBytes writeToURL:walURL options:NSDataWritingAtomic
+                               error:nil]);
+  XCTAssertTrue(([NSFileManager.defaultManager
+      setAttributes:@{ NSFilePosixPermissions : @0600 }
+       ofItemAtPath:walURL.path error:nil]));
 
   NSString *relaunchId = @"eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee";
   DSHSessionSnapshotStore *sessions = [[DSHSessionSnapshotStore alloc]
@@ -1904,7 +1963,7 @@ DSH_RECORD(queryAgentCleanup)
   XCTAssertEqualObjects(loaded[@"writer_launch_instance_id"],
       @"fdefd001-889c-460d-9886-afd3886fc7f5");
   XCTAssertEqualObjects(loaded[@"current_launch_instance_id"], relaunchId);
-  if (![loaded[@"status"] isEqualToString:@"present"]) return;
+  if (![loaded[@"status"] isEqualToString:@"present"]) return nil;
 
   DSHAgentNativeWAL *wal = [[DSHAgentNativeWAL alloc]
       initWithRootURL:walRoot clock:^NSDate * { return NSDate.date; }
@@ -1916,23 +1975,17 @@ DSH_RECORD(queryAgentCleanup)
   NSDictionary *walSnapshot = [wal snapshotWithError:&walError];
   XCTAssertNil(walError);
   XCTAssertNotNil(walSnapshot);
-  if (walSnapshot == nil) return;
+  if (walSnapshot == nil) return nil;
   // The pulled WAL must contain the exact zombie residue: intent rows,
   // active reservations, and prepared authorities.
   NSUInteger intents = 0;
   for (NSDictionary *row in walSnapshot[@"ledger"]) {
     if ([row[@"state"] isEqualToString:@"intent"]) intents += 1;
   }
-  NSUInteger reservations = [(NSArray *)walSnapshot[@"reservations"] count];
-  NSUInteger authorities = [(NSArray *)walSnapshot[@"authorities"] count];
   XCTAssertGreaterThanOrEqual(intents, 3U);
-  XCTAssertGreaterThanOrEqual(reservations, 5U);
-  XCTAssertGreaterThanOrEqual(authorities, 30U);
+  XCTAssertGreaterThanOrEqual([(NSArray *)walSnapshot[@"reservations"] count], 5U);
+  XCTAssertGreaterThanOrEqual([(NSArray *)walSnapshot[@"authorities"] count], 30U);
 
-  // Interrupt every stale non-terminal attempt through the coordinator proof
-  // gate: the persisted session attempt must be terminal with
-  // E_ATTEMPT_INTERRUPTED and a matching failed cleanup entry.  This models
-  // the production JS drain that runs after the recovered candidate commits.
   NSDictionary *evidenceRoot = @{ @"schema_version" : @1,
     @"kind" : @"workspace",
     @"workspace_id" : @"87640873-d08d-4a24-a326-78d72cdd2ec7",
@@ -1947,7 +2000,6 @@ DSH_RECORD(queryAgentCleanup)
   DSHAgentPreparedAttemptStore *prepared = [[DSHAgentPreparedAttemptStore alloc]
       initWithWAL:wal rootResolver:resolver sessionSnapshotStore:sessions
       transcriptStore:transcripts];
-  DSHAgentRoundJournal *rounds = [[DSHAgentRoundJournal alloc] initWithWAL:wal];
   DSHAgentExecutionLedger *ledger = [[DSHAgentExecutionLedger alloc]
       initWithWAL:wal];
   DSHAgentRuntimeCoordinator *coordinator = [[DSHAgentRuntimeCoordinator alloc]
@@ -1956,57 +2008,22 @@ DSH_RECORD(queryAgentCleanup)
       executionService:(DSHAgentToolExecutionService *)(id)NSNull.null
       transcripts:transcripts ledger:ledger];
   XCTAssertNotNil(coordinator);
-
-  // Interrupt the approval-pending zombie (b766c10b) that owns three intent
-  // write_file rows, a closed write batch, and an 11-byte reservation.
-  NSString *approvalAttempt = @"b766c10b-4e61-449c-a30d-2a0b3f0041bb";
-  NSString *approvalTask = @"10ab1ccb-df2a-41bb-a70b-e33781ddb467";
-  NSString *approvalConversation = @"70c1fefc-cd94-4849-bbc7-1fc3de40c9cd";
   NSDictionary *envelope = [NSJSONSerialization JSONObjectWithData:envelopeBytes
       options:0 error:nil];
-  NSError *interruptError = nil;
-  NSDictionary *interrupted = [coordinator interruptAgentAttempt:@{
-    @"schema_version" : @2,
-    @"operation_id" : @"fbfbfbfb-fbfb-4fbf-8fbf-fbfbfbfbfbfb",
-    @"cleanup_id" : @"fb000001-0000-4000-8000-000000000001",
-    @"task_id" : approvalTask,
-    @"conversation_id" : approvalConversation,
-    @"attempt_id" : approvalAttempt,
-    @"transcript_ref" : @"9ac4118f-8cce-46e9-bdf4-96922b0b061f",
-    @"transcript_sha256" :
-        @"2a024b41a771d837e827c2d6db88e1a2bdd6b623f220574ec46978491f8cfb3d",
-    @"reason" : @"failed",
-    @"expected_session_generation" : envelope[@"generation"],
-    @"expected_session_sha256" : envelope[@"session_sha256"],
-  } error:&interruptError];
-  XCTAssertNil(interruptError);
-  XCTAssertEqualObjects(interrupted[@"status"], @"discarded");
+  XCTAssertTrue([envelope isKindOfClass:NSDictionary.class]);
+  return @{ @"wal" : wal, @"sessions" : sessions, @"prepared" : prepared,
+            @"coordinator" : coordinator, @"envelope" : envelope };
+}
 
-  walSnapshot = [wal snapshotWithError:&walError];
-  XCTAssertNil(walError);
-  // The stale attempt's authority, transcript, rounds, batches, dispatch
-  // rows, and reservations are all gone; its intent rows can never replay.
-  NSUInteger approvalResidue = 0;
-  for (NSDictionary *authority in walSnapshot[@"authorities"]) {
-    if ([authority[@"attempt_id"] isEqual:approvalAttempt]) approvalResidue += 1;
-  }
-  for (NSDictionary *row in walSnapshot[@"ledger"]) {
-    if ([row[@"locator"][@"attempt_id"] isEqual:approvalAttempt]) approvalResidue += 1;
-  }
-  for (NSDictionary *row in walSnapshot[@"reservations"]) {
-    if ([row[@"attempt_id"] isEqual:approvalAttempt]) approvalResidue += 1;
-  }
-  for (NSDictionary *row in walSnapshot[@"batches"]) {
-    if ([row[@"attempt_id"] isEqual:approvalAttempt]) approvalResidue += 1;
-  }
-  XCTAssertEqual(approvalResidue, 0U);
-
-  // A fresh attempt in a DIFFERENT conversation of the same workspace now
-  // prepares successfully against the same evidence session (the exact
-  // operation that failed with E_AGENT_PERSISTENCE on the device).
+/// The exact prepare request the device issued for the fresh attempt in the
+/// Smoke conversation (a DIFFERENT conversation bound to the same workspace
+/// as the approval-pending zombie).
+- (NSDictionary *)evidenceFreshPrepareRequestWithOperationId:(NSString *)operationId
+                                                   attemptId:(NSString *)newAttempt
+                                           sessionGeneration:(NSNumber *)sessionGeneration
+                                               sessionSHA256:(NSString *)sessionSHA256 {
   NSString *newConversation = @"db9c06db-7880-4ba0-8fae-54a230584e3f";
   NSString *newTask = @"af0322f0-abc4-461c-a298-7ae81bc7ae98";
-  NSString *newAttempt = @"3c9ff09d-7002-44b8-a41d-c60fd8a435a9";
   NSArray *visibleIds = @[
     @"17f69ddf-c2dc-4b6f-b3ed-404a4c22c600",
     @"06c9a91f-fbbe-490a-a4d4-42971afc59a8",
@@ -2033,22 +2050,21 @@ DSH_RECORD(queryAgentCleanup)
   NSString *visibleDigest = DSHAgentHJ(@"visible-history",
       @{ @"messages" : visibleMessages }, nil);
   XCTAssertNotNil(visibleDigest);
-  NSError *prepareError = nil;
-  NSDictionary *preparedResult = [prepared prepareAgentAttemptWithRequest:@{
+  return @{
     @"schema_version" : @2,
-    @"operation_id" : @"fafafafa-fafa-4faf-8faf-fafafafafafa",
+    @"operation_id" : operationId,
     @"controller_cas" : @{ @"schema_version" : @1,
       @"conversation_id" : newConversation,
       @"task_id" : newTask,
       @"attempt_id" : newAttempt,
       @"expected_controller_generation" : @0,
       @"expected_journal_revision" : @0,
-      @"expected_session_generation" : envelope[@"generation"],
-      @"expected_session_sha256" : envelope[@"session_sha256"] },
+      @"expected_session_generation" : sessionGeneration,
+      @"expected_session_sha256" : sessionSHA256 },
     @"committed_checkpoint" : @{ @"schema_version" : @1,
       @"journal_revision" : @0,
-      @"session_generation" : envelope[@"generation"],
-      @"session_sha256" : envelope[@"session_sha256"] },
+      @"session_generation" : sessionGeneration,
+      @"session_sha256" : sessionSHA256 },
     @"task_id" : newTask,
     @"conversation_id" : newConversation,
     @"attempt_id" : newAttempt,
@@ -2065,7 +2081,193 @@ DSH_RECORD(queryAgentCleanup)
     @"registry_version" : @1,
     @"expected_policy_version" : @"agent-v1",
     @"expected_transcript" : NSNull.null,
-  } error:&prepareError];
+  };
+}
+
+/// Commits a shared JS parity fixture over the present snapshot, modelling
+/// the launch-time CAS migration.  Returns the committed snapshot ref.
+- (NSDictionary *)evidenceCommitFixtureNamed:(NSString *)name
+                                    sessions:(DSHSessionSnapshotStore *)sessions
+                                 operationId:(NSString *)operationId
+                            expectedSnapshot:(NSDictionary *)expectedSnapshot {
+  NSData *bytes = [self bundleFixtureBytesNamed:name];
+  XCTAssertNotNil(bytes);
+  if (bytes == nil) return nil;
+  NSString *candidate = [[[NSString alloc] initWithData:bytes
+      encoding:NSUTF8StringEncoding]
+      stringByTrimmingCharactersInSet:NSCharacterSet.newlineCharacterSet];
+  NSError *casError = nil;
+  NSDictionary *cas = [sessions casPersistSession:@{
+    @"schema_version" : @1,
+    @"operation_id" : operationId,
+    @"expected" : @{ @"schema_version" : @1, @"kind" : @"present",
+                     @"snapshot" : expectedSnapshot },
+    @"candidate_json" : candidate,
+  } error:&casError];
+  XCTAssertNil(casError);
+  XCTAssertEqualObjects(cas[@"status"], @"committed");
+  return [cas[@"status"] isEqualToString:@"committed"] ? cas[@"snapshot"] : nil;
+}
+
+- (NSUInteger)evidenceResidueForAttempt:(NSString *)attemptId
+                                   wal:(DSHAgentNativeWAL *)wal {
+  NSError *walError = nil;
+  NSDictionary *walSnapshot = [wal snapshotWithError:&walError];
+  XCTAssertNil(walError);
+  NSUInteger residue = 0;
+  for (NSDictionary *row in walSnapshot[@"authorities"]) {
+    if ([row[@"attempt_id"] isEqual:attemptId]) residue += 1;
+  }
+  for (NSDictionary *row in walSnapshot[@"transcripts"]) {
+    if ([row[@"attempt_id"] isEqual:attemptId]) residue += 1;
+  }
+  for (NSDictionary *row in walSnapshot[@"ledger"]) {
+    if ([row[@"locator"][@"attempt_id"] isEqual:attemptId]) residue += 1;
+  }
+  for (NSDictionary *row in walSnapshot[@"reservations"]) {
+    if ([row[@"attempt_id"] isEqual:attemptId]) residue += 1;
+  }
+  for (NSDictionary *row in walSnapshot[@"batches"]) {
+    if ([row[@"attempt_id"] isEqual:attemptId]) residue += 1;
+  }
+  for (NSDictionary *row in walSnapshot[@"dispatch"]) {
+    if ([row[@"locator"][@"attempt_id"] isEqual:attemptId]) residue += 1;
+  }
+  return residue;
+}
+
+- (void)testEvidenceUntouchedResidueDoesNotBlockFreshPrepareInOtherConversation {
+  // Root-cause pin for the device E_AGENT_PERSISTENCE: against the pulled WAL
+  // (37 prepared authorities, active write reservations, never-dispatched
+  // intent rows, one finalize operation left in started) and the pulled
+  // session, the exact fresh prepare the device issued for the Smoke
+  // conversation commits.  The stale residue therefore does not block new
+  // attempts at the WAL/session layer; interruption recovery still discards
+  // it so no reservation or intent can outlive its dead writer.
+  NSDictionary *harness = [self evidenceHarnessNamed:@"evidence-untouched"];
+  if (harness == nil) return;
+  DSHAgentNativeWAL *wal = harness[@"wal"];
+  DSHAgentPreparedAttemptStore *prepared = harness[@"prepared"];
+  NSDictionary *envelope = harness[@"envelope"];
+  NSError *prepareError = nil;
+  NSDictionary *result = [prepared prepareAgentAttemptWithRequest:
+      [self evidenceFreshPrepareRequestWithOperationId:
+          @"fafafafa-fafa-4faf-8faf-fafafafafafa"
+          attemptId:@"3c9ff09d-7002-44b8-a41d-c60fd8a435a9"
+          sessionGeneration:envelope[@"generation"]
+          sessionSHA256:envelope[@"session_sha256"]]
+      error:&prepareError];
+  XCTAssertNil(prepareError);
+  XCTAssertEqualObjects(result[@"status"], @"prepared");
+  NSError *walError = nil;
+  NSDictionary *walSnapshot = [wal snapshotWithError:&walError];
+  XCTAssertNil(walError);
+  XCTAssertEqualObjects(walSnapshot[@"generation"], @496);
+  XCTAssertEqual([(NSArray *)walSnapshot[@"authorities"] count], 38U);
+  // The zombie's residue is untouched by an unrelated prepare.
+  XCTAssertGreaterThan([self evidenceResidueForAttempt:
+      @"b766c10b-4e61-449c-a30d-2a0b3f0041bb" wal:wal], 0U);
+}
+
+- (void)testEvidenceScenarioStaleAttemptsInterruptedThenFreshAttemptPrepares {
+  NSDictionary *harness = [self evidenceHarnessNamed:@"evidence"];
+  if (harness == nil) return;
+  DSHAgentNativeWAL *wal = harness[@"wal"];
+  DSHSessionSnapshotStore *sessions = harness[@"sessions"];
+  DSHAgentPreparedAttemptStore *prepared = harness[@"prepared"];
+  DSHAgentRuntimeCoordinator *coordinator = harness[@"coordinator"];
+  NSDictionary *envelope = harness[@"envelope"];
+
+  // 1. Launch-time CAS migration: the JS-recovered session (every
+  //    non-terminal attempt failed/E_ATTEMPT_INTERRUPTED with derived
+  //    cleanup entries) commits over the pulled snapshot.
+  NSDictionary *recoveredSnapshot = [self
+      evidenceCommitFixtureNamed:@"agent-interrupted-recovery-session"
+                        sessions:sessions
+                     operationId:@"fdfdfdfd-fdfd-4fdf-8fdf-fdfdfdfdfdfd"
+                expectedSnapshot:@{ @"schema_version" : @1,
+                  @"generation" : envelope[@"generation"],
+                  @"session_sha256" : envelope[@"session_sha256"] }];
+  if (recoveredSnapshot == nil) return;
+  XCTAssertEqualObjects(recoveredSnapshot[@"generation"],
+      @([envelope[@"generation"] unsignedIntegerValue] + 1));
+
+  // 2. The derived cleanup entry for the approval-pending zombie (b766c10b:
+  //    three intent write_file rows, a closed write batch, an 11-byte
+  //    reservation) comes from the committed session itself.
+  NSData *recoveredBytes = [self bundleFixtureBytesNamed:
+      @"agent-interrupted-recovery-session"];
+  NSDictionary *recovered = [NSJSONSerialization JSONObjectWithData:recoveredBytes
+      options:0 error:nil];
+  NSString *approvalAttempt = @"b766c10b-4e61-449c-a30d-2a0b3f0041bb";
+  NSDictionary *entry = nil;
+  for (NSDictionary *candidate in recovered[@"agent_transcript_cleanup_outbox"]) {
+    if ([candidate[@"attempt_id"] isEqual:approvalAttempt]) entry = candidate;
+  }
+  XCTAssertNotNil(entry);
+  if (entry == nil) return;
+  XCTAssertEqualObjects(entry[@"reason"], @"failed");
+  XCTAssertEqualObjects(entry[@"transcript_ref"],
+      @"9ac4118f-8cce-46e9-bdf4-96922b0b061f");
+  XCTAssertGreaterThan([self evidenceResidueForAttempt:approvalAttempt wal:wal], 0U);
+
+  // 3. The launch drain interrupts the zombie through the coordinator proof
+  //    gate bound to the committed recovered snapshot.
+  NSDictionary *interruptRequest = @{
+    @"schema_version" : @2,
+    @"operation_id" : @"fbfbfbfb-fbfb-4fbf-8fbf-fbfbfbfbfbfb",
+    @"cleanup_id" : entry[@"cleanup_id"],
+    @"task_id" : entry[@"task_id"],
+    @"conversation_id" : entry[@"conversation_id"],
+    @"attempt_id" : approvalAttempt,
+    @"transcript_ref" : entry[@"transcript_ref"],
+    @"transcript_sha256" : entry[@"transcript_sha256"],
+    @"reason" : @"failed",
+    @"expected_session_generation" : recoveredSnapshot[@"generation"],
+    @"expected_session_sha256" : recoveredSnapshot[@"session_sha256"],
+  };
+  NSError *interruptError = nil;
+  NSDictionary *interrupted = [coordinator interruptAgentAttempt:interruptRequest
+                                                            error:&interruptError];
+  XCTAssertNil(interruptError);
+  XCTAssertEqualObjects(interrupted[@"status"], @"discarded");
+  // Authority, transcript, intent rows, reservation, batch, and dispatch rows
+  // are gone: nothing of the zombie can ever replay.
+  XCTAssertEqual([self evidenceResidueForAttempt:approvalAttempt wal:wal], 0U);
+  NSError *walError = nil;
+  NSDictionary *walSnapshot = [wal snapshotWithError:&walError];
+  XCTAssertNil(walError);
+  NSDictionary *cleanupRow = nil;
+  for (NSDictionary *row in walSnapshot[@"cleanup"]) {
+    if ([row[@"cleanup_id"] isEqual:entry[@"cleanup_id"]]) cleanupRow = row;
+  }
+  XCTAssertEqualObjects(cleanupRow[@"status"], @"discarded");
+  XCTAssertEqualObjects(cleanupRow[@"reason"], @"failed");
+  // Replay of the same operation is idempotent.
+  NSDictionary *replay = [coordinator interruptAgentAttempt:interruptRequest
+                                                       error:&interruptError];
+  XCTAssertNil(interruptError);
+  XCTAssertEqualObjects(replay, interrupted);
+
+  // 4. Retry in the Smoke conversation (a DIFFERENT conversation bound to
+  //    the same workspace) persists a fresh attempt in the same turn; the
+  //    native store commits that session and the fresh prepare succeeds
+  //    against it (the operation that failed with E_AGENT_PERSISTENCE on
+  //    the device).
+  NSDictionary *retrySnapshot = [self
+      evidenceCommitFixtureNamed:@"agent-interrupted-retry-session"
+                        sessions:sessions
+                     operationId:@"fefefefe-fefe-4fef-8fef-fefefefefefe"
+                expectedSnapshot:recoveredSnapshot];
+  if (retrySnapshot == nil) return;
+  NSError *prepareError = nil;
+  NSDictionary *preparedResult = [prepared prepareAgentAttemptWithRequest:
+      [self evidenceFreshPrepareRequestWithOperationId:
+          @"fafafafa-fafa-4faf-8faf-fafafafafafa"
+          attemptId:@"9e4fadc3-606e-4019-923c-e970f4bd6c25"
+          sessionGeneration:retrySnapshot[@"generation"]
+          sessionSHA256:retrySnapshot[@"session_sha256"]]
+      error:&prepareError];
   XCTAssertNil(prepareError);
   XCTAssertNotNil(preparedResult);
   XCTAssertEqualObjects(preparedResult[@"status"], @"prepared");

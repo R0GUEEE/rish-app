@@ -1734,6 +1734,222 @@ static NSArray *DSHRuntimeLatestBatchCalls(NSDictionary *state,
   return nil;
 }
 
+typedef NS_OPTIONS(NSUInteger, DSHRuntimeResidueDiscardOptions) {
+  DSHRuntimeResidueDiscardStrict = 0,
+  /// Drop ledger intent rows whose execution was never dispatched.  A
+  /// dispatched intent may have executed and is never silently deleted.
+  DSHRuntimeResidueDiscardUndispatchedIntents = 1 << 0,
+  /// Create the cleanup row when the attempt never went through finalize
+  /// (interruption of a dead writer's still-prepared authority).
+  DSHRuntimeResidueDiscardCreateCleanupRow = 1 << 1,
+};
+
+/// Fail-closed discard of every WAL row owned by one attempt: authority,
+/// transcript, rounds, ledger, reservations, batches, denied calls, dispatch
+/// rows, and the attempt's settled operations.  Shared by discard (after a
+/// committed finalize) and interrupt (a dead writer's prepared authority).
+/// The caller has already proven the authority and started the operation;
+/// this helper validates the cleanup row, refuses while any round outcome or
+/// executed effect is unprovable, and commits the operation into the same
+/// transaction.  Returns the public result, or nil with the mutation error
+/// set and the state untouched.
+static NSDictionary *DSHRuntimeDiscardAttemptResidue(
+    NSMutableDictionary *state,
+    DSHAgentNativeWAL *wal,
+    NSDictionary *request,
+    NSString *operationKind,
+    NSString *requestSHA,
+    DSHRuntimeResidueDiscardOptions options,
+    NSError **mutationError) {
+  NSString *attemptId = request[@"attempt_id"];
+  NSMutableArray *cleanup = [state[@"cleanup"] mutableCopy];
+  NSMutableDictionary *cleanupRow = nil;
+  NSUInteger cleanupIndex = NSNotFound;
+  for (NSUInteger index = 0; index < cleanup.count; index += 1) {
+    NSDictionary *candidate = cleanup[index];
+    if ([candidate[@"cleanup_id"] isEqual:request[@"cleanup_id"]]) {
+      cleanupIndex = index;
+      cleanupRow = [candidate mutableCopy];
+      break;
+    }
+  }
+  if (cleanupRow == nil &&
+      (options & DSHRuntimeResidueDiscardCreateCleanupRow) != 0) {
+    cleanupRow = [@{
+      @"schema_version" : @1,
+      @"cleanup_id" : request[@"cleanup_id"],
+      @"attempt_id" : attemptId,
+      @"transcript_ref" : request[@"transcript_ref"],
+      @"transcript_sha256" : request[@"transcript_sha256"],
+      @"cleanup_owner" : request[@"task_id"],
+      @"reason" : request[@"reason"],
+      @"created_at" : [wal currentTimestamp],
+      @"status" : @"pending",
+    } mutableCopy];
+    [cleanup addObject:cleanupRow];
+    cleanupIndex = cleanup.count - 1;
+  }
+  if (cleanupRow == nil ||
+      ![cleanupRow[@"attempt_id"] isEqual:attemptId] ||
+      ![cleanupRow[@"transcript_ref"] isEqual:request[@"transcript_ref"]] ||
+      ![cleanupRow[@"transcript_sha256"] isEqual:request[@"transcript_sha256"]] ||
+      ![cleanupRow[@"cleanup_owner"] isEqual:request[@"task_id"]] ||
+      ![cleanupRow[@"status"] isEqualToString:@"pending"]) {
+    DSHSetAgentNativeStoreError(mutationError, DSHAgentNativeStoreErrorConflict);
+    return nil;
+  }
+  for (NSDictionary *round in state[@"rounds"]) {
+    if (![round[@"locator"][@"attempt_id"] isEqual:attemptId]) continue;
+    if ([@[@"in_flight", @"cancel_requested", @"unknown", @"ambiguous"]
+            containsObject:round[@"state"]]) {
+      DSHSetAgentNativeStoreError(mutationError,
+                                  DSHAgentNativeStoreErrorConflict);
+      return nil;
+    }
+  }
+  for (NSDictionary *row in state[@"ledger"]) {
+    if (![row[@"locator"][@"attempt_id"] isEqual:attemptId]) continue;
+    NSString *rowState = row[@"state"];
+    if ([@[@"running", @"cancel_requested", @"unknown", @"ambiguous"]
+            containsObject:rowState]) {
+      DSHSetAgentNativeStoreError(mutationError,
+                                  DSHAgentNativeStoreErrorConflict);
+      return nil;
+    }
+    if (![rowState isEqualToString:@"intent"]) continue;
+    if ((options & DSHRuntimeResidueDiscardUndispatchedIntents) == 0) {
+      DSHSetAgentNativeStoreError(mutationError,
+                                  DSHAgentNativeStoreErrorConflict);
+      return nil;
+    }
+    NSDictionary *locator = row[@"locator"];
+    for (NSDictionary *dispatch in state[@"dispatch"]) {
+      if (![dispatch[@"kind"] isEqualToString:@"execution"] ||
+          ![dispatch[@"locator"] isEqual:locator]) continue;
+      if ([dispatch[@"dispatch_state"] isEqualToString:@"dispatched"]) {
+        DSHSetAgentNativeStoreError(mutationError,
+                                    DSHAgentNativeStoreErrorConflict);
+        return nil;
+      }
+    }
+  }
+  NSPredicate *keepAttempt = [NSPredicate predicateWithBlock:
+      ^BOOL(NSDictionary *row, NSDictionary *bindings) {
+    (void)bindings;
+    NSString *candidate = row[@"attempt_id"] ?: row[@"locator"][@"attempt_id"];
+    return ![candidate isEqual:attemptId];
+  }];
+  NSMutableArray *keptOperations = [NSMutableArray array];
+  NSMutableSet *removedOperationIds = [NSMutableSet set];
+  for (NSDictionary *operation in state[@"operations"]) {
+    if ([operation[@"attempt_id"] isEqual:attemptId] &&
+        ![operation[@"operation_id"] isEqual:request[@"operation_id"]]) {
+      NSString *operationState = operation[@"state"];
+      if ([operationState isEqualToString:@"started"] ||
+          [operationState isEqualToString:@"unknown"] ||
+          [operationState isEqualToString:@"ambiguous"]) {
+        DSHSetAgentNativeStoreError(mutationError,
+                                    DSHAgentNativeStoreErrorConflict);
+        return nil;
+      }
+      if (![operationState isEqualToString:@"committed"] &&
+          ![operationState isEqualToString:@"rejected"] &&
+          ![operationState isEqualToString:@"conflict"]) {
+        DSHSetAgentNativeStoreError(mutationError,
+                                    DSHAgentNativeStoreErrorCorrupt);
+        return nil;
+      }
+      [removedOperationIds addObject:operation[@"operation_id"]];
+    } else {
+      [keptOperations addObject:operation];
+    }
+  }
+  NSMutableArray *keptResults = [NSMutableArray array];
+  for (NSDictionary *result in state[@"operation_results"]) {
+    if (![removedOperationIds containsObject:result[@"operation_id"]]) {
+      [keptResults addObject:result];
+    }
+  }
+  NSMutableArray *transcripts = [state[@"transcripts"] mutableCopy];
+  NSIndexSet *transcriptIndexes = [transcripts indexesOfObjectsPassingTest:
+      ^BOOL(NSDictionary *row, NSUInteger index, BOOL *stop) {
+    (void)index; (void)stop;
+    return [row[@"attempt_id"] isEqual:attemptId];
+  }];
+  [transcripts removeObjectsAtIndexes:transcriptIndexes];
+  cleanupRow[@"status"] = @"discarded";
+  cleanup[cleanupIndex] = cleanupRow;
+  state[@"authorities"] = [state[@"authorities"] filteredArrayUsingPredicate:keepAttempt];
+  state[@"rounds"] = [state[@"rounds"] filteredArrayUsingPredicate:keepAttempt];
+  state[@"ledger"] = [state[@"ledger"] filteredArrayUsingPredicate:keepAttempt];
+  state[@"reservations"] = [state[@"reservations"] filteredArrayUsingPredicate:keepAttempt];
+  state[@"batches"] = [state[@"batches"] filteredArrayUsingPredicate:keepAttempt];
+  state[@"denied_calls"] = [state[@"denied_calls"] filteredArrayUsingPredicate:keepAttempt];
+  state[@"dispatch"] = [state[@"dispatch"] filteredArrayUsingPredicate:
+      [NSPredicate predicateWithBlock:^BOOL(NSDictionary *row,
+                                             NSDictionary *bindings) {
+    (void)bindings;
+    return ![row[@"locator"][@"attempt_id"] isEqual:attemptId];
+  }]];
+  state[@"transcripts"] = transcripts;
+  state[@"cleanup"] = cleanup;
+  state[@"operations"] = keptOperations;
+  state[@"operation_results"] = keptResults;
+  NSDictionary *result = @{ @"schema_version" : @2,
+    @"status" : @"discarded", @"operation_id" : request[@"operation_id"],
+    @"cleanup_id" : request[@"cleanup_id"] };
+  NSDictionary *safe = @{ @"schema_version" : @2,
+    @"result_kind" : operationKind, @"result" : result };
+  NSDictionary *operation = DSHAgentNativeWALCommitOperationInState(
+      state, wal, request[@"operation_id"], requestSHA,
+      request[@"task_id"], attemptId, @"committed",
+      @"discarded", @{ @"schema_version" : @2, @"kind" : @"cleanup",
+        @"cleanup_id" : request[@"cleanup_id"] }, @1, safe, mutationError);
+  return operation == nil ? nil : result;
+}
+
+/// Closes an operation whose durable residue is already gone.  Only a
+/// discarded cleanup row that still proves this exact transcript ownership
+/// may close it; the result is committed as already_missing.
+static NSDictionary *DSHRuntimeCommitAlreadyMissing(
+    DSHAgentNativeWAL *wal,
+    NSDictionary *request,
+    NSString *operationKind,
+    NSDictionary *operationQuery,
+    NSError **error) {
+  NSNumber *operationAuthorityRevision =
+      [operationQuery[@"status"] isEqualToString:@"found"]
+      ? operationQuery[@"record"][@"authority_revision"] : @0;
+  NSDictionary *started = DSHAgentNativeWALStartOperation(
+      wal, operationKind, request, request[@"task_id"],
+      request[@"attempt_id"], operationAuthorityRevision, error);
+  if ([started[@"status"] isEqualToString:@"replayed"]) {
+    return started[@"result"][@"result"];
+  }
+  if (started == nil) return nil;
+  NSDictionary *result = @{ @"schema_version" : @2,
+    @"status" : @"already_missing", @"operation_id" : request[@"operation_id"],
+    @"cleanup_id" : request[@"cleanup_id"] };
+  NSDictionary *safe = @{ @"schema_version" : @2,
+    @"result_kind" : operationKind, @"result" : result };
+  NSDictionary *committed = DSHAgentNativeWALCommitOperation(
+      wal, request[@"operation_id"], started[@"request_sha256"],
+      request[@"task_id"], request[@"attempt_id"], @"committed",
+      @"already_missing", @{ @"schema_version" : @2, @"kind" : @"cleanup",
+        @"cleanup_id" : request[@"cleanup_id"] }, @1, safe, error);
+  return committed == nil ? nil : committed[@"result"][@"result"];
+}
+
+static BOOL DSHRuntimeExactDiscardedCleanup(NSDictionary *cleanupRow,
+                                            NSDictionary *request) {
+  return [cleanupRow[@"status"] isEqualToString:@"discarded"] &&
+      [cleanupRow[@"attempt_id"] isEqual:request[@"attempt_id"]] &&
+      [cleanupRow[@"transcript_ref"] isEqual:request[@"transcript_ref"]] &&
+      [cleanupRow[@"transcript_sha256"]
+          isEqual:request[@"transcript_sha256"]] &&
+      [cleanupRow[@"cleanup_owner"] isEqual:request[@"task_id"]];
+}
+
 - (NSDictionary *)discardAgentAttempt:(NSDictionary *)rawRequest
                                   error:(NSError **)error {
   NSDictionary *request = DSHRuntimeRequest(rawRequest, @[
@@ -1764,39 +1980,14 @@ static NSArray *DSHRuntimeLatestBatchCalls(NSDictionary *state,
   if (authority == nil) {
     NSDictionary *cleanupRow = DSHRuntimeFindCleanup(stateBefore,
                                                       request[@"cleanup_id"]);
-    BOOL exactDiscardedCleanup =
-        [cleanupRow[@"status"] isEqualToString:@"discarded"] &&
-        [cleanupRow[@"attempt_id"] isEqual:request[@"attempt_id"]] &&
-        [cleanupRow[@"transcript_ref"] isEqual:request[@"transcript_ref"]] &&
-        [cleanupRow[@"transcript_sha256"]
-            isEqual:request[@"transcript_sha256"]] &&
-        [cleanupRow[@"cleanup_owner"] isEqual:request[@"task_id"]];
-    if (!exactDiscardedCleanup ||
+    if (!DSHRuntimeExactDiscardedCleanup(cleanupRow, request) ||
         !DSHRuntimeCleanupOutboxProof(self.preparedStore, request, error)) {
       DSHSetAgentNativeStoreError(error, DSHAgentNativeStoreErrorConflict);
       return nil;
     }
-    NSNumber *operationAuthorityRevision =
-        [operationQuery[@"status"] isEqualToString:@"found"]
-        ? operationQuery[@"record"][@"authority_revision"] : @0;
-    NSDictionary *started = DSHAgentNativeWALStartOperation(
-        self.wal, @"discard_agent_attempt", request, request[@"task_id"],
-        request[@"attempt_id"], operationAuthorityRevision, error);
-    if ([started[@"status"] isEqualToString:@"replayed"]) {
-      return started[@"result"][@"result"];
-    }
-    if (started == nil) return nil;
-    NSDictionary *result = @{ @"schema_version" : @2,
-      @"status" : @"already_missing", @"operation_id" : request[@"operation_id"],
-      @"cleanup_id" : request[@"cleanup_id"] };
-    NSDictionary *safe = @{ @"schema_version" : @2,
-      @"result_kind" : @"discard_agent_attempt", @"result" : result };
-    NSDictionary *committed = DSHAgentNativeWALCommitOperation(
-        self.wal, request[@"operation_id"], started[@"request_sha256"],
-        request[@"task_id"], request[@"attempt_id"], @"committed",
-        @"already_missing", @{ @"schema_version" : @2, @"kind" : @"cleanup",
-          @"cleanup_id" : request[@"cleanup_id"] }, @1, safe, error);
-    return committed == nil ? nil : committed[@"result"][@"result"];
+    return DSHRuntimeCommitAlreadyMissing(self.wal, request,
+                                          @"discard_agent_attempt",
+                                          operationQuery, error);
   }
   if (![authority[@"conversation_id"] isEqual:request[@"conversation_id"]] ||
       ![authority[@"state"] isEqualToString:@"cleanup_pending"] ||
@@ -1824,132 +2015,22 @@ static NSArray *DSHRuntimeLatestBatchCalls(NSDictionary *state,
                                   DSHAgentNativeStoreErrorConflict);
       return NO;
     }
-    NSMutableDictionary *cleanupRow = nil;
-    NSUInteger cleanupIndex = NSNotFound;
-    NSMutableArray *cleanup = [state[@"cleanup"] mutableCopy];
-    for (NSUInteger index = 0; index < cleanup.count; index += 1) {
-      NSDictionary *candidate = cleanup[index];
-      if ([candidate[@"cleanup_id"] isEqual:request[@"cleanup_id"]]) {
-        cleanupIndex = index;
-        cleanupRow = [candidate mutableCopy];
-        break;
-      }
-    }
-    if (cleanupRow == nil ||
-        ![cleanupRow[@"attempt_id"] isEqual:request[@"attempt_id"]] ||
-        ![cleanupRow[@"transcript_ref"] isEqual:request[@"transcript_ref"]] ||
-        ![cleanupRow[@"transcript_sha256"] isEqual:request[@"transcript_sha256"]] ||
-        ![cleanupRow[@"cleanup_owner"] isEqual:request[@"task_id"]] ||
-        ![cleanupRow[@"status"] isEqualToString:@"pending"]) {
-      DSHSetAgentNativeStoreError(mutationError,
-                                  DSHAgentNativeStoreErrorConflict);
-      return NO;
-    }
-    for (NSDictionary *round in state[@"rounds"]) {
-      if (![round[@"locator"][@"attempt_id"] isEqual:request[@"attempt_id"]]) continue;
-      if ([@[@"in_flight", @"cancel_requested", @"unknown", @"ambiguous"]
-              containsObject:round[@"state"]]) {
-        DSHSetAgentNativeStoreError(mutationError,
-                                    DSHAgentNativeStoreErrorConflict);
-        return NO;
-      }
-    }
-    for (NSDictionary *row in state[@"ledger"]) {
-      if (![row[@"locator"][@"attempt_id"] isEqual:request[@"attempt_id"]]) continue;
-      if ([@[@"intent", @"running", @"cancel_requested", @"unknown", @"ambiguous"]
-              containsObject:row[@"state"]]) {
-        DSHSetAgentNativeStoreError(mutationError,
-                                    DSHAgentNativeStoreErrorConflict);
-        return NO;
-      }
-    }
-    NSString *attemptId = request[@"attempt_id"];
-    NSPredicate *keepAttempt = [NSPredicate predicateWithBlock:
-        ^BOOL(NSDictionary *row, NSDictionary *bindings) {
-      (void)bindings;
-      NSString *candidate = row[@"attempt_id"] ?: row[@"locator"][@"attempt_id"];
-      return ![candidate isEqual:attemptId];
-    }];
-    NSMutableArray *keptOperations = [NSMutableArray array];
-    NSMutableSet *removedOperationIds = [NSMutableSet set];
-    for (NSDictionary *operation in state[@"operations"]) {
-      if ([operation[@"attempt_id"] isEqual:attemptId] &&
-          ![operation[@"operation_id"] isEqual:request[@"operation_id"]]) {
-        NSString *operationState = operation[@"state"];
-        if ([operationState isEqualToString:@"started"] ||
-            [operationState isEqualToString:@"unknown"] ||
-            [operationState isEqualToString:@"ambiguous"]) {
-          DSHSetAgentNativeStoreError(mutationError,
-                                      DSHAgentNativeStoreErrorConflict);
-          return NO;
-        }
-        if (![operationState isEqualToString:@"committed"] &&
-            ![operationState isEqualToString:@"rejected"] &&
-            ![operationState isEqualToString:@"conflict"]) {
-          DSHSetAgentNativeStoreError(mutationError,
-                                      DSHAgentNativeStoreErrorCorrupt);
-          return NO;
-        }
-        [removedOperationIds addObject:operation[@"operation_id"]];
-      } else {
-        [keptOperations addObject:operation];
-      }
-    }
-    NSMutableArray *keptResults = [NSMutableArray array];
-    for (NSDictionary *result in state[@"operation_results"]) {
-      if (![removedOperationIds containsObject:result[@"operation_id"]]) {
-        [keptResults addObject:result];
-      }
-    }
-    NSMutableArray *transcripts = [state[@"transcripts"] mutableCopy];
-    NSIndexSet *transcriptIndexes = [transcripts indexesOfObjectsPassingTest:
-        ^BOOL(NSDictionary *row, NSUInteger index, BOOL *stop) {
-      (void)index; (void)stop;
-      return [row[@"attempt_id"] isEqual:attemptId];
-    }];
-    [transcripts removeObjectsAtIndexes:transcriptIndexes];
-    cleanupRow[@"status"] = @"discarded";
-    cleanup[cleanupIndex] = cleanupRow;
-    state[@"authorities"] = [state[@"authorities"] filteredArrayUsingPredicate:keepAttempt];
-    state[@"rounds"] = [state[@"rounds"] filteredArrayUsingPredicate:keepAttempt];
-    state[@"ledger"] = [state[@"ledger"] filteredArrayUsingPredicate:keepAttempt];
-    state[@"reservations"] = [state[@"reservations"] filteredArrayUsingPredicate:keepAttempt];
-    state[@"batches"] = [state[@"batches"] filteredArrayUsingPredicate:keepAttempt];
-    state[@"denied_calls"] = [state[@"denied_calls"] filteredArrayUsingPredicate:keepAttempt];
-    state[@"dispatch"] = [state[@"dispatch"] filteredArrayUsingPredicate:
-        [NSPredicate predicateWithBlock:^BOOL(NSDictionary *row,
-                                               NSDictionary *bindings) {
-      (void)bindings;
-      return ![row[@"locator"][@"attempt_id"] isEqual:attemptId];
-    }]];
-    state[@"transcripts"] = transcripts;
-    state[@"cleanup"] = cleanup;
-    state[@"operations"] = keptOperations;
-    state[@"operation_results"] = keptResults;
-    NSDictionary *result = @{ @"schema_version" : @2,
-      @"status" : @"discarded", @"operation_id" : request[@"operation_id"],
-      @"cleanup_id" : request[@"cleanup_id"] };
-    NSDictionary *safe = @{ @"schema_version" : @2,
-      @"result_kind" : @"discard_agent_attempt", @"result" : result };
-    NSDictionary *operation = DSHAgentNativeWALCommitOperationInState(
-        state, self.wal, request[@"operation_id"], started[@"request_sha256"],
-        request[@"task_id"], request[@"attempt_id"], @"committed",
-        @"discarded", @{ @"schema_version" : @2, @"kind" : @"cleanup",
-          @"cleanup_id" : request[@"cleanup_id"] }, @1, safe, mutationError);
-    if (operation == nil) return NO;
-    output = result;
-    return YES;
+    output = DSHRuntimeDiscardAttemptResidue(
+        state, self.wal, request, @"discard_agent_attempt",
+        started[@"request_sha256"], DSHRuntimeResidueDiscardStrict,
+        mutationError);
+    return output != nil;
   } error:error];
   return committed ? output : nil;
 }
 
 /// Interruption proof: the persisted session must record the attempt as
-/// terminal and interrupted (failed with E_ATTEMPT_INTERRUPTED and a dropped
-/// journal) or as terminal with a journal whose transcript matches the
-/// request, and the cleanup outbox must carry the exact matching entry for
-/// the request's cleanup identity.  The snapshot generation/sha must equal
-/// the caller's committed checkpoint, so only the controller that durably
-/// recorded the interruption can discard the native residue.
+/// terminal (failed with E_ATTEMPT_INTERRUPTED, or completed/cancelled/failed
+/// with a journal whose transcript matches the request), and the cleanup
+/// outbox must carry the exact matching entry for the request's cleanup
+/// identity.  The snapshot generation/sha must equal the caller's committed
+/// checkpoint, so only the controller that durably recorded the interruption
+/// can discard the native residue.
 static BOOL DSHRuntimeInterruptionProof(
     DSHAgentPreparedAttemptStore *preparedStore,
     NSDictionary *request,
@@ -2001,8 +2082,6 @@ static BOOL DSHRuntimeInterruptionProof(
       [matched[@"transcript_ref"] isEqual:request[@"transcript_ref"]] &&
       [matched[@"transcript_sha256"] isEqual:request[@"transcript_sha256"]] &&
       [matched[@"reason"] isEqual:request[@"reason"]] &&
-      [@[@"completed", @"cancelled", @"failed", @"conversation_deleted"]
-          containsObject:matched[@"reason"]] &&
       DSHAgentCanonicalTimestamp(matched[@"created_at"]);
   if (!matches) {
     DSHSetAgentNativeStoreError(error, DSHAgentNativeStoreErrorConflict);
@@ -2030,10 +2109,9 @@ static BOOL DSHRuntimeInterruptionProof(
   BOOL interrupted =
       [status isEqualToString:@"failed"] &&
       [attempt[@"failure_code"] isEqual:@"E_ATTEMPT_INTERRUPTED"] &&
-      attempt[@"agent"] == NSNull.null &&
       [matched[@"reason"] isEqual:@"failed"];
   BOOL journalTerminal = NO;
-  if (!interrupted && attempt[@"agent"] != NSNull.null) {
+  if (attempt[@"agent"] != NSNull.null) {
     NSDictionary *transcript = attempt[@"agent"][@"transcript"];
     journalTerminal =
         ([status isEqualToString:@"completed"] ||
@@ -2043,7 +2121,7 @@ static BOOL DSHRuntimeInterruptionProof(
         [transcript[@"transcript_sha256"]
             isEqual:request[@"transcript_sha256"]];
   }
-  if (!interrupted && !journalTerminal) {
+  if (!(interrupted && attempt[@"agent"] == NSNull.null) && !journalTerminal) {
     DSHSetAgentNativeStoreError(error, DSHAgentNativeStoreErrorConflict);
     return NO;
   }
@@ -2087,48 +2165,23 @@ static BOOL DSHRuntimeInterruptionProof(
   NSDictionary *authority = DSHRuntimeFindAuthority(
       stateBefore, request[@"task_id"], request[@"attempt_id"]);
   if (authority == nil) {
-    // The durable residue is already gone.  Only a discarded cleanup row that
-    // still proves this exact transcript ownership may close the operation.
     NSDictionary *cleanupRow = DSHRuntimeFindCleanup(stateBefore,
                                                       request[@"cleanup_id"]);
-    BOOL exactDiscardedCleanup =
-        [cleanupRow[@"status"] isEqualToString:@"discarded"] &&
-        [cleanupRow[@"attempt_id"] isEqual:request[@"attempt_id"]] &&
-        [cleanupRow[@"transcript_ref"] isEqual:request[@"transcript_ref"]] &&
-        [cleanupRow[@"transcript_sha256"]
-            isEqual:request[@"transcript_sha256"]] &&
-        [cleanupRow[@"cleanup_owner"] isEqual:request[@"task_id"]];
-    if (!exactDiscardedCleanup) {
+    if (!DSHRuntimeExactDiscardedCleanup(cleanupRow, request)) {
       DSHSetAgentNativeStoreError(error, DSHAgentNativeStoreErrorConflict);
       return nil;
     }
-    NSNumber *operationAuthorityRevision =
-        [operationQuery[@"status"] isEqualToString:@"found"]
-        ? operationQuery[@"record"][@"authority_revision"] : @0;
-    NSDictionary *started = DSHAgentNativeWALStartOperation(
-        self.wal, @"interrupt_agent_attempt", request, request[@"task_id"],
-        request[@"attempt_id"], operationAuthorityRevision, error);
-    if ([started[@"status"] isEqualToString:@"replayed"]) {
-      return started[@"result"][@"result"];
-    }
-    if (started == nil) return nil;
-    NSDictionary *result = @{ @"schema_version" : @2,
-      @"status" : @"already_missing", @"operation_id" : request[@"operation_id"],
-      @"cleanup_id" : request[@"cleanup_id"] };
-    NSDictionary *safe = @{ @"schema_version" : @2,
-      @"result_kind" : @"interrupt_agent_attempt", @"result" : result };
-    NSDictionary *committed = DSHAgentNativeWALCommitOperation(
-        self.wal, request[@"operation_id"], started[@"request_sha256"],
-        request[@"task_id"], request[@"attempt_id"], @"committed",
-        @"already_missing", @{ @"schema_version" : @2, @"kind" : @"cleanup",
-          @"cleanup_id" : request[@"cleanup_id"] }, @1, safe, error);
-    return committed == nil ? nil : committed[@"result"][@"result"];
+    return DSHRuntimeCommitAlreadyMissing(self.wal, request,
+                                          @"interrupt_agent_attempt",
+                                          operationQuery, error);
   }
-  if (![authority[@"conversation_id"] isEqual:request[@"conversation_id"]] ||
-      (![authority[@"state"] isEqualToString:@"prepared"] &&
-       ![authority[@"state"] isEqualToString:@"cleanup_pending"]) ||
-      ([authority[@"state"] isEqualToString:@"cleanup_pending"] &&
-       ![authority[@"cleanup_id"] isEqual:request[@"cleanup_id"]])) {
+  BOOL (^authorityInterruptible)(NSDictionary *) = ^BOOL(NSDictionary *row) {
+    return [row[@"conversation_id"] isEqual:request[@"conversation_id"]] &&
+        ([row[@"state"] isEqualToString:@"prepared"] ||
+         ([row[@"state"] isEqualToString:@"cleanup_pending"] &&
+          [row[@"cleanup_id"] isEqual:request[@"cleanup_id"]]));
+  };
+  if (!authorityInterruptible(authority)) {
     DSHSetAgentNativeStoreError(error, DSHAgentNativeStoreErrorConflict);
     return nil;
   }
@@ -2145,163 +2198,18 @@ static BOOL DSHRuntimeInterruptionProof(
       NSMutableDictionary *state, NSError **mutationError) {
     NSDictionary *currentAuthority = DSHRuntimeFindAuthority(
         state, request[@"task_id"], request[@"attempt_id"]);
-    if (![currentAuthority[@"conversation_id"]
-            isEqual:request[@"conversation_id"]] ||
-        (![currentAuthority[@"state"] isEqualToString:@"prepared"] &&
-         ![currentAuthority[@"state"] isEqualToString:@"cleanup_pending"]) ||
-        ([currentAuthority[@"state"] isEqualToString:@"cleanup_pending"] &&
-         ![currentAuthority[@"cleanup_id"] isEqual:request[@"cleanup_id"]])) {
+    if (!authorityInterruptible(currentAuthority)) {
       DSHSetAgentNativeStoreError(mutationError,
                                   DSHAgentNativeStoreErrorConflict);
       return NO;
     }
-    NSString *attemptId = request[@"attempt_id"];
-    // Fail closed: refuse while any round outcome or executed effect is
-    // unprovable.  Intent rows are only droppable when their execution was
-    // never dispatched; a dispatched intent may have executed and must never
-    // be silently deleted.
-    for (NSDictionary *round in state[@"rounds"]) {
-      if (![round[@"locator"][@"attempt_id"] isEqual:attemptId]) continue;
-      if ([@[@"in_flight", @"cancel_requested", @"unknown", @"ambiguous"]
-              containsObject:round[@"state"]]) {
-        DSHSetAgentNativeStoreError(mutationError,
-                                    DSHAgentNativeStoreErrorConflict);
-        return NO;
-      }
-    }
-    for (NSDictionary *row in state[@"ledger"]) {
-      if (![row[@"locator"][@"attempt_id"] isEqual:attemptId]) continue;
-      NSString *rowState = row[@"state"];
-      if ([@[@"running", @"cancel_requested", @"unknown", @"ambiguous"]
-              containsObject:rowState]) {
-        DSHSetAgentNativeStoreError(mutationError,
-                                    DSHAgentNativeStoreErrorConflict);
-        return NO;
-      }
-      if ([rowState isEqualToString:@"intent"]) {
-        NSDictionary *locator = row[@"locator"];
-        for (NSDictionary *dispatch in state[@"dispatch"]) {
-          if (![dispatch[@"kind"] isEqualToString:@"execution"] ||
-              ![dispatch[@"locator"] isEqual:locator]) continue;
-          if ([dispatch[@"dispatch_state"] isEqualToString:@"dispatched"]) {
-            DSHSetAgentNativeStoreError(mutationError,
-                                        DSHAgentNativeStoreErrorConflict);
-            return NO;
-          }
-        }
-      }
-    }
-    NSMutableArray *cleanup = [state[@"cleanup"] mutableCopy];
-    NSMutableDictionary *cleanupRow = nil;
-    NSUInteger cleanupIndex = NSNotFound;
-    for (NSUInteger index = 0; index < cleanup.count; index += 1) {
-      NSDictionary *candidate = cleanup[index];
-      if ([candidate[@"cleanup_id"] isEqual:request[@"cleanup_id"]]) {
-        cleanupIndex = index;
-        cleanupRow = [candidate mutableCopy];
-        break;
-      }
-    }
-    if (cleanupRow == nil) {
-      cleanupRow = [@{
-        @"schema_version" : @1,
-        @"cleanup_id" : request[@"cleanup_id"],
-        @"attempt_id" : attemptId,
-        @"transcript_ref" : request[@"transcript_ref"],
-        @"transcript_sha256" : request[@"transcript_sha256"],
-        @"cleanup_owner" : request[@"task_id"],
-        @"reason" : request[@"reason"],
-        @"created_at" : [self.wal currentTimestamp],
-        @"status" : @"discarded",
-      } mutableCopy];
-      [cleanup addObject:cleanupRow];
-      cleanupIndex = cleanup.count - 1;
-    } else if (
-        ![cleanupRow[@"attempt_id"] isEqual:attemptId] ||
-        ![cleanupRow[@"transcript_ref"] isEqual:request[@"transcript_ref"]] ||
-        ![cleanupRow[@"transcript_sha256"]
-            isEqual:request[@"transcript_sha256"]] ||
-        ![cleanupRow[@"cleanup_owner"] isEqual:request[@"task_id"]] ||
-        ![cleanupRow[@"status"] isEqualToString:@"pending"]) {
-      DSHSetAgentNativeStoreError(mutationError,
-                                  DSHAgentNativeStoreErrorConflict);
-      return NO;
-    }
-    NSPredicate *keepAttempt = [NSPredicate predicateWithBlock:
-        ^BOOL(NSDictionary *row, NSDictionary *bindings) {
-      (void)bindings;
-      NSString *candidate = row[@"attempt_id"] ?: row[@"locator"][@"attempt_id"];
-      return ![candidate isEqual:attemptId];
-    }];
-    NSMutableArray *keptOperations = [NSMutableArray array];
-    NSMutableSet *removedOperationIds = [NSMutableSet set];
-    for (NSDictionary *operation in state[@"operations"]) {
-      if ([operation[@"attempt_id"] isEqual:attemptId] &&
-          ![operation[@"operation_id"] isEqual:request[@"operation_id"]]) {
-        NSString *operationState = operation[@"state"];
-        if ([operationState isEqualToString:@"started"] ||
-            [operationState isEqualToString:@"unknown"] ||
-            [operationState isEqualToString:@"ambiguous"]) {
-          DSHSetAgentNativeStoreError(mutationError,
-                                      DSHAgentNativeStoreErrorConflict);
-          return NO;
-        }
-        if (![operationState isEqualToString:@"committed"] &&
-            ![operationState isEqualToString:@"rejected"] &&
-            ![operationState isEqualToString:@"conflict"]) {
-          DSHSetAgentNativeStoreError(mutationError,
-                                      DSHAgentNativeStoreErrorCorrupt);
-          return NO;
-        }
-        [removedOperationIds addObject:operation[@"operation_id"]];
-      } else {
-        [keptOperations addObject:operation];
-      }
-    }
-    NSMutableArray *keptResults = [NSMutableArray array];
-    for (NSDictionary *result in state[@"operation_results"]) {
-      if (![removedOperationIds containsObject:result[@"operation_id"]]) {
-        [keptResults addObject:result];
-      }
-    }
-    NSMutableArray *transcripts = [state[@"transcripts"] mutableCopy];
-    NSIndexSet *transcriptIndexes = [transcripts indexesOfObjectsPassingTest:
-        ^BOOL(NSDictionary *row, NSUInteger index, BOOL *stop) {
-      (void)index; (void)stop;
-      return [row[@"attempt_id"] isEqual:attemptId];
-    }];
-    [transcripts removeObjectsAtIndexes:transcriptIndexes];
-    cleanupRow[@"status"] = @"discarded";
-    cleanup[cleanupIndex] = cleanupRow;
-    state[@"authorities"] = [state[@"authorities"] filteredArrayUsingPredicate:keepAttempt];
-    state[@"rounds"] = [state[@"rounds"] filteredArrayUsingPredicate:keepAttempt];
-    state[@"ledger"] = [state[@"ledger"] filteredArrayUsingPredicate:keepAttempt];
-    state[@"reservations"] = [state[@"reservations"] filteredArrayUsingPredicate:keepAttempt];
-    state[@"batches"] = [state[@"batches"] filteredArrayUsingPredicate:keepAttempt];
-    state[@"denied_calls"] = [state[@"denied_calls"] filteredArrayUsingPredicate:keepAttempt];
-    state[@"dispatch"] = [state[@"dispatch"] filteredArrayUsingPredicate:
-        [NSPredicate predicateWithBlock:^BOOL(NSDictionary *row,
-                                               NSDictionary *bindings) {
-      (void)bindings;
-      return ![row[@"locator"][@"attempt_id"] isEqual:attemptId];
-    }]];
-    state[@"transcripts"] = transcripts;
-    state[@"cleanup"] = cleanup;
-    state[@"operations"] = keptOperations;
-    state[@"operation_results"] = keptResults;
-    NSDictionary *result = @{ @"schema_version" : @2,
-      @"status" : @"discarded", @"operation_id" : request[@"operation_id"],
-      @"cleanup_id" : request[@"cleanup_id"] };
-    NSDictionary *safe = @{ @"schema_version" : @2,
-      @"result_kind" : @"interrupt_agent_attempt", @"result" : result };
-    NSDictionary *operation = DSHAgentNativeWALCommitOperationInState(
-        state, self.wal, request[@"operation_id"], started[@"request_sha256"],
-        request[@"task_id"], request[@"attempt_id"], @"committed",
-        @"discarded", @{ @"schema_version" : @2, @"kind" : @"cleanup",
-          @"cleanup_id" : request[@"cleanup_id"] }, @1, safe, mutationError);
-    if (operation == nil) return NO;
-    output = result;
-    return YES;
+    output = DSHRuntimeDiscardAttemptResidue(
+        state, self.wal, request, @"interrupt_agent_attempt",
+        started[@"request_sha256"],
+        DSHRuntimeResidueDiscardUndispatchedIntents |
+            DSHRuntimeResidueDiscardCreateCleanupRow,
+        mutationError);
+    return output != nil;
   } error:error];
   return committed ? output : nil;
 }

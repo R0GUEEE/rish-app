@@ -40,6 +40,7 @@
 		C3F400021AD99517003FC87E /* agent-interrupted-recovery-session.json in Resources */ = {isa = PBXBuildFile; fileRef = C3F400011AD99517003FC87E /* agent-interrupted-recovery-session.json */; };
 		C4F400021AD99517003FC87E /* scenario-a4-wal.json in Resources */ = {isa = PBXBuildFile; fileRef = C4F400011AD99517003FC87E /* scenario-a4-wal.json */; };
 		C5F400021AD99517003FC87E /* scenario-a4-session-envelope.json in Resources */ = {isa = PBXBuildFile; fileRef = C5F400011AD99517003FC87E /* scenario-a4-session-envelope.json */; };
+		C6F400021AD99517003FC87E /* agent-interrupted-retry-session.json in Resources */ = {isa = PBXBuildFile; fileRef = C6F400011AD99517003FC87E /* agent-interrupted-retry-session.json */; };
 		C91A46F4761A4A3EA8F34780 /* CompletionV2StreamTests.mm in Sources */ = {isa = PBXBuildFile; fileRef = 94F13054405C479482FDBF90 /* CompletionV2StreamTests.mm */; };
 		D4C400021AD99517003FC87E /* ProjectContextServiceTests.mm in Sources */ = {isa = PBXBuildFile; fileRef = D4C400011AD99517003FC87E /* ProjectContextServiceTests.mm */; };
 		D5C400021AD99517003FC87E /* CompletionV2Tests.mm in Sources */ = {isa = PBXBuildFile; fileRef = D5C400011AD99517003FC87E /* CompletionV2Tests.mm */; };
@@ -113,6 +114,7 @@
 		C3F400011AD99517003FC87E /* agent-interrupted-recovery-session.json */ = {isa = PBXFileReference; lastKnownFileType = text.json; path = "Fixtures/agent-interrupted-recovery-session.json"; sourceTree = "<group>"; };
 		C4F400011AD99517003FC87E /* scenario-a4-wal.json */ = {isa = PBXFileReference; lastKnownFileType = text.json; path = "Fixtures/scenario-a4-wal.json"; sourceTree = "<group>"; };
 		C5F400011AD99517003FC87E /* scenario-a4-session-envelope.json */ = {isa = PBXFileReference; lastKnownFileType = text.json; path = "Fixtures/scenario-a4-session-envelope.json"; sourceTree = "<group>"; };
+		C6F400011AD99517003FC87E /* agent-interrupted-retry-session.json */ = {isa = PBXFileReference; lastKnownFileType = text.json; path = "Fixtures/agent-interrupted-retry-session.json"; sourceTree = "<group>"; };
 		D4C400011AD99517003FC87E /* ProjectContextServiceTests.mm */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.cpp.objcpp; path = ProjectContextServiceTests.mm; sourceTree = "<group>"; };
 		D5C400011AD99517003FC87E /* CompletionV2Tests.mm */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.cpp.objcpp; path = CompletionV2Tests.mm; sourceTree = "<group>"; };
 		D5E1000000000000000000A1 /* vmlinuz-virt-6.18.35 */ = {isa = PBXFileReference; lastKnownFileType = file; path = "vmlinuz-virt-6.18.35"; sourceTree = "<group>"; };
@@ -171,6 +173,7 @@
 				C3F400011AD99517003FC87E /* agent-interrupted-recovery-session.json */,
 				C4F400011AD99517003FC87E /* scenario-a4-wal.json */,
 				C5F400011AD99517003FC87E /* scenario-a4-session-envelope.json */,
+				C6F400011AD99517003FC87E /* agent-interrupted-retry-session.json */,
 				A4C400011AD99517003FC87E /* SessionSnapshotsModuleTests.mm */,
 				A5C400011AD99517003FC87E /* LocalWorkspaceModuleV2Tests.mm */,
 				A6C400011AD99517003FC87E /* LocalDocumentsModuleV2Tests.mm */,
@@ -406,6 +409,7 @@
 				C3F400021AD99517003FC87E /* agent-interrupted-recovery-session.json in Resources */,
 				C4F400021AD99517003FC87E /* scenario-a4-wal.json in Resources */,
 				C5F400021AD99517003FC87E /* scenario-a4-session-envelope.json in Resources */,
+				C6F400021AD99517003FC87E /* agent-interrupted-retry-session.json in Resources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};

@@ -415,6 +415,55 @@ describe('stale agent attempt recovery', () => {
     expect(store.getState().agentTranscriptCleanupOutbox ?? []).toHaveLength(0);
   });
 
+  test('retry of the interrupted journal-less attempt in the Smoke conversation prepares a fresh attempt with the same visible history', () => {
+    // The device's failed send left 3c9ff09d as prepared/agent=null in the
+    // Smoke conversation; recovery interrupts it and Retry prepares a fresh
+    // attempt in the same turn.  The serialized result is the second parity
+    // fixture: the native end-to-end commits it after the recovered session
+    // and prepares the fresh attempt against it.
+    const hydrated = hydrateStale(scenarioSession);
+    expect(hydrated.ok).toBe(true);
+    if (!hydrated.ok) throw new Error('hydration failed');
+    const store = createChatStore({
+      initialState: hydrated.state,
+      now: () => NOW,
+      createLifecycleId: () => FRESH_ATTEMPT_ID,
+    });
+    const conversationId = 'db9c06db-7880-4ba0-8fae-54a230584e3f';
+    const staleAttemptId = '3c9ff09d-7002-44b8-a41d-c60fd8a435a9';
+    const stale = store
+      .getState()
+      .conversations[conversationId]?.attempts.find(
+        attempt => attempt.attemptId === staleAttemptId,
+      );
+    expect(stale).toMatchObject({
+      status: 'failed',
+      failureCode: 'E_ATTEMPT_INTERRUPTED',
+      agent: null,
+    });
+    const retry = store.retryAttempt(conversationId, staleAttemptId);
+    expect(retry).toMatchObject({ attemptId: FRESH_ATTEMPT_ID, turnId: stale?.turnId });
+    const fresh = store
+      .getState()
+      .conversations[conversationId]?.attempts.find(
+        attempt => attempt.attemptId === FRESH_ATTEMPT_ID,
+      );
+    expect(fresh).toMatchObject({ status: 'prepared', agent: null, rounds: [] });
+    expect(fresh?.visibleMessageIds).toEqual(stale?.visibleMessageIds);
+    expect(fresh?.visibleMessageIds).toEqual([
+      '17f69ddf-c2dc-4b6f-b3ed-404a4c22c600',
+      '06c9a91f-fbbe-490a-a4d4-42971afc59a8',
+      '0c481945-b3db-44b7-9113-b3f70aa77149',
+    ]);
+    const serialized = store.serialize();
+    const target = path.resolve(
+      nativeFixtureDir,
+      'agent-interrupted-retry-session.json',
+    );
+    fs.writeFileSync(target, `${serialized}\n`);
+    expect(fs.readFileSync(target, 'utf8')).toBe(`${serialized}\n`);
+  });
+
   test('serializes the recovered parity fixture for the native snapshot store', () => {
     const hydrated = hydrateStale(scenarioSession);
     expect(hydrated.ok).toBe(true);

@@ -2074,27 +2074,38 @@ static NSString *const DSHSessionTestOperationB =
 - (void)testInterruptedAttemptWithKeptJournalAndCleanupEntryValidates {
   // The hydration recovery keeps the Agent journal phase as forensic evidence
   // while marking the attempt failed with E_ATTEMPT_INTERRUPTED and enqueuing
-  // a reason-"failed" cleanup entry.  The exact shape is exercised through the
-  // shared parity fixture above; this test pins the narrower rule that a
-  // failed interrupted attempt may retain any live journal phase and an
-  // active_round-free projection.
+  // a reason-"failed" cleanup entry; a journal-less zombie (the device's
+  // failed fresh send) is interrupted without any entry.  The exact shape is
+  // exercised through the shared parity fixture above; this test pins the
+  // narrower rule that a failed interrupted attempt may retain any live
+  // journal phase and an active_round-free projection.
   NSError *error = nil;
   NSDictionary *candidate =
       [self mutableSharedFixtureNamed:@"agent-interrupted-recovery-session"];
   XCTAssertNotNil(candidate);
   if (candidate == nil) return;
   NSUInteger interrupted = 0;
+  NSUInteger journaled = 0;
+  NSUInteger journalless = 0;
   for (NSMutableDictionary *conversation in candidate[@"conversations"]) {
     for (NSMutableDictionary *attempt in conversation[@"attempts"]) {
       if ([attempt[@"status"] isEqual:@"failed"] &&
           [attempt[@"failure_code"] isEqual:@"E_ATTEMPT_INTERRUPTED"]) {
         interrupted += 1;
         XCTAssertEqualObjects(attempt[@"active_round"], NSNull.null);
-        XCTAssertTrue([attempt[@"agent"] isKindOfClass:NSDictionary.class]);
+        if ([attempt[@"agent"] isKindOfClass:NSDictionary.class]) {
+          journaled += 1;
+        } else {
+          XCTAssertEqualObjects(attempt[@"agent"], NSNull.null);
+          XCTAssertEqualObjects(attempt[@"journal_revision"], @0);
+          journalless += 1;
+        }
       }
     }
   }
   XCTAssertGreaterThanOrEqual(interrupted, 30U);
+  XCTAssertGreaterThanOrEqual(journaled, 30U);
+  XCTAssertEqual(journalless, 1U);
   NSDictionary *result = [self casWithOperation:DSHSessionTestOperationA
       expected:@{ @"schema_version" : @1, @"kind" : @"missing" }
       candidate:candidate error:&error];
