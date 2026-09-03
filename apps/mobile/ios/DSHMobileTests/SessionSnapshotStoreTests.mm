@@ -2190,6 +2190,54 @@ static NSString *const DSHSessionTestOperationB =
   XCTAssertEqual(error.code, DSHSessionSnapshotStoreErrorInvalidArgument);
 }
 
+- (void)testSharedJSGitPushConversationGrantFixtureCommitsThroughNativeStore {
+  // git_push follows the git_commit pattern: the JS controller persisted a
+  // conversation-scoped grant with tool_family git_push and an
+  // allow_conversation decision. The native validator must accept exactly
+  // that shape.
+  NSDictionary *candidate =
+      [self sharedFixtureNamed:@"agent-git-push-conversation-session"];
+  XCTAssertNotNil(candidate);
+  if (candidate == nil) return;
+  NSString *json = [[NSString alloc] initWithData:
+      [NSJSONSerialization dataWithJSONObject:candidate options:0 error:nil]
+                                          encoding:NSUTF8StringEncoding];
+  XCTAssertTrue([json containsString:@"\"tool_family\":\"git_push\""]);
+  XCTAssertTrue([json containsString:@"\"approval_decision\":\"allow_conversation\""]);
+  NSError *error = nil;
+  NSDictionary *result = [self casWithOperation:DSHSessionTestOperationA
+      expected:@{ @"schema_version" : @1, @"kind" : @"missing" }
+      candidate:candidate error:&error];
+  XCTAssertNil(error);
+  XCTAssertEqualObjects(result[@"status"], @"committed");
+}
+
+- (void)testSharedJSGitPushGrantRejectsOnceOnlyAccessForGitPush {
+  NSMutableDictionary *candidate =
+      [self mutableSharedFixtureNamed:@"agent-git-push-conversation-session"];
+  XCTAssertNotNil(candidate);
+  if (candidate == nil) return;
+  BOOL mutated = NO;
+  for (NSMutableDictionary *conversation in candidate[@"conversations"]) {
+    for (NSMutableDictionary *attempt in conversation[@"attempts"]) {
+      id agent = attempt[@"agent"];
+      if (![agent isKindOfClass:NSDictionary.class]) continue;
+      for (NSMutableDictionary *call in agent[@"batch"]) {
+        if ([call[@"name"] isEqual:@"git_push"]) {
+          call[@"access"] = @"confirm_once";
+          mutated = YES;
+        }
+      }
+    }
+  }
+  XCTAssertTrue(mutated, @"fixture carries no git_push call to mutate");
+  NSError *error = nil;
+  XCTAssertNil(([self casWithOperation:DSHSessionTestOperationA
+      expected:@{ @"schema_version" : @1, @"kind" : @"missing" }
+      candidate:candidate error:&error]));
+  XCTAssertEqual(error.code, DSHSessionSnapshotStoreErrorInvalidArgument);
+}
+
 - (void)testHistoricalToolEventRejectsRoundMissingFromAttemptReceipts {
   NSMutableDictionary *candidate =
       [self mutableSharedFixtureNamed:@"agent-next-round-after-tool-session"];

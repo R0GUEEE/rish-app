@@ -30,6 +30,8 @@
 		A7C400021AD99517003FC87E /* LocalProjectAccessV2Tests.mm in Sources */ = {isa = PBXBuildFile; fileRef = A7C400011AD99517003FC87E /* LocalProjectAccessV2Tests.mm */; };
 		A8C400021AD99517003FC87E /* ProjectContextWorkspaceV2Tests.mm in Sources */ = {isa = PBXBuildFile; fileRef = A8C400011AD99517003FC87E /* ProjectContextWorkspaceV2Tests.mm */; };
 		A9C400021AD99517003FC87E /* LocalProjectsModuleV2Tests.mm in Sources */ = {isa = PBXBuildFile; fileRef = A9C400011AD99517003FC87E /* LocalProjectsModuleV2Tests.mm */; };
+		A9D400021AD99517003FC87E /* GitPushSupportTests.mm in Sources */ = {isa = PBXBuildFile; fileRef = A9D400011AD99517003FC87E /* GitPushSupportTests.mm */; };
+		A9E400021AD99517003FC87E /* GitPushG2Tests.mm in Sources */ = {isa = PBXBuildFile; fileRef = A9E400011AD99517003FC87E /* GitPushG2Tests.mm */; };
 		AAC400021AD99517003FC87E /* AgentToolEffectsTests.mm in Sources */ = {isa = PBXBuildFile; fileRef = AAC400011AD99517003FC87E /* AgentToolEffectsTests.mm */; };
 		ABC400021AD99517003FC87E /* DSHCompletionProviderTransportTests.mm in Sources */ = {isa = PBXBuildFile; fileRef = ABC400011AD99517003FC87E /* DSHCompletionProviderTransportTests.mm */; };
 		ABD400021AD99517003FC87E /* AgentPreparedAttemptStoreTests.mm in Sources */ = {isa = PBXBuildFile; fileRef = ABD400011AD99517003FC87E /* AgentPreparedAttemptStoreTests.mm */; };
@@ -51,6 +53,7 @@
 		C4F400021AD99517003FC87E /* scenario-a4-wal.json in Resources */ = {isa = PBXBuildFile; fileRef = C4F400011AD99517003FC87E /* scenario-a4-wal.json */; };
 		C5F400021AD99517003FC87E /* scenario-a4-session-envelope.json in Resources */ = {isa = PBXBuildFile; fileRef = C5F400011AD99517003FC87E /* scenario-a4-session-envelope.json */; };
 		C6F400021AD99517003FC87E /* agent-interrupted-retry-session.json in Resources */ = {isa = PBXBuildFile; fileRef = C6F400011AD99517003FC87E /* agent-interrupted-retry-session.json */; };
+		C7F400021AD99517003FC87E /* agent-git-push-conversation-session.json in Resources */ = {isa = PBXBuildFile; fileRef = C7F400011AD99517003FC87E /* agent-git-push-conversation-session.json */; };
 		C91A46F4761A4A3EA8F34780 /* CompletionV2StreamTests.mm in Sources */ = {isa = PBXBuildFile; fileRef = 94F13054405C479482FDBF90 /* CompletionV2StreamTests.mm */; };
 		D4C400021AD99517003FC87E /* ProjectContextServiceTests.mm in Sources */ = {isa = PBXBuildFile; fileRef = D4C400011AD99517003FC87E /* ProjectContextServiceTests.mm */; };
 		D5C400021AD99517003FC87E /* CompletionV2Tests.mm in Sources */ = {isa = PBXBuildFile; fileRef = D5C400011AD99517003FC87E /* CompletionV2Tests.mm */; };
@@ -113,6 +116,8 @@
 		A7C400011AD99517003FC87E /* LocalProjectAccessV2Tests.mm */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.cpp.objcpp; path = LocalProjectAccessV2Tests.mm; sourceTree = "<group>"; };
 		A8C400011AD99517003FC87E /* ProjectContextWorkspaceV2Tests.mm */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.cpp.objcpp; path = ProjectContextWorkspaceV2Tests.mm; sourceTree = "<group>"; };
 		A9C400011AD99517003FC87E /* LocalProjectsModuleV2Tests.mm */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.cpp.objcpp; path = LocalProjectsModuleV2Tests.mm; sourceTree = "<group>"; };
+		A9D400011AD99517003FC87E /* GitPushSupportTests.mm */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.cpp.objcpp; path = GitPushSupportTests.mm; sourceTree = "<group>"; };
+		A9E400011AD99517003FC87E /* GitPushG2Tests.mm */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.cpp.objcpp; path = GitPushG2Tests.mm; sourceTree = "<group>"; };
 		AAC400011AD99517003FC87E /* AgentToolEffectsTests.mm */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.cpp.objcpp; path = AgentToolEffectsTests.mm; sourceTree = "<group>"; };
 		ABC400011AD99517003FC87E /* DSHCompletionProviderTransportTests.mm */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.cpp.objcpp; path = DSHCompletionProviderTransportTests.mm; sourceTree = "<group>"; };
 		ABD400011AD99517003FC87E /* AgentPreparedAttemptStoreTests.mm */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.cpp.objcpp; path = AgentPreparedAttemptStoreTests.mm; sourceTree = "<group>"; };
@@ -135,6 +140,7 @@
 		C4F400011AD99517003FC87E /* scenario-a4-wal.json */ = {isa = PBXFileReference; lastKnownFileType = text.json; path = "Fixtures/scenario-a4-wal.json"; sourceTree = "<group>"; };
 		C5F400011AD99517003FC87E /* scenario-a4-session-envelope.json */ = {isa = PBXFileReference; lastKnownFileType = text.json; path = "Fixtures/scenario-a4-session-envelope.json"; sourceTree = "<group>"; };
 		C6F400011AD99517003FC87E /* agent-interrupted-retry-session.json */ = {isa = PBXFileReference; lastKnownFileType = text.json; path = "Fixtures/agent-interrupted-retry-session.json"; sourceTree = "<group>"; };
+		C7F400011AD99517003FC87E /* agent-git-push-conversation-session.json */ = {isa = PBXFileReference; lastKnownFileType = text.json; path = "Fixtures/agent-git-push-conversation-session.json"; sourceTree = "<group>"; };
 		D4C400011AD99517003FC87E /* ProjectContextServiceTests.mm */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.cpp.objcpp; path = ProjectContextServiceTests.mm; sourceTree = "<group>"; };
 		D5C400011AD99517003FC87E /* CompletionV2Tests.mm */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.cpp.objcpp; path = CompletionV2Tests.mm; sourceTree = "<group>"; };
 		D5E1000000000000000000A1 /* vmlinuz-virt-6.18.35 */ = {isa = PBXFileReference; lastKnownFileType = file; path = "vmlinuz-virt-6.18.35"; sourceTree = "<group>"; };
@@ -200,12 +206,15 @@
 				C4F400011AD99517003FC87E /* scenario-a4-wal.json */,
 				C5F400011AD99517003FC87E /* scenario-a4-session-envelope.json */,
 				C6F400011AD99517003FC87E /* agent-interrupted-retry-session.json */,
+				C7F400011AD99517003FC87E /* agent-git-push-conversation-session.json */,
 				A4C400011AD99517003FC87E /* SessionSnapshotsModuleTests.mm */,
 				A5C400011AD99517003FC87E /* LocalWorkspaceModuleV2Tests.mm */,
 				A6C400011AD99517003FC87E /* LocalDocumentsModuleV2Tests.mm */,
 				A7C400011AD99517003FC87E /* LocalProjectAccessV2Tests.mm */,
 				A8C400011AD99517003FC87E /* ProjectContextWorkspaceV2Tests.mm */,
 				A9C400011AD99517003FC87E /* LocalProjectsModuleV2Tests.mm */,
+				A9D400011AD99517003FC87E /* GitPushSupportTests.mm */,
+				A9E400011AD99517003FC87E /* GitPushG2Tests.mm */,
 				AAC400011AD99517003FC87E /* AgentToolEffectsTests.mm */,
 				ABC400011AD99517003FC87E /* DSHCompletionProviderTransportTests.mm */,
 				E1C400011AD99517003FC87E /* ClaudeProviderTransportTests.mm */,
@@ -446,6 +455,7 @@
 				C4F400021AD99517003FC87E /* scenario-a4-wal.json in Resources */,
 				C5F400021AD99517003FC87E /* scenario-a4-session-envelope.json in Resources */,
 				C6F400021AD99517003FC87E /* agent-interrupted-retry-session.json in Resources */,
+				C7F400021AD99517003FC87E /* agent-git-push-conversation-session.json in Resources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -584,6 +594,8 @@
 				A7C400021AD99517003FC87E /* LocalProjectAccessV2Tests.mm in Sources */,
 				A8C400021AD99517003FC87E /* ProjectContextWorkspaceV2Tests.mm in Sources */,
 				A9C400021AD99517003FC87E /* LocalProjectsModuleV2Tests.mm in Sources */,
+				A9D400021AD99517003FC87E /* GitPushSupportTests.mm in Sources */,
+				A9E400021AD99517003FC87E /* GitPushG2Tests.mm in Sources */,
 				AAC400021AD99517003FC87E /* AgentToolEffectsTests.mm in Sources */,
 				ABC400021AD99517003FC87E /* DSHCompletionProviderTransportTests.mm in Sources */,
 				E1C400021AD99517003FC87E /* ClaudeProviderTransportTests.mm in Sources */,

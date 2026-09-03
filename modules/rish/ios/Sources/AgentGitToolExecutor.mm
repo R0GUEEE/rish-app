@@ -573,14 +573,11 @@ static NSString *DSHAgentGitExpectedSHA1(NSData *payload) {
   };
 }
 
-- (NSDictionary *)executeToolNamed:(NSString *)name
-                          arguments:(NSDictionary *)arguments
-                               root:(NSDictionary *)root
-                       precondition:(NSDictionary *)precondition
-                              error:(NSError **)error {
-  return [self executeToolNamed:name arguments:arguments root:root
-                   precondition:precondition cancelToken:nil error:error];
-}
+/// The cancellation token rides on the calling thread between the six- and
+/// five-argument entries, so subclasses that override the five-argument
+/// entry (test doubles) keep intercepting every execution.
+static NSString *const DSHAgentGitActiveCancelTokenKey =
+    @"dev.zseven.rish.agent-git-push.cancel-token";
 
 - (NSDictionary *)executeToolNamed:(NSString *)name
                           arguments:(NSDictionary *)arguments
@@ -588,6 +585,30 @@ static NSString *DSHAgentGitExpectedSHA1(NSData *payload) {
                        precondition:(NSDictionary *)precondition
                         cancelToken:(DSHGitPushCancelToken *)cancelToken
                               error:(NSError **)error {
+  NSMutableDictionary *thread = NSThread.currentThread.threadDictionary;
+  id previous = thread[DSHAgentGitActiveCancelTokenKey];
+  if (cancelToken != nil) {
+    thread[DSHAgentGitActiveCancelTokenKey] = cancelToken;
+  } else {
+    [thread removeObjectForKey:DSHAgentGitActiveCancelTokenKey];
+  }
+  NSDictionary *result = [self executeToolNamed:name arguments:arguments root:root
+                                   precondition:precondition error:error];
+  if (previous != nil) {
+    thread[DSHAgentGitActiveCancelTokenKey] = previous;
+  } else {
+    [thread removeObjectForKey:DSHAgentGitActiveCancelTokenKey];
+  }
+  return result;
+}
+
+- (NSDictionary *)executeToolNamed:(NSString *)name
+                          arguments:(NSDictionary *)arguments
+                               root:(NSDictionary *)root
+                       precondition:(NSDictionary *)precondition
+                              error:(NSError **)error {
+  DSHGitPushCancelToken *cancelToken =
+      NSThread.currentThread.threadDictionary[DSHAgentGitActiveCancelTokenKey];
   if ([name isEqualToString:@"git_push"]) {
     return [self performPushForToolNamed:name root:root
         operation:^NSDictionary *(git_repository *repository,
@@ -855,7 +876,6 @@ static NSString *DSHAgentGitExpectedSHA1(NSData *payload) {
       @"schema_version" : @1, @"remote" : @"origin",
       @"remote_ref" : headRef, @"pushed_oid" : headOID,
       @"remote_oid" : remoteOID,
-      @"remote_oid_verified" : @(pushResult.verified),
     },
   }, error);
   if (feedback == nil) return nil;

@@ -929,9 +929,23 @@ BOOL DSHAgentValidateNativeToolFeedbackString(NSString *feedbackJSON,
       [outcome isEqualToString:@"denied"] ||
       [outcome isEqualToString:@"cancelled"] ||
       [outcome isEqualToString:@"ambiguous"]) {
-    BOOL validFailure = DSHAgentExactDictionaryKeys(payload, @[
-        @"schema_version", @"failure_code",
-      ]) && DSHAgentSafeInteger(payload[@"schema_version"], 1, NO) &&
+    // git_push failures may carry a value-free `reason` token next to the
+    // stable failure code (non_fast_forward, remote_moved, auth_failed, ...).
+    NSCharacterSet *reasonAlphabet = [[NSCharacterSet
+        characterSetWithCharactersInString:@"abcdefghijklmnopqrstuvwxyz_"]
+        invertedSet];
+    BOOL validReason = payload[@"reason"] == nil ||
+        (DSHAgentExactDictionaryKeys(payload, @[
+            @"schema_version", @"failure_code", @"reason",
+          ]) &&
+         DSHAgentBoundedUTF8String(payload[@"reason"], 64, NO, nullptr) &&
+         [(NSString *)payload[@"reason"] rangeOfCharacterFromSet:reasonAlphabet]
+             .location == NSNotFound);
+    BOOL validFailure = (payload[@"reason"] != nil
+        ? validReason
+        : DSHAgentExactDictionaryKeys(payload, @[
+            @"schema_version", @"failure_code",
+          ])) && DSHAgentSafeInteger(payload[@"schema_version"], 1, NO) &&
         DSHAgentFailureCode(payload[@"failure_code"]);
     if (!validFailure) {
       DSHSetAgentNativeStoreError(error, DSHAgentNativeStoreErrorInvalidArgument);
@@ -1008,9 +1022,17 @@ BOOL DSHAgentValidateNativeToolFeedbackString(NSString *feedbackJSON,
         DSHAgentBoundedUTF8String(payload[@"tree_oid"], 128, NO, nullptr);
   }
   if ([name isEqualToString:@"git_push"]) {
-    return DSHAgentExactDictionaryKeys(payload, @[
-             @"schema_version", @"remote", @"remote_ref", @"pushed_oid",
-           ]) && [payload[@"remote"] isEqualToString:@"origin"] &&
+    // `remote_oid` is the OID the server advertised after the push was
+    // accepted; older feedback without it stays valid.
+    BOOL exactKeys = payload[@"remote_oid"] == nil
+        ? DSHAgentExactDictionaryKeys(payload, @[
+            @"schema_version", @"remote", @"remote_ref", @"pushed_oid",
+          ])
+        : DSHAgentExactDictionaryKeys(payload, @[
+            @"schema_version", @"remote", @"remote_ref", @"pushed_oid",
+            @"remote_oid",
+          ]) && DSHAgentBoundedUTF8String(payload[@"remote_oid"], 128, NO, nullptr);
+    return exactKeys && [payload[@"remote"] isEqualToString:@"origin"] &&
         DSHAgentBoundedUTF8String(payload[@"remote_ref"], 256, NO, nullptr) &&
         DSHAgentBoundedUTF8String(payload[@"pushed_oid"], 128, NO, nullptr);
   }

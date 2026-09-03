@@ -631,7 +631,9 @@ DSHGitPushResult *DSHGitPushRun(DSHGitPushRequest *request) {
   control.cancelToken = request.cancelToken;
   __block DSHGitPushResult *settledResult = nil;
   dispatch_semaphore_t semaphore = dispatch_semaphore_create(0);
-  dispatch_async(dispatch_get_global_queue(QOS_CLASS_UTILITY, 0), ^{
+  // The caller blocks on this work; keep the worker at the caller's tier so
+  // the wait is not a priority inversion.
+  dispatch_async(dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^{
     @autoreleasepool {
       DSHGitPushCallbackState state = {};
       state.credential.host = request.host;
