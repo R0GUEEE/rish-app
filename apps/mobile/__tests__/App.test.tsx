@@ -359,6 +359,7 @@ function deferred<T>() {
 }
 
 const CONTEXT_PROJECT_ID = '44444444-4444-4444-8444-444444444444';
+const APP_LAUNCH_INSTANCE_ID = '99999999-9999-4999-8999-999999999999';
 const CONTEXT_RUNTIME_ID = '11111111-1111-4111-8111-111111111111';
 const CONTEXT_SNAPSHOT_ID = '22222222-2222-4222-8222-222222222222';
 const CONTEXT_CONSENT_ID = '33333333-3333-4333-8333-333333333333';
@@ -828,6 +829,8 @@ function queueDeferredSessionLoad(load: Promise<string | null>): void {
             status: 'missing',
             snapshot: null,
             session_json: null,
+            writer_launch_instance_id: null,
+            current_launch_instance_id: APP_LAUNCH_INSTANCE_ID,
           }
         : presentLoadResult(sessionJSON),
     ),
@@ -1432,6 +1435,8 @@ function bridgedLoadResult(): unknown {
       status: 'missing',
       snapshot: null,
       session_json: null,
+      writer_launch_instance_id: null,
+      current_launch_instance_id: APP_LAUNCH_INSTANCE_ID,
     };
   }
   const authority = bridgedAuthority();
@@ -1441,6 +1446,8 @@ function bridgedLoadResult(): unknown {
       status: 'present',
       snapshot: authority.snapshot,
       session_json: bridgedSessionJSON,
+      writer_launch_instance_id: APP_LAUNCH_INSTANCE_ID,
+      current_launch_instance_id: APP_LAUNCH_INSTANCE_ID,
     };
   }
   if (authority.kind === 'legacy_present') {
@@ -1449,6 +1456,8 @@ function bridgedLoadResult(): unknown {
       status: 'legacy_present',
       legacy: authority.legacy,
       session_json: bridgedSessionJSON,
+      writer_launch_instance_id: APP_LAUNCH_INSTANCE_ID,
+      current_launch_instance_id: APP_LAUNCH_INSTANCE_ID,
     };
   }
   return bridgedSessionJSON;
@@ -7476,6 +7485,8 @@ function legacyLoadResult(sessionJSON: string) {
       legacy_bytes_sha256: 'a'.repeat(64),
     },
     session_json: sessionJSON,
+    writer_launch_instance_id: APP_LAUNCH_INSTANCE_ID,
+    current_launch_instance_id: APP_LAUNCH_INSTANCE_ID,
   };
 }
 
@@ -7491,6 +7502,8 @@ function presentLoadResult(sessionJSON: string, generation = 1) {
       session_sha256: digest,
     },
     session_json: sessionJSON,
+    writer_launch_instance_id: APP_LAUNCH_INSTANCE_ID,
+    current_launch_instance_id: APP_LAUNCH_INSTANCE_ID,
   };
 }
 

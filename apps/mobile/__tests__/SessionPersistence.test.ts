@@ -7,6 +7,7 @@ import {
 import { createEmptyChatState, serializeChatState } from '../src/state';
 
 const OPERATION_ID = '11111111-1111-4111-8111-111111111111';
+const LAUNCH_INSTANCE_ID = '99999999-9999-4999-8999-999999999999';
 const SECOND_OPERATION_ID = '22222222-2222-4222-8222-222222222222';
 const CANDIDATE = serializeChatState(createEmptyChatState());
 const CANDIDATE_DIGEST = sessionSnapshotSHA256(CANDIDATE)!;
@@ -34,6 +35,8 @@ function nativeLoaded(
       status: 'missing',
       snapshot: null,
       session_json: null,
+      writer_launch_instance_id: null,
+      current_launch_instance_id: LAUNCH_INSTANCE_ID,
     };
   }
   if (authority.kind === 'legacy_present') {
@@ -42,6 +45,8 @@ function nativeLoaded(
       status: 'legacy_present',
       legacy: authority.legacy,
       session_json: '{}',
+      writer_launch_instance_id: LAUNCH_INSTANCE_ID,
+      current_launch_instance_id: LAUNCH_INSTANCE_ID,
     };
   }
   return {
@@ -49,6 +54,8 @@ function nativeLoaded(
     status: 'present',
     snapshot: authority.snapshot,
     session_json: CANDIDATE,
+    writer_launch_instance_id: LAUNCH_INSTANCE_ID,
+    current_launch_instance_id: LAUNCH_INSTANCE_ID,
   };
 }
 
@@ -192,6 +199,8 @@ describe('schema-9 native session persistence coordinator', () => {
           session_sha256: 'a'.repeat(64),
         },
         session_json: '{}',
+        writer_launch_instance_id: LAUNCH_INSTANCE_ID,
+        current_launch_instance_id: LAUNCH_INSTANCE_ID,
       }),
       casPersistSession: jest.fn(),
     });
@@ -210,6 +219,8 @@ describe('schema-9 native session persistence coordinator', () => {
         session_sha256: 'f'.repeat(64),
       },
       session_json: CANDIDATE,
+      writer_launch_instance_id: LAUNCH_INSTANCE_ID,
+      current_launch_instance_id: LAUNCH_INSTANCE_ID,
     });
     const coordinator = createSessionPersistenceCoordinator({
       loadSessionSnapshot,
