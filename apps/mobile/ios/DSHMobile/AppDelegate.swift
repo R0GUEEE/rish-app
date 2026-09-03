@@ -32,12 +32,19 @@ class AppDelegate: UIResponder, UIApplicationDelegate {
 
     window = UIWindow(frame: UIScreen.main.bounds)
 
-    // QA fixture gate: "simctl launch <udid> <bundle> -DSHSeedMarkdownDemo"
-    // seeds a markdown rendering demo conversation. Absent the argument,
-    // production launches are unchanged.
+    // QA fixture gates, launch arguments only (production launches carry
+    // none): "simctl launch <udid> <bundle> -DSHSeedMarkdownDemo" seeds a
+    // markdown rendering demo conversation; "-DSHUIPreview <kind>" renders
+    // the approval-single / approval-batch / policy-panel screenshot preview
+    // with fixed display data instead of the home screen.
     var initialProperties: [AnyHashable: Any] = [:]
-    if ProcessInfo.processInfo.arguments.contains("-DSHSeedMarkdownDemo") {
+    let arguments = ProcessInfo.processInfo.arguments
+    if arguments.contains("-DSHSeedMarkdownDemo") {
       initialProperties["dshSeedMarkdownDemo"] = true
+    }
+    if let index = arguments.firstIndex(of: "-DSHUIPreview"),
+       arguments.indices.contains(index + 1) {
+      initialProperties["dshUIPreview"] = arguments[index + 1]
     }
 
     factory.startReactNative(
