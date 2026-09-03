@@ -7941,7 +7941,10 @@ async function waitForRenderedText(
   renderer: Renderer,
   text: string,
 ): Promise<void> {
-  for (let index = 0; index < 100; index += 1) {
+  // A batch approval commits every decision as its own persisted checkpoint
+  // before execution, so the Agent path needs more settle hops than the
+  // single-card flow did.
+  for (let index = 0; index < 400; index += 1) {
     if (renderer.root.findAllByProps({ children: text }).length > 0) return;
     await act(async () => {
       await settle();
