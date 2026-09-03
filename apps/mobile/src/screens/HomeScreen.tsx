@@ -1136,23 +1136,29 @@ export function HomeScreen() {
 
   /**
    * Launch-time drain of the transcript cleanup outbox.  Entries that
-   * reference interrupted attempts (failed + E_ATTEMPT_INTERRUPTED with the
-   * Agent journal dropped at hydration) or terminal attempts whose native
-   * finalize/discard never completed are closed through the dedicated native
-   * interrupt operation, which discards the native authority, transcript,
-   * reservations, batches, and ledger rows in one fail-closed transaction.
-   * The outbox entry is then acknowledged with the committed session proof.
+   * reference interrupted attempts (failed + E_ATTEMPT_INTERRUPTED, journal
+   * retained as evidence) or terminal attempts whose native finalize/discard
+   * never completed are closed through the dedicated native interrupt
+   * operation, which discards the native authority, transcript,
+   * reservations, batches, and never-dispatched ledger intents in one
+   * fail-closed transaction.  The outbox entry is then acknowledged with the
+   * committed session proof.  An entry native refuses (for example an
+   * attempt with an unresolved operation) is skipped for this launch so it
+   * cannot starve the entries behind it; it stays durable and is retried on
+   * the next launch.
    */
   const drainInterruptedAgentCleanup = useCallback(async (): Promise<void> => {
     if (!nativeAvailable || sessionSnapshotsAvailable !== true) return;
     if (drainInterruptedCleanupRef.current) return;
     drainInterruptedCleanupRef.current = true;
+    const skipped = new Set<string>();
     try {
       for (;;) {
         const state = store.getState();
         const outbox = state.agentTranscriptCleanupOutbox ?? [];
         let progressed = false;
         for (const entry of outbox) {
+          if (skipped.has(entry.cleanup_id)) continue;
           const conversation = state.conversations[entry.conversation_id];
           const attempt = conversation?.attempts.find(
             candidate => candidate.attemptId === entry.attempt_id,
@@ -1197,15 +1203,18 @@ export function HomeScreen() {
               expected_session_sha256: authority.sessionSha256,
             });
           } catch {
-            // Native rejected or is unavailable; fail closed and retry on the
-            // next launch.  The entry and the interrupted attempt stay
-            // durable, and the stale attempt can never be resumed.
-            return;
+            // Native rejected this entry (or is unavailable); fail closed for
+            // it and move on.  The entry and the interrupted attempt stay
+            // durable, the stale attempt can never be resumed, and the next
+            // launch retries the discard.
+            skipped.add(entry.cleanup_id);
+            continue;
           }
           if (
             discarded.status !== 'discarded' &&
             discarded.status !== 'already_missing'
           ) {
+            skipped.add(entry.cleanup_id);
             continue;
           }
           const transaction =
@@ -1213,7 +1222,10 @@ export function HomeScreen() {
               entry.cleanup_id,
               entry,
             );
-          if (transaction === null) continue;
+          if (transaction === null) {
+            skipped.add(entry.cleanup_id);
+            continue;
+          }
           const candidateJSON = store.serialize();
           const durability = await persistSessionCandidate(candidateJSON, {
             schema_version: 1,

@@ -192,9 +192,10 @@ export type ChatHydrationOptionsV1 = {
    * True when the persisted envelope was written by a previous process
    * launch.  Every non-terminal attempt then belongs to a dead writer and
    * is interrupted deterministically at hydration: marked failed with
-   * E_ATTEMPT_INTERRUPTED, its Agent journal dropped so it can never be
-   * resumed, and a transcript-cleanup outbox entry enqueued for native
-   * discard.  Defaults to false so existing hydration semantics hold.
+   * E_ATTEMPT_INTERRUPTED (its Agent journal is retained as evidence but
+   * can never be resumed) and, for journaled attempts, a transcript-cleanup
+   * outbox entry is enqueued for native discard while outbox capacity
+   * remains.  Defaults to false so existing hydration semantics hold.
    */
   readonly staleWriterLaunch?: boolean;
 };
@@ -6152,10 +6153,34 @@ export function hydrateChatState(
   // attempt persisted by a previous process launch can never be resumed:
   // its writer is dead, its provider round can no longer complete, and its
   // native reservation/authority residue must be discarded, never replayed.
-  // Marking it failed with E_ATTEMPT_INTERRUPTED and dropping the Agent
-  // journal routes every later Retry through the legacy retry path (a fresh
-  // attempt in the same turn) instead of native recovery of the stale one.
+  // Marking it failed with E_ATTEMPT_INTERRUPTED routes every later Retry
+  // through the legacy retry path (a fresh attempt in the same turn) instead
+  // of native recovery of the stale one.  A journaled attempt additionally
+  // needs a cleanup outbox entry so the native residue is discarded; the
+  // outbox is bounded, so journaled zombies beyond the remaining capacity
+  // stay untouched this launch and are interrupted, in the same file order,
+  // by a later hydration once the outbox has drained.  Attempts without a
+  // journal own no native residue and are always interrupted.
   const interruptedCleanupEntries: AgentTranscriptCleanupV1[] = [];
+  const interruptibleJournaled = new Set<string>();
+  if (hydrationOptions.staleWriterLaunch) {
+    const budget = Math.max(
+      0,
+      MAX_AGENT_CLEANUP_OUTBOX_ENTRIES - agentTranscriptCleanupOutbox.length,
+    );
+    Object.values(conversations).forEach(conversation => {
+      conversation.attempts.forEach(attempt => {
+        if (
+          (attempt.status === 'sending' || attempt.status === 'prepared') &&
+          attempt.agent !== undefined &&
+          attempt.agent !== null &&
+          interruptibleJournaled.size < budget
+        ) {
+          interruptibleJournaled.add(attempt.attemptId);
+        }
+      });
+    });
+  }
   const hydratedConversations: Record<string, Conversation> = {};
   Object.values(conversations).forEach(conversation => {
     hydratedConversations[conversation.id] = {
@@ -6163,15 +6188,18 @@ export function hydrateChatState(
       attempts: conversation.attempts.map(attempt => {
         const nonTerminal =
           attempt.status === 'sending' || attempt.status === 'prepared';
-        if (hydrationOptions.staleWriterLaunch && nonTerminal) {
-          if (attempt.agent !== undefined && attempt.agent !== null) {
+        const journaled = attempt.agent !== undefined && attempt.agent !== null;
+        if (
+          hydrationOptions.staleWriterLaunch &&
+          nonTerminal &&
+          (!journaled || interruptibleJournaled.has(attempt.attemptId))
+        ) {
+          if (journaled) {
             // The journal stays as the round/transcript audit evidence, but
             // the attempt itself is terminal: its writer launch is dead, so
             // neither the provider round nor any tool effect may continue.
             // The cleanup entry retains the transcript identity for the
-            // native discard proof.  The controller retry/resume paths treat
-            // E_ATTEMPT_INTERRUPTED as legacy, so Retry always prepares a
-            // fresh attempt in the same turn instead of resuming this one.
+            // native discard proof.
             interruptedCleanupEntries.push({
               schema_version: AGENT_CLEANUP_SCHEMA_VERSION,
               cleanup_id: interruptedCleanupIdForAttempt(attempt.attemptId),
@@ -6205,16 +6233,6 @@ export function hydrateChatState(
     };
   });
   if (interruptedCleanupEntries.length > 0) {
-    const finalCleanupEntries = [
-      ...agentTranscriptCleanupOutbox,
-      ...interruptedCleanupEntries,
-    ];
-    if (finalCleanupEntries.length > MAX_AGENT_CLEANUP_OUTBOX_ENTRIES) {
-      return invalid(
-        '$.agent_transcript_cleanup_outbox',
-        'must not exceed the cleanup entry capacity after interruption recovery',
-      );
-    }
     interruptedCleanupEntries.forEach(entry => {
       if (
         agentTranscriptCleanupOutbox.some(
@@ -6232,7 +6250,10 @@ export function hydrateChatState(
         '$.agent_transcript_cleanup_outbox[interrupted]',
       );
     });
-    agentTranscriptCleanupOutbox = finalCleanupEntries;
+    agentTranscriptCleanupOutbox = [
+      ...agentTranscriptCleanupOutbox,
+      ...interruptedCleanupEntries,
+    ];
   }
 
   if (workspaceAuthorityOutbox.length > 0) {

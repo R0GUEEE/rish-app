@@ -431,3 +431,107 @@ describe('stale agent attempt recovery', () => {
     expect(serialized).not.toBe(JSON.stringify(scenarioSession));
   });
 });
+
+describe('stale agent attempt recovery under outbox capacity pressure', () => {
+  // Every UUID inside a cloned conversation is rewritten deterministically so
+  // the clone carries its own conversation, turn, message, attempt, grant,
+  // round, and transcript identities and never collides with the original.
+  function cloneWithFreshIds<T>(value: T, tag: string): T {
+    const serialized = JSON.stringify(value).replace(
+      /[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/gu,
+      uuid => `${tag}${uuid.slice(tag.length)}`,
+    );
+    return JSON.parse(serialized) as T;
+  }
+
+  function journaledZombies(session: PersistedSessionRow): number {
+    return nonTerminalAttempts(session).filter(
+      attempt => attempt.agent !== null && attempt.agent !== undefined,
+    ).length;
+  }
+
+  test('interrupts journaled zombies only up to the outbox capacity and finishes on a later launch', () => {
+    const doubled: PersistedSessionRow = {
+      ...scenarioSession,
+      conversations: [
+        ...scenarioSession.conversations,
+        ...cloneWithFreshIds(scenarioSession.conversations, 'c10e').filter(
+          conversation =>
+            conversation.attempts.some(
+              attempt =>
+                (attempt.status === 'prepared' ||
+                  attempt.status === 'sending') &&
+                attempt.agent !== null,
+            ),
+        ),
+      ],
+    };
+    const existingEntries = doubled.agent_transcript_cleanup_outbox.length;
+    const capacity = 64 - existingEntries;
+    expect(journaledZombies(doubled)).toBeGreaterThan(capacity);
+
+    const first = hydrateStale(doubled);
+    expect(first.ok).toBe(true);
+    if (!first.ok) throw new Error(first.error.message);
+    const firstOutbox = first.state.agentTranscriptCleanupOutbox ?? [];
+    expect(firstOutbox).toHaveLength(64);
+    const firstAttempts = Object.values(first.state.conversations).flatMap(
+      conversation => conversation.attempts,
+    );
+    const interruptedJournaled = firstAttempts.filter(
+      attempt =>
+        attempt.failureCode === 'E_ATTEMPT_INTERRUPTED' &&
+        attempt.agent !== null,
+    );
+    expect(interruptedJournaled).toHaveLength(capacity);
+    // Journal-less zombies own no native residue and are always interrupted.
+    expect(
+      firstAttempts.filter(
+        attempt =>
+          (attempt.status === 'prepared' || attempt.status === 'sending') &&
+          attempt.agent === null,
+      ),
+    ).toHaveLength(0);
+    const deferred = firstAttempts.filter(
+      attempt => attempt.status === 'prepared' || attempt.status === 'sending',
+    );
+    expect(deferred).toHaveLength(journaledZombies(doubled) - capacity);
+    // Deterministic: the first journaled zombies in file order win.
+    const orderedIds = doubled.conversations.flatMap(conversation =>
+      conversation.attempts
+        .filter(
+          attempt =>
+            (attempt.status === 'prepared' || attempt.status === 'sending') &&
+            attempt.agent !== null,
+        )
+        .map(attempt => attempt.attempt_id),
+    );
+    expect(new Set(interruptedJournaled.map(attempt => attempt.attemptId))).toEqual(
+      new Set(orderedIds.slice(0, capacity)),
+    );
+
+    // Once the drain has acknowledged the failed entries, the next launch
+    // interrupts the deferred remainder.
+    const drained = JSON.parse(serializeChatState(first.state)) as PersistedSessionRow;
+    drained.agent_transcript_cleanup_outbox =
+      drained.agent_transcript_cleanup_outbox.filter(
+        entry => entry.reason !== 'failed',
+      );
+    const second = hydrateStale(drained);
+    expect(second.ok).toBe(true);
+    if (!second.ok) throw new Error(second.error.message);
+    const secondAttempts = Object.values(second.state.conversations).flatMap(
+      conversation => conversation.attempts,
+    );
+    expect(
+      secondAttempts.filter(
+        attempt => attempt.status === 'prepared' || attempt.status === 'sending',
+      ),
+    ).toHaveLength(0);
+    expect(
+      (second.state.agentTranscriptCleanupOutbox ?? []).filter(
+        entry => entry.reason === 'failed',
+      ),
+    ).toHaveLength(deferred.length);
+  });
+});
