@@ -1193,6 +1193,225 @@ DSH_RECORD(queryAgentCleanup)
   XCTAssertEqualObjects(missingReplay, alreadyMissing);
 }
 
+- (void)testFinalizeAcceptsTranscriptAdvanceProvenByLatestCompletedFinalRound {
+  DSHRecoveryWAL *wal = [[DSHRecoveryWAL alloc]
+      initWithRootURL:[self.rootURL URLByAppendingPathComponent:@"final-round-advance"]
+      clock:^NSDate * { return NSDate.date; }
+      identifierGenerator:^NSString * {
+        return @"41414141-4141-4141-8141-414141414141";
+      } faultHook:nil];
+  NSMutableDictionary *before = [[self recoveryTranscript] mutableCopy];
+  before[@"generation"] = @4;
+  before[@"transcript_sha256"] =
+      @"4444444444444444444444444444444444444444444444444444444444444444";
+  before[@"transcript_bytes"] = @1756;
+  NSMutableDictionary *after = [[self recoveryTranscript] mutableCopy];
+  after[@"generation"] = @5;
+  after[@"transcript_sha256"] =
+      @"5555555555555555555555555555555555555555555555555555555555555555";
+  after[@"transcript_bytes"] = @2015;
+  NSDictionary *authority = @{
+    @"task_id" : @"22222222-2222-4222-8222-222222222222",
+    @"conversation_id" : @"11111111-1111-4111-8111-111111111111",
+    @"attempt_id" : @"33333333-3333-4333-8333-333333333333",
+    @"root" : [self recoveryRoot], @"transcript" : [before copy],
+    @"state" : @"prepared", @"cleanup_id" : NSNull.null,
+    @"authority_revision" : @9,
+    @"updated_at" : @"2026-08-31T00:00:00.000Z"
+  };
+  NSDictionary *round = @{
+    @"locator" : @{ @"schema_version" : @1,
+      @"task_id" : authority[@"task_id"], @"attempt_id" : authority[@"attempt_id"],
+      @"round_id" : @"42424242-4242-4242-8242-424242424242",
+      @"round_index" : @2 },
+    @"state" : @"completed", @"terminal_kind" : @"final",
+    @"completion_receipt" : @{ @"finish_reason" : @"stop" },
+    @"transcript_before" : [before copy], @"transcript_after" : [after copy]
+  };
+  wal.recoveryState = @{ @"authorities" : @[authority],
+    @"transcripts" : @[@{ @"transcript_ref" : after[@"transcript_ref"],
+      @"attempt_id" : authority[@"attempt_id"],
+      @"transcript_sha256" : after[@"transcript_sha256"],
+      @"state" : @"open", @"retention_until" : NSNull.null,
+      @"updated_at" : @"2026-08-31T00:00:00.000Z" }],
+    @"cleanup" : @[], @"rounds" : @[round], @"ledger" : @[],
+    @"reservations" : @[], @"batches" : @[], @"denied_calls" : @[],
+    @"dispatch" : @[], @"operations" : @[], @"operation_results" : @[] };
+  DSHRecoveryRuntimeCoordinator *coordinator =
+      [self recoveryCoordinatorWithWAL:wal roundService:nullptr
+          executionService:nullptr];
+  DSHRecoveryPreparedStore *prepared =
+      (DSHRecoveryPreparedStore *)coordinator.preparedStore;
+  prepared.recoveryAuthority = authority;
+  NSString *cleanupId = @"43434343-4343-4343-8343-434343434343";
+  NSDictionary *request = @{ @"schema_version" : @2,
+    @"operation_id" : @"44444444-4444-4444-8444-444444444444",
+    @"controller_cas" : [self recoveryControllerCAS],
+    @"committed_checkpoint" : [self recoveryCheckpoint],
+    @"task_id" : authority[@"task_id"],
+    @"conversation_id" : authority[@"conversation_id"],
+    @"attempt_id" : authority[@"attempt_id"], @"terminal_reason" : @"completed",
+    @"cleanup_id" : cleanupId, @"transcript" : [after copy],
+    @"root" : [self recoveryRoot] };
+  NSError *error = nil;
+  NSDictionary *started = DSHAgentNativeWALStartOperation(
+      wal, @"finalize_agent_attempt", request, authority[@"task_id"],
+      authority[@"attempt_id"], authority[@"authority_revision"], &error);
+  XCTAssertNil(error);
+  XCTAssertEqualObjects(started[@"status"], @"started");
+  XCTAssertEqualObjects(wal.recoveryState[@"operations"][0][@"state"], @"started");
+  NSDictionary *finalized = [coordinator finalizeAgentAttempt:request error:&error];
+  XCTAssertNil(error);
+  XCTAssertEqualObjects(finalized[@"status"], @"terminal");
+  XCTAssertEqualObjects(wal.recoveryState[@"authorities"][0][@"transcript"], after);
+  XCTAssertEqualObjects(wal.recoveryState[@"authorities"][0][@"state"],
+                        @"cleanup_pending");
+  XCTAssertEqualObjects(wal.recoveryState[@"operations"][0][@"state"], @"committed");
+  NSDictionary *replay = [coordinator finalizeAgentAttempt:request error:&error];
+  XCTAssertNil(error);
+  XCTAssertEqualObjects(replay, finalized);
+
+  prepared.recoveryAuthority = wal.recoveryState[@"authorities"][0];
+  NSDictionary *discarded = [coordinator discardAgentAttempt:@{
+    @"schema_version" : @2,
+    @"operation_id" : @"45454545-4545-4545-8545-454545454545",
+    @"cleanup_id" : cleanupId, @"task_id" : authority[@"task_id"],
+    @"conversation_id" : authority[@"conversation_id"],
+    @"attempt_id" : authority[@"attempt_id"],
+    @"transcript_ref" : after[@"transcript_ref"],
+    @"transcript_sha256" : after[@"transcript_sha256"]
+  } error:&error];
+  XCTAssertNil(error);
+  XCTAssertEqualObjects(discarded[@"status"], @"discarded");
+  XCTAssertEqual([wal.recoveryState[@"authorities"] count], 0U);
+  XCTAssertEqual([wal.recoveryState[@"transcripts"] count], 0U);
+}
+
+- (void)testFinalizeRejectsUnprovenTranscriptAndTerminalizesConflictForReplay {
+  DSHRecoveryWAL *wal = [[DSHRecoveryWAL alloc]
+      initWithRootURL:[self.rootURL URLByAppendingPathComponent:@"unproven-final"]
+      clock:^NSDate * { return NSDate.date; }
+      identifierGenerator:^NSString * {
+        return @"46464646-4646-4646-8646-464646464646";
+      } faultHook:nil];
+  NSMutableDictionary *before = [[self recoveryTranscript] mutableCopy];
+  before[@"generation"] = @4;
+  before[@"transcript_sha256"] =
+      @"4444444444444444444444444444444444444444444444444444444444444444";
+  NSMutableDictionary *after = [[self recoveryTranscript] mutableCopy];
+  after[@"generation"] = @5;
+  after[@"transcript_sha256"] =
+      @"5555555555555555555555555555555555555555555555555555555555555555";
+  NSDictionary *authority = @{
+    @"task_id" : @"22222222-2222-4222-8222-222222222222",
+    @"conversation_id" : @"11111111-1111-4111-8111-111111111111",
+    @"attempt_id" : @"33333333-3333-4333-8333-333333333333",
+    @"root" : [self recoveryRoot], @"transcript" : [before copy],
+    @"state" : @"prepared", @"cleanup_id" : NSNull.null,
+    @"authority_revision" : @9,
+    @"updated_at" : @"2026-08-31T00:00:00.000Z"
+  };
+  wal.recoveryState = @{ @"authorities" : @[authority],
+    @"transcripts" : @[@{ @"transcript_ref" : after[@"transcript_ref"],
+      @"attempt_id" : authority[@"attempt_id"],
+      @"transcript_sha256" : after[@"transcript_sha256"], @"state" : @"open" }],
+    @"cleanup" : @[], @"rounds" : @[@{
+      @"locator" : @{ @"task_id" : authority[@"task_id"],
+        @"attempt_id" : authority[@"attempt_id"], @"round_index" : @2 },
+      @"state" : @"completed", @"terminal_kind" : @"tool_batch",
+      @"completion_receipt" : @{ @"finish_reason" : @"tool_calls" },
+      @"transcript_before" : [before copy], @"transcript_after" : [after copy] }],
+    @"ledger" : @[], @"reservations" : @[], @"batches" : @[],
+    @"denied_calls" : @[], @"dispatch" : @[], @"operations" : @[],
+    @"operation_results" : @[] };
+  DSHRecoveryRuntimeCoordinator *coordinator =
+      [self recoveryCoordinatorWithWAL:wal roundService:nullptr
+          executionService:nullptr];
+  ((DSHRecoveryPreparedStore *)coordinator.preparedStore).recoveryAuthority =
+      authority;
+  NSDictionary *request = @{ @"schema_version" : @2,
+    @"operation_id" : @"47474747-4747-4747-8747-474747474747",
+    @"controller_cas" : [self recoveryControllerCAS],
+    @"committed_checkpoint" : [self recoveryCheckpoint],
+    @"task_id" : authority[@"task_id"],
+    @"conversation_id" : authority[@"conversation_id"],
+    @"attempt_id" : authority[@"attempt_id"], @"terminal_reason" : @"completed",
+    @"cleanup_id" : @"48484848-4848-4848-8848-484848484848",
+    @"transcript" : [after copy], @"root" : [self recoveryRoot] };
+  NSError *error = nil;
+  NSDictionary *conflict = [coordinator finalizeAgentAttempt:request error:&error];
+  XCTAssertNil(error);
+  XCTAssertEqualObjects(conflict[@"status"], @"conflict");
+  XCTAssertEqualObjects(conflict[@"failure_code"], @"E_AGENT_CONFLICT");
+  XCTAssertEqualObjects(wal.recoveryState[@"operations"][0][@"state"], @"conflict");
+  XCTAssertEqualObjects(wal.recoveryState[@"authorities"][0][@"transcript"], before);
+  XCTAssertEqual([wal.recoveryState[@"cleanup"] count], 0U);
+  NSDictionary *replay = [coordinator finalizeAgentAttempt:request error:&error];
+  XCTAssertNil(error);
+  XCTAssertEqualObjects(replay, conflict);
+  XCTAssertEqualObjects(wal.recoveryState[@"operations"][0][@"state"], @"conflict");
+}
+
+- (void)testFinalizeAcceptsFailedTranscriptAdvanceProvenByBlockedRound {
+  DSHRecoveryWAL *wal = [[DSHRecoveryWAL alloc]
+      initWithRootURL:[self.rootURL URLByAppendingPathComponent:@"blocked-round"]
+      clock:^NSDate * { return NSDate.date; }
+      identifierGenerator:^NSString * {
+        return @"49494949-4949-4949-8949-494949494949";
+      } faultHook:nil];
+  NSMutableDictionary *before = [[self recoveryTranscript] mutableCopy];
+  before[@"generation"] = @7;
+  before[@"transcript_sha256"] =
+      @"7777777777777777777777777777777777777777777777777777777777777777";
+  NSMutableDictionary *after = [[self recoveryTranscript] mutableCopy];
+  after[@"generation"] = @8;
+  after[@"transcript_sha256"] =
+      @"8888888888888888888888888888888888888888888888888888888888888888";
+  NSDictionary *authority = @{
+    @"task_id" : @"22222222-2222-4222-8222-222222222222",
+    @"conversation_id" : @"11111111-1111-4111-8111-111111111111",
+    @"attempt_id" : @"33333333-3333-4333-8333-333333333333",
+    @"root" : [self recoveryRoot], @"transcript" : [before copy],
+    @"state" : @"prepared", @"cleanup_id" : NSNull.null,
+    @"authority_revision" : @3,
+    @"updated_at" : @"2026-08-31T00:00:00.000Z"
+  };
+  wal.recoveryState = @{ @"authorities" : @[authority],
+    @"transcripts" : @[@{ @"transcript_ref" : after[@"transcript_ref"],
+      @"attempt_id" : authority[@"attempt_id"],
+      @"transcript_sha256" : after[@"transcript_sha256"], @"state" : @"open" }],
+    @"cleanup" : @[], @"rounds" : @[@{
+      @"locator" : @{ @"task_id" : authority[@"task_id"],
+        @"attempt_id" : authority[@"attempt_id"], @"round_index" : @4 },
+      @"state" : @"completed", @"terminal_kind" : @"blocked",
+      @"completion_receipt" : @{ @"finish_reason" : @"length" },
+      @"transcript_before" : [before copy], @"transcript_after" : [after copy] }],
+    @"ledger" : @[], @"reservations" : @[], @"batches" : @[],
+    @"denied_calls" : @[], @"dispatch" : @[], @"operations" : @[],
+    @"operation_results" : @[] };
+  DSHRecoveryRuntimeCoordinator *coordinator =
+      [self recoveryCoordinatorWithWAL:wal roundService:nullptr
+          executionService:nullptr];
+  ((DSHRecoveryPreparedStore *)coordinator.preparedStore).recoveryAuthority =
+      authority;
+  NSDictionary *request = @{ @"schema_version" : @2,
+    @"operation_id" : @"50505050-5050-4050-8050-505050505050",
+    @"controller_cas" : [self recoveryControllerCAS],
+    @"committed_checkpoint" : [self recoveryCheckpoint],
+    @"task_id" : authority[@"task_id"],
+    @"conversation_id" : authority[@"conversation_id"],
+    @"attempt_id" : authority[@"attempt_id"], @"terminal_reason" : @"failed",
+    @"cleanup_id" : @"51515151-5151-4151-8151-515151515151",
+    @"transcript" : [after copy], @"root" : [self recoveryRoot] };
+  NSError *error = nil;
+  NSDictionary *finalized = [coordinator finalizeAgentAttempt:request error:&error];
+  XCTAssertNil(error);
+  XCTAssertEqualObjects(finalized[@"status"], @"terminal");
+  XCTAssertEqualObjects(wal.recoveryState[@"authorities"][0][@"transcript"], after);
+  XCTAssertEqualObjects(wal.recoveryState[@"cleanup"][0][@"reason"], @"failed");
+  XCTAssertEqualObjects(wal.recoveryState[@"operations"][0][@"state"], @"committed");
+}
+
 - (void)testDiscardAlreadyMissingWithMissingSessionFailsClosedWithoutException {
   DSHRecoveryWAL *wal = [[DSHRecoveryWAL alloc]
       initWithRootURL:[self.rootURL URLByAppendingPathComponent:@"discard-missing-session"]
