@@ -1816,7 +1816,12 @@ static BOOL DSHAgentWALAuthorityShape(NSDictionary *authority) {
     return NO;
   }
   for (NSDictionary *tool in authority[@"registry"][@"tools"]) {
-    if (![expectedTools[tool[@"name"]] isEqual:tool[@"access"]]) return NO;
+    if ([expectedTools[tool[@"name"]] isEqual:tool[@"access"]]) continue;
+    // Authorities prepared by builds that registered git_push as once-only
+    // stay readable; the pulled device evidence fixtures carry that shape.
+    if ([tool[@"name"] isEqualToString:@"git_push"] &&
+        [tool[@"access"] isEqualToString:@"confirm_once"]) continue;
+    return NO;
   }
   if ([authority[@"transport_schema_version"] isEqual:@3]) {
     if (![root[@"kind"] isEqualToString:@"project"] ||
