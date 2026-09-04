@@ -420,6 +420,49 @@ static NSString *const DSHDigestB =
 
 - (NSDictionary *)ownedAuthorityForWorkspace:(NSString *)workspaceId
                                       revision:(NSUInteger)revision
+                                 directoryName:(NSString *)directoryName
+                                      deviceId:(NSString *)deviceId
+                                       inodeId:(NSString *)inodeId {
+  NSData *nameData = [directoryName dataUsingEncoding:NSUTF8StringEncoding];
+  NSDictionary *base = @{
+    @"schema_version": @1,
+    @"workspace_id": workspaceId,
+    @"binding_revision": @(revision),
+    @"device_id": deviceId,
+    @"inode_id": inodeId,
+    @"directory_name_sha256": [self sha256ForData:nameData],
+    @"recorded_at": DSHTimestamp,
+  };
+  NSString *origin = [workspaceId isEqual:DSHWorkspaceB]
+      ? @"imported" : @"rish_created";
+  NSDictionary *record = [self recordForWorkspaceId:workspaceId
+                                             origin:origin
+                                    rootLocatorKind:@"documents_owned"
+                                      locationClass:@"rish_owned"
+                                ownedDirectoryName:directoryName
+                                   legacyProjectId:nil
+                                  bindingRevision:revision];
+  NSString *authoritySHA256 = [self sha256ForData:[self canonicalData:base]];
+  NSDictionary *input = @{
+    @"schema_version": @1,
+    @"origin": record[@"origin"],
+    @"workspace_id": workspaceId,
+    @"binding_revision": @(revision),
+    @"root_locator_kind": @"documents_owned",
+    @"device_id": deviceId,
+    @"inode_id": inodeId,
+    @"directory_name_sha256": base[@"directory_name_sha256"],
+    @"authority_sha256": authoritySHA256,
+  };
+  NSMutableDictionary *authority = [base mutableCopy];
+  authority[@"root_fingerprint_sha256"] =
+      DSHWorkspaceRootFingerprintSHA256(input, nil);
+  XCTAssertNotNil(authority[@"root_fingerprint_sha256"]);
+  return authority;
+}
+
+- (NSDictionary *)ownedAuthorityForWorkspace:(NSString *)workspaceId
+                                      revision:(NSUInteger)revision
                                  directoryName:(NSString *)directoryName {
   NSData *nameData = [directoryName dataUsingEncoding:NSUTF8StringEncoding];
   NSDictionary *base = @{
@@ -1893,6 +1936,69 @@ static NSString *const DSHDigestB =
                   [error.userInfo[@"code"] isEqual:@"E_WORKSPACE_UNAVAILABLE"] ||
                   [error.userInfo[@"code"] isEqual:@"E_WORKSPACE_ROOT_CHANGED"]);
   }
+}
+
+- (void)testOwnedRootSurvivesADeviceIdentifierChangeButNotAnInodeChange {
+  // iOS renumbers the data volume across reboots, so a persisted st_dev stops
+  // matching while the directory itself is untouched. A workspace must still
+  // resolve; only a genuinely different directory may be rejected.
+  NSURL *documents = [self documentsRootForRoot:self.rootURL];
+  DSHLocalWorkspaceAccess *access =
+      [self accessWithRoot:self.rootURL
+          documentsRootURL:documents
+                     fault:nil
+               UUIDGenerator:^NSString *{
+                 return DSHWorkspaceA;
+               }];
+  NSDictionary *created =
+      [access createRishOwnedWorkspaceWithDisplayName:@"Reboot"
+                                          operationId:DSHOperationA
+                                                error:nil];
+  XCTAssertNotNil(created);
+  NSString *directoryName =
+      created[@"workspace"][@"owned_directory_name"] ?: @"Reboot";
+  NSURL *ownedRoot = [[self ownedWorkspacesRootForRoot:self.rootURL]
+      URLByAppendingPathComponent:directoryName isDirectory:YES];
+  struct stat state = {};
+  XCTAssertEqual(lstat(ownedRoot.fileSystemRepresentation, &state), 0);
+
+  NSURL *authorityURL = [self authorityURLForRoot:self.rootURL
+                                             kind:@"owned"
+                                      workspaceId:DSHWorkspaceA
+                                         revision:1];
+  NSString *realInode = [NSString stringWithFormat:@"%llu",
+                         (unsigned long long)state.st_ino];
+  NSString *renumberedDevice = [NSString stringWithFormat:@"%llu",
+                                (unsigned long long)state.st_dev + 7u];
+  [self secureWriteObject:[self ownedAuthorityForWorkspace:DSHWorkspaceA
+                                                  revision:1
+                                             directoryName:directoryName
+                                                  deviceId:renumberedDevice
+                                                   inodeId:realInode]
+                    toURL:authorityURL];
+
+  NSError *error = nil;
+  NSDictionary *resolved = [access resolveWorkspaceId:DSHWorkspaceA
+                              expectedBindingRevision:@1
+                                 requiredCapabilities:@[@"read"]
+                                                error:&error];
+  XCTAssertNotNil(resolved, @"%@", error);
+  XCTAssertNil(error);
+
+  NSString *foreignInode = [NSString stringWithFormat:@"%llu",
+                            (unsigned long long)state.st_ino + 7u];
+  [self secureWriteObject:[self ownedAuthorityForWorkspace:DSHWorkspaceA
+                                                  revision:1
+                                             directoryName:directoryName
+                                                  deviceId:renumberedDevice
+                                                   inodeId:foreignInode]
+                    toURL:authorityURL];
+  error = nil;
+  XCTAssertNil([access resolveWorkspaceId:DSHWorkspaceA
+                  expectedBindingRevision:@1
+                     requiredCapabilities:@[@"read"]
+                                    error:&error]);
+  XCTAssertEqualObjects(error.userInfo[@"code"], @"E_WORKSPACE_ROOT_CHANGED");
 }
 
 - (void)testOwnedLeaseAndCoordinatedOperationUseTheVerifiedDescriptor {

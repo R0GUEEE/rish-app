@@ -344,10 +344,12 @@ static BOOL DSHValidLegacyPhysicalIdentity(NSDictionary *identity,
 static BOOL DSHLegacyPhysicalIdentityMatchesAuthority(
     NSDictionary *identity,
     NSDictionary *authority) {
+  // Device ids are deliberately absent: iOS renumbers the data volume across
+  // reboots, so a persisted st_dev is not evidence about the directory. The
+  // three inodes, all reached from this app's own container, carry the
+  // identity.
   NSArray *keys = @[
-    @"projects_root_device_id",
-    @"projects_root_inode_id", @"repository_device_id",
-    @"repository_inode_id", @"git_device_id", @"git_inode_id",
+    @"projects_root_inode_id", @"repository_inode_id", @"git_inode_id",
   ];
   for (NSString *key in keys) {
     if (![identity[key] isEqual:authority[key]]) return NO;
@@ -956,12 +958,13 @@ static BOOL DSHWorkspaceDescriptorMatchesAuthority(
       S_ISLNK(state.st_mode)) {
     return NO;
   }
-  unsigned long long expectedDevice = strtoull(
-      [authority[@"device_id"] UTF8String], nullptr, 10);
+  // st_dev is not durable across reboots (iOS renumbers the data volume), so
+  // only the inode is compared against the persisted authority. Callers reach
+  // this descriptor by walking down from the app container, which is what a
+  // matching device id used to stand for.
   unsigned long long expectedInode = strtoull(
       [authority[@"inode_id"] UTF8String], nullptr, 10);
-  return (unsigned long long)state.st_dev == expectedDevice &&
-         (unsigned long long)state.st_ino == expectedInode;
+  return (unsigned long long)state.st_ino == expectedInode;
 }
 
 static NSString *DSHUnsignedIntegerString(unsigned long long value) {
@@ -1447,12 +1450,25 @@ static NSString *DSHTruncateDisplayNameForSuffix(NSString *base,
     }
     return NO;
   }
-  unsigned long long expectedDevice =
-      strtoull([authority[@"device_id"] UTF8String], NULL, 10);
   unsigned long long expectedInode =
       strtoull([authority[@"inode_id"] UTF8String], NULL, 10);
-  if ((unsigned long long)device != expectedDevice ||
-      (unsigned long long)inode != expectedInode) {
+  if ((unsigned long long)inode != expectedInode) {
+    DSHSetWorkspaceError(error, DSHLocalWorkspaceAccessErrorRootChanged);
+    return NO;
+  }
+  // A persisted st_dev is not durable: iOS renumbers the data volume across
+  // reboots, so a stored device id that no longer matches says nothing about
+  // the directory. Prove containment against the live owned-workspaces root
+  // instead, which is the property the device id was standing in for: the
+  // workspace directory must sit on the same volume as this app's container.
+  struct stat ownedRootState = {};
+  if (lstat(self.ownedWorkspacesRootURL.fileSystemRepresentation,
+            &ownedRootState) != 0 ||
+      !S_ISDIR(ownedRootState.st_mode) || S_ISLNK(ownedRootState.st_mode)) {
+    DSHSetWorkspaceError(error, DSHLocalWorkspaceAccessErrorUnavailable);
+    return NO;
+  }
+  if (device != ownedRootState.st_dev) {
     DSHSetWorkspaceError(error, DSHLocalWorkspaceAccessErrorRootChanged);
     return NO;
   }
@@ -2090,12 +2106,12 @@ static NSString *DSHTruncateDisplayNameForSuffix(NSString *base,
       struct stat state = {};
       BOOL isDirectory = lstat(url.fileSystemRepresentation, &state) == 0 &&
                          S_ISDIR(state.st_mode) && !S_ISLNK(state.st_mode);
-      unsigned long long expectedDevice = strtoull(
-          [grantedAuthority[@"device_id"] UTF8String], nullptr, 10);
+      // The security-scoped bookmark plus the persisted inode identify this
+      // folder. A persisted st_dev does not survive a reboot, so comparing it
+      // would report every granted folder as revoked after a restart.
       unsigned long long expectedInode = strtoull(
           [grantedAuthority[@"inode_id"] UTF8String], nullptr, 10);
       BOOL identityMatches = isDirectory &&
-          (unsigned long long)state.st_dev == expectedDevice &&
           (unsigned long long)state.st_ino == expectedInode;
       NSNumber *ubiquitous = nil;
       NSString *downloadStatus = nil;
