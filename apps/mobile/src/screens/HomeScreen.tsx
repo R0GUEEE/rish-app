@@ -1084,6 +1084,33 @@ export function HomeScreen({
         }
       }
 
+      // A CAS response that cannot be correlated does not mean the write was
+      // refused: the native store may already hold this exact candidate. The
+      // digest covers the candidate bytes, so a durable snapshot carrying it
+      // is proof that this write is durable, whichever call committed it.
+      // Without this the Agent attempt is failed with E_AGENT_PERSISTENCE
+      // while its own journal is already on disk, and the pending entry is
+      // stranded because no later write ever asks about it again.
+      const write = pending;
+      const reconcileWithDurableSnapshot =
+        async (): Promise<CompletionPersistenceResult> => {
+          let current: SessionSnapshotAuthorityV1;
+          try {
+            current = await sessionPersistence.loadAuthority();
+          } catch {
+            return { status: 'unknown' };
+          }
+          if (
+            current.kind !== 'present' ||
+            current.snapshot.session_sha256 !== write.candidateDigest ||
+            !installSessionAuthority(current.snapshot)
+          ) {
+            return { status: 'unknown' };
+          }
+          pendingSessionWritesRef.current.delete(candidateDigest);
+          return { status: 'committed', snapshot: current.snapshot };
+        };
+
       let authority: SessionSnapshotAuthorityV1;
       try {
         authority = await sessionPersistence.loadAuthority();
@@ -1113,7 +1140,7 @@ export function HomeScreen({
         ) {
           // The native CAS may already have committed, but without a
           // correlated Store authority it is unsafe to report durability.
-          return { status: 'unknown' };
+          return await reconcileWithDurableSnapshot();
         }
         pendingSessionWritesRef.current.delete(candidateDigest);
         return { status: 'committed', snapshot: response.snapshot };
@@ -1139,7 +1166,7 @@ export function HomeScreen({
           queried.snapshot.session_sha256 !== pending.candidateDigest ||
           !installSessionAuthority(queried.snapshot)
         ) {
-          return { status: 'unknown' };
+          return await reconcileWithDurableSnapshot();
         }
         pendingSessionWritesRef.current.delete(candidateDigest);
         return { status: 'committed', snapshot: queried.snapshot };
@@ -1152,7 +1179,7 @@ export function HomeScreen({
         pendingSessionWritesRef.current.delete(candidateDigest);
         return { status: 'not_committed' };
       }
-      return { status: 'unknown' };
+      return await reconcileWithDurableSnapshot();
     },
     [installSessionAuthority, sessionPersistence],
   );

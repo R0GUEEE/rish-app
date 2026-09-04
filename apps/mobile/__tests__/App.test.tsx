@@ -5400,6 +5400,78 @@ test('sends the complete conversation history and persists both messages', async
   expect(persisted.messages[1]?.text).toBe('STRICT_LOCAL_OK');
 });
 
+test('treats a lost CAS response as durable when the store already holds the candidate', async () => {
+  const renderer = await renderApp();
+  const root = renderer.root;
+
+  // The native store commits the candidate and then loses its own response,
+  // and the follow-up query for the same operation is indeterminate too.
+  // This is the shape the device produced: the journal was already durable
+  // while the controller was told the write had not landed, which failed the
+  // turn with a persistence error that no retry could clear.  The durable
+  // snapshot carries this candidate's digest, so the write is provably ours.
+  mockSessionSnapshots.casPersistSession.mockImplementationOnce(
+    async request => {
+      commitBridgedCandidate(request);
+      return unknownResult();
+    },
+  );
+  mockSessionSnapshots.querySessionCommit.mockResolvedValueOnce({
+    schema_version: 1,
+    status: 'unknown',
+  });
+
+  await act(async () => {
+    root
+      .findByProps({ accessibilityLabel: 'Message DSH' })
+      .props.onChangeText('First turn');
+  });
+  await act(async () => {
+    root.findByProps({ accessibilityLabel: 'Send message' }).props.onPress();
+    await settle();
+  });
+
+  expect(mockLocalRuntime.completeV2).toHaveBeenCalledTimes(1);
+  expect(
+    root.findByProps({ accessibilityLabel: 'Message DSH' }).props.value,
+  ).toBe('');
+  const persisted = lastPersistedState();
+  expect(persisted.messages.map(message => message.role)).toEqual([
+    'user',
+    'assistant',
+  ]);
+  expect(bridgedSessionJSON).toBe(lastPersistedCandidateJSON());
+});
+
+test('keeps a lost CAS response indeterminate when the store holds other bytes', async () => {
+  const renderer = await renderApp();
+  const root = renderer.root;
+
+  // Same lost response, but nothing committed.  The durable digest belongs to
+  // an older candidate, so the write stays indeterminate and no request is
+  // sent: reconciliation must never assume durability it cannot prove.
+  mockSessionSnapshots.casPersistSession.mockResolvedValueOnce(unknownResult());
+  mockSessionSnapshots.querySessionCommit.mockResolvedValueOnce({
+    schema_version: 1,
+    status: 'unknown',
+  });
+
+  await act(async () => {
+    root
+      .findByProps({ accessibilityLabel: 'Message DSH' })
+      .props.onChangeText('Keep this draft');
+  });
+  await act(async () => {
+    root.findByProps({ accessibilityLabel: 'Send message' }).props.onPress();
+    await settle();
+  });
+
+  expect(mockLocalRuntime.completeV2).not.toHaveBeenCalled();
+  expect(
+    root.findByProps({ accessibilityLabel: 'Message DSH' }).props.value,
+  ).toBe('Keep this draft');
+});
+
 test('preserves the draft and sends zero HTTP when prepared durability is absent', async () => {
   mockLocalAttachments.present.mockResolvedValueOnce({
     schema_version: 1,
