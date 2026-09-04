@@ -40,7 +40,7 @@
 		C0F400021AD99517003FC87E /* agent-begin-round-session.json in Resources */ = {isa = PBXBuildFile; fileRef = C0F400011AD99517003FC87E /* agent-begin-round-session.json */; };
 		C1F400021AD99517003FC87E /* agent-first-round-complete-session.json in Resources */ = {isa = PBXBuildFile; fileRef = C1F400011AD99517003FC87E /* agent-first-round-complete-session.json */; };
 		C2F400021AD99517003FC87E /* agent-next-round-after-tool-session.json in Resources */ = {isa = PBXBuildFile; fileRef = C2F400011AD99517003FC87E /* agent-next-round-after-tool-session.json */; };
-		C7F400021AD99517003FC87E /* agent-denied-call-session.json in Resources */ = {isa = PBXBuildFile; fileRef = C7F400011AD99517003FC87E /* agent-denied-call-session.json */; };
+		C9F400021AD99517003FC87E /* agent-denied-call-session.json in Resources */ = {isa = PBXBuildFile; fileRef = C9F400011AD99517003FC87E /* agent-denied-call-session.json */; };
 		D1F400021AD99517003FC87E /* claude-code-tool-round-session.json in Resources */ = {isa = PBXBuildFile; fileRef = D1F400011AD99517003FC87E /* claude-code-tool-round-session.json */; };
 		D2F400021AD99517003FC87E /* codex-round-session.json in Resources */ = {isa = PBXBuildFile; fileRef = D2F400011AD99517003FC87E /* codex-round-session.json */; };
 		D3F400021AD99517003FC87E /* legacy-pre-harness-session.json in Resources */ = {isa = PBXBuildFile; fileRef = D3F400011AD99517003FC87E /* legacy-pre-harness-session.json */; };
@@ -128,7 +128,7 @@
 		C0F400011AD99517003FC87E /* agent-begin-round-session.json */ = {isa = PBXFileReference; lastKnownFileType = text.json; path = "Fixtures/agent-begin-round-session.json"; sourceTree = "<group>"; };
 		C1F400011AD99517003FC87E /* agent-first-round-complete-session.json */ = {isa = PBXFileReference; lastKnownFileType = text.json; path = "Fixtures/agent-first-round-complete-session.json"; sourceTree = "<group>"; };
 		C2F400011AD99517003FC87E /* agent-next-round-after-tool-session.json */ = {isa = PBXFileReference; lastKnownFileType = text.json; path = "Fixtures/agent-next-round-after-tool-session.json"; sourceTree = "<group>"; };
-		C7F400011AD99517003FC87E /* agent-denied-call-session.json */ = {isa = PBXFileReference; lastKnownFileType = text.json; path = "Fixtures/agent-denied-call-session.json"; sourceTree = "<group>"; };
+		C9F400011AD99517003FC87E /* agent-denied-call-session.json */ = {isa = PBXFileReference; lastKnownFileType = text.json; path = "Fixtures/agent-denied-call-session.json"; sourceTree = "<group>"; };
 		D1F400011AD99517003FC87E /* claude-code-tool-round-session.json */ = {isa = PBXFileReference; lastKnownFileType = text.json; path = "Fixtures/claude-code-tool-round-session.json"; sourceTree = "<group>"; };
 		D2F400011AD99517003FC87E /* codex-round-session.json */ = {isa = PBXFileReference; lastKnownFileType = text.json; path = "Fixtures/codex-round-session.json"; sourceTree = "<group>"; };
 		D3F400011AD99517003FC87E /* legacy-pre-harness-session.json */ = {isa = PBXFileReference; lastKnownFileType = text.json; path = "Fixtures/legacy-pre-harness-session.json"; sourceTree = "<group>"; };
@@ -198,7 +198,7 @@
 				C0F400011AD99517003FC87E /* agent-begin-round-session.json */,
 				C1F400011AD99517003FC87E /* agent-first-round-complete-session.json */,
 				C2F400011AD99517003FC87E /* agent-next-round-after-tool-session.json */,
-				C7F400011AD99517003FC87E /* agent-denied-call-session.json */,
+				C9F400011AD99517003FC87E /* agent-denied-call-session.json */,
 				D1F400011AD99517003FC87E /* claude-code-tool-round-session.json */,
 				D2F400011AD99517003FC87E /* codex-round-session.json */,
 				D3F400011AD99517003FC87E /* legacy-pre-harness-session.json */,
@@ -448,7 +448,7 @@
 				C0F400021AD99517003FC87E /* agent-begin-round-session.json in Resources */,
 				C1F400021AD99517003FC87E /* agent-first-round-complete-session.json in Resources */,
 				C2F400021AD99517003FC87E /* agent-next-round-after-tool-session.json in Resources */,
-				C7F400021AD99517003FC87E /* agent-denied-call-session.json in Resources */,
+				C9F400021AD99517003FC87E /* agent-denied-call-session.json in Resources */,
 				D1F400021AD99517003FC87E /* claude-code-tool-round-session.json in Resources */,
 				D2F400021AD99517003FC87E /* codex-round-session.json in Resources */,
 				D3F400021AD99517003FC87E /* legacy-pre-harness-session.json in Resources */,
