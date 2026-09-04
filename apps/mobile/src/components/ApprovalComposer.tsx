@@ -239,7 +239,7 @@ function PreviewBlock({
           {preview.paths[0] ?? ''}
         </Text>
         <Text style={styles.previewMeta} testID="approval-preview-bytes">
-          {preview.prior === null
+          {preview.prior === null || preview.prior.kind === 'absent'
             ? t('agent.approvalPriorAbsent')
             : t('agent.approvalPriorKnown', {
                 bytes:
@@ -260,7 +260,9 @@ function PreviewBlock({
         style={styles.previewPath}
         testID="approval-preview-path"
       >
-        {preview.paths.join(', ') || '—'}
+        {preview.paths.length === 0 && preview.kind === 'list_dir'
+          ? t('agent.approvalPathRoot')
+          : preview.paths.join(', ') || '—'}
       </Text>
     </View>
   );

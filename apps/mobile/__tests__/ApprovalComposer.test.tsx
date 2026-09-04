@@ -206,3 +206,34 @@ test('batch items default to denial until explicitly approved', async () => {
     { approvalId: 'ap-2', decision: { status: 'denied' } },
   ]);
 });
+
+test('a new-file write says it creates the file even though its prior is present', async () => {
+  // Native previews a new file as prior {kind: 'absent', bytes: null}; only a
+  // known prior replaces an existing file.
+  const { renderer } = await renderComposer();
+  const meta = byTestId(renderer.root, 'approval-preview-bytes');
+  const text = ([] as unknown[]).concat(meta.props.children).join('');
+  expect(text).toContain('Creates a new file');
+  expect(text).not.toContain('Replaces existing file');
+});
+
+test('listing the workspace root names the root rather than an empty path', async () => {
+  const rootListing: ApprovalRequestSpec = {
+    ...request,
+    approvalId: 'ap-3',
+    toolCallId: 'c3',
+    toolName: 'list_dir',
+    argumentsJson: '{"path":""}',
+    preview: {
+      schema_version: 1,
+      kind: 'list_dir',
+      paths: [],
+      content_bytes: null,
+      prior: null,
+      diff_preview: null,
+      diff_truncated: false,
+    },
+  };
+  const { renderer } = await renderComposer([rootListing]);
+  expect(byTestId(renderer.root, 'approval-preview-path').props.children).toBe('Workspace root');
+});

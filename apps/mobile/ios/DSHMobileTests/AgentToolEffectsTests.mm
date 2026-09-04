@@ -566,6 +566,67 @@
 }
 
 - (NSDictionary *)serviceFixtureForRawCalls:(NSArray<NSDictionary *> *)rawCalls {
+  return [self serviceFixtureForRawCalls:rawCalls root:nil workspaceExecutor:nil];
+}
+
+/// Builds the batch service over a real owned workspace and the production
+/// workspace executor, so the approval preview the executor computes is the
+/// one the ledger validates.  Returns nil (after failing the test) when the
+/// workspace cannot be created.
+- (NSDictionary *)realWorkspaceServiceFixtureForRawCalls:
+    (NSArray<NSDictionary *> *)rawCalls {
+  NSURL *privateRoot = [self.rootURL URLByAppendingPathComponent:@"service-private"
+                                                     isDirectory:YES];
+  NSURL *documents = [self.rootURL URLByAppendingPathComponent:@"ServiceDocuments"
+                                                   isDirectory:YES];
+  XCTAssertTrue([NSFileManager.defaultManager createDirectoryAtURL:privateRoot
+                                         withIntermediateDirectories:YES
+                                                          attributes:@{NSFilePosixPermissions : @0700}
+                                                               error:nil]);
+  XCTAssertTrue([NSFileManager.defaultManager createDirectoryAtURL:documents
+                                         withIntermediateDirectories:YES
+                                                          attributes:nil
+                                                               error:nil]);
+  DSHLocalWorkspaceAccess *access = [[DSHLocalWorkspaceAccess alloc]
+      initWithPrivateRootURL:privateRoot
+      documentsRootURL:documents
+      clock:^NSDate * { return [NSDate dateWithTimeIntervalSince1970:1788134400]; }
+      UUIDGenerator:^NSString * {
+        return @"55555555-5555-4555-8555-555555555557";
+      }
+      legacyResolver:^BOOL(NSString *projectId, NSDictionary **evidence,
+                           NSError **error) {
+        (void)projectId;
+        if (evidence != nil) *evidence = nil;
+        (void)error;
+        return NO;
+      }
+      faultHook:nil];
+  NSError *error = nil;
+  XCTAssertTrue([access ensurePrivateLayoutWithError:&error]);
+  XCTAssertNil(error);
+  NSDictionary *created = [access createRishOwnedWorkspaceWithDisplayName:@"Service"
+      operationId:@"66666666-6666-4666-8666-666666666668" error:&error];
+  XCTAssertNotNil(created);
+  XCTAssertNil(error);
+  if (created == nil) return nil;
+  DSHAgentRootResolver *resolver = [[DSHAgentRootResolver alloc]
+      initWithWorkspaceAccess:access projectAccess:nil];
+  NSDictionary *root = [resolver resolveRootForWorkspaceId:created[@"workspace_id"]
+      projectId:nil bindingRevision:created[@"binding_revision"] error:&error];
+  XCTAssertNotNil(root);
+  XCTAssertNil(error);
+  if (root == nil) return nil;
+  DSHAgentWorkspaceToolExecutor *executor =
+      [[DSHAgentWorkspaceToolExecutor alloc] initWithRootResolver:resolver];
+  return [self serviceFixtureForRawCalls:rawCalls root:root
+                       workspaceExecutor:executor];
+}
+
+- (NSDictionary *)serviceFixtureForRawCalls:(NSArray<NSDictionary *> *)rawCalls
+                                       root:(NSDictionary *)explicitRoot
+                          workspaceExecutor:
+                              (DSHAgentWorkspaceToolExecutor *)explicitExecutor {
   NSString *task = @"10101010-1010-4010-8010-101010101010";
   NSString *attempt = @"20202020-2020-4020-8020-202020202020";
   NSString *conversation = @"30303030-3030-4030-8030-303030303030";
@@ -581,7 +642,7 @@
       [capabilities addObject:@"file_read"];
     if ([name hasPrefix:@"git_"]) [capabilities addObject:name];
   }
-  NSDictionary *root = [self projectRootWithCapabilities:
+  NSDictionary *root = explicitRoot ?: [self projectRootWithCapabilities:
       [[capabilities allObjects] sortedArrayUsingSelector:@selector(compare:)]];
   NSError *error = nil;
   NSDictionary *before = [self.transcripts createAgentTranscriptWithRequest:@{
@@ -706,8 +767,8 @@
   AgentEffectsPreparedStore *preparedStore = [[AgentEffectsPreparedStore alloc]
       initWithWAL:self.wal rootResolver:resolver sessionSnapshotStore:sessionStore
       transcriptStore:self.transcripts];
-  AgentEffectsWorkspaceExecutor *workspace = [[AgentEffectsWorkspaceExecutor alloc]
-      initWithRootResolver:resolver];
+  DSHAgentWorkspaceToolExecutor *workspace = explicitExecutor ?:
+      [[AgentEffectsWorkspaceExecutor alloc] initWithRootResolver:resolver];
   AgentEffectsGitExecutor *git = [[AgentEffectsGitExecutor alloc]
       initWithRootResolver:resolver];
   DSHAgentToolBatchService *batchService = [[DSHAgentToolBatchService alloc]
@@ -2228,6 +2289,69 @@
                                  @"round_index" : @0 },
           @"batch" : calls } }] }],
     @"session_events" : events };
+}
+
+// Device evidence (2026-09-04): the executor previewed a new-file write with
+// `prior = {schema_version, kind: absent}` while the ledger required the
+// prior to carry `bytes` as well, so every first write into a workspace was
+// rejected as E_AGENT_BAD_ARGUMENTS before approval.  This drives the real
+// executor through the batch service so the two sides cannot drift apart
+// again.
+- (void)testBatchServiceAcceptsTheExecutorPreviewForANewFile {
+  NSDictionary *rawWrite = @{ @"schema_version" : @1,
+    @"call_id" : @"write-new", @"name" : @"write_file",
+    @"arguments_json" :
+        @"{\"path\":\"RF4-A.md\",\"content\":\"one\\n\",\"expected_revision\":null}" };
+  NSDictionary *fixture = [self realWorkspaceServiceFixtureForRawCalls:@[rawWrite]];
+  if (fixture == nil) return;
+  DSHAgentToolBatchService *batchService = fixture[@"batch_service"];
+  NSError *error = nil;
+  NSDictionary *prepared = [batchService
+      prepareAgentToolBatchWithRequest:fixture[@"batch_request"] error:&error];
+  XCTAssertNil(error);
+  XCTAssertEqualObjects(prepared[@"status"], @"prepared", @"%@", prepared);
+  if (![prepared[@"status"] isEqualToString:@"prepared"]) return;
+  NSDictionary *call = prepared[@"receipt"][@"calls"][0];
+  NSDictionary *preview = call[@"approval_preview"];
+  XCTAssertEqualObjects(preview[@"kind"], @"write_file");
+  XCTAssertEqualObjects(preview[@"paths"], @[@"RF4-A.md"]);
+  XCTAssertEqualObjects(preview[@"content_bytes"], @4);
+  NSDictionary *expectedPrior = @{ @"schema_version" : @1, @"kind" : @"absent",
+                                   @"bytes" : NSNull.null };
+  XCTAssertEqualObjects(preview[@"prior"], expectedPrior);
+  XCTAssertEqualObjects(preview[@"diff_preview"], NSNull.null);
+}
+
+// Device evidence (2026-09-04): listing the workspace root previewed
+// `paths = [""]`, which the ledger rejects because a preview path must be a
+// non-empty relative path.  The root lists as no path at all, and a bare "."
+// names the same root so a model's first instinct is not an E_AGENT_BAD_PATH.
+- (void)testBatchServiceAcceptsTheExecutorPreviewForTheWorkspaceRoot {
+  NSDictionary *rawEmpty = @{ @"schema_version" : @1,
+    @"call_id" : @"list-root", @"name" : @"list_dir",
+    @"arguments_json" : @"{\"path\":\"\"}" };
+  NSDictionary *rawDot = @{ @"schema_version" : @1,
+    @"call_id" : @"list-dot", @"name" : @"list_dir",
+    @"arguments_json" : @"{\"path\":\".\"}" };
+  NSDictionary *fixture =
+      [self realWorkspaceServiceFixtureForRawCalls:@[rawEmpty, rawDot]];
+  if (fixture == nil) return;
+  DSHAgentToolBatchService *batchService = fixture[@"batch_service"];
+  NSError *error = nil;
+  NSDictionary *prepared = [batchService
+      prepareAgentToolBatchWithRequest:fixture[@"batch_request"] error:&error];
+  XCTAssertNil(error);
+  XCTAssertEqualObjects(prepared[@"status"], @"prepared", @"%@", prepared);
+  if (![prepared[@"status"] isEqualToString:@"prepared"]) return;
+  NSArray *calls = prepared[@"receipt"][@"calls"];
+  XCTAssertEqual(calls.count, 2U);
+  for (NSDictionary *call in calls) {
+    NSDictionary *preview = call[@"approval_preview"];
+    XCTAssertEqualObjects(preview[@"kind"], @"list_dir", @"%@", call);
+    XCTAssertEqualObjects(preview[@"paths"], @[], @"%@", call);
+    XCTAssertEqualObjects(preview[@"prior"], NSNull.null);
+    XCTAssertEqualObjects(preview[@"content_bytes"], NSNull.null);
+  }
 }
 
 - (void)testUserDenialBindSettlesDeniedReceiptAndProtectedFeedbackOnce {

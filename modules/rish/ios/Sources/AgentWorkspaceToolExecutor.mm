@@ -37,7 +37,12 @@ static NSArray<NSString *> *DSHAgentWorkspacePathComponents(id value,
       ![path isEqualToString:path.precomposedStringWithCanonicalMapping] ||
       [path hasPrefix:@"/"] || [path containsString:@"\\"] ||
       [path rangeOfString:@"\0"].location != NSNotFound) return nil;
-  if (path.length == 0) return allowRoot ? @[] : nil;
+  // The workspace root is the empty path.  A bare "." is accepted as the same
+  // root for directory listings because models reach for it first; it never
+  // names an entry, so nothing below can be confused with a "." component.
+  if (path.length == 0 || (allowRoot && [path isEqualToString:@"."])) {
+    return allowRoot ? @[] : nil;
+  }
   NSMutableArray<NSString *> *components = [NSMutableArray array];
   for (NSString *component in [path componentsSeparatedByString:@"/"]) {
     NSData *componentBytes = [component dataUsingEncoding:NSUTF8StringEncoding];
@@ -422,9 +427,13 @@ static BOOL DSHAgentWorkspaceEntryList(int directoryDescriptor,
         @"kind" : @"list_dir",
         @"directory_fingerprint_sha256" : fingerprint,
       };
+      // The ledger and the Store both require every preview path to be a
+      // non-empty relative path, so the workspace root is previewed as no
+      // path at all rather than as "".
       approvalPreview = @{
         @"schema_version" : @1, @"kind" : @"list_dir",
-        @"paths" : @[path], @"content_bytes" : NSNull.null,
+        @"paths" : components.count == 0 ? @[] : @[path],
+        @"content_bytes" : NSNull.null,
         @"prior" : NSNull.null, @"diff_preview" : NSNull.null,
         @"diff_truncated" : @NO,
       };
@@ -544,11 +553,15 @@ static BOOL DSHAgentWorkspaceEntryList(int directoryDescriptor,
       @"kind" : @"write_file",
       @"paths" : @[path],
       @"content_bytes" : @(content.length),
+      // The preview prior always carries `bytes` (null when nothing was
+      // read); the ledger and the Store validate that exact shape and reject
+      // a new-file write whose prior omits the key.
       @"prior" : statResult == 0
           ? @{ @"schema_version" : @1, @"kind" : @"known",
                @"bytes" : priorContent == nil ? NSNull.null
                    : @(priorContent.length) }
-          : @{ @"schema_version" : @1, @"kind" : @"absent" },
+          : @{ @"schema_version" : @1, @"kind" : @"absent",
+               @"bytes" : NSNull.null },
       @"diff_preview" : diffPreview ?: NSNull.null,
       @"diff_truncated" : @(diffTruncated),
     };

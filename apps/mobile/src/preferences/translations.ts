@@ -728,6 +728,7 @@ const enUS = {
   'agent.approvalDenyMessageHint':
     'Your message is sent to the model as a structured denial result.',
   'agent.approvalPathLabel': 'Target',
+  'agent.approvalPathRoot': 'Workspace root',
   'agent.approvalBytes': '{bytes} bytes',
   'agent.approvalPriorKnown': 'Replaces existing file ({bytes} bytes)',
   'agent.approvalPriorAbsent': 'Creates a new file',
@@ -1478,6 +1479,7 @@ const zhCN: Readonly<Record<TranslationKey, string>> = {
   'agent.approvalDenyMessagePlaceholder': '告诉智能体为什么拒绝…',
   'agent.approvalDenyMessageHint': '你的说明会作为结构化拒绝结果发送给模型。',
   'agent.approvalPathLabel': '目标',
+  'agent.approvalPathRoot': '工作区根目录',
   'agent.approvalBytes': '{bytes} 字节',
   'agent.approvalPriorKnown': '覆盖现有文件（{bytes} 字节）',
   'agent.approvalPriorAbsent': '创建新文件',
