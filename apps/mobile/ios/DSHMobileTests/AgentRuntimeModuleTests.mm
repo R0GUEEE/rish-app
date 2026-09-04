@@ -1784,6 +1784,126 @@ DSH_RECORD(queryAgentCleanup)
   XCTAssertEqual([wal.recoveryState[@"operations"] count], 0U);
 }
 
+// Device evidence (2026-09-04): nine attempts whose writer died with an
+// ambiguous complete_agent_round_v2 operation, plus one whose finalize was
+// started and never committed, pinned ten cleanup entries across ten launches.
+// Each launch's interrupt refused them because of the unsettled operation and
+// then left its own started operation behind, so the pile only grew.  An
+// unsettled operation that never reaches the workspace is residue, not proof
+// of an effect, and the discard takes it with everything else.
+- (void)testInterruptDiscardsUnsettledWALOnlyOperationsLeftByADeadWriter {
+  DSHRecoveryWAL *wal = [[DSHRecoveryWAL alloc]
+      initWithRootURL:[self.rootURL URLByAppendingPathComponent:@"interrupt-unsettled"]
+      clock:^NSDate * { return NSDate.date; }
+      identifierGenerator:^NSString * {
+        return @"67676767-6767-4767-8767-676767676767";
+      } faultHook:nil];
+  NSDictionary *authority = @{ @"task_id" : @"22222222-2222-4222-8222-222222222222",
+    @"conversation_id" : @"11111111-1111-4111-8111-111111111111",
+    @"attempt_id" : @"33333333-3333-4333-8333-333333333333",
+    @"root" : [self recoveryRoot], @"transcript" : [self recoveryTranscript],
+    @"state" : @"prepared", @"cleanup_id" : NSNull.null,
+    @"authority_revision" : @2 };
+  NSDictionary *ambiguousRound = @{
+    @"attempt_id" : authority[@"attempt_id"], @"task_id" : authority[@"task_id"],
+    @"operation_id" : @"68686868-6868-4868-8868-686868686868",
+    @"operation_kind" : @"complete_agent_round_v2", @"state" : @"ambiguous" };
+  NSDictionary *startedFinalize = @{
+    @"attempt_id" : authority[@"attempt_id"], @"task_id" : authority[@"task_id"],
+    @"operation_id" : @"69696969-6969-4969-8969-696969696969",
+    @"operation_kind" : @"finalize_agent_attempt", @"state" : @"started" };
+  NSDictionary *earlierInterrupt = @{
+    @"attempt_id" : authority[@"attempt_id"], @"task_id" : authority[@"task_id"],
+    @"operation_id" : @"70707070-7070-4070-8070-707070707070",
+    @"operation_kind" : @"interrupt_agent_attempt", @"state" : @"started" };
+  NSDictionary *transcriptRow = @{ @"attempt_id" : authority[@"attempt_id"],
+    @"transcript_ref" : [self recoveryTranscript][@"transcript_ref"],
+    @"transcript_sha256" : [self recoveryTranscript][@"transcript_sha256"],
+    @"state" : @"open" };
+  wal.recoveryState = @{ @"authorities" : @[authority],
+    @"transcripts" : @[transcriptRow],
+    @"cleanup" : @[], @"rounds" : @[], @"ledger" : @[],
+    @"reservations" : @[], @"batches" : @[], @"denied_calls" : @[],
+    @"dispatch" : @[],
+    @"operations" : @[ambiguousRound, startedFinalize, earlierInterrupt],
+    @"operation_results" : @[] };
+  DSHRecoveryRuntimeCoordinator *coordinator =
+      [self recoveryCoordinatorWithWAL:wal roundService:nullptr
+          executionService:nullptr];
+  DSHRecoverySessionStore *sessionStore =
+      (DSHRecoverySessionStore *)coordinator.preparedStore.sessionSnapshotStore;
+  sessionStore.recoveryLoad = [self interruptSessionLoadWithStatus:@"failed"
+      failureCode:@"E_ATTEMPT_INTERRUPTED"
+            agent:@{ @"controller_generation" : @1,
+                     @"phase" : @"round_in_flight",
+                     @"transcript" : [self recoveryTranscript] }
+           reason:@"failed"];
+  NSError *error = nil;
+  NSDictionary *request = [self interruptRequestWithOperationId:
+      @"71717171-7171-4171-8171-717171717171"];
+  NSDictionary *result = [coordinator interruptAgentAttempt:request error:&error];
+  XCTAssertNil(error);
+  XCTAssertEqualObjects(result[@"status"], @"discarded");
+  XCTAssertEqual([wal.recoveryState[@"authorities"] count], 0U);
+  XCTAssertEqual([wal.recoveryState[@"transcripts"] count], 0U);
+  XCTAssertEqual([wal.recoveryState[@"cleanup"] count], 1U);
+  XCTAssertEqualObjects(wal.recoveryState[@"cleanup"][0][@"status"], @"discarded");
+  // Only this interrupt's own committed operation survives.
+  NSArray *operations = wal.recoveryState[@"operations"];
+  XCTAssertEqual(operations.count, 1U);
+  XCTAssertEqualObjects(operations.firstObject[@"operation_id"],
+                        request[@"operation_id"]);
+  XCTAssertEqualObjects(operations.firstObject[@"state"], @"committed");
+}
+
+- (void)testInterruptStillRefusesAnUnsettledToolExecution {
+  DSHRecoveryWAL *wal = [[DSHRecoveryWAL alloc]
+      initWithRootURL:[self.rootURL URLByAppendingPathComponent:@"interrupt-execute"]
+      clock:^NSDate * { return NSDate.date; }
+      identifierGenerator:^NSString * {
+        return @"72727272-7272-4272-8272-727272727272";
+      } faultHook:nil];
+  NSDictionary *authority = @{ @"task_id" : @"22222222-2222-4222-8222-222222222222",
+    @"conversation_id" : @"11111111-1111-4111-8111-111111111111",
+    @"attempt_id" : @"33333333-3333-4333-8333-333333333333",
+    @"root" : [self recoveryRoot], @"transcript" : [self recoveryTranscript],
+    @"state" : @"prepared", @"cleanup_id" : NSNull.null,
+    @"authority_revision" : @2 };
+  NSDictionary *startedExecute = @{
+    @"attempt_id" : authority[@"attempt_id"], @"task_id" : authority[@"task_id"],
+    @"operation_id" : @"73737373-7373-4373-8373-737373737373",
+    @"operation_kind" : @"execute_agent_tool", @"state" : @"started" };
+  NSDictionary *transcriptRow = @{ @"attempt_id" : authority[@"attempt_id"],
+    @"transcript_ref" : [self recoveryTranscript][@"transcript_ref"],
+    @"transcript_sha256" : [self recoveryTranscript][@"transcript_sha256"],
+    @"state" : @"open" };
+  wal.recoveryState = @{ @"authorities" : @[authority],
+    @"transcripts" : @[transcriptRow],
+    @"cleanup" : @[], @"rounds" : @[], @"ledger" : @[],
+    @"reservations" : @[], @"batches" : @[], @"denied_calls" : @[],
+    @"dispatch" : @[], @"operations" : @[startedExecute],
+    @"operation_results" : @[] };
+  DSHRecoveryRuntimeCoordinator *coordinator =
+      [self recoveryCoordinatorWithWAL:wal roundService:nullptr
+          executionService:nullptr];
+  DSHRecoverySessionStore *sessionStore =
+      (DSHRecoverySessionStore *)coordinator.preparedStore.sessionSnapshotStore;
+  sessionStore.recoveryLoad = [self interruptSessionLoadWithStatus:@"failed"
+      failureCode:@"E_ATTEMPT_INTERRUPTED"
+            agent:@{ @"controller_generation" : @1,
+                     @"phase" : @"round_in_flight",
+                     @"transcript" : [self recoveryTranscript] }
+           reason:@"failed"];
+  NSError *error = nil;
+  NSDictionary *result = [coordinator interruptAgentAttempt:
+      [self interruptRequestWithOperationId:
+          @"74747474-7474-4174-8174-747474747474"] error:&error];
+  XCTAssertNil(result);
+  XCTAssertEqual(error.code, DSHAgentNativeStoreErrorConflict);
+  XCTAssertEqual([wal.recoveryState[@"authorities"] count], 1U);
+  XCTAssertEqual([wal.recoveryState[@"transcripts"] count], 1U);
+}
+
 - (void)testInterruptAlreadyMissingRequiresDiscardedCleanupRow {
   DSHRecoveryWAL *wal = [[DSHRecoveryWAL alloc]
       initWithRootURL:[self.rootURL URLByAppendingPathComponent:@"interrupt-missing"]

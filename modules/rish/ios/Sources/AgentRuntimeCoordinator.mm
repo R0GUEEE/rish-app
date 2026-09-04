@@ -1805,6 +1805,25 @@ typedef NS_OPTIONS(NSUInteger, DSHRuntimeResidueDiscardOptions) {
   DSHRuntimeResidueDiscardCreateCleanupRow = 1 << 1,
 };
 
+/// Whether an operation of this kind can touch anything outside the WAL.
+/// Only tool execution reaches the workspace or a git remote; every other
+/// kind rewrites WAL rows and nothing else.  Unknown kinds are treated as
+/// reaching the workspace so a future kind fails closed until listed here.
+static BOOL DSHRuntimeOperationKindReachesWorkspace(id kind) {
+  static NSSet<NSString *> *walOnlyKinds = nil;
+  static dispatch_once_t once;
+  dispatch_once(&once, ^{
+    walOnlyKinds = [NSSet setWithArray:@[
+      @"prepare_agent_attempt", @"complete_agent_round_v2",
+      @"prepare_agent_tool_batch", @"bind_agent_approval",
+      @"finalize_agent_attempt", @"interrupt_agent_attempt",
+      @"cancel_agent_attempt", @"discard_agent_attempt",
+      @"recover_agent_attempt",
+    ]];
+  });
+  return ![kind isKindOfClass:NSString.class] || ![walOnlyKinds containsObject:kind];
+}
+
 /// Fail-closed discard of every WAL row owned by one attempt: authority,
 /// transcript, rounds, ledger, reservations, batches, denied calls, dispatch
 /// rows, and the attempt's settled operations.  Shared by discard (after a
@@ -1906,12 +1925,26 @@ static NSDictionary *DSHRuntimeDiscardAttemptResidue(
     if ([operation[@"attempt_id"] isEqual:attemptId] &&
         ![operation[@"operation_id"] isEqual:request[@"operation_id"]]) {
       NSString *operationState = operation[@"state"];
-      if ([operationState isEqualToString:@"started"] ||
+      BOOL unsettled = [operationState isEqualToString:@"started"] ||
           [operationState isEqualToString:@"unknown"] ||
-          [operationState isEqualToString:@"ambiguous"]) {
+          [operationState isEqualToString:@"ambiguous"];
+      // An unsettled operation only blocks the discard when it could have
+      // reached the workspace: whether an execute ran is proven by its
+      // ledger row and dispatch marker above, and a settled row cannot
+      // hide a started execute.  Every other kind mutates nothing but this
+      // WAL, so the residue it left behind is exactly what is discarded
+      // here.  A dead writer's ambiguous round or a finalize/interrupt that
+      // never committed would otherwise pin the attempt forever, and every
+      // retried interrupt would add one more started operation to the pile.
+      if (unsettled &&
+          DSHRuntimeOperationKindReachesWorkspace(operation[@"operation_kind"])) {
         DSHSetAgentNativeStoreError(mutationError,
                                     DSHAgentNativeStoreErrorConflict);
         return nil;
+      }
+      if (unsettled) {
+        [removedOperationIds addObject:operation[@"operation_id"]];
+        continue;
       }
       if (![operationState isEqualToString:@"committed"] &&
           ![operationState isEqualToString:@"rejected"] &&
