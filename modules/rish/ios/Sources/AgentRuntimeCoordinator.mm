@@ -1803,7 +1803,20 @@ typedef NS_OPTIONS(NSUInteger, DSHRuntimeResidueDiscardOptions) {
   /// Create the cleanup row when the attempt never went through finalize
   /// (interruption of a dead writer's still-prepared authority).
   DSHRuntimeResidueDiscardCreateCleanupRow = 1 << 1,
+  /// Discard a round whose outcome is unprovable because its writer died.
+  /// The owner sweep has already rewritten such a row to unknown/ambiguous
+  /// and released its owner, so only an ownerless row qualifies.
+  DSHRuntimeResidueDiscardUnsettledRounds = 1 << 2,
 };
+
+/// Whether a row's writer has provably released it.  The WAL's owner sweep
+/// retires a dead writer's row and sets its owner to null, so an explicit
+/// null owner is the record that no writer holds the row any more.  A row
+/// that still names an owner, or that carries no owner field at all, is not
+/// provably abandoned and fails closed.
+static BOOL DSHRuntimeRowOwnerIsReleased(NSDictionary *row) {
+  return row[@"owner"] == NSNull.null;
+}
 
 /// Whether an operation of this kind can touch anything outside the WAL.
 /// Only tool execution reaches the workspace or a git remote; every other
@@ -1880,8 +1893,21 @@ static NSDictionary *DSHRuntimeDiscardAttemptResidue(
   }
   for (NSDictionary *round in state[@"rounds"]) {
     if (![round[@"locator"][@"attempt_id"] isEqual:attemptId]) continue;
-    if ([@[@"in_flight", @"cancel_requested", @"unknown", @"ambiguous"]
-            containsObject:round[@"state"]]) {
+    NSString *roundState = round[@"state"];
+    // A round that still has a live writer is never discarded: its outcome
+    // may still arrive.  The owner sweep retires a dead writer's round to
+    // unknown/ambiguous and releases the owner, and such a row is exactly
+    // the residue an interrupt exists to clear.  A round is a provider call
+    // and reaches no workspace or git remote; the ledger and dispatch checks
+    // below remain the sole proof for anything that did.
+    if ([@[@"in_flight", @"cancel_requested"] containsObject:roundState]) {
+      DSHSetAgentNativeStoreError(mutationError,
+                                  DSHAgentNativeStoreErrorConflict);
+      return nil;
+    }
+    if ([@[@"unknown", @"ambiguous"] containsObject:roundState] &&
+        !((options & DSHRuntimeResidueDiscardUnsettledRounds) != 0 &&
+          DSHRuntimeRowOwnerIsReleased(round))) {
       DSHSetAgentNativeStoreError(mutationError,
                                   DSHAgentNativeStoreErrorConflict);
       return nil;
@@ -2301,7 +2327,8 @@ static BOOL DSHRuntimeInterruptionProof(
         state, self.wal, request, @"interrupt_agent_attempt",
         started[@"request_sha256"],
         DSHRuntimeResidueDiscardUndispatchedIntents |
-            DSHRuntimeResidueDiscardCreateCleanupRow,
+            DSHRuntimeResidueDiscardCreateCleanupRow |
+            DSHRuntimeResidueDiscardUnsettledRounds,
         mutationError);
     return output != nil;
   } error:error];

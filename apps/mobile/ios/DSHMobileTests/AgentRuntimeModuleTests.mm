@@ -1716,7 +1716,10 @@ DSH_RECORD(queryAgentCleanup)
   XCTAssertEqual([wal.recoveryState[@"authorities"] count], 1U);
 }
 
-- (void)testInterruptRejectsAmbiguousRoundAndNonTerminalSessionAttempt {
+// The round below carries no owner field, so nothing proves its writer let it
+// go and the discard fails closed.  A round the owner sweep has released is
+// covered by testInterruptDiscardsAnAbandonedAmbiguousRound.
+- (void)testInterruptRejectsAnUnreleasedAmbiguousRoundAndNonTerminalSessionAttempt {
   DSHRecoveryWAL *wal = [[DSHRecoveryWAL alloc]
       initWithRootURL:[self.rootURL URLByAppendingPathComponent:@"interrupt-guards"]
       clock:^NSDate * { return NSDate.date; }
@@ -1902,6 +1905,131 @@ DSH_RECORD(queryAgentCleanup)
   XCTAssertEqual(error.code, DSHAgentNativeStoreErrorConflict);
   XCTAssertEqual([wal.recoveryState[@"authorities"] count], 1U);
   XCTAssertEqual([wal.recoveryState[@"transcripts"] count], 1U);
+}
+
+// Device evidence (2026-09-04, second round): after the operation fix drained
+// the reservation and the newest attempt, nine cleanup entries and nine
+// authorities still survived every launch.  Each of those attempts had one
+// round the WAL's owner sweep had already retired to ambiguous with a
+// released owner and E_AGENT_ROUND_AMBIGUOUS, and the round check ran before
+// the relaxed operation check and refused the discard outright.  A round is a
+// provider call: it reaches no workspace and no git remote, and once its
+// writer has released it there is no outcome left to wait for.
+- (void)testInterruptDiscardsAnAbandonedAmbiguousRound {
+  DSHRecoveryWAL *wal = [[DSHRecoveryWAL alloc]
+      initWithRootURL:[self.rootURL URLByAppendingPathComponent:@"interrupt-round"]
+      clock:^NSDate * { return NSDate.date; }
+      identifierGenerator:^NSString * {
+        return @"75757575-7575-4575-8575-757575757575";
+      } faultHook:nil];
+  NSDictionary *authority = @{ @"task_id" : @"22222222-2222-4222-8222-222222222222",
+    @"conversation_id" : @"11111111-1111-4111-8111-111111111111",
+    @"attempt_id" : @"33333333-3333-4333-8333-333333333333",
+    @"root" : [self recoveryRoot], @"transcript" : [self recoveryTranscript],
+    @"state" : @"prepared", @"cleanup_id" : NSNull.null,
+    @"authority_revision" : @2 };
+  NSDictionary *roundLocator = @{ @"schema_version" : @1,
+    @"task_id" : authority[@"task_id"], @"attempt_id" : authority[@"attempt_id"],
+    @"round_id" : @"77777777-7777-4777-8777-777777777777",
+    @"round_index" : @0 };
+  NSDictionary *sweptRound = @{ @"locator" : roundLocator,
+    @"state" : @"ambiguous", @"owner" : NSNull.null,
+    @"failure_code" : @"E_AGENT_ROUND_AMBIGUOUS" };
+  NSDictionary *transcriptRow = @{ @"attempt_id" : authority[@"attempt_id"],
+    @"transcript_ref" : [self recoveryTranscript][@"transcript_ref"],
+    @"transcript_sha256" : [self recoveryTranscript][@"transcript_sha256"],
+    @"state" : @"open" };
+  wal.recoveryState = @{ @"authorities" : @[authority],
+    @"transcripts" : @[transcriptRow],
+    @"cleanup" : @[], @"rounds" : @[sweptRound], @"ledger" : @[],
+    @"reservations" : @[], @"batches" : @[], @"denied_calls" : @[],
+    @"dispatch" : @[], @"operations" : @[], @"operation_results" : @[] };
+  DSHRecoveryRuntimeCoordinator *coordinator =
+      [self recoveryCoordinatorWithWAL:wal roundService:nullptr
+          executionService:nullptr];
+  DSHRecoverySessionStore *sessionStore =
+      (DSHRecoverySessionStore *)coordinator.preparedStore.sessionSnapshotStore;
+  sessionStore.recoveryLoad = [self interruptSessionLoadWithStatus:@"failed"
+      failureCode:@"E_ATTEMPT_INTERRUPTED"
+            agent:@{ @"controller_generation" : @1,
+                     @"phase" : @"round_in_flight",
+                     @"transcript" : [self recoveryTranscript] }
+           reason:@"failed"];
+  NSError *error = nil;
+  NSDictionary *result = [coordinator interruptAgentAttempt:
+      [self interruptRequestWithOperationId:
+          @"76767676-7676-4676-8676-767676767676"] error:&error];
+  XCTAssertNil(error);
+  XCTAssertEqualObjects(result[@"status"], @"discarded");
+  XCTAssertEqual([wal.recoveryState[@"rounds"] count], 0U);
+  XCTAssertEqual([wal.recoveryState[@"authorities"] count], 0U);
+  XCTAssertEqual([wal.recoveryState[@"transcripts"] count], 0U);
+  XCTAssertEqual([wal.recoveryState[@"cleanup"] count], 1U);
+  NSString *cleanupStatus = wal.recoveryState[@"cleanup"][0][@"status"];
+  XCTAssertEqualObjects(cleanupStatus, @"discarded");
+}
+
+// A round whose writer still holds it may yet report an outcome, and an
+// in-flight round is a live one whatever its owner field says.  Neither is
+// residue, so both keep failing closed.
+- (void)testInterruptStillRefusesARoundThatIsOwnedOrInFlight {
+  NSDictionary *authority = @{ @"task_id" : @"22222222-2222-4222-8222-222222222222",
+    @"conversation_id" : @"11111111-1111-4111-8111-111111111111",
+    @"attempt_id" : @"33333333-3333-4333-8333-333333333333",
+    @"root" : [self recoveryRoot], @"transcript" : [self recoveryTranscript],
+    @"state" : @"prepared", @"cleanup_id" : NSNull.null,
+    @"authority_revision" : @2 };
+  NSDictionary *roundLocator = @{ @"schema_version" : @1,
+    @"task_id" : authority[@"task_id"], @"attempt_id" : authority[@"attempt_id"],
+    @"round_id" : @"77777777-7777-4777-8777-777777777777",
+    @"round_index" : @0 };
+  NSDictionary *owner = @{
+    @"native_task_id" : @"78787878-7878-4878-8878-787878787878",
+    @"launch_id" : @"79797979-7979-4979-8979-797979797979" };
+  NSDictionary *ownedRound = @{ @"locator" : roundLocator,
+    @"state" : @"ambiguous", @"owner" : owner };
+  NSDictionary *inFlightRound = @{ @"locator" : roundLocator,
+    @"state" : @"in_flight", @"owner" : NSNull.null };
+  NSDictionary *transcriptRow = @{ @"attempt_id" : authority[@"attempt_id"],
+    @"transcript_ref" : [self recoveryTranscript][@"transcript_ref"],
+    @"transcript_sha256" : [self recoveryTranscript][@"transcript_sha256"],
+    @"state" : @"open" };
+  NSArray *rounds = @[ownedRound, inFlightRound];
+  for (NSUInteger index = 0; index < rounds.count; index += 1) {
+    NSString *directory = [NSString stringWithFormat:@"interrupt-round-live-%lu",
+                                                     (unsigned long)index];
+    DSHRecoveryWAL *wal = [[DSHRecoveryWAL alloc]
+        initWithRootURL:[self.rootURL URLByAppendingPathComponent:directory]
+        clock:^NSDate * { return NSDate.date; }
+        identifierGenerator:^NSString * {
+          return @"80808080-8080-4080-8080-808080808080";
+        } faultHook:nil];
+    wal.recoveryState = @{ @"authorities" : @[authority],
+      @"transcripts" : @[transcriptRow],
+      @"cleanup" : @[], @"rounds" : @[rounds[index]], @"ledger" : @[],
+      @"reservations" : @[], @"batches" : @[], @"denied_calls" : @[],
+      @"dispatch" : @[], @"operations" : @[], @"operation_results" : @[] };
+    DSHRecoveryRuntimeCoordinator *coordinator =
+        [self recoveryCoordinatorWithWAL:wal roundService:nullptr
+            executionService:nullptr];
+    DSHRecoverySessionStore *sessionStore =
+        (DSHRecoverySessionStore *)coordinator.preparedStore.sessionSnapshotStore;
+    sessionStore.recoveryLoad = [self interruptSessionLoadWithStatus:@"failed"
+        failureCode:@"E_ATTEMPT_INTERRUPTED"
+              agent:@{ @"controller_generation" : @1,
+                       @"phase" : @"round_in_flight",
+                       @"transcript" : [self recoveryTranscript] }
+             reason:@"failed"];
+    NSError *error = nil;
+    NSString *operationId = [NSString stringWithFormat:
+        @"8181818%lu-8181-4181-8181-818181818181", (unsigned long)index];
+    NSDictionary *result = [coordinator interruptAgentAttempt:
+        [self interruptRequestWithOperationId:operationId] error:&error];
+    XCTAssertNil(result);
+    XCTAssertEqual(error.code, DSHAgentNativeStoreErrorConflict);
+    XCTAssertEqual([wal.recoveryState[@"rounds"] count], 1U);
+    XCTAssertEqual([wal.recoveryState[@"authorities"] count], 1U);
+  }
 }
 
 - (void)testInterruptAlreadyMissingRequiresDiscardedCleanupRow {
