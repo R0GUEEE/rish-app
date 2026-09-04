@@ -1070,7 +1070,11 @@ static BOOL DSHSessionValidAttemptFailureCode(id value) {
       @"E_CONTEXT_NATIVE", @"E_WORKSPACE_REVOKED",
     ]];
   });
-  return [codes containsObject:value];
+  // An agent round that fails settles its attempt with the agent's own code,
+  // so every code the agent can raise must also be persistable here. Leaving
+  // them out rejected the whole candidate and reported the durable-write
+  // failure instead of the real cause.
+  return [codes containsObject:value] || DSHSessionValidAgentFailureCode(value);
 }
 
 static BOOL DSHSessionValidateAttachment(NSDictionary *attachment) {

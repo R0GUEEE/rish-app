@@ -1,4 +1,5 @@
 import {
+  AGENT_FAILURE_CODES,
   ATTEMPT_PROJECT_CONTEXT_SCHEMA_VERSION,
   ATTEMPT_FAILURE_CODES,
   ATTACHMENT_DESCRIPTOR_SCHEMA_VERSION,
@@ -118,9 +119,14 @@ const supportedModels: ReadonlySet<string> = new Set(SUPPORTED_MODEL_IDS);
 const thinkingModes: ReadonlySet<string> = new Set(CONVERSATION_THINKING_MODES);
 const attachmentKinds: ReadonlySet<string> = new Set(ATTACHMENT_KINDS);
 const finishReasons: ReadonlySet<string> = new Set(COMPLETION_FINISH_REASONS);
-const attemptFailureCodes: ReadonlySet<string> = new Set(
-  ATTEMPT_FAILURE_CODES,
-);
+// An Agent round settles its attempt with the Agent's own failure code, so
+// every code the Agent can raise is also a valid attempt failure code. Keeping
+// them out made a real Agent failure unpersistable, which surfaced as a
+// durability error instead of the cause.
+const attemptFailureCodes: ReadonlySet<string> = new Set<string>([
+  ...ATTEMPT_FAILURE_CODES,
+  ...AGENT_FAILURE_CODES,
+]);
 const attemptStatuses: ReadonlySet<string> = new Set(TURN_ATTEMPT_STATUSES);
 const workspaceBootstrapStates: ReadonlySet<string> = new Set(
   CONVERSATION_WORKSPACE_BOOTSTRAP_STATES,

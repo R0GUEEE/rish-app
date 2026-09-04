@@ -224,7 +224,13 @@ export type TurnAttemptStatus = (typeof TURN_ATTEMPT_STATUSES)[number];
 export type CompletionFinishReason = (typeof COMPLETION_FINISH_REASONS)[number];
 export type AttemptContextDisposition =
   (typeof ATTEMPT_CONTEXT_DISPOSITIONS)[number];
-export type AttemptFailureCode = (typeof ATTEMPT_FAILURE_CODES)[number];
+/**
+ * An Agent round settles its attempt with the Agent's own failure code, so an
+ * attempt may carry either family. Both are stable and value-free.
+ */
+export type AttemptFailureCode =
+  | (typeof ATTEMPT_FAILURE_CODES)[number]
+  | AgentFailureCode;
 export type ProjectContextDestructiveAction =
   (typeof PROJECT_CONTEXT_DESTRUCTIVE_ACTIONS)[number];
 export type ProjectContextDestructivePhase =

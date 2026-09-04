@@ -699,6 +699,57 @@ static NSString *const DSHSessionTestOperationB =
   return legacySession;
 }
 
+- (NSDictionary *)casRequestWithOperation:(NSString *)operation
+                                 expected:(NSDictionary *)expected
+                                candidate:(NSDictionary *)candidate {
+  return @{
+    @"schema_version" : @1,
+    @"operation_id" : operation,
+    @"expected" : expected,
+    @"candidate_json" : [self jsonForCandidate:candidate],
+  };
+}
+
+- (DSHSessionSnapshotStore *)storeAtFreshRoot {
+  NSString *name = [NSString stringWithFormat:@"rish-session-%@",
+                    NSUUID.UUID.UUIDString.lowercaseString];
+  NSURL *requested = [NSURL fileURLWithPath:
+      [NSTemporaryDirectory() stringByAppendingPathComponent:name]
+                                isDirectory:YES];
+  XCTAssertTrue([NSFileManager.defaultManager
+      createDirectoryAtURL:requested
+      withIntermediateDirectories:YES
+      attributes:@{ NSFilePosixPermissions : @0700 }
+      error:nil]);
+  NSURL *root = [NSURL fileURLWithPath:requested.path.stringByStandardizingPath
+                           isDirectory:YES];
+  return [[DSHSessionSnapshotStore alloc]
+      initWithRootURL:root
+           sessionURL:[root URLByAppendingPathComponent:@"sessions.json"]
+     launchInstanceId:DSHSessionTestLaunch
+           coordinator:nil
+             faultHook:nil];
+}
+
+- (NSMutableDictionary *)failedAttemptCandidateWithCode:(NSString *)code {
+  // Starts from the recovery fixture, whose attempts are already terminal
+  // failures, and restates one attempt's failure code. That is the shape the
+  // device produces when an Agent round settles on a stale workspace root.
+  NSMutableDictionary *candidate =
+      [self mutableSharedFixtureNamed:@"agent-interrupted-recovery-session"];
+  XCTAssertNotNil(candidate);
+  BOOL restated = NO;
+  for (NSMutableDictionary *conversation in candidate[@"conversations"]) {
+    for (NSMutableDictionary *attempt in conversation[@"attempts"]) {
+      if (restated || ![attempt[@"status"] isEqual:@"failed"]) continue;
+      attempt[@"failure_code"] = code;
+      restated = YES;
+    }
+  }
+  XCTAssertTrue(restated, @"fixture carries no failed attempt");
+  return candidate;
+}
+
 - (NSDictionary *)casWithOperation:(NSString *)operation
                            expected:(NSDictionary *)expected
                           candidate:(NSDictionary *)candidate
@@ -2187,6 +2238,40 @@ static NSString *const DSHSessionTestOperationB =
   XCTAssertNil(([self casWithOperation:DSHSessionTestOperationA
       expected:@{ @"schema_version" : @1, @"kind" : @"missing" }
       candidate:candidate error:&error]));
+  XCTAssertEqual(error.code, DSHSessionSnapshotStoreErrorInvalidArgument);
+}
+
+- (void)testFailedAttemptAcceptsAnAgentFailureCode {
+  // An Agent round settles its attempt with the Agent's own code. Rejecting
+  // those codes here made the durable write fail, so the user saw a
+  // persistence error instead of the real cause (a stale workspace root).
+  NSArray<NSString *> *codes = @[
+    @"E_AGENT_ROOT_STALE", @"E_AGENT_CAPABILITY", @"E_ATTEMPT_INTERRUPTED",
+  ];
+  NSDictionary *missing = @{ @"schema_version" : @1, @"kind" : @"missing" };
+  for (NSString *code in codes) {
+    NSMutableDictionary *candidate = [self failedAttemptCandidateWithCode:code];
+    DSHSessionSnapshotStore *store = [self storeAtFreshRoot];
+    NSError *error = nil;
+    NSDictionary *result = [store casPersistSession:[self casRequestWithOperation:DSHSessionTestOperationA
+                                                                         expected:missing
+                                                                        candidate:candidate]
+                                              error:&error];
+    XCTAssertNotNil(result, @"%@ rejected: %@", code, error);
+    XCTAssertEqualObjects(result[@"status"], @"committed", @"code %@", code);
+  }
+}
+
+- (void)testFailedAttemptStillRejectsAnUnknownFailureCode {
+  NSDictionary *missing = @{ @"schema_version" : @1, @"kind" : @"missing" };
+  NSMutableDictionary *candidate =
+      [self failedAttemptCandidateWithCode:@"E_AGENT_NOT_A_REAL_CODE"];
+  NSError *error = nil;
+  NSDictionary *result = [self casWithOperation:DSHSessionTestOperationA
+                                       expected:missing
+                                      candidate:candidate
+                                          error:&error];
+  XCTAssertNil(result);
   XCTAssertEqual(error.code, DSHSessionSnapshotStoreErrorInvalidArgument);
 }
 
