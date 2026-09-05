@@ -3449,7 +3449,14 @@ export function createChatStore(options: ChatStoreOptions = {}): ChatStore {
           ...(normalized.journalRevision === undefined
             ? {}
             : { journalRevision: normalized.journalRevision }),
-          at: canonicalNow(now),
+          // The advance reducer requires the journal's updated_at to equal
+          // the checkpoint time. The journal was stamped by the controller's
+          // clock a moment ago; reading this store's clock again here made
+          // the two disagree whenever a millisecond boundary fell between
+          // the reads, and that refusal surfaced as E_AGENT_CONFLICT after
+          // the first tool of a batch. One checkpoint carries one time, and
+          // the journal already validated it as canonical.
+          at: normalized.journal.updated_at,
         },
       });
       return agentCheckpointTransaction(

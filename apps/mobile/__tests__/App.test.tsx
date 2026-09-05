@@ -3,7 +3,7 @@
  */
 
 import React from 'react';
-import { AccessibilityInfo, Alert, Keyboard, StyleSheet } from 'react-native';
+import { AccessibilityInfo, Alert, Keyboard, StyleSheet, Text } from 'react-native';
 import ReactTestRenderer, {
   act,
   type ReactTestInstance,
@@ -8023,7 +8023,46 @@ async function waitForRenderedText(
       await new Promise<void>(resolve => setTimeout(() => resolve(), 0));
     });
   }
-  throw new Error(`missing rendered text ${text}`);
+  // Report where the Agent flow actually stopped, not just that the text is
+  // missing: the native call counts and the last persisted attempt tell
+  // apart a stalled flow, a wrong terminal, and a restart that hydrated an
+  // older candidate.
+  const counts = {
+    prepare: mockAgentRuntime.prepareAgentAttempt.mock.calls.length,
+    rounds: mockAgentRuntime.completeAgentRoundV2.mock.calls.length,
+    batches: mockAgentRuntime.prepareAgentToolBatch.mock.calls.length,
+    binds: mockAgentRuntime.bindAgentApproval.mock.calls.length,
+    executes: mockAgentRuntime.executeAgentTool.mock.calls.length,
+    finalizes: mockAgentRuntime.finalizeAgentAttempt.mock.calls.length,
+    discards: mockAgentRuntime.discardAgentAttempt.mock.calls.length,
+    persists: mockSessionSnapshots.casPersistSession.mock.calls.length,
+  };
+  let lastAttempt = 'none';
+  try {
+    const persisted = JSON.parse(lastPersistedCandidateJSON()) as {
+      conversations: Array<{
+        attempts: Array<{
+          status: string;
+          failure_code: string | null;
+          agent: null | { phase: string };
+        }>;
+      }>;
+    };
+    const attempt = persisted.conversations[0]?.attempts.at(-1);
+    lastAttempt = attempt === undefined
+      ? 'no attempt'
+      : `${attempt.status}/${attempt.failure_code ?? 'null'}/${attempt.agent?.phase ?? 'no journal'}`;
+  } catch {
+    lastAttempt = 'unreadable';
+  }
+  const composers = renderer.root.findAllByType(ApprovalComposer).length;
+  const banners = renderer.root
+    .findAllByType(Text)
+    .map(node => node.props.children)
+    .filter((child): child is string => typeof child === 'string' && child.startsWith('E_'));
+  throw new Error(
+    `missing rendered text ${text}; calls=${JSON.stringify(counts)}; lastAttempt=${lastAttempt}; approvalComposers=${composers}; banners=${JSON.stringify(banners)}`,
+  );
 }
 
 test('runs a project Agent task through two safe approvals and restores it without replay', async () => {

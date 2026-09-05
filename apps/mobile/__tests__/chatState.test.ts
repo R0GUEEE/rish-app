@@ -5359,6 +5359,7 @@ describe('schema 9 Agent journal persistence', () => {
     const setup = (
       nextCall: PersistedAgentCallJournalV3,
       middleCalls: readonly PersistedAgentCallJournalV3[] = [],
+      storeNow: () => string = () => T1,
     ) => {
       const seed = createChatStore({
         now: () => T0,
@@ -5479,7 +5480,7 @@ describe('schema 9 Agent journal persistence', () => {
         },
       };
       const store = createChatStore({
-        now: () => T1,
+        now: storeNow,
         sessionAuthority: { generation: 1, sessionSha256: 'd'.repeat(64) },
         initialState: state,
       });
@@ -5623,6 +5624,23 @@ describe('schema 9 Agent journal persistence', () => {
       expectedAttempt: drifted.expectedAttempt,
       journal: drifted.candidate('batch_frozen'),
     })).toBeNull();
+
+    // The controller stamps the advance journal from its own clock and the
+    // store must not demand that its own clock agree to the millisecond.
+    // Reading the clock twice refused roughly one advance in ten whenever a
+    // millisecond boundary fell between the reads, and the run then stopped
+    // after the first tool of a batch with E_AGENT_CONFLICT. The checkpoint
+    // carries the journal's time, not a second reading.
+    const laterClock = setup(autoCall, [], () => T2);
+    const laterTransaction = laterClock.store.advanceAgentCall({
+      cas: laterClock.cas,
+      expectedAttempt: laterClock.expectedAttempt,
+      journal: laterClock.candidate('batch_frozen'),
+    });
+    expect(laterTransaction).not.toBeNull();
+    expect(
+      laterClock.store.getState().conversations[laterClock.conversationId]!.attempts[0]!.agent,
+    ).toMatchObject({ phase: 'batch_frozen', call_index: 1, updated_at: T1 });
 
     const settledNext: PersistedAgentCallJournalV3 = {
       ...autoCall,
