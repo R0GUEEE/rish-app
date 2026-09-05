@@ -45,6 +45,7 @@
 		D2F400021AD99517003FC87E /* codex-round-session.json in Resources */ = {isa = PBXBuildFile; fileRef = D2F400011AD99517003FC87E /* codex-round-session.json */; };
 		D3F400021AD99517003FC87E /* legacy-pre-harness-session.json in Resources */ = {isa = PBXBuildFile; fileRef = D3F400011AD99517003FC87E /* legacy-pre-harness-session.json */; };
 		D4F400021AD99517003FC87E /* claude-stream-cases.json in Resources */ = {isa = PBXBuildFile; fileRef = D4F400011AD99517003FC87E /* claude-stream-cases.json */; };
+		D4F400A21AD99517003FC87E /* glm-stream-cases.json in Resources */ = {isa = PBXBuildFile; fileRef = D4F400A11AD99517003FC87E /* glm-stream-cases.json */; };
 		D5F400021AD99517003FC87E /* codex-stream-cases.json in Resources */ = {isa = PBXBuildFile; fileRef = D5F400011AD99517003FC87E /* codex-stream-cases.json */; };
 		D6F400021AD99517003FC87E /* deepseek-stream-cases.json in Resources */ = {isa = PBXBuildFile; fileRef = D6F400011AD99517003FC87E /* deepseek-stream-cases.json */; };
 		E1C400021AD99517003FC87E /* ClaudeProviderTransportTests.mm in Sources */ = {isa = PBXBuildFile; fileRef = E1C400011AD99517003FC87E /* ClaudeProviderTransportTests.mm */; };
@@ -133,6 +134,7 @@
 		D2F400011AD99517003FC87E /* codex-round-session.json */ = {isa = PBXFileReference; lastKnownFileType = text.json; path = "Fixtures/codex-round-session.json"; sourceTree = "<group>"; };
 		D3F400011AD99517003FC87E /* legacy-pre-harness-session.json */ = {isa = PBXFileReference; lastKnownFileType = text.json; path = "Fixtures/legacy-pre-harness-session.json"; sourceTree = "<group>"; };
 		D4F400011AD99517003FC87E /* claude-stream-cases.json */ = {isa = PBXFileReference; lastKnownFileType = text.json; path = "Fixtures/claude-stream-cases.json"; sourceTree = "<group>"; };
+		D4F400A11AD99517003FC87E /* glm-stream-cases.json */ = {isa = PBXFileReference; lastKnownFileType = text.json; path = "Fixtures/glm-stream-cases.json"; sourceTree = "<group>"; };
 		D5F400011AD99517003FC87E /* codex-stream-cases.json */ = {isa = PBXFileReference; lastKnownFileType = text.json; path = "Fixtures/codex-stream-cases.json"; sourceTree = "<group>"; };
 		D6F400011AD99517003FC87E /* deepseek-stream-cases.json */ = {isa = PBXFileReference; lastKnownFileType = text.json; path = "Fixtures/deepseek-stream-cases.json"; sourceTree = "<group>"; };
 		E1C400011AD99517003FC87E /* ClaudeProviderTransportTests.mm */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.cpp.objcpp; path = ClaudeProviderTransportTests.mm; sourceTree = "<group>"; };
@@ -203,6 +205,7 @@
 				D2F400011AD99517003FC87E /* codex-round-session.json */,
 				D3F400011AD99517003FC87E /* legacy-pre-harness-session.json */,
 				D4F400011AD99517003FC87E /* claude-stream-cases.json */,
+				D4F400A11AD99517003FC87E /* glm-stream-cases.json */,
 				D5F400011AD99517003FC87E /* codex-stream-cases.json */,
 				D6F400011AD99517003FC87E /* deepseek-stream-cases.json */,
 				C3F400011AD99517003FC87E /* agent-interrupted-recovery-session.json */,
@@ -453,6 +456,7 @@
 				D2F400021AD99517003FC87E /* codex-round-session.json in Resources */,
 				D3F400021AD99517003FC87E /* legacy-pre-harness-session.json in Resources */,
 				D4F400021AD99517003FC87E /* claude-stream-cases.json in Resources */,
+				D4F400A21AD99517003FC87E /* glm-stream-cases.json in Resources */,
 				D5F400021AD99517003FC87E /* codex-stream-cases.json in Resources */,
 				D6F400021AD99517003FC87E /* deepseek-stream-cases.json in Resources */,
 				C3F400021AD99517003FC87E /* agent-interrupted-recovery-session.json in Resources */,

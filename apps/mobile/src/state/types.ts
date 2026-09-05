@@ -94,6 +94,8 @@ export const SUPPORTED_MODEL_IDS = [
   'gpt-5.6',
   'gpt-5.6-mini',
   'gpt-5.6-nano',
+  'GLM-5.3',
+  'GLM-5.3-Flash',
 ] as const;
 
 export const CONVERSATION_THINKING_MODES = ['off', 'high', 'max'] as const;

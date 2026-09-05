@@ -3,15 +3,21 @@ import {
   CLAUDE_CODE_HARNESS,
   CODEX_HARNESS,
   DSH_HARNESS,
+  GLM_HARNESS,
   createHarnessRegistry,
+  harnessForModel,
+  isCredentialSlot,
+  providerForHarness,
+  providerHostForModel,
   type HarnessManifest,
 } from '../src/harness';
 
-test('registers the three executable built-in Rish harnesses', () => {
+test('registers the four executable built-in Rish harnesses', () => {
   expect(BUILTIN_HARNESSES.list()).toEqual([
     DSH_HARNESS,
     CLAUDE_CODE_HARNESS,
     CODEX_HARNESS,
+    GLM_HARNESS,
   ]);
   expect(BUILTIN_HARNESSES.get('dsh')?.runtime).toEqual({
     kind: 'native-adapter',
@@ -30,6 +36,11 @@ test('registers the three executable built-in Rish harnesses', () => {
     entrypoint: 'CodexHarnessAdapter',
   });
   expect(BUILTIN_HARNESSES.get('codex')?.capabilities).toContain('tools');
+  expect(BUILTIN_HARNESSES.get('glm')?.runtime).toEqual({
+    kind: 'native-adapter',
+    entrypoint: 'GlmHarnessAdapter',
+  });
+  expect(BUILTIN_HARNESSES.get('glm')?.capabilities).toContain('workspace');
 });
 
 test('exposes provider credential slots keyed by Keychain account', () => {
@@ -57,6 +68,14 @@ test('exposes provider credential slots keyed by Keychain account', () => {
       secret: true,
     },
   ]);
+  expect(GLM_HARNESS.credentials).toEqual([
+    {
+      id: 'bigmodel-api-key',
+      keychainAccount: 'BIGMODEL_API_KEY',
+      label: 'Zhipu GLM API key',
+      secret: true,
+    },
+  ]);
 });
 
 test('catalogs the requested provider model families', () => {
@@ -71,6 +90,19 @@ test('catalogs the requested provider model families', () => {
     'gpt-5.6-mini',
     'gpt-5.6-nano',
   ]);
+  expect(GLM_HARNESS.models.map(model => model.id)).toEqual([
+    'GLM-5.3',
+    'GLM-5.3-Flash',
+  ]);
+});
+
+test('routes GLM models to the bigmodel provider over open.bigmodel.cn', () => {
+  expect(harnessForModel('GLM-5.3')).toBe('glm');
+  expect(harnessForModel('GLM-5.3-Flash')).toBe('glm');
+  expect(providerForHarness('glm')).toBe('bigmodel');
+  expect(providerHostForModel('GLM-5.3')).toBe('open.bigmodel.cn');
+  expect(providerHostForModel('GLM-5.3-Flash')).toBe('open.bigmodel.cn');
+  expect(isCredentialSlot('BIGMODEL_API_KEY')).toBe(true);
 });
 
 test('accepts a valid custom rish-guest harness manifest', () => {

@@ -32,6 +32,7 @@ const FIXTURES: ReadonlyArray<{ readonly file: string; readonly harnessId: Harne
   { file: 'deepseek-stream-cases.json', harnessId: 'dsh' },
   { file: 'claude-stream-cases.json', harnessId: 'claude-code' },
   { file: 'codex-stream-cases.json', harnessId: 'codex' },
+  { file: 'glm-stream-cases.json', harnessId: 'glm' },
 ];
 
 type StreamCase = {

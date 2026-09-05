@@ -1,6 +1,6 @@
 export const HARNESS_MANIFEST_SCHEMA_VERSION = 1 as const;
 
-export const HARNESS_IDS = ['dsh', 'claude-code', 'codex'] as const;
+export const HARNESS_IDS = ['dsh', 'claude-code', 'codex', 'glm'] as const;
 export type HarnessId = (typeof HARNESS_IDS)[number];
 
 export function isHarnessId(value: unknown): value is HarnessId {
@@ -40,12 +40,28 @@ export const CODEX_MODEL_IDS = [
 ] as const;
 export type CodexModelId = (typeof CODEX_MODEL_IDS)[number];
 
-export type HarnessModelId = DeepSeekModelId | ClaudeModelId | CodexModelId;
+/** The GLM-5.3 family catalog; ids are configurable in the manifest. */
+export const GLM_MODEL_IDS = ['GLM-5.3', 'GLM-5.3-Flash'] as const;
+export type GlmModelId = (typeof GLM_MODEL_IDS)[number];
+
+export function isGlmModelId(value: unknown): value is GlmModelId {
+  return (
+    typeof value === 'string' &&
+    (GLM_MODEL_IDS as readonly string[]).includes(value)
+  );
+}
+
+export type HarnessModelId =
+  | DeepSeekModelId
+  | ClaudeModelId
+  | CodexModelId
+  | GlmModelId;
 
 export const PROVIDER_MODEL_IDS = [
   ...DEEPSEEK_MODEL_IDS,
   ...CLAUDE_MODEL_IDS,
   ...CODEX_MODEL_IDS,
+  ...GLM_MODEL_IDS,
 ] as const;
 
 export function isHarnessModelId(value: unknown): value is HarnessModelId {
@@ -60,14 +76,21 @@ export function isHarnessModelId(value: unknown): value is HarnessModelId {
  * travel inside project-context consent receipts and runtime proof so the
  * record names the API that actually served a round; the native catalog
  * (RishHarnessCatalog.mm) keeps the same tables.
+ *
+ * Harness / provider / host triples:
+ * dsh         -> deepseek  (api.deepseek.com)
+ * claude-code -> anthropic (api.anthropic.com)
+ * codex       -> openai    (api.openai.com)
+ * glm         -> bigmodel  (open.bigmodel.cn)
  */
-export const PROVIDER_IDS = ['deepseek', 'anthropic', 'openai'] as const;
+export const PROVIDER_IDS = ['deepseek', 'anthropic', 'openai', 'bigmodel'] as const;
 export type ProviderId = (typeof PROVIDER_IDS)[number];
 
 export const PROVIDER_HOSTS = {
   deepseek: 'api.deepseek.com',
   anthropic: 'api.anthropic.com',
   openai: 'api.openai.com',
+  bigmodel: 'open.bigmodel.cn',
 } as const satisfies Record<ProviderId, string>;
 export type ProviderHost = (typeof PROVIDER_HOSTS)[ProviderId];
 
@@ -90,6 +113,7 @@ export function harnessForModel(model: HarnessModelId): HarnessId {
   if ((CLAUDE_MODEL_IDS as readonly string[]).includes(model)) {
     return 'claude-code';
   }
+  if ((GLM_MODEL_IDS as readonly string[]).includes(model)) return 'glm';
   return 'codex';
 }
 
@@ -101,6 +125,8 @@ export function providerForHarness(harnessId: HarnessId): ProviderId {
       return 'anthropic';
     case 'codex':
       return 'openai';
+    case 'glm':
+      return 'bigmodel';
   }
 }
 
@@ -115,12 +141,16 @@ export function providerHostForModel(model: HarnessModelId): ProviderHost {
 /**
  * Keychain accounts shared with the native runtime. The account is the
  * credential slot identifier; the Keychain service name is owned by the
- * generic runtime and never changes.
+ * generic runtime and never changes. The built-in harness / provider /
+ * slot triples are dsh/deepseek/DEEPSEEK_API_KEY,
+ * claude-code/anthropic/ANTHROPIC_API_KEY, codex/openai/OPENAI_API_KEY,
+ * and glm/bigmodel/BIGMODEL_API_KEY.
  */
 export const CREDENTIAL_SLOTS = [
   'DEEPSEEK_API_KEY',
   'ANTHROPIC_API_KEY',
   'OPENAI_API_KEY',
+  'BIGMODEL_API_KEY',
 ] as const;
 export type CredentialSlot = (typeof CREDENTIAL_SLOTS)[number];
 
@@ -160,7 +190,7 @@ export type HarnessCredentialSlot = {
 
 export type HarnessManifest = {
   readonly schemaVersion: typeof HARNESS_MANIFEST_SCHEMA_VERSION;
-  /** Stable harness id; the three builtins are HarnessId, custom manifests use any registry-validated id. */
+  /** Stable harness id; the four builtins are HarnessId, custom manifests use any registry-validated id. */
   readonly id: string;
   readonly name: string;
   readonly version: string;

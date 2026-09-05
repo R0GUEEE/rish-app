@@ -14,6 +14,7 @@ import type { HarnessId } from '../types';
 import { ClaudeCodeHarnessAdapter } from './ClaudeCodeHarnessAdapter';
 import { CodexHarnessAdapter } from './CodexHarnessAdapter';
 import { DshHarnessAdapter } from './DshHarnessAdapter';
+import { GlmHarnessAdapter } from './GlmHarnessAdapter';
 
 /**
  * The shared surface every builtin native-adapter Harness exposes. The
@@ -42,6 +43,7 @@ export const BUILTIN_HARNESS_ADAPTERS: Record<HarnessId, HarnessAdapter> = {
   dsh: DshHarnessAdapter,
   'claude-code': ClaudeCodeHarnessAdapter,
   codex: CodexHarnessAdapter,
+  glm: GlmHarnessAdapter,
 };
 
 export function getHarnessAdapter(harnessId: HarnessId): HarnessAdapter {

@@ -18,7 +18,9 @@ export type SupportedModel =
   | 'claude-fable-5-1'
   | 'gpt-5.6'
   | 'gpt-5.6-mini'
-  | 'gpt-5.6-nano';
+  | 'gpt-5.6-nano'
+  | 'GLM-5.3'
+  | 'GLM-5.3-Flash';
 
 export const modelDetails: Record<
   SupportedModel,
@@ -73,6 +75,16 @@ export const modelDetails: Record<
     name: 'GPT-5.6 Nano',
     eyebrow: 'FASTEST · NANO',
     description: 'Smallest and fastest Codex model.',
+  },
+  'GLM-5.3': {
+    name: 'GLM-5.3',
+    eyebrow: 'GLM · DEFAULT',
+    description: 'Zhipu GLM reasoning and tool work over Messages transport.',
+  },
+  'GLM-5.3-Flash': {
+    name: 'GLM-5.3 Flash',
+    eyebrow: 'FAST · FLASH',
+    description: 'Faster Zhipu GLM rounds for everyday work.',
   },
 };
 
@@ -140,6 +152,18 @@ export function localizedModelDetails(
         name: t('model.gpt56nano.name'),
         eyebrow: t('model.gpt56nano.eyebrow'),
         description: t('model.gpt56nano.description'),
+      };
+    case 'GLM-5.3':
+      return {
+        name: t('model.glm53.name'),
+        eyebrow: t('model.glm53.eyebrow'),
+        description: t('model.glm53.description'),
+      };
+    case 'GLM-5.3-Flash':
+      return {
+        name: t('model.glm53flash.name'),
+        eyebrow: t('model.glm53flash.eyebrow'),
+        description: t('model.glm53flash.description'),
       };
   }
 }

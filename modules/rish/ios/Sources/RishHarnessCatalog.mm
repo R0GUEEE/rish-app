@@ -3,6 +3,12 @@
 static NSString *const DSHCatalogHarnessDsh = @"dsh";
 static NSString *const DSHCatalogHarnessClaudeCode = @"claude-code";
 static NSString *const DSHCatalogHarnessCodex = @"codex";
+/// Zhipu GLM served over its Anthropic-compatible Messages endpoint. A
+/// distinct catalog entry rather than a base-URL override on claude-code:
+/// provider_host is recorded in consent manifests, runtime proof and session
+/// snapshots and compared by equality, so the host that actually served a
+/// round has to be a fixed catalog fact, not mutable state.
+static NSString *const DSHCatalogHarnessGlm = @"glm";
 
 static NSDictionary<NSString *, NSString *> *DSHCatalogHarnessByModel(void) {
   static NSDictionary<NSString *, NSString *> *table = nil;
@@ -19,6 +25,8 @@ static NSDictionary<NSString *, NSString *> *DSHCatalogHarnessByModel(void) {
       @"gpt-5.6" : DSHCatalogHarnessCodex,
       @"gpt-5.6-mini" : DSHCatalogHarnessCodex,
       @"gpt-5.6-nano" : DSHCatalogHarnessCodex,
+      @"GLM-5.3" : DSHCatalogHarnessGlm,
+      @"GLM-5.3-Flash" : DSHCatalogHarnessGlm,
     };
   });
   return table;
@@ -32,6 +40,7 @@ static NSDictionary<NSString *, NSString *> *DSHCatalogProviderByHarness(void) {
       DSHCatalogHarnessDsh : @"deepseek",
       DSHCatalogHarnessClaudeCode : @"anthropic",
       DSHCatalogHarnessCodex : @"openai",
+      DSHCatalogHarnessGlm : @"bigmodel",
     };
   });
   return table;
@@ -45,6 +54,7 @@ static NSDictionary<NSString *, NSString *> *DSHCatalogHostByProvider(void) {
       @"deepseek" : @"api.deepseek.com",
       @"anthropic" : @"api.anthropic.com",
       @"openai" : @"api.openai.com",
+      @"bigmodel" : @"open.bigmodel.cn",
     };
   });
   return table;
@@ -58,6 +68,7 @@ static NSDictionary<NSString *, NSString *> *DSHCatalogAccountByHarness(void) {
       DSHCatalogHarnessDsh : @"DEEPSEEK_API_KEY",
       DSHCatalogHarnessClaudeCode : @"ANTHROPIC_API_KEY",
       DSHCatalogHarnessCodex : @"OPENAI_API_KEY",
+      DSHCatalogHarnessGlm : @"BIGMODEL_API_KEY",
     };
   });
   return table;

@@ -30,4 +30,12 @@ NS_ASSUME_NONNULL_BEGIN
 
 @end
 
+/// GLM Harness provider transport: Zhipu serves GLM models over an
+/// Anthropic-compatible Messages endpoint, so the whole Claude dialect
+/// (blocks, thinking, stop reasons, SSE parser, headers) is reused and only
+/// the base URL, the harness identity and the model gate differ.
+@interface GlmProviderTransport : ClaudeProviderTransport
+
+@end
+
 NS_ASSUME_NONNULL_END

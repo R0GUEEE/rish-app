@@ -49,13 +49,17 @@ static NSDictionary *ClaudeDictionary(id value) {
 }
 
 typedef NS_ENUM(NSInteger, ClaudeThinkingFamily) {
-  ClaudeThinkingFamilyBudget,        // Haiku 4.5: enabled + budget_tokens
+  ClaudeThinkingFamilyBudget,        // Haiku 4.5 and GLM: enabled + budget_tokens
   ClaudeThinkingFamilyAdaptive,      // Sonnet 5 / Opus 5: adaptive, may disable
   ClaudeThinkingFamilyAlwaysOn,      // Fable 5.1: adaptive, cannot disable
 };
 
 static ClaudeThinkingFamily ClaudeFamilyForModel(NSString *model) {
   if ([model hasPrefix:@"claude-haiku-4-5"]) return ClaudeThinkingFamilyBudget;
+  // GLM over the Anthropic-compatible endpoint takes the classic
+  // enabled + budget_tokens form and nothing when thinking is off; the
+  // adaptive / output_config vocabulary is Anthropic-only.
+  if ([model hasPrefix:@"GLM-"]) return ClaudeThinkingFamilyBudget;
   if ([model hasPrefix:@"claude-fable-"]) return ClaudeThinkingFamilyAlwaysOn;
   return ClaudeThinkingFamilyAdaptive;
 }
@@ -592,6 +596,22 @@ static NSDictionary<NSString *, id> * _Nullable ClaudeDecodeEvent(
 
 - (NSString *)providerHarnessId {
   return @"claude-code";
+}
+
+@end
+
+@implementation GlmProviderTransport
+
+- (NSURL *)providerBaseURL {
+  return [NSURL URLWithString:@"https://open.bigmodel.cn/api/anthropic/v1/messages"];
+}
+
+- (BOOL)providerSupportsModel:(NSString *)model {
+  return [DSHHarnessIdForModel(model) isEqualToString:@"glm"];
+}
+
+- (NSString *)providerHarnessId {
+  return @"glm";
 }
 
 @end

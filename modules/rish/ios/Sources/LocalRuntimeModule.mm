@@ -615,6 +615,7 @@ static BOOL DSHCanConnectToMacProxy(void) {
 @property(nonatomic, strong) DSHCompletionProviderTransport *completionProviderTransport;
 @property(nonatomic, strong) ClaudeProviderTransport *claudeProviderTransport;
 @property(nonatomic, strong) CodexProviderTransport *codexProviderTransport;
+@property(nonatomic, strong) GlmProviderTransport *glmProviderTransport;
 @property(nonatomic, strong) NSURLSessionDataTask *activeCompletionTask;
 @property(nonatomic, copy) NSString *activeCompletionRequestId;
 @property(nonatomic) NSUInteger activeCompletionGeneration;
@@ -753,6 +754,10 @@ RCT_EXPORT_MODULE(LocalRuntime)
         initWithSession:_modelSession
         uuidGenerator:_completionV2UUIDGenerator
         monotonicClock:_completionV2MonotonicClock];
+    _glmProviderTransport = [[GlmProviderTransport alloc]
+        initWithSession:_modelSession
+        uuidGenerator:_completionV2UUIDGenerator
+        monotonicClock:_completionV2MonotonicClock];
     _slotCredentialGenerations = [NSMutableDictionary dictionary];
     for (NSString *account in DSHHarnessCredentialAccounts()) {
       _slotCredentialGenerations[account] = @0;
@@ -764,6 +769,7 @@ RCT_EXPORT_MODULE(LocalRuntime)
 - (DSHCompletionProviderTransport *)providerTransportForHarnessId:(NSString *)harnessId {
   if ([harnessId isEqualToString:@"claude-code"]) return self.claudeProviderTransport;
   if ([harnessId isEqualToString:@"codex"]) return self.codexProviderTransport;
+  if ([harnessId isEqualToString:@"glm"]) return self.glmProviderTransport;
   return self.completionProviderTransport;
 }
 
@@ -1811,12 +1817,16 @@ static NSString *DSHCredentialPromptTitle(NSString *account, BOOL chinese) {
   if ([account isEqualToString:@"OPENAI_API_KEY"]) {
     return chinese ? @"OpenAI API 密钥" : @"OpenAI API key";
   }
+  if ([account isEqualToString:@"BIGMODEL_API_KEY"]) {
+    return chinese ? @"智谱 GLM API 密钥" : @"Zhipu GLM API key";
+  }
   return chinese ? @"DeepSeek API 密钥" : @"DeepSeek API key";
 }
 
 static NSString *DSHCredentialPromptPlaceholder(NSString *account) {
   if ([account isEqualToString:@"ANTHROPIC_API_KEY"]) return @"sk-ant-…";
   if ([account isEqualToString:@"OPENAI_API_KEY"]) return @"sk-…";
+  if ([account isEqualToString:@"BIGMODEL_API_KEY"]) return @"id.secret";
   return @"sk-…";
 }
 

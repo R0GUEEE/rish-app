@@ -366,6 +366,13 @@ const enUS = {
   'model.gpt56nano.name': 'GPT-5.6 Nano',
   'model.gpt56nano.eyebrow': 'FASTEST · NANO',
   'model.gpt56nano.description': 'Smallest and fastest Codex model.',
+  'model.glm53.name': 'GLM-5.3',
+  'model.glm53.eyebrow': 'GLM · DEFAULT',
+  'model.glm53.description':
+    'Zhipu GLM reasoning and tool work over Messages transport.',
+  'model.glm53flash.name': 'GLM-5.3 Flash',
+  'model.glm53flash.eyebrow': 'FAST · FLASH',
+  'model.glm53flash.description': 'Faster Zhipu GLM rounds for everyday work.',
 
   'thinking.eyebrow': 'THINKING',
   'thinking.title': 'Thinking for this chat',
@@ -1139,6 +1146,12 @@ const zhCN: Readonly<Record<TranslationKey, string>> = {
   'model.gpt56nano.name': 'GPT-5.6 Nano',
   'model.gpt56nano.eyebrow': '最快 · 迷你',
   'model.gpt56nano.description': '最小最快的 Codex 模型。',
+  'model.glm53.name': 'GLM-5.3',
+  'model.glm53.eyebrow': 'GLM · 默认',
+  'model.glm53.description': '基于 Messages 传输的智谱 GLM 推理与工具能力。',
+  'model.glm53flash.name': 'GLM-5.3 Flash',
+  'model.glm53flash.eyebrow': '快速 · FLASH',
+  'model.glm53flash.description': '适合日常工作的更快智谱 GLM 模型。',
 
   'thinking.eyebrow': '思考',
   'thinking.title': '当前对话的思考模式',

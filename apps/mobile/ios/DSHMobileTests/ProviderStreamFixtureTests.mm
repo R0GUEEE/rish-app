@@ -100,6 +100,12 @@
   [self replayFixture:@"codex-stream-cases" transport:transport harnessId:@"codex"];
 }
 
+- (void)testGlmStreamFixtureReplaysThroughGlmParser {
+  GlmProviderTransport *transport = [[GlmProviderTransport alloc]
+      initWithSession:NSURLSession.sharedSession uuidGenerator:nil monotonicClock:nil];
+  [self replayFixture:@"glm-stream-cases" transport:transport harnessId:@"glm"];
+}
+
 - (void)testCatalogAgreesOnProviderIdentity {
   XCTAssertEqualObjects(DSHHarnessIdForModel(@"deepseek-v4-flash"), @"dsh");
   XCTAssertEqualObjects(DSHHarnessIdForModel(@"claude-sonnet-5"), @"claude-code");
@@ -116,7 +122,7 @@
   XCTAssertNil(DSHCredentialAccountForHarnessId(@"rish-guest"));
   XCTAssertTrue(DSHHarnessIsProviderHost(@"api.anthropic.com"));
   XCTAssertFalse(DSHHarnessIsProviderHost(@"api.example.com"));
-  XCTAssertEqual(DSHHarnessSupportedModels().count, (NSUInteger)10);
+  XCTAssertEqual(DSHHarnessSupportedModels().count, (NSUInteger)12);
 }
 
 @end

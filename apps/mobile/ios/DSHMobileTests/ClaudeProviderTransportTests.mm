@@ -124,6 +124,53 @@ static NSUInteger ClaudeTransportRequestCount = 0;
   XCTAssertFalse([self.transport providerSupportsModel:@"deepseek-v4-flash"]);
 }
 
+// GLM rides the Claude dialect over Zhipu's Anthropic-compatible endpoint. It is a
+// distinct catalog entry, not a base-URL override: provider_host is recorded
+// in consent manifests, proof and snapshots and compared by equality, so the
+// host that served a round must be a fixed catalog fact.
+- (void)testGlmTransportTargetsBigmodelWithTheClaudeDialect {
+  GlmProviderTransport *glm = [[GlmProviderTransport alloc]
+      initWithSession:self.session uuidGenerator:nil monotonicClock:nil];
+  XCTAssertEqualObjects([glm providerBaseURL].absoluteString,
+                        @"https://open.bigmodel.cn/api/anthropic/v1/messages");
+  NSDictionary *headers = [glm providerHeadersWithCredential:@"id.secret"];
+  XCTAssertEqualObjects(headers[@"x-api-key"], @"id.secret");
+  XCTAssertEqualObjects(headers[@"anthropic-version"], @"2023-06-01");
+  XCTAssertNil(headers[@"Authorization"]);
+  XCTAssertEqualObjects([glm providerHarnessId], @"glm");
+  XCTAssertTrue([glm providerSupportsModel:@"GLM-5.3"]);
+  XCTAssertTrue([glm providerSupportsModel:@"GLM-5.3-Flash"]);
+  XCTAssertFalse([glm providerSupportsModel:@"claude-fable-5-1"]);
+  XCTAssertFalse([glm providerSupportsModel:@"deepseek-v4-flash"]);
+  XCTAssertFalse([self.transport providerSupportsModel:@"GLM-5.3"]);
+
+  // Catalog facts the evidence layer will record for a GLM round.
+  XCTAssertEqualObjects(DSHHarnessIdForModel(@"GLM-5.3-Flash"), @"glm");
+  XCTAssertEqualObjects(DSHProviderIdForHarnessId(@"glm"), @"bigmodel");
+  XCTAssertEqualObjects(DSHProviderHostForModel(@"GLM-5.3"), @"open.bigmodel.cn");
+  XCTAssertTrue(DSHHarnessIsProviderHost(@"open.bigmodel.cn"));
+  XCTAssertEqualObjects(DSHCredentialAccountForHarnessId(@"glm"), @"BIGMODEL_API_KEY");
+  XCTAssertTrue(DSHHarnessIsCredentialAccount(@"BIGMODEL_API_KEY"));
+
+  // Thinking uses the classic enabled + budget_tokens form; off sends nothing.
+  NSArray *messages = @[ @{ @"role": @"user", @"content": @"hello" } ];
+  NSError *error = nil;
+  NSDictionary *max = [glm providerRequestBodyForModel:@"GLM-5.3" thinkingMode:@"max"
+      messages:messages tools:@[] streaming:NO error:&error];
+  XCTAssertNil(error);
+  XCTAssertEqualObjects(max[@"model"], @"GLM-5.3");
+  NSDictionary *expectedThinking = @{ @"type": @"enabled", @"budget_tokens": @16000 };
+  XCTAssertEqualObjects(max[@"thinking"], expectedThinking);
+  XCTAssertNil(max[@"output_config"]);
+  NSDictionary *off = [glm providerRequestBodyForModel:@"GLM-5.3-Flash" thinkingMode:@"off"
+      messages:messages tools:@[] streaming:YES error:&error];
+  XCTAssertNil(error);
+  XCTAssertEqualObjects(off[@"model"], @"GLM-5.3-Flash");
+  XCTAssertEqualObjects(off[@"stream"], @YES);
+  XCTAssertNil(off[@"thinking"]);
+  XCTAssertNil(off[@"output_config"]);
+}
+
 - (void)testAdaptiveFamilyMapsThinkingModesWithoutBudgetTokens {
   NSArray *messages = @[
     @{ @"role": @"system", @"content": @"system policy" },

@@ -1717,7 +1717,9 @@ function model(value: unknown): value is HarnessModelId {
     value === 'claude-fable-5-1' ||
     value === 'gpt-5.6' ||
     value === 'gpt-5.6-mini' ||
-    value === 'gpt-5.6-nano'
+    value === 'gpt-5.6-nano' ||
+    value === 'GLM-5.3' ||
+    value === 'GLM-5.3-Flash'
   );
 }
 

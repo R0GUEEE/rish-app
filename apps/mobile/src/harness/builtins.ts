@@ -115,8 +115,41 @@ export const CODEX_HARNESS: HarnessManifest = {
   ],
 };
 
+export const GLM_HARNESS: HarnessManifest = {
+  schemaVersion: 1,
+  id: 'glm',
+  name: 'GLM',
+  version: 'builtin',
+  description:
+    'Zhipu GLM harness over the Anthropic-compatible Messages transport.',
+  builtin: true,
+  runtime: { kind: 'native-adapter', entrypoint: 'GlmHarnessAdapter' },
+  capabilities: ['chat', 'reasoning', 'tools', 'workspace'],
+  credentials: [
+    {
+      id: 'bigmodel-api-key',
+      keychainAccount: 'BIGMODEL_API_KEY',
+      label: 'Zhipu GLM API key',
+      secret: true,
+    },
+  ],
+  models: [
+    {
+      id: 'GLM-5.3',
+      name: 'GLM-5.3',
+      inputModalities: ['text'],
+    },
+    {
+      id: 'GLM-5.3-Flash',
+      name: 'GLM-5.3 Flash',
+      inputModalities: ['text'],
+    },
+  ],
+};
+
 export const BUILTIN_HARNESSES = createHarnessRegistry([
   DSH_HARNESS,
   CLAUDE_CODE_HARNESS,
   CODEX_HARNESS,
+  GLM_HARNESS,
 ]);
