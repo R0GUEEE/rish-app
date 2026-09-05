@@ -802,6 +802,42 @@ static BOOL LPValidateCheckoutTree(int directoryDescriptor,
   return valid;
 }
 
+/// Network budget for a public clone.  Before this, libgit2 was handed no
+/// connect timeout, no idle timeout and no progress callback, so a remote that
+/// was slow or unreachable left the Projects form on "Loading projects…"
+/// indefinitely: no error, no cancel, no end.  A clone that cannot reach the
+/// server, or whose transfer stalls, must fail with a message the surface can
+/// show.  The idle timeout is what ends a stalled transfer; the overall budget
+/// is only a backstop for the pathological case where neither fires.
+static const int LPCloneConnectTimeoutMilliseconds = 15000;
+static const int LPCloneIdleTimeoutMilliseconds = 30000;
+static const NSTimeInterval LPCloneOverallBudgetSeconds = 300;
+
+typedef struct {
+  NSTimeInterval deadline;
+  bool exceeded;
+} LPCloneBudget;
+
+static int LPCloneBudgetExpired(void *payload) {
+  LPCloneBudget *budget = (LPCloneBudget *)payload;
+  if (budget == nullptr) return 0;
+  if (NSDate.timeIntervalSinceReferenceDate < budget->deadline) return 0;
+  budget->exceeded = true;
+  return GIT_EUSER;
+}
+
+static int LPCloneTransferProgress(const git_indexer_progress *stats,
+                                    void *payload) {
+  (void)stats;
+  return LPCloneBudgetExpired(payload);
+}
+
+static int LPCloneSidebandProgress(const char *text, int length, void *payload) {
+  (void)text;
+  (void)length;
+  return LPCloneBudgetExpired(payload);
+}
+
 static int LPPublicCloneCredentialCallback(git_credential **out,
                                             const char *url,
                                             const char *username,
@@ -2926,6 +2962,19 @@ RCT_REMAP_METHOD(clone,
     ? GIT_PROXY_SPECIFIED : GIT_PROXY_NONE;
   options.fetch_opts.proxy_opts.url = proxyURL.UTF8String;
   options.fetch_opts.callbacks.credentials = LPPublicCloneCredentialCallback;
+  // Bound every phase: connecting, waiting on a silent server, and the whole
+  // operation.  The credential callback ignores its payload, so the budget can
+  // ride along on the shared callbacks payload.
+  LPCloneBudget budget = {
+    .deadline = NSDate.timeIntervalSinceReferenceDate + LPCloneOverallBudgetSeconds,
+    .exceeded = false,
+  };
+  options.fetch_opts.callbacks.transfer_progress = LPCloneTransferProgress;
+  options.fetch_opts.callbacks.sideband_progress = LPCloneSidebandProgress;
+  options.fetch_opts.callbacks.payload = &budget;
+  git_libgit2_opts(GIT_OPT_SET_SERVER_CONNECT_TIMEOUT,
+                   LPCloneConnectTimeoutMilliseconds);
+  git_libgit2_opts(GIT_OPT_SET_SERVER_TIMEOUT, LPCloneIdleTimeoutMilliseconds);
   git_repository *repository = nullptr;
   BOOL stagingBoundBefore = [self stagingEntryIsExactForProjectId:projectId
                                                              error:error];
@@ -2935,8 +2984,14 @@ RCT_REMAP_METHOD(clone,
     : -1;
   BOOL stagingBoundAfter = result == 0 &&
     [self stagingEntryIsExactForProjectId:projectId error:error];
-  NSString *cloneFailure = result < 0
-    ? LPSanitizedGitFailure(@"Public clone transport", result) : nil;
+  NSString *cloneFailure = nil;
+  if (result < 0) {
+    cloneFailure = budget.exceeded
+      ? [NSString stringWithFormat:
+          @"Public clone stopped after %.0f seconds without completing",
+          LPCloneOverallBudgetSeconds]
+      : LPSanitizedGitFailure(@"Public clone transport", result);
+  }
   BOOL checkoutSafe = NO;
   if (stagingBoundAfter && repository != nullptr && LPDirectoryIsSafe(repoURL)
     && LPDirectoryIsSafe([repoURL URLByAppendingPathComponent:@".git" isDirectory:YES])
