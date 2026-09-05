@@ -184,8 +184,16 @@ static NSDictionary *DSHAgentExecutionRawCall(NSArray *messages,
 static NSDictionary *DSHAgentExecutionPreparedProjection(NSDictionary *state,
                                                           NSDictionary *request) {
   for (NSDictionary *snapshot in state[@"operation_results"]) {
-    NSDictionary *result = snapshot[@"result"][@"result"];
+    // Results are a tagged union. In particular, an allowed approval carries
+    // receipt:NSNull; scanning a later batch must not treat it as a batch
+    // receipt (or depend on finding this batch before that approval row).
+    NSDictionary *wrapper = snapshot[@"result"];
+    if (![snapshot[@"operation_kind"] isEqualToString:@"prepare_agent_tool_batch"] ||
+        ![wrapper[@"result_kind"] isEqualToString:@"prepare_agent_tool_batch"]) continue;
+    NSDictionary *result = wrapper[@"result"];
+    if (![result[@"status"] isEqualToString:@"prepared"]) continue;
     NSDictionary *receipt = result[@"receipt"];
+    if (![receipt isKindOfClass:NSDictionary.class]) continue;
     if (![receipt[@"task_id"] isEqual:request[@"task_id"]] ||
         ![receipt[@"attempt_id"] isEqual:request[@"attempt_id"]] ||
         ![receipt[@"round_id"] isEqual:request[@"round_id"]] ||

@@ -2291,6 +2291,89 @@
     @"session_events" : events };
 }
 
+- (void)testExecutionSkipsNullApprovalReceiptsBeforeItsPreparedBatch {
+  NSDictionary *rawWrite = @{ @"schema_version" : @1,
+    @"call_id" : @"write-after-approval", @"name" : @"write_file",
+    @"arguments_json" :
+        @"{\"path\":\"AFTER.md\",\"content\":\"after\\n\",\"expected_revision\":null}" };
+  NSDictionary *fixture = [self realWorkspaceServiceFixtureForRawCalls:@[rawWrite]];
+  if (fixture == nil) return;
+  NSError *error = nil;
+  DSHAgentToolBatchService *batchService = fixture[@"batch_service"];
+  NSDictionary *prepared = [batchService
+      prepareAgentToolBatchWithRequest:fixture[@"batch_request"] error:&error];
+  XCTAssertNil(error);
+  XCTAssertEqualObjects(prepared[@"status"], @"prepared");
+  if (![prepared[@"status"] isEqual:@"prepared"]) return;
+  NSDictionary *receipt = prepared[@"receipt"];
+  NSDictionary *call = receipt[@"calls"][0];
+  NSString *marker = @"91919191-9191-4191-8191-919191919191";
+  NSArray *calls = @[[self persistedCallForProjection:call
+      decision:@"allow_once" reference:marker]];
+  NSArray *events = @[[self approvalEventForCall:call attempt:fixture[@"attempt"]
+      eventId:marker seq:@1]];
+  AgentEffectsSessionStore *sessions = fixture[@"session_store"];
+  sessions.fakeLoadResult = [self loadResultForSession:
+      [self sessionForFixture:fixture phase:@"approval_pending"
+          transcript:receipt[@"transcript"] calls:calls events:events grants:@[]]
+      generation:@3 digest:fixture[@"checkpoint"][@"session_sha256"]];
+  NSDictionary *bound = [batchService bindAgentApprovalWithRequest:
+      [self bindRequestForFixture:fixture receipt:receipt call:call
+          operationId:marker decision:@"allow_once" denyMessage:nil] error:&error];
+  XCTAssertNil(error);
+  XCTAssertEqualObjects(bound[@"status"], @"bound");
+  XCTAssertEqualObjects(bound[@"receipt"], NSNull.null);
+
+  // The WAL contains multiple result variants. A legal approval result can
+  // precede the batch being looked up, as it does for later rounds/attempts.
+  // Reorder real committed rows without changing their shape or authority.
+  XCTAssertTrue([self.wal performAtomicTransaction:^BOOL(
+      NSMutableDictionary *state, NSError **mutationError) {
+    (void)mutationError;
+    NSMutableArray *results = [state[@"operation_results"] mutableCopy];
+    NSUInteger index = [results indexOfObjectPassingTest:
+        ^BOOL(NSDictionary *result, NSUInteger idx, BOOL *stop) {
+          (void)idx; (void)stop;
+          return [result[@"operation_id"] isEqual:marker];
+        }];
+    if (index == NSNotFound) return NO;
+    NSDictionary *approval = results[index];
+    [results removeObjectAtIndex:index];
+    [results insertObject:approval atIndex:0];
+    state[@"operation_results"] = results;
+    return YES;
+  } error:&error]);
+  XCTAssertNil(error);
+  sessions.fakeLoadResult = [self loadResultForSession:
+      [self sessionForFixture:fixture phase:@"execution_intent"
+          transcript:receipt[@"transcript"] calls:calls events:events grants:@[]]
+      generation:@3 digest:fixture[@"checkpoint"][@"session_sha256"]];
+  DSHAgentToolExecutionService *execution = [[DSHAgentToolExecutionService alloc]
+      initWithWAL:self.wal ledger:self.ledger
+      preparedStore:fixture[@"prepared_store"] transcripts:self.transcripts
+      workspaceExecutor:fixture[@"workspace_executor"] gitExecutor:fixture[@"git_executor"]];
+  NSDictionary *request = [self executeRequestForFixture:fixture receipt:receipt
+      call:call operationId:@"92929292-9292-4292-8292-929292929292"
+      approvalReference:marker];
+  NSDictionary *executed = nil;
+  XCTAssertNoThrow(executed = [execution executeAgentToolWithRequest:request error:&error]);
+  XCTAssertNil(error);
+  XCTAssertEqualObjects(executed[@"status"], @"completed");
+  if (executed == nil) return;
+  NSURL *file = [self.rootURL URLByAppendingPathComponent:
+      @"ServiceDocuments/Rish Workspaces/Service/AFTER.md"];
+  XCTAssertEqualObjects([NSData dataWithContentsOfURL:file],
+                       [@"after\n" dataUsingEncoding:NSUTF8StringEncoding]);
+  NSDictionary *replayed = [execution executeAgentToolWithRequest:request error:&error];
+  XCTAssertNil(error);
+  XCTAssertEqualObjects(replayed, executed);
+  NSArray *operations = [self.wal snapshotWithError:&error][@"operations"];
+  NSArray *executes = [operations filteredArrayUsingPredicate:
+      [NSPredicate predicateWithFormat:@"operation_kind == %@", @"execute_agent_tool"]];
+  XCTAssertEqual(executes.count, 1U);
+  XCTAssertEqualObjects(executes[0][@"state"], @"committed");
+}
+
 // Device evidence (2026-09-04): the executor previewed a new-file write with
 // `prior = {schema_version, kind: absent}` while the ledger required the
 // prior to carry `bytes` as well, so every first write into a workspace was
