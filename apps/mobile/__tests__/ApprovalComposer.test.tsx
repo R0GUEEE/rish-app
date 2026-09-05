@@ -217,6 +217,56 @@ test('a new-file write says it creates the file even though its prior is present
   expect(text).not.toContain('Replaces existing file');
 });
 
+test('an absent-prior write with no diff preview shows the new-file text, not binary', async () => {
+  // Native sends diff_preview null for a new plain-text file; that must not
+  // be labelled binary.
+  const newFile: ApprovalRequestSpec = {
+    ...request,
+    approvalId: 'ap-4',
+    toolCallId: 'c4',
+    preview: {
+      schema_version: 1,
+      kind: 'write_file',
+      paths: ['notes.md'],
+      content_bytes: 12,
+      prior: { schema_version: 1, kind: 'absent', bytes: null },
+      diff_preview: null,
+      diff_truncated: false,
+    },
+  };
+  const { renderer } = await renderComposer([newFile]);
+  const root = renderer.root;
+  const diff = byTestId(root, 'approval-diff-new-file');
+  const text = ([] as unknown[]).concat(diff.props.children).join('');
+  expect(text).toContain('New file: no diff to show');
+  expect(root.findAllByProps({ testID: 'approval-diff-binary' })).toHaveLength(0);
+  expect(
+    root.findAllByProps({ children: 'Binary content: no text preview' }),
+  ).toHaveLength(0);
+});
+
+test('a known prior with no diff preview still shows the binary text', async () => {
+  const binary: ApprovalRequestSpec = {
+    ...request,
+    approvalId: 'ap-5',
+    toolCallId: 'c5',
+    preview: {
+      schema_version: 1,
+      kind: 'write_file',
+      paths: ['logo.png'],
+      content_bytes: 512,
+      prior: { schema_version: 1, kind: 'known', bytes: 512 },
+      diff_preview: null,
+      diff_truncated: false,
+    },
+  };
+  const { renderer } = await renderComposer([binary]);
+  const binaryText = byTestId(renderer.root, 'approval-diff-binary');
+  const text = ([] as unknown[]).concat(binaryText.props.children).join('');
+  expect(text).toContain('Binary content');
+  expect(text).not.toContain('New file');
+});
+
 test('listing the workspace root names the root rather than an empty path', async () => {
   const rootListing: ApprovalRequestSpec = {
     ...request,

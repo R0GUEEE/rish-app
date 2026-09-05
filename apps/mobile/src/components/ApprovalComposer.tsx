@@ -278,6 +278,17 @@ function DiffPreview({
   t: ComposerTranslator;
 }) {
   if (preview.diff_preview === null) {
+    if (
+      preview.kind === 'write_file' &&
+      preview.prior !== null &&
+      preview.prior.kind === 'absent'
+    ) {
+      return (
+        <Text style={styles.diffEmpty} testID="approval-diff-new-file">
+          {t('agent.approvalDiffNewFile')}
+        </Text>
+      );
+    }
     return (
       <Text style={styles.diffEmpty} testID="approval-diff-binary">
         {t('agent.approvalDiffBinary')}
