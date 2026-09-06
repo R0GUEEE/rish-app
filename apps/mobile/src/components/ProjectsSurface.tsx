@@ -1,4 +1,11 @@
-import React, { useCallback, useEffect, useMemo, useState } from 'react';
+import React, {
+  useCallback,
+  useEffect,
+  useLayoutEffect,
+  useMemo,
+  useRef,
+  useState,
+} from 'react';
 import ChevronLeft from 'lucide-react-native/icons/chevron-left';
 import ChevronRight from 'lucide-react-native/icons/chevron-right';
 import FolderDown from 'lucide-react-native/icons/folder-down';
@@ -35,6 +42,7 @@ import { useAppPresentation } from '../presentation/AppPresentation';
 import { fonts, hitSlop, type ThemePalette } from '../theme';
 import { AppIcon } from './AppIcon';
 import { SlidingSurface } from './SlidingSurface';
+import { ProjectViewTasks, type ProjectViewTask } from './projectViewTasks';
 
 type CreateMode = 'create' | 'clone' | null;
 type ProjectTab = 'files' | 'changes';
@@ -160,33 +168,108 @@ export function ProjectsSurface({
   const [receipt, setReceipt] = useState<ProjectPushReceipt | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
+  const [tasks] = useState(() => new ProjectViewTasks());
+  const selectedRef = useRef<LocalProject | null>(null);
+  const remoteDraftDirty = useRef(false);
+  const remoteDraftRevision = useRef(0);
+  const reloadCurrentRef = useRef<(() => void) | null>(null);
+  const syncBusy = useCallback(() => {
+    setBusy(tasks.busy);
+    setPushing(tasks.pushing);
+  }, [tasks]);
+  const beginTask = useCallback(
+    (kind: ProjectViewTask['kind']) => {
+      const task = tasks.begin(kind);
+      syncBusy();
+      return task;
+    },
+    [syncBusy, tasks],
+  );
+  const finishTask = useCallback(
+    (task: ProjectViewTask) => {
+      tasks.finish(task);
+      if (tasks.visible) {
+        syncBusy();
+        // A native mutation may outlive navigation. If its project is open again,
+        // refresh that new view; never publish the old view's captured payload.
+        if (
+          (task.kind === 'mutation' || task.kind === 'push') &&
+          task.projectId === (selectedRef.current?.id ?? null) &&
+          !tasks.owns(task)
+        ) {
+          reloadCurrentRef.current?.();
+        }
+      }
+    },
+    [syncBusy, tasks],
+  );
+  const selectView = useCallback(
+    (project: LocalProject | null) => {
+      tasks.invalidate(project?.id ?? null);
+      selectedRef.current = project;
+      remoteDraftDirty.current = false;
+      remoteDraftRevision.current += 1;
+      setSelected(project);
+      setStatus(null);
+      setDiff(null);
+      setCredential(null);
+      setReceipt(null);
+      setRemoteUrl(project?.origin_url ?? '');
+      setError(null);
+      setNotice(null);
+      syncBusy();
+    },
+    [syncBusy, tasks],
+  );
+  const closeSurface = useCallback(() => {
+    tasks.visible = false;
+    tasks.invalidate();
+    onClose();
+  }, [onClose, tasks]);
+  useLayoutEffect(() => {
+    tasks.visible = visible;
+    tasks.invalidate();
+    syncBusy();
+    return () => {
+      tasks.visible = false;
+      tasks.invalidate();
+    };
+  }, [syncBusy, tasks, visible]);
 
   const loadProjects = useCallback(async () => {
+    if (!tasks.visible) return;
     if (!LocalProjects.isAvailable()) {
       setError(t('projects.unavailable'));
       return;
     }
-    setBusy(true);
+    const task = beginTask('list');
     setError(null);
     try {
       const listing = await LocalProjects.list();
+      if (!tasks.owns(task)) return;
       setProjects(listing.projects);
-      setSelected(previous => {
-        if (previous === null) return null;
-        return (
-          listing.projects.find(project => project.id === previous.id) ?? null
-        );
-      });
+      const previous = selectedRef.current;
+      if (previous !== null) {
+        const next =
+          listing.projects.find(project => project.id === previous.id) ?? null;
+        if (next === null) selectView(null);
+        else {
+          selectedRef.current = next;
+          setSelected(next);
+        }
+      }
     } catch (caught) {
+      if (!tasks.owns(task)) return;
       setError(t('projects.operationFailed', { error: errorText(caught) }));
     } finally {
-      setBusy(false);
+      finishTask(task);
     }
-  }, [t]);
+  }, [beginTask, finishTask, selectView, t, tasks]);
 
   const loadDetail = useCallback(
     async (project: LocalProject) => {
-      setBusy(true);
+      if (!tasks.visible || selectedRef.current?.id !== project.id) return;
+      const task = beginTask('detail');
       setError(null);
       try {
         const [nextStatus, nextDiff, nextCredential, nextReceipts] =
@@ -200,6 +283,7 @@ export function ProjectsSurface({
               ? Promise.resolve(null)
               : LocalProjects.pushReceipts(project.id),
           ]);
+        if (!tasks.owns(task)) return;
         setStatus(nextStatus);
         setDiff(nextDiff);
         setCredential(nextCredential);
@@ -208,47 +292,60 @@ export function ProjectsSurface({
             ? null
             : nextReceipts.receipts[nextReceipts.receipts.length - 1],
         );
-        setRemoteUrl(project.origin_url ?? '');
+        if (!remoteDraftDirty.current) setRemoteUrl(project.origin_url ?? '');
       } catch (caught) {
+        if (!tasks.owns(task)) return;
         setError(t('projects.operationFailed', { error: errorText(caught) }));
       } finally {
-        setBusy(false);
+        finishTask(task);
       }
     },
-    [t],
+    [beginTask, finishTask, t, tasks],
   );
 
   useEffect(() => {
     if (visible) loadProjects().catch(() => undefined);
   }, [loadProjects, visible]);
 
+  useLayoutEffect(() => {
+    reloadCurrentRef.current = () => {
+      const project = selectedRef.current;
+      (project === null ? loadProjects() : loadDetail(project)).catch(
+        () => undefined,
+      );
+    };
+    return () => {
+      reloadCurrentRef.current = null;
+    };
+  }, [loadDetail, loadProjects]);
+
   useEffect(() => {
-    if (refreshToken > 0 && visible && selected !== null)
+    if (visible && selected !== null)
       loadDetail(selected).catch(() => undefined);
   }, [loadDetail, refreshToken, selected, visible]);
 
   const openProject = useCallback(
     (project: LocalProject) => {
-      setSelected(project);
+      if (!tasks.visible || selectedRef.current !== null) return;
+      selectView(project);
       setTab('files');
       setNotice(null);
       setStatus(null);
       setDiff(null);
       setCredential(null);
       setRemoteUrl(project.origin_url ?? '');
-      loadDetail(project).catch(() => undefined);
     },
-    [loadDetail],
+    [selectView, tasks],
   );
 
   const finishCreation = useCallback(
     async (kind: Exclude<CreateMode, null>) => {
-      if (busy) return;
+      if (!tasks.visible || tasks.busy) return;
       const trimmedName = name.trim();
       const trimmedUrl = cloneUrl.trim();
       if (kind === 'create' && trimmedName.length === 0) return;
       if (kind === 'clone' && trimmedUrl.length === 0) return;
-      setBusy(true);
+      const task = beginTask('mutation');
       setError(null);
       setNotice(null);
       try {
@@ -260,6 +357,7 @@ export function ProjectsSurface({
                 trimmedName.length === 0 ? undefined : trimmedName,
                 { httpsProxyUrl: preferences.gitHttpsProxyUrl },
               );
+        if (!tasks.owns(task)) return;
         setProjects(previous => [
           project,
           ...previous.filter(item => item.id !== project.id),
@@ -267,22 +365,31 @@ export function ProjectsSurface({
         setCreateMode(null);
         setName('');
         setCloneUrl('');
+        selectView(project);
         setNotice(
           kind === 'create'
             ? t('projects.created')
             : t('projects.clonedSuccess'),
         );
-        setSelected(project);
         setTab('files');
         setRemoteUrl(project.origin_url ?? '');
-        await loadDetail(project);
       } catch (caught) {
+        if (!tasks.owns(task)) return;
         setError(t('projects.operationFailed', { error: errorText(caught) }));
       } finally {
-        setBusy(false);
+        finishTask(task);
       }
     },
-    [busy, cloneUrl, loadDetail, name, preferences.gitHttpsProxyUrl, t],
+    [
+      beginTask,
+      cloneUrl,
+      finishTask,
+      name,
+      preferences.gitHttpsProxyUrl,
+      selectView,
+      t,
+      tasks,
+    ],
   );
 
   const refresh = useCallback(async () => {
@@ -291,34 +398,46 @@ export function ProjectsSurface({
   }, [loadDetail, selected]);
 
   const stageAll = useCallback(async () => {
-    if (selected === null || busy || status?.entries.length === 0) return;
-    setBusy(true);
+    if (
+      selected === null ||
+      selectedRef.current?.id !== selected.id ||
+      !tasks.visible ||
+      tasks.busy ||
+      status?.entries.length === 0
+    )
+      return;
+    const task = beginTask('mutation');
     setError(null);
     setNotice(null);
     try {
       const nextStatus = await LocalProjects.stageAll(selected.id);
+      if (!tasks.owns(task)) return;
       const nextDiff = await LocalProjects.diff(selected.id, { staged: true });
+      if (!tasks.owns(task)) return;
       setStatus(nextStatus);
       setDiff(nextDiff);
       setNotice(t('projects.stagedSuccess'));
     } catch (caught) {
+      if (!tasks.owns(task)) return;
       setError(t('projects.operationFailed', { error: errorText(caught) }));
     } finally {
-      setBusy(false);
+      finishTask(task);
     }
-  }, [busy, selected, status?.entries.length, t]);
+  }, [beginTask, finishTask, selected, status?.entries.length, t, tasks]);
 
   const commit = useCallback(async () => {
     if (
       selected === null ||
-      busy ||
+      selectedRef.current?.id !== selected.id ||
+      !tasks.visible ||
+      tasks.busy ||
       commitMessage.trim().length === 0 ||
       authorName.trim().length === 0 ||
       authorEmail.trim().length === 0 ||
       !hasStagedChanges(status)
     )
       return;
-    setBusy(true);
+    const task = beginTask('mutation');
     setError(null);
     setNotice(null);
     try {
@@ -327,28 +446,40 @@ export function ProjectsSurface({
         authorName: authorName.trim(),
         authorEmail: authorEmail.trim(),
       });
-      setCommitMessage('');
+      if (!tasks.owns(task)) return;
+      setCommitMessage(current => (current === commitMessage ? '' : current));
       setNotice(t('projects.committedSuccess'));
       await loadDetail(selected);
     } catch (caught) {
+      if (!tasks.owns(task)) return;
       setError(t('projects.operationFailed', { error: errorText(caught) }));
     } finally {
-      setBusy(false);
+      finishTask(task);
     }
   }, [
     authorEmail,
     authorName,
-    busy,
+    beginTask,
+    finishTask,
     commitMessage,
     loadDetail,
     selected,
     status,
     t,
+    tasks,
   ]);
 
   const saveRemote = useCallback(async () => {
-    if (selected === null || busy || remoteUrl.trim().length === 0) return;
-    setBusy(true);
+    if (
+      selected === null ||
+      selectedRef.current?.id !== selected.id ||
+      !tasks.visible ||
+      tasks.busy ||
+      remoteUrl.trim().length === 0
+    )
+      return;
+    const task = beginTask('mutation');
+    const draftRevision = remoteDraftRevision.current;
     setError(null);
     setNotice(null);
     try {
@@ -356,70 +487,102 @@ export function ProjectsSurface({
         selected.id,
         remoteUrl.trim(),
       );
+      if (!tasks.owns(task)) return;
       const updated = { ...selected, origin_url: remote.url };
+      if (remoteDraftRevision.current === draftRevision) {
+        remoteDraftDirty.current = false;
+        setRemoteUrl(remote.url);
+      }
+      selectedRef.current = updated;
       setSelected(updated);
       setProjects(previous =>
         previous.map(project =>
           project.id === updated.id ? updated : project,
         ),
       );
-      setCredential(await LocalProjects.credentialStatus(selected.id));
+      const nextCredential = await LocalProjects.credentialStatus(selected.id);
+      if (!tasks.owns(task)) return;
+      setCredential(nextCredential);
       setNotice(t('projects.remoteSaved'));
     } catch (caught) {
+      if (!tasks.owns(task)) return;
       setError(t('projects.operationFailed', { error: errorText(caught) }));
     } finally {
-      setBusy(false);
+      finishTask(task);
     }
-  }, [busy, remoteUrl, selected, t]);
+  }, [beginTask, finishTask, remoteUrl, selected, t, tasks]);
 
   const configureCredential = useCallback(async () => {
-    if (selected === null || selected.origin_url === null || busy) return;
-    setBusy(true);
+    if (
+      selected === null ||
+      selectedRef.current?.id !== selected.id ||
+      selected.origin_url === null ||
+      !tasks.visible ||
+      tasks.busy
+    )
+      return;
+    const task = beginTask('mutation');
     setError(null);
     setNotice(null);
     try {
-      setCredential(
-        await LocalProjects.presentCredentialPrompt(
-          selected.id,
-          locale === 'zh-CN' ? 'zh-CN' : 'en',
-        ),
+      const nextCredential = await LocalProjects.presentCredentialPrompt(
+        selected.id,
+        locale === 'zh-CN' ? 'zh-CN' : 'en',
       );
+      if (!tasks.owns(task)) return;
+      setCredential(nextCredential);
     } catch (caught) {
+      if (!tasks.owns(task)) return;
       setError(t('projects.operationFailed', { error: errorText(caught) }));
     } finally {
-      setBusy(false);
+      finishTask(task);
     }
-  }, [busy, locale, selected, t]);
+  }, [beginTask, finishTask, locale, selected, t, tasks]);
 
   const clearCredential = useCallback(async () => {
-    if (selected === null || !credential?.configured || busy) return;
-    setBusy(true);
+    if (
+      selected === null ||
+      selectedRef.current?.id !== selected.id ||
+      !credential?.configured ||
+      !tasks.visible ||
+      tasks.busy
+    )
+      return;
+    const task = beginTask('mutation');
     setError(null);
     setNotice(null);
     try {
-      setCredential(await LocalProjects.clearCredential(selected.id));
+      const nextCredential = await LocalProjects.clearCredential(selected.id);
+      if (!tasks.owns(task)) return;
+      setCredential(nextCredential);
       setNotice(t('projects.credentialCleared'));
     } catch (caught) {
+      if (!tasks.owns(task)) return;
       setError(t('projects.operationFailed', { error: errorText(caught) }));
     } finally {
-      setBusy(false);
+      finishTask(task);
     }
-  }, [busy, credential?.configured, selected, t]);
+  }, [beginTask, credential?.configured, finishTask, selected, t, tasks]);
 
   const push = useCallback(() => {
     if (
       selected === null ||
+      selectedRef.current?.id !== selected.id ||
       selected.origin_url === null ||
       status === null ||
       status.branch === null ||
       status.branch.length === 0 ||
       status.head_oid === null ||
-      busy
+      !tasks.visible ||
+      tasks.busy
     )
       return;
     const target = pushBranch.trim();
     const host = remoteHost(selected.origin_url);
     const newBranch = target.length > 0 && target !== status.branch;
+    // A confirmation belongs to this exact view and target, not a later visit.
+    const confirmation = tasks.begin('push');
+    tasks.finish(confirmation);
     Alert.alert(
       t('projects.pushTitle'),
       newBranch
@@ -439,8 +602,13 @@ export function ProjectsSurface({
         {
           text: t('projects.confirmPush'),
           onPress: () => {
-            setBusy(true);
-            setPushing(true);
+            if (
+              !tasks.owns(confirmation) ||
+              tasks.busy ||
+              selectedRef.current?.origin_url !== selected.origin_url
+            )
+              return;
+            const task = beginTask('push');
             setError(null);
             setNotice(null);
             LocalProjects.push(selected.id, {
@@ -448,14 +616,18 @@ export function ProjectsSurface({
               ...(newBranch ? { branch: target } : {}),
             })
               .then(result => {
+                if (!tasks.owns(task)) return;
                 setNotice(t('projects.pushSuccess'));
-                setPushBranch('');
+                setPushBranch(current =>
+                  current.trim() === target ? '' : current,
+                );
                 if (result.receipt !== undefined) {
                   setReceipt(result.receipt);
                 }
                 return loadDetail(selected);
               })
               .catch(caught => {
+                if (!tasks.owns(task)) return;
                 const code =
                   typeof caught === 'object' &&
                   caught !== null &&
@@ -481,21 +653,22 @@ export function ProjectsSurface({
                 }
               })
               .finally(() => {
-                setPushing(false);
-                setBusy(false);
+                finishTask(task);
               });
           },
         },
       ],
     );
   }, [
-    busy,
+    beginTask,
+    finishTask,
     loadDetail,
     preferences.gitHttpsProxyUrl,
     pushBranch,
     selected,
     status,
     t,
+    tasks,
   ]);
 
   const cancelPush = useCallback(() => {
@@ -510,7 +683,7 @@ export function ProjectsSurface({
       accessibilityHidden={covered}
       accessibilityLabel={title}
       closeAccessibilityLabel={t('projects.close')}
-      onClose={onClose}
+      onClose={closeSurface}
       onDismiss={onDismiss}
       scrim={false}
       side="right"
@@ -532,7 +705,7 @@ export function ProjectsSurface({
               accessibilityRole="button"
               hitSlop={hitSlop}
               onPress={() => {
-                setSelected(null);
+                selectView(null);
                 setError(null);
                 setNotice(null);
                 loadProjects().catch(() => undefined);
@@ -567,7 +740,7 @@ export function ProjectsSurface({
             accessibilityLabel={t('projects.close')}
             accessibilityRole="button"
             hitSlop={hitSlop}
-            onPress={onClose}
+            onPress={closeSurface}
             style={({ pressed }) => [
               styles.headerButton,
               pressed && styles.pressed,
@@ -588,6 +761,8 @@ export function ProjectsSurface({
             onChangeCloneUrl={setCloneUrl}
             onChangeName={setName}
             onChooseMode={mode => {
+              tasks.invalidate();
+              syncBusy();
               setCreateMode(mode);
               setError(null);
               setNotice(null);
@@ -794,7 +969,12 @@ export function ProjectsSurface({
                 placeholder={t('projects.remoteUrlPlaceholder')}
                 styles={styles}
                 value={remoteUrl}
-                onChangeText={setRemoteUrl}
+                onChangeText={value => {
+                  remoteDraftRevision.current += 1;
+                  remoteDraftDirty.current =
+                    value !== (selectedRef.current?.origin_url ?? '');
+                  setRemoteUrl(value);
+                }}
               />
               <Pressable
                 accessibilityLabel={t('projects.saveRemote')}
@@ -923,9 +1103,7 @@ export function ProjectsSurface({
                       host: receipt.host,
                       local: receipt.local_oid.slice(0, 12),
                       remote: receipt.remote_oid.slice(0, 12),
-                      time: new Date(
-                        receipt.pushed_at,
-                      ).toLocaleString(),
+                      time: new Date(receipt.pushed_at).toLocaleString(),
                     })}
                     style={styles.mono}
                   >
@@ -934,9 +1112,7 @@ export function ProjectsSurface({
                       host: receipt.host,
                       local: receipt.local_oid.slice(0, 12),
                       remote: receipt.remote_oid.slice(0, 12),
-                      time: new Date(
-                        receipt.pushed_at,
-                      ).toLocaleString(),
+                      time: new Date(receipt.pushed_at).toLocaleString(),
                     })}
                   </Text>
                 )}

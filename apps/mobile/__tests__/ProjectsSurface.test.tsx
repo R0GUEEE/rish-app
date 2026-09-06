@@ -239,6 +239,356 @@ beforeEach(() => {
   });
 });
 
+function deferred<T>() {
+  let resolve!: (value: T) => void;
+  let reject!: (reason: unknown) => void;
+  const promise = new Promise<T>((yes, no) => {
+    resolve = yes;
+    reject = no;
+  });
+  return { promise, resolve, reject };
+}
+
+const otherProject = {
+  ...project,
+  id: 'project-2',
+  name: 'other',
+  origin_url: 'https://example.org/other.git',
+};
+
+async function navigateToOther(renderer: Renderer) {
+  await act(async () => {
+    actionByLabel(renderer.root, 'Back to projects').props.onPress();
+    await settle();
+  });
+  await act(async () => {
+    actionByLabel(renderer.root, 'Open project other').props.onPress();
+    await settle();
+  });
+}
+
+async function setVisible(renderer: Renderer, visible: boolean) {
+  const presentation = renderer.root.findByType(AppPresentationProvider)
+    .props as React.ComponentProps<typeof AppPresentationProvider>;
+  const props = renderer.root.findByType(ProjectsSurface)
+    .props as React.ComponentProps<typeof ProjectsSurface>;
+  await act(async () => {
+    renderer.update(
+      <AppPresentationProvider {...presentation}>
+        <ProjectsSurface {...props} visible={visible} />
+      </AppPresentationProvider>,
+    );
+    await settle();
+  });
+}
+
+test('late project A detail cannot overwrite project B data or remote credentials', async () => {
+  const held = deferred<typeof dirtyStatus>();
+  mockLocalProjects.list.mockResolvedValue({
+    schema_version: 1,
+    projects: [project, otherProject],
+  });
+  mockLocalProjects.status.mockImplementation((id: string) =>
+    id === project.id
+      ? held.promise
+      : Promise.resolve({
+          ...dirtyStatus,
+          project_id: id,
+          branch: 'other-branch',
+        }),
+  );
+  mockLocalProjects.credentialStatus.mockImplementation(async (id: string) => ({
+    project_id: id,
+    host: id,
+    configured: id === project.id,
+  }));
+  mockLocalProjects.diff.mockImplementation(async (id: string) => ({
+    ...diff,
+    project_id: id,
+    patch: id === project.id ? 'OLD-A-PATCH' : 'CURRENT-B-PATCH',
+  }));
+  const renderer = await renderSurface();
+  await openProject(renderer);
+  await navigateToOther(renderer);
+  await act(async () => {
+    held.resolve(dirtyStatus);
+    await settle();
+  });
+  expect(inputByLabel(renderer.root, 'Origin HTTPS URL').props.value).toBe(
+    otherProject.origin_url,
+  );
+  expect(
+    renderer.root.findAllByProps({ children: 'other-branch' }).length,
+  ).toBeGreaterThan(0);
+  expect(
+    renderer.root.findAllByProps({
+      accessibilityLabel: 'Clear remote credential',
+    }),
+  ).toHaveLength(0);
+  await act(async () =>
+    actionByLabel(renderer.root, 'Changes').props.onPress(),
+  );
+  expect(
+    renderer.root.findAllByProps({ children: 'OLD-A-PATCH' }),
+  ).toHaveLength(0);
+  expect(
+    renderer.root.findAllByProps({ children: 'CURRENT-B-PATCH' }).length,
+  ).toBeGreaterThan(0);
+});
+
+test.each(['success', 'failure'] as const)(
+  'late A %s cannot unlock or report an error in still-loading B',
+  async outcome => {
+    const a = deferred<typeof dirtyStatus>();
+    const b = deferred<typeof dirtyStatus>();
+    mockLocalProjects.list.mockResolvedValue({
+      schema_version: 1,
+      projects: [project, otherProject],
+    });
+    mockLocalProjects.status.mockImplementation((id: string) =>
+      id === project.id ? a.promise : b.promise,
+    );
+    const renderer = await renderSurface();
+    await openProject(renderer);
+    await navigateToOther(renderer);
+    await act(async () => {
+      if (outcome === 'success') a.resolve(dirtyStatus);
+      else a.reject(new Error('STALE-A-ERROR'));
+      await settle();
+    });
+    expect(
+      actionByLabel(renderer.root, 'Refresh project status').props.disabled,
+    ).toBe(true);
+    expect(JSON.stringify(renderer.toJSON())).not.toContain('STALE-A-ERROR');
+    await act(async () => {
+      b.resolve({ ...dirtyStatus, project_id: otherProject.id });
+      await settle();
+    });
+    expect(
+      actionByLabel(renderer.root, 'Refresh project status').props.disabled,
+    ).toBe(false);
+  },
+);
+
+test('close and reopen invalidates the old detail even for the same project', async () => {
+  const held = deferred<typeof dirtyStatus>();
+  mockLocalProjects.status
+    .mockImplementationOnce(() => held.promise)
+    .mockResolvedValue({ ...dirtyStatus, branch: 'reopened-branch' });
+  const renderer = await renderSurface();
+  await openProject(renderer);
+  await act(async () =>
+    renderer.root.findByType(SlidingSurface).props.onClose(),
+  );
+  await setVisible(renderer, false);
+  await setVisible(renderer, true);
+  await act(async () => {
+    held.resolve({ ...dirtyStatus, branch: 'STALE-CLOSED-BRANCH' });
+    await settle();
+  });
+  expect(JSON.stringify(renderer.toJSON())).not.toContain(
+    'STALE-CLOSED-BRANCH',
+  );
+  expect(
+    renderer.root.findAllByProps({ children: 'reopened-branch' }).length,
+  ).toBeGreaterThan(0);
+});
+
+test('a completed stage operation on A cannot refresh or overwrite B', async () => {
+  const held = deferred<typeof dirtyStatus>();
+  mockLocalProjects.list.mockResolvedValue({
+    schema_version: 1,
+    projects: [project, otherProject],
+  });
+  mockLocalProjects.stageAll.mockImplementationOnce(() => held.promise);
+  const renderer = await renderSurface();
+  await openProject(renderer);
+  await act(async () =>
+    actionByLabel(renderer.root, 'Changes').props.onPress(),
+  );
+  await act(async () => {
+    actionByLabel(renderer.root, 'Stage all changes').props.onPress();
+    await settle();
+  });
+  await navigateToOther(renderer);
+  const before = mockLocalProjects.diff.mock.calls.length;
+  await act(async () => {
+    held.resolve(dirtyStatus);
+    await settle();
+  });
+  expect(mockLocalProjects.diff.mock.calls).toHaveLength(before);
+  expect(inputByLabel(renderer.root, 'Origin HTTPS URL').props.value).toBe(
+    otherProject.origin_url,
+  );
+  expect(JSON.stringify(renderer.toJSON())).not.toContain(
+    'All current changes were staged.',
+  );
+});
+
+test('a push confirmation from an old view cannot dispatch after navigating to another project', async () => {
+  mockLocalProjects.list.mockResolvedValue({
+    schema_version: 1,
+    projects: [project, otherProject],
+  });
+  const alert = jest.spyOn(Alert, 'alert');
+  const renderer = await renderSurface();
+  await openProject(renderer);
+  await act(async () => {
+    actionByLabel(renderer.root, 'Push').props.onPress();
+  });
+  const confirm = alert.mock.calls.at(-1)?.[2]?.[1]?.onPress;
+  expect(confirm).toBeDefined();
+  await navigateToOther(renderer);
+  await act(async () => {
+    confirm?.();
+    await settle();
+  });
+  expect(mockLocalProjects.push).not.toHaveBeenCalled();
+  alert.mockRestore();
+});
+
+test('a late commit cannot clear the current project draft or start an old-project refresh', async () => {
+  const held = deferred<unknown>();
+  mockLocalProjects.list.mockResolvedValue({
+    schema_version: 1,
+    projects: [project, otherProject],
+  });
+  mockLocalProjects.commit.mockImplementationOnce(() => held.promise);
+  const renderer = await renderSurface();
+  await openProject(renderer);
+  await act(async () => {
+    inputByLabel(renderer.root, 'Commit message').props.onChangeText(
+      'commit A',
+    );
+    inputByLabel(renderer.root, 'Author name').props.onChangeText(
+      'Test author',
+    );
+    inputByLabel(renderer.root, 'Author email').props.onChangeText(
+      'test@example.invalid',
+    );
+  });
+  await act(async () => {
+    actionByLabel(renderer.root, 'Commit staged changes').props.onPress();
+    await settle();
+  });
+  await navigateToOther(renderer);
+  await act(async () => {
+    inputByLabel(renderer.root, 'Commit message').props.onChangeText(
+      'keep B draft',
+    );
+  });
+  const before = mockLocalProjects.status.mock.calls.length;
+  await act(async () => {
+    held.resolve({ project_id: project.id });
+    await settle();
+  });
+  expect(mockLocalProjects.status.mock.calls).toHaveLength(before);
+  expect(inputByLabel(renderer.root, 'Commit message').props.value).toBe(
+    'keep B draft',
+  );
+});
+
+test.each(['credential', 'remote'] as const)(
+  'late %s mutation cannot change B or its credential state',
+  async kind => {
+    const held = deferred<unknown>();
+    mockLocalProjects.list.mockResolvedValue({
+      schema_version: 1,
+      projects: [project, otherProject],
+    });
+    if (kind === 'credential')
+      mockLocalProjects.presentCredentialPrompt.mockImplementationOnce(
+        () => held.promise,
+      );
+    else mockLocalProjects.setRemote.mockImplementationOnce(() => held.promise);
+    const renderer = await renderSurface();
+    await openProject(renderer);
+    await act(async () => {
+      actionByLabel(
+        renderer.root,
+        kind === 'credential' ? 'Configure remote credential' : 'Save origin',
+      ).props.onPress();
+      await settle();
+    });
+    await navigateToOther(renderer);
+    const before = mockLocalProjects.credentialStatus.mock.calls.length;
+    await act(async () => {
+      held.resolve({
+        project_id: project.id,
+        configured: true,
+        host: 'old.example',
+        url: 'https://old.example/repo.git',
+      });
+      await settle();
+    });
+    expect(mockLocalProjects.credentialStatus.mock.calls).toHaveLength(before);
+    expect(inputByLabel(renderer.root, 'Origin HTTPS URL').props.value).toBe(
+      otherProject.origin_url,
+    );
+    expect(
+      renderer.root.findAllByProps({
+        accessibilityLabel: 'Clear remote credential',
+      }),
+    ).toHaveLength(0);
+  },
+);
+
+test('reopening the same project refreshes detail without discarding an unsaved remote draft', async () => {
+  const renderer = await renderSurface();
+  await openProject(renderer);
+  await act(async () => {
+    inputByLabel(renderer.root, 'Origin HTTPS URL').props.onChangeText(
+      'https://example.invalid/unsaved.git',
+    );
+  });
+  await setVisible(renderer, false);
+  await setVisible(renderer, true);
+  expect(inputByLabel(renderer.root, 'Origin HTTPS URL').props.value).toBe(
+    'https://example.invalid/unsaved.git',
+  );
+});
+
+test('returning to a still-mutating project keeps its lock and refreshes after native completion', async () => {
+  const held = deferred<typeof dirtyStatus>();
+  mockLocalProjects.list.mockResolvedValue({
+    schema_version: 1,
+    projects: [project, otherProject],
+  });
+  mockLocalProjects.stageAll.mockImplementationOnce(() => held.promise);
+  const renderer = await renderSurface();
+  await openProject(renderer);
+  await act(async () => {
+    actionByLabel(renderer.root, 'Changes').props.onPress();
+  });
+  await act(async () => {
+    actionByLabel(renderer.root, 'Stage all changes').props.onPress();
+    await settle();
+  });
+  await navigateToOther(renderer);
+  await act(async () => {
+    actionByLabel(renderer.root, 'Back to projects').props.onPress();
+    await settle();
+  });
+  await openProject(renderer);
+  expect(
+    actionByLabel(renderer.root, 'Refresh project status').props.disabled,
+  ).toBe(true);
+  mockLocalProjects.status.mockResolvedValue({
+    ...dirtyStatus,
+    branch: 'settled-A',
+  });
+  await act(async () => {
+    held.resolve(dirtyStatus);
+    await settle();
+  });
+  expect(
+    actionByLabel(renderer.root, 'Refresh project status').props.disabled,
+  ).toBe(false);
+  expect(
+    renderer.root.findAllByProps({ children: 'settled-A' }).length,
+  ).toBeGreaterThan(0);
+});
+
 test('creates an isolated local project and opens its real detail response', async () => {
   const renderer = await renderSurface();
 
@@ -458,9 +808,10 @@ test('shows the non-fast-forward message and pushes a named new branch', async (
   const renderer = await renderSurface();
   await openProject(renderer);
   await act(async () => {
-    inputByLabel(renderer.root, 'Push as new branch (optional)').props.onChangeText(
-      'feature/g2',
-    );
+    inputByLabel(
+      renderer.root,
+      'Push as new branch (optional)',
+    ).props.onChangeText('feature/g2');
     await settle();
   });
   mockLocalProjects.push.mockRejectedValueOnce(
