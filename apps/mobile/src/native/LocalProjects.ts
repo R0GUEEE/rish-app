@@ -239,7 +239,41 @@ export type ProjectPushCancellation = {
   cancelled: boolean;
 };
 
+export type ProjectClonePhase =
+  | 'queued'
+  | 'connecting'
+  | 'receiving'
+  | 'checkout'
+  | 'validating'
+  | 'publishing'
+  | 'succeeded'
+  | 'failed'
+  | 'cancelled';
+
+export type ProjectCloneOperation = {
+  schema_version: 1;
+  operation_id: string;
+  name: string;
+  phase: ProjectClonePhase;
+  cancel_requested: boolean;
+  received_objects: number;
+  total_objects: number;
+  received_bytes: number;
+  completed_files: number;
+  total_files: number;
+  project: LocalProject | null;
+  error_code: 'timeout' | 'git' | null;
+};
+
 type NativeLocalProjects = {
+  startClone?(
+    url: string,
+    name: string | null,
+    options: ProjectGitTransportOptions,
+  ): Promise<unknown>;
+  cloneStatus?(operationId: string | null): Promise<unknown>;
+  cancelClone?(operationId: string): Promise<unknown>;
+
   list(): Promise<LocalProjectListing>;
   create(name: string): Promise<LocalProject>;
   clone(
@@ -1308,8 +1342,94 @@ async function projectV2Boundary<T>(
   }
 }
 
+function cloneOperation(value: unknown): ProjectCloneOperation {
+  const code = 'E_PROJECT_RESULT_INVALID';
+  const row = projectV2ExactRecord(
+    value,
+    [
+      'schema_version',
+      'operation_id',
+      'name',
+      'phase',
+      'cancel_requested',
+      'received_objects',
+      'total_objects',
+      'received_bytes',
+      'completed_files',
+      'total_files',
+      'project',
+      'error_code',
+    ],
+    code,
+  );
+  const phases: readonly unknown[] = [
+    'queued',
+    'connecting',
+    'receiving',
+    'checkout',
+    'validating',
+    'publishing',
+    'succeeded',
+    'failed',
+    'cancelled',
+  ];
+  if (
+    row.schema_version !== 1 ||
+    !projectV2UUID(row.operation_id) ||
+    !projectV2DisplayName(row.name) ||
+    !phases.includes(row.phase) ||
+    typeof row.cancel_requested !== 'boolean' ||
+    ![null, 'timeout', 'git'].includes(row.error_code as string | null)
+  )
+    projectV2Fail(code);
+  for (const key of [
+    'received_objects',
+    'total_objects',
+    'received_bytes',
+    'completed_files',
+    'total_files',
+  ]) {
+    if (!Number.isSafeInteger(row[key]) || (row[key] as number) < 0)
+      projectV2Fail(code);
+  }
+  const project = row.project === null ? null : legacyProject(row.project);
+  if (
+    (row.phase === 'succeeded') !== (project !== null) ||
+    (row.phase === 'failed') !== (row.error_code !== null)
+  )
+    projectV2Fail(code);
+  return { ...row, project } as ProjectCloneOperation;
+}
+
 export const LocalProjects = {
   isAvailable: () => hasNativeCapabilities(native),
+  startClone: async (
+    url: string,
+    name?: string,
+    options: ProjectGitTransportOptions = {},
+  ) => {
+    const api = required();
+    if (!api.startClone) throw new Error('Clone controls are unavailable');
+    return cloneOperation(await api.startClone(url, name ?? null, options));
+  },
+  cloneStatus: async (operationId: string | null = null) => {
+    const api = required();
+    if (!api.cloneStatus) return null;
+    const result = await api.cloneStatus(operationId);
+    if (result === null && operationId === null) return null;
+    const operation = cloneOperation(result);
+    if (operationId !== null && operation.operation_id !== operationId)
+      projectV2Fail('E_PROJECT_RESULT_INVALID');
+    return operation;
+  },
+  cancelClone: async (operationId: string) => {
+    const api = required();
+    if (!api.cancelClone) throw new Error('Clone controls are unavailable');
+    const operation = cloneOperation(await api.cancelClone(operationId));
+    if (operation.operation_id !== operationId)
+      projectV2Fail('E_PROJECT_RESULT_INVALID');
+    return operation;
+  },
   list: async () => legacyProjectListing(await required().list()),
   create: (name: string) => required().create(name),
   clone: (

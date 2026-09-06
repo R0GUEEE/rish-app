@@ -813,22 +813,91 @@ static const int LPCloneConnectTimeoutMilliseconds = 15000;
 static const int LPCloneIdleTimeoutMilliseconds = 30000;
 static const NSTimeInterval LPCloneOverallBudgetSeconds = 300;
 
+// One retained operation per module: snapshots and cancellation never wait on
+// projectQueue, which is occupied by libgit2. Only complete clones are published.
+@interface LPCloneOperation : NSObject
+@property(nonatomic, copy) NSString *operationId;
+@property(nonatomic, copy) NSString *name;
+@property(nonatomic, copy) NSString *phase;
+@property(nonatomic) BOOL cancelRequested;
+@property(nonatomic) NSUInteger receivedObjects;
+@property(nonatomic) NSUInteger totalObjects;
+@property(nonatomic) NSUInteger receivedBytes;
+@property(nonatomic) NSUInteger completedFiles;
+@property(nonatomic) NSUInteger totalFiles;
+@property(nonatomic, copy) NSDictionary *project;
+@property(nonatomic, copy) NSString *failureCode;
+- (NSDictionary *)snapshot;
+- (BOOL)terminal;
+- (BOOL)shouldCancel;
+- (void)updatePhase:(NSString *)phase;
+- (BOOL)beginPublication;
+@end
+
+@implementation LPCloneOperation
+- (instancetype)init {
+  if ((self = [super init])) {
+    _operationId = NSUUID.UUID.UUIDString.lowercaseString;
+    _phase = @"queued";
+  }
+  return self;
+}
+- (BOOL)terminal {
+  @synchronized (self) {
+    return [@[@"succeeded", @"failed", @"cancelled"] containsObject:self.phase];
+  }
+}
+- (BOOL)shouldCancel {
+  @synchronized (self) { return self.cancelRequested; }
+}
+- (void)updatePhase:(NSString *)phase {
+  @synchronized (self) { if (![self terminal]) self.phase = phase; }
+}
+- (BOOL)beginPublication {
+  @synchronized (self) {
+    if (self.cancelRequested) return NO;
+    self.phase = @"publishing";
+    return YES;
+  }
+}
+- (NSDictionary *)snapshot {
+  @synchronized (self) {
+    return @{@"schema_version": @1, @"operation_id": self.operationId,
+      @"name": self.name, @"phase": self.phase,
+      @"cancel_requested": @(self.cancelRequested),
+      @"received_objects": @(self.receivedObjects), @"total_objects": @(self.totalObjects),
+      @"received_bytes": @(self.receivedBytes),
+      @"completed_files": @(self.completedFiles), @"total_files": @(self.totalFiles),
+      @"project": self.project ?: NSNull.null,
+      @"error_code": self.failureCode ?: NSNull.null};
+  }
+}
+@end
+
 typedef struct {
   NSTimeInterval deadline;
   bool exceeded;
+  __unsafe_unretained LPCloneOperation *operation;
 } LPCloneBudget;
 
 static int LPCloneBudgetExpired(void *payload) {
   LPCloneBudget *budget = (LPCloneBudget *)payload;
   if (budget == nullptr) return 0;
-  if (NSDate.timeIntervalSinceReferenceDate < budget->deadline) return 0;
+  if ([budget->operation shouldCancel]) return GIT_EUSER;
+  if (NSProcessInfo.processInfo.systemUptime < budget->deadline) return 0;
   budget->exceeded = true;
   return GIT_EUSER;
 }
 
 static int LPCloneTransferProgress(const git_indexer_progress *stats,
                                     void *payload) {
-  (void)stats;
+  LPCloneOperation *operation = ((LPCloneBudget *)payload)->operation;
+  @synchronized (operation) {
+    [operation updatePhase:@"receiving"];
+    operation.receivedObjects = stats->received_objects;
+    operation.totalObjects = stats->total_objects;
+    operation.receivedBytes = stats->received_bytes;
+  }
   return LPCloneBudgetExpired(payload);
 }
 
@@ -836,6 +905,25 @@ static int LPCloneSidebandProgress(const char *text, int length, void *payload) 
   (void)text;
   (void)length;
   return LPCloneBudgetExpired(payload);
+}
+
+static int LPCloneCheckoutNotify(git_checkout_notify_t why, const char *path,
+    const git_diff_file *baseline, const git_diff_file *target,
+    const git_diff_file *workdir, void *payload) {
+  (void)why; (void)path; (void)baseline; (void)target; (void)workdir;
+  [((LPCloneBudget *)payload)->operation updatePhase:@"checkout"];
+  return LPCloneBudgetExpired(payload);
+}
+
+static void LPCloneCheckoutProgress(const char *path, size_t completed,
+    size_t total, void *payload) {
+  (void)path;
+  LPCloneOperation *operation = ((LPCloneBudget *)payload)->operation;
+  @synchronized (operation) {
+    [operation updatePhase:@"checkout"];
+    operation.completedFiles = completed;
+    operation.totalFiles = total;
+  }
 }
 
 static int LPPublicCloneCredentialCallback(git_credential **out,
@@ -866,6 +954,7 @@ typedef void (^LPCredentialPromptHook)(NSString *host, BOOL chinese,
 
 @interface LocalProjectsModule : NSObject <RCTBridgeModule>
 @property(nonatomic, strong) dispatch_queue_t projectQueue;
+@property(nonatomic, strong) LPCloneOperation *cloneOperation;
 @property(nonatomic, copy, nullable) LPCredentialPromptHook credentialPromptHook;
 @property(nonatomic, strong) DSHLocalProjectAccess *projectAccess;
 @property(nonatomic, strong, nullable) DSHLocalWorkspaceAccess *workspaceAccessV2;
@@ -879,6 +968,8 @@ typedef void (^LPCredentialPromptHook)(NSString *host, BOOL chinese,
 @property(nonatomic, strong, nullable) NSError *v2AttachStartupError;
 @property(nonatomic, strong, nullable) DSHLocalProjectsRootLease *pendingRootLease;
 @property(nonatomic, copy, nullable) LPV2AttachFaultHook v2AttachFaultHook;
+@property(nonatomic, copy, nullable) void (^clonePhaseHook)(NSString *phase);
+- (nullable NSDictionary *)clonePublicRepositoryAtURL:(NSURL *)remoteURL name:(NSString *)name proxyURL:(NSString *)proxyURL operation:(LPCloneOperation *)operation error:(NSError **)error;
 - (BOOL)stagingEntryIsExactForProjectId:(NSString *)projectId
                                   error:(NSError **)error;
 - (void)removeVisibleStagingDirectory:(NSURL *)staging
@@ -2893,6 +2984,77 @@ RCT_REMAP_METHOD(create,
   });
 }
 
+RCT_REMAP_METHOD(startClone,
+                 startCloneURL:(id)urlValue name:(id)nameValue options:(id)optionsValue
+                 resolver:(RCTPromiseResolveBlock)resolve rejecter:(RCTPromiseRejectBlock)reject) {
+  NSError *error = nil;
+  NSString *proxyURL = LPValidatedHTTPSProxyURL(optionsValue, &error);
+  NSURL *remoteURL = error == nil ? DSHGitValidatedRemoteURL(urlValue, &error) : nil;
+  NSString *name = nil;
+  if (nameValue == nil || nameValue == NSNull.null) {
+    NSString *derived = remoteURL.path.lastPathComponent.stringByRemovingPercentEncoding;
+    if ([derived.lowercaseString hasSuffix:@".git"] && derived.length > 4)
+      derived = [derived substringToIndex:derived.length - 4];
+    name = LPValidatedProjectName(derived, nil) ?: @"Repository";
+  } else name = LPValidatedProjectName(nameValue, &error);
+  if (error != nil || remoteURL == nil || name == nil) {
+    reject(@"validation", @"Invalid public clone request", nil);
+    return;
+  }
+  LPCloneOperation *operation = [[LPCloneOperation alloc] init];
+  operation.name = name;
+  @synchronized (self) {
+    if (self.cloneOperation != nil && ![self.cloneOperation terminal]) {
+      reject(@"busy", @"A clone is already running", nil);
+      return;
+    }
+    self.cloneOperation = operation;
+  }
+  resolve([operation snapshot]);
+  dispatch_async(self.projectQueue, ^{
+    NSError *failure = nil;
+    NSDictionary *project = [self clonePublicRepositoryAtURL:remoteURL name:name
+      proxyURL:proxyURL operation:operation error:&failure];
+    @synchronized (operation) {
+      operation.project = project;
+      operation.phase = project != nil ? @"succeeded"
+        : operation.cancelRequested ? @"cancelled" : @"failed";
+      operation.failureCode = project != nil || operation.cancelRequested ? nil
+        : failure.code == 3010 ? @"timeout" : @"git";
+    }
+  });
+}
+
+RCT_REMAP_METHOD(cloneStatus,
+                 cloneStatusForOperation:(id)operationIdValue
+                 resolver:(RCTPromiseResolveBlock)resolve rejecter:(RCTPromiseRejectBlock)reject) {
+  LPCloneOperation *operation = nil;
+  @synchronized (self) { operation = self.cloneOperation; }
+  if (operationIdValue != nil && operationIdValue != NSNull.null &&
+      ![operation.operationId isEqual:LPString(operationIdValue)]) {
+    reject(@"state", @"Clone operation is unavailable", nil);
+    return;
+  }
+  resolve(operation == nil ? NSNull.null : [operation snapshot]);
+}
+
+RCT_REMAP_METHOD(cancelClone,
+                 cancelCloneOperation:(id)operationIdValue
+                 resolver:(RCTPromiseResolveBlock)resolve rejecter:(RCTPromiseRejectBlock)reject) {
+  LPCloneOperation *operation = nil;
+  @synchronized (self) { operation = self.cloneOperation; }
+  if (operation == nil || ![operation.operationId isEqual:LPString(operationIdValue)]) {
+    reject(@"state", @"Clone operation is unavailable", nil);
+    return;
+  }
+  @synchronized (operation) {
+    // Once publication starts, report its real result; never claim cancellation.
+    if (![operation terminal] && ![operation.phase isEqual:@"publishing"])
+      operation.cancelRequested = YES;
+    resolve([operation snapshot]);
+  }
+}
+
 RCT_REMAP_METHOD(clone,
                  clonePublicRepository:(id)urlValue
                  name:(id)nameValue
@@ -2941,6 +3103,18 @@ RCT_REMAP_METHOD(clone,
                                         name:(NSString *)name
                                     proxyURL:(NSString *)proxyURL
                                        error:(NSError **)error {
+  return [self clonePublicRepositoryAtURL:remoteURL name:name proxyURL:proxyURL
+    operation:nil error:error];
+}
+
+- (NSDictionary *)clonePublicRepositoryAtURL:(NSURL *)remoteURL
+                                        name:(NSString *)name
+                                    proxyURL:(NSString *)proxyURL
+                                   operation:(LPCloneOperation *)operation
+                                       error:(NSError **)error {
+  if (self.clonePhaseHook != nil) self.clonePhaseHook(@"queued");
+  if ([operation shouldCancel]) return nil;
+  [operation updatePhase:@"connecting"];
   NSURL *root = [self projectsRootCreatingIfNeeded:YES error:error];
   if (root == nil) return nil;
   NSString *projectId = NSUUID.UUID.UUIDString.lowercaseString;
@@ -2966,19 +3140,26 @@ RCT_REMAP_METHOD(clone,
   // operation.  The credential callback ignores its payload, so the budget can
   // ride along on the shared callbacks payload.
   LPCloneBudget budget = {
-    .deadline = NSDate.timeIntervalSinceReferenceDate + LPCloneOverallBudgetSeconds,
+    .deadline = NSProcessInfo.processInfo.systemUptime + LPCloneOverallBudgetSeconds,
     .exceeded = false,
+    .operation = operation,
   };
   options.fetch_opts.callbacks.transfer_progress = LPCloneTransferProgress;
   options.fetch_opts.callbacks.sideband_progress = LPCloneSidebandProgress;
   options.fetch_opts.callbacks.payload = &budget;
+  options.checkout_opts.notify_flags = GIT_CHECKOUT_NOTIFY_ALL;
+  options.checkout_opts.notify_cb = LPCloneCheckoutNotify;
+  options.checkout_opts.notify_payload = &budget;
+  options.checkout_opts.progress_cb = LPCloneCheckoutProgress;
+  options.checkout_opts.progress_payload = &budget;
   git_libgit2_opts(GIT_OPT_SET_SERVER_CONNECT_TIMEOUT,
                    LPCloneConnectTimeoutMilliseconds);
   git_libgit2_opts(GIT_OPT_SET_SERVER_TIMEOUT, LPCloneIdleTimeoutMilliseconds);
   git_repository *repository = nullptr;
   BOOL stagingBoundBefore = [self stagingEntryIsExactForProjectId:projectId
                                                              error:error];
-  int result = stagingBoundBefore
+  if (self.clonePhaseHook != nil) self.clonePhaseHook(@"before_transfer");
+  int result = stagingBoundBefore && LPCloneBudgetExpired(&budget) == 0
     ? git_clone(&repository, remoteURL.absoluteString.UTF8String,
                 repoURL.fileSystemRepresentation, &options)
     : -1;
@@ -2992,6 +3173,7 @@ RCT_REMAP_METHOD(clone,
           LPCloneOverallBudgetSeconds]
       : LPSanitizedGitFailure(@"Public clone transport", result);
   }
+  [operation updatePhase:@"validating"];
   BOOL checkoutSafe = NO;
   if (stagingBoundAfter && repository != nullptr && LPDirectoryIsSafe(repoURL)
     && LPDirectoryIsSafe([repoURL URLByAppendingPathComponent:@".git" isDirectory:YES])
@@ -3022,15 +3204,17 @@ RCT_REMAP_METHOD(clone,
     @"updated_at": now,
     @"origin_url": remoteURL.absoluteString,
   };
-  BOOL success = checkoutSafe
+  if (self.clonePhaseHook != nil) self.clonePhaseHook(@"before_publish");
+  BOOL success = checkoutSafe && LPCloneBudgetExpired(&budget) == 0
     && [self writeMetadata:stored atProjectDirectory:staging
                  projectId:projectId writeToken:projectLock error:error]
+    && (operation == nil || [operation beginPublication])
     && [self publishStagingDirectory:staging atRoot:root projectId:projectId error:error];
   if (repository != nullptr) git_repository_free(repository);
   if (!success) {
     [self removeVisibleStagingDirectory:staging projectId:projectId];
     if (error != nil && *error == nil) {
-      *error = LPError(3009, cloneFailure ?: @"Public repository cannot be cloned");
+      *error = LPError(budget.exceeded ? 3010 : 3009, cloneFailure ?: @"Public repository cannot be cloned");
     }
     return nil;
   }

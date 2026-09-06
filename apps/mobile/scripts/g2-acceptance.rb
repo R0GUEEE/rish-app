@@ -19,7 +19,8 @@
 #   g2-acceptance.rb --root DIR [--simulator UDID] [--derived-data DIR]
 #                    [--bind 127.0.0.1] [--port 0] [--branch NAME]
 #                    [--lock /tmp/rish-sim-lock] [--lock-owner NAME]
-#                    [--workspace PATH] [--report-only]
+#                    [--workspace PATH] [--report-only] [--clone-only]
+# --clone-only runs anonymous clone acceptance without credential or push actions.
 
 require 'digest'
 require 'fileutils'
@@ -45,6 +46,7 @@ options = {
   lock_owner: 'wp/git-push',
   workspace: File.expand_path('../ios/DSHMobile.xcworkspace', SCRIPT_DIR),
   report_only: false,
+  clone_only: false,
 }
 OptionParser.new do |parser|
   parser.on('--root DIR') { |value| options[:root] = File.expand_path(value) }
@@ -56,9 +58,11 @@ OptionParser.new do |parser|
   parser.on('--lock PATH') { |value| options[:lock] = value }
   parser.on('--lock-owner NAME') { |value| options[:lock_owner] = value }
   parser.on('--workspace PATH') { |value| options[:workspace] = File.expand_path(value) }
+  parser.on('--clone-only') { options[:clone_only] = true }
   parser.on('--report-only') { options[:report_only] = true }
 end.parse!
 abort 'usage: g2-acceptance.rb --root DIR [...]' if options[:root].nil?
+abort '--clone-only cannot be combined with --report-only' if options[:clone_only] && options[:report_only]
 
 root = options[:root]
 FileUtils.mkdir_p(root)
@@ -158,7 +162,7 @@ unless options[:report_only]
     '-scheme', 'DSHMobile',
     '-configuration', 'Release',
     '-destination', "id=#{options[:simulator]}",
-    '-only-testing:DSHMobileTests/GitPushG2Tests',
+    options[:clone_only] ? '-only-testing:DSHMobileTests/GitPushG2Tests/testCloneOperationTransferCancellationAndPublication' : '-only-testing:DSHMobileTests/GitPushG2Tests',
   ]
   command += ['-derivedDataPath', options[:derived_data]] if options[:derived_data]
   xcode_log = File.join(root, 'xcodebuild-g2.log')
@@ -179,6 +183,11 @@ unless options[:report_only]
   release_lock(options[:lock], options[:lock_owner], transcript)
   log(transcript, "xcodebuild exit #{status.exitstatus} after #{(Time.now - started).round}s; log #{xcode_log}")
   abort 'GitPushG2Tests did not pass' unless status.success?
+end
+
+if options[:clone_only]
+  log(transcript, 'Clone transfer, cancellation, cleanup, offline failure, and publication: PASS')
+  exit 0
 end
 
 abort "no report at #{report_path}" unless File.file?(report_path)

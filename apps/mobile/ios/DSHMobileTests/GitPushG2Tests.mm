@@ -1,4 +1,5 @@
 #import <XCTest/XCTest.h>
+#import "DSHTestStorageFixture.h"
 
 #import <CommonCrypto/CommonDigest.h>
 
@@ -22,6 +23,10 @@ typedef void (^G2Reject)(NSString *code, NSString *message, NSError *error);
 @end
 
 @interface LocalProjectsModule (G2Bridge)
+- (void)startCloneURL:(id)url name:(id)name options:(id)options resolver:(G2Resolve)resolve rejecter:(G2Reject)reject;
+- (void)cloneStatusForOperation:(id)operationId resolver:(G2Resolve)resolve rejecter:(G2Reject)reject;
+- (void)cancelCloneOperation:(id)operationId resolver:(G2Resolve)resolve rejecter:(G2Reject)reject;
+
 - (instancetype)initWithSupportURL:(nullable NSURL *)support
                        projectAccess:(DSHLocalProjectAccess *)projectAccess;
 - (void)clonePublicRepository:(id)urlValue name:(id)nameValue options:(id)optionsValue
@@ -490,6 +495,108 @@ static NSString *G2SHA256(NSData *data) {
   [NSThread sleepForTimeInterval:9.0];
   git_repository_free(second);
   git_repository_free(repository);
+}
+
+
+// Clone acceptance uses only anonymous fetches and an isolated fixture root.
+// It does not configure credentials, mutate remotes, commit, or push.
+- (NSDictionary *)cloneStatus:(NSString *)operationId {
+  return [self expectResolved:^(G2Resolve resolve, G2Reject reject) {
+    [self.module cloneStatusForOperation:operationId resolver:resolve rejecter:reject];
+  } step:@"clone status"];
+}
+
+- (NSDictionary *)waitForClone:(NSString *)operationId {
+  NSDate *deadline = [NSDate dateWithTimeIntervalSinceNow:40];
+  NSDictionary *snapshot = nil;
+  do {
+    snapshot = [self bridge:^(G2Resolve resolve, G2Reject reject) {
+      [self.module cloneStatusForOperation:operationId resolver:resolve rejecter:reject];
+    } code:nil message:nil];
+    if ([@[@"succeeded", @"failed", @"cancelled"] containsObject:snapshot[@"phase"]]) return snapshot;
+    [NSThread sleepForTimeInterval:0.05];
+  } while (deadline.timeIntervalSinceNow > 0);
+  XCTFail(@"Clone did not reach a terminal state: %@", snapshot);
+  return snapshot;
+}
+
+- (NSDictionary *)startClone:(NSString *)url name:(NSString *)name {
+  return [self expectResolved:^(G2Resolve resolve, G2Reject reject) {
+    [self.module startCloneURL:url name:name options:@{} resolver:resolve rejecter:reject];
+  } step:@"start clone"];
+}
+
+- (NSArray *)cloneFixtureEntries {
+  return [NSFileManager.defaultManager contentsOfDirectoryAtPath:
+    [self.supportURL URLByAppendingPathComponent:@"projects"].path error:nil] ?: @[];
+}
+
+- (void)testCloneOperationTransferCancellationAndPublication {
+  [NSFileManager.defaultManager removeItemAtURL:self.supportURL error:nil];
+  self.supportURL = DSHCreateTestStorageFixtureRoot(@"CloneOperationTests", nil);
+  XCTAssertNotNil(self.supportURL);
+  XCTAssertTrue([NSFileManager.defaultManager createDirectoryAtURL:
+    [self.supportURL URLByAppendingPathComponent:@"projects" isDirectory:YES]
+    withIntermediateDirectories:YES attributes:@{NSFilePosixPermissions: @0700} error:nil]);
+  self.projectAccess = [[DSHLocalProjectAccess alloc] initWithProjectsRootURL:
+    [self.supportURL URLByAppendingPathComponent:@"projects" isDirectory:YES]];
+  [self.module setValue:self.projectAccess forKey:@"projectAccess"];
+
+  NSString *slowPublic = [self.env[@"DSH_G2_PUBLIC_URL"]
+    stringByReplacingOccurrencesOfString:@"/public.git" withString:@"/slow-public.git"];
+  NSDictionary *started = [self startClone:slowPublic name:@"cancel-transfer"];
+  [NSThread sleepForTimeInterval:0.4];
+  NSDictionary *cancelling = [self expectResolved:^(G2Resolve resolve, G2Reject reject) {
+    [self.module cancelCloneOperation:started[@"operation_id"] resolver:resolve rejecter:reject];
+  } step:@"cancel transfer"];
+  XCTAssertEqualObjects(cancelling[@"cancel_requested"], @YES);
+  BOOL alreadyFinished = [@[@"succeeded", @"failed", @"cancelled"] containsObject:cancelling[@"phase"]];
+  XCTAssertFalse(alreadyFinished);
+  NSDictionary *cancelled = [self waitForClone:started[@"operation_id"]];
+  XCTAssertEqualObjects(cancelled[@"phase"], @"cancelled");
+  XCTAssertEqualObjects(cancelled[@"project"], NSNull.null);
+  XCTAssertEqual(self.cloneFixtureEntries.count, (NSUInteger)0);
+
+  __weak GitPushG2Tests *weakSelf = self;
+  [self.module setValue:^(NSString *phase) {
+    if (![phase isEqual:@"before_publish"]) return;
+    [weakSelf.module cloneStatusForOperation:NSNull.null resolver:^(NSDictionary *current) {
+      [weakSelf.module cancelCloneOperation:current[@"operation_id"] resolver:^(__unused id result) {}
+        rejecter:^(__unused NSString *code, __unused NSString *message, __unused NSError *error) { XCTFail(@"pre-publish cancel rejected"); }];
+    } rejecter:^(__unused NSString *code, __unused NSString *message, __unused NSError *error) { XCTFail(@"snapshot rejected"); }];
+  } forKey:@"clonePhaseHook"];
+  started = [self startClone:self.env[@"DSH_G2_PUBLIC_URL"] name:@"cancel-before-publish"];
+  NSDictionary *beforePublish = [self waitForClone:started[@"operation_id"]];
+  XCTAssertEqualObjects(beforePublish[@"phase"], @"cancelled");
+  XCTAssertGreaterThan([beforePublish[@"received_bytes"] unsignedIntegerValue], (NSUInteger)0);
+  XCTAssertGreaterThan([beforePublish[@"completed_files"] unsignedIntegerValue], (NSUInteger)0);
+  XCTAssertEqual(self.cloneFixtureEntries.count, (NSUInteger)0);
+  [self.module setValue:nil forKey:@"clonePhaseHook"];
+
+  started = [self startClone:@"http://127.0.0.1:1/offline.git" name:@"offline"];
+  NSDictionary *offline = [self waitForClone:started[@"operation_id"]];
+  XCTAssertEqualObjects(offline[@"phase"], @"failed");
+  XCTAssertEqual(self.cloneFixtureEntries.count, (NSUInteger)0);
+
+  started = [self startClone:self.env[@"DSH_G2_PUBLIC_URL"] name:@"complete-clone"];
+  NSDictionary *success = [self waitForClone:started[@"operation_id"]];
+  XCTAssertEqualObjects(success[@"phase"], @"succeeded");
+  XCTAssertEqual(self.cloneFixtureEntries.count, (NSUInteger)1);
+  XCTAssertGreaterThan([success[@"received_bytes"] unsignedIntegerValue], (NSUInteger)0);
+  XCTAssertEqualObjects(success[@"completed_files"], success[@"total_files"]);
+  NSDictionary *lateCancel = [self expectResolved:^(G2Resolve resolve, G2Reject reject) {
+    [self.module cancelCloneOperation:started[@"operation_id"] resolver:resolve rejecter:reject];
+  } step:@"late cancellation"];
+  XCTAssertEqualObjects(lateCancel[@"phase"], @"succeeded");
+  XCTAssertEqualObjects(lateCancel[@"cancel_requested"], @NO);
+  if (![success[@"project"] isKindOfClass:NSDictionary.class]) return;
+  NSDictionary *status = [self expectResolved:^(G2Resolve resolve, G2Reject reject) {
+    [self.module statusForProject:success[@"project"][@"id"] resolver:resolve rejecter:reject];
+  } step:@"cloned status"];
+  XCTAssertEqualObjects(status[@"clean"], @YES);
+  NSLog(@"CLONE_ACCEPTANCE: %@", @{ @"transfer_cancel": cancelled,
+    @"before_publish_cancel": beforePublish, @"offline": offline,
+    @"success": success, @"status": status });
 }
 
 @end

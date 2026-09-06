@@ -568,6 +568,23 @@ const enUS = {
   'projects.remoteUrlPlaceholder': 'https://github.com/owner/repository.git',
   'projects.create': 'Create project',
   'projects.clone': 'Clone',
+  'projects.cloneCancelling':
+    'Cancelling… Waiting for the current network call to stop (up to 30 seconds).',
+  'projects.cloneTransfer': '{received}/{total} objects · {kib} KiB received',
+  'projects.cloneCheckout': '{completed}/{total} files checked out',
+  'projects.cloneTimeout':
+    'The server took too long. Check the connection and try again.',
+  'projects.clonePhase.queued': 'Waiting to clone…',
+  'projects.clonePhase.connecting': 'Connecting to repository…',
+  'projects.clonePhase.receiving': 'Receiving objects…',
+  'projects.clonePhase.checkout': 'Checking out files…',
+  'projects.clonePhase.validating': 'Verifying repository…',
+  'projects.clonePhase.publishing': 'Finishing repository…',
+  'projects.clonePhase.succeeded': 'Repository cloned locally.',
+  'projects.clonePhase.failed':
+    'Clone failed. Check the URL and network, then try again.',
+  'projects.clonePhase.cancelled': 'Clone cancelled. No project was published.',
+
   'projects.cancelCreate': 'Cancel project creation',
   'projects.cancelClone': 'Cancel repository clone',
   'projects.publicHttpsOnly':
@@ -1339,6 +1356,20 @@ const zhCN: Readonly<Record<TranslationKey, string>> = {
   'projects.remoteUrlPlaceholder': 'https://github.com/owner/repository.git',
   'projects.create': '创建项目',
   'projects.clone': '克隆',
+  'projects.cloneCancelling': '正在取消…等待当前网络调用停止（最长约30秒）。',
+  'projects.cloneTransfer': '已接收 {received}/{total} 个对象 · {kib} KiB',
+  'projects.cloneCheckout': '已检出 {completed}/{total} 个文件',
+  'projects.cloneTimeout': '服务器响应超时，请检查网络后重试。',
+  'projects.clonePhase.queued': '正在等待克隆…',
+  'projects.clonePhase.connecting': '正在连接仓库…',
+  'projects.clonePhase.receiving': '正在接收对象…',
+  'projects.clonePhase.checkout': '正在检出文件…',
+  'projects.clonePhase.validating': '正在验证仓库…',
+  'projects.clonePhase.publishing': '正在完成仓库…',
+  'projects.clonePhase.succeeded': '仓库已克隆到本机。',
+  'projects.clonePhase.failed': '克隆失败，请检查地址和网络后重试。',
+  'projects.clonePhase.cancelled': '克隆已取消，未发布项目。',
+
   'projects.cancelCreate': '取消创建项目',
   'projects.cancelClone': '取消克隆仓库',
   'projects.publicHttpsOnly':

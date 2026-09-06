@@ -116,6 +116,13 @@ static NSString *DSHSHA256Hex(NSData *data) {
 @end
 
 @interface LocalProjectsModule (DSHProjectContextTests)
+- (void)startCloneURL:(id)url name:(id)name options:(id)options
+    resolver:(void (^)(id))resolve rejecter:(void (^)(NSString *, NSString *, NSError *))reject;
+- (void)cloneStatusForOperation:(id)operationId
+    resolver:(void (^)(id))resolve rejecter:(void (^)(NSString *, NSString *, NSError *))reject;
+- (void)cancelCloneOperation:(id)operationId
+    resolver:(void (^)(id))resolve rejecter:(void (^)(NSString *, NSString *, NSError *))reject;
+
 - (nullable NSURL *)createStagingDirectoryAtRoot:(NSURL *)root
                                         projectId:(NSString *)projectId
                                              error:(NSError **)error;
@@ -5300,6 +5307,85 @@ static NSString *DSHSHA256Hex(NSData *data) {
                           @"project");
     XCTAssertFalse([message hasPrefix:@"HTTPS proxy"]);
   }
+}
+
+- (NSDictionary *)cloneSnapshot:(LocalProjectsModule *)module {
+  __block NSDictionary *snapshot = nil;
+  [module cloneStatusForOperation:NSNull.null resolver:^(id result) {
+    snapshot = result == NSNull.null ? nil : result;
+  } rejecter:^(NSString *code, __unused NSString *message, __unused NSError *error) {
+    XCTFail(@"Unexpected clone status rejection: %@", code);
+  }];
+  return snapshot;
+}
+
+- (void)testCloneCancellationWhileQueuedIsQueryableAndNeverStartsNetwork {
+  LocalProjectsModule *module = [[LocalProjectsModule alloc] init];
+  [module setValue:self.access forKey:@"projectAccess"];
+  dispatch_queue_t queue = [module valueForKey:@"projectQueue"];
+  dispatch_semaphore_t release = dispatch_semaphore_create(0);
+  dispatch_async(queue, ^{ dispatch_semaphore_wait(release,
+      dispatch_time(DISPATCH_TIME_NOW, 5 * NSEC_PER_SEC)); });
+  __block NSDictionary *started = nil;
+  [module startCloneURL:@"https://example.com/queued.git" name:@"queued" options:@{}
+    resolver:^(id result) { started = result; }
+    rejecter:^(NSString *code, __unused NSString *message, __unused NSError *error) {
+      XCTFail(@"Unexpected start rejection: %@", code);
+    }];
+  XCTAssertEqualObjects(started[@"phase"], @"queued");
+  __block NSString *secondCode = nil;
+  [module startCloneURL:@"https://example.com/second.git" name:@"second" options:@{}
+    resolver:^(__unused id result) { XCTFail(@"Concurrent clone accepted"); }
+    rejecter:^(NSString *code, __unused NSString *message, __unused NSError *error) { secondCode = code; }];
+  XCTAssertEqualObjects(secondCode, @"busy");
+  [module cancelCloneOperation:started[@"operation_id"] resolver:^(id result) {
+    XCTAssertEqualObjects(result[@"cancel_requested"], @YES);
+    XCTAssertEqualObjects(result[@"phase"], @"queued");
+  } rejecter:^(__unused NSString *code, __unused NSString *message, __unused NSError *error) { XCTFail(@"Cancel rejected"); }];
+  XCTAssertEqualObjects([self cloneSnapshot:module][@"operation_id"], started[@"operation_id"]);
+  dispatch_semaphore_signal(release);
+  dispatch_sync(queue, ^{});
+  NSDictionary *terminal = [self cloneSnapshot:module];
+  XCTAssertEqualObjects(terminal[@"phase"], @"cancelled");
+  XCTAssertEqualObjects(terminal[@"project"], NSNull.null);
+  NSArray *entries = [NSFileManager.defaultManager contentsOfDirectoryAtPath:self.projectsURL.path error:nil];
+  XCTAssertEqual(entries.count, (NSUInteger)0);
+}
+
+- (void)testCloneCancellationAfterStagingCleansUpWithoutPublishing {
+  LocalProjectsModule *module = [[LocalProjectsModule alloc] init];
+  [module setValue:self.access forKey:@"projectAccess"];
+  __weak LocalProjectsModule *weakModule = module;
+  __block BOOL sawStaging = NO;
+  [module setValue:^(NSString *phase) {
+    if (![phase isEqual:@"before_transfer"]) return;
+    sawStaging = [NSFileManager.defaultManager contentsOfDirectoryAtPath:self.projectsURL.path error:nil].count > 0;
+    NSDictionary *operation = [self cloneSnapshot:weakModule];
+    [weakModule cancelCloneOperation:operation[@"operation_id"] resolver:^(__unused id result) {}
+      rejecter:^(__unused NSString *code, __unused NSString *message, __unused NSError *error) { XCTFail(@"Cancel rejected"); }];
+  } forKey:@"clonePhaseHook"];
+  [module startCloneURL:@"https://example.com/staging.git" name:@"staging" options:@{}
+    resolver:^(__unused id result) {} rejecter:^(__unused NSString *code, __unused NSString *message, __unused NSError *error) { XCTFail(@"Start rejected"); }];
+  dispatch_sync((dispatch_queue_t)[module valueForKey:@"projectQueue"], ^{});
+  XCTAssertTrue(sawStaging);
+  XCTAssertEqualObjects([self cloneSnapshot:module][@"phase"], @"cancelled");
+  NSArray *entries = [NSFileManager.defaultManager contentsOfDirectoryAtPath:self.projectsURL.path error:nil];
+  XCTAssertEqual(entries.count, (NSUInteger)0);
+}
+
+- (void)testCloneRejectsUnknownCancellationAndInvalidRequests {
+  LocalProjectsModule *module = [[LocalProjectsModule alloc] init];
+  __block NSString *code = nil;
+  [module cancelCloneOperation:@"unknown" resolver:^(__unused id result) { XCTFail(@"Unknown cancellation accepted"); }
+    rejecter:^(NSString *value, __unused NSString *message, __unused NSError *error) { code = value; }];
+  XCTAssertEqualObjects(code, @"state");
+  [module startCloneURL:@"https://secret@example.com/repo.git" name:@"invalid" options:@{}
+    resolver:^(__unused id result) { XCTFail(@"Invalid request accepted"); }
+    rejecter:^(NSString *value, NSString *message, __unused NSError *error) {
+      code = value; XCTAssertFalse([message containsString:@"secret"]);
+    }];
+  XCTAssertEqualObjects(code, @"validation");
+  XCTAssertNil([self cloneSnapshot:module]);
 }
 
 - (void)testCloneRootSwapLeavesOnlyRecoverableOwnedStaging {

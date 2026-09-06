@@ -43,6 +43,14 @@ import { fonts, hitSlop, type ThemePalette } from '../theme';
 import { AppIcon } from './AppIcon';
 import { SlidingSurface } from './SlidingSurface';
 import { ProjectViewTasks, type ProjectViewTask } from './projectViewTasks';
+import type { ProjectCloneOperation } from '../native/LocalProjects';
+
+function cloneIsActive(operation: ProjectCloneOperation | null) {
+  return (
+    operation !== null &&
+    !['succeeded', 'failed', 'cancelled'].includes(operation.phase)
+  );
+}
 
 type CreateMode = 'create' | 'clone' | null;
 type ProjectTab = 'files' | 'changes';
@@ -158,6 +166,15 @@ export function ProjectsSurface({
   const [createMode, setCreateMode] = useState<CreateMode>(null);
   const [name, setName] = useState('');
   const [cloneUrl, setCloneUrl] = useState('');
+  const [cloneOperation, setCloneOperation] =
+    useState<ProjectCloneOperation | null>(null);
+  const cloneOperationRef = useRef<ProjectCloneOperation | null>(null);
+  const cloneOwner = useRef<ProjectViewTask | null>(null);
+  const [startingClone, setStartingClone] = useState(false);
+  const cloneStarting = useRef(false);
+  const cloneCancelOnStart = useRef(false);
+  const clonePollVersion = useRef(0);
+  const handledClone = useRef<string | null>(null);
   const [commitMessage, setCommitMessage] = useState('');
   const [authorName, setAuthorName] = useState('');
   const [authorEmail, setAuthorEmail] = useState('');
@@ -338,9 +355,107 @@ export function ProjectsSurface({
     [selectView, tasks],
   );
 
+  const applyCloneSnapshot = useCallback(
+    (operation: ProjectCloneOperation) => {
+      const current = cloneOperationRef.current;
+      if (
+        current?.operation_id === operation.operation_id &&
+        ((!cloneIsActive(current) && cloneIsActive(operation)) ||
+          (current.cancel_requested &&
+            !operation.cancel_requested &&
+            cloneIsActive(operation)))
+      )
+        return;
+      cloneOperationRef.current = operation;
+      setCloneOperation(operation);
+      if (
+        cloneIsActive(operation) ||
+        handledClone.current === operation.operation_id
+      )
+        return;
+      handledClone.current = operation.operation_id;
+      const owner = cloneOwner.current;
+      cloneOwner.current = null;
+      if (operation.phase === 'succeeded' && operation.project !== null) {
+        const project = operation.project;
+        setProjects(previous => [
+          project,
+          ...previous.filter(item => item.id !== project.id),
+        ]);
+        if (owner !== null && tasks.owns(owner)) {
+          setCreateMode(null);
+          setName('');
+          setCloneUrl('');
+          selectView(project);
+          setTab('files');
+          setNotice(t('projects.clonedSuccess'));
+        }
+      }
+      if (owner !== null) finishTask(owner);
+    },
+    [finishTask, selectView, t, tasks],
+  );
+
+  useEffect(() => {
+    if (!visible) return;
+    let disposed = false;
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const poll = async () => {
+      const version = clonePollVersion.current;
+      try {
+        const operation = await LocalProjects.cloneStatus();
+        if (
+          !disposed &&
+          version === clonePollVersion.current &&
+          operation !== null &&
+          !cloneStarting.current
+        )
+          applyCloneSnapshot(operation);
+      } catch {
+        // Retain the last known operation; a failed poll must not imply completion.
+      }
+      if (!disposed && cloneIsActive(cloneOperationRef.current))
+        timer = setTimeout(() => {
+          poll().catch(() => undefined);
+        }, 400);
+    };
+    poll().catch(() => undefined);
+    return () => {
+      disposed = true;
+      if (timer !== undefined) clearTimeout(timer);
+    };
+  }, [applyCloneSnapshot, visible, cloneOperation?.operation_id]);
+
+  const cancelClone = useCallback(async () => {
+    const operation = cloneOperationRef.current;
+    if (!cloneIsActive(operation) || operation === null) return;
+    // Cancel navigation ownership immediately; the native result may already be publishing.
+    if (cloneOwner.current !== null) {
+      tasks.invalidate();
+      syncBusy();
+    }
+    try {
+      const next = await LocalProjects.cancelClone(operation.operation_id);
+      if (
+        tasks.visible &&
+        cloneOperationRef.current?.operation_id === next.operation_id
+      )
+        applyCloneSnapshot(next);
+    } catch (caught) {
+      if (tasks.visible)
+        setError(t('projects.operationFailed', { error: errorText(caught) }));
+    }
+  }, [applyCloneSnapshot, syncBusy, t, tasks]);
+
   const finishCreation = useCallback(
     async (kind: Exclude<CreateMode, null>) => {
-      if (!tasks.visible || tasks.busy) return;
+      if (
+        !tasks.visible ||
+        tasks.busy ||
+        cloneStarting.current ||
+        cloneIsActive(cloneOperationRef.current)
+      )
+        return;
       const trimmedName = name.trim();
       const trimmedUrl = cloneUrl.trim();
       if (kind === 'create' && trimmedName.length === 0) return;
@@ -349,14 +464,28 @@ export function ProjectsSurface({
       setError(null);
       setNotice(null);
       try {
-        const project =
-          kind === 'create'
-            ? await LocalProjects.create(trimmedName)
-            : await LocalProjects.clone(
-                trimmedUrl,
-                trimmedName.length === 0 ? undefined : trimmedName,
-                { httpsProxyUrl: preferences.gitHttpsProxyUrl },
-              );
+        if (kind === 'clone') {
+          cloneStarting.current = true;
+          setStartingClone(true);
+          cloneCancelOnStart.current = false;
+          clonePollVersion.current += 1;
+          cloneOwner.current = task;
+          handledClone.current = null;
+          let operation = await LocalProjects.startClone(
+            trimmedUrl,
+            trimmedName.length === 0 ? undefined : trimmedName,
+            { httpsProxyUrl: preferences.gitHttpsProxyUrl },
+          );
+          cloneOperationRef.current = operation;
+          if (tasks.visible) applyCloneSnapshot(operation);
+          if (cloneCancelOnStart.current && cloneIsActive(operation)) {
+            operation = await LocalProjects.cancelClone(operation.operation_id);
+            cloneOperationRef.current = operation;
+            if (tasks.visible) applyCloneSnapshot(operation);
+          }
+          return;
+        }
+        const project = await LocalProjects.create(trimmedName);
         if (!tasks.owns(task)) return;
         setProjects(previous => [
           project,
@@ -366,21 +495,20 @@ export function ProjectsSurface({
         setName('');
         setCloneUrl('');
         selectView(project);
-        setNotice(
-          kind === 'create'
-            ? t('projects.created')
-            : t('projects.clonedSuccess'),
-        );
+        setNotice(t('projects.created'));
         setTab('files');
         setRemoteUrl(project.origin_url ?? '');
       } catch (caught) {
         if (!tasks.owns(task)) return;
         setError(t('projects.operationFailed', { error: errorText(caught) }));
       } finally {
+        cloneStarting.current = false;
+        setStartingClone(false);
         finishTask(task);
       }
     },
     [
+      applyCloneSnapshot,
       beginTask,
       cloneUrl,
       finishTask,
@@ -752,15 +880,29 @@ export function ProjectsSurface({
 
         {selected === null ? (
           <ProjectList
-            busy={busy}
+            busy={busy || startingClone || cloneIsActive(cloneOperation)}
             cloneUrl={cloneUrl}
             createMode={createMode}
+            cloneOperation={cloneOperation}
+            onCancelClone={cancelClone}
             name={name}
             projects={projects}
             styles={styles}
             onChangeCloneUrl={setCloneUrl}
             onChangeName={setName}
             onChooseMode={mode => {
+              if (mode === null && cloneStarting.current) {
+                cloneCancelOnStart.current = true;
+                tasks.invalidate();
+                syncBusy();
+                return;
+              }
+              if (mode === null && cloneIsActive(cloneOperationRef.current)) {
+                cancelClone().catch(() => undefined);
+                return;
+              }
+              if (mode !== null && cloneIsActive(cloneOperationRef.current))
+                return;
               tasks.invalidate();
               syncBusy();
               setCreateMode(mode);
@@ -1160,6 +1302,8 @@ export function ProjectsSurface({
 }
 
 function ProjectList({
+  cloneOperation,
+  onCancelClone,
   busy,
   cloneUrl,
   createMode,
@@ -1172,6 +1316,8 @@ function ProjectList({
   onOpenProject,
   onSubmit,
 }: {
+  cloneOperation: ProjectCloneOperation | null;
+  onCancelClone: () => Promise<void>;
   busy: boolean;
   cloneUrl: string;
   createMode: CreateMode;
@@ -1222,6 +1368,56 @@ function ProjectList({
           </Text>
         </Pressable>
       </View>
+
+      {cloneOperation !== null && (
+        <View
+          style={styles.formCard}
+          testID="projects-clone-progress"
+          accessibilityLiveRegion="polite"
+        >
+          <Text style={styles.formHint}>{cloneOperation.name}</Text>
+          <Text style={styles.formHint}>
+            {cloneOperation.cancel_requested && cloneIsActive(cloneOperation)
+              ? t('projects.cloneCancelling')
+              : t(`projects.clonePhase.${cloneOperation.phase}`)}
+          </Text>
+          {cloneOperation.received_bytes > 0 && (
+            <Text style={styles.mono}>
+              {t('projects.cloneTransfer', {
+                received: cloneOperation.received_objects,
+                total: cloneOperation.total_objects,
+                kib: Math.ceil(cloneOperation.received_bytes / 1024),
+              })}
+            </Text>
+          )}
+          {cloneOperation.total_files > 0 && (
+            <Text style={styles.mono}>
+              {t('projects.cloneCheckout', {
+                completed: cloneOperation.completed_files,
+                total: cloneOperation.total_files,
+              })}
+            </Text>
+          )}
+          {cloneOperation.error_code === 'timeout' && (
+            <Text style={styles.formHint}>{t('projects.cloneTimeout')}</Text>
+          )}
+          {cloneIsActive(cloneOperation) &&
+            !cloneOperation.cancel_requested &&
+            cloneOperation.phase !== 'publishing' && (
+              <Pressable
+                accessibilityRole="button"
+                accessibilityLabel={t('projects.cancelClone')}
+                onPress={() => {
+                  onCancelClone().catch(() => undefined);
+                }}
+                style={styles.formCancel}
+                testID="projects-clone-operation-cancel"
+              >
+                <Text style={styles.formCancelText}>{t('common.cancel')}</Text>
+              </Pressable>
+            )}
+        </View>
+      )}
 
       {createMode !== null && (
         <View style={styles.formCard}>

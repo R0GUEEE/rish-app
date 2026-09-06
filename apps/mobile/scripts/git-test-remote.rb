@@ -18,7 +18,8 @@
 # Repositories under DIR:
 #   public.git  anonymous fetch (public clone leg), push always denied
 #   target.git  basic auth required for every request, non-force push only
-#   stall.git   info/refs sleeps 8 s (timeout / cancellation tests)
+#   stall.git   authenticated info/refs sleeps 8 s (push cancellation tests)
+#   slow-public.git anonymous fetch with an 8 s delay; push always denied
 #
 # Layout of DIR/server.json (written by `serve`, read by the orchestrator):
 #   {"port": N, "bind": "…", "pid": N, "public_url": "…", "target_url": "…",
@@ -38,6 +39,7 @@ GIT = ENV.fetch('DSH_GIT', 'git')
 PUBLIC_REPO = 'public.git'
 TARGET_REPO = 'target.git'
 STALL_REPO = 'stall.git'
+SLOW_PUBLIC_REPO = 'slow-public.git'
 REALM = 'rish-git-test'
 
 def sh!(*command, chdir: nil, input: nil)
@@ -100,6 +102,11 @@ end
 def init_root(root)
   FileUtils.mkdir_p(root)
   seed_public(root)
+  slow_public = bare_path(root, SLOW_PUBLIC_REPO)
+  unless File.directory?(slow_public)
+    sh!(GIT, 'clone', '--bare', '--quiet', bare_path(root, PUBLIC_REPO), slow_public)
+    sh!(GIT, 'config', 'http.receivepack', 'false', chdir: slow_public)
+  end
   seed_target(root)
   seed_stall(root)
   root
@@ -191,6 +198,10 @@ class GitBackend < WEBrick::HTTPServlet::AbstractServlet
     case repo
     when PUBLIC_REPO
       return json(res, 403, 'error' => 'push is disabled on the public repository') if receive
+    when SLOW_PUBLIC_REPO
+      return json(res, 403, 'error' => 'push is disabled on the public repository') if receive
+
+      sleep Float(ENV.fetch('DSH_GIT_TEST_CLONE_DELAY', '8')).clamp(0, 60) if path.end_with?('/info/refs')
     when TARGET_REPO
       return unauthorized(res) unless authorized?(req)
     when STALL_REPO

@@ -21,6 +21,9 @@ jest.mock('../src/native/LocalProjects', () => ({
     list: jest.fn(),
     create: jest.fn(),
     clone: jest.fn(),
+    startClone: jest.fn(),
+    cloneStatus: jest.fn(),
+    cancelClone: jest.fn(),
     status: jest.fn(),
     diff: jest.fn(),
     stageAll: jest.fn(),
@@ -54,6 +57,23 @@ const project = {
   updated_at: '2026-08-24T00:00:00.000Z',
   origin_url: 'https://github.com/example/demo.git',
 };
+
+function cloneSnapshot(phase: string, cancelRequested = false) {
+  return {
+    schema_version: 1,
+    operation_id: 'clone-1',
+    name: 'copy',
+    phase,
+    cancel_requested: cancelRequested,
+    received_objects: 2,
+    total_objects: 8,
+    received_bytes: 4096,
+    completed_files: 0,
+    total_files: 0,
+    project: phase === 'succeeded' ? project : null,
+    error_code: phase === 'failed' ? 'git' : null,
+  };
+}
 
 const dirtyStatus = {
   project_id: project.id,
@@ -95,6 +115,16 @@ async function settle() {
   await Promise.resolve();
 }
 
+const mountedRenderers = new Set<Renderer>();
+
+afterEach(async () => {
+  await act(async () => {
+    for (const renderer of mountedRenderers) renderer.unmount();
+  });
+  mountedRenderers.clear();
+  jest.useRealTimers();
+});
+
 async function renderSurface({
   boundProjectId = null,
   gitHttpsProxyUrl = null,
@@ -135,6 +165,7 @@ async function renderSurface({
     await settle();
   });
   if (renderer === undefined) throw new Error('renderer was not created');
+  mountedRenderers.add(renderer);
   return renderer;
 }
 
@@ -191,6 +222,11 @@ beforeEach(() => {
     origin_url: null,
   });
   mockLocalProjects.clone.mockResolvedValue(project);
+  mockLocalProjects.cloneStatus.mockResolvedValue(null);
+  mockLocalProjects.startClone.mockResolvedValue(cloneSnapshot('succeeded'));
+  mockLocalProjects.cancelClone.mockResolvedValue(
+    cloneSnapshot('receiving', true),
+  );
   mockLocalProjects.status.mockResolvedValue(dirtyStatus);
   mockLocalProjects.diff.mockResolvedValue(diff);
   mockLocalProjects.stageAll.mockResolvedValue(dirtyStatus);
@@ -611,7 +647,7 @@ test('creates an isolated local project and opens its real detail response', asy
 
 test('clones only through the native API and surfaces a native failure', async () => {
   const gitHttpsProxyUrl = 'http://127.0.0.1:7890/';
-  mockLocalProjects.clone.mockRejectedValueOnce(new Error('TLS failed'));
+  mockLocalProjects.startClone.mockRejectedValueOnce(new Error('TLS failed'));
   const renderer = await renderSurface({ gitHttpsProxyUrl });
 
   await act(async () =>
@@ -628,7 +664,7 @@ test('clones only through the native API and surfaces a native failure', async (
     await settle();
   });
 
-  expect(mockLocalProjects.clone).toHaveBeenCalledWith(
+  expect(mockLocalProjects.startClone).toHaveBeenCalledWith(
     'https://github.com/example/demo.git',
     'copy',
     { httpsProxyUrl: gitHttpsProxyUrl },
@@ -659,7 +695,7 @@ test('passes an explicit null proxy when no HTTPS proxy is configured', async ()
     await settle();
   });
 
-  expect(mockLocalProjects.clone).toHaveBeenCalledWith(
+  expect(mockLocalProjects.startClone).toHaveBeenCalledWith(
     'https://github.com/example/demo.git',
     undefined,
     { httpsProxyUrl: null },
@@ -893,4 +929,159 @@ test('renders the native push receipt after a successful push', async () => {
     renderer.root.findAllByProps({ children: 'Branch pushed successfully.' })
       .length,
   ).toBeGreaterThan(0);
+});
+
+async function startTestClone(renderer: Renderer) {
+  await act(async () =>
+    actionByLabel(renderer.root, 'Clone repository').props.onPress(),
+  );
+  await act(async () =>
+    inputByLabel(renderer.root, 'Remote HTTPS URL').props.onChangeText(
+      'https://example.com/copy.git',
+    ),
+  );
+  await act(async () => {
+    actionByLabel(renderer.root, 'Clone').props.onPress();
+    await settle();
+  });
+}
+
+async function pollClone() {
+  await act(async () => {
+    jest.advanceTimersByTime(400);
+    await settle();
+  });
+}
+
+test('shows native transfer progress and waits for real cancellation before retry', async () => {
+  jest.useFakeTimers();
+  mockLocalProjects.startClone.mockResolvedValue(cloneSnapshot('receiving'));
+  const renderer = await renderSurface();
+  await startTestClone(renderer);
+  expect(
+    renderer.root.findAllByProps({ children: '2/8 objects · 4 KiB received' })
+      .length,
+  ).toBeGreaterThan(0);
+  await act(async () => {
+    renderer.root
+      .findByProps({ testID: 'projects-clone-operation-cancel' })
+      .props.onPress();
+    await settle();
+  });
+  expect(mockLocalProjects.cancelClone).toHaveBeenCalledWith('clone-1');
+  expect(actionByLabel(renderer.root, 'Clone').props.disabled).toBe(true);
+  expect(
+    renderer.root.findAllByProps({
+      children:
+        'Cancelling… Waiting for the current network call to stop (up to 30 seconds).',
+    }).length,
+  ).toBeGreaterThan(0);
+  mockLocalProjects.cloneStatus.mockResolvedValue(
+    cloneSnapshot('cancelled', true),
+  );
+  await pollClone();
+  expect(actionByLabel(renderer.root, 'Clone').props.disabled).toBe(false);
+  expect(
+    renderer.root.findAllByProps({
+      children: 'Clone cancelled. No project was published.',
+    }).length,
+  ).toBeGreaterThan(0);
+  expect(mockLocalProjects.status).not.toHaveBeenCalled();
+});
+
+test('reopens the same native operation without restarting or navigating on late success', async () => {
+  jest.useFakeTimers();
+  mockLocalProjects.startClone.mockResolvedValue(cloneSnapshot('connecting'));
+  const renderer = await renderSurface();
+  await startTestClone(renderer);
+  await setVisible(renderer, false);
+  mockLocalProjects.cloneStatus.mockResolvedValue(cloneSnapshot('receiving'));
+  await setVisible(renderer, true);
+  expect(
+    renderer.root.findAllByProps({ children: 'Receiving objects…' }).length,
+  ).toBeGreaterThan(0);
+  mockLocalProjects.cloneStatus.mockResolvedValue(cloneSnapshot('succeeded'));
+  await pollClone();
+  expect(mockLocalProjects.startClone).toHaveBeenCalledTimes(1);
+  expect(mockLocalProjects.status).not.toHaveBeenCalled();
+  expect(actionByLabel(renderer.root, 'Open project demo')).toBeDefined();
+});
+
+test('cancel arriving after publication reports success without stealing navigation', async () => {
+  jest.useFakeTimers();
+  mockLocalProjects.startClone.mockResolvedValue(cloneSnapshot('validating'));
+  mockLocalProjects.cancelClone.mockResolvedValue(cloneSnapshot('succeeded'));
+  const renderer = await renderSurface();
+  await startTestClone(renderer);
+  await act(async () => {
+    renderer.root
+      .findByProps({ testID: 'projects-clone-operation-cancel' })
+      .props.onPress();
+    await settle();
+  });
+  expect(mockLocalProjects.status).not.toHaveBeenCalled();
+  expect(
+    renderer.root.findAllByProps({ children: 'Repository cloned locally.' })
+      .length,
+  ).toBeGreaterThan(0);
+  expect(
+    renderer.root.findAllByProps({
+      children: 'Clone cancelled. No project was published.',
+    }),
+  ).toHaveLength(0);
+});
+
+test('a query from before start cannot overwrite the new clone operation', async () => {
+  jest.useFakeTimers();
+  const held = deferred<ReturnType<typeof cloneSnapshot>>();
+  mockLocalProjects.cloneStatus.mockReturnValueOnce(held.promise);
+  mockLocalProjects.startClone.mockResolvedValue(cloneSnapshot('receiving'));
+  const renderer = await renderSurface();
+  await startTestClone(renderer);
+  await act(async () => {
+    held.resolve({ ...cloneSnapshot('failed'), operation_id: 'old' });
+    await settle();
+  });
+  expect(
+    renderer.root.findAllByProps({ children: 'Receiving objects…' }).length,
+  ).toBeGreaterThan(0);
+  expect(actionByLabel(renderer.root, 'Clone').props.disabled).toBe(true);
+});
+
+test('a transport failure has a retryable terminal state', async () => {
+  jest.useFakeTimers();
+  mockLocalProjects.startClone.mockResolvedValue(cloneSnapshot('connecting'));
+  const renderer = await renderSurface();
+  await startTestClone(renderer);
+  mockLocalProjects.cloneStatus.mockResolvedValue({
+    ...cloneSnapshot('failed'),
+    error_code: 'timeout',
+  });
+  await pollClone();
+  expect(actionByLabel(renderer.root, 'Clone').props.disabled).toBe(false);
+  expect(
+    renderer.root.findAllByProps({
+      children: 'The server took too long. Check the connection and try again.',
+    }).length,
+  ).toBeGreaterThan(0);
+});
+
+test('cancel before the native start reply is forwarded once identity arrives', async () => {
+  jest.useFakeTimers();
+  const held = deferred<ReturnType<typeof cloneSnapshot>>();
+  mockLocalProjects.startClone.mockReturnValue(held.promise);
+  const renderer = await renderSurface();
+  await startTestClone(renderer);
+  await act(async () =>
+    renderer.root
+      .findByProps({ testID: 'projects-clone-cancel' })
+      .props.onPress(),
+  );
+  expect(mockLocalProjects.cancelClone).not.toHaveBeenCalled();
+  await act(async () => {
+    held.resolve(cloneSnapshot('queued'));
+    await settle();
+  });
+  expect(mockLocalProjects.cancelClone).toHaveBeenCalledWith('clone-1');
+  expect(mockLocalProjects.status).not.toHaveBeenCalled();
 });
