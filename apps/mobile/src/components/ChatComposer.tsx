@@ -224,7 +224,13 @@ export function ChatComposer(props: Props) {
             : t('messages.configurePlaceholder', { provider: props.providerName })
         }
         placeholderTextColor={colors.faint}
-        style={styles.input}
+        // Native multiline inputs can retain their previous intrinsic height
+        // after a controlled clear, especially while becoming non-editable.
+        // Constrain empty drafts immediately; restore intrinsic sizing for typing.
+        style={[
+          styles.input,
+          props.draft.length === 0 && styles.emptyInput,
+        ]}
         value={props.draft}
       />
       <View style={styles.actions}>
@@ -453,6 +459,7 @@ const createStyles = (colors: ThemePalette) =>
       lineHeight: 23,
       fontFamily: fonts.body,
     },
+    emptyInput: { height: 36 },
     attachmentScroll: { marginBottom: 9, maxHeight: 72 },
     attachmentRow: { gap: 8, paddingRight: 4 },
     attachmentCard: {

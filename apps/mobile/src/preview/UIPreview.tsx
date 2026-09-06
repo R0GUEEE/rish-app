@@ -228,6 +228,7 @@ function UIPreviewContent({ kind }: { kind: UIPreviewKind }) {
 
 function ComposerPreview() {
   const [draft, setDraft] = useState('验收草稿');
+  const [sending, setSending] = useState(false);
   const [action, setAction] = useState('');
   const { colors } = useAppPresentation();
   return (
@@ -254,15 +255,22 @@ function ComposerPreview() {
         workspaceName="用于验证长项目名称的工作区"
         ownershipKey="preview"
         locked={false}
-        sending={false}
+        sending={sending}
         onAddAttachment={() => setAction('attachment')}
-        onCancel={() => setAction('cancel')}
+        onCancel={() => {
+          setSending(false);
+          setAction('cancel');
+        }}
         onChange={setDraft}
         onConfigure={() => setAction('configure')}
         onOptionsPress={() => setAction('options')}
         onPreviewAttachment={() => {}}
         onRemoveAttachment={() => {}}
-        onSend={() => setAction('sent')}
+        onSend={() => {
+          setDraft('');
+          setSending(true);
+          setAction('sent');
+        }}
         onWorkspacePress={() => setAction('workspace')}
       />
     </View>
