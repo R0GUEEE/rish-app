@@ -314,6 +314,59 @@
   XCTAssertEqual(error.code, DSHProjectContextServiceErrorInvalidArgument);
 }
 
+- (void)testFrozenAgentContextPreservesBytesAfterWriteAndRejectsChangedRootOrConsent {
+  DSHLocalWorkspaceAccess *workspaceAccess = nil;
+  DSHLocalProjectAccess *projectAccess = nil;
+  NSDictionary *root = nil;
+  NSURL *workspaceRootURL = nil;
+  NSURL *gitURL = nil;
+  NSURL *baseURL = [self makePrivateSplitFixtureWithProjectId:
+      @"33333333-3333-4333-8333-333333333333"
+      bindingProjectId:@"33333333-3333-4333-8333-333333333333"
+      workspaceAccess:&workspaceAccess projectAccess:&projectAccess
+      root:&root rootURL:&workspaceRootURL gitURL:&gitURL];
+  DSHProjectContextStore *store = [self storeAtURL:
+      [baseURL URLByAppendingPathComponent:@"store" isDirectory:YES]];
+  DSHProjectContextService *service = [self serviceWithProjectAccess:projectAccess
+      workspaceAccess:workspaceAccess store:store hook:nil prefix:@"cccccccc"];
+  NSString *conversation = @"44444444-4444-4444-8444-444444444444";
+  NSError *error = nil;
+  NSDictionary *manifest = [service prepareCandidateV2WithRoot:root
+      conversationId:conversation modelId:@"deepseek-v4-flash" policy:@"chat-read-v1"
+      selectedPaths:@[@"README.md"] error:&error];
+  NSDictionary *consent = [service confirmSnapshotV2Id:manifest[@"snapshot_id"]
+      root:root error:&error];
+  XCTAssertNotNil(consent, @"%@", error);
+  NSDictionary *request = @{
+    @"schema_version": @2, @"snapshot_id": manifest[@"snapshot_id"],
+    @"consent_receipt_id": consent[@"consent_receipt_id"], @"root": root,
+    @"conversation_id": conversation, @"model_id": @"deepseek-v4-flash",
+    @"policy": @"chat-read-v1",
+  };
+  NSData *original = [service verifiedEnvelopeV2:request receipt:nil error:&error];
+  XCTAssertNotNil(original, @"%@", error);
+  XCTAssertTrue([[@"Changed by approved Agent tool\n" dataUsingEncoding:NSUTF8StringEncoding]
+      writeToURL:[workspaceRootURL URLByAppendingPathComponent:@"README.md"] atomically:YES]);
+  error = nil;
+  XCTAssertNil([service verifiedEnvelopeV2:request receipt:nil error:&error]);
+  XCTAssertEqual(error.code, DSHProjectContextServiceErrorChanged);
+  error = nil;
+  NSDictionary *receipt = nil;
+  NSData *continued = [service verifiedFrozenEnvelopeV2:request receipt:&receipt error:&error];
+  XCTAssertEqualObjects(continued, original, @"%@", error);
+  XCTAssertEqualObjects(receipt[@"snapshot_sha256"], manifest[@"snapshot_sha256"]);
+  NSMutableDictionary *wrongConsent = [request mutableCopy];
+  wrongConsent[@"consent_receipt_id"] = @"99999999-9999-4999-8999-999999999999";
+  XCTAssertNil([service verifiedFrozenEnvelopeV2:wrongConsent receipt:nil error:&error]);
+  XCTAssertEqual(error.code, DSHProjectContextServiceErrorConsent);
+  [self replaceDirectoryAtURL:workspaceRootURL];
+  error = nil;
+  XCTAssertNil([service verifiedFrozenEnvelopeV2:request receipt:nil error:&error]);
+  XCTAssertNotNil(error);
+  [[NSFileManager defaultManager] removeItemAtURL:baseURL error:nil];
+  (void)gitURL;
+}
+
 - (void)testRealV2SnapshotConsentInspectAndVerifiedSendLifecycle {
   DSHLocalWorkspaceAccess *workspaceAccess = nil;
   DSHLocalProjectAccess *projectAccess = nil;

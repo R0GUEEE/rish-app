@@ -108,6 +108,12 @@ typedef void (^DSHProjectContextServiceHook)(NSString *stage,
 - (nullable NSData *)verifiedEnvelopeV2:(NSDictionary *)request
                                 receipt:(NSDictionary *_Nullable *_Nullable)receipt
                                   error:(NSError **)error;
+/// Native Agent continuation only: returns the same consented snapshot bytes
+/// after tools change files. Still verifies protection, consent, digest, root
+/// identity and live lease. Never exposed as a JS freshness bypass.
+- (nullable NSData *)verifiedFrozenEnvelopeV2:(NSDictionary *)request
+                                     receipt:(NSDictionary *_Nullable *_Nullable)receipt
+                                       error:(NSError **)error;
 - (nullable NSData *)verifiedEnvelopeV2ForSnapshotId:(NSString *)snapshotId
                                     consentReceiptId:(NSString *)consentReceiptId
                                                 root:(NSDictionary *)rootRef

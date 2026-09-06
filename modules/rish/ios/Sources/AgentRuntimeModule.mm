@@ -171,13 +171,19 @@ static NSDictionary *DSHRuntimeContextBundle(
     @"binding_revision" : authority[@"root"][@"workspace_binding_revision"],
     @"project_id" : authority[@"root"][@"project_id"],
   };
-  NSData *envelope = [service
-      verifiedEnvelopeV2ForSnapshotId:context[@"snapshot_id"]
-      consentReceiptId:context[@"consent_receipt_id"]
-      root:rootRef
-      conversationId:context[@"runtime_context_id"]
-      modelId:authority[@"model"] policy:context[@"policy"]
-      receipt:&receipt error:error];
+  NSDictionary *contextRequest = @{
+    @"schema_version" : @2, @"snapshot_id" : context[@"snapshot_id"],
+    @"consent_receipt_id" : context[@"consent_receipt_id"], @"root" : rootRef,
+    @"conversation_id" : context[@"runtime_context_id"],
+    @"model_id" : authority[@"model"], @"policy" : context[@"policy"],
+  };
+  // The protected native authority advances its transcript only after a real
+  // provider/tool result. First launch still requires a fresh snapshot; later
+  // rounds reuse its exact consented bytes, including after our own writes.
+  BOOL continuation = [authority[@"transcript"][@"generation"] unsignedIntegerValue] > 0;
+  NSData *envelope = continuation
+      ? [service verifiedFrozenEnvelopeV2:contextRequest receipt:&receipt error:error]
+      : [service verifiedEnvelopeV2:contextRequest receipt:&receipt error:error];
   if (envelope == nil) {
     if (error != nullptr && *error == nil) {
       DSHSetAgentNativeStoreError(error, DSHAgentNativeStoreErrorConflict);

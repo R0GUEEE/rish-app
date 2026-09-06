@@ -451,6 +451,14 @@ static NSString *DSHServiceGitState(BOOL staged,
                        root:(NSDictionary *)rootRef
               retainedLease:(DSHLocalProjectLease *_Nullable *_Nullable)lease
                        error:(NSError **)error;
+- (BOOL)verifySnapshotV2:(NSDictionary *)snapshot root:(NSDictionary *)rootRef
+       requireLiveSource:(BOOL)requireLiveSource
+           retainedLease:(DSHLocalProjectLease *_Nullable *_Nullable)lease
+                    error:(NSError **)error;
+- (nullable NSData *)verifiedEnvelopeV2:(NSDictionary *)request
+                     requireLiveSource:(BOOL)requireLiveSource
+                               receipt:(NSDictionary *_Nullable *_Nullable)receipt
+                                 error:(NSError **)error;
 - (nullable NSDictionary *)captureV2ForLease:(DSHLocalProjectLease *)lease
                                 selectedPaths:(NSArray<NSString *> *)selectedPaths
                                        blocks:(BOOL)includeBlocks
@@ -2548,6 +2556,15 @@ static int DSHAppendSerializedPatchLine(__unused const git_diff_delta *delta,
                          root:(NSDictionary *)rootRef
                 retainedLease:(DSHLocalProjectLease **)retainedLease
                          error:(NSError **)error {
+  return [self verifySnapshotV2:snapshot root:rootRef requireLiveSource:YES
+                 retainedLease:retainedLease error:error];
+}
+
+- (BOOL)verifySnapshotV2:(NSDictionary *)snapshot
+                    root:(NSDictionary *)rootRef
+       requireLiveSource:(BOOL)requireLiveSource
+           retainedLease:(DSHLocalProjectLease **)retainedLease
+                    error:(NSError **)error {
   if (retainedLease != nil) *retainedLease = nil;
   NSDictionary *root = DSHServiceV2RootRef(rootRef, YES);
   NSDictionary *source = snapshot[@"source_descriptor"];
@@ -2673,6 +2690,11 @@ static int DSHAppendSerializedPatchLine(__unused const git_diff_delta *delta,
       objectsInode != (unsigned long long)lease.objectsInode) {
     DSHSetServiceError(error, DSHProjectContextServiceErrorIntegrity);
     return NO;
+  }
+  if (!requireLiveSource) {
+    if (![self validateV2Lease:lease root:root error:error]) return NO;
+    if (retainedLease != nil) *retainedLease = lease;
+    return YES;
   }
   NSDictionary *capture = [self captureV2ForLease:lease
                                      selectedPaths:paths
@@ -3345,6 +3367,19 @@ static int DSHAppendSerializedPatchLine(__unused const git_diff_delta *delta,
 - (NSData *)verifiedEnvelopeV2:(NSDictionary *)request
                         receipt:(NSDictionary **)receipt
                           error:(NSError **)error {
+  return [self verifiedEnvelopeV2:request requireLiveSource:YES receipt:receipt error:error];
+}
+
+- (NSData *)verifiedFrozenEnvelopeV2:(NSDictionary *)request
+                             receipt:(NSDictionary **)receipt
+                               error:(NSError **)error {
+  return [self verifiedEnvelopeV2:request requireLiveSource:NO receipt:receipt error:error];
+}
+
+- (NSData *)verifiedEnvelopeV2:(NSDictionary *)request
+             requireLiveSource:(BOOL)requireLiveSource
+                       receipt:(NSDictionary **)receipt
+                         error:(NSError **)error {
   NSArray *keys = @[
     @"schema_version", @"snapshot_id", @"consent_receipt_id", @"root",
     @"conversation_id", @"model_id", @"policy"
@@ -3372,6 +3407,7 @@ static int DSHAppendSerializedPatchLine(__unused const git_diff_delta *delta,
         [self performLegacyContextForRoot:root
             operation:^BOOL(NSError **operationError) {
               legacyResult = [self verifiedEnvelopeV2:request
+                                    requireLiveSource:requireLiveSource
                                               receipt:&legacyReceipt
                                                 error:operationError];
               return legacyResult != nil;
@@ -3418,7 +3454,8 @@ static int DSHAppendSerializedPatchLine(__unused const git_diff_delta *delta,
     return nil;
   }
   DSHLocalProjectLease *liveLease = nil;
-  if (![self verifyLiveSnapshotV2:snapshot root:root retainedLease:&liveLease error:error]) {
+  if (![self verifySnapshotV2:snapshot root:root requireLiveSource:requireLiveSource
+                retainedLease:&liveLease error:error]) {
     [self.store cancelAuthorizationLease:authorization];
     return nil;
   }
