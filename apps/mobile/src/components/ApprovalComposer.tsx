@@ -1,3 +1,4 @@
+import { ComposerViewport } from './ComposerViewport';
 import React, { useMemo, useRef, useState } from 'react';
 import {
   Modal,
@@ -7,6 +8,7 @@ import {
   Text,
   TextInput,
   View,
+  useWindowDimensions,
 } from 'react-native';
 import Check from 'lucide-react-native/icons/check';
 import X from 'lucide-react-native/icons/x';
@@ -72,7 +74,11 @@ type ComposerTranslator = (
  */
 export function ApprovalComposer({ requests, onDecide }: Props) {
   const { colors, t } = useAppPresentation();
-  const styles = useMemo(() => createStyles(colors), [colors]);
+  const { fontScale } = useWindowDimensions();
+  const styles = useMemo(
+    () => createStyles(colors, fontScale >= 1.5),
+    [colors, fontScale],
+  );
   const batch = requests.length > 1;
   const [decisions, setDecisions] = useState<Record<string, ItemDecision>>(
     () => {
@@ -184,96 +190,90 @@ export function ApprovalComposer({ requests, onDecide }: Props) {
       transparent
       visible
     >
-      <View accessibilityViewIsModal style={styles.overlay}>
-        <View pointerEvents="box-none" style={styles.anchor}>
-          <View
-            accessibilityLabel={
-              batch
-                ? t('agent.approvalBatchTitle', { count: requests.length })
-                : t('agent.approvalTitle')
-            }
-            accessibilityRole="dialog"
-            style={styles.card}
-            testID="approval-composer-card"
-          >
-            <Text style={styles.eyebrow}>
-              {batch
-                ? t('agent.approvalBatchEyebrow')
-                : t('agent.approvalEyebrow')}
-            </Text>
-            <Text style={styles.title}>
-              {batch
-                ? t('agent.approvalBatchTitle', { count: requests.length })
-                : t('agent.approvalTitle')}
-            </Text>
-            {batch ? (
-              <ScrollView
-                bounces={false}
-                style={styles.batchList}
-                testID="approval-batch-list"
-              >
-                {requests.map((request, index) => (
-                  <BatchItem
-                    key={request.approvalId}
-                    colors={colors}
-                    decision={decisions[request.approvalId]}
-                    index={index}
-                    request={request}
-                    styles={styles}
-                    t={t}
-                    onDecision={decision =>
-                      setDecision(request.approvalId, decision)
-                    }
-                  />
-                ))}
-              </ScrollView>
-            ) : (
-              <SingleItem
-                key={requests[0]?.approvalId}
-                colors={colors}
-                request={requests[0]}
-                styles={styles}
-                t={t}
-                onSubmit={submitSingle}
-              />
-            )}
-            {batch && (
-              <>
-                {invalidBatch && (
-                  <Text accessibilityRole="alert" style={styles.messageError}>
-                    {t('agent.approvalBatchMessageInvalid', {
-                      calls: invalidBatchItems.join(', '),
-                      limit: MAX_APPROVAL_MESSAGE_BYTES,
-                    })}
-                  </Text>
-                )}
-                <Text style={styles.batchSummary}>
-                  {t('agent.approvalBatchSummary', {
-                    approved: approvedCount,
-                    denied: requests.length - approvedCount,
+      <ComposerViewport revealEndOnKeyboard={!batch}>
+        <View
+          accessibilityLabel={
+            batch
+              ? t('agent.approvalBatchTitle', { count: requests.length })
+              : t('agent.approvalTitle')
+          }
+          accessibilityRole="dialog"
+          style={styles.card}
+          testID="approval-composer-card"
+        >
+          <Text style={styles.eyebrow}>
+            {batch
+              ? t('agent.approvalBatchEyebrow')
+              : t('agent.approvalEyebrow')}
+          </Text>
+          <Text style={styles.title}>
+            {batch
+              ? t('agent.approvalBatchTitle', { count: requests.length })
+              : t('agent.approvalTitle')}
+          </Text>
+          {batch ? (
+            <View style={styles.batchList} testID="approval-batch-list">
+              {requests.map((request, index) => (
+                <BatchItem
+                  key={request.approvalId}
+                  colors={colors}
+                  decision={decisions[request.approvalId]}
+                  index={index}
+                  request={request}
+                  styles={styles}
+                  t={t}
+                  onDecision={decision =>
+                    setDecision(request.approvalId, decision)
+                  }
+                />
+              ))}
+            </View>
+          ) : (
+            <SingleItem
+              key={requests[0]?.approvalId}
+              colors={colors}
+              request={requests[0]}
+              styles={styles}
+              t={t}
+              onSubmit={submitSingle}
+            />
+          )}
+          {batch && (
+            <>
+              {invalidBatch && (
+                <Text accessibilityRole="alert" style={styles.messageError}>
+                  {t('agent.approvalBatchMessageInvalid', {
+                    calls: invalidBatchItems.join(', '),
+                    limit: MAX_APPROVAL_MESSAGE_BYTES,
                   })}
                 </Text>
-                <Pressable
-                  accessibilityRole="button"
-                  onPress={submitAll}
-                  disabled={invalidBatch}
-                  accessibilityState={{ disabled: invalidBatch }}
-                  style={({ pressed }) => [
-                    styles.commitButton,
-                    invalidBatch && styles.disabled,
-                    pressed && styles.pressed,
-                  ]}
-                  testID="approval-batch-commit"
-                >
-                  <Text style={styles.commitText}>
-                    {t('agent.approvalBatchCommit')}
-                  </Text>
-                </Pressable>
-              </>
-            )}
-          </View>
+              )}
+              <Text style={styles.batchSummary}>
+                {t('agent.approvalBatchSummary', {
+                  approved: approvedCount,
+                  denied: requests.length - approvedCount,
+                })}
+              </Text>
+              <Pressable
+                accessibilityRole="button"
+                onPress={submitAll}
+                disabled={invalidBatch}
+                accessibilityState={{ disabled: invalidBatch }}
+                style={({ pressed }) => [
+                  styles.commitButton,
+                  invalidBatch && styles.disabled,
+                  pressed && styles.pressed,
+                ]}
+                testID="approval-batch-commit"
+              >
+                <Text style={styles.commitText}>
+                  {t('agent.approvalBatchCommit')}
+                </Text>
+              </Pressable>
+            </>
+          )}
         </View>
-      </View>
+      </ComposerViewport>
     </Modal>
   );
 }
@@ -587,6 +587,12 @@ function SingleItem({
           );
         })}
       </View>
+      {denyMessage.trim().length > 0 && (
+        <Text style={styles.denyHint}>
+          {t('agent.approvalDenyMessageHint')}
+        </Text>
+      )}
+      <MessageBudget message={denyMessage} styles={styles} t={t} />
       <TextInput
         accessibilityLabel={t('agent.approvalDenyWithMessage')}
         multiline
@@ -600,12 +606,6 @@ function SingleItem({
         testID="approval-deny-message"
         value={denyMessage}
       />
-      {denyMessage.trim().length > 0 && (
-        <Text style={styles.denyHint}>
-          {t('agent.approvalDenyMessageHint')}
-        </Text>
-      )}
-      <MessageBudget message={denyMessage} styles={styles} t={t} />
       <View style={styles.buttonRow}>
         <Pressable
           accessibilityRole="button"
@@ -685,22 +685,14 @@ function MessageBudget({
   );
 }
 
-const createStyles = (colors: ThemePalette) =>
+const createStyles = (colors: ThemePalette, largeText = false) =>
   StyleSheet.create({
-    overlay: { flex: 1 },
     disabled: { opacity: 0.4 },
     messageError: {
       color: colors.danger,
       fontSize: 11,
       lineHeight: 16,
       marginTop: 4,
-    },
-    anchor: {
-      flex: 1,
-      justifyContent: 'flex-end',
-      alignItems: 'stretch',
-      paddingHorizontal: 18,
-      paddingBottom: 72,
     },
     card: {
       backgroundColor: colors.surface,
@@ -758,7 +750,6 @@ const createStyles = (colors: ThemePalette) =>
       borderRadius: 10,
       padding: 8,
       marginTop: 2,
-      maxHeight: 128,
     },
     diffText: {
       color: colors.text,
@@ -777,7 +768,7 @@ const createStyles = (colors: ThemePalette) =>
       fontSize: 10,
       marginTop: 2,
     },
-    batchList: { maxHeight: 320, marginTop: 8 },
+    batchList: { marginTop: 8 },
     batchItem: {
       borderWidth: StyleSheet.hairlineWidth,
       borderColor: colors.line,
@@ -888,9 +879,13 @@ const createStyles = (colors: ThemePalette) =>
       lineHeight: 15,
       marginTop: 1,
     },
-    buttonRow: { flexDirection: 'row', gap: 10, marginTop: 10 },
+    buttonRow: {
+      flexDirection: largeText ? 'column' : 'row',
+      gap: 10,
+      marginTop: 10,
+    },
     denyButton: {
-      flex: 1,
+      flex: largeText ? 0 : 1,
       minHeight: 46,
       borderRadius: 14,
       alignItems: 'center',
@@ -899,7 +894,7 @@ const createStyles = (colors: ThemePalette) =>
     },
     denyText: { color: colors.danger, fontSize: 14, fontWeight: '700' },
     allowButton: {
-      flex: 1.6,
+      flex: largeText ? 0 : 1.6,
       minHeight: 46,
       borderRadius: 14,
       alignItems: 'center',

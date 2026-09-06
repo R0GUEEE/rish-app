@@ -1,3 +1,8 @@
+import { ChatComposer } from '../components/ChatComposer';
+import { EmptyChat } from '../components/EmptyChat';
+import { HarnessPicker } from '../components/HarnessPicker';
+import { BUILTIN_HARNESSES } from '../harness/builtins';
+import { QuestionComposer } from '../components/QuestionComposer';
 import { RecoveryNotice } from '../components/RecoveryNotice';
 import { completionRecoveryLabel } from '../components/recoveryMessage';
 import {
@@ -36,6 +41,12 @@ export const UI_PREVIEW_KINDS = [
   'message-list',
   'recovery-zh',
   'recovery-en',
+  'approval-long-zh',
+  'question-options-zh',
+  'question-text-zh',
+  'composer-zh',
+  'copy-zh',
+  'copy-en',
 ] as const;
 
 export type UIPreviewKind = (typeof UI_PREVIEW_KINDS)[number];
@@ -106,6 +117,22 @@ const PREVIEW_GRANTS: readonly AgentConversationGrantV2[] = [
 ];
 
 export function UIPreview({ kind }: { kind: UIPreviewKind }) {
+  const [store] = useState(() =>
+    createPreferencesStore({
+      initialPreferences: {
+        ...createDefaultPreferences(),
+        locale: kind.endsWith('-zh') ? 'zh-CN' : 'en-US',
+      },
+    }),
+  );
+  return (
+    <AppPresentationProvider store={store}>
+      <UIPreviewContent kind={kind} />
+    </AppPresentationProvider>
+  );
+}
+
+function UIPreviewContent({ kind }: { kind: UIPreviewKind }) {
   const { colors } = useAppPresentation();
   const [decided, setDecided] = useState<string | null>(null);
   return (
@@ -119,7 +146,31 @@ export function UIPreview({ kind }: { kind: UIPreviewKind }) {
       >
         {decided ?? `preview:${kind}`}
       </Text>
-      {kind === 'recovery-zh' || kind === 'recovery-en' ? (
+      {decided !== null ? null : kind === 'composer-zh' ? (
+        <ComposerPreview />
+      ) : kind === 'copy-zh' || kind === 'copy-en' ? (
+        <CopyPreview />
+      ) : kind === 'question-options-zh' || kind === 'question-text-zh' ? (
+        <QuestionComposer
+          question={{
+            questionId: 'preview-question',
+            text: '请检查这次操作的范围并选择下一步。'.repeat(5),
+            inputMode: kind === 'question-options-zh' ? 'options' : 'free_text',
+            options:
+              kind === 'question-options-zh'
+                ? Array.from({ length: 8 }, (_, i) => ({
+                    id: `option-${i + 1}`,
+                    label: `选项${
+                      i + 1
+                    }：只处理当前工作区中确认过的文件，并保留未保存的修改。`,
+                  }))
+                : [],
+            required: false,
+          }}
+          onAnswer={(_, answer) => setDecided(`answered:${answer}`)}
+          onCancel={() => setDecided('cancelled')}
+        />
+      ) : kind === 'recovery-zh' || kind === 'recovery-en' ? (
         <RecoveryPreview locale={kind === 'recovery-zh' ? 'zh-CN' : 'en-US'} />
       ) : kind === 'message-list' ? (
         <MessageListPreview />
@@ -146,6 +197,20 @@ export function UIPreview({ kind }: { kind: UIPreviewKind }) {
           requests={
             kind === 'approval-batch'
               ? [WRITE_REQUEST, COMMIT_REQUEST]
+              : kind === 'approval-long-zh'
+              ? [
+                  {
+                    ...WRITE_REQUEST,
+                    preview: {
+                      ...WRITE_REQUEST.preview!,
+                      paths: [
+                        'docs/项目说明与验收记录/需要认真复核的长文件名.md',
+                      ],
+                      diff_preview: '+ 请复核文件内容与操作范围。\n'.repeat(30),
+                      diff_truncated: true,
+                    },
+                  },
+                ]
               : [WRITE_REQUEST]
           }
           onDecide={decisions =>
@@ -157,6 +222,70 @@ export function UIPreview({ kind }: { kind: UIPreviewKind }) {
           }
         />
       )}
+    </View>
+  );
+}
+
+function ComposerPreview() {
+  const [draft, setDraft] = useState('验收草稿');
+  const [action, setAction] = useState('');
+  const { colors } = useAppPresentation();
+  return (
+    <View
+      style={{
+        flex: 1,
+        alignSelf: 'stretch',
+        justifyContent: 'flex-end',
+        padding: 12,
+      }}
+    >
+      <Text style={{ color: colors.text }}>{action}</Text>
+      <ChatComposer
+        configured
+        draft={draft}
+        attachments={[]}
+        attachmentBusy={false}
+        previewingAttachmentId={null}
+        model="claude-haiku-4-5-20251001"
+        providerName="Anthropic"
+        harnessName="Claude Code"
+        optionsVisible={false}
+        thinkingMode="high"
+        workspaceName="用于验证长项目名称的工作区"
+        ownershipKey="preview"
+        locked={false}
+        sending={false}
+        onAddAttachment={() => setAction('attachment')}
+        onCancel={() => setAction('cancel')}
+        onChange={setDraft}
+        onConfigure={() => setAction('configure')}
+        onOptionsPress={() => setAction('options')}
+        onPreviewAttachment={() => {}}
+        onRemoveAttachment={() => {}}
+        onSend={() => setAction('sent')}
+        onWorkspacePress={() => setAction('workspace')}
+      />
+    </View>
+  );
+}
+function CopyPreview() {
+  const [visible, setVisible] = useState(false);
+  const { colors } = useAppPresentation();
+  return (
+    <View style={{ flex: 1, alignSelf: 'stretch' }}>
+      <EmptyChat onSuggestion={() => {}} />
+      <Pressable accessibilityRole="button" onPress={() => setVisible(true)}>
+        <Text style={{ color: colors.accent, padding: 12 }}>
+          Show harness list
+        </Text>
+      </Pressable>
+      <HarnessPicker
+        manifests={BUILTIN_HARNESSES.list()}
+        selectedId="glm"
+        visible={visible}
+        onClose={() => setVisible(false)}
+        onSelect={() => {}}
+      />
     </View>
   );
 }

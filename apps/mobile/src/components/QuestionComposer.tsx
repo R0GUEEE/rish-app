@@ -1,5 +1,13 @@
+import { ComposerViewport } from './ComposerViewport';
 import React, { useMemo, useState } from 'react';
-import { Modal, Pressable, StyleSheet, Text, TextInput, View } from 'react-native';
+import {
+  Modal,
+  Pressable,
+  StyleSheet,
+  Text,
+  TextInput,
+  View,
+} from 'react-native';
 import Check from 'lucide-react-native/icons/check';
 
 import type { QuestionOption, QuestionSpec } from '../agent/AgentQuestions';
@@ -63,116 +71,106 @@ export function QuestionComposer({ question, onAnswer, onCancel }: Props) {
       transparent
       visible
     >
-      <View accessibilityViewIsModal style={styles.overlay}>
-        <View pointerEvents="box-none" style={styles.anchor}>
-          <View
-            accessibilityLabel={t('agent.questionTitle')}
-            accessibilityRole="dialog"
-            style={styles.card}
-            testID="question-composer-card"
-          >
-            <Text style={styles.eyebrow}>{t('agent.questionEyebrow')}</Text>
-            <Text style={styles.title}>{t('agent.questionTitle')}</Text>
-            <Text style={styles.questionText}>{question.text}</Text>
-            {optionsMode ? (
-              <View
-                accessibilityLabel={t('agent.questionTitle')}
-                accessibilityRole="radiogroup"
-                testID="question-options-group"
-              >
-                {options.map((option, index) => {
-                  const isSelected = option.id === selectedOptionId;
-                  return (
-                    <Pressable
-                      accessibilityRole="radio"
-                      accessibilityState={{ checked: isSelected }}
-                      key={option.id}
-                      onPress={() => {
-                        setSelectedOptionId(option.id);
-                        setError(null);
-                      }}
-                      style={({ pressed }) => [
-                        styles.option,
-                        index > 0 && styles.optionDivider,
-                        isSelected && styles.optionSelected,
-                        pressed && styles.pressed,
-                      ]}
-                      testID={'question-option-' + option.id}
-                    >
-                      <View style={styles.check}>
-                        {isSelected && (
-                          <AppIcon color={colors.accent} icon={Check} size={16} />
-                        )}
-                      </View>
-                      <Text style={styles.optionLabel}>{option.label}</Text>
-                    </Pressable>
-                  );
-                })}
-              </View>
-            ) : (
-              <TextInput
-                accessibilityLabel={t('agent.questionFreeTextPlaceholder')}
-                autoFocus
-                multiline
-                onChangeText={text => {
-                  setFreeText(text);
-                  setError(null);
-                }}
-                placeholder={t('agent.questionFreeTextPlaceholder')}
-                placeholderTextColor={colors.muted}
-                style={styles.input}
-                testID="question-free-text-input"
-                value={freeText}
-              />
-            )}
-            {error !== null && (
-              <Text style={styles.error} testID="question-error">
-                {error}
-              </Text>
-            )}
-            <View style={styles.buttonRow}>
-              {!question.required && (
-                <Pressable
-                  accessibilityRole="button"
-                  onPress={() => onCancel(question.questionId)}
-                  style={({ pressed }) => [
-                    styles.cancelButton,
-                    pressed && styles.pressed,
-                  ]}
-                  testID="question-cancel"
-                >
-                  <Text style={styles.cancelText}>{t('common.cancel')}</Text>
-                </Pressable>
-              )}
+      <ComposerViewport>
+        <View
+          accessibilityLabel={t('agent.questionTitle')}
+          accessibilityRole="dialog"
+          style={styles.card}
+          testID="question-composer-card"
+        >
+          <Text style={styles.eyebrow}>{t('agent.questionEyebrow')}</Text>
+          <Text style={styles.title}>{t('agent.questionTitle')}</Text>
+          <Text style={styles.questionText}>{question.text}</Text>
+          {optionsMode ? (
+            <View
+              accessibilityLabel={t('agent.questionTitle')}
+              accessibilityRole="radiogroup"
+              testID="question-options-group"
+            >
+              {options.map((option, index) => {
+                const isSelected = option.id === selectedOptionId;
+                return (
+                  <Pressable
+                    accessibilityRole="radio"
+                    accessibilityState={{ checked: isSelected }}
+                    key={option.id}
+                    onPress={() => {
+                      setSelectedOptionId(option.id);
+                      setError(null);
+                    }}
+                    style={({ pressed }) => [
+                      styles.option,
+                      index > 0 && styles.optionDivider,
+                      isSelected && styles.optionSelected,
+                      pressed && styles.pressed,
+                    ]}
+                    testID={'question-option-' + option.id}
+                  >
+                    <View style={styles.check}>
+                      {isSelected && (
+                        <AppIcon color={colors.accent} icon={Check} size={16} />
+                      )}
+                    </View>
+                    <Text style={styles.optionLabel}>{option.label}</Text>
+                  </Pressable>
+                );
+              })}
+            </View>
+          ) : (
+            <TextInput
+              accessibilityLabel={t('agent.questionFreeTextPlaceholder')}
+              autoFocus
+              multiline
+              onChangeText={text => {
+                setFreeText(text);
+                setError(null);
+              }}
+              placeholder={t('agent.questionFreeTextPlaceholder')}
+              placeholderTextColor={colors.muted}
+              style={styles.input}
+              testID="question-free-text-input"
+              value={freeText}
+            />
+          )}
+          {error !== null && (
+            <Text style={styles.error} testID="question-error">
+              {error}
+            </Text>
+          )}
+          <View style={styles.buttonRow}>
+            {!question.required && (
               <Pressable
                 accessibilityRole="button"
-                onPress={submit}
+                onPress={() => onCancel(question.questionId)}
                 style={({ pressed }) => [
-                  styles.submitButton,
+                  styles.cancelButton,
                   pressed && styles.pressed,
                 ]}
-                testID="question-submit"
+                testID="question-cancel"
               >
-                <Text style={styles.submitText}>{t('agent.questionSubmit')}</Text>
+                <Text style={styles.cancelText}>{t('common.cancel')}</Text>
               </Pressable>
-            </View>
+            )}
+            <Pressable
+              accessibilityRole="button"
+              onPress={submit}
+              style={({ pressed }) => [
+                styles.submitButton,
+                pressed && styles.pressed,
+              ]}
+              testID="question-submit"
+            >
+              <Text style={styles.submitText}>{t('agent.questionSubmit')}</Text>
+            </Pressable>
           </View>
         </View>
-      </View>
+      </ComposerViewport>
     </Modal>
   );
 }
 
 const createStyles = (colors: ThemePalette) =>
   StyleSheet.create({
-    overlay: { flex: 1 },
-    anchor: {
-      flex: 1,
-      justifyContent: 'flex-end',
-      alignItems: 'stretch',
-      paddingHorizontal: 18,
-      paddingBottom: 96,
-    },
     card: {
       backgroundColor: colors.surface,
       borderRadius: 22,
@@ -208,12 +206,21 @@ const createStyles = (colors: ThemePalette) =>
       alignItems: 'center',
       marginTop: 6,
     },
-    optionDivider: { borderTopWidth: StyleSheet.hairlineWidth, borderTopColor: colors.line },
+    optionDivider: {
+      borderTopWidth: StyleSheet.hairlineWidth,
+      borderTopColor: colors.line,
+    },
     optionSelected: { backgroundColor: colors.surfaceRaised },
     check: { width: 20, alignItems: 'flex-start', marginRight: 8 },
-    optionLabel: { color: colors.text, fontSize: 13, fontWeight: '600', flex: 1 },
+    optionLabel: {
+      color: colors.text,
+      fontSize: 13,
+      fontWeight: '600',
+      flex: 1,
+    },
     input: {
       minHeight: 88,
+      maxHeight: 160,
       marginTop: 10,
       borderRadius: 12,
       borderWidth: StyleSheet.hairlineWidth,
@@ -245,6 +252,6 @@ const createStyles = (colors: ThemePalette) =>
       justifyContent: 'center',
       backgroundColor: colors.accent,
     },
-    submitText: { color: colors.background, fontSize:14, fontWeight: '700' },
+    submitText: { color: colors.background, fontSize: 14, fontWeight: '700' },
     pressed: { opacity: 0.58 },
   });

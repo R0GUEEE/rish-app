@@ -1,3 +1,4 @@
+import type { TranslationKey } from '../preferences';
 import React, { useMemo } from 'react';
 import { Pressable, ScrollView, StyleSheet, Text, View } from 'react-native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
@@ -11,6 +12,10 @@ import { fonts, type ThemePalette } from '../theme';
 import { AppIcon } from './AppIcon';
 import { HarnessLogo } from './HarnessLogo';
 import { SlidingPanel } from './SlidingPanel';
+
+const BUILTIN_DESCRIPTION_KEYS: Readonly<Record<string, TranslationKey>> = {
+  dsh: 'harness.adapter.dsh', 'claude-code': 'harness.adapter.claude', codex: 'harness.adapter.codex', glm: 'harness.adapter.glm',
+};
 
 export function HarnessPicker({
   disabled = false,
@@ -64,6 +69,7 @@ export function HarnessPicker({
         <ScrollView contentContainerStyle={styles.content}>
           <Text style={styles.description}>{t('harness.description')}</Text>
           {manifests.map(manifest => {
+            const descriptionKey = manifest.builtin ? BUILTIN_DESCRIPTION_KEYS[manifest.id] : undefined;
             const selected = manifest.id === selectedId;
             const runtimeLabel =
               manifest.runtime.kind === 'native-adapter'
@@ -107,7 +113,7 @@ export function HarnessPicker({
                   />
                 </View>
                 <Text style={styles.cardDescription}>
-                  {manifest.description}
+                  {descriptionKey === undefined ? manifest.description : t(descriptionKey)}
                 </Text>
                 <View style={styles.capabilities}>
                   {manifest.capabilities.map(capability => (

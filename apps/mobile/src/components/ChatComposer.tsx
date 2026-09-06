@@ -280,7 +280,7 @@ export function ChatComposer(props: Props) {
               icon={FolderCode}
               size={13}
             />
-            <Text numberOfLines={1} style={styles.workspaceText}>
+            <Text numberOfLines={2} style={styles.workspaceText}>
               {props.workspaceName ?? t('messages.workspaceLabel')}
             </Text>
             <AppIcon
@@ -314,7 +314,7 @@ export function ChatComposer(props: Props) {
             testID="composer-options-chip"
           >
             <View style={styles.modelDot} />
-            <Text numberOfLines={1} style={styles.modelText}>
+            <Text numberOfLines={2} style={styles.modelText}>
               {model.name} · {thinking.shortName}
             </Text>
             <AppIcon
@@ -498,20 +498,21 @@ const createStyles = (colors: ThemePalette) =>
       borderWidth: 2,
       borderColor: colors.surface,
     },
-    actions: { flexDirection: 'row', alignItems: 'center', marginTop: 5 },
+    actions: { flexDirection: 'row', flexWrap: 'wrap', rowGap: 8, alignItems: 'center', marginTop: 5 },
     actionSpacer: { flex: 1 },
     addAttachment: {
-      width: 32,
-      height: 32,
-      borderRadius: 16,
+      width: 44,
+      height: 44,
+      borderRadius: 22,
       backgroundColor: colors.surfaceRaised,
       alignItems: 'center',
       justifyContent: 'center',
       marginRight: 5,
     },
     workspaceChip: {
-      height: 30,
-      borderRadius: 15,
+      minHeight: 44,
+      paddingVertical: 7,
+      borderRadius: 18,
       paddingHorizontal: 10,
       backgroundColor: colors.surfaceRaised,
       flexDirection: 'row',
@@ -520,10 +521,11 @@ const createStyles = (colors: ThemePalette) =>
       maxWidth: 132,
       marginRight: 6,
     },
-    workspaceText: { color: colors.textDim, fontSize: 10, fontWeight: '600' },
+    workspaceText: { color: colors.textDim, fontSize: 10, fontWeight: '600', flexShrink: 1 },
     modelChip: {
-      height: 30,
-      borderRadius: 15,
+      minHeight: 44,
+      paddingVertical: 7,
+      borderRadius: 18,
       paddingHorizontal: 8,
       backgroundColor: colors.surfaceRaised,
       flexDirection: 'row',
@@ -537,11 +539,11 @@ const createStyles = (colors: ThemePalette) =>
       backgroundColor: colors.accent,
       marginRight: 5,
     },
-    modelText: { color: colors.textDim, fontSize: 10, fontWeight: '600' },
+    modelText: { color: colors.textDim, fontSize: 10, fontWeight: '600', flexShrink: 1 },
     chevronIcon: { marginLeft: 3 },
     configureChip: {
-      height: 38,
-      borderRadius: 19,
+      minHeight: 44,
+      borderRadius: 22,
       paddingHorizontal: 14,
       backgroundColor: colors.accent,
       justifyContent: 'center',
@@ -552,9 +554,9 @@ const createStyles = (colors: ThemePalette) =>
       fontWeight: '800',
     },
     send: {
-      width: 38,
-      height: 38,
-      borderRadius: 19,
+      width: 44,
+      minHeight: 44,
+      borderRadius: 22,
       alignItems: 'center',
       justifyContent: 'center',
       backgroundColor: colors.text,
@@ -598,9 +600,9 @@ const createStyles = (colors: ThemePalette) =>
     },
     menuItemPressed: { backgroundColor: colors.surfaceRaised },
     menuIcon: {
-      width: 38,
-      height: 38,
-      borderRadius: 19,
+      width: 44,
+      minHeight: 44,
+      borderRadius: 22,
       backgroundColor: colors.surfaceRaised,
       alignItems: 'center',
       justifyContent: 'center',

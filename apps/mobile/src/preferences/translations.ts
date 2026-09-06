@@ -49,7 +49,7 @@ const enUS = {
   'home.localWorkspace': 'LOCAL WORKSPACE',
   'home.onDevice': 'RISH · ON DEVICE',
   'home.description':
-    'Run local harnesses, think, and keep their work on this device. DSH, Claude Code, and Codex are built in.',
+    'Built-in API adapters for DSH, Claude Code, Codex, and GLM. Model requests go to the selected service; files and conversations stay on this device.',
   'home.greeting.lateNight': 'A quiet hour to build something.',
   'home.greeting.morning': 'What should we move forward?',
   'home.greeting.afternoon': 'Let’s make the next step concrete.',
@@ -538,15 +538,19 @@ const enUS = {
   'harness.close': 'Close harnesses',
   'harness.eyebrow': 'RISH RUNTIME',
   'harness.title': 'Local harnesses',
+  'harness.adapter.dsh': 'Connects to DeepSeek through its API.',
+  'harness.adapter.claude': 'Connects to Anthropic through the Messages API.',
+  'harness.adapter.codex': 'Connects to OpenAI through the Responses API.',
+  'harness.adapter.glm': 'Connects to Zhipu through its Anthropic-compatible Messages API.',
   'harness.description':
-    'Each harness declares its runtime, models, credentials, capabilities, and entrypoint. DSH, Claude Code, and Codex are built in.',
+    'DSH, Claude Code, Codex, and GLM connect through built-in API adapters, not installed official CLIs. Model requests go to the selected service; files and conversations stay on this device.',
   'harness.builtin': 'Built in',
   'harness.selected': 'Current harness',
   'harness.use': 'Use {harness}',
   'harness.manifestTitle': 'Harness manifest v1',
   'harness.manifestDescription':
     'The registry accepts native adapters or rish-guest entrypoints. Local manifest import becomes available with the persistent guest.',
-  'harness.runtime.native': 'Native adapter',
+  'harness.runtime.native': 'API adapter',
   'harness.runtime.guest': 'rish guest',
 
   'runtime.close': 'Close runtime evidence',
@@ -922,7 +926,7 @@ const zhCN: Readonly<Record<TranslationKey, string>> = {
   'home.localWorkspace': '本地工作区',
   'home.onDevice': 'RISH · 在此设备运行',
   'home.description':
-    '在此设备运行本地 Harness、思考并保存工作。DSH、Claude Code 与 Codex 均已内置。',
+    '内置 DSH、Claude Code、Codex 和 GLM 的 API 接入适配器。模型请求发送至所选服务，文件与会话保存在设备上。',
   'home.greeting.lateNight': '安静的深夜，适合做点东西。',
   'home.greeting.morning': '今天想推进什么？',
   'home.greeting.afternoon': '把下一步变得具体。',
@@ -1376,15 +1380,19 @@ const zhCN: Readonly<Record<TranslationKey, string>> = {
   'harness.close': '关闭 Harness',
   'harness.eyebrow': 'RISH RUNTIME',
   'harness.title': '本地 Harness',
+  'harness.adapter.dsh': '通过 API 连接 DeepSeek。',
+  'harness.adapter.claude': '通过 Messages API 连接 Anthropic。',
+  'harness.adapter.codex': '通过 Responses API 连接 OpenAI。',
+  'harness.adapter.glm': '通过兼容 Anthropic Messages 的 API 连接智谱。',
   'harness.description':
-    '每个 Harness 声明自己的运行时、模型、凭证、能力和入口点；DSH、Claude Code 与 Codex 均已内置。',
+    'DSH、Claude Code、Codex 和 GLM 通过内置 API 适配器接入，并非在手机安装了官方 CLI。模型请求发送至所选服务，文件与会话保存在设备上。',
   'harness.builtin': '内置',
   'harness.selected': '当前 Harness',
   'harness.use': '使用 {harness}',
   'harness.manifestTitle': 'Harness Manifest v1',
   'harness.manifestDescription':
     'Registry 支持原生适配器或 rish-guest 入口；持久化 guest 挂载后开放本地 Manifest 导入。',
-  'harness.runtime.native': '原生适配器',
+  'harness.runtime.native': 'API 接入适配器',
   'harness.runtime.guest': 'rish guest',
 
   'runtime.close': '关闭运行证据',
