@@ -1564,7 +1564,13 @@ describe('AgentStoreTransitions', () => {
         result: revisionResult(2),
       })?.kind,
     ).toBe('prepare_agent_tool_batch');
-    for (const invalidBatchRevision of [1, 3]) {
+    for (const opaqueRevision of [1, 3, 7]) {
+      expect(validateAgentStoreTransition({
+        operation: 'prepare_agent_tool_batch', request: revisionRequest,
+        result: revisionResult(opaqueRevision),
+      })?.kind).toBe('prepare_agent_tool_batch');
+    }
+    for (const invalidBatchRevision of [0, -1, NaN, Infinity, Number.MAX_SAFE_INTEGER]) {
       expect(
         validateAgentStoreTransition({
           operation: 'prepare_agent_tool_batch',

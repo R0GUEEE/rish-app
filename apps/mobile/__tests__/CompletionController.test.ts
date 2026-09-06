@@ -1536,6 +1536,7 @@ describe('project Agent completion controller', () => {
   type AgentRuntimeFixtureOptions = {
     readonly batchRounds?: readonly (readonly AgentRuntimeFixtureCall[])[];
     readonly finalRoundIndex?: number;
+    readonly completedRoundRevision?: number;
     readonly finalReasoning?: string;
     readonly cancelledCallIds?: readonly string[];
     /** Adds git_push to the frozen root capabilities and registry. */
@@ -1635,7 +1636,7 @@ describe('project Agent completion controller', () => {
       const nextGeneration = request.transcript.generation + 1;
       const nextTranscript = transcript(
         nextGeneration,
-        final ? '9'.repeat(64) : `${nextGeneration}`.repeat(64),
+        final ? '9'.repeat(64) : nextGeneration.toString(16).slice(-1).repeat(64),
       );
       const completionReceipt: AgentRoundReceiptV2 = {
         schema_version: 2,
@@ -1678,7 +1679,7 @@ describe('project Agent completion controller', () => {
           round_id: request.round_id,
           round_index: request.round_index,
           launch_attempt: request.launch_attempt,
-          result_round_revision: 1,
+          result_round_revision: options.completedRoundRevision ?? 1,
           transcript: nextTranscript,
           outcome: {
             schema_version: 3,
@@ -1703,7 +1704,7 @@ describe('project Agent completion controller', () => {
         round_id: request.round_id,
         round_index: request.round_index,
         launch_attempt: request.launch_attempt,
-        result_round_revision: 1,
+        result_round_revision: options.completedRoundRevision ?? 1,
         transcript: nextTranscript,
         outcome: {
           schema_version: 3,
@@ -1731,12 +1732,17 @@ describe('project Agent completion controller', () => {
       };
     });
     let lastBatchTranscript: AgentRuntimeTranscriptHandleV1 | null = null;
+    let writeReservationRevision = 0;
+    const writeRevisions = new Map<string, number>();
     const prepareAgentToolBatch = jest.fn(async (request: PrepareAgentToolBatchRequestV2) => {
       operations.push(prepareAgentToolBatch);
       const callsForRound = options.batchRounds?.[request.round_index] ?? defaultBatchCalls;
       const hasMutation = callsForRound.some(call => call.name === 'write_file' || call.name === 'git_commit' || call.name === 'git_push');
+      if (hasMutation && !writeRevisions.has(request.operation_id)) {
+        writeRevisions.set(request.operation_id, ++writeReservationRevision);
+      }
       const batchRevision = hasMutation
-        ? request.expected_batch_revision + 1
+        ? writeRevisions.get(request.operation_id)!
         : request.expected_round_revision;
       const makeToken = (index: number, call: AgentRuntimeFixtureCall): AgentApprovalBindingTokenV2 => ({
         schema_version: 2,
@@ -1754,7 +1760,7 @@ describe('project Agent completion controller', () => {
         call_id: call.callId,
         name: call.name,
         arguments_sha256: call.argumentsSha256,
-        idempotency_key: `${request.round_index + index + 4}`.repeat(64),
+        idempotency_key: (request.round_index + index + 4).toString(16).slice(-1).repeat(64),
         root_fingerprint_sha256: ROOT_SHA,
         binding_revision: 1,
         policy_version: 'agent-v1',
@@ -1766,7 +1772,7 @@ describe('project Agent completion controller', () => {
       });
       const calls: AgentBatchCallProjectionV2[] = callsForRound.map((call, callIndex) => {
         const durableDeny = call.access === 'durable_deny';
-        const idempotencyKey = durableDeny ? null : `${request.round_index + callIndex + 4}`.repeat(64);
+        const idempotencyKey = durableDeny ? null : (request.round_index + callIndex + 4).toString(16).slice(-1).repeat(64);
         const deniedReceipt: AgentToolReceiptV1 | null = durableDeny
           ? {
               schema_version: 1,
@@ -1867,7 +1873,7 @@ describe('project Agent completion controller', () => {
             schema_version: 1 as const,
             transcript_ref: AGENT_TRANSCRIPT,
             generation: deniedGeneration,
-            transcript_sha256: `${deniedGeneration}`.repeat(64),
+            transcript_sha256: deniedGeneration.toString(16).slice(-1).repeat(64),
             transcript_bytes: deniedGeneration * 10,
           }
         : null;
@@ -1881,7 +1887,7 @@ describe('project Agent completion controller', () => {
       const cancelled = options.cancelledCallIds?.includes(request.call_id) === true;
       const receipt: AgentToolReceiptV1 = { schema_version: 1, call_id: request.call_id, name: request.name, arguments_sha256: request.arguments_sha256, result_sha256: `${request.call_index + 6}`.repeat(64), result_bytes: 1, truncated: false, duration_ms: 1, outcome: cancelled ? 'cancelled' : 'ok', failure_code: cancelled ? 'E_AGENT_CANCELLED' : null, approval_reference: request.approval_reference };
       const nextGeneration = request.transcript.generation + 1;
-      const commonResult = { operation_id: request.operation_id, task_id: request.task_id, attempt_id: request.attempt_id, round_id: request.round_id, round_index: request.round_index, call_index: request.call_index, call_id: request.call_id, name: request.name, idempotency_key: request.idempotency_key, result_execution_revision: request.expected_execution_revision + 3, transcript: { schema_version: 1 as const, transcript_ref: AGENT_TRANSCRIPT, generation: nextGeneration, transcript_sha256: `${nextGeneration}`.repeat(64), transcript_bytes: nextGeneration * 10 }, receipt };
+      const commonResult = { operation_id: request.operation_id, task_id: request.task_id, attempt_id: request.attempt_id, round_id: request.round_id, round_index: request.round_index, call_index: request.call_index, call_id: request.call_id, name: request.name, idempotency_key: request.idempotency_key, result_execution_revision: request.expected_execution_revision + 3, transcript: { schema_version: 1 as const, transcript_ref: AGENT_TRANSCRIPT, generation: nextGeneration, transcript_sha256: nextGeneration.toString(16).slice(-1).repeat(64), transcript_bytes: nextGeneration * 10 }, receipt };
       if (cancelled) {
         return { schema_version: 2, status: 'cancelled', ...commonResult, effect_may_have_occurred: false };
       }
@@ -2845,6 +2851,28 @@ describe('project Agent completion controller', () => {
     expect(executeRequests.map(request => request.expected_batch_revision)).toEqual([1, 1, 2]);
     expect(executeRequests.every(request => request.manifest_sha256 === MANIFEST_SHA)).toBe(true);
     expect(batchResults.map(resultValue => resultValue.receipt.batch_revision)).toEqual([1, 2]);
+  });
+
+  test('accepts opaque native batch revisions across read-read-write-read-write rounds', async () => {
+    const store = agentStore();
+    const conversationId = store.getState().selectedConversationId!;
+    const batchRounds: readonly (readonly AgentRuntimeFixtureCall[])[] = [
+      [{callId: 'read-0', name: 'read_file', argumentsSha256: '1'.repeat(64), access: 'auto'}],
+      [{callId: 'read-1', name: 'read_file', argumentsSha256: '2'.repeat(64), access: 'auto'}],
+      [{callId: 'write-2', name: 'write_file', argumentsSha256: '3'.repeat(64), access: 'conversation_confirm'}],
+      [{callId: 'read-3', name: 'read_file', argumentsSha256: '4'.repeat(64), access: 'auto'}],
+      [{callId: 'write-4', name: 'write_file', argumentsSha256: '5'.repeat(64), access: 'conversation_confirm'}],
+    ];
+    const runtime = makeRuntime([], {batchRounds, finalRoundIndex: 5, completedRoundRevision: 3});
+    const ids = Array.from({length: 128}, (_, index) => `00000000-0000-4000-8000-${(index + 1).toString(16).padStart(12, '0')}`);
+    const controller = agentController(store, runtime, committedPersistence(store), [...IDS, ...ids]);
+    const result = await controller.send({conversationId, text: 'read then write repeatedly', attachments: []});
+    expect(result.status).toBe('completed');
+    const prepares = (runtime.prepareAgentToolBatch as jest.Mock).mock.calls.map(call => call[0]);
+    expect(prepares.map(request => request.expected_batch_revision)).toEqual([0, 3, 3, 1, 3]);
+    const executions = (runtime.executeAgentTool as jest.Mock).mock.calls.map(call => call[0]);
+    expect(executions.map(request => request.expected_batch_revision)).toEqual([3, 3, 1, 3, 2]);
+    expect(runtime.completeAgentRoundV2).toHaveBeenCalledTimes(6);
   });
 
   test('uses batch authority for a mixed auto and write batch', async () => {

@@ -1445,9 +1445,12 @@ function validateBatchReceipt(value: unknown, request: PrepareAgentToolBatchRequ
   const transcript = validateTranscript(raw.transcript);
   const calls = arrayValue(raw.calls, 16)?.map(validateBatchCall);
   if (transcript === null || calls === undefined || calls.length < 1 || calls.some(call => call === null) || calls.some((call, index) => call!.call_index !== index)) return null;
-  if (raw.batch_kind === 'read_only_batch'
-      ? raw.batch_revision !== request.expected_round_revision
-      : raw.batch_revision !== request.expected_batch_revision + 1) return null;
+  // Read-only batches use the round revision; writes use the independent
+  // native reservation revision. Crossing from reads to writes may decrease
+  // the value. Native validates the prior authority atomically; here bind the
+  // returned positive authority to the exact receipt/token/CAS below.
+  if (raw.batch_kind === 'read_only_batch' &&
+      raw.batch_revision !== request.expected_round_revision) return null;
   if (!transcriptRelation(request.transcript, transcript)) return null;
   for (const call of calls as AgentBatchCallProjectionV2[]) {
     if (!rootCanUse(request.root, call.name)) return null;
