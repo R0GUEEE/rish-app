@@ -9886,3 +9886,29 @@ test('Files registration remains reusable by the subsequent project chat action'
   await act(async () => { jest.advanceTimersByTime(300); await settle(); });
   await act(async () => renderer.unmount());
 });
+
+test('keeps a new project binding alive when native resolution yields across the conversation selection effect', async () => {
+  jest.useFakeTimers();
+  mockLocalWorkspaces.list.mockImplementation(async () => ({
+    schema_version: 1,
+    workspaces: bootstrappedLegacyProjectId === null ? [] : [appWorkspaceDescriptor(CONTEXT_RUNTIME_ID)],
+  }));
+  const originalResolve = mockLocalWorkspaces.resolve.getMockImplementation()!;
+  mockLocalWorkspaces.resolve.mockImplementation(async request => {
+    await new Promise<void>(resolve => setTimeout(resolve, 1));
+    return originalResolve(request);
+  });
+  const renderer = await renderApp();
+  await openProjectsSurface(renderer.root);
+  let opening!: Promise<void>;
+  await act(async () => {
+    opening = renderer.root.findByType(ProjectsSurface).props.onChatInProject(contextProject);
+    await settle();
+  });
+  for (let index = 0; index < 40; index += 1) {
+    await act(async () => { jest.advanceTimersByTime(1); await settle(); });
+  }
+  await act(async () => { await opening; await settle(); });
+  expect(lastPersistedState().conversations.some(conversation => conversation.project_id === contextProject.id)).toBe(true);
+  await act(async () => { jest.advanceTimersByTime(300); await settle(); renderer.unmount(); });
+});

@@ -2048,7 +2048,10 @@ export function HomeScreen({
   useEffect(() => {
     const previous = workspaceOwnerConversationRef.current;
     const current = activeConversation?.id ?? null;
-    if (previous !== null && previous !== current) {
+    if (
+      previous !== null && previous !== current &&
+      (current === null || workspaceBindingController.getState().conversationId !== current)
+    ) {
       workspaceBindingController.invalidate();
     }
     workspaceOwnerConversationRef.current = current;
@@ -2064,7 +2067,12 @@ export function HomeScreen({
       return;
     }
     workspaceSurfaceNonceRef.current += 1;
-    workspaceBindingController.invalidate();
+    if (
+      activeConversation?.id == null ||
+      workspaceBindingController.getState().conversationId !== activeConversation.id
+    ) {
+      workspaceBindingController.invalidate();
+    }
     workspaceVisibleRef.current = false;
     setWorkspaceVisible(false);
     setWorkspaceRoute(null);
