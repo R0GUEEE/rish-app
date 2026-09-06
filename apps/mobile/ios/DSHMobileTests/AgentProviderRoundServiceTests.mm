@@ -1354,6 +1354,17 @@ static NSDictionary *DSHProviderSmokeQueryRequest(NSDictionary *root,
   [NSFileManager.defaultManager removeItemAtURL:fixture.walRoot error:nil];
 }
 
+- (void)testMissingContextBundlePreservesStorageFailure {
+  NSError *original = [NSError errorWithDomain:@"dev.zseven.rish.project-context-service" code:6 userInfo:nil];
+  NSError *error = original;
+  NSDictionary *receipt = nil;
+  NSArray *messages = nil;
+  XCTAssertFalse(DSHProviderContextBundle(nil, DSHProviderSmokeDigest, &receipt, &messages, &error));
+  XCTAssertEqual(error, original);
+  XCTAssertNil(receipt);
+  XCTAssertNil(messages);
+}
+
 - (void)testSchema3ContextBundleDigestMustMatchFrozenRequest {
   NSDictionary *receipt = @{
     @"schema_version" : @1,

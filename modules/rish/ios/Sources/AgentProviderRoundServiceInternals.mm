@@ -486,6 +486,7 @@ BOOL DSHProviderContextBundle(NSDictionary *bundle,
                                      NSDictionary **receiptOut,
                                      NSArray **messagesOut,
                                      NSError **error) {
+  if (bundle == nil && error != nullptr && *error != nil) return NO;
   if (!DSHAgentExactDictionaryKeys(bundle, @[
         @"project_context_sha256", @"receipt", @"messages",
       ]) ||

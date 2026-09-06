@@ -178,8 +178,13 @@ static NSDictionary *DSHRuntimeContextBundle(
       conversationId:context[@"runtime_context_id"]
       modelId:authority[@"model"] policy:context[@"policy"]
       receipt:&receipt error:error];
-  NSString *content = envelope == nil ? nil :
-      [[NSString alloc] initWithData:envelope encoding:NSUTF8StringEncoding];
+  if (envelope == nil) {
+    if (error != nullptr && *error == nil) {
+      DSHSetAgentNativeStoreError(error, DSHAgentNativeStoreErrorConflict);
+    }
+    return nil;
+  }
+  NSString *content = [[NSString alloc] initWithData:envelope encoding:NSUTF8StringEncoding];
   if (content == nil || ![context[@"context_bytes"] isEqual:@(envelope.length)] ||
       ![receipt[@"snapshot_sha256"] isEqual:context[@"snapshot_sha256"]] ||
       ![receipt[@"source_fingerprint"] isEqual:context[@"source_fingerprint"]]) {
@@ -201,6 +206,23 @@ static NSDictionary *DSHRuntimeContextBundle(
 }
 
 static NSString *DSHRuntimeErrorCode(NSError *error) {
+  // Context-service error numbers are a different enum from Agent WAL errors.
+  // Preserve value-free provenance rather than reporting storage as bad args.
+  if ([error.domain isEqual:DSHProjectContextServiceErrorDomain]) {
+    switch ((DSHProjectContextServiceErrorCode)error.code) {
+      case DSHProjectContextServiceErrorInvalidArgument: return @"E_CONTEXT_REQUEST_INVALID";
+      case DSHProjectContextServiceErrorProjectUnavailable: return @"E_PROJECT_NOT_FOUND";
+      case DSHProjectContextServiceErrorChanged: return @"E_CONTEXT_CHANGED";
+      case DSHProjectContextServiceErrorSecret: return @"E_CONTEXT_SECRET";
+      case DSHProjectContextServiceErrorBudgetExceeded: return @"E_CONTEXT_BUDGET";
+      case DSHProjectContextServiceErrorStorage: return @"E_CONTEXT_STORAGE";
+      case DSHProjectContextServiceErrorTimeout: return @"E_CONTEXT_TIMEOUT";
+      case DSHProjectContextServiceErrorConsent: return @"E_CONTEXT_CONSENT_INVALID";
+      case DSHProjectContextServiceErrorIntegrity: return @"E_CONTEXT_INTEGRITY";
+      case DSHProjectContextServiceErrorSnapshotMissing: return @"E_CONTEXT_SNAPSHOT_MISSING";
+    }
+    return @"E_CONTEXT_NATIVE";
+  }
   id candidate = error.userInfo[@"code"];
   if ([candidate isKindOfClass:NSString.class] &&
       DSHAgentFailureCode(candidate)) return candidate;

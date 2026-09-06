@@ -67,6 +67,8 @@ test.each(['en-US', 'zh-CN'] as const)(
 test('recovery distinguishes protection, permission, download and persistence without guessing unknown causes', () => {
   const t = createTranslator('zh-CN');
   expect(recoveryMessage('E_SESSION_PROTECTION', t)).toContain('解锁');
+  expect(recoveryMessage('E_CONTEXT_STORAGE', t)).toContain('解锁');
+  expect(recoveryMessage('E_CONTEXT_CONSENT_INVALID', t)).toContain('重新确认');
   expect(recoveryMessage('E_WORKSPACE_REVOKED', t)).toContain('重新授权');
   expect(recoveryMessage('E_WORKSPACE_NOT_DOWNLOADED', t)).toContain('下载');
   expect(recoveryMessage('E_AGENT_PERSISTENCE', t)).toContain('保存');

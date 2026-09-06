@@ -1,6 +1,8 @@
 import type { ResolvedLocale } from './types';
 
 const enUS = {
+  'recovery.contextStorage': 'Project context cannot be read right now. Unlock the device, then refresh the project context before retrying.',
+  'recovery.contextRefresh': 'Project context is missing or has changed. Refresh it and confirm the files again before retrying.',
   'recovery.eventCapacity': 'There is not enough audit storage for another tool task. Remove conversations you no longer need before retrying. Existing records have been kept.',
   'recovery.save': "Saving the latest conversation state could not be confirmed. Use Retry save when available.",
   'recovery.bindingSave': "Saving the workspace selection could not be confirmed. Retry saving the selection.",
@@ -879,6 +881,8 @@ export type Translator = (
 ) => string;
 
 const zhCN: Readonly<Record<TranslationKey, string>> = {
+  'recovery.contextStorage': '暂时无法读取项目上下文。请解锁设备，再刷新项目上下文后重试。',
+  'recovery.contextRefresh': '项目上下文缺失或已变化，请刷新并重新确认文件后重试。',
   'recovery.eventCapacity': '审计存储不足以启动新的工具任务。请清理不再需要的会话后重试，现有记录已保留。',
   'recovery.save': "无法确认最新会话状态已保存。可重试时，请点“重试保存”。",
   'recovery.bindingSave': "无法确认工作区选择已保存，请重试保存选择。",

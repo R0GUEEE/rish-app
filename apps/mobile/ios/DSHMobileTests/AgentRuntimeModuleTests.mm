@@ -429,6 +429,23 @@ DSH_RECORD(queryAgentCleanup)
   [self waitForExpectations:@[done] timeout:2];
 }
 
+- (void)testContextStorageErrorKeepsItsDomainAndDoesNotLeakDescription {
+  DSHRecordingRuntimeCoordinator *coordinator = [[DSHRecordingRuntimeCoordinator alloc] init];
+  coordinator.error = [NSError errorWithDomain:@"dev.zseven.rish.project-context-service" code:6
+      userInfo:@{NSLocalizedDescriptionKey: @"private context path"}];
+  id module = [self moduleWithCoordinator:coordinator];
+  XCTestExpectation *done = [self expectationWithDescription:@"context rejected"];
+  [self invokeModule:module selector:NSSelectorFromString(@"completeAgentRoundV2Request:resolver:rejecter:")
+      request:@{@"schema_version": @2} resolve:^(__unused id value) { XCTFail(@"resolved"); }
+      reject:^(NSString *code, NSString *message, NSError *error) {
+        XCTAssertEqualObjects(code, @"E_CONTEXT_STORAGE");
+        XCTAssertEqualObjects(message, code);
+        XCTAssertNil(error);
+        [done fulfill];
+      }];
+  [self waitForExpectations:@[done] timeout:2];
+}
+
 - (void)testCoordinatorRequiresOneWALDomainAndAllHighLevelServices {
   DSHAgentNativeWAL *wal = [[DSHAgentNativeWAL alloc]
       initWithRootURL:self.rootURL clock:^NSDate * { return NSDate.date; }
