@@ -2060,6 +2060,61 @@ static NSString *const DSHSessionTestOperationB =
   XCTAssertEqualObjects(result[@"status"], @"committed");
 }
 
+- (void)testRetainedAgentEventsBeyond512CommitWithoutDroppingHistory {
+  NSDictionary *fixture = [self sharedFixtureNamed:@"agent-next-round-after-tool-session"];
+  NSMutableDictionary *candidate = [fixture mutableCopy];
+  NSMutableArray *conversations = [NSMutableArray array];
+  NSMutableArray *events = [NSMutableArray array];
+  NSString *source = [self jsonForCandidate:fixture];
+  NSRegularExpression *uuidPattern = [NSRegularExpression regularExpressionWithPattern:
+      @"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}" options:0 error:nil];
+  for (NSUInteger copy = 0; copy < 40; copy++) {
+    NSMutableDictionary *ids = [NSMutableDictionary dictionary];
+    NSString *text = source;
+    for (NSTextCheckingResult *match in [uuidPattern matchesInString:source options:0 range:NSMakeRange(0, source.length)]) {
+      NSString *old = [source substringWithRange:match.range];
+      if (ids[old] == nil) {
+        ids[old] = [NSString stringWithFormat:@"%08lx-1111-4111-8111-%012lx", (unsigned long)(copy + 1), (unsigned long)(ids.count + 1)];
+        text = [text stringByReplacingOccurrencesOfString:old withString:ids[old]];
+      }
+    }
+    NSDictionary *cloned = [NSJSONSerialization JSONObjectWithData:[text dataUsingEncoding:NSUTF8StringEncoding] options:NSJSONReadingMutableContainers error:nil];
+    for (NSMutableDictionary *conversation in cloned[@"conversations"]) {
+      for (NSMutableDictionary *attempt in conversation[@"attempts"]) {
+        for (NSMutableDictionary *round in attempt[@"rounds"]) {
+          round[@"provider_response_id"] = [NSString stringWithFormat:@"%@-%lu", round[@"provider_response_id"], (unsigned long)copy];
+        }
+      }
+    }
+    [conversations addObjectsFromArray:cloned[@"conversations"]];
+    [events addObjectsFromArray:cloned[@"session_events"]];
+  }
+  candidate[@"conversations"] = conversations;
+  candidate[@"session_events"] = events;
+  candidate[@"active_conversation_id"] = conversations[0][@"id"];
+  candidate[@"messages"] = conversations[0][@"messages"];
+  XCTAssertGreaterThan(events.count, 512U);
+  NSError *error = nil;
+  NSDictionary *result = [self casWithOperation:DSHSessionTestOperationA
+      expected:@{ @"schema_version": @1, @"kind": @"missing" }
+      candidate:candidate error:&error];
+  XCTAssertNil(error);
+  XCTAssertEqualObjects(result[@"status"], @"committed");
+}
+
+- (void)testRetainedAgentEventLimitStillRejectsOversizedCandidates {
+  NSMutableDictionary *candidate = [self mutableSharedFixtureNamed:@"agent-next-round-after-tool-session"];
+  NSDictionary *event = candidate[@"session_events"][0];
+  NSMutableArray *events = [NSMutableArray array];
+  for (NSUInteger index = 0; index < 8193; index++) [events addObject:event];
+  candidate[@"session_events"] = events;
+  NSError *error = nil;
+  XCTAssertNil(([self casWithOperation:DSHSessionTestOperationA
+      expected:@{ @"schema_version": @1, @"kind": @"missing" }
+      candidate:candidate error:&error]));
+  XCTAssertEqual(error.code, DSHSessionSnapshotStoreErrorInvalidArgument);
+}
+
 - (void)testSharedJSInterruptedRecoveryFixtureCommitsThroughNativeStore {
   NSDictionary *candidate =
       [self sharedFixtureNamed:@"agent-interrupted-recovery-session"];

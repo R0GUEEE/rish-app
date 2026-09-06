@@ -3,6 +3,7 @@ import type { TranslationKey, Translator } from '../preferences';
 const reasons: Readonly<Record<string, TranslationKey>> = {
   E_ATTEMPT_PERSISTENCE: 'recovery.save',
   E_AGENT_PERSISTENCE: 'recovery.save',
+  E_AGENT_EVENT_CAPACITY: 'recovery.eventCapacity',
   E_WORKSPACE_PERSISTENCE: 'recovery.bindingSave',
   E_SESSION_PROTECTION: 'recovery.locked',
   E_ATTEMPT_INTERRUPTED: 'recovery.interrupted',

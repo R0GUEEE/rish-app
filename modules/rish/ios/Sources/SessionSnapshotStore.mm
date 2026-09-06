@@ -37,10 +37,11 @@ static const NSUInteger DSHSessionSnapshotMaximumBytes = 16U * 1024U * 1024U;
 static const NSUInteger DSHSessionSnapshotMaximumCanonicalBytes =
     16U * 1024U * 1024U;
 static const NSUInteger DSHSessionSnapshotMaximumJSONDepth = 64U;
-static const NSUInteger DSHSessionSnapshotMaximumJSONNodes = 30000U;
+static const NSUInteger DSHSessionSnapshotMaximumEvents = 8192U;
+// Match SessionPersistence.ts; byte/depth limits stay unchanged.
+static const NSUInteger DSHSessionSnapshotMaximumJSONNodes = 250000U;
 static const NSUInteger DSHSessionSnapshotMaximumTombstoneJSONNodes = 450000U;
 static const NSUInteger DSHSessionSnapshotMaximumRecentCommits = 64U;
-static const NSUInteger DSHSessionSnapshotMaximumEvents = 512U;
 static const NSUInteger DSHSessionSnapshotMaximumOutbox = 16U;
 static const NSUInteger DSHSessionSnapshotMaximumCleanup = 64U;
 static const unsigned long long DSHSessionSnapshotMaximumSafeInteger =
@@ -339,7 +340,7 @@ static BOOL DSHSessionValidAgentFailureCode(id value) {
       @"E_AGENT_APPROVAL", @"E_AGENT_TRANSCRIPT", @"E_AGENT_LEDGER",
       @"E_AGENT_ROUND_AMBIGUOUS", @"E_AGENT_EXECUTION_AMBIGUOUS",
       @"E_AGENT_RETRY_LINEAGE", @"E_AGENT_PERSISTENCE", @"E_AGENT_CONFLICT",
-      @"E_AGENT_ROUND_LIMIT", @"E_AGENT_CANCELLED", @"E_AGENT_TOOL_FAILED",
+      @"E_AGENT_EVENT_CAPACITY", @"E_AGENT_ROUND_LIMIT", @"E_AGENT_CANCELLED", @"E_AGENT_TOOL_FAILED",
       @"E_AGENT_DENIED_BY_USER",
     ]];
   });

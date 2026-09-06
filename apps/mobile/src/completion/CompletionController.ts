@@ -57,6 +57,8 @@ import type {
 import type { HarnessId } from '../harness/types';
 import {
   ATTEMPT_FAILURE_CODES,
+  MAX_SESSION_EVENT_ROWS,
+  AGENT_EVENT_START_RESERVE,
   type AgentCheckpointTransaction,
   type AgentCleanupAcknowledgementTransaction,
   type AgentApprovalDecision,
@@ -3860,6 +3862,11 @@ export function createCompletionController(
           conversation.projectId !== null ||
           conversation.workspaceBinding !== null);
       if (agentEligible) {
+        if (attempt.agent == null &&
+            (dependencies.chat.getState().sessionEvents?.length ?? 0) + AGENT_EVENT_START_RESERVE > MAX_SESSION_EVENT_ROWS) {
+          publish(stateFor('blocked', { conversationId, turnId, attemptId, failureCode: 'E_AGENT_EVENT_CAPACITY' }));
+          return outcome('blocked', state);
+        }
         return await runAgentPrepared(
           conversationId,
           turnId,
@@ -4606,6 +4613,18 @@ export function createCompletionController(
         state.phase === 'resume_available'
       ) {
         return busyOutcome(input.conversationId, null);
+      }
+      const startState = dependencies.chat.getState();
+      const startConversation = startState.conversations[input.conversationId];
+      if (
+        agentRuntime !== undefined && agentAvailable() &&
+        input.sendWithoutProjectContext !== true && startConversation !== undefined &&
+        (startConversation.workspaceId !== null || startConversation.projectId !== null ||
+          startConversation.workspaceBinding != null) &&
+        (startState.sessionEvents?.length ?? 0) + AGENT_EVENT_START_RESERVE > MAX_SESSION_EVENT_ROWS
+      ) {
+        publish(stateFor('blocked', { conversationId: input.conversationId, failureCode: 'E_AGENT_EVENT_CAPACITY' }));
+        return outcome('blocked', state);
       }
       epoch += 1;
       const runEpoch = epoch;

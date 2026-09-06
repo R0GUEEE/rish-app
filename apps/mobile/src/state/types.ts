@@ -60,7 +60,10 @@ export const MAX_AGENT_ROUNDS = 8 as const;
 export const MAX_AGENT_CALLS_PER_BATCH = 16 as const;
 export const MAX_AGENT_GRANTS_PER_CONVERSATION = 2 as const;
 export const MAX_AGENT_CLEANUP_OUTBOX_ENTRIES = 64 as const;
-export const MAX_SESSION_EVENT_ROWS = 512 as const;
+// App-wide retained audit rows, not the per-attempt execution budget.
+export const MAX_SESSION_EVENT_ROWS = 8192 as const;
+// 8 rounds x 16 calls plus approval/execution/result/recovery bookkeeping.
+export const AGENT_EVENT_START_RESERVE = 1024 as const;
 export const MAX_AGENT_SINGLE_WRITE_BYTES = 32768 as const;
 export const MAX_AGENT_BATCH_WRITE_BYTES = 512 * 1024;
 export const MAX_AGENT_ATTEMPT_WRITE_BYTES = 4 * 1024 * 1024;
@@ -208,6 +211,7 @@ export const ATTEMPT_FAILURE_CODES = [
   'E_AGENT_EXECUTION_AMBIGUOUS',
   'E_AGENT_RETRY_LINEAGE',
   'E_AGENT_PERSISTENCE',
+  'E_AGENT_EVENT_CAPACITY',
   'E_AGENT_CONFLICT',
   'E_AGENT_ROUND_LIMIT',
   'E_AGENT_CANCELLED',

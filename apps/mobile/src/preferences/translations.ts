@@ -1,6 +1,7 @@
 import type { ResolvedLocale } from './types';
 
 const enUS = {
+  'recovery.eventCapacity': 'There is not enough audit storage for another tool task. Remove conversations you no longer need before retrying. Existing records have been kept.',
   'recovery.save': "Saving the latest conversation state could not be confirmed. Use Retry save when available.",
   'recovery.bindingSave': "Saving the workspace selection could not be confirmed. Retry saving the selection.",
   'recovery.locked': "Device protection is preventing access to local data. Unlock the device, then retry the available action.",
@@ -878,6 +879,7 @@ export type Translator = (
 ) => string;
 
 const zhCN: Readonly<Record<TranslationKey, string>> = {
+  'recovery.eventCapacity': '审计存储不足以启动新的工具任务。请清理不再需要的会话后重试，现有记录已保留。',
   'recovery.save': "无法确认最新会话状态已保存。可重试时，请点“重试保存”。",
   'recovery.bindingSave': "无法确认工作区选择已保存，请重试保存选择。",
   'recovery.locked': "设备保护暂时阻止了本地数据访问。请解锁设备，再重试当前可用的操作。",
