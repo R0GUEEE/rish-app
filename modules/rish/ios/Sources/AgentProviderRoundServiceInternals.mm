@@ -596,7 +596,9 @@ NSArray *DSHProviderToolsForAuthority(
     [raw addObject:@{
       @"type" : @"function",
       @"name" : native[@"name"],
-      @"description" : native[@"safe_summary_key"],
+      @"description" : [native[@"name"] isEqual:@"write_file"]
+          ? @"Write a UTF-8 file. For a new file, expected_revision must be JSON null, not the string \"null\". For an existing file, first read_file and pass its exact revision string."
+          : native[@"safe_summary_key"],
       @"parameters" : native[@"parameters"],
     }];
   }

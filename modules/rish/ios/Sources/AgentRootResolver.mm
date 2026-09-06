@@ -665,6 +665,13 @@ static NSArray<NSString *> *DSHAgentCapabilitiesForWorkspace(
       return YES;
     }
     if (disposition == DSHLegacyBoundProjectRootDispositionFailed) {
+      // The adapter revalidates root identity after the callback. Its own
+      // failures describe the root; an Agent-domain failure belongs to the
+      // tool callback (for example a file revision conflict) and must survive.
+      if ([legacyError.domain isEqual:DSHAgentNativeStoreErrorDomain]) {
+        if (error != nullptr) *error = legacyError;
+        return NO;
+      }
       DSHSetRootError(error,
           legacyError.code == DSHLegacyBoundProjectRootAccessErrorInvalid
               ? DSHAgentNativeStoreErrorInvalidArgument

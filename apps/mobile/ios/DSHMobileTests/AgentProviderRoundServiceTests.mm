@@ -1069,6 +1069,8 @@ static NSDictionary *DSHProviderSmokeQueryRequest(NSDictionary *root,
     }
   }
   XCTAssertNotNil(writeFunction);
+  XCTAssertTrue([writeFunction[@"description"] containsString:@"JSON null"]);
+  XCTAssertTrue([writeFunction[@"description"] containsString:@"exact revision"]);
   XCTAssertEqualObjects(writeFunction[@"parameters"][@"properties"]
                              [@"expected_revision"][@"type"],
                         (@[ @"string", @"null" ]));

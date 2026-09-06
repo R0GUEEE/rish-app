@@ -3,6 +3,7 @@
 #import "../../../../modules/rish/ios/Sources/LegacyBoundProjectRootAccess.h"
 #import "../../../../modules/rish/ios/Sources/AgentGitToolExecutor.h"
 #import "../../../../modules/rish/ios/Sources/AgentRootResolver.h"
+#import "../../../../modules/rish/ios/Sources/AgentNativeWAL.h"
 #import "../../../../modules/rish/ios/Sources/AgentWorkspaceToolExecutor.h"
 
 #include <fcntl.h>
@@ -336,6 +337,30 @@ static NSString *const DSHLegacyAdapterOperation =
         @"mode=%@ error=%@", mode, error);
     XCTAssertTrue(ran);
   }
+}
+
+- (void)testAgentRevisionConflictDoesNotBecomeRootStale {
+  DSHAgentRootResolver *resolver = [[DSHAgentRootResolver alloc]
+      initWithWorkspaceAccess:self.workspaceAccess projectAccess:self.projectAccess];
+  NSError *error = nil;
+  NSDictionary *root = [resolver resolveRootForWorkspaceId:DSHLegacyAdapterWorkspace
+      projectId:DSHLegacyAdapterProject bindingRevision:@1 error:&error];
+  DSHAgentWorkspaceToolExecutor *executor =
+      [[DSHAgentWorkspaceToolExecutor alloc] initWithRootResolver:resolver];
+  NSDictionary *invalid = @{
+    @"path": @"new-file.txt", @"content": @"test\n", @"expected_revision": @"null",
+  };
+  XCTAssertNil([executor prepareToolNamed:@"write_file" arguments:invalid root:root error:&error]);
+  XCTAssertEqualObjects(error.domain, DSHAgentNativeStoreErrorDomain);
+  XCTAssertEqual(error.code, DSHAgentNativeStoreErrorConflict);
+  XCTAssertFalse([NSFileManager.defaultManager fileExistsAtPath:
+      [self.repositoryURL URLByAppendingPathComponent:@"new-file.txt"].path]);
+  error = nil;
+  XCTAssertTrue([resolver validateFrozenRoot:root error:&error]);
+  NSMutableDictionary *valid = [invalid mutableCopy];
+  valid[@"expected_revision"] = NSNull.null;
+  XCTAssertNotNil([executor prepareToolNamed:@"write_file" arguments:valid root:root error:&error]);
+  XCTAssertNil(error);
 }
 
 - (void)testVerifiedLegacyRootRunsFileWriteStatusAndCommitEndToEnd {
