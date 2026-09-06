@@ -535,15 +535,18 @@ RCT_EXPORT_MODULE(LocalWorkspace)
 + (BOOL)requiresMainQueueSetup { return NO; }
 
 - (instancetype)init {
+  NSError *error = nil;
+  NSURL *support = [NSFileManager.defaultManager URLForDirectory:NSApplicationSupportDirectory
+    inDomain:NSUserDomainMask appropriateForURL:nil create:YES error:&error];
+  return [self initWithSupportURL:support
+             legacyProjectAccess:[DSHLocalProjectAccess sharedAccess]];
+}
+
+- (instancetype)initWithSupportURL:(NSURL *)support
+                legacyProjectAccess:(DSHLocalProjectAccess *)legacyAccess {
   self = [super init];
   if (self != nil) {
     _workspaceQueue = dispatch_queue_create("dev.zseven.rish.local-workspace-v2", DISPATCH_QUEUE_SERIAL);
-    NSError *error = nil;
-    NSURL *support = [[NSFileManager defaultManager] URLForDirectory:NSApplicationSupportDirectory
-                                                            inDomain:NSUserDomainMask
-                                                   appropriateForURL:nil
-                                                              create:YES
-                                                               error:&error];
     if (support != nil) {
       _access = [[DSHLocalWorkspaceAccess alloc]
           initWithPrivateRootURL:support
@@ -551,14 +554,21 @@ RCT_EXPORT_MODULE(LocalWorkspace)
           UUIDGenerator:^NSString *{ return NSUUID.UUID.UUIDString.lowercaseString; }
           legacyResolver:^BOOL(NSString *projectId, NSDictionary **evidence,
                                NSError **resolverError) {
-            (void)projectId;
-            if (evidence != nil) *evidence = nil;
-            if (resolverError != nil) *resolverError = LWError(DSHLocalWorkspaceAccessErrorUnavailable);
-            return NO;
+            NSError *projectError = nil;
+            NSDictionary *resolved = [legacyAccess
+                legacyWorkspaceBootstrapEvidenceForProjectId:projectId error:&projectError];
+            if (resolved == nil) {
+              if (evidence != nil) *evidence = nil;
+              if (resolverError != nil) *resolverError = projectError ?: LWError(DSHLocalWorkspaceAccessErrorUnavailable);
+              return NO;
+            }
+            if (evidence != nil) *evidence = [resolved copy];
+            return YES;
           }
           faultHook:nil];
       _projectAccess = [[DSHLocalProjectAccess alloc]
-          initWithWorkspaceAccess:_access hook:nil];
+          initWithProjectsRootURL:[legacyAccess projectsRootURLWithError:nil]
+                 workspaceAccess:_access hook:nil];
     }
   }
   return self;

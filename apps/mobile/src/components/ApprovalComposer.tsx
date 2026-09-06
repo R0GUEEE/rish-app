@@ -1,4 +1,4 @@
-import React, { useMemo, useState } from 'react';
+import React, { useMemo, useRef, useState } from 'react';
 import {
   Modal,
   Pressable,
@@ -12,6 +12,10 @@ import Check from 'lucide-react-native/icons/check';
 import X from 'lucide-react-native/icons/x';
 
 import type { ApprovalRequestSpec } from '../agent/AgentApprovals';
+import {
+  approvalMessageBudget,
+  MAX_APPROVAL_MESSAGE_BYTES,
+} from '../agent/approvalMessage';
 import type { AgentApprovalPreviewV1 } from '../native/AgentRuntime';
 import type { ApprovalScopeValue } from '../agent/SessionEvents';
 import { useAppPresentation } from '../presentation/AppPresentation';
@@ -35,8 +39,6 @@ type Props = {
 type ItemDecision =
   | { readonly kind: 'approve'; readonly scope: ApprovalScopeValue }
   | { readonly kind: 'deny'; readonly message: string };
-
-const MAX_DENY_MESSAGE_BYTES = 2000;
 
 function toolSummaryKey(name: string): string {
   switch (name) {
@@ -82,22 +84,52 @@ export function ApprovalComposer({ requests, onDecide }: Props) {
     },
   );
 
+  const decisionsRef = useRef(decisions);
+  decisionsRef.current = decisions;
+  const requestsRef = useRef(requests);
+  requestsRef.current = requests;
+  const requestKey = JSON.stringify(
+    requests.map(request => request.approvalId),
+  );
+  const invalidBatchItems = requests.flatMap((request, index) => {
+    const decision = decisions[request.approvalId];
+    return decision?.kind === 'deny' &&
+      !approvalMessageBudget(decision.message).valid
+      ? [index + 1]
+      : [];
+  });
+  const invalidBatch = invalidBatchItems.length > 0;
   const setDecision = (approvalId: string, decision: ItemDecision) => {
-    setDecisions(current => ({ ...current, [approvalId]: decision }));
+    decisionsRef.current = { ...decisionsRef.current, [approvalId]: decision };
+    setDecisions(decisionsRef.current);
   };
 
   const submitAll = () => {
+    if (
+      requestKey !==
+      JSON.stringify(requestsRef.current.map(request => request.approvalId))
+    )
+      return;
+    if (
+      requests.some(request => {
+        const decision = decisionsRef.current[request.approvalId];
+        return (
+          decision?.kind === 'deny' &&
+          !approvalMessageBudget(decision.message).valid
+        );
+      })
+    )
+      return;
     onDecide(
       requests.map(request => {
-        const decision = decisions[request.approvalId];
+        const decision = decisionsRef.current[request.approvalId];
         const approval: AgentApprovalDecisionInput =
           decision !== undefined && decision.kind === 'approve'
             ? { status: 'approved', scope: decision.scope }
             : {
                 status: 'denied',
-                ...(decision !== undefined &&
-                decision.message.trim().length > 0
-                  ? { message: decision.message.slice(0, MAX_DENY_MESSAGE_BYTES) }
+                ...(decision !== undefined && decision.message.trim().length > 0
+                  ? { message: decision.message }
                   : {}),
               };
         return { approvalId: request.approvalId, decision: approval };
@@ -109,10 +141,26 @@ export function ApprovalComposer({ requests, onDecide }: Props) {
     request: ApprovalRequestSpec,
     decision: AgentApprovalDecisionInput,
   ) => {
+    if (
+      requestsRef.current.length !== 1 ||
+      requestsRef.current[0]?.approvalId !== request.approvalId
+    )
+      return;
+    if (
+      decision.status === 'denied' &&
+      decision.message !== undefined &&
+      !approvalMessageBudget(decision.message).valid
+    )
+      return;
     onDecide([{ approvalId: request.approvalId, decision }]);
   };
 
   const closeAll = () => {
+    if (
+      requestKey !==
+      JSON.stringify(requestsRef.current.map(request => request.approvalId))
+    )
+      return;
     onDecide(
       requests.map(request => ({
         approvalId: request.approvalId,
@@ -181,6 +229,7 @@ export function ApprovalComposer({ requests, onDecide }: Props) {
               </ScrollView>
             ) : (
               <SingleItem
+                key={requests[0]?.approvalId}
                 colors={colors}
                 request={requests[0]}
                 styles={styles}
@@ -190,6 +239,14 @@ export function ApprovalComposer({ requests, onDecide }: Props) {
             )}
             {batch && (
               <>
+                {invalidBatch && (
+                  <Text accessibilityRole="alert" style={styles.messageError}>
+                    {t('agent.approvalBatchMessageInvalid', {
+                      calls: invalidBatchItems.join(', '),
+                      limit: MAX_APPROVAL_MESSAGE_BYTES,
+                    })}
+                  </Text>
+                )}
                 <Text style={styles.batchSummary}>
                   {t('agent.approvalBatchSummary', {
                     approved: approvedCount,
@@ -199,8 +256,11 @@ export function ApprovalComposer({ requests, onDecide }: Props) {
                 <Pressable
                   accessibilityRole="button"
                   onPress={submitAll}
+                  disabled={invalidBatch}
+                  accessibilityState={{ disabled: invalidBatch }}
                   style={({ pressed }) => [
                     styles.commitButton,
+                    invalidBatch && styles.disabled,
                     pressed && styles.pressed,
                   ]}
                   testID="approval-batch-commit"
@@ -242,10 +302,11 @@ function PreviewBlock({
           {preview.prior === null || preview.prior.kind === 'absent'
             ? t('agent.approvalPriorAbsent')
             : t('agent.approvalPriorKnown', {
-                bytes:
-                  preview.prior.bytes === null ? 0 : preview.prior.bytes,
+                bytes: preview.prior.bytes === null ? 0 : preview.prior.bytes,
               })}
-          {` · ${t('agent.approvalBytes', { bytes: preview.content_bytes ?? 0 })}`}
+          {` · ${t('agent.approvalBytes', {
+            bytes: preview.content_bytes ?? 0,
+          })}`}
         </Text>
         <Text style={styles.previewLabel}>{t('agent.approvalDiffTitle')}</Text>
         <DiffPreview preview={preview} styles={styles} t={t} />
@@ -339,10 +400,12 @@ function BatchItem({
   t: ComposerTranslator;
 }) {
   const [denyMessage, setDenyMessage] = useState('');
+  const denyMessageRef = useRef('');
   const current = decision ?? { kind: 'deny', message: '' };
   const approve = (value: ApprovalScopeValue) =>
     onDecision({ kind: 'approve', scope: value });
-  const deny = () => onDecision({ kind: 'deny', message: denyMessage });
+  const deny = () =>
+    onDecision({ kind: 'deny', message: denyMessageRef.current });
   return (
     <View style={styles.batchItem} testID={`approval-batch-item-${index}`}>
       <Text style={styles.itemIndex}>
@@ -426,9 +489,9 @@ function BatchItem({
         <View style={styles.denyMessageRow}>
           <TextInput
             accessibilityLabel={t('agent.approvalDenyWithMessage')}
-            maxLength={MAX_DENY_MESSAGE_BYTES}
             multiline
             onChangeText={value => {
+              denyMessageRef.current = value;
               setDenyMessage(value);
               onDecision({ kind: 'deny', message: value });
             }}
@@ -441,6 +504,7 @@ function BatchItem({
           <Text style={styles.denyHint}>
             {t('agent.approvalDenyMessageHint')}
           </Text>
+          <MessageBudget message={denyMessage} styles={styles} t={t} />
         </View>
       )}
     </View>
@@ -467,6 +531,7 @@ function SingleItem({
     request.scopes[0] ?? 'once',
   );
   const [denyMessage, setDenyMessage] = useState('');
+  const denyMessageRef = useRef('');
   return (
     <>
       <Text style={styles.toolName}>{request.toolName}</Text>
@@ -524,9 +589,11 @@ function SingleItem({
       </View>
       <TextInput
         accessibilityLabel={t('agent.approvalDenyWithMessage')}
-        maxLength={MAX_DENY_MESSAGE_BYTES}
         multiline
-        onChangeText={setDenyMessage}
+        onChangeText={value => {
+          denyMessageRef.current = value;
+          setDenyMessage(value);
+        }}
         placeholder={t('agent.approvalDenyMessagePlaceholder')}
         placeholderTextColor={colors.muted}
         style={styles.denyInput}
@@ -538,19 +605,25 @@ function SingleItem({
           {t('agent.approvalDenyMessageHint')}
         </Text>
       )}
+      <MessageBudget message={denyMessage} styles={styles} t={t} />
       <View style={styles.buttonRow}>
         <Pressable
           accessibilityRole="button"
-          onPress={() =>
+          disabled={!approvalMessageBudget(denyMessage).valid}
+          accessibilityState={{
+            disabled: !approvalMessageBudget(denyMessage).valid,
+          }}
+          onPress={() => {
+            const message = denyMessageRef.current;
+            if (!approvalMessageBudget(message).valid) return;
             onSubmit(request, {
               status: 'denied',
-              ...(denyMessage.trim().length > 0
-                ? { message: denyMessage }
-                : {}),
-            })
-          }
+              ...(message.trim().length > 0 ? { message } : {}),
+            });
+          }}
           style={({ pressed }) => [
             styles.denyButton,
+            !approvalMessageBudget(denyMessage).valid && styles.disabled,
             pressed && styles.pressed,
           ]}
           testID="approval-deny"
@@ -577,9 +650,51 @@ function SingleItem({
   );
 }
 
+function MessageBudget({
+  message,
+  styles,
+  t,
+}: {
+  message: string;
+  styles: ReturnType<typeof createStyles>;
+  t: ComposerTranslator;
+}) {
+  const budget = approvalMessageBudget(message);
+  if (message.length === 0) return null;
+  return (
+    <View>
+      {budget.bytes !== null && (
+        <Text style={styles.denyHint}>
+          {t('agent.approvalMessageBudget', {
+            used: budget.bytes,
+            limit: MAX_APPROVAL_MESSAGE_BYTES,
+          })}
+        </Text>
+      )}
+      {!budget.valid && (
+        <Text accessibilityRole="alert" style={styles.messageError}>
+          {t(
+            budget.bytes === null
+              ? 'agent.approvalMessageInvalid'
+              : 'agent.approvalMessageTooLong',
+            { limit: MAX_APPROVAL_MESSAGE_BYTES },
+          )}
+        </Text>
+      )}
+    </View>
+  );
+}
+
 const createStyles = (colors: ThemePalette) =>
   StyleSheet.create({
     overlay: { flex: 1 },
+    disabled: { opacity: 0.4 },
+    messageError: {
+      color: colors.danger,
+      fontSize: 11,
+      lineHeight: 16,
+      marginTop: 4,
+    },
     anchor: {
       flex: 1,
       justifyContent: 'flex-end',
@@ -676,7 +791,12 @@ const createStyles = (colors: ThemePalette) =>
       fontWeight: '800',
       letterSpacing: 1,
     },
-    itemActions: { flexDirection: 'row', flexWrap: 'wrap', gap: 6, marginTop: 8 },
+    itemActions: {
+      flexDirection: 'row',
+      flexWrap: 'wrap',
+      gap: 6,
+      marginTop: 8,
+    },
     itemApprove: {
       flexDirection: 'row',
       alignItems: 'center',

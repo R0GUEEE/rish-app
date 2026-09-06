@@ -1,7 +1,7 @@
 export type ProjectViewTask = {
   readonly epoch: number;
   readonly projectId: string | null;
-  readonly kind: 'list' | 'detail' | 'mutation' | 'push';
+  readonly kind: 'list' | 'detail' | 'mutation' | 'push' | 'diff' | 'files';
 };
 
 /** UI ownership only: invalidating a view does not cancel native effects. */

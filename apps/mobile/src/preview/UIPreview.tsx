@@ -1,6 +1,7 @@
-import React, { useState } from 'react';
-import { StyleSheet, Text, View } from 'react-native';
+import React, { useRef, useState } from 'react';
+import { Pressable, ScrollView, StyleSheet, Text, View } from 'react-native';
 
+import { MessageList, type DisplayMessage } from '../components/MessageList';
 import type { ApprovalRequestSpec } from '../agent/AgentApprovals';
 import { DEFAULT_APPROVAL_TIMEOUT_MS } from '../agent/AgentApprovals';
 import {
@@ -13,7 +14,7 @@ import type { AgentConversationGrantV2 } from '../state';
 
 /**
  * Launch-environment gated UI preview (DSH_UI_PREVIEW). It renders the
- * approval composer and the Agent policy panel with fixed display data so
+ * approval composer, message list and Agent policy panel with fixed display data so
  * simulator screenshots can be taken without a provider round. Nothing here
  * touches the store, native runtime, or persistence: every decision is
  * discarded, so the surface can never issue an approval or revoke a grant.
@@ -23,6 +24,7 @@ export const UI_PREVIEW_KINDS = [
   'approval-single',
   'approval-batch',
   'policy-panel',
+  'message-list',
 ] as const;
 
 export type UIPreviewKind = (typeof UI_PREVIEW_KINDS)[number];
@@ -100,13 +102,24 @@ export function UIPreview({ kind }: { kind: UIPreviewKind }) {
       style={[styles.root, { backgroundColor: colors.background }]}
       testID="ui-preview-root"
     >
-      <Text style={[styles.caption, { color: colors.muted }]} testID="ui-preview-caption">
+      <Text
+        style={[styles.caption, { color: colors.muted }]}
+        testID="ui-preview-caption"
+      >
         {decided ?? `preview:${kind}`}
       </Text>
-      {kind === 'policy-panel' ? (
+      {kind === 'message-list' ? (
+        <MessageListPreview />
+      ) : kind === 'policy-panel' ? (
         <AgentPolicySheet
           budget={AGENT_POLICY_DEFAULT_BUDGET}
-          capabilities={['file_read', 'file_write', 'git_status', 'git_commit', 'git_push']}
+          capabilities={[
+            'file_read',
+            'file_write',
+            'git_status',
+            'git_commit',
+            'git_push',
+          ]}
           grants={PREVIEW_GRANTS}
           revokeBusy={false}
           revokeFailed={null}
@@ -117,7 +130,11 @@ export function UIPreview({ kind }: { kind: UIPreviewKind }) {
         />
       ) : (
         <ApprovalComposer
-          requests={kind === 'approval-batch' ? [WRITE_REQUEST, COMMIT_REQUEST] : [WRITE_REQUEST]}
+          requests={
+            kind === 'approval-batch'
+              ? [WRITE_REQUEST, COMMIT_REQUEST]
+              : [WRITE_REQUEST]
+          }
           onDecide={decisions =>
             setDecided(
               decisions
@@ -127,6 +144,69 @@ export function UIPreview({ kind }: { kind: UIPreviewKind }) {
           }
         />
       )}
+    </View>
+  );
+}
+
+function MessageListPreview() {
+  const list = useRef<React.ComponentRef<typeof ScrollView>>(null);
+  const [revision, setRevision] = useState(0);
+  const [toolDone, setToolDone] = useState(false);
+  const messages: DisplayMessage[] = [
+    ...Array.from({ length: 20 }, (_, index): DisplayMessage => ({
+      id: `history-${index}`,
+      role: index % 2 === 0 ? 'user' : 'assistant',
+      text: `History ${index + 1}. This saved paragraph stays in place while new output arrives.\nA second line makes the reading position easy to verify.`,
+    })),
+    {
+      id: 'live',
+      role: 'assistant',
+      text: '',
+      blocks: [
+        {
+          id: 'stream',
+          type: 'text',
+          text: `Latest response — revision ${revision}.\n${'New streamed text. '.repeat(revision * 8 + 1)}`,
+        },
+        {
+          id: 'tool',
+          type: 'tool-call',
+          name: 'read_file',
+          arguments: '{"path":"notes.txt"}',
+          status: toolDone ? 'success' : 'running',
+        },
+      ],
+    },
+  ];
+  return (
+    <View style={{ flex: 1, alignSelf: 'stretch' }}>
+      <View
+        style={{
+          flexDirection: 'row',
+          justifyContent: 'space-around',
+          padding: 12,
+        }}
+      >
+        <Pressable
+          accessibilityRole="button"
+          onPress={() => list.current?.scrollTo({ y: 0, animated: false })}
+        >
+          <Text>Read history</Text>
+        </Pressable>
+        <Pressable
+          accessibilityRole="button"
+          onPress={() => setRevision(value => value + 1)}
+        >
+          <Text>Append stream</Text>
+        </Pressable>
+        <Pressable
+          accessibilityRole="button"
+          onPress={() => setToolDone(value => !value)}
+        >
+          <Text>Update tool</Text>
+        </Pressable>
+      </View>
+      <MessageList ref={list} messages={messages} autoExpandTools />
     </View>
   );
 }

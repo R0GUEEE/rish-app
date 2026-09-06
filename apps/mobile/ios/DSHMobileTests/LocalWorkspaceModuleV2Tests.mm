@@ -1,5 +1,6 @@
 #import <XCTest/XCTest.h>
 #import <React/RCTBridgeModule.h>
+#import "DSHTestStorageFixture.h"
 
 #import "../../../../modules/rish/ios/Sources/LocalProjectAccess.h"
 #import "../../../../modules/rish/ios/Sources/LocalWorkspaceAccess.h"
@@ -13,7 +14,14 @@
 @interface LocalWorkspaceModule : NSObject
 @end
 
+@interface LocalDocumentsModule : NSObject
+- (instancetype)initWithSupportURL:(NSURL *)support legacyProjectAccess:(DSHLocalProjectAccess *)legacyAccess;
+- (BOOL)performRoot:(NSDictionary *)root capabilities:(NSSet<NSString *> *)capabilities
+  block:(BOOL (^)(int, NSError **))block error:(NSError **)error;
+@end
+
 @interface LocalWorkspaceModule (FilesV2Testing)
+- (instancetype)initWithSupportURL:(NSURL *)support legacyProjectAccess:(DSHLocalProjectAccess *)legacyAccess;
 - (void)capabilitiesWithResolver:(RCTPromiseResolveBlock)resolve
                         rejecter:(RCTPromiseRejectBlock)reject;
 - (void)listV2Request:(id)request
@@ -602,6 +610,60 @@
   [self awaitCall:^(RCTPromiseResolveBlock resolve, RCTPromiseRejectBlock reject) {
     [self.module restoreFromTrashV2Request:restoreRequest resolver:resolve rejecter:reject];
   } expectedCode:nil];
+}
+
+
+- (void)testProductionFilesAndDocumentsInitializersResolveBootstrappedLegacyProject {
+  NSURL *base = DSHCreateTestStorageFixtureRoot(@"FilesLegacyInitialization", nil);
+  XCTAssertNotNil(base);
+  if (base == nil) return;
+  NSURL *support = [base URLByAppendingPathComponent:@"private" isDirectory:YES];
+  NSURL *projectsURL = [base URLByAppendingPathComponent:@"projects" isDirectory:YES];
+  NSString *projectId = NSUUID.UUID.UUIDString.lowercaseString;
+  NSURL *projectURL = [projectsURL URLByAppendingPathComponent:projectId isDirectory:YES];
+  NSURL *repoURL = [projectURL URLByAppendingPathComponent:@"repo" isDirectory:YES];
+  XCTAssertTrue([NSFileManager.defaultManager createDirectoryAtURL:support withIntermediateDirectories:YES attributes:nil error:nil]);
+  XCTAssertTrue([NSFileManager.defaultManager createDirectoryAtURL:repoURL withIntermediateDirectories:YES attributes:nil error:nil]);
+  NSDictionary *metadata = @{ @"schema_version": @1, @"name": @"Files root fixture",
+    @"created_at": @"2026-09-06T00:00:00.000Z", @"updated_at": @"2026-09-06T00:00:00.000Z", @"origin_url": NSNull.null };
+  XCTAssertTrue([[NSJSONSerialization dataWithJSONObject:metadata options:0 error:nil]
+    writeToURL:[projectURL URLByAppendingPathComponent:@"project.json"] atomically:YES]);
+  XCTAssertTrue([[@"fixture-content\n" dataUsingEncoding:NSUTF8StringEncoding]
+    writeToURL:[repoURL URLByAppendingPathComponent:@"marker.txt"] atomically:YES]);
+  git_repository *repository = nullptr;
+  XCTAssertGreaterThan(git_libgit2_init(), 0);
+  XCTAssertEqual(git_repository_init(&repository, repoURL.fileSystemRepresentation, 0), 0);
+  if (repository != nullptr) git_repository_free(repository);
+  DSHLocalProjectAccess *legacy = [[DSHLocalProjectAccess alloc] initWithProjectsRootURL:projectsURL];
+  LocalWorkspaceModule *files = [[LocalWorkspaceModule alloc] initWithSupportURL:support legacyProjectAccess:legacy];
+  DSHLocalWorkspaceAccess *registry = [files valueForKey:@"access"];
+  NSError *error = nil;
+  NSDictionary *workspace = [registry bootstrapLegacyProjectId:projectId operationId:NSUUID.UUID.UUIDString.lowercaseString error:&error];
+  XCTAssertNotNil(workspace, @"%@", error);
+  if (workspace != nil) {
+    NSDictionary *root = @{ @"schema_version": @1, @"workspace_id": workspace[@"workspace_id"],
+      @"binding_revision": workspace[@"binding_revision"], @"project_id": projectId };
+    NSDictionary *listing = [self awaitCall:^(RCTPromiseResolveBlock resolve, RCTPromiseRejectBlock reject) {
+      [files listV2Request:@{ @"schema_version": @1, @"root": root, @"path": @"", @"max_entries": @100 }
+        resolver:resolve rejecter:reject];
+    } expectedCode:nil];
+    XCTAssertTrue([[listing[@"entries"] valueForKey:@"name"] containsObject:@"marker.txt"]);
+    LocalDocumentsModule *documents = [[LocalDocumentsModule alloc] initWithSupportURL:support legacyProjectAccess:legacy];
+    dispatch_sync((dispatch_queue_t)[documents valueForKey:@"documentQueue"], ^{});
+    __block NSString *readback = nil;
+    BOOL readSucceeded = [documents performRoot:root capabilities:[NSSet setWithObject:@"read"]
+      block:^BOOL(int descriptor, __unused NSError **blockError) {
+        int fd = openat(descriptor, "marker.txt", O_RDONLY | O_NOFOLLOW);
+        if (fd < 0) return NO;
+        char data[64] = {}; ssize_t count = read(fd, data, sizeof(data)); close(fd);
+        if (count < 0) return NO;
+        readback = [[NSString alloc] initWithBytes:data length:(NSUInteger)count encoding:NSUTF8StringEncoding];
+        return YES;
+      } error:&error];
+    XCTAssertTrue(readSucceeded, @"%@", error);
+    XCTAssertEqualObjects(readback, @"fixture-content\n");
+  }
+  [NSFileManager.defaultManager removeItemAtURL:base error:nil];
 }
 
 @end

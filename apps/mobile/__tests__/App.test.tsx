@@ -1125,17 +1125,8 @@ test('creates a new project chat from a workspace-only active conversation', asy
     await root.findByType(ProjectsSurface).props.onChatInProject(contextProject);
     await settle();
   });
-  const bootstrapOperationId =
-    mockLocalWorkspaces.bootstrapLegacyProject.mock.calls[0]?.[0]
-      .operation_id;
-  expect(mockLocalWorkspaces.bootstrapLegacyProject.mock.calls[0]?.[0]).toEqual({
-    schema_version: 1,
-    operation_id: bootstrapOperationId,
-    project_id: contextProject.id,
-  });
-  expect(bootstrapOperationId).toMatch(
-    /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-8[0-9a-f]{3}-[0-9a-f]{12}$/u,
-  );
+  // This project is already registered; reuse its root rather than bootstrap again.
+  expect(mockLocalWorkspaces.bootstrapLegacyProject).not.toHaveBeenCalled();
   await act(async () => {
     jest.advanceTimersByTime(180);
     await settle();
@@ -2462,8 +2453,9 @@ describe('project context Home integration H1', () => {
     });
 
     await act(async () => {
-      actionByLabel(root, 'Chat in this project').props.onPress();
+      const opening = actionByLabel(root, 'Chat in this project').props.onPress();
       expect(visibleContextSheets(root)).toHaveLength(0);
+      await opening;
       await settle();
     });
     await act(async () => {
@@ -2598,7 +2590,7 @@ describe('project context Home integration H1', () => {
       await settle();
     });
     await act(async () => {
-      actionByLabel(root, 'Chat in this project').props.onPress();
+      await actionByLabel(root, 'Chat in this project').props.onPress();
       await settle();
     });
     await act(async () => {
@@ -2972,7 +2964,7 @@ describe('project context Home integration H1', () => {
       await settle();
     });
     await act(async () => {
-      actionByLabel(root, 'Chat in this project').props.onPress();
+      await actionByLabel(root, 'Chat in this project').props.onPress();
       await settle();
     });
     expect(mockLocalProjectContext.listCandidates).not.toHaveBeenCalled();
@@ -9821,4 +9813,76 @@ test('fails gracefully when the platform has no local native adapter', async () 
     .findAllByProps({ accessibilityLabel: 'Configure DeepSeek key' })
     .find(instance => instance.props.disabled === true);
   expect(adapterButton).toBeDefined();
+});
+
+
+test('opens Files for an unregistered project without creating or rebinding a chat', async () => {
+  const renderer = await renderApp();
+  const root = renderer.root;
+  const activeId = root.findByType(ChatDrawer).props.activeId;
+  await openProjectsSurface(root);
+  await act(async () => {
+    await root
+      .findByType(ProjectsSurface)
+      .props.onOpenFiles(contextProject, () => true);
+    await settle();
+  });
+  expect(mockLocalWorkspaces.bootstrapLegacyProject).toHaveBeenCalledWith(
+    expect.objectContaining({ project_id: contextProject.id }),
+  );
+  expect(root.findByType(WorkspaceDrawer).props.visible).toBe(true);
+  expect(root.findByType(WorkspaceDrawer).props.workspaceRoot).toMatchObject({
+    workspace_id: CONTEXT_RUNTIME_ID,
+    project_id: contextProject.id,
+  });
+  expect(root.findByType(ChatDrawer).props.activeId).toBe(activeId);
+});
+
+test('does not present a root after its Projects view is no longer current', async () => {
+  const renderer = await renderApp();
+  const root = renderer.root;
+  await openProjectsSurface(root);
+  let current = true;
+  const bootstrap =
+    mockLocalWorkspaces.bootstrapLegacyProject.getMockImplementation();
+  mockLocalWorkspaces.bootstrapLegacyProject.mockImplementationOnce(
+    async (request) => {
+      const result = await bootstrap?.(request);
+      current = false;
+      return result;
+    },
+  );
+  await act(async () => {
+    await root
+      .findByType(ProjectsSurface)
+      .props.onOpenFiles(contextProject, () => current);
+    await settle();
+  });
+  expect(root.findByType(WorkspaceDrawer).props.visible).toBe(false);
+});
+
+
+test('Files registration remains reusable by the subsequent project chat action', async () => {
+  jest.useFakeTimers();
+  mockLocalWorkspaces.list.mockImplementation(async () => ({
+    schema_version: 1,
+    workspaces: bootstrappedLegacyProjectId === null ? [] : [appWorkspaceDescriptor(CONTEXT_RUNTIME_ID)],
+  }));
+  const renderer = await renderApp();
+  const root = renderer.root;
+  await openProjectsSurface(root);
+  await act(async () => {
+    await root.findByType(ProjectsSurface).props.onOpenFiles(contextProject, () => true);
+    await settle();
+  });
+  expect(root.findByType(WorkspaceDrawer).props.visible).toBe(true);
+  await act(async () => { root.findByType(WorkspaceDrawer).props.onClose(); await settle(); });
+  await act(async () => {
+    await root.findByType(ProjectsSurface).props.onChatInProject(contextProject);
+    await settle();
+  });
+  expect(mockLocalWorkspaces.bootstrapLegacyProject).toHaveBeenCalledTimes(1);
+  expect(lastPersistedState().conversations.some(conversation => conversation.project_id === contextProject.id)).toBe(true);
+  await act(async () => { jest.advanceTimersByTime(300); await settle(); });
+  await act(async () => renderer.unmount());
 });

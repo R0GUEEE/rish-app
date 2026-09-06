@@ -192,6 +192,49 @@ export function WorkspaceDrawer({
   } | null>(null);
   const [content, setContent] = useState('');
   const [savedContent, setSavedContent] = useState('');
+  const editorGeneration = useRef({
+    view: `${nextRootKey}:${visible}`,
+    epoch: 0,
+  });
+  const view = `${nextRootKey}:${visible}`;
+  if (editorGeneration.current.view !== view) {
+    editorGeneration.current = {
+      view,
+      epoch: editorGeneration.current.epoch + 1,
+    };
+  }
+  const editorEpoch = editorGeneration.current.epoch;
+  const editorState = useRef({
+    openFile,
+    content,
+    savedContent,
+    visible,
+    busy,
+    readOnly,
+    path,
+  });
+  editorState.current = {
+    openFile,
+    content,
+    savedContent,
+    visible,
+    busy,
+    readOnly,
+    path,
+  };
+  const exportInFlight = useRef<object | null>(null);
+  const changeContent = useCallback((value: string) => {
+    editorState.current.content = value;
+    setContent(value);
+  }, []);
+
+  useEffect(
+    () => () => {
+      editorGeneration.current.epoch += 1;
+      editorState.current.visible = false;
+    },
+    [],
+  );
   const [toolBlocks, setToolBlocks] = useState<StructuredBlock[]>([]);
   const [recentTrash, setRecentTrash] = useState<WorkspaceTrashReceipt[]>([]);
 
@@ -247,6 +290,7 @@ export function WorkspaceDrawer({
 
   useEffect(() => {
     if (!visible) return;
+    editorGeneration.current.epoch += 1;
     setPath('');
     setEntries([]);
     setRecentTrash([]);
@@ -265,6 +309,7 @@ export function WorkspaceDrawer({
 
   const open = useCallback(
     async (entry: WorkspaceEntry) => {
+      const epoch = ++editorGeneration.current.epoch;
       if (entry.kind === 'directory') {
         await load(entry.path);
         return;
@@ -281,7 +326,12 @@ export function WorkspaceDrawer({
           path: entry.path,
           max_bytes: 1024 * 1024,
         });
-        if (!isCurrentRoot(root, generation)) return;
+        if (
+          !isCurrentRoot(root, generation) ||
+          epoch !== editorGeneration.current.epoch ||
+          !editorState.current.visible
+        )
+          return;
         if (!sameRoot(root, file.root)) throw new Error(t('files.unavailable'));
         setOpenFile(file.file);
         openFileAuthorityRef.current = { root, generation };
@@ -289,10 +339,19 @@ export function WorkspaceDrawer({
         setSavedContent(file.content);
         setToolBlocks([]);
       } catch (caught) {
-        if (!isCurrentRoot(root, generation)) return;
+        if (
+          !isCurrentRoot(root, generation) ||
+          epoch !== editorGeneration.current.epoch ||
+          !editorState.current.visible
+        )
+          return;
         setError(caught instanceof Error ? caught.message : String(caught));
       } finally {
-        if (isCurrentRoot(root, generation)) setBusy(false);
+        if (
+          isCurrentRoot(root, generation) &&
+          epoch === editorGeneration.current.epoch
+        )
+          setBusy(false);
       }
     },
     [captureRoot, isCurrentRoot, load, t],
@@ -388,43 +447,75 @@ export function WorkspaceDrawer({
   ]);
 
   const save = useCallback(async (): Promise<boolean> => {
-    if (openFile === null || readOnly) return false;
+    const current = editorState.current;
+    if (
+      openFile === null ||
+      readOnly ||
+      current.readOnly ||
+      !current.visible ||
+      current.busy ||
+      exportInFlight.current !== null ||
+      editorEpoch !== editorGeneration.current.epoch ||
+      current.openFile?.path !== openFile.path ||
+      current.openFile.revision !== openFile.revision
+    )
+      return false;
     const authority = openFileAuthorityRef.current;
     const root = authority?.root;
     const generation = authority?.generation ?? -1;
+    const draft = current.content;
+    const owns = () =>
+      isCurrentRoot(root, generation) &&
+      editorState.current.visible &&
+      editorEpoch === editorGeneration.current.epoch;
+    editorState.current.busy = true;
     setBusy(true);
     setError(null);
     try {
-      if (!isCurrentRoot(root, generation)) return false;
+      if (!owns()) return false;
       if (root === undefined) throw new Error(t('files.unavailable'));
       const result = await LocalWorkspace.writeV2({
         schema_version: 1,
         root,
         path: openFile.path,
-        content,
+        content: draft,
         expected_revision: openFile.revision,
         create_only: false,
       });
-      if (!isCurrentRoot(root, generation)) return false;
-      if (!sameRoot(root, result.root)) throw new Error(t('files.unavailable'));
+      if (!owns()) return false;
+      if (!sameRoot(root, result.root) || result.file.path !== openFile.path)
+        throw new Error(t('files.unavailable'));
+      editorState.current.openFile = result.file;
+      editorState.current.savedContent = draft;
       setOpenFile(result.file);
-      setSavedContent(content);
+      setSavedContent(draft);
       setEntries(previous =>
         previous.map(entry =>
           entry.path === result.file.path ? result.file : entry,
         ),
       );
-      return true;
+      // A queued edit may arrive during the write: preserve it and do not
+      // let a save-and-close action discard the newer draft.
+      return editorState.current.content === draft;
     } catch (caught) {
-      if (!isCurrentRoot(root, generation)) return false;
+      if (!owns()) return false;
       setError(caught instanceof Error ? caught.message : String(caught));
       return false;
     } finally {
-      if (isCurrentRoot(root, generation)) setBusy(false);
+      if (owns()) {
+        editorState.current.busy = false;
+        setBusy(false);
+      }
     }
-  }, [content, isCurrentRoot, openFile, readOnly, t]);
+  }, [editorEpoch, isCurrentRoot, openFile, readOnly, t]);
 
   const closeEditor = useCallback(() => {
+    editorGeneration.current.epoch += 1;
+    editorState.current.openFile = null;
+    editorState.current.content = '';
+    editorState.current.savedContent = '';
+    editorState.current.busy = false;
+    setBusy(false);
     setOpenFile(null);
     openFileAuthorityRef.current = null;
     setContent('');
@@ -731,44 +822,73 @@ export function WorkspaceDrawer({
 
   const exportPathsToFiles = useCallback(
     async (sourcePaths: string[]) => {
-      if (sourcePaths.length === 0 || busy) return;
+      const current = editorState.current;
+      if (
+        sourcePaths.length === 0 ||
+        !current.visible ||
+        current.busy ||
+        exportInFlight.current !== null ||
+        editorEpoch !== editorGeneration.current.epoch ||
+        current.path !== path
+      )
+        return;
+      if (
+        current.openFile !== null &&
+        current.content !== current.savedContent
+      ) {
+        setNotice(t('files.saveBeforeExport'));
+        return;
+      }
       if (!LocalDocuments.isAvailable()) {
         setError(t('files.documentsUnavailable'));
         return;
       }
+      const token = {};
+      exportInFlight.current = token;
+      editorState.current.busy = true;
       setBusy(true);
       setError(null);
       setNotice(null);
       const root = captureRoot();
       const generation = rootGenerationRef.current.generation;
-      const operationId = newOperationId();
+      const owns = () =>
+        isCurrentRoot(root, generation) &&
+        editorState.current.visible &&
+        editorEpoch === editorGeneration.current.epoch;
       try {
-        if (!isCurrentRoot(root, generation)) return;
-        const paths = sourcePaths.slice();
+        if (!owns()) return;
         if (root === undefined) throw new Error(t('files.unavailable'));
         const result = await LocalDocuments.presentExportPicker({
           schema_version: 1,
           root,
-          operation_id: operationId,
-          source_paths: paths,
+          operation_id: newOperationId(),
+          source_paths: sourcePaths.slice(),
         });
-        if (!isCurrentRoot(root, generation)) return;
+        if (!owns()) return;
         if (!sameRoot(root, result.root))
           throw new Error(t('files.unavailable'));
         if (result.status === 'cancelled') return;
         setNotice(t('files.exportedCount', { count: result.item_count }));
       } catch (caught) {
-        if (!isCurrentRoot(root, generation)) return;
+        if (!owns()) return;
         setError(caught instanceof Error ? caught.message : String(caught));
       } finally {
-        if (isCurrentRoot(root, generation)) setBusy(false);
+        if (exportInFlight.current === token) exportInFlight.current = null;
+        if (owns()) {
+          editorState.current.busy = false;
+          setBusy(false);
+        }
       }
     },
-    [busy, captureRoot, isCurrentRoot, t],
+    [captureRoot, editorEpoch, isCurrentRoot, path, t],
   );
 
   const exportToFiles = useCallback(async () => {
-    if (openFile === null) return;
+    if (
+      openFile === null ||
+      editorState.current.openFile?.path !== openFile.path
+    )
+      return;
     await exportPathsToFiles([openFile.path]);
   }, [exportPathsToFiles, openFile]);
 
@@ -1146,15 +1266,20 @@ export function WorkspaceDrawer({
             </Text>
             <TextInput
               accessibilityLabel={t('files.content')}
-              editable={!readOnly}
+              editable={!readOnly && !busy}
               multiline
-              onChangeText={setContent}
+              onChangeText={changeContent}
               placeholder={t('files.content')}
               placeholderTextColor={colors.faint}
               style={styles.contentInput}
               textAlignVertical="top"
               value={content}
             />
+            {content !== savedContent && (
+              <Text accessibilityRole="alert" style={styles.editorPath}>
+                {t('files.saveBeforeExport')}
+              </Text>
+            )}
             <View style={styles.editorActions}>
               <Pressable
                 accessibilityLabel={t('common.close')}
@@ -1171,13 +1296,25 @@ export function WorkspaceDrawer({
                 accessibilityLabel={t('files.exportToFiles')}
                 accessibilityRole="button"
                 accessibilityState={{
-                  disabled: busy || !rootReady || !LocalDocuments.isAvailable(),
+                  disabled:
+                    busy ||
+                    content !== savedContent ||
+                    !rootReady ||
+                    !LocalDocuments.isAvailable(),
                 }}
-                disabled={busy || !rootReady || !LocalDocuments.isAvailable()}
+                disabled={
+                  busy ||
+                  content !== savedContent ||
+                  !rootReady ||
+                  !LocalDocuments.isAvailable()
+                }
                 onPress={() => exportToFiles().catch(() => undefined)}
                 style={[
                   styles.inlineSecondary,
-                  (busy || !rootReady || !LocalDocuments.isAvailable()) &&
+                  (busy ||
+                    content !== savedContent ||
+                    !rootReady ||
+                    !LocalDocuments.isAvailable()) &&
                     styles.disabled,
                 ]}
               >

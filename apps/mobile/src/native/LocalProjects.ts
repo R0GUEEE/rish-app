@@ -65,6 +65,13 @@ export type ProjectDiff = {
   files: ProjectDiffFile[];
 };
 
+export type ProjectDiffPage = ProjectDiff & {
+  page_offset: number;
+  next_offset: number | null;
+  snapshot_id: string;
+  omitted_paths: string[];
+};
+
 export type ProjectDiffOptions = {
   staged?: boolean;
   contextLines?: number;
@@ -274,6 +281,7 @@ type NativeLocalProjects = {
   cloneStatus?(operationId: string | null): Promise<unknown>;
   cancelClone?(operationId: string): Promise<unknown>;
 
+  diffPage?(projectId: string, staged: boolean, offset: number, snapshot: string | null): Promise<unknown>;
   list(): Promise<LocalProjectListing>;
   create(name: string): Promise<LocalProject>;
   clone(
@@ -1401,6 +1409,29 @@ function cloneOperation(value: unknown): ProjectCloneOperation {
   return { ...row, project } as ProjectCloneOperation;
 }
 
+function reviewPage(value: unknown, projectId: string, staged: boolean, offset: number, snapshot: string | null): ProjectDiffPage {
+  const code = 'E_PROJECT_RESULT_INVALID';
+  const row = projectV2ExactRecord(value, ['schema_version', 'project_id', 'staged', 'truncated', 'patch', 'files',
+    'page_offset', 'next_offset', 'snapshot_id', 'omitted_paths'], code);
+  if (row.schema_version !== 1 || row.project_id !== projectId || row.staged !== staged ||
+      typeof row.truncated !== 'boolean' || typeof row.patch !== 'string' ||
+      (projectV2UTF8Bytes(row.patch) ?? Infinity) > 65536 || row.page_offset !== offset ||
+      !projectV2Digest(row.snapshot_id) || (snapshot !== null && row.snapshot_id !== snapshot) ||
+      (row.next_offset !== null && (!Number.isSafeInteger(row.next_offset) ||
+        row.next_offset !== offset + (projectV2UTF8Bytes(row.patch) ?? 0) ||
+        (row.next_offset as number) <= offset)) || row.truncated !== (row.next_offset !== null)) projectV2Fail(code);
+  const files = projectV2Array(row.files, 1000, code).map(item => {
+    const file = projectV2ExactRecord(item, ['path', 'status', 'additions', 'deletions'], code);
+    if (!projectV2String(file.path, 4096) || !projectV2String(file.status, 40) ||
+        !Number.isSafeInteger(file.additions) || (file.additions as number) < 0 ||
+        !Number.isSafeInteger(file.deletions) || (file.deletions as number) < 0) projectV2Fail(code);
+    return file;
+  });
+  const omitted = projectV2Array(row.omitted_paths, 1000, code);
+  if (omitted.some(path => !files.some(file => file.path === path))) projectV2Fail(code);
+  return { ...row, files, omitted_paths: omitted } as ProjectDiffPage;
+}
+
 export const LocalProjects = {
   isAvailable: () => hasNativeCapabilities(native),
   startClone: async (
@@ -1438,6 +1469,11 @@ export const LocalProjects = {
     options: ProjectGitTransportOptions = {},
   ) => required().clone(url, name ?? null, options),
   status: (projectId: string) => required().status(projectId),
+  diffPage: async (projectId: string, staged: boolean, offset = 0, snapshot: string | null = null) => {
+    const api = required();
+    if (!api.diffPage) throw new Error('Paged diff review is unavailable');
+    return reviewPage(await api.diffPage(projectId, staged, offset, snapshot), projectId, staged, offset, snapshot);
+  },
   diff: (projectId: string, options: ProjectDiffOptions = {}) =>
     required().diff(
       projectId,

@@ -26,6 +26,7 @@ jest.mock('../src/native/LocalProjects', () => ({
     cancelClone: jest.fn(),
     status: jest.fn(),
     diff: jest.fn(),
+    diffPage: jest.fn(),
     stageAll: jest.fn(),
     commit: jest.fn(),
     setRemote: jest.fn(),
@@ -228,7 +229,20 @@ beforeEach(() => {
     cloneSnapshot('receiving', true),
   );
   mockLocalProjects.status.mockResolvedValue(dirtyStatus);
-  mockLocalProjects.diff.mockResolvedValue(diff);
+  mockLocalProjects.diff.mockImplementation(
+    async (_id: string, options?: { staged?: boolean }) => ({
+      ...diff,
+      staged: options?.staged ?? false,
+    }),
+  );
+  mockLocalProjects.diffPage.mockResolvedValue({
+    ...diff,
+    staged: true,
+    page_offset: 0,
+    next_offset: null,
+    snapshot_id: 'a'.repeat(64),
+    omitted_paths: [],
+  });
   mockLocalProjects.stageAll.mockResolvedValue(dirtyStatus);
   mockLocalProjects.commit.mockResolvedValue({
     project_id: project.id,
@@ -711,7 +725,7 @@ test('opens only the selected project worktree in Files', async () => {
     actionByLabel(renderer.root, 'Open project files').props.onPress(),
   );
 
-  expect(onOpenFiles).toHaveBeenCalledWith(project);
+  expect(onOpenFiles).toHaveBeenCalledWith(project, expect.any(Function));
   expect(
     renderer.root.findByProps({ children: project.workspace_path }),
   ).toBeDefined();
@@ -749,6 +763,12 @@ test('shows a real diff, stages all, and commits with explicit author fields', a
   expect(
     renderer.root.findByProps({ children: 'Staged: Added' }),
   ).toBeDefined();
+  expect(
+    renderer.root.findAllByProps({ children: 'Working tree: Added' }),
+  ).toHaveLength(0);
+  await act(async () =>
+    actionByLabel(renderer.root, 'Unstaged').props.onPress(),
+  );
   expect(
     renderer.root.findByProps({ children: 'Working tree: Added' }),
   ).toBeDefined();
@@ -1084,4 +1104,184 @@ test('cancel before the native start reply is forwarded once identity arrives', 
   });
   expect(mockLocalProjects.cancelClone).toHaveBeenCalledWith('clone-1');
   expect(mockLocalProjects.status).not.toHaveBeenCalled();
+});
+
+test('reopening and refreshing preserves a real staged review separate from worktree changes', async () => {
+  mockLocalProjects.diff.mockImplementation(
+    async (_id: string, options: { staged: boolean }) => ({
+      ...diff,
+      staged: options.staged,
+      patch: options.staged ? '+INDEX-ONLY' : '+WORKTREE-ONLY',
+    }),
+  );
+  const renderer = await renderSurface();
+  await openProject(renderer);
+  await act(async () =>
+    actionByLabel(renderer.root, 'Review staged changes').props.onPress(),
+  );
+  expect(renderer.root.findByProps({ children: '+INDEX-ONLY' })).toBeDefined();
+  expect(
+    renderer.root.findAllByProps({ children: '+WORKTREE-ONLY' }),
+  ).toHaveLength(0);
+  await setVisible(renderer, false);
+  await setVisible(renderer, true);
+  expect(renderer.root.findByProps({ children: '+INDEX-ONLY' })).toBeDefined();
+  await act(async () =>
+    actionByLabel(renderer.root, 'Unstaged').props.onPress(),
+  );
+  expect(
+    renderer.root.findByProps({ children: '+WORKTREE-ONLY' }),
+  ).toBeDefined();
+  await setVisible(renderer, false);
+  await setVisible(renderer, true);
+  expect(
+    renderer.root.findByProps({ children: '+WORKTREE-ONLY' }),
+  ).toBeDefined();
+});
+
+test('truncated diff offers snapshot-bound pages and mode switches discard old page replies', async () => {
+  mockLocalProjects.diff.mockResolvedValue({ ...diff, truncated: true });
+  const page = {
+    ...diff,
+    staged: true,
+    patch: 'FIRST-PAGE',
+    truncated: true,
+    page_offset: 0,
+    next_offset: 10,
+    snapshot_id: 'a'.repeat(64),
+    omitted_paths: [],
+  };
+  mockLocalProjects.diffPage.mockResolvedValue(page);
+  const renderer = await renderSurface();
+  await openProject(renderer);
+  await act(async () =>
+    actionByLabel(renderer.root, 'Changes').props.onPress(),
+  );
+  expect(
+    renderer.root.findAllByProps({
+      children:
+        'Partial preview: this diff exceeds the preview limit. Review it in pages to continue.',
+    }).length,
+  ).toBeGreaterThan(0);
+  await act(async () => {
+    actionByLabel(renderer.root, 'Review diff in pages').props.onPress();
+    await settle();
+  });
+  expect(mockLocalProjects.diffPage).toHaveBeenLastCalledWith(
+    project.id,
+    true,
+    0,
+    null,
+  );
+  const held = deferred<typeof page>();
+  mockLocalProjects.diffPage.mockReturnValueOnce(held.promise);
+  await act(async () => {
+    actionByLabel(renderer.root, 'Next page').props.onPress();
+    await settle();
+  });
+  expect(mockLocalProjects.diffPage).toHaveBeenLastCalledWith(
+    project.id,
+    true,
+    10,
+    'a'.repeat(64),
+  );
+  await act(async () =>
+    actionByLabel(renderer.root, 'Unstaged').props.onPress(),
+  );
+  await act(async () => {
+    held.resolve({ ...page, patch: 'STALE-INDEX-PAGE' });
+    await settle();
+  });
+  expect(
+    renderer.root.findAllByProps({ children: 'STALE-INDEX-PAGE' }),
+  ).toHaveLength(0);
+  expect(renderer.root.findAllByProps({ children: 'FIRST-PAGE' })).toHaveLength(
+    0,
+  );
+});
+
+test('binary omissions are visible and a changed diff restarts paged review', async () => {
+  mockLocalProjects.diffPage.mockResolvedValue({
+    ...diff,
+    staged: true,
+    patch: 'PAGE',
+    truncated: true,
+    page_offset: 0,
+    next_offset: 4,
+    snapshot_id: 'a'.repeat(64),
+    omitted_paths: ['image.bin'],
+  });
+  const renderer = await renderSurface();
+  await openProject(renderer);
+  await act(async () =>
+    actionByLabel(renderer.root, 'Changes').props.onPress(),
+  );
+  await act(async () => {
+    actionByLabel(renderer.root, 'Review diff in pages').props.onPress();
+    await settle();
+  });
+  expect(
+    renderer.root.findAllByProps({
+      children:
+        'Text is unavailable for binary, non-UTF-8, or oversized files: image.bin. Their contents are not shown.',
+    }).length,
+  ).toBeGreaterThan(0);
+  mockLocalProjects.diffPage.mockRejectedValueOnce(
+    new Error('Diff changed; restart the review'),
+  );
+  await act(async () => {
+    actionByLabel(renderer.root, 'Next page').props.onPress();
+    await settle();
+  });
+  expect(renderer.root.findAllByProps({ children: 'PAGE' })).toHaveLength(0);
+  expect(actionByLabel(renderer.root, 'Review diff in pages')).toBeDefined();
+});
+
+
+test('invalidates a pending Files opener when the selected project changes', async () => {
+  const held = deferred<void>();
+  const onOpenFiles = jest.fn(
+    (_project: unknown, _isCurrent?: () => boolean) => held.promise,
+  );
+  mockLocalProjects.list.mockResolvedValue({
+    schema_version: 1,
+    projects: [project, otherProject],
+  });
+  const renderer = await renderSurface({ onOpenFiles });
+  await openProject(renderer);
+  await act(async () => {
+    actionByLabel(renderer.root, 'Open project files').props.onPress();
+    await settle();
+  });
+  const isCurrent = onOpenFiles.mock.calls[0]?.[1] as unknown as () => boolean;
+  expect(isCurrent()).toBe(true);
+  await navigateToOther(renderer);
+  expect(isCurrent()).toBe(false);
+  await act(async () => {
+    held.resolve();
+    await settle();
+  });
+  expect(
+    renderer.root.findByProps({ children: otherProject.workspace_path }),
+  ).toBeDefined();
+});
+
+test('shows a Files root error on the project surface and permits retry', async () => {
+  const onOpenFiles = jest
+    .fn()
+    .mockRejectedValue(new Error('E_WORKSPACE_UNAVAILABLE'));
+  const renderer = await renderSurface({ onOpenFiles });
+  await openProject(renderer);
+  await act(async () => {
+    actionByLabel(renderer.root, 'Open project files').props.onPress();
+    await settle();
+  });
+  expect(
+    renderer.root.findByProps({
+      children: 'Git operation failed: E_WORKSPACE_UNAVAILABLE',
+    }),
+  ).toBeDefined();
+  expect(
+    actionByLabel(renderer.root, 'Open project files').props.disabled,
+  ).toBe(false);
 });

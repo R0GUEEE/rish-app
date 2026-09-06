@@ -43,6 +43,7 @@ import {
   type SupportedModel,
 } from '../components/ModelPicker';
 import { LocalWorkspaces } from '../native/LocalWorkspaces';
+import { createProjectWorkspaceRootResolver } from '../native/projectWorkspaceRoot';
 import { ProjectsSurface } from '../components/ProjectsSurface';
 import {
   ProjectContextSheet,
@@ -4421,50 +4422,7 @@ export function HomeScreen({
     ],
   );
 
-  const resolveProjectFilesRoot = useCallback(
-    async (projectId: string): Promise<WorkspaceRootRefV1 | null> => {
-      const listing = await LocalWorkspaces.list();
-      const candidates = listing.workspaces
-        .filter(workspace => workspace.status === 'ok')
-        .sort((left, right) => left.workspace_id.localeCompare(right.workspace_id));
-      for (const candidate of candidates) {
-        const resolved = await LocalWorkspaces.resolve({
-          schema_version: 1,
-          workspace_id: candidate.workspace_id,
-          expected_binding_revision: candidate.binding_revision,
-          required_capabilities: ['read'],
-        });
-        if (
-          resolved.disposition !== 'direct' ||
-          resolved.workspace.status !== 'ok' ||
-          resolved.workspace.workspace_id !== candidate.workspace_id ||
-          resolved.workspace.binding_revision !== candidate.binding_revision
-        ) {
-          continue;
-        }
-        const baseRoot = assertWorkspaceRootRefV1({
-          schema_version: 1,
-          workspace_id: candidate.workspace_id,
-          binding_revision: candidate.binding_revision,
-          project_id: null,
-        });
-        const lookup = await LocalProjects.projectForWorkspaceV2(baseRoot);
-        if (
-          lookup.status === 'attached' &&
-          lookup.project.project_id === projectId &&
-          lookup.project.workspace_id === baseRoot.workspace_id &&
-          lookup.project.workspace_binding_revision === baseRoot.binding_revision
-        ) {
-          return assertWorkspaceRootRefV1({
-            ...baseRoot,
-            project_id: lookup.project.project_id,
-          });
-        }
-      }
-      return null;
-    },
-    [],
-  );
+  const resolveProjectWorkspaceRoot = useMemo(() => createProjectWorkspaceRootResolver(), []);
 
   const chatInProject = useCallback(
     async (project: LocalProject) => {
@@ -4555,12 +4513,20 @@ export function HomeScreen({
         > | null = null;
         if (requiresProjectAuthority) {
           try {
-            bootstrappedWorkspace =
-              await LocalWorkspaces.bootstrapLegacyProject({
-                schema_version: 1,
-                operation_id: LocalRuntime.createCompletionRequestId(),
-                project_id: project.id,
-              });
+            const root = await resolveProjectWorkspaceRoot(project.id);
+            if (root === null) throw new Error('E_WORKSPACE_ROOT_CHANGED');
+            const resolved = await LocalWorkspaces.resolve({
+              schema_version: 1,
+              workspace_id: root.workspace_id,
+              expected_binding_revision: root.binding_revision,
+              required_capabilities: ['read', 'write', 'git', 'project_context'],
+            });
+            if (resolved.disposition !== 'direct' || resolved.workspace.status !== 'ok' ||
+                resolved.workspace.workspace_id !== root.workspace_id ||
+                resolved.workspace.binding_revision !== root.binding_revision) {
+              throw new Error('E_WORKSPACE_ROOT_CHANGED');
+            }
+            bootstrappedWorkspace = resolved.workspace;
           } catch {
             setRequestFailure('E_WORKSPACE_UNAVAILABLE');
             return;
@@ -4714,6 +4680,7 @@ export function HomeScreen({
       }
     },
     [
+      resolveProjectWorkspaceRoot,
       completionController,
       discardDraftAttachments,
       directProjectMutationView,
@@ -5564,6 +5531,7 @@ export function HomeScreen({
           <EmptyChat onSuggestion={changeDraft} />
         ) : (
           <MessageList
+            key={activeConversation?.id ?? 'no-conversation'}
             autoExpandTools={preferences.autoExpandTools}
             messages={activeMessages}
             onPreviewAttachment={id => {
@@ -5994,60 +5962,58 @@ export function HomeScreen({
           setProjectsVisible(false);
         }}
         onDismiss={handleProjectsDismiss}
-        onOpenFiles={project => {
-          if (!projectsVisibleRef.current || destructiveSurfaceBlocked()) return;
-          setProjectFilesScope(project);
+        onOpenFiles={async (project, isCurrent = () => true) => {
+          if (
+            !projectsVisibleRef.current ||
+            !isCurrent() ||
+            destructiveSurfaceBlocked()
+          )
+            return;
+          const expectedProjectsEpoch = projectsSurfaceEpoch.current;
+          const nonce = ++workspaceSurfaceNonceRef.current;
+          const canOpen = () =>
+            projectsVisibleRef.current &&
+            isCurrent() &&
+            projectsSurfaceEpoch.current === expectedProjectsEpoch &&
+            workspaceSurfaceNonceRef.current === nonce &&
+            !destructiveSurfaceBlocked();
           const current = selectActiveConversation(store.getState());
-          const currentBinding = current?.workspaceBinding ?? null;
+          const binding = current?.workspaceBinding ?? null;
           if (
             current !== null &&
             current.projectId === project.id &&
-            currentBinding !== null
+            binding !== null
           ) {
-            try {
-              const binding = currentBinding;
-              const root = assertWorkspaceRootRefV1({
-                schema_version: 1,
-                workspace_id: binding.workspaceId,
-                binding_revision: binding.bindingRevision,
-                project_id: binding.projectId,
-              });
-              workspaceSurfaceNonceRef.current += 1;
-              workspaceVisibleRef.current = true;
-              setWorkspaceRoute({
-                root,
-                label: project.name,
-                conversationId: current.id,
-                projectId: project.id,
-              });
-              setWorkspaceVisible(true);
-            } catch (error) {
-              setRequestFailure(errorText(error));
-            }
+            const root = assertWorkspaceRootRefV1({
+              schema_version: 1,
+              workspace_id: binding.workspaceId,
+              binding_revision: binding.bindingRevision,
+              project_id: binding.projectId,
+            });
+            if (!canOpen()) return;
+            setProjectFilesScope(project);
+            workspaceVisibleRef.current = true;
+            setWorkspaceRoute({
+              root,
+              label: project.name,
+              conversationId: current.id,
+              projectId: project.id,
+            });
+            setWorkspaceVisible(true);
             return;
           }
-          const expectedProjectsEpoch = projectsSurfaceEpoch.current;
-          workspaceSurfaceNonceRef.current += 1;
-          resolveProjectFilesRoot(project.id)
-            .then(root => {
-              if (
-                root === null ||
-                !projectsVisibleRef.current ||
-                projectsSurfaceEpoch.current !== expectedProjectsEpoch
-              ) {
-                if (root === null) setRequestFailure('E_WORKSPACE_ROOT_CHANGED');
-                return;
-              }
-              workspaceVisibleRef.current = true;
-              setWorkspaceRoute({
-                root,
-                label: project.name,
-                conversationId: null,
-                projectId: project.id,
-              });
-              setWorkspaceVisible(true);
-            })
-            .catch(error => setRequestFailure(errorText(error)));
+          const root = await resolveProjectWorkspaceRoot(project.id);
+          if (!canOpen()) return;
+          if (root === null) throw new Error('E_WORKSPACE_ROOT_CHANGED');
+          setProjectFilesScope(project);
+          workspaceVisibleRef.current = true;
+          setWorkspaceRoute({
+            root,
+            label: project.name,
+            conversationId: null,
+            projectId: project.id,
+          });
+          setWorkspaceVisible(true);
         }}
         onUnbindFromChat={() =>
           unbindProjectFromConversation(projectsRenderEpoch)

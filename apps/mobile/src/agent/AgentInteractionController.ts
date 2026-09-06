@@ -1,3 +1,4 @@
+import { approvalMessageBudget } from './approvalMessage';
 import type { ApprovalRequestSpec } from './AgentApprovals';
 import { DEFAULT_APPROVAL_TIMEOUT_MS } from './AgentApprovals';
 import type { QuestionSpec } from './AgentQuestions';
@@ -57,24 +58,7 @@ function isDecisionRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value);
 }
 
-function isBoundedMessage(value: unknown): value is string {
-  if (typeof value !== 'string' || value.length > 2000) return false;
-  let bytes = 0;
-  for (let index = 0; index < value.length; index += 1) {
-    const unit = value.charCodeAt(index);
-    if (unit <= 0x7f) bytes += 1;
-    else if (unit <= 0x7ff) bytes += 2;
-    else if (unit >= 0xd800 && unit <= 0xdbff) {
-      const next = value.charCodeAt(index + 1);
-      if (next < 0xdc00 || next > 0xdfff) return false;
-      bytes += 4;
-      index += 1;
-    } else if (unit >= 0xdc00 && unit <= 0xdfff) return false;
-    else bytes += 3;
-    if (bytes > 2000) return false;
-  }
-  return true;
-}
+const INVALID_DENIAL_MESSAGE = Symbol('invalid-denial-message');
 
 /**
  * UI actions carry the approval id out-of-band. Once the id matches the live
@@ -88,12 +72,9 @@ function exactApprovalDecision(
   if (!isDecisionRecord(decision)) return undefined;
   try {
     if (decision.status === 'denied') {
-      const message =
-        decision.message === undefined
-          ? undefined
-          : isBoundedMessage(decision.message)
-            ? decision.message
-            : undefined;
+      const message = decision.message;
+      if (message !== undefined && typeof message !== 'string') return undefined;
+      if (message !== undefined && !approvalMessageBudget(message).valid) return INVALID_DENIAL_MESSAGE;
       return message === undefined
         ? { status: 'denied', approval_id: spec.approvalId }
         : { status: 'denied', approval_id: spec.approvalId, message };
@@ -270,6 +251,9 @@ export function createAgentInteractionController(options: {
       const wait = approvalWaits.find(candidate => candidate.spec.approvalId === approvalId);
       if (wait === undefined) return;
       const exactDecision = exactApprovalDecision(wait.spec, decision);
+      // An invalid reason is editable input, not a reasonless decision.
+      // Keep the original deadline and pending cards while the user fixes it.
+      if (exactDecision === INVALID_DENIAL_MESSAGE) return;
       if (exactDecision === undefined) {
         // A malformed UI decision fails closed: the whole presented list
         // settles as absent answers, which the driver resolves to denials.
@@ -291,6 +275,7 @@ export function createAgentInteractionController(options: {
         const exact = exactApprovalDecision(spec, entry.decision);
         return exact === undefined ? { status: 'denied', approval_id: spec.approvalId } : exact;
       });
+      if (settled.includes(INVALID_DENIAL_MESSAGE)) return;
       settleAllApprovals(settled);
     },
     answerQuestion: (questionId, answer) => {

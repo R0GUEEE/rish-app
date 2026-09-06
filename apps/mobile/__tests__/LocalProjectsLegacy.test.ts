@@ -11,6 +11,7 @@ const native = {
   cancelClone: jest.fn(),
   status: jest.fn(),
   diff: jest.fn(),
+  diffPage: jest.fn(),
   stageAll: jest.fn(),
   commit: jest.fn(),
   setRemote: jest.fn(),
@@ -159,4 +160,56 @@ test.each([
   await expect(LocalProjects.cloneStatus()).rejects.toMatchObject({
     code: 'E_PROJECT_RESULT_INVALID',
   });
+});
+
+function diffReviewPage() {
+  return {
+    schema_version: 1,
+    project_id: PROJECT_ID,
+    staged: true,
+    truncated: true,
+    patch: 'page',
+    files: [],
+    page_offset: 0,
+    next_offset: 4,
+    snapshot_id: 'a'.repeat(64),
+    omitted_paths: [],
+  };
+}
+
+test('validates diff page identity, UTF-8 byte offsets, and snapshot continuity', async () => {
+  native.diffPage.mockResolvedValue(diffReviewPage());
+  expect(await LocalProjects.diffPage(PROJECT_ID, true)).toEqual(
+    diffReviewPage(),
+  );
+  expect(native.diffPage).toHaveBeenCalledWith(PROJECT_ID, true, 0, null);
+  native.diffPage.mockResolvedValue({
+    ...diffReviewPage(),
+    patch: '中文',
+    next_offset: 6,
+  });
+  expect((await LocalProjects.diffPage(PROJECT_ID, true)).next_offset).toBe(6);
+});
+
+test.each([
+  { project_id: 'wrong' },
+  { staged: false },
+  { next_offset: 3 },
+  { truncated: false },
+  { page_offset: 1 },
+  { snapshot_id: 'bad' },
+  { omitted_paths: ['unknown'] },
+  { patch: 'x'.repeat(65537), next_offset: 65537 },
+])('rejects inconsistent diff page %j', async change => {
+  native.diffPage.mockResolvedValue({ ...diffReviewPage(), ...change });
+  await expect(LocalProjects.diffPage(PROJECT_ID, true)).rejects.toMatchObject({
+    code: 'E_PROJECT_RESULT_INVALID',
+  });
+});
+
+test('rejects a different snapshot even when project and offset match', async () => {
+  native.diffPage.mockResolvedValue(diffReviewPage());
+  await expect(
+    LocalProjects.diffPage(PROJECT_ID, true, 0, 'b'.repeat(64)),
+  ).rejects.toMatchObject({ code: 'E_PROJECT_RESULT_INVALID' });
 });

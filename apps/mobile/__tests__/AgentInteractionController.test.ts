@@ -293,18 +293,54 @@ test('a deny message is carried through the batch broker', async () => {
   ]);
 });
 
-test('an oversized deny message is dropped by the broker', async () => {
+test('an oversized reason keeps the batch pending until it is corrected', async () => {
   const controller = createAgentInteractionController();
   const batch = controller.requestBatchApprovals([approvalSpec]);
+  let settled = false;
+  batch.then(() => { settled = true; });
+  controller.decideBatchApprovals([{ approvalId: 'ap-1', decision: { status: 'denied', message: '拒'.repeat(667) } }]);
+  await Promise.resolve();
+  expect(settled).toBe(false);
+  expect(controller.getState().pendingApprovals).toEqual([approvalSpec]);
+  const message = '拒'.repeat(666) + 'ab';
+  controller.decideBatchApprovals([{ approvalId: 'ap-1', decision: { status: 'denied', message } }]);
+  await expect(batch).resolves.toEqual([{ status: 'denied', approval_id: 'ap-1', message }]);
+});
+
+test('invalid Unicode cannot silently become a reasonless single denial', async () => {
+  const controller = createAgentInteractionController();
+  const pending = controller.requestApproval(approvalSpec);
+  controller.decideApproval('ap-1', { status: 'denied', message: '\ud800' });
+  expect(controller.getState().pendingApprovals).toEqual([approvalSpec]);
+  const message = '😀'.repeat(500);
+  controller.decideApproval('ap-1', { status: 'denied', message });
+  await expect(pending).resolves.toEqual({ status: 'denied', approval_id: 'ap-1', message });
+});
+
+test('one invalid batch reason prevents partial approval settlement', async () => {
+  const controller = createAgentInteractionController();
+  const second = { ...approvalSpec, approvalId: 'ap-2', toolCallId: 'c2' };
+  const pending = controller.requestBatchApprovals([approvalSpec, second]);
   controller.decideBatchApprovals([
-    {
-      approvalId: 'ap-1',
-      decision: { status: 'denied', message: 'x'.repeat(3000) },
-    },
+    { approvalId: 'ap-1', decision: { status: 'approved', scope: 'once' } },
+    { approvalId: 'ap-2', decision: { status: 'denied', message: 'x'.repeat(2001) } },
   ]);
-  await expect(batch).resolves.toEqual([
-    { status: 'denied', approval_id: 'ap-1' },
-  ]);
+  expect(controller.getState().pendingApprovals).toHaveLength(2);
+  controller.cancelPending();
+  await expect(pending).resolves.toEqual([undefined, undefined]);
+});
+
+test('invalid reasons do not extend the fail-closed deadline', async () => {
+  jest.useFakeTimers();
+  try {
+    const controller = createAgentInteractionController({ approvalTimeoutMs: 100 });
+    const pending = controller.requestApproval(approvalSpec);
+    jest.advanceTimersByTime(90);
+    controller.decideApproval('ap-1', { status: 'denied', message: 'x'.repeat(2001) });
+    jest.advanceTimersByTime(10);
+    await expect(pending).resolves.toBeUndefined();
+    expect(controller.getState().pendingApprovals).toHaveLength(0);
+  } finally { jest.useRealTimers(); }
 });
 
 test('cancelPending settles every open wait without fabricating answers', async () => {

@@ -666,3 +666,197 @@ test('ignores a late result from an earlier workspace reference generation', asy
     renderer.root.findAllByProps({ children: 'new.md' }).length,
   ).toBeGreaterThan(0);
 });
+
+async function openExportFixture(confirmDestructive = true) {
+  mockLocalWorkspace.listV2.mockResolvedValue({
+    schema_version: 1,
+    root: ROOT,
+    path: '',
+    entries: [rootFile],
+  });
+  const renderer = await renderDrawer({ root: ROOT, confirmDestructive });
+  await act(async () => {
+    actionByLabel(renderer.root, 'Open note.md').props.onPress();
+    await settle();
+  });
+  return renderer;
+}
+
+function contentInput(renderer: Renderer) {
+  return renderer.root.findByProps({ accessibilityLabel: 'File content' });
+}
+
+test('unsaved edits disable export even when destructive confirmations are off', async () => {
+  const renderer = await openExportFixture(false);
+  const staleExport = actionByLabel(renderer.root, 'Export to Files').props
+    .onPress;
+  await act(async () => {
+    contentInput(renderer).props.onChangeText('unsaved 中文');
+    // The queued old callback must observe the edit before React rerenders.
+    staleExport();
+    await settle();
+  });
+  expect(actionByLabel(renderer.root, 'Export to Files').props.disabled).toBe(
+    true,
+  );
+  expect(
+    renderer.root.findAllByProps({
+      children: 'Save your changes before exporting this file.',
+    }).length,
+  ).toBeGreaterThan(0);
+  expect(mockLocalDocuments.presentExportPicker).not.toHaveBeenCalled();
+  expect(mockLocalWorkspace.writeV2).not.toHaveBeenCalled();
+});
+
+test('explicit save completes before export reads the saved UTF-8 bytes', async () => {
+  const { Buffer: TestBuffer } = jest.requireActual('buffer') as {
+    Buffer: { from(value: string, encoding: 'utf8'): Uint8Array };
+  };
+  let disk = 'hello';
+  let exported: Uint8Array | undefined;
+  mockLocalWorkspace.writeV2.mockImplementation(async request => {
+    expect(request.expected_revision).toBe(rootFile.revision);
+    disk = request.content;
+    return {
+      schema_version: 1,
+      root: ROOT,
+      file: { ...rootFile, revision: 'c'.repeat(64) },
+      created: false,
+    };
+  });
+  mockLocalDocuments.presentExportPicker.mockImplementation(async request => {
+    exported = TestBuffer.from(disk, 'utf8');
+    return {
+      schema_version: 1,
+      root: ROOT,
+      operation_id: request.operation_id,
+      status: 'exported',
+      item_count: 1,
+    };
+  });
+  const renderer = await openExportFixture();
+  await act(async () =>
+    contentInput(renderer).props.onChangeText('saved 中文\n'),
+  );
+  await act(async () => {
+    actionByLabel(renderer.root, 'Save changes').props.onPress();
+    await settle();
+  });
+  expect(actionByLabel(renderer.root, 'Export to Files').props.disabled).toBe(
+    false,
+  );
+  await act(async () => {
+    actionByLabel(renderer.root, 'Export to Files').props.onPress();
+    await settle();
+  });
+  expect(exported).toEqual(TestBuffer.from('saved 中文\n', 'utf8'));
+});
+
+test('save conflict keeps the draft and never opens the export picker', async () => {
+  mockLocalWorkspace.writeV2.mockRejectedValueOnce(
+    new Error('File revision changed'),
+  );
+  const renderer = await openExportFixture();
+  await act(async () =>
+    contentInput(renderer).props.onChangeText('keep my draft'),
+  );
+  await act(async () => {
+    actionByLabel(renderer.root, 'Save changes').props.onPress();
+    await settle();
+  });
+  await act(async () => {
+    actionByLabel(renderer.root, 'Export to Files').props.onPress();
+    await settle();
+  });
+  expect(contentInput(renderer).props.value).toBe('keep my draft');
+  expect(actionByLabel(renderer.root, 'Export to Files').props.disabled).toBe(
+    true,
+  );
+  expect(mockLocalDocuments.presentExportPicker).not.toHaveBeenCalled();
+  expect(
+    renderer.root.findAllByProps({ children: 'Exported 1 item(s) to Files.' }),
+  ).toHaveLength(0);
+});
+
+test('a queued edit during save stays dirty and cannot be exported', async () => {
+  const held = deferred<unknown>();
+  mockLocalWorkspace.writeV2.mockReturnValueOnce(held.promise);
+  const renderer = await openExportFixture();
+  await act(async () =>
+    contentInput(renderer).props.onChangeText('saving version'),
+  );
+  await act(async () => {
+    actionByLabel(renderer.root, 'Save changes').props.onPress();
+    await settle();
+  });
+  expect(contentInput(renderer).props.editable).toBe(false);
+  await act(async () => {
+    contentInput(renderer).props.onChangeText('newer queued edit');
+    held.resolve({
+      schema_version: 1,
+      root: ROOT,
+      file: { ...rootFile, revision: 'c'.repeat(64) },
+      created: false,
+    });
+    await settle();
+  });
+  expect(contentInput(renderer).props.value).toBe('newer queued edit');
+  expect(actionByLabel(renderer.root, 'Export to Files').props.disabled).toBe(
+    true,
+  );
+  await act(async () => {
+    actionByLabel(renderer.root, 'Export to Files').props.onPress();
+    await settle();
+  });
+  expect(mockLocalDocuments.presentExportPicker).not.toHaveBeenCalled();
+});
+
+test('an export callback from a closed editor cannot export a reopened file', async () => {
+  const renderer = await openExportFixture();
+  const staleExport = actionByLabel(renderer.root, 'Export to Files').props
+    .onPress;
+  await act(async () => actionByLabel(renderer.root, 'Close').props.onPress());
+  await act(async () => {
+    actionByLabel(renderer.root, 'Open note.md').props.onPress();
+    await settle();
+  });
+  await act(async () => {
+    staleExport();
+    await settle();
+  });
+  expect(mockLocalDocuments.presentExportPicker).not.toHaveBeenCalled();
+});
+
+test('duplicate export clicks produce one picker and late success cannot update a reopened editor', async () => {
+  const held = deferred<unknown>();
+  mockLocalDocuments.presentExportPicker.mockReturnValueOnce(held.promise);
+  const renderer = await openExportFixture();
+  const exportAction = actionByLabel(renderer.root, 'Export to Files').props
+    .onPress;
+  await act(async () => {
+    exportAction();
+    exportAction();
+    await settle();
+  });
+  expect(mockLocalDocuments.presentExportPicker).toHaveBeenCalledTimes(1);
+  const request = mockLocalDocuments.presentExportPicker.mock.calls[0]?.[0];
+  await act(async () => actionByLabel(renderer.root, 'Close').props.onPress());
+  await act(async () => {
+    actionByLabel(renderer.root, 'Open note.md').props.onPress();
+    await settle();
+  });
+  await act(async () => {
+    held.resolve({
+      schema_version: 1,
+      root: ROOT,
+      operation_id: request.operation_id,
+      status: 'exported',
+      item_count: 1,
+    });
+    await settle();
+  });
+  expect(
+    renderer.root.findAllByProps({ children: 'Exported 1 item(s) to Files.' }),
+  ).toHaveLength(0);
+  expect(contentInput(renderer).props.value).toBe('hello');
+});

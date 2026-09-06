@@ -33,6 +33,7 @@ import {
   type LocalProject,
   type ProjectCredentialStatus,
   type ProjectDiff,
+  type ProjectDiffPage,
   type ProjectFileStatus,
   type ProjectGitStatus,
   type ProjectPushReceipt,
@@ -54,6 +55,7 @@ function cloneIsActive(operation: ProjectCloneOperation | null) {
 
 type CreateMode = 'create' | 'clone' | null;
 type ProjectTab = 'files' | 'changes';
+type DiffMode = 'staged' | 'unstaged';
 
 function errorText(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
@@ -131,7 +133,10 @@ type Props = {
   onChatInProject?: (project: LocalProject) => void;
   onClose: () => void;
   onDismiss?: () => void;
-  onOpenFiles: (project: LocalProject) => void;
+  onOpenFiles: (
+    project: LocalProject,
+    isCurrent?: () => boolean,
+  ) => void | Promise<void>;
   onUnbindFromChat?: () => void;
 };
 
@@ -158,11 +163,21 @@ export function ProjectsSurface({
   const [projects, setProjects] = useState<LocalProject[]>([]);
   const [selected, setSelected] = useState<LocalProject | null>(null);
   const [status, setStatus] = useState<ProjectGitStatus | null>(null);
-  const [diff, setDiff] = useState<ProjectDiff | null>(null);
+  const [diffs, setDiffs] = useState<{
+    staged: ProjectDiff | null;
+    unstaged: ProjectDiff | null;
+  }>({ staged: null, unstaged: null });
+  const [diffMode, setDiffMode] = useState<DiffMode>('unstaged');
+  const diffModeRef = useRef<DiffMode | null>(null);
+  const [diffPage, setDiffPage] = useState<ProjectDiffPage | null>(null);
+  const [pageHistory, setPageHistory] = useState<number[]>([]);
+  const diffRevision = useRef(0);
+  const diff = diffs[diffMode];
   const [credential, setCredential] = useState<ProjectCredentialStatus | null>(
     null,
   );
   const [tab, setTab] = useState<ProjectTab>('files');
+  const detailScroll = useRef<React.ComponentRef<typeof ScrollView>>(null);
   const [createMode, setCreateMode] = useState<CreateMode>(null);
   const [name, setName] = useState('');
   const [cloneUrl, setCloneUrl] = useState('');
@@ -228,7 +243,12 @@ export function ProjectsSurface({
       remoteDraftRevision.current += 1;
       setSelected(project);
       setStatus(null);
-      setDiff(null);
+      setDiffs({ staged: null, unstaged: null });
+      diffModeRef.current = null;
+      setDiffMode('unstaged');
+      diffRevision.current += 1;
+      setDiffPage(null);
+      setPageHistory([]);
       setCredential(null);
       setReceipt(null);
       setRemoteUrl(project?.origin_url ?? '');
@@ -286,23 +306,37 @@ export function ProjectsSurface({
   const loadDetail = useCallback(
     async (project: LocalProject) => {
       if (!tasks.visible || selectedRef.current?.id !== project.id) return;
+      diffRevision.current += 1;
+      setDiffPage(null);
+      setPageHistory([]);
       const task = beginTask('detail');
       setError(null);
       try {
-        const [nextStatus, nextDiff, nextCredential, nextReceipts] =
-          await Promise.all([
-            LocalProjects.status(project.id),
-            LocalProjects.diff(project.id),
-            project.origin_url === null
-              ? Promise.resolve(null)
-              : LocalProjects.credentialStatus(project.id),
-            project.origin_url === null
-              ? Promise.resolve(null)
-              : LocalProjects.pushReceipts(project.id),
-          ]);
+        const [
+          nextStatus,
+          unstagedDiff,
+          stagedDiff,
+          nextCredential,
+          nextReceipts,
+        ] = await Promise.all([
+          LocalProjects.status(project.id),
+          LocalProjects.diff(project.id, { staged: false }),
+          LocalProjects.diff(project.id, { staged: true }),
+          project.origin_url === null
+            ? Promise.resolve(null)
+            : LocalProjects.credentialStatus(project.id),
+          project.origin_url === null
+            ? Promise.resolve(null)
+            : LocalProjects.pushReceipts(project.id),
+        ]);
         if (!tasks.owns(task)) return;
         setStatus(nextStatus);
-        setDiff(nextDiff);
+        setDiffs({ unstaged: unstagedDiff, staged: stagedDiff });
+        const mode =
+          diffModeRef.current ??
+          (hasStagedChanges(nextStatus) ? 'staged' : 'unstaged');
+        diffModeRef.current = mode;
+        setDiffMode(mode);
         setCredential(nextCredential);
         setReceipt(
           nextReceipts === null || nextReceipts.receipts.length === 0
@@ -348,7 +382,7 @@ export function ProjectsSurface({
       setTab('files');
       setNotice(null);
       setStatus(null);
-      setDiff(null);
+      setDiffs({ staged: null, unstaged: null });
       setCredential(null);
       setRemoteUrl(project.origin_url ?? '');
     },
@@ -540,10 +574,11 @@ export function ProjectsSurface({
     try {
       const nextStatus = await LocalProjects.stageAll(selected.id);
       if (!tasks.owns(task)) return;
-      const nextDiff = await LocalProjects.diff(selected.id, { staged: true });
-      if (!tasks.owns(task)) return;
+      diffModeRef.current = 'staged';
+      setDiffMode('staged');
       setStatus(nextStatus);
-      setDiff(nextDiff);
+      await loadDetail(selected);
+      if (!tasks.owns(task)) return;
       setNotice(t('projects.stagedSuccess'));
     } catch (caught) {
       if (!tasks.owns(task)) return;
@@ -551,7 +586,68 @@ export function ProjectsSurface({
     } finally {
       finishTask(task);
     }
-  }, [beginTask, finishTask, selected, status?.entries.length, t, tasks]);
+  }, [
+    beginTask,
+    finishTask,
+    loadDetail,
+    selected,
+    status?.entries.length,
+    t,
+    tasks,
+  ]);
+
+  const chooseDiffMode = useCallback((mode: DiffMode) => {
+    diffModeRef.current = mode;
+    setDiffMode(mode);
+    diffRevision.current += 1;
+    setDiffPage(null);
+    setPageHistory([]);
+  }, []);
+
+  const reviewDiffPage = useCallback(
+    async (offset: number, snapshot: string | null, history: number[]) => {
+      const project = selectedRef.current;
+      if (project === null || !tasks.visible) return;
+      const mode = diffModeRef.current ?? 'unstaged';
+      const revision = diffRevision.current;
+      const task = beginTask('diff');
+      setError(null);
+      try {
+        const page = await LocalProjects.diffPage(
+          project.id,
+          mode === 'staged',
+          offset,
+          snapshot,
+        );
+        if (!tasks.owns(task) || revision !== diffRevision.current) return;
+        setDiffPage(page);
+        setPageHistory(history);
+      } catch (caught) {
+        if (!tasks.owns(task) || revision !== diffRevision.current) return;
+        setDiffPage(null);
+        setPageHistory([]);
+        setError(t('projects.operationFailed', { error: errorText(caught) }));
+      } finally {
+        finishTask(task);
+      }
+    },
+    [beginTask, finishTask, t, tasks],
+  );
+
+  const openFiles = useCallback(async () => {
+    const project = selectedRef.current;
+    if (project === null || !tasks.visible || tasks.busy) return;
+    const task = beginTask('files');
+    setError(null);
+    try {
+      await onOpenFiles(project, () => tasks.owns(task));
+    } catch (caught) {
+      if (tasks.owns(task))
+        setError(t('projects.operationFailed', { error: errorText(caught) }));
+    } finally {
+      finishTask(task);
+    }
+  }, [beginTask, finishTask, onOpenFiles, t, tasks]);
 
   const commit = useCallback(async () => {
     if (
@@ -914,8 +1010,24 @@ export function ProjectsSurface({
             onOpenProject={openProject}
             onSubmit={finishCreation}
           />
+        ) : diffPage !== null ? (
+          <ScrollView contentContainerStyle={styles.detailContent}>
+            <ChangesPanel
+              busy={busy}
+              diff={diff}
+              diffMode={diffMode}
+              diffPage={diffPage}
+              pageHistory={pageHistory}
+              onChooseDiffMode={chooseDiffMode}
+              onReviewPage={reviewDiffPage}
+              status={status}
+              styles={styles}
+              onStageAll={stageAll}
+            />
+          </ScrollView>
         ) : (
           <ScrollView
+            ref={detailScroll}
             contentContainerStyle={styles.detailContent}
             keyboardDismissMode="interactive"
             keyboardShouldPersistTaps="handled"
@@ -1022,7 +1134,9 @@ export function ProjectsSurface({
                 <Pressable
                   accessibilityLabel={t('projects.openFiles')}
                   accessibilityRole="button"
-                  onPress={() => onOpenFiles(selected)}
+                  disabled={busy}
+                  accessibilityState={{ disabled: busy }}
+                  onPress={() => openFiles().catch(() => undefined)}
                   style={({ pressed }) => [
                     styles.secondaryButton,
                     pressed && styles.pressed,
@@ -1037,6 +1151,11 @@ export function ProjectsSurface({
               <ChangesPanel
                 busy={busy}
                 diff={diff}
+                diffMode={diffMode}
+                diffPage={diffPage}
+                pageHistory={pageHistory}
+                onChooseDiffMode={chooseDiffMode}
+                onReviewPage={reviewDiffPage}
                 status={status}
                 styles={styles}
                 onStageAll={stageAll}
@@ -1045,6 +1164,22 @@ export function ProjectsSurface({
 
             <SectionLabel label={t('projects.commitSection')} styles={styles} />
             <View style={styles.card}>
+              {hasStagedChanges(status) && (
+                <Pressable
+                  accessibilityRole="button"
+                  accessibilityLabel={t('projects.reviewStaged')}
+                  onPress={() => {
+                    setTab('changes');
+                    chooseDiffMode('staged');
+                    detailScroll.current?.scrollTo({ y: 0, animated: true });
+                  }}
+                  style={styles.secondaryButton}
+                >
+                  <Text style={styles.secondaryButtonText}>
+                    {t('projects.reviewStaged')}
+                  </Text>
+                </Pressable>
+              )}
               <Field
                 label={t('projects.commitMessage')}
                 multiline
@@ -1552,12 +1687,26 @@ function ProjectList({
 }
 
 function ChangesPanel({
+  diffMode,
+  diffPage,
+  pageHistory,
+  onChooseDiffMode,
+  onReviewPage,
   busy,
   diff,
   status,
   styles,
   onStageAll,
 }: {
+  diffMode: DiffMode;
+  diffPage: ProjectDiffPage | null;
+  pageHistory: number[];
+  onChooseDiffMode: (mode: DiffMode) => void;
+  onReviewPage: (
+    offset: number,
+    snapshot: string | null,
+    history: number[],
+  ) => Promise<void>;
   busy: boolean;
   diff: ProjectDiff | null;
   status: ProjectGitStatus | null;
@@ -1573,16 +1722,73 @@ function ChangesPanel({
       </View>
     );
   }
+  const entries = (status?.entries ?? []).filter(entry =>
+    hasStatus(
+      diffMode === 'staged' ? entry.index_status : entry.worktree_status,
+    ),
+  );
+  const shown = diffPage ?? diff;
+  const previewClipped = diffPage === null && (diff?.patch.length ?? 0) > 16000;
+  let patch = shown?.patch ?? '';
+  if (previewClipped) {
+    patch = patch.slice(0, 16000);
+    if (/[\uD800-\uDBFF]$/u.test(patch)) patch = patch.slice(0, -1);
+  }
   return (
     <View style={styles.card}>
-      {(status?.entries ?? []).map(entry => (
+      {diffPage !== null && (
+        <Pressable
+          accessibilityRole="button"
+          accessibilityLabel={t('projects.backToChanges')}
+          onPress={() => onChooseDiffMode(diffMode)}
+          style={styles.formCancel}
+        >
+          <Text style={styles.formCancelText}>
+            {t('projects.backToChanges')}
+          </Text>
+        </Pressable>
+      )}
+      <View style={styles.tabs}>
+        {(['staged', 'unstaged'] as const).map(mode => (
+          <Pressable
+            key={mode}
+            accessibilityRole="tab"
+            accessibilityLabel={t(`projects.diffMode.${mode}`)}
+            accessibilityState={{ selected: diffMode === mode }}
+            onPress={() => onChooseDiffMode(mode)}
+            style={[styles.tab, diffMode === mode && styles.tabSelected]}
+          >
+            <Text
+              style={[
+                styles.tabText,
+                diffMode === mode && styles.tabTextSelected,
+              ]}
+            >
+              {t(`projects.diffMode.${mode}`)}
+            </Text>
+          </Pressable>
+        ))}
+      </View>
+      <Text style={styles.cardBody}>{t(`projects.diffScope.${diffMode}`)}</Text>
+      {(diffPage === null ? entries : []).map(entry => (
         <View key={entry.path} style={styles.changeRow}>
           <View style={styles.flex}>
             <Text numberOfLines={1} style={styles.changePath}>
               {entry.path}
             </Text>
             <View style={styles.changeLabels}>
-              {changeLabels(entry, t).map(label => (
+              {changeLabels(
+                {
+                  ...entry,
+                  index_status:
+                    diffMode === 'staged' ? entry.index_status : 'unmodified',
+                  worktree_status:
+                    diffMode === 'unstaged'
+                      ? entry.worktree_status
+                      : 'unmodified',
+                },
+                t,
+              ).map(label => (
                 <Text key={label} style={styles.changeKind}>
                   {label}
                 </Text>
@@ -1591,9 +1797,9 @@ function ChangesPanel({
           </View>
         </View>
       ))}
-      {diff !== null && diff.files.length > 0 && (
+      {shown !== null && shown.files.length > 0 && (
         <View style={styles.diffSummary}>
-          {diff.files.map(file => (
+          {shown.files.map(file => (
             <View key={file.path} style={styles.diffFileRow}>
               <Text numberOfLines={1} style={styles.diffFilePath}>
                 {file.path}
@@ -1604,27 +1810,168 @@ function ChangesPanel({
           ))}
         </View>
       )}
-      <ScrollView horizontal style={styles.patchScroller}>
-        <Text selectable style={styles.patch}>
-          {diff?.patch || t('projects.diffUnavailable')}
+      {(diff?.truncated || previewClipped) && diffPage === null && (
+        <Text accessibilityRole="alert" style={styles.cardBody}>
+          {t('projects.diffTruncated')}
         </Text>
-      </ScrollView>
+      )}
+      {diffPage !== null && (
+        <Text style={styles.cardBody}>
+          {t('projects.diffPageNumber', { page: pageHistory.length + 1 })}
+        </Text>
+      )}
+      {diffPage !== null && diffPage.omitted_paths.length > 0 && (
+        <Text accessibilityRole="alert" style={styles.cardBody}>
+          {t('projects.diffOmitted', {
+            paths: diffPage.omitted_paths.join(', '),
+          })}
+        </Text>
+      )}
+      {diffPage !== null && (
+        <View style={styles.formActions}>
+          <Pressable
+            accessibilityRole="button"
+            accessibilityLabel={t('projects.diffPrevious')}
+            disabled={busy || pageHistory.length === 0}
+            accessibilityState={{ disabled: busy || pageHistory.length === 0 }}
+            onPress={() =>
+              onReviewPage(
+                pageHistory[pageHistory.length - 1] ?? 0,
+                diffPage.snapshot_id,
+                pageHistory.slice(0, -1),
+              ).catch(() => undefined)
+            }
+            style={[
+              styles.formCancel,
+              (busy || pageHistory.length === 0) && styles.disabled,
+            ]}
+          >
+            <Text style={styles.formCancelText}>
+              {t('projects.diffPrevious')}
+            </Text>
+          </Pressable>
+          <Pressable
+            accessibilityRole="button"
+            accessibilityLabel={t('projects.diffNext')}
+            disabled={busy || diffPage.next_offset === null}
+            accessibilityState={{
+              disabled: busy || diffPage.next_offset === null,
+            }}
+            onPress={() => {
+              if (diffPage.next_offset !== null)
+                onReviewPage(diffPage.next_offset, diffPage.snapshot_id, [
+                  ...pageHistory,
+                  diffPage.page_offset,
+                ]).catch(() => undefined);
+            }}
+            style={[
+              styles.formSubmit,
+              (busy || diffPage.next_offset === null) && styles.disabled,
+            ]}
+          >
+            <Text style={styles.formSubmitText}>{t('projects.diffNext')}</Text>
+          </Pressable>
+        </View>
+      )}
+      {diffPage === null && (diff?.files.length ?? 0) > 0 && (
+        <Pressable
+          accessibilityRole="button"
+          accessibilityLabel={t('projects.reviewDiffPages')}
+          disabled={busy}
+          onPress={() => onReviewPage(0, null, []).catch(() => undefined)}
+          style={styles.secondaryButton}
+        >
+          <Text style={styles.secondaryButtonText}>
+            {t('projects.reviewDiffPages')}
+          </Text>
+        </Pressable>
+      )}
+      <DiffPatch
+        key={`${diffMode}:${diffPage?.snapshot_id ?? 'preview'}:${
+          diffPage?.page_offset ?? 0
+        }`}
+        patch={
+          patch ||
+          t(
+            diffMode === 'staged'
+              ? 'projects.noStagedDiff'
+              : 'projects.noUnstagedDiff',
+          )
+        }
+        styles={styles}
+      />
       <Pressable
         accessibilityLabel={t('projects.stageAll')}
         accessibilityRole="button"
         accessibilityState={{
-          disabled: busy || (status?.entries.length ?? 0) === 0,
+          disabled:
+            busy ||
+            !(
+              status?.entries.some(entry => hasStatus(entry.worktree_status)) ??
+              false
+            ),
         }}
-        disabled={busy || (status?.entries.length ?? 0) === 0}
+        disabled={
+          busy ||
+          !(
+            status?.entries.some(entry => hasStatus(entry.worktree_status)) ??
+            false
+          )
+        }
         onPress={() => onStageAll().catch(() => undefined)}
         style={({ pressed }) => [
           styles.secondaryButton,
-          (busy || (status?.entries.length ?? 0) === 0) && styles.disabled,
+          (busy ||
+            !(
+              status?.entries.some(entry => hasStatus(entry.worktree_status)) ??
+              false
+            )) &&
+            styles.disabled,
           pressed && styles.pressed,
         ]}
       >
         <Text style={styles.secondaryButtonText}>{t('projects.stageAll')}</Text>
       </Pressable>
+    </View>
+  );
+}
+
+function DiffPatch({
+  patch,
+  styles,
+}: {
+  patch: string;
+  styles: ReturnType<typeof createStyles>;
+}) {
+  // Small Text blocks avoid iOS's large-text layout ceiling. Full pages use
+  // the surface's single native ScrollView; previews deliberately stay clipped.
+  const chunks = useMemo(() => {
+    const result: string[] = [];
+    let group: string[] = [];
+    let length = 0;
+    for (const line of patch.split('\n')) {
+      const parts =
+        line.length <= 1024 ? [line] : line.match(/.{1,512}/gu) ?? [''];
+      for (const part of parts) {
+        if (length + part.length > 1024 && group.length > 0) {
+          result.push(group.join('\n'));
+          group = [];
+          length = 0;
+        }
+        group.push(part);
+        length += part.length + 1;
+      }
+    }
+    if (group.length > 0) result.push(group.join('\n'));
+    return result;
+  }, [patch]);
+  return (
+    <View style={[styles.patchScroller, { padding: 12 }]}>
+      {chunks.map((text, index) => (
+        <Text key={index} selectable style={[styles.patch, { padding: 0 }]}>
+          {text || ' '}
+        </Text>
+      ))}
     </View>
   );
 }
@@ -1967,7 +2314,6 @@ const createStyles = (colors: ThemePalette) =>
       marginLeft: 8,
     },
     patchScroller: {
-      maxHeight: 260,
       borderRadius: 12,
       backgroundColor: colors.background,
       marginTop: 10,

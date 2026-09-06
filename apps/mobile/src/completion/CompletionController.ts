@@ -1,3 +1,4 @@
+import { approvalMessageBudget } from '../agent/approvalMessage';
 import type {
   CompleteRoundV2Request,
   CompleteRoundV2Result,
@@ -1223,21 +1224,7 @@ export function createCompletionController(
       if (record.status !== 'denied' || record.message === undefined) return null;
       if (typeof record.message !== 'string') return null;
       const message = record.message;
-      let bytes = 0;
-      for (let index = 0; index < message.length; index += 1) {
-        const unit = message.charCodeAt(index);
-        if (unit <= 0x7f) bytes += 1;
-        else if (unit <= 0x7ff) bytes += 2;
-        else if (unit >= 0xd800 && unit <= 0xdbff) {
-          const next = message.charCodeAt(index + 1);
-          if (next < 0xdc00 || next > 0xdfff) return null;
-          bytes += 4;
-          index += 1;
-        } else if (unit >= 0xdc00 && unit <= 0xdfff) return null;
-        else bytes += 3;
-        if (bytes > 2000) return null;
-      }
-      return message;
+      return approvalMessageBudget(message).valid ? message : null;
     } catch {
       return null;
     }

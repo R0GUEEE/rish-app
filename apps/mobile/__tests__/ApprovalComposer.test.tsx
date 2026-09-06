@@ -93,12 +93,18 @@ test('shows the tool call, the preview, the offered scopes, and allow/deny actio
   const root = renderer.root;
   expect(root.findByProps({ testID: 'approval-composer-card' })).toBeDefined();
   expect(root.findByProps({ testID: 'approval-scope-once' })).toBeDefined();
-  expect(root.findByProps({ testID: 'approval-scope-conversation' })).toBeDefined();
+  expect(
+    root.findByProps({ testID: 'approval-scope-conversation' }),
+  ).toBeDefined();
   expect(root.findByProps({ testID: 'approval-allow' })).toBeDefined();
   expect(root.findByProps({ testID: 'approval-deny' })).toBeDefined();
   // The gated tool and its native-computed preview are visible.
-  expect(root.findAllByProps({ children: 'write_file' }).length).toBeGreaterThan(0);
-  expect(root.findByProps({ testID: 'approval-preview-path' }).props.children).toBe('notes.md');
+  expect(
+    root.findAllByProps({ children: 'write_file' }).length,
+  ).toBeGreaterThan(0);
+  expect(
+    root.findByProps({ testID: 'approval-preview-path' }).props.children,
+  ).toBe('notes.md');
   expect(root.findByProps({ testID: 'approval-diff' })).toBeDefined();
 });
 
@@ -124,7 +130,10 @@ test('allow submits the conversation scope after selection', async () => {
     allow.props.onPress();
   });
   expect(onDecide).toHaveBeenCalledWith([
-    { approvalId: 'ap-1', decision: { status: 'approved', scope: 'conversation' } },
+    {
+      approvalId: 'ap-1',
+      decision: { status: 'approved', scope: 'conversation' },
+    },
   ]);
 });
 
@@ -239,7 +248,9 @@ test('an absent-prior write with no diff preview shows the new-file text, not bi
   const diff = byTestId(root, 'approval-diff-new-file');
   const text = ([] as unknown[]).concat(diff.props.children).join('');
   expect(text).toContain('New file: no diff to show');
-  expect(root.findAllByProps({ testID: 'approval-diff-binary' })).toHaveLength(0);
+  expect(root.findAllByProps({ testID: 'approval-diff-binary' })).toHaveLength(
+    0,
+  );
   expect(
     root.findAllByProps({ children: 'Binary content: no text preview' }),
   ).toHaveLength(0);
@@ -285,5 +296,135 @@ test('listing the workspace root names the root rather than an empty path', asyn
     },
   };
   const { renderer } = await renderComposer([rootListing]);
-  expect(byTestId(renderer.root, 'approval-preview-path').props.children).toBe('Workspace root');
+  expect(byTestId(renderer.root, 'approval-preview-path').props.children).toBe(
+    'Workspace root',
+  );
+});
+
+test('single Chinese overflow is preserved and cannot submit, including a queued old button', async () => {
+  const { renderer, onDecide } = await renderComposer();
+  const oldDeny = byTestId(renderer.root, 'approval-deny').props.onPress;
+  const message = '拒'.repeat(667);
+  await act(async () => {
+    byTestId(renderer.root, 'approval-deny-message').props.onChangeText(
+      message,
+    );
+    oldDeny();
+  });
+  expect(byTestId(renderer.root, 'approval-deny-message').props.value).toBe(
+    message,
+  );
+  expect(
+    byTestId(renderer.root, 'approval-deny-message').props.maxLength,
+  ).toBeUndefined();
+  expect(byTestId(renderer.root, 'approval-deny').props.disabled).toBe(true);
+  expect(
+    renderer.root.findByProps({ children: '2001/2000 UTF-8 bytes' }),
+  ).toBeDefined();
+  expect(onDecide).not.toHaveBeenCalled();
+  const valid = '拒'.repeat(666) + 'ab';
+  await act(async () =>
+    byTestId(renderer.root, 'approval-deny-message').props.onChangeText(valid),
+  );
+  await act(async () =>
+    byTestId(renderer.root, 'approval-deny').props.onPress(),
+  );
+  expect(onDecide).toHaveBeenCalledWith([
+    {
+      approvalId: request.approvalId,
+      decision: { status: 'denied', message: valid },
+    },
+  ]);
+});
+
+test('batch overflow blocks the entire submission without clipping the draft', async () => {
+  const { renderer, onDecide } = await renderComposer([request, secondRequest]);
+  const oldCommit = byTestId(renderer.root, 'approval-batch-commit').props
+    .onPress;
+  await act(async () =>
+    byTestId(renderer.root, 'approval-item-0-once').props.onPress(),
+  );
+  const message = '😀'.repeat(501);
+  await act(async () => {
+    byTestId(renderer.root, 'approval-item-1-deny-message').props.onChangeText(
+      message,
+    );
+    oldCommit();
+  });
+  expect(
+    byTestId(renderer.root, 'approval-item-1-deny-message').props.value,
+  ).toBe(message);
+  expect(byTestId(renderer.root, 'approval-batch-commit').props.disabled).toBe(
+    true,
+  );
+  expect(renderer.root.findByProps({
+    children: 'Review rejection reasons for calls 2. Each must be valid UTF-8 and at most 2000 bytes.',
+  })).toBeDefined();
+  expect(onDecide).not.toHaveBeenCalled();
+  const valid = ' 😀 '.repeat(333); // 1998 bytes, whitespace must stay exact.
+  await act(async () =>
+    byTestId(renderer.root, 'approval-item-1-deny-message').props.onChangeText(
+      valid,
+    ),
+  );
+  await act(async () =>
+    byTestId(renderer.root, 'approval-batch-commit').props.onPress(),
+  );
+  expect(onDecide.mock.calls[0][0][1].decision.message).toBe(valid);
+});
+
+test('invalid Unicode displays an error and keeps the reason editable', async () => {
+  const { renderer, onDecide } = await renderComposer();
+  await act(async () =>
+    byTestId(renderer.root, 'approval-deny-message').props.onChangeText(
+      '\ud800',
+    ),
+  );
+  expect(byTestId(renderer.root, 'approval-deny').props.disabled).toBe(true);
+  expect(
+    renderer.root.findByProps({
+      children:
+        'Reason contains an invalid Unicode character. Edit it before submitting.',
+    }),
+  ).toBeDefined();
+  await act(async () =>
+    byTestId(renderer.root, 'approval-deny').props.onPress(),
+  );
+  expect(onDecide).not.toHaveBeenCalled();
+});
+
+test('callbacks from a replaced single request cannot discard the new draft', async () => {
+  const { renderer, onDecide } = await renderComposer();
+  const oldDeny = byTestId(renderer.root, 'approval-deny').props.onPress;
+  const oldClose = byTestId(renderer.root, 'approval-composer-modal').props
+    .onRequestClose;
+  await act(async () =>
+    renderer.update(
+      presentation(
+        <ApprovalComposer requests={[secondRequest]} onDecide={onDecide} />,
+      ),
+    ),
+  );
+  await act(async () =>
+    byTestId(renderer.root, 'approval-deny-message').props.onChangeText(
+      'keep this reason',
+    ),
+  );
+  await act(async () => {
+    oldDeny();
+    oldClose();
+  });
+  expect(onDecide).not.toHaveBeenCalled();
+  expect(byTestId(renderer.root, 'approval-deny-message').props.value).toBe(
+    'keep this reason',
+  );
+  await act(async () =>
+    byTestId(renderer.root, 'approval-deny').props.onPress(),
+  );
+  expect(onDecide).toHaveBeenCalledWith([
+    {
+      approvalId: secondRequest.approvalId,
+      decision: { status: 'denied', message: 'keep this reason' },
+    },
+  ]);
 });

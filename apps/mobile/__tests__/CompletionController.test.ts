@@ -2964,7 +2964,7 @@ describe('project Agent completion controller', () => {
     });
   });
 
-  test('presents a batch of gated calls as one list and persists each decision', async () => {
+  test.each([{ label: 'ASCII', reason: 'no commits right now' }, { label: 'Chinese byte boundary', reason: '拒'.repeat(666) + 'ab' }, { label: 'emoji byte boundary', reason: '😀'.repeat(500) }])('persists batch decisions and exact denial text: $label', async ({ reason }) => {
     const store = agentStore();
     const conversationId = store.getState().selectedConversationId!;
     const runtime = makeRuntime([]);
@@ -2986,7 +2986,7 @@ describe('project Agent completion controller', () => {
         expect(requests[1]?.preview?.kind).toBe('git_commit');
         return [
           { status: 'approved', scope: 'once' },
-          { status: 'denied', message: 'no commits right now' },
+          { status: 'denied', message: reason },
         ];
       },
     );
@@ -3017,7 +3017,7 @@ describe('project Agent completion controller', () => {
     expect(bindMock.mock.calls[1]?.[0]).toMatchObject({
       call_id: 'commit-call',
       decision: 'denied',
-      deny_message: 'no commits right now',
+      deny_message: reason,
     });
     // The denied call never executes; only the allowed write does.
     const executeMock = runtime.executeAgentTool as jest.Mock;

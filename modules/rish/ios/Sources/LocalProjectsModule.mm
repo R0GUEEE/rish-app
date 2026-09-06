@@ -1,4 +1,5 @@
 #import <Foundation/Foundation.h>
+#import <CommonCrypto/CommonDigest.h>
 #import <React/RCTBridgeModule.h>
 #import <React/RCTUtils.h>
 #import <Security/Security.h>
@@ -969,6 +970,9 @@ typedef void (^LPCredentialPromptHook)(NSString *host, BOOL chinese,
 @property(nonatomic, strong, nullable) DSHLocalProjectsRootLease *pendingRootLease;
 @property(nonatomic, copy, nullable) LPV2AttachFaultHook v2AttachFaultHook;
 @property(nonatomic, copy, nullable) void (^clonePhaseHook)(NSString *phase);
+- (nullable NSDictionary *)diffForRepository:(git_repository *)repository projectId:(NSString *)projectId
+  staged:(BOOL)staged contextLines:(NSUInteger)contextLines pageOffset:(NSNumber *)pageOffset
+  expectedSnapshot:(NSString *)expectedSnapshot error:(NSError **)error;
 - (nullable NSDictionary *)clonePublicRepositoryAtURL:(NSURL *)remoteURL name:(NSString *)name proxyURL:(NSString *)proxyURL operation:(LPCloneOperation *)operation error:(NSError **)error;
 - (BOOL)stagingEntryIsExactForProjectId:(NSString *)projectId
                                   error:(NSError **)error;
@@ -3261,6 +3265,27 @@ RCT_REMAP_METHOD(status,
                               staged:(BOOL)staged
                         contextLines:(NSUInteger)contextLines
                                error:(NSError **)error {
+  return [self diffForRepository:repository projectId:projectId staged:staged
+    contextLines:contextLines pageOffset:nil expectedSnapshot:nil error:error];
+}
+
+- (NSDictionary *)diffForRepository:(git_repository *)repository
+                           projectId:(NSString *)projectId
+                              staged:(BOOL)staged
+                        contextLines:(NSUInteger)contextLines
+                          pageOffset:(NSNumber *)pageOffset
+                    expectedSnapshot:(NSString *)expectedSnapshot
+                               error:(NSError **)error {
+  BOOL paged = pageOffset != nil;
+  NSUInteger offset = pageOffset.unsignedIntegerValue;
+  const NSUInteger pageLimit = 64 * 1024;
+  const NSUInteger reviewLimit = 64 * 1024 * 1024;
+  CC_SHA256_CTX digest;
+  CC_SHA256_Init(&digest);
+  CC_SHA256_Update(&digest, staged ? "staged" : "unstaged", staged ? 6 : 8);
+  NSMutableArray<NSString *> *omitted = [NSMutableArray array];
+  NSUInteger totalBytes = 0;
+  BOOL pageClosed = NO;
   git_diff_options options = GIT_DIFF_OPTIONS_INIT;
   options.context_lines = (uint32_t)contextLines;
   options.max_size = 4 * 1024 * 1024;
@@ -3327,16 +3352,53 @@ RCT_REMAP_METHOD(status,
       @"additions": @(additions),
       @"deletions": @(deletions),
     }];
-    if (patch != nullptr && !truncated) {
+    if (paged && (delta->flags & GIT_DIFF_FLAG_BINARY)) [omitted addObject:path];
+    if (patch != nullptr && (paged || !truncated)) {
       git_buf buffer = GIT_BUF_INIT;
       if (git_patch_to_buf(&buffer, patch) == 0 && buffer.ptr != nullptr && buffer.size > 0) {
         NSString *text = [[NSString alloc] initWithBytes:buffer.ptr
                                                   length:buffer.size
                                                 encoding:NSUTF8StringEncoding];
         if (text == nil) {
+          if (paged && ![omitted containsObject:path]) [omitted addObject:path];
           text = [NSString stringWithFormat:@"Binary or non-UTF-8 diff omitted: %@\n", path];
         }
         NSData *encoded = [text dataUsingEncoding:NSUTF8StringEncoding];
+        if (paged) {
+          CC_SHA256_Update(&digest, encoded.bytes, (CC_LONG)encoded.length);
+          CC_SHA256_Update(&digest, delta->old_file.id.id, GIT_OID_SHA1_SIZE);
+          CC_SHA256_Update(&digest, delta->new_file.id.id, GIT_OID_SHA1_SIZE);
+          if (encoded.length > reviewLimit - totalBytes) {
+            git_buf_dispose(&buffer); git_patch_free(patch); git_diff_free(diff);
+            if (error != nil) *error = LPError(3042, @"Diff exceeds the 64 MiB review limit");
+            return nil;
+          }
+          NSUInteger start = offset > totalBytes ? MIN(offset - totalBytes, encoded.length) : 0;
+          NSUInteger take = pageClosed ? 0 : MIN(encoded.length - start, pageLimit - usedBytes);
+          if (take > 0) {
+            // Reject an offset inside a UTF-8 code point before trying suffixes.
+            if ((((const uint8_t *)encoded.bytes)[start] & 0xC0) == 0x80) {
+              git_buf_dispose(&buffer); git_patch_free(patch); git_diff_free(diff);
+              if (error != nil) *error = LPError(3040, @"Diff page offset is invalid");
+              return nil;
+            }
+            NSString *piece = nil;
+            while (take > 0 && piece == nil) {
+              piece = [[NSString alloc] initWithBytes:(const uint8_t *)encoded.bytes + start
+                length:take encoding:NSUTF8StringEncoding];
+              if (piece == nil) take -= 1;
+            }
+            if (piece == nil) {
+              git_buf_dispose(&buffer); git_patch_free(patch); git_diff_free(diff);
+              if (error != nil) *error = LPError(3040, @"Diff page offset is invalid");
+              return nil;
+            }
+            [patchText appendString:piece];
+            usedBytes += take;
+            if (start + take < encoded.length) pageClosed = YES;
+          }
+          totalBytes += encoded.length;
+        } else {
         NSUInteger remaining = LPMaxDiffBytes - usedBytes;
         if (encoded.length <= remaining) {
           [patchText appendString:text];
@@ -3353,12 +3415,41 @@ RCT_REMAP_METHOD(status,
           usedBytes = LPMaxDiffBytes;
           truncated = YES;
         }
+        }
+      } else if (paged) {
+        git_buf_dispose(&buffer); git_patch_free(patch); git_diff_free(diff);
+        if (error != nil) *error = LPError(3025, @"Repository diff text is unavailable");
+        return nil;
       }
       git_buf_dispose(&buffer);
+    }
+    if (paged && patch == nullptr) {
+      git_diff_free(diff);
+      if (error != nil) *error = LPError(3025, @"Repository diff text is unavailable");
+      return nil;
     }
     if (patch != nullptr) git_patch_free(patch);
   }
   git_diff_free(diff);
+  if (paged) {
+    unsigned char bytes[CC_SHA256_DIGEST_LENGTH];
+    CC_SHA256_Final(bytes, &digest);
+    NSMutableString *snapshot = [NSMutableString string];
+    for (NSUInteger i = 0; i < sizeof(bytes); i++) [snapshot appendFormat:@"%02x", bytes[i]];
+    if (expectedSnapshot != nil && ![snapshot isEqual:expectedSnapshot]) {
+      if (error != nil) *error = LPError(3041, @"Diff changed; restart the review");
+      return nil;
+    }
+    if (offset > totalBytes) {
+      if (error != nil) *error = LPError(3040, @"Diff page offset is invalid");
+      return nil;
+    }
+    BOOL more = offset + usedBytes < totalBytes;
+    return @{@"schema_version": @1, @"project_id": projectId, @"staged": @(staged),
+      @"truncated": @(more), @"patch": patchText, @"files": files,
+      @"page_offset": @(offset), @"next_offset": more ? @(offset + usedBytes) : NSNull.null,
+      @"snapshot_id": snapshot, @"omitted_paths": omitted};
+  }
   return @{
     @"schema_version": @1,
     @"project_id": projectId,
@@ -3402,6 +3493,37 @@ RCT_REMAP_METHOD(diff,
       return;
     }
     resolve(diff);
+  });
+}
+
+RCT_REMAP_METHOD(diffPage,
+                 diffPageForProject:(id)projectIdValue staged:(BOOL)staged
+                 offset:(id)offsetValue snapshot:(id)snapshotValue
+                 resolver:(RCTPromiseResolveBlock)resolve rejecter:(RCTPromiseRejectBlock)reject) {
+  BOOL validOffset = [offsetValue isKindOfClass:NSNumber.class] &&
+    CFGetTypeID((__bridge CFTypeRef)offsetValue) != CFBooleanGetTypeID() &&
+    isfinite([offsetValue doubleValue]) && [offsetValue doubleValue] >= 0 &&
+    [offsetValue doubleValue] <= 64 * 1024 * 1024 &&
+    floor([offsetValue doubleValue]) == [offsetValue doubleValue];
+  NSString *snapshot = snapshotValue == NSNull.null ? nil : LPString(snapshotValue);
+  BOOL validSnapshot = snapshot == nil ? snapshotValue == NSNull.null || snapshotValue == nil
+    : [snapshot rangeOfString:@"^[0-9a-f]{64}$" options:NSRegularExpressionSearch].location != NSNotFound;
+  if (!validOffset || !validSnapshot || ([offsetValue unsignedIntegerValue] > 0 && snapshot == nil)) {
+    reject(@"validation", @"Diff page request is invalid", nil); return;
+  }
+  dispatch_async(self.projectQueue, ^{
+    NSError *error = nil;
+    NSString *projectId = LPString(projectIdValue);
+    __attribute__((objc_precise_lifetime)) DSHLocalProjectLease *lease =
+      [self leaseRepositoryForId:projectId mode:DSHLocalProjectAccessModeRead metadata:nil error:&error];
+    NSDictionary *page = lease == nil ? nil : [self diffForRepository:lease.repository
+      projectId:projectId staged:staged contextLines:3 pageOffset:offsetValue
+      expectedSnapshot:snapshot error:&error];
+    if (page == nil) {
+      reject(error.code == 3041 ? @"diff_changed" : @"git", error.localizedDescription, nil);
+      return;
+    }
+    resolve(page);
   });
 }
 

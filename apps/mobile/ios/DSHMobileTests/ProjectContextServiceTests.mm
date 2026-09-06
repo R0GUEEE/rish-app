@@ -116,6 +116,10 @@ static NSString *DSHSHA256Hex(NSData *data) {
 @end
 
 @interface LocalProjectsModule (DSHProjectContextTests)
+- (void)stageAllForProject:(id)projectId resolver:(void (^)(id))resolve rejecter:(void (^)(NSString *, NSString *, NSError *))reject;
+- (NSDictionary *)diffForRepository:(git_repository *)repository projectId:(NSString *)projectId staged:(BOOL)staged contextLines:(NSUInteger)contextLines error:(NSError **)error;
+- (void)diffPageForProject:(id)projectId staged:(BOOL)staged offset:(id)offset snapshot:(id)snapshot resolver:(void (^)(id))resolve rejecter:(void (^)(NSString *, NSString *, NSError *))reject;
+
 - (void)startCloneURL:(id)url name:(id)name options:(id)options
     resolver:(void (^)(id))resolve rejecter:(void (^)(NSString *, NSString *, NSError *))reject;
 - (void)cloneStatusForOperation:(id)operationId
@@ -5307,6 +5311,135 @@ static NSString *DSHSHA256Hex(NSData *data) {
                           @"project");
     XCTAssertFalse([message hasPrefix:@"HTTPS proxy"]);
   }
+}
+
+// Explicitly gated UI fixture: production create/stage APIs, app process only.
+- (void)testPrepareVisibleDiffReviewFixture {
+  NSString *name = NSProcessInfo.processInfo.environment[@"DSH_DIFF_UI_FIXTURE_NAME"];
+  if (![name isEqual:@"UX04-review-0906"]) { XCTSkip(@"UI fixture was not requested"); return; }
+  LocalProjectsModule *module = [[LocalProjectsModule alloc] init];
+  XCTestExpectation *created = [self expectationWithDescription:@"create UI review fixture"];
+  __block NSDictionary *project = nil;
+  [module createProjectWithName:name resolver:^(id result) { project = result; [created fulfill]; }
+    rejecter:^(NSString *code, NSString *message, __unused NSError *error) {
+      XCTFail(@"UI fixture creation failed: %@ %@", code, message); [created fulfill];
+    }];
+  [self waitForExpectations:@[created] timeout:10];
+  if (project == nil) return;
+  DSHLocalProjectAccess *access = [DSHLocalProjectAccess sharedAccess];
+  __attribute__((objc_precise_lifetime)) DSHLocalProjectLease *lease =
+    [access leaseProjectId:project[@"id"] mode:DSHLocalProjectAccessModeWrite includeMetadata:NO error:nil];
+  XCTAssertNotNil(lease);
+  if (lease == nil) return;
+  NSURL *file = [lease.repositoryURL URLByAppendingPathComponent:@"00-review.txt"];
+  XCTAssertTrue([DSHData(@"index-only-v1\n") writeToURL:file atomically:YES]);
+  NSMutableString *large = [NSMutableString string];
+  for (NSUInteger i = 0; i < 60000; i++) [large appendFormat:@"line-%05lu 中文分页内容\n", (unsigned long)i];
+  XCTAssertTrue([DSHData(large) writeToURL:[lease.repositoryURL URLByAppendingPathComponent:@"large-review.txt"] atomically:YES]);
+  lease = nil;
+  XCTestExpectation *staged = [self expectationWithDescription:@"stage UI fixture"];
+  [module stageAllForProject:project[@"id"] resolver:^(__unused id result) { [staged fulfill]; }
+    rejecter:^(NSString *code, NSString *message, __unused NSError *error) {
+      XCTFail(@"UI fixture stage failed: %@ %@", code, message); [staged fulfill];
+    }];
+  [self waitForExpectations:@[staged] timeout:10];
+  lease = [access leaseProjectId:project[@"id"] mode:DSHLocalProjectAccessModeWrite includeMetadata:NO error:nil];
+  XCTAssertNotNil(lease);
+  if (lease == nil) return;
+  XCTAssertTrue([DSHData(@"worktree-only-v2\n") writeToURL:
+    [lease.repositoryURL URLByAppendingPathComponent:@"00-review.txt"] atomically:YES]);
+  lease = nil;
+  NSLog(@"DIFF_UI_FIXTURE: %@", project);
+}
+
+- (NSDictionary *)reviewPage:(LocalProjectsModule *)module staged:(BOOL)staged
+                       offset:(NSUInteger)offset snapshot:(NSString *)snapshot code:(NSString **)code {
+  XCTestExpectation *done = [self expectationWithDescription:@"diff review page"];
+  __block NSDictionary *value = nil;
+  __block NSString *failure = nil;
+  [module diffPageForProject:DSHFixtureProjectA staged:staged offset:@(offset)
+    snapshot:snapshot ?: NSNull.null resolver:^(id result) { value = result; [done fulfill]; }
+    rejecter:^(NSString *result, __unused NSString *message, __unused NSError *error) { failure = result; [done fulfill]; }];
+  [self waitForExpectations:@[done] timeout:10];
+  if (code != nil) *code = failure;
+  return value;
+}
+
+- (void)testDiffReviewSeparatesIndexAndWorktreeAfterReopen {
+  DSHProjectFixture *fixture = [self createProject:DSHFixtureProjectA name:@"review"
+    initialFile:@"README.md" content:@"base\n" commit:YES];
+  [self writeString:@"index-only\n" relativePath:@"README.md" fixture:fixture];
+  [self addPathToIndex:@"README.md" fixture:fixture];
+  [self writeString:@"worktree-only\n" relativePath:@"README.md" fixture:fixture];
+  for (NSUInteger reopen = 0; reopen < 2; reopen++) {
+    LocalProjectsModule *module = [[LocalProjectsModule alloc] init];
+    [module setValue:self.access forKey:@"projectAccess"];
+    NSDictionary *staged = [self reviewPage:module staged:YES offset:0 snapshot:nil code:nil];
+    NSDictionary *unstaged = [self reviewPage:module staged:NO offset:0 snapshot:nil code:nil];
+    XCTAssertTrue([staged[@"patch"] containsString:@"+index-only"]);
+    XCTAssertFalse([staged[@"patch"] containsString:@"worktree-only"]);
+    XCTAssertTrue([unstaged[@"patch"] containsString:@"-index-only"]);
+    XCTAssertTrue([unstaged[@"patch"] containsString:@"+worktree-only"]);
+    XCTAssertNotEqualObjects(staged[@"snapshot_id"], unstaged[@"snapshot_id"]);
+  }
+}
+
+- (void)testDiffReviewPagesCoverTruncatedUTF8PatchAndRejectChangedSnapshot {
+  DSHProjectFixture *fixture = [self createProject:DSHFixtureProjectA name:@"pages"
+    initialFile:@"large.txt" content:@"base\n" commit:YES];
+  NSMutableString *content = [NSMutableString string];
+  for (NSUInteger i = 0; i < 55000; i++) [content appendFormat:@"%06lu 中文内容-review\n", (unsigned long)i];
+  [content appendString:@"END-OF-REVIEW\n"];
+  [self writeString:content relativePath:@"large.txt" fixture:fixture];
+  [self addPathToIndex:@"large.txt" fixture:fixture];
+  LocalProjectsModule *module = [[LocalProjectsModule alloc] init];
+  [module setValue:self.access forKey:@"projectAccess"];
+  NSDictionary *preview = [module diffForRepository:fixture.repository projectId:DSHFixtureProjectA
+    staged:YES contextLines:3 error:nil];
+  XCTAssertEqualObjects(preview[@"truncated"], @YES);
+  NSMutableString *joined = [NSMutableString string];
+  NSUInteger offset = 0;
+  NSString *snapshot = nil;
+  NSUInteger pages = 0;
+  do {
+    NSDictionary *page = [self reviewPage:module staged:YES offset:offset snapshot:snapshot code:nil];
+    XCTAssertNotNil(page);
+    if (page == nil) return;
+    XCTAssertLessThanOrEqual([page[@"patch"] lengthOfBytesUsingEncoding:NSUTF8StringEncoding], (NSUInteger)65536);
+    [joined appendString:page[@"patch"]];
+    snapshot = page[@"snapshot_id"];
+    pages++;
+    if (page[@"next_offset"] == NSNull.null) break;
+    XCTAssertGreaterThan([page[@"next_offset"] unsignedIntegerValue], offset);
+    offset = [page[@"next_offset"] unsignedIntegerValue];
+  } while (pages < 100);
+  XCTAssertGreaterThan(pages, (NSUInteger)16);
+  XCTAssertTrue([joined hasPrefix:preview[@"patch"]]);
+  XCTAssertTrue([joined hasSuffix:@"+END-OF-REVIEW\n"]);
+  NSArray *lines = [joined componentsSeparatedByString:@"\n"];
+  NSUInteger added = 0;
+  for (NSString *line in lines) if ([line hasPrefix:@"+"] && ![line hasPrefix:@"+++"]) added++;
+  XCTAssertEqual(added, (NSUInteger)55001);
+  [self writeString:@"new index version\n" relativePath:@"large.txt" fixture:fixture];
+  [self addPathToIndex:@"large.txt" fixture:fixture];
+  NSString *code = nil;
+  XCTAssertNil([self reviewPage:module staged:YES offset:65536 snapshot:snapshot code:&code]);
+  XCTAssertEqualObjects(code, @"diff_changed");
+}
+
+- (void)testDiffReviewDisclosesBinaryOmissionAndValidatesCursor {
+  DSHProjectFixture *fixture = [self createProject:DSHFixtureProjectA name:@"binary"
+    initialFile:@"README.md" content:@"base\n" commit:YES];
+  const char bytes[] = {0, 1, 2, 3};
+  [self writeBytes:[NSData dataWithBytes:bytes length:sizeof(bytes)] relativePath:@"binary.bin" fixture:fixture];
+  [self addPathToIndex:@"binary.bin" fixture:fixture];
+  LocalProjectsModule *module = [[LocalProjectsModule alloc] init];
+  [module setValue:self.access forKey:@"projectAccess"];
+  NSDictionary *page = [self reviewPage:module staged:YES offset:0 snapshot:nil code:nil];
+  XCTAssertTrue([page[@"omitted_paths"] containsObject:@"binary.bin"]);
+  NSString *code = nil;
+  XCTAssertNil([self reviewPage:module staged:YES offset:1 snapshot:nil code:&code]);
+  XCTAssertEqualObjects(code, @"validation");
 }
 
 - (NSDictionary *)cloneSnapshot:(LocalProjectsModule *)module {
