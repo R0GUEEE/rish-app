@@ -47,6 +47,8 @@ import { SlidingSurface } from './SlidingSurface';
 type Props = {
   busy: boolean;
   credentialConfigured: boolean;
+  harnessName: string;
+  providerName: string;
   model: SupportedModel;
   runtimeAvailable: boolean;
   runtimeLabel: string;
@@ -186,7 +188,7 @@ export function SettingsSheet(props: Props) {
           </SettingCard>
 
           <SectionLabel
-            label={t('settings.section.harness', { harness: 'DSH' })}
+            label={t('settings.section.harness', { harness: props.harnessName })}
           />
           <SettingCard>
             <View style={styles.credentialHeader}>
@@ -220,8 +222,8 @@ export function SettingsSheet(props: Props) {
               <Pressable
                 accessibilityLabel={
                   props.credentialConfigured
-                    ? t('settings.credential.replaceLabel')
-                    : t('settings.credential.configureLabel')
+                    ? t('settings.credential.replaceLabel', { provider: props.providerName })
+                    : t('settings.credential.configureLabel', { provider: props.providerName })
                 }
                 accessibilityRole="button"
                 accessibilityState={{
@@ -246,7 +248,7 @@ export function SettingsSheet(props: Props) {
               </Pressable>
               {props.credentialConfigured && (
                 <Pressable
-                  accessibilityLabel={t('settings.credential.clearLabel')}
+                  accessibilityLabel={t('settings.credential.clearLabel', { provider: props.providerName })}
                   accessibilityRole="button"
                   disabled={props.busy}
                   accessibilityState={{ disabled: props.busy }}
@@ -285,7 +287,7 @@ export function SettingsSheet(props: Props) {
             </Pressable>
             <Divider />
             <SettingHeader
-              description={modelDescription(preferences.defaultModel)}
+              description={t('settings.defaultModel.description')}
               icon={Sparkles}
               title={t('settings.defaultModel')}
             />

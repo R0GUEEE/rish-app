@@ -4,7 +4,12 @@ import {
   sessionSnapshotSHA256,
   type SessionSnapshotAuthorityV1,
 } from '../src/completion/SessionPersistence';
-import { createEmptyChatState, serializeChatState } from '../src/state';
+import {
+  createChatStore,
+  createEmptyChatState,
+  hydrateChatState,
+  serializeChatState,
+} from '../src/state';
 
 const OPERATION_ID = '11111111-1111-4111-8111-111111111111';
 const LAUNCH_INSTANCE_ID = '99999999-9999-4999-8999-999999999999';
@@ -60,6 +65,93 @@ function nativeLoaded(
 }
 
 describe('schema-9 native session persistence coordinator', () => {
+  test.each([
+    ['glm', 'GLM-5.3-Flash'],
+    ['claude-code', 'claude-fable-5-1'],
+    ['codex', 'gpt-5.6'],
+  ] as const)(
+    'preserves the native session digest when recovering %s attempts and receipts',
+    async (harnessId, modelId) => {
+      const lifecycleIds = [OPERATION_ID, SECOND_OPERATION_ID];
+      let ordinaryId = 0;
+      const store = createChatStore({
+        now: () => '2026-09-06T01:00:00.000Z',
+        createId: kind => `${kind}-${++ordinaryId}`,
+        createLifecycleId: () => lifecycleIds.shift()!,
+      });
+      const conversationId = store.createConversation({ modelId });
+      const prepared = store.prepareTurnAttempt(
+        conversationId,
+        'synthetic turn',
+        {
+          harnessId,
+        },
+      )!;
+      expect(prepared.commit()).toBe(true);
+      expect(
+        store.startAttemptRound(
+          conversationId,
+          prepared.attemptId,
+          LAUNCH_INSTANCE_ID,
+          0,
+        ),
+      ).toBe(true);
+      expect(
+        store.recordAttemptRound(conversationId, prepared.attemptId, {
+          schemaVersion: 1,
+          transportSchemaVersion: 2,
+          turnId: prepared.turnId,
+          attemptId: prepared.attemptId,
+          roundId: LAUNCH_INSTANCE_ID,
+          roundIndex: 0,
+          providerRequestId: 'synthetic-request',
+          providerResponseId: 'synthetic-response',
+          harnessId,
+          requestedModel: modelId,
+          model: modelId,
+          thinkingMode: 'high',
+          finishReason: 'stop',
+          latencyMs: 1,
+          visibleHistorySha256: 'a'.repeat(64),
+          modelInputSha256: 'b'.repeat(64),
+          requestBodySha256: 'c'.repeat(64),
+          projectContextReceipt: null,
+        }),
+      ).toBe(true);
+      expect(
+        store.completeAttempt(conversationId, prepared.attemptId, 'done', {
+          metadata: { modelId, latencyMs: 1, finishReason: 'stop' },
+        }),
+      ).not.toBeNull();
+      const snapshotJSON = store.serialize();
+      const digest = sessionSnapshotSHA256(snapshotJSON);
+      expect(digest).not.toBeNull();
+      const authority: SessionSnapshotAuthorityV1 = {
+        schema_version: 1,
+        kind: 'present',
+        snapshot: { schema_version: 1, generation: 4, session_sha256: digest! },
+      };
+      const coordinator = createSessionPersistenceCoordinator({
+        loadSessionSnapshot: jest.fn().mockResolvedValue({
+          ...nativeLoaded(authority),
+          session_json: snapshotJSON,
+          writer_launch_instance_id: OPERATION_ID,
+        }),
+      });
+      const loaded = await coordinator.loadSessionSnapshotResult();
+      expect(loaded?.status).toBe('present');
+      if (loaded?.status !== 'present') throw new Error('snapshot not loaded');
+      const hydrated = hydrateChatState(loaded.session_json, {
+        sessionAuthority: loaded.snapshot,
+        staleWriterLaunch: true,
+      });
+      const roundTripJSON = serializeChatState(hydrated);
+      expect(sessionSnapshotSHA256(roundTripJSON)).toBe(digest);
+      expect(roundTripJSON).toBe(snapshotJSON);
+      expect(hydrated).toEqual(store.getState());
+    },
+  );
+
   test('uses the raw UTF-8 Runtime Proof SHA-256 for recovered text', () => {
     expect(agentTextSHA256('recovered')).toBe(
       'f6e09cc89f85dcd21d987a4c4af142fe5bbb741de93d375af548f1d4f1d2063b',

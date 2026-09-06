@@ -12,7 +12,8 @@ NS_ASSUME_NONNULL_BEGIN
 /// existing LocalRuntime owner; none of these values are part of the RN
 /// request or any service result. The credential provider receives the
 /// harness id from the round request so the generic runtime can key the
-/// Keychain slot (DEEPSEEK_API_KEY / ANTHROPIC_API_KEY / OPENAI_API_KEY).
+/// Keychain slot (DEEPSEEK_API_KEY / ANTHROPIC_API_KEY / OPENAI_API_KEY /
+/// BIGMODEL_API_KEY).
 typedef NSString * _Nullable (^DSHAgentProviderRoundCredentialProvider)(
     NSString *harnessId, NSUInteger *generation);
 typedef NSArray<NSDictionary *> * _Nullable (^DSHAgentProviderRoundVisibleHistoryProvider)(
@@ -55,12 +56,10 @@ typedef NSDictionary * _Nullable (^DSHAgentProviderRoundContextReceiptProvider)(
                      transport:(DSHCompletionProviderTransport *)transport
           credentialProvider:(nullable DSHAgentProviderRoundCredentialProvider)credentialProvider
        visibleHistoryProvider:(nullable DSHAgentProviderRoundVisibleHistoryProvider)visibleHistoryProvider
-       contextReceiptProvider:(nullable DSHAgentProviderRoundContextReceiptProvider)contextReceiptProvider
-    NS_DESIGNATED_INITIALIZER;
+       contextReceiptProvider:(nullable DSHAgentProviderRoundContextReceiptProvider)contextReceiptProvider;
 
 /// Provider-agnostic coordinator entry point. `transport` remains the DSH
-/// transport for legacy callers and tests; `claudeTransport` and
-/// `codexTransport` serve the other two builtin harnesses. A request for a
+/// transport for legacy callers and tests. A request for a
 /// harness whose transport is nil fails closed as unavailable.
 - (instancetype)initWithWAL:(DSHAgentNativeWAL *)wal
                 preparedStore:(DSHAgentPreparedAttemptStore *)preparedStore
@@ -72,6 +71,19 @@ typedef NSDictionary * _Nullable (^DSHAgentProviderRoundContextReceiptProvider)(
           credentialProvider:(nullable DSHAgentProviderRoundCredentialProvider)credentialProvider
        visibleHistoryProvider:(nullable DSHAgentProviderRoundVisibleHistoryProvider)visibleHistoryProvider
        contextReceiptProvider:(nullable DSHAgentProviderRoundContextReceiptProvider)contextReceiptProvider;
+
+- (instancetype)initWithWAL:(DSHAgentNativeWAL *)wal
+                preparedStore:(DSHAgentPreparedAttemptStore *)preparedStore
+                   transcripts:(DSHAgentTranscriptStore *)transcripts
+                        rounds:(DSHAgentRoundJournal *)rounds
+                     transport:(DSHCompletionProviderTransport *)transport
+              claudeTransport:(nullable DSHCompletionProviderTransport *)claudeTransport
+               codexTransport:(nullable DSHCompletionProviderTransport *)codexTransport
+                 glmTransport:(nullable DSHCompletionProviderTransport *)glmTransport
+          credentialProvider:(nullable DSHAgentProviderRoundCredentialProvider)credentialProvider
+       visibleHistoryProvider:(nullable DSHAgentProviderRoundVisibleHistoryProvider)visibleHistoryProvider
+       contextReceiptProvider:(nullable DSHAgentProviderRoundContextReceiptProvider)contextReceiptProvider
+    NS_DESIGNATED_INITIALIZER;
 
 /// Synchronously composes one native round around the asynchronous provider
 /// transport.  The blocking wait is confined to this native-private helper;
@@ -100,8 +112,10 @@ typedef NSDictionary * _Nullable (^DSHAgentProviderRoundContextReceiptProvider)(
 @property(nonatomic, strong, readonly) DSHCompletionProviderTransport *transport;
 @property(nonatomic, strong, readonly, nullable) DSHCompletionProviderTransport *claudeTransport;
 @property(nonatomic, strong, readonly, nullable) DSHCompletionProviderTransport *codexTransport;
+@property(nonatomic, strong, readonly, nullable) DSHCompletionProviderTransport *glmTransport;
 
-/// Selects the transport for the request's harness_id (defaults to dsh).
+/// Missing harness_id preserves legacy DSH behavior. Unknown, mismatched,
+/// or unavailable transports are rejected before reading credentials.
 - (nullable DSHCompletionProviderTransport *)transportForRequest:(NSDictionary *)request;
 
 @end

@@ -3,6 +3,7 @@
 #import "../../../../modules/rish/ios/Sources/AgentProviderRoundService.h"
 #import "../../../../modules/rish/ios/Sources/DshProviderTransport.h"
 #import "../../../../modules/rish/ios/Sources/ClaudeProviderTransport.h"
+#import "../../../../modules/rish/ios/Sources/CodexProviderTransport.h"
 #import "../../../../modules/rish/ios/Sources/AgentProviderRoundServiceInternals.h"
 #import "../../../../modules/rish/ios/Sources/DSHCompletionV2.h"
 #import "../../../../modules/rish/ios/Sources/DSHWorkspaceCanonical.h"
@@ -578,6 +579,182 @@ static NSDictionary *DSHProviderSmokeQueryRequest(NSDictionary *root,
                                                               error:&error];
   XCTAssertNil(result);
   XCTAssertEqual(error.code, DSHAgentNativeStoreErrorInvalidArgument);
+}
+
+- (void)testFourHarnessToolRoundsKeepCredentialEndpointBodyAndReceiptIdentity {
+  NSArray *cases = @[
+    @[ @"dsh", @"deepseek-v4-flash", @"api.deepseek.com", @"/chat/completions" ],
+    @[ @"claude-code", @"claude-sonnet-5", @"api.anthropic.com", @"/v1/messages" ],
+    @[ @"codex", @"gpt-5.6", @"api.openai.com", @"/v1/responses" ],
+    @[ @"glm", @"GLM-5.3", @"open.bigmodel.cn", @"/api/anthropic/v1/messages" ],
+  ];
+  for (NSArray *entry in cases) {
+    [DSHProviderURLProtocol reset];
+    NSString *harnessId = entry[0];
+    NSString *model = entry[1];
+    NSString *credential = [@"synthetic-credential-" stringByAppendingString:harnessId];
+    BOOL anthropicDialect = [harnessId isEqual:@"claude-code"] || [harnessId isEqual:@"glm"];
+    DSHProviderSmokeFixture *fixture = [[DSHProviderSmokeFixture alloc] init];
+    NSMutableDictionary *authority = [fixture.prepared.authority mutableCopy];
+    authority[@"model"] = model;
+    fixture.prepared.authority = authority;
+    NSMutableDictionary *request = [fixture.request mutableCopy];
+    request[@"model"] = model;
+    request[@"harness_id"] = harnessId;
+    NSURLSessionConfiguration *configuration = NSURLSessionConfiguration.ephemeralSessionConfiguration;
+    configuration.protocolClasses = @[ DSHProviderURLProtocol.class ];
+    NSURLSession *session = [NSURLSession sessionWithConfiguration:configuration];
+    NSString *(^uuid)(void) = ^NSString *{ return @"66666666-6666-4666-8666-666666666666"; };
+    NSTimeInterval (^clock)(void) = ^NSTimeInterval { return 3.0; };
+    DshProviderTransport *dsh = [[DshProviderTransport alloc]
+        initWithSession:session uuidGenerator:uuid monotonicClock:clock];
+    ClaudeProviderTransport *claude = [[ClaudeProviderTransport alloc]
+        initWithSession:session uuidGenerator:uuid monotonicClock:clock];
+    CodexProviderTransport *codex = [[CodexProviderTransport alloc]
+        initWithSession:session uuidGenerator:uuid monotonicClock:clock];
+    GlmProviderTransport *glm = [[GlmProviderTransport alloc]
+        initWithSession:session uuidGenerator:uuid monotonicClock:clock];
+    __block NSUInteger credentialCalls = 0;
+    DSHAgentProviderRoundService *service = [[DSHAgentProviderRoundService alloc]
+        initWithWAL:fixture.wal preparedStore:fixture.prepared
+        transcripts:fixture.transcripts rounds:fixture.rounds
+        transport:dsh claudeTransport:claude codexTransport:codex glmTransport:glm
+        credentialProvider:^NSString *(NSString *requestedHarness, NSUInteger *generation) {
+          credentialCalls += 1;
+          XCTAssertEqualObjects(requestedHarness, harnessId);
+          if (generation != nullptr) *generation = 7;
+          return credential;
+        }
+        visibleHistoryProvider:^NSArray *(NSDictionary *nativeAuthority, NSError **error) {
+          if (error != nullptr) *error = nil;
+          return @[ @{ @"role" : @"user", @"content" : @"hello" } ];
+        }
+        contextReceiptProvider:nil];
+    [DSHProviderURLProtocol setHandler:^(NSURLProtocol *protocol, NSURLRequest *httpRequest) {
+      XCTAssertEqualObjects(httpRequest.URL.host, entry[2]);
+      XCTAssertEqualObjects(httpRequest.URL.path, entry[3]);
+      XCTAssertEqualObjects(httpRequest.HTTPMethod, @"POST");
+      NSDictionary *body = [NSJSONSerialization JSONObjectWithData:
+          DSHProviderCapturedRequestBody(httpRequest) options:0 error:nil];
+      XCTAssertEqualObjects(body[@"model"], model);
+      XCTAssertEqualObjects(body[@"stream"], @NO);
+      NSDictionary *readTool = nil;
+      for (NSDictionary *tool in body[@"tools"]) {
+        NSString *name = tool[@"name"] ?: tool[@"function"][@"name"];
+        if ([name isEqual:@"read_file"]) readTool = tool;
+      }
+      XCTAssertNotNil(readTool);
+      NSDictionary *payload = nil;
+      if (anthropicDialect) {
+        XCTAssertEqualObjects([httpRequest valueForHTTPHeaderField:@"x-api-key"], credential);
+        XCTAssertNil([httpRequest valueForHTTPHeaderField:@"Authorization"]);
+        XCTAssertEqualObjects([httpRequest valueForHTTPHeaderField:@"anthropic-version"], @"2023-06-01");
+        XCTAssertEqualObjects(body[@"messages"][0][@"content"][0][@"type"], @"text");
+        XCTAssertNotNil(readTool[@"input_schema"]);
+        XCTAssertNil(readTool[@"function"]);
+        payload = @{
+          @"id" : @"fixture-response", @"type" : @"message", @"role" : @"assistant",
+          @"model" : [harnessId isEqual:@"glm"] ? model.lowercaseString : model,
+          @"content" : @[ @{ @"type" : @"tool_use", @"id" : @"call_fixture",
+                            @"name" : @"read_file", @"input" : @{ @"path" : @"README.md" } } ],
+          @"stop_reason" : @"tool_use", @"stop_sequence" : NSNull.null,
+        };
+      } else {
+        XCTAssertEqualObjects([httpRequest valueForHTTPHeaderField:@"Authorization"],
+                              [@"Bearer " stringByAppendingString:credential]);
+        XCTAssertNil([httpRequest valueForHTTPHeaderField:@"x-api-key"]);
+        if ([harnessId isEqual:@"codex"]) {
+          XCTAssertEqualObjects(body[@"store"], @NO);
+          XCTAssertNotNil(body[@"input"]);
+          XCTAssertNil(body[@"messages"]);
+          XCTAssertNotNil(readTool[@"parameters"]);
+          payload = @{ @"id" : @"fixture-response", @"object" : @"response",
+            @"status" : @"completed", @"model" : model,
+            @"output" : @[ @{ @"type" : @"function_call", @"id" : @"fc_fixture",
+              @"call_id" : @"call_fixture", @"name" : @"read_file",
+              @"arguments" : @"{\"path\":\"README.md\"}" } ] };
+        } else {
+          XCTAssertEqualObjects(body[@"messages"][0][@"content"], @"hello");
+          XCTAssertNotNil(readTool[@"function"][@"parameters"]);
+          payload = @{ @"id" : @"fixture-response", @"model" : model,
+            @"choices" : @[ @{ @"finish_reason" : @"tool_calls", @"message" : @{
+              @"role" : @"assistant", @"content" : @"", @"reasoning_content" : @"",
+              @"tool_calls" : @[ @{ @"id" : @"call_fixture", @"type" : @"function",
+                @"function" : @{ @"name" : @"read_file",
+                  @"arguments" : @"{\"path\":\"README.md\"}" } } ] } } ] };
+        }
+      }
+      NSData *data = [NSJSONSerialization dataWithJSONObject:payload options:0 error:nil];
+      NSHTTPURLResponse *response = [[NSHTTPURLResponse alloc]
+          initWithURL:httpRequest.URL statusCode:200 HTTPVersion:@"HTTP/1.1"
+          headerFields:@{ @"Content-Type" : @"application/json" }];
+      [protocol.client URLProtocol:protocol didReceiveResponse:response
+               cacheStoragePolicy:NSURLCacheStorageNotAllowed];
+      [protocol.client URLProtocol:protocol didLoadData:data];
+      [protocol.client URLProtocolDidFinishLoading:protocol];
+    }];
+    NSError *error = nil;
+    NSDictionary *result = [service completeAgentRoundV2WithRequest:request error:&error];
+    XCTAssertNil(error, @"%@", harnessId);
+    XCTAssertEqualObjects(result[@"status"], @"completed", @"%@", harnessId);
+    XCTAssertEqualObjects(result[@"outcome"][@"kind"], @"tool_batch");
+    XCTAssertEqualObjects(result[@"outcome"][@"calls"][0][@"name"], @"read_file");
+    NSDictionary *receipt = result[@"outcome"][@"completion_receipt"];
+    XCTAssertEqualObjects(receipt[@"harness_id"], harnessId);
+    XCTAssertEqualObjects(receipt[@"model"], model);
+    XCTAssertEqualObjects(receipt[@"requested_model"], model);
+    XCTAssertTrue(credentialCalls > 0);
+    XCTAssertEqual([DSHProviderURLProtocol requestCount], (NSUInteger)1);
+    XCTAssertEqual(fixture.rounds.completeCount, (NSUInteger)1);
+    [session invalidateAndCancel];
+    [DSHProviderURLProtocol reset];
+  }
+}
+
+- (void)testInvalidOrUnwiredHarnessNeverReadsCredentialsOrDispatches {
+  NSArray *cases = @[
+    @{ @"harness" : @"future-provider", @"model" : @"deepseek-v4-flash" },
+    @{ @"harness" : NSNull.null, @"model" : @"deepseek-v4-flash" },
+    @{ @"harness" : @"dsh", @"model" : @"GLM-5.3" },
+    @{ @"harness" : @"glm", @"model" : @"deepseek-v4-flash" },
+    @{ @"harness" : @"glm", @"model" : @"GLM-5.3" },
+    @{ @"harness" : @"glm", @"model" : @"GLM-5.3", @"wrong_transport" : @YES },
+    @{ @"model" : @"GLM-5.3" },
+  ];
+  for (NSDictionary *entry in cases) {
+    DSHProviderSmokeFixture *fixture = [[DSHProviderSmokeFixture alloc] init];
+    NSMutableDictionary *request = [fixture.request mutableCopy];
+    request[@"model"] = entry[@"model"];
+    if (entry[@"harness"] != nil) request[@"harness_id"] = entry[@"harness"];
+    NSMutableDictionary *authority = [fixture.prepared.authority mutableCopy];
+    authority[@"model"] = entry[@"model"];
+    fixture.prepared.authority = authority;
+    __block NSUInteger credentialCalls = 0;
+    __block NSUInteger historyCalls = 0;
+    DSHAgentProviderRoundService *service = [[DSHAgentProviderRoundService alloc]
+        initWithWAL:fixture.wal preparedStore:fixture.prepared
+        transcripts:fixture.transcripts rounds:fixture.rounds
+        transport:fixture.transport claudeTransport:nil codexTransport:nil
+        glmTransport:[entry[@"wrong_transport"] boolValue] ? fixture.transport : nil
+        credentialProvider:^NSString *(NSString *harness, NSUInteger *generation) {
+          credentialCalls += 1;
+          return @"synthetic-must-not-be-read";
+        }
+        visibleHistoryProvider:^NSArray *(NSDictionary *nativeAuthority, NSError **error) {
+          historyCalls += 1;
+          return @[];
+        }
+        contextReceiptProvider:nil];
+    XCTAssertNil([service transportForRequest:request]);
+    NSError *error = nil;
+    XCTAssertNil([service completeAgentRoundV2WithRequest:request error:&error]);
+    XCTAssertNotNil(error);
+    XCTAssertEqual(credentialCalls, (NSUInteger)0);
+    XCTAssertEqual(historyCalls, (NSUInteger)0);
+    XCTAssertEqual(fixture.transport.startCount, (NSUInteger)0);
+    XCTAssertEqual(fixture.rounds.createCount, (NSUInteger)0);
+    XCTAssertEqual(fixture.rounds.dispatchCount, (NSUInteger)0);
+  }
 }
 
 - (void)testURLProtocolBodyAndDigestEvidenceArriveAfterBoundTransportContext {

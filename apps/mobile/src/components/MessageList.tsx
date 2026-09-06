@@ -13,6 +13,7 @@ import {
 } from 'react-native';
 
 import { useAppPresentation } from '../presentation/AppPresentation';
+import { providerForModel, type HarnessModelId, type ProviderId } from '../harness/types';
 import type { AttachmentDescriptor } from '../state';
 import { fonts, type ThemePalette } from '../theme';
 import { StructuredContent, type StructuredBlock } from './StructuredContent';
@@ -23,10 +24,18 @@ export type DisplayMessage = {
   id: string;
   role: 'user' | 'assistant';
   text: string;
+  modelId?: HarnessModelId;
   meta?: string;
   blocks?: readonly StructuredBlock[];
   attachments?: readonly AttachmentDescriptor[];
 };
+
+const assistantProviderLabels = {
+  deepseek: 'DEEPSEEK',
+  anthropic: 'ANTHROPIC',
+  openai: 'OPENAI',
+  bigmodel: 'ZHIPU GLM',
+} satisfies Record<ProviderId, string>;
 
 export function MessageList({
   messages,
@@ -159,7 +168,11 @@ export function MessageList({
               <View style={styles.assistantMark}>
                 <AppIcon color={colors.accent} icon={Sparkles} size={13} />
               </View>
-              <Text style={styles.role}>{t('messages.role.assistant')}</Text>
+              <Text testID={`assistant-provider-${message.id}`} style={styles.role}>
+                {message.modelId === undefined
+                  ? t('messages.role.assistant')
+                  : assistantProviderLabels[providerForModel(message.modelId)]}
+              </Text>
             </View>
             {message.blocks === undefined ? (
               <MarkdownText

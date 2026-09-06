@@ -6069,6 +6069,172 @@ describe('schema v6 attempts and project context', () => {
     };
   }
 
+  const harnessCases = [
+    ['dsh', 'deepseek-v4-flash'],
+    ['glm', 'GLM-5.3-Flash'],
+    ['claude-code', 'claude-fable-5-1'],
+    ['codex', 'gpt-5.6'],
+  ] as const;
+
+  function completedHarnessStore(
+    harnessId: CompletionRoundReceiptV1['harnessId'] = 'dsh',
+    modelId: CompletionRoundReceiptV1['model'] = 'deepseek-v4-flash',
+  ) {
+    const store = v6Store();
+    const conversationId = store.createConversation({ modelId });
+    const prepared = store.prepareTurnAttempt(
+      conversationId,
+      'harness receipt',
+      {
+        harnessId,
+      },
+    )!;
+    expect(prepared.commit()).toBe(true);
+    expect(
+      store.startAttemptRound(conversationId, prepared.attemptId, ROUND_ID, 0),
+    ).toBe(true);
+    expect(
+      store.recordAttemptRound(
+        conversationId,
+        prepared.attemptId,
+        schema2Receipt(prepared, {
+          harnessId,
+          model: modelId,
+          requestedModel: modelId,
+        }),
+      ),
+    ).toBe(true);
+    expect(
+      store.completeAttempt(conversationId, prepared.attemptId, 'done', {
+        metadata: { modelId, latencyMs: 1, finishReason: 'stop' },
+      }),
+    ).not.toBeNull();
+    return { store, conversationId };
+  }
+
+  test.each(harnessCases)(
+    'round-trips %s identity on a failed attempt without receipts',
+    (harnessId, modelId) => {
+      const store = v6Store();
+      const conversationId = store.createConversation({ modelId });
+      const prepared = store.prepareTurnAttempt(
+        conversationId,
+        'failed request',
+        {
+          harnessId,
+        },
+      )!;
+      expect(prepared.commit()).toBe(true);
+      expect(
+        store.failAttempt(
+          conversationId,
+          prepared.attemptId,
+          'E_COMPLETION_MODEL_MISMATCH',
+        ),
+      ).toBe(true);
+
+      const serialized = store.serialize();
+      const hydrated = hydrateChatState(serialized);
+      expect(hydrated.conversations[conversationId]?.attempts[0]).toMatchObject(
+        {
+          harnessId,
+          status: 'failed',
+          rounds: [],
+        },
+      );
+      expect(hydrated).toEqual(store.getState());
+      expect(serializeChatState(hydrated)).toBe(serialized);
+    },
+  );
+
+  test.each(harnessCases)(
+    'round-trips %s identity on a completed attempt and its round receipt',
+    (harnessId, modelId) => {
+      const { store, conversationId } = completedHarnessStore(
+        harnessId,
+        modelId,
+      );
+      const serialized = store.serialize();
+      const hydrated = hydrateChatState(serialized);
+      expect(hydrated.conversations[conversationId]?.attempts[0]).toMatchObject(
+        {
+          harnessId,
+          status: 'completed',
+          rounds: [{ harnessId }],
+        },
+      );
+      expect(hydrated).toEqual(store.getState());
+      expect(serializeChatState(hydrated)).toBe(serialized);
+    },
+  );
+
+  test('defaults absent legacy attempt and receipt harness identity to dsh', () => {
+    const { store } = completedHarnessStore();
+    const payload = JSON.parse(store.serialize()) as {
+      conversations: Array<{
+        attempts: Array<{
+          harness_id?: string;
+          rounds: Array<{ harness_id?: string }>;
+        }>;
+      }>;
+    };
+    const attempt = payload.conversations[0]!.attempts[0]!;
+    delete attempt.harness_id;
+    delete attempt.rounds[0]!.harness_id;
+
+    expect(hydrateChatState(payload)).toEqual(store.getState());
+    expect(serializeChatState(hydrateChatState(JSON.stringify(payload)))).toBe(
+      store.serialize(),
+    );
+  });
+
+  test.each(['attempt', 'round receipt'] as const)(
+    'rejects hostile optional harness identity on a persisted %s',
+    target => {
+      const { store } = completedHarnessStore();
+      const getter = jest.fn(() => {
+        throw new Error('OPTIONAL_HARNESS_GETTER_SENTINEL');
+      });
+      const setter = jest.fn();
+      const descriptors: PropertyDescriptor[] = [
+        { enumerable: true, get: getter },
+        { enumerable: true, set: setter },
+        { enumerable: false, value: 'dsh' },
+        { enumerable: true, value: 'unsupported-harness' },
+        { enumerable: true, value: null },
+      ];
+      for (const descriptor of descriptors) {
+        const payload = JSON.parse(store.serialize()) as {
+          conversations: Array<{
+            attempts: Array<
+              Record<string, unknown> & {
+                rounds: Array<Record<string, unknown>>;
+              }
+            >;
+          }>;
+        };
+        const attempt = payload.conversations[0]!.attempts[0]!;
+        const record = target === 'attempt' ? attempt : attempt.rounds[0]!;
+        Object.defineProperty(record, 'harness_id', descriptor);
+        const result = safeHydrateChatState(payload);
+        expect(result.ok).toBe(false);
+        if (!result.ok) {
+          expect(result.error).toBeInstanceOf(ChatStateValidationError);
+          expect(result.error.path).toBe(
+            '$.conversations[0].attempts[0]' +
+              (target === 'attempt' ? '' : '.rounds[0]') +
+              '.harness_id',
+          );
+          expect(result.error.message).not.toContain(
+            'OPTIONAL_HARNESS_GETTER_SENTINEL',
+          );
+        }
+      }
+      expect(getter).not.toHaveBeenCalled();
+      expect(setter).not.toHaveBeenCalled();
+    },
+  );
+
   function schema6Payload(store: ChatStore) {
     const payload = JSON.parse(store.serialize()) as Record<string, unknown>;
     stripSchema9Fields(payload);

@@ -34,6 +34,7 @@ import {
   type AgentToolReceiptV1,
 } from '../src/state';
 import { sessionSnapshotSHA256 } from '../src/completion/SessionPersistence';
+import { createPreferencesStore } from '../src/preferences';
 import type {
   AgentApprovalBindingTokenV2,
   AgentAttemptProjectionV2,
@@ -2093,6 +2094,275 @@ test('presents DSH as one built-in harness under the Rish runtime', async () => 
   expect(actionByLabel(root, 'Use DSH')).toBeDefined();
   expect(root.findByProps({ children: 'Harness manifest v1' })).toBeDefined();
   expect(root.findByProps({ children: 'Current harness' })).toBeDefined();
+});
+
+async function openHarnessPicker(root: ReactTestInstance): Promise<void> {
+  await act(async () => actionByLabel(root, 'Open navigation').props.onPress());
+  await act(async () => {
+    const drawer = root.findByType(ChatDrawer);
+    drawer.props.onOpenHarnesses();
+    drawer.props.onDismiss();
+    await settle();
+  });
+  expect(root.findByType(HarnessPicker).props.visible).toBe(true);
+}
+
+test('seeds GLM new chats from the selected Harness and shows its actual settings credential', async () => {
+  const stored = createChatStore();
+  const preferences = createPreferencesStore();
+  preferences.setSelectedHarness('glm');
+  queuePresentSession(JSON.stringify({
+    ...JSON.parse(stored.serialize()),
+    preferences: JSON.parse(preferences.serialize()),
+  }));
+  const renderer = await renderApp();
+  const root = renderer.root;
+  expect(root.findByType(ChatComposer).props.model).toBe('GLM-5.3');
+  expect(root.findByType(ChatComposer).props.harnessName).toBe('GLM');
+  await act(async () => actionByLabel(root, 'Open navigation').props.onPress());
+  await act(async () => {
+    await root.findByType(ChatDrawer).props.onNewChat();
+    await settle();
+  });
+  expect(lastPersistedState().conversations.every(chat => chat.model_id === 'GLM-5.3')).toBe(true);
+  expect(root.findByType(ChatComposer).props.model).toBe('GLM-5.3');
+  await act(async () => actionByLabel(root, 'Open navigation').props.onPress());
+  await act(async () => {
+    const drawer = root.findByType(ChatDrawer);
+    drawer.props.onOpenSettings();
+    drawer.props.onDismiss();
+    await settle();
+  });
+  expect(root.findByProps({ children: 'Harness · GLM' })).toBeDefined();
+  expect(actionByLabel(root, 'Replace Zhipu GLM key')).toBeDefined();
+  await act(async () => {
+    root.findByType(SettingsSheet).props.onConfigureCredential();
+    await settle();
+  });
+  expect(mockLocalRuntime.presentCredentialPromptForSlot).toHaveBeenLastCalledWith('BIGMODEL_API_KEY', 'en-US');
+});
+
+test('switches Harness in the same settled conversation without rewriting history or discarding its draft', async () => {
+  const renderer = await renderApp();
+  const root = renderer.root;
+  await act(async () => root.findByType(ChatComposer).props.onChange('Existing DSH turn'));
+  await act(async () => {
+    root.findByType(ChatComposer).props.onSend();
+    await settle();
+  });
+  const before = lastPersistedState();
+  expect(before.conversations[0]?.attempts).toHaveLength(1);
+  await act(async () => root.findByType(ChatComposer).props.onChange('Keep this draft'));
+  await openHarnessPicker(root);
+  await act(async () => {
+    root.findByType(HarnessPicker).props.onSelect('glm');
+    await settle();
+  });
+  const after = lastPersistedState();
+  expect(after.active_conversation_id).toBe(before.active_conversation_id);
+  expect(after.conversations).toHaveLength(1);
+  expect(after.conversations[0]?.model_id).toBe('GLM-5.3');
+  expect(after.conversations[0]?.messages).toEqual(before.conversations[0]?.messages);
+  expect(after.conversations[0]?.attempts).toEqual(before.conversations[0]?.attempts);
+  expect(root.findByType(ChatComposer).props.draft).toBe('Keep this draft');
+  await act(async () => {
+    root.findByType(ChatComposer).props.onSend();
+    await settle();
+  });
+  expect(mockLocalRuntime.completeV2.mock.calls.at(-1)?.[0]).toMatchObject({ harnessId: 'glm', model: 'GLM-5.3' });
+});
+
+test('routes restored and reopened conversations by their own models while keeping the new-chat Harness preference', async () => {
+  const stored = createChatStore();
+  const glm = stored.createConversation({ title: 'GLM history', modelId: 'GLM-5.3-Flash' });
+  const dsh = stored.createConversation({ title: 'DSH history', modelId: 'deepseek-v4-pro' });
+  stored.selectConversation(glm);
+  queuePresentSession(stored.serialize());
+  const renderer = await renderApp();
+  const root = renderer.root;
+  expect(root.findByType(ChatComposer).props.harnessName).toBe('GLM');
+  await act(async () => root.findByType(ChatComposer).props.onChange('GLM restored send'));
+  await act(async () => {
+    root.findByType(ChatComposer).props.onSend();
+    await settle();
+  });
+  expect(mockLocalRuntime.completeV2.mock.calls.at(-1)?.[0]).toMatchObject({ harnessId: 'glm', model: 'GLM-5.3-Flash' });
+  await act(async () => actionByLabel(root, 'Open navigation').props.onPress());
+  await act(async () => {
+    await root.findByType(ChatDrawer).props.onSelect(dsh);
+    await settle();
+  });
+  expect(root.findByType(ChatComposer).props.harnessName).toBe('DSH');
+  await act(async () => root.findByType(ChatComposer).props.onChange('DSH reopened send'));
+  await act(async () => {
+    root.findByType(ChatComposer).props.onSend();
+    await settle();
+  });
+  expect(mockLocalRuntime.completeV2.mock.calls.at(-1)?.[0]).toMatchObject({ harnessId: 'dsh', model: 'deepseek-v4-pro' });
+  expect(JSON.parse(lastPersistedCandidateJSON()).preferences.selected_harness_id).toBe('dsh');
+});
+
+test('keeps the selected conversation retry owner when an earlier Harness save finishes late', async () => {
+  const stored = createChatStore();
+  const firstId = stored.createConversation({ title: 'Harness switch source' });
+  const secondId = stored.createConversation({ title: 'Retry destination' });
+  const prepared = stored.prepareTurnAttempt(secondId, 'Retry this destination')!;
+  expect(prepared.commit()).toBe(true);
+  expect(
+    stored.failAttempt(secondId, prepared.attemptId, 'E_COMPLETION_NATIVE'),
+  ).toBe(true);
+  stored.selectConversation(firstId);
+  queuePresentSession(stored.serialize());
+  const renderer = await renderApp();
+  const root = renderer.root;
+  const harnessSave = deferred<boolean>();
+  mockSessionSnapshots.casPersistSession.mockImplementationOnce(async request => {
+    await harnessSave.promise;
+    return commitBridgedCandidate(request);
+  });
+
+  await openHarnessPicker(root);
+  await act(async () => {
+    root.findByType(HarnessPicker).props.onSelect('glm');
+    await settle();
+  });
+  expect(mockSessionSnapshots.casPersistSession).toHaveBeenCalledTimes(1);
+  expect(root.findByType(ChatComposer).props.harnessName).toBe('GLM');
+
+  await act(async () => actionByLabel(root, 'Open navigation').props.onPress());
+  let selectDestination: Promise<void> | undefined;
+  await act(async () => {
+    selectDestination = root.findByType(ChatDrawer).props.onSelect(secondId);
+    await settle();
+  });
+  expect(root.findByType(ChatComposer).props.harnessName).toBe('DSH');
+  expect(actionByLabel(root, 'Retry response')).toBeDefined();
+
+  await act(async () => {
+    harnessSave.resolve(true);
+    await selectDestination;
+    await settle();
+  });
+  expect(lastPersistedState().active_conversation_id).toBe(secondId);
+  expect(root.findByType(ChatComposer).props.harnessName).toBe('DSH');
+  expect(actionByLabel(root, 'Retry response')).toBeDefined();
+});
+
+test('blocks Harness switching during an active completion and allows it after the attempt settles', async () => {
+  const completion = deferred<ReturnType<typeof strictCompletionResult>>();
+  let request: StrictCompletionRequest | undefined;
+  mockLocalRuntime.completeV2.mockImplementationOnce((input: StrictCompletionRequest) => {
+    request = input;
+    return completion.promise;
+  });
+  const renderer = await renderApp();
+  const root = renderer.root;
+  await act(async () => root.findByType(ChatComposer).props.onChange('Keep this running attempt'));
+  await act(async () => {
+    root.findByType(ChatComposer).props.onSend();
+    await settle();
+  });
+  expect(request).toBeDefined();
+  expect(root.findByProps({ children: 'Working with DeepSeek…' })).toBeDefined();
+  await openHarnessPicker(root);
+  expect(actionByLabel(root, 'Use GLM').props.disabled).toBe(true);
+  await act(async () => root.findByType(HarnessPicker).props.onSelect('glm'));
+  expect(root.findByType(ChatComposer).props.model).toBe('deepseek-v4-flash');
+  expect(root.findByType(HarnessPicker).props.visible).toBe(true);
+  expect(mockLocalRuntime.cancelCompletion).not.toHaveBeenCalled();
+  await act(async () => {
+    completion.resolve(strictCompletionResult(request!));
+    await settle();
+  });
+  await act(async () => {
+    root.findByType(HarnessPicker).props.onSelect('glm');
+    await settle();
+  });
+  expect(root.findByType(ChatComposer).props.model).toBe('GLM-5.3');
+  expect(lastPersistedState().conversations[0]?.attempts?.[0]?.status).toBe('completed');
+});
+
+test('refreshes credential availability when switching Harness instead of reusing the previous provider key', async () => {
+  mockLocalRuntime.credentialStatusForSlot.mockImplementation(async slot => ({
+    status: slot === 'BIGMODEL_API_KEY' ? 'missing' : 'configured',
+  }));
+  const renderer = await renderApp();
+  const root = renderer.root;
+  await openHarnessPicker(root);
+  await act(async () => {
+    root.findByType(HarnessPicker).props.onSelect('glm');
+    await settle();
+  });
+  expect(root.findByType(ChatComposer).props.configured).toBe(false);
+  expect(actionByLabel(root, 'Configure Zhipu GLM key')).toBeDefined();
+  expect(root.findByProps({ accessibilityLabel: 'Message GLM' }).props.placeholder).toBe('Configure a Zhipu GLM key to start');
+});
+
+test.each([
+  ['dsh', 'DSH', 'DeepSeek'],
+  ['claude-code', 'Claude Code', 'Anthropic'],
+  ['codex', 'Codex', 'OpenAI'],
+  ['glm', 'GLM', 'Zhipu GLM'],
+] as const)('labels the %s API provider independently from its Harness name', async (id, harness, provider) => {
+  const renderer = await renderApp();
+  const root = renderer.root;
+  await openHarnessPicker(root);
+  await act(async () => {
+    root.findByType(HarnessPicker).props.onSelect(id);
+    await settle();
+  });
+  expect(root.findByType(ChatComposer).props).toMatchObject({
+    harnessName: harness,
+    providerName: provider,
+  });
+  expect(root.findByType(SettingsSheet).props).toMatchObject({
+    harnessName: harness,
+    providerName: provider,
+  });
+});
+
+test('invalidates project context consent when switching Harness in the same conversation', async () => {
+  const fixture = storedProjectContext(true);
+  queuePresentSession(fixture.stored.serialize());
+  const renderer = await renderApp();
+  const root = renderer.root;
+  await openHarnessPicker(root);
+  await act(async () => {
+    root.findByType(HarnessPicker).props.onSelect('glm');
+    await settle();
+  });
+  const current = lastPersistedState().conversations.find(chat => chat.id === fixture.conversationId);
+  expect(current?.project_id).toBe(CONTEXT_PROJECT_ID);
+  expect(current?.runtime_context_id).toBe(CONTEXT_RUNTIME_ID);
+  expect(current?.model_id).toBe('GLM-5.3');
+  expect(current?.project_context?.consent).toBeNull();
+  expect(current?.project_context?.status).not.toBe('ready');
+  expect(mockLocalRuntime.completeV2).not.toHaveBeenCalled();
+});
+
+test('does not silently switch an image draft from GLM to the DeepSeek provider', async () => {
+  const renderer = await renderApp();
+  const root = renderer.root;
+  await openHarnessPicker(root);
+  await act(async () => {
+    root.findByType(HarnessPicker).props.onSelect('glm');
+    await settle();
+  });
+  mockLocalAttachments.present.mockResolvedValueOnce({
+    schema_version: 1, status: 'selected', attachments: [{
+      schema_version: 1, id: 'glm-image', kind: 'image', name: 'glm.png', mime_type: 'image/png', size: 64,
+    }],
+  });
+  await act(async () => actionByLabel(root, 'Add attachment').props.onPress());
+  await chooseAttachmentSource(root, 'Photos');
+  await act(async () => {
+    root.findByType(ChatComposer).props.onSend();
+    await settle();
+  });
+  expect(mockLocalRuntime.completeV2).not.toHaveBeenCalled();
+  expect(root.findByType(ChatComposer).props.model).toBe('GLM-5.3');
+  expect(root.findByType(ChatComposer).props.attachments).toHaveLength(1);
+  expect(root.findByProps({ children: 'Images are not supported by GLM. Choose a harness with image input before sending.' })).toBeDefined();
 });
 
 test('opens Projects as a full-width primary surface from the navigation drawer', async () => {
@@ -8103,6 +8373,12 @@ test('runs a project Agent task through two safe approvals and restores it witho
   // Both gated calls of the batch are presented as one list with per-item
   // decisions and a single commit.
   const batchApproval = await waitForAgentApproval(renderer, 'write_file');
+  await openHarnessPicker(renderer.root);
+  expect(actionByLabel(renderer.root, 'Use GLM').props.disabled).toBe(true);
+  await act(async () => renderer.root.findByType(HarnessPicker).props.onSelect('glm'));
+  expect(renderer.root.findByType(ChatComposer).props.model).toBe('deepseek-v4-flash');
+  expect(mockAgentRuntime.cancelAgentAttempt).not.toHaveBeenCalled();
+  await act(async () => renderer.root.findByType(HarnessPicker).props.onClose());
   const presented = batchApproval.props.requests as Array<{
     toolName: string;
     argumentsJson: string;

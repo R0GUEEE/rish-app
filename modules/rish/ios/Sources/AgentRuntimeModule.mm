@@ -39,6 +39,8 @@ typedef NSDictionary *_Nullable (^DSHRuntimeModuleInvoke)(
 @property(nonatomic, strong, readonly)
     DSHCompletionProviderTransport *codexProviderTransport;
 @property(nonatomic, strong, readonly)
+    DSHCompletionProviderTransport *glmProviderTransport;
+@property(nonatomic, strong, readonly)
     DSHProjectContextService *projectContextService;
 @property(nonatomic, readonly) NSUInteger credentialGeneration;
 - (nullable NSString *)credential;
@@ -258,6 +260,8 @@ RCT_EXPORT_MODULE(AgentRuntime)
       [localRuntime claudeProviderTransport];
   DSHCompletionProviderTransport *codexTransport =
       [localRuntime codexProviderTransport];
+  DSHCompletionProviderTransport *glmTransport =
+      [localRuntime glmProviderTransport];
   DSHProjectContextService *projectContext =
       [localRuntime projectContextService] ?: DSHSharedProjectContextService();
   DSHLocalWorkspaceAccess *workspaceAccess = projectContext.workspaceAccess;
@@ -298,7 +302,8 @@ RCT_EXPORT_MODULE(AgentRuntime)
   DSHAgentProviderRoundService *roundService = [[DSHAgentProviderRoundService alloc]
       initWithWAL:wal preparedStore:prepared transcripts:transcripts rounds:rounds
       transport:transport claudeTransport:claudeTransport
-      codexTransport:codexTransport credentialProvider:credentials
+      codexTransport:codexTransport glmTransport:glmTransport
+      credentialProvider:credentials
       visibleHistoryProvider:history contextReceiptProvider:context];
   DSHAgentWorkspaceToolExecutor *workspaceExecutor =
       [[DSHAgentWorkspaceToolExecutor alloc] initWithRootResolver:rootResolver];

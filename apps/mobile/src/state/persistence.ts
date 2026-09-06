@@ -362,7 +362,7 @@ function exactRecord(
     if (!allowed.has(key)) invalid(`${path}.${key}`, 'is not recognized');
   });
   const raw = Object.create(null) as UnknownRecord;
-  keys.forEach(key => {
+  allowed.forEach(key => {
     const descriptor = Object.getOwnPropertyDescriptor(value, key);
     if (descriptor === undefined) {
       if (optional.has(key)) return;

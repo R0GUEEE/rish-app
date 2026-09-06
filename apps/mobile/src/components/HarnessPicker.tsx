@@ -9,15 +9,18 @@ import type { HarnessManifest } from '../harness';
 import { useAppPresentation } from '../presentation/AppPresentation';
 import { fonts, type ThemePalette } from '../theme';
 import { AppIcon } from './AppIcon';
+import { HarnessLogo } from './HarnessLogo';
 import { SlidingPanel } from './SlidingPanel';
 
 export function HarnessPicker({
+  disabled = false,
   manifests,
   selectedId,
   visible,
   onClose,
   onSelect,
 }: {
+  disabled?: boolean;
   manifests: readonly HarnessManifest[];
   selectedId: string;
   visible: boolean;
@@ -72,7 +75,8 @@ export function HarnessPicker({
                   harness: manifest.name,
                 })}
                 accessibilityRole="radio"
-                accessibilityState={{ checked: selected }}
+                accessibilityState={{ checked: selected, disabled }}
+                disabled={disabled}
                 key={manifest.id}
                 onPress={() => onSelect(manifest.id)}
                 style={({ pressed }) => [
@@ -83,9 +87,7 @@ export function HarnessPicker({
               >
                 <View style={styles.cardHeader}>
                   <View style={styles.harnessIcon}>
-                    <Text style={styles.harnessIconText}>
-                      {manifest.name.slice(0, 2).toUpperCase()}
-                    </Text>
+                    <HarnessLogo harnessId={manifest.id} name={manifest.name} />
                   </View>
                   <View style={styles.flex}>
                     <View style={styles.nameRow}>
@@ -189,15 +191,10 @@ const createStyles = (colors: ThemePalette) =>
       width: 44,
       height: 44,
       borderRadius: 14,
-      backgroundColor: colors.text,
+      backgroundColor: '#F7F7F5',
       alignItems: 'center',
       justifyContent: 'center',
       marginRight: 12,
-    },
-    harnessIconText: {
-      color: colors.background,
-      fontSize: 12,
-      fontWeight: '900',
     },
     nameRow: { flexDirection: 'row', alignItems: 'center', gap: 7 },
     name: { color: colors.text, fontSize: 18, fontWeight: '700' },

@@ -41,6 +41,7 @@ type Props = {
   attachmentBusy: boolean;
   previewingAttachmentId: string | null;
   harnessName: string;
+  providerName: string;
   model: SupportedModel;
   optionsVisible: boolean;
   thinkingMode: ConversationThinkingMode;
@@ -220,7 +221,7 @@ export function ChatComposer(props: Props) {
         placeholder={
           props.configured
             ? t('messages.inputPlaceholder', { harness: props.harnessName })
-            : t('messages.configurePlaceholder')
+            : t('messages.configurePlaceholder', { provider: props.providerName })
         }
         placeholderTextColor={colors.faint}
         style={styles.input}
@@ -325,7 +326,7 @@ export function ChatComposer(props: Props) {
           </Pressable>
         ) : (
           <Pressable
-            accessibilityLabel={t('messages.configureKey')}
+            accessibilityLabel={t('messages.configureKey', { provider: props.providerName })}
             accessibilityRole="button"
             accessibilityState={{ disabled: locked }}
             disabled={locked}
@@ -375,14 +376,14 @@ export function ChatComposer(props: Props) {
       </View>
       {props.sending && (
         <View
-          accessibilityLabel={t('messages.respondingLabel')}
+          accessibilityLabel={t('messages.respondingLabel', { provider: props.providerName })}
           accessibilityLiveRegion="polite"
           accessibilityRole={Platform.OS === 'android' ? 'text' : 'status'}
           style={styles.progressRow}
         >
           <ActivityIndicator color={colors.accent} size="small" />
           <Text style={styles.progressText}>
-            {t('messages.workingLocally')}
+            {t('messages.workingLocally', { provider: props.providerName })}
           </Text>
         </View>
       )}

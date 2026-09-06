@@ -3,6 +3,7 @@
 #import "AgentToolRegistry.h"
 #import "DSHCompletionV2.h"
 #import "DSHWorkspaceCanonical.h"
+#import "RishHarnessCatalog.h"
 
 @interface DSHAgentProviderRoundService ()
 @property(nonatomic, strong, readwrite) DSHAgentNativeWAL *wal;
@@ -12,6 +13,7 @@
 @property(nonatomic, strong, readwrite) DSHCompletionProviderTransport *transport;
 @property(nonatomic, strong, readwrite) DSHCompletionProviderTransport *claudeTransport;
 @property(nonatomic, strong, readwrite) DSHCompletionProviderTransport *codexTransport;
+@property(nonatomic, strong, readwrite) DSHCompletionProviderTransport *glmTransport;
 @property(nonatomic, copy) DSHAgentProviderRoundCredentialProvider credentialProvider;
 @property(nonatomic, copy) DSHAgentProviderRoundVisibleHistoryProvider visibleHistoryProvider;
 @property(nonatomic, copy) DSHAgentProviderRoundContextReceiptProvider contextReceiptProvider;
@@ -97,6 +99,30 @@
           credentialProvider:(DSHAgentProviderRoundCredentialProvider)credentialProvider
        visibleHistoryProvider:(DSHAgentProviderRoundVisibleHistoryProvider)visibleHistoryProvider
        contextReceiptProvider:(DSHAgentProviderRoundContextReceiptProvider)contextReceiptProvider {
+  return [self initWithWAL:wal
+              preparedStore:preparedStore
+                 transcripts:transcripts
+                      rounds:rounds
+                   transport:transport
+            claudeTransport:claudeTransport
+             codexTransport:codexTransport
+               glmTransport:nil
+        credentialProvider:credentialProvider
+     visibleHistoryProvider:visibleHistoryProvider
+      contextReceiptProvider:contextReceiptProvider];
+}
+
+- (instancetype)initWithWAL:(DSHAgentNativeWAL *)wal
+                preparedStore:(DSHAgentPreparedAttemptStore *)preparedStore
+                   transcripts:(DSHAgentTranscriptStore *)transcripts
+                        rounds:(DSHAgentRoundJournal *)rounds
+                     transport:(DSHCompletionProviderTransport *)transport
+              claudeTransport:(DSHCompletionProviderTransport *)claudeTransport
+               codexTransport:(DSHCompletionProviderTransport *)codexTransport
+                 glmTransport:(DSHCompletionProviderTransport *)glmTransport
+          credentialProvider:(DSHAgentProviderRoundCredentialProvider)credentialProvider
+       visibleHistoryProvider:(DSHAgentProviderRoundVisibleHistoryProvider)visibleHistoryProvider
+       contextReceiptProvider:(DSHAgentProviderRoundContextReceiptProvider)contextReceiptProvider {
   self = [super init];
   if (self != nil) {
     _wal = wal;
@@ -106,6 +132,7 @@
     _transport = transport;
     _claudeTransport = claudeTransport;
     _codexTransport = codexTransport;
+    _glmTransport = glmTransport;
     _credentialProvider = [credentialProvider copy];
     _visibleHistoryProvider = [visibleHistoryProvider copy];
     _contextReceiptProvider = [contextReceiptProvider copy];
@@ -115,11 +142,19 @@
 }
 
 - (nullable DSHCompletionProviderTransport *)transportForRequest:(NSDictionary *)request {
-  NSString *harnessId = [request[@"harness_id"] isKindOfClass:NSString.class]
-      ? request[@"harness_id"] : @"dsh";
-  if ([harnessId isEqualToString:@"claude-code"]) return self.claudeTransport;
-  if ([harnessId isEqualToString:@"codex"]) return self.codexTransport;
-  return self.transport;
+  id rawHarness = request[@"harness_id"];
+  if (rawHarness != nil && ![rawHarness isKindOfClass:NSString.class]) return nil;
+  NSString *harnessId = rawHarness ?: @"dsh";
+  if (![DSHHarnessIdForModel(request[@"model"]) isEqual:harnessId]) return nil;
+  DSHCompletionProviderTransport *selected = nil;
+  if ([harnessId isEqualToString:@"dsh"]) selected = self.transport;
+  else if ([harnessId isEqualToString:@"claude-code"]) selected = self.claudeTransport;
+  else if ([harnessId isEqualToString:@"codex"]) selected = self.codexTransport;
+  else if ([harnessId isEqualToString:@"glm"]) selected = self.glmTransport;
+  if (selected == nil ||
+      ![[selected providerHarnessId] isEqual:harnessId] ||
+      ![selected providerSupportsModel:request[@"model"]]) return nil;
+  return selected;
 }
 
 - (nullable NSDictionary *)commitStartedOperationForRequest:(NSDictionary *)request
@@ -912,6 +947,7 @@
   NSDictionary *effectiveCAS = [latestRow isKindOfClass:NSDictionary.class]
       ? DSHProviderRoundCASForRow(latestRow) : activeCAS;
   BOOL providerCorrelationMatches = providerResult != nil &&
+      [(providerResult[@"harness_id"] ?: @"dsh") isEqual:harnessId] &&
       DSHProviderResultMatchesRequest(providerResult, request, providerRequestId);
   BOOL providerDigestsMatch = providerResult != nil &&
       [providerResult[@"visible_history_sha256"] isEqual:actualVisibleTransportDigest] &&
@@ -1314,6 +1350,7 @@
       [self.transport cancelTask:context.task];
       [self.claudeTransport cancelTask:context.task];
       [self.codexTransport cancelTask:context.task];
+      [self.glmTransport cancelTask:context.task];
     }
     BOOL signal = NO;
     @synchronized (context) {

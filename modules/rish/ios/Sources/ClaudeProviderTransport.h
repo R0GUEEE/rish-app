@@ -28,12 +28,18 @@ NS_ASSUME_NONNULL_BEGIN
 /// digest, cancellation, and redirect orchestration is inherited unchanged.
 @interface ClaudeProviderTransport : DSHCompletionProviderTransport
 
+/// Provider-specific response identity policy. Claude retains its existing
+/// absent-echo / exact-alias / alias-prefixed-snapshot behavior.
+- (BOOL)providerReportedModel:(nullable NSString *)reportedModel
+        matchesRequestedModel:(NSString *)requestedModel;
+
 @end
 
 /// GLM Harness provider transport: Zhipu serves GLM models over an
 /// Anthropic-compatible Messages endpoint, so the whole Claude dialect
 /// (blocks, thinking, stop reasons, SSE parser, headers) is reused and only
-/// the base URL, the harness identity and the model gate differ.
+/// the base URL, the harness identity and the model gates differ. A GLM
+/// response must echo the exact requested model, ignoring ASCII case only.
 @interface GlmProviderTransport : ClaudeProviderTransport
 
 @end

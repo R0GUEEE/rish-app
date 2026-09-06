@@ -75,15 +75,6 @@ static NSString *ClaudeFinishReasonForStopReason(NSString *stopReason) {
   return nil;
 }
 
-/// The API echoes either the alias that was requested or its dated
-/// snapshot (alias + "-" + date). Both prove the requested model served the
-/// round; anything else is a mismatch.
-static BOOL ClaudeModelMatches(NSString *reported, NSString *requested) {
-  if (reported == nil) return YES;
-  return [reported isEqualToString:requested] ||
-      [reported hasPrefix:[requested stringByAppendingString:@"-"]];
-}
-
 /// Converts one DSH-shaped transcript/tool message into Anthropic blocks.
 /// Tool results append to an open tool_result user message so every
 /// tool_use of one assistant turn is answered in a single user turn.
@@ -404,6 +395,13 @@ static NSDictionary<NSString *, id> * _Nullable ClaudeDecodeEvent(
 
 @implementation ClaudeProviderTransport
 
+- (BOOL)providerReportedModel:(NSString *)reportedModel
+        matchesRequestedModel:(NSString *)requestedModel {
+  if (reportedModel == nil) return YES;
+  return [reportedModel isEqualToString:requestedModel] ||
+      [reportedModel hasPrefix:[requestedModel stringByAppendingString:@"-"]];
+}
+
 - (NSURL *)providerBaseURL {
   return [NSURL URLWithString:@"https://api.anthropic.com/v1/messages"];
 }
@@ -523,7 +521,8 @@ static NSDictionary<NSString *, id> * _Nullable ClaudeDecodeEvent(
     if (error != nil) *error = ClaudeTransportError(2403, @"E_COMPLETION_PROVIDER_RESPONSE_ID");
     return nil;
   }
-  if (!ClaudeModelMatches(ClaudeString(decoded[@"model"]), requestedModel)) {
+  if (![self providerReportedModel:ClaudeString(decoded[@"model"])
+            matchesRequestedModel:requestedModel]) {
     if (error != nil) *error = ClaudeTransportError(2404, @"E_COMPLETION_MODEL_MISMATCH");
     return nil;
   }
@@ -601,6 +600,26 @@ static NSDictionary<NSString *, id> * _Nullable ClaudeDecodeEvent(
 @end
 
 @implementation GlmProviderTransport
+
+- (BOOL)providerReportedModel:(NSString *)reportedModel
+        matchesRequestedModel:(NSString *)requestedModel {
+  if (reportedModel.length == 0 ||
+      reportedModel.length != requestedModel.length ||
+      ![self providerSupportsModel:requestedModel]) {
+    return NO;
+  }
+  // Zhipu echoes canonical GLM model IDs in lowercase. Fold ASCII letters
+  // explicitly: locale/Unicode case folding must not admit lookalike IDs.
+  for (NSUInteger index = 0; index < requestedModel.length; index++) {
+    unichar reported = [reportedModel characterAtIndex:index];
+    unichar requested = [requestedModel characterAtIndex:index];
+    if (reported > 0x7f || requested > 0x7f) return NO;
+    if (reported >= 'A' && reported <= 'Z') reported += 'a' - 'A';
+    if (requested >= 'A' && requested <= 'Z') requested += 'a' - 'A';
+    if (reported != requested) return NO;
+  }
+  return YES;
+}
 
 - (NSURL *)providerBaseURL {
   return [NSURL URLWithString:@"https://open.bigmodel.cn/api/anthropic/v1/messages"];

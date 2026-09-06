@@ -332,6 +332,77 @@ static NSUInteger ClaudeTransportRequestCount = 0;
                                     requestedModel:model thinkingMode:@"high" error:error];
 }
 
+- (void)testClaudeModelIdentityRetainsAbsentExactAndSnapshotEchoRules {
+  for (id echo in @[ NSNull.null, @"claude-sonnet-5", @"claude-sonnet-5-20260415" ]) {
+    NSMutableDictionary *payload = [@{
+      @"id": @"msg-claude-identity",
+      @"content": @[ @{ @"type": @"text", @"text": @"answer" } ],
+      @"stop_reason": @"end_turn",
+    } mutableCopy];
+    if (echo != NSNull.null) payload[@"model"] = echo;
+    NSError *error = nil;
+    NSDictionary *parsed = [self parse:payload model:@"claude-sonnet-5" error:&error];
+    XCTAssertNil(error);
+    XCTAssertEqualObjects(parsed[@"model"], @"claude-sonnet-5");
+  }
+  XCTAssertFalse([self.transport providerReportedModel:@"CLAUDE-SONNET-5"
+                                matchesRequestedModel:@"claude-sonnet-5"]);
+}
+
+- (void)testGlmResponseIdentityAcceptsOnlyExactModelWithASCIICaseDifferences {
+  GlmProviderTransport *glm = [[GlmProviderTransport alloc]
+      initWithSession:self.session uuidGenerator:nil monotonicClock:nil];
+  for (NSString *model in @[ @"GLM-5.3", @"GLM-5.3-Flash" ]) {
+    for (NSString *echo in @[ model, model.lowercaseString, model.uppercaseString ]) {
+      NSError *error = nil;
+      NSDictionary *parsed = [glm providerParseResponseData:[self jsonData:@{
+        @"id": @"msg-glm-identity", @"model": echo,
+        @"content": @[ @{ @"type": @"text", @"text": @"answer" } ],
+        @"stop_reason": @"end_turn",
+      }] requestedModel:model thinkingMode:@"high" error:&error];
+      XCTAssertNil(error, @"%@ echoed as %@", model, echo);
+      XCTAssertEqualObjects(parsed[@"model"], model);
+      XCTAssertEqualObjects(parsed[@"text"], @"answer");
+    }
+  }
+}
+
+- (void)testGlmResponseIdentityRejectsWrongModelsSuffixesMissingAndNonASCIIEchoes {
+  GlmProviderTransport *glm = [[GlmProviderTransport alloc]
+      initWithSession:self.session uuidGenerator:nil monotonicClock:nil];
+  for (NSString *model in @[ @"GLM-5.3", @"GLM-5.3-Flash" ]) {
+    NSString *otherVariant = [model isEqualToString:@"GLM-5.3"]
+        ? @"glm-5.3-flash" : @"glm-5.3";
+    NSArray *invalidEchoes = @[
+      NSNull.null, @"", @42, otherVariant, @"glm-5.2", @"claude-sonnet-5",
+      [model stringByAppendingString:@"-20260906"],
+      [model stringByAppendingString:@"-anything"],
+      [model stringByAppendingString:@" "],
+      [model stringByReplacingOccurrencesOfString:@"GLM" withString:@"ＧＬＭ"],
+      [model stringByReplacingOccurrencesOfString:@"-" withString:@"−"],
+      @"glm-5.3-flaſh",
+    ];
+    for (id echo in invalidEchoes) {
+      NSMutableDictionary *payload = [@{
+        @"id": @"msg-glm-rejected", @"model": echo,
+        @"content": @[ @{ @"type": @"text", @"text": @"answer" } ],
+        @"stop_reason": @"end_turn",
+      } mutableCopy];
+      NSError *error = nil;
+      XCTAssertNil([glm providerParseResponseData:[self jsonData:payload]
+          requestedModel:model thinkingMode:@"high" error:&error], @"%@ / %@", model, echo);
+      XCTAssertEqualObjects(error.localizedDescription, @"E_COMPLETION_MODEL_MISMATCH");
+      if (echo == NSNull.null) {
+        [payload removeObjectForKey:@"model"];
+        error = nil;
+        XCTAssertNil([glm providerParseResponseData:[self jsonData:payload]
+            requestedModel:model thinkingMode:@"high" error:&error]);
+        XCTAssertEqualObjects(error.localizedDescription, @"E_COMPLETION_MODEL_MISMATCH");
+      }
+    }
+  }
+}
+
 - (void)testParsesContentBlocksAndMapsStopReasons {
   NSError *error = nil;
   NSDictionary *parsed = [self parse:@{
@@ -437,15 +508,24 @@ static NSUInteger ClaudeTransportRequestCount = 0;
 }
 
 - (void)startRoundExpectingResult:(NSDictionary **)result errorCode:(NSString **)errorCode {
+  [self startRoundWithTransport:self.transport model:@"claude-sonnet-5"
+      schemaVersion:2 result:result errorCode:errorCode];
+}
+
+- (void)startRoundWithTransport:(ClaudeProviderTransport *)transport
+                         model:(NSString *)model
+                 schemaVersion:(NSInteger)schemaVersion
+                        result:(NSDictionary **)result
+                     errorCode:(NSString **)errorCode {
   NSString *roundId = @"33333333-3333-4333-8333-333333333333";
   NSString *providerId = @"44444444-4444-4444-8444-444444444444";
-  NSData *body = [self jsonData:@{ @"model": @"claude-sonnet-5" }];
+  NSData *body = [self jsonData:@{ @"model": model }];
   __block NSDictionary *value = nil;
   __block NSString *code = nil;
   XCTestExpectation *done = [self expectationWithDescription:@"round"];
-  [self.transport startRequestWithSchemaVersion:2 roundId:roundId generation:1
+  [transport startRequestWithSchemaVersion:schemaVersion roundId:roundId generation:1
       credentialGeneration:1 providerRequestId:providerId
-      credential:@"sk-ant-test" requestedModel:@"claude-sonnet-5"
+      credential:@"sk-ant-test" requestedModel:model
       thinkingMode:@"off" credentialGenerationIsCurrent:^BOOL(__unused NSUInteger g) { return YES; }
       startedAt:1.0 bodyData:body visibleHistory:@[] modelInput:@[]
       bindTask:^BOOL(__unused NSURLSessionDataTask *t) { return YES; }
@@ -479,6 +559,53 @@ static NSUInteger ClaudeTransportRequestCount = 0;
   XCTAssertEqualObjects(captured[@"x-api-key"], @"sk-ant-test");
   XCTAssertEqualObjects(captured[@"anthropic-version"], @"2023-06-01");
   XCTAssertEqual([ClaudeTransportURLProtocol requestCount], 1u);
+}
+
+- (void)testGlmStrictRoundsKeepCanonicalModelAndHarnessAfterLowercaseEcho {
+  GlmProviderTransport *glm = [[GlmProviderTransport alloc]
+      initWithSession:self.session uuidGenerator:nil monotonicClock:nil];
+  for (NSNumber *schemaVersion in @[ @2, @3 ]) {
+    for (NSString *model in @[ @"GLM-5.3", @"GLM-5.3-Flash" ]) {
+      [ClaudeTransportURLProtocol setHandler:^(NSURLProtocol *protocol, NSURLRequest *request) {
+        XCTAssertEqualObjects(request.URL.host, @"open.bigmodel.cn");
+        [self respond:protocol request:request data:[self jsonData:@{
+          @"id": @"msg-glm-round", @"model": model.lowercaseString,
+          @"content": @[ @{ @"type": @"text", @"text": @"answer" } ],
+          @"stop_reason": @"end_turn",
+        }] status:200];
+      }];
+      NSDictionary *result = nil;
+      NSString *errorCode = nil;
+      [self startRoundWithTransport:glm model:model schemaVersion:schemaVersion.integerValue
+          result:&result errorCode:&errorCode];
+      XCTAssertNil(errorCode);
+      XCTAssertNotNil(result);
+      XCTAssertEqualObjects(result[@"harness_id"], @"glm");
+      XCTAssertEqualObjects(result[@"requested_model"], model);
+      XCTAssertEqualObjects(result[@"model"], model);
+      XCTAssertEqualObjects(result[@"provider_request_id"], @"44444444-4444-4444-8444-444444444444");
+      XCTAssertEqualObjects(result[@"provider_response_id"], @"msg-glm-round");
+    }
+  }
+  XCTAssertEqual([ClaudeTransportURLProtocol requestCount], 4u);
+}
+
+- (void)testGlmStrictRoundRejectsCrossProviderResponseIdentity {
+  GlmProviderTransport *glm = [[GlmProviderTransport alloc]
+      initWithSession:self.session uuidGenerator:nil monotonicClock:nil];
+  [ClaudeTransportURLProtocol setHandler:^(NSURLProtocol *protocol, NSURLRequest *request) {
+    [self respond:protocol request:request data:[self jsonData:@{
+      @"id": @"msg-wrong-provider", @"model": @"claude-sonnet-5",
+      @"content": @[ @{ @"type": @"text", @"text": @"answer" } ],
+      @"stop_reason": @"end_turn",
+    }] status:200];
+  }];
+  NSDictionary *result = nil;
+  NSString *errorCode = nil;
+  [self startRoundWithTransport:glm model:@"GLM-5.3-Flash" schemaVersion:2
+      result:&result errorCode:&errorCode];
+  XCTAssertNil(result);
+  XCTAssertEqualObjects(errorCode, @"E_COMPLETION_MODEL_MISMATCH");
 }
 
 - (void)testRateLimitedRoundSurfacesStableCodeWithoutBody {

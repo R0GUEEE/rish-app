@@ -2537,17 +2537,20 @@ export function createCompletionController(
       null,
       transitionCreatedAt,
     );
-    const cleanup =
-      phase === 'round_in_flight'
-        ? undefined
-        : agentCleanupFor(
+    // Unknown/ambiguous rounds still own unresolved native evidence. Only a
+    // settled failed/cancelled journal may enqueue transcript cleanup; the
+    // store deliberately rejects cleanup on the unresolved checkpoints.
+    const needsCleanup = phase === 'failed' || phase === 'cancelled';
+    const cleanup = needsCleanup
+        ? agentCleanupFor(
             conversationId,
             located.attempt,
             nextJournal,
             phase === 'cancelled' ? 'cancelled' : 'failed',
             transitionCreatedAt,
-          );
-    if (phase !== 'round_in_flight' && cleanup === null) {
+          )
+        : undefined;
+    if (needsCleanup && cleanup === null) {
       return await failAgentWithoutNative(conversationId, attemptId, 'E_AGENT_PERSISTENCE');
     }
     const cas = authorityFor(located.attempt, conversationId);

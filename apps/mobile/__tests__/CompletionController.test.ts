@@ -1945,6 +1945,66 @@ describe('project Agent completion controller', () => {
     });
   }
 
+  test.each(['ambiguous', 'unknown'] as const)(
+    'persists a GLM %s round without discarding unresolved native evidence',
+    async status => {
+      const store = agentStore('GLM-5.3');
+      const conversationId = store.getState().selectedConversationId!;
+      const runtime = makeRuntime([]);
+      (runtime.completeAgentRoundV2 as jest.Mock).mockImplementationOnce(
+        async (request: CompleteAgentRoundRequestV2): Promise<CompleteAgentRoundResultV2> => ({
+          schema_version: 2,
+          status,
+          operation_id: request.operation_id,
+          task_id: request.task_id,
+          attempt_id: request.attempt_id,
+          round_id: request.round_id,
+          round_index: request.round_index,
+          launch_attempt: request.launch_attempt,
+          result_round_revision: 3,
+          transcript: request.transcript,
+          failure_code: status === 'ambiguous'
+            ? 'E_AGENT_ROUND_AMBIGUOUS'
+            : 'E_AGENT_CONFLICT',
+        }),
+      );
+      const checkpoint = jest.spyOn(store, 'failAgentAttempt');
+      const committed: string[] = [];
+      const persistCurrent = jest.fn(async (): Promise<CompletionPersistenceResult> => {
+        const session = store.serialize();
+        const generation = (store.getSessionAuthority()?.generation ?? 1) + 1;
+        const digest = sessionSnapshotSHA256(session)!;
+        committed.push(session);
+        store.setSessionAuthority({ generation, sessionSha256: digest });
+        return { status: 'committed', snapshot: {
+          schema_version: 1, generation, session_sha256: digest,
+        } };
+      });
+      const controller = agentController(store, runtime, persistCurrent);
+      const result = await controller.send({ conversationId, harnessId: 'glm', text: 'read only', attachments: [] });
+      const failureCode = status === 'ambiguous'
+        ? 'E_AGENT_EXECUTION_AMBIGUOUS'
+        : 'E_AGENT_CONFLICT';
+      expect(result.status).toBe('retryable');
+      expect(checkpoint).toHaveBeenCalledTimes(1);
+      expect(checkpoint.mock.calls[0]![0].cleanup).toBeUndefined();
+      const expectedAttempt = {
+        status: 'failed', harnessId: 'glm', modelId: 'GLM-5.3', failureCode,
+        activeRound: null,
+        agent: { phase: status, round_lineage: { status, native_row_revision: 3 } },
+      };
+      expect(store.getState().conversations[conversationId]?.attempts[0]).toMatchObject(expectedAttempt);
+      const restored = hydrateChatState(committed.at(-1)!);
+      expect(restored.conversations[conversationId]?.attempts[0]).toMatchObject(expectedAttempt);
+      expect(restored.agentTranscriptCleanupOutbox).toEqual([]);
+      expect(runtime.completeAgentRoundV2).toHaveBeenCalledTimes(1);
+      expect(runtime.prepareAgentToolBatch).not.toHaveBeenCalled();
+      expect(runtime.executeAgentTool).not.toHaveBeenCalled();
+      expect(runtime.finalizeAgentAttempt).not.toHaveBeenCalled();
+      expect(runtime.discardAgentAttempt).not.toHaveBeenCalled();
+    },
+  );
+
   test('does not invoke Agent native effects when outer preparation is not durable', async () => {
     const store = agentStore();
     const runtime = makeRuntime([]);
