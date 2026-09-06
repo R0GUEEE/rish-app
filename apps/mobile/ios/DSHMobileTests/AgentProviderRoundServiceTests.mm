@@ -1069,12 +1069,12 @@ static NSDictionary *DSHProviderSmokeQueryRequest(NSDictionary *root,
     }
   }
   XCTAssertNotNil(writeFunction);
-  XCTAssertTrue([writeFunction[@"description"] containsString:@"JSON null"]);
+  XCTAssertTrue([writeFunction[@"description"] containsString:@"OMIT expected_revision"]);
   XCTAssertTrue([writeFunction[@"description"] containsString:@"exact revision"]);
   XCTAssertEqualObjects(writeFunction[@"parameters"][@"properties"]
                              [@"expected_revision"][@"type"],
-                        (@[ @"string", @"null" ]));
-  XCTAssertTrue([writeFunction[@"parameters"][@"required"]
+                        @"string");
+  XCTAssertFalse([writeFunction[@"parameters"][@"required"]
       containsObject:@"expected_revision"]);
   NSDictionary *state = [fixture.wal snapshotWithError:nil];
   XCTAssertEqualObjects(state[@"operations"][0][@"state"], @"committed");

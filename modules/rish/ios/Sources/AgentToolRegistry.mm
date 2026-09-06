@@ -98,11 +98,11 @@ static NSArray<NSDictionary *> *DSHAgentNativeToolDescriptors(void) {
               @"type" : @"string", @"max_utf8_bytes" : @32768,
             },
             @"expected_revision" : @{
-              @"type" : @[ @"string", @"null" ],
+              @"type" : @"string",
               @"max_utf8_bytes" : @256,
             },
           },
-          @"required" : @[ @"path", @"content", @"expected_revision" ],
+          @"required" : @[ @"path", @"content" ],
         },
       },
     ];

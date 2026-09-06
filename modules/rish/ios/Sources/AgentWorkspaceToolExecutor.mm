@@ -472,7 +472,8 @@ static BOOL DSHAgentWorkspaceEntryList(int directoryDescriptor,
     BOOL exactWrite = DSHAgentExactDictionaryKeys(
         arguments, @[@"path", @"content", @"expected_prior"]) ||
         DSHAgentExactDictionaryKeys(
-            arguments, @[@"path", @"content", @"expected_revision"]);
+            arguments, @[@"path", @"content", @"expected_revision"]) ||
+        DSHAgentExactDictionaryKeys(arguments, @[@"path", @"content"]);
     NSData *content = [arguments[@"content"] isKindOfClass:NSString.class]
         ? [arguments[@"content"] dataUsingEncoding:NSUTF8StringEncoding] : nil;
     if (!exactWrite || content == nil ||
@@ -491,7 +492,7 @@ static BOOL DSHAgentWorkspaceEntryList(int directoryDescriptor,
     NSDictionary *expectedPrior = arguments[@"expected_prior"];
     if (expectedPrior == nil) {
       id revision = arguments[@"expected_revision"];
-      expectedPrior = revision == NSNull.null
+      expectedPrior = revision == nil || revision == NSNull.null
           ? @{ @"schema_version" : @1, @"kind" : @"absent" }
           : @{ @"schema_version" : @1, @"kind" : @"known",
                @"revision" : revision ?: @"" };

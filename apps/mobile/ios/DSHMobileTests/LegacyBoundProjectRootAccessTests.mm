@@ -361,6 +361,20 @@ static NSString *const DSHLegacyAdapterOperation =
   valid[@"expected_revision"] = NSNull.null;
   XCTAssertNotNil([executor prepareToolNamed:@"write_file" arguments:valid root:root error:&error]);
   XCTAssertNil(error);
+  [valid removeObjectForKey:@"expected_revision"];
+  NSDictionary *prepared = [executor prepareToolNamed:@"write_file"
+      arguments:valid root:root error:&error];
+  XCTAssertNotNil(prepared, @"%@", error);
+  XCTAssertEqualObjects(prepared[@"precondition"][@"prior"][@"kind"], @"absent");
+  NSDictionary *written = [executor executeToolNamed:@"write_file" arguments:valid
+      root:root precondition:prepared[@"precondition"] error:&error];
+  XCTAssertEqualObjects(written[@"status"], @"ok", @"%@", error);
+  error = nil;
+  XCTAssertNil([executor prepareToolNamed:@"write_file" arguments:valid root:root error:&error]);
+  XCTAssertEqual(error.code, DSHAgentNativeStoreErrorConflict);
+  XCTAssertEqualObjects([NSString stringWithContentsOfURL:
+      [self.repositoryURL URLByAppendingPathComponent:@"new-file.txt"]
+      encoding:NSUTF8StringEncoding error:nil], @"test\n");
 }
 
 - (void)testVerifiedLegacyRootRunsFileWriteStatusAndCommitEndToEnd {
