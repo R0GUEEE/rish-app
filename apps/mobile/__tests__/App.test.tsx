@@ -1344,7 +1344,7 @@ test('shows workspace recovery and no Context when project binding durability is
 
   expect(visibleContextSheets(root)).toHaveLength(0);
   expect(mockLocalProjectContext.listCandidatesV2).not.toHaveBeenCalled();
-  expect(actionByLabel(root, 'Retry workspace binding')).toBeDefined();
+  expect(actionByLabel(root, 'Retry saving workspace')).toBeDefined();
   expect(mockSessionSnapshots.casPersistSession).toHaveBeenCalledTimes(2);
   expect(mockSessionSnapshots.querySessionCommit).toHaveBeenCalledTimes(1);
   expect(bridgedSessionJSON).toBe(committedWorkspaceOnly);
@@ -2029,7 +2029,7 @@ test.each(['prepared', 'failed'] as const)(
     queuePresentSession(stored.serialize());
 
     const renderer = await renderApp();
-    expect(actionByLabel(renderer.root, 'Retry response')).toBeDefined();
+    expect(actionByLabel(renderer.root, status === 'prepared' ? 'Continue response' : 'Retry response')).toBeDefined();
     if (status === 'prepared') {
       expect(
         renderer.root.findByProps({ accessibilityLabel: 'Message DSH' }).props
@@ -5909,7 +5909,7 @@ test('shows cancellation persistence failure instead of a false stopped notice',
   const rendered = JSON.stringify(renderer.toJSON());
   expect(rendered).toContain('E_ATTEMPT_PERSISTENCE');
   expect(rendered).not.toContain('Response stopped.');
-  expect(actionByLabel(root, 'Retry response')).toBeDefined();
+  expect(actionByLabel(root, 'Retry save')).toBeDefined();
 });
 
 test('adds an image attachment, switches to Flash Exp, and sends without text', async () => {
@@ -7126,7 +7126,7 @@ test('keeps model, effort, and attachments frozen while persistence is pending',
     await actionByLabel(root, 'Send message').props.onPress();
   });
 
-  expect(actionByLabel(root, 'Retry response')).toBeDefined();
+  expect(actionByLabel(root, 'Retry save')).toBeDefined();
   expect(composerOptionsChip(root).props.disabled).toBe(true);
   expect(actionByLabel(root, 'Add attachment').props.disabled).toBe(true);
   expect(
@@ -8534,7 +8534,7 @@ test.each([
     renderer.root.findAllByProps({ children: 'agent restart pending' }),
   ).not.toHaveLength(0);
   await act(async () => {
-    actionByLabel(renderer.root, 'Retry response').props.onPress();
+    actionByLabel(renderer.root, 'Continue response').props.onPress();
     await settle();
   });
   expect(mockSessionSnapshots.casPersistSession).toHaveBeenCalledTimes(1);
@@ -8615,10 +8615,10 @@ test('uses the ordinary retry path for a current non-Agent attempt after Agent h
 
   const renderer = await renderApp();
   expect(currentAttemptId).toBeDefined();
-  expect(actionByLabel(renderer.root, 'Retry response')).toBeDefined();
+  expect(actionByLabel(renderer.root, 'Continue response')).toBeDefined();
 
   await act(async () => {
-    actionByLabel(renderer.root, 'Retry response').props.onPress();
+    actionByLabel(renderer.root, 'Continue response').props.onPress();
     await settle();
     await settle();
   });

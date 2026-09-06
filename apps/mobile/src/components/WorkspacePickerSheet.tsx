@@ -36,6 +36,8 @@ import {
   type WorkspacePickerSelection,
 } from '../workspaces/WorkspacePickerController';
 import { AppIcon } from './AppIcon';
+import { RecoveryNotice } from './RecoveryNotice';
+import { recoveryErrorText } from './recoveryMessage';
 
 const AnimatedPressable = Animated.createAnimatedComponent(Pressable);
 
@@ -147,7 +149,7 @@ export function WorkspacePickerSheet({
         setRows([]);
         setNotice({
           kind: 'load',
-          error: error instanceof Error ? error.message : String(error),
+          error: recoveryErrorText(error),
         });
       }
     },
@@ -241,7 +243,7 @@ export function WorkspacePickerSheet({
         ) {
           setNotice({
             kind: 'action',
-            error: error instanceof Error ? error.message : String(error),
+            error: recoveryErrorText(error),
           });
         }
       } finally {
@@ -381,7 +383,7 @@ export function WorkspacePickerSheet({
           resolveForgetAuthorization(workspace),
         );
         if (result.status === 'not_authorized') {
-          throw new Error('Workspace clearance is unavailable.');
+          throw new Error('E_WORKSPACE_CLEARANCE_UNAVAILABLE');
         }
         return result.status === 'forgotten';
       }),
@@ -445,7 +447,9 @@ export function WorkspacePickerSheet({
                 </Text>
                 <View style={styles.selectionPromptActions}>
                   <Pressable
-                    accessibilityLabel={`Confirm ${pendingSelection.display_name}`}
+                    accessibilityLabel={t('workspaces.confirmSelection', {
+                      name: pendingSelection.display_name,
+                    })}
                     accessibilityRole="button"
                     disabled={busy}
                     onPress={() => {
@@ -464,7 +468,9 @@ export function WorkspacePickerSheet({
                     </Text>
                   </Pressable>
                   <Pressable
-                    accessibilityLabel={`Cancel ${pendingSelection.display_name}`}
+                    accessibilityLabel={t('workspaces.cancelSelection', {
+                      name: pendingSelection.display_name,
+                    })}
                     accessibilityRole="button"
                     disabled={busy}
                     onPress={() => {
@@ -477,19 +483,13 @@ export function WorkspacePickerSheet({
                     testID="workspace-picker-cancel-selection"
                   >
                     <Text style={styles.footerActionText}>
-                      {t('workspaces.close')}
+                      {t('common.cancel')}
                     </Text>
                   </Pressable>
                 </View>
               </View>
             )}
-            {notice !== null && (
-              <Text accessibilityRole="alert" style={styles.notice}>
-                {notice.kind === 'load'
-                  ? t('workspaces.loadFailed', { error: notice.error })
-                  : t('workspaces.actionFailed', { error: notice.error })}
-              </Text>
-            )}
+            {notice !== null && <RecoveryNotice error={notice.error} />}
             <ScrollView
               accessibilityLabel={t('workspaces.list')}
               style={styles.listScroll}
@@ -552,7 +552,10 @@ export function WorkspacePickerSheet({
                           {row.origin === 'granted_folder' &&
                             row.status !== 'ok' && (
                               <Pressable
-                                accessibilityLabel={`Regrant ${row.display_name}`}
+                                accessibilityLabel={t(
+                                  'workspaces.regrantNamed',
+                                  { name: row.display_name },
+                                )}
                                 accessibilityRole="button"
                                 disabled={busy}
                                 onPress={() => {
@@ -566,7 +569,9 @@ export function WorkspacePickerSheet({
                                 ]}
                                 testID={`workspace-picker-regrant-${row.workspace_id}`}
                               >
-                                <Text style={styles.forgetText}>Regrant</Text>
+                                <Text style={styles.forgetText}>
+                                  {t('workspaces.regrant')}
+                                </Text>
                               </Pressable>
                             )}
                           <Pressable

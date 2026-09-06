@@ -1,3 +1,5 @@
+import { RecoveryNotice } from '../components/RecoveryNotice';
+import { completionRecoveryLabel, recoveryCode } from '../components/recoveryMessage';
 import React, {
   useCallback,
   useEffect,
@@ -5552,12 +5554,14 @@ export function HomeScreen({
         >
           {(visibleRequestFailure !== null || storageWarning !== null) && (
             <View style={styles.notice}>
-              <Text numberOfLines={3} style={styles.noticeText}>
-                {visibleRequestFailure ?? storageWarning}
-              </Text>
+              <RecoveryNotice
+                error={visibleRequestFailure ?? storageWarning ?? ''}
+                message={recoveryCode(visibleRequestFailure ?? storageWarning ?? '') === null
+                  ? visibleRequestFailure ?? storageWarning ?? undefined : undefined}
+              />
               {completionActionVisible && visibleRequestFailure !== null && (
                 <Pressable
-                  accessibilityLabel={t('messages.retryResponse')}
+                  accessibilityLabel={completionRecoveryLabel(completionState.phase, t)}
                   accessibilityRole="button"
                   accessibilityState={{
                     disabled:
@@ -5573,12 +5577,12 @@ export function HomeScreen({
                     pressed && styles.pressed,
                   ]}
                 >
-                  <Text style={styles.retryText}>{t('messages.retry')}</Text>
+                  <Text style={styles.retryText}>{completionRecoveryLabel(completionState.phase, t)}</Text>
                 </Pressable>
               )}
               {workspaceBindingRecoveryVisible && (
                 <Pressable
-                  accessibilityLabel="Retry workspace binding"
+                  accessibilityLabel={t('recovery.retryBinding')}
                   accessibilityRole="button"
                   disabled={attachmentBusy || previewingAttachmentId !== null}
                   onPress={retryWorkspaceBinding}
@@ -5587,7 +5591,7 @@ export function HomeScreen({
                     pressed && styles.pressed,
                   ]}
                 >
-                  <Text style={styles.retryText}>Retry workspace binding</Text>
+                  <Text style={styles.retryText}>{t('recovery.retryBinding')}</Text>
                 </Pressable>
               )}
             </View>
@@ -6439,8 +6443,8 @@ const createStyles = (colors: ThemePalette) =>
       borderColor: colors.danger,
       paddingHorizontal: 12,
       paddingVertical: 9,
-      flexDirection: 'row',
-      alignItems: 'center',
+      alignItems: 'stretch',
+      gap: 8,
     },
     noticeText: { flex: 1, color: colors.danger, fontSize: 11, lineHeight: 15 },
     attachmentNotice: {

@@ -1,3 +1,9 @@
+import { RecoveryNotice } from '../components/RecoveryNotice';
+import { completionRecoveryLabel } from '../components/recoveryMessage';
+import {
+  createPreferencesStore,
+  createDefaultPreferences,
+} from '../preferences';
 import React, { useRef, useState } from 'react';
 import { Pressable, ScrollView, StyleSheet, Text, View } from 'react-native';
 
@@ -9,7 +15,10 @@ import {
   AGENT_POLICY_DEFAULT_BUDGET,
 } from '../components/AgentPolicySheet';
 import { ApprovalComposer } from '../components/ApprovalComposer';
-import { useAppPresentation } from '../presentation/AppPresentation';
+import {
+  AppPresentationProvider,
+  useAppPresentation,
+} from '../presentation/AppPresentation';
 import type { AgentConversationGrantV2 } from '../state';
 
 /**
@@ -25,6 +34,8 @@ export const UI_PREVIEW_KINDS = [
   'approval-batch',
   'policy-panel',
   'message-list',
+  'recovery-zh',
+  'recovery-en',
 ] as const;
 
 export type UIPreviewKind = (typeof UI_PREVIEW_KINDS)[number];
@@ -108,7 +119,9 @@ export function UIPreview({ kind }: { kind: UIPreviewKind }) {
       >
         {decided ?? `preview:${kind}`}
       </Text>
-      {kind === 'message-list' ? (
+      {kind === 'recovery-zh' || kind === 'recovery-en' ? (
+        <RecoveryPreview locale={kind === 'recovery-zh' ? 'zh-CN' : 'en-US'} />
+      ) : kind === 'message-list' ? (
         <MessageListPreview />
       ) : kind === 'policy-panel' ? (
         <AgentPolicySheet
@@ -148,16 +161,65 @@ export function UIPreview({ kind }: { kind: UIPreviewKind }) {
   );
 }
 
+function RecoveryPreview({ locale }: { locale: 'zh-CN' | 'en-US' }) {
+  const [store] = useState(() =>
+    createPreferencesStore({
+      initialPreferences: { ...createDefaultPreferences(), locale },
+    }),
+  );
+  return (
+    <AppPresentationProvider store={store}>
+      <RecoveryPreviewContent />
+    </AppPresentationProvider>
+  );
+}
+
+function RecoveryPreviewContent() {
+  const { t, colors } = useAppPresentation();
+  const [kind, setKind] = useState(0);
+  const failures = [
+    'E_WORKSPACE_PERSISTENCE',
+    'E_WORKSPACE_REVOKED',
+    'E_SESSION_PROTECTION',
+  ];
+  const error =
+    failures[kind] + ': ' + 'Diagnostic line. '.repeat(80) + 'END OF DETAILS';
+  return (
+    <View style={{ alignSelf: 'stretch', padding: 20, gap: 16 }}>
+      <Pressable
+        accessibilityRole="button"
+        accessibilityLabel="Next example"
+        onPress={() => setKind(value => (value + 1) % failures.length)}
+      >
+        <Text style={{ color: colors.accent }}>Next example</Text>
+      </Pressable>
+      <RecoveryNotice error={error} />
+      <Text style={{ color: colors.text }}>
+        {kind === 0
+          ? completionRecoveryLabel('persistence_pending', t)
+          : kind === 1
+          ? t('workspaces.regrant')
+          : t('recovery.retrySave')}
+      </Text>
+    </View>
+  );
+}
+
 function MessageListPreview() {
   const list = useRef<React.ComponentRef<typeof ScrollView>>(null);
   const [revision, setRevision] = useState(0);
   const [toolDone, setToolDone] = useState(false);
   const messages: DisplayMessage[] = [
-    ...Array.from({ length: 20 }, (_, index): DisplayMessage => ({
-      id: `history-${index}`,
-      role: index % 2 === 0 ? 'user' : 'assistant',
-      text: `History ${index + 1}. This saved paragraph stays in place while new output arrives.\nA second line makes the reading position easy to verify.`,
-    })),
+    ...Array.from(
+      { length: 20 },
+      (_, index): DisplayMessage => ({
+        id: `history-${index}`,
+        role: index % 2 === 0 ? 'user' : 'assistant',
+        text: `History ${
+          index + 1
+        }. This saved paragraph stays in place while new output arrives.\nA second line makes the reading position easy to verify.`,
+      }),
+    ),
     {
       id: 'live',
       role: 'assistant',
@@ -166,7 +228,9 @@ function MessageListPreview() {
         {
           id: 'stream',
           type: 'text',
-          text: `Latest response — revision ${revision}.\n${'New streamed text. '.repeat(revision * 8 + 1)}`,
+          text: `Latest response — revision ${revision}.\n${'New streamed text. '.repeat(
+            revision * 8 + 1,
+          )}`,
         },
         {
           id: 'tool',

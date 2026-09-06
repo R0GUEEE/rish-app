@@ -87,7 +87,7 @@ const WORKSPACE_B = 'bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb';
 const OPERATION_ID = 'dddddddd-dddd-4ddd-8ddd-dddddddddddd';
 const CLEARANCE_RECEIPT_ID = 'eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee';
 
-function presentation(children: React.ReactNode) {
+function presentation(children: React.ReactNode, locale: 'en-US' | 'zh-CN' = 'en-US') {
   const { AppPresentationProvider } = jest.requireActual(
     '../src/presentation/AppPresentation',
   ) as typeof import('../src/presentation/AppPresentation');
@@ -98,7 +98,7 @@ function presentation(children: React.ReactNode) {
   const store = createPreferencesStore({
     initialPreferences: {
       ...createDefaultPreferences(),
-      locale: 'en-US',
+      locale,
     },
   });
   return (
@@ -108,6 +108,7 @@ function presentation(children: React.ReactNode) {
 
 async function renderSheet(
   props: {
+    locale?: 'en-US' | 'zh-CN';
     activeWorkspaceId?: string | null;
     onClose?: jest.Mock;
     onSelect?: jest.Mock<void, [string]>;
@@ -128,6 +129,7 @@ async function renderSheet(
           onSelect={props.onSelect ?? jest.fn()}
           forgetAuthorization={props.forgetAuthorization}
         />,
+        props.locale,
       ),
     );
   });
@@ -418,7 +420,7 @@ test('imports after confirmation with the same one-shot operation id', async () 
   expect(onSelect).toHaveBeenCalledWith(WORKSPACE_A);
 });
 
-test('regrants a revoked granted folder through the exact captured revision', async () => {
+test.each(['en-US', 'zh-CN'] as const)('regrants a revoked folder with localized controls in %s and preserves the captured revision', async locale => {
   mockNativeLocalWorkspaces.list.mockResolvedValue({
     schema_version: 1,
     workspaces: [
@@ -444,12 +446,14 @@ test('regrants a revoked granted folder through the exact captured revision', as
     },
   });
   const onSelect = jest.fn();
-  const renderer = await renderSheet({ onSelect });
+  const renderer = await renderSheet({ onSelect, locale });
 
   await act(async () => {
-    actionByLabel(renderer.root, 'Regrant Beta').props.onPress();
+    actionByLabel(renderer.root, locale === 'zh-CN' ? '重新授权Beta' : 'Grant access to Beta again').props.onPress();
     await Promise.resolve();
   });
+  expect(actionByLabel(renderer.root, locale === 'zh-CN' ? '确认Beta' : 'Confirm Beta')).toBeDefined();
+  expect(actionByLabel(renderer.root, locale === 'zh-CN' ? '取消Beta' : 'Cancel Beta')).toBeDefined();
   const operationId =
     mockNativeLocalWorkspaces.presentRegrantPicker.mock.calls[0][0]
       .operation_id;
@@ -665,7 +669,7 @@ test('invalidates an in-flight regrant when its workspace owner is replaced', as
   });
 
   await act(async () => {
-    actionByLabel(renderer.root, 'Regrant Alpha').props.onPress();
+    actionByLabel(renderer.root, 'Grant access to Alpha again').props.onPress();
     await Promise.resolve();
   });
   await act(async () => {
