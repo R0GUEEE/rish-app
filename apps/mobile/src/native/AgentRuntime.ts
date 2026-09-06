@@ -1306,10 +1306,19 @@ export type AgentRuntimeFacadeV2 = {
   ): Promise<QueryAgentCleanupResultV2>;
 };
 
-export class AgentRuntimeError extends Error {
-  readonly code: AgentRuntimeFailureCode;
+const contextBridgeFailureCodes = [
+  'E_CONTEXT_REQUEST_INVALID', 'E_PROJECT_NOT_FOUND', 'E_CONTEXT_CHANGED',
+  'E_CONTEXT_SECRET', 'E_CONTEXT_BUDGET', 'E_CONTEXT_STORAGE',
+  'E_CONTEXT_TIMEOUT', 'E_CONTEXT_CONSENT_INVALID', 'E_CONTEXT_INTEGRITY',
+  'E_CONTEXT_SNAPSHOT_MISSING', 'E_CONTEXT_NATIVE',
+] as const;
+type AgentBridgeFailureCode = AgentRuntimeFailureCode |
+  (typeof contextBridgeFailureCodes)[number];
 
-  constructor(code: AgentRuntimeFailureCode) {
+export class AgentRuntimeError extends Error {
+  readonly code: AgentBridgeFailureCode;
+
+  constructor(code: AgentBridgeFailureCode) {
     super(code);
     this.name = 'AgentRuntimeError';
     this.code = code;
@@ -5532,11 +5541,17 @@ function resolveNativeMethods(): NativeAgentRuntimeV2 | null {
 function nativeFailureCode(
   error: unknown,
   fallback: AgentRuntimeFailureCode,
-): AgentRuntimeFailureCode {
+): AgentBridgeFailureCode {
   try {
     if (typeof error === 'object' && error !== null) {
       const candidate = (error as { code?: unknown }).code;
       if (isRuntimeFailureCode(candidate)) return candidate;
+      // Context validation fails before a native round starts. Preserve its
+      // closed error code without widening persisted tool-result vocabulary.
+      if (typeof candidate === 'string' &&
+          contextBridgeFailureCodes.some(code => code === candidate)) {
+        return candidate as (typeof contextBridgeFailureCodes)[number];
+      }
     }
   } catch {
     // Native error messages and hostile accessors never cross the bridge.

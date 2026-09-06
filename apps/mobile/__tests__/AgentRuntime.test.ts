@@ -1011,6 +1011,18 @@ test('maps native errors to closed code-only failures', async () => {
   );
 });
 
+test.each([
+  'E_CONTEXT_CHANGED', 'E_CONTEXT_STORAGE', 'E_CONTEXT_CONSENT_INVALID',
+  'E_CONTEXT_SNAPSHOT_MISSING', 'E_CONTEXT_INTEGRITY',
+])('preserves pre-round context failure %s without native details', async code => {
+  native.complete_agent_round_v2.mockRejectedValueOnce({
+    code, message: 'private native path must not escape',
+  });
+  await expect(AgentRuntime.completeAgentRoundV2(completeRequest))
+    .rejects.toMatchObject({ code, message: code });
+  expect(native.complete_agent_round_v2).toHaveBeenCalledTimes(1);
+});
+
 test('requires every controller CAS session field to equal the committed checkpoint', async () => {
   const mismatch = {
     ...prepareRequest,
