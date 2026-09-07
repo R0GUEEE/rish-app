@@ -43,6 +43,7 @@ type Props = {
   harnessName: string;
   providerName: string;
   model: SupportedModel;
+  modelLabel?: string;
   optionsVisible: boolean;
   thinkingMode: ConversationThinkingMode;
   workspaceName?: string | null;
@@ -300,7 +301,7 @@ export function ChatComposer(props: Props) {
         {props.configured ? (
           <Pressable
             accessibilityLabel={t('messages.composerOptions', {
-              model: model.name,
+              model: props.modelLabel ?? model.name,
               effort: thinking.name,
             })}
             accessibilityRole="button"
@@ -321,7 +322,7 @@ export function ChatComposer(props: Props) {
           >
             <View style={styles.modelDot} />
             <Text numberOfLines={2} style={styles.modelText}>
-              {model.name} · {thinking.shortName}
+              {props.modelLabel ?? model.name} · {thinking.shortName}
             </Text>
             <AppIcon
               color={colors.muted}

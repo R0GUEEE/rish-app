@@ -5,6 +5,10 @@
 #import "ClaudeProviderTransport.h"
 #import "CodexProviderTransport.h"
 #import "RishHarnessCatalog.h"
+#import "ConfiguredProviderTransport.h"
+#import "ProviderConfiguration.h"
+#import "SessionSnapshotStore.h"
+#import "SessionWorkspaceCoordinator.h"
 #import "DSHStreamEvents.h"
 #import "LocalAttachmentStore.h"
 #import "ModelTransitionProof.h"
@@ -613,8 +617,8 @@ static BOOL DSHCanConnectToMacProxy(void) {
 /// while this module keeps the existing completion slot and the generic
 /// credential store (keyed by credential slot) as the single owner.
 @property(nonatomic, strong) DSHCompletionProviderTransport *completionProviderTransport;
-@property(nonatomic, strong) ClaudeProviderTransport *claudeProviderTransport;
-@property(nonatomic, strong) CodexProviderTransport *codexProviderTransport;
+@property(nonatomic, strong) DSHCompletionProviderTransport *claudeProviderTransport;
+@property(nonatomic, strong) DSHCompletionProviderTransport *codexProviderTransport;
 @property(nonatomic, strong) GlmProviderTransport *glmProviderTransport;
 @property(nonatomic, strong) NSURLSessionDataTask *activeCompletionTask;
 @property(nonatomic, copy) NSString *activeCompletionRequestId;
@@ -746,14 +750,14 @@ RCT_EXPORT_MODULE(LocalRuntime)
         initWithSession:_modelSession
         uuidGenerator:_completionV2UUIDGenerator
         monotonicClock:_completionV2MonotonicClock];
-    _claudeProviderTransport = [[ClaudeProviderTransport alloc]
-        initWithSession:_modelSession
+    _claudeProviderTransport = [[DSHConfiguredProviderTransport alloc]
+        initWithHarness:@"claude-code" session:_modelSession
         uuidGenerator:_completionV2UUIDGenerator
-        monotonicClock:_completionV2MonotonicClock];
-    _codexProviderTransport = [[CodexProviderTransport alloc]
-        initWithSession:_modelSession
+        monotonicClock:_completionV2MonotonicClock store:DSHProviderConfigurationStore.sharedStore];
+    _codexProviderTransport = [[DSHConfiguredProviderTransport alloc]
+        initWithHarness:@"codex" session:_modelSession
         uuidGenerator:_completionV2UUIDGenerator
-        monotonicClock:_completionV2MonotonicClock];
+        monotonicClock:_completionV2MonotonicClock store:DSHProviderConfigurationStore.sharedStore];
     _glmProviderTransport = [[GlmProviderTransport alloc]
         initWithSession:_modelSession
         uuidGenerator:_completionV2UUIDGenerator
@@ -847,6 +851,8 @@ RCT_EXPORT_MODULE(LocalRuntime)
 }
 
 - (NSMutableDictionary *)keychainQueryForAccount:(NSString *)account {
+  account = DSHEffectiveCredentialAccount(account);
+  if (account == nil) return nil;
   return [@{
     (__bridge id)kSecClass: (__bridge id)kSecClassGenericPassword,
     (__bridge id)kSecAttrService: DSHCredentialService,
@@ -954,7 +960,8 @@ RCT_EXPORT_MODULE(LocalRuntime)
     [NSCharacterSet whitespaceAndNewlineCharacterSet]];
   BOOL containsWhitespace = [trimmed rangeOfCharacterFromSet:
     [NSCharacterSet whitespaceAndNewlineCharacterSet]].location != NSNotFound;
-  if (trimmed.length < 16 || trimmed.length > 512 || containsWhitespace) {
+  BOOL customAccount = ![DSHEffectiveCredentialAccount(account) isEqual:account];
+  if (trimmed.length < (customAccount ? 1 : 16) || trimmed.length > (customAccount ? 4096 : 512) || containsWhitespace) {
     if (error != nil) {
       *error = DSHLocalRuntimeError(1004,
           [NSString stringWithFormat:@"%@ credential format is invalid", account]);
@@ -1830,6 +1837,63 @@ static NSString *DSHCredentialPromptPlaceholder(NSString *account) {
   return @"sk-…";
 }
 
+// Save routing only between persisted attempts. The shared coordinator makes
+// this check atomic with native prepare/checkpoint operations.
+- (BOOL)providerConfigurationCanChange {
+  @synchronized(self) {
+    if (self.activeCompletionRequestId != nil || [self.claudeProviderTransport hasActiveRequests] ||
+        [self.codexProviderTransport hasActiveRequests] || [self.completionProviderTransport hasActiveRequests] ||
+        [self.glmProviderTransport hasActiveRequests]) return NO;
+  }
+  NSError *error = nil;
+  DSHSessionSnapshotStore *store = [[DSHSessionSnapshotStore alloc] initWithError:&error];
+  NSDictionary *loaded = [store loadSessionSnapshotWithError:&error];
+  if (error != nil || loaded == nil) return NO;
+  if ([loaded[@"status"] isEqual:@"missing"]) return YES;
+  NSData *data = [loaded[@"session_json"] dataUsingEncoding:NSUTF8StringEncoding];
+  NSDictionary *session = data ? [NSJSONSerialization JSONObjectWithData:data options:0 error:&error] : nil;
+  if (![session isKindOfClass:NSDictionary.class] || error != nil) return NO;
+  for (NSDictionary *conversation in session[@"conversations"]) {
+    for (NSDictionary *attempt in conversation[@"attempts"]) {
+      if ([@[@"prepared", @"sending"] containsObject:attempt[@"status"]]) return NO;
+    }
+  }
+  return YES;
+}
+RCT_REMAP_METHOD(providerConfiguration, providerConfigurationForHarness:(NSString *)harness
+                 resolver:(RCTPromiseResolveBlock)resolve rejecter:(RCTPromiseRejectBlock)reject) {
+  NSDictionary *configuration = [DSHProviderConfigurationStore.sharedStore configurationForHarness:harness];
+  if (configuration == nil) reject(@"E_PROVIDER_CONFIGURATION", @"E_PROVIDER_CONFIGURATION", nil);
+  else resolve(configuration);
+}
+RCT_REMAP_METHOD(saveProviderConfiguration, saveProviderConfiguration:(NSDictionary *)configuration
+                 resolver:(RCTPromiseResolveBlock)resolve rejecter:(RCTPromiseRejectBlock)reject) {
+  NSDictionary *safe = DSHNormalizeProviderConfiguration(configuration);
+  if (safe == nil) { reject(@"E_PROVIDER_CONFIGURATION", @"E_PROVIDER_CONFIGURATION", nil); return; }
+  [DSHSessionWorkspaceCoordinator.sharedCoordinator performAsync:^{
+    if (![self providerConfigurationCanChange]) { reject(@"E_COMPLETION_BUSY", @"E_COMPLETION_BUSY", nil); return; }
+    @synchronized(self) {
+      NSError *error = nil;
+      NSDictionary *saved = [DSHProviderConfigurationStore.sharedStore saveConfiguration:safe error:&error];
+      if (saved == nil) { reject(@"E_PROVIDER_CONFIGURATION", @"E_PROVIDER_CONFIGURATION", nil); return; }
+      [self credentialDidChangeForSlot:DSHCredentialAccountForHarnessId(safe[@"harness_id"])];
+      resolve(saved);
+    }
+  }];
+}
+RCT_REMAP_METHOD(resetProviderConfiguration, resetProviderConfigurationForHarness:(NSString *)harness
+                 resolver:(RCTPromiseResolveBlock)resolve rejecter:(RCTPromiseRejectBlock)reject) {
+  if (![@[@"claude-code", @"codex"] containsObject:harness]) { reject(@"E_PROVIDER_CONFIGURATION", @"E_PROVIDER_CONFIGURATION", nil); return; }
+  [DSHSessionWorkspaceCoordinator.sharedCoordinator performAsync:^{
+    if (![self providerConfigurationCanChange]) { reject(@"E_COMPLETION_BUSY", @"E_COMPLETION_BUSY", nil); return; }
+    @synchronized(self) {
+      NSDictionary *saved = [DSHProviderConfigurationStore.sharedStore resetHarness:harness];
+      [self credentialDidChangeForSlot:DSHCredentialAccountForHarnessId(harness)];
+      resolve(saved);
+    }
+  }];
+}
+
 RCT_REMAP_METHOD(credentialStatus,
                  credentialStatusWithResolver:(RCTPromiseResolveBlock)resolve
                  rejecter:(RCTPromiseRejectBlock)reject) {
@@ -1885,13 +1949,21 @@ RCT_REMAP_METHOD(presentCredentialPromptForSlot,
   // The app passes its resolved locale. Any absent, malformed, or unsupported
   // value falls back to English instead of consulting mutable device state.
   BOOL usesChinese = DSHCredentialPromptUsesChinese(localeValue);
+  NSString *boundAccount = DSHEffectiveCredentialAccount(slot);
   NSString *title = DSHCredentialPromptTitle(slot, usesChinese);
+  if (boundAccount != nil && ![boundAccount isEqual:slot]) {
+    NSString *harness = [slot isEqual:@"ANTHROPIC_API_KEY"] ? @"claude-code" : @"codex";
+    NSDictionary *configuration = [DSHProviderConfigurationStore.sharedStore configurationForHarness:harness];
+    title = [NSString stringWithFormat:@"%@ · %@", configuration[@"name"],
+             [NSURL URLWithString:configuration[@"endpoint_url"]].host];
+  }
   NSString *message = usesChinese
     ? @"仅保存在此设备的钥匙串中。Rish 不会将密钥发送到 JavaScript。"
     : @"Saved only in this device's Keychain. Rish never sends the key to JavaScript.";
   NSString *cancelTitle = usesChinese ? @"取消" : @"Cancel";
   NSString *saveTitle = usesChinese ? @"安全保存" : @"Save securely";
-  NSString *placeholder = DSHCredentialPromptPlaceholder(slot);
+  NSString *placeholder = boundAccount != nil && ![boundAccount isEqual:slot]
+      ? @"API Key" : DSHCredentialPromptPlaceholder(slot);
   dispatch_async(dispatch_get_main_queue(), ^{
     UIViewController *presenter = RCTPresentedViewController();
     if (presenter == nil || [presenter isKindOfClass:UIAlertController.class]) {
@@ -1926,6 +1998,10 @@ RCT_REMAP_METHOD(presentCredentialPromptForSlot,
       NSString *value = field.text ?: @"";
       field.text = @"";
       dispatch_async(self.stateQueue, ^{
+        if (boundAccount == nil || ![DSHEffectiveCredentialAccount(slot) isEqual:boundAccount]) {
+          reject(@"E_PROVIDER_CONFIGURATION_CHANGED", @"E_PROVIDER_CONFIGURATION_CHANGED", nil);
+          return;
+        }
         NSError *error = nil;
         if (![self storeCredential:value forAccount:slot error:&error]) {
           reject(@"credential", error.localizedDescription ?: @"Unable to save credential", error);

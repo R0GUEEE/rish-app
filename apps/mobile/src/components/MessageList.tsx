@@ -41,6 +41,7 @@ export type DisplayMessage = {
   role: 'user' | 'assistant';
   text: string;
   modelId?: HarnessModelId;
+  providerLabel?: string;
   meta?: string;
   blocks?: readonly StructuredBlock[];
   attachments?: readonly AttachmentDescriptor[];
@@ -226,11 +227,11 @@ export const MessageList = React.forwardRef<
                   testID={`assistant-provider-${message.id}`}
                   style={styles.role}
                 >
-                  {message.modelId === undefined
+                  {message.providerLabel ?? (message.modelId === undefined
                     ? t('messages.role.assistant')
                     : assistantProviderLabels[
                         providerForModel(message.modelId)
-                      ]}
+                      ])}
                 </Text>
               </View>
               {message.blocks === undefined ? (

@@ -1,3 +1,5 @@
+#import "../../../../modules/rish/ios/Sources/ConfiguredProviderTransport.h"
+#import "../../../../modules/rish/ios/Sources/ProviderConfiguration.h"
 #import <XCTest/XCTest.h>
 
 #import "../../../../modules/rish/ios/Sources/ClaudeProviderTransport.h"
@@ -512,7 +514,7 @@ static NSUInteger ClaudeTransportRequestCount = 0;
       schemaVersion:2 result:result errorCode:errorCode];
 }
 
-- (void)startRoundWithTransport:(ClaudeProviderTransport *)transport
+- (void)startRoundWithTransport:(DSHCompletionProviderTransport *)transport
                          model:(NSString *)model
                  schemaVersion:(NSInteger)schemaVersion
                         result:(NSDictionary **)result
@@ -641,4 +643,111 @@ static NSUInteger ClaudeTransportRequestCount = 0;
   XCTAssertNil(error);
 }
 
+
+- (NSDictionary *)customConfiguration:(NSString *)protocol endpoint:(NSString *)endpoint {
+  return @{@"schema_version": @1, @"harness_id": @"claude-code", @"name": @"Test relay",
+    @"protocol": protocol, @"endpoint_url": endpoint, @"auth_type": @"bearer",
+    @"send_reasoning": @NO, @"model_mappings": @{@"claude-sonnet-5": @"relay-model"}};
+}
+
+- (void)testCustomProviderConfigurationRejectsUnsafeEndpointsAndKeepsRestartState {
+  NSString *suite = [@"custom-provider-" stringByAppendingString:NSUUID.UUID.UUIDString];
+  NSUserDefaults *defaults = [[NSUserDefaults alloc] initWithSuiteName:suite];
+  DSHProviderConfigurationStore *store = [[DSHProviderConfigurationStore alloc] initWithDefaults:defaults];
+  NSDictionary *configuration = [store saveConfiguration:[self customConfiguration:@"messages" endpoint:@"https://relay.example/v1"] error:nil];
+  XCTAssertEqualObjects(configuration[@"endpoint_url"], @"https://relay.example/v1/messages");
+  DSHProviderConfigurationStore *restarted = [[DSHProviderConfigurationStore alloc] initWithDefaults:defaults];
+  XCTAssertEqualObjects([restarted configurationForHarness:@"claude-code"], configuration);
+  for (NSString *url in @[@"http://relay.example", @"https://key@relay.example", @"https://relay.example?key=secret", @"https://relay.example/#secret"]) {
+    XCTAssertNil(DSHNormalizeProviderConfiguration([self customConfiguration:@"messages" endpoint:url]));
+  }
+  XCTAssertNotNil(DSHNormalizeProviderConfiguration([self customConfiguration:@"chat-completions" endpoint:@"http://127.0.0.1:9999/v1"]));
+  XCTAssertNotNil(DSHNormalizeProviderConfiguration([self customConfiguration:@"messages" endpoint:@"http://[::1]:9999/v1"]));
+  XCTAssertEqualObjects(DSHNormalizeProviderEndpoint(@"https://relay.example/v1/responses", @"chat-completions"), @"https://relay.example/v1/chat/completions");
+  NSMutableDictionary *full = [[self customConfiguration:@"messages" endpoint:@"https://relay.example/custom/endpoint"] mutableCopy];
+  full[@"full_url"] = @YES;
+  NSDictionary *normalizedFull = DSHNormalizeProviderConfiguration(full);
+  XCTAssertEqualObjects(normalizedFull[@"endpoint_url"], full[@"endpoint_url"]);
+  XCTAssertTrue(DSHValidateProviderBinding(DSHProviderBindingFromConfiguration(normalizedFull, @"claude-sonnet-5"), @"claude-sonnet-5"));
+  NSMutableDictionary *withSecret = [[self customConfiguration:@"messages" endpoint:@"https://relay.example"] mutableCopy];
+  withSecret[@"api_key"] = @"must-never-persist";
+  XCTAssertNil(DSHNormalizeProviderConfiguration(withSecret));
+  XCTAssertEqualObjects([store resetHarness:@"claude-code"][@"official"], @YES);
+  [defaults removePersistentDomainForName:suite];
+}
+
+- (void)testCustomProvidersRouteAllThreeProtocolsAndRecordTheRealTarget {
+  for (NSString *protocol in @[@"messages", @"responses", @"chat-completions"]) {
+    [ClaudeTransportURLProtocol reset];
+    NSString *suite = [@"custom-wire-" stringByAppendingString:NSUUID.UUID.UUIDString];
+    NSUserDefaults *defaults = [[NSUserDefaults alloc] initWithSuiteName:suite];
+    DSHProviderConfigurationStore *store = [[DSHProviderConfigurationStore alloc] initWithDefaults:defaults];
+    [store saveConfiguration:[self customConfiguration:protocol endpoint:@"https://relay.example/v1"] error:nil];
+    DSHConfiguredProviderTransport *transport = [[DSHConfiguredProviderTransport alloc]
+        initWithHarness:@"claude-code" session:self.session uuidGenerator:nil monotonicClock:nil store:store];
+    NSDictionary *binding = [transport providerConfigurationForModel:@"claude-sonnet-5"];
+    XCTAssertTrue(DSHValidateProviderBinding(binding, @"claude-sonnet-5"));
+    XCTAssertEqualObjects(binding[@"model_id"], @"relay-model");
+    [ClaudeTransportURLProtocol setHandler:^(NSURLProtocol *p, NSURLRequest *request) {
+      XCTAssertEqualObjects(request.URL.host, @"relay.example");
+      XCTAssertNotNil([request valueForHTTPHeaderField:@"Authorization"]);
+      NSDictionary *payload = nil;
+      if ([protocol isEqual:@"messages"]) {
+        XCTAssertEqualObjects(request.URL.path, @"/v1/messages");
+        payload = @{@"id": @"response-custom", @"model": @"relay-model", @"content": @[@{@"type": @"text", @"text": @"answer"}], @"stop_reason": @"end_turn"};
+      } else if ([protocol isEqual:@"responses"]) {
+        XCTAssertEqualObjects(request.URL.path, @"/v1/responses");
+        payload = @{@"id": @"response-custom", @"model": @"relay-model", @"status": @"completed", @"output": @[@{@"type": @"message", @"role": @"assistant", @"content": @[@{@"type": @"output_text", @"text": @"answer"}]}]};
+      } else {
+        XCTAssertEqualObjects(request.URL.path, @"/v1/chat/completions");
+        payload = @{@"id": @"response-custom", @"model": @"relay-model", @"choices": @[@{@"finish_reason": @"stop", @"message": @{@"role": @"assistant", @"content": @"answer"}}]};
+      }
+      [self respond:p request:request data:[self jsonData:payload] status:200];
+    }];
+    NSDictionary *result = nil; NSString *errorCode = nil;
+    [self startRoundWithTransport:transport model:@"claude-sonnet-5" schemaVersion:2 result:&result errorCode:&errorCode];
+    XCTAssertNil(errorCode, @"%@", protocol);
+    XCTAssertEqualObjects(result[@"model"], @"claude-sonnet-5");
+    XCTAssertEqualObjects(result[@"provider_configuration"], binding);
+    [defaults removePersistentDomainForName:suite];
+  }
+}
+
+- (void)testChangingCustomProviderRejectsTheOldInFlightResponse {
+  NSString *suite = [@"custom-race-" stringByAppendingString:NSUUID.UUID.UUIDString];
+  NSUserDefaults *defaults = [[NSUserDefaults alloc] initWithSuiteName:suite];
+  DSHProviderConfigurationStore *store = [[DSHProviderConfigurationStore alloc] initWithDefaults:defaults];
+  [store saveConfiguration:[self customConfiguration:@"messages" endpoint:@"https://first.example"] error:nil];
+  DSHConfiguredProviderTransport *transport = [[DSHConfiguredProviderTransport alloc]
+      initWithHarness:@"claude-code" session:self.session uuidGenerator:nil monotonicClock:nil store:store];
+  [ClaudeTransportURLProtocol setHandler:^(NSURLProtocol *p, NSURLRequest *request) {
+    XCTAssertEqualObjects(request.URL.host, @"first.example");
+    [store saveConfiguration:[self customConfiguration:@"messages" endpoint:@"https://second.example"] error:nil];
+    [self respond:p request:request data:[self jsonData:@{@"id": @"stale-response", @"model": @"relay-model",
+      @"content": @[@{@"type": @"text", @"text": @"must-not-appear"}], @"stop_reason": @"end_turn"}] status:200];
+  }];
+  NSDictionary *result = nil; NSString *errorCode = nil;
+  [self startRoundWithTransport:transport model:@"claude-sonnet-5" schemaVersion:2 result:&result errorCode:&errorCode];
+  XCTAssertNil(result);
+  XCTAssertEqualObjects(errorCode, @"E_COMPLETION_CREDENTIAL_CHANGED");
+  XCTAssertEqual([ClaudeTransportURLProtocol requestCount], 1u);
+  [defaults removePersistentDomainForName:suite];
+}
+
+- (void)testCustomProviderCredentialNamespacesAreEndpointSpecific {
+  DSHProviderConfigurationStore *store = DSHProviderConfigurationStore.sharedStore;
+  NSDictionary *original = [store configurationForHarness:@"claude-code"];
+  @try {
+    [store saveConfiguration:[self customConfiguration:@"messages" endpoint:@"https://one.example"] error:nil];
+    NSString *one = DSHEffectiveCredentialAccount(@"ANTHROPIC_API_KEY");
+    XCTAssertNotEqualObjects(one, @"ANTHROPIC_API_KEY");
+    [store saveConfiguration:[self customConfiguration:@"messages" endpoint:@"https://two.example"] error:nil];
+    XCTAssertNotEqualObjects(DSHEffectiveCredentialAccount(@"ANTHROPIC_API_KEY"), one);
+    [store resetHarness:@"claude-code"];
+    XCTAssertEqualObjects(DSHEffectiveCredentialAccount(@"ANTHROPIC_API_KEY"), @"ANTHROPIC_API_KEY");
+  } @finally {
+    if ([original[@"official"] boolValue]) [store resetHarness:@"claude-code"];
+    else [store saveConfiguration:original error:nil];
+  }
+}
 @end

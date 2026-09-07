@@ -1,3 +1,4 @@
+import { parseProviderBinding, providerHostMatches, providerRecordKeys } from '../providers/configuration';
 import { NativeModules } from 'react-native';
 
 import {
@@ -30,10 +31,8 @@ import {
 import type { HarnessModelId } from './LocalRuntime';
 import {
   PROVIDER_MODEL_IDS,
-  isProviderHost,
   isProviderId,
   providerForModel,
-  providerHostForModel,
   type ProviderHost,
   type ProviderId,
 } from '../harness/types';
@@ -573,7 +572,7 @@ function projectManifest(
     model?: HarnessModelId;
   } = {},
 ): ProjectContextManifestV1 {
-  const row = exactRecord(value, manifestKeys, 'E_CONTEXT_RESULT_INVALID');
+  const row = exactRecord(value, providerRecordKeys(value, manifestKeys), 'E_CONTEXT_RESULT_INVALID');
   const branch = gitBranch(row.branch);
   const name = projectName(row.project_name);
   if (
@@ -589,10 +588,10 @@ function projectManifest(
     (row.clean && row.conflicted) ||
     !timestamp(row.captured_at) ||
     row.policy_version !== 'chat-read-v1.0.0' ||
-    !isProviderHost(row.provider_host) ||
+    typeof row.provider_host !== 'string' ||
     typeof row.model !== 'string' ||
     !models.has(row.model) ||
-    providerHostForModel(row.model as HarnessModelId) !== row.provider_host ||
+    !providerHostMatches(row.model as HarnessModelId, row.provider_host, row.provider_configuration) ||
     !nonNegativeInteger(row.context_bytes, 256 * 1024) ||
     row.context_bytes < 1 ||
     !nonNegativeInteger(row.estimated_tokens, 65536) ||
@@ -637,7 +636,10 @@ function projectManifest(
   });
   const omittedIds = new Set(omitted.map(item => `${item.path}\n${item.reason}`));
   if (omittedIds.size !== omitted.length) fail('E_CONTEXT_RESULT_INVALID');
+  const providerConfiguration = row.provider_configuration === undefined ? undefined : parseProviderBinding(row.provider_configuration, row.model as HarnessModelId);
+  if (providerConfiguration === null) fail('E_CONTEXT_RESULT_INVALID');
   return {
+    ...(providerConfiguration === undefined ? {} : { provider_configuration: providerConfiguration }),
     schema_version: 1,
     snapshot_id: row.snapshot_id,
     project_id: row.project_id,
@@ -861,7 +863,7 @@ function projectManifestV2(
     expectedConversationId,
     expectedModel,
   } = options;
-  const row = exactRecord(value, manifestV2Keys, 'E_CONTEXT_RESULT_INVALID');
+  const row = exactRecord(value, providerRecordKeys(value, manifestV2Keys), 'E_CONTEXT_RESULT_INVALID');
   const root = projectRootResult(row.root);
   const project = projectDescriptorV2(row.project, root);
   const branch = gitBranch(row.branch);
@@ -930,7 +932,10 @@ function projectManifestV2(
   ) {
     fail('E_CONTEXT_RESULT_INVALID');
   }
+  const providerConfiguration = row.provider_configuration === undefined ? undefined : parseProviderBinding(row.provider_configuration, row.model_id as HarnessModelId);
+  if (providerConfiguration === null) fail('E_CONTEXT_RESULT_INVALID');
   return {
+    ...(providerConfiguration === undefined ? {} : { provider_configuration: providerConfiguration }),
     schema_version: 2,
     snapshot_id: row.snapshot_id,
     root,

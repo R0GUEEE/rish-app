@@ -1,3 +1,4 @@
+#import "../../../../modules/rish/ios/Sources/ProviderConfiguration.h"
 #import <XCTest/XCTest.h>
 
 #import "../../../../modules/rish/ios/Sources/ProjectContextPolicy.h"
@@ -8,6 +9,11 @@
 #include <git2.h>
 #include <sys/stat.h>
 #include <unistd.h>
+
+@interface NSObject (CustomProviderContextModuleTesting)
+- (instancetype)initWithService:(DSHProjectContextService *)service operationQueue:(dispatch_queue_t)queue maxPending:(NSUInteger)pending;
+- (void)prepareCandidateV2Request:(id)request resolver:(void (^)(id))resolve rejecter:(void (^)(NSString *, NSString *, NSError *))reject;
+@end
 
 @interface ProjectContextWorkspaceV2Tests : XCTestCase
 @property(nonatomic, strong) DSHProjectContextService *service;
@@ -851,4 +857,59 @@
   [NSFileManager.defaultManager removeItemAtURL:base error:nil];
 }
 
+
+- (void)testCustomProviderSnapshotBindsEndpointAndRejectsSameHostPathSwitch {
+  DSHLocalWorkspaceAccess *workspaceAccess = nil;
+  DSHLocalProjectAccess *projectAccess = nil;
+  NSDictionary *root = nil; NSURL *workspaceRoot = nil; NSURL *gitURL = nil;
+  NSURL *base = [self makePrivateSplitFixtureWithProjectId:@"33333333-3333-4333-8333-333333333333"
+      bindingProjectId:@"33333333-3333-4333-8333-333333333333" workspaceAccess:&workspaceAccess
+      projectAccess:&projectAccess root:&root rootURL:&workspaceRoot gitURL:&gitURL];
+  DSHProviderConfigurationStore *profiles = DSHProviderConfigurationStore.sharedStore;
+  NSDictionary *original = [profiles configurationForHarness:@"claude-code"];
+  @try {
+    NSDictionary *configuration = @{@"schema_version": @1, @"harness_id": @"claude-code", @"name": @"Relay",
+      @"endpoint_url": @"https://relay.example/v1/messages", @"protocol": @"messages", @"auth_type": @"bearer",
+      @"send_reasoning": @NO, @"model_mappings": @{@"claude-sonnet-5": @"relay-sonnet"}};
+    [profiles saveConfiguration:configuration error:nil];
+    DSHProjectContextStore *store = [self storeAtURL:[base URLByAppendingPathComponent:@"store" isDirectory:YES]];
+    DSHProjectContextService *service = [self serviceWithProjectAccess:projectAccess workspaceAccess:workspaceAccess
+        store:store hook:nil prefix:@"cccccccc"];
+    NSError *error = nil;
+    NSString *conversation = @"44444444-4444-4444-8444-444444444444";
+    id module = [[NSClassFromString(@"LocalProjectContextModule") alloc] initWithService:service
+        operationQueue:dispatch_queue_create("custom-context-test", DISPATCH_QUEUE_SERIAL) maxPending:16];
+    __block NSDictionary *manifest = nil;
+    XCTestExpectation *prepared = [self expectationWithDescription:@"custom provider native bridge"];
+    [module prepareCandidateV2Request:@{@"schema_version": @2, @"root": root, @"conversation_id": conversation,
+      @"model_id": @"claude-sonnet-5", @"policy": @"chat-read-v1", @"selected_paths": @[@"README.md"]}
+      resolver:^(id value) { manifest = value; [prepared fulfill]; }
+      rejecter:^(NSString *code, NSString *message, NSError *failure) { XCTFail(@"%@", code); [prepared fulfill]; }];
+    [self waitForExpectations:@[prepared] timeout:5];
+    XCTAssertNotNil(manifest, @"%@", error);
+    XCTAssertEqualObjects(manifest[@"provider_configuration"][@"model_id"], @"relay-sonnet");
+    NSDictionary *consent = [service confirmSnapshotV2Id:manifest[@"snapshot_id"] root:root error:&error];
+    NSDictionary *request = @{@"schema_version": @2, @"snapshot_id": manifest[@"snapshot_id"],
+      @"consent_receipt_id": consent[@"consent_receipt_id"], @"root": root, @"conversation_id": conversation,
+      @"model_id": @"claude-sonnet-5", @"policy": @"chat-read-v1"};
+    NSData *bytes = [service verifiedFrozenEnvelopeV2:request receipt:nil error:&error];
+    XCTAssertNotNil(bytes, @"%@", error);
+    NSString *text = [[NSString alloc] initWithData:bytes encoding:NSUTF8StringEncoding];
+    XCTAssertTrue([text containsString:@"relay.example"]);
+    XCTAssertTrue([text containsString:@"relay-sonnet"]);
+    NSMutableDictionary *changed = [configuration mutableCopy]; changed[@"endpoint_url"] = @"https://relay.example/other/v1/messages";
+    [profiles saveConfiguration:changed error:nil];
+    error = nil;
+    XCTAssertNil([service verifiedFrozenEnvelopeV2:request receipt:nil error:&error]);
+    XCTAssertEqual(error.code, DSHProjectContextServiceErrorChanged);
+    [profiles resetHarness:@"claude-code"];
+    error = nil;
+    XCTAssertNil([service verifiedEnvelopeV2:request receipt:nil error:&error]);
+    XCTAssertEqual(error.code, DSHProjectContextServiceErrorChanged);
+  } @finally {
+    if ([original[@"official"] boolValue]) [profiles resetHarness:@"claude-code"];
+    else [profiles saveConfiguration:original error:nil];
+    [NSFileManager.defaultManager removeItemAtURL:base error:nil];
+  }
+}
 @end

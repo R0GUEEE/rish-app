@@ -442,6 +442,7 @@ function receipt(
     schemaVersion: 1,
     transportSchemaVersion: result.schema_version,
     harnessId: result.harness_id,
+    ...(result.provider_configuration === undefined ? {} : { providerConfiguration: result.provider_configuration }),
     turnId: result.turn_id,
     attemptId: result.attempt_id,
     roundId: result.round_id,

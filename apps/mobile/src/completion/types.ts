@@ -1,3 +1,4 @@
+import type { ProviderBinding } from '../providers/configuration';
 import type { HarnessId, HarnessModelId, ProviderId } from '../harness/types';
 
 export type {
@@ -139,6 +140,7 @@ export type CompletionFinishReasonV2 =
   | 'content_filter';
 
 export type CompleteRoundV2Result = {
+  readonly provider_configuration?: ProviderBinding;
   readonly schema_version: 2;
   /**
    * Which built-in Harness produced this model response. Optional on the

@@ -35,6 +35,7 @@ function sameManifest(
     left.captured_at !== right.captured_at ||
     left.policy_version !== right.policy_version ||
     left.provider_host !== right.provider_host ||
+    left.provider_configuration?.profile_id !== right.provider_configuration?.profile_id ||
     left.model !== right.model ||
     left.context_bytes !== right.context_bytes ||
     left.estimated_tokens !== right.estimated_tokens ||
@@ -182,6 +183,8 @@ export function projectContextReducer(
         return state;
       }
       return invalidate(state, 'model_changed');
+    case 'provider_configuration_changed':
+      return invalidate(state, 'provider_changed');
     case 'provider_changed':
       if (state.activePreparationId !== null) {
         return invalidate(state, 'provider_changed');

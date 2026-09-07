@@ -1,7 +1,6 @@
+import { parseProviderBinding, providerHostMatches, providerRecordKeys } from '../providers/configuration';
 import {
   PROVIDER_MODEL_IDS,
-  isProviderHost,
-  providerHostForModel,
 } from '../harness/types';
 import {
   PROJECT_CONTEXT_ERROR_CODES,
@@ -305,11 +304,11 @@ function manifest(value: unknown): ProjectContextManifestV1 | null {
   if (value === null) {
     return null;
   }
-  const raw = exactRecord(value, '$.manifest', manifestKeys);
+  const raw = exactRecord(value, '$.manifest', providerRecordKeys(value, manifestKeys));
   if (raw.schema_version !== PROJECT_CONTEXT_SCHEMA_VERSION) {
     return invalid('$.manifest.schema_version', 'must equal 1');
   }
-  if (!isProviderHost(raw.provider_host)) {
+  if (typeof raw.provider_host !== 'string') {
     return invalid(
       '$.manifest.provider_host',
       'must be a supported provider host',
@@ -353,13 +352,14 @@ function manifest(value: unknown): ProjectContextManifestV1 | null {
     '$.manifest.model',
     harnessModels,
   );
-  if (providerHostForModel(model) !== raw.provider_host) {
+  if (!providerHostMatches(model, raw.provider_host, raw.provider_configuration)) {
     return invalid(
       '$.manifest.provider_host',
       'must match the provider of the manifest model',
     );
   }
   return {
+    ...(raw.provider_configuration === undefined ? {} : { provider_configuration: parseProviderBinding(raw.provider_configuration, model)! }),
     schema_version: PROJECT_CONTEXT_SCHEMA_VERSION,
     snapshot_id: nonEmptyString(raw.snapshot_id, '$.manifest.snapshot_id'),
     project_id: nonEmptyString(raw.project_id, '$.manifest.project_id'),

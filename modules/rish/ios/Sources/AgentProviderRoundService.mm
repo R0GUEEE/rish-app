@@ -1102,6 +1102,11 @@
     @"request_body_sha256" : providerResult[@"request_body_sha256"],
     @"project_context_receipt" : contextReceipt ?: NSNull.null,
   };
+  if (providerResult[@"provider_configuration"] != nil) {
+    NSMutableDictionary *boundReceipt = [nativeReceipt mutableCopy];
+    boundReceipt[@"provider_configuration"] = providerResult[@"provider_configuration"];
+    nativeReceipt = boundReceipt;
+  }
   NSString *terminalKind = [finishReason isEqualToString:@"stop"] ? @"final" :
       ([finishReason isEqualToString:@"tool_calls"] ? @"tool_batch" : @"blocked");
   NSDictionary *completed = [self.rounds completeAgentRoundV3WithLocator:locator

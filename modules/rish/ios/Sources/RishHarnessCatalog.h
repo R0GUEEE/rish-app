@@ -9,6 +9,9 @@ NS_ASSUME_NONNULL_BEGIN
 /// model ids, harness ids, provider ids, and provider hosts through it
 /// instead of carrying its own list. Pure functions only: no I/O, no state.
 
+/// These functions describe built-in logical model slots and official defaults.
+/// A custom request's actual endpoint/model identity is its immutable
+/// provider_configuration binding, never a mutation of this legacy catalog.
 /// All model ids across the four built-in Harnesses.
 FOUNDATION_EXPORT NSSet<NSString *> *DSHHarnessSupportedModels(void);
 FOUNDATION_EXPORT BOOL DSHHarnessIsSupportedModel(id _Nullable value);

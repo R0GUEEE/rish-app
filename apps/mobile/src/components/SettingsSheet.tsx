@@ -1,3 +1,5 @@
+import { ProviderConfigurationCard } from './ProviderConfigurationCard';
+import type { ConfigurableHarness } from '../providers/configuration';
 import React, { useEffect, useMemo, useState } from 'react';
 import {
   ActivityIndicator,
@@ -63,6 +65,7 @@ type Props = {
   onOpenMirrors: () => void;
   onOpenRuntime: () => void;
   onPreferencesChanged: () => void;
+  onProviderConfigurationChanged?: (harness: ConfigurableHarness) => void;
 };
 
 export function SettingsSheet(props: Props) {
@@ -149,6 +152,7 @@ export function SettingsSheet(props: Props) {
         </View>
 
         <ScrollView
+          automaticallyAdjustKeyboardInsets
           contentContainerStyle={styles.content}
           keyboardDismissMode="interactive"
           keyboardShouldPersistTaps="handled"
@@ -190,6 +194,8 @@ export function SettingsSheet(props: Props) {
           <SectionLabel
             label={t('settings.section.harness', { harness: props.harnessName })}
           />
+          <ProviderConfigurationCard model={props.model} disabled={props.busy}
+            visible={props.visible} onSaved={harness => props.onProviderConfigurationChanged?.(harness)} />
           <SettingCard>
             <View style={styles.credentialHeader}>
               <SettingIcon icon={KeyRound} />

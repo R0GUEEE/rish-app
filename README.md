@@ -27,6 +27,19 @@ infer completed behavior from a design document.
 The app must continue to identify itself as `local_substrate`. A local model
 request plus a few local tools is not a complete local Harness runtime.
 
+## Custom providers (iOS)
+
+Select **Claude Code** or **Codex**, then open **Settings → Custom provider**.
+Enter the service address, choose Messages, Responses, or Chat Completions, and
+map the existing model slots to the service's model IDs. Empty mappings use the
+original model ID. Full endpoint mode preserves a custom API path; otherwise
+Rish fills in the selected protocol's standard path.
+
+Save the settings, then use **Configure key** to save that service's API key in
+the native Keychain prompt. Official and custom credentials remain separate.
+Changing services requires project context to be confirmed again. Disable the
+custom provider and save to return to the official configuration.
+
 ## Current mobile product
 
 - Multiple local conversations: create, search, switch, auto-title, rename,

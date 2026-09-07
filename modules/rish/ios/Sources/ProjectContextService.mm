@@ -1,3 +1,4 @@
+#import "ProviderConfiguration.h"
 #import "ProjectContextService.h"
 #import "RishHarnessCatalog.h"
 #import "LegacyBoundProjectRootAccess.h"
@@ -2069,6 +2070,12 @@ static int DSHAppendSerializedPatchLine(__unused const git_diff_delta *delta,
     @"selected_paths" : capture[@"expanded_paths"],
     @"tracked_status" : capture[@"tracked_status"],
   };
+  NSDictionary *providerBinding = DSHProviderBindingForModel(validated[@"model"]);
+  if (providerBinding != nil) {
+    NSMutableDictionary *boundMetadata = [envelopeMetadata mutableCopy];
+    boundMetadata[@"provider_configuration"] = providerBinding;
+    envelopeMetadata = boundMetadata;
+  }
   NSMutableArray *included = [NSMutableArray array];
   NSMutableArray *omitted = [capture[@"omitted"] mutableCopy];
   NSData *envelope = [self framedEnvelopeMetadata:envelopeMetadata
@@ -2098,6 +2105,12 @@ static int DSHAppendSerializedPatchLine(__unused const git_diff_delta *delta,
     @"snapshot_sha256" : snapshotDigest,
     @"source_fingerprint" : capture[@"source_fingerprint"],
   };
+  if (providerBinding != nil) {
+    NSMutableDictionary *boundManifest = [manifest mutableCopy];
+    boundManifest[@"provider_configuration"] = providerBinding;
+    boundManifest[@"provider_host"] = [NSURL URLWithString:providerBinding[@"endpoint_url"]].host;
+    manifest = boundManifest;
+  }
   NSDictionary *sourceDescriptor = @{
     @"schema_version" : @1,
     @"project_id" : validated[@"project_id"],
@@ -2145,6 +2158,16 @@ static int DSHAppendSerializedPatchLine(__unused const git_diff_delta *delta,
 - (BOOL)verifyLiveSnapshot:(NSDictionary *)snapshot
               retainedLease:(DSHLocalProjectLease *__strong *)retainedLease
                       error:(NSError **)error {
+  NSDictionary *providerManifest = snapshot[@"manifest"];
+  if (![providerManifest isKindOfClass:NSDictionary.class]) {
+    DSHSetServiceError(error, DSHProjectContextServiceErrorIntegrity); return NO;
+  }
+  NSString *providerModel = providerManifest[@"model_id"] ?: providerManifest[@"model"];
+  if (!DSHProviderBindingIsCurrent(providerManifest[@"provider_configuration"], providerModel)) {
+    DSHSetServiceError(error, DSHProjectContextServiceErrorChanged);
+    return NO;
+  }
+
   if (retainedLease != nil) *retainedLease = nil;
   NSDictionary *descriptor = snapshot[@"source_descriptor"];
   NSString *projectId = descriptor[@"project_id"];
@@ -2565,6 +2588,16 @@ static int DSHAppendSerializedPatchLine(__unused const git_diff_delta *delta,
        requireLiveSource:(BOOL)requireLiveSource
            retainedLease:(DSHLocalProjectLease **)retainedLease
                     error:(NSError **)error {
+  NSDictionary *providerManifest = snapshot[@"manifest"];
+  if (![providerManifest isKindOfClass:NSDictionary.class]) {
+    DSHSetServiceError(error, DSHProjectContextServiceErrorIntegrity); return NO;
+  }
+  NSString *providerModel = providerManifest[@"model_id"] ?: providerManifest[@"model"];
+  if (!DSHProviderBindingIsCurrent(providerManifest[@"provider_configuration"], providerModel)) {
+    DSHSetServiceError(error, DSHProjectContextServiceErrorChanged);
+    return NO;
+  }
+
   if (retainedLease != nil) *retainedLease = nil;
   NSDictionary *root = DSHServiceV2RootRef(rootRef, YES);
   NSDictionary *source = snapshot[@"source_descriptor"];
@@ -2922,6 +2955,12 @@ static int DSHAppendSerializedPatchLine(__unused const git_diff_delta *delta,
     @"selected_paths" : capture[@"expanded_paths"] ?: @[],
     @"tracked_status" : capture[@"tracked_status"] ?: @[],
   };
+  NSDictionary *providerBinding = DSHProviderBindingForModel(model);
+  if (providerBinding != nil) {
+    NSMutableDictionary *boundMetadata = [metadata mutableCopy];
+    boundMetadata[@"provider_configuration"] = providerBinding;
+    metadata = boundMetadata;
+  }
   NSMutableArray *included = [NSMutableArray array];
   NSMutableArray *omitted = [capture[@"omitted"] mutableCopy] ?: [NSMutableArray array];
   NSData *envelope = [self framedEnvelopeMetadata:metadata
@@ -2953,6 +2992,11 @@ static int DSHAppendSerializedPatchLine(__unused const git_diff_delta *delta,
     @"snapshot_sha256" : snapshotDigest,
     @"source_fingerprint" : capture[@"source_fingerprint"],
   };
+  if (providerBinding != nil) {
+    NSMutableDictionary *boundManifest = [manifest mutableCopy];
+    boundManifest[@"provider_configuration"] = providerBinding;
+    manifest = boundManifest;
+  }
   NSDictionary *sourceDescriptor = @{
     @"schema_version" : @2,
     @"root" : root,

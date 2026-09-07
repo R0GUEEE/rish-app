@@ -1,3 +1,4 @@
+import { parseProviderBinding } from '../providers/configuration';
 import type {
   HarnessId,
   HarnessModelId,
@@ -1034,9 +1035,12 @@ function validateCompleteV2ResultUnsafe(
   request: CompleteRoundV2Request,
 ): CompleteRoundV2Result {
   const result = resultRecordWithOptionalKeys(value, SCHEMA2_RESULT_KEYS, [
-    'harness_id',
+    'harness_id', 'provider_configuration',
   ]);
   const harnessId = projectResultHarnessId(result.harness_id);
+  const providerConfiguration = result.provider_configuration === undefined ? undefined :
+    parseProviderBinding(result.provider_configuration, request.model);
+  if (providerConfiguration === null) fail('E_COMPLETION_RESULT_RELATION');
   if (harnessId !== request.harnessId) fail('E_COMPLETION_MODEL_MISMATCH');
   if (
     typeof result.schema_version !== 'number' ||
@@ -1120,6 +1124,7 @@ function validateCompleteV2ResultUnsafe(
   return {
     schema_version: 2,
     harness_id: harnessId,
+    ...(providerConfiguration === undefined ? {} : { provider_configuration: providerConfiguration }),
     turn_id: result.turn_id,
     attempt_id: result.attempt_id,
     round_id: result.round_id,
@@ -1201,9 +1206,12 @@ function validateCompleteV3ResultUnsafe(
   request: CompleteRoundV3Request,
 ): CompleteRoundV3Result {
   const result = resultRecordWithOptionalKeys(value, SCHEMA2_RESULT_KEYS, [
-    'harness_id',
+    'harness_id', 'provider_configuration',
   ]);
   const harnessId = projectResultHarnessId(result.harness_id);
+  const providerConfiguration = result.provider_configuration === undefined ? undefined :
+    parseProviderBinding(result.provider_configuration, request.model);
+  if (providerConfiguration === null) fail('E_COMPLETION_RESULT_RELATION');
   if (harnessId !== request.harnessId) fail('E_COMPLETION_MODEL_MISMATCH');
   if (
     typeof result.schema_version !== 'number' ||
@@ -1293,6 +1301,7 @@ function validateCompleteV3ResultUnsafe(
   return {
     schema_version: 3,
     harness_id: harnessId,
+    ...(providerConfiguration === undefined ? {} : { provider_configuration: providerConfiguration }),
     turn_id: result.turn_id,
     attempt_id: result.attempt_id,
     round_id: result.round_id,

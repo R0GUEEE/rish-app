@@ -1,3 +1,4 @@
+import type { ProviderBinding } from '../providers/configuration';
 import type {
   PersistedProjectContextStateV1,
   ProjectContextAction,
@@ -960,6 +961,7 @@ export type CompletionProjectContextReceiptV1 = {
 
 /** Metadata-only receipt: provider text and raw project bytes are absent. */
 export type CompletionRoundReceiptV1 = {
+  readonly providerConfiguration?: ProviderBinding;
   readonly schemaVersion: typeof COMPLETION_ROUND_RECEIPT_SCHEMA_VERSION;
   readonly transportSchemaVersion: 2 | 3;
   /** Harness that produced this model response; legacy rows hydrate as dsh. */
@@ -1667,6 +1669,7 @@ export type PersistedAttemptProjectContextV1 = {
 };
 
 export type PersistedCompletionRoundReceiptV1 = {
+  readonly provider_configuration?: ProviderBinding;
   readonly schema_version: 1;
   readonly transport_schema_version: 2 | 3;
   /** Omitted by legacy snapshots; hydration defaults to dsh. */

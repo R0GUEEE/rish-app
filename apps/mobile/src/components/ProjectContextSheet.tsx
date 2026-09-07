@@ -925,9 +925,9 @@ export function ProjectContextSheet(props: ProjectContextSheetProps) {
         <Text style={styles.disclosure}>{t('context.sheet.disclosure')}</Text>
         <View style={styles.disclosureCard}>
           <Text style={styles.metaLabel}>{t('context.sheet.disclosure.provider')}</Text>
-          <Text style={styles.metaValue}>{current.provider_host}</Text>
+          <Text style={styles.metaValue}>{current.provider_configuration?.endpoint_url ?? current.provider_host}</Text>
           <Text style={styles.metaLabel}>{t('context.sheet.disclosure.model')}</Text>
-          <Text style={styles.metaValue}>{current.model}</Text>
+          <Text style={styles.metaValue}>{current.provider_configuration?.model_id ?? current.model}</Text>
           <Text style={styles.metaLabel}>{t('context.sheet.disclosure.branch')}</Text>
           <Text style={styles.metaValue}>{branch}</Text>
           <Text style={styles.metaLabel}>{t('context.sheet.disclosure.head')}</Text>

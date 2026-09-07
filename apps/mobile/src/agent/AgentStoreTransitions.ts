@@ -1,3 +1,4 @@
+import { parseProviderBinding } from '../providers/configuration';
 /**
  * Closed, RN-side evidence for the high-level Agent Runtime boundary.
  *
@@ -1109,8 +1110,9 @@ function transcriptRelation(before: AgentRuntimeTranscriptHandleV1, after: Agent
 }
 
 function validateRoundReceipt(value: unknown): AgentRoundReceiptV2 | null {
-  const raw = exactWithOptional(value, ['schema_version', 'transport_schema_version', 'turn_id', 'task_id', 'attempt_id', 'round_id', 'round_index', 'provider_request_id', 'provider_response_id', 'requested_model', 'model', 'thinking_mode', 'finish_reason', 'latency_ms', 'visible_history_sha256', 'model_input_sha256', 'request_body_sha256', 'project_context_receipt'], ['harness_id']);
+  const raw = exactWithOptional(value, ['schema_version', 'transport_schema_version', 'turn_id', 'task_id', 'attempt_id', 'round_id', 'round_index', 'provider_request_id', 'provider_response_id', 'requested_model', 'model', 'thinking_mode', 'finish_reason', 'latency_ms', 'visible_history_sha256', 'model_input_sha256', 'request_body_sha256', 'project_context_receipt'], ['harness_id', 'provider_configuration']);
   if (raw === null || raw.schema_version !== 2 || (raw.transport_schema_version !== 2 && raw.transport_schema_version !== 3) || !uuid(raw.turn_id) || !uuid(raw.task_id) || !uuid(raw.attempt_id) || !uuid(raw.round_id) || !safeInteger(raw.round_index, 7) || !opaque(raw.provider_request_id) || !opaque(raw.provider_response_id) || (raw.harness_id !== undefined && !validHarnessId(raw.harness_id)) || !validProviderModel(raw.requested_model) || !validProviderModel(raw.model) || !enumValue(raw.thinking_mode, ['off', 'high', 'max'] as const) || !enumValue(raw.finish_reason, ['stop', 'tool_calls', 'length', 'content_filter'] as const) || !safeInteger(raw.latency_ms, 24 * 60 * 60 * 1000) || !digest(raw.visible_history_sha256) || !digest(raw.model_input_sha256) || !digest(raw.request_body_sha256) || !validateProjectReceipt(raw.project_context_receipt)) return null;
+  if (raw.provider_configuration !== undefined && parseProviderBinding(raw.provider_configuration, raw.model as import('../harness/types').HarnessModelId) === null) return null;
   if ((raw.transport_schema_version === 2 && raw.project_context_receipt !== null) ||
     (raw.transport_schema_version === 3 && raw.project_context_receipt === null)) return null;
   const normalized = raw.harness_id === undefined ? { ...raw, harness_id: 'dsh' } : raw;

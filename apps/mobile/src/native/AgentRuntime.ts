@@ -1,3 +1,5 @@
+import { parseProviderBinding } from '../providers/configuration';
+import type { ProviderBinding } from '../providers/configuration';
 import { NativeModules, TurboModuleRegistry } from 'react-native';
 
 import type {
@@ -288,6 +290,7 @@ export type AgentAttemptProjectionV2 = {
 };
 
 export type AgentRoundReceiptV2 = {
+  readonly provider_configuration?: ProviderBinding;
   readonly schema_version: 2;
   readonly transport_schema_version: 2 | 3;
   readonly turn_id: string;
@@ -2026,7 +2029,7 @@ function validateRoundReceipt(value: unknown): AgentRoundReceiptV2 {
       'request_body_sha256',
       'project_context_receipt',
     ],
-    ['harness_id'],
+    ['harness_id', 'provider_configuration'],
     'E_AGENT_LEDGER',
   );
   if (
@@ -2057,6 +2060,7 @@ function validateRoundReceipt(value: unknown): AgentRoundReceiptV2 {
     !digest(receipt.request_body_sha256)
   )
     fail('E_AGENT_LEDGER');
+  if (receipt.provider_configuration !== undefined && parseProviderBinding(receipt.provider_configuration, receipt.model as HarnessModelId) === null) fail('E_AGENT_LEDGER');
   const context = validateProjectContextReceipt(
     receipt.project_context_receipt,
   );

@@ -1,3 +1,4 @@
+#import "ProviderConfiguration.h"
 #import "SessionSnapshotStore.h"
 #import "RishHarnessCatalog.h"
 
@@ -1204,6 +1205,11 @@ static BOOL DSHSessionValidateMessages(NSArray *messages,
 
 static BOOL DSHSessionValidateProjectContextManifest(NSDictionary *manifest,
                                                      NSString *projectId) {
+  if (![manifest isKindOfClass:NSDictionary.class]) return NO;
+  NSDictionary *binding = manifest[@"provider_configuration"];
+  manifest = DSHProviderRecordWithoutConfiguration(manifest, manifest[@"model"]);
+  NSString *expectedHost = binding == nil ? DSHProviderHostForModel(manifest[@"model"]) :
+      [NSURL URLWithString:binding[@"endpoint_url"]].host;
   if (!DSHSessionExactKeys(manifest, @[
         @"schema_version", @"snapshot_id", @"project_id", @"project_name",
         @"branch", @"head_oid", @"clean", @"conflicted", @"captured_at",
@@ -1224,7 +1230,7 @@ static BOOL DSHSessionValidateProjectContextManifest(NSDictionary *manifest,
        [manifest[@"conflicted"] boolValue]) ||
       !DSHSessionCanonicalTimestamp(manifest[@"captured_at"]) ||
       ![manifest[@"policy_version"] isEqual:@"chat-read-v1.0.0"] ||
-      ![manifest[@"provider_host"] isEqual:DSHProviderHostForModel(manifest[@"model"])] ||
+      ![manifest[@"provider_host"] isEqual:expectedHost] ||
       !DSHSessionValidModel(manifest[@"model"]) ||
       !DSHSessionTrustedArray(manifest[@"included"]) ||
       [(NSArray *)manifest[@"included"] count] > 32 ||
@@ -1864,6 +1870,8 @@ static BOOL DSHSessionValidateAttemptProjectContext(NSDictionary *context) {
 }
 
 static BOOL DSHSessionValidateRoundReceipt(NSDictionary *receipt) {
+  if (![receipt isKindOfClass:NSDictionary.class]) return NO;
+  receipt = DSHProviderRecordWithoutConfiguration(receipt, receipt[@"model"]);
   if (!DSHSessionExactKeysWithOptional(receipt, @[
         @"schema_version", @"transport_schema_version", @"turn_id",
         @"attempt_id", @"round_id", @"round_index", @"provider_request_id",

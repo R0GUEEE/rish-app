@@ -1,3 +1,4 @@
+#import "ProviderConfiguration.h"
 #import "ProjectContextService.h"
 #import "RishHarnessCatalog.h"
 
@@ -333,6 +334,8 @@ static NSDictionary *DSHPCV2Manifest(id raw, NSDictionary *expectedRoot,
                                      NSString *expectedConversationId,
                                      NSString *expectedModel) {
   NSDictionary *manifest = DSHPCDictionary(raw);
+  NSDictionary *binding = manifest[@"provider_configuration"];
+  manifest = DSHProviderRecordWithoutConfiguration(manifest, manifest[@"model_id"]);
   NSArray *keys = @[
     @"schema_version", @"snapshot_id", @"root", @"project", @"project_id",
     @"conversation_id", @"model_id", @"policy", @"branch", @"head_oid",
@@ -401,7 +404,7 @@ static NSDictionary *DSHPCV2Manifest(id raw, NSDictionary *expectedRoot,
     [omittedIds addObject:identity];
     [projectedOmitted addObject:item];
   }
-  return @{
+  NSMutableDictionary *projected = [@{
     @"schema_version" : @2,
     @"snapshot_id" : snapshotId,
     @"root" : root,
@@ -422,7 +425,9 @@ static NSDictionary *DSHPCV2Manifest(id raw, NSDictionary *expectedRoot,
     @"estimated_tokens" : @(estimatedTokens),
     @"snapshot_sha256" : DSHPCDigest(manifest[@"snapshot_sha256"]),
     @"source_fingerprint" : DSHPCDigest(manifest[@"source_fingerprint"]),
-  };
+  } mutableCopy];
+  if (binding != nil) projected[@"provider_configuration"] = binding;
+  return [projected copy];
 }
 
 static NSDictionary *DSHPCV2Consent(id raw, NSDictionary *expectedRoot,
@@ -770,6 +775,8 @@ static NSDictionary *DSHPCManifest(id raw, NSString *expectedProjectId,
                                    NSString *expectedSnapshotId,
                                    NSString *expectedModel) {
   NSDictionary *manifest = DSHPCDictionary(raw);
+  NSDictionary *binding = manifest[@"provider_configuration"];
+  manifest = DSHProviderRecordWithoutConfiguration(manifest, manifest[@"model"]);
   NSArray *keys = @[
     @"schema_version", @"snapshot_id", @"project_id", @"project_name",
     @"branch", @"head_oid", @"clean", @"conflicted", @"captured_at",
@@ -798,7 +805,7 @@ static NSDictionary *DSHPCManifest(id raw, NSString *expectedProjectId,
       !DSHPCBoolean(manifest[@"conflicted"], &conflicted) ||
       (clean && conflicted) || !DSHPCTimestamp(manifest[@"captured_at"]) ||
       ![manifest[@"policy_version"] isEqual:@"chat-read-v1.0.0"] ||
-      ![manifest[@"provider_host"] isEqual:DSHProviderHostForModel(model)] ||
+      ![manifest[@"provider_host"] isEqual:(binding == nil ? DSHProviderHostForModel(model) : [NSURL URLWithString:binding[@"endpoint_url"]].host)] ||
       ![DSHPCModels() containsObject:model] || included == nil ||
       included.count > 32 || omitted == nil || omitted.count > 5000 ||
       !DSHPCSafeInteger(manifest[@"context_bytes"], 256 * 1024,
@@ -835,7 +842,7 @@ static NSDictionary *DSHPCManifest(id raw, NSString *expectedProjectId,
     [omittedIdentity addObject:identity];
     [projectedOmitted addObject:item];
   }
-  return @{
+  NSMutableDictionary *projected = [@{
     @"schema_version": @1,
     @"snapshot_id": snapshotId,
     @"project_id": projectId,
@@ -846,7 +853,7 @@ static NSDictionary *DSHPCManifest(id raw, NSString *expectedProjectId,
     @"conflicted": @(conflicted),
     @"captured_at": [manifest[@"captured_at"] copy],
     @"policy_version": @"chat-read-v1.0.0",
-    @"provider_host": DSHProviderHostForModel(model),
+    @"provider_host": binding == nil ? DSHProviderHostForModel(model) : [NSURL URLWithString:binding[@"endpoint_url"]].host,
     @"model": [model copy],
     @"included": [projectedIncluded copy],
     @"omitted": [projectedOmitted copy],
@@ -854,7 +861,9 @@ static NSDictionary *DSHPCManifest(id raw, NSString *expectedProjectId,
     @"estimated_tokens": @(estimatedTokens),
     @"snapshot_sha256": DSHPCDigest(manifest[@"snapshot_sha256"]),
     @"source_fingerprint": DSHPCDigest(manifest[@"source_fingerprint"]),
-  };
+  } mutableCopy];
+  if (binding != nil) projected[@"provider_configuration"] = binding;
+  return [projected copy];
 }
 
 static NSDictionary *DSHPCConsent(id raw, NSString *expectedSnapshotId) {

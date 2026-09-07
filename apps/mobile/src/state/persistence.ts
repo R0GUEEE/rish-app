@@ -1,3 +1,4 @@
+import { parseProviderBinding } from '../providers/configuration';
 import {
   ATTACHMENT_CHAT_STATE_SCHEMA_VERSION,
   AGENT_ATTEMPT_JOURNAL_SCHEMA_VERSION,
@@ -1451,7 +1452,7 @@ function parseRoundReceipt(
       'request_body_sha256',
       'project_context_receipt',
     ],
-    ['harness_id'],
+    ['harness_id', 'provider_configuration'],
   );
   const harnessId =
     raw.harness_id === undefined
@@ -1487,7 +1488,10 @@ function parseRoundReceipt(
   if (roundIndex >= MAX_COMPLETION_ROUNDS) {
     return invalid(`${path}.round_index`, 'must be less than 8');
   }
+  const providerConfiguration = raw.provider_configuration === undefined ? undefined : parseProviderBinding(raw.provider_configuration, raw.model);
+  if (providerConfiguration === null) return invalid(path + '.provider_configuration', 'invalid provider binding');
   return {
+    ...(providerConfiguration === undefined ? {} : { providerConfiguration }),
     schemaVersion: COMPLETION_ROUND_RECEIPT_SCHEMA_VERSION,
     transportSchemaVersion: raw.transport_schema_version,
     harnessId,
@@ -5204,6 +5208,7 @@ function toPersistedRoundReceipt(
     schema_version: receipt.schemaVersion,
     transport_schema_version: receipt.transportSchemaVersion,
     harness_id: receipt.harnessId,
+    ...(receipt.providerConfiguration === undefined ? {} : { provider_configuration: receipt.providerConfiguration }),
     turn_id: receipt.turnId,
     attempt_id: receipt.attemptId,
     round_id: receipt.roundId,

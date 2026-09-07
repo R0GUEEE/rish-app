@@ -213,6 +213,7 @@ static NSString *DSHCompletionTransportParserErrorCode(NSError *error) {
     return nil;
   }
 
+  NSDictionary *providerConfiguration = [self providerConfigurationForModel:requestedModel];
   NSURL *url = [self providerBaseURL];
   if (url == nil || [self providerHarnessId].length == 0) {
     [self settleStartFailure:@"E_COMPLETION_TRANSPORT"
@@ -270,7 +271,10 @@ static NSString *DSHCompletionTransportParserErrorCode(NSError *error) {
       } @catch (__unused NSException *exception) {
         generationCurrent = NO;
       }
-      if (!generationCurrent) {
+      NSDictionary *currentConfiguration = [self providerConfigurationForModel:requestedModel];
+      BOOL configurationCurrent = (currentConfiguration == nil && providerConfiguration == nil) ||
+          [currentConfiguration isEqual:providerConfiguration];
+      if (!generationCurrent || !configurationCurrent) {
         if (owned.completion != nil) {
           owned.completion(nil, @"E_COMPLETION_CREDENTIAL_CHANGED");
         }
@@ -338,6 +342,11 @@ static NSString *DSHCompletionTransportParserErrorCode(NSError *error) {
         @"model_input_sha256": modelInputDigest,
         @"request_body_sha256": bodyDigest,
       };
+      if (providerConfiguration != nil) {
+        NSMutableDictionary *bound = [result mutableCopy];
+        bound[@"provider_configuration"] = providerConfiguration;
+        result = bound;
+      }
       if (owned.completion != nil) owned.completion(result, nil);
     }];
   } @catch (__unused NSException *exception) {
@@ -426,6 +435,10 @@ static NSString *DSHCompletionTransportParserErrorCode(NSError *error) {
 /// and redirect orchestration only. Every provider dialect lives in a
 /// subclass (DshProviderTransport, ClaudeProviderTransport,
 /// CodexProviderTransport); an unimplemented hook fails closed.
+
+- (BOOL)hasActiveRequests { @synchronized(self) { return self.contexts.count > 0; } }
+
+- (NSDictionary *)providerConfigurationForModel:(NSString *)model { return nil; }
 
 - (NSURL *)providerBaseURL {
   return nil;

@@ -1,3 +1,5 @@
+#import "../../../../modules/rish/ios/Sources/ConfiguredProviderTransport.h"
+#import "../../../../modules/rish/ios/Sources/ProviderConfiguration.h"
 #import <XCTest/XCTest.h>
 
 #import "../../../../modules/rish/ios/Sources/AgentProviderRoundService.h"
@@ -2055,4 +2057,49 @@ static NSDictionary *DSHProviderSmokeQueryRequest(NSDictionary *root,
   [NSFileManager.defaultManager removeItemAtURL:walRoot error:nil];
 }
 
+
+- (void)testCustomProviderIdentitySurvivesNativeRoundAndOperationReplay {
+  DSHProviderSmokeFixture *fixture = [[DSHProviderSmokeFixture alloc] init];
+  NSMutableDictionary *authority = [fixture.prepared.authority mutableCopy]; authority[@"model"] = @"claude-sonnet-5";
+  fixture.prepared.authority = authority;
+  NSString *suite = [@"custom-round-" stringByAppendingString:NSUUID.UUID.UUIDString];
+  NSUserDefaults *defaults = [[NSUserDefaults alloc] initWithSuiteName:suite];
+  DSHProviderConfigurationStore *profiles = [[DSHProviderConfigurationStore alloc] initWithDefaults:defaults];
+  [profiles saveConfiguration:@{@"schema_version": @1, @"harness_id": @"claude-code", @"name": @"Relay",
+      @"endpoint_url": @"https://relay.example/v1/messages", @"protocol": @"messages", @"auth_type": @"bearer",
+      @"send_reasoning": @NO, @"model_mappings": @{@"claude-sonnet-5": @"relay-model"}} error:nil];
+  NSURLSessionConfiguration *sessionConfiguration = NSURLSessionConfiguration.ephemeralSessionConfiguration;
+  sessionConfiguration.protocolClasses = @[DSHProviderURLProtocol.class];
+  NSURLSession *session = [NSURLSession sessionWithConfiguration:sessionConfiguration];
+  DSHConfiguredProviderTransport *transport = [[DSHConfiguredProviderTransport alloc] initWithHarness:@"claude-code"
+      session:session uuidGenerator:^NSString *{ return NSUUID.UUID.UUIDString.lowercaseString; }
+      monotonicClock:nil store:profiles];
+  DSHAgentProviderRoundService *service = [[DSHAgentProviderRoundService alloc]
+      initWithWAL:fixture.wal preparedStore:fixture.prepared transcripts:fixture.transcripts rounds:fixture.rounds
+      transport:fixture.transport claudeTransport:transport codexTransport:nil glmTransport:nil
+      credentialProvider:^NSString *(NSString *harness, NSUInteger *generation) {
+        XCTAssertEqualObjects(harness, @"claude-code"); if (generation) *generation = 1; return @"synthetic-relay-key";
+      } visibleHistoryProvider:^NSArray *(NSDictionary *value, NSError **error) {
+        return @[@{@"role": @"user", @"content": @"hello"}];
+      } contextReceiptProvider:nil];
+  [DSHProviderURLProtocol setHandler:^(NSURLProtocol *p, NSURLRequest *request) {
+    XCTAssertEqualObjects(request.URL.host, @"relay.example");
+    NSData *data = [NSJSONSerialization dataWithJSONObject:@{@"id": @"custom-round-response", @"model": @"relay-model",
+      @"content": @[@{@"type": @"text", @"text": @"answer"}], @"stop_reason": @"end_turn"} options:0 error:nil];
+    NSHTTPURLResponse *response = [[NSHTTPURLResponse alloc] initWithURL:request.URL statusCode:200 HTTPVersion:@"HTTP/1.1" headerFields:@{@"Content-Type": @"application/json"}];
+    [p.client URLProtocol:p didReceiveResponse:response cacheStoragePolicy:NSURLCacheStorageNotAllowed];
+    [p.client URLProtocol:p didLoadData:data]; [p.client URLProtocolDidFinishLoading:p];
+  }];
+  NSMutableDictionary *request = [fixture.request mutableCopy]; request[@"model"] = @"claude-sonnet-5"; request[@"harness_id"] = @"claude-code";
+  NSError *error = nil;
+  NSDictionary *result = [service completeAgentRoundV2WithRequest:request error:&error];
+  XCTAssertNotNil(result, @"%@", error);
+  NSDictionary *binding = result[@"outcome"][@"completion_receipt"][@"provider_configuration"];
+  XCTAssertEqualObjects(binding[@"model_id"], @"relay-model");
+  XCTAssertTrue(DSHValidateProviderBinding(binding, @"claude-sonnet-5"));
+  NSDictionary *replayed = [service completeAgentRoundV2WithRequest:request error:&error];
+  XCTAssertEqualObjects(replayed, result);
+  XCTAssertEqual([DSHProviderURLProtocol requestCount], 1u);
+  [session invalidateAndCancel]; [defaults removePersistentDomainForName:suite];
+}
 @end

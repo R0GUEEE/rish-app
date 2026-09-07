@@ -1,3 +1,4 @@
+#import "../../../../modules/rish/ios/Sources/ProviderConfiguration.h"
 #import <XCTest/XCTest.h>
 
 #import "DSHTestHost.h"
@@ -3159,6 +3160,39 @@ static NSString *const DSHSessionTestOperationB =
   NSDictionary *loaded = [self.store loadSessionSnapshotWithError:&error];
   XCTAssertNil(error);
   XCTAssertEqualObjects(loaded[@"snapshot"][@"generation"], @66);
+}
+
+
+- (void)testCustomProviderManifestAndRoundReceiptCommitAndReload {
+  NSMutableDictionary *candidate = [self mutableSharedFixtureNamed:@"claude-code-tool-round-session"];
+  NSDictionary *configuration = @{@"schema_version": @1, @"harness_id": @"claude-code", @"name": @"Relay",
+    @"endpoint_url": @"https://relay.example/v1/messages", @"protocol": @"messages", @"auth_type": @"bearer",
+    @"send_reasoning": @NO, @"model_mappings": @{@"claude-sonnet-5": @"relay-sonnet"}};
+  NSDictionary *binding = DSHProviderBindingFromConfiguration(configuration, @"claude-sonnet-5");
+  XCTAssertNotNil(binding);
+  NSUInteger receipts = 0;
+  for (NSMutableDictionary *conversation in candidate[@"conversations"]) {
+    id context = conversation[@"project_context"];
+    if ([context isKindOfClass:NSDictionary.class] && [context[@"manifest"] isKindOfClass:NSDictionary.class]) {
+      context[@"manifest"][@"provider_configuration"] = binding;
+      context[@"manifest"][@"provider_host"] = @"relay.example";
+    }
+    for (NSMutableDictionary *attempt in conversation[@"attempts"]) {
+      for (NSMutableDictionary *receipt in attempt[@"rounds"]) {
+        receipt[@"provider_configuration"] = binding; receipts += 1;
+      }
+    }
+  }
+  XCTAssertGreaterThan(receipts, 0u);
+  NSError *error = nil;
+  NSDictionary *result = [self casWithOperation:DSHSessionTestOperationA
+      expected:@{@"schema_version": @1, @"kind": @"missing"} candidate:candidate error:&error];
+  XCTAssertNil(error);
+  XCTAssertEqualObjects(result[@"status"], @"committed");
+  NSDictionary *loaded = [self.store loadSessionSnapshotWithError:&error];
+  XCTAssertNil(error);
+  XCTAssertTrue([loaded[@"session_json"] containsString:@"provider_configuration"]);
+  XCTAssertTrue([loaded[@"session_json"] containsString:@"relay-sonnet"]);
 }
 
 @end

@@ -72,6 +72,9 @@ export function isHarnessModelId(value: unknown): value is HarnessModelId {
 }
 
 /**
+ * Built-in logical provider identity and official default host.
+ * Custom request targets are carried by immutable provider_configuration
+ * bindings on snapshots and receipts; do not infer their host from this table.
  * Provider identity behind each built-in Harness. The provider id and host
  * travel inside project-context consent receipts and runtime proof so the
  * record names the API that actually served a round; the native catalog

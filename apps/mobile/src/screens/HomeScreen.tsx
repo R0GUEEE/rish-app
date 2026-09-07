@@ -1,3 +1,5 @@
+import { ProviderConfigurations } from '../providers/native';
+import type { ProviderConfiguration } from '../providers/configuration';
 import { RecoveryNotice } from '../components/RecoveryNotice';
 import { completionRecoveryLabel, recoveryCode } from '../components/recoveryMessage';
 import React, {
@@ -551,13 +553,14 @@ function displayMessages(
             { id: `${message.id}-text`, type: 'text', text: message.text },
           ]
         : undefined;
+    const attempt = conversation?.attempts.find(item => item.assistantMessageId === message.id);
+    const providerBinding = attempt?.rounds.at(-1)?.providerConfiguration;
     return {
       id: message.id,
       role: message.role,
       text: message.text,
-      modelId: message.metadata?.modelId ?? conversation?.attempts.find(
-        attempt => attempt.assistantMessageId === message.id,
-      )?.modelId,
+      ...(providerBinding === undefined ? {} : { providerLabel: new URL(providerBinding.endpoint_url).host }),
+      modelId: message.metadata?.modelId ?? attempt?.modelId,
       ...(message.attachments === undefined || message.attachments.length === 0
         ? {}
         : {
@@ -575,7 +578,7 @@ function displayMessages(
         ? {}
         : {
             meta: [
-              message.metadata.modelId,
+              providerBinding?.model_id ?? message.metadata.modelId,
               message.metadata.latencyMs === undefined
                 ? undefined
                 : `${message.metadata.latencyMs} ms`,
@@ -782,7 +785,19 @@ export function HomeScreen({
   const activeHarnessIdRef = useRef(activeHarnessId);
   activeHarnessIdRef.current = activeHarnessId;
   const activeAdapter = getHarnessAdapter(activeHarnessId);
-  const providerName = {
+  const [providerConfigurationRevision, setProviderConfigurationRevision] = useState(0);
+  const [providerOverride, setProviderOverride] = useState<ProviderConfiguration | null>(null);
+  useEffect(() => {
+    let cancelled = false;
+    setProviderOverride(null);
+    if ((activeHarnessId === 'claude-code' || activeHarnessId === 'codex') && ProviderConfigurations.isAvailable()) {
+      ProviderConfigurations.read(activeHarnessId).then(value => {
+        if (!cancelled) setProviderOverride(value.official ? null : value);
+      }).catch(() => undefined);
+    }
+    return () => { cancelled = true; };
+  }, [activeHarnessId, providerConfigurationRevision]);
+  const providerName = (providerOverride?.harness_id === activeHarnessId ? providerOverride.name : null) ?? {
     dsh: 'DeepSeek',
     'claude-code': 'Anthropic',
     codex: 'OpenAI',
@@ -2030,7 +2045,7 @@ export function HomeScreen({
     return () => {
       cancelled = true;
     };
-  }, [activeAdapter, activeHarnessId, lifecycleBootstrapReady, nativeAvailable]);
+  }, [activeAdapter, activeHarnessId, lifecycleBootstrapReady, nativeAvailable, providerConfigurationRevision]);
 
   // QA fixture: with -DSHSeedMarkdownDemo the Simulator seeds one
   // markdown-demo conversation after bootstrap, unless a session restored.
@@ -5700,6 +5715,7 @@ export function HomeScreen({
             harnessName={activeHarness.name}
             providerName={providerName}
             model={activeModel}
+            modelLabel={providerOverride?.harness_id === activeHarnessId ? providerOverride.model_mappings[activeModel] : undefined}
             locked={
               requestState === 'sending' ||
               previewingAttachmentId !== null ||
@@ -5881,6 +5897,15 @@ export function HomeScreen({
         onOpenRuntime={() => {
           if (!settingsSourceIsLive(settingsRenderEpoch)) return;
           setEvidenceVisible(true);
+        }}
+        onProviderConfigurationChanged={harness => {
+          for (const conversation of Object.values(store.getState().conversations)) {
+            if (harnessForModel(conversation.modelId) === harness && conversation.projectContext !== null) {
+              store.applyProjectContextAction(conversation.id, { type: 'provider_configuration_changed' });
+            }
+          }
+          setProviderConfigurationRevision(value => value + 1);
+          persist().catch(() => undefined);
         }}
         onPreferencesChanged={() => {
           if (!settingsSourceIsLive(settingsRenderEpoch)) return;

@@ -1,3 +1,4 @@
+import { providerHostMatches, parseProviderBinding } from '../providers/configuration';
 import {
   AGENT_FAILURE_CODES,
   ATTEMPT_PROJECT_CONTEXT_SCHEMA_VERSION,
@@ -72,7 +73,6 @@ import {
   isHarnessId,
   isProviderId,
   providerForModel,
-  providerHostForModel,
 } from '../harness/types';
 import {
   validateAgentStoreTransition,
@@ -853,6 +853,7 @@ function copyRoundReceipt(
     providerRequestId: receipt.providerRequestId,
     providerResponseId: receipt.providerResponseId,
     harnessId: receipt.harnessId,
+    ...(receipt.providerConfiguration === undefined ? {} : { providerConfiguration: { ...receipt.providerConfiguration } }),
     requestedModel: receipt.requestedModel,
     model: receipt.model,
     thinkingMode: receipt.thinkingMode,
@@ -1179,7 +1180,7 @@ function contextAuthorityMatches(
     context.projectId === conversation.projectId &&
     snapshot.project_id === conversation.projectId &&
     snapshot.model === conversation.modelId &&
-    snapshot.provider_host === providerHostForModel(snapshot.model) &&
+    providerHostMatches(snapshot.model, snapshot.provider_host, snapshot.provider_configuration) &&
     snapshot.policy_version === 'chat-read-v1.0.0' &&
     isCanonicalLifecycleId(snapshot.snapshot_id) &&
     (confirmed
@@ -1196,7 +1197,8 @@ function receiptIsValid(
   attempt: TurnAttemptV1,
   receipt: CompletionRoundReceiptV1,
 ): boolean {
-  if (!isExactDataRecord(receipt, roundReceiptKeys)) return false;
+  if (!isExactDataRecordWithOptional(receipt, roundReceiptKeys, ['providerConfiguration'])) return false;
+  if (receipt.providerConfiguration !== undefined && parseProviderBinding(receipt.providerConfiguration, receipt.model) === null) return false;
   const binding = attempt.projectContext;
   const projectReceipt = receipt.projectContextReceipt;
   if (
@@ -3774,7 +3776,7 @@ function evidenceRoundReceipt(value: unknown): CompletionRoundReceiptV1 | null {
     'model_input_sha256',
     'request_body_sha256',
     'project_context_receipt',
-  ], ['harness_id'])) return null;
+  ], ['harness_id', 'provider_configuration'])) return null;
   if (value.harness_id !== undefined && !isHarnessId(value.harness_id)) {
     return null;
   }
@@ -3789,6 +3791,7 @@ function evidenceRoundReceipt(value: unknown): CompletionRoundReceiptV1 | null {
     readonly provider_request_id: string;
     readonly provider_response_id: string;
     readonly harness_id?: CompletionRoundReceiptV1['harnessId'];
+    readonly provider_configuration?: import('../providers/configuration').ProviderBinding;
     readonly requested_model: CompletionRoundReceiptV1['requestedModel'];
     readonly model: CompletionRoundReceiptV1['model'];
     readonly thinking_mode: CompletionRoundReceiptV1['thinkingMode'];
@@ -3804,6 +3807,7 @@ function evidenceRoundReceipt(value: unknown): CompletionRoundReceiptV1 | null {
     schemaVersion: 1,
     transportSchemaVersion: receipt.transport_schema_version,
     harnessId: receipt.harness_id ?? 'dsh',
+    ...(receipt.provider_configuration === undefined ? {} : { providerConfiguration: receipt.provider_configuration }),
     turnId: receipt.turn_id,
     attemptId: receipt.attempt_id,
     roundId: receipt.round_id,

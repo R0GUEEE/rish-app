@@ -107,7 +107,11 @@ typedef void (^DSHCompletionProviderTransportCompletionBlock)(
 /// shared slot, digest, cancellation, and redirect orchestration above.
 /// Streaming parsers conform to DSHProviderStreamEventParsing and emit the
 /// same delta vocabulary {type, content?, reasoning?, finish_reason?}.
+- (BOOL)hasActiveRequests;
 - (NSURL *)providerBaseURL;
+
+/// Immutable non-secret identity attached to custom provider receipts.
+- (nullable NSDictionary *)providerConfigurationForModel:(NSString *)model;
 
 - (NSDictionary<NSString *, NSString *> *)providerHeadersWithCredential:(NSString *)credential;
 

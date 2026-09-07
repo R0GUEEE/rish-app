@@ -1,3 +1,4 @@
+import type { ProviderBinding } from '../providers/configuration';
 import type { HarnessModelId } from '../native/LocalRuntime';
 import type { ProviderHost, ProviderId } from '../harness/types';
 import type { WorkspaceRootRefV1 } from '../native/WorkspaceRoot';
@@ -96,6 +97,7 @@ export type ProjectContextIncludedItemV1 = {
 };
 
 export type ProjectContextManifestV1 = {
+  readonly provider_configuration?: ProviderBinding;
   readonly schema_version: typeof PROJECT_CONTEXT_SCHEMA_VERSION;
   readonly snapshot_id: string;
   readonly project_id: string;
@@ -106,7 +108,7 @@ export type ProjectContextManifestV1 = {
   readonly conflicted: boolean;
   readonly captured_at: string;
   readonly policy_version: string;
-  readonly provider_host: ProviderHost;
+  readonly provider_host: ProviderHost | string;
   readonly model: HarnessModelId;
   readonly included: readonly ProjectContextIncludedItemV1[];
   readonly omitted: readonly {
@@ -195,6 +197,7 @@ export type ProjectContextSelectionV2 = {
 };
 
 export type ProjectContextManifestV2 = {
+  readonly provider_configuration?: ProviderBinding;
   readonly schema_version: 2;
   readonly snapshot_id: string;
   readonly root: ProjectContextWorkspaceRootRefV1;
@@ -346,6 +349,7 @@ export type ProjectContextAction =
     }
   | { readonly type: 'project_changed' }
   | { readonly type: 'model_changed'; readonly model: HarnessModelId }
+  | { readonly type: 'provider_configuration_changed' }
   | { readonly type: 'provider_changed'; readonly providerHost: string }
   | { readonly type: 'policy_changed'; readonly policyVersion: string }
   | {

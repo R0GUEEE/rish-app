@@ -1,3 +1,4 @@
+import { providerBindingHost } from '../providers/configuration';
 import {
   LocalProjectContext,
   ProjectContextBridgeError,
@@ -405,7 +406,8 @@ function manifestV2ForController(
     conflicted: manifest.conflicted,
     captured_at: manifest.captured_at,
     policy_version: manifest.policy_version,
-    provider_host: providerHostForModel(manifest.model_id),
+    provider_host: manifest.provider_configuration === undefined ? providerHostForModel(manifest.model_id) : providerBindingHost(manifest.provider_configuration),
+    ...(manifest.provider_configuration === undefined ? {} : { provider_configuration: manifest.provider_configuration }),
     model: manifest.model_id,
     included: manifest.included.map(item => ({ ...item })),
     omitted: manifest.omitted.map(item => ({ ...item })),

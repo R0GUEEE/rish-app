@@ -1,3 +1,4 @@
+#import "ProviderConfiguration.h"
 #import "AgentProviderRoundServiceInternals.h"
 #import "RishHarnessCatalog.h"
 
@@ -58,6 +59,8 @@ BOOL DSHProviderOpaqueId(id value) {
 }
 
 BOOL DSHProviderResultShape(NSDictionary *result) {
+  if (![result isKindOfClass:NSDictionary.class]) return NO;
+  result = DSHProviderRecordWithoutConfiguration(result, result[@"model"]);
   if (!DSHAgentExactDictionaryKeysWithOptional(result, @[
         @"provider_request_id", @"provider_response_id", @"requested_model",
         @"model", @"thinking_mode", @"text", @"reasoning", @"tool_calls",
@@ -297,7 +300,7 @@ NSDictionary *DSHProviderPublicReceipt(NSDictionary *provider,
                                               NSDictionary *request,
                                               NSString *providerRequestId,
                                               NSDictionary *contextReceipt) {
-  return @{
+  NSMutableDictionary *receipt = [@{
     @"schema_version" : @2,
     @"transport_schema_version" : request[@"transport_schema_version"],
     @"turn_id" : request[@"task_id"],
@@ -320,7 +323,9 @@ NSDictionary *DSHProviderPublicReceipt(NSDictionary *provider,
     @"model_input_sha256" : provider[@"model_input_sha256"],
     @"request_body_sha256" : provider[@"request_body_sha256"],
     @"project_context_receipt" : contextReceipt ?: NSNull.null,
-  };
+  } mutableCopy];
+  if (provider[@"provider_configuration"] != nil) receipt[@"provider_configuration"] = provider[@"provider_configuration"];
+  return receipt;
 }
 
 NSDictionary *DSHProviderRecoveredRoundProjection(NSDictionary *row,

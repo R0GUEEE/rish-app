@@ -1,3 +1,4 @@
+#import "ProviderConfiguration.h"
 #import "AgentRoundJournal.h"
 #import "RishHarnessCatalog.h"
 
@@ -242,6 +243,8 @@ static BOOL DSHAgentRoundMessagesMatchCalls(NSArray *messages,
 
 static BOOL DSHAgentCompletionReceipt(NSDictionary *receipt,
                                       NSDictionary *locator) {
+  if (![receipt isKindOfClass:NSDictionary.class]) return NO;
+  receipt = DSHProviderRecordWithoutConfiguration(receipt, receipt[@"model"]);
   if (!DSHAgentExactDictionaryKeysWithOptional(receipt, @[
         @"schema_version", @"transport_schema_version", @"turn_id",
         @"attempt_id", @"round_id", @"round_index", @"provider_request_id",
