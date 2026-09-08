@@ -23,6 +23,8 @@ class AppDelegate: UIResponder, UIApplicationDelegate {
       return true
     }
 
+    TaskExperience.shared.configure()
+
     let delegate = ReactNativeDelegate()
     let factory = RCTReactNativeFactory(delegate: delegate)
     delegate.dependencyProvider = RCTAppDependencyProvider()
@@ -54,7 +56,11 @@ class AppDelegate: UIResponder, UIApplicationDelegate {
       launchOptions: launchOptions
     )
 
+    TaskExperienceAcceptance.startIfRequested()
     return true
+  }
+  func application(_ app: UIApplication, open url: URL, options: [UIApplication.OpenURLOptionsKey: Any] = [:]) -> Bool {
+    TaskExperience.shared.open(url)
   }
 }
 

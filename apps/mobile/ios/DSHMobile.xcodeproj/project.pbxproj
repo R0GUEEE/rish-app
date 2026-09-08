@@ -15,11 +15,20 @@
 		0FB00ADC1B871CFEE69D14D2 /* HarnessEvidenceUITests.m in Sources */ = {isa = PBXBuildFile; fileRef = 2CC0852742D4D62FB4839A6E /* HarnessEvidenceUITests.m */; };
 		0FD535F546494316DAC7D8C8 /* Foundation.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = 83D13607DBF7D23FF1349ED7 /* Foundation.framework */; };
 		13B07FBF1A68108700A75B9A /* Images.xcassets in Resources */ = {isa = PBXBuildFile; fileRef = 13B07FB51A68108700A75B9A /* Images.xcassets */; };
+		14C6BC971FC336AFAC3185DF /* CancelTaskIntent.swift in Sources */ = {isa = PBXBuildFile; fileRef = 59C1824F4EE8C553D062A00B /* CancelTaskIntent.swift */; };
+		1992284064D420D62BCC26B3 /* RishTaskActivity.appex in Embed App Extensions */ = {isa = PBXBuildFile; fileRef = 857C264E122AD7BCC0209CE1 /* RishTaskActivity.appex */; settings = {ATTRIBUTES = (RemoveHeadersOnCopy, ); }; };
+		1D87B29625DD6ECC7445D5E9 /* TaskAlertPolicyTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 4F1B5E967FA9B73114469E3F /* TaskAlertPolicyTests.swift */; };
 		22A08E972B0819769FA015A3 /* WorkspaceBootstrapFreshInstallTests.mm in Sources */ = {isa = PBXBuildFile; fileRef = 3175292C9FC14967A3F72251 /* WorkspaceBootstrapFreshInstallTests.mm */; };
+		2AC1411F79AB1A0E0AE8073C /* TaskAlertPolicy.swift in Sources */ = {isa = PBXBuildFile; fileRef = 9C6ACD833B5CAF1E2B7A52DF /* TaskAlertPolicy.swift */; };
 		3D97A1AB7731B11795FBBB91 /* libPods-DSHMobileTests.a in Frameworks */ = {isa = PBXBuildFile; fileRef = 6F24AC77CE20B288D7D94AA9 /* libPods-DSHMobileTests.a */; };
 		40D5B5F596262FD65CF7C474 /* PrivacyInfo.xcprivacy in Resources */ = {isa = PBXBuildFile; fileRef = 13B07FB81A68108700A75B9A /* PrivacyInfo.xcprivacy */; };
+		4EDBB0B1389437436E93DC36 /* Foundation.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = CA37B0C0CDA024217D4FD37B /* Foundation.framework */; };
+		6201E4D90D300C22C3AE9A4F /* TaskExperienceBridge.m in Sources */ = {isa = PBXBuildFile; fileRef = C0862762A831629353284454 /* TaskExperienceBridge.m */; };
+		73B2491A82DB4E4F46AF6360 /* TaskExperience.swift in Sources */ = {isa = PBXBuildFile; fileRef = 48E34B4FE7E4E89A02BC5D5E /* TaskExperience.swift */; };
 		761780ED2CA45674006654EE /* AppDelegate.swift in Sources */ = {isa = PBXBuildFile; fileRef = 761780EC2CA45674006654EE /* AppDelegate.swift */; };
+		7F276F65A16012BEDA66011E /* CancelTaskIntent.swift in Sources */ = {isa = PBXBuildFile; fileRef = 59C1824F4EE8C553D062A00B /* CancelTaskIntent.swift */; };
 		81AB9BB82411601600AC10FF /* LaunchScreen.storyboard in Resources */ = {isa = PBXBuildFile; fileRef = 81AB9BB72411601600AC10FF /* LaunchScreen.storyboard */; };
+		8C311F650255DB45BBC37FB5 /* TaskExperienceAcceptance.swift in Sources */ = {isa = PBXBuildFile; fileRef = F2A1F0E39B54A7F9B1B123F6 /* TaskExperienceAcceptance.swift */; };
 		A0C400021AD99517003FC87E /* LocalWorkspacesModuleV2Tests.mm in Sources */ = {isa = PBXBuildFile; fileRef = A0C400011AD99517003FC87E /* LocalWorkspacesModuleV2Tests.mm */; };
 		A1C400021AD99517003FC87E /* AgentNativeStoreTests.mm in Sources */ = {isa = PBXBuildFile; fileRef = A1C400011AD99517003FC87E /* AgentNativeStoreTests.mm */; };
 		A2C400021AD99517003FC87E /* AgentRuntimeModuleTests.mm in Sources */ = {isa = PBXBuildFile; fileRef = A2C400011AD99517003FC87E /* AgentRuntimeModuleTests.mm */; };
@@ -40,33 +49,37 @@
 		C0F400021AD99517003FC87E /* agent-begin-round-session.json in Resources */ = {isa = PBXBuildFile; fileRef = C0F400011AD99517003FC87E /* agent-begin-round-session.json */; };
 		C1F400021AD99517003FC87E /* agent-first-round-complete-session.json in Resources */ = {isa = PBXBuildFile; fileRef = C1F400011AD99517003FC87E /* agent-first-round-complete-session.json */; };
 		C2F400021AD99517003FC87E /* agent-next-round-after-tool-session.json in Resources */ = {isa = PBXBuildFile; fileRef = C2F400011AD99517003FC87E /* agent-next-round-after-tool-session.json */; };
-		C9F400021AD99517003FC87E /* agent-denied-call-session.json in Resources */ = {isa = PBXBuildFile; fileRef = C9F400011AD99517003FC87E /* agent-denied-call-session.json */; };
-		D1F400021AD99517003FC87E /* claude-code-tool-round-session.json in Resources */ = {isa = PBXBuildFile; fileRef = D1F400011AD99517003FC87E /* claude-code-tool-round-session.json */; };
-		D2F400021AD99517003FC87E /* codex-round-session.json in Resources */ = {isa = PBXBuildFile; fileRef = D2F400011AD99517003FC87E /* codex-round-session.json */; };
-		D3F400021AD99517003FC87E /* legacy-pre-harness-session.json in Resources */ = {isa = PBXBuildFile; fileRef = D3F400011AD99517003FC87E /* legacy-pre-harness-session.json */; };
-		D4F400021AD99517003FC87E /* claude-stream-cases.json in Resources */ = {isa = PBXBuildFile; fileRef = D4F400011AD99517003FC87E /* claude-stream-cases.json */; };
-		D4F400A21AD99517003FC87E /* glm-stream-cases.json in Resources */ = {isa = PBXBuildFile; fileRef = D4F400A11AD99517003FC87E /* glm-stream-cases.json */; };
-		D5F400021AD99517003FC87E /* codex-stream-cases.json in Resources */ = {isa = PBXBuildFile; fileRef = D5F400011AD99517003FC87E /* codex-stream-cases.json */; };
-		D6F400021AD99517003FC87E /* deepseek-stream-cases.json in Resources */ = {isa = PBXBuildFile; fileRef = D6F400011AD99517003FC87E /* deepseek-stream-cases.json */; };
-		E1C400021AD99517003FC87E /* ClaudeProviderTransportTests.mm in Sources */ = {isa = PBXBuildFile; fileRef = E1C400011AD99517003FC87E /* ClaudeProviderTransportTests.mm */; };
-		E2C400021AD99517003FC87E /* CodexProviderTransportTests.mm in Sources */ = {isa = PBXBuildFile; fileRef = E2C400011AD99517003FC87E /* CodexProviderTransportTests.mm */; };
-		E3C400021AD99517003FC87E /* ProviderStreamFixtureTests.mm in Sources */ = {isa = PBXBuildFile; fileRef = E3C400011AD99517003FC87E /* ProviderStreamFixtureTests.mm */; };
 		C3F400021AD99517003FC87E /* agent-interrupted-recovery-session.json in Resources */ = {isa = PBXBuildFile; fileRef = C3F400011AD99517003FC87E /* agent-interrupted-recovery-session.json */; };
 		C4F400021AD99517003FC87E /* scenario-a4-wal.json in Resources */ = {isa = PBXBuildFile; fileRef = C4F400011AD99517003FC87E /* scenario-a4-wal.json */; };
 		C5F400021AD99517003FC87E /* scenario-a4-session-envelope.json in Resources */ = {isa = PBXBuildFile; fileRef = C5F400011AD99517003FC87E /* scenario-a4-session-envelope.json */; };
 		C6F400021AD99517003FC87E /* agent-interrupted-retry-session.json in Resources */ = {isa = PBXBuildFile; fileRef = C6F400011AD99517003FC87E /* agent-interrupted-retry-session.json */; };
+		C7D92D6691AE24E183194EC0 /* TaskAlertPolicy.swift in Sources */ = {isa = PBXBuildFile; fileRef = 9C6ACD833B5CAF1E2B7A52DF /* TaskAlertPolicy.swift */; };
 		C7F400021AD99517003FC87E /* agent-git-push-conversation-session.json in Resources */ = {isa = PBXBuildFile; fileRef = C7F400011AD99517003FC87E /* agent-git-push-conversation-session.json */; };
 		C91A46F4761A4A3EA8F34780 /* CompletionV2StreamTests.mm in Sources */ = {isa = PBXBuildFile; fileRef = 94F13054405C479482FDBF90 /* CompletionV2StreamTests.mm */; };
+		C9F400021AD99517003FC87E /* agent-denied-call-session.json in Resources */ = {isa = PBXBuildFile; fileRef = C9F400011AD99517003FC87E /* agent-denied-call-session.json */; };
+		D1F400021AD99517003FC87E /* claude-code-tool-round-session.json in Resources */ = {isa = PBXBuildFile; fileRef = D1F400011AD99517003FC87E /* claude-code-tool-round-session.json */; };
+		D2F400021AD99517003FC87E /* codex-round-session.json in Resources */ = {isa = PBXBuildFile; fileRef = D2F400011AD99517003FC87E /* codex-round-session.json */; };
+		D3F400021AD99517003FC87E /* legacy-pre-harness-session.json in Resources */ = {isa = PBXBuildFile; fileRef = D3F400011AD99517003FC87E /* legacy-pre-harness-session.json */; };
 		D4C400021AD99517003FC87E /* ProjectContextServiceTests.mm in Sources */ = {isa = PBXBuildFile; fileRef = D4C400011AD99517003FC87E /* ProjectContextServiceTests.mm */; };
+		D4F400021AD99517003FC87E /* claude-stream-cases.json in Resources */ = {isa = PBXBuildFile; fileRef = D4F400011AD99517003FC87E /* claude-stream-cases.json */; };
+		D4F400A21AD99517003FC87E /* glm-stream-cases.json in Resources */ = {isa = PBXBuildFile; fileRef = D4F400A11AD99517003FC87E /* glm-stream-cases.json */; };
 		D5C400021AD99517003FC87E /* CompletionV2Tests.mm in Sources */ = {isa = PBXBuildFile; fileRef = D5C400011AD99517003FC87E /* CompletionV2Tests.mm */; };
 		D5E2000000000000000000A1 /* vmlinuz-virt-6.18.35 in Resources */ = {isa = PBXBuildFile; fileRef = D5E1000000000000000000A1 /* vmlinuz-virt-6.18.35 */; };
 		D5E2000000000000000000A2 /* rish-container.cpio in Resources */ = {isa = PBXBuildFile; fileRef = D5E1000000000000000000A2 /* rish-container.cpio */; };
 		D5E2000000000000000000A4 /* LocalGuestModuleTests.mm in Sources */ = {isa = PBXBuildFile; fileRef = D5E1000000000000000000A4 /* LocalGuestModuleTests.mm */; };
+		D5F400021AD99517003FC87E /* codex-stream-cases.json in Resources */ = {isa = PBXBuildFile; fileRef = D5F400011AD99517003FC87E /* codex-stream-cases.json */; };
 		D6C400021AD99517003FC87E /* ProjectContextProofTests.mm in Sources */ = {isa = PBXBuildFile; fileRef = D6C400011AD99517003FC87E /* ProjectContextProofTests.mm */; };
+		D6F400021AD99517003FC87E /* deepseek-stream-cases.json in Resources */ = {isa = PBXBuildFile; fileRef = D6F400011AD99517003FC87E /* deepseek-stream-cases.json */; };
 		D7C400021AD99517003FC87E /* LocalProjectContextModuleTests.mm in Sources */ = {isa = PBXBuildFile; fileRef = D7C400011AD99517003FC87E /* LocalProjectContextModuleTests.mm */; };
 		D8C400021AD99517003FC87E /* ProjectContextCompletionV3Tests.mm in Sources */ = {isa = PBXBuildFile; fileRef = D8C400011AD99517003FC87E /* ProjectContextCompletionV3Tests.mm */; };
 		D9C400021AD99517003FC87E /* LocalWorkspaceAccessTests.mm in Sources */ = {isa = PBXBuildFile; fileRef = D9C400011AD99517003FC87E /* LocalWorkspaceAccessTests.mm */; };
+		E1C400021AD99517003FC87E /* ClaudeProviderTransportTests.mm in Sources */ = {isa = PBXBuildFile; fileRef = E1C400011AD99517003FC87E /* ClaudeProviderTransportTests.mm */; };
+		E2C400021AD99517003FC87E /* CodexProviderTransportTests.mm in Sources */ = {isa = PBXBuildFile; fileRef = E2C400011AD99517003FC87E /* CodexProviderTransportTests.mm */; };
+		E3C400021AD99517003FC87E /* ProviderStreamFixtureTests.mm in Sources */ = {isa = PBXBuildFile; fileRef = E3C400011AD99517003FC87E /* ProviderStreamFixtureTests.mm */; };
+		E499A3C7C97A8E3F11B46FE9 /* TaskAttributes.swift in Sources */ = {isa = PBXBuildFile; fileRef = 9A8ACD2C493DA7F9D27E1886 /* TaskAttributes.swift */; };
 		E7A2B4012C9FC4196B3C00A1 /* ContainerAnchorTests.mm in Sources */ = {isa = PBXBuildFile; fileRef = E7A2B4012C9FC4196B3C00A0 /* ContainerAnchorTests.mm */; };
+		EA26CCDA41946F6D4036D7A1 /* RishTaskWidget.swift in Sources */ = {isa = PBXBuildFile; fileRef = FDF43AF166C9C586D3952C9F /* RishTaskWidget.swift */; };
+		EA43D9B32991E7951E1FA419 /* TaskAttributes.swift in Sources */ = {isa = PBXBuildFile; fileRef = 9A8ACD2C493DA7F9D27E1886 /* TaskAttributes.swift */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXContainerItemProxy section */
@@ -77,6 +90,13 @@
 			remoteGlobalIDString = 13B07F861A680F5B00A75B9A;
 			remoteInfo = DSHMobile;
 		};
+		C97FEBC52AF2E0D8C25CF920 /* PBXContainerItemProxy */ = {
+			isa = PBXContainerItemProxy;
+			containerPortal = 83CBB9F71A601CBA00E9B192 /* Project object */;
+			proxyType = 1;
+			remoteGlobalIDString = 438B3BB90F586A6C5778F8D3;
+			remoteInfo = RishTaskActivity;
+		};
 		FA37681CF3B9AA82764C666A /* PBXContainerItemProxy */ = {
 			isa = PBXContainerItemProxy;
 			containerPortal = 83CBB9F71A601CBA00E9B192 /* Project object */;
@@ -85,6 +105,20 @@
 			remoteInfo = DSHMobile;
 		};
 /* End PBXContainerItemProxy section */
+
+/* Begin PBXCopyFilesBuildPhase section */
+		185BAD42CED5813C3E9EA193 /* Embed App Extensions */ = {
+			isa = PBXCopyFilesBuildPhase;
+			buildActionMask = 2147483647;
+			dstPath = "";
+			dstSubfolderSpec = 13;
+			files = (
+				1992284064D420D62BCC26B3 /* RishTaskActivity.appex in Embed App Extensions */,
+			);
+			name = "Embed App Extensions";
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+/* End PBXCopyFilesBuildPhase section */
 
 /* Begin PBXFileReference section */
 		00E356EE1AD99517003FC87E /* DSHMobileTests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = DSHMobileTests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
@@ -100,14 +134,20 @@
 		2CC0852742D4D62FB4839A6E /* HarnessEvidenceUITests.m */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.c.objc; path = HarnessEvidenceUITests.m; sourceTree = "<group>"; };
 		3175292C9FC14967A3F72251 /* WorkspaceBootstrapFreshInstallTests.mm */ = {isa = PBXFileReference; includeInIndex = 1; path = WorkspaceBootstrapFreshInstallTests.mm; sourceTree = "<group>"; };
 		3B4392A12AC88292D35C810B /* Pods-DSHMobile.debug.xcconfig */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = text.xcconfig; name = "Pods-DSHMobile.debug.xcconfig"; path = "Target Support Files/Pods-DSHMobile/Pods-DSHMobile.debug.xcconfig"; sourceTree = "<group>"; };
+		48E34B4FE7E4E89A02BC5D5E /* TaskExperience.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; name = TaskExperience.swift; path = DSHMobile/TaskExperience.swift; sourceTree = "<group>"; };
+		4F1B5E967FA9B73114469E3F /* TaskAlertPolicyTests.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; name = TaskAlertPolicyTests.swift; path = DSHMobileTests/TaskAlertPolicyTests.swift; sourceTree = "<group>"; };
 		5709B34CF0A7D63546082F79 /* Pods-DSHMobile.release.xcconfig */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = text.xcconfig; name = "Pods-DSHMobile.release.xcconfig"; path = "Target Support Files/Pods-DSHMobile/Pods-DSHMobile.release.xcconfig"; sourceTree = "<group>"; };
+		59C1824F4EE8C553D062A00B /* CancelTaskIntent.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; name = CancelTaskIntent.swift; path = RishTaskActivity/CancelTaskIntent.swift; sourceTree = "<group>"; };
 		5DCACB8F33CDC322A6C60F78 /* libPods-DSHMobile.a */ = {isa = PBXFileReference; explicitFileType = archive.ar; includeInIndex = 0; path = "libPods-DSHMobile.a"; sourceTree = BUILT_PRODUCTS_DIR; };
 		6F24AC77CE20B288D7D94AA9 /* libPods-DSHMobileTests.a */ = {isa = PBXFileReference; explicitFileType = archive.ar; includeInIndex = 0; path = "libPods-DSHMobileTests.a"; sourceTree = BUILT_PRODUCTS_DIR; };
 		71DFAAFF78228859B0B14FAA /* DSHMobileUITests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = DSHMobileUITests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
 		761780EC2CA45674006654EE /* AppDelegate.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; name = AppDelegate.swift; path = DSHMobile/AppDelegate.swift; sourceTree = "<group>"; };
 		81AB9BB72411601600AC10FF /* LaunchScreen.storyboard */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = file.storyboard; name = LaunchScreen.storyboard; path = DSHMobile/LaunchScreen.storyboard; sourceTree = "<group>"; };
 		83D13607DBF7D23FF1349ED7 /* Foundation.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = Foundation.framework; path = System/Library/Frameworks/Foundation.framework; sourceTree = SDKROOT; };
+		857C264E122AD7BCC0209CE1 /* RishTaskActivity.appex */ = {isa = PBXFileReference; explicitFileType = "wrapper.app-extension"; includeInIndex = 0; path = RishTaskActivity.appex; sourceTree = BUILT_PRODUCTS_DIR; };
 		94F13054405C479482FDBF90 /* CompletionV2StreamTests.mm */ = {isa = PBXFileReference; includeInIndex = 1; path = CompletionV2StreamTests.mm; sourceTree = "<group>"; };
+		9A8ACD2C493DA7F9D27E1886 /* TaskAttributes.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; name = TaskAttributes.swift; path = RishTaskActivity/TaskAttributes.swift; sourceTree = "<group>"; };
+		9C6ACD833B5CAF1E2B7A52DF /* TaskAlertPolicy.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; name = TaskAlertPolicy.swift; path = DSHMobile/TaskAlertPolicy.swift; sourceTree = "<group>"; };
 		A0C400011AD99517003FC87E /* LocalWorkspacesModuleV2Tests.mm */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.cpp.objcpp; path = LocalWorkspacesModuleV2Tests.mm; sourceTree = "<group>"; };
 		A1C400011AD99517003FC87E /* AgentNativeStoreTests.mm */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.cpp.objcpp; path = AgentNativeStoreTests.mm; sourceTree = "<group>"; };
 		A2C400011AD99517003FC87E /* AgentRuntimeModuleTests.mm */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.cpp.objcpp; path = AgentRuntimeModuleTests.mm; sourceTree = "<group>"; };
@@ -126,38 +166,42 @@
 		ABE400011AD99517003FC87E /* AgentProviderRoundServiceTests.mm */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.cpp.objcpp; path = AgentProviderRoundServiceTests.mm; sourceTree = "<group>"; };
 		ABF400011AD99517003FC87E /* LegacyBoundProjectRootAccessTests.mm */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.cpp.objcpp; path = LegacyBoundProjectRootAccessTests.mm; sourceTree = "<group>"; };
 		BEAB33D4FD608B29CABFBC8D /* StreamEventParserTests.mm */ = {isa = PBXFileReference; includeInIndex = 1; path = StreamEventParserTests.mm; sourceTree = "<group>"; };
+		C0862762A831629353284454 /* TaskExperienceBridge.m */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.c.objc; name = TaskExperienceBridge.m; path = DSHMobile/TaskExperienceBridge.m; sourceTree = "<group>"; };
 		C0F400011AD99517003FC87E /* agent-begin-round-session.json */ = {isa = PBXFileReference; lastKnownFileType = text.json; path = "Fixtures/agent-begin-round-session.json"; sourceTree = "<group>"; };
 		C1F400011AD99517003FC87E /* agent-first-round-complete-session.json */ = {isa = PBXFileReference; lastKnownFileType = text.json; path = "Fixtures/agent-first-round-complete-session.json"; sourceTree = "<group>"; };
 		C2F400011AD99517003FC87E /* agent-next-round-after-tool-session.json */ = {isa = PBXFileReference; lastKnownFileType = text.json; path = "Fixtures/agent-next-round-after-tool-session.json"; sourceTree = "<group>"; };
-		C9F400011AD99517003FC87E /* agent-denied-call-session.json */ = {isa = PBXFileReference; lastKnownFileType = text.json; path = "Fixtures/agent-denied-call-session.json"; sourceTree = "<group>"; };
-		D1F400011AD99517003FC87E /* claude-code-tool-round-session.json */ = {isa = PBXFileReference; lastKnownFileType = text.json; path = "Fixtures/claude-code-tool-round-session.json"; sourceTree = "<group>"; };
-		D2F400011AD99517003FC87E /* codex-round-session.json */ = {isa = PBXFileReference; lastKnownFileType = text.json; path = "Fixtures/codex-round-session.json"; sourceTree = "<group>"; };
-		D3F400011AD99517003FC87E /* legacy-pre-harness-session.json */ = {isa = PBXFileReference; lastKnownFileType = text.json; path = "Fixtures/legacy-pre-harness-session.json"; sourceTree = "<group>"; };
-		D4F400011AD99517003FC87E /* claude-stream-cases.json */ = {isa = PBXFileReference; lastKnownFileType = text.json; path = "Fixtures/claude-stream-cases.json"; sourceTree = "<group>"; };
-		D4F400A11AD99517003FC87E /* glm-stream-cases.json */ = {isa = PBXFileReference; lastKnownFileType = text.json; path = "Fixtures/glm-stream-cases.json"; sourceTree = "<group>"; };
-		D5F400011AD99517003FC87E /* codex-stream-cases.json */ = {isa = PBXFileReference; lastKnownFileType = text.json; path = "Fixtures/codex-stream-cases.json"; sourceTree = "<group>"; };
-		D6F400011AD99517003FC87E /* deepseek-stream-cases.json */ = {isa = PBXFileReference; lastKnownFileType = text.json; path = "Fixtures/deepseek-stream-cases.json"; sourceTree = "<group>"; };
-		E1C400011AD99517003FC87E /* ClaudeProviderTransportTests.mm */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.cpp.objcpp; path = ClaudeProviderTransportTests.mm; sourceTree = "<group>"; };
-		E2C400011AD99517003FC87E /* CodexProviderTransportTests.mm */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.cpp.objcpp; path = CodexProviderTransportTests.mm; sourceTree = "<group>"; };
-		E3C400011AD99517003FC87E /* ProviderStreamFixtureTests.mm */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.cpp.objcpp; path = ProviderStreamFixtureTests.mm; sourceTree = "<group>"; };
 		C3F400011AD99517003FC87E /* agent-interrupted-recovery-session.json */ = {isa = PBXFileReference; lastKnownFileType = text.json; path = "Fixtures/agent-interrupted-recovery-session.json"; sourceTree = "<group>"; };
 		C4F400011AD99517003FC87E /* scenario-a4-wal.json */ = {isa = PBXFileReference; lastKnownFileType = text.json; path = "Fixtures/scenario-a4-wal.json"; sourceTree = "<group>"; };
 		C5F400011AD99517003FC87E /* scenario-a4-session-envelope.json */ = {isa = PBXFileReference; lastKnownFileType = text.json; path = "Fixtures/scenario-a4-session-envelope.json"; sourceTree = "<group>"; };
 		C6F400011AD99517003FC87E /* agent-interrupted-retry-session.json */ = {isa = PBXFileReference; lastKnownFileType = text.json; path = "Fixtures/agent-interrupted-retry-session.json"; sourceTree = "<group>"; };
 		C7F400011AD99517003FC87E /* agent-git-push-conversation-session.json */ = {isa = PBXFileReference; lastKnownFileType = text.json; path = "Fixtures/agent-git-push-conversation-session.json"; sourceTree = "<group>"; };
+		C9F400011AD99517003FC87E /* agent-denied-call-session.json */ = {isa = PBXFileReference; lastKnownFileType = text.json; path = "Fixtures/agent-denied-call-session.json"; sourceTree = "<group>"; };
+		CA37B0C0CDA024217D4FD37B /* Foundation.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = Foundation.framework; path = Platforms/iPhoneOS.platform/Developer/SDKs/iPhoneOS18.0.sdk/System/Library/Frameworks/Foundation.framework; sourceTree = DEVELOPER_DIR; };
+		D1F400011AD99517003FC87E /* claude-code-tool-round-session.json */ = {isa = PBXFileReference; lastKnownFileType = text.json; path = "Fixtures/claude-code-tool-round-session.json"; sourceTree = "<group>"; };
+		D2F400011AD99517003FC87E /* codex-round-session.json */ = {isa = PBXFileReference; lastKnownFileType = text.json; path = "Fixtures/codex-round-session.json"; sourceTree = "<group>"; };
+		D3F400011AD99517003FC87E /* legacy-pre-harness-session.json */ = {isa = PBXFileReference; lastKnownFileType = text.json; path = "Fixtures/legacy-pre-harness-session.json"; sourceTree = "<group>"; };
 		D4C400011AD99517003FC87E /* ProjectContextServiceTests.mm */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.cpp.objcpp; path = ProjectContextServiceTests.mm; sourceTree = "<group>"; };
+		D4F400011AD99517003FC87E /* claude-stream-cases.json */ = {isa = PBXFileReference; lastKnownFileType = text.json; path = "Fixtures/claude-stream-cases.json"; sourceTree = "<group>"; };
+		D4F400A11AD99517003FC87E /* glm-stream-cases.json */ = {isa = PBXFileReference; lastKnownFileType = text.json; path = "Fixtures/glm-stream-cases.json"; sourceTree = "<group>"; };
 		D5C400011AD99517003FC87E /* CompletionV2Tests.mm */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.cpp.objcpp; path = CompletionV2Tests.mm; sourceTree = "<group>"; };
 		D5E1000000000000000000A1 /* vmlinuz-virt-6.18.35 */ = {isa = PBXFileReference; lastKnownFileType = file; path = "vmlinuz-virt-6.18.35"; sourceTree = "<group>"; };
 		D5E1000000000000000000A2 /* rish-container.cpio */ = {isa = PBXFileReference; lastKnownFileType = file; path = "rish-container.cpio"; sourceTree = "<group>"; };
 		D5E1000000000000000000A3 /* SHA256SUMS */ = {isa = PBXFileReference; lastKnownFileType = text; path = SHA256SUMS; sourceTree = "<group>"; };
 		D5E1000000000000000000A4 /* LocalGuestModuleTests.mm */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.cpp.objcpp; path = LocalGuestModuleTests.mm; sourceTree = "<group>"; };
+		D5F400011AD99517003FC87E /* codex-stream-cases.json */ = {isa = PBXFileReference; lastKnownFileType = text.json; path = "Fixtures/codex-stream-cases.json"; sourceTree = "<group>"; };
 		D6C400011AD99517003FC87E /* ProjectContextProofTests.mm */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.cpp.objcpp; path = ProjectContextProofTests.mm; sourceTree = "<group>"; };
+		D6F400011AD99517003FC87E /* deepseek-stream-cases.json */ = {isa = PBXFileReference; lastKnownFileType = text.json; path = "Fixtures/deepseek-stream-cases.json"; sourceTree = "<group>"; };
 		D7C400011AD99517003FC87E /* LocalProjectContextModuleTests.mm */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.cpp.objcpp; path = LocalProjectContextModuleTests.mm; sourceTree = "<group>"; };
 		D8C400011AD99517003FC87E /* ProjectContextCompletionV3Tests.mm */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.cpp.objcpp; path = ProjectContextCompletionV3Tests.mm; sourceTree = "<group>"; };
 		D9C400011AD99517003FC87E /* LocalWorkspaceAccessTests.mm */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.cpp.objcpp; path = LocalWorkspaceAccessTests.mm; sourceTree = "<group>"; };
+		E1C400011AD99517003FC87E /* ClaudeProviderTransportTests.mm */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.cpp.objcpp; path = ClaudeProviderTransportTests.mm; sourceTree = "<group>"; };
+		E2C400011AD99517003FC87E /* CodexProviderTransportTests.mm */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.cpp.objcpp; path = CodexProviderTransportTests.mm; sourceTree = "<group>"; };
+		E3C400011AD99517003FC87E /* ProviderStreamFixtureTests.mm */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.cpp.objcpp; path = ProviderStreamFixtureTests.mm; sourceTree = "<group>"; };
 		E7A2B4012C9FC4196B3C00A0 /* ContainerAnchorTests.mm */ = {isa = PBXFileReference; includeInIndex = 1; path = ContainerAnchorTests.mm; sourceTree = "<group>"; };
 		ED297162215061F000B7C4FE /* JavaScriptCore.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = JavaScriptCore.framework; path = System/Library/Frameworks/JavaScriptCore.framework; sourceTree = SDKROOT; };
+		F2A1F0E39B54A7F9B1B123F6 /* TaskExperienceAcceptance.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; name = TaskExperienceAcceptance.swift; path = DSHMobile/TaskExperienceAcceptance.swift; sourceTree = "<group>"; };
 		F9F4AF3337E9FB1D1EB4EB40 /* Pods-DSHMobileTests.debug.xcconfig */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = text.xcconfig; name = "Pods-DSHMobileTests.debug.xcconfig"; path = "Target Support Files/Pods-DSHMobileTests/Pods-DSHMobileTests.debug.xcconfig"; sourceTree = "<group>"; };
+		FDF43AF166C9C586D3952C9F /* RishTaskWidget.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; name = RishTaskWidget.swift; path = RishTaskActivity/RishTaskWidget.swift; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
 /* Begin PBXFrameworksBuildPhase section */
@@ -174,6 +218,14 @@
 			buildActionMask = 2147483647;
 			files = (
 				0C80B921A6F3F58F76C31292 /* libPods-DSHMobile.a in Frameworks */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		58D7EDD7C8C9972CC8A7ADC6 /* Frameworks */ = {
+			isa = PBXFrameworksBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				4EDBB0B1389437436E93DC36 /* Foundation.framework in Frameworks */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -296,6 +348,14 @@
 				BBD78D7AC51CEA395F1C20DB /* Pods */,
 				1626FED4935CCF1E6723D53C /* DSHMobile.app */,
 				350607EB0AE336315419B120 /* DSHMobileUITests */,
+				48E34B4FE7E4E89A02BC5D5E /* TaskExperience.swift */,
+				C0862762A831629353284454 /* TaskExperienceBridge.m */,
+				9A8ACD2C493DA7F9D27E1886 /* TaskAttributes.swift */,
+				FDF43AF166C9C586D3952C9F /* RishTaskWidget.swift */,
+				9C6ACD833B5CAF1E2B7A52DF /* TaskAlertPolicy.swift */,
+				4F1B5E967FA9B73114469E3F /* TaskAlertPolicyTests.swift */,
+				F2A1F0E39B54A7F9B1B123F6 /* TaskExperienceAcceptance.swift */,
+				59C1824F4EE8C553D062A00B /* CancelTaskIntent.swift */,
 			);
 			indentWidth = 2;
 			sourceTree = "<group>";
@@ -308,6 +368,7 @@
 				13B07F961A680F5B00A75B9A /* DSHMobile.app */,
 				00E356EE1AD99517003FC87E /* DSHMobileTests.xctest */,
 				71DFAAFF78228859B0B14FAA /* DSHMobileUITests.xctest */,
+				857C264E122AD7BCC0209CE1 /* RishTaskActivity.appex */,
 			);
 			name = Products;
 			sourceTree = "<group>";
@@ -316,6 +377,7 @@
 			isa = PBXGroup;
 			children = (
 				83D13607DBF7D23FF1349ED7 /* Foundation.framework */,
+				CA37B0C0CDA024217D4FD37B /* Foundation.framework */,
 			);
 			name = iOS;
 			sourceTree = "<group>";
@@ -374,15 +436,34 @@
 				00DD1BFF1BD5951E006B06BC /* Bundle React Native code and images */,
 				00EEFC60759A1932668264C0 /* [CP] Embed Pods Frameworks */,
 				E235C05ADACE081382539298 /* [CP] Copy Pods Resources */,
+				185BAD42CED5813C3E9EA193 /* Embed App Extensions */,
 			);
 			buildRules = (
 			);
 			dependencies = (
+				506D8AF86E7BB25A3DE47B2F /* PBXTargetDependency */,
 			);
 			name = DSHMobile;
 			productName = DSHMobile;
 			productReference = 13B07F961A680F5B00A75B9A /* DSHMobile.app */;
 			productType = "com.apple.product-type.application";
+		};
+		438B3BB90F586A6C5778F8D3 /* RishTaskActivity */ = {
+			isa = PBXNativeTarget;
+			buildConfigurationList = 9CBDE65048D63D8E79655147 /* Build configuration list for PBXNativeTarget "RishTaskActivity" */;
+			buildPhases = (
+				7A07EFEE31B31B95E9FC147B /* Sources */,
+				58D7EDD7C8C9972CC8A7ADC6 /* Frameworks */,
+				0224674A318C4B0D85A0DD25 /* Resources */,
+			);
+			buildRules = (
+			);
+			dependencies = (
+			);
+			name = RishTaskActivity;
+			productName = RishTaskActivity;
+			productReference = 857C264E122AD7BCC0209CE1 /* RishTaskActivity.appex */;
+			productType = "com.apple.product-type.app-extension";
 		};
 		C4DAFB561CF311B71EDF9602 /* DSHMobileUITests */ = {
 			isa = PBXNativeTarget;
@@ -439,6 +520,7 @@
 				13B07F861A680F5B00A75B9A /* DSHMobile */,
 				00E356ED1AD99517003FC87E /* DSHMobileTests */,
 				C4DAFB561CF311B71EDF9602 /* DSHMobileUITests */,
+				438B3BB90F586A6C5778F8D3 /* RishTaskActivity */,
 			);
 		};
 /* End PBXProject section */
@@ -464,6 +546,13 @@
 				C5F400021AD99517003FC87E /* scenario-a4-session-envelope.json in Resources */,
 				C6F400021AD99517003FC87E /* agent-interrupted-retry-session.json in Resources */,
 				C7F400021AD99517003FC87E /* agent-git-push-conversation-session.json in Resources */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		0224674A318C4B0D85A0DD25 /* Resources */ = {
+			isa = PBXResourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -623,6 +712,8 @@
 				C91A46F4761A4A3EA8F34780 /* CompletionV2StreamTests.mm in Sources */,
 				E7A2B4012C9FC4196B3C00A1 /* ContainerAnchorTests.mm in Sources */,
 				D5E2000000000000000000A4 /* LocalGuestModuleTests.mm in Sources */,
+				2AC1411F79AB1A0E0AE8073C /* TaskAlertPolicy.swift in Sources */,
+				1D87B29625DD6ECC7445D5E9 /* TaskAlertPolicyTests.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -631,6 +722,22 @@
 			buildActionMask = 2147483647;
 			files = (
 				761780ED2CA45674006654EE /* AppDelegate.swift in Sources */,
+				73B2491A82DB4E4F46AF6360 /* TaskExperience.swift in Sources */,
+				6201E4D90D300C22C3AE9A4F /* TaskExperienceBridge.m in Sources */,
+				E499A3C7C97A8E3F11B46FE9 /* TaskAttributes.swift in Sources */,
+				C7D92D6691AE24E183194EC0 /* TaskAlertPolicy.swift in Sources */,
+				8C311F650255DB45BBC37FB5 /* TaskExperienceAcceptance.swift in Sources */,
+				7F276F65A16012BEDA66011E /* CancelTaskIntent.swift in Sources */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		7A07EFEE31B31B95E9FC147B /* Sources */ = {
+			isa = PBXSourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				EA43D9B32991E7951E1FA419 /* TaskAttributes.swift in Sources */,
+				EA26CCDA41946F6D4036D7A1 /* RishTaskWidget.swift in Sources */,
+				14C6BC971FC336AFAC3185DF /* CancelTaskIntent.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -656,6 +763,12 @@
 			name = DSHMobile;
 			target = 13B07F861A680F5B00A75B9A /* DSHMobile */;
 			targetProxy = FA37681CF3B9AA82764C666A /* PBXContainerItemProxy */;
+		};
+		506D8AF86E7BB25A3DE47B2F /* PBXTargetDependency */ = {
+			isa = PBXTargetDependency;
+			name = RishTaskActivity;
+			target = 438B3BB90F586A6C5778F8D3 /* RishTaskActivity */;
+			targetProxy = C97FEBC52AF2E0D8C25CF920 /* PBXContainerItemProxy */;
 		};
 /* End PBXTargetDependency section */
 
@@ -691,6 +804,7 @@
 				PRODUCT_BUNDLE_IDENTIFIER = dev.zseven.dsh.mobile.tests;
 				PRODUCT_NAME = "$(TARGET_NAME)";
 				SUPPORTED_PLATFORMS = "iphoneos iphonesimulator";
+				SWIFT_VERSION = 5.0;
 				TARGETED_DEVICE_FAMILY = "1,2";
 				TEST_HOST = "$(BUILT_PRODUCTS_DIR)/DSHMobile.app/DSHMobile";
 			};
@@ -723,10 +837,30 @@
 				PRODUCT_BUNDLE_IDENTIFIER = dev.zseven.dsh.mobile.tests;
 				PRODUCT_NAME = "$(TARGET_NAME)";
 				SUPPORTED_PLATFORMS = "iphoneos iphonesimulator";
+				SWIFT_VERSION = 5.0;
 				TARGETED_DEVICE_FAMILY = "1,2";
 				TEST_HOST = "$(BUILT_PRODUCTS_DIR)/DSHMobile.app/DSHMobile";
 			};
 			name = Release;
+		};
+		04C8B0921A41957E4B754A43 /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				APPLICATION_EXTENSION_API_ONLY = YES;
+				CLANG_ENABLE_OBJC_WEAK = NO;
+				CODE_SIGN_STYLE = Automatic;
+				GENERATE_INFOPLIST_FILE = NO;
+				INFOPLIST_FILE = RishTaskActivity/Info.plist;
+				IPHONEOS_DEPLOYMENT_TARGET = 16.2;
+				PRODUCT_BUNDLE_IDENTIFIER = dev.zseven.dsh.mobile.taskactivity;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				RISH_EXTENSION_SUFFIX = .taskactivity;
+				SDKROOT = iphoneos;
+				SKIP_INSTALL = YES;
+				SWIFT_VERSION = 5.0;
+				TARGETED_DEVICE_FAMILY = "1,2";
+			};
+			name = Debug;
 		};
 		13B07F941A680F5B00A75B9A /* Debug */ = {
 			isa = XCBuildConfiguration;
@@ -764,10 +898,12 @@
 				);
 				PRODUCT_BUNDLE_IDENTIFIER = dev.zseven.dsh.mobile;
 				PRODUCT_NAME = DSHMobile;
+				RISH_APP_DISPLAY_NAME = Rish;
 				STRIP_INSTALLED_PRODUCT = NO;
 				"STRIP_INSTALLED_PRODUCT[sdk=iphonesimulator*]" = NO;
 				STRIP_SWIFT_SYMBOLS = NO;
 				SUPPORTED_PLATFORMS = "iphoneos iphonesimulator";
+				SWIFT_ACTIVE_COMPILATION_CONDITIONS = "$(inherited) RISH_TASK_HOST";
 				SWIFT_OPTIMIZATION_LEVEL = "-Onone";
 				SWIFT_VERSION = 5.0;
 				TARGETED_DEVICE_FAMILY = "1,2";
@@ -810,10 +946,12 @@
 				);
 				PRODUCT_BUNDLE_IDENTIFIER = dev.zseven.dsh.mobile;
 				PRODUCT_NAME = DSHMobile;
+				RISH_APP_DISPLAY_NAME = Rish;
 				STRIP_INSTALLED_PRODUCT = NO;
 				"STRIP_INSTALLED_PRODUCT[sdk=iphonesimulator*]" = NO;
 				STRIP_SWIFT_SYMBOLS = NO;
 				SUPPORTED_PLATFORMS = "iphoneos iphonesimulator";
+				SWIFT_ACTIVE_COMPILATION_CONDITIONS = "$(inherited) RISH_TASK_HOST";
 				SWIFT_VERSION = 5.0;
 				TARGETED_DEVICE_FAMILY = "1,2";
 				VERSIONING_SYSTEM = "apple-generic";
@@ -991,6 +1129,26 @@
 			};
 			name = Release;
 		};
+		BB2EC7F77C86F68573561B94 /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				APPLICATION_EXTENSION_API_ONLY = YES;
+				CLANG_ENABLE_OBJC_WEAK = NO;
+				CODE_SIGN_STYLE = Automatic;
+				GENERATE_INFOPLIST_FILE = NO;
+				INFOPLIST_FILE = RishTaskActivity/Info.plist;
+				IPHONEOS_DEPLOYMENT_TARGET = 16.2;
+				PRODUCT_BUNDLE_IDENTIFIER = dev.zseven.dsh.mobile.taskactivity;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				RISH_EXTENSION_SUFFIX = .taskactivity;
+				SDKROOT = iphoneos;
+				SKIP_INSTALL = YES;
+				SWIFT_VERSION = 5.0;
+				TARGETED_DEVICE_FAMILY = "1,2";
+				VALIDATE_PRODUCT = YES;
+			};
+			name = Release;
+		};
 		BE15F0966F95DD551330367F /* Debug */ = {
 			isa = XCBuildConfiguration;
 			buildSettings = {
@@ -1041,6 +1199,15 @@
 			buildConfigurations = (
 				83CBBA201A601CBA00E9B192 /* Debug */,
 				83CBBA211A601CBA00E9B192 /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Release;
+		};
+		9CBDE65048D63D8E79655147 /* Build configuration list for PBXNativeTarget "RishTaskActivity" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				BB2EC7F77C86F68573561B94 /* Release */,
+				04C8B0921A41957E4B754A43 /* Debug */,
 			);
 			defaultConfigurationIsVisible = 0;
 			defaultConfigurationName = Release;

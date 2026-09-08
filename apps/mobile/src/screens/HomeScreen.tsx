@@ -1,3 +1,5 @@
+import { withTaskExperience, cancelTaskExperienceRun } from '../taskExperience/controller';
+import { useTaskActions } from '../taskExperience/useTaskActions';
 import { ProviderConfigurations } from '../providers/native';
 import type { ProviderConfiguration } from '../providers/configuration';
 import { RecoveryNotice } from '../components/RecoveryNotice';
@@ -1425,7 +1427,7 @@ export function HomeScreen({
 
   const completionController = useMemo(
     () =>
-      createCompletionController({
+      withTaskExperience(createCompletionController({
         chat: store,
         persistCurrent: () => persistCurrentRef.current(),
         completeRoundV2: request =>
@@ -1499,7 +1501,7 @@ export function HomeScreen({
             required: request.required,
           }),
         now: () => new Date().toISOString(),
-      }),
+      })),
     [agentInteractions, store],
   );
   const [completionState, setCompletionState] =
@@ -3769,6 +3771,19 @@ export function HomeScreen({
     ],
   );
 
+  const openSystemTask = useCallback(async (id: string) => {
+    if (!selectConversationById(store.getState(), id)) return true;
+    if (store.getState().selectedConversationId === id) return true;
+    if (completionBusy(completionState) && completionState.conversationId !== id) return false;
+    if (!rootSurfaceAdmissionAllowed(true)) return false;
+    drawerSurfaceEpoch.current += 1;
+    drawerVisibleRef.current = true;
+    setDrawerVisible(true);
+    await selectConversation(id, drawerSurfaceEpoch.current);
+    return store.getState().selectedConversationId === id;
+  }, [store, rootSurfaceAdmissionAllowed, selectConversation, completionState]);
+
+
   const renameConversation = useCallback(
     (title: string) => {
       if (
@@ -5483,6 +5498,14 @@ export function HomeScreen({
     contextSheetVisible;
   navigationSurfaceVisibleRef.current = navigationSurfaceVisible;
 
+  useTaskActions(
+    navigationSurfaceVisible || contextSheetVisible ? null : chatState.selectedConversationId,
+    openSystemTask,
+    runId => cancelTaskExperienceRun(completionController, runId),
+    lifecycleBootstrapReady && !navigationSurfaceVisible && !contextSheetVisible,
+    locale,
+  );
+
   return (
     <KeyboardAvoidingView
       behavior={Platform.OS === 'ios' ? 'padding' : undefined}
@@ -5866,6 +5889,7 @@ export function HomeScreen({
         onRename={renameConversation}
       />
       <SettingsSheet
+        taskConversationId={chatState.selectedConversationId}
         busy={credentialBusy}
         harnessName={activeHarness.name}
         providerName={providerName}

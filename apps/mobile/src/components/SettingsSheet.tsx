@@ -1,3 +1,4 @@
+import { TaskSettingsCard } from './TaskSettingsCard';
 import { ProviderConfigurationCard } from './ProviderConfigurationCard';
 import type { ConfigurableHarness } from '../providers/configuration';
 import React, { useEffect, useMemo, useState } from 'react';
@@ -47,6 +48,7 @@ import { AppIcon } from './AppIcon';
 import { SlidingSurface } from './SlidingSurface';
 
 type Props = {
+  taskConversationId?: string | null;
   busy: boolean;
   credentialConfigured: boolean;
   harnessName: string;
@@ -158,6 +160,7 @@ export function SettingsSheet(props: Props) {
           keyboardShouldPersistTaps="handled"
           showsVerticalScrollIndicator
         >
+          <TaskSettingsCard conversationId={props.taskConversationId} />
           <SectionLabel label={t('settings.section.appearance')} />
           <SettingCard>
             <SettingHeader
