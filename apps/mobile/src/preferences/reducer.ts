@@ -1,6 +1,6 @@
+import { isDeepSeekModelId } from '../harness/types';
 import {
   APP_PREFERENCES_SCHEMA_VERSION,
-  DEFAULT_MODEL_IDS,
   LOCALE_PREFERENCES,
   MIRROR_CATEGORIES,
   THEME_MODES,
@@ -49,7 +49,6 @@ export const DEFAULT_APP_PREFERENCES: AppPreferences = Object.freeze({
 
 const themes: ReadonlySet<string> = new Set(THEME_MODES);
 const locales: ReadonlySet<string> = new Set(LOCALE_PREFERENCES);
-const models: ReadonlySet<string> = new Set(DEFAULT_MODEL_IDS);
 const thinkingModes: ReadonlySet<string> = new Set(THINKING_MODES);
 const toolPermissionModes: ReadonlySet<string> = new Set(TOOL_PERMISSION_MODES);
 const mirrorCategories: ReadonlySet<string> = new Set(MIRROR_CATEGORIES);
@@ -101,7 +100,7 @@ export function isLocalePreference(value: unknown): value is LocalePreference {
 }
 
 export function isDefaultModelId(value: unknown): value is DefaultModelId {
-  return typeof value === 'string' && models.has(value);
+  return typeof value === 'string' && isDeepSeekModelId(value);
 }
 
 export function isHarnessId(value: unknown): value is string {

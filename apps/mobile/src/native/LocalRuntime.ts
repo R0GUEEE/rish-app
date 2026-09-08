@@ -41,6 +41,7 @@ export type {
 
 export type RuntimeProofChecks = {
   credential_in_keychain: boolean;
+  credential_in_secure_store?: boolean;
   model_response_received: boolean;
   session_restored_after_restart: boolean;
   rish_applet_executed: boolean;
@@ -51,7 +52,7 @@ export type RuntimeProof = {
   product: 'rish';
   active_harness: string;
   mode: 'local_substrate';
-  platform: 'ios_simulator' | 'ios_device';
+  platform: 'ios_simulator' | 'ios_device' | 'android_emulator' | 'android_device';
   bundle_id: string;
   runtime_id: string;
   launch_instance_id: string;
@@ -60,8 +61,8 @@ export type RuntimeProof = {
   proof_run_id?: string;
   container_root: string;
   session_store: string;
-  model_transport: 'url_session';
-  rish_backend: 'portable_applet';
+  model_transport: 'url_session' | 'okhttp';
+  rish_backend: 'portable_applet' | 'unavailable';
   rish_protocol_version: number;
   rish_probe: {
     protocol_version?: number;
@@ -133,7 +134,7 @@ export type RuntimeProof = {
       recorded_at: string;
     }>;
   };
-  mac_dsh_port_3180_reachable: boolean;
+  mac_dsh_port_3180_reachable: boolean | null;
   checks: RuntimeProofChecks;
 };
 

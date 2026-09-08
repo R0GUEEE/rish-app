@@ -79,17 +79,16 @@ static NSString *_Nullable DSHCatalogString(id _Nullable value) {
 }
 
 NSSet<NSString *> *DSHHarnessSupportedModels(void) {
-  static NSSet<NSString *> *models = nil;
-  static dispatch_once_t onceToken;
-  dispatch_once(&onceToken, ^{
-    models = [NSSet setWithArray:DSHCatalogHarnessByModel().allKeys];
-  });
+  NSMutableSet *models = [NSMutableSet setWithArray:DSHCatalogHarnessByModel().allKeys];
+  NSDictionary *catalog = DSHDshModelCatalog();
+  for (NSArray *rows in @[catalog[@"models"] ?: @[], catalog[@"retired_models"] ?: @[]])
+    for (NSDictionary *row in rows) [models addObject:row[@"id"]];
   return models;
 }
 
 BOOL DSHHarnessIsSupportedModel(id value) {
   NSString *model = DSHCatalogString(value);
-  return model != nil && DSHCatalogHarnessByModel()[model] != nil;
+  return model != nil && (DSHCatalogHarnessByModel()[model] != nil || DSHDshModelEntry(model) != nil);
 }
 
 NSSet<NSString *> *DSHHarnessSupportedHarnessIds(void) {
@@ -108,7 +107,7 @@ BOOL DSHHarnessIsSupportedHarnessId(id value) {
 
 NSString *DSHHarnessIdForModel(id model) {
   NSString *key = DSHCatalogString(model);
-  return key == nil ? nil : DSHCatalogHarnessByModel()[key];
+  return key == nil ? nil : (DSHCatalogHarnessByModel()[key] ?: (DSHDshModelEntry(key) ? @"dsh" : nil));
 }
 
 NSSet<NSString *> *DSHHarnessSupportedProviderIds(void) {
@@ -174,4 +173,69 @@ BOOL DSHHarnessIsCredentialAccount(id value) {
 NSString *DSHCredentialAccountForHarnessId(id harnessId) {
   NSString *key = DSHCatalogString(harnessId);
   return key == nil ? nil : DSHCatalogAccountByHarness()[key];
+}
+
+static NSArray *DSHDshDefaultModels(void) {
+  return @[
+    @{@"id": @"deepseek-v4-flash", @"name": @"V4 Flash", @"supports_images": @NO},
+    @{@"id": @"deepseek-v4-pro", @"name": @"V4 Pro", @"supports_images": @NO},
+    @{@"id": @"deepseek-v4-flash-vision-exp", @"name": @"Flash Exp", @"supports_images": @YES},
+  ];
+}
+static NSArray *_Nullable DSHValidateDshModels(id value, BOOL retired) {
+  if (![value isKindOfClass:NSArray.class] || [value count] > (retired ? 256 : 32) || (!retired && [value count] == 0)) return nil;
+  NSMutableSet *seen = [NSMutableSet set];
+  NSMutableArray *result = [NSMutableArray array];
+  NSRegularExpression *pattern = [NSRegularExpression regularExpressionWithPattern:@"^[A-Za-z0-9][A-Za-z0-9._:/-]{0,127}$" options:0 error:nil];
+  for (id row in value) {
+    if (![row isKindOfClass:NSDictionary.class] || [row count] != 3) return nil;
+    NSString *model = row[@"id"], *name = row[@"name"];
+    id images = row[@"supports_images"];
+    if (![model isKindOfClass:NSString.class] || ![name isKindOfClass:NSString.class] ||
+        [pattern numberOfMatchesInString:model options:0 range:NSMakeRange(0, model.length)] != 1 ||
+        [seen containsObject:model] || (DSHCatalogHarnessByModel()[model] && ![DSHCatalogHarnessByModel()[model] isEqual:@"dsh"]) ||
+        ![images isKindOfClass:NSNumber.class] || CFGetTypeID((__bridge CFTypeRef)images) != CFBooleanGetTypeID()) return nil;
+    name = [name stringByTrimmingCharactersInSet:NSCharacterSet.whitespaceAndNewlineCharacterSet];
+    if (name.length < 1 || name.length > 80 || [name rangeOfCharacterFromSet:NSCharacterSet.controlCharacterSet].location != NSNotFound) return nil;
+    [seen addObject:model];
+    [result addObject:@{@"id":model, @"name":name, @"supports_images":images}];
+  }
+  return result;
+}
+NSDictionary *DSHDshModelCatalog(void) {
+  NSDictionary *value = [NSUserDefaults.standardUserDefaults dictionaryForKey:@"rish.dsh-models.v1"];
+  if (!value) return @{@"schema_version":@1, @"models":DSHDshDefaultModels(), @"retired_models":@[]};
+  if (![value[@"schema_version"] isKindOfClass:NSNumber.class] || [value[@"schema_version"] doubleValue] != 1 ||
+      !DSHValidateDshModels(value[@"models"], NO) || !DSHValidateDshModels(value[@"retired_models"], YES)) return nil;
+  return value;
+}
+NSDictionary *DSHDshModelEntry(NSString *model) {
+  NSDictionary *value = DSHDshModelCatalog();
+  for (NSArray *rows in @[value[@"models"] ?: @[], value[@"retired_models"] ?: @[], DSHDshDefaultModels()]) {
+    for (NSDictionary *row in rows) if ([row[@"id"] isEqual:model]) return row;
+  }
+  return nil;
+}
+BOOL DSHDshModelSupportsImages(NSString *model) { return [DSHDshModelEntry(model)[@"supports_images"] boolValue]; }
+NSDictionary *DSHSaveDshModelCatalog(NSDictionary *request) {
+  if (![request isKindOfClass:NSDictionary.class] || request.count != 2 ||
+      ![request[@"schema_version"] isKindOfClass:NSNumber.class] ||
+      CFGetTypeID((__bridge CFTypeRef)request[@"schema_version"]) == CFBooleanGetTypeID() ||
+      [request[@"schema_version"] doubleValue] != 1) return nil;
+  NSArray *models = DSHValidateDshModels(request[@"models"], NO);
+  if (!models) return nil;
+  @synchronized(NSUserDefaults.standardUserDefaults) {
+    NSDictionary *old = DSHDshModelCatalog();
+    if (!old) return nil;
+    NSMutableDictionary *known = [NSMutableDictionary dictionary];
+    for (NSArray *rows in @[DSHDshDefaultModels(), old[@"retired_models"], old[@"models"]])
+      for (NSDictionary *row in rows) known[row[@"id"]] = row;
+    for (NSDictionary *row in models) [known removeObjectForKey:row[@"id"]];
+    if (known.count > 256) return nil;
+    NSMutableArray *retired = [NSMutableArray array];
+    for (NSString *key in [known.allKeys sortedArrayUsingSelector:@selector(compare:)]) [retired addObject:known[key]];
+    NSDictionary *saved = @{@"schema_version":@1, @"models":models, @"retired_models":retired};
+    [NSUserDefaults.standardUserDefaults setObject:saved forKey:@"rish.dsh-models.v1"];
+    return saved;
+  }
 }

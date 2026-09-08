@@ -1,37 +1,36 @@
 package dev.zseven.rish.modules
 
-import com.facebook.react.bridge.Promise
-import com.facebook.react.bridge.ReactApplicationContext
-import com.facebook.react.bridge.ReactContextBaseJavaModule
-import com.facebook.react.bridge.ReactMethod
-import com.facebook.react.bridge.ReadableMap
+import com.facebook.react.bridge.*
 import dev.zseven.rish.RishUnavailable
+import dev.zseven.rish.runtime.AndroidRuntimeState
+import dev.zseven.rish.runtime.RuntimeJson
+import org.json.JSONObject
 
-/**
- * SessionSnapshots — phase-1 Android skeleton.
- *
- * Mirrors the iOS registration in modules/rish/ios/Sources/SessionSnapshotsModule.mm
- * (RCT_EXPORT_MODULE(SessionSnapshots)) and the JS wrapper in
- * apps/mobile/src/native/SessionSnapshots.ts. Every method rejects with the JS-
- * recognized "E_SESSION_NATIVE" unavailable code; no success results are stubbed.
- */
-class SessionSnapshotsModule(reactContext: ReactApplicationContext) :
-    ReactContextBaseJavaModule(reactContext) {
-
-    override fun getName(): String = "SessionSnapshots"
-
-    @ReactMethod
-    fun loadSessionSnapshot(promise: Promise) = RishUnavailable.reject("SessionSnapshots", "E_SESSION_NATIVE", promise)
-
-    @ReactMethod
-    fun casPersistSession(request: ReadableMap?, promise: Promise) = RishUnavailable.reject("SessionSnapshots", "E_SESSION_NATIVE", promise)
-
-    @ReactMethod
-    fun querySessionCommit(request: ReadableMap?, promise: Promise) = RishUnavailable.reject("SessionSnapshots", "E_SESSION_NATIVE", promise)
-
-    @ReactMethod
-    fun persistSessionWithWorkspaceClearance(request: ReadableMap?, promise: Promise) = RishUnavailable.reject("SessionSnapshots", "E_SESSION_NATIVE", promise)
-
-    @ReactMethod
-    fun queryWorkspaceClearance(request: ReadableMap?, promise: Promise) = RishUnavailable.reject("SessionSnapshots", "E_SESSION_NATIVE", promise)
+/** Opaque chat snapshots with atomic CAS. Workspace authority APIs remain unavailable. */
+class SessionSnapshotsModule(react: ReactApplicationContext) : ReactContextBaseJavaModule(react) {
+    private val runtime = AndroidRuntimeState.get(react)
+    override fun getName() = "SessionSnapshots"
+    private fun run(promise: Promise, operation: () -> JSONObject) {
+        runtime.io.execute {
+            try { promise.resolve(Arguments.makeNativeMap(RuntimeJson.map(operation()))) }
+            catch (_: Exception) { promise.reject("E_SESSION_NATIVE", "Session snapshot operation failed") }
+        }
+    }
+    private fun capture(request: ReadableMap?): String {
+        requireNotNull(request)
+        val json = JSONObject(request.toHashMap()).toString()
+        require(json.toByteArray(Charsets.UTF_8).size <= 20 * 1024 * 1024)
+        return json
+    }
+    @ReactMethod fun loadSessionSnapshot(promise: Promise) = run(promise) { runtime.loadSnapshot() }
+    @ReactMethod fun casPersistSession(request: ReadableMap?, promise: Promise) {
+        try { val captured = capture(request); run(promise) { runtime.sessions.persist(JSONObject(captured)) } }
+        catch (_: Exception) { promise.reject("E_SESSION_NATIVE", "Invalid session request") }
+    }
+    @ReactMethod fun querySessionCommit(request: ReadableMap?, promise: Promise) {
+        try { val captured = capture(request); run(promise) { runtime.sessions.query(JSONObject(captured)) } }
+        catch (_: Exception) { promise.reject("E_SESSION_NATIVE", "Invalid session request") }
+    }
+    @ReactMethod fun persistSessionWithWorkspaceClearance(request: ReadableMap?, promise: Promise) = RishUnavailable.reject("SessionSnapshots", "E_SESSION_NATIVE", promise)
+    @ReactMethod fun queryWorkspaceClearance(request: ReadableMap?, promise: Promise) = RishUnavailable.reject("SessionSnapshots", "E_SESSION_NATIVE", promise)
 }

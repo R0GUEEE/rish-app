@@ -5,9 +5,8 @@ import org.junit.Assert.assertTrue
 import org.junit.Test
 
 /**
- * JVM unit-test skeleton for the future module logic: pins the phase-1
- * contract — exactly 11 module names, the same names the JS wrappers probe,
- * and the per-module JS-recognized unavailable codes.
+ * Pins the remaining unsupported Android module names and their
+ * JS-recognized unavailable codes. Runtime and snapshots have device tests.
  *
  * Run with one Gradle command:
  *   ./gradlew :app:testDebugUnitTest
@@ -22,10 +21,8 @@ class RishPackageUnitTest {
         "LocalMirrors" to "E_NATIVE_UNAVAILABLE",
         "LocalProjectContext" to "E_CONTEXT_NATIVE",
         "LocalProjects" to "E_PROJECT_NATIVE",
-        "LocalRuntime" to "E_COMPLETION_NATIVE",
         "LocalWorkspace" to "E_WORKSPACE_UNAVAILABLE",
         "LocalWorkspaces" to "E_WORKSPACE_UNAVAILABLE",
-        "SessionSnapshots" to "E_SESSION_NATIVE",
     )
 
     @Test
@@ -33,8 +30,8 @@ class RishPackageUnitTest {
         assertEquals(
             setOf(
                 "AgentRuntime", "LocalAttachments", "LocalDocuments", "LocalGuest",
-                "LocalMirrors", "LocalProjectContext", "LocalProjects", "LocalRuntime",
-                "LocalWorkspace", "LocalWorkspaces", "SessionSnapshots",
+                "LocalMirrors", "LocalProjectContext", "LocalProjects",
+                "LocalWorkspace", "LocalWorkspaces",
             ),
             unavailableCodes.keys,
         )

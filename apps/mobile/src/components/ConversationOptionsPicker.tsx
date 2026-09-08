@@ -1,5 +1,5 @@
 import React, { useMemo } from 'react';
-import { Modal, Pressable, StyleSheet, Text, View } from 'react-native';
+import { Modal, Pressable, ScrollView, StyleSheet, Text, View, useWindowDimensions } from 'react-native';
 import Check from 'lucide-react-native/icons/check';
 
 import type { Translator } from '../preferences';
@@ -58,19 +58,12 @@ export function ConversationOptionsPicker({
   onSelectModel,
   onSelectThinkingMode,
 }: Props) {
+  const { height } = useWindowDimensions();
   const { colors, t } = useAppPresentation();
   const styles = useMemo(() => createStyles(colors), [colors]);
 
   return (
-    <Modal
-      animationType="fade"
-      onRequestClose={onClose}
-      presentationStyle="overFullScreen"
-      statusBarTranslucent
-      testID="conversation-options-modal"
-      transparent
-      visible={visible}
-    >
+    <Modal visible={visible} onRequestClose={onClose} testID="conversation-options-modal" animationType="fade" presentationStyle="overFullScreen" statusBarTranslucent transparent>
       <View accessibilityViewIsModal style={styles.overlay}>
         <Pressable
           accessibilityLabel={t('options.close')}
@@ -86,10 +79,11 @@ export function ConversationOptionsPicker({
         >
           <View
             accessibilityLabel={t('options.title')}
-            accessibilityRole="dialog"
+            role="dialog"
             style={styles.popover}
             testID="conversation-options-popover"
           >
+            <ScrollView style={{height: Math.min(height * 0.72, (modelsProp ?? ALL_MODELS).length * 80 + 280)}} keyboardShouldPersistTaps="handled">
             <Text style={styles.eyebrow}>{t('model.eyebrow')}</Text>
             <View
               accessibilityLabel={t('model.title')}
@@ -185,6 +179,7 @@ export function ConversationOptionsPicker({
             >
               <Text style={styles.doneText}>{t('common.done')}</Text>
             </Pressable>
+            </ScrollView>
           </View>
         </View>
       </View>

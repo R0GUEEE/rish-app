@@ -69,12 +69,14 @@ export function RuntimeEvidenceSheet({
         ? t('runtime.pending')
         : proof.checks.credential_in_keychain
         ? 'iOS Keychain'
+        : proof.checks.credential_in_secure_store
+        ? 'Android Keystore'
         : t('runtime.missing'),
     ],
     [
       t('runtime.row.model'),
       proof?.checks.model_response_received
-        ? `${proof.model_response?.model ?? t('runtime.received')} · URLSession`
+        ? `${proof.model_response?.model ?? t('runtime.received')} · ${proof.model_transport === 'okhttp' ? 'OkHttp' : 'URLSession'}`
         : t('runtime.pending'),
     ],
     [
@@ -87,7 +89,7 @@ export function RuntimeEvidenceSheet({
     ],
     [
       t('runtime.row.macDsh'),
-      proof === null
+      proof === null || proof.mac_dsh_port_3180_reachable === null
         ? t('runtime.pending')
         : proof.mac_dsh_port_3180_reachable
         ? t('runtime.reachableFail')

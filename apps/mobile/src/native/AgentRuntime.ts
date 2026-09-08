@@ -1,3 +1,5 @@
+import { isHarnessModelId } from '../harness/types';
+import { nativeImplementationAvailable } from './NativeImplementation';
 import { parseProviderBinding } from '../providers/configuration';
 import type { ProviderBinding } from '../providers/configuration';
 import { NativeModules, TurboModuleRegistry } from 'react-native';
@@ -1718,22 +1720,7 @@ function timestamp(value: unknown): value is string {
   return Number.isFinite(parsed) && new Date(parsed).toISOString() === value;
 }
 
-function model(value: unknown): value is HarnessModelId {
-  return (
-    value === 'deepseek-v4-flash' ||
-    value === 'deepseek-v4-pro' ||
-    value === 'deepseek-v4-flash-vision-exp' ||
-    value === 'claude-sonnet-5' ||
-    value === 'claude-opus-5' ||
-    value === 'claude-haiku-4-5-20251001' ||
-    value === 'claude-fable-5-1' ||
-    value === 'gpt-5.6' ||
-    value === 'gpt-5.6-mini' ||
-    value === 'gpt-5.6-nano' ||
-    value === 'GLM-5.3' ||
-    value === 'GLM-5.3-Flash'
-  );
-}
+function model(value: unknown): value is HarnessModelId { return isHarnessModelId(value); }
 
 function harness(value: unknown): value is HarnessId {
   return isHarnessId(value);
@@ -5510,6 +5497,7 @@ function legacyNative(): unknown {
 }
 
 function cachedNativeMethods(value: unknown): NativeAgentRuntimeV2 | null {
+  if (!nativeImplementationAvailable(value)) return null;
   if (typeof value !== 'object' || value === null) return null;
   const object = value as object;
   const cached = nativeMethodCache.get(object);

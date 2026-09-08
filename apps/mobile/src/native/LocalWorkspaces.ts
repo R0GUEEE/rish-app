@@ -1,3 +1,4 @@
+import { nativeImplementationAvailable } from './NativeImplementation';
 import { NativeModules, TurboModuleRegistry } from 'react-native';
 
 export type WorkspaceStatus =
@@ -812,6 +813,7 @@ function requiredNative(): LocalWorkspacesNativeV1 {
 }
 
 function isNative(value: unknown): value is LocalWorkspacesNativeV1 {
+  if (!nativeImplementationAvailable(value)) return false;
   if (typeof value !== 'object' || value === null) return false;
   try {
     // React Native may expose this object through a HostObject. Capability

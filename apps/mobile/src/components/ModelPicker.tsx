@@ -1,5 +1,6 @@
+import { dshModelEntry, DEFAULT_DSH_MODELS } from '../models/catalog';
 import React, { useMemo } from 'react';
-import { Modal, Pressable, StyleSheet, Text, View } from 'react-native';
+import { Modal, Pressable, ScrollView, StyleSheet, Text, View, useWindowDimensions } from 'react-native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import Check from 'lucide-react-native/icons/check';
 
@@ -8,19 +9,7 @@ import type { Translator } from '../preferences';
 import type { ThemePalette } from '../theme';
 import { AppIcon } from './AppIcon';
 
-export type SupportedModel =
-  | 'deepseek-v4-flash'
-  | 'deepseek-v4-pro'
-  | 'deepseek-v4-flash-vision-exp'
-  | 'claude-sonnet-5'
-  | 'claude-opus-5'
-  | 'claude-haiku-4-5-20251001'
-  | 'claude-fable-5-1'
-  | 'gpt-5.6'
-  | 'gpt-5.6-mini'
-  | 'gpt-5.6-nano'
-  | 'GLM-5.3'
-  | 'GLM-5.3-Flash';
+export type SupportedModel = string;
 
 export const modelDetails: Record<
   SupportedModel,
@@ -92,6 +81,8 @@ export function localizedModelDetails(
   model: SupportedModel,
   t: Translator,
 ): { name: string; eyebrow: string; description: string } {
+  const custom = dshModelEntry(model);
+  if (custom && custom.name !== DEFAULT_DSH_MODELS.find(row => row.id === model)?.name) return { name: custom.name, eyebrow: 'DSH', description: model };
   switch (model) {
     case 'deepseek-v4-flash':
       return {
@@ -166,6 +157,7 @@ export function localizedModelDetails(
         description: t('model.glm53flash.description'),
       };
   }
+  return {name: model, eyebrow: '', description: model};
 }
 
 type Props = {
@@ -188,6 +180,7 @@ export function ModelPicker({
   onClose,
   onSelect,
 }: Props) {
+  const { height } = useWindowDimensions();
   const insets = useSafeAreaInsets();
   const { colors, t } = useAppPresentation();
   const styles = useMemo(() => createStyles(colors), [colors]);
@@ -195,15 +188,7 @@ export function ModelPicker({
     modelsProp ?? (Object.keys(modelDetails) as SupportedModel[]);
 
   return (
-    <Modal
-      animationType="fade"
-      onRequestClose={onClose}
-      presentationStyle="overFullScreen"
-      statusBarTranslucent
-      testID="model-picker-modal"
-      transparent
-      visible={visible}
-    >
+    <Modal visible={visible} onRequestClose={onClose} testID="model-picker-modal" animationType="fade" presentationStyle="overFullScreen" statusBarTranslucent transparent>
       <View accessibilityViewIsModal style={styles.overlay}>
         <Pressable
           accessibilityLabel={t('model.closePicker')}
@@ -231,6 +216,7 @@ export function ModelPicker({
             ]}
             testID="model-picker-popover"
           >
+            <ScrollView style={{height: Math.min(height * 0.72, models.length * 80)}} keyboardShouldPersistTaps="handled">
             {models.map((model, index) => {
               const details = localizedModelDetails(model, t);
               const isSelected = model === selected;
@@ -267,6 +253,7 @@ export function ModelPicker({
                 </Pressable>
               );
             })}
+            </ScrollView>
           </View>
         </View>
       </View>

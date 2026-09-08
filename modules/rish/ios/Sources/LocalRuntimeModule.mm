@@ -141,9 +141,7 @@ static void DSHRejectCompletionSchema2(RCTPromiseRejectBlock reject,
 }
 
 static BOOL DSHIsSupportedModel(NSString *model) {
-  return [model isEqualToString:@"deepseek-v4-flash"]
-    || [model isEqualToString:@"deepseek-v4-pro"]
-    || [model isEqualToString:@"deepseek-v4-flash-vision-exp"];
+  return [DSHHarnessIdForModel(model) isEqual:@"dsh"];
 }
 
 static BOOL DSHIsThinkingMode(NSString *mode) {
@@ -1090,7 +1088,7 @@ RCT_EXPORT_MODULE(LocalRuntime)
 
       NSString *kind = DSHString(reference[@"kind"]);
       if ([kind isEqualToString:@"image"]) {
-        if (![model isEqualToString:@"deepseek-v4-flash-vision-exp"]) {
+        if (!DSHDshModelSupportsImages(model)) {
           if (error != nil) {
             *error = DSHLocalRuntimeError(1034, @"Image attachments require Flash Exp");
           }
@@ -1207,7 +1205,7 @@ RCT_EXPORT_MODULE(LocalRuntime)
       attachmentBytes += size;
       NSString *kind = DSHString(reference[@"kind"]);
       if ([kind isEqualToString:@"image"]) {
-        if (![model isEqualToString:@"deepseek-v4-flash-vision-exp"] ||
+        if (!DSHDshModelSupportsImages(model) ||
             payload == nil ||
             payload.length != [manifest[@"size"] unsignedLongLongValue]) {
           if (error != nil) {
@@ -1859,6 +1857,17 @@ static NSString *DSHCredentialPromptPlaceholder(NSString *account) {
     }
   }
   return YES;
+}
+RCT_REMAP_METHOD(dshModelCatalog, dshModelCatalogWithResolver:(RCTPromiseResolveBlock)resolve rejecter:(RCTPromiseRejectBlock)reject) {
+  NSDictionary *value = DSHDshModelCatalog();
+  if (value) resolve(value); else reject(@"E_MODEL_CATALOG", @"E_MODEL_CATALOG", nil);
+}
+RCT_REMAP_METHOD(saveDshModelCatalog, saveDshModelCatalog:(NSDictionary *)request resolver:(RCTPromiseResolveBlock)resolve rejecter:(RCTPromiseRejectBlock)reject) {
+  [DSHSessionWorkspaceCoordinator.sharedCoordinator performAsync:^{
+    if (![self providerConfigurationCanChange]) { reject(@"E_COMPLETION_BUSY", @"E_COMPLETION_BUSY", nil); return; }
+    NSDictionary *value = DSHSaveDshModelCatalog(request);
+    if (value) resolve(value); else reject(@"E_MODEL_CATALOG", @"E_MODEL_CATALOG", nil);
+  }];
 }
 RCT_REMAP_METHOD(providerConfiguration, providerConfigurationForHarness:(NSString *)harness
                  resolver:(RCTPromiseResolveBlock)resolve rejecter:(RCTPromiseRejectBlock)reject) {

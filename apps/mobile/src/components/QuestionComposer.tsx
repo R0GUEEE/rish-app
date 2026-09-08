@@ -74,7 +74,7 @@ export function QuestionComposer({ question, onAnswer, onCancel }: Props) {
       <ComposerViewport>
         <View
           accessibilityLabel={t('agent.questionTitle')}
-          accessibilityRole="dialog"
+          role="dialog"
           style={styles.card}
           testID="question-composer-card"
         >

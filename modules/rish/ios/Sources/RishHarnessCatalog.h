@@ -2,12 +2,17 @@
 
 NS_ASSUME_NONNULL_BEGIN
 
-/// Closed catalog of the built-in Rish Harnesses, the provider models they
+FOUNDATION_EXPORT NSDictionary *_Nullable DSHDshModelCatalog(void);
+FOUNDATION_EXPORT NSDictionary *_Nullable DSHSaveDshModelCatalog(NSDictionary *request);
+FOUNDATION_EXPORT NSDictionary *_Nullable DSHDshModelEntry(NSString *model);
+FOUNDATION_EXPORT BOOL DSHDshModelSupportsImages(NSString *model);
+
+/// Built-in catalog of the built-in Rish Harnesses, the provider models they
 /// serve, and the provider identity recorded on receipts, project-context
 /// consent, and runtime proof. This is the single native mirror of
 /// apps/mobile/src/harness/types.ts; every closed-shape validator resolves
 /// model ids, harness ids, provider ids, and provider hosts through it
-/// instead of carrying its own list. Pure functions only: no I/O, no state.
+/// instead of carrying its own list. DSH model identities additionally use the device model catalog.
 
 /// These functions describe built-in logical model slots and official defaults.
 /// A custom request's actual endpoint/model identity is its immutable

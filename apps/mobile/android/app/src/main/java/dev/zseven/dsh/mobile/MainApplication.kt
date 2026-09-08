@@ -12,12 +12,11 @@ class MainApplication : Application(), ReactApplication {
   override val reactHost: ReactHost by lazy {
     getDefaultReactHost(
       context = applicationContext,
+      useDevSupport = BuildConfig.DEBUG && !BuildConfig.RISH_STANDALONE,
       packageList =
         PackageList(this).packages.apply {
-          // Phase-1 Android bring-up: register the Rish native package that
-          // mirrors the 11 iOS modules (modules/rish/ios/Sources). Every method
-          // rejects with its JS-recognized "native unavailable" code so the
-          // capability probes in apps/mobile/src/native/*.ts stay honest.
+          // Task alerts have a native implementation. Runtime/workspace
+          // modules still reject unavailable capabilities explicitly.
           add(dev.zseven.rish.RishNativePackage())
         },
     )
@@ -25,6 +24,7 @@ class MainApplication : Application(), ReactApplication {
 
   override fun onCreate() {
     super.onCreate()
+    dev.zseven.rish.tasks.TaskExperience.initialize(this)
     loadReactNative(this)
   }
 }

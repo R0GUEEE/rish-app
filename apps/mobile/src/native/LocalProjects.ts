@@ -1,3 +1,4 @@
+import { nativeImplementationAvailable } from './NativeImplementation';
 import { NativeModules } from 'react-native';
 
 import {
@@ -1287,6 +1288,7 @@ function legacyProjectListing(value: unknown): LocalProjectListing {
 }
 
 function hasNativeCapabilities(value: unknown): value is NativeLocalProjects {
+  if (!nativeImplementationAvailable(value)) return false;
   if (typeof value !== 'object' || value === null) return false;
   const candidate = value as Partial<
     Record<keyof NativeLocalProjects, unknown>
@@ -1315,6 +1317,7 @@ function required(): NativeLocalProjects {
 }
 
 function hasV2Capabilities(value: unknown): value is NativeLocalProjects {
+  if (!nativeImplementationAvailable(value)) return false;
   try {
     if (typeof value !== 'object' || value === null) return false;
     const row = value as Partial<NativeLocalProjects>;

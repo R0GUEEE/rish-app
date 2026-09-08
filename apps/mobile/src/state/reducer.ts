@@ -1,3 +1,4 @@
+import { isHarnessModelId } from '../harness/types';
 import { providerHostMatches, parseProviderBinding } from '../providers/configuration';
 import {
   AGENT_FAILURE_CODES,
@@ -12,7 +13,6 @@ import {
   COMPLETION_ROUND_RECEIPT_SCHEMA_VERSION,
   CONVERSATION_THINKING_MODES,
   CONVERSATION_TURN_SCHEMA_VERSION,
-  SUPPORTED_MODEL_IDS,
   TURN_ATTEMPT_STATUSES,
   TURN_ATTEMPT_SCHEMA_VERSION,
   PROJECT_CONTEXT_DESTRUCTIVE_TRANSITION_SCHEMA_VERSION,
@@ -115,7 +115,6 @@ export const MAX_PROJECT_CONTEXT_SNAPSHOT_REFERENCE_ROWS = 1024;
 export const MAX_WORKSPACE_AUTHORITY_OUTBOX_ENTRIES = 16;
 const MAX_PROJECT_CONTEXT_SNAPSHOT_REFERENCE_SCAN = 100_000;
 
-const supportedModels: ReadonlySet<string> = new Set(SUPPORTED_MODEL_IDS);
 const thinkingModes: ReadonlySet<string> = new Set(CONVERSATION_THINKING_MODES);
 const attachmentKinds: ReadonlySet<string> = new Set(ATTACHMENT_KINDS);
 const finishReasons: ReadonlySet<string> = new Set(COMPLETION_FINISH_REASONS);
@@ -470,7 +469,7 @@ export function createEmptyChatState(): ChatState {
 }
 
 export function isModelId(value: unknown): value is ModelId {
-  return typeof value === 'string' && supportedModels.has(value);
+  return typeof value === 'string' && isHarnessModelId(value);
 }
 
 export function isConversationThinkingMode(

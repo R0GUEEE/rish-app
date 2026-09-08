@@ -1,3 +1,6 @@
+import { DshModelCatalogCard } from './DshModelCatalogCard';
+import { getDshCatalog, subscribeDshCatalog } from '../models/catalog';
+import { useSyncExternalStore } from 'react';
 import { TaskSettingsCard } from './TaskSettingsCard';
 import { ProviderConfigurationCard } from './ProviderConfigurationCard';
 import type { ConfigurableHarness } from '../providers/configuration';
@@ -35,7 +38,6 @@ import type { LucideIcon } from 'lucide-react-native';
 
 import {
   normalizeGitHttpsProxyUrl,
-  type DefaultModelId,
   type LocalePreference,
   type ThemeMode,
   type ToolPermissionMode,
@@ -71,6 +73,7 @@ type Props = {
 };
 
 export function SettingsSheet(props: Props) {
+  const dshCatalog = useSyncExternalStore(subscribeDshCatalog, getDshCatalog);
   const insets = useSafeAreaInsets();
   const { colors, preferences, store, t } = useAppPresentation();
   const styles = useMemo(() => createStyles(colors), [colors]);
@@ -197,6 +200,7 @@ export function SettingsSheet(props: Props) {
           <SectionLabel
             label={t('settings.section.harness', { harness: props.harnessName })}
           />
+          <DshModelCatalogCard model={props.model} disabled={props.busy} visible={props.visible} />
           <ProviderConfigurationCard model={props.model} disabled={props.busy}
             visible={props.visible} onSaved={harness => props.onProviderConfigurationChanged?.(harness)} />
           <SettingCard>
@@ -300,15 +304,16 @@ export function SettingsSheet(props: Props) {
               icon={Sparkles}
               title={t('settings.defaultModel')}
             />
-            <SegmentedControl<DefaultModelId>
-              options={[
-                ['deepseek-v4-flash', t('model.flash.name')],
-                ['deepseek-v4-pro', t('model.pro.name')],
-                ['deepseek-v4-flash-vision-exp', t('model.vision.shortName')],
-              ]}
-              selected={preferences.defaultModel}
-              onSelect={value => update(() => store.setDefaultModel(value))}
-            />
+            <View style={{gap: 8}}>
+              {dshCatalog.models.map(entry => <Pressable key={entry.id} accessibilityRole="radio"
+                accessibilityState={{checked: preferences.defaultModel === entry.id}}
+                onPress={() => update(() => store.setDefaultModel(entry.id))}
+                style={{paddingVertical: 12, paddingHorizontal: 14, borderWidth: 1, borderRadius: 10, borderColor: colors.line}}>
+                <Text style={{color: preferences.defaultModel === entry.id ? colors.text : colors.textDim}}>
+                  {preferences.defaultModel === entry.id ? '● ' : '○ '}{modelName(entry.id)}
+                </Text>
+              </Pressable>)}
+            </View>
             <Divider />
             <ToggleRow
               description={t('settings.showReasoning.description')}

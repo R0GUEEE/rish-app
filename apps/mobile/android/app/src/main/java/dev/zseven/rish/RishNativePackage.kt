@@ -17,8 +17,8 @@ import dev.zseven.rish.modules.LocalWorkspacesModule
 import dev.zseven.rish.modules.SessionSnapshotsModule
 
 /**
- * Registers the 11 iOS-mirrored native modules for the phase-1 Android
- * skeleton.
+ * Registers the Android task-experience service and the 11 iOS-mirrored
+ * runtime modules that remain unavailable until their implementations land.
  *
  * Bridge decision (documented for the architecture review): the app runs RN
  * 0.87 with newArchEnabled=true (apps/mobile/android/gradle.properties), and
@@ -33,6 +33,7 @@ import dev.zseven.rish.modules.SessionSnapshotsModule
 class RishNativePackage : ReactPackage {
     override fun createNativeModules(reactContext: ReactApplicationContext): List<NativeModule> =
         listOf(
+            dev.zseven.rish.tasks.TaskExperienceModule(reactContext),
             AgentRuntimeModule(reactContext),
             LocalAttachmentsModule(reactContext),
             LocalDocumentsModule(reactContext),

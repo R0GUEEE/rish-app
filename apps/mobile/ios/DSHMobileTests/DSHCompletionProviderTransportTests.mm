@@ -1,3 +1,4 @@
+#import "../../../../modules/rish/ios/Sources/RishHarnessCatalog.h"
 #import <XCTest/XCTest.h>
 
 #import "../../../../modules/rish/ios/Sources/DSHCompletionProviderTransport.h"
@@ -86,6 +87,30 @@ willPerformHTTPRedirection:(__unused NSHTTPURLResponse *)response
 @end
 
 @implementation DSHCompletionProviderTransportTests
+- (void)testDshModelCatalogRegistersAndRetiresProviderIdentity {
+  NSUserDefaults *defaults = NSUserDefaults.standardUserDefaults;
+  id previous = [defaults objectForKey:@"rish.dsh-models.v1"];
+  @try {
+    [defaults removeObjectForKey:@"rish.dsh-models.v1"];
+    NSDictionary *initial = DSHDshModelCatalog();
+    NSMutableArray *models = [initial[@"models"] mutableCopy];
+    NSString *model = @"catalog-fixture-vNext";
+    XCTAssertFalse(DSHHarnessIsSupportedModel(model));
+    [models addObject:@{@"id":model, @"name":@"Future model", @"supports_images":@YES}];
+    XCTAssertNotNil(DSHSaveDshModelCatalog(@{@"schema_version":@1, @"models":models}));
+    XCTAssertEqualObjects(DSHHarnessIdForModel(model), @"dsh");
+    XCTAssertEqualObjects(DSHProviderHostForModel(model), @"api.deepseek.com");
+    XCTAssertTrue(DSHDshModelSupportsImages(model));
+    XCTAssertNotNil(DSHSaveDshModelCatalog(@{@"schema_version":@1, @"models":initial[@"models"]}));
+    XCTAssertTrue(DSHHarnessIsSupportedModel(model));
+    XCTAssertEqual([DSHDshModelCatalog()[@"retired_models"] count], 1u);
+    XCTAssertNil(DSHSaveDshModelCatalog(@{@"schema_version":@1, @"models":@[@{@"id":@"gpt-5.6", @"name":@"Wrong provider", @"supports_images":@NO}]}));
+  } @finally {
+    if (previous) [defaults setObject:previous forKey:@"rish.dsh-models.v1"];
+    else [defaults removeObjectForKey:@"rish.dsh-models.v1"];
+  }
+}
+
 
 static NSString *const DSHTransportRoundId =
     @"33333333-3333-4333-8333-333333333333";

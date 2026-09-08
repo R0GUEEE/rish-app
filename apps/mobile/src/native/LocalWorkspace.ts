@@ -1,3 +1,4 @@
+import { nativeImplementationAvailable } from './NativeImplementation';
 import { NativeModules } from 'react-native';
 
 import {
@@ -768,6 +769,7 @@ function parseTool(
 }
 
 function hasNativeCapabilities(value: unknown): value is NativeLocalWorkspace {
+  if (!nativeImplementationAvailable(value)) return false;
   if (typeof value !== 'object' || value === null) return false;
   const candidate = value as Partial<
     Record<keyof NativeLocalWorkspace, unknown>

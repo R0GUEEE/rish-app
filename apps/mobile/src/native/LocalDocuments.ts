@@ -1,3 +1,4 @@
+import { nativeImplementationAvailable } from './NativeImplementation';
 import { NativeModules } from 'react-native';
 
 import {
@@ -472,6 +473,7 @@ function encodeOperationCleanup(
 }
 
 function hasNativeCapabilities(value: unknown): value is NativeLocalDocuments {
+  if (!nativeImplementationAvailable(value)) return false;
   if (typeof value !== 'object' || value === null) return false;
   const candidate = value as Partial<
     Record<keyof NativeLocalDocuments, unknown>

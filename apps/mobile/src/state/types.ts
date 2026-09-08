@@ -221,7 +221,7 @@ export const ATTEMPT_FAILURE_CODES = [
   'E_COMPLETION_CONTENT_FILTER',
 ] as const;
 
-export type ModelId = (typeof SUPPORTED_MODEL_IDS)[number];
+export type ModelId = import("../harness/types").HarnessModelId;
 export type ConversationThinkingMode =
   (typeof CONVERSATION_THINKING_MODES)[number];
 export type ChatRole = 'user' | 'assistant';

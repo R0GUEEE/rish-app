@@ -1,3 +1,4 @@
+import { isRegisteredDshModel } from '../models/catalog';
 export const HARNESS_MANIFEST_SCHEMA_VERSION = 1 as const;
 
 export const HARNESS_IDS = ['dsh', 'claude-code', 'codex', 'glm'] as const;
@@ -15,12 +16,12 @@ export const DEEPSEEK_MODEL_IDS = [
   'deepseek-v4-pro',
   'deepseek-v4-flash-vision-exp',
 ] as const;
-export type DeepSeekModelId = (typeof DEEPSEEK_MODEL_IDS)[number];
+export type DeepSeekModelId = string;
 
 export function isDeepSeekModelId(value: unknown): value is DeepSeekModelId {
   return (
     typeof value === 'string' &&
-    (DEEPSEEK_MODEL_IDS as readonly string[]).includes(value)
+    isRegisteredDshModel(value)
   );
 }
 
@@ -67,7 +68,7 @@ export const PROVIDER_MODEL_IDS = [
 export function isHarnessModelId(value: unknown): value is HarnessModelId {
   return (
     typeof value === 'string' &&
-    (PROVIDER_MODEL_IDS as readonly string[]).includes(value)
+    ((PROVIDER_MODEL_IDS as readonly string[]).includes(value) || isRegisteredDshModel(value))
   );
 }
 
@@ -112,7 +113,7 @@ export function isProviderHost(value: unknown): value is ProviderHost {
 }
 
 export function harnessForModel(model: HarnessModelId): HarnessId {
-  if ((DEEPSEEK_MODEL_IDS as readonly string[]).includes(model)) return 'dsh';
+  if (isRegisteredDshModel(model)) return 'dsh';
   if ((CLAUDE_MODEL_IDS as readonly string[]).includes(model)) {
     return 'claude-code';
   }

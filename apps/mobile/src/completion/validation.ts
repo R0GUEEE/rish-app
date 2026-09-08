@@ -1,3 +1,5 @@
+import { dshModelSupportsImages } from '../models/catalog';
+import { isHarnessModelId } from '../harness/types';
 import { parseProviderBinding } from '../providers/configuration';
 import type {
   HarnessId,
@@ -5,7 +7,6 @@ import type {
   ProviderId,
 } from '../harness/types';
 import {
-  PROVIDER_MODEL_IDS,
   harnessForModel,
   isHarnessId,
   isProviderId,
@@ -132,7 +133,6 @@ const SHA256_PATTERN = /^[0-9a-f]{64}$/;
 const OPAQUE_ID_PATTERN = /^[A-Za-z0-9._:-]+$/;
 const TOOL_NAME_PATTERN = /^[A-Za-z0-9_-]+$/;
 
-const MODELS: ReadonlySet<string> = new Set(PROVIDER_MODEL_IDS);
 const THINKING_MODES: ReadonlySet<string> = new Set(['off', 'high', 'max']);
 const FINISH_REASONS: ReadonlySet<string> = new Set([
   'stop',
@@ -382,7 +382,7 @@ function validToolName(value: unknown): value is string {
 }
 
 function validModel(value: unknown): value is HarnessModelId {
-  return typeof value === 'string' && MODELS.has(value);
+  return typeof value === 'string' && isHarnessModelId(value);
 }
 
 function validHarnessId(value: unknown): value is HarnessId {
@@ -551,7 +551,7 @@ function projectVisibleHistory(
       if (
         attachment.size > MAX_ATTACHMENT_BYTES - totalAttachmentBytes ||
         (attachment.kind === 'image' &&
-          model !== 'deepseek-v4-flash-vision-exp')
+          !dshModelSupportsImages(model))
       ) {
         fail('E_COMPLETION_HISTORY');
       }

@@ -197,7 +197,7 @@ export function ApprovalComposer({ requests, onDecide }: Props) {
               ? t('agent.approvalBatchTitle', { count: requests.length })
               : t('agent.approvalTitle')
           }
-          accessibilityRole="dialog"
+          role="dialog"
           style={styles.card}
           testID="approval-composer-card"
         >

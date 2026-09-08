@@ -425,7 +425,7 @@ export function WorkspacePickerSheet({
         >
           <View
             accessibilityLabel={t('workspaces.title')}
-            accessibilityRole="dialog"
+            role="dialog"
             style={[
               styles.sheet,
               { maxHeight: Math.round(windowHeight * 0.78) },

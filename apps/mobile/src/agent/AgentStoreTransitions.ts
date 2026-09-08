@@ -47,7 +47,7 @@ import type {
   AgentRuntimeFailureCode,
 } from '../native/AgentRuntime';
 import { agentTextSHA256 } from '../completion/SessionPersistence';
-import { HARNESS_IDS, PROVIDER_MODEL_IDS } from '../harness/types';
+import { HARNESS_IDS, isHarnessModelId } from '../harness/types';
 
 export type AgentStoreOperation =
   | 'prepare_agent_attempt'
@@ -419,7 +419,7 @@ function validHarnessId(value: unknown): value is string {
 function validProviderModel(value: unknown): value is string {
   return (
     typeof value === 'string' &&
-    (PROVIDER_MODEL_IDS as readonly string[]).includes(value)
+    isHarnessModelId(value)
   );
 }
 

@@ -1,3 +1,4 @@
+import { getDshCatalog } from '../models/catalog';
 import { parseProviderBinding, providerHostMatches, providerRecordKeys } from '../providers/configuration';
 import {
   PROVIDER_MODEL_IDS,
@@ -350,7 +351,7 @@ function manifest(value: unknown): ProjectContextManifestV1 | null {
   const model = enumValue<ProjectContextManifestV1['model']>(
     raw.model,
     '$.manifest.model',
-    harnessModels,
+    new Set([...harnessModels, ...getDshCatalog().models.map(m => m.id), ...getDshCatalog().retired_models.map(m => m.id)]),
   );
   if (!providerHostMatches(model, raw.provider_host, raw.provider_configuration)) {
     return invalid(

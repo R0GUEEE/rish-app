@@ -1,3 +1,4 @@
+import { getDshCatalog } from '../models/catalog';
 import type { HarnessManifest } from './types';
 import { createHarnessRegistry } from './registry';
 
@@ -18,23 +19,7 @@ export const DSH_HARNESS: HarnessManifest = {
       secret: true,
     },
   ],
-  models: [
-    {
-      id: 'deepseek-v4-flash',
-      name: 'V4 Flash',
-      inputModalities: ['text'],
-    },
-    {
-      id: 'deepseek-v4-pro',
-      name: 'V4 Pro',
-      inputModalities: ['text'],
-    },
-    {
-      id: 'deepseek-v4-flash-vision-exp',
-      name: 'Flash Exp',
-      inputModalities: ['text', 'image'],
-    },
-  ],
+  get models() { return getDshCatalog().models.map(m => ({ id: m.id, name: m.name, inputModalities: m.supports_images ? ['text', 'image'] as const : ['text'] as const })); },
 };
 
 export const CLAUDE_CODE_HARNESS: HarnessManifest = {

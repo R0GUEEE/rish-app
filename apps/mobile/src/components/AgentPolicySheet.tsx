@@ -181,7 +181,7 @@ export function AgentPolicySheet({
         <View pointerEvents="box-none" style={styles.anchor}>
           <View
             accessibilityLabel={t('agent.policy.title')}
-            accessibilityRole="dialog"
+            role="dialog"
             style={styles.card}
             testID="agent-policy-card"
           >

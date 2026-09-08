@@ -6,6 +6,23 @@ import com.facebook.react.defaults.DefaultNewArchitectureEntryPoint.fabricEnable
 import com.facebook.react.defaults.DefaultReactActivityDelegate
 
 class MainActivity : ReactActivity() {
+  override fun onCreate(savedInstanceState: android.os.Bundle?) {
+    super.onCreate(savedInstanceState)
+    if (savedInstanceState == null) dev.zseven.rish.tasks.TaskExperience.open(intent)
+  }
+  override fun onNewIntent(intent: android.content.Intent) {
+    super.onNewIntent(intent)
+    dev.zseven.rish.tasks.TaskExperience.open(intent)
+  }
+  override fun onResume() {
+    super.onResume()
+    dev.zseven.rish.tasks.TaskExperience.resume()
+  }
+  override fun onStop() {
+    dev.zseven.rish.tasks.TaskExperience.pause()
+    super.onStop()
+  }
+
 
   /**
    * Returns the name of the main component registered from JavaScript. This is used to schedule

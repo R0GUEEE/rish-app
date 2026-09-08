@@ -1,3 +1,6 @@
+import { isHarnessModelId } from '../harness/types';
+import { getDshCatalog, subscribeDshCatalog, dshModelSupportsImages } from '../models/catalog';
+import { useSyncExternalStore } from 'react';
 import { withTaskExperience, cancelTaskExperienceRun } from '../taskExperience/controller';
 import { useTaskActions } from '../taskExperience/useTaskActions';
 import { ProviderConfigurations } from '../providers/native';
@@ -45,7 +48,6 @@ import { HarnessPicker } from '../components/HarnessPicker';
 import type { StructuredBlock } from '../components/StructuredContent';
 import {
   ModelPicker,
-  modelDetails,
   type SupportedModel,
 } from '../components/ModelPicker';
 import { LocalWorkspaces } from '../native/LocalWorkspaces';
@@ -787,6 +789,7 @@ export function HomeScreen({
   const activeHarnessIdRef = useRef(activeHarnessId);
   activeHarnessIdRef.current = activeHarnessId;
   const activeAdapter = getHarnessAdapter(activeHarnessId);
+  const dshCatalog = useSyncExternalStore(subscribeDshCatalog, getDshCatalog);
   const [providerConfigurationRevision, setProviderConfigurationRevision] = useState(0);
   const [providerOverride, setProviderOverride] = useState<ProviderConfiguration | null>(null);
   useEffect(() => {
@@ -809,12 +812,12 @@ export function HomeScreen({
     credentialHarnessId === activeHarnessId && credentialConfiguredValue;
   const activeModels = useMemo(
     () =>
-      activeHarness.models
+      (activeHarness.id === "dsh" ? dshCatalog.models : activeHarness.models)
         .map(model => model.id)
         .filter((id): id is SupportedModel =>
-          (Object.keys(modelDetails) as string[]).includes(id),
+          isHarnessModelId(id),
         ),
-    [activeHarness],
+    [activeHarness, dshCatalog],
   );
 
   useEffect(() => store.subscribe(setChatState), [store]);
@@ -2345,7 +2348,7 @@ export function HomeScreen({
   ]);
   const runtimeLocal =
     proof !== null &&
-    proof.checks.credential_in_keychain &&
+    (proof.checks.credential_in_keychain || proof.checks.credential_in_secure_store === true) &&
     proof.checks.rish_applet_executed &&
     !proof.mac_dsh_port_3180_reachable;
   const runtimeLabel = runtimeChecking
@@ -2354,10 +2357,14 @@ export function HomeScreen({
     ? t('home.localAdapterUnavailable')
     : !credentialConfigured
     ? t('settings.credential.notConfigured')
+    : runtimeFailure !== null
+    ? t('runtime.status.failed')
     : proof?.mac_dsh_port_3180_reachable
     ? t('runtime.status.proxyDetected')
     : runtimeLocal
     ? t('runtime.status.verified')
+    : proof?.platform?.startsWith('android')
+    ? t(proof.checks.model_response_received ? 'runtime.status.chatReadyToolsPending' : 'runtime.status.chatConfiguredToolsPending')
     : t('runtime.status.incomplete');
   const runtimeStatus: RuntimeVerificationStatus = runtimeChecking
     ? 'checking'
@@ -2827,11 +2834,11 @@ export function HomeScreen({
     let visionModelChanged = false;
     if (
       historyNeedsVision &&
-      beforeAppend?.modelId !== 'deepseek-v4-flash-vision-exp'
+      !dshModelSupportsImages(beforeAppend?.modelId ?? '')
     ) {
       visionModelChanged = changeConversationModel(
         conversationId,
-        'deepseek-v4-flash-vision-exp',
+        imageHarness!.models.find(entry => entry.inputModalities.includes('image'))!.id,
         'send_image_guard',
       );
       if (visionModelChanged) {

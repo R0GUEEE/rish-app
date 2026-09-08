@@ -1,3 +1,5 @@
+import { isHarnessModelId } from '../harness/types';
+import { nativeImplementationAvailable } from './NativeImplementation';
 import { parseProviderBinding, providerHostMatches, providerRecordKeys } from '../providers/configuration';
 import { NativeModules } from 'react-native';
 
@@ -30,7 +32,6 @@ import {
 } from '../project-context/types';
 import type { HarnessModelId } from './LocalRuntime';
 import {
-  PROVIDER_MODEL_IDS,
   isProviderId,
   providerForModel,
   type ProviderHost,
@@ -73,7 +74,6 @@ const knownCodes: ReadonlySet<string> = new Set([
 const omissionReasons: ReadonlySet<string> = new Set(
   PROJECT_CONTEXT_OMISSION_REASONS,
 );
-const models: ReadonlySet<string> = new Set(PROVIDER_MODEL_IDS);
 const gitStates: ReadonlySet<string> = new Set([
   'unchanged',
   'staged',
@@ -459,7 +459,7 @@ function projectSelection(value: unknown): ProjectContextSelectionV1 {
     !canonicalUUID(row.conversation_id) ||
     !isProviderId(row.provider) ||
     typeof row.model !== 'string' ||
-    !models.has(row.model) ||
+    !isHarnessModelId(row.model) ||
     providerForModel(row.model as HarnessModelId) !== row.provider ||
     row.policy !== 'chat-read-v1'
   ) {
@@ -590,7 +590,7 @@ function projectManifest(
     row.policy_version !== 'chat-read-v1.0.0' ||
     typeof row.provider_host !== 'string' ||
     typeof row.model !== 'string' ||
-    !models.has(row.model) ||
+    !isHarnessModelId(row.model) ||
     !providerHostMatches(row.model as HarnessModelId, row.provider_host, row.provider_configuration) ||
     !nonNegativeInteger(row.context_bytes, 256 * 1024) ||
     row.context_bytes < 1 ||
@@ -913,7 +913,7 @@ function projectManifestV2(
     (expectedConversationId !== undefined &&
       row.conversation_id !== expectedConversationId) ||
     typeof row.model_id !== 'string' ||
-    !models.has(row.model_id) ||
+    !isHarnessModelId(row.model_id) ||
     (expectedModel !== undefined && row.model_id !== expectedModel) ||
     row.policy !== 'chat-read-v1' ||
     typeof row.clean !== 'boolean' ||
@@ -1086,6 +1086,7 @@ function currentNative(): unknown {
 }
 
 function hasCapabilities(value: unknown): value is NativeLocalProjectContext {
+  if (!nativeImplementationAvailable(value)) return false;
   try {
     if (typeof value !== 'object' || value === null) return false;
     const row = value as Partial<Record<keyof NativeLocalProjectContext, unknown>>;
@@ -1113,6 +1114,7 @@ function required(): NativeLocalProjectContext {
 }
 
 function hasV2Capabilities(value: unknown): value is NativeLocalProjectContext {
+  if (!nativeImplementationAvailable(value)) return false;
   try {
     if (typeof value !== 'object' || value === null) return false;
     const row = value as Partial<NativeLocalProjectContext>;
@@ -1332,7 +1334,7 @@ export const LocalProjectContext = {
         row.schema_version !== 2 ||
         !canonicalUUID(row.conversation_id) ||
         typeof row.model_id !== 'string' ||
-        !models.has(row.model_id) ||
+        !isHarnessModelId(row.model_id) ||
         row.policy !== 'chat-read-v1'
       ) {
         fail('E_CONTEXT_REQUEST_INVALID');
@@ -1492,7 +1494,7 @@ export const LocalProjectContext = {
         !canonicalUUID(row.consent_receipt_id) ||
         !canonicalUUID(row.conversation_id) ||
         typeof row.model_id !== 'string' ||
-        !models.has(row.model_id) ||
+        !isHarnessModelId(row.model_id) ||
         row.policy !== 'chat-read-v1'
       ) {
         fail('E_CONTEXT_REQUEST_INVALID');

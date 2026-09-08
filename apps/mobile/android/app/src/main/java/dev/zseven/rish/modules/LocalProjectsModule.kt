@@ -18,6 +18,8 @@ import dev.zseven.rish.RishUnavailable
 class LocalProjectsModule(reactContext: ReactApplicationContext) :
     ReactContextBaseJavaModule(reactContext) {
 
+    override fun getConstants(): MutableMap<String, Any> = mutableMapOf("implemented" to false)
+
     override fun getName(): String = "LocalProjects"
 
     @ReactMethod

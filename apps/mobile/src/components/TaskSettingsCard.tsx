@@ -1,6 +1,7 @@
 import React, { useEffect, useState } from 'react';
 import {
   AppState,
+  Platform,
   Pressable,
   StyleSheet,
   Switch,
@@ -80,7 +81,13 @@ export function TaskSettingsCard({
     ],
     [
       'liveActivity',
-      zh ? '灵动岛与锁屏状态' : 'Live Activities',
+      Platform.OS === 'android'
+        ? zh
+          ? '常驻任务通知'
+          : 'Ongoing task notification'
+        : zh
+        ? '灵动岛与锁屏状态'
+        : 'Live Activities',
       zh
         ? '显示当前阶段与耗时，不显示消息正文'
         : 'Show stage and elapsed time, without message content',

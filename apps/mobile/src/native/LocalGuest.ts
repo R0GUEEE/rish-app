@@ -1,3 +1,4 @@
+import { nativeImplementationAvailable } from './NativeImplementation';
 import { NativeModules } from 'react-native';
 
 export type GuestBootReceipt = {
@@ -92,6 +93,7 @@ type NativeLocalGuest = {
 const native: unknown = NativeModules.LocalGuest;
 
 function hasNativeCapabilities(value: unknown): value is NativeLocalGuest {
+  if (!nativeImplementationAvailable(value)) return false;
   if (typeof value !== 'object' || value === null) return false;
   const candidate = value as Partial<NativeLocalGuest>;
   return (

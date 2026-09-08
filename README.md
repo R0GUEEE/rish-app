@@ -175,9 +175,43 @@ For Android UI development:
 npm run android
 ```
 
-Android currently compiles the shared React Native UI but fails closed for
-local runtime/workspace operations because Android KeyStore, model transport,
-session persistence, and rish native bindings have not been implemented.
+Android task alerts, per-conversation mute, and user-started foreground-service
+lifecycle are implemented and have scoped emulator tests. Android uses an
+ongoing notification instead of iOS Live Activities. These checks do not prove
+model, file/Git, or Agent execution.
+
+Android now supports pure-text API chat through native OkHttp, Android Keystore
+encrypted credentials, scoped custom-provider profiles, and atomic SQLite session
+snapshots. API33 emulator checks cover DSH, GLM, GLM-backed Codex/Claude Code
+profiles, and UI send/save/reopen without replay. Those profiles test API adapters,
+not the official CLI harnesses or subscription login. Attachments, project context,
+file/Git, Agent execution, and rish JNI remain unavailable; runtime status honestly
+reports incomplete. Debug UI uses Metro; standalone Release and physical Android
+device acceptance remain pending.
+
+For temporary Android compatibility-container testing, build a self-contained
+debug-signed APK with bundled JS and developer-server support disabled:
+
+```sh
+apps/mobile/android/gradlew -p apps/mobile/android :app:assembleDebug -PrishStandalone=true -PreactNativeArchitectures=arm64-v8a
+```
+
+This remains a test build, not a production-signed release. Its launcher was
+checked on the API33 emulator with airplane mode enabled; HarmonyOS compatibility
+container installation and execution require a separate device check.
+
+## Editable DSH model catalog
+
+In Settings, use **DSH model catalog** to add exact provider model IDs, display
+names and image-input capability declarations, or edit/remove entries and restore
+defaults. iOS and Android persist the catalog natively. Up to 32 selectable models
+are supported; removed identities remain readable in existing conversations.
+Adding a provider-supported model does not require another app update.
+
+Android status now distinguishes configured chat from unavailable local tools.
+API chat and session storage do not imply that file/Git, Agent or rish execution
+has been implemented. Image capability declarations cannot add capabilities that
+the provider or platform does not support.
 
 ## Build and verify the iOS local-substrate proof
 

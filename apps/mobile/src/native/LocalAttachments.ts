@@ -1,3 +1,4 @@
+import { nativeImplementationAvailable } from './NativeImplementation';
 import { NativeModules } from 'react-native';
 
 export type AttachmentSource = 'camera' | 'photos' | 'files';
@@ -53,6 +54,7 @@ const native = NativeModules.LocalAttachments as unknown;
 function hasNativeCapabilities(
   value: unknown,
 ): value is NativeLocalAttachments {
+  if (!nativeImplementationAvailable(value)) return false;
   if (typeof value !== 'object' || value === null) return false;
   const candidate = value as Partial<
     Record<keyof NativeLocalAttachments, unknown>

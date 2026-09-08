@@ -18,6 +18,8 @@ import dev.zseven.rish.RishUnavailable
 class LocalGuestModule(reactContext: ReactApplicationContext) :
     ReactContextBaseJavaModule(reactContext) {
 
+    override fun getConstants(): MutableMap<String, Any> = mutableMapOf("implemented" to false)
+
     override fun getName(): String = "LocalGuest"
 
     @ReactMethod

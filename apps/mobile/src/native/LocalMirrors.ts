@@ -1,3 +1,4 @@
+import { nativeImplementationAvailable } from './NativeImplementation';
 import { NativeModules } from 'react-native';
 
 import type { MirrorPreferences } from '../preferences';
@@ -34,6 +35,7 @@ type NativeLocalMirrors = {
 const native = NativeModules.LocalMirrors as unknown;
 
 function hasNativeCapabilities(value: unknown): value is NativeLocalMirrors {
+  if (!nativeImplementationAvailable(value)) return false;
   if (typeof value !== 'object' || value === null) return false;
   const candidate = value as Partial<NativeLocalMirrors>;
   return (
