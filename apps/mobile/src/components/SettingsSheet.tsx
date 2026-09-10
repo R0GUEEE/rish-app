@@ -3,6 +3,9 @@ import { getDshCatalog, subscribeDshCatalog } from '../models/catalog';
 import { useSyncExternalStore } from 'react';
 import { TaskSettingsCard } from './TaskSettingsCard';
 import { ProviderConfigurationCard } from './ProviderConfigurationCard';
+import { HarnessSubscriptionCard, harnessSubscriptionIdForModel } from './HarnessSubscriptionCard';
+import { GlmAccountCard } from './GlmAccountCard';
+import { isGlmModelId } from '../harness/types';
 import type { ConfigurableHarness } from '../providers/configuration';
 import React, { useEffect, useMemo, useState } from 'react';
 import {
@@ -50,6 +53,7 @@ import { AppIcon } from './AppIcon';
 import { SlidingSurface } from './SlidingSurface';
 
 type Props = {
+  authOnly?: boolean;
   taskConversationId?: string | null;
   busy: boolean;
   credentialConfigured: boolean;
@@ -69,7 +73,7 @@ type Props = {
   onOpenMirrors: () => void;
   onOpenRuntime: () => void;
   onPreferencesChanged: () => void;
-  onProviderConfigurationChanged?: (harness: ConfigurableHarness) => void;
+  onProviderConfigurationChanged?: (harness: ConfigurableHarness | 'glm') => void;
 };
 
 export function SettingsSheet(props: Props) {
@@ -89,6 +93,7 @@ export function SettingsSheet(props: Props) {
   const runtimePillLabel = runtimeVerified
     ? t('settings.local')
     : props.runtimeLabel;
+  const subscriptionHarnessId = harnessSubscriptionIdForModel(props.model);
 
   useEffect(() => {
     if (!props.visible) return;
@@ -143,7 +148,7 @@ export function SettingsSheet(props: Props) {
         <View style={styles.header}>
           <View style={styles.headerSide} />
           <Text accessibilityRole="header" style={styles.headerTitle}>
-            {t('settings.eyebrow')}
+            {t(props.authOnly ? 'messages.signIn' : 'settings.eyebrow')}
           </Text>
           <Pressable
             accessibilityLabel={t('settings.close')}
@@ -163,6 +168,13 @@ export function SettingsSheet(props: Props) {
           keyboardShouldPersistTaps="handled"
           showsVerticalScrollIndicator
         >
+          {isGlmModelId(props.model) && <GlmAccountCard visible={props.visible} disabled={props.busy}
+            onSourceChanged={() => props.onProviderConfigurationChanged?.('glm')} />}
+          {subscriptionHarnessId !== null && (
+            <HarnessSubscriptionCard disabled={props.busy} id={subscriptionHarnessId} visible={props.visible}
+              onCredentialChanged={() => props.onProviderConfigurationChanged?.(subscriptionHarnessId)} />
+          )}
+          {!props.authOnly && <>
           <TaskSettingsCard conversationId={props.taskConversationId} />
           <SectionLabel label={t('settings.section.appearance')} />
           <SettingCard>
@@ -499,6 +511,7 @@ export function SettingsSheet(props: Props) {
             <AppIcon color={colors.danger} icon={RotateCcw} size={17} />
             <Text style={styles.resetText}>{t('settings.reset')}</Text>
           </Pressable>
+          </>}
         </ScrollView>
       </View>
     </SlidingSurface>

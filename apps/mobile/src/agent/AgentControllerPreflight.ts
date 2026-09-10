@@ -13,6 +13,7 @@ import type {
   AgentRuntimeControllerCASV1,
   AgentRuntimeRootV1,
   AgentRuntimeTranscriptHandleV1,
+  AgentRegistryVersion,
   DeepSeekThinkingMode,
 } from '../native/AgentRuntime';
 
@@ -40,7 +41,7 @@ export type AgentBeginRoundPreflightV1 = AgentControllerPreflightBaseV1 & {
   readonly project_context_sha256: string | null;
   readonly transcript: AgentRuntimeTranscriptHandleV1;
   readonly root: AgentRuntimeRootV1;
-  readonly registry_version: 1;
+  readonly registry_version: AgentRegistryVersion;
   readonly toolset_sha256: string;
 };
 
@@ -68,8 +69,8 @@ export type AgentApprovalDecisionPreflightV1 =
     readonly binding_revision: number;
     readonly root_fingerprint_sha256: string;
     readonly policy_version: 'agent-v1';
-    readonly registry_version: 1;
-    readonly tool_family: 'file_write' | 'git_commit' | 'git_push' | null;
+    readonly registry_version: AgentRegistryVersion;
+    readonly tool_family: 'file_write' | 'git_commit' | 'git_push' | 'guest_service' | null;
     readonly grant: AgentConversationGrantV2 | null;
   };
 
@@ -123,6 +124,10 @@ const UUID =
 const SHA256 = /^[0-9a-f]{64}$/u;
 const OPAQUE = /^[A-Za-z0-9._:-]{1,128}$/u;
 const TOOL_NAME = /^[A-Za-z0-9._:-]{1,64}$/u;
+
+function isAgentRegistryVersion(value: unknown): value is AgentRegistryVersion {
+  return value === 1 || value === 2;
+}
 
 const COMMON_KEYS = [
   'schema_version',
@@ -426,7 +431,7 @@ function validateRoot(value: unknown): AgentRuntimeRootV1 | null {
     !digest(root.root_fingerprint_sha256)
   )
     return null;
-  const rawCapabilities = exactArray(root.capabilities, 5);
+  const rawCapabilities = exactArray(root.capabilities, 6);
   if (rawCapabilities === null) return null;
   const allowed = new Set([
     'file_read',
@@ -434,6 +439,7 @@ function validateRoot(value: unknown): AgentRuntimeRootV1 | null {
     'git_status',
     'git_commit',
     'git_push',
+    'guest_service',
   ]);
   const capabilities: AgentRuntimeRootV1['capabilities'][number][] = [];
   const seen = new Set<string>();
@@ -485,9 +491,10 @@ function validateGrant(value: unknown): AgentConversationGrantV2 | null {
     (grant.project_id !== null && !uuid(grant.project_id)) ||
     !safeInteger(grant.binding_revision, MAX_SAFE, false) ||
     !digest(grant.root_fingerprint_sha256) ||
-    (grant.tool_family !== 'file_write' && grant.tool_family !== 'git_commit' && grant.tool_family !== 'git_push') ||
+    (grant.tool_family !== 'file_write' && grant.tool_family !== 'git_commit' && grant.tool_family !== 'git_push' && grant.tool_family !== 'guest_service') ||
     ((grant.tool_family === 'git_commit' || grant.tool_family === 'git_push') && grant.project_id === null) ||
-    grant.registry_version !== 1 ||
+    !isAgentRegistryVersion(grant.registry_version) ||
+    (grant.tool_family === 'guest_service' && grant.registry_version !== 2) ||
     !opaque(grant.policy_version) ||
     !timestamp(grant.created_at)
   )
@@ -513,7 +520,7 @@ function validateGrant(value: unknown): AgentConversationGrantV2 | null {
     binding_revision: grant.binding_revision,
     root_fingerprint_sha256: grant.root_fingerprint_sha256,
     tool_family: grant.tool_family,
-    registry_version: 1,
+    registry_version: grant.registry_version,
     policy_version: grant.policy_version,
     issued_for: {
       schema_version: 1,
@@ -695,7 +702,7 @@ function validateBeginRound(value: unknown): AgentBeginRoundPreflightV1 | null {
     !digest(raw.visible_history_sha256) ||
     !safeInteger(raw.visible_message_count, MAX_VISIBLE_MESSAGES) ||
     !nullableDigest(raw.project_context_sha256) ||
-    raw.registry_version !== 1 ||
+    !isAgentRegistryVersion(raw.registry_version) ||
     !digest(raw.toolset_sha256)
   )
     return null;
@@ -727,7 +734,7 @@ function validateBeginRound(value: unknown): AgentBeginRoundPreflightV1 | null {
     project_context_sha256: raw.project_context_sha256,
     transcript,
     root,
-    registry_version: 1,
+    registry_version: raw.registry_version,
     toolset_sha256: raw.toolset_sha256,
   };
 }
@@ -759,10 +766,11 @@ function validateApproval(
     !safeInteger(raw.binding_revision, MAX_SAFE, false) ||
     !digest(raw.root_fingerprint_sha256) ||
     raw.policy_version !== 'agent-v1' ||
-    raw.registry_version !== 1 ||
+    !isAgentRegistryVersion(raw.registry_version) ||
     (raw.tool_family !== 'file_write' &&
       raw.tool_family !== 'git_commit' &&
       raw.tool_family !== 'git_push' &&
+      raw.tool_family !== 'guest_service' &&
       raw.tool_family !== null)
   )
     return null;
@@ -780,9 +788,15 @@ function validateApproval(
       (raw.access !== 'conversation_confirm' ||
         raw.tool_family !== 'git_push' ||
         raw.project_id === null)) ||
+    ((raw.name === 'start_guest_cgi' || raw.name === 'stop_guest_cgi') &&
+      (raw.access !== 'conversation_confirm' ||
+        raw.tool_family !== 'guest_service' ||
+        raw.registry_version !== 2)) ||
     (raw.name !== 'write_file' &&
       raw.name !== 'git_commit' &&
-      raw.name !== 'git_push')
+      raw.name !== 'git_push' &&
+      raw.name !== 'start_guest_cgi' &&
+      raw.name !== 'stop_guest_cgi')
   )
     return null;
   const grant = raw.grant === null ? null : validateGrant(raw.grant);
@@ -823,7 +837,7 @@ function validateApproval(
     binding_revision: raw.binding_revision,
     root_fingerprint_sha256: raw.root_fingerprint_sha256,
     policy_version: 'agent-v1',
-    registry_version: 1,
+    registry_version: raw.registry_version,
     tool_family: raw.tool_family,
     grant,
   };
@@ -868,7 +882,7 @@ function validateExecution(
       (raw.access !== 'auto' ||
         raw.approval_state !== 'not_required' ||
         raw.approval_reference !== null)) ||
-    ((raw.name === 'write_file' || raw.name === 'git_commit' || raw.name === 'git_push') &&
+    ((raw.name === 'write_file' || raw.name === 'git_commit' || raw.name === 'git_push' || raw.name === 'start_guest_cgi' || raw.name === 'stop_guest_cgi') &&
       (raw.batch_kind !== 'write_batch' ||
         raw.access !== 'conversation_confirm' ||
         raw.approval_state !== 'bound' ||
@@ -878,7 +892,9 @@ function validateExecution(
       raw.name !== 'git_status' &&
       raw.name !== 'write_file' &&
       raw.name !== 'git_commit' &&
-      raw.name !== 'git_push')
+      raw.name !== 'git_push' &&
+      raw.name !== 'start_guest_cgi' &&
+      raw.name !== 'stop_guest_cgi')
   )
     return null;
   const common = validateCommon(raw);
@@ -896,6 +912,8 @@ function validateExecution(
       ? 'file_read'
       : raw.name === 'write_file'
         ? 'file_write'
+      : raw.name === 'start_guest_cgi' || raw.name === 'stop_guest_cgi'
+        ? 'guest_service'
       : (raw.name as AgentRuntimeRootV1['capabilities'][number]);
   if (!root.capabilities.includes(requiredCapability)) return null;
   return {

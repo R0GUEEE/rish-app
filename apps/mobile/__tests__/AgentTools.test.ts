@@ -374,3 +374,29 @@ test('native rejections map to the transport error text', async () => {
     https_proxy_url: null,
   });
 });
+
+test('legacy AgentTools never advertises or executes guest CGI tools', async () => {
+  const definitions = [
+    { name: 'start_guest_cgi', parameters: {} },
+    { name: 'stop_guest_cgi', parameters: {} },
+    { name: 'read_file', parameters: {} },
+  ];
+  expect(
+    filterAgentToolDefinitions(definitions, 'workspace-write').map(
+      tool => (tool as { name: string }).name,
+    ),
+  ).toEqual(['read_file']);
+
+  await expect(
+    executeAgentTool(CTX, 'start_guest_cgi', '{}'),
+  ).resolves.toMatchObject({
+    ok: false,
+    detail: 'E_AGENT_UNKNOWN_TOOL',
+  });
+  await expect(
+    executeAgentTool(CTX, 'stop_guest_cgi', '{}'),
+  ).resolves.toMatchObject({
+    ok: false,
+    detail: 'E_AGENT_UNKNOWN_TOOL',
+  });
+});

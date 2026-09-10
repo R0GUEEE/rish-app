@@ -22,6 +22,7 @@ import {
   type AgentRuntimeRootV1,
   type AgentRuntimeTranscriptHandleV1,
   type AgentToolReceiptV1,
+  type AgentRegistryVersion,
   type PersistedAgentAttemptJournalV3,
   type PersistedAgentCallJournalV3,
 } from '../state/types';
@@ -44,7 +45,7 @@ export type AgentRoundEvidence =
   | AgentControllerPreflightV1;
 
 export const AGENT_AUTO_TOOLS = ['list_dir', 'read_file', 'git_status'] as const;
-export const AGENT_CONFIRM_TOOLS = ['write_file', 'git_commit', 'git_push'] as const;
+export const AGENT_CONFIRM_TOOLS = ['write_file', 'git_commit', 'git_push', 'start_guest_cgi', 'stop_guest_cgi'] as const;
 export const AGENT_ONCE_ONLY_TOOLS = [] as const;
 export const AGENT_TOOL_NAMES = [
   ...AGENT_AUTO_TOOLS,
@@ -88,8 +89,8 @@ export function isAgentGrantUsable(
     readonly project_id: string | null;
     readonly binding_revision: number;
     readonly root_fingerprint_sha256: string;
-    readonly tool_family: 'file_write' | 'git_commit' | 'git_push';
-    readonly registry_version: 1;
+    readonly tool_family: 'file_write' | 'git_commit' | 'git_push' | 'guest_service';
+    readonly registry_version: AgentRegistryVersion;
     readonly policy_version: string;
   },
 ): boolean {
@@ -181,10 +182,13 @@ function validRoot(root: AgentRuntimeRootV1): boolean {
   if (root.schema_version !== 1 || (root.kind !== 'project' && root.kind !== 'workspace') || !isCanonicalUuid(root.workspace_id) || !Number.isSafeInteger(root.workspace_binding_revision) || root.workspace_binding_revision < 1 || !isDigest(root.root_fingerprint_sha256) || (root.project_id !== null && !isCanonicalUuid(root.project_id)) || (root.kind === 'project') !== (root.project_id !== null) || !Array.isArray(root.capabilities) || root.capabilities.length > 6) return false;
   const seen = new Set<string>();
   for (const capability of root.capabilities) {
-    if (!['file_read', 'file_write', 'git_status', 'git_commit', 'git_push'].includes(capability) || seen.has(capability) || (root.kind === 'workspace' && capability.startsWith('git_'))) return false;
+    if (!['file_read', 'file_write', 'git_status', 'git_commit', 'git_push', 'guest_service'].includes(capability) || seen.has(capability) || (root.kind === 'workspace' && capability.startsWith('git_'))) return false;
     seen.add(capability);
   }
   return true;
+}
+function validRegistryVersion(value: unknown): value is AgentRegistryVersion {
+  return value === 1 || value === 2;
 }
 function validPolicy(policy: AgentRuntimePolicyV1): boolean {
   return policy.schema_version === 1 && policy.policy_version === 'agent-v1' && policy.max_single_write_bytes === MAX_AGENT_SINGLE_WRITE_BYTES && Number.isSafeInteger(policy.max_batch_write_bytes) && policy.max_batch_write_bytes >= MAX_AGENT_SINGLE_WRITE_BYTES && policy.max_batch_write_bytes <= 512 * 1024 && Number.isSafeInteger(policy.max_attempt_write_bytes) && policy.max_attempt_write_bytes >= policy.max_batch_write_bytes && policy.max_attempt_write_bytes <= 4 * 1024 * 1024;
@@ -207,12 +211,19 @@ function agentPhase(value: unknown): value is AgentAttemptPhase {
   return value === 'ready_for_round' || value === 'round_in_flight' || value === 'batch_frozen' || value === 'approval_pending' || value === 'execution_intent' || value === 'tool_result_pending' || value === 'final_response' || value === 'cancelled' || value === 'failed' || value === 'unknown' || value === 'ambiguous';
 }
 function validState(state: AgentRoundState): boolean {
-  if (state.schema_version !== 3 || !agentPhase(state.phase) || !Number.isSafeInteger(state.controller_generation) || state.controller_generation < 0 || !validRoot(state.root) || !validPolicy(state.policy) || state.tool_registry_version !== 1 || !isDigest(state.toolset_sha256) || !validTranscript(state.transcript) || !Number.isSafeInteger(state.round_index) || state.round_index < 0 || state.round_index >= MAX_AGENT_ROUNDS || !Array.isArray(state.batch) || state.batch.length > MAX_AGENT_CALLS_PER_BATCH || !Array.isArray(state.frozen_grant_ids) || state.frozen_grant_ids.length > 2 || state.frozen_grant_ids.some((id, index) => !isCanonicalUuid(id) || state.frozen_grant_ids.indexOf(id) !== index) || !Number.isSafeInteger(state.reserved_write_bytes) || state.reserved_write_bytes < 0 || state.reserved_write_bytes > state.policy.max_attempt_write_bytes || !isCanonicalTimestamp(state.updated_at) || !isAgentPhaseLineageValid(state.phase, state.round_lineage?.status ?? null)) return false;
+  if (state.schema_version !== 3 || !agentPhase(state.phase) || !Number.isSafeInteger(state.controller_generation) || state.controller_generation < 0 || !validRoot(state.root) || !validPolicy(state.policy) || !validRegistryVersion(state.tool_registry_version) || !isDigest(state.toolset_sha256) || !validTranscript(state.transcript) || !Number.isSafeInteger(state.round_index) || state.round_index < 0 || state.round_index >= MAX_AGENT_ROUNDS || !Array.isArray(state.batch) || state.batch.length > MAX_AGENT_CALLS_PER_BATCH || !Array.isArray(state.frozen_grant_ids) || state.frozen_grant_ids.length > 2 || state.frozen_grant_ids.some((id, index) => !isCanonicalUuid(id) || state.frozen_grant_ids.indexOf(id) !== index) || !Number.isSafeInteger(state.reserved_write_bytes) || state.reserved_write_bytes < 0 || state.reserved_write_bytes > state.policy.max_attempt_write_bytes || !isCanonicalTimestamp(state.updated_at) || !isAgentPhaseLineageValid(state.phase, state.round_lineage?.status ?? null)) return false;
   if (state.round_lineage === null) return false;
   const lineage = state.round_lineage;
   if (lineage.schema_version !== 2 || !isCanonicalUuid(lineage.round_id) || lineage.round_index !== state.round_index || !Number.isSafeInteger(lineage.launch_attempt) || lineage.launch_attempt < 1 || lineage.launch_attempt > MAX_AGENT_ROUNDS || (lineage.native_row_revision !== null && (!Number.isSafeInteger(lineage.native_row_revision) || lineage.native_row_revision < 1))) return false;
   const ids = new Set<string>();
-  for (let index = 0; index < state.batch.length; index += 1) { const call = state.batch[index]!; if (!validCall(call, index) || ids.has(call.call_id)) return false; ids.add(call.call_id); }
+  for (let index = 0; index < state.batch.length; index += 1) {
+    const call = state.batch[index]!;
+    if (!validCall(call, index) ||
+        (state.tool_registry_version === 1 &&
+          (call.name === 'start_guest_cgi' || call.name === 'stop_guest_cgi')) ||
+        ids.has(call.call_id)) return false;
+    ids.add(call.call_id);
+  }
   if (state.call_index !== null && (!Number.isSafeInteger(state.call_index) || state.call_index < 0 || state.call_index >= state.batch.length)) return false;
   if (state.phase === 'ready_for_round' && (state.batch.length !== 0 || state.call_index !== null || lineage.status !== 'ready')) return false;
   if (state.phase === 'round_in_flight' && lineage.status !== 'active' && lineage.status !== 'cancel_requested') return false;
@@ -325,7 +336,9 @@ function stateFromProjection(current: AgentRoundState, projection: unknown, upda
   const lineage = roundId === null ? previous : { schema_version: 2 as const, round_id: roundId, round_index: raw.round_index as number, launch_attempt: previous?.launch_attempt ?? 1, status: (raw.round_status ?? 'ready') as NonNullable<AgentRoundState['round_lineage']>['status'], native_row_revision: raw.round_revision as number | null };
   if (lineage === null) return null;
   const registry = ownRecord(raw.registry);
-  return { schema_version: 3, phase: raw.phase as AgentAttemptPhase, controller_generation: raw.controller_generation as number, policy: raw.policy as AgentRuntimePolicyV1, root: raw.root as AgentRuntimeRootV1, tool_registry_version: 1, toolset_sha256: registry?.toolset_sha256 as string ?? current.toolset_sha256, transcript: raw.transcript as AgentRuntimeTranscriptHandleV1, round_index: raw.round_index as number, round_lineage: lineage, call_index: raw.call_index as number | null, batch: calls as PersistedAgentCallJournalV3[], frozen_grant_ids: raw.frozen_grant_ids as string[], reserved_write_bytes: raw.reserved_write_bytes as number, updated_at: updatedAt };
+  const registryVersion = registry?.registry_version;
+  if (!validRegistryVersion(registryVersion)) return null;
+  return { schema_version: 3, phase: raw.phase as AgentAttemptPhase, controller_generation: raw.controller_generation as number, policy: raw.policy as AgentRuntimePolicyV1, root: raw.root as AgentRuntimeRootV1, tool_registry_version: registryVersion, toolset_sha256: registry?.toolset_sha256 as string ?? current.toolset_sha256, transcript: raw.transcript as AgentRuntimeTranscriptHandleV1, round_index: raw.round_index as number, round_lineage: lineage, call_index: raw.call_index as number | null, batch: calls as PersistedAgentCallJournalV3[], frozen_grant_ids: raw.frozen_grant_ids as string[], reserved_write_bytes: raw.reserved_write_bytes as number, updated_at: updatedAt };
 }
 
 export function createAgentAttemptJournal(input: CreateAgentRoundInput): AgentRoundState {

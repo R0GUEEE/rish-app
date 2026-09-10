@@ -39,7 +39,10 @@ export const CODEX_MODEL_IDS = [
   'gpt-5.6-mini',
   'gpt-5.6-nano',
 ] as const;
-export type CodexModelId = (typeof CODEX_MODEL_IDS)[number];
+export type CodexModelId = string;
+export function isCodexModelId(value: unknown): value is CodexModelId {
+  return typeof value === 'string' && value.length <= 80 && /^(?:(?:gpt|codex)-[A-Za-z0-9][A-Za-z0-9._-]*|o[0-9][A-Za-z0-9._-]*)$/.test(value);
+}
 
 /** The GLM-5.3 family catalog; ids are configurable in the manifest. */
 export const GLM_MODEL_IDS = ['GLM-5.3', 'GLM-5.3-Flash'] as const;
@@ -68,7 +71,7 @@ export const PROVIDER_MODEL_IDS = [
 export function isHarnessModelId(value: unknown): value is HarnessModelId {
   return (
     typeof value === 'string' &&
-    ((PROVIDER_MODEL_IDS as readonly string[]).includes(value) || isRegisteredDshModel(value))
+    ((PROVIDER_MODEL_IDS as readonly string[]).includes(value) || isRegisteredDshModel(value) || isCodexModelId(value))
   );
 }
 

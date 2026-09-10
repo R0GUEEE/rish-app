@@ -33,6 +33,8 @@ jest.mock('../src/native/LocalProjects', () => ({
     credentialStatus: jest.fn(),
     presentCredentialPrompt: jest.fn(),
     clearCredential: jest.fn(),
+    beginSSHCredentialImport: jest.fn(),
+    sshCredentialStatus: jest.fn(),
     push: jest.fn(),
     pushReceipts: jest.fn(),
     cancelPush: jest.fn(),
@@ -124,6 +126,50 @@ afterEach(async () => {
   });
   mountedRenderers.clear();
   jest.useRealTimers();
+});
+
+test('configures SSH credentials before cloning and forwards the matching profile', async () => {
+  const renderer = await renderSurface();
+  await act(async () => actionByLabel(renderer.root, 'Clone repository').props.onPress());
+  await act(async () => inputByLabel(renderer.root, 'Remote URL').props.onChangeText('git@github.com:example/demo.git'));
+  await act(async () => { await actionByLabel(renderer.root, 'Configure SSH credential').props.onPress(); await settle(); });
+  expect(mockLocalProjects.beginSSHCredentialImport).toHaveBeenCalledWith('rish-ssh-git@github.com-22', 'github.com', 22, 'git');
+  await act(async () => actionByLabel(renderer.root, 'Clone').props.onPress());
+  expect(mockLocalProjects.startClone).toHaveBeenCalledWith(expect.any(String), undefined, expect.objectContaining({ sshProfileId: 'rish-ssh-git@github.com-22' }));
+});
+
+test('switching SSH endpoints discards late status and keeps clone disabled', async () => {
+  const late = deferred<any>();
+  mockLocalProjects.sshCredentialStatus.mockReturnValueOnce(late.promise).mockResolvedValue(null);
+  const renderer = await renderSurface();
+  await act(async () => actionByLabel(renderer.root, 'Clone repository').props.onPress());
+  await act(async () => inputByLabel(renderer.root, 'Remote URL').props.onChangeText('git@github.com:example/demo.git'));
+  await act(async () => inputByLabel(renderer.root, 'Remote URL').props.onChangeText('git@gitlab.com:example/demo.git'));
+  await act(async () => late.resolve({ profile_id: 'rish-ssh-git@github.com-22', host: 'github.com', port: 22, username: 'git', configured: true }));
+  expect(actionByLabel(renderer.root, 'Clone').props.disabled).toBe(true);
+});
+
+test('SSH import failure is visible, retryable, and double click safe', async () => {
+  mockLocalProjects.beginSSHCredentialImport.mockRejectedValueOnce(new Error('failed')).mockResolvedValueOnce({ profile_id: 'rish-ssh-git@github.com-22', host: 'github.com', port: 22, username: 'git', configured: true });
+  const renderer = await renderSurface();
+  await act(async () => actionByLabel(renderer.root, 'Clone repository').props.onPress());
+  await act(async () => inputByLabel(renderer.root, 'Remote URL').props.onChangeText('git@github.com:example/demo.git'));
+  const configure = actionByLabel(renderer.root, 'Configure SSH credential');
+  await act(async () => configure.props.onPress());
+  expect(renderer.root.findAllByProps({ children: 'SSH credential setup failed. Try again.' }).length).toBeGreaterThan(0);
+  await act(async () => { configure.props.onPress(); configure.props.onPress(); await settle(); });
+  expect(mockLocalProjects.beginSSHCredentialImport).toHaveBeenCalledTimes(2);
+});
+
+test('remounting an SSH endpoint reloads configured status and permits clone', async () => {
+  mockLocalProjects.sshCredentialStatus.mockResolvedValue({ profile_id: 'rish-ssh-git@github.com-22', host: 'github.com', port: 22, username: 'git', configured: true });
+  const renderer = await renderSurface();
+  await act(async () => actionByLabel(renderer.root, 'Clone repository').props.onPress());
+  await act(async () => inputByLabel(renderer.root, 'Remote URL').props.onChangeText('git@github.com:example/demo.git'));
+  await settle();
+  expect(actionByLabel(renderer.root, 'Clone').props.disabled).toBe(false);
+  await act(async () => actionByLabel(renderer.root, 'Clone').props.onPress());
+  expect(mockLocalProjects.startClone).toHaveBeenCalledWith(expect.any(String), undefined, expect.objectContaining({ sshProfileId: 'rish-ssh-git@github.com-22' }));
 });
 
 async function renderSurface({
@@ -269,6 +315,11 @@ beforeEach(() => {
     project_id: project.id,
     host: 'github.com',
     configured: false,
+  });
+  mockLocalProjects.sshCredentialStatus.mockResolvedValue(null);
+  mockLocalProjects.beginSSHCredentialImport.mockResolvedValue({
+    profile_id: 'rish-ssh-git@github.com-22', host: 'github.com', port: 22,
+    username: 'git', configured: true,
   });
   mockLocalProjects.push.mockResolvedValue({
     project_id: project.id,
@@ -669,7 +720,7 @@ test('clones only through the native API and surfaces a native failure', async (
   );
   await act(async () => {
     inputByLabel(renderer.root, 'Project name').props.onChangeText('copy');
-    inputByLabel(renderer.root, 'Remote HTTPS URL').props.onChangeText(
+    inputByLabel(renderer.root, 'Remote URL').props.onChangeText(
       'https://github.com/example/demo.git',
     );
   });
@@ -700,7 +751,7 @@ test('passes an explicit null proxy when no HTTPS proxy is configured', async ()
     actionByLabel(renderer.root, 'Clone repository').props.onPress(),
   );
   await act(async () =>
-    inputByLabel(renderer.root, 'Remote HTTPS URL').props.onChangeText(
+    inputByLabel(renderer.root, 'Remote URL').props.onChangeText(
       'https://github.com/example/demo.git',
     ),
   );
@@ -800,6 +851,120 @@ test('shows a real diff, stages all, and commits with explicit author fields', a
     authorName: 'Fini',
     authorEmail: 'fini@example.com',
   });
+});
+
+test('uses a wide changed-file rail beside the diff and keeps the narrow stack intact', async () => {
+  const renderer = await renderSurface();
+  await openProject(renderer);
+  const layout = renderer.root
+    .findAll(instance => typeof instance.props.onLayout === 'function')[0];
+  expect(layout).toBeDefined();
+  await act(async () => {
+    layout?.props.onLayout({ nativeEvent: { layout: { width: 1024 } } });
+    await settle();
+  });
+  expect(renderer.root.findByProps({ testID: 'projects-wide-change-list' })).toBeDefined();
+  expect(renderer.root.findAllByProps({ children: 'README.md' }).length).toBeGreaterThan(0);
+  await act(async () => {
+    layout?.props.onLayout({ nativeEvent: { layout: { width: 600 } } });
+    await settle();
+  });
+  expect(renderer.root.findAllByProps({ testID: 'projects-wide-change-list' })).toHaveLength(0);
+  expect(actionByLabel(renderer.root, 'Changes')).toBeDefined();
+});
+
+test('keeps long diff lines horizontally scrollable', async () => {
+  const longLine = 'x'.repeat(2048);
+  mockLocalProjects.diff.mockResolvedValue({
+    ...diff,
+    patch: `diff --git a/long.txt b/long.txt\n+${longLine}\n`,
+  });
+  const renderer = await renderSurface();
+  await openProject(renderer);
+  await act(async () => actionByLabel(renderer.root, 'Changes').props.onPress());
+  expect(renderer.root.findAllByProps({ horizontal: true }).length).toBeGreaterThan(0);
+  expect(renderer.root.findAllByProps({ children: `+${longLine}` }).length).toBeGreaterThan(0);
+});
+
+test('selecting a changed file shows its own diff and survives rotation to narrow layout', async () => {
+  const renderer = await renderSurface();
+  await openProject(renderer);
+  const layout = renderer.root
+    .findAll(instance => typeof instance.props.onLayout === 'function')[0];
+  await act(async () => {
+    layout?.props.onLayout({ nativeEvent: { layout: { width: 1024 } } });
+    await settle();
+  });
+  await act(async () => actionByLabel(renderer.root, 'README.md').props.onPress());
+  expect(renderer.root.findAllByProps({ children: 'diff --git a/README.md b/README.md\n+hello\n' }).length).toBeGreaterThan(0);
+  await act(async () => {
+    layout?.props.onLayout({ nativeEvent: { layout: { width: 600 } } });
+    await settle();
+  });
+  expect(renderer.root.findAllByProps({ testID: 'projects-wide-change-list' })).toHaveLength(0);
+  expect(renderer.root.findAllByProps({ children: 'diff --git a/README.md b/README.md\n+hello\n' }).length).toBeGreaterThan(0);
+});
+
+test('reports when a selected file is absent from the current diff page', async () => {
+  mockLocalProjects.diff.mockResolvedValue({
+    ...diff,
+    files: [{ path: 'image.bin', status: 'modified', additions: 0, deletions: 0 }],
+    patch: 'diff --git a/image.bin b/image.bin\n',
+  });
+  mockLocalProjects.diffPage.mockResolvedValue({
+    ...diff,
+    patch: 'PAGE-WITHOUT-SELECTED-FILE',
+    files: [],
+    truncated: true,
+    page_offset: 0,
+    next_offset: null,
+    snapshot_id: 'b'.repeat(64),
+    omitted_paths: ['image.bin'],
+  });
+  const renderer = await renderSurface();
+  await openProject(renderer);
+  await act(async () => actionByLabel(renderer.root, 'Changes').props.onPress());
+  await act(async () => actionByLabel(renderer.root, 'image.bin').props.onPress());
+  await act(async () => {
+    actionByLabel(renderer.root, 'Review diff in pages').props.onPress();
+    await settle();
+  });
+  expect(renderer.root.findAllByProps({ children: 'This file’s diff is not on the current page. Load another page to continue.' }).length).toBeGreaterThan(0);
+  expect(renderer.root.findAllByProps({ children: 'PAGE-WITHOUT-SELECTED-FILE' })).toHaveLength(0);
+});
+
+test('locates quoted unicode and spaced paths in rename style diff headers', async () => {
+  const path = 'docs/中 space.md';
+  const quotedPatch = 'diff --git "a/docs/\\344\\270\\255 space.md" "b/docs/\\344\\270\\255 space.md"\n--- a/docs/\\344\\270\\255 space.md\n+++ b/docs/\\344\\270\\255 space.md\n+changed\n';
+  mockLocalProjects.diff.mockResolvedValue({
+    ...diff,
+    patch: quotedPatch,
+    files: [{ path, status: 'renamed', additions: 1, deletions: 0 }],
+  });
+  const renderer = await renderSurface();
+  await openProject(renderer);
+  await act(async () => actionByLabel(renderer.root, 'Changes').props.onPress());
+  await act(async () => actionByLabel(renderer.root, path).props.onPress());
+  expect(renderer.root.findAllByProps({ children: quotedPatch }).length).toBeGreaterThan(0);
+});
+
+test('matches exact changed paths instead of directory or filename prefixes', async () => {
+  const exact = 'diff --git a/foo.ts b/foo.ts\n+EXACT\n';
+  const prefix = 'diff --git a/foobar.ts b/foobar.ts\n+PREFIX\n';
+  mockLocalProjects.diff.mockResolvedValue({
+    ...diff,
+    patch: `${exact}${prefix}`,
+    files: [
+      { path: 'foo.ts', status: 'modified', additions: 1, deletions: 0 },
+      { path: 'foobar.ts', status: 'modified', additions: 1, deletions: 0 },
+    ],
+  });
+  const renderer = await renderSurface();
+  await openProject(renderer);
+  await act(async () => actionByLabel(renderer.root, 'Changes').props.onPress());
+  await act(async () => actionByLabel(renderer.root, 'foo.ts').props.onPress());
+  expect(JSON.stringify(renderer.toJSON())).toContain('EXACT');
+  expect(JSON.stringify(renderer.toJSON())).not.toContain('PREFIX');
 });
 
 test('localizes readable index and working-tree status labels', () => {
@@ -956,7 +1121,7 @@ async function startTestClone(renderer: Renderer) {
     actionByLabel(renderer.root, 'Clone repository').props.onPress(),
   );
   await act(async () =>
-    inputByLabel(renderer.root, 'Remote HTTPS URL').props.onChangeText(
+    inputByLabel(renderer.root, 'Remote URL').props.onChangeText(
       'https://example.com/copy.git',
     ),
   );

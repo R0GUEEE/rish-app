@@ -29,6 +29,8 @@ import {
 import type { AttachmentDescriptor } from '../state';
 import { fonts, type ThemePalette } from '../theme';
 import { StructuredContent, type StructuredBlock } from './StructuredContent';
+import { InlineMarkdown } from './InlineMarkdown';
+import { tokenizePlainLinks } from '../markdown/inline';
 import { MarkdownText } from './MarkdownText';
 import { AppIcon } from './AppIcon';
 import {
@@ -135,7 +137,6 @@ export const MessageList = React.forwardRef<
         {messages.map(message =>
           message.role === 'user' ? (
             <View key={message.id} style={styles.userWrap}>
-              <Text style={styles.role}>{t('messages.role.you')}</Text>
               {message.attachments !== undefined &&
                 message.attachments.length > 0 && (
                   <View style={styles.attachments}>
@@ -208,9 +209,7 @@ export const MessageList = React.forwardRef<
                   </View>
                 )}
               {message.text.length > 0 && (
-                <Text selectable style={styles.userText}>
-                  {message.text}
-                </Text>
+                <InlineMarkdown selectable textStyle={styles.userText} tokens={tokenizePlainLinks(message.text)} />
               )}
             </View>
           ) : (

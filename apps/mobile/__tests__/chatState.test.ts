@@ -889,6 +889,18 @@ describe('schema-9 final Agent V3 contract', () => {
     receipt: null,
   };
 
+  test('uses the journal registry version for persisted CGI approval policy', () => {
+    for (const name of ['start_guest_cgi', 'stop_guest_cgi']) {
+      const cgi = {...finalCall, name, safe_summary_key: `agent.${name}`};
+      expect(parsePersistedAgentCallJournalV3(cgi, '$', 2)).toEqual(cgi);
+      expect(() => parsePersistedAgentCallJournalV3(cgi, '$', 1)).toThrow(/registered tool policy/);
+      expect(() => parsePersistedAgentCallJournalV3({...cgi, access: 'auto'}, '$', 2)).toThrow(/registered tool policy/);
+      const legacy = {...cgi, access: 'durable_deny', safe_summary_key: 'agent.unknown', approval_token: null, approval_decision: 'denied'};
+      expect(parsePersistedAgentCallJournalV3(legacy, '$', 1).access).toBe('durable_deny');
+    }
+    expect(() => parsePersistedAgentCallJournalV3({...finalCall, name: 'unknown_service'}, '$', 2)).toThrow(/registered tool policy/);
+  });
+
   test('accepts an opaque final token and rejects a structured token object', () => {
     expect(parsePersistedAgentCallJournalV3(finalCall)).toEqual(finalCall);
     expect(() =>
@@ -1759,7 +1771,7 @@ describe('schema 9 Agent journal persistence', () => {
               root_fingerprint_sha256: current.root.root_fingerprint_sha256,
               binding_revision: current.root.workspace_binding_revision,
               policy_version: 'agent-v1' as const,
-              registry_version: 1 as const,
+              registry_version: current.tool_registry_version,
               access: call.access === 'confirm_once'
                 ? 'confirm_once' as const
                 : 'conversation_confirm' as const,
@@ -1795,7 +1807,7 @@ describe('schema 9 Agent journal persistence', () => {
       expected_round_revision: lineage.native_row_revision,
       transcript: current.transcript,
       root: current.root,
-      registry_version: 1 as const,
+      registry_version: current.tool_registry_version,
       toolset_sha256: current.toolset_sha256,
       policy_version: 'agent-v1' as const,
       expected_batch_revision: 0,
@@ -2526,7 +2538,7 @@ describe('schema 9 Agent journal persistence', () => {
   });
 
   test('checkpoints prepared native intent projections without opening the approval gate', () => {
-    const setup = () => {
+    const setup = (guestName?: 'start_guest_cgi' | 'stop_guest_cgi') => {
       const seed = createChatStore({
         now: () => T0,
         createId: () => UUID_A,
@@ -2555,9 +2567,9 @@ describe('schema 9 Agent journal persistence', () => {
           workspace_binding_revision: 1,
           project_id: null,
           root_fingerprint_sha256: '9'.repeat(64),
-          capabilities: ['file_read', 'file_write'],
+          capabilities: guestName ? ['file_read', 'file_write', 'guest_service'] : ['file_read', 'file_write'],
         },
-        tool_registry_version: 1,
+        tool_registry_version: guestName ? 2 : 1,
         toolset_sha256: '8'.repeat(64),
         transcript: {
           schema_version: 1,
@@ -2701,9 +2713,9 @@ describe('schema 9 Agent journal persistence', () => {
             schema_version: 3,
             call_index: 1,
             call_id: 'call-gated',
-            name: 'write_file',
+            name: guestName ?? 'write_file',
             arguments_sha256: '2'.repeat(64),
-            safe_summary_key: 'agent.write_file',
+            safe_summary_key: guestName ? `agent.${guestName}` : 'agent.write_file',
             access: 'conversation_confirm',
             approval_token: '77777777-7777-4777-8777-777777777777',
             approval_decision: 'pending',
@@ -2814,6 +2826,18 @@ describe('schema 9 Agent journal persistence', () => {
       routed.store.getState().conversations[routed.conversationId]!.attempts[0]!
         .agent?.phase,
     ).toBe('approval_pending');
+
+    // This exercises checkpoint -> candidate digest -> schema-9 serializer,
+    // the boundary that rejected the actual prepared CGI receipt before any
+    // native snapshot commit could be attempted.
+    for (const name of ['start_guest_cgi', 'stop_guest_cgi'] as const) {
+      const cgi = setup(name);
+      const transaction = cgi.store.checkpointAgentRound({cas: cgi.cas, expectedAttempt: cgi.expectedAttempt, journal: cgi.nextJournal, events: [cgi.batchEvent], evidence: cgi.evidence});
+      expect(transaction).not.toBeNull();
+      expect(transaction?.commit(nativeCommittedProof(cgi.store, 4))).toBe(true);
+      const reopened = hydrateChatState(cgi.store.serialize());
+      expect(reopened.conversations[cgi.conversationId]!.attempts[0]!.agent?.batch[1]).toMatchObject({name, access: 'conversation_confirm', approval_decision: 'pending'});
+    }
 
     const wrongCurrentPhase = setup();
     const wrongCurrentAttempt: TurnAttemptV1 = {

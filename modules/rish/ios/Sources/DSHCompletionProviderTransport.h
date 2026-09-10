@@ -14,6 +14,12 @@ typedef BOOL (^DSHCompletionProviderTransportCredentialGenerationIsCurrentBlock)
     NSUInteger credentialGeneration);
 typedef void (^DSHCompletionProviderTransportMarkRedirectedBlock)(NSURLSessionDataTask *task);
 typedef void (^DSHCompletionProviderTransportRedirectDecisionBlock)(BOOL rejected);
+#if DEBUG
+/// Debug/test-only, value-free transport diagnostics. The callback receives
+/// only bounded phase/classification fields; it never contains URL, body,
+/// headers, credentials, or NSError descriptions.
+typedef void (^DSHCompletionProviderTransportDiagnosticBlock)(NSDictionary *diagnostic);
+#endif
 
 @protocol DSHProviderStreamEventParsing <NSObject>
 
@@ -45,6 +51,10 @@ typedef void (^DSHCompletionProviderTransportCompletionBlock)(
 /// never persisted here.  Ownership and generation checks remain in the
 /// caller's existing completion slot via the callbacks above.
 @interface DSHCompletionProviderTransport : NSObject
+
+#if DEBUG
+@property(nonatomic, copy, nullable) DSHCompletionProviderTransportDiagnosticBlock diagnosticHandler;
+#endif
 
 - (instancetype)initWithSession:(NSURLSession *)session
                    uuidGenerator:(NSString *(^ _Nullable)(void))uuidGenerator

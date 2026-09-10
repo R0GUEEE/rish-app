@@ -41,6 +41,15 @@ NS_ASSUME_NONNULL_BEGIN
 /// the base URL, the harness identity and the model gates differ. A GLM
 /// response must echo the exact requested model, ignoring ASCII case only.
 @interface GlmProviderTransport : ClaudeProviderTransport
+@property(atomic, copy, nullable) NSString *accountProvider;
+@property(atomic, copy, nullable) NSArray<NSString *> *trialAllowedModels;
+
+/// Account-plan endpoints are selected by the native ZCode plan resolver.
+/// Manual BIGMODEL_API_KEY requests retain the existing BigModel default;
+/// these helpers let LocalRuntime bind a resolved provider explicitly without
+/// storing or silently substituting credential material in the transport.
++ (nullable NSURL *)endpointForZCodeProvider:(NSString *)provider;
++ (NSDictionary<NSString *, NSString *> *)headersForZCodeCredential:(NSString *)credential;
 
 @end
 

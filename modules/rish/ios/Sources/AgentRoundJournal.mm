@@ -65,7 +65,7 @@ static BOOL DSHAgentRoundRoot(NSDictionary *root) {
   if ([kind isEqualToString:@"project"] && project == NSNull.null) return NO;
   if ([kind isEqualToString:@"workspace"] && project != NSNull.null) return NO;
   NSSet *allowed = [NSSet setWithArray:@[
-    @"file_read", @"file_write", @"git_status", @"git_commit", @"git_push",
+    @"file_read", @"file_write", @"git_status", @"git_commit", @"git_push", @"guest_service",
   ]];
   NSMutableSet *seen = [NSMutableSet set];
   for (id capability in root[@"capabilities"]) {

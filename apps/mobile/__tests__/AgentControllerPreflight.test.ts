@@ -383,6 +383,23 @@ describe('AgentControllerPreflight', () => {
     },
   );
 
+  test('accepts CGI execution only with the guest_service capability and approval', () => {
+    const serviceRoot = {
+      ...root,
+      capabilities: [...root.capabilities, 'guest_service'] as const,
+    };
+    expect(validateAgentControllerPreflight({
+      ...beginExecution,
+      name: 'start_guest_cgi',
+      root: serviceRoot,
+    })?.kind).toBe('begin_execution');
+    expect(validateAgentControllerPreflight({
+      ...beginExecution,
+      name: 'start_guest_cgi',
+      root,
+    })).toBeNull();
+  });
+
   test.each([
     ['event/operation mismatch', { ...beginExecution, source_event_id: ROUND_ID }],
     ['write batch without manifest', { ...beginExecution, manifest_sha256: null }],

@@ -180,6 +180,7 @@ test('a batch presents every call with per-item decisions and one commit', async
   expect(root.findByProps({ testID: 'approval-batch-list' })).toBeDefined();
   expect(root.findByProps({ testID: 'approval-batch-item-0' })).toBeDefined();
   expect(root.findByProps({ testID: 'approval-batch-item-1' })).toBeDefined();
+  expect(root.findByProps({ testID: 'approval-batch-footer' })).toBeDefined();
   // Per-item decisions: allow the first, deny the second with a message.
   await act(async () => {
     byTestId(root, 'approval-item-0-once').props.onPress();
@@ -214,6 +215,31 @@ test('batch items default to denial until explicitly approved', async () => {
     { approvalId: 'ap-1', decision: { status: 'denied' } },
     { approvalId: 'ap-2', decision: { status: 'denied' } },
   ]);
+});
+
+test('batch approve all sends one once decision for every visible request', async () => {
+  const { renderer, onDecide } = await renderComposer([request, secondRequest]);
+  await act(async () => {
+    byTestId(renderer.root, 'approval-batch-approve-all-once').props.onPress();
+  });
+  expect(onDecide).toHaveBeenCalledWith([
+    { approvalId: request.approvalId, decision: { status: 'approved', scope: 'once' } },
+    { approvalId: secondRequest.approvalId, decision: { status: 'approved', scope: 'once' } },
+  ]);
+});
+
+test('batch approve all ignores a stale callback after the request key changes', async () => {
+  const { renderer, onDecide } = await renderComposer([request, secondRequest]);
+  const staleApproveAll = byTestId(renderer.root, 'approval-batch-approve-all-once').props.onPress;
+  await act(async () => {
+    renderer.update(
+      presentation(
+        <ApprovalComposer requests={[secondRequest, request]} onDecide={onDecide} />,
+      ),
+    );
+  });
+  await act(async () => staleApproveAll());
+  expect(onDecide).not.toHaveBeenCalled();
 });
 
 test('a new-file write says it creates the file even though its prior is present', async () => {

@@ -1,0 +1,30 @@
+{
+  "schema_version": 1,
+  "target": "linux-arm64-musl",
+  "packages": {
+    "codex": {
+      "name": "@openai/codex",
+      "version": "0.153.4-linux-arm64",
+      "tarball": "https://registry.npmjs.org/@openai/codex/-/codex-0.153.4-linux-arm64.tgz",
+      "integrity": "sha512-QKdjYLYV4hXIuUQDP3P6F4NXuWFoKo9WUoV4nAREIx55kiUyi8UsYdsVobkeXir5n/maEQgYMCKLHVma4rNPiw==",
+      "binary": "package/vendor/aarch64-unknown-linux-musl/bin/codex",
+      "output": "libcodex.so"
+    },
+    "claude-code": {
+      "name": "@anthropic-ai/claude-code-linux-arm64-musl",
+      "version": "2.1.263",
+      "tarball": "https://registry.npmjs.org/@anthropic-ai/claude-code-linux-arm64-musl/-/claude-code-linux-arm64-musl-2.1.263.tgz",
+      "integrity": "sha512-RxeDl9uWmj7FtghdtRImpWsGEEe8l05VoS9wt5vJAFVZFP6ZmyanS7b+1+STXW6F6QsEbVqbKF5R/HPz3dzW4g==",
+      "binary": "package/claude",
+      "output": "libclaude_code.so"
+    }
+  },
+  "musl_loader": {
+    "version": "1.2.5-r23",
+    "url": "https://dl-cdn.alpinelinux.org/alpine/v3.23/main/aarch64/musl-1.2.5-r23.apk",
+    "apk_sha256": "6a3edd924ead1fad88a69e28c5775809af3026b322f58428001cd02fedc5299e",
+    "loader_sha256": "fc61b6e11fd8c6bfee3235865249cd78eea34aa36d88277e6008038031160993",
+    "binary": "lib/ld-musl-aarch64.so.1",
+    "output": "libmusl_loader.so"
+  }
+}

@@ -61,6 +61,7 @@ import {
   type FrozenAgentRootV1,
   type AgentWritePolicyV1,
   type AgentConversationGrantV2,
+  type AgentRegistryVersion,
   type AgentApprovalTokenV1,
   type AgentControllerCASV1,
   type AgentCheckpointEvidence,
@@ -1600,6 +1601,8 @@ const agentStatusValues = new Set<SessionEventV2['status']>([
   'ambiguous',
 ]);
 const safeSummaryKeys = new Set<string>(AGENT_SAFE_SUMMARY_KEYS);
+const isAgentRegistryVersion = (value: unknown): value is AgentRegistryVersion =>
+  value === 1 || value === 2;
 
 export function isAgentFailureCode(value: unknown): value is AgentFailureCode {
   return (
@@ -1663,6 +1666,7 @@ function agentRootIsValid(value: unknown): value is FrozenAgentRootV1 {
         'git_status',
         'git_commit',
         'git_push',
+        'guest_service',
       ].includes(capability) ||
       capabilities.has(capability) ||
       (root.kind === 'workspace' && capability.startsWith('git_'))
@@ -1901,7 +1905,7 @@ function agentCallIsValid(value: unknown): value is PersistedAgentCallJournalV2 
     call.safe_summary_key.length > MAX_AGENT_SUMMARY_KEY_LENGTH ||
     !safeSummaryKeys.has(call.safe_summary_key) ||
     call.safe_summary_key !==
-      (['list_dir', 'read_file', 'write_file', 'git_status', 'git_commit', 'git_push'].includes(call.name)
+      (['list_dir', 'read_file', 'write_file', 'git_status', 'git_commit', 'git_push', 'start_guest_cgi', 'stop_guest_cgi'].includes(call.name)
         ? `agent.${call.name}`
         : 'agent.unknown') ||
     (['list_dir', 'read_file', 'git_status'].includes(call.name) &&
@@ -1909,7 +1913,8 @@ function agentCallIsValid(value: unknown): value is PersistedAgentCallJournalV2 
     (['write_file', 'git_commit'].includes(call.name) &&
       call.access !== 'conversation_confirm') ||
     (call.name === 'git_push' && call.access !== 'conversation_confirm') ||
-    (!['list_dir', 'read_file', 'write_file', 'git_status', 'git_commit', 'git_push'].includes(call.name) &&
+    ((call.name === 'start_guest_cgi' || call.name === 'stop_guest_cgi') && call.access !== 'conversation_confirm') ||
+    (!['list_dir', 'read_file', 'write_file', 'git_status', 'git_commit', 'git_push', 'start_guest_cgi', 'stop_guest_cgi'].includes(call.name) &&
       call.access !== 'durable_deny') ||
     !agentAccessValues.has(call.access) ||
     !agentDecisionValues.has(call.approval_decision) ||
@@ -1990,7 +1995,7 @@ export function isAgentAttemptJournal(
     journal.controller_generation >= Number.MAX_SAFE_INTEGER ||
     !agentPolicyIsValid(journal.policy) ||
     !agentRootIsValid(journal.root) ||
-    journal.tool_registry_version !== 1 ||
+    !isAgentRegistryVersion(journal.tool_registry_version) ||
     !isSha256Digest(journal.toolset_sha256) ||
     !agentTranscriptIsValid(journal.transcript) ||
     !Number.isSafeInteger(journal.round_index) ||
@@ -2013,6 +2018,8 @@ export function isAgentAttemptJournal(
     const call = journal.batch[index];
     if (
       !agentCallIsValid(call) ||
+      (journal.tool_registry_version === 1 &&
+        (call.name === 'start_guest_cgi' || call.name === 'stop_guest_cgi')) ||
       call.call_index !== index ||
       seenCallIds.has(call.call_id)
     ) return false;
@@ -2138,7 +2145,9 @@ function agentCallV3IsValid(value: unknown): value is PersistedAgentCallJournalV
     call.name === 'write_file' ||
     call.name === 'git_status' ||
     call.name === 'git_commit' ||
-    call.name === 'git_push';
+    call.name === 'git_push' ||
+    call.name === 'start_guest_cgi' ||
+    call.name === 'stop_guest_cgi';
   const expectedAccess = knownTool
     ? call.name === 'list_dir' || call.name === 'read_file' || call.name === 'git_status'
       ? 'auto'
@@ -2222,7 +2231,7 @@ export function isAgentAttemptJournalV3(
     journal.controller_generation >= Number.MAX_SAFE_INTEGER ||
     !agentPolicyIsValid(journal.policy) ||
     !agentRootIsValid(journal.root) ||
-    journal.tool_registry_version !== 1 ||
+    !isAgentRegistryVersion(journal.tool_registry_version) ||
     !isSha256Digest(journal.toolset_sha256) ||
     !agentTranscriptIsValid(journal.transcript) ||
     !Number.isSafeInteger(journal.round_index) ||
@@ -2240,7 +2249,10 @@ export function isAgentAttemptJournalV3(
   const ids = new Set<string>();
   for (let index = 0; index < journal.batch.length; index += 1) {
     const call = journal.batch[index];
-    if (!agentCallV3IsValid(call) || call.call_index !== index || ids.has(call.call_id)) return false;
+    if (!agentCallV3IsValid(call) ||
+        (journal.tool_registry_version === 1 &&
+          (call.name === 'start_guest_cgi' || call.name === 'stop_guest_cgi')) ||
+        call.call_index !== index || ids.has(call.call_id)) return false;
     ids.add(call.call_id);
   }
   if (
@@ -2340,9 +2352,11 @@ function agentGrantIsValid(value: unknown): value is AgentConversationGrantV2 {
     isSha256Digest(grant.root_fingerprint_sha256) &&
     (grant.tool_family === 'file_write' ||
       grant.tool_family === 'git_commit' ||
-      grant.tool_family === 'git_push') &&
-    (grant.tool_family === 'file_write' || grant.project_id !== null) &&
-    grant.registry_version === 1 &&
+      grant.tool_family === 'git_push' ||
+      grant.tool_family === 'guest_service') &&
+    (grant.tool_family === 'file_write' || grant.tool_family === 'guest_service' || grant.project_id !== null) &&
+    isAgentRegistryVersion(grant.registry_version) &&
+    (grant.tool_family !== 'guest_service' || grant.registry_version === 2) &&
     validIdentifier(grant.policy_version) &&
     isExactDataRecord(grant.issued_for, ['schema_version', 'task_id', 'attempt_id']) &&
     grant.issued_for.schema_version === 1 &&

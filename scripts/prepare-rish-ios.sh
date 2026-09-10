@@ -6,6 +6,7 @@ set -euo pipefail
 # next door when the mobile dependencies are prepared.
 readonly EXPECTED_RISH_COMMIT="ef660dc81fa31cbe279b1f4ba355a97734ff1740"
 readonly EXPECTED_RISH_REMOTE="git@github.com:ZSeven-W/rish.git"
+readonly EXPECTED_RISH_PUBLIC_REMOTE="https://github.com/ZSeven-W/rish.git"
 readonly EXPECTED_HEADER_SHA256="e62f8f088565003a944927e99ec45a4d2194af7a5177b37dcacb41db3e00027d"
 readonly EXPECTED_CARGO_LOCK_SHA256="066816c03c72c20774f7bd80b3e75899e36fd047cea1260313d6e5ea963147d4"
 readonly EXPECTED_CRATE_VERSION="0.1.0"
@@ -20,7 +21,16 @@ readonly EXPECTED_IPHONESIMULATOR_SDK="26.5"
 
 readonly SCRIPT_DIR=${0:A:h}
 readonly APP_ROOT=${SCRIPT_DIR:h}
-readonly RISH_ROOT=${APP_ROOT:h}/rish
+# Accept an explicitly selected sibling checkout so a fresh clone does not
+# depend on the maintainer's local workspace layout. The checkout remains
+# pinned and dirty-tree checked below.
+# A caller may provide a reviewed checkout through either name. With neither
+# set, the script creates a temporary detached clone from the public HTTPS
+# repository and removes it on exit; it never mutates a user's sibling tree.
+readonly RISH_SOURCE_ARG=${RISH_SOURCE_DIR:-${RISH_IOS_RISH_ROOT:-${1:-}}}
+readonly OFFLINE=${RISH_IOS_OFFLINE:-0}
+RISH_ROOT=""
+rish_source_tmp=""
 readonly MODULE_ROOT=${APP_ROOT}/modules/rish/ios
 readonly VENDOR_ROOT=${MODULE_ROOT}/Vendor
 readonly INCLUDE_ROOT=${MODULE_ROOT}/include
@@ -222,6 +232,7 @@ cleanup() {
   [[ -n "${next_header}" ]] && /bin/rm -f -- "${next_header}" || true
   [[ -n "${next_version}" ]] && /bin/rm -f -- "${next_version}" || true
   [[ -n "${build_root}" && -d "${build_root}" ]] && /bin/rm -rf -- "${build_root}" || true
+  [[ -n "${rish_source_tmp}" && -d "${rish_source_tmp}" ]] && /bin/rm -rf -- "${rish_source_tmp}" || true
   if [[ "${lock_acquired}" == true && -n "${lock_dir}" ]]; then
     /bin/rmdir "${lock_dir}" 2>/dev/null || true
   fi
@@ -237,8 +248,40 @@ require_command tar
 require_command xcodebuild
 require_command xcrun
 
-rustc_release=$(rustc +"${RUST_TOOLCHAIN}" -vV | /usr/bin/awk '/^release:/ { print $2 }')
-rustc_commit=$(rustc +"${RUST_TOOLCHAIN}" -vV | /usr/bin/awk '/^commit-hash:/ { print $2 }')
+[[ "${OFFLINE}" == 0 || "${OFFLINE}" == 1 ]] || \
+  fail "RISH_IOS_OFFLINE must be 0 or 1"
+build_rust_toolchain=${RUST_TOOLCHAIN}
+if [[ "${OFFLINE}" == 1 ]]; then
+  # A +version proxy may auto-install a missing Rust toolchain. Resolve only
+  # from the installed inventory, then keep that full name for every command.
+  installed_toolchains=$(rustup toolchain list --quiet) || \
+    fail "could not inspect installed Rust toolchains"
+  build_rust_toolchain=$(
+    print -r -- "${installed_toolchains}" |
+      /usr/bin/awk -v requested="${RUST_TOOLCHAIN}" \
+        '$1 == requested || index($1, requested "-") == 1 { print $1; exit }'
+  )
+  [[ -n "${build_rust_toolchain}" ]] || \
+    fail "offline preparation requires preinstalled Rust ${RUST_TOOLCHAIN}; install the pinned toolchain before retrying"
+fi
+if [[ -n "${RISH_SOURCE_ARG}" ]]; then
+  RISH_ROOT=${RISH_SOURCE_ARG:A}
+  [[ -d "${RISH_ROOT}" ]] || fail "rish source checkout does not exist: ${RISH_ROOT}"
+else
+  [[ "${OFFLINE}" == 0 ]] || \
+    fail "offline preparation requires RISH_SOURCE_DIR or an explicit reviewed checkout path"
+  rish_source_tmp=$(mktemp -d "${TMPDIR:-/tmp}/rish-ios-source.XXXXXX")
+  RISH_ROOT=${rish_source_tmp}/rish
+  git init --quiet "${RISH_ROOT}"
+  git -C "${RISH_ROOT}" remote add origin "${EXPECTED_RISH_PUBLIC_REMOTE}"
+  git -C "${RISH_ROOT}" fetch --quiet --depth=1 origin "${EXPECTED_RISH_COMMIT}" ||
+    fail "could not fetch pinned rish commit from ${EXPECTED_RISH_PUBLIC_REMOTE}"
+  git -C "${RISH_ROOT}" checkout --quiet --detach "${EXPECTED_RISH_COMMIT}" ||
+    fail "could not check out pinned rish commit ${EXPECTED_RISH_COMMIT}"
+fi
+
+rustc_release=$(rustc +"${build_rust_toolchain}" -vV | /usr/bin/awk '/^release:/ { print $2 }')
+rustc_commit=$(rustc +"${build_rust_toolchain}" -vV | /usr/bin/awk '/^commit-hash:/ { print $2 }')
 [[ "${rustc_release}" == "${EXPECTED_RUSTC_RELEASE}" && \
   "${rustc_commit}" == "${EXPECTED_RUSTC_COMMIT}" ]] || \
   fail "Rust ${RUST_TOOLCHAIN} resolved to ${rustc_release}/${rustc_commit}; expected ${EXPECTED_RUSTC_RELEASE}/${EXPECTED_RUSTC_COMMIT}"
@@ -255,18 +298,23 @@ simulator_sdk=$(xcrun --sdk iphonesimulator --show-sdk-version)
   fail "iOS SDKs are ${device_sdk}/${simulator_sdk}; expected ${EXPECTED_IPHONEOS_SDK}/${EXPECTED_IPHONESIMULATOR_SDK}"
 
 git -C "${RISH_ROOT}" rev-parse --is-inside-work-tree >/dev/null 2>&1 || \
-  fail "expected adjacent rish checkout at ${RISH_ROOT}"
+  fail "expected a Git source checkout at ${RISH_ROOT}"
 actual_commit=$(git -C "${RISH_ROOT}" rev-parse HEAD)
 actual_remote=$(git -C "${RISH_ROOT}" remote get-url origin)
 [[ "${actual_commit}" == "${EXPECTED_RISH_COMMIT}" ]] || \
   fail "rish HEAD is ${actual_commit}; expected pinned commit ${EXPECTED_RISH_COMMIT}"
-[[ "${actual_remote}" == "${EXPECTED_RISH_REMOTE}" ]] || \
-  fail "rish origin is ${actual_remote}; expected ${EXPECTED_RISH_REMOTE}"
+case "${actual_remote}" in
+  "${EXPECTED_RISH_REMOTE}"|"${EXPECTED_RISH_PUBLIC_REMOTE}"|ssh://git@github.com/ZSeven-W/rish.git)
+    ;;
+  *)
+    fail "rish origin is ${actual_remote}; expected the canonical ZSeven-W/rish repository"
+    ;;
+esac
 [[ -z "$(git -C "${RISH_ROOT}" status --porcelain=v1 --untracked-files=all)" ]] || \
   fail "rish checkout is dirty; refusing to package beside unreviewed source"
 
 for target in "${DEVICE_TARGET}" "${SIMULATOR_TARGET}"; do
-  rustup target list --installed --toolchain "${RUST_TOOLCHAIN}" |
+  rustup target list --installed --toolchain "${build_rust_toolchain}" |
     /usr/bin/grep -x "${target}" >/dev/null || \
     fail "Rust target ${target} is not installed; run: rustup target add --toolchain ${RUST_TOOLCHAIN} ${target}"
 done
@@ -294,12 +342,11 @@ actual_lock_sha=$(sha256_file "${source_root}/Cargo.lock")
 [[ "${actual_lock_sha}" == "${EXPECTED_CARGO_LOCK_SHA256}" ]] || \
   fail "archived Cargo.lock SHA-256 is ${actual_lock_sha}; expected ${EXPECTED_CARGO_LOCK_SHA256}"
 
-# Remove ambient code-generation inputs. Reuse only Cargo's content-addressed
-# dependency cache after rejecting user-level Cargo config; fetch and both
-# release builds remain offline/frozen against the pinned lockfile.
+# Remove ambient code-generation inputs. Populate Cargo's content-addressed
+# cache from the pinned lockfile on a fresh machine, after rejecting user-level
+# Cargo config. RISH_IOS_OFFLINE=1 requires an already populated cache; both
+# release builds always stay offline/frozen against the verified lockfile.
 dependency_cache_root=${CARGO_HOME:-${HOME}/.cargo}
-[[ -d "${dependency_cache_root}" ]] || \
-  fail "Cargo dependency cache is missing at ${dependency_cache_root}"
 for cargo_config in "${dependency_cache_root}/config" "${dependency_cache_root}/config.toml"; do
   [[ ! -e "${cargo_config}" ]] || \
     fail "ambient Cargo config is not allowed during release packaging: ${cargo_config}"
@@ -314,17 +361,18 @@ export CARGO_TARGET_DIR=${build_root}/cargo-target
 export IPHONEOS_DEPLOYMENT_TARGET=${IOS_DEPLOYMENT_TARGET}
 export RISH_SOURCE_REVISION=${EXPECTED_RISH_COMMIT}
 export SOURCE_DATE_EPOCH=$(git -C "${RISH_ROOT}" show -s --format=%ct "${EXPECTED_RISH_COMMIT}")
+fetch_options=(--locked)
+[[ "${OFFLINE}" == 1 ]] && fetch_options+=(--offline)
 (
   cd "${source_root}"
-  cargo +"${RUST_TOOLCHAIN}" fetch \
-    --locked \
-    --offline \
+  cargo +"${build_rust_toolchain}" fetch \
+    "${fetch_options[@]}" \
     --target "${DEVICE_TARGET}" \
     --target "${SIMULATOR_TARGET}"
 )
 crate_version=$(
   cd "${source_root}"
-  cargo +"${RUST_TOOLCHAIN}" metadata --frozen --no-deps --format-version 1 |
+  cargo +"${build_rust_toolchain}" metadata --frozen --no-deps --format-version 1 |
     /usr/bin/jq -r '.packages[] | select(.name == "rish-ffi") | .version'
 )
 [[ "${crate_version}" == "${EXPECTED_CRATE_VERSION}" ]] || \
@@ -334,7 +382,7 @@ for target in "${DEVICE_TARGET}" "${SIMULATOR_TARGET}"; do
   print -- "building immutable rish-ffi ${EXPECTED_RISH_COMMIT} for ${target}"
   (
     cd "${source_root}"
-    cargo +"${RUST_TOOLCHAIN}" build \
+    cargo +"${build_rust_toolchain}" build \
       --frozen \
       --release \
       --target "${target}" \
@@ -360,8 +408,8 @@ xcodebuild -create-xcframework \
   -output "${stage_xcframework}"
 verify_xcframework "${stage_xcframework}" "${source_header}"
 
-rustc_version=$(rustc +"${RUST_TOOLCHAIN}" --version)
-cargo_version=$(cargo +"${RUST_TOOLCHAIN}" --version)
+rustc_version=$(rustc +"${build_rust_toolchain}" --version)
+cargo_version=$(cargo +"${build_rust_toolchain}" --version)
 xcode_version="${xcode_version_line};${xcode_build_line}"
 device_sha=$(sha256_file "${stage_xcframework}/ios-arm64/librish_ffi.a")
 simulator_sha=$(sha256_file "${stage_xcframework}/ios-arm64-simulator/librish_ffi.a")
@@ -371,7 +419,7 @@ version_stage=${stage_root}/rish_ffi.version
 {
   print -- "format=1"
   print -- "source=https://github.com/ZSeven-W/rish"
-  print -- "source_remote=${EXPECTED_RISH_REMOTE}"
+  print -- "source_remote=${EXPECTED_RISH_PUBLIC_REMOTE}"
   print -- "source_snapshot=git-archive"
   print -- "commit=${EXPECTED_RISH_COMMIT}"
   print -- "crate=rish-ffi"

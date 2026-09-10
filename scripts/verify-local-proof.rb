@@ -145,8 +145,8 @@ processes, process_status = Open3.capture2e(
 abort "cannot read Simulator process table: #{processes.strip}" unless process_status.success?
 expected_pid = proof.fetch('process_id').to_i
 process_line = processes.lines.find do |line|
-  line.match?(/^\s*#{expected_pid}\s+/) && line.include?('DSHMobile')
+  line.match?(/^\s*#{expected_pid}\s+/) && line.include?('Rish')
 end
-abort "runtime proof PID #{expected_pid} is not a live Simulator DSHMobile process" if process_line.nil?
+abort "runtime proof PID #{expected_pid} is not a live Simulator Rish process" if process_line.nil?
 
 puts JSON.pretty_generate(proof)

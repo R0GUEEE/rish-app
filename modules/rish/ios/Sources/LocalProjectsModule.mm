@@ -6,6 +6,7 @@
 #import <UIKit/UIKit.h>
 
 #import "DSHGitPushSupport.h"
+#import "DSHGitSSHSupport.h"
 #import "LocalProjectAccess.h"
 #import "LocalWorkspaceAccess.h"
 #import "WorkspaceClearanceStore.h"
@@ -66,6 +67,16 @@ static NSError *LPError(NSInteger code, NSString *message) {
 
 static NSString *LPString(id value) {
   return [value isKindOfClass:NSString.class] ? value : nil;
+}
+
+/// Validates either the existing HTTPS remote grammar or the native SSH
+/// grammar. SSH is kept out of the HTTPS token credential path.
+static NSURL *LPValidatedRemoteURL(id value, NSError **error) {
+  NSURL *https = DSHGitValidatedRemoteURL(value, nil);
+  if (https != nil) return https;
+  NSDictionary *ssh = DSHGitSSHValidatedRemote(value, error);
+  if (ssh == nil) return nil;
+  return [NSURL URLWithString:ssh[@"canonical_url"]];
 }
 
 static NSDictionary *LPDictionary(id value) {
@@ -404,6 +415,23 @@ static NSString *LPValidatedHTTPSProxyURL(id optionsValue, NSError **error) {
     return nil;
   }
   return proxyURL;
+}
+
+static NSString *LPValidatedSSHProfileId(id optionsValue, NSError **error) {
+  if (optionsValue == nil || optionsValue == NSNull.null) return nil;
+  NSDictionary *options = LPDictionary(optionsValue);
+  if (options == nil) {
+    if (error) *error = LPError(3004, @"SSH profile options are invalid");
+    return nil;
+  }
+  id value = options[@"sshProfileId"];
+  if (value == nil || value == NSNull.null) return nil;
+  NSString *profile = LPString(value);
+  if (profile.length == 0 || profile.length > 128 || LPHasControlCharacter(profile)) {
+    if (error) *error = LPError(3004, @"SSH profile id is invalid");
+    return nil;
+  }
+  return profile;
 }
 
 static NSString *LPValidatedProjectName(id value, NSError **error) {
@@ -828,6 +856,7 @@ static const NSTimeInterval LPCloneOverallBudgetSeconds = 300;
 @property(nonatomic) NSUInteger totalFiles;
 @property(nonatomic, copy) NSDictionary *project;
 @property(nonatomic, copy) NSString *failureCode;
+@property(nonatomic, copy, nullable) NSString *sshProfileId;
 - (NSDictionary *)snapshot;
 - (BOOL)terminal;
 - (BOOL)shouldCancel;
@@ -879,6 +908,7 @@ typedef struct {
   NSTimeInterval deadline;
   bool exceeded;
   __unsafe_unretained LPCloneOperation *operation;
+  void *sshContext;
 } LPCloneBudget;
 
 static int LPCloneBudgetExpired(void *payload) {
@@ -932,12 +962,23 @@ static int LPPublicCloneCredentialCallback(git_credential **out,
                                             const char *username,
                                             unsigned int allowedTypes,
                                             void *payload) {
+  LPCloneBudget *budget = (LPCloneBudget *)payload;
+  if (budget != nullptr && budget->sshContext != nullptr)
+    return DSHGitSSHCredentialCallback(out, url, username, allowedTypes,
+                                       budget->sshContext);
   (void)out;
   (void)url;
   (void)username;
   (void)allowedTypes;
   (void)payload;
   return GIT_EAUTH;
+}
+
+static int LPCloneCertificateCallback(git_cert *cert, int valid,
+                                      const char *host, void *payload) {
+  LPCloneBudget *budget = (LPCloneBudget *)payload;
+  if (budget == nullptr || budget->sshContext == nullptr) return valid ? 0 : -1;
+  return DSHGitSSHCertificateCallback(cert, valid, host, budget->sshContext);
 }
 
 /// Native credential prompt result. `failureCode` nil means the user entered a
@@ -953,7 +994,7 @@ typedef void (^LPCredentialPromptHook)(NSString *host, BOOL chinese,
                                        BOOL plaintext,
                                        LPCredentialPromptCompletion completion);
 
-@interface LocalProjectsModule : NSObject <RCTBridgeModule>
+@interface LocalProjectsModule : NSObject <RCTBridgeModule, UIDocumentPickerDelegate>
 @property(nonatomic, strong) dispatch_queue_t projectQueue;
 @property(nonatomic, strong) LPCloneOperation *cloneOperation;
 @property(nonatomic, copy, nullable) LPCredentialPromptHook credentialPromptHook;
@@ -970,10 +1011,16 @@ typedef void (^LPCredentialPromptHook)(NSString *host, BOOL chinese,
 @property(nonatomic, strong, nullable) DSHLocalProjectsRootLease *pendingRootLease;
 @property(nonatomic, copy, nullable) LPV2AttachFaultHook v2AttachFaultHook;
 @property(nonatomic, copy, nullable) void (^clonePhaseHook)(NSString *phase);
+@property(nonatomic, copy, nullable) NSString *sshImportProfileId;
+@property(nonatomic, copy, nullable) NSString *sshImportHost;
+@property(nonatomic) NSInteger sshImportPort;
+@property(nonatomic, copy, nullable) NSString *sshImportUsername;
+@property(nonatomic, copy, nullable) RCTPromiseResolveBlock sshImportResolve;
+@property(nonatomic, copy, nullable) RCTPromiseRejectBlock sshImportReject;
 - (nullable NSDictionary *)diffForRepository:(git_repository *)repository projectId:(NSString *)projectId
   staged:(BOOL)staged contextLines:(NSUInteger)contextLines pageOffset:(NSNumber *)pageOffset
   expectedSnapshot:(NSString *)expectedSnapshot error:(NSError **)error;
-- (nullable NSDictionary *)clonePublicRepositoryAtURL:(NSURL *)remoteURL name:(NSString *)name proxyURL:(NSString *)proxyURL operation:(LPCloneOperation *)operation error:(NSError **)error;
+- (nullable NSDictionary *)clonePublicRepositoryAtURL:(NSURL *)remoteURL name:(NSString *)name proxyURL:(NSString *)proxyURL operation:(LPCloneOperation *_Nullable)operation sshProfileId:(NSString *_Nullable)sshProfileId error:(NSError **)error;
 - (BOOL)stagingEntryIsExactForProjectId:(NSString *)projectId
                                   error:(NSError **)error;
 - (void)removeVisibleStagingDirectory:(NSURL *)staging
@@ -1169,7 +1216,7 @@ RCT_EXPORT_MODULE(LocalProjects)
     NSString *origin = (*metadata)[@"origin_url"] == NSNull.null
       ? nil : LPString((*metadata)[@"origin_url"]);
     if (*metadata != nil && origin != nil &&
-        DSHGitValidatedRemoteURL(origin, nil) == nil) {
+        LPValidatedRemoteURL(origin, nil) == nil) {
       *metadata = nil;
     }
     if (*metadata == nil) {
@@ -1277,7 +1324,7 @@ RCT_EXPORT_MODULE(LocalProjects)
     ? [NSString stringWithUTF8String:value.ptr] : nil;
   git_buf_dispose(&value);
   if (config != nullptr) git_config_free(config);
-  NSURL *validated = DSHGitValidatedRemoteURL(raw, nil);
+  NSURL *validated = LPValidatedRemoteURL(raw, nil);
   if (validated == nil) {
     if (error != nil) *error = LPError(3015, @"Origin remote is unavailable or unsafe");
     return nil;
@@ -2993,7 +3040,8 @@ RCT_REMAP_METHOD(startClone,
                  resolver:(RCTPromiseResolveBlock)resolve rejecter:(RCTPromiseRejectBlock)reject) {
   NSError *error = nil;
   NSString *proxyURL = LPValidatedHTTPSProxyURL(optionsValue, &error);
-  NSURL *remoteURL = error == nil ? DSHGitValidatedRemoteURL(urlValue, &error) : nil;
+  NSString *sshProfileId = error == nil ? LPValidatedSSHProfileId(optionsValue, &error) : nil;
+  NSURL *remoteURL = error == nil ? LPValidatedRemoteURL(urlValue, &error) : nil;
   NSString *name = nil;
   if (nameValue == nil || nameValue == NSNull.null) {
     NSString *derived = remoteURL.path.lastPathComponent.stringByRemovingPercentEncoding;
@@ -3007,6 +3055,7 @@ RCT_REMAP_METHOD(startClone,
   }
   LPCloneOperation *operation = [[LPCloneOperation alloc] init];
   operation.name = name;
+  operation.sshProfileId = sshProfileId;
   @synchronized (self) {
     if (self.cloneOperation != nil && ![self.cloneOperation terminal]) {
       reject(@"busy", @"A clone is already running", nil);
@@ -3018,7 +3067,7 @@ RCT_REMAP_METHOD(startClone,
   dispatch_async(self.projectQueue, ^{
     NSError *failure = nil;
     NSDictionary *project = [self clonePublicRepositoryAtURL:remoteURL name:name
-      proxyURL:proxyURL operation:operation error:&failure];
+      proxyURL:proxyURL operation:operation sshProfileId:operation.sshProfileId error:&failure];
     @synchronized (operation) {
       operation.project = project;
       operation.phase = project != nil ? @"succeeded"
@@ -3069,11 +3118,12 @@ RCT_REMAP_METHOD(clone,
     NSError *error = nil;
     __attribute__((objc_precise_lifetime)) NSString *proxyURL =
       LPValidatedHTTPSProxyURL(optionsValue, &error);
+    NSString *sshProfileId = error == nil ? LPValidatedSSHProfileId(optionsValue, &error) : nil;
     if (error != nil) {
       reject(@"validation", error.localizedDescription, nil);
       return;
     }
-    NSURL *remoteURL = DSHGitValidatedRemoteURL(urlValue, &error);
+    NSURL *remoteURL = LPValidatedRemoteURL(urlValue, &error);
     NSString *name = nil;
     if (nameValue == nil || nameValue == NSNull.null) {
       NSString *derived = remoteURL.path.lastPathComponent.stringByRemovingPercentEncoding;
@@ -3091,6 +3141,8 @@ RCT_REMAP_METHOD(clone,
     NSDictionary *metadata = [self clonePublicRepositoryAtURL:remoteURL
                                                          name:name
                                                      proxyURL:proxyURL
+                                                   operation:nil
+                                                sshProfileId:sshProfileId
                                                         error:&error];
     if (metadata == nil) {
       reject(@"git", error.localizedDescription ?: @"Public repository cannot be cloned", nil);
@@ -3100,21 +3152,76 @@ RCT_REMAP_METHOD(clone,
   });
 }
 
+RCT_REMAP_METHOD(fetch,
+                 fetchForProject:(id)projectIdValue
+                 sshProfileId:(id)profileIdValue
+                 resolver:(RCTPromiseResolveBlock)resolve
+                 rejecter:(RCTPromiseRejectBlock)reject) {
+  dispatch_async(self.projectQueue, ^{
+    NSError *error = nil;
+    NSString *projectId = LPString(projectIdValue);
+    NSString *profileId = LPString(profileIdValue);
+    __attribute__((objc_precise_lifetime)) DSHLocalProjectLease *lease =
+        [self leaseRepositoryForId:projectId mode:DSHLocalProjectAccessModeWrite
+                           metadata:nil error:&error];
+    if (lease == nil) {
+      reject(@"project", error.localizedDescription ?: @"Project is unavailable", nil);
+      return;
+    }
+    NSString *origin = [self originURLForRepository:lease.repository error:&error];
+    NSDictionary *ssh = DSHGitSSHValidatedRemote(origin, nil);
+    if (ssh != nil && profileId.length == 0) {
+      reject(@"credential", @"An SSH credential profile is required", nil);
+      return;
+    }
+    void *auth = nullptr;
+    if (ssh != nil) {
+      auth = DSHGitSSHAuthContextCreate(profileId, ssh[@"host"],
+          [ssh[@"port"] integerValue], ssh[@"username"], &error);
+      if (auth == nullptr) {
+        reject(@"credential", error.localizedDescription ?: @"SSH credential is unavailable", nil);
+        return;
+      }
+    }
+    git_remote *remote = nullptr;
+    int result = git_remote_lookup(&remote, lease.repository, LPRemoteName.UTF8String);
+    git_fetch_options options = GIT_FETCH_OPTIONS_INIT;
+    if (auth != nullptr) {
+      options.callbacks.credentials = DSHGitSSHCredentialCallback;
+      options.callbacks.certificate_check = DSHGitSSHCertificateCallback;
+      options.callbacks.payload = auth;
+    }
+    git_libgit2_opts(GIT_OPT_SET_SERVER_CONNECT_TIMEOUT,
+                     LPCloneConnectTimeoutMilliseconds);
+    git_libgit2_opts(GIT_OPT_SET_SERVER_TIMEOUT, LPCloneIdleTimeoutMilliseconds);
+    if (result == 0) result = git_remote_fetch(remote, nullptr, &options, nullptr);
+    if (remote != nullptr) git_remote_free(remote);
+    if (auth != nullptr) DSHGitSSHAuthContextFree(auth);
+    if (result < 0) {
+      reject(@"git", @"Git fetch failed", nil);
+      return;
+    }
+    resolve(@{ @"schema_version": @1, @"project_id": projectId,
+               @"remote": LPRemoteName, @"fetched": @YES });
+  });
+}
+
 /// Runs the complete staged, validated public clone. Callers must serialize
 /// access through the project queue; used by the RCT clone method and by the
 /// env-gated test fixture driver.
 - (NSDictionary *)clonePublicRepositoryAtURL:(NSURL *)remoteURL
                                         name:(NSString *)name
                                     proxyURL:(NSString *)proxyURL
-                                       error:(NSError **)error {
+                                        error:(NSError **)error {
   return [self clonePublicRepositoryAtURL:remoteURL name:name proxyURL:proxyURL
-    operation:nil error:error];
+    operation:nil sshProfileId:nil error:error];
 }
 
 - (NSDictionary *)clonePublicRepositoryAtURL:(NSURL *)remoteURL
                                         name:(NSString *)name
                                     proxyURL:(NSString *)proxyURL
                                    operation:(LPCloneOperation *)operation
+                               sshProfileId:(NSString *)sshProfileId
                                        error:(NSError **)error {
   if (self.clonePhaseHook != nil) self.clonePhaseHook(@"queued");
   if ([operation shouldCancel]) return nil;
@@ -3147,7 +3254,23 @@ RCT_REMAP_METHOD(clone,
     .deadline = NSProcessInfo.processInfo.systemUptime + LPCloneOverallBudgetSeconds,
     .exceeded = false,
     .operation = operation,
+    .sshContext = nullptr,
   };
+  NSDictionary *sshRemote = DSHGitSSHValidatedRemote(remoteURL.absoluteString, nil);
+  if (sshRemote != nil && sshProfileId.length > 0) {
+    budget.sshContext = DSHGitSSHAuthContextCreate(
+        sshProfileId, sshRemote[@"host"], [sshRemote[@"port"] integerValue],
+        sshRemote[@"username"], error);
+    if (budget.sshContext == nullptr) {
+      [self removeVisibleStagingDirectory:staging projectId:projectId];
+      return nil;
+    }
+    options.fetch_opts.callbacks.certificate_check = LPCloneCertificateCallback;
+  } else if (sshRemote != nil) {
+    if (error) *error = LPError(3021, @"An SSH credential profile is required");
+    [self removeVisibleStagingDirectory:staging projectId:projectId];
+    return nil;
+  }
   options.fetch_opts.callbacks.transfer_progress = LPCloneTransferProgress;
   options.fetch_opts.callbacks.sideband_progress = LPCloneSidebandProgress;
   options.fetch_opts.callbacks.payload = &budget;
@@ -3167,6 +3290,10 @@ RCT_REMAP_METHOD(clone,
     ? git_clone(&repository, remoteURL.absoluteString.UTF8String,
                 repoURL.fileSystemRepresentation, &options)
     : -1;
+  if (budget.sshContext != nullptr) {
+    DSHGitSSHAuthContextFree(budget.sshContext);
+    budget.sshContext = nullptr;
+  }
   BOOL stagingBoundAfter = result == 0 &&
     [self stagingEntryIsExactForProjectId:projectId error:error];
   NSString *cloneFailure = nil;
@@ -3700,7 +3827,7 @@ RCT_REMAP_METHOD(setRemote,
   dispatch_async(self.projectQueue, ^{
     NSError *error = nil;
     NSString *projectId = LPString(projectIdValue);
-    NSURL *remoteURL = DSHGitValidatedRemoteURL(urlValue, &error);
+    NSURL *remoteURL = LPValidatedRemoteURL(urlValue, &error);
     if (remoteURL == nil) {
       reject(@"validation", error.localizedDescription, nil);
       return;
@@ -3779,6 +3906,150 @@ RCT_REMAP_METHOD(credentialStatus,
     }
     resolve(status);
   });
+}
+
+RCT_REMAP_METHOD(sshCredentialStatus,
+                 sshCredentialStatusForProfile:(id)profileIdValue
+                 resolver:(RCTPromiseResolveBlock)resolve
+                 rejecter:(RCTPromiseRejectBlock)reject) {
+  dispatch_async(self.projectQueue, ^{
+    NSError *error = nil;
+    NSString *profileId = LPString(profileIdValue);
+    NSDictionary *status = DSHGitSSHCredentialStatusForProfile(profileId, &error);
+    if (error != nil) {
+      reject(@"credential", error.localizedDescription, nil);
+      return;
+    }
+    resolve(status ?: NSNull.null);
+  });
+}
+
+/// Opens the native document picker for exactly one private-key file and one
+/// OpenSSH known_hosts file. Selected data is read under the security-scoped
+/// URL and immediately handed to Keychain storage; no filesystem copy is made.
+RCT_REMAP_METHOD(beginSSHCredentialImport,
+                 beginSSHCredentialImportForProfile:(id)profileIdValue
+                 host:(id)hostValue
+                 port:(id)portValue
+                 username:(id)usernameValue
+                 resolver:(RCTPromiseResolveBlock)resolve
+                 rejecter:(RCTPromiseRejectBlock)reject) {
+  NSString *profileId = LPString(profileIdValue);
+  NSString *host = LPString(hostValue).lowercaseString;
+  NSInteger port = [portValue isKindOfClass:NSNumber.class] ? [portValue integerValue] : 0;
+  NSString *username = LPString(usernameValue);
+  if (profileId.length == 0 || host.length == 0 || port < 1 || port > 65535 || username.length == 0) {
+    reject(@"validation", @"SSH profile endpoint is invalid", nil);
+    return;
+  }
+  dispatch_async(dispatch_get_main_queue(), ^{
+    @synchronized (self) {
+      if (self.sshImportResolve != nil) {
+        reject(@"busy", @"Another SSH credential import is already active", nil);
+        return;
+      }
+    }
+    UIViewController *presenter = RCTPresentedViewController();
+    if (presenter == nil || [presenter isKindOfClass:UIAlertController.class]) {
+      reject(@"presentation", @"SSH credential picker cannot be presented", nil);
+      return;
+    }
+    self.sshImportProfileId = profileId;
+    self.sshImportHost = host;
+    self.sshImportPort = port;
+    self.sshImportUsername = username;
+    self.sshImportResolve = resolve;
+    self.sshImportReject = reject;
+    UIDocumentPickerViewController *picker =
+        [[UIDocumentPickerViewController alloc] initWithDocumentTypes:@[@"public.data"]
+                                                                  inMode:UIDocumentPickerModeOpen];
+    picker.allowsMultipleSelection = YES;
+    picker.delegate = self;
+    [presenter presentViewController:picker animated:YES completion:nil];
+  });
+}
+
+- (void)documentPickerWasCancelled:(UIDocumentPickerViewController *)controller {
+  (void)controller;
+  RCTPromiseResolveBlock resolve = self.sshImportResolve;
+  self.sshImportResolve = nil;
+  self.sshImportReject = nil;
+  self.sshImportProfileId = nil;
+  self.sshImportHost = nil;
+  self.sshImportUsername = nil;
+  self.sshImportPort = 0;
+  if (resolve != nil) resolve(NSNull.null);
+}
+
+- (void)documentPicker:(UIDocumentPickerViewController *)controller
+ didPickDocumentsAtURLs:(NSArray<NSURL *> *)urls {
+  (void)controller;
+  RCTPromiseResolveBlock resolve = self.sshImportResolve;
+  RCTPromiseRejectBlock reject = self.sshImportReject;
+  NSString *profileId = self.sshImportProfileId;
+  NSString *host = self.sshImportHost;
+  NSInteger port = self.sshImportPort;
+  NSString *username = self.sshImportUsername;
+  self.sshImportResolve = nil;
+  self.sshImportReject = nil;
+  self.sshImportProfileId = nil;
+  self.sshImportHost = nil;
+  self.sshImportUsername = nil;
+  self.sshImportPort = 0;
+  if (urls.count != 2 || resolve == nil || reject == nil) {
+    if (reject) reject(@"validation", @"Choose one private key and one known_hosts file", nil);
+    return;
+  }
+  NSURL *keyURL = nil;
+  NSURL *knownURL = nil;
+  for (NSURL *url in urls) {
+    if ([url.lastPathComponent isEqualToString:@"known_hosts"] ||
+        [url.lastPathComponent isEqualToString:@"known_hosts.old"]) knownURL = url;
+    else if (keyURL == nil) keyURL = url;
+    else { keyURL = nil; break; }
+  }
+  if (keyURL == nil || knownURL == nil) {
+    reject(@"validation", @"Choose one private key and one known_hosts file", nil);
+    return;
+  }
+  NSDictionary *resourceKeys = [keyURL resourceValuesForKeys:
+      @[NSURLIsDirectoryKey, NSURLFileSizeKey] error:nil];
+  NSDictionary *knownResourceKeys = [knownURL resourceValuesForKeys:
+      @[NSURLIsDirectoryKey, NSURLFileSizeKey] error:nil];
+  NSNumber *keySize = resourceKeys[NSURLFileSizeKey];
+  NSNumber *knownSize = knownResourceKeys[NSURLFileSizeKey];
+  if ([resourceKeys[NSURLIsDirectoryKey] boolValue] ||
+      [knownResourceKeys[NSURLIsDirectoryKey] boolValue] ||
+      keySize == nil || knownSize == nil || keySize.unsignedLongLongValue > 131072 ||
+      knownSize.unsignedLongLongValue > 1048576) {
+    reject(@"validation", @"SSH key or known_hosts file is too large", nil);
+    return;
+  }
+  BOOL keyAccess = [keyURL startAccessingSecurityScopedResource];
+  BOOL knownAccess = [knownURL startAccessingSecurityScopedResource];
+  NSData *keyData = keyAccess ? [NSData dataWithContentsOfURL:keyURL options:NSDataReadingMappedIfSafe error:nil] : nil;
+  NSData *knownData = knownAccess ? [NSData dataWithContentsOfURL:knownURL options:NSDataReadingMappedIfSafe error:nil] : nil;
+  if (keyAccess) [keyURL stopAccessingSecurityScopedResource];
+  if (knownAccess) [knownURL stopAccessingSecurityScopedResource];
+  NSString *privateKey = [[NSString alloc] initWithData:keyData encoding:NSUTF8StringEncoding];
+  NSString *knownHosts = [[NSString alloc] initWithData:knownData encoding:NSUTF8StringEncoding];
+  keyData = nil;
+  knownData = nil;
+  NSError *error = nil;
+  if (privateKey == nil || knownHosts == nil ||
+      !DSHGitSSHPrivateKeyIsSupported(privateKey, &error)) {
+    reject(@"credential", error.localizedDescription ?: @"SSH private key is invalid", nil);
+    return;
+  }
+  BOOL stored = DSHGitSSHStoreCredentialForProfile(profileId, host, port, username,
+      privateKey, nil, nil, knownHosts, &error);
+  privateKey = nil;
+  knownHosts = nil;
+  if (!stored) {
+    reject(@"credential", error.localizedDescription ?: @"SSH credential cannot be saved", nil);
+    return;
+  }
+  resolve(DSHGitSSHCredentialStatusForProfile(profileId, nil));
 }
 
 RCT_REMAP_METHOD(presentCredentialPrompt,
@@ -4021,6 +4292,11 @@ RCT_REMAP_METHOD(push,
     if (origin == nil) {
       lease = nil;
       reject(@"remote", error.localizedDescription ?: @"Origin remote is unavailable or unsafe", nil);
+      return;
+    }
+    if (DSHGitSSHValidatedRemote(origin, nil) != nil) {
+      lease = nil;
+      reject(@"credential", @"SSH push is unavailable until an SSH push transport is enabled", nil);
       return;
     }
     NSString *host = [NSURLComponents componentsWithString:origin].host.lowercaseString;

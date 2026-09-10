@@ -880,6 +880,27 @@ static NSArray *DSHRuntimeLatestBatchCalls(NSDictionary *state,
             @"tool" : tool };
 }
 
+- (NSDictionary *)readAgentRoundPresentations:(NSDictionary *)request error:(NSError **)error {
+  if (!DSHAgentExactDictionaryKeys(request, @[@"schema_version", @"conversation_id", @"attempt_id"]) || ![request[@"schema_version"] isEqual:@1] || !DSHAgentCanonicalUUID(request[@"conversation_id"]) || !DSHAgentCanonicalUUID(request[@"attempt_id"])) {
+    DSHSetAgentNativeStoreError(error, DSHAgentNativeStoreErrorInvalidArgument); return nil;
+  }
+  NSDictionary *loaded = [self.preparedStore.sessionSnapshotStore loadSessionSnapshotWithError:error];
+  NSData *bytes = [loaded[@"session_json"] isKindOfClass:NSString.class] ? [loaded[@"session_json"] dataUsingEncoding:NSUTF8StringEncoding] : nil;
+  NSDictionary *session = bytes ? [NSJSONSerialization JSONObjectWithData:bytes options:0 error:nil] : nil;
+  if (![loaded[@"status"] isEqual:@"present"] || ![session[@"conversations"] isKindOfClass:NSArray.class]) {
+    if (error && !*error) DSHSetAgentNativeStoreError(error, DSHAgentNativeStoreErrorUnavailable); return nil;
+  }
+  BOOL ownsAttempt = NO;
+  for (NSDictionary *conversation in session[@"conversations"]) {
+    if (![conversation[@"id"] isEqual:request[@"conversation_id"]]) continue;
+    for (NSDictionary *attempt in conversation[@"attempts"]) {
+      if ([attempt[@"attempt_id"] isEqual:request[@"attempt_id"]]) ownsAttempt = YES;
+    }
+  }
+  if (!ownsAttempt) { DSHSetAgentNativeStoreError(error, DSHAgentNativeStoreErrorNotFound); return nil; }
+  return [self.transcripts roundPresentationsForConversation:request[@"conversation_id"] attempt:request[@"attempt_id"] error:error];
+}
+
 - (NSDictionary *)queryAgentAttempt:(NSDictionary *)rawRequest
                                 error:(NSError **)error {
   NSDictionary *request = DSHRuntimeRequest(rawRequest, @[
@@ -1357,7 +1378,7 @@ static NSArray *DSHRuntimeLatestBatchCalls(NSDictionary *state,
         @"visible_message_count" : authority[@"visible_message_count"],
         @"project_context_sha256" : authority[@"project_context_sha256"],
         @"transcript" : request[@"expected_transcript"], @"root" : request[@"root"],
-        @"registry_version" : @1,
+        @"registry_version" : authority[@"registry"][@"registry_version"],
         @"toolset_sha256" : authority[@"registry"][@"toolset_sha256"],
       } error:error];
       if (retried == nil) return nil;

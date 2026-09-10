@@ -998,19 +998,29 @@ BOOL DSHAgentValidateNativeToolFeedbackString(NSString *feedbackJSON,
       DSHSetAgentNativeStoreError(error, DSHAgentNativeStoreErrorCapacity);
       return NO;
     }
-    return DSHAgentExactDictionaryKeys(payload, @[
-             @"schema_version", @"content", @"revision", @"truncated",
-           ]) && DSHAgentBoundedUTF8String(payload[@"content"], 64 * 1024, YES,
+    return DSHAgentExactDictionaryKeys(payload, payload[@"sha256"] == nil
+        ? @[@"schema_version", @"content", @"revision", @"truncated"]
+        : @[@"schema_version", @"content", @"revision", @"truncated", @"sha256"]) &&
+        (payload[@"sha256"] == nil || (DSHAgentCanonicalSHA256(payload[@"sha256"]) && ![payload[@"truncated"] boolValue])) && DSHAgentBoundedUTF8String(payload[@"content"], 64 * 1024, YES,
                                            nullptr) &&
         DSHAgentBoundedUTF8String(payload[@"revision"], 256, NO, nullptr) &&
         [payload[@"truncated"] isKindOfClass:NSNumber.class] &&
         CFGetTypeID((__bridge CFTypeRef)payload[@"truncated"]) == CFBooleanGetTypeID();
   }
   if ([name isEqualToString:@"write_file"]) {
-    return DSHAgentExactDictionaryKeys(payload, @[
-             @"schema_version", @"bytes", @"revision",
-           ]) && DSHAgentSafeInteger(payload[@"bytes"], 32768, YES) &&
+    return DSHAgentExactDictionaryKeys(payload, payload[@"sha256"] == nil
+        ? @[@"schema_version", @"bytes", @"revision"]
+        : @[@"schema_version", @"bytes", @"revision", @"sha256"]) &&
+        (payload[@"sha256"] == nil || DSHAgentCanonicalSHA256(payload[@"sha256"])) && DSHAgentSafeInteger(payload[@"bytes"], 32768, YES) &&
         DSHAgentBoundedUTF8String(payload[@"revision"], 256, NO, nullptr);
+  }
+  if ([name isEqualToString:@"start_guest_cgi"] || [name isEqualToString:@"stop_guest_cgi"]) {
+    BOOL start = [name isEqualToString:@"start_guest_cgi"];
+    if (!DSHAgentExactDictionaryKeys(payload, start ? @[@"schema_version", @"status", @"service_id", @"url"] : @[@"schema_version", @"status", @"service_id"]) || !DSHAgentCanonicalUUID(payload[@"service_id"]) || ![payload[@"status"] isEqual:(start ? @"running" : @"stopped")]) return NO;
+    if (!start) return YES;
+    if (!DSHAgentBoundedUTF8String(payload[@"url"], 128, NO, nullptr)) return NO;
+    NSURLComponents *url = [NSURLComponents componentsWithString:payload[@"url"]];
+    return [url.scheme isEqual:@"http"] && [url.host isEqual:@"127.0.0.1"] && url.port.integerValue > 0 && url.port.integerValue <= 65535 && [url.path isEqual:@"/"] && url.user == nil && url.password == nil && url.query == nil && url.fragment == nil;
   }
   if ([name isEqualToString:@"git_status"]) {
     return DSHAgentExactDictionaryKeys(payload, @[
@@ -1676,7 +1686,7 @@ static BOOL DSHAgentWALRootShape(NSDictionary *root) {
                           DSHAgentMaximumSafeInteger, NO) ||
       !DSHAgentCanonicalSHA256(root[@"root_fingerprint_sha256"]) ||
       ![root[@"capabilities"] isKindOfClass:NSArray.class] ||
-      [(NSArray *)root[@"capabilities"] count] > 5) {
+      [(NSArray *)root[@"capabilities"] count] > 6) {
     return NO;
   }
   NSString *kind = root[@"kind"];
@@ -1687,7 +1697,7 @@ static BOOL DSHAgentWALRootShape(NSDictionary *root) {
       !DSHAgentCanonicalUUID(projectID)) return NO;
   if ([kind isEqualToString:@"workspace"] && projectID != NSNull.null) return NO;
   NSSet *allowed = [NSSet setWithArray:@[
-    @"file_read", @"file_write", @"git_status", @"git_commit", @"git_push",
+    @"file_read", @"file_write", @"git_status", @"git_commit", @"git_push", @"guest_service",
   ]];
   NSMutableSet *seen = [NSMutableSet set];
   for (id capability in root[@"capabilities"]) {
@@ -1725,13 +1735,14 @@ static BOOL DSHAgentWALRegistryShape(NSDictionary *registry) {
   if (!DSHAgentExactDictionaryKeys(registry, @[
         @"schema_version", @"registry_version", @"toolset_sha256", @"tools",
       ]) || ![registry[@"schema_version"] isEqual:@2] ||
-      ![registry[@"registry_version"] isEqual:@1] ||
+      (![registry[@"registry_version"] isEqual:@1] &&
+       ![registry[@"registry_version"] isEqual:@2]) ||
       !DSHAgentCanonicalSHA256(registry[@"toolset_sha256"]) ||
       ![registry[@"tools"] isKindOfClass:NSArray.class] ||
-      [(NSArray *)registry[@"tools"] count] > 6) return NO;
+      [(NSArray *)registry[@"tools"] count] > 8) return NO;
   NSSet *names = [NSSet setWithArray:@[
     @"list_dir", @"read_file", @"write_file", @"git_status", @"git_commit",
-    @"git_push",
+    @"git_push", @"start_guest_cgi", @"stop_guest_cgi",
   ]];
   NSMutableSet *seen = [NSMutableSet set];
   NSString *previous = nil;
@@ -1790,11 +1801,10 @@ static BOOL DSHAgentWALAuthorityShape(NSDictionary *authority) {
                           DSHAgentMaximumSafeInteger, NO) ||
       !DSHAgentCanonicalTimestamp(authority[@"created_at"]) ||
       !DSHAgentCanonicalTimestamp(authority[@"updated_at"])) return NO;
-  static NSSet *models;
+  NSSet *models = DSHHarnessSupportedModels();
   static NSSet *thinkingModes;
   static dispatch_once_t onceToken;
   dispatch_once(&onceToken, ^{
-    models = DSHHarnessSupportedModels();
     thinkingModes = [NSSet setWithArray:@[@"off", @"high", @"max"]];
   });
   if (![models containsObject:authority[@"model"]] ||
@@ -1822,6 +1832,11 @@ static BOOL DSHAgentWALAuthorityShape(NSDictionary *authority) {
       [capabilities containsObject:@"git_push"]) {
     // git_push follows the git_commit pattern (see AgentToolRegistry).
     expectedTools[@"git_push"] = @"conversation_confirm";
+  }
+  if ([capabilities containsObject:@"guest_service"]) {
+    if (![authority[@"registry"][@"registry_version"] isEqual:@2]) return NO;
+    expectedTools[@"start_guest_cgi"] = @"conversation_confirm";
+    expectedTools[@"stop_guest_cgi"] = @"conversation_confirm";
   }
   if (expectedTools.count != [(NSArray *)authority[@"registry"][@"tools"] count]) {
     return NO;
@@ -2228,7 +2243,7 @@ static BOOL DSHAgentWALManifestCallShapeV2(NSDictionary *call,
         !DSHAgentSafeInteger(call[@"content_bytes"],
                             DSHAgentNativeWALMaxSingleWriteBytes, YES)) return NO;
   } else if ([mutationKind isEqualToString:@"git_commit"] ||
-             [mutationKind isEqualToString:@"git_push"]) {
+             [mutationKind isEqualToString:@"git_push"] || [mutationKind isEqualToString:@"start_guest_cgi"] || [mutationKind isEqualToString:@"stop_guest_cgi"]) {
     if (!DSHAgentExactDictionaryKeys(call, @[
           @"schema_version", @"mutation_kind", @"locator",
           @"precondition_sha256", @"content_bytes",
@@ -2422,7 +2437,7 @@ static BOOL DSHAgentWALRoundCallV3Shape(NSDictionary *call,
   dispatch_once(&onceToken, ^{
     knownNames = [NSSet setWithArray:@[
       @"list_dir", @"read_file", @"write_file", @"git_status", @"git_commit",
-      @"git_push",
+      @"git_push", @"start_guest_cgi", @"stop_guest_cgi",
     ]];
   });
   BOOL known = [knownNames containsObject:call[@"name"]];
@@ -2503,7 +2518,7 @@ static NSDictionary *DSHAgentWALMigrateRoundV2ToV3(NSDictionary *row,
       !DSHAgentValidateRoundNativeEntryV2(row, error)) return nil;
   NSSet *knownNames = [NSSet setWithArray:@[
     @"list_dir", @"read_file", @"write_file", @"git_status", @"git_commit",
-    @"git_push",
+    @"git_push", @"start_guest_cgi", @"stop_guest_cgi",
   ]];
   NSMutableArray *calls = [NSMutableArray array];
   NSUInteger executableCount = 0;

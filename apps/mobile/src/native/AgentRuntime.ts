@@ -44,6 +44,9 @@ export type AgentRuntimeFailureCode =
   | 'E_COMPLETION_LENGTH'
   | 'E_COMPLETION_CONTENT_FILTER';
 
+/** Supported native tool registry generations. Version 2 is debug-only today. */
+export type AgentRegistryVersion = 1 | 2;
+
 export type AgentFailureCode = Exclude<
   AgentRuntimeFailureCode,
   'E_AGENT_NATIVE' | 'E_AGENT_NOT_FOUND'
@@ -62,6 +65,7 @@ export type AgentRuntimeRootV1 = {
     | 'git_status'
     | 'git_commit'
     | 'git_push'
+    | 'guest_service'
   )[];
 };
 
@@ -103,8 +107,8 @@ export type AgentConversationGrantV2 = {
   readonly project_id: string | null;
   readonly binding_revision: number;
   readonly root_fingerprint_sha256: string;
-  readonly tool_family: 'file_write' | 'git_commit' | 'git_push';
-  readonly registry_version: 1;
+  readonly tool_family: 'file_write' | 'git_commit' | 'git_push' | 'guest_service';
+  readonly registry_version: AgentRegistryVersion;
   readonly policy_version: string;
   readonly issued_for: {
     readonly schema_version: 1;
@@ -145,7 +149,7 @@ export type AgentRuntimeRegistryToolV2 = {
 
 export type AgentRuntimeRegistryV2 = {
   readonly schema_version: 2;
-  readonly registry_version: 1;
+  readonly registry_version: AgentRegistryVersion;
   readonly toolset_sha256: string;
   readonly tools: readonly AgentRuntimeRegistryToolV2[];
 };
@@ -170,7 +174,7 @@ export type AgentApprovalBindingTokenV2 = {
   readonly root_fingerprint_sha256: string;
   readonly binding_revision: number;
   readonly policy_version: 'agent-v1';
-  readonly registry_version: 1;
+  readonly registry_version: AgentRegistryVersion;
   readonly access: 'conversation_confirm' | 'confirm_once';
   readonly allowed_decisions: readonly (
     | 'denied'
@@ -190,7 +194,9 @@ export type AgentApprovalPreviewV1 = {
     | 'read_file'
     | 'write_file'
     | 'git_commit'
-    | 'git_push';
+    | 'git_push'
+    | 'start_guest_cgi'
+    | 'stop_guest_cgi';
   readonly paths: readonly string[];
   readonly content_bytes: number | null;
   readonly prior:
@@ -389,7 +395,7 @@ export type PrepareAgentAttemptRequestV2 = {
   readonly visible_history_sha256: string;
   readonly visible_message_count: number;
   readonly project_context_sha256: string | null;
-  readonly registry_version: 1;
+  readonly registry_version: AgentRegistryVersion;
   readonly expected_policy_version: 'agent-v1' | null;
   readonly expected_transcript: AgentRuntimeTranscriptHandleV1 | null;
 };
@@ -449,7 +455,7 @@ export type CompleteAgentRoundRequestV2 = {
   readonly project_context_sha256: string | null;
   readonly transcript: AgentRuntimeTranscriptHandleV1;
   readonly root: AgentRuntimeRootV1;
-  readonly registry_version: 1;
+  readonly registry_version: AgentRegistryVersion;
   readonly toolset_sha256: string;
 };
 
@@ -530,7 +536,7 @@ export type PrepareAgentToolBatchRequestV2 = {
   readonly expected_round_revision: number;
   readonly transcript: AgentRuntimeTranscriptHandleV1;
   readonly root: AgentRuntimeRootV1;
-  readonly registry_version: 1;
+  readonly registry_version: AgentRegistryVersion;
   readonly toolset_sha256: string;
   readonly policy_version: 'agent-v1';
   readonly expected_batch_revision: number;
@@ -1346,6 +1352,10 @@ const MAX_TEXT_BYTES = 256 * 1024;
 const MAX_PROVIDER_ID_BYTES = 128;
 const MAX_DURATION_MS = 24 * 60 * 60 * 1000;
 
+function isAgentRegistryVersion(value: unknown): value is AgentRegistryVersion {
+  return value === 1 || value === 2;
+}
+
 const runtimeFailureCodes = new Set<AgentRuntimeFailureCode>([
   'E_AGENT_UNKNOWN_TOOL',
   'E_AGENT_BAD_ARGUMENTS',
@@ -1810,6 +1820,7 @@ function validateRoot(value: unknown): AgentRuntimeRootV1 {
     'git_status',
     'git_commit',
     'git_push',
+    'guest_service',
   ]);
   const seen = new Set<string>();
   for (const capability of capabilities) {
@@ -1913,7 +1924,10 @@ function validateCheckpoint(value: unknown): AgentRuntimeCommittedCheckpointV1 {
   return checkpoint as AgentRuntimeCommittedCheckpointV1;
 }
 
-function validateRegistryTool(value: unknown): AgentRuntimeRegistryToolV2 {
+function validateRegistryTool(
+  value: unknown,
+  registryVersion: AgentRegistryVersion,
+): AgentRuntimeRegistryToolV2 {
   const tool = exactRecord(
     value,
     ['schema_version', 'name', 'safe_summary_key', 'access'],
@@ -1935,10 +1949,16 @@ function validateRegistryTool(value: unknown): AgentRuntimeRegistryToolV2 {
     'git_status',
     'git_commit',
     'git_push',
+    'start_guest_cgi',
+    'stop_guest_cgi',
   ]).has(tool.name as string)
     ? `agent.${tool.name as string}`
     : 'agent.unknown';
   if (tool.safe_summary_key !== expected) fail('E_AGENT_LEDGER');
+  if (registryVersion === 1 &&
+      (tool.name === 'start_guest_cgi' || tool.name === 'stop_guest_cgi')) {
+    fail('E_AGENT_LEDGER');
+  }
   return tool as AgentRuntimeRegistryToolV2;
 }
 
@@ -1950,13 +1970,17 @@ function validateRegistry(value: unknown): AgentRuntimeRegistryV2 {
   );
   if (
     registry.schema_version !== 2 ||
-    registry.registry_version !== 1 ||
+    !isAgentRegistryVersion(registry.registry_version) ||
     !digest(registry.toolset_sha256)
   )
     fail('E_AGENT_LEDGER');
-  const tools = strictArray(registry.tools, 6, 0, 'E_AGENT_LEDGER').map(
-    validateRegistryTool,
-  );
+  const registryVersion = registry.registry_version as AgentRegistryVersion;
+  const tools = strictArray(
+    registry.tools,
+    registryVersion === 2 ? 8 : 6,
+    0,
+    'E_AGENT_LEDGER',
+  ).map(tool => validateRegistryTool(tool, registryVersion));
   const seen = new Set<string>();
   for (const tool of tools)
     if (seen.has(tool.name)) fail('E_AGENT_LEDGER');
@@ -2170,8 +2194,9 @@ function validateGrant(value: unknown): AgentConversationGrantV2 {
     !nullableUuid(grant.project_id) ||
     !safeInteger(grant.binding_revision, MAX_SAFE, false) ||
     !digest(grant.root_fingerprint_sha256) ||
-    !['file_write', 'git_commit', 'git_push'].includes(grant.tool_family as string) ||
-    grant.registry_version !== 1 ||
+    !['file_write', 'git_commit', 'git_push', 'guest_service'].includes(grant.tool_family as string) ||
+    !isAgentRegistryVersion(grant.registry_version) ||
+    (grant.tool_family === 'guest_service' && grant.registry_version !== 2) ||
     !boundedString(grant.policy_version, 128) ||
     !timestamp(grant.created_at)
   )
@@ -2226,7 +2251,8 @@ function validateApprovalToken(value: unknown): AgentApprovalBindingTokenV2 {
     !digest(token.root_fingerprint_sha256) ||
     !safeInteger(token.binding_revision, MAX_SAFE, false) ||
     token.policy_version !== 'agent-v1' ||
-    token.registry_version !== 1 ||
+    !isAgentRegistryVersion(token.registry_version) ||
+    ((token.name === 'start_guest_cgi' || token.name === 'stop_guest_cgi') && token.registry_version !== 2) ||
     !['conversation_confirm', 'confirm_once'].includes(token.access as string)
   )
     fail('E_AGENT_APPROVAL');
@@ -2357,6 +2383,7 @@ function validatePreviewPath(value: unknown): value is string {
 
 function validateApprovalPreview(
   value: unknown,
+  allowLegacyGuestCgiEmpty = false,
 ): AgentApprovalPreviewV1 | null {
   if (value === null) return null;
   const preview = exactRecord(
@@ -2380,6 +2407,8 @@ function validateApprovalPreview(
       'write_file',
       'git_commit',
       'git_push',
+      'start_guest_cgi',
+      'stop_guest_cgi',
     ].includes(preview.kind as string) ||
     !Array.isArray(preview.paths) ||
     preview.paths.length > 8 ||
@@ -2419,6 +2448,23 @@ function validateApprovalPreview(
     )
       fail('E_AGENT_LEDGER');
   } else if (preview.kind === 'git_commit' || preview.kind === 'git_push') {
+    if (
+      preview.paths.length !== 0 ||
+      preview.content_bytes !== null ||
+      preview.prior !== null ||
+      preview.diff_preview !== null
+    )
+      fail('E_AGENT_LEDGER');
+  } else if (preview.kind === 'start_guest_cgi') {
+    if (
+      ((preview.paths.length !== 2 && preview.paths.length !== 3) &&
+        !(allowLegacyGuestCgiEmpty && preview.paths.length === 0)) ||
+      preview.content_bytes !== null ||
+      preview.prior !== null ||
+      preview.diff_preview !== null
+    )
+      fail('E_AGENT_LEDGER');
+  } else if (preview.kind === 'stop_guest_cgi') {
     if (
       preview.paths.length !== 0 ||
       preview.content_bytes !== null ||
@@ -2499,7 +2545,10 @@ function validateBatchCall(value: unknown): AgentBatchCallProjectionV2 {
       : validateApprovalToken(call.approval_token);
   const receipt =
     call.receipt === null ? null : validateToolReceipt(call.receipt);
-  const approvalPreview = validateApprovalPreview(call.approval_preview);
+  const approvalPreview = validateApprovalPreview(
+    call.approval_preview,
+    call.name === 'start_guest_cgi' && approvalToken?.registry_version === 2,
+  );
   assign(call, 'approval_token', approvalToken);
   assign(call, 'receipt', receipt);
   assign(call, 'approval_preview', approvalPreview);
@@ -3204,7 +3253,7 @@ function validateAttemptRequest(value: unknown): PrepareAgentAttemptRequestV2 {
     !thinkingMode(request.thinking_mode) ||
     !digest(request.visible_history_sha256) ||
     !safeInteger(request.visible_message_count, MAX_VISIBLE_MESSAGES) ||
-    request.registry_version !== 1 ||
+    !isAgentRegistryVersion(request.registry_version) ||
     (request.expected_policy_version !== null &&
       request.expected_policy_version !== 'agent-v1') ||
     !nullableUuid(request.workspace_id) ||
@@ -3299,7 +3348,7 @@ function validateCompleteRequest(value: unknown): CompleteAgentRoundRequestV2 {
     !digest(request.visible_history_sha256) ||
     !safeInteger(request.visible_message_count, MAX_VISIBLE_MESSAGES) ||
     !nullableDigest(request.project_context_sha256) ||
-    request.registry_version !== 1 ||
+    !isAgentRegistryVersion(request.registry_version) ||
     !digest(request.toolset_sha256)
   )
     fail();
@@ -3353,7 +3402,7 @@ function validateBatchRequest(value: unknown): PrepareAgentToolBatchRequestV2 {
     !uuid(request.round_id) ||
     !safeInteger(request.round_index, MAX_ROUNDS) ||
     !safeInteger(request.expected_round_revision, MAX_SAFE) ||
-    request.registry_version !== 1 ||
+    !isAgentRegistryVersion(request.registry_version) ||
     !digest(request.toolset_sha256) ||
     request.policy_version !== 'agent-v1' ||
     !safeInteger(request.expected_batch_revision, MAX_SAFE) ||

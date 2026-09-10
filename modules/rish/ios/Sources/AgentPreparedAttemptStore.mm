@@ -143,7 +143,8 @@ static BOOL DSHPreparedRequestShape(NSDictionary *request) {
           [request[@"visible_message_count"] unsignedIntegerValue] ||
       !DSHAgentCanonicalSHA256(request[@"visible_history_sha256"]) ||
       !DSHPreparedNullableDigest(request[@"project_context_sha256"]) ||
-      ![request[@"registry_version"] isEqual:@1] ||
+      (![request[@"registry_version"] isEqual:@1] &&
+       ![request[@"registry_version"] isEqual:@2]) ||
       !(request[@"expected_policy_version"] == NSNull.null ||
         ([request[@"expected_policy_version"] isKindOfClass:NSString.class] &&
          [request[@"expected_policy_version"] isEqualToString:@"agent-v1"])) ||
@@ -241,7 +242,7 @@ static NSDictionary *DSHPreparedTranscriptRow(NSString *attemptId,
 static NSDictionary *DSHPreparedEmptyRegistry(DSHAgentToolRegistry *registry) {
   return @{
     @"schema_version" : @2,
-    @"registry_version" : @1,
+    @"registry_version" : @2,
     @"toolset_sha256" : registry.toolsetSHA256,
     @"tools" : @[],
   };

@@ -1007,6 +1007,7 @@ static DSHPCOperationScheduler *DSHPCSharedScheduler(void) {
 
 @implementation LocalProjectContextModule
 
+
 RCT_EXPORT_MODULE(LocalProjectContext)
 
 + (BOOL)requiresMainQueueSetup {

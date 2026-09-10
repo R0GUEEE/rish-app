@@ -75,9 +75,9 @@ static BOOL DSHLegacyBoundSafeInteger(id value) {
 }
 
 static BOOL DSHLegacyBoundCapabilities(id value, NSSet **capabilitiesOut) {
-  if (![value isKindOfClass:NSArray.class] || [value count] > 5) return NO;
+  if (![value isKindOfClass:NSArray.class] || [value count] > 6) return NO;
   NSSet *allowed = [NSSet setWithArray:@[
-    @"file_read", @"file_write", @"git_status", @"git_commit", @"git_push",
+    @"file_read", @"file_write", @"git_status", @"git_commit", @"git_push", @"guest_service",
   ]];
   NSMutableSet *seen = [NSMutableSet set];
   for (id capability in value) {

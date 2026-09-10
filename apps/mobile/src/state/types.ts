@@ -21,6 +21,9 @@ export type AgentCheckpointEvidence =
   | AgentStoreTransitionEvidence
   | AgentControllerPreflightV1;
 
+/** Native tool registry generations accepted by the session boundary. */
+export type AgentRegistryVersion = 1 | 2;
+
 /**
  * Schema 8 is kept as a first-class migration input.  Schema 9 is the first
  * session root that owns the Agent journal and event projection.
@@ -78,6 +81,8 @@ export const AGENT_SAFE_SUMMARY_KEYS = [
   'agent.git_status',
   'agent.git_commit',
   'agent.git_push',
+  'agent.start_guest_cgi',
+  'agent.stop_guest_cgi',
   'agent.unknown',
 ] as const;
 export const MAX_AGENT_TRANSCRIPT_COUNT = 128;
@@ -296,7 +301,8 @@ export type AgentCapability =
   | 'file_write'
   | 'git_status'
   | 'git_commit'
-  | 'git_push';
+  | 'git_push'
+  | 'guest_service';
 
 export type AgentAccess =
   | 'auto'
@@ -331,7 +337,7 @@ export type AgentApprovalTokenV1 = {
   readonly root_fingerprint_sha256: string;
   readonly binding_revision: number;
   readonly policy_version: string;
-  readonly registry_version: 1;
+  readonly registry_version: AgentRegistryVersion;
   readonly allowed_decisions: readonly Exclude<
     AgentApprovalDecision,
     'pending'
@@ -366,7 +372,7 @@ export type AgentApprovalBindingTokenV2 = {
   readonly root_fingerprint_sha256: string;
   readonly binding_revision: number;
   readonly policy_version: 'agent-v1';
-  readonly registry_version: 1;
+  readonly registry_version: AgentRegistryVersion;
   readonly access: 'conversation_confirm' | 'confirm_once';
   readonly allowed_decisions: readonly (
     | 'denied'
@@ -551,8 +557,8 @@ export type AgentConversationGrantV2 = {
   readonly project_id: string | null;
   readonly binding_revision: number;
   readonly root_fingerprint_sha256: string;
-  readonly tool_family: 'file_write' | 'git_commit' | 'git_push';
-  readonly registry_version: 1;
+  readonly tool_family: 'file_write' | 'git_commit' | 'git_push' | 'guest_service';
+  readonly registry_version: AgentRegistryVersion;
   readonly policy_version: string;
   readonly issued_for: {
     readonly schema_version: 1;
@@ -762,7 +768,7 @@ export type PersistedAgentAttemptJournalV2 = {
   readonly controller_generation: number;
   readonly policy: AgentWritePolicyV1;
   readonly root: FrozenAgentRootV1;
-  readonly tool_registry_version: 1;
+  readonly tool_registry_version: AgentRegistryVersion;
   readonly toolset_sha256: string;
   readonly transcript: AgentTranscriptReferenceV1;
   readonly round_index: number;
@@ -781,7 +787,7 @@ export type PersistedAgentAttemptJournalV3 = {
   readonly controller_generation: number;
   readonly policy: AgentRuntimePolicyV1;
   readonly root: AgentRuntimeRootV1;
-  readonly tool_registry_version: 1;
+  readonly tool_registry_version: AgentRegistryVersion;
   readonly toolset_sha256: string;
   readonly transcript: AgentRuntimeTranscriptHandleV1;
   readonly round_index: number;

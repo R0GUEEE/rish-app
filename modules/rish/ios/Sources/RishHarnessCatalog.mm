@@ -3,6 +3,27 @@
 static NSString *const DSHCatalogHarnessDsh = @"dsh";
 static NSString *const DSHCatalogHarnessClaudeCode = @"claude-code";
 static NSString *const DSHCatalogHarnessCodex = @"codex";
+static NSString *const DSHCodexDiscoveredModelsKey = @"rish.codex.discovered-models.v1";
+static BOOL DSHCodexDiscoveryID(id value) {
+  if (![value isKindOfClass:NSString.class] || [value length] > 80) return NO;
+  return [value rangeOfString:@"^(?:(?:gpt|codex)-[A-Za-z0-9][A-Za-z0-9._-]*|o[0-9][A-Za-z0-9._-]*)$" options:NSRegularExpressionSearch].location != NSNotFound;
+}
+static NSSet<NSString *> *DSHCodexDiscoveredModels(void) {
+  NSArray *values = [NSUserDefaults.standardUserDefaults arrayForKey:DSHCodexDiscoveredModelsKey];
+  NSMutableSet *result = [NSMutableSet set];
+  for (id value in values) if (DSHCodexDiscoveryID(value) && result.count < 256) [result addObject:value];
+  return result;
+}
+BOOL DSHRegisterCodexSubscriptionModels(NSArray<NSString *> *models) {
+  if (![models isKindOfClass:NSArray.class] || models.count > 64) return NO;
+  @synchronized (NSUserDefaults.standardUserDefaults) {
+    NSMutableSet *all = [DSHCodexDiscoveredModels() mutableCopy];
+    for (id model in models) { if (!DSHCodexDiscoveryID(model)) return NO; [all addObject:model]; }
+    if (all.count > 256) return NO;
+    [NSUserDefaults.standardUserDefaults setObject:[all.allObjects sortedArrayUsingSelector:@selector(compare:)] forKey:DSHCodexDiscoveredModelsKey];
+    return YES;
+  }
+}
 /// Zhipu GLM served over its Anthropic-compatible Messages endpoint. A
 /// distinct catalog entry rather than a base-URL override on claude-code:
 /// provider_host is recorded in consent manifests, runtime proof and session
@@ -80,6 +101,7 @@ static NSString *_Nullable DSHCatalogString(id _Nullable value) {
 
 NSSet<NSString *> *DSHHarnessSupportedModels(void) {
   NSMutableSet *models = [NSMutableSet setWithArray:DSHCatalogHarnessByModel().allKeys];
+  [models unionSet:DSHCodexDiscoveredModels()];
   NSDictionary *catalog = DSHDshModelCatalog();
   for (NSArray *rows in @[catalog[@"models"] ?: @[], catalog[@"retired_models"] ?: @[]])
     for (NSDictionary *row in rows) [models addObject:row[@"id"]];
@@ -88,7 +110,7 @@ NSSet<NSString *> *DSHHarnessSupportedModels(void) {
 
 BOOL DSHHarnessIsSupportedModel(id value) {
   NSString *model = DSHCatalogString(value);
-  return model != nil && (DSHCatalogHarnessByModel()[model] != nil || DSHDshModelEntry(model) != nil);
+  return model != nil && (DSHCatalogHarnessByModel()[model] != nil || DSHDshModelEntry(model) != nil || [DSHCodexDiscoveredModels() containsObject:model]);
 }
 
 NSSet<NSString *> *DSHHarnessSupportedHarnessIds(void) {
@@ -107,7 +129,7 @@ BOOL DSHHarnessIsSupportedHarnessId(id value) {
 
 NSString *DSHHarnessIdForModel(id model) {
   NSString *key = DSHCatalogString(model);
-  return key == nil ? nil : (DSHCatalogHarnessByModel()[key] ?: (DSHDshModelEntry(key) ? @"dsh" : nil));
+  return key == nil ? nil : (DSHCatalogHarnessByModel()[key] ?: (DSHDshModelEntry(key) ? @"dsh" : ([DSHCodexDiscoveredModels() containsObject:key] ? @"codex" : nil)));
 }
 
 NSSet<NSString *> *DSHHarnessSupportedProviderIds(void) {

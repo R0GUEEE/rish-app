@@ -59,14 +59,22 @@ export function MarkdownText({
                 table={block.table}
               />
             );
-          case 'lines':
+          case 'lines': {
+            // The root owns spacing between blocks; surrounding Markdown
+            // blank lines must not add a second layer of vertical padding.
+            const lines = [...block.lines];
+            while (lines.length && lines[0].trim() === '') lines.shift();
+            while (lines.length && lines[lines.length - 1].trim() === '') lines.pop();
+            if (lines.length === 0) return null;
             return (
               <View key={'text-' + blockIndex} style={styles.textGroup}>
-                {block.lines.map((line, lineIndex) =>
-                  renderLine(line, lineIndex, styles, attachments),
+                {lines.map((line, lineIndex) =>
+                  line.trim() === '' && lineIndex > 0 && lines[lineIndex - 1].trim() === ''
+                    ? null : renderLine(line, lineIndex, styles, attachments),
                 )}
               </View>
             );
+          }
         }
       })}
     </View>
@@ -189,6 +197,7 @@ const createStyles = (colors: ThemePalette) =>
       fontFamily: fonts.mono,
       fontSize: 12,
       lineHeight: 19,
-      padding: 12,
+      paddingHorizontal: 12,
+      paddingVertical: 10,
     },
   });

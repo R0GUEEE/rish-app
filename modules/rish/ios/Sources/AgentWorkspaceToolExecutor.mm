@@ -1,4 +1,5 @@
 #import "AgentWorkspaceToolExecutor.h"
+#import <CommonCrypto/CommonDigest.h>
 
 #import "AgentNativeWAL.h"
 #import "AgentRootResolver.h"
@@ -12,6 +13,16 @@
 #include <sys/stat.h>
 #include <sys/stdio.h>
 #include <unistd.h>
+
+// Plain content SHA-256 for model-visible source snapshot binding. This is
+// distinct from domain-separated WAL identity hashes.
+static NSString *DSHAgentWorkspacePlainSHA256(NSData *data) {
+  unsigned char digest[CC_SHA256_DIGEST_LENGTH];
+  CC_SHA256(data.bytes, (CC_LONG)data.length, digest);
+  NSMutableString *value = [NSMutableString stringWithCapacity:64];
+  for (NSUInteger i = 0; i < sizeof(digest); i++) [value appendFormat:@"%02x", digest[i]];
+  return value;
+}
 
 static const NSUInteger DSHAgentWorkspaceMaxPathBytes = 512;
 // Leave canonical-envelope headroom under the 64-KiB protected feedback cap.
@@ -442,7 +453,7 @@ static BOOL DSHAgentWorkspaceEntryList(int directoryDescriptor,
     NSString *leaf = nil;
     int parent = DSHAgentWorkspaceOpenParent(rootDescriptor, components, &leaf);
     if (parent < 0) {
-      DSHSetAgentNativeStoreError(blockError, DSHAgentNativeStoreErrorUnavailable);
+      DSHSetAgentNativeStoreError(blockError, DSHAgentNativeStoreErrorInvalidArgument);
       return NO;
     }
     struct stat metadata = {};
@@ -688,7 +699,7 @@ static BOOL DSHAgentWorkspaceEntryList(int directoryDescriptor,
     NSString *leaf = nil;
     int parent = DSHAgentWorkspaceOpenParent(rootDescriptor, components, &leaf);
     if (parent < 0) {
-      DSHSetAgentNativeStoreError(blockError, DSHAgentNativeStoreErrorUnavailable);
+      DSHSetAgentNativeStoreError(blockError, DSHAgentNativeStoreErrorInvalidArgument);
       return NO;
     }
     if ([name isEqualToString:@"read_file"]) {
@@ -733,13 +744,14 @@ static BOOL DSHAgentWorkspaceEntryList(int directoryDescriptor,
         return result != nil;
       }
       BOOL truncated = before.st_size > (off_t)offset;
+      NSMutableDictionary *payload = [@{
+        @"schema_version": @1, @"content": content,
+        @"revision": precondition[@"source_revision"], @"truncated": @(truncated),
+      } mutableCopy];
+      if (!truncated) payload[@"sha256"] = DSHAgentWorkspacePlainSHA256(data);
       NSDictionary *object = @{
         @"schema_version" : @1, @"name" : name, @"outcome" : @"ok",
-        @"payload" : @{
-          @"schema_version" : @1, @"content" : content,
-          @"revision" : precondition[@"source_revision"],
-          @"truncated" : @(truncated),
-        },
+        @"payload" : [payload copy],
       };
       NSString *feedback = DSHAgentWorkspaceFeedback(object, blockError);
       if (feedback == nil) return NO;
@@ -879,6 +891,7 @@ static BOOL DSHAgentWorkspaceEntryList(int directoryDescriptor,
       @"payload" : @{
         @"schema_version" : @1, @"bytes" : @(content.length),
         @"revision" : revision,
+        @"sha256" : DSHAgentWorkspacePlainSHA256(content),
       },
     };
     NSString *feedback = DSHAgentWorkspaceFeedback(object, blockError);

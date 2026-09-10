@@ -42,6 +42,8 @@ type Props = {
   previewingAttachmentId: string | null;
   harnessName: string;
   providerName: string;
+  configurationHint?: string;
+  configurationAction?: string;
   model: SupportedModel;
   modelLabel?: string;
   optionsVisible: boolean;
@@ -55,6 +57,7 @@ type Props = {
   onCancel: () => void;
   onChange: (value: string) => void;
   onConfigure: () => void;
+  onLogin?: () => void;
   onOptionsPress: () => void;
   onPreviewAttachment: (id: string, ownershipKey: string) => void;
   onRemoveAttachment: (id: string, ownershipKey: string) => void;
@@ -222,7 +225,7 @@ export function ChatComposer(props: Props) {
         placeholder={
           props.configured
             ? t('messages.inputPlaceholder', { harness: props.harnessName })
-            : t('messages.configurePlaceholder', { provider: props.providerName })
+            : props.configurationHint ?? (props.onLogin ? t('messages.authPlaceholder') : t('messages.configurePlaceholder', { provider: props.providerName }))
         }
         placeholderTextColor={colors.faint}
         // Native multiline inputs can retain their previous intrinsic height
@@ -332,21 +335,27 @@ export function ChatComposer(props: Props) {
             />
           </Pressable>
         ) : (
+          <>
+          {props.onLogin && <Pressable accessibilityLabel={t('messages.signIn')} accessibilityRole="button" disabled={locked} onPress={props.onLogin} style={styles.configureChip}>
+            <Text style={styles.configureText}>{t('messages.signIn')}</Text>
+          </Pressable>}
           <Pressable
-            accessibilityLabel={t('messages.configureKey', { provider: props.providerName })}
+            accessibilityLabel={props.configurationAction ?? t('messages.configureKey', { provider: props.providerName })}
             accessibilityRole="button"
             accessibilityState={{ disabled: locked }}
             disabled={locked}
             onPress={props.onConfigure}
             style={({ pressed }) => [
               styles.configureChip,
+              props.onLogin && styles.secondaryConfigureChip,
               pressed && styles.pressed,
             ]}
           >
-            <Text style={styles.configureText}>
-              {t('messages.configureKeyShort')}
+            <Text style={[styles.configureText, props.onLogin && styles.secondaryConfigureText]}>
+              {props.configurationAction ?? t('messages.configureKeyShort')}
             </Text>
           </Pressable>
+          </>
         )}
         <View style={styles.actionSpacer} />
         <Pressable
@@ -556,6 +565,11 @@ const createStyles = (colors: ThemePalette) =>
       backgroundColor: colors.accent,
       justifyContent: 'center',
     },
+    secondaryConfigureChip: {
+      marginLeft: 8,
+      backgroundColor: colors.surfaceRaised,
+    },
+    secondaryConfigureText: { color: colors.text },
     configureText: {
       color: colors.background,
       fontSize: 12,

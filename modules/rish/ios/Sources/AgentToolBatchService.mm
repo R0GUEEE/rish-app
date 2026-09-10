@@ -6,6 +6,7 @@
 #import "AgentPreparedAttemptStore.h"
 #import "AgentTranscriptStore.h"
 #import "AgentWorkspaceToolExecutor.h"
+#import "DSHAgentGuestCgiToolExecutor.h"
 
 static const unsigned long long DSHAgentBatchMaximumSafeInteger =
     9007199254740991ULL;
@@ -337,7 +338,7 @@ static NSDictionary *DSHAgentBatchConversationGrant(
     NSDictionary *root,
     NSString *name) {
   NSString *family = [name isEqualToString:@"write_file"] ? @"file_write" :
-      ([name isEqualToString:@"git_commit"] ? @"git_commit" : nil);
+      ([name hasSuffix:@"_guest_cgi"] ? @"guest_service" : ([name isEqualToString:@"git_commit"] ? @"git_commit" : nil));
   if (family == nil) return nil;
   for (NSDictionary *conversation in session[@"conversations"]) {
     if (![(conversation[@"id"] ?: conversation[@"conversation_id"])
@@ -351,7 +352,8 @@ static NSDictionary *DSHAgentBatchConversationGrant(
           [grant[@"root_fingerprint_sha256"]
               isEqual:root[@"root_fingerprint_sha256"]] &&
           [grant[@"tool_family"] isEqual:family] &&
-          [grant[@"registry_version"] isEqual:@1] &&
+          ([grant[@"registry_version"] isEqual:@1] || [grant[@"registry_version"] isEqual:@2]) &&
+          (![name hasSuffix:@"_guest_cgi"] || [grant[@"registry_version"] isEqual:@2]) &&
           [grant[@"policy_version"] isEqualToString:@"agent-v1"] &&
           DSHAgentCanonicalUUID(grant[@"grant_id"])) return grant;
     }
@@ -411,7 +413,7 @@ static NSDictionary *DSHAgentBatchConversationGrant(
                           DSHAgentBatchMaximumSafeInteger, NO) ||
       !DSHAgentBatchTranscript(request[@"transcript"]) ||
       !DSHAgentBatchRoot(request[@"root"]) ||
-      ![request[@"registry_version"] isEqual:@1] ||
+      (![request[@"registry_version"] isEqual:@1] && ![request[@"registry_version"] isEqual:@2]) ||
       !DSHAgentCanonicalSHA256(request[@"toolset_sha256"]) ||
       ![request[@"policy_version"] isEqualToString:@"agent-v1"] ||
       !DSHAgentSafeInteger(request[@"expected_batch_revision"],
@@ -527,7 +529,7 @@ static NSDictionary *DSHAgentBatchConversationGrant(
         raw[@"name"], raw[@"arguments_json"], error);
     BOOL mutation = [raw[@"name"] isEqualToString:@"write_file"] ||
         [raw[@"name"] isEqualToString:@"git_commit"] ||
-        [raw[@"name"] isEqualToString:@"git_push"];
+        [raw[@"name"] isEqualToString:@"git_push"] || [raw[@"name"] hasSuffix:@"_guest_cgi"];
     mutationBatch = mutationBatch || mutation;
     if (argumentsSHA == nil || ![raw[@"call_id"] isEqual:presentation[@"call_id"]] ||
         ![raw[@"name"] isEqual:presentation[@"name"]] ||
@@ -562,6 +564,9 @@ static NSDictionary *DSHAgentBatchConversationGrant(
                                                    arguments:arguments
                                                         root:request[@"root"]
                                                        error:error];
+      } else if ([raw[@"name"] hasSuffix:@"_guest_cgi"]) {
+        NSDictionary *condition = [[DSHAgentGuestCgiToolExecutor executorForWorkspaceExecutor:self.workspaceExecutor] prepareToolNamed:raw[@"name"] arguments:arguments root:request[@"root"] error:error];
+        if (condition != nil) prepared = @{ @"precondition": condition, @"reserved_write_bytes": @0 };
       } else {
         prepared = [self.gitExecutor prepareToolNamed:raw[@"name"]
                                              arguments:arguments
@@ -590,8 +595,13 @@ static NSDictionary *DSHAgentBatchConversationGrant(
     if (prepared != nil && [prepared[@"approval_preview"]
             isKindOfClass:NSDictionary.class]) {
       approvalPreview = prepared[@"approval_preview"];
+    } else if ([raw[@"name"] isEqualToString:@"start_guest_cgi"] && prepared != nil) {
+      NSDictionary *condition = prepared[@"precondition"];
+      NSMutableArray *paths = [NSMutableArray arrayWithObjects:condition[@"index_path"], condition[@"backend_path"], nil];
+      if (condition[@"initial_data_path"] != NSNull.null) [paths addObject:condition[@"initial_data_path"]];
+      approvalPreview = @{ @"schema_version": @1, @"kind": @"start_guest_cgi", @"paths": [paths copy], @"content_bytes": NSNull.null, @"prior": NSNull.null, @"diff_preview": NSNull.null, @"diff_truncated": @NO };
     } else if ([raw[@"name"] isEqualToString:@"git_commit"] ||
-               [raw[@"name"] isEqualToString:@"git_push"]) {
+               [raw[@"name"] isEqualToString:@"git_push"] || [raw[@"name"] hasSuffix:@"_guest_cgi"]) {
       // Git calls never carry file content; the preview names only the
       // mutation kind.  Commit/push messages stay native-private.
       approvalPreview = @{
@@ -637,6 +647,8 @@ static NSDictionary *DSHAgentBatchConversationGrant(
       [finalCapabilities addObject:@"file_read"];
     } else if ([name isEqualToString:@"write_file"]) {
       [finalCapabilities addObject:@"file_write"];
+    } else if ([name hasSuffix:@"_guest_cgi"]) {
+      [finalCapabilities addObject:@"guest_service"];
     } else if ([name hasPrefix:@"git_"]) {
       [finalCapabilities addObject:name];
       needsProjectLease = YES;
@@ -705,7 +717,7 @@ static NSDictionary *DSHAgentBatchConversationGrant(
     for (NSDictionary *call in preparedCalls) {
       if (([call[@"name"] isEqualToString:@"write_file"] ||
            [call[@"name"] isEqualToString:@"git_commit"] ||
-           [call[@"name"] isEqualToString:@"git_push"]) &&
+           [call[@"name"] isEqualToString:@"git_push"] || [call[@"name"] hasSuffix:@"_guest_cgi"]) &&
           ![call[@"access"] isEqualToString:@"durable_deny"]) {
         hasMutation = YES;
       }
@@ -773,7 +785,7 @@ static BOOL DSHAgentApprovalToken(NSDictionary *token) {
       DSHAgentSafeInteger(token[@"binding_revision"],
                           DSHAgentBatchMaximumSafeInteger, NO) &&
       [token[@"policy_version"] isEqualToString:@"agent-v1"] &&
-      [token[@"registry_version"] isEqual:@1] &&
+      ([token[@"registry_version"] isEqual:@1] || [token[@"registry_version"] isEqual:@2]) &&
       ([token[@"access"] isEqualToString:@"conversation_confirm"] ||
        [token[@"access"] isEqualToString:@"confirm_once"]) &&
       [token[@"allowed_decisions"] isKindOfClass:NSArray.class])) return NO;
@@ -797,7 +809,7 @@ static BOOL DSHAgentApprovalToken(NSDictionary *token) {
   // with the full decision set.
   return ([token[@"name"] isEqualToString:@"write_file"] ||
           [token[@"name"] isEqualToString:@"git_commit"] ||
-          [token[@"name"] isEqualToString:@"git_push"]) &&
+          [token[@"name"] isEqualToString:@"git_push"] || [token[@"name"] hasSuffix:@"_guest_cgi"]) &&
       [token[@"allowed_decisions"] isEqual:@[
         @"denied", @"allow_once", @"allow_conversation", @"cancelled",
       ]];
@@ -1048,7 +1060,7 @@ static BOOL DSHAgentBatchCanonicalEqual(id left, id right) {
     grant = priorBinding[@"grant"];
   } else if ([request[@"decision"] isEqualToString:@"allow_conversation"]) {
     NSString *family = [token[@"name"] isEqualToString:@"git_commit"]
-        ? @"git_commit" : @"file_write";
+        ? @"git_commit" : ([token[@"name"] hasSuffix:@"_guest_cgi"] ? @"guest_service" : @"file_write");
     for (NSDictionary *candidate in persistedConversation[@"agent_grants"]) {
       if ([candidate[@"conversation_id"] isEqual:request[@"conversation_id"]] &&
           [candidate[@"workspace_id"] isEqual:authority[@"root"][@"workspace_id"]] &&
@@ -1058,7 +1070,7 @@ static BOOL DSHAgentBatchCanonicalEqual(id left, id right) {
           [candidate[@"root_fingerprint_sha256"]
               isEqual:authority[@"root"][@"root_fingerprint_sha256"]] &&
           [candidate[@"tool_family"] isEqual:family] &&
-          [candidate[@"registry_version"] isEqual:@1] &&
+          [candidate[@"registry_version"] isEqual:token[@"registry_version"]] &&
           [candidate[@"policy_version"] isEqualToString:@"agent-v1"]) {
         grant = candidate;
         break;

@@ -1,5 +1,6 @@
 #import "ProviderConfiguration.h"
 #import "RishHarnessCatalog.h"
+#import "HarnessAuthService.h"
 #import "AgentNativeWAL.h"
 #include <CoreFoundation/CoreFoundation.h>
 
@@ -145,6 +146,14 @@ NSDictionary *DSHProviderBindingFromConfiguration(NSDictionary *configuration, N
 NSDictionary *DSHProviderBindingForModel(NSString *model) {
   NSString *harness = DSHHarnessIdForModel(model);
   if (!Supported(harness)) return nil;
+  if ([harness isEqual:@"codex"] && DSHCodexChatUsesSubscription()) {
+    NSDictionary *identity = @{@"schema_version":@1, @"harness_id":@"codex",
+      @"endpoint_url":@"https://chatgpt.com/backend-api/codex/responses", @"protocol":@"responses",
+      @"auth_type":@"bearer", @"send_reasoning":@YES, @"model_id":model};
+    NSMutableDictionary *binding = [identity mutableCopy];
+    binding[@"profile_id"] = Digest(identity);
+    return binding;
+  }
   return DSHProviderBindingFromConfiguration([[DSHProviderConfigurationStore sharedStore] configurationForHarness:harness], model);
 }
 BOOL DSHValidateProviderBinding(id raw, NSString *model) {
@@ -162,7 +171,7 @@ BOOL DSHValidateProviderBinding(id raw, NSString *model) {
 }
 BOOL DSHProviderBindingIsCurrent(id value, NSString *model) {
   NSString *harness = DSHHarnessIdForModel(model);
-  if (Supported(harness) && [[DSHProviderConfigurationStore sharedStore] configurationForHarness:harness] == nil) return NO;
+  if (Supported(harness) && !([harness isEqual:@"codex"] && DSHCodexChatUsesSubscription()) && [[DSHProviderConfigurationStore sharedStore] configurationForHarness:harness] == nil) return NO;
   NSDictionary *current = DSHProviderBindingForModel(model);
   return (value == nil && current == nil) || [current isEqual:value];
 }

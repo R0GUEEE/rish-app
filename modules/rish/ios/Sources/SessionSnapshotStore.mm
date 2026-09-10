@@ -1,5 +1,6 @@
 #import "ProviderConfiguration.h"
 #import "SessionSnapshotStore.h"
+#import "AgentTranscriptStore.h"
 #import "RishHarnessCatalog.h"
 
 #import "DSHWorkspaceCanonical.h"
@@ -1014,7 +1015,7 @@ static BOOL DSHSessionValidAgentSummaryKey(id value) {
   dispatch_once(&onceToken, ^{
     keys = [NSSet setWithArray:@[
       @"agent.list_dir", @"agent.read_file", @"agent.write_file",
-      @"agent.git_status", @"agent.git_commit", @"agent.git_push",
+      @"agent.git_status", @"agent.git_commit", @"agent.git_push", @"agent.start_guest_cgi", @"agent.stop_guest_cgi",
       @"agent.unknown",
     ]];
   });
@@ -1026,8 +1027,9 @@ static BOOL DSHSessionAgentSummaryMatchesName(id summary, id name) {
       !DSHSessionTrustedString(name)) return NO;
   NSSet<NSString *> *registered = [NSSet setWithArray:@[
     @"list_dir", @"read_file", @"write_file", @"git_status", @"git_commit",
-    @"git_push",
+    @"git_push", @"start_guest_cgi", @"stop_guest_cgi",
   ]];
+  if (([name isEqual:@"start_guest_cgi"] || [name isEqual:@"stop_guest_cgi"]) && [summary isEqual:@"agent.unknown"]) return YES;
   NSString *expected = [registered containsObject:name]
       ? [NSString stringWithFormat:@"agent.%@", name] : @"agent.unknown";
   return [summary isEqual:expected];
@@ -1429,13 +1431,13 @@ static BOOL DSHSessionValidateAgentRoot(NSDictionary *root) {
         DSHSessionCanonicalUUID(root[@"project_id"])) ||
       !DSHSessionCanonicalDigest(root[@"root_fingerprint_sha256"]) ||
       !DSHSessionTrustedArray(root[@"capabilities"]) ||
-      [(NSArray *)root[@"capabilities"] count] > 5) {
+      [(NSArray *)root[@"capabilities"] count] > 6) {
     return NO;
   }
   BOOL project = root[@"project_id"] != NSNull.null;
   if (([root[@"kind"] isEqual:@"project"]) != project) return NO;
   NSSet *allowed = [NSSet setWithArray:@[
-    @"file_read", @"file_write", @"git_status", @"git_commit", @"git_push",
+    @"file_read", @"file_write", @"git_status", @"git_commit", @"git_push", @"guest_service",
   ]];
   NSMutableSet *seen = [NSMutableSet set];
   for (NSString *capability in root[@"capabilities"]) {
@@ -1586,10 +1588,10 @@ static BOOL DSHSessionValidateAgentCall(NSDictionary *call) {
   NSString *name = call[@"name"];
   NSSet *registered = [NSSet setWithArray:@[
     @"list_dir", @"read_file", @"write_file", @"git_status", @"git_commit",
-    @"git_push",
+    @"git_push", @"start_guest_cgi", @"stop_guest_cgi",
   ]];
   NSSet *autoTools = [NSSet setWithArray:@[@"list_dir", @"read_file", @"git_status"]];
-  NSSet *conversationTools = [NSSet setWithArray:@[@"write_file", @"git_commit", @"git_push"]];
+  NSSet *conversationTools = [NSSet setWithArray:@[@"write_file", @"git_commit", @"git_push", @"start_guest_cgi", @"stop_guest_cgi"]];
   if (!DSHSessionAgentSummaryMatchesName(call[@"safe_summary_key"], name)) {
     return NO;
   }
@@ -1599,7 +1601,8 @@ static BOOL DSHSessionValidateAgentCall(NSDictionary *call) {
   }
   if ([autoTools containsObject:name] && ![call[@"access"] isEqual:@"auto"]) return NO;
   if ([conversationTools containsObject:name] &&
-      ![call[@"access"] isEqual:@"conversation_confirm"]) return NO;
+      ![call[@"access"] isEqual:@"conversation_confirm"] &&
+      !(([name isEqual:@"start_guest_cgi"] || [name isEqual:@"stop_guest_cgi"]) && [call[@"access"] isEqual:@"durable_deny"])) return NO;
   if ([call[@"access"] isEqual:@"durable_deny"] &&
       (![call[@"approval_decision"] isEqual:@"denied"] ||
        call[@"approval_token"] != NSNull.null ||
@@ -1664,7 +1667,7 @@ static BOOL DSHSessionValidateAgentJournal(NSDictionary *journal) {
       !DSHSessionValidateAgentPolicy(journal[@"policy"]) ||
       !DSHSessionTrustedDictionary(journal[@"root"]) ||
       !DSHSessionValidateAgentRoot(journal[@"root"]) ||
-      !DSHSessionExactSchema(journal[@"tool_registry_version"], 1) ||
+      (!DSHSessionExactSchema(journal[@"tool_registry_version"], 1) && !DSHSessionExactSchema(journal[@"tool_registry_version"], 2)) ||
       !DSHSessionCanonicalDigest(journal[@"toolset_sha256"]) ||
       !DSHSessionTrustedDictionary(journal[@"transcript"]) ||
       !DSHSessionValidateTranscriptReference(journal[@"transcript"]) ||
@@ -1791,12 +1794,13 @@ static BOOL DSHSessionValidateAgentGrant(NSDictionary *grant) {
       [grant[@"binding_revision"] unsignedIntegerValue] >=
           DSHSessionSnapshotMaximumSafeInteger ||
       !DSHSessionCanonicalDigest(grant[@"root_fingerprint_sha256"]) ||
-      ![@[@"file_write", @"git_commit", @"git_push"]
+      ![@[@"file_write", @"git_commit", @"git_push", @"guest_service"]
           containsObject:grant[@"tool_family"]] ||
       (([grant[@"tool_family"] isEqual:@"git_commit"] ||
         [grant[@"tool_family"] isEqual:@"git_push"]) &&
        grant[@"project_id"] == NSNull.null) ||
-      !DSHSessionExactSchema(grant[@"registry_version"], 1) ||
+      (!DSHSessionExactSchema(grant[@"registry_version"], 1) && !DSHSessionExactSchema(grant[@"registry_version"], 2)) ||
+      ([grant[@"tool_family"] isEqual:@"guest_service"] && !DSHSessionExactSchema(grant[@"registry_version"], 2)) ||
       !DSHSessionBoundedText(grant[@"policy_version"], 256, NO) ||
       !DSHSessionTrustedDictionary(grant[@"issued_for"]) ||
       !DSHSessionExactKeys(grant[@"issued_for"], @[@"schema_version", @"task_id", @"attempt_id"]) ||
@@ -2552,7 +2556,7 @@ static BOOL DSHSessionValidateConversation(NSDictionary *conversation,
         NSString *family = grant[@"tool_family"];
         NSString *requiredCapability = [family isEqual:@"file_write"]
             ? @"file_write"
-            : [family isEqual:@"git_commit"] ? @"git_commit" : @"git_push";
+            : [family isEqual:@"guest_service"] ? @"guest_service" : [family isEqual:@"git_commit"] ? @"git_commit" : @"git_push";
         if (![journal[@"root"][@"capabilities"] containsObject:requiredCapability]) return NO;
       }
     }
@@ -5301,6 +5305,11 @@ NSString *DSHSessionSnapshotStoreLaunchInstanceId(void) {
       verified.generation == nextGeneration &&
       [verified.sessionDigest isEqualToString:candidateDigest] &&
       [verified.recentCommits.lastObject[@"operation_id"] isEqualToString:operationId]) {
+    @try {
+      NSMutableSet *conversationIds = [NSMutableSet set];
+      for (NSDictionary *conversation in candidate[@"conversations"]) [conversationIds addObject:conversation[@"id"]];
+      DSHAgentPruneRoundPresentationCache([self.rootURL URLByAppendingPathComponent:@"agent-runtime" isDirectory:YES], conversationIds);
+    } @catch (__unused NSException *exception) {}
     return @{
       @"schema_version" : @1,
       @"status" : @"committed",

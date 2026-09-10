@@ -21,6 +21,7 @@ type Props = React.PropsWithChildren<{
   onClose: () => void;
   onDismiss?: () => void;
   onPresented?: () => void;
+  docked?: boolean;
 }>;
 
 const disableAnimations = process.env.NODE_ENV === 'test';
@@ -38,6 +39,7 @@ export function SlidingSurface({
   onClose,
   onDismiss,
   onPresented,
+  docked = false,
 }: Props) {
   const { width, height } = useWindowDimensions();
   const panelWidth = Math.min(width * widthRatio, maxWidth);
@@ -71,6 +73,7 @@ export function SlidingSurface({
   );
 
   useEffect(() => {
+    if (docked) return;
     if (visible) {
       if (presented.current) return;
       presented.current = true;
@@ -90,9 +93,10 @@ export function SlidingSurface({
       setActive(false);
       onDismissRef.current?.();
     });
-  }, [animateTo, visible]);
+  }, [animateTo, docked, visible]);
 
   useEffect(() => {
+    if (docked) return;
     if (!visible) return;
     const subscription = BackHandler.addEventListener(
       'hardwareBackPress',
@@ -102,9 +106,17 @@ export function SlidingSurface({
       },
     );
     return () => subscription.remove();
-  }, [onClose, visible]);
+  }, [docked, onClose, visible]);
 
   useEffect(() => () => progress.stopAnimation(), [progress]);
+
+  if (docked) {
+    return (
+      <View style={[styles.dockedContainer, { width: maxWidth }]}>
+        {children}
+      </View>
+    );
+  }
 
   const translateX = progress.interpolate({
     inputRange: [0, 1],
@@ -168,4 +180,11 @@ const styles = StyleSheet.create({
   panel: { height: '100%' },
   scrimWrap: { flex: 1 },
   scrim: { flex: 1, backgroundColor: 'rgba(0,0,0,0.54)' },
+  dockedContainer: {
+    position: 'absolute',
+    top: 0,
+    bottom: 0,
+    left: 0,
+    zIndex: 100,
+  },
 });

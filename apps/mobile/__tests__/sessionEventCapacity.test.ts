@@ -4,7 +4,7 @@ import { createChatStore, hydrateChatState, serializeChatState, MAX_SESSION_EVEN
 import { createCompletionController } from '../src/completion/CompletionController';
 import type { AgentRuntimeFacadeV2 } from '../src/native/AgentRuntime';
 
-const base = require('../ios/DSHMobileTests/Fixtures/agent-next-round-after-tool-session.json');
+const base = require('../ios/RishTests/Fixtures/agent-next-round-after-tool-session.json');
 function history(copies: number) {
   const result = JSON.parse(JSON.stringify(base));
   result.conversations = [];

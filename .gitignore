@@ -3,5 +3,16 @@
 .DS_Store
 modules/rish/ios/Vendor/*.a
 modules/rish/ios/Vendor/libgit2.xcframework/
+modules/rish/ios/Vendor/libcrypto.xcframework/
+modules/rish/ios/Vendor/libssh2.xcframework/
 modules/rish/ios/Vendor/rish_ffi.xcframework/
+modules/rish/ios/Vendor/rish_ffi-harness-auth.xcframework
 modules/rish/ios/include/rish.h
+
+# Optional phone-local official CLI auth assets are verified build inputs,
+# never source-controlled release artifacts. Keep the directory itself
+# available for the preparation script while excluding generated credentials
+# runtimes and their digest manifest.
+apps/mobile/ios/Rish/HarnessAuth/*
+!apps/mobile/ios/Rish/HarnessAuth/.gitkeep
+!apps/mobile/ios/Rish/HarnessAuth/HarnessAuthAssets.json

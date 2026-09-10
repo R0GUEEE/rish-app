@@ -2155,6 +2155,13 @@ describe('project Agent completion controller', () => {
     expect(restarted.getState().phase).toBe('resume_available');
     expect(runtime.queryAgentAttempt).toHaveBeenCalledTimes(1);
     expect(runtime.recoverAgentAttempt).toHaveBeenCalledTimes(1);
+    const retried = await restarted.retry(conversationId, attempt.attemptId);
+    expect(retried).toMatchObject({ status: 'retryable', code: 'E_AGENT_EXECUTION_AMBIGUOUS' });
+    expect(runtime.queryAgentAttempt).toHaveBeenCalledTimes(2);
+    expect(runtime.recoverAgentAttempt).toHaveBeenCalledTimes(2);
+    expect(await restarted.beforeConversationChange(conversationId)).toBe(true);
+    expect(runtime.cancelAgentAttempt).not.toHaveBeenCalled();
+    expect(store.getState().conversations[conversationId]!.attempts[0]!.agent).toEqual(journal);
     expect(runtime.completeAgentRoundV2).toHaveBeenCalledTimes(1);
     expect(runtime.prepareAgentToolBatch).not.toHaveBeenCalled();
     expect(runtime.executeAgentTool).not.toHaveBeenCalled();
@@ -2549,7 +2556,7 @@ describe('project Agent completion controller', () => {
   function assertSharedFixture(session: string, name: string): void {
     const file = nodePath.resolve(
       __dirname,
-      '../ios/DSHMobileTests/Fixtures',
+      '../ios/RishTests/Fixtures',
       name,
     );
     const env = process.env as Record<string, string | undefined>;
@@ -2741,7 +2748,7 @@ describe('project Agent completion controller', () => {
 
   test('hydrates a pre-harness Agent session as DSH', () => {
     const legacy = nodeFs.readFileSync(
-      nodePath.resolve(__dirname, '../ios/DSHMobileTests/Fixtures/legacy-pre-harness-session.json'),
+      nodePath.resolve(__dirname, '../ios/RishTests/Fixtures/legacy-pre-harness-session.json'),
       'utf8',
     );
     expect(legacy.includes('"harness_id"')).toBe(false);

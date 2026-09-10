@@ -1,313 +1,208 @@
-# Rish
+<p align="center">
+  <img src="./brand/rish-readme-icon.svg" alt="Rish" width="96" />
+</p>
 
-Rish is a local-first mobile runtime for running Harnesses on-device. DSH is
-the first built-in Harness, not the product boundary. The app lives in
-`apps/mobile` and renders native React Native views with Fabric and Hermes; it
-is not a `WKWebView` wrapper.
+<h1 align="center">Rish，你的随身 Agent。</h1>
 
-The Swift/WebKit code at the repository root is retained only as the original
-`web_proxy` baseline. `run-simulator.sh` now builds and launches the React
-Native product; it never starts or embeds that baseline.
+<p align="center">
+  <strong>手机本地执行，模型自由接入。</strong><br />
+  <sub>本地工作区 · 多模型接入 · 工具执行 · 操作审批</sub>
+</p>
 
-## Product documentation
+<p align="center">
+  <strong>DSH · Claude Code · Codex · GLM API</strong><br />
+  <sub>首批内置接入 · Rish 原生适配器</sub>
+</p>
 
-Rish App product designs, stable interface specs, plans, and evidence live in
-the private [Z-Seven document center](https://github.com/ZSeven-W/openpencil-docs/tree/main/rish-app).
-This source repository remains the implementation and runtime truth; do not
-infer completed behavior from a design document.
+<p align="center">
+  <b>简体中文</b> · <a href="./README.en.md">English</a>
+</p>
 
-## Honest runtime boundary
+<p align="center">
+  <a href="#开始使用">开始使用</a> ·
+  <a href="#首批内置接入">内置接入</a> ·
+  <a href="#产品导览">产品导览</a> ·
+  <a href="#平台与模型">平台与模型</a> ·
+  <a href="./docs/development.md">开发文档</a> ·
+  <a href="./LICENSE">MIT License</a>
+</p>
 
-| Mode              | What runs on the phone                                                                                                     | Current status             |
-| ----------------- | -------------------------------------------------------------------------------------------------------------------------- | -------------------------- |
-| `web_proxy`       | UI only; DSH runs elsewhere                                                                                                | Historical WebKit baseline |
-| `local_substrate` | Native model transport, secure credential storage, local sessions, bounded workspace operations, and rish portable applets | Implemented on iOS         |
-| `local_harness`   | One selected Harness runtime, agent loop, event log, registered tools, approvals, and persistence                          | Not implemented            |
+Rish 把 Agent 的会话、工作区和工具执行放进手机。选一个模型，交代任务，在本机查看过程、批准操作、保留结果，无需电脑常驻。用途不限于编程。
 
-The app must continue to identify itself as `local_substrate`. A local model
-request plus a few local tools is not a complete local Harness runtime.
+> **实验性源码预览准备中。** 当前 iOS 支持本地文件、Git 与受控 Agent 执行；Android 支持 API 对话和会话保存，本地工具执行仍在开发。暂未提供正式安装包。
 
-## Custom providers (iOS)
+## 首批内置接入
 
-Select **Claude Code** or **Codex**, then open **Settings → Custom provider**.
-Enter the service address, choose Messages, Responses, or Chat Completions, and
-map the existing model slots to the service's model IDs. Empty mappings use the
-original model ID. Full endpoint mode preserves a custom API path; otherwise
-Rish fills in the selected protocol's standard path.
+**四个内置接入，一个随身工作区。**
 
-Save the settings, then use **Configure key** to save that service's API key in
-the native Keychain prompt. Official and custom credentials remain separate.
-Changing services requires project context to be confirmed again. Disable the
-custom provider and save to return to the official configuration.
+<table>
+<tr>
+<td align="center" width="25%">
+  <img src="./apps/mobile/src/assets/harness/deepseek-color.svg" alt="DSH / DeepSeek" width="40" height="40" /><br />
+  <strong>DSH</strong><br />
+  <sub>DeepSeek · 可编辑模型目录</sub>
+</td>
+<td align="center" width="25%">
+  <img src="./apps/mobile/src/assets/harness/claude-color.svg" alt="Claude Code" width="40" height="40" /><br />
+  <strong>Claude Code</strong><br />
+  <sub>Anthropic · Messages API</sub>
+</td>
+<td align="center" width="25%">
+  <img src="./apps/mobile/src/assets/harness/codex-color.svg" alt="Codex" width="40" height="40" /><br />
+  <strong>Codex</strong><br />
+  <sub>OpenAI · Responses API</sub>
+</td>
+<td align="center" width="25%">
+  <img src="./apps/mobile/src/assets/harness/zai.svg" alt="GLM" width="40" height="40" /><br />
+  <strong>GLM API</strong><br />
+  <sub>智谱 · 兼容 Messages API</sub>
+</td>
+</tr>
+</table>
 
-## Current mobile product
+在 App 中选择 Harness、配置自己的 Key，围绕手机里的文件和项目开始任务。首批采用 Rish 内置的原生 API 适配器，工作区、工具授权与执行记录由 Rish 管理；具体平台支持见下方表格。
 
-- Multiple local conversations: create, search, switch, auto-title, rename,
-  delete with confirmation, and restore after process restart.
-- Per-conversation DeepSeek V4 Flash, V4 Pro, or multimodal Flash Vision Exp selection, complete multi-turn
-  history, request-scoped Stop, retry, and rejection of late responses.
-- Composer attachments from Camera, Photos, and iOS Files. Images use the
-  native Flash Exp multimodal request path; UTF-8 text files are bounded and
-  delimited, and PDFs use bounded PDFKit text extraction. Attachment-only
-  messages, retry, history cards, restart recovery, and clickable native Quick
-  Look previews are supported.
-- Composer-level thinking modes (`off`, `high`, and `max`) persisted per conversation and sent through the native DeepSeek
-  transport. Returned reasoning can be persisted, hidden, and expanded.
-- A mobile Markdown subset for headings, bullets, block quotes, inline code,
-  and fenced code blocks, plus collapsible reasoning/tool-call/tool-result
-  cards.
-- A right-side animated Settings drawer with system/light/dark appearance,
-  system/Simplified Chinese/English locale, default model, thinking display,
-  tool-card behavior, local workspace permission, destructive-action
-  confirmation, credential management, package mirrors, and runtime evidence.
-- Alpine APK, Python pip, and Node npm mirror settings support presets, custom
-  HTTPS bases, bounded speed tests, persistence, and native staging for the
-  rish guest. The UI explicitly reports that the persistent guest is not
-  mounted yet.
-- A right-side local Files drawer with nested directory navigation, text-file
-  create/read/edit, revision-protected atomic save, rename, recoverable trash,
-  restore, and real `sha256sum`/`wc` rish receipts. Files and folders can be
-  imported from and exported to the iOS Files app through the native document
-  picker; security-scoped provider URLs never cross into JavaScript.
-- App-owned Git Projects backed by pinned libgit2: create, public HTTPS clone,
-  status, unified diff, stage all, commit, configure `origin`, native Keychain
-  credentials, and non-force push. Each conversation can bind to one opaque
-  project id, and project Files stay scoped to that worktree while `.git`
-  remains hidden from the normal file API.
-- A mobile-specific runtime evidence surface and a machine-verifiable proof
-  record that correlates the DeepSeek response, optional reasoning, persisted
-  session, process restart, rish execution, live Simulator PID, and a closed
-  Mac DSH port.
-- One Lucide-based functional icon system across chat, drawers, settings,
-  projects, Git, Files, attachments, and tool states. Icons use per-icon imports
-  and a shared 1.8-stroke wrapper; semantic text markers, data symbols, status
-  dots, and the Rish brand mark remain intentionally separate.
+当前内置的是这些名称对应的 API 适配能力，完整官方 CLI 与订阅登录另见[实验状态](docs/ios-harness-auth-status.md)。
 
-The original app icon is stored in `brand/`. It intentionally uses the
-geometric DSH mark without the whale or any plugin artwork. Lucide is used for
-interface actions only and does not replace the product mark.
+智谱的官方 Agent 产品名是 [ZCode](https://zcode.z.ai/cn/docs/agents)，GLM 是模型系列。iOS 已实测 BigModel 账号登录、重开保留，以及个人 Coding Plan 的 GLM-5.3 调用；体验额度通道仍待验证。ZCode 运行时尚未集成，详见[账号接入状态](docs/zcode-account-login.md)。
 
-## Architecture
+## 产品导览
+
+从会话执行、项目变更到模型选择，看看 Rish 的实际界面。点击图片查看原图。
+
+<table>
+<tr>
+<td width="50%" valign="top" align="center">
+  <a href="./docs/images/agent-workflow-ios.png"><img src="./docs/images/agent-workflow-ios.png" alt="Rish iOS 模拟器中的进度正文、list_dir 工具调用和最终回答" width="280" /></a><br />
+  <sub><b>Agent 会话</b> — 查看进度、工具调用和结果；图中正文在重启后仍保留。</sub>
+</td>
+<td width="50%" valign="top" align="center">
+  <a href="./docs/images/project-changes-ios.png"><img src="./docs/images/project-changes-ios.png" alt="Rish iOS 模拟器中的未暂存文件和变更统计" width="280" /></a><br />
+  <sub><b>本地项目</b> — 查看未暂存文件和变更统计，在提交前审核工作区变化。</sub>
+</td>
+</tr>
+<tr>
+<td colspan="2" valign="top">
+  <a href="./docs/images/model-adapters-ipad.png"><img src="./docs/images/model-adapters-ipad.png" alt="Rish iPad 模拟器中的侧栏与四个原生 API 适配入口" width="100%" /></a><br />
+  <sub><b>iPad 工作区与模型接入</b> — 宽屏侧栏、深色界面和 API 适配入口。</sub>
+</td>
+</tr>
+</table>
+
+以上均为真实模拟器截图；模型入口图展示界面，不代表官方 CLI 或订阅登录已验证。
+
+## 为什么用 Rish
+
+<table>
+<tr>
+<td width="50%">
+
+### 工作区随身带
+
+文件与项目保存在手机的应用工作区。导入资料、查看文件、检查项目变化，在同一个 App 里继续处理任务。
+
+</td>
+<td width="50%">
+
+### 模型由你选
+
+从内置的 DSH、Claude Code、Codex 与 GLM API 入口开始，也可配置兼容的 API 服务与模型映射。模型负责生成下一步，手机上的工具执行操作。
+
+</td>
+</tr>
+<tr>
+<td width="50%">
+
+### 看得见的执行过程
+
+每轮正文、模型返回的可选思考区块、工具调用和最终结果按顺序显示。链接可直接打开，历史会话可以重开。
+
+</td>
+<td width="50%">
+
+### 操作由你掌控
+
+Agent 在限定的工作区内使用工具。需要授权的操作会先请求批准，文件变更和 Git 差异可供查看。
+
+</td>
+</tr>
+</table>
+
+## 可以拿它做什么
+
+从这些任务开始，逐步把自己的工作带进手机：
+
+| 场景 | 可以这样开始 |
+| --- | --- |
+| 处理资料 | 导入文本或 PDF，让模型提取重点，再审核 Agent 保存的笔记。 |
+| 整理文件 | 让 Agent 查看项目目录、读取指定文件，确认后创建或更新内容。 |
+| 维护项目 | 查看 Git 状态和差异，修改文件，审核后提交变更。 |
+
+这些场景以 iOS 当前可用能力为基础；可用工具和文件格式取决于平台。Linux Guest 运行实验的范围见[运行环境说明](docs/development.md#honest-runtime-boundary)。
+
+## 怎么在本地运行
 
 ```text
-React Native mobile UI (Fabric + Hermes)
-  -> typed chat/preferences stores and mobile presentation layer
-  -> bounded native modules
-       LocalRuntime
-         -> iOS Keychain (credential never crosses into JavaScript)
-         -> native URLSession -> DeepSeek
-         -> App Container sessions + runtime proof
-         -> linked rish sha256sum proof probe
-       LocalWorkspace
-         -> app-owned workspace only
-         -> descriptor-relative, no-symlink file operations
-         -> atomic revision-checked text writes + recoverable trash
-         -> allowlisted read-only rish portable applets
-       LocalDocuments
-         -> UIDocumentPicker import/export bridge to the iOS Files app
-         -> bounded staged copies; no external provider URL reaches JavaScript
-         -> reserved Git metadata and symlinks fail closed
-       LocalAttachments
-         -> Camera, PHPicker, and UIDocumentPicker acquisition
-         -> opaque-id native store with normalized images and bounded previews
-         -> SHA-256 manifests, lifecycle pruning, and no file paths in chat JSON
-       LocalProjects
-         -> app-private, isolated Git worktrees resolved from opaque ids
-         -> pinned libgit2 XCFramework using iOS SecureTransport
-         -> native HTTPS credential prompt + device-only Keychain storage
+你交代任务 → Rish 组织上下文 → 你选择的模型服务
+                                  ↓ 返回文字 / 工具请求
+手机工作区 ← 本地工具执行 ← Rish 校验与审批
 ```
 
-These native modules currently use the legacy React Native bridge. A production
-hardening step is to migrate the same narrow contracts to Codegen TurboModules;
-it is not permission to expose arbitrary paths, provider URLs, credentials, or
-a general shell to JavaScript.
+Rish 的受控工具在手机本地执行，会话和工作区由 App 管理。模型请求会将选定的对话及任务上下文发送给你配置的服务，**本地执行不等于模型离线推理**。
 
-## Security invariants
+底层结合原生文件与 Git 能力、Rish 运行时和实验性的 Linux Guest。当前不承诺完整桌面软件兼容或后台常驻；已验证能力和实验功能分别列在[开发文档](docs/development.md)。
 
-- API keys are never committed, bundled, logged, persisted in chat/session
-  JSON, or returned to React Native. On iOS they are stored as
-  `WhenUnlockedThisDeviceOnly` Keychain items and used only by native code.
-- The Simulator provisioner uses a temporary `0600` staging file, waits for a
-  value-free acknowledgement, and removes the staged value after Keychain
-  import. Prefer `--secure-stdin` when not importing the managed DSH
-  credential.
-- Workspace paths are relative to the app-owned workspace. Absolute paths,
-  traversal, `.trash`, symlinks, non-text/oversized reads, excessive listings,
-  and non-allowlisted tools fail closed.
-- iOS Files access is explicit import/export, not unrestricted filesystem
-  access. Imports are bounded and staged before publication. Exports copy to a
-  temporary sanitized tree and omit `.git`, `.gitmodules`, and app trash.
-- Chat attachments are copied into an app-owned 256 MiB native store. Messages
-  persist only opaque descriptors; thumbnails, provider URLs, absolute paths,
-  and base64 image payloads are excluded from session JSON. Images are
-  metadata-stripped and downsampled before sending.
-- Git remote URLs must be credential-free public DNS HTTPS URLs. PATs remain in
-  native `WhenUnlockedThisDeviceOnly` Keychain storage; force push, SSH, LFS,
-  and submodules are rejected in version 1.
-- Read-only mode disables create, edit, rename, and trash controls. Saves use
-  an expected revision to detect stale edits, and deletion means a recoverable
-  move to app trash.
-- Run `scripts/verify-no-bundled-secret.rb` before sharing an app bundle. Never
-  place a key in source, shell history, a README, an environment file, or a
-  test fixture.
+## 平台与模型
 
-## Install and run the React Native app
+| 平台 | 当前范围 |
+| --- | --- |
+| iOS / iPadOS | 原生会话、附件、文件、Git、受控 Agent 工具执行；包含 iPad 布局适配。 |
+| Android | 原生 API 对话、凭据存储、会话恢复和部分任务通知；本地 Agent、文件与 Git 执行待完成。 |
+| HarmonyOS | Android 兼容容器的临时测试不代表原生鸿蒙支持。 |
 
-Node 22.11 or newer is required.
+| 模型接入 | 当前方式 |
+| --- | --- |
+| DeepSeek / DSH | API Key、可编辑模型目录；能力取决于具体模型和平台。 |
+| GLM | API Key；iOS 独立账号授权已验证 BigModel Coding Lite 的 GLM-5.3 调用，体验套餐仍待验证。 |
+| Codex | API 适配；可选 iOS 实验包已实测订阅登录、Luna 对话与手机本地目录工具调用。 |
+| Claude Code | API 适配，可配置兼容服务；订阅登录仍待验证。 |
+| 自定义服务 | iOS 可选择 Messages、Responses 或 Chat Completions 协议及模型映射。 |
+
+Codex 订阅接入仍需可选实验构建，并不代表完整官方 CLI 兼容。详见[订阅登录状态](docs/ios-harness-auth-status.md)。
+
+## 开始使用
+
+当前从源码构建，尚无面向普通用户的正式下载。访问源码后，先在仓库根目录安装依赖：
 
 ```sh
-cd apps/mobile
-npm ci
+node scripts/verify-source-checkout.mjs
+npm ci --prefix apps/mobile
 ```
 
-For a Metro-backed iOS development run:
-
-```sh
-cd ios
-/opt/homebrew/bin/pod install
-cd ..
-npm run ios
-```
-
-For Android UI development:
-
-```sh
-npm run android
-```
-
-Android task alerts, per-conversation mute, and user-started foreground-service
-lifecycle are implemented and have scoped emulator tests. Android uses an
-ongoing notification instead of iOS Live Activities. These checks do not prove
-model, file/Git, or Agent execution.
-
-Android now supports pure-text API chat through native OkHttp, Android Keystore
-encrypted credentials, scoped custom-provider profiles, and atomic SQLite session
-snapshots. API33 emulator checks cover DSH, GLM, GLM-backed Codex/Claude Code
-profiles, and UI send/save/reopen without replay. Those profiles test API adapters,
-not the official CLI harnesses or subscription login. Attachments, project context,
-file/Git, Agent execution, and rish JNI remain unavailable; runtime status honestly
-reports incomplete. Debug UI uses Metro; standalone Release and physical Android
-device acceptance remain pending.
-
-For temporary Android compatibility-container testing, build a self-contained
-debug-signed APK with bundled JS and developer-server support disabled:
-
-```sh
-apps/mobile/android/gradlew -p apps/mobile/android :app:assembleDebug -PrishStandalone=true -PreactNativeArchitectures=arm64-v8a
-```
-
-This remains a test build, not a production-signed release. Its launcher was
-checked on the API33 emulator with airplane mode enabled; HarmonyOS compatibility
-container installation and execution require a separate device check.
-
-## Editable DSH model catalog
-
-In Settings, use **DSH model catalog** to add exact provider model IDs, display
-names and image-input capability declarations, or edit/remove entries and restore
-defaults. iOS and Android persist the catalog natively. Up to 32 selectable models
-are supported; removed identities remain readable in existing conversations.
-Adding a provider-supported model does not require another app update.
-
-Android status now distinguishes configured chat from unavailable local tools.
-API chat and session storage do not imply that file/Git, Agent or rish execution
-has been implemented. Image capability declarations cannot add capabilities that
-the provider or platform does not support.
-
-## Build and verify the iOS local-substrate proof
-
-The proof build links rish and libgit2 into a self-contained app and does not
-depend on Metro or a Mac `dsh web` process. Both dependencies are packaged as
-device + Simulator arm64 XCFrameworks.
-
-From the repository root:
+**iOS：** 原生依赖需要指定版本的 Xcode、Rust 和 SDK。先按[构建指南](docs/development.md#ios-build-prerequisites)准备，再运行：
 
 ```sh
 ./scripts/prepare-rish-ios.sh
 ./scripts/prepare-libgit2-ios.sh
 cd apps/mobile/ios
-/opt/homebrew/bin/pod install
-
-xcodebuild \
-  -workspace DSHMobile.xcworkspace \
-  -scheme DSHMobile \
-  -configuration Release \
-  -sdk iphonesimulator \
-  -destination 'platform=iOS Simulator,id=<UDID>' \
-  -derivedDataPath build/local-proof-arm64 \
-  ARCHS=arm64 \
-  ONLY_ACTIVE_ARCH=YES \
-  build
-
-xcrun simctl install <UDID> \
-  build/local-proof-arm64/Build/Products/Release-iphonesimulator/DSHMobile.app
+pod install
 cd ../../..
+npm run ios --prefix apps/mobile
 ```
 
-The separate unsigned `generic/platform=iOS` Release build is a required
-device-link gate. It proves the iPhone arm64 slices link, but it is not evidence
-that the app ran on a physical iPhone.
+**Android：** 配置好 Android 开发环境后运行 `npm run android --prefix apps/mobile`。[独立测试 APK 的构建方法](docs/development.md#install-and-run-the-react-native-app)另见开发文档。
 
-Confirm no Mac DSH listener is present, then import the key without putting the
-value on the command line:
+打开 App 后，选择模型并配置自己的 Key。iOS 上创建或选择项目，确认项目上下文，再开始任务。Key 由原生安全存储保管，请勿放进源码或提交记录。
 
-```sh
-lsof -nP -iTCP:3180 -sTCP:LISTEN
-./scripts/provision-simulator-key.rb \
-  --secure-stdin <UDID> dev.zseven.dsh.mobile
-```
+## 进展与参与
 
-In the app, select **V4 Flash**, complete a real response, terminate and
-relaunch the app, then verify the correlated record:
+Rish 正在准备首个源码预览，后续发布将标记为 **Pre-release**。当前完整 Harness 兼容、Android 本地执行和持续后台运行仍有明确限制，详见[当前范围与路线](docs/releases/v0.1.0.md)。
 
-```sh
-./scripts/verify-local-proof.rb <UDID> dev.zseven.dsh.mobile
-```
+欢迎从文档、平台适配、模型兼容和可复现的问题入手参与。开始前请阅读[贡献指南](CONTRIBUTING.md)；安全问题请先查看[安全策略](SECURITY.md)，不要在公开讨论中贴凭据或敏感数据。
 
-The verifier currently pins its acceptance request to V4 Flash. It checks the
-actual container file and live Simulator process; a screenshot or an inherited
-boolean is not sufficient evidence.
+- [开发与构建文档](docs/development.md)
+- [源码预览进度](docs/open-source-sprint.md)
+- [品牌与宣传语](brand/README.md)
+- [第三方声明与 Guest 来源](THIRD_PARTY_NOTICES.md)
 
-## Quality gates
-
-```sh
-cd apps/mobile
-npm run typecheck
-npm run lint
-npm test -- --runInBand
-
-cd android
-./gradlew assembleDebug
-
-cd ../../..
-ruby scripts/verify-no-bundled-secret.rb
-ruby scripts/verify-no-bundled-secret.rb \
-  apps/mobile/ios/build/local-proof-arm64/Build/Products/Release-iphonesimulator/DSHMobile.app
-```
-
-The Jest suite covers typed state/persistence, theme and locale resolution,
-chat isolation/history, request cancellation/retry, reasoning, structured tool
-display, the Markdown subset, credential recovery, workspace create/edit with
-revision protection, and portable-tool receipts. The native Release build and
-the proof verifier remain separate required gates.
-
-## What is still missing
-
-- The real DSH AgentLoop, SessionEvent replay, tool registry, provider/plugin
-  host, autonomous tool loop, approvals, and structured questions.
-- Token/reasoning/event streaming; the current native request returns one
-  completed response.
-- DSH plans, goals, jobs, subagents, workflow runs, queues, steering, skills,
-  plugins, agent presets, usage/stats, and produced-file event integration.
-- Share-extension input, OCR for scanned PDFs, full DSH Markdown parity (links,
-  tables, math, images), and message edit/regenerate/export/feedback actions.
-- Git pull/fetch UI, merge/rebase, SSH, LFS, submodules, signed commits, and
-  force push. The current Git slice intentionally supports a smaller auditable
-  HTTPS workflow.
-- Android native local runtime/workspace adapters and device proof.
-
-See [the DSH Web parity matrix][parity], [the mobile UI audit][ui-audit], and
-[the proof contract][proof] in the document center for the exact boundaries.
-
-[parity]: https://github.com/ZSeven-W/openpencil-docs/blob/main/rish-app/reference/dsh-web-parity.md
-[ui-audit]: https://github.com/ZSeven-W/openpencil-docs/blob/main/rish-app/reference/mobile-ui-audit.md
-[proof]: https://github.com/ZSeven-W/openpencil-docs/blob/main/rish-app/reference/local-runtime-proof.md
+项目代码使用 [MIT License](LICENSE)。第三方运行时、Guest 组件和其他依赖保留各自许可证。

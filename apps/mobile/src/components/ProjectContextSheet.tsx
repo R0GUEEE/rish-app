@@ -364,7 +364,7 @@ function canPrepare(props: ProjectContextSheetProps): boolean {
     !props.loadingMore &&
     !props.unavailable &&
     props.errorCode === null &&
-    selected.count > 0 &&
+    (selected.count > 0 || props.candidates.length === 0) &&
     !selected.ineligible &&
     selected.bytes <= PROJECT_CONTEXT_MAX_BYTES
   );

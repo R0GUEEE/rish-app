@@ -20,6 +20,8 @@ typedef NSArray<NSDictionary *> * _Nullable (^DSHAgentProviderRoundVisibleHistor
     NSDictionary *authority, NSError **error);
 typedef NSDictionary * _Nullable (^DSHAgentProviderRoundContextReceiptProvider)(
     NSDictionary *authority, NSError **error);
+typedef DSHCompletionProviderTransport * _Nullable (^DSHAgentProviderRoundTransportResolver)(
+    NSString *harnessId);
 
 /// For schema-3 rounds the callback returns exactly
 /// `{project_context_sha256,receipt:{...},messages:[{role:"system",content,attachments:[]}]}`.
@@ -113,6 +115,8 @@ typedef NSDictionary * _Nullable (^DSHAgentProviderRoundContextReceiptProvider)(
 @property(nonatomic, strong, readonly, nullable) DSHCompletionProviderTransport *claudeTransport;
 @property(nonatomic, strong, readonly, nullable) DSHCompletionProviderTransport *codexTransport;
 @property(nonatomic, strong, readonly, nullable) DSHCompletionProviderTransport *glmTransport;
+/// Optional per-round resolver consulted after initialization.
+@property(nonatomic, copy, nullable) DSHAgentProviderRoundTransportResolver transportResolver;
 
 /// Missing harness_id preserves legacy DSH behavior. Unknown, mismatched,
 /// or unavailable transports are rejected before reading credentials.

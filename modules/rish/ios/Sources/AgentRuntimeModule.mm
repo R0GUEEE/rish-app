@@ -46,6 +46,7 @@ typedef NSDictionary *_Nullable (^DSHRuntimeModuleInvoke)(
 - (nullable NSString *)credential;
 - (nullable NSString *)credentialForHarnessId:(NSString *)harnessId
                                    generation:(NSUInteger *)generation;
+- (nullable DSHCompletionProviderTransport *)providerTransportForHarnessId:(NSString *)harnessId;
 @end
 
 static DSHAgentNativeWAL *DSHRuntimeSharedWAL(void) {
@@ -333,6 +334,9 @@ RCT_EXPORT_MODULE(AgentRuntime)
       codexTransport:codexTransport glmTransport:glmTransport
       credentialProvider:credentials
       visibleHistoryProvider:history contextReceiptProvider:context];
+  roundService.transportResolver = ^DSHCompletionProviderTransport *(NSString *harnessId) {
+    return [weakRuntime providerTransportForHarnessId:harnessId];
+  };
   DSHAgentWorkspaceToolExecutor *workspaceExecutor =
       [[DSHAgentWorkspaceToolExecutor alloc] initWithRootResolver:rootResolver];
   DSHAgentGitToolExecutor *gitExecutor = [[DSHAgentGitToolExecutor alloc]
@@ -408,6 +412,8 @@ DSH_RUNTIME_EXPORT(execute_agent_tool, executeAgentToolRequest,
                    executeAgentTool)
 DSH_RUNTIME_EXPORT(cancel_agent_attempt, cancelAgentAttemptRequest,
                    cancelAgentAttempt)
+DSH_RUNTIME_EXPORT(read_agent_round_presentations, readAgentRoundPresentationsRequest,
+                   readAgentRoundPresentations)
 DSH_RUNTIME_EXPORT(query_agent_attempt, queryAgentAttemptRequest,
                    queryAgentAttempt)
 DSH_RUNTIME_EXPORT(query_agent_tool, queryAgentToolRequest, queryAgentTool)

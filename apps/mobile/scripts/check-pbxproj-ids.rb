@@ -8,7 +8,7 @@
 
 require 'set'
 
-project = ARGV[0] || File.expand_path('../ios/DSHMobile.xcodeproj/project.pbxproj', __dir__)
+project = ARGV[0] || File.expand_path('../ios/Rish.xcodeproj/project.pbxproj', __dir__)
 abort "not a file: #{project}" unless File.file?(project)
 
 DEFINITION = /^\t*([0-9A-F]{24}) \/\* (.+?) \*\/ = \{isa = (\w+)/.freeze

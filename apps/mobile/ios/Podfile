@@ -14,7 +14,7 @@ if linkage != nil
   use_frameworks! :linkage => linkage.to_sym
 end
 
-target 'DSHMobile' do
+target 'Rish' do
   config = use_native_modules!
   pod 'RishLocalRuntime', :path => '../../../modules/rish/ios'
 
@@ -24,7 +24,7 @@ target 'DSHMobile' do
     :app_path => "#{Pod::Config.instance.installation_root}/.."
   )
 
-  target 'DSHMobileTests' do
+  target 'RishTests' do
     inherit! :search_paths
   end
 

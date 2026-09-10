@@ -6,6 +6,7 @@
 #import "AgentPreparedAttemptStore.h"
 #import "AgentTranscriptStore.h"
 #import "AgentWorkspaceToolExecutor.h"
+#import "DSHAgentGuestCgiToolExecutor.h"
 #import "DSHGitPushSupport.h"
 
 static const unsigned long long DSHAgentExecutionMaximumSafeInteger =
@@ -238,7 +239,7 @@ static BOOL DSHAgentExecutionConversationGrantBound(
   NSString *family = [request[@"name"] isEqualToString:@"write_file"]
       ? @"file_write" : ([request[@"name"] isEqualToString:@"git_commit"]
           ? @"git_commit" : ([request[@"name"] isEqualToString:@"git_push"]
-              ? @"git_push" : nil));
+              ? @"git_push" : ([request[@"name"] hasSuffix:@"_guest_cgi"] ? @"guest_service" : nil)));
   if (family == nil || request[@"approval_reference"] == NSNull.null) return NO;
   NSDictionary *loaded = [preparedStore.sessionSnapshotStore
       loadSessionSnapshotWithError:nil];
@@ -265,7 +266,8 @@ static BOOL DSHAgentExecutionConversationGrantBound(
           [grant[@"root_fingerprint_sha256"]
               isEqual:root[@"root_fingerprint_sha256"]] &&
           [grant[@"tool_family"] isEqual:family] &&
-          [grant[@"registry_version"] isEqual:@1] &&
+          ([grant[@"registry_version"] isEqual:@1] || [grant[@"registry_version"] isEqual:@2]) &&
+          (![family isEqual:@"guest_service"] || [grant[@"registry_version"] isEqual:@2]) &&
           [grant[@"policy_version"] isEqualToString:@"agent-v1"]) return YES;
     }
   }
@@ -718,7 +720,7 @@ static NSDictionary *DSHAgentExecutionHistoricalResult(
   }
   BOOL mutation = [request[@"name"] isEqualToString:@"write_file"] ||
       [request[@"name"] isEqualToString:@"git_commit"] ||
-      [request[@"name"] isEqualToString:@"git_push"];
+      [request[@"name"] isEqualToString:@"git_push"] || [request[@"name"] hasSuffix:@"_guest_cgi"];
   if ([request[@"batch_kind"] isEqualToString:@"write_batch"] && mutation) {
     NSDictionary *gate = [self.ledger openAgentWriteBatchEffectGateWithRequest:@{
       @"schema_version" : @2, @"task_id" : request[@"task_id"],
@@ -784,6 +786,10 @@ static NSDictionary *DSHAgentExecutionHistoricalResult(
                                                   root:request[@"root"]
                                           precondition:row[@"precondition"]
                                                  error:error];
+  } else if ([request[@"name"] hasSuffix:@"_guest_cgi"]) {
+#if DEBUG
+    effect = [[DSHAgentGuestCgiToolExecutor executorForWorkspaceExecutor:self.workspaceExecutor] executeSynchronouslyToolNamed:request[@"name"] arguments:arguments root:request[@"root"] owner:request precondition:row[@"precondition"]];
+#endif
   } else {
     // git_push registers a cancellation token under the same locator identity
     // as the ledger row, so the coordinator's cancel path can interrupt the
@@ -810,6 +816,12 @@ static NSDictionary *DSHAgentExecutionHistoricalResult(
         }
       }
     }
+  }
+  if ([request[@"name"] hasSuffix:@"_guest_cgi"] &&
+      !DSHAgentExecutionValidateCommittedSession(self.preparedStore, request, YES, nil)) {
+    [[DSHAgentGuestCgiToolExecutor executorForWorkspaceExecutor:self.workspaceExecutor] cancelAttempt:request[@"attempt_id"]];
+    NSString *feedback = DSHAgentExecutionFeedback(@{ @"schema_version": @1, @"name": request[@"name"], @"outcome": @"ambiguous", @"payload": @{ @"schema_version": @1, @"failure_code": @"E_AGENT_EXECUTION_AMBIGUOUS" } }, nil);
+    effect = @{ @"schema_version": @1, @"status": @"ambiguous", @"feedback": feedback, @"settled_facts": NSNull.null, @"truncated": @NO, @"effect_may_have_occurred": @YES };
   }
   if (effect == nil) {
     if (error != nullptr) *error = nil;
@@ -945,6 +957,9 @@ static NSDictionary *DSHAgentExecutionHistoricalResult(
                                                       root:request[@"root"]
                                               precondition:row[@"precondition"]
                                                      error:error];
+  } else if ([request[@"name"] hasSuffix:@"_guest_cgi"]) {
+    // Process-owned services are never replayed during recovery.
+    recovered = @{ @"schema_version": @1, @"status": @"ambiguous" };
   } else {
     recovered = [self.gitExecutor recoverToolNamed:request[@"name"]
                                            arguments:arguments
@@ -1062,6 +1077,7 @@ static NSDictionary *DSHAgentExecutionHistoricalResult(
     token = self.pushCancelTokens[locatorKey];
   }
   [token cancel];
+  [[DSHAgentGuestCgiToolExecutor executorForWorkspaceExecutor:self.workspaceExecutor] cancelAttempt:locator[@"attempt_id"]];
 }
 
 @end

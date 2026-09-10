@@ -18,6 +18,7 @@ NS_ASSUME_NONNULL_BEGIN
 - (nullable NSDictionary *)bindAgentApproval:(NSDictionary *)request error:(NSError **)error;
 - (nullable NSDictionary *)executeAgentTool:(NSDictionary *)request error:(NSError **)error;
 - (nullable NSDictionary *)cancelAgentAttempt:(NSDictionary *)request error:(NSError **)error;
+- (nullable NSDictionary *)readAgentRoundPresentations:(NSDictionary *)request error:(NSError **)error;
 - (nullable NSDictionary *)queryAgentAttempt:(NSDictionary *)request error:(NSError **)error;
 - (nullable NSDictionary *)queryAgentTool:(NSDictionary *)request error:(NSError **)error;
 - (nullable NSDictionary *)recoverAgentAttempt:(NSDictionary *)request error:(NSError **)error;
@@ -28,8 +29,8 @@ NS_ASSUME_NONNULL_BEGIN
 @property(nonatomic, readonly, getter=isAvailable) BOOL available;
 @end
 
-/// One native composition point for the twelve public Agent Runtime V2
-/// operations.  It owns no React Native surface and returns only detached,
+/// Native composition for Agent authority operations and read-only display
+/// projections.  It owns no React Native surface and returns only detached,
 /// redacted Foundation JSON projections.
 @interface DSHAgentRuntimeCoordinator : NSObject <DSHAgentRuntimeCoordinating>
 
@@ -66,6 +67,7 @@ NS_ASSUME_NONNULL_BEGIN
                                         error:(NSError **)error;
 - (nullable NSDictionary *)cancelAgentAttempt:(NSDictionary *)request
                                           error:(NSError **)error;
+- (nullable NSDictionary *)readAgentRoundPresentations:(NSDictionary *)request error:(NSError **)error;
 - (nullable NSDictionary *)queryAgentAttempt:(NSDictionary *)request
                                          error:(NSError **)error;
 - (nullable NSDictionary *)queryAgentTool:(NSDictionary *)request

@@ -1,0 +1,403 @@
+# Development and runtime reference
+
+[Back to Rish](../README.md) · [English overview](../README.en.md)
+
+This guide contains implementation detail, build commands, and validation
+procedures. Run shell commands from the repository root unless stated otherwise.
+For a capability overview, start with the README.
+
+## iOS build prerequisites
+
+The native preparation scripts currently require an Apple Silicon Mac, Xcode
+26.6 (build 17F113), iOS and Simulator SDK 26.5, Rust toolchain `1.94` resolving
+to rustc 1.94.1, and the `aarch64-apple-ios` and `aarch64-apple-ios-sim` targets.
+These are enforced pins, not a claim of compatibility with arbitrary versions.
+Node 22.11+, CocoaPods, CMake, Perl, make, Git, jq, and the script-checked tools
+must be available. The first preparation downloads pinned sources and dependencies.
+
+The app lives in `apps/mobile` and renders native React Native views with
+Fabric and Hermes. DSH was the first built-in Harness target; Rish's scope
+extends to multiple model providers and task types.
+
+The Swift/WebKit code at the repository root is retained only as the original
+`web_proxy` baseline. `run-simulator.sh` now builds and launches the React
+Native product; it never starts or embeds that baseline.
+
+## Product documentation
+
+Rish App product designs, stable interface specs, plans, and evidence are
+maintained separately from this source repository. This README is the public
+implementation and runtime boundary; do not infer completed behavior from a
+design document.
+
+The current contribution and security policies are drafts: see
+[CONTRIBUTING.md](../CONTRIBUTING.md) and [SECURITY.md](../SECURITY.md). The project
+source is licensed under the [MIT License](../LICENSE), and the current status of
+private vulnerability reporting is recorded in `SECURITY.md`.
+The current limited dependency inventory is in
+[THIRD_PARTY_NOTICES.md](../THIRD_PARTY_NOTICES.md); it is not a complete SBOM.
+The planned `v0.1.0` source-preview scope and release checklist are in
+[`docs/releases/v0.1.0.md`](releases/v0.1.0.md); no tag or release is
+created by that document.
+
+## Honest runtime boundary
+
+| Mode              | What runs on the phone                                                                                                     | Current status             |
+| ----------------- | -------------------------------------------------------------------------------------------------------------------------- | -------------------------- |
+| `web_proxy`       | UI only; DSH runs elsewhere                                                                                                | Historical WebKit baseline |
+| `local_substrate` | Native model transport, secure credential storage, local sessions, bounded workspace operations, and rish portable applets | Implemented on iOS         |
+| `local_harness`   | One selected Harness runtime, agent loop, event log, registered tools, approvals, and persistence                          | Partially implemented; gate not closed |
+
+The app must continue to identify itself as `local_substrate` until the selected
+Harness has passed the complete local_harness gate. Existing AgentLoop,
+controller, tool and approval code, or a local model request plus a few local
+tools, is not by itself a complete local Harness runtime.
+
+## Custom providers (iOS)
+
+Select **Claude Code** or **Codex**, then open **Settings → Custom provider**.
+Enter the service address, choose Messages, Responses, or Chat Completions, and
+map the existing model slots to the service's model IDs. Empty mappings use the
+original model ID. Full endpoint mode preserves a custom API path; otherwise
+Rish fills in the selected protocol's standard path.
+
+Save the settings, then use **Configure key** to save that service's API key in
+the native Keychain prompt. Official and custom credentials remain separate.
+Changing services requires project context to be confirmed again. Disable the
+custom provider and save to return to the official configuration.
+
+## Current mobile product
+
+The following describes the iOS surface unless another platform is named.
+
+- Multiple local conversations: create, search, switch, auto-title, rename,
+  delete with confirmation, and restore after process restart.
+- Per-conversation DeepSeek V4 Flash, V4 Pro, or multimodal Flash Vision Exp selection, complete multi-turn
+  history, request-scoped Stop, retry, and rejection of late responses.
+- Composer attachments from Camera, Photos, and iOS Files. Images use the
+  native Flash Exp multimodal request path; UTF-8 text files are bounded and
+  delimited, and PDFs use bounded PDFKit text extraction. Attachment-only
+  messages, retry, history cards, restart recovery, and clickable native Quick
+  Look previews are supported.
+- Composer-level thinking modes (`off`, `high`, and `max`) persisted per conversation and sent through the native DeepSeek
+  transport. Returned reasoning can be persisted, hidden, and expanded.
+- A mobile Markdown subset for headings, bullets, block quotes, inline code,
+  fenced code, bounded tables and math, and controlled image display. Plain
+  URLs, bold URLs, and Markdown links open on an explicit tap; user messages
+  also support plain URL links. Code spans stay literal, and unsupported URL
+  schemes are not actionable.
+- Agent round presentation places returned progress text and optional
+  reasoning before that round's tool cards, followed by the final answer.
+  The bounded, owner-checked iOS presentation archive survives transcript
+  cleanup and process restart; it does not replay tools. Reasoning display
+  follows the user's setting and depends on what the model returns. Text
+  already discarded by older builds cannot be reconstructed.
+- A right-side animated Settings drawer with system/light/dark appearance,
+  system/Simplified Chinese/English locale, default model, thinking display,
+  tool-card behavior, local workspace permission, destructive-action
+  confirmation, credential management, package mirrors, and runtime evidence.
+- Alpine APK, Python pip, and Node npm mirror settings support presets, custom
+  HTTPS bases, bounded speed tests, persistence, and native staging for the
+  rish guest. The UI explicitly reports that the persistent guest is not
+  mounted yet.
+- A right-side local Files drawer with nested directory navigation, text-file
+  create/read/edit, revision-protected atomic save, rename, recoverable trash,
+  restore, and real `sha256sum`/`wc` rish receipts. Files and folders can be
+  imported from and exported to the iOS Files app through the native document
+  picker; security-scoped provider URLs never cross into JavaScript.
+- App-owned Git Projects backed by pinned libgit2: create, public HTTPS clone,
+  native SSH clone/fetch with pinned libssh2/OpenSSL and strict `known_hosts`,
+  status, unified diff, stage all, commit, configure `origin`, native Keychain
+  credentials, and non-force HTTPS push. SSH profile picker/restart UI and SSH
+  push remain outside the verified surface. Each conversation can bind to one
+  opaque project id, and project Files stay scoped to that worktree while `.git`
+  remains hidden from the normal file API.
+- A mobile-specific runtime evidence surface and a machine-verifiable proof
+  record that correlates the DeepSeek response, optional reasoning, persisted
+  session, process restart, rish execution, live Simulator PID, and a closed
+  Mac DSH port.
+- One Lucide-based functional icon system across chat, drawers, settings,
+  projects, Git, Files, attachments, and tool states. Icons use per-icon imports
+  and a shared 1.8-stroke wrapper; semantic text markers, data symbols, status
+  dots, and the Rish brand mark remain intentionally separate.
+
+The original app icon is stored in `brand/`. It intentionally uses the
+geometric DSH mark without the whale or any plugin artwork. Lucide is used for
+interface actions only and does not replace the product mark.
+
+## Architecture
+
+```text
+React Native mobile UI (Fabric + Hermes)
+  -> typed chat/preferences stores and mobile presentation layer
+  -> bounded native modules
+       LocalRuntime
+         -> iOS Keychain (credential never crosses into JavaScript)
+         -> native URLSession -> DeepSeek
+         -> App Container sessions + runtime proof
+         -> linked rish sha256sum proof probe
+       LocalWorkspace
+         -> app-owned workspace only
+         -> descriptor-relative, no-symlink file operations
+         -> atomic revision-checked text writes + recoverable trash
+         -> allowlisted read-only rish portable applets
+       LocalDocuments
+         -> UIDocumentPicker import/export bridge to the iOS Files app
+         -> bounded staged copies; no external provider URL reaches JavaScript
+         -> reserved Git metadata and symlinks fail closed
+       LocalAttachments
+         -> Camera, PHPicker, and UIDocumentPicker acquisition
+         -> opaque-id native store with normalized images and bounded previews
+         -> SHA-256 manifests, lifecycle pruning, and no file paths in chat JSON
+       LocalProjects
+         -> app-private, isolated Git worktrees resolved from opaque ids
+         -> pinned libgit2 XCFramework using iOS SecureTransport
+         -> pinned libssh2/OpenSSL SSH transport
+         -> native HTTPS credential prompt + device-only Keychain storage
+```
+
+These native modules currently use the legacy React Native bridge. A production
+hardening step is to migrate the same narrow contracts to Codegen TurboModules;
+it is not permission to expose arbitrary paths, provider URLs, credentials, or
+a general shell to JavaScript.
+
+## Security invariants
+
+- API keys are never committed, bundled, logged, persisted in chat/session
+  JSON, or returned to React Native. On iOS they are stored as
+  `WhenUnlockedThisDeviceOnly` Keychain items and used only by native code.
+- The Simulator provisioner uses a temporary `0600` staging file, waits for a
+  value-free acknowledgement, and removes the staged value after Keychain
+  import. Prefer `--secure-stdin` when not importing the managed DSH
+  credential.
+- Workspace paths are relative to the app-owned workspace. Absolute paths,
+  traversal, `.trash`, symlinks, non-text/oversized reads, excessive listings,
+  and non-allowlisted tools fail closed.
+- iOS Files access is explicit import/export, not unrestricted filesystem
+  access. Imports are bounded and staged before publication. Exports copy to a
+  temporary sanitized tree and omit `.git`, `.gitmodules`, and app trash.
+- Chat attachments are copied into an app-owned 256 MiB native store. Messages
+  persist only opaque descriptors; thumbnails, provider URLs, absolute paths,
+  and base64 image payloads are excluded from session JSON. Images are
+  metadata-stripped and downsampled before sending.
+- Git remote URLs are validated before credentials are used. HTTPS uses
+  credential-free public DNS origins with PATs in native
+  `WhenUnlockedThisDeviceOnly` Keychain storage; SSH profiles keep their
+  private material in native storage and require strict `known_hosts`.
+  Encrypted SSH private-key formats, force push, LFS, and submodules are
+  rejected in the current surface.
+- Read-only mode disables create, edit, rename, and trash controls. Saves use
+  an expected revision to detect stale edits, and deletion means a recoverable
+  move to app trash.
+- Run `scripts/verify-no-bundled-secret.rb` before sharing an app bundle. Never
+  place a key in source, shell history, a README, an environment file, or a
+  test fixture.
+
+## Install and run the React Native app
+
+Node 22.11 or newer is required. From the repository root, check the source
+layout before installing dependencies:
+
+```sh
+node scripts/verify-source-checkout.mjs
+npm ci --prefix apps/mobile
+```
+
+The preflight runs offline and checks required source files, portable build
+references, native entry points, and the npm lockfile. It does not compile
+native code or prepare dependencies.
+
+All iOS builds, including Metro-backed development builds, require the
+vendored native frameworks before CocoaPods installation. Run this shared
+preparation from the repository root:
+
+```sh
+./scripts/prepare-rish-ios.sh
+./scripts/prepare-libgit2-ios.sh
+cd apps/mobile/ios
+pod install
+cd ../../..
+```
+
+The default Rish preparation fetches the pinned source commit into an
+isolated temporary checkout and downloads missing Cargo dependencies with
+`--locked`. The actual builds use `--frozen`; dependency versions stay pinned.
+To reuse a reviewed clean source checkout, pass its path to
+`prepare-rish-ios.sh` or set `RISH_SOURCE_DIR`.
+
+For an explicitly offline Rish preparation, the pinned Rust toolchain and
+targets must already be installed, the Cargo cache must be populated, and a
+reviewed source checkout must be supplied:
+
+```sh
+RISH_IOS_OFFLINE=1 RISH_SOURCE_DIR=/path/to/rish ./scripts/prepare-rish-ios.sh
+```
+
+This option disables source fetching and enables Cargo's offline mode for
+Rish preparation. It does not make npm, CocoaPods, or the separate native
+dependency preparation scripts offline.
+
+The iOS dependency bootstrap requires Rust/Cargo, Xcode command-line tools,
+CocoaPods, Perl, `make`, and CMake on `PATH`, plus the tools checked by the
+preparation scripts. On macOS, CMake can be installed with
+`brew install cmake`; an absolute override is also supported:
+
+```sh
+CMAKE_BIN=/absolute/path/to/cmake ./scripts/prepare-libgit2-ios.sh
+```
+
+`prepare-libgit2-ios.sh` automatically invokes the pinned libssh2 and OpenSSL
+preparation helpers, so they do not need to be run separately.
+
+After the shared iOS preparation, start a Metro-backed development run from
+the repository root:
+
+```sh
+npm run ios --prefix apps/mobile
+```
+
+For Android UI development, after the npm installation above:
+
+```sh
+npm run android --prefix apps/mobile
+```
+
+Android task alerts, per-conversation mute, and user-started foreground-service
+lifecycle are implemented and have scoped emulator tests. Android uses an
+ongoing notification instead of iOS Live Activities. These checks do not prove
+model, file/Git, or Agent execution.
+
+Android now supports pure-text API chat through native OkHttp, Android Keystore
+encrypted credentials, scoped custom-provider profiles, and atomic SQLite session
+snapshots. API33 emulator checks cover DSH, GLM, GLM-backed Codex/Claude Code
+profiles, and UI send/save/reopen without replay. Those profiles test API adapters,
+not the official CLI harnesses or subscription login. Attachments, project context,
+file/Git, Agent execution, and rish JNI remain unavailable; runtime status honestly
+reports incomplete. Debug UI uses Metro; standalone Release and physical Android
+device acceptance remain pending.
+
+For temporary Android compatibility-container testing, build a self-contained
+debug-signed APK with bundled JS and developer-server support disabled:
+
+```sh
+apps/mobile/android/gradlew -p apps/mobile/android :app:assembleDebug -PrishStandalone=true -PreactNativeArchitectures=arm64-v8a
+```
+
+This remains a test build, not a production-signed release. Its launcher was
+checked on the API33 emulator with airplane mode enabled; HarmonyOS compatibility
+container installation and execution require a separate device check.
+
+## Editable DSH model catalog
+
+In Settings, use **DSH model catalog** to add exact provider model IDs, display
+names and image-input capability declarations, or edit/remove entries and restore
+defaults. iOS and Android persist the catalog natively. Up to 32 selectable models
+are supported; removed identities remain readable in existing conversations.
+Adding a provider-supported model does not require another app update.
+
+Android status now distinguishes configured chat from unavailable local tools.
+API chat and session storage do not imply that file/Git, Agent or rish execution
+has been implemented. Image capability declarations cannot add capabilities that
+the provider or platform does not support.
+
+## Build and verify the iOS local-substrate proof
+
+The proof build links rish and libgit2 into a self-contained app and does not
+depend on Metro or a Mac `dsh web` process. Both dependencies are packaged as
+device + Simulator arm64 XCFrameworks.
+
+Complete the [shared iOS preparation](#install-and-run-the-react-native-app)
+above first, including `npm ci`, both framework preparation scripts, and
+`pod install`. Then, from the repository root:
+
+```sh
+cd apps/mobile/ios
+xcodebuild \
+  -workspace Rish.xcworkspace \
+  -scheme Rish \
+  -configuration Release \
+  -sdk iphonesimulator \
+  -destination 'platform=iOS Simulator,id=<UDID>' \
+  -derivedDataPath build/local-proof-arm64 \
+  ARCHS=arm64 \
+  ONLY_ACTIVE_ARCH=YES \
+  build
+
+xcrun simctl install <UDID> \
+  build/local-proof-arm64/Build/Products/Release-iphonesimulator/Rish.app
+cd ../../..
+```
+
+The separate unsigned `generic/platform=iOS` Release build is a required
+device-link gate. It proves the iPhone arm64 slices link, but it is not evidence
+that the app ran on a physical iPhone.
+
+Confirm no Mac DSH listener is present, then import the key without putting the
+value on the command line:
+
+```sh
+lsof -nP -iTCP:3180 -sTCP:LISTEN
+./scripts/provision-simulator-key.rb \
+  --secure-stdin <UDID> dev.zseven.dsh.mobile
+```
+
+In the app, select **V4 Flash**, complete a real response, terminate and
+relaunch the app, then verify the correlated record:
+
+```sh
+./scripts/verify-local-proof.rb <UDID> dev.zseven.dsh.mobile
+```
+
+The verifier currently pins its acceptance request to V4 Flash. It checks the
+actual container file and live Simulator process; a screenshot or an inherited
+boolean is not sufficient evidence.
+
+## Quality gates
+
+From the repository root:
+
+```sh
+node scripts/verify-source-checkout.mjs
+cd apps/mobile
+npm run typecheck
+npm run lint
+npm test -- --runInBand
+
+cd android
+./gradlew assembleDebug
+
+cd ../../..
+ruby scripts/verify-no-bundled-secret.rb
+ruby scripts/verify-no-bundled-secret.rb \
+  apps/mobile/ios/build/local-proof-arm64/Build/Products/Release-iphonesimulator/Rish.app
+```
+
+The Jest suite covers typed state/persistence, theme and locale resolution,
+chat isolation/history, request cancellation/retry, reasoning, structured tool
+display, the Markdown subset, credential recovery, workspace create/edit with
+revision protection, and portable-tool receipts. The native Release build and
+the proof verifier remain separate required gates.
+
+## What is still missing
+
+- The complete `local_harness` qualification and full upstream Harness
+  coverage. The implemented bounded API-driven Agent loop, registered tools,
+  approvals, journal, and recovery paths do not establish general Harness or
+  official CLI compatibility. A general provider/plugin host and structured
+  question flow remain outside the verified scope.
+- Token/reasoning/event streaming; the current native request returns one
+  completed response.
+- DSH plans, goals, jobs, subagents, workflow runs, queues, steering, skills,
+  plugins, agent presets, usage/stats, and produced-file event integration.
+- Share-extension input, OCR for scanned PDFs, full DSH Markdown parity beyond
+  the supported mobile subset, and message edit/regenerate/export/feedback
+  actions.
+- Git pull/fetch UI, merge/rebase, SSH profile picker/restart UI, encrypted SSH
+  private-key formats, LFS, submodules, signed commits, and SSH push. The
+  current Git slice intentionally supports a smaller auditable HTTPS workflow
+  plus native SSH clone/fetch.
+- Android native local runtime/workspace adapters and device proof.
+
+Detailed DSH parity, mobile UI, and runtime proof records are maintained
+separately from this source repository. This README keeps the implementation
+boundary and known limitations self-contained for a source checkout.

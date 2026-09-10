@@ -3,6 +3,9 @@
 #import "DSHCompletionV2.h"
 
 #import <CommonCrypto/CommonDigest.h>
+#if DEBUG
+#import <os/log.h>
+#endif
 
 #include <math.h>
 
@@ -69,6 +72,7 @@ static NSString *DSHCompletionTransportParserErrorCode(NSError *error) {
 @property(nonatomic, copy) DSHCompletionProviderTransportMarkRedirectedBlock markRedirected;
 @property(nonatomic, copy) DSHCompletionProviderTransportRedirectDecisionBlock redirectDecision;
 @property(nonatomic, copy) DSHCompletionProviderTransportCompletionBlock completion;
+@property(nonatomic) NSTimeInterval startedAt;
 @end
 
 @implementation DSHCompletionProviderTransportContext
@@ -82,6 +86,66 @@ static NSString *DSHCompletionTransportParserErrorCode(NSError *error) {
 @end
 
 @implementation DSHCompletionProviderTransport
+
+#if DEBUG
+static NSString *DSHCompletionTransportDiagnosticKind(NSError *error,
+                                                      BOOL hasHTTPResponse) {
+  if (hasHTTPResponse) return @"http_status";
+  if (error == nil) return @"non_http";
+  switch (error.code) {
+    case NSURLErrorTimedOut: return @"timeout";
+    case NSURLErrorCannotFindHost:
+    case NSURLErrorDNSLookupFailed: return @"dns";
+    case NSURLErrorSecureConnectionFailed:
+    case NSURLErrorServerCertificateUntrusted:
+    case NSURLErrorServerCertificateHasBadDate:
+    case NSURLErrorServerCertificateHasUnknownRoot:
+    case NSURLErrorClientCertificateRejected:
+    case NSURLErrorClientCertificateRequired: return @"tls";
+    case NSURLErrorCancelled: return @"cancelled";
+    case NSURLErrorNotConnectedToInternet:
+    case NSURLErrorNetworkConnectionLost:
+    case NSURLErrorCannotConnectToHost:
+    case NSURLErrorInternationalRoamingOff:
+    case NSURLErrorDataNotAllowed:
+    case NSURLErrorCallIsActive:
+    case NSURLErrorResourceUnavailable: return @"network";
+    default: return @"other";
+  }
+}
+
+- (void)emitDiagnosticForContext:(DSHCompletionProviderTransportContext *)context
+                            error:(NSError *)error
+                    responseStatus:(NSNumber *)responseStatus
+                 callbackSignaled:(BOOL)callbackSignaled {
+  if (context == nil) return;
+  NSTimeInterval finished = context.startedAt;
+  @try { finished = self.monotonicClock(); } @catch (__unused NSException *exception) {}
+  NSInteger elapsedMs = (NSInteger)floor(MAX(0, finished - context.startedAt) * 1000.0 + 0.000001);
+  BOOL hasHTTPResponse = responseStatus != nil && responseStatus != (id)NSNull.null;
+  NSString *harness = [self.providerHarnessId isEqualToString:@"dsh"] ||
+      [self.providerHarnessId isEqualToString:@"claude-code"] ||
+      [self.providerHarnessId isEqualToString:@"codex"] ||
+      [self.providerHarnessId isEqualToString:@"glm"]
+      ? self.providerHarnessId : @"unknown";
+  NSDictionary *diagnostic = @{
+    @"phase": hasHTTPResponse ? @"response" : @"response_callback",
+    @"harness": harness,
+    @"schema_version": @(context.schemaVersion),
+    @"elapsed_ms": @(elapsedMs),
+    @"error_kind": DSHCompletionTransportDiagnosticKind(error, hasHTTPResponse),
+    @"error_code": error == nil ? @0 : @(error.code),
+    @"http_status": responseStatus ?: (id)NSNull.null,
+    @"callback_signaled": @(callbackSignaled),
+  };
+  DSHCompletionProviderTransportDiagnosticBlock handler = self.diagnosticHandler;
+  if (handler != nil) handler(diagnostic);
+  os_log_info(OS_LOG_DEFAULT, "completion_transport phase=%{public}@ harness=%{public}@ schema=%{public}ld elapsed_ms=%{public}ld error_kind=%{public}@ error_code=%{public}ld http_status=%{public}@ callback_signaled=%{public}@",
+              diagnostic[@"phase"], diagnostic[@"harness"], [diagnostic[@"schema_version"] longValue],
+              [diagnostic[@"elapsed_ms"] longValue], diagnostic[@"error_kind"],
+              [diagnostic[@"error_code"] longValue], diagnostic[@"http_status"], diagnostic[@"callback_signaled"]);
+}
+#endif
 
 - (instancetype)initWithSession:(NSURLSession *)session
                    uuidGenerator:(NSString *(^)(void))uuidGenerator
@@ -235,6 +299,7 @@ static NSString *DSHCompletionTransportParserErrorCode(NSError *error) {
   DSHCompletionProviderTransportContext *context =
       [[DSHCompletionProviderTransportContext alloc] init];
   context.schemaVersion = schemaVersion;
+  context.startedAt = startedAt;
   context.roundId = [roundId copy];
   context.generation = generation;
   context.credentialGeneration = credentialGeneration;
@@ -288,6 +353,12 @@ static NSString *DSHCompletionTransportParserErrorCode(NSError *error) {
       }
       if (transportError != nil ||
           ![response isKindOfClass:NSHTTPURLResponse.class]) {
+#if DEBUG
+        [self emitDiagnosticForContext:owned
+                                  error:transportError
+                          responseStatus:nil
+                       callbackSignaled:owned.completion != nil];
+#endif
         if (owned.completion != nil) {
           owned.completion(nil, @"E_COMPLETION_TRANSPORT");
         }
@@ -295,6 +366,12 @@ static NSString *DSHCompletionTransportParserErrorCode(NSError *error) {
       }
       NSHTTPURLResponse *http = (NSHTTPURLResponse *)response;
       if (http.statusCode < 200 || http.statusCode >= 300) {
+#if DEBUG
+        [self emitDiagnosticForContext:owned
+                                  error:nil
+                          responseStatus:@(http.statusCode)
+                       callbackSignaled:owned.completion != nil];
+#endif
         if (owned.completion != nil) {
           owned.completion(nil, [self providerErrorCodeForHTTPStatus:http.statusCode
                                                                  data:data]);
@@ -313,6 +390,22 @@ static NSString *DSHCompletionTransportParserErrorCode(NSError *error) {
                                                 thinkingMode:thinkingMode
                                                       error:&parseError];
       if (parsed == nil) {
+#if DEBUG
+        // Retain only bounded shape facts for a rejected response. Never log
+        // response text, reasoning, arguments, identifiers, or credentials.
+        id decoded = [NSJSONSerialization JSONObjectWithData:data options:0 error:nil];
+        NSArray *choices = [decoded isKindOfClass:NSDictionary.class] && [decoded[@"choices"] isKindOfClass:NSArray.class] ? decoded[@"choices"] : nil;
+        NSDictionary *choice = choices.count > 0 && [choices[0] isKindOfClass:NSDictionary.class] ? choices[0] : nil;
+        NSDictionary *message = [choice[@"message"] isKindOfClass:NSDictionary.class] ? choice[@"message"] : nil;
+        NSString *finish = [@[@"stop", @"tool_calls", @"length", @"content_filter"] containsObject:choice[@"finish_reason"] ?: NSNull.null] ? choice[@"finish_reason"] : @"other";
+        NSInteger calls = [message[@"tool_calls"] isKindOfClass:NSArray.class] ? [message[@"tool_calls"] count] : -1;
+        NSInteger contentBytes = [message[@"content"] isKindOfClass:NSString.class] ? [message[@"content"] lengthOfBytesUsingEncoding:NSUTF8StringEncoding] : -1;
+        NSInteger reasoningBytes = [message[@"reasoning_content"] isKindOfClass:NSString.class] ? [message[@"reasoning_content"] lengthOfBytesUsingEncoding:NSUTF8StringEncoding] : -1;
+        id responseModel = [decoded isKindOfClass:NSDictionary.class] ? decoded[@"model"] : nil;
+        BOOL modelIsString = [responseModel isKindOfClass:NSString.class];
+        BOOL modelMatches = modelIsString && [responseModel isEqual:requestedModel];
+        os_log_error(OS_LOG_DEFAULT, "completion_parser_reject code=%{public}@ finish=%{public}@ calls=%{public}ld content_bytes=%{public}ld reasoning_bytes=%{public}ld response_bytes=%{public}lu model_present=%{public}d model_is_string=%{public}d model_matches_requested=%{public}d", DSHCompletionTransportParserErrorCode(parseError), finish, calls, contentBytes, reasoningBytes, (unsigned long)data.length, responseModel != nil, modelIsString, modelMatches);
+#endif
         if (owned.completion != nil) {
           owned.completion(nil, DSHCompletionTransportParserErrorCode(parseError));
         }

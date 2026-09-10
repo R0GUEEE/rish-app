@@ -56,6 +56,7 @@ import {
   type ChatState,
   type AgentAccess,
   type AgentCapability,
+  type AgentRegistryVersion,
   type AgentConversationGrantV2,
   type AgentApprovalTokenV1,
   type AgentApprovalBindingTokenV2,
@@ -1573,7 +1574,10 @@ const agentCapabilities = new Set([
   'git_status',
   'git_commit',
   'git_push',
+  'guest_service',
 ]);
+const isAgentRegistryVersion = (value: unknown): value is AgentRegistryVersion =>
+  value === 1 || value === 2;
 const sessionEventKinds = new Set([
   'round',
   'tool_call',
@@ -2096,6 +2100,7 @@ function parseAgentApprovalToken(
 export function parsePersistedAgentCallJournalV3(
   value: unknown,
   path = '$',
+  registryVersion: AgentRegistryVersion = 1,
 ): PersistedAgentCallJournalV3 {
   const raw = exactRecord(value, path, [
     'schema_version',
@@ -2169,7 +2174,8 @@ export function parsePersistedAgentCallJournalV3(
     raw.receipt === null
       ? null
       : parseAgentReceipt(raw.receipt, `${path}.receipt`);
-  const knownTool = registeredAgentTools.has(name);
+  const knownTool = registeredAgentTools.has(name) ||
+    (registryVersion === 2 && (name === 'start_guest_cgi' || name === 'stop_guest_cgi'));
   const expectedAccess = knownTool
     ? autoAgentTools.has(name)
       ? 'auto'
@@ -2748,6 +2754,7 @@ export function migrateAgentApprovalTokenV3(
 function parseAgentCallForFinal(
   value: unknown,
   path: string,
+  registryVersion: AgentRegistryVersion,
 ): PersistedAgentCallJournalV3 {
   const raw = exactRecord(value, path, [
     'schema_version',
@@ -2765,7 +2772,7 @@ function parseAgentCallForFinal(
     'receipt',
   ]);
   if (raw.schema_version === AGENT_CALL_JOURNAL_SCHEMA_VERSION_V3) {
-    return parsePersistedAgentCallJournalV3(value, path);
+    return parsePersistedAgentCallJournalV3(value, path, registryVersion);
   }
   if (raw.schema_version !== AGENT_CALL_JOURNAL_SCHEMA_VERSION) {
     return invalid(`${path}.schema_version`, 'must equal 2 or 3');
@@ -2826,7 +2833,7 @@ function parseAgentCallForFinal(
   };
   // `exactRecord` above already established the source key set.  The final
   // parser performs all field, policy, receipt, and terminal-authority checks.
-  return parsePersistedAgentCallJournalV3(migrated, path);
+  return parsePersistedAgentCallJournalV3(migrated, path, registryVersion);
 }
 
 /** Parses final V3 journals and atomically classifies early schema-9 journals. */
@@ -2877,8 +2884,8 @@ export function parsePersistedAgentAttemptJournalV3(
   }
   const policy = parseAgentPolicy(raw.policy, `${path}.policy`);
   const root = parseAgentRoot(raw.root, `${path}.root`);
-  if (raw.tool_registry_version !== 1) {
-    return invalid(`${path}.tool_registry_version`, 'must equal 1');
+  if (!isAgentRegistryVersion(raw.tool_registry_version)) {
+    return invalid(`${path}.tool_registry_version`, 'must equal 1 or 2');
   }
   const toolsetSha256 = sha256(raw.toolset_sha256, `${path}.toolset_sha256`);
   const transcript = parseTranscriptReference(
@@ -2972,7 +2979,7 @@ export function parsePersistedAgentAttemptJournalV3(
       : nonNegativeSafeInteger(raw.call_index, `${path}.call_index`);
   const batchRaw = array(raw.batch, `${path}.batch`, MAX_AGENT_CALLS_PER_BATCH);
   const batch = batchRaw.map((entry, index) =>
-    parseAgentCallForFinal(entry, `${path}.batch[${index}]`),
+    parseAgentCallForFinal(entry, `${path}.batch[${index}]`, raw.tool_registry_version as AgentRegistryVersion),
   );
   batchRaw.forEach((entry, index) => {
     if (
@@ -3061,7 +3068,7 @@ export function parsePersistedAgentAttemptJournalV3(
       token.root_fingerprint_sha256 !== root.root_fingerprint_sha256 ||
       token.binding_revision !== root.workspace_binding_revision ||
       token.policy_version !== policy.policy_version ||
-      token.registry_version !== 1 ||
+      !isAgentRegistryVersion(token.registry_version) ||
       token.batch_call_ids.length !== batch.length ||
       token.batch_arguments_sha256.length !== batch.length ||
       token.batch_call_ids.some(
@@ -3233,7 +3240,7 @@ export function parsePersistedAgentAttemptJournalV3(
     controller_generation: controllerGeneration,
     policy,
     root,
-    tool_registry_version: 1,
+    tool_registry_version: raw.tool_registry_version,
     toolset_sha256: toolsetSha256,
     transcript,
     round_index: roundIndex,
@@ -3269,19 +3276,22 @@ function parseAgentGrant(
   if (
     raw.tool_family !== 'file_write' &&
     raw.tool_family !== 'git_commit' &&
-    raw.tool_family !== 'git_push'
+    raw.tool_family !== 'git_push' &&
+    raw.tool_family !== 'guest_service'
   )
     return invalid(
       `${path}.tool_family`,
-      'must be file_write, git_commit, or git_push',
+      'must be file_write, git_commit, git_push, or guest_service',
     );
-  if (raw.registry_version !== 1)
-    return invalid(`${path}.registry_version`, 'must equal 1');
+  if (!isAgentRegistryVersion(raw.registry_version))
+    return invalid(`${path}.registry_version`, 'must equal 1 or 2');
+  if (raw.tool_family === 'guest_service' && raw.registry_version !== 2)
+    return invalid(`${path}.registry_version`, 'guest_service requires registry version 2');
   const projectId =
     raw.project_id === null
       ? null
       : canonicalLifecycleId(raw.project_id, `${path}.project_id`);
-  if (raw.tool_family !== 'file_write' && projectId === null)
+  if (raw.tool_family !== 'file_write' && raw.tool_family !== 'guest_service' && projectId === null)
     return invalid(`${path}.project_id`, 'Git grants require a project');
   const issued = exactRecord(raw.issued_for, `${path}.issued_for`, [
     'schema_version',
@@ -3321,7 +3331,7 @@ function parseAgentGrant(
       `${path}.root_fingerprint_sha256`,
     ),
     tool_family: raw.tool_family,
-    registry_version: 1,
+    registry_version: raw.registry_version,
     policy_version: boundedIdentifier(
       raw.policy_version,
       `${path}.policy_version`,

@@ -70,6 +70,66 @@ class LocalRuntimeModule(private val react: ReactApplicationContext) : ReactCont
         } catch (error: Exception) { reject(promise, error) }
     }
     @ReactMethod fun providerConfiguration(harness: String, promise: Promise) = io(promise) { runtime.configurations.read(harness) }
+    /** Official Codex/Claude subscription auth is native-only and isolated from API keys. */
+    @ReactMethod fun harnessAuthStatus(harnessId: String, promise: Promise) = io(promise) {
+        runtime.subscriptionAuth.status(harnessId)
+    }
+    @ReactMethod fun startHarnessLogin(harnessId: String, promise: Promise) = io(promise) {
+        runtime.subscriptionAuth.start(harnessId)
+    }
+    @ReactMethod fun cancelHarnessLogin(harnessId: String, sessionId: String, promise: Promise) = io(promise) {
+        runtime.subscriptionAuth.cancel(harnessId, sessionId)
+    }
+    @ReactMethod fun logoutHarness(harnessId: String, promise: Promise) = io(promise) {
+        runtime.subscriptionAuth.logout(harnessId)
+    }
+    @ReactMethod fun presentHarnessLoginCode(harnessId: String, sessionId: String, locale: String?, promise: Promise) {
+        try {
+            UiThreadUtil.runOnUiThread {
+                val activity = react.currentActivity
+                if (activity == null || activity.isFinishing) {
+                    promise.reject("E_AUTH_UI", "Active screen required")
+                    return@runOnUiThread
+                }
+                val chinese = locale == "zh-CN"
+                val field = EditText(activity).apply {
+                    inputType = InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_VARIATION_PASSWORD
+                    isSingleLine = true
+                    if (android.os.Build.VERSION.SDK_INT >= 26) {
+                        setAutofillHints(null)
+                        importantForAutofill = android.view.View.IMPORTANT_FOR_AUTOFILL_NO_EXCLUDE_DESCENDANTS
+                    }
+                }
+                val dialog = AlertDialog.Builder(activity)
+                    .setTitle(if (chinese) "输入登录验证码" else "Enter login code")
+                    .setMessage(if (chinese) "验证码仅发送给官方 CLI，不会写入会话。" else "The code is sent only to the official CLI and is never written to chat.")
+                    .setView(field)
+                    .setNegativeButton(if (chinese) "取消" else "Cancel") { _, _ ->
+                        field.text.clear()
+                        resolve(promise, JSONObject().put("status", "cancelled"))
+                    }
+                    .setPositiveButton(if (chinese) "提交" else "Submit", null)
+                    .setOnCancelListener {
+                        field.text.clear()
+                        resolve(promise, JSONObject().put("status", "cancelled"))
+                    }.create()
+                dialog.setOnShowListener {
+                    dialog.window?.addFlags(WindowManager.LayoutParams.FLAG_SECURE)
+                    dialog.getButton(AlertDialog.BUTTON_POSITIVE).setOnClickListener {
+                        val code = field.text.toString().trim()
+                        if (code.isEmpty()) {
+                            field.error = if (chinese) "请输入验证码" else "Enter a code"
+                            return@setOnClickListener
+                        }
+                        field.text.clear()
+                        dialog.dismiss()
+                        io(promise) { runtime.subscriptionAuth.submitCode(harnessId, sessionId, code) }
+                    }
+                }
+                dialog.show()
+            }
+        } catch (error: Exception) { reject(promise, error) }
+    }
     @ReactMethod fun saveProviderConfiguration(request: ReadableMap?, promise: Promise) {
         try { val text = runtime.configurations.normalize(RuntimeJson.fromBridgeMap(requireNotNull(request).toHashMap())).toString(); io(promise) { runtime.transport.mutate { runtime.configurations.save(JSONObject(text)) } } }
         catch(error: Exception) { reject(promise, error) }
@@ -106,5 +166,5 @@ class LocalRuntimeModule(private val react: ReactApplicationContext) : ReactCont
             catch(error: Exception) { reject(promise, error) }
         }
     }
-    override fun invalidate() { runtime.transport.mutate { }; super.invalidate() }
+    override fun invalidate() { runtime.subscriptionAuth.shutdown(); runtime.transport.mutate { }; super.invalidate() }
 }

@@ -83,6 +83,8 @@ function capabilityLabel(capability: AgentCapability): string {
       return 'agent.policy.capability.git_commit';
     case 'git_push':
       return 'agent.policy.capability.git_push';
+    case 'guest_service':
+      return 'agent.policy.capability.guest_service';
   }
 }
 

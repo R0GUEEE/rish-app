@@ -52,7 +52,11 @@ export type RuntimeProof = {
   product: 'rish';
   active_harness: string;
   mode: 'local_substrate';
-  platform: 'ios_simulator' | 'ios_device' | 'android_emulator' | 'android_device';
+  platform:
+    | 'ios_simulator'
+    | 'ios_device'
+    | 'android_emulator'
+    | 'android_device';
   bundle_id: string;
   runtime_id: string;
   launch_instance_id: string;
@@ -196,6 +200,7 @@ export type ModelTransitionProofEntry = {
 
 type NativeLocalRuntime = {
   bootstrap(): Promise<BootstrapResult>;
+  bootstrapForHarness?(harnessId: HarnessId): Promise<BootstrapResult>;
   credentialStatus(): Promise<CredentialStatus>;
   presentCredentialPrompt(
     locale: CredentialPromptLocale,
@@ -342,10 +347,7 @@ async function completeV2(
       throw new CompletionBridgeError('E_COMPLETION_NATIVE');
     }
     if (classified.kind === 'schema3') {
-      const envelope = encodeCompleteV3Request(
-        classified.request,
-        harnessId,
-      );
+      const envelope = encodeCompleteV3Request(classified.request, harnessId);
       const raw = await nativeModule.completeV2(envelope);
       return validateCompleteV3Result(raw, classified.request);
     }
@@ -361,13 +363,29 @@ export const LocalRuntime = {
   isAvailable: () => hasNativeCapabilities(native),
   createCompletionRequestId,
   bootstrap: () => required().bootstrap(),
+  bootstrapForHarness: async (
+    harnessId: HarnessId,
+  ): Promise<BootstrapResult> => {
+    const module = NativeModules.LocalRuntime as
+      | (Partial<NativeLocalRuntime> & {
+          bootstrapForHarness?: (id: HarnessId) => Promise<BootstrapResult>;
+        })
+      | undefined;
+    if (typeof module?.bootstrapForHarness === 'function') {
+      return module.bootstrapForHarness(harnessId);
+    }
+    if (harnessId === 'dsh') return required().bootstrap();
+    throw new Error('harness-aware runtime bootstrap is unavailable');
+  },
   credentialStatus: () => required().credentialStatus(),
   presentCredentialPrompt: (locale: CredentialPromptLocale) =>
     required().presentCredentialPrompt(safeCredentialPromptLocale(locale)),
   clearCredential: () => required().clearCredential(),
   credentialStatusForSlot: (slot: CredentialSlot) => {
     const module = required() as NativeLocalRuntime & {
-      credentialStatusForSlot?: (slot: CredentialSlot) => Promise<CredentialStatus>;
+      credentialStatusForSlot?: (
+        slot: CredentialSlot,
+      ) => Promise<CredentialStatus>;
     };
     if (typeof module.credentialStatusForSlot !== 'function') {
       return required().credentialStatus();
@@ -396,7 +414,9 @@ export const LocalRuntime = {
   },
   clearCredentialForSlot: (slot: CredentialSlot) => {
     const module = required() as NativeLocalRuntime & {
-      clearCredentialForSlot?: (slot: CredentialSlot) => Promise<ClearCredentialResult>;
+      clearCredentialForSlot?: (
+        slot: CredentialSlot,
+      ) => Promise<ClearCredentialResult>;
     };
     if (typeof module.clearCredentialForSlot !== 'function') {
       return required().clearCredential();
@@ -441,7 +461,9 @@ export const LocalRuntime = {
     harnessId: HarnessId = 'dsh',
   ): Promise<CompleteV2Result> => {
     const nativeModule = required() as NativeLocalRuntime & {
-      completeV2Stream?: (envelopeJSON: string) => Promise<Record<string, unknown>>;
+      completeV2Stream?: (
+        envelopeJSON: string,
+      ) => Promise<Record<string, unknown>>;
     };
     if (typeof nativeModule.completeV2Stream !== 'function') {
       throw new Error('completeV2Stream native method is not linked');
@@ -472,7 +494,10 @@ export const LocalRuntime = {
     const { NativeEventEmitter } =
       require('react-native') as typeof import('react-native');
     const emitter = new NativeEventEmitter(NativeModules.LocalRuntime);
-    const subscription = emitter.addListener('completionStream', listener as (payload: unknown) => void);
+    const subscription = emitter.addListener(
+      'completionStream',
+      listener as (payload: unknown) => void,
+    );
     return { remove: () => subscription.remove() };
   },
   recordAgentTrace: async (

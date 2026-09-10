@@ -102,3 +102,22 @@ test('emits one presentation-complete event only after every open transition', a
   expect(onDismiss).toHaveBeenCalledTimes(2);
   expect(onPresented).toHaveBeenCalledTimes(2);
 });
+
+test('keeps a docked surface mounted when visible is false', async () => {
+  let renderer: ReactTestRenderer.ReactTestRenderer | undefined;
+  await act(async () => {
+    renderer = ReactTestRenderer.create(
+      <SlidingSurface
+        closeAccessibilityLabel="Close navigation"
+        docked
+        onClose={() => undefined}
+        visible={false}
+        maxWidth={296}
+      >
+        <Text>Docked navigation</Text>
+      </SlidingSurface>,
+    );
+  });
+  expect(renderer!.root.findByProps({ children: 'Docked navigation' })).toBeDefined();
+  expect(renderer!.root.findAllByType(Modal)).toHaveLength(0);
+});

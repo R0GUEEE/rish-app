@@ -601,6 +601,37 @@ static NSDictionary<NSString *, id> * _Nullable ClaudeDecodeEvent(
 
 @implementation GlmProviderTransport
 
++ (NSURL *)endpointForZCodeProvider:(NSString *)provider {
+  if ([provider isEqualToString:@"bigmodel"]) {
+    return [NSURL URLWithString:@"https://open.bigmodel.cn/api/anthropic/v1/messages"];
+  }
+  if ([provider isEqualToString:@"zai"]) {
+    return [NSURL URLWithString:@"https://api.z.ai/api/anthropic/v1/messages"];
+  }
+  if ([provider isEqualToString:@"bigmodel_trial"] || [provider isEqualToString:@"zai_trial"]) {
+    return [NSURL URLWithString:@"https://zcode.z.ai/api/v1/zcode-plan/anthropic"];
+  }
+  return nil;
+}
+
++ (NSDictionary<NSString *, NSString *> *)headersForZCodeCredential:(NSString *)credential {
+  if (![credential isKindOfClass:NSString.class] || credential.length == 0) return @{};
+  return @{
+    @"Content-Type" : @"application/json",
+    @"x-api-key" : credential,
+    @"anthropic-version" : ClaudeAnthropicVersion,
+  };
+}
+
+- (NSDictionary<NSString *, NSString *> *)providerHeadersWithCredential:(NSString *)credential {
+  if ([self.accountProvider hasSuffix:@"_trial"]) {
+    if (![credential isKindOfClass:NSString.class] || credential.length == 0) return @{};
+    return @{@"Content-Type": @"application/json", @"Authorization": [@"Bearer " stringByAppendingString:credential],
+      @"anthropic-version": ClaudeAnthropicVersion};
+  }
+  return [GlmProviderTransport headersForZCodeCredential:credential];
+}
+
 - (BOOL)providerReportedModel:(NSString *)reportedModel
         matchesRequestedModel:(NSString *)requestedModel {
   if (reportedModel.length == 0 ||
@@ -622,11 +653,17 @@ static NSDictionary<NSString *, id> * _Nullable ClaudeDecodeEvent(
 }
 
 - (NSURL *)providerBaseURL {
-  return [NSURL URLWithString:@"https://open.bigmodel.cn/api/anthropic/v1/messages"];
+  return [GlmProviderTransport endpointForZCodeProvider:self.accountProvider ?: @"bigmodel"];
 }
 
 - (BOOL)providerSupportsModel:(NSString *)model {
-  return [DSHHarnessIdForModel(model) isEqualToString:@"glm"];
+  if (![DSHHarnessIdForModel(model) isEqualToString:@"glm"]) return NO;
+  if ([self.accountProvider hasSuffix:@"_trial"]) {
+    for (NSString *allowed in self.trialAllowedModels)
+      if ([allowed isKindOfClass:NSString.class] && [allowed caseInsensitiveCompare:model] == NSOrderedSame) return YES;
+    return NO;
+  }
+  return YES;
 }
 
 - (NSString *)providerHarnessId {

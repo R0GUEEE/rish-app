@@ -20,15 +20,19 @@ if [[ -z "${DEVICE_ID}" ]]; then
 fi
 
 if [[ ! -d "${IOS_ROOT}/Pods" ]]; then
-  (cd "${IOS_ROOT}" && /opt/homebrew/bin/pod install)
+  command -v pod >/dev/null 2>&1 || {
+    print -u2 "CocoaPods is required; install pod and add it to PATH"
+    exit 2
+  }
+  (cd "${IOS_ROOT}" && pod install)
 fi
 
 xcrun simctl boot "${DEVICE_ID}" >/dev/null 2>&1 || true
 xcrun simctl bootstatus "${DEVICE_ID}" -b
 
 xcodebuild \
-  -workspace "${IOS_ROOT}/DSHMobile.xcworkspace" \
-  -scheme DSHMobile \
+  -workspace "${IOS_ROOT}/Rish.xcworkspace" \
+  -scheme Rish \
   -configuration Release \
   -sdk iphonesimulator \
   -destination "platform=iOS Simulator,id=${DEVICE_ID}" \
@@ -37,7 +41,7 @@ xcodebuild \
   ONLY_ACTIVE_ARCH=YES \
   build
 
-APP_BUNDLE="${DERIVED_DATA}/Build/Products/Release-iphonesimulator/DSHMobile.app"
+APP_BUNDLE="${DERIVED_DATA}/Build/Products/Release-iphonesimulator/Rish.app"
 xcrun simctl install "${DEVICE_ID}" "${APP_BUNDLE}"
 xcrun simctl launch --terminate-running-process "${DEVICE_ID}" "${BUNDLE_ID}"
 

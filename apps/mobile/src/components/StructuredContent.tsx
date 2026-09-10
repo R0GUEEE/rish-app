@@ -23,7 +23,8 @@ export type StructuredBlock =
       type: 'tool-call';
       name: string;
       arguments: string;
-      status: 'pending' | 'running' | 'success' | 'error' | 'cancelled';
+      status: 'pending' | 'running' | 'success' | 'error' | 'cancelled' | 'unknown';
+      durationMs?: number;
     }
   | {
       id: string;
@@ -101,6 +102,8 @@ export function StructuredContent({
             return t('messages.status.error');
           case 'cancelled':
             return t('messages.status.cancelled');
+          case 'unknown':
+            return t('messages.status.unknown');
         }
       },
       toolAnnouncement: (tool, status) => {
@@ -115,6 +118,8 @@ export function StructuredContent({
             return t('messages.toolFailed', { tool });
           case 'cancelled':
             return t('messages.toolCancelled', { tool });
+          case 'unknown':
+            return t('messages.status.unknown');
         }
       },
       toolCompleted: tool => t('messages.toolCompleted', { tool }),
@@ -242,7 +247,7 @@ function ToolBlock({
   const succeeded = isCall ? block.status === 'success' : !failed;
   const detail = isCall ? block.arguments : block.output;
   const caption = isCall
-    ? labels.status(block.status)
+    ? block.durationMs === undefined ? labels.status(block.status) : `${labels.status(block.status)} · ${labels.duration(block.durationMs)}`
     : failed
     ? labels.status('error')
     : block.durationMs === undefined

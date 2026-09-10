@@ -3,7 +3,6 @@ import { Pressable, StyleSheet, Text, View } from 'react-native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import Cloud from 'lucide-react-native/icons/cloud';
 import HardDrive from 'lucide-react-native/icons/hard-drive';
-import LogIn from 'lucide-react-native/icons/log-in';
 import X from 'lucide-react-native/icons/x';
 
 import type { LucideIcon } from 'lucide-react-native';
@@ -95,7 +94,7 @@ export function AccountSheet({
               accessibilityState={{ disabled: true }}
               style={styles.disabledButton}
             >
-              <AppIcon color={colors.textDim} icon={LogIn} size={17} />
+              <AppIcon color={colors.textDim} icon={Cloud} size={17} />
               <Text style={styles.disabledButtonText}>
                 {t('account.signInComingSoon')}
               </Text>

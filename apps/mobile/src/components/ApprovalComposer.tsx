@@ -180,6 +180,67 @@ export function ApprovalComposer({ requests, onDecide }: Props) {
     return decision !== undefined && decision.kind === 'approve';
   }).length;
 
+  const batchFooter = batch ? (
+    <View style={styles.batchFooter} testID="approval-batch-footer">
+      {invalidBatch && (
+        <Text accessibilityRole="alert" style={styles.messageError}>
+          {t('agent.approvalBatchMessageInvalid', {
+            calls: invalidBatchItems.join(','),
+            limit: MAX_APPROVAL_MESSAGE_BYTES,
+          })}
+        </Text>
+      )}
+      <Text style={styles.batchSummary}>
+        {t('agent.approvalBatchSummary', {
+          approved: approvedCount,
+          denied: requests.length - approvedCount,
+        })}
+      </Text>
+      <View style={styles.batchFooterActions}>
+        <Pressable
+          accessibilityRole="button"
+          onPress={() => {
+            if (
+              requestKey !==
+              JSON.stringify(requestsRef.current.map(request => request.approvalId))
+            ) return;
+            onDecide(
+              requestsRef.current.map(request => ({
+                approvalId: request.approvalId,
+                decision: { status: 'approved' as const, scope: 'once' as const },
+              })),
+            );
+          }}
+          style={({ pressed }) => [
+            styles.batchApproveAll,
+            pressed && styles.pressed,
+          ]}
+          testID="approval-batch-approve-all-once"
+        >
+          <Text style={styles.batchApproveAllText}>
+            {t('agent.approvalBatchApproveAll')}
+          </Text>
+        </Pressable>
+        <Pressable
+          accessibilityRole="button"
+          onPress={submitAll}
+          disabled={invalidBatch}
+          accessibilityState={{ disabled: invalidBatch }}
+          style={({ pressed }) => [
+            styles.commitButton,
+            invalidBatch && styles.disabled,
+            pressed && styles.pressed,
+          ]}
+          testID="approval-batch-commit"
+        >
+          <Text style={styles.commitText}>
+            {t('agent.approvalBatchCommit')}
+          </Text>
+        </Pressable>
+      </View>
+    </View>
+  ) : undefined;
+
   return (
     <Modal
       animationType="fade"
@@ -190,7 +251,7 @@ export function ApprovalComposer({ requests, onDecide }: Props) {
       transparent
       visible
     >
-      <ComposerViewport revealEndOnKeyboard={!batch}>
+      <ComposerViewport footer={batchFooter} revealEndOnKeyboard={!batch}>
         <View
           accessibilityLabel={
             batch
@@ -237,40 +298,6 @@ export function ApprovalComposer({ requests, onDecide }: Props) {
               t={t}
               onSubmit={submitSingle}
             />
-          )}
-          {batch && (
-            <>
-              {invalidBatch && (
-                <Text accessibilityRole="alert" style={styles.messageError}>
-                  {t('agent.approvalBatchMessageInvalid', {
-                    calls: invalidBatchItems.join(', '),
-                    limit: MAX_APPROVAL_MESSAGE_BYTES,
-                  })}
-                </Text>
-              )}
-              <Text style={styles.batchSummary}>
-                {t('agent.approvalBatchSummary', {
-                  approved: approvedCount,
-                  denied: requests.length - approvedCount,
-                })}
-              </Text>
-              <Pressable
-                accessibilityRole="button"
-                onPress={submitAll}
-                disabled={invalidBatch}
-                accessibilityState={{ disabled: invalidBatch }}
-                style={({ pressed }) => [
-                  styles.commitButton,
-                  invalidBatch && styles.disabled,
-                  pressed && styles.pressed,
-                ]}
-                testID="approval-batch-commit"
-              >
-                <Text style={styles.commitText}>
-                  {t('agent.approvalBatchCommit')}
-                </Text>
-              </Pressable>
-            </>
           )}
         </View>
       </ComposerViewport>
@@ -769,6 +796,17 @@ const createStyles = (colors: ThemePalette, largeText = false) =>
       marginTop: 2,
     },
     batchList: { marginTop: 8 },
+    batchFooter: {
+      backgroundColor: colors.surface,
+      borderTopWidth: StyleSheet.hairlineWidth,
+      borderTopColor: colors.line,
+      paddingHorizontal: 18,
+      paddingTop: 10,
+    },
+    batchFooterActions: {
+      flexDirection: largeText ? 'column' : 'row',
+      gap: 8,
+    },
     batchItem: {
       borderWidth: StyleSheet.hairlineWidth,
       borderColor: colors.line,
@@ -841,14 +879,30 @@ const createStyles = (colors: ThemePalette, largeText = false) =>
       marginTop: 6,
     },
     commitButton: {
+      flex: largeText ? 0 : 1,
       minHeight: 46,
       borderRadius: 14,
       alignItems: 'center',
       justifyContent: 'center',
       backgroundColor: colors.accent,
-      marginTop: 8,
     },
     commitText: { color: colors.background, fontSize: 14, fontWeight: '700' },
+    batchApproveAll: {
+      flex: largeText ? 0 : 1,
+      minHeight: 46,
+      borderRadius: 14,
+      alignItems: 'center',
+      justifyContent: 'center',
+      borderWidth: StyleSheet.hairlineWidth,
+      borderColor: colors.accent,
+      backgroundColor: colors.surface,
+    },
+    batchApproveAllText: {
+      color: colors.accent,
+      fontSize: 13,
+      fontWeight: '700',
+      textAlign: 'center',
+    },
     scopeLabel: {
       color: colors.muted,
       fontSize: 10,

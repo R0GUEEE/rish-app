@@ -18,6 +18,7 @@
       <service android:name="dev.zseven.rish.tasks.TaskForegroundService"
         android:exported="false" android:foregroundServiceType="dataSync" />
       <receiver android:name="dev.zseven.rish.tasks.TaskActionReceiver" android:exported="false" />
+      <service android:name="dev.zseven.rish.runtime.OfficialCliProbeService" android:enabled="${officialCliProbeEnabled}" android:exported="false" />
       <activity
         android:name=".MainActivity"
         android:label="@string/app_name"

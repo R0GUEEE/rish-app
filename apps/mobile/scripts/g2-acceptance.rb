@@ -6,7 +6,7 @@
 # 1. Starts the local HTTP Git remote (git-test-remote.rb) with a fresh
 #    random token.
 # 2. Holds the shared simulator lock and runs the native XCTest drive
-#    DSHMobileTests/GitPushG2Tests inside the app process. The drive clones
+#    RishTests/GitPushG2Tests inside the app process. The drive clones
 #    the public repository without credentials, commits, configures the
 #    dedicated target remote, provisions the token through the native prompt
 #    flow, pushes a new branch, asks the Mac (through the server) for a
@@ -44,7 +44,7 @@ options = {
   branch: "g2/simulator-#{Time.now.utc.strftime('%Y%m%d-%H%M%S')}",
   lock: '/tmp/rish-sim-lock',
   lock_owner: 'wp/git-push',
-  workspace: File.expand_path('../ios/DSHMobile.xcworkspace', SCRIPT_DIR),
+  workspace: File.expand_path('../ios/Rish.xcworkspace', SCRIPT_DIR),
   report_only: false,
   clone_only: false,
 }
@@ -159,10 +159,10 @@ unless options[:report_only]
   command = [
     'xcodebuild', 'test',
     '-workspace', options[:workspace],
-    '-scheme', 'DSHMobile',
+    '-scheme', 'Rish',
     '-configuration', 'Release',
     '-destination', "id=#{options[:simulator]}",
-    options[:clone_only] ? '-only-testing:DSHMobileTests/GitPushG2Tests/testCloneOperationTransferCancellationAndPublication' : '-only-testing:DSHMobileTests/GitPushG2Tests',
+    options[:clone_only] ? '-only-testing:RishTests/GitPushG2Tests/testCloneOperationTransferCancellationAndPublication' : '-only-testing:RishTests/GitPushG2Tests',
   ]
   command += ['-derivedDataPath', options[:derived_data]] if options[:derived_data]
   xcode_log = File.join(root, 'xcodebuild-g2.log')

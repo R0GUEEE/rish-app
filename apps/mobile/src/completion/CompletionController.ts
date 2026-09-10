@@ -1235,13 +1235,15 @@ export function createCompletionController(
 
   const agentToolFamily = (
     name: string,
-  ): 'file_write' | 'git_commit' | 'git_push' | null =>
+  ): 'file_write' | 'git_commit' | 'git_push' | 'guest_service' | null =>
     name === 'write_file'
       ? 'file_write'
       : name === 'git_commit'
         ? 'git_commit'
         : name === 'git_push'
           ? 'git_push'
+          : name === 'start_guest_cgi' || name === 'stop_guest_cgi'
+            ? 'guest_service'
           : null;
 
   const agentGrantFor = (
@@ -3039,7 +3041,7 @@ export function createCompletionController(
       binding_revision: journal.root.workspace_binding_revision,
       root_fingerprint_sha256: journal.root.root_fingerprint_sha256,
       policy_version: 'agent-v1',
-      registry_version: 1,
+      registry_version: journal.tool_registry_version,
       tool_family: agentToolFamily(call.name),
       grant,
     });
@@ -4103,8 +4105,8 @@ export function createCompletionController(
         completed.completion_receipt.project_context_receipt?.snapshot_sha256 ?? null,
       transcript: request.expected_transcript,
       root: request.root,
-      registry_version: 1,
-      toolset_sha256: '',
+      registry_version: recovered.attempt.registry.registry_version,
+      toolset_sha256: recovered.attempt.registry.toolset_sha256,
     };
     // The recovery evidence already carries the authoritative projection. The
     // request fields above are used only as a correlation envelope by the
@@ -4141,7 +4143,7 @@ export function createCompletionController(
     );
   };
 
-  const recoverAgentRun = async (
+  const recoverAgentRunImpl = async (
     conversationId: string,
     attemptId: string,
     events: CompletionControllerEvents,
@@ -4305,6 +4307,26 @@ export function createCompletionController(
       publish(stateFor('retryable', { conversationId, turnId: attempt.turnId, attemptId, failureCode: 'E_AGENT_PERSISTENCE' }));
       return outcome('retryable', state);
     }, runEpoch, { conversationId, turnId: attempt.turnId, attemptId });
+  };
+
+  const recoverAgentRun = async (
+    conversationId: string,
+    attemptId: string,
+    events: CompletionControllerEvents,
+    runEpoch: number,
+  ): Promise<CompletionControllerOutcome> => {
+    try {
+      return await recoverAgentRunImpl(conversationId, attemptId, events, runEpoch);
+    } finally {
+      // A settled recovery probe is no longer an active provider/tool run.
+      // Keep durable unresolved evidence, but release the transient owner so
+      // another explicit reconciliation can inspect it instead of staying busy.
+      if (agentRun?.epoch === runEpoch && pendingAgentPersistence === null &&
+          pendingAgentCleanup === null &&
+          (state.phase === 'resume_available' || state.phase === 'retryable' || state.phase === 'blocked')) {
+        agentRun = null;
+      }
+    }
   };
 
   const cancelAgentRun = async (): Promise<void> => {

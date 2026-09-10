@@ -1,9 +1,79 @@
 #import "AgentTranscriptStore.h"
 
 #import <TargetConditionals.h>
+#import "DSHWorkspaceCanonical.h"
+#include <fcntl.h>
+#include <unistd.h>
 
 #include <math.h>
 #include <sys/stat.h>
+
+static NSUInteger const DSHPresentationMaxFile = 2 * 1024 * 1024;
+static NSUInteger const DSHPresentationMaxTotal = 64 * 1024 * 1024;
+static NSString *DSHPresentationDigest(NSString *text) {
+  return DSHWorkspaceSHA256Hex([text dataUsingEncoding:NSUTF8StringEncoding]);
+}
+static BOOL DSHPresentationRoundValid(NSDictionary *value) {
+  return DSHAgentExactDictionaryKeys(value, @[@"round_id", @"round_index", @"kind", @"text", @"reasoning", @"assistant_text_sha256", @"reasoning_text_sha256"]) &&
+      DSHAgentCanonicalUUID(value[@"round_id"]) && DSHAgentSafeInteger(value[@"round_index"], 7, YES) &&
+      [@[@"tool_batch", @"final", @"blocked"] containsObject:value[@"kind"]] &&
+      DSHAgentBoundedUTF8String(value[@"text"], DSHPresentationMaxFile, YES, nullptr) &&
+      DSHAgentBoundedUTF8String(value[@"reasoning"], DSHPresentationMaxFile, YES, nullptr) &&
+      [DSHPresentationDigest(value[@"text"]) isEqual:value[@"assistant_text_sha256"]] &&
+      [DSHPresentationDigest(value[@"reasoning"]) isEqual:value[@"reasoning_text_sha256"]];
+}
+static NSDictionary *DSHPresentationRound(NSString *roundId, NSNumber *index, NSString *kind, NSDictionary *message) {
+  NSString *text = message[@"content"], *reasoning = message[@"reasoning_content"];
+  if (![text isKindOfClass:NSString.class] || ![reasoning isKindOfClass:NSString.class]) return nil;
+  NSDictionary *value = @{ @"round_id": roundId, @"round_index": index, @"kind": kind, @"text": text, @"reasoning": reasoning, @"assistant_text_sha256": DSHPresentationDigest(text), @"reasoning_text_sha256": DSHPresentationDigest(reasoning) };
+  return DSHPresentationRoundValid(value) ? value : nil;
+}
+static NSURL *DSHPresentationDirectory(NSURL *walRoot) {
+  return [walRoot URLByAppendingPathComponent:@"round-presentations-v1" isDirectory:YES];
+}
+static NSDictionary *DSHPresentationRead(NSURL *url) {
+  int fd = open(url.fileSystemRepresentation, O_RDONLY | O_NOFOLLOW | O_CLOEXEC);
+  if (fd < 0) return nil;
+  struct stat metadata = {};
+  if (fstat(fd, &metadata) != 0 || !S_ISREG(metadata.st_mode) || metadata.st_size < 0 || metadata.st_size > DSHPresentationMaxFile) { close(fd); return nil; }
+  NSFileHandle *handle = [[NSFileHandle alloc] initWithFileDescriptor:fd closeOnDealloc:YES];
+  NSData *bytes = [handle readDataToEndOfFile];
+  [handle closeFile];
+  id value = bytes ? [NSJSONSerialization JSONObjectWithData:bytes options:0 error:nil] : nil;
+  if (!DSHAgentExactDictionaryKeys(value, @[@"schema_version", @"conversation_id", @"attempt_id", @"rounds"]) || ![value[@"schema_version"] isEqual:@1] || !DSHAgentCanonicalUUID(value[@"conversation_id"]) || !DSHAgentCanonicalUUID(value[@"attempt_id"]) || ![value[@"rounds"] isKindOfClass:NSArray.class] || [value[@"rounds"] count] > 8) return nil;
+  NSMutableSet *ids = [NSMutableSet set], *indices = [NSMutableSet set];
+  for (NSDictionary *round in value[@"rounds"]) {
+    if (!DSHPresentationRoundValid(round) || [ids containsObject:round[@"round_id"]] || [indices containsObject:round[@"round_index"]]) return nil;
+    [ids addObject:round[@"round_id"]]; [indices addObject:round[@"round_index"]];
+  }
+  return value;
+}
+// Invoked after a committed session deletion as well as display reads. It
+// never changes session/WAL authority. Capacity eviction affects display only.
+void DSHAgentPruneRoundPresentationCache(NSURL *walRoot, NSSet<NSString *> *conversationIds) {
+  @synchronized(DSHAgentTranscriptStore.class) {
+    NSURL *directory = DSHPresentationDirectory(walRoot);
+    NSArray<NSURL *> *files = [NSFileManager.defaultManager contentsOfDirectoryAtURL:directory includingPropertiesForKeys:@[NSURLFileSizeKey, NSURLContentModificationDateKey] options:0 error:nil];
+    NSMutableArray<NSDictionary *> *retained = [NSMutableArray array]; NSUInteger total = 0;
+    for (NSURL *file in files) {
+      NSString *name = file.lastPathComponent;
+      NSArray *parts = [[name stringByDeletingPathExtension] componentsSeparatedByString:@"_"];
+      if (parts.count != 2 || !DSHAgentCanonicalUUID(parts[0]) || !DSHAgentCanonicalUUID(parts[1]) || ![file.pathExtension isEqual:@"json"]) continue;
+      if (conversationIds && ![conversationIds containsObject:parts[0]]) { [NSFileManager.defaultManager removeItemAtURL:file error:nil]; continue; }
+      NSDictionary *attributes = [NSFileManager.defaultManager attributesOfItemAtPath:file.path error:nil];
+      NSUInteger size = [attributes[NSFileSize] unsignedIntegerValue];
+      if (![attributes[NSFileType] isEqual:NSFileTypeRegular] || size > DSHPresentationMaxFile) { [NSFileManager.defaultManager removeItemAtURL:file error:nil]; continue; }
+      total += size;
+      [retained addObject:@{ @"url": file, @"bytes": @(size), @"date": attributes[NSFileModificationDate] ?: NSDate.distantPast }];
+    }
+    [retained sortUsingComparator:^NSComparisonResult(NSDictionary *left, NSDictionary *right) { return [left[@"date"] compare:right[@"date"]]; }];
+    NSUInteger count = retained.count;
+    for (NSDictionary *entry in retained) {
+      if (total <= DSHPresentationMaxTotal && count <= 256) break;
+      [NSFileManager.defaultManager removeItemAtURL:entry[@"url"] error:nil]; total -= [entry[@"bytes"] unsignedIntegerValue]; count--;
+    }
+  }
+}
 
 static NSArray<NSString *> *DSHAgentTranscriptReferenceKeys(void) {
   return @[
@@ -49,7 +119,7 @@ static BOOL DSHAgentRoot(NSDictionary *root) {
   if ([kind isEqualToString:@"project"] && project == NSNull.null) return NO;
   if ([kind isEqualToString:@"workspace"] && project != NSNull.null) return NO;
   NSSet *allowed = [NSSet setWithArray:@[
-    @"file_read", @"file_write", @"git_status", @"git_commit", @"git_push",
+    @"file_read", @"file_write", @"git_status", @"git_commit", @"git_push", @"guest_service",
   ]];
   NSMutableSet *seen = [NSMutableSet set];
   for (id capability in root[@"capabilities"]) {
@@ -100,106 +170,10 @@ static BOOL DSHAgentArgumentsJSON(NSString *value) {
 }
 
 static BOOL DSHAgentCanonicalFeedbackString(NSString *value) {
-  NSError *nativeFeedbackError = nil;
-  if (!DSHAgentValidateNativeToolFeedbackString(value, &nativeFeedbackError)) return NO;
-  NSData *bytes = [value dataUsingEncoding:NSUTF8StringEncoding];
-  if (bytes == nil || bytes.length > DSHAgentNativeWALMaxTranscriptBytes) return NO;
-  NSError *decodeError = nil;
-  id object = [NSJSONSerialization JSONObjectWithData:bytes options:0 error:&decodeError];
-  if (![object isKindOfClass:NSDictionary.class]) return NO;
-  NSError *canonicalError = nil;
-  NSData *canonical = DSHAgentCanonicalJSON(object, &canonicalError);
-  if (canonical == nil || ![canonical isEqualToData:bytes]) return NO;
-  NSDictionary *feedback = object;
-  if (!DSHAgentExactDictionaryKeys(feedback, @[
-        @"schema_version", @"name", @"outcome", @"payload",
-      ]) || !DSHAgentSafeInteger(feedback[@"schema_version"], 1, NO) ||
-      !DSHAgentBoundedUTF8String(feedback[@"name"], 64, NO, nullptr) ||
-      ![feedback[@"payload"] isKindOfClass:NSDictionary.class]) return NO;
-  NSString *name = feedback[@"name"];
-  NSString *outcome = feedback[@"outcome"];
-  if (![name isKindOfClass:NSString.class] ||
-      ![outcome isKindOfClass:NSString.class]) return NO;
-  if ([name isEqualToString:@"list_dir"] && bytes.length > 64 * 1024) return NO;
-  NSDictionary *payload = feedback[@"payload"];
-  if ([outcome isEqualToString:@"failed"] ||
-      [outcome isEqualToString:@"denied"] ||
-      [outcome isEqualToString:@"cancelled"] ||
-      [outcome isEqualToString:@"ambiguous"]) {
-    return DSHAgentExactDictionaryKeys(payload, @[
-             @"schema_version", @"failure_code",
-           ]) && DSHAgentSafeInteger(payload[@"schema_version"], 1, NO) &&
-        DSHAgentFailureCode(payload[@"failure_code"]);
-  }
-  if (![outcome isEqualToString:@"ok"] ||
-      !DSHAgentSafeInteger(payload[@"schema_version"], 1, NO)) return NO;
-  if ([name isEqualToString:@"list_dir"]) {
-    if (!DSHAgentExactDictionaryKeys(payload, @[
-          @"schema_version", @"entries", @"truncated",
-        ]) || ![payload[@"entries"] isKindOfClass:NSArray.class] ||
-        [(NSArray *)payload[@"entries"] count] > 1000 ||
-        ![payload[@"truncated"] isKindOfClass:NSNumber.class] ||
-        CFGetTypeID((__bridge CFTypeRef)payload[@"truncated"]) != CFBooleanGetTypeID()) {
-      return NO;
-    }
-    for (NSDictionary *entry in payload[@"entries"]) {
-      if (!DSHAgentExactDictionaryKeys(entry, @[
-            @"schema_version", @"name", @"type", @"revision",
-          ]) || !DSHAgentSafeInteger(entry[@"schema_version"], 1, NO) ||
-          !DSHAgentBoundedUTF8String(entry[@"name"], 4096, NO, nullptr) ||
-          (![entry[@"type"] isEqualToString:@"file"] &&
-           ![entry[@"type"] isEqualToString:@"directory"]) ||
-          !DSHAgentBoundedUTF8String(entry[@"revision"], 256, NO, nullptr)) {
-        return NO;
-      }
-    }
-    return YES;
-  }
-  if ([name isEqualToString:@"read_file"]) {
-    if (bytes.length > 64 * 1024) return NO;
-    return DSHAgentExactDictionaryKeys(payload, @[
-             @"schema_version", @"content", @"revision", @"truncated",
-           ]) && DSHAgentBoundedUTF8String(payload[@"content"], 64 * 1024, YES,
-                                           nullptr) &&
-        DSHAgentBoundedUTF8String(payload[@"revision"], 256, NO, nullptr) &&
-        [payload[@"truncated"] isKindOfClass:NSNumber.class] &&
-        CFGetTypeID((__bridge CFTypeRef)payload[@"truncated"]) == CFBooleanGetTypeID();
-  }
-  if ([name isEqualToString:@"write_file"]) {
-    return DSHAgentExactDictionaryKeys(payload, @[
-             @"schema_version", @"bytes", @"revision",
-           ]) && DSHAgentSafeInteger(payload[@"bytes"], 32768, YES) &&
-        DSHAgentBoundedUTF8String(payload[@"revision"], 256, NO, nullptr);
-  }
-  if ([name isEqualToString:@"git_status"]) {
-    return DSHAgentExactDictionaryKeys(payload, @[
-             @"schema_version", @"branch", @"head_oid", @"clean",
-             @"has_conflicts", @"entry_count",
-           ]) &&
-        (payload[@"branch"] == NSNull.null ||
-         DSHAgentBoundedUTF8String(payload[@"branch"], 1024, NO, nullptr)) &&
-        (payload[@"head_oid"] == NSNull.null ||
-         DSHAgentBoundedUTF8String(payload[@"head_oid"], 128, NO, nullptr)) &&
-        [payload[@"clean"] isKindOfClass:NSNumber.class] &&
-        CFGetTypeID((__bridge CFTypeRef)payload[@"clean"]) == CFBooleanGetTypeID() &&
-        [payload[@"has_conflicts"] isKindOfClass:NSNumber.class] &&
-        CFGetTypeID((__bridge CFTypeRef)payload[@"has_conflicts"]) == CFBooleanGetTypeID() &&
-        DSHAgentSafeInteger(payload[@"entry_count"], 1000000, YES);
-  }
-  if ([name isEqualToString:@"git_commit"]) {
-    return DSHAgentExactDictionaryKeys(payload, @[
-             @"schema_version", @"commit_oid", @"tree_oid",
-           ]) && DSHAgentBoundedUTF8String(payload[@"commit_oid"], 128, NO, nullptr) &&
-        DSHAgentBoundedUTF8String(payload[@"tree_oid"], 128, NO, nullptr);
-  }
-  if ([name isEqualToString:@"git_push"]) {
-    return DSHAgentExactDictionaryKeys(payload, @[
-             @"schema_version", @"remote", @"remote_ref", @"pushed_oid",
-           ]) && [payload[@"remote"] isEqualToString:@"origin"] &&
-        DSHAgentBoundedUTF8String(payload[@"remote_ref"], 256, NO, nullptr) &&
-        DSHAgentBoundedUTF8String(payload[@"pushed_oid"], 128, NO, nullptr);
-  }
-  return NO;
+  // The WAL validator is the single exact feedback contract. Duplicating the
+  // per-tool payload schemas here caused accepted CGI/hash feedback to be
+  // rejected when the protected transcript was reopened.
+  return DSHAgentValidateNativeToolFeedbackString(value, nullptr);
 }
 
 static BOOL DSHAgentTranscriptMessage(NSDictionary *message) {
@@ -321,6 +295,76 @@ static NSMutableArray *DSHAgentMutableArray(id value) {
 @end
 
 @implementation DSHAgentTranscriptStore
+
+- (void)cacheRoundPresentationForRequest:(NSDictionary *)request message:(NSDictionary *)message kind:(NSString *)kind {
+  if (!DSHAgentCanonicalUUID(request[@"conversation_id"]) || !DSHAgentCanonicalUUID(request[@"attempt_id"])) return;
+  NSDictionary *round = DSHPresentationRound(request[@"round_id"], request[@"round_index"], kind, message);
+  if (!round) return;
+  @synchronized(DSHAgentTranscriptStore.class) {
+    NSURL *directory = DSHPresentationDirectory(self.wal.rootURL);
+    struct stat metadata = {};
+    if (lstat(directory.fileSystemRepresentation, &metadata) == 0 && !S_ISDIR(metadata.st_mode)) return;
+    if (![NSFileManager.defaultManager createDirectoryAtURL:directory withIntermediateDirectories:YES attributes:@{NSFilePosixPermissions: @0700, NSFileProtectionKey: NSFileProtectionCompleteUntilFirstUserAuthentication} error:nil]) return;
+    [directory setResourceValue:@YES forKey:NSURLIsExcludedFromBackupKey error:nil];
+    NSString *name = [NSString stringWithFormat:@"%@_%@.json", request[@"conversation_id"], request[@"attempt_id"]];
+    NSURL *file = [directory URLByAppendingPathComponent:name];
+    NSDictionary *prior = DSHPresentationRead(file);
+    NSMutableDictionary *byIndex = [NSMutableDictionary dictionary];
+    if ([prior[@"conversation_id"] isEqual:request[@"conversation_id"]] && [prior[@"attempt_id"] isEqual:request[@"attempt_id"]]) {
+      for (NSDictionary *old in prior[@"rounds"]) byIndex[old[@"round_index"]] = old;
+    }
+    byIndex[round[@"round_index"]] = round;
+    NSArray *keys = [byIndex.allKeys sortedArrayUsingSelector:@selector(compare:)];
+    NSMutableArray *rounds = [NSMutableArray array];
+    for (NSNumber *key in keys) [rounds addObject:byIndex[key]];
+    NSDictionary *projection = @{ @"schema_version": @1, @"conversation_id": request[@"conversation_id"], @"attempt_id": request[@"attempt_id"], @"rounds": rounds };
+    NSData *data = DSHAgentCanonicalJSON(projection, nil);
+    if (!data || data.length > DSHPresentationMaxFile) return;
+    if (![data writeToURL:file options:NSDataWritingAtomic | NSDataWritingFileProtectionCompleteUntilFirstUserAuthentication error:nil]) return;
+    [NSFileManager.defaultManager setAttributes:@{ NSFilePosixPermissions: @0600 } ofItemAtPath:file.path error:nil];
+    DSHAgentPruneRoundPresentationCache(self.wal.rootURL, nil);
+  }
+}
+
+- (NSDictionary *)roundPresentationsForConversation:(NSString *)conversationId attempt:(NSString *)attemptId error:(NSError **)error {
+  if (!DSHAgentCanonicalUUID(conversationId) || !DSHAgentCanonicalUUID(attemptId)) {
+    DSHSetAgentNativeStoreError(error, DSHAgentNativeStoreErrorInvalidArgument); return nil;
+  }
+  // snapshotWithError verifies the immutable WAL and transcript hashes. This
+  // query never reconciles/replays/advances an authority or provider round.
+  NSDictionary *state = [self.wal snapshotWithError:error];
+  if (!state) return nil;
+  NSMutableDictionary *byIndex = [NSMutableDictionary dictionary];
+  @synchronized(DSHAgentTranscriptStore.class) {
+    NSURL *file = [DSHPresentationDirectory(self.wal.rootURL) URLByAppendingPathComponent:[NSString stringWithFormat:@"%@_%@.json", conversationId, attemptId]];
+    NSDictionary *cached = DSHPresentationRead(file);
+    if ([cached[@"conversation_id"] isEqual:conversationId] && [cached[@"attempt_id"] isEqual:attemptId]) {
+      for (NSDictionary *round in cached[@"rounds"]) byIndex[round[@"round_index"]] = round;
+    }
+  }
+  for (NSDictionary *row in state[@"rounds"]) {
+    NSDictionary *locator = row[@"locator"];
+    if (![locator[@"attempt_id"] isEqual:attemptId] || ![row[@"state"] isEqual:@"completed"]) continue;
+    NSString *kind = row[@"terminal_kind"];
+    if (![@[@"tool_batch", @"final", @"blocked"] containsObject:kind]) continue;
+    NSDictionary *reference = row[@"transcript_after"];
+    for (NSDictionary *transcript in state[@"transcripts"]) {
+      if (![transcript[@"attempt_id"] isEqual:attemptId] || ![transcript[@"transcript_ref"] isEqual:reference[@"transcript_ref"]] || [transcript[@"generation"] unsignedLongLongValue] < [reference[@"generation"] unsignedLongLongValue]) continue;
+      for (NSDictionary *message in [transcript[@"messages"] reverseObjectEnumerator]) {
+        if (![message[@"role"] isEqual:@"assistant"] || ![message[@"round_index"] isEqual:locator[@"round_index"]]) continue;
+        NSDictionary *round = DSHPresentationRound(locator[@"round_id"], locator[@"round_index"], kind, message);
+        if (round) byIndex[round[@"round_index"]] = round;
+        break;
+      }
+    }
+  }
+  if (byIndex.count > 8) { DSHSetAgentNativeStoreError(error, DSHAgentNativeStoreErrorCorrupt); return nil; }
+  NSMutableArray *rounds = [NSMutableArray array];
+  for (NSNumber *index in [byIndex.allKeys sortedArrayUsingSelector:@selector(compare:)]) [rounds addObject:byIndex[index]];
+  return @{ @"schema_version": @1, @"conversation_id": conversationId, @"attempt_id": attemptId, @"rounds": rounds };
+}
+
+
 
 - (instancetype)initWithWAL:(DSHAgentNativeWAL *)wal {
   self = [super init];

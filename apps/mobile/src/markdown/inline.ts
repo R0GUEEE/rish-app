@@ -1,3 +1,4 @@
+/* eslint-disable no-control-regex -- URL actions reject control characters */
 import { INLINE_LIMITS, MATH_LIMITS } from './limits';
 
 /**
@@ -13,17 +14,75 @@ export type InlineToken =
   | { type: 'code'; value: string }
   | { type: 'math'; source: string }
   | { type: 'image'; alt: string; target: string }
-  | { type: 'link'; label: string; target: string };
+  | { type: 'link'; label: string; target: string; children?: InlineToken[] };
 
 type TokenizeOptions = { parseStrong: boolean; parseImages: boolean };
 
-const LINK_SCHEME_RE = /^(?:https?|mailto):/iu;
+/** Only browser and email targets may cross the native URL boundary. */
+export function isSafeLinkTarget(target: string): boolean {
+  if (target.length > 2048 || /[\s\u0000-\u001f\u007f\\]/u.test(target))
+    return false;
+  if (/^mailto:[^@/?#]+@[^/?#]+(?:[?][^#]*)?$/iu.test(target)) return true;
+  return /^https?:\/\/(?:\[[0-9a-f:]+\]|[^/:?#@]+)(?::[0-9]{1,5})?(?:[/?#].*)?$/iu.test(
+    target,
+  );
+}
+
+function bareLinkAt(value: string, start: number): string | undefined {
+  if (start > 0 && /[\p{L}\p{N}_/@]/u.test(value[start - 1])) return undefined;
+  const match = /^(?:https?:\/\/|mailto:)[^\s<>"'`*\u0000-\u001f]+/iu.exec(
+    value.slice(start),
+  );
+  if (match === null) return undefined;
+  let target = match[0].replace(/[.,;:!?。，；：！？、]+$/u, '');
+  for (const [open, close] of [
+    ['(', ')'],
+    ['[', ']'],
+    ['{', '}'],
+  ]) {
+    while (
+      target.endsWith(close) &&
+      target.split(close).length > target.split(open).length
+    ) {
+      target = target.slice(0, -1);
+    }
+  }
+  return isSafeLinkTarget(target) ? target : undefined;
+}
+
+/** User text keeps all formatting literally, with only URLs gaining actions. */
+export function tokenizePlainLinks(value: string): InlineToken[] {
+  if (value.length > INLINE_LIMITS.maxLineChars)
+    return [{ type: 'text', value }];
+  const tokens: InlineToken[] = [];
+  let start = 0;
+  for (let i = 0; i < value.length; i += 1) {
+    if (value[i] === '`') {
+      const run = /^`+/u.exec(value.slice(i))![0];
+      const close = value.indexOf(run, i + run.length);
+      if (close !== -1) {
+        i = close + run.length - 1;
+        continue;
+      }
+    }
+    const target = bareLinkAt(value, i);
+    if (target === undefined) continue;
+    if (i > start) tokens.push({ type: 'text', value: value.slice(start, i) });
+    tokens.push({ type: 'link', label: target, target });
+    i += target.length - 1;
+    start = i + 1;
+  }
+  if (start < value.length)
+    tokens.push({ type: 'text', value: value.slice(start) });
+  return tokens;
+}
 
 export function tokenizeInline(
   value: string,
   options: TokenizeOptions = { parseStrong: true, parseImages: true },
 ): InlineToken[] {
-  if (value.length > INLINE_LIMITS.maxLineChars) return [{ type: 'text', value }];
+  if (value.length > INLINE_LIMITS.maxLineChars)
+    return [{ type: 'text', value }];
   const tokens: InlineToken[] = [];
   let buffer = '';
   const flush = () => {
@@ -37,7 +96,10 @@ export function tokenizeInline(
     const ch = value[i];
     if (value.startsWith('![', i)) {
       const rest = value.slice(i);
-      const match = /^!\[([^\]]{0,200})\]\(\s*([^\s()]{1,8192})\s*(?:["'][^"']*["'])?\s*\)/u.exec(rest);
+      const match =
+        /^!\[([^\]]{0,200})\]\(\s*([^\s()]{1,8192})\s*(?:["'][^"']*["'])?\s*\)/u.exec(
+          rest,
+        );
       if (match !== null) {
         if (options.parseImages) {
           flush();
@@ -126,7 +188,10 @@ export function tokenizeInline(
         const inner = value.slice(i + 2, end);
         tokens.push({
           type: 'strong',
-          children: tokenizeInline(inner, { parseStrong: false, parseImages: false }),
+          children: tokenizeInline(inner, {
+            parseStrong: false,
+            parseImages: false,
+          }),
         });
         i = end + 2;
         continue;
@@ -139,18 +204,45 @@ export function tokenizeInline(
         closeBracket - i <= INLINE_LIMITS.maxStrongSpanChars &&
         value[closeBracket + 1] === '('
       ) {
-        const match = /^\(([^\s()]{1,2048})\)/u.exec(value.slice(closeBracket + 1));
-        if (match !== null && LINK_SCHEME_RE.test(match[1])) {
+        const match = /^\(([^\s()]*(?:\([^\s()]*\)[^\s()]*)*)\)/u.exec(
+          value.slice(closeBracket + 1),
+        );
+        if (match !== null && isSafeLinkTarget(match[1])) {
           flush();
           tokens.push({
             type: 'link',
             label: value.slice(i + 1, closeBracket),
             target: match[1],
+            ...(value.slice(i + 1, closeBracket).includes('**')
+              ? {
+                  children: tokenizeInline(value.slice(i + 1, closeBracket), {
+                    parseStrong: true,
+                    parseImages: false,
+                  }),
+                }
+              : {}),
           });
           i = closeBracket + 1 + match[0].length;
           continue;
         }
       }
+    }
+    if (ch === '<') {
+      const end = value.indexOf('>', i + 1);
+      const target = end === -1 ? '' : value.slice(i + 1, end);
+      if (isSafeLinkTarget(target)) {
+        flush();
+        tokens.push({ type: 'link', label: target, target });
+        i = end + 1;
+        continue;
+      }
+    }
+    const target = bareLinkAt(value, i);
+    if (target !== undefined) {
+      flush();
+      tokens.push({ type: 'link', label: target, target });
+      i += target.length;
+      continue;
     }
     buffer += ch;
     i += 1;

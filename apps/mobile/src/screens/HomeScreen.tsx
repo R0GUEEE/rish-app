@@ -1,4 +1,6 @@
 import { isHarnessModelId } from '../harness/types';
+import { glmAccountStatus, glmCredentialSource, glmSourceProvider } from '../harnessAuth/glmAccount';
+import { codexChatSource, codexAvailableModels } from '../harnessAuth/native';
 import { getDshCatalog, subscribeDshCatalog, dshModelSupportsImages } from '../models/catalog';
 import { useSyncExternalStore } from 'react';
 import { withTaskExperience, cancelTaskExperienceRun } from '../taskExperience/controller';
@@ -28,6 +30,7 @@ import {
   StyleSheet,
   Text,
   View,
+  useWindowDimensions,
 } from 'react-native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 
@@ -46,6 +49,8 @@ import { MirrorSettingsSheet } from '../components/MirrorSettingsSheet';
 import { ConversationOptionsPicker } from '../components/ConversationOptionsPicker';
 import { HarnessPicker } from '../components/HarnessPicker';
 import type { StructuredBlock } from '../components/StructuredContent';
+import { projectAgentActivity } from '../components/agentActivityProjection';
+import { readAgentAttemptPresentation, type AgentAttemptPresentation } from '../agent/AgentRoundPresentation';
 import {
   ModelPicker,
   type SupportedModel,
@@ -138,6 +143,17 @@ import {
   isHarnessId,
 } from '../harness';
 import { defaultModelForHarness } from './harnessSelection';
+
+async function bootstrapForHarness(harnessId: string) {
+  const runtime = LocalRuntime as typeof LocalRuntime & {
+    bootstrapForHarness?: (id: string) => Promise<{ proof: RuntimeProof }>;
+  };
+  return typeof runtime.bootstrapForHarness === 'function'
+    ? runtime.bootstrapForHarness(harnessId)
+    : harnessId === 'dsh'
+      ? runtime.bootstrap()
+      : Promise.reject(new Error('Harness-aware runtime bootstrap is unavailable'));
+}
 import {
   createProjectContextController,
   createProjectContextLifecycleController,
@@ -151,6 +167,11 @@ import {
   type ProjectContextLifecycleControllerState,
 } from '../project-context';
 import { useAppPresentation } from '../presentation/AppPresentation';
+import {
+  resolveAdaptiveLayout,
+  WIDE_CONTENT_MAX_WIDTH,
+  WIDE_SIDEBAR_WIDTH,
+} from '../layout/adaptive';
 import { fonts, hitSlop, type ThemePalette } from '../theme';
 import { seedMarkdownDemoConversation } from '../dev/markdownDemo';
 import { SessionSnapshots } from '../native/SessionSnapshots';
@@ -541,14 +562,19 @@ function summaryFor(conversation: Conversation): ConversationSummary {
   };
 }
 
-function displayMessages(
+export function displayMessages(
   conversation: Conversation | null,
   previews: Readonly<Record<string, string>>,
+  sessionEvents: readonly import('../state/types').PersistedSessionEventV3[] = [],
+  presentations: Readonly<Record<string, AgentAttemptPresentation>> = {},
 ): DisplayMessage[] {
-  return (conversation?.messages ?? []).map(message => {
+  const rendered = (conversation?.messages ?? []).map(message => {
+    const attempt = conversation?.attempts.find(item => item.assistantMessageId === message.id);
+    const projectedTools = attempt === undefined ? [] : projectAgentActivity(sessionEvents, attempt.attemptId, presentations[attempt.attemptId], true);
     const blocks: StructuredBlock[] | undefined =
       message.role === 'assistant' && message.metadata?.reasoning !== undefined
         ? [
+            ...projectedTools,
             {
               id: `${message.id}-reasoning`,
               type: 'reasoning',
@@ -556,8 +582,7 @@ function displayMessages(
             },
             { id: `${message.id}-text`, type: 'text', text: message.text },
           ]
-        : undefined;
-    const attempt = conversation?.attempts.find(item => item.assistantMessageId === message.id);
+        : projectedTools.length > 0 ? [...projectedTools, { id: `${message.id}-text`, type: 'text', text: message.text }] : undefined;
     const providerBinding = attempt?.rounds.at(-1)?.providerConfiguration;
     return {
       id: message.id,
@@ -592,6 +617,23 @@ function displayMessages(
           }),
     };
   });
+  if (conversation === null) return rendered;
+  const synthetic = new Map<string, DisplayMessage[]>();
+  const orderedAttempts = conversation.attempts.slice().sort((a, b) => Date.parse(a.createdAt) - Date.parse(b.createdAt));
+  for (const attempt of orderedAttempts) {
+    if (attempt.assistantMessageId !== null) continue;
+    const blocks = projectAgentActivity(sessionEvents, attempt.attemptId, presentations[attempt.attemptId]);
+    if (blocks.length === 0) continue;
+    const turn = conversation.turns.find(item => item.turnId === attempt.turnId);
+    if (turn === undefined) continue;
+    const entry = { id: `activity-${attempt.attemptId}`, role: 'assistant' as const, text: '', modelId: attempt.modelId, blocks };
+    const existing = synthetic.get(turn.userMessageId) ?? [];
+    existing.push(entry); synthetic.set(turn.userMessageId, existing);
+  }
+  if (synthetic.size === 0) return rendered;
+  const merged: DisplayMessage[] = [];
+  for (const message of rendered) { merged.push(message); const activities = synthetic.get(message.id); if (activities) merged.push(...activities); }
+  return merged;
 }
 
 export function HomeScreen({
@@ -600,6 +642,8 @@ export function HomeScreen({
   seedMarkdownDemo?: boolean;
 }) {
   const insets = useSafeAreaInsets();
+  const { width: windowWidth } = useWindowDimensions();
+  const { isWide: wideLayout } = resolveAdaptiveLayout(windowWidth);
   const {
     colors,
     locale,
@@ -639,6 +683,7 @@ export function HomeScreen({
   const drawerSurfaceEpoch = useRef(0);
   const [accountVisible, setAccountVisible] = useState(false);
   const [settingsVisible, setSettingsVisible] = useState(false);
+  const [settingsAuthOnly, setSettingsAuthOnly] = useState(false);
   const settingsVisibleRef = useRef(false);
   settingsVisibleRef.current = settingsVisible;
   const settingsSurfaceEpoch = useRef(0);
@@ -791,13 +836,44 @@ export function HomeScreen({
   const activeAdapter = getHarnessAdapter(activeHarnessId);
   const dshCatalog = useSyncExternalStore(subscribeDshCatalog, getDshCatalog);
   const [providerConfigurationRevision, setProviderConfigurationRevision] = useState(0);
+  const [codexModels, setCodexModels] = useState<readonly {id: string; name: string}[] | null>(null);
+  const [codexModelsLoading, setCodexModelsLoading] = useState(false);
+  useEffect(() => {
+    let cancelled = false;
+    setCodexModels(null);
+    if (activeHarnessId !== 'codex' || !nativeAvailable) { setCodexModelsLoading(false); return; }
+    setCodexModelsLoading(true);
+    codexChatSource().then(async source => {
+      if (source.source !== 'subscription' || !source.ready) return;
+      const models = await codexAvailableModels();
+      if (!cancelled) setCodexModels(models);
+    }).catch(() => { if (!cancelled) setRuntimeFailure('E_CODEX_MODEL_CATALOG'); })
+      .finally(() => { if (!cancelled) setCodexModelsLoading(false); });
+    return () => { cancelled = true; };
+  }, [activeHarnessId, nativeAvailable, providerConfigurationRevision, settingsVisible]);
+  const [glmSubscriptionState, setGlmSubscriptionState] = useState<'signed_in' | 'needs_login' | null>(null);
+  useEffect(() => {
+    let cancelled = false;
+    setGlmSubscriptionState(null);
+    if (activeHarnessId === 'glm') {
+      glmCredentialSource().then(async source => {
+        const provider = glmSourceProvider(source.source);
+        if (!provider) return;
+        const account = await glmAccountStatus(provider);
+        if (!cancelled) setGlmSubscriptionState(account.status === 'signed_in' ? 'signed_in' : 'needs_login');
+      }).catch(() => undefined);
+    }
+    return () => { cancelled = true; };
+  }, [activeHarnessId, providerConfigurationRevision, settingsVisible]);
+  const subscriptionNeedsAttention = activeHarnessId === 'glm' && glmSubscriptionState !== null;
   const [providerOverride, setProviderOverride] = useState<ProviderConfiguration | null>(null);
   useEffect(() => {
     let cancelled = false;
     setProviderOverride(null);
     if ((activeHarnessId === 'claude-code' || activeHarnessId === 'codex') && ProviderConfigurations.isAvailable()) {
-      ProviderConfigurations.read(activeHarnessId).then(value => {
-        if (!cancelled) setProviderOverride(value.official ? null : value);
+      ProviderConfigurations.read(activeHarnessId).then(async value => {
+        const subscription = activeHarnessId === 'codex' && (await codexChatSource()).source === 'subscription';
+        if (!cancelled) setProviderOverride(subscription || value.official ? null : value);
       }).catch(() => undefined);
     }
     return () => { cancelled = true; };
@@ -812,12 +888,12 @@ export function HomeScreen({
     credentialHarnessId === activeHarnessId && credentialConfiguredValue;
   const activeModels = useMemo(
     () =>
-      (activeHarness.id === "dsh" ? dshCatalog.models : activeHarness.models)
+      (activeHarness.id === "dsh" ? dshCatalog.models : activeHarness.id === 'codex' && codexModels ? codexModels : activeHarness.models)
         .map(model => model.id)
         .filter((id): id is SupportedModel =>
           isHarnessModelId(id),
         ),
-    [activeHarness, dshCatalog],
+    [activeHarness, dshCatalog, codexModels],
   );
 
   useEffect(() => store.subscribe(setChatState), [store]);
@@ -1730,10 +1806,7 @@ export function HomeScreen({
       completionController.reconcileHydrated(conversationId);
       if (!projectContextNativeAvailable) return;
       if (
-        completionOwnsPresentation(
-          completionController.getState(),
-          conversationId,
-        ) ||
+        completionBusy(completionController.getState()) ||
         selectProjectContextSnapshotReferences(
           store.getState(),
           conversationId,
@@ -1915,7 +1988,7 @@ export function HomeScreen({
       let initialProof: RuntimeProof | null = null;
       if (configured) {
         try {
-          initialProof = (await LocalRuntime.bootstrap()).proof;
+          initialProof = (await bootstrapForHarness(activeHarnessId)).proof;
         } catch (error) {
           // Runtime proof is observational. A broken sandbox probe must not
           // suppress restoration of an already committed local session.
@@ -1991,11 +2064,12 @@ export function HomeScreen({
         loaded.status !== 'missing'
       ) {
         try {
-          initialProof = (await LocalRuntime.bootstrap()).proof;
+          initialProof = (await bootstrapForHarness(activeHarnessId)).proof;
         } catch (error) {
           setRuntimeFailure(errorText(error));
         }
       }
+      if (activeHarnessIdRef.current !== activeHarnessId) return;
       setProof(initialProof);
     } catch (error) {
       setRuntimeFailure(errorText(error));
@@ -2120,9 +2194,28 @@ export function HomeScreen({
       cancelled = true;
     };
   }, [activeProjectId]);
+  const [roundPresentations, setRoundPresentations] = useState<Readonly<Record<string, AgentAttemptPresentation>>>({});
+  // Read native completed projections on hydration and each durable round transition.
+  // This display cache never changes model history or execution checkpoints.
+  const presentationOwner = activeConversation?.id ?? null;
+  const presentationRevision = JSON.stringify(activeConversation?.attempts.filter(attempt => attempt.agent != null).map(attempt => [
+    attempt.attemptId, attempt.journalRevision ?? 0, attempt.assistantMessageId,
+  ]) ?? []);
+  useEffect(() => {
+    let cancelled = false;
+    if (presentationOwner === null) { setRoundPresentations({}); return; }
+    const attempts = JSON.parse(presentationRevision) as [string, number, string | null][];
+    Promise.all(attempts.map(async ([attemptId]) => {
+      const result = await readAgentAttemptPresentation(presentationOwner, attemptId);
+      return [attemptId, result] as const;
+    })).then(results => {
+      if (!cancelled) setRoundPresentations(Object.fromEntries(results.filter((entry): entry is readonly [string, AgentAttemptPresentation] => entry[1] !== null)));
+    });
+    return () => { cancelled = true; };
+  }, [presentationOwner, presentationRevision]);
   const activeMessages = useMemo(
-    () => displayMessages(activeConversation, attachmentPreviews),
-    [activeConversation, attachmentPreviews],
+    () => displayMessages(activeConversation, attachmentPreviews, chatState.sessionEvents ?? [], roundPresentations),
+    [activeConversation, attachmentPreviews, chatState.sessionEvents, roundPresentations],
   );
   const conversationSummaries = useMemo(
     () => selectOrderedConversations(chatState).map(summaryFor),
@@ -2317,7 +2410,7 @@ export function HomeScreen({
     if (
       activeConversation.projectId === null ||
       activeConversation.projectContext === null ||
-      completionOwnsPresentation(completionState, activeConversation.id) ||
+      completionBusy(completionState) ||
       selectProjectContextSnapshotReferences(
         store.getState(),
         activeConversation.id,
@@ -2351,12 +2444,14 @@ export function HomeScreen({
     (proof.checks.credential_in_keychain || proof.checks.credential_in_secure_store === true) &&
     proof.checks.rish_applet_executed &&
     !proof.mac_dsh_port_3180_reachable;
-  const runtimeLabel = runtimeChecking
+  const runtimeLabel = codexModelsLoading ? t('messages.loadingSubscriptionModels') : runtimeChecking
     ? t('runtime.status.verifying')
     : !nativeAvailable
     ? t('home.localAdapterUnavailable')
     : !credentialConfigured
-    ? t('settings.credential.notConfigured')
+    ? subscriptionNeedsAttention
+      ? t(glmSubscriptionState === 'signed_in' ? 'messages.subscriptionUnverified' : 'messages.subscriptionLoginRequired')
+      : t('settings.credential.notConfigured')
     : runtimeFailure !== null
     ? t('runtime.status.failed')
     : proof?.mac_dsh_port_3180_reachable
@@ -2389,7 +2484,7 @@ export function HomeScreen({
         setRuntimeFailure(null);
         return;
       }
-      const refreshedProof = (await LocalRuntime.bootstrap()).proof;
+      const refreshedProof = (await bootstrapForHarness(activeHarnessId)).proof;
       if (activeHarnessIdRef.current !== activeHarnessId) return;
       setProof(refreshedProof);
       setRuntimeFailure(null);
@@ -3521,12 +3616,12 @@ export function HomeScreen({
   const drawerSourceIsLive = useCallback(
     (expectedEpoch: number) =>
       lifecycleBootstrapReadyRef.current &&
-      drawerVisibleRef.current &&
+      (wideLayout || drawerVisibleRef.current) &&
       drawerSurfaceEpoch.current === expectedEpoch &&
       !contextSheetVisibleRef.current &&
       !destructiveAuthorityActive() &&
       !projectContextOperationInFlight(projectContextController.getState()),
-    [destructiveAuthorityActive, projectContextController],
+    [destructiveAuthorityActive, projectContextController, wideLayout],
   );
 
   const settingsSourceIsLive = useCallback(
@@ -4088,6 +4183,11 @@ export function HomeScreen({
     (model: SupportedModel) => selectModel(model, 'composer_picker'),
     [selectModel],
   );
+  useEffect(() => {
+    if (activeHarnessId !== 'codex' || !codexModels?.length || codexModels.some(model => model.id === activeModel)) return;
+    if (activeConversation && activeConversation.messages.length > 0) return;
+    selectModel(codexModels[0].id, 'composer_picker');
+  }, [activeHarnessId, codexModels, activeModel, activeConversation, selectModel]);
 
   const selectSettingsModel = useCallback(
     (model: SupportedModel) => selectModel(model, 'settings_picker'),
@@ -4095,6 +4195,7 @@ export function HomeScreen({
   );
 
   const presentSettingsSurface = useCallback(() => {
+    setSettingsAuthOnly(false);
     settingsSurfaceEpoch.current += 1;
     settingsVisibleRef.current = true;
     setSettingsVisible(true);
@@ -5324,7 +5425,9 @@ export function HomeScreen({
       if (result.status === 'configured') {
         setCredentialHarnessId(activeHarnessId);
         setCredentialConfigured(true);
-        setProof((await LocalRuntime.bootstrap()).proof);
+        const refreshedProof = (await bootstrapForHarness(activeHarnessId)).proof;
+        if (activeHarnessIdRef.current !== activeHarnessId) return;
+        setProof(refreshedProof);
         setRuntimeFailure(null);
       }
     } catch (error) {
@@ -5360,9 +5463,14 @@ export function HomeScreen({
     open: () => void,
   ) => {
     if (!drawerSourceIsLive(expectedEpoch)) return;
+    if (wideLayout) {
+      closeDrawerSurface();
+      open();
+      return;
+    }
     afterDrawerDismiss.current = open;
     closeDrawerSurface();
-  }, [closeDrawerSurface, drawerSourceIsLive]);
+  }, [closeDrawerSurface, drawerSourceIsLive, wideLayout]);
 
   const openPendingLifecycleFromDrawer = useCallback(
     (
@@ -5373,7 +5481,7 @@ export function HomeScreen({
     ) => {
       if (
         !lifecycleBootstrapReadyRef.current ||
-        !drawerVisibleRef.current ||
+        (!wideLayout && !drawerVisibleRef.current) ||
         drawerSurfaceEpoch.current !== expectedDrawerEpoch
       )
         return;
@@ -5407,6 +5515,7 @@ export function HomeScreen({
       closeDrawerSurface,
       lifecycleIntentIsLive,
       projectContextLifecycleController,
+      wideLayout,
     ],
   );
 
@@ -5523,8 +5632,11 @@ export function HomeScreen({
         importantForAccessibility={
           navigationSurfaceVisible ? 'no-hide-descendants' : 'auto'
         }
-        style={[styles.screen, { paddingTop: insets.top }]}
+        style={[styles.screen, wideLayout && styles.screenWide, { paddingTop: insets.top }]}
       >
+        <View
+          style={[styles.contentContainer, wideLayout && styles.wideContent]}
+        >
         <View style={styles.topBar}>
           <RoundButton
             accessibilityLabel={t('home.openNavigation')}
@@ -5744,9 +5856,12 @@ export function HomeScreen({
             draft={draft}
             harnessName={activeHarness.name}
             providerName={providerName}
+            configurationHint={subscriptionNeedsAttention ? t(glmSubscriptionState === 'signed_in' ? 'messages.subscriptionUnverified' : 'messages.subscriptionLoginRequired') : undefined}
+            configurationAction={subscriptionNeedsAttention ? t('messages.manageSubscription') : undefined}
             model={activeModel}
             modelLabel={providerOverride?.harness_id === activeHarnessId ? providerOverride.model_mappings[activeModel] : undefined}
             locked={
+              codexModelsLoading ||
               requestState === 'sending' ||
               previewingAttachmentId !== null ||
               projectContextLocksComposer
@@ -5767,7 +5882,19 @@ export function HomeScreen({
             }}
             onCancel={() => cancel(completionState)}
             onChange={changeDraft}
-            onConfigure={openSettings}
+            onLogin={activeHarnessId === 'dsh' ? undefined : () => {
+              if (!rootSurfaceAdmissionAllowed() || credentialBusy) return;
+              presentSettingsSurface();
+              setSettingsAuthOnly(true);
+            }}
+            onConfigure={() => {
+              if (!rootSurfaceAdmissionAllowed() || credentialBusy) return;
+              if (!nativeAvailable || subscriptionNeedsAttention) {
+                openSettings();
+                return;
+              }
+              configureCredential().catch(() => undefined);
+            }}
             onOptionsPress={openComposerOptions}
             onWorkspacePress={() => {
               openWorkspacePicker();
@@ -5780,6 +5907,7 @@ export function HomeScreen({
             onRemoveAttachment={removeDraftAttachment}
             onSend={() => send().catch(() => undefined)}
           />
+        </View>
         </View>
       </View>
 
@@ -5796,6 +5924,7 @@ export function HomeScreen({
         runtimeLabel={runtimeLabel}
         runtimeStatus={runtimeStatus}
         visible={drawerVisible}
+        docked={wideLayout}
         onClose={closeDrawerSurface}
         onDismiss={handleDrawerDismiss}
         onNewChat={() => createConversation(drawerRenderEpoch)}
@@ -5896,6 +6025,7 @@ export function HomeScreen({
         onRename={renameConversation}
       />
       <SettingsSheet
+        authOnly={settingsAuthOnly}
         taskConversationId={chatState.selectedConversationId}
         busy={credentialBusy}
         harnessName={activeHarness.name}
@@ -6435,6 +6565,17 @@ const createStyles = (colors: ThemePalette) =>
     },
     root: { flex: 1, backgroundColor: colors.background },
     screen: { flex: 1, backgroundColor: colors.background },
+    contentContainer: { flex: 1 },
+    screenWide: {
+      paddingLeft: WIDE_SIDEBAR_WIDTH,
+      paddingRight: 24,
+    },
+    wideContent: {
+      flex: 1,
+      width: '100%',
+      maxWidth: WIDE_CONTENT_MAX_WIDTH,
+      alignSelf: 'center',
+    },
     topBar: {
       height: 66,
       paddingHorizontal: 16,

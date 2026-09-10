@@ -10,14 +10,14 @@ final class AppDelegate: UIResponder, UIApplicationDelegate {
         didFinishLaunchingWithOptions launchOptions: [UIApplication.LaunchOptionsKey: Any]? = nil
     ) -> Bool {
         let window = UIWindow(frame: UIScreen.main.bounds)
-        window.rootViewController = DSHMobileViewController()
+        window.rootViewController = RishViewController()
         window.makeKeyAndVisible()
         self.window = window
         return true
     }
 }
 
-final class DSHMobileViewController: UIViewController, WKNavigationDelegate {
+final class RishViewController: UIViewController, WKNavigationDelegate {
     private let headerView = UIVisualEffectView(effect: UIBlurEffect(style: .systemThinMaterial))
     private let menuButton = UIButton(type: .system)
     private let titleLabel = UILabel()
@@ -119,7 +119,7 @@ final class DSHMobileViewController: UIViewController, WKNavigationDelegate {
         webView.allowsBackForwardNavigationGestures = true
         webView.scrollView.keyboardDismissMode = .interactive
         webView.scrollView.contentInsetAdjustmentBehavior = .never
-        webView.customUserAgent = "DSHMobile/0.1 iOS"
+        webView.customUserAgent = "Rish/0.1 iOS"
         if #available(iOS 16.4, *) {
             webView.isInspectable = true
         }

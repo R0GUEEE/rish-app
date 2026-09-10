@@ -212,7 +212,8 @@ NSDictionary *DSHProviderRoundRequestCopy(NSDictionary *request,
       ![copy[@"root"] isKindOfClass:NSDictionary.class] ||
       ![DSHAgentRootResolver validateAgentRootProjection:copy[@"root"]
                                                    error:&copyError] ||
-      ![copy[@"registry_version"] isEqual:@1] ||
+      (![copy[@"registry_version"] isEqual:@1] &&
+       ![copy[@"registry_version"] isEqual:@2]) ||
       !DSHProviderDigest(copy[@"toolset_sha256"])) {
     if (error != nullptr) *error = DSHAgentNativeStoreError(
         DSHAgentNativeStoreErrorInvalidArgument);
@@ -569,7 +570,10 @@ NSString *DSHProviderFailureCode(NSString *providerErrorCode,
       [providerErrorCode isEqualToString:@"E_COMPLETION_HTTP_429"]) {
     return @"E_AGENT_TOOL_FAILED";
   }
-  if ([providerErrorCode isEqualToString:@"E_COMPLETION_RESPONSE_JSON"] ||
+  if ([providerErrorCode isEqualToString:@"E_COMPLETION_RESPONSE_MODEL"] ||
+      [providerErrorCode isEqualToString:@"E_COMPLETION_MODEL_MISMATCH"] ||
+      [providerErrorCode isEqualToString:@"E_COMPLETION_PROVIDER_RESPONSE_ID"] ||
+      [providerErrorCode isEqualToString:@"E_COMPLETION_RESPONSE_JSON"] ||
       [providerErrorCode isEqualToString:@"E_COMPLETION_EMPTY_RESPONSE"] ||
       [providerErrorCode isEqualToString:@"E_COMPLETION_TOOL_CALL_INVALID"] ||
       [providerErrorCode isEqualToString:@"E_COMPLETION_FINISH_RELATION"]) {

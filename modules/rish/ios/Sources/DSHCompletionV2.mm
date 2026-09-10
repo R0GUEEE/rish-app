@@ -941,7 +941,16 @@ DSHParseCompletionResponseSchema2(
     return nil;
   }
   NSString *text = nil;
-  if (!DSHSchema2BoundedUTF8String(message[@"content"], 256 * 1024, &text)) {
+  id rawContent = message[@"content"];
+  // DeepSeek's required content field is nullable for a tool-only assistant
+  // response. All tool records and the finish relation are still validated
+  // below before this normalized empty string can leave the parser.
+  BOOL nullableToolContent = rawContent == NSNull.null &&
+      [finish isEqualToString:@"tool_calls"] &&
+      [message[@"tool_calls"] isKindOfClass:NSArray.class] &&
+      [message[@"tool_calls"] count] > 0;
+  if (nullableToolContent) text = @"";
+  else if (!DSHSchema2BoundedUTF8String(rawContent, 256 * 1024, &text)) {
     DSHSchema2Fail(error, @"E_COMPLETION_EMPTY_RESPONSE");
     return nil;
   }

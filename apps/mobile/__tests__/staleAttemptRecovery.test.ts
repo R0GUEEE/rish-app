@@ -33,7 +33,7 @@ import {
 const fixtureDir = path.resolve(__dirname, 'fixtures');
 const nativeFixtureDir = path.resolve(
   __dirname,
-  '../ios/DSHMobileTests/Fixtures',
+  '../ios/RishTests/Fixtures',
 );
 
 type PersistedAttemptRow = {

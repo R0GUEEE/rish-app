@@ -19,6 +19,7 @@ FOUNDATION_EXPORT BOOL DSHDshModelSupportsImages(NSString *model);
 /// provider_configuration binding, never a mutation of this legacy catalog.
 /// All model ids across the four built-in Harnesses.
 FOUNDATION_EXPORT NSSet<NSString *> *DSHHarnessSupportedModels(void);
+FOUNDATION_EXPORT BOOL DSHRegisterCodexSubscriptionModels(NSArray<NSString *> *models);
 FOUNDATION_EXPORT BOOL DSHHarnessIsSupportedModel(id _Nullable value);
 
 /// "dsh" | "claude-code" | "codex" | "glm".

@@ -1,6 +1,10 @@
 import { ChatComposer } from '../components/ChatComposer';
 import { EmptyChat } from '../components/EmptyChat';
 import { HarnessPicker } from '../components/HarnessPicker';
+import {
+  ProjectReviewPreview,
+  type ProjectReviewPreviewProps,
+} from '../components/ProjectsSurface';
 import { BUILTIN_HARNESSES } from '../harness/builtins';
 import { QuestionComposer } from '../components/QuestionComposer';
 import { RecoveryNotice } from '../components/RecoveryNotice';
@@ -13,6 +17,7 @@ import React, { useRef, useState } from 'react';
 import { Pressable, ScrollView, StyleSheet, Text, View } from 'react-native';
 
 import { MessageList, type DisplayMessage } from '../components/MessageList';
+import { projectToolActivity } from '../components/toolActivityProjection';
 import type { ApprovalRequestSpec } from '../agent/AgentApprovals';
 import { DEFAULT_APPROVAL_TIMEOUT_MS } from '../agent/AgentApprovals';
 import {
@@ -24,7 +29,11 @@ import {
   AppPresentationProvider,
   useAppPresentation,
 } from '../presentation/AppPresentation';
-import type { AgentConversationGrantV2 } from '../state';
+import type {
+  AgentConversationGrantV2,
+  PersistedSessionEventV3,
+} from '../state';
+import type { ProjectDiff, ProjectGitStatus } from '../native/LocalProjects';
 
 /**
  * Launch-environment gated UI preview (DSH_UI_PREVIEW). It renders the
@@ -39,6 +48,8 @@ export const UI_PREVIEW_KINDS = [
   'approval-batch',
   'policy-panel',
   'message-list',
+  'tool-activity',
+  'project-review',
   'recovery-zh',
   'recovery-en',
   'approval-long-zh',
@@ -174,6 +185,12 @@ function UIPreviewContent({ kind }: { kind: UIPreviewKind }) {
         <RecoveryPreview locale={kind === 'recovery-zh' ? 'zh-CN' : 'en-US'} />
       ) : kind === 'message-list' ? (
         <MessageListPreview />
+      ) : kind === 'tool-activity' ? (
+        <ToolActivityPreview />
+      ) : kind === 'project-review' ? (
+        <View style={styles.previewSurfaceWide}>
+          <ProjectReviewPreview {...PROJECT_REVIEW_PREVIEW} />
+        </View>
       ) : kind === 'policy-panel' ? (
         <AgentPolicySheet
           budget={AGENT_POLICY_DEFAULT_BUDGET}
@@ -412,7 +429,102 @@ function MessageListPreview() {
   );
 }
 
+function ToolActivityPreview() {
+  const [phase, setPhase] = useState<'running' | 'completed' | 'cancelled'>('running');
+  const attemptId = 'preview-attempt';
+  const common = {
+    schema_version: 2 as const,
+    attempt_id: attemptId,
+    round_index: 1,
+    arguments_sha256: null,
+    result_sha256: null,
+    approval_reference: null,
+    created_at: '2026-09-09T00:00:00.000Z',
+  };
+  const callEvent: PersistedSessionEventV3 = {
+    ...common, event_id: 'preview-call-event', seq: 1,
+    kind: 'tool_call', call_id: 'preview-call', safe_summary_key: 'agent.read_file',
+    status: 'running', failure_code: null,
+  };
+  const resultEvent: PersistedSessionEventV3 = {
+    ...common, event_id: 'preview-result-event', seq: 2,
+    kind: 'tool_result', call_id: 'preview-call', safe_summary_key: 'agent.read_file',
+    status: 'ok', failure_code: null, created_at: '2026-09-09T00:00:00.240Z',
+  };
+  const cancelEvent: PersistedSessionEventV3 = {
+    ...common, event_id: 'preview-cancel-event', seq: 2,
+    kind: 'cancel', call_id: null, safe_summary_key: null,
+    status: 'cancelled', failure_code: 'E_AGENT_CANCELLED', approval_reference: 'preview-cancel',
+  };
+  const events: PersistedSessionEventV3[] = [
+    callEvent,
+    ...(phase === 'running' ? [] : [phase === 'completed' ? resultEvent : cancelEvent]),
+  ];
+  const blocks = projectToolActivity(events, attemptId);
+  return (
+    <View style={styles.previewColumn}>
+      <View style={styles.previewControls}>
+        <Pressable onPress={() => setPhase('completed')}><Text>Finish tool</Text></Pressable>
+        <Pressable onPress={() => setPhase('cancelled')}><Text>Cancel tool</Text></Pressable>
+        <Text>assistantMessageId: null · {phase}</Text>
+      </View>
+      <MessageList
+        messages={[
+          { id: 'preview-user', role: 'user', text: 'Inspect the selected file.' },
+          { id: 'preview-assistant', role: 'assistant', text: phase === 'running' ? '' : 'Tool activity settled safely.', blocks },
+        ]}
+        autoExpandTools
+      />
+    </View>
+  );
+}
+
+const PROJECT_REVIEW_PREVIEW: ProjectReviewPreviewProps = {
+  status: {
+    schema_version: 1,
+    project_id: 'preview-project',
+    branch: 'main',
+    head_oid: '0123456789abcdef0123456789abcdef01234567',
+    clean: false,
+    has_conflicts: false,
+    ahead: 0,
+    behind: 0,
+    entries: [
+      { path: 'README.md', index_status: 'modified', worktree_status: 'modified', conflicted: false },
+      { path: 'docs/very-long-file-name-that-needs-horizontal-review.md', index_status: 'modified', worktree_status: 'modified', conflicted: false },
+    ],
+  } satisfies ProjectGitStatus,
+  diff: {
+    schema_version: 1,
+    project_id: 'preview-project',
+    staged: false,
+    truncated: false,
+    files: [
+      { path: 'README.md', status: 'modified', additions: 2, deletions: 1 },
+      { path: 'docs/very-long-file-name-that-needs-horizontal-review.md', status: 'modified', additions: 3, deletions: 2 },
+    ],
+    patch: [
+      'diff --git a/README.md b/README.md',
+      '@@ -1,3 +1,4 @@',
+      ' # Rish',
+      '-Old preview note',
+      '+Updated preview note',
+      '+Two files are available in this fixture.',
+      '',
+      'diff --git a/docs/very-long-file-name-that-needs-horizontal-review.md b/docs/very-long-file-name-that-needs-horizontal-review.md',
+      '@@ -1,3 +1,4 @@',
+      ' # Review fixture',
+      '-short line',
+      '+This intentionally long changed line remains intact for horizontal scrolling in the read-only review panel.',
+      '+The file selection is exact and local to this fixture.',
+    ].join('\n'),
+  } satisfies ProjectDiff,
+};
+
 const styles = StyleSheet.create({
   root: { flex: 1, alignItems: 'center', justifyContent: 'flex-start' },
   caption: { marginTop: 64, fontSize: 11 },
+  previewColumn: { flex: 1, alignSelf: 'stretch' },
+  previewSurfaceWide: { flex: 1, width: '100%', alignSelf: 'stretch' },
+  previewControls: { flexDirection: 'row', gap: 18, padding: 14, alignItems: 'center' },
 });

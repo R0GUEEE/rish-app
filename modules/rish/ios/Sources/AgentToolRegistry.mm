@@ -13,6 +13,10 @@ static NSArray<NSDictionary *> *DSHAgentNativeToolDescriptors(void) {
     // are required to build the provider request/digest, but are never
     // copied into the safe registry projection or an RN result.
     descriptors = @[
+#if DEBUG
+      @{ @"schema_version": @1, @"name": @"start_guest_cgi", @"required_capability": @"guest_service", @"effect": @"guest_service", @"safe_summary_key": @"agent.start_guest_cgi", @"parameters": @{ @"type": @"object", @"properties": @{ @"index_path": @{ @"type": @"string", @"max_utf8_bytes": @1024 }, @"index_sha256": @{ @"type": @"string", @"max_utf8_bytes": @64 }, @"backend_path": @{ @"type": @"string", @"max_utf8_bytes": @1024 }, @"backend_sha256": @{ @"type": @"string", @"max_utf8_bytes": @64 }, @"initial_data_path": @{ @"type": @[ @"string", @"null" ], @"max_utf8_bytes": @1024 }, @"initial_data_sha256": @{ @"type": @[ @"string", @"null" ], @"max_utf8_bytes": @64 } }, @"required": @[ @"index_path", @"index_sha256", @"backend_path", @"backend_sha256", @"initial_data_path", @"initial_data_sha256" ] } },
+      @{ @"schema_version": @1, @"name": @"stop_guest_cgi", @"required_capability": @"guest_service", @"effect": @"guest_service", @"safe_summary_key": @"agent.stop_guest_cgi", @"parameters": @{ @"type": @"object", @"properties": @{ @"service_id": @{ @"type": @"string", @"max_utf8_bytes": @36 } }, @"required": @[ @"service_id" ] } },
+#endif
       @{
         @"schema_version" : @1,
         @"name" : @"git_commit",
@@ -119,9 +123,9 @@ static NSDictionary *DSHAgentNativeDescriptorForName(NSString *name) {
 
 static BOOL DSHAgentRegistryCapabilitySet(id value,
                                           NSSet<NSString *> **setOut) {
-  if (![value isKindOfClass:NSArray.class] || [value count] > 5) return NO;
+  if (![value isKindOfClass:NSArray.class] || [value count] > 6) return NO;
   NSSet *allowed = [NSSet setWithArray:@[
-    @"file_read", @"file_write", @"git_status", @"git_commit", @"git_push",
+    @"file_read", @"file_write", @"git_status", @"git_commit", @"git_push", @"guest_service",
   ]];
   NSMutableSet *set = [NSMutableSet set];
   for (id item in value) {
@@ -143,6 +147,7 @@ static NSString *DSHAgentRegistryAccessForName(NSString *name,
     @"git_status" : @"git_status",
     @"git_commit" : @"git_commit",
     @"git_push" : @"git_push",
+    @"start_guest_cgi": @"guest_service", @"stop_guest_cgi": @"guest_service",
   };
   NSString *capability = required[name];
   if (capability == nil || ![capabilities containsObject:capability] ||
@@ -188,7 +193,7 @@ static NSDictionary *DSHAgentDurableDenyProjection(NSString *name) {
 
 static BOOL DSHAgentKnownToolName(NSString *name) {
   return [@[ @"list_dir", @"read_file", @"write_file", @"git_status",
-             @"git_commit", @"git_push" ] containsObject:name];
+             @"git_commit", @"git_push", @"start_guest_cgi", @"stop_guest_cgi" ] containsObject:name];
 }
 
 static BOOL DSHAgentRegistryShape(NSDictionary *registry,
@@ -198,10 +203,10 @@ static BOOL DSHAgentRegistryShape(NSDictionary *registry,
       !DSHAgentExactDictionaryKeys(registry, @[
         @"schema_version", @"registry_version", @"toolset_sha256", @"tools",
       ]) || ![registry[@"schema_version"] isEqual:@2] ||
-      ![registry[@"registry_version"] isEqual:@1] ||
+      ![registry[@"registry_version"] isEqual:@2] ||
       !DSHAgentCanonicalSHA256(registry[@"toolset_sha256"]) ||
       ![registry[@"tools"] isKindOfClass:NSArray.class] ||
-      [registry[@"tools"] count] > 6 ||
+      [registry[@"tools"] count] > 8 ||
       ![DSHAgentRootResolver validateAgentRootProjection:root error:error]) {
     if (error != nullptr && *error == nil) {
       DSHSetAgentNativeStoreError(error, DSHAgentNativeStoreErrorInvalidArgument);
@@ -255,11 +260,11 @@ static BOOL DSHAgentRegistryShape(NSDictionary *registry,
     _nativeDescriptors = [DSHAgentNativeToolDescriptors() copy];
     NSError *error = nil;
     NSData *canonical = DSHAgentCanonicalJSON(@{
-      @"registry_version" : @1,
+      @"registry_version" : @2,
       @"tools" : _nativeDescriptors,
     }, &error);
     _toolsetSHA256 = DSHAgentHJ(@"agent-toolset", @{
-      @"registry_version" : @1,
+      @"registry_version" : @2,
       @"tools" : _nativeDescriptors,
     }, &error);
     if (canonical == nil || !DSHAgentCanonicalSHA256(_toolsetSHA256)) {
@@ -299,7 +304,7 @@ static BOOL DSHAgentRegistryShape(NSDictionary *registry,
   }];
   NSDictionary *registry = @{
     @"schema_version" : @2,
-    @"registry_version" : @1,
+    @"registry_version" : @2,
     @"toolset_sha256" : self.toolsetSHA256,
     @"tools" : [tools copy],
   };

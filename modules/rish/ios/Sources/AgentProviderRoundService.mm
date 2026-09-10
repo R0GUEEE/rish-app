@@ -4,6 +4,11 @@
 #import "DSHCompletionV2.h"
 #import "DSHWorkspaceCanonical.h"
 #import "RishHarnessCatalog.h"
+#import "SessionWorkspaceCoordinator.h"
+
+#if DEBUG
+#import <os/log.h>
+#endif
 
 @interface DSHAgentProviderRoundService ()
 @property(nonatomic, strong, readwrite) DSHAgentNativeWAL *wal;
@@ -18,6 +23,7 @@
 @property(nonatomic, copy) DSHAgentProviderRoundVisibleHistoryProvider visibleHistoryProvider;
 @property(nonatomic, copy) DSHAgentProviderRoundContextReceiptProvider contextReceiptProvider;
 @property(nonatomic, strong) NSMutableDictionary<NSString *, DSHAgentProviderRoundContext *> *contexts;
+@property(nonatomic, strong) NSMutableDictionary<NSString *, DSHCompletionProviderTransport *> *contextTransports;
 - (nullable NSDictionary *)commitStartedOperationForRequest:(NSDictionary *)request
                                                  requestSHA:(NSString *)requestSHA
                                                        row:(nullable NSDictionary *)row
@@ -137,6 +143,7 @@
     _visibleHistoryProvider = [visibleHistoryProvider copy];
     _contextReceiptProvider = [contextReceiptProvider copy];
     _contexts = [NSMutableDictionary dictionary];
+    _contextTransports = [NSMutableDictionary dictionary];
   }
   return self;
 }
@@ -146,11 +153,14 @@
   if (rawHarness != nil && ![rawHarness isKindOfClass:NSString.class]) return nil;
   NSString *harnessId = rawHarness ?: @"dsh";
   if (![DSHHarnessIdForModel(request[@"model"]) isEqual:harnessId]) return nil;
-  DSHCompletionProviderTransport *selected = nil;
-  if ([harnessId isEqualToString:@"dsh"]) selected = self.transport;
-  else if ([harnessId isEqualToString:@"claude-code"]) selected = self.claudeTransport;
-  else if ([harnessId isEqualToString:@"codex"]) selected = self.codexTransport;
-  else if ([harnessId isEqualToString:@"glm"]) selected = self.glmTransport;
+  DSHCompletionProviderTransport *selected = self.transportResolver == nil
+      ? nil : self.transportResolver(harnessId);
+  if (self.transportResolver == nil) {
+    if ([harnessId isEqualToString:@"dsh"]) selected = self.transport;
+    else if ([harnessId isEqualToString:@"claude-code"]) selected = self.claudeTransport;
+    else if ([harnessId isEqualToString:@"codex"]) selected = self.codexTransport;
+    else if ([harnessId isEqualToString:@"glm"]) selected = self.glmTransport;
+  }
   if (selected == nil ||
       ![[selected providerHarnessId] isEqual:harnessId] ||
       ![selected providerSupportsModel:request[@"model"]]) return nil;
@@ -805,9 +815,17 @@
   NSError *credentialError = nil;
   NSUInteger credentialGeneration = 0;
   NSString *credential = nil;
+  BOOL transportCurrent = YES;
+  if (self.transportResolver != nil) {
+    @try {
+      transportCurrent = self.transportResolver(harnessId) == providerTransport;
+    } @catch (__unused NSException *exception) {
+      transportCurrent = NO;
+    }
+  }
   @try {
-    credential = self.credentialProvider == nil
-        ? nil : self.credentialProvider(harnessId, &credentialGeneration);
+    credential = transportCurrent && self.credentialProvider != nil
+        ? self.credentialProvider(harnessId, &credentialGeneration) : nil;
   } @catch (__unused NSException *exception) {
     credential = nil;
   }
@@ -869,7 +887,10 @@
   context.locator = locator;
   context.cas = activeCAS;
   context.semaphore = semaphore;
-  if (contextKey != nil) @synchronized (self) { self.contexts[contextKey] = context; }
+  if (contextKey != nil) @synchronized (self) {
+    self.contexts[contextKey] = context;
+    self.contextTransports[contextKey] = providerTransport;
+  }
   __block BOOL redirected = NO;
   NSURLSessionDataTask *task = [providerTransport
       startRequestWithSchemaVersion:[request[@"transport_schema_version"] integerValue]
@@ -880,7 +901,14 @@
                          credential:credential
                      requestedModel:request[@"model"]
                       thinkingMode:request[@"thinking_mode"]
-       credentialGenerationIsCurrent:^BOOL(NSUInteger expectedGeneration) {
+         credentialGenerationIsCurrent:^BOOL(NSUInteger expectedGeneration) {
+         if (self.transportResolver != nil) {
+           @try {
+             if (self.transportResolver(harnessId) != providerTransport) return NO;
+           } @catch (__unused NSException *exception) {
+             return NO;
+           }
+         }
          NSUInteger currentGeneration = 0;
          NSString *currentCredential = nil;
          @try {
@@ -895,9 +923,14 @@
                            bodyData:bodyData
                        visibleHistory:visibleHistory
                            modelInput:modelInput
-                             bindTask:^BOOL(NSURLSessionDataTask *candidate) {
-                               return candidate != nil;
+                           bindTask:^BOOL(NSURLSessionDataTask *candidate) {
+                             if (candidate == nil) return NO;
+                             @synchronized (context) {
+                               if (context.finished) return NO;
+                               context.task = candidate;
                              }
+                             return YES;
+                           }
                            claimRound:^BOOL(BOOL *redirectedOut) {
                              NSDictionary *roundQuery = [self.rounds
                                  queryAgentRoundV3WithLocator:locator error:nil];
@@ -928,12 +961,47 @@
                           completion:^(NSDictionary *result, NSString *errorCode) {
                             DSHProviderFinishContext(context, result, errorCode);
                           }];
-  @synchronized (context) { context.task = task; }
-  if (context.finished && task != nil) [providerTransport cancelTask:task];
+  if (task != nil) {
+    BOOL shouldCancel = NO;
+    @synchronized (context) {
+      if (!context.finished && context.task == nil) {
+        context.task = task;
+      } else if (context.finished || context.task != task) {
+        shouldCancel = YES;
+      }
+    }
+    if (shouldCancel) [providerTransport cancelTask:task];
+  }
+  NSTimeInterval waitStarted = NSProcessInfo.processInfo.systemUptime;
   dispatch_time_t deadline = dispatch_time(DISPATCH_TIME_NOW, 120LL * NSEC_PER_SEC);
   BOOL signaled = dispatch_semaphore_wait(semaphore, deadline) == 0;
-  if (!signaled && task != nil) [providerTransport cancelTask:task];
-  if (contextKey != nil) @synchronized (self) { [self.contexts removeObjectForKey:contextKey]; }
+#if DEBUG
+  if (!signaled) {
+    NSTimeInterval waitFinished = NSProcessInfo.processInfo.systemUptime;
+    NSInteger elapsedMs = (NSInteger)floor(MAX(0, waitFinished - waitStarted) * 1000.0 + 0.000001);
+    // The transport callback owns request-level diagnostics. This branch is
+    // only the bounded round wait timeout, so it emits one value-free marker
+    // and never duplicates provider response/error text.
+    os_log_info(OS_LOG_DEFAULT,
+                "agent_round phase=agent_wait harness=%{public}@ schema=%{public}ld elapsed_ms=%{public}ld error_kind=timeout error_code=0 http_status=-1 callback_signaled=false",
+                harnessId, [request[@"transport_schema_version"] longValue], elapsedMs);
+  }
+#endif
+  if (!signaled) {
+    NSURLSessionDataTask *taskToCancel = nil;
+    @synchronized (context) {
+      if (!context.finished) {
+        context.finished = YES;
+        context.providerErrorCode = @"E_COMPLETION_TIMEOUT";
+      }
+      taskToCancel = context.task;
+    }
+    if (taskToCancel != nil) [providerTransport cancelTask:taskToCancel];
+  }
+  if (contextKey != nil) @synchronized (self) {
+    [self.contexts removeObjectForKey:contextKey];
+    [self.contextTransports removeObjectForKey:contextKey];
+  }
   [self.wal unregisterNativeTaskId:nativeTaskId error:nil];
   NSDictionary *providerResult = nil;
   NSString *providerErrorCode = nil;
@@ -955,6 +1023,12 @@
       [providerResult[@"request_body_sha256"] isEqual:actualBodyDigest];
   if (!signaled || providerResult == nil || providerErrorCode != nil ||
       !providerCorrelationMatches || !providerDigestsMatch) {
+#if DEBUG
+    NSSet *knownProviderErrors = [NSSet setWithArray:@[@"E_COMPLETION_RESPONSE_MODEL", @"E_COMPLETION_MODEL_MISMATCH", @"E_COMPLETION_PROVIDER_RESPONSE_ID", @"E_COMPLETION_RESPONSE_JSON", @"E_COMPLETION_EMPTY_RESPONSE", @"E_COMPLETION_TOOL_CALL_INVALID", @"E_COMPLETION_FINISH_RELATION", @"E_COMPLETION_HTTP_STATUS", @"E_COMPLETION_HTTP_429", @"E_COMPLETION_CREDENTIAL_CHANGED", @"E_COMPLETION_REDIRECT", @"E_AGENT_CANCELLED"]];
+    NSString *safeProviderError = providerErrorCode == nil ? @"none" : ([knownProviderErrors containsObject:providerErrorCode] ? providerErrorCode : @"other");
+    os_log_error(OS_LOG_DEFAULT, "agent_round_validation signaled=%{public}d result_present=%{public}d provider_error=%{public}@ correlation_matches=%{public}d digests_match=%{public}d", signaled, providerResult != nil, safeProviderError, providerCorrelationMatches, providerDigestsMatch);
+#endif
+
     NSDictionary *reconciled = [self.rounds reconcileAgentRoundV3OwnerLossWithLocator:
         locator expectedCAS:effectiveCAS error:&operationError];
     NSDictionary *row = reconciled[@"row"] ?: persistedRow;
@@ -1130,6 +1204,21 @@
     if (error != nullptr) *error = operationError;
     return nil;
   }
+  // Presentation retention is best effort and independent of authority.
+  // Only the already validated, successfully committed assistant is copied.
+  @try {
+    [self.preparedStore.sessionSnapshotStore.coordinator performSync:^{
+      NSDictionary *loaded = [self.preparedStore.sessionSnapshotStore loadSessionSnapshotWithError:nil];
+      NSData *sessionBytes = [loaded[@"session_json"] isKindOfClass:NSString.class] ? [loaded[@"session_json"] dataUsingEncoding:NSUTF8StringEncoding] : nil;
+      NSDictionary *session = sessionBytes ? [NSJSONSerialization JSONObjectWithData:sessionBytes options:0 error:nil] : nil;
+      BOOL ownsAttempt = NO;
+      for (NSDictionary *conversation in session[@"conversations"]) {
+        if (![conversation[@"id"] isEqual:request[@"conversation_id"]]) continue;
+        for (NSDictionary *attempt in conversation[@"attempts"]) if ([attempt[@"attempt_id"] isEqual:request[@"attempt_id"]]) ownsAttempt = YES;
+      }
+      if (ownsAttempt) [self.transcripts cacheRoundPresentationForRequest:request message:nativeMessage kind:terminalKind];
+    }];
+  } @catch (__unused NSException *exception) {}
   NSDictionary *after = completed[@"transcript"];
   NSDictionary *publicReceipt = DSHProviderPublicReceipt(providerResult, request,
                                                           providerRequestId,
@@ -1351,12 +1440,7 @@
   DSHAgentProviderRoundContext *context = nil;
   if (key != nil) @synchronized (self) { context = self.contexts[key]; }
   if (context != nil) {
-    if (context.task != nil) {
-      [self.transport cancelTask:context.task];
-      [self.claudeTransport cancelTask:context.task];
-      [self.codexTransport cancelTask:context.task];
-      [self.glmTransport cancelTask:context.task];
-    }
+    NSURLSessionDataTask *task = nil;
     BOOL signal = NO;
     @synchronized (context) {
       if (!context.finished) {
@@ -1364,6 +1448,12 @@
         context.providerErrorCode = @"E_AGENT_CANCELLED";
         signal = YES;
       }
+      task = context.task;
+    }
+    if (task != nil) {
+      DSHCompletionProviderTransport *selected = nil;
+      @synchronized (self) { selected = self.contextTransports[key]; }
+      [selected cancelTask:task];
     }
     if (signal && context.semaphore != nil) dispatch_semaphore_signal(context.semaphore);
   }

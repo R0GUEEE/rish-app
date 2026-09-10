@@ -666,6 +666,59 @@ test('forwards only the high-level operation and a defensive safe request', asyn
   expect(native.prepare_agent_attempt).toHaveBeenCalledWith(prepareRequest);
 });
 
+test('accepts an explicitly versioned DEBUG v2 registry projection', async () => {
+  native.prepare_agent_attempt.mockResolvedValueOnce({
+    ...prepareResult,
+    attempt: {
+      ...attempt,
+      registry: {
+        ...registry,
+        registry_version: 2,
+      },
+    },
+  });
+  await expect(
+    AgentRuntime.prepareAgentAttempt(prepareRequest),
+  ).resolves.toMatchObject({
+    attempt: { registry: { registry_version: 2 } },
+  });
+});
+
+test('rejects CGI descriptors inside a legacy v1 registry', async () => {
+  native.prepare_agent_attempt.mockResolvedValueOnce({
+    ...prepareResult,
+    attempt: {
+      ...attempt,
+      root: { ...attempt.root, capabilities: ['guest_service'] },
+      registry: {
+        ...registry,
+        tools: [{
+          schema_version: 2,
+          name: 'start_guest_cgi',
+          safe_summary_key: 'agent.start_guest_cgi',
+          access: 'conversation_confirm',
+        }],
+      },
+    },
+  });
+  await expect(
+    AgentRuntime.prepareAgentAttempt(prepareRequest),
+  ).rejects.toMatchObject({ code: 'E_AGENT_LEDGER' });
+});
+
+test('reopens a historical v1 session projection without upgrading its registry', async () => {
+  native.query_agent_attempt.mockResolvedValueOnce({
+    schema_version: 2,
+    status: 'active',
+    attempt,
+  });
+  await expect(
+    AgentRuntime.queryAgentAttempt(queryAttemptRequest),
+  ).resolves.toMatchObject({
+    attempt: { registry: { registry_version: 1 } },
+  });
+});
+
 test('maps every approved high-level method to its snake-case selector', async () => {
   native.complete_agent_round_v2.mockResolvedValueOnce(completedRoundResult);
   native.prepare_agent_tool_batch.mockResolvedValueOnce(batchResult);

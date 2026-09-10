@@ -12,6 +12,7 @@ internal class AndroidRuntimeState private constructor(val app: Application) {
     val configurations = AndroidProviderConfiguration(app)
     val sessions = AndroidSessionStore(app)
     val transport = AndroidModelTransport(credentials, configurations)
+    val subscriptionAuth = AndroidSubscriptionAuthManager(app)
     val io = Executors.newFixedThreadPool(2)
     @Volatile var selectedSlot = "DEEPSEEK_API_KEY"
     @Volatile var restored = false

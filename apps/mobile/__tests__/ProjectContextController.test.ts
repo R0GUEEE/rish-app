@@ -2367,9 +2367,9 @@ describe('ProjectContextController V1', () => {
       harness.controller.prepare(actionToken(harness)),
     ).resolves.toMatchObject({
       status: 'blocked',
-      code: 'E_CONTEXT_REQUEST_INVALID',
+      code: 'E_CONTEXT_RESULT_INVALID',
     });
-    expect(harness.native.prepare).not.toHaveBeenCalled();
+    expect(harness.native.prepare).toHaveBeenCalledWith(expect.objectContaining({ selected_paths: [] }));
   });
 
   test('recovers prepared persistence responsibility before attach after owner drift', async () => {

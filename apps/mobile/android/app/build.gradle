@@ -7,6 +7,16 @@ apply plugin: "com.facebook.react"
  * By default you don't need to apply any configuration, just uncomment the lines you need.
  */
 def rishStandalone = providers.gradleProperty("rishStandalone").orNull == "true"
+// Official subscription CLIs are intentionally opt-in. The preparation
+// script stages unmodified aarch64 binaries under arm64-v8a; no executable is
+// checked into this repository and a normal build remains a lite build.
+def officialCliDirProperty = providers.gradleProperty("rishOfficialCliDir").orNull
+def officialCliDir = officialCliDirProperty == null ? null : file(officialCliDirProperty)
+def officialCliEnabled = officialCliDir != null
+def officialCliProbeEnabled = officialCliEnabled && providers.gradleProperty("rishOfficialCliProbe").orNull == "true"
+if (officialCliDir != null && !officialCliDir.isDirectory()) {
+    throw new GradleException("rishOfficialCliDir does not exist: ${officialCliDir}")
+}
 
 react {
     if (rishStandalone) debuggableVariants = []
@@ -81,12 +91,32 @@ android {
     compileSdk rootProject.ext.compileSdkVersion
 
     namespace "dev.zseven.dsh.mobile"
+    if (officialCliDir != null) {
+        sourceSets {
+            main {
+                // AGP extracts these files to ApplicationInfo.nativeLibraryDir.
+                // The preparation script names executables as .so so AGP keeps
+                // them in the native-lib set; bytes are copied unchanged.
+                jniLibs.srcDirs = [officialCliDir]
+            }
+        }
+    }
+    packagingOptions {
+        jniLibs {
+            // The CLI is an executable launched by ProcessBuilder, so it must
+            // be a real file in nativeLibraryDir rather than mmap'd from APK.
+            useLegacyPackaging = true
+            keepDebugSymbols += ["**/libcodex.so", "**/libclaude_code.so", "**/libmusl_loader.so"]
+        }
+    }
     testBuildType project.findProperty("rishTestBuildType") ?: "debug"
     defaultConfig {
         applicationId "dev.zseven.dsh.mobile"
         minSdkVersion rootProject.ext.minSdkVersion
         targetSdkVersion rootProject.ext.targetSdkVersion
         buildConfigField "boolean", "RISH_STANDALONE", rishStandalone.toString()
+        buildConfigField "boolean", "RISH_OFFICIAL_CLI_ENABLED", officialCliEnabled.toString()
+        manifestPlaceholders.officialCliProbeEnabled = officialCliProbeEnabled
         versionCode 1
         versionName "1.0"
         // Phase-1 Android bring-up: instrumented smoke test runner.

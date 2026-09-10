@@ -49,7 +49,7 @@ function loadFixture(file: string): {
   readonly dialect: string;
   readonly cases: readonly StreamCase[];
 } {
-  const path = nodePath.resolve(__dirname, '../ios/DSHMobileTests/Fixtures', file);
+  const path = nodePath.resolve(__dirname, '../ios/RishTests/Fixtures', file);
   return JSON.parse(nodeFs.readFileSync(path, 'utf8'));
 }
 

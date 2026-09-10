@@ -45,6 +45,25 @@ import { AppIcon } from './AppIcon';
 import { SlidingSurface } from './SlidingSurface';
 import { ProjectViewTasks, type ProjectViewTask } from './projectViewTasks';
 import type { ProjectCloneOperation } from '../native/LocalProjects';
+import { type ProjectSSHCredentialStatus } from '../native/LocalProjects';
+
+export function sshEndpoint(value: string): { host: string; port: number; username: string } | null {
+  const text = value.trim();
+  if (/[^\x20-\x7e]/.test(text)) return null;
+  try {
+    const url = /^ssh:\/\//iu.test(text) ? new URL(text) : null;
+    if (url) {
+      if (url.protocol.toLowerCase() !== 'ssh:' || url.password || url.search || url.hash || !url.hostname || url.username.length === 0) return null;
+      const port = Number(url.port || 22); if (!Number.isInteger(port) || port < 1 || port > 65535) return null;
+      return { host: url.hostname.toLowerCase(), port, username: decodeURIComponent(url.username) };
+    }
+    if (/^[a-z][a-z0-9+.-]*:\/\//iu.test(text)) return null;
+    const match = /^([^@/:\s]+)@([^/:\s]+):(.+)$/.exec(text);
+    if (!match || match[3]!.length === 0 || /[?#]/.test(match[3]!)) return null;
+    return { host: match[2]!.toLowerCase(), port: 22, username: match[1]! };
+  } catch { return null; }
+}
+function sshProfileId(endpoint: { host: string; port: number; username: string }): string { return `rish-ssh-${endpoint.username}@${endpoint.host}-${endpoint.port}`; }
 
 function cloneIsActive(operation: ProjectCloneOperation | null) {
   return (
@@ -57,6 +76,13 @@ type CreateMode = 'create' | 'clone' | null;
 type ProjectTab = 'files' | 'changes';
 type DiffMode = 'staged' | 'unstaged';
 
+export type ProjectReviewPreviewProps = {
+  status: ProjectGitStatus | null;
+  diff: ProjectDiff;
+  diffPage?: ProjectDiffPage | null;
+  diffMode?: DiffMode;
+};
+
 function errorText(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
 }
@@ -64,6 +90,74 @@ function errorText(error: unknown): string {
 function hasStatus(value: string): boolean {
   const normalized = value.trim().toLocaleLowerCase();
   return !['', '.', 'unmodified', 'current', 'none'].includes(normalized);
+}
+
+function gitPathHeaderVariants(path: string): string[] {
+  const bytes: number[] = [];
+  try {
+    const encoded = encodeURIComponent(path);
+    for (let index = 0; index < encoded.length; index += 1) {
+      if (encoded[index] === '%') {
+        bytes.push(Number.parseInt(encoded.slice(index + 1, index + 3), 16));
+        index += 2;
+      } else bytes.push(encoded.charCodeAt(index));
+    }
+  } catch {
+    return [`a/${path}`, `b/${path}`];
+  }
+  let quoted = '"';
+  for (const byte of bytes) {
+    if (byte === 0x22 || byte === 0x5c) quoted += `\\${String.fromCharCode(byte)}`;
+    else if (byte >= 0x20 && byte <= 0x7e) quoted += String.fromCharCode(byte);
+    else quoted += `\\${byte.toString(8).padStart(3, '0')}`;
+  }
+  quoted += '"';
+  return [`a/${path}`, `b/${path}`, `"a/${quoted.slice(1)}`, `"b/${quoted.slice(1)}`];
+}
+
+function patchSectionMatchesPath(section: string, path: string): boolean {
+  const header = section.split('\n', 1)[0] ?? '';
+  const rest = header.startsWith('diff --git ')
+    ? header.slice('diff --git '.length)
+    : '';
+  const tokens: string[] = [];
+  for (let index = 0; index < rest.length;) {
+    while (/\s/u.test(rest[index] ?? '')) index += 1;
+    if (index >= rest.length) break;
+    const start = index;
+    if (rest[index] === '"') {
+      index += 1;
+      let escaped = false;
+      while (index < rest.length) {
+        const character = rest[index] ?? '';
+        index += 1;
+        if (escaped) escaped = false;
+        else if (character === '\\') escaped = true;
+        else if (character === '"') break;
+      }
+    } else {
+      while (index < rest.length && !/\s/u.test(rest[index] ?? '')) index += 1;
+    }
+    tokens.push(rest.slice(start, index));
+  }
+  return gitPathHeaderVariants(path).some(variant => tokens.includes(variant));
+}
+
+function patchForPath(patch: string, path: string): string | null {
+  const lines = patch.split('\n');
+  let start = -1;
+  for (let index = 0; index < lines.length; index += 1) {
+    const line = lines[index] ?? '';
+    if (!line.startsWith('diff --git ')) continue;
+    if (start !== -1) {
+      const section = lines.slice(start, index).join('\n');
+      if (patchSectionMatchesPath(section, path)) return section;
+    }
+    start = index;
+  }
+  if (start === -1) return null;
+  const section = lines.slice(start).join('\n');
+  return patchSectionMatchesPath(section, path) ? section : null;
 }
 
 function hasStagedChanges(status: ProjectGitStatus | null): boolean {
@@ -158,6 +252,8 @@ export function ProjectsSurface({
   onUnbindFromChat,
 }: Props) {
   const insets = useSafeAreaInsets();
+  const [containerWidth, setContainerWidth] = useState(0);
+  const wideLayout = containerWidth >= 900;
   const { colors, locale, preferences, t } = useAppPresentation();
   const styles = useMemo(() => createStyles(colors), [colors]);
   const [projects, setProjects] = useState<LocalProject[]>([]);
@@ -171,6 +267,7 @@ export function ProjectsSurface({
   const diffModeRef = useRef<DiffMode | null>(null);
   const [diffPage, setDiffPage] = useState<ProjectDiffPage | null>(null);
   const [pageHistory, setPageHistory] = useState<number[]>([]);
+  const [selectedDiffPath, setSelectedDiffPath] = useState<string | null>(null);
   const diffRevision = useRef(0);
   const diff = diffs[diffMode];
   const [credential, setCredential] = useState<ProjectCredentialStatus | null>(
@@ -181,6 +278,20 @@ export function ProjectsSurface({
   const [createMode, setCreateMode] = useState<CreateMode>(null);
   const [name, setName] = useState('');
   const [cloneUrl, setCloneUrl] = useState('');
+  const [sshCredential, setSshCredential] = useState<ProjectSSHCredentialStatus | null>(null);
+  const sshCredentialBusy = useRef(false);
+  const [sshCredentialBusyState, setSshCredentialBusyState] = useState(false);
+  const sshCredentialEpoch = useRef(0);
+  const [sshCredentialError, setSshCredentialError] = useState<string | null>(null);
+  useEffect(() => {
+    const endpoint = sshEndpoint(cloneUrl);
+    const epoch = ++sshCredentialEpoch.current;
+    setSshCredential(null); setSshCredentialError(null);
+    if (!endpoint) return () => { sshCredentialEpoch.current += 1; };
+    if (typeof LocalProjects.sshCredentialStatus !== 'function') return;
+    LocalProjects.sshCredentialStatus(sshProfileId(endpoint)).then(next => { if (epoch === sshCredentialEpoch.current && next !== null && next.profile_id === sshProfileId(endpoint) && next.host === endpoint.host && next.port === endpoint.port && next.username === endpoint.username) setSshCredential(next); }).catch(() => undefined);
+    return () => { sshCredentialEpoch.current += 1; };
+  }, [cloneUrl]);
   const [cloneOperation, setCloneOperation] =
     useState<ProjectCloneOperation | null>(null);
   const cloneOperationRef = useRef<ProjectCloneOperation | null>(null);
@@ -249,6 +360,7 @@ export function ProjectsSurface({
       diffRevision.current += 1;
       setDiffPage(null);
       setPageHistory([]);
+      setSelectedDiffPath(null);
       setCredential(null);
       setReceipt(null);
       setRemoteUrl(project?.origin_url ?? '');
@@ -309,6 +421,7 @@ export function ProjectsSurface({
       diffRevision.current += 1;
       setDiffPage(null);
       setPageHistory([]);
+      setSelectedDiffPath(null);
       const task = beginTask('detail');
       setError(null);
       try {
@@ -379,14 +492,14 @@ export function ProjectsSurface({
     (project: LocalProject) => {
       if (!tasks.visible || selectedRef.current !== null) return;
       selectView(project);
-      setTab('files');
+      setTab(wideLayout ? 'changes' : 'files');
       setNotice(null);
       setStatus(null);
       setDiffs({ staged: null, unstaged: null });
       setCredential(null);
       setRemoteUrl(project.origin_url ?? '');
     },
-    [selectView, tasks],
+    [selectView, tasks, wideLayout],
   );
 
   const applyCloneSnapshot = useCallback(
@@ -421,13 +534,13 @@ export function ProjectsSurface({
           setName('');
           setCloneUrl('');
           selectView(project);
-          setTab('files');
+          setTab(wideLayout ? 'changes' : 'files');
           setNotice(t('projects.clonedSuccess'));
         }
       }
       if (owner !== null) finishTask(owner);
     },
-    [finishTask, selectView, t, tasks],
+    [finishTask, selectView, t, tasks, wideLayout],
   );
 
   useEffect(() => {
@@ -508,7 +621,7 @@ export function ProjectsSurface({
           let operation = await LocalProjects.startClone(
             trimmedUrl,
             trimmedName.length === 0 ? undefined : trimmedName,
-            { httpsProxyUrl: preferences.gitHttpsProxyUrl },
+            { httpsProxyUrl: preferences.gitHttpsProxyUrl, ...(sshEndpoint(trimmedUrl) ? { sshProfileId: sshProfileId(sshEndpoint(trimmedUrl)!) } : {}) },
           );
           cloneOperationRef.current = operation;
           if (tasks.visible) applyCloneSnapshot(operation);
@@ -602,6 +715,7 @@ export function ProjectsSurface({
     diffRevision.current += 1;
     setDiffPage(null);
     setPageHistory([]);
+    setSelectedDiffPath(null);
   }, []);
 
   const reviewDiffPage = useCallback(
@@ -915,6 +1029,7 @@ export function ProjectsSurface({
       widthRatio={1}
     >
       <View
+        onLayout={event => setContainerWidth(event.nativeEvent.layout.width)}
         style={[
           styles.root,
           { paddingTop: insets.top + 8, paddingBottom: insets.bottom + 10 },
@@ -974,10 +1089,49 @@ export function ProjectsSurface({
           </Pressable>
         </View>
 
+        <View
+          style={selected !== null && wideLayout ? styles.wideBody : styles.body}
+        >
+          {selected !== null && wideLayout && (
+            <View style={styles.wideSidebar} testID="projects-wide-change-list">
+              <Text style={styles.wideSidebarTitle}>{t('projects.changes')}</Text>
+              <ScrollView contentContainerStyle={styles.wideSidebarList}>
+                {(diff?.files ?? []).length === 0 ? (
+                  <Text style={styles.cardBody}>{t('projects.diffUnavailable')}</Text>
+                ) : (
+                  (diff?.files ?? []).map(file => (
+                    <Pressable
+                      key={file.path}
+                      accessibilityRole="button"
+                      accessibilityLabel={file.path}
+                      accessibilityState={{ selected: selectedDiffPath === file.path }}
+                      onPress={() => {
+                        setSelectedDiffPath(file.path);
+                        setTab('changes');
+                      }}
+                      style={styles.wideSidebarRow}
+                    >
+                      <Text numberOfLines={2} style={styles.wideSidebarPath}>
+                        {file.path}
+                      </Text>
+                      <Text style={styles.additions}>+{file.additions}</Text>
+                      <Text style={styles.deletions}>−{file.deletions}</Text>
+                    </Pressable>
+                  ))
+                )}
+              </ScrollView>
+            </View>
+          )}
+          <View style={selected !== null && wideLayout ? styles.wideDetail : undefined}>
         {selected === null ? (
           <ProjectList
             busy={busy || startingClone || cloneIsActive(cloneOperation)}
             cloneUrl={cloneUrl}
+            sshCredential={sshCredential}
+            sshCredentialBusy={sshCredentialBusyState}
+            sshCredentialError={sshCredentialError}
+            sshReady={!sshEndpoint(cloneUrl) || sshCredential?.configured === true}
+            onConfigureSSH={async () => { const endpoint = sshEndpoint(cloneUrl); if (!endpoint || sshCredentialBusy.current || typeof LocalProjects.beginSSHCredentialImport !== 'function') return; const profileId = sshProfileId(endpoint); const epoch = ++sshCredentialEpoch.current; sshCredentialBusy.current = true; setSshCredentialBusyState(true); setSshCredentialError(null); try { const next = await LocalProjects.beginSSHCredentialImport(profileId, endpoint.host, endpoint.port, endpoint.username); if (epoch === sshCredentialEpoch.current) setSshCredential(next); } catch { if (epoch === sshCredentialEpoch.current) setSshCredentialError(t('projects.sshCredentialError')); } finally { sshCredentialBusy.current = false; setSshCredentialBusyState(false); } }}
             createMode={createMode}
             cloneOperation={cloneOperation}
             onCancelClone={cancelClone}
@@ -1019,6 +1173,8 @@ export function ProjectsSurface({
               diffPage={diffPage}
               pageHistory={pageHistory}
               onChooseDiffMode={chooseDiffMode}
+              selectedPath={selectedDiffPath}
+              onSelectPath={setSelectedDiffPath}
               onReviewPage={reviewDiffPage}
               status={status}
               styles={styles}
@@ -1155,6 +1311,8 @@ export function ProjectsSurface({
                 diffPage={diffPage}
                 pageHistory={pageHistory}
                 onChooseDiffMode={chooseDiffMode}
+                selectedPath={selectedDiffPath}
+                onSelectPath={setSelectedDiffPath}
                 onReviewPage={reviewDiffPage}
                 status={status}
                 styles={styles}
@@ -1397,6 +1555,8 @@ export function ProjectsSurface({
             )}
           </ScrollView>
         )}
+          </View>
+        </View>
 
         {(busy || error !== null || notice !== null) && (
           <View
@@ -1441,6 +1601,11 @@ function ProjectList({
   onCancelClone,
   busy,
   cloneUrl,
+  sshCredential,
+  sshCredentialBusy,
+  sshCredentialError,
+  sshReady,
+  onConfigureSSH,
   createMode,
   name,
   projects,
@@ -1455,6 +1620,11 @@ function ProjectList({
   onCancelClone: () => Promise<void>;
   busy: boolean;
   cloneUrl: string;
+  sshCredential: ProjectSSHCredentialStatus | null;
+  sshCredentialBusy: boolean;
+  sshCredentialError: string | null;
+  sshReady: boolean;
+  onConfigureSSH: () => Promise<void>;
   createMode: CreateMode;
   name: string;
   projects: LocalProject[];
@@ -1511,7 +1681,7 @@ function ProjectList({
           accessibilityLiveRegion="polite"
         >
           <Text style={styles.formHint}>{cloneOperation.name}</Text>
-          <Text style={styles.formHint}>
+                <Text style={styles.formHint}>
             {cloneOperation.cancel_requested && cloneIsActive(cloneOperation)
               ? t('projects.cloneCancelling')
               : t(`projects.clonePhase.${cloneOperation.phase}`)}
@@ -1578,8 +1748,14 @@ function ProjectList({
                 onChangeText={onChangeCloneUrl}
               />
               <Text style={styles.formHint}>
-                {t('projects.publicHttpsOnly')}
+                {sshEndpoint(cloneUrl) ? t('projects.sshCredentialHint') : t('projects.publicHttpsOnly')}
               </Text>
+              {sshEndpoint(cloneUrl) && (
+                <Pressable accessibilityRole="button" accessibilityLabel={t('projects.configureSSH')} disabled={sshCredentialBusy} onPress={() => onConfigureSSH().catch(() => undefined)} style={styles.formCancel}>
+                  <Text style={styles.formCancelText}>{sshCredentialBusy ? t('projects.sshConfiguring') : sshCredential?.configured ? t('projects.replaceSSH') : t('projects.configureSSH')}</Text>
+                </Pressable>
+              )}
+              {sshCredentialError !== null && <Text style={styles.formHint}>{sshCredentialError}</Text>}
             </>
           )}
           <View style={styles.formActions}>
@@ -1608,13 +1784,13 @@ function ProjectList({
                   busy ||
                   (createMode === 'create'
                     ? name.trim().length === 0
-                    : cloneUrl.trim().length === 0),
+                    : cloneUrl.trim().length === 0 || !sshReady),
               }}
               disabled={
                 busy ||
-                (createMode === 'create'
-                  ? name.trim().length === 0
-                  : cloneUrl.trim().length === 0)
+                  (createMode === 'create'
+                    ? name.trim().length === 0
+                    : cloneUrl.trim().length === 0 || !sshReady)
               }
               onPress={() => onSubmit(createMode).catch(() => undefined)}
               style={({ pressed }) => [
@@ -1690,6 +1866,8 @@ function ChangesPanel({
   diffMode,
   diffPage,
   pageHistory,
+  selectedPath,
+  onSelectPath,
   onChooseDiffMode,
   onReviewPage,
   busy,
@@ -1697,10 +1875,13 @@ function ChangesPanel({
   status,
   styles,
   onStageAll,
+  readOnly = false,
 }: {
   diffMode: DiffMode;
   diffPage: ProjectDiffPage | null;
   pageHistory: number[];
+  selectedPath: string | null;
+  onSelectPath: (path: string | null) => void;
   onChooseDiffMode: (mode: DiffMode) => void;
   onReviewPage: (
     offset: number,
@@ -1712,6 +1893,7 @@ function ChangesPanel({
   status: ProjectGitStatus | null;
   styles: ReturnType<typeof createStyles>;
   onStageAll: () => Promise<void>;
+  readOnly?: boolean;
 }) {
   const { t } = useAppPresentation();
   if (status?.clean) {
@@ -1736,7 +1918,7 @@ function ChangesPanel({
   }
   return (
     <View style={styles.card}>
-      {diffPage !== null && (
+      {!readOnly && diffPage !== null && (
         <Pressable
           accessibilityRole="button"
           accessibilityLabel={t('projects.backToChanges')}
@@ -1771,7 +1953,16 @@ function ChangesPanel({
       </View>
       <Text style={styles.cardBody}>{t(`projects.diffScope.${diffMode}`)}</Text>
       {(diffPage === null ? entries : []).map(entry => (
-        <View key={entry.path} style={styles.changeRow}>
+        <Pressable
+          key={entry.path}
+          accessibilityRole="button"
+          accessibilityLabel={entry.path}
+          onPress={() => onSelectPath(entry.path)}
+          style={[
+            styles.changeRow,
+            selectedPath === entry.path && styles.changeRowSelected,
+          ]}
+        >
           <View style={styles.flex}>
             <Text numberOfLines={1} style={styles.changePath}>
               {entry.path}
@@ -1795,18 +1986,27 @@ function ChangesPanel({
               ))}
             </View>
           </View>
-        </View>
+        </Pressable>
       ))}
       {shown !== null && shown.files.length > 0 && (
         <View style={styles.diffSummary}>
           {shown.files.map(file => (
-            <View key={file.path} style={styles.diffFileRow}>
+            <Pressable
+              key={file.path}
+              accessibilityRole="button"
+              accessibilityLabel={file.path}
+              onPress={() => onSelectPath(file.path)}
+              style={[
+                styles.diffFileRow,
+                selectedPath === file.path && styles.changeRowSelected,
+              ]}
+            >
               <Text numberOfLines={1} style={styles.diffFilePath}>
                 {file.path}
               </Text>
               <Text style={styles.additions}>+{file.additions}</Text>
               <Text style={styles.deletions}>−{file.deletions}</Text>
-            </View>
+            </Pressable>
           ))}
         </View>
       )}
@@ -1827,7 +2027,7 @@ function ChangesPanel({
           })}
         </Text>
       )}
-      {diffPage !== null && (
+      {!readOnly && diffPage !== null && (
         <View style={styles.formActions}>
           <Pressable
             accessibilityRole="button"
@@ -1873,7 +2073,7 @@ function ChangesPanel({
           </Pressable>
         </View>
       )}
-      {diffPage === null && (diff?.files.length ?? 0) > 0 && (
+      {!readOnly && diffPage === null && (diff?.files.length ?? 0) > 0 && (
         <Pressable
           accessibilityRole="button"
           accessibilityLabel={t('projects.reviewDiffPages')}
@@ -1891,16 +2091,19 @@ function ChangesPanel({
           diffPage?.page_offset ?? 0
         }`}
         patch={
-          patch ||
-          t(
-            diffMode === 'staged'
-              ? 'projects.noStagedDiff'
-              : 'projects.noUnstagedDiff',
-          )
+          selectedPath !== null
+            ? patchForPath(patch, selectedPath) ??
+              t('projects.diffPageMissing')
+            : patch ||
+              t(
+                diffMode === 'staged'
+                  ? 'projects.noStagedDiff'
+                  : 'projects.noUnstagedDiff',
+              )
         }
         styles={styles}
       />
-      <Pressable
+      {!readOnly && <Pressable
         accessibilityLabel={t('projects.stageAll')}
         accessibilityRole="button"
         accessibilityState={{
@@ -1931,7 +2134,81 @@ function ChangesPanel({
         ]}
       >
         <Text style={styles.secondaryButtonText}>{t('projects.stageAll')}</Text>
-      </Pressable>
+      </Pressable>}
+    </View>
+  );
+}
+
+/** Read-only review fixture used by iPad visual QA; it has no native bridge. */
+export function ProjectReviewPreview({
+  status,
+  diff,
+  diffPage = null,
+  diffMode: initialMode = 'unstaged',
+}: ProjectReviewPreviewProps) {
+  const { colors } = useAppPresentation();
+  const styles = useMemo(() => createStyles(colors), [colors]);
+  const [containerWidth, setContainerWidth] = useState(0);
+  const [selectedPath, setSelectedPath] = useState<string | null>(null);
+  const wide = containerWidth >= 900;
+  const [mode, setMode] = useState<DiffMode>(initialMode);
+  return (
+    <View
+      onLayout={event => setContainerWidth(event.nativeEvent.layout.width)}
+      style={[styles.root, styles.previewRoot]}
+    >
+      {wide && (
+        <View style={styles.wideSidebar} testID="projects-review-preview-file-list">
+          <Text style={styles.wideSidebarTitle}>Changed files</Text>
+          <ScrollView contentContainerStyle={styles.wideSidebarList}>
+            {diff.files.length === 0 ? (
+              <Text style={styles.cardBody}>No changed files.</Text>
+            ) : (
+              diff.files.map(file => (
+                <Pressable
+                  key={file.path}
+                  accessibilityRole="button"
+                  accessibilityLabel={file.path}
+                  accessibilityState={{ selected: selectedPath === file.path }}
+                  onPress={() => setSelectedPath(file.path)}
+                  style={[
+                    styles.wideSidebarRow,
+                    selectedPath === file.path && styles.changeRowSelected,
+                  ]}
+                >
+                  <Text numberOfLines={2} style={styles.wideSidebarPath}>
+                    {file.path}
+                  </Text>
+                  <Text style={styles.additions}>+{file.additions}</Text>
+                  <Text style={styles.deletions}>−{file.deletions}</Text>
+                </Pressable>
+              ))
+            )}
+          </ScrollView>
+        </View>
+      )}
+      <View style={wide ? styles.wideDetail : styles.previewDetail}>
+        <ScrollView contentContainerStyle={styles.detailContent}>
+          <ChangesPanel
+            busy={false}
+            diff={diff}
+            diffMode={mode}
+            diffPage={diffPage}
+            onChooseDiffMode={next => {
+              setMode(next);
+              setSelectedPath(null);
+            }}
+            onReviewPage={async () => undefined}
+            onSelectPath={setSelectedPath}
+            onStageAll={async () => undefined}
+            pageHistory={[]}
+            readOnly
+            selectedPath={selectedPath}
+            status={status}
+            styles={styles}
+          />
+        </ScrollView>
+      </View>
     </View>
   );
 }
@@ -1943,36 +2220,34 @@ function DiffPatch({
   patch: string;
   styles: ReturnType<typeof createStyles>;
 }) {
-  // Small Text blocks avoid iOS's large-text layout ceiling. Full pages use
-  // the surface's single native ScrollView; previews deliberately stay clipped.
-  const chunks = useMemo(() => {
-    const result: string[] = [];
-    let group: string[] = [];
-    let length = 0;
-    for (const line of patch.split('\n')) {
-      const parts =
-        line.length <= 1024 ? [line] : line.match(/.{1,512}/gu) ?? [''];
-      for (const part of parts) {
-        if (length + part.length > 1024 && group.length > 0) {
-          result.push(group.join('\n'));
-          group = [];
-          length = 0;
-        }
-        group.push(part);
-        length += part.length + 1;
-      }
-    }
-    if (group.length > 0) result.push(group.join('\n'));
-    return result;
-  }, [patch]);
+  // Keep each source line intact so long lines can be inspected horizontally;
+  // the parent surface owns vertical scrolling and page bounds the payload.
+  const lines = useMemo(() => patch.split('\n'), [patch]);
+  const compact = patch.length <= 4096 && lines.every(line => line.length <= 1024);
   return (
-    <View style={[styles.patchScroller, { padding: 12 }]}>
-      {chunks.map((text, index) => (
-        <Text key={index} selectable style={[styles.patch, { padding: 0 }]}>
-          {text || ' '}
-        </Text>
-      ))}
-    </View>
+    <ScrollView
+      horizontal
+      nestedScrollEnabled
+      showsHorizontalScrollIndicator
+      style={styles.patchScroller}
+      contentContainerStyle={styles.patchHorizontal}
+    >
+      {compact ? (
+        <Text selectable style={styles.patch}>{patch}</Text>
+      ) : (
+        <View>
+          {lines.map((line, index) => (
+            <View key={index} style={styles.patchLine}>
+              {(line.match(/.{1,8192}/gu) ?? ['']).map((part, partIndex) => (
+                <Text key={partIndex} selectable style={styles.patch}>
+                  {part || ' '}
+                </Text>
+              ))}
+            </View>
+          ))}
+        </View>
+      )}
+    </ScrollView>
   );
 }
 
@@ -2055,6 +2330,41 @@ const createStyles = (colors: ThemePalette) =>
       justifyContent: 'center',
     },
     listContent: { paddingTop: 12, paddingBottom: 110 },
+    body: { flex: 1, minHeight: 0 },
+    wideBody: { flex: 1, minHeight: 0, flexDirection: 'row', gap: 14 },
+    wideSidebar: {
+      width: '32%',
+      maxWidth: 340,
+      minWidth: 250,
+      borderRadius: 18,
+      backgroundColor: colors.surface,
+      padding: 14,
+    },
+    wideSidebarTitle: { color: colors.text, fontSize: 13, fontWeight: '800' },
+    wideSidebarList: { paddingTop: 10, paddingBottom: 20 },
+    wideSidebarRow: {
+      minHeight: 44,
+      borderBottomWidth: StyleSheet.hairlineWidth,
+      borderBottomColor: colors.line,
+      flexDirection: 'row',
+      alignItems: 'center',
+      gap: 8,
+    },
+    wideSidebarPath: {
+      flex: 1,
+      minWidth: 0,
+      color: colors.textDim,
+      fontFamily: fonts.mono,
+      fontSize: 12,
+    },
+    wideDetail: { flex: 1, minWidth: 0 },
+    previewRoot: {
+      paddingTop: 12,
+      paddingBottom: 12,
+      flexDirection: 'row',
+      gap: 14,
+    },
+    previewDetail: { flex: 1, minWidth: 0 },
     lead: { color: colors.muted, fontSize: 12, lineHeight: 18 },
     creationActions: { flexDirection: 'row', gap: 10, marginTop: 16 },
     creationButton: {
@@ -2295,6 +2605,7 @@ const createStyles = (colors: ThemePalette) =>
       borderBottomWidth: StyleSheet.hairlineWidth,
       borderBottomColor: colors.line,
     },
+    changeRowSelected: { backgroundColor: colors.surfaceRaised },
     changePath: { color: colors.text, fontFamily: fonts.mono, fontSize: 10 },
     changeLabels: {
       flexDirection: 'row',
@@ -2318,12 +2629,14 @@ const createStyles = (colors: ThemePalette) =>
       backgroundColor: colors.background,
       marginTop: 10,
     },
+    patchHorizontal: { padding: 12 },
+    patchLine: { flexDirection: 'row' },
     patch: {
       color: colors.textDim,
       fontFamily: fonts.mono,
       fontSize: 9,
       lineHeight: 14,
-      padding: 12,
+      flexShrink: 0,
     },
     credentialRow: {
       flexDirection: 'row',

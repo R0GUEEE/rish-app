@@ -234,6 +234,16 @@ export type ProjectPushResultV2 = Omit<ProjectPushResult, 'schema_version'> & {
 
 export type ProjectGitTransportOptions = {
   httpsProxyUrl?: string | null;
+  sshProfileId?: string | null;
+};
+
+export type ProjectSSHCredentialStatus = {
+  profile_id: string;
+  host: string;
+  port: number;
+  username: string;
+  configured: boolean;
+  key_fingerprint?: string;
 };
 
 export type ProjectPushOptions = ProjectGitTransportOptions & {
@@ -310,6 +320,8 @@ type NativeLocalProjects = {
     locale: string,
   ): Promise<ProjectCredentialStatus>;
   clearCredential(projectId: string): Promise<ProjectCredentialStatus>;
+  beginSSHCredentialImport?(profileId: string, host: string, port: number, username: string): Promise<ProjectSSHCredentialStatus>;
+  sshCredentialStatus?(profileId: string): Promise<ProjectSSHCredentialStatus | null>;
   push(
     projectId: string,
     options: ProjectPushOptions,
@@ -1498,6 +1510,16 @@ export const LocalProjects = {
   presentCredentialPrompt: (projectId: string, locale: 'zh-CN' | 'en' = 'en') =>
     required().presentCredentialPrompt(projectId, locale),
   clearCredential: (projectId: string) => required().clearCredential(projectId),
+  beginSSHCredentialImport: (profileId: string, host: string, port: number, username: string) => {
+    const api = required();
+    if (!api.beginSSHCredentialImport) throw new Error('SSH credential setup is unavailable');
+    return api.beginSSHCredentialImport(profileId, host, port, username);
+  },
+  sshCredentialStatus: (profileId: string) => {
+    const api = required();
+    if (!api.sshCredentialStatus) throw new Error('SSH credential status is unavailable');
+    return api.sshCredentialStatus(profileId);
+  },
   push: (projectId: string, options: ProjectPushOptions = {}) =>
     required().push(projectId, options),
   pushReceipts: (projectId: string) => required().pushReceipts(projectId),

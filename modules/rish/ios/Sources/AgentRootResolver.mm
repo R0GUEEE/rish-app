@@ -56,9 +56,9 @@ static void DSHSetRootError(NSError **error,
 static BOOL DSHAgentRootCapabilityArray(id value,
                                         BOOL project,
                                         NSSet<NSString *> **setOut) {
-  if (![value isKindOfClass:NSArray.class] || [value count] > 5) return NO;
+  if (![value isKindOfClass:NSArray.class] || [value count] > 6) return NO;
   NSSet *allowed = [NSSet setWithArray:@[
-    @"file_read", @"file_write", @"git_status", @"git_commit", @"git_push",
+    @"file_read", @"file_write", @"git_status", @"git_commit", @"git_push", @"guest_service",
   ]];
   NSMutableSet *seen = [NSMutableSet set];
   for (id item in (NSArray *)value) {
@@ -154,6 +154,9 @@ static NSArray<NSString *> *DSHAgentCapabilitiesForWorkspace(
       @"git_status", @"git_commit", @"git_push",
     ]];
   }
+#if DEBUG
+  if ([available containsObject:@"read"] && [available containsObject:@"write"]) [capabilities addObject:@"guest_service"];
+#endif
   return [capabilities copy];
 }
 
@@ -542,6 +545,9 @@ static NSArray<NSString *> *DSHAgentCapabilitiesForWorkspace(
       [workspaceCapabilities addObject:@"read"];
     } else if ([capability isEqualToString:@"file_write"]) {
       [workspaceCapabilities addObject:@"write"];
+    } else if ([capability isEqualToString:@"guest_service"]) {
+      [workspaceCapabilities addObject:@"read"];
+      [workspaceCapabilities addObject:@"write"];
     } else if ([capability hasPrefix:@"git_"]) {
       [workspaceCapabilities addObject:@"git"];
     } else {
@@ -743,7 +749,7 @@ static NSArray<NSString *> *DSHAgentCapabilitiesForWorkspace(
   BOOL hasGitRead = [capabilities containsObject:@"git_status"];
   BOOL hasGitPush = [capabilities containsObject:@"git_push"];
   NSSet *allowed = [NSSet setWithArray:@[
-    @"file_read", @"file_write", @"git_status", @"git_commit", @"git_push",
+    @"file_read", @"file_write", @"git_status", @"git_commit", @"git_push", @"guest_service",
   ]];
   BOOL anyGit = hasGitRead || hasGitWrite || hasGitPush;
   if (![capabilities isSubsetOfSet:allowed] ||

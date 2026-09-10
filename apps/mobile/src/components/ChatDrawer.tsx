@@ -24,6 +24,7 @@ import { useSafeAreaInsets } from 'react-native-safe-area-context';
 
 import type { Translator } from '../preferences';
 import { useAppPresentation } from '../presentation/AppPresentation';
+import { WIDE_SIDEBAR_WIDTH } from '../layout/adaptive';
 import { fonts, hitSlop, type ThemePalette } from '../theme';
 import { AppIcon } from './AppIcon';
 import { BrandMark } from './BrandMark';
@@ -48,6 +49,7 @@ type Props = {
   runtimeStatus: RuntimeVerificationStatus;
   covered: boolean;
   visible: boolean;
+  docked?: boolean;
   pendingProjectCleanup: boolean;
   onClose: () => void;
   onDismiss: () => void;
@@ -104,8 +106,9 @@ export function ChatDrawer(props: Props) {
       onDismiss={props.onDismiss}
       side="left"
       visible={props.visible}
+      docked={props.docked}
       widthRatio={0.88}
-      maxWidth={520}
+      maxWidth={props.docked ? WIDE_SIDEBAR_WIDTH : 520}
     >
       <View
         style={[
@@ -118,19 +121,21 @@ export function ChatDrawer(props: Props) {
             <BrandMark size={37} />
             <Text style={styles.brandCaption}>{t('home.localWorkspace')}</Text>
           </View>
-          <Pressable
-            accessibilityLabel={t('drawer.closeNavigation')}
-            accessibilityRole="button"
-            hitSlop={hitSlop}
-            onPress={props.onClose}
-            style={({ pressed }) => [
-              styles.closeButton,
-              pressed && styles.pressed,
-            ]}
-            testID="drawer-close"
-          >
-            <AppIcon color={colors.text} icon={X} size={20} />
-          </Pressable>
+          {!props.docked && (
+            <Pressable
+              accessibilityLabel={t('drawer.closeNavigation')}
+              accessibilityRole="button"
+              hitSlop={hitSlop}
+              onPress={props.onClose}
+              style={({ pressed }) => [
+                styles.closeButton,
+                pressed && styles.pressed,
+              ]}
+              testID="drawer-close"
+            >
+              <AppIcon color={colors.text} icon={X} size={20} />
+            </Pressable>
+          )}
         </View>
 
         <Pressable

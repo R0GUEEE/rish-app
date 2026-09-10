@@ -3,7 +3,7 @@
 NS_ASSUME_NONNULL_BEGIN
 
 // Bundle resource names and the pinned digests they must match at boot.
-// The digest constants mirror apps/mobile/ios/DSHMobile/GuestAssets/SHA256SUMS.
+// The digest constants mirror apps/mobile/ios/Rish/GuestAssets/SHA256SUMS.
 FOUNDATION_EXPORT NSString *const DSHGuestKernelResourceName;
 FOUNDATION_EXPORT NSString *const DSHGuestInitramfsResourceName;
 FOUNDATION_EXPORT NSString *const DSHGuestKernelSha256;

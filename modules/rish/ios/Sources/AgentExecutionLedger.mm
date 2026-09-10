@@ -93,7 +93,7 @@ static BOOL DSHAgentLedgerRootFull(NSDictionary *root) {
   if ([kind isEqualToString:@"project"] && project == NSNull.null) return NO;
   if ([kind isEqualToString:@"workspace"] && project != NSNull.null) return NO;
   NSSet *allowed = [NSSet setWithArray:@[
-    @"file_read", @"file_write", @"git_status", @"git_commit", @"git_push",
+    @"file_read", @"file_write", @"git_status", @"git_commit", @"git_push", @"guest_service",
   ]];
   NSMutableSet *seen = [NSMutableSet set];
   for (id capability in root[@"capabilities"]) {
@@ -353,6 +353,12 @@ static BOOL DSHAgentRawArgumentsBindIntent(NSString *argumentsJSON,
     }
     return YES;
   }
+  if ([name isEqualToString:@"start_guest_cgi"] || [name isEqualToString:@"stop_guest_cgi"]) {
+    NSMutableDictionary *expected = [arguments mutableCopy];
+    expected[@"schema_version"] = @1; expected[@"kind"] = name;
+    if (![expected isEqual:precondition]) { DSHSetAgentNativeStoreError(error, DSHAgentNativeStoreErrorConflict); return NO; }
+    return YES;
+  }
   if ([name isEqualToString:@"git_commit"]) {
     if (!DSHAgentExactDictionaryKeys(arguments, @[@"message"]) ||
         ![precondition[@"kind"] isEqualToString:@"git_commit"] ||
@@ -526,6 +532,17 @@ static BOOL DSHAgentPrecondition(NSDictionary *precondition) {
         (precondition[@"head_oid"] == NSNull.null ||
          DSHAgentBoundedUTF8String(precondition[@"head_oid"], 128, NO, nullptr));
   }
+  if ([kind isEqualToString:@"start_guest_cgi"]) {
+    NSArray *keys = @[@"schema_version", @"kind", @"index_path", @"index_sha256", @"backend_path", @"backend_sha256", @"initial_data_path", @"initial_data_sha256"];
+    return DSHAgentExactDictionaryKeys(precondition, keys) && [precondition[@"schema_version"] isEqual:@1] &&
+      DSHAgentBoundedUTF8String(precondition[@"index_path"], 1024, NO, nullptr) && DSHAgentCanonicalSHA256(precondition[@"index_sha256"]) &&
+      DSHAgentBoundedUTF8String(precondition[@"backend_path"], 1024, NO, nullptr) && DSHAgentCanonicalSHA256(precondition[@"backend_sha256"]) &&
+      ((precondition[@"initial_data_path"] == NSNull.null && precondition[@"initial_data_sha256"] == NSNull.null) ||
+       (DSHAgentBoundedUTF8String(precondition[@"initial_data_path"], 1024, NO, nullptr) && DSHAgentCanonicalSHA256(precondition[@"initial_data_sha256"])));
+  }
+  if ([kind isEqualToString:@"stop_guest_cgi"]) {
+    return DSHAgentExactDictionaryKeys(precondition, @[@"schema_version", @"kind", @"service_id"]) && [precondition[@"schema_version"] isEqual:@1] && DSHAgentCanonicalUUID(precondition[@"service_id"]);
+  }
   return NO;
 }
 
@@ -533,6 +550,9 @@ static BOOL DSHAgentSettledFacts(NSDictionary *facts) {
   if (![facts isKindOfClass:NSDictionary.class]) return NO;
   NSString *kind = facts[@"kind"];
   if (![kind isKindOfClass:NSString.class]) return NO;
+  if ([kind isEqualToString:@"start_guest_cgi"] || [kind isEqualToString:@"stop_guest_cgi"]) {
+    return DSHAgentExactDictionaryKeys(facts, @[@"schema_version", @"kind", @"service_id", @"status"]) && [facts[@"schema_version"] isEqual:@1] && DSHAgentCanonicalUUID(facts[@"service_id"]) && [facts[@"status"] isEqual:([kind isEqual:@"start_guest_cgi"] ? @"running" : @"stopped")];
+  }
   if ([kind isEqualToString:@"read_file"]) {
     return DSHAgentExactDictionaryKeys(facts, @[
       @"schema_version", @"kind", @"source_revision",
@@ -605,6 +625,9 @@ static BOOL DSHAgentSettledFactsMatchFeedback(NSDictionary *row,
       [row[@"name"] isEqualToString:@"git_status"]) {
     return [facts[@"head_oid"] isEqual:payload[@"head_oid"]];
   }
+  if ([kind isEqualToString:@"start_guest_cgi"] || [kind isEqualToString:@"stop_guest_cgi"]) {
+    return [facts[@"service_id"] isEqual:payload[@"service_id"]] && [facts[@"status"] isEqual:payload[@"status"]];
+  }
   // list_dir's feedback intentionally carries bounded entries rather than a
   // second directory fingerprint.  Its exact precondition/facts relation is
   // enforced by DSHAgentLedgerRow above.
@@ -621,7 +644,7 @@ static BOOL DSHAgentApprovalPreview(NSDictionary *preview) {
         @"diff_preview", @"diff_truncated",
       ]) && [preview[@"schema_version"] isEqual:@1] &&
       [@[ @"list_dir", @"read_file", @"write_file", @"git_commit",
-          @"git_push" ] containsObject:preview[@"kind"]] &&
+          @"git_push", @"start_guest_cgi", @"stop_guest_cgi" ] containsObject:preview[@"kind"]] &&
       [preview[@"paths"] isKindOfClass:NSArray.class] &&
       [(NSArray *)preview[@"paths"] count] <= 8 &&
       [preview[@"diff_truncated"] isKindOfClass:NSNumber.class] &&
@@ -658,8 +681,15 @@ static BOOL DSHAgentApprovalPreview(NSDictionary *preview) {
         preview[@"content_bytes"] != NSNull.null &&
         preview[@"prior"] != NSNull.null;
   }
+  if ([kind isEqualToString:@"start_guest_cgi"]) {
+    NSUInteger count = [preview[@"paths"] count];
+    // Empty previews were durably emitted by the first v2 build. Preserve
+    // loading/reconciliation while new preparation always names its sources.
+    return (count == 0 || count == 2 || count == 3) && preview[@"content_bytes"] == NSNull.null && preview[@"prior"] == NSNull.null && preview[@"diff_preview"] == NSNull.null;
+  }
   if ([kind isEqualToString:@"git_commit"] ||
-      [kind isEqualToString:@"git_push"]) {
+      [kind isEqualToString:@"git_push"] ||
+      [kind isEqualToString:@"stop_guest_cgi"]) {
     return [(NSArray *)preview[@"paths"] count] == 0 &&
         preview[@"content_bytes"] == NSNull.null &&
         preview[@"prior"] == NSNull.null &&
@@ -765,6 +795,7 @@ static BOOL DSHAgentLedgerRow(NSDictionary *row) {
       if ([kind isEqualToString:@"git_push"]) {
         return [facts[@"actual_remote_oid"] isEqual:row[@"precondition"][@"target_oid"]];
       }
+      if ([kind isEqualToString:@"stop_guest_cgi"]) return [facts[@"service_id"] isEqual:row[@"precondition"][@"service_id"]];
       if ([kind isEqualToString:@"read_file"]) {
         return [facts[@"source_revision"] isEqual:row[@"precondition"][@"source_revision"]];
       }
@@ -844,7 +875,7 @@ static BOOL DSHAgentWriteBatchEffectGateOpen(NSDictionary *state,
   NSString *name = row[@"name"];
   if (![name isEqualToString:@"write_file"] &&
       ![name isEqualToString:@"git_commit"] &&
-      ![name isEqualToString:@"git_push"]) return YES;
+      ![name isEqualToString:@"git_push"] && ![name isEqualToString:@"start_guest_cgi"] && ![name isEqualToString:@"stop_guest_cgi"]) return YES;
   NSString *attemptId = row[@"locator"][@"attempt_id"];
   NSString *idempotencyKey = row[@"locator"][@"idempotency_key"];
   for (NSDictionary *batch in state[@"batches"]) {
@@ -1100,7 +1131,7 @@ static NSDictionary *DSHAgentWriteManifestCallForIntent(NSDictionary *intent) {
     };
   }
   if ([name isEqualToString:@"git_commit"] ||
-      [name isEqualToString:@"git_push"]) {
+      [name isEqualToString:@"git_push"] || [name isEqualToString:@"start_guest_cgi"] || [name isEqualToString:@"stop_guest_cgi"]) {
     return @{
       @"schema_version" : @2, @"mutation_kind" : name,
       @"locator" : intent[@"locator"],
@@ -1127,7 +1158,7 @@ static BOOL DSHAgentWriteManifestCallShape(NSDictionary *call) {
                             DSHAgentNativeWALMaxSingleWriteBytes, YES);
   }
   return ([call[@"mutation_kind"] isEqualToString:@"git_commit"] ||
-          [call[@"mutation_kind"] isEqualToString:@"git_push"]) &&
+          [call[@"mutation_kind"] isEqualToString:@"git_push"] || [call[@"mutation_kind"] isEqualToString:@"start_guest_cgi"] || [call[@"mutation_kind"] isEqualToString:@"stop_guest_cgi"]) &&
       DSHAgentExactDictionaryKeys(call, @[
         @"schema_version", @"mutation_kind", @"locator",
         @"precondition_sha256", @"content_bytes",
@@ -2553,7 +2584,7 @@ static BOOL DSHAgentLedgerAdvanceAuthority(
         @"projection" : deniedProjection,
         @"failure_code" : [@[
           @"list_dir", @"read_file", @"write_file", @"git_status",
-          @"git_commit", @"git_push",
+          @"git_commit", @"git_push", @"start_guest_cgi", @"stop_guest_cgi",
         ] containsObject:call[@"name"]]
             ? @"E_AGENT_CAPABILITY" : @"E_AGENT_UNKNOWN_TOOL",
       }];
@@ -2611,7 +2642,7 @@ static BOOL DSHAgentLedgerAdvanceAuthority(
     [intents addObject:intent];
     BOOL fileMutation = [call[@"name"] isEqualToString:@"write_file"];
     BOOL gitMutation = [call[@"name"] isEqualToString:@"git_commit"] ||
-        [call[@"name"] isEqualToString:@"git_push"];
+        [call[@"name"] isEqualToString:@"git_push"] || [call[@"name"] isEqualToString:@"start_guest_cgi"] || [call[@"name"] isEqualToString:@"stop_guest_cgi"];
     if (fileMutation || gitMutation) {
       if (fileMutation) {
         NSString *pathDigest = precondition[@"relative_path_sha256"];
@@ -3077,6 +3108,10 @@ static BOOL DSHAgentLedgerAdvanceAuthority(
             transcript, resultTranscript, request[@"policy"],
             request[@"expected_reserved_write_bytes"], @(reserved), YES,
             timestamp, mutationError)) return NO;
+    NSNumber *approvalRegistryVersion = [root[@"capabilities"] containsObject:@"guest_service"] ? @2 : @1;
+    for (NSDictionary *authority in state[@"authorities"]) {
+      if ([authority[@"task_id"] isEqual:request[@"task_id"]] && [authority[@"attempt_id"] isEqual:request[@"attempt_id"]]) approvalRegistryVersion = authority[@"registry"][@"registry_version"];
+    }
     state[@"ledger"] = rows;
     state[@"dispatch"] = dispatch;
     state[@"reservations"] = reservations;
@@ -3130,7 +3165,7 @@ static BOOL DSHAgentLedgerAdvanceAuthority(
           @"idempotency_key" : projection[@"idempotency_key"],
           @"root_fingerprint_sha256" : root[@"root_fingerprint_sha256"],
           @"binding_revision" : root[@"workspace_binding_revision"],
-          @"policy_version" : @"agent-v1", @"registry_version" : @1,
+          @"policy_version" : @"agent-v1", @"registry_version" : approvalRegistryVersion,
           @"access" : projection[@"access"],
           @"allowed_decisions" : once
               ? @[@"denied", @"allow_once", @"cancelled"]

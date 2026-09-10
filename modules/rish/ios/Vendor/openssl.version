@@ -1,0 +1,13 @@
+format=1
+source=https://github.com/openssl/openssl.git
+version=3.6.2
+commit=fe686e15d84334b284f883118ed92f64b409b3aa
+crypto=OpenSSL
+ios_deployment_target=15.1
+xcode=Xcode 26.6;Build version 17F113
+architectures=ios-arm64,ios-simulator-arm64
+device_platform=LC_BUILD_VERSION:2
+simulator_platform=LC_BUILD_VERSION:7
+header_evp_sha256=0c2e950834c4cd0ac8a887f039400932e7cb1d6aaf2f80da73698a8ed5c3b318
+device_library_sha256=9afa8ec94355379bd64eaa313371e744383d6c354dc04364fea9417a0bcee543
+simulator_library_sha256=b1c5e376063c97a38288941ea59ff07d3b8a090c2bd8628a3b4c7d56301843e3

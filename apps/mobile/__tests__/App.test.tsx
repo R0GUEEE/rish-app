@@ -2286,7 +2286,8 @@ test('refreshes credential availability when switching Harness instead of reusin
   });
   expect(root.findByType(ChatComposer).props.configured).toBe(false);
   expect(actionByLabel(root, 'Configure Zhipu GLM key')).toBeDefined();
-  expect(root.findByProps({ accessibilityLabel: 'Message GLM' }).props.placeholder).toBe('Configure a Zhipu GLM key to start');
+  expect(root.findByProps({ accessibilityLabel: 'Message GLM' }).props.placeholder).toBe('Sign in or configure an API key to start');
+  expect(typeof root.findByType(ChatComposer).props.onLogin).toBe('function');
 });
 
 test.each([
@@ -6897,9 +6898,9 @@ test('opens the honest local profile entry from the drawer footer', async () => 
   );
   await act(async () => settle());
 
-  expect(root.findByProps({ children: 'Profile' })).toBeDefined();
+  expect(root.findByProps({ children: 'Rish profile' })).toBeDefined();
   expect(
-    root.findByProps({ accessibilityLabel: 'Sign in · coming soon' }).props
+    root.findByProps({ accessibilityLabel: 'Account & sync · coming soon' }).props
       .accessibilityState,
   ).toEqual({ disabled: true });
 });
@@ -9748,12 +9749,6 @@ test('offers native credential recovery when no key is configured', async () => 
   ).toBe(false);
   await act(async () => {
     actionByLabel(root, 'Configure DeepSeek key').props.onPress();
-  });
-  await act(async () => {
-    const configureButtons = root
-      .findAllByProps({ accessibilityLabel: 'Configure DeepSeek key' })
-      .filter(instance => typeof instance.props.onPress === 'function');
-    configureButtons.at(-1)?.props.onPress();
     await settle();
   });
 
@@ -9809,6 +9804,7 @@ test('fails gracefully when the platform has no local native adapter', async () 
   await act(async () => {
     actionByLabel(root, 'Configure DeepSeek key').props.onPress();
   });
+  expect(root.findByType(SettingsSheet).props.visible).toBe(true);
   const adapterButton = root
     .findAllByProps({ accessibilityLabel: 'Configure DeepSeek key' })
     .find(instance => instance.props.disabled === true);

@@ -7,6 +7,8 @@ NS_ASSUME_NONNULL_BEGIN
 /// Native-only transcript storage. The public result of every method is a
 /// reference or a redacted status; raw assistant/tool messages stay inside the
 /// protected WAL and are never returned by this class.
+FOUNDATION_EXPORT void DSHAgentPruneRoundPresentationCache(NSURL *walRoot, NSSet<NSString *> *_Nullable conversationIds);
+
 @interface DSHAgentTranscriptStore : NSObject
 
 - (instancetype)init NS_UNAVAILABLE;
@@ -57,6 +59,10 @@ NS_ASSUME_NONNULL_BEGIN
 /// over the WAL state rather than exposing raw records to JavaScript.
 - (BOOL)performAtomicTransaction:(DSHAgentNativeWALMutation)mutation
                            error:(NSError **)error;
+
+/// Non-authority display cache. Only call after the round/transcript commit.
+- (void)cacheRoundPresentationForRequest:(NSDictionary *)request message:(NSDictionary *)message kind:(NSString *)kind;
+- (nullable NSDictionary *)roundPresentationsForConversation:(NSString *)conversationId attempt:(NSString *)attemptId error:(NSError **)error;
 
 @property(nonatomic, strong, readonly) DSHAgentNativeWAL *wal;
 

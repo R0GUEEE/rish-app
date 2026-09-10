@@ -5,14 +5,19 @@ import {
   Platform,
   ScrollView,
   StyleSheet,
+  View,
 } from 'react-native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 
 /** One vertical scroll owner keeps the full dialog reachable above the keyboard. */
 export function ComposerViewport({
   children,
+  footer,
   revealEndOnKeyboard = true,
-}: React.PropsWithChildren<{ revealEndOnKeyboard?: boolean }>) {
+}: React.PropsWithChildren<{
+  revealEndOnKeyboard?: boolean;
+  footer?: React.ReactNode;
+}>) {
   const insets = useSafeAreaInsets();
   const scroll = useRef<React.ComponentRef<typeof ScrollView>>(null);
   const keyboardVisible = useRef(Keyboard.isVisible());
@@ -68,10 +73,30 @@ export function ComposerViewport({
       >
         {children}
       </ScrollView>
+      {footer !== undefined && (
+        <ScrollViewFooter insetsBottom={insets.bottom}>{footer}</ScrollViewFooter>
+      )}
     </KeyboardAvoidingView>
+  );
+}
+
+function ScrollViewFooter({
+  children,
+  insetsBottom,
+}: React.PropsWithChildren<{ insetsBottom: number }>) {
+  return (
+    <View
+      style={[
+        styles.footer,
+        { paddingBottom: Math.max(insetsBottom, 12) },
+      ]}
+    >
+      {children}
+    </View>
   );
 }
 const styles = StyleSheet.create({
   root: { flex: 1 },
   content: { flexGrow: 1, justifyContent: 'flex-end', paddingHorizontal: 18 },
+  footer: { flexShrink: 0 },
 });

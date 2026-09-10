@@ -549,6 +549,140 @@ describe('AgentStoreTransitions', () => {
     ).toBeNull();
   });
 
+  test('accepts native v2 CGI previews and preserves the old empty-path resume shape', () => {
+    const serviceRoot = { ...root, capabilities: ['guest_service'] as const };
+    const serviceRequest = {
+      schema_version: 2 as const,
+      operation_id: UUID_D,
+      controller_cas: cas,
+      committed_checkpoint: checkpoint,
+      task_id: UUID_B,
+      conversation_id: UUID_A,
+      attempt_id: UUID_C,
+      round_id: UUID_D,
+      round_index: 0,
+      expected_round_revision: 0,
+      transcript,
+      root: serviceRoot,
+      registry_version: 2 as const,
+      toolset_sha256: SHA,
+      policy_version: 'agent-v1' as const,
+      expected_batch_revision: 0,
+      expected_reserved_write_bytes: 0,
+    };
+    const serviceToken = {
+      schema_version: 2 as const,
+      token: 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa',
+      controller_cas: cas,
+      task_id: UUID_B,
+      attempt_id: UUID_C,
+      round_id: UUID_D,
+      round_index: 0,
+      batch_call_ids: ['call-cgi'],
+      batch_arguments_sha256: [SHA],
+      batch_revision: 1,
+      manifest_sha256: SHA,
+      call_index: 0,
+      call_id: 'call-cgi',
+      name: 'start_guest_cgi',
+      arguments_sha256: SHA,
+      idempotency_key: SHA,
+      root_fingerprint_sha256: SHA,
+      binding_revision: 1,
+      policy_version: 'agent-v1' as const,
+      registry_version: 2 as const,
+      access: 'conversation_confirm' as const,
+      allowed_decisions: ['denied', 'allow_once', 'allow_conversation', 'cancelled'] as const,
+    };
+    const serviceCall = {
+      schema_version: 2 as const,
+      call_index: 0,
+      call_id: 'call-cgi',
+      name: 'start_guest_cgi',
+      arguments_sha256: SHA,
+      idempotency_key: SHA,
+      safe_summary_key: 'agent.start_guest_cgi',
+      access: 'conversation_confirm' as const,
+      approval_state: 'pending' as const,
+      approval_token: serviceToken,
+      approval_reference: null,
+      execution_status: 'intent' as const,
+      execution_revision: 1,
+      native_row_revision: null,
+      receipt: null,
+      approval_preview: {
+        schema_version: 1 as const,
+        kind: 'start_guest_cgi' as const,
+        paths: ['demo/index.html', 'demo/backend.sh', 'demo/initial.json'],
+        content_bytes: null,
+        prior: null,
+        diff_preview: null,
+        diff_truncated: false,
+      },
+    };
+    const serviceReceipt = {
+      schema_version: 2 as const,
+      task_id: UUID_B,
+      attempt_id: UUID_C,
+      round_id: UUID_D,
+      round_index: 0,
+      batch_kind: 'write_batch' as const,
+      batch_revision: 1,
+      manifest_sha256: SHA,
+      transcript,
+      calls: [serviceCall],
+      batch_new_write_bytes: 0,
+      reserved_write_bytes: 0,
+      effect_gate: 'closed' as const,
+    };
+    expect(validateAgentStoreTransition({
+      operation: 'prepare_agent_tool_batch',
+      request: serviceRequest,
+      result: {
+        schema_version: 2 as const,
+        status: 'prepared' as const,
+        operation_id: UUID_D,
+        receipt: serviceReceipt,
+        observed_checkpoint: checkpoint,
+      },
+    })?.kind).toBe('prepare_agent_tool_batch');
+    expect(validateAgentStoreTransition({
+      operation: 'prepare_agent_tool_batch',
+      request: serviceRequest,
+      result: {
+        schema_version: 2 as const,
+        status: 'prepared' as const,
+        operation_id: UUID_D,
+        receipt: {
+          ...serviceReceipt,
+          calls: [{
+            ...serviceCall,
+            approval_preview: { ...serviceCall.approval_preview, paths: [] },
+          }],
+        },
+        observed_checkpoint: checkpoint,
+      },
+    })?.kind).toBe('prepare_agent_tool_batch');
+    expect(validateAgentStoreTransition({
+      operation: 'prepare_agent_tool_batch',
+      request: serviceRequest,
+      result: {
+        schema_version: 2 as const,
+        status: 'prepared' as const,
+        operation_id: UUID_D,
+        receipt: {
+          ...serviceReceipt,
+          calls: [{
+            ...serviceCall,
+            approval_preview: { ...serviceCall.approval_preview, paths: ['demo/index.html'] },
+          }],
+        },
+        observed_checkpoint: checkpoint,
+      },
+    }),
+    ).toBeNull();
+  });
+
   test('requires the exact ambiguous execute branch to carry a real ambiguous receipt and failure code', () => {
     const request = {
       schema_version: 2 as const,

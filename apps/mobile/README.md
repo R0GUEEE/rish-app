@@ -77,8 +77,10 @@ Android UI development:
 npm run android
 ```
 
-The self-contained iOS Release proof also requires the sibling rish archive.
-From the repository root, run `./scripts/prepare-rish-ios.sh`, install Pods,
+The self-contained iOS Release proof also requires the pinned rish source
+checkout. From the repository root, run `./scripts/prepare-rish-ios.sh` to
+fetch a temporary detached copy, or pass a reviewed checkout path (also
+accepted through `RISH_SOURCE_DIR`), then install Pods,
 build the arm64 Simulator Release app, provision Keychain through
 `scripts/provision-simulator-key.rb`, complete and restore a V4 Flash turn, and
 run `scripts/verify-local-proof.rb`. The full reproducible commands are in the
@@ -113,6 +115,7 @@ JavaScript receives typed status/data, never the API key, arbitrary filesystem
 roots, raw VM pointers, or a general shell. The production migration should use
 Codegen TurboModules while retaining the same narrow, bounded contracts.
 
-See the root [DSH Web parity matrix](../../docs/dsh-web-parity.md),
-[mobile UI audit](../../docs/mobile-ui-audit.md), and
-[runtime proof contract](../../docs/local-runtime-proof.md).
+See the root [README](../../README.md), [contribution guide](../../CONTRIBUTING.md),
+and [security policy](../../SECURITY.md) for the source checkout's current
+boundary. Product evidence and detailed parity records are maintained
+separately and are not required to build this directory.

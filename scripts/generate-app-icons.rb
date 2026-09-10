@@ -17,7 +17,7 @@ generate_android = platform_flag != '--ios-only'
 
 ios_root = File.join(
   root,
-  'apps/mobile/ios/DSHMobile/Images.xcassets/AppIcon.appiconset',
+  'apps/mobile/ios/Rish/Images.xcassets/AppIcon.appiconset',
 )
 android_root = File.join(root, 'apps/mobile/android/app/src/main/res')
 

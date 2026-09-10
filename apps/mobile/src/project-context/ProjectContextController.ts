@@ -48,6 +48,15 @@ export type ProjectContextControllerErrorCode =
   | 'E_CONTEXT_PERSISTENCE'
   | 'E_CONTEXT_OWNER_STALE';
 
+const CONTEXT_NATIVE_TIMEOUT_MS = 30_000;
+function boundedNative<T>(operation: Promise<T>): Promise<T> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const timeout = new Promise<T>((_, reject) => {
+    timer = setTimeout(() => reject(new ProjectContextBridgeError('E_CONTEXT_TIMEOUT')), CONTEXT_NATIVE_TIMEOUT_MS);
+  });
+  return Promise.race([operation, timeout]).finally(() => { if (timer !== undefined) clearTimeout(timer); });
+}
+
 export type ProjectContextControllerOwner = {
   readonly conversationId: string;
   readonly projectId: string;
@@ -1688,11 +1697,11 @@ export function createProjectContextController(
           finishOperation(operation);
           return setFailure('E_CONTEXT_NATIVE');
         }
-        const rawInspection = await dependencies.native.inspectV2({
+        const rawInspection = await boundedNative(dependencies.native.inspectV2({
           schema_version: 2,
           snapshot_id: snapshot.snapshot_id,
           root: cloneRoot(operation.root)!,
-        });
+        }));
         const projectedManifest = manifestV2ForController(
           rawInspection.manifest,
           operation.root,
@@ -1781,7 +1790,6 @@ export function createProjectContextController(
       return candidate === undefined || !candidate.eligible ? [] : [candidate];
     });
     if (
-      selectedPaths.length === 0 ||
       authorizedCandidates.length !== selectedPaths.length
     ) {
       return blocked('E_CONTEXT_REQUEST_INVALID');
@@ -2412,7 +2420,7 @@ export function createProjectContextController(
         return blocked('E_CONTEXT_REQUEST_INVALID');
       }
       const selectedPaths = orderedPaths(paths);
-      if (selectedPaths.length === 0) {
+      if (selectedPaths.length === 0 && (knownCandidates.size > 0 || state.listGeneration === 0)) {
         return blocked('E_CONTEXT_REQUEST_INVALID');
       }
       const selectedCandidates = selectedPaths.flatMap(path => {
