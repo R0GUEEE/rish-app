@@ -773,6 +773,7 @@ RCT_EXPORT_MODULE(SessionSnapshots)
   DSHSessionSnapshotStore *store = self.store;
   dispatch_queue_t queue = self.operationQueue ?: [DSHSessionWorkspaceCoordinator sharedQueue];
   dispatch_async(queue, ^{
+    CFAbsoluteTime began = CFAbsoluteTimeGetCurrent();
     NSError *error = nil;
     NSDictionary *result = nil;
     NSString *failureCode = nil;
@@ -795,6 +796,10 @@ RCT_EXPORT_MODULE(SessionSnapshots)
       failureCode = DSHSessionBridgeNative;
       result = nil;
     }
+    os_log_info(OS_LOG_DEFAULT,
+                "session_bridge op=%{public}ld elapsed_ms=%{public}.1f status=%{public}@",
+                (long)operation, (CFAbsoluteTimeGetCurrent() - began) * 1000.0,
+                failureCode ?: (result[@"status"] ?: @"ok"));
     if (failureCode != nil) {
       DSHSessionBridgeReject(reject, failureCode);
     } else {
@@ -913,7 +918,7 @@ RCT_EXPORT_BLOCKING_SYNCHRONOUS_METHOD(sessionCandidateDigest:(id)candidate) {
   if (![candidate isKindOfClass:NSString.class]) return nil;
   CFAbsoluteTime began = CFAbsoluteTimeGetCurrent();
   NSString *digest = [DSHSessionSnapshotStore candidateDigestForSessionJSON:candidate];
-  os_log_debug(OS_LOG_DEFAULT,
+  os_log_info(OS_LOG_DEFAULT,
                "session_candidate_digest bytes=%{public}lu ok=%{public}d elapsed_ms=%{public}.1f",
                (unsigned long)[(NSString *)candidate length], digest != nil,
                (CFAbsoluteTimeGetCurrent() - began) * 1000.0);

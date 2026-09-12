@@ -1,6 +1,7 @@
 #import <Foundation/Foundation.h>
 #import <React/RCTBridge.h>
 #import <React/RCTBridgeModule.h>
+#import <os/log.h>
 
 #import "AgentExecutionLedger.h"
 #import "AgentGitToolExecutor.h"
@@ -359,7 +360,9 @@ RCT_EXPORT_MODULE(AgentRuntime)
 }
 
 - (void)invoke:(id)rawRequest resolver:(RCTPromiseResolveBlock)resolve
-       rejecter:(RCTPromiseRejectBlock)reject block:(DSHRuntimeModuleInvoke)block {
+       rejecter:(RCTPromiseRejectBlock)reject providerWait:(BOOL)providerWait
+           name:(NSString *)name
+         block:(DSHRuntimeModuleInvoke)block {
   NSError *copyError = nil;
   NSDictionary *request = DSHAgentImmutableJSONCopy(rawRequest, &copyError);
   if (![request isKindOfClass:NSDictionary.class]) {
@@ -371,20 +374,35 @@ RCT_EXPORT_MODULE(AgentRuntime)
     NSError *error = nil;
     id<DSHAgentRuntimeCoordinating> coordinator =
         [self buildRuntimeCoordinator:&error];
+    // Coordinator construction is serialized; only provider rounds leave this
+    // queue. Their service serializes preparation and commit independently.
+    dispatch_block_t run = ^{
+    CFAbsoluteTime began = CFAbsoluteTimeGetCurrent();
+    NSError *invokeError = error;
     NSDictionary *result = nil;
     @try {
-      result = coordinator == nil ? nil : block(coordinator, request, &error);
-      result = result == nil ? nil : DSHAgentImmutableJSONCopy(result, &error);
+      result = coordinator == nil ? nil : block(coordinator, request, &invokeError);
+      result = result == nil ? nil : DSHAgentImmutableJSONCopy(result, &invokeError);
     } @catch (__unused NSException *exception) {
       result = nil;
-      error = DSHAgentNativeStoreError(DSHAgentNativeStoreErrorPersistence);
+      invokeError = DSHAgentNativeStoreError(DSHAgentNativeStoreErrorPersistence);
     }
+    os_log_info(OS_LOG_DEFAULT,
+                "agent_runtime op=%{public}@ elapsed_ms=%{public}.1f ok=%{public}d",
+                name, (CFAbsoluteTimeGetCurrent() - began) * 1000.0,
+                [result isKindOfClass:NSDictionary.class]);
     if (![result isKindOfClass:NSDictionary.class]) {
       NSString *code = coordinator == nil ? @"E_AGENT_NATIVE" :
-          DSHRuntimeErrorCode(error);
+          DSHRuntimeErrorCode(invokeError);
       if (reject != nil) reject(code, code, nil);
     } else if (resolve != nil) {
       resolve(result);
+    }
+    };
+    if (providerWait) {
+      dispatch_async(dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), run);
+    } else {
+      run();
     }
   }];
 }
@@ -394,6 +412,11 @@ RCT_EXPORT_MODULE(AgentRuntime)
                    resolver:(RCTPromiseResolveBlock)resolve \
                    rejecter:(RCTPromiseRejectBlock)reject) { \
     [self invoke:request resolver:resolve rejecter:reject \
+        providerWait:([@#selector isEqualToString:@"completeAgentRoundV2"] || \
+          ([@#selector isEqualToString:@"recoverAgentAttempt"] && \
+           [request isKindOfClass:NSDictionary.class] && \
+           [request[@"action"] isEqual:@"retry_failed_round"])) \
+        name:@#js_name \
         block:^NSDictionary *(id<DSHAgentRuntimeCoordinating> coordinator, \
                               NSDictionary *value, NSError **error) { \
       return [coordinator selector:value error:error]; \

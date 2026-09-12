@@ -11,6 +11,7 @@
 #include <stdint.h>
 #include <stdlib.h>
 #include <string>
+#include <vector>
 #include <string.h>
 
 NSErrorDomain const DSHWorkspaceCanonicalErrorDomain =
@@ -190,8 +191,22 @@ static void DSHWorkspaceAppendJSONString(NSString *value,
   }
   [output appendString:@"\""];
   NSUInteger length = value.length;
+  // Copy the UTF-16 units once; per-character appendFormat: dominated the
+  // whole canonicalisation on megabyte sessions. Runs of characters that
+  // need no escaping are appended as one substring; only escapes are
+  // formatted. Run boundaries are ASCII escapes, so surrogate pairs are
+  // never split.
+  std::vector<unichar> units(length);
+  if (length > 0) [value getCharacters:units.data() range:NSMakeRange(0, length)];
+  NSUInteger runStart = 0;
   for (NSUInteger index = 0; index < length; index += 1) {
-    unichar character = [value characterAtIndex:index];
+    unichar character = units[index];
+    BOOL needsEscape = character == '"' || character == '\\' || character < 0x20;
+    if (!needsEscape) continue;
+    if (index > runStart) {
+      [output appendString:[value substringWithRange:NSMakeRange(runStart, index - runStart)]];
+    }
+    runStart = index + 1;
     switch (character) {
       case '"':
         [output appendString:@"\\\""];
@@ -215,13 +230,12 @@ static void DSHWorkspaceAppendJSONString(NSString *value,
         [output appendString:@"\\t"];
         break;
       default:
-        if (character < 0x20) {
-          [output appendFormat:@"\\u%04x", character];
-        } else {
-          [output appendFormat:@"%C", character];
-        }
+        [output appendFormat:@"\\u%04x", character];
         break;
     }
+  }
+  if (length > runStart) {
+    [output appendString:[value substringWithRange:NSMakeRange(runStart, length - runStart)]];
   }
   [output appendString:@"\""];
 }
