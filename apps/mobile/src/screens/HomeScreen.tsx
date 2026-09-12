@@ -25,6 +25,7 @@ import {
   AccessibilityInfo,
   findNodeHandle,
   KeyboardAvoidingView,
+  ScrollView,
   Platform,
   Pressable,
   StyleSheet,
@@ -5695,7 +5696,17 @@ export function HomeScreen({
         </View>
 
         {activeMessages.length === 0 ? (
-          <EmptyChat onSuggestion={changeDraft} />
+          // The welcome hero is taller than the space left once the keyboard
+          // is up; let it scroll instead of overlapping the composer.
+          <ScrollView
+            contentContainerStyle={styles.emptyChatContent}
+            keyboardDismissMode="on-drag"
+            keyboardShouldPersistTaps="handled"
+            showsVerticalScrollIndicator={false}
+            style={styles.emptyChatScroll}
+          >
+            <EmptyChat onSuggestion={changeDraft} />
+          </ScrollView>
         ) : (
           <MessageList
             key={activeConversation?.id ?? 'no-conversation'}
@@ -6604,6 +6615,8 @@ const createStyles = (colors: ThemePalette) =>
     },
     pressed: { opacity: 0.6, transform: [{ scale: 0.98 }] },
     runtimeGlyph: { alignItems: 'center', justifyContent: 'center' },
+    emptyChatScroll: { flex: 1 },
+    emptyChatContent: { flexGrow: 1 },
     runtimeDot: {
       position: 'absolute',
       width: 6,
