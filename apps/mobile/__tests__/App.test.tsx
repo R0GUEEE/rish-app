@@ -2254,7 +2254,9 @@ test('blocks Harness switching during an active completion and allows it after t
     await settle();
   });
   expect(request).toBeDefined();
-  expect(root.findByProps({ children: 'Working with DeepSeek…' })).toBeDefined();
+  // Progress is shown by the send/stop button alone; there is no status row.
+  expect(root.findByType(ChatComposer).props.sending).toBe(true);
+  expect(() => root.findByProps({ children: 'Working with DeepSeek…' })).toThrow();
   await openHarnessPicker(root);
   expect(actionByLabel(root, 'Use GLM').props.disabled).toBe(true);
   await act(async () => root.findByType(HarnessPicker).props.onSelect('glm'));

@@ -16,7 +16,6 @@ import {
   Image,
   Keyboard,
   Modal,
-  Platform,
   Pressable,
   ScrollView,
   StyleSheet,
@@ -385,24 +384,13 @@ export function ChatComposer(props: Props) {
               icon={Square}
               size={11}
             />
+          ) : props.configurationPending ? (
+            <ActivityIndicator color={colors.accent} size="small" />
           ) : (
             <AppIcon color={colors.background} icon={ArrowUp} size={20} />
           )}
         </Pressable>
       </View>
-      {props.sending && (
-        <View
-          accessibilityLabel={t('messages.respondingLabel', { provider: props.providerName })}
-          accessibilityLiveRegion="polite"
-          accessibilityRole={Platform.OS === 'android' ? 'text' : 'status'}
-          style={styles.progressRow}
-        >
-          <ActivityIndicator color={colors.accent} size="small" />
-          <Text style={styles.progressText}>
-            {t('messages.workingLocally', { provider: props.providerName })}
-          </Text>
-        </View>
-      )}
       <Modal
         animationType="fade"
         onDismiss={finishAttachmentMenuDismiss}
@@ -585,13 +573,6 @@ const createStyles = (colors: ThemePalette) =>
     },
     sendDisabled: { backgroundColor: colors.surfaceRaised },
     stop: { backgroundColor: colors.text },
-    progressRow: {
-      flexDirection: 'row',
-      alignItems: 'center',
-      gap: 7,
-      marginTop: 8,
-    },
-    progressText: { color: colors.muted, fontSize: 10, fontFamily: fonts.mono },
     menuBackdrop: {
       flex: 1,
       backgroundColor: colors.scrim,
