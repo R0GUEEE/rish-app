@@ -292,8 +292,13 @@ function utf8Bytes(value: string): number | null {
 }
 
 function boundedJSON(value: unknown): value is string {
-  const bytes = typeof value === 'string' ? utf8Bytes(value) : null;
-  return bytes !== null && bytes > 0 && bytes <= 16 * 1024 * 1024;
+  if (typeof value !== 'string' || value.length === 0) return false;
+  // UTF-8 never needs more than three bytes per UTF-16 unit, so a short
+  // enough string is within budget without scanning it (the native store
+  // already decoded it from valid UTF-8).
+  if (value.length * 3 <= 16 * 1024 * 1024) return true;
+  const bytes = utf8Bytes(value);
+  return bytes !== null && bytes <= 16 * 1024 * 1024;
 }
 
 function validateRef(value: unknown): SessionSnapshotRefV1 {

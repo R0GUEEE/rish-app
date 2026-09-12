@@ -322,8 +322,44 @@ function canonicalJSONValue(value: unknown): string | null {
   return `{${pairs.join(',')}}`;
 }
 
+
+// Whole-text scans over a megabyte session (byte bounds, lexical budget,
+// schema probe, status match) repeat several times per checkpoint on the same
+// string. Remember the last few answers by value; Hermes compares equal-length
+// strings with a memcmp, far cheaper than any scan.
+class TextMemo<T> {
+  private readonly entries: Array<{ readonly value: string; readonly result: T }> = [];
+
+  constructor(private readonly capacity: number = 4) {}
+
+  get(value: string): T | undefined {
+    for (let index = 0; index < this.entries.length; index += 1) {
+      const entry = this.entries[index]!;
+      if (entry.value === value) return entry.result;
+    }
+    return undefined;
+  }
+
+  set(value: string, result: T): T {
+    if (this.entries.length >= this.capacity) this.entries.shift();
+    this.entries.push({ value, result });
+    return result;
+  }
+}
+
+const boundedUtf8Memo = new TextMemo<boolean>();
+const lexicalBudgetMemo = new TextMemo<boolean>();
+const schema9Memo = new TextMemo<boolean>();
+const loadedStatusMemo = new TextMemo<boolean>();
+
 function boundedUtf8(value: string): boolean {
   if (value.length === 0 || value.length > MAX_SESSION_BYTES) return false;
+  const remembered = boundedUtf8Memo.get(value);
+  if (remembered !== undefined) return remembered;
+  return boundedUtf8Memo.set(value, scanBoundedUtf8(value));
+}
+
+function scanBoundedUtf8(value: string): boolean {
   let bytes = 0;
   for (let index = 0; index < value.length; index += 1) {
     const unit = value.charCodeAt(index);
@@ -356,6 +392,12 @@ function isJSONWhitespace(character: string): boolean {
 }
 
 function lexicalJSONBudget(value: string): boolean {
+  const remembered = lexicalBudgetMemo.get(value);
+  if (remembered !== undefined) return remembered;
+  return lexicalBudgetMemo.set(value, scanLexicalJSONBudget(value));
+}
+
+function scanLexicalJSONBudget(value: string): boolean {
   const containers: string[] = [];
   let tokens = 0;
   let inString = false;
@@ -525,7 +567,27 @@ function parsePreflightedJSON(value: string): ParsedJSON {
   }
 }
 
+// A candidate the serializer has already validated (by exact text) needs no
+// further JS preflight: hydration subsumes the schema probe, and the byte and
+// node budgets are enforced natively before anything is written. Unknown text
+// still goes through every check.
+function candidateAcceptable(candidate: string): boolean {
+  if (sessionCandidateIsValid(candidate)) return true;
+  return (
+    preflightJSON(candidate) &&
+    parsePreflightedJSON(candidate).ok &&
+    candidateIsSchema9(candidate) &&
+    sessionCandidateIsValid(candidate)
+  );
+}
+
 function candidateIsSchema9(value: string): boolean {
+  const remembered = schema9Memo.get(value);
+  if (remembered !== undefined) return remembered;
+  return schema9Memo.set(value, probeCandidateIsSchema9(value));
+}
+
+function probeCandidateIsSchema9(value: string): boolean {
   try {
     const parsed = parseStrictJSON(value);
     if (typeof parsed !== 'object' || parsed === null || Array.isArray(parsed)) return false;
@@ -892,7 +954,17 @@ function loadedSessionJSONMatchesStatus(
   status: 'legacy_present' | 'present',
   value: unknown,
 ): value is string {
-  if (typeof value !== 'string' || !boundedUtf8(value)) return false;
+  if (typeof value !== 'string') return false;
+  const remembered = loadedStatusMemo.get(status + '\u0000' + value);
+  if (remembered !== undefined) return remembered;
+  return loadedStatusMemo.set(status + '\u0000' + value, scanLoadedSessionJSONMatchesStatus(status, value));
+}
+
+function scanLoadedSessionJSONMatchesStatus(
+  status: 'legacy_present' | 'present',
+  value: string,
+): boolean {
+  if (!boundedUtf8(value)) return false;
   try {
     const parsed = parseStrictJSON(value);
     const raw = plainRecord(parsed);
@@ -966,7 +1038,11 @@ function isLaunchInstanceId(value: unknown): value is string {
   return typeof value === 'string' && launchInstanceIdPattern.test(value);
 }
 
-function parseLoadSnapshot(value: unknown): LoadSessionSnapshotResultV1 | null {
+function parseLoadSnapshot(
+  value: unknown,
+  options: { readonly verifySessionText?: boolean } = {},
+): LoadSessionSnapshotResultV1 | null {
+  const verifySessionText = options.verifySessionText !== false;
   const raw = plainRecord(value);
   if (raw === null || raw.schema_version !== 1 || typeof raw.status !== 'string') return null;
   if (raw.status === 'missing') {
@@ -1024,6 +1100,7 @@ function parseLoadSnapshot(value: unknown): LoadSessionSnapshotResultV1 | null {
       !isLaunchInstanceId(raw.current_launch_instance_id)
     ) return null;
     if (
+      verifySessionText &&
       !loadedSessionJSONMatchesStatus(
         raw.status,
         raw.session_json,
@@ -1171,7 +1248,9 @@ export function createSessionPersistenceCoordinator(
       const loadSnapshot =
         dependencies.loadSessionSnapshot;
       if (loadSnapshot === undefined) throw new Error('native authority unavailable');
-      const loaded = parseLoadSnapshot(await loadSnapshot());
+      // Only the authority fields are consumed here; the session text itself
+      // is verified by the paths that hydrate it, never by an authority read.
+      const loaded = parseLoadSnapshot(await loadSnapshot(), { verifySessionText: false });
       if (loaded === null) throw new Error('invalid session snapshot');
       if (loaded.status === 'missing') return { schema_version: 1, kind: 'missing' };
       if (loaded.status === 'legacy_present') {
@@ -1217,9 +1296,7 @@ export function createSessionPersistenceCoordinator(
       requestRecord.schema_version !== 1 ||
       expected === null ||
       typeof candidateJson !== 'string' ||
-      !preflightJSON(candidateJson) ||
-      !candidateIsSchema9(candidateJson) ||
-      !sessionCandidateIsValid(candidateJson) ||
+      !candidateAcceptable(candidateJson) ||
       typeof requestRecord.operation_id !== 'string' ||
       !validUuid(requestRecord.operation_id)
     ) return null;
@@ -1301,9 +1378,7 @@ export function createSessionPersistenceCoordinator(
       readonly expected?: SessionSnapshotAuthorityV1;
     } | undefined,
   ): Promise<SessionDurabilityResult> => {
-    if (!parsePreflightedJSON(candidate).ok) return RESULTS.unknown;
-    if (!candidateIsSchema9(candidate)) return RESULTS.unknown;
-    if (!sessionCandidateIsValid(candidate)) return RESULTS.unknown;
+    if (!candidateAcceptable(candidate)) return RESULTS.unknown;
     const candidateDigest = candidateSessionDigest(candidate);
     if (candidateDigest === null) return RESULTS.unknown;
     if (
