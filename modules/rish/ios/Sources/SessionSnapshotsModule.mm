@@ -796,8 +796,8 @@ RCT_EXPORT_MODULE(SessionSnapshots)
       failureCode = DSHSessionBridgeNative;
       result = nil;
     }
-    os_log_info(OS_LOG_DEFAULT,
-                "session_bridge op=%{public}ld elapsed_ms=%{public}.1f status=%{public}@",
+    os_log(OS_LOG_DEFAULT,
+           "session_bridge op=%{public}ld elapsed_ms=%{public}.1f status=%{public}@",
                 (long)operation, (CFAbsoluteTimeGetCurrent() - began) * 1000.0,
                 failureCode ?: (result[@"status"] ?: @"ok"));
     if (failureCode != nil) {
@@ -914,12 +914,25 @@ RCT_REMAP_METHOD(queryWorkspaceClearance,
 // the store, so it cannot reorder or block a persist. JS uses it to replace
 // its interpreter-side SHA-256 of the whole session; when the method is
 // missing or answers nil, JS falls back to its own implementation.
+// JS timing marks land in the same unified log as the native operation
+// timings, so one device syslog shows both sides of a checkpoint. Synchronous
+// so ordering is exact; it does nothing but log.
+RCT_EXPORT_BLOCKING_SYNCHRONOUS_METHOD(markTiming:(id)label elapsed:(id)elapsedMs) {
+  if (![label isKindOfClass:NSString.class] || ![elapsedMs isKindOfClass:NSNumber.class]) {
+    return nil;
+  }
+  os_log(OS_LOG_DEFAULT, "js_timing label=%{public}@ elapsed_ms=%{public}.1f",
+         [(NSString *)label substringToIndex:MIN((NSUInteger)64, [(NSString *)label length])],
+         [(NSNumber *)elapsedMs doubleValue]);
+  return nil;
+}
+
 RCT_EXPORT_BLOCKING_SYNCHRONOUS_METHOD(sessionCandidateDigest:(id)candidate) {
   if (![candidate isKindOfClass:NSString.class]) return nil;
   CFAbsoluteTime began = CFAbsoluteTimeGetCurrent();
   NSString *digest = [DSHSessionSnapshotStore candidateDigestForSessionJSON:candidate];
-  os_log_info(OS_LOG_DEFAULT,
-               "session_candidate_digest bytes=%{public}lu ok=%{public}d elapsed_ms=%{public}.1f",
+  os_log(OS_LOG_DEFAULT,
+         "session_candidate_digest bytes=%{public}lu ok=%{public}d elapsed_ms=%{public}.1f",
                (unsigned long)[(NSString *)candidate length], digest != nil,
                (CFAbsoluteTimeGetCurrent() - began) * 1000.0);
   return digest;

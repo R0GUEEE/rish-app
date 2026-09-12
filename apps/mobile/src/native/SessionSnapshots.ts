@@ -683,6 +683,18 @@ export function sessionCandidateDigestSync(
   }
 }
 
+// Optional timing mark; see markTiming: on the native side. Never throws and
+// costs one synchronous bridge call, so it is safe on hot paths.
+export function markTimingSync(label: string, elapsedMs: number): void {
+  try {
+    const nativeObject = legacyNative() ?? turboNative();
+    if (typeof nativeObject !== 'object' || nativeObject === null) return;
+    const method = Reflect.get(nativeObject, 'markTiming');
+    if (typeof method !== 'function') return;
+    (method as (label: string, elapsedMs: number) => unknown).call(nativeObject, label, elapsedMs);
+  } catch {}
+}
+
 async function callNative<T>(
   method: keyof NativeSessionSnapshots,
   request: unknown,

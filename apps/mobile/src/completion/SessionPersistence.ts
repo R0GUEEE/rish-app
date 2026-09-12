@@ -1,4 +1,7 @@
-import { sessionCandidateDigestSync } from '../native/SessionSnapshots';
+import {
+  markTimingSync,
+  sessionCandidateDigestSync,
+} from '../native/SessionSnapshots';
 import {
   parseStrictJSON,
   safeHydrateChatState,
@@ -1201,6 +1204,7 @@ export function createSessionPersistenceCoordinator(
       requestRecord === null ? null : parseAuthority(requestRecord.expected);
     const candidateJson =
       requestRecord === null ? undefined : requestRecord.candidate_json;
+    const checksStarted = Date.now();
     if (
       dependencies.casPersistSession === undefined ||
       requestRecord === null ||
@@ -1219,6 +1223,9 @@ export function createSessionPersistenceCoordinator(
       typeof requestRecord.operation_id !== 'string' ||
       !validUuid(requestRecord.operation_id)
     ) return null;
+    try {
+      markTimingSync('js.cas_request_checks', Date.now() - checksStarted);
+    } catch {}
     try {
       const parsed = parseCASResult(
         await dependencies.casPersistSession({

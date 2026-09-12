@@ -43,6 +43,15 @@ import { ChatDrawer, type ConversationSummary } from '../components/ChatDrawer';
 import { BrandMark } from '../components/BrandMark';
 import { AppIcon } from '../components/AppIcon';
 import { SpinningIcon } from '../components/SpinningIcon';
+import { markTimingSync } from '../native/SessionSnapshots';
+
+// The native module (or a test mock) may lack the timing mark; never let a
+// missing diagnostic break the screen.
+const markTiming = (label: string, elapsedMs: number): void => {
+  try {
+    markTimingSync(label, elapsedMs);
+  } catch {}
+};
 import { AccountSheet } from '../components/AccountSheet';
 import { ConversationActionSheet } from '../components/ConversationActionSheet';
 import { EmptyChat } from '../components/EmptyChat';
@@ -898,7 +907,20 @@ export function HomeScreen({
     [activeHarness, dshCatalog, codexModels],
   );
 
-  useEffect(() => store.subscribe(setChatState), [store]);
+  const publishedAtRef = useRef(0);
+  useEffect(
+    () =>
+      store.subscribe(next => {
+        publishedAtRef.current = Date.now();
+        setChatState(next);
+      }),
+    [store],
+  );
+  useEffect(() => {
+    if (publishedAtRef.current === 0) return;
+    markTiming('js.render_after_publish', Date.now() - publishedAtRef.current);
+    publishedAtRef.current = 0;
+  }, [chatState]);
 
   useEffect(() => {
     if (SessionSnapshots.isAvailable() === true) {
@@ -1166,7 +1188,9 @@ export function HomeScreen({
       candidateJSON: string,
       expectedAuthority?: SessionSnapshotAuthorityV1,
     ): Promise<CompletionPersistenceResult> => {
+      const digestStarted = Date.now();
       const candidateDigest = sessionSnapshotSHA256(candidateJSON);
+      markTiming('js.candidate_digest', Date.now() - digestStarted);
       if (candidateDigest === null) return { status: 'unknown' };
       let pending = pendingSessionWritesRef.current.get(candidateDigest);
       const hadPending = pending !== undefined;
@@ -1236,12 +1260,14 @@ export function HomeScreen({
         };
 
       let authority: SessionSnapshotAuthorityV1;
+      const loadStarted = Date.now();
       try {
         authority = await sessionPersistence.loadAuthority();
       } catch {
         // Keep the exact operation/candidate pair for a later query/retry.
         return { status: 'unknown' };
       }
+      markTiming('js.load_authority', Date.now() - loadStarted);
       if (
         expectedAuthority !== undefined &&
         !sameSessionSnapshotAuthority(expectedAuthority, authority)
@@ -1257,6 +1283,7 @@ export function HomeScreen({
           expected: authority,
           candidate_json: pending.candidateJSON,
         });
+      markTiming('js.cas_persist_await', Date.now() - casStarted);
       if (response?.status === 'committed') {
         if (
           response.snapshot.session_sha256 !== pending.candidateDigest ||
@@ -1461,8 +1488,12 @@ export function HomeScreen({
         return { status: 'unknown' };
       }
       try {
+        const serializeStarted = Date.now();
         const candidate = synchronizePreferencesIntoChatState();
+        markTiming('js.serialize_candidate', Date.now() - serializeStarted);
+        const persistStarted = Date.now();
         const result = await persistSessionCandidate(candidate);
+        markTiming('js.persist_candidate', Date.now() - persistStarted);
         if (result.status === 'committed') {
           setStorageWarning(null);
         } else {

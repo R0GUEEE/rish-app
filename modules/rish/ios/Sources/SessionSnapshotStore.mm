@@ -3464,19 +3464,19 @@ typedef NS_ENUM(NSInteger, DSHSessionAtomicWriteResult) {
 @implementation DSHSessionValidatedEnvelope
 @end
 
+static DSHSessionValidatedEnvelope *DSHSessionValidatedEnvelopeLast;
+
 static DSHSessionValidatedEnvelope *DSHSessionValidatedEnvelopeCached(NSData *raw) {
-  static DSHSessionValidatedEnvelope *cached;
   @synchronized (DSHSessionValidatedEnvelope.class) {
-    if (raw == nil) return nil;
-    if (cached != nil && [cached.bytes isEqualToData:raw]) return cached;
-    return nil;
+    DSHSessionValidatedEnvelope *cached = DSHSessionValidatedEnvelopeLast;
+    if (raw == nil || cached == nil) return nil;
+    return [cached.bytes isEqualToData:raw] ? cached : nil;
   }
 }
 
 static void DSHSessionValidatedEnvelopeRemember(DSHSessionValidatedEnvelope *entry) {
-  static DSHSessionValidatedEnvelope *cached;
   @synchronized (DSHSessionValidatedEnvelope.class) {
-    cached = entry;
+    DSHSessionValidatedEnvelopeLast = entry;
   }
 }
 
