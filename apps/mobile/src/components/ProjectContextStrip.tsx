@@ -19,6 +19,7 @@ import {
 import { useAppPresentation } from '../presentation/AppPresentation';
 import { fonts, hitSlop, type ThemePalette } from '../theme';
 import { AppIcon } from './AppIcon';
+import { SpinningIcon } from './SpinningIcon';
 
 export const PROJECT_CONTEXT_MAX_BYTES = 256 * 1024;
 
@@ -266,7 +267,11 @@ export const ProjectContextStrip = React.forwardRef<
           { backgroundColor: `${statusColor(effective, colors)}1F` },
         ]}
       >
-        <AppIcon color={statusColor(effective, colors)} icon={Icon} size={17} />
+        {Icon === LoaderCircle ? (
+          <SpinningIcon color={statusColor(effective, colors)} icon={Icon} size={17} />
+        ) : (
+          <AppIcon color={statusColor(effective, colors)} icon={Icon} size={17} />
+        )}
       </View>
       <View style={styles.content}>
         <Text

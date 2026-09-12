@@ -13,6 +13,7 @@ import { useAppPresentation } from '../presentation/AppPresentation';
 import type { AttachmentDescriptor } from '../state';
 import { fonts, type ThemePalette } from '../theme';
 import { AppIcon } from './AppIcon';
+import { SpinningIcon } from './SpinningIcon';
 import { MarkdownText } from './MarkdownText';
 
 export type StructuredBlock =
@@ -306,12 +307,21 @@ function ToolBlock({
             failed && styles.toolGlyphFailed,
           ]}
         >
-          <AppIcon
-            color={statusIconColor}
-            icon={StatusIcon}
-            size={15}
-            testID={`tool-status-${statusIconName}`}
-          />
+          {running ? (
+            <SpinningIcon
+              color={statusIconColor}
+              icon={StatusIcon}
+              size={15}
+              testID={`tool-status-${statusIconName}`}
+            />
+          ) : (
+            <AppIcon
+              color={statusIconColor}
+              icon={StatusIcon}
+              size={15}
+              testID={`tool-status-${statusIconName}`}
+            />
+          )}
         </View>
         <View style={styles.headerCopy}>
           <Text style={styles.blockEyebrow}>

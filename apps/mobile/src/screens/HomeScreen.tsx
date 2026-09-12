@@ -42,6 +42,7 @@ import {
 import { ChatDrawer, type ConversationSummary } from '../components/ChatDrawer';
 import { BrandMark } from '../components/BrandMark';
 import { AppIcon } from '../components/AppIcon';
+import { SpinningIcon } from '../components/SpinningIcon';
 import { AccountSheet } from '../components/AccountSheet';
 import { ConversationActionSheet } from '../components/ConversationActionSheet';
 import { EmptyChat } from '../components/EmptyChat';
@@ -5677,19 +5678,17 @@ export function HomeScreen({
                     runtimeStatus === 'failed' && styles.runtimeDotFailed,
                   ]}
                 />
-                <AppIcon
-                  color={
-                    runtimeStatus === 'failed' ? colors.danger : colors.warning
-                  }
-                  icon={
-                    runtimeStatus === 'failed'
-                      ? CircleAlert
-                      : runtimeStatus === 'checking'
-                      ? LoaderCircle
-                      : CircleEllipsis
-                  }
-                  size={18}
-                />
+                {runtimeStatus === 'checking' ? (
+                  <SpinningIcon color={colors.warning} icon={LoaderCircle} size={18} />
+                ) : (
+                  <AppIcon
+                    color={
+                      runtimeStatus === 'failed' ? colors.danger : colors.warning
+                    }
+                    icon={runtimeStatus === 'failed' ? CircleAlert : CircleEllipsis}
+                    size={18}
+                  />
+                )}
               </View>
             </RoundButton>
           )}
@@ -5783,6 +5782,7 @@ export function HomeScreen({
               </Text>
             </View>
           )}
+          <View style={styles.proofRow}>
           <Pressable
             accessibilityLabel={runtimeLabel}
             accessibilityRole="button"
@@ -6629,9 +6629,17 @@ const createStyles = (colors: ThemePalette) =>
     runtimeDotReady: { backgroundColor: colors.success },
     runtimeDotFailed: { backgroundColor: colors.danger },
     bottomArea: { paddingHorizontal: 13, gap: 5 },
+    // Both status chips share one row; they used to stack and cost two
+    // lines above the composer.
+    proofRow: {
+      flexDirection: 'row',
+      flexWrap: 'wrap',
+      justifyContent: 'center',
+      columnGap: 16,
+    },
     proofChip: {
       alignSelf: 'center',
-      minHeight: 28,
+      minHeight: 24,
       paddingHorizontal: 8,
       flexDirection: 'row',
       alignItems: 'center',
