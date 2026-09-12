@@ -1121,11 +1121,16 @@ static NSString *const DSHSessionDigestParityInterruptedRecovery =
   XCTAssertNil([(id)module sessionCandidateDigest:@"[]"]);
   XCTAssertNil([(id)module sessionCandidateDigest:@"{}"]);
   XCTAssertNil([(id)module sessionCandidateDigest:@"{\"schema_version\":8}"]);
+  // Shallow by design (JS parity): a schema-9 object digests even when the CAS
+  // would later refuse it; the CAS keeps the full validation.
+  XCTAssertEqualObjects([(id)module sessionCandidateDigest:@"{\"schema_version\":9}"],
+                        [(id)module sessionCandidateDigest:@"{ \"schema_version\" : 9 }"]);
+  XCTAssertNotNil([(id)module sessionCandidateDigest:@"{\"schema_version\":9}"]);
   XCTAssertNil([(id)module sessionCandidateDigest:
       [beginRound stringByAppendingString:@"}"]]);
   XCTAssertNil([DSHSessionSnapshotStore candidateDigestForSessionJSON:
-      [beginRound stringByReplacingOccurrencesOfString:@"\"schema_version\":9"
-                                            withString:@"\"schema_version\":10"]]);
+      [beginRound stringByReplacingOccurrencesOfString:@"\"schema_version\":9,"
+                                            withString:@"\"schema_version\":10,"]]);
 }
 
 @end

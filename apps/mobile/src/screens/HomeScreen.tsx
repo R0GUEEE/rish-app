@@ -2200,8 +2200,11 @@ export function HomeScreen({
   // Read native completed projections on hydration and each durable round transition.
   // This display cache never changes model history or execution checkpoints.
   const presentationOwner = activeConversation?.id ?? null;
+  // Native presentations change only when a round lands or the attempt
+  // settles; keying on the journal revision re-read every attempt on every
+  // persisted checkpoint (about a second of native time each).
   const presentationRevision = JSON.stringify(activeConversation?.attempts.filter(attempt => attempt.agent != null).map(attempt => [
-    attempt.attemptId, attempt.journalRevision ?? 0, attempt.assistantMessageId,
+    attempt.attemptId, attempt.rounds.length, attempt.status, attempt.assistantMessageId,
   ]) ?? []);
   useEffect(() => {
     let cancelled = false;

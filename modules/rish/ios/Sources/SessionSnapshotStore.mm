@@ -3448,6 +3448,38 @@ typedef NS_ENUM(NSInteger, DSHSessionAtomicWriteResult) {
   DSHSessionAtomicWriteUnknown = 2,
 };
 
+// Parsing and validating a megabyte envelope is a pure function of its bytes,
+// and one checkpoint reads the same file three or four times (authority read,
+// CAS pre-check, CAS re-check, post-write verification). Remember the last
+// validated envelope by exact byte equality; identity, protection and
+// tombstone checks are still performed on every read.
+@interface DSHSessionValidatedEnvelope : NSObject
+@property(nonatomic, strong) NSData *bytes;
+@property(nonatomic, strong) NSDictionary *envelope;
+@property(nonatomic, strong) NSDictionary *session;
+@property(nonatomic, copy) NSString *digest;
+@property(nonatomic) NSUInteger generation;
+@property(nonatomic, strong) NSArray *commits;
+@end
+@implementation DSHSessionValidatedEnvelope
+@end
+
+static DSHSessionValidatedEnvelope *DSHSessionValidatedEnvelopeCached(NSData *raw) {
+  static DSHSessionValidatedEnvelope *cached;
+  @synchronized (DSHSessionValidatedEnvelope.class) {
+    if (raw == nil) return nil;
+    if (cached != nil && [cached.bytes isEqualToData:raw]) return cached;
+    return nil;
+  }
+}
+
+static void DSHSessionValidatedEnvelopeRemember(DSHSessionValidatedEnvelope *entry) {
+  static DSHSessionValidatedEnvelope *cached;
+  @synchronized (DSHSessionValidatedEnvelope.class) {
+    cached = entry;
+  }
+}
+
 @interface DSHSessionSnapshotStore ()
 @property(nonatomic, readwrite, strong) NSURL *sessionURL;
 @property(nonatomic, readwrite, strong) NSURL *rootURL;
@@ -4372,8 +4404,9 @@ NSString *DSHSessionSnapshotStoreLaunchInstanceId(void) {
     return state;
   }
   if (raw == nil) return nil;
+  DSHSessionValidatedEnvelope *remembered = DSHSessionValidatedEnvelopeCached(raw);
   NSError *parseError = nil;
-  NSDictionary *envelope = DSHSessionParseObject(
+  NSDictionary *envelope = remembered != nil ? remembered.envelope : DSHSessionParseObject(
       raw, DSHSessionSnapshotStoreErrorCorrupt, &parseError);
   if (envelope == nil) {
     if (error != nullptr) *error = parseError ?: DSHSessionStoreError(
@@ -4421,14 +4454,28 @@ NSString *DSHSessionSnapshotStoreLaunchInstanceId(void) {
     NSUInteger generation = 0;
     NSArray *commits = nil;
     NSError *validationError = nil;
-    if (![self validateV3Envelope:envelope
-                          session:&session
-                           digest:&digest
-                       generation:&generation
-                          commits:&commits
-                            error:&validationError]) {
+    if (remembered != nil) {
+      session = remembered.session;
+      digest = remembered.digest;
+      generation = remembered.generation;
+      commits = remembered.commits;
+    } else if (![self validateV3Envelope:envelope
+                                 session:&session
+                                  digest:&digest
+                              generation:&generation
+                                 commits:&commits
+                                   error:&validationError]) {
       if (error != nullptr) *error = validationError;
       return nil;
+    } else {
+      DSHSessionValidatedEnvelope *entry = [[DSHSessionValidatedEnvelope alloc] init];
+      entry.bytes = raw;
+      entry.envelope = envelope;
+      entry.session = session;
+      entry.digest = digest;
+      entry.generation = generation;
+      entry.commits = commits;
+      DSHSessionValidatedEnvelopeRemember(entry);
     }
     DSHSessionLoadedState *state = [[DSHSessionLoadedState alloc] init];
     NSError *protectionError = nil;
@@ -5751,10 +5798,8 @@ static NSDictionary *DSHSessionClearanceResult(NSString *status,
 #pragma mark - Candidate digest (shared JS/native contract)
 
 + (nullable NSString *)candidateDigestForSessionJSON:(NSString *)candidateJSON {
-  // Mirrors the CAS candidate path byte for byte: UTF-8 bounds, strict parse,
-  // schema-9 shape, canonical JSON, domain-separated SHA-256. Anything the CAS
-  // would refuse digests to nil here, so a caller can never hold a digest the
-  // store would not have minted.
+  // UTF-8 bounds, strict parse, schema-9 root, canonical JSON and the
+  // domain-separated SHA-256 the CAS mints as session_sha256.
   if (![candidateJSON isKindOfClass:NSString.class]) return nil;
   NSData *bytes = [candidateJSON dataUsingEncoding:NSUTF8StringEncoding
                               allowLossyConversion:NO];
@@ -5764,7 +5809,12 @@ static NSDictionary *DSHSessionClearanceResult(NSString *status,
   }
   NSDictionary *candidate = DSHSessionParseObject(
       bytes, DSHSessionSnapshotStoreErrorInvalidArgument, nullptr);
-  if (candidate == nil || !DSHSessionValidateSchema9Root(candidate)) return nil;
+  // Same acceptance as the JS implementation this replaces: a JSON object
+  // whose schema_version is 9 and that canonicalises. The CAS path still
+  // applies the full schema-9 validation before anything is written.
+  if (candidate == nil || !DSHSessionExactSchema(candidate[@"schema_version"], 9)) {
+    return nil;
+  }
   return DSHSessionHashObject(@"chat-session", candidate, nullptr,
                               DSHSessionSnapshotStoreErrorInvalidArgument);
 }
