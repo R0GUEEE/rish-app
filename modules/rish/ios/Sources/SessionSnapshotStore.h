@@ -125,6 +125,15 @@ typedef BOOL (^DSHSessionSnapshotStoreFaultHook)(
 - (nullable NSDictionary *)queryWorkspaceClearance:(NSDictionary *)request
                                               error:(NSError **)error;
 
+/// Digest of a schema-9 session candidate under the shared JS/native
+/// contract: SHA-256 over "rish.chat-session.v1\0" + canonical JSON, exactly
+/// the value the CAS path mints as `session_sha256`. Pure function of the
+/// candidate bytes: no lock, no disk, no store state. nil when the candidate
+/// is not a valid schema-9 session. Exposed so the bridge can answer the JS
+/// side synchronously instead of JS re-hashing the whole session in the
+/// interpreter on every checkpoint.
++ (nullable NSString *)candidateDigestForSessionJSON:(NSString *)candidateJSON;
+
 @end
 
 @compatibility_alias SessionSnapshotStore DSHSessionSnapshotStore;

@@ -1,5 +1,6 @@
 #import <Foundation/Foundation.h>
 #import <React/RCTBridgeModule.h>
+#import <os/log.h>
 
 #import "SessionSnapshotStore.h"
 #import "WorkspaceClearanceStore.h"
@@ -901,6 +902,22 @@ RCT_REMAP_METHOD(queryWorkspaceClearance,
     return [store queryWorkspaceClearance:(NSDictionary *)forwardedRequest
                                      error:error];
   }];
+}
+
+// Synchronous on purpose: a pure digest of the candidate bytes that runs on
+// the calling JS thread. It never touches the shared queue, the CAS lock or
+// the store, so it cannot reorder or block a persist. JS uses it to replace
+// its interpreter-side SHA-256 of the whole session; when the method is
+// missing or answers nil, JS falls back to its own implementation.
+RCT_EXPORT_BLOCKING_SYNCHRONOUS_METHOD(sessionCandidateDigest:(id)candidate) {
+  if (![candidate isKindOfClass:NSString.class]) return nil;
+  CFAbsoluteTime began = CFAbsoluteTimeGetCurrent();
+  NSString *digest = [DSHSessionSnapshotStore candidateDigestForSessionJSON:candidate];
+  os_log_debug(OS_LOG_DEFAULT,
+               "session_candidate_digest bytes=%{public}lu ok=%{public}d elapsed_ms=%{public}.1f",
+               (unsigned long)[(NSString *)candidate length], digest != nil,
+               (CFAbsoluteTimeGetCurrent() - began) * 1000.0);
+  return digest;
 }
 
 @end

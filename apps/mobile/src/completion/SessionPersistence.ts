@@ -1,3 +1,4 @@
+import { sessionCandidateDigestSync } from '../native/SessionSnapshots';
 import { parseStrictJSON, safeHydrateChatState } from '../state/persistence';
 import type { CompletionVisibleMessageV2 } from './types';
 
@@ -528,7 +529,49 @@ function candidateIsSchema9(value: string): boolean {
   }
 }
 
+// One checkpoint digests the same candidate string several times (the write
+// path, the post-commit check and the store transaction all re-derive it), so
+// remember the last few results by value. The digest is a pure function of
+// the string, and Hermes compares equal-length strings with a memcmp, which is
+// far cheaper than any digest.
+const DIGEST_MEMO_ENTRIES = 4;
+const digestMemo: Array<{ readonly value: string; readonly digest: string }> = [];
+
+function rememberedDigest(value: string): string | null {
+  for (let index = 0; index < digestMemo.length; index += 1) {
+    const entry = digestMemo[index]!;
+    if (entry.value === value) return entry.digest;
+  }
+  return null;
+}
+
+function rememberDigest(value: string, digest: string): void {
+  if (digestMemo.length >= DIGEST_MEMO_ENTRIES) digestMemo.shift();
+  digestMemo.push({ value, digest });
+}
+
 function candidateSessionDigest(value: string): string | null {
+  if (
+    typeof value !== 'string' ||
+    value.length === 0 ||
+    value.length > MAX_SESSION_BYTES
+  ) {
+    return null;
+  }
+  const remembered = rememberedDigest(value);
+  if (remembered !== null) return remembered;
+  const digest = computeCandidateSessionDigest(value);
+  if (digest !== null) rememberDigest(value, digest);
+  return digest;
+}
+
+function computeCandidateSessionDigest(value: string): string | null {
+  try {
+    // The bridge module may be mocked or absent; a missing fast path is the
+    // pure-JS path, never a failure.
+    const native = sessionCandidateDigestSync(value);
+    if (typeof native === 'string') return native;
+  } catch {}
   try {
     const parsed = parseStrictJSON(value);
     if (

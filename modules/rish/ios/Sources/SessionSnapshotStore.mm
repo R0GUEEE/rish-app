@@ -5748,4 +5748,25 @@ static NSDictionary *DSHSessionClearanceResult(NSString *status,
   return result;
 }
 
+#pragma mark - Candidate digest (shared JS/native contract)
+
++ (nullable NSString *)candidateDigestForSessionJSON:(NSString *)candidateJSON {
+  // Mirrors the CAS candidate path byte for byte: UTF-8 bounds, strict parse,
+  // schema-9 shape, canonical JSON, domain-separated SHA-256. Anything the CAS
+  // would refuse digests to nil here, so a caller can never hold a digest the
+  // store would not have minted.
+  if (![candidateJSON isKindOfClass:NSString.class]) return nil;
+  NSData *bytes = [candidateJSON dataUsingEncoding:NSUTF8StringEncoding
+                              allowLossyConversion:NO];
+  if (bytes == nil || bytes.length == 0 ||
+      bytes.length > DSHSessionSnapshotMaximumBytes) {
+    return nil;
+  }
+  NSDictionary *candidate = DSHSessionParseObject(
+      bytes, DSHSessionSnapshotStoreErrorInvalidArgument, nullptr);
+  if (candidate == nil || !DSHSessionValidateSchema9Root(candidate)) return nil;
+  return DSHSessionHashObject(@"chat-session", candidate, nullptr,
+                              DSHSessionSnapshotStoreErrorInvalidArgument);
+}
+
 @end

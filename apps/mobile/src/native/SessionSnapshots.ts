@@ -660,6 +660,29 @@ function resolveNativeMethods(): NativeSessionSnapshots | null {
   return legacy ?? validatedNativeMethods(turboNative());
 }
 
+// Optional digest fast path; it stays out of nativeMethodNames and the
+// NativeSessionSnapshots contract on purpose so native builds (and jest
+// mocks) without it keep working and callers fall back to pure JS.
+export function sessionCandidateDigestSync(
+  candidateJSON: string,
+): string | null {
+  try {
+    const nativeObject: unknown = legacyNative() ?? turboNative();
+    if (typeof nativeObject !== 'object' || nativeObject === null) {
+      return null;
+    }
+    const method = Reflect.get(nativeObject, 'sessionCandidateDigest');
+    if (typeof method !== 'function') return null;
+    const callable = method.bind(nativeObject) as (
+      candidateJSON: string,
+    ) => unknown;
+    const result = callable(candidateJSON);
+    return digest(result) ? result : null;
+  } catch {
+    return null;
+  }
+}
+
 async function callNative<T>(
   method: keyof NativeSessionSnapshots,
   request: unknown,

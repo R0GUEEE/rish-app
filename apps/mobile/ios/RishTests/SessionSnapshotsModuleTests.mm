@@ -12,6 +12,7 @@ typedef void (^DSHSessionReject)(NSString *code, NSString *message,
 
 @protocol DSHSessionSnapshotsModuleTesting <NSObject>
 - (instancetype)initWithStore:(DSHSessionSnapshotStore *)store;
+- (nullable id)sessionCandidateDigest:(id)candidate;
 - (void)loadSessionSnapshotWithResolver:(DSHSessionResolve)resolve
                                rejecter:(DSHSessionReject)reject;
 - (void)casPersistSessionRequest:(id)request
@@ -284,6 +285,12 @@ static NSString *const DSHSessionModuleOperation =
       @"persistSessionWithWorkspaceClearanceRequest:resolver:rejecter:")]);
   XCTAssertTrue([cls instancesRespondToSelector:NSSelectorFromString(
       @"queryWorkspaceClearanceRequest:resolver:rejecter:")]);
+  // Synchronous digest fast path: exported with the blocking-sync macro, so
+  // the selector carries only the candidate argument (self, _cmd, candidate).
+  SEL digestSelector = NSSelectorFromString(@"sessionCandidateDigest:");
+  XCTAssertTrue([cls instancesRespondToSelector:digestSelector]);
+  XCTAssertEqual([[cls instanceMethodSignatureForSelector:digestSelector]
+                      numberOfArguments], 3u);
 
   SEL loadSelector = NSSelectorFromString(
       @"loadSessionSnapshotWithResolver:rejecter:");
@@ -1044,6 +1051,81 @@ static NSString *const DSHSessionModuleOperation =
     [rejected fulfill];
   }];
   [self waitForExpectations:@[ rejected ] timeout:2];
+}
+
+// JS parity constants: sessionSnapshotSHA256() over the same shared fixtures,
+// recorded from the pure-JS implementation in apps/mobile (SessionPersistence).
+static NSString *const DSHSessionDigestParityBeginRound =
+    @"ec84b5ee47814d689598afd62c056940af2fdd723e951a094e71e00cd7eacd53";
+static NSString *const DSHSessionDigestParityInterruptedRecovery =
+    @"eca528ffb764538d2fffad800659dcdba44e1839a7c169be3a02a6ed707bcc60";
+
+- (NSString *)sharedFixtureTextNamed:(NSString *)name {
+  NSURL *url = [[NSBundle bundleForClass:self.class] URLForResource:name
+                                                     withExtension:@"json"];
+  XCTAssertNotNil(url, @"missing shared fixture %@", name);
+  NSString *text = url == nil ? nil
+      : [NSString stringWithContentsOfURL:url encoding:NSUTF8StringEncoding
+                                     error:nil];
+  XCTAssertNotNil(text);
+  return text;
+}
+
+- (void)testSessionCandidateDigestMatchesJSAndCommittedSha256WithoutTouchingTheStore {
+  id<DSHSessionSnapshotsModuleTesting> module = [self moduleWithStore:self.store];
+  NSString *beginRound = [self sharedFixtureTextNamed:@"agent-begin-round-session"];
+  NSString *recovery =
+      [self sharedFixtureTextNamed:@"agent-interrupted-recovery-session"];
+
+  // Pure: digesting must not create, lock or read the session file.
+  XCTAssertEqualObjects([(id)module sessionCandidateDigest:beginRound],
+                        DSHSessionDigestParityBeginRound);
+  XCTAssertEqualObjects([(id)module sessionCandidateDigest:recovery],
+                        DSHSessionDigestParityInterruptedRecovery);
+  NSError *error = nil;
+  NSDictionary *loaded = [self.store loadSessionSnapshotWithError:&error];
+  XCTAssertEqualObjects(loaded[@"status"], @"missing");
+  XCTAssertNil(error);
+
+  // Same value the CAS path mints for that candidate.
+  NSDictionary *committed = [self.store casPersistSession:@{
+    @"schema_version" : @1,
+    @"operation_id" : @"aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+    @"expected" : @{ @"schema_version" : @1, @"kind" : @"missing" },
+    @"candidate_json" : beginRound,
+  } error:&error];
+  XCTAssertEqualObjects(committed[@"status"], @"committed", @"%@", error);
+  XCTAssertEqualObjects(committed[@"snapshot"][@"session_sha256"],
+                        DSHSessionDigestParityBeginRound);
+
+  // Formatting-insensitive (canonical JSON), content-sensitive.
+  NSData *reparsed = [NSJSONSerialization
+      dataWithJSONObject:[NSJSONSerialization JSONObjectWithData:
+          [beginRound dataUsingEncoding:NSUTF8StringEncoding] options:0 error:nil]
+                 options:NSJSONWritingPrettyPrinted error:nil];
+  XCTAssertEqualObjects([(id)module sessionCandidateDigest:
+      [[NSString alloc] initWithData:reparsed encoding:NSUTF8StringEncoding]],
+                        DSHSessionDigestParityBeginRound);
+  NSString *edited = [beginRound stringByReplacingOccurrencesOfString:@"\"schema_version\":9"
+                                                            withString:@"\"schema_version\": 9"];
+  XCTAssertEqualObjects([(id)module sessionCandidateDigest:edited],
+                        DSHSessionDigestParityBeginRound);
+  XCTAssertNotEqualObjects([(id)module sessionCandidateDigest:recovery],
+                           DSHSessionDigestParityBeginRound);
+
+  // Anything the CAS would refuse digests to nil: wrong type, empty, not an
+  // object, not schema 9, malformed JSON.
+  XCTAssertNil([(id)module sessionCandidateDigest:@42]);
+  XCTAssertNil([(id)module sessionCandidateDigest:NSNull.null]);
+  XCTAssertNil([(id)module sessionCandidateDigest:@""]);
+  XCTAssertNil([(id)module sessionCandidateDigest:@"[]"]);
+  XCTAssertNil([(id)module sessionCandidateDigest:@"{}"]);
+  XCTAssertNil([(id)module sessionCandidateDigest:@"{\"schema_version\":8}"]);
+  XCTAssertNil([(id)module sessionCandidateDigest:
+      [beginRound stringByAppendingString:@"}"]]);
+  XCTAssertNil([DSHSessionSnapshotStore candidateDigestForSessionJSON:
+      [beginRound stringByReplacingOccurrencesOfString:@"\"schema_version\":9"
+                                            withString:@"\"schema_version\":10"]]);
 }
 
 @end
