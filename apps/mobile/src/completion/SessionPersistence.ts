@@ -1,5 +1,9 @@
 import { sessionCandidateDigestSync } from '../native/SessionSnapshots';
-import { parseStrictJSON, safeHydrateChatState } from '../state/persistence';
+import {
+  parseStrictJSON,
+  safeHydrateChatState,
+  sessionCandidateIsValid,
+} from '../state/persistence';
 import type { CompletionVisibleMessageV2 } from './types';
 
 export type SessionDurabilityStatus =
@@ -1211,7 +1215,7 @@ export function createSessionPersistenceCoordinator(
       typeof candidateJson !== 'string' ||
       !preflightJSON(candidateJson) ||
       !candidateIsSchema9(candidateJson) ||
-      !safeHydrateChatState(candidateJson).ok ||
+      !sessionCandidateIsValid(candidateJson) ||
       typeof requestRecord.operation_id !== 'string' ||
       !validUuid(requestRecord.operation_id)
     ) return null;
@@ -1292,8 +1296,7 @@ export function createSessionPersistenceCoordinator(
   ): Promise<SessionDurabilityResult> => {
     if (!parsePreflightedJSON(candidate).ok) return RESULTS.unknown;
     if (!candidateIsSchema9(candidate)) return RESULTS.unknown;
-    const hydrated = safeHydrateChatState(candidate);
-    if (!hydrated.ok) return RESULTS.unknown;
+    if (!sessionCandidateIsValid(candidate)) return RESULTS.unknown;
     const candidateDigest = candidateSessionDigest(candidate);
     if (candidateDigest === null) return RESULTS.unknown;
     if (

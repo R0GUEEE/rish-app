@@ -6521,11 +6521,53 @@ export function safeHydrateChatState(
   }
 }
 
+// Every distinct candidate string is validated once; a checkpoint serialises
+// and re-validates the same session several times, so remember the last few
+// strings that passed. Validation stays fail-closed: nothing is trusted
+// until hydrateChatState has accepted exactly that text.
+const VALIDATED_CANDIDATE_ENTRIES = 4;
+const validatedCandidates: string[] = [];
+
+function rememberValidatedCandidate(json: string): void {
+  if (validatedCandidates.length >= VALIDATED_CANDIDATE_ENTRIES) {
+    validatedCandidates.shift();
+  }
+  validatedCandidates.push(json);
+}
+
+function isValidatedCandidate(json: string): boolean {
+  for (let index = 0; index < validatedCandidates.length; index += 1) {
+    if (validatedCandidates[index] === json) return true;
+  }
+  return false;
+}
+
+/**
+ * True when `json` is a session candidate hydrateChatState accepts. Repeats
+ * of a string that already passed are answered from memory.
+ */
+export function sessionCandidateIsValid(json: string): boolean {
+  if (typeof json !== 'string' || json.length === 0) return false;
+  if (isValidatedCandidate(json)) return true;
+  if (!safeHydrateChatState(json).ok) return false;
+  rememberValidatedCandidate(json);
+  return true;
+}
+
 export function serializeChatState(state: ChatState): string {
   try {
     const persisted = toPersistedState(state);
-    hydrateChatState(persisted);
-    return JSON.stringify(persisted);
+    const json = JSON.stringify(persisted);
+    if (typeof json !== 'string') {
+      throw new ChatStateValidationError('$', 'could not serialize chat state');
+    }
+    if (!isValidatedCandidate(json)) {
+      // Validate the text that will be persisted, not the in-memory object:
+      // that is exactly what the native store and every later reader see.
+      hydrateChatState(JSON.parse(json));
+      rememberValidatedCandidate(json);
+    }
+    return json;
   } catch (error) {
     if (error instanceof ChatStateValidationError) throw error;
     throw new ChatStateValidationError('$', 'could not serialize chat state');
