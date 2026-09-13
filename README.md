@@ -10,7 +10,7 @@
 </p>
 
 <p align="center">
-  <strong>DSH · Claude Code · Codex · GLM API</strong><br />
+  <strong>DSH · Claude Code · Codex · GLM</strong><br />
   <sub>首批内置接入 · Rish 原生适配器</sub>
 </p>
 
@@ -29,7 +29,7 @@
 
 Rish 把 Agent 的会话、工作区和工具执行放进手机。选一个模型，交代任务，在本机查看过程、批准操作、保留结果，无需电脑常驻。用途不限于编程。
 
-> **实验性源码预览准备中。** 当前 iOS 支持本地文件、Git 与受控 Agent 执行；Android 支持 API 对话和会话保存，本地工具执行仍在开发。暂未提供正式安装包。
+> **实验性源码预览准备中，暂未提供正式安装包。** 平台范围与账号/订阅验证状态见下方[平台与模型](#平台与模型)。
 
 ## 首批内置接入
 
@@ -45,26 +45,30 @@ Rish 把 Agent 的会话、工作区和工具执行放进手机。选一个模�
 <td align="center" width="25%">
   <img src="./apps/mobile/src/assets/harness/claude-color.svg" alt="Claude Code" width="40" height="40" /><br />
   <strong>Claude Code</strong><br />
-  <sub>Anthropic · Messages API</sub>
+  <sub>Anthropic · API Key / 订阅登录¹</sub>
 </td>
 <td align="center" width="25%">
   <img src="./apps/mobile/src/assets/harness/codex-color.svg" alt="Codex" width="40" height="40" /><br />
   <strong>Codex</strong><br />
-  <sub>OpenAI · Responses API</sub>
+  <sub>OpenAI · API Key / 订阅登录¹</sub>
 </td>
 <td align="center" width="25%">
   <img src="./apps/mobile/src/assets/harness/zai.svg" alt="GLM" width="40" height="40" /><br />
-  <strong>GLM API</strong><br />
-  <sub>智谱 · 兼容 Messages API</sub>
+  <strong>GLM</strong><br />
+  <sub>智谱 · API Key / 订阅登录¹</sub>
 </td>
 </tr>
 </table>
 
-在 App 中选择 Harness、配置自己的 Key，围绕手机里的文件和项目开始任务。首批采用 Rish 内置的原生 API 适配器，工作区、工具授权与执行记录由 Rish 管理；具体平台支持见下方表格。
+¹ 订阅登录目前限 iOS：智谱 BigModel Coding Lite 已验证；Codex 和 Claude Code 需要可选实验构建。详细验证范围见下方。
 
-当前内置的是这些名称对应的 API 适配能力，完整官方 CLI 与订阅登录另见[实验状态](docs/ios-harness-auth-status.md)。
+选择 Harness，通过 API Key 或当前构建支持的账号登录接入模型，再围绕手机里的文件和项目开始任务。Rish 管理 Agent 循环、工作区、工具审批与执行记录；内置适配器负责连接模型服务。
 
-智谱的官方 Agent 产品名是 [ZCode](https://zcode.z.ai/cn/docs/agents)，GLM 是模型系列。iOS 已实测 BigModel 账号登录、重开保留，以及个人 Coding Plan 的 GLM-5.3 调用；体验额度通道仍待验证。ZCode 运行时尚未集成，详见[账号接入状态](docs/zcode-account-login.md)。
+**账号与订阅验证（iOS）**
+
+- **Codex**：可选实验构建已实测官方 CLI 设备登录、订阅 `gpt-5.6-luna` 文本对话、本地 `list_dir` 工具调用及重启后保留；官方 CLI 仅用于登录，并非所有工具和模型都已验证。
+- **GLM**：智谱官方 Agent 产品名是 [ZCode](https://zcode.z.ai/cn/docs/agents)，GLM 是模型系列。已实测 BigModel 账号登录、重开保留，以及 Coding Lite 套餐的 GLM-5.3 调用；体验额度通道未验证。ZCode 官方运行时尚未集成。
+- **Claude Code**：可选 iOS 实验构建已实测订阅登录、Haiku 4.5 文本回复及重启后保留，请求由未修改的官方 CLI 发起。目前仅支持文本，工具及附件尚未开放；实测整轮约 4 分半，性能仍需优化。
 
 ## 产品导览
 
@@ -89,7 +93,7 @@ Rish 把 Agent 的会话、工作区和工具执行放进手机。选一个模�
 </tr>
 </table>
 
-以上均为真实模拟器截图；模型入口图展示界面，不代表官方 CLI 或订阅登录已验证。
+以上均为真实模拟器截图，展示当前实际界面与执行流程。
 
 ## 为什么用 Rish
 
@@ -106,7 +110,7 @@ Rish 把 Agent 的会话、工作区和工具执行放进手机。选一个模�
 
 ### 模型由你选
 
-从内置的 DSH、Claude Code、Codex 与 GLM API 入口开始，也可配置兼容的 API 服务与模型映射。模型负责生成下一步，手机上的工具执行操作。
+从内置的 DSH、Claude Code、Codex 与 GLM 入口开始，也可配置兼容的 API 服务与模型映射。模型负责生成下一步，手机上的工具执行操作。
 
 </td>
 </tr>
@@ -163,12 +167,10 @@ Rish 的受控工具在手机本地执行，会话和工作区由 App 管理。�
 | 模型接入 | 当前方式 |
 | --- | --- |
 | DeepSeek / DSH | API Key、可编辑模型目录；能力取决于具体模型和平台。 |
-| GLM | API Key；iOS 独立账号授权已验证 BigModel Coding Lite 的 GLM-5.3 调用，体验套餐仍待验证。 |
-| Codex | API 适配；可选 iOS 实验包已实测订阅登录、Luna 对话与手机本地目录工具调用。 |
-| Claude Code | API 适配，可配置兼容服务；订阅登录仍待验证。 |
+| GLM | API Key；可选 BigModel/Z.ai 账号连接，验证进度见上方状态。 |
+| Codex | API 适配；可选 iOS 实验构建支持订阅登录，验证进度见上方状态。 |
+| Claude Code | API 适配，可配置兼容服务；可选 iOS 实验构建已验证订阅文本调用，范围与性能见上方。 |
 | 自定义服务 | iOS 可选择 Messages、Responses 或 Chat Completions 协议及模型映射。 |
-
-Codex 订阅接入仍需可选实验构建，并不代表完整官方 CLI 兼容。详见[订阅登录状态](docs/ios-harness-auth-status.md)。
 
 ## 开始使用
 
@@ -192,7 +194,7 @@ npm run ios --prefix apps/mobile
 
 **Android：** 配置好 Android 开发环境后运行 `npm run android --prefix apps/mobile`。[独立测试 APK 的构建方法](docs/development.md#install-and-run-the-react-native-app)另见开发文档。
 
-打开 App 后，选择模型并配置自己的 Key。iOS 上创建或选择项目，确认项目上下文，再开始任务。Key 由原生安全存储保管，请勿放进源码或提交记录。
+打开 App 后，选择模型，通过 API Key 或该构建支持的账号入口连接。iOS 上创建或选择项目，确认项目上下文，再开始任务。Codex 和 Claude Code 订阅登录需要[可选实验构建](docs/ios-harness-auth-status.md)；BigModel 账号接入见[说明](docs/zcode-account-login.md)。凭据由原生安全存储保管。
 
 ## 进展与参与
 

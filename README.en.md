@@ -2,15 +2,15 @@
   <img src="./brand/rish-readme-icon.svg" alt="Rish" width="96" />
 </p>
 
-<h1 align="center">Rish, your pocket Agent.</h1>
+<h1 align="center">Rish, your pocket agent.</h1>
 
 <p align="center">
-  <strong>Execute on your phone. Connect your choice of model.</strong><br />
+  <strong>Run locally. Choose your model.</strong><br />
   <sub>Local workspaces · Model choice · Tool execution · Approvals</sub>
 </p>
 
 <p align="center">
-  <strong>DSH · Claude Code · Codex · GLM API</strong><br />
+  <strong>DSH · Claude Code · Codex · GLM</strong><br />
   <sub>Built-in connections · Native Rish adapters</sub>
 </p>
 
@@ -31,10 +31,9 @@ Rish brings Agent conversations, workspaces, and tool execution to your phone.
 Choose a model, describe a task, inspect the work, and approve changes without
 keeping a computer running. Coding is one of its uses, not its only purpose.
 
-> **Preparing an experimental source preview.** iOS supports local Files, Git,
-> and controlled Agent tools. Android supports API chat and session storage;
-> local tool execution is still in development. No stable installable release
-> is available yet.
+> **Preparing an experimental source preview; no stable installable release
+> yet.** Platform scope and account/subscription verification status are
+> summarized in [Platforms and models](#platforms-and-models).
 
 ## Built-in connections
 
@@ -50,34 +49,43 @@ keeping a computer running. Coding is one of its uses, not its only purpose.
 <td align="center" width="25%">
   <img src="./apps/mobile/src/assets/harness/claude-color.svg" alt="Claude Code" width="40" height="40" /><br />
   <strong>Claude Code</strong><br />
-  <sub>Anthropic · Messages API</sub>
+  <sub>Anthropic · API key / Subscription sign-in¹</sub>
 </td>
 <td align="center" width="25%">
   <img src="./apps/mobile/src/assets/harness/codex-color.svg" alt="Codex" width="40" height="40" /><br />
   <strong>Codex</strong><br />
-  <sub>OpenAI · Responses API</sub>
+  <sub>OpenAI · API key / Subscription sign-in¹</sub>
 </td>
 <td align="center" width="25%">
   <img src="./apps/mobile/src/assets/harness/zai.svg" alt="GLM" width="40" height="40" /><br />
-  <strong>GLM API</strong><br />
-  <sub>Zhipu · Messages-compatible API</sub>
+  <strong>GLM</strong><br />
+  <sub>Zhipu · API key / Subscription sign-in¹</sub>
 </td>
 </tr>
 </table>
 
-Select a Harness, configure your own key, and work with files and projects on
-your phone. This first set uses native API adapters built into Rish, which
-manages the workspace, tool approvals, and execution records. Platform
-availability is listed below.
+¹ Subscription sign-in is currently iOS-only. BigModel Coding Lite is verified; Codex and Claude Code require the optional experimental build. See the verification details below.
 
-These entries provide API adaptation under the listed names. Full official CLI
-and subscription-login support have a separate [experimental status](docs/ios-harness-auth-status.md).
+Choose a harness and connect with an API key or an account supported by your
+build. Then start working with files and projects on your phone. Rish manages
+the agent loop, workspace, tool approvals, and execution records; the built-in
+adapters connect to model services.
 
-[ZCode](https://zcode.z.ai/en/docs/agents) is Zhipu's agent product; GLM is the
-model family. iOS now includes a separate account connection: BigModel sign-in
-and restart persistence have been verified, along with a real GLM-5.3 response
-using a personal Coding Plan. Trial allowance remains unverified. The ZCode runtime is not integrated.
-See [account connection status](docs/zcode-account-login.md).
+**Account and subscription verification (iOS)**
+
+- **Codex**: the optional experimental build has verified official-CLI device
+  login, a subscription `gpt-5.6-luna` text chat, a local `list_dir` tool call,
+  and persistence across restart. The official CLI is used only for login; not
+  all tools and models are verified.
+- **GLM**: [ZCode](https://zcode.z.ai/en/docs/agents) is Zhipu's agent product;
+  GLM is the model family. BigModel sign-in, restart persistence, and a Coding
+  Lite GLM-5.3 response are verified; the trial allowance is not. The official
+  ZCode runtime is not integrated.
+- **Claude Code**: the optional iOS experimental build has verified subscription
+  login, a Haiku 4.5 text response through the unmodified official CLI, and
+  persistence across restart.
+  This path currently supports text only, without tools or attachments. A
+  measured turn took about 4.5 minutes; performance still needs work.
 
 ## Product tour
 
@@ -103,8 +111,7 @@ Click a screenshot to open the original.
 </tr>
 </table>
 
-All captures are from actual Simulators. The adapter screen demonstrates the
-UI, not verified official CLI or subscription-login support.
+All captures are from actual Simulators, showing the current UI and workflow.
 
 ## Why Rish
 
@@ -122,7 +129,7 @@ read files, review project changes, and continue working in one app.
 
 ### Choose your model
 
-Start with the built-in DSH, Claude Code, Codex, and GLM API entries, or configure
+Start with the built-in DSH, Claude Code, Codex, and GLM entries, or configure
 a compatible API service and model mappings. The model proposes the next step;
 local tools perform the operation.
 
@@ -188,13 +195,10 @@ verified capabilities from experimental paths.
 | Connection | Current method |
 | --- | --- |
 | DeepSeek / DSH | API key and editable model catalog; capabilities depend on the model and platform. |
-| GLM | API key, plus a separate iOS account connection. BigModel Coding Lite requests with GLM-5.3 are verified; trial access remains unverified. |
-| Codex | API adapter; the optional iOS experiment has verified subscription login, Luna chat, and an on-device directory tool call. |
-| Claude Code | API adapter with compatible-service configuration; subscription login remains unverified. |
+| GLM | API key, plus an optional BigModel/Z.ai account connection; see the status above. |
+| Codex | API adapter; the optional iOS experimental build adds subscription sign-in — see the status above. |
+| Claude Code | API adapter with compatible-service configuration; subscribed text calls are verified in the optional iOS build, with the scope and latency noted above. |
 | Custom services | On iOS, select Messages, Responses, or Chat Completions and configure model mappings. |
-
-Codex subscription access requires the optional experimental build and does not
-establish full official CLI compatibility. See [auth status](docs/ios-harness-auth-status.md).
 
 ## Get started
 
@@ -222,9 +226,11 @@ npm run ios --prefix apps/mobile
 `npm run android --prefix apps/mobile`. The developer guide also covers
 [standalone test APKs](docs/development.md#install-and-run-the-react-native-app).
 
-In the app, select a model and configure your key. On iOS, create or select a
-project and confirm its context before starting a task. Keys use native secure
-storage; do not put them in source or commits.
+Open the app, choose a model, and connect with an API key or a supported account.
+On iOS, create or select a project, review its context, and start a task. Codex and Claude Code
+subscription sign-in requires the [optional experimental build](docs/ios-harness-auth-status.md);
+see the [account guide](docs/zcode-account-login.md) for BigModel. Credentials
+stay in native secure storage.
 
 ## Progress and contributing
 
