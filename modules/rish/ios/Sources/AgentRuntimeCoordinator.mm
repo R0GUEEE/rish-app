@@ -8,6 +8,7 @@
 #import "AgentToolBatchService.h"
 #import "AgentToolExecutionService.h"
 #import "AgentTranscriptStore.h"
+#import "SessionWorkspaceCoordinator.h"
 
 @interface DSHAgentProviderRoundService (DSHRuntimeAvailability)
 @property(nonatomic, copy, readonly)
@@ -24,6 +25,12 @@
 @property(nonatomic, strong, readonly) DSHAgentPreparedAttemptStore *preparedStore;
 @property(nonatomic, strong, readonly) DSHAgentTranscriptStore *transcripts;
 @end
+
+static NSDictionary *DSHRuntimeSerializedResult(NSDictionary *(^operation)(void)) {
+  __block NSDictionary *result = nil;
+  DSHSessionWorkspacePerformSync(^{ result = operation(); });
+  return result;
+}
 
 static NSDictionary *DSHRuntimeRequest(id request, NSArray<NSString *> *keys,
                                        NSError **error) {
@@ -223,7 +230,7 @@ static BOOL DSHRuntimeCancelSourceProof(
       [token[@"token"] isEqual:token[@"source_event_id"]] &&
       DSHAgentCanonicalUUID(token[@"task_id"]) &&
       DSHAgentCanonicalUUID(token[@"attempt_id"]) &&
-      [@[@"round_in_flight", @"approval_pending", @"execution_intent",
+      [@[@"ready_for_round", @"batch_frozen", @"round_in_flight", @"approval_pending", @"execution_intent",
          @"tool_result_pending"] containsObject:token[@"expected_phase"]] &&
       [@[@"E_AGENT_CANCELLED", @"E_AGENT_ROOT_STALE",
          @"E_AGENT_PERSISTENCE"] containsObject:token[@"reason_code"]] &&
@@ -1157,6 +1164,17 @@ static NSArray *DSHRuntimeLatestBatchCalls(NSDictionary *state,
                                           error);
     }
   }
+  if (row == nil && [kind isEqual:@"attempt"] &&
+      [request[@"cancel_token"][@"expected_phase"] isEqual:@"ready_for_round"] &&
+      DSHRuntimeLatestRound(state, target[@"task_id"], target[@"attempt_id"]) == nil) {
+    NSDictionary *result = @{ @"schema_version" : @2, @"status" : @"cancelled",
+      @"operation_id" : request[@"operation_id"], @"target" : target,
+      @"result_round_revision" : NSNull.null, @"result_execution_revision" : NSNull.null,
+      @"transcript" : request[@"expected_transcript"], @"receipt" : NSNull.null,
+      @"effect_may_have_occurred" : @NO,
+      @"observed_checkpoint" : request[@"committed_checkpoint"] };
+    return DSHRuntimeCommitCancelResult(self.wal, request, started, result, error);
+  }
   if (row == nil) {
     NSDictionary *result = @{ @"schema_version" : @2, @"status" : @"unknown",
       @"operation_id" : request[@"operation_id"], @"target" : target,
@@ -1211,6 +1229,8 @@ static NSArray *DSHRuntimeLatestBatchCalls(NSDictionary *state,
 
 - (NSDictionary *)recoverAgentAttempt:(NSDictionary *)rawRequest
                                   error:(NSError **)error {
+  __block NSDictionary *(^awaitRetry)(void) = nil;
+  NSDictionary *preparedResult = DSHRuntimeSerializedResult(^NSDictionary *{
   NSDictionary *request = DSHRuntimeRequest(rawRequest, @[
     @"schema_version", @"operation_id", @"controller_cas",
     @"committed_checkpoint", @"target", @"action",
@@ -1301,10 +1321,23 @@ static NSArray *DSHRuntimeLatestBatchCalls(NSDictionary *state,
     return started[@"result"][@"result"];
   }
   if (started == nil) return nil;
-  NSDictionary *completedRound = nil;
-  NSString *status = [attemptQuery[@"status"] isEqualToString:@"terminal"]
+  NSDictionary *(^finishRecovery)(NSString *, NSString *, NSDictionary *) =
+      ^NSDictionary *(NSString *status, NSString *next, NSDictionary *completedRound) {
+  NSDictionary *attemptQuery = queryAttempt(error);
+  if (attemptQuery == nil || ![attemptQuery[@"attempt"] isKindOfClass:NSDictionary.class]) {
+    return nil;
+  }
+  NSDictionary *result = @{ @"schema_version" : @2, @"status" : status,
+    @"operation_id" : request[@"operation_id"], @"next_action" : next,
+    @"attempt" : attemptQuery[@"attempt"],
+    @"completed_round" : completedRound ?: NSNull.null };
+  return DSHRuntimeCommitRecoveryResult(self.wal, request, started, result,
+                                        error);
+  };
+  __block NSDictionary *completedRound = nil;
+  __block NSString *status = [attemptQuery[@"status"] isEqualToString:@"terminal"]
       ? @"terminal" : @"resumed";
-  NSString *next = @"none";
+  __block NSString *next = @"none";
   if ([target[@"kind"] isEqualToString:@"round"]) {
     NSDictionary *roundRecovery = [self.roundService recoverAgentRoundWithRequest:@{
       @"schema_version" : @2, @"task_id" : target[@"task_id"],
@@ -1362,7 +1395,7 @@ static NSArray *DSHRuntimeLatestBatchCalls(NSDictionary *state,
       NSString *childOperation = DSHRuntimeChildOperationID(
           request[@"operation_id"], @"retry-round", error);
       if (childOperation == nil) return nil;
-      NSDictionary *retried = [self.roundService retryFailedAgentRoundV2WithRequest:@{
+      NSDictionary *retryRequest = @{
         @"schema_version" : @2, @"operation_id" : childOperation,
         @"controller_cas" : request[@"controller_cas"],
         @"committed_checkpoint" : request[@"committed_checkpoint"],
@@ -1380,7 +1413,12 @@ static NSArray *DSHRuntimeLatestBatchCalls(NSDictionary *state,
         @"transcript" : request[@"expected_transcript"], @"root" : request[@"root"],
         @"registry_version" : authority[@"registry"][@"registry_version"],
         @"toolset_sha256" : authority[@"registry"][@"toolset_sha256"],
-      } error:error];
+      };
+      // Only the provider continuation leaves the serialized recovery authority.
+      awaitRetry = ^NSDictionary *{
+      NSDictionary *retried = [self.roundService retryFailedAgentRoundV2WithRequest:
+          retryRequest error:error];
+      return DSHRuntimeSerializedResult(^NSDictionary *{
       if (retried == nil) return nil;
       NSString *retryStatus = retried[@"status"];
       if ([retryStatus isEqualToString:@"conflict"]) {
@@ -1418,6 +1456,10 @@ static NSArray *DSHRuntimeLatestBatchCalls(NSDictionary *state,
         status = @"manual_reconciliation";
         next = @"inspect_native_state";
       }
+      return finishRecovery(status, next, completedRound);
+      });
+      };
+      return nil;
     } else if ([roundStatus isEqualToString:@"completed"]) {
       completedRound = roundRecovery[@"completed_round"];
       if (![completedRound isKindOfClass:NSDictionary.class]) {
@@ -1584,16 +1626,9 @@ static NSArray *DSHRuntimeLatestBatchCalls(NSDictionary *state,
       next = @"inspect_native_state";
     }
   }
-  attemptQuery = queryAttempt(error);
-  if (attemptQuery == nil || ![attemptQuery[@"attempt"] isKindOfClass:NSDictionary.class]) {
-    return nil;
-  }
-  NSDictionary *result = @{ @"schema_version" : @2, @"status" : status,
-    @"operation_id" : request[@"operation_id"], @"next_action" : next,
-    @"attempt" : attemptQuery[@"attempt"],
-    @"completed_round" : completedRound ?: NSNull.null };
-  return DSHRuntimeCommitRecoveryResult(self.wal, request, started, result,
-                                        error);
+  return finishRecovery(status, next, completedRound);
+  });
+  return awaitRetry == nil ? preparedResult : awaitRetry();
 }
 
 - (NSDictionary *)finalizeAgentAttempt:(NSDictionary *)rawRequest

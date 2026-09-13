@@ -637,7 +637,9 @@ function validateCancelToken(value: unknown): AgentCancelTokenV2 | null {
     token.token !== token.source_event_id ||
     !uuid(token.task_id) ||
     !uuid(token.attempt_id) ||
-    (token.expected_phase !== 'round_in_flight' &&
+    (token.expected_phase !== 'ready_for_round' &&
+      token.expected_phase !== 'batch_frozen' &&
+      token.expected_phase !== 'round_in_flight' &&
       token.expected_phase !== 'approval_pending' &&
       token.expected_phase !== 'execution_intent' &&
       token.expected_phase !== 'tool_result_pending') ||

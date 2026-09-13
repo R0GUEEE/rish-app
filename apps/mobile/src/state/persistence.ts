@@ -3160,6 +3160,11 @@ export function parsePersistedAgentAttemptJournalV3(
       'does not match the closed phase-lineage matrix',
     );
   }
+  if (phase === 'cancelled' && effectiveLineage === null &&
+      (raw.round_index !== 0 || effectiveBatch.length !== 0 ||
+       raw.call_index !== null || raw.reserved_write_bytes !== 0)) {
+    return invalid(`${path}.phase`, 'an unstarted cancelled attempt cannot contain round effects');
+  }
   if (
     phase === 'approval_pending' &&
     !effectiveBatch.some(

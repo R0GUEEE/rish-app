@@ -1735,9 +1735,10 @@ static BOOL DSHSessionValidateAgentJournal(NSDictionary *journal) {
       (journal[@"call_index"] != NSNull.null || batch.count != 0 ||
        (lineage != nil && ![lineageStatus isEqual:@"ready"]))) return NO;
   if ([phase isEqual:@"round_in_flight"] &&
-      (lineage == nil || ![lineageStatus isEqual:@"active"])) return NO;
+      (lineage == nil || (![lineageStatus isEqual:@"active"] &&
+                          ![lineageStatus isEqual:@"cancel_requested"]))) return NO;
   if (([phase isEqual:@"batch_frozen"] || [phase isEqual:@"approval_pending"] ||
-       [phase isEqual:@"execution_intent"] || [phase isEqual:@"tool_result_pending"]) &&
+       [phase isEqual:@"tool_result_pending"]) &&
       (lineage == nil || ![lineageStatus isEqual:@"completed"])) return NO;
   if ([phase isEqual:@"approval_pending"]) {
     BOOL pending = NO;
@@ -1749,6 +1750,8 @@ static BOOL DSHSessionValidateAgentJournal(NSDictionary *journal) {
     if (!pending) return NO;
   }
   if ([phase isEqual:@"execution_intent"]) {
+    if (lineage == nil || (![lineageStatus isEqual:@"completed"] &&
+                           ![lineageStatus isEqual:@"cancel_requested"])) return NO;
     if (journal[@"call_index"] == NSNull.null) return NO;
     NSDictionary *call = batch[[journal[@"call_index"] unsignedIntegerValue]];
     if (call[@"idempotency_key"] == NSNull.null ||
@@ -1767,6 +1770,8 @@ static BOOL DSHSessionValidateAgentJournal(NSDictionary *journal) {
              isEqual:@"denied"])) return NO;
   }
   if ([phase isEqual:@"cancelled"]) {
+    if (lineage == nil && (![journal[@"round_index"] isEqual:@0] || batch.count != 0 ||
+        journal[@"call_index"] != NSNull.null || ![journal[@"reserved_write_bytes"] isEqual:@0])) return NO;
     for (NSDictionary *call in batch) {
       if (call[@"receipt"] == NSNull.null &&
           ![call[@"approval_decision"] isEqual:@"denied"] &&

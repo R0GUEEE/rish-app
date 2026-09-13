@@ -845,6 +845,8 @@ export type AgentCancelTokenV2 = {
   readonly task_id: string;
   readonly attempt_id: string;
   readonly expected_phase:
+    | 'ready_for_round'
+    | 'batch_frozen'
     | 'round_in_flight'
     | 'approval_pending'
     | 'execution_intent'
@@ -3154,6 +3156,8 @@ function validateCancelToken(value: unknown): AgentCancelTokenV2 {
     !uuid(token.task_id) ||
     !uuid(token.attempt_id) ||
     ![
+      'ready_for_round',
+      'batch_frozen',
       'round_in_flight',
       'approval_pending',
       'execution_intent',

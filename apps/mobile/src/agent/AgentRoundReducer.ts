@@ -212,7 +212,10 @@ function agentPhase(value: unknown): value is AgentAttemptPhase {
 }
 function validState(state: AgentRoundState): boolean {
   if (state.schema_version !== 3 || !agentPhase(state.phase) || !Number.isSafeInteger(state.controller_generation) || state.controller_generation < 0 || !validRoot(state.root) || !validPolicy(state.policy) || !validRegistryVersion(state.tool_registry_version) || !isDigest(state.toolset_sha256) || !validTranscript(state.transcript) || !Number.isSafeInteger(state.round_index) || state.round_index < 0 || state.round_index >= MAX_AGENT_ROUNDS || !Array.isArray(state.batch) || state.batch.length > MAX_AGENT_CALLS_PER_BATCH || !Array.isArray(state.frozen_grant_ids) || state.frozen_grant_ids.length > 2 || state.frozen_grant_ids.some((id, index) => !isCanonicalUuid(id) || state.frozen_grant_ids.indexOf(id) !== index) || !Number.isSafeInteger(state.reserved_write_bytes) || state.reserved_write_bytes < 0 || state.reserved_write_bytes > state.policy.max_attempt_write_bytes || !isCanonicalTimestamp(state.updated_at) || !isAgentPhaseLineageValid(state.phase, state.round_lineage?.status ?? null)) return false;
-  if (state.round_lineage === null) return false;
+  if (state.round_lineage === null) return (
+    (state.phase === 'ready_for_round' || state.phase === 'cancelled') &&
+    state.round_index === 0 && state.batch.length === 0 &&
+    state.call_index === null && state.reserved_write_bytes === 0);
   const lineage = state.round_lineage;
   if (lineage.schema_version !== 2 || !isCanonicalUuid(lineage.round_id) || lineage.round_index !== state.round_index || !Number.isSafeInteger(lineage.launch_attempt) || lineage.launch_attempt < 1 || lineage.launch_attempt > MAX_AGENT_ROUNDS || (lineage.native_row_revision !== null && (!Number.isSafeInteger(lineage.native_row_revision) || lineage.native_row_revision < 1))) return false;
   const ids = new Set<string>();
@@ -454,30 +457,26 @@ export function reduceAgentRound(current: AgentRoundState, action: AgentRoundRed
     }
     case 'cancel': {
       if (evidence?.kind === 'request_cancel') {
-        if (state.phase === 'final_response' || state.phase === 'cancelled' || state.round_lineage === null) return reject(current);
+        if (state.phase === 'final_response' || state.phase === 'cancelled' || (state.round_lineage === null && evidence.target.kind !== 'attempt')) return reject(current);
         const target = evidence.target;
-        if (target.kind === 'round' && (state.round_lineage.round_id !== target.round_id || state.round_index !== target.round_index)) return reject(current);
+        if (target.kind === 'round' && (state.round_lineage?.round_id !== target.round_id || state.round_index !== target.round_index)) return reject(current);
         if (target.kind === 'tool') {
           const call = state.batch[target.call_index];
           if (call === undefined || call.call_id !== target.call_id || call.idempotency_key !== target.idempotency_key) return reject(current);
         }
         if (target.kind === 'round' || target.kind === 'tool') {
-          state.round_lineage = { ...state.round_lineage, status: 'cancel_requested' };
-        } else {
-          state.phase = 'cancelled';
-          state.round_lineage = { ...state.round_lineage, status: 'cancelled' };
-          state.batch = state.batch.map(call => call.receipt === null && call.approval_decision !== 'denied' && call.approval_decision !== 'cancelled' ? { ...call, approval_decision: 'cancelled', approval_token: null, approval_reference: null } : call);
+          state.round_lineage = { ...state.round_lineage!, status: 'cancel_requested' };
         }
         state.updated_at = at;
         return accept(current, state);
       }
-      if (evidence?.kind !== 'cancel_agent_attempt' || state.phase === 'cancelled' || state.phase === 'final_response' || state.round_lineage === null) return reject(current);
+      if (evidence?.kind !== 'cancel_agent_attempt' || state.phase === 'cancelled' || state.phase === 'final_response' || (state.round_lineage === null && evidence.result.target.kind !== 'attempt')) return reject(current);
       const result = evidence.result; state.transcript = { ...result.transcript };
       if (result.target.kind === 'tool' && result.receipt !== null) { const call = state.batch[result.target.call_index]; const receipt = result.receipt as unknown as AgentToolReceiptV1; if (call === undefined || call.call_id !== result.target.call_id || !sameReceiptForCall(receipt, call)) return reject(current); state.batch[result.target.call_index] = { ...call, receipt: cloneReceipt(receipt), native_row_revision: result.result_execution_revision }; }
-      if (result.status === 'cancel_requested') state.round_lineage = { ...state.round_lineage, status: 'cancel_requested', native_row_revision: result.result_round_revision ?? state.round_lineage.native_row_revision };
-      else if (result.status === 'unknown' || result.status === 'ambiguous') { state.phase = result.status; state.round_lineage = { ...state.round_lineage, status: result.status, native_row_revision: result.result_round_revision ?? state.round_lineage.native_row_revision }; }
+      if (result.status === 'cancel_requested') state.round_lineage = state.round_lineage === null ? null : { ...state.round_lineage, status: 'cancel_requested', native_row_revision: result.result_round_revision ?? state.round_lineage.native_row_revision };
+      else if (result.status === 'unknown' || result.status === 'ambiguous') { state.phase = result.status; state.round_lineage = state.round_lineage === null ? null : { ...state.round_lineage, status: result.status, native_row_revision: result.result_round_revision ?? state.round_lineage.native_row_revision }; }
       else if (result.status === 'settled' && result.receipt !== null) { state.phase = 'tool_result_pending'; state.call_index = result.target.kind === 'tool' ? result.target.call_index : state.call_index; }
-      else { state.phase = 'cancelled'; state.round_lineage = { ...state.round_lineage, status: 'cancelled', native_row_revision: result.result_round_revision ?? state.round_lineage.native_row_revision }; state.batch = state.batch.map(call => call.receipt === null && call.approval_decision !== 'denied' && call.approval_decision !== 'cancelled' ? { ...call, approval_decision: 'cancelled', approval_token: null, approval_reference: null } : call); }
+      else { state.phase = 'cancelled'; state.round_lineage = state.round_lineage === null ? null : { ...state.round_lineage, status: 'cancelled', native_row_revision: result.result_round_revision ?? state.round_lineage.native_row_revision }; state.batch = state.batch.map(call => call.receipt === null && call.approval_decision !== 'denied' && call.approval_decision !== 'cancelled' ? { ...call, approval_decision: 'cancelled', approval_token: null, approval_reference: null } : call); }
       state.updated_at = at; return accept(current, state);
     }
     case 'recover':

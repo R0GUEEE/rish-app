@@ -2069,6 +2069,9 @@ export function isAgentAttemptJournal(
       journal.round_lineage?.status ?? null,
     )
   ) return false;
+  if (journal.phase === 'cancelled' && journal.round_lineage === null &&
+      (journal.round_index !== 0 || journal.batch.length !== 0 ||
+       journal.call_index !== null || journal.reserved_write_bytes !== 0)) return false;
   if (journal.phase === 'approval_pending' && !journal.batch.some(call => call.approval_decision === 'pending')) return false;
   if (journal.phase === 'execution_intent') {
     const call = journal.call_index === null ? undefined : journal.batch[journal.call_index];
@@ -2403,7 +2406,7 @@ function agentPhaseTransitionIsLegalAny(
   next: PersistedAgentAttemptJournalV2 | PersistedAgentAttemptJournalV3,
 ): boolean {
   const allowed: Readonly<Record<AgentAttemptPhase, readonly AgentAttemptPhase[]>> = {
-    ready_for_round: ['round_in_flight'],
+    ready_for_round: ['ready_for_round', 'round_in_flight', 'cancelled'],
     round_in_flight: [
       'round_in_flight',
       'ready_for_round',

@@ -169,6 +169,8 @@ export type CompletionAgentQuestionRequest = {
 };
 
 export type CompletionControllerEvents = {
+  /** Accepted into the visible conversation; persistence is still pending. */
+  readonly onPrepared?: () => void;
   readonly onPreparedDurable?: (prepared: {
     readonly conversationId: string;
     readonly turnId: string;
@@ -655,6 +657,9 @@ export function createCompletionController(
   let pendingCommit: PendingCommit | null = null;
   let pendingTerminal: PendingTerminalPersistence | null = null;
   let agentRun: AgentRun | null = null;
+  let requestedAgentCancellationEpoch: number | null = null;
+  let agentCancellationInFlight: number | null = null;
+  let pendingAgentRecoveryRead: { epoch: number; stop: () => void } | null = null;
   let pendingAgentPersistence: PendingAgentPersistence | null = null;
   let pendingAgentCleanup: PendingAgentCleanupAcknowledgement | null = null;
   let retryPersistenceInFlight = false;
@@ -935,6 +940,10 @@ export function createCompletionController(
       return outcome('blocked', state);
     }
     if (pendingAgentPersistence === pending) pendingAgentPersistence = null;
+    if (kind === 'checkpoint' && requestedAgentCancellationEpoch === runEpoch) {
+      await settleAgentCancellation();
+      return outcome('cancelled', state);
+    }
     return await continuation(
       checkpointFromSnapshot(
         durability.snapshot,
@@ -1662,7 +1671,7 @@ export function createCompletionController(
     return outcome('retryable', state);
   };
 
-  const runAgentPrepared = async (
+  const runAgentPreparedImpl = async (
     conversationId: string,
     turnId: string,
     attemptId: string,
@@ -1862,6 +1871,22 @@ export function createCompletionController(
     );
   };
 
+  const runAgentPrepared = async (
+    conversationId: string, turnId: string, attemptId: string,
+    events: CompletionControllerEvents, runEpoch: number,
+  ): Promise<CompletionControllerOutcome> => {
+    try {
+      return await runAgentPreparedImpl(conversationId, turnId, attemptId, events, runEpoch);
+    } finally {
+      if (agentRun?.epoch === runEpoch && pendingAgentPersistence === null &&
+          pendingAgentCleanup === null &&
+          ['blocked', 'retryable', 'resume_available'].includes(state.phase)) {
+        agentRun = null;
+        if (requestedAgentCancellationEpoch === runEpoch) requestedAgentCancellationEpoch = null;
+      }
+    }
+  };
+
   let prepareAgentBatch: (
     conversationId: string,
     attemptId: string,
@@ -2025,10 +2050,11 @@ export function createCompletionController(
         try {
           result = await agentRuntime!.completeAgentRoundV2(completeRequest);
         } catch (error) {
+          if (runEpoch !== epoch || agentCancellationInFlight === runEpoch) return outcome('cancelled', state);
           updateAgentRun({ operationId: null, cancelTarget: null });
           return await failAgentWithoutNative(conversationId, attemptId, agentFailure(error));
         }
-        if (runEpoch !== epoch) return outcome('cancelled', state);
+        if (runEpoch !== epoch || agentCancellationInFlight === runEpoch) return outcome('cancelled', state);
         if (!agentRoundContextMatchesAttempt(current.attempt, result)) {
           return await failAgentWithoutNative(
             conversationId,
@@ -3386,8 +3412,10 @@ export function createCompletionController(
         try {
           executeResult = await agentRuntime!.executeAgentTool(executeRequest);
         } catch (error) {
+          if (runEpoch !== epoch || agentCancellationInFlight === runEpoch) return outcome('cancelled', state);
           return await failAgentWithoutNative(conversationId, attemptId, agentFailure(error));
         }
+        if (runEpoch !== epoch || agentCancellationInFlight === runEpoch) return outcome('cancelled', state);
         const executeEvidence = mapEvidence('execute_agent_tool', executeRequest, executeResult);
         if (executeEvidence === null || executeResult.status === 'conflict') return await failAgentWithoutNative(conversationId, attemptId, 'E_AGENT_EXECUTION_AMBIGUOUS');
         const safeExecuteResult = executeResult as AgentExecuteResult;
@@ -4008,6 +4036,7 @@ export function createCompletionController(
       events,
       durability: null,
     };
+    try { events.onPrepared?.(); } catch { /* Presentation cannot change ownership. */ }
     publish(
       stateFor('preparing', {
         conversationId,
@@ -4191,8 +4220,27 @@ export function createCompletionController(
     publish(stateFor('recovering', { conversationId, turnId: attempt.turnId, attemptId, roundId: journal.round_lineage?.round_id ?? null, transportSchemaVersion: agentTransportSchema(attempt) }));
     let queried: QueryAgentAttemptResultV2;
     try {
-      queried = await agentRuntime.queryAgentAttempt(queryRequest);
+      // A read can queue behind a long native provider round. Bound only this
+      // UI inspection, never cancel/clear the durable native execution. Late
+      // read results are consumed but cannot start recovery or replay work.
+      queried = await new Promise<QueryAgentAttemptResultV2>((resolve, reject) => {
+        let settled = false;
+        const read = { epoch: runEpoch, stop: () => finish(undefined, { code: 'E_AGENT_EXECUTION_AMBIGUOUS' }) };
+        const timer = setTimeout(() => read.stop(), 15_000);
+        const finish = (value?: QueryAgentAttemptResultV2, error?: unknown) => {
+          if (settled) return;
+          settled = true;
+          clearTimeout(timer);
+          if (pendingAgentRecoveryRead === read) pendingAgentRecoveryRead = null;
+          if (value !== undefined) resolve(value);
+          else reject(error);
+        };
+        pendingAgentRecoveryRead = read;
+        Promise.resolve().then(() => agentRuntime.queryAgentAttempt(queryRequest))
+          .then(value => finish(value), error => finish(undefined, error));
+      });
     } catch (error) {
+      if (runEpoch !== epoch) return outcome('cancelled', state);
       publish(stateFor('resume_available', { conversationId, turnId: attempt.turnId, attemptId, failureCode: agentFailure(error) }));
       return outcome('retryable', state);
     }
@@ -4373,14 +4421,7 @@ export function createCompletionController(
               task_id: run.turnId,
               attempt_id: run.attemptId,
             };
-    const expectedPhase: AgentCancelTokenV2['expected_phase'] =
-      journal.phase === 'approval_pending'
-        ? 'approval_pending'
-        : journal.phase === 'execution_intent'
-          ? 'execution_intent'
-          : journal.phase === 'tool_result_pending'
-            ? 'tool_result_pending'
-            : 'round_in_flight';
+    const expectedPhase = journal.phase as AgentCancelTokenV2['expected_phase'];
     const cancelToken: AgentCancelTokenV2 = {
       schema_version: 2,
       issuer: 'completion_controller',
@@ -4417,22 +4458,15 @@ export function createCompletionController(
       lastCancellationCommitted = false;
       return;
     }
-    const cancelledJournal: PersistedAgentAttemptJournalV3 =
-      target.kind === 'attempt'
-        ? {
-            ...copyAgentJournal(journal),
-            phase: 'cancelled',
-            controller_generation: journal.controller_generation + 1,
-            round_lineage: journal.round_lineage === null ? null : { ...journal.round_lineage, status: 'cancelled' },
-            batch: journal.batch.map(call => call.receipt === null && call.approval_decision !== 'denied' && call.approval_decision !== 'cancelled' ? { ...call, approval_decision: 'cancelled', approval_token: null, approval_reference: null } : call),
-            updated_at: canonicalNow(dependencies.now),
-          }
-        : {
-            ...copyAgentJournal(journal),
-            controller_generation: journal.controller_generation + 1,
-            round_lineage: journal.round_lineage === null ? null : { ...journal.round_lineage, status: 'cancel_requested' },
-            updated_at: canonicalNow(dependencies.now),
-          };
+    const cancelledJournal: PersistedAgentAttemptJournalV3 = {
+      ...copyAgentJournal(journal),
+      controller_generation: journal.controller_generation + 1,
+      round_lineage: journal.round_lineage === null ? null : {
+        ...journal.round_lineage,
+        status: target.kind === 'attempt' ? journal.round_lineage.status : 'cancel_requested',
+      },
+      updated_at: canonicalNow(dependencies.now),
+    };
     const transaction = dependencies.chat.cancelAgentAttempt({ cas, expectedAttempt: attempt, journal: cancelledJournal, events: [], evidence: preflight });
     if (transaction === null) {
       publish(stateFor('blocked', { conversationId: run.conversationId, turnId: run.turnId, attemptId: run.attemptId, failureCode: 'E_AGENT_CONFLICT' }));
@@ -4604,6 +4638,28 @@ export function createCompletionController(
         return await finalizeAgent(run.conversationId, run.attemptId, run.epoch, finalCheckpoint, nextJournal, cleanup!, postCas);
       }, run.epoch, { conversationId: run.conversationId, turnId: run.turnId, attemptId: run.attemptId }, 'cancel');
     }, run.epoch, { conversationId: run.conversationId, turnId: run.turnId, attemptId: run.attemptId }, 'cancel');
+  };
+
+  const settleAgentCancellation = async (): Promise<void> => {
+    const run = agentRun;
+    if (run === null || agentCancellationInFlight === run.epoch) return;
+    requestedAgentCancellationEpoch = null;
+    agentCancellationInFlight = run.epoch;
+    lastCancellationCommitted = false;
+    try {
+      await cancelAgentRun();
+    } finally {
+      agentCancellationInFlight = null;
+      if (pendingAgentPersistence === null && pendingAgentCleanup === null) {
+        if (agentRun?.epoch === run.epoch) agentRun = null;
+        if (epoch === run.epoch) epoch += 1;
+        if (!lastCancellationCommitted) {
+          publish(stateFor('resume_available', { conversationId: run.conversationId,
+            turnId: run.turnId, attemptId: run.attemptId,
+            failureCode: state.failureCode ?? 'E_AGENT_CONFLICT' }));
+        }
+      }
+    }
   };
 
   const controller: CompletionController = {
@@ -4917,6 +4973,21 @@ export function createCompletionController(
     },
     cancel: async () => {
       if (destructiveJournalActive()) return;
+      if (pendingAgentRecoveryRead !== null && agentRun?.epoch === pendingAgentRecoveryRead.epoch) {
+        const read = pendingAgentRecoveryRead;
+        const run = agentRun;
+        epoch += 1;
+        agentRun = null;
+        read.stop();
+        // Stopping an inspection is not proof of cancelling its underlying
+        // attempt. Keep the journal unchanged and allow another explicit read.
+        publish(stateFor('resume_available', {
+          conversationId: run.conversationId, turnId: run.turnId,
+          attemptId: run.attemptId, failureCode: 'E_AGENT_EXECUTION_AMBIGUOUS',
+        }));
+        lastCancellationCommitted = false;
+        return;
+      }
       if (
         pendingCommit !== null ||
         pendingTerminal !== null ||
@@ -4925,8 +4996,15 @@ export function createCompletionController(
       )
         return;
       if (agentRun !== null) {
-        await cancelAgentRun();
-        epoch += 1;
+        requestedAgentCancellationEpoch = agentRun.epoch;
+        lastCancellationCommitted = false;
+        if (pendingAgentPersistence !== null ||
+            getConversationAttempt(agentRun.conversationId, agentRun.attemptId)?.attempt.agent == null) {
+          publish(stateFor('cancelling', { conversationId: agentRun.conversationId,
+            turnId: agentRun.turnId, attemptId: agentRun.attemptId }));
+          return;
+        }
+        await settleAgentCancellation();
         return;
       }
       epoch += 1;
@@ -5041,8 +5119,11 @@ export function createCompletionController(
         return false;
       }
       if (agentRun?.conversationId === conversationId) {
+        const onlyInspecting = pendingAgentRecoveryRead?.epoch === agentRun.epoch;
         await controller.cancel();
-        return lastCancellationCommitted;
+        // Navigation may leave a paused inspection without claiming that its
+        // underlying native attempt has been durably cancelled.
+        return onlyInspecting || lastCancellationCommitted;
       }
       if (active?.conversationId !== conversationId) return true;
       await controller.cancel();
@@ -5050,6 +5131,15 @@ export function createCompletionController(
     },
     beforeConversationDelete: async conversationId => {
       if (destructiveJournalActive()) return false;
+      if (agentRun?.conversationId === conversationId && pendingAgentRecoveryRead?.epoch === agentRun.epoch) {
+        await controller.cancel();
+        return false;
+      }
+      const conversation = dependencies.chat.getState().conversations[conversationId];
+      if (agentRun?.conversationId !== conversationId && conversation?.attempts.some(attempt =>
+        attempt.agent != null && attempt.failureCode !== 'E_ATTEMPT_INTERRUPTED' &&
+        !['final_response', 'cancelled', 'failed'].includes(attempt.agent.phase),
+      )) return false;
       return await controller.beforeConversationChange(conversationId);
     },
     reconcileHydrated: conversationId => {
@@ -5077,8 +5167,10 @@ export function createCompletionController(
             message.id === attempt.assistantMessageId &&
             message.role === 'assistant',
         ) === true;
-      if (completedAgentHasAssistant) {
-        // A terminal Agent checkpoint is already user-visible and must never
+      const cancelledAgent = attempt?.status === 'cancelled' &&
+        attempt.agent?.phase === 'cancelled';
+      if (completedAgentHasAssistant || cancelledAgent) {
+        // A completed or cancelled Agent checkpoint is terminal and must never
         // re-enter provider/tool recovery after hydration. Transcript cleanup,
         // if still present in the durable outbox, remains independently owned
         // by that outbox and does not make the completed attempt resumable.

@@ -2062,6 +2062,160 @@ describe('project Agent completion controller', () => {
     expect(store.getState().conversations[conversationId]?.attempts).toHaveLength(0);
   });
 
+  test.each(['native preparation', 'initial checkpoint'] as const)(
+    'cancels during %s without launching a round or blocking navigation', async stage => {
+      const store = agentStore();
+      const runtime = makeRuntime([]);
+      const held = deferred<void>();
+      let reached = false;
+      const prepare = runtime.prepareAgentAttempt;
+      if (stage === 'native preparation') {
+        runtime.prepareAgentAttempt = jest.fn(async request => {
+          const result = await prepare(request);
+          reached = true;
+          await held.promise;
+          return result;
+        });
+      }
+      const commit = committedPersistence(store);
+      const persist = jest.fn(async () => {
+        const attempt = store.getState().conversations[AGENT_CONVERSATION]?.attempts[0];
+        if (stage === 'initial checkpoint' && !reached && attempt?.agent?.phase === 'ready_for_round') {
+          reached = true;
+          await held.promise;
+        }
+        return await commit();
+      });
+      (runtime.cancelAgentAttempt as jest.Mock).mockImplementation(async request => {
+        const journal = store.getState().conversations[AGENT_CONVERSATION]!.attempts[0]!.agent!;
+        expect(journal.phase).toBe(request.cancel_token.expected_phase);
+        return { schema_version: 2, status: 'cancelled', operation_id: request.operation_id,
+          target: request.target, result_round_revision: null, result_execution_revision: null,
+          transcript: request.expected_transcript, receipt: null, effect_may_have_occurred: false,
+          observed_checkpoint: request.committed_checkpoint };
+      });
+      const controller = agentController(store, runtime, persist);
+      const conversationId = store.getState().selectedConversationId!;
+      const send = controller.send({ conversationId, text: 'Cancel before the first round', attachments: [] });
+      for (let i = 0; i < 40 && !reached; i++) await Promise.resolve();
+      expect(reached).toBe(true);
+      await controller.cancel();
+      expect(controller.getState().phase).toBe('cancelling');
+      held.resolve();
+      await send;
+      expect(runtime.completeAgentRoundV2).not.toHaveBeenCalled();
+      expect(runtime.executeAgentTool).not.toHaveBeenCalled();
+      expect(runtime.cancelAgentAttempt).toHaveBeenCalledTimes(1);
+      expect(store.getState().conversations[conversationId]?.attempts[0]).toMatchObject({ status: 'cancelled', agent: { phase: 'cancelled', round_lineage: null } });
+      expect(await controller.beforeConversationChange(conversationId)).toBe(true);
+      expect(await controller.beforeConversationDelete(conversationId)).toBe(true);
+      expect(controller.reconcileHydrated(conversationId).phase).toBe('idle');
+      expect(runtime.recoverAgentAttempt).not.toHaveBeenCalled();
+      const snapshot = store.getState();
+      const previous = snapshot.conversations[conversationId]!;
+      const interrupted = createChatStore({ initialState: { ...snapshot,
+        conversations: { ...snapshot.conversations, [conversationId]: { ...previous,
+          attempts: previous.attempts.map(attempt => ({ ...attempt, status: 'failed' as const,
+            failureCode: 'E_ATTEMPT_INTERRUPTED' as const,
+            agent: { ...attempt.agent!, phase: 'ready_for_round' as const, round_lineage: null },
+          })),
+        } },
+      } });
+      const restarted = agentController(interrupted, runtime, committedPersistence(interrupted));
+      expect(await restarted.beforeConversationDelete(conversationId)).toBe(true);
+      expect(runtime.cancelAgentAttempt).toHaveBeenCalledTimes(1);
+    },
+  );
+
+  test('streamed previews follow the in-flight round and drop when the run settles', async () => {
+    const store = agentStore();
+    const runtime = makeRuntime([]);
+    const round = deferred<CompleteAgentRoundResultV2>();
+    (runtime.completeAgentRoundV2 as jest.Mock).mockImplementationOnce(() => round.promise);
+    (runtime.cancelAgentAttempt as jest.Mock).mockImplementation(async (request: any): Promise<CancelAgentAttemptResultV2> => ({
+      schema_version: 2,
+      status: 'cancelled',
+      operation_id: request.operation_id,
+      target: request.target,
+      result_round_revision: request.target.kind === 'round' ? 1 : null,
+      result_execution_revision: null,
+      transcript: request.expected_transcript,
+      receipt: null,
+      effect_may_have_occurred: false,
+      observed_checkpoint: request.committed_checkpoint,
+    }));
+    let emit: ((event: AgentRoundPreviewEvent) => void) | null = null;
+    const previewSource = jest.fn((listener: (event: AgentRoundPreviewEvent) => void) => {
+      emit = listener;
+      return () => { emit = null; };
+    });
+    const controller = agentController(store, runtime, committedPersistence(store), [...IDS], undefined, undefined, undefined, previewSource);
+    const published: AgentRoundPreviews[] = [];
+    controller.subscribePreviews(previews => published.push(previews));
+    expect(previewSource).not.toHaveBeenCalled();
+    const conversationId = store.getState().selectedConversationId!;
+    const sendPromise = controller.send({ conversationId, text: 'stream me', attachments: [] });
+    for (let index = 0; index < 20 && !(runtime.completeAgentRoundV2 as jest.Mock).mock.calls.length; index += 1) {
+      await Promise.resolve();
+    }
+    expect(previewSource).toHaveBeenCalledTimes(1);
+    const request = (runtime.completeAgentRoundV2 as jest.Mock).mock.calls[0][0] as CompleteAgentRoundRequestV2;
+    const correlation = {
+      taskId: request.task_id,
+      attemptId: request.attempt_id,
+      roundId: request.round_id,
+      roundIndex: request.round_index,
+      operationId: request.operation_id,
+      providerRequestId: '77777777-7777-4777-8777-000000000001',
+      harnessId: request.harness_id,
+    };
+    emit!({ ...correlation, kind: 'delta', seq: 1, reasoning: 'thinking' });
+    emit!({ ...correlation, kind: 'delta', seq: 2, text: 'Hel' });
+    // A stale operation or another round never reaches the preview.
+    emit!({ ...correlation, operationId: 'someone-else', kind: 'delta', seq: 3, text: 'XX' });
+    emit!({ ...correlation, roundId: '22222222-2222-4222-8222-222222222222', kind: 'delta', seq: 1, text: 'YY' });
+    emit!({ ...correlation, kind: 'delta', seq: 3, text: 'lo' });
+    const preview = controller.getPreviews()[request.round_id];
+    expect(preview).toMatchObject({ reasoning: 'thinking', text: 'Hello', lastSeq: 3, incomplete: false });
+    expect(Object.keys(controller.getPreviews())).toEqual([request.round_id]);
+    expect(published.length).toBe(3);
+    expect(store.getState().sessionEvents ?? []).not.toContainEqual(expect.objectContaining({ text: 'Hello' }));
+
+    await controller.cancel();
+    expect(controller.getPreviews()).toEqual({});
+    expect(published.at(-1)).toEqual({});
+    round.resolve(undefined as unknown as CompleteAgentRoundResultV2);
+    await sendPromise;
+  });
+
+  test('a validated round keeps its preview until the run ends, then the durable message stands alone', async () => {
+    const store = agentStore();
+    const runtime = makeRuntime([], { finalRoundIndex: 0 });
+    const original = (runtime.completeAgentRoundV2 as jest.Mock).getMockImplementation()!;
+    let emit: ((event: AgentRoundPreviewEvent) => void) | null = null;
+    const controller = agentController(store, runtime, committedPersistence(store), [...IDS], undefined, undefined, undefined,
+      listener => { emit = listener; return () => {}; });
+    let previewDuringRound: AgentRoundPreviews | null = null;
+    (runtime.completeAgentRoundV2 as jest.Mock).mockImplementationOnce(async (request: CompleteAgentRoundRequestV2) => {
+      const correlation = {
+        taskId: request.task_id, attemptId: request.attempt_id, roundId: request.round_id,
+        roundIndex: request.round_index, operationId: request.operation_id,
+        providerRequestId: '77777777-7777-4777-8777-000000000001', harnessId: request.harness_id,
+      };
+      emit!({ ...correlation, kind: 'delta', seq: 1, text: 'done' });
+      emit!({ ...correlation, kind: 'end', seq: 2, status: 'validated', truncated: false });
+      previewDuringRound = controller.getPreviews();
+      return original(request);
+    });
+    const conversationId = store.getState().selectedConversationId!;
+    const outcome = await controller.send({ conversationId, text: 'stream me', attachments: [] });
+    expect(outcome.status).toBe('completed');
+    expect(previewDuringRound).not.toBeNull();
+    expect(Object.values(previewDuringRound!)[0]).toMatchObject({ text: 'done', ended: { status: 'validated', failureCode: null } });
+    expect(controller.getState().phase).toBe('idle');
+    expect(controller.getPreviews()).toEqual({});
+  });
+
   test('cancel persists request_cancel before native cancel and never runs the held round', async () => {
     const store = agentStore();
     const runtime = makeRuntime([]);
@@ -2107,6 +2261,55 @@ describe('project Agent completion controller', () => {
     round.resolve({} as CompleteAgentRoundResultV2);
     await sendPromise;
     expect(runtime.completeAgentRoundV2).toHaveBeenCalledTimes(1);
+  });
+
+  test.each(['timeout', 'cancel', 'delete', 'navigate'] as const)('a stalled recovery query %s releases only its transient owner without replay', async action => {
+    const store = agentStore();
+    const runtime = makeRuntime([]);
+    (runtime.completeAgentRoundV2 as jest.Mock).mockImplementationOnce(async (request: CompleteAgentRoundRequestV2) => ({
+      schema_version: 2, status: 'in_flight', operation_id: request.operation_id,
+      task_id: request.task_id, attempt_id: request.attempt_id, round_id: request.round_id,
+      round_index: request.round_index, launch_attempt: request.launch_attempt,
+      result_round_revision: 1, transcript: request.transcript,
+    }));
+    const first = agentController(store, runtime, committedPersistence(store));
+    const conversationId = store.getState().selectedConversationId!;
+    await first.send({ conversationId, text: 'recovery read', attachments: [] });
+    const attempt = store.getState().conversations[conversationId]!.attempts[0]!;
+    const journal = attempt.agent;
+    const late = deferred<QueryAgentAttemptResultV2>();
+    (runtime.queryAgentAttempt as jest.Mock).mockReturnValue(late.promise);
+    const controller = agentController(store, runtime, committedPersistence(store));
+    jest.useFakeTimers();
+    try {
+      const pending = controller.resume(conversationId, attempt.attemptId);
+      await Promise.resolve();
+      expect(controller.getState().phase).toBe('recovering');
+      if (action === 'timeout') await jest.advanceTimersByTimeAsync(15000);
+      else if (action === 'delete') expect(await controller.beforeConversationDelete(conversationId)).toBe(false);
+      else if (action === 'navigate') expect(await controller.beforeConversationChange(conversationId)).toBe(true);
+      else await controller.cancel();
+      expect(controller.getState().phase).toBe('resume_available');
+      await pending;
+      expect(store.getState().conversations[conversationId]!.attempts[0]!.agent).toEqual(journal);
+      expect(runtime.cancelAgentAttempt).not.toHaveBeenCalled();
+      expect(runtime.recoverAgentAttempt).not.toHaveBeenCalled();
+      expect(await controller.beforeConversationChange(conversationId)).toBe(true);
+      expect(await controller.beforeConversationDelete(conversationId)).toBe(false);
+      const protectedConversation = store.getState().conversations[conversationId];
+      store.deleteConversation(conversationId);
+      expect(store.getState().conversations[conversationId]).toBe(protectedConversation);
+      late.resolve({ schema_version: 2, status: 'not_found', failure_code: 'E_AGENT_NOT_FOUND' });
+      await Promise.resolve();
+      expect(controller.getState().phase).toBe('resume_available');
+      // A second explicit inspection remains possible; the old result cannot
+      // start a provider, tool, or recovery mutation.
+      (runtime.queryAgentAttempt as jest.Mock).mockResolvedValue({ schema_version: 2, status: 'not_found', failure_code: 'E_AGENT_NOT_FOUND' });
+      await controller.resume(conversationId, attempt.attemptId);
+      expect(runtime.queryAgentAttempt).toHaveBeenCalledTimes(2);
+      expect(runtime.completeAgentRoundV2).toHaveBeenCalledTimes(1);
+      expect(runtime.executeAgentTool).not.toHaveBeenCalled();
+    } finally { jest.useRealTimers(); }
   });
 
   test('restarts through query/recover without replaying an in-flight round', async () => {
