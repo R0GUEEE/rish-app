@@ -138,9 +138,9 @@ test('a layout change during a touch does not scroll until the touch ends', () =
   jest.advanceTimersByTime(30);
   expect(scroll.mock.calls).toEqual([[false]]);
   follow.scrolled(bottom);
-  // Finger down on a link: the press highlight relayouts the paragraph.
+  // Finger down on a link while content grows underneath.
   follow.touchStarted();
-  follow.layoutChanged();
+  follow.layoutChanged(2200);
   jest.advanceTimersByTime(100);
   expect(scroll.mock.calls).toEqual([[false]]);
   // Finger up: the deferred follow may now run.
@@ -154,12 +154,32 @@ test('a queued follow is cancelled by a touch and not replayed while it is down'
   const { scroll, follow } = setup();
   follow.messagesChanged();
   follow.scrolled(bottom);
-  follow.layoutChanged();
+  follow.layoutChanged(2200);
   follow.touchStarted();
   jest.advanceTimersByTime(100);
   expect(scroll).not.toHaveBeenCalled();
   follow.touchEnded();
   jest.advanceTimersByTime(30);
   expect(scroll.mock.calls).toEqual([[false]]);
+  follow.dispose();
+});
+
+test('a reader already at the end is not scrolled again by layout echoes', () => {
+  const { scroll, follow } = setup();
+  follow.messagesChanged();
+  jest.advanceTimersByTime(30);
+  expect(scroll.mock.calls).toEqual([[false]]);
+  // The viewport now shows the end; the follow's own scroll echoes a layout.
+  follow.scrolled(bottom);
+  for (let i = 0; i < 5; i += 1) {
+    follow.layoutChanged(bottom.contentHeight, bottom.viewportHeight);
+    jest.advanceTimersByTime(30);
+    follow.scrolled(bottom);
+  }
+  expect(scroll.mock.calls).toEqual([[false]]);
+  // Real growth still follows.
+  follow.layoutChanged(2200);
+  jest.advanceTimersByTime(30);
+  expect(scroll.mock.calls).toEqual([[false], [false]]);
   follow.dispose();
 });

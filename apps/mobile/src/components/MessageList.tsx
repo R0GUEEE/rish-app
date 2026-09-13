@@ -119,8 +119,10 @@ export const MessageList = React.forwardRef<
         testID="message-scroll"
         style={styles.scroll}
         maintainVisibleContentPosition={{ minIndexForVisible: 0 }}
-        onContentSizeChange={follow.layoutChanged}
-        onLayout={follow.layoutChanged}
+        onContentSizeChange={(_width, height) => follow.layoutChanged(height)}
+        onLayout={event =>
+          follow.layoutChanged(undefined, event.nativeEvent.layout.height)
+        }
         onScroll={event => follow.scrolled(viewport(event.nativeEvent))}
         onTouchStart={follow.touchStarted}
         onTouchEnd={follow.touchEnded}

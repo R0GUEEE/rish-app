@@ -41,13 +41,45 @@ export function createMessageFollowController(
   const cancel = () => {
     if (timer !== null) clearTimeout(timer);
     timer = null;
+    pendingForce = false;
   };
-  const layoutChanged = () => {
-    if (disposed || !following || interacting || touching || timer !== null) return;
+  // True once the last known viewport already shows the end of the content;
+  // following again from there only spins (each scrollToEnd fires a layout
+  // event, which asked for another scrollToEnd, thirty times a second).
+  const atEnd = () =>
+    metrics !== null &&
+    metrics.viewportHeight > 0 &&
+    metrics.contentHeight - metrics.viewportHeight - metrics.offset <= 1;
+  let pendingForce = false;
+  const follow = (force: boolean) => {
+    if (disposed || !following || interacting || touching) return;
+    if (timer !== null) {
+      // A forced follow (new message) must not be swallowed by a pending
+      // layout-only follow that will decline at the end.
+      pendingForce = pendingForce || force;
+      return;
+    }
+    if (!force && atEnd()) return;
+    pendingForce = force;
     timer = setTimeout(() => {
       timer = null;
-      if (!disposed && following && !interacting && !touching) scrollToEnd(false);
+      const forced = pendingForce;
+      pendingForce = false;
+      if (!disposed && following && !interacting && !touching && (forced || !atEnd())) {
+        scrollToEnd(false);
+      }
     }, 30);
+  };
+  const layoutChanged = (contentHeight?: number, viewportHeight?: number) => {
+    if (metrics !== null) {
+      if (typeof contentHeight === 'number' && contentHeight > 0) {
+        metrics = { ...metrics, contentHeight };
+      }
+      if (typeof viewportHeight === 'number' && viewportHeight > 0) {
+        metrics = { ...metrics, viewportHeight };
+      }
+    }
+    follow(false);
   };
   const scrolled = (next: MessageViewport) => {
     if (disposed || next.viewportHeight <= 0) return;
@@ -102,7 +134,8 @@ export function createMessageFollowController(
     },
     messagesChanged: () => {
       if (disposed) return;
-      if (following && !interacting) layoutChanged();
+      // A message change is a real change even before its layout lands.
+      if (following && !interacting) follow(true);
       else emit(true, true);
     },
     dragStarted,
