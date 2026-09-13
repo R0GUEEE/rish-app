@@ -1,3 +1,4 @@
+#import "RishGuestCgiFeature.h"
 #import "AgentToolRegistry.h"
 
 #import "AgentNativeWAL.h"
@@ -13,7 +14,7 @@ static NSArray<NSDictionary *> *DSHAgentNativeToolDescriptors(void) {
     // are required to build the provider request/digest, but are never
     // copied into the safe registry projection or an RN result.
     descriptors = @[
-#if DEBUG
+#if DSH_GUEST_CGI_AVAILABLE
       @{ @"schema_version": @1, @"name": @"start_guest_cgi", @"required_capability": @"guest_service", @"effect": @"guest_service", @"safe_summary_key": @"agent.start_guest_cgi", @"parameters": @{ @"type": @"object", @"properties": @{ @"index_path": @{ @"type": @"string", @"max_utf8_bytes": @1024 }, @"index_sha256": @{ @"type": @"string", @"max_utf8_bytes": @64 }, @"backend_path": @{ @"type": @"string", @"max_utf8_bytes": @1024 }, @"backend_sha256": @{ @"type": @"string", @"max_utf8_bytes": @64 }, @"initial_data_path": @{ @"type": @[ @"string", @"null" ], @"max_utf8_bytes": @1024 }, @"initial_data_sha256": @{ @"type": @[ @"string", @"null" ], @"max_utf8_bytes": @64 } }, @"required": @[ @"index_path", @"index_sha256", @"backend_path", @"backend_sha256", @"initial_data_path", @"initial_data_sha256" ] } },
       @{ @"schema_version": @1, @"name": @"stop_guest_cgi", @"required_capability": @"guest_service", @"effect": @"guest_service", @"safe_summary_key": @"agent.stop_guest_cgi", @"parameters": @{ @"type": @"object", @"properties": @{ @"service_id": @{ @"type": @"string", @"max_utf8_bytes": @36 } }, @"required": @[ @"service_id" ] } },
 #endif

@@ -1,3 +1,4 @@
+#import "RishGuestCgiFeature.h"
 #import "AgentToolExecutionService.h"
 
 #import "AgentExecutionLedger.h"
@@ -787,7 +788,7 @@ static NSDictionary *DSHAgentExecutionHistoricalResult(
                                           precondition:row[@"precondition"]
                                                  error:error];
   } else if ([request[@"name"] hasSuffix:@"_guest_cgi"]) {
-#if DEBUG
+#if DSH_GUEST_CGI_AVAILABLE
     effect = [[DSHAgentGuestCgiToolExecutor executorForWorkspaceExecutor:self.workspaceExecutor] executeSynchronouslyToolNamed:request[@"name"] arguments:arguments root:request[@"root"] owner:request precondition:row[@"precondition"]];
 #endif
   } else {

@@ -1,3 +1,4 @@
+#import "RishGuestCgiFeature.h"
 #import "AgentRootResolver.h"
 
 #import "AgentNativeWAL.h"
@@ -154,7 +155,7 @@ static NSArray<NSString *> *DSHAgentCapabilitiesForWorkspace(
       @"git_status", @"git_commit", @"git_push",
     ]];
   }
-#if DEBUG
+#if DSH_GUEST_CGI_AVAILABLE
   if ([available containsObject:@"read"] && [available containsObject:@"write"]) [capabilities addObject:@"guest_service"];
 #endif
   return [capabilities copy];

@@ -1,3 +1,4 @@
+#import "RishGuestCgiFeature.h"
 #import "DSHAgentGuestCgiToolExecutor.h"
 
 #import <CommonCrypto/CommonDigest.h>
@@ -167,7 +168,7 @@ static NSString *DSHGuestCgiHexDigest(NSData *data) {
                           arguments:(NSDictionary *)arguments
                                root:(NSDictionary *)root
                               error:(NSError **)error {
-#if !DEBUG
+#if !DSH_GUEST_CGI_AVAILABLE
   DSHGuestCgiSetError(error, @"E_AGENT_CAPABILITY");
   return nil;
 #endif
