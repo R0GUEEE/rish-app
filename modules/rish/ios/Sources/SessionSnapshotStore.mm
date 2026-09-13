@@ -5347,6 +5347,19 @@ NSString *DSHSessionSnapshotStoreLaunchInstanceId(void) {
       @"current" : current.authority,
     };
   }
+  {
+    // The bytes on disk are exactly `encoded`; the read-back below proves
+    // that by byte equality instead of parsing and validating a megabyte
+    // envelope we assembled ourselves a moment ago.
+    DSHSessionValidatedEnvelope *written = [[DSHSessionValidatedEnvelope alloc] init];
+    written.bytes = encoded;
+    written.envelope = envelope;
+    written.session = candidate;
+    written.digest = candidateDigest;
+    written.generation = nextGeneration;
+    written.commits = [commits copy];
+    DSHSessionValidatedEnvelopeRemember(written);
+  }
   DSHSessionLoadedState *verified = [self readStateWithError:&stateError];
   if (verified != nil && !verified.missing && !verified.legacy &&
       verified.generation == nextGeneration &&

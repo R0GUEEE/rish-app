@@ -4374,6 +4374,22 @@ NSDictionary *DSHAgentNativeWALRecordDeniedCall(DSHAgentNativeWAL *wal,
   return committed ? DSHAgentImmutableJSONCopy(output, error) : nil;
 }
 
+
+static NSData *DSHAgentWALVerifiedBytes;
+
+static BOOL DSHAgentWALBytesVerified(NSData *data) {
+  @synchronized (DSHAgentNativeWAL.class) {
+    return data != nil && DSHAgentWALVerifiedBytes != nil &&
+        [DSHAgentWALVerifiedBytes isEqualToData:data];
+  }
+}
+
+static void DSHAgentWALRememberVerifiedBytes(NSData *data) {
+  @synchronized (DSHAgentNativeWAL.class) {
+    DSHAgentWALVerifiedBytes = [data copy];
+  }
+}
+
 @implementation DSHAgentNativeWAL
 
 - (instancetype)initWithRootURL:(NSURL *)rootURL
@@ -4479,12 +4495,20 @@ NSDictionary *DSHAgentNativeWALRecordDeniedCall(DSHAgentNativeWAL *wal,
     DSHSetAgentNativeStoreError(error, DSHAgentNativeStoreErrorCorrupt);
     return nil;
   }
-  NSError *canonicalError = nil;
-  NSData *canonical = DSHAgentCanonicalJSON(object, &canonicalError);
-  if (canonical == nil || ![canonical isEqualToData:data] ||
-      !DSHAgentWALStateBasicValidation(object, error)) {
-    DSHSetAgentNativeStoreError(error, DSHAgentNativeStoreErrorCorrupt);
-    return nil;
+  // Every operation loads the WAL several times and re-canonicalises the
+  // whole file to prove it is byte-exact. The bytes we wrote ourselves, or
+  // already proved once, need no second proof: compare bytes and skip the
+  // re-encode and shape validation. The parse itself is always fresh, so the
+  // mutable tree handed to callers is never shared.
+  if (!DSHAgentWALBytesVerified(data)) {
+    NSError *canonicalError = nil;
+    NSData *canonical = DSHAgentCanonicalJSON(object, &canonicalError);
+    if (canonical == nil || ![canonical isEqualToData:data] ||
+        !DSHAgentWALStateBasicValidation(object, error)) {
+      DSHSetAgentNativeStoreError(error, DSHAgentNativeStoreErrorCorrupt);
+      return nil;
+    }
+    DSHAgentWALRememberVerifiedBytes(data);
   }
   return [object mutableCopy];
 }
@@ -4672,6 +4696,7 @@ NSDictionary *DSHAgentNativeWALRecordDeniedCall(DSHAgentNativeWAL *wal,
   close(rootDescriptor);
   if (!replaced || !synced ||
       ![self faultAtStage:@"wal.after_directory_fsync" error:error]) return NO;
+  DSHAgentWALRememberVerifiedBytes(data);
   return YES;
 }
 
