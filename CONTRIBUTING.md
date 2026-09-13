@@ -1,8 +1,7 @@
 # Contributing to Rish App
 
-This is a draft contribution guide for the source repository. Rish App source
-is licensed under the [MIT License](LICENSE). No contributor agreement is
-currently declared; the owner may choose whether one is needed.
+Rish App source is licensed under the [MIT License](LICENSE). No contributor
+agreement is currently declared; the owner may choose whether one is needed.
 
 ## Before changing code
 
@@ -68,6 +67,16 @@ physical-device or complete-product result. Changes to bundled guest assets,
 third-party dependencies, generated Vendor archives, or release metadata need
 the corresponding source, hash, license, and provenance review before release.
 
-The public contribution workflow, issue templates, review rules, and release
-branch policy remain to be established by the repository owner. A contributor
-agreement is optional owner policy and is not currently declared.
+## Filing and reviewing
+
+Open a [bug report](.github/ISSUE_TEMPLATE/bug_report.md) or a
+[feature request](.github/ISSUE_TEMPLATE/feature_request.md) before a large
+change, so the scope can be agreed first. Report anything exploitable through
+GitHub's private advisory form instead; see [SECURITY.md](SECURITY.md).
+
+Pull requests target `main` and follow the
+[template](.github/PULL_REQUEST_TEMPLATE.md); run its checks before asking for
+review. Every path is owned by the repository owner
+([CODEOWNERS](.github/CODEOWNERS)), who reviews and merges. The release branch
+policy and whether a contributor agreement is needed are still open, and a
+change here will be announced in this file.

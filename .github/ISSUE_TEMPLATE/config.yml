@@ -1,0 +1,8 @@
+blank_issues_enabled: true
+contact_links:
+  - name: Security vulnerability
+    url: https://github.com/ZSeven-W/rish-app/security/advisories/new
+    about: Report privately through GitHub. Never open a public issue for anything exploitable.
+  - name: Build and development questions
+    url: https://github.com/ZSeven-W/rish-app/blob/main/docs/development.md
+    about: Toolchain pins, build commands, and the runtime boundary.

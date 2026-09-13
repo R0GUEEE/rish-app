@@ -27,9 +27,10 @@ The app lives in `apps/mobile` and renders native React Native views with
 Fabric and Hermes. DSH was the first built-in Harness target; Rish's scope
 extends to multiple model providers and task types.
 
-The Swift/WebKit code at the repository root is retained only as the original
-`web_proxy` baseline. `run-simulator.sh` now builds and launches the React
-Native product; it never starts or embeds that baseline.
+The original Swift/WebKit shell is retired and kept only for provenance in
+[`legacy/web-proxy/`](../legacy/web-proxy/README.md). No target builds it.
+`run-simulator.sh` builds and launches the React Native product; it never
+starts or embeds that baseline.
 
 ## Product documentation
 
