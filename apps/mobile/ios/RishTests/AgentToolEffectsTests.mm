@@ -1589,6 +1589,10 @@
   NSDictionary *result = [fixture[@"batch_service"]
       prepareAgentToolBatchWithRequest:fixture[@"batch_request"] error:&error];
   XCTAssertNil(error);
+  // The fixture's arguments digest does not match the raw arguments: an
+  // identity mismatch is never reinterpreted as a model mistake, so the
+  // batch stays a closed rejection (refused arguments with a matching
+  // digest settle instead; see the next test).
   XCTAssertEqualObjects(result[@"status"], @"rejected");
   XCTAssertEqualObjects(result[@"failure_code"], @"E_AGENT_BAD_PATH");
   XCTAssertEqualObjects(result[@"effect_dispatched"], @NO);
@@ -1599,6 +1603,69 @@
       [NSPredicate predicateWithFormat:@"operation_kind == %@",
        @"prepare_agent_tool_batch"]].firstObject;
   XCTAssertEqualObjects(operation[@"state"], @"rejected");
+}
+
+- (void)testRefusedArgumentsSettleEveryCallAsFailedFeedbackForTheNextRound {
+  NSDictionary *rawRead = @{ @"schema_version" : @1,
+    @"call_id" : @"read-good", @"name" : @"read_file",
+    @"arguments_json" : @"{\"path\":\"README.md\"}" };
+  NSDictionary *rawBad = @{ @"schema_version" : @1,
+    @"call_id" : @"read-bad", @"name" : @"read_file",
+    @"arguments_json" : @"{\"path\":\"/workspace/README.md\"}" };
+  NSDictionary *fixture = [self serviceFixtureForRawCalls:@[rawRead, rawBad]];
+  NSError *error = nil;
+  NSDictionary *transcriptBefore = fixture[@"batch_request"][@"transcript"];
+  NSDictionary *result = [fixture[@"batch_service"]
+      prepareAgentToolBatchWithRequest:fixture[@"batch_request"] error:&error];
+  XCTAssertNil(error);
+  XCTAssertEqualObjects(result[@"status"], @"prepared", @"%@", result);
+  NSArray *calls = result[@"receipt"][@"calls"];
+  XCTAssertEqual(calls.count, 2U);
+  // The refused call carries its own reason; its valid sibling is not run
+  // either and says so, so the next round reconsiders the batch as a unit.
+  XCTAssertEqualObjects(calls[1][@"receipt"][@"failure_code"], @"E_AGENT_BAD_PATH");
+  XCTAssertEqualObjects(calls[0][@"receipt"][@"failure_code"], @"E_AGENT_BAD_PATH");
+  XCTAssertEqualObjects(calls[0][@"execution_status"], @"failed");
+  XCTAssertNotEqualObjects(calls[0][@"idempotency_key"], NSNull.null);
+  for (NSDictionary *call in calls) {
+    XCTAssertEqualObjects(call[@"receipt"][@"outcome"], @"failed");
+    XCTAssertEqualObjects(call[@"receipt"][@"duration_ms"], @0);
+    XCTAssertEqualObjects(call[@"receipt"][@"approval_reference"], NSNull.null);
+    XCTAssertEqualObjects(call[@"native_row_revision"], @1);
+    XCTAssertEqualObjects(call[@"execution_revision"], @1);
+  }
+  NSDictionary *state = [self.wal snapshotWithError:&error];
+  XCTAssertEqual([state[@"ledger"] count], 0U);
+  XCTAssertEqual([state[@"batches"] count], 1U);
+  NSArray *rejectedRows = state[@"denied_calls"];
+  XCTAssertEqual(rejectedRows.count, 2U);
+  XCTAssertEqualObjects(rejectedRows[0][@"feedback"][@"payload"][@"reason"],
+                        @"not_executed_because_another_call_was_rejected");
+  XCTAssertEqualObjects(rejectedRows[1][@"feedback"][@"payload"][@"reason"],
+                        @"path_must_be_relative_to_workspace_root");
+  // The transcript advanced by one tool message per call, in call order.
+  NSDictionary *transcriptAfter = result[@"receipt"][@"transcript"];
+  XCTAssertEqual([transcriptAfter[@"generation"] unsignedIntegerValue],
+                 [transcriptBefore[@"generation"] unsignedIntegerValue] + 2);
+  NSDictionary *transcriptRow = nil;
+  for (NSDictionary *candidate in state[@"transcripts"]) {
+    if ([candidate[@"transcript_ref"] isEqual:transcriptAfter[@"transcript_ref"]]) transcriptRow = candidate;
+  }
+  NSArray *messages = transcriptRow[@"messages"];
+  XCTAssertTrue(messages.count >= 2);
+  NSDictionary *lastMessage = messages.lastObject;
+  XCTAssertEqualObjects(lastMessage[@"role"], @"tool");
+  XCTAssertEqualObjects(lastMessage[@"call_id"], @"read-bad");
+  XCTAssertTrue([lastMessage[@"content"] containsString:@"\"outcome\":\"failed\""]);
+  XCTAssertTrue([lastMessage[@"content"] containsString:@"path_must_be_relative_to_workspace_root"]);
+  XCTAssertFalse([lastMessage[@"content"] containsString:@"/workspace/README.md"]);
+  // Replaying the same operation returns the settlements without appending.
+  NSDictionary *replay = [fixture[@"batch_service"]
+      prepareAgentToolBatchWithRequest:fixture[@"batch_request"] error:&error];
+  XCTAssertNil(error);
+  XCTAssertEqualObjects(replay[@"receipt"][@"calls"][1][@"receipt"],
+                        calls[1][@"receipt"]);
+  XCTAssertEqual([[self.wal snapshotWithError:&error][@"denied_calls"] count], 2U);
 }
 
 - (void)testExistingFileWithAbsentWritePreconditionIsARequeryableConflict {
@@ -2954,9 +3021,13 @@
   NSDictionary *result = [fixture[@"batch_service"]
       prepareAgentToolBatchWithRequest:fixture[@"batch_request"] error:&error];
   XCTAssertNil(error);
-  XCTAssertEqualObjects(result[@"status"], @"rejected", @"%@", result);
-  XCTAssertEqualObjects(result[@"failure_code"], @"E_AGENT_BAD_PATH");
-  XCTAssertEqualObjects(result[@"effect_dispatched"], @NO);
+  // The missing parent refuses the first write; the whole batch settles as
+  // failed feedback without executing the valid second write.
+  XCTAssertEqualObjects(result[@"status"], @"prepared", @"%@", result);
+  XCTAssertEqualObjects(result[@"receipt"][@"calls"][0][@"receipt"][@"failure_code"], @"E_AGENT_BAD_PATH");
+  XCTAssertEqualObjects(result[@"receipt"][@"calls"][1][@"receipt"][@"outcome"], @"failed");
+  XCTAssertEqualObjects(result[@"receipt"][@"effect_gate"], @"not_applicable");
+  XCTAssertEqual([[self.wal snapshotWithError:&error][@"ledger"] count], 0U);
 
   NSURL *workspace = [self.rootURL
       URLByAppendingPathComponent:@"ServiceDocuments/Rish Workspaces/Service"

@@ -1072,7 +1072,7 @@ function validateCancelTarget(value: unknown): AgentCancelTargetV2 | null {
 function validateCancelToken(value: unknown): AgentCancelTokenV2 | null {
   const raw = exact(value, ['schema_version', 'issuer', 'source_event_id', 'token', 'task_id', 'attempt_id', 'expected_phase', 'reason_code']);
   if (raw === null || raw.schema_version !== 2 || raw.issuer !== 'completion_controller' || !uuid(raw.source_event_id) || raw.token !== raw.source_event_id || !uuid(raw.task_id) || !uuid(raw.attempt_id) ||
-    !enumValue(raw.expected_phase, ['round_in_flight', 'approval_pending', 'execution_intent', 'tool_result_pending'] as const) ||
+    !enumValue(raw.expected_phase, ['ready_for_round', 'batch_frozen', 'round_in_flight', 'approval_pending', 'execution_intent', 'tool_result_pending'] as const) ||
     !enumValue(raw.reason_code, ['E_AGENT_CANCELLED', 'E_AGENT_ROOT_STALE', 'E_AGENT_PERSISTENCE'] as const)) return null;
   return raw as unknown as AgentCancelTokenV2;
 }
@@ -1264,6 +1264,9 @@ function validateAttemptProjection(value: unknown): AgentAttemptProjectionV2 | n
   const allowedStatuses = allowedLineage[raw.phase];
   if (raw.phase === 'ready_for_round') {
     if (raw.round_status !== null && raw.round_status !== 'ready') return null;
+  } else if (raw.phase === 'cancelled' && raw.round_id === null && raw.round_status === null) {
+    if (raw.round_index !== 0 || raw.round_revision !== null || calls.length !== 0 ||
+        raw.call_index !== null || raw.reserved_write_bytes !== 0) return null;
   } else if (allowedStatuses === null || allowedStatuses === undefined || raw.round_status === null || !allowedStatuses.includes(raw.round_status)) return null;
   if (raw.batch_kind === null && (raw.batch_revision !== null || raw.manifest_sha256 !== null || calls.length !== 0)) return null;
   if (raw.batch_kind === 'write_batch' && (raw.batch_revision === null || raw.manifest_sha256 === null)) return null;
@@ -1499,13 +1502,16 @@ function validateBatchReceipt(value: unknown, request: PrepareAgentToolBatchRequ
     if (!sameStringArray(token.batch_call_ids, (calls as AgentBatchCallProjectionV2[]).map(call => call.call_id)) ||
       !sameStringArray(token.batch_arguments_sha256, (calls as AgentBatchCallProjectionV2[]).map(call => call.arguments_sha256))) return null;
   }
+  // A call settled at preparation (refused arguments) never reaches the
+  // write manifest, so only calls still awaiting execution decide the kind.
   const hasMutation = calls.some(
     call =>
-      call!.name === 'write_file' ||
-      call!.name === 'git_commit' ||
-      call!.name === 'git_push' ||
-      call!.name === 'start_guest_cgi' ||
-      call!.name === 'stop_guest_cgi',
+      call!.receipt === null && (
+        call!.name === 'write_file' ||
+        call!.name === 'git_commit' ||
+        call!.name === 'git_push' ||
+        call!.name === 'start_guest_cgi' ||
+        call!.name === 'stop_guest_cgi'),
   );
   if (
     (raw.batch_kind === 'write_batch' &&

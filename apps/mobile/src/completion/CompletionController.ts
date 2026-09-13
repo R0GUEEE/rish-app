@@ -1514,15 +1514,24 @@ export function createCompletionController(
     updatedAt: string,
   ): PersistedAgentAttemptJournalV3 => {
     const calls = batchReceipt.calls.map(agentCallFromProjection);
+    // Calls native already settled at preparation (refused arguments,
+    // durable denials) need no approval; a batch settled in full is waiting
+    // for the next round exactly like one whose calls all executed.
     const hasPendingApproval = calls.some(
       call =>
+        call.receipt === null &&
         call.access !== 'auto' &&
         call.access !== 'durable_deny' &&
         call.approval_decision === 'pending',
     );
+    const allSettled = calls.length > 0 && calls.every(call => call.receipt !== null);
     return {
       ...copyAgentJournal(journal),
-      phase: hasPendingApproval ? 'approval_pending' : 'batch_frozen',
+      phase: hasPendingApproval
+        ? 'approval_pending'
+        : allSettled
+          ? 'tool_result_pending'
+          : 'batch_frozen',
       controller_generation: journal.controller_generation + 1,
       transcript: copyAgentTranscript(batchReceipt.transcript),
       round_lineage:
@@ -1533,7 +1542,7 @@ export function createCompletionController(
               status: 'completed',
               native_row_revision: roundRevision,
             },
-      call_index: calls.findIndex(call => call.receipt === null),
+      call_index: allSettled ? calls.length - 1 : calls.findIndex(call => call.receipt === null),
       batch: calls,
       reserved_write_bytes: batchReceipt.reserved_write_bytes,
       updated_at: updatedAt,
@@ -1890,11 +1899,7 @@ export function createCompletionController(
     const evidence = mapEvidence('prepare_agent_attempt', request, result);
     if (evidence === null) {
       updateAgentRun({ operationId: null, cancelTarget: null });
-      return await failAgentWithoutNative(
-        conversationId,
-        attemptId,
-        'E_AGENT_TRANSCRIPT',
-      );
+      return await failAgentWithoutNative(conversationId, attemptId, 'E_AGENT_TRANSCRIPT');
     }
     if (result.status === 'not_agent') {
       agentRun = null;
@@ -1912,11 +1917,7 @@ export function createCompletionController(
     );
     if (preparedJournal === null) {
       updateAgentRun({ operationId: null, cancelTarget: null });
-      return await failAgentWithoutNative(
-        conversationId,
-        attemptId,
-        'E_AGENT_TRANSCRIPT',
-      );
+      return await failAgentWithoutNative(conversationId, attemptId, 'E_AGENT_TRANSCRIPT');
     }
     const transaction = dependencies.chat.initializeAgentAttempt({
       cas,
@@ -2167,11 +2168,7 @@ export function createCompletionController(
         }
         if (runEpoch !== epoch || agentCancellationInFlight === runEpoch) return outcome('cancelled', state);
         if (!agentRoundContextMatchesAttempt(current.attempt, result)) {
-          return await failAgentWithoutNative(
-            conversationId,
-            attemptId,
-            'E_AGENT_TRANSCRIPT',
-          );
+          return await failAgentWithoutNative(conversationId, attemptId, 'E_AGENT_TRANSCRIPT');
         }
         const evidence = mapEvidence('complete_agent_round_v2', completeRequest, result);
         if (evidence === null) {
@@ -2898,6 +2895,32 @@ export function createCompletionController(
           null,
           null,
         );
+        // Calls native settled while preparing (refused arguments) get their
+        // durable tool rows now, so the cards show the failure and the next
+        // round's transcript already carries the feedback.
+        const settledEvents: PersistedSessionEventV3[] = [];
+        for (const call of batchJournal.batch) {
+          if (call.receipt === null || call.receipt.outcome !== 'failed') continue;
+          const callEventId = freshOperationId();
+          const resultEventId = freshOperationId();
+          if (callEventId === null || resultEventId === null) {
+            return await failAgentWithoutNative(conversationId, attemptId, 'E_AGENT_PERSISTENCE');
+          }
+          const seqBase = batchEvent.seq + settledEvents.length;
+          // The call row records that the call existed and never ran; the
+          // result row carries the failure.
+          settledEvents.push({
+            ...agentEvent(attemptId, callEventId, 'tool_call', request.round_index, call.call_id, 'waiting',
+              call.safe_summary_key, call.arguments_sha256, null, null, null),
+            seq: seqBase + 1,
+          });
+          settledEvents.push({
+            ...agentEvent(attemptId, resultEventId, 'tool_result', request.round_index, call.call_id, 'failed',
+              call.safe_summary_key, call.arguments_sha256, call.receipt.result_sha256, null,
+              call.receipt.failure_code as PersistedSessionEventV3['failure_code']),
+            seq: seqBase + 2,
+          });
+        }
         // A batch with nothing left to approve starts its first executable
         // call in the same durable write as the batch receipt.
         const firstIndex = batchJournal.phase === 'approval_pending' ? -1 : batchJournal.batch.findIndex(
@@ -2935,7 +2958,7 @@ export function createCompletionController(
           cas: batchCas,
           expectedAttempt: completed.attempt,
           journal: batchJournal,
-          events: [batchEvent],
+          events: [batchEvent, ...settledEvents],
           evidence: batchEvidence,
         });
         if (transaction === null) return await failAgentWithoutNative(conversationId, attemptId, 'E_AGENT_CONFLICT');

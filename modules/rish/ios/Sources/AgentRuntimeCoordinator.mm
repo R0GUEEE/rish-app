@@ -1000,12 +1000,18 @@ static NSArray *DSHRuntimeLatestBatchCalls(NSDictionary *state,
     attempt[@"batch_revision"] = batch[@"batch_revision"];
     attempt[@"manifest_sha256"] = batch[@"manifest_sha256"];
     attempt[@"batch"] = calls;
-    attempt[@"phase"] = [calls filteredArrayUsingPredicate:
-        [NSPredicate predicateWithBlock:^BOOL(NSDictionary *call,
-                                               NSDictionary *bindings) {
-          (void)bindings;
-          return [call[@"approval_state"] isEqualToString:@"pending"];
-        }]].count > 0 ? @"approval_pending" : @"batch_frozen";
+    // A batch whose every call already holds a receipt (executed, denied or
+    // refused at preparation) is waiting for the next round; approval checks
+    // only concern calls that are still unsettled.
+    BOOL allSettled = calls.count > 0;
+    BOOL pendingApproval = NO;
+    for (NSDictionary *call in calls) {
+      BOOL settled = call[@"receipt"] != nil && call[@"receipt"] != NSNull.null;
+      if (!settled) allSettled = NO;
+      if (!settled && [call[@"approval_state"] isEqualToString:@"pending"]) pendingApproval = YES;
+    }
+    attempt[@"phase"] = allSettled ? @"tool_result_pending"
+        : (pendingApproval ? @"approval_pending" : @"batch_frozen");
   }
   NSString *status = [@[@"terminal", @"cleanup_pending"]
       containsObject:DSHRuntimeFindAuthority(state, request[@"task_id"],

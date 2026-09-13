@@ -393,14 +393,33 @@
   XCTAssertNotNil(DSHAgentParseArgumentsJSON(worstEscaped, &error));
   XCTAssertNil(error);
 
+  // Path legality is not part of a call's identity: the digest still binds
+  // the call, and the tool refuses the arguments with a value-free reason.
   error = nil;
-  XCTAssertNil(DSHAgentArgumentsSHA256(
+  XCTAssertNotNil(DSHAgentArgumentsSHA256(
       @"read_file", @"{\"path\":\"a\\u0000b\"}", &error));
-  XCTAssertNotNil(error);
-  error = nil;
-  XCTAssertNil(DSHAgentArgumentsSHA256(
+  XCTAssertNil(error);
+  NSString *code = nil;
+  NSString *reason = nil;
+  XCTAssertFalse(DSHAgentToolArgumentsAccepted(
+      @"read_file", DSHAgentParseArgumentsJSON(@"{\"path\":\"a\\u0000b\"}", nil),
+      &code, &reason));
+  XCTAssertEqualObjects(code, @"E_AGENT_BAD_PATH");
+  XCTAssertEqualObjects(reason, @"path_contains_disallowed_segment_or_character");
+  XCTAssertNotNil(DSHAgentArgumentsSHA256(
       @"read_file", @"{\"path\":\"e\\u0301.txt\"}", &error));
-  XCTAssertNotNil(error);
+  XCTAssertFalse(DSHAgentToolArgumentsAccepted(
+      @"read_file", DSHAgentParseArgumentsJSON(@"{\"path\":\"e\\u0301.txt\"}", nil),
+      &code, &reason));
+  XCTAssertEqualObjects(code, @"E_AGENT_BAD_PATH");
+  XCTAssertFalse(DSHAgentToolArgumentsAccepted(
+      @"read_file", DSHAgentParseArgumentsJSON(@"{\"path\":\"/workspace/a.txt\"}", nil),
+      &code, &reason));
+  XCTAssertEqualObjects(code, @"E_AGENT_BAD_PATH");
+  XCTAssertEqualObjects(reason, @"path_must_be_relative_to_workspace_root");
+  XCTAssertTrue(DSHAgentToolArgumentsAccepted(
+      @"read_file", DSHAgentParseArgumentsJSON(@"{\"path\":\"a.txt\"}", nil),
+      &code, &reason));
 }
 
 - (void)testContractGitArgumentsOmitFrozenNativeFields {
@@ -412,16 +431,22 @@
   XCTAssertNotNil(DSHAgentArgumentsSHA256(@"git_push", @"{}", &error));
   XCTAssertNil(error);
 
-  error = nil;
-  XCTAssertNil(DSHAgentArgumentsSHA256(
+  // Frozen native fields are refused by the tool, not by the identity digest.
+  NSString *code = nil;
+  NSString *reason = nil;
+  XCTAssertFalse(DSHAgentToolArgumentsAccepted(
       @"git_commit",
-      @"{\"message\":\"m\",\"tree_oid\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\"}",
-      &error));
-  XCTAssertNotNil(error);
-  error = nil;
-  XCTAssertNil(DSHAgentArgumentsSHA256(
-      @"git_push", @"{\"remote_ref\":\"refs/heads/main\"}", &error));
-  XCTAssertNotNil(error);
+      DSHAgentParseArgumentsJSON(
+          @"{\"message\":\"m\",\"tree_oid\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\"}", nil),
+      &code, &reason));
+  XCTAssertEqualObjects(code, @"E_AGENT_BAD_ARGUMENTS");
+  XCTAssertEqualObjects(reason, @"arguments_do_not_match_tool_schema");
+  XCTAssertFalse(DSHAgentToolArgumentsAccepted(
+      @"git_push", DSHAgentParseArgumentsJSON(@"{\"remote_ref\":\"refs/heads/main\"}", nil),
+      &code, &reason));
+  XCTAssertEqualObjects(code, @"E_AGENT_BAD_ARGUMENTS");
+  XCTAssertTrue(DSHAgentToolArgumentsAccepted(
+      @"git_commit", DSHAgentParseArgumentsJSON(@"{\"message\":\"m\"}", nil), &code, &reason));
 }
 
 - (void)testGitCommitFeedbackMustMatchFrozenTreePrecondition {

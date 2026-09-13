@@ -284,10 +284,22 @@ FOUNDATION_EXPORT id _Nullable DSHAgentImmutableJSONCopy(id value,
 FOUNDATION_EXPORT NSDictionary * _Nullable DSHAgentParseArgumentsJSON(
     NSString *argumentsJSON,
     NSError **error);
+/// Identity digest of a tool call: a well-formed tool name over parseable
+/// argument objects.  It never judges the arguments themselves; see
+/// DSHAgentToolArgumentsAccepted.
 FOUNDATION_EXPORT NSString * _Nullable DSHAgentArgumentsSHA256(
     NSString *name,
     NSString *argumentsJSON,
     NSError **error);
+/// Whether a tool accepts these arguments (schema, workspace-relative paths,
+/// write size).  On refusal, `failureCode` is E_AGENT_BAD_PATH or
+/// E_AGENT_BAD_ARGUMENTS and `reason` a value-free token (lowercase and
+/// underscores, at most 64 bytes) suitable as model-directed feedback.
+FOUNDATION_EXPORT BOOL DSHAgentToolArgumentsAccepted(
+    NSString *name,
+    NSDictionary *arguments,
+    NSString * _Nullable * _Nullable failureCode,
+    NSString * _Nullable * _Nullable reason);
 FOUNDATION_EXPORT NSString * _Nullable DSHAgentIdempotencyKeyForLocator(
     NSDictionary *locator,
     NSString *rootFingerprintSHA256,

@@ -700,6 +700,21 @@ static BOOL DSHAgentApprovalPreview(NSDictionary *preview) {
       preview[@"diff_preview"] == NSNull.null;
 }
 
+/// {failure_code, reason}: an argument-class refusal with a value-free
+/// reason token (lowercase and underscores, at most 64 bytes).
+static BOOL DSHAgentLedgerRejection(NSDictionary *rejection) {
+  if (!DSHAgentExactDictionaryKeys(rejection, @[ @"failure_code", @"reason" ])) return NO;
+  NSString *code = rejection[@"failure_code"];
+  if (![code isKindOfClass:NSString.class] ||
+      (![code isEqualToString:@"E_AGENT_BAD_ARGUMENTS"] &&
+       ![code isEqualToString:@"E_AGENT_BAD_PATH"])) return NO;
+  NSString *reason = rejection[@"reason"];
+  if (!DSHAgentBoundedUTF8String(reason, 64, NO, nullptr) || reason.length == 0) return NO;
+  NSCharacterSet *alphabet = [[NSCharacterSet
+      characterSetWithCharactersInString:@"abcdefghijklmnopqrstuvwxyz_"] invertedSet];
+  return [reason rangeOfCharacterFromSet:alphabet].location == NSNotFound;
+}
+
 static BOOL DSHAgentLedgerRow(NSDictionary *row) {
   if (!DSHAgentExactDictionaryKeys(row, DSHAgentLedgerKeys()) ||
       ![row[@"schema_version"] isEqual:@2] ||
@@ -2511,7 +2526,23 @@ static BOOL DSHAgentLedgerAdvanceAuthority(
 
   for (NSUInteger index = 0; index < [(NSArray *)request[@"calls"] count];
        index += 1) {
-    NSDictionary *call = request[@"calls"][index];
+    NSDictionary *suppliedCall = request[@"calls"][index];
+    // A refused call arrives with a `rejection` the batch service attached;
+    // it is validated here and never becomes an executable intent.
+    NSDictionary *rejection = nil;
+    NSDictionary *call = suppliedCall;
+    if (suppliedCall[@"rejection"] != nil) {
+      NSMutableDictionary *withoutRejection = [suppliedCall mutableCopy];
+      [withoutRejection removeObjectForKey:@"rejection"];
+      call = [withoutRejection copy];
+      if (suppliedCall[@"rejection"] != NSNull.null) {
+        rejection = suppliedCall[@"rejection"];
+        if (!DSHAgentLedgerRejection(rejection)) {
+          DSHSetAgentNativeStoreError(error, DSHAgentNativeStoreErrorInvalidArgument);
+          return nil;
+        }
+      }
+    }
     NSMutableArray *callKeys = [@[
           @"call_index", @"call_id", @"name", @"arguments_json",
           @"arguments_sha256", @"safe_summary_key", @"access",
@@ -2587,6 +2618,60 @@ static BOOL DSHAgentLedgerAdvanceAuthority(
           @"git_commit", @"git_push", @"start_guest_cgi", @"stop_guest_cgi",
         ] containsObject:call[@"name"]]
             ? @"E_AGENT_CAPABILITY" : @"E_AGENT_UNKNOWN_TOOL",
+      }];
+      continue;
+    }
+    if (rejection != nil) {
+      if (call[@"precondition"] != NSNull.null ||
+          ![call[@"reserved_write_bytes"] isEqual:@0]) {
+        DSHSetAgentNativeStoreError(error, DSHAgentNativeStoreErrorConflict);
+        return nil;
+      }
+      NSError *rejectedArgumentsError = nil;
+      NSString *rejectedSHA = DSHAgentArgumentsSHA256(
+          call[@"name"], call[@"arguments_json"], &rejectedArgumentsError);
+      if (rejectedSHA == nil || ![rejectedSHA isEqual:call[@"arguments_sha256"]]) {
+        if (error != nullptr) *error = rejectedArgumentsError ?:
+            DSHAgentNativeStoreError(DSHAgentNativeStoreErrorConflict);
+        return nil;
+      }
+      NSMutableDictionary *rejectedLocator = [@{
+        @"schema_version" : @2,
+        @"task_id" : request[@"task_id"],
+        @"attempt_id" : request[@"attempt_id"],
+        @"round_id" : request[@"round_id"],
+        @"round_index" : request[@"round_index"],
+        @"call_index" : call[@"call_index"],
+        @"call_id" : call[@"call_id"],
+        @"idempotency_key" :
+            @"0000000000000000000000000000000000000000000000000000000000000000",
+      } mutableCopy];
+      NSString *rejectedKey = DSHAgentIdempotencyKeyForLocator(
+          rejectedLocator, root[@"root_fingerprint_sha256"], rejectedSHA, error);
+      if (rejectedKey == nil) return nil;
+      NSMutableDictionary *rejectedProjection = [@{
+        @"schema_version" : @2,
+        @"call_index" : call[@"call_index"], @"call_id" : call[@"call_id"],
+        @"name" : call[@"name"], @"arguments_sha256" : rejectedSHA,
+        @"idempotency_key" : rejectedKey,
+        @"safe_summary_key" : call[@"safe_summary_key"], @"access" : access,
+        // No approval is ever issued for a refused call: a gated one settles
+        // with its approval cancelled and no token, never pending.
+        @"approval_state" : [access isEqualToString:@"auto"]
+            ? @"not_required" : @"cancelled",
+        @"approval_token" : NSNull.null,
+        @"approval_reference" : NSNull.null,
+        @"execution_status" : @"failed", @"execution_revision" : @1,
+        @"native_row_revision" : NSNull.null, @"receipt" : NSNull.null,
+        @"approval_preview" : NSNull.null,
+      } mutableCopy];
+      [projections addObject:rejectedProjection];
+      [deniedCandidates addObject:@{
+        @"call" : call,
+        @"projection" : rejectedProjection,
+        @"outcome" : @"failed",
+        @"failure_code" : rejection[@"failure_code"],
+        @"reason" : rejection[@"reason"],
       }];
       continue;
     }
@@ -2968,13 +3053,16 @@ static BOOL DSHAgentLedgerAdvanceAuthority(
       NSDictionary *currentReference = [transcript copy];
       for (NSDictionary *candidate in deniedCandidates) {
         NSDictionary *call = candidate[@"call"];
+        NSString *candidateOutcome = candidate[@"outcome"] ?: @"denied";
+        NSMutableDictionary *feedbackPayload = [@{
+          @"schema_version" : @1,
+          @"failure_code" : candidate[@"failure_code"],
+        } mutableCopy];
+        if (candidate[@"reason"] != nil) feedbackPayload[@"reason"] = candidate[@"reason"];
         NSDictionary *feedback = @{
           @"schema_version" : @1, @"name" : call[@"name"],
-          @"outcome" : @"denied",
-          @"payload" : @{
-            @"schema_version" : @1,
-            @"failure_code" : candidate[@"failure_code"],
-          },
+          @"outcome" : candidateOutcome,
+          @"payload" : [feedbackPayload copy],
         };
         NSError *feedbackError = nil;
         NSData *feedbackBytes = DSHAgentCanonicalJSON(feedback, &feedbackError);
@@ -3039,7 +3127,7 @@ static BOOL DSHAgentLedgerAdvanceAuthority(
           @"arguments_sha256" : call[@"arguments_sha256"],
           @"result_sha256" : feedbackSHA,
           @"result_bytes" : @(feedbackBytes.length), @"truncated" : @NO,
-          @"duration_ms" : @0, @"outcome" : @"denied",
+          @"duration_ms" : @0, @"outcome" : candidateOutcome,
           @"failure_code" : candidate[@"failure_code"],
           @"approval_reference" : NSNull.null,
         };
@@ -3053,7 +3141,8 @@ static BOOL DSHAgentLedgerAdvanceAuthority(
           @"arguments_sha256" : call[@"arguments_sha256"],
           @"root_fingerprint_sha256" : root[@"root_fingerprint_sha256"],
           @"binding_revision" : root[@"workspace_binding_revision"],
-          @"transcript_before" : currentReference, @"state" : @"denied",
+          @"transcript_before" : currentReference,
+          @"state" : [candidateOutcome isEqualToString:@"failed"] ? @"rejected" : @"denied",
           @"row_revision" : @1, @"feedback" : feedback,
           @"transcript_after" : after, @"receipt" : receipt,
           @"created_at" : timestamp, @"updated_at" : timestamp,
@@ -3132,6 +3221,8 @@ static BOOL DSHAgentLedgerAdvanceAuthority(
       }
       for (NSMutableDictionary *projection in projections) {
         if (![projection[@"approval_state"] isEqualToString:@"pending"]) continue;
+        // A call settled at preparation never gets a usable token or grant.
+        if (projection[@"receipt"] != NSNull.null) continue;
         NSDictionary *sourceCall = request[@"calls"]
             [[projection[@"call_index"] unsignedIntegerValue]];
         id grantReference = sourceCall[@"grant_reference"];

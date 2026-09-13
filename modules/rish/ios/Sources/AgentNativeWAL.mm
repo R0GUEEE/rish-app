@@ -777,24 +777,34 @@ static BOOL DSHAgentArgumentWritePriorShape(id prior) {
       DSHAgentFailureCode(prior[@"failure_code"]);
 }
 
-NSString *DSHAgentArgumentsSHA256(NSString *name,
-                                  NSString *argumentsJSON,
-                                  NSError **error) {
-  NSString *toolName = nil;
-  if (!DSHAgentBoundedUTF8String(name, 64, NO, &toolName)) {
-    DSHSetAgentNativeStoreError(error, DSHAgentNativeStoreErrorInvalidArgument);
-    return nil;
-  }
+static BOOL DSHAgentToolNameWellFormed(NSString *name, NSString **toolName) {
+  if (!DSHAgentBoundedUTF8String(name, 64, NO, toolName)) return NO;
   NSCharacterSet *invalid = [[NSCharacterSet
       characterSetWithCharactersInString:
           @"abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_-"]
       invertedSet];
-  if ([toolName rangeOfCharacterFromSet:invalid].location != NSNotFound) {
-    DSHSetAgentNativeStoreError(error, DSHAgentNativeStoreErrorInvalidArgument);
-    return nil;
+  return [*toolName rangeOfCharacterFromSet:invalid].location == NSNotFound;
+}
+
+static BOOL DSHAgentToolArgumentsRefused(NSString **failureCode,
+                                         NSString **reason,
+                                         NSString *code,
+                                         NSString *token) {
+  if (failureCode != nullptr) *failureCode = code;
+  if (reason != nullptr) *reason = token;
+  return NO;
+}
+
+BOOL DSHAgentToolArgumentsAccepted(NSString *name,
+                                   NSDictionary *arguments,
+                                   NSString **failureCode,
+                                   NSString **reason) {
+  NSString *toolName = nil;
+  if (!DSHAgentToolNameWellFormed(name, &toolName) ||
+      ![arguments isKindOfClass:NSDictionary.class]) {
+    return DSHAgentToolArgumentsRefused(failureCode, reason,
+        @"E_AGENT_BAD_ARGUMENTS", @"arguments_do_not_match_tool_schema");
   }
-  NSDictionary *arguments = DSHAgentParseArgumentsJSON(argumentsJSON, error);
-  if (arguments == nil) return nil;
   if ([toolName isEqualToString:@"write_file"] ||
       [toolName isEqualToString:@"read_file"] ||
       [toolName isEqualToString:@"list_dir"]) {
@@ -806,9 +816,16 @@ NSString *DSHAgentArgumentsSHA256(NSString *name,
             ? (arguments.count == 0 || DSHAgentExactDictionaryKeys(arguments, @[@"path"]))
             : DSHAgentExactDictionaryKeys(arguments, @[@"path"]));
     if (listDirectory && path == nil) path = @"";
-    if (!exactPath || !DSHAgentArgumentPathAllowed(path, listDirectory)) {
-      DSHSetAgentNativeStoreError(error, DSHAgentNativeStoreErrorInvalidArgument);
-      return nil;
+    if (!exactPath || ![path isKindOfClass:NSString.class]) {
+      return DSHAgentToolArgumentsRefused(failureCode, reason,
+          @"E_AGENT_BAD_ARGUMENTS", @"arguments_do_not_match_tool_schema");
+    }
+    if (!DSHAgentArgumentPathAllowed(path, listDirectory)) {
+      return DSHAgentToolArgumentsRefused(failureCode, reason,
+          @"E_AGENT_BAD_PATH",
+          [path hasPrefix:@"/"]
+              ? @"path_must_be_relative_to_workspace_root"
+              : @"path_contains_disallowed_segment_or_character");
     }
   }
   if ([toolName isEqualToString:@"write_file"]) {
@@ -824,23 +841,44 @@ NSString *DSHAgentArgumentsSHA256(NSString *name,
                                       @[@"path", @"content", @"expected_prior"])) ||
         ![arguments[@"content"] isKindOfClass:NSString.class] ||
         contentBytes == nil ||
-        contentBytes.length > DSHAgentNativeWALMaxSingleWriteBytes ||
         (expectedRevision != nil && expectedRevision != NSNull.null &&
          !DSHAgentBoundedUTF8String(expectedRevision, 256, NO, nullptr)) ||
         (expectedPrior != nil && !DSHAgentArgumentWritePriorShape(expectedPrior))) {
-      DSHSetAgentNativeStoreError(error, DSHAgentNativeStoreErrorInvalidArgument);
-      return nil;
+      return DSHAgentToolArgumentsRefused(failureCode, reason,
+          @"E_AGENT_BAD_ARGUMENTS", @"arguments_do_not_match_tool_schema");
+    }
+    if (contentBytes.length > DSHAgentNativeWALMaxSingleWriteBytes) {
+      return DSHAgentToolArgumentsRefused(failureCode, reason,
+          @"E_AGENT_BAD_ARGUMENTS", @"content_exceeds_single_write_limit");
     }
   } else if ([toolName isEqualToString:@"git_commit"] &&
              (!DSHAgentExactDictionaryKeys(arguments, @[@"message"]) ||
               !DSHAgentBoundedUTF8String(arguments[@"message"], 500, NO, nullptr))) {
-    DSHSetAgentNativeStoreError(error, DSHAgentNativeStoreErrorInvalidArgument);
-    return nil;
+    return DSHAgentToolArgumentsRefused(failureCode, reason,
+        @"E_AGENT_BAD_ARGUMENTS", @"arguments_do_not_match_tool_schema");
   } else if ([toolName isEqualToString:@"git_push"] &&
              arguments.count != 0) {
+    return DSHAgentToolArgumentsRefused(failureCode, reason,
+        @"E_AGENT_BAD_ARGUMENTS", @"arguments_do_not_match_tool_schema");
+  }
+  return YES;
+}
+
+NSString *DSHAgentArgumentsSHA256(NSString *name,
+                                  NSString *argumentsJSON,
+                                  NSError **error) {
+  // The digest binds a call's identity: any well-formed tool name over any
+  // parseable argument object.  Whether the arguments are acceptable to the
+  // tool (paths, schema, sizes) is a separate question answered by
+  // DSHAgentToolArgumentsAccepted, so a refusal can settle as a tool result
+  // the model sees instead of failing the round that carried it.
+  NSString *toolName = nil;
+  if (!DSHAgentToolNameWellFormed(name, &toolName)) {
     DSHSetAgentNativeStoreError(error, DSHAgentNativeStoreErrorInvalidArgument);
     return nil;
   }
+  NSDictionary *arguments = DSHAgentParseArgumentsJSON(argumentsJSON, error);
+  if (arguments == nil) return nil;
   return DSHAgentHJ(@"tool-arguments", @{
     @"name" : toolName,
     @"arguments" : arguments,
@@ -2384,7 +2422,8 @@ static BOOL DSHAgentWALDeniedCallShape(NSDictionary *row) {
       !DSHAgentSafeInteger(row[@"binding_revision"],
                           DSHAgentMaximumSafeInteger, NO) ||
       !DSHAgentWALReferenceShape(row[@"transcript_before"]) ||
-      ![row[@"state"] isEqualToString:@"denied"] ||
+      (![row[@"state"] isEqualToString:@"denied"] &&
+       ![row[@"state"] isEqualToString:@"rejected"]) ||
       ![row[@"row_revision"] isEqual:@1] ||
       !DSHAgentWALReferenceShape(row[@"transcript_after"]) ||
       !DSHAgentWALToolReceiptShape(row[@"receipt"]) ||
@@ -2392,16 +2431,32 @@ static BOOL DSHAgentWALDeniedCallShape(NSDictionary *row) {
       !DSHAgentCanonicalTimestamp(row[@"updated_at"])) return NO;
   NSDictionary *feedback = row[@"feedback"];
   NSDictionary *payload = feedback[@"payload"];
+  // `denied` rows are durable denials (unknown tool / capability); `rejected`
+  // rows are argument refusals settled at preparation as failed results with
+  // a value-free reason token.
+  BOOL rejectedRow = [row[@"state"] isEqualToString:@"rejected"];
+  NSString *expectedOutcome = rejectedRow ? @"failed" : @"denied";
+  BOOL payloadShape = rejectedRow
+      ? (DSHAgentExactDictionaryKeys(payload, @[
+            @"schema_version", @"failure_code", @"reason",
+          ]) &&
+         DSHAgentBoundedUTF8String(payload[@"reason"], 64, NO, nullptr) &&
+         [(NSString *)payload[@"reason"] rangeOfCharacterFromSet:
+             [[NSCharacterSet characterSetWithCharactersInString:
+                 @"abcdefghijklmnopqrstuvwxyz_"] invertedSet]].location == NSNotFound &&
+         ([payload[@"failure_code"] isEqualToString:@"E_AGENT_BAD_ARGUMENTS"] ||
+          [payload[@"failure_code"] isEqualToString:@"E_AGENT_BAD_PATH"]))
+      : (DSHAgentExactDictionaryKeys(payload, @[
+            @"schema_version", @"failure_code",
+          ]) &&
+         ([payload[@"failure_code"] isEqualToString:@"E_AGENT_UNKNOWN_TOOL"] ||
+          [payload[@"failure_code"] isEqualToString:@"E_AGENT_CAPABILITY"]));
   if (!DSHAgentExactDictionaryKeys(feedback, @[
         @"schema_version", @"name", @"outcome", @"payload",
       ]) || ![feedback[@"schema_version"] isEqual:@1] ||
       ![feedback[@"name"] isEqual:row[@"name"]] ||
-      ![feedback[@"outcome"] isEqualToString:@"denied"] ||
-      !DSHAgentExactDictionaryKeys(payload, @[
-        @"schema_version", @"failure_code",
-      ]) || ![payload[@"schema_version"] isEqual:@1] ||
-      (![payload[@"failure_code"] isEqualToString:@"E_AGENT_UNKNOWN_TOOL"] &&
-       ![payload[@"failure_code"] isEqualToString:@"E_AGENT_CAPABILITY"])) return NO;
+      ![feedback[@"outcome"] isEqualToString:expectedOutcome] ||
+      !payloadShape || ![payload[@"schema_version"] isEqual:@1]) return NO;
   NSError *digestError = nil;
   NSData *feedbackBytes = DSHAgentCanonicalJSON(feedback, &digestError);
   NSString *resultSHA = DSHAgentHB(@"tool-result", feedbackBytes, &digestError);
@@ -2412,7 +2467,7 @@ static BOOL DSHAgentWALDeniedCallShape(NSDictionary *row) {
       [receipt[@"arguments_sha256"] isEqual:row[@"arguments_sha256"]] &&
       [receipt[@"result_sha256"] isEqual:resultSHA] &&
       [receipt[@"result_bytes"] isEqual:@(feedbackBytes.length)] &&
-      [receipt[@"outcome"] isEqualToString:@"denied"] &&
+      [receipt[@"outcome"] isEqualToString:expectedOutcome] &&
       [receipt[@"failure_code"] isEqual:payload[@"failure_code"]];
 }
 

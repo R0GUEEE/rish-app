@@ -550,14 +550,22 @@ static NSDictionary *DSHAgentBatchConversationGrant(
             raw[@"name"])
         : nil;
     NSDictionary *prepared = nil;
+    // A call whose arguments the tool refuses is not an error of the turn:
+    // it settles as a failed tool result so the model can correct it in the
+    // next round (see the ledger's rejected settlement).
+    NSDictionary *rejection = nil;
     if (![access isEqualToString:@"durable_deny"]) {
       NSDictionary *arguments = DSHAgentParseArgumentsJSON(raw[@"arguments_json"], error);
+      NSString *refusalCode = nil;
+      NSString *refusalReason = nil;
       if (arguments == nil) {
-        return DSHAgentBatchCommitRejected(
-            self.wal, request, started, @"E_AGENT_BAD_ARGUMENTS", mutationBatch,
-            @"none", error);
-      }
-      if ([raw[@"name"] isEqualToString:@"list_dir"] ||
+        if (error != nullptr) *error = nil;
+        rejection = @{ @"failure_code" : @"E_AGENT_BAD_ARGUMENTS",
+                       @"reason" : @"arguments_not_a_json_object" };
+      } else if (!DSHAgentToolArgumentsAccepted(raw[@"name"], arguments,
+                                                &refusalCode, &refusalReason)) {
+        rejection = @{ @"failure_code" : refusalCode, @"reason" : refusalReason };
+      } else if ([raw[@"name"] isEqualToString:@"list_dir"] ||
           [raw[@"name"] isEqualToString:@"read_file"] ||
           [raw[@"name"] isEqualToString:@"write_file"]) {
         prepared = [self.workspaceExecutor prepareToolNamed:raw[@"name"]
@@ -573,7 +581,7 @@ static NSDictionary *DSHAgentBatchConversationGrant(
                                                   root:request[@"root"]
                                                  error:error];
       }
-      if (prepared == nil) {
+      if (prepared == nil && rejection == nil) {
         NSInteger code = (error != nullptr && *error != nil) ? (*error).code : 0;
         NSString *failure = code == DSHAgentNativeStoreErrorInvalidArgument
             ? (([raw[@"name"] isEqualToString:@"list_dir"] ||
@@ -584,11 +592,17 @@ static NSDictionary *DSHAgentBatchConversationGrant(
                 ? @"E_AGENT_CONFLICT"
                 : (code == DSHAgentNativeStoreErrorOwnerLost
                     ? @"E_AGENT_ROOT_STALE" : @"E_AGENT_CAPABILITY"));
-        return DSHAgentBatchCommitRejected(
-            self.wal, request, started, failure, mutationBatch,
-            ([failure isEqualToString:@"E_AGENT_CONFLICT"] ||
-             [failure isEqualToString:@"E_AGENT_ROOT_STALE"])
-                ? @"requery" : @"none", error);
+        if (code == DSHAgentNativeStoreErrorInvalidArgument) {
+          if (error != nullptr) *error = nil;
+          rejection = @{ @"failure_code" : failure,
+                         @"reason" : DSHAgentBatchRejectionReason(raw[@"name"], failure) };
+        } else {
+          return DSHAgentBatchCommitRejected(
+              self.wal, request, started, failure, mutationBatch,
+              ([failure isEqualToString:@"E_AGENT_CONFLICT"] ||
+               [failure isEqualToString:@"E_AGENT_ROOT_STALE"])
+                  ? @"requery" : @"none", error);
+        }
       }
     }
     id approvalPreview = NSNull.null;
@@ -622,8 +636,31 @@ static NSDictionary *DSHAgentBatchConversationGrant(
       @"reserved_write_bytes" : prepared == nil
           ? @0 : prepared[@"reserved_write_bytes"],
       @"grant_reference" : grant == nil ? NSNull.null : grant[@"grant_id"],
-      @"approval_preview" : approvalPreview,
+      @"approval_preview" : rejection == nil ? approvalPreview : NSNull.null,
+      @"rejection" : rejection ?: NSNull.null,
     }];
+  }
+  // One refused call settles the whole batch without executing anything:
+  // its siblings carry the same code with an explicit "not executed" reason
+  // so the next round can reconsider the batch as a unit.
+  NSDictionary *firstRejection = nil;
+  for (NSDictionary *call in preparedCalls) {
+    if (call[@"rejection"] != NSNull.null) { firstRejection = call[@"rejection"]; break; }
+  }
+  if (firstRejection != nil) {
+    NSMutableArray *settled = [NSMutableArray arrayWithCapacity:preparedCalls.count];
+    for (NSDictionary *call in preparedCalls) {
+      NSMutableDictionary *copy = [call mutableCopy];
+      if (call[@"rejection"] == NSNull.null && ![call[@"access"] isEqualToString:@"durable_deny"]) {
+        copy[@"rejection"] = @{ @"failure_code" : firstRejection[@"failure_code"],
+                                @"reason" : @"not_executed_because_another_call_was_rejected" };
+        copy[@"precondition"] = NSNull.null;
+        copy[@"reserved_write_bytes"] = @0;
+        copy[@"approval_preview"] = NSNull.null;
+      }
+      [settled addObject:[copy copy]];
+    }
+    preparedCalls = settled;
   }
   if (DSHAgentBatchCommittedSession(self.preparedStore, request, error) == nil) {
     return DSHAgentBatchCommitRejected(
@@ -752,6 +789,18 @@ static NSDictionary *DSHAgentBatchConversationGrant(
     return nil;
   }
   return operationResult;
+}
+
+/// Value-free, model-directed explanation of why a call's arguments were
+/// refused. Tokens only (lowercase and underscores), never argument values.
+static NSString *DSHAgentBatchRejectionReason(NSString *name, NSString *failureCode) {
+  if ([failureCode isEqualToString:@"E_AGENT_BAD_PATH"]) {
+    return @"path_must_be_relative_to_workspace_root";
+  }
+  if ([name hasSuffix:@"_guest_cgi"]) {
+    return @"paths_must_be_workspace_relative_and_keys_exact";
+  }
+  return @"arguments_do_not_match_tool_schema";
 }
 
 static BOOL DSHAgentApprovalToken(NSDictionary *token) {

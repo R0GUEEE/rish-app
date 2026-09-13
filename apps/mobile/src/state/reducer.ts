@@ -3843,6 +3843,17 @@ function evidenceRoundReceipt(value: unknown): CompletionRoundReceiptV1 | null {
   };
 }
 
+/**
+ * A gated call refused for its arguments: native settled it as a failed
+ * result before any approval was issued, so its approval is `cancelled`
+ * with no token and it never became a write intent.
+ */
+function agentCallSettledBeforeApproval(call: PersistedAgentCallJournalV3): boolean {
+  return call.access !== 'auto' && call.access !== 'durable_deny' &&
+    call.approval_decision === 'cancelled' && call.approval_token === null &&
+    call.receipt !== null && call.receipt.outcome === 'failed';
+}
+
 function projectionCallMatchesJournal(
   projection: Record<string, unknown>,
   call: PersistedAgentCallJournalV3,
@@ -3918,9 +3929,23 @@ function projectionCallMatchesJournal(
         projection.execution_status !== 'denied' ||
         projection.execution_revision !== null
       ) return false;
+    } else if (call.receipt !== null) {
+      // Refused arguments: native settled the call while preparing the batch
+      // as a failed result the model can correct; it never got a token, and
+      // a gated call's approval is cancelled rather than pending.
+      if (
+        call.receipt.outcome !== 'failed' ||
+        (call.receipt.failure_code !== 'E_AGENT_BAD_ARGUMENTS' &&
+          call.receipt.failure_code !== 'E_AGENT_BAD_PATH') ||
+        call.idempotency_key === null ||
+        call.approval_decision !== (call.access === 'auto' ? 'pending' : 'cancelled') ||
+        call.approval_token !== null ||
+        call.approval_reference !== null ||
+        projection.execution_status !== 'failed' ||
+        projection.execution_revision !== call.native_row_revision
+      ) return false;
     } else if (
       call.idempotency_key === null ||
-      call.receipt !== null ||
       projection.execution_status !== 'intent' ||
       projection.execution_revision !== 1 ||
       (call.access === 'auto'
@@ -3991,10 +4016,16 @@ function evidenceAttemptProjectionMatchesJournal(
     'cleanup_id',
   ])) return false;
   const value = projection;
+  // Native opens a write manifest only for calls that became executable
+  // intents: durable denials and calls refused for their arguments never
+  // reach it, so a batch of only those (plus reads) is read-only.
   const expectedBatchKind =
     journal.batch.length === 0
       ? null
-      : journal.batch.every(call => call.access === 'auto')
+      : journal.batch.every(call =>
+        call.access === 'auto' ||
+        call.access === 'durable_deny' ||
+        agentCallSettledBeforeApproval(call))
         ? 'read_only_batch'
         : 'write_batch';
   if (
@@ -4194,12 +4225,16 @@ function highLevelEvidenceSupportsTransition(
     if (batchResult.status === 'rejected') return false;
     const receipt = batchResult.receipt;
     const firstUnsettledCall = next.batch.findIndex(call => call.receipt === null);
+    const batchSettled = next.batch.length > 0 && firstUnsettledCall < 0;
     const expectedPhase = next.batch.some(call =>
+      call.receipt === null &&
       call.access !== 'auto' &&
       call.access !== 'durable_deny' &&
       call.approval_decision === 'pending')
       ? 'approval_pending'
-      : 'batch_frozen';
+      : batchSettled
+        ? 'tool_result_pending'
+        : 'batch_frozen';
     if (current.phase !== 'batch_frozen' || current.batch.length !== 0 ||
       current.call_index !== null || current.round_lineage === null ||
       current.round_lineage.status !== 'completed' ||
@@ -4211,7 +4246,7 @@ function highLevelEvidenceSupportsTransition(
       request.expected_reserved_write_bytes !== current.reserved_write_bytes ||
       nextLineage === null || !sameAgentRoundLineage(current.round_lineage, nextLineage) ||
       next.phase !== expectedPhase ||
-      next.call_index !== (firstUnsettledCall < 0 ? null : firstUnsettledCall) ||
+      next.call_index !== (batchSettled ? next.batch.length - 1 : firstUnsettledCall < 0 ? null : firstUnsettledCall) ||
       receipt.task_id !== requestCas.task_id || receipt.attempt_id !== requestCas.attempt_id ||
       receipt.round_id !== nextLineage?.round_id || receipt.round_index !== next.round_index ||
       !sameAgentTranscript(receipt.transcript, next.transcript) ||

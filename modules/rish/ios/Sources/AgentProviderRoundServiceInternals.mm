@@ -596,6 +596,28 @@ NSDictionary *DSHProviderOperationSafeResult(NSDictionary *result) {
   };
 }
 
+/// What the model is told about each tool. Every path argument is relative
+/// to the workspace root exactly as list_dir/read_file use it; the round
+/// batch rejects absolute or normalised paths, so the description has to
+/// say so instead of leaving the model to guess a mount point.
+static NSString *DSHProviderToolDescription(NSString *name, NSString *fallback) {
+  static NSDictionary<NSString *, NSString *> *descriptions = nil;
+  static dispatch_once_t onceToken;
+  dispatch_once(&onceToken, ^{
+    descriptions = @{
+      @"list_dir" : @"List a directory of the workspace. path is relative to the workspace root (\"\" or \".\" for the root itself, e.g. \"src\"); never an absolute path.",
+      @"read_file" : @"Read a UTF-8 file of the workspace. path is relative to the workspace root exactly as list_dir shows it (e.g. \"index.html\", \"src/app.js\"); never an absolute path. The result carries the file's revision and sha256.",
+      @"write_file" : @"Write literal UTF-8 content, using real line breaks instead of escaped backslash-n text. path is relative to the workspace root. To create a NEW file, OMIT expected_revision; omission asserts the file does not exist. To update an EXISTING file, first read_file and pass its exact revision string. Never pass the string null.",
+      @"git_status" : @"Report the workspace's git status: branch, staged and unstaged changes.",
+      @"git_commit" : @"Commit the workspace's current changes with the given message.",
+      @"git_push" : @"Push the workspace's committed changes to its remote.",
+      @"start_guest_cgi" : @"Start the local demo service from files in the workspace and return its preview URL. All paths are relative to the workspace root exactly as used with read_file (e.g. \"index.html\", \"backend.sh\"); never prefix them with a directory such as /workspace. Each sha256 must be the value read_file returned for that file. When there is no seed data, pass null for both initial_data_path and initial_data_sha256.",
+      @"stop_guest_cgi" : @"Stop the local demo service identified by service_id (the id start_guest_cgi returned).",
+    };
+  });
+  return descriptions[name] ?: fallback;
+}
+
 NSArray *DSHProviderToolsForAuthority(
     NSDictionary *authority,
     DSHAgentToolRegistry *registry,
@@ -608,9 +630,8 @@ NSArray *DSHProviderToolsForAuthority(
     [raw addObject:@{
       @"type" : @"function",
       @"name" : native[@"name"],
-      @"description" : [native[@"name"] isEqual:@"write_file"]
-          ? @"Write literal UTF-8 content, using real line breaks instead of escaped backslash-n text. To create a NEW file, OMIT expected_revision; omission asserts the file does not exist. To update an EXISTING file, first read_file and pass its exact revision string. Never pass the string null."
-          : native[@"safe_summary_key"],
+      @"description" : DSHProviderToolDescription(native[@"name"],
+                                                  native[@"safe_summary_key"]),
       @"parameters" : native[@"parameters"],
     }];
   }

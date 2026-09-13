@@ -1579,6 +1579,12 @@ describe('project Agent completion controller', () => {
     readonly cancelledCallIds?: readonly string[];
     /** Adds git_push to the frozen root capabilities and registry. */
     readonly pushCapable?: boolean;
+    /**
+     * Round indexes whose batch native refuses at preparation: every call
+     * comes back settled as a failed result (E_AGENT_BAD_PATH) and the
+     * transcript advanced by one tool message per call.
+     */
+    readonly refusedRounds?: readonly number[];
   };
 
   const defaultBatchCalls: readonly AgentRuntimeFixtureCall[] = [
@@ -1779,7 +1785,10 @@ describe('project Agent completion controller', () => {
       if (hasMutation && !writeRevisions.has(request.operation_id)) {
         writeRevisions.set(request.operation_id, ++writeReservationRevision);
       }
-      const batchRevision = hasMutation
+      const refused = options.refusedRounds?.includes(request.round_index) === true;
+      // A refused batch opens no write manifest, so it carries the round
+      // revision like any read-only batch.
+      const batchRevision = hasMutation && !refused
         ? writeRevisions.get(request.operation_id)!
         : request.expected_round_revision;
       const makeToken = (index: number, call: AgentRuntimeFixtureCall): AgentApprovalBindingTokenV2 => ({
@@ -1811,6 +1820,21 @@ describe('project Agent completion controller', () => {
       const calls: AgentBatchCallProjectionV2[] = callsForRound.map((call, callIndex) => {
         const durableDeny = call.access === 'durable_deny';
         const idempotencyKey = durableDeny ? null : (request.round_index + callIndex + 4).toString(16).slice(-1).repeat(64);
+        const refusedReceipt: AgentToolReceiptV1 | null = refused && !durableDeny
+          ? {
+              schema_version: 1,
+              call_id: call.callId,
+              name: call.name,
+              arguments_sha256: call.argumentsSha256,
+              result_sha256: 'b'.repeat(64),
+              result_bytes: 96,
+              truncated: false,
+              duration_ms: 0,
+              outcome: 'failed',
+              failure_code: 'E_AGENT_BAD_PATH',
+              approval_reference: null,
+            }
+          : null;
         const deniedReceipt: AgentToolReceiptV1 | null = durableDeny
           ? {
               schema_version: 1,
@@ -1834,7 +1858,7 @@ describe('project Agent completion controller', () => {
           arguments_sha256: call.argumentsSha256,
           idempotency_key: idempotencyKey,
           safe_summary_key: durableDeny ? 'agent.unknown' : `agent.${call.name}`,
-          approval_preview: durableDeny
+          approval_preview: durableDeny || refusedReceipt !== null
             ? null
             : call.name === 'write_file'
               ? {
@@ -1856,16 +1880,19 @@ describe('project Agent completion controller', () => {
                   diff_truncated: false,
                 },
           access: call.access,
-          approval_state: durableDeny ? 'denied' : call.access === 'auto' ? 'not_required' : 'pending',
-          approval_token: durableDeny || call.access === 'auto' ? null : makeToken(callIndex, call),
+          approval_state: durableDeny ? 'denied' : call.access === 'auto' ? 'not_required' : refusedReceipt !== null ? 'cancelled' : 'pending',
+          approval_token: durableDeny || call.access === 'auto' || refusedReceipt !== null ? null : makeToken(callIndex, call),
           approval_reference: null,
-          execution_status: durableDeny ? 'denied' : 'intent',
+          execution_status: durableDeny ? 'denied' : refusedReceipt !== null ? 'failed' : 'intent',
           execution_revision: durableDeny ? null : 1,
           native_row_revision: 1,
-          receipt: deniedReceipt,
+          receipt: refusedReceipt ?? deniedReceipt,
         };
       });
-      const batchKind = hasMutation ? 'write_batch' : 'read_only_batch';
+      const refusedTranscript = refused
+        ? transcript(request.transcript.generation + callsForRound.length, (request.transcript.generation + callsForRound.length).toString(16).slice(-1).repeat(64))
+        : request.transcript;
+      const batchKind = hasMutation && !refused ? 'write_batch' : 'read_only_batch';
       const batchNewWriteBytes = hasMutation ? 1 : 0;
       const receipt: AgentBatchReceiptV2 = {
         schema_version: 2,
@@ -1875,14 +1902,14 @@ describe('project Agent completion controller', () => {
         round_index: request.round_index,
         batch_kind: batchKind,
         batch_revision: batchRevision,
-        manifest_sha256: hasMutation ? MANIFEST_SHA : null,
-        transcript: request.transcript,
+        manifest_sha256: hasMutation && !refused ? MANIFEST_SHA : null,
+        transcript: refusedTranscript,
         calls,
-        batch_new_write_bytes: batchNewWriteBytes,
-        reserved_write_bytes: request.expected_reserved_write_bytes + batchNewWriteBytes,
-        effect_gate: hasMutation ? 'closed' : 'not_applicable',
+        batch_new_write_bytes: refused ? 0 : batchNewWriteBytes,
+        reserved_write_bytes: request.expected_reserved_write_bytes + (refused ? 0 : batchNewWriteBytes),
+        effect_gate: hasMutation && !refused ? 'closed' : 'not_applicable',
       };
-      lastBatchTranscript = request.transcript;
+      lastBatchTranscript = refusedTranscript;
       return { schema_version: 2 as const, status: 'prepared' as const, operation_id: request.operation_id, receipt, observed_checkpoint: request.committed_checkpoint };
     });
     const bindAgentApproval = jest.fn(async (request: BindAgentApprovalRequestV2) => {
