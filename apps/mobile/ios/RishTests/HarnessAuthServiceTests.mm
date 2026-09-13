@@ -2,6 +2,7 @@
 #import <UIKit/UIKit.h>
 
 #import "../../../../modules/rish/ios/Sources/HarnessAuthService.h"
+#import "../../../../modules/rish/ios/Sources/RishConversationBrowser.h"
 
 @interface DSHHarnessAuthService (StreamTest)
 - (void)receiveStreamEvent:(const char *)event length:(size_t)length;
@@ -16,6 +17,12 @@
 @end
 
 @implementation HarnessAuthServiceTests
+
+- (void)testClaudeSessionAccessorDoesNotRecursivelyReadItself {
+  DSHHarnessAuthService *service = [[DSHHarnessAuthService alloc] initWithBundle:[NSBundle bundleForClass:self.class]];
+  XCTAssertNil([service claudeOfficialSession]);
+  XCTAssertNil([service claudeOfficialSession]);
+}
 
 - (void)testAuthorizationHeaderCopiesNineCharactersAndRendersCompactly {
   RishDeviceAuthorizationController *controller = [[RishDeviceAuthorizationController alloc]
@@ -149,4 +156,26 @@
   XCTAssertNil([service valueForKey:@"activeUserCode"]);
 }
 
+- (void)testConversationBrowserAcceptsOnlyVersionedWebTargets {
+  for (NSString *address in @[@"http://localhost:8000/index.html", @"http://127.0.0.1:65016/?mode=preview#items", @"https://example.com/docs"]) {
+    NSURL *url = [RishConversationBrowser URLForRequest:@{@"schema_version":@1, @"url":address}];
+    XCTAssertEqualObjects(url.absoluteString, address);
+  }
+  for (NSString *address in @[@"javascript:alert(1)", @"file:///tmp/index.html", @"data:text/html,test", @"mailto:test@example.com", @"https://", @"https://user:secret@example.com", @"http://localhost:99999/", @"https://example.com\\x", @"https://example.com/\n"]) {
+    XCTAssertNil(([RishConversationBrowser URLForRequest:@{@"schema_version":@1, @"url":address}]));
+  }
+  XCTAssertNil(([RishConversationBrowser URLForRequest:@{@"schema_version":@2, @"url":@"https://example.com"}]));
+  XCTAssertNil(([RishConversationBrowser URLForRequest:@{@"schema_version":@YES, @"url":@"https://example.com"}]));
+  XCTAssertNil(([RishConversationBrowser URLForRequest:@{@"schema_version":@1, @"url":@"https://example.com", @"extra":@YES}]));
+}
+
+- (void)testClaudeAuthorizationRequestCodeSwitchIsNotAToken {
+  NSString *url = @"https://claude.ai/oauth/authorize?code=true&state=fixture";
+  NSDictionary *valid = [DSHHarnessAuthService safeLoginFieldsFromOfficialOutput:url harnessId:@"claude-code"];
+  XCTAssertEqualObjects(valid[@"verification_url"], url);
+  for (NSString *invalid in @[@"https://claude.ai/oauth/authorize?code=secret", @"https://claude.ai/oauth/authorize?code=true&code=true", @"https://claude.ai/oauth/callback?code=true"]) {
+    NSDictionary *result = [DSHHarnessAuthService safeLoginFieldsFromOfficialOutput:invalid harnessId:@"claude-code"];
+    XCTAssertNil(result[@"verification_url"]);
+  }
+}
 @end

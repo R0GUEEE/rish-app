@@ -1,3 +1,4 @@
+import { sanitizeCompletionError } from '../src/completion/validation';
 import {
   createCompletionController,
   type CompletionController,
@@ -1163,6 +1164,41 @@ describe('transactional completion controller', () => {
       code: 'E_COMPLETION_TRANSPORT',
     });
     expect(value.completeRoundV2).toHaveBeenCalledTimes(1);
+  });
+
+  test.each(['E_CLAUDE_OFFICIAL_TEXT_TIMEOUT', 'E_COMPLETION_TIMEOUT'])('persists and rehydrates %s as a retryable canonical timeout', async code => {
+    const value = fixture();
+    const conversationId = value.store.createConversation({ modelId: 'claude-haiku-4-5-20251001', thinkingMode: 'off' });
+    value.completeRoundV2.mockRejectedValueOnce(sanitizeCompletionError({ code, message: 'private provider output' }));
+    const result = await value.controller.send({ conversationId, text: 'hello', attachments: [] });
+    expect(result).toMatchObject({ status: 'retryable', code: 'E_COMPLETION_TIMEOUT' });
+    const saved = value.store.serialize();
+    expect(saved).toContain('E_COMPLETION_TIMEOUT');
+    expect(saved).not.toContain('E_CLAUDE_OFFICIAL_TEXT_TIMEOUT');
+    const reloaded = createChatStore({ initialState: hydrateChatState(saved) });
+    const restored = fixture({ store: reloaded });
+    expect(restored.controller.reconcileHydrated(conversationId)).toMatchObject({
+      phase: 'retryable', failureCode: 'E_COMPLETION_TIMEOUT',
+    });
+    expect(restored.completeRoundV2).not.toHaveBeenCalled();
+  });
+
+  test('retry after selecting a model sends the same image with the newly frozen selection and completes', async () => {
+    const value = fixture();
+    const conversationId = value.store.createConversation({ modelId: 'deepseek-v4-flash-vision-exp', thinkingMode: 'high' });
+    const image = { schema_version: 1 as const, id: 'retry-image', kind: 'image' as const, name: 'image.png', mime_type: 'image/png', size: 100 };
+    value.completeRoundV2.mockRejectedValueOnce(sanitizeCompletionError({ code: 'E_COMPLETION_RESPONSE_MODEL' }));
+    await value.controller.send({ conversationId, text: 'What is this?', attachments: [image] });
+    const source = value.store.getState().conversations[conversationId].attempts[0];
+    value.store.setModel(conversationId, 'deepseek-v4-flash');
+    value.store.setThinkingMode(conversationId, 'off');
+    const result = await value.controller.retry(conversationId, source.attemptId);
+    expect(result.status).toBe('completed');
+    const request = value.completeRoundV2.mock.calls[1][0];
+    expect(request).toMatchObject({ model: 'deepseek-v4-flash', thinkingMode: 'off', harnessId: 'dsh' });
+    expect(request.visibleHistory[0].attachments).toEqual([image]);
+    expect(value.store.getState().conversations[conversationId].attempts[0]).toEqual(source);
+    expect(value.store.getState().conversations[conversationId].attempts[1].status).toBe('completed');
   });
 
   test('reconciles a persisted sending round to interrupted without HTTP', () => {

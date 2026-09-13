@@ -1,6 +1,9 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { ActivityIndicator, AppState, Linking, Pressable, StyleSheet, Text, View } from 'react-native';
+import { ActivityIndicator, AppState, Linking, Platform, Pressable, StyleSheet, Text, View } from 'react-native';
+import BadgeCheck from 'lucide-react-native/icons/badge-check';
 import CircleAlert from 'lucide-react-native/icons/circle-alert';
+import CircleCheck from 'lucide-react-native/icons/circle-check';
+import CircleDot from 'lucide-react-native/icons/circle-dot';
 import LogIn from 'lucide-react-native/icons/log-in';
 import LogOut from 'lucide-react-native/icons/log-out';
 import RotateCcw from 'lucide-react-native/icons/rotate-ccw';
@@ -14,6 +17,8 @@ import { validVerificationUrl } from '../harnessAuth/url';
 import * as Auth from '../harnessAuth/native';
 import type { CodexChatSource } from '../harnessAuth/native';
 
+const readChatSource = (id: HarnessSubscriptionId) =>
+  id === 'claude-code' ? Auth.claudeChatSource() : Auth.codexChatSource();
 
 export function harnessSubscriptionIdForModel(model: string): HarnessSubscriptionId | null {
   if (!isHarnessModelId(model)) return null;
@@ -66,7 +71,7 @@ export function HarnessSubscriptionCard({ id, visible, disabled: externalDisable
   }, [id, refresh, stopPolling, visible]);
 
   useEffect(() => {
-    if (!currentState || currentState.harness_id !== 'codex') return;
+    if (!currentState) return;
     const status = currentState.status;
     if (authTransition.current === null) { authTransition.current = status; return; }
     if (authTransition.current === status) return;
@@ -74,7 +79,7 @@ export function HarnessSubscriptionCard({ id, visible, disabled: externalDisable
     if (status === 'signed_out') { setChatSource(null); setChatSourceError(null); onCredentialChanged?.(null); }
     if (status === 'signed_in') {
       const scope = scopeRef.current;
-      Auth.codexChatSource().then(source => {
+      readChatSource(currentState.harness_id).then(source => {
         if (scopeRef.current !== scope) return;
         setChatSource(source); setChatSourceError(source.error_code); onCredentialChanged?.(source);
       }).catch(() => { if (scopeRef.current === scope) setChatSourceError('E_CHAT_SOURCE_STATUS'); });
@@ -83,9 +88,9 @@ export function HarnessSubscriptionCard({ id, visible, disabled: externalDisable
 
   useEffect(() => {
     const scope = scopeRef.current;
-    if (!scope || id !== 'codex' || currentState?.status !== 'signed_in' || sourceBusy.current.has(scope)) return;
+    if (!scope || currentState?.status !== 'signed_in' || sourceBusy.current.has(scope)) return;
     sourceBusy.current.add(scope);
-    Auth.codexChatSource().then(source => { if (scopeRef.current === scope) { setChatSource(source); setChatSourceError(source.error_code); } }).catch(() => { if (scopeRef.current === scope) setChatSourceError('E_CHAT_SOURCE_STATUS'); }).finally(() => sourceBusy.current.delete(scope));
+    readChatSource(id).then(source => { if (scopeRef.current === scope) { setChatSource(source); setChatSourceError(source.error_code); } }).catch(() => { if (scopeRef.current === scope) setChatSourceError('E_CHAT_SOURCE_STATUS'); }).finally(() => sourceBusy.current.delete(scope));
   }, [id, currentState?.status]);
 
   useEffect(() => { const scope = scopeRef.current; if (scope && rawState?.harness_id === id && rawState.status === 'authorizing' && visible && AppState.currentState === 'active') startPolling(scope); else stopPolling(); return stopPolling; }, [id, rawState?.harness_id, rawState?.status, startPolling, stopPolling, visible]);
@@ -105,26 +110,28 @@ export function HarnessSubscriptionCard({ id, visible, disabled: externalDisable
     const login = state?.login;
     if (!login || !validVerificationUrl(id, login.verification_url)) return;
     setBrowserError(false);
-    (id === 'codex' ? Auth.openHarnessAuthorization(id, login.session_id) : Linking.openURL(login.verification_url))
+    (id === 'codex' || Platform.OS === 'ios' ? Auth.openHarnessAuthorization(id, login.session_id) : Linking.openURL(login.verification_url))
       .then(() => { setBrowserError(false); })
       .catch(() => { setLocalProgress(null); setBrowserError(true); });
   };
   const cancel = async () => { const login = state?.login; const scope = scopeRef.current; if (!login || !scope || actionBusyRef.current) return; actionBusyRef.current = true; setActionBusy(true); setBrowserError(false); apply(await Auth.cancelHarnessLogin(id, login.session_id), scope); actionBusyRef.current = false; setActionBusy(false); };
   const logout = async () => { const scope = scopeRef.current; if (!scope || actionBusyRef.current) return; actionBusyRef.current = true; setActionBusy(true); setBrowserError(false); apply(await Auth.logoutHarness(id), scope); actionBusyRef.current = false; setActionBusy(false); };
   const submitCode = async () => { const login = state?.login; const scope = scopeRef.current; if (!login?.can_submit_code || !scope || actionBusyRef.current) return; actionBusyRef.current = true; setActionBusy(true); setBrowserError(false); apply(await Auth.presentHarnessLoginCode(id, login.session_id, locale), scope); actionBusyRef.current = false; setActionBusy(false); };
-  const selectAccount = async () => { if (id !== 'codex' || actionBusyRef.current || currentState?.status !== 'signed_in') return; actionBusyRef.current = true; setActionBusy(true); setChatSourceError(null); const source = await Auth.selectCodexChatSource('subscription'); setChatSource(source); setChatSourceError(source.error_code); if (!source.error_code) onCredentialChanged?.(source); actionBusyRef.current = false; setActionBusy(false); };
+  const selectAccount = async () => { if (actionBusyRef.current || currentState?.status !== 'signed_in') return; actionBusyRef.current = true; setActionBusy(true); setChatSourceError(null); const source = await (id === 'claude-code' ? Auth.selectClaudeChatSource('subscription') : Auth.selectCodexChatSource('subscription')); setChatSource(source); setChatSourceError(source.error_code); if (!source.error_code) onCredentialChanged?.(source); actionBusyRef.current = false; setActionBusy(false); };
   const expired = currentState?.login?.expires_at !== undefined && currentState.login.expires_at * 1000 <= Date.now();
   const progressPhase = currentState?.status === 'authorizing' ? currentState.login?.phase ?? (currentState.login?.user_code ? 'waiting_for_browser' : 'starting') : null;
-  const progressText = progressPhase === 'starting' ? t('settings.auth.progressStarting') : progressPhase === 'waiting_for_browser' ? t('settings.auth.progressWaiting') : progressPhase === 'verifying' ? t('settings.auth.progressVerifying') : null;
-  const statusText = localProgress === 'starting' ? t('settings.auth.progressStarting') : currentState === null ? t('settings.auth.checking') : currentState.status === 'signed_in' ? t('settings.auth.signedIn') : expired ? t('settings.auth.expired') : currentState.status === 'authorizing' ? progressText ?? t('settings.auth.authorizing') : currentState.status === 'error' ? t('settings.auth.error') : currentState.status === 'unavailable' ? t('settings.auth.unavailable') : t('settings.auth.signedOut');
+  const startingText = t(id === 'claude-code' ? 'settings.auth.progressStartingClaude' : 'settings.auth.progressStarting');
+  const progressText = progressPhase === 'starting' ? startingText : progressPhase === 'waiting_for_browser' ? t('settings.auth.progressWaiting') : progressPhase === 'verifying' ? t('settings.auth.progressVerifying') : null;
+  const checkingText = t(id === 'claude-code' ? 'settings.auth.checkingClaude' : 'settings.auth.checking');
+  const statusText = localProgress === 'starting' ? startingText : currentState === null ? checkingText : currentState.status === 'signed_in' ? t('settings.auth.signedIn') : expired ? t('settings.auth.expired') : currentState.status === 'authorizing' ? progressText ?? t('settings.auth.authorizing') : currentState.status === 'error' ? t('settings.auth.error') : currentState.status === 'unavailable' ? t('settings.auth.unavailable') : t('settings.auth.signedOut');
   const unavailableReason = currentState?.runtime.reason === 'runtime_check_failed' ? t('settings.auth.runtimeCheckFailed') : currentState?.runtime.reason === 'cli_incompatible_sigsys' ? t('settings.auth.cliIncompatible') : currentState?.runtime.reason === 'waiting_for_cleanup' ? t('settings.auth.waitingCleanup') : t('settings.auth.runtimeMissing');
 
   return <View testID={`harness-subscription-card-${id}`} style={styles.card}>
-    <View style={styles.settingHeadingRow}><View style={styles.settingIcon}><AppIcon color={colors.textDim} icon={LogIn} size={17} /></View><View style={styles.flex}><Text style={styles.settingTitle}>{title}</Text><Text style={styles.settingDescription}>{t('settings.auth.subtitle')}</Text></View></View>
+    <View style={styles.settingHeadingRow}><View style={styles.settingIcon}><AppIcon color={colors.textDim} icon={BadgeCheck} size={17} /></View><View style={styles.flex}><Text style={styles.settingTitle}>{title}</Text><Text style={styles.settingDescription}>{t('settings.auth.subtitle')}</Text></View></View>
     <Text style={styles.credentialBody}>{t('settings.auth.independence')}</Text>
-    <View style={styles.authStatusRow}>{(localProgress !== null || progressPhase !== null) && currentState?.status !== 'signed_in' ? <ActivityIndicator testID="harness-auth-progress" animating color={colors.accent} size="small" /> : <AppIcon color={currentState?.status === 'signed_in' ? colors.accent : colors.textDim} icon={currentState?.status === 'error' || currentState?.status === 'unavailable' ? CircleAlert : LogIn} size={16} />}<Text style={styles.settingDescription}>{statusText}{currentState?.runtime.version ? ` · ${currentState.runtime.version}` : ''}</Text></View>
+    <View style={styles.authStatusRow}>{(localProgress !== null || progressPhase !== null) && currentState?.status !== 'signed_in' ? <ActivityIndicator testID="harness-auth-progress" animating color={colors.accent} size="small" /> : <AppIcon color={currentState?.status === 'signed_in' ? colors.accent : currentState?.status === 'error' || currentState?.status === 'unavailable' ? colors.danger : colors.textDim} icon={currentState?.status === 'signed_in' ? CircleCheck : currentState?.status === 'error' || currentState?.status === 'unavailable' ? CircleAlert : CircleDot} size={16} />}<Text style={styles.settingDescription}>{statusText}{currentState?.runtime.version ? ` · ${currentState.runtime.version}` : ''}</Text></View>
     {currentState?.status === 'signed_in' && currentState.account && <Text style={styles.settingDescription}>{currentState.account.label}{currentState.account.plan ? ` · ${currentState.account.plan}` : ''}</Text>}
-    {currentState?.status === 'signed_in' && id === 'codex' && chatSource && <Text style={styles.settingDescription}>{t(chatSource.source === 'subscription' ? 'settings.auth.chatSourceSubscription' : 'settings.auth.chatSourceApiKey')}{chatSource.ready ? '' : ` · ${t('settings.auth.chatSourceNotReady')}`}</Text>}
+    {currentState?.status === 'signed_in' && chatSource && <Text style={styles.settingDescription}>{t(chatSource.source === 'subscription' ? 'settings.auth.chatSourceSubscription' : 'settings.auth.chatSourceApiKey')}{chatSource.ready ? '' : ` · ${t('settings.auth.chatSourceNotReady')}`}</Text>}
     {chatSourceError && <Text style={styles.proxyError}>{t('settings.auth.chatSourceError')}</Text>}
     {(currentState?.status === 'unavailable' || currentState?.runtime.available === false) && <Text style={styles.proxyError}>{unavailableReason}</Text>}
     {currentState?.status === 'authorizing' && currentState.login?.user_code && <><Text selectable style={styles.authCode}>{currentState.login.user_code}</Text>{id === 'codex' && <Text style={styles.credentialBody}>{t('settings.auth.codePasteHint')}</Text>}</>}

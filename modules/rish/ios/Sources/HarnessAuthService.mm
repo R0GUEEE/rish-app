@@ -1,4 +1,5 @@
 #import "HarnessAuthService.h"
+#import "ClaudeOfficialSession.h"
 
 #import <CommonCrypto/CommonDigest.h>
 #import <Security/Security.h>
@@ -28,6 +29,7 @@ BOOL DSHCodexChatUsesSubscription(void) {
   return [[reader codexChatSource] isEqualToString:@"subscription"];
 }
 static NSString *const DSHCodexChatSourceKeychainAccount = @"codex-chat-source";
+static NSString *const DSHClaudeChatSourceKeychainAccount = @"claude-chat-source";
 static NSString *const DSHCodexChatSubscription = @"subscription";
 static NSString *const DSHCodexChatAPIKey = @"api_key";
 static NSString *const DSHCodexOAuthTokenURL = @"https://auth.openai.com/oauth/token";
@@ -134,8 +136,9 @@ static NSDictionary *DSHAuthManifestForBundle(NSBundle *bundle) {
     return nil;
   }
   NSDictionary *harnesses = manifest[@"harnesses"];
-  for (NSString *harnessId in @[DSHHarnessAuthHarnessCodex]) {
+  for (NSString *harnessId in @[DSHHarnessAuthHarnessCodex, DSHHarnessAuthHarnessClaudeCode]) {
     NSDictionary *entry = harnesses[harnessId];
+    if (entry == nil && [harnessId isEqual:DSHHarnessAuthHarnessClaudeCode]) continue;
     if (![entry isKindOfClass:NSDictionary.class] ||
         entry.count != 5 ||
         ![entry[@"version"] isKindOfClass:NSString.class] ||
@@ -170,7 +173,7 @@ static NSDictionary *DSHAuthAssetInfo(NSBundle *bundle, NSString *harnessId,
   BOOL available = resource.length == 0 || (regular &&
       [digest isEqualToString:entry[@"sha256"]]);
   NSString *reason = nil;
-  if ([harnessId isEqualToString:DSHHarnessAuthHarnessCodex] && available) {
+  if (DSHAuthSupportedHarness(harnessId) && available) {
     for (NSString *key in @[ @"kernel_resource", @"initrd_resource" ]) {
       NSString *assetResource = entry[key];
       NSURL *assetURL = [root URLByAppendingPathComponent:assetResource];
@@ -221,6 +224,13 @@ static NSMutableDictionary *DSHCodexSourceQuery(void) {
             (__bridge id)kSecAttrSynchronizable:@NO} mutableCopy];
 }
 
+static NSMutableDictionary *DSHClaudeSourceQuery(void) {
+  return [@{(__bridge id)kSecClass:(__bridge id)kSecClassGenericPassword,
+            (__bridge id)kSecAttrService:DSHHarnessAuthKeychainService,
+            (__bridge id)kSecAttrAccount:DSHClaudeChatSourceKeychainAccount,
+            (__bridge id)kSecAttrSynchronizable:@NO} mutableCopy];
+}
+
 static NSString *DSHCodexJWTStringPart(NSString *jwt, NSUInteger index) {
   if (![jwt isKindOfClass:NSString.class]) return nil;
   NSArray *parts = [jwt componentsSeparatedByString:@"."];
@@ -248,7 +258,7 @@ static BOOL DSHAuthSafeOAuthQuery(NSString *query) {
   if (query.length > 2048) return NO;
   NSSet *allowedKeys = [NSSet setWithArray:@[
     @"state", @"code_challenge", @"code_challenge_method", @"client_id",
-    @"redirect_uri", @"response_type", @"scope", @"prompt",
+    @"redirect_uri", @"response_type", @"scope", @"prompt", @"code",
   ]];
   NSSet *tokenKeys = [NSSet setWithArray:@[
     @"access_token", @"refresh_token", @"id_token", @"token",
@@ -257,7 +267,9 @@ static BOOL DSHAuthSafeOAuthQuery(NSString *query) {
       [NSString stringWithFormat:@"https://auth.invalid/?%@", query]];
   NSArray<NSURLQueryItem *> *items = components.queryItems;
   if (items.count == 0) return NO;
+  NSUInteger codeFlags = 0;
   for (NSURLQueryItem *item in items) {
+    if ([item.name isEqual:@"code"] && (![item.value isEqual:@"true"] || ++codeFlags > 1)) return NO;
     if (![item.name isKindOfClass:NSString.class] ||
         [tokenKeys containsObject:item.name] ||
         ![allowedKeys containsObject:item.name] ||
@@ -287,9 +299,13 @@ static NSString *DSHAuthSafeVerificationURL(id value,
         [path isEqualToString:@"/codex/device"] &&
         components.query.length == 0;
   } else if ([harnessId isEqualToString:DSHHarnessAuthHarnessClaudeCode]) {
-    allowed = allowed && [host isEqualToString:@"claude.ai"] &&
-        [path hasPrefix:@"/oauth/"] &&
+    BOOL authorizationPath = ([host isEqualToString:@"claude.ai"] && [path isEqual:@"/oauth/authorize"]) ||
+        ([host isEqualToString:@"claude.com"] && [path isEqual:@"/cai/oauth/authorize"]);
+    allowed = allowed && authorizationPath &&
         DSHAuthSafeOAuthQuery(components.query);
+    for (NSURLQueryItem *item in components.queryItems) {
+      if ([item.name isEqual:@"code"] && !authorizationPath) allowed = NO;
+    }
   } else {
     allowed = NO;
   }
@@ -318,6 +334,9 @@ static BOOL DSHAuthValidSessionId(id value) {
 
 @interface DSHHarnessAuthService () <NSURLSessionTaskDelegate>
 @property(nonatomic, strong) NSBundle *bundle;
+@property(nonatomic, strong) DSHClaudeOfficialSession *cachedClaudeSession;
+@property(nonatomic) BOOL claudeRestorePending;
+@property(nonatomic, strong) NSMutableArray *claudeRestoreWaiters;
 @property(nonatomic, strong) dispatch_queue_t queue;
 @property(nonatomic, strong) dispatch_queue_t workerQueue;
 @property(nonatomic, copy) NSString *activeSessionId;
@@ -331,6 +350,7 @@ static BOOL DSHAuthValidSessionId(id value) {
 @property(nonatomic, copy) NSString *activePhase;
 @property(nonatomic) BOOL codexRefreshInFlight;
 @property(nonatomic, strong) NSMutableArray *codexRefreshWaiters;
+- (DSHClaudeOfficialSession *)validatedClaudeSession;
 - (void)receiveStreamEvent:(const char *)event length:(size_t)length;
 - (void)runCodexLoginForSession:(NSString *)sessionId generation:(NSUInteger)generation;
 - (void)finishCodexLoginWithGeneration:(NSUInteger)generation
@@ -371,6 +391,68 @@ static void DSHAuthStreamEvent(void *context, const char *event,
     _codexRefreshWaiters = [NSMutableArray array];
   }
   return self;
+}
+
+- (NSString *)claudeChatSource {
+  @synchronized (self) {
+    NSMutableDictionary *query = DSHClaudeSourceQuery();
+    query[(__bridge id)kSecReturnData] = @YES;
+    query[(__bridge id)kSecMatchLimit] = (__bridge id)kSecMatchLimitOne;
+    CFTypeRef result = nil;
+    OSStatus status = SecItemCopyMatching((__bridge CFDictionaryRef)query, &result);
+    NSData *data = status == errSecSuccess && result != nil ? CFBridgingRelease(result) : nil;
+    NSString *stored = [data isKindOfClass:NSData.class] ? [[NSString alloc] initWithData:data encoding:NSUTF8StringEncoding] : nil;
+    if ([stored isEqualToString:@"api_key"]) return stored;
+    if ([stored isEqualToString:@"subscription"]) return stored;
+    if (status != errSecItemNotFound) return @"unavailable";
+    // Preserve the subscription route only when the official guest has a
+    // saved-session hint. Fresh/manual installs remain API-key based until
+    // the user explicitly selects subscription.
+    NSURL *support = [NSFileManager.defaultManager URLsForDirectory:NSApplicationSupportDirectory inDomains:NSUserDomainMask].firstObject;
+    NSURL *directory = [support URLByAppendingPathComponent:@"official-claude" isDirectory:YES];
+    BOOL saved = [NSFileManager.defaultManager fileExistsAtPath:[directory URLByAppendingPathComponent:@"verified-session.hint"].path] &&
+        [NSFileManager.defaultManager fileExistsAtPath:[directory URLByAppendingPathComponent:@"guest-home.img"].path];
+    return saved ? @"subscription" : @"api_key";
+  }
+}
+
+- (BOOL)selectClaudeChatSource:(NSString *)source error:(NSError **)error {
+  if (![source isEqualToString:@"subscription"] && ![source isEqualToString:@"api_key"]) {
+    if (error) *error = [NSError errorWithDomain:DSHHarnessAuthKeychainService code:EINVAL userInfo:@{NSLocalizedDescriptionKey:@"Invalid Claude chat source"}];
+    return NO;
+  }
+  NSData *data = [source dataUsingEncoding:NSUTF8StringEncoding];
+  OSStatus status;
+  NSString *previous = nil;
+  @synchronized (self) {
+    NSMutableDictionary *read = DSHClaudeSourceQuery();
+    read[(__bridge id)kSecReturnData] = @YES;
+    CFTypeRef result = nil;
+    OSStatus readStatus = SecItemCopyMatching((__bridge CFDictionaryRef)read, &result);
+    NSData *oldData = readStatus == errSecSuccess && result != nil ? CFBridgingRelease(result) : nil;
+    previous = [oldData isKindOfClass:NSData.class] ? [[NSString alloc] initWithData:oldData encoding:NSUTF8StringEncoding] : nil;
+    NSMutableDictionary *query = DSHClaudeSourceQuery();
+    NSDictionary *attrs = @{(__bridge id)kSecValueData:data, (__bridge id)kSecAttrAccessible:(__bridge id)kSecAttrAccessibleWhenUnlockedThisDeviceOnly};
+    status = SecItemUpdate((__bridge CFDictionaryRef)query, (__bridge CFDictionaryRef)attrs);
+    if (status == errSecItemNotFound) {
+      query[(__bridge id)kSecValueData] = data;
+      query[(__bridge id)kSecAttrAccessible] = (__bridge id)kSecAttrAccessibleWhenUnlockedThisDeviceOnly;
+      status = SecItemAdd((__bridge CFDictionaryRef)query, nil);
+    }
+  }
+  if (status != errSecSuccess) {
+    if (error) *error = [NSError errorWithDomain:DSHHarnessAuthKeychainService code:status userInfo:@{NSLocalizedDescriptionKey:@"Unable to save Claude chat source"}];
+    return NO;
+  }
+  void (^changed)(void) = nil;
+  @synchronized (self) { changed = [self.onClaudeChatCredentialChanged copy]; }
+  if ([previous isEqualToString:source]) changed = nil;
+  if (changed) changed();
+  return YES;
+}
+
+- (DSHClaudeOfficialSession *)claudeOfficialSession {
+  return [self validatedClaudeSession];
 }
 
 - (NSString *)codexChatSource {
@@ -458,7 +540,70 @@ static void DSHAuthStreamEvent(void *context, const char *event,
   return exp == nil || exp.doubleValue <= (now ?: [NSDate date]).timeIntervalSince1970 + 60.0;
 }
 
+- (DSHClaudeOfficialSession *)validatedClaudeSession {
+  @synchronized (self) {
+    if (self.cachedClaudeSession != nil) return self.cachedClaudeSession;
+    NSDictionary *manifest = DSHAuthManifestForBundle(self.bundle);
+    if (![manifest[@"harnesses"][@"claude-code"] isKindOfClass:NSDictionary.class]) return nil;
+    NSDictionary *asset = DSHAuthAssetInfo(self.bundle, @"claude-code", manifest);
+    if (![asset[@"available"] boolValue]) return nil;
+    NSURL *support = [NSFileManager.defaultManager URLsForDirectory:NSApplicationSupportDirectory inDomains:NSUserDomainMask].firstObject;
+    self.cachedClaudeSession = [[DSHClaudeOfficialSession alloc]
+        initWithKernelURL:asset[@"kernel_url"] initrdURL:asset[@"initrd_url"]
+        storageDirectory:[support URLByAppendingPathComponent:@"official-claude" isDirectory:YES]
+        version:asset[@"version"]];
+    if (self.cachedClaudeSession.shouldRestoreSavedSession) {
+      self.claudeRestorePending = YES;
+      [self.cachedClaudeSession refresh:^(__unused NSDictionary *status) {
+        NSArray *waiters = nil;
+        @synchronized (self) {
+          self.claudeRestorePending = NO;
+          waiters = [self.claudeRestoreWaiters copy];
+          [self.claudeRestoreWaiters removeAllObjects];
+        }
+        NSDictionary *current = [self statusForHarnessId:@"claude-code"];
+        for (void (^waiter)(NSDictionary *) in waiters) [self finishAsync:waiter status:current];
+      }];
+    }
+    return self.cachedClaudeSession;
+  }
+}
+
+- (void)submitClaudeLoginCode:(NSString *)code session:(NSString *)session
+                  completion:(void (^)(NSDictionary *))completion {
+  DSHClaudeOfficialSession *runner = [self validatedClaudeSession];
+  if (runner != nil) {
+    [runner submitCode:code session:session completion:^(NSDictionary *status) {
+      if ([status[@"status"] isEqualToString:@"signed_in"]) {
+        void (^changed)(void) = nil;
+        @synchronized (self) { changed = [self.onClaudeChatCredentialChanged copy]; }
+        if (changed) changed();
+      }
+      if (completion) completion(status);
+    }];
+  }
+  else [self finishAsync:completion status:[self statusForHarnessId:@"claude-code"]];
+}
+
+- (void)readStatusForHarnessId:(NSString *)harnessId completion:(void (^)(NSDictionary *))completion {
+  if ([harnessId isEqual:@"claude-code"]) {
+    [self validatedClaudeSession];
+    @synchronized (self) {
+      if (self.claudeRestorePending) {
+        if (self.claudeRestoreWaiters == nil) self.claudeRestoreWaiters = [NSMutableArray array];
+        if (completion) [self.claudeRestoreWaiters addObject:[completion copy]];
+        return;
+      }
+    }
+  }
+  [self finishAsync:completion status:[self statusForHarnessId:harnessId]];
+}
+
 - (NSDictionary *)statusForHarnessId:(NSString *)harnessId {
+  if ([harnessId isEqual:@"claude-code"]) {
+    DSHClaudeOfficialSession *runner = [self validatedClaudeSession];
+    if (runner != nil) return runner.status;
+  }
   if (!DSHAuthSupportedHarness(harnessId)) return @{};
   NSDictionary *manifest = DSHAuthManifestForBundle(self.bundle);
   if (manifest == nil) {
@@ -820,6 +965,21 @@ static NSURL *DSHAuthInitrdWithCredential(NSURL *baseURL, NSData *credential,
 
 - (void)startLoginForHarnessId:(NSString *)harnessId
                     completion:(void (^)(NSDictionary *))completion {
+  if ([harnessId isEqual:@"claude-code"]) {
+    DSHClaudeOfficialSession *runner = [self validatedClaudeSession];
+    if (runner != nil) {
+      [runner startLogin:^(NSDictionary *status) {
+        if ([status[@"status"] isEqualToString:@"signed_in"]) {
+          void (^changed)(void) = nil;
+          @synchronized (self) { changed = [self.onClaudeChatCredentialChanged copy]; }
+          if (changed) changed();
+        }
+        if (completion) completion(status);
+      }];
+    }
+    else [self finishAsync:completion status:[self statusForHarnessId:harnessId]];
+    return;
+  }
   dispatch_async(self.queue, ^{
     NSMutableDictionary *status = [[self statusForHarnessId:harnessId] mutableCopy];
     if (status.count == 0) {
@@ -866,6 +1026,12 @@ static NSURL *DSHAuthInitrdWithCredential(NSURL *baseURL, NSData *credential,
 - (void)cancelLoginForHarnessId:(NSString *)harnessId
                       sessionId:(NSString *)sessionId
                      completion:(void (^)(NSDictionary *))completion {
+  if ([harnessId isEqual:@"claude-code"]) {
+    DSHClaudeOfficialSession *runner = [self validatedClaudeSession];
+    if (runner != nil) [runner cancelSession:sessionId completion:completion];
+    else [self finishAsync:completion status:[self statusForHarnessId:harnessId]];
+    return;
+  }
   dispatch_async(self.queue, ^{
     NSMutableDictionary *status = [[self statusForHarnessId:harnessId] mutableCopy];
     if (status.count == 0) {
@@ -898,6 +1064,19 @@ static NSURL *DSHAuthInitrdWithCredential(NSURL *baseURL, NSData *credential,
 
 - (void)logoutForHarnessId:(NSString *)harnessId
                 completion:(void (^)(NSDictionary *))completion {
+  if ([harnessId isEqual:@"claude-code"]) {
+    DSHClaudeOfficialSession *runner = [self validatedClaudeSession];
+    if (runner != nil) {
+      [runner logout:^(NSDictionary *status) {
+        void (^changed)(void) = nil;
+        @synchronized (self) { changed = [self.onClaudeChatCredentialChanged copy]; }
+        if (changed) changed();
+        if (completion) completion(status);
+      }];
+    }
+    else [self finishAsync:completion status:[self statusForHarnessId:harnessId]];
+    return;
+  }
   dispatch_async(self.queue, ^{
     if (!DSHAuthSupportedHarness(harnessId)) {
       [self finishAsync:completion status:@{ @"schema_version": @1,

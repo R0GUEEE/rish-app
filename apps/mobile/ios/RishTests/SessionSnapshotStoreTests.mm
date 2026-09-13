@@ -2302,7 +2302,7 @@ static NSString *const DSHSessionTestOperationB =
   // those codes here made the durable write fail, so the user saw a
   // persistence error instead of the real cause (a stale workspace root).
   NSArray<NSString *> *codes = @[
-    @"E_AGENT_ROOT_STALE", @"E_AGENT_CAPABILITY", @"E_ATTEMPT_INTERRUPTED",
+    @"E_AGENT_ROOT_STALE", @"E_AGENT_CAPABILITY", @"E_ATTEMPT_INTERRUPTED", @"E_COMPLETION_TIMEOUT",
   ];
   NSDictionary *missing = @{ @"schema_version" : @1, @"kind" : @"missing" };
   for (NSString *code in codes) {
@@ -2315,6 +2315,11 @@ static NSString *const DSHSessionTestOperationB =
                                               error:&error];
     XCTAssertNotNil(result, @"%@ rejected: %@", code, error);
     XCTAssertEqualObjects(result[@"status"], @"committed", @"code %@", code);
+    NSDictionary *loaded = [store loadSessionSnapshotWithError:&error];
+    XCTAssertEqualObjects(loaded[@"status"], @"present");
+    NSString *serialized = loaded[@"session_json"];
+    XCTAssertTrue([serialized containsString:code]);
+
   }
 }
 

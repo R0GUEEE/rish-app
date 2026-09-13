@@ -6,7 +6,7 @@ import { validVerificationUrl } from '../src/harnessAuth/url';
 import type { HarnessAuthStatus } from '../src/harnessAuth/types';
 import * as Auth from '../src/harnessAuth/native';
 
-jest.mock('../src/harnessAuth/native', () => ({ harnessAuthStatus: jest.fn(), startHarnessLogin: jest.fn(), cancelHarnessLogin: jest.fn(), logoutHarness: jest.fn(), presentHarnessLoginCode: jest.fn(), openHarnessAuthorization: jest.fn(), codexChatSource: jest.fn(), selectCodexChatSource: jest.fn() }));
+jest.mock('../src/harnessAuth/native', () => ({ harnessAuthStatus: jest.fn(), startHarnessLogin: jest.fn(), cancelHarnessLogin: jest.fn(), logoutHarness: jest.fn(), presentHarnessLoginCode: jest.fn(), openHarnessAuthorization: jest.fn(), codexChatSource: jest.fn(), selectCodexChatSource: jest.fn(), claudeChatSource: jest.fn(), selectClaudeChatSource: jest.fn() }));
 const auth = Auth as jest.Mocked<typeof Auth>;
 const runtime = { kind: 'official-cli' as const, available: true, version: '1' };
 const status = (harness_id: 'codex' | 'claude-code', value: 'signed_out' | 'authorizing' | 'signed_in', login?: HarnessAuthStatus['login']): HarnessAuthStatus => ({ schema_version: 1, harness_id, runtime, status: value, auth_method: value === 'signed_out' ? 'none' : 'subscription', ...(login ? { login } : {}) });
@@ -49,7 +49,7 @@ test('fails closed when the native auth contract is unavailable', async () => {
   await act(async () => renderer.unmount());
 });
 
-beforeEach(() => { jest.clearAllMocks(); auth.codexChatSource.mockResolvedValue({ schema_version: 1, source: 'api_key', ready: true, error_code: null }); auth.selectCodexChatSource.mockResolvedValue({ schema_version: 1, source: 'subscription', ready: true, error_code: null }); });
+beforeEach(() => { jest.clearAllMocks(); auth.codexChatSource.mockResolvedValue({ schema_version: 1, source: 'api_key', ready: true, error_code: null }); auth.selectCodexChatSource.mockResolvedValue({ schema_version: 1, source: 'subscription', ready: true, error_code: null }); auth.claudeChatSource.mockResolvedValue({ schema_version: 1, source: 'api_key', ready: true, error_code: null }); auth.selectClaudeChatSource.mockResolvedValue({ schema_version: 1, source: 'subscription', ready: true, error_code: null }); });
 
 test('poll receives a delayed authorization URL', async () => {
   jest.useFakeTimers();
@@ -174,5 +174,30 @@ test('uses native waiting phase and confirms only after the authorization browse
   await act(async () => { renderer.root.findByProps({ accessibilityLabel: 'settings.auth.refresh' }).props.onPress(); await Promise.resolve(); await Promise.resolve(); });
   expect(renderer.root.findAllByType(RNText).some(node => String(node.props.children).startsWith('settings.auth.progressVerifying'))).toBe(true);
   expect(renderer.root.findByProps({ testID: 'harness-auth-progress' }).props.animating).toBe(true);
+  await act(async () => renderer.unmount());
+});
+
+test('Claude authorization uses the native in-app browser on iOS', async () => {
+  auth.harnessAuthStatus.mockResolvedValue(status('claude-code', 'authorizing', {
+    session_id: 'claude-browser', phase: 'waiting_for_browser',
+    verification_url: 'https://claude.com/cai/oauth/authorize?code=true&state=fixture',
+  }));
+  auth.openHarnessAuthorization.mockResolvedValue();
+  let renderer!: TestRenderer.ReactTestRenderer;
+  await act(async () => { renderer = TestRenderer.create(<HarnessSubscriptionCard id="claude-code" visible />); });
+  await act(async () => { renderer.root.findByProps({ accessibilityLabel: 'settings.auth.openAuth' }).props.onPress(); });
+  expect(auth.openHarnessAuthorization).toHaveBeenCalledWith('claude-code', 'claude-browser');
+  await act(async () => renderer.unmount());
+});
+
+test('a signed-in Claude account can select subscription for chat', async () => {
+  auth.harnessAuthStatus.mockResolvedValue(status('claude-code', 'signed_in'));
+  const changed = jest.fn();
+  let renderer!: TestRenderer.ReactTestRenderer;
+  await act(async () => { renderer = TestRenderer.create(<HarnessSubscriptionCard id="claude-code" visible onCredentialChanged={changed} />); });
+  await act(async () => { await renderer.root.findByProps({ accessibilityLabel: 'settings.auth.useAccount' }).props.onPress(); });
+  expect(auth.selectClaudeChatSource).toHaveBeenCalledWith('subscription');
+  expect(auth.selectCodexChatSource).not.toHaveBeenCalled();
+  expect(changed).toHaveBeenCalledWith(expect.objectContaining({source:'subscription',ready:true}));
   await act(async () => renderer.unmount());
 });

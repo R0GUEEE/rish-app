@@ -23,8 +23,10 @@
 		3D97A1AB7731B11795FBBB91 /* libPods-RishTests.a in Frameworks */ = {isa = PBXBuildFile; fileRef = 6F24AC77CE20B288D7D94AA9 /* libPods-RishTests.a */; };
 		40D5B5F596262FD65CF7C474 /* PrivacyInfo.xcprivacy in Resources */ = {isa = PBXBuildFile; fileRef = 13B07FB81A68108700A75B9A /* PrivacyInfo.xcprivacy */; };
 		4EDBB0B1389437436E93DC36 /* Foundation.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = CA37B0C0CDA024217D4FD37B /* Foundation.framework */; };
+		56FD7F31B1DD85786556E0D4 /* ClaudeSubscriptionTransportTests.mm in Sources */ = {isa = PBXBuildFile; fileRef = A18A28FDB0056BD7A0EA7202 /* ClaudeSubscriptionTransportTests.mm */; };
 		5EA653BC4BB01606CF3C8FD3 /* CodexSubscriptionTransportTests.mm in Sources */ = {isa = PBXBuildFile; fileRef = CEF5CC90096E0D11A5E59F02 /* CodexSubscriptionTransportTests.mm */; };
 		6201E4D90D300C22C3AE9A4F /* TaskExperienceBridge.m in Sources */ = {isa = PBXBuildFile; fileRef = C0862762A831629353284454 /* TaskExperienceBridge.m */; };
+		659EAEE283241EDE1632D90A /* ClaudeOfficialSessionTests.mm in Sources */ = {isa = PBXBuildFile; fileRef = 6ADBCB4A4EBCFD88D6FA4E1D /* ClaudeOfficialSessionTests.mm */; };
 		73B2491A82DB4E4F46AF6360 /* TaskExperience.swift in Sources */ = {isa = PBXBuildFile; fileRef = 48E34B4FE7E4E89A02BC5D5E /* TaskExperience.swift */; };
 		761780ED2CA45674006654EE /* AppDelegate.swift in Sources */ = {isa = PBXBuildFile; fileRef = 761780EC2CA45674006654EE /* AppDelegate.swift */; };
 		7F276F65A16012BEDA66011E /* CancelTaskIntent.swift in Sources */ = {isa = PBXBuildFile; fileRef = 59C1824F4EE8C553D062A00B /* CancelTaskIntent.swift */; };
@@ -148,6 +150,7 @@
 		5709B34CF0A7D63546082F79 /* Pods-Rish.release.xcconfig */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = text.xcconfig; name = "Pods-Rish.release.xcconfig"; path = "Target Support Files/Pods-Rish/Pods-Rish.release.xcconfig"; sourceTree = "<group>"; };
 		59C1824F4EE8C553D062A00B /* CancelTaskIntent.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; name = CancelTaskIntent.swift; path = RishTaskActivity/CancelTaskIntent.swift; sourceTree = "<group>"; };
 		5DCACB8F33CDC322A6C60F78 /* libPods-Rish.a */ = {isa = PBXFileReference; explicitFileType = archive.ar; includeInIndex = 0; path = "libPods-Rish.a"; sourceTree = BUILT_PRODUCTS_DIR; };
+		6ADBCB4A4EBCFD88D6FA4E1D /* ClaudeOfficialSessionTests.mm */ = {isa = PBXFileReference; includeInIndex = 1; path = ClaudeOfficialSessionTests.mm; sourceTree = "<group>"; };
 		6F24AC77CE20B288D7D94AA9 /* libPods-RishTests.a */ = {isa = PBXFileReference; explicitFileType = archive.ar; includeInIndex = 0; path = "libPods-RishTests.a"; sourceTree = BUILT_PRODUCTS_DIR; };
 		71DFAAFF78228859B0B14FAA /* RishUITests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = RishUITests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
 		761780EC2CA45674006654EE /* AppDelegate.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; name = AppDelegate.swift; path = Rish/AppDelegate.swift; sourceTree = "<group>"; };
@@ -158,6 +161,7 @@
 		9A8ACD2C493DA7F9D27E1886 /* TaskAttributes.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; name = TaskAttributes.swift; path = RishTaskActivity/TaskAttributes.swift; sourceTree = "<group>"; };
 		9C6ACD833B5CAF1E2B7A52DF /* TaskAlertPolicy.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; name = TaskAlertPolicy.swift; path = Rish/TaskAlertPolicy.swift; sourceTree = "<group>"; };
 		A0C400011AD99517003FC87E /* LocalWorkspacesModuleV2Tests.mm */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.cpp.objcpp; path = LocalWorkspacesModuleV2Tests.mm; sourceTree = "<group>"; };
+		A18A28FDB0056BD7A0EA7202 /* ClaudeSubscriptionTransportTests.mm */ = {isa = PBXFileReference; includeInIndex = 1; path = ClaudeSubscriptionTransportTests.mm; sourceTree = "<group>"; };
 		A1C400011AD99517003FC87E /* AgentNativeStoreTests.mm */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.cpp.objcpp; path = AgentNativeStoreTests.mm; sourceTree = "<group>"; };
 		A2C400011AD99517003FC87E /* AgentRuntimeModuleTests.mm */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.cpp.objcpp; path = AgentRuntimeModuleTests.mm; sourceTree = "<group>"; };
 		A3C400011AD99517003FC87E /* SessionSnapshotStoreTests.mm */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.cpp.objcpp; path = SessionSnapshotStoreTests.mm; sourceTree = "<group>"; };
@@ -320,6 +324,8 @@
 				F8A400011AD99517003FC87E /* ZCodePlanResolverTests.mm */,
 				F988BBD6DEFB3CF8939B5A42 /* CodexChatCredentialTests.mm */,
 				CEF5CC90096E0D11A5E59F02 /* CodexSubscriptionTransportTests.mm */,
+				6ADBCB4A4EBCFD88D6FA4E1D /* ClaudeOfficialSessionTests.mm */,
+				A18A28FDB0056BD7A0EA7202 /* ClaudeSubscriptionTransportTests.mm */,
 			);
 			path = RishTests;
 			sourceTree = "<group>";
@@ -716,7 +722,7 @@
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 			shellPath = /bin/sh;
-			shellScript = "set -eu\nsource_dir=\"${SRCROOT}/Rish/HarnessAuth\"\ndestination_dir=\"${TARGET_BUILD_DIR}/${UNLOCALIZED_RESOURCES_FOLDER_PATH}/HarnessAuth\"\nif [ \"${DSH_HARNESS_AUTH_ENABLED:-0}\" != \"1\" ]; then\n  /bin/rm -rf -- \"${destination_dir}\"\n  exit 0\nfi\nif [ ! -f \"${source_dir}/HarnessAuthAssets.json\" ] || [ ! -f \"${source_dir}/kernel\" ] || [ ! -f \"${source_dir}/codex.cpio\" ]; then\n  echo \"error: DSH_HARNESS_AUTH_ENABLED=1 but verified HarnessAuth assets are missing\" >&2\n  exit 1\nfi\n/bin/mkdir -p -- \"${destination_dir}\"\n/usr/bin/ditto \"${source_dir}/HarnessAuthAssets.json\" \"${destination_dir}/HarnessAuthAssets.json\"\n/usr/bin/ditto \"${source_dir}/kernel\" \"${destination_dir}/kernel\"\n/usr/bin/ditto \"${source_dir}/codex.cpio\" \"${destination_dir}/codex.cpio\"\n";
+			shellScript = "set -eu\nsource_dir=\"${SRCROOT}/Rish/HarnessAuth\"\ndestination_dir=\"${TARGET_BUILD_DIR}/${UNLOCALIZED_RESOURCES_FOLDER_PATH}/HarnessAuth\"\nif [ \"${DSH_HARNESS_AUTH_ENABLED:-0}\" != \"1\" ]; then\n  /bin/rm -rf -- \"${destination_dir}\"\n  exit 0\nfi\n/usr/bin/ruby \"${SRCROOT}/../../../scripts/copy-ios-harness-auth.rb\" \"${source_dir}\" \"${destination_dir}\"\n";
 			showEnvVarsInLog = 0;
 		};
 /* End PBXShellScriptBuildPhase section */
@@ -770,6 +776,8 @@
 				1D87B29625DD6ECC7445D5E9 /* TaskAlertPolicyTests.swift in Sources */,
 				E5180925E431440F0A7A9A44 /* CodexChatCredentialTests.mm in Sources */,
 				5EA653BC4BB01606CF3C8FD3 /* CodexSubscriptionTransportTests.mm in Sources */,
+				659EAEE283241EDE1632D90A /* ClaudeOfficialSessionTests.mm in Sources */,
+				56FD7F31B1DD85786556E0D4 /* ClaudeSubscriptionTransportTests.mm in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};

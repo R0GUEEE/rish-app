@@ -413,7 +413,11 @@ NSDictionary<NSString *, id> * DSHCompletionRequestBodyV2(
     @"stream": @NO,
     @"thinking": @{@"type": [thinkingMode isEqualToString:@"off"]
                         ? @"disabled" : @"enabled"},
-    @"max_tokens": [thinkingMode isEqualToString:@"off"] ? @1024 : @4096,
+    // Tool arguments can contain an entire file. Keep room for that output
+    // even when reasoning is disabled, plus reasoning room when enabled.
+    @"max_tokens": tools.count > 0
+        ? ([thinkingMode isEqualToString:@"off"] ? @8192 : @16384)
+        : ([thinkingMode isEqualToString:@"off"] ? @1024 : @4096),
     @"messages": messages,
   } mutableCopy];
   if (![thinkingMode isEqualToString:@"off"]) {
@@ -938,6 +942,14 @@ DSHParseCompletionResponseSchema2(
       ![DSHV2String(message[@"role"]) isEqualToString:@"assistant"] ||
       ![allowedFinish containsObject:finish]) {
     DSHSchema2Fail(error, @"E_COMPLETION_EMPTY_RESPONSE");
+    return nil;
+  }
+  if ([finish isEqualToString:@"length"] &&
+      [message[@"tool_calls"] isKindOfClass:NSArray.class] &&
+      [message[@"tool_calls"] count] > 0) {
+    // A length-limited tool response is incomplete, even if its partial JSON
+    // happens to parse. Never expose executable calls from it.
+    DSHSchema2Fail(error, @"E_COMPLETION_LENGTH");
     return nil;
   }
   NSString *text = nil;

@@ -7,7 +7,7 @@ import { HarnessSubscriptionCard, harnessSubscriptionIdForModel } from './Harnes
 import { GlmAccountCard } from './GlmAccountCard';
 import { isGlmModelId } from '../harness/types';
 import type { ConfigurableHarness } from '../providers/configuration';
-import React, { useEffect, useMemo, useState } from 'react';
+import React, { useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import {
   ActivityIndicator,
   Pressable,
@@ -79,6 +79,21 @@ type Props = {
 export function SettingsSheet(props: Props) {
   const dshCatalog = useSyncExternalStore(subscribeDshCatalog, getDshCatalog);
   const insets = useSafeAreaInsets();
+  const scrollRef = useRef<React.ElementRef<typeof ScrollView>>(null);
+  const [presented, setPresented] = useState(false);
+  const adjustsKeyboard = props.visible && !props.covered && presented;
+  useLayoutEffect(() => {
+    if (!props.visible) setPresented(false);
+    if (adjustsKeyboard) return;
+    // The hidden SlidingSurface stays mounted one screen below the window.
+    // Native keyboard insets use window coordinates; do not retain an inset
+    // calculated while the surface is translated or covered by another input.
+    scrollRef.current?.getNativeScrollRef()?.setNativeProps({
+      contentInset: {top: 0, left: 0, bottom: 0, right: 0},
+      scrollIndicatorInsets: {top: 0, left: 0, bottom: 0, right: 0},
+    });
+  }, [adjustsKeyboard, props.visible]);
+
   const { colors, preferences, store, t } = useAppPresentation();
   const styles = useMemo(() => createStyles(colors), [colors]);
   const [gitProxyDraft, setGitProxyDraft] = useState(
@@ -134,6 +149,7 @@ export function SettingsSheet(props: Props) {
       accessibilityHidden={props.covered}
       onClose={props.onClose}
       onDismiss={props.onDismiss}
+      onPresented={() => setPresented(true)}
       side="bottom"
       visible={props.visible}
       widthRatio={1}
@@ -162,7 +178,10 @@ export function SettingsSheet(props: Props) {
         </View>
 
         <ScrollView
-          automaticallyAdjustKeyboardInsets
+          ref={scrollRef}
+          testID="settings-scroll"
+          automaticallyAdjustKeyboardInsets={adjustsKeyboard}
+          contentInsetAdjustmentBehavior="never"
           contentContainerStyle={styles.content}
           keyboardDismissMode="interactive"
           keyboardShouldPersistTaps="handled"

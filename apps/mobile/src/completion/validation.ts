@@ -58,7 +58,19 @@ type StableCompletionErrorCode =
   | NativeCompletionErrorCode
   | NativeProjectContextErrorCode;
 
+const CLAUDE_LOCAL_ERROR_CODES = [
+  'E_CLAUDE_OFFICIAL_TEXT_INVALID',
+  'E_CLAUDE_OFFICIAL_TEXT_FAILED',
+  'E_CLAUDE_OFFICIAL_TEXT_TIMEOUT',
+  'E_CLAUDE_OFFICIAL_TEXT_CANCELLED',
+  'E_CLAUDE_OFFICIAL_TEXT_BUSY',
+  'E_CLAUDE_OFFICIAL_TEXT_AUTH_REQUIRED',
+  'E_CLAUDE_ATTACHMENTS_UNSUPPORTED',
+  'E_CLAUDE_TEXT_ONLY',
+] as const;
+
 type NativeCompletionErrorCode =
+  | (typeof CLAUDE_LOCAL_ERROR_CODES)[number]
   | 'E_COMPLETION_CREDENTIAL_UNAVAILABLE'
   | 'E_COMPLETION_CREDENTIAL_CHANGED'
   | 'E_COMPLETION_BODY_INVALID'
@@ -66,6 +78,7 @@ type NativeCompletionErrorCode =
   | 'E_COMPLETION_BUSY'
   | 'E_COMPLETION_CANCELLED'
   | 'E_COMPLETION_REDIRECT'
+  | 'E_COMPLETION_TIMEOUT'
   | 'E_COMPLETION_TRANSPORT'
   | 'E_COMPLETION_HTTP_STATUS'
   | 'E_COMPLETION_HTTP_429'
@@ -76,6 +89,7 @@ type NativeCompletionErrorCode =
   | 'E_COMPLETION_RESPONSE_MODEL'
   | 'E_COMPLETION_MODEL_MISMATCH'
   | 'E_COMPLETION_FINISH_RELATION'
+  | 'E_COMPLETION_LENGTH'
   | 'E_COMPLETION_TOOL_CALL_INVALID'
   | 'E_COMPLETION_EMPTY_RESPONSE';
 
@@ -142,6 +156,7 @@ const FINISH_REASONS: ReadonlySet<string> = new Set([
 ]);
 
 const NATIVE_ERROR_CODES: ReadonlySet<string> = new Set([
+  ...CLAUDE_LOCAL_ERROR_CODES,
   'E_COMPLETION_SCHEMA',
   'E_COMPLETION_IDENTIFIER',
   'E_COMPLETION_ROUND',
@@ -159,6 +174,7 @@ const NATIVE_ERROR_CODES: ReadonlySet<string> = new Set([
   'E_COMPLETION_BUSY',
   'E_COMPLETION_CANCELLED',
   'E_COMPLETION_REDIRECT',
+  'E_COMPLETION_TIMEOUT',
   'E_COMPLETION_TRANSPORT',
   'E_COMPLETION_HTTP_STATUS',
   'E_COMPLETION_HTTP_429',
@@ -169,6 +185,7 @@ const NATIVE_ERROR_CODES: ReadonlySet<string> = new Set([
   'E_COMPLETION_RESPONSE_MODEL',
   'E_COMPLETION_MODEL_MISMATCH',
   'E_COMPLETION_FINISH_RELATION',
+  'E_COMPLETION_LENGTH',
   'E_COMPLETION_TOOL_CALL_INVALID',
   'E_COMPLETION_EMPTY_RESPONSE',
   'E_PROJECT_NOT_FOUND',
@@ -1374,6 +1391,11 @@ export function validateLegacyCompleteV2Result(
 /** Rebuilds native failures with a value-free message and no attached cause. */
 export function sanitizeCompletionError(error: unknown): CompletionBridgeError {
   try {
+    // Compatibility with older native adapters: expose one canonical timeout,
+    // never the provider's message or arbitrary private error vocabulary.
+    if (isRecord(error) && error.code === 'E_CLAUDE_OFFICIAL_TEXT_TIMEOUT') {
+      return new CompletionBridgeError('E_COMPLETION_TIMEOUT');
+    }
     if (error instanceof CompletionBridgeError) {
       return isStableCompletionErrorCode(error.code)
         ? new CompletionBridgeError(error.code)

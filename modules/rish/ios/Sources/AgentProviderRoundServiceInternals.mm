@@ -560,6 +560,9 @@ NSDictionary *DSHProviderUnknownResult(NSDictionary *request,
 NSString *DSHProviderFailureCode(NSString *providerErrorCode,
                                  BOOL digestMismatch) {
   if (digestMismatch) return @"E_AGENT_TRANSCRIPT";
+  if ([providerErrorCode isEqualToString:@"E_COMPLETION_LENGTH"]) {
+    return @"E_COMPLETION_LENGTH";
+  }
   if ([providerErrorCode isEqualToString:@"E_AGENT_CANCELLED"]) {
     return @"E_AGENT_CANCELLED";
   }

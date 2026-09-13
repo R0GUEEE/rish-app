@@ -662,6 +662,29 @@ static NSData *DSHTestRequestBody(NSURLRequest *request) {
 
 #pragma mark - Strict schema 2 response RED
 
+- (void)testToolRequestsReserveEnoughOutputForFileContents {
+  NSArray *messages = @[@{@"role":@"user", @"content":@"Create a mobile HTML page."}];
+  NSArray *tools = @[[self validSchema2Tool]];
+  NSDictionary *off = DSHCompletionRequestBodyV2(@"deepseek-v4-flash", @"off", messages, tools);
+  NSDictionary *high = DSHCompletionRequestBodyV2(@"deepseek-v4-flash", @"high", messages, tools);
+  XCTAssertEqualObjects(off[@"max_tokens"], @8192);
+  XCTAssertEqualObjects(off[@"thinking"], (@{@"type":@"disabled"}));
+  XCTAssertEqualObjects(high[@"max_tokens"], @16384);
+  XCTAssertEqualObjects(high[@"reasoning_effort"], @"high");
+}
+
+- (void)testLengthLimitedToolArgumentsReportOutputLimitWithoutExecution {
+  NSArray *calls = @[@{@"id":@"call-partial", @"type":@"function",
+    @"function":@{@"name":@"write_file", @"arguments":@"{\"path\":\"index.html\",\"content\":\"<!doctype html>"}}];
+  for (id content in @[@"", NSNull.null]) {
+    NSDictionary *payload = @{@"id":@"response-length", @"model":@"deepseek-v4-flash",
+      @"choices":@[@{@"finish_reason":@"length", @"message":@{@"role":@"assistant", @"content":content, @"tool_calls":calls}}]};
+    NSError *error = nil;
+    XCTAssertNil(DSHParseCompletionResponseSchema2(payload, @"deepseek-v4-flash", @"off", &error));
+    XCTAssertEqualObjects(error.localizedDescription, @"E_COMPLETION_LENGTH");
+  }
+}
+
 - (void)testFinishReasonAndToolCallsAreBidirectionallyRelated {
   NSArray *toolCalls = @[@{
     @"id": @"call_1", @"type": @"function",

@@ -173,6 +173,7 @@ export const ATTEMPT_FAILURE_CODES = [
   'E_COMPLETION_BUSY',
   'E_COMPLETION_CANCELLED',
   'E_COMPLETION_REDIRECT',
+  'E_COMPLETION_TIMEOUT',
   'E_COMPLETION_TRANSPORT',
   'E_COMPLETION_HTTP_STATUS',
   'E_COMPLETION_HTTP_429',
@@ -478,7 +479,7 @@ export const AGENT_ATTEMPT_PHASES = [
 /**
  * Closed phase/lineage relation shared by the persistence parser and the
  * reducer.  A ready Agent attempt may not have allocated a native round yet;
- * every later phase must carry exactly the native lineage state that explains
+ * cancellation before launch also has no round. Other phases carry the lineage that explains
  * it.  Keeping this table in the state contract prevents the two validators
  * from drifting and admitting an authority transition at only one boundary.
  */
@@ -507,7 +508,7 @@ export function isAgentPhaseLineageValid(
   lineageStatus: PersistedAgentRoundLineageV2['status'] | null,
 ): boolean {
   const allowed = AGENT_PHASE_LINEAGE_MATRIX[phase];
-  if (phase === 'ready_for_round' && lineageStatus === null) return true;
+  if ((phase === 'ready_for_round' || phase === 'cancelled') && lineageStatus === null) return true;
   return (
     lineageStatus !== null &&
     allowed !== null &&

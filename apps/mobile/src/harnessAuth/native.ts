@@ -33,6 +33,8 @@ type NativeHarnessAuth = {
   ) => Promise<unknown>;
   codexChatSource?: () => Promise<unknown>;
   selectCodexChatSource?: (source: 'subscription' | 'api_key') => Promise<unknown>;
+  claudeChatSource?: () => Promise<unknown>;
+  selectClaudeChatSource?: (source: 'subscription' | 'api_key') => Promise<unknown>;
 };
 
 const native = () => NativeModules.LocalRuntime as NativeHarnessAuth | undefined;
@@ -52,6 +54,18 @@ export async function codexChatSource(): Promise<CodexChatSource> {
 
 export async function selectCodexChatSource(source: 'subscription' | 'api_key'): Promise<CodexChatSource> {
   const fn = native()?.selectCodexChatSource;
+  if (typeof fn !== 'function') return safeChatSource(null, 'E_CHAT_SOURCE_SELECT');
+  try { return safeChatSource(await fn(source)); } catch { return safeChatSource(null, 'E_CHAT_SOURCE_SELECT'); }
+}
+
+export async function claudeChatSource(): Promise<CodexChatSource> {
+  const fn = native()?.claudeChatSource;
+  if (typeof fn !== 'function') return safeChatSource(null);
+  try { return safeChatSource(await fn()); } catch { return safeChatSource(null, 'E_CHAT_SOURCE_STATUS'); }
+}
+
+export async function selectClaudeChatSource(source: 'subscription' | 'api_key'): Promise<CodexChatSource> {
+  const fn = native()?.selectClaudeChatSource;
   if (typeof fn !== 'function') return safeChatSource(null, 'E_CHAT_SOURCE_SELECT');
   try { return safeChatSource(await fn(source)); } catch { return safeChatSource(null, 'E_CHAT_SOURCE_SELECT'); }
 }

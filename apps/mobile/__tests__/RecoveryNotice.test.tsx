@@ -1,6 +1,7 @@
 import React from 'react';
 import { act, create, type ReactTestRenderer } from 'react-test-renderer';
 import { RecoveryNotice } from '../src/components/RecoveryNotice';
+import { sanitizeCompletionError } from '../src/completion/validation';
 import {
   completionRecoveryLabel,
   recoveryMessage,
@@ -103,3 +104,16 @@ test.each(['en-US', 'zh-CN'] as const)(
     );
   },
 );
+
+test.each(['en-US', 'zh-CN'] as const)('explains a request timeout without asserting a network failure in %s', locale => {
+  const t = createTranslator(locale);
+  expect(recoveryMessage('E_COMPLETION_TIMEOUT', t)).toBe(t('recovery.timeout'));
+  expect(recoveryMessage('E_COMPLETION_TIMEOUT', t)).not.toBe(t('recovery.network'));
+});
+
+test.each(['en-US', 'zh-CN'] as const)('preserves and explains the output-limit error in %s', locale => {
+  const failure = sanitizeCompletionError({ code: 'E_COMPLETION_LENGTH', message: 'private provider output' });
+  expect(failure.code).toBe('E_COMPLETION_LENGTH');
+  expect(failure.message).not.toContain('private provider output');
+  expect(recoveryMessage(failure.code, createTranslator(locale))).toBe(createTranslator(locale)('recovery.outputLimit'));
+});
