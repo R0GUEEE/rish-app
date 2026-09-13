@@ -1,6 +1,6 @@
 # Development and runtime reference
 
-[Back to Rish](../README.md) · [English overview](../README.en.md)
+[Back to Rish](../README.md) · [中文说明](../README.zh.md)
 
 This guide contains implementation detail, build commands, and validation
 procedures. Run shell commands from the repository root unless stated otherwise.
