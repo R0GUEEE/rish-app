@@ -15,6 +15,11 @@ export function createMessageFollowController(
 ) {
   let following = true;
   let interacting = false;
+  // A finger is down somewhere in the list. Any programmatic scroll while it
+  // is down cancels that touch on iOS, which is how a tap on a link inside a
+  // list that follows its end never became a press. Defer following until
+  // the touch ends.
+  let touching = false;
   let jumping = false;
   let disposed = false;
   let metrics: MessageViewport | null = null;
@@ -38,10 +43,10 @@ export function createMessageFollowController(
     timer = null;
   };
   const layoutChanged = () => {
-    if (disposed || !following || interacting || timer !== null) return;
+    if (disposed || !following || interacting || touching || timer !== null) return;
     timer = setTimeout(() => {
       timer = null;
-      if (!disposed && following && !interacting) scrollToEnd(false);
+      if (!disposed && following && !interacting && !touching) scrollToEnd(false);
     }, 30);
   };
   const scrolled = (next: MessageViewport) => {
@@ -87,6 +92,14 @@ export function createMessageFollowController(
   return {
     layoutChanged,
     scrolled,
+    touchStarted: () => {
+      touching = true;
+      cancel();
+    },
+    touchEnded: () => {
+      touching = false;
+      if (following && !interacting) layoutChanged();
+    },
     messagesChanged: () => {
       if (disposed) return;
       if (following && !interacting) layoutChanged();

@@ -122,6 +122,9 @@ export const MessageList = React.forwardRef<
         onContentSizeChange={follow.layoutChanged}
         onLayout={follow.layoutChanged}
         onScroll={event => follow.scrolled(viewport(event.nativeEvent))}
+        onTouchStart={follow.touchStarted}
+        onTouchEnd={follow.touchEnded}
+        onTouchCancel={follow.touchEnded}
         onScrollBeginDrag={follow.dragStarted}
         onScrollEndDrag={event => follow.dragEnded(viewport(event.nativeEvent))}
         onMomentumScrollBegin={follow.momentumStarted}

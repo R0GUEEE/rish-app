@@ -131,3 +131,35 @@ test('user input interrupts an explicit jump and expiry cleanup cancels old work
   jest.advanceTimersByTime(100);
   expect(scroll).not.toHaveBeenCalled();
 });
+
+test('a layout change during a touch does not scroll until the touch ends', () => {
+  const { scroll, follow } = setup();
+  follow.messagesChanged();
+  jest.advanceTimersByTime(30);
+  expect(scroll.mock.calls).toEqual([[false]]);
+  follow.scrolled(bottom);
+  // Finger down on a link: the press highlight relayouts the paragraph.
+  follow.touchStarted();
+  follow.layoutChanged();
+  jest.advanceTimersByTime(100);
+  expect(scroll.mock.calls).toEqual([[false]]);
+  // Finger up: the deferred follow may now run.
+  follow.touchEnded();
+  jest.advanceTimersByTime(30);
+  expect(scroll.mock.calls).toEqual([[false], [false]]);
+  follow.dispose();
+});
+
+test('a queued follow is cancelled by a touch and not replayed while it is down', () => {
+  const { scroll, follow } = setup();
+  follow.messagesChanged();
+  follow.scrolled(bottom);
+  follow.layoutChanged();
+  follow.touchStarted();
+  jest.advanceTimersByTime(100);
+  expect(scroll).not.toHaveBeenCalled();
+  follow.touchEnded();
+  jest.advanceTimersByTime(30);
+  expect(scroll.mock.calls).toEqual([[false]]);
+  follow.dispose();
+});
