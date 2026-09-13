@@ -66,19 +66,40 @@ kernel SHA-256
 `1e6bf9027720c75c3ed0d79171f21b5791ee40ca9795d07c7c6e04dc5ea2ae90`, both
 verified against the adjacent `SHA256SUMS` file.
 The CPIO includes BusyBox, musl, apk/libapk, OpenSSL/zlib and the pinned
-musl/tree APK inputs. A local corresponding-source handoff was also prepared
-for review, but has not been uploaded or published; its local-only status does
-not constitute a written offer. The guest directory records the source
-coverage and the remaining release decisions without claiming a complete SBOM
-for unrelated future payloads.
+musl/tree APK inputs.
 
-For source-release readiness, the bounded guest source set and notices are
-prepared locally in the corresponding-source handoff, but that archive has
-not been uploaded or made publicly available. A release owner still needs to
-choose the public source-hosting or offer mechanism. Binary-release optional
-exclusions remain the separately downloaded official CLI experiments and the
-unresolved full CocoaPods/transitive dependency notice report; neither is
-silently represented by this guest inventory.
+### Corresponding source for the guest payload (written offer)
+
+The kernel (`vmlinuz-virt-6.18.35`) and parts of the initramfs
+(`rish-container.cpio`: BusyBox, apk-tools, the Linux kernel modules) are
+distributed under the GNU General Public License version 2. Distributing this
+repository distributes those binaries, so the complete corresponding source is
+provided as follows:
+
+1. **Download.** Every Rish App release that ships or changes these two files
+   attaches the archive `rish-guest-corresponding-sources-<date>.tar` with its
+   SHA-256 on the release page:
+   <https://github.com/ZSeven-W/rish-app/releases>. The archive contains the
+   exact Linux 6.18 source tarball and 6.18.35 stable patch, the Alpine
+   APKBUILDs, patches and kernel configuration named by the pinned package
+   revisions, the upstream source tarballs of BusyBox 1.37.0, musl 1.2.6,
+   apk-tools 3.0.6, OpenSSL 3.5.7, zlib and tree 2.3.2, the guest license
+   texts, and source snapshots of the sibling runtime commits (`2b66dd9`,
+   `83233ea`) that hold the guest recipe, overlay and guest-agent source. The
+   member list and per-file hashes are in `third-party/guest/source-lock.tsv`
+   and `manifest.tsv`; the archive is rebuilt from them with
+   `third-party/guest/collect-source-materials.sh`.
+2. **Written offer.** If the release download is unavailable, any third party
+   may request the same corresponding source, on a physical medium or as a
+   download, for no more than the cost of physically performing the
+   distribution. Open an issue titled "GPL source request" at
+   <https://github.com/ZSeven-W/rish-app/issues>. This offer is valid for
+   three years from the date each affected release is first published, as
+   required by GPLv2 §3(b).
+
+The App bundle only ever ships the two tracked files above; the officially
+downloaded CLI experiments are excluded from this offer and are documented
+separately below.
 
 Official Codex and Claude CLI binaries are not tracked in this repository. If a
 future installer or release downloads or redistributes them, their exact

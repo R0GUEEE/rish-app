@@ -137,10 +137,10 @@ pins:
 
 Consequently the collector provides a complete, bounded set of identified
 source archives, Alpine recipes, patches, configs, and notices for this audit,
-without putting the large archives in Git. The remaining release work is to
-choose how to host or offer this source set and, if a byte-identical rebuild is
-required, to pin the Alpine build environment and toolchain inputs. No
-written-offer term or legal conclusion is made here.
+without putting the large archives in Git. The source set is offered through
+the release-asset download and the written offer in the top-level
+`THIRD_PARTY_NOTICES.md`; if a byte-identical rebuild is ever required, the
+Alpine build environment and toolchain inputs would still need pinning.
 
 ## Local delivery status
 
@@ -150,10 +150,10 @@ review. It contains the verified source-delivery files, this provenance and
 lock material, the guest license texts, and source snapshots of runtime
 commits `2b66dd9` and `83233ea` needed to read the guest recipe, overlay, and
 guest-agent source. It excludes `.toolchain` binaries, build caches, logs,
-private material, and the tracked App blobs. The archive is local preparation
-only: it has not been uploaded, published, or offered to recipients. Its
-size/SHA-256 and member list are recorded in the handoff accompanying this
-audit, outside the archive itself.
+private material, and the tracked App blobs. Local archives are not kept;
+each release rebuilds the archive with `collect-source-materials.sh` and
+attaches it, with its size and SHA-256, to the release that ships the guest
+files, as the written offer in `THIRD_PARTY_NOTICES.md` describes.
 
 ## Guest-agent Rust dependency scope
 
