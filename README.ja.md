@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="./brand/rish-banner.jpg" alt="Rish — あなたのポケットエージェント。ローカル実行。モデルの自由。DSH / Claude Code / GLM" width="100%" />
+  <img src="./brand/rish-readme-icon.svg" alt="Rish" width="96" />
 </p>
 
 <h1 align="center">Rish、ポケットの中のエージェント。</h1>
@@ -26,6 +26,10 @@
   <a href="#エコシステム">エコシステム</a> ·
   <a href="./docs/development.md">開発者ガイド</a> ·
   <a href="./LICENSE">MIT ライセンス</a>
+</p>
+
+<p align="center">
+  <img src="./brand/rish-banner.jpg" alt="Rish — あなたのポケットエージェント。ローカル実行。モデルの自由。DSH / Claude Code / GLM" width="100%" />
 </p>
 
 Rish は、エージェントとの会話、ワークスペース、ツール実行をスマートフォンにもたらします。
@@ -92,8 +96,8 @@ Rish は、エージェントとの会話、ワークスペース、ツール実
 <table>
 <tr>
 <td width="50%" valign="top" align="center">
-  <a href="./docs/images/agent-workflow-ios.png"><img src="./docs/images/agent-workflow-ios.png" alt="進行状況、list_dir ツール呼び出し、最終回答を示す Rish iOS Simulator の実際の会話" width="280" /></a><br />
-  <sub><b>エージェントとの会話</b> — 進行状況、ツール、結果を追跡できます。表示されているテキストはアプリ再起動後も保持されます。</sub>
+  <a href="./docs/images/agent-workflow-ios.png"><img src="./docs/images/agent-workflow-ios.png" alt="2 件の成功したツール呼び出しと、絶対パスが拒否されたことを説明するサマリーを表示した iPhone 上の Rish" width="280" /></a><br />
+  <sub><b>エージェントとの会話</b> — スマートフォンで進行状況、ツール呼び出し、結果を追跡できます。ワークスペース外のパスは拒否され、モデルは次のラウンドで自ら修正します。</sub>
 </td>
 <td width="50%" valign="top" align="center">
   <a href="./docs/images/project-changes-ios.png"><img src="./docs/images/project-changes-ios.png" alt="未ステージのファイルと変更統計を示す Rish iOS Simulator" width="280" /></a><br />
@@ -195,6 +199,18 @@ Rish は、ネイティブのファイル/Git 操作、Rish ランタイム、�
 | Claude Code | 互換サービスを設定できる API アダプター。サブスクリプションによるテキスト呼び出しはオプションの iOS ビルドで検証済みで、その範囲とレイテンシは上記のとおりです。 |
 | カスタムサービス | iOS では、Messages、Responses、Chat Completions のいずれかを選択し、モデルマッピングを設定します。 |
 
+## エコシステム
+
+Rish は、**[ZSeven-W](https://github.com/ZSeven-W)** によるローカルファーストで AI ネイティブなツール群のひとつです。`rish` はこのアプリの中で Linux ゲストを起動し、そのほかのプロジェクトは同じ考えをターミナル、デザインキャンバス、エージェントのメモリといった別の舞台へ広げます。
+
+| プロジェクト | 概要 |
+| ------- | ---------- |
+| **[rish](https://github.com/ZSeven-W/rish)** | スマートフォン上で本物の Docker を実現。純粋な Rust で書かれた JIT 不要の x86-64 フルシステムインタープリターが Linux を起動し、iOS と Android でコンテナを実行します。このアプリの Linux Guest はここ由来です。 |
+| <img src="./docs/images/ecosystem/openpencil.png" alt="OpenPencil" width="40" /> **[OpenPencil](https://github.com/ZSeven-W/openpencil)** | 初のオープンソース・AI ネイティブなベクターデザインツールであり、Agent Teams の同時実行を初めて備えたツール。Design-as-Code により、プロンプトをライブキャンバス上の UI に直接変えます。 |
+| <img src="./docs/images/ecosystem/jian.png" alt="jian" width="40" /> **[jian](https://github.com/ZSeven-W/jian)** | 純粋な Rust による GPU-Skia の UI フレームワーク。宣言的な `.op` ドキュメントをそのままネイティブアプリに変えます。JS ランタイム不要、DOM 不要、Electron 不要。 |
+| <img src="./docs/images/ecosystem/zode.png" alt="Zode" width="40" /> **[Zode](https://github.com/ZSeven-W/zode)** | ターミナル向けの AI ネイティブなコーディング CLI。高速な Rust の TUI が、コードを読み、コマンドを実行し、ファイルを検索し、git を管理します。 |
+| <img src="./docs/images/ecosystem/noema.png" alt="noema" width="40" /> **[noema](https://github.com/ZSeven-W/noema)** | コーディングエージェント向けのローカルファースト・非ベクターのメモリ。検査可能なファイルとしての永続メモリ、レビューキュー、埋め込み不要のリコールを備えます。 |
+
 ## はじめに
 
 現時点ではソースからビルドしてください。エンドユーザー向けの安定版ダウンロードはありません。
@@ -244,13 +260,3 @@ Codex と Claude Code のサブスクリプションサインインにはオプ�
 
 プロジェクトのコードは [MIT](LICENSE) ライセンスの下で提供されます。サードパーティーの
 ランタイム、Guest コンポーネント、その他の依存コンポーネントはそれぞれ独自のライセンスを保持します。
-
-## エコシステム
-
-同じローカルファースト・モデルフリーの考えに基づく兄弟プロジェクト:
-
-- **[rish](https://github.com/ZSeven-W/rish)** — スマートフォン上で本物の Docker を実現。純粋な Rust で書かれた JIT 不要の x86-64 フルシステムインタープリターで、Linux を起動し、iOS と Android でコンテナを実行します。このプロジェクトの Linux Guest はここ由来です。
-- **[OpenPencil](https://github.com/ZSeven-W/openpencil)** — 初のオープンソース・AI ネイティブのベクターデザインツールであり、エージェントチームの同時実行を初めて備えたツール。Design-as-Code により、プロンプトをライブキャンバス上の UI に変えます。
-- **[Jian](https://github.com/ZSeven-W/jian)** — Rust ネイティブのクロスプラットフォーム UI フレームワーク。.op ファイルがそのままアプリになります。
-- **[Zode](https://github.com/ZSeven-W/zode)** — ターミナル向けの AI ネイティブなコーディング CLI。マイクロカーネルとプラグイン、マルチプロバイダー、フルスクリーン TUI。
-- **[Noema](https://github.com/ZSeven-W/noema)** — コーディングエージェントのためのローカルファーストなメモリ。ベクターストア不要で、レビューキューと MCP を備えます。

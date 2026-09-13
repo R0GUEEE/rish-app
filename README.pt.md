@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="./brand/rish-banner.jpg" alt="Rish — seu agente de bolso. Execução local. Liberdade de modelo. DSH / Claude Code / Codex / GLM" width="100%" />
+  <img src="./brand/rish-readme-icon.svg" alt="Rish" width="96" />
 </p>
 
 <h1 align="center">Rish, seu agente de bolso.</h1>
@@ -26,6 +26,10 @@
   <a href="#ecossistema">Ecossistema</a> ·
   <a href="./docs/development.md">Guia do desenvolvedor</a> ·
   <a href="./LICENSE">Licença MIT</a>
+</p>
+
+<p align="center">
+  <img src="./brand/rish-banner.jpg" alt="Rish — seu agente de bolso. Execução local. Liberdade de modelo. DSH / Claude Code / Codex / GLM" width="100%" />
 </p>
 
 Rish leva para o seu telefone conversas de Agente, espaços de trabalho e
@@ -102,8 +106,8 @@ conexão de modelo. Clique em uma captura de tela para abrir a original.
 <table>
 <tr>
 <td width="50%" valign="top" align="center">
-  <a href="./docs/images/agent-workflow-ios.png"><img src="./docs/images/agent-workflow-ios.png" alt="Conversa real do Agente no Simulador de iOS do Rish mostrando o progresso, uma chamada da ferramenta list_dir e a resposta final" width="280" /></a><br />
-  <sub><b>Conversa do Agente</b> — Acompanhe o progresso, as ferramentas e os resultados. O texto exibido sobrevive ao reinício do app.</sub>
+  <a href="./docs/images/agent-workflow-ios.png"><img src="./docs/images/agent-workflow-ios.png" alt="Rish em um iPhone mostrando duas chamadas de ferramentas bem-sucedidas e um resumo explicando que um caminho absoluto foi recusado" width="280" /></a><br />
+  <sub><b>Conversa do Agente</b> — Acompanhe o progresso, as chamadas de ferramentas e os resultados no telefone. Um caminho fora do espaço de trabalho é recusado, e o modelo se corrige na rodada seguinte.</sub>
 </td>
 <td width="50%" valign="top" align="center">
   <a href="./docs/images/project-changes-ios.png"><img src="./docs/images/project-changes-ios.png" alt="Simulador de iOS do Rish mostrando arquivos não preparados e estatísticas de mudanças" width="280" /></a><br />
@@ -214,6 +218,18 @@ dos caminhos experimentais.
 | Claude Code | Adaptador de API com configuração de serviços compatíveis; chamadas de texto com assinatura estão verificadas na compilação opcional de iOS, com o escopo e a latência indicados acima. |
 | Serviços personalizados | No iOS, selecione Messages, Responses ou Chat Completions e configure mapeamentos de modelos. |
 
+## Ecossistema
+
+Rish faz parte de uma família de ferramentas local-first e nativas de IA de **[ZSeven-W](https://github.com/ZSeven-W)**. O `rish` inicializa o Linux Guest dentro deste app; as demais levam a mesma ideia para outras superfícies — o terminal, o canvas de design e a memória de um agente.
+
+| Projeto | O que é |
+| ------- | ---------- |
+| **[rish](https://github.com/ZSeven-W/rish)** | Docker de verdade em um telefone: um interpretador de sistema completo x86-64 sem JIT, em Rust puro, que inicializa o Linux e executa contêineres no iOS e no Android. O Linux Guest deste app vem daqui. |
+| <img src="./docs/images/ecosystem/openpencil.png" alt="OpenPencil" width="40" /> **[OpenPencil](https://github.com/ZSeven-W/openpencil)** | A primeira ferramenta de design vetorial nativa de IA e de código aberto, e a primeira com Agent Teams concorrentes. Design-as-Code — transforme prompts em UI diretamente no canvas em tempo real. |
+| <img src="./docs/images/ecosystem/jian.png" alt="jian" width="40" /> **[jian](https://github.com/ZSeven-W/jian)** | Framework de UI em Rust puro e com GPU-Skia. Transforma um documento declarativo `.op` em um app nativo — sem runtime de JS, sem DOM, sem Electron. |
+| <img src="./docs/images/ecosystem/zode.png" alt="Zode" width="40" /> **[Zode](https://github.com/ZSeven-W/zode)** | CLI de programação nativa de IA para o seu terminal. Uma TUI rápida em Rust que lê o seu código, executa comandos, pesquisa arquivos e gerencia o git. |
+| <img src="./docs/images/ecosystem/noema.png" alt="noema" width="40" /> **[noema](https://github.com/ZSeven-W/noema)** | Memória local-first e não vetorial para agentes de programação. Memória durável como arquivos inspecionáveis, uma fila de revisão e recuperação sem embeddings. |
+
 ## Como começar
 
 Por enquanto, compile a partir do código-fonte; não há download estável para
@@ -268,14 +284,3 @@ credenciais ou dados sensíveis publicamente.
 
 O código do projeto está licenciado sob [MIT](LICENSE). Runtimes de terceiros,
 componentes do Guest e outras dependências mantêm suas próprias licenças.
-
-## Ecossistema
-
-Projetos irmãos construídos sobre a mesma ideia local-first e de liberdade de
-modelos:
-
-- **[rish](https://github.com/ZSeven-W/rish)** — Docker de verdade no telefone. Um interpretador de sistema completo x86-64 sem JIT, em Rust puro, que inicializa o Linux e executa contêineres no iOS e no Android. O Linux Guest deste projeto vem de lá.
-- **[OpenPencil](https://github.com/ZSeven-W/openpencil)** — a primeira ferramenta de design vetorial nativa de IA de código aberto, e a primeira com Agent Teams concorrentes. Design-as-Code, transformando prompts em UI no canvas em tempo real.
-- **[Jian](https://github.com/ZSeven-W/jian)** — um framework de UI multiplataforma nativo em Rust. Um arquivo .op é um app.
-- **[Zode](https://github.com/ZSeven-W/zode)** — uma CLI de programação nativa de IA para o seu terminal. Micronúcleo com plugins, multiprovedor, TUI em tela cheia.
-- **[Noema](https://github.com/ZSeven-W/noema)** — memória local-first para agentes de programação, sem armazenamento de vetores, com filas de revisão e MCP.

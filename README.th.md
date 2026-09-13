@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="./brand/rish-banner.jpg" alt="Rish — เอเจนต์ในกระเป๋าของคุณ ทำงานบนเครื่อง อิสระในการเลือกโมเดล DSH / Claude Code / Codex / GLM" width="100%" />
+  <img src="./brand/rish-readme-icon.svg" alt="Rish" width="96" />
 </p>
 
 <h1 align="center">Rish เอเจนต์ในกระเป๋าของคุณ</h1>
@@ -26,6 +26,10 @@
   <a href="#ระบบนิเวศ">ระบบนิเวศ</a> ·
   <a href="./docs/development.md">คู่มือนักพัฒนา</a> ·
   <a href="./LICENSE">สัญญาอนุญาต MIT</a>
+</p>
+
+<p align="center">
+  <img src="./brand/rish-banner.jpg" alt="Rish — เอเจนต์ในกระเป๋าของคุณ ทำงานบนเครื่อง อิสระในการเลือกโมเดล DSH / Claude Code / Codex / GLM" width="100%" />
 </p>
 
 Rish นำบทสนทนากับเอเจนต์ เวิร์กสเปซ และการเรียกใช้เครื่องมือมาไว้บนโทรศัพท์ของคุณ
@@ -99,8 +103,8 @@ BigModel Coding Lite ผ่านการตรวจสอบแล้ว ส�
 <table>
 <tr>
 <td width="50%" valign="top" align="center">
-  <a href="./docs/images/agent-workflow-ios.png"><img src="./docs/images/agent-workflow-ios.png" alt="บทสนทนาจริงบน Rish iOS Simulator แสดงความคืบหน้า การเรียกใช้เครื่องมือ list_dir และคำตอบสุดท้าย" width="280" /></a><br />
-  <sub><b>บทสนทนากับเอเจนต์</b> — ติดตามความคืบหน้า เครื่องมือ และผลลัพธ์ ข้อความที่แสดงยังอยู่หลังรีสตาร์ทแอป</sub>
+  <a href="./docs/images/agent-workflow-ios.png"><img src="./docs/images/agent-workflow-ios.png" alt="Rish บน iPhone แสดงการเรียกใช้เครื่องมือที่สำเร็จสองครั้ง และบทสรุปที่อธิบายว่าเส้นทางแบบสัมบูรณ์ถูกปฏิเสธ" width="280" /></a><br />
+  <sub><b>บทสนทนากับเอเจนต์</b> — ติดตามความคืบหน้า การเรียกใช้เครื่องมือ และผลลัพธ์บนโทรศัพท์ เส้นทางที่อยู่นอกเวิร์กสเปซจะถูกปฏิเสธ และโมเดลแก้ไขเองในรอบถัดไป</sub>
 </td>
 <td width="50%" valign="top" align="center">
   <a href="./docs/images/project-changes-ios.png"><img src="./docs/images/project-changes-ios.png" alt="Rish iOS Simulator แสดงไฟล์ที่ยังไม่ได้ stage และสถิติการเปลี่ยนแปลง" width="280" /></a><br />
@@ -208,6 +212,18 @@ Rish ผสานการทำงานกับไฟล์/Git แบบเ�
 | Claude Code | อะแดปเตอร์ API พร้อมการกำหนดค่าบริการที่เข้ากันได้ การเรียกข้อความด้วยการสมัครใช้งานตรวจสอบแล้วในบิลด์ iOS เสริมเลือกติดตั้ง ตามขอบเขตและเวลาแฝงที่ระบุด้านบน |
 | บริการกำหนดเอง | บน iOS ให้เลือก Messages, Responses หรือ Chat Completions แล้วกำหนดค่าการจับคู่โมเดล |
 
+## ระบบนิเวศ
+
+Rish เป็นส่วนหนึ่งของตระกูลเครื่องมือ local-first และ AI-native จาก **[ZSeven-W](https://github.com/ZSeven-W)** `rish` ทำหน้าที่บูต Linux guest ภายในแอปนี้ ส่วนโปรเจกต์อื่น ๆ นำแนวคิดเดียวกันนี้ไปใช้บนพื้นที่อื่น — เทอร์มินัล แคนวาสสำหรับออกแบบ และหน่วยความจำของเอเจนต์
+
+| โปรเจกต์ | คืออะไร |
+| --- | --- |
+| **[rish](https://github.com/ZSeven-W/rish)** | Docker ตัวจริงบนโทรศัพท์: อินเทอร์พรีเตอร์จำลองระบบเต็มแบบ x86-64 ที่ไม่ใช้ JIT เขียนด้วย Rust ล้วน บูต Linux และรันคอนเทนเนอร์บน iOS และ Android Linux Guest ของแอปนี้มาจากที่นี่ |
+| <img src="./docs/images/ecosystem/openpencil.png" alt="OpenPencil" width="40" /> **[OpenPencil](https://github.com/ZSeven-W/openpencil)** | เครื่องมือออกแบบเวกเตอร์แบบ AI-native โอเพนซอร์สตัวแรก และตัวแรกที่มี Agent Teams ทำงานพร้อมกัน Design-as-Code — เปลี่ยนพรอมต์เป็น UI ได้โดยตรงบนแคนวาสสด |
+| <img src="./docs/images/ecosystem/jian.png" alt="jian" width="40" /> **[jian](https://github.com/ZSeven-W/jian)** | เฟรมเวิร์ก UI แบบ GPU-Skia เขียนด้วย Rust ล้วน เปลี่ยนเอกสาร `.op` แบบ declarative ให้กลายเป็นแอปเนทีฟ — ไม่มี JS runtime ไม่มี DOM ไม่มี Electron |
+| <img src="./docs/images/ecosystem/zode.png" alt="Zode" width="40" /> **[Zode](https://github.com/ZSeven-W/zode)** | CLI สำหรับเขียนโค้ดแบบ AI-native บนเทอร์มินัลของคุณ เป็น TUI ที่เขียนด้วย Rust และรวดเร็ว อ่านโค้ดของคุณ รันคำสั่ง ค้นหาไฟล์ และจัดการ git |
+| <img src="./docs/images/ecosystem/noema.png" alt="noema" width="40" /> **[noema](https://github.com/ZSeven-W/noema)** | หน่วยความจำแบบ local-first ที่ไม่ใช้เวกเตอร์สำหรับเอเจนต์เขียนโค้ด หน่วยความจำที่คงทนในรูปไฟล์ที่ตรวจสอบได้ พร้อมคิวตรวจทาน และการเรียกคืนโดยไม่ต้องใช้ embedding |
+
 ## เริ่มต้นใช้งาน
 
 สำหรับตอนนี้ต้องบิลด์จากซอร์ส ยังไม่มีไฟล์ดาวน์โหลดสำหรับผู้ใช้ปลายทางที่เสถียร
@@ -259,13 +275,3 @@ npm run ios --prefix apps/mobile
 โค้ดของโปรเจกต์เผยแพร่ภายใต้สัญญาอนุญาต [MIT](LICENSE)
 รันไทม์ของบุคคลที่สาม ส่วนประกอบของ Guest และ dependency อื่น ๆ
 ยังคงใช้สัญญาอนุญาตของตนเอง
-
-## ระบบนิเวศ
-
-โปรเจกต์พี่น้องที่สร้างบนแนวคิดเดียวกัน คือ local-first และไม่ผูกติดกับโมเดลใดโมเดลหนึ่ง:
-
-- **[rish](https://github.com/ZSeven-W/rish)** — Docker ตัวจริงบนโทรศัพท์ อินเทอร์พรีเตอร์จำลองระบบเต็มแบบ x86-64 ที่ไม่ใช้ JIT เขียนด้วย Rust ล้วน บูต Linux และรันคอนเทนเนอร์บน iOS และ Android Linux Guest ของโปรเจกต์นี้มาจากโปรเจกต์นั้น
-- **[OpenPencil](https://github.com/ZSeven-W/openpencil)** — เครื่องมือออกแบบเวกเตอร์แบบ AI-native โอเพนซอร์สตัวแรก และตัวแรกที่มี Agent Teams ทำงานพร้อมกัน Design-as-Code ที่เปลี่ยนพรอมต์เป็น UI บนแคนวาสสด
-- **[Jian](https://github.com/ZSeven-W/jian)** — เฟรมเวิร์ก UI ข้ามแพลตฟอร์มบน Rust ไฟล์ .op หนึ่งไฟล์คือหนึ่งแอป
-- **[Zode](https://github.com/ZSeven-W/zode)** — CLI เขียนโค้ดแบบ AI-native สำหรับเทอร์มินัลของคุณ ไมโครเคอร์เนลพร้อมปลั๊กอิน รองรับผู้ให้บริการหลายราย และ TUI แบบเต็มจอ
-- **[Noema](https://github.com/ZSeven-W/noema)** — หน่วยความจำแบบ local-first สำหรับเอเจนต์เขียนโค้ด ไม่ต้องใช้ vector store มีคิวตรวจทานและรองรับ MCP

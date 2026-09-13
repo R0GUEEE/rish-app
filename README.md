@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="./brand/rish-banner.jpg" alt="Rish — your pocket agent. Local execution. Model freedom. DSH / Claude Code / Codex / GLM" width="100%" />
+  <img src="./brand/rish-readme-icon.svg" alt="Rish" width="96" />
 </p>
 
 <h1 align="center">Rish, your pocket agent.</h1>
@@ -26,6 +26,10 @@
   <a href="#ecosystem">Ecosystem</a> ·
   <a href="./docs/development.md">Developer guide</a> ·
   <a href="./LICENSE">MIT License</a>
+</p>
+
+<p align="center">
+  <img src="./brand/rish-banner.jpg" alt="Rish — your pocket agent. Local execution. Model freedom. DSH / Claude Code / Codex / GLM" width="100%" />
 </p>
 
 Rish brings Agent conversations, workspaces, and tool execution to your phone.
@@ -96,8 +100,8 @@ Click a screenshot to open the original.
 <table>
 <tr>
 <td width="50%" valign="top" align="center">
-  <a href="./docs/images/agent-workflow-ios.png"><img src="./docs/images/agent-workflow-ios.png" alt="Actual Rish iOS Simulator conversation showing progress, a list_dir tool call, and its final answer" width="280" /></a><br />
-  <sub><b>Agent conversation</b> — Follow progress, tools, and results. The shown text survives app restart.</sub>
+  <a href="./docs/images/agent-workflow-ios.png"><img src="./docs/images/agent-workflow-ios.png" alt="Rish on an iPhone showing two successful tool calls and a summary explaining that an absolute path was refused" width="280" /></a><br />
+  <sub><b>Agent conversation</b> — Follow progress, tool calls, and results on the phone. A path outside the workspace is refused, and the model corrects itself in the next round.</sub>
 </td>
 <td width="50%" valign="top" align="center">
   <a href="./docs/images/project-changes-ios.png"><img src="./docs/images/project-changes-ios.png" alt="Rish iOS Simulator showing unstaged files and change statistics" width="280" /></a><br />
@@ -201,6 +205,18 @@ verified capabilities from experimental paths.
 | Claude Code | API adapter with compatible-service configuration; subscribed text calls are verified in the optional iOS build, with the scope and latency noted above. |
 | Custom services | On iOS, select Messages, Responses, or Chat Completions and configure model mappings. |
 
+## Ecosystem
+
+Rish is part of a family of local-first, AI-native tools from **[ZSeven-W](https://github.com/ZSeven-W)**. `rish` boots the Linux guest inside this app; the others carry the same idea onto other surfaces — the terminal, the design canvas, and an agent's memory.
+
+| Project | What it is |
+| ------- | ---------- |
+| **[rish](https://github.com/ZSeven-W/rish)** | Real Docker on a phone: a no-JIT x86-64 full-system interpreter in pure Rust that boots Linux and runs containers on iOS and Android. This app's Linux Guest comes from here. |
+| <img src="./docs/images/ecosystem/openpencil.png" alt="OpenPencil" width="40" /> **[OpenPencil](https://github.com/ZSeven-W/openpencil)** | The first open-source AI-native vector design tool, and the first with concurrent Agent Teams. Design-as-Code — turn prompts into UI directly on the live canvas. |
+| <img src="./docs/images/ecosystem/jian.png" alt="jian" width="40" /> **[jian](https://github.com/ZSeven-W/jian)** | Pure-Rust, GPU-Skia UI framework. Turns a declarative `.op` document into a native app — no JS runtime, no DOM, no Electron. |
+| <img src="./docs/images/ecosystem/zode.png" alt="Zode" width="40" /> **[Zode](https://github.com/ZSeven-W/zode)** | AI-native coding CLI for your terminal. A fast Rust TUI that reads your code, runs commands, searches files, and manages git. |
+| <img src="./docs/images/ecosystem/noema.png" alt="noema" width="40" /> **[noema](https://github.com/ZSeven-W/noema)** | Local-first, non-vector memory for coding agents. Durable memory as inspectable files, a review queue, and embedding-free recall. |
+
 ## Get started
 
 Build from source for now; there is no stable end-user download. Once you have
@@ -251,13 +267,3 @@ never post credentials or sensitive data publicly.
 
 Project code is licensed under [MIT](LICENSE). Third-party runtimes, Guest
 components, and other dependencies retain their own licenses.
-
-## Ecosystem
-
-Sibling projects built on the same local-first, model-free idea:
-
-- **[rish](https://github.com/ZSeven-W/rish)** — real Docker on a phone. A no-JIT x86-64 full-system interpreter in pure Rust that boots Linux and runs containers on iOS and Android. This project's Linux Guest comes from there.
-- **[OpenPencil](https://github.com/ZSeven-W/openpencil)** — the first open-source AI-native vector design tool, and the first with concurrent Agent Teams. Design-as-Code, turning prompts into UI on the live canvas.
-- **[Jian](https://github.com/ZSeven-W/jian)** — a Rust-native cross-platform UI framework. An .op file is an app.
-- **[Zode](https://github.com/ZSeven-W/zode)** — an AI-native coding CLI for your terminal. Microkernel plus plugins, multi-provider, full-screen TUI.
-- **[Noema](https://github.com/ZSeven-W/noema)** — local-first memory for coding agents, without a vector store, with review queues and MCP.

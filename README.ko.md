@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="./brand/rish-banner.jpg" alt="Rish — 당신의 포켓 에이전트. 로컬 실행. 모델의 자유. DSH / Claude Code / Codex / GLM" width="100%" />
+  <img src="./brand/rish-readme-icon.svg" alt="Rish" width="96" />
 </p>
 
 <h1 align="center">Rish, 당신의 포켓 에이전트.</h1>
@@ -26,6 +26,10 @@
   <a href="#생태계">생태계</a> ·
   <a href="./docs/development.md">개발자 안내</a> ·
   <a href="./LICENSE">MIT 라이선스</a>
+</p>
+
+<p align="center">
+  <img src="./brand/rish-banner.jpg" alt="Rish — 당신의 포켓 에이전트. 로컬 실행. 모델의 자유. DSH / Claude Code / Codex / GLM" width="100%" />
 </p>
 
 Rish는 에이전트 대화, 작업 공간, 도구 실행을 휴대폰으로 가져옵니다.
@@ -89,8 +93,8 @@ Rish는 에이전트 대화, 작업 공간, 도구 실행을 휴대폰으로 가
 <table>
 <tr>
 <td width="50%" valign="top" align="center">
-  <a href="./docs/images/agent-workflow-ios.png"><img src="./docs/images/agent-workflow-ios.png" alt="진행 상황, list_dir 도구 호출, 최종 답변을 보여주는 실제 Rish iOS 시뮬레이터 대화" width="280" /></a><br />
-  <sub><b>에이전트 대화</b> — 진행 상황, 도구, 결과를 확인하세요. 표시된 텍스트는 앱을 재시작해도 유지됩니다.</sub>
+  <a href="./docs/images/agent-workflow-ios.png"><img src="./docs/images/agent-workflow-ios.png" alt="두 건의 성공적인 도구 호출과 절대 경로가 거부되었음을 설명하는 요약을 보여주는 iPhone의 Rish" width="280" /></a><br />
+  <sub><b>에이전트 대화</b> — 휴대폰에서 진행 상황, 도구 호출, 결과를 따라가 보세요. 작업 공간 밖의 경로는 거부되며, 모델은 다음 라운드에서 스스로 바로잡습니다.</sub>
 </td>
 <td width="50%" valign="top" align="center">
   <a href="./docs/images/project-changes-ios.png"><img src="./docs/images/project-changes-ios.png" alt="스테이징되지 않은 파일과 변경 통계를 보여주는 Rish iOS 시뮬레이터" width="280" /></a><br />
@@ -194,6 +198,18 @@ Rish는 네이티브 파일/Git 작업, Rish 런타임, 실험적인 Linux 게�
 | Claude Code | 호환 서비스 구성이 가능한 API 어댑터. 구독 텍스트 호출은 선택적 iOS 빌드에서 검증되었으며, 그 범위와 지연 시간은 위에 안내되어 있습니다. |
 | 커스텀 서비스 | iOS에서 Messages, Responses 또는 Chat Completions를 선택하고 모델 매핑을 구성하세요. |
 
+## 생태계
+
+Rish는 **[ZSeven-W](https://github.com/ZSeven-W)**의 로컬 우선·AI 네이티브 도구 제품군의 일부입니다. `rish`가 이 앱 안에서 Linux 게스트를 부팅하며, 나머지는 같은 아이디어를 다른 영역 — 터미널, 디자인 캔버스, 에이전트의 메모리 — 로 확장합니다.
+
+| 프로젝트 | 소개 |
+| ------- | ---------- |
+| **[rish](https://github.com/ZSeven-W/rish)** | 휴대폰에서 동작하는 진짜 Docker: 순수 Rust로 작성된 JIT 없는 x86-64 풀시스템 인터프리터가 Linux를 부팅하고 iOS와 Android에서 컨테이너를 실행합니다. 이 앱의 Linux 게스트는 여기서 왔습니다. |
+| <img src="./docs/images/ecosystem/openpencil.png" alt="OpenPencil" width="40" /> **[OpenPencil](https://github.com/ZSeven-W/openpencil)** | 최초의 오픈소스 AI 네이티브 벡터 디자인 도구이자, 동시 실행 Agent Teams를 갖춘 최초의 도구입니다. Design-as-Code — 프롬프트를 라이브 캔버스에서 바로 UI로 바꿉니다. |
+| <img src="./docs/images/ecosystem/jian.png" alt="jian" width="40" /> **[jian](https://github.com/ZSeven-W/jian)** | 순수 Rust 기반 GPU-Skia UI 프레임워크입니다. 선언형 `.op` 문서를 네이티브 앱으로 바꿉니다 — JS 런타임 없이, DOM 없이, Electron 없이. |
+| <img src="./docs/images/ecosystem/zode.png" alt="Zode" width="40" /> **[Zode](https://github.com/ZSeven-W/zode)** | 터미널을 위한 AI 네이티브 코딩 CLI입니다. 빠른 Rust TUI로 코드를 읽고, 명령을 실행하고, 파일을 검색하고, git을 관리합니다. |
+| <img src="./docs/images/ecosystem/noema.png" alt="noema" width="40" /> **[noema](https://github.com/ZSeven-W/noema)** | 코딩 에이전트를 위한 로컬 우선, 벡터 없는 메모리입니다. 검사 가능한 파일 형태의 내구성 있는 메모리, 검토 큐, 임베딩 없는 회상을 제공합니다. |
+
 ## 시작하기
 
 현재는 소스에서 직접 빌드해야 하며, 안정적인 최종 사용자 다운로드는 없습니다.
@@ -244,13 +260,3 @@ BigModel은 [계정 안내](docs/zcode-account-login.md)를 참고하세요. 자
 
 프로젝트 코드는 [MIT](LICENSE) 라이선스하에 배포됩니다. 서드파티 런타임, 게스트
 구성 요소, 기타 의존성은 각자의 라이선스를 유지합니다.
-
-## 생태계
-
-같은 로컬 우선·모델 자유 철학으로 만든 형제 프로젝트들:
-
-- **[rish](https://github.com/ZSeven-W/rish)** — 휴대폰에서 동작하는 진짜 Docker. 순수 Rust로 작성된 JIT 없는 x86-64 풀시스템 인터프리터로, Linux를 부팅하고 iOS와 Android에서 컨테이너를 실행합니다. 이 프로젝트의 Linux 게스트는 여기서 왔습니다.
-- **[OpenPencil](https://github.com/ZSeven-W/openpencil)** — 최초의 오픈소스 AI 네이티브 벡터 디자인 도구이자, 동시 실행 에이전트 팀을 갖춘 최초의 도구입니다. Design-as-Code로, 프롬프트를 라이브 캔버스에서 UI로 바꿉니다.
-- **[Jian](https://github.com/ZSeven-W/jian)** — Rust 네이티브 크로스 플랫폼 UI 프레임워크. .op 파일 하나가 앱입니다.
-- **[Zode](https://github.com/ZSeven-W/zode)** — 터미널을 위한 AI 네이티브 코딩 CLI. 마이크로커널과 플러그인, 다중 공급자, 전체 화면 TUI.
-- **[Noema](https://github.com/ZSeven-W/noema)** — 코딩 에이전트를 위한 로컬 우선 메모리. 벡터 저장소 없이, 검토 큐와 MCP를 갖추고 있습니다.

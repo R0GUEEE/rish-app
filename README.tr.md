@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="./brand/rish-banner.jpg" alt="Rish — cebinizdeki ajanınız. Yerel yürütme. Model özgürlüğü. DSH / Claude Code / Codex / GLM" width="100%" />
+  <img src="./brand/rish-readme-icon.svg" alt="Rish" width="96" />
 </p>
 
 <h1 align="center">Rish, cebinizdeki ajanınız.</h1>
@@ -26,6 +26,10 @@
   <a href="#ekosistem">Ekosistem</a> ·
   <a href="./docs/development.md">Geliştirici kılavuzu</a> ·
   <a href="./LICENSE">MIT Lisansı</a>
+</p>
+
+<p align="center">
+  <img src="./brand/rish-banner.jpg" alt="Rish — cebinizdeki ajanınız. Yerel yürütme. Model özgürlüğü. DSH / Claude Code / Codex / GLM" width="100%" />
 </p>
 
 Rish, Ajan sohbetlerini, çalışma alanlarını ve araç yürütmesini telefonunuza getirir.
@@ -87,8 +91,8 @@ Orijinalini açmak için ekran görüntülerinden birine tıklayın.
 <table>
 <tr>
 <td width="50%" valign="top" align="center">
-  <a href="./docs/images/agent-workflow-ios.png"><img src="./docs/images/agent-workflow-ios.png" alt="İlerlemeyi, bir list_dir araç çağrısını ve nihai yanıtı gösteren gerçek Rish iOS Simulator sohbesi" width="280" /></a><br />
-  <sub><b>Ajan sohbeti</b> — İlerlemeyi, araçları ve sonuçları izleyin. Gösterilen metin uygulama yeniden başlatıldıktan sonra da korunur.</sub>
+  <a href="./docs/images/agent-workflow-ios.png"><img src="./docs/images/agent-workflow-ios.png" alt="iPhone'da iki başarılı araç çağrısını ve mutlak bir yolun reddedildiğini açıklayan bir özeti gösteren Rish" width="280" /></a><br />
+  <sub><b>Ajan sohbeti</b> — İlerlemeyi, araç çağrılarını ve sonuçları telefonda izleyin. Çalışma alanı dışındaki bir yol reddedilir ve model bir sonraki turda kendini düzeltir.</sub>
 </td>
 <td width="50%" valign="top" align="center">
   <a href="./docs/images/project-changes-ios.png"><img src="./docs/images/project-changes-ios.png" alt="Staging'e eklenmemiş dosyaları ve değişiklik istatistiklerini gösteren Rish iOS Simulator" width="280" /></a><br />
@@ -194,6 +198,18 @@ deneysel yollardan ayırır.
 | Claude Code | Uyumlu hizmet yapılandırmasıyla API adaptörü; abonelik metin çağrıları, yukarıda belirtilen kapsam ve gecikmeyle isteğe bağlı iOS yapısında doğrulanmıştır. |
 | Özel hizmetler | iOS'ta Messages, Responses veya Chat Completions seçin ve model eşlemelerini yapılandırın. |
 
+## Ekosistem
+
+Rish, **[ZSeven-W](https://github.com/ZSeven-W)**'nin yerel-öncelikli, yapay zekâ odaklı araçlar ailesinin bir parçasıdır. `rish` bu uygulamanın içindeki Linux Guest'i önyükler; diğerleri de aynı fikri başka yüzeylere — terminale, tasarım tuvaline ve bir ajanın belleğine — taşır.
+
+| Proje | Ne olduğu |
+| ------- | ---------- |
+| **[rish](https://github.com/ZSeven-W/rish)** | Telefonda gerçek Docker: iOS ve Android'de Linux'u önyükleyip konteynerler çalıştıran, saf Rust ile yazılmış, JIT'siz x86-64 tam sistem yorumlayıcısı. Bu uygulamanın Linux Guest'i buradan geliyor. |
+| <img src="./docs/images/ecosystem/openpencil.png" alt="OpenPencil" width="40" /> **[OpenPencil](https://github.com/ZSeven-W/openpencil)** | İlk açık kaynaklı, yapay zekâ odaklı vektör tasarım aracı ve eşzamanlı Agent Teams sunan ilk araç. Design-as-Code — istemleri doğrudan canlı tuvalde arayüze dönüştürün. |
+| <img src="./docs/images/ecosystem/jian.png" alt="jian" width="40" /> **[jian](https://github.com/ZSeven-W/jian)** | Saf Rust ile yazılmış, GPU-Skia arayüz çerçevesi. Bildirimsel bir `.op` belgesini yerel bir uygulamaya dönüştürür — JS çalışma zamanı yok, DOM yok, Electron yok. |
+| <img src="./docs/images/ecosystem/zode.png" alt="Zode" width="40" /> **[Zode](https://github.com/ZSeven-W/zode)** | Terminaliniz için yapay zekâ odaklı kodlama CLI'sı. Kodunuzu okuyan, komutlar çalıştıran, dosyalarda arama yapan ve git'i yöneten hızlı bir Rust TUI. |
+| <img src="./docs/images/ecosystem/noema.png" alt="noema" width="40" /> **[noema](https://github.com/ZSeven-W/noema)** | Kodlama ajanları için yerel-öncelikli, vektör tabanlı olmayan bellek. Kalıcı bellek; incelenebilir dosyalar, bir inceleme kuyruğu ve embedding gerektirmeyen geri çağırmadan oluşur. |
+
 ## Başlayın
 
 Şimdilik kaynaktan derleyin; kararlı bir son kullanıcı indirmesi yok. Kaynağı elde
@@ -248,13 +264,3 @@ asla herkese açık şekilde paylaşmayın.
 
 Proje kodu [MIT](LICENSE) lisansı altında sunulur. Üçüncü taraf çalışma zamanları,
 Guest bileşenleri ve diğer bağımlılıklar kendi lisanslarını korur.
-
-## Ekosistem
-
-Aynı yerel-öncelikli, modelden bağımsız fikir üzerine kurulan kardeş projeler:
-
-- **[rish](https://github.com/ZSeven-W/rish)** — telefonda gerçek Docker. iOS ve Android'de Linux'u önyükleyip konteynerler çalıştıran, saf Rust ile yazılmış, JIT'siz x86-64 tam sistem yorumlayıcısı. Bu projenin Linux Guest'i oradan geliyor.
-- **[OpenPencil](https://github.com/ZSeven-W/openpencil)** — ilk açık kaynaklı, yapay zekâ odaklı vektör tasarım aracı ve eşzamanlı Ajan Takımları sunan ilk araç. Design-as-Code: istemleri canlı tuvalde arayüze dönüştürür.
-- **[Jian](https://github.com/ZSeven-W/jian)** — Rust tabanlı, platformlar arası bir arayüz çerçevesi. Bir .op dosyası bir uygulamadır.
-- **[Zode](https://github.com/ZSeven-W/zode)** — terminaliniz için yapay zekâ odaklı bir kodlama CLI'sı. Mikro çekirdek ve eklentiler, çok sağlayıcılı destek, tam ekran TUI.
-- **[Noema](https://github.com/ZSeven-W/noema)** — kodlama ajanları için, vektör deposu olmadan, inceleme kuyrukları ve MCP barındıran yerel-öncelikli bellek.

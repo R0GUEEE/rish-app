@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="./brand/rish-banner.jpg" alt="Rish — agent trong túi của bạn. Thực thi cục bộ. Tự do chọn mô hình. DSH / Claude Code / Codex / GLM" width="100%" />
+  <img src="./brand/rish-readme-icon.svg" alt="Rish" width="96" />
 </p>
 
 <h1 align="center">Rish, agent trong túi của bạn.</h1>
@@ -26,6 +26,10 @@
   <a href="#hệ-sinh-thái">Hệ sinh thái</a> ·
   <a href="./docs/development.md">Hướng dẫn nhà phát triển</a> ·
   <a href="./LICENSE">Giấy phép MIT</a>
+</p>
+
+<p align="center">
+  <img src="./brand/rish-banner.jpg" alt="Rish — agent trong túi của bạn. Thực thi cục bộ. Tự do chọn mô hình. DSH / Claude Code / Codex / GLM" width="100%" />
 </p>
 
 Rish mang các cuộc hội thoại Agent, không gian làm việc và việc thực thi công cụ
@@ -100,8 +104,8 @@ mô hình. Nhấp vào ảnh chụp màn hình để mở bản gốc.
 <table>
 <tr>
 <td width="50%" valign="top" align="center">
-  <a href="./docs/images/agent-workflow-ios.png"><img src="./docs/images/agent-workflow-ios.png" alt="Cuộc hội thoại thực tế trên Rish iOS Simulator thể hiện tiến độ, một lệnh gọi công cụ list_dir và câu trả lời cuối cùng" width="280" /></a><br />
-  <sub><b>Cuộc hội thoại Agent</b> — Theo dõi tiến độ, công cụ và kết quả. Nội dung hiển thị vẫn còn sau khi ứng dụng khởi động lại.</sub>
+  <a href="./docs/images/agent-workflow-ios.png"><img src="./docs/images/agent-workflow-ios.png" alt="Rish trên iPhone hiển thị hai lệnh gọi công cụ thành công và phần tóm tắt giải thích rằng một đường dẫn tuyệt đối đã bị từ chối" width="280" /></a><br />
+  <sub><b>Cuộc hội thoại Agent</b> — Theo dõi tiến độ, các lệnh gọi công cụ và kết quả trên điện thoại. Một đường dẫn nằm ngoài không gian làm việc bị từ chối, và mô hình tự sửa lỗi ở lượt tiếp theo.</sub>
 </td>
 <td width="50%" valign="top" align="center">
   <a href="./docs/images/project-changes-ios.png"><img src="./docs/images/project-changes-ios.png" alt="Rish iOS Simulator hiển thị các tệp chưa staged và thống kê thay đổi" width="280" /></a><br />
@@ -209,6 +213,18 @@ phân biệt rõ các khả năng đã xác minh và các hướng thử nghiệ
 | Claude Code | Bộ điều hợp API với cấu hình dịch vụ tương thích; các cuộc gọi văn bản bằng gói đăng ký đã được xác minh trong bản dựng iOS tùy chọn, với phạm vi và độ trễ như đã nêu ở trên. |
 | Dịch vụ tùy chỉnh | Trên iOS, chọn Messages, Responses hoặc Chat Completions và cấu hình ánh xạ mô hình. |
 
+## Hệ sinh thái
+
+Rish là một phần trong dòng công cụ ưu tiên cục bộ và AI-native đến từ **[ZSeven-W](https://github.com/ZSeven-W)**. `rish` khởi động Linux Guest bên trong ứng dụng này; những công cụ còn lại mang cùng ý tưởng đó đến các bề mặt khác — terminal, canvas thiết kế, và bộ nhớ của agent.
+
+| Dự án | Đây là gì |
+| ------- | ---------- |
+| **[rish](https://github.com/ZSeven-W/rish)** | Docker thật trên điện thoại: một trình thông dịch toàn hệ thống x86-64 không cần JIT viết thuần Rust, khởi động Linux và chạy container trên iOS và Android. Linux Guest của ứng dụng này đến từ đây. |
+| <img src="./docs/images/ecosystem/openpencil.png" alt="OpenPencil" width="40" /> **[OpenPencil](https://github.com/ZSeven-W/openpencil)** | Công cụ thiết kế vector AI-native mã nguồn mở đầu tiên, và là công cụ đầu tiên có các Agent Teams đồng thời. Design-as-Code — biến prompt thành UI trực tiếp trên canvas đang hoạt động. |
+| <img src="./docs/images/ecosystem/jian.png" alt="jian" width="40" /> **[jian](https://github.com/ZSeven-W/jian)** | Framework UI thuần Rust dùng GPU-Skia. Biến một tài liệu khai báo `.op` thành ứng dụng native — không JS runtime, không DOM, không Electron. |
+| <img src="./docs/images/ecosystem/zode.png" alt="Zode" width="40" /> **[Zode](https://github.com/ZSeven-W/zode)** | CLI lập trình AI-native cho terminal của bạn. Một TUI Rust nhanh, đọc mã của bạn, chạy lệnh, tìm kiếm tệp và quản lý git. |
+| <img src="./docs/images/ecosystem/noema.png" alt="noema" width="40" /> **[noema](https://github.com/ZSeven-W/noema)** | Bộ nhớ ưu tiên cục bộ, không dùng vector, dành cho các agent lập trình. Bộ nhớ bền vững dưới dạng các tệp có thể kiểm tra, hàng đợi xem xét, và khả năng truy hồi không cần embedding. |
+
 ## Bắt đầu
 
 Trước mắt hãy dựng từ mã nguồn; chưa có bản tải xuống ổn định cho người dùng
@@ -262,23 +278,3 @@ liệu nhạy cảm.
 
 Mã nguồn của dự án được cấp phép theo [MIT](LICENSE). Các runtime bên thứ ba,
 thành phần Guest và các phụ thuộc khác giữ giấy phép riêng của chúng.
-
-## Hệ sinh thái
-
-Các dự án anh em được xây dựng trên cùng ý tưởng ưu tiên cục bộ và không ràng
-buộc vào một mô hình nào:
-
-- **[rish](https://github.com/ZSeven-W/rish)** — Docker thật trên điện thoại.
-  Một trình thông dịch toàn hệ thống x86-64 không cần JIT viết thuần Rust, khởi
-  động Linux và chạy container trên iOS và Android. Linux Guest của dự án này
-  đến từ đó.
-- **[OpenPencil](https://github.com/ZSeven-W/openpencil)** — công cụ thiết kế
-  vector AI-native mã nguồn mở đầu tiên, và là công cụ đầu tiên có các Agent
-  Teams đồng thời. Design-as-Code, biến prompt thành UI trực tiếp trên canvas.
-- **[Jian](https://github.com/ZSeven-W/jian)** — một framework UI đa nền tảng
-  viết bằng Rust. Một tệp .op là một ứng dụng.
-- **[Zode](https://github.com/ZSeven-W/zode)** — một CLI lập trình AI-native
-  cho terminal của bạn. Microkernel cùng các plugin, đa nhà cung cấp, TUI toàn
-  màn hình.
-- **[Noema](https://github.com/ZSeven-W/noema)** — bộ nhớ ưu tiên cục bộ cho
-  các agent lập trình, không cần vector store, có hàng đợi xem xét và MCP.

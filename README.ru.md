@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="./brand/rish-banner.jpg" alt="Rish — ваш карманный агент. Локальное выполнение. Свобода выбора модели. DSH / Claude Code / Codex / GLM" width="100%" />
+  <img src="./brand/rish-readme-icon.svg" alt="Rish" width="96" />
 </p>
 
 <h1 align="center">Rish — ваш карманный агент.</h1>
@@ -26,6 +26,10 @@
   <a href="#экосистема">Экосистема</a> ·
   <a href="./docs/development.md">Руководство для разработчиков</a> ·
   <a href="./LICENSE">Лицензия MIT</a>
+</p>
+
+<p align="center">
+  <img src="./brand/rish-banner.jpg" alt="Rish — ваш карманный агент. Локальное выполнение. Свобода выбора модели. DSH / Claude Code / Codex / GLM" width="100%" />
 </p>
 
 Rish открывает диалоги с агентом, рабочие пространства и выполнение
@@ -105,8 +109,8 @@ Rish открывает диалоги с агентом, рабочие про�
 <table>
 <tr>
 <td width="50%" valign="top" align="center">
-  <a href="./docs/images/agent-workflow-ios.png"><img src="./docs/images/agent-workflow-ios.png" alt="Реальный диалог Rish в iOS Simulator: ход выполнения, вызов инструмента list_dir и итоговый ответ" width="280" /></a><br />
-  <sub><b>Диалог с агентом</b> — Отслеживайте ход выполнения, инструменты и результаты. Показанный текст сохраняется после перезапуска приложения.</sub>
+  <a href="./docs/images/agent-workflow-ios.png"><img src="./docs/images/agent-workflow-ios.png" alt="Rish на iPhone: два успешных вызова инструментов и итоговое сообщение о том, что абсолютный путь был отклонён" width="280" /></a><br />
+  <sub><b>Диалог с агентом</b> — Отслеживайте на телефоне ход выполнения, вызовы инструментов и результаты. Путь вне рабочего пространства отклоняется, и модель исправляет себя в следующем раунде.</sub>
 </td>
 <td width="50%" valign="top" align="center">
   <a href="./docs/images/project-changes-ios.png"><img src="./docs/images/project-changes-ios.png" alt="Rish в iOS Simulator: непроиндексированные файлы и статистика изменений" width="280" /></a><br />
@@ -217,6 +221,18 @@ Rish объединяет нативные операции с файлами и
 | Claude Code | API-адаптер с настройкой совместимых сервисов; текстовые вызовы по подписке проверены в необязательной сборке для iOS — с охватом и задержкой, указанными выше. |
 | Пользовательские сервисы | На iOS выберите Messages, Responses или Chat Completions и настройте сопоставления моделей. |
 
+## Экосистема
+
+Rish входит в семейство ИИ-нативных инструментов с приоритетом локальной работы от **[ZSeven-W](https://github.com/ZSeven-W)**. `rish` загружает Linux Guest внутри этого приложения; остальные переносят ту же идею на другие поверхности — терминал, холст для дизайна и память агента.
+
+| Проект | Что это |
+| ------- | ---------- |
+| **[rish](https://github.com/ZSeven-W/rish)** | Настоящий Docker на телефоне: полносистемный интерпретатор x86-64 без JIT на чистом Rust, который загружает Linux и запускает контейнеры на iOS и Android. Linux Guest этого приложения родом отсюда. |
+| <img src="./docs/images/ecosystem/openpencil.png" alt="OpenPencil" width="40" /> **[OpenPencil](https://github.com/ZSeven-W/openpencil)** | Первый открытый ИИ-нативный инструмент векторного дизайна и первый с параллельными Agent Teams. Design-as-Code — превращайте промпты в интерфейс прямо на живом холсте. |
+| <img src="./docs/images/ecosystem/jian.png" alt="jian" width="40" /> **[jian](https://github.com/ZSeven-W/jian)** | UI-фреймворк на чистом Rust с GPU-Skia. Превращает декларативный документ `.op` в нативное приложение — без JS-рантайма, без DOM, без Electron. |
+| <img src="./docs/images/ecosystem/zode.png" alt="Zode" width="40" /> **[Zode](https://github.com/ZSeven-W/zode)** | ИИ-нативная CLI для программирования в вашем терминале. Быстрый TUI на Rust, который читает ваш код, выполняет команды, ищет файлы и управляет git. |
+| <img src="./docs/images/ecosystem/noema.png" alt="noema" width="40" /> **[noema](https://github.com/ZSeven-W/noema)** | Память для кодинг-агентов с приоритетом локальной работы, без векторного хранилища. Долговечная память в виде просматриваемых файлов, очередь проверки и поиск без эмбеддингов. |
+
 ## Начало работы
 
 Пока что приложение собирается из исходного кода; стабильной версии для
@@ -274,14 +290,3 @@ Claude Code требуется необязательная эксперимен
 
 Код проекта распространяется по лицензии [MIT](LICENSE). Сторонние рантаймы,
 компоненты Guest и другие зависимости сохраняют собственные лицензии.
-
-## Экосистема
-
-Смежные проекты, построенные на той же идее — локальность прежде всего и
-свобода выбора модели:
-
-- **[rish](https://github.com/ZSeven-W/rish)** — настоящий Docker на телефоне. Полносистемный интерпретатор x86-64 без JIT на чистом Rust, который загружает Linux и запускает контейнеры на iOS и Android. Linux Guest этого проекта родом оттуда.
-- **[OpenPencil](https://github.com/ZSeven-W/openpencil)** — первый открытый ИИ-нативный инструмент векторного дизайна и первый с параллельными командами агентов (Agent Teams). Design-as-Code: превращение промптов в интерфейс прямо на живом холсте.
-- **[Jian](https://github.com/ZSeven-W/jian)** — кроссплатформенный UI-фреймворк на Rust. Файл .op — это приложение.
-- **[Zode](https://github.com/ZSeven-W/zode)** — ИИ-нативная CLI для программирования в вашем терминале. Микроядро плюс плагины, несколько провайдеров, полноэкранный TUI.
-- **[Noema](https://github.com/ZSeven-W/noema)** — локальная память для кодинг-агентов без векторного хранилища, с очередями проверки и MCP.

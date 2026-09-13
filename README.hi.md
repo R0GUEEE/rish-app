@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="./brand/rish-banner.jpg" alt="Rish — आपका पॉकेट एजेंट। लोकल निष्पादन। मॉडल की आज़ादी। DSH / Claude Code / Codex / GLM" width="100%" />
+  <img src="./brand/rish-readme-icon.svg" alt="Rish" width="96" />
 </p>
 
 <h1 align="center">Rish, आपका पॉकेट एजेंट।</h1>
@@ -26,6 +26,10 @@
   <a href="#इकोसिस्टम">इकोसिस्टम</a> ·
   <a href="./docs/development.md">डेवलपर गाइड</a> ·
   <a href="./LICENSE">MIT लाइसेंस</a>
+</p>
+
+<p align="center">
+  <img src="./brand/rish-banner.jpg" alt="Rish — आपका पॉकेट एजेंट। लोकल निष्पादन। मॉडल की आज़ादी। DSH / Claude Code / Codex / GLM" width="100%" />
 </p>
 
 Rish एजेंट बातचीत, वर्कस्पेस और टूल निष्पादन आपके फ़ोन तक लाता है।
@@ -92,8 +96,8 @@ Rish एजेंट बातचीत, वर्कस्पेस और ट�
 <table>
 <tr>
 <td width="50%" valign="top" align="center">
-  <a href="./docs/images/agent-workflow-ios.png"><img src="./docs/images/agent-workflow-ios.png" alt="वास्तविक Rish iOS Simulator बातचीत जिसमें प्रगति, एक list_dir टूल कॉल और अंतिम उत्तर दिखाया गया है" width="280" /></a><br />
-  <sub><b>एजेंट बातचीत</b> — प्रगति, टूल और परिणाम देखते चलें। दिखाया गया टेक्स्ट ऐप रीस्टार्ट के बाद भी बना रहता है।</sub>
+  <a href="./docs/images/agent-workflow-ios.png"><img src="./docs/images/agent-workflow-ios.png" alt="iPhone पर Rish, जिसमें दो सफल टूल कॉल और एक ऐसा सारांश दिखाया गया है जो बताता है कि एक एब्सोल्यूट पाथ अस्वीकार कर दिया गया था" width="280" /></a><br />
+  <sub><b>एजेंट बातचीत</b> — फ़ोन पर प्रगति, टूल कॉल और परिणाम देखते चलें। वर्कस्पेस के बाहर का पाथ अस्वीकार कर दिया जाता है, और मॉडल अगले राउंड में अपनी गलती सुधार लेता है।</sub>
 </td>
 <td width="50%" valign="top" align="center">
   <a href="./docs/images/project-changes-ios.png"><img src="./docs/images/project-changes-ios.png" alt="Rish iOS Simulator जिसमें अनस्टेज्ड फ़ाइलें और बदलाव आँकड़े दिखाए जा रहे हैं" width="280" /></a><br />
@@ -196,6 +200,18 @@ Rish नेटिव फ़ाइल/Git संक्रियाओं, Rish �
 | Claude Code | संगत-सेवा कॉन्फ़िगरेशन वाला API अडैप्टर; सब्सक्रिप्शन टेक्स्ट कॉल वैकल्पिक iOS बिल्ड में सत्यापित हैं, जिनका दायरा और विलंबता ऊपर बताई गई है। |
 | कस्टम सेवाएँ | iOS पर Messages, Responses या Chat Completions चुनें और मॉडल मैपिंग कॉन्फ़िगर करें। |
 
+## इकोसिस्टम
+
+Rish **[ZSeven-W](https://github.com/ZSeven-W)** के लोकल-प्रथम, AI-नेटिव टूल्स के परिवार का हिस्सा है। `rish` इस ऐप के भीतर Linux गेस्ट को बूट करता है; बाक़ी यही विचार दूसरी सतहों पर ले जाते हैं — टर्मिनल, डिज़ाइन कैनवास और एक एजेंट की मेमोरी।
+
+| प्रोजेक्ट | यह क्या है |
+| ------- | ---------- |
+| **[rish](https://github.com/ZSeven-W/rish)** | फ़ोन पर असली Docker: शुद्ध Rust में लिखा no-JIT x86-64 फुल-सिस्टम इंटरप्रेटर, जो Linux बूट करता है और iOS तथा Android पर कंटेनर चलाता है। इस ऐप का Linux Guest यहीं से आया है। |
+| <img src="./docs/images/ecosystem/openpencil.png" alt="OpenPencil" width="40" /> **[OpenPencil](https://github.com/ZSeven-W/openpencil)** | पहला ओपन-सोर्स AI-नेटिव वेक्टर डिज़ाइन टूल, और समवर्ती Agent Teams वाला पहला टूल। Design-as-Code — प्रॉम्प्ट को लाइव कैनवास पर सीधे UI में बदलें। |
+| <img src="./docs/images/ecosystem/jian.png" alt="jian" width="40" /> **[jian](https://github.com/ZSeven-W/jian)** | शुद्ध-Rust, GPU-Skia UI फ़्रेमवर्क। एक डिक्लेरेटिव `.op` डॉक्यूमेंट को नेटिव ऐप में बदलता है — कोई JS रनटाइम नहीं, कोई DOM नहीं, कोई Electron नहीं। |
+| <img src="./docs/images/ecosystem/zode.png" alt="Zode" width="40" /> **[Zode](https://github.com/ZSeven-W/zode)** | आपके टर्मिनल के लिए AI-नेटिव कोडिंग CLI। एक तेज़ Rust TUI जो आपका कोड पढ़ता है, कमांड चलाता है, फ़ाइलें खोजता है और git संभालता है। |
+| <img src="./docs/images/ecosystem/noema.png" alt="noema" width="40" /> **[noema](https://github.com/ZSeven-W/noema)** | कोडिंग एजेंटों के लिए लोकल-प्रथम, नॉन-वेक्टर मेमोरी। निरीक्षण योग्य फ़ाइलों, एक रिव्यू कतार और एम्बेडिंग-रहित रिकॉल के रूप में टिकाऊ मेमोरी। |
+
 ## शुरू करें
 
 फ़िलहाल सोर्स से बिल्ड करें; कोई स्थिर एंड-यूज़र डाउनलोड नहीं है। सोर्स मिल जाने पर,
@@ -245,13 +261,3 @@ Harness संगतता, Android लोकल निष्पादन और
 
 प्रोजेक्ट कोड [MIT](LICENSE) लाइसेंस के अंतर्गत आता है। थर्ड-पार्टी रनटाइम, Guest
 घटक और अन्य डिपेंडेंसीज़ अपने-अपने लाइसेंस रखती हैं।
-
-## इकोसिस्टम
-
-उसी लोकल-प्रथम, मॉडल-मुक्त विचार पर बने सहोदर प्रोजेक्ट:
-
-- **[rish](https://github.com/ZSeven-W/rish)** — फ़ोन पर असली Docker। शुद्ध Rust में लिखा no-JIT x86-64 फुल-सिस्टम इंटरप्रेटर, जो Linux बूट करता है और iOS तथा Android पर कंटेनर चलाता है। इस प्रोजेक्ट का Linux Guest वहीं से आया है।
-- **[OpenPencil](https://github.com/ZSeven-W/openpencil)** — पहला ओपन-सोर्स AI-नेटिव वेक्टर डिज़ाइन टूल, और समवर्ती एजेंट टीमों वाला पहला टूल। Design-as-Code — प्रॉम्प्ट को लाइव कैनवास पर UI में बदलना।
-- **[Jian](https://github.com/ZSeven-W/jian)** — Rust-नेटिव क्रॉस-प्लेटफ़ॉर्म UI फ़्रेमवर्क। एक .op फ़ाइल ही एक ऐप है।
-- **[Zode](https://github.com/ZSeven-W/zode)** — आपके टर्मिनल के लिए AI-नेटिव कोडिंग CLI। माइक्रोकर्नल और प्लगइन्स, मल्टी-प्रोवाइडर, फुल-स्क्रीन TUI।
-- **[Noema](https://github.com/ZSeven-W/noema)** — कोडिंग एजेंटों के लिए लोकल-प्रथम मेमोरी, बिना वेक्टर स्टोर, रिव्यू कतारों और MCP के साथ।

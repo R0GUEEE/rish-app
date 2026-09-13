@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="./brand/rish-banner.jpg" alt="Rish — 你的隨身 Agent。本機執行。模型自由。DSH / Claude Code / Codex / GLM" width="100%" />
+  <img src="./brand/rish-readme-icon.svg" alt="Rish" width="96" />
 </p>
 
 <h1 align="center">Rish，你的隨身 Agent。</h1>
@@ -26,6 +26,10 @@
   <a href="#生態系">生態系</a> ·
   <a href="./docs/development.md">開發指南</a> ·
   <a href="./LICENSE">MIT License</a>
+</p>
+
+<p align="center">
+  <img src="./brand/rish-banner.jpg" alt="Rish — 你的隨身 Agent。本機執行。模型自由。DSH / Claude Code / Codex / GLM" width="100%" />
 </p>
 
 Rish 把 Agent 對話、工作區與工具執行帶到你的手機上。選擇模型、描述任務、檢視工作過程並核准變更，不必一直開著電腦。寫程式只是用途之一，並非唯一目的。
@@ -78,8 +82,8 @@ Rish 把 Agent 對話、工作區與工具執行帶到你的手機上。選擇�
 <table>
 <tr>
 <td width="50%" valign="top" align="center">
-  <a href="./docs/images/agent-workflow-ios.png"><img src="./docs/images/agent-workflow-ios.png" alt="Rish iOS 模擬器實際對話，顯示進度、list_dir 工具呼叫與最終回答" width="280" /></a><br />
-  <sub><b>Agent 對話</b> — 掌握進度、工具與結果。圖中文字在 App 重新啟動後仍會保留。</sub>
+  <a href="./docs/images/agent-workflow-ios.png"><img src="./docs/images/agent-workflow-ios.png" alt="Rish 在 iPhone 上顯示兩次成功的工具呼叫，以及一段說明絕對路徑已遭拒絕的摘要" width="280" /></a><br />
+  <sub><b>Agent 對話</b> — 在手機上掌握進度、工具呼叫與結果。工作區外的路徑會遭到拒絕，模型會在下一輪自行修正。</sub>
 </td>
 <td width="50%" valign="top" align="center">
   <a href="./docs/images/project-changes-ios.png"><img src="./docs/images/project-changes-ios.png" alt="Rish iOS 模擬器顯示未暫存檔案與變更統計" width="280" /></a><br />
@@ -171,6 +175,18 @@ Rish 結合原生檔案/Git 操作、Rish 執行環境與實驗性的 Linux Gues
 | Claude Code | API 轉接，可設定相容服務；訂閱文字呼叫已在選配的 iOS 建置中驗證，範圍與延遲如上方所述。 |
 | 自訂服務 | 在 iOS 上選擇 Messages、Responses 或 Chat Completions，並設定模型對應。 |
 
+## 生態系
+
+Rish 是 **[ZSeven-W](https://github.com/ZSeven-W)** 本機優先、AI 原生工具家族的一員。`rish` 負責在這個 App 裡啟動 Linux Guest；其他專案則把同樣的理念帶到其他場景 — 終端機、設計畫布，以及 Agent 的記憶。
+
+| 專案 | 簡介 |
+| ------- | ---------- |
+| **[rish](https://github.com/ZSeven-W/rish)** | 手機上的真 Docker：以純 Rust 實作、免 JIT 的 x86-64 全系統直譯器，可在 iOS 與 Android 上啟動 Linux 並執行容器。本 App 的 Linux Guest 即來自於此。 |
+| <img src="./docs/images/ecosystem/openpencil.png" alt="OpenPencil" width="40" /> **[OpenPencil](https://github.com/ZSeven-W/openpencil)** | 第一個開源的 AI 原生向量設計工具，也是第一個支援並行 Agent Teams 的設計工具。Design-as-Code — 在即時畫布上把提示詞直接化為 UI。 |
+| <img src="./docs/images/ecosystem/jian.png" alt="jian" width="40" /> **[jian](https://github.com/ZSeven-W/jian)** | 純 Rust、GPU-Skia 的 UI 框架。把宣告式 `.op` 文件變成原生應用程式 — 不需要 JS 執行環境、沒有 DOM、不用 Electron。 |
+| <img src="./docs/images/ecosystem/zode.png" alt="Zode" width="40" /> **[Zode](https://github.com/ZSeven-W/zode)** | 供終端機使用的 AI 原生程式設計 CLI。快速的 Rust TUI，可讀取你的程式碼、執行指令、搜尋檔案並管理 git。 |
+| <img src="./docs/images/ecosystem/noema.png" alt="noema" width="40" /> **[noema](https://github.com/ZSeven-W/noema)** | 為程式設計 Agent 打造的本機優先、非向量記憶。以可檢視的檔案、審查佇列與無需嵌入向量的召回，實現持久的記憶。 |
+
 ## 開始使用
 
 目前暫時需從原始碼建置，尚無提供給一般使用者的穩定下載版本。取得原始碼後，從儲存庫根目錄開始：
@@ -206,13 +222,3 @@ npm run ios --prefix apps/mobile
 - [第三方聲明與 Guest 來源](THIRD_PARTY_NOTICES.md)
 
 專案程式碼採用 [MIT](LICENSE) 授權。第三方執行環境、Guest 元件與其他相依套件保留各自的授權條款。
-
-## 生態系
-
-基於同樣本機優先、模型自由理念的同源專案：
-
-- **[rish](https://github.com/ZSeven-W/rish)** — 手機上的真 Docker。以純 Rust 實作、免 JIT 的 x86-64 全系統直譯器，可在 iOS 與 Android 上啟動 Linux 並執行容器。本專案的 Linux Guest 即來自該專案。
-- **[OpenPencil](https://github.com/ZSeven-W/openpencil)** — 第一個開源的 AI 原生向量設計工具，也是第一個支援並行 Agent 團隊的設計工具。Design-as-Code，在即時畫布上把提示詞化為 UI。
-- **[Jian](https://github.com/ZSeven-W/jian)** — Rust 原生的跨平台 UI 框架。一個 .op 檔案就是一個應用程式。
-- **[Zode](https://github.com/ZSeven-W/zode)** — 供終端機使用的 AI 原生程式設計 CLI。微核心加外掛架構，支援多供應商，全螢幕 TUI。
-- **[Noema](https://github.com/ZSeven-W/noema)** — 為程式設計 Agent 而生的本機優先記憶，不依賴向量儲存，具備審查佇列與 MCP。

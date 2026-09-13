@@ -1,16 +1,19 @@
 # README screenshots
 
-`agent-workflow-ios.png` is an unmodified 1206 × 2622 iOS Simulator capture
-from the dedicated Rish Demo Experiment on September 10, 2026.
+`agent-workflow-ios.png` is an unmodified 1206 x 2622 iPhone capture from the
+Rish Demo workspace on September 14, 2026, taken on a physical device rather
+than the Simulator.
 
-It shows an actual provider progress message, successful native `list_dir`,
-and the final response. The screenshot was taken after restarting Rish to
-verify that the intermediate text remained visible.
+It shows two successful native tool calls with their durations and the model's
+own summary of the round, including its explanation that an absolute path was
+refused because the tools accept only workspace-relative paths. The refusal is
+returned to the model as a failed tool result, which is why the same round
+continues with a relative path instead of ending the attempt.
 
-This records a read-only file inspection and conversation restoration, not a
-physical-device run, an active CGI server, or general desktop compatibility.
-The image contains demo project names only and no credentials, private URLs,
-or user documents.
+This records a read-only file inspection. It is not evidence of an active CGI
+server, a write or Git mutation, or general desktop compatibility. The image
+contains demo project names only and no credentials, private URLs, or user
+documents.
 
 `project-changes-ios.png` was captured directly from the dedicated Rish Demo
 Experiment Simulator on September 10, 2026. It shows the existing demo

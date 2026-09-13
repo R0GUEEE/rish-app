@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="./brand/rish-banner.jpg" alt="Rish — agen dalam saku Anda. Eksekusi lokal. Kebebasan memilih model. DSH / Claude Code / Codex / GLM" width="100%" />
+  <img src="./brand/rish-readme-icon.svg" alt="Rish" width="96" />
 </p>
 
 <h1 align="center">Rish, agen dalam saku Anda.</h1>
@@ -26,6 +26,10 @@
   <a href="#ekosistem">Ekosistem</a> ·
   <a href="./docs/development.md">Panduan pengembang</a> ·
   <a href="./LICENSE">Lisensi MIT</a>
+</p>
+
+<p align="center">
+  <img src="./brand/rish-banner.jpg" alt="Rish — agen dalam saku Anda. Eksekusi lokal. Kebebasan memilih model. DSH / Claude Code / Codex / GLM" width="100%" />
 </p>
 
 Rish menghadirkan percakapan Agent, ruang kerja, dan eksekusi alat ke ponsel Anda.
@@ -98,8 +102,8 @@ Klik tangkapan layar untuk membuka berkas aslinya.
 <table>
 <tr>
 <td width="50%" valign="top" align="center">
-  <a href="./docs/images/agent-workflow-ios.png"><img src="./docs/images/agent-workflow-ios.png" alt="Percakapan Rish iOS Simulator sungguhan yang memperlihatkan progres, panggilan alat list_dir, dan jawaban akhirnya" width="280" /></a><br />
-  <sub><b>Percakapan Agent</b> — Ikuti progres, alat, dan hasil. Teks yang ditampilkan tetap ada setelah aplikasi direstart.</sub>
+  <a href="./docs/images/agent-workflow-ios.png"><img src="./docs/images/agent-workflow-ios.png" alt="Rish di sebuah iPhone yang memperlihatkan dua panggilan alat yang berhasil dan sebuah ringkasan yang menjelaskan bahwa path absolut ditolak" width="280" /></a><br />
+  <sub><b>Percakapan Agent</b> — Ikuti progres, panggilan alat, dan hasilnya di ponsel. Path di luar ruang kerja ditolak, dan model memperbaiki dirinya pada putaran berikutnya.</sub>
 </td>
 <td width="50%" valign="top" align="center">
   <a href="./docs/images/project-changes-ios.png"><img src="./docs/images/project-changes-ios.png" alt="Rish iOS Simulator yang memperlihatkan berkas yang belum di-stage dan statistik perubahan" width="280" /></a><br />
@@ -208,6 +212,18 @@ memisahkan kemampuan yang terverifikasi dari jalur eksperimental.
 | Claude Code | Adapter API dengan konfigurasi layanan yang kompatibel; panggilan teks berlangganan terverifikasi di build iOS opsional, dengan cakupan dan latensi yang disebutkan di atas. |
 | Layanan kustom | Di iOS, pilih Messages, Responses, atau Chat Completions dan konfigurasikan pemetaan model. |
 
+## Ekosistem
+
+Rish adalah bagian dari sebuah keluarga alat lokal-dahulu dan AI-native dari **[ZSeven-W](https://github.com/ZSeven-W)**. `rish` mem-boot Linux Guest di dalam aplikasi ini; yang lainnya membawa ide yang sama ke permukaan lain — terminal, kanvas desain, dan memori agen.
+
+| Proyek | Apa itu |
+| ------- | ---------- |
+| **[rish](https://github.com/ZSeven-W/rish)** | Docker sungguhan di ponsel: interpreter full-system x86-64 tanpa JIT dalam Rust murni yang mem-boot Linux dan menjalankan kontainer di iOS dan Android. Linux Guest aplikasi ini berasal dari sana. |
+| <img src="./docs/images/ecosystem/openpencil.png" alt="OpenPencil" width="40" /> **[OpenPencil](https://github.com/ZSeven-W/openpencil)** | Alat desain vektor AI-native sumber terbuka pertama, dan yang pertama dengan Agent Teams bersamaan. Design-as-Code — mengubah prompt menjadi UI secara langsung di kanvas yang aktif. |
+| <img src="./docs/images/ecosystem/jian.png" alt="jian" width="40" /> **[jian](https://github.com/ZSeven-W/jian)** | Kerangka kerja UI Rust murni dengan GPU-Skia. Mengubah dokumen `.op` deklaratif menjadi aplikasi native — tanpa runtime JS, tanpa DOM, tanpa Electron. |
+| <img src="./docs/images/ecosystem/zode.png" alt="Zode" width="40" /> **[Zode](https://github.com/ZSeven-W/zode)** | CLI pemrograman AI-native untuk terminal Anda. Sebuah TUI Rust cepat yang membaca kode Anda, menjalankan perintah, mencari berkas, dan mengelola git. |
+| <img src="./docs/images/ecosystem/noema.png" alt="noema" width="40" /> **[noema](https://github.com/ZSeven-W/noema)** | Memori lokal-dahulu non-vektor untuk agen pemrograman. Memori tahan lama berupa berkas yang dapat diperiksa, antrean tinjauan, dan pengambilan tanpa embedding. |
+
 ## Memulai
 
 Untuk saat ini bangun dari sumber; belum ada unduhan stabil untuk pengguna
@@ -262,14 +278,3 @@ sensitif secara publik.
 
 Kode proyek dilisensikan di bawah [MIT](LICENSE). Runtime pihak ketiga,
 komponen Guest, dan dependensi lainnya tetap memakai lisensi masing-masing.
-
-## Ekosistem
-
-Proyek-proyek serumpun yang dibangun di atas ide lokal-dahulu dan bebas
-memilih model yang sama:
-
-- **[rish](https://github.com/ZSeven-W/rish)** — Docker sungguhan di ponsel. Sebuah interpreter full-system x86-64 tanpa JIT dalam Rust murni yang mem-boot Linux dan menjalankan kontainer di iOS dan Android. Linux Guest proyek ini berasal dari sana.
-- **[OpenPencil](https://github.com/ZSeven-W/openpencil)** — alat desain vektor AI-native sumber terbuka pertama, dan yang pertama dengan Agent Teams bersamaan. Design-as-Code, mengubah prompt menjadi UI di kanvas langsung.
-- **[Jian](https://github.com/ZSeven-W/jian)** — kerangka kerja UI lintas platform yang Rust-native. Sebuah berkas .op adalah sebuah aplikasi.
-- **[Zode](https://github.com/ZSeven-W/zode)** — CLI pemrograman AI-native untuk terminal Anda. Mikrokernel plus plugin, multi-penyedia, TUI layar penuh.
-- **[Noema](https://github.com/ZSeven-W/noema)** — memori lokal-dahulu untuk agen pemrograman, tanpa penyimpanan vektor, dengan antrean tinjauan dan MCP.
