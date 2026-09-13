@@ -9,7 +9,7 @@ import org.json.JSONObject
 internal object AndroidDshModelCatalog {
     private var preferences: SharedPreferences? = null
     private val defaults get() = JSONArray()
-        .put(entry("deepseek-v4-flash", "V4 Flash", false))
+        .put(entry("deepseek-v4-flash", "V4 Flash", true))
         .put(entry("deepseek-v4-pro", "V4 Pro", false))
         .put(entry("deepseek-v4-flash-vision-exp", "Flash Exp", true))
     private fun entry(id: String, name: String, images: Boolean) =

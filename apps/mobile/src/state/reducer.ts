@@ -71,6 +71,7 @@ import {
   type AgentAttemptPhase,
 } from './types';
 import {
+  harnessForModel,
   isHarnessId,
   isProviderId,
   providerForModel,
@@ -6823,8 +6824,9 @@ export function chatReducer(state: ChatState, action: ChatAction): ChatState {
         !hasSameStrings(attempt.visibleMessageIds, source.visibleMessageIds) ||
         attempt.visibleHistorySha256 !== source.visibleHistorySha256 ||
         !hasSameStrings(attempt.attachmentIds, source.attachmentIds) ||
-        attempt.modelId !== source.modelId ||
-        attempt.thinkingMode !== source.thinkingMode ||
+        attempt.modelId !== conversation.modelId ||
+        attempt.thinkingMode !== conversation.thinkingMode ||
+        attempt.harnessId !== harnessForModel(conversation.modelId) ||
         attempt.contextDisposition !== source.contextDisposition ||
         attempt.contextProjectId !== source.contextProjectId ||
         attempt.workspaceId !== source.workspaceId ||

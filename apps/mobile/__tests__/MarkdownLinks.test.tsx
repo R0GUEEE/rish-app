@@ -1,6 +1,6 @@
 /* eslint-disable no-script-url -- unsafe target regression */
 import React from 'react';
-import { Alert, Linking, Text } from 'react-native';
+import { Alert, Linking, NativeModules, Text } from 'react-native';
 import ReactTestRenderer, { act } from 'react-test-renderer';
 import { MarkdownText } from '../src/components/MarkdownText';
 import {
@@ -10,7 +10,15 @@ import {
   tokenizePlainLinks,
 } from '../src/markdown/inline';
 
-afterEach(() => jest.restoreAllMocks());
+const originalRuntime = NativeModules.LocalRuntime;
+beforeEach(() => {
+  jest.clearAllMocks();
+  NativeModules.LocalRuntime = undefined;
+});
+afterEach(() => {
+  NativeModules.LocalRuntime = originalRuntime;
+  jest.restoreAllMocks();
+});
 async function renderLink(markdown: string) {
   let renderer!: ReactTestRenderer.ReactTestRenderer;
   await act(async () => {
@@ -41,6 +49,50 @@ test('failed native opening produces a visible alert', async () => {
     'Please check the address and try again.',
   );
 });
+test.each([
+  'http://localhost:8000/index.html',
+  'http://127.0.0.1:65016/index.html?mode=preview#checklist',
+  'https://example.com/a-long-path/page.html',
+])('opens the complete web URL %s inside the iOS app only when pressed', async target => {
+  const open = jest.fn().mockResolvedValue({ schema_version: 1, status: 'opened' });
+  NativeModules.LocalRuntime = { openConversationURL: open };
+  const external = jest.spyOn(Linking, 'openURL');
+  const link = await renderLink('[打开页面](' + target + ')');
+  expect(link).toBeDefined();
+  expect(open).not.toHaveBeenCalled();
+  await act(async () => { await link.props.onPress(); });
+  expect(open).toHaveBeenCalledTimes(1);
+  expect(open).toHaveBeenCalledWith({ schema_version: 1, url: target });
+  expect(external).not.toHaveBeenCalled();
+});
+test.each([
+  '`http://localhost:8000/index.html`',
+  '`https://example.com`',
+  '`curl https://example.com`',
+  '`javascript:alert(1)`',
+  '`file:///tmp/index.html`',
+  '`https://user:password@example.com`',
+  '```sh\nhttps://example.com\n```',
+])('keeps inline code and fenced code noninteractive: %s', async markdown => {
+  expect(await renderLink(markdown)).toBeUndefined();
+});
+test('reports an in-app browser presentation failure without silently opening another app', async () => {
+  NativeModules.LocalRuntime = { openConversationURL: jest.fn().mockRejectedValue(new Error('busy')) };
+  const external = jest.spyOn(Linking, 'openURL');
+  const alert = jest.spyOn(Alert, 'alert').mockImplementation(() => {});
+  const link = await renderLink('[preview](http://localhost:8000/index.html)');
+  await act(async () => { await link.props.onPress(); });
+  expect(external).not.toHaveBeenCalled();
+  expect(alert).toHaveBeenCalledWith('Unable to open link', 'Please check the address and try again.');
+});
+test('an explicit link owns a nested code label without a second URL action', async () => {
+  const open = jest.spyOn(Linking, 'openURL').mockResolvedValue(undefined);
+  const link = await renderLink('[**`https://label.example`**](https://destination.example)');
+  const actions = link.findAllByType(Text).filter(node => node.props.onPress !== undefined);
+  expect(actions).toHaveLength(1);
+  await act(async () => { await link.props.onPress(); });
+  expect(open).toHaveBeenCalledWith('https://destination.example');
+});
 test('plain user messages keep punctuation and code literal', () => {
   const input = '**visit** https://example.com, `https://code.example`';
   const tokens = tokenizePlainLinks(input);
@@ -68,7 +120,7 @@ test('punctuation, balanced parentheses, autolinks and nested strong labels', ()
     children: [{ type: 'strong', children: [{ type: 'text', value: 'docs' }] }],
   });
 });
-test('code and unsafe schemes are not actionable', () => {
+test('code retains literal tokens and unsafe schemes are not parsed as links', () => {
   expect(
     tokenizeInline(
       '`https://example.com` [bad](javascript:evil) [bad](file:///tmp/x)',

@@ -83,7 +83,7 @@ export function ConversationOptionsPicker({
             style={styles.popover}
             testID="conversation-options-popover"
           >
-            <ScrollView style={{height: Math.min(height * 0.72, (modelsProp ?? ALL_MODELS).length * 80 + 280)}} keyboardShouldPersistTaps="handled">
+            <ScrollView style={{maxHeight: height * 0.72, flexGrow: 0}} keyboardShouldPersistTaps="handled">
             <Text style={styles.eyebrow}>{t('model.eyebrow')}</Text>
             <View
               accessibilityLabel={t('model.title')}
@@ -117,9 +117,6 @@ export function ConversationOptionsPicker({
                     </View>
                     <View style={styles.optionCopy}>
                       <Text style={styles.optionTitle}>{details.name}</Text>
-                      <Text numberOfLines={2} style={styles.optionBody}>
-                        {details.description}
-                      </Text>
                     </View>
                   </Pressable>
                 );
@@ -159,9 +156,6 @@ export function ConversationOptionsPicker({
                     </View>
                     <View style={styles.optionCopy}>
                       <Text style={styles.optionTitle}>{details.name}</Text>
-                      <Text numberOfLines={2} style={styles.optionBody}>
-                        {details.description}
-                      </Text>
                     </View>
                   </Pressable>
                 );
@@ -229,7 +223,7 @@ const createStyles = (colors: ThemePalette) =>
       marginBottom: 3,
     },
     option: {
-      minHeight: 60,
+      minHeight: 44,
       paddingHorizontal: 15,
       paddingVertical: 9,
       flexDirection: 'row',
@@ -244,12 +238,6 @@ const createStyles = (colors: ThemePalette) =>
     },
     optionCopy: { flex: 1 },
     optionTitle: { color: colors.text, fontSize: 15, fontWeight: '700' },
-    optionBody: {
-      color: colors.muted,
-      fontSize: 11,
-      lineHeight: 15,
-      marginTop: 2,
-    },
     check: {
       width: 22,
       alignItems: 'flex-start',

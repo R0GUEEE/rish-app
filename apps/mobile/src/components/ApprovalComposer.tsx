@@ -56,8 +56,12 @@ function toolSummaryKey(name: string): string {
       return 'agent.tool.git_commit';
     case 'git_push':
       return 'agent.tool.git_push';
+    case 'start_guest_cgi':
+      return 'agent.tool.start_guest_cgi';
+    case 'stop_guest_cgi':
+      return 'agent.tool.stop_guest_cgi';
     default:
-      return 'agent.tool.read_file';
+      return 'agent.tool.unknown';
   }
 }
 

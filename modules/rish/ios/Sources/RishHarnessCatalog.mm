@@ -199,7 +199,7 @@ NSString *DSHCredentialAccountForHarnessId(id harnessId) {
 
 static NSArray *DSHDshDefaultModels(void) {
   return @[
-    @{@"id": @"deepseek-v4-flash", @"name": @"V4 Flash", @"supports_images": @NO},
+    @{@"id": @"deepseek-v4-flash", @"name": @"V4 Flash", @"supports_images": @YES},
     @{@"id": @"deepseek-v4-pro", @"name": @"V4 Pro", @"supports_images": @NO},
     @{@"id": @"deepseek-v4-flash-vision-exp", @"name": @"Flash Exp", @"supports_images": @YES},
   ];

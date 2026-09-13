@@ -3,6 +3,7 @@ import { NativeModules } from 'react-native';
 import { act, create, type ReactTestRenderer } from 'react-test-renderer';
 import {
   DEFAULT_DSH_MODELS,
+  dshModelSupportsImages,
   getDshCatalog,
   installDshCatalog,
   validateDshModels,
@@ -134,4 +135,11 @@ test('editor saves additions through native catalog and refreshes the picker cat
     if (renderer) await act(async () => renderer.unmount());
     NativeModules.LocalRuntime = previous;
   }
+});
+
+test('default Flash accepts images while Pro remains text only and saved overrides win', () => {
+  expect(dshModelSupportsImages('deepseek-v4-flash')).toBe(true);
+  expect(dshModelSupportsImages('deepseek-v4-pro')).toBe(false);
+  installDshCatalog({schema_version: 1, models: defaults().map(row => row.id === 'deepseek-v4-flash' ? {...row, supports_images: false} : row), retired_models: []});
+  expect(dshModelSupportsImages('deepseek-v4-flash')).toBe(false);
 });

@@ -10,7 +10,7 @@ export type DshCatalog = {
   retired_models: DshModelEntry[];
 };
 export const DEFAULT_DSH_MODELS: readonly DshModelEntry[] = [
-  { id: 'deepseek-v4-flash', name: 'V4 Flash', supports_images: false },
+  { id: 'deepseek-v4-flash', name: 'V4 Flash', supports_images: true },
   { id: 'deepseek-v4-pro', name: 'V4 Pro', supports_images: false },
   {
     id: 'deepseek-v4-flash-vision-exp',

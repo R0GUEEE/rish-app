@@ -216,7 +216,7 @@ export function ModelPicker({
             ]}
             testID="model-picker-popover"
           >
-            <ScrollView style={{height: Math.min(height * 0.72, models.length * 80)}} keyboardShouldPersistTaps="handled">
+            <ScrollView style={{maxHeight: height * 0.72, flexGrow: 0}} keyboardShouldPersistTaps="handled">
             {models.map((model, index) => {
               const details = localizedModelDetails(model, t);
               const isSelected = model === selected;
@@ -246,9 +246,6 @@ export function ModelPicker({
                   </View>
                   <View style={styles.optionCopy}>
                     <Text style={styles.optionTitle}>{details.name}</Text>
-                    <Text numberOfLines={2} style={styles.optionBody}>
-                      {details.description}
-                    </Text>
                   </View>
                 </Pressable>
               );
@@ -301,9 +298,9 @@ const createStyles = (colors: ThemePalette) =>
     },
     settingsPopover: { width: 'auto' },
     option: {
-      minHeight: 66,
+      minHeight: 44,
       paddingHorizontal: 15,
-      paddingVertical: 11,
+      paddingVertical: 9,
       flexDirection: 'row',
       alignItems: 'center',
     },
@@ -319,12 +316,6 @@ const createStyles = (colors: ThemePalette) =>
       color: colors.text,
       fontSize: 15,
       fontWeight: '700',
-    },
-    optionBody: {
-      color: colors.muted,
-      fontSize: 11,
-      lineHeight: 15,
-      marginTop: 3,
     },
     check: {
       width: 22,

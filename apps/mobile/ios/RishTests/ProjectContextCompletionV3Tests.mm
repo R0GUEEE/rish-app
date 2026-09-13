@@ -551,7 +551,7 @@ static NSData *DSHV3RequestBody(NSURLRequest *request) {
   LocalRuntimeModule *module = [self moduleWithService:service
       attachmentResolver:resolver];
   NSMutableDictionary *envelope = [[self validSchema3Envelope] mutableCopy];
-  envelope[@"model"] = @"deepseek-v4-flash-vision-exp";
+  envelope[@"model"] = @"deepseek-v4-flash";
   envelope[@"visible_history"] = @[
     @{@"role": @"user", @"content": @"prompt-first",
       @"attachments": references},
@@ -565,7 +565,7 @@ static NSData *DSHV3RequestBody(NSURLRequest *request) {
     parts = body[@"messages"][2][@"content"];
     [self respondSuccessFromProtocol:protocol request:request
         body:[self providerSuccessForModel:
-            @"deepseek-v4-flash-vision-exp"]];
+            @"deepseek-v4-flash"]];
     [network fulfill];
   }];
   XCTestExpectation *resolved = [self expectationWithDescription:@"resolved"];

@@ -40,6 +40,8 @@ const POLICY_TOOLS = [
   'git_status',
   'git_commit',
   'git_push',
+  'start_guest_cgi',
+  'stop_guest_cgi',
 ] as const;
 
 type PolicyTool = (typeof POLICY_TOOLS)[number];
@@ -62,6 +64,8 @@ export function agentToolAccess(
     git_status: has('git_status') ? 'auto' : 'durable_deny',
     git_commit: has('git_commit') ? 'conversation_confirm' : 'durable_deny',
     git_push: has('git_push') ? 'confirm_once' : 'durable_deny',
+    start_guest_cgi: has('guest_service') ? 'conversation_confirm' : 'durable_deny',
+    stop_guest_cgi: has('guest_service') ? 'conversation_confirm' : 'durable_deny',
   };
 }
 
@@ -126,8 +130,12 @@ function toolKey(name: PolicyTool): string {
       return 'agent.tool.git_status';
     case 'git_commit':
       return 'agent.tool.git_commit';
-    default:
+    case 'git_push':
       return 'agent.tool.git_push';
+    case 'start_guest_cgi':
+      return 'agent.tool.start_guest_cgi';
+    case 'stop_guest_cgi':
+      return 'agent.tool.stop_guest_cgi';
   }
 }
 

@@ -1,3 +1,4 @@
+import { createPreferencesStore } from '../src/preferences';
 import {
   CHAT_STATE_SCHEMA_VERSION,
   ChatStateValidationError,
@@ -8441,10 +8442,13 @@ describe('schema v6 attempts and project context', () => {
     expect(
       resumed.getState().conversations[conversationId]?.attempts[1],
     ).toMatchObject({
-      modelId: 'deepseek-v4-flash',
-      thinkingMode: 'high',
+      modelId: 'deepseek-v4-pro',
+      thinkingMode: 'max',
       visibleHistorySha256: null,
       rounds: [],
+    });
+    expect(resumed.getState().conversations[conversationId]?.attempts[0]).toMatchObject({
+      modelId: 'deepseek-v4-flash', thinkingMode: 'high', failureCode: 'E_ATTEMPT_INTERRUPTED',
     });
   });
 
@@ -10926,4 +10930,52 @@ describe('schema v6 attempts and project context', () => {
     expect(store.setSessionAuthority(null)).toBe(true);
     expect(store.getSessionAuthority()).toBeNull();
   });
+});
+
+test('preference-only synchronization validates fields and preserves workspace transaction ownership', () => {
+  const store = createChatStore();
+  const conversationId = store.createConversation();
+  const original = store.getState().conversations[conversationId];
+  const binding = store.applyConversationWorkspaceBinding({
+    schema_version: 1,
+    owner: { conversation_id: conversationId, expected_conversation: original,
+      expected_project_context: original.projectContext,
+      expected_destructive_epoch: store.getState().projectContextDestructiveEpoch },
+    binding: { schema_version: 1, workspace_id: 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa', binding_revision: 1, project_id: null },
+  });
+  expect(binding).not.toBeNull();
+  const candidate = store.getState();
+  const authority = { generation: 3, sessionSha256: 'a'.repeat(64) };
+  store.setSessionAuthority(authority);
+  const preferences = createPreferencesStore();
+  preferences.setShowReasoning(true);
+  expect(store.setPreferences(preferences.serialize())).toBe(true);
+  expect(store.getState().conversations).toBe(candidate.conversations);
+  expect(store.getState().conversations[conversationId]).toBe(candidate.conversations[conversationId]);
+  expect(store.getSessionAuthority()).toEqual(authority);
+  expect(JSON.parse(store.serialize()).preferences.show_reasoning).toBe(true);
+  expect(binding!.commit()).toBe(true);
+  const after = store.getState();
+  expect(store.setPreferences({ schema_version: 999 })).toBe(false);
+  expect(store.getState()).toBe(after);
+});
+
+test('retry after model selection freezes the new selection and keeps the failed image source unchanged', () => {
+  const store = createChatStore();
+  const id = store.createConversation({ modelId: 'deepseek-v4-flash-vision-exp', thinkingMode: 'high' });
+  const image = { schema_version: 1 as const, id: 'retry-image', kind: 'image' as const, name: 'image.png', mime_type: 'image/png', size: 100 };
+  const first = store.prepareTurnAttempt(id, 'What is this?', { attachments: [image] })!;
+  expect(first.commit()).toBe(true);
+  expect(store.failAttempt(id, first.attemptId, 'E_COMPLETION_RESPONSE_MODEL')).toBe(true);
+  const failed = store.getState().conversations[id].attempts[0];
+  store.setModel(id, 'deepseek-v4-flash');
+  store.setThinkingMode(id, 'off');
+  const retry = store.retryAttempt(id, first.attemptId)!;
+  expect(retry).not.toBeNull();
+  const attempt = store.getState().conversations[id].attempts.at(-1)!;
+  expect(attempt).toMatchObject({ modelId: 'deepseek-v4-flash', thinkingMode: 'off', harnessId: 'dsh', attachmentIds: ['retry-image'] });
+  expect(attempt.visibleMessageIds).toEqual(failed.visibleMessageIds);
+  expect(store.getState().conversations[id].attempts[0]).toEqual(failed);
+  expect(retry.commit()).toBe(true);
+  expect(store.startAttemptRound(id, retry.attemptId, '11111111-1111-4111-8111-111111111111', 0)).toBe(true);
 });

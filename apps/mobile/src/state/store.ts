@@ -1,3 +1,4 @@
+import { hydrateAppPreferences, serializeAppPreferences } from '../preferences/persistence';
 import {
   chatReducer,
   createEmptyChatState,
@@ -63,7 +64,7 @@ import {
 } from '../agent/AgentControllerPreflight';
 import { projectAgentVisibleHistory } from '../agent/AgentVisibleHistory';
 import { isProjectContextSendable } from '../project-context/reducer';
-import { isHarnessId, providerForModel } from '../harness/types';
+import { harnessForModel, isHarnessId, providerForModel } from '../harness/types';
 import type {
   ProjectContextAction,
   ProjectContextConsentV1,
@@ -455,6 +456,8 @@ export type ChatStore = {
   ): AgentCheckpointTransaction | null;
   getSessionAuthority(): SessionAuthority | null;
   setSessionAuthority(authority: SessionAuthority | null): boolean;
+  /** Validate only preferences; preserve conversation owners and native CAS authority. */
+  setPreferences(input: unknown): boolean;
   checkpointAgentApproval(
     input: AgentApprovalCheckpointInput,
   ): AgentCheckpointTransaction | null;
@@ -3238,6 +3241,11 @@ export function createChatStore(options: ChatStoreOptions = {}): ChatStore {
       const at = canonicalNow(now);
       const attempt: TurnAttemptV1 = {
         ...source,
+        // A user may choose another model/effort before retrying. Freeze the
+        // current selection in this new attempt, never rewrite the old one.
+        modelId: conversation.modelId,
+        thinkingMode: conversation.thinkingMode,
+        harnessId: harnessForModel(conversation.modelId),
         attemptId,
         status: 'prepared',
         activeRound: null,
@@ -3558,6 +3566,19 @@ export function createChatStore(options: ChatStoreOptions = {}): ChatStore {
       }
       if (!validSessionAuthority(authority)) return false;
       sessionAuthority = { ...authority };
+      return true;
+    },
+    setPreferences: input => {
+      if (notificationDepth > 0) return false;
+      let preferences: NonNullable<ChatState['preferences']>;
+      try {
+        preferences = JSON.parse(serializeAppPreferences(hydrateAppPreferences(input)));
+      } catch {
+        return false;
+      }
+      if (JSON.stringify(state.preferences) === JSON.stringify(preferences)) return true;
+      state = { ...state, preferences };
+      notifyListeners();
       return true;
     },
     serialize: () => serializeChatState(state),

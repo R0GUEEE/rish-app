@@ -1,7 +1,6 @@
 import React, { useMemo } from 'react';
 import {
   Alert,
-  Linking,
   StyleSheet,
   Text,
   View,
@@ -10,6 +9,7 @@ import {
 } from 'react-native';
 
 import { isSafeLinkTarget, type InlineToken } from '../markdown/inline';
+import { openConversationLink } from '../native/ConversationLinks';
 import { useAppPresentation } from '../presentation/AppPresentation';
 import type { AttachmentDescriptor } from '../state';
 import { fonts, type ThemePalette } from '../theme';
@@ -37,7 +37,7 @@ export function InlineMarkdown({
   const openLink = async (target: string) => {
     try {
       if (!isSafeLinkTarget(target)) throw new Error('invalid link');
-      await Linking.openURL(target);
+      await openConversationLink(target);
     } catch {
       Alert.alert(t('messages.linkFailedTitle'), t('messages.linkFailedBody'));
     }
