@@ -22,6 +22,8 @@ typedef NSDictionary * _Nullable (^DSHAgentProviderRoundContextReceiptProvider)(
     NSDictionary *authority, NSError **error);
 typedef DSHCompletionProviderTransport * _Nullable (^DSHAgentProviderRoundTransportResolver)(
     NSString *harnessId);
+/// Display-only preview events of a streamed round (see `previewSink`).
+typedef void (^DSHAgentProviderRoundPreviewSink)(NSDictionary<NSString *, id> *event);
 
 /// For schema-3 rounds the callback returns exactly
 /// `{project_context_sha256,receipt:{...},messages:[{role:"system",content,attachments:[]}]}`.
@@ -117,6 +119,21 @@ typedef DSHCompletionProviderTransport * _Nullable (^DSHAgentProviderRoundTransp
 @property(nonatomic, strong, readonly, nullable) DSHCompletionProviderTransport *glmTransport;
 /// Optional per-round resolver consulted after initialization.
 @property(nonatomic, copy, nullable) DSHAgentProviderRoundTransportResolver transportResolver;
+
+/// When set, rounds on transports that support streaming are requested with
+/// `stream:true` and their parsed deltas are coalesced (about every 50 ms,
+/// 256 KiB per round) into versioned events delivered here from a private
+/// queue, never from the serialized workspace queue:
+///   {schema_version:1, kind:"delta", task_id, attempt_id, round_id,
+///    round_index, operation_id, provider_request_id, harness_id, seq,
+///    text?, reasoning?, tool_calls?:[{index,id?,name?,arguments?}],
+///    finish_reason?}
+///   {schema_version:1, kind:"end", ...same correlation..., seq,
+///    status:"validated"|"failed", failure_code?, truncated}
+/// Events are presentation material only; the round still returns exactly
+/// one validated result, and that result is authoritative regardless of
+/// which arrives first.
+@property(nonatomic, copy, nullable) DSHAgentProviderRoundPreviewSink previewSink;
 
 /// Missing harness_id preserves legacy DSH behavior. Unknown, mismatched,
 /// or unavailable transports are rejected before reading credentials.

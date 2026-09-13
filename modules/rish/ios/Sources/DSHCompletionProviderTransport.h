@@ -2,6 +2,18 @@
 
 NS_ASSUME_NONNULL_BEGIN
 
+@protocol DSHProviderStreamResponseAssembling;
+
+/// An execution owns cancellation without implying an HTTP session task.
+@protocol DSHCompletionExecution <NSObject>
+- (void)cancel;
+@optional
+/// Real HTTP task only, for existing delegate routing and strict-slot ownership.
+/// Non-HTTP executions omit this method or return nil.
+- (nullable NSURLSessionDataTask *)underlyingHTTPTask;
+@end
+typedef BOOL (^DSHCompletionProviderTransportBindExecutionBlock)(id<DSHCompletionExecution> execution);
+
 /// Native-only ownership hooks used by the completion transport.  The
 /// transport deliberately does not keep a credential store, create an
 /// NSURLSession, or own the LocalRuntime completion slot.  A caller supplies
@@ -44,6 +56,13 @@ typedef void (^DSHCompletionProviderTransportCompletionBlock)(
     NSDictionary<NSString *, id> * _Nullable result,
     NSString * _Nullable errorCode);
 
+/// Preview deltas of a streamed round, in the parser vocabulary
+/// {type:"delta", content?, reasoning?, tool_calls?:[{index,id?,name?,arguments?}],
+/// finish_reason?}. Display material only: the round still settles through
+/// `completion` with one result validated from the whole stream.
+typedef void (^DSHCompletionProviderTransportPreviewBlock)(
+    NSDictionary<NSString *, id> *delta);
+
 /// Private shared DeepSeek HTTP transport for strict completion schema 2/3.
 ///
 /// The injected NSURLSession is the module's one session and is not owned by
@@ -56,7 +75,7 @@ typedef void (^DSHCompletionProviderTransportCompletionBlock)(
 @property(nonatomic, copy, nullable) DSHCompletionProviderTransportDiagnosticBlock diagnosticHandler;
 #endif
 
-- (instancetype)initWithSession:(NSURLSession *)session
+- (instancetype)initWithSession:(nullable NSURLSession *)session
                    uuidGenerator:(NSString *(^ _Nullable)(void))uuidGenerator
                   monotonicClock:(NSTimeInterval (^ _Nullable)(void))monotonicClock;
 
@@ -92,6 +111,66 @@ typedef void (^DSHCompletionProviderTransportCompletionBlock)(
                                                 markRedirected:(DSHCompletionProviderTransportMarkRedirectedBlock _Nullable)markRedirected
                                               redirectDecision:(DSHCompletionProviderTransportRedirectDecisionBlock _Nullable)redirectDecision
                                                      completion:(DSHCompletionProviderTransportCompletionBlock)completion;
+
+/// Generic execution entry point; HTTP transports adapt their existing task owner.
+- (id<DSHCompletionExecution> _Nullable)startExecutionWithSchemaVersion:(NSInteger)schemaVersion
+                                                           roundId:(NSString *)roundId
+                                                          generation:(NSUInteger)generation
+                                                credentialGeneration:(NSUInteger)credentialGeneration
+                                                 providerRequestId:(NSString *)providerRequestId
+                                                       credential:(NSString * _Nullable)credential
+                                                   requestedModel:(NSString *)requestedModel
+                                                    thinkingMode:(NSString *)thinkingMode
+                                     credentialGenerationIsCurrent:(DSHCompletionProviderTransportCredentialGenerationIsCurrentBlock _Nullable)credentialGenerationIsCurrent
+                                                        startedAt:(NSTimeInterval)startedAt
+                                                        bodyData:(NSData *)bodyData
+                                                  visibleHistory:(NSArray *)visibleHistory
+                                                      modelInput:(NSArray *)modelInput
+                                                       bindExecution:(DSHCompletionProviderTransportBindExecutionBlock)bindExecution
+                                                     claimRound:(DSHCompletionProviderTransportClaimRoundBlock)claimRound
+                                                markRedirected:(DSHCompletionProviderTransportMarkRedirectedBlock _Nullable)markRedirected
+                                              redirectDecision:(DSHCompletionProviderTransportRedirectDecisionBlock _Nullable)redirectDecision
+                                                     completion:(DSHCompletionProviderTransportCompletionBlock)completion;
+/// Streams the provider round when `providerSupportsStreamingRounds` is
+/// YES: the request body must have been built with `streaming:YES`, parsed
+/// deltas are forwarded to `preview` as they arrive (on the session's
+/// delegate queue), and `completion` still settles exactly once with one
+/// result assembled from the whole stream and validated by the same
+/// response parser as a single-shot round. Transports without streaming
+/// rounds fall back to `startExecutionWithSchemaVersion:...` and never
+/// call `preview`.
+- (nullable id<DSHCompletionExecution>)startStreamingExecutionWithSchemaVersion:(NSInteger)schemaVersion
+                                                                         roundId:(NSString *)roundId
+                                                                      generation:(NSUInteger)generation
+                                                            credentialGeneration:(NSUInteger)credentialGeneration
+                                                               providerRequestId:(NSString *)providerRequestId
+                                                                      credential:(NSString *)credential
+                                                                  requestedModel:(NSString *)requestedModel
+                                                                    thinkingMode:(NSString *)thinkingMode
+                                                   credentialGenerationIsCurrent:(DSHCompletionProviderTransportCredentialGenerationIsCurrentBlock)credentialGenerationIsCurrent
+                                                                       startedAt:(NSTimeInterval)startedAt
+                                                                        bodyData:(NSData *)bodyData
+                                                                  visibleHistory:(NSArray *)visibleHistory
+                                                                      modelInput:(NSArray *)modelInput
+                                                                         preview:(nullable DSHCompletionProviderTransportPreviewBlock)preview
+                                                                   bindExecution:(DSHCompletionProviderTransportBindExecutionBlock)bindExecution
+                                                                      claimRound:(DSHCompletionProviderTransportClaimRoundBlock)claimRound
+                                                                  markRedirected:(DSHCompletionProviderTransportMarkRedirectedBlock _Nullable)markRedirected
+                                                                redirectDecision:(DSHCompletionProviderTransportRedirectDecisionBlock _Nullable)redirectDecision
+                                                                      completion:(DSHCompletionProviderTransportCompletionBlock)completion;
+
+/// Session-delegate entry points for streamed tasks this transport owns
+/// (`handlesTask:`). The owner's NSURLSession delegate forwards its data
+/// callbacks here; tasks started with a completion handler never reach them.
+- (void)streamingTask:(NSURLSessionDataTask *)task didReceiveResponse:(NSURLResponse *)response;
+- (void)streamingTask:(NSURLSessionDataTask *)task didReceiveData:(NSData *)data;
+- (void)streamingTask:(NSURLSessionTask *)task didCompleteWithError:(nullable NSError *)error;
+
+- (BOOL)isReadyWithCredential:(nullable NSString *)credential;
+- (BOOL)supportsTools;
+/// Bounded owner wait, including local execution startup. HTTP stays at 120s.
+- (NSTimeInterval)executionTimeoutInterval;
+
 
 /// Returns whether this transport currently owns the task identifier.  The
 /// module's NSURLSession delegate uses this to route only strict redirects to
@@ -146,6 +225,17 @@ typedef void (^DSHCompletionProviderTransportCompletionBlock)(
 
 /// Fresh streaming parser for this provider's SSE dialect.
 - (id<DSHProviderStreamEventParsing>)providerNewStreamEventParser;
+
+/// Whether agent rounds may be streamed through this transport. Requires a
+/// parser that reports tool-call fragments and chunk identity so the
+/// assembled response passes `providerParseResponseData:` unchanged.
+- (BOOL)providerSupportsStreamingRounds;
+
+/// Fresh assembler turning this dialect's streamed deltas back into its
+/// single-shot response object for `providerParseResponseData:`. The base
+/// class returns the chat-completions assembler.
+- (id<DSHProviderStreamResponseAssembling>)providerNewStreamResponseAssemblerWithThinkingMode:(NSString *)thinkingMode
+                                                                                  maximumBytes:(NSUInteger)maximumBytes;
 
 /// Whether this transport serves the given model id.
 - (BOOL)providerSupportsModel:(NSString *)model;

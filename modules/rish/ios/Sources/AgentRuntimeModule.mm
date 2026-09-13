@@ -1,6 +1,8 @@
 #import <Foundation/Foundation.h>
 #import <React/RCTBridge.h>
 #import <React/RCTBridgeModule.h>
+#import <React/RCTEventEmitter.h>
+#import <UIKit/UIKit.h>
 #import <os/log.h>
 
 #import "AgentExecutionLedger.h"
@@ -249,10 +251,16 @@ static NSString *DSHRuntimeErrorCode(NSError *error) {
   return @"E_AGENT_PERSISTENCE";
 }
 
-@interface AgentRuntimeModule : NSObject <RCTBridgeModule>
-@property(nonatomic, weak) RCTBridge *bridge;
+/// Round preview events (see DSHAgentProviderRoundService.previewSink).
+static NSString *const DSHAgentRoundPreviewEventName = @"agentRoundPreview";
+
+@interface AgentRuntimeModule : RCTEventEmitter <RCTBridgeModule>
 @property(nonatomic, strong) id<DSHAgentRuntimeCoordinating> runtimeCoordinator;
 @property(nonatomic, strong) DSHSessionWorkspaceCoordinator *serializationCoordinator;
+@property(nonatomic) NSUInteger previewObserverCount;
+/// Preview delivery pauses while the app is in the background: the round
+/// keeps validating natively and its result replaces the preview anyway.
+@property(nonatomic) BOOL previewSuspended;
 - (instancetype)initWithCoordinator:(id<DSHAgentRuntimeCoordinating>)coordinator;
 @end
 
@@ -260,16 +268,67 @@ static NSString *DSHRuntimeErrorCode(NSError *error) {
 
 RCT_EXPORT_MODULE(AgentRuntime)
 
-@synthesize bridge = _bridge;
-
 + (BOOL)requiresMainQueueSetup { return NO; }
+
+- (NSArray<NSString *> *)supportedEvents {
+  return @[ DSHAgentRoundPreviewEventName ];
+}
+
+- (void)startObserving {
+  @synchronized (self) { _previewObserverCount += 1; }
+  os_log(OS_LOG_DEFAULT, "agent_preview_observers count=%{public}lu",
+         (unsigned long)_previewObserverCount);
+}
+
+- (void)stopObserving {
+  @synchronized (self) {
+    _previewObserverCount = _previewObserverCount > 0 ? _previewObserverCount - 1 : 0;
+  }
+}
+
+- (BOOL)hasPreviewObservers {
+  @synchronized (self) { return _previewObserverCount > 0; }
+}
+
+- (void)publishRoundPreview:(NSDictionary *)event {
+  if (![event isKindOfClass:NSDictionary.class]) return;
+  BOOL suspended = NO;
+  @synchronized (self) { suspended = _previewSuspended; }
+  if (suspended) return;
+  if (![self hasPreviewObservers]) {
+    os_log(OS_LOG_DEFAULT, "agent_preview_dropped kind=%{public}@ seq=%{public}@",
+           event[@"kind"], event[@"seq"]);
+    return;
+  }
+  @try {
+    [self sendEventWithName:DSHAgentRoundPreviewEventName body:event];
+  } @catch (__unused NSException *exception) {
+  }
+}
 
 - (instancetype)init {
   self = [super init];
   if (self != nil) {
     _serializationCoordinator = DSHSessionWorkspaceCoordinator.sharedCoordinator;
+    NSNotificationCenter *center = NSNotificationCenter.defaultCenter;
+    [center addObserver:self selector:@selector(applicationDidEnterBackground:)
+                   name:UIApplicationDidEnterBackgroundNotification object:nil];
+    [center addObserver:self selector:@selector(applicationWillEnterForeground:)
+                   name:UIApplicationWillEnterForegroundNotification object:nil];
   }
   return self;
+}
+
+- (void)dealloc {
+  [NSNotificationCenter.defaultCenter removeObserver:self];
+}
+
+- (void)applicationDidEnterBackground:(__unused NSNotification *)notification {
+  @synchronized (self) { _previewSuspended = YES; }
+}
+
+- (void)applicationWillEnterForeground:(__unused NSNotification *)notification {
+  @synchronized (self) { _previewSuspended = NO; }
 }
 
 - (instancetype)initWithCoordinator:(id<DSHAgentRuntimeCoordinating>)coordinator {
@@ -338,6 +397,10 @@ RCT_EXPORT_MODULE(AgentRuntime)
   roundService.transportResolver = ^DSHCompletionProviderTransport *(NSString *harnessId) {
     return [weakRuntime providerTransportForHarnessId:harnessId];
   };
+  __weak AgentRuntimeModule *weakSelf = self;
+  roundService.previewSink = ^(NSDictionary *event) {
+    [weakSelf publishRoundPreview:event];
+  };
   DSHAgentWorkspaceToolExecutor *workspaceExecutor =
       [[DSHAgentWorkspaceToolExecutor alloc] initWithRootResolver:rootResolver];
   DSHAgentGitToolExecutor *gitExecutor = [[DSHAgentGitToolExecutor alloc]
@@ -387,8 +450,8 @@ RCT_EXPORT_MODULE(AgentRuntime)
       result = nil;
       invokeError = DSHAgentNativeStoreError(DSHAgentNativeStoreErrorPersistence);
     }
-    os_log_info(OS_LOG_DEFAULT,
-                "agent_runtime op=%{public}@ elapsed_ms=%{public}.1f ok=%{public}d",
+    os_log(OS_LOG_DEFAULT,
+           "agent_runtime op=%{public}@ elapsed_ms=%{public}.1f ok=%{public}d",
                 name, (CFAbsoluteTimeGetCurrent() - began) * 1000.0,
                 [result isKindOfClass:NSDictionary.class]);
     if (![result isKindOfClass:NSDictionary.class]) {

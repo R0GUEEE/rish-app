@@ -17,7 +17,9 @@ import { SpinningIcon } from './SpinningIcon';
 import { MarkdownText } from './MarkdownText';
 
 export type StructuredBlock =
-  | { id: string; type: 'text'; text: string }
+  | { id: string; type: 'text'; text: string; reveal?: boolean }
+  /** Transient progress line for a turn that has produced nothing yet. */
+  | { id: string; type: 'activity'; label: string }
   | { id: string; type: 'reasoning'; text: string; durationMs?: number }
   | {
       id: string;
@@ -137,13 +139,18 @@ export function StructuredContent({
     <View style={styles.root}>
       {blocks.map(block => {
         if (block.type === 'text') {
-          return (
+          return block.reveal === true ? (
+            <RevealingText attachments={attachments} key={block.id} text={block.text} />
+          ) : (
             <MarkdownText
               attachments={attachments}
               key={block.id}
               markdown={block.text}
             />
           );
+        }
+        if (block.type === 'activity') {
+          return <ActivityBlock key={block.id} label={block.label} />;
         }
         if (block.type === 'reasoning') {
           return showReasoning ? (
@@ -159,6 +166,51 @@ export function StructuredContent({
           />
         );
       })}
+    </View>
+  );
+}
+
+const REVEAL_CHARACTERS_PER_SECOND = 160;
+const REVEAL_TICK_MS = 40;
+
+/**
+ * Streams provisional text onto the screen a few characters per frame so a
+ * burst of deltas (or one slow render) still reads as a live stream. The
+ * durable copy of the same text is rendered whole by MarkdownText.
+ */
+function RevealingText({
+  attachments,
+  text,
+}: {
+  attachments?: readonly AttachmentDescriptor[];
+  text: string;
+}) {
+  const [revealed, setRevealed] = useState(0);
+  useEffect(() => {
+    if (revealed >= text.length) return undefined;
+    const step = Math.max(1, Math.round((REVEAL_CHARACTERS_PER_SECOND * REVEAL_TICK_MS) / 1000));
+    const timer = setTimeout(() => {
+      setRevealed(current => Math.min(text.length, current + step));
+    }, REVEAL_TICK_MS);
+    return () => clearTimeout(timer);
+  }, [revealed, text]);
+  const visible = revealed >= text.length ? text : text.slice(0, revealed);
+  return <MarkdownText attachments={attachments} markdown={visible} />;
+}
+
+function ActivityBlock({ label }: { label: string }) {
+  const { colors } = useAppPresentation();
+  const styles = useStyles();
+  return (
+    <View
+      accessibilityLabel={label}
+      accessibilityLiveRegion="polite"
+      accessibilityRole={Platform.OS === 'android' ? 'text' : 'status'}
+      style={styles.activityRow}
+      testID="activity-block"
+    >
+      <SpinningIcon color={colors.accent} icon={LoaderCircle} size={14} testID="activity-spinner" />
+      <Text style={styles.activityLabel}>{label}</Text>
     </View>
   );
 }
@@ -375,6 +427,17 @@ const createStyles = (colors: ThemePalette) =>
       borderLeftWidth: 2,
       borderLeftColor: colors.accentSoft,
       paddingLeft: 11,
+    },
+    activityRow: {
+      flexDirection: 'row',
+      alignItems: 'center',
+      gap: 8,
+      minHeight: 24,
+    },
+    activityLabel: {
+      color: colors.muted,
+      fontFamily: fonts.body,
+      fontSize: 13,
     },
     toolWrap: {
       borderRadius: 15,

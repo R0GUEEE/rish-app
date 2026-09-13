@@ -197,6 +197,13 @@ static NSData *CodexSubscriptionCompletedResponse(NSData *data, NSError **error)
 @end
 @implementation CodexSubscriptionTransport
 
+/// This transport already streams and re-assembles the ChatGPT SSE body in
+/// its own buffered request; the shared streaming round path must not
+/// double-handle it.
+- (BOOL)providerSupportsStreamingRounds {
+  return NO;
+}
+
 - (void)fetchAvailableModels:(void (^)(NSArray<NSDictionary *> *, NSString *))completion {
   DSHHarnessAuthService *auth = self.accountAuth;
   if (auth == nil) { if (completion) completion(@[], @"E_COMPLETION_CREDENTIAL_UNAVAILABLE"); return; }

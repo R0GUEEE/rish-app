@@ -44,7 +44,30 @@ static void (^CodexTransportHandler)(NSURLProtocol *, NSURLRequest *);
 
 @end
 
+/// Forwards the session's data callbacks to the transport so streamed
+/// rounds settle the same way they do behind LocalRuntimeModule.
+@interface CodexStreamingSessionDelegate : NSObject <NSURLSessionDataDelegate>
+@property(nonatomic, weak) DSHCompletionProviderTransport *transport;
+@end
+@implementation CodexStreamingSessionDelegate
+- (void)URLSession:(__unused NSURLSession *)session dataTask:(NSURLSessionDataTask *)dataTask
+didReceiveResponse:(NSURLResponse *)response
+ completionHandler:(void (^)(NSURLSessionResponseDisposition))completionHandler {
+  if ([self.transport handlesTask:dataTask]) [self.transport streamingTask:dataTask didReceiveResponse:response];
+  completionHandler(NSURLSessionResponseAllow);
+}
+- (void)URLSession:(__unused NSURLSession *)session dataTask:(NSURLSessionDataTask *)dataTask
+    didReceiveData:(NSData *)data {
+  if ([self.transport handlesTask:dataTask]) [self.transport streamingTask:dataTask didReceiveData:data];
+}
+- (void)URLSession:(__unused NSURLSession *)session task:(NSURLSessionTask *)task
+didCompleteWithError:(NSError *)error {
+  if ([self.transport handlesTask:task]) [self.transport streamingTask:task didCompleteWithError:error];
+}
+@end
+
 @interface CodexProviderTransportTests : XCTestCase
+@property(nonatomic, strong) CodexStreamingSessionDelegate *streamingDelegate;
 @property(nonatomic, strong) NSURLSession *session;
 @property(nonatomic, strong) CodexProviderTransport *transport;
 @end
@@ -57,9 +80,13 @@ static void (^CodexTransportHandler)(NSURLProtocol *, NSURLRequest *);
   NSURLSessionConfiguration *configuration =
       NSURLSessionConfiguration.ephemeralSessionConfiguration;
   configuration.protocolClasses = @[CodexTransportURLProtocol.class];
-  self.session = [NSURLSession sessionWithConfiguration:configuration];
+  self.streamingDelegate = [[CodexStreamingSessionDelegate alloc] init];
+  self.session = [NSURLSession sessionWithConfiguration:configuration
+                                                delegate:self.streamingDelegate
+                                           delegateQueue:nil];
   self.transport = [[CodexProviderTransport alloc]
       initWithSession:self.session uuidGenerator:nil monotonicClock:nil];
+  self.streamingDelegate.transport = self.transport;
 }
 
 - (void)tearDown {
@@ -349,6 +376,75 @@ static void (^CodexTransportHandler)(NSURLProtocol *, NSURLRequest *);
   XCTAssertEqualObjects(deltas, (@[ @{ @"type": @"delta", @"finish_reason": @"tool_calls" } ]));
   XCTAssertEqualObjects([parser finish:&error], @[]);
   XCTAssertNil(error);
+}
+
+#pragma mark - Streamed rounds
+
+- (void)testStreamedCodexRoundAssemblesFunctionCallsAndPreviewsFragments {
+  [CodexTransportURLProtocol setHandler:^(NSURLProtocol *protocol, NSURLRequest *request) {
+    XCTAssertEqualObjects([request valueForHTTPHeaderField:@"Accept"], @"text/event-stream");
+    NSHTTPURLResponse *response = [[NSHTTPURLResponse alloc]
+        initWithURL:request.URL statusCode:200 HTTPVersion:@"HTTP/1.1"
+       headerFields:@{ @"Content-Type": @"text/event-stream" }];
+    [protocol.client URLProtocol:protocol didReceiveResponse:response
+              cacheStoragePolicy:NSURLCacheStorageNotAllowed];
+    for (NSString *chunk in @[
+      @"event: response.created\ndata: {\"type\":\"response.created\",\"response\":{\"id\":\"resp_stream\",\"object\":\"response\",\"model\":\"gpt-5.6\",\"status\":\"in_progress\",\"output\":[]}}\n\n",
+      @"event: response.reasoning_summary_text.delta\ndata: {\"type\":\"response.reasoning_summary_text.delta\",\"output_index\":0,\"delta\":\"Plan it.\"}\n\n"
+      @"event: response.output_text.delta\ndata: {\"type\":\"response.output_text.delta\",\"output_index\":1,\"delta\":\"Writing.\"}\n\n",
+      @"event: response.output_item.added\ndata: {\"type\":\"response.output_item.added\",\"output_index\":2,\"item\":{\"id\":\"fc_stream\",\"type\":\"function_call\",\"status\":\"in_progress\",\"call_id\":\"call_stream\",\"name\":\"write_file\",\"arguments\":\"\"}}\n\n"
+      @"event: response.function_call_arguments.delta\ndata: {\"type\":\"response.function_call_arguments.delta\",\"item_id\":\"fc_stream\",\"output_index\":2,\"delta\":\"{\\\"path\\\":\\\"notes.md\\\",\"}\n\n",
+      @"event: response.function_call_arguments.delta\ndata: {\"type\":\"response.function_call_arguments.delta\",\"item_id\":\"fc_stream\",\"output_index\":2,\"delta\":\"\\\"content\\\":\\\"hi\\\"}\"}\n\n"
+      @"event: response.function_call_arguments.done\ndata: {\"type\":\"response.function_call_arguments.done\",\"item_id\":\"fc_stream\",\"output_index\":2,\"arguments\":\"{\\\"path\\\":\\\"notes.md\\\",\\\"content\\\":\\\"hi\\\"}\"}\n\n",
+      @"event: response.completed\ndata: {\"type\":\"response.completed\",\"response\":{\"id\":\"resp_stream\",\"object\":\"response\",\"model\":\"gpt-5.6\",\"status\":\"completed\",\"output\":[{\"type\":\"function_call\",\"call_id\":\"call_stream\",\"name\":\"write_file\",\"arguments\":\"{}\"}]}}\n\n",
+    ]) {
+      [protocol.client URLProtocol:protocol didLoadData:[chunk dataUsingEncoding:NSUTF8StringEncoding]];
+    }
+    [protocol.client URLProtocolDidFinishLoading:protocol];
+  }];
+  NSMutableArray<NSDictionary *> *previews = [NSMutableArray array];
+  __block NSDictionary *result = nil;
+  __block NSString *errorCode = nil;
+  XCTestExpectation *done = [self expectationWithDescription:@"streamed round"];
+  id<DSHCompletionExecution> execution = [self.transport
+      startStreamingExecutionWithSchemaVersion:2
+      roundId:@"33333333-3333-4333-8333-333333333333" generation:1 credentialGeneration:1
+      providerRequestId:@"44444444-4444-4444-8444-444444444444"
+      credential:@"sk-test" requestedModel:@"gpt-5.6" thinkingMode:@"high"
+      credentialGenerationIsCurrent:^BOOL(__unused NSUInteger g) { return YES; }
+      startedAt:1.0 bodyData:[self jsonData:@{ @"model": @"gpt-5.6", @"stream": @YES }]
+      visibleHistory:@[] modelInput:@[]
+      preview:^(NSDictionary *delta) { @synchronized (previews) { [previews addObject:delta]; } }
+      bindExecution:^BOOL(id<DSHCompletionExecution> candidate) { return candidate != nil; }
+      claimRound:^BOOL(__unused BOOL *redirected) { return YES; }
+      markRedirected:nil redirectDecision:nil
+      completion:^(NSDictionary *v, NSString *c) { result = v; errorCode = c; [done fulfill]; }];
+  XCTAssertNotNil(execution);
+  [self waitForExpectations:@[done] timeout:5];
+  XCTAssertNil(errorCode);
+  XCTAssertEqualObjects(result[@"provider_response_id"], @"resp_stream");
+  XCTAssertEqualObjects(result[@"harness_id"], @"codex");
+  XCTAssertEqualObjects(result[@"text"], @"Writing.");
+  XCTAssertEqualObjects(result[@"reasoning"], @"Plan it.");
+  XCTAssertEqualObjects(result[@"finish_reason"], @"tool_calls");
+  XCTAssertEqual([result[@"tool_calls"] count], 1u);
+  XCTAssertEqualObjects(result[@"tool_calls"][0][@"id"], @"call_stream");
+  XCTAssertEqualObjects(result[@"tool_calls"][0][@"name"], @"write_file");
+  NSDictionary *arguments = [NSJSONSerialization JSONObjectWithData:
+      [result[@"tool_calls"][0][@"arguments"] dataUsingEncoding:NSUTF8StringEncoding] options:0 error:nil];
+  XCTAssertEqualObjects(arguments[@"path"], @"notes.md");
+  XCTAssertEqualObjects(arguments[@"content"], @"hi");
+  NSMutableString *argumentFragments = [NSMutableString string];
+  @synchronized (previews) {
+    for (NSDictionary *delta in previews) {
+      for (NSDictionary *fragment in delta[@"tool_calls"] ?: @[]) {
+        XCTAssertEqualObjects(fragment[@"index"], @2);
+        if (fragment[@"arguments"]) [argumentFragments appendString:fragment[@"arguments"]];
+      }
+    }
+  }
+  XCTAssertEqualObjects(argumentFragments, @"{\"path\":\"notes.md\",\"content\":\"hi\"}");
+  XCTAssertFalse([self.transport hasActiveRequests]);
 }
 
 @end

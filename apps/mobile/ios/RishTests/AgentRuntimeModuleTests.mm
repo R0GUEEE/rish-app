@@ -17,6 +17,8 @@
 #import "../../../../modules/rish/ios/Sources/DshProviderTransport.h"
 #import "../../../../modules/rish/ios/Sources/SessionSnapshotStore.h"
 
+#import "../../../../modules/rish/ios/Sources/SessionWorkspaceCoordinator.h"
+
 #import <objc/message.h>
 #import <objc/runtime.h>
 
@@ -86,6 +88,35 @@ DSH_RECORD(queryAgentCleanup)
 
 @end
 
+@interface DSHWaitingRuntimeCoordinator : DSHRecordingRuntimeCoordinator
+@property(nonatomic, strong) dispatch_semaphore_t releaseProvider;
+@property(nonatomic, copy) dispatch_block_t providerStarted;
+@property(nonatomic) BOOL providerOnTransactionQueue;
+@property(nonatomic) BOOL queryOnTransactionQueue;
+@property(nonatomic) BOOL cancelOnTransactionQueue;
+@end
+@implementation DSHWaitingRuntimeCoordinator
+- (NSDictionary *)completeAgentRoundV2:(NSDictionary *)request error:(NSError **)error {
+  self.providerOnTransactionQueue = DSHSessionWorkspaceCoordinator.sharedCoordinator.isExecutingOnQueue;
+  if (self.providerStarted) self.providerStarted();
+  dispatch_semaphore_wait(self.releaseProvider,
+      dispatch_time(DISPATCH_TIME_NOW, 5 * NSEC_PER_SEC));
+  return @{ @"status" : @"finished" };
+}
+- (NSDictionary *)recoverAgentAttempt:(NSDictionary *)request error:(NSError **)error {
+  return [self completeAgentRoundV2:request error:error];
+}
+- (NSDictionary *)queryAgentAttempt:(NSDictionary *)request error:(NSError **)error {
+  self.queryOnTransactionQueue = DSHSessionWorkspaceCoordinator.sharedCoordinator.isExecutingOnQueue;
+  return @{ @"status" : @"in_flight" };
+}
+- (NSDictionary *)cancelAgentAttempt:(NSDictionary *)request error:(NSError **)error {
+  self.cancelOnTransactionQueue = DSHSessionWorkspaceCoordinator.sharedCoordinator.isExecutingOnQueue;
+  dispatch_semaphore_signal(self.releaseProvider);
+  return @{ @"status" : @"cancel_requested" };
+}
+@end
+
 @interface DSHRecoveryWAL : DSHAgentNativeWAL
 @property(nonatomic, copy) NSDictionary *recoveryState;
 @end
@@ -152,6 +183,7 @@ DSH_RECORD(queryAgentCleanup)
 @property(nonatomic, copy) NSDictionary *recoveryResult;
 @property(nonatomic, copy) NSDictionary *receivedRecoveryRequest;
 @property(nonatomic, copy) NSDictionary *retryResult;
+@property(nonatomic) BOOL retryOnTransactionQueue;
 @property(nonatomic, copy) NSDictionary *receivedRetryRequest;
 @end
 @implementation DSHRecordingRoundRecoveryService
@@ -163,6 +195,7 @@ DSH_RECORD(queryAgentCleanup)
 }
 - (NSDictionary *)retryFailedAgentRoundV2WithRequest:(NSDictionary *)request
                                                 error:(NSError **)error {
+  self.retryOnTransactionQueue = DSHSessionWorkspaceCoordinator.sharedCoordinator.isExecutingOnQueue;
   self.receivedRetryRequest = request;
   if (error != nullptr) *error = nil;
   return self.retryResult;
@@ -313,6 +346,37 @@ DSH_RECORD(queryAgentCleanup)
   function(module, selector, request, resolve, reject);
 }
 
+- (void)testProviderWaitDoesNotBlockSerializedQueryAndCancel {
+  for (NSString *selectorName in @[@"completeAgentRoundV2Request:resolver:rejecter:",
+                                    @"recoverAgentAttemptRequest:resolver:rejecter:"]) {
+  DSHWaitingRuntimeCoordinator *coordinator = [[DSHWaitingRuntimeCoordinator alloc] init];
+  coordinator.releaseProvider = dispatch_semaphore_create(0);
+  XCTestExpectation *started = [self expectationWithDescription:@"provider started"];
+  coordinator.providerStarted = ^{ [started fulfill]; };
+  id module = [self moduleWithCoordinator:coordinator];
+  XCTestExpectation *finished = [self expectationWithDescription:@"round returned"];
+  DSHRuntimeReject reject = ^(NSString *code, NSString *message, NSError *error) {
+    XCTFail(@"unexpected rejection %@", code);
+  };
+  [self invokeModule:module selector:NSSelectorFromString(selectorName)
+      request:@{ @"action" : @"retry_failed_round" } resolve:^(id value) { [finished fulfill]; } reject:reject];
+  [self waitForExpectations:@[started] timeout:2];
+  XCTestExpectation *queried = [self expectationWithDescription:@"query responsive"];
+  XCTestExpectation *cancelled = [self expectationWithDescription:@"cancel responsive"];
+  [self invokeModule:module selector:NSSelectorFromString(@"queryAgentAttemptRequest:resolver:rejecter:")
+      request:@{} resolve:^(id value) {
+        XCTAssertEqualObjects(value[@"status"], @"in_flight");
+        [queried fulfill];
+      } reject:reject];
+  [self invokeModule:module selector:NSSelectorFromString(@"cancelAgentAttemptRequest:resolver:rejecter:")
+      request:@{} resolve:^(id value) { [cancelled fulfill]; } reject:reject];
+  [self waitForExpectations:@[queried, cancelled, finished] timeout:2];
+  XCTAssertFalse(coordinator.providerOnTransactionQueue);
+  XCTAssertTrue(coordinator.queryOnTransactionQueue);
+  XCTAssertTrue(coordinator.cancelOnTransactionQueue);
+  }
+}
+
 - (void)testExportsAuthorityAndReadOnlyPresentationSelectorsWithoutLegacySurface {
   XCTAssertEqualObjects([[self moduleClass] moduleName], @"AgentRuntime");
   NSArray *expected = [@[
@@ -378,7 +442,7 @@ DSH_RECORD(queryAgentCleanup)
     request[@"marker"] = @"mutated-after-call";
     [self waitForExpectations:@[done] timeout:2];
   }
-  XCTAssertEqual(coordinator.callCount, 13U);
+  XCTAssertEqual(coordinator.callCount, bindings.count);
 }
 
 - (void)testInvalidBridgeValueAndUnavailableCoordinatorFailClosed {
@@ -694,7 +758,7 @@ DSH_RECORD(queryAgentCleanup)
     @"thinking_mode" : @"off", @"visible_history_sha256" :
         @"abababababababababababababababababababababababababababababababab",
     @"visible_message_count" : @0, @"project_context_sha256" : NSNull.null,
-    @"registry" : @{ @"toolset_sha256" :
+    @"registry" : @{ @"registry_version" : @1, @"toolset_sha256" :
         @"cdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcd" } };
   prepared.preparedProjection = @{ @"task_id" : @"22222222-2222-4222-8222-222222222222",
     @"conversation_id" : @"11111111-1111-4111-8111-111111111111",
@@ -811,6 +875,7 @@ DSH_RECORD(queryAgentCleanup)
     @"expected_transcript" : [self recoveryTranscript],
     @"root" : [self recoveryRoot] } error:&error];
   XCTAssertNil(error);
+  XCTAssertFalse(round.retryOnTransactionQueue);
   XCTAssertEqualObjects(round.receivedRetryRequest[@"round_id"],
                         locator[@"round_id"]);
   XCTAssertEqualObjects(round.receivedRetryRequest[@"launch_attempt"], @2);
@@ -917,6 +982,44 @@ DSH_RECORD(queryAgentCleanup)
   XCTAssertEqualObjects(replay, first);
   XCTAssertEqual([wal.recoveryState[@"operations"] count], 1U);
   XCTAssertEqual([wal.recoveryState[@"operation_results"] count], 1U);
+}
+
+- (void)testCancelPreparedAttemptWithoutRoundCommitsAndReplays {
+  DSHRecoveryWAL *wal = [[DSHRecoveryWAL alloc]
+      initWithRootURL:[self.rootURL URLByAppendingPathComponent:@"cancel-unstarted"]
+      clock:^NSDate * { return NSDate.date; }
+      identifierGenerator:^NSString * { return @"bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb"; }
+      faultHook:nil];
+  wal.recoveryState = @{ @"ledger": @[], @"rounds": @[], @"batches": @[],
+    @"operations": @[], @"operation_results": @[] };
+  DSHRecoveryRuntimeCoordinator *coordinator = [self recoveryCoordinatorWithWAL:wal
+      roundService:nullptr executionService:nullptr];
+  DSHRecoverySessionStore *store = (DSHRecoverySessionStore *)coordinator.preparedStore.sessionSnapshotStore;
+  NSMutableDictionary *load = [store.recoveryLoad mutableCopy];
+  NSData *bytes = [load[@"session_json"] dataUsingEncoding:NSUTF8StringEncoding];
+  NSMutableDictionary *session = [NSJSONSerialization JSONObjectWithData:bytes
+      options:NSJSONReadingMutableContainers error:nil];
+  session[@"conversations"][0][@"attempts"][0][@"agent"][@"phase"] = @"ready_for_round";
+  load[@"session_json"] = [[NSString alloc] initWithData:
+      [NSJSONSerialization dataWithJSONObject:session options:NSJSONWritingSortedKeys error:nil]
+      encoding:NSUTF8StringEncoding];
+  store.recoveryLoad = load;
+  NSMutableDictionary *request = [[self recoveryCancelRequestWithOperationId:
+      @"cccccccc-cccc-4ccc-8ccc-cccccccccccc"] mutableCopy];
+  NSMutableDictionary *token = [request[@"cancel_token"] mutableCopy];
+  token[@"expected_phase"] = @"ready_for_round";
+  request[@"cancel_token"] = token;
+  NSError *error = nil;
+  NSDictionary *result = [coordinator cancelAgentAttempt:request error:&error];
+  XCTAssertNil(error);
+  XCTAssertEqualObjects(result[@"status"], @"cancelled");
+  XCTAssertEqualObjects(result[@"result_round_revision"], NSNull.null);
+  XCTAssertEqualObjects(result[@"effect_may_have_occurred"], @NO);
+  store.recoveryLoad = @{ @"status": @"missing" };
+  XCTAssertEqualObjects([coordinator cancelAgentAttempt:request error:&error], result);
+  XCTAssertNil(error);
+  XCTAssertEqual([wal.recoveryState[@"operations"] count], 1U);
+  XCTAssertEqual([wal.recoveryState[@"rounds"] count], 0U);
 }
 
 - (void)testCancelAttemptRejectsUnboundSchemaNineSourceProofs {

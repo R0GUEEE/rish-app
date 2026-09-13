@@ -1,5 +1,9 @@
 #import "CodexProviderTransport.h"
 
+#import "DSHStreamEvents.h"
+
+#include <math.h>
+
 #import "DSHCompletionV2.h"
 #import "RishHarnessCatalog.h"
 
@@ -119,8 +123,19 @@ static BOOL CodexAppendItems(NSMutableArray *input, NSDictionary *message,
   return NO;
 }
 
+/// Responses output index as the tool-call fragment index (0..15).
+static NSNumber * _Nullable CodexStreamOutputIndex(id value) {
+  if (![value isKindOfClass:NSNumber.class] ||
+      CFGetTypeID((__bridge CFTypeRef)value) == CFBooleanGetTypeID()) return nil;
+  double position = [value doubleValue];
+  if (position != floor(position) || position < 0 || position > 15) return nil;
+  return @((NSInteger)position);
+}
+
 static NSDictionary<NSString *, id> * _Nullable CodexDecodeEvent(
-    NSString *eventName, NSArray<NSString *> *dataLines, NSError **error) {
+    NSString *eventName, NSArray<NSString *> *dataLines,
+    NSDictionary * _Nullable * _Nullable chunkOut, NSError **error) {
+  if (chunkOut != nil) *chunkOut = nil;
   if (dataLines.count == 0) return nil;
   NSString *data = [dataLines componentsJoinedByString:@"\n"];
   if ([data isEqualToString:@"[DONE]"]) return @{@"type": @"done"};
@@ -139,6 +154,7 @@ static NSDictionary<NSString *, id> * _Nullable CodexDecodeEvent(
     if (error != nil) *error = CodexTransportError(3302, @"SSE event is not a JSON object");
     return nil;
   }
+  if (chunkOut != nil) *chunkOut = chunk;
   NSString *kind = CodexString(chunk[@"type"]) ?: eventName;
   if ([kind isEqualToString:@"response.failed"] || [kind isEqualToString:@"error"]) {
     if (error != nil) {
@@ -170,9 +186,32 @@ static NSDictionary<NSString *, id> * _Nullable CodexDecodeEvent(
     }
     return @{@"type": @"delta", @"finish_reason": finish};
   }
-  // response.created/in_progress, output_item.*, content_part.*,
-  // function_call_arguments.* and reasoning_summary_part.* carry no
-  // presentable delta; tool arguments come from the round result.
+  if ([kind isEqualToString:@"response.output_item.added"]) {
+    NSDictionary *item = CodexDictionary(chunk[@"item"]);
+    if (![CodexString(item[@"type"]) isEqualToString:@"function_call"]) return nil;
+    NSNumber *index = CodexStreamOutputIndex(chunk[@"output_index"]);
+    NSString *callId = CodexString(item[@"call_id"]);
+    NSString *name = CodexString(item[@"name"]);
+    if (index == nil || callId.length == 0 || name.length == 0) {
+      if (error != nil) *error = CodexTransportError(3308, @"Responses function_call item is not usable");
+      return nil;
+    }
+    return @{@"type": @"delta",
+             @"tool_calls": @[ @{@"index": index, @"id": callId, @"name": name} ]};
+  }
+  if ([kind isEqualToString:@"response.function_call_arguments.delta"]) {
+    NSNumber *index = CodexStreamOutputIndex(chunk[@"output_index"]);
+    NSString *fragment = CodexString(chunk[@"delta"]);
+    if (index == nil) {
+      if (error != nil) *error = CodexTransportError(3308, @"Responses arguments delta has no output index");
+      return nil;
+    }
+    return fragment.length > 0
+        ? @{@"type": @"delta", @"tool_calls": @[ @{@"index": index, @"arguments": fragment} ]}
+        : nil;
+  }
+  // response.created/in_progress, content_part.*, function_call_arguments.done
+  // and reasoning_summary_part.* carry no presentable delta.
   return nil;
 }
 
@@ -181,6 +220,23 @@ static NSDictionary<NSString *, id> * _Nullable CodexDecodeEvent(
   NSMutableArray<NSString *> *_dataLines;
   NSString *_eventName;
   BOOL _finished;
+}
+
+@synthesize streamedResponseId = _streamedResponseId;
+@synthesize streamedModel = _streamedModel;
+
+- (void)noteChunkIdentity:(NSDictionary *)chunk {
+  NSString *kind = CodexString(chunk[@"type"]);
+  if (![kind isEqualToString:@"response.created"] &&
+      ![kind isEqualToString:@"response.completed"] &&
+      ![kind isEqualToString:@"response.incomplete"]) return;
+  NSDictionary *response = CodexDictionary(chunk[@"response"]);
+  if (_streamedResponseId == nil && CodexString(response[@"id"]).length > 0) {
+    _streamedResponseId = [response[@"id"] copy];
+  }
+  if (_streamedModel == nil && CodexString(response[@"model"]).length > 0) {
+    _streamedModel = [response[@"model"] copy];
+  }
 }
 
 - (instancetype)init {
@@ -194,6 +250,8 @@ static NSDictionary<NSString *, id> * _Nullable CodexDecodeEvent(
 }
 
 - (void)reset {
+  _streamedResponseId = nil;
+  _streamedModel = nil;
   _pending = [NSMutableData data];
   [_dataLines removeAllObjects];
   _eventName = nil;
@@ -255,10 +313,12 @@ static NSDictionary<NSString *, id> * _Nullable CodexDecodeEvent(
           }
           return nil;
         }
+        NSDictionary *chunk = nil;
         NSDictionary<NSString *, id> *delta = CodexDecodeEvent(
-            _eventName, _dataLines, error);
+            _eventName, _dataLines, &chunk, error);
         [_dataLines removeAllObjects];
         _eventName = nil;
+        if (chunk != nil) [self noteChunkIdentity:chunk];
         if (delta != nil) [deltas addObject:delta];
         else if (error != nil && *error != nil) return nil;
       }
@@ -313,13 +373,61 @@ static NSDictionary<NSString *, id> * _Nullable CodexDecodeEvent(
     _pending = [NSMutableData data];
   }
   if (_dataLines.count > 0) {
+    NSDictionary *chunk = nil;
     NSDictionary<NSString *, id> *delta = CodexDecodeEvent(
-        _eventName, _dataLines, error);
+        _eventName, _dataLines, &chunk, error);
     [_dataLines removeAllObjects];
+    if (chunk != nil) [self noteChunkIdentity:chunk];
     if (delta != nil) [deltas addObject:delta];
     else if (error != nil && *error != nil) return nil;
   }
   return deltas;
+}
+
+@end
+
+/// Responses-API shape for a streamed OpenAI round. A stream without a
+/// terminal `response.completed`/`response.incomplete` keeps status
+/// `in_progress`, which `providerParseResponseData:` rejects.
+@interface CodexStreamResponseAssembler : DSHStreamResponseAssembler
+@end
+
+@implementation CodexStreamResponseAssembler
+
+- (NSDictionary<NSString *, id> *)responseObject {
+  NSMutableArray *output = [NSMutableArray array];
+  if (self.assembledSawReasoning) {
+    [output addObject:@{@"type": @"reasoning",
+                        @"summary": @[ @{@"type": @"summary_text", @"text": self.assembledReasoning} ]}];
+  }
+  if (self.assembledText.length > 0) {
+    [output addObject:@{@"type": @"message", @"role": @"assistant",
+                        @"content": @[ @{@"type": @"output_text", @"text": self.assembledText} ]}];
+  }
+  for (NSDictionary *call in self.assembledToolCalls) {
+    NSMutableDictionary *item = [NSMutableDictionary dictionary];
+    item[@"type"] = @"function_call";
+    if (call[@"id"] != nil) item[@"call_id"] = call[@"id"];
+    if (call[@"name"] != nil) item[@"name"] = call[@"name"];
+    item[@"arguments"] = call[@"arguments"];
+    [output addObject:[item copy]];
+  }
+  NSString *finish = self.assembledFinishReason;
+  NSMutableDictionary *object = [NSMutableDictionary dictionary];
+  object[@"object"] = @"response";
+  if (self.assembledResponseId != nil) object[@"id"] = self.assembledResponseId;
+  if (self.assembledModel != nil) object[@"model"] = self.assembledModel;
+  object[@"output"] = [output copy];
+  if ([finish isEqualToString:@"stop"] || [finish isEqualToString:@"tool_calls"]) {
+    object[@"status"] = @"completed";
+  } else if ([finish isEqualToString:@"length"] || [finish isEqualToString:@"content_filter"]) {
+    object[@"status"] = @"incomplete";
+    object[@"incomplete_details"] = @{@"reason": [finish isEqualToString:@"length"]
+        ? @"max_output_tokens" : @"content_filter"};
+  } else {
+    object[@"status"] = @"in_progress";
+  }
+  return [object copy];
 }
 
 @end
@@ -486,6 +594,16 @@ static NSDictionary<NSString *, id> * _Nullable CodexDecodeEvent(
 
 - (id<DSHProviderStreamEventParsing>)providerNewStreamEventParser {
   return [[CodexStreamEventParser alloc] init];
+}
+
+- (BOOL)providerSupportsStreamingRounds {
+  return YES;
+}
+
+- (id<DSHProviderStreamResponseAssembling>)providerNewStreamResponseAssemblerWithThinkingMode:(NSString *)thinkingMode
+                                                                                  maximumBytes:(NSUInteger)maximumBytes {
+  return [[CodexStreamResponseAssembler alloc] initWithThinkingMode:thinkingMode
+                                                       maximumBytes:maximumBytes];
 }
 
 - (BOOL)providerSupportsModel:(NSString *)model {

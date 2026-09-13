@@ -241,3 +241,42 @@ test('announces running tool calls as busy status updates', async () => {
     expanded: false,
   });
 });
+
+test('an activity line spins with its label and provisional text is revealed progressively', async () => {
+  jest.useFakeTimers();
+  try {
+    let renderer: ReactTestRenderer.ReactTestRenderer | undefined;
+    await act(async () => {
+      renderer = ReactTestRenderer.create(
+        <StructuredContent
+          blocks={[
+            { id: 'activity', type: 'activity', label: 'Thinking' },
+            { id: 'live', type: 'text', text: 'abcdefghijklmnop', reveal: true },
+            { id: 'final', type: 'text', text: 'Durable text renders whole.' },
+          ]}
+        />,
+      );
+    });
+    if (renderer === undefined) throw new Error('renderer missing');
+    const root = renderer.root;
+    expect(root.findByProps({ testID: 'activity-block' }).props.accessibilityLabel).toBe('Thinking');
+    expect(root.findAllByProps({ testID: 'activity-spinner' }).length).toBeGreaterThan(0);
+    const rendered = () => JSON.stringify(renderer!.toJSON());
+    expect(rendered()).toContain('Durable text renders whole.');
+    expect(rendered()).not.toContain('abcdefghijklmnop');
+    await act(async () => {
+      jest.advanceTimersByTime(45);
+    });
+    expect(rendered()).toContain('abcdef');
+    expect(rendered()).not.toContain('abcdefghijklmnop');
+    // Each step schedules the next from an effect, so advance tick by tick.
+    for (let step = 0; step < 12; step += 1) {
+      await act(async () => {
+        jest.advanceTimersByTime(40);
+      });
+    }
+    expect(rendered()).toContain('abcdefghijklmnop');
+  } finally {
+    jest.useRealTimers();
+  }
+});

@@ -5,7 +5,7 @@ NS_ASSUME_NONNULL_BEGIN
 /// Private native-only state shared by the provider coordinator and its
 /// bounded helper functions.  It is never exposed through RCT.
 @interface DSHAgentProviderRoundContext : NSObject
-@property(nonatomic, strong, nullable) NSURLSessionDataTask *task;
+@property(nonatomic, strong, nullable) id<DSHCompletionExecution> task;
 @property(nonatomic, copy) NSString *nativeTaskId;
 @property(nonatomic, copy) NSDictionary *locator;
 @property(nonatomic, copy) NSDictionary *cas;

@@ -11,6 +11,9 @@ NS_ASSUME_NONNULL_BEGIN
 /// same delta vocabulary as DSHStreamEventParser:
 /// {type:"delta", content?, reasoning?, finish_reason?}.
 @interface CodexStreamEventParser : NSObject <DSHProviderStreamEventParsing>
+/// Identity from `response.created` / `response.completed`; nil until seen.
+@property(nonatomic, copy, readonly, nullable) NSString *streamedResponseId;
+@property(nonatomic, copy, readonly, nullable) NSString *streamedModel;
 
 - (nullable NSArray<NSDictionary<NSString *, id> *> *)appendBytes:(const uint8_t *)bytes
                                                              length:(NSUInteger)length

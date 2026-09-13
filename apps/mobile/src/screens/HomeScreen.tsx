@@ -1,6 +1,6 @@
 import { isHarnessModelId } from '../harness/types';
 import { glmAccountStatus, glmCredentialSource, glmSourceProvider } from '../harnessAuth/glmAccount';
-import { codexChatSource, codexAvailableModels } from '../harnessAuth/native';
+import { codexChatSource, codexAvailableModels, claudeChatSource, type CodexChatSource } from '../harnessAuth/native';
 import { getDshCatalog, subscribeDshCatalog, dshModelSupportsImages } from '../models/catalog';
 import { useSyncExternalStore } from 'react';
 import { withTaskExperience, cancelTaskExperienceRun } from '../taskExperience/controller';
@@ -60,7 +60,9 @@ import { MirrorSettingsSheet } from '../components/MirrorSettingsSheet';
 import { ConversationOptionsPicker } from '../components/ConversationOptionsPicker';
 import { HarnessPicker } from '../components/HarnessPicker';
 import type { StructuredBlock } from '../components/StructuredContent';
-import { projectAgentActivity } from '../components/agentActivityProjection';
+import { projectAgentActivity, projectRoundPreviews } from '../components/agentActivityProjection';
+import { nativeAgentRoundPreviewSource } from '../agent/AgentRoundPreviewSource';
+import type { AgentRoundPreviewState } from '../agent/AgentRoundPreview';
 import { readAgentAttemptPresentation, type AgentAttemptPresentation } from '../agent/AgentRoundPresentation';
 import {
   ModelPicker,
@@ -105,6 +107,7 @@ import {
   type SessionAuthority,
   type SnapshotFreeProjectMutationTransaction,
 } from '../state';
+import { createColdStartConversationSelection } from '../state/coldStartConversation';
 import type { InterruptAgentAttemptResultV2 } from '../native/AgentRuntime';
 import {
   LocalRuntime,
@@ -578,6 +581,9 @@ export function displayMessages(
   previews: Readonly<Record<string, string>>,
   sessionEvents: readonly import('../state/types').PersistedSessionEventV3[] = [],
   presentations: Readonly<Record<string, AgentAttemptPresentation>> = {},
+  roundPreviews: Readonly<Record<string, AgentRoundPreviewState>> = {},
+  pendingAttemptId: string | null = null,
+  labels: { readonly thinking: string } = { thinking: 'Thinking' },
 ): DisplayMessage[] {
   const rendered = (conversation?.messages ?? []).map(message => {
     const attempt = conversation?.attempts.find(item => item.assistantMessageId === message.id);
@@ -634,6 +640,12 @@ export function displayMessages(
   for (const attempt of orderedAttempts) {
     if (attempt.assistantMessageId !== null) continue;
     const blocks = projectAgentActivity(sessionEvents, attempt.attemptId, presentations[attempt.attemptId]);
+    // Streamed material of rounds still in flight, then a bare "thinking"
+    // placeholder while the round is being prepared or sent.
+    blocks.push(...projectRoundPreviews(roundPreviews, attempt.attemptId, sessionEvents, presentations[attempt.attemptId], labels));
+    if (blocks.length === 0 && attempt.attemptId === pendingAttemptId) {
+      blocks.push({ id: `pending-${attempt.attemptId}`, type: 'activity', label: labels.thinking });
+    }
     if (blocks.length === 0) continue;
     const turn = conversation.turns.find(item => item.turnId === attempt.turnId);
     if (turn === undefined) continue;
@@ -671,6 +683,7 @@ export function HomeScreen({
       }),
     [],
   );
+  const selectColdStartConversation = useMemo(createColdStartConversationSelection, []);
   const [chatState, setChatState] = useState<ChatState>(() => store.getState());
   const [draft, setDraft] = useState('');
   const draftRef = useRef('');
@@ -682,6 +695,11 @@ export function HomeScreen({
   draftAttachmentsRef.current = draftAttachments;
   const [attachmentBusy, setAttachmentBusy] = useState(false);
   const [attachmentNotice, setAttachmentNotice] = useState<string | null>(null);
+  // Conversation that was last sent without a workspace while the agent
+  // runtime was available: the turn silently ran as plain chat, so the hint
+  // stays until a workspace is bound or the chat changes.
+  const [workspaceHintConversationId, setWorkspaceHintConversationId] =
+    useState<string | null>(null);
   const [attachmentPreviews, setAttachmentPreviews] = useState<
     Readonly<Record<string, string>>
   >({});
@@ -717,7 +735,7 @@ export function HomeScreen({
   const [workspacePickerGeneration, setWorkspacePickerGeneration] =
     useState(0);
   const workspacePickerOwnersRef = useRef(
-    new Map<number, Conversation | null>(),
+    new Map<number, { conversation: Conversation | null; surfaceNonce: number }>(),
   );
   const workspaceSurfaceNonceRef = useRef(0);
   const [workspaceRoute, setWorkspaceRoute] = useState<{
@@ -832,6 +850,7 @@ export function HomeScreen({
   >(
     () => (SessionSnapshots.isAvailable() ? true : null),
   );
+  const [selectionHydrated, setSelectionHydrated] = useState(false);
   const activeConversation = selectActiveConversation(chatState);
   const activeHarness =
     BUILTIN_HARNESSES.get(
@@ -847,27 +866,40 @@ export function HomeScreen({
   const activeAdapter = getHarnessAdapter(activeHarnessId);
   const dshCatalog = useSyncExternalStore(subscribeDshCatalog, getDshCatalog);
   const [providerConfigurationRevision, setProviderConfigurationRevision] = useState(0);
+  const [claudeSource, setClaudeSource] = useState<CodexChatSource | null>(null);
+  const [claudeSourceChecking, setClaudeSourceChecking] = useState(false);
+  useEffect(() => {
+    let cancelled = false;
+    setClaudeSource(null);
+    if (!selectionHydrated || !lifecycleBootstrapReady || activeHarnessId !== 'claude-code' || !nativeAvailable) { setClaudeSourceChecking(false); return; }
+    setClaudeSourceChecking(true);
+    claudeChatSource().then(source => { if (!cancelled) setClaudeSource(source); })
+      .finally(() => { if (!cancelled) setClaudeSourceChecking(false); });
+    return () => { cancelled = true; };
+  }, [activeHarnessId, selectionHydrated, lifecycleBootstrapReady, nativeAvailable, providerConfigurationRevision, settingsVisible]);
+  const claudeSubscriptionSelected = activeHarnessId === 'claude-code' && claudeSource?.source === 'subscription';
   const [codexModels, setCodexModels] = useState<readonly {id: string; name: string}[] | null>(null);
   const [codexModelsLoading, setCodexModelsLoading] = useState(false);
   useEffect(() => {
     let cancelled = false;
     setCodexModels(null);
-    if (activeHarnessId !== 'codex' || !nativeAvailable) { setCodexModelsLoading(false); return; }
+    if (!selectionHydrated || !lifecycleBootstrapReady || activeHarnessId !== 'codex' || !nativeAvailable) { setCodexModelsLoading(false); return; }
     setCodexModelsLoading(true);
     codexChatSource().then(async source => {
-      if (source.source !== 'subscription' || !source.ready) return;
+      if (cancelled || source.source !== 'subscription' || !source.ready) return;
       const models = await codexAvailableModels();
       if (!cancelled) setCodexModels(models);
     }).catch(() => { if (!cancelled) setRuntimeFailure('E_CODEX_MODEL_CATALOG'); })
       .finally(() => { if (!cancelled) setCodexModelsLoading(false); });
     return () => { cancelled = true; };
-  }, [activeHarnessId, nativeAvailable, providerConfigurationRevision, settingsVisible]);
+  }, [activeHarnessId, selectionHydrated, lifecycleBootstrapReady, nativeAvailable, providerConfigurationRevision, settingsVisible]);
   const [glmSubscriptionState, setGlmSubscriptionState] = useState<'signed_in' | 'needs_login' | null>(null);
   useEffect(() => {
     let cancelled = false;
     setGlmSubscriptionState(null);
-    if (activeHarnessId === 'glm') {
+    if (selectionHydrated && lifecycleBootstrapReady && nativeAvailable && activeHarnessId === 'glm') {
       glmCredentialSource().then(async source => {
+        if (cancelled) return;
         const provider = glmSourceProvider(source.source);
         if (!provider) return;
         const account = await glmAccountStatus(provider);
@@ -875,20 +907,22 @@ export function HomeScreen({
       }).catch(() => undefined);
     }
     return () => { cancelled = true; };
-  }, [activeHarnessId, providerConfigurationRevision, settingsVisible]);
+  }, [activeHarnessId, selectionHydrated, lifecycleBootstrapReady, nativeAvailable, providerConfigurationRevision, settingsVisible]);
   const subscriptionNeedsAttention = activeHarnessId === 'glm' && glmSubscriptionState !== null;
   const [providerOverride, setProviderOverride] = useState<ProviderConfiguration | null>(null);
   useEffect(() => {
     let cancelled = false;
     setProviderOverride(null);
-    if ((activeHarnessId === 'claude-code' || activeHarnessId === 'codex') && ProviderConfigurations.isAvailable()) {
+    if (selectionHydrated && lifecycleBootstrapReady && nativeAvailable && (activeHarnessId === 'claude-code' || activeHarnessId === 'codex') && ProviderConfigurations.isAvailable()) {
       ProviderConfigurations.read(activeHarnessId).then(async value => {
-        const subscription = activeHarnessId === 'codex' && (await codexChatSource()).source === 'subscription';
+        if (cancelled) return;
+        const subscription = activeHarnessId === 'codex' ? (await codexChatSource()).source === 'subscription'
+          : (await claudeChatSource()).source === 'subscription';
         if (!cancelled) setProviderOverride(subscription || value.official ? null : value);
       }).catch(() => undefined);
     }
     return () => { cancelled = true; };
-  }, [activeHarnessId, providerConfigurationRevision]);
+  }, [activeHarnessId, selectionHydrated, lifecycleBootstrapReady, nativeAvailable, providerConfigurationRevision]);
   const providerName = (providerOverride?.harness_id === activeHarnessId ? providerOverride.name : null) ?? {
     dsh: 'DeepSeek',
     'claude-code': 'Anthropic',
@@ -896,7 +930,14 @@ export function HomeScreen({
     glm: 'Zhipu GLM',
   }[activeHarnessId];
   const credentialConfigured =
-    credentialHarnessId === activeHarnessId && credentialConfiguredValue;
+    claudeSubscriptionSelected ? claudeSource.ready : credentialHarnessId === activeHarnessId && credentialConfiguredValue;
+  // A cold launch (or Harness switch) has not established that the key is
+  // missing. Keep configuration actions hidden until that read has settled.
+  const configurationPending = claudeSourceChecking || (
+    !credentialConfigured && nativeAvailable && (
+      runtimeChecking || (selectionHydrated && credentialHarnessId !== activeHarnessId)
+    )
+  );
   const activeModels = useMemo(
     () =>
       (activeHarness.id === "dsh" ? dshCatalog.models : activeHarness.id === 'codex' && codexModels ? codexModels : activeHarness.models)
@@ -1095,21 +1136,12 @@ export function HomeScreen({
   const sessionWriteTailRef = useRef(Promise.resolve());
   const drainInterruptedCleanupRef = useRef(false);
 
-  /**
-   * Preferences have a presentation store of their own, while the schema-9
-   * session root owns the canonical persisted projection.  Rehydrate through
-   * the full chat validator before serialization so every native write gets
-   * one complete, canonical V9 root instead of an ad-hoc merged envelope.
-   */
+  /** Keep validated preferences current without replacing in-flight row owners. */
   const synchronizePreferencesIntoChatState = useCallback(() => {
-    const serializedChat = store.serialize();
-    const serializedPreferences = preferencesStore.serialize();
-    const snapshot = JSON.parse(serializedChat) as Record<string, unknown>;
-    if (JSON.stringify(snapshot.preferences) === serializedPreferences) {
-      return serializedChat;
+    if (!store.setPreferences(preferencesStore.serialize())) {
+      throw new Error('E_SESSION_PERSISTENCE');
     }
-    snapshot.preferences = JSON.parse(serializedPreferences) as unknown;
-    store.hydrate(snapshot);
+    // Full V9 serialization still validates the complete persisted envelope.
     return store.serialize();
   }, [preferencesStore, store]);
 
@@ -1276,6 +1308,7 @@ export function HomeScreen({
         return { status: 'not_committed' };
       }
 
+      const casStarted = Date.now();
       const response: SessionCASPersistResultV1 | null =
         await sessionPersistence.casPersist({
           schema_version: 1,
@@ -1553,6 +1586,7 @@ export function HomeScreen({
         createRoundId: () => LocalRuntime.createCompletionRequestId(),
         createOperationId: () => LocalRuntime.createCompletionRequestId(),
         agentRuntime: AgentRuntime,
+        previewSource: nativeAgentRoundPreviewSource,
         requestAgentApproval: (request: CompletionAgentApprovalRequest) => {
           const scopes = [
             ...(request.allowedDecisions.includes('allow_once')
@@ -1622,6 +1656,11 @@ export function HomeScreen({
     );
   useEffect(
     () => completionController.subscribe(setCompletionState),
+    [completionController],
+  );
+  const [roundPreviews, setRoundPreviews] = useState(() => completionController.getPreviews());
+  useEffect(
+    () => completionController.subscribePreviews(setRoundPreviews),
     [completionController],
   );
   const projectContextNativeAvailable = useMemo(
@@ -1816,17 +1855,26 @@ export function HomeScreen({
     [store, t],
   );
 
+  // The persisted active conversation owns the last choice, even when it is
+  // blank. Settings defaults remain the fallback for an empty session. Copy
+  // only model/effort so a new chat never inherits project or workspace state.
+  const newConversationOptions = useCallback(() => {
+    const selected = selectActiveConversation(store.getState());
+    const defaults = preferencesStore.getState();
+    return {
+      modelId: defaultModelForHarness(
+        selected === null ? defaults.selectedHarnessId : harnessForModel(selected.modelId),
+        selected?.modelId ?? defaults.defaultModel,
+      ),
+      thinkingMode: selected?.thinkingMode ?? defaults.thinkingMode,
+    };
+  }, [preferencesStore, store]);
+
   const ensureConversation = useCallback((): string => {
     const selected = store.getState().selectedConversationId;
     if (selected !== null) return selected;
-    return store.createConversation({
-      modelId: defaultModelForHarness(
-        preferencesStore.getState().selectedHarnessId,
-        preferencesStore.getState().defaultModel,
-      ),
-      thinkingMode: preferencesStore.getState().thinkingMode,
-    });
-  }, [preferencesStore, store]);
+    return store.createConversation(newConversationOptions());
+  }, [newConversationOptions, store]);
 
   const reconcileSelectedConversation = useCallback(
     (conversationId: string) => {
@@ -1860,7 +1908,7 @@ export function HomeScreen({
   );
 
   const hydrateStoredState = useCallback(
-    async (loaded: LoadSessionSnapshotResultV1 | null): Promise<void> => {
+    async (loaded: LoadSessionSnapshotResultV1 | null): Promise<boolean> => {
       if (loaded === null) {
         // A malformed, unavailable, or boolean native result is not a
         // missing session. Do not hydrate or overwrite the live projection;
@@ -1870,12 +1918,12 @@ export function HomeScreen({
         setStorageWarning(
           t('home.storedChatsRejected', { error: 'E_SESSION_PERSISTENCE' }),
         );
-        return;
+        return false;
       }
       if (loaded.status === 'missing') {
         setSessionAuthority(null);
         ensureConversation();
-        return;
+        return true;
       }
 
       const hydrated = safeHydrateChatState(
@@ -1901,7 +1949,7 @@ export function HomeScreen({
         setStorageWarning(
           t('home.storedChatsRejected', { error: hydrated.error.message }),
         );
-        return;
+        return false;
       }
 
       let candidate: string;
@@ -1911,7 +1959,7 @@ export function HomeScreen({
         setSessionAuthority(null);
         ensureConversation();
         setStorageWarning(t('home.saveFailed', { error: errorText(error) }));
-        return;
+        return false;
       }
       const candidateDigest = sessionSnapshotSHA256(candidate);
       if (candidateDigest === null) {
@@ -1920,7 +1968,7 @@ export function HomeScreen({
         setStorageWarning(
           t('home.saveFailed', { error: 'E_SESSION_PERSISTENCE' }),
         );
-        return;
+        return false;
       }
 
       let migratedFromLegacy = false;
@@ -1937,7 +1985,7 @@ export function HomeScreen({
           setSessionAuthority(null);
           ensureConversation();
           setStorageWarning(t('home.saveFailed', { error: migrated.status }));
-          return;
+          return false;
         }
         migratedFromLegacy = true;
       } else if (candidateDigest !== loaded.snapshot.session_sha256) {
@@ -1959,7 +2007,7 @@ export function HomeScreen({
           setSessionAuthority(null);
           ensureConversation();
           setStorageWarning(t('home.saveFailed', { error: migrated.status }));
-          return;
+          return false;
         }
       } else {
         // The native facade has already verified the V9 digest and requires
@@ -1970,7 +2018,7 @@ export function HomeScreen({
             t('home.saveFailed', { error: 'E_SESSION_PERSISTENCE' }),
           );
           ensureConversation();
-          return;
+          return false;
         }
       }
 
@@ -1988,6 +2036,7 @@ export function HomeScreen({
       if (store.getSessionAuthority() !== null) {
         drainInterruptedAgentCleanup().catch(() => undefined);
       }
+      return true;
     },
     [
       drainInterruptedAgentCleanup,
@@ -2013,25 +2062,12 @@ export function HomeScreen({
       setRuntimeChecking(false);
       return;
     }
+    let restoredSelection = false;
     try {
-      const credential = await activeAdapter.credentialStatus();
-      const configured = credential.status === 'configured';
-      setCredentialHarnessId(activeHarnessId);
-      setCredentialConfigured(configured);
-      let initialProof: RuntimeProof | null = null;
-      if (configured) {
-        try {
-          initialProof = (await bootstrapForHarness(activeHarnessId)).proof;
-        } catch (error) {
-          // Runtime proof is observational. A broken sandbox probe must not
-          // suppress restoration of an already committed local session.
-          setRuntimeFailure(errorText(error));
-        }
-      }
       const loaded = sessionSnapshotsAvailable === true
         ? await sessionPersistence.loadSessionSnapshotResult()
         : null;
-      await hydrateStoredState(loaded);
+      restoredSelection = await hydrateStoredState(loaded);
       setChatState(store.getState());
       const restoredTransition =
         store.getState().projectContextDestructiveTransition;
@@ -2075,6 +2111,14 @@ export function HomeScreen({
           setContextSheetVisible(true);
         }
       }
+      // Restore history and reconcile destructive recovery first. Only the cold
+      // bootstrap changes the default selection; resume and queued task links
+      // retain their existing navigation flow after this gate opens.
+      if (selectColdStartConversation(store, newConversationOptions())) {
+        await persist();
+        setChatState(store.getState());
+      }
+      setSelectionHydrated(restoredSelection);
       lifecycleBootstrapReadyRef.current = true;
       setLifecycleBootstrapReady(true);
       if (
@@ -2091,35 +2135,23 @@ export function HomeScreen({
         reconcileSelectedConversation(selectedAfterLifecycle);
       }
       await synchronizeAttachmentStore(store.getState());
-      if (
-        configured &&
-        loaded !== null &&
-        loaded.status !== 'missing'
-      ) {
-        try {
-          initialProof = (await bootstrapForHarness(activeHarnessId)).proof;
-        } catch (error) {
-          setRuntimeFailure(errorText(error));
-        }
-      }
-      if (activeHarnessIdRef.current !== activeHarnessId) return;
-      setProof(initialProof);
     } catch (error) {
       setRuntimeFailure(errorText(error));
       if (store.getState().selectedConversationId === null)
         ensureConversation();
       setChatState(store.getState());
     } finally {
+      if (!restoredSelection) setRuntimeChecking(false);
       if (!lifecycleBootstrapReadyRef.current) {
         lifecycleBootstrapReadyRef.current = true;
         setLifecycleBootstrapReady(true);
       }
-      setRuntimeChecking(false);
     }
   }, [
-    activeAdapter,
-    activeHarnessId,
     ensureConversation,
+    selectColdStartConversation,
+    newConversationOptions,
+    persist,
     hydrateStoredState,
     nativeAvailable,
     sessionSnapshotsAvailable,
@@ -2139,25 +2171,44 @@ export function HomeScreen({
     bootstrap().catch(() => undefined);
   }, [bootstrap, sessionSnapshotsAvailable]);
 
+  // Probe only the final hydrated selection. The launch callback must not
+  // retain the adapter from its pre-hydration render, and stale results must
+  // not start another provider after the user has switched conversations.
   useEffect(() => {
-    if (!lifecycleBootstrapReady || !nativeAvailable) return;
+    if (!selectionHydrated || !lifecycleBootstrapReady || !nativeAvailable) return;
     let cancelled = false;
-    activeAdapter
-      .credentialStatus()
-      .then(credential => {
+    setRuntimeChecking(true);
+    setRuntimeFailure(null);
+    setProof(null);
+    const probe = async () => {
+      let credentialReadSucceeded = false;
+      try {
+        const credential = await activeAdapter.credentialStatus();
         if (cancelled) return;
+        credentialReadSucceeded = true;
+        const configured = credential.status === 'configured';
         setCredentialHarnessId(activeHarnessId);
-        setCredentialConfigured(credential.status === 'configured');
-      })
-      .catch(() => {
+        setCredentialConfigured(configured);
+        if (configured) {
+          const initialProof = (await bootstrapForHarness(activeHarnessId)).proof;
+          if (!cancelled) setProof(initialProof);
+        }
+      } catch (error) {
         if (cancelled) return;
-        setCredentialHarnessId(activeHarnessId);
-        setCredentialConfigured(false);
-      });
-    return () => {
-      cancelled = true;
+        // A failed key/source read invalidates the earlier configured value;
+        // an observational runtime-proof failure does not erase a known key.
+        if (!credentialReadSucceeded) {
+          setCredentialHarnessId(activeHarnessId);
+          setCredentialConfigured(false);
+        }
+        setRuntimeFailure(errorText(error));
+      } finally {
+        if (!cancelled) setRuntimeChecking(false);
+      }
     };
-  }, [activeAdapter, activeHarnessId, lifecycleBootstrapReady, nativeAvailable, providerConfigurationRevision]);
+    probe().catch(() => undefined);
+    return () => { cancelled = true; };
+  }, [activeAdapter, activeHarnessId, selectionHydrated, lifecycleBootstrapReady, nativeAvailable, providerConfigurationRevision]);
 
   // QA fixture: with -DSHSeedMarkdownDemo the Simulator seeds one
   // markdown-demo conversation after bootstrap, unless a session restored.
@@ -2249,12 +2300,30 @@ export function HomeScreen({
     });
     return () => { cancelled = true; };
   }, [presentationOwner, presentationRevision]);
+  const pendingAttemptId =
+    completionState.conversationId === activeConversation?.id &&
+    (completionState.phase === 'preparing' ||
+      completionState.phase === 'starting' ||
+      completionState.phase === 'sending')
+      ? completionState.attemptId
+      : null;
+  const previewLabels = useMemo(() => ({ thinking: t('messages.thinking') }), [t]);
   const activeMessages = useMemo(
-    () => displayMessages(activeConversation, attachmentPreviews, chatState.sessionEvents ?? [], roundPresentations),
-    [activeConversation, attachmentPreviews, chatState.sessionEvents, roundPresentations],
+    () => {
+      const started = Date.now();
+      const rows = displayMessages(activeConversation, attachmentPreviews, chatState.sessionEvents ?? [], roundPresentations, roundPreviews, pendingAttemptId, previewLabels);
+      markTiming('js.display_messages', Date.now() - started);
+      return rows;
+    },
+    [activeConversation, attachmentPreviews, chatState.sessionEvents, roundPresentations, roundPreviews, pendingAttemptId, previewLabels],
   );
   const conversationSummaries = useMemo(
-    () => selectOrderedConversations(chatState).map(summaryFor),
+    () => {
+      const started = Date.now();
+      const summaries = selectOrderedConversations(chatState).map(summaryFor);
+      markTiming('js.conversation_summaries', Date.now() - started);
+      return summaries;
+    },
     [chatState],
   );
   const activeModel = activeConversation?.modelId ??
@@ -2877,7 +2946,28 @@ export function HomeScreen({
       const attachmentIds = attachments.map(attachment => attachment.id);
       setAttachmentNotice(null);
       setRequestFailure(null);
+      const unboundAgentChat =
+        !sendWithoutProjectContext &&
+        conversation.workspaceId === null &&
+        conversation.projectId === null &&
+        conversation.workspaceBinding == null &&
+        AgentRuntime.isAvailable();
+      setWorkspaceHintConversationId(unboundAgentChat ? conversationId : null);
       const outcomeEpoch = ++completionUiEpoch.current;
+      let durable = false;
+      let restored = false;
+      const clearOutgoingDraft = () => {
+        if (store.getState().selectedConversationId !== conversationId ||
+            completionUiEpoch.current !== outcomeEpoch) return;
+        if (draftRef.current === text) {
+          draftRef.current = '';
+          setDraft('');
+        }
+        if (sameOrderedAttachmentIds(draftAttachmentsRef.current, attachmentIds)) {
+          draftAttachmentsRef.current = [];
+          setDraftAttachments([]);
+        }
+      };
       const result = await completionController.send(
         {
           conversationId,
@@ -2887,25 +2977,25 @@ export function HomeScreen({
           ...(sendWithoutProjectContext ? { sendWithoutProjectContext: true } : {}),
         },
         {
+          onPrepared: clearOutgoingDraft,
           onPreparedDurable: () => {
-            setDraft(current => {
-              const next = current === text ? '' : current;
-              draftRef.current = next;
-              return next;
-            });
-            setDraftAttachments(current => {
-              const next = sameOrderedAttachmentIds(current, attachmentIds)
-                ? []
-                : current;
-              draftAttachmentsRef.current = next;
-              return next;
-            });
+            durable = true;
+            if (restored) clearOutgoingDraft();
           },
           onCommitted: () => {
             refreshProof().catch(() => undefined);
           },
         },
       );
+      if (!durable && store.getState().selectedConversationId === conversationId &&
+          completionUiEpoch.current === outcomeEpoch &&
+          draftRef.current === '' && draftAttachmentsRef.current.length === 0) {
+        restored = true;
+        draftRef.current = text;
+        setDraft(text);
+        draftAttachmentsRef.current = attachments;
+        setDraftAttachments(attachments);
+      }
       applyCompletionOutcome(result, outcomeEpoch);
     },
     [
@@ -3136,6 +3226,8 @@ export function HomeScreen({
       current.phase === 'blocked'
     ) {
       setRequestFailure(current.failureCode ?? 'E_ATTEMPT_PERSISTENCE');
+    } else if (current.phase === 'cancelling') {
+      setRequestFailure(null);
     } else {
       setRequestFailure(t('home.responseStopped'));
     }
@@ -3258,13 +3350,7 @@ export function HomeScreen({
           setDraft('');
         }
         if (store.getState().selectedConversationId === null) {
-          store.createConversation({
-            modelId: defaultModelForHarness(
-              preferencesStore.getState().selectedHarnessId,
-              preferencesStore.getState().defaultModel,
-            ),
-            thinkingMode: preferencesStore.getState().thinkingMode,
-          });
+          store.createConversation(newConversationOptions());
         }
         await synchronizeAttachmentStore(store.getState());
       } else if (
@@ -3280,7 +3366,7 @@ export function HomeScreen({
     [
       discardDraftAttachments,
       markAttachmentOperationStale,
-      preferencesStore,
+      newConversationOptions,
       reconcileSelectedConversation,
       store,
       synchronizeAttachmentStore,
@@ -3455,13 +3541,7 @@ export function HomeScreen({
           setDraft('');
         }
         if (store.getState().selectedConversationId === null) {
-          store.createConversation({
-            modelId: defaultModelForHarness(
-              preferencesStore.getState().selectedHarnessId,
-              preferencesStore.getState().defaultModel,
-            ),
-            thinkingMode: preferencesStore.getState().thinkingMode,
-          });
+          store.createConversation(newConversationOptions());
         }
         await synchronizeAttachmentStore(store.getState());
       } else if (
@@ -3477,7 +3557,7 @@ export function HomeScreen({
     [
       discardDraftAttachments,
       markAttachmentOperationStale,
-      preferencesStore,
+      newConversationOptions,
       reconcileSelectedConversation,
       store,
       synchronizeAttachmentStore,
@@ -3759,13 +3839,7 @@ export function HomeScreen({
       completionUiEpoch.current += 1;
       markAttachmentOperationStale();
       discardDraftAttachments();
-      store.createConversation({
-        modelId: defaultModelForHarness(
-          preferencesStore.getState().selectedHarnessId,
-          preferencesStore.getState().defaultModel,
-        ),
-        thinkingMode: preferencesStore.getState().thinkingMode,
-      });
+      store.createConversation(newConversationOptions());
       setDraft('');
       setAttachmentNotice(null);
       setRequestFailure(null);
@@ -3784,7 +3858,7 @@ export function HomeScreen({
     markAttachmentOperationStale,
     openBlockedProjectContext,
     persist,
-    preferencesStore,
+    newConversationOptions,
     projectContextController,
     projectContextLifecycleController,
     reconcileSelectedConversation,
@@ -4329,13 +4403,13 @@ export function HomeScreen({
     }
     const nextGeneration = workspacePickerGenerationRef.current + 1;
     workspacePickerGenerationRef.current = nextGeneration;
-    workspacePickerOwnersRef.current.set(
-      nextGeneration,
-      selectActiveConversation(store.getState()),
-    );
-    setWorkspacePickerGeneration(nextGeneration);
     const nextNonce = workspaceSurfaceNonceRef.current + 1;
     workspaceSurfaceNonceRef.current = nextNonce;
+    workspacePickerOwnersRef.current.set(
+      nextGeneration,
+      { conversation: selectActiveConversation(store.getState()), surfaceNonce: nextNonce },
+    );
+    setWorkspacePickerGeneration(nextGeneration);
     workspaceSheetVisibleRef.current = true;
     setWorkspaceSheetVisible(true);
   }, [completionController, rootSurfaceAdmissionAllowed, store]);
@@ -4409,10 +4483,9 @@ export function HomeScreen({
             workspacePickerGenerationRef.current !== pickerGeneration ||
             workspaceSurfaceNonceRef.current !== surfaceNonce
           ) {
-            if ('ownerDrifted' in outcome && outcome.ownerDrifted) {
-              setChatState(store.getState());
-              setRequestFailure('E_WORKSPACE_CONFLICT');
-            }
+            // The binding is durable. A dismissed/replaced picker cannot
+            // publish a late conflict banner into the current conversation.
+            // Controller ownership checks and uncertain-write recovery remain intact.
             return;
           }
           if ('ownerDrifted' in outcome && outcome.ownerDrifted) {
@@ -4420,6 +4493,7 @@ export function HomeScreen({
             setRequestFailure('E_WORKSPACE_CONFLICT');
             return;
           }
+          setRequestFailure(previous => previous === 'E_WORKSPACE_CONFLICT' ? null : previous);
           setWorkspaceNames(previous => ({
             ...previous,
             [outcome.workspace.workspace_id]: outcome.workspace.display_name,
@@ -4489,13 +4563,16 @@ export function HomeScreen({
   }, [closeWorkspacePicker, store, workspaceBindingController]);
 
   const workspacePickerOnSelect = useCallback(
-    (workspaceId: string) =>
+    (workspaceId: string) => {
+      const owner = workspacePickerOwnersRef.current.get(workspacePickerGeneration);
+      if (owner === undefined) return;
       handleWorkspaceSelect(
         workspaceId,
         workspacePickerGeneration,
-        workspacePickerGeneration,
-        workspacePickerOwnersRef.current.get(workspacePickerGeneration) ?? null,
-      ),
+        owner.surfaceNonce,
+        owner.conversation,
+      );
+    },
     [handleWorkspaceSelect, workspacePickerGeneration],
   );
 
@@ -4748,13 +4825,7 @@ export function HomeScreen({
           discardDraftAttachments();
           setDraft('');
           setAttachmentNotice(null);
-          const conversationId = store.createConversation({
-            modelId: defaultModelForHarness(
-              preferencesStore.getState().selectedHarnessId,
-              preferencesStore.getState().defaultModel,
-            ),
-            thinkingMode: preferencesStore.getState().thinkingMode,
-          });
+          const conversationId = store.createConversation(newConversationOptions());
           let outcome: Awaited<
             ReturnType<typeof workspaceBindingController.bindWorkspace>
           >;
@@ -4870,7 +4941,7 @@ export function HomeScreen({
       directProjectMutationView,
       invalidatePendingProjectSend,
       markAttachmentOperationStale,
-      preferencesStore,
+      newConversationOptions,
       projectContextController,
       projectContextLifecycleController,
       store,
@@ -5816,6 +5887,34 @@ export function HomeScreen({
               </Text>
             </View>
           )}
+          {workspaceHintConversationId !== null &&
+            workspaceHintConversationId === activeConversation?.id &&
+            activeWorkspaceId === null &&
+            visibleRequestFailure === null && (
+            <View
+              accessibilityLiveRegion="polite"
+              accessibilityRole={Platform.OS === 'android' ? 'text' : 'status'}
+              style={styles.workspaceHint}
+              testID="workspace-unbound-hint"
+            >
+              <Text numberOfLines={3} style={styles.workspaceHintText}>
+                {t('messages.workspaceUnboundNotice')}
+              </Text>
+              <Pressable
+                accessibilityLabel={t('messages.chooseWorkspace')}
+                accessibilityRole="button"
+                onPress={() => {
+                  openWorkspacePicker();
+                }}
+                style={({ pressed }) => [styles.workspaceHintAction, pressed && styles.pressed]}
+                testID="workspace-unbound-hint-action"
+              >
+                <Text style={styles.workspaceHintActionText}>
+                  {t('messages.chooseWorkspace')}
+                </Text>
+              </Pressable>
+            </View>
+          )}
           <View style={styles.proofRow}>
           <Pressable
             accessibilityLabel={runtimeLabel}
@@ -5869,6 +5968,7 @@ export function HomeScreen({
               </Text>
             </Pressable>
           )}
+          </View>
           {activeConversation?.projectContext !== null &&
             activeConversation?.projectContext !== undefined &&
             activeConversation.projectId !== null && (
@@ -5901,7 +6001,9 @@ export function HomeScreen({
             draft={draft}
             harnessName={activeHarness.name}
             providerName={providerName}
-            configurationHint={subscriptionNeedsAttention ? t(glmSubscriptionState === 'signed_in' ? 'messages.subscriptionUnverified' : 'messages.subscriptionLoginRequired') : undefined}
+            configurationHint={claudeSourceChecking ? t('settings.auth.checkingClaude') : configurationPending ? t('messages.preparingConnection', { harness: activeHarness.name }) : subscriptionNeedsAttention ? t(glmSubscriptionState === 'signed_in' ? 'messages.subscriptionUnverified' : 'messages.subscriptionLoginRequired') : undefined}
+            configurationPending={configurationPending}
+            textOnly={claudeSubscriptionSelected}
             configurationAction={subscriptionNeedsAttention ? t('messages.manageSubscription') : undefined}
             model={activeModel}
             modelLabel={providerOverride?.harness_id === activeHarnessId ? providerOverride.model_mappings[activeModel] : undefined}
@@ -5921,6 +6023,7 @@ export function HomeScreen({
                 : workspaceNames[activeWorkspaceId] ?? null
             }
             workspacePickerVisible={workspaceSheetVisible}
+            cancelling={completionState.phase === 'cancelling'}
             sending={completionCancellable(completionState)}
             onAddAttachment={(source, ownershipKey) => {
               addAttachment(source, ownershipKey).catch(() => undefined);
@@ -6721,6 +6824,36 @@ const createStyles = (colors: ThemePalette) =>
       color: colors.textDim,
       fontSize: 10,
       lineHeight: 14,
+    },
+    workspaceHint: {
+      minHeight: 34,
+      borderRadius: 12,
+      backgroundColor: colors.surfaceWarm,
+      borderWidth: StyleSheet.hairlineWidth,
+      borderColor: colors.accent,
+      paddingHorizontal: 11,
+      paddingVertical: 6,
+      flexDirection: 'row',
+      alignItems: 'center',
+      gap: 10,
+    },
+    workspaceHintText: {
+      color: colors.textDim,
+      fontSize: 10,
+      lineHeight: 14,
+      flex: 1,
+    },
+    workspaceHintAction: {
+      minHeight: 28,
+      borderRadius: 14,
+      paddingHorizontal: 11,
+      backgroundColor: colors.accent,
+      justifyContent: 'center',
+    },
+    workspaceHintActionText: {
+      color: colors.background,
+      fontSize: 10,
+      fontWeight: '700',
     },
     retry: {
       height: 28,

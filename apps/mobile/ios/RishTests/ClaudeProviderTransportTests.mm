@@ -59,7 +59,30 @@ static NSUInteger ClaudeTransportRequestCount = 0;
 
 @end
 
+/// Forwards the session's data callbacks to the transport so streamed
+/// rounds settle the same way they do behind LocalRuntimeModule.
+@interface ClaudeStreamingSessionDelegate : NSObject <NSURLSessionDataDelegate>
+@property(nonatomic, weak) DSHCompletionProviderTransport *transport;
+@end
+@implementation ClaudeStreamingSessionDelegate
+- (void)URLSession:(__unused NSURLSession *)session dataTask:(NSURLSessionDataTask *)dataTask
+didReceiveResponse:(NSURLResponse *)response
+ completionHandler:(void (^)(NSURLSessionResponseDisposition))completionHandler {
+  if ([self.transport handlesTask:dataTask]) [self.transport streamingTask:dataTask didReceiveResponse:response];
+  completionHandler(NSURLSessionResponseAllow);
+}
+- (void)URLSession:(__unused NSURLSession *)session dataTask:(NSURLSessionDataTask *)dataTask
+    didReceiveData:(NSData *)data {
+  if ([self.transport handlesTask:dataTask]) [self.transport streamingTask:dataTask didReceiveData:data];
+}
+- (void)URLSession:(__unused NSURLSession *)session task:(NSURLSessionTask *)task
+didCompleteWithError:(NSError *)error {
+  if ([self.transport handlesTask:task]) [self.transport streamingTask:task didCompleteWithError:error];
+}
+@end
+
 @interface ClaudeProviderTransportTests : XCTestCase
+@property(nonatomic, strong) ClaudeStreamingSessionDelegate *streamingDelegate;
 @property(nonatomic, strong) NSURLSession *session;
 @property(nonatomic, strong) ClaudeProviderTransport *transport;
 @end
@@ -72,9 +95,13 @@ static NSUInteger ClaudeTransportRequestCount = 0;
   NSURLSessionConfiguration *configuration =
       NSURLSessionConfiguration.ephemeralSessionConfiguration;
   configuration.protocolClasses = @[ClaudeTransportURLProtocol.class];
-  self.session = [NSURLSession sessionWithConfiguration:configuration];
+  self.streamingDelegate = [[ClaudeStreamingSessionDelegate alloc] init];
+  self.session = [NSURLSession sessionWithConfiguration:configuration
+                                                delegate:self.streamingDelegate
+                                           delegateQueue:nil];
   self.transport = [[ClaudeProviderTransport alloc]
       initWithSession:self.session uuidGenerator:nil monotonicClock:nil];
+  self.streamingDelegate.transport = self.transport;
 }
 
 - (void)tearDown {
@@ -750,4 +777,136 @@ static NSUInteger ClaudeTransportRequestCount = 0;
     else [store saveConfiguration:original error:nil];
   }
 }
+
+#pragma mark - Streamed rounds
+
+- (void)respondSSE:(NSURLProtocol *)protocol request:(NSURLRequest *)request chunks:(NSArray<NSString *> *)chunks {
+  NSHTTPURLResponse *response = [[NSHTTPURLResponse alloc]
+      initWithURL:request.URL statusCode:200 HTTPVersion:@"HTTP/1.1"
+     headerFields:@{ @"Content-Type": @"text/event-stream" }];
+  [protocol.client URLProtocol:protocol didReceiveResponse:response
+            cacheStoragePolicy:NSURLCacheStorageNotAllowed];
+  for (NSString *chunk in chunks) {
+    [protocol.client URLProtocol:protocol didLoadData:[chunk dataUsingEncoding:NSUTF8StringEncoding]];
+  }
+  [protocol.client URLProtocolDidFinishLoading:protocol];
+}
+
+- (void)startStreamedRoundWithTransport:(DSHCompletionProviderTransport *)transport
+                                  model:(NSString *)model
+                                preview:(DSHCompletionProviderTransportPreviewBlock)preview
+                                 result:(NSDictionary **)result
+                              errorCode:(NSString **)errorCode {
+  __block NSDictionary *value = nil;
+  __block NSString *code = nil;
+  XCTestExpectation *done = [self expectationWithDescription:@"streamed round"];
+  id<DSHCompletionExecution> execution = [transport
+      startStreamingExecutionWithSchemaVersion:2
+      roundId:@"33333333-3333-4333-8333-333333333333" generation:1 credentialGeneration:1
+      providerRequestId:@"44444444-4444-4444-8444-444444444444"
+      credential:@"sk-ant-test" requestedModel:model thinkingMode:@"high"
+      credentialGenerationIsCurrent:^BOOL(__unused NSUInteger g) { return YES; }
+      startedAt:1.0 bodyData:[self jsonData:@{ @"model": model, @"stream": @YES }]
+      visibleHistory:@[] modelInput:@[] preview:preview
+      bindExecution:^BOOL(id<DSHCompletionExecution> candidate) { return candidate != nil; }
+      claimRound:^BOOL(__unused BOOL *redirected) { return YES; }
+      markRedirected:nil redirectDecision:nil
+      completion:^(NSDictionary *v, NSString *c) { value = v; code = c; [done fulfill]; }];
+  XCTAssertNotNil(execution);
+  [self waitForExpectations:@[done] timeout:5];
+  if (result != NULL) *result = value;
+  if (errorCode != NULL) *errorCode = code;
+}
+
+- (NSArray<NSString *> *)streamedToolRoundChunksForModel:(NSString *)model {
+  return @[
+    [NSString stringWithFormat:@"event: message_start\ndata: {\"type\":\"message_start\",\"message\":{\"id\":\"msg_stream\",\"type\":\"message\",\"role\":\"assistant\",\"model\":\"%@\",\"content\":[]}}\n\n", model],
+    @"event: content_block_start\ndata: {\"type\":\"content_block_start\",\"index\":0,\"content_block\":{\"type\":\"thinking\",\"thinking\":\"\"}}\n\n"
+    @"event: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"thinking_delta\",\"thinking\":\"Plan it.\"}}\n\n",
+    @"event: content_block_start\ndata: {\"type\":\"content_block_start\",\"index\":1,\"content_block\":{\"type\":\"text\",\"text\":\"\"}}\n\n"
+    @"event: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":1,\"delta\":{\"type\":\"text_delta\",\"text\":\"Writing.\"}}\n\n",
+    @"event: content_block_start\ndata: {\"type\":\"content_block_start\",\"index\":2,\"content_block\":{\"type\":\"tool_use\",\"id\":\"toolu_stream\",\"name\":\"write_file\",\"input\":{}}}\n\n"
+    @"event: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":2,\"delta\":{\"type\":\"input_json_delta\",\"partial_json\":\"{\\\"path\\\": \\\"notes.md\\\",\"}}\n\n",
+    @"event: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":2,\"delta\":{\"type\":\"input_json_delta\",\"partial_json\":\" \\\"content\\\": \\\"hi\\\"}\"}}\n\n"
+    @"event: content_block_stop\ndata: {\"type\":\"content_block_stop\",\"index\":2}\n\n",
+    @"event: message_delta\ndata: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"tool_use\",\"stop_sequence\":null},\"usage\":{\"output_tokens\":12}}\n\n"
+    @"event: message_stop\ndata: {\"type\":\"message_stop\"}\n\n",
+  ];
+}
+
+- (void)testStreamedClaudeRoundAssemblesToolUseAndPreviewsFragments {
+  [ClaudeTransportURLProtocol setHandler:^(NSURLProtocol *protocol, NSURLRequest *request) {
+    XCTAssertEqualObjects([request valueForHTTPHeaderField:@"Accept"], @"text/event-stream");
+    [self respondSSE:protocol request:request chunks:[self streamedToolRoundChunksForModel:@"claude-sonnet-5"]];
+  }];
+  NSMutableArray<NSDictionary *> *previews = [NSMutableArray array];
+  NSDictionary *result = nil;
+  NSString *errorCode = nil;
+  [self startStreamedRoundWithTransport:self.transport model:@"claude-sonnet-5"
+      preview:^(NSDictionary *delta) { @synchronized (previews) { [previews addObject:delta]; } }
+      result:&result errorCode:&errorCode];
+  XCTAssertNil(errorCode);
+  XCTAssertEqualObjects(result[@"provider_response_id"], @"msg_stream");
+  XCTAssertEqualObjects(result[@"harness_id"], @"claude-code");
+  XCTAssertEqualObjects(result[@"text"], @"Writing.");
+  XCTAssertEqualObjects(result[@"reasoning"], @"Plan it.");
+  XCTAssertEqualObjects(result[@"finish_reason"], @"tool_calls");
+  XCTAssertEqual([result[@"tool_calls"] count], 1u);
+  XCTAssertEqualObjects(result[@"tool_calls"][0][@"id"], @"toolu_stream");
+  XCTAssertEqualObjects(result[@"tool_calls"][0][@"name"], @"write_file");
+  NSDictionary *arguments = [NSJSONSerialization JSONObjectWithData:
+      [result[@"tool_calls"][0][@"arguments"] dataUsingEncoding:NSUTF8StringEncoding] options:0 error:nil];
+  // write_file arguments may gain create-only normalization keys; the
+  // streamed values themselves must survive untouched.
+  XCTAssertEqualObjects(arguments[@"path"], @"notes.md");
+  XCTAssertEqualObjects(arguments[@"content"], @"hi");
+  NSMutableString *argumentFragments = [NSMutableString string];
+  NSString *previewedName = nil;
+  @synchronized (previews) {
+    for (NSDictionary *delta in previews) {
+      for (NSDictionary *fragment in delta[@"tool_calls"] ?: @[]) {
+        XCTAssertEqualObjects(fragment[@"index"], @2);
+        if (fragment[@"name"]) previewedName = fragment[@"name"];
+        if (fragment[@"arguments"]) [argumentFragments appendString:fragment[@"arguments"]];
+      }
+    }
+  }
+  XCTAssertEqualObjects(previewedName, @"write_file");
+  XCTAssertEqualObjects(argumentFragments, @"{\"path\": \"notes.md\", \"content\": \"hi\"}");
+  XCTAssertFalse([self.transport hasActiveRequests]);
+}
+
+- (void)testStreamedClaudeRoundCutBeforeMessageDeltaIsRejected {
+  [ClaudeTransportURLProtocol setHandler:^(NSURLProtocol *protocol, NSURLRequest *request) {
+    [self respondSSE:protocol request:request chunks:@[
+      @"event: message_start\ndata: {\"type\":\"message_start\",\"message\":{\"id\":\"msg_cut\",\"model\":\"claude-sonnet-5\"}}\n\n",
+      @"event: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\"half\"}}\n\n",
+    ]];
+  }];
+  NSDictionary *result = nil;
+  NSString *errorCode = nil;
+  [self startStreamedRoundWithTransport:self.transport model:@"claude-sonnet-5" preview:nil
+                                 result:&result errorCode:&errorCode];
+  XCTAssertNil(result);
+  XCTAssertEqualObjects(errorCode, @"E_COMPLETION_FINISH_RELATION");
+}
+
+- (void)testStreamedGlmRoundKeepsTheStrictModelEcho {
+  GlmProviderTransport *glm = [[GlmProviderTransport alloc]
+      initWithSession:self.session uuidGenerator:nil monotonicClock:nil];
+  self.streamingDelegate.transport = glm;
+  XCTAssertTrue([glm providerSupportsStreamingRounds]);
+  [ClaudeTransportURLProtocol setHandler:^(NSURLProtocol *protocol, NSURLRequest *request) {
+    [self respondSSE:protocol request:request chunks:[self streamedToolRoundChunksForModel:@"glm-5.3"]];
+  }];
+  NSDictionary *result = nil;
+  NSString *errorCode = nil;
+  [self startStreamedRoundWithTransport:glm model:@"GLM-5.3" preview:nil
+                                 result:&result errorCode:&errorCode];
+  XCTAssertNil(errorCode);
+  XCTAssertEqualObjects(result[@"harness_id"], @"glm");
+  XCTAssertEqualObjects(result[@"model"], @"GLM-5.3");
+  XCTAssertEqualObjects(result[@"finish_reason"], @"tool_calls");
+}
+
 @end

@@ -43,6 +43,8 @@ type Props = {
   providerName: string;
   configurationHint?: string;
   configurationAction?: string;
+  configurationPending?: boolean;
+  textOnly?: boolean;
   model: SupportedModel;
   modelLabel?: string;
   optionsVisible: boolean;
@@ -52,6 +54,7 @@ type Props = {
   ownershipKey: string;
   locked: boolean;
   sending: boolean;
+  cancelling?: boolean;
   onAddAttachment: (source: AttachmentSource, ownershipKey: string) => void;
   onCancel: () => void;
   onChange: (value: string) => void;
@@ -92,8 +95,10 @@ export function ChatComposer(props: Props) {
   const locked = props.locked || props.sending;
   const canSend =
     props.configured &&
+    !props.configurationPending &&
     (props.draft.trim().length > 0 || props.attachments.length > 0) &&
     !locked &&
+    (!props.textOnly || props.attachments.length === 0) &&
     !props.attachmentBusy;
   const model = localizedModelDetails(props.model, t);
   const thinking = localizedThinkingDetails(props.thinkingMode, t);
@@ -222,7 +227,9 @@ export function ChatComposer(props: Props) {
         multiline
         onChangeText={props.onChange}
         placeholder={
-          props.configured
+          props.configurationPending
+            ? props.configurationHint ?? t('messages.preparingConnection', { harness: props.harnessName })
+            : props.configured
             ? t('messages.inputPlaceholder', { harness: props.harnessName })
             : props.configurationHint ?? (props.onLogin ? t('messages.authPlaceholder') : t('messages.configurePlaceholder', { provider: props.providerName }))
         }
@@ -236,6 +243,17 @@ export function ChatComposer(props: Props) {
         ]}
         value={props.draft}
       />
+      {props.textOnly && <Text style={styles.capabilityNote}>{t(props.attachments.length > 0 ? 'messages.subscriptionTextOnlyAttachments' : 'messages.subscriptionTextOnly')}</Text>}
+      {!props.configured && !props.configurationPending && <View style={styles.authActions}>
+        {props.onLogin && <Pressable accessibilityLabel={t('messages.signIn')} accessibilityRole="button" disabled={locked} onPress={props.onLogin} style={styles.configureChip}>
+          <Text style={styles.configureText}>{t('messages.signIn')}</Text>
+        </Pressable>}
+        <Pressable accessibilityLabel={props.configurationAction ?? t('messages.configureKey', { provider: props.providerName })}
+          accessibilityRole="button" accessibilityState={{ disabled: locked }} disabled={locked} onPress={props.onConfigure}
+          style={({ pressed }) => [styles.configureChip, props.onLogin && styles.secondaryConfigureChip, pressed && styles.pressed]}>
+          <Text style={[styles.configureText, props.onLogin && styles.secondaryConfigureText]}>{props.configurationAction ?? t('messages.configureKeyShort')}</Text>
+        </Pressable>
+      </View>}
       <View style={styles.actions}>
         <Pressable
           accessibilityLabel={t('messages.attachment.add')}
@@ -243,9 +261,9 @@ export function ChatComposer(props: Props) {
           accessibilityState={{
             busy: props.attachmentBusy,
             disabled:
-              !props.configured || locked || props.attachmentBusy,
+              !props.configured || props.textOnly || locked || props.attachmentBusy,
           }}
-          disabled={!props.configured || locked || props.attachmentBusy}
+          disabled={!props.configured || props.textOnly || locked || props.attachmentBusy}
           onPress={() => {
             Keyboard.dismiss();
             pendingAttachmentOwnership.current = props.ownershipKey;
@@ -271,7 +289,7 @@ export function ChatComposer(props: Props) {
               expanded: props.workspacePickerVisible,
             }}
             accessibilityValue={{
-              text: props.workspaceName ?? t('messages.workspaceLabel'),
+              text: props.workspaceName ?? t('messages.chooseWorkspace'),
             }}
             disabled={locked}
             onPress={() => {
@@ -289,8 +307,14 @@ export function ChatComposer(props: Props) {
               icon={FolderCode}
               size={13}
             />
-            <Text numberOfLines={2} style={styles.workspaceText}>
-              {props.workspaceName ?? t('messages.workspaceLabel')}
+            <Text
+              numberOfLines={2}
+              style={[
+                styles.workspaceText,
+                props.workspaceName == null && styles.workspaceTextUnbound,
+              ]}
+            >
+              {props.workspaceName ?? t('messages.chooseWorkspace')}
             </Text>
             <AppIcon
               color={colors.muted}
@@ -300,7 +324,7 @@ export function ChatComposer(props: Props) {
             />
           </Pressable>
         )}
-        {props.configured ? (
+        {(
           <Pressable
             accessibilityLabel={t('messages.composerOptions', {
               model: props.modelLabel ?? model.name,
@@ -333,28 +357,6 @@ export function ChatComposer(props: Props) {
               style={styles.chevronIcon}
             />
           </Pressable>
-        ) : (
-          <>
-          {props.onLogin && <Pressable accessibilityLabel={t('messages.signIn')} accessibilityRole="button" disabled={locked} onPress={props.onLogin} style={styles.configureChip}>
-            <Text style={styles.configureText}>{t('messages.signIn')}</Text>
-          </Pressable>}
-          <Pressable
-            accessibilityLabel={props.configurationAction ?? t('messages.configureKey', { provider: props.providerName })}
-            accessibilityRole="button"
-            accessibilityState={{ disabled: locked }}
-            disabled={locked}
-            onPress={props.onConfigure}
-            style={({ pressed }) => [
-              styles.configureChip,
-              props.onLogin && styles.secondaryConfigureChip,
-              pressed && styles.pressed,
-            ]}
-          >
-            <Text style={[styles.configureText, props.onLogin && styles.secondaryConfigureText]}>
-              {props.configurationAction ?? t('messages.configureKeyShort')}
-            </Text>
-          </Pressable>
-          </>
         )}
         <View style={styles.actionSpacer} />
         <Pressable
@@ -365,7 +367,7 @@ export function ChatComposer(props: Props) {
           }
           accessibilityRole="button"
           accessibilityState={{
-            busy: props.sending,
+            busy: props.sending || props.configurationPending === true,
             disabled: !props.sending && (locked || !canSend),
           }}
           disabled={!props.sending && (locked || !canSend)}
@@ -503,6 +505,8 @@ const createStyles = (colors: ThemePalette) =>
       borderWidth: 2,
       borderColor: colors.surface,
     },
+    authActions: { flexDirection: 'row', gap: 8, marginBottom: 8 },
+    capabilityNote: { color: colors.muted, fontSize: 11, marginBottom: 6 },
     actions: { flexDirection: 'row', flexWrap: 'wrap', rowGap: 8, alignItems: 'center', marginTop: 5 },
     actionSpacer: { flex: 1 },
     addAttachment: {
@@ -527,6 +531,9 @@ const createStyles = (colors: ThemePalette) =>
       marginRight: 6,
     },
     workspaceText: { color: colors.textDim, fontSize: 10, fontWeight: '600', flexShrink: 1 },
+    // An unbound chat shows the call to action in the accent colour so the
+    // missing binding is visible before the first message is sent.
+    workspaceTextUnbound: { color: colors.accent },
     modelChip: {
       minHeight: 44,
       paddingVertical: 7,

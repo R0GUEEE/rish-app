@@ -10,6 +10,8 @@ import type {
   CompleteRoundV3Result,
 } from '../src/completion/types';
 import type { SessionDurabilityResult } from '../src/completion/SessionPersistence';
+import type { AgentRoundPreviewEvent } from '../src/agent/AgentRoundPreview';
+import type { AgentRoundPreviews } from '../src/completion/CompletionController';
 import { sessionSnapshotSHA256 } from '../src/completion/SessionPersistence';
 import {
   providerHostForModel,
@@ -1968,6 +1970,7 @@ describe('project Agent completion controller', () => {
     requestAgentApproval = jest.fn(async () => ({ status: 'approved' as const, scope: 'once' as const })),
     now: () => string = () => NOW,
     requestBatchApprovals?: CompletionControllerDependencies['requestBatchApprovals'],
+    previewSource?: CompletionControllerDependencies['previewSource'],
   ) {
     return createCompletionController({
       chat: store,
@@ -1984,6 +1987,7 @@ describe('project Agent completion controller', () => {
       ...(requestBatchApprovals === undefined
         ? {}
         : { requestBatchApprovals }),
+      ...(previewSource === undefined ? {} : { previewSource }),
     });
   }
 

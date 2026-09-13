@@ -18,7 +18,13 @@ extern NSString * const DSHStreamEventErrorDomain;
 /// A parsed streaming delta emitted to JS.
 typedef NSDictionary<NSString *, id> DSHStreamDelta;
 
+/// Error 2106: a tool-call fragment has an unusable shape.
 @interface DSHStreamEventParser : NSObject <DSHProviderStreamEventParsing>
+
+/// Provider identity observed on the chunks so far (`id` / `model` of the
+/// OpenAI-style chunk object). nil until a chunk carried them.
+@property(nonatomic, copy, readonly, nullable) NSString *streamedResponseId;
+@property(nonatomic, copy, readonly, nullable) NSString *streamedModel;
 
 /// Feed raw chunk bytes. Returns the deltas decoded from complete SSE
 /// events, or nil with *error on malformed/oversized input.
@@ -32,6 +38,62 @@ typedef NSDictionary<NSString *, id> DSHStreamDelta;
 
 /// Resets to a clean state for reuse.
 - (void)reset;
+
+@end
+
+/// Error domain / codes for the assembler (2201 over budget, 2202 tool
+/// fragment cannot be placed).
+extern NSString * const DSHStreamAssemblerErrorDomain;
+
+/// Rebuilds a provider's single-shot response object from the streamed
+/// delta vocabulary so a streamed round is validated by exactly the same
+/// response parser as a non-streamed one. Each dialect supplies its own
+/// wire shape through `responseObject`.
+@protocol DSHProviderStreamResponseAssembling <NSObject>
+- (void)noteResponseId:(nullable NSString *)responseId model:(nullable NSString *)model;
+- (BOOL)appendDelta:(DSHStreamDelta *)delta error:(NSError **)error;
+@property(nonatomic, readonly) NSUInteger accumulatedBytes;
+- (NSDictionary<NSString *, id> *)responseObject;
+@end
+
+/// One assembled tool call: index, optional id/name, concatenated arguments.
+typedef NSDictionary<NSString *, id> DSHStreamAssembledCall;
+
+/// Accumulates text, reasoning, tool fragments, finish reason and identity;
+/// `responseObject` emits the OpenAI `chat.completion` shape (DeepSeek and
+/// other chat-completions dialects). Subclasses reuse the accumulation and
+/// override `responseObject` for their own wire shape. Pure state, no I/O.
+@interface DSHStreamResponseAssembler : NSObject <DSHProviderStreamResponseAssembling>
+
+- (instancetype)initWithThinkingMode:(NSString *)thinkingMode
+                        maximumBytes:(NSUInteger)maximumBytes;
+
+/// Records the chunk identity; the first non-empty value wins.
+- (void)noteResponseId:(nullable NSString *)responseId
+                 model:(nullable NSString *)model;
+
+/// Applies one parsed delta. NO with *error when the accumulated text,
+/// reasoning and tool arguments exceed the byte budget or a tool fragment
+/// cannot be placed.
+- (BOOL)appendDelta:(DSHStreamDelta *)delta error:(NSError **)error;
+
+/// Bytes of text, reasoning and arguments accumulated so far.
+@property(nonatomic, readonly) NSUInteger accumulatedBytes;
+
+/// The assembled object in the provider's single-shot shape. Missing
+/// identity or finish reason is left for the response parser to reject.
+- (NSDictionary<NSString *, id> *)responseObject;
+
+/// Accumulated state for subclasses building another wire shape.
+@property(nonatomic, copy, readonly) NSString *assembledText;
+@property(nonatomic, copy, readonly) NSString *assembledReasoning;
+@property(nonatomic, readonly) BOOL assembledSawReasoning;
+@property(nonatomic, copy, readonly, nullable) NSString *assembledFinishReason;
+@property(nonatomic, copy, readonly, nullable) NSString *assembledResponseId;
+@property(nonatomic, copy, readonly, nullable) NSString *assembledModel;
+@property(nonatomic, copy, readonly) NSString *assembledThinkingMode;
+/// Sorted by index; each {index, id?, name?, arguments}.
+@property(nonatomic, copy, readonly) NSArray<DSHStreamAssembledCall *> *assembledToolCalls;
 
 @end
 

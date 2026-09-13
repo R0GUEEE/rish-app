@@ -7,6 +7,13 @@ import type {
   CompletionVisibleMessageV2,
 } from './types';
 import { SESSION_EVENT_SCHEMA_VERSION } from '../agent/SessionEvents';
+import {
+  createAgentRoundPreviewState,
+  reduceAgentRoundPreview,
+  type AgentRoundPreviewEvent,
+  type AgentRoundPreviewState,
+} from '../agent/AgentRoundPreview';
+import type { AgentRoundPreviewSource } from '../agent/AgentRoundPreviewSource';
 import type {
   SessionDurabilityResult,
   SessionSnapshotRefV1,
@@ -229,6 +236,13 @@ export type CompletionControllerDependencies = {
   readonly createRoundId: () => string;
   /** Optional native high-level Agent facade. */
   readonly agentRuntime?: AgentRuntimeFacadeV2;
+  /**
+   * Optional source of streamed round previews. Preview state is
+   * presentation material owned by this controller: it never enters chat
+   * state, the session journal, or any proof input, and the validated round
+   * result replaces it.
+   */
+  readonly previewSource?: AgentRoundPreviewSource;
   /** Injected safe UI approval broker; absence fails closed. */
   readonly requestAgentApproval?: (
     request: CompletionAgentApprovalRequest,
@@ -250,9 +264,14 @@ export type CompletionControllerDependencies = {
   readonly now?: () => string;
 };
 
+/** Streamed previews of the active attempt's rounds, keyed by round id. */
+export type AgentRoundPreviews = Readonly<Record<string, AgentRoundPreviewState>>;
+
 export type CompletionController = {
   getState(): CompletionControllerState;
   subscribe(listener: (state: CompletionControllerState) => void): () => void;
+  getPreviews(): AgentRoundPreviews;
+  subscribePreviews(listener: (previews: AgentRoundPreviews) => void): () => void;
   send(
     input: CompletionControllerInput,
     events?: CompletionControllerEvents,
@@ -685,8 +704,72 @@ export function createCompletionController(
     }
   };
 
+  // Streamed round previews: ephemeral, per attempt, replaced by the
+  // validated result and dropped when the run settles.
+  let roundPreviews: AgentRoundPreviews = Object.freeze({});
+  let previewAttemptId: string | null = null;
+  let previewKeys = new Map<string, { readonly operationId: string }>();
+  let previewUnsubscribe: (() => void) | null = null;
+  const previewListeners = new Set<(previews: AgentRoundPreviews) => void>();
+  const publishPreviews = (next: AgentRoundPreviews): void => {
+    if (next === roundPreviews) return;
+    roundPreviews = next;
+    previewListeners.forEach(listener => {
+      try {
+        listener(roundPreviews);
+      } catch {
+        // Preview listeners cannot affect the completion flow.
+      }
+    });
+  };
+  const clearPreviews = (): void => {
+    previewAttemptId = null;
+    previewKeys = new Map();
+    if (Object.keys(roundPreviews).length > 0) publishPreviews(Object.freeze({}));
+  };
+  const onPreviewEvent = (event: AgentRoundPreviewEvent): void => {
+    if (event.attemptId !== previewAttemptId) return;
+    const key = previewKeys.get(event.roundId);
+    if (key === undefined || key.operationId !== event.operationId) return;
+    const current =
+      roundPreviews[event.roundId] ??
+      createAgentRoundPreviewState({
+        taskId: event.taskId,
+        attemptId: event.attemptId,
+        roundId: event.roundId,
+        roundIndex: event.roundIndex,
+        operationId: event.operationId,
+        providerRequestId: event.providerRequestId,
+        harnessId: event.harnessId,
+      });
+    const next = reduceAgentRoundPreview(current, event);
+    if (next === roundPreviews[event.roundId]) return;
+    publishPreviews(Object.freeze({ ...roundPreviews, [event.roundId]: next }));
+  };
+  const openPreview = (attemptId: string, roundId: string, operationId: string): void => {
+    if (previewAttemptId !== attemptId) clearPreviews();
+    previewAttemptId = attemptId;
+    previewKeys.set(roundId, { operationId });
+    if (previewUnsubscribe === null && dependencies.previewSource !== undefined) {
+      try {
+        previewUnsubscribe = dependencies.previewSource(onPreviewEvent);
+      } catch {
+        previewUnsubscribe = null;
+      }
+    }
+  };
+
   const publish = (next: Omit<CompletionControllerState, 'epoch'>) => {
     state = { ...next, epoch };
+    if (
+      next.phase === 'idle' ||
+      next.phase === 'blocked' ||
+      next.phase === 'retryable' ||
+      next.phase === 'resume_available' ||
+      next.phase === 'cancelling'
+    ) {
+      clearPreviews();
+    }
     listeners.forEach(listener => {
       try {
         listener(state);
@@ -2046,6 +2129,7 @@ export function createCompletionController(
             transportSchemaVersion: completeRequest.transport_schema_version,
           }),
         );
+        openPreview(attemptId, currentJournal.round_lineage.round_id, completeOperationId);
         let result: CompleteAgentRoundResultV2;
         try {
           result = await agentRuntime!.completeAgentRoundV2(completeRequest);
@@ -4667,6 +4751,11 @@ export function createCompletionController(
     subscribe: listener => {
       listeners.add(listener);
       return () => listeners.delete(listener);
+    },
+    getPreviews: () => roundPreviews,
+    subscribePreviews: listener => {
+      previewListeners.add(listener);
+      return () => previewListeners.delete(listener);
     },
     send: async (input, events = {}) => {
       if (destructiveJournalActive()) {

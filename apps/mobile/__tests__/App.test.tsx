@@ -3,7 +3,7 @@
  */
 
 import React from 'react';
-import { AccessibilityInfo, Alert, Keyboard, StyleSheet, Text } from 'react-native';
+import { AccessibilityInfo, Alert, AppState, Keyboard, StyleSheet, Text, type AppStateStatus } from 'react-native';
 import ReactTestRenderer, {
   act,
   type ReactTestInstance,
@@ -11,6 +11,10 @@ import ReactTestRenderer, {
 } from 'react-test-renderer';
 
 import App from '../App';
+import * as HarnessAuth from '../src/harnessAuth/native';
+import * as GlmAccount from '../src/harnessAuth/glmAccount';
+import { ProviderConfigurations } from '../src/providers/native';
+import { AppPresentationProvider } from '../src/presentation/AppPresentation';
 import { AccountSheet } from '../src/components/AccountSheet';
 import { ChatDrawer } from '../src/components/ChatDrawer';
 import { ChatComposer } from '../src/components/ChatComposer';
@@ -450,7 +454,7 @@ function contextManifest(): ProjectContextManifestV1 {
   };
 }
 
-function storedProjectContext(confirmed: boolean) {
+function storedProjectContext(confirmed: boolean, modelId: 'deepseek-v4-flash' | 'deepseek-v4-pro' = 'deepseek-v4-flash') {
   let messageId = 0;
   const lifecycleIds = [
     CONTEXT_RUNTIME_ID,
@@ -466,12 +470,13 @@ function storedProjectContext(confirmed: boolean) {
     createLifecycleId: () => lifecycleIds.shift()!,
   });
   const conversationId = stored.createConversation({
+    modelId,
     projectId: CONTEXT_PROJECT_ID,
   });
   expect(stored.ensureRuntimeContextId(conversationId)).toBe(
     CONTEXT_RUNTIME_ID,
   );
-  const manifest = contextManifest();
+  const manifest = {...contextManifest(), model: modelId};
   const initial = stored.getState().conversations[conversationId]!;
   const prepared = stored.replaceProjectContextPrepared(
     {
@@ -705,6 +710,23 @@ async function renderApp(): Promise<Renderer> {
   return renderer;
 }
 
+/** Workflow fixture setup: cold boot normally, then explicitly reopen its history. */
+async function renderAppOpeningStoredConversation(): Promise<Renderer> {
+  const storedId = bridgedSessionJSON === null ? null : JSON.parse(bridgedSessionJSON).active_conversation_id;
+  const renderer = await renderApp();
+  if (typeof storedId === 'string') {
+    const root = renderer.root;
+    await act(async () => actionByLabel(root, 'Open navigation').props.onPress());
+    await act(async () => {
+      await root.findByType(ChatDrawer).props.onSelect(storedId);
+      await settle();
+    });
+  }
+  // Subsequent assertions measure the workflow, not completed setup writes.
+  mockSessionSnapshots.casPersistSession.mockClear();
+  return renderer;
+}
+
 function lastPersistedState() {
   const calls = mockSessionSnapshots.casPersistSession.mock.calls;
   const serialized = calls.at(-1)?.[0]?.candidate_json;
@@ -882,7 +904,7 @@ async function renderSetupProjectApp(): Promise<Renderer> {
     schema_version: 1,
     projects: [contextProject],
   });
-  return await renderApp();
+  return await renderAppOpeningStoredConversation();
 }
 
 async function enterPendingProjectRecovery(
@@ -2028,7 +2050,7 @@ test.each(['prepared', 'failed'] as const)(
     }
     queuePresentSession(stored.serialize());
 
-    const renderer = await renderApp();
+    const renderer = await renderAppOpeningStoredConversation();
     expect(actionByLabel(renderer.root, status === 'prepared' ? 'Continue response' : 'Retry response')).toBeDefined();
     if (status === 'prepared') {
       expect(
@@ -2163,7 +2185,7 @@ test('switches Harness in the same settled conversation without rewriting histor
   expect(mockLocalRuntime.completeV2.mock.calls.at(-1)?.[0]).toMatchObject({ harnessId: 'glm', model: 'GLM-5.3' });
 });
 
-test('routes restored and reopened conversations by their own models while keeping the new-chat Harness preference', async () => {
+test('routes explicitly reopened conversations by their own models while keeping the new-chat Harness preference', async () => {
   const stored = createChatStore();
   const glm = stored.createConversation({ title: 'GLM history', modelId: 'GLM-5.3-Flash' });
   const dsh = stored.createConversation({ title: 'DSH history', modelId: 'deepseek-v4-pro' });
@@ -2171,6 +2193,12 @@ test('routes restored and reopened conversations by their own models while keepi
   queuePresentSession(stored.serialize());
   const renderer = await renderApp();
   const root = renderer.root;
+  // Cold launch now defaults to a new chat; history reopening is explicit.
+  await act(async () => actionByLabel(root, 'Open navigation').props.onPress());
+  await act(async () => {
+    await root.findByType(ChatDrawer).props.onSelect(glm);
+    await settle();
+  });
   expect(root.findByType(ChatComposer).props.harnessName).toBe('GLM');
   await act(async () => root.findByType(ChatComposer).props.onChange('GLM restored send'));
   await act(async () => {
@@ -2204,7 +2232,7 @@ test('keeps the selected conversation retry owner when an earlier Harness save f
   ).toBe(true);
   stored.selectConversation(firstId);
   queuePresentSession(stored.serialize());
-  const renderer = await renderApp();
+  const renderer = await renderAppOpeningStoredConversation();
   const root = renderer.root;
   const harnessSave = deferred<boolean>();
   mockSessionSnapshots.casPersistSession.mockImplementationOnce(async request => {
@@ -2318,7 +2346,7 @@ test.each([
 test('invalidates project context consent when switching Harness in the same conversation', async () => {
   const fixture = storedProjectContext(true);
   queuePresentSession(fixture.stored.serialize());
-  const renderer = await renderApp();
+  const renderer = await renderAppOpeningStoredConversation();
   const root = renderer.root;
   await openHarnessPicker(root);
   await act(async () => {
@@ -2385,7 +2413,7 @@ describe('project context Home integration H1', () => {
     });
     mockLocalProjectContext.inspect.mockReturnValueOnce(inspection.promise);
 
-    const renderer = await renderApp();
+    const renderer = await renderAppOpeningStoredConversation();
     const root = renderer.root;
     expect(mockLocalProjectContext.inspect).toHaveBeenCalledTimes(1);
     expect(mockLocalProjectContext.inspect).toHaveBeenCalledWith(
@@ -2420,7 +2448,7 @@ describe('project context Home integration H1', () => {
       message: 'RAW_NATIVE_SENTINEL /private/project',
     });
 
-    const renderer = await renderApp();
+    const renderer = await renderAppOpeningStoredConversation();
     const root = renderer.root;
     await act(async () => settle());
 
@@ -2494,7 +2522,7 @@ describe('project context Home integration H1', () => {
       state: 'confirmed',
       manifest: fixture.manifest,
     });
-    const renderer = await renderApp();
+    const renderer = await renderAppOpeningStoredConversation();
     const root = renderer.root;
     await act(async () =>
       root.findByProps({ testID: 'project-context-strip' }).props.onPress(),
@@ -2524,7 +2552,7 @@ describe('project context Home integration H1', () => {
         manifest: fixture.manifest,
       })
       .mockReturnValueOnce(reinspection.promise);
-    const renderer = await renderApp();
+    const renderer = await renderAppOpeningStoredConversation();
     const root = renderer.root;
     await act(async () => actionByLabel(root, 'Open navigation').props.onPress());
     await act(async () => {
@@ -2652,7 +2680,7 @@ describe('project context Home integration H1', () => {
       state: 'prepared',
       manifest: fixture.manifest,
     });
-    const renderer = await renderApp();
+    const renderer = await renderAppOpeningStoredConversation();
     const root = renderer.root;
     await act(async () => settle());
     await act(async () =>
@@ -2685,7 +2713,7 @@ describe('project context Home integration H1', () => {
       projects: [contextProject],
     });
 
-    const renderer = await renderApp();
+    const renderer = await renderAppOpeningStoredConversation();
     const root = renderer.root;
     expect(mockLocalProjectContext.inspect).not.toHaveBeenCalled();
     expect(mockLocalProjectContext.listCandidates).not.toHaveBeenCalled();
@@ -2710,7 +2738,7 @@ describe('project context Home integration H1', () => {
       projects: [contextProject],
     });
     mockLocalProjectContext.inspect.mockReturnValueOnce(inspection.promise);
-    const renderer = await renderApp();
+    const renderer = await renderAppOpeningStoredConversation();
     const root = renderer.root;
 
     await act(async () => root.findByType(ChatComposer).props.onOptionsPress());
@@ -2776,7 +2804,7 @@ describe('project context Home integration H1', () => {
         },
       }),
     );
-    const renderer = await renderApp();
+    const renderer = await renderAppOpeningStoredConversation();
     const root = renderer.root;
     expect(mockLocalProjectContext.inspect).not.toHaveBeenCalled();
 
@@ -2877,7 +2905,7 @@ describe('project context Home integration H1', () => {
       ],
       next_cursor: null,
     });
-    const renderer = await renderApp();
+    const renderer = await renderAppOpeningStoredConversation();
     const root = renderer.root;
     await act(async () =>
       root.findByProps({ testID: 'project-context-strip' }).props.onPress(),
@@ -3081,7 +3109,7 @@ describe('project context Home integration H1', () => {
       state: 'confirmed',
       manifest: fixture.manifest,
     });
-    const renderer = await renderApp();
+    const renderer = await renderAppOpeningStoredConversation();
     const root = renderer.root;
     await act(async () =>
       root.findByProps({ testID: 'project-context-strip' }).props.onPress(),
@@ -3110,7 +3138,7 @@ describe('project context Home integration H1', () => {
       state: 'confirmed',
       manifest: fixture.manifest,
     });
-    const renderer = await renderApp();
+    const renderer = await renderAppOpeningStoredConversation();
     const root = renderer.root;
     await act(async () =>
       root.findByProps({ testID: 'project-context-strip' }).props.onPress(),
@@ -3144,7 +3172,7 @@ describe('project context Home integration H1', () => {
     const focus = jest
       .spyOn(AccessibilityInfo, 'setAccessibilityFocus')
       .mockImplementation(() => undefined);
-    const renderer = await renderApp();
+    const renderer = await renderAppOpeningStoredConversation();
     const root = renderer.root;
     await act(async () =>
       root.findByProps({ testID: 'project-context-strip-focus-target' }).props.onLayout({
@@ -3169,7 +3197,7 @@ describe('project context Home integration H1', () => {
 
   test('stops a confirmed project image send after Vision invalidates context', async () => {
     jest.useFakeTimers();
-    const fixture = storedProjectContext(true);
+    const fixture = storedProjectContext(true, 'deepseek-v4-pro');
     queuePresentSession(fixture.stored.serialize());
     mockLocalProjects.list.mockResolvedValue({
       schema_version: 1,
@@ -3197,7 +3225,7 @@ describe('project context Home integration H1', () => {
         },
       ],
     });
-    const renderer = await renderApp();
+    const renderer = await renderAppOpeningStoredConversation();
     const root = renderer.root;
     await act(async () => actionByLabel(root, 'Add attachment').props.onPress());
     await chooseAttachmentSource(root, 'Photos');
@@ -3214,7 +3242,7 @@ describe('project context Home integration H1', () => {
       lastPersistedState().conversations.find(
         conversation => conversation.project_id === CONTEXT_PROJECT_ID,
       )?.model_id,
-    ).toBe('deepseek-v4-flash-vision-exp');
+    ).toBe('deepseek-v4-flash');
     expect(visibleContextSheets(root)[0]?.props.mode).toBe('recovery');
     expect(visibleContextSheets(root)[0]?.props.disabled).toBe(true);
     await act(async () => {
@@ -3369,7 +3397,7 @@ describe('project context Home integration H2', () => {
       schema_version: 1,
       projects: [contextProject, secondProject],
     });
-    const renderer = await renderApp();
+    const renderer = await renderAppOpeningStoredConversation();
     const root = renderer.root;
     await enterPendingProjectRecovery(root, 'Do not move this intent');
     const oldSheet = visibleContextSheets(root)[0]!;
@@ -4087,7 +4115,7 @@ describe('project context Home integration H3', () => {
       state: 'prepared',
       manifest: fixture.manifest,
     });
-    const renderer = await renderApp();
+    const renderer = await renderAppOpeningStoredConversation();
     const root = renderer.root;
     await act(async () => settle());
     const originalConversationId = root.findByType(ChatDrawer).props.activeId;
@@ -4130,7 +4158,7 @@ describe('project context Home integration H3', () => {
       state: 'confirmed',
       manifest: fixture.manifest,
     });
-    const renderer = await renderApp();
+    const renderer = await renderAppOpeningStoredConversation();
     const root = renderer.root;
     await act(async () => settle());
     await act(async () => actionByLabel(root, 'Open navigation').props.onPress());
@@ -4239,7 +4267,7 @@ describe('project context Home integration H3', () => {
       state: 'prepared',
       manifest: fixture.manifest,
     });
-    const renderer = await renderApp();
+    const renderer = await renderAppOpeningStoredConversation();
     const root = renderer.root;
     mockSessionSnapshots.casPersistSession.mockClear();
 
@@ -4275,7 +4303,7 @@ describe('project context Home integration H3', () => {
       manifest: fixture.manifest,
     });
     mockLocalProjectContext.discard.mockReturnValueOnce(cleanup.promise);
-    const renderer = await renderApp();
+    const renderer = await renderAppOpeningStoredConversation();
     const root = renderer.root;
     await act(async () => settle());
     mockSessionSnapshots.casPersistSession.mockClear();
@@ -4332,7 +4360,7 @@ describe('project context Home integration H3', () => {
       state: 'confirmed',
       manifest: fixture.manifest,
     });
-    const renderer = await renderApp();
+    const renderer = await renderAppOpeningStoredConversation();
     const root = renderer.root;
     await act(async () => settle());
     mockSessionSnapshots.casPersistSession.mockClear();
@@ -4395,7 +4423,7 @@ describe('project context Home integration H3', () => {
         message: 'RAW_UNBIND_CLEANUP_SENTINEL',
       })
       .mockResolvedValue({ schema_version: 1, status: 'discarded' });
-    const renderer = await renderApp();
+    const renderer = await renderAppOpeningStoredConversation();
     const root = renderer.root;
     await act(async () => settle());
     mockSessionSnapshots.casPersistSession.mockClear();
@@ -4472,7 +4500,7 @@ describe('project context Home integration H3', () => {
       schema_version: 1,
       projects: [contextProject],
     });
-    const renderer = await renderApp();
+    const renderer = await renderAppOpeningStoredConversation();
     const root = renderer.root;
     await act(async () => settle());
     mockSessionSnapshots.casPersistSession.mockClear();
@@ -4515,7 +4543,7 @@ describe('project context Home integration H3', () => {
       state: 'confirmed',
       manifest: fixture.manifest,
     });
-    const renderer = await renderApp();
+    const renderer = await renderAppOpeningStoredConversation();
     const root = renderer.root;
     await act(async () => settle());
 
@@ -4532,7 +4560,8 @@ describe('project context Home integration H3', () => {
     await act(async () => root.findByType(ProjectsSurface).props.onDismiss());
 
     const persisted = lastPersistedState();
-    expect(persisted.conversations).toHaveLength(2);
+    // Preserved snapshot owner + cold-launch blank + new project conversation.
+    expect(persisted.conversations).toHaveLength(3);
     expect(
       persisted.conversations.find(
         conversation => conversation.id === fixture.conversationId,
@@ -4590,7 +4619,7 @@ describe('project context Home integration H3', () => {
     );
     const activeId = fixture.stored.createConversation({ title: 'Keep me' });
     queuePresentSession(fixture.stored.serialize());
-    const renderer = await renderApp();
+    const renderer = await renderAppOpeningStoredConversation();
     const root = renderer.root;
     await act(async () => settle());
     await act(async () => {
@@ -4648,7 +4677,7 @@ describe('project context Home integration H3', () => {
   test('directly unbinds snapshot-free context with no journal or native discard', async () => {
     const fixture = storedSetupProject();
     queuePresentSession(fixture.stored.serialize());
-    const renderer = await renderApp();
+    const renderer = await renderAppOpeningStoredConversation();
     const root = renderer.root;
     mockSessionSnapshots.casPersistSession.mockClear();
 
@@ -4673,7 +4702,7 @@ describe('project context Home integration H3', () => {
   test('rolls back snapshot-free unbind when the direct session write is not committed', async () => {
     const fixture = storedSetupProject();
     queuePresentSession(fixture.stored.serialize());
-    const renderer = await renderApp();
+    const renderer = await renderAppOpeningStoredConversation();
     const root = renderer.root;
     mockSessionSnapshots.casPersistSession.mockResolvedValueOnce(
       notCommittedResult(),
@@ -4726,7 +4755,7 @@ describe('project context Home integration H3', () => {
             ?.onPress?.();
           if (result !== undefined) deletePromise = Promise.resolve(result);
         });
-      const renderer = await renderApp();
+      const renderer = await renderAppOpeningStoredConversation();
       const root = renderer.root;
       if (status === 'unknown') {
         mockSessionSnapshots.casPersistSession.mockImplementationOnce(
@@ -4844,7 +4873,7 @@ describe('project context Home integration H3', () => {
       manifest: fixture.manifest,
     });
     mockLocalProjectContext.discard.mockReturnValueOnce(cleanup.promise);
-    const renderer = await renderApp();
+    const renderer = await renderAppOpeningStoredConversation();
     const root = renderer.root;
     await openProjectsSurface(root);
     await act(async () => {
@@ -4884,7 +4913,7 @@ describe('project context Home integration H3', () => {
     const fixture = storedSetupProject();
     const activeId = fixture.stored.createConversation({ title: 'Active' });
     queuePresentSession(fixture.stored.serialize());
-    const renderer = await renderApp();
+    const renderer = await renderAppOpeningStoredConversation();
     const root = renderer.root;
     mockSessionSnapshots.casPersistSession.mockImplementationOnce(
       async () => unknownResult(),
@@ -4957,7 +4986,7 @@ describe('project context Home integration H3', () => {
     mockLocalProjectContext.discard
       .mockRejectedValueOnce({ code: 'E_CONTEXT_TIMEOUT' })
       .mockResolvedValue({ schema_version: 1, status: 'discarded' });
-    const renderer = await renderApp();
+    const renderer = await renderAppOpeningStoredConversation();
     const root = renderer.root;
 
     await act(async () => actionByLabel(root, 'Open navigation').props.onPress());
@@ -5035,7 +5064,7 @@ describe('project context Home integration H3', () => {
       },
       rish: {},
     });
-    const renderer = await renderApp();
+    const renderer = await renderAppOpeningStoredConversation();
     const root = renderer.root;
     const staleMainRuntime = actionByLabel(
       root,
@@ -5141,7 +5170,7 @@ describe('project context Home integration H3', () => {
       state: 'confirmed',
       manifest: fixture.manifest,
     });
-    const renderer = await renderApp();
+    const renderer = await renderAppOpeningStoredConversation();
     const root = renderer.root;
     await act(async () => settle());
     const staleOptions = root.findByType(ChatComposer).props.onOptionsPress;
@@ -5191,6 +5220,19 @@ describe('project context Home integration H3', () => {
       expect(root.findByType(WorkspacePickerSheet).props.visible).toBe(false);
     },
   );
+
+  test('only the presented uncovered Settings surface adjusts keyboard insets', async () => {
+    const renderer = await renderApp();
+    const root = renderer.root;
+    await act(async () => actionByLabel(root, 'Open navigation').props.onPress());
+    await act(async () => root.findByType(ChatDrawer).props.onOpenSettings());
+    expect(root.findByProps({testID: 'settings-scroll'}).props.automaticallyAdjustKeyboardInsets).toBe(true);
+    await act(async () => root.findByType(SettingsSheet).props.onOpenMirrors());
+    expect(root.findByType(SettingsSheet).props.covered).toBe(true);
+    expect(root.findByProps({testID: 'settings-scroll'}).props.automaticallyAdjustKeyboardInsets).toBe(false);
+    await act(async () => root.findByType(MirrorSettingsSheet).props.onClose());
+    expect(root.findByProps({testID: 'settings-scroll'}).props.automaticallyAdjustKeyboardInsets).toBe(true);
+  });
 
   test('rejects old Settings child openers after close and reopen', async () => {
     const renderer = await renderApp();
@@ -5318,14 +5360,14 @@ describe('project context Home integration H3', () => {
     const fixture = storedSetupProject();
     queuePresentSession(fixture.stored.serialize());
     const persisted = deferred<boolean>();
+    const renderer = await renderAppOpeningStoredConversation();
+    const root = renderer.root;
     mockSessionSnapshots.casPersistSession.mockImplementationOnce(
       async request => {
         const saved = await persisted.promise;
         return saved ? commitBridgedCandidate(request) : unknownResult();
       },
     );
-    const renderer = await renderApp();
-    const root = renderer.root;
     await openProjectsSurface(root);
 
     await act(async () => {
@@ -5596,7 +5638,7 @@ test('sends verified project context through schema3 without AgentLoop', async (
       },
     }),
   );
-  const renderer = await renderApp();
+  const renderer = await renderAppOpeningStoredConversation();
   const root = renderer.root;
   await act(async () => {
     root
@@ -5782,7 +5824,7 @@ test('preserves the draft and sends zero HTTP when prepared durability is absent
   expect(mockSessionSnapshots.casPersistSession).toHaveBeenCalledTimes(1);
 });
 
-test('keeps draft ownership until prepared persistence resolves true', async () => {
+test('moves the draft into the conversation immediately while durability is pending', async () => {
   let resolvePersist!: (saved: boolean) => void;
   const renderer = await renderApp();
   const root = renderer.root;
@@ -5805,7 +5847,8 @@ test('keeps draft ownership until prepared persistence resolves true', async () 
   });
   expect(
     root.findByProps({ accessibilityLabel: 'Message DSH' }).props.value,
-  ).toBe('Durable first');
+  ).toBe('');
+  expect(root.findAllByProps({ children: 'Durable first' }).length).toBeGreaterThan(0);
   expect(mockLocalRuntime.completeV2).not.toHaveBeenCalled();
 
   await act(async () => {
@@ -5915,7 +5958,7 @@ test('shows cancellation persistence failure instead of a false stopped notice',
   expect(actionByLabel(root, 'Retry save')).toBeDefined();
 });
 
-test('adds an image attachment, switches to Flash Exp, and sends without text', async () => {
+test('adds an image attachment, keeps V4 Flash, and sends without text', async () => {
   mockLocalAttachments.present.mockResolvedValueOnce({
     schema_version: 1,
     status: 'selected',
@@ -5963,7 +6006,7 @@ test('adds an image attachment, switches to Flash Exp, and sends without text', 
   expect(mockLocalRuntime.completeV2).toHaveBeenCalledWith(
     expect.objectContaining({
       schemaVersion: 2,
-      model: 'deepseek-v4-flash-vision-exp',
+      model: 'deepseek-v4-flash',
       thinkingMode: 'high',
       visibleHistory: [
         {
@@ -5986,7 +6029,7 @@ test('adds an image attachment, switches to Flash Exp, and sends without text', 
   );
   const persisted = lastPersistedState();
   expect(persisted.conversations[0]?.model_id).toBe(
-    'deepseek-v4-flash-vision-exp',
+    'deepseek-v4-flash',
   );
   expect(persisted.messages[0]?.attachments[0]).toMatchObject({
     id: 'image-1',
@@ -5996,18 +6039,7 @@ test('adds an image attachment, switches to Flash Exp, and sends without text', 
     persisted.messages[0]?.attachments[0]?.thumbnail_data_url,
   ).toBeUndefined();
   expect(mockLocalAttachments.discard).not.toHaveBeenCalled();
-  expect(mockLocalRuntime.recordModelTransition).toHaveBeenCalledTimes(1);
-  expect(mockLocalRuntime.recordModelTransition).toHaveBeenCalledWith({
-    attachment_busy: false,
-    conversation_id: expect.any(String),
-    draft_image_count: 1,
-    from_model: 'deepseek-v4-flash',
-    history_image_count: 0,
-    request_epoch: 0,
-    request_state: 'idle',
-    source: 'send_image_guard',
-    to_model: 'deepseek-v4-flash-vision-exp',
-  });
+  expect(mockLocalRuntime.recordModelTransition).not.toHaveBeenCalled();
 });
 
 test('ignores a stale attachment-menu dismissal after completion ownership changes', async () => {
@@ -6764,7 +6796,7 @@ test('restores persisted image thumbnails through the bounded preview API', asyn
     thumbnail_data_url: 'data:image/png;base64,cmVzdG9yZWQ=',
   });
 
-  const renderer = await renderApp();
+  const renderer = await renderAppOpeningStoredConversation();
   const root = renderer.root;
 
   expect(mockLocalAttachments.prune).toHaveBeenCalledWith(['restored-image']);
@@ -8337,7 +8369,7 @@ test('runs a project Agent task through two safe approvals and restores it witho
   mockConfirmedAgentProjectInspection(fixture.manifest);
   installAgentRuntimeFlow();
 
-  const renderer = await renderApp();
+  const renderer = await renderAppOpeningStoredConversation();
   expect(
     renderer.root.findAllByType(ProjectContextStrip).map(strip => ({
       status: strip.props.state.status,
@@ -8443,7 +8475,7 @@ test('runs a project Agent task through two safe approvals and restores it witho
   };
   queuePresentSession(lastPersistedCandidateJSON(), bridgedGeneration);
   await act(async () => renderer.unmount());
-  const restarted = await renderApp();
+  const restarted = await renderAppOpeningStoredConversation();
   await waitForRenderedText(restarted, 'Agent final');
   expect(mockAgentRuntime.prepareAgentAttempt).toHaveBeenCalledTimes(
     callsBeforeRestart.prepare,
@@ -8465,7 +8497,7 @@ test('executes zero Agent native calls when outer project-task persistence fails
   mockAgentWorkspaceAuthority();
   mockConfirmedAgentProjectInspection(fixture.manifest);
   installAgentRuntimeFlow();
-  const renderer = await renderApp();
+  const renderer = await renderAppOpeningStoredConversation();
   await waitForRenderedText(renderer, 'Ready');
   mockSessionSnapshots.casPersistSession.mockResolvedValueOnce(
     notCommittedResult(),
@@ -8507,7 +8539,8 @@ test('promotes an exact V2 legacy token to one canonical V3/V9 session', async (
 
   const renderer = await renderApp();
   const root = renderer.root;
-  expect(root.findAllByProps({ children: 'legacy message' })).not.toHaveLength(0);
+  expect(root.findAllByType(EmptyChat).length).toBeGreaterThan(0);
+  expect(lastPersistedCandidateJSON()).toContain('legacy message');
   expect(mockSessionSnapshots.casPersistSession).toHaveBeenCalledWith(
     expect.objectContaining({
       expected: {
@@ -8521,7 +8554,8 @@ test('promotes an exact V2 legacy token to one canonical V3/V9 session', async (
       candidate_json: expect.stringContaining('"schema_version":9'),
     }),
   );
-  expect(mockSessionSnapshots.loadSessionSnapshot).toHaveBeenCalledTimes(2);
+  // Additional authority read belongs to the cold-start selection save.
+  expect(mockSessionSnapshots.loadSessionSnapshot).toHaveBeenCalledTimes(3);
 });
 
 test.each([
@@ -8532,7 +8566,7 @@ test.each([
   const sessionJSON = schema9AgentPendingSessionJSON(phase);
   queuePresentSession(sessionJSON, 7);
 
-  const renderer = await renderApp();
+  const renderer = await renderAppOpeningStoredConversation();
   expect(
     renderer.root.findAllByProps({ children: 'agent restart pending' }),
   ).not.toHaveLength(0);
@@ -8540,7 +8574,9 @@ test.each([
     actionByLabel(renderer.root, 'Continue response').props.onPress();
     await settle();
   });
-  expect(mockSessionSnapshots.casPersistSession).toHaveBeenCalledTimes(1);
+  // Setup completed migration and explicit history selection; Continue must
+  // not manufacture a new commit or replay this interrupted native work.
+  expect(mockSessionSnapshots.casPersistSession).not.toHaveBeenCalled();
   expect(mockSessionSnapshots.querySessionCommit).not.toHaveBeenCalled();
   expect(mockLocalRuntime.completeV2).not.toHaveBeenCalled();
   expect(mockLocalWorkspace.executePortableTool).not.toHaveBeenCalled();
@@ -8553,10 +8589,12 @@ test('CAS-migrates a present V2/V9 candidate before installing its new authority
   queuePresentSession(sessionJSON, 7);
 
   const renderer = await renderApp();
-  expect(
-    renderer.root.findAllByProps({ children: 'agent restart pending' }),
-  ).not.toHaveLength(0);
-  expect(mockSessionSnapshots.casPersistSession).toHaveBeenCalledTimes(1);
+  expect(renderer.root.findAllByType(EmptyChat).length).toBeGreaterThan(0);
+  expect(lastPersistedCandidateJSON()).toContain('agent restart pending');
+  // Migration CAS first; cold-start selection CAS uses its committed authority.
+  expect(mockSessionSnapshots.casPersistSession).toHaveBeenCalledTimes(2);
+  const selection = mockSessionSnapshots.casPersistSession.mock.calls[1]?.[0];
+  expect(selection.expected.snapshot.generation).toBe(8);
   const request = mockSessionSnapshots.casPersistSession.mock.calls[0]?.[0];
   expect(request.expected).toEqual({
     schema_version: 1,
@@ -8616,7 +8654,7 @@ test('uses the ordinary retry path for a current non-Agent attempt after Agent h
   const { sessionJSON, currentAttemptId } = schema9MixedAgentSession();
   queuePresentSession(sessionJSON, 7);
 
-  const renderer = await renderApp();
+  const renderer = await renderAppOpeningStoredConversation();
   expect(currentAttemptId).toBeDefined();
   expect(actionByLabel(renderer.root, 'Continue response')).toBeDefined();
 
@@ -9110,7 +9148,7 @@ test('retry keeps the exact attachment history', async () => {
   ).toEqual([expect.objectContaining({ id: 'pdf-1', kind: 'pdf' })]);
 });
 
-test('reselects Flash Exp when existing history still contains an image', async () => {
+test('reselects V4 Flash when existing history still contains an image', async () => {
   mockLocalAttachments.present.mockResolvedValueOnce({
     schema_version: 1,
     status: 'selected',
@@ -9154,10 +9192,11 @@ test('reselects Flash Exp when existing history still contains an image', async 
   });
 
   expect(mockLocalRuntime.completeV2.mock.calls.at(-1)?.[0]?.model).toBe(
-    'deepseek-v4-flash-vision-exp',
+    'deepseek-v4-flash',
   );
+  expect(mockLocalRuntime.completeV2.mock.calls.at(-1)?.[0]?.visibleHistory[0]?.attachments).toEqual([expect.objectContaining({ id: 'history-image' })]);
   expect(lastPersistedState().conversations[0]?.model_id).toBe(
-    'deepseek-v4-flash-vision-exp',
+    'deepseek-v4-flash',
   );
 });
 
@@ -9741,6 +9780,103 @@ test('persists cancellation before deleting the active chat and ignores late out
   alert.mockRestore();
 });
 
+test.each(['configured', 'missing'] as const)('cold launch waits for credential status before showing configuration actions: %s', async status => {
+  let finishCredential!: (value: { status: string }) => void;
+  let finishProof!: (value: { proof: typeof proof }) => void;
+  mockLocalRuntime.credentialStatusForSlot.mockImplementation(() => new Promise(resolve => { finishCredential = resolve; }));
+  mockLocalRuntime.bootstrap.mockImplementation(() => new Promise(resolve => { finishProof = resolve; }));
+  const renderer = await renderApp();
+  try {
+    const composer = () => renderer.root.findByType(ChatComposer);
+    const input = () => composer().findByProps({ accessibilityLabel: 'Message DSH' });
+    expect(input().props.placeholder).toBe('Preparing DSH…');
+    expect(input().props.editable).toBe(false);
+    expect(composer().findAllByProps({ accessibilityLabel: 'Configure DeepSeek key' })).toHaveLength(0);
+    expect(composer().findByProps({ accessibilityLabel: 'Send message' }).props.accessibilityState).toMatchObject({ busy: true, disabled: true });
+    expect(composerOptionsChip(renderer.root).props.disabled).toBe(false);
+
+    await act(async () => { finishCredential({ status }); await settle(); });
+    if (status === 'configured') {
+      // A slow runtime proof must not keep an already verified key unusable.
+      expect(input().props.placeholder).toBe('Message DSH');
+      expect(input().props.editable).toBe(true);
+      expect(composer().findAllByProps({ accessibilityLabel: 'Configure DeepSeek key' })).toHaveLength(0);
+      expect(composer().props.configurationPending).toBe(false);
+      await act(async () => { finishProof({ proof }); await settle(); });
+    } else {
+      expect(input().props.placeholder).toBe('Configure a DeepSeek key to start');
+      expect(input().props.editable).toBe(false);
+      expect(actionByLabel(composer(), 'Configure DeepSeek key').props.disabled).toBe(false);
+      expect(mockLocalRuntime.bootstrap).not.toHaveBeenCalled();
+    }
+  } finally {
+    await act(async () => renderer.unmount());
+  }
+});
+
+test('a workspace commit arriving after picker dismissal does not report a conflict', async () => {
+  const workspace = appWorkspaceDescriptor('aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa', 'codextest');
+  mockLocalWorkspaces.list.mockResolvedValue({ schema_version: 1, workspaces: [workspace] });
+  const renderer = await renderApp();
+  const root = renderer.root;
+  const commit = mockSessionSnapshots.casPersistSession.getMockImplementation()!;
+  let finish!: () => Promise<void>;
+  mockSessionSnapshots.casPersistSession.mockImplementationOnce(request => new Promise(resolve => {
+    finish = async () => resolve(await commit(request));
+  }));
+  try {
+    await act(async () => { actionByLabel(root, 'Choose workspace').props.onPress(); await settle(); });
+    await act(async () => {
+      actionByLabel(root.findByProps({ testID: 'workspace-picker-sheet' }), 'Use codextest').props.onPress();
+      await settle();
+    });
+    expect(finish).toBeDefined();
+    expect(root.findByType(WorkspacePickerSheet).props.activeWorkspaceId).toBe(workspace.workspace_id);
+    await act(async () => { root.findByType(WorkspacePickerSheet).props.onClose(); await settle(); });
+    await act(async () => { await finish(); await settle(); });
+    expect(lastPersistedState().conversations.find(chat => chat.id === lastPersistedState().active_conversation_id)?.workspace_id).toBe(workspace.workspace_id);
+    expect(root.findByType(WorkspacePickerSheet).props.visible).toBe(false);
+    expect(root.findAllByProps({ children: 'E_WORKSPACE_CONFLICT' })).toHaveLength(0);
+  } finally {
+    await act(async () => renderer.unmount());
+  }
+});
+
+test('workspace selection still works after opening and closing Files', async () => {
+  const workspace = appWorkspaceDescriptor('aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa', 'codextest');
+  mockLocalWorkspaces.list.mockResolvedValue({ schema_version: 1, workspaces: [workspace] });
+  const renderer = await renderApp();
+  const root = renderer.root;
+  try {
+    await act(async () => actionByLabel(root, 'Open navigation').props.onPress());
+    await act(async () => {
+      root.findByType(ChatDrawer).props.onOpenFiles();
+      root.findByType(ChatDrawer).props.onDismiss();
+      await settle();
+    });
+    expect(root.findByType(WorkspaceDrawer).props.visible).toBe(true);
+    await act(async () => { root.findByType(WorkspaceDrawer).props.onClose(); await settle(); });
+    await act(async () => { actionByLabel(root, 'Choose workspace').props.onPress(); await settle(); });
+    await act(async () => {
+      actionByLabel(root.findByProps({ testID: 'workspace-picker-sheet' }), 'Use codextest').props.onPress();
+      await settle();
+    });
+    expect(root.findByType(WorkspacePickerSheet).props.visible).toBe(false);
+    expect(root.findAllByProps({ children: 'E_WORKSPACE_CONFLICT' })).toHaveLength(0);
+  } finally {
+    await act(async () => renderer.unmount());
+  }
+});
+
+test('keeps model selection available before configuring a key', async () => {
+  mockLocalRuntime.credentialStatusForSlot.mockResolvedValue({ status: 'missing' });
+  const renderer = await renderApp();
+  const root = renderer.root;
+  expect(composerOptionsChip(root).props.disabled).toBe(false);
+  await act(async () => { composerOptionsChip(root).props.onPress(); });
+  expect(root.findByType(ChatComposer).props.optionsVisible).toBe(true);
+});
+
 test('offers native credential recovery when no key is configured', async () => {
   mockLocalRuntime.credentialStatusForSlot.mockResolvedValue({ status: 'missing' });
   const renderer = await renderApp();
@@ -9909,4 +10045,236 @@ test('keeps a new project binding alive when native resolution yields across the
   await act(async () => { await opening; await settle(); });
   expect(lastPersistedState().conversations.some(conversation => conversation.project_id === contextProject.id)).toBe(true);
   await act(async () => { jest.advanceTimersByTime(300); await settle(); renderer.unmount(); });
+});
+
+test('cold launch opens a blank chat after restoration and history remains reopenable on resume', async () => {
+  const appStateListeners: Array<(state: AppStateStatus) => void> = [];
+  const appStateSubscription = jest.spyOn(AppState, 'addEventListener').mockImplementation((event, listener) => {
+    if (event === 'change') appStateListeners.push(listener);
+    return { remove: jest.fn() };
+  });
+  const stored = createChatStore();
+  const previous = stored.createConversation({ title: 'Previous launch history', modelId: 'deepseek-v4-pro' });
+  stored.appendUserMessage(previous, 'Keep this previous conversation');
+  queuePresentSession(stored.serialize());
+  const renderer = await renderApp();
+  const root = renderer.root;
+  const coldState = lastPersistedState();
+  expect(coldState.active_conversation_id).not.toBe(previous);
+  expect(coldState.conversations.some(conversation => conversation.id === previous)).toBe(true);
+  expect(root.findAllByType(EmptyChat).length).toBeGreaterThan(0);
+  expect(root.findByType(ChatComposer).props.draft).toBe('');
+  await act(async () => actionByLabel(root, 'Open navigation').props.onPress());
+  await act(async () => {
+    await root.findByType(ChatDrawer).props.onSelect(previous);
+    await settle();
+  });
+  expect(lastPersistedState().active_conversation_id).toBe(previous);
+  const persistedCount = mockSessionSnapshots.casPersistSession.mock.calls.length;
+  await act(async () => { renderer.update(<App />); await settle(); });
+  expect(lastPersistedState().active_conversation_id).toBe(previous);
+  expect(mockSessionSnapshots.casPersistSession.mock.calls).toHaveLength(persistedCount);
+  await act(async () => root.findByType(ChatComposer).props.onChange('Keep draft on resume'));
+  await act(async () => {
+    appStateListeners.forEach(listener => listener('background'));
+    appStateListeners.forEach(listener => listener('active'));
+    await settle();
+  });
+  expect(lastPersistedState().active_conversation_id).toBe(previous);
+  expect(root.findByType(ChatComposer).props.draft).toBe('Keep draft on resume');
+  appStateSubscription.mockRestore();
+});
+
+test.each([false, true])('cold CC workspace binding preserves its owner when preferences changed=%s', async changed => {
+  const stored = createChatStore();
+  const history = stored.createConversation({ modelId: 'claude-sonnet-5', thinkingMode: 'high' });
+  stored.appendUserMessage(history, 'previous CC conversation');
+  const preferences = createPreferencesStore();
+  preferences.setSelectedHarness('claude-code');
+  queuePresentSession(JSON.stringify({ ...JSON.parse(stored.serialize()), preferences: JSON.parse(preferences.serialize()) }));
+  const workspace = appWorkspaceDescriptor('aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa', 'Smoke-0902');
+  mockLocalWorkspaces.list.mockResolvedValue({ schema_version: 1, workspaces: [workspace] });
+  const renderer = await renderApp();
+  const root = renderer.root;
+  expect(root.findByType(ChatComposer).props.model).toBe('claude-sonnet-5');
+  if (changed) {
+    // A queued preference must not replace the in-flight binding owner.
+    await act(async () => root.findByType(AppPresentationProvider).props.store.setShowReasoning(true));
+  }
+  await act(async () => actionByLabel(root, 'Choose workspace').props.onPress());
+  await act(async () => {
+    actionByLabel(root.findByProps({ testID: 'workspace-picker-sheet' }), 'Use Smoke-0902').props.onPress();
+    await settle();
+  });
+  expect(lastPersistedState().conversations.find(chat => chat.id === lastPersistedState().active_conversation_id)?.workspace_id).toBe(workspace.workspace_id);
+  expect(root.findByType(WorkspacePickerSheet).props.visible).toBe(false);
+  expect(root.findAllByProps({ children: 'E_WORKSPACE_CONFLICT' })).toHaveLength(0);
+});
+
+
+test.each([
+  ['dsh', 'deepseek-v4-flash', 'claude-code', 'claude-sonnet-5'],
+  ['claude-code', 'claude-sonnet-5', 'dsh', 'deepseek-v4-pro'],
+] as const)('cold launch hydrates last %s selection before any provider startup work', async (harness, model, defaultHarness, defaultModel) => {
+  const stored = createChatStore();
+  const previous = stored.createConversation({ modelId: model, thinkingMode: 'high' });
+  stored.appendUserMessage(previous, 'Last used model history');
+  const preferences = createPreferencesStore();
+  preferences.setSelectedHarness(defaultHarness);
+  preferences.setDefaultModel(defaultModel);
+  preferences.setThinkingMode('off');
+  queuePresentSession(JSON.stringify({ ...JSON.parse(stored.serialize()), preferences: JSON.parse(preferences.serialize()) }));
+  const loaded = bridgedLoadResult();
+  let finishLoad!: (value: typeof loaded) => void;
+  mockSessionSnapshots.loadSessionSnapshot.mockReset().mockImplementation(async () => bridgedLoadResult())
+    .mockImplementationOnce(() => new Promise(resolve => { finishLoad = resolve; }));
+  const appState = jest.spyOn(AppState, 'addEventListener').mockReturnValue({ remove: jest.fn() });
+  const providerAvailable = jest.spyOn(ProviderConfigurations, 'isAvailable').mockReturnValue(true);
+  const source = { schema_version: 1 as const, source: 'api_key' as const, ready: true, error_code: null };
+  const claude = jest.spyOn(HarnessAuth, 'claudeChatSource').mockResolvedValue(source);
+  const codex = jest.spyOn(HarnessAuth, 'codexChatSource').mockResolvedValue(source);
+  const glm = jest.spyOn(GlmAccount, 'glmCredentialSource');
+  const provider = jest.spyOn(ProviderConfigurations, 'read').mockImplementation(async id => ({
+    schema_version: 1, harness_id: id, name: 'Official', endpoint_url: 'https://example.test',
+    protocol: 'messages', auth_type: 'x-api-key', send_reasoning: true, model_mappings: {}, official: true,
+  }));
+  const runtime = mockLocalRuntime as MockLocalRuntime & { bootstrapForHarness?: jest.Mock };
+  runtime.bootstrapForHarness = jest.fn().mockResolvedValue({ proof });
+  let renderer: Renderer | undefined;
+  try {
+    renderer = await renderApp();
+    // Exercise a pre-hydration provider selection while native storage is slow.
+    for (const pendingHarness of ['claude-code', 'codex', 'glm']) {
+      await act(async () => {
+        renderer!.root.findByType(AppPresentationProvider).props.store.setSelectedHarness(pendingHarness);
+        await settle();
+      });
+      expect(claude).not.toHaveBeenCalled();
+      expect(codex).not.toHaveBeenCalled();
+      expect(glm).not.toHaveBeenCalled();
+      expect(provider).not.toHaveBeenCalled();
+      expect(mockLocalRuntime.credentialStatus).not.toHaveBeenCalled();
+      expect(mockLocalRuntime.credentialStatusForSlot).not.toHaveBeenCalled();
+      expect(runtime.bootstrapForHarness).not.toHaveBeenCalled();
+    }
+    await act(async () => { finishLoad(loaded); await settle(); });
+    const root = renderer.root;
+    expect(root.findByType(ChatComposer).props.model).toBe(model);
+    expect(root.findByType(ChatComposer).props.thinkingMode).toBe('high');
+    expect(root.findAllByType(EmptyChat).length).toBeGreaterThan(0);
+    const persisted = lastPersistedState();
+    const blank = persisted.conversations.find(chat => chat.id === persisted.active_conversation_id);
+    expect(blank).toMatchObject({ model_id: model, thinking_mode: 'high', project_id: null, workspace_id: null, runtime_context_id: null, project_context: null });
+    expect(blank?.id).not.toBe(previous);
+    expect(root.findByType(AppPresentationProvider).props.store.getState()).toEqual(preferences.getState());
+    expect(runtime.bootstrapForHarness).toHaveBeenCalledWith(harness);
+    expect(runtime.bootstrapForHarness.mock.calls.every(([id]) => id === harness)).toBe(true);
+    expect(codex).not.toHaveBeenCalled();
+    expect(glm).not.toHaveBeenCalled();
+    if (harness === 'dsh') {
+      expect(claude).not.toHaveBeenCalled();
+      expect(mockLocalRuntime.credentialStatusForSlot).toHaveBeenCalledWith('DEEPSEEK_API_KEY');
+      expect(mockLocalRuntime.credentialStatusForSlot).not.toHaveBeenCalledWith('ANTHROPIC_API_KEY');
+      expect(provider).not.toHaveBeenCalled();
+    } else {
+      expect(claude).toHaveBeenCalled();
+      expect(mockLocalRuntime.credentialStatus).not.toHaveBeenCalled();
+      expect(mockLocalRuntime.credentialStatusForSlot).toHaveBeenCalledWith('ANTHROPIC_API_KEY');
+    }
+  } finally {
+    await act(async () => renderer?.unmount());
+    claude.mockRestore(); codex.mockRestore(); glm.mockRestore(); provider.mockRestore();
+    providerAvailable.mockRestore(); appState.mockRestore();
+    delete runtime.bootstrapForHarness;
+  }
+});
+
+test('model and effort choices survive New Chat and remount, including a selected blank', async () => {
+  const appState = jest.spyOn(AppState, 'addEventListener').mockReturnValue({ remove: jest.fn() });
+  const stored = createChatStore();
+  const previous = stored.createConversation({ modelId: 'deepseek-v4-flash', thinkingMode: 'high' });
+  stored.appendUserMessage(previous, 'Earlier history');
+  const preferences = createPreferencesStore();
+  preferences.setSelectedHarness('claude-code');
+  preferences.setDefaultModel('claude-sonnet-5');
+  preferences.setThinkingMode('off');
+  queuePresentSession(JSON.stringify({ ...JSON.parse(stored.serialize()), preferences: JSON.parse(preferences.serialize()) }));
+  let renderer = await renderApp();
+  let root = renderer.root;
+  await act(async () => {
+    root.findByType(ConversationOptionsPicker).props.onSelectModel('deepseek-v4-pro');
+    await settle();
+  });
+  await act(async () => {
+    root.findByType(ConversationOptionsPicker).props.onSelectThinkingMode('max');
+    await settle();
+  });
+  await act(async () => actionByLabel(root, 'Open navigation').props.onPress());
+  await act(async () => { await root.findByType(ChatDrawer).props.onNewChat(); await settle(); });
+  expect(root.findByType(ChatComposer).props.model).toBe('deepseek-v4-pro');
+  expect(root.findByType(ChatComposer).props.thinkingMode).toBe('max');
+  const blankId = lastPersistedState().active_conversation_id;
+  await act(async () => renderer.unmount());
+  renderer = await renderApp();
+  root = renderer.root;
+  expect(root.findByType(ChatComposer).props.model).toBe('deepseek-v4-pro');
+  expect(root.findByType(ChatComposer).props.thinkingMode).toBe('max');
+  expect(root.findByType(ChatDrawer).props.activeId).toBe(blankId);
+  expect(root.findAllByType(EmptyChat).length).toBeGreaterThan(0);
+  await act(async () => renderer.unmount());
+  appState.mockRestore();
+});
+
+test.each(['credential', 'proof'] as const)('provider refresh handles a %s failure without keeping stale credential state', async failure => {
+  const appState = jest.spyOn(AppState, 'addEventListener').mockReturnValue({ remove: jest.fn() });
+  const renderer = await renderApp();
+  try {
+    const root = renderer.root;
+    expect(root.findByType(SettingsSheet).props.credentialConfigured).toBe(true);
+    mockLocalRuntime.bootstrap.mockClear();
+    if (failure === 'credential') {
+      mockLocalRuntime.credentialStatusForSlot.mockRejectedValueOnce(new Error('credential read failed'));
+    } else {
+      mockLocalRuntime.bootstrap.mockRejectedValueOnce(new Error('runtime proof failed'));
+    }
+    await act(async () => {
+      root.findByType(SettingsSheet).props.onProviderConfigurationChanged('dsh');
+      await settle();
+    });
+    expect(root.findByType(SettingsSheet).props.credentialConfigured).toBe(failure === 'proof');
+    expect(mockLocalRuntime.bootstrap).toHaveBeenCalledTimes(failure === 'proof' ? 1 : 0);
+  } finally {
+    await act(async () => renderer.unmount());
+    appState.mockRestore();
+  }
+});
+
+test('sending without a bound workspace shows a hint whose action opens the picker', async () => {
+  mockAgentRuntime.isAvailable.mockReturnValue(true);
+  const renderer = await renderApp();
+  const root = renderer.root;
+  try {
+    expect(
+      root.findByProps({ testID: 'composer-workspace-chip' }).props.accessibilityValue,
+    ).toEqual({ text: 'Choose workspace' });
+    expect(root.findAllByProps({ testID: 'workspace-unbound-hint' })).toHaveLength(0);
+    await act(async () =>
+      root.findByProps({ accessibilityLabel: 'Message DSH' }).props.onChangeText('hello'),
+    );
+    await act(async () => {
+      actionByLabel(root, 'Send message').props.onPress();
+      await settle();
+      await settle();
+    });
+    expect(root.findAllByProps({ testID: 'workspace-unbound-hint' }).length).toBeGreaterThan(0);
+    await act(async () => {
+      root.findByProps({ testID: 'workspace-unbound-hint-action' }).props.onPress();
+      await settle();
+    });
+    expect(root.findByType(WorkspacePickerSheet).props.visible).toBe(true);
+  } finally {
+    // Leave the tree mounted like the other agent-runtime flows: the task
+    // bridge subscription has no emitter to remove in this environment.
+    mockAgentRuntime.isAvailable.mockReturnValue(false);
+  }
 });

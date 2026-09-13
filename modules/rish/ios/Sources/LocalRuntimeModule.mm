@@ -3,9 +3,11 @@
 #import "DSHCompletionProviderTransport.h"
 #import "DshProviderTransport.h"
 #import "ClaudeProviderTransport.h"
+#import "ClaudeSubscriptionTransport.h"
 #import "CodexProviderTransport.h"
 #import "CodexSubscriptionTransport.h"
 #import "RishHarnessCatalog.h"
+#import "RishConversationBrowser.h"
 #import "ConfiguredProviderTransport.h"
 #import "ProviderConfiguration.h"
 #import "SessionSnapshotStore.h"
@@ -15,6 +17,7 @@
 #import "ModelTransitionProof.h"
 #import "ProjectContextService.h"
 #import "HarnessAuthService.h"
+#import "ClaudeOfficialSession.h"
 #import "ZCodeAccountAuthService.h"
 #import "ZCodePlanResolver.h"
 
@@ -814,10 +817,12 @@ static BOOL DSHCanConnectToMacProxy(void) {
 /// credential store (keyed by credential slot) as the single owner.
 @property(nonatomic, strong) DSHCompletionProviderTransport *completionProviderTransport;
 @property(nonatomic, strong) DSHCompletionProviderTransport *claudeProviderTransport;
+@property(nonatomic, strong) DSHClaudeSubscriptionTransport *claudeSubscriptionTransport;
 @property(nonatomic, strong) DSHCompletionProviderTransport *codexProviderTransport;
 @property(nonatomic, strong) CodexSubscriptionTransport *codexSubscriptionTransport;
 @property(nonatomic, strong) GlmProviderTransport *glmProviderTransport;
 @property(nonatomic, strong) NSURLSessionDataTask *activeCompletionTask;
+@property(nonatomic, strong) id<DSHCompletionExecution> activeCompletionExecution;
 @property(nonatomic, copy) NSString *activeCompletionRequestId;
 @property(nonatomic) NSUInteger activeCompletionGeneration;
 @property(nonatomic) NSUInteger completionGeneration;
@@ -841,7 +846,8 @@ static BOOL DSHCanConnectToMacProxy(void) {
 /// Keychain namespace and runtime capability checks; it never touches the
 /// provider API-key slots or the Rish account/session stores.
 @property(nonatomic, strong) DSHHarnessAuthService *harnessAuthService;
-@property(nonatomic, strong) RishDeviceAuthorizationController *harnessAuthorizationBrowser;
+@property(nonatomic, strong) UIViewController *harnessAuthorizationBrowser;
+@property(nonatomic, strong) RishConversationBrowser *conversationBrowser;
 @property(nonatomic, copy) NSString *harnessAuthorizationProvider;
 @property(nonatomic, strong) RishZCodeAccountAuthService *zcodeAccountAuthService;
 @property(nonatomic, strong) RishZCodePlanResolver *glmPlanResolver;
@@ -943,6 +949,14 @@ RCT_EXPORT_MODULE(LocalRuntime)
         [owner recordCredentialConfigured:([owner credentialLookupStatusForAccount:@"OPENAI_API_KEY"] == errSecSuccess) forAccount:@"OPENAI_API_KEY"];
       }];
     };
+    _harnessAuthService.onClaudeChatCredentialChanged = ^{
+      [DSHSessionWorkspaceCoordinator.sharedCoordinator performAsync:^{
+        LocalRuntimeModule *owner = codexOwner;
+        if (!owner) return;
+        [owner credentialDidChangeForSlot:@"ANTHROPIC_API_KEY"];
+        [owner recordCredentialConfigured:([owner credentialLookupStatusForAccount:@"ANTHROPIC_API_KEY"] == errSecSuccess) forAccount:@"ANTHROPIC_API_KEY"];
+      }];
+    };
     _zcodeAccountAuthService = [[RishZCodeAccountAuthService alloc] init];
     __weak LocalRuntimeModule *accountOwner = self;
     _zcodeAccountAuthService.onAccountConnected = ^(NSString *provider) {
@@ -1035,7 +1049,18 @@ RCT_EXPORT_MODULE(LocalRuntime)
 }
 
 - (DSHCompletionProviderTransport *)providerTransportForHarnessId:(NSString *)harnessId {
-  if ([harnessId isEqualToString:@"claude-code"]) return self.claudeProviderTransport;
+  if ([harnessId isEqualToString:@"claude-code"]) {
+    NSString *source = [self.harnessAuthService claudeChatSource];
+    if ([source isEqual:@"api_key"]) return self.claudeProviderTransport;
+    if (![source isEqual:@"subscription"]) return nil;
+    @synchronized (self) {
+      if (!self.claudeSubscriptionTransport) {
+        DSHClaudeOfficialSession *session = [self.harnessAuthService claudeOfficialSession];
+        if (session) self.claudeSubscriptionTransport = [[DSHClaudeSubscriptionTransport alloc] initWithOfficialSession:session];
+      }
+      return self.claudeSubscriptionTransport;
+    }
+  }
   if ([harnessId isEqualToString:@"codex"]) return [[self.harnessAuthService codexChatSource] isEqual:@"api_key"] ? self.codexProviderTransport : self.codexSubscriptionTransport;
   if ([harnessId isEqualToString:@"glm"]) return self.glmProviderTransport;
   return self.completionProviderTransport;
@@ -1130,8 +1155,17 @@ RCT_EXPORT_MODULE(LocalRuntime)
 }
 
 - (OSStatus)credentialLookupStatusForAccount:(NSString *)account {
+  if ([account isEqual:@"ANTHROPIC_API_KEY"] && [[self.harnessAuthService claudeChatSource] isEqual:@"unavailable"]) return errSecDecode;
   if ([account isEqual:@"OPENAI_API_KEY"] && ![[self.harnessAuthService codexChatSource] isEqual:@"api_key"])
     return [self.harnessAuthService codexChatCredential] ? errSecSuccess : errSecItemNotFound;
+  if ([account isEqual:@"ANTHROPIC_API_KEY"] &&
+      [[self.harnessAuthService claudeChatSource] isEqual:@"subscription"]) {
+    NSDictionary *status = [self.harnessAuthService claudeOfficialSession].status;
+    return ([status[@"status"] isEqual:@"signed_in"] &&
+            [status[@"auth_method"] isEqual:@"subscription"] &&
+            [status[@"runtime"][@"available"] boolValue])
+        ? errSecSuccess : errSecItemNotFound;
+  }
   if ([account isEqual:@"BIGMODEL_API_KEY"]) {
     NSString *source = [self.glmCredentialSelection source];
     if (!source) return errSecDecode;
@@ -1156,6 +1190,13 @@ RCT_EXPORT_MODULE(LocalRuntime)
   }
   if ([account isEqual:@"OPENAI_API_KEY"] && ![[self.harnessAuthService codexChatSource] isEqual:@"api_key"])
     return [self.harnessAuthService codexChatCredential][@"access_token"];
+  if ([account isEqual:@"ANTHROPIC_API_KEY"] &&
+      [[self.harnessAuthService claudeChatSource] isEqual:@"subscription"]) {
+    // Official Claude credentials remain inside the guest disk. The
+    // subscription transport is credential-independent and uses its session
+    // accessor, so no token or synthetic API key crosses this method.
+    return nil;
+  }
   if ([account isEqual:@"BIGMODEL_API_KEY"]) {
     NSString *source = [self.glmCredentialSelection source];
     if (!source) return nil;
@@ -1185,6 +1226,7 @@ RCT_EXPORT_MODULE(LocalRuntime)
 
 - (void)cancelActiveCompletionForCredentialSlot:(NSString *)account {
   NSURLSessionDataTask *task = nil;
+  id<DSHCompletionExecution> execution = nil;
   RCTPromiseRejectBlock strictRejecter = nil;
   RCTPromiseRejectBlock streamRejecter = nil;
   NSString *streamRequestId = nil;
@@ -1201,6 +1243,7 @@ RCT_EXPORT_MODULE(LocalRuntime)
       return;
     }
     task = self.activeCompletionTask;
+    execution = self.activeCompletionExecution;
     if (self.activeCompletionSchemaVersion == 2 ||
         self.activeCompletionSchemaVersion == 3) {
       strictRejecter = self.activeCompletionRejecter;
@@ -1219,6 +1262,7 @@ RCT_EXPORT_MODULE(LocalRuntime)
     [self.codexProviderTransport cancelTask:task];
     [self.codexSubscriptionTransport cancelTask:task];
   }
+  if (execution != nil) [execution cancel];
   if (strictRejecter != nil) {
     DSHRejectCompletionSchema2(
         strictRejecter, @"E_COMPLETION_CREDENTIAL_CHANGED");
@@ -1919,6 +1963,7 @@ RCT_EXPORT_MODULE(LocalRuntime)
 
 - (void)clearActiveCompletionLocked {
   self.activeCompletionTask = nil;
+  self.activeCompletionExecution = nil;
   self.activeCompletionRequestId = nil;
   self.activeCompletionGeneration = 0;
   self.activeCompletionSchemaVersion = 0;
@@ -1972,6 +2017,7 @@ RCT_EXPORT_MODULE(LocalRuntime)
     }
     if (self.activeCompletionRequestId != nil ||
         self.activeCompletionTask != nil ||
+        self.activeCompletionExecution != nil ||
         self.activeCompletionSchemaVersion != 0) {
       if (errorCode != nil) *errorCode = @"E_COMPLETION_BUSY";
       return nil;
@@ -2026,6 +2072,31 @@ RCT_EXPORT_MODULE(LocalRuntime)
     if (registerTaskIdentifier) {
       [self.strictCompletionTaskIdentifiers addObject:@(task.taskIdentifier)];
     }
+    return YES;
+  }
+}
+
+- (BOOL)bindStrictExecution:(id<DSHCompletionExecution>)execution
+               schemaVersion:(NSInteger)schemaVersion
+                     roundId:(NSString *)roundId
+                  generation:(NSUInteger)generation
+      registerTaskIdentifier:(BOOL)registerTaskIdentifier {
+  @synchronized (self) {
+    if (self.activeCompletionSchemaVersion != schemaVersion ||
+        ![self.activeCompletionRequestId isEqualToString:roundId] ||
+        self.activeCompletionGeneration != generation) return NO;
+    NSURLSessionDataTask *task = nil;
+    if ([execution respondsToSelector:@selector(underlyingHTTPTask)]) {
+      task = [execution underlyingHTTPTask];
+    }
+    if (task != nil && ![self bindStrictTask:task
+                                schemaVersion:schemaVersion
+                                      roundId:roundId
+                                   generation:generation
+                         registerTaskIdentifier:registerTaskIdentifier]) {
+      return NO;
+    }
+    self.activeCompletionExecution = execution;
     return YES;
   }
 }
@@ -2155,7 +2226,7 @@ static NSString *DSHCredentialPromptPlaceholder(NSString *account) {
 // this check atomic with native prepare/checkpoint operations.
 - (BOOL)providerConfigurationCanChange {
   @synchronized(self) {
-    if (self.activeCompletionRequestId != nil || [self.claudeProviderTransport hasActiveRequests] ||
+    if (self.activeCompletionRequestId != nil || [self.claudeProviderTransport hasActiveRequests] || [self.claudeSubscriptionTransport hasActiveRequests] ||
         [self.codexProviderTransport hasActiveRequests] || [self.codexSubscriptionTransport hasActiveRequests] || [self.completionProviderTransport hasActiveRequests] ||
         [self.glmProviderTransport hasActiveRequests]) return NO;
   }
@@ -2350,6 +2421,10 @@ RCT_REMAP_METHOD(openZcodeAccountAuthorization,
 
 - (void)safariViewControllerDidFinish:(SFSafariViewController *)controller {
   [controller dismissViewControllerAnimated:YES completion:nil];
+  if (controller == self.harnessAuthorizationBrowser) {
+    self.harnessAuthorizationBrowser = nil;
+    self.harnessAuthorizationProvider = nil;
+  }
   if (controller == self.zcodeAuthorizationBrowser) {
     self.zcodeAuthorizationBrowser = nil;
     self.zcodeAuthorizationProvider = nil;
@@ -2396,7 +2471,7 @@ RCT_REMAP_METHOD(harnessAuthStatus,
     return;
   }
   dispatch_async(self.stateQueue, ^{
-    NSDictionary *status = [self.harnessAuthService statusForHarnessId:harness];
+    [self.harnessAuthService readStatusForHarnessId:harness completion:^(NSDictionary *status) {
     resolve(status);
     if ([@[@"signed_in", @"error"] containsObject:status[@"status"]]) {
       dispatch_async(dispatch_get_main_queue(), ^{
@@ -2407,6 +2482,7 @@ RCT_REMAP_METHOD(harnessAuthStatus,
         }
       });
     }
+    }];
   });
 }
 
@@ -2417,8 +2493,60 @@ RCT_REMAP_METHOD(harnessAuthStatus,
            @"error_code":(!ready && [source isEqual:@"subscription"]) ? @"E_CODEX_SIGN_IN_REQUIRED" : (id)NSNull.null};
 }
 
+- (NSDictionary *)claudeChatSourceStatusFromHarnessStatus:(NSDictionary *)harnessStatus {
+  NSString *source = [self.harnessAuthService claudeChatSource] ?: @"subscription";
+  if (![@[@"subscription", @"api_key"] containsObject:source]) return @{@"schema_version":@1, @"source":@"subscription", @"ready":@NO, @"error_code":@"E_CLAUDE_CHAT_SOURCE_UNAVAILABLE"};
+  BOOL ready = [source isEqualToString:@"api_key"]
+      ? [self credentialLookupStatusForAccount:@"ANTHROPIC_API_KEY"] == errSecSuccess
+      : ([harnessStatus[@"status"] isEqualToString:@"signed_in"] &&
+         [harnessStatus[@"auth_method"] isEqualToString:@"subscription"] &&
+         [harnessStatus[@"runtime"][@"available"] boolValue]);
+  NSString *errorCode = nil;
+  if (!ready) {
+    errorCode = [source isEqualToString:@"subscription"]
+        ? ([harnessStatus[@"status"] isEqualToString:@"error"]
+            ? (harnessStatus[@"error_code"] ?: @"E_CLAUDE_SUBSCRIPTION_UNAVAILABLE")
+            : @"E_CLAUDE_SIGN_IN_REQUIRED")
+        : @"E_CLAUDE_API_KEY_REQUIRED";
+  }
+  return @{@"schema_version":@1, @"source":source, @"ready":@(ready),
+           @"error_code":errorCode ?: (id)NSNull.null};
+}
+
 RCT_REMAP_METHOD(codexChatSource, codexChatSourceWithResolver:(RCTPromiseResolveBlock)resolve rejecter:(RCTPromiseRejectBlock)reject) {
   dispatch_async(self.stateQueue, ^{ resolve([self codexChatSourceStatus]); });
+}
+
+RCT_REMAP_METHOD(claudeChatSource, claudeChatSourceWithResolver:(RCTPromiseResolveBlock)resolve rejecter:(RCTPromiseRejectBlock)reject) {
+  if (![[self.harnessAuthService claudeChatSource] isEqual:@"subscription"]) {
+    resolve([self claudeChatSourceStatusFromHarnessStatus:@{}]); return;
+  }
+  // Restoration must not block the LocalRuntime state queue.
+  [self.harnessAuthService readStatusForHarnessId:@"claude-code" completion:^(NSDictionary *status) {
+    resolve([self claudeChatSourceStatusFromHarnessStatus:status]);
+  }];
+}
+
+RCT_REMAP_METHOD(selectClaudeChatSource, selectClaudeChatSource:(NSString *)source resolver:(RCTPromiseResolveBlock)resolve rejecter:(RCTPromiseRejectBlock)reject) {
+  if (![source isEqualToString:@"subscription"] && ![source isEqualToString:@"api_key"]) {
+    reject(@"E_CLAUDE_CHAT_SOURCE", @"Invalid Claude chat source", nil);
+    return;
+  }
+  [DSHSessionWorkspaceCoordinator.sharedCoordinator performAsync:^{
+    if (![self providerConfigurationCanChange]) {
+      reject(@"E_COMPLETION_BUSY", @"A request is still active", nil);
+      return;
+    }
+    NSError *error = nil;
+    if (![self.harnessAuthService selectClaudeChatSource:source error:&error]) {
+      reject(@"E_CLAUDE_CHAT_SOURCE", @"Unable to save Claude chat source", error);
+      return;
+    }
+    if ([source isEqual:@"api_key"]) { resolve([self claudeChatSourceStatusFromHarnessStatus:@{}]); return; }
+    [self.harnessAuthService readStatusForHarnessId:@"claude-code" completion:^(NSDictionary *status) {
+      resolve([self claudeChatSourceStatusFromHarnessStatus:status]);
+    }];
+  }];
 }
 
 RCT_REMAP_METHOD(codexAvailableModels, codexAvailableModelsWithResolver:(RCTPromiseResolveBlock)resolve rejecter:(RCTPromiseRejectBlock)reject) {
@@ -2448,9 +2576,45 @@ RCT_REMAP_METHOD(selectCodexChatSource, selectCodexChatSource:(NSString *)source
   }];
 }
 
+RCT_REMAP_METHOD(openConversationURL,
+                 openConversationURL:(NSDictionary *)request
+                 resolver:(RCTPromiseResolveBlock)resolve rejecter:(RCTPromiseRejectBlock)reject) {
+  dispatch_async(dispatch_get_main_queue(), ^{
+    if (self.conversationBrowser == nil) self.conversationBrowser = [RishConversationBrowser new];
+    [self.conversationBrowser openRequest:request completion:^(NSString *errorCode) {
+      if (errorCode != nil) reject(errorCode, @"Unable to open browser", nil);
+      else resolve(@{@"schema_version":@1, @"status":@"opened"});
+    }];
+  });
+}
+
 RCT_REMAP_METHOD(openHarnessAuthorization,
                  openHarnessAuthorizationForHarness:(NSString *)harness session:(NSString *)session
                  resolver:(RCTPromiseResolveBlock)resolve rejecter:(RCTPromiseRejectBlock)reject) {
+  if ([harness isEqual:@"claude-code"]) {
+    dispatch_async(self.stateQueue, ^{
+      NSDictionary *status = [self.harnessAuthService statusForHarnessId:harness];
+      NSString *address = status[@"login"][@"verification_url"];
+      NSURL *url = [address isKindOfClass:NSString.class] ? [NSURL URLWithString:address] : nil;
+      if (![status[@"status"] isEqual:@"authorizing"] || ![status[@"login"][@"session_id"] isEqual:session] ||
+          ![url.scheme isEqual:@"https"] || ![@[@"claude.ai", @"claude.com"] containsObject:url.host]) {
+        reject(@"E_HARNESS_AUTH_SESSION_NOT_FOUND", @"Authorization session is no longer active", nil); return;
+      }
+      dispatch_async(dispatch_get_main_queue(), ^{
+        UIViewController *presenter = RCTPresentedViewController();
+        if (!presenter || [presenter isKindOfClass:SFSafariViewController.class]) {
+          reject(@"E_HARNESS_AUTH_BROWSER", @"Cannot present authorization browser", nil); return;
+        }
+        SFSafariViewController *browser = [[SFSafariViewController alloc] initWithURL:url];
+        browser.delegate = self;
+        browser.modalPresentationStyle = UIModalPresentationFullScreen;
+        self.harnessAuthorizationBrowser = browser;
+        self.harnessAuthorizationProvider = harness;
+        [presenter presentViewController:browser animated:YES completion:^{ resolve(@YES); }];
+      });
+    });
+    return;
+  }
   if (![harness isEqual:@"codex"]) { reject(@"E_HARNESS_AUTH_BROWSER", @"Unsupported authorization browser", nil); return; }
   dispatch_async(self.stateQueue, ^{
     NSDictionary *status = [self.harnessAuthService statusForHarnessId:harness];
@@ -2538,6 +2702,40 @@ RCT_REMAP_METHOD(presentHarnessLoginCode,
     return;
   }
   NSString *locale = [localeValue isKindOfClass:NSString.class] ? localeValue : nil;
+  if ([harness isEqual:@"claude-code"]) {
+    NSDictionary *status = [self.harnessAuthService statusForHarnessId:harness];
+    if (![status[@"status"] isEqual:@"authorizing"] ||
+        ![status[@"login"][@"session_id"] isEqual:sessionId] ||
+        ![status[@"login"][@"can_submit_code"] boolValue]) {
+      reject(@"E_HARNESS_AUTH_SESSION_NOT_FOUND", @"Login is no longer waiting for a code", nil); return;
+    }
+    dispatch_async(dispatch_get_main_queue(), ^{
+      BOOL chinese = [locale hasPrefix:@"zh"];
+      UIViewController *presenter = RCTPresentedViewController();
+      if (presenter == nil || [presenter isKindOfClass:UIAlertController.class]) {
+        reject(@"E_HARNESS_AUTH_PRESENTATION", @"Cannot open code input", nil); return;
+      }
+      UIAlertController *alert = [UIAlertController alertControllerWithTitle:chinese ? @"完成 Claude Code 登录" : @"Finish Claude Code sign-in"
+          message:chinese ? @"粘贴官方授权页显示的代码，将直接传给手机里的 Claude Code。" : @"Paste the code shown by the official authorization page. It goes directly to Claude Code on this phone."
+          preferredStyle:UIAlertControllerStyleAlert];
+      [alert addTextFieldWithConfigurationHandler:^(UITextField *field) {
+        field.secureTextEntry = YES; field.keyboardType = UIKeyboardTypeASCIICapable;
+        field.autocorrectionType = UITextAutocorrectionTypeNo;
+        field.autocapitalizationType = UITextAutocapitalizationTypeNone;
+      }];
+      __weak UIAlertController *weakAlert = alert;
+      [alert addAction:[UIAlertAction actionWithTitle:chinese ? @"取消" : @"Cancel" style:UIAlertActionStyleCancel handler:^(__unused UIAlertAction *action) {
+        resolve([self.harnessAuthService statusForHarnessId:harness]);
+      }]];
+      [alert addAction:[UIAlertAction actionWithTitle:chinese ? @"继续" : @"Continue" style:UIAlertActionStyleDefault handler:^(__unused UIAlertAction *action) {
+        NSString *code = weakAlert.textFields.firstObject.text ?: @"";
+        weakAlert.textFields.firstObject.text = @"";
+        [self.harnessAuthService submitClaudeLoginCode:code session:sessionId completion:resolve];
+      }]];
+      [presenter presentViewController:alert animated:YES completion:nil];
+    });
+    return;
+  }
   [self.harnessAuthService presentLoginCodeForHarnessId:harness
                                               sessionId:sessionId
                                                  locale:locale
@@ -2660,6 +2858,10 @@ RCT_REMAP_METHOD(presentCredentialPromptForSlot,
         if ([slot isEqual:@"OPENAI_API_KEY"] && ![self.harnessAuthService selectCodexChatSource:@"api_key" error:nil]) {
           reject(@"E_CODEX_CHAT_SOURCE", @"Unable to select the saved API key", nil); return;
         }
+        if ([slot isEqual:@"ANTHROPIC_API_KEY"] &&
+            ![self.harnessAuthService selectClaudeChatSource:@"api_key" error:nil]) {
+          reject(@"E_CLAUDE_CHAT_SOURCE", @"Unable to select the saved API key", nil); return;
+        }
         [self recordCredentialConfigured:YES forAccount:slot];
         resolve(@{@"status": @"configured"});
       });
@@ -2704,6 +2906,7 @@ RCT_REMAP_METHOD(cancelCompletion,
     return;
   }
   NSURLSessionDataTask *task = nil;
+  id<DSHCompletionExecution> execution = nil;
   RCTPromiseRejectBlock strictRejecter = nil;
   RCTPromiseRejectBlock streamRejecter = nil;
   NSString *streamRequestId = nil;
@@ -2714,6 +2917,7 @@ RCT_REMAP_METHOD(cancelCompletion,
         self.activeCompletionTask != nil) {
       if ([self.activeCompletionRequestId isEqualToString:requestId]) {
         task = self.activeCompletionTask;
+        execution = self.activeCompletionExecution;
         if (self.activeCompletionSchemaVersion == 2 ||
             self.activeCompletionSchemaVersion == 3) {
           strictRejecter = self.activeCompletionRejecter;
@@ -2732,6 +2936,7 @@ RCT_REMAP_METHOD(cancelCompletion,
     self.completionV2BeforeTaskCancelForTesting();
   }
   [self.completionProviderTransport cancelTask:task];
+  [execution cancel];
   if (strictRejecter != nil) {
     DSHRejectCompletionSchema2(strictRejecter,
                                @"E_COMPLETION_CANCELLED");
@@ -3105,7 +3310,7 @@ RCT_REMAP_METHOD(complete,
       providerRequestBodyForModel:requestedModel
                      thinkingMode:thinkingMode
                          messages:modelInput
-                            tools:envelope[@"tools"]
+                            tools:([transport supportsTools] ? envelope[@"tools"] : @[])
                         streaming:NO
                             error:&bodyError];
   if (body == nil) {
@@ -3127,7 +3332,7 @@ RCT_REMAP_METHOD(complete,
   __block NSUInteger credentialGeneration = 0;
   apiKey = [self credentialForAccount:credentialAccount
                             generation:&credentialGeneration];
-  if (apiKey.length == 0) {
+  if (apiKey.length == 0 && ![transport isReadyWithCredential:apiKey]) {
     DSHRejectCompletionSchema2(
         reject, @"E_COMPLETION_CREDENTIAL_UNAVAILABLE");
     return;
@@ -3151,7 +3356,7 @@ RCT_REMAP_METHOD(complete,
   __weak LocalRuntimeModule *weakSelf = self;
   NSString *claimedAccount = [credentialAccount copy];
   [transport
-      startRequestWithSchemaVersion:2
+      startExecutionWithSchemaVersion:2
       roundId:roundId
       generation:generation
       credentialGeneration:credentialGeneration
@@ -3169,8 +3374,8 @@ RCT_REMAP_METHOD(complete,
       bodyData:bodyData
       visibleHistory:envelope[@"visible_history"]
       modelInput:modelInput
-      bindTask:^BOOL(NSURLSessionDataTask *task) {
-        return [weakSelf bindStrictTask:task
+      bindExecution:^BOOL(id<DSHCompletionExecution> execution) {
+        return [weakSelf bindStrictExecution:execution
                            schemaVersion:2
                                  roundId:roundId
                               generation:generation
@@ -3365,7 +3570,7 @@ RCT_REMAP_METHOD(complete,
         providerRequestBodyForModel:requestedModel
                        thinkingMode:thinkingMode
                            messages:modelInput
-                              tools:envelope[@"tools"]
+                           tools:([transport supportsTools] ? envelope[@"tools"] : @[])
                           streaming:NO
                               error:&bodyError];
     NSData *bodyData = body == nil ? nil : [NSJSONSerialization
@@ -3394,7 +3599,7 @@ RCT_REMAP_METHOD(complete,
     __weak LocalRuntimeModule *weakSelf = self;
     NSString *claimedAccount = [credentialAccount copy];
     [transport
-        startRequestWithSchemaVersion:3
+        startExecutionWithSchemaVersion:3
         roundId:roundId
         generation:generation
         credentialGeneration:credentialGeneration
@@ -3412,8 +3617,8 @@ RCT_REMAP_METHOD(complete,
         bodyData:bodyData
         visibleHistory:envelope[@"visible_history"]
         modelInput:modelInput
-        bindTask:^BOOL(NSURLSessionDataTask *task) {
-          return [weakSelf bindStrictTask:task
+        bindExecution:^BOOL(id<DSHCompletionExecution> execution) {
+          return [weakSelf bindStrictExecution:execution
                              schemaVersion:3
                                    roundId:roundId
                                 generation:generation
@@ -3701,9 +3906,36 @@ RCT_REMAP_METHOD(completeV2Stream,
 
 #pragma mark NSURLSessionDataDelegate (streaming)
 
+/// Streamed agent rounds are owned by a provider transport; the module only
+/// forwards the session callbacks. Legacy completeV2Stream tasks stay below.
+- (DSHCompletionProviderTransport *)streamingTransportForTask:(NSURLSessionTask *)task {
+  for (DSHCompletionProviderTransport *transport in @[
+      self.completionProviderTransport ?: (id)NSNull.null,
+      self.claudeProviderTransport ?: (id)NSNull.null,
+      self.codexProviderTransport ?: (id)NSNull.null,
+      self.glmProviderTransport ?: (id)NSNull.null ]) {
+    if ((id)transport != NSNull.null && [transport handlesTask:task]) return transport;
+  }
+  return nil;
+}
+
+- (void)URLSession:(NSURLSession *)session
+          dataTask:(NSURLSessionDataTask *)dataTask
+didReceiveResponse:(NSURLResponse *)response
+ completionHandler:(void (^)(NSURLSessionResponseDisposition))completionHandler {
+  DSHCompletionProviderTransport *owner = [self streamingTransportForTask:dataTask];
+  if (owner != nil) [owner streamingTask:dataTask didReceiveResponse:response];
+  completionHandler(NSURLSessionResponseAllow);
+}
+
 - (void)URLSession:(NSURLSession *)session
           dataTask:(NSURLSessionDataTask *)dataTask
     didReceiveData:(NSData *)data {
+  DSHCompletionProviderTransport *owner = [self streamingTransportForTask:dataTask];
+  if (owner != nil) {
+    [owner streamingTask:dataTask didReceiveData:data];
+    return;
+  }
   dispatch_async(self.stateQueue, ^{
     NSURLSessionDataTask *active = nil;
     @synchronized(self) {
@@ -3759,6 +3991,11 @@ RCT_REMAP_METHOD(completeV2Stream,
 - (void)URLSession:(NSURLSession *)session
               task:(NSURLSessionTask *)task
 didCompleteWithError:(NSError *)error {
+  DSHCompletionProviderTransport *owner = [self streamingTransportForTask:task];
+  if (owner != nil) {
+    [owner streamingTask:task didCompleteWithError:error];
+    return;
+  }
   if (self.streamCompletion == nil) return;
   dispatch_async(self.stateQueue, ^{
     NSURLSessionDataTask *active = nil;

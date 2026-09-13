@@ -1,3 +1,4 @@
+#import "../../../../modules/rish/ios/Sources/SessionWorkspaceCoordinator.h"
 #import "../../../../modules/rish/ios/Sources/ConfiguredProviderTransport.h"
 #import "../../../../modules/rish/ios/Sources/ProviderConfiguration.h"
 #import <XCTest/XCTest.h>
@@ -284,6 +285,8 @@ static NSString *const DSHProviderSmokeDigest =
 @property(nonatomic, copy) NSData *lastBodyData;
 @property(nonatomic, copy) NSArray *lastModelInput;
 @property(nonatomic) BOOL holdResponse;
+@property(nonatomic, copy) dispatch_block_t responseHeld;
+@property(nonatomic, copy) NSDictionary *heldResult;
 @property(nonatomic) BOOL rejectCredentialGeneration;
 @property(nonatomic) BOOL bindAndReturnTask;
 @property(nonatomic) BOOL deferBind;
@@ -358,7 +361,15 @@ static NSString *const DSHProviderSmokeDigest =
       (generationCheck != nil && !generationCheck(7))) {
     completion(nil, @"E_COMPLETION_CREDENTIAL_CHANGED");
   } else if (self.holdResponse) {
+    NSMutableDictionary *held = [self.result mutableCopy];
+    held[@"visible_history_sha256"] = DSHWorkspaceSHA256Hex(
+        [NSJSONSerialization dataWithJSONObject:visibleHistory options:NSJSONWritingSortedKeys error:nil]);
+    held[@"model_input_sha256"] = DSHWorkspaceSHA256Hex(
+        [NSJSONSerialization dataWithJSONObject:modelInput options:NSJSONWritingSortedKeys error:nil]);
+    held[@"request_body_sha256"] = DSHWorkspaceSHA256Hex(bodyData);
+    self.heldResult = held;
     self.pendingCompletion = [completion copy];
+    if (self.responseHeld) self.responseHeld();
   } else {
     NSError *digestError = nil;
     NSData *visibleBytes = [NSJSONSerialization dataWithJSONObject:visibleHistory
@@ -491,6 +502,79 @@ static NSDictionary *DSHProviderSmokeQueryRequest(NSDictionary *root,
   return [request copy];
 }
 
+/// Streams a scripted round: previews a few deltas, then settles one result
+/// whose digests match the dispatched body, like the HTTP transport would.
+@interface DSHProviderStreamingSmokeExecution : NSObject <DSHCompletionExecution>
+@property(nonatomic) NSUInteger cancelCount;
+@end
+@implementation DSHProviderStreamingSmokeExecution
+- (void)cancel { self.cancelCount += 1; }
+@end
+
+@interface DSHProviderStreamingSmokeTransport : DSHProviderSmokeTransport
+@property(nonatomic) NSUInteger streamingStarts;
+@property(nonatomic, copy) NSArray<NSDictionary *> *scriptedDeltas;
+@property(nonatomic) BOOL supportsStreaming;
+@end
+@implementation DSHProviderStreamingSmokeTransport
+- (BOOL)providerSupportsStreamingRounds { return self.supportsStreaming; }
+- (id<DSHCompletionExecution>)startStreamingExecutionWithSchemaVersion:(NSInteger)schemaVersion
+                                                               roundId:(NSString *)roundId
+                                                            generation:(NSUInteger)generation
+                                                  credentialGeneration:(NSUInteger)credentialGeneration
+                                                     providerRequestId:(NSString *)providerRequestId
+                                                            credential:(NSString *)credential
+                                                        requestedModel:(NSString *)requestedModel
+                                                          thinkingMode:(NSString *)thinkingMode
+                                         credentialGenerationIsCurrent:(DSHCompletionProviderTransportCredentialGenerationIsCurrentBlock)credentialGenerationIsCurrent
+                                                             startedAt:(NSTimeInterval)startedAt
+                                                              bodyData:(NSData *)bodyData
+                                                        visibleHistory:(NSArray *)visibleHistory
+                                                            modelInput:(NSArray *)modelInput
+                                                               preview:(DSHCompletionProviderTransportPreviewBlock)preview
+                                                         bindExecution:(DSHCompletionProviderTransportBindExecutionBlock)bindExecution
+                                                            claimRound:(DSHCompletionProviderTransportClaimRoundBlock)claimRound
+                                                        markRedirected:(DSHCompletionProviderTransportMarkRedirectedBlock)markRedirected
+                                                      redirectDecision:(DSHCompletionProviderTransportRedirectDecisionBlock)redirectDecision
+                                                            completion:(DSHCompletionProviderTransportCompletionBlock)completion {
+  if (!self.supportsStreaming) {
+    return [super startStreamingExecutionWithSchemaVersion:schemaVersion roundId:roundId
+        generation:generation credentialGeneration:credentialGeneration
+        providerRequestId:providerRequestId credential:credential
+        requestedModel:requestedModel thinkingMode:thinkingMode
+        credentialGenerationIsCurrent:credentialGenerationIsCurrent startedAt:startedAt
+        bodyData:bodyData visibleHistory:visibleHistory modelInput:modelInput
+        preview:preview bindExecution:bindExecution claimRound:claimRound
+        markRedirected:markRedirected redirectDecision:redirectDecision
+        completion:completion];
+  }
+  (void)schemaVersion; (void)roundId; (void)generation; (void)credentialGeneration;
+  (void)providerRequestId; (void)credential; (void)requestedModel; (void)thinkingMode;
+  (void)credentialGenerationIsCurrent; (void)startedAt; (void)claimRound;
+  (void)markRedirected; (void)redirectDecision;
+  self.startCount += 1;
+  self.streamingStarts += 1;
+  self.lastBodyData = bodyData;
+  self.lastModelInput = [modelInput copy];
+  DSHProviderStreamingSmokeExecution *execution = [DSHProviderStreamingSmokeExecution new];
+  if (bindExecution == nil || !bindExecution(execution)) return nil;
+  NSMutableDictionary *result = [self.result mutableCopy];
+  result[@"visible_history_sha256"] = DSHWorkspaceSHA256Hex(
+      [NSJSONSerialization dataWithJSONObject:visibleHistory options:NSJSONWritingSortedKeys error:nil]);
+  result[@"model_input_sha256"] = DSHWorkspaceSHA256Hex(
+      [NSJSONSerialization dataWithJSONObject:modelInput options:NSJSONWritingSortedKeys error:nil]);
+  result[@"request_body_sha256"] = DSHWorkspaceSHA256Hex(bodyData);
+  NSArray *deltas = [self.scriptedDeltas copy];
+  dispatch_async(dispatch_get_global_queue(QOS_CLASS_DEFAULT, 0), ^{
+    for (NSDictionary *delta in deltas) {
+      if (preview != nil) preview(delta);
+    }
+    completion([result copy], nil);
+  });
+  return execution;
+}
+@end
+
 @interface DSHProviderSmokeFixture : NSObject
 @property(nonatomic, strong) DSHAgentNativeWAL *wal;
 @property(nonatomic, strong) DSHProviderSmokePreparedStore *prepared;
@@ -504,6 +588,7 @@ static NSDictionary *DSHProviderSmokeQueryRequest(NSDictionary *root,
 @property(nonatomic, strong) NSURL *walRoot;
 @property(nonatomic) BOOL historyAvailable;
 @property(nonatomic) BOOL credentialAvailable;
+@property(nonatomic) NSUInteger credentialGeneration;
 @property(nonatomic) NSUInteger historyCalls;
 @property(nonatomic) NSUInteger credentialCalls;
 - (instancetype)initWithFaultingCommit:(BOOL)faultingCommit;
@@ -517,6 +602,7 @@ static NSDictionary *DSHProviderSmokeQueryRequest(NSDictionary *root,
     _transcript = DSHProviderSmokeTranscript();
     _historyAvailable = YES;
     _credentialAvailable = YES;
+    _credentialGeneration = 7;
     NSError *registryError = nil;
     DSHAgentToolRegistry *registry = [[DSHAgentToolRegistry alloc] init];
     NSDictionary *registryProjection = [registry registryForRoot:_root
@@ -572,7 +658,7 @@ static NSDictionary *DSHProviderSmokeQueryRequest(NSDictionary *root,
         credentialProvider:^NSString *(NSString *harnessId, NSUInteger *generation) {
           weakSelf.credentialCalls += 1;
           if (!weakSelf.credentialAvailable) return nil;
-          if (generation != nullptr) *generation = 7;
+          if (generation != nullptr) *generation = weakSelf.credentialGeneration;
           return @"credential";
         }
         visibleHistoryProvider:^NSArray *(NSDictionary *authority, NSError **error) {
@@ -596,6 +682,150 @@ static NSDictionary *DSHProviderSmokeQueryRequest(NSDictionary *root,
 @end
 
 @implementation AgentProviderRoundServiceTests
+
+- (DSHAgentProviderRoundService *)streamingServiceForFixture:(DSHProviderSmokeFixture *)fixture
+                                                   transport:(DSHProviderStreamingSmokeTransport *)transport {
+  __weak DSHProviderSmokeFixture *weakFixture = fixture;
+  return [[DSHAgentProviderRoundService alloc]
+      initWithWAL:fixture.wal
+      preparedStore:fixture.prepared
+      transcripts:fixture.transcripts
+      rounds:fixture.rounds
+      transport:transport
+      credentialProvider:^NSString *(__unused NSString *harnessId, NSUInteger *generation) {
+        if (generation != nullptr) *generation = weakFixture.credentialGeneration;
+        return @"credential";
+      }
+      visibleHistoryProvider:^NSArray *(__unused NSDictionary *authority, NSError **error) {
+        if (error != nullptr) *error = nil;
+        return @[ @{ @"role" : @"user", @"content" : @"hello" } ];
+      }];
+}
+
+- (DSHProviderStreamingSmokeTransport *)streamingTransportWithResult:(NSDictionary *)result {
+  DSHProviderStreamingSmokeTransport *transport =
+      [[DSHProviderStreamingSmokeTransport alloc] initWithResult:result];
+  transport.supportsStreaming = YES;
+  transport.scriptedDeltas = @[
+    @{ @"type" : @"delta", @"reasoning" : @"th" },
+    @{ @"type" : @"delta", @"reasoning" : @"ink" },
+    @{ @"type" : @"delta", @"content" : @"do" },
+    @{ @"type" : @"delta", @"content" : @"ne", @"finish_reason" : @"stop" },
+  ];
+  return transport;
+}
+
+- (void)testStreamedRoundPublishesOrderedPreviewEventsAndOneValidatedEnd {
+  DSHProviderSmokeFixture *fixture = [[DSHProviderSmokeFixture alloc] init];
+  DSHProviderStreamingSmokeTransport *transport =
+      [self streamingTransportWithResult:fixture.transport.result];
+  DSHAgentProviderRoundService *service =
+      [self streamingServiceForFixture:fixture transport:transport];
+  NSMutableArray<NSDictionary *> *events = [NSMutableArray array];
+  XCTestExpectation *ended = [self expectationWithDescription:@"end event"];
+  service.previewSink = ^(NSDictionary *event) {
+    @synchronized (events) { [events addObject:event]; }
+    if ([event[@"kind"] isEqual:@"end"]) [ended fulfill];
+  };
+  NSError *error = nil;
+  NSDictionary *result = [service completeAgentRoundV2WithRequest:fixture.request error:&error];
+  XCTAssertNil(error);
+  XCTAssertEqualObjects(result[@"status"], @"completed");
+  XCTAssertEqualObjects(result[@"outcome"][@"kind"], @"final");
+  [self waitForExpectations:@[ ended ] timeout:5];
+
+  XCTAssertEqual(transport.streamingStarts, (NSUInteger)1);
+  NSDictionary *body = [NSJSONSerialization JSONObjectWithData:transport.lastBodyData
+                                                        options:0 error:nil];
+  XCTAssertEqualObjects(body[@"stream"], @YES);
+
+  NSArray<NSDictionary *> *snapshot = nil;
+  @synchronized (events) { snapshot = [events copy]; }
+  XCTAssertTrue(snapshot.count >= 2);
+  NSMutableString *text = [NSMutableString string];
+  NSMutableString *reasoning = [NSMutableString string];
+  NSUInteger expectedSeq = 1;
+  for (NSDictionary *event in snapshot) {
+    XCTAssertEqualObjects(event[@"schema_version"], @1);
+    XCTAssertEqualObjects(event[@"seq"], @(expectedSeq));
+    expectedSeq += 1;
+    XCTAssertEqualObjects(event[@"task_id"], fixture.request[@"task_id"]);
+    XCTAssertEqualObjects(event[@"attempt_id"], fixture.request[@"attempt_id"]);
+    XCTAssertEqualObjects(event[@"round_id"], fixture.request[@"round_id"]);
+    XCTAssertEqualObjects(event[@"round_index"], fixture.request[@"round_index"]);
+    XCTAssertEqualObjects(event[@"operation_id"], fixture.request[@"operation_id"]);
+    XCTAssertEqualObjects(event[@"provider_request_id"],
+                          @"66666666-6666-4666-8666-666666666666");
+    XCTAssertEqualObjects(event[@"harness_id"], @"dsh");
+    if ([event[@"kind"] isEqual:@"delta"]) {
+      if (event[@"text"]) [text appendString:event[@"text"]];
+      if (event[@"reasoning"]) [reasoning appendString:event[@"reasoning"]];
+    }
+  }
+  XCTAssertEqualObjects(text, @"done");
+  XCTAssertEqualObjects(reasoning, @"think");
+  NSDictionary *last = snapshot.lastObject;
+  XCTAssertEqualObjects(last[@"kind"], @"end");
+  XCTAssertEqualObjects(last[@"status"], @"validated");
+  XCTAssertEqualObjects(last[@"truncated"], @NO);
+  XCTAssertNil(last[@"failure_code"]);
+  for (NSDictionary *event in [snapshot subarrayWithRange:NSMakeRange(0, snapshot.count - 1)]) {
+    XCTAssertEqualObjects(event[@"kind"], @"delta");
+  }
+  NSString *lastFinish = nil;
+  for (NSDictionary *event in snapshot) if (event[@"finish_reason"]) lastFinish = event[@"finish_reason"];
+  XCTAssertEqualObjects(lastFinish, @"stop");
+  [NSFileManager.defaultManager removeItemAtURL:fixture.walRoot error:nil];
+}
+
+- (void)testStreamedRoundEndsFailedWhenTheResultDoesNotValidate {
+  DSHProviderSmokeFixture *fixture = [[DSHProviderSmokeFixture alloc] init];
+  NSMutableDictionary *mismatched = [fixture.transport.result mutableCopy];
+  mismatched[@"provider_request_id"] = @"77777777-7777-4777-8777-777777777777";
+  DSHProviderStreamingSmokeTransport *transport =
+      [self streamingTransportWithResult:mismatched];
+  DSHAgentProviderRoundService *service =
+      [self streamingServiceForFixture:fixture transport:transport];
+  NSMutableArray<NSDictionary *> *events = [NSMutableArray array];
+  XCTestExpectation *ended = [self expectationWithDescription:@"end event"];
+  service.previewSink = ^(NSDictionary *event) {
+    @synchronized (events) { [events addObject:event]; }
+    if ([event[@"kind"] isEqual:@"end"]) [ended fulfill];
+  };
+  NSError *error = nil;
+  NSDictionary *result = [service completeAgentRoundV2WithRequest:fixture.request error:&error];
+  XCTAssertNil(error);
+  XCTAssertEqualObjects(result[@"status"], @"ambiguous");
+  [self waitForExpectations:@[ ended ] timeout:5];
+  NSDictionary *last = nil;
+  @synchronized (events) { last = events.lastObject; }
+  XCTAssertEqualObjects(last[@"kind"], @"end");
+  XCTAssertEqualObjects(last[@"status"], @"failed");
+  XCTAssertTrue([last[@"failure_code"] isKindOfClass:NSString.class]);
+  [NSFileManager.defaultManager removeItemAtURL:fixture.walRoot error:nil];
+}
+
+- (void)testPreviewSinkWithoutStreamingTransportKeepsTheSingleShotRound {
+  DSHProviderSmokeFixture *fixture = [[DSHProviderSmokeFixture alloc] init];
+  DSHProviderStreamingSmokeTransport *transport =
+      [self streamingTransportWithResult:fixture.transport.result];
+  transport.supportsStreaming = NO;
+  DSHAgentProviderRoundService *service =
+      [self streamingServiceForFixture:fixture transport:transport];
+  __block NSUInteger delivered = 0;
+  service.previewSink = ^(__unused NSDictionary *event) { delivered += 1; };
+  NSError *error = nil;
+  NSDictionary *result = [service completeAgentRoundV2WithRequest:fixture.request error:&error];
+  XCTAssertNil(error);
+  XCTAssertEqualObjects(result[@"status"], @"completed");
+  XCTAssertEqual(transport.streamingStarts, (NSUInteger)0);
+  XCTAssertEqual(transport.startCount, (NSUInteger)1);
+  NSDictionary *body = [NSJSONSerialization JSONObjectWithData:transport.lastBodyData
+                                                        options:0 error:nil];
+  XCTAssertEqualObjects(body[@"stream"], @NO);
+  XCTAssertEqual(delivered, (NSUInteger)0);
+  [NSFileManager.defaultManager removeItemAtURL:fixture.walRoot error:nil];
+}
 
 - (void)testTransportResolverIsConsultedForEachRoundSelection {
   NSURLSession *session = [NSURLSession sessionWithConfiguration:
@@ -1072,8 +1302,15 @@ static NSDictionary *DSHProviderSmokeQueryRequest(NSDictionary *root,
       fixture.root, fixture.transcript, 2, YES);
   NSTimeInterval started = CFAbsoluteTimeGetCurrent();
   NSError *cancelError = nil;
-  NSDictionary *cancel = [fixture.service cancelAgentRoundWithRequest:cancelRequest
-                                                                 error:&cancelError];
+  __block NSDictionary *cancel = nil;
+  __block NSError *serializedCancelError = nil;
+  DSHSessionWorkspacePerformSync(^{
+    NSDictionary *query = [fixture.service queryAgentRoundWithRequest:
+        DSHProviderSmokeQueryRequest(fixture.root, fixture.transcript, 2, NO) error:nil];
+    XCTAssertEqualObjects(query[@"status"], @"in_flight");
+    cancel = [fixture.service cancelAgentRoundWithRequest:cancelRequest error:&serializedCancelError];
+  });
+  cancelError = serializedCancelError;
   XCTAssertNil(cancelError);
   XCTAssertLessThan(CFAbsoluteTimeGetCurrent() - started, 2.0);
   XCTAssertEqualObjects(cancel[@"status"], @"cancel_requested");
@@ -1083,9 +1320,11 @@ static NSDictionary *DSHProviderSmokeQueryRequest(NSDictionary *root,
   XCTAssertEqualObjects(roundResult[@"status"], @"ambiguous");
   void (^lateCompletion)(NSDictionary *, NSString *) = fixture.transport.pendingCompletion;
   if (lateCompletion != nil) {
-    lateCompletion(@{ @"late" : @YES }, @"E_COMPLETION_TRANSPORT");
+    lateCompletion(fixture.transport.heldResult, nil);
   }
   XCTAssertEqualObjects(roundResult[@"status"], @"ambiguous");
+
+  XCTAssertEqual(fixture.rounds.completeCount, (NSUInteger)0);
 
   NSDictionary *stale = DSHProviderSmokeQueryRequest(
       fixture.root, fixture.transcript, 1, NO);
@@ -1094,6 +1333,41 @@ static NSDictionary *DSHProviderSmokeQueryRequest(NSDictionary *root,
   XCTAssertNil(cancelError);
   XCTAssertEqualObjects(staleResult[@"status"], @"conflict");
   [NSFileManager.defaultManager removeItemAtURL:fixture.walRoot error:nil];
+}
+
+- (void)testSuccessfulLateProviderResultCannotApplyAfterSourceOrAuthorityChange {
+  for (NSString *change in @[@"transport", @"credential", @"authority"]) {
+    DSHProviderSmokeFixture *fixture = [[DSHProviderSmokeFixture alloc] init];
+    fixture.transport.holdResponse = YES;
+    __block DSHCompletionProviderTransport *current = fixture.transport;
+    fixture.service.transportResolver = ^DSHCompletionProviderTransport *(NSString *harnessId) {
+      return current;
+    };
+    XCTestExpectation *started = [self expectationWithDescription:@"response held"];
+    fixture.transport.responseHeld = ^{ [started fulfill]; };
+    XCTestExpectation *finished = [self expectationWithDescription:@"late response rejected"];
+    __block NSDictionary *result = nil;
+    dispatch_async(dispatch_get_global_queue(QOS_CLASS_DEFAULT, 0), ^{
+      result = [fixture.service completeAgentRoundV2WithRequest:fixture.request error:nil];
+      [finished fulfill];
+    });
+    [self waitForExpectations:@[started] timeout:2];
+    DSHSessionWorkspacePerformSync(^{
+      if ([change isEqual:@"transport"]) current = nil;
+      else if ([change isEqual:@"credential"]) fixture.credentialGeneration += 1;
+      else {
+        NSMutableDictionary *authority = [fixture.prepared.authority mutableCopy];
+        authority[@"authority_revision"] = @999;
+        fixture.prepared.authority = authority;
+      }
+      if (fixture.transport.pendingCompletion)
+        fixture.transport.pendingCompletion(fixture.transport.heldResult, nil);
+    });
+    [self waitForExpectations:@[finished] timeout:2];
+    XCTAssertNotEqualObjects(result[@"status"], @"completed", @"%@", change);
+    XCTAssertEqual(fixture.rounds.completeCount, (NSUInteger)0, @"%@", change);
+    XCTAssertEqual(fixture.transport.startCount, (NSUInteger)1);
+  }
 }
 
 - (void)testAsyncBoundTaskUsesOriginalTransportAfterResolverSourceSwitch {
@@ -1154,6 +1428,8 @@ static NSDictionary *DSHProviderSmokeQueryRequest(NSDictionary *root,
 }
 
 - (void)testProviderErrorMatrixKeepsStableClosedCodes {
+  XCTAssertEqualObjects(DSHProviderFailureCode(@"E_COMPLETION_LENGTH", NO),
+                        @"E_COMPLETION_LENGTH");
   XCTAssertEqualObjects(DSHProviderFailureCode(@"E_AGENT_CANCELLED", NO),
                         @"E_AGENT_CANCELLED");
   XCTAssertEqualObjects(DSHProviderFailureCode(@"E_COMPLETION_REDIRECT", NO),

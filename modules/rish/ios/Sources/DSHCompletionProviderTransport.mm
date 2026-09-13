@@ -1,11 +1,10 @@
 #import "DSHCompletionProviderTransport.h"
 
 #import "DSHCompletionV2.h"
+#import "DSHStreamEvents.h"
 
 #import <CommonCrypto/CommonDigest.h>
-#if DEBUG
 #import <os/log.h>
-#endif
 
 #include <math.h>
 
@@ -56,6 +55,7 @@ static NSString *DSHCompletionTransportParserErrorCode(NSError *error) {
       @"E_COMPLETION_EMPTY_RESPONSE",
       @"E_COMPLETION_TOOL_CALL_INVALID",
       @"E_COMPLETION_FINISH_RELATION",
+      @"E_COMPLETION_LENGTH",
     ]];
   });
   return [allowed containsObject:candidate] ? candidate :
@@ -73,6 +73,23 @@ static NSString *DSHCompletionTransportParserErrorCode(NSError *error) {
 @property(nonatomic, copy) DSHCompletionProviderTransportRedirectDecisionBlock redirectDecision;
 @property(nonatomic, copy) DSHCompletionProviderTransportCompletionBlock completion;
 @property(nonatomic) NSTimeInterval startedAt;
+// Per-request values the settle path needs; captured here so streamed and
+// buffered tasks settle through one method.
+@property(nonatomic, copy) NSString *requestedModel;
+@property(nonatomic, copy) NSString *thinkingMode;
+@property(nonatomic, copy) NSString *providerRequestId;
+@property(nonatomic, copy, nullable) NSDictionary *providerConfiguration;
+@property(nonatomic, copy) NSString *visibleDigest;
+@property(nonatomic, copy) NSString *modelInputDigest;
+@property(nonatomic, copy) NSString *bodyDigest;
+// Streamed rounds only.
+@property(nonatomic) BOOL streaming;
+@property(nonatomic, strong, nullable) id<DSHProviderStreamEventParsing> parser;
+@property(nonatomic, strong, nullable) id<DSHProviderStreamResponseAssembling> assembler;
+@property(nonatomic, copy, nullable) DSHCompletionProviderTransportPreviewBlock preview;
+@property(nonatomic) NSInteger statusCode;
+@property(nonatomic, strong, nullable) NSMutableData *errorBody;
+@property(nonatomic, copy, nullable) NSString *failureCode;
 @end
 
 @implementation DSHCompletionProviderTransportContext
@@ -85,6 +102,15 @@ static NSString *DSHCompletionTransportParserErrorCode(NSError *error) {
 @property(nonatomic, strong) NSMutableDictionary<NSNumber *, DSHCompletionProviderTransportContext *> *contexts;
 @end
 
+@interface DSHHTTPCompletionExecution : NSObject <DSHCompletionExecution>
+@property(nonatomic, strong) NSURLSessionDataTask *task;
+@property(nonatomic, strong) DSHCompletionProviderTransport *transport;
+@end
+@implementation DSHHTTPCompletionExecution
+- (void)cancel { [self.transport cancelTask:self.task]; }
+- (NSURLSessionDataTask *)underlyingHTTPTask { return self.task; }
+@end
+
 @implementation DSHCompletionProviderTransport
 
 #if DEBUG
@@ -92,6 +118,7 @@ static NSString *DSHCompletionTransportDiagnosticKind(NSError *error,
                                                       BOOL hasHTTPResponse) {
   if (hasHTTPResponse) return @"http_status";
   if (error == nil) return @"non_http";
+  if (![error.domain isEqualToString:NSURLErrorDomain]) return @"other";
   switch (error.code) {
     case NSURLErrorTimedOut: return @"timeout";
     case NSURLErrorCannotFindHost:
@@ -221,6 +248,37 @@ static NSString *DSHCompletionTransportDiagnosticKind(NSError *error,
                                       markRedirected:(DSHCompletionProviderTransportMarkRedirectedBlock)markRedirected
                                     redirectDecision:(DSHCompletionProviderTransportRedirectDecisionBlock)redirectDecision
                                            completion:(DSHCompletionProviderTransportCompletionBlock)completion {
+  return [self startRequestWithSchemaVersion:schemaVersion roundId:roundId
+      generation:generation credentialGeneration:credentialGeneration
+      providerRequestId:providerRequestId credential:credential
+      requestedModel:requestedModel thinkingMode:thinkingMode
+      credentialGenerationIsCurrent:credentialGenerationIsCurrent
+      startedAt:startedAt bodyData:bodyData visibleHistory:visibleHistory
+      modelInput:modelInput streaming:NO preview:nil bindTask:bindTask
+      claimRound:claimRound markRedirected:markRedirected
+      redirectDecision:redirectDecision completion:completion];
+}
+
+- (NSURLSessionDataTask *)startRequestWithSchemaVersion:(NSInteger)schemaVersion
+                                                 roundId:(NSString *)roundId
+                                                generation:(NSUInteger)generation
+                                      credentialGeneration:(NSUInteger)credentialGeneration
+                                       providerRequestId:(NSString *)providerRequestId
+                                             credential:(NSString *)credential
+                                         requestedModel:(NSString *)requestedModel
+                                          thinkingMode:(NSString *)thinkingMode
+                           credentialGenerationIsCurrent:(DSHCompletionProviderTransportCredentialGenerationIsCurrentBlock)credentialGenerationIsCurrent
+                                              startedAt:(NSTimeInterval)startedAt
+                                              bodyData:(NSData *)bodyData
+                                        visibleHistory:(NSArray *)visibleHistory
+                                            modelInput:(NSArray *)modelInput
+                                             streaming:(BOOL)streaming
+                                               preview:(DSHCompletionProviderTransportPreviewBlock)preview
+                                             bindTask:(DSHCompletionProviderTransportBindTaskBlock)bindTask
+                                           claimRound:(DSHCompletionProviderTransportClaimRoundBlock)claimRound
+                                      markRedirected:(DSHCompletionProviderTransportMarkRedirectedBlock)markRedirected
+                                    redirectDecision:(DSHCompletionProviderTransportRedirectDecisionBlock)redirectDecision
+                                           completion:(DSHCompletionProviderTransportCompletionBlock)completion {
   if ((schemaVersion != 2 && schemaVersion != 3) ||
       !DSHCompletionTransportValidRequestId(roundId)) {
     [self settleStartFailure:@"E_COMPLETION_SCHEMA"
@@ -288,12 +346,13 @@ static NSString *DSHCompletionTransportDiagnosticKind(NSError *error,
   request.HTTPMethod = @"POST";
   request.HTTPShouldHandleCookies = NO;
   request.cachePolicy = NSURLRequestReloadIgnoringLocalCacheData;
-  request.timeoutInterval = [self providerTimeoutIntervalForStreaming:NO];
+  request.timeoutInterval = [self providerTimeoutIntervalForStreaming:streaming];
   NSDictionary<NSString *, NSString *> *headers =
       [self providerHeadersWithCredential:credential];
   for (NSString *field in headers) {
     [request setValue:headers[field] forHTTPHeaderField:field];
   }
+  if (streaming) [request setValue:@"text/event-stream" forHTTPHeaderField:@"Accept"];
   request.HTTPBody = bodyData;
 
   DSHCompletionProviderTransportContext *context =
@@ -308,10 +367,41 @@ static NSString *DSHCompletionTransportDiagnosticKind(NSError *error,
   context.markRedirected = [markRedirected copy];
   context.redirectDecision = [redirectDecision copy];
   context.completion = [completion copy];
+  context.requestedModel = requestedModel;
+  context.thinkingMode = thinkingMode;
+  context.providerRequestId = providerRequestId;
+  context.providerConfiguration = providerConfiguration;
+  context.visibleDigest = visibleDigest;
+  context.modelInputDigest = modelInputDigest;
+  context.bodyDigest = bodyDigest;
+  if (streaming) {
+    id<DSHProviderStreamEventParsing> parser = [self providerNewStreamEventParser];
+    if (parser == nil) {
+      [self settleStartFailure:@"E_COMPLETION_TRANSPORT"
+                     claimRound:claimRound completion:completion];
+      return nil;
+    }
+    context.streaming = YES;
+    context.parser = parser;
+    context.assembler = [self providerNewStreamResponseAssemblerWithThinkingMode:thinkingMode
+        maximumBytes:DSHCompletionTransportMaximumResponseBytes];
+    if (context.assembler == nil) {
+      [self settleStartFailure:@"E_COMPLETION_TRANSPORT"
+                     claimRound:claimRound completion:completion];
+      return nil;
+    }
+    context.preview = preview;
+    context.statusCode = 0;
+  }
 
   __block NSUInteger taskIdentifier = NSUIntegerMax;
   NSURLSessionDataTask *task = nil;
   @try {
+    if (streaming) {
+      // Delegate-driven: the session owner forwards data callbacks to
+      // streamingTask:... and the round settles in didCompleteWithError.
+      task = [session dataTaskWithRequest:request];
+    } else {
     task = [session dataTaskWithRequest:request
                       completionHandler:^(NSData *data,
                                           NSURLResponse *response,
@@ -320,128 +410,10 @@ static NSString *DSHCompletionTransportDiagnosticKind(NSError *error,
           [self contextForTaskIdentifier:taskIdentifier];
       if (owned == nil) return;
       [self removeContextForTaskIdentifier:taskIdentifier];
-
-      BOOL redirected = NO;
-      BOOL current = NO;
-      @try {
-        current = owned.claimRound != nil && owned.claimRound(&redirected);
-      } @catch (__unused NSException *exception) {
-        current = NO;
-      }
-      if (!current) return;
-      BOOL generationCurrent = YES;
-      @try {
-        generationCurrent = owned.credentialGenerationIsCurrent == nil ||
-            owned.credentialGenerationIsCurrent(owned.credentialGeneration);
-      } @catch (__unused NSException *exception) {
-        generationCurrent = NO;
-      }
-      NSDictionary *currentConfiguration = [self providerConfigurationForModel:requestedModel];
-      BOOL configurationCurrent = (currentConfiguration == nil && providerConfiguration == nil) ||
-          [currentConfiguration isEqual:providerConfiguration];
-      if (!generationCurrent || !configurationCurrent) {
-        if (owned.completion != nil) {
-          owned.completion(nil, @"E_COMPLETION_CREDENTIAL_CHANGED");
-        }
-        return;
-      }
-      if (redirected) {
-        if (owned.completion != nil) {
-          owned.completion(nil, @"E_COMPLETION_REDIRECT");
-        }
-        return;
-      }
-      if (transportError != nil ||
-          ![response isKindOfClass:NSHTTPURLResponse.class]) {
-#if DEBUG
-        [self emitDiagnosticForContext:owned
-                                  error:transportError
-                          responseStatus:nil
-                       callbackSignaled:owned.completion != nil];
-#endif
-        if (owned.completion != nil) {
-          owned.completion(nil, @"E_COMPLETION_TRANSPORT");
-        }
-        return;
-      }
-      NSHTTPURLResponse *http = (NSHTTPURLResponse *)response;
-      if (http.statusCode < 200 || http.statusCode >= 300) {
-#if DEBUG
-        [self emitDiagnosticForContext:owned
-                                  error:nil
-                          responseStatus:@(http.statusCode)
-                       callbackSignaled:owned.completion != nil];
-#endif
-        if (owned.completion != nil) {
-          owned.completion(nil, [self providerErrorCodeForHTTPStatus:http.statusCode
-                                                                 data:data]);
-        }
-        return;
-      }
-      if (data.length == 0 || data.length > DSHCompletionTransportMaximumResponseBytes) {
-        if (owned.completion != nil) {
-          owned.completion(nil, @"E_COMPLETION_RESPONSE_SIZE");
-        }
-        return;
-      }
-      NSError *parseError = nil;
-      NSDictionary *parsed = [self providerParseResponseData:data
-                                              requestedModel:requestedModel
-                                                thinkingMode:thinkingMode
-                                                      error:&parseError];
-      if (parsed == nil) {
-#if DEBUG
-        // Retain only bounded shape facts for a rejected response. Never log
-        // response text, reasoning, arguments, identifiers, or credentials.
-        id decoded = [NSJSONSerialization JSONObjectWithData:data options:0 error:nil];
-        NSArray *choices = [decoded isKindOfClass:NSDictionary.class] && [decoded[@"choices"] isKindOfClass:NSArray.class] ? decoded[@"choices"] : nil;
-        NSDictionary *choice = choices.count > 0 && [choices[0] isKindOfClass:NSDictionary.class] ? choices[0] : nil;
-        NSDictionary *message = [choice[@"message"] isKindOfClass:NSDictionary.class] ? choice[@"message"] : nil;
-        NSString *finish = [@[@"stop", @"tool_calls", @"length", @"content_filter"] containsObject:choice[@"finish_reason"] ?: NSNull.null] ? choice[@"finish_reason"] : @"other";
-        NSInteger calls = [message[@"tool_calls"] isKindOfClass:NSArray.class] ? [message[@"tool_calls"] count] : -1;
-        NSInteger contentBytes = [message[@"content"] isKindOfClass:NSString.class] ? [message[@"content"] lengthOfBytesUsingEncoding:NSUTF8StringEncoding] : -1;
-        NSInteger reasoningBytes = [message[@"reasoning_content"] isKindOfClass:NSString.class] ? [message[@"reasoning_content"] lengthOfBytesUsingEncoding:NSUTF8StringEncoding] : -1;
-        id responseModel = [decoded isKindOfClass:NSDictionary.class] ? decoded[@"model"] : nil;
-        BOOL modelIsString = [responseModel isKindOfClass:NSString.class];
-        BOOL modelMatches = modelIsString && [responseModel isEqual:requestedModel];
-        os_log_error(OS_LOG_DEFAULT, "completion_parser_reject code=%{public}@ finish=%{public}@ calls=%{public}ld content_bytes=%{public}ld reasoning_bytes=%{public}ld response_bytes=%{public}lu model_present=%{public}d model_is_string=%{public}d model_matches_requested=%{public}d", DSHCompletionTransportParserErrorCode(parseError), finish, calls, contentBytes, reasoningBytes, (unsigned long)data.length, responseModel != nil, modelIsString, modelMatches);
-#endif
-        if (owned.completion != nil) {
-          owned.completion(nil, DSHCompletionTransportParserErrorCode(parseError));
-        }
-        return;
-      }
-      NSTimeInterval finished = startedAt;
-      @try {
-        finished = self.monotonicClock();
-      } @catch (__unused NSException *exception) {
-        finished = startedAt;
-      }
-      NSInteger latencyMs = (NSInteger)floor(MAX(0, finished - startedAt) *
-          1000.0 + 0.000001);
-      NSDictionary *result = @{
-        @"provider_request_id": providerRequestId,
-        @"provider_response_id": parsed[@"provider_response_id"],
-        @"harness_id": [self providerHarnessId],
-        @"requested_model": requestedModel,
-        @"model": parsed[@"model"],
-        @"thinking_mode": thinkingMode,
-        @"text": parsed[@"text"],
-        @"reasoning": parsed[@"reasoning"],
-        @"tool_calls": DSHCompletionNormalizeToolCalls(parsed[@"tool_calls"]),
-        @"finish_reason": parsed[@"finish_reason"],
-        @"latency_ms": @(latencyMs),
-        @"visible_history_sha256": visibleDigest,
-        @"model_input_sha256": modelInputDigest,
-        @"request_body_sha256": bodyDigest,
-      };
-      if (providerConfiguration != nil) {
-        NSMutableDictionary *bound = [result mutableCopy];
-        bound[@"provider_configuration"] = providerConfiguration;
-        result = bound;
-      }
-      if (owned.completion != nil) owned.completion(result, nil);
+      [self settleContext:owned data:data response:response
+           transportError:transportError];
     }];
+    }
   } @catch (__unused NSException *exception) {
     [self settleStartFailure:@"E_COMPLETION_TRANSPORT"
                    claimRound:claimRound completion:completion];
@@ -484,6 +456,295 @@ static NSString *DSHCompletionTransportDiagnosticKind(NSError *error,
   }
   [task resume];
   return task;
+}
+
+/// Settles one owned request whose context has already been removed from
+/// the routing table. `data` is the buffered body (single-shot) or, for a
+/// streamed round, the assembled single-shot object (2xx) / the bounded
+/// error body (non-2xx).
+- (void)settleContext:(DSHCompletionProviderTransportContext *)owned
+                 data:(NSData *)data
+             response:(NSURLResponse *)response
+       transportError:(NSError *)transportError {
+  NSString *requestedModel = owned.requestedModel;
+  NSString *thinkingMode = owned.thinkingMode;
+  NSString *providerRequestId = owned.providerRequestId;
+  NSDictionary *providerConfiguration = owned.providerConfiguration;
+  NSString *visibleDigest = owned.visibleDigest;
+  NSString *modelInputDigest = owned.modelInputDigest;
+  NSString *bodyDigest = owned.bodyDigest;
+  NSTimeInterval startedAt = owned.startedAt;
+  {
+    {
+      BOOL redirected = NO;
+      BOOL current = NO;
+      @try {
+        current = owned.claimRound != nil && owned.claimRound(&redirected);
+      } @catch (__unused NSException *exception) {
+        current = NO;
+      }
+      if (!current) return;
+      BOOL generationCurrent = YES;
+      @try {
+        generationCurrent = owned.credentialGenerationIsCurrent == nil ||
+            owned.credentialGenerationIsCurrent(owned.credentialGeneration);
+      } @catch (__unused NSException *exception) {
+        generationCurrent = NO;
+      }
+      NSDictionary *currentConfiguration = [self providerConfigurationForModel:requestedModel];
+      BOOL configurationCurrent = (currentConfiguration == nil && providerConfiguration == nil) ||
+          [currentConfiguration isEqual:providerConfiguration];
+      if (!generationCurrent || !configurationCurrent) {
+        if (owned.completion != nil) {
+          owned.completion(nil, @"E_COMPLETION_CREDENTIAL_CHANGED");
+        }
+        return;
+      }
+      if (redirected) {
+        if (owned.completion != nil) {
+          owned.completion(nil, @"E_COMPLETION_REDIRECT");
+        }
+        return;
+      }
+      if (transportError != nil ||
+          ![response isKindOfClass:NSHTTPURLResponse.class]) {
+#if DEBUG
+        [self emitDiagnosticForContext:owned
+                                  error:transportError
+                          responseStatus:nil
+                       callbackSignaled:owned.completion != nil];
+#endif
+        if (owned.completion != nil) {
+          BOOL timedOut = [transportError.domain isEqualToString:NSURLErrorDomain] &&
+              transportError.code == NSURLErrorTimedOut;
+          owned.completion(nil, timedOut ? @"E_COMPLETION_TIMEOUT" : @"E_COMPLETION_TRANSPORT");
+        }
+        return;
+      }
+      NSHTTPURLResponse *http = (NSHTTPURLResponse *)response;
+      if (http.statusCode < 200 || http.statusCode >= 300) {
+#if DEBUG
+        [self emitDiagnosticForContext:owned
+                                  error:nil
+                          responseStatus:@(http.statusCode)
+                       callbackSignaled:owned.completion != nil];
+#endif
+        if (owned.completion != nil) {
+          owned.completion(nil, [self providerErrorCodeForHTTPStatus:http.statusCode
+                                                                 data:data]);
+        }
+        return;
+      }
+      if (data.length == 0 || data.length > DSHCompletionTransportMaximumResponseBytes) {
+        if (owned.completion != nil) {
+          owned.completion(nil, @"E_COMPLETION_RESPONSE_SIZE");
+        }
+        return;
+      }
+      NSError *parseError = nil;
+      NSDictionary *parsed = [self providerParseResponseData:data
+                                              requestedModel:requestedModel
+                                                thinkingMode:thinkingMode
+                                                      error:&parseError];
+      if (parsed == nil) {
+        // Retain only bounded shape facts for a rejected response. Never log
+        // response text, reasoning, arguments, identifiers, or credentials.
+        id decoded = [NSJSONSerialization JSONObjectWithData:data options:0 error:nil];
+        NSArray *choices = [decoded isKindOfClass:NSDictionary.class] && [decoded[@"choices"] isKindOfClass:NSArray.class] ? decoded[@"choices"] : nil;
+        NSDictionary *choice = choices.count > 0 && [choices[0] isKindOfClass:NSDictionary.class] ? choices[0] : nil;
+        NSDictionary *message = [choice[@"message"] isKindOfClass:NSDictionary.class] ? choice[@"message"] : nil;
+        NSString *finish = [@[@"stop", @"tool_calls", @"length", @"content_filter"] containsObject:choice[@"finish_reason"] ?: NSNull.null] ? choice[@"finish_reason"] : @"other";
+        NSInteger calls = [message[@"tool_calls"] isKindOfClass:NSArray.class] ? [message[@"tool_calls"] count] : -1;
+        NSInteger contentBytes = [message[@"content"] isKindOfClass:NSString.class] ? [message[@"content"] lengthOfBytesUsingEncoding:NSUTF8StringEncoding] : -1;
+        NSInteger reasoningBytes = [message[@"reasoning_content"] isKindOfClass:NSString.class] ? [message[@"reasoning_content"] lengthOfBytesUsingEncoding:NSUTF8StringEncoding] : -1;
+        id responseModel = [decoded isKindOfClass:NSDictionary.class] ? decoded[@"model"] : nil;
+        BOOL modelIsString = [responseModel isKindOfClass:NSString.class];
+        BOOL modelMatches = modelIsString && [responseModel isEqual:requestedModel];
+        id usage = [decoded isKindOfClass:NSDictionary.class] ? decoded[@"usage"] : nil;
+        id tokens = [usage isKindOfClass:NSDictionary.class] ? usage[@"completion_tokens"] : nil;
+        NSInteger outputTokens = [tokens isKindOfClass:NSNumber.class] && [tokens doubleValue] >= 0 && [tokens doubleValue] <= 1000000 ? [tokens integerValue] : -1;
+        os_log_error(OS_LOG_DEFAULT, "completion_parser_reject code=%{public}@ finish=%{public}@ calls=%{public}ld content_bytes=%{public}ld reasoning_bytes=%{public}ld response_bytes=%{public}lu model_present=%{public}d model_is_string=%{public}d model_matches_requested=%{public}d output_tokens=%{public}ld", DSHCompletionTransportParserErrorCode(parseError), finish, calls, contentBytes, reasoningBytes, (unsigned long)data.length, responseModel != nil, modelIsString, modelMatches, outputTokens);
+        if (owned.completion != nil) {
+          owned.completion(nil, DSHCompletionTransportParserErrorCode(parseError));
+        }
+        return;
+      }
+      NSTimeInterval finished = startedAt;
+      @try {
+        finished = self.monotonicClock();
+      } @catch (__unused NSException *exception) {
+        finished = startedAt;
+      }
+      NSInteger latencyMs = (NSInteger)floor(MAX(0, finished - startedAt) *
+          1000.0 + 0.000001);
+      NSDictionary *result = @{
+        @"provider_request_id": providerRequestId,
+        @"provider_response_id": parsed[@"provider_response_id"],
+        @"harness_id": [self providerHarnessId],
+        @"requested_model": requestedModel,
+        @"model": parsed[@"model"],
+        @"thinking_mode": thinkingMode,
+        @"text": parsed[@"text"],
+        @"reasoning": parsed[@"reasoning"],
+        @"tool_calls": DSHCompletionNormalizeToolCalls(parsed[@"tool_calls"]),
+        @"finish_reason": parsed[@"finish_reason"],
+        @"latency_ms": @(latencyMs),
+        @"visible_history_sha256": visibleDigest,
+        @"model_input_sha256": modelInputDigest,
+        @"request_body_sha256": bodyDigest,
+      };
+      if (providerConfiguration != nil) {
+        NSMutableDictionary *bound = [result mutableCopy];
+        bound[@"provider_configuration"] = providerConfiguration;
+        result = bound;
+      }
+      if (owned.completion != nil) owned.completion(result, nil);
+    }
+  }
+}
+
+#pragma mark Streamed rounds
+
+- (void)streamingTask:(NSURLSessionDataTask *)task didReceiveResponse:(NSURLResponse *)response {
+  DSHCompletionProviderTransportContext *context =
+      [self contextForTaskIdentifier:task.taskIdentifier];
+  if (context == nil || !context.streaming) return;
+  context.statusCode = [response isKindOfClass:NSHTTPURLResponse.class]
+      ? ((NSHTTPURLResponse *)response).statusCode : -1;
+}
+
+- (void)streamingTask:(NSURLSessionDataTask *)task didReceiveData:(NSData *)data {
+  DSHCompletionProviderTransportContext *context =
+      [self contextForTaskIdentifier:task.taskIdentifier];
+  if (context == nil || !context.streaming || context.failureCode != nil ||
+      data.length == 0) return;
+  if (context.statusCode < 200 || context.statusCode >= 300) {
+    // Not an event stream: keep a bounded copy for the status → code map.
+    if (context.errorBody == nil) context.errorBody = [NSMutableData data];
+    NSUInteger room = 64 * 1024 - MIN(context.errorBody.length, (NSUInteger)64 * 1024);
+    [context.errorBody appendBytes:data.bytes length:MIN(data.length, room)];
+    return;
+  }
+  NSError *parseError = nil;
+  NSArray<NSDictionary *> *deltas = [context.parser
+      appendBytes:static_cast<const uint8_t *>(data.bytes)
+           length:data.length error:&parseError];
+  if (deltas == nil) {
+    context.failureCode = parseError.code == 2104 || parseError.code == 2105
+        ? @"E_COMPLETION_RESPONSE_SIZE" : @"E_COMPLETION_RESPONSE_JSON";
+    [task cancel];
+    return;
+  }
+  [self applyStreamedDeltas:deltas toContext:context task:task];
+}
+
+- (void)applyStreamedDeltas:(NSArray<NSDictionary *> *)deltas
+                  toContext:(DSHCompletionProviderTransportContext *)context
+                       task:(NSURLSessionTask *)task {
+  if ([context.parser respondsToSelector:@selector(streamedResponseId)] &&
+      [context.parser respondsToSelector:@selector(streamedModel)]) {
+    [context.assembler noteResponseId:[(id)context.parser streamedResponseId]
+                                model:[(id)context.parser streamedModel]];
+  }
+  for (NSDictionary *delta in deltas) {
+    NSError *assembleError = nil;
+    if (![context.assembler appendDelta:delta error:&assembleError]) {
+      context.failureCode = assembleError.code == 2201
+          ? @"E_COMPLETION_RESPONSE_SIZE" : @"E_COMPLETION_TOOL_CALL_INVALID";
+      [task cancel];
+      return;
+    }
+    if (context.preview != nil && [delta[@"type"] isEqual:@"delta"]) {
+      @try { context.preview(delta); } @catch (__unused NSException *exception) {}
+    }
+  }
+}
+
+- (void)streamingTask:(NSURLSessionTask *)task didCompleteWithError:(NSError *)error {
+  DSHCompletionProviderTransportContext *owned =
+      [self contextForTaskIdentifier:task.taskIdentifier];
+  if (owned == nil || !owned.streaming) return;
+  [self removeContextForTaskIdentifier:task.taskIdentifier];
+  NSURLResponse *response = task.response;
+  BOOL ok = error == nil && [response isKindOfClass:NSHTTPURLResponse.class] &&
+      owned.statusCode >= 200 && owned.statusCode < 300;
+  if (owned.failureCode == nil && ok) {
+    NSError *flushError = nil;
+    NSArray *flushed = [owned.parser finish:&flushError];
+    if (flushed == nil) {
+      owned.failureCode = flushError.code == 2104 || flushError.code == 2105
+          ? @"E_COMPLETION_RESPONSE_SIZE" : @"E_COMPLETION_RESPONSE_JSON";
+    } else {
+      [self applyStreamedDeltas:flushed toContext:owned task:task];
+    }
+  }
+  if (owned.failureCode != nil) {
+    // The transport itself cancelled the task; report the parse/budget
+    // failure, never the resulting NSURLErrorCancelled.
+    BOOL current = NO;
+    BOOL redirected = NO;
+    @try {
+      current = owned.claimRound != nil && owned.claimRound(&redirected);
+    } @catch (__unused NSException *exception) {
+      current = NO;
+    }
+    if (current && owned.completion != nil) owned.completion(nil, owned.failureCode);
+    return;
+  }
+  NSData *data = nil;
+  if (ok) {
+    NSError *encodeError = nil;
+    data = [NSJSONSerialization dataWithJSONObject:[owned.assembler responseObject]
+                                           options:0 error:&encodeError];
+  } else {
+    data = owned.errorBody ?: [NSData data];
+  }
+  [self settleContext:owned data:data response:response transportError:error];
+}
+
+- (id<DSHCompletionExecution>)startStreamingExecutionWithSchemaVersion:(NSInteger)schemaVersion
+                                                               roundId:(NSString *)roundId
+                                                            generation:(NSUInteger)generation
+                                                  credentialGeneration:(NSUInteger)credentialGeneration
+                                                     providerRequestId:(NSString *)providerRequestId
+                                                            credential:(NSString *)credential
+                                                        requestedModel:(NSString *)requestedModel
+                                                          thinkingMode:(NSString *)thinkingMode
+                                         credentialGenerationIsCurrent:(DSHCompletionProviderTransportCredentialGenerationIsCurrentBlock)credentialGenerationIsCurrent
+                                                             startedAt:(NSTimeInterval)startedAt
+                                                              bodyData:(NSData *)bodyData
+                                                        visibleHistory:(NSArray *)visibleHistory
+                                                            modelInput:(NSArray *)modelInput
+                                                               preview:(DSHCompletionProviderTransportPreviewBlock)preview
+                                                         bindExecution:(DSHCompletionProviderTransportBindExecutionBlock)bindExecution
+                                                            claimRound:(DSHCompletionProviderTransportClaimRoundBlock)claimRound
+                                                        markRedirected:(DSHCompletionProviderTransportMarkRedirectedBlock)markRedirected
+                                                      redirectDecision:(DSHCompletionProviderTransportRedirectDecisionBlock)redirectDecision
+                                                            completion:(DSHCompletionProviderTransportCompletionBlock)completion {
+  if (![self providerSupportsStreamingRounds]) {
+    return [self startExecutionWithSchemaVersion:schemaVersion roundId:roundId
+        generation:generation credentialGeneration:credentialGeneration
+        providerRequestId:providerRequestId credential:credential
+        requestedModel:requestedModel thinkingMode:thinkingMode
+        credentialGenerationIsCurrent:credentialGenerationIsCurrent
+        startedAt:startedAt bodyData:bodyData visibleHistory:visibleHistory
+        modelInput:modelInput bindExecution:bindExecution claimRound:claimRound
+        markRedirected:markRedirected redirectDecision:redirectDecision
+        completion:completion];
+  }
+  DSHHTTPCompletionExecution *execution = [DSHHTTPCompletionExecution new];
+  execution.transport = self;
+  NSURLSessionDataTask *task = [self startRequestWithSchemaVersion:schemaVersion
+    roundId:roundId generation:generation credentialGeneration:credentialGeneration
+    providerRequestId:providerRequestId credential:credential requestedModel:requestedModel
+    thinkingMode:thinkingMode credentialGenerationIsCurrent:credentialGenerationIsCurrent
+    startedAt:startedAt bodyData:bodyData visibleHistory:visibleHistory modelInput:modelInput
+    streaming:YES preview:preview
+    bindTask:^BOOL(NSURLSessionDataTask *candidate) {
+      execution.task = candidate;
+      return bindExecution != nil && bindExecution(execution);
+    } claimRound:claimRound markRedirected:markRedirected redirectDecision:redirectDecision completion:completion];
+  return task == nil ? nil : execution;
 }
 
 - (BOOL)handlesTask:(NSURLSessionTask *)task {
@@ -588,6 +849,16 @@ static NSString *DSHCompletionTransportDiagnosticKind(NSError *error,
   return nil;
 }
 
+- (BOOL)providerSupportsStreamingRounds {
+  return NO;
+}
+
+- (id<DSHProviderStreamResponseAssembling>)providerNewStreamResponseAssemblerWithThinkingMode:(NSString *)thinkingMode
+                                                                                  maximumBytes:(NSUInteger)maximumBytes {
+  return [[DSHStreamResponseAssembler alloc] initWithThinkingMode:thinkingMode
+                                                     maximumBytes:maximumBytes];
+}
+
 - (BOOL)providerSupportsModel:(NSString *)model {
   return NO;
 }
@@ -600,4 +871,39 @@ static NSString *DSHCompletionTransportDiagnosticKind(NSError *error,
   return nil;
 }
 
+
+- (BOOL)isReadyWithCredential:(NSString *)credential { return [credential isKindOfClass:NSString.class] && credential.length > 0; }
+- (BOOL)supportsTools { return YES; }
+- (NSTimeInterval)executionTimeoutInterval { return 120; }
+- (id<DSHCompletionExecution>)startExecutionWithSchemaVersion:(NSInteger)schemaVersion
+                                                           roundId:(NSString *)roundId
+                                                          generation:(NSUInteger)generation
+                                                credentialGeneration:(NSUInteger)credentialGeneration
+                                                 providerRequestId:(NSString *)providerRequestId
+                                                       credential:(NSString *)credential
+                                                   requestedModel:(NSString *)requestedModel
+                                                    thinkingMode:(NSString *)thinkingMode
+                                     credentialGenerationIsCurrent:(DSHCompletionProviderTransportCredentialGenerationIsCurrentBlock)credentialGenerationIsCurrent
+                                                        startedAt:(NSTimeInterval)startedAt
+                                                        bodyData:(NSData *)bodyData
+                                                  visibleHistory:(NSArray *)visibleHistory
+                                                      modelInput:(NSArray *)modelInput
+                                                       bindExecution:(DSHCompletionProviderTransportBindExecutionBlock)bindExecution
+                                                     claimRound:(DSHCompletionProviderTransportClaimRoundBlock)claimRound
+                                                markRedirected:(DSHCompletionProviderTransportMarkRedirectedBlock)markRedirected
+                                              redirectDecision:(DSHCompletionProviderTransportRedirectDecisionBlock)redirectDecision
+                                                     completion:(DSHCompletionProviderTransportCompletionBlock)completion {
+  DSHHTTPCompletionExecution *execution = [DSHHTTPCompletionExecution new];
+  execution.transport = self;
+  NSURLSessionDataTask *task = [self startRequestWithSchemaVersion:schemaVersion
+    roundId:roundId generation:generation credentialGeneration:credentialGeneration
+    providerRequestId:providerRequestId credential:credential requestedModel:requestedModel
+    thinkingMode:thinkingMode credentialGenerationIsCurrent:credentialGenerationIsCurrent
+    startedAt:startedAt bodyData:bodyData visibleHistory:visibleHistory modelInput:modelInput
+    bindTask:^BOOL(NSURLSessionDataTask *candidate) {
+      execution.task = candidate;
+      return bindExecution != nil && bindExecution(execution);
+    } claimRound:claimRound markRedirected:markRedirected redirectDecision:redirectDecision completion:completion];
+  return task == nil ? nil : execution;
+}
 @end

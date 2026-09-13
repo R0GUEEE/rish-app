@@ -99,7 +99,28 @@ describe.each(FIXTURES)('recorded $file', ({ file, harnessId }) => {
         const payload = keys.filter(key => key !== 'type');
         expect(payload.length).toBeGreaterThan(0);
         for (const key of payload) {
-          expect(['content', 'reasoning', 'finish_reason']).toContain(key);
+          expect(['content', 'reasoning', 'finish_reason', 'tool_calls']).toContain(key);
+          if (key === 'tool_calls') {
+            // Streamed tool-call fragments: {index, id?, name?, arguments?},
+            // assembled natively into the round's validated tool calls.
+            const fragments = delta[key];
+            expect(Array.isArray(fragments)).toBe(true);
+            expect((fragments as unknown[]).length).toBeGreaterThan(0);
+            expect((fragments as unknown[]).length).toBeLessThanOrEqual(16);
+            for (const fragment of fragments as Record<string, unknown>[]) {
+              const fragmentKeys = Object.keys(fragment).sort();
+              expect(fragmentKeys).toContain('index');
+              expect(Number.isInteger(fragment.index)).toBe(true);
+              expect(fragment.index as number).toBeGreaterThanOrEqual(0);
+              expect(fragment.index as number).toBeLessThanOrEqual(15);
+              for (const fragmentKey of fragmentKeys.filter(item => item !== 'index')) {
+                expect(['id', 'name', 'arguments']).toContain(fragmentKey);
+                expect(typeof fragment[fragmentKey]).toBe('string');
+                expect((fragment[fragmentKey] as string).length).toBeGreaterThan(0);
+              }
+            }
+            continue;
+          }
           expect(typeof delta[key]).toBe('string');
           expect((delta[key] as string).length).toBeGreaterThan(0);
         }

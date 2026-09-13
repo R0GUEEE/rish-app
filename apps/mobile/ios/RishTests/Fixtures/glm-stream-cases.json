@@ -68,6 +68,34 @@
         },
         {
           "type": "delta",
+          "tool_calls": [
+            {
+              "index": 1,
+              "id": "toolu_01",
+              "name": "write_file"
+            }
+          ]
+        },
+        {
+          "type": "delta",
+          "tool_calls": [
+            {
+              "index": 1,
+              "arguments": "{\"path\": \"notes.md\","
+            }
+          ]
+        },
+        {
+          "type": "delta",
+          "tool_calls": [
+            {
+              "index": 1,
+              "arguments": " \"content\": \"hi\"}"
+            }
+          ]
+        },
+        {
+          "type": "delta",
           "finish_reason": "tool_calls"
         },
         {

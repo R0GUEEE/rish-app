@@ -6,9 +6,177 @@
 #import "RishHarnessCatalog.h"
 #import "SessionWorkspaceCoordinator.h"
 
-#if DEBUG
 #import <os/log.h>
-#endif
+
+// Authority preparation and result application share the workspace transaction
+// queue. The continuation between them owns only the provider wait.
+static NSDictionary *DSHProviderSerializedResult(NSDictionary *(^operation)(void)) {
+  __block NSDictionary *result = nil;
+  DSHSessionWorkspacePerformSync(^{ result = operation(); });
+  return result;
+}
+
+static const NSUInteger DSHAgentRoundPreviewBudgetBytes = 256 * 1024;
+static const NSUInteger DSHAgentRoundPreviewFlushBytes = 32 * 1024;
+static const int64_t DSHAgentRoundPreviewCoalesceNanoseconds = 50 * NSEC_PER_MSEC;
+
+/// Coalesces transport deltas of one round into ordered preview events.
+/// All state lives on a private serial queue; the sink is invoked from it.
+@interface DSHAgentRoundPreviewPublisher : NSObject
+@property(nonatomic, copy) DSHAgentProviderRoundPreviewSink sink;
+@property(nonatomic, copy) NSDictionary *correlation;
+@property(nonatomic, strong) dispatch_queue_t queue;
+@property(nonatomic, strong) NSMutableString *pendingText;
+@property(nonatomic, strong) NSMutableString *pendingReasoning;
+@property(nonatomic, strong) NSMutableArray<NSMutableDictionary *> *pendingCalls;
+@property(nonatomic, copy, nullable) NSString *pendingFinish;
+@property(nonatomic) NSUInteger pendingBytes;
+@property(nonatomic) NSUInteger emittedBytes;
+@property(nonatomic) NSUInteger seq;
+@property(nonatomic) BOOL scheduled;
+@property(nonatomic) BOOL truncated;
+@property(nonatomic) BOOL finished;
+@end
+
+@implementation DSHAgentRoundPreviewPublisher
+
+- (instancetype)initWithSink:(DSHAgentProviderRoundPreviewSink)sink
+                 correlation:(NSDictionary *)correlation {
+  self = [super init];
+  if (self != nil) {
+    _sink = [sink copy];
+    _correlation = [correlation copy];
+    _queue = dispatch_queue_create("dev.zseven.dsh.mobile.agent-round-preview",
+                                   DISPATCH_QUEUE_SERIAL);
+    _pendingText = [NSMutableString string];
+    _pendingReasoning = [NSMutableString string];
+    _pendingCalls = [NSMutableArray array];
+  }
+  return self;
+}
+
+- (void)emitLocked:(NSDictionary *)fields {
+  self.seq += 1;
+  NSMutableDictionary *event = [self.correlation mutableCopy];
+  event[@"schema_version"] = @1;
+  event[@"seq"] = @(self.seq);
+  [event addEntriesFromDictionary:fields];
+  @try {
+    if (self.sink != nil) self.sink([event copy]);
+  } @catch (__unused NSException *exception) {
+  }
+}
+
+- (void)flushLocked {
+  if (self.pendingText.length == 0 && self.pendingReasoning.length == 0 &&
+      self.pendingCalls.count == 0 && self.pendingFinish == nil) return;
+  NSMutableDictionary *fields = [NSMutableDictionary dictionary];
+  fields[@"kind"] = @"delta";
+  if (self.pendingText.length > 0) fields[@"text"] = [self.pendingText copy];
+  if (self.pendingReasoning.length > 0) {
+    fields[@"reasoning"] = [self.pendingReasoning copy];
+  }
+  if (self.pendingCalls.count > 0) {
+    NSMutableArray *calls = [NSMutableArray arrayWithCapacity:self.pendingCalls.count];
+    for (NSMutableDictionary *call in self.pendingCalls) {
+      NSMutableDictionary *fragment = [call mutableCopy];
+      NSString *arguments = call[@"arguments"];
+      if (arguments.length == 0) [fragment removeObjectForKey:@"arguments"];
+      else fragment[@"arguments"] = [arguments copy];
+      [calls addObject:[fragment copy]];
+    }
+    fields[@"tool_calls"] = [calls copy];
+  }
+  if (self.pendingFinish != nil) fields[@"finish_reason"] = self.pendingFinish;
+  [self emitLocked:fields];
+  self.emittedBytes += self.pendingBytes;
+  self.pendingBytes = 0;
+  self.pendingText = [NSMutableString string];
+  self.pendingReasoning = [NSMutableString string];
+  self.pendingCalls = [NSMutableArray array];
+  self.pendingFinish = nil;
+}
+
+- (void)appendDelta:(NSDictionary *)delta {
+  if (![delta isKindOfClass:NSDictionary.class]) return;
+  dispatch_async(self.queue, ^{
+    if (self.finished || self.truncated) return;
+    NSString *text = [delta[@"content"] isKindOfClass:NSString.class] ? delta[@"content"] : nil;
+    NSString *reasoning = [delta[@"reasoning"] isKindOfClass:NSString.class] ? delta[@"reasoning"] : nil;
+    NSArray *fragments = [delta[@"tool_calls"] isKindOfClass:NSArray.class] ? delta[@"tool_calls"] : @[];
+    NSUInteger bytes = [text lengthOfBytesUsingEncoding:NSUTF8StringEncoding] +
+        [reasoning lengthOfBytesUsingEncoding:NSUTF8StringEncoding];
+    for (NSDictionary *fragment in fragments) {
+      if ([fragment[@"arguments"] isKindOfClass:NSString.class]) {
+        bytes += [fragment[@"arguments"] lengthOfBytesUsingEncoding:NSUTF8StringEncoding];
+      }
+    }
+    if (self.emittedBytes + self.pendingBytes + bytes > DSHAgentRoundPreviewBudgetBytes) {
+      // Beyond the preview budget the round keeps validating natively; the
+      // end event tells JS the preview stopped short.
+      self.truncated = YES;
+      [self flushLocked];
+      return;
+    }
+    self.pendingBytes += bytes;
+    if (text != nil) [self.pendingText appendString:text];
+    if (reasoning != nil) [self.pendingReasoning appendString:reasoning];
+    for (NSDictionary *fragment in fragments) {
+      if (![fragment isKindOfClass:NSDictionary.class] ||
+          ![fragment[@"index"] isKindOfClass:NSNumber.class]) continue;
+      NSMutableDictionary *last = self.pendingCalls.lastObject;
+      BOOL continues = last != nil && [last[@"index"] isEqual:fragment[@"index"]] &&
+          fragment[@"id"] == nil && fragment[@"name"] == nil;
+      if (continues) {
+        if ([fragment[@"arguments"] isKindOfClass:NSString.class]) {
+          last[@"arguments"] = [(last[@"arguments"] ?: @"") stringByAppendingString:fragment[@"arguments"]];
+        }
+        continue;
+      }
+      NSMutableDictionary *call = [NSMutableDictionary dictionary];
+      call[@"index"] = fragment[@"index"];
+      if ([fragment[@"id"] isKindOfClass:NSString.class]) call[@"id"] = fragment[@"id"];
+      if ([fragment[@"name"] isKindOfClass:NSString.class]) call[@"name"] = fragment[@"name"];
+      if ([fragment[@"arguments"] isKindOfClass:NSString.class]) call[@"arguments"] = fragment[@"arguments"];
+      [self.pendingCalls addObject:call];
+    }
+    if ([delta[@"finish_reason"] isKindOfClass:NSString.class]) {
+      self.pendingFinish = delta[@"finish_reason"];
+    }
+    if (self.pendingBytes >= DSHAgentRoundPreviewFlushBytes) {
+      [self flushLocked];
+      return;
+    }
+    if (self.scheduled) return;
+    self.scheduled = YES;
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, DSHAgentRoundPreviewCoalesceNanoseconds),
+                   self.queue, ^{
+      self.scheduled = NO;
+      if (!self.finished) [self flushLocked];
+    });
+  });
+}
+
+- (void)finishWithStatus:(NSString *)status failureCode:(NSString *)failureCode {
+  dispatch_sync(self.queue, ^{
+    if (self.finished) return;
+    [self flushLocked];
+    self.finished = YES;
+    os_log(OS_LOG_DEFAULT,
+           "agent_round_preview status=%{public}@ events=%{public}lu bytes=%{public}lu truncated=%{public}d",
+           status ?: @"failed", (unsigned long)self.seq, (unsigned long)self.emittedBytes, self.truncated);
+    NSMutableDictionary *fields = [NSMutableDictionary dictionary];
+    fields[@"kind"] = @"end";
+    fields[@"status"] = status ?: @"failed";
+    if ([failureCode isKindOfClass:NSString.class] && failureCode.length > 0) {
+      fields[@"failure_code"] = failureCode;
+    }
+    fields[@"truncated"] = @(self.truncated);
+    [self emitLocked:fields];
+  });
+}
+
+@end
 
 @interface DSHAgentProviderRoundService ()
 @property(nonatomic, strong, readwrite) DSHAgentNativeWAL *wal;
@@ -316,6 +484,8 @@
 - (nullable NSDictionary *)completeAgentRoundV2WithRequest:(NSDictionary *)rawRequest
                                                      error:(NSError **)error
                                          retryFailedRound:(BOOL)retryFailedRound {
+  __block NSDictionary *(^awaitProvider)(void) = nil;
+  NSDictionary *preparedResult = DSHProviderSerializedResult(^NSDictionary *{
   NSError *requestError = nil;
   NSDictionary *request = DSHProviderRoundRequestCopy(rawRequest, &requestError);
   if (request == nil || ![DSHAgentRootResolver
@@ -330,7 +500,7 @@
   // builder. A started record may be promoted only when the journal and
   // protected transcript prove a completed round; otherwise it remains an
   // unknown recovery case and is never treated as provider success.
-  NSError *operationError = nil;
+  __block NSError *operationError = nil;
   NSString *requestSHA = DSHAgentHJ(@"agent-operation-request", @{
     @"operation_kind" : @"complete_agent_round_v2",
     @"request" : request,
@@ -623,15 +793,18 @@
   [messages addObjectsFromArray:visibleHistory];
   [messages addObjectsFromArray:priorTranscript];
   NSError *toolsError = nil;
-  NSArray *tools = DSHProviderToolsForAuthority(
+  NSArray *tools = ![providerTransport supportsTools] ? @[] : DSHProviderToolsForAuthority(
       authority, self.preparedStore.toolRegistry, &toolsError);
   NSError *bodyBuildError = nil;
+  DSHAgentProviderRoundPreviewSink previewSink = self.previewSink;
+  BOOL streamRound = previewSink != nil &&
+      [providerTransport providerSupportsStreamingRounds];
   NSDictionary *body = tools == nil ? nil : [providerTransport
       providerRequestBodyForModel:request[@"model"]
                      thinkingMode:request[@"thinking_mode"]
                          messages:messages
                             tools:tools
-                        streaming:NO
+                        streaming:streamRound
                             error:&bodyBuildError];
   if (body == nil && bodyBuildError != nil) toolsError = bodyBuildError;
   NSData *bodyData = body == nil ? nil : [NSJSONSerialization
@@ -829,7 +1002,7 @@
   } @catch (__unused NSException *exception) {
     credential = nil;
   }
-  if (![credential isKindOfClass:NSString.class] || credential.length == 0) {
+  if (!transportCurrent || ![providerTransport isReadyWithCredential:credential]) {
     // No provider request was dispatched; proof-gated cancellation is safe.
     NSDictionary *cancelled = [self.rounds cancelAgentRoundV3WithCAS:dispatchCAS
                                                                   error:&credentialError];
@@ -891,17 +1064,7 @@
     self.contexts[contextKey] = context;
     self.contextTransports[contextKey] = providerTransport;
   }
-  __block BOOL redirected = NO;
-  NSURLSessionDataTask *task = [providerTransport
-      startRequestWithSchemaVersion:[request[@"transport_schema_version"] integerValue]
-                              roundId:request[@"round_id"]
-                            generation:1
-                  credentialGeneration:credentialGeneration
-                   providerRequestId:providerRequestId
-                         credential:credential
-                     requestedModel:request[@"model"]
-                      thinkingMode:request[@"thinking_mode"]
-         credentialGenerationIsCurrent:^BOOL(NSUInteger expectedGeneration) {
+  BOOL (^sourceIsCurrent)(NSUInteger) = ^BOOL(NSUInteger expectedGeneration) {
          if (self.transportResolver != nil) {
            @try {
              if (self.transportResolver(harnessId) != providerTransport) return NO;
@@ -917,21 +1080,34 @@
          } @catch (__unused NSException *exception) {
            currentCredential = nil;
          }
-         return currentCredential.length > 0 && currentGeneration == expectedGeneration;
-       }
-                            startedAt:NSProcessInfo.processInfo.systemUptime
-                           bodyData:bodyData
-                       visibleHistory:visibleHistory
-                           modelInput:modelInput
-                           bindTask:^BOOL(NSURLSessionDataTask *candidate) {
+         return [providerTransport isReadyWithCredential:currentCredential] && currentGeneration == expectedGeneration;
+       };
+  os_log(OS_LOG_DEFAULT, "agent_round_dispatch harness=%{public}@ streaming=%{public}d sink=%{public}d",
+         harnessId, streamRound, previewSink != nil);
+  DSHAgentRoundPreviewPublisher *previewPublisher = !streamRound ? nil :
+      [[DSHAgentRoundPreviewPublisher alloc]
+          initWithSink:previewSink
+           correlation:@{
+             @"task_id" : request[@"task_id"],
+             @"attempt_id" : request[@"attempt_id"],
+             @"round_id" : request[@"round_id"],
+             @"round_index" : request[@"round_index"],
+             @"operation_id" : request[@"operation_id"] ?: @"",
+             @"provider_request_id" : providerRequestId,
+             @"harness_id" : harnessId,
+           }];
+  awaitProvider = ^NSDictionary *{
+  __block BOOL redirected = NO;
+  DSHCompletionProviderTransportBindExecutionBlock bindExecution =
+      ^BOOL(id<DSHCompletionExecution> candidate) {
                              if (candidate == nil) return NO;
                              @synchronized (context) {
                                if (context.finished) return NO;
                                context.task = candidate;
                              }
                              return YES;
-                           }
-                           claimRound:^BOOL(BOOL *redirectedOut) {
+                           };
+  DSHCompletionProviderTransportClaimRoundBlock claimRound = ^BOOL(BOOL *redirectedOut) {
                              NSDictionary *roundQuery = [self.rounds
                                  queryAgentRoundV3WithLocator:locator error:nil];
                              NSDictionary *currentRow = roundQuery[@"row"];
@@ -950,17 +1126,63 @@
                              if (redirectedOut != nullptr) *redirectedOut = redirected;
                              return currentRow != nil && ownerMatches && stateCurrent &&
                                  revisionCurrent;
-                           }
-                        markRedirected:^(NSURLSessionDataTask * __unused candidate) {
+                           };
+  DSHCompletionProviderTransportMarkRedirectedBlock markRedirected =
+      ^(NSURLSessionDataTask * __unused candidate) {
                           redirected = YES;
                           @synchronized (context) { context.redirected = YES; }
-                        }
-                     redirectDecision:^(BOOL rejected) {
+                        };
+  DSHCompletionProviderTransportRedirectDecisionBlock redirectDecision = ^(BOOL rejected) {
                        @synchronized (context) { context.redirectRejected = rejected; }
-                     }
-                          completion:^(NSDictionary *result, NSString *errorCode) {
+                     };
+  DSHCompletionProviderTransportCompletionBlock completion =
+      ^(NSDictionary *result, NSString *errorCode) {
                             DSHProviderFinishContext(context, result, errorCode);
-                          }];
+                          };
+  NSInteger transportSchema = [request[@"transport_schema_version"] integerValue];
+  NSTimeInterval startedAt = NSProcessInfo.processInfo.systemUptime;
+  id<DSHCompletionExecution> task = previewPublisher != nil
+      ? [providerTransport
+            startStreamingExecutionWithSchemaVersion:transportSchema
+                                             roundId:request[@"round_id"]
+                                          generation:1
+                                credentialGeneration:credentialGeneration
+                                   providerRequestId:providerRequestId
+                                          credential:credential
+                                      requestedModel:request[@"model"]
+                                        thinkingMode:request[@"thinking_mode"]
+                       credentialGenerationIsCurrent:sourceIsCurrent
+                                           startedAt:startedAt
+                                            bodyData:bodyData
+                                      visibleHistory:visibleHistory
+                                          modelInput:modelInput
+                                             preview:^(NSDictionary *delta) {
+                                               [previewPublisher appendDelta:delta];
+                                             }
+                                       bindExecution:bindExecution
+                                          claimRound:claimRound
+                                      markRedirected:markRedirected
+                                    redirectDecision:redirectDecision
+                                          completion:completion]
+      : [providerTransport
+            startExecutionWithSchemaVersion:transportSchema
+                                    roundId:request[@"round_id"]
+                                 generation:1
+                       credentialGeneration:credentialGeneration
+                          providerRequestId:providerRequestId
+                                 credential:credential
+                             requestedModel:request[@"model"]
+                               thinkingMode:request[@"thinking_mode"]
+              credentialGenerationIsCurrent:sourceIsCurrent
+                                  startedAt:startedAt
+                                   bodyData:bodyData
+                             visibleHistory:visibleHistory
+                                 modelInput:modelInput
+                              bindExecution:bindExecution
+                                 claimRound:claimRound
+                             markRedirected:markRedirected
+                           redirectDecision:redirectDecision
+                                 completion:completion];
   if (task != nil) {
     BOOL shouldCancel = NO;
     @synchronized (context) {
@@ -970,10 +1192,13 @@
         shouldCancel = YES;
       }
     }
-    if (shouldCancel) [providerTransport cancelTask:task];
+    if (shouldCancel) [task cancel];
   }
   NSTimeInterval waitStarted = NSProcessInfo.processInfo.systemUptime;
-  dispatch_time_t deadline = dispatch_time(DISPATCH_TIME_NOW, 120LL * NSEC_PER_SEC);
+  NSTimeInterval executionTimeout = [providerTransport executionTimeoutInterval];
+  if (!isfinite(executionTimeout) || executionTimeout <= 0) executionTimeout = 120;
+  executionTimeout = MIN(executionTimeout, 900);
+  dispatch_time_t deadline = dispatch_time(DISPATCH_TIME_NOW, (int64_t)(executionTimeout * NSEC_PER_SEC));
   BOOL signaled = dispatch_semaphore_wait(semaphore, deadline) == 0;
 #if DEBUG
   if (!signaled) {
@@ -988,7 +1213,7 @@
   }
 #endif
   if (!signaled) {
-    NSURLSessionDataTask *taskToCancel = nil;
+    id<DSHCompletionExecution> taskToCancel = nil;
     @synchronized (context) {
       if (!context.finished) {
         context.finished = YES;
@@ -996,8 +1221,9 @@
       }
       taskToCancel = context.task;
     }
-    if (taskToCancel != nil) [providerTransport cancelTask:taskToCancel];
+    if (taskToCancel != nil) [taskToCancel cancel];
   }
+  return DSHProviderSerializedResult(^NSDictionary *{
   if (contextKey != nil) @synchronized (self) {
     [self.contexts removeObjectForKey:contextKey];
     [self.contextTransports removeObjectForKey:contextKey];
@@ -1014,6 +1240,22 @@
   NSDictionary *latestRow = latestRoundQuery[@"row"];
   NSDictionary *effectiveCAS = [latestRow isKindOfClass:NSDictionary.class]
       ? DSHProviderRoundCASForRow(latestRow) : activeCAS;
+  // Recheck the dispatch owner and source after the asynchronous gap. Never
+  // adopt a newer row CAS to apply an old callback after cancellation/switch.
+  BOOL dispatchStillCurrent = [latestRow[@"state"] isEqual:@"in_flight"] &&
+      [DSHProviderRoundCASForRow(latestRow) isEqual:activeCAS];
+  NSDictionary *currentAuthority = [self.preparedStore nativeAuthorityForTaskId:
+      request[@"task_id"] attemptId:request[@"attempt_id"] error:nil];
+  BOOL authorityStillCurrent = [currentAuthority isEqual:authority] &&
+      [self.preparedStore validatePreparedRoot:request[@"root"]
+          taskId:request[@"task_id"] attemptId:request[@"attempt_id"] error:nil];
+  if (providerErrorCode == nil &&
+      (!dispatchStillCurrent || !authorityStillCurrent ||
+       !sourceIsCurrent(credentialGeneration))) {
+    providerErrorCode = !dispatchStillCurrent ? @"E_AGENT_CANCELLED" :
+        (!authorityStillCurrent ? @"E_AGENT_ROOT_STALE" :
+                                  @"E_COMPLETION_CREDENTIAL_CHANGED");
+  }
   BOOL providerCorrelationMatches = providerResult != nil &&
       [(providerResult[@"harness_id"] ?: @"dsh") isEqual:harnessId] &&
       DSHProviderResultMatchesRequest(providerResult, request, providerRequestId);
@@ -1023,11 +1265,14 @@
       [providerResult[@"request_body_sha256"] isEqual:actualBodyDigest];
   if (!signaled || providerResult == nil || providerErrorCode != nil ||
       !providerCorrelationMatches || !providerDigestsMatch) {
-#if DEBUG
+    [previewPublisher finishWithStatus:@"failed"
+                           failureCode:DSHProviderFailureCode(
+                               providerErrorCode,
+                               providerResult != nil &&
+                                   (!providerDigestsMatch || !providerCorrelationMatches))];
     NSSet *knownProviderErrors = [NSSet setWithArray:@[@"E_COMPLETION_RESPONSE_MODEL", @"E_COMPLETION_MODEL_MISMATCH", @"E_COMPLETION_PROVIDER_RESPONSE_ID", @"E_COMPLETION_RESPONSE_JSON", @"E_COMPLETION_EMPTY_RESPONSE", @"E_COMPLETION_TOOL_CALL_INVALID", @"E_COMPLETION_FINISH_RELATION", @"E_COMPLETION_HTTP_STATUS", @"E_COMPLETION_HTTP_429", @"E_COMPLETION_CREDENTIAL_CHANGED", @"E_COMPLETION_REDIRECT", @"E_AGENT_CANCELLED"]];
     NSString *safeProviderError = providerErrorCode == nil ? @"none" : ([knownProviderErrors containsObject:providerErrorCode] ? providerErrorCode : @"other");
     os_log_error(OS_LOG_DEFAULT, "agent_round_validation signaled=%{public}d result_present=%{public}d provider_error=%{public}@ correlation_matches=%{public}d digests_match=%{public}d", signaled, providerResult != nil, safeProviderError, providerCorrelationMatches, providerDigestsMatch);
-#endif
 
     NSDictionary *reconciled = [self.rounds reconcileAgentRoundV3OwnerLossWithLocator:
         locator expectedCAS:effectiveCAS error:&operationError];
@@ -1056,6 +1301,7 @@
     if (error != nullptr) *error = nil;
     return unknown;
   }
+  [previewPublisher finishWithStatus:@"validated" failureCode:nil];
   NSString *finishReason = providerResult[@"finish_reason"];
   NSArray *providerCalls = [providerResult[@"tool_calls"] isKindOfClass:NSArray.class]
       ? providerResult[@"tool_calls"] : @[];
@@ -1284,6 +1530,11 @@
   }
   if (error != nullptr) *error = nil;
   return publicResult;
+  });
+  };
+  return nil;
+  });
+  return awaitProvider == nil ? preparedResult : awaitProvider();
 }
 - (nullable NSDictionary *)queryAgentRoundWithRequest:(NSDictionary *)request
                                                 error:(NSError **)error {
@@ -1440,7 +1691,7 @@
   DSHAgentProviderRoundContext *context = nil;
   if (key != nil) @synchronized (self) { context = self.contexts[key]; }
   if (context != nil) {
-    NSURLSessionDataTask *task = nil;
+    id<DSHCompletionExecution> task = nil;
     BOOL signal = NO;
     @synchronized (context) {
       if (!context.finished) {
@@ -1451,9 +1702,7 @@
       task = context.task;
     }
     if (task != nil) {
-      DSHCompletionProviderTransport *selected = nil;
-      @synchronized (self) { selected = self.contextTransports[key]; }
-      [selected cancelTask:task];
+      [task cancel];
     }
     if (signal && context.semaphore != nil) dispatch_semaphore_signal(context.semaphore);
   }

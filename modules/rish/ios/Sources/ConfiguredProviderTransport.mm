@@ -113,6 +113,11 @@ static NSError *ProviderError(NSString *code) {
   NSMutableDictionary *result = [parsed mutableCopy]; result[@"model"] = model;
   return result;
 }
+- (BOOL)providerSupportsStreamingRounds { return [[self dialect] providerSupportsStreamingRounds]; }
+- (id<DSHProviderStreamResponseAssembling>)providerNewStreamResponseAssemblerWithThinkingMode:(NSString *)thinkingMode
+                                                                                  maximumBytes:(NSUInteger)maximumBytes {
+  return [[self dialect] providerNewStreamResponseAssemblerWithThinkingMode:thinkingMode maximumBytes:maximumBytes];
+}
 - (id<DSHProviderStreamEventParsing>)providerNewStreamEventParser { return [[self dialect] providerNewStreamEventParser]; }
 - (NSTimeInterval)providerTimeoutIntervalForStreaming:(BOOL)streaming { return [[self dialect] providerTimeoutIntervalForStreaming:streaming]; }
 @end

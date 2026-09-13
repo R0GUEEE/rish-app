@@ -1,5 +1,9 @@
 #import "ClaudeProviderTransport.h"
 
+#import "DSHStreamEvents.h"
+
+#include <math.h>
+
 #import "DSHCompletionV2.h"
 #import "RishHarnessCatalog.h"
 
@@ -174,8 +178,19 @@ static BOOL ClaudeLastAssistantUsesTools(NSArray *converted) {
   return NO;
 }
 
+/// Anthropic content block index as the tool-call fragment index (0..15).
+static NSNumber * _Nullable ClaudeStreamBlockIndex(id value) {
+  if (![value isKindOfClass:NSNumber.class] ||
+      CFGetTypeID((__bridge CFTypeRef)value) == CFBooleanGetTypeID()) return nil;
+  double position = [value doubleValue];
+  if (position != floor(position) || position < 0 || position > 15) return nil;
+  return @((NSInteger)position);
+}
+
 static NSDictionary<NSString *, id> * _Nullable ClaudeDecodeEvent(
-    NSString *eventName, NSArray<NSString *> *dataLines, NSError **error) {
+    NSString *eventName, NSArray<NSString *> *dataLines,
+    NSDictionary * _Nullable * _Nullable chunkOut, NSError **error) {
+  if (chunkOut != nil) *chunkOut = nil;
   if (dataLines.count == 0) return nil;
   NSString *data = [dataLines componentsJoinedByString:@"\n"];
   if ([data isEqualToString:@"[DONE]"]) return @{@"type": @"done"};
@@ -198,6 +213,7 @@ static NSDictionary<NSString *, id> * _Nullable ClaudeDecodeEvent(
     }
     return nil;
   }
+  if (chunkOut != nil) *chunkOut = chunk;
   // The SSE `event:` name and the payload `type` agree on the wire; the
   // payload is authoritative so a missing event line cannot hide an error.
   NSString *kind = ClaudeString(chunk[@"type"]) ?: eventName;
@@ -222,9 +238,36 @@ static NSDictionary<NSString *, id> * _Nullable ClaudeDecodeEvent(
       return thinking.length > 0
           ? @{@"type": @"delta", @"reasoning": thinking} : nil;
     }
-    // input_json_delta and signature_delta never enter the delta vocabulary:
-    // tool arguments are assembled from the non-streaming round result.
+    if ([deltaKind isEqualToString:@"input_json_delta"]) {
+      NSString *partial = ClaudeString(delta[@"partial_json"]);
+      NSNumber *index = ClaudeStreamBlockIndex(chunk[@"index"]);
+      if (index == nil) {
+        if (error != nil) {
+          *error = ClaudeTransportError(2308, @"Anthropic tool fragment has no block index");
+        }
+        return nil;
+      }
+      return partial.length > 0
+          ? @{@"type": @"delta", @"tool_calls": @[ @{@"index": index, @"arguments": partial} ]}
+          : nil;
+    }
+    // signature_delta carries nothing presentable.
     return nil;
+  }
+  if ([kind isEqualToString:@"content_block_start"]) {
+    NSDictionary *block = ClaudeDictionary(chunk[@"content_block"]);
+    if (![ClaudeString(block[@"type"]) isEqualToString:@"tool_use"]) return nil;
+    NSNumber *index = ClaudeStreamBlockIndex(chunk[@"index"]);
+    NSString *identifier = ClaudeString(block[@"id"]);
+    NSString *name = ClaudeString(block[@"name"]);
+    if (index == nil || identifier.length == 0 || name.length == 0) {
+      if (error != nil) {
+        *error = ClaudeTransportError(2308, @"Anthropic tool_use block is not usable");
+      }
+      return nil;
+    }
+    return @{@"type": @"delta",
+             @"tool_calls": @[ @{@"index": index, @"id": identifier, @"name": name} ]};
   }
   if ([kind isEqualToString:@"message_delta"]) {
     NSString *stopReason = ClaudeString(ClaudeDictionary(chunk[@"delta"])[@"stop_reason"]);
@@ -241,7 +284,7 @@ static NSDictionary<NSString *, id> * _Nullable ClaudeDecodeEvent(
   if ([kind isEqualToString:@"message_stop"]) {
     return @{@"type": @"done"};
   }
-  // message_start, content_block_start/stop, ping: no delta.
+  // message_start, content_block_stop, ping: no delta.
   return nil;
 }
 
@@ -250,6 +293,20 @@ static NSDictionary<NSString *, id> * _Nullable ClaudeDecodeEvent(
   NSMutableArray<NSString *> *_dataLines;
   NSString *_eventName;
   BOOL _finished;
+}
+
+@synthesize streamedResponseId = _streamedResponseId;
+@synthesize streamedModel = _streamedModel;
+
+- (void)noteChunkIdentity:(NSDictionary *)chunk {
+  if (![ClaudeString(chunk[@"type"]) isEqualToString:@"message_start"]) return;
+  NSDictionary *message = ClaudeDictionary(chunk[@"message"]);
+  if (_streamedResponseId == nil && ClaudeString(message[@"id"]).length > 0) {
+    _streamedResponseId = [message[@"id"] copy];
+  }
+  if (_streamedModel == nil && ClaudeString(message[@"model"]).length > 0) {
+    _streamedModel = [message[@"model"] copy];
+  }
 }
 
 - (instancetype)init {
@@ -263,6 +320,8 @@ static NSDictionary<NSString *, id> * _Nullable ClaudeDecodeEvent(
 }
 
 - (void)reset {
+  _streamedResponseId = nil;
+  _streamedModel = nil;
   _pending = [NSMutableData data];
   [_dataLines removeAllObjects];
   _eventName = nil;
@@ -324,10 +383,12 @@ static NSDictionary<NSString *, id> * _Nullable ClaudeDecodeEvent(
           }
           return nil;
         }
+        NSDictionary *chunk = nil;
         NSDictionary<NSString *, id> *delta = ClaudeDecodeEvent(
-            _eventName, _dataLines, error);
+            _eventName, _dataLines, &chunk, error);
         [_dataLines removeAllObjects];
         _eventName = nil;
+        if (chunk != nil) [self noteChunkIdentity:chunk];
         if (delta != nil) [deltas addObject:delta];
         else if (error != nil && *error != nil) return nil;
       }
@@ -382,13 +443,63 @@ static NSDictionary<NSString *, id> * _Nullable ClaudeDecodeEvent(
     _pending = [NSMutableData data];
   }
   if (_dataLines.count > 0) {
+    NSDictionary *chunk = nil;
     NSDictionary<NSString *, id> *delta = ClaudeDecodeEvent(
-        _eventName, _dataLines, error);
+        _eventName, _dataLines, &chunk, error);
     [_dataLines removeAllObjects];
+    if (chunk != nil) [self noteChunkIdentity:chunk];
     if (delta != nil) [deltas addObject:delta];
     else if (error != nil && *error != nil) return nil;
   }
   return deltas;
+}
+
+@end
+
+/// Messages-API shape for a streamed Anthropic round. Missing identity, an
+/// absent stop_reason (stream cut short) or unparsable tool input all fail
+/// in `providerParseResponseData:` exactly like a malformed single-shot body.
+@interface ClaudeStreamResponseAssembler : DSHStreamResponseAssembler
+@end
+
+@implementation ClaudeStreamResponseAssembler
+
+- (NSDictionary<NSString *, id> *)responseObject {
+  NSMutableArray *content = [NSMutableArray array];
+  if (self.assembledSawReasoning) {
+    [content addObject:@{@"type": @"thinking", @"thinking": self.assembledReasoning}];
+  }
+  if (self.assembledText.length > 0) {
+    [content addObject:@{@"type": @"text", @"text": self.assembledText}];
+  }
+  for (NSDictionary *call in self.assembledToolCalls) {
+    NSData *bytes = [call[@"arguments"] dataUsingEncoding:NSUTF8StringEncoding];
+    // Anthropic sends an empty input as "" or "{}" on the wire.
+    id input = bytes.length == 0 ? @{} : [NSJSONSerialization JSONObjectWithData:bytes options:0 error:nil];
+    NSMutableDictionary *block = [NSMutableDictionary dictionary];
+    block[@"type"] = @"tool_use";
+    if (call[@"id"] != nil) block[@"id"] = call[@"id"];
+    if (call[@"name"] != nil) block[@"name"] = call[@"name"];
+    block[@"input"] = [input isKindOfClass:NSDictionary.class] ? input : (id)NSNull.null;
+    [content addObject:[block copy]];
+  }
+  static NSDictionary<NSString *, NSString *> *stopReasons = nil;
+  static dispatch_once_t onceToken;
+  dispatch_once(&onceToken, ^{
+    stopReasons = @{@"stop": @"end_turn", @"tool_calls": @"tool_use",
+                    @"length": @"max_tokens", @"content_filter": @"refusal"};
+  });
+  NSString *finish = self.assembledFinishReason;
+  NSMutableDictionary *object = [NSMutableDictionary dictionary];
+  object[@"type"] = @"message";
+  object[@"role"] = @"assistant";
+  if (self.assembledResponseId != nil) object[@"id"] = self.assembledResponseId;
+  if (self.assembledModel != nil) object[@"model"] = self.assembledModel;
+  object[@"content"] = [content copy];
+  // A stream that never delivered message_delta is incomplete: an unknown
+  // stop_reason makes the parser reject it instead of defaulting to end_turn.
+  object[@"stop_reason"] = finish == nil ? @"stream_incomplete" : (stopReasons[finish] ?: @"stream_incomplete");
+  return [object copy];
 }
 
 @end
@@ -587,6 +698,16 @@ static NSDictionary<NSString *, id> * _Nullable ClaudeDecodeEvent(
 
 - (id<DSHProviderStreamEventParsing>)providerNewStreamEventParser {
   return [[ClaudeStreamEventParser alloc] init];
+}
+
+- (BOOL)providerSupportsStreamingRounds {
+  return YES;
+}
+
+- (id<DSHProviderStreamResponseAssembling>)providerNewStreamResponseAssemblerWithThinkingMode:(NSString *)thinkingMode
+                                                                                  maximumBytes:(NSUInteger)maximumBytes {
+  return [[ClaudeStreamResponseAssembler alloc] initWithThinkingMode:thinkingMode
+                                                        maximumBytes:maximumBytes];
 }
 
 - (BOOL)providerSupportsModel:(NSString *)model {
