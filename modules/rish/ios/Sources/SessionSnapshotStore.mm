@@ -5825,6 +5825,11 @@ static NSDictionary *DSHSessionClearanceResult(NSString *status,
       bytes.length > DSHSessionSnapshotMaximumBytes) {
     return nil;
   }
+  // The authority read right after a commit hands JS the exact bytes the CAS
+  // just validated and digested; a byte-equal hit returns that digest without
+  // parsing and canonicalising a megabyte again.
+  DSHSessionValidatedEnvelope *validated = DSHSessionValidatedEnvelopeCached(bytes);
+  if (validated != nil && validated.digest.length > 0) return validated.digest;
   NSDictionary *candidate = DSHSessionParseObject(
       bytes, DSHSessionSnapshotStoreErrorInvalidArgument, nullptr);
   // Same acceptance as the JS implementation this replaces: a JSON object

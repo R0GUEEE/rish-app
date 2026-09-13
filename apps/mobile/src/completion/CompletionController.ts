@@ -294,6 +294,15 @@ export type CompletionController = {
   reconcileHydrated(conversationId: string): CompletionControllerState;
 };
 
+type ExecutionIntent = {
+  readonly preflight: NonNullable<ReturnType<typeof validateAgentControllerPreflight>>;
+  readonly journal: PersistedAgentAttemptJournalV3;
+  readonly batchKind: 'write_batch' | 'read_only_batch';
+  readonly manifestSha256: string | null;
+  readonly batchRevision: number;
+  readonly approvalReference: string | null;
+};
+
 type ActiveRun = {
   readonly epoch: number;
   readonly conversationId: string;
@@ -2079,7 +2088,25 @@ export function createCompletionController(
     );
     return await safeAgentPersist(
       transaction,
-      async committedCheckpoint => {
+      async committedCheckpoint => await runRoundAfterBegin(
+        conversationId, attemptId, runEpoch, preflight, committedCheckpoint,
+      ),
+      runEpoch,
+      { conversationId, turnId: attempt.turnId, attemptId },
+    );
+  };
+
+  /** Everything after a durable round launch marker: the provider round and its dispatch. */
+  const runRoundAfterBegin = async (
+    conversationId: string,
+    attemptId: string,
+    runEpoch: number,
+    preflight: Extract<
+      NonNullable<ReturnType<typeof validateAgentControllerPreflight>>,
+      { readonly kind: 'begin_round' }
+    >,
+    committedCheckpoint: AgentRuntimeCommittedCheckpointV1,
+  ): Promise<CompletionControllerOutcome> => {
         if (runEpoch !== epoch) return outcome('cancelled', state);
         const current = getConversationAttempt(conversationId, attemptId);
         if (current === null || current.attempt.agent === undefined || current.attempt.agent === null) {
@@ -2179,10 +2206,6 @@ export function createCompletionController(
           result,
           evidence,
         );
-      },
-      runEpoch,
-      { conversationId, turnId: attempt.turnId, attemptId },
-    );
   };
 
   runAgentRound = runAgentRoundImpl;
@@ -2875,6 +2898,39 @@ export function createCompletionController(
           null,
           null,
         );
+        // A batch with nothing left to approve starts its first executable
+        // call in the same durable write as the batch receipt.
+        const firstIndex = batchJournal.phase === 'approval_pending' ? -1 : batchJournal.batch.findIndex(
+          call => call.receipt === null && call.idempotency_key !== null && call.access !== 'durable_deny' &&
+            (call.access === 'auto' ||
+              ((call.approval_decision === 'allow_once' || call.approval_decision === 'allow_conversation') &&
+                call.approval_reference !== null)),
+        );
+        const firstOperationId = firstIndex >= 0 ? freshOperationId() : null;
+        const batchAuthority = agentRun?.batchAuthority;
+        if (firstIndex >= 0 && firstOperationId !== null && batchAuthority !== null && batchAuthority !== undefined) {
+          const intentCas: AgentRuntimeControllerCASV1 = {
+            ...batchCas,
+            expected_controller_generation: batchJournal.controller_generation,
+            expected_journal_revision: (completed.attempt.journalRevision ?? 0) + 1,
+          };
+          const intent = intentForCall(conversationId, completed.attempt, batchJournal, firstIndex, intentCas, firstOperationId, batchAuthority);
+          const combined = intent === null ? null : dependencies.chat.checkpointAgentBatchAndBeginFirst({
+            batch: { cas: batchCas, expectedAttempt: completed.attempt, journal: batchJournal, events: [batchEvent], evidence: batchEvidence },
+            next: { cas: intentCas, journal: intent.journal, callIndex: firstIndex, events: [], evidence: intent.preflight },
+          });
+          if (intent !== null && combined !== null) {
+            announceExecution(conversationId, completed.attempt, intent.journal, firstIndex, batchJournal.batch[firstIndex]!, firstOperationId);
+            return await safeAgentPersist(
+              combined,
+              async committedCheckpoint => await runExecutionAfterIntent(
+                conversationId, attemptId, runEpoch, firstIndex, firstOperationId, intent, committedCheckpoint,
+              ),
+              runEpoch,
+              { conversationId, turnId: completed.attempt.turnId, attemptId },
+            );
+          }
+        }
         const transaction = dependencies.chat.checkpointAgentRound({
           cas: batchCas,
           expectedAttempt: completed.attempt,
@@ -3408,6 +3464,40 @@ export function createCompletionController(
       batchAuthority.roundIndex !== journal.round_index ||
       batchAuthority.resultRoundRevision !== journal.round_lineage?.native_row_revision
     ) return await failAgentWithoutNative(conversationId, attemptId, 'E_AGENT_CONFLICT');
+    const intent = intentForCall(conversationId, attempt, journal, callIndex, cas, operationId, batchAuthority);
+    if (intent === null) return await failAgentWithoutNative(conversationId, attemptId, 'E_AGENT_CONFLICT');
+    const transaction = dependencies.chat.insertAgentExecutionIntent({
+      cas,
+      expectedAttempt: attempt,
+      journal: intent.journal,
+      callIndex,
+      events: [],
+      evidence: intent.preflight,
+    });
+    if (transaction === null) return await failAgentWithoutNative(conversationId, attemptId, 'E_AGENT_CONFLICT');
+    announceExecution(conversationId, attempt, journal, callIndex, call, operationId);
+    return await safeAgentPersist(
+      transaction,
+      async committedCheckpoint => await runExecutionAfterIntent(
+        conversationId, attemptId, runEpoch, callIndex, operationId, intent, committedCheckpoint,
+      ),
+      runEpoch,
+      { conversationId, turnId: attempt.turnId, attemptId },
+    );
+  };
+
+  /** Launch-marker material for one batch call: the validated preflight and the intent journal. */
+  const intentForCall = (
+    conversationId: string,
+    attempt: TurnAttemptV1,
+    journal: PersistedAgentAttemptJournalV3,
+    callIndex: number,
+    cas: AgentRuntimeControllerCASV1,
+    operationId: string,
+    batchAuthority: NonNullable<AgentRun['batchAuthority']>,
+  ): ExecutionIntent | null => {
+    const call = journal.batch[callIndex];
+    if (call === undefined || call.receipt !== null || call.idempotency_key === null) return null;
     const batchKind = batchAuthority.batchKind;
     const manifestSha256 = batchAuthority.manifestSha256;
     const approvalReference = call.access === 'auto' ? null : call.approval_reference;
@@ -3419,7 +3509,7 @@ export function createCompletionController(
       base_cas: cas,
       conversation_id: conversationId,
       task_id: attempt.turnId,
-      attempt_id: attemptId,
+      attempt_id: attempt.attemptId,
       round_id: journal.round_lineage?.round_id ?? '',
       round_index: journal.round_index,
       batch_kind: batchKind,
@@ -3438,27 +3528,46 @@ export function createCompletionController(
       approval_reference: approvalReference,
       source_event_id: operationId,
     });
-    if (preflight === null) return await failAgentWithoutNative(conversationId, attemptId, 'E_AGENT_CONFLICT');
-    const nextJournal = journalForExecutionIntent(journal, callIndex, canonicalNow(dependencies.now));
-    const transaction = dependencies.chat.insertAgentExecutionIntent({
-      cas,
-      expectedAttempt: attempt,
-      journal: nextJournal,
-      callIndex,
-      events: [],
-      evidence: preflight,
-    });
-    if (transaction === null) return await failAgentWithoutNative(conversationId, attemptId, 'E_AGENT_CONFLICT');
-    updateAgentRun({ operationId, cancelTarget: { schema_version: 2, kind: 'tool', task_id: attempt.turnId, attempt_id: attemptId, round_id: journal.round_lineage?.round_id ?? '', round_index: journal.round_index, call_index: callIndex, call_id: call.call_id, idempotency_key: call.idempotency_key } });
-    publish(stateFor('executing', { conversationId, turnId: attempt.turnId, attemptId, roundId: journal.round_lineage?.round_id ?? null, transportSchemaVersion: attempt.contextDisposition === 'verified' ? 3 : 2 }));
-    return await safeAgentPersist(
-      transaction,
-      async committedCheckpoint => {
+    if (preflight === null) return null;
+    return {
+      preflight,
+      journal: journalForExecutionIntent(journal, callIndex, canonicalNow(dependencies.now)),
+      batchKind,
+      manifestSha256,
+      batchRevision: batchAuthority.batchRevision,
+      approvalReference,
+    };
+  };
+
+  const announceExecution = (
+    conversationId: string,
+    attempt: TurnAttemptV1,
+    journal: PersistedAgentAttemptJournalV3,
+    callIndex: number,
+    call: PersistedAgentAttemptJournalV3['batch'][number],
+    operationId: string,
+  ): void => {
+    updateAgentRun({ operationId, cancelTarget: { schema_version: 2, kind: 'tool', task_id: attempt.turnId, attempt_id: attempt.attemptId, round_id: journal.round_lineage?.round_id ?? '', round_index: journal.round_index, call_index: callIndex, call_id: call.call_id, idempotency_key: call.idempotency_key ?? '' } });
+    publish(stateFor('executing', { conversationId, turnId: attempt.turnId, attemptId: attempt.attemptId, roundId: journal.round_lineage?.round_id ?? null, transportSchemaVersion: attempt.contextDisposition === 'verified' ? 3 : 2 }));
+  };
+
+  /** Everything after a durable execution intent: run the native tool and persist its outcome. */
+  const runExecutionAfterIntent = async (
+    conversationId: string,
+    attemptId: string,
+    runEpoch: number,
+    callIndex: number,
+    operationId: string,
+    intent: ExecutionIntent,
+    committedCheckpoint: AgentRuntimeCommittedCheckpointV1,
+  ): Promise<CompletionControllerOutcome> => {
+    const { batchKind, manifestSha256, approvalReference } = intent;
         const current = getConversationAttempt(conversationId, attemptId);
         if (current === null || current.attempt.agent === undefined || current.attempt.agent === null || current.attempt.agent.round_lineage === null) return await failAgentWithoutNative(conversationId, attemptId, 'E_AGENT_CONFLICT');
         const currentJournal = current.attempt.agent;
         const currentLineage = currentJournal.round_lineage;
-        if (currentLineage === null) {
+        const call = currentJournal.batch[callIndex];
+        if (currentLineage === null || call === undefined || call.idempotency_key === null) {
           return await failAgentWithoutNative(conversationId, attemptId, 'E_AGENT_CONFLICT');
         }
         const executeRequest: ExecuteAgentToolRequestV2 = {
@@ -3473,12 +3582,12 @@ export function createCompletionController(
           round_index: currentJournal.round_index,
           batch_kind: batchKind,
           manifest_sha256: manifestSha256,
-          expected_batch_revision: batchAuthority.batchRevision,
+          expected_batch_revision: intent.batchRevision,
           call_index: callIndex,
           call_id: call.call_id,
           name: call.name,
           arguments_sha256: call.arguments_sha256,
-          idempotency_key: call.idempotency_key!,
+          idempotency_key: call.idempotency_key,
           expected_execution_revision: call.native_row_revision ?? 1,
           transcript: currentJournal.transcript,
           root: agentRootForJournal(currentJournal),
@@ -3605,8 +3714,32 @@ export function createCompletionController(
             'final',
           );
         }
-        const resultTransaction =
-            executeStatus === 'completed' || executeStatus === 'failed' || executeStatus === 'denied'
+        const terminalResult =
+            executeStatus === 'completed' || executeStatus === 'failed' || executeStatus === 'denied';
+        // One durable write for "call k finished, call k+1 starts" when the
+        // next call needs no approval: the result, the cursor advance and the
+        // next launch marker are validated by their own reducers against the
+        // intermediate states, exactly as three checkpoints would be.
+        if (terminalResult) {
+          const combined = combinedResultAndNextIntent(
+            conversationId, current.attempt, resultJournal, callIndex, resultCas,
+            safeExecuteResult.receipt! as unknown as StoreAgentToolReceiptV1,
+            [executionEvent, resultEvent], executeEvidence,
+          );
+          if (combined !== null) {
+            announceExecution(conversationId, current.attempt, combined.intent.journal, combined.nextCallIndex, combined.nextCall, combined.operationId);
+            return await safeAgentPersist(
+              combined.transaction,
+              async nextCheckpoint => await runExecutionAfterIntent(
+                conversationId, attemptId, runEpoch, combined.nextCallIndex, combined.operationId,
+                combined.intent, nextCheckpoint,
+              ),
+              runEpoch,
+              { conversationId, turnId: current.attempt.turnId, attemptId },
+            );
+          }
+        }
+        const resultTransaction = terminalResult
             ? dependencies.chat.recordAgentToolResult({ cas: resultCas, expectedAttempt: current.attempt, journal: resultJournal, callIndex, receipt: safeExecuteResult.receipt! as unknown as StoreAgentToolReceiptV1, events: [executionEvent, resultEvent], evidence: executeEvidence })
             : dependencies.chat.checkpointAgentAttempt({ cas: resultCas, expectedAttempt: current.attempt, journal: resultJournal, events: [executionEvent, resultEvent], evidence: executeEvidence });
         if (resultTransaction === null) return await failAgentWithoutNative(conversationId, attemptId, 'E_AGENT_CONFLICT');
@@ -3671,10 +3804,71 @@ export function createCompletionController(
           runEpoch,
           { conversationId, turnId: current.attempt.turnId, attemptId },
         );
-      },
-      runEpoch,
-      { conversationId, turnId: attempt.turnId, attemptId },
-    );
+  };
+
+  /**
+   * Builds the combined "result k + advance + intent k+1" transaction, or null
+   * when the next call is not immediately executable (needs approval, is
+   * denied, or the batch is finished) so the caller keeps the separate path.
+   */
+  const combinedResultAndNextIntent = (
+    conversationId: string,
+    attempt: TurnAttemptV1,
+    resultJournal: PersistedAgentAttemptJournalV3,
+    callIndex: number,
+    resultCas: AgentRuntimeControllerCASV1,
+    toolReceipt: StoreAgentToolReceiptV1,
+    events: readonly PersistedSessionEventV3[],
+    evidence: NonNullable<ReturnType<typeof mapEvidence>>,
+  ): {
+    readonly transaction: AgentCheckpointTransaction;
+    readonly nextCallIndex: number;
+    readonly nextCall: PersistedAgentAttemptJournalV3['batch'][number];
+    readonly operationId: string;
+    readonly intent: ExecutionIntent;
+  } | null => {
+    const batchAuthority = agentRun?.batchAuthority;
+    if (batchAuthority === null || batchAuthority === undefined) return null;
+    let nextCallIndex = callIndex + 1;
+    while (
+      nextCallIndex < resultJournal.batch.length &&
+      resultJournal.batch[nextCallIndex]!.receipt !== null
+    ) nextCallIndex += 1;
+    const nextCall = resultJournal.batch[nextCallIndex];
+    if (
+      nextCall === undefined ||
+      nextCall.receipt !== null ||
+      nextCall.idempotency_key === null ||
+      nextCall.access === 'durable_deny' ||
+      !(nextCall.access === 'auto' ||
+        ((nextCall.approval_decision === 'allow_once' || nextCall.approval_decision === 'allow_conversation') &&
+          nextCall.approval_reference !== null))
+    ) return null;
+    const advanceJournal: PersistedAgentAttemptJournalV3 = {
+      ...copyAgentJournal(resultJournal),
+      phase: 'batch_frozen',
+      controller_generation: resultJournal.controller_generation + 1,
+      call_index: nextCallIndex,
+      updated_at: canonicalNow(dependencies.now),
+    };
+    const operationId = freshOperationId();
+    if (operationId === null) return null;
+    // The launch marker binds to the state two transitions ahead of the
+    // committed one: same session authority, journal revision and controller
+    // generation advanced by the result and the cursor move.
+    const intentCas: AgentRuntimeControllerCASV1 = {
+      ...resultCas,
+      expected_controller_generation: advanceJournal.controller_generation,
+      expected_journal_revision: (attempt.journalRevision ?? 0) + 2,
+    };
+    const intent = intentForCall(conversationId, attempt, advanceJournal, nextCallIndex, intentCas, operationId, batchAuthority);
+    if (intent === null) return null;
+    const transaction = dependencies.chat.recordAgentToolResultAndBeginNext({
+      result: { cas: resultCas, expectedAttempt: attempt, journal: resultJournal, callIndex, receipt: toolReceipt, events, evidence },
+      advance: { journal: advanceJournal },
+      next: { cas: intentCas, journal: intent.journal, callIndex: nextCallIndex, events: [], evidence: intent.preflight },
+    });
+    return transaction === null ? null : { transaction, nextCallIndex, nextCall, operationId, intent };
   };
 
   const runAgentBatchImpl = async (
@@ -3689,6 +3883,7 @@ export function createCompletionController(
     const pendingApprovalIndexes: number[] = [];
     journal.batch.forEach((call, index) => {
       if (
+        call.receipt === null &&
         call.access !== 'auto' &&
         call.access !== 'durable_deny' &&
         call.approval_decision === 'pending'

@@ -2638,6 +2638,7 @@ describe('project Agent completion controller', () => {
       });
     const executionStore = jest.spyOn(store, 'insertAgentExecutionIntent');
     const receiptStore = jest.spyOn(store, 'recordAgentToolResult');
+    const combinedStore = jest.spyOn(store, 'recordAgentToolResultAndBeginNext');
     const opIds = [...IDS];
     const committedSnapshots: NonNullable<
       CompletionPersistenceResult['snapshot']
@@ -2759,11 +2760,22 @@ describe('project Agent completion controller', () => {
         expect(batchCommit!.mock.invocationCallOrder[0]!).toBeLessThan(invocation);
       }
     }
-    expect(executionStore.mock.calls).toHaveLength(2);
-    expect(executionStore.mock.calls.map(call => call[0]?.evidence?.operation_id)).toEqual(
+    // The second call is already approved, so its launch marker rides in the
+    // same durable write as the first call's result.
+    expect(executionStore.mock.calls).toHaveLength(1);
+    expect(combinedStore.mock.calls).toHaveLength(1);
+    const intentOperationIds = [
+      ...executionStore.mock.calls.map(call => call[0]?.evidence?.operation_id),
+      ...combinedStore.mock.calls.map(call => call[0]?.next.evidence?.operation_id),
+    ];
+    expect(intentOperationIds).toEqual(
       (runtime.executeAgentTool as jest.Mock).mock.calls.map(call => call[0]?.operation_id),
     );
-    expect(receiptStore.mock.calls.map(call => call[0]?.events[0]?.event_id)).toEqual(
+    const receiptMarkerIds = [
+      ...combinedStore.mock.calls.map(call => call[0]?.result.events[0]?.event_id),
+      ...receiptStore.mock.calls.map(call => call[0]?.events[0]?.event_id),
+    ];
+    expect(receiptMarkerIds).toEqual(
       (runtime.executeAgentTool as jest.Mock).mock.calls.map(call => call[0]?.operation_id),
     );
     expect(persistCurrent).toHaveBeenCalled();
@@ -3123,6 +3135,100 @@ describe('project Agent completion controller', () => {
     const executions = (runtime.executeAgentTool as jest.Mock).mock.calls.map(call => call[0]);
     expect(executions.map(request => request.expected_batch_revision)).toEqual([3, 3, 1, 3, 2]);
     expect(runtime.completeAgentRoundV2).toHaveBeenCalledTimes(6);
+  });
+
+  test('an auto batch persists one checkpoint per finished call instead of three', async () => {
+    const store = agentStore();
+    const conversationId = store.getState().selectedConversationId!;
+    const runtime = makeRuntime([], {
+      batchRounds: [[
+        { callId: 'read-a', name: 'read_file', argumentsSha256: '5'.repeat(64), access: 'auto' },
+        { callId: 'read-b', name: 'read_file', argumentsSha256: '6'.repeat(64), access: 'auto' },
+        { callId: 'read-c', name: 'read_file', argumentsSha256: '7'.repeat(64), access: 'auto' },
+      ]],
+      finalRoundIndex: 1,
+    });
+    const persistCurrent = committedPersistence(store);
+    const intentStore = jest.spyOn(store, 'insertAgentExecutionIntent');
+    const combinedStore = jest.spyOn(store, 'recordAgentToolResultAndBeginNext');
+    const advanceStore = jest.spyOn(store, 'advanceAgentCall');
+    const receiptStore = jest.spyOn(store, 'recordAgentToolResult');
+    const controller = agentController(store, runtime, persistCurrent, [...IDS, ...Array.from({ length: 30 }, (_, index) => {
+      const suffix = (index + 1).toString(16).padStart(12, '0');
+      return `${suffix.slice(0, 8)}-${suffix.slice(0, 4)}-4${suffix.slice(0, 3)}-8${suffix.slice(0, 3)}-${suffix}`;
+    })]);
+
+    const result = await controller.send({ conversationId, text: 'read three files', attachments: [] });
+
+    expect(result.status).toBe('completed');
+    expect(runtime.executeAgentTool).toHaveBeenCalledTimes(3);
+    expect((runtime.executeAgentTool as jest.Mock).mock.calls.map(call => call[0].call_id)).toEqual(['read-a', 'read-b', 'read-c']);
+    // The first launch marker rides with the batch receipt, then
+    // result+advance+next-intent twice, then the last result on its own: no
+    // stand-alone intent and no cursor-only write at all.
+    const batchStore = jest.spyOn(store, 'checkpointAgentBatchAndBeginFirst');
+    expect(intentStore).not.toHaveBeenCalled();
+    expect(combinedStore).toHaveBeenCalledTimes(2);
+    expect(receiptStore).toHaveBeenCalledTimes(1);
+    expect(advanceStore).not.toHaveBeenCalled();
+    batchStore.mockRestore();
+    // Every native execution ran against the checkpoint that made its own
+    // launch marker durable: the combined write's proof is the next request's
+    // committed_checkpoint.
+    const executeRequests = (runtime.executeAgentTool as jest.Mock).mock.calls.map(call => call[0]);
+    const combinedTransactions = combinedStore.mock.results.map(entry => entry.value);
+    expect(combinedTransactions.every(transaction => transaction !== null)).toBe(true);
+    expect(executeRequests[1].committed_checkpoint.journal_revision).toBe(executeRequests[0].committed_checkpoint.journal_revision + 3);
+    expect(executeRequests[2].committed_checkpoint.journal_revision).toBe(executeRequests[1].committed_checkpoint.journal_revision + 3);
+    const attempt = store.getState().conversations[conversationId]!.attempts[0]!;
+    expect(attempt.status).toBe('completed');
+    expect(attempt.assistantMessageId).not.toBeNull();
+    // Compared with separate batch/intent/result/advance writes the turn
+    // saves five whole-session persists (16 before).
+    expect(persistCurrent).toHaveBeenCalledTimes(11);
+  });
+
+  test('a batch refused for its arguments settles as failed feedback and the next round runs', async () => {
+    const store = agentStore();
+    const conversationId = store.getState().selectedConversationId!;
+    const runtime = makeRuntime([], {
+      batchRounds: [
+        [
+          { callId: 'read-abs', name: 'read_file', argumentsSha256: '5'.repeat(64), access: 'auto' },
+          { callId: 'write-abs', name: 'write_file', argumentsSha256: '6'.repeat(64), access: 'conversation_confirm' },
+        ],
+        [
+          { callId: 'read-rel', name: 'read_file', argumentsSha256: '7'.repeat(64), access: 'auto' },
+        ],
+      ],
+      refusedRounds: [0],
+      finalRoundIndex: 2,
+    });
+    const persistCurrent = committedPersistence(store);
+    const requestAgentApproval = jest.fn(async () => ({ status: 'approved' as const, scope: 'once' as const }));
+    const controller = agentController(store, runtime, persistCurrent, [...IDS, ...Array.from({ length: 30 }, (_, index) => {
+      const suffix = (index + 1).toString(16).padStart(12, '0');
+      return `${suffix.slice(0, 8)}-${suffix.slice(0, 4)}-4${suffix.slice(0, 3)}-8${suffix.slice(0, 3)}-${suffix}`;
+    })], requestAgentApproval);
+
+    const result = await controller.send({ conversationId, text: 'start with an absolute path', attachments: [] });
+
+    expect([result.status, result.code, controller.getState().phase, controller.getState().failureCode]).toEqual(['completed', null, 'idle', null]);
+    // Round 0's batch never executed or asked for approval; round 1 ran its
+    // corrected call; round 2 answered.
+    expect(runtime.completeAgentRoundV2).toHaveBeenCalledTimes(3);
+    expect(requestAgentApproval).not.toHaveBeenCalled();
+    expect(runtime.bindAgentApproval).not.toHaveBeenCalled();
+    expect((runtime.executeAgentTool as jest.Mock).mock.calls.map(call => call[0].call_id)).toEqual(['read-rel']);
+    const events = store.getState().sessionEvents ?? [];
+    const refusedResults = events.filter(event => event.kind === 'tool_result' && event.round_index === 0);
+    expect(refusedResults.map(event => [event.call_id, event.status, event.failure_code])).toEqual([
+      ['read-abs', 'failed', 'E_AGENT_BAD_PATH'],
+      ['write-abs', 'failed', 'E_AGENT_BAD_PATH'],
+    ]);
+    const attempt = store.getState().conversations[conversationId]!.attempts[0]!;
+    expect(attempt.status).toBe('completed');
+    expect(attempt.rounds.map(round => round.roundIndex)).toEqual([0, 1, 2]);
   });
 
   test('uses batch authority for a mixed auto and write batch', async () => {

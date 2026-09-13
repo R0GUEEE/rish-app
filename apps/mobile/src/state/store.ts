@@ -234,6 +234,44 @@ export type AgentNextCallCheckpointInput = {
   readonly journalRevision?: number;
 };
 
+/**
+ * One durable checkpoint carrying three consecutive transitions of a tool
+ * batch: the terminal result of call k, the cursor advance to call k+1, and
+ * the execution intent (launch marker) of call k+1. Each transition is
+ * validated by its own reducer against the intermediate state, exactly as
+ * three separate checkpoints would be; only the persistence is shared. The
+ * caller supplies the intermediate CAS for the launch marker (journal
+ * revision +2, controller generation +2, same session authority) because
+ * the preflight evidence binds to it.
+ */
+/**
+ * One durable checkpoint carrying the accepted batch receipt and the
+ * execution intent of its first executable call. Used only when no call in
+ * the batch still needs an approval decision.
+ */
+export type AgentBatchAndFirstIntentInput = {
+  readonly batch: AgentCheckpointInput;
+  readonly next: {
+    readonly cas: AgentControllerCASV1;
+    readonly journal: PersistedAgentAttemptJournalV3;
+    readonly callIndex: number;
+    readonly events: readonly PersistedSessionEventV3[];
+    readonly evidence: AgentCheckpointEvidence;
+  };
+};
+
+export type AgentToolResultAndNextIntentInput = {
+  readonly result: AgentToolResultInput;
+  readonly advance: { readonly journal: PersistedAgentAttemptJournalV3 };
+  readonly next: {
+    readonly cas: AgentControllerCASV1;
+    readonly journal: PersistedAgentAttemptJournalV3;
+    readonly callIndex: number;
+    readonly events: readonly PersistedSessionEventV3[];
+    readonly evidence: AgentCheckpointEvidence;
+  };
+};
+
 export type AgentCleanupInput = {
   readonly conversationId: string;
   readonly attemptId: string;
@@ -481,6 +519,12 @@ export type ChatStore = {
   ): AgentCheckpointTransaction | null;
   advanceAgentCall(
     input: AgentNextCallCheckpointInput,
+  ): AgentCheckpointTransaction | null;
+  recordAgentToolResultAndBeginNext(
+    input: AgentToolResultAndNextIntentInput,
+  ): AgentCheckpointTransaction | null;
+  checkpointAgentBatchAndBeginFirst(
+    input: AgentBatchAndFirstIntentInput,
   ): AgentCheckpointTransaction | null;
   advanceAgentRound(
     input: AgentCheckpointInput,
@@ -1959,17 +2003,14 @@ export function createChatStore(options: ChatStoreOptions = {}): ChatStore {
     };
   };
 
-  const applyAgentControllerCheckpoint = (
-    input: unknown,
+  /** One validated checkpoint transition applied to the live state (no transaction yet). */
+  const applyNormalizedCheckpoint = (
+    normalized: NormalizedAgentCheckpointInput,
     allowedOperations?: readonly (
       | AgentStoreOperation
       | AgentControllerPreflightV1['kind']
     )[],
-  ): AgentCheckpointTransaction | null => {
-    if (notificationDepth > 0) return null;
-    const capturedAuthority = readSessionAuthority();
-    const normalized = normalizeAgentCheckpointInput(input);
-    if (normalized === null) return null;
+  ): AppliedAction | null => {
     if (
       allowedOperations !== undefined &&
       !allowedOperations.includes(normalized.evidence.kind)
@@ -2006,7 +2047,7 @@ export function createChatStore(options: ChatStoreOptions = {}): ChatStore {
       canonicalNow(now),
     );
     if (candidateEvents === null) return null;
-    const applied = applyAction({
+    return applyAction({
       type: 'attempt/agent-checkpoint',
       payload: {
         cas: normalized.cas,
@@ -2025,6 +2066,21 @@ export function createChatStore(options: ChatStoreOptions = {}): ChatStore {
         at: canonicalNow(now),
       },
     });
+  };
+
+  const applyAgentControllerCheckpoint = (
+    input: unknown,
+    allowedOperations?: readonly (
+      | AgentStoreOperation
+      | AgentControllerPreflightV1['kind']
+    )[],
+  ): AgentCheckpointTransaction | null => {
+    if (notificationDepth > 0) return null;
+    const capturedAuthority = readSessionAuthority();
+    const normalized = normalizeAgentCheckpointInput(input);
+    if (normalized === null) return null;
+    const applied = applyNormalizedCheckpoint(normalized, allowedOperations);
+    if (applied === null) return null;
     return agentCheckpointTransaction(
       applied,
       normalized.conversationId,
@@ -3434,6 +3490,188 @@ export function createChatStore(options: ChatStoreOptions = {}): ChatStore {
       return normalized === null
         ? null
         : applyAgentControllerCheckpoint(normalized, ['execute_agent_tool']);
+    },
+    checkpointAgentBatchAndBeginFirst: input => {
+      if (notificationDepth > 0) return null;
+      if (typeof input !== 'object' || input === null) return null;
+      const capturedAuthority = readSessionAuthority();
+      const first = normalizeAgentCheckpointInput(input.batch);
+      if (
+        first === null ||
+        first.evidence.kind !== 'prepare_agent_tool_batch' ||
+        !isAgentAttemptJournalV3(first.journal) ||
+        first.journal.phase !== 'batch_frozen' ||
+        controllerCASMatchesCurrent(first.cas, first.expectedAttempt) === null ||
+        typeof input.next !== 'object' || input.next === null ||
+        !isAgentAttemptJournalV3(input.next.journal)
+      ) return null;
+      const { conversationId, attemptId } = first;
+      const batchEvents = eventsForAgentCheckpoint(
+        state, first.evidence, first.expectedAttempt, first.events, canonicalNow(now),
+      );
+      if (batchEvents === null) return null;
+      const applied = applyAction({
+        type: 'attempt/agent-checkpoint',
+        payload: {
+          cas: first.cas,
+          conversationId,
+          attemptId,
+          expectedAttempt: first.expectedAttempt,
+          journal: first.journal,
+          events: batchEvents,
+          ...(first.journalRevision === undefined ? {} : { journalRevision: first.journalRevision }),
+          evidence: first.evidence,
+          at: canonicalNow(now),
+        },
+      });
+      if (!applied.changed) return null;
+      const abandon = (): null => {
+        if (state !== applied.before) {
+          state = applied.before;
+          notifyListeners();
+        }
+        return null;
+      };
+      const afterBatch = state.conversations[conversationId]?.attempts.find(
+        attempt => attempt.attemptId === attemptId,
+      );
+      if (afterBatch === undefined) return abandon();
+      const second = normalizeAgentExecutionInput(
+        { ...input.next, expectedAttempt: afterBatch, conversationId, attemptId },
+        false,
+      );
+      if (
+        second === null ||
+        second.evidence.kind !== 'begin_execution' ||
+        controllerCASMatchesCurrent(second.cas, afterBatch) === null
+      ) return abandon();
+      const intentEvents = eventsForAgentCheckpoint(
+        state, second.evidence, afterBatch, second.events, canonicalNow(now),
+      );
+      if (intentEvents === null) return abandon();
+      const intent = applyAction({
+        type: 'attempt/agent-checkpoint',
+        payload: {
+          cas: second.cas,
+          conversationId,
+          attemptId,
+          expectedAttempt: afterBatch,
+          journal: second.journal,
+          events: intentEvents,
+          evidence: second.evidence,
+          at: canonicalNow(now),
+        },
+      });
+      if (!intent.changed) return abandon();
+      const transaction = agentCheckpointTransaction(
+        { before: applied.before, next: intent.next, changed: true },
+        conversationId,
+        attemptId,
+        capturedAuthority,
+      );
+      return transaction === null ? abandon() : transaction;
+    },
+    recordAgentToolResultAndBeginNext: input => {
+      if (notificationDepth > 0) return null;
+      if (typeof input !== 'object' || input === null) return null;
+      const capturedAuthority = readSessionAuthority();
+      const first = normalizeAgentExecutionInput(input.result, true);
+      if (
+        first === null ||
+        first.evidence.kind !== 'execute_agent_tool' ||
+        controllerCASMatchesCurrent(first.cas, first.expectedAttempt) === null ||
+        !isAgentAttemptJournalV3(input.advance?.journal) ||
+        typeof input.next !== 'object' || input.next === null ||
+        !isAgentAttemptJournalV3(input.next.journal)
+      ) return null;
+      const { conversationId, attemptId } = first;
+      const attemptNow = (): TurnAttemptV1 | undefined =>
+        state.conversations[conversationId]?.attempts.find(
+          attempt => attempt.attemptId === attemptId,
+        );
+      const resultEvents = eventsForAgentCheckpoint(
+        state, first.evidence, first.expectedAttempt, first.events, canonicalNow(now),
+      );
+      if (resultEvents === null) return null;
+      const applied = applyAction({
+        type: 'attempt/agent-checkpoint',
+        payload: {
+          cas: first.cas,
+          conversationId,
+          attemptId,
+          expectedAttempt: first.expectedAttempt,
+          journal: first.journal,
+          events: resultEvents,
+          ...(first.journalRevision === undefined ? {} : { journalRevision: first.journalRevision }),
+          evidence: first.evidence,
+          at: canonicalNow(now),
+        },
+      });
+      if (!applied.changed) return null;
+      // Any later transition that the reducers refuse leaves the store exactly
+      // as it was; the caller then falls back to separate checkpoints.
+      const abandon = (): null => {
+        if (state !== applied.before) {
+          state = applied.before;
+          notifyListeners();
+        }
+        return null;
+      };
+      const casFor = (attempt: TurnAttemptV1): AgentControllerCASV1 => ({
+        ...first.cas,
+        expected_controller_generation: attempt.agent?.controller_generation ?? 0,
+        expected_journal_revision: attempt.journalRevision ?? 0,
+      });
+      const afterResult = attemptNow();
+      if (afterResult === undefined) return abandon();
+      const advanced = applyAction({
+        type: 'attempt/agent-advance-call',
+        payload: {
+          cas: casFor(afterResult),
+          conversationId,
+          attemptId,
+          expectedAttempt: afterResult,
+          journal: input.advance.journal,
+          at: input.advance.journal.updated_at,
+        },
+      });
+      if (!advanced.changed) return abandon();
+      const afterAdvance = attemptNow();
+      if (afterAdvance === undefined) return abandon();
+      const third = normalizeAgentExecutionInput(
+        { ...input.next, expectedAttempt: afterAdvance, conversationId, attemptId },
+        false,
+      );
+      if (
+        third === null ||
+        third.evidence.kind !== 'begin_execution' ||
+        controllerCASMatchesCurrent(third.cas, afterAdvance) === null
+      ) return abandon();
+      const intentEvents = eventsForAgentCheckpoint(
+        state, third.evidence, afterAdvance, third.events, canonicalNow(now),
+      );
+      if (intentEvents === null) return abandon();
+      const intent = applyAction({
+        type: 'attempt/agent-checkpoint',
+        payload: {
+          cas: third.cas,
+          conversationId,
+          attemptId,
+          expectedAttempt: afterAdvance,
+          journal: third.journal,
+          events: intentEvents,
+          evidence: third.evidence,
+          at: canonicalNow(now),
+        },
+      });
+      if (!intent.changed) return abandon();
+      const transaction = agentCheckpointTransaction(
+        { before: applied.before, next: intent.next, changed: true },
+        conversationId,
+        attemptId,
+        capturedAuthority,
+      );
+      return transaction === null ? abandon() : transaction;
     },
     advanceAgentCall: input => {
       if (notificationDepth > 0) return null;
