@@ -46,3 +46,12 @@ Files:
 The selected concept was regenerated from the user-approved geometry with the
 whale precisely removed. Launcher exports must not add plugin-specific or
 feature-specific symbols.
+
+## License
+
+The Rish name, wordmark, app icon, and the social preview image in this
+directory are brand assets. They are not covered by the repository's MIT
+license and all rights are reserved. You may show them unmodified to refer to
+the Rish project; do not use them to present a fork or another product as
+Rish. The icon geometry originated from an AI-generated concept that was then
+redrawn by hand.

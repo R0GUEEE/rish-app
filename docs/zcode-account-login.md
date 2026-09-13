@@ -51,29 +51,6 @@ project API key. The request path does not append `/v1/messages`.
 
 Rish keeps trial selection explicit (`bigmodel_trial` or `zai_trial`). A failed
 trial check must not switch to a personal subscription, manual key, or general
-API balance. The current user confirmed this is a trial account, explaining why
-the personal subscription list was empty. Live trial inference still needs
-separate verification; account sign-in does not establish it.
-
-## September 10 verification
-
-| Check | Result |
-| --- | --- |
-| BigModel and Z.ai initialization + pending polling | Official endpoints returned HTTP 200 and valid pending flows with an honest Rish user agent |
-| BigModel browser authorization | User completed the official page; Rish subsequently showed signed-in state |
-| Restart persistence | Signed-in account remained after installing/reopening the debug build |
-| Existing personal key retrieval | Succeeded in the observed BigModel run |
-| Personal subscription query | Initially 0 entries for the trial account; after the user purchased Coding Lite, Rish verified the personal Coding Plan |
-| Real subscription model invocation | GLM-5.3 returned a JavaScript addition function and examples in the experiment Simulator (about 12 seconds), using the selected personal-plan credential |
-| Z.ai completed sign-in | Not yet tested with a real account |
-| Trial allowance | Separate resolver and source implemented; actual balance request returned HTTP 400, so trial inference remains unverified |
-| Team entitlement | Not implemented |
-
-Earlier external-Safari attempts displayed browser success but did not produce
-a saved native session before expiry/reload. They are not counted as successful
-Rish login evidence. The later in-app browser attempt produced the saved account.
-
-The empty personal list does not establish that the user has no other plan or
-account. Confirm the correct account and entitlement type before extending
-routing. Do not advertise full ZCode runtime support or successful subscription
-inference from account sign-in alone.
+API balance. An empty personal subscription list is expected for a trial
+account. Live trial inference still needs separate verification; account
+sign-in does not establish it.

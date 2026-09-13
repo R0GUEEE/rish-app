@@ -2,6 +2,12 @@
   "name": "dev.zseven.dsh.mobile",
   "version": "0.0.1",
   "private": true,
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/ZSeven-W/rish-app.git",
+    "directory": "apps/mobile"
+  },
   "scripts": {
     "android": "react-native run-android",
     "ios": "react-native run-ios",

@@ -194,7 +194,7 @@ npm run ios --prefix apps/mobile
 
 **Android：** 配置好 Android 开发环境后运行 `npm run android --prefix apps/mobile`。[独立测试 APK 的构建方法](docs/development.md#install-and-run-the-react-native-app)另见开发文档。
 
-打开 App 后，选择模型，通过 API Key 或该构建支持的账号入口连接。iOS 上创建或选择项目，确认项目上下文，再开始任务。Codex 和 Claude Code 订阅登录需要[可选实验构建](docs/ios-harness-auth-status.md)；BigModel 账号接入见[说明](docs/zcode-account-login.md)。凭据由原生安全存储保管。
+打开 App 后，选择模型，通过 API Key 或该构建支持的账号入口连接。iOS 上创建或选择项目，确认项目上下文，再开始任务。Codex 和 Claude Code 订阅登录需要可选实验构建（见[开发文档](docs/development.md)）；BigModel 账号接入见[说明](docs/zcode-account-login.md)。凭据由原生安全存储保管。
 
 ## 进展与参与
 
@@ -203,7 +203,6 @@ Rish 正在准备首个源码预览，后续发布将标记为 **Pre-release**�
 欢迎从文档、平台适配、模型兼容和可复现的问题入手参与。开始前请阅读[贡献指南](CONTRIBUTING.md)；安全问题请先查看[安全策略](SECURITY.md)，不要在公开讨论中贴凭据或敏感数据。
 
 - [开发与构建文档](docs/development.md)
-- [源码预览进度](docs/open-source-sprint.md)
 - [品牌与宣传语](brand/README.md)
 - [第三方声明与 Guest 来源](THIRD_PARTY_NOTICES.md)
 

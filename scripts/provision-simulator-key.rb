@@ -13,10 +13,7 @@ end
 bundle_id = ARGV.fetch(1, 'dev.zseven.dsh.mobile')
 slot = ARGV.fetch(2, 'DEEPSEEK_API_KEY')
 abort 'unknown credential slot' unless %w[DEEPSEEK_API_KEY ANTHROPIC_API_KEY OPENAI_API_KEY].include?(slot)
-credentials_path = ENV.fetch(
-  'DSH_CREDENTIALS',
-  File.expand_path('~/.dsh/.credentials.yaml'),
-)
+credentials_path = ENV['DSH_CREDENTIALS']
 
 key = if secure_stdin
         abort '--secure-stdin requires an interactive terminal' unless $stdin.tty?
@@ -25,6 +22,7 @@ key = if secure_stdin
         $stderr.puts
         value
       else
+        abort 'set DSH_CREDENTIALS to a 0600 YAML credential file you own, or use --secure-stdin' if credentials_path.nil?
         source_stat = File.lstat(credentials_path)
         abort 'managed credential source must be a regular file, not a symlink' unless source_stat.file? && !source_stat.symlink?
         abort 'managed credential source must be owned by the current user' unless source_stat.uid == Process.uid

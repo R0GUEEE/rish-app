@@ -7,7 +7,7 @@ require 'net/http'
 require 'openssl'
 require 'yaml'
 
-credential_path = ENV.fetch('DSH_CREDENTIALS', File.expand_path('~/.dsh/.credentials.yaml'))
+credential_path = ENV.fetch('DSH_CREDENTIALS') { abort 'set DSH_CREDENTIALS to a 0600 YAML credential file you own' }
 image_only = ARGV.delete('--image-only')
 image_path = ARGV.fetch(0) { abort 'usage: probe-deepseek-vision.rb <png-path>' }
 credential_stat = File.lstat(credential_path)

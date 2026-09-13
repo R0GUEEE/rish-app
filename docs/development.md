@@ -15,6 +15,14 @@ These are enforced pins, not a claim of compatibility with arbitrary versions.
 Node 22.11+, CocoaPods, CMake, Perl, make, Git, jq, and the script-checked tools
 must be available. The first preparation downloads pinned sources and dependencies.
 
+The project ships without a signing team. Simulator builds need none; device
+builds need your own Apple Developer team, set in Xcode under Signing &
+Capabilities or passed to `xcodebuild` as `DEVELOPMENT_TEAM=<team id>` with
+`-allowProvisioningUpdates`. Developer scripts that read API keys
+(`scripts/provision-simulator-key.rb`, `scripts/probe-deepseek-vision.rb`) take
+`DSH_CREDENTIALS`, a 0600 YAML file you own; there is no default path, and
+`--secure-stdin` reads the key from the terminal instead.
+
 The app lives in `apps/mobile` and renders native React Native views with
 Fabric and Hermes. DSH was the first built-in Harness target; Rish's scope
 extends to multiple model providers and task types.

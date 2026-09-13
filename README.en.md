@@ -228,7 +228,7 @@ npm run ios --prefix apps/mobile
 
 Open the app, choose a model, and connect with an API key or a supported account.
 On iOS, create or select a project, review its context, and start a task. Codex and Claude Code
-subscription sign-in requires the [optional experimental build](docs/ios-harness-auth-status.md);
+subscription sign-in requires an optional experimental build (see the [developer guide](docs/development.md));
 see the [account guide](docs/zcode-account-login.md) for BigModel. Credentials
 stay in native secure storage.
 
@@ -245,7 +245,6 @@ For security issues, consult [SECURITY](SECURITY.md) before sharing details;
 never post credentials or sensitive data publicly.
 
 - [Developer and build guide](docs/development.md)
-- [Source-preview progress](docs/open-source-sprint.md)
 - [Brand and approved copy](brand/README.md)
 - [Third-party notices and Guest sources](THIRD_PARTY_NOTICES.md)
 

@@ -27,13 +27,12 @@ full credential-bearing URLs in a report. Redact reproduction data and provide
 the smallest useful description, affected revision, platform, and safe steps
 to reproduce.
 
-There is currently no confirmed private submission channel to list here.
-Please do not assume that a public issue, pull request, or the private
-document center is a secure reporting path. The owner may enable a repository
-private mechanism or publish another route later.
+Report vulnerabilities privately through GitHub: open the repository's
+**Security** tab and choose **Report a vulnerability**. Do not use a public
+issue, pull request, or discussion for anything exploitable.
 
 ## Handling and disclosure
 
-Response times, supported versions, coordinated disclosure, credit, and
-security-fix release policy have not yet been defined. They remain optional
-owner policy to document if and when a reporting channel is enabled.
+Reports are acknowledged through the same private thread. Response times,
+supported versions, coordinated disclosure, credit, and security-fix release
+policy are not yet formalised and will be documented here as they are decided.
