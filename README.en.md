@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="./brand/rish-readme-icon.svg" alt="Rish" width="96" />
+  <img src="./brand/rish-banner.jpg" alt="Rish — your pocket agent. Local execution. Model freedom. DSH / Claude Code / Codex / GLM" width="100%" />
 </p>
 
 <h1 align="center">Rish, your pocket agent.</h1>
@@ -15,7 +15,7 @@
 </p>
 
 <p align="center">
-  <a href="./README.md">简体中文</a> · <b>English</b>
+  <a href="./README.md">简体中文</a> · <b>English</b> · <a href="./README.zh-TW.md">繁體中文</a> · <a href="./README.ja.md">日本語</a> · <a href="./README.ko.md">한국어</a> · <a href="./README.fr.md">Français</a> · <a href="./README.es.md">Español</a> · <a href="./README.de.md">Deutsch</a> · <a href="./README.pt.md">Português</a> · <a href="./README.ru.md">Русский</a> · <a href="./README.hi.md">हिन्दी</a> · <a href="./README.tr.md">Türkçe</a> · <a href="./README.th.md">ไทย</a> · <a href="./README.vi.md">Tiếng Việt</a> · <a href="./README.id.md">Bahasa Indonesia</a>
 </p>
 
 <p align="center">
@@ -23,6 +23,7 @@
   <a href="#built-in-connections">Built-in connections</a> ·
   <a href="#product-tour">Product tour</a> ·
   <a href="#platforms-and-models">Platforms and models</a> ·
+  <a href="#ecosystem">Ecosystem</a> ·
   <a href="./docs/development.md">Developer guide</a> ·
   <a href="./LICENSE">MIT License</a>
 </p>
@@ -250,3 +251,13 @@ never post credentials or sensitive data publicly.
 
 Project code is licensed under [MIT](LICENSE). Third-party runtimes, Guest
 components, and other dependencies retain their own licenses.
+
+## Ecosystem
+
+Sibling projects built on the same local-first, model-free idea:
+
+- **[rish](https://github.com/ZSeven-W/rish)** — real Docker on a phone. A no-JIT x86-64 full-system interpreter in pure Rust that boots Linux and runs containers on iOS and Android. This project's Linux Guest comes from there.
+- **[OpenPencil](https://github.com/ZSeven-W/openpencil)** — the first open-source AI-native vector design tool, and the first with concurrent Agent Teams. Design-as-Code, turning prompts into UI on the live canvas.
+- **[Jian](https://github.com/ZSeven-W/jian)** — a Rust-native cross-platform UI framework. An .op file is an app.
+- **[Zode](https://github.com/ZSeven-W/zode)** — an AI-native coding CLI for your terminal. Microkernel plus plugins, multi-provider, full-screen TUI.
+- **[Noema](https://github.com/ZSeven-W/noema)** — local-first memory for coding agents, without a vector store, with review queues and MCP.

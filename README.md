@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="./brand/rish-readme-icon.svg" alt="Rish" width="96" />
+  <img src="./brand/rish-banner.jpg" alt="Rish — your pocket agent. Local execution. Model freedom. DSH / Claude Code / Codex / GLM" width="100%" />
 </p>
 
 <h1 align="center">Rish，你的随身 Agent。</h1>
@@ -15,7 +15,7 @@
 </p>
 
 <p align="center">
-  <b>简体中文</b> · <a href="./README.en.md">English</a>
+  <b>简体中文</b> · <a href="./README.en.md">English</a> · <a href="./README.zh-TW.md">繁體中文</a> · <a href="./README.ja.md">日本語</a> · <a href="./README.ko.md">한국어</a> · <a href="./README.fr.md">Français</a> · <a href="./README.es.md">Español</a> · <a href="./README.de.md">Deutsch</a> · <a href="./README.pt.md">Português</a> · <a href="./README.ru.md">Русский</a> · <a href="./README.hi.md">हिन्दी</a> · <a href="./README.tr.md">Türkçe</a> · <a href="./README.th.md">ไทย</a> · <a href="./README.vi.md">Tiếng Việt</a> · <a href="./README.id.md">Bahasa Indonesia</a>
 </p>
 
 <p align="center">
@@ -23,6 +23,7 @@
   <a href="#首批内置接入">内置接入</a> ·
   <a href="#产品导览">产品导览</a> ·
   <a href="#平台与模型">平台与模型</a> ·
+  <a href="#生态">生态</a> ·
   <a href="./docs/development.md">开发文档</a> ·
   <a href="./LICENSE">MIT License</a>
 </p>
@@ -207,3 +208,13 @@ Rish 正在准备首个源码预览，后续发布将标记为 **Pre-release**�
 - [第三方声明与 Guest 来源](THIRD_PARTY_NOTICES.md)
 
 项目代码使用 [MIT License](LICENSE)。第三方运行时、Guest 组件和其他依赖保留各自许可证。
+
+## 生态
+
+同一套本地优先、模型自由的思路，还有这些同源项目：
+
+- **[rish](https://github.com/ZSeven-W/rish)** — 手机上的真 Docker。纯 Rust 写的免 JIT x86-64 全系统解释器，在 iOS/Android 上启动 Linux 并运行容器。本项目的 Linux Guest 来自这里。
+- **[OpenPencil](https://github.com/ZSeven-W/openpencil)** — 首个开源的 AI 原生矢量设计工具，也是首个支持并发 Agent 团队的设计工具。Design-as-Code，在画布上把提示词直接变成 UI。
+- **[Jian](https://github.com/ZSeven-W/jian)** — Rust 原生的跨平台 UI 框架。一个 .op 文件就是一个应用。
+- **[Zode](https://github.com/ZSeven-W/zode)** — 终端里的 AI 原生编程 CLI。微内核加插件架构，多模型接入，全屏 TUI。
+- **[Noema](https://github.com/ZSeven-W/noema)** — 面向编程 Agent 的本地优先记忆，不用向量库，带复核队列和 MCP 接入。
