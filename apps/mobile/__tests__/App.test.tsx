@@ -10290,3 +10290,112 @@ test('sending without a bound workspace shows a hint whose action opens the pick
     mockAgentRuntime.isAvailable.mockReturnValue(false);
   }
 });
+
+test('preserves stored chats after a failed startup read and explicit retry', async () => {
+  const stored = createChatStore();
+  const conversation = stored.createConversation();
+  stored.appendUserMessage(conversation, 'Keep this saved conversation');
+  mockSessionSnapshots.loadSessionSnapshot.mockRejectedValueOnce({
+    code: 'E_SESSION_PROTECTION', message: 'private device path must not be displayed',
+  });
+  queuePresentSession(stored.serialize(), 7);
+  const renderer = await renderApp();
+  expect(mockSessionSnapshots.casPersistSession).not.toHaveBeenCalled();
+  expect(mockLocalAttachments.prune).not.toHaveBeenCalled();
+  expect(JSON.stringify(renderer.toJSON())).toContain('E_SESSION_PROTECTION');
+  expect(JSON.stringify(renderer.toJSON())).not.toContain('private device path');
+  expect(renderer.root.findByType(ChatComposer).props.configurationAction).toBe('Retry loading chats');
+  expect(JSON.stringify(renderer.toJSON())).not.toContain('NOT CONFIGURED');
+  await act(async () => {
+    await renderer.root.findByProps({ testID: 'retry-session-load' }).props.onPress();
+    await settle();
+  });
+  expect(renderer.root.findAllByProps({ testID: 'retry-session-load' })).toHaveLength(0);
+  expect(lastPersistedCandidateJSON()).toContain('Keep this saved conversation');
+  expect(mockSessionSnapshots.casPersistSession.mock.calls[0]?.[0].expected.snapshot.generation).toBe(7);
+});
+
+test.each(['settings', 'new chat', 'background'] as const)(
+  'keeps unreadable chats and attachments intact when %s changes before retry', async action => {
+    const appStateListeners: Array<(state: AppStateStatus) => void> = [];
+    jest.spyOn(AppState, 'addEventListener').mockImplementation((event, listener) => {
+      if (event === 'change') appStateListeners.push(listener);
+      return { remove: jest.fn() };
+    });
+    const stored = createChatStore();
+    const conversation = stored.createConversation();
+    stored.appendUserMessage(conversation, 'Original saved attachment', {
+      attachments: [{
+        schema_version: 1, id: 'saved-attachment', kind: 'text',
+        name: 'saved.txt', mime_type: 'text/plain', size: 12,
+      }],
+    });
+    mockSessionSnapshots.loadSessionSnapshot.mockRejectedValueOnce({ code: 'E_SESSION_PROTECTION' });
+    // Storage becomes readable after the first read. Unrelated UI/background
+    // work must not acquire its authority to overwrite the blank projection.
+    queuePresentSession(stored.serialize(), 7);
+    const renderer = await renderApp();
+    const root = renderer.root;
+    await act(async () => {
+      if (action === 'settings') {
+        actionByLabel(root, 'Open navigation').props.onPress();
+        root.findByType(ChatDrawer).props.onOpenSettings();
+        root.findByType(AppPresentationProvider).props.store.setThemeMode('light');
+        root.findByType(SettingsSheet).props.onPreferencesChanged();
+        // This callback can arrive independently of the settings UI and reaches
+        // persistCurrent, exercising the write gate beneath surface admission.
+        root.findByType(SettingsSheet).props.onProviderConfigurationChanged('dsh');
+      } else if (action === 'new chat') {
+        actionByLabel(root, 'Open navigation').props.onPress();
+        await root.findByType(ChatDrawer).props.onNewChat();
+      } else {
+        appStateListeners.forEach(listener => listener('background'));
+        appStateListeners.forEach(listener => listener('active'));
+      }
+      await settle();
+    });
+    expect(mockSessionSnapshots.loadSessionSnapshot).toHaveBeenCalledTimes(1);
+    expect(mockSessionSnapshots.casPersistSession).not.toHaveBeenCalled();
+    expect(mockLocalAttachments.prune).not.toHaveBeenCalled();
+    expect(root.findByType(SettingsSheet).props.visible).toBe(false);
+    expect(root.findByType(ChatDrawer).props.visible).toBe(false);
+
+    await act(async () => {
+      await root.findByProps({ testID: 'retry-session-load' }).props.onPress();
+      await settle();
+    });
+    expect(root.findAllByProps({ testID: 'retry-session-load' })).toHaveLength(0);
+    expect(lastPersistedCandidateJSON()).toContain('Original saved attachment');
+    expect(mockSessionSnapshots.casPersistSession.mock.calls[0]?.[0].expected.snapshot.generation).toBe(7);
+    expect(mockLocalAttachments.prune).toHaveBeenCalledWith(['saved-attachment']);
+    expect(mockLocalAttachments.prune.mock.calls.every(([ids]) => ids.includes('saved-attachment'))).toBe(true);
+  },
+);
+
+test('retry re-probes a native session module that becomes available after startup', async () => {
+  jest.useFakeTimers();
+  mockSessionSnapshots.isAvailable.mockReturnValue(false);
+  const stored = createChatStore();
+  const conversation = stored.createConversation();
+  stored.appendUserMessage(conversation, 'Recovered after native module became available');
+  queuePresentSession(stored.serialize(), 7);
+  const renderer = await renderApp();
+  await act(async () => {
+    jest.advanceTimersByTime(100);
+    await settle();
+  });
+  expect(mockSessionSnapshots.loadSessionSnapshot).not.toHaveBeenCalled();
+  expect(mockSessionSnapshots.casPersistSession).not.toHaveBeenCalled();
+  expect(mockLocalAttachments.prune).not.toHaveBeenCalled();
+  expect(renderer.root.findByType(ChatComposer).props.configurationAction).toBe('Retry loading chats');
+
+  mockSessionSnapshots.isAvailable.mockReturnValue(true);
+  await act(async () => {
+    renderer.root.findByType(ChatComposer).props.onConfigure();
+    await settle();
+  });
+  expect(renderer.root.findAllByProps({ testID: 'retry-session-load' })).toHaveLength(0);
+  expect(lastPersistedCandidateJSON()).toContain('Recovered after native module became available');
+  expect(mockSessionSnapshots.casPersistSession.mock.calls[0]?.[0].expected.snapshot.generation).toBe(7);
+  expect(mockLocalRuntime.presentCredentialPromptForSlot).not.toHaveBeenCalled();
+});

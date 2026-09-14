@@ -3742,15 +3742,22 @@ NSString *DSHSessionSnapshotStoreLaunchInstanceId(void) {
 }
 
 - (id)sessionProtectionPolicyValue {
-  return NSURLFileProtectionCompleteUntilFirstUserAuthentication;
+  return NSFileProtectionCompleteUntilFirstUserAuthentication;
+}
+
+- (NSFileManager *)sessionFileManager {
+  return NSFileManager.defaultManager;
 }
 
 - (BOOL)setSessionProtectionValue:(id)value
                             atURL:(NSURL *)url
                             error:(NSError **)error {
-  return [url setResourceValue:value
-                         forKey:NSURLFileProtectionKey
-                          error:error];
+  // This also hardens Application Support itself. Use the file-attribute
+  // setter for both directories and files, matching the workspace stores;
+  // Read back the same NSFileProtectionKey attribute for each kind.
+  return [[self sessionFileManager] setAttributes:@{ NSFileProtectionKey : value }
+                                    ofItemAtPath:url.path
+                                           error:error];
 }
 
 - (BOOL)setSessionBackupExcluded:(BOOL)excluded
@@ -3764,9 +3771,14 @@ NSString *DSHSessionSnapshotStoreLaunchInstanceId(void) {
 - (BOOL)getSessionProtectionAtURL:(NSURL *)url
                             value:(id *)value
                             error:(NSError **)error {
-  return [url getResourceValue:value
-                        forKey:NSURLFileProtectionKey
-                         error:error];
+  // Read the actual attributes afresh instead of a cached NSURL resource
+  // value. An absent class still fails the caller's exact-policy check.
+  if (value != nullptr) *value = nil;
+  NSDictionary *attributes = [[self sessionFileManager]
+      attributesOfItemAtPath:url.path error:error];
+  if (attributes == nil) return NO;
+  if (value != nullptr) *value = attributes[NSFileProtectionKey];
+  return YES;
 }
 
 - (BOOL)getSessionBackupExcludedAtURL:(NSURL *)url

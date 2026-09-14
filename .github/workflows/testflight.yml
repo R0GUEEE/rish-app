@@ -108,7 +108,7 @@ jobs:
         run: |
           bundle exec pod install --project-directory=ios
           printf 'export NODE_BINARY=%s\n' "$(command -v node)" > ios/.xcode.env.local
-      - name: Verify Release preview service on iOS Simulator
+      - name: Verify Release service and session storage on iOS Simulator
         timeout-minutes: 25
         run: bash scripts/ci/test-ios-preview.sh
       - name: Sign, archive and export IPA

@@ -1,3 +1,4 @@
+import { DshModelCatalog } from '../models/native';
 import { isHarnessModelId } from '../harness/types';
 import { glmAccountStatus, glmCredentialSource, glmSourceProvider } from '../harnessAuth/glmAccount';
 import { codexChatSource, codexAvailableModels, claudeChatSource, type CodexChatSource } from '../harnessAuth/native';
@@ -810,6 +811,14 @@ export function HomeScreen({
   const [runtimeFailure, setRuntimeFailure] = useState<string | null>(null);
   const [requestFailure, setRequestFailure] = useState<string | null>(null);
   const [storageWarning, setStorageWarning] = useState<string | null>(null);
+  const [sessionLoadFailure, setSessionLoadFailure] = useState<string | null>(null);
+  const sessionReloadBusy = useRef(false);
+  // Native authority alone cannot authorize replacing chats we never loaded.
+  const sessionProjectionReady = useRef(false);
+  const verifiedSessionMigration = useRef<{
+    candidateJSON: string;
+    expected: SessionSnapshotAuthorityV1;
+  } | null>(null);
   const [workspaceBindingRecoveryVisible, setWorkspaceBindingRecoveryVisible] =
     useState(false);
   const attachmentOperationGeneration = useRef(0);
@@ -850,6 +859,8 @@ export function HomeScreen({
   >(
     () => (SessionSnapshots.isAvailable() ? true : null),
   );
+  const sessionSnapshotsAvailableRef = useRef(sessionSnapshotsAvailable === true);
+  sessionSnapshotsAvailableRef.current = sessionSnapshotsAvailable === true;
   const [selectionHydrated, setSelectionHydrated] = useState(false);
   const activeConversation = selectActiveConversation(chatState);
   const activeHarness =
@@ -1073,6 +1084,7 @@ export function HomeScreen({
 
   const synchronizeAttachmentStore = useCallback(
     async (state: ChatState) => {
+      if (!sessionProjectionReady.current) return;
       if (!LocalAttachments.isAvailable()) return;
       const referencedIds = referencedAttachmentIds(state);
       try {
@@ -1220,6 +1232,11 @@ export function HomeScreen({
       candidateJSON: string,
       expectedAuthority?: SessionSnapshotAuthorityV1,
     ): Promise<CompletionPersistenceResult> => {
+      if (
+        !sessionProjectionReady.current &&
+        (verifiedSessionMigration.current?.candidateJSON !== candidateJSON ||
+          verifiedSessionMigration.current?.expected !== expectedAuthority)
+      ) return { status: 'unknown' };
       const digestStarted = Date.now();
       const candidateDigest = sessionSnapshotSHA256(candidateJSON);
       markTiming('js.candidate_digest', Date.now() - digestStarted);
@@ -1373,6 +1390,13 @@ export function HomeScreen({
       candidateJSON: string,
       expectedAuthority?: SessionSnapshotAuthorityV1,
     ): Promise<CompletionPersistenceResult> => {
+      // Reject before enqueueing as well: a blank candidate created during a
+      // failed load must not become eligible when a later retry succeeds.
+      if (
+        !sessionProjectionReady.current &&
+        (verifiedSessionMigration.current?.candidateJSON !== candidateJSON ||
+          verifiedSessionMigration.current?.expected !== expectedAuthority)
+      ) return Promise.resolve({ status: 'unknown' });
       const operation = sessionWriteTailRef.current.then(
         () => performSessionCandidate(candidateJSON, expectedAuthority),
         () => performSessionCandidate(candidateJSON, expectedAuthority),
@@ -1400,7 +1424,7 @@ export function HomeScreen({
    * the next launch.
    */
   const drainInterruptedAgentCleanup = useCallback(async (): Promise<void> => {
-    if (!nativeAvailable || sessionSnapshotsAvailable !== true) return;
+    if (!sessionProjectionReady.current || !nativeAvailable || !sessionSnapshotsAvailableRef.current) return;
     if (drainInterruptedCleanupRef.current) return;
     drainInterruptedCleanupRef.current = true;
     const skipped = new Set<string>();
@@ -1512,14 +1536,15 @@ export function HomeScreen({
     } finally {
       drainInterruptedCleanupRef.current = false;
     }
-  }, [nativeAvailable, persistSessionCandidate, sessionSnapshotsAvailable, store]);
+  }, [nativeAvailable, persistSessionCandidate, store]);
 
   const persistCurrent = useCallback(
     async (): Promise<CompletionPersistenceResult> => {
-      if (!nativeAvailable || sessionSnapshotsAvailable !== true) {
+      if (!nativeAvailable || !sessionSnapshotsAvailableRef.current) {
         setStorageWarning(t('home.persistenceUnavailable'));
         return { status: 'unknown' };
       }
+      if (!sessionProjectionReady.current) return { status: 'unknown' };
       try {
         const serializeStarted = Date.now();
         const candidate = synchronizePreferencesIntoChatState();
@@ -1542,7 +1567,6 @@ export function HomeScreen({
     },
     [
       nativeAvailable,
-      sessionSnapshotsAvailable,
       persistSessionCandidate,
       synchronizePreferencesIntoChatState,
       t,
@@ -1878,6 +1902,7 @@ export function HomeScreen({
 
   const reconcileSelectedConversation = useCallback(
     (conversationId: string) => {
+      if (!sessionProjectionReady.current) return;
       if (
         directProjectMutationOutboxRef.current !== null ||
         store.getState().projectContextDestructiveTransition !== null
@@ -1908,21 +1933,26 @@ export function HomeScreen({
   );
 
   const hydrateStoredState = useCallback(
-    async (loaded: LoadSessionSnapshotResultV1 | null): Promise<boolean> => {
+    async (loaded: LoadSessionSnapshotResultV1 | null, failureCode = 'E_SESSION_PERSISTENCE'): Promise<boolean> => {
+      sessionProjectionReady.current = false;
       if (loaded === null) {
+        setSessionLoadFailure(failureCode);
         // A malformed, unavailable, or boolean native result is not a
         // missing session. Do not hydrate or overwrite the live projection;
         // the blank shell remains usable while storage fails closed.
         setSessionAuthority(null);
         ensureConversation();
         setStorageWarning(
-          t('home.storedChatsRejected', { error: 'E_SESSION_PERSISTENCE' }),
+          t('home.storedChatsRejected', { error: failureCode }),
         );
         return false;
       }
       if (loaded.status === 'missing') {
+        setSessionLoadFailure(null);
+        setStorageWarning(null);
         setSessionAuthority(null);
         ensureConversation();
+        sessionProjectionReady.current = true;
         return true;
       }
 
@@ -1944,6 +1974,7 @@ export function HomeScreen({
           : {},
       );
       if (!hydrated.ok) {
+        setSessionLoadFailure('E_SESSION_CORRUPT');
         setSessionAuthority(null);
         ensureConversation();
         setStorageWarning(
@@ -1972,13 +2003,24 @@ export function HomeScreen({
       }
 
       let migratedFromLegacy = false;
+      const persistMigration = async (expected: SessionSnapshotAuthorityV1) => {
+        const migration = { candidateJSON: candidate, expected };
+        verifiedSessionMigration.current = migration;
+        try {
+          return await persistSessionCandidate(candidate, expected);
+        } finally {
+          if (verifiedSessionMigration.current === migration) {
+            verifiedSessionMigration.current = null;
+          }
+        }
+      };
       if (loaded.status === 'legacy_present') {
         const expected: SessionSnapshotAuthorityV1 = {
           schema_version: 1,
           kind: 'legacy_present',
           legacy: loaded.legacy,
         };
-        const migrated = await persistSessionCandidate(candidate, expected);
+        const migrated = await persistMigration(expected);
         if (migrated.status !== 'committed') {
           // Do not expose or mutate the legacy projection unless the exact
           // V2 byte-token CAS promoted it to schema-9.
@@ -1994,7 +2036,7 @@ export function HomeScreen({
           kind: 'present',
           snapshot: loaded.snapshot,
         };
-        const migrated = await persistSessionCandidate(candidate, expected);
+        const migrated = await persistMigration(expected);
         const installed = store.getSessionAuthority();
         if (
           migrated.status !== 'committed' ||
@@ -2023,10 +2065,13 @@ export function HomeScreen({
       }
 
       store.hydrate(candidate);
+      setSessionLoadFailure(null);
+      setStorageWarning(null);
       const persistedPreferences = store.getState().preferences;
       if (persistedPreferences !== undefined) {
         preferencesStore.hydrate(persistedPreferences);
       }
+      sessionProjectionReady.current = true;
       if (store.getState().selectedConversationId === null) {
         ensureConversation();
       }
@@ -2050,7 +2095,9 @@ export function HomeScreen({
     ],
   );
 
-  const bootstrap = useCallback(async () => {
+  const bootstrap = useCallback(async (sessionAvailable = sessionSnapshotsAvailable === true) => {
+    sessionProjectionReady.current = false;
+    setSelectionHydrated(false);
     setRuntimeChecking(true);
     setRuntimeFailure(null);
     if (!nativeAvailable) {
@@ -2064,14 +2111,17 @@ export function HomeScreen({
     }
     let restoredSelection = false;
     try {
-      const loaded = sessionSnapshotsAvailable === true
-        ? await sessionPersistence.loadSessionSnapshotResult()
-        : null;
-      restoredSelection = await hydrateStoredState(loaded);
+      const load = sessionAvailable
+        ? await sessionPersistence.loadSessionSnapshotOutcome()
+        : { status: 'failed' as const, code: 'E_SESSION_NATIVE' };
+      restoredSelection = await hydrateStoredState(
+        load.status === 'loaded' ? load.value : null,
+        load.status === 'failed' ? load.code : undefined,
+      );
       setChatState(store.getState());
       const restoredTransition =
         store.getState().projectContextDestructiveTransition;
-      if (restoredTransition !== null) {
+      if (restoredSelection && restoredTransition !== null) {
         const outcome =
           await projectContextLifecycleController.reconcileDestructiveTransition();
         if (outcome.status !== 'completed') {
@@ -2114,14 +2164,15 @@ export function HomeScreen({
       // Restore history and reconcile destructive recovery first. Only the cold
       // bootstrap changes the default selection; resume and queued task links
       // retain their existing navigation flow after this gate opens.
-      if (selectColdStartConversation(store, newConversationOptions())) {
+      if (restoredSelection && selectColdStartConversation(store, newConversationOptions())) {
         await persist();
         setChatState(store.getState());
       }
       setSelectionHydrated(restoredSelection);
-      lifecycleBootstrapReadyRef.current = true;
-      setLifecycleBootstrapReady(true);
+      lifecycleBootstrapReadyRef.current = restoredSelection;
+      setLifecycleBootstrapReady(restoredSelection);
       if (
+        restoredSelection &&
         store.getState().projectContextDestructiveTransition === null &&
         store.getState().selectedConversationId === null
       ) {
@@ -2129,12 +2180,13 @@ export function HomeScreen({
       }
       const selectedAfterLifecycle = store.getState().selectedConversationId;
       if (
+        restoredSelection &&
         store.getState().projectContextDestructiveTransition === null &&
         selectedAfterLifecycle !== null
       ) {
         reconcileSelectedConversation(selectedAfterLifecycle);
       }
-      await synchronizeAttachmentStore(store.getState());
+      if (restoredSelection) await synchronizeAttachmentStore(store.getState());
     } catch (error) {
       setRuntimeFailure(errorText(error));
       if (store.getState().selectedConversationId === null)
@@ -2142,9 +2194,9 @@ export function HomeScreen({
       setChatState(store.getState());
     } finally {
       if (!restoredSelection) setRuntimeChecking(false);
-      if (!lifecycleBootstrapReadyRef.current) {
-        lifecycleBootstrapReadyRef.current = true;
-        setLifecycleBootstrapReady(true);
+      if (!restoredSelection) {
+        lifecycleBootstrapReadyRef.current = false;
+        setLifecycleBootstrapReady(false);
       }
     }
   }, [
@@ -2163,6 +2215,26 @@ export function HomeScreen({
     t,
     workspaceBindingController,
   ]);
+
+  const retrySessionLoad = useCallback(async () => {
+    if (sessionReloadBusy.current || runtimeChecking || sessionLoadFailure === null) return;
+    sessionReloadBusy.current = true;
+    try {
+      // Catalog-dependent validation must see the latest on-device catalog.
+      try {
+        await DshModelCatalog.refresh();
+      } catch {
+        setStorageWarning(t('home.storedChatsRejected', { error: 'E_MODEL_CATALOG' }));
+        return;
+      }
+      const available = SessionSnapshots.isAvailable() === true;
+      sessionSnapshotsAvailableRef.current = available;
+      setSessionSnapshotsAvailable(available);
+      await bootstrap(available);
+    } finally {
+      sessionReloadBusy.current = false;
+    }
+  }, [bootstrap, runtimeChecking, sessionLoadFailure, t]);
 
   useEffect(() => {
     if (sessionSnapshotsAvailable === null) return;
@@ -2549,7 +2621,7 @@ export function HomeScreen({
     (proof.checks.credential_in_keychain || proof.checks.credential_in_secure_store === true) &&
     proof.checks.rish_applet_executed &&
     !proof.mac_dsh_port_3180_reachable;
-  const runtimeLabel = codexModelsLoading ? t('messages.loadingSubscriptionModels') : runtimeChecking
+  const runtimeLabel = sessionLoadFailure !== null ? t('recovery.loadBlocked') : codexModelsLoading ? t('messages.loadingSubscriptionModels') : runtimeChecking
     ? t('runtime.status.verifying')
     : !nativeAvailable
     ? t('home.localAdapterUnavailable')
@@ -2568,7 +2640,7 @@ export function HomeScreen({
     : t('runtime.status.incomplete');
   const runtimeStatus: RuntimeVerificationStatus = runtimeChecking
     ? 'checking'
-    : runtimeFailure !== null ||
+    : sessionLoadFailure !== null || runtimeFailure !== null ||
       !nativeAvailable ||
       proof?.mac_dsh_port_3180_reachable
     ? 'failed'
@@ -2679,6 +2751,7 @@ export function HomeScreen({
 
   const addAttachment = useCallback(
     async (source: AttachmentSource, expectedOwnershipKey: string) => {
+      if (!sessionProjectionReady.current) return;
       const liveOwnershipKey = completionOwnershipKey(
         completionController.getState(),
         store.getState().selectedConversationId,
@@ -3007,6 +3080,7 @@ export function HomeScreen({
   );
 
   const send = useCallback(async () => {
+    if (!sessionProjectionReady.current) return;
     const prompt = draft;
     const outgoingAttachments = draftAttachments;
     const selectedConversation = selectActiveConversation(store.getState());
@@ -3721,34 +3795,37 @@ export function HomeScreen({
 
   const rootSurfaceAdmissionAllowed = useCallback(
     (allowSettledDirectRecovery = false) =>
+      (!nativeAvailable || sessionProjectionReady.current) &&
       lifecycleBootstrapReadyRef.current &&
       !navigationSurfaceVisibleRef.current &&
       !contextSheetVisibleRef.current &&
       !destructiveAuthorityActive(allowSettledDirectRecovery) &&
       !projectContextOperationInFlight(projectContextController.getState()),
-    [destructiveAuthorityActive, projectContextController],
+    [destructiveAuthorityActive, nativeAvailable, projectContextController],
   );
 
   const drawerSourceIsLive = useCallback(
     (expectedEpoch: number) =>
+      (!nativeAvailable || sessionProjectionReady.current) &&
       lifecycleBootstrapReadyRef.current &&
       (wideLayout || drawerVisibleRef.current) &&
       drawerSurfaceEpoch.current === expectedEpoch &&
       !contextSheetVisibleRef.current &&
       !destructiveAuthorityActive() &&
       !projectContextOperationInFlight(projectContextController.getState()),
-    [destructiveAuthorityActive, projectContextController, wideLayout],
+    [destructiveAuthorityActive, nativeAvailable, projectContextController, wideLayout],
   );
 
   const settingsSourceIsLive = useCallback(
     (expectedEpoch: number) =>
+      (!nativeAvailable || sessionProjectionReady.current) &&
       lifecycleBootstrapReadyRef.current &&
       settingsVisibleRef.current &&
       settingsSurfaceEpoch.current === expectedEpoch &&
       !contextSheetVisibleRef.current &&
       !destructiveAuthorityActive() &&
       !projectContextOperationInFlight(projectContextController.getState()),
-    [destructiveAuthorityActive, projectContextController],
+    [destructiveAuthorityActive, nativeAvailable, projectContextController],
   );
 
   const closeDrawerSurface = useCallback(() => {
@@ -5526,6 +5603,7 @@ export function HomeScreen({
       setRuntimeFailure(t('home.secureStorageUnavailable'));
       return;
     }
+    if (!sessionProjectionReady.current) return;
     setCredentialBusy(true);
     try {
       const result = await activeAdapter.presentCredentialPrompt(locale);
@@ -5545,6 +5623,7 @@ export function HomeScreen({
   }, [activeAdapter, activeHarnessId, locale, nativeAvailable, t]);
 
   const clearCredential = useCallback(() => {
+    if (!sessionProjectionReady.current) return;
     Alert.alert(t('home.clearKeyTitle', { provider: providerName }), t('home.clearKeyBody'), [
       { text: t('common.cancel'), style: 'cancel' },
       {
@@ -5839,6 +5918,18 @@ export function HomeScreen({
                 message={recoveryCode(visibleRequestFailure ?? storageWarning ?? '') === null
                   ? visibleRequestFailure ?? storageWarning ?? undefined : undefined}
               />
+              {sessionLoadFailure !== null && (
+                <Pressable
+                  accessibilityRole="button"
+                  accessibilityLabel={t('recovery.retryLoad')}
+                  disabled={runtimeChecking || credentialBusy}
+                  onPress={() => retrySessionLoad().catch(() => undefined)}
+                  style={({ pressed }) => [styles.retry, pressed && styles.pressed]}
+                  testID="retry-session-load"
+                >
+                  <Text style={styles.retryText}>{t('recovery.retryLoad')}</Text>
+                </Pressable>
+              )}
               {completionActionVisible && visibleRequestFailure !== null && (
                 <Pressable
                   accessibilityLabel={completionRecoveryLabel(completionState.phase, t)}
@@ -6001,10 +6092,10 @@ export function HomeScreen({
             draft={draft}
             harnessName={activeHarness.name}
             providerName={providerName}
-            configurationHint={claudeSourceChecking ? t('settings.auth.checkingClaude') : configurationPending ? t('messages.preparingConnection', { harness: activeHarness.name }) : subscriptionNeedsAttention ? t(glmSubscriptionState === 'signed_in' ? 'messages.subscriptionUnverified' : 'messages.subscriptionLoginRequired') : undefined}
-            configurationPending={configurationPending}
+            configurationHint={sessionLoadFailure !== null ? t('recovery.loadRequired') : claudeSourceChecking ? t('settings.auth.checkingClaude') : configurationPending ? t('messages.preparingConnection', { harness: activeHarness.name }) : subscriptionNeedsAttention ? t(glmSubscriptionState === 'signed_in' ? 'messages.subscriptionUnverified' : 'messages.subscriptionLoginRequired') : undefined}
+            configurationPending={sessionLoadFailure !== null ? runtimeChecking : configurationPending}
             textOnly={claudeSubscriptionSelected}
-            configurationAction={subscriptionNeedsAttention ? t('messages.manageSubscription') : undefined}
+            configurationAction={sessionLoadFailure !== null ? t('recovery.retryLoad') : subscriptionNeedsAttention ? t('messages.manageSubscription') : undefined}
             model={activeModel}
             modelLabel={providerOverride?.harness_id === activeHarnessId ? providerOverride.model_mappings[activeModel] : undefined}
             locked={
@@ -6030,12 +6121,16 @@ export function HomeScreen({
             }}
             onCancel={() => cancel(completionState)}
             onChange={changeDraft}
-            onLogin={activeHarnessId === 'dsh' ? undefined : () => {
+            onLogin={sessionLoadFailure !== null || activeHarnessId === 'dsh' ? undefined : () => {
               if (!rootSurfaceAdmissionAllowed() || credentialBusy) return;
               presentSettingsSurface();
               setSettingsAuthOnly(true);
             }}
             onConfigure={() => {
+              if (sessionLoadFailure !== null) {
+                retrySessionLoad().catch(() => undefined);
+                return;
+              }
               if (!rootSurfaceAdmissionAllowed() || credentialBusy) return;
               if (!nativeAvailable || subscriptionNeedsAttention) {
                 openSettings();

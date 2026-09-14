@@ -29,7 +29,14 @@ xcodebuild build-for-testing -workspace apps/mobile/ios/Rish.xcworkspace \
   -derivedDataPath "$output/DerivedData" CODE_SIGNING_ALLOWED=NO \
   -only-testing:RishTests/RishGuestCgiLiveTests \
   -only-testing:RishTests/AgentGuestCgiAdapterTests \
-  -only-testing:RishTests/RishGuestCgiHTTPTests
+  -only-testing:RishTests/RishGuestCgiHTTPTests \
+  -only-testing:RishTests/SessionSnapshotStoreTests/testProtectionUsesFreshFileAttributesForDirectoryAndFile \
+  -only-testing:RishTests/SessionSnapshotStoreTests/testFreshStoreLoadsAsMissingAndFirstCASCommitsV3 \
+  -only-testing:RishTests/SessionSnapshotStoreTests/testLoadResultExposesWriterAndCurrentLaunchInstanceIds \
+  -only-testing:RishTests/SessionSnapshotStoreTests/testInitAcceptsPrivatePrefixedExistingRootBeforeSessionFileExists \
+  -only-testing:RishTests/SessionSnapshotStoreTests/testLegacyV2LoadsWithRawByteTokenAndMigratesOnlyWithThatToken \
+  -only-testing:RishTests/SessionSnapshotStoreTests/testProtectionV2CoversRootLockSessionTombstoneAndTemporaryPaths \
+  -only-testing:RishTests/SessionSnapshotStoreTests/testV2ProtectionRejectsFreshReadbackLoss
 python3 - "$output/DerivedData/Build/Products" "$PWD/scripts/tests/fixtures/guest-cgi" <<'PY'
 import pathlib, plistlib, sys
 paths = list(pathlib.Path(sys.argv[1]).glob('*.xctestrun'))
@@ -60,18 +67,37 @@ xcodebuild test-without-building -xctestrun "${plans[0]}" \
   -resultBundlePath "$output/Preview.xcresult" \
   -only-testing:RishTests/RishGuestCgiLiveTests \
   -only-testing:RishTests/AgentGuestCgiAdapterTests \
-  -only-testing:RishTests/RishGuestCgiHTTPTests
+  -only-testing:RishTests/RishGuestCgiHTTPTests \
+  -only-testing:RishTests/SessionSnapshotStoreTests/testProtectionUsesFreshFileAttributesForDirectoryAndFile \
+  -only-testing:RishTests/SessionSnapshotStoreTests/testFreshStoreLoadsAsMissingAndFirstCASCommitsV3 \
+  -only-testing:RishTests/SessionSnapshotStoreTests/testLoadResultExposesWriterAndCurrentLaunchInstanceIds \
+  -only-testing:RishTests/SessionSnapshotStoreTests/testInitAcceptsPrivatePrefixedExistingRootBeforeSessionFileExists \
+  -only-testing:RishTests/SessionSnapshotStoreTests/testLegacyV2LoadsWithRawByteTokenAndMigratesOnlyWithThatToken \
+  -only-testing:RishTests/SessionSnapshotStoreTests/testProtectionV2CoversRootLockSessionTombstoneAndTemporaryPaths \
+  -only-testing:RishTests/SessionSnapshotStoreTests/testV2ProtectionRejectsFreshReadbackLoss
 xcrun xcresulttool get test-results tests --path "$output/Preview.xcresult" --compact > "$output/tests.json"
 python3 - "$output/tests.json" <<'PY'
 import json, sys
 nodes = json.load(open(sys.argv[1]))['testNodes']
-found = []
+required = {
+    'testOptInRealGuestCgiCounterOverLoopback',
+    'testProtectionUsesFreshFileAttributesForDirectoryAndFile',
+    'testFreshStoreLoadsAsMissingAndFirstCASCommitsV3',
+    'testLoadResultExposesWriterAndCurrentLaunchInstanceIds',
+    'testInitAcceptsPrivatePrefixedExistingRootBeforeSessionFileExists',
+    'testLegacyV2LoadsWithRawByteTokenAndMigratesOnlyWithThatToken',
+    'testProtectionV2CoversRootLockSessionTombstoneAndTemporaryPaths',
+    'testV2ProtectionRejectsFreshReadbackLoss',
+}
+found = {name: [] for name in required}
 def visit(node):
-    if node.get('nodeType') == 'Test Case' and 'testOptInRealGuestCgiCounterOverLoopback' in node.get('name', ''):
-        found.append(node.get('result'))
+    if node.get('nodeType') == 'Test Case':
+        for name in required:
+            if name in node.get('name', ''):
+                found[name].append(node.get('result'))
     for child in node.get('children', []): visit(child)
 for node in nodes: visit(node)
-if found != ['Passed']:
-    raise SystemExit(f'Real guest preview test must run and pass; observed: {found}')
-print('Release guest preview: registry enabled, guest boot, HTTP GET/POST, and teardown verified.')
+if any(results != ['Passed'] for results in found.values()):
+    raise SystemExit(f'Release service and storage tests must run and pass; observed: {found}')
+print('Release guest preview and native session storage/restart tests passed.')
 PY

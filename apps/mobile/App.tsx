@@ -31,9 +31,10 @@ export default function App({
   dshSeedMarkdownDemo?: boolean;
   dshUIPreview?: unknown;
 }) {
-  const [catalogReady, setCatalogReady] = useState(
-    !DshModelCatalog.isAvailable(),
-  );
+  // Native modules can become available between render and the effect. Always
+  // await refresh before mounting HomeScreen, whose session parser needs the
+  // saved custom and retired model identities.
+  const [catalogReady, setCatalogReady] = useState(false);
   const [catalogError, setCatalogError] = useState(false);
   const [catalogRetry, setCatalogRetry] = useState(0);
   useEffect(() => {

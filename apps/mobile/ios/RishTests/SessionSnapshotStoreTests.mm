@@ -29,6 +29,7 @@
 @interface DSHSessionSnapshotStore (MetadataHardeningTesting)
 - (BOOL)requiresSessionResourceMetadata;
 - (id)sessionProtectionPolicyValue;
+- (NSFileManager *)sessionFileManager;
 - (BOOL)setSessionProtectionValue:(id)value
                             atURL:(NSURL *)url
                             error:(NSError **)error;
@@ -50,6 +51,40 @@
                  excludeBackup:(BOOL)excludeBackup
                          error:(NSError **)error;
 - (int)acquireCASLock:(NSError **)error;
+@end
+
+// Forward to the real filesystem while recording which Foundation API the
+// production protection helpers use. The metadata fake below only tests the
+// surrounding guards and cannot catch an unsupported NSURL resource setter.
+@interface DSHSessionTrackingFileManager : NSFileManager
+@property(nonatomic, copy) NSDictionary *lastWrittenAttributes;
+@property(nonatomic, copy) NSString *lastWritePath;
+@property(nonatomic, copy) NSString *lastReadPath;
+@end
+
+@implementation DSHSessionTrackingFileManager
+- (BOOL)setAttributes:(NSDictionary<NSFileAttributeKey, id> *)attributes
+         ofItemAtPath:(NSString *)path
+                error:(NSError **)error {
+  self.lastWrittenAttributes = attributes;
+  self.lastWritePath = path;
+  return [super setAttributes:attributes ofItemAtPath:path error:error];
+}
+- (NSDictionary<NSFileAttributeKey, id> *)attributesOfItemAtPath:(NSString *)path
+                                                       error:(NSError **)error {
+  self.lastReadPath = path;
+  return [super attributesOfItemAtPath:path error:error];
+}
+@end
+
+@interface DSHSessionFileAttributesTestStore : DSHSessionSnapshotStore
+@property(nonatomic, strong) DSHSessionTrackingFileManager *trackingFileManager;
+@end
+
+@implementation DSHSessionFileAttributesTestStore
+- (NSFileManager *)sessionFileManager {
+  return self.trackingFileManager;
+}
 @end
 
 @interface DSHSessionMetadataTestStore : DSHSessionSnapshotStore
@@ -766,18 +801,14 @@ static NSString *const DSHSessionTestOperationB =
 // Applies the exact metadata shape a store-written session file must
 // carry. On a physical device data protection is enforced, so the class and
 // backup-exclusion attributes are asserted by READING THEM BACK through the
-// same NSURL resource keys the store validates (NSURLFileProtectionKey must
-// equal the class the store requires) instead of trusting the setter's
-// return value. On CoreSimulator the keys are not enforced and stay best
-// effort. NSFileManager takes the NSFileProtection* spelling; NSURL reports
-// the NSURLFileProtection* spelling, so both constants appear here on
-// purpose.
+// same fresh NSFileManager attributes the store validates, instead of
+// trusting the setter's return value. CoreSimulator does not enforce data
+// protection; backup exclusion remains an NSURL resource property.
 - (void)applyPublishedSessionProtectionAtURL:(NSURL *)url {
   if (DSHTestHostIsSimulator()) {
-    (void)[url setResourceValue:
-        NSURLFileProtectionCompleteUntilFirstUserAuthentication
-                          forKey:NSURLFileProtectionKey
-                           error:nil];
+    (void)[NSFileManager.defaultManager setAttributes:@{
+        NSFileProtectionKey : NSFileProtectionCompleteUntilFirstUserAuthentication,
+      } ofItemAtPath:url.path error:nil];
     (void)[url setResourceValue:@YES
                           forKey:NSURLIsExcludedFromBackupKey
                            error:nil];
@@ -795,13 +826,12 @@ static NSString *const DSHSessionTestOperationB =
   XCTAssertTrue(([url setResourceValue:@YES
                                 forKey:NSURLIsExcludedFromBackupKey
                                  error:&error]), @"%@", error);
-  id protection = nil;
   error = nil;
-  XCTAssertTrue(([url getResourceValue:&protection
-                                forKey:NSURLFileProtectionKey
-                                 error:&error]), @"%@", error);
-  XCTAssertEqualObjects(protection,
-      NSURLFileProtectionCompleteUntilFirstUserAuthentication);
+  NSDictionary *attributes = [NSFileManager.defaultManager
+      attributesOfItemAtPath:url.path error:&error];
+  XCTAssertNotNil(attributes, @"%@", error);
+  XCTAssertEqualObjects(attributes[NSFileProtectionKey],
+      NSFileProtectionCompleteUntilFirstUserAuthentication);
   NSNumber *excluded = nil;
   error = nil;
   XCTAssertTrue(([url getResourceValue:&excluded
@@ -865,14 +895,48 @@ static NSString *const DSHSessionTestOperationB =
                        error:nil][NSFilePosixPermissions];
   XCTAssertEqualObjects(mode, @0600);
   XCTAssertEqualObjects(store.protections[self.rootURL.path],
-                        NSURLFileProtectionCompleteUntilFirstUserAuthentication);
+                        NSFileProtectionCompleteUntilFirstUserAuthentication);
   XCTAssertEqualObjects(store.backups[self.rootURL.path], @NO);
   XCTAssertEqualObjects(store.protections[self.store.sessionURL.path],
-                        NSURLFileProtectionCompleteUntilFirstUserAuthentication);
+                        NSFileProtectionCompleteUntilFirstUserAuthentication);
   XCTAssertEqualObjects(store.backups[self.store.sessionURL.path], @YES);
   for (NSString *path in store.protections) {
     XCTAssertFalse([path hasPrefix:@"/dev/fd/"]);
   }
+}
+
+- (void)testProtectionUsesFreshFileAttributesForDirectoryAndFile {
+  [self writeMetadataFixtureWithMode:@0600];
+  DSHSessionFileAttributesTestStore *store = [[DSHSessionFileAttributesTestStore alloc]
+      initWithRootURL:self.rootURL sessionURL:self.store.sessionURL
+      launchInstanceId:DSHSessionTestLaunch coordinator:nil faultHook:nil];
+  store.trackingFileManager = [[DSHSessionTrackingFileManager alloc] init];
+  NSData *original = [NSData dataWithContentsOfURL:self.store.sessionURL];
+  for (NSURL *url in @[self.rootURL, self.store.sessionURL]) {
+    NSError *error = nil;
+    XCTAssertTrue([store setSessionProtectionValue:[store sessionProtectionPolicyValue]
+                                            atURL:url error:&error], @"%@", error);
+    XCTAssertEqualObjects(store.trackingFileManager.lastWritePath, url.path);
+    XCTAssertEqualObjects(store.trackingFileManager.lastWrittenAttributes,
+        (@{NSFileProtectionKey : NSFileProtectionCompleteUntilFirstUserAuthentication}));
+    id protection = @"stale value";
+    XCTAssertTrue([store getSessionProtectionAtURL:url value:&protection error:&error],
+                  @"%@", error);
+    XCTAssertEqualObjects(store.trackingFileManager.lastReadPath, url.path);
+    NSDictionary *actual = [NSFileManager.defaultManager
+        attributesOfItemAtPath:url.path error:&error];
+    XCTAssertEqualObjects(protection, actual[NSFileProtectionKey]);
+    if (!DSHTestHostIsSimulator()) {
+      XCTAssertEqualObjects(protection, NSFileProtectionCompleteUntilFirstUserAuthentication);
+    }
+  }
+  XCTAssertEqualObjects([NSData dataWithContentsOfURL:self.store.sessionURL], original);
+  NSURL *missing = [self.rootURL URLByAppendingPathComponent:@"missing-protection-file"];
+  id protection = @"stale value";
+  NSError *error = nil;
+  XCTAssertFalse([store getSessionProtectionAtURL:missing value:&protection error:&error]);
+  XCTAssertNil(protection);
+  XCTAssertNotNil(error);
 }
 
 - (void)testCanonicalPathMetadataDetectsInodeSwapAsConflict {
@@ -891,13 +955,13 @@ static NSString *const DSHSessionTestOperationB =
   DSHSessionMetadataTestStore *store = [self metadataTestStore];
   NSError *error = nil;
   XCTAssertTrue([store ensurePrivateRoot:&error], @"%@", error);
-  store.protections[self.store.sessionURL.path] = NSURLFileProtectionComplete;
+  store.protections[self.store.sessionURL.path] = NSFileProtectionComplete;
   XCTAssertTrue([store hardenLegacyFileWithIdentity:&expected error:&error],
                 @"%@", error);
   XCTAssertNil(error);
   XCTAssertEqualObjects(
       store.protections[self.store.sessionURL.path],
-      NSURLFileProtectionCompleteUntilFirstUserAuthentication);
+      NSFileProtectionCompleteUntilFirstUserAuthentication);
 }
 
 - (void)testLockedV1CompleteProtectionFailsWhenV2CannotBeApplied {
@@ -905,11 +969,11 @@ static NSString *const DSHSessionTestOperationB =
   DSHSessionMetadataTestStore *store = [self metadataTestStore];
   NSError *error = nil;
   XCTAssertTrue([store ensurePrivateRoot:&error], @"%@", error);
-  store.protections[self.store.sessionURL.path] = NSURLFileProtectionComplete;
+  store.protections[self.store.sessionURL.path] = NSFileProtectionComplete;
   store.preserveOldSessionProtection = YES;
   XCTAssertFalse([store hardenLegacyFileWithIdentity:&expected error:&error]);
   XCTAssertEqualObjects(store.protections[self.store.sessionURL.path],
-                        NSURLFileProtectionComplete);
+                        NSFileProtectionComplete);
   XCTAssertEqual(error.code, DSHSessionSnapshotStoreErrorProtection);
 }
 
@@ -953,7 +1017,7 @@ static NSString *const DSHSessionTestOperationB =
       URLByAppendingPathComponent:@".sessions.cas-lock" isDirectory:NO];
   XCTAssertEqualObjects(
       store.protections[lockURL.path],
-      NSURLFileProtectionCompleteUntilFirstUserAuthentication);
+      NSFileProtectionCompleteUntilFirstUserAuthentication);
   XCTAssertEqualObjects(store.backups[lockURL.path], @YES);
   if (descriptor >= 0) close(descriptor);
 }
@@ -984,7 +1048,7 @@ static NSString *const DSHSessionTestOperationB =
   for (NSString *path in store.protections) {
     XCTAssertEqualObjects(
         store.protections[path],
-        NSURLFileProtectionCompleteUntilFirstUserAuthentication);
+        NSFileProtectionCompleteUntilFirstUserAuthentication);
     NSURL *url = [NSURL fileURLWithPath:path];
     [observedNames addObject:url.lastPathComponent];
     if ([url.lastPathComponent hasPrefix:@".sessions.json."] &&

@@ -96,3 +96,19 @@ After building the musl guest agent from the pinned rish source, use
 archive entries and refresh the integrity pins. The other rootfs files and
 offline APK packages are preserved. Both CI lanes check the image hashes
 and the presence of the expected agent-ready marker.
+
+## Session startup and recovery
+
+The Release simulator gate also exercises fresh session creation, cross-launch
+loading, exact-byte legacy migration, and file/directory protection metadata.
+Protection uses fresh `NSFileManager` attributes; the exact protection class is
+still enforced on physical devices. Simulator results do not establish device
+lock/unlock enforcement.
+
+The model catalog loads before stored conversations are validated. Load
+validation caches are scoped to that catalog, so a retry after catalog recovery
+revalidates the original bytes. A failed load retains a stable error code and
+keeps session writes, reconciliation, and attachment pruning gated until a
+successful read. **Retry loading chats** reads the existing store again; it is
+not a reset and does not replace rejected data with an empty session. Error
+notices do not include native filesystem paths or stored conversation content.

@@ -1,3 +1,4 @@
+import { sessionLoadFailureCode } from './session-load-failure';
 import {
   markTimingSync,
   sessionCandidateDigestSync,
@@ -8,6 +9,7 @@ import {
   sessionCandidateIsValid,
 } from '../state/persistence';
 import type { CompletionVisibleMessageV2 } from './types';
+import { getDshCatalog } from '../models/catalog';
 
 export type SessionDurabilityStatus =
   | 'committed'
@@ -120,6 +122,10 @@ export type SessionPersistenceDependencies = {
   readonly loadSessionAuthority?: () => Promise<unknown>;
 };
 
+export type SessionSnapshotLoadOutcome =
+  | { readonly status: 'loaded'; readonly value: LoadSessionSnapshotResultV1 }
+  | { readonly status: 'failed'; readonly code: string };
+
 export type SessionPersistenceCoordinator = {
   write(
     candidate: unknown,
@@ -159,6 +165,7 @@ export type SessionPersistenceCoordinator = {
   ): Promise<SessionCommitQueryResultV1 | null>;
   loadSessionSnapshot(): Promise<SessionSnapshotAuthorityV1>;
   loadSessionSnapshotResult(): Promise<LoadSessionSnapshotResultV1 | null>;
+  loadSessionSnapshotOutcome(): Promise<SessionSnapshotLoadOutcome>;
 };
 
 const MAX_SESSION_BYTES = 16 * 1024 * 1024;
@@ -350,7 +357,7 @@ class TextMemo<T> {
 const boundedUtf8Memo = new TextMemo<boolean>();
 const lexicalBudgetMemo = new TextMemo<boolean>();
 const schema9Memo = new TextMemo<boolean>();
-const loadedStatusMemo = new TextMemo<boolean>();
+const loadedStatusMemos = new WeakMap<object, TextMemo<boolean>>();
 
 function boundedUtf8(value: string): boolean {
   if (value.length === 0 || value.length > MAX_SESSION_BYTES) return false;
@@ -955,6 +962,15 @@ function loadedSessionJSONMatchesStatus(
   value: unknown,
 ): value is string {
   if (typeof value !== 'string') return false;
+  // Hydration validates dynamic model identities against the current catalog.
+  // A refresh can make previously rejected text valid (or the reverse), so
+  // neither positive nor negative results may outlive that catalog snapshot.
+  const catalog = getDshCatalog();
+  let loadedStatusMemo = loadedStatusMemos.get(catalog);
+  if (loadedStatusMemo === undefined) {
+    loadedStatusMemo = new TextMemo<boolean>();
+    loadedStatusMemos.set(catalog, loadedStatusMemo);
+  }
   const remembered = loadedStatusMemo.get(status + '\u0000' + value);
   if (remembered !== undefined) return remembered;
   return loadedStatusMemo.set(status + '\u0000' + value, scanLoadedSessionJSONMatchesStatus(status, value));
@@ -1264,15 +1280,26 @@ export function createSessionPersistenceCoordinator(
     }
   };
 
-  const loadSessionSnapshotResult = async (): Promise<LoadSessionSnapshotResultV1 | null> => {
-    const loadSnapshot =
-      dependencies.loadSessionSnapshot;
-    if (loadSnapshot === undefined) return null;
+  const loadSessionSnapshotOutcome = async (): Promise<SessionSnapshotLoadOutcome> => {
+    const loadSnapshot = dependencies.loadSessionSnapshot;
+    if (loadSnapshot === undefined) return { status: 'failed', code: 'E_SESSION_NATIVE' };
     try {
-      return parseLoadSnapshot(await loadSnapshot());
-    } catch {
-      return null;
+      const raw = await loadSnapshot();
+      const value = parseLoadSnapshot(raw);
+      if (value !== null) return { status: 'loaded', value };
+      // Preserve rejection rather than treating unreadable storage as missing.
+      const record = plainRecord(raw);
+      const rejectedContent = typeof record?.session_json === 'string' &&
+        !safeHydrateChatState(record.session_json).ok;
+      return { status: 'failed', code: rejectedContent ? 'E_SESSION_CORRUPT' : 'E_SESSION_INVALID' };
+    } catch (error) {
+      return { status: 'failed', code: sessionLoadFailureCode(error) };
     }
+  };
+
+  const loadSessionSnapshotResult = async (): Promise<LoadSessionSnapshotResultV1 | null> => {
+    const result = await loadSessionSnapshotOutcome();
+    return result.status === 'loaded' ? result.value : null;
   };
 
   const casPersist = async (
@@ -1469,6 +1496,7 @@ export function createSessionPersistenceCoordinator(
     read: loadAuthority,
     loadSessionSnapshot: loadAuthority,
     loadSessionSnapshotResult,
+    loadSessionSnapshotOutcome,
     casPersist,
     writeCAS: casPersist,
     queryCommit,
