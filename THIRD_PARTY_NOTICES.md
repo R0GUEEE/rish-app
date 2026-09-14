@@ -54,6 +54,9 @@ five direct packages exhaust the JavaScript or native dependency graph.
 
 The app tracks a kernel and CPIO guest payload under
 `apps/mobile/ios/Rish/GuestAssets/`, with `SHA256SUMS` for the exact bytes.
+The same two files are packaged into the Android APK as assets when the
+runtime is staged with `scripts/prepare-rish-android.sh`; there is one copy in
+the source tree and one set of pinned digests.
 The pinned sibling Rish source provides the guest provenance and license
 correspondence in
 [`guest/x86_64/SOURCES-AND-LICENSES.md`](https://github.com/ZSeven-W/rish/blob/ef660dc81fa31cbe279b1f4ba355a97734ff1740/guest/x86_64/SOURCES-AND-LICENSES.md)
@@ -61,8 +64,10 @@ and its `assets.lock.tsv`/build recipes. The exact App hashes are paired with
 the verified member mapping, Alpine package records, source lock, and guest
 license texts in [`third-party/guest/`](third-party/guest/PROVENANCE.md).
 The currently tracked values are CPIO SHA-256
-`152905238ade87b7e1cd495508ff1bb92807b4440cc0ed056030e4dfd72caea0` and
-kernel SHA-256
+`ebcd2279be5dfc92b1c3264c355bb440a027079bcef2fa9be209654891479b9d` (the base
+Alpine initramfs `152905238ade87b7e1cd495508ff1bb92807b4440cc0ed056030e4dfd72caea0`
+with the guest agent rebuilt from the pinned host revision recorded in
+`guest-agent-build.json`) and kernel SHA-256
 `1e6bf9027720c75c3ed0d79171f21b5791ee40ca9795d07c7c6e04dc5ea2ae90`, both
 verified against the adjacent `SHA256SUMS` file.
 The CPIO includes BusyBox, musl, apk/libapk, OpenSSL/zlib and the pinned

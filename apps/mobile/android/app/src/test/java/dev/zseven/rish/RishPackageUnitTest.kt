@@ -7,6 +7,8 @@ import org.junit.Test
 /**
  * Pins the remaining unsupported Android module names and their
  * JS-recognized unavailable codes. Runtime and snapshots have device tests.
+ * LocalGuest is implemented (dev.zseven.rish.guest) but still rejects with
+ * E_GUEST_NATIVE in a lite build without the staged rish runtime.
  *
  * Run with one Gradle command:
  *   ./gradlew :app:testDebugUnitTest

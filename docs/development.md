@@ -281,9 +281,53 @@ encrypted credentials, scoped custom-provider profiles, and atomic SQLite sessio
 snapshots. API33 emulator checks cover DSH, GLM, GLM-backed Codex/Claude Code
 profiles, and UI send/save/reopen without replay. Those profiles test API adapters,
 not the official CLI harnesses or subscription login. Attachments, project context,
-file/Git, Agent execution, and rish JNI remain unavailable; runtime status honestly
+file/Git, and Agent execution remain unavailable; runtime status honestly
 reports incomplete. Debug UI uses Metro; standalone Release and physical Android
 device acceptance remain pending.
+
+### Android guest runtime
+
+The rish Linux guest runs on Android through the same pure-Rust x86_64
+interpreter the iOS app uses. It is opt-in at build time because it adds the
+runtime library and the 22 MB of guest boot assets to the APK:
+
+```sh
+scripts/prepare-rish-android.sh
+apps/mobile/android/gradlew -p apps/mobile/android :app:assembleDebug -PreactNativeArchitectures=arm64-v8a
+```
+
+`prepare-rish-android.sh` carries the same rish commit, `rish.h`, `Cargo.lock`
+and Rust pins as `prepare-rish-ios.sh`, builds `rish-ffi` with the pinned NDK
+(27.1.12297006, API 24, 16 KiB page alignment), verifies the ELF machine,
+segment alignment, Bionic-only dependencies and exported symbols, and stages
+`apps/mobile/android/rish-ffi/` (gitignored) with a provenance manifest.
+`RISH_ANDROID_ABIS` selects ABIs (default `arm64-v8a`; `x86_64` needs the
+`x86_64-linux-android` Rust target). Gradle packages the runtime, compiles the
+JNI shim under `app/src/main/cpp/`, and copies the pinned kernel and initramfs
+from `apps/mobile/ios/Rish/GuestAssets/` into the APK assets; it refuses a
+`reactNativeArchitectures` set the runtime was not staged for. Without the
+staged directory the build stays a lite build and `LocalGuest` reports
+`implemented = false`.
+
+`LocalGuestModule` (Kotlin, `dev.zseven.rish.guest`) mirrors the iOS module:
+fail-closed request validation, digest verification of the staged assets before
+every boot, one session per process, boot on a dedicated thread, exec
+serialised with shutdown, and receipts that never carry paths. JVM unit tests
+cover the state machine against a fake runtime; the instrumented
+`LocalGuestBootTest` is the real proof and skips on a lite build:
+
+```sh
+apps/mobile/android/gradlew -p apps/mobile/android :app:connectedDebugAndroidTest \
+  -PreactNativeArchitectures=arm64-v8a \
+  -Pandroid.testInstrumentationRunnerArguments.class=tech.zseven.rish.LocalGuestBootTest
+```
+
+On the arm64 API 33 emulator it boots the guest in about 34 s with 768 MiB,
+reports `uname -m` as `x86_64`, installs `tree` from the offline apk repository
+baked into the initramfs, runs it, and shuts down. This proves the runtime and
+guest are genuinely in the APK and bootable; nothing in the Android UI drives
+the guest yet, because the Agent runtime, workspace and file modules that use
+it on iOS are still unavailable on Android.
 
 For temporary Android compatibility-container testing, build a self-contained
 debug-signed APK with bundled JS and developer-server support disabled:

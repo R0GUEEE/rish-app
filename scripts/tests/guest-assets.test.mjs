@@ -11,16 +11,21 @@ const sha = bytes => createHash('sha256').update(bytes).digest('hex');
 test('bundled guest assets match the manifest and native integrity checks', () => {
   const manifest = read(`${assets}SHA256SUMS`).toString();
   const module = read('modules/rish/ios/Sources/LocalGuestModule.mm').toString();
+  // Android packages the same two files and pins the same digests in Kotlin.
+  const android = read('apps/mobile/android/app/src/main/java/dev/zseven/rish/guest/GuestAssets.kt').toString();
   for (const line of manifest.split('\n').filter(line => line && !line.startsWith('#'))) {
     const [digest, file] = line.split('  ');
     assert.equal(sha(read(`${assets}${file}`)), digest);
-    assert.ok(module.includes(digest));
+    assert.ok(module.includes(digest), `iOS module must pin ${file}`);
+    assert.ok(android.includes(digest), `Android GuestAssets must pin ${file}`);
+    assert.ok(android.includes(`"${file}"`), `Android GuestAssets must name ${file}`);
   }
 });
 
 test('bundled agent agrees with the pinned host readiness protocol', () => {
   const provenance = JSON.parse(read(`${assets}guest-agent-build.json`).toString());
   assert.ok(read('scripts/prepare-rish-ios.sh').toString().includes(`EXPECTED_RISH_COMMIT="${provenance.rish_commit}"`));
+  assert.ok(read('scripts/prepare-rish-android.sh').toString().includes(`EXPECTED_RISH_COMMIT="${provenance.rish_commit}"`));
   const data = read(`${assets}rish-container.cpio`);
   assert.equal(sha(data), provenance.initramfs_sha256);
   let found = false;

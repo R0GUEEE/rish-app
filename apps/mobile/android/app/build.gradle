@@ -17,6 +17,23 @@ def officialCliProbeEnabled = officialCliEnabled && providers.gradleProperty("ri
 if (officialCliDir != null && !officialCliDir.isDirectory()) {
     throw new GradleException("rishOfficialCliDir does not exist: ${officialCliDir}")
 }
+// The rish guest runtime (the pure-Rust x86_64 interpreter) is staged per ABI
+// by scripts/prepare-rish-android.sh into android/rish-ffi, or wherever
+// -PrishFfiDir points. Without a staged runtime the build stays a lite build:
+// LocalGuest reports implemented=false and no guest boot assets ship.
+def rishFfiDirProperty = providers.gradleProperty("rishFfiDir").orNull
+def rishFfiDir = rishFfiDirProperty == null ? file("$rootDir/rish-ffi") : file(rishFfiDirProperty)
+def rishGuestEnabled = new File(rishFfiDir, "rish_ffi.version").isFile()
+if (rishFfiDirProperty != null && !rishGuestEnabled) {
+    throw new GradleException("rishFfiDir has no rish_ffi.version manifest: ${rishFfiDir}; run scripts/prepare-rish-android.sh")
+}
+def rishStagedAbis = rishGuestEnabled
+    ? (new File(rishFfiDir, "jniLibs").listFiles() ?: new File[0]).findAll { it.isDirectory() && new File(it, "librish_ffi.so").isFile() }.collect { it.name }.sort()
+    : []
+def rishGuestAssetsDir = file("$rootDir/../ios/Rish/GuestAssets")
+if (rishGuestEnabled && !new File(rishGuestAssetsDir, "SHA256SUMS").isFile()) {
+    throw new GradleException("guest boot assets are missing: ${rishGuestAssetsDir}")
+}
 
 react {
     if (rishStandalone) debuggableVariants = []
@@ -97,7 +114,7 @@ android {
                 // AGP extracts these files to ApplicationInfo.nativeLibraryDir.
                 // The preparation script names executables as .so so AGP keeps
                 // them in the native-lib set; bytes are copied unchanged.
-                jniLibs.srcDirs = [officialCliDir]
+                jniLibs.srcDirs += [officialCliDir]
             }
         }
     }
@@ -109,6 +126,44 @@ android {
             keepDebugSymbols += ["**/libcodex.so", "**/libclaude_code.so", "**/libmusl_loader.so"]
         }
     }
+    if (rishGuestEnabled) {
+        // A guest-enabled build ships only the ABIs the runtime was staged for.
+        def requestedAbis = ((project.findProperty("reactNativeArchitectures") ?: "armeabi-v7a,arm64-v8a,x86,x86_64") as String)
+            .split(",").collect { it.trim() }.findAll { it }
+        def missingAbis = requestedAbis - rishStagedAbis
+        // Only a build that compiles the JNI shim needs every requested ABI
+        // staged; unit tests and plain configuration must keep working.
+        gradle.taskGraph.whenReady { graph ->
+            def buildsNative = graph.allTasks.any { task ->
+                task.project == project && ["configureCMake", "buildCMake", "externalNativeBuild"].any { prefix -> task.name.startsWith(prefix) }
+            }
+            if (buildsNative && !missingAbis.isEmpty()) {
+                throw new GradleException("rish guest runtime is staged for ${rishStagedAbis} but reactNativeArchitectures requests ${requestedAbis}; pass -PreactNativeArchitectures=${rishStagedAbis.join(',')} or stage the missing ABIs with scripts/prepare-rish-android.sh")
+            }
+        }
+        externalNativeBuild {
+            cmake {
+                path file("src/main/cpp/CMakeLists.txt")
+                version "3.22.1"
+            }
+        }
+        defaultConfig {
+            externalNativeBuild {
+                cmake {
+                    arguments "-DRISH_FFI_DIR=${rishFfiDir.absolutePath}", "-DANDROID_SUPPORT_FLEXIBLE_PAGE_SIZES=ON"
+                    targets "rish_guest_jni"
+                }
+            }
+        }
+        sourceSets {
+            main {
+                jniLibs.srcDirs += [new File(rishFfiDir, "jniLibs")]
+                // The same pinned kernel and initramfs the iOS bundle carries;
+                // LocalGuestModule verifies their digests before every boot.
+                assets.srcDirs += [rishGuestAssetsDir]
+            }
+        }
+    }
     testBuildType project.findProperty("rishTestBuildType") ?: "debug"
     defaultConfig {
         applicationId "tech.zseven.rish"
@@ -116,6 +171,7 @@ android {
         targetSdkVersion rootProject.ext.targetSdkVersion
         buildConfigField "boolean", "RISH_STANDALONE", rishStandalone.toString()
         buildConfigField "boolean", "RISH_OFFICIAL_CLI_ENABLED", officialCliEnabled.toString()
+        buildConfigField "boolean", "RISH_GUEST_RUNTIME_BUNDLED", rishGuestEnabled.toString()
         manifestPlaceholders.officialCliProbeEnabled = officialCliProbeEnabled
         versionCode 1
         versionName "1.0"
@@ -156,6 +212,9 @@ dependencies {
 
     // Phase-1 Android bring-up test harness (AndroidX/test essentials only).
     testImplementation("junit:junit:4.13.2")
+    // GuestSessionController speaks JSON to the runtime; JVM unit tests need a
+    // real org.json instead of the android.jar stubs.
+    testImplementation("org.json:json:20240303")
     androidTestImplementation("androidx.test.ext:junit:1.2.1")
     androidTestImplementation("androidx.test:core:1.6.1")
     androidTestImplementation("androidx.test.espresso:espresso-core:3.6.1")
