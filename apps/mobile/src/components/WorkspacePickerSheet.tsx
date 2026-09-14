@@ -10,9 +10,11 @@ import {
   Animated,
   Easing,
   Modal,
+  Keyboard,
+  KeyboardAvoidingView,
+  Platform,
   Pressable,
   ScrollView,
-  StyleSheet,
   Text,
   TextInput,
   useWindowDimensions,
@@ -29,7 +31,8 @@ import {
   type WorkspaceDescriptor,
 } from '../native/LocalWorkspaces';
 import { createCompletionRequestId } from '../native/LocalRuntime';
-import { fonts, type ThemePalette } from '../theme';
+import { useSafeAreaInsets } from 'react-native-safe-area-context';
+import { createWorkspacePickerStyles } from './workspace-picker-sheet-styles';
 import {
   WorkspacePickerController,
   type WorkspaceForgetAuthorization,
@@ -76,7 +79,44 @@ export function WorkspacePickerSheet({
 }: WorkspacePickerSheetProps) {
   const { colors, t } = useAppPresentation();
   const { height: windowHeight } = useWindowDimensions();
-  const styles = useMemo(() => createStyles(colors), [colors]);
+  const insets = useSafeAreaInsets();
+  const styles = useMemo(() => createWorkspacePickerStyles(colors), [colors]);
+  const scroll = useRef<React.ComponentRef<typeof ScrollView>>(null);
+  const nameFocused = useRef(false);
+  const keyboardVisible = useRef(Keyboard.isVisible());
+  const revealFrame = useRef<number | null>(null);
+  const revealCreation = useCallback(() => {
+    if (!visible || !nameFocused.current || !keyboardVisible.current) return;
+    if (revealFrame.current !== null) cancelAnimationFrame(revealFrame.current);
+    revealFrame.current = requestAnimationFrame(() => {
+      revealFrame.current = null;
+      if (nameFocused.current && keyboardVisible.current)
+        scroll.current?.scrollToEnd({ animated: false });
+    });
+  }, [visible]);
+  useEffect(() => {
+    if (!visible) return;
+    keyboardVisible.current = Keyboard.isVisible();
+    const show = () => {
+      keyboardVisible.current = true;
+      revealCreation();
+    };
+    const willShow = Keyboard.addListener('keyboardWillShow', show);
+    const didShow = Keyboard.addListener('keyboardDidShow', show);
+    const hide = Keyboard.addListener('keyboardDidHide', () => {
+      keyboardVisible.current = false;
+    });
+    return () => {
+      willShow.remove();
+      didShow.remove();
+      hide.remove();
+      nameFocused.current = false;
+      if (revealFrame.current !== null) {
+        cancelAnimationFrame(revealFrame.current);
+        revealFrame.current = null;
+      }
+    };
+  }, [revealCreation, visible]);
   const progress = useRef(new Animated.Value(0)).current;
   const [presented, setPresented] = useState(visible);
   const presentedRef = useRef(visible);
@@ -278,6 +318,7 @@ export function WorkspacePickerSheet({
   }, [draftName, runAction]);
 
   const closeSurface = useCallback(() => {
+    Keyboard.dismiss();
     surfaceGenerationRef.current += 1;
     controller.invalidate();
     if (mountedRef.current) setPendingSelection(null);
@@ -408,434 +449,300 @@ export function WorkspacePickerSheet({
           style={[styles.backdrop, { opacity: progress }]}
           testID="workspace-picker-backdrop"
         />
-        <Animated.View
+        <KeyboardAvoidingView
+          behavior={Platform.OS === 'ios' ? 'padding' : 'height'}
+          pointerEvents="box-none"
           style={[
-            styles.cardAnchor,
-            {
-              transform: [
-                {
-                  translateY: progress.interpolate({
-                    inputRange: [0, 1],
-                    outputRange: [windowHeight, 0],
-                  }),
-                },
-              ],
-            },
+            styles.keyboardAvoider,
+            { paddingTop: Math.max(insets.top, 12) },
           ]}
         >
-          <View
-            accessibilityLabel={t('workspaces.title')}
-            role="dialog"
+          <Animated.View
             style={[
-              styles.sheet,
+              styles.cardAnchor,
               { maxHeight: Math.round(windowHeight * 0.78) },
+              {
+                transform: [
+                  {
+                    translateY: progress.interpolate({
+                      inputRange: [0, 1],
+                      outputRange: [windowHeight, 0],
+                    }),
+                  },
+                ],
+              },
             ]}
-            testID="workspace-picker-sheet"
           >
-            <Text style={styles.title}>{t('workspaces.title')}</Text>
-            {pendingSelection !== null && (
-              <View
-                accessibilityLabel={pendingSelection.display_name}
-                style={styles.selectionPrompt}
-                testID="workspace-picker-selection-prompt"
-              >
-                <Text style={styles.selectionPromptText}>
-                  {pendingSelection.kind === 'import'
-                    ? t('workspaces.importFolder')
-                    : t('workspaces.openFolder')}{' '}
-                  {pendingSelection.display_name}
-                </Text>
-                <View style={styles.selectionPromptActions}>
-                  <Pressable
-                    accessibilityLabel={t('workspaces.confirmSelection', {
-                      name: pendingSelection.display_name,
-                    })}
-                    accessibilityRole="button"
-                    disabled={busy}
-                    onPress={() => {
-                      confirmSelection().catch(() => undefined);
-                    }}
-                    style={({ pressed }) => [
-                      styles.actionChip,
-                      pressed && styles.pressed,
-                    ]}
-                    testID="workspace-picker-confirm-selection"
-                  >
-                    <Text style={styles.actionText}>
-                      {pendingSelection.kind === 'import'
-                        ? t('workspaces.importFolder')
-                        : t('workspaces.openFolder')}
-                    </Text>
-                  </Pressable>
-                  <Pressable
-                    accessibilityLabel={t('workspaces.cancelSelection', {
-                      name: pendingSelection.display_name,
-                    })}
-                    accessibilityRole="button"
-                    disabled={busy}
-                    onPress={() => {
-                      cancelSelection().catch(() => undefined);
-                    }}
-                    style={({ pressed }) => [
-                      styles.footerAction,
-                      pressed && styles.pressed,
-                    ]}
-                    testID="workspace-picker-cancel-selection"
-                  >
-                    <Text style={styles.footerActionText}>
-                      {t('common.cancel')}
-                    </Text>
-                  </Pressable>
-                </View>
-              </View>
-            )}
-            {notice !== null && <RecoveryNotice error={notice.error} />}
             <ScrollView
-              accessibilityLabel={t('workspaces.list')}
-              style={styles.listScroll}
-              contentContainerStyle={styles.listContent}
-              testID="workspace-picker-list"
+              ref={scroll}
+              accessibilityLabel={t('workspaces.title')}
+              role="dialog"
+              style={styles.sheet}
+              contentContainerStyle={[
+                styles.sheetContent,
+                { paddingBottom: Math.max(insets.bottom, 16) },
+              ]}
+              keyboardShouldPersistTaps="handled"
+              keyboardDismissMode="interactive"
+              onLayout={revealCreation}
+              onContentSizeChange={revealCreation}
+              testID="workspace-picker-sheet"
             >
-              {rows === null ? (
-                <View style={styles.loading}>
-                  <ActivityIndicator color={colors.accent} size="small" />
+              <Text style={styles.title}>{t('workspaces.title')}</Text>
+              {pendingSelection !== null && (
+                <View
+                  accessibilityLabel={pendingSelection.display_name}
+                  style={styles.selectionPrompt}
+                  testID="workspace-picker-selection-prompt"
+                >
+                  <Text style={styles.selectionPromptText}>
+                    {pendingSelection.kind === 'import'
+                      ? t('workspaces.importFolder')
+                      : t('workspaces.openFolder')}{' '}
+                    {pendingSelection.display_name}
+                  </Text>
+                  <View style={styles.selectionPromptActions}>
+                    <Pressable
+                      accessibilityLabel={t('workspaces.confirmSelection', {
+                        name: pendingSelection.display_name,
+                      })}
+                      accessibilityRole="button"
+                      disabled={busy}
+                      onPress={() => {
+                        confirmSelection().catch(() => undefined);
+                      }}
+                      style={({ pressed }) => [
+                        styles.actionChip,
+                        pressed && styles.pressed,
+                      ]}
+                      testID="workspace-picker-confirm-selection"
+                    >
+                      <Text style={styles.actionText}>
+                        {pendingSelection.kind === 'import'
+                          ? t('workspaces.importFolder')
+                          : t('workspaces.openFolder')}
+                      </Text>
+                    </Pressable>
+                    <Pressable
+                      accessibilityLabel={t('workspaces.cancelSelection', {
+                        name: pendingSelection.display_name,
+                      })}
+                      accessibilityRole="button"
+                      disabled={busy}
+                      onPress={() => {
+                        cancelSelection().catch(() => undefined);
+                      }}
+                      style={({ pressed }) => [
+                        styles.footerAction,
+                        pressed && styles.pressed,
+                      ]}
+                      testID="workspace-picker-cancel-selection"
+                    >
+                      <Text style={styles.footerActionText}>
+                        {t('common.cancel')}
+                      </Text>
+                    </Pressable>
+                  </View>
                 </View>
-              ) : rows.length === 0 ? (
-                <Text style={styles.empty}>{t('workspaces.empty')}</Text>
-              ) : (
-                rows.map(row => {
-                  const isActive = row.workspace_id === activeWorkspaceId;
-                  return (
-                    <View key={row.workspace_id} style={styles.rowShell}>
-                      <View style={styles.row}>
-                        <Pressable
-                          accessibilityLabel={t('workspaces.select', {
-                            name: row.display_name,
-                          })}
-                          accessibilityRole="radio"
-                          accessibilityState={{
-                            checked: isActive,
-                            disabled: row.status !== 'ok',
-                          }}
-                          disabled={busy || row.status !== 'ok'}
-                          onPress={() => selectWorkspace(row.workspace_id)}
-                          style={({ pressed }) => [
-                            styles.rowSelect,
-                            row.status !== 'ok' && styles.disabledRow,
-                            pressed && styles.pressed,
-                          ]}
-                          testID={`workspace-picker-row-${row.workspace_id}`}
-                        >
-                          <View style={styles.check}>
-                            {isActive && (
-                              <AppIcon
-                                color={colors.accent}
-                                icon={Check}
-                                size={18}
-                              />
-                            )}
-                          </View>
-                          <View style={styles.rowCopy}>
-                            <Text numberOfLines={1} style={styles.rowTitle}>
-                              {row.display_name}
-                            </Text>
-                            <Text style={styles.rowStatus}>
-                              {row.origin === 'granted_folder'
-                                ? `${t(
-                                    `workspaces.status.${row.status}`,
-                                  )} · ${t('workspaces.onDevice')}`
-                                : t(`workspaces.status.${row.status}`)}
-                            </Text>
-                          </View>
-                        </Pressable>
-                        <View style={styles.rowActions}>
-                          {row.origin === 'granted_folder' &&
-                            row.status !== 'ok' && (
-                              <Pressable
-                                accessibilityLabel={t(
-                                  'workspaces.regrantNamed',
-                                  { name: row.display_name },
-                                )}
-                                accessibilityRole="button"
-                                disabled={busy}
-                                onPress={() => {
-                                  presentRegrantPicker(row).catch(
-                                    () => undefined,
-                                  );
-                                }}
-                                style={({ pressed }) => [
-                                  styles.forgetButton,
-                                  pressed && styles.pressed,
-                                ]}
-                                testID={`workspace-picker-regrant-${row.workspace_id}`}
-                              >
-                                <Text style={styles.forgetText}>
-                                  {t('workspaces.regrant')}
-                                </Text>
-                              </Pressable>
-                            )}
+              )}
+              {notice !== null && <RecoveryNotice error={notice.error} />}
+              <View
+                accessibilityLabel={t('workspaces.list')}
+                style={styles.listContent}
+                testID="workspace-picker-list"
+              >
+                {rows === null ? (
+                  <View style={styles.loading}>
+                    <ActivityIndicator color={colors.accent} size="small" />
+                  </View>
+                ) : rows.length === 0 ? (
+                  <Text style={styles.empty}>{t('workspaces.empty')}</Text>
+                ) : (
+                  rows.map(row => {
+                    const isActive = row.workspace_id === activeWorkspaceId;
+                    return (
+                      <View key={row.workspace_id} style={styles.rowShell}>
+                        <View style={styles.row}>
                           <Pressable
-                            accessibilityLabel={t('workspaces.forget', {
+                            accessibilityLabel={t('workspaces.select', {
                               name: row.display_name,
                             })}
-                            accessibilityRole="button"
-                            disabled={busy}
-                            onPress={() => {
-                              forgetWorkspace(row).catch(() => undefined);
+                            accessibilityRole="radio"
+                            accessibilityState={{
+                              checked: isActive,
+                              disabled: row.status !== 'ok',
                             }}
+                            disabled={busy || row.status !== 'ok'}
+                            onPress={() => selectWorkspace(row.workspace_id)}
                             style={({ pressed }) => [
-                              styles.forgetButton,
+                              styles.rowSelect,
+                              row.status !== 'ok' && styles.disabledRow,
                               pressed && styles.pressed,
                             ]}
+                            testID={`workspace-picker-row-${row.workspace_id}`}
                           >
-                            <Text style={styles.forgetText}>
-                              {t('common.forget')}
-                            </Text>
+                            <View style={styles.check}>
+                              {isActive && (
+                                <AppIcon
+                                  color={colors.accent}
+                                  icon={Check}
+                                  size={18}
+                                />
+                              )}
+                            </View>
+                            <View style={styles.rowCopy}>
+                              <Text numberOfLines={1} style={styles.rowTitle}>
+                                {row.display_name}
+                              </Text>
+                              <Text style={styles.rowStatus}>
+                                {row.origin === 'granted_folder'
+                                  ? `${t(
+                                      `workspaces.status.${row.status}`,
+                                    )} · ${t('workspaces.onDevice')}`
+                                  : t(`workspaces.status.${row.status}`)}
+                              </Text>
+                            </View>
                           </Pressable>
+                          <View style={styles.rowActions}>
+                            {row.origin === 'granted_folder' &&
+                              row.status !== 'ok' && (
+                                <Pressable
+                                  accessibilityLabel={t(
+                                    'workspaces.regrantNamed',
+                                    { name: row.display_name },
+                                  )}
+                                  accessibilityRole="button"
+                                  disabled={busy}
+                                  onPress={() => {
+                                    presentRegrantPicker(row).catch(
+                                      () => undefined,
+                                    );
+                                  }}
+                                  style={({ pressed }) => [
+                                    styles.forgetButton,
+                                    pressed && styles.pressed,
+                                  ]}
+                                  testID={`workspace-picker-regrant-${row.workspace_id}`}
+                                >
+                                  <Text style={styles.forgetText}>
+                                    {t('workspaces.regrant')}
+                                  </Text>
+                                </Pressable>
+                              )}
+                            <Pressable
+                              accessibilityLabel={t('workspaces.forget', {
+                                name: row.display_name,
+                              })}
+                              accessibilityRole="button"
+                              disabled={busy}
+                              onPress={() => {
+                                forgetWorkspace(row).catch(() => undefined);
+                              }}
+                              style={({ pressed }) => [
+                                styles.forgetButton,
+                                pressed && styles.pressed,
+                              ]}
+                            >
+                              <Text style={styles.forgetText}>
+                                {t('common.forget')}
+                              </Text>
+                            </Pressable>
+                          </View>
                         </View>
                       </View>
-                    </View>
-                  );
-                })
-              )}
-            </ScrollView>
-            <View style={styles.newRow}>
-              <TextInput
-                accessibilityLabel={t('workspaces.namePlaceholder')}
-                onChangeText={setDraftName}
-                onSubmitEditing={() => {
-                  createWorkspace().catch(() => undefined);
-                }}
-                placeholder={t('workspaces.namePlaceholder')}
-                placeholderTextColor={colors.faint}
-                style={styles.input}
-                testID="workspace-picker-name-input"
-                value={draftName}
-              />
-              <Pressable
-                accessibilityLabel={t('workspaces.new')}
-                accessibilityRole="button"
-                disabled={draftName.trim().length === 0 || busy}
-                onPress={() => {
-                  createWorkspace().catch(() => undefined);
-                }}
-                style={({ pressed }) => [
-                  styles.actionChip,
-                  draftName.trim().length === 0 && styles.actionDisabled,
-                  pressed && styles.pressed,
-                ]}
-                testID="workspace-picker-new"
-              >
-                {busy ? (
-                  <ActivityIndicator color={colors.text} size="small" />
-                ) : (
-                  <>
-                    <AppIcon color={colors.text} icon={Plus} size={16} />
-                    <Text style={styles.actionText}>{t('workspaces.new')}</Text>
-                  </>
+                    );
+                  })
                 )}
-              </Pressable>
-            </View>
-            <View style={styles.footerRow}>
-              <Pressable
-                accessibilityLabel={t('workspaces.openFolder')}
-                accessibilityRole="button"
-                disabled={busy || pendingSelection !== null}
-                onPress={() => {
-                  presentFolderPicker('grant_or_import').catch(() => undefined);
-                }}
-                style={({ pressed }) => [
-                  styles.footerAction,
-                  pressed && styles.pressed,
-                ]}
-              >
-                <AppIcon color={colors.accent} icon={FolderOpen} size={17} />
-                <Text style={styles.footerActionText}>
-                  {t('workspaces.openFolder')}
-                </Text>
-              </Pressable>
-              <Pressable
-                accessibilityLabel={t('workspaces.importFolder')}
-                accessibilityRole="button"
-                disabled={busy || pendingSelection !== null}
-                onPress={() => {
-                  presentFolderPicker('import_only').catch(() => undefined);
-                }}
-                style={({ pressed }) => [
-                  styles.footerAction,
-                  pressed && styles.pressed,
-                ]}
-              >
-                <AppIcon color={colors.accent} icon={FolderInput} size={17} />
-                <Text style={styles.footerActionText}>
-                  {t('workspaces.importFolder')}
-                </Text>
-              </Pressable>
-            </View>
-          </View>
-        </Animated.View>
+              </View>
+              <View style={styles.newRow}>
+                <TextInput
+                  accessibilityLabel={t('workspaces.namePlaceholder')}
+                  onChangeText={setDraftName}
+                  onFocus={() => {
+                    nameFocused.current = true;
+                    revealCreation();
+                  }}
+                  onBlur={() => {
+                    nameFocused.current = false;
+                  }}
+                  returnKeyType="done"
+                  onSubmitEditing={() => {
+                    createWorkspace().catch(() => undefined);
+                  }}
+                  placeholder={t('workspaces.namePlaceholder')}
+                  placeholderTextColor={colors.faint}
+                  style={styles.input}
+                  testID="workspace-picker-name-input"
+                  value={draftName}
+                />
+                <Pressable
+                  accessibilityLabel={t('workspaces.new')}
+                  accessibilityRole="button"
+                  disabled={draftName.trim().length === 0 || busy}
+                  onPress={() => {
+                    createWorkspace().catch(() => undefined);
+                  }}
+                  style={({ pressed }) => [
+                    styles.actionChip,
+                    draftName.trim().length === 0 && styles.actionDisabled,
+                    pressed && styles.pressed,
+                  ]}
+                  testID="workspace-picker-new"
+                >
+                  {busy ? (
+                    <ActivityIndicator color={colors.text} size="small" />
+                  ) : (
+                    <>
+                      <AppIcon color={colors.text} icon={Plus} size={16} />
+                      <Text style={styles.actionText}>
+                        {t('workspaces.new')}
+                      </Text>
+                    </>
+                  )}
+                </Pressable>
+              </View>
+              <View style={styles.footerRow}>
+                <Pressable
+                  accessibilityLabel={t('workspaces.openFolder')}
+                  accessibilityRole="button"
+                  disabled={busy || pendingSelection !== null}
+                  onPress={() => {
+                    presentFolderPicker('grant_or_import').catch(
+                      () => undefined,
+                    );
+                  }}
+                  style={({ pressed }) => [
+                    styles.footerAction,
+                    pressed && styles.pressed,
+                  ]}
+                >
+                  <AppIcon color={colors.accent} icon={FolderOpen} size={17} />
+                  <Text style={styles.footerActionText}>
+                    {t('workspaces.openFolder')}
+                  </Text>
+                </Pressable>
+                <Pressable
+                  accessibilityLabel={t('workspaces.importFolder')}
+                  accessibilityRole="button"
+                  disabled={busy || pendingSelection !== null}
+                  onPress={() => {
+                    presentFolderPicker('import_only').catch(() => undefined);
+                  }}
+                  style={({ pressed }) => [
+                    styles.footerAction,
+                    pressed && styles.pressed,
+                  ]}
+                >
+                  <AppIcon color={colors.accent} icon={FolderInput} size={17} />
+                  <Text style={styles.footerActionText}>
+                    {t('workspaces.importFolder')}
+                  </Text>
+                </Pressable>
+              </View>
+            </ScrollView>
+          </Animated.View>
+        </KeyboardAvoidingView>
       </View>
     </Modal>
   );
 }
-
-const createStyles = (colors: ThemePalette) =>
-  StyleSheet.create({
-    overlay: { flex: 1 },
-    backdrop: {
-      position: 'absolute',
-      top: 0,
-      right: 0,
-      bottom: 0,
-      left: 0,
-      backgroundColor: colors.scrim,
-    },
-    cardAnchor: {
-      position: 'absolute',
-      right: 0,
-      bottom: 0,
-      left: 0,
-    },
-    sheet: {
-      borderTopLeftRadius: 24,
-      borderTopRightRadius: 24,
-      backgroundColor: colors.surface,
-      borderWidth: StyleSheet.hairlineWidth,
-      borderColor: colors.line,
-      paddingHorizontal: 16,
-      paddingTop: 14,
-      paddingBottom: 16,
-    },
-    title: {
-      color: colors.text,
-      fontSize: 17,
-      fontWeight: '800',
-      marginBottom: 6,
-    },
-    notice: {
-      color: colors.danger,
-      fontSize: 12,
-      lineHeight: 16,
-      marginBottom: 6,
-    },
-    listScroll: { flexGrow: 0 },
-    listContent: { paddingVertical: 4 },
-    loading: {
-      minHeight: 72,
-      alignItems: 'center',
-      justifyContent: 'center',
-    },
-    empty: {
-      color: colors.muted,
-      fontSize: 13,
-      textAlign: 'center',
-      paddingVertical: 24,
-    },
-    rowShell: {
-      borderBottomWidth: StyleSheet.hairlineWidth,
-      borderBottomColor: colors.line,
-    },
-    row: {
-      minHeight: 58,
-      flexDirection: 'row',
-      alignItems: 'center',
-      paddingVertical: 8,
-      paddingRight: 2,
-    },
-    rowSelect: {
-      flex: 1,
-      minHeight: 42,
-      flexDirection: 'row',
-      alignItems: 'center',
-    },
-    rowActions: {
-      flexDirection: 'row',
-      alignItems: 'center',
-      gap: 4,
-      marginLeft: 8,
-    },
-    disabledRow: { opacity: 0.56 },
-    rowCopy: { flex: 1 },
-    rowTitle: { color: colors.text, fontSize: 15, fontWeight: '700' },
-    rowStatus: {
-      color: colors.muted,
-      fontSize: 11,
-      fontFamily: fonts.mono,
-      marginTop: 2,
-    },
-    check: {
-      width: 24,
-      alignItems: 'flex-start',
-      marginRight: 8,
-    },
-    forgetButton: {
-      borderRadius: 13,
-      backgroundColor: colors.surfaceRaised,
-      paddingHorizontal: 10,
-      paddingVertical: 6,
-      marginLeft: 8,
-    },
-    forgetText: { color: colors.textDim, fontSize: 11, fontWeight: '700' },
-    selectionPrompt: {
-      borderRadius: 14,
-      backgroundColor: colors.surfaceRaised,
-      paddingHorizontal: 12,
-      paddingVertical: 10,
-      marginBottom: 8,
-    },
-    selectionPromptText: {
-      color: colors.text,
-      fontSize: 12,
-      fontWeight: '700',
-      marginBottom: 8,
-    },
-    selectionPromptActions: {
-      flexDirection: 'row',
-      alignItems: 'center',
-      gap: 10,
-    },
-    newRow: {
-      flexDirection: 'row',
-      alignItems: 'center',
-      gap: 8,
-      marginTop: 8,
-    },
-    input: {
-      flex: 1,
-      minHeight: 38,
-      borderRadius: 19,
-      backgroundColor: colors.surfaceRaised,
-      color: colors.text,
-      fontSize: 14,
-      paddingHorizontal: 13,
-    },
-    actionChip: {
-      height: 38,
-      borderRadius: 19,
-      backgroundColor: colors.surfaceRaised,
-      flexDirection: 'row',
-      alignItems: 'center',
-      gap: 5,
-      paddingHorizontal: 12,
-    },
-    actionDisabled: { opacity: 0.5 },
-    actionText: { color: colors.textDim, fontSize: 12, fontWeight: '700' },
-    footerRow: {
-      flexDirection: 'row',
-      alignItems: 'center',
-      gap: 16,
-      marginTop: 10,
-    },
-    footerAction: {
-      flexDirection: 'row',
-      alignItems: 'center',
-      gap: 6,
-      minHeight: 36,
-    },
-    footerActionText: {
-      color: colors.text,
-      fontSize: 13,
-      fontWeight: '600',
-    },
-    pressed: { opacity: 0.58 },
-  });
