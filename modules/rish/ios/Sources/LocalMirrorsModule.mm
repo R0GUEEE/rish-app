@@ -6,7 +6,7 @@
 #include <sys/stat.h>
 
 static NSError *LMError(NSInteger code, NSString *message) {
-  return [NSError errorWithDomain:@"dev.zseven.dsh.mobile.mirrors"
+  return [NSError errorWithDomain:@"tech.zseven.rish.mirrors"
                              code:code
                          userInfo:@{NSLocalizedDescriptionKey: message}];
 }
@@ -33,7 +33,7 @@ RCT_EXPORT_MODULE(LocalMirrors)
   self = [super init];
   if (self != nil) {
     _queue = dispatch_queue_create(
-      "dev.zseven.dsh.mobile.local-mirrors",
+      "tech.zseven.rish.local-mirrors",
       DISPATCH_QUEUE_SERIAL
     );
   }

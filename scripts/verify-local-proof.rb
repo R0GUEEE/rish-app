@@ -22,7 +22,7 @@ def json_sha256(value)
 end
 
 udid = ARGV.fetch(0) { abort 'usage: verify-local-proof.rb <simulator-udid> [bundle-id]' }
-bundle_id = ARGV.fetch(1, 'dev.zseven.dsh.mobile')
+bundle_id = ARGV.fetch(1, 'tech.zseven.rish')
 
 listener = `lsof -nP -iTCP:3180 -sTCP:LISTEN`
 abort "Mac DSH port 3180 is still listening:\n#{listener}" unless listener.empty?

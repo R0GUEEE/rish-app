@@ -870,7 +870,7 @@
 					"$(inherited)",
 					"-Wl,-undefined,dynamic_lookup",
 				);
-				PRODUCT_BUNDLE_IDENTIFIER = dev.zseven.dsh.mobile.tests;
+				PRODUCT_BUNDLE_IDENTIFIER = tech.zseven.rish.tests;
 				PRODUCT_NAME = "$(TARGET_NAME)";
 				SUPPORTED_PLATFORMS = "iphoneos iphonesimulator";
 				SWIFT_VERSION = 5.0;
@@ -908,7 +908,7 @@
 					"$(inherited)",
 					"-Wl,-undefined,dynamic_lookup",
 				);
-				PRODUCT_BUNDLE_IDENTIFIER = dev.zseven.dsh.mobile.tests;
+				PRODUCT_BUNDLE_IDENTIFIER = tech.zseven.rish.tests;
 				PRODUCT_NAME = "$(TARGET_NAME)";
 				SUPPORTED_PLATFORMS = "iphoneos iphonesimulator";
 				SWIFT_VERSION = 5.0;
@@ -926,7 +926,9 @@
 				GENERATE_INFOPLIST_FILE = NO;
 				INFOPLIST_FILE = RishTaskActivity/Info.plist;
 				IPHONEOS_DEPLOYMENT_TARGET = 16.2;
-				PRODUCT_BUNDLE_IDENTIFIER = dev.zseven.dsh.mobile.taskactivity;
+				CURRENT_PROJECT_VERSION = 1;
+				MARKETING_VERSION = 1.0;
+				PRODUCT_BUNDLE_IDENTIFIER = tech.zseven.rish.taskactivity;
 				PRODUCT_NAME = "$(TARGET_NAME)";
 				RISH_EXTENSION_SUFFIX = .taskactivity;
 				SDKROOT = iphoneos;
@@ -989,7 +991,7 @@
 					"-Wl,-u,_git_blob_create_from_buffer",
 					"-Wl,-u,_git_index_conflict_add",
 				);
-				PRODUCT_BUNDLE_IDENTIFIER = dev.zseven.dsh.mobile;
+				PRODUCT_BUNDLE_IDENTIFIER = tech.zseven.rish;
 				PRODUCT_NAME = Rish;
 				RISH_APP_DISPLAY_NAME = Rish;
 				STRIP_INSTALLED_PRODUCT = NO;
@@ -1056,7 +1058,7 @@
 					"-Wl,-u,_git_blob_create_from_buffer",
 					"-Wl,-u,_git_index_conflict_add",
 				);
-				PRODUCT_BUNDLE_IDENTIFIER = dev.zseven.dsh.mobile;
+				PRODUCT_BUNDLE_IDENTIFIER = tech.zseven.rish;
 				PRODUCT_NAME = Rish;
 				RISH_APP_DISPLAY_NAME = Rish;
 				STRIP_INSTALLED_PRODUCT = NO;
@@ -1077,7 +1079,7 @@
 				DEVELOPMENT_TEAM = "";
 				GENERATE_INFOPLIST_FILE = YES;
 				IPHONEOS_DEPLOYMENT_TARGET = 15.1;
-				PRODUCT_BUNDLE_IDENTIFIER = dev.zseven.dsh.mobile.uitests;
+				PRODUCT_BUNDLE_IDENTIFIER = tech.zseven.rish.uitests;
 				PRODUCT_NAME = "$(TARGET_NAME)";
 				SWIFT_VERSION = 5.0;
 				TARGETED_DEVICE_FAMILY = "1,2";
@@ -1250,7 +1252,9 @@
 				GENERATE_INFOPLIST_FILE = NO;
 				INFOPLIST_FILE = RishTaskActivity/Info.plist;
 				IPHONEOS_DEPLOYMENT_TARGET = 16.2;
-				PRODUCT_BUNDLE_IDENTIFIER = dev.zseven.dsh.mobile.taskactivity;
+				CURRENT_PROJECT_VERSION = 1;
+				MARKETING_VERSION = 1.0;
+				PRODUCT_BUNDLE_IDENTIFIER = tech.zseven.rish.taskactivity;
 				PRODUCT_NAME = "$(TARGET_NAME)";
 				RISH_EXTENSION_SUFFIX = .taskactivity;
 				SDKROOT = iphoneos;
@@ -1268,7 +1272,7 @@
 				DEVELOPMENT_TEAM = "";
 				GENERATE_INFOPLIST_FILE = YES;
 				IPHONEOS_DEPLOYMENT_TARGET = 15.1;
-				PRODUCT_BUNDLE_IDENTIFIER = dev.zseven.dsh.mobile.uitests;
+				PRODUCT_BUNDLE_IDENTIFIER = tech.zseven.rish.uitests;
 				PRODUCT_NAME = "$(TARGET_NAME)";
 				SWIFT_VERSION = 5.0;
 				TARGETED_DEVICE_FAMILY = "1,2";

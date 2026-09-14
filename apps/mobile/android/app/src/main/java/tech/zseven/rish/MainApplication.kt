@@ -1,4 +1,4 @@
-package dev.zseven.dsh.mobile
+package tech.zseven.rish
 
 import android.app.Application
 import com.facebook.react.PackageList

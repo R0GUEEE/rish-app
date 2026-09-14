@@ -1,4 +1,4 @@
-package dev.zseven.dsh.mobile
+package tech.zseven.rish
 
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import dev.zseven.rish.runtime.AndroidSubscriptionAuthStatusParser

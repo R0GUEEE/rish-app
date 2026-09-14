@@ -151,12 +151,12 @@ RCT_EXPORT_MODULE(LocalGuest)
 - (instancetype)initWithBundle:(NSBundle *)bundle {
   self = [super init];
   if (self != nil) {
-    _stateQueue = dispatch_queue_create("dev.zseven.dsh.mobile.local-guest",
+    _stateQueue = dispatch_queue_create("tech.zseven.rish.local-guest",
                                         DISPATCH_QUEUE_SERIAL);
     dispatch_queue_set_specific(_stateQueue, DSHGuestStateQueueKey,
                                 (void *)DSHGuestStateQueueKey, NULL);
     _bootQueue = dispatch_queue_create(
-        "dev.zseven.dsh.mobile.local-guest-boot",
+        "tech.zseven.rish.local-guest-boot",
         dispatch_queue_attr_make_with_qos_class(
             DISPATCH_QUEUE_SERIAL, QOS_CLASS_USER_INITIATED, 0));
     _sessionState = DSHGuestSessionStateIdle;

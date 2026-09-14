@@ -1,4 +1,4 @@
-package dev.zseven.dsh.mobile
+package tech.zseven.rish
 
 import android.os.Bundle
 import android.util.Base64

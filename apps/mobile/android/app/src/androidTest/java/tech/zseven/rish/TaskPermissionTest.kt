@@ -1,4 +1,4 @@
-package dev.zseven.dsh.mobile
+package tech.zseven.rish
 
 import android.Manifest
 import android.content.pm.PackageManager

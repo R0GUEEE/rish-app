@@ -10,7 +10,7 @@ import android.content.Intent
 import android.content.pm.PackageManager
 import android.net.Uri
 import android.os.Build
-import dev.zseven.dsh.mobile.MainActivity
+import tech.zseven.rish.MainActivity
 import org.json.JSONArray
 import org.json.JSONObject
 import java.util.Locale

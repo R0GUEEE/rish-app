@@ -131,10 +131,10 @@ static BOOL DSHClaudeValidSessionId(id value) {
     _initrdURL = initrdURL;
     _storageDirectory = storageDirectory;
     _version = [version copy] ?: @"";
-    _queue = dispatch_queue_create("dev.zseven.dsh.mobile.claude-official",
+    _queue = dispatch_queue_create("tech.zseven.rish.claude-official",
                                    DISPATCH_QUEUE_SERIAL);
     _workerQueue = dispatch_queue_create(
-        "dev.zseven.dsh.mobile.claude-official-worker",
+        "tech.zseven.rish.claude-official-worker",
         dispatch_queue_attr_make_with_qos_class(DISPATCH_QUEUE_SERIAL,
                                                 QOS_CLASS_USER_INITIATED, 0));
     _loginOutput = [NSMutableData data];

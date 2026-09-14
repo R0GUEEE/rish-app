@@ -16,7 +16,7 @@ struct TaskPreferences: Codable {
 @MainActor
 final class TaskExperience: NSObject, UNUserNotificationCenterDelegate {
   static let shared = TaskExperience()
-  static var prefix: String { (Bundle.main.bundleIdentifier ?? "dev.zseven.dsh.mobile") + ".task" }
+  static var prefix: String { (Bundle.main.bundleIdentifier ?? "tech.zseven.rish") + ".task" }
   static let preferenceKey = "rish.task.preferences.v1"
   private var preferences = TaskPreferences()
   private var current: [String: String]?

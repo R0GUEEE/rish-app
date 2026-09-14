@@ -1,4 +1,4 @@
-package dev.zseven.dsh.mobile
+package tech.zseven.rish
 
 import com.facebook.react.ReactActivity
 import com.facebook.react.ReactActivityDelegate

@@ -90,7 +90,7 @@ android {
     buildToolsVersion rootProject.ext.buildToolsVersion
     compileSdk rootProject.ext.compileSdkVersion
 
-    namespace "dev.zseven.dsh.mobile"
+    namespace "tech.zseven.rish"
     if (officialCliDir != null) {
         sourceSets {
             main {
@@ -111,7 +111,7 @@ android {
     }
     testBuildType project.findProperty("rishTestBuildType") ?: "debug"
     defaultConfig {
-        applicationId "dev.zseven.dsh.mobile"
+        applicationId "tech.zseven.rish"
         minSdkVersion rootProject.ext.minSdkVersion
         targetSdkVersion rootProject.ext.targetSdkVersion
         buildConfigField "boolean", "RISH_STANDALONE", rishStandalone.toString()

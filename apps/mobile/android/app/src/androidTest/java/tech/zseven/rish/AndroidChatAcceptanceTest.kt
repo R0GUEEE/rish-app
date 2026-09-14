@@ -1,4 +1,4 @@
-package dev.zseven.dsh.mobile
+package tech.zseven.rish
 
 import android.view.View
 import androidx.test.core.app.ActivityScenario

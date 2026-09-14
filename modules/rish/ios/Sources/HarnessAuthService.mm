@@ -19,7 +19,7 @@ NSString *const DSHHarnessAuthHarnessClaudeCode = @"claude-code";
 
 static NSString *const DSHHarnessAuthManifestName = @"HarnessAuthAssets";
 static NSString *const DSHHarnessAuthKeychainService =
-    @"dev.zseven.dsh.mobile.harness-subscription-auth";
+    @"tech.zseven.rish.harness-subscription-auth";
 static NSUInteger const DSHHarnessAuthMaximumCredentialBytes = 256 * 1024;
 static NSUInteger const DSHHarnessAuthMaxOutputBytes = 64 * 1024;
 BOOL DSHCodexChatUsesSubscription(void) {
@@ -382,9 +382,9 @@ static void DSHAuthStreamEvent(void *context, const char *event,
   self = [super init];
   if (self != nil) {
     _bundle = bundle ?: NSBundle.mainBundle;
-    _queue = dispatch_queue_create("dev.zseven.dsh.mobile.harness-auth",
+    _queue = dispatch_queue_create("tech.zseven.rish.harness-auth",
                                    DISPATCH_QUEUE_SERIAL);
-    _workerQueue = dispatch_queue_create("dev.zseven.dsh.mobile.harness-auth-worker",
+    _workerQueue = dispatch_queue_create("tech.zseven.rish.harness-auth-worker",
                                          dispatch_queue_attr_make_with_qos_class(
                                              DISPATCH_QUEUE_SERIAL,
                                              QOS_CLASS_USER_INITIATED, 0));

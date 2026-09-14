@@ -46,7 +46,7 @@ static const int64_t DSHAgentRoundPreviewCoalesceNanoseconds = 50 * NSEC_PER_MSE
   if (self != nil) {
     _sink = [sink copy];
     _correlation = [correlation copy];
-    _queue = dispatch_queue_create("dev.zseven.dsh.mobile.agent-round-preview",
+    _queue = dispatch_queue_create("tech.zseven.rish.agent-round-preview",
                                    DISPATCH_QUEUE_SERIAL);
     _pendingText = [NSMutableString string];
     _pendingReasoning = [NSMutableString string];

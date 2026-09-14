@@ -46,7 +46,7 @@ jobs:
       - name: Verify portable source checkout
         working-directory: .
         run: |
-          node --test scripts/tests/source-preflight.test.mjs scripts/tests/ios-preparation.test.mjs
+          node --test scripts/tests/source-preflight.test.mjs scripts/tests/ios-preparation.test.mjs scripts/tests/release-identifiers.test.mjs
           node scripts/verify-source-checkout.mjs
           ruby apps/mobile/scripts/check-pbxproj-ids.rb
       - name: Install dependencies

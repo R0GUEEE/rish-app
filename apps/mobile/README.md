@@ -119,3 +119,8 @@ See the root [README](../../README.md), [contribution guide](../../CONTRIBUTING.
 and [security policy](../../SECURITY.md) for the source checkout's current
 boundary. Product evidence and detailed parity records are maintained
 separately and are not required to build this directory.
+
+## TestFlight
+
+See [TestFlight build setup](../../docs/testflight.md) for Apple signing, GitHub
+Secrets, and the manual IPA/upload workflow.

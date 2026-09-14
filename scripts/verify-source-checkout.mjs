@@ -20,7 +20,7 @@ export const requiredFiles = [
   'apps/mobile/ios/Rish/Rish.entitlements',
   'apps/mobile/android/gradlew',
   'apps/mobile/android/gradle/wrapper/gradle-wrapper.jar',
-  'apps/mobile/android/app/src/main/java/dev/zseven/dsh/mobile/MainActivity.kt',
+  'apps/mobile/android/app/src/main/java/tech/zseven/rish/MainActivity.kt',
   'modules/rish/ios/RishLocalRuntime.podspec',
   'run-simulator.sh',
   'scripts/prepare-rish-ios.sh',
@@ -78,7 +78,7 @@ export function auditSource(sourceRoot) {
   if (app && app.name !== 'Rish') errors.push('apps/mobile/app.json: native component name must be Rish');
   for (const [file, expected] of [
     ['apps/mobile/ios/Rish/AppDelegate.swift', /withModuleName:\s*"Rish"/],
-    ['apps/mobile/android/app/src/main/java/dev/zseven/dsh/mobile/MainActivity.kt', /getMainComponentName\(\):\s*String\s*=\s*"Rish"/],
+    ['apps/mobile/android/app/src/main/java/tech/zseven/rish/MainActivity.kt', /getMainComponentName\(\):\s*String\s*=\s*"Rish"/],
     ['apps/mobile/ios/Rish.xcworkspace/contents.xcworkspacedata', /location\s*=\s*"group:Rish\.xcodeproj"/],
     ['apps/mobile/ios/Rish.xcodeproj/xcshareddata/xcschemes/Rish.xcscheme', /ReferencedContainer\s*=\s*"container:Rish\.xcodeproj"/],
   ]) {

@@ -47,7 +47,7 @@
 
 #include "rish.h"
 
-static NSString *const DSHCredentialService = @"dev.zseven.dsh.mobile.credentials";
+static NSString *const DSHCredentialService = @"tech.zseven.rish.credentials";
 
 @interface RishGlmPlanRedirectBlocker : NSObject <NSURLSessionTaskDelegate>
 @end
@@ -911,7 +911,7 @@ RCT_EXPORT_MODULE(LocalRuntime)
       monotonicClock:monotonicClock
       projectContextService:DSHSharedProjectContextService()
       preparationQueue:dispatch_queue_create(
-          "dev.zseven.dsh.mobile.completion-preparation",
+          "tech.zseven.rish.completion-preparation",
           DISPATCH_QUEUE_SERIAL)
       attachmentResolver:nil];
 }
@@ -928,7 +928,7 @@ RCT_EXPORT_MODULE(LocalRuntime)
                                            NSError **error))attachmentResolver {
   self = [super init];
   if (self != nil) {
-    _stateQueue = dispatch_queue_create("dev.zseven.dsh.mobile.local-runtime", DISPATCH_QUEUE_SERIAL);
+    _stateQueue = dispatch_queue_create("tech.zseven.rish.local-runtime", DISPATCH_QUEUE_SERIAL);
     configuration = [configuration copy] ?:
         NSURLSessionConfiguration.ephemeralSessionConfiguration;
     configuration.URLCache = nil;
@@ -990,7 +990,7 @@ RCT_EXPORT_MODULE(LocalRuntime)
           [task resume]; return task;
         } clock:^NSTimeInterval { return NSDate.date.timeIntervalSince1970; }];
     _completionPreparationQueue = preparationQueue ?: dispatch_queue_create(
-        "dev.zseven.dsh.mobile.completion-preparation",
+        "tech.zseven.rish.completion-preparation",
         DISPATCH_QUEUE_SERIAL);
     _completionAttachmentResolver = attachmentResolver != nil
         ? [attachmentResolver copy]
@@ -1895,7 +1895,7 @@ RCT_EXPORT_MODULE(LocalRuntime)
     @"active_harness": harnessId,
     @"mode": @"local_substrate",
     @"platform": platform,
-    @"bundle_id": NSBundle.mainBundle.bundleIdentifier ?: @"dev.zseven.dsh.mobile",
+    @"bundle_id": NSBundle.mainBundle.bundleIdentifier ?: @"tech.zseven.rish",
     @"runtime_id": runtimeId,
     @"launch_instance_id": launchId,
     @"process_id": @(getpid()),

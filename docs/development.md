@@ -347,14 +347,14 @@ value on the command line:
 ```sh
 lsof -nP -iTCP:3180 -sTCP:LISTEN
 ./scripts/provision-simulator-key.rb \
-  --secure-stdin <UDID> dev.zseven.dsh.mobile
+  --secure-stdin <UDID> tech.zseven.rish
 ```
 
 In the app, select **V4 Flash**, complete a real response, terminate and
 relaunch the app, then verify the correlated record:
 
 ```sh
-./scripts/verify-local-proof.rb <UDID> dev.zseven.dsh.mobile
+./scripts/verify-local-proof.rb <UDID> tech.zseven.rish
 ```
 
 The verifier currently pins its acceptance request to V4 Flash. It checks the

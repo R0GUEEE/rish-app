@@ -4,7 +4,7 @@ set -euo pipefail
 APP_ROOT=${0:A:h}
 IOS_ROOT="${APP_ROOT}/apps/mobile/ios"
 DERIVED_DATA="${APP_ROOT}/.build/ios-simulator"
-BUNDLE_ID=dev.zseven.dsh.mobile
+BUNDLE_ID=tech.zseven.rish
 
 DEVICE_ID=${1:-}
 if [[ -z "${DEVICE_ID}" ]]; then

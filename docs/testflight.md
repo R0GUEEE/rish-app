@@ -1,0 +1,73 @@
+# iOS TestFlight builds
+
+The `iOS TestFlight` GitHub Actions workflow builds the React Native app and
+its pinned Rust/libgit2/libssh2/OpenSSL dependencies on `macos-26`, using Xcode
+26.6 (17F113) and the iOS 26.5 SDK required by `prepare-rish-ios.sh`.
+It signs both the app and Live Activity extension, exports an App Store IPA,
+saves the IPA and dSYMs for 14 days, and optionally uploads to App Store Connect.
+
+## Apple setup (one time)
+
+In the Apple Developer account, register explicit identifiers:
+
+- Main app: `tech.zseven.rish`
+- Live Activity extension: `tech.zseven.rish.taskactivity`
+
+Create the Rish app record in App Store Connect with the main identifier.
+Create an Apple Distribution certificate and export it **with its private key**
+as a password-protected `.p12`. Create one App Store Connect distribution
+provisioning profile for each identifier using that certificate. Both profiles
+must belong to the same team and support the target's entitlements.
+
+Create a team App Store Connect API key with permission to upload builds
+(Developer is sufficient for this upload-only workflow). Download its `.p8` once and keep it securely.
+Complete the app's export-compliance questionnaire in App Store Connect;
+this workflow does not assume an encryption exemption.
+
+## GitHub setup
+
+Create the `testflight` Environment in this repository. Restrict its deployment
+branches to reviewed release branches (initially `main`). Add these secrets:
+
+| Secret | Value |
+| --- | --- |
+| `IOS_DISTRIBUTION_CERTIFICATE_BASE64` | Base64 of the distribution `.p12` |
+| `IOS_DISTRIBUTION_CERTIFICATE_PASSWORD` | Password used when exporting the `.p12` |
+| `IOS_PROVISIONING_PROFILE_BASE64` | Base64 of the main app's App Store profile |
+| `IOS_EXTENSION_PROVISIONING_PROFILE_BASE64` | Base64 of the extension's App Store profile |
+| `APP_STORE_CONNECT_API_KEY_BASE64` | Base64 of the API key `.p8` |
+| `APP_STORE_CONNECT_API_KEY_ID` | API key ID |
+| `APP_STORE_CONNECT_ISSUER_ID` | API issuer ID |
+
+For file secrets, this pattern reads the file directly into GitHub without
+printing its contents (replace the secret name and local file path):
+
+```sh
+base64 < /path/to/distribution.p12 | gh secret set IOS_DISTRIBUTION_CERTIFICATE_BASE64 \
+  --repo ZSeven-W/rish-app --env testflight
+```
+
+Use GitHub's secret form or `gh secret set`'s hidden interactive prompt for
+passwords. Do not commit certificates, profiles, or keys. The team ID is derived
+from and cross-checked between the profiles; no additional team secret is needed.
+
+## Run
+
+Commit and push the workflow to `main` before its first dispatch. In Actions,
+select **iOS TestFlight → Run workflow**, choose `main`, and enter the marketing
+version (default `1.0.0`). Keep **Upload** enabled to send the build to Apple;
+disable it to only produce a signed IPA. Signing secrets are required in both
+modes; API secrets are required only for upload.
+
+The build number is `<GitHub run number>.<run attempt>`, shared by the app and
+extension. Rerunning a job produces a new build number. Avoid uploading higher
+manual build numbers for the same marketing version; if one already exists,
+start a new marketing version or adjust the numbering before dispatch.
+
+A successful upload means Apple accepted the upload request. Wait for Apple
+processing, resolve export-compliance prompts, then enable the build for an
+internal testing group. External testing may require Beta App Review.
+The workflow does not submit an App Store release or enable external testers.
+
+The base build uses the repository's default native runtime configuration.
+Optional device-only harness-auth assets are not included by this workflow.

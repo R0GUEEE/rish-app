@@ -293,7 +293,7 @@ const proof = {
   schema_version: 2,
   mode: 'local_substrate',
   platform: 'ios_simulator',
-  bundle_id: 'dev.zseven.dsh.mobile',
+  bundle_id: 'tech.zseven.rish',
   runtime_id: 'runtime-1',
   launch_instance_id: 'launch-1',
   process_id: 123,

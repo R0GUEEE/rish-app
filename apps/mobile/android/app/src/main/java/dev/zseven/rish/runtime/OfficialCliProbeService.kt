@@ -3,7 +3,7 @@ package dev.zseven.rish.runtime
 import android.app.Service
 import android.content.Intent
 import android.os.IBinder
-import dev.zseven.dsh.mobile.BuildConfig
+import tech.zseven.rish.BuildConfig
 import org.json.JSONObject
 import java.io.File
 import java.io.BufferedReader
@@ -131,7 +131,7 @@ internal class OfficialCliProbeService : Service() {
         Regex("(?i)(?:code|device code|verification code)\\s*[:：]?\\s*[A-Z0-9][A-Z0-9-]{3,31}").containsMatchIn(output)
 
     companion object {
-        const val ACTION = "dev.zseven.dsh.mobile.action.OFFICIAL_CLI_PROBE"
+        const val ACTION = "tech.zseven.rish.action.OFFICIAL_CLI_PROBE"
         const val RESULT_FILE = "official-cli-probe-result.json"
     }
 }
