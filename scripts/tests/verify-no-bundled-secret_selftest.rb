@@ -17,6 +17,8 @@ begin
     'blob.bin' => "\0ASIA" + ('D' * 16),
     'glm.txt' => ('a' * 32) + '.' + ('E' * 16),
     'openssh-algorithm.txt' => 'sk-ecdsa-sha2-nistp256-cert-v01',
+    'openssh-ed25519.bin' => "\0sk-ssh-ed25519-cert-v01@openssh.com\0",
+    'openssh-prefix-not-exempt.txt' => 'sk-ssh-ed25519-cert-v01' + ('X' * 20),
   }
   samples.each do |relative, content|
     path = File.join(root, relative)
@@ -32,6 +34,8 @@ begin
     [['blob.bin'], false],
     [['glm.txt'], false],
     [['openssh-algorithm.txt'], true],
+    [['openssh-ed25519.bin'], true],
+    [['openssh-prefix-not-exempt.txt'], false],
   ]
   checks.each do |arguments, expected_success|
     _output, status = Open3.capture2e('ruby', scanner, *arguments.map { |path| File.join(root, path) })

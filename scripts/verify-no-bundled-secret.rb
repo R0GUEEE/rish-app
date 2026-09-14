@@ -40,8 +40,8 @@ secret_shape = Regexp.union(
   /npm_[A-Za-z0-9_-]{20,}/,
   /xox[baprs]-[A-Za-z0-9-]{20,}/,
   /AIza[A-Za-z0-9_-]{20,}/,
-  # OpenAI/Anthropic credential bodies may contain both '-' and '_'. The one
-  # OpenSSH algorithm false-positive is removed below by exact full-token
+  # OpenAI/Anthropic credential bodies may contain both '-' and '_'. Known
+  # OpenSSH algorithm false-positives are removed below by exact full-token
   # allowlist, never by allowing a prefix or directory.
   /\bsk-(?:proj-|ant-)?[A-Za-z0-9_-]{20,}/i,
   /[0-9a-f]{32}\.[A-Za-z0-9]{16,}/i,
@@ -56,6 +56,8 @@ synthetic_exact = Set.new([
 ])
 non_secret_exact = Set.new([
   'sk-ecdsa-sha2-nistp256-cert-v01',
+  # Public SSH algorithm name in pinned libssh2 src/userauth.c.
+  'sk-ssh-ed25519-cert-v01',
 ])
 
 scanned_count = 0
@@ -153,7 +155,10 @@ else
   end
 end
 
-abort "secret-shaped candidates found at #{leaks.length} location(s); values suppressed" unless leaks.empty?
+unless leaks.empty?
+  leaks.each { |label| warn "candidate location: #{label}" }
+  abort "secret-shaped candidates found at #{leaks.length} location(s); values suppressed"
+end
 unless skipped.empty?
   abort "scan incomplete: #{skipped.length} file/blob(s) exceeded --max-bytes; values suppressed"
 end
