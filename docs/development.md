@@ -568,6 +568,26 @@ The core links into the `RishLocalRuntime` pod as
 the script refuses to install toolchains or targets itself. Rebuild it after
 any change under `modules/rish/core` and before `pod install`.
 
+### Device-only storage metadata
+
+The session store and the agent WAL require every pinned item to report
+`NSFileProtectionCompleteUntilFirstUserAuthentication` and the expected
+`NSURLIsExcludedFromBackupKey` value. That requirement is enforced on a
+physical device only: `requiresSessionResourceMetadata` and
+`requiresWALResourceMetadata` return `NO` on the simulator and on macOS,
+because CoreSimulator does not report the protection class through
+`NSFileManager`. The simulator suites cover the path through injected
+file managers (`sessionFileManager`, `walFileManager`) and an overridden
+requirement, so a change there must be exercised with those fakes; a green
+simulator run is not evidence about a device.
+
+An item created by an earlier build can carry a different protection class
+or no backup exclusion. Both stores now re-apply the required metadata in
+place once and read it back before refusing, the way `LocalWorkspaceAccess`
+migrates a legacy `NSFileProtectionComplete` item. Without that repair an
+upgraded container fails every WAL read with `E_AGENT_PERSISTENCE` and never
+recovers, which the simulator can never show.
+
 ## Quality gates
 
 From the repository root:

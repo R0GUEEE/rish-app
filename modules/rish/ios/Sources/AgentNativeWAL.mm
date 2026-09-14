@@ -1275,14 +1275,35 @@ static BOOL DSHAgentVerifyFileProtectionDescriptor(DSHAgentNativeWAL *store,
     return NO;
   }
   if ([store requiresWALResourceMetadata]) {
+    // An item created by an earlier build, or by a path that never applied
+    // the policy, carries a different (or absent) protection class and no
+    // backup exclusion. Re-apply the required metadata in place once and
+    // read it back, the way the workspace store migrates a legacy class,
+    // instead of refusing the store forever. The descriptor and path
+    // identity are re-checked below, so the repair cannot be redirected.
     id protection = nil;
-    NSNumber *excluded = nil;
-    if (![store getWALProtectionAtURL:descriptorURL value:&protection error:nil] ||
-        ![protection isEqual:NSFileProtectionCompleteUntilFirstUserAuthentication] ||
-        ![store getWALBackupExcludedAtURL:descriptorURL value:&excluded error:nil] ||
-        ![excluded isKindOfClass:NSNumber.class] || !excluded.boolValue) {
-      return NO;
+    BOOL protectionOK =
+        [store getWALProtectionAtURL:descriptorURL value:&protection error:nil] &&
+        [protection isEqual:NSFileProtectionCompleteUntilFirstUserAuthentication];
+    if (!protectionOK) {
+      protection = nil;
+      protectionOK =
+          [store setWALProtectionAtURL:descriptorURL error:nil] &&
+          [store getWALProtectionAtURL:descriptorURL value:&protection error:nil] &&
+          [protection isEqual:NSFileProtectionCompleteUntilFirstUserAuthentication];
     }
+    NSNumber *excluded = nil;
+    BOOL excludedOK =
+        [store getWALBackupExcludedAtURL:descriptorURL value:&excluded error:nil] &&
+        [excluded isKindOfClass:NSNumber.class] && excluded.boolValue;
+    if (!excludedOK) {
+      excluded = nil;
+      excludedOK =
+          [store setWALBackupExcludedAtURL:descriptorURL error:nil] &&
+          [store getWALBackupExcludedAtURL:descriptorURL value:&excluded error:nil] &&
+          [excluded isKindOfClass:NSNumber.class] && excluded.boolValue;
+    }
+    if (!protectionOK || !excludedOK) return NO;
   }
   struct stat after = {};
   struct stat pathAfter = {};

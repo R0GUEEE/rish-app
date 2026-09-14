@@ -495,6 +495,39 @@ static NSString *DSHWALTestInode(NSString *path) {
   XCTAssertNil(error);
 }
 
+// An install upgraded from a build that applied a different protection class
+// (or none) must keep working: the verifier re-applies the required class and
+// backup exclusion in place and reads them back, exactly as the workspace
+// store migrates a legacy class, instead of refusing the WAL forever.
+- (void)testDeviceMetadataMigratesLegacyProtectionInsteadOfRefusingTheWAL {
+  DSHWALDeviceMetadataStore *wal = [self deviceMetadataStore];
+  NSError *error = nil;
+  NSDictionary *created = [self createDeviceMetadataTranscript:wal error:&error];
+  XCTAssertNotNil(created, @"%@", error);
+  NSData *before = [NSData dataWithContentsOfURL:wal.walURL];
+  XCTAssertGreaterThan(before.length, 0U);
+
+  // Model the upgraded container: every recorded item carries the legacy
+  // class and no backup exclusion.
+  for (NSString *identity in wal.metadata.protections.allKeys) {
+    wal.metadata.protections[identity] = NSFileProtectionComplete;
+  }
+  [wal.backups removeAllObjects];
+
+  DSHWALDeviceMetadataStore *reopened = [self deviceMetadataStore];
+  reopened.metadata = wal.metadata;
+  reopened.backups = wal.backups;
+  error = nil;
+  NSDictionary *state = [reopened snapshotWithError:&error];
+  XCTAssertNotNil(state, @"a legacy protection class must be migrated, not refused: %@", error);
+  XCTAssertNil(error);
+  XCTAssertEqualObjects([NSData dataWithContentsOfURL:reopened.walURL], before);
+  NSString *walIdentity = DSHWALTestInode(reopened.walURL.path);
+  XCTAssertEqualObjects(reopened.metadata.protections[walIdentity],
+                        NSFileProtectionCompleteUntilFirstUserAuthentication);
+  XCTAssertEqualObjects(reopened.backups[walIdentity], @YES);
+}
+
 - (void)testDeviceMetadataFailuresPreserveCommittedWALBytes {
   DSHWALDeviceMetadataStore *wal = [self deviceMetadataStore];
   NSError *error = nil;

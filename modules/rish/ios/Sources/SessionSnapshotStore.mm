@@ -926,9 +926,26 @@ NSString *DSHSessionSnapshotStoreLaunchInstanceId(void) {
   if (![self setErrorForPinnedPathCheck:check error:error]) return NO;
   if (!requireMetadata || ![self requiresSessionResourceMetadata]) return YES;
 
+  // An item created by an earlier build, or by a path that never applied the
+  // policy, carries a different (or absent) protection class and backup flag.
+  // Re-apply the required metadata in place once and read it back, the way
+  // the workspace store migrates a legacy class, instead of refusing the
+  // store forever. The pinned-path check below re-proves identity, so the
+  // repair cannot be redirected to another item.
   NSError *readError = nil;
   id protection = nil;
-  if (![self getSessionProtectionAtURL:url value:&protection error:&readError]) {
+  BOOL protectionRead =
+      [self getSessionProtectionAtURL:url value:&protection error:&readError];
+  if (protectionRead && ![protection isEqual:[self sessionProtectionPolicyValue]]) {
+    readError = nil;
+    protection = nil;
+    protectionRead =
+        [self setSessionProtectionValue:[self sessionProtectionPolicyValue]
+                                  atURL:url
+                                  error:&readError] &&
+        [self getSessionProtectionAtURL:url value:&protection error:&readError];
+  }
+  if (!protectionRead) {
     if (readError != nil) {
       return DSHSessionSetError(error, DSHSessionSnapshotStoreErrorStorage);
     }
@@ -942,7 +959,17 @@ NSString *DSHSessionSnapshotStoreLaunchInstanceId(void) {
   if (![self setErrorForPinnedPathCheck:check error:error]) return NO;
   NSNumber *excluded = nil;
   readError = nil;
-  if (![self getSessionBackupExcludedAtURL:url value:&excluded error:&readError]) {
+  BOOL excludedRead =
+      [self getSessionBackupExcludedAtURL:url value:&excluded error:&readError];
+  if (excludedRead && (![excluded isKindOfClass:NSNumber.class] ||
+                       excluded.boolValue != excludeBackup)) {
+    readError = nil;
+    excluded = nil;
+    excludedRead =
+        [self setSessionBackupExcluded:excludeBackup atURL:url error:&readError] &&
+        [self getSessionBackupExcludedAtURL:url value:&excluded error:&readError];
+  }
+  if (!excludedRead) {
     if (readError != nil) {
       return DSHSessionSetError(error, DSHSessionSnapshotStoreErrorStorage);
     }

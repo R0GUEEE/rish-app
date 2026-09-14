@@ -474,13 +474,21 @@ RCT_EXPORT_MODULE(AgentRuntime)
       exceptionCaught = YES;
       invokeError = DSHAgentNativeStoreError(DSHAgentNativeStoreErrorPersistence);
     }
+    BOOL ok = [result isKindOfClass:NSDictionary.class];
+    NSString *failureCode = ok ? nil : (coordinator == nil ? @"E_AGENT_NATIVE" :
+        DSHRuntimeErrorCode(invokeError));
+    // The public codes collapse several native failures into one value, so
+    // record the native domain and code here: a device log is the only way
+    // to tell a protection failure from a capacity or persistence failure
+    // once the app has reported E_AGENT_PERSISTENCE.
     os_log(OS_LOG_DEFAULT,
-           "agent_runtime op=%{public}@ elapsed_ms=%{public}.1f ok=%{public}d",
-                name, (CFAbsoluteTimeGetCurrent() - began) * 1000.0,
-                [result isKindOfClass:NSDictionary.class]);
-    if (![result isKindOfClass:NSDictionary.class]) {
-      NSString *code = coordinator == nil ? @"E_AGENT_NATIVE" :
-          DSHRuntimeErrorCode(invokeError);
+           "agent_runtime op=%{public}@ elapsed_ms=%{public}.1f ok=%{public}d "
+           "code=%{public}@ native=%{public}@:%{public}ld exception=%{public}d",
+                name, (CFAbsoluteTimeGetCurrent() - began) * 1000.0, ok,
+                failureCode ?: @"-", invokeError.domain ?: @"-",
+                (long)invokeError.code, exceptionCaught);
+    if (!ok) {
+      NSString *code = failureCode;
       if (reject != nil) reject(code,
           DSHRuntimeFailureMessage(code, name, invokeError, exceptionCaught), nil);
     } else if (resolve != nil) {

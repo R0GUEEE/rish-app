@@ -43,6 +43,8 @@
                                 value:(NSNumber **)value
                                 error:(NSError **)error;
 - (BOOL)ensurePrivateRoot:(NSError **)error;
+- (BOOL)validateProtectedFileWithIdentity:(const struct stat *)expected
+                                     error:(NSError **)error;
 - (BOOL)hardenLegacyFileWithIdentity:(const struct stat *)expected
                                 error:(NSError **)error;
 - (BOOL)hardenPinnedDescriptor:(int)descriptor
@@ -962,6 +964,27 @@ static NSString *const DSHSessionTestOperationB =
   XCTAssertEqualObjects(
       store.protections[self.store.sessionURL.path],
       NSFileProtectionCompleteUntilFirstUserAuthentication);
+}
+
+// The read path only validates; it never hardens. An upgraded container whose
+// session file still carries the legacy class, or lost its backup flag, must
+// be repaired in place instead of failing every load and commit afterwards.
+- (void)testReadValidationMigratesLegacyProtectionInsteadOfRefusingTheStore {
+  struct stat expected = [self writeMetadataFixtureWithMode:@0600];
+  DSHSessionMetadataTestStore *store = [self metadataTestStore];
+  NSError *error = nil;
+  XCTAssertTrue([store ensurePrivateRoot:&error], @"%@", error);
+  XCTAssertTrue([store hardenLegacyFileWithIdentity:&expected error:&error],
+                @"%@", error);
+  store.protections[self.store.sessionURL.path] = NSFileProtectionComplete;
+  store.backups[self.store.sessionURL.path] = @NO;
+  error = nil;
+  XCTAssertTrue([store validateProtectedFileWithIdentity:&expected error:&error],
+                @"a legacy protection class must be migrated, not refused: %@", error);
+  XCTAssertNil(error);
+  XCTAssertEqualObjects(store.protections[self.store.sessionURL.path],
+                        NSFileProtectionCompleteUntilFirstUserAuthentication);
+  XCTAssertEqualObjects(store.backups[self.store.sessionURL.path], @YES);
 }
 
 - (void)testLockedV1CompleteProtectionFailsWhenV2CannotBeApplied {

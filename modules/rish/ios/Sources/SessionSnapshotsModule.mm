@@ -666,6 +666,9 @@ static NSDictionary *DSHSessionBridgeSanitizeResult(
 }
 
 static NSString *DSHSessionBridgeCodeForError(NSError *error) {
+  // A nil result with no error stays E_SESSION_PERSISTENCE: the JS recovery
+  // surface treats it as "storage did not confirm", and the os_log line in
+  // performOperation: records the native domain and code for diagnosis.
   if (error == nil) return DSHSessionBridgePersistence;
   if ([error.domain isEqualToString:DSHWorkspaceClearanceStoreErrorDomain]) {
     switch ((DSHWorkspaceClearanceStoreErrorCode)error.code) {
@@ -797,9 +800,11 @@ RCT_EXPORT_MODULE(SessionSnapshots)
       result = nil;
     }
     os_log(OS_LOG_DEFAULT,
-           "session_bridge op=%{public}ld elapsed_ms=%{public}.1f status=%{public}@",
+           "session_bridge op=%{public}ld elapsed_ms=%{public}.1f status=%{public}@ "
+           "native=%{public}@:%{public}ld",
                 (long)operation, (CFAbsoluteTimeGetCurrent() - began) * 1000.0,
-                failureCode ?: (result[@"status"] ?: @"ok"));
+                failureCode ?: (result[@"status"] ?: @"ok"),
+                error.domain ?: @"-", (long)error.code);
     if (failureCode != nil) {
       DSHSessionBridgeReject(reject, failureCode);
     } else {
