@@ -40,10 +40,8 @@ NSString *const DSHSessionSnapshotStoreErrorConflictCode =
 static const NSUInteger DSHSessionSnapshotMaximumBytes = 16U * 1024U * 1024U;
 static const NSUInteger DSHSessionSnapshotMaximumCanonicalBytes =
     16U * 1024U * 1024U;
-static const NSUInteger DSHSessionSnapshotMaximumRecentCommits = 64U;
 static const unsigned long long DSHSessionSnapshotMaximumSafeInteger =
     9007199254740991ULL;
-static const NSUInteger DSHSessionSnapshotMaximumTombstones = 400000U;
 static const NSUInteger DSHSessionSnapshotMaximumTombstoneBytes =
     16U * 1024U * 1024U;
 
@@ -158,11 +156,6 @@ static BOOL DSHSessionTrustedDictionary(id value) {
       DSHSessionObjectComesFromSystemFramework(value) && [value copy] == value;
 }
 
-static BOOL DSHSessionTrustedArray(id value) {
-  return [value isKindOfClass:NSArray.class] &&
-      DSHSessionObjectComesFromSystemFramework(value) && [value copy] == value;
-}
-
 static BOOL DSHSessionTrustedString(id value) {
   return [value isKindOfClass:NSString.class] &&
       DSHSessionObjectComesFromSystemFramework(value) && [value copy] == value;
@@ -226,10 +219,6 @@ static BOOL DSHSessionCanonicalDigest(id value) {
   NSCharacterSet *hex =
       [NSCharacterSet characterSetWithCharactersInString:@"0123456789abcdef"];
   return [string rangeOfCharacterFromSet:hex.invertedSet].location == NSNotFound;
-}
-
-static BOOL DSHSessionCanonicalOperationId(id value) {
-  return DSHSessionCanonicalUUID(value);
 }
 
 static BOOL DSHSessionExactSchema(id value, NSUInteger schema) {
@@ -346,14 +335,15 @@ static NSDictionary *DSHSessionCoreEnvironment(id root) {
 }
 
 static NSDictionary *DSHSessionCoreReduce(NSString *op,
+                                          NSDictionary *fields,
                                           NSData *input,
                                           NSDictionary *env,
                                           DSHSessionSnapshotStoreErrorCode fallback,
                                           NSError **error) {
-  NSData *request = [NSJSONSerialization
-      dataWithJSONObject:@{ @"op" : op, @"env" : env ?: @{} }
-                 options:0
-                   error:nil];
+  NSMutableDictionary *envelope = [fields mutableCopy] ?: [NSMutableDictionary dictionary];
+  envelope[@"op"] = op;
+  envelope[@"env"] = env ?: @{};
+  NSData *request = [NSJSONSerialization dataWithJSONObject:envelope options:0 error:nil];
   if (request == nil) {
     DSHSessionSetError(error, fallback);
     return nil;
@@ -379,7 +369,8 @@ static NSDictionary *DSHSessionCoreReduce(NSString *op,
     DSHSessionSnapshotStoreErrorCode mapped = fallback;
     if (code == DSHSessionSnapshotStoreErrorInvalidArgument ||
         code == DSHSessionSnapshotStoreErrorCorrupt ||
-        code == DSHSessionSnapshotStoreErrorBounds) {
+        code == DSHSessionSnapshotStoreErrorBounds ||
+        code == DSHSessionSnapshotStoreErrorConflict) {
       mapped = (DSHSessionSnapshotStoreErrorCode)code;
     }
     DSHSessionSetError(error, mapped);
@@ -404,7 +395,7 @@ static NSDictionary *DSHSessionCoreAcceptCandidate(NSData *bytes,
                                                    NSError **error) {
   NSDictionary *candidate = DSHSessionCoreDecodedObject(bytes);
   NSDictionary *reply = DSHSessionCoreReduce(
-      @"candidate", bytes, DSHSessionCoreEnvironment(candidate),
+      @"candidate", nil, bytes, DSHSessionCoreEnvironment(candidate),
       DSHSessionSnapshotStoreErrorInvalidArgument, error);
   if (reply == nil) return nil;
   NSString *digest = reply[@"digest"];
@@ -479,13 +470,9 @@ static NSDictionary *DSHSessionLoadMissingResult(NSString *currentLaunchInstance
 @property(nonatomic, copy) NSString *writerLaunchInstanceId;
 @property(nonatomic) NSUInteger generation;
 @property(nonatomic, copy) NSDictionary *authority;
-@property(nonatomic) BOOL tombstoneAvailable;
-@property(nonatomic, strong) NSSet<NSString *> *tombstonedOperationIds;
-@property(nonatomic) NSUInteger tombstoneGeneration;
-@property(nonatomic) dev_t tombstoneDevice;
-@property(nonatomic) ino_t tombstoneInode;
-@property(nonatomic) off_t tombstoneFileSize;
-@property(nonatomic, strong) NSData *tombstoneRawBytes;
+/// The core's view of the tombstone ledger read right after the envelope
+/// (`{missing, valid, generation, operation_ids}`), nil when that read failed.
+@property(nonatomic, copy) NSDictionary *tombstones;
 @end
 
 @implementation DSHSessionLoadedState
@@ -517,6 +504,58 @@ static DSHSessionLoadedState *DSHSessionExpectedStateForTombstones(
     expected.rawBytes = tombstones.rawBytes;
   }
   return expected;
+}
+
+// The core's view of a tombstone read: nil (the read failed) becomes null.
+static NSDictionary *DSHSessionCoreTombstoneView(DSHSessionTombstoneState *tombstones) {
+  if (tombstones == nil) return nil;
+  NSArray *ids = [tombstones.operationIds.allObjects
+      sortedArrayUsingSelector:@selector(compare:)] ?: @[];
+  return @{
+    @"missing" : @(tombstones.missing),
+    @"valid" : @(tombstones.valid),
+    @"generation" : @(tombstones.generation),
+    @"operation_ids" : ids,
+  };
+}
+
+// The core's view of a loaded state (`Loaded` in session_schema::cas).
+static id DSHSessionCoreLoadedView(DSHSessionLoadedState *state) {
+  if (state == nil) return NSNull.null;
+  if (state.missing) return @{ @"kind" : @"missing" };
+  if (state.legacy) {
+    return @{ @"kind" : @"legacy", @"legacy_bytes_sha256" : state.legacyBytesDigest ?: @"" };
+  }
+  NSMutableArray<NSString *> *outbox = [NSMutableArray array];
+  id entries = state.session[@"workspace_authority_outbox"];
+  if ([entries isKindOfClass:NSArray.class]) {
+    for (id entry in entries) {
+      id operationId = [entry isKindOfClass:NSDictionary.class] ? entry[@"operation_id"] : nil;
+      if ([operationId isKindOfClass:NSString.class]) [outbox addObject:operationId];
+    }
+  }
+  return @{
+    @"kind" : @"present",
+    @"generation" : @(state.generation),
+    @"session_sha256" : state.sessionDigest ?: @"",
+    @"recent_commits" : state.recentCommits ?: @[],
+    @"tombstones" : state.tombstones ?: NSNull.null,
+    @"outbox_operation_ids" : outbox,
+  };
+}
+
+// committed / conflict / unknown outcomes become the CAS result; nil means
+// the core said to proceed.
+static NSDictionary *DSHSessionCASOutcomeResult(NSDictionary *reply) {
+  NSString *outcome = reply[@"outcome"];
+  if ([outcome isEqual:@"committed"] && [reply[@"snapshot"] isKindOfClass:NSDictionary.class]) {
+    return @{ @"schema_version" : @1, @"status" : @"committed", @"snapshot" : reply[@"snapshot"] };
+  }
+  if (([outcome isEqual:@"conflict"] || [outcome isEqual:@"unknown"]) &&
+      [reply[@"current"] isKindOfClass:NSDictionary.class]) {
+    return @{ @"schema_version" : @1, @"status" : outcome, @"current" : reply[@"current"] };
+  }
+  return nil;
 }
 
 typedef NS_ENUM(NSInteger, DSHSessionAtomicWriteResult) {
@@ -1271,7 +1310,7 @@ NSString *DSHSessionSnapshotStoreLaunchInstanceId(void) {
   }
   NSError *parseError = nil;
   NSDictionary *verdict = DSHSessionCoreReduce(
-      @"tombstones", raw, @{}, DSHSessionSnapshotStoreErrorCorrupt, &parseError);
+      @"tombstones", nil, raw, @{}, DSHSessionSnapshotStoreErrorCorrupt, &parseError);
   NSUInteger generation = 0;
   NSSet<NSString *> *operationIds = nil;
   if (verdict == nil || ![verdict[@"generation"] isKindOfClass:NSNumber.class] ||
@@ -1394,7 +1433,7 @@ NSString *DSHSessionSnapshotStoreLaunchInstanceId(void) {
     NSError *validationError = nil;
     envelope = DSHSessionCoreDecodedObject(raw);
     verdict = DSHSessionCoreReduce(
-        @"envelope", raw, DSHSessionCoreEnvironment(envelope),
+        @"envelope", nil, raw, DSHSessionCoreEnvironment(envelope),
         DSHSessionSnapshotStoreErrorCorrupt, &validationError);
     if (verdict == nil || envelope == nil) {
       if (error != nullptr) *error = validationError ?: DSHSessionStoreError(
@@ -1481,20 +1520,7 @@ NSString *DSHSessionSnapshotStoreLaunchInstanceId(void) {
     NSError *tombstoneError = nil;
     DSHSessionTombstoneState *tombstones =
         [self readTombstoneStateWithError:&tombstoneError];
-    if (tombstones != nil) {
-      state.tombstoneDevice = tombstones.device;
-      state.tombstoneInode = tombstones.inode;
-      state.tombstoneFileSize = tombstones.fileSize;
-      state.tombstoneRawBytes = tombstones.rawBytes;
-      state.tombstoneGeneration = tombstones.generation;
-      state.tombstonedOperationIds = tombstones.operationIds ?: [NSSet set];
-      state.tombstoneAvailable = tombstones.valid &&
-          (generation <= DSHSessionSnapshotMaximumRecentCommits ||
-           tombstones.generation >= generation);
-      if (tombstones.missing && generation <= DSHSessionSnapshotMaximumRecentCommits) {
-        state.tombstoneAvailable = YES;
-      }
-    }
+    state.tombstones = DSHSessionCoreTombstoneView(tombstones);
     return state;
   }
   DSHSessionSetError(error, DSHSessionSnapshotStoreErrorCorrupt);
@@ -1537,50 +1563,6 @@ NSString *DSHSessionSnapshotStoreLaunchInstanceId(void) {
 
 - (NSDictionary *)authorityResultForState:(DSHSessionLoadedState *)state {
   return state.authority ?: DSHSessionMissingAuthority();
-}
-
-- (BOOL)validateAuthority:(NSDictionary *)authority error:(NSError **)error {
-  if (!DSHSessionTrustedDictionary(authority) ||
-      !DSHSessionExactSchema(authority[@"schema_version"], 1) ||
-      !DSHSessionTrustedString(authority[@"kind"])) {
-    return DSHSessionSetError(error, DSHSessionSnapshotStoreErrorInvalidArgument);
-  }
-  NSString *kind = authority[@"kind"];
-  if ([kind isEqualToString:@"missing"]) {
-    if (!DSHSessionExactKeys(authority, @[@"schema_version", @"kind"])) {
-      return DSHSessionSetError(error, DSHSessionSnapshotStoreErrorInvalidArgument);
-    }
-    return YES;
-  }
-  if ([kind isEqualToString:@"legacy_present"]) {
-    NSDictionary *legacy = authority[@"legacy"];
-    if (!DSHSessionExactKeys(authority, @[@"schema_version", @"kind", @"legacy"]) ||
-        !DSHSessionExactKeys(legacy, @[@"schema_version", @"legacy_bytes_sha256"]) ||
-        !DSHSessionExactSchema(legacy[@"schema_version"], 1) ||
-        !DSHSessionCanonicalDigest(legacy[@"legacy_bytes_sha256"])) {
-      return DSHSessionSetError(error, DSHSessionSnapshotStoreErrorInvalidArgument);
-    }
-    return YES;
-  }
-  if ([kind isEqualToString:@"present"]) {
-    NSDictionary *snapshot = authority[@"snapshot"];
-    if (!DSHSessionExactKeys(authority, @[@"schema_version", @"kind", @"snapshot"]) ||
-        !DSHSessionExactKeys(snapshot, @[
-          @"schema_version", @"generation", @"session_sha256",
-        ]) ||
-        !DSHSessionExactSchema(snapshot[@"schema_version"], 1) ||
-        !DSHSessionSafeInteger(snapshot[@"generation"], NO) ||
-        !DSHSessionCanonicalDigest(snapshot[@"session_sha256"])) {
-      return DSHSessionSetError(error, DSHSessionSnapshotStoreErrorInvalidArgument);
-    }
-    return YES;
-  }
-  return DSHSessionSetError(error, DSHSessionSnapshotStoreErrorInvalidArgument);
-}
-
-- (BOOL)authorityMatchesState:(NSDictionary *)authority
-                        state:(DSHSessionLoadedState *)state {
-  return [authority isEqual:state.authority];
 }
 
 - (BOOL)targetMatchesExpectedState:(DSHSessionLoadedState *)expected
@@ -2102,16 +2084,16 @@ NSString *DSHSessionSnapshotStoreLaunchInstanceId(void) {
                             lockDescriptor:(int)lockDescriptor
                                       error:(NSError **)error {
   if (!DSHSessionTrustedDictionary(request) ||
-      !DSHSessionExactKeys(request, @[
-        @"schema_version", @"operation_id", @"expected", @"candidate_json",
-      ]) ||
-      !DSHSessionExactSchema(request[@"schema_version"], 1) ||
-      !DSHSessionCanonicalOperationId(request[@"operation_id"]) ||
-      !DSHSessionTrustedString(request[@"candidate_json"]) ||
-      ![self validateAuthority:request[@"expected"] error:error]) {
-    if (error != nullptr && *error == nil) {
-      DSHSessionSetError(error, DSHSessionSnapshotStoreErrorInvalidArgument);
-    }
+      !DSHSessionTrustedString(request[@"candidate_json"])) {
+    DSHSessionSetError(error, DSHSessionSnapshotStoreErrorInvalidArgument);
+    return nil;
+  }
+  // The request shape and the expected authority are judged by the core; the
+  // candidate text is not part of that shape and stays out of the envelope.
+  NSMutableDictionary *shape = [request mutableCopy];
+  shape[@"candidate_json"] = @"";
+  if (DSHSessionCoreReduce(@"cas_request", @{ @"request" : shape }, nil, @{},
+                           DSHSessionSnapshotStoreErrorInvalidArgument, error) == nil) {
     return nil;
   }
   NSData *candidateBytes = [request[@"candidate_json"]
@@ -2133,34 +2115,19 @@ NSString *DSHSessionSnapshotStoreLaunchInstanceId(void) {
     return nil;
   }
   NSString *operationId = request[@"operation_id"];
-  if (!state.missing && !state.legacy) {
-    for (NSDictionary *commit in state.recentCommits) {
-      if (![commit[@"operation_id"] isEqualToString:operationId]) continue;
-      BOOL identical = [commit[@"session_sha256"] isEqualToString:candidateDigest];
-      if (identical) {
-        return @{
-          @"schema_version" : @1,
-          @"status" : @"committed",
-          @"snapshot" : DSHSessionSnapshotRef(
-              [commit[@"generation"] unsignedIntegerValue],
-              commit[@"session_sha256"]),
-        };
-      }
-      return @{
-        @"schema_version" : @1,
-        @"status" : @"conflict",
-        @"current" : state.authority,
-      };
-    }
-  }
   NSDictionary *expected = request[@"expected"];
-  if (![self authorityMatchesState:expected state:state]) {
-    return @{
-      @"schema_version" : @1,
-      @"status" : @"conflict",
-      @"current" : state.authority,
-    };
-  }
+  NSDictionary *precheck = DSHSessionCoreReduce(
+      @"cas_precheck",
+      @{
+        @"operation_id" : operationId,
+        @"expected" : expected,
+        @"candidate_digest" : candidateDigest,
+        @"state" : DSHSessionCoreLoadedView(state),
+      },
+      nil, @{}, DSHSessionSnapshotStoreErrorCorrupt, error);
+  if (precheck == nil) return nil;
+  NSDictionary *early = DSHSessionCASOutcomeResult(precheck);
+  if (early != nil) return early;
 
   // Re-read while still holding the same process-global serial lock.  This is
   // the legacy migration guard: an expected token is the digest of exact raw
@@ -2170,98 +2137,42 @@ NSString *DSHSessionSnapshotStoreLaunchInstanceId(void) {
     if (error != nullptr) *error = stateError;
     return nil;
   }
-  if (![self authorityMatchesState:expected state:current]) {
-    return @{
-      @"schema_version" : @1,
-      @"status" : @"conflict",
-      @"current" : current.authority,
-    };
-  }
   // Re-read the separate tombstone ledger after the authority re-read.  A
   // valid ledger makes a non-retained operation a fresh operation; an absent,
   // stale, or malformed ledger makes the absence unprovable and therefore
-  // cannot be allowed to advance the session.
+  // cannot be allowed to advance the session. The core applies those rules
+  // and plans the two writes.
   NSError *tombstoneError = nil;
   DSHSessionTombstoneState *tombstones =
       [self readTombstoneStateWithError:&tombstoneError];
-  if (tombstones == nil) {
-    return @{
-      @"schema_version" : @1,
-      @"status" : @"unknown",
-      @"current" : current.authority,
-    };
-  }
-  if (!tombstones.valid && !tombstones.missing) {
-    return @{
-      @"schema_version" : @1,
-      @"status" : @"unknown",
-      @"current" : current.authority,
-    };
-  }
-  if (!current.missing && !current.legacy &&
-      current.generation > current.recentCommits.count &&
-      (!tombstones.valid || tombstones.generation < current.generation)) {
-    return @{
-      @"schema_version" : @1,
-      @"status" : @"unknown",
-      @"current" : current.authority,
-    };
-  }
-  if (tombstones.valid && [tombstones.operationIds containsObject:operationId]) {
-    return @{
-      @"schema_version" : @1,
-      @"status" : @"unknown",
-      @"current" : current.authority,
-    };
-  }
-  NSUInteger nextGeneration = current.missing || current.legacy
-      ? 1
-      : current.generation + 1;
-  if (nextGeneration == 0 ||
-      nextGeneration > DSHSessionSnapshotMaximumSafeInteger) {
-    DSHSessionSetError(error, DSHSessionSnapshotStoreErrorBounds);
+  NSDictionary *plan = DSHSessionCoreReduce(
+      @"cas_plan",
+      @{
+        @"operation_id" : operationId,
+        @"expected" : expected,
+        @"current" : DSHSessionCoreLoadedView(current),
+        @"tombstones" : DSHSessionCoreTombstoneView(tombstones) ?: NSNull.null,
+        @"launch_instance_id" : self.launchInstanceId,
+      },
+      candidateBytes, DSHSessionCoreEnvironment(candidate),
+      DSHSessionSnapshotStoreErrorInvalidArgument, error);
+  if (plan == nil) return nil;
+  early = DSHSessionCASOutcomeResult(plan);
+  if (early != nil) return early;
+  NSData *tombstoneData = [plan[@"tombstone_json"] isKindOfClass:NSString.class]
+      ? [plan[@"tombstone_json"] dataUsingEncoding:NSUTF8StringEncoding] : nil;
+  NSData *encoded = [plan[@"envelope_json"] isKindOfClass:NSString.class]
+      ? [plan[@"envelope_json"] dataUsingEncoding:NSUTF8StringEncoding] : nil;
+  NSArray *commits = plan[@"recent_commits"];
+  if (![plan[@"outcome"] isEqual:@"write"] || tombstoneData.length == 0 ||
+      encoded.length == 0 || ![commits isKindOfClass:NSArray.class] ||
+      ![plan[@"next_generation"] isKindOfClass:NSNumber.class]) {
+    DSHSessionSetError(error, DSHSessionSnapshotStoreErrorCorrupt);
     return nil;
   }
-  NSMutableArray *commits = [NSMutableArray array];
-  if (!current.missing && !current.legacy) {
-    [commits addObjectsFromArray:current.recentCommits];
-  }
-  [commits addObject:@{
-    @"schema_version" : @1,
-    @"operation_id" : operationId,
-    @"generation" : @(nextGeneration),
-    @"session_sha256" : candidateDigest,
-  }];
-  while (commits.count > DSHSessionSnapshotMaximumRecentCommits) {
-    [commits removeObjectAtIndex:0];
-  }
-  NSMutableArray<NSString *> *tombstonedOperationIds = [NSMutableArray array];
-  if (!current.missing && !current.legacy && current.generation >
-          DSHSessionSnapshotMaximumRecentCommits) {
-    [tombstonedOperationIds addObjectsFromArray:
-        [[tombstones.operationIds allObjects]
-            sortedArrayUsingSelector:@selector(compare:)]];
-  }
-  if (!current.missing && !current.legacy &&
-      current.recentCommits.count == DSHSessionSnapshotMaximumRecentCommits) {
-    NSString *evicted = current.recentCommits.firstObject[@"operation_id"];
-    if (![tombstonedOperationIds containsObject:evicted]) {
-      [tombstonedOperationIds addObject:evicted];
-    }
-  }
-  if (tombstonedOperationIds.count > DSHSessionSnapshotMaximumTombstones) {
-    DSHSessionSetError(error, DSHSessionSnapshotStoreErrorBounds);
-    return nil;
-  }
-  NSDictionary *tombstoneEnvelope = @{
-    @"schema_version" : @1,
-    @"generation" : @(nextGeneration),
-    @"operation_ids" : [tombstonedOperationIds copy],
-  };
-  NSData *tombstoneData = DSHSessionCanonicalJSON(
-      tombstoneEnvelope, error, DSHSessionSnapshotStoreErrorInvalidArgument);
-  if (tombstoneData == nil) return nil;
-  if (tombstoneData.length > DSHSessionSnapshotMaximumTombstoneBytes) {
+  NSUInteger nextGeneration = [plan[@"next_generation"] unsignedIntegerValue];
+  if (tombstoneData.length > DSHSessionSnapshotMaximumTombstoneBytes ||
+      encoded.length > DSHSessionSnapshotMaximumBytes) {
     DSHSessionSetError(error, DSHSessionSnapshotStoreErrorBounds);
     return nil;
   }
@@ -2287,19 +2198,6 @@ NSString *DSHSessionSnapshotStoreLaunchInstanceId(void) {
       @"current" : current.authority,
     };
   }
-  NSDictionary *envelope = @{
-    @"schema_version" : @3,
-    @"writer_launch_instance_id" : self.launchInstanceId,
-    @"generation" : @(nextGeneration),
-    @"session_sha256" : candidateDigest,
-    @"session" : candidate,
-    @"recent_commits" : [commits copy],
-    @"proof_run_id" : NSNull.null,
-    @"proof_request_id" : NSNull.null,
-  };
-  NSData *encoded = DSHSessionCanonicalJSON(
-      envelope, error, DSHSessionSnapshotStoreErrorInvalidArgument);
-  if (encoded == nil) return nil;
   DSHSessionAtomicWriteResult writeResult =
       [self writeEnvelopeData:encoded
                  expectedState:current
@@ -2325,21 +2223,36 @@ NSString *DSHSessionSnapshotStoreLaunchInstanceId(void) {
   {
     // The bytes on disk are exactly `encoded`; the read-back below proves
     // that by byte equality instead of parsing and validating a megabyte
-    // envelope we assembled ourselves a moment ago.
+    // envelope the core assembled a moment ago.
     DSHSessionValidatedEnvelope *written = [[DSHSessionValidatedEnvelope alloc] init];
     written.bytes = encoded;
-    written.envelope = envelope;
+    written.envelope = @{
+      @"schema_version" : @3,
+      @"writer_launch_instance_id" : self.launchInstanceId,
+      @"generation" : @(nextGeneration),
+      @"session_sha256" : candidateDigest,
+      @"session" : candidate,
+      @"recent_commits" : commits,
+      @"proof_run_id" : NSNull.null,
+      @"proof_request_id" : NSNull.null,
+    };
     written.session = candidate;
     written.digest = candidateDigest;
     written.generation = nextGeneration;
-    written.commits = [commits copy];
+    written.commits = commits;
     DSHSessionValidatedEnvelopeRemember(written);
   }
   DSHSessionLoadedState *verified = [self readStateWithError:&stateError];
-  if (verified != nil && !verified.missing && !verified.legacy &&
-      verified.generation == nextGeneration &&
-      [verified.sessionDigest isEqualToString:candidateDigest] &&
-      [verified.recentCommits.lastObject[@"operation_id"] isEqualToString:operationId]) {
+  NSDictionary *verdict = DSHSessionCoreReduce(
+      @"cas_verify",
+      @{
+        @"operation_id" : operationId,
+        @"next_generation" : @(nextGeneration),
+        @"candidate_digest" : candidateDigest,
+        @"verified" : DSHSessionCoreLoadedView(verified),
+      },
+      nil, @{}, DSHSessionSnapshotStoreErrorCorrupt, nullptr);
+  if ([verdict[@"committed"] isEqual:@YES]) {
     @try {
       NSMutableSet *conversationIds = [NSMutableSet set];
       for (NSDictionary *conversation in candidate[@"conversations"]) [conversationIds addObject:conversation[@"id"]];
@@ -2423,11 +2336,13 @@ NSString *DSHSessionSnapshotStoreLaunchInstanceId(void) {
   __block NSError *operationError = nil;
   BOOL completed = [self.coordinator performSyncWithError:^BOOL(NSError **innerError) {
     if (!DSHSessionTrustedDictionary(request) ||
-        !DSHSessionExactKeys(request, @[@"schema_version", @"operation_id"]) ||
-        !DSHSessionExactSchema(request[@"schema_version"], 1) ||
-        !DSHSessionCanonicalOperationId(request[@"operation_id"])) {
-      operationError = DSHSessionStoreError(
-          DSHSessionSnapshotStoreErrorInvalidArgument);
+        DSHSessionCoreReduce(@"query_request", @{ @"request" : request }, nil, @{},
+                             DSHSessionSnapshotStoreErrorInvalidArgument,
+                             &operationError) == nil) {
+      if (operationError == nil) {
+        operationError = DSHSessionStoreError(
+            DSHSessionSnapshotStoreErrorInvalidArgument);
+      }
       if (innerError != nullptr) *innerError = operationError;
       return NO;
     }
@@ -2443,43 +2358,19 @@ NSString *DSHSessionSnapshotStoreLaunchInstanceId(void) {
     }
     @try {
     NSError *stateError = nil;
+    // Query is intentionally weaker than load: malformed or unavailable
+    // storage prevents proving absence, so the core answers `unknown` for a
+    // failed read without projecting any native failure detail.
     DSHSessionLoadedState *state = [self readStateWithError:&stateError];
-    if (state == nil) {
-      // Query is intentionally weaker than load: malformed or unavailable
-      // storage prevents proving absence, so it returns `unknown` without
-      // projecting any native failure detail.
-      result = @{@"schema_version" : @1, @"status" : @"unknown"};
-      return YES;
-    }
-    if (state.missing || state.legacy) {
-      result = @{@"schema_version" : @1, @"status" : @"not_started"};
-      return YES;
-    }
-    NSString *operationId = request[@"operation_id"];
-    for (NSDictionary *commit in state.recentCommits) {
-      if ([commit[@"operation_id"] isEqualToString:operationId]) {
-        result = @{
-          @"schema_version" : @1,
-          @"status" : @"committed",
-          @"snapshot" : DSHSessionSnapshotRef(
-              [commit[@"generation"] unsignedIntegerValue],
-              commit[@"session_sha256"]),
-        };
-        return YES;
-      }
-    }
-    BOOL historyEvicted = state.generation > state.recentCommits.count;
-    BOOL tombstoneProvesAbsence = !historyEvicted ||
-        (state.tombstoneAvailable &&
-         ![state.tombstonedOperationIds containsObject:request[@"operation_id"]]);
-    BOOL fullHistoryRetained = !historyEvicted &&
-        state.recentCommits.count == state.generation &&
-        [state.recentCommits.firstObject[@"generation"] unsignedIntegerValue] == 1;
-    result = @{
-      @"schema_version" : @1,
-      @"status" : (fullHistoryRetained || tombstoneProvesAbsence)
-          ? @"not_started" : @"unknown",
-    };
+    NSDictionary *reply = DSHSessionCoreReduce(
+        @"query_commit",
+        @{
+          @"operation_id" : request[@"operation_id"],
+          @"state" : DSHSessionCoreLoadedView(state),
+        },
+        nil, @{}, DSHSessionSnapshotStoreErrorCorrupt, nullptr);
+    result = [reply[@"result"] isKindOfClass:NSDictionary.class]
+        ? reply[@"result"] : @{@"schema_version" : @1, @"status" : @"unknown"};
     return YES;
     } @finally {
       close(lockDescriptor);
@@ -2495,38 +2386,6 @@ NSString *DSHSessionSnapshotStoreLaunchInstanceId(void) {
 - (NSDictionary *)querySessionCommitWithRequest:(NSDictionary *)request
                                            error:(NSError **)error {
   return [self querySessionCommit:request error:error];
-}
-
-static BOOL DSHSessionCandidateReferencesWorkspace(
-    NSDictionary *candidate,
-    NSString *workspaceId) {
-  NSArray *conversations = candidate[@"conversations"];
-  if (!DSHSessionTrustedArray(conversations) ||
-      !DSHSessionTrustedString(workspaceId)) {
-    return YES;
-  }
-  for (NSDictionary *conversation in conversations) {
-    if (![conversation isKindOfClass:NSDictionary.class]) return YES;
-    id conversationWorkspace = conversation[@"workspace_id"];
-    if (conversationWorkspace != NSNull.null &&
-        [conversationWorkspace isEqual:workspaceId]) {
-      return YES;
-    }
-    NSDictionary *binding = conversation[@"workspace_binding"] == NSNull.null
-        ? nil : conversation[@"workspace_binding"];
-    if (binding != nil && [binding[@"workspace_id"] isEqual:workspaceId]) {
-      return YES;
-    }
-    for (NSDictionary *attempt in conversation[@"attempts"]) {
-      if (![attempt isKindOfClass:NSDictionary.class]) return YES;
-      id attemptWorkspace = attempt[@"workspace_id"];
-      if (attemptWorkspace != NSNull.null &&
-          [attemptWorkspace isEqual:workspaceId]) {
-        return YES;
-      }
-    }
-  }
-  return NO;
 }
 
 static NSDictionary *DSHSessionClearanceResult(NSString *status,
@@ -2569,32 +2428,18 @@ static NSDictionary *DSHSessionClearanceResult(NSString *status,
       if (innerError != nullptr) *innerError = operationError;
       return NO;
     }
+    // The core accepts the candidate and checks that the operation appears
+    // unchanged in its authority outbox and that nothing in it still
+    // references the workspace (Conflict otherwise).
     NSError *candidateError = nil;
-    NSDictionary *candidate = DSHSessionCoreAcceptCandidate(
-        candidateBytes, nullptr, &candidateError);
-    if (candidate == nil) {
+    NSDictionary *candidate = DSHSessionCoreDecodedObject(candidateBytes);
+    if (candidate == nil ||
+        DSHSessionCoreReduce(@"clearance_candidate", @{ @"operation" : operation },
+                             candidateBytes, DSHSessionCoreEnvironment(candidate),
+                             DSHSessionSnapshotStoreErrorInvalidArgument,
+                             &candidateError) == nil) {
       operationError = candidateError ?: DSHSessionStoreError(
           DSHSessionSnapshotStoreErrorInvalidArgument);
-      if (innerError != nullptr) *innerError = operationError;
-      return NO;
-    }
-    BOOL operationInCandidate = NO;
-    for (NSDictionary *entry in candidate[@"workspace_authority_outbox"]) {
-      if ([entry[@"operation_id"] isEqual:operation[@"operation_id"]]) {
-        operationInCandidate = YES;
-        if (![entry isEqual:operation]) {
-          operationError = DSHSessionStoreError(
-              DSHSessionSnapshotStoreErrorConflict);
-          if (innerError != nullptr) *innerError = operationError;
-          return NO;
-        }
-      }
-    }
-    if (!operationInCandidate ||
-        DSHSessionCandidateReferencesWorkspace(candidate,
-                                               operation[@"workspace_id"])) {
-      operationError = DSHSessionStoreError(
-          DSHSessionSnapshotStoreErrorConflict);
       if (innerError != nullptr) *innerError = operationError;
       return NO;
     }
@@ -2631,19 +2476,16 @@ static NSDictionary *DSHSessionClearanceResult(NSString *status,
         return YES;
       }
       NSString *operationId = operation[@"operation_id"];
-      if (!state.missing && !state.legacy) {
-        // A replayed operation is only idempotent while it still describes
-        // the current authority. Once any later generation committed, the
-        // old operation can no longer mint/return its generation-1 receipt.
-        for (NSDictionary *commit in state.recentCommits) {
-          if (![commit[@"operation_id"] isEqual:operationId]) continue;
-          if ([commit[@"generation"] unsignedIntegerValue] != state.generation ||
-              ![commit[@"session_sha256"] isEqual:state.sessionDigest]) {
-            result = DSHSessionClearanceResult(@"not_committed", nil);
-            return YES;
-          }
-          break;
-        }
+      // A replayed operation is only idempotent while it still describes
+      // the current authority. Once any later generation committed, the
+      // old operation can no longer mint/return its generation-1 receipt.
+      NSDictionary *replay = DSHSessionCoreReduce(
+          @"clearance_replay",
+          @{ @"operation_id" : operationId, @"state" : DSHSessionCoreLoadedView(state) },
+          nil, @{}, DSHSessionSnapshotStoreErrorCorrupt, nullptr);
+      if (![replay[@"allowed"] isEqual:@YES]) {
+        result = DSHSessionClearanceResult(@"not_committed", nil);
+        return YES;
       }
       NSDictionary *casRequest = @{
         @"schema_version" : @1,
@@ -2719,11 +2561,13 @@ static NSDictionary *DSHSessionClearanceResult(NSString *status,
   __block NSError *operationError = nil;
   BOOL completed = [self.coordinator performSyncWithError:^BOOL(NSError **innerError) {
     if (!DSHSessionTrustedDictionary(request) ||
-        !DSHSessionExactKeys(request, @[@"schema_version", @"operation_id"]) ||
-        !DSHSessionExactSchema(request[@"schema_version"], 1) ||
-        !DSHSessionCanonicalOperationId(request[@"operation_id"])) {
-      operationError = DSHSessionStoreError(
-          DSHSessionSnapshotStoreErrorInvalidArgument);
+        DSHSessionCoreReduce(@"query_request", @{ @"request" : request }, nil, @{},
+                             DSHSessionSnapshotStoreErrorInvalidArgument,
+                             &operationError) == nil) {
+      if (operationError == nil) {
+        operationError = DSHSessionStoreError(
+            DSHSessionSnapshotStoreErrorInvalidArgument);
+      }
       if (innerError != nullptr) *innerError = operationError;
       return NO;
     }
@@ -2751,22 +2595,11 @@ static NSDictionary *DSHSessionClearanceResult(NSString *status,
       // durably observed this operation.  The session CAS may have committed
       // while receipt publication failed or was interrupted; preserve that
       // recovery surface as unknown instead of inviting a fresh operation.
-      BOOL operationObserved = NO;
-      for (NSDictionary *commit in state.recentCommits) {
-        if ([commit[@"operation_id"] isEqual:request[@"operation_id"]]) {
-          operationObserved = YES;
-          break;
-        }
-      }
-      if (!operationObserved) {
-        for (NSDictionary *entry in state.session[@"workspace_authority_outbox"]) {
-          if ([entry[@"operation_id"] isEqual:request[@"operation_id"]]) {
-            operationObserved = YES;
-            break;
-          }
-        }
-      }
-      if (operationObserved) {
+      NSDictionary *observed = DSHSessionCoreReduce(
+          @"clearance_observed",
+          @{ @"operation_id" : request[@"operation_id"], @"state" : DSHSessionCoreLoadedView(state) },
+          nil, @{}, DSHSessionSnapshotStoreErrorCorrupt, nullptr);
+      if ([observed[@"observed"] isEqual:@YES]) {
         result = @{ @"schema_version" : @1, @"status" : @"unknown" };
       }
     }
@@ -2803,7 +2636,7 @@ static NSDictionary *DSHSessionClearanceResult(NSString *status,
   // whose schema_version is 9 and that canonicalises. The CAS path still
   // applies the full schema-9 validation before anything is written.
   NSDictionary *reply = DSHSessionCoreReduce(
-      @"candidate_digest", bytes, @{},
+      @"candidate_digest", nil, bytes, @{},
       DSHSessionSnapshotStoreErrorInvalidArgument, nullptr);
   NSString *digest = reply[@"digest"];
   return [digest isKindOfClass:NSString.class] ? digest : nil;

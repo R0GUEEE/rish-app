@@ -10,6 +10,7 @@
 //! through [`Env`]. Numbers follow Foundation's `doubleValue` reading: a
 //! lexeme such as `1.0` is an integer here, `-0` is refused at the scanner.
 
+pub mod cas;
 mod primitives;
 mod scanner;
 mod validators;
@@ -37,6 +38,7 @@ pub enum SessionError {
     InvalidArgument = 1,
     Corrupt = 2,
     Bounds = 5,
+    Conflict = 6,
 }
 
 impl SessionError {
@@ -468,6 +470,6 @@ fn reduce_json_inner(request: &str, input: &[u8]) -> Result<Value, SessionError>
             Ok(json!({ "generation": generation, "operation_ids": ids }))
         }
         "legacy_root" => Ok(json!({ "valid": legacy_root_bytes(input, &env) })),
-        _ => Err(SessionError::InvalidArgument),
+        _ => cas::reduce(op, &envelope, input, &env),
     }
 }

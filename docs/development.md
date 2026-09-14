@@ -518,7 +518,14 @@ deleted: about 17,500 answers over the shared session fixtures, hand-written
 legacy roots, envelopes, tombstones, lexical edge cases and a deterministic
 mutation walk, replayed by `tests/session_schema.rs`. Three corpus inputs
 made the native validator throw (a provider binding whose `endpoint_url` is
-not a string) and are recorded as `!`; the core refuses them.
+not a string) and are recorded as `!`; the core refuses them. The store's
+CAS decisions follow in `session_schema/cas.rs`: request and authority
+shapes, the replay-by-operation-id and expected-authority checks, the
+tombstone-ledger rules, the next generation, the commit chain and the
+canonical bytes of both files the host writes, the post-write verification,
+`querySessionCommit`, and the clearance path's candidate, replay and
+observed-operation rules. The host reads, locks, writes and reads back,
+calling the core between those steps with what it observed.
 
 The core links into the `RishLocalRuntime` pod as
 `Vendor/rish_agent_core.xcframework`, built by
