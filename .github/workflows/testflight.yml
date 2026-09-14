@@ -110,7 +110,8 @@ jobs:
           bundle exec pod install --project-directory=ios
           printf 'export NODE_BINARY=%s\n' "$(command -v node)" > ios/.xcode.env.local
       - name: Verify Release service and session storage on iOS Simulator
-        timeout-minutes: 25
+        # A cold app build can consume 23 minutes before guest boot and tests.
+        timeout-minutes: 45
         run: bash scripts/ci/test-ios-preview.sh
       - name: Sign, archive and export IPA
         working-directory: apps/mobile
