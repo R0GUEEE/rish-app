@@ -759,7 +759,7 @@ describe('strict completion schema 2 bridge', () => {
     ];
 
     await expect(
-      LocalRuntime.completeV2({ ...schema2Request(), visibleHistory }),
+      LocalRuntime.completeV2({ ...schema2Request(), model: 'deepseek-v4-pro', visibleHistory }),
     ).rejects.toMatchObject({
       code: 'E_COMPLETION_HISTORY',
       message: 'E_COMPLETION_HISTORY',

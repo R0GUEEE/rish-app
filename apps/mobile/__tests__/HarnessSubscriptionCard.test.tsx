@@ -1,6 +1,6 @@
 import React from 'react';
 import TestRenderer, { act } from 'react-test-renderer';
-import { AppState, Linking, Text as RNText } from 'react-native';
+import { AppState, Text as RNText } from 'react-native';
 import { HarnessSubscriptionCard, harnessSubscriptionIdForModel } from '../src/components/HarnessSubscriptionCard';
 import { validVerificationUrl } from '../src/harnessAuth/url';
 import type { HarnessAuthStatus } from '../src/harnessAuth/types';

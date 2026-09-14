@@ -84,7 +84,7 @@ export function HarnessSubscriptionCard({ id, visible, disabled: externalDisable
         setChatSource(source); setChatSourceError(source.error_code); onCredentialChanged?.(source);
       }).catch(() => { if (scopeRef.current === scope) setChatSourceError('E_CHAT_SOURCE_STATUS'); });
     }
-  }, [currentState?.harness_id, currentState?.status, onCredentialChanged]);
+  }, [currentState, onCredentialChanged]);
 
   useEffect(() => {
     const scope = scopeRef.current;
