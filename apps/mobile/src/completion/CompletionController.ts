@@ -1,4 +1,8 @@
 import { approvalMessageBudget } from '../agent/approvalMessage';
+import {
+  agentRuntimeDiagnosticFromError,
+  type AgentRuntimeDiagnostic,
+} from '../native/agent-runtime-diagnostic';
 import type {
   CompleteRoundV2Request,
   CompleteRoundV2Result,
@@ -110,6 +114,8 @@ export type CompletionControllerState = {
   readonly roundId: string | null;
   readonly transportSchemaVersion: 2 | 3 | null;
   readonly failureCode: AttemptFailureCode | null;
+  /** Transient diagnostics only; never included in stored attempts or events. */
+  readonly failureDiagnostic?: AgentRuntimeDiagnostic;
 };
 
 export type CompletionControllerInput = {
@@ -797,6 +803,7 @@ export function createCompletionController(
       roundId?: string | null;
       transportSchemaVersion?: 2 | 3 | null;
       failureCode?: AttemptFailureCode | null;
+      failureDiagnostic?: AgentRuntimeDiagnostic | null;
     } = {},
   ): Omit<CompletionControllerState, 'epoch'> => ({
     phase,
@@ -806,6 +813,7 @@ export function createCompletionController(
     roundId: identity.roundId ?? null,
     transportSchemaVersion: identity.transportSchemaVersion ?? null,
     failureCode: identity.failureCode ?? null,
+    ...(identity.failureDiagnostic ? { failureDiagnostic: identity.failureDiagnostic } : {}),
   });
 
   const safePersist = async (): Promise<CompletionPersistenceResult> => {
@@ -1712,6 +1720,7 @@ export function createCompletionController(
     conversationId: string,
     attemptId: string,
     code: AttemptFailureCode,
+    failureDiagnostic?: AgentRuntimeDiagnostic | null,
   ): Promise<CompletionControllerOutcome> => {
     const located = getConversationAttempt(conversationId, attemptId);
     if (located === null) {
@@ -1733,6 +1742,7 @@ export function createCompletionController(
           roundId: located.attempt.agent.round_lineage?.round_id ?? null,
           transportSchemaVersion: agentTransportSchema(located.attempt),
           failureCode: code,
+          failureDiagnostic,
         }),
       );
       return outcome('retryable', state);
@@ -2164,7 +2174,10 @@ export function createCompletionController(
         } catch (error) {
           if (runEpoch !== epoch || agentCancellationInFlight === runEpoch) return outcome('cancelled', state);
           updateAgentRun({ operationId: null, cancelTarget: null });
-          return await failAgentWithoutNative(conversationId, attemptId, agentFailure(error));
+          return await failAgentWithoutNative(
+            conversationId, attemptId, agentFailure(error),
+            agentRuntimeDiagnosticFromError(error),
+          );
         }
         if (runEpoch !== epoch || agentCancellationInFlight === runEpoch) return outcome('cancelled', state);
         if (!agentRoundContextMatchesAttempt(current.attempt, result)) {

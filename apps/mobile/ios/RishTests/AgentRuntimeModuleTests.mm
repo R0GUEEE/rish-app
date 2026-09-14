@@ -39,6 +39,7 @@ typedef void (^DSHRuntimeReject)(NSString *code, NSString *message,
 @property(nonatomic, copy) NSDictionary *result;
 @property(nonatomic, strong) NSError *error;
 @property(nonatomic) NSUInteger callCount;
+@property(nonatomic) BOOL throwsPrivateException;
 @end
 
 @implementation DSHRecordingRuntimeCoordinator
@@ -54,6 +55,11 @@ typedef void (^DSHRuntimeReject)(NSString *code, NSString *message,
 
 - (NSDictionary *)record:(NSString *)method request:(NSDictionary *)request
                     error:(NSError **)error {
+  if (self.throwsPrivateException) {
+    @throw [NSException exceptionWithName:@"PrivateException"
+                                  reason:@"private path or credential"
+                                userInfo:nil];
+  }
   self.method = method;
   self.request = request;
   self.callCount += 1;
@@ -495,6 +501,33 @@ DSH_RECORD(queryAgentCleanup)
   [self waitForExpectations:@[done] timeout:2];
 }
 
+- (void)testRoundPersistenceDiagnosticsExposeOnlyFixedOperationAndKind {
+  for (NSString *kind in @[@"persistence", @"unavailable", @"exception", @"unknown"]) {
+    DSHRecordingRuntimeCoordinator *coordinator = [[DSHRecordingRuntimeCoordinator alloc] init];
+    coordinator.throwsPrivateException = [kind isEqual:@"exception"];
+    coordinator.error = [kind isEqual:@"unknown"]
+        ? [NSError errorWithDomain:@"private native domain" code:99
+                          userInfo:@{NSLocalizedDescriptionKey: @"private path or credential"}]
+        : DSHAgentNativeStoreError([kind isEqual:@"unavailable"]
+            ? DSHAgentNativeStoreErrorUnavailable : DSHAgentNativeStoreErrorPersistence);
+    id module = [self moduleWithCoordinator:coordinator];
+    XCTestExpectation *done = [self expectationWithDescription:kind];
+    [self invokeModule:module
+        selector:NSSelectorFromString(@"completeAgentRoundV2Request:resolver:rejecter:")
+        request:@{@"schema_version": @2}
+        resolve:^(__unused id value) { XCTFail(@"resolved"); }
+        reject:^(NSString *code, NSString *message, NSError *error) {
+          XCTAssertEqualObjects(code, @"E_AGENT_PERSISTENCE");
+          NSString *expectedMessage = [NSString stringWithFormat:
+              @"E_AGENT_PERSISTENCE\nagent_runtime/v1 operation=complete_agent_round_v2 kind=%@", kind];
+          XCTAssertEqualObjects(message, expectedMessage);
+          XCTAssertNil(error);
+          [done fulfill];
+        }];
+    [self waitForExpectations:@[done] timeout:2];
+  }
+}
+
 - (void)testContextStorageErrorKeepsItsDomainAndDoesNotLeakDescription {
   DSHRecordingRuntimeCoordinator *coordinator = [[DSHRecordingRuntimeCoordinator alloc] init];
   coordinator.error = [NSError errorWithDomain:@"dev.zseven.rish.project-context-service" code:6
@@ -510,6 +543,56 @@ DSH_RECORD(queryAgentCleanup)
         [done fulfill];
       }];
   [self waitForExpectations:@[done] timeout:2];
+}
+
+- (void)testToolDefinitionValidationErrorsAreBadArgumentsWithoutLeakingDescription {
+  for (NSNumber *nativeCode in @[@2001, @2002, @2003, @2004, @2005, @2006, @2007, @2008]) {
+    DSHRecordingRuntimeCoordinator *coordinator = [[DSHRecordingRuntimeCoordinator alloc] init];
+    coordinator.error = [NSError errorWithDomain:@"DSHCompletionV2Error"
+        code:nativeCode.integerValue
+        userInfo:@{NSLocalizedDescriptionKey: @"private tool description or path"}];
+    id module = [self moduleWithCoordinator:coordinator];
+    XCTestExpectation *done = [self expectationWithDescription:nativeCode.stringValue];
+    [self invokeModule:module
+        selector:NSSelectorFromString(@"completeAgentRoundV2Request:resolver:rejecter:")
+        request:@{@"schema_version": @2}
+        resolve:^(__unused id value) { XCTFail(@"resolved"); }
+        reject:^(NSString *code, NSString *message, NSError *error) {
+          XCTAssertEqualObjects(code, @"E_AGENT_BAD_ARGUMENTS");
+          XCTAssertEqualObjects(message, code);
+          XCTAssertNil(error);
+          [done fulfill];
+        }];
+    [self waitForExpectations:@[done] timeout:2];
+  }
+}
+
+- (void)testToolDefinitionMappingDoesNotClaimOtherDomainsOrResponseErrors {
+  NSArray *cases = @[
+    @{@"domain": @"other native domain", @"code": @2006},
+    @{@"domain": @"DSHCompletionV2Error", @"code": @2009},
+    @{@"domain": @"DSHCompletionV2Error", @"code": @2106},
+  ];
+  for (NSDictionary *testCase in cases) {
+    DSHRecordingRuntimeCoordinator *coordinator = [[DSHRecordingRuntimeCoordinator alloc] init];
+    coordinator.error = [NSError errorWithDomain:testCase[@"domain"]
+        code:[testCase[@"code"] integerValue]
+        userInfo:@{NSLocalizedDescriptionKey: @"private response or path"}];
+    id module = [self moduleWithCoordinator:coordinator];
+    XCTestExpectation *done = [self expectationWithDescription:@"unclassified error"];
+    [self invokeModule:module
+        selector:NSSelectorFromString(@"completeAgentRoundV2Request:resolver:rejecter:")
+        request:@{@"schema_version": @2}
+        resolve:^(__unused id value) { XCTFail(@"resolved"); }
+        reject:^(NSString *code, NSString *message, NSError *error) {
+          XCTAssertEqualObjects(code, @"E_AGENT_PERSISTENCE");
+          XCTAssertEqualObjects(message,
+              @"E_AGENT_PERSISTENCE\nagent_runtime/v1 operation=complete_agent_round_v2 kind=unknown");
+          XCTAssertNil(error);
+          [done fulfill];
+        }];
+    [self waitForExpectations:@[done] timeout:2];
+  }
 }
 
 - (void)testCoordinatorRequiresOneWALDomainAndAllHighLevelServices {

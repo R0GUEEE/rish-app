@@ -293,7 +293,7 @@ static NSDictionary *DSHPreparedTestRoot(BOOL project,
   NSDictionary *projection = [registry registryForRoot:root error:&error];
   XCTAssertNil(error);
   XCTAssertNotNil(projection);
-  XCTAssertEqualObjects(projection[@"registry_version"], @1);
+  XCTAssertEqualObjects(projection[@"registry_version"], @2);
   XCTAssertEqualObjects(projection[@"toolset_sha256"], registry.toolsetSHA256);
   XCTAssertEqualObjects(
       [projection[@"tools"] valueForKey:@"name"],

@@ -36,7 +36,18 @@ xcodebuild build-for-testing -workspace apps/mobile/ios/Rish.xcworkspace \
   -only-testing:RishTests/SessionSnapshotStoreTests/testInitAcceptsPrivatePrefixedExistingRootBeforeSessionFileExists \
   -only-testing:RishTests/SessionSnapshotStoreTests/testLegacyV2LoadsWithRawByteTokenAndMigratesOnlyWithThatToken \
   -only-testing:RishTests/SessionSnapshotStoreTests/testProtectionV2CoversRootLockSessionTombstoneAndTemporaryPaths \
-  -only-testing:RishTests/SessionSnapshotStoreTests/testV2ProtectionRejectsFreshReadbackLoss
+  -only-testing:RishTests/SessionSnapshotStoreTests/testV2ProtectionRejectsFreshReadbackLoss \
+  -only-testing:RishTests/AgentPreparedAttemptStoreTests/testPrepareCommitsTranscriptAuthorityAndOperationAtomicallyAndReplays \
+  -only-testing:RishTests/AgentProviderRoundServiceTests/testFreshWorkspaceSessionCASPreparesAndCompletesRealStoredAgentRound \
+  -only-testing:RishTests/AgentNativeStoreTests/testDeviceMetadataFirstTransactionAndRelaunchPreserveTranscript \
+  -only-testing:RishTests/AgentNativeStoreTests/testDeviceMetadataFailuresPreserveCommittedWALBytes \
+  -only-testing:RishTests/AgentNativeStoreTests/testDeviceMetadataReadFailureAndInodeSwapNeverReplaceCommittedWAL \
+  -only-testing:RishTests/AgentNativeStoreTests/testWALProtectionUsesFreshFileAttributesForDirectoryAndFile \
+  -only-testing:RishTests/AgentRuntimeModuleTests/testRoundPersistenceDiagnosticsExposeOnlyFixedOperationAndKind \
+  -only-testing:RishTests/AgentProviderRoundServiceTests/testRoundV3RejectsCreateAndDispatchWhenRealWALWriteFails \
+  -only-testing:RishTests/AgentProviderRoundServiceTests/testFreshWorkspaceRoundCreationFailureDoesNotDispatchProvider \
+  -only-testing:RishTests/AgentRuntimeModuleTests/testToolDefinitionValidationErrorsAreBadArgumentsWithoutLeakingDescription \
+  -only-testing:RishTests/AgentRuntimeModuleTests/testToolDefinitionMappingDoesNotClaimOtherDomainsOrResponseErrors
 python3 - "$output/DerivedData/Build/Products" "$PWD/scripts/tests/fixtures/guest-cgi" <<'PY'
 import pathlib, plistlib, sys
 paths = list(pathlib.Path(sys.argv[1]).glob('*.xctestrun'))
@@ -74,7 +85,18 @@ xcodebuild test-without-building -xctestrun "${plans[0]}" \
   -only-testing:RishTests/SessionSnapshotStoreTests/testInitAcceptsPrivatePrefixedExistingRootBeforeSessionFileExists \
   -only-testing:RishTests/SessionSnapshotStoreTests/testLegacyV2LoadsWithRawByteTokenAndMigratesOnlyWithThatToken \
   -only-testing:RishTests/SessionSnapshotStoreTests/testProtectionV2CoversRootLockSessionTombstoneAndTemporaryPaths \
-  -only-testing:RishTests/SessionSnapshotStoreTests/testV2ProtectionRejectsFreshReadbackLoss
+  -only-testing:RishTests/SessionSnapshotStoreTests/testV2ProtectionRejectsFreshReadbackLoss \
+  -only-testing:RishTests/AgentPreparedAttemptStoreTests/testPrepareCommitsTranscriptAuthorityAndOperationAtomicallyAndReplays \
+  -only-testing:RishTests/AgentProviderRoundServiceTests/testFreshWorkspaceSessionCASPreparesAndCompletesRealStoredAgentRound \
+  -only-testing:RishTests/AgentNativeStoreTests/testDeviceMetadataFirstTransactionAndRelaunchPreserveTranscript \
+  -only-testing:RishTests/AgentNativeStoreTests/testDeviceMetadataFailuresPreserveCommittedWALBytes \
+  -only-testing:RishTests/AgentNativeStoreTests/testDeviceMetadataReadFailureAndInodeSwapNeverReplaceCommittedWAL \
+  -only-testing:RishTests/AgentNativeStoreTests/testWALProtectionUsesFreshFileAttributesForDirectoryAndFile \
+  -only-testing:RishTests/AgentRuntimeModuleTests/testRoundPersistenceDiagnosticsExposeOnlyFixedOperationAndKind \
+  -only-testing:RishTests/AgentProviderRoundServiceTests/testRoundV3RejectsCreateAndDispatchWhenRealWALWriteFails \
+  -only-testing:RishTests/AgentProviderRoundServiceTests/testFreshWorkspaceRoundCreationFailureDoesNotDispatchProvider \
+  -only-testing:RishTests/AgentRuntimeModuleTests/testToolDefinitionValidationErrorsAreBadArgumentsWithoutLeakingDescription \
+  -only-testing:RishTests/AgentRuntimeModuleTests/testToolDefinitionMappingDoesNotClaimOtherDomainsOrResponseErrors
 xcrun xcresulttool get test-results tests --path "$output/Preview.xcresult" --compact > "$output/tests.json"
 python3 - "$output/tests.json" <<'PY'
 import json, sys
@@ -88,6 +110,17 @@ required = {
     'testLegacyV2LoadsWithRawByteTokenAndMigratesOnlyWithThatToken',
     'testProtectionV2CoversRootLockSessionTombstoneAndTemporaryPaths',
     'testV2ProtectionRejectsFreshReadbackLoss',
+    'testPrepareCommitsTranscriptAuthorityAndOperationAtomicallyAndReplays',
+    'testFreshWorkspaceSessionCASPreparesAndCompletesRealStoredAgentRound',
+    'testDeviceMetadataFirstTransactionAndRelaunchPreserveTranscript',
+    'testDeviceMetadataFailuresPreserveCommittedWALBytes',
+    'testDeviceMetadataReadFailureAndInodeSwapNeverReplaceCommittedWAL',
+    'testWALProtectionUsesFreshFileAttributesForDirectoryAndFile',
+    'testRoundPersistenceDiagnosticsExposeOnlyFixedOperationAndKind',
+    'testRoundV3RejectsCreateAndDispatchWhenRealWALWriteFails',
+    'testFreshWorkspaceRoundCreationFailureDoesNotDispatchProvider',
+    'testToolDefinitionValidationErrorsAreBadArgumentsWithoutLeakingDescription',
+    'testToolDefinitionMappingDoesNotClaimOtherDomainsOrResponseErrors',
 }
 found = {name: [] for name in required}
 def visit(node):
@@ -99,5 +132,5 @@ def visit(node):
 for node in nodes: visit(node)
 if any(results != ['Passed'] for results in found.values()):
     raise SystemExit(f'Release service and storage tests must run and pass; observed: {found}')
-print('Release guest preview and native session storage/restart tests passed.')
+print('Release guest preview, session storage, and real agent persistence tests passed.')
 PY

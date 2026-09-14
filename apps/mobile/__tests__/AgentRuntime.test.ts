@@ -1064,6 +1064,23 @@ test('maps native errors to closed code-only failures', async () => {
   );
 });
 
+test('retains only the fixed diagnostic for a rejected native round', async () => {
+  const diagnostic = 'agent_runtime/v1 operation=complete_agent_round_v2 kind=unavailable';
+  native.complete_agent_round_v2.mockRejectedValueOnce({
+    code: 'E_AGENT_PERSISTENCE', message: `E_AGENT_PERSISTENCE\n${diagnostic}`,
+    nativeStackIOS: ['/private/path'],
+  });
+  await expect(AgentRuntime.completeAgentRoundV2(completeRequest)).rejects.toMatchObject({
+    code: 'E_AGENT_PERSISTENCE', message: 'E_AGENT_PERSISTENCE', diagnostic,
+  });
+  native.complete_agent_round_v2.mockRejectedValueOnce({
+    code: 'E_AGENT_PERSISTENCE', message: `E_AGENT_PERSISTENCE\n${diagnostic}\nprivate details`,
+  });
+  await expect(AgentRuntime.completeAgentRoundV2(completeRequest)).rejects.toMatchObject({
+    code: 'E_AGENT_PERSISTENCE', message: 'E_AGENT_PERSISTENCE', diagnostic: null,
+  });
+});
+
 test.each([
   'E_CONTEXT_CHANGED', 'E_CONTEXT_STORAGE', 'E_CONTEXT_CONSENT_INVALID',
   'E_CONTEXT_SNAPSHOT_MISSING', 'E_CONTEXT_INTEGRITY',

@@ -520,6 +520,30 @@ display, the Markdown subset, credential recovery, workspace create/edit with
 revision protection, and portable-tool receipts. The native Release build and
 the proof verifier remain separate required gates.
 
+The TestFlight Release gate also runs the real first-send storage graph:
+workspace creation, session CAS checkpoints, prepared Agent authority, native
+WAL, round journal, a scripted HTTP response and exact replay without another
+request. Agent WAL protection uses `NSFileManager` for both writing and fresh
+readback, with strict device checks for protection and backup exclusion. Tests
+inject device metadata failures while keeping real file descriptors, inode
+checks and atomic writes, and require the previous committed bytes to survive.
+Simulator and macOS results do not establish the state of an existing device's
+storage; physical-device reports still need confirmation.
+
+Run this graph with the production `RISH_GUEST_CGI_ENABLED=1` define. The CGI
+tool description previously exceeded the 1,024-character transport limit,
+rejecting every Agent request that advertised it before HTTP dispatch. Keep
+descriptions within that bound and test the actual capability-filtered tool
+set. Round-create and dispatch failures are also injected into the real WAL:
+an uncommitted in-memory row must never be returned as a successful write or
+permit a provider request.
+
+For a native `complete_agent_round_v2` persistence rejection, error details
+include a fixed diagnostic marker distinguishing storage failure, unavailable
+dependencies and an exception. This marker is transient display information;
+it never changes persisted failure codes or recovery authority and contains no
+raw native error message, exception reason, path or credential.
+
 ## What is still missing
 
 - The complete `local_harness` qualification and full upstream Harness

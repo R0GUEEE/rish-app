@@ -14,12 +14,14 @@ import type { AgentCapability, AgentConversationGrantV2 } from '../state';
 import { useAppPresentation } from '../presentation/AppPresentation';
 import type { ThemePalette } from '../theme';
 import { AppIcon } from './AppIcon';
+import {
+  AGENT_POLICY_TOOLS,
+  agentToolAccess,
+  type AgentPolicyAccess,
+  type PolicyTool,
+} from './agent-policy-projection';
 
-export type AgentPolicyAccess =
-  | 'auto'
-  | 'conversation_confirm'
-  | 'confirm_once'
-  | 'durable_deny';
+export { agentToolAccess, type AgentPolicyAccess } from './agent-policy-projection';
 
 export type AgentPolicyBudget = {
   readonly max_single_write_bytes: number;
@@ -32,42 +34,6 @@ export const AGENT_POLICY_DEFAULT_BUDGET: AgentPolicyBudget = {
   max_batch_write_bytes: 524288,
   max_attempt_write_bytes: 4194304,
 };
-
-const POLICY_TOOLS = [
-  'list_dir',
-  'read_file',
-  'write_file',
-  'git_status',
-  'git_commit',
-  'git_push',
-  'start_guest_cgi',
-  'stop_guest_cgi',
-] as const;
-
-type PolicyTool = (typeof POLICY_TOOLS)[number];
-
-/**
- * Effective per-tool access for one capability set, mirroring the native
- * capability-filter matrix: reads and git_status are automatic, writes and
- * git commits need conversation confirmation, git push is confirm-once, and
- * anything outside the granted capabilities is durably denied.
- */
-export function agentToolAccess(
-  capabilities: readonly AgentCapability[],
-): Record<PolicyTool, AgentPolicyAccess> {
-  const has = (capability: AgentCapability): boolean =>
-    capabilities.includes(capability);
-  return {
-    list_dir: has('file_read') ? 'auto' : 'durable_deny',
-    read_file: has('file_read') ? 'auto' : 'durable_deny',
-    write_file: has('file_write') ? 'conversation_confirm' : 'durable_deny',
-    git_status: has('git_status') ? 'auto' : 'durable_deny',
-    git_commit: has('git_commit') ? 'conversation_confirm' : 'durable_deny',
-    git_push: has('git_push') ? 'confirm_once' : 'durable_deny',
-    start_guest_cgi: has('guest_service') ? 'conversation_confirm' : 'durable_deny',
-    stop_guest_cgi: has('guest_service') ? 'conversation_confirm' : 'durable_deny',
-  };
-}
 
 function formatBytes(bytes: number): string {
   if (bytes < 1024) return `${bytes} B`;
@@ -94,6 +60,8 @@ function capabilityLabel(capability: AgentCapability): string {
 
 function accessKey(access: AgentPolicyAccess): string {
   switch (access) {
+    case 'unverified':
+      return 'runtime.unverified';
     case 'auto':
       return 'agent.policy.access.auto';
     case 'conversation_confirm':
@@ -107,6 +75,8 @@ function accessKey(access: AgentPolicyAccess): string {
 
 function accessBodyKey(access: AgentPolicyAccess): string {
   switch (access) {
+    case 'unverified':
+      return 'agent.policy.serviceUnverifiedBody';
     case 'auto':
       return 'agent.policy.access.autoBody';
     case 'conversation_confirm':
@@ -143,6 +113,8 @@ type Props = {
   visible: boolean;
   workspaceName: string | null;
   capabilities: readonly AgentCapability[];
+  guestServiceVerified?: boolean;
+  gitProjectRequired?: boolean;
   budget: AgentPolicyBudget;
   grants: readonly AgentConversationGrantV2[];
   revokeBusy: boolean;
@@ -162,6 +134,8 @@ export function AgentPolicySheet({
   visible,
   workspaceName,
   capabilities,
+  guestServiceVerified = false,
+  gitProjectRequired = false,
   budget,
   grants,
   revokeBusy,
@@ -176,7 +150,7 @@ export function AgentPolicySheet({
   // without ever covering the whole screen.
   const scrollMaxHeight = Math.max(320, Math.min(windowHeight * 0.66, 720));
   if (!visible) return null;
-  const access = agentToolAccess(capabilities);
+  const access = agentToolAccess(capabilities, guestServiceVerified);
   return (
     <Modal
       animationType="fade"
@@ -238,8 +212,13 @@ export function AgentPolicySheet({
                 ))}
               </View>
               <Text style={styles.sectionLabel}>{t('agent.policy.toolAccess')}</Text>
+              {gitProjectRequired && (
+                <Text style={styles.toolBody} testID="agent-policy-git-project-required">
+                  {t('agent.policy.gitProjectRequired')}
+                </Text>
+              )}
               <View testID="agent-policy-tools">
-                {POLICY_TOOLS.map(tool => (
+                {AGENT_POLICY_TOOLS.map(tool => (
                   <View key={tool} style={styles.toolRow}>
                     <View style={styles.toolCopy}>
                       <Text style={styles.toolName}>
@@ -254,6 +233,7 @@ export function AgentPolicySheet({
                         styles.accessBadge,
                         access[tool] === 'durable_deny' && styles.accessDenied,
                         access[tool] === 'auto' && styles.accessAuto,
+                        access[tool] === 'unverified' && styles.accessUnverified,
                       ]}
                     >
                       {t(accessKey(access[tool]) as never)}
@@ -448,6 +428,10 @@ const createStyles = (colors: ThemePalette) =>
     accessDenied: {
       color: colors.danger,
       borderColor: colors.danger,
+    },
+    accessUnverified: {
+      color: colors.muted,
+      borderColor: colors.line,
     },
     budgetRow: { flexDirection: 'row', gap: 8 },
     budgetCell: {

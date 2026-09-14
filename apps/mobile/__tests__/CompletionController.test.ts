@@ -3041,6 +3041,29 @@ describe('project Agent completion controller', () => {
     expect(conversation.attempts[0]?.rounds.every(round => round.harnessId === 'dsh')).toBe(true);
   });
 
+  test('keeps rejected round diagnostics in memory and clears them on recovery', async () => {
+    const store = agentStore();
+    const conversationId = store.getState().selectedConversationId!;
+    const runtime = makeRuntime([]);
+    const diagnostic = 'agent_runtime/v1 operation=complete_agent_round_v2 kind=exception';
+    (runtime.completeAgentRoundV2 as jest.Mock).mockRejectedValueOnce({
+      code: 'E_AGENT_PERSISTENCE', message: `E_AGENT_PERSISTENCE\n${diagnostic}`,
+    });
+    const controller = agentController(store, runtime, committedPersistence(store));
+    const result = await controller.send({ conversationId, text: 'test', attachments: [] });
+    expect(result).toMatchObject({ status: 'retryable', code: 'E_AGENT_PERSISTENCE' });
+    expect(controller.getState()).toMatchObject({
+      phase: 'resume_available', failureCode: 'E_AGENT_PERSISTENCE',
+      failureDiagnostic: diagnostic,
+    });
+    expect(store.serialize()).not.toContain('agent_runtime/v1');
+    const attemptId = controller.getState().attemptId!;
+    (runtime.queryAgentAttempt as jest.Mock).mockRejectedValueOnce({ code: 'E_AGENT_CONFLICT' });
+    await controller.retry(conversationId, attemptId);
+    expect(controller.getState().failureDiagnostic).toBeUndefined();
+    expect(store.serialize()).not.toContain('agent_runtime/v1');
+  });
+
   test('keeps a rejected Agent batch recoverable with its native failure code', async () => {
     const store = agentStore();
     const conversationId = store.getState().selectedConversationId!;

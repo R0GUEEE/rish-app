@@ -1,6 +1,11 @@
 import { isHarnessModelId } from '../harness/types';
 import { nativeImplementationAvailable } from './NativeImplementation';
 import { parseProviderBinding } from '../providers/configuration';
+import {
+  agentRuntimeDiagnosticFromError,
+  parseAgentRuntimeDiagnostic,
+  type AgentRuntimeDiagnostic,
+} from './agent-runtime-diagnostic';
 import type { ProviderBinding } from '../providers/configuration';
 import { NativeModules, TurboModuleRegistry } from 'react-native';
 
@@ -1330,11 +1335,14 @@ type AgentBridgeFailureCode = AgentRuntimeFailureCode |
 
 export class AgentRuntimeError extends Error {
   readonly code: AgentBridgeFailureCode;
+  readonly diagnostic: AgentRuntimeDiagnostic | null;
 
-  constructor(code: AgentBridgeFailureCode) {
+  constructor(code: AgentBridgeFailureCode, diagnostic?: AgentRuntimeDiagnostic | null) {
     super(code);
     this.name = 'AgentRuntimeError';
     this.code = code;
+    this.diagnostic = code === 'E_AGENT_PERSISTENCE'
+      ? parseAgentRuntimeDiagnostic(diagnostic) : null;
   }
 }
 
@@ -5625,6 +5633,7 @@ async function invokeNative<Request, Result>(
   } catch (error) {
     throw new AgentRuntimeError(
       nativeFailureCode(error, 'E_AGENT_PERSISTENCE'),
+      selector === 'complete_agent_round_v2' ? agentRuntimeDiagnosticFromError(error) : null,
     );
   }
   try {

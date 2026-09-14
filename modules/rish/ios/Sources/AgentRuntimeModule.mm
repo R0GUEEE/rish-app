@@ -216,6 +216,12 @@ static NSDictionary *DSHRuntimeContextBundle(
 }
 
 static NSString *DSHRuntimeErrorCode(NSError *error) {
+  // DSHCompletionToolsV2FromArray uses 2001...2008 only for local tool
+  // definitions. Its response errors (2101+) are a separate failure family.
+  if ([error.domain isEqual:@"DSHCompletionV2Error"] &&
+      error.code >= 2001 && error.code <= 2008) {
+    return @"E_AGENT_BAD_ARGUMENTS";
+  }
   // Context-service error numbers are a different enum from Agent WAL errors.
   // Preserve value-free provenance rather than reporting storage as bad args.
   if ([error.domain isEqual:DSHProjectContextServiceErrorDomain]) {
@@ -249,6 +255,22 @@ static NSString *DSHRuntimeErrorCode(NSError *error) {
       return @"E_AGENT_PERSISTENCE";
   }
   return @"E_AGENT_PERSISTENCE";
+}
+
+// Only fixed, display-only provenance crosses the bridge. Never include an
+// NSError description/domain/userInfo or an NSException name/reason.
+static NSString *DSHRuntimeFailureMessage(NSString *code, NSString *operation,
+                                          NSError *error, BOOL exceptionCaught) {
+  if (![code isEqual:@"E_AGENT_PERSISTENCE"] ||
+      ![operation isEqual:@"complete_agent_round_v2"]) return code;
+  NSString *kind = @"unknown";
+  if (exceptionCaught) kind = @"exception";
+  else if ([error.domain isEqual:DSHAgentNativeStoreErrorDomain]) {
+    if (error.code == DSHAgentNativeStoreErrorPersistence) kind = @"persistence";
+    else if (error.code == DSHAgentNativeStoreErrorUnavailable) kind = @"unavailable";
+  }
+  return [NSString stringWithFormat:
+      @"E_AGENT_PERSISTENCE\nagent_runtime/v1 operation=complete_agent_round_v2 kind=%@", kind];
 }
 
 /// Round preview events (see DSHAgentProviderRoundService.previewSink).
@@ -443,11 +465,13 @@ RCT_EXPORT_MODULE(AgentRuntime)
     CFAbsoluteTime began = CFAbsoluteTimeGetCurrent();
     NSError *invokeError = error;
     NSDictionary *result = nil;
+    BOOL exceptionCaught = NO;
     @try {
       result = coordinator == nil ? nil : block(coordinator, request, &invokeError);
       result = result == nil ? nil : DSHAgentImmutableJSONCopy(result, &invokeError);
     } @catch (__unused NSException *exception) {
       result = nil;
+      exceptionCaught = YES;
       invokeError = DSHAgentNativeStoreError(DSHAgentNativeStoreErrorPersistence);
     }
     os_log(OS_LOG_DEFAULT,
@@ -457,7 +481,8 @@ RCT_EXPORT_MODULE(AgentRuntime)
     if (![result isKindOfClass:NSDictionary.class]) {
       NSString *code = coordinator == nil ? @"E_AGENT_NATIVE" :
           DSHRuntimeErrorCode(invokeError);
-      if (reject != nil) reject(code, code, nil);
+      if (reject != nil) reject(code,
+          DSHRuntimeFailureMessage(code, name, invokeError, exceptionCaught), nil);
     } else if (resolve != nil) {
       resolve(result);
     }

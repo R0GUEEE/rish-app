@@ -2534,4 +2534,365 @@ static NSDictionary *DSHProviderSmokeQueryRequest(NSDictionary *root,
   XCTAssertEqual([DSHProviderURLProtocol requestCount], 1u);
   [session invalidateAndCancel]; [defaults removePersistentDomainForName:suite];
 }
+
+// The older "real WAL" smoke test substitutes prepared authority. This case
+// exercises the actual first-send storage graph, including the session proof
+// the production prepared store reads before and after each WAL operation.
+- (void)testFreshWorkspaceSessionCASPreparesAndCompletesRealStoredAgentRound {
+  [self runFreshWorkspaceRoundFailingWALWrite:0];
+}
+
+- (void)testFreshWorkspaceRoundCreationFailureDoesNotDispatchProvider {
+  [self runFreshWorkspaceRoundFailingWALWrite:2];
+}
+
+- (void)runFreshWorkspaceRoundFailingWALWrite:(NSUInteger)failedWrite {
+  [DSHProviderURLProtocol reset];
+  NSURL *testRoot = [NSURL fileURLWithPath:[NSTemporaryDirectory()
+      stringByAppendingPathComponent:NSUUID.UUID.UUIDString] isDirectory:YES];
+  NSURLSession *session = nil;
+  @try {
+    NSURL *documents = [testRoot URLByAppendingPathComponent:@"Documents" isDirectory:YES];
+    XCTAssertTrue([NSFileManager.defaultManager createDirectoryAtURL:documents
+        withIntermediateDirectories:YES attributes:nil error:nil]);
+    NSURL *privateRoot = [testRoot URLByAppendingPathComponent:@"workspaces" isDirectory:YES];
+    XCTAssertTrue([NSFileManager.defaultManager createDirectoryAtURL:privateRoot
+        withIntermediateDirectories:YES attributes:@{ NSFilePosixPermissions : @0700 } error:nil]);
+    DSHLocalWorkspaceAccess *workspaces = [[DSHLocalWorkspaceAccess alloc]
+        initWithPrivateRootURL:privateRoot
+        documentsRootURL:documents clock:^NSDate * { return NSDate.date; }
+        UUIDGenerator:^NSString * { return NSUUID.UUID.UUIDString.lowercaseString; }
+        legacyResolver:^BOOL(__unused NSString *projectId, __unused NSDictionary **evidence,
+                              __unused NSError **error) { return NO; } faultHook:nil];
+    NSError *error = nil;
+    XCTAssertTrue([workspaces ensurePrivateLayoutWithError:&error], @"workspace layout: %@", error);
+    XCTAssertNil(error);
+    NSDictionary *workspace = [workspaces createRishOwnedWorkspaceWithDisplayName:@"demo"
+        operationId:NSUUID.UUID.UUIDString.lowercaseString error:&error];
+    XCTAssertNotNil(workspace, @"create workspace: %@", error);
+    if (workspace == nil) return;
+    DSHAgentRootResolver *resolver = [[DSHAgentRootResolver alloc]
+        initWithWorkspaceAccess:workspaces projectAccess:nil];
+    NSDictionary *root = [resolver resolveRootForWorkspaceId:workspace[@"workspace_id"]
+        projectId:nil bindingRevision:workspace[@"binding_revision"] error:&error];
+    XCTAssertNotNil(root, @"resolve workspace: %@", error);
+    if (root == nil) return;
+    // Query the compiled native registry: the Pods target and this XCTest
+    // target need not receive the same preprocessor feature definitions.
+    DSHAgentToolRegistry *nativeRegistry = [[DSHAgentToolRegistry alloc] init];
+    BOOL guestToolsAvailable = [nativeRegistry nativeDescriptorForToolName:@"start_guest_cgi"
+        error:nil] != nil;
+    if (guestToolsAvailable) {
+      XCTAssertTrue([root[@"capabilities"] containsObject:@"guest_service"]);
+    }
+
+    DSHSessionSnapshotStore *sessions = [[DSHSessionSnapshotStore alloc]
+        initWithRootURL:[testRoot URLByAppendingPathComponent:@"sessions"]];
+    __block NSUInteger writesUntilFault = 0;
+    __block NSUInteger injectedFailures = 0;
+    DSHAgentNativeWAL *wal = [[DSHAgentNativeWAL alloc]
+        initWithRootURL:[testRoot URLByAppendingPathComponent:@"agent"]
+        clock:^NSDate * { return NSDate.date; }
+        identifierGenerator:^NSString * { return NSUUID.UUID.UUIDString.lowercaseString; }
+        faultHook:^BOOL(NSString *stage) {
+          if (writesUntilFault > 0 && [stage isEqualToString:@"wal.before_prepare"] &&
+              --writesUntilFault == 0) {
+            injectedFailures += 1;
+            return NO;
+          }
+          return YES;
+        }];
+    DSHAgentTranscriptStore *transcripts = [[DSHAgentTranscriptStore alloc] initWithWAL:wal];
+    DSHAgentPreparedAttemptStore *prepared = [[DSHAgentPreparedAttemptStore alloc]
+        initWithWAL:wal rootResolver:resolver sessionSnapshotStore:sessions transcriptStore:transcripts];
+    DSHAgentRoundJournal *rounds = [[DSHAgentRoundJournal alloc] initWithWAL:wal];
+    NSURL *fixtureURL = [[NSBundle bundleForClass:self.class]
+        URLForResource:@"agent-begin-round-session" withExtension:@"json"];
+    XCTAssertNotNil(fixtureURL);
+    if (fixtureURL == nil) return;
+    NSMutableDictionary *candidate = [NSJSONSerialization JSONObjectWithData:
+        [NSData dataWithContentsOfURL:fixtureURL] options:NSJSONReadingMutableContainers error:&error];
+    XCTAssertNotNil(candidate);
+    if (candidate == nil) return;
+    NSMutableDictionary *conversation = candidate[@"conversations"][0];
+    NSMutableDictionary *attempt = conversation[@"attempts"][0];
+    NSMutableDictionary *journal = [attempt[@"agent"] mutableCopy];
+    NSArray *beginEvents = [candidate[@"session_events"] copy];
+    NSString *prepareOperation = beginEvents[0][@"event_id"];
+    NSString *roundOperation = beginEvents[1][@"event_id"];
+    NSString *roundId = journal[@"round_lineage"][@"round_id"];
+    NSArray *visible = @[@{ @"role" : @"user", @"content" : @"测试", @"attachments" : @[] }];
+    NSString *visibleDigest = DSHAgentHJ(@"visible-history", @{ @"messages" : visible }, nil);
+    for (NSMutableDictionary *message in conversation[@"messages"]) message[@"text"] = @"测试";
+    for (NSMutableDictionary *message in candidate[@"messages"]) message[@"text"] = @"测试";
+    conversation[@"title"] = @"测试";
+    conversation[@"project_id"] = NSNull.null;
+    conversation[@"project_context"] = NSNull.null;
+    conversation[@"runtime_context_id"] = NSNull.null;
+    conversation[@"workspace_id"] = workspace[@"workspace_id"];
+    conversation[@"workspace_binding"] = @{
+      @"schema_version" : @1, @"workspace_id" : workspace[@"workspace_id"],
+      @"binding_revision" : workspace[@"binding_revision"], @"project_id" : NSNull.null,
+    };
+    attempt[@"workspace_id"] = workspace[@"workspace_id"];
+    attempt[@"workspace_binding_revision"] = workspace[@"binding_revision"];
+    attempt[@"context_disposition"] = @"unbound";
+    attempt[@"context_project_id"] = NSNull.null;
+    attempt[@"project_context"] = NSNull.null;
+    attempt[@"status"] = @"prepared";
+    attempt[@"visible_history_sha256"] = NSNull.null;
+    attempt[@"active_round"] = NSNull.null;
+    attempt[@"journal_revision"] = @0;
+    attempt[@"agent"] = NSNull.null;
+    candidate[@"session_events"] = @[];
+
+    // Snapshot bridge inputs and outputs are immutable Foundation JSON. Round
+    // trip every request as the RN bridge does instead of passing test-owned
+    // NSMutableDictionary instances into strict native request validators.
+    NSDictionary *(^immutable)(NSDictionary *) = ^NSDictionary *(NSDictionary *value) {
+      NSData *bytes = [NSJSONSerialization dataWithJSONObject:value options:0 error:nil];
+      return [NSJSONSerialization JSONObjectWithData:bytes options:0 error:nil];
+    };
+    __block NSDictionary *snapshot = nil;
+    BOOL (^commitCandidate)(void) = ^BOOL {
+      NSError *commitError = nil;
+      NSString *json = [[NSString alloc] initWithData:
+          [NSJSONSerialization dataWithJSONObject:candidate options:0 error:&commitError]
+          encoding:NSUTF8StringEncoding];
+      NSDictionary *expected = snapshot == nil
+          ? @{ @"schema_version" : @1, @"kind" : @"missing" }
+          : @{ @"schema_version" : @1, @"kind" : @"present", @"snapshot" : snapshot };
+      NSDictionary *result = [sessions casPersistSessionWithRequest:immutable(@{
+        @"schema_version" : @1, @"operation_id" : NSUUID.UUID.UUIDString.lowercaseString,
+        @"expected" : expected, @"candidate_json" : json,
+      }) error:&commitError];
+      XCTAssertNil(commitError, @"session checkpoint: %@", commitError);
+      XCTAssertEqualObjects(result[@"status"], @"committed");
+      snapshot = result[@"snapshot"];
+      return snapshot != nil;
+    };
+    NSDictionary *(^cas)(NSNumber *, NSNumber *) = ^NSDictionary *(NSNumber *generation, NSNumber *revision) {
+      return @{ @"schema_version" : @1, @"conversation_id" : conversation[@"id"],
+        @"task_id" : attempt[@"turn_id"], @"attempt_id" : attempt[@"attempt_id"],
+        @"expected_controller_generation" : generation, @"expected_journal_revision" : revision,
+        @"expected_session_generation" : snapshot[@"generation"],
+        @"expected_session_sha256" : snapshot[@"session_sha256"] };
+    };
+    NSDictionary *(^checkpoint)(NSNumber *) = ^NSDictionary *(NSNumber *revision) {
+      return @{ @"schema_version" : @1, @"journal_revision" : revision,
+        @"session_generation" : snapshot[@"generation"], @"session_sha256" : snapshot[@"session_sha256"] };
+    };
+    if (!commitCandidate()) return;
+    NSDictionary *preparedResult = [prepared prepareAgentAttemptWithRequest:immutable(@{
+      @"schema_version" : @2, @"operation_id" : prepareOperation,
+      @"controller_cas" : cas(@0, @0), @"committed_checkpoint" : checkpoint(@0),
+      @"task_id" : attempt[@"turn_id"], @"conversation_id" : conversation[@"id"],
+      @"attempt_id" : attempt[@"attempt_id"], @"workspace_id" : workspace[@"workspace_id"],
+      @"project_id" : NSNull.null, @"workspace_binding_revision" : workspace[@"binding_revision"],
+      @"transport_schema_version" : @2, @"harness_id" : @"dsh", @"model" : @"deepseek-v4-flash",
+      @"thinking_mode" : @"high", @"visible_message_ids" : attempt[@"visible_message_ids"],
+      @"visible_history_sha256" : visibleDigest, @"visible_message_count" : @1,
+      @"project_context_sha256" : NSNull.null, @"registry_version" : @1,
+      @"expected_policy_version" : NSNull.null, @"expected_transcript" : NSNull.null,
+    }) error:&error];
+    XCTAssertNil(error, @"prepare agent: %@", error);
+    XCTAssertEqualObjects(preparedResult[@"status"], @"prepared");
+    NSDictionary *projection = preparedResult[@"attempt"];
+    if (projection == nil) return;
+    if (guestToolsAvailable) {
+      XCTAssertTrue([projection[@"root"][@"capabilities"] containsObject:@"guest_service"]);
+      NSArray *names = [projection[@"registry"][@"tools"] valueForKey:@"name"];
+      XCTAssertTrue([names containsObject:@"start_guest_cgi"]);
+      XCTAssertTrue([names containsObject:@"stop_guest_cgi"]);
+    }
+    journal[@"phase"] = projection[@"phase"];
+    journal[@"controller_generation"] = projection[@"controller_generation"];
+    journal[@"policy"] = projection[@"policy"];
+    journal[@"root"] = projection[@"root"];
+    journal[@"tool_registry_version"] = projection[@"registry"][@"registry_version"];
+    journal[@"toolset_sha256"] = projection[@"registry"][@"toolset_sha256"];
+    journal[@"transcript"] = projection[@"transcript"];
+    journal[@"round_lineage"] = NSNull.null;
+    attempt[@"agent"] = journal;
+    attempt[@"visible_history_sha256"] = visibleDigest;
+    attempt[@"journal_revision"] = @1;
+    candidate[@"session_events"] = @[beginEvents[0]];
+    if (!commitCandidate()) return;
+
+    journal[@"phase"] = @"round_in_flight";
+    journal[@"controller_generation"] = @1;
+    journal[@"round_lineage"] = @{ @"schema_version" : @2, @"round_id" : roundId,
+      @"round_index" : @0, @"launch_attempt" : @1, @"status" : @"active", @"native_row_revision" : NSNull.null };
+    attempt[@"status"] = @"sending";
+    attempt[@"journal_revision"] = @2;
+    attempt[@"active_round"] = @{ @"round_id" : roundId, @"round_index" : @0 };
+    candidate[@"session_events"] = beginEvents;
+    if (!commitCandidate()) return;
+    XCTAssertEqualObjects(snapshot[@"generation"], @3);
+
+    NSURLSessionConfiguration *configuration = NSURLSessionConfiguration.ephemeralSessionConfiguration;
+    configuration.protocolClasses = @[DSHProviderURLProtocol.class];
+    session = [NSURLSession sessionWithConfiguration:configuration];
+    DshProviderTransport *transport = [[DshProviderTransport alloc] initWithSession:session
+        uuidGenerator:^NSString * { return NSUUID.UUID.UUIDString.lowercaseString; }
+        monotonicClock:^NSTimeInterval { return NSProcessInfo.processInfo.systemUptime; }];
+    [DSHProviderURLProtocol setHandler:^(NSURLProtocol *protocol, NSURLRequest *request) {
+      NSDictionary *body = [NSJSONSerialization JSONObjectWithData:
+          DSHProviderCapturedRequestBody(request) options:0 error:nil];
+      XCTAssertEqualObjects(body[@"messages"][0][@"content"], @"测试");
+      if (guestToolsAvailable) {
+        NSArray *toolNames = [body[@"tools"] valueForKeyPath:@"function.name"];
+        XCTAssertTrue([toolNames containsObject:@"start_guest_cgi"]);
+        XCTAssertTrue([toolNames containsObject:@"stop_guest_cgi"]);
+      }
+      NSData *data = [NSJSONSerialization dataWithJSONObject:@{
+        @"id" : @"first-send-response", @"model" : @"deepseek-v4-flash",
+        @"choices" : @[@{ @"finish_reason" : @"stop", @"message" : @{
+          @"role" : @"assistant", @"content" : @"测试成功", @"reasoning_content" : @"" } }],
+      } options:0 error:nil];
+      NSHTTPURLResponse *response = [[NSHTTPURLResponse alloc] initWithURL:request.URL
+          statusCode:200 HTTPVersion:@"HTTP/1.1" headerFields:@{ @"Content-Type" : @"application/json" }];
+      [protocol.client URLProtocol:protocol didReceiveResponse:response cacheStoragePolicy:NSURLCacheStorageNotAllowed];
+      [protocol.client URLProtocol:protocol didLoadData:data];
+      [protocol.client URLProtocolDidFinishLoading:protocol];
+    }];
+    DSHAgentProviderRoundService *service = [[DSHAgentProviderRoundService alloc]
+        initWithWAL:wal preparedStore:prepared transcripts:transcripts rounds:rounds transport:transport
+        credentialProvider:^NSString *(__unused NSString *harness, NSUInteger *generation) {
+          if (generation != nullptr) *generation = 7;
+          return @"test-credential";
+        } visibleHistoryProvider:^NSArray *(__unused NSDictionary *authority, __unused NSError **historyError) {
+          return visible;
+        }];
+    NSDictionary *request = immutable(@{
+      @"schema_version" : @2, @"operation_id" : roundOperation,
+      @"controller_cas" : cas(@1, @2), @"committed_checkpoint" : checkpoint(@2),
+      @"task_id" : attempt[@"turn_id"], @"conversation_id" : conversation[@"id"],
+      @"attempt_id" : attempt[@"attempt_id"], @"round_id" : roundId, @"round_index" : @0,
+      @"launch_attempt" : @1, @"expected_round_revision" : @0,
+      @"transport_schema_version" : @2, @"harness_id" : @"dsh", @"model" : @"deepseek-v4-flash",
+      @"thinking_mode" : @"high", @"visible_history_sha256" : visibleDigest, @"visible_message_count" : @1,
+      @"project_context_sha256" : NSNull.null, @"transcript" : projection[@"transcript"],
+      @"root" : root, @"registry_version" : projection[@"registry"][@"registry_version"],
+      @"toolset_sha256" : projection[@"registry"][@"toolset_sha256"],
+    });
+    // After preparation the first WAL write records the operation, and the
+    // second inserts the round. Fail only that round write, before any rename.
+    writesUntilFault = failedWrite;
+    NSDictionary *result = [service completeAgentRoundV2WithRequest:request error:&error];
+    if (failedWrite > 0) {
+      XCTAssertEqual(injectedFailures, 1U);
+      XCTAssertNil(result);
+      XCTAssertEqual(error.code, DSHAgentNativeStoreErrorPersistence);
+      XCTAssertEqual([DSHProviderURLProtocol requestCount], 0U,
+          @"an uncommitted round cannot dispatch the provider");
+      error = nil;
+      NSDictionary *durable = [wal snapshotWithError:&error];
+      XCTAssertNotNil(durable, @"previous WAL remains readable: %@", error);
+      XCTAssertNil(error);
+      XCTAssertEqual([(NSArray *)durable[@"rounds"] count], 0U);
+      XCTAssertEqual([(NSArray *)durable[@"transcripts"][0][@"messages"] count], 0U);
+      return;
+    }
+    XCTAssertNil(error, @"complete first round: %@", error);
+    XCTAssertEqualObjects(result[@"status"], @"completed");
+    if (![result[@"status"] isEqualToString:@"completed"]) return;
+    XCTAssertEqualObjects(result[@"outcome"][@"text"], @"测试成功");
+    XCTAssertEqual([DSHProviderURLProtocol requestCount], 1U);
+    NSDictionary *stored = [wal snapshotWithError:&error];
+    XCTAssertNil(error);
+    XCTAssertEqualObjects([(NSArray *)stored[@"rounds"] firstObject][@"state"], @"completed");
+    XCTAssertEqual([(NSArray *)stored[@"transcripts"][0][@"messages"] count], 1U);
+    XCTAssertEqualObjects([service completeAgentRoundV2WithRequest:request error:&error], result);
+    XCTAssertEqual([DSHProviderURLProtocol requestCount], 1U, @"replay must not send a second request");
+  } @finally {
+    [session invalidateAndCancel];
+    [DSHProviderURLProtocol reset];
+    [NSFileManager.defaultManager removeItemAtURL:testRoot error:nil];
+  }
+}
+
+// Both insert and dispatch produce an in-memory result before the enclosing
+// WAL rename. A failed write must never publish that result as durable proof.
+- (void)testRoundV3RejectsCreateAndDispatchWhenRealWALWriteFails {
+  NSURL *walRoot = [NSURL fileURLWithPath:[NSTemporaryDirectory()
+      stringByAppendingPathComponent:NSUUID.UUID.UUIDString]];
+  __block BOOL failNextWrite = NO;
+  __block NSUInteger injectedFailures = 0;
+  DSHAgentNativeWAL *wal = [[DSHAgentNativeWAL alloc]
+      initWithRootURL:walRoot clock:^NSDate * { return NSDate.date; }
+      identifierGenerator:^NSString * { return NSUUID.UUID.UUIDString.lowercaseString; }
+      faultHook:^BOOL(NSString *stage) {
+        if (failNextWrite && [stage isEqualToString:@"wal.before_prepare"]) {
+          failNextWrite = NO;
+          injectedFailures += 1;
+          return NO;
+        }
+        return YES;
+      }];
+  @try {
+    NSError *error = nil;
+    NSDictionary *root = DSHProviderSmokeRoot();
+    DSHAgentTranscriptStore *transcripts = [[DSHAgentTranscriptStore alloc] initWithWAL:wal];
+    NSDictionary *transcript = [transcripts createAgentTranscriptWithRequest:@{
+      @"schema_version" : @1, @"attempt_id" : DSHProviderSmokeAttempt, @"root" : root,
+    } error:&error];
+    XCTAssertNotNil(transcript, @"%@", error);
+    if (transcript == nil) return;
+    NSString *nativeTaskId = NSUUID.UUID.UUIDString.lowercaseString;
+    XCTAssertTrue([wal registerNativeTaskId:nativeTaskId error:&error]);
+    NSDictionary *locator = @{ @"schema_version" : @1, @"task_id" : DSHProviderSmokeTask,
+      @"attempt_id" : DSHProviderSmokeAttempt, @"round_id" : DSHProviderSmokeRound, @"round_index" : @0 };
+    NSDictionary *owner = @{ @"schema_version" : @1, @"task_id" : DSHProviderSmokeTask,
+      @"launch_id" : wal.launchId, @"native_task_id" : nativeTaskId, @"owner_generation" : @1,
+      @"heartbeat_at" : wal.currentTimestamp };
+    NSDictionary *row = @{ @"schema_version" : @3, @"locator" : locator, @"row_revision" : @1,
+      @"root_fingerprint_sha256" : root[@"root_fingerprint_sha256"], @"binding_revision" : @7,
+      @"request_sha256" : DSHProviderSmokeDigest, @"transcript_before" : transcript,
+      @"launch_attempt" : @1, @"state" : @"in_flight", @"owner" : owner,
+      @"failure_code" : NSNull.null, @"completion_receipt" : NSNull.null,
+      @"transcript_after" : NSNull.null, @"calls" : @[], @"batch_class" : NSNull.null,
+      @"executable_call_count" : @0, @"denied_call_count" : @0, @"terminal_kind" : NSNull.null,
+      @"created_at" : wal.currentTimestamp, @"updated_at" : wal.currentTimestamp };
+    NSDictionary *insert = @{ @"schema_version" : @1, @"locator" : locator, @"expected_absent" : @YES,
+      @"expected_transcript_generation" : transcript[@"generation"],
+      @"expected_transcript_sha256" : transcript[@"transcript_sha256"],
+      @"expected_root_fingerprint_sha256" : root[@"root_fingerprint_sha256"],
+      @"expected_binding_revision" : @7 };
+    DSHAgentRoundJournal *rounds = [[DSHAgentRoundJournal alloc] initWithWAL:wal];
+    NSDictionary *beforeInsert = [wal snapshotWithError:&error];
+    XCTAssertNotNil(beforeInsert);
+    failNextWrite = YES;
+    NSDictionary *failedInsert = [rounds createAgentRoundV3WithInsertCAS:insert exactRoundStart:row error:&error];
+    XCTAssertNil(failedInsert, @"an uncommitted round must not be reported as inserted");
+    XCTAssertEqual(error.code, DSHAgentNativeStoreErrorPersistence);
+    XCTAssertEqual(injectedFailures, 1U);
+    error = nil;
+    XCTAssertEqualObjects([wal snapshotWithError:&error], beforeInsert);
+    XCTAssertNil(error, @"previous WAL must remain readable");
+    NSDictionary *inserted = [rounds createAgentRoundV3WithInsertCAS:insert exactRoundStart:row error:&error];
+    XCTAssertNil(error);
+    XCTAssertEqualObjects(inserted[@"status"], @"inserted");
+    if (inserted == nil) return;
+
+    NSDictionary *dispatchCAS = DSHProviderRoundCASForRow(inserted[@"row"]);
+    NSDictionary *beforeDispatch = [wal snapshotWithError:&error];
+    failNextWrite = YES;
+    NSDictionary *failedDispatch = [rounds markAgentRoundV3DispatchedWithCAS:dispatchCAS error:&error];
+    XCTAssertNil(failedDispatch, @"an uncommitted dispatch must not permit HTTP dispatch");
+    XCTAssertEqual(error.code, DSHAgentNativeStoreErrorPersistence);
+    XCTAssertEqual(injectedFailures, 2U);
+    error = nil;
+    XCTAssertEqualObjects([wal snapshotWithError:&error], beforeDispatch);
+    XCTAssertNil(error);
+    XCTAssertEqualObjects([wal dispatchStateForKind:@"round" locator:locator error:&error], @"not_dispatched");
+    NSDictionary *dispatched = [rounds markAgentRoundV3DispatchedWithCAS:dispatchCAS error:&error];
+    XCTAssertNil(error);
+    XCTAssertNotNil(dispatched);
+    XCTAssertEqualObjects([wal dispatchStateForKind:@"round" locator:locator error:&error], @"dispatched");
+    XCTAssertTrue([wal unregisterNativeTaskId:nativeTaskId error:&error]);
+  } @finally {
+    [NSFileManager.defaultManager removeItemAtURL:walRoot error:nil];
+  }
+}
 @end

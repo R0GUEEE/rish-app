@@ -100,7 +100,6 @@ import {
   selectProjectContextSnapshotReferences,
   selectOrderedConversations,
   serializeChatState,
-  type AgentCapability,
   type ChatState,
   type Conversation,
   type AttachmentDescriptor,
@@ -133,6 +132,7 @@ import {
   AgentPolicySheet,
   AGENT_POLICY_DEFAULT_BUDGET,
 } from '../components/AgentPolicySheet';
+import { projectAgentPolicy } from '../components/agent-policy-projection';
 import { QuestionComposer } from '../components/QuestionComposer';
 import { DEFAULT_APPROVAL_TIMEOUT_MS } from '../agent/AgentApprovals';
 import {
@@ -4233,30 +4233,15 @@ export function HomeScreen({
   // Effective policy projection for the read-only Agent policy panel. This
   // is display context only: native revalidates every capability and grant
   // before any effect.
-  const agentPolicyCapabilities: readonly AgentCapability[] = (() => {
-    if (activeWorkspaceId === null) return [];
-    const descriptor = workspaceDescriptors[activeWorkspaceId];
-    const binding = activeConversation?.workspaceBinding ?? null;
-    const projectBound =
-      (binding?.projectId ?? null) !== null ||
-      (activeConversation?.projectId ?? null) !== null;
-    if (descriptor !== undefined) {
-      return [
-        ...(descriptor.capabilities.read ? (['file_read'] as const) : []),
-        ...(descriptor.capabilities.write ? (['file_write'] as const) : []),
-        ...(descriptor.capabilities.git && projectBound
-          ? (['git_status', 'git_commit', 'git_push'] as const)
-          : []),
-      ];
-    }
-    return [
-      'file_read',
-      'file_write',
-      ...(projectBound
-        ? (['git_status', 'git_commit', 'git_push'] as const)
-        : []),
-    ];
-  })();
+  const agentPolicy = projectAgentPolicy({
+    workspaceId: activeWorkspaceId,
+    projectId: activeConversation?.projectId ?? null,
+    binding: activeConversation?.workspaceBinding,
+    descriptor: activeWorkspaceId === null ? undefined : workspaceDescriptors[activeWorkspaceId],
+    attempt: completionState.conversationId === activeConversation?.id
+      ? activeConversation?.attempts.find(attempt => attempt.attemptId === completionState.attemptId)
+      : null,
+  });
   const agentPolicyBudget = (() => {
     const journal = activeConversation?.attempts.find(
       attempt => attempt.agent !== null && attempt.agent !== undefined,
@@ -5914,7 +5899,11 @@ export function HomeScreen({
           {(visibleRequestFailure !== null || storageWarning !== null) && (
             <View style={styles.notice}>
               <RecoveryNotice
-                error={visibleRequestFailure ?? storageWarning ?? ''}
+                error={completionState.conversationId === activeConversation?.id &&
+                  visibleRequestFailure === completionState.failureCode &&
+                  completionState.failureDiagnostic !== undefined
+                  ? `${visibleRequestFailure}\n${completionState.failureDiagnostic}`
+                  : visibleRequestFailure ?? storageWarning ?? ''}
                 message={recoveryCode(visibleRequestFailure ?? storageWarning ?? '') === null
                   ? visibleRequestFailure ?? storageWarning ?? undefined : undefined}
               />
@@ -6248,7 +6237,9 @@ export function HomeScreen({
             ? null
             : workspaceNames[activeWorkspaceId] ?? null
         }
-        capabilities={agentPolicyCapabilities}
+        capabilities={agentPolicy.capabilities}
+        guestServiceVerified={agentPolicy.guestServiceVerified}
+        gitProjectRequired={agentPolicy.gitProjectRequired}
         budget={agentPolicyBudget}
         grants={activeConversation?.agentGrants ?? activeConversation?.agent_grants ?? []}
         revokeBusy={agentPolicyRevokeBusy}

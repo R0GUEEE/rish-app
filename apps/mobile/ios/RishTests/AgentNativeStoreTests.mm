@@ -7,6 +7,115 @@
 
 #include <sys/stat.h>
 
+@interface DSHAgentNativeWAL (ProtectionTesting)
+- (BOOL)requiresWALResourceMetadata;
+- (NSFileManager *)walFileManager;
+- (BOOL)setWALProtectionAtURL:(NSURL *)url error:(NSError **)error;
+- (BOOL)getWALProtectionAtURL:(NSURL *)url value:(id *)value error:(NSError **)error;
+- (BOOL)setWALBackupExcludedAtURL:(NSURL *)url error:(NSError **)error;
+- (BOOL)getWALBackupExcludedAtURL:(NSURL *)url
+                          value:(NSNumber **)value error:(NSError **)error;
+@end
+
+static NSString *DSHWALTestInode(NSString *path) {
+  struct stat metadata = {};
+  if (lstat(path.fileSystemRepresentation, &metadata) != 0) return nil;
+  return [NSString stringWithFormat:@"%llu:%llu",
+      (unsigned long long)metadata.st_dev, (unsigned long long)metadata.st_ino];
+}
+
+// Model the device's protection metadata while executing the production WAL
+// transaction and every real descriptor, mode, no-follow and inode check.
+// Metadata follows inodes across staging rename and a fresh WAL instance.
+@interface DSHWALMetadataFileManager : NSFileManager
+@property(nonatomic, strong) NSMutableDictionary *protections;
+@property(nonatomic, copy) NSString *failure;
+@property(nonatomic, copy) NSString *failureSuffix;
+@property(nonatomic) NSUInteger protectionWrites;
+@property(nonatomic) NSUInteger protectionReads;
+@end
+
+@implementation DSHWALMetadataFileManager
+- (instancetype)init {
+  self = [super init];
+  if (self) _protections = [NSMutableDictionary dictionary];
+  return self;
+}
+- (BOOL)fails:(NSString *)kind path:(NSString *)path {
+  return [self.failure isEqual:kind] && [path hasSuffix:self.failureSuffix ?: @".tmp"];
+}
+- (BOOL)setAttributes:(NSDictionary<NSFileAttributeKey, id> *)attributes
+         ofItemAtPath:(NSString *)path error:(NSError **)error {
+  if (attributes[NSFileProtectionKey] == nil) {
+    return [super setAttributes:attributes ofItemAtPath:path error:error];
+  }
+  self.protectionWrites += 1;
+  if ([self fails:@"protection_write" path:path]) return NO;
+  NSString *identity = DSHWALTestInode(path);
+  if (identity == nil) return NO;
+  self.protections[identity] = attributes[NSFileProtectionKey];
+  return YES;
+}
+- (NSDictionary<NSFileAttributeKey, id> *)attributesOfItemAtPath:(NSString *)path
+                                                       error:(NSError **)error {
+  self.protectionReads += 1;
+  if ([self fails:@"protection_read" path:path]) return nil;
+  NSMutableDictionary *attributes =
+      [[super attributesOfItemAtPath:path error:error] mutableCopy];
+  NSString *identity = DSHWALTestInode(path);
+  if (attributes == nil || identity == nil) return nil;
+  id protection = self.protections[identity];
+  if ([self fails:@"protection_missing" path:path]) protection = nil;
+  if ([self fails:@"protection_wrong" path:path]) protection = NSFileProtectionNone;
+  if (protection == nil) [attributes removeObjectForKey:NSFileProtectionKey];
+  else attributes[NSFileProtectionKey] = protection;
+  return attributes;
+}
+@end
+
+@interface DSHWALDeviceMetadataStore : DSHAgentNativeWAL
+@property(nonatomic, strong) DSHWALMetadataFileManager *metadata;
+@property(nonatomic, strong) NSMutableDictionary *backups;
+@property(nonatomic) BOOL swapStagedInode;
+@property(nonatomic) BOOL didSwap;
+@end
+
+@implementation DSHWALDeviceMetadataStore
+- (BOOL)requiresWALResourceMetadata { return YES; }
+- (NSFileManager *)walFileManager { return self.metadata; }
+- (BOOL)setWALBackupExcludedAtURL:(NSURL *)url error:(NSError **)error {
+  if ([self.metadata fails:@"backup_write" path:url.path]) return NO;
+  if (self.swapStagedInode && [url.lastPathComponent hasSuffix:@".tmp"]) {
+    NSURL *moved = [url URLByAppendingPathExtension:@"swapped"];
+    if (![NSFileManager.defaultManager moveItemAtURL:url toURL:moved error:error] ||
+        ![[NSData dataWithContentsOfURL:moved] writeToURL:url options:0 error:error]) {
+      return NO;
+    }
+    [NSFileManager.defaultManager setAttributes:@{NSFilePosixPermissions : @0600}
+                                  ofItemAtPath:url.path error:error];
+    self.metadata.protections[DSHWALTestInode(url.path)] =
+        NSFileProtectionCompleteUntilFirstUserAuthentication;
+    self.didSwap = YES;
+  }
+  NSString *identity = DSHWALTestInode(url.path);
+  if (identity == nil) return NO;
+  self.backups[identity] = @YES;
+  return YES;
+}
+- (BOOL)getWALBackupExcludedAtURL:(NSURL *)url
+                          value:(NSNumber **)value error:(NSError **)error {
+  (void)error;
+  if (value != nullptr) *value = nil;
+  if ([self.metadata fails:@"backup_read" path:url.path]) return NO;
+  NSString *identity = DSHWALTestInode(url.path);
+  NSNumber *excluded = identity == nil ? nil : self.backups[identity];
+  if ([self.metadata fails:@"backup_missing" path:url.path]) excluded = nil;
+  if ([self.metadata fails:@"backup_wrong" path:url.path]) excluded = @NO;
+  if (value != nullptr) *value = excluded;
+  return YES;
+}
+@end
+
 @interface AgentNativeStoreTests : XCTestCase
 @property(nonatomic, strong) NSURL *rootURL;
 @property(nonatomic, strong) DSHAgentNativeWAL *wal;
@@ -341,6 +450,128 @@
   XCTAssertTrue((metadata.st_mode & 0777) == 0700);
   XCTAssertEqual(lstat(self.wal.walURL.fileSystemRepresentation, &metadata), 0);
   XCTAssertTrue((metadata.st_mode & 0777) == 0600);
+}
+
+- (DSHWALDeviceMetadataStore *)deviceMetadataStore {
+  DSHWALDeviceMetadataStore *store = [[DSHWALDeviceMetadataStore alloc]
+      initWithRootURL:self.rootURL
+      clock:^NSDate * { return [NSDate dateWithTimeIntervalSince1970:1787961600]; }
+      identifierGenerator:^NSString * { return NSUUID.UUID.UUIDString.lowercaseString; }
+      faultHook:nil];
+  store.metadata = [[DSHWALMetadataFileManager alloc] init];
+  store.backups = [NSMutableDictionary dictionary];
+  return store;
+}
+
+- (NSDictionary *)createDeviceMetadataTranscript:(DSHWALDeviceMetadataStore *)wal
+                                           error:(NSError **)error {
+  return [[[DSHAgentTranscriptStore alloc] initWithWAL:wal]
+      createAgentTranscriptWithRequest:@{
+        @"schema_version" : @1,
+        @"attempt_id" : @"22222222-2222-4222-8222-222222222222",
+        @"root" : [self root],
+      } error:error];
+}
+
+- (void)testDeviceMetadataFirstTransactionAndRelaunchPreserveTranscript {
+  // First launch has an existing private parent and neither agent directory nor WAL.
+  XCTAssertTrue([NSFileManager.defaultManager removeItemAtURL:self.rootURL error:nil]);
+  DSHWALDeviceMetadataStore *first = [self deviceMetadataStore];
+  NSError *error = nil;
+  NSDictionary *created = [self createDeviceMetadataTranscript:first error:&error];
+  XCTAssertNotNil(created, @"%@", error);
+  XCTAssertNil(error);
+  NSData *before = [NSData dataWithContentsOfURL:first.walURL];
+  XCTAssertGreaterThan(before.length, 0U);
+  XCTAssertGreaterThan(first.metadata.protectionReads, 0U);
+  XCTAssertGreaterThan(first.metadata.protectionWrites, 0U);
+  DSHWALDeviceMetadataStore *reopened = [self deviceMetadataStore];
+  reopened.metadata = first.metadata;
+  reopened.backups = first.backups;
+  XCTAssertEqualObjects([self createDeviceMetadataTranscript:reopened error:&error], created);
+  XCTAssertNil(error);
+  XCTAssertEqualObjects([NSData dataWithContentsOfURL:reopened.walURL], before);
+  XCTAssertNotNil([reopened snapshotWithError:&error]);
+  XCTAssertNil(error);
+}
+
+- (void)testDeviceMetadataFailuresPreserveCommittedWALBytes {
+  DSHWALDeviceMetadataStore *wal = [self deviceMetadataStore];
+  NSError *error = nil;
+  NSDictionary *created = [self createDeviceMetadataTranscript:wal error:&error];
+  XCTAssertNotNil(created, @"%@", error);
+  NSData *before = [NSData dataWithContentsOfURL:wal.walURL];
+  XCTAssertGreaterThan(before.length, 0U);
+  NSArray *failures = @[@"protection_write", @"protection_read", @"protection_missing",
+      @"protection_wrong", @"backup_write", @"backup_read", @"backup_missing", @"backup_wrong"];
+  DSHAgentTranscriptStore *transcripts = [[DSHAgentTranscriptStore alloc] initWithWAL:wal];
+  NSDictionary *message = @{@"schema_version": @1, @"role": @"assistant",
+      @"round_index": @0, @"content": @"saved reply", @"reasoning_content": @"",
+      @"tool_calls": @[]};
+  for (NSString *failure in failures) {
+    wal.metadata.failure = failure;
+    error = nil;
+    XCTAssertNil([transcripts appendAssistantMessage:message expectedTranscript:created
+        root:[self root] attemptId:@"22222222-2222-4222-8222-222222222222" error:&error],
+        @"%@ must fail", failure);
+    XCTAssertEqual(error.code, DSHAgentNativeStoreErrorPersistence, @"%@", failure);
+    XCTAssertEqualObjects([NSData dataWithContentsOfURL:wal.walURL], before, @"%@", failure);
+    XCTAssertFalse([NSFileManager.defaultManager fileExistsAtPath:
+        [wal.walURL.path stringByAppendingString:@".tmp"]], @"%@", failure);
+    wal.metadata.failure = nil;
+    XCTAssertNotNil([wal snapshotWithError:nil], @"%@", failure);
+  }
+  // The same exact CAS becomes writable after metadata recovery.
+  error = nil;
+  XCTAssertNotNil([transcripts appendAssistantMessage:message expectedTranscript:created
+      root:[self root] attemptId:@"22222222-2222-4222-8222-222222222222" error:&error]);
+  XCTAssertNil(error);
+}
+
+- (void)testDeviceMetadataReadFailureAndInodeSwapNeverReplaceCommittedWAL {
+  DSHWALDeviceMetadataStore *wal = [self deviceMetadataStore];
+  NSError *error = nil;
+  XCTAssertNotNil([self createDeviceMetadataTranscript:wal error:&error]);
+  NSData *before = [NSData dataWithContentsOfURL:wal.walURL];
+  for (NSString *suffix in @[self.rootURL.lastPathComponent, wal.walURL.lastPathComponent]) {
+    wal.metadata.failureSuffix = suffix;
+    wal.metadata.failure = @"protection_missing";
+    XCTAssertNil([wal snapshotWithError:&error]);
+    XCTAssertEqual(error.code, DSHAgentNativeStoreErrorUnavailable);
+    XCTAssertEqualObjects([NSData dataWithContentsOfURL:wal.walURL], before);
+    wal.metadata.failure = nil;
+  }
+  wal.swapStagedInode = YES;
+  error = nil;
+  XCTAssertFalse([wal performAtomicTransaction:^BOOL(NSMutableDictionary *state, NSError **inner) {
+    (void)state; (void)inner;
+    return YES;
+  } error:&error]);
+  XCTAssertTrue(wal.didSwap);
+  XCTAssertEqual(error.code, DSHAgentNativeStoreErrorPersistence);
+  XCTAssertEqualObjects([NSData dataWithContentsOfURL:wal.walURL], before);
+}
+
+- (void)testWALProtectionUsesFreshFileAttributesForDirectoryAndFile {
+  NSURL *file = [self.rootURL URLByAppendingPathComponent:@"metadata-probe.json"];
+  XCTAssertTrue([[@"{}" dataUsingEncoding:NSUTF8StringEncoding] writeToURL:file atomically:YES]);
+  for (NSURL *url in @[self.rootURL, file]) {
+    NSError *error = nil;
+    XCTAssertTrue([self.wal setWALProtectionAtURL:url error:&error], @"%@", error);
+    id protection = nil;
+    XCTAssertTrue([self.wal getWALProtectionAtURL:url value:&protection error:&error], @"%@", error);
+    NSDictionary *actual = [NSFileManager.defaultManager attributesOfItemAtPath:url.path error:&error];
+    XCTAssertEqualObjects(protection, actual[NSFileProtectionKey]);
+    if (protection != nil) {
+      XCTAssertEqualObjects(protection, NSFileProtectionCompleteUntilFirstUserAuthentication);
+    }
+  }
+  id protection = @"stale";
+  NSError *error = nil;
+  XCTAssertFalse([self.wal getWALProtectionAtURL:[file URLByAppendingPathExtension:@"missing"]
+      value:&protection error:&error]);
+  XCTAssertNil(protection);
+  XCTAssertNotNil(error);
 }
 
 - (void)testArgumentsRejectDuplicateNegativeZeroAndUnsafeInteger {

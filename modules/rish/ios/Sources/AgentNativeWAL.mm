@@ -1107,10 +1107,23 @@ static BOOL DSHAgentDirectoryIsSafe(NSURL *url) {
       metadata.st_nlink >= 2;
 }
 
-static BOOL DSHAgentVerifyFileProtectionDescriptor(int descriptor,
+// Application-owned methods keep device-only metadata requirements testable on
+// simulator filesystems. They never change the descriptor/identity checks.
+@interface DSHAgentNativeWAL (ProtectionMetadata)
+- (BOOL)requiresWALResourceMetadata;
+- (NSFileManager *)walFileManager;
+- (BOOL)setWALProtectionAtURL:(NSURL *)url error:(NSError **)error;
+- (BOOL)getWALProtectionAtURL:(NSURL *)url value:(id *)value error:(NSError **)error;
+- (BOOL)setWALBackupExcludedAtURL:(NSURL *)url error:(NSError **)error;
+- (BOOL)getWALBackupExcludedAtURL:(NSURL *)url
+                          value:(NSNumber **)value error:(NSError **)error;
+@end
+
+static BOOL DSHAgentVerifyFileProtectionDescriptor(DSHAgentNativeWAL *store,
+                                                   int descriptor,
                                                    const struct stat *expected);
 
-static BOOL DSHAgentEnsureDirectory(NSURL *url) {
+static BOOL DSHAgentEnsureDirectory(DSHAgentNativeWAL *store, NSURL *url) {
   if (url == nil || !url.isFileURL) return NO;
   NSURL *parentURL = url.URLByDeletingLastPathComponent;
   int parentDescriptor = open(parentURL.fileSystemRepresentation,
@@ -1171,29 +1184,15 @@ static BOOL DSHAgentEnsureDirectory(NSURL *url) {
   // Keep the POSIX mode operation independent from the iOS metadata keys.
   // The simulator filesystem does not implement all NSFileProtection and
   // backup-resource keys, so those requests are best effort there; physical
-  // iOS still requires both Complete protection and backup exclusion below.
+  // iOS still requires UntilFirstAuthentication protection and backup exclusion.
   BOOL permissions = [[NSFileManager defaultManager]
       setAttributes:@{ NSFilePosixPermissions : @0700 }
        ofItemAtPath:url.path
               error:&attributeError];
-  BOOL protection = [[NSFileManager defaultManager]
-      setAttributes:@{
-        NSFileProtectionKey :
-            NSFileProtectionCompleteUntilFirstUserAuthentication
-      }
-       ofItemAtPath:url.path
-              error:&attributeError];
-  BOOL excluded = [url setResourceValue:@YES
-                                 forKey:NSURLIsExcludedFromBackupKey
-                                 error:&attributeError];
-#if TARGET_OS_SIMULATOR || TARGET_OS_OSX
-  BOOL attributes = permissions;
-  (void)protection;
-  (void)excluded;
-  excluded = YES;
-#else
-  BOOL attributes = permissions && protection;
-#endif
+  BOOL protection = [store setWALProtectionAtURL:url error:&attributeError];
+  BOOL excluded = [store setWALBackupExcludedAtURL:url error:&attributeError];
+  BOOL attributes = permissions &&
+      (![store requiresWALResourceMetadata] || (protection && excluded));
   struct stat after = {};
   struct stat fromParentAfter = {};
   BOOL unchanged = fstat(descriptor, &after) == 0 &&
@@ -1205,10 +1204,10 @@ static BOOL DSHAgentEnsureDirectory(NSURL *url) {
       fromParentAfter.st_ino == opened.st_ino &&
       (after.st_mode & 0777) == 0700;
   BOOL protectionOK = unchanged &&
-      DSHAgentVerifyFileProtectionDescriptor(descriptor, &opened);
+      DSHAgentVerifyFileProtectionDescriptor(store, descriptor, &opened);
   close(parentDescriptor);
   close(descriptor);
-  return attributes && excluded && unchanged && protectionOK;
+  return attributes && unchanged && protectionOK;
 }
 
 static BOOL DSHAgentWriteAll(int descriptor, NSData *data) {
@@ -1252,7 +1251,8 @@ static BOOL DSHAgentRegularFileIdentity(struct stat metadata) {
       metadata.st_nlink == 1 && (metadata.st_mode & 0777) == 0600;
 }
 
-static BOOL DSHAgentVerifyFileProtectionDescriptor(int descriptor,
+static BOOL DSHAgentVerifyFileProtectionDescriptor(DSHAgentNativeWAL *store,
+                                                   int descriptor,
                                                    const struct stat *expected) {
   if (descriptor < 0) return NO;
   struct stat opened = {};
@@ -1274,35 +1274,16 @@ static BOOL DSHAgentVerifyFileProtectionDescriptor(int descriptor,
       pathBefore.st_ino != opened.st_ino) {
     return NO;
   }
-  id protection = nil;
-  BOOL protectionRead = [descriptorURL getResourceValue:&protection
-                                                  forKey:NSURLFileProtectionKey
-                                                   error:nil];
-  NSNumber *excluded = nil;
-  BOOL excludedRead = [descriptorURL getResourceValue:&excluded
-                                                forKey:NSURLIsExcludedFromBackupKey
-                                                 error:nil];
-#if TARGET_OS_OSX
-  (void)protectionRead;
-  (void)protection;
-  (void)excludedRead;
-  (void)excluded;
-#elif TARGET_OS_SIMULATOR
-  // Simulator filesystems may report an unsupported protection/backup key as
-  // a readable default (for example, `excluded = NO`) or return no value at
-  // all.  These metadata values are not security evidence in the simulator;
-  // mode, descriptor identity, and no-follow checks above remain mandatory.
-  (void)protectionRead;
-  (void)protection;
-  (void)excludedRead;
-  (void)excluded;
-#else
-  BOOL protectionOK = !protectionRead || protection == nil ||
-      [protection
-          isEqual:NSURLFileProtectionCompleteUntilFirstUserAuthentication];
-  BOOL backupOK = !excludedRead || excluded == nil || excluded.boolValue;
-  if (!protectionOK || !backupOK) return NO;
-#endif
+  if ([store requiresWALResourceMetadata]) {
+    id protection = nil;
+    NSNumber *excluded = nil;
+    if (![store getWALProtectionAtURL:descriptorURL value:&protection error:nil] ||
+        ![protection isEqual:NSFileProtectionCompleteUntilFirstUserAuthentication] ||
+        ![store getWALBackupExcludedAtURL:descriptorURL value:&excluded error:nil] ||
+        ![excluded isKindOfClass:NSNumber.class] || !excluded.boolValue) {
+      return NO;
+    }
+  }
   struct stat after = {};
   struct stat pathAfter = {};
   int descriptorResult = fstat(descriptor, &after);
@@ -1334,7 +1315,8 @@ static NSData *DSHAgentReadDescriptor(int descriptor,
   return data;
 }
 
-static NSData *DSHAgentReadWALAtRoot(int rootDescriptor,
+static NSData *DSHAgentReadWALAtRoot(DSHAgentNativeWAL *store,
+                                     int rootDescriptor,
                                      const char *name,
                                      NSError **error) {
   struct stat metadata = {};
@@ -1356,7 +1338,7 @@ static NSData *DSHAgentReadWALAtRoot(int rootDescriptor,
   BOOL valid = fstat(descriptor, &opened) == 0 &&
       DSHAgentRegularFileIdentity(opened) && opened.st_dev == metadata.st_dev &&
       opened.st_ino == metadata.st_ino &&
-      DSHAgentVerifyFileProtectionDescriptor(descriptor, &opened);
+      DSHAgentVerifyFileProtectionDescriptor(store, descriptor, &opened);
   NSData *data = valid ? DSHAgentReadDescriptor(descriptor,
                                                 DSHAgentNativeWALMaxStoreBytes,
                                                 error) : nil;
@@ -4447,6 +4429,50 @@ static void DSHAgentWALRememberVerifiedBytes(NSData *data) {
 
 @implementation DSHAgentNativeWAL
 
+- (BOOL)requiresWALResourceMetadata {
+#if TARGET_OS_SIMULATOR || TARGET_OS_OSX
+  return NO;
+#else
+  return YES;
+#endif
+}
+
+- (NSFileManager *)walFileManager {
+  return NSFileManager.defaultManager;
+}
+
+- (BOOL)setWALProtectionAtURL:(NSURL *)url error:(NSError **)error {
+  return [[self walFileManager]
+      setAttributes:@{
+        NSFileProtectionKey : NSFileProtectionCompleteUntilFirstUserAuthentication
+      }
+       ofItemAtPath:url.path error:error];
+}
+
+- (BOOL)getWALProtectionAtURL:(NSURL *)url value:(id *)value error:(NSError **)error {
+  if (value != nullptr) *value = nil;
+  // Read actual file attributes each time. NSURL resource caches are not
+  // evidence that the currently pinned inode has the required policy.
+  NSDictionary *attributes = [[self walFileManager]
+      attributesOfItemAtPath:url.path error:error];
+  if (attributes == nil) return NO;
+  if (value != nullptr) *value = attributes[NSFileProtectionKey];
+  return YES;
+}
+
+- (BOOL)setWALBackupExcludedAtURL:(NSURL *)url error:(NSError **)error {
+  return [url setResourceValue:@YES
+                       forKey:NSURLIsExcludedFromBackupKey error:error];
+}
+
+- (BOOL)getWALBackupExcludedAtURL:(NSURL *)url
+                          value:(NSNumber **)value error:(NSError **)error {
+  if (value != nullptr) *value = nil;
+  [url removeCachedResourceValueForKey:NSURLIsExcludedFromBackupKey];
+  return [url getResourceValue:value
+                       forKey:NSURLIsExcludedFromBackupKey error:error];
+}
+
 - (instancetype)initWithRootURL:(NSURL *)rootURL
                            clock:(DSHAgentNativeWALClock)clock
               identifierGenerator:(DSHAgentNativeWALIdentifierGenerator)generator
@@ -4528,7 +4554,7 @@ static void DSHAgentWALRememberVerifiedBytes(NSData *data) {
     DSHSetAgentNativeStoreError(error, DSHAgentNativeStoreErrorUnavailable);
     return nil;
   }
-  NSData *data = DSHAgentReadWALAtRoot(rootDescriptor,
+  NSData *data = DSHAgentReadWALAtRoot(self, rootDescriptor,
                                        DSHAgentWALFileName.UTF8String,
                                        error);
   close(rootDescriptor);
@@ -4574,7 +4600,7 @@ static void DSHAgentWALRememberVerifiedBytes(NSData *data) {
       self.clock != nil && self.launchId != nil;
   NSURL *parent = baseValid ? self.rootURL.URLByDeletingLastPathComponent : nil;
   BOOL parentSafe = baseValid && DSHAgentDirectoryIsSafe(parent);
-  BOOL directoryReady = parentSafe && DSHAgentEnsureDirectory(self.rootURL);
+  BOOL directoryReady = parentSafe && DSHAgentEnsureDirectory(self, self.rootURL);
   BOOL valid = baseValid && parentSafe && directoryReady;
   if (!valid) {
     [self.lock unlock];
@@ -4680,38 +4706,10 @@ static void DSHAgentWALRememberVerifiedBytes(NSData *data) {
       setAttributes:@{ NSFilePosixPermissions : @0600 }
        ofItemAtPath:temporaryURL.path
               error:&attributeError];
-  BOOL protection = [[NSFileManager defaultManager]
-      setAttributes:@{
-        NSFileProtectionKey :
-            NSFileProtectionCompleteUntilFirstUserAuthentication
-      }
-       ofItemAtPath:temporaryURL.path
-              error:&attributeError];
-  BOOL excluded = [temporaryURL setResourceValue:@YES
-                                           forKey:NSURLIsExcludedFromBackupKey
-                                            error:&attributeError];
-#if TARGET_OS_SIMULATOR || TARGET_OS_OSX
-  BOOL protectedFile = identity && permissions;
-  (void)protection;
-  (void)excluded;
-#else
-  BOOL protectedFile = identity && permissions && protection && excluded;
-#endif
-#if TARGET_OS_OSX
-#else
-  if (protectedFile) {
-    BOOL fileProtection = [temporaryURL
-        setResourceValue:
-            NSURLFileProtectionCompleteUntilFirstUserAuthentication
-                  forKey:NSURLFileProtectionKey
-                   error:&attributeError];
-#if TARGET_OS_SIMULATOR || TARGET_OS_OSX
-    (void)fileProtection;
-#else
-    protectedFile = fileProtection;
-#endif
-  }
-#endif
+  BOOL protection = [self setWALProtectionAtURL:temporaryURL error:&attributeError];
+  BOOL excluded = [self setWALBackupExcludedAtURL:temporaryURL error:&attributeError];
+  BOOL protectedFile = identity && permissions &&
+      (![self requiresWALResourceMetadata] || (protection && excluded));
   int verifyDescriptor = openat(rootDescriptor, temporaryName,
                                 O_RDONLY | O_NOFOLLOW);
   struct stat verifiedMetadata = {};
@@ -4719,7 +4717,7 @@ static void DSHAgentWALRememberVerifiedBytes(NSData *data) {
       DSHAgentRegularFileIdentity(verifiedMetadata) &&
       verifiedMetadata.st_dev == stagedMetadata.st_dev &&
       verifiedMetadata.st_ino == stagedMetadata.st_ino && protectedFile &&
-      DSHAgentVerifyFileProtectionDescriptor(verifyDescriptor, &stagedMetadata);
+      DSHAgentVerifyFileProtectionDescriptor(self, verifyDescriptor, &stagedMetadata);
   if (verifyDescriptor >= 0) close(verifyDescriptor);
   if (!written || !verified) {
     unlinkat(rootDescriptor, temporaryName, 0);
