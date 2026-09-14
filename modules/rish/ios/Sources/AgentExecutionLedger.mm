@@ -1,6 +1,7 @@
 #import "AgentExecutionLedger.h"
 
 #include <math.h>
+#include "rish_agent_core.h"
 
 static const unsigned long long DSHAgentMaximumSafeInteger = 9007199254740991ULL;
 
@@ -18,16 +19,6 @@ static NSArray<NSString *> *DSHAgentLedgerKeys(void) {
     @"name", @"arguments_sha256", @"precondition", @"reserved_write_bytes",
     @"state", @"owner", @"settled_facts", @"transcript_after", @"receipt",
     @"created_at", @"updated_at",
-  ];
-}
-
-static NSArray<NSString *> *DSHAgentLedgerCASKeys(void) {
-  return @[
-    @"schema_version", @"locator", @"expected_row_revision",
-    @"expected_state", @"expected_owner_generation", @"expected_launch_id",
-    @"expected_native_task_id", @"expected_transcript_generation",
-    @"expected_transcript_sha256", @"expected_root_fingerprint_sha256",
-    @"expected_binding_revision",
   ];
 }
 
@@ -145,46 +136,6 @@ static BOOL DSHAgentLedgerOwner(NSDictionary *owner) {
       DSHAgentCanonicalTimestamp(owner[@"heartbeat_at"]);
 }
 
-static BOOL DSHAgentLedgerCAS(NSDictionary *cas) {
-  return DSHAgentExactDictionaryKeys(cas, DSHAgentLedgerCASKeys()) &&
-      [cas[@"schema_version"] isEqual:@2] &&
-      DSHAgentLedgerLocator(cas[@"locator"]) &&
-      DSHAgentSafeInteger(cas[@"expected_row_revision"],
-                          9007199254740991ULL, NO) &&
-      DSHAgentBoundedUTF8String(cas[@"expected_state"], 32, NO, nullptr) &&
-      ((cas[@"expected_owner_generation"] == NSNull.null) ||
-       DSHAgentSafeInteger(cas[@"expected_owner_generation"],
-                           9007199254740991ULL, NO)) &&
-      ((cas[@"expected_launch_id"] == NSNull.null) ||
-       DSHAgentCanonicalUUID(cas[@"expected_launch_id"])) &&
-      ((cas[@"expected_native_task_id"] == NSNull.null) ||
-       DSHAgentCanonicalUUID(cas[@"expected_native_task_id"])) &&
-      DSHAgentSafeInteger(cas[@"expected_transcript_generation"],
-                          9007199254740991ULL, YES) &&
-      DSHAgentCanonicalSHA256(cas[@"expected_transcript_sha256"]) &&
-      DSHAgentCanonicalSHA256(cas[@"expected_root_fingerprint_sha256"]) &&
-      DSHAgentSafeInteger(cas[@"expected_binding_revision"],
-                          9007199254740991ULL, NO);
-}
-
-static BOOL DSHAgentLedgerInsertCAS(NSDictionary *cas) {
-  return DSHAgentExactDictionaryKeys(cas, @[
-    @"schema_version", @"locator", @"expected_absent",
-    @"expected_transcript_generation", @"expected_transcript_sha256",
-    @"expected_root_fingerprint_sha256", @"expected_binding_revision",
-  ]) && DSHAgentSafeInteger(cas[@"schema_version"], 1, NO) &&
-      DSHAgentLedgerLocator(cas[@"locator"]) &&
-      [cas[@"expected_absent"] isKindOfClass:NSNumber.class] &&
-      CFGetTypeID((__bridge CFTypeRef)cas[@"expected_absent"]) ==
-          CFBooleanGetTypeID() && [cas[@"expected_absent"] boolValue] &&
-      DSHAgentSafeInteger(cas[@"expected_transcript_generation"],
-                          9007199254740991ULL, YES) &&
-      DSHAgentCanonicalSHA256(cas[@"expected_transcript_sha256"]) &&
-      DSHAgentCanonicalSHA256(cas[@"expected_root_fingerprint_sha256"]) &&
-      DSHAgentSafeInteger(cas[@"expected_binding_revision"],
-                          9007199254740991ULL, NO);
-}
-
 static BOOL DSHAgentReceipt(NSDictionary *receipt) {
   if (!DSHAgentExactDictionaryKeys(receipt, @[
         @"schema_version", @"call_id", @"name", @"arguments_sha256",
@@ -218,29 +169,6 @@ static BOOL DSHAgentReceipt(NSDictionary *receipt) {
   if ([outcome isEqualToString:@"ok"] && failure != NSNull.null) return NO;
   if (![outcome isEqualToString:@"ok"] && failure == NSNull.null) return NO;
   return YES;
-}
-
-static NSData *DSHAgentCanonicalFeedbackBytes(NSDictionary *message) {
-  if (!DSHAgentExactDictionaryKeys(message, @[
-        @"schema_version", @"role", @"round_index", @"call_id",
-        @"content", @"truncated",
-      ]) || !DSHAgentSafeInteger(message[@"schema_version"], 1, NO) ||
-      ![message[@"role"] isKindOfClass:NSString.class] ||
-      ![message[@"role"] isEqualToString:@"tool"] ||
-      !DSHAgentSafeInteger(message[@"round_index"], 7, YES) ||
-      !DSHAgentBoundedUTF8String(message[@"call_id"], 128, NO, nullptr) ||
-      !DSHAgentBoundedUTF8String(message[@"content"],
-                                DSHAgentNativeWALMaxTranscriptBytes, YES,
-                                nullptr) ||
-      ![message[@"truncated"] isKindOfClass:NSNumber.class] ||
-      CFGetTypeID((__bridge CFTypeRef)message[@"truncated"]) != CFBooleanGetTypeID()) {
-    return nil;
-  }
-  NSData *bytes = [message[@"content"] dataUsingEncoding:NSUTF8StringEncoding];
-  NSError *decodeError = nil;
-  id object = [NSJSONSerialization JSONObjectWithData:bytes options:0 error:&decodeError];
-  NSData *canonical = DSHAgentCanonicalJSON(object, &decodeError);
-  return canonical != nil && [canonical isEqualToData:bytes] ? bytes : nil;
 }
 
 static BOOL DSHAgentWritePrior(id prior) {
@@ -594,46 +522,6 @@ static BOOL DSHAgentSettledFacts(NSDictionary *facts) {
   return NO;
 }
 
-static BOOL DSHAgentSettledFactsMatchFeedback(NSDictionary *row,
-                                              NSDictionary *feedback,
-                                              NSDictionary *facts) {
-  NSString *outcome = feedback[@"outcome"];
-  if (![outcome isEqualToString:@"ok"]) return (id)facts == NSNull.null;
-  if ((id)facts == NSNull.null) return NO;
-  NSDictionary *payload = feedback[@"payload"];
-  NSString *kind = row[@"precondition"][@"kind"];
-  if ([kind isEqualToString:@"read_file"] &&
-      [row[@"name"] isEqualToString:@"read_file"]) {
-    return [facts[@"source_revision"] isEqual:payload[@"revision"]];
-  }
-  if ([kind isEqualToString:@"write_file"] &&
-      [row[@"name"] isEqualToString:@"write_file"]) {
-    return [facts[@"actual_revision"] isEqual:payload[@"revision"]] &&
-        [payload[@"bytes"] isEqual:row[@"precondition"][@"content_bytes"]];
-  }
-  if ([kind isEqualToString:@"git_commit"] &&
-      [row[@"name"] isEqualToString:@"git_commit"]) {
-    return [facts[@"actual_commit_oid"] isEqual:payload[@"commit_oid"]] &&
-        [payload[@"tree_oid"] isEqual:row[@"precondition"][@"tree_oid"]];
-  }
-  if ([kind isEqualToString:@"git_push"] &&
-      [row[@"name"] isEqualToString:@"git_push"]) {
-    return [facts[@"actual_remote_oid"] isEqual:payload[@"pushed_oid"]] &&
-        [payload[@"remote_ref"] isEqual:row[@"precondition"][@"remote_ref"]];
-  }
-  if ([kind isEqualToString:@"git_status"] &&
-      [row[@"name"] isEqualToString:@"git_status"]) {
-    return [facts[@"head_oid"] isEqual:payload[@"head_oid"]];
-  }
-  if ([kind isEqualToString:@"start_guest_cgi"] || [kind isEqualToString:@"stop_guest_cgi"]) {
-    return [facts[@"service_id"] isEqual:payload[@"service_id"]] && [facts[@"status"] isEqual:payload[@"status"]];
-  }
-  // list_dir's feedback intentionally carries bounded entries rather than a
-  // second directory fingerprint.  Its exact precondition/facts relation is
-  // enforced by DSHAgentLedgerRow above.
-  return YES;
-}
-
 /// Exact safe approval-preview shape carried by the public batch call
 /// projection.  Paths are workspace-relative, validated strings (never
 /// absolute, never content); the diff preview is a bounded text blob computed
@@ -871,139 +759,7 @@ static BOOL DSHAgentLedgerTranscriptBound(NSDictionary *state,
   return NO;
 }
 
-static BOOL DSHAgentLedgerRowExecutable(NSDictionary *row) {
-  if ([row[@"precondition"][@"kind"] isEqualToString:@"write_file"] &&
-      [row[@"precondition"][@"prior"][@"kind"] isEqualToString:@"unknown"]) {
-    return NO;
-  }
-  if ([row[@"precondition"][@"kind"] isEqualToString:@"write_file"] &&
-      ![row[@"reserved_write_bytes"] isEqual:row[@"precondition"][@"content_bytes"]]) {
-    return NO;
-  }
-  return YES;
-}
-
 static NSDictionary *DSHAgentWriteManifestCallForIntent(NSDictionary *intent);
-
-static BOOL DSHAgentWriteBatchEffectGateOpen(NSDictionary *state,
-                                             NSDictionary *row) {
-  NSString *name = row[@"name"];
-  if (![name isEqualToString:@"write_file"] &&
-      ![name isEqualToString:@"git_commit"] &&
-      ![name isEqualToString:@"git_push"] && ![name isEqualToString:@"start_guest_cgi"] && ![name isEqualToString:@"stop_guest_cgi"]) return YES;
-  NSString *attemptId = row[@"locator"][@"attempt_id"];
-  NSString *idempotencyKey = row[@"locator"][@"idempotency_key"];
-  for (NSDictionary *batch in state[@"batches"]) {
-    if ([batch[@"attempt_id"] isEqual:attemptId] &&
-        [batch[@"write_keys"] containsObject:idempotencyKey]) {
-      if (![batch[@"effect_gate"] isEqualToString:@"open"] ||
-          ![batch[@"task_id"] isEqual:row[@"locator"][@"task_id"]] ||
-          ![batch[@"round_id"] isEqual:row[@"locator"][@"round_id"]] ||
-          ![batch[@"round_index"] isEqual:row[@"locator"][@"round_index"]]) {
-        return NO;
-      }
-      NSDictionary *expectedManifestCall =
-          DSHAgentWriteManifestCallForIntent(row);
-      for (NSDictionary *manifestCall in batch[@"manifest_calls"]) {
-        if ([manifestCall[@"locator"] isEqual:row[@"locator"]]) {
-          return expectedManifestCall != nil &&
-              [manifestCall isEqual:expectedManifestCall];
-        }
-      }
-      return NO;
-    }
-  }
-  return NO;
-}
-
-static BOOL DSHAgentMutationBatchProvesNoDispatch(NSDictionary *state,
-                                                   NSDictionary *batch) {
-  if (![batch[@"manifest_calls"] isKindOfClass:NSArray.class] ||
-      [(NSArray *)batch[@"manifest_calls"] count] == 0) return NO;
-  for (NSDictionary *call in batch[@"manifest_calls"]) {
-    if (![DSHAgentLedgerDispatchState(state[@"dispatch"], call[@"locator"])
-            isEqualToString:@"not_dispatched"]) return NO;
-  }
-  return YES;
-}
-
-static BOOL DSHAgentCASOwnerMatches(NSDictionary *row, NSDictionary *cas) {
-  id expectedGeneration = cas[@"expected_owner_generation"];
-  if (expectedGeneration == NSNull.null) return row[@"owner"] == NSNull.null;
-  NSDictionary *owner = row[@"owner"];
-  return DSHAgentLedgerOwner(owner) &&
-      [owner[@"owner_generation"] isEqual:expectedGeneration] &&
-      [owner[@"launch_id"] isEqual:cas[@"expected_launch_id"]] &&
-      [owner[@"native_task_id"] isEqual:cas[@"expected_native_task_id"]];
-}
-
-static BOOL DSHAgentCASMatchesRow(NSDictionary *row,
-                                  NSDictionary *cas,
-                                  NSError **error) {
-  NSDictionary *before = row[@"transcript_before"];
-  if (!DSHAgentLedgerCAS(cas) || ![row[@"locator"] isEqual:cas[@"locator"]] ||
-      ![row[@"row_revision"] isEqual:cas[@"expected_row_revision"]] ||
-      ![row[@"state"] isEqual:cas[@"expected_state"]] ||
-      !DSHAgentCASOwnerMatches(row, cas) ||
-      ![before[@"generation"] isEqual:cas[@"expected_transcript_generation"]] ||
-      ![before[@"transcript_sha256"] isEqual:cas[@"expected_transcript_sha256"]] ||
-      ![row[@"root_fingerprint_sha256"] isEqual:cas[@"expected_root_fingerprint_sha256"]] ||
-      ![row[@"binding_revision"] isEqual:cas[@"expected_binding_revision"]]) {
-    DSHSetAgentNativeStoreError(error, DSHAgentNativeStoreErrorConflict);
-    return NO;
-  }
-  return YES;
-}
-
-static BOOL DSHAgentLedgerTransitionAllowed(NSString *from,
-                                            NSString *to,
-                                            BOOL allowReconcile) {
-  if (![from isKindOfClass:NSString.class] || ![to isKindOfClass:NSString.class]) {
-    return NO;
-  }
-  if ([from isEqualToString:to]) return YES;  // owner heartbeat/metadata CAS.
-  if ([from isEqualToString:@"intent"]) {
-    return [to isEqualToString:@"running"] || [to isEqualToString:@"cancelled"];
-  }
-  if ([from isEqualToString:@"running"]) {
-    if (allowReconcile &&
-        ([to isEqualToString:@"unknown"] || [to isEqualToString:@"ambiguous"])) {
-      return YES;
-    }
-    return [to isEqualToString:@"cancel_requested"] ||
-        [to isEqualToString:@"settled"];
-  }
-  if ([from isEqualToString:@"cancel_requested"]) {
-    if (allowReconcile &&
-        ([to isEqualToString:@"unknown"] || [to isEqualToString:@"ambiguous"])) {
-      return YES;
-    }
-    return [to isEqualToString:@"settled"] || [to isEqualToString:@"cancelled"];
-  }
-  return allowReconcile &&
-      ([from isEqualToString:@"settled"] || [from isEqualToString:@"cancelled"] ||
-       [from isEqualToString:@"unknown"] || [from isEqualToString:@"ambiguous"]) &&
-      ([to isEqualToString:@"settled"] || [to isEqualToString:@"cancelled"] ||
-       [to isEqualToString:@"unknown"] || [to isEqualToString:@"ambiguous"]);
-}
-
-static BOOL DSHAgentLedgerPatchKeysAllowed(NSDictionary *patch,
-                                           NSError **error) {
-  if (![patch isKindOfClass:NSDictionary.class]) {
-    DSHSetAgentNativeStoreError(error, DSHAgentNativeStoreErrorInvalidArgument);
-    return NO;
-  }
-  NSSet *mutableKeys = [NSSet setWithArray:@[
-    @"state", @"owner", @"settled_facts", @"transcript_after", @"receipt",
-  ]];
-  for (id key in patch) {
-    if (![key isKindOfClass:NSString.class] || ![mutableKeys containsObject:key]) {
-      DSHSetAgentNativeStoreError(error, DSHAgentNativeStoreErrorInvalidArgument);
-      return NO;
-    }
-  }
-  return YES;
-}
 
 static BOOL DSHAgentWriteReservationPolicy(NSDictionary *policy) {
   return DSHAgentExactDictionaryKeys(policy, @[
@@ -1414,10 +1170,6 @@ static BOOL DSHAgentMutationBatchApprovalsBound(NSDictionary *state,
   return YES;
 }
 
-static NSMutableDictionary *DSHAgentLedgerMutable(id value) {
-  return [value isKindOfClass:NSDictionary.class] ? [value mutableCopy] : nil;
-}
-
 static BOOL DSHAgentLedgerAuthorityRootMatches(NSDictionary *authorityRoot,
                                                NSDictionary *candidateRoot) {
   if (![authorityRoot isKindOfClass:NSDictionary.class] ||
@@ -1520,507 +1272,430 @@ static BOOL DSHAgentLedgerAdvanceAuthority(
   return self;
 }
 
-- (NSDictionary *)insertValidatedAgentExecutionIntentWithInsertCAS:(NSDictionary *)insertCAS
-                                                       argumentsJSON:(NSString *)argumentsJSON
-                                                        exactIntent:(NSDictionary *)intent
-                                                              error:(NSError **)error {
-  NSError *bindingError = nil;
-  if (!DSHAgentRawArgumentsBindIntent(argumentsJSON, intent, &bindingError)) {
-    if (error != nullptr) *error = bindingError ?: DSHAgentNativeStoreError(
-        DSHAgentNativeStoreErrorConflict);
-    return nil;
-  }
-  if (!DSHAgentLedgerInsertCAS(insertCAS) || !DSHAgentLedgerRow(intent) ||
-      ![intent[@"locator"] isEqual:insertCAS[@"locator"]] ||
-      ![intent[@"transcript_before"][@"generation"]
-          isEqual:insertCAS[@"expected_transcript_generation"]] ||
-      ![intent[@"transcript_before"][@"transcript_sha256"]
-          isEqual:insertCAS[@"expected_transcript_sha256"]] ||
-      ![intent[@"root_fingerprint_sha256"]
-          isEqual:insertCAS[@"expected_root_fingerprint_sha256"]] ||
-      ![intent[@"binding_revision"] isEqual:insertCAS[@"expected_binding_revision"]] ||
-      ![intent[@"state"] isEqualToString:@"intent"]) {
+#pragma mark - Shared-core facade (row-level operations)
+
+// The row-level selectors below are a facade over the Rust reducer in
+// modules/rish/core (`rish_agent_ledger_reduce`). This side owns the WAL
+// transaction (or the caller's candidate for the in-state helpers): it
+// collects the ledger row, the attempt's execution dispatch markers, the bound
+// transcript row, the attempt's reservation and batch records, the
+// task/attempt authorities and the liveness answers into a view, hands the
+// operation to the reducer, and applies the returned changes verbatim. For
+// settlement the reducer also returns the operation commit, which this side
+// performs through DSHAgentNativeWALCommitOperationInState on the same
+// candidate. Row policy lives in crates/rish-agent-core/src/ledger_ops.rs.
+// The batch-level methods further down are still the Objective-C
+// implementation and keep their validators.
+
+typedef NS_ENUM(NSInteger, DSHAgentLedgerRunMode) {
+  DSHAgentLedgerRunModeTransaction,
+  DSHAgentLedgerRunModeSnapshot,
+  DSHAgentLedgerRunModeInState,
+};
+
+static NSDictionary *DSHAgentLedgerReduce(NSDictionary *envelope, NSError **error) {
+  NSData *bytes = DSHAgentCanonicalJSON(envelope, nil);
+  if (bytes == nil) {
     DSHSetAgentNativeStoreError(error, DSHAgentNativeStoreErrorInvalidArgument);
     return nil;
   }
-  NSError *immutableIntentError = nil;
-  NSDictionary *immutableIntent = DSHAgentImmutableJSONCopy(intent,
-                                                            &immutableIntentError);
-  if (![immutableIntent isKindOfClass:NSDictionary.class]) {
-    DSHSetAgentNativeStoreError(error, DSHAgentNativeStoreErrorInvalidArgument);
+  char *raw = rish_agent_ledger_reduce((const char *)bytes.bytes, bytes.length);
+  if (raw == NULL) {
+    DSHSetAgentNativeStoreError(error, DSHAgentNativeStoreErrorCorrupt);
     return nil;
   }
-  intent = immutableIntent;
-  NSDictionary *snapshot = [self.wal snapshotWithError:error];
-  if (snapshot == nil) return nil;
-  for (NSDictionary *candidate in snapshot[@"ledger"]) {
-    if (![candidate[@"locator"] isEqual:insertCAS[@"locator"]]) continue;
-    NSError *bytesError = nil;
-    NSData *left = DSHAgentCanonicalJSON(candidate, &bytesError);
-    NSData *right = DSHAgentCanonicalJSON(intent, &bytesError);
-    if (left != nil && right != nil && [left isEqualToData:right]) {
-      return @{ @"schema_version" : @1,
-                @"status" : @"existing_identical", @"row" : candidate };
+  NSData *reply = [NSData dataWithBytes:raw length:strlen(raw)];
+  rish_agent_string_free(raw);
+  id parsed = [NSJSONSerialization JSONObjectWithData:reply options:0 error:nil];
+  if (![parsed isKindOfClass:NSDictionary.class]) {
+    DSHSetAgentNativeStoreError(error, DSHAgentNativeStoreErrorCorrupt);
+    return nil;
+  }
+  if (![parsed[@"ok"] isEqual:@YES]) {
+    NSInteger code = [parsed[@"error"] isKindOfClass:NSNumber.class]
+        ? [parsed[@"error"] integerValue] : 0;
+    if (code < DSHAgentNativeStoreErrorInvalidArgument ||
+        code > DSHAgentNativeStoreErrorPersistence) {
+      code = DSHAgentNativeStoreErrorCorrupt;
     }
-    DSHSetAgentNativeStoreError(error, DSHAgentNativeStoreErrorConflict);
+    DSHSetAgentNativeStoreError(error, (DSHAgentNativeStoreErrorCode)code);
     return nil;
   }
-  __block NSDictionary *inserted = nil;
-  BOOL committed = [self.wal performAtomicTransaction:^BOOL(
-      NSMutableDictionary *state, NSError **mutationError) {
-    NSMutableArray *rows = [state[@"ledger"] mutableCopy];
-    NSMutableArray *attemptRows = [NSMutableArray array];
-    for (NSDictionary *candidate in rows) {
-      if ([candidate[@"locator"] isEqual:insertCAS[@"locator"]]) {
-        DSHSetAgentNativeStoreError(mutationError, DSHAgentNativeStoreErrorConflict);
+  return parsed;
+}
+
+static id DSHAgentLedgerArgument(id value) {
+  return value ?: NSNull.null;
+}
+
+static id DSHAgentLedgerLocatorOf(id container) {
+  return [container isKindOfClass:NSDictionary.class] ? container[@"locator"] : nil;
+}
+
+static id DSHAgentLedgerField(id container, NSString *key) {
+  return [container isKindOfClass:NSDictionary.class] ? container[key] : nil;
+}
+
+static NSArray *DSHAgentLedgerSlotted(NSArray *table, BOOL (^matches)(NSDictionary *record)) {
+  NSMutableArray *slotted = [NSMutableArray array];
+  for (NSUInteger index = 0; index < table.count; index += 1) {
+    NSDictionary *record = table[index];
+    if ([record isKindOfClass:NSDictionary.class] && matches(record)) {
+      [slotted addObject:@{ @"slot" : @(index), @"record" : record }];
+    }
+  }
+  return slotted;
+}
+
+static NSUInteger DSHAgentLedgerIndexOfTranscript(NSArray *transcripts, id transcriptRef) {
+  if (transcriptRef == nil || transcriptRef == NSNull.null) return NSNotFound;
+  for (NSUInteger index = 0; index < transcripts.count; index += 1) {
+    if ([transcripts[index][@"transcript_ref"] isEqual:transcriptRef]) return index;
+  }
+  return NSNotFound;
+}
+
+- (BOOL)applyLedgerChanges:(NSArray *)changes
+                   toState:(NSMutableDictionary *)state
+                  rowIndex:(NSUInteger)rowIndex
+                     error:(NSError **)error {
+  for (NSDictionary *change in changes) {
+    NSString *kind = DSHAgentLedgerField(change, @"kind");
+    if ([kind isEqualToString:@"insert_ledger_row"]) {
+      NSMutableArray *rows = [state[@"ledger"] mutableCopy];
+      [rows addObject:change[@"row"]];
+      state[@"ledger"] = rows;
+    } else if ([kind isEqualToString:@"replace_ledger_row"]) {
+      NSMutableArray *rows = [state[@"ledger"] mutableCopy];
+      if (rowIndex == NSNotFound || rowIndex >= rows.count) {
+        DSHSetAgentNativeStoreError(error, DSHAgentNativeStoreErrorCorrupt);
         return NO;
       }
-      if ([candidate[@"locator"][@"attempt_id"]
-              isEqual:intent[@"locator"][@"attempt_id"]]) {
-        [attemptRows addObject:candidate];
-      }
-    }
-    if (attemptRows.count >= DSHAgentNativeWALMaxLedgerRowsPerAttempt) {
-      DSHSetAgentNativeStoreError(mutationError, DSHAgentNativeStoreErrorCapacity);
-      return NO;
-    }
-    if (!DSHAgentLedgerTranscriptBound(state, intent, mutationError)) return NO;
-    NSUInteger reservedBytes = [intent[@"reserved_write_bytes"] unsignedIntegerValue];
-    NSUInteger contentBytes = [intent[@"precondition"][@"content_bytes"] unsignedIntegerValue];
-    if (contentBytes > 0 || reservedBytes > 0) {
-      BOOL reservationFound = NO;
-      NSString *attemptId = intent[@"locator"][@"attempt_id"];
-      NSString *idempotencyKey = intent[@"locator"][@"idempotency_key"];
-      for (NSDictionary *reservation in state[@"reservations"]) {
-        if (![reservation[@"attempt_id"] isEqual:attemptId]) continue;
-        for (NSDictionary *key in reservation[@"keys"]) {
-          if ([key[@"idempotency_key"] isEqual:idempotencyKey] &&
-              [key[@"state"] isEqualToString:@"active"] &&
-              [key[@"content_bytes"] isEqual:@(contentBytes)] &&
-              reservedBytes == contentBytes &&
-              [key[@"content_sha256"] isEqual:intent[@"precondition"][@"content_sha256"]] &&
-              [key[@"relative_path_sha256"] isEqual:intent[@"precondition"][@"relative_path_sha256"]]) {
-            reservationFound = YES;
-            break;
-          }
+      rows[rowIndex] = change[@"row"];
+      state[@"ledger"] = rows;
+    } else if ([kind isEqualToString:@"insert_dispatch_marker"]) {
+      NSMutableArray *dispatch = [state[@"dispatch"] mutableCopy];
+      [dispatch addObject:change[@"marker"]];
+      state[@"dispatch"] = dispatch;
+    } else if ([kind isEqualToString:@"mark_dispatched"]) {
+      NSMutableArray *dispatch = [state[@"dispatch"] mutableCopy];
+      NSUInteger markerIndex = NSNotFound;
+      for (NSUInteger index = 0; index < dispatch.count; index += 1) {
+        NSDictionary *candidate = dispatch[index];
+        if ([candidate[@"kind"] isEqualToString:@"execution"] &&
+            [candidate[@"locator"] isEqual:change[@"locator"]]) {
+          markerIndex = index;
+          break;
         }
       }
-      if (!reservationFound) {
-        DSHSetAgentNativeStoreError(mutationError,
-                                    DSHAgentNativeStoreErrorConflict);
+      if (markerIndex == NSNotFound) {
+        DSHSetAgentNativeStoreError(error, DSHAgentNativeStoreErrorCorrupt);
         return NO;
       }
+      NSMutableDictionary *marker = [dispatch[markerIndex] mutableCopy];
+      marker[@"dispatch_state"] = @"dispatched";
+      dispatch[markerIndex] = [marker copy];
+      state[@"dispatch"] = dispatch;
+    } else if ([kind isEqualToString:@"replace_transcript"]) {
+      NSMutableArray *transcripts = [state[@"transcripts"] mutableCopy];
+      NSUInteger index = DSHAgentLedgerIndexOfTranscript(transcripts, change[@"row"][@"transcript_ref"]);
+      if (index == NSNotFound) {
+        DSHSetAgentNativeStoreError(error, DSHAgentNativeStoreErrorCorrupt);
+        return NO;
+      }
+      transcripts[index] = change[@"row"];
+      state[@"transcripts"] = transcripts;
+    } else if ([kind isEqualToString:@"replace_reservation"] ||
+               [kind isEqualToString:@"replace_batch"] ||
+               [kind isEqualToString:@"replace_authority"]) {
+      NSString *table = [kind isEqualToString:@"replace_reservation"] ? @"reservations"
+          : ([kind isEqualToString:@"replace_batch"] ? @"batches" : @"authorities");
+      NSMutableArray *records = [state[table] mutableCopy];
+      NSUInteger slot = [change[@"slot"] isKindOfClass:NSNumber.class]
+          ? [change[@"slot"] unsignedIntegerValue] : NSNotFound;
+      if (records == nil || slot >= records.count) {
+        DSHSetAgentNativeStoreError(error, DSHAgentNativeStoreErrorCorrupt);
+        return NO;
+      }
+      records[slot] = change[@"record"];
+      state[table] = records;
+    } else {
+      DSHSetAgentNativeStoreError(error, DSHAgentNativeStoreErrorCorrupt);
+      return NO;
     }
-    [rows addObject:[intent copy]];
-    state[@"ledger"] = rows;
-    NSMutableArray *dispatch = [state[@"dispatch"] mutableCopy];
-    [dispatch addObject:@{
-      @"schema_version" : @1,
-      @"kind" : @"execution",
-      @"locator" : [intent[@"locator"] copy],
-      @"dispatch_state" : @"not_dispatched",
-    }];
-    state[@"dispatch"] = dispatch;
-    inserted = [intent copy];
+  }
+  return YES;
+}
+
+/// Runs one reducer operation. `locator` selects the ledger row, `taskId` /
+/// `attemptId` scope the dispatch, reservation, batch and authority views,
+/// `expectedTranscript` names the transcript row the in-state helpers bind
+/// to, and `argOwner` is the owner an argument carries (for liveness).
+- (NSDictionary *)runLedgerOperation:(NSString *)op
+                                args:(NSDictionary *)args
+                             locator:(id)locator
+                              taskId:(id)taskId
+                           attemptId:(id)attemptId
+                  expectedTranscript:(id)expectedTranscript
+                            argOwner:(id)argOwner
+                                mode:(DSHAgentLedgerRunMode)mode
+                          inState:(NSMutableDictionary *)callerState
+                               error:(NSError **)error {
+  NSString *launchId = self.wal.launchId;
+  NSString *now = [self.wal currentTimestamp];
+  __block NSDictionary *output = nil;
+  DSHAgentNativeWALMutation run = ^BOOL(NSMutableDictionary *state, NSError **mutationError) {
+    NSArray *rows = state[@"ledger"];
+    NSDictionary *row = nil;
+    NSUInteger rowIndex = NSNotFound;
+    NSUInteger attemptRowCount = 0;
+    for (NSUInteger index = 0; index < rows.count; index += 1) {
+      NSDictionary *candidate = rows[index];
+      if (row == nil && locator != nil && [candidate[@"locator"] isEqual:locator]) {
+        row = candidate;
+        rowIndex = index;
+      }
+      if (attemptId != nil && [candidate[@"locator"][@"attempt_id"] isEqual:attemptId]) {
+        attemptRowCount += 1;
+      }
+    }
+    NSMutableArray *dispatch = [NSMutableArray array];
+    for (NSDictionary *entry in state[@"dispatch"]) {
+      if ([entry[@"kind"] isEqualToString:@"execution"] &&
+          attemptId != nil && [entry[@"locator"][@"attempt_id"] isEqual:attemptId]) {
+        [dispatch addObject:entry];
+      }
+    }
+    NSArray *transcripts = state[@"transcripts"];
+    // The bound transcript is the one the row names; an insert has no row
+    // yet, so the intent argument names it instead.
+    id boundReference = row != nil ? row[@"transcript_before"]
+        : DSHAgentLedgerField(args[@"intent"], @"transcript_before");
+    NSUInteger transcriptIndex = DSHAgentLedgerIndexOfTranscript(
+        transcripts, DSHAgentLedgerField(boundReference, @"transcript_ref"));
+    NSUInteger expectedIndex = DSHAgentLedgerIndexOfTranscript(
+        transcripts, DSHAgentLedgerField(expectedTranscript, @"transcript_ref"));
+    NSArray *reservations = DSHAgentLedgerSlotted(state[@"reservations"], ^BOOL(NSDictionary *record) {
+      return attemptId != nil && [record[@"attempt_id"] isEqual:attemptId];
+    });
+    NSArray *batches = DSHAgentLedgerSlotted(state[@"batches"], ^BOOL(NSDictionary *record) {
+      return attemptId != nil && [record[@"attempt_id"] isEqual:attemptId];
+    });
+    NSArray *authorityTable = state[@"authorities"];
+    id authorities = NSNull.null;
+    if ([authorityTable isKindOfClass:NSArray.class] && authorityTable.count > 0) {
+      authorities = DSHAgentLedgerSlotted(authorityTable, ^BOOL(NSDictionary *record) {
+        return taskId != nil && attemptId != nil &&
+            [record[@"task_id"] isEqual:taskId] && [record[@"attempt_id"] isEqual:attemptId];
+      });
+    }
+    BOOL argOwnerAlive = [argOwner isKindOfClass:NSDictionary.class] &&
+        [self.wal isNativeTaskAlive:argOwner[@"native_task_id"] launchId:argOwner[@"launch_id"]];
+    id rowOwner = row[@"owner"];
+    BOOL rowOwnerAlive = [rowOwner isKindOfClass:NSDictionary.class] &&
+        [self.wal isNativeTaskAlive:rowOwner[@"native_task_id"] launchId:rowOwner[@"launch_id"]];
+    NSDictionary *envelope = @{
+      @"op" : op,
+      @"args" : args,
+      @"env" : @{ @"launch_id" : launchId, @"now" : now, @"attempt_row_count" : @(attemptRowCount) },
+      @"view" : @{
+        @"row" : row ?: NSNull.null,
+        @"dispatch" : dispatch,
+        @"transcript" : transcriptIndex == NSNotFound ? NSNull.null : transcripts[transcriptIndex],
+        @"expected_transcript" : expectedIndex == NSNotFound ? NSNull.null : transcripts[expectedIndex],
+        @"reservations" : reservations,
+        @"batches" : batches,
+        @"authorities" : authorities,
+        @"arg_owner_alive" : argOwnerAlive ? @YES : @NO,
+        @"row_owner_alive" : rowOwnerAlive ? @YES : @NO,
+      },
+    };
+    NSDictionary *result = DSHAgentLedgerReduce(envelope, mutationError);
+    if (result == nil) return NO;
+    id reduced = result[@"output"];
+    if (![reduced isKindOfClass:NSDictionary.class]) {
+      DSHSetAgentNativeStoreError(mutationError, DSHAgentNativeStoreErrorCorrupt);
+      return NO;
+    }
+    output = reduced;
+    if (mode == DSHAgentLedgerRunModeSnapshot || ![result[@"commit"] isEqual:@YES]) return NO;
+    NSArray *changes = [result[@"changes"] isKindOfClass:NSArray.class] ? result[@"changes"] : @[];
+    if (![self applyLedgerChanges:changes toState:state rowIndex:rowIndex error:mutationError]) {
+      return NO;
+    }
+    NSDictionary *operation = result[@"commit_operation"];
+    if ([operation isKindOfClass:NSDictionary.class]) {
+      NSDictionary *committed = DSHAgentNativeWALCommitOperationInState(
+          state, self.wal, operation[@"operation_id"], operation[@"request_sha256"],
+          operation[@"task_id"], operation[@"attempt_id"], operation[@"terminal_state"],
+          operation[@"result_status"], operation[@"result_ref"], operation[@"result_revision"],
+          operation[@"safe_result"], mutationError);
+      if (committed == nil) return NO;
+      NSMutableDictionary *withOperation = [output mutableCopy];
+      withOperation[@"operation_result"] = committed[@"result"][@"result"] ?: NSNull.null;
+      output = [withOperation copy];
+    }
     return YES;
-  } error:error];
-  return committed ? @{ @"schema_version" : @1,
-                        @"status" : @"inserted", @"row" : inserted } : nil;
+  };
+  if (mode == DSHAgentLedgerRunModeInState) {
+    NSError *runError = nil;
+    BOOL applied = run(callerState, &runError);
+    if (!applied) {
+      if (error != nullptr) *error = runError ?: DSHAgentNativeStoreError(DSHAgentNativeStoreErrorCorrupt);
+      return nil;
+    }
+    return output;
+  }
+  if (mode == DSHAgentLedgerRunModeSnapshot) {
+    NSDictionary *snapshot = [self.wal snapshotWithError:error];
+    if (snapshot == nil) return nil;
+    NSError *runError = nil;
+    (void)run([snapshot mutableCopy], &runError);
+    if (runError != nil) {
+      if (error != nullptr) *error = runError;
+      return nil;
+    }
+    return output;
+  }
+  BOOL committed = [self.wal performAtomicTransaction:run error:error];
+  return committed ? output : nil;
 }
 
 - (NSDictionary *)insertAgentExecutionIntentWithInsertCAS:(NSDictionary *)insertCAS
                                             argumentsJSON:(NSString *)argumentsJSON
                                              exactIntent:(NSDictionary *)intent
                                                    error:(NSError **)error {
-  if (![intent isKindOfClass:NSDictionary.class]) {
-    DSHSetAgentNativeStoreError(error, DSHAgentNativeStoreErrorInvalidArgument);
-    return nil;
-  }
-  NSString *name = intent[@"name"];
-  NSError *bindingError = nil;
-  if (!DSHAgentRawArgumentsBindIntent(argumentsJSON, intent, &bindingError)) {
-    if (error != nullptr) *error = bindingError ?: DSHAgentNativeStoreError(
-        DSHAgentNativeStoreErrorConflict);
-    return nil;
-  }
-  NSError *argumentsError = nil;
-  NSString *argumentsDigest = DSHAgentArgumentsSHA256(name, argumentsJSON,
-                                                      &argumentsError);
-  if (argumentsDigest == nil ||
-      ![argumentsDigest isEqual:intent[@"arguments_sha256"]]) {
-    DSHSetAgentNativeStoreError(error, DSHAgentNativeStoreErrorConflict);
-    return nil;
-  }
-  return [self insertValidatedAgentExecutionIntentWithInsertCAS:insertCAS
-                                                  argumentsJSON:argumentsJSON
-                                                       exactIntent:intent
-                                                             error:error];
+  id locator = DSHAgentLedgerLocatorOf(insertCAS);
+  return [self runLedgerOperation:@"insert"
+                             args:@{
+                               @"insert_cas" : DSHAgentLedgerArgument(insertCAS),
+                               @"arguments_json" : DSHAgentLedgerArgument(argumentsJSON),
+                               @"intent" : DSHAgentLedgerArgument(intent),
+                             }
+                          locator:locator
+                           taskId:DSHAgentLedgerField(locator, @"task_id")
+                        attemptId:DSHAgentLedgerField(locator, @"attempt_id")
+               expectedTranscript:nil
+                         argOwner:nil
+                             mode:DSHAgentLedgerRunModeTransaction
+                          inState:nil
+                            error:error];
 }
 
 - (NSDictionary *)casAgentExecutionWithCAS:(NSDictionary *)cas
                                       patch:(NSDictionary *)patch
                               allowReconcile:(BOOL)allowReconcile
                                       error:(NSError **)error {
-  NSError *patchError = nil;
-  if (!DSHAgentLedgerCAS(cas) || !DSHAgentLedgerPatchKeysAllowed(patch, &patchError)) {
-    DSHSetAgentNativeStoreError(error, DSHAgentNativeStoreErrorInvalidArgument);
-    return nil;
-  }
-  NSError *immutablePatchError = nil;
-  NSDictionary *immutablePatch = DSHAgentImmutableJSONCopy(
-      patch, &immutablePatchError);
-  if (![immutablePatch isKindOfClass:NSDictionary.class]) {
-    DSHSetAgentNativeStoreError(error, DSHAgentNativeStoreErrorInvalidArgument);
-    return nil;
-  }
-  patch = immutablePatch;
-  if ((patch[@"state"] != nil &&
-       ![patch[@"state"] isKindOfClass:NSString.class])) {
-    DSHSetAgentNativeStoreError(error, DSHAgentNativeStoreErrorInvalidArgument);
-    return nil;
-  }
-  if (!allowReconcile &&
-      ([patch[@"state"] isEqualToString:@"settled"] ||
-       [patch[@"state"] isEqualToString:@"cancelled"])) {
-    // Terminal ledger rows are created only by settle/cancel's specialized
-    // atomic paths. Generic CAS remains a non-terminal mutation surface.
-    DSHSetAgentNativeStoreError(error, DSHAgentNativeStoreErrorConflict);
-    return nil;
-  }
-  __block NSDictionary *output = nil;
-  BOOL committed = [self.wal performAtomicTransaction:^BOOL(
-      NSMutableDictionary *state, NSError **mutationError) {
-    NSMutableArray *rows = [state[@"ledger"] mutableCopy];
-    for (NSUInteger index = 0; index < rows.count; index += 1) {
-      NSMutableDictionary *row = DSHAgentLedgerMutable(rows[index]);
-      if (![row[@"locator"] isEqual:cas[@"locator"]]) continue;
-      if (!DSHAgentCASMatchesRow(row, cas, mutationError)) return NO;
-      if (!allowReconcile &&
-          ([row[@"state"] isEqualToString:@"settled"] ||
-           [row[@"state"] isEqualToString:@"cancelled"])) {
-        DSHSetAgentNativeStoreError(mutationError,
-                                    DSHAgentNativeStoreErrorConflict);
-        return NO;
-      }
-      if (!DSHAgentLedgerTranscriptBound(state, row, mutationError)) return NO;
-      if ([row[@"state"] isEqualToString:@"intent"] &&
-          [patch[@"state"] isEqualToString:@"running"] &&
-          !DSHAgentLedgerRowExecutable(row)) {
-        DSHSetAgentNativeStoreError(mutationError,
-                                    DSHAgentNativeStoreErrorConflict);
-        return NO;
-      }
-      NSMutableDictionary *updated = [row mutableCopy];
-      [patch enumerateKeysAndObjectsUsingBlock:^(id key, id value, BOOL *stop) {
-        (void)stop;
-        updated[key] = value;
-      }];
-      NSString *nextState = updated[@"state"];
-      if (![nextState isKindOfClass:NSString.class]) {
-        DSHSetAgentNativeStoreError(mutationError,
-                                    DSHAgentNativeStoreErrorInvalidArgument);
-        return NO;
-      }
-      if ([nextState isEqualToString:@"cancelled"] ||
-          [nextState isEqualToString:@"unknown"] ||
-          [nextState isEqualToString:@"ambiguous"]) {
-        NSString *dispatchState = DSHAgentLedgerDispatchState(
-            state[@"dispatch"], row[@"locator"]);
-        if ([nextState isEqualToString:@"cancelled"] &&
-            ![dispatchState isEqualToString:@"not_dispatched"]) {
-          DSHSetAgentNativeStoreError(mutationError,
-                                      DSHAgentNativeStoreErrorConflict);
-          return NO;
-        }
-        if (([nextState isEqualToString:@"unknown"] ||
-             [nextState isEqualToString:@"ambiguous"]) && !allowReconcile) {
-          DSHSetAgentNativeStoreError(mutationError,
-                                      DSHAgentNativeStoreErrorConflict);
-          return NO;
-        }
-      }
-      if ((id)updated[@"owner"] != NSNull.null &&
-          (![updated[@"owner"] isKindOfClass:NSDictionary.class] ||
-           ![updated[@"owner"][@"task_id"] isEqual:updated[@"locator"][@"task_id"]] ||
-           ![updated[@"owner"][@"launch_id"] isEqual:self.wal.launchId] ||
-           ![self.wal isNativeTaskAlive:updated[@"owner"][@"native_task_id"]
-                                launchId:updated[@"owner"][@"launch_id"]])) {
-        DSHSetAgentNativeStoreError(mutationError,
-                                    DSHAgentNativeStoreErrorOwnerLost);
-        return NO;
-      }
-      if (!DSHAgentLedgerTransitionAllowed(row[@"state"], updated[@"state"],
-                                           allowReconcile)) {
-        DSHSetAgentNativeStoreError(mutationError,
-                                    DSHAgentNativeStoreErrorConflict);
-        return NO;
-      }
-      NSUInteger revision = [row[@"row_revision"] unsignedIntegerValue];
-      if (revision == 9007199254740991ULL || !DSHAgentLedgerRow(updated)) {
-        DSHSetAgentNativeStoreError(mutationError,
-                                    revision == 9007199254740991ULL
-                                        ? DSHAgentNativeStoreErrorCapacity
-                                        : DSHAgentNativeStoreErrorInvalidArgument);
-        return NO;
-      }
-      updated[@"row_revision"] = @(revision + 1);
-      updated[@"updated_at"] = [self.wal currentTimestamp];
-      if (!DSHAgentLedgerRow(updated)) {
-        DSHSetAgentNativeStoreError(mutationError, DSHAgentNativeStoreErrorInvalidArgument);
-        return NO;
-      }
-      NSDictionary *currentTranscript = nil;
-      for (NSDictionary *candidate in state[@"transcripts"]) {
-        if ([candidate[@"transcript_ref"]
-                isEqual:row[@"transcript_before"][@"transcript_ref"]]) {
-          currentTranscript = @{
-            @"schema_version" : @1,
-            @"transcript_ref" : candidate[@"transcript_ref"],
-            @"generation" : candidate[@"generation"],
-            @"transcript_sha256" : candidate[@"transcript_sha256"],
-            @"transcript_bytes" : candidate[@"transcript_bytes"],
-          };
-          break;
-        }
-      }
-      if (currentTranscript == nil || !DSHAgentLedgerAdvanceAuthority(
-              state, row[@"locator"][@"task_id"],
-              row[@"locator"][@"attempt_id"],
-              @{ @"schema_version" : @1,
-                 @"root_fingerprint_sha256" : row[@"root_fingerprint_sha256"],
-                 @"binding_revision" : row[@"binding_revision"] },
-              currentTranscript, currentTranscript, nil, nil, nil, NO,
-              [self.wal currentTimestamp], mutationError)) return NO;
-      rows[index] = updated;
-      state[@"ledger"] = rows;
-      output = @{ @"ok" : @YES, @"row" : [updated copy] };
-      return YES;
-    }
-    DSHSetAgentNativeStoreError(mutationError, DSHAgentNativeStoreErrorConflict);
-    return NO;
-  } error:error];
-  if (committed) return output;
-  if (error != nullptr && *error != nil &&
-      (*error).code == DSHAgentNativeStoreErrorConflict) {
-    NSDictionary *state = [self.wal snapshotWithError:nil];
-    for (NSDictionary *row in state[@"ledger"]) {
-      if ([row[@"locator"] isEqual:cas[@"locator"]]) {
-        if (error != nullptr) *error = nil;
-        return @{ @"ok" : @NO, @"conflict" : @YES, @"row" : row };
-      }
-    }
-  }
-  return nil;
+  id locator = DSHAgentLedgerLocatorOf(cas);
+  return [self runLedgerOperation:@"cas"
+                             args:@{
+                               @"cas" : DSHAgentLedgerArgument(cas),
+                               @"patch" : DSHAgentLedgerArgument(patch),
+                               @"allow_reconcile" : allowReconcile ? @YES : @NO,
+                             }
+                          locator:locator
+                           taskId:DSHAgentLedgerField(locator, @"task_id")
+                        attemptId:DSHAgentLedgerField(locator, @"attempt_id")
+               expectedTranscript:nil
+                         argOwner:DSHAgentLedgerField(patch, @"owner")
+                             mode:DSHAgentLedgerRunModeTransaction
+                          inState:nil
+                            error:error];
 }
 
 - (NSDictionary *)casAgentExecutionWithCAS:(NSDictionary *)cas
                                       patch:(NSDictionary *)patch
                                       error:(NSError **)error {
-  return [self casAgentExecutionWithCAS:cas
-                                  patch:patch
-                          allowReconcile:NO
-                                  error:error];
+  return [self casAgentExecutionWithCAS:cas patch:patch allowReconcile:NO error:error];
 }
 
 - (NSDictionary *)claimAgentExecutionWithLocator:(NSDictionary *)locator
                               expectedRowRevision:(NSNumber *)revision
                                              owner:(NSDictionary *)owner
                                              error:(NSError **)error {
-  if (!DSHAgentLedgerLocator(locator) ||
-      !DSHAgentSafeInteger(revision, 9007199254740991ULL, NO) ||
-      !DSHAgentLedgerOwner(owner) ||
-      ![owner[@"task_id"] isEqual:locator[@"task_id"]] ||
-      ![owner[@"launch_id"] isEqual:self.wal.launchId] ||
-      ![self.wal isNativeTaskAlive:owner[@"native_task_id"]
-                           launchId:owner[@"launch_id"]]) {
-    DSHSetAgentNativeStoreError(error, DSHAgentNativeStoreErrorInvalidArgument);
-    return nil;
-  }
-  NSDictionary *state = [self.wal snapshotWithError:error];
-  if (state == nil) return nil;
-  for (NSDictionary *row in state[@"ledger"]) {
-    if (![row[@"locator"] isEqual:locator]) continue;
-    NSDictionary *cas = @{
-      @"schema_version" : @2,
-      @"locator" : locator,
-      @"expected_row_revision" : revision,
-      @"expected_state" : @"intent",
-      @"expected_owner_generation" : NSNull.null,
-      @"expected_launch_id" : NSNull.null,
-      @"expected_native_task_id" : NSNull.null,
-      @"expected_transcript_generation" : row[@"transcript_before"][@"generation"],
-      @"expected_transcript_sha256" : row[@"transcript_before"][@"transcript_sha256"],
-      @"expected_root_fingerprint_sha256" : row[@"root_fingerprint_sha256"],
-      @"expected_binding_revision" : row[@"binding_revision"],
-    };
-    return [self casAgentExecutionWithCAS:cas
-                                     patch:@{
-                                       @"state" : @"running",
-                                       @"owner" : owner,
-                                     }
-                              allowReconcile:NO
-                                     error:error];
-  }
-  DSHSetAgentNativeStoreError(error, DSHAgentNativeStoreErrorNotFound);
-  return nil;
+  return [self runLedgerOperation:@"claim"
+                             args:@{
+                               @"locator" : DSHAgentLedgerArgument(locator),
+                               @"expected_row_revision" : DSHAgentLedgerArgument(revision),
+                               @"owner" : DSHAgentLedgerArgument(owner),
+                             }
+                          locator:locator
+                           taskId:DSHAgentLedgerField(locator, @"task_id")
+                        attemptId:DSHAgentLedgerField(locator, @"attempt_id")
+               expectedTranscript:nil
+                         argOwner:owner
+                             mode:DSHAgentLedgerRunModeTransaction
+                          inState:nil
+                            error:error];
 }
 
 - (NSDictionary *)heartbeatAgentExecutionWithCAS:(NSDictionary *)cas
                                             owner:(NSDictionary *)owner
                                             error:(NSError **)error {
-  if (!DSHAgentLedgerCAS(cas) || !DSHAgentLedgerOwner(owner) ||
-      ![owner[@"task_id"] isEqual:cas[@"locator"][@"task_id"]] ||
-      ![owner[@"launch_id"] isEqual:self.wal.launchId] ||
-      ![self.wal isNativeTaskAlive:owner[@"native_task_id"]
-                           launchId:owner[@"launch_id"]]) {
-    DSHSetAgentNativeStoreError(error, DSHAgentNativeStoreErrorOwnerLost);
-    return nil;
-  }
-  return [self casAgentExecutionWithCAS:cas
-                                  patch:@{ @"owner" : owner }
-                                  error:error];
+  id locator = DSHAgentLedgerLocatorOf(cas);
+  return [self runLedgerOperation:@"heartbeat"
+                             args:@{
+                               @"cas" : DSHAgentLedgerArgument(cas),
+                               @"owner" : DSHAgentLedgerArgument(owner),
+                             }
+                          locator:locator
+                           taskId:DSHAgentLedgerField(locator, @"task_id")
+                        attemptId:DSHAgentLedgerField(locator, @"attempt_id")
+               expectedTranscript:nil
+                         argOwner:owner
+                             mode:DSHAgentLedgerRunModeTransaction
+                          inState:nil
+                            error:error];
 }
 
 - (NSDictionary *)markAgentExecutionDispatchedWithCAS:(NSDictionary *)cas
                                                   error:(NSError **)error {
-  if (!DSHAgentLedgerCAS(cas)) {
-    DSHSetAgentNativeStoreError(error, DSHAgentNativeStoreErrorInvalidArgument);
-    return nil;
-  }
-  __block NSDictionary *output = nil;
-  BOOL committed = [self.wal performAtomicTransaction:^BOOL(
-      NSMutableDictionary *state, NSError **mutationError) {
-    NSMutableArray *rows = [state[@"ledger"] mutableCopy];
-    NSUInteger rowIndex = NSNotFound;
-    NSMutableDictionary *row = nil;
-    for (NSUInteger index = 0; index < rows.count; index += 1) {
-      NSMutableDictionary *candidate = DSHAgentLedgerMutable(rows[index]);
-      if ([candidate[@"locator"] isEqual:cas[@"locator"]]) {
-        row = candidate;
-        rowIndex = index;
-        break;
-      }
-    }
-    if (row == nil || !DSHAgentCASMatchesRow(row, cas, mutationError) ||
-        (![row[@"state"] isEqualToString:@"running"] &&
-         ![row[@"state"] isEqualToString:@"cancel_requested"]) ||
-        (id)row[@"owner"] == NSNull.null ||
-        ![self.wal isNativeTaskAlive:row[@"owner"][@"native_task_id"]
-                             launchId:row[@"owner"][@"launch_id"]]) {
-      DSHSetAgentNativeStoreError(mutationError,
-                                  DSHAgentNativeStoreErrorConflict);
-      return NO;
-    }
-    if (!DSHAgentLedgerTranscriptBound(state, row, mutationError)) return NO;
-    if ([row[@"precondition"][@"kind"] isEqualToString:@"write_file"] &&
-        [row[@"precondition"][@"prior"][@"kind"] isEqualToString:@"unknown"]) {
-      DSHSetAgentNativeStoreError(mutationError,
-                                  DSHAgentNativeStoreErrorConflict);
-      return NO;
-    }
-    if (!DSHAgentWriteBatchEffectGateOpen(state, row)) {
-      DSHSetAgentNativeStoreError(mutationError,
-                                  DSHAgentNativeStoreErrorConflict);
-      return NO;
-    }
-    NSMutableArray *dispatch = [state[@"dispatch"] mutableCopy];
-    BOOL found = NO;
-    for (NSMutableDictionary *entry in dispatch) {
-      if (![entry[@"kind"] isEqualToString:@"execution"] ||
-          ![entry[@"locator"] isEqual:row[@"locator"]]) continue;
-      found = YES;
-      if ([entry[@"dispatch_state"] isEqualToString:@"dispatched"]) {
-        output = @{ @"schema_version" : @1,
-                    @"status" : @"already_dispatched",
-                    @"row" : [row copy] };
-        return NO;
-      }
-      entry[@"dispatch_state"] = @"dispatched";
-      break;
-    }
-    if (!found) {
-      DSHSetAgentNativeStoreError(mutationError, DSHAgentNativeStoreErrorCorrupt);
-      return NO;
-    }
-    NSUInteger revision = [row[@"row_revision"] unsignedIntegerValue];
-    if (revision == 9007199254740991ULL) {
-      DSHSetAgentNativeStoreError(mutationError, DSHAgentNativeStoreErrorCapacity);
-      return NO;
-    }
-    row[@"row_revision"] = @(revision + 1);
-    row[@"updated_at"] = [self.wal currentTimestamp];
-    if (!DSHAgentLedgerRow(row)) {
-      DSHSetAgentNativeStoreError(mutationError, DSHAgentNativeStoreErrorInvalidArgument);
-      return NO;
-    }
-    NSDictionary *currentTranscript = nil;
-    for (NSDictionary *candidate in state[@"transcripts"]) {
-      if ([candidate[@"transcript_ref"]
-              isEqual:row[@"transcript_before"][@"transcript_ref"]]) {
-        currentTranscript = @{
-          @"schema_version" : @1,
-          @"transcript_ref" : candidate[@"transcript_ref"],
-          @"generation" : candidate[@"generation"],
-          @"transcript_sha256" : candidate[@"transcript_sha256"],
-          @"transcript_bytes" : candidate[@"transcript_bytes"],
-        };
-        break;
-      }
-    }
-    if (currentTranscript == nil || !DSHAgentLedgerAdvanceAuthority(
-            state, row[@"locator"][@"task_id"],
-            row[@"locator"][@"attempt_id"],
-            @{ @"schema_version" : @1,
-               @"root_fingerprint_sha256" : row[@"root_fingerprint_sha256"],
-               @"binding_revision" : row[@"binding_revision"] },
-            currentTranscript, currentTranscript, nil, nil, nil, NO,
-            [self.wal currentTimestamp], mutationError)) return NO;
-    rows[rowIndex] = row;
-    state[@"ledger"] = rows;
-    state[@"dispatch"] = dispatch;
-    output = @{ @"schema_version" : @1,
-                @"status" : @"dispatched",
-                @"row" : [row copy] };
-    return YES;
-  } error:error];
-  return committed ? output : nil;
+  id locator = DSHAgentLedgerLocatorOf(cas);
+  return [self runLedgerOperation:@"mark_dispatched"
+                             args:@{ @"cas" : DSHAgentLedgerArgument(cas) }
+                          locator:locator
+                           taskId:DSHAgentLedgerField(locator, @"task_id")
+                        attemptId:DSHAgentLedgerField(locator, @"attempt_id")
+               expectedTranscript:nil
+                         argOwner:nil
+                             mode:DSHAgentLedgerRunModeTransaction
+                          inState:nil
+                            error:error];
 }
 
 - (NSDictionary *)queryAgentExecutionWithLocator:(NSDictionary *)locator
                                 expectedTranscript:(NSDictionary *)transcript
                                                root:(NSDictionary *)root
                                              error:(NSError **)error {
-  if (!DSHAgentLedgerLocator(locator) || !DSHAgentLedgerReference(transcript) ||
-      !([root isKindOfClass:NSDictionary.class] &&
-        (DSHAgentLedgerRootExpectation(root) || DSHAgentLedgerRootFull(root))) ||
-      !DSHAgentCanonicalSHA256(root[@"root_fingerprint_sha256"]) ||
-      !DSHAgentSafeInteger(root[@"binding_revision"] ?: root[@"workspace_binding_revision"],
-                           9007199254740991ULL, NO)) {
-    DSHSetAgentNativeStoreError(error, DSHAgentNativeStoreErrorInvalidArgument);
+  NSDictionary *args = @{
+    @"locator" : DSHAgentLedgerArgument(locator),
+    @"expected_transcript" : DSHAgentLedgerArgument(transcript),
+    @"root" : DSHAgentLedgerArgument(root),
+  };
+  // The reducer validates the arguments before it looks at any row, so a
+  // dry run over an empty view reproduces the ObjC preflight: invalid
+  // arguments never trigger owner-loss reconciliation.
+  NSError *preflightError = nil;
+  NSDictionary *preflight = DSHAgentLedgerReduce(@{
+    @"op" : @"query", @"args" : args,
+    @"env" : @{ @"launch_id" : self.wal.launchId, @"now" : [self.wal currentTimestamp], @"attempt_row_count" : @0 },
+    @"view" : @{},
+  }, &preflightError);
+  if (preflight == nil) {
+    if (error != nullptr) *error = preflightError;
     return nil;
   }
   if (![self.wal reconcileOwnerLossWithError:error]) return nil;
-  NSDictionary *state = [self.wal snapshotWithError:error];
-  if (state == nil) return nil;
-  for (NSDictionary *row in state[@"ledger"]) {
-    if (![row[@"locator"] isEqual:locator]) continue;
-    if (![row[@"root_fingerprint_sha256"] isEqual:root[@"root_fingerprint_sha256"]] ||
-        ![row[@"binding_revision"] isEqual:
-            (root[@"binding_revision"] ?: root[@"workspace_binding_revision"])] ||
-        ![row[@"transcript_before"] isEqual:transcript]) {
-      DSHSetAgentNativeStoreError(error, DSHAgentNativeStoreErrorConflict);
-      return nil;
-    }
-    NSString *status = row[@"state"];
-    if ([status isEqualToString:@"settled"]) {
-      NSString *outcome = row[@"receipt"][@"outcome"];
-      NSString *mapped = [outcome isEqualToString:@"ok"] ? @"completed" :
-          ([outcome isEqualToString:@"denied"] ? @"denied" : @"failed");
-      return @{ @"schema_version" : @2, @"status" : mapped, @"row" : row };
-    }
-    return @{ @"schema_version" : @2, @"status" : status, @"row" : row };
-  }
-  return @{ @"schema_version" : @2, @"status" : @"not_started" };
+  return [self runLedgerOperation:@"query"
+                             args:args
+                          locator:locator
+                           taskId:DSHAgentLedgerField(locator, @"task_id")
+                        attemptId:DSHAgentLedgerField(locator, @"attempt_id")
+               expectedTranscript:nil
+                         argOwner:nil
+                             mode:DSHAgentLedgerRunModeSnapshot
+                          inState:nil
+                            error:error];
 }
 
 - (NSDictionary *)reserveWriteBytesForAttemptWithRequest:(NSDictionary *)request
@@ -3388,110 +3063,17 @@ static BOOL DSHAgentLedgerAdvanceAuthority(
 
 - (NSDictionary *)releaseWriteReservationWithCAS:(NSDictionary *)cas
                                             error:(NSError **)error {
-  if (!DSHAgentLedgerCAS(cas)) {
-    DSHSetAgentNativeStoreError(error, DSHAgentNativeStoreErrorInvalidArgument);
-    return nil;
-  }
-  __block NSDictionary *output = nil;
-  BOOL committed = [self.wal performAtomicTransaction:^BOOL(
-      NSMutableDictionary *state, NSError **mutationError) {
-    NSMutableArray *rows = [state[@"ledger"] mutableCopy];
-    NSMutableDictionary *target = nil;
-    NSUInteger targetIndex = NSNotFound;
-    for (NSUInteger index = 0; index < rows.count; index += 1) {
-      NSDictionary *row = rows[index];
-      if ([row[@"locator"] isEqual:cas[@"locator"]]) {
-        target = DSHAgentLedgerMutable(row);
-        targetIndex = index;
-        break;
-      }
-    }
-    if (target == nil || !DSHAgentCASMatchesRow(target, cas, mutationError) ||
-        ![target[@"state"] isEqualToString:@"intent"] ||
-        [target[@"reserved_write_bytes"] unsignedIntegerValue] == 0 ||
-        ![DSHAgentLedgerDispatchState(state[@"dispatch"], target[@"locator"])
-            isEqualToString:@"not_dispatched"]) {
-      DSHSetAgentNativeStoreError(mutationError, DSHAgentNativeStoreErrorConflict);
-      return NO;
-    }
-    if (!DSHAgentLedgerTranscriptBound(state, target, mutationError)) return NO;
-    NSMutableArray *reservations = [state[@"reservations"] mutableCopy];
-    for (NSMutableDictionary *record in reservations) {
-      if (![record[@"attempt_id"] isEqual:target[@"locator"][@"attempt_id"]]) continue;
-      NSUInteger reserved = [record[@"reserved_write_bytes"] unsignedIntegerValue];
-      NSUInteger amount = [target[@"reserved_write_bytes"] unsignedIntegerValue];
-      NSMutableArray *keys = [record[@"keys"] mutableCopy];
-      NSString *idempotency = target[@"locator"][@"idempotency_key"];
-      BOOL didReleaseKey = NO;
-      for (NSUInteger index = 0; index < keys.count; index += 1) {
-        if ([keys[index][@"idempotency_key"] isEqual:idempotency]) {
-          NSMutableDictionary *releasedKey = [keys[index] mutableCopy];
-          if (![releasedKey[@"state"] isEqualToString:@"active"] ||
-              ![releasedKey[@"content_bytes"] isEqual:@(amount)]) {
-            DSHSetAgentNativeStoreError(mutationError,
-                                        DSHAgentNativeStoreErrorConflict);
-            return NO;
-          }
-          releasedKey[@"state"] = @"released";
-          keys[index] = releasedKey;
-          didReleaseKey = YES;
-          break;
-        }
-      }
-      if (!didReleaseKey) {
-        DSHSetAgentNativeStoreError(mutationError, DSHAgentNativeStoreErrorConflict);
-        return NO;
-      }
-      if ([record[@"reservation_version"] unsignedIntegerValue] == DSHAgentMaximumSafeInteger) {
-        DSHSetAgentNativeStoreError(mutationError, DSHAgentNativeStoreErrorCapacity);
-        return NO;
-      }
-      record[@"reservation_version"] = @([record[@"reservation_version"] unsignedIntegerValue] + 1);
-      record[@"reserved_write_bytes"] = @(reserved >= amount ? reserved - amount : 0);
-      record[@"keys"] = keys;
-      NSUInteger rowRevision = [target[@"row_revision"] unsignedIntegerValue];
-      if (rowRevision == 9007199254740991ULL) {
-        DSHSetAgentNativeStoreError(mutationError, DSHAgentNativeStoreErrorCapacity);
-        return NO;
-      }
-      target[@"reserved_write_bytes"] = @0;
-      target[@"row_revision"] = @(rowRevision + 1);
-      target[@"updated_at"] = [self.wal currentTimestamp];
-      if (!DSHAgentLedgerRow(target)) {
-        DSHSetAgentNativeStoreError(mutationError, DSHAgentNativeStoreErrorInvalidArgument);
-        return NO;
-      }
-      rows[targetIndex] = target;
-      state[@"reservations"] = reservations;
-      state[@"ledger"] = rows;
-      NSMutableArray *batches = [state[@"batches"] mutableCopy];
-      NSString *attemptId = target[@"locator"][@"attempt_id"];
-      NSString *releasedKeyId = target[@"locator"][@"idempotency_key"];
-      for (NSUInteger batchIndex = 0; batchIndex < batches.count; batchIndex += 1) {
-        NSMutableDictionary *batch = [batches[batchIndex] mutableCopy];
-        if (![batch[@"attempt_id"] isEqual:attemptId] ||
-            ![batch[@"write_keys"] containsObject:releasedKeyId]) continue;
-        NSUInteger batchReserved = [batch[@"reserved_write_bytes"] unsignedIntegerValue];
-        batch[@"reserved_write_bytes"] = @(batchReserved >= amount
-                                             ? batchReserved - amount : 0);
-        if ([batch[@"effect_gate"] isEqualToString:@"closed"] &&
-            DSHAgentMutationBatchProvesNoDispatch(state, batch)) {
-          batch[@"effect_gate"] = @"released";
-        }
-        batch[@"updated_at"] = [self.wal currentTimestamp];
-        batches[batchIndex] = batch;
-      }
-      state[@"batches"] = batches;
-      output = @{ @"schema_version" : @1,
-                  @"status" : @"released",
-                  @"reserved_write_bytes" : record[@"reserved_write_bytes"],
-                  @"row" : [target copy] };
-      return YES;
-    }
-    DSHSetAgentNativeStoreError(mutationError, DSHAgentNativeStoreErrorNotFound);
-    return NO;
-  } error:error];
-  return committed ? output : nil;
+  id locator = DSHAgentLedgerLocatorOf(cas);
+  return [self runLedgerOperation:@"release"
+                             args:@{ @"cas" : DSHAgentLedgerArgument(cas) }
+                          locator:locator
+                           taskId:DSHAgentLedgerField(locator, @"task_id")
+                        attemptId:DSHAgentLedgerField(locator, @"attempt_id")
+               expectedTranscript:nil
+                         argOwner:nil
+                             mode:DSHAgentLedgerRunModeTransaction
+                          inState:nil
+                            error:error];
 }
 
 - (NSDictionary *)settleAgentExecutionWithCAS:(NSDictionary *)cas
@@ -3507,614 +3089,60 @@ static BOOL DSHAgentLedgerAdvanceAuthority(
                                         message:(NSDictionary *)message
                                       operation:(nullable NSDictionary *)operation
                                           error:(NSError **)error {
-  NSError *patchError = nil;
-  if (!DSHAgentLedgerCAS(cas) ||
-      !DSHAgentLedgerPatchKeysAllowed(patch, &patchError) ||
-      ![message isKindOfClass:NSDictionary.class] ||
-      ![message[@"role"] isKindOfClass:NSString.class] ||
-      ![message[@"role"] isEqualToString:@"tool"] ||
-      !DSHAgentReceipt(patch[@"receipt"]) ||
-      ![patch[@"state"] isKindOfClass:NSString.class] ||
-      (![patch[@"state"] isEqualToString:@"settled"] &&
-       ![patch[@"state"] isEqualToString:@"ambiguous"]) ||
-      (operation != nil &&
-       (!DSHAgentExactDictionaryKeys(operation, @[
-          @"operation_id", @"request_sha256", @"effect_may_have_occurred",
-        ]) || !DSHAgentCanonicalUUID(operation[@"operation_id"]) ||
-        !DSHAgentCanonicalSHA256(operation[@"request_sha256"]) ||
-        ![operation[@"effect_may_have_occurred"] isKindOfClass:NSNumber.class] ||
-        CFGetTypeID((__bridge CFTypeRef)operation[@"effect_may_have_occurred"]) !=
-            CFBooleanGetTypeID()))) {
-    DSHSetAgentNativeStoreError(error, DSHAgentNativeStoreErrorInvalidArgument);
-    return nil;
-  }
-  NSData *feedbackBytes = DSHAgentCanonicalFeedbackBytes(message);
-  if (feedbackBytes == nil ||
-      !DSHAgentValidateNativeToolFeedbackString(message[@"content"], nullptr)) {
-    DSHSetAgentNativeStoreError(error, DSHAgentNativeStoreErrorInvalidArgument);
-    return nil;
-  }
-  NSError *feedbackDigestError = nil;
-  NSString *feedbackDigest = DSHAgentHB(@"tool-result", feedbackBytes,
-                                        &feedbackDigestError);
-  if (feedbackDigest == nil ||
-      ![patch[@"receipt"][@"result_sha256"] isEqual:feedbackDigest] ||
-      ![patch[@"receipt"][@"result_bytes"] isEqual:@(feedbackBytes.length)] ||
-      ![patch[@"receipt"][@"truncated"] isEqual:message[@"truncated"]]) {
-    DSHSetAgentNativeStoreError(error, DSHAgentNativeStoreErrorConflict);
-    return nil;
-  }
-  NSError *feedbackDecodeError = nil;
-  NSDictionary *feedback = [NSJSONSerialization JSONObjectWithData:feedbackBytes
-                                                               options:0
-                                                                 error:&feedbackDecodeError];
-  if (![feedback isKindOfClass:NSDictionary.class] ||
-      ![feedback[@"name"] isEqualToString:patch[@"receipt"][@"name"]] ||
-      ![feedback[@"outcome"] isEqualToString:patch[@"receipt"][@"outcome"]] ||
-      ![message[@"call_id"] isEqual:patch[@"receipt"][@"call_id"]]) {
-    DSHSetAgentNativeStoreError(error, DSHAgentNativeStoreErrorConflict);
-    return nil;
-  }
-  NSDictionary *feedbackPayload = feedback[@"payload"];
-  NSString *feedbackOutcome = feedback[@"outcome"];
-  if (![feedbackPayload isKindOfClass:NSDictionary.class] ||
-      ([feedbackOutcome isEqualToString:@"ok"] &&
-       patch[@"receipt"][@"failure_code"] != NSNull.null) ||
-      (![feedbackOutcome isEqualToString:@"ok"] &&
-       ![feedbackPayload[@"failure_code"] isEqual:patch[@"receipt"][@"failure_code"]])) {
-    DSHSetAgentNativeStoreError(error, DSHAgentNativeStoreErrorConflict);
-    return nil;
-  }
-  if ([feedbackOutcome isEqualToString:@"ok"] &&
-      ([feedback[@"name"] isEqualToString:@"read_file"] ||
-       [feedback[@"name"] isEqualToString:@"list_dir"]) &&
-      ![feedbackPayload[@"truncated"] isEqual:message[@"truncated"]]) {
-    DSHSetAgentNativeStoreError(error, DSHAgentNativeStoreErrorConflict);
-    return nil;
-  }
-  NSError *immutableSettlementError = nil;
-  NSDictionary *immutableMessage = DSHAgentImmutableJSONCopy(
-      message, &immutableSettlementError);
-  NSDictionary *immutablePatch = DSHAgentImmutableJSONCopy(
-      patch, &immutableSettlementError);
-  if (![immutableMessage isKindOfClass:NSDictionary.class] ||
-      ![immutablePatch isKindOfClass:NSDictionary.class]) {
-    DSHSetAgentNativeStoreError(error, DSHAgentNativeStoreErrorInvalidArgument);
-    return nil;
-  }
-  message = immutableMessage;
-  patch = immutablePatch;
-  __block NSDictionary *output = nil;
-  BOOL committed = [self.wal performAtomicTransaction:^BOOL(
-      NSMutableDictionary *state, NSError **mutationError) {
-    NSMutableArray *rows = [state[@"ledger"] mutableCopy];
-    NSMutableArray *transcripts = [state[@"transcripts"] mutableCopy];
-    NSUInteger rowIndex = NSNotFound;
-    NSMutableDictionary *row = nil;
-    for (NSUInteger index = 0; index < rows.count; index += 1) {
-      NSMutableDictionary *candidate = DSHAgentLedgerMutable(rows[index]);
-      if ([candidate[@"locator"] isEqual:cas[@"locator"]]) {
-        row = candidate;
-        rowIndex = index;
-        break;
-      }
-    }
-    if (row == nil || !DSHAgentCASMatchesRow(row, cas, mutationError) ||
-        (![row[@"state"] isEqualToString:@"running"] &&
-         ![row[@"state"] isEqualToString:@"cancel_requested"]) ||
-        ![message[@"round_index"] isEqual:row[@"locator"][@"round_index"]] ||
-        ![message[@"call_id"] isEqual:row[@"locator"][@"call_id"]] ||
-        ![patch[@"receipt"][@"call_id"] isEqual:row[@"locator"][@"call_id"]] ||
-        ![patch[@"receipt"][@"name"] isEqual:row[@"name"]] ||
-        ![patch[@"receipt"][@"arguments_sha256"] isEqual:row[@"arguments_sha256"]] ||
-        ![patch[@"receipt"][@"outcome"] isEqual:feedbackOutcome] ||
-        ![DSHAgentLedgerDispatchState(state[@"dispatch"], row[@"locator"])
-            isEqualToString:@"dispatched"]) {
-      if (mutationError != nullptr && *mutationError == nil) {
-        DSHSetAgentNativeStoreError(mutationError,
-                                    DSHAgentNativeStoreErrorConflict);
-      }
-      return NO;
-    }
-    if (!DSHAgentSettledFactsMatchFeedback(row, feedback,
-                                           patch[@"settled_facts"])) {
-      DSHSetAgentNativeStoreError(mutationError,
-                                  DSHAgentNativeStoreErrorConflict);
-      return NO;
-    }
-    if (!DSHAgentLedgerTranscriptBound(state, row, mutationError)) return NO;
-    NSDictionary *before = row[@"transcript_before"];
-    NSMutableDictionary *transcript = nil;
-    NSUInteger transcriptIndex = NSNotFound;
-    for (NSUInteger index = 0; index < transcripts.count; index += 1) {
-      NSMutableDictionary *candidate = [transcripts[index] mutableCopy];
-      if ([candidate[@"transcript_ref"] isEqual:before[@"transcript_ref"]]) {
-        transcript = candidate;
-        transcriptIndex = index;
-        break;
-      }
-    }
-    NSUInteger currentGeneration = [transcript[@"generation"] unsignedIntegerValue];
-    NSUInteger beforeGeneration = [before[@"generation"] unsignedIntegerValue];
-    if (transcript == nil || currentGeneration < beforeGeneration ||
-        (currentGeneration == beforeGeneration &&
-         (![transcript[@"transcript_sha256"] isEqual:before[@"transcript_sha256"]] ||
-          ![transcript[@"transcript_bytes"] isEqual:before[@"transcript_bytes"]])) ||
-        ![transcript[@"state"] isEqualToString:@"open"]) {
-      DSHSetAgentNativeStoreError(mutationError, DSHAgentNativeStoreErrorConflict);
-      return NO;
-    }
-    NSDictionary *authorityTranscriptBefore = @{
-      @"schema_version" : @1,
-      @"transcript_ref" : transcript[@"transcript_ref"],
-      @"generation" : transcript[@"generation"],
-      @"transcript_sha256" : transcript[@"transcript_sha256"],
-      @"transcript_bytes" : transcript[@"transcript_bytes"],
-    };
-    NSMutableArray *messages = [transcript[@"messages"] mutableCopy];
-    [messages addObject:[message copy]];
-    NSUInteger generation = currentGeneration + 1;
-    NSDictionary *input = @{
-      @"schema_version" : @1,
-      @"transcript_ref" : transcript[@"transcript_ref"],
-      @"attempt_id" : transcript[@"attempt_id"],
-      @"root_fingerprint_sha256" : transcript[@"root_fingerprint_sha256"],
-      @"generation" : @(generation),
-      @"messages" : messages,
-    };
-    NSError *digestError = nil;
-    NSData *bytes = DSHAgentCanonicalJSON(input, &digestError);
-    NSString *digest = DSHAgentHJ(@"agent-transcript", input, &digestError);
-    if (digest == nil || bytes.length > DSHAgentNativeWALMaxTranscriptBytes) {
-      if (digest == nil) {
-        if (mutationError != nullptr) *mutationError = digestError;
-      }
-      else DSHSetAgentNativeStoreError(mutationError, DSHAgentNativeStoreErrorCapacity);
-      return NO;
-    }
-    transcript[@"messages"] = messages;
-    transcript[@"generation"] = @(generation);
-    transcript[@"transcript_sha256"] = digest;
-    transcript[@"transcript_bytes"] = @(bytes.length);
-    transcript[@"updated_at"] = [self.wal currentTimestamp];
-    NSDictionary *after = @{
-      @"schema_version" : @1,
-      @"transcript_ref" : transcript[@"transcript_ref"],
-      @"generation" : @(generation),
-      @"transcript_sha256" : digest,
-      @"transcript_bytes" : @(bytes.length),
-    };
-    NSMutableDictionary *updated = [row mutableCopy];
-    [patch enumerateKeysAndObjectsUsingBlock:^(id key, id value, BOOL *stop) {
-      (void)stop;
-      updated[key] = value;
-    }];
-    updated[@"owner"] = NSNull.null;
-    updated[@"transcript_after"] = after;
-    NSUInteger revision = [row[@"row_revision"] unsignedIntegerValue];
-    if (revision == 9007199254740991ULL) {
-      DSHSetAgentNativeStoreError(mutationError, DSHAgentNativeStoreErrorCapacity);
-      return NO;
-    }
-    updated[@"row_revision"] = @(revision + 1);
-    updated[@"updated_at"] = [self.wal currentTimestamp];
-    if (!DSHAgentLedgerRow(updated)) {
-      DSHSetAgentNativeStoreError(mutationError, DSHAgentNativeStoreErrorInvalidArgument);
-      return NO;
-    }
-    if (!DSHAgentLedgerAdvanceAuthority(
-            state, row[@"locator"][@"task_id"],
-            row[@"locator"][@"attempt_id"],
-            @{ @"schema_version" : @1,
-               @"root_fingerprint_sha256" : row[@"root_fingerprint_sha256"],
-               @"binding_revision" : row[@"binding_revision"] },
-            authorityTranscriptBefore, after, nil, nil, nil, NO,
-            [self.wal currentTimestamp], mutationError)) return NO;
-    rows[rowIndex] = updated;
-    transcripts[transcriptIndex] = transcript;
-    state[@"ledger"] = rows;
-    state[@"transcripts"] = transcripts;
-    NSDictionary *safeOperationResult = nil;
-    if (operation != nil) {
-      NSString *receiptOutcome = updated[@"receipt"][@"outcome"];
-      NSString *publicStatus = [receiptOutcome isEqualToString:@"ok"]
-          ? @"completed" : receiptOutcome;
-      NSDictionary *result = @{
-        @"schema_version" : @2, @"status" : publicStatus,
-        @"operation_id" : operation[@"operation_id"],
-        @"task_id" : updated[@"locator"][@"task_id"],
-        @"attempt_id" : updated[@"locator"][@"attempt_id"],
-        @"round_id" : updated[@"locator"][@"round_id"],
-        @"round_index" : updated[@"locator"][@"round_index"],
-        @"call_index" : updated[@"locator"][@"call_index"],
-        @"call_id" : updated[@"locator"][@"call_id"],
-        @"name" : updated[@"name"],
-        @"idempotency_key" : updated[@"locator"][@"idempotency_key"],
-        @"result_execution_revision" : updated[@"row_revision"],
-        @"transcript" : after, @"receipt" : updated[@"receipt"],
-        @"effect_may_have_occurred" : operation[@"effect_may_have_occurred"],
-      };
-      NSDictionary *safeResult = @{
-        @"schema_version" : @2, @"result_kind" : @"execute_agent_tool",
-        @"result" : result,
-      };
-      NSDictionary *resultRef = @{
-        @"schema_version" : @2, @"kind" : @"tool",
-        @"task_id" : updated[@"locator"][@"task_id"],
-        @"attempt_id" : updated[@"locator"][@"attempt_id"],
-        @"round_id" : updated[@"locator"][@"round_id"],
-        @"round_index" : updated[@"locator"][@"round_index"],
-        @"call_index" : updated[@"locator"][@"call_index"],
-        @"call_id" : updated[@"locator"][@"call_id"],
-        @"execution_revision" : updated[@"row_revision"],
-      };
-      NSString *terminalState = [publicStatus isEqualToString:@"ambiguous"]
-          ? @"ambiguous" : @"committed";
-      NSDictionary *committedOperation =
-          DSHAgentNativeWALCommitOperationInState(
-              state, self.wal, operation[@"operation_id"],
-              operation[@"request_sha256"], updated[@"locator"][@"task_id"],
-              updated[@"locator"][@"attempt_id"], terminalState, publicStatus,
-              resultRef, updated[@"row_revision"], safeResult, mutationError);
-      if (committedOperation == nil) return NO;
-      safeOperationResult = committedOperation[@"result"][@"result"];
-    }
-    output = @{ @"schema_version" : @1,
-                @"row" : [updated copy], @"transcript" : after,
-                @"operation_result" : safeOperationResult ?: NSNull.null };
-    return YES;
-  } error:error];
-  return committed ? output : nil;
+  id locator = DSHAgentLedgerLocatorOf(cas);
+  return [self runLedgerOperation:@"settle"
+                             args:@{
+                               @"cas" : DSHAgentLedgerArgument(cas),
+                               @"patch" : DSHAgentLedgerArgument(patch),
+                               @"message" : DSHAgentLedgerArgument(message),
+                               @"operation" : DSHAgentLedgerArgument(operation),
+                             }
+                          locator:locator
+                           taskId:DSHAgentLedgerField(locator, @"task_id")
+                        attemptId:DSHAgentLedgerField(locator, @"attempt_id")
+               expectedTranscript:nil
+                         argOwner:DSHAgentLedgerField(patch, @"owner")
+                             mode:DSHAgentLedgerRunModeTransaction
+                          inState:nil
+                            error:error];
 }
 
 - (NSDictionary *)cancelAgentExecutionWithCAS:(NSDictionary *)cas
                                          patch:(NSDictionary *)patch
                                          error:(NSError **)error {
-  if (!DSHAgentLedgerCAS(cas) ||
-      !DSHAgentExactDictionaryKeys(patch, @[@"state"]) ||
-      ![patch[@"state"] isKindOfClass:NSString.class] ||
-      ![patch[@"state"] isEqualToString:@"cancelled"] ||
-      (![cas[@"expected_state"] isEqualToString:@"intent"] &&
-       ![cas[@"expected_state"] isEqualToString:@"cancel_requested"])) {
-    DSHSetAgentNativeStoreError(error, DSHAgentNativeStoreErrorInvalidArgument);
-    return nil;
-  }
-  NSString *dispatchState = [self.wal dispatchStateForKind:@"execution"
-                                                    locator:cas[@"locator"]
-                                                      error:error];
-  if (![dispatchState isEqualToString:@"not_dispatched"]) {
-    DSHSetAgentNativeStoreError(error, DSHAgentNativeStoreErrorConflict);
-    return nil;
-  }
-  __block NSDictionary *output = nil;
-  BOOL committed = [self.wal performAtomicTransaction:^BOOL(
-      NSMutableDictionary *state, NSError **mutationError) {
-    NSMutableArray *rows = [state[@"ledger"] mutableCopy];
-    NSMutableArray *transcripts = [state[@"transcripts"] mutableCopy];
-    NSUInteger rowIndex = NSNotFound;
-    NSMutableDictionary *row = nil;
-    for (NSUInteger index = 0; index < rows.count; index += 1) {
-      NSMutableDictionary *candidate = DSHAgentLedgerMutable(rows[index]);
-      if ([candidate[@"locator"] isEqual:cas[@"locator"]]) {
-        row = candidate;
-        rowIndex = index;
-        break;
-      }
-    }
-    if (row == nil || !DSHAgentCASMatchesRow(row, cas, mutationError) ||
-        ![row[@"state"] isEqual:cas[@"expected_state"]] ||
-        !DSHAgentLedgerTranscriptBound(state, row, mutationError)) {
-      if (mutationError != nullptr && *mutationError == nil) {
-        DSHSetAgentNativeStoreError(mutationError,
-                                    DSHAgentNativeStoreErrorConflict);
-      }
-      return NO;
-    }
-    if ([row[@"state"] isEqualToString:@"intent"] &&
-        row[@"owner"] != NSNull.null) {
-      DSHSetAgentNativeStoreError(mutationError,
-                                  DSHAgentNativeStoreErrorCorrupt);
-      return NO;
-    }
-    NSDictionary *before = row[@"transcript_before"];
-    NSMutableDictionary *transcript = nil;
-    NSUInteger transcriptIndex = NSNotFound;
-    for (NSUInteger index = 0; index < transcripts.count; index += 1) {
-      NSMutableDictionary *candidate = DSHAgentLedgerMutable(transcripts[index]);
-      if ([candidate[@"transcript_ref"] isEqual:before[@"transcript_ref"]]) {
-        transcript = candidate;
-        transcriptIndex = index;
-        break;
-      }
-    }
-    NSUInteger currentGeneration = [transcript[@"generation"] unsignedIntegerValue];
-    NSUInteger beforeGeneration = [before[@"generation"] unsignedIntegerValue];
-    if (transcript == nil || currentGeneration < beforeGeneration ||
-        (currentGeneration == beforeGeneration &&
-         (![transcript[@"transcript_sha256"] isEqual:before[@"transcript_sha256"]] ||
-          ![transcript[@"transcript_bytes"] isEqual:before[@"transcript_bytes"]])) ||
-        ![transcript[@"state"] isEqualToString:@"open"]) {
-      DSHSetAgentNativeStoreError(mutationError,
-                                  DSHAgentNativeStoreErrorConflict);
-      return NO;
-    }
-    NSDictionary *authorityTranscriptBefore = @{
-      @"schema_version" : @1,
-      @"transcript_ref" : transcript[@"transcript_ref"],
-      @"generation" : transcript[@"generation"],
-      @"transcript_sha256" : transcript[@"transcript_sha256"],
-      @"transcript_bytes" : transcript[@"transcript_bytes"],
-    };
-    NSDictionary *feedback = @{
-      @"schema_version" : @1,
-      @"name" : row[@"name"],
-      @"outcome" : @"cancelled",
-      @"payload" : @{
-        @"schema_version" : @1,
-        @"failure_code" : @"E_AGENT_CANCELLED",
-      },
-    };
-    NSError *feedbackError = nil;
-    NSData *feedbackBytes = DSHAgentCanonicalJSON(feedback, &feedbackError);
-    NSString *feedbackString = [[NSString alloc] initWithData:feedbackBytes
-                                                      encoding:NSUTF8StringEncoding];
-    if (feedbackBytes == nil || feedbackString == nil ||
-        !DSHAgentValidateNativeToolFeedbackString(feedbackString, &feedbackError)) {
-      if (mutationError != nullptr) *mutationError = feedbackError ?:
-          DSHAgentNativeStoreError(DSHAgentNativeStoreErrorInvalidArgument);
-      return NO;
-    }
-    NSMutableArray *messages = [transcript[@"messages"] mutableCopy];
-    NSUInteger generation = currentGeneration;
-    if (messages == nil || messages.count >= 1024 ||
-        generation == DSHAgentMaximumSafeInteger) {
-      DSHSetAgentNativeStoreError(mutationError, DSHAgentNativeStoreErrorCapacity);
-      return NO;
-    }
-    [messages addObject:@{
-      @"schema_version" : @1,
-      @"role" : @"tool",
-      @"round_index" : row[@"locator"][@"round_index"],
-      @"call_id" : row[@"locator"][@"call_id"],
-      @"content" : feedbackString,
-      @"truncated" : @NO,
-    }];
-    generation += 1;
-    NSDictionary *transcriptInput = @{
-      @"schema_version" : @1,
-      @"transcript_ref" : transcript[@"transcript_ref"],
-      @"attempt_id" : transcript[@"attempt_id"],
-      @"root_fingerprint_sha256" : transcript[@"root_fingerprint_sha256"],
-      @"generation" : @(generation),
-      @"messages" : messages,
-    };
-    NSData *transcriptBytes = DSHAgentCanonicalJSON(transcriptInput, &feedbackError);
-    NSString *transcriptDigest = DSHAgentHJ(@"agent-transcript", transcriptInput,
-                                            &feedbackError);
-    NSString *resultDigest = DSHAgentHB(@"tool-result", feedbackBytes,
-                                       &feedbackError);
-    if (transcriptBytes == nil || transcriptDigest == nil || resultDigest == nil ||
-        transcriptBytes.length > DSHAgentNativeWALMaxTranscriptBytes) {
-      if (mutationError != nullptr) *mutationError = feedbackError ?:
-          DSHAgentNativeStoreError(DSHAgentNativeStoreErrorCapacity);
-      return NO;
-    }
-    transcript[@"messages"] = messages;
-    transcript[@"generation"] = @(generation);
-    transcript[@"transcript_sha256"] = transcriptDigest;
-    transcript[@"transcript_bytes"] = @(transcriptBytes.length);
-    transcript[@"updated_at"] = [self.wal currentTimestamp];
-    NSDictionary *after = @{
-      @"schema_version" : @1,
-      @"transcript_ref" : transcript[@"transcript_ref"],
-      @"generation" : @(generation),
-      @"transcript_sha256" : transcriptDigest,
-      @"transcript_bytes" : @(transcriptBytes.length),
-    };
-    NSMutableDictionary *updated = [row mutableCopy];
-    updated[@"state"] = @"cancelled";
-    updated[@"owner"] = NSNull.null;
-    updated[@"settled_facts"] = NSNull.null;
-    updated[@"transcript_after"] = after;
-    updated[@"receipt"] = @{
-      @"schema_version" : @1,
-      @"call_id" : row[@"locator"][@"call_id"],
-      @"name" : row[@"name"],
-      @"arguments_sha256" : row[@"arguments_sha256"],
-      @"result_sha256" : resultDigest,
-      @"result_bytes" : @(feedbackBytes.length),
-      @"truncated" : @NO,
-      @"duration_ms" : @0,
-      @"outcome" : @"cancelled",
-      @"failure_code" : @"E_AGENT_CANCELLED",
-      @"approval_reference" : NSNull.null,
-    };
-    NSUInteger revision = [row[@"row_revision"] unsignedIntegerValue];
-    if (revision == DSHAgentMaximumSafeInteger) {
-      DSHSetAgentNativeStoreError(mutationError, DSHAgentNativeStoreErrorCapacity);
-      return NO;
-    }
-    // Cancellation proves no dispatch and releases a write reservation in the
-    // same WAL transaction. The immutable manifest remains as historical
-    // evidence, while the key and row both become released/zero-count.
-    NSUInteger amount = [updated[@"reserved_write_bytes"] unsignedIntegerValue];
-    NSNumber *authorityReservedBefore = nil;
-    NSNumber *authorityReservedAfter = nil;
-    if (amount > 0) {
-      BOOL released = NO;
-      NSMutableArray *reservations = [state[@"reservations"] mutableCopy];
-      for (NSUInteger reservationIndex = 0;
-           reservationIndex < reservations.count; reservationIndex += 1) {
-        NSMutableDictionary *record = DSHAgentLedgerMutable(
-            reservations[reservationIndex]);
-        if (![record[@"attempt_id"] isEqual:row[@"locator"][@"attempt_id"]]) continue;
-        NSUInteger reserved = [record[@"reserved_write_bytes"] unsignedIntegerValue];
-        NSMutableArray *keys = [record[@"keys"] mutableCopy];
-        for (NSUInteger keyIndex = 0; keyIndex < keys.count; keyIndex += 1) {
-          if (![keys[keyIndex][@"idempotency_key"]
-                  isEqual:row[@"locator"][@"idempotency_key"]]) continue;
-          NSMutableDictionary *key = [keys[keyIndex] mutableCopy];
-          if (![key[@"state"] isEqualToString:@"active"] ||
-              ![key[@"content_bytes"] isEqual:@(amount)]) {
-            DSHSetAgentNativeStoreError(mutationError,
-                                        DSHAgentNativeStoreErrorConflict);
-            return NO;
-          }
-          key[@"state"] = @"released";
-          keys[keyIndex] = key;
-          NSUInteger reservationVersion = [record[@"reservation_version"] unsignedIntegerValue];
-          if (reservationVersion == DSHAgentMaximumSafeInteger) {
-            DSHSetAgentNativeStoreError(mutationError,
-                                        DSHAgentNativeStoreErrorCapacity);
-            return NO;
-          }
-          record[@"reservation_version"] = @(reservationVersion + 1);
-          record[@"reserved_write_bytes"] = @(reserved >= amount ? reserved - amount : 0);
-          authorityReservedBefore = @(reserved);
-          authorityReservedAfter = record[@"reserved_write_bytes"];
-          record[@"keys"] = keys;
-          reservations[reservationIndex] = record;
-          released = YES;
-          break;
-        }
-        if (released) break;
-      }
-      if (!released) {
-        DSHSetAgentNativeStoreError(mutationError,
-                                    DSHAgentNativeStoreErrorConflict);
-        return NO;
-      }
-      state[@"reservations"] = reservations;
-      NSMutableArray *batches = [state[@"batches"] mutableCopy];
-      for (NSUInteger batchIndex = 0; batchIndex < batches.count; batchIndex += 1) {
-        NSMutableDictionary *batch = DSHAgentLedgerMutable(batches[batchIndex]);
-        if (![batch[@"attempt_id"] isEqual:row[@"locator"][@"attempt_id"]] ||
-            ![batch[@"write_keys"] containsObject:row[@"locator"][@"idempotency_key"]]) continue;
-        NSUInteger batchReserved = [batch[@"reserved_write_bytes"] unsignedIntegerValue];
-        batch[@"reserved_write_bytes"] = @(batchReserved >= amount ? batchReserved - amount : 0);
-        batch[@"updated_at"] = [self.wal currentTimestamp];
-        batches[batchIndex] = batch;
-        break;
-      }
-      state[@"batches"] = batches;
-      updated[@"reserved_write_bytes"] = @0;
-    }
-    NSMutableArray *gateBatches = [state[@"batches"] mutableCopy];
-    for (NSUInteger batchIndex = 0; batchIndex < gateBatches.count; batchIndex += 1) {
-      NSMutableDictionary *batch = DSHAgentLedgerMutable(gateBatches[batchIndex]);
-      if (![batch[@"attempt_id"] isEqual:row[@"locator"][@"attempt_id"]] ||
-          ![batch[@"write_keys"]
-              containsObject:row[@"locator"][@"idempotency_key"]]) continue;
-      if ([batch[@"effect_gate"] isEqualToString:@"closed"] &&
-          DSHAgentMutationBatchProvesNoDispatch(state, batch)) {
-        batch[@"effect_gate"] = @"released";
-        batch[@"updated_at"] = [self.wal currentTimestamp];
-        gateBatches[batchIndex] = batch;
-      }
-      break;
-    }
-    state[@"batches"] = gateBatches;
-    updated[@"row_revision"] = @(revision + 1);
-    updated[@"updated_at"] = [self.wal currentTimestamp];
-    if (!DSHAgentLedgerRow(updated)) {
-      DSHSetAgentNativeStoreError(mutationError,
-                                  DSHAgentNativeStoreErrorInvalidArgument);
-      return NO;
-    }
-    if (!DSHAgentLedgerAdvanceAuthority(
-            state, row[@"locator"][@"task_id"],
-            row[@"locator"][@"attempt_id"],
-            @{ @"schema_version" : @1,
-               @"root_fingerprint_sha256" : row[@"root_fingerprint_sha256"],
-               @"binding_revision" : row[@"binding_revision"] },
-            authorityTranscriptBefore, after, nil,
-            authorityReservedBefore, authorityReservedAfter, NO,
-            [self.wal currentTimestamp], mutationError)) return NO;
-    rows[rowIndex] = updated;
-    transcripts[transcriptIndex] = transcript;
-    state[@"ledger"] = rows;
-    state[@"transcripts"] = transcripts;
-    output = @{ @"ok" : @YES, @"row" : [updated copy] };
-    return YES;
-  } error:error];
-  return committed ? output : nil;
+  id locator = DSHAgentLedgerLocatorOf(cas);
+  return [self runLedgerOperation:@"cancel"
+                             args:@{
+                               @"cas" : DSHAgentLedgerArgument(cas),
+                               @"patch" : DSHAgentLedgerArgument(patch),
+                             }
+                          locator:locator
+                           taskId:DSHAgentLedgerField(locator, @"task_id")
+                        attemptId:DSHAgentLedgerField(locator, @"attempt_id")
+               expectedTranscript:nil
+                         argOwner:nil
+                             mode:DSHAgentLedgerRunModeTransaction
+                          inState:nil
+                            error:error];
 }
 
 - (NSDictionary *)reconcileAgentExecutionWithCAS:(NSDictionary *)cas
                                             patch:(NSDictionary *)patch
                                             error:(NSError **)error {
-  if (!DSHAgentLedgerCAS(cas) || ![patch isKindOfClass:NSDictionary.class]) {
-    DSHSetAgentNativeStoreError(error, DSHAgentNativeStoreErrorInvalidArgument);
-    return nil;
-  }
-  NSString *state = patch[@"state"];
-  if (![state isKindOfClass:NSString.class]) {
-    DSHSetAgentNativeStoreError(error, DSHAgentNativeStoreErrorInvalidArgument);
-    return nil;
-  }
-  if (![state isEqualToString:@"unknown"] && ![state isEqualToString:@"cancelled"]) {
-    DSHSetAgentNativeStoreError(error, DSHAgentNativeStoreErrorInvalidArgument);
-    return nil;
-  }
-  if ([state isEqualToString:@"cancelled"]) {
-    if ((![cas[@"expected_state"] isEqualToString:@"intent"] &&
-         ![cas[@"expected_state"] isEqualToString:@"cancel_requested"]) ||
-        ![[self.wal dispatchStateForKind:@"execution"
-                                locator:cas[@"locator"]
-                                  error:error] isEqualToString:@"not_dispatched"]) {
-      if (error == nullptr || *error == nil) {
-        DSHSetAgentNativeStoreError(error, DSHAgentNativeStoreErrorConflict);
-      }
-      return nil;
-    }
-    return [self cancelAgentExecutionWithCAS:cas
-                                       patch:@{ @"state" : @"cancelled" }
-                                       error:error];
-  }
-  // Unknown is only a native owner-loss result.  Derive it from the persisted
-  // dispatch marker and a dead persisted owner; a caller's reason string or
-  // requested state never supplies this proof.  Ambiguous settlement must use
-  // settleAgentExecutionWithCAS so native can append and hash the protected
-  // feedback in the same transaction.
-  NSDictionary *snapshot = [self.wal snapshotWithError:error];
-  if (snapshot == nil) return nil;
-  NSDictionary *row = nil;
-  for (NSDictionary *candidate in snapshot[@"ledger"]) {
-    if ([candidate[@"locator"] isEqual:cas[@"locator"]]) {
-      row = candidate;
-      break;
-    }
-  }
-  if (row == nil) {
-    DSHSetAgentNativeStoreError(error, DSHAgentNativeStoreErrorNotFound);
-    return nil;
-  }
-  if ((! [row[@"state"] isEqualToString:@"running"] &&
-       ![row[@"state"] isEqualToString:@"cancel_requested"]) ||
-      row[@"owner"] == NSNull.null ||
-      !DSHAgentLedgerOwner(row[@"owner"])) {
-    DSHSetAgentNativeStoreError(error, DSHAgentNativeStoreErrorConflict);
-    return nil;
-  }
-  if ([self.wal isNativeTaskAlive:row[@"owner"][@"native_task_id"]
-                           launchId:row[@"owner"][@"launch_id"]]) {
-    DSHSetAgentNativeStoreError(error, DSHAgentNativeStoreErrorConflict);
-    return nil;
-  }
-  if (![DSHAgentLedgerDispatchState(snapshot[@"dispatch"], row[@"locator"])
-      isEqualToString:@"not_dispatched"] ||
-      ![patch[@"state"] isEqualToString:@"unknown"] ||
-      patch[@"owner"] != NSNull.null ||
-      patch[@"settled_facts"] != NSNull.null ||
-      patch[@"transcript_after"] != NSNull.null ||
-      patch[@"receipt"] != NSNull.null) {
-    DSHSetAgentNativeStoreError(error, DSHAgentNativeStoreErrorConflict);
-    return nil;
-  }
-  return [self casAgentExecutionWithCAS:cas
-                                  patch:patch
-                          allowReconcile:YES
-                                  error:error];
+  id locator = DSHAgentLedgerLocatorOf(cas);
+  return [self runLedgerOperation:@"reconcile"
+                             args:@{
+                               @"cas" : DSHAgentLedgerArgument(cas),
+                               @"patch" : DSHAgentLedgerArgument(patch),
+                             }
+                          locator:locator
+                           taskId:DSHAgentLedgerField(locator, @"task_id")
+                        attemptId:DSHAgentLedgerField(locator, @"attempt_id")
+               expectedTranscript:nil
+                         argOwner:DSHAgentLedgerField(patch, @"owner")
+                             mode:DSHAgentLedgerRunModeTransaction
+                          inState:nil
+                            error:error];
 }
 
 - (NSDictionary *)appendDenialFeedbackInState:
@@ -4130,94 +3158,31 @@ static BOOL DSHAgentLedgerAdvanceAuthority(
                                      feedbackJSON:(NSString *)feedbackJSON
                                        timestamp:(NSString *)timestamp
                                            error:(NSError **)error {
-  if (![state isKindOfClass:NSMutableDictionary.class] ||
-      !DSHAgentCanonicalUUID(taskId) || !DSHAgentCanonicalUUID(attemptId) ||
-      ![root isKindOfClass:NSDictionary.class] ||
-      !DSHAgentLedgerReference(expectedTranscript) ||
-      ![policy isKindOfClass:NSDictionary.class] ||
-      !DSHAgentSafeInteger(expectedReservedWriteBytes,
-                          DSHAgentNativeWALMaxAttemptWriteBytes, YES) ||
-      !DSHAgentBoundedUTF8String(callId, 128, NO, nullptr) ||
-      !DSHAgentSafeInteger(roundIndex, 7, YES) ||
-      !DSHAgentBoundedUTF8String(feedbackJSON, 8 * 1024, NO, nullptr) ||
-      !DSHAgentValidateNativeToolFeedbackString(feedbackJSON, error) ||
-      !DSHAgentCanonicalTimestamp(timestamp)) {
+  if (![state isKindOfClass:NSMutableDictionary.class]) {
     DSHSetAgentNativeStoreError(error, DSHAgentNativeStoreErrorInvalidArgument);
     return nil;
   }
-  NSMutableArray *transcripts = [state[@"transcripts"] mutableCopy];
-  NSMutableDictionary *transcript = nil;
-  NSUInteger transcriptIndex = NSNotFound;
-  for (NSUInteger index = 0; index < transcripts.count; index += 1) {
-    NSMutableDictionary *candidate = [transcripts[index] mutableCopy];
-    if ([candidate[@"transcript_ref"]
-            isEqual:expectedTranscript[@"transcript_ref"]]) {
-      transcript = candidate;
-      transcriptIndex = index;
-      break;
-    }
-  }
-  if (transcript == nil ||
-      ![transcript[@"generation"] isEqual:expectedTranscript[@"generation"]] ||
-      ![transcript[@"transcript_sha256"]
-          isEqual:expectedTranscript[@"transcript_sha256"]] ||
-      ![transcript[@"transcript_bytes"]
-          isEqual:expectedTranscript[@"transcript_bytes"]] ||
-      ![transcript[@"state"] isEqualToString:@"open"]) {
-    DSHSetAgentNativeStoreError(error, DSHAgentNativeStoreErrorConflict);
-    return nil;
-  }
-  NSMutableArray *messages = [transcript[@"messages"] mutableCopy];
-  [messages addObject:@{
-    @"schema_version" : @1, @"role" : @"tool",
-    @"round_index" : roundIndex, @"call_id" : callId,
-    @"content" : feedbackJSON, @"truncated" : @NO,
-  }];
-  NSUInteger generation = [transcript[@"generation"] unsignedIntegerValue];
-  if (generation == DSHAgentMaximumSafeInteger) {
-    DSHSetAgentNativeStoreError(error, DSHAgentNativeStoreErrorCapacity);
-    return nil;
-  }
-  generation += 1;
-  NSDictionary *input = @{
-    @"schema_version" : @1,
-    @"transcript_ref" : transcript[@"transcript_ref"],
-    @"attempt_id" : transcript[@"attempt_id"],
-    @"root_fingerprint_sha256" : transcript[@"root_fingerprint_sha256"],
-    @"generation" : @(generation), @"messages" : messages,
-  };
-  NSError *digestError = nil;
-  NSData *bytes = DSHAgentCanonicalJSON(input, &digestError);
-  NSString *digest = DSHAgentHJ(@"agent-transcript", input, &digestError);
-  if (digest == nil || bytes.length > DSHAgentNativeWALMaxTranscriptBytes) {
-    if (digest == nil) {
-      if (error != nullptr) *error = digestError;
-    } else {
-      DSHSetAgentNativeStoreError(error, DSHAgentNativeStoreErrorCapacity);
-    }
-    return nil;
-  }
-  transcript[@"messages"] = messages;
-  transcript[@"generation"] = @(generation);
-  transcript[@"transcript_sha256"] = digest;
-  transcript[@"transcript_bytes"] = @(bytes.length);
-  transcript[@"updated_at"] = timestamp;
-  NSDictionary *after = @{
-    @"schema_version" : @1,
-    @"transcript_ref" : transcript[@"transcript_ref"],
-    @"generation" : @(generation),
-    @"transcript_sha256" : digest,
-    @"transcript_bytes" : @(bytes.length),
-  };
-  transcripts[transcriptIndex] = transcript;
-  state[@"transcripts"] = transcripts;
-  if (!DSHAgentLedgerAdvanceAuthority(
-          state, taskId, attemptId, root, expectedTranscript, after, policy,
-          expectedReservedWriteBytes, expectedReservedWriteBytes, NO,
-          timestamp, error)) {
-    return nil;
-  }
-  return after;
+  return [self runLedgerOperation:@"append_denial_feedback"
+                             args:@{
+                               @"task_id" : DSHAgentLedgerArgument(taskId),
+                               @"attempt_id" : DSHAgentLedgerArgument(attemptId),
+                               @"root" : DSHAgentLedgerArgument(root),
+                               @"expected_transcript" : DSHAgentLedgerArgument(expectedTranscript),
+                               @"policy" : DSHAgentLedgerArgument(policy),
+                               @"expected_reserved_write_bytes" : DSHAgentLedgerArgument(expectedReservedWriteBytes),
+                               @"call_id" : DSHAgentLedgerArgument(callId),
+                               @"round_index" : DSHAgentLedgerArgument(roundIndex),
+                               @"feedback_json" : DSHAgentLedgerArgument(feedbackJSON),
+                               @"timestamp" : DSHAgentLedgerArgument(timestamp),
+                             }
+                          locator:nil
+                           taskId:taskId
+                        attemptId:attemptId
+               expectedTranscript:expectedTranscript
+                         argOwner:nil
+                             mode:DSHAgentLedgerRunModeInState
+                          inState:state
+                            error:error];
 }
 
 - (NSDictionary *)settleDeniedApprovalInState:
@@ -4230,93 +3195,28 @@ static BOOL DSHAgentLedgerAdvanceAuthority(
                                      feedbackJSON:(NSString *)feedbackJSON
                                        timestamp:(NSString *)timestamp
                                            error:(NSError **)error {
-  if (![state isKindOfClass:NSMutableDictionary.class] ||
-      !DSHAgentLedgerLocator(locator) || !DSHAgentLedgerRootFull(root) ||
-      !DSHAgentLedgerReference(expectedTranscript) ||
-      ![policy isKindOfClass:NSDictionary.class] ||
-      !DSHAgentSafeInteger(expectedReservedWriteBytes,
-                          DSHAgentNativeWALMaxAttemptWriteBytes, YES) ||
-      !DSHAgentBoundedUTF8String(feedbackJSON, 8 * 1024, NO, nullptr) ||
-      !DSHAgentValidateNativeToolFeedbackString(feedbackJSON, error) ||
-      !DSHAgentCanonicalTimestamp(timestamp)) {
+  if (![state isKindOfClass:NSMutableDictionary.class]) {
     DSHSetAgentNativeStoreError(error, DSHAgentNativeStoreErrorInvalidArgument);
     return nil;
   }
-  // The feedback must be the exact user-denial union; parse it before any
-  // row change so a malformed payload can never settle or append anything.
-  NSData *feedbackBytes = [feedbackJSON dataUsingEncoding:NSUTF8StringEncoding];
-  NSError *parseError = nil;
-  NSDictionary *feedback = feedbackBytes == nil ? nil
-      : [NSJSONSerialization JSONObjectWithData:feedbackBytes options:0
-                                          error:&parseError];
-  if (![feedback isKindOfClass:NSDictionary.class] ||
-      ![feedback[@"outcome"] isEqualToString:@"denied"] ||
-      ![feedback[@"payload"][@"failure_code"]
-          isEqualToString:@"E_AGENT_DENIED_BY_USER"] ||
-      !DSHAgentBoundedUTF8String(feedback[@"name"], 64, NO, nullptr)) {
-    DSHSetAgentNativeStoreError(error, DSHAgentNativeStoreErrorInvalidArgument);
-    return nil;
-  }
-  NSMutableArray *rows = [state[@"ledger"] mutableCopy];
-  NSMutableDictionary *row = nil;
-  NSUInteger rowIndex = NSNotFound;
-  for (NSUInteger index = 0; index < rows.count; index += 1) {
-    NSMutableDictionary *candidate = DSHAgentLedgerMutable(rows[index]);
-    if ([candidate[@"locator"] isEqual:locator]) {
-      row = candidate;
-      rowIndex = index;
-      break;
-    }
-  }
-  if (row == nil || ![row[@"state"] isEqualToString:@"intent"] ||
-      ![row[@"row_revision"] isEqual:@1] ||
-      row[@"owner"] != NSNull.null ||
-      row[@"settled_facts"] != NSNull.null ||
-      row[@"transcript_after"] != NSNull.null ||
-      row[@"receipt"] != NSNull.null ||
-      ![row[@"name"] isEqual:feedback[@"name"]] ||
-      ![DSHAgentLedgerDispatchState(state[@"dispatch"], locator)
-          isEqualToString:@"not_dispatched"] ||
-      !DSHAgentLedgerTranscriptBound(state, row, error)) {
-    DSHSetAgentNativeStoreError(error, DSHAgentNativeStoreErrorConflict);
-    return nil;
-  }
-  NSString *callId = row[@"locator"][@"call_id"];
-  NSNumber *roundIndex = row[@"locator"][@"round_index"];
-  NSDictionary *after = [self appendDenialFeedbackInState:state
-      taskId:locator[@"task_id"] attemptId:locator[@"attempt_id"]
-      root:root expectedTranscript:expectedTranscript policy:policy
-      expectedReservedWriteBytes:expectedReservedWriteBytes callId:callId
-      roundIndex:roundIndex feedbackJSON:feedbackJSON timestamp:timestamp
-      error:error];
-  if (after == nil) return nil;
-  NSError *digestError = nil;
-  NSString *resultSHA = DSHAgentHB(@"tool-result", feedbackBytes, &digestError);
-  if (resultSHA == nil) {
-    if (error != nullptr) *error = digestError;
-    return nil;
-  }
-  NSDictionary *receipt = @{
-    @"schema_version" : @1, @"call_id" : callId, @"name" : row[@"name"],
-    @"arguments_sha256" : row[@"arguments_sha256"],
-    @"result_sha256" : resultSHA, @"result_bytes" : @(feedbackBytes.length),
-    @"truncated" : @NO, @"duration_ms" : @0, @"outcome" : @"denied",
-    @"failure_code" : @"E_AGENT_DENIED_BY_USER",
-    @"approval_reference" : NSNull.null,
-  };
-  row[@"row_revision"] = @2;
-  row[@"state"] = @"settled";
-  row[@"settled_facts"] = NSNull.null;
-  row[@"transcript_after"] = after;
-  row[@"receipt"] = receipt;
-  row[@"updated_at"] = timestamp;
-  if (!DSHAgentLedgerRow(row)) {
-    DSHSetAgentNativeStoreError(error, DSHAgentNativeStoreErrorCorrupt);
-    return nil;
-  }
-  rows[rowIndex] = row;
-  state[@"ledger"] = rows;
-  return @{ @"receipt" : receipt, @"transcript" : after };
+  return [self runLedgerOperation:@"settle_denied_approval"
+                             args:@{
+                               @"locator" : DSHAgentLedgerArgument(locator),
+                               @"root" : DSHAgentLedgerArgument(root),
+                               @"expected_transcript" : DSHAgentLedgerArgument(expectedTranscript),
+                               @"policy" : DSHAgentLedgerArgument(policy),
+                               @"expected_reserved_write_bytes" : DSHAgentLedgerArgument(expectedReservedWriteBytes),
+                               @"feedback_json" : DSHAgentLedgerArgument(feedbackJSON),
+                               @"timestamp" : DSHAgentLedgerArgument(timestamp),
+                             }
+                          locator:locator
+                           taskId:DSHAgentLedgerField(locator, @"task_id")
+                        attemptId:DSHAgentLedgerField(locator, @"attempt_id")
+               expectedTranscript:expectedTranscript
+                         argOwner:nil
+                             mode:DSHAgentLedgerRunModeInState
+                          inState:state
+                            error:error];
 }
 
 @end

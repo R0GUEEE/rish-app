@@ -211,6 +211,189 @@ pub fn arguments_sha256(name: Option<&Value>, arguments_json: Option<&Value>) ->
     crate::canonical::hash_json("tool-arguments", &Value::Object(identity))
 }
 
+/// `DSHAgentNativeWALMaxTranscriptBytes`.
+pub const MAX_TRANSCRIPT_BYTES: u64 = 2 * 1024 * 1024;
+
+/// `DSHAgentRoundReference` / `DSHAgentLedgerReference`: a transcript
+/// reference `{schema_version, transcript_ref, generation, transcript_sha256,
+/// transcript_bytes}`.
+pub fn transcript_reference(value: Option<&Value>) -> bool {
+    let keys = [
+        "schema_version",
+        "transcript_ref",
+        "generation",
+        "transcript_sha256",
+        "transcript_bytes",
+    ];
+    let Some(map) = exact_keys(value, &keys) else {
+        return false;
+    };
+    safe_integer(map.get("schema_version"), 1, false).is_some()
+        && canonical_uuid(map.get("transcript_ref"))
+        && safe_integer(map.get("generation"), MAX_SAFE_INTEGER, true).is_some()
+        && canonical_sha256(map.get("transcript_sha256"))
+        && safe_integer(map.get("transcript_bytes"), MAX_TRANSCRIPT_BYTES, true).is_some()
+}
+
+/// `DSHAgentRoundOwner` / `DSHAgentLedgerOwner`: a native owner record.
+pub fn owner_shape(value: Option<&Value>) -> bool {
+    let keys = [
+        "schema_version",
+        "task_id",
+        "launch_id",
+        "native_task_id",
+        "owner_generation",
+        "heartbeat_at",
+    ];
+    let Some(map) = exact_keys(value, &keys) else {
+        return false;
+    };
+    safe_integer(map.get("schema_version"), 1, false).is_some()
+        && canonical_uuid(map.get("task_id"))
+        && canonical_uuid(map.get("launch_id"))
+        && canonical_uuid(map.get("native_task_id"))
+        && safe_integer(map.get("owner_generation"), MAX_SAFE_INTEGER, false).is_some()
+        && canonical_timestamp(map.get("heartbeat_at"))
+}
+
+/// `DSHAgentRoundRoot` / `DSHAgentLedgerRootFull`: the complete frozen root
+/// projection.
+pub fn root_full(value: Option<&Value>) -> bool {
+    let keys = [
+        "schema_version",
+        "kind",
+        "workspace_id",
+        "workspace_binding_revision",
+        "project_id",
+        "root_fingerprint_sha256",
+        "capabilities",
+    ];
+    let Some(map) = exact_keys(value, &keys) else {
+        return false;
+    };
+    let Some(Value::Array(capabilities)) = map.get("capabilities") else {
+        return false;
+    };
+    if safe_integer(map.get("schema_version"), 1, false).is_none()
+        || !canonical_uuid(map.get("workspace_id"))
+        || safe_integer(
+            map.get("workspace_binding_revision"),
+            MAX_SAFE_INTEGER,
+            false,
+        )
+        .is_none()
+        || !canonical_sha256(map.get("root_fingerprint_sha256"))
+        || capabilities.len() > 6
+    {
+        return false;
+    }
+    let Some(Value::String(kind)) = map.get("kind") else {
+        return false;
+    };
+    if kind != "project" && kind != "workspace" {
+        return false;
+    }
+    let project = map.get("project_id");
+    let project_null = is_null(project);
+    if !project_null && !canonical_uuid(project) {
+        return false;
+    }
+    if (kind == "project" && project_null) || (kind == "workspace" && !project_null) {
+        return false;
+    }
+    const ALLOWED: &[&str] = &[
+        "file_read",
+        "file_write",
+        "git_status",
+        "git_commit",
+        "git_push",
+        "guest_service",
+    ];
+    let mut seen: Vec<&str> = Vec::new();
+    for capability in capabilities {
+        let Value::String(name) = capability else {
+            return false;
+        };
+        let name = name.as_str();
+        if !ALLOWED.contains(&name) || seen.contains(&name) {
+            return false;
+        }
+        if kind == "workspace" && name.starts_with("git_") {
+            return false;
+        }
+        seen.push(name);
+    }
+    true
+}
+
+/// `DSHAgentRoundRootExpectation` / `DSHAgentLedgerRootExpectation`: the
+/// narrow `{schema_version, root_fingerprint_sha256, binding_revision}` form.
+pub fn root_expectation(value: Option<&Value>) -> bool {
+    let Some(map) = exact_keys(
+        value,
+        &[
+            "schema_version",
+            "root_fingerprint_sha256",
+            "binding_revision",
+        ],
+    ) else {
+        return false;
+    };
+    safe_integer(map.get("schema_version"), 1, false).is_some()
+        && canonical_sha256(map.get("root_fingerprint_sha256"))
+        && safe_integer(map.get("binding_revision"), MAX_SAFE_INTEGER, false).is_some()
+}
+
+/// `DSHAgentIdempotencyKeyForLocator`: HJ(tool-idempotency, …) over the
+/// execution locator's identity, the root fingerprint and the arguments
+/// digest; `None` when any part is malformed.
+pub fn idempotency_key_for_locator(
+    locator: Option<&Value>,
+    root_fingerprint: Option<&Value>,
+    arguments_sha256: Option<&Value>,
+) -> Option<String> {
+    let keys = [
+        "schema_version",
+        "task_id",
+        "attempt_id",
+        "round_id",
+        "round_index",
+        "call_index",
+        "call_id",
+        "idempotency_key",
+    ];
+    let map = exact_keys(locator, &keys)?;
+    if safe_integer(map.get("schema_version"), 2, false) != Some(2)
+        || !canonical_uuid(map.get("task_id"))
+        || !canonical_uuid(map.get("attempt_id"))
+        || !canonical_uuid(map.get("round_id"))
+        || safe_integer(map.get("round_index"), 7, true).is_none()
+        || safe_integer(map.get("call_index"), 15, true).is_none()
+        || !opaque_identifier(map.get("call_id"))
+        || !canonical_sha256(root_fingerprint)
+        || !canonical_sha256(arguments_sha256)
+    {
+        return None;
+    }
+    let mut identity = Map::new();
+    for key in [
+        "task_id",
+        "attempt_id",
+        "round_id",
+        "round_index",
+        "call_index",
+        "call_id",
+    ] {
+        identity.insert(key.to_string(), map[key].clone());
+    }
+    identity.insert(
+        "root_fingerprint_sha256".to_string(),
+        root_fingerprint?.clone(),
+    );
+    identity.insert("arguments_sha256".to_string(), arguments_sha256?.clone());
+    crate::canonical::hash_json("tool-idempotency", &Value::Object(identity))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

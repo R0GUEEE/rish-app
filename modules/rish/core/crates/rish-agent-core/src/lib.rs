@@ -14,8 +14,11 @@
 //! transaction, and the bounded primitive validators it needs ([`schema`]).
 
 pub mod canonical;
+pub mod execution_ledger;
+pub mod ledger_ops;
 pub mod round_journal;
 pub mod schema;
+pub mod store;
 pub mod strict_json;
 
 /// Protocol version reported over the C ABI. Bumped when the JSON contract

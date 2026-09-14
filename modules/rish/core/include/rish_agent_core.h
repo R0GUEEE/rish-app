@@ -41,6 +41,12 @@ char *rish_agent_parse_arguments(const char *json, size_t json_length);
 /// input is not UTF-8.
 char *rish_agent_round_reduce(const char *json, size_t json_length);
 
+/// One execution-ledger row operation over a JSON envelope
+/// {"op","args","env","view"}; returns {"ok":true,...} with the change list
+/// and optional operation commit, or {"ok":false,"error":<code>}. NULL only
+/// when the input is not UTF-8.
+char *rish_agent_ledger_reduce(const char *json, size_t json_length);
+
 #ifdef __cplusplus
 }
 #endif

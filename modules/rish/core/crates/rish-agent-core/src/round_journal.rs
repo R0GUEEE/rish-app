@@ -14,6 +14,7 @@
 
 use crate::canonical::{canonical_json, hash_json};
 use crate::schema::*;
+pub use crate::store::StoreError;
 use crate::strict_json::parse_arguments;
 use serde_json::{json, Map, Value};
 
@@ -25,25 +26,6 @@ const MAX_LAUNCH_ATTEMPTS: u64 = 8;
 const MAX_ROUND_INDEX: u64 = 7;
 const MAX_CALLS: usize = 16;
 const MAX_TRANSCRIPT_MESSAGES: usize = 1024;
-
-/// `DSHAgentNativeStoreErrorCode`.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum StoreError {
-    InvalidArgument = 1,
-    Corrupt = 2,
-    Conflict = 3,
-    Capacity = 4,
-    Unavailable = 5,
-    OwnerLost = 6,
-    NotFound = 7,
-    Persistence = 8,
-}
-
-impl StoreError {
-    pub fn code(self) -> u8 {
-        self as u8
-    }
-}
 
 /// Host facts the reducer cannot derive: the process launch, the injected
 /// clock, and the provider catalogue answers for the receipt being committed.
@@ -135,116 +117,6 @@ pub fn round_locator(value: Option<&Value>) -> bool {
         && canonical_uuid(map.get("attempt_id"))
         && canonical_uuid(map.get("round_id"))
         && safe_integer(map.get("round_index"), MAX_ROUND_INDEX, true).is_some()
-}
-
-fn round_reference(value: Option<&Value>) -> bool {
-    let keys = [
-        "schema_version",
-        "transcript_ref",
-        "generation",
-        "transcript_sha256",
-        "transcript_bytes",
-    ];
-    let Some(map) = exact_keys(value, &keys) else {
-        return false;
-    };
-    safe_integer(map.get("schema_version"), 1, false).is_some()
-        && canonical_uuid(map.get("transcript_ref"))
-        && safe_integer(map.get("generation"), MAX_SAFE_INTEGER, true).is_some()
-        && canonical_sha256(map.get("transcript_sha256"))
-        && safe_integer(
-            map.get("transcript_bytes"),
-            MAX_TRANSCRIPT_BYTES as u64,
-            true,
-        )
-        .is_some()
-}
-
-fn round_owner(value: Option<&Value>) -> bool {
-    let keys = [
-        "schema_version",
-        "task_id",
-        "launch_id",
-        "native_task_id",
-        "owner_generation",
-        "heartbeat_at",
-    ];
-    let Some(map) = exact_keys(value, &keys) else {
-        return false;
-    };
-    safe_integer(map.get("schema_version"), 1, false).is_some()
-        && canonical_uuid(map.get("task_id"))
-        && canonical_uuid(map.get("launch_id"))
-        && canonical_uuid(map.get("native_task_id"))
-        && safe_integer(map.get("owner_generation"), MAX_SAFE_INTEGER, false).is_some()
-        && canonical_timestamp(map.get("heartbeat_at"))
-}
-
-fn round_root(value: Option<&Value>) -> bool {
-    let keys = [
-        "schema_version",
-        "kind",
-        "workspace_id",
-        "workspace_binding_revision",
-        "project_id",
-        "root_fingerprint_sha256",
-        "capabilities",
-    ];
-    let Some(map) = exact_keys(value, &keys) else {
-        return false;
-    };
-    let Some(Value::Array(capabilities)) = map.get("capabilities") else {
-        return false;
-    };
-    if safe_integer(map.get("schema_version"), 1, false).is_none()
-        || !canonical_uuid(map.get("workspace_id"))
-        || safe_integer(
-            map.get("workspace_binding_revision"),
-            MAX_SAFE_INTEGER,
-            false,
-        )
-        .is_none()
-        || !canonical_sha256(map.get("root_fingerprint_sha256"))
-        || capabilities.len() > 6
-    {
-        return false;
-    }
-    let Some(kind) = as_str(map.get("kind")) else {
-        return false;
-    };
-    if kind != "project" && kind != "workspace" {
-        return false;
-    }
-    let project = map.get("project_id");
-    let project_null = is_null(project);
-    if !project_null && !canonical_uuid(project) {
-        return false;
-    }
-    if (kind == "project" && project_null) || (kind == "workspace" && !project_null) {
-        return false;
-    }
-    const ALLOWED: &[&str] = &[
-        "file_read",
-        "file_write",
-        "git_status",
-        "git_commit",
-        "git_push",
-        "guest_service",
-    ];
-    let mut seen: Vec<&str> = Vec::new();
-    for capability in capabilities {
-        let Some(name) = as_str(Some(capability)) else {
-            return false;
-        };
-        if !ALLOWED.contains(&name) || seen.contains(&name) {
-            return false;
-        }
-        if kind == "workspace" && name.starts_with("git_") {
-            return false;
-        }
-        seen.push(name);
-    }
-    true
 }
 
 fn round_insert_cas(value: Option<&Value>) -> bool {
@@ -354,7 +226,7 @@ fn round_v3_cas_matches_row(row: &Value, cas: &Value) -> bool {
         return is_null(owner);
     }
     let Some(owner) = owner else { return false };
-    round_owner(Some(owner))
+    owner_shape(Some(owner))
         && get(owner, "owner_generation") == expected_generation
         && get(owner, "launch_id") == get(cas, "expected_launch_id")
         && get(owner, "native_task_id") == get(cas, "expected_native_task_id")
@@ -549,7 +421,7 @@ pub fn round_v3_row(row: &Value, env: &Env) -> bool {
         || !canonical_sha256(map.get("root_fingerprint_sha256"))
         || safe_integer(map.get("binding_revision"), MAX_SAFE_INTEGER, false).is_none()
         || !canonical_sha256(map.get("request_sha256"))
-        || !round_reference(map.get("transcript_before"))
+        || !transcript_reference(map.get("transcript_before"))
         || safe_integer(map.get("launch_attempt"), MAX_LAUNCH_ATTEMPTS, false).is_none()
         || calls.len() > MAX_CALLS
         || safe_integer(map.get("executable_call_count"), MAX_CALLS as u64, true).is_none()
@@ -569,7 +441,7 @@ pub fn round_v3_row(row: &Value, env: &Env) -> bool {
     let owner = map.get("owner");
     let owner_null = is_null(owner);
     if !owner_null
-        && (!round_owner(owner) || owner.and_then(|o| get(o, "task_id")) != get(locator, "task_id"))
+        && (!owner_shape(owner) || owner.and_then(|o| get(o, "task_id")) != get(locator, "task_id"))
     {
         return false;
     }
@@ -585,7 +457,7 @@ pub fn round_v3_row(row: &Value, env: &Env) -> bool {
     }
     let after = map.get("transcript_after");
     let after_null = is_null(after);
-    if !after_null && !round_reference(after) {
+    if !after_null && !transcript_reference(after) {
         return false;
     }
     let batch_class = map.get("batch_class");
@@ -840,7 +712,7 @@ fn claim(args: &Map<String, Value>, env: &Env, view: &View) -> Result<Effect, St
     let owner = args.get("owner").unwrap_or(&Value::Null);
     if !round_locator(Some(locator))
         || safe_integer(revision, MAX_SAFE_INTEGER, false).is_none()
-        || !round_owner(Some(owner))
+        || !owner_shape(Some(owner))
         || get(owner, "task_id") != get(locator, "task_id")
         || as_str(get(owner, "launch_id")) != Some(env.launch_id.as_str())
         || !view.arg_owner_alive
@@ -946,7 +818,7 @@ fn complete(args: &Map<String, Value>, env: &Env, view: &View) -> Result<Effect,
     if !round_locator(Some(locator))
         || !round_v3_cas(Some(cas))
         || get(cas, "locator") != Some(locator)
-        || !round_root(root)
+        || !root_full(root)
         || !completion_receipt(receipt, locator, env)
         || !matches!(terminal_kind, Some("final" | "tool_batch" | "blocked"))
     {

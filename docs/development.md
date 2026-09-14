@@ -471,6 +471,22 @@ provider catalogue answers a receipt needs (`DSHHarnessSupportedModels`,
 facts. The schema-2 selectors remain Objective-C for the low-level
 compatibility tests until they are deleted.
 
+Phase 2 does the same for the row-level half of the execution ledger
+(`crates/rish-agent-core/src/execution_ledger.rs` for the row, precondition,
+settled-fact, receipt and protected-feedback invariants;
+`ledger_ops.rs` for insert, claim, heartbeat, CAS, mark dispatched, query,
+release, settle, cancel, reconcile and the two in-state denial helpers). The
+facade collects the row, the attempt's execution dispatch markers, the bound
+transcript row, the attempt's reservation and batch records and the
+task/attempt authorities as a view, calls `rish_agent_ledger_reduce`, and
+applies the returned change list (each change names its table and, for
+reservations, batches and authorities, the host-issued slot). Settlement also
+returns the operation commit, which the facade performs through
+`DSHAgentNativeWALCommitOperationInState` on the same candidate. The
+batch-level methods (`reserveWriteBytesForAttempt`, `prepareAgentWriteBatch`,
+`prepareAgentToolBatch`, `openAgentWriteBatchEffectGate`) are still
+Objective-C and keep the validators they need.
+
 The core links into the `RishLocalRuntime` pod as
 `Vendor/rish_agent_core.xcframework`, built by
 `scripts/prepare-rish-agent-core.sh` from the workspace toolchain
