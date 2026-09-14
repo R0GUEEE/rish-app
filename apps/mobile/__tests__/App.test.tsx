@@ -700,10 +700,13 @@ async function settle() {
   }
 }
 
+const mountedRenderers = new Set<Renderer>();
+
 async function renderApp(): Promise<Renderer> {
   let renderer: Renderer | undefined;
   await act(async () => {
     renderer = ReactTestRenderer.create(<App />);
+    mountedRenderers.add(renderer);
     await settle();
   });
   if (renderer === undefined) throw new Error('renderer was not created');
@@ -1535,6 +1538,7 @@ function commitBridgedCandidate(request: {
 
 beforeEach(() => {
   jest.clearAllMocks();
+  jest.spyOn(AppState, 'addEventListener').mockReturnValue({ remove: jest.fn() });
   mockSessionSnapshots.isAvailable.mockReset();
   mockSessionSnapshots.loadSessionSnapshot.mockReset();
   mockSessionSnapshots.casPersistSession.mockReset();
@@ -1970,7 +1974,13 @@ beforeEach(() => {
   });
 });
 
-afterEach(() => {
+afterEach(async () => {
+  await act(async () => {
+    for (const renderer of mountedRenderers) renderer.unmount();
+    mountedRenderers.clear();
+    await settle();
+  });
+  jest.restoreAllMocks();
   jest.useRealTimers();
 });
 
@@ -2010,6 +2020,7 @@ test('keeps cold-start bootstrap gated for a third session availability probe', 
   let renderer: Renderer | undefined;
   await act(async () => {
     renderer = ReactTestRenderer.create(<App />);
+    mountedRenderers.add(renderer);
     await settle();
   });
   expect(mockSessionSnapshots.loadSessionSnapshot).not.toHaveBeenCalled();
@@ -5404,6 +5415,7 @@ describe('project context Home integration H3', () => {
     let renderer: Renderer | undefined;
     await act(async () => {
       renderer = ReactTestRenderer.create(<App />);
+      mountedRenderers.add(renderer);
       await settle();
     });
     if (renderer === undefined) throw new Error('renderer missing');
