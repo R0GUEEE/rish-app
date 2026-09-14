@@ -19,6 +19,7 @@ pub mod ledger_batch;
 pub mod ledger_ops;
 pub mod round_journal;
 pub mod schema;
+pub mod session_schema;
 pub mod store;
 pub mod strict_json;
 pub mod transcript_store;

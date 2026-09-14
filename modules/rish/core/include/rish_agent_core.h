@@ -54,6 +54,14 @@ char *rish_agent_ledger_batch_reduce(const char *json, size_t json_length);
 /// One transcript-store operation over {"op","request","env","view"}.
 char *rish_agent_transcript_reduce(const char *json, size_t json_length);
 
+/// One session-schema operation: `request` is {"op","env"} JSON, `input` the
+/// operation's raw bytes (candidate JSON, stored envelope, tombstone file; any
+/// bytes, empty allowed). Ops: candidate (validation + digest),
+/// candidate_digest (lenient), envelope, tombstones, legacy_root. Same reply
+/// shape as the reducers.
+char *rish_agent_session_reduce(const char *request, size_t request_length,
+                                const uint8_t *input, size_t input_length);
+
 #ifdef __cplusplus
 }
 #endif

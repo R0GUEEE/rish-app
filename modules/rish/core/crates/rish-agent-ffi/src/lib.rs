@@ -7,6 +7,7 @@ use rish_agent_core::canonical::{canonical_json, hash_bytes, hash_json};
 use rish_agent_core::ledger_batch::reduce_json as ledger_batch_reduce_json;
 use rish_agent_core::ledger_ops::reduce_json as ledger_reduce_json;
 use rish_agent_core::round_journal::reduce_json;
+use rish_agent_core::session_schema::reduce_json as session_reduce_json;
 use rish_agent_core::strict_json::parse_arguments;
 use rish_agent_core::transcript_store::reduce_json as transcript_reduce_json;
 use std::ffi::CString;
@@ -202,4 +203,31 @@ pub unsafe extern "C" fn rish_agent_transcript_reduce(
         return std::ptr::null_mut();
     };
     output(transcript_reduce_json(text))
+}
+
+/// Runs one session-schema operation (candidate validation and digest,
+/// envelope and tombstone validation, legacy root validation): `request`
+/// is the `{"op","env"}` JSON documented on
+/// `rish_agent_core::session_schema::reduce_json`, `input` the operation's
+/// raw bytes (they need not be UTF-8; an empty input is a valid, empty file).
+///
+/// # Safety
+/// `request` must reference `request_length` readable bytes or be null;
+/// `input` must reference `input_length` readable bytes or be null.
+#[no_mangle]
+pub unsafe extern "C" fn rish_agent_session_reduce(
+    request: *const c_char,
+    request_length: usize,
+    input: *const u8,
+    input_length: usize,
+) -> *mut c_char {
+    let Some(text) = self::input(request, request_length) else {
+        return std::ptr::null_mut();
+    };
+    let bytes: &[u8] = if input.is_null() {
+        &[]
+    } else {
+        slice::from_raw_parts(input, input_length)
+    };
+    output(session_reduce_json(text, bytes))
 }
