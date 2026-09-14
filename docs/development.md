@@ -527,6 +527,18 @@ canonical bytes of both files the host writes, the post-write verification,
 observed-operation rules. The host reads, locks, writes and reads back,
 calling the core between those steps with what it observed.
 
+Phase 6 moves `DSHAgentToolBatchService`'s decisions into `tool_batch.rs`
+behind `rish_agent_tool_batch_reduce`: the prepare and bind request
+shapes, the preparation gate, the per-call analysis of the round's raw
+tool calls (identity against the round's presentation, registry access,
+conversation grants, argument acceptance), the executor outcome mapping
+with the whole-batch rejection cascade, the capability set, the final
+authority check and the ledger's internal request, the ledger-failure
+rejection, and the approval binding checks down to the result the WAL
+commits. The host keeps the WAL operation relation, the committed session
+load, the root proofs, the executors' preparation probes (run in call
+order, stopping where the core would) and the denied-approval transaction.
+
 The core links into the `RishLocalRuntime` pod as
 `Vendor/rish_agent_core.xcframework`, built by
 `scripts/prepare-rish-agent-core.sh` from the workspace toolchain

@@ -62,6 +62,11 @@ char *rish_agent_transcript_reduce(const char *json, size_t json_length);
 char *rish_agent_session_reduce(const char *request, size_t request_length,
                                 const uint8_t *input, size_t input_length);
 
+/// One tool-batch-service decision over {"op","request",...}: prepare_request,
+/// prepare_gate, prepare_calls, prepare_finish, prepare_final,
+/// prepare_ledger_failure, bind_request, bind_check.
+char *rish_agent_tool_batch_reduce(const char *json, size_t json_length);
+
 #ifdef __cplusplus
 }
 #endif
