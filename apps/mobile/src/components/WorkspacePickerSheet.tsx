@@ -96,6 +96,9 @@ export function WorkspacePickerSheet({
   }, [visible]);
   useEffect(() => {
     if (!visible) return;
+    // A keyboard inherited from the underlying screen predates this Modal's
+    // KeyboardAvoidingView subscriptions. Start with a fresh focus transition.
+    Keyboard.dismiss();
     keyboardVisible.current = Keyboard.isVisible();
     const show = () => {
       keyboardVisible.current = true;
