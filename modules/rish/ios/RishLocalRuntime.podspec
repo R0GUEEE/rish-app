@@ -16,6 +16,7 @@ Pod::Spec.new do |spec|
   rish_framework = (auth_rish_framework && File.directory?(auth_rish_framework)) ? auth_rish_framework : 'Vendor/rish_ffi.xcframework'
   spec.vendored_frameworks = [
     rish_framework,
+    'Vendor/rish_agent_core.xcframework',
     'Vendor/libgit2.xcframework',
     'Vendor/libssh2.xcframework',
     'Vendor/libcrypto.xcframework',
@@ -29,9 +30,9 @@ Pod::Spec.new do |spec|
     # libgit2 is a vendored static XCFramework. CocoaPods exposes its link
     # input late, so add both immutable header roots explicitly for compile
     # phases on device and simulator.
-    'HEADER_SEARCH_PATHS' => '"${PODS_TARGET_SRCROOT}/include" "${PODS_TARGET_SRCROOT}/Vendor/libgit2.xcframework/ios-arm64/Headers" "${PODS_TARGET_SRCROOT}/Vendor/libgit2.xcframework/ios-arm64-simulator/Headers" "${PODS_TARGET_SRCROOT}/Vendor/libssh2.xcframework/ios-arm64/Headers" "${PODS_TARGET_SRCROOT}/Vendor/libssh2.xcframework/ios-arm64-simulator/Headers"',
-    'LIBRARY_SEARCH_PATHS[sdk=iphoneos*]' => '"${PODS_TARGET_SRCROOT}/Vendor/libgit2.xcframework/ios-arm64" "${PODS_TARGET_SRCROOT}/Vendor/libssh2.xcframework/ios-arm64" "${PODS_TARGET_SRCROOT}/Vendor/libcrypto.xcframework/ios-arm64" "${PODS_TARGET_SRCROOT}/Vendor/rish_ffi.xcframework/ios-arm64"',
-    'LIBRARY_SEARCH_PATHS[sdk=iphonesimulator*]' => '"${PODS_TARGET_SRCROOT}/Vendor/libgit2.xcframework/ios-arm64-simulator" "${PODS_TARGET_SRCROOT}/Vendor/libssh2.xcframework/ios-arm64-simulator" "${PODS_TARGET_SRCROOT}/Vendor/libcrypto.xcframework/ios-arm64-simulator" "${PODS_TARGET_SRCROOT}/Vendor/rish_ffi.xcframework/ios-arm64-simulator"',
+    'HEADER_SEARCH_PATHS' => '"${PODS_TARGET_SRCROOT}/include" "${PODS_TARGET_SRCROOT}/Vendor/rish_agent_core.xcframework/ios-arm64/Headers" "${PODS_TARGET_SRCROOT}/Vendor/rish_agent_core.xcframework/ios-arm64-simulator/Headers" "${PODS_TARGET_SRCROOT}/Vendor/libgit2.xcframework/ios-arm64/Headers" "${PODS_TARGET_SRCROOT}/Vendor/libgit2.xcframework/ios-arm64-simulator/Headers" "${PODS_TARGET_SRCROOT}/Vendor/libssh2.xcframework/ios-arm64/Headers" "${PODS_TARGET_SRCROOT}/Vendor/libssh2.xcframework/ios-arm64-simulator/Headers"',
+    'LIBRARY_SEARCH_PATHS[sdk=iphoneos*]' => '"${PODS_TARGET_SRCROOT}/Vendor/libgit2.xcframework/ios-arm64" "${PODS_TARGET_SRCROOT}/Vendor/libssh2.xcframework/ios-arm64" "${PODS_TARGET_SRCROOT}/Vendor/libcrypto.xcframework/ios-arm64" "${PODS_TARGET_SRCROOT}/Vendor/rish_ffi.xcframework/ios-arm64" "${PODS_TARGET_SRCROOT}/Vendor/rish_agent_core.xcframework/ios-arm64"',
+    'LIBRARY_SEARCH_PATHS[sdk=iphonesimulator*]' => '"${PODS_TARGET_SRCROOT}/Vendor/libgit2.xcframework/ios-arm64-simulator" "${PODS_TARGET_SRCROOT}/Vendor/libssh2.xcframework/ios-arm64-simulator" "${PODS_TARGET_SRCROOT}/Vendor/libcrypto.xcframework/ios-arm64-simulator" "${PODS_TARGET_SRCROOT}/Vendor/rish_ffi.xcframework/ios-arm64-simulator" "${PODS_TARGET_SRCROOT}/Vendor/rish_agent_core.xcframework/ios-arm64-simulator"',
     'GCC_PREPROCESSOR_DEFINITIONS' => "$(inherited) DSH_LOCAL_PROOF=1 DSH_HARNESS_AUTH_ENABLED=#{auth_enabled ? 1 : 0} RISH_GUEST_CGI_ENABLED=#{guest_cgi_enabled}",
   }
   spec.frameworks = [

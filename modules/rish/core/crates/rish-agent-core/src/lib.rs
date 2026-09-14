@@ -5,11 +5,17 @@
 //! test suites as the oracle. See the plan in the document centre
 //! (`rish-app/plans/2026-09-14-shared-agent-core-astra.md`).
 //!
-//! Phase 0 (this crate today): canonical JSON, domain-separated hashing, and
-//! the strict argument parser, pinned byte for byte to the ObjC engine by
+//! Phase 0: canonical JSON, domain-separated hashing, and the strict argument
+//! parser, pinned byte for byte to the ObjC engine by
 //! `fixtures/canonical-golden.json`.
+//!
+//! Phase 1: the schema-3 round journal as a pure reducer
+//! ([`round_journal`]), driven by the ObjC facade that still owns the WAL
+//! transaction, and the bounded primitive validators it needs ([`schema`]).
 
 pub mod canonical;
+pub mod round_journal;
+pub mod schema;
 pub mod strict_json;
 
 /// Protocol version reported over the C ABI. Bumped when the JSON contract

@@ -222,6 +222,7 @@ preparation from the repository root:
 
 ```sh
 ./scripts/prepare-rish-ios.sh
+./scripts/prepare-rish-agent-core.sh
 ./scripts/prepare-libgit2-ios.sh
 cd apps/mobile/ios
 pod install
@@ -457,6 +458,25 @@ Objective-C output drifts from the committed golden. Add inputs to
 together. The corpus `divergences` map lists the cases where the two sides
 deliberately differ, with the stage responsible and the exact Rust output; the
 Rust test asserts those too, so a divergence is pinned rather than skipped.
+
+Phase 1 moves the schema-3 provider-round journal into the core as a pure
+reducer (`crates/rish-agent-core/src/round_journal.rs`). The `…V3…` selectors
+of `DSHAgentRoundJournal` are now a facade: they open the WAL transaction,
+collect the round row, its dispatch marker, the bound transcript row and the
+native-task liveness answers into a view, call `rish_agent_round_reduce`, and
+apply the returned effect verbatim. Round policy (argument validation, CAS
+matching, state transitions, transcript digests) lives only in Rust; the
+provider catalogue answers a receipt needs (`DSHHarnessSupportedModels`,
+`DSHHarnessIdForModel`, `DSHValidateProviderBinding`) are passed in as host
+facts. The schema-2 selectors remain Objective-C for the low-level
+compatibility tests until they are deleted.
+
+The core links into the `RishLocalRuntime` pod as
+`Vendor/rish_agent_core.xcframework`, built by
+`scripts/prepare-rish-agent-core.sh` from the workspace toolchain
+(`rust-toolchain.toml`) for `aarch64-apple-ios` and `aarch64-apple-ios-sim`;
+the script refuses to install toolchains or targets itself. Rebuild it after
+any change under `modules/rish/core` and before `pod install`.
 
 ## Quality gates
 

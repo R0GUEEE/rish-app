@@ -4,6 +4,7 @@
 //! call from any thread and never panics across the boundary.
 
 use rish_agent_core::canonical::{canonical_json, hash_bytes, hash_json};
+use rish_agent_core::round_journal::reduce_json;
 use rish_agent_core::strict_json::parse_arguments;
 use std::ffi::CString;
 use std::os::raw::c_char;
@@ -131,4 +132,21 @@ pub unsafe extern "C" fn rish_agent_parse_arguments(
         Ok(bytes) => output(String::from_utf8(bytes).unwrap_or_default()),
         Err(_) => std::ptr::null_mut(),
     }
+}
+
+/// Runs one schema-3 round-journal operation over the JSON envelope
+/// documented on `rish_agent_core::round_journal::reduce_json`. Always returns
+/// a JSON object (`ok` true or false); null only when `input` is not UTF-8.
+///
+/// # Safety
+/// `pointer` must reference `length` readable bytes or be null.
+#[no_mangle]
+pub unsafe extern "C" fn rish_agent_round_reduce(
+    pointer: *const c_char,
+    length: usize,
+) -> *mut c_char {
+    let Some(text) = input(pointer, length) else {
+        return std::ptr::null_mut();
+    };
+    output(reduce_json(text))
 }

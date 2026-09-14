@@ -1,0 +1,48 @@
+// C ABI of the shared Rish agent core (modules/rish/core, crate rish-agent-ffi).
+//
+// Every string-returning function hands back a NUL-terminated UTF-8 buffer
+// owned by the library; release it with rish_agent_string_free. Inputs are
+// UTF-8 with explicit lengths and are never retained. All functions are safe
+// to call from any thread and never unwind across the boundary.
+#ifndef RISH_AGENT_CORE_H
+#define RISH_AGENT_CORE_H
+
+#include <stddef.h>
+#include <stdint.h>
+
+#ifdef __cplusplus
+extern "C" {
+#endif
+
+/// JSON protocol version implemented by the library (see PROTOCOL_VERSION).
+uint32_t rish_agent_protocol_version(void);
+
+/// Releases a string returned by any function below. NULL is ignored.
+void rish_agent_string_free(char *value);
+
+/// Canonical JSON of a JSON text, or NULL when it is not JSON or cannot be
+/// canonicalised (non-finite, negative zero, unsafe integer, depth > 64).
+char *rish_agent_canonical_json(const char *json, size_t json_length);
+
+/// DSHAgentHJ: SHA-256("rish.<tag>.v1\0" || canonical JSON), lowercase hex.
+char *rish_agent_hash_json(const char *tag, size_t tag_length,
+                           const char *json, size_t json_length);
+
+/// DSHAgentHB: SHA-256("rish.<tag>.v1\0" || u64 big-endian length || bytes).
+char *rish_agent_hash_bytes(const char *tag, size_t tag_length,
+                            const uint8_t *bytes, size_t length);
+
+/// Canonical form of tool arguments when the strict parser accepts them.
+char *rish_agent_parse_arguments(const char *json, size_t json_length);
+
+/// One schema-3 round-journal operation over a JSON envelope
+/// {"op","args","env","view"}; returns {"ok":true,...} or
+/// {"ok":false,"error":<DSHAgentNativeStoreErrorCode>}. NULL only when the
+/// input is not UTF-8.
+char *rish_agent_round_reduce(const char *json, size_t json_length);
+
+#ifdef __cplusplus
+}
+#endif
+
+#endif

@@ -7,6 +7,8 @@ modules/rish/ios/Vendor/libcrypto.xcframework/
 modules/rish/ios/Vendor/libssh2.xcframework/
 modules/rish/ios/Vendor/rish_ffi.xcframework/
 modules/rish/ios/Vendor/rish_ffi-harness-auth.xcframework
+modules/rish/ios/Vendor/rish_agent_core.xcframework/
+modules/rish/ios/Vendor/rish_agent_core.version
 modules/rish/ios/include/rish.h
 apps/mobile/android/rish-ffi/
 

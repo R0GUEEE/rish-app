@@ -87,13 +87,14 @@ jobs:
           path: |
             modules/rish/ios/Vendor
             modules/rish/ios/include/rish.h
-          key: rish-ios-arm64-xcode-26.6-v1-${{ hashFiles('scripts/prepare-*-ios.sh', 'modules/rish/ios/*.podspec') }}
+          key: rish-ios-arm64-xcode-26.6-v2-${{ hashFiles('scripts/prepare-*-ios.sh', 'scripts/prepare-rish-agent-core.sh', 'modules/rish/ios/*.podspec', 'modules/rish/core/Cargo.toml', 'modules/rish/core/Cargo.lock', 'modules/rish/core/rust-toolchain.toml', 'modules/rish/core/include/**', 'modules/rish/core/crates/**') }}
       - name: Prepare pinned native dependencies
         if: steps.native-cache.outputs.cache-hit != 'true'
         run: |
           rustup toolchain install 1.94 --profile minimal
           rustup target add --toolchain 1.94 aarch64-apple-ios aarch64-apple-ios-sim
           ./scripts/prepare-rish-ios.sh
+          ./scripts/prepare-rish-agent-core.sh
           ./scripts/prepare-libgit2-ios.sh
       - name: Cache prepared native dependencies
         if: steps.native-cache.outputs.cache-hit != 'true'
