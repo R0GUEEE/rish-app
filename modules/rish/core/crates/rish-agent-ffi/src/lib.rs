@@ -8,6 +8,7 @@ use rish_agent_core::ledger_batch::reduce_json as ledger_batch_reduce_json;
 use rish_agent_core::ledger_ops::reduce_json as ledger_reduce_json;
 use rish_agent_core::round_journal::reduce_json;
 use rish_agent_core::strict_json::parse_arguments;
+use rish_agent_core::transcript_store::reduce_json as transcript_reduce_json;
 use std::ffi::CString;
 use std::os::raw::c_char;
 use std::slice;
@@ -185,4 +186,20 @@ pub unsafe extern "C" fn rish_agent_ledger_batch_reduce(
         return std::ptr::null_mut();
     };
     output(ledger_batch_reduce_json(text))
+}
+
+/// Runs one transcript-store operation over the JSON envelope documented on
+/// `rish_agent_core::transcript_store::reduce_json`.
+///
+/// # Safety
+/// `pointer` must reference `length` readable bytes or be null.
+#[no_mangle]
+pub unsafe extern "C" fn rish_agent_transcript_reduce(
+    pointer: *const c_char,
+    length: usize,
+) -> *mut c_char {
+    let Some(text) = input(pointer, length) else {
+        return std::ptr::null_mut();
+    };
+    output(transcript_reduce_json(text))
 }

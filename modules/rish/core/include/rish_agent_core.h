@@ -51,6 +51,9 @@ char *rish_agent_ledger_reduce(const char *json, size_t json_length);
 /// over {"op","request","env","view"}; same reply shape as the row reducer.
 char *rish_agent_ledger_batch_reduce(const char *json, size_t json_length);
 
+/// One transcript-store operation over {"op","request","env","view"}.
+char *rish_agent_transcript_reduce(const char *json, size_t json_length);
+
 #ifdef __cplusplus
 }
 #endif

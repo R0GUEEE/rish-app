@@ -21,6 +21,7 @@ pub mod round_journal;
 pub mod schema;
 pub mod store;
 pub mod strict_json;
+pub mod transcript_store;
 
 /// Protocol version reported over the C ABI. Bumped when the JSON contract
 /// of any exported operation changes incompatibly.
