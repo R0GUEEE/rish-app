@@ -110,9 +110,10 @@ separately. No closed-source CLI authorization is asserted here.
 
 `apps/mobile/ios/Podfile.lock` is tracked and fixes the React Native dependency
 graph, but the Pods sources and complete license set are not tracked. This
-notice file therefore does not claim to cover every Pod. The release owner
-should generate a license report from the exact clean checkout and resolved
-Pods before public distribution.
+notice file therefore does not claim to cover every Pod. Publishing this
+source tree does not redistribute them: a build resolves them from CocoaPods
+itself. Before distributing a built app, generate a license report from the
+exact clean checkout and the resolved Pods.
 
 No API keys, private keys, passwords, credential-bearing URLs, or user data are
 included in these notices. This file and the copied texts are source-release
