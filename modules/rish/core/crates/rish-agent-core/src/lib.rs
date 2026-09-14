@@ -23,6 +23,7 @@ pub mod session_schema;
 pub mod store;
 pub mod strict_json;
 pub mod tool_batch;
+pub mod tool_execution;
 pub mod transcript_store;
 
 /// Protocol version reported over the C ABI. Bumped when the JSON contract

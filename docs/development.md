@@ -539,6 +539,16 @@ commits. The host keeps the WAL operation relation, the committed session
 load, the root proofs, the executors' preparation probes (run in call
 order, stopping where the core would) and the denied-approval transaction.
 
+Phase 7 does the same for `DSHAgentToolExecutionService` in
+`tool_execution.rs` behind `rish_agent_tool_execution_reduce`: the request
+shape, the committed-session relation, the pre-execution checks over the
+WAL views (authority, batch, ledger row, prepared projection, approval or
+grant binding, call ordering, row-state branching into replay, active,
+unknown and ambiguous results), the ledger CAS, the settlement of an
+executor's effect into receipt, tool message and patch, and the recovery
+settlement. The host keeps the WAL operation relation, the session load,
+the root proofs, liveness, the executors and the ledger calls.
+
 The core links into the `RishLocalRuntime` pod as
 `Vendor/rish_agent_core.xcframework`, built by
 `scripts/prepare-rish-agent-core.sh` from the workspace toolchain

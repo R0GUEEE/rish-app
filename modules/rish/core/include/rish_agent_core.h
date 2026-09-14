@@ -67,6 +67,12 @@ char *rish_agent_session_reduce(const char *request, size_t request_length,
 /// prepare_ledger_failure, bind_request, bind_check.
 char *rish_agent_tool_batch_reduce(const char *json, size_t json_length);
 
+/// One tool-execution-service decision over {"op","request",...}: request,
+/// session_matches, row, precheck, conflict, arguments, recover_arguments,
+/// effect_gate, execution_cas, active_result, safe_result, generic_failure,
+/// ambiguous_effect, settlement, settle_failed, recover.
+char *rish_agent_tool_execution_reduce(const char *json, size_t json_length);
+
 #ifdef __cplusplus
 }
 #endif

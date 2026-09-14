@@ -10,6 +10,7 @@ use rish_agent_core::round_journal::reduce_json;
 use rish_agent_core::session_schema::reduce_json as session_reduce_json;
 use rish_agent_core::strict_json::parse_arguments;
 use rish_agent_core::tool_batch::reduce_json as tool_batch_reduce_json;
+use rish_agent_core::tool_execution::reduce_json as tool_execution_reduce_json;
 use rish_agent_core::transcript_store::reduce_json as transcript_reduce_json;
 use std::ffi::CString;
 use std::os::raw::c_char;
@@ -247,4 +248,20 @@ pub unsafe extern "C" fn rish_agent_tool_batch_reduce(
         return std::ptr::null_mut();
     };
     output(tool_batch_reduce_json(text))
+}
+
+/// Runs one tool-execution-service decision over the JSON envelope
+/// documented on `rish_agent_core::tool_execution::reduce_json`.
+///
+/// # Safety
+/// `pointer` must reference `length` readable bytes or be null.
+#[no_mangle]
+pub unsafe extern "C" fn rish_agent_tool_execution_reduce(
+    pointer: *const c_char,
+    length: usize,
+) -> *mut c_char {
+    let Some(text) = input(pointer, length) else {
+        return std::ptr::null_mut();
+    };
+    output(tool_execution_reduce_json(text))
 }
