@@ -2,9 +2,9 @@ package tech.zseven.rish
 
 import androidx.test.core.app.ApplicationProvider
 import androidx.test.ext.junit.runners.AndroidJUnit4
-import dev.zseven.rish.runtime.AndroidSubscriptionAuthManager
-import dev.zseven.rish.runtime.SubscriptionAuthProcessFactory
-import dev.zseven.rish.runtime.SubscriptionAuthVault
+import tech.zseven.rish.runtime.AndroidSubscriptionAuthManager
+import tech.zseven.rish.runtime.SubscriptionAuthProcessFactory
+import tech.zseven.rish.runtime.SubscriptionAuthVault
 import java.io.ByteArrayInputStream
 import java.io.ByteArrayOutputStream
 import java.io.File

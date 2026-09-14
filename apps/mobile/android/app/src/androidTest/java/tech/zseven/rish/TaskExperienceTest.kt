@@ -7,7 +7,7 @@ import androidx.lifecycle.Lifecycle
 import androidx.test.core.app.ActivityScenario
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import androidx.test.platform.app.InstrumentationRegistry
-import dev.zseven.rish.tasks.TaskExperience
+import tech.zseven.rish.tasks.TaskExperience
 import org.json.JSONObject
 import org.junit.Assert.*
 import org.junit.Test
@@ -98,7 +98,7 @@ class TaskExperienceTest {
     }
     @Test fun staleForegroundStartStopsBeforeItsPromotionDeadline() = scenario { _, id ->
         main {
-            val intent = android.content.Intent(context, dev.zseven.rish.tasks.TaskForegroundService::class.java).putExtra("runId", "obsolete-$id")
+            val intent = android.content.Intent(context, tech.zseven.rish.tasks.TaskForegroundService::class.java).putExtra("runId", "obsolete-$id")
             if (Build.VERSION.SDK_INT >= 26) context.startForegroundService(intent) else context.startService(intent)
         }
         Thread.sleep(6_000)

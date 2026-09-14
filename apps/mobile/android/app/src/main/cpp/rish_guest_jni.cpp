@@ -135,7 +135,7 @@ void *SessionFromHandle(jlong handle) {
 }  // namespace
 
 extern "C" JNIEXPORT jint JNICALL
-Java_dev_zseven_rish_guest_RishGuestNative_protocolVersion(JNIEnv *, jclass) {
+Java_tech_zseven_rish_guest_RishGuestNative_protocolVersion(JNIEnv *, jclass) {
   return static_cast<jint>(rish_protocol_version());
 }
 
@@ -143,7 +143,7 @@ Java_dev_zseven_rish_guest_RishGuestNative_protocolVersion(JNIEnv *, jclass) {
 // failed to boot. Blocks for the whole boot: the caller keeps it off the main
 // thread and the module's state executor.
 extern "C" JNIEXPORT jlong JNICALL
-Java_dev_zseven_rish_guest_RishGuestNative_bootSession(JNIEnv *env, jclass,
+Java_tech_zseven_rish_guest_RishGuestNative_bootSession(JNIEnv *env, jclass,
                                                        jstring request) {
   if (request == nullptr) return 0;
   std::string utf8;
@@ -156,7 +156,7 @@ Java_dev_zseven_rish_guest_RishGuestNative_bootSession(JNIEnv *env, jclass,
 // unusable or the reply is not valid UTF-8. The Rust string is always freed
 // before returning.
 extern "C" JNIEXPORT jstring JNICALL
-Java_dev_zseven_rish_guest_RishGuestNative_sessionExecJson(JNIEnv *env, jclass,
+Java_tech_zseven_rish_guest_RishGuestNative_sessionExecJson(JNIEnv *env, jclass,
                                                            jlong handle,
                                                            jstring request) {
   if (handle == 0 || request == nullptr) return nullptr;
@@ -171,7 +171,7 @@ Java_dev_zseven_rish_guest_RishGuestNative_sessionExecJson(JNIEnv *env, jclass,
 }
 
 extern "C" JNIEXPORT void JNICALL
-Java_dev_zseven_rish_guest_RishGuestNative_sessionFree(JNIEnv *, jclass,
+Java_tech_zseven_rish_guest_RishGuestNative_sessionFree(JNIEnv *, jclass,
                                                        jlong handle) {
   if (handle != 0) rish_vm_session_free(SessionFromHandle(handle));
 }

@@ -8,7 +8,7 @@ import androidx.test.espresso.assertion.ViewAssertions.matches
 import androidx.test.espresso.matcher.ViewMatchers.*
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import androidx.test.platform.app.InstrumentationRegistry
-import dev.zseven.rish.runtime.AndroidRuntimeState
+import tech.zseven.rish.runtime.AndroidRuntimeState
 import org.hamcrest.Matcher
 import org.json.JSONObject
 import org.junit.Assert.*

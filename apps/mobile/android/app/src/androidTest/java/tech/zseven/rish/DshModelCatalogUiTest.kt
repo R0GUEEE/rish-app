@@ -8,7 +8,7 @@ import androidx.test.espresso.assertion.ViewAssertions.matches
 import androidx.test.espresso.matcher.ViewMatchers.*
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import androidx.test.platform.app.InstrumentationRegistry
-import dev.zseven.rish.runtime.AndroidDshModelCatalog
+import tech.zseven.rish.runtime.AndroidDshModelCatalog
 import org.hamcrest.Matcher
 import org.hamcrest.Matchers.allOf
 import org.junit.Assert.*
@@ -34,7 +34,7 @@ class DshModelCatalogUiTest {
         val context = InstrumentationRegistry.getInstrumentation().targetContext
         val prefs = context.getSharedPreferences("rish.dsh-models.v1", 0)
         val previous = prefs.getString("catalog", null)
-        val credentials = dev.zseven.rish.runtime.AndroidRuntimeState.get(context).credentials
+        val credentials = tech.zseven.rish.runtime.AndroidRuntimeState.get(context).credentials
         val previousKey = credentials.get("DEEPSEEK_API_KEY")
         try {
             prefs.edit().remove("catalog").commit()

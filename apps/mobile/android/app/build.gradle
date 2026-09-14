@@ -90,6 +90,44 @@ react {
 def enableProguardInReleaseBuilds = false
 
 /**
+ * Release signing material, resolved once. android/keystore.properties wins;
+ * the RISH_ANDROID_KEYSTORE* environment is the CI form. Passwords are read
+ * here and handed to the signing config only; nothing echoes them.
+ */
+def releaseSigning = {
+    def propertiesFile = rootProject.file("keystore.properties")
+    def storeFile = null
+    def storePassword = null
+    def keyAlias = null
+    def keyPassword = null
+    if (propertiesFile.isFile()) {
+        def properties = new Properties()
+        propertiesFile.withInputStream { properties.load(it) }
+        storeFile = properties.getProperty("storeFile")
+        storePassword = properties.getProperty("storePassword")
+        keyAlias = properties.getProperty("keyAlias")
+        keyPassword = properties.getProperty("keyPassword")
+    } else if (System.getenv("RISH_ANDROID_KEYSTORE") != null) {
+        storeFile = System.getenv("RISH_ANDROID_KEYSTORE")
+        storePassword = System.getenv("RISH_ANDROID_KEYSTORE_PASSWORD")
+        keyAlias = System.getenv("RISH_ANDROID_KEY_ALIAS")
+        keyPassword = System.getenv("RISH_ANDROID_KEY_PASSWORD")
+    }
+    if (storeFile == null) return null
+    def resolvedStore = rootProject.file(storeFile)
+    if (!resolvedStore.isFile()) {
+        throw new GradleException("release keystore does not exist: ${resolvedStore}")
+    }
+    if (resolvedStore.name == "debug.keystore") {
+        throw new GradleException("the React Native debug keystore cannot sign a release build")
+    }
+    if (!storePassword || !keyAlias || !keyPassword) {
+        throw new GradleException("release signing needs storePassword, keyAlias and keyPassword alongside storeFile")
+    }
+    return [storeFile: resolvedStore, storePassword: storePassword, keyAlias: keyAlias, keyPassword: keyPassword]
+}()
+
+/**
  * The preferred build flavor of JavaScriptCore (JSC)
  *
  * For example, to use the international variant, you can use:
@@ -185,17 +223,36 @@ android {
             keyAlias 'androiddebugkey'
             keyPassword 'android'
         }
+        // Release builds are signed only with a key the maintainer supplies:
+        // android/keystore.properties (gitignored) or the RISH_ANDROID_KEYSTORE*
+        // environment. The well-known debug key never signs a release; a
+        // release build without a key fails instead of producing an APK anyone
+        // could re-sign.
+        release {
+            if (releaseSigning != null) {
+                storeFile releaseSigning.storeFile
+                storePassword releaseSigning.storePassword
+                keyAlias releaseSigning.keyAlias
+                keyPassword releaseSigning.keyPassword
+            }
+        }
     }
     buildTypes {
         debug {
             signingConfig signingConfigs.debug
         }
         release {
-            // Caution! In production, you need to generate your own keystore file.
-            // see https://reactnative.dev/docs/signed-apk-android.
-            signingConfig signingConfigs.debug
+            signingConfig releaseSigning != null ? signingConfigs.release : null
             minifyEnabled enableProguardInReleaseBuilds
             proguardFiles getDefaultProguardFile("proguard-android-optimize.txt"), "proguard-rules.pro"
+        }
+    }
+    gradle.taskGraph.whenReady { graph ->
+        def packagesRelease = graph.allTasks.any { task ->
+            task.project == project && task.name ==~ /(package|bundle|install)Release.*/ && !task.name.contains("AndroidTest")
+        }
+        if (packagesRelease && releaseSigning == null) {
+            throw new GradleException("release builds need a release signing key: create android/keystore.properties (storeFile, storePassword, keyAlias, keyPassword) or set RISH_ANDROID_KEYSTORE, RISH_ANDROID_KEYSTORE_PASSWORD, RISH_ANDROID_KEY_ALIAS and RISH_ANDROID_KEY_PASSWORD; the debug key is never used for release")
         }
     }
 }

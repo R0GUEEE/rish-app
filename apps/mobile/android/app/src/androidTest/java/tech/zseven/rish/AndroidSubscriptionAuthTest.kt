@@ -2,8 +2,8 @@ package tech.zseven.rish
 
 import androidx.test.core.app.ApplicationProvider
 import androidx.test.ext.junit.runners.AndroidJUnit4
-import dev.zseven.rish.runtime.AndroidSubscriptionAuthManager
-import dev.zseven.rish.runtime.AndroidSubscriptionAuthStore
+import tech.zseven.rish.runtime.AndroidSubscriptionAuthManager
+import tech.zseven.rish.runtime.AndroidSubscriptionAuthStore
 import java.io.File
 import org.json.JSONObject
 import org.junit.Assert.assertEquals

@@ -1,8 +1,8 @@
 package tech.zseven.rish
 
 import androidx.test.ext.junit.runners.AndroidJUnit4
-import dev.zseven.rish.runtime.AndroidSubscriptionAuthStatusParser
-import dev.zseven.rish.runtime.AndroidSubscriptionAuthProtocol
+import tech.zseven.rish.runtime.AndroidSubscriptionAuthStatusParser
+import tech.zseven.rish.runtime.AndroidSubscriptionAuthProtocol
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNull
 import org.junit.Test

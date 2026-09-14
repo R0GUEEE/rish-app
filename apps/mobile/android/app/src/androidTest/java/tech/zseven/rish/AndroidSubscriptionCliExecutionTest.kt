@@ -5,7 +5,7 @@ import androidx.test.ext.junit.runners.AndroidJUnit4
 import java.io.File
 import android.os.SystemClock
 import android.content.Intent
-import dev.zseven.rish.runtime.OfficialCliProbeService
+import tech.zseven.rish.runtime.OfficialCliProbeService
 import org.json.JSONObject
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertTrue

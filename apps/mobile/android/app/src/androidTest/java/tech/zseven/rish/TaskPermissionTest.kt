@@ -10,7 +10,7 @@ import androidx.test.platform.app.InstrumentationRegistry
 import com.facebook.react.bridge.Callback
 import com.facebook.react.bridge.PromiseImpl
 import com.facebook.react.bridge.ReactApplicationContext
-import dev.zseven.rish.tasks.TaskExperienceModule
+import tech.zseven.rish.tasks.TaskExperienceModule
 import org.json.JSONObject
 import org.junit.Assert.*
 import org.junit.Assume.assumeTrue

@@ -17,14 +17,14 @@ class MainApplication : Application(), ReactApplication {
         PackageList(this).packages.apply {
           // Task alerts have a native implementation. Runtime/workspace
           // modules still reject unavailable capabilities explicitly.
-          add(dev.zseven.rish.RishNativePackage())
+          add(tech.zseven.rish.RishNativePackage())
         },
     )
   }
 
   override fun onCreate() {
     super.onCreate()
-    dev.zseven.rish.tasks.TaskExperience.initialize(this)
+    tech.zseven.rish.tasks.TaskExperience.initialize(this)
     loadReactNative(this)
   }
 }

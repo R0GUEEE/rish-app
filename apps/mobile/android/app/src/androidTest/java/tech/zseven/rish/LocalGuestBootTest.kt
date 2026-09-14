@@ -4,11 +4,11 @@ import android.util.Log
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import androidx.test.filters.LargeTest
 import androidx.test.platform.app.InstrumentationRegistry
-import dev.zseven.rish.guest.AndroidGuestAssets
-import dev.zseven.rish.guest.GuestAssets
-import dev.zseven.rish.guest.GuestRuntimeState
-import dev.zseven.rish.guest.GuestSessionController
-import dev.zseven.rish.guest.RishGuestNative
+import tech.zseven.rish.guest.AndroidGuestAssets
+import tech.zseven.rish.guest.GuestAssets
+import tech.zseven.rish.guest.GuestRuntimeState
+import tech.zseven.rish.guest.GuestSessionController
+import tech.zseven.rish.guest.RishGuestNative
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNotNull

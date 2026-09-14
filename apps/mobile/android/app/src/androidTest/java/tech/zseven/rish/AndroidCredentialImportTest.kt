@@ -4,8 +4,8 @@ import android.os.Bundle
 import android.util.Base64
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import androidx.test.platform.app.InstrumentationRegistry
-import dev.zseven.rish.runtime.AndroidRuntimeState
-import dev.zseven.rish.runtime.AndroidProviderConfiguration
+import tech.zseven.rish.runtime.AndroidRuntimeState
+import tech.zseven.rish.runtime.AndroidProviderConfiguration
 import org.json.JSONObject
 import org.junit.Assume.assumeTrue
 import org.junit.Test

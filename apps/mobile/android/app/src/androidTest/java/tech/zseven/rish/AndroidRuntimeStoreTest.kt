@@ -2,7 +2,7 @@ package tech.zseven.rish
 
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import androidx.test.platform.app.InstrumentationRegistry
-import dev.zseven.rish.runtime.*
+import tech.zseven.rish.runtime.*
 import org.json.JSONObject
 import org.junit.Assert.*
 import org.junit.Test

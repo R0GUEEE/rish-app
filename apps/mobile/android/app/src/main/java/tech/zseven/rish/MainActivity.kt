@@ -8,18 +8,18 @@ import com.facebook.react.defaults.DefaultReactActivityDelegate
 class MainActivity : ReactActivity() {
   override fun onCreate(savedInstanceState: android.os.Bundle?) {
     super.onCreate(savedInstanceState)
-    if (savedInstanceState == null) dev.zseven.rish.tasks.TaskExperience.open(intent)
+    if (savedInstanceState == null) tech.zseven.rish.tasks.TaskExperience.open(intent)
   }
   override fun onNewIntent(intent: android.content.Intent) {
     super.onNewIntent(intent)
-    dev.zseven.rish.tasks.TaskExperience.open(intent)
+    tech.zseven.rish.tasks.TaskExperience.open(intent)
   }
   override fun onResume() {
     super.onResume()
-    dev.zseven.rish.tasks.TaskExperience.resume()
+    tech.zseven.rish.tasks.TaskExperience.resume()
   }
   override fun onStop() {
-    dev.zseven.rish.tasks.TaskExperience.pause()
+    tech.zseven.rish.tasks.TaskExperience.pause()
     super.onStop()
   }
 

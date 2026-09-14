@@ -309,7 +309,7 @@ from `apps/mobile/ios/Rish/GuestAssets/` into the APK assets; it refuses a
 staged directory the build stays a lite build and `LocalGuest` reports
 `implemented = false`.
 
-`LocalGuestModule` (Kotlin, `dev.zseven.rish.guest`) mirrors the iOS module:
+`LocalGuestModule` (Kotlin, `tech.zseven.rish.guest`) mirrors the iOS module:
 fail-closed request validation, digest verification of the staged assets before
 every boot, one session per process, boot on a dedicated thread, exec
 serialised with shutdown, and receipts that never carry paths. JVM unit tests
@@ -339,6 +339,24 @@ apps/mobile/android/gradlew -p apps/mobile/android :app:assembleDebug -PrishStan
 This remains a test build, not a production-signed release. Its launcher was
 checked on the API33 emulator with airplane mode enabled; HarmonyOS compatibility
 container installation and execution require a separate device check.
+
+### Android release signing
+
+Release builds never use the React Native debug keystore. `assembleRelease`,
+`bundleRelease` and `installRelease` fail with an explanation unless you supply
+a key, either as `apps/mobile/android/keystore.properties` (gitignored):
+
+```properties
+storeFile=/absolute/or/android-relative/path/to/release.jks
+storePassword=...
+keyAlias=...
+keyPassword=...
+```
+
+or as the environment `RISH_ANDROID_KEYSTORE`, `RISH_ANDROID_KEYSTORE_PASSWORD`,
+`RISH_ANDROID_KEY_ALIAS` and `RISH_ANDROID_KEY_PASSWORD` for CI. A properties
+file that points at `debug.keystore` is refused. Debug builds keep the debug
+key, and unit tests and configuration never need release signing.
 
 ## Editable DSH model catalog
 
