@@ -71,3 +71,20 @@ The workflow does not submit an App Store release or enable external testers.
 
 The base build uses the repository's default native runtime configuration.
 Optional device-only harness-auth assets are not included by this workflow.
+
+## Local preview service
+
+TestFlight builds enable `RISH_IOS_GUEST_CGI_ENABLED=1` when installing Pods.
+The Release simulator gate verifies the native service tool is registered,
+boots the real bundled Linux guest, fetches its HTML page, calls a stateful
+JSON API, and stops the service. A skipped live test does not satisfy the gate.
+The pinned rish source includes the agent-ready handshake fix; native cache
+keys include the preparation script so a source pin change rebuilds the library.
+
+The available service is a temporary local HTTP preview: self-contained HTML
+at `/` plus a BusyBox `/bin/sh` handler for `POST /api`. The handler receives
+the request-body file as `$1` and a mutable JSON state file as `$2`; stdout is
+returned as JSON. It is not a general Node.js/npm server or a persistent iOS
+background service. Existing tool approval and workspace capability checks
+still apply. After updating the app, send a new request to start the preview;
+an already denied attempt from an older build remains denied in its history.

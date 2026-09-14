@@ -28,6 +28,7 @@ jobs:
       DEVELOPER_DIR: /Applications/Xcode_26.6.app/Contents/Developer
       RELEASE_VERSION: ${{ inputs.version }}
       UPLOAD_TESTFLIGHT: ${{ inputs.upload }}
+      RISH_IOS_GUEST_CGI_ENABLED: '1'
     steps:
       - uses: actions/checkout@v4
         with:
@@ -107,6 +108,9 @@ jobs:
         run: |
           bundle exec pod install --project-directory=ios
           printf 'export NODE_BINARY=%s\n' "$(command -v node)" > ios/.xcode.env.local
+      - name: Verify Release preview service on iOS Simulator
+        timeout-minutes: 25
+        run: bash scripts/ci/test-ios-preview.sh
       - name: Sign, archive and export IPA
         working-directory: apps/mobile
         env:

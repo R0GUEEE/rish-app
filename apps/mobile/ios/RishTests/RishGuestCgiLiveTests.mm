@@ -8,6 +8,7 @@
 #import <unistd.h>
 
 #import "RishGuestCgiService.h"
+#import "AgentToolRegistry.h"
 
 static NSData *RishCGISHA256(NSData *data) {
   unsigned char digest[CC_SHA256_DIGEST_LENGTH];
@@ -107,10 +108,15 @@ static BOOL RishCGIWait(BOOL (^predicate)(void), NSTimeInterval timeout) {
   if (![environment[@"RISH_GUEST_CGI_LIVE"] isEqualToString:@"1"]) {
     XCTSkip(@"Set RISH_GUEST_CGI_LIVE=1 and stage the simulator Documents fixture to run the bounded real guest test.");
   }
-  NSString *directory = [NSHomeDirectory() stringByAppendingPathComponent:@"Documents/RishGuestCgiLiveFixture"];
+  NSError *registryError = nil;
+  DSHAgentToolRegistry *registry = [[DSHAgentToolRegistry alloc] init];
+  XCTAssertNotNil([registry nativeDescriptorForToolName:@"start_guest_cgi" error:&registryError]);
+  XCTAssertNil(registryError, @"Release must advertise the service tool");
+  NSString *directory = environment[@"RISH_GUEST_CGI_FIXTURE_DIR"] ?: [NSHomeDirectory() stringByAppendingPathComponent:@"Documents/RishGuestCgiLiveFixture"];
   NSArray<NSString *> *names = @[@"index.html", @"backend.sh", @"initial.json"];
   NSData *sumsData = [NSData dataWithContentsOfFile:[directory stringByAppendingPathComponent:@"SHA256SUMS"]];
-  if (sumsData == nil) XCTSkip(@"No staged RishGuestCgiLiveFixture in the simulator app Documents directory.");
+  XCTAssertNotNil(sumsData, @"Opted-in live test requires its fixture manifest");
+  if (sumsData == nil) return;
   NSString *sums = [[NSString alloc] initWithData:sumsData encoding:NSUTF8StringEncoding];
   NSMutableDictionary *expected = [NSMutableDictionary dictionary];
   for (NSString *line in [sums componentsSeparatedByString:@"\n"]) {
