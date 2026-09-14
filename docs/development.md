@@ -552,6 +552,13 @@ set. Round-create and dispatch failures are also injected into the real WAL:
 an uncommitted in-memory row must never be returned as a successful write or
 permit a provider request.
 
+The real CGI HTTP client uses one 60-second host-time deadline across connect,
+send and receive. A POST stages its body, executes the backend and removes the
+temporary file through multiple software-guest exchanges; the backend's
+five-second guest-shell timeout is not an end-to-end host-time bound. The test
+requires complete responses and the exact counter sequence without retries,
+and records timings without cookies or request contents.
+
 For a native `complete_agent_round_v2` persistence rejection, error details
 include a fixed diagnostic marker distinguishing storage failure, unavailable
 dependencies and an exception. This marker is transient display information;

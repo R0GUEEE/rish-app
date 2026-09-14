@@ -103,6 +103,7 @@ import json, sys
 nodes = json.load(open(sys.argv[1]))['testNodes']
 required = {
     'testOptInRealGuestCgiCounterOverLoopback',
+    'testHTTPClientHonorsWholeRequestDeadlineAndRejectsTruncation',
     'testProtectionUsesFreshFileAttributesForDirectoryAndFile',
     'testFreshStoreLoadsAsMissingAndFirstCASCommitsV3',
     'testLoadResultExposesWriterAndCurrentLaunchInstanceIds',
