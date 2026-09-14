@@ -70,6 +70,7 @@ jobs:
           working-directory: apps/mobile
       - name: Verify source and install JavaScript dependencies
         run: |
+          ruby scripts/tests/ios-plist_test.rb
           ruby scripts/verify-no-bundled-secret.rb --tracked
           node --test scripts/tests/source-preflight.test.mjs scripts/tests/ios-preparation.test.mjs scripts/tests/release-identifiers.test.mjs
           node scripts/verify-source-checkout.mjs
@@ -78,12 +79,29 @@ jobs:
           npm run typecheck --prefix apps/mobile
           npm run lint --prefix apps/mobile
           npm test --prefix apps/mobile -- --runInBand --ci
+      - name: Restore pinned native dependencies
+        id: native-cache
+        uses: actions/cache/restore@v4
+        with:
+          path: |
+            modules/rish/ios/Vendor
+            modules/rish/ios/include/rish.h
+          key: rish-ios-arm64-xcode-26.6-v1-${{ hashFiles('scripts/prepare-*-ios.sh', 'modules/rish/ios/*.podspec') }}
       - name: Prepare pinned native dependencies
+        if: steps.native-cache.outputs.cache-hit != 'true'
         run: |
           rustup toolchain install 1.94 --profile minimal
           rustup target add --toolchain 1.94 aarch64-apple-ios aarch64-apple-ios-sim
           ./scripts/prepare-rish-ios.sh
           ./scripts/prepare-libgit2-ios.sh
+      - name: Cache prepared native dependencies
+        if: steps.native-cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v4
+        with:
+          path: |
+            modules/rish/ios/Vendor
+            modules/rish/ios/include/rish.h
+          key: ${{ steps.native-cache.outputs.cache-primary-key }}
       - name: Install Pods
         working-directory: apps/mobile
         run: |

@@ -8,6 +8,7 @@ require 'securerandom'
 require 'time'
 require 'tmpdir'
 require 'xcodeproj'
+require_relative 'ios-plist'
 
 ROOT = File.expand_path('../..', __dir__)
 OUTPUT = File.join(ROOT, '.build/testflight')
@@ -93,7 +94,7 @@ begin
        '-archivePath', archive, "MARKETING_VERSION=#{version}", "CURRENT_PROJECT_VERSION=#{build}", 'archive')
   app = File.join(archive, 'Products/Applications/Rish.app')
   { app => 'tech.zseven.rish', File.join(app, 'PlugIns/RishTaskActivity.appex') => 'tech.zseven.rish.taskactivity' }.each do |bundle, identifier|
-    info = Xcodeproj::Plist.read_from_path(File.join(bundle, 'Info.plist'))
+    info = IOSPlist.read(File.join(bundle, 'Info.plist'))
     abort 'Archive bundle identity/version mismatch' unless info['CFBundleIdentifier'] == identifier &&
       info['CFBundleShortVersionString'] == version && info['CFBundleVersion'] == build
     run!('codesign', '--verify', '--strict', bundle)
