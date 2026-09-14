@@ -40,20 +40,6 @@ NS_ASSUME_NONNULL_BEGIN
                                                         root:(NSDictionary *)root
                                                       error:(NSError **)error;
 
-/// Reserves all previously unseen write idempotency keys in one transaction.
-/// The request is the exact batch preflight object; it accepts no file bytes,
-/// only bounded byte counts/digests and validated relative-path digests.
-- (nullable NSDictionary *)reserveWriteBytesForAttemptWithRequest:
-    (NSDictionary *)request
-                                                             error:(NSError **)error;
-
-/// Atomically reserves a frozen write batch and inserts all of its intent
-/// rows. The request must carry one native-only raw `arguments_json` string
-/// per intent; native recomputes every arguments/idempotency digest before any
-/// row is accepted. No effect gate is opened until this transaction commits.
-- (nullable NSDictionary *)prepareAgentWriteBatchWithRequest:(NSDictionary *)request
-                                                        error:(NSError **)error;
-
 /// Whole-batch native preparation used by AgentToolBatchService.  `request`
 /// is native-private: raw argument JSON and operation preconditions are loaded
 /// from the protected transcript/executors and never cross React Native.  All
