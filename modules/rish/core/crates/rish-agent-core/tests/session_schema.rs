@@ -204,7 +204,7 @@ fn compare_section(
         let name = item["name"].as_str().expect("name");
         let entry = expected
             .get(name)
-            .unwrap_or_else(|| panic!("{section}/{name} missing from the golden; regenerate it"));
+            .unwrap_or_else(|| panic!("{section}/{name} missing from the frozen golden (it cannot be regenerated; add new cases as a separate fixture)"));
         let env = env_from_json(entry.get("env"));
         let bytes = case_bytes(item, cases);
         let got = oracle(&bytes, &env);

@@ -6,6 +6,7 @@
 use rish_agent_core::canonical::{canonical_json, hash_bytes, hash_json};
 use rish_agent_core::ledger_batch::reduce_json as ledger_batch_reduce_json;
 use rish_agent_core::ledger_ops::reduce_json as ledger_reduce_json;
+use rish_agent_core::prepared_attempt::reduce_json as prepared_attempt_reduce_json;
 use rish_agent_core::round_journal::reduce_json;
 use rish_agent_core::session_schema::reduce_json as session_reduce_json;
 use rish_agent_core::strict_json::parse_arguments;
@@ -264,4 +265,42 @@ pub unsafe extern "C" fn rish_agent_tool_execution_reduce(
         return std::ptr::null_mut();
     };
     output(tool_execution_reduce_json(text))
+}
+
+/// Runs one prepared-attempt-store decision over the JSON envelope
+/// documented on `rish_agent_core::prepared_attempt::reduce_json`;
+/// `session` carries the committed session's exact JSON bytes for the
+/// `session` op (may be null/empty for the others).
+///
+/// # Safety
+/// `pointer` must reference `length` readable bytes or be null; `session`
+/// must reference `session_length` readable bytes or be null.
+#[no_mangle]
+pub unsafe extern "C" fn rish_agent_prepared_attempt_reduce(
+    pointer: *const c_char,
+    length: usize,
+    session: *const u8,
+    session_length: usize,
+) -> *mut c_char {
+    let Some(text) = input(pointer, length) else {
+        return std::ptr::null_mut();
+    };
+    let bytes: &[u8] = if session.is_null() {
+        &[]
+    } else {
+        slice::from_raw_parts(session, session_length)
+    };
+    output(prepared_attempt_reduce_json(text, bytes))
+}
+
+/// The build identity of the linked core: crate version plus the git
+/// revision the packaging script recorded, so a test can prove which
+/// build it exercises.
+#[no_mangle]
+pub extern "C" fn rish_agent_build_id() -> *mut c_char {
+    output(format!(
+        "rish-agent-core {} {}",
+        env!("CARGO_PKG_VERSION"),
+        option_env!("RISH_AGENT_CORE_GIT_SHA").unwrap_or("unknown")
+    ))
 }

@@ -549,6 +549,18 @@ executor's effect into receipt, tool message and patch, and the recovery
 settlement. The host keeps the WAL operation relation, the session load,
 the root proofs, liveness, the executors and the ledger calls.
 
+Phase 8 moves `DSHAgentPreparedAttemptStore` into `prepared_attempt.rs`
+behind `rish_agent_prepared_attempt_reduce`: the request shape, the
+committed-session relation including the visible-history digest, the
+observed safe values and the conflict result, the attempt projections,
+and the prepare transaction itself (replay, not_agent, already_prepared,
+prepared) as a change set the facade appends. The facade keeps the
+session load, the root resolver, the tool registry, the workspace
+authority guard held across the whole WAL transaction, and the
+transaction itself; fresh transcript identities and clock readings are
+passed in as host facts. `rish_agent_build_id` reports the linked core's
+version and git revision so a test can prove which build it exercises.
+
 The core links into the `RishLocalRuntime` pod as
 `Vendor/rish_agent_core.xcframework`, built by
 `scripts/prepare-rish-agent-core.sh` from the workspace toolchain

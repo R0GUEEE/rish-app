@@ -37,6 +37,7 @@ for target in "${DEVICE_TARGET}" "${SIMULATOR_TARGET}"; do
 done
 
 export IPHONEOS_DEPLOYMENT_TARGET="${IOS_DEPLOYMENT_TARGET}"
+export RISH_AGENT_CORE_GIT_SHA="$(git -C "${REPO_ROOT}" rev-parse --short=12 HEAD 2>/dev/null || echo unknown)$(git -C "${REPO_ROOT}" diff --quiet -- modules/rish/core 2>/dev/null || echo -dirty)"
 for target in "${DEVICE_TARGET}" "${SIMULATOR_TARGET}"; do
   (cd "${CORE_ROOT}" && cargo "+${toolchain}" build --release --locked \
       --package rish-agent-ffi --target "${target}") ||

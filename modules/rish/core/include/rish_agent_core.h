@@ -73,6 +73,16 @@ char *rish_agent_tool_batch_reduce(const char *json, size_t json_length);
 /// ambiguous_effect, settlement, settle_failed, recover.
 char *rish_agent_tool_execution_reduce(const char *json, size_t json_length);
 
+/// One prepared-attempt-store decision over {"op","request",...}: request,
+/// session (takes the committed session's exact JSON bytes), observed,
+/// conflict, session_matches, projection, transaction.
+char *rish_agent_prepared_attempt_reduce(const char *json, size_t json_length,
+                                         const uint8_t *session, size_t session_length);
+
+/// "rish-agent-core <version> <git sha>" of the linked build; free with
+/// rish_agent_string_free.
+char *rish_agent_build_id(void);
+
 #ifdef __cplusplus
 }
 #endif
