@@ -20,7 +20,7 @@ NSString *const DSHGuestInitramfsResourceName = @"rish-container.cpio";
 NSString *const DSHGuestKernelSha256 =
     @"1e6bf9027720c75c3ed0d79171f21b5791ee40ca9795d07c7c6e04dc5ea2ae90";
 NSString *const DSHGuestInitramfsSha256 =
-    @"152905238ade87b7e1cd495508ff1bb92807b4440cc0ed056030e4dfd72caea0";
+    @"ebcd2279be5dfc92b1c3264c355bb440a027079bcef2fa9be209654891479b9d";
 
 NSString *const DSHGuestErrorInvalidRequest = @"E_GUEST_INVALID_REQUEST";
 NSString *const DSHGuestErrorAssetsMissing = @"E_GUEST_ASSETS_MISSING";

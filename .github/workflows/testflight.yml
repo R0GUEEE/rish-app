@@ -73,7 +73,7 @@ jobs:
         run: |
           ruby scripts/tests/ios-plist_test.rb
           ruby scripts/verify-no-bundled-secret.rb --tracked
-          node --test scripts/tests/source-preflight.test.mjs scripts/tests/ios-preparation.test.mjs scripts/tests/release-identifiers.test.mjs
+          node --test scripts/tests/source-preflight.test.mjs scripts/tests/ios-preparation.test.mjs scripts/tests/release-identifiers.test.mjs scripts/tests/guest-assets.test.mjs
           node scripts/verify-source-checkout.mjs
           ruby apps/mobile/scripts/check-pbxproj-ids.rb
           npm ci --prefix apps/mobile

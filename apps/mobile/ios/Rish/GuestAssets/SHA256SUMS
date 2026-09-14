@@ -1,10 +1,10 @@
 # Pinned SHA-256 digests for the rish guest boot assets bundled with Rish.
-# Copied from the rish repository (read-only reference):
+# Base rootfs and kernel copied from the rish repository:
 #   rish/guest/x86_64/out/downloads/vmlinuz-virt-6.18.35
 #   rish/guest/x86_64/out/rish-container.cpio
 # Re-verify with: shasum -a 256 -c SHA256SUMS   (run from this directory)
 # LocalGuestModule re-checks these digests at every boot and fails closed on
-# mismatch (E_GUEST_ASSET_INTEGRITY). The initramfs digest matches the
-# reproducible-build record in rish docs/guest-apk-offline.md.
-152905238ade87b7e1cd495508ff1bb92807b4440cc0ed056030e4dfd72caea0  rish-container.cpio
+# mismatch (E_GUEST_ASSET_INTEGRITY). The guest agent is rebuilt from the
+# pinned host revision; see guest-agent-build.json and scripts/refresh-guest-agent.py.
+ebcd2279be5dfc92b1c3264c355bb440a027079bcef2fa9be209654891479b9d  rish-container.cpio
 1e6bf9027720c75c3ed0d79171f21b5791ee40ca9795d07c7c6e04dc5ea2ae90  vmlinuz-virt-6.18.35

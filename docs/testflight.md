@@ -88,3 +88,11 @@ returned as JSON. It is not a general Node.js/npm server or a persistent iOS
 background service. Existing tool approval and workspace capability checks
 still apply. After updating the app, send a new request to start the preview;
 an already denied attempt from an older build remains denied in its history.
+
+The bundled guest agent must use the same ready-marker protocol as the host.
+Its build source and hashes are recorded in `GuestAssets/guest-agent-build.json`.
+After building the musl guest agent from the pinned rish source, use
+`python3 scripts/refresh-guest-agent.py /path/to/rish` to replace the guest-agent and init-script
+archive entries and refresh the integrity pins. The other rootfs files and
+offline APK packages are preserved. Both CI lanes check the image hashes
+and the presence of the expected agent-ready marker.

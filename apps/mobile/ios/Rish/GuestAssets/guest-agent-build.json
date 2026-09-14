@@ -1,0 +1,9 @@
+{
+  "rish_commit": "674565009ffa06988cd74b19918f2ebb96fa833c",
+  "rust_toolchain": "1.94",
+  "target": "x86_64-unknown-linux-musl",
+  "base_initramfs_sha256": "152905238ade87b7e1cd495508ff1bb92807b4440cc0ed056030e4dfd72caea0",
+  "agent_sha256": "c03ce56dbcb28a04cb2307abc476ca92bbdae071aefb88057eb4ef586dfe403a",
+  "init_sha256": "359db280c6fd53a5e5499665e211acd91467974e8bc1124bf7e76d1442d29c4d",
+  "initramfs_sha256": "ebcd2279be5dfc92b1c3264c355bb440a027079bcef2fa9be209654891479b9d"
+}
