@@ -15,6 +15,7 @@
 
 pub mod canonical;
 pub mod execution_ledger;
+pub mod ledger_batch;
 pub mod ledger_ops;
 pub mod round_journal;
 pub mod schema;

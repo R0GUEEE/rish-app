@@ -47,6 +47,10 @@ char *rish_agent_round_reduce(const char *json, size_t json_length);
 /// when the input is not UTF-8.
 char *rish_agent_ledger_reduce(const char *json, size_t json_length);
 
+/// One batch-level ledger operation (prepare_tool_batch / open_effect_gate)
+/// over {"op","request","env","view"}; same reply shape as the row reducer.
+char *rish_agent_ledger_batch_reduce(const char *json, size_t json_length);
+
 #ifdef __cplusplus
 }
 #endif

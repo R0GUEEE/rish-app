@@ -4,6 +4,7 @@
 //! call from any thread and never panics across the boundary.
 
 use rish_agent_core::canonical::{canonical_json, hash_bytes, hash_json};
+use rish_agent_core::ledger_batch::reduce_json as ledger_batch_reduce_json;
 use rish_agent_core::ledger_ops::reduce_json as ledger_reduce_json;
 use rish_agent_core::round_journal::reduce_json;
 use rish_agent_core::strict_json::parse_arguments;
@@ -167,4 +168,21 @@ pub unsafe extern "C" fn rish_agent_ledger_reduce(
         return std::ptr::null_mut();
     };
     output(ledger_reduce_json(text))
+}
+
+/// Runs one batch-level ledger operation (`prepare_tool_batch` or
+/// `open_effect_gate`) over the JSON envelope documented on
+/// `rish_agent_core::ledger_batch::reduce_json`.
+///
+/// # Safety
+/// `pointer` must reference `length` readable bytes or be null.
+#[no_mangle]
+pub unsafe extern "C" fn rish_agent_ledger_batch_reduce(
+    pointer: *const c_char,
+    length: usize,
+) -> *mut c_char {
+    let Some(text) = input(pointer, length) else {
+        return std::ptr::null_mut();
+    };
+    output(ledger_batch_reduce_json(text))
 }

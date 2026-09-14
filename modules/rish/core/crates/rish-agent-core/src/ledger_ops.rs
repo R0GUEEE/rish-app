@@ -67,6 +67,9 @@ pub enum Change {
     ReplaceReservation { slot: u64, record: Value },
     ReplaceBatch { slot: u64, record: Value },
     ReplaceAuthority { slot: u64, record: Value },
+    InsertReservation(Value),
+    InsertBatch(Value),
+    InsertDeniedCall(Value),
 }
 
 /// The operation commit the settle facade performs through
@@ -109,6 +112,18 @@ fn string_eq(value: Option<&Value>, expected: &str) -> bool {
 }
 
 /// `DSHAgentLedgerDispatchState` over the attempt's execution markers.
+pub(crate) fn dispatch_state_in<'a>(
+    dispatch: &'a [Value],
+    locator: Option<&Value>,
+) -> Option<&'a str> {
+    dispatch
+        .iter()
+        .find(|entry| {
+            string_eq(get(entry, "kind"), "execution") && get(entry, "locator") == locator
+        })
+        .and_then(|entry| as_str(get(entry, "dispatch_state")))
+}
+
 fn dispatch_state<'a>(view: &'a View, locator: Option<&Value>) -> Option<&'a str> {
     view.dispatch
         .iter()
@@ -1602,8 +1617,15 @@ pub fn reduce(
 
 // MARK: - JSON envelope
 
-fn change_json(change: &Change) -> Value {
+pub(crate) fn change_json(change: &Change) -> Value {
     match change {
+        Change::InsertReservation(record) => {
+            json!({ "kind": "insert_reservation", "record": record })
+        }
+        Change::InsertBatch(record) => json!({ "kind": "insert_batch", "record": record }),
+        Change::InsertDeniedCall(record) => {
+            json!({ "kind": "insert_denied_call", "record": record })
+        }
         Change::InsertLedgerRow(row) => json!({ "kind": "insert_ledger_row", "row": row }),
         Change::ReplaceLedgerRow(row) => json!({ "kind": "replace_ledger_row", "row": row }),
         Change::InsertDispatchMarker(marker) => {
