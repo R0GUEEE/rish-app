@@ -1,0 +1,12 @@
+[package]
+name = "rish-agent-core"
+description = "Platform-independent Rish agent engine: canonical encoding, hashing, and (progressively) the state machines the iOS Objective-C++ engine implements today"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+serde_json.workspace = true
+sha2.workspace = true

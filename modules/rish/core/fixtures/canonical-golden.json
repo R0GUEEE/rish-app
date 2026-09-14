@@ -1,0 +1,264 @@
+{
+  "arguments" : {
+    "args-bad-escape" : false,
+    "args-beyond-safe-integer" : false,
+    "args-depth-64" : true,
+    "args-depth-65" : false,
+    "args-duplicate-key" : false,
+    "args-duplicate-key-escaped" : false,
+    "args-empty-object" : true,
+    "args-fraction-fifteen-digits" : true,
+    "args-fraction-sixteen-digits" : false,
+    "args-huge-exponent" : false,
+    "args-integer-exponent-safe" : true,
+    "args-integer-exponent-unsafe" : false,
+    "args-leading-zero" : false,
+    "args-lone-surrogate" : false,
+    "args-max-safe-integer" : true,
+    "args-negative-zero" : false,
+    "args-negative-zero-fraction" : false,
+    "args-nested" : true,
+    "args-not-object-array" : false,
+    "args-not-object-string" : false,
+    "args-raw-control" : false,
+    "args-simple" : true,
+    "args-tiny-exponent" : false,
+    "args-trailing-garbage" : false,
+    "args-true-false-null" : true,
+    "args-unicode-escape-ok" : true,
+    "args-whitespace" : true
+  },
+  "canonical" : {
+    "agent-transcript-shape" : {
+      "canonical" : "{\"attempt_id\":\"20202020-2020-4020-8020-202020202020\",\"generation\":7,\"messages\":[{\"call_id\":\"call_00_x\",\"content\":\"{\\\"outcome\\\":\\\"failed\\\",\\\"payload\\\":{\\\"reason\\\":\\\"path_must_be_relative_to_workspace_root\\\"}}\",\"role\":\"tool\",\"round_index\":0,\"schema_version\":1,\"truncated\":false}],\"root_fingerprint_sha256\":\"1e6bf9027720c75c3ed0d79171f21b5791ee40ca9795d07c7c6e04dc5ea2ae90\",\"schema_version\":1,\"transcript_ref\":\"9a8b7c6d-5e4f-4a3b-8c2d-1e0f9a8b7c6d\"}",
+      "hash" : "851d6e5ea88bba4a9fd3398d0721744c476ddf9489a325bff7ec4b48906a4ceb"
+    },
+    "array-empty" : {
+      "canonical" : "[]",
+      "hash" : "26af85762d3c64ce1d5d4790e40ba744cad574296ed8de4940a2f21dc3264e86"
+    },
+    "array-mixed" : {
+      "canonical" : "[1,\"two\",null,true,[3.5],{\"k\":false}]",
+      "hash" : "c058163ee6dd6fda6d691aae50e71e1dd7977a578a50adcba7b6782784add4ca"
+    },
+    "beyond-safe-integer" : {
+      "canonical" : null,
+      "hash" : null
+    },
+    "beyond-safe-integer-large" : {
+      "canonical" : null,
+      "hash" : null
+    },
+    "depth-64" : {
+      "canonical" : null,
+      "hash" : null
+    },
+    "depth-65" : {
+      "canonical" : null,
+      "hash" : null
+    },
+    "exponent-negative-zero-mantissa" : {
+      "canonical" : "0",
+      "hash" : "6cb4b1c4a73643dbb6d13d89b091b35fec0ed8fa00ddb6b9efe87d3f85174f97"
+    },
+    "false" : {
+      "canonical" : "false",
+      "hash" : "97885e28f8726b4d14672a17b57c15a4e7d3e6327e26e67da5093b2602a5eac0"
+    },
+    "fixed-upper-bound" : {
+      "canonical" : "100000000000000000000",
+      "hash" : "b72754ad4419ee64993f7ecce3202215a1ab0ed79d9b65659f92ceb7ce1fdfc2"
+    },
+    "hundred-exponent" : {
+      "canonical" : "100",
+      "hash" : "e6e9256f0d20ea46c67038e8a94ca52b38a6d699c4951a8ea60c009ea7974891"
+    },
+    "hundred-fraction-exponent" : {
+      "canonical" : "100",
+      "hash" : "e6e9256f0d20ea46c67038e8a94ca52b38a6d699c4951a8ea60c009ea7974891"
+    },
+    "large-fixed" : {
+      "canonical" : "123456789012345670000",
+      "hash" : "6fb4c98f35a0ddcd5bc32413d1a737bf54542f2f8a54b6e12e73bfc888ca3ab7"
+    },
+    "largest-double" : {
+      "canonical" : "1.7976931348623157e+308",
+      "hash" : "109b1157aa4a8dd93c6e995f257e9976029bd109e8ff96781a5f47efcebdf3af"
+    },
+    "max-safe-integer" : {
+      "canonical" : "9007199254740991",
+      "hash" : "d892bf82a087a4b63b15ba6f495cf4edfd58b85da70097fb7239da409a4a6e50"
+    },
+    "max-safe-integer-negative" : {
+      "canonical" : "-9007199254740991",
+      "hash" : "8b3a5dbdad9626b0be6478a4b2f163645162ce1cb04ca6b2e88c35b711be7c63"
+    },
+    "negative-fraction" : {
+      "canonical" : "-2.5",
+      "hash" : "d761aeba3baa84f43f2e950146bd6e17d0955cc89a198eb9c1041d5d194046c3"
+    },
+    "negative-one" : {
+      "canonical" : "-1",
+      "hash" : "ba421fdf24ac1a027f8d740375211de9a0e078d6d97689cc2c3ccb4d856187b5"
+    },
+    "negative-zero-fraction" : {
+      "canonical" : null,
+      "hash" : null
+    },
+    "negative-zero-integer" : {
+      "canonical" : "0",
+      "hash" : "6cb4b1c4a73643dbb6d13d89b091b35fec0ed8fa00ddb6b9efe87d3f85174f97"
+    },
+    "null" : {
+      "canonical" : "null",
+      "hash" : "a8563a8ecf0ab8f8b6ca2e1dc6ca910cc0ee6b7f5a9208e69c70596826b42df8"
+    },
+    "object-empty" : {
+      "canonical" : "{}",
+      "hash" : "8ed846ef898442ee90b65475c78516f4f14a182a5aac97af6d70d0a8661e6965"
+    },
+    "object-key-case-order" : {
+      "canonical" : "{\"0\":6,\"A\":3,\"B\":2,\"_\":5,\"a\":1,\"b\":4}",
+      "hash" : "a9cbd890b9f4480acd49c364bdaa5b2e8e1789063069c9e7b1bded25f4a617b4"
+    },
+    "object-key-escapes" : {
+      "canonical" : "{\"back\\\\slash\":3,\"line\\nbreak\":1,\"quote\\\"d\":2}",
+      "hash" : "e53092c9cdc539bde4cac0e38bae97b1269704b4ba5dbcd4cfeb0cf51cbb2174"
+    },
+    "object-key-order-utf16" : {
+      "canonical" : "{\"z\":\"ascii\",\"é\":\"e acute\",\"😀\":\"emoji (U+1F600, UTF-16 D83D DE00)\",\"ﬁ\":\"ligature fi (U+FB01)\"}",
+      "hash" : "bbb45137b35ed5424195070732795bef8166d5ff938d6cdcb427c8755e5ad100"
+    },
+    "object-key-prefix-order" : {
+      "canonical" : "{\"\":4,\"a\":2,\"ab\":1,\"abc\":3}",
+      "hash" : "4b5ecbfc1672761eb8f8bed0c6f734b74a8c4636051b661e5093da7e1e6f54c3"
+    },
+    "object-nested" : {
+      "canonical" : "{\"list\":[[],{}],\"outer\":{\"inner\":{\"deep\":[1,{\"x\":null}]}}}",
+      "hash" : "74285d3fd23721d1bd5fe705432be72ab54b257dea40878baa20282b942680af"
+    },
+    "object-sorted" : {
+      "canonical" : "{\"a\":2,\"b\":1,\"c\":3}",
+      "hash" : "cebff120d5e74b866ca0300223fdd5b796b4f29746d82aa236dd845e0190aaa1"
+    },
+    "object-whitespace" : {
+      "canonical" : "{\"a\":[1,2],\"b\":\"c\"}",
+      "hash" : "8637dbb52eb353b7d42c9a25a2cd14e8da30738414dafabbe4e2433b9ddd42c3"
+    },
+    "one" : {
+      "canonical" : "1",
+      "hash" : "d5e41d2490910d302250e816b6c88a09e0438bb72a1f00e2d94ed297ed37919f"
+    },
+    "one-point-five" : {
+      "canonical" : "1.5",
+      "hash" : "e2220227d5ca0bee76baa4172155046bc686de68ebdd84612a1a9fed404033c9"
+    },
+    "one-point-zero" : {
+      "canonical" : "1",
+      "hash" : "d5e41d2490910d302250e816b6c88a09e0438bb72a1f00e2d94ed297ed37919f"
+    },
+    "point-one-plus-point-two" : {
+      "canonical" : "0.30000000000000004",
+      "hash" : "99ea99a2887580c04cabd49ba1a1d9c98a51d1c7ef98d6054faa572e90063b3b"
+    },
+    "scientific-lower-bound" : {
+      "canonical" : "1e+21",
+      "hash" : "ae4c4ce11c4a8d1b458b151a1a014025d37038dffda3e2e22d4d136af585f095"
+    },
+    "small-fixed" : {
+      "canonical" : "0.000001",
+      "hash" : "38078b9d4e566bd5fed84271d232a0b208be484126804d8949fc4982d616c062"
+    },
+    "small-scientific" : {
+      "canonical" : "1e-7",
+      "hash" : "dc619fbd4c2bedd38eaedce0d939104e909b50fbc62ad461c44940ced5a16897"
+    },
+    "smallest-subnormal" : {
+      "canonical" : null,
+      "hash" : null
+    },
+    "string-ascii" : {
+      "canonical" : "\"hello, world\"",
+      "hash" : "a474f683fefa6a3341758ce94ec47951bb84134fa3c6ce76942ba899e41339ec"
+    },
+    "string-bom" : {
+      "canonical" : "\"bom\"",
+      "hash" : "add01f8f62f1e2dce4f6dfce695d38212d1d58a7ae1c57db22a2c99664fcee6e"
+    },
+    "string-control" : {
+      "canonical" : "\"\\u0000\\u0001\\u001f\"",
+      "hash" : "00df650859d0d8be51ab3d8bfe8ceced02b8868acd480af6b83e75ecc8b15f7d"
+    },
+    "string-emoji-raw" : {
+      "canonical" : "\"😀 face\"",
+      "hash" : "de60a69b0321fdaae5eac2ba74dc5fd116454597738a589582511b0e492fe7ff"
+    },
+    "string-emoji-surrogates" : {
+      "canonical" : "\"😀 pair\"",
+      "hash" : "81ebc826130d71100105beccdf6aaeaaa9cd8760af11ebf0312dace857b8edef"
+    },
+    "string-empty" : {
+      "canonical" : "\"\"",
+      "hash" : "58ca8553518f7caa52fcda625c09ea3b029f7fd5a29e3c559ead58645d821ab8"
+    },
+    "string-escapes" : {
+      "canonical" : "\"quote\\\" backslash\\\\ slash\/ bs\\b ff\\f nl\\n cr\\r tab\\t\"",
+      "hash" : "f5de7a627ab4aa16fb7cae0098e937dd462069dfa4eab8b08485bb922f2cd396"
+    },
+    "string-lone-high-surrogate" : {
+      "canonical" : null,
+      "hash" : null
+    },
+    "string-lone-low-surrogate" : {
+      "canonical" : null,
+      "hash" : null
+    },
+    "string-nfd" : {
+      "canonical" : "\"é\"",
+      "hash" : "454d401a685cec23eff4a2b31510e8bc2324ff11028975e4b059e71b718fb8d1"
+    },
+    "string-unicode-escape-bmp" : {
+      "canonical" : "\"é中文\"",
+      "hash" : "c45c108f518103b87da100003ffa2dd163881a057dcb5dd59ddd8554fff630dc"
+    },
+    "string-unicode-raw" : {
+      "canonical" : "\"é中文 ünïcödé\"",
+      "hash" : "d98e97092b89e0df508dc5a15ae38c0dc22465d466a9980130797a4f50b8ad05"
+    },
+    "tenth" : {
+      "canonical" : "0.1",
+      "hash" : "09a8714fac4f9e39c35a24eb770324e0b2acc9e15297d014b74dfb5c34f6b416"
+    },
+    "tool-arguments-shape" : {
+      "canonical" : "{\"arguments\":{\"path\":\"README.md\"},\"name\":\"read_file\"}",
+      "hash" : "33e84310d2a87ba000ed64b19f8516f864a48dc0e713c87d86d4451a87f17bbb"
+    },
+    "true" : {
+      "canonical" : "true",
+      "hash" : "2d4e18c672c98677d6c35f666f7fdfe699eef070595a468a939fb3930bd856e9"
+    },
+    "twelve-digit-fraction" : {
+      "canonical" : "3.141592653589793",
+      "hash" : "9db840dbcf94d1ffd63e13b4511aeafce1b97d54567c96e119473fde6d4f2c6b"
+    },
+    "zero" : {
+      "canonical" : "0",
+      "hash" : "6cb4b1c4a73643dbb6d13d89b091b35fec0ed8fa00ddb6b9efe87d3f85174f97"
+    }
+  },
+  "generator" : "AgentCoreGoldenTests.mm (Objective-C++ engine)",
+  "hash_bytes" : {
+    "hb-ascii" : "c59236aab2a8c6130c9009f3b01cad68b2429ade5e9d8ed262afc08f62984e5c",
+    "hb-binary" : "7b47f31d35662168e381c70ac867a2b8e11cd12a1d814a32837c96ff473bb943",
+    "hb-commit-message" : "5d7aa64d5c0d8e065d959478dfd04bbbe9f4b571033ceb0196a5a567ad4fb9e7",
+    "hb-empty" : "224dc8903b8f7bd623ba24b2c4b1ae84dd680e4ff85a0c099f3eab43913ad82a"
+  },
+  "hash_json" : {
+    "hj-empty-object" : "8ed846ef898442ee90b65475c78516f4f14a182a5aac97af6d70d0a8661e6965",
+    "hj-null" : "a8563a8ecf0ab8f8b6ca2e1dc6ca910cc0ee6b7f5a9208e69c70596826b42df8",
+    "hj-number-forms" : null,
+    "hj-tool-arguments" : "08df7048ee67e03bafc3ef0386ad78ee24ed74e7faa9e82d8dd99ef34ce27dc1",
+    "hj-unicode-tag-payload" : "1d122180c664bafe1987a6942b8c44f8ed1fd671b42b6bab4873d87c11fc075e"
+  },
+  "schema_version" : 1
+}

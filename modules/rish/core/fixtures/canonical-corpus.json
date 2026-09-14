@@ -1,0 +1,393 @@
+{
+  "schema_version": 1,
+  "description": "Inputs for the canonical JSON / hash goldens shared by the ObjC engine and the Rust core. Every case is JSON text so both sides parse identical bytes. canonical: expected canonical output or null when the encoder must refuse. hash_json: DSHAgentHJ over the parsed value with the given tag. hash_bytes: DSHAgentHB over raw bytes given as hex. arguments: DSHAgentParseArgumentsJSON accept/reject. divergences: cases where the two sides deliberately differ, with the stage responsible and the exact Rust output (null = the core refuses).",
+  "canonical": [
+    {
+      "name": "null",
+      "json": "null"
+    },
+    {
+      "name": "true",
+      "json": "true"
+    },
+    {
+      "name": "false",
+      "json": "false"
+    },
+    {
+      "name": "zero",
+      "json": "0"
+    },
+    {
+      "name": "one",
+      "json": "1"
+    },
+    {
+      "name": "negative-one",
+      "json": "-1"
+    },
+    {
+      "name": "one-point-zero",
+      "json": "1.0"
+    },
+    {
+      "name": "one-point-five",
+      "json": "1.5"
+    },
+    {
+      "name": "hundred-exponent",
+      "json": "1e2"
+    },
+    {
+      "name": "hundred-fraction-exponent",
+      "json": "1.00e+2"
+    },
+    {
+      "name": "tenth",
+      "json": "0.1"
+    },
+    {
+      "name": "point-one-plus-point-two",
+      "json": "0.30000000000000004"
+    },
+    {
+      "name": "fixed-upper-bound",
+      "json": "1e20"
+    },
+    {
+      "name": "scientific-lower-bound",
+      "json": "1e21"
+    },
+    {
+      "name": "large-fixed",
+      "json": "123456789012345680000"
+    },
+    {
+      "name": "small-fixed",
+      "json": "0.000001"
+    },
+    {
+      "name": "small-scientific",
+      "json": "1e-7"
+    },
+    {
+      "name": "smallest-subnormal",
+      "json": "5e-324"
+    },
+    {
+      "name": "largest-double",
+      "json": "1.7976931348623157e308"
+    },
+    {
+      "name": "max-safe-integer",
+      "json": "9007199254740991"
+    },
+    {
+      "name": "max-safe-integer-negative",
+      "json": "-9007199254740991"
+    },
+    {
+      "name": "beyond-safe-integer",
+      "json": "9007199254740992"
+    },
+    {
+      "name": "beyond-safe-integer-large",
+      "json": "123456789012345678"
+    },
+    {
+      "name": "negative-zero-integer",
+      "json": "-0"
+    },
+    {
+      "name": "negative-zero-fraction",
+      "json": "-0.0"
+    },
+    {
+      "name": "negative-fraction",
+      "json": "-2.5"
+    },
+    {
+      "name": "exponent-negative-zero-mantissa",
+      "json": "0e5"
+    },
+    {
+      "name": "twelve-digit-fraction",
+      "json": "3.141592653589793"
+    },
+    {
+      "name": "string-empty",
+      "json": "\"\""
+    },
+    {
+      "name": "string-ascii",
+      "json": "\"hello, world\""
+    },
+    {
+      "name": "string-escapes",
+      "json": "\"quote\\\" backslash\\\\ slash\\/ bs\\b ff\\f nl\\n cr\\r tab\\t\""
+    },
+    {
+      "name": "string-control",
+      "json": "\"\\u0000\\u0001\\u001f\\u007f\""
+    },
+    {
+      "name": "string-unicode-escape-bmp",
+      "json": "\"\\u00e9\\u4e2d\\u6587\""
+    },
+    {
+      "name": "string-unicode-raw",
+      "json": "\"é中文 ünïcödé\""
+    },
+    {
+      "name": "string-emoji-raw",
+      "json": "\"😀 face\""
+    },
+    {
+      "name": "string-emoji-surrogates",
+      "json": "\"\\ud83d\\ude00 pair\""
+    },
+    {
+      "name": "string-lone-high-surrogate",
+      "json": "\"\\ud83d\""
+    },
+    {
+      "name": "string-lone-low-surrogate",
+      "json": "\"\\ude00\""
+    },
+    {
+      "name": "string-bom",
+      "json": "\"\\ufeffbom\""
+    },
+    {
+      "name": "string-nfd",
+      "json": "\"e\\u0301\""
+    },
+    {
+      "name": "array-empty",
+      "json": "[]"
+    },
+    {
+      "name": "array-mixed",
+      "json": "[1, \"two\", null, true, [3.5], {\"k\": false}]"
+    },
+    {
+      "name": "object-empty",
+      "json": "{}"
+    },
+    {
+      "name": "object-sorted",
+      "json": "{\"b\": 1, \"a\": 2, \"c\": 3}"
+    },
+    {
+      "name": "object-key-order-utf16",
+      "json": "{\"\\ufb01\": \"ligature fi (U+FB01)\", \"\\ud83d\\ude00\": \"emoji (U+1F600, UTF-16 D83D DE00)\", \"z\": \"ascii\", \"\\u00e9\": \"e acute\"}"
+    },
+    {
+      "name": "object-key-prefix-order",
+      "json": "{\"ab\": 1, \"a\": 2, \"abc\": 3, \"\": 4}"
+    },
+    {
+      "name": "object-key-case-order",
+      "json": "{\"a\": 1, \"B\": 2, \"A\": 3, \"b\": 4, \"_\": 5, \"0\": 6}"
+    },
+    {
+      "name": "object-key-escapes",
+      "json": "{\"line\\nbreak\": 1, \"quote\\\"d\": 2, \"back\\\\slash\": 3}"
+    },
+    {
+      "name": "object-nested",
+      "json": "{\"outer\": {\"inner\": {\"deep\": [1, {\"x\": null}]}}, \"list\": [[], {}]}"
+    },
+    {
+      "name": "object-whitespace",
+      "json": "  {  \"a\"  :  [ 1 ,  2 ] ,\n\t\"b\" : \"c\" }  "
+    },
+    {
+      "name": "depth-64",
+      "json": "[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[1]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]"
+    },
+    {
+      "name": "depth-65",
+      "json": "[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[1]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]"
+    },
+    {
+      "name": "agent-transcript-shape",
+      "json": "{\"schema_version\": 1, \"transcript_ref\": \"9a8b7c6d-5e4f-4a3b-8c2d-1e0f9a8b7c6d\", \"attempt_id\": \"20202020-2020-4020-8020-202020202020\", \"root_fingerprint_sha256\": \"1e6bf9027720c75c3ed0d79171f21b5791ee40ca9795d07c7c6e04dc5ea2ae90\", \"generation\": 7, \"messages\": [{\"schema_version\": 1, \"role\": \"tool\", \"round_index\": 0, \"call_id\": \"call_00_x\", \"content\": \"{\\\"outcome\\\":\\\"failed\\\",\\\"payload\\\":{\\\"reason\\\":\\\"path_must_be_relative_to_workspace_root\\\"}}\", \"truncated\": false}]}"
+    },
+    {
+      "name": "tool-arguments-shape",
+      "json": "{\"name\": \"read_file\", \"arguments\": {\"path\": \"README.md\"}}"
+    }
+  ],
+  "hash_json": [
+    {
+      "name": "hj-tool-arguments",
+      "tag": "tool-arguments",
+      "json": "{\"name\": \"read_file\", \"arguments\": {\"path\": \"README.md\"}}"
+    },
+    {
+      "name": "hj-empty-object",
+      "tag": "golden",
+      "json": "{}"
+    },
+    {
+      "name": "hj-unicode-tag-payload",
+      "tag": "write-manifest",
+      "json": "{\"calls\": [{\"mutation_kind\": \"file_write\", \"path\": \"notes/中文.md\"}]}"
+    },
+    {
+      "name": "hj-number-forms",
+      "tag": "agent-transcript",
+      "json": "[1, 1.0, 1e2, 0.1, 1e21, 5e-324]"
+    },
+    {
+      "name": "hj-null",
+      "tag": "golden",
+      "json": "null"
+    }
+  ],
+  "hash_bytes": [
+    {
+      "name": "hb-empty",
+      "tag": "tool-result",
+      "bytes_hex": ""
+    },
+    {
+      "name": "hb-ascii",
+      "tag": "file-content",
+      "bytes_hex": "68656c6c6f0a"
+    },
+    {
+      "name": "hb-binary",
+      "tag": "relative-path",
+      "bytes_hex": "00ff10fe7f80"
+    },
+    {
+      "name": "hb-commit-message",
+      "tag": "commit-message",
+      "bytes_hex": "e4b8ade69687e68f90e4baa4"
+    }
+  ],
+  "arguments": [
+    {
+      "name": "args-simple",
+      "json": "{\"path\":\"README.md\"}"
+    },
+    {
+      "name": "args-nested",
+      "json": "{\"path\":\"a\",\"content\":\"b\",\"expected_prior\":{\"schema_version\":1,\"kind\":\"absent\"}}"
+    },
+    {
+      "name": "args-empty-object",
+      "json": "{}"
+    },
+    {
+      "name": "args-whitespace",
+      "json": " { \"path\" : \"x\" } "
+    },
+    {
+      "name": "args-not-object-array",
+      "json": "[1]"
+    },
+    {
+      "name": "args-not-object-string",
+      "json": "\"x\""
+    },
+    {
+      "name": "args-trailing-garbage",
+      "json": "{\"path\":\"x\"} x"
+    },
+    {
+      "name": "args-duplicate-key",
+      "json": "{\"path\":\"a\",\"path\":\"b\"}"
+    },
+    {
+      "name": "args-duplicate-key-escaped",
+      "json": "{\"path\":\"a\",\"p\\u0061th\":\"b\"}"
+    },
+    {
+      "name": "args-negative-zero",
+      "json": "{\"n\":-0}"
+    },
+    {
+      "name": "args-negative-zero-fraction",
+      "json": "{\"n\":-0.0}"
+    },
+    {
+      "name": "args-leading-zero",
+      "json": "{\"n\":01}"
+    },
+    {
+      "name": "args-max-safe-integer",
+      "json": "{\"n\":9007199254740991}"
+    },
+    {
+      "name": "args-beyond-safe-integer",
+      "json": "{\"n\":9007199254740992}"
+    },
+    {
+      "name": "args-integer-exponent-safe",
+      "json": "{\"n\":9.007199254740991e15}"
+    },
+    {
+      "name": "args-integer-exponent-unsafe",
+      "json": "{\"n\":9.007199254740992e15}"
+    },
+    {
+      "name": "args-fraction-fifteen-digits",
+      "json": "{\"n\":0.123456789012345}"
+    },
+    {
+      "name": "args-fraction-sixteen-digits",
+      "json": "{\"n\":0.1234567890123456}"
+    },
+    {
+      "name": "args-huge-exponent",
+      "json": "{\"n\":1e400}"
+    },
+    {
+      "name": "args-tiny-exponent",
+      "json": "{\"n\":1e-400}"
+    },
+    {
+      "name": "args-bad-escape",
+      "json": "{\"p\":\"\\x41\"}"
+    },
+    {
+      "name": "args-raw-control",
+      "json": "{\"p\":\"a\tb\"}"
+    },
+    {
+      "name": "args-unicode-escape-ok",
+      "json": "{\"p\":\"\\u4e2d\"}"
+    },
+    {
+      "name": "args-true-false-null",
+      "json": "{\"a\":true,\"b\":false,\"c\":null}"
+    },
+    {
+      "name": "args-lone-surrogate",
+      "json": "{\"p\":\"\\ud800\"}"
+    },
+    {
+      "name": "args-depth-64",
+      "json": "{\"a\":[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[1]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]}"
+    },
+    {
+      "name": "args-depth-65",
+      "json": "{\"a\":[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[1]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]}"
+    }
+  ],
+  "divergences": {
+    "large-fixed": {
+      "stage": "parser",
+      "rust_canonical": null,
+      "why": "NSJSONSerialization decodes an integer lexeme beyond 64 bits as a lossy double (this text yields 123456789012345670000); the Rust core refuses such lexemes. Unreachable in practice: the strict argument parser rejects them and the engine never writes integers beyond 2^53."
+    },
+    "string-bom": {
+      "stage": "parser",
+      "rust_canonical": "\"﻿bom\"",
+      "why": "NSJSONSerialization drops a U+FEFF that begins a string value (escaped or raw) while parsing; DSHWorkspaceCanonicalJSONData itself preserves U+FEFF (verified by testProbeInteriorByteOrderMark: an interior \"a\\ufeffb\" and a directly constructed NSString both keep it). serde_json keeps the character, so the Rust core canonicalises this text to \"\\ufeffbom\". Only strings that start with U+FEFF are affected."
+    }
+  }
+}

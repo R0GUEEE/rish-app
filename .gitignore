@@ -17,3 +17,6 @@ apps/mobile/android/rish-ffi/
 apps/mobile/ios/Rish/HarnessAuth/*
 !apps/mobile/ios/Rish/HarnessAuth/.gitkeep
 !apps/mobile/ios/Rish/HarnessAuth/HarnessAuthAssets.json
+
+# Rust workspace for the shared agent core
+modules/rish/core/target/

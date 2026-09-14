@@ -1,0 +1,21 @@
+[workspace]
+resolver = "2"
+members = ["crates/rish-agent-core", "crates/rish-agent-ffi"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.85"
+license = "MIT"
+repository = "https://github.com/ZSeven-W/rish-app"
+
+[workspace.dependencies]
+rish-agent-core = { path = "crates/rish-agent-core" }
+serde_json = { version = "1.0", features = ["arbitrary_precision"] }
+sha2 = "0.10"
+
+[profile.release]
+codegen-units = 1
+lto = "fat"
+panic = "abort"
+opt-level = 3

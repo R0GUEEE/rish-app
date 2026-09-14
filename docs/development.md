@@ -423,6 +423,41 @@ The verifier currently pins its acceptance request to V4 Flash. It checks the
 actual container file and live Simulator process; a screenshot or an inherited
 boolean is not sufficient evidence.
 
+## Shared agent core (Rust)
+
+`modules/rish/core` is a Cargo workspace (`rish-agent-core` for domain logic,
+`rish-agent-ffi` for the C boundary) that will carry the Agent engine for both
+platforms. The Objective-C++ engine under `modules/rish/ios/Sources` stays the
+reference until each piece is migrated behind its existing interface.
+
+Phase 0 ports the byte-level contracts every later piece depends on: canonical
+JSON (`DSHWorkspaceCanonicalJSONData`), the domain-separated hashes
+(`DSHAgentHJ`, `DSHAgentHB`) and the strict argument parser
+(`DSHAgentParseArgumentsJSON`). Parity is pinned by a golden generated from the
+Objective-C engine itself:
+
+```sh
+# 1. The XCTest writes the golden when this environment variable is exported
+#    (an xcodebuild command-line argument does not reach the test process).
+export TEST_RUNNER_RISH_CORE_GOLDEN_OUT="$PWD/modules/rish/core/fixtures/canonical-golden.json"
+cd apps/mobile/ios
+xcodebuild test -workspace Rish.xcworkspace -scheme Rish \
+  -destination "platform=iOS Simulator,id=<simulator>" \
+  -only-testing:RishTests/AgentCoreGoldenTests
+unset TEST_RUNNER_RISH_CORE_GOLDEN_OUT
+
+# 2. The Rust side replays the same corpus against that golden.
+cd ../../../modules/rish/core
+cargo test --workspace
+```
+
+Without the variable the XCTest runs in compare mode and fails when the
+Objective-C output drifts from the committed golden. Add inputs to
+`fixtures/canonical-corpus.json`, regenerate, and commit corpus and golden
+together. The corpus `divergences` map lists the cases where the two sides
+deliberately differ, with the stage responsible and the exact Rust output; the
+Rust test asserts those too, so a divergence is pinned rather than skipped.
+
 ## Quality gates
 
 From the repository root:
