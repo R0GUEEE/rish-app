@@ -1897,6 +1897,290 @@ pub fn recovery_commit(
     }))
 }
 
+// MARK: - recovery
+
+/// What a recovery reports and what the controller should do next. The pair is
+/// always decided together, so it travels together.
+fn outcome(status: &str, next: &str) -> Value {
+    json!({ "status": status, "next_action": next })
+}
+
+/// Which persistence step a completed round asks the controller for.
+fn persist_step(completed_round: Option<&Value>) -> &'static str {
+    match as_str(at(completed_round, "kind")) {
+        Some("final") => "persist_final",
+        Some("tool_batch") => "persist_batch",
+        _ => "persist_round",
+    }
+}
+
+/// The status a recovery starts from: an attempt the query already calls
+/// terminal is not resumed by recovering it.
+pub fn recover_initial_outcome(attempt_query: &Value) -> Value {
+    let status = if string_eq(get(attempt_query, "status"), "terminal") {
+        "terminal"
+    } else {
+        "resumed"
+    };
+    outcome(status, "none")
+}
+
+/// `recoverAgentAttempt`'s round branch, for everything except the retry
+/// action: the round journal's own answer decides both halves.
+pub fn recover_round_outcome(round_recovery: &Value) -> Result<Value, StoreError> {
+    match as_str(get(round_recovery, "status")) {
+        Some("completed") => {
+            let completed = get(round_recovery, "completed_round");
+            if !completed.is_some_and(Value::is_object) {
+                return Err(StoreError::Corrupt);
+            }
+            let mut result = outcome("resumed", persist_step(completed));
+            if let Some(result) = result.as_object_mut() {
+                result.insert("completed_round".into(), owned(completed));
+            }
+            Ok(result)
+        }
+        Some("unknown" | "ambiguous") => {
+            Ok(outcome("manual_reconciliation", "inspect_native_state"))
+        }
+        Some("failed_retryable") => Ok(outcome("retryable", "retry_same_round")),
+        Some("cancelled") => Ok(outcome("terminal", "none")),
+        // Anything else leaves the status the attempt query already gave.
+        _ => Ok(Value::Null),
+    }
+}
+
+/// A retry only proceeds from a round the journal still calls failed_retryable
+/// at exactly the revision the controller expects.
+pub fn recover_retry_allowed(round_recovery: &Value, request: &Value) -> bool {
+    string_eq(get(round_recovery, "status"), "failed_retryable")
+        && get(round_recovery, "result_round_revision") == get(request, "expected_round_revision")
+}
+
+/// The stored round row has to agree, and its launch attempt has to be inside
+/// the retry budget. Returns the next launch attempt.
+pub fn recover_retry_launch_attempt(state: &Value, request: &Value) -> Result<u64, StoreError> {
+    let target = get(request, "target");
+    let row = array(get(state, "rounds")).iter().find(|candidate| {
+        let locator = get(candidate, "locator");
+        at(locator, "task_id") == at(target, "task_id")
+            && at(locator, "attempt_id") == at(target, "attempt_id")
+            && at(locator, "round_id") == at(target, "round_id")
+            && at(locator, "round_index") == at(target, "round_index")
+    });
+    let launch_attempt = u64_of(row.and_then(|row| get(row, "launch_attempt")));
+    if !row.is_some_and(|row| string_eq(get(row, "state"), "failed_retryable"))
+        || row.and_then(|row| get(row, "row_revision")) != get(request, "expected_round_revision")
+        || launch_attempt == 0
+        || launch_attempt >= 8
+    {
+        return Err(StoreError::Conflict);
+    }
+    Ok(launch_attempt + 1)
+}
+
+/// The round the retry relaunches, built from the same authority facts the
+/// original launch was bound to.
+pub fn recover_retry_request(
+    request: &Value,
+    authority: &Value,
+    launch_attempt: u64,
+    child_operation_id: &str,
+) -> Value {
+    let target = get(request, "target");
+    let cas = get(request, "controller_cas");
+    let registry = get(authority, "registry");
+    json!({
+        "schema_version": 2,
+        "operation_id": child_operation_id,
+        "controller_cas": cas,
+        "committed_checkpoint": get(request, "committed_checkpoint"),
+        "task_id": at(target, "task_id"),
+        "conversation_id": at(cas, "conversation_id"),
+        "attempt_id": at(target, "attempt_id"),
+        "round_id": at(target, "round_id"),
+        "round_index": at(target, "round_index"),
+        "launch_attempt": launch_attempt,
+        "expected_round_revision": get(request, "expected_round_revision"),
+        "transport_schema_version": get(authority, "transport_schema_version"),
+        "model": get(authority, "model"),
+        "thinking_mode": get(authority, "thinking_mode"),
+        "visible_history_sha256": get(authority, "visible_history_sha256"),
+        "visible_message_count": get(authority, "visible_message_count"),
+        "project_context_sha256": get(authority, "project_context_sha256"),
+        "transcript": get(request, "expected_transcript"),
+        "root": get(request, "root"),
+        "registry_version": at(registry, "registry_version"),
+        "toolset_sha256": at(registry, "toolset_sha256"),
+    })
+}
+
+/// What the relaunched round reports. A completed retry is recovered once more
+/// so the controller is handed the round journal's own projection, not the
+/// launch's.
+pub fn recover_retry_outcome(retried: &Value, after_retry: &Value) -> Result<Value, StoreError> {
+    match as_str(get(retried, "status")) {
+        Some("completed") => {
+            let completed = get(after_retry, "completed_round");
+            if !completed.is_some_and(Value::is_object) {
+                return Err(StoreError::Corrupt);
+            }
+            let mut result = outcome("resumed", persist_step(completed));
+            if let Some(result) = result.as_object_mut() {
+                result.insert("completed_round".into(), owned(completed));
+            }
+            Ok(result)
+        }
+        Some("failed_retryable" | "in_flight") => Ok(outcome("retryable", "retry_same_round")),
+        _ => Ok(outcome("manual_reconciliation", "inspect_native_state")),
+    }
+}
+
+/// `recoverAgentAttempt`'s tool branch: the ledger row, the batch it belongs
+/// to and the prepare-time call projection are all required, and together they
+/// name the execution the recovery re-runs.
+pub fn recover_tool_plan(
+    state: &Value,
+    request: &Value,
+    authority: &Value,
+    child_operation_id: &str,
+) -> Result<Value, StoreError> {
+    let target = get(request, "target");
+    let cas = get(request, "controller_cas");
+    let row = array(get(state, "ledger"))
+        .iter()
+        .find(|candidate| {
+            let locator = get(candidate, "locator");
+            at(locator, "task_id") == at(target, "task_id")
+                && at(locator, "attempt_id") == at(target, "attempt_id")
+                && at(locator, "round_id") == at(target, "round_id")
+                && at(locator, "round_index") == at(target, "round_index")
+                && at(locator, "call_index") == at(target, "call_index")
+                && at(locator, "call_id") == at(target, "call_id")
+                && at(locator, "idempotency_key") == at(target, "idempotency_key")
+        })
+        .ok_or(StoreError::NotFound)?;
+    let batch = array(get(state, "batches")).iter().find(|candidate| {
+        get(candidate, "task_id") == at(target, "task_id")
+            && get(candidate, "attempt_id") == at(target, "attempt_id")
+            && get(candidate, "round_id") == at(target, "round_id")
+            && get(candidate, "round_index") == at(target, "round_index")
+    });
+    let calls = latest_batch_calls(state, batch.unwrap_or(&Value::Null));
+    let call = array(Some(&calls)).iter().find(|candidate| {
+        get(candidate, "call_index") == at(target, "call_index")
+            && get(candidate, "call_id") == at(target, "call_id")
+    });
+    let (Some(batch), Some(call)) = (batch, call) else {
+        return Err(StoreError::Corrupt);
+    };
+    let tool_request = json!({
+        "schema_version": 2,
+        "operation_id": child_operation_id,
+        "controller_cas": cas,
+        "committed_checkpoint": get(request, "committed_checkpoint"),
+        "task_id": at(target, "task_id"),
+        "conversation_id": at(cas, "conversation_id"),
+        "attempt_id": at(target, "attempt_id"),
+        "round_id": at(target, "round_id"),
+        "round_index": at(target, "round_index"),
+        "batch_kind": get(batch, "kind"),
+        "manifest_sha256": get(batch, "manifest_sha256"),
+        "expected_batch_revision": get(batch, "batch_revision"),
+        "call_index": at(target, "call_index"),
+        "call_id": at(target, "call_id"),
+        "name": get(row, "name"),
+        "arguments_sha256": get(row, "arguments_sha256"),
+        "idempotency_key": at(target, "idempotency_key"),
+        "expected_execution_revision": get(request, "expected_execution_revision"),
+        "transcript": get(request, "expected_transcript"),
+        "root": get(request, "root"),
+        "approval_reference": get(call, "approval_reference").unwrap_or(&Value::Null),
+    });
+    // A retried recovery reuses the authority revision its own child operation
+    // was started under, so the replay compares like with like.
+    let authority_revision = array(get(state, "operations"))
+        .iter()
+        .find(|operation| as_str(get(operation, "operation_id")) == Some(child_operation_id))
+        .and_then(|operation| get(operation, "authority_revision"))
+        .or_else(|| get(authority, "authority_revision"));
+    Ok(json!({
+        "tool_request": tool_request,
+        "authority_revision": authority_revision,
+    }))
+}
+
+/// A tool recovery that reached a terminal answer commits it against its own
+/// child operation.
+pub fn recover_tool_commit(
+    request: &Value,
+    tool_started: &Value,
+    tool_recovery: &Value,
+    child_operation_id: &str,
+) -> Result<Value, StoreError> {
+    let target = get(request, "target");
+    let status = as_str(get(tool_recovery, "status")).unwrap_or_default();
+    let revision = get(tool_recovery, "result_execution_revision");
+    if as_str(get(tool_recovery, "operation_id")) != Some(child_operation_id)
+        || safe_integer(revision, MAX_SAFE_INTEGER, false).is_none()
+    {
+        return Err(StoreError::Corrupt);
+    }
+    Ok(json!({
+        "operation_id": child_operation_id,
+        "request_sha256": get(tool_started, "request_sha256"),
+        "task_id": at(target, "task_id"),
+        "attempt_id": at(target, "attempt_id"),
+        "terminal_state": if status == "ambiguous" { "ambiguous" } else { "committed" },
+        "result_status": status,
+        "result_ref": {
+            "schema_version": 2, "kind": "tool",
+            "task_id": at(target, "task_id"), "attempt_id": at(target, "attempt_id"),
+            "round_id": at(target, "round_id"), "round_index": at(target, "round_index"),
+            "call_index": at(target, "call_index"), "call_id": at(target, "call_id"),
+            "execution_revision": revision,
+        },
+        "result_revision": revision,
+        "safe_result": {
+            "schema_version": 2,
+            "result_kind": "execute_agent_tool",
+            "result": tool_recovery,
+        },
+    }))
+}
+
+/// Whether a tool recovery's answer is one the child operation settles.
+pub fn recover_tool_is_terminal(tool_recovery: &Value) -> bool {
+    matches!(
+        as_str(get(tool_recovery, "status")),
+        Some("completed" | "failed" | "denied" | "cancelled" | "ambiguous")
+    )
+}
+
+/// What the tool branch reports once the execution service has spoken.
+pub fn recover_tool_outcome(tool_recovery: &Value) -> Value {
+    if recover_tool_is_terminal(tool_recovery) {
+        return outcome("resumed", "persist_tool_result");
+    }
+    match as_str(get(tool_recovery, "status")) {
+        Some("not_started" | "intent") => outcome("resumed", "persist_approval"),
+        _ => outcome("manual_reconciliation", "inspect_native_state"),
+    }
+}
+
+/// `finishRecovery`: the attempt as the query sees it now, beside whatever the
+/// branch concluded.
+pub fn recover_result(request: &Value, attempt: &Value, settled: &Value) -> Value {
+    json!({
+        "schema_version": 2,
+        "status": get(settled, "status"),
+        "operation_id": get(request, "operation_id"),
+        "next_action": get(settled, "next_action"),
+        "attempt": attempt,
+        "completed_round": get(settled, "completed_round").unwrap_or(&Value::Null),
+    })
+}
+
 /// `rish_agent_runtime_reduce`.
 pub fn reduce_json(input: &str) -> String {
     let value = match reduce_json_inner(input) {
@@ -2076,6 +2360,70 @@ fn reduce_json_inner(input: &str) -> Result<Value, StoreError> {
                 "commit".into(),
                 recovery_commit(state, request, started, result)?,
             );
+        }
+        "recover_initial_outcome" => {
+            let query = get(&envelope, "attempt_query").ok_or(StoreError::InvalidArgument)?;
+            reply.insert("settled".into(), recover_initial_outcome(query));
+        }
+        "recover_round_outcome" => {
+            let recovery = get(&envelope, "recovery").ok_or(StoreError::InvalidArgument)?;
+            reply.insert("settled".into(), recover_round_outcome(recovery)?);
+        }
+        "recover_retry_allowed" => {
+            let recovery = get(&envelope, "recovery").ok_or(StoreError::InvalidArgument)?;
+            reply.insert(
+                "allowed".into(),
+                json!(recover_retry_allowed(recovery, request)),
+            );
+        }
+        "recover_retry_launch_attempt" => {
+            reply.insert(
+                "launch_attempt".into(),
+                json!(recover_retry_launch_attempt(state, request)?),
+            );
+        }
+        "recover_retry_request" => {
+            let authority = get(&envelope, "authority").ok_or(StoreError::InvalidArgument)?;
+            let launch = get(&envelope, "launch_attempt")
+                .and_then(Value::as_u64)
+                .ok_or(StoreError::InvalidArgument)?;
+            let child =
+                as_str(get(&envelope, "child_operation_id")).ok_or(StoreError::InvalidArgument)?;
+            reply.insert(
+                "request".into(),
+                recover_retry_request(request, authority, launch, child),
+            );
+        }
+        "recover_retry_outcome" => {
+            let retried = get(&envelope, "retried").ok_or(StoreError::InvalidArgument)?;
+            let after = get(&envelope, "after_retry").unwrap_or(&Value::Null);
+            reply.insert("settled".into(), recover_retry_outcome(retried, after)?);
+        }
+        "recover_tool_plan" => {
+            let authority = get(&envelope, "authority").ok_or(StoreError::InvalidArgument)?;
+            let child =
+                as_str(get(&envelope, "child_operation_id")).ok_or(StoreError::InvalidArgument)?;
+            return recover_tool_plan(state, request, authority, child);
+        }
+        "recover_tool_commit" => {
+            let started = get(&envelope, "started").ok_or(StoreError::InvalidArgument)?;
+            let recovery = get(&envelope, "recovery").ok_or(StoreError::InvalidArgument)?;
+            let child =
+                as_str(get(&envelope, "child_operation_id")).ok_or(StoreError::InvalidArgument)?;
+            reply.insert(
+                "commit".into(),
+                recover_tool_commit(request, started, recovery, child)?,
+            );
+        }
+        "recover_tool_outcome" => {
+            let recovery = get(&envelope, "recovery").ok_or(StoreError::InvalidArgument)?;
+            reply.insert("terminal".into(), json!(recover_tool_is_terminal(recovery)));
+            reply.insert("settled".into(), recover_tool_outcome(recovery));
+        }
+        "recover_result" => {
+            let attempt = get(&envelope, "attempt").ok_or(StoreError::InvalidArgument)?;
+            let settled = get(&envelope, "settled").ok_or(StoreError::InvalidArgument)?;
+            reply.insert("output".into(), recover_result(request, attempt, settled));
         }
         "cleanup_outbox_proof" => {
             reply.insert(

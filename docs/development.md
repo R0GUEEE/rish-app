@@ -702,7 +702,18 @@ its operation result points at. What is left native in
 `recoverAgentAttempt` is the orchestration itself — in particular the provider
 retry continuation, the one step that leaves the serialized recovery authority
 and re-enters. That is the `Command → Effect → Event` refactor the plan
-describes and it is the next cut.
+describes, and phase 15 does it.
+
+`runtime_coordinator.rs` now owns recovery's decisions as well: the status and
+next action each round outcome implies, whether a retry may proceed and which
+launch attempt it gets, the relaunch request built from the authority's own
+facts, what the relaunched round concluded, the tool branch's plan (the ledger
+row, the batch and the prepare-time call that together name the execution),
+the child operation's commit, and the result every branch ends with. What
+stays native is the shape of the orchestration: the service calls, the
+serialized recovery authority, and the one continuation that leaves it to run
+the provider retry and re-enters when the answer arrives. The coordinator is
+down to 1,212 lines from 2,412.
 
 ### Device-only storage metadata
 
