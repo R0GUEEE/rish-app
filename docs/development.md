@@ -575,6 +575,24 @@ The core links into the `RishLocalRuntime` pod as
 the script refuses to install toolchains or targets itself. Rebuild it after
 any change under `modules/rish/core` and before `pod install`.
 
+Phase 9 moves the pure half of the provider round service —
+`AgentProviderRoundServiceInternals.mm` — into `provider_round.rs` behind
+`rish_agent_provider_round_reduce`: the round and selector request shapes,
+the controller CAS and checkpoint relations, the transport result shape and
+its relation to the request, the round locator and ledger CAS, the
+native-to-provider message conversion, the public receipt, the recovered
+round projection, the project-context bundle with its byte budget, the
+failure-code mapping, the result projections, and the tool descriptions the
+model is shown. The facade keeps the transport, credentials, the tool
+registry's native descriptors, the root projection validator, the
+completion transport's own schema validation, and the two provider digests.
+
+Those digests are a second byte protocol and must not move: the model input
+digest is `NSJSONSerialization` with `NSJSONWritingSortedKeys`, whose key
+order is locale-sensitive, and the request body digest binds the exact bytes
+that were sent. Both stay in `DSHProviderJSONSHA256` and reach the core as
+host facts.
+
 ### Device-only storage metadata
 
 The session store and the agent WAL require every pinned item to report

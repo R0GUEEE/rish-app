@@ -6,10 +6,21 @@
 #import "DSHCompletionV2.h"
 #import "DSHWorkspaceCanonical.h"
 
+#include "rish_agent_core.h"
+
 #include <CoreFoundation/CoreFoundation.h>
 #include <math.h>
 
-static const NSUInteger DSHAgentProviderMaximumSafeInteger = 9007199254740991ULL;
+// The pure half of this file lives in the shared core (modules/rish/core,
+// `rish_agent_provider_round_reduce`): request and result shapes, the
+// controller CAS and checkpoint relations, the locator and ledger CAS, the
+// native-to-provider message conversion, the public receipt, the recovered
+// round projection, the project-context bundle, the failure-code mapping,
+// the selector requests and the tool descriptions. This side keeps the
+// transport, credentials, the registry's native descriptors, the root
+// projection validator, and the two provider digests — those use
+// NSJSONSerialization with sorted keys, a different byte protocol from the
+// core's canonical JSON, so they are computed here and passed in as facts.
 
 void DSHSetProviderError(NSError **error,
                                 DSHAgentNativeStoreErrorCode code) {
@@ -18,14 +29,133 @@ void DSHSetProviderError(NSError **error,
 
 BOOL DSHProviderUUID(id value) { return DSHAgentCanonicalUUID(value); }
 BOOL DSHProviderDigest(id value) { return DSHAgentCanonicalSHA256(value); }
-BOOL DSHProviderNullableDigest(id value) {
-  return value == NSNull.null || DSHProviderDigest(value);
+
+static id DSHProviderValue(id value) {
+  return value ?: NSNull.null;
 }
-BOOL DSHProviderSchema(id value, NSUInteger schema) {
-  return DSHAgentSafeInteger(value, schema, NO) && [value isEqual:@(schema)];
+
+// Catalogue and provider-binding answers for one parsed tree, the host facts
+// the core's shapes need. Mirrors the session store's environment builder.
+static NSString *DSHProviderBindingKey(id binding, id model) {
+  NSData *canonical = DSHWorkspaceCanonicalJSONData(
+      @{ @"binding" : DSHProviderValue(binding), @"model" : DSHProviderValue(model) }, nil);
+  return canonical == nil ? nil : DSHWorkspaceSHA256Hex(canonical);
+}
+
+static void DSHProviderCollectFacts(id node,
+                                    NSMutableSet<NSString *> *strings,
+                                    NSMutableArray<NSDictionary *> *bindings,
+                                    NSMutableSet<NSString *> *keys) {
+  if ([node isKindOfClass:NSString.class]) {
+    [strings addObject:node];
+    return;
+  }
+  if ([node isKindOfClass:NSArray.class]) {
+    for (id child in (NSArray *)node) {
+      DSHProviderCollectFacts(child, strings, bindings, keys);
+    }
+    return;
+  }
+  if (![node isKindOfClass:NSDictionary.class]) return;
+  NSDictionary *record = node;
+  id binding = record[@"provider_configuration"];
+  if (binding != nil) {
+    id model = record[@"model"];
+    NSString *key = DSHProviderBindingKey(binding, model);
+    if (key != nil && ![keys containsObject:key]) {
+      [keys addObject:key];
+      BOOL valid = [binding isKindOfClass:NSDictionary.class] &&
+          DSHValidateProviderBinding(binding, model);
+      NSString *host = nil;
+      if (valid && [((NSDictionary *)binding)[@"endpoint_url"] isKindOfClass:NSString.class]) {
+        host = [NSURL URLWithString:((NSDictionary *)binding)[@"endpoint_url"]].host;
+      }
+      [bindings addObject:@{
+        @"canonical_sha256" : key,
+        @"valid" : @(valid),
+        @"host" : DSHProviderValue(host),
+      }];
+    }
+  }
+  for (id child in record.allValues) {
+    DSHProviderCollectFacts(child, strings, bindings, keys);
+  }
+}
+
+static NSDictionary *DSHProviderEnvironment(id root) {
+  NSMutableSet<NSString *> *strings = [NSMutableSet set];
+  NSMutableArray<NSDictionary *> *bindings = [NSMutableArray array];
+  NSMutableSet<NSString *> *keys = [NSMutableSet set];
+  DSHProviderCollectFacts(root, strings, bindings, keys);
+  NSMutableArray<NSString *> *models = [NSMutableArray array];
+  NSMutableDictionary<NSString *, NSString *> *harnessByModel =
+      [NSMutableDictionary dictionary];
+  NSMutableDictionary<NSString *, NSString *> *hostByModel =
+      [NSMutableDictionary dictionary];
+  NSMutableArray<NSString *> *providers = [NSMutableArray array];
+  for (NSString *string in strings) {
+    if (DSHHarnessIsSupportedModel(string)) {
+      [models addObject:string];
+      NSString *harness = DSHHarnessIdForModel(string);
+      if (harness != nil) harnessByModel[string] = harness;
+      NSString *host = DSHProviderHostForModel(string);
+      if (host != nil) hostByModel[string] = host;
+    }
+    if (DSHHarnessIsProviderId(string)) [providers addObject:string];
+  }
+  [models sortUsingSelector:@selector(compare:)];
+  [providers sortUsingSelector:@selector(compare:)];
+  [bindings sortUsingComparator:^NSComparisonResult(NSDictionary *a, NSDictionary *b) {
+    return [a[@"canonical_sha256"] compare:b[@"canonical_sha256"]];
+  }];
+  return @{
+    @"supported_models" : [models copy],
+    @"harness_by_model" : [harnessByModel copy],
+    @"provider_ids" : [providers copy],
+    @"host_by_model" : [hostByModel copy],
+    @"provider_bindings" : [bindings copy],
+  };
+}
+
+static NSDictionary *DSHProviderReduce(NSString *op,
+                                       NSDictionary *fields,
+                                       NSError **error) {
+  NSMutableDictionary *envelope = [fields mutableCopy];
+  envelope[@"op"] = op;
+  NSData *bytes = [NSJSONSerialization dataWithJSONObject:envelope options:0 error:nil];
+  if (bytes == nil) {
+    DSHSetProviderError(error, DSHAgentNativeStoreErrorInvalidArgument);
+    return nil;
+  }
+  char *raw = rish_agent_provider_round_reduce((const char *)bytes.bytes, bytes.length);
+  if (raw == NULL) {
+    DSHSetProviderError(error, DSHAgentNativeStoreErrorCorrupt);
+    return nil;
+  }
+  NSData *replyBytes = [NSData dataWithBytes:raw length:strlen(raw)];
+  rish_agent_string_free(raw);
+  id reply = [NSJSONSerialization JSONObjectWithData:replyBytes options:0 error:nil];
+  if (![reply isKindOfClass:NSDictionary.class]) {
+    DSHSetProviderError(error, DSHAgentNativeStoreErrorCorrupt);
+    return nil;
+  }
+  if (![reply[@"ok"] isEqual:@YES]) {
+    NSInteger code = [reply[@"error"] isKindOfClass:NSNumber.class]
+        ? [reply[@"error"] integerValue] : DSHAgentNativeStoreErrorCorrupt;
+    if (code < DSHAgentNativeStoreErrorInvalidArgument ||
+        code > DSHAgentNativeStoreErrorPersistence) {
+      code = DSHAgentNativeStoreErrorCorrupt;
+    }
+    DSHSetProviderError(error, (DSHAgentNativeStoreErrorCode)code);
+    return nil;
+  }
+  return reply;
 }
 
 NSString *DSHProviderJSONSHA256(id value, NSError **error) {
+  // The provider input digest is NOT this project's canonical JSON: it is
+  // NSJSONSerialization with sorted keys, and the request body digest binds
+  // the exact bytes that were sent. Both stay native.
   if (value == nil || ![NSJSONSerialization isValidJSONObject:value]) {
     DSHSetProviderError(error, DSHAgentNativeStoreErrorInvalidArgument);
     return nil;
@@ -36,19 +166,8 @@ NSString *DSHProviderJSONSHA256(id value, NSError **error) {
   return bytes == nil ? nil : DSHWorkspaceSHA256Hex(bytes);
 }
 
-BOOL DSHProviderReference(NSDictionary *reference) {
-  return DSHAgentExactDictionaryKeys(reference, @[
-    @"schema_version", @"transcript_ref", @"generation",
-    @"transcript_sha256", @"transcript_bytes",
-  ]) && DSHProviderSchema(reference[@"schema_version"], 1) &&
-      DSHProviderUUID(reference[@"transcript_ref"]) &&
-      DSHAgentSafeInteger(reference[@"generation"],
-                          DSHAgentProviderMaximumSafeInteger, YES) &&
-      DSHProviderDigest(reference[@"transcript_sha256"]) &&
-      DSHAgentSafeInteger(reference[@"transcript_bytes"],
-                          DSHAgentNativeWALMaxTranscriptBytes, YES);
-}
-
+// Opaque identifiers are checked inside every shape the core owns; this
+// standalone predicate has no request context, so it stays native.
 BOOL DSHProviderOpaqueId(id value) {
   if (!DSHAgentBoundedUTF8String(value, 128, NO, nullptr)) return NO;
   NSCharacterSet *invalid = [[NSCharacterSet
@@ -60,87 +179,24 @@ BOOL DSHProviderOpaqueId(id value) {
 
 BOOL DSHProviderResultShape(NSDictionary *result) {
   if (![result isKindOfClass:NSDictionary.class]) return NO;
-  result = DSHProviderRecordWithoutConfiguration(result, result[@"model"]);
-  if (!DSHAgentExactDictionaryKeysWithOptional(result, @[
-        @"provider_request_id", @"provider_response_id", @"requested_model",
-        @"model", @"thinking_mode", @"text", @"reasoning", @"tool_calls",
-        @"finish_reason", @"latency_ms", @"visible_history_sha256",
-        @"model_input_sha256", @"request_body_sha256",
-      ], @[@"harness_id"]) || !DSHProviderOpaqueId(result[@"provider_request_id"]) ||
-      !DSHProviderOpaqueId(result[@"provider_response_id"]) ||
-      !DSHAgentBoundedUTF8String(result[@"requested_model"], 128, NO, nullptr) ||
-      !DSHAgentBoundedUTF8String(result[@"model"], 128, NO, nullptr) ||
-      !DSHAgentBoundedUTF8String(result[@"thinking_mode"], 32, NO, nullptr) ||
-      !DSHAgentBoundedUTF8String(result[@"text"], DSHAgentNativeWALMaxTranscriptBytes,
-                                 YES, nullptr) ||
-      !DSHAgentBoundedUTF8String(result[@"reasoning"],
-                                 DSHAgentNativeWALMaxTranscriptBytes, YES, nullptr) ||
-      ![result[@"tool_calls"] isKindOfClass:NSArray.class] ||
-      [result[@"tool_calls"] count] > 16 ||
-      !DSHAgentBoundedUTF8String(result[@"finish_reason"], 32, NO, nullptr) ||
-      !DSHAgentSafeInteger(result[@"latency_ms"], 24 * 60 * 60 * 1000, YES) ||
-      !DSHProviderDigest(result[@"visible_history_sha256"]) ||
-      !DSHProviderDigest(result[@"model_input_sha256"]) ||
-      !DSHProviderDigest(result[@"request_body_sha256"])) return NO;
-  if (![result[@"finish_reason"] isEqualToString:@"stop"] &&
-      ![result[@"finish_reason"] isEqualToString:@"tool_calls"] &&
-      ![result[@"finish_reason"] isEqualToString:@"length"] &&
-      ![result[@"finish_reason"] isEqualToString:@"content_filter"]) return NO;
-  NSSet *models = DSHHarnessSupportedModels();
-  if (result[@"harness_id"] != nil &&
-      ![DSHHarnessIdForModel(result[@"model"]) isEqual:result[@"harness_id"]]) {
-    return NO;
-  }
-  return [models containsObject:result[@"requested_model"]] &&
-      [models containsObject:result[@"model"]] &&
-      [result[@"requested_model"] isEqual:result[@"model"]] &&
-      ([result[@"finish_reason"] isEqualToString:@"tool_calls"]
-      ? [result[@"tool_calls"] count] > 0
-      : [result[@"tool_calls"] count] == 0);
+  NSDictionary *reply = DSHProviderReduce(@"result_only_shape", @{
+    @"result" : result, @"request" : @{}, @"env" : DSHProviderEnvironment(result),
+  }, nullptr);
+  return reply != nil && [reply[@"matches"] isEqual:@YES];
 }
 
 BOOL DSHProviderResultMatchesRequest(NSDictionary *result,
                                      NSDictionary *request,
                                      NSString *providerRequestId) {
-  return DSHProviderResultShape(result) &&
-      [result[@"provider_request_id"] isEqual:providerRequestId] &&
-      [result[@"requested_model"] isEqual:request[@"model"]] &&
-      [result[@"model"] isEqual:request[@"model"]] &&
-      [result[@"thinking_mode"] isEqual:request[@"thinking_mode"]];
-}
-
-BOOL DSHProviderControllerCAS(NSDictionary *cas,
-                                     NSString *conversationId,
-                                     NSString *taskId,
-                                     NSString *attemptId) {
-  return DSHAgentExactDictionaryKeys(cas, @[
-    @"schema_version", @"conversation_id", @"task_id", @"attempt_id",
-    @"expected_controller_generation", @"expected_journal_revision",
-    @"expected_session_generation", @"expected_session_sha256",
-  ]) && DSHProviderSchema(cas[@"schema_version"], 1) &&
-      DSHProviderUUID(cas[@"conversation_id"]) &&
-      DSHProviderUUID(cas[@"task_id"]) && DSHProviderUUID(cas[@"attempt_id"]) &&
-      [cas[@"conversation_id"] isEqual:conversationId] &&
-      [cas[@"task_id"] isEqual:taskId] && [cas[@"attempt_id"] isEqual:attemptId] &&
-      DSHAgentSafeInteger(cas[@"expected_controller_generation"],
-                          DSHAgentProviderMaximumSafeInteger, YES) &&
-      DSHAgentSafeInteger(cas[@"expected_journal_revision"],
-                          DSHAgentProviderMaximumSafeInteger, YES) &&
-      DSHAgentSafeInteger(cas[@"expected_session_generation"],
-                          DSHAgentProviderMaximumSafeInteger, YES) &&
-      DSHProviderDigest(cas[@"expected_session_sha256"]);
-}
-
-BOOL DSHProviderCheckpoint(NSDictionary *checkpoint) {
-  return DSHAgentExactDictionaryKeys(checkpoint, @[
-    @"schema_version", @"journal_revision", @"session_generation",
-    @"session_sha256",
-  ]) && DSHProviderSchema(checkpoint[@"schema_version"], 1) &&
-      DSHAgentSafeInteger(checkpoint[@"journal_revision"],
-                          DSHAgentProviderMaximumSafeInteger, YES) &&
-      DSHAgentSafeInteger(checkpoint[@"session_generation"],
-                          DSHAgentProviderMaximumSafeInteger, YES) &&
-      DSHProviderDigest(checkpoint[@"session_sha256"]);
+  if (![result isKindOfClass:NSDictionary.class] ||
+      ![request isKindOfClass:NSDictionary.class]) return NO;
+  NSDictionary *reply = DSHProviderReduce(@"result_shape", @{
+    @"result" : result,
+    @"request" : request,
+    @"provider_request_id" : DSHProviderValue(providerRequestId),
+    @"env" : DSHProviderEnvironment(result),
+  }, nullptr);
+  return reply != nil && [reply[@"matches"] isEqual:@YES];
 }
 
 NSDictionary *DSHProviderConflictResult(NSString *operationId,
@@ -149,72 +205,29 @@ NSDictionary *DSHProviderConflictResult(NSString *operationId,
                                                NSNumber *actualRoundRevision,
                                                NSString *actualRoundStatus,
                                                NSDictionary *actualTranscript) {
-  return @{
-    @"schema_version" : @2,
-    @"status" : @"conflict",
-    @"operation_id" : operationId,
+  NSDictionary *reply = DSHProviderReduce(@"conflict", @{
+    @"operation_id" : DSHProviderValue(operationId),
     @"failure_code" : failureCode,
-    @"expected_round_revision" : request[@"expected_round_revision"],
-    @"actual_round_revision" : actualRoundRevision ?: @0,
-    @"actual_round_status" : actualRoundStatus ?: @"in_flight",
-    @"actual_transcript" : actualTranscript ?: request[@"transcript"],
-  };
+    @"request" : request,
+    @"actual_round_revision" : DSHProviderValue(actualRoundRevision),
+    @"actual_round_status" : DSHProviderValue(actualRoundStatus),
+    @"actual_transcript" : DSHProviderValue(actualTranscript),
+  }, nullptr);
+  return reply[@"result"];
 }
 
 NSDictionary *DSHProviderRoundRequestCopy(NSDictionary *request,
                                                  NSError **error) {
-  NSArray *keys = @[
-    @"schema_version", @"operation_id", @"controller_cas",
-    @"committed_checkpoint", @"task_id", @"conversation_id", @"attempt_id",
-    @"round_id", @"round_index", @"launch_attempt", @"expected_round_revision",
-    @"transport_schema_version", @"model", @"thinking_mode",
-    @"visible_history_sha256", @"visible_message_count",
-    @"project_context_sha256", @"transcript", @"root", @"registry_version",
-    @"toolset_sha256",
-  ];
   NSError *copyError = nil;
   NSDictionary *copy = DSHAgentImmutableJSONCopy(request, &copyError);
-  // harness_id names the built-in Harness that owns the round; it must
-  // catalog the requested model. Pre-split callers omit it (DSH).
-  if (!DSHAgentExactDictionaryKeysWithOptional(copy, keys, @[ @"harness_id" ]) ||
-      (copy[@"harness_id"] != nil &&
-       ![DSHHarnessIdForModel(copy[@"model"]) isEqual:copy[@"harness_id"]]) ||
-      !DSHProviderSchema(copy[@"schema_version"], 2) ||
-      !DSHProviderUUID(copy[@"operation_id"]) ||
-      !DSHProviderUUID(copy[@"task_id"]) || !DSHProviderUUID(copy[@"conversation_id"]) ||
-      !DSHProviderUUID(copy[@"attempt_id"]) || !DSHProviderUUID(copy[@"round_id"]) ||
-      !DSHProviderControllerCAS(copy[@"controller_cas"], copy[@"conversation_id"],
-                                copy[@"task_id"], copy[@"attempt_id"]) ||
-      !DSHProviderCheckpoint(copy[@"committed_checkpoint"]) ||
-      ![copy[@"controller_cas"][@"expected_journal_revision"]
-          isEqual:copy[@"committed_checkpoint"][@"journal_revision"]] ||
-      ![copy[@"controller_cas"][@"expected_session_generation"]
-          isEqual:copy[@"committed_checkpoint"][@"session_generation"]] ||
-      ![copy[@"controller_cas"][@"expected_session_sha256"]
-          isEqual:copy[@"committed_checkpoint"][@"session_sha256"]] ||
-      !DSHProviderUUID(copy[@"round_id"]) ||
-      !DSHAgentSafeInteger(copy[@"round_index"], 7, YES) ||
-      !DSHAgentSafeInteger(copy[@"launch_attempt"], 8, NO) ||
-      !DSHAgentSafeInteger(copy[@"expected_round_revision"],
-                          DSHAgentProviderMaximumSafeInteger, YES) ||
-      (![copy[@"transport_schema_version"] isEqual:@2] &&
-       ![copy[@"transport_schema_version"] isEqual:@3]) ||
-      !DSHAgentBoundedUTF8String(copy[@"model"], 128, NO, nullptr) ||
-      !DSHAgentBoundedUTF8String(copy[@"thinking_mode"], 32, NO, nullptr) ||
-      !DSHProviderDigest(copy[@"visible_history_sha256"]) ||
-      !DSHAgentSafeInteger(copy[@"visible_message_count"], 96, YES) ||
-      !DSHProviderNullableDigest(copy[@"project_context_sha256"]) ||
-      ([copy[@"transport_schema_version"] isEqual:@3] &&
-       copy[@"project_context_sha256"] == NSNull.null) ||
-      ([copy[@"transport_schema_version"] isEqual:@2] &&
-       copy[@"project_context_sha256"] != NSNull.null) ||
-      !DSHProviderReference(copy[@"transcript"]) ||
-      ![copy[@"root"] isKindOfClass:NSDictionary.class] ||
-      ![DSHAgentRootResolver validateAgentRootProjection:copy[@"root"]
-                                                   error:&copyError] ||
-      (![copy[@"registry_version"] isEqual:@1] &&
-       ![copy[@"registry_version"] isEqual:@2]) ||
-      !DSHProviderDigest(copy[@"toolset_sha256"])) {
+  BOOL rootOK = [copy[@"root"] isKindOfClass:NSDictionary.class] &&
+      [DSHAgentRootResolver validateAgentRootProjection:copy[@"root"]
+                                                  error:&copyError];
+  if (copy == nil ||
+      DSHProviderReduce(@"round_request", @{
+        @"request" : copy, @"root_ok" : @(rootOK),
+        @"env" : DSHProviderEnvironment(copy),
+      }, nullptr) == nil) {
     if (error != nullptr) *error = DSHAgentNativeStoreError(
         DSHAgentNativeStoreErrorInvalidArgument);
     return nil;
@@ -246,87 +259,31 @@ NSDictionary *DSHProviderOwner(DSHAgentNativeWAL *wal,
 }
 
 NSDictionary *DSHProviderRoundCASForRow(NSDictionary *row) {
-  NSDictionary *locator = row[@"locator"];
-  NSDictionary *owner = row[@"owner"];
-  return @{
-    @"schema_version" : @2,
-    @"locator" : locator,
-    @"expected_row_revision" : row[@"row_revision"],
-    @"expected_state" : row[@"state"],
-    @"expected_owner_generation" : (id)owner == NSNull.null
-        ? NSNull.null : owner[@"owner_generation"],
-    @"expected_launch_id" : (id)owner == NSNull.null
-        ? NSNull.null : owner[@"launch_id"],
-    @"expected_native_task_id" : (id)owner == NSNull.null
-        ? NSNull.null : owner[@"native_task_id"],
-    @"expected_transcript_generation" : row[@"transcript_before"][@"generation"],
-    @"expected_transcript_sha256" : row[@"transcript_before"][@"transcript_sha256"],
-    @"expected_root_fingerprint_sha256" : row[@"root_fingerprint_sha256"],
-    @"expected_binding_revision" : row[@"binding_revision"],
-  };
+  NSDictionary *reply = DSHProviderReduce(@"round_cas", @{ @"row" : row }, nullptr);
+  return reply[@"cas"];
 }
 
 NSDictionary *DSHProviderNativeToCompletionMessage(NSDictionary *message,
                                                           NSError **error) {
-  if (![message isKindOfClass:NSDictionary.class] ||
-      ![message[@"role"] isEqualToString:@"assistant"] ||
-      ![message[@"content"] isKindOfClass:NSString.class] ||
-      ![message[@"reasoning_content"] isKindOfClass:NSString.class] ||
-      ![message[@"tool_calls"] isKindOfClass:NSArray.class]) return nil;
-  NSMutableArray *calls = [NSMutableArray array];
-  for (NSDictionary *call in message[@"tool_calls"]) {
-    if (!DSHAgentBoundedUTF8String(call[@"call_id"], 128, NO, nullptr) ||
-        !DSHAgentBoundedUTF8String(call[@"name"], 64, NO, nullptr) ||
-        !DSHAgentBoundedUTF8String(call[@"arguments"],
-                                   DSHCompletionV2MaxArgumentsBytes, NO, nullptr) ||
-        DSHAgentParseArgumentsJSON(call[@"arguments"], error) == nil) return nil;
-    [calls addObject:@{
-      @"schema_version" : @1,
-      @"call_id" : call[@"call_id"],
-      @"name" : call[@"name"],
-      @"arguments_json" : call[@"arguments"],
-    }];
-  }
-  return @{
-    @"schema_version" : @1,
-    @"role" : @"assistant",
-    @"round_index" : message[@"round_index"],
-    @"content" : message[@"content"],
-    @"reasoning_content" : message[@"reasoning_content"],
-    @"tool_calls" : [calls copy],
-  };
+  if (![message isKindOfClass:NSDictionary.class]) return nil;
+  NSDictionary *reply = DSHProviderReduce(@"assistant_message", @{
+    @"message" : message,
+  }, error);
+  id converted = reply[@"message"];
+  return [converted isKindOfClass:NSDictionary.class] ? converted : nil;
 }
 
 NSDictionary *DSHProviderPublicReceipt(NSDictionary *provider,
                                               NSDictionary *request,
                                               NSString *providerRequestId,
                                               NSDictionary *contextReceipt) {
-  NSMutableDictionary *receipt = [@{
-    @"schema_version" : @2,
-    @"transport_schema_version" : request[@"transport_schema_version"],
-    @"turn_id" : request[@"task_id"],
-    @"task_id" : request[@"task_id"],
-    @"attempt_id" : request[@"attempt_id"],
-    @"round_id" : request[@"round_id"],
-    @"round_index" : request[@"round_index"],
-    @"provider_request_id" : providerRequestId,
-    @"provider_response_id" : provider[@"provider_response_id"],
-    @"harness_id" : [provider[@"harness_id"] isKindOfClass:NSString.class]
-        ? provider[@"harness_id"]
-        : ([request[@"harness_id"] isKindOfClass:NSString.class]
-            ? request[@"harness_id"] : @"dsh"),
-    @"requested_model" : request[@"model"],
-    @"model" : request[@"model"],
-    @"thinking_mode" : request[@"thinking_mode"],
-    @"finish_reason" : provider[@"finish_reason"],
-    @"latency_ms" : provider[@"latency_ms"],
-    @"visible_history_sha256" : provider[@"visible_history_sha256"],
-    @"model_input_sha256" : provider[@"model_input_sha256"],
-    @"request_body_sha256" : provider[@"request_body_sha256"],
-    @"project_context_receipt" : contextReceipt ?: NSNull.null,
-  } mutableCopy];
-  if (provider[@"provider_configuration"] != nil) receipt[@"provider_configuration"] = provider[@"provider_configuration"];
-  return receipt;
+  NSDictionary *reply = DSHProviderReduce(@"public_receipt", @{
+    @"provider" : provider,
+    @"request" : request,
+    @"provider_request_id" : DSHProviderValue(providerRequestId),
+    @"context_receipt" : DSHProviderValue(contextReceipt),
+  }, nullptr);
+  return reply[@"receipt"];
 }
 
 NSDictionary *DSHProviderRecoveredRoundProjection(NSDictionary *row,
@@ -335,156 +292,14 @@ NSDictionary *DSHProviderRecoveredRoundProjection(NSDictionary *row,
                                                     NSError **error) {
   if (![row isKindOfClass:NSDictionary.class] ||
       ![request isKindOfClass:NSDictionary.class] ||
-      ![nativeMessages isKindOfClass:NSArray.class] ||
-      ![row[@"state"] isEqualToString:@"completed"] ||
-      ![row[@"locator"][@"task_id"] isEqual:request[@"task_id"]] ||
-      ![row[@"locator"][@"attempt_id"] isEqual:request[@"attempt_id"]] ||
-      ![row[@"locator"][@"round_id"] isEqual:request[@"round_id"]] ||
-      ![row[@"locator"][@"round_index"] isEqual:request[@"round_index"]] ||
-      ![row[@"transcript_after"] isKindOfClass:NSDictionary.class] ||
-      ![row[@"completion_receipt"] isKindOfClass:NSDictionary.class]) {
+      ![nativeMessages isKindOfClass:NSArray.class]) {
     DSHSetProviderError(error, DSHAgentNativeStoreErrorConflict);
     return nil;
   }
-  NSDictionary *assistant = nil;
-  for (NSDictionary *message in nativeMessages) {
-    if (![message isKindOfClass:NSDictionary.class] ||
-        ![message[@"role"] isEqualToString:@"assistant"] ||
-        ![message[@"round_index"] isEqual:request[@"round_index"]]) continue;
-    assistant = message;
-  }
-  if (![assistant isKindOfClass:NSDictionary.class] ||
-      !DSHAgentBoundedUTF8String(assistant[@"content"],
-                                 DSHAgentNativeWALMaxTranscriptBytes, YES,
-                                 nullptr) ||
-      !DSHAgentBoundedUTF8String(assistant[@"reasoning_content"],
-                                 DSHAgentNativeWALMaxTranscriptBytes, YES,
-                                 nullptr) ||
-      ![assistant[@"tool_calls"] isKindOfClass:NSArray.class]) {
-    DSHSetProviderError(error, DSHAgentNativeStoreErrorConflict);
-    return nil;
-  }
-  NSDictionary *nativeReceipt = row[@"completion_receipt"];
-  // Selector/recovery requests intentionally carry only the round locator,
-  // root, and transcript handle.  Bind optional receipt fields to the
-  // persisted native receipt when those selectors omit them; a full
-  // complete-agent-round request still supplies and is checked against the
-  // same values below.
-  NSMutableDictionary *receiptRequest = [request mutableCopy];
-  if (receiptRequest[@"transport_schema_version"] == nil) {
-    receiptRequest[@"transport_schema_version"] =
-        nativeReceipt[@"transport_schema_version"];
-  }
-  if (receiptRequest[@"model"] == nil) {
-    receiptRequest[@"model"] = nativeReceipt[@"model"];
-  }
-  if (receiptRequest[@"thinking_mode"] == nil) {
-    receiptRequest[@"thinking_mode"] = nativeReceipt[@"thinking_mode"];
-  }
-  NSNumber *expectedTransportSchema = receiptRequest[@"transport_schema_version"];
-  NSString *expectedModel = receiptRequest[@"model"];
-  NSString *expectedThinkingMode = receiptRequest[@"thinking_mode"];
-  NSString *providerRequestId = nativeReceipt[@"provider_request_id"];
-  if (!DSHProviderOpaqueId(providerRequestId) ||
-      ![nativeReceipt[@"transport_schema_version"]
-          isEqual:expectedTransportSchema] ||
-      ![nativeReceipt[@"requested_model"] isEqual:expectedModel] ||
-      ![nativeReceipt[@"model"] isEqual:expectedModel] ||
-      ![nativeReceipt[@"thinking_mode"] isEqual:expectedThinkingMode]) {
-    DSHSetProviderError(error, DSHAgentNativeStoreErrorConflict);
-    return nil;
-  }
-  NSDictionary *contextReceipt = nativeReceipt[@"project_context_receipt"];
-  if ((id)contextReceipt == NSNull.null) contextReceipt = nil;
-  if (([expectedTransportSchema isEqual:@3] &&
-       contextReceipt == nil) ||
-      ([expectedTransportSchema isEqual:@2] &&
-       contextReceipt != nil)) {
-    DSHSetProviderError(error, DSHAgentNativeStoreErrorConflict);
-    return nil;
-  }
-  NSDictionary *publicReceipt = DSHProviderPublicReceipt(
-      nativeReceipt, receiptRequest, providerRequestId, contextReceipt);
-  NSString *finishReason = nativeReceipt[@"finish_reason"];
-  if (![finishReason isEqualToString:@"stop"] &&
-      ![finishReason isEqualToString:@"tool_calls"] &&
-      ![finishReason isEqualToString:@"length"] &&
-      ![finishReason isEqualToString:@"content_filter"]) {
-    DSHSetProviderError(error, DSHAgentNativeStoreErrorConflict);
-    return nil;
-  }
-  NSData *textBytes = [assistant[@"content"]
-      dataUsingEncoding:NSUTF8StringEncoding];
-  NSData *reasoningBytes = [assistant[@"reasoning_content"]
-      dataUsingEncoding:NSUTF8StringEncoding];
-  NSString *assistantTextSHA = DSHWorkspaceSHA256Hex(textBytes);
-  NSString *reasoningTextSHA = DSHWorkspaceSHA256Hex(reasoningBytes);
-  if (assistantTextSHA == nil || reasoningTextSHA == nil) {
-    DSHSetProviderError(error, DSHAgentNativeStoreErrorConflict);
-    return nil;
-  }
-  NSMutableDictionary *projection = [@{
-    @"schema_version" : @2,
-    @"task_id" : request[@"task_id"],
-    @"attempt_id" : request[@"attempt_id"],
-    @"round_id" : request[@"round_id"],
-    @"round_index" : request[@"round_index"],
-    @"launch_attempt" : row[@"launch_attempt"],
-    @"result_round_revision" : row[@"row_revision"],
-    @"transcript" : row[@"transcript_after"],
-    @"completion_receipt" : publicReceipt,
-    @"text" : assistant[@"content"],
-    @"reasoning" : assistant[@"reasoning_content"],
-    @"assistant_text_sha256" : assistantTextSHA,
-    @"reasoning_text_sha256" : reasoningTextSHA,
-  } mutableCopy];
-  if ([finishReason isEqualToString:@"stop"]) {
-    if ([assistant[@"tool_calls"] count] != 0) {
-      DSHSetProviderError(error, DSHAgentNativeStoreErrorConflict);
-      return nil;
-    }
-    projection[@"kind"] = @"final";
-    projection[@"finish_reason"] = @"stop";
-    projection[@"text"] = assistant[@"content"];
-    projection[@"reasoning"] = assistant[@"reasoning_content"];
-  } else if ([finishReason isEqualToString:@"tool_calls"]) {
-    if (![row[@"calls"] isKindOfClass:NSArray.class] ||
-        [row[@"calls"] count] == 0 ||
-        ![row[@"batch_class"] isKindOfClass:NSString.class] ||
-        [assistant[@"tool_calls"] count] != [row[@"calls"] count]) {
-      DSHSetProviderError(error, DSHAgentNativeStoreErrorConflict);
-      return nil;
-    }
-    projection[@"kind"] = @"tool_batch";
-    projection[@"finish_reason"] = @"tool_calls";
-    projection[@"calls"] = row[@"calls"];
-    projection[@"batch_class"] = row[@"batch_class"];
-    projection[@"executable_call_count"] = row[@"executable_call_count"];
-    projection[@"denied_call_count"] = row[@"denied_call_count"];
-    projection[@"reasoning"] = assistant[@"reasoning_content"];
-  } else {
-    if ([assistant[@"tool_calls"] count] != 0) {
-      DSHSetProviderError(error, DSHAgentNativeStoreErrorConflict);
-      return nil;
-    }
-    projection[@"kind"] = @"blocked";
-    projection[@"finish_reason"] = finishReason;
-    projection[@"failure_code"] = [finishReason isEqualToString:@"length"]
-        ? @"E_COMPLETION_LENGTH" : @"E_COMPLETION_CONTENT_FILTER";
-  }
-  return [projection copy];
-}
-
-BOOL DSHProviderContextReceipt(NSDictionary *receipt) {
-  return DSHAgentExactDictionaryKeys(receipt, @[
-    @"schema_version", @"snapshot_id", @"snapshot_sha256",
-    @"source_fingerprint", @"context_bytes", @"verified_at",
-  ]) && DSHProviderSchema(receipt[@"schema_version"], 1) &&
-      DSHProviderUUID(receipt[@"snapshot_id"]) &&
-      DSHProviderDigest(receipt[@"snapshot_sha256"]) &&
-      DSHProviderDigest(receipt[@"source_fingerprint"]) &&
-      DSHAgentSafeInteger(receipt[@"context_bytes"], 32 * 1024 * 1024, YES) &&
-      DSHAgentCanonicalTimestamp(receipt[@"verified_at"]);
+  NSDictionary *reply = DSHProviderReduce(@"recovered_projection", @{
+    @"row" : row, @"request" : request, @"messages" : nativeMessages,
+  }, error);
+  return reply[@"projection"];
 }
 
 BOOL DSHProviderContextBundle(NSDictionary *bundle,
@@ -493,48 +308,18 @@ BOOL DSHProviderContextBundle(NSDictionary *bundle,
                                      NSArray **messagesOut,
                                      NSError **error) {
   if (bundle == nil && error != nullptr && *error != nil) return NO;
-  if (!DSHAgentExactDictionaryKeys(bundle, @[
-        @"project_context_sha256", @"receipt", @"messages",
-      ]) ||
-      !DSHProviderDigest(bundle[@"project_context_sha256"]) ||
-      !DSHProviderContextReceipt(bundle[@"receipt"]) ||
-      ![bundle[@"messages"] isKindOfClass:NSArray.class] ||
-      [bundle[@"messages"] count] == 0 ||
-      [bundle[@"messages"] count] > 32) {
-    DSHSetProviderError(error, DSHAgentNativeStoreErrorInvalidArgument);
+  NSDictionary *reply = DSHProviderReduce(@"context_bundle", @{
+    @"bundle" : DSHProviderValue(bundle),
+    @"expected_digest" : DSHProviderValue(expectedContextDigest),
+  }, error);
+  if (reply == nil) return NO;
+  if (![reply[@"receipt"] isKindOfClass:NSDictionary.class] ||
+      ![reply[@"messages"] isKindOfClass:NSArray.class]) {
+    DSHSetProviderError(error, DSHAgentNativeStoreErrorCorrupt);
     return NO;
   }
-  if (![bundle[@"project_context_sha256"] isEqual:expectedContextDigest]) {
-    DSHSetProviderError(error, DSHAgentNativeStoreErrorConflict);
-    return NO;
-  }
-  NSMutableArray *messages = [NSMutableArray array];
-  NSUInteger contextBytes = 0;
-  for (NSDictionary *message in bundle[@"messages"]) {
-    if (!DSHAgentExactDictionaryKeys(message, @[
-          @"role", @"content", @"attachments",
-        ]) || ![message[@"role"] isEqualToString:@"system"] ||
-        !DSHAgentBoundedUTF8String(message[@"content"], 256 * 1024, NO, nullptr) ||
-        ![message[@"attachments"] isKindOfClass:NSArray.class] ||
-        [message[@"attachments"] count] != 0) {
-      DSHSetProviderError(error, DSHAgentNativeStoreErrorInvalidArgument);
-      return NO;
-    }
-    NSUInteger messageBytes = [message[@"content"]
-        lengthOfBytesUsingEncoding:NSUTF8StringEncoding];
-    if (messageBytes > 256 * 1024 - contextBytes) {
-      DSHSetProviderError(error, DSHAgentNativeStoreErrorCapacity);
-      return NO;
-    }
-    contextBytes += messageBytes;
-    [messages addObject:[message copy]];
-  }
-  if (![bundle[@"receipt"][@"context_bytes"] isEqual:@(contextBytes)]) {
-    DSHSetProviderError(error, DSHAgentNativeStoreErrorConflict);
-    return NO;
-  }
-  if (receiptOut != nullptr) *receiptOut = bundle[@"receipt"];
-  if (messagesOut != nullptr) *messagesOut = [messages copy];
+  if (receiptOut != nullptr) *receiptOut = reply[@"receipt"];
+  if (messagesOut != nullptr) *messagesOut = reply[@"messages"];
   return YES;
 }
 
@@ -542,50 +327,20 @@ NSDictionary *DSHProviderUnknownResult(NSDictionary *request,
                                               NSString *status,
                                               NSUInteger revision,
                                               NSString *failureCode) {
-  return @{
-    @"schema_version" : @2,
-    @"status" : status,
-    @"operation_id" : request[@"operation_id"],
-    @"task_id" : request[@"task_id"],
-    @"attempt_id" : request[@"attempt_id"],
-    @"round_id" : request[@"round_id"],
-    @"round_index" : request[@"round_index"],
-    @"launch_attempt" : request[@"launch_attempt"],
-    @"result_round_revision" : @(revision),
-    @"transcript" : request[@"transcript"],
+  NSDictionary *reply = DSHProviderReduce(@"unknown_result", @{
+    @"request" : request, @"status" : status, @"revision" : @(revision),
     @"failure_code" : failureCode,
-  };
+  }, nullptr);
+  return reply[@"result"];
 }
 
 NSString *DSHProviderFailureCode(NSString *providerErrorCode,
                                  BOOL digestMismatch) {
-  if (digestMismatch) return @"E_AGENT_TRANSCRIPT";
-  if ([providerErrorCode isEqualToString:@"E_COMPLETION_LENGTH"]) {
-    return @"E_COMPLETION_LENGTH";
-  }
-  if ([providerErrorCode isEqualToString:@"E_AGENT_CANCELLED"]) {
-    return @"E_AGENT_CANCELLED";
-  }
-  if ([providerErrorCode isEqualToString:@"E_COMPLETION_REDIRECT"]) {
-    return @"E_AGENT_CONFLICT";
-  }
-  if ([providerErrorCode isEqualToString:@"E_COMPLETION_HTTP_STATUS"] ||
-      [providerErrorCode isEqualToString:@"E_COMPLETION_HTTP_429"]) {
-    return @"E_AGENT_TOOL_FAILED";
-  }
-  if ([providerErrorCode isEqualToString:@"E_COMPLETION_RESPONSE_MODEL"] ||
-      [providerErrorCode isEqualToString:@"E_COMPLETION_MODEL_MISMATCH"] ||
-      [providerErrorCode isEqualToString:@"E_COMPLETION_PROVIDER_RESPONSE_ID"] ||
-      [providerErrorCode isEqualToString:@"E_COMPLETION_RESPONSE_JSON"] ||
-      [providerErrorCode isEqualToString:@"E_COMPLETION_EMPTY_RESPONSE"] ||
-      [providerErrorCode isEqualToString:@"E_COMPLETION_TOOL_CALL_INVALID"] ||
-      [providerErrorCode isEqualToString:@"E_COMPLETION_FINISH_RELATION"]) {
-    return @"E_AGENT_TRANSCRIPT";
-  }
-  if ([providerErrorCode isEqualToString:@"E_COMPLETION_CREDENTIAL_CHANGED"]) {
-    return @"E_AGENT_PERSISTENCE";
-  }
-  return @"E_AGENT_ROUND_AMBIGUOUS";
+  NSDictionary *reply = DSHProviderReduce(@"failure_code", @{
+    @"provider_error_code" : DSHProviderValue(providerErrorCode),
+    @"digest_mismatch" : @(digestMismatch),
+  }, nullptr);
+  return reply[@"code"];
 }
 
 NSDictionary *DSHProviderOperationSafeResult(NSDictionary *result) {
@@ -594,30 +349,6 @@ NSDictionary *DSHProviderOperationSafeResult(NSDictionary *result) {
     @"result_kind" : @"complete_agent_round_v2",
     @"result" : result,
   };
-}
-
-/// What the model is told about each tool. Every path argument is relative
-/// to the workspace root exactly as list_dir/read_file use it; the round
-/// batch rejects absolute or normalised paths, so the description has to
-/// say so instead of leaving the model to guess a mount point.
-static NSString *DSHProviderToolDescription(NSString *name, NSString *fallback) {
-  static NSDictionary<NSString *, NSString *> *descriptions = nil;
-  static dispatch_once_t onceToken;
-  dispatch_once(&onceToken, ^{
-    // Every entry must fit DSHCompletionV2MaxToolDescriptionLength (1024).
-    // One oversized enabled tool prevents the entire Agent request dispatch.
-    descriptions = @{
-      @"list_dir" : @"List a directory of the workspace. path is relative to the workspace root (\"\" or \".\" for the root itself, e.g. \"src\"); never an absolute path.",
-      @"read_file" : @"Read a UTF-8 file of the workspace. path is relative to the workspace root exactly as list_dir shows it (e.g. \"index.html\", \"src/app.js\"); never an absolute path. The result carries the file's revision and sha256.",
-      @"write_file" : @"Write literal UTF-8 content, using real line breaks instead of escaped backslash-n text. path is relative to the workspace root. To create a NEW file, OMIT expected_revision; omission asserts the file does not exist. To update an EXISTING file, first read_file and pass its exact revision string. Never pass the string null.",
-      @"git_status" : @"Report the workspace's git status: branch, staged and unstaged changes.",
-      @"git_commit" : @"Commit the workspace's current changes with the given message.",
-      @"git_push" : @"Push the workspace's committed changes to its remote.",
-      @"start_guest_cgi" : @"Start a local HTTP preview from self-contained HTML (inline CSS/JS, at most 32 KiB) and a BusyBox /bin/sh backend (at most 8 KiB). Use this tool to start it; Node.js/npm servers and arbitrary long-running processes are unsupported. GET / serves HTML; POST /api runs backend.sh with the request-body file as $1 and mutable data file as $2, returning stdout as JSON. For static previews, backend.sh can print {}. Use workspace-relative paths exactly as read_file does, e.g. index.html and backend.sh, never /workspace prefixes. Each sha256 must come from read_file. Without seed data, pass null for both initial_data_path and initial_data_sha256. Return the URL only after success. The service is device-local, temporary, and may stop in the background.",
-      @"stop_guest_cgi" : @"Stop the local demo service identified by service_id (the id start_guest_cgi returned).",
-    };
-  });
-  return descriptions[name] ?: fallback;
 }
 
 NSArray *DSHProviderToolsForAuthority(
@@ -629,11 +360,17 @@ NSArray *DSHProviderToolsForAuthority(
     NSDictionary *native = [registry nativeDescriptorForToolName:safeTool[@"name"]
                                                                 error:error];
     if (native == nil) return nil;
+    // The description the model is shown is shared with Android; the registry
+    // supplies the tool's native identity and parameters.
+    NSDictionary *described = DSHProviderReduce(@"tool_description", @{
+      @"name" : native[@"name"],
+    }, nullptr);
+    id description = described[@"description"];
     [raw addObject:@{
       @"type" : @"function",
       @"name" : native[@"name"],
-      @"description" : DSHProviderToolDescription(native[@"name"],
-                                                  native[@"safe_summary_key"]),
+      @"description" : [description isKindOfClass:NSString.class]
+          ? description : native[@"safe_summary_key"],
       @"parameters" : native[@"parameters"],
     }];
   }
@@ -644,37 +381,15 @@ NSArray *DSHProviderTranscriptForBody(NSArray *nativeMessages,
                                              NSUInteger roundIndex,
                                              NSString *thinkingMode,
                                              NSError **error) {
-  NSMutableArray *provider = [NSMutableArray array];
-  for (NSDictionary *message in nativeMessages) {
-    if ([message[@"role"] isEqualToString:@"assistant"]) {
-      NSMutableArray *calls = [NSMutableArray array];
-      for (NSDictionary *call in message[@"tool_calls"]) {
-        [calls addObject:@{
-          @"id" : call[@"call_id"],
-          @"type" : @"function",
-          @"function" : @{
-            @"name" : call[@"name"],
-            @"arguments" : call[@"arguments_json"],
-          },
-        }];
-      }
-      [provider addObject:@{
-        @"role" : @"assistant",
-        @"content" : message[@"content"],
-        @"reasoning_content" : message[@"reasoning_content"],
-        @"tool_calls" : [calls copy],
-      }];
-    } else if ([message[@"role"] isEqualToString:@"tool"]) {
-      [provider addObject:@{
-        @"role" : @"tool",
-        @"tool_call_id" : message[@"call_id"],
-        @"content" : message[@"content"],
-      }];
-    } else {
-      DSHSetProviderError(error, DSHAgentNativeStoreErrorCorrupt);
-      return nil;
-    }
+  if (![nativeMessages isKindOfClass:NSArray.class]) {
+    DSHSetProviderError(error, DSHAgentNativeStoreErrorCorrupt);
+    return nil;
   }
+  NSDictionary *reply = DSHProviderReduce(@"transcript_body", @{
+    @"request" : @{}, @"messages" : nativeMessages,
+  }, error);
+  NSArray *provider = reply[@"messages"];
+  if (![provider isKindOfClass:NSArray.class]) return nil;
   return DSHCompletionRoundTranscriptSchema2FromArray(provider,
                                                        (NSInteger)roundIndex,
                                                        thinkingMode,
@@ -686,83 +401,63 @@ NSArray *DSHProviderTranscriptForBody(NSArray *nativeMessages,
 @end
 
 NSString *DSHProviderLocatorKey(NSDictionary *locator) {
-  NSError *error = nil;
-  NSData *bytes = DSHAgentCanonicalJSON(locator, &error);
-  return bytes == nil ? nil : [[NSString alloc] initWithData:bytes
-                                                      encoding:NSUTF8StringEncoding];
+  NSDictionary *reply = DSHProviderReduce(@"locator_key", @{
+    @"request" : @{}, @"locator" : locator,
+  }, nullptr);
+  id key = reply[@"key"];
+  return [key isKindOfClass:NSString.class] ? key : nil;
 }
 
 NSDictionary *DSHProviderRoundResultForRow(NSDictionary *request,
                                                   NSDictionary *row,
                                                   NSString *status,
                                                   NSString *failureCode) {
-  NSMutableDictionary *result = [DSHProviderUnknownResult(
-      request, status, [row[@"row_revision"] unsignedIntegerValue],
-      failureCode) mutableCopy];
-  result[@"transcript"] = (id)row[@"transcript_after"] == NSNull.null
-      ? row[@"transcript_before"] : row[@"transcript_after"];
-  return [result copy];
+  NSDictionary *reply = DSHProviderReduce(@"round_result", @{
+    @"request" : request, @"row" : row, @"status" : status,
+    @"failure_code" : DSHProviderValue(failureCode),
+  }, nullptr);
+  return reply[@"result"];
 }
 
 NSDictionary *DSHProviderQueryResultForRow(NSDictionary *request,
                                                   NSDictionary *row,
                                                   NSString *status,
                                                   NSString *failureCode) {
-  NSMutableDictionary *result = [@{
-    @"schema_version" : @2,
-    @"status" : status,
-    @"task_id" : request[@"task_id"],
-    @"attempt_id" : request[@"attempt_id"],
-    @"round_id" : request[@"round_id"],
-    @"round_index" : request[@"round_index"],
-    @"result_round_revision" : row[@"row_revision"] ?: @0,
-    @"transcript" : (id)row[@"transcript_after"] == NSNull.null
-        ? row[@"transcript_before"] : row[@"transcript_after"],
-  } mutableCopy];
-  if (failureCode != nil) result[@"failure_code"] = failureCode;
-  return [result copy];
+  NSDictionary *reply = DSHProviderReduce(@"query_result", @{
+    @"request" : request, @"row" : row, @"status" : status,
+    @"failure_code" : DSHProviderValue(failureCode),
+  }, nullptr);
+  return reply[@"result"];
 }
 
 NSDictionary *DSHProviderSelectorConflict(NSDictionary *request,
                                                  NSDictionary *row,
                                                  NSString *failureCode) {
-  NSMutableDictionary *result = [@{
-    @"schema_version" : @2,
-    @"status" : @"conflict",
-    @"failure_code" : failureCode,
-    @"expected_round_revision" : request[@"expected_round_revision"],
-    @"actual_round_revision" : row[@"row_revision"] ?: @0,
-    @"actual_round_status" : row[@"state"] ?: @"unknown",
-    @"actual_transcript" : (id)row[@"transcript_after"] == NSNull.null
-        ? row[@"transcript_before"] : row[@"transcript_after"],
-  } mutableCopy];
-  return [result copy];
+  NSDictionary *reply = DSHProviderReduce(@"selector_conflict", @{
+    @"request" : request, @"row" : row, @"failure_code" : failureCode,
+  }, nullptr);
+  return reply[@"result"];
 }
 
 BOOL DSHProviderSelectorRequest(NSDictionary *request,
                                        BOOL cancellation,
                                        BOOL allowZeroRevision,
                                        NSError **error) {
-  NSMutableArray *keys = [NSMutableArray arrayWithArray:@[
-    @"schema_version", @"task_id", @"attempt_id", @"round_id", @"round_index",
-    @"expected_round_revision", @"transcript", @"root",
-  ]];
-  if (cancellation) [keys addObject:@"cancel_token"];
-  if (!DSHAgentExactDictionaryKeys(request, keys) ||
-      !DSHProviderSchema(request[@"schema_version"], 2) ||
-      !DSHProviderUUID(request[@"task_id"]) || !DSHProviderUUID(request[@"attempt_id"]) ||
-      !DSHProviderUUID(request[@"round_id"]) ||
-      !DSHAgentSafeInteger(request[@"round_index"], 7, YES) ||
-      !DSHAgentSafeInteger(request[@"expected_round_revision"],
-                           DSHAgentProviderMaximumSafeInteger,
-                           allowZeroRevision) ||
-      !DSHProviderReference(request[@"transcript"]) ||
-      ![request[@"root"] isKindOfClass:NSDictionary.class] ||
-      ![DSHAgentRootResolver validateAgentRootProjection:request[@"root"]
-                                                   error:error] ||
-      (cancellation && !DSHProviderUUID(request[@"cancel_token"]))) {
+  if (![request isKindOfClass:NSDictionary.class]) {
+    DSHSetProviderError(error, DSHAgentNativeStoreErrorInvalidArgument);
+    return NO;
+  }
+  NSError *rootError = nil;
+  BOOL rootOK = [request[@"root"] isKindOfClass:NSDictionary.class] &&
+      [DSHAgentRootResolver validateAgentRootProjection:request[@"root"]
+                                                  error:&rootError];
+  if (DSHProviderReduce(@"selector_request", @{
+        @"request" : request, @"cancellation" : @(cancellation),
+        @"allow_zero_revision" : @(allowZeroRevision), @"root_ok" : @(rootOK),
+      }, nullptr) == nil) {
     if (error != nullptr && *error == nil) {
-      DSHSetProviderError(error, DSHAgentNativeStoreErrorInvalidArgument);
+      *error = rootError ?: DSHAgentNativeStoreError(
+          DSHAgentNativeStoreErrorInvalidArgument);
     }
     return NO;
   }
@@ -771,12 +466,10 @@ BOOL DSHProviderSelectorRequest(NSDictionary *request,
 
 BOOL DSHProviderSelectorMatchesRow(NSDictionary *request,
                                           NSDictionary *row) {
-  return [row[@"row_revision"] isEqual:request[@"expected_round_revision"]] &&
-      [row[@"root_fingerprint_sha256"]
-          isEqual:request[@"root"][@"root_fingerprint_sha256"]] &&
-      [row[@"binding_revision"]
-          isEqual:request[@"root"][@"workspace_binding_revision"]] &&
-      [row[@"transcript_before"] isEqual:request[@"transcript"]];
+  NSDictionary *reply = DSHProviderReduce(@"selector_matches", @{
+    @"request" : request, @"row" : row,
+  }, nullptr);
+  return [reply[@"matches"] isEqual:@YES];
 }
 
 void DSHProviderFinishContext(DSHAgentProviderRoundContext *context,

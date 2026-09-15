@@ -79,6 +79,13 @@ char *rish_agent_tool_execution_reduce(const char *json, size_t json_length);
 char *rish_agent_prepared_attempt_reduce(const char *json, size_t json_length,
                                          const uint8_t *session, size_t session_length);
 
+/// One provider-round decision over {"op","request",...}: round_request,
+/// selector_request, selector_matches, result_shape, round_cas, locator_key,
+/// assistant_message, public_receipt, recovered_projection, context_bundle,
+/// conflict, unknown_result, round_result, query_result, selector_conflict,
+/// failure_code, safe_result, tool_description, transcript_body.
+char *rish_agent_provider_round_reduce(const char *json, size_t json_length);
+
 /// "rish-agent-core <version> <git sha>" of the linked build; free with
 /// rish_agent_string_free.
 char *rish_agent_build_id(void);
