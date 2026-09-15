@@ -13,6 +13,7 @@ modules/rish/ios/Vendor/rish_agent_core.xcframework/
 modules/rish/ios/Vendor/rish_agent_core.version
 modules/rish/ios/include/rish.h
 apps/mobile/android/rish-ffi/
+apps/mobile/android/rish-agent-core/
 
 # Optional phone-local official CLI auth assets are verified build inputs,
 # never source-controlled release artifacts. Keep the directory itself

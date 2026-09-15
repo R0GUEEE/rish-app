@@ -98,8 +98,29 @@ class AndroidRuntimeStoreTest {
     @Test fun sessionDigestMatchesTheSharedJcsDomainVector() {
         val candidate = JSONObject().put("schema_version", 9).put("z", "https://example.com/你好😀")
             .put("a", org.json.JSONArray().put(true).put(JSONObject.NULL).put(1))
-        assertEquals("4604b724aeae709f20da9f323bac4618a16cba34701dadb069e4e68f930f8d97", RuntimeJson.sessionDigest(candidate.toString()))
+        assertEquals("4604b724aeae709f20da9f323bac4618a16cba34701dadb069e4e68f930f8d97", RishAgentCoreNative.session(JSONObject().put("op", "candidate_digest"), candidate.toString()).getString("digest"))
     }
+    /**
+     * The smallest session the shared schema accepts. Android used to persist
+     * anything that merely said schema_version 9; the core judges the whole
+     * root, so a fixture has to be a real session.
+     */
+    private fun emptySession(activeConversationId: Any = JSONObject.NULL): JSONObject =
+        JSONObject().put("schema_version", 9)
+            .put("workspace_authority_outbox", org.json.JSONArray())
+            .put("agent_transcript_cleanup_outbox", org.json.JSONArray())
+            .put("project_context_destructive_epoch", 0)
+            .put("project_context_destructive_transition", JSONObject.NULL)
+            .put("active_conversation_id", activeConversationId)
+            .put("conversations", org.json.JSONArray())
+            .put("messages", org.json.JSONArray())
+            .put("session_events", org.json.JSONArray())
+            .put("preferences", JSONObject().put("schema_version", 1)
+                .put("theme_mode", "system").put("locale", "system")
+                .put("default_model", "deepseek-v4-flash").put("thinking_mode", "off")
+                .put("tool_permission", "read-only").put("show_reasoning", false)
+                .put("auto_expand_tools", false).put("confirm_destructive_file_actions", true))
+
     @Test fun snapshotCASIsAtomicIdempotentAndDetectsConflicts() {
         val name = "session-test-${UUID.randomUUID()}.db"
         val store = AndroidSessionStore(context, name)
@@ -107,16 +128,36 @@ class AndroidRuntimeStoreTest {
             val operation = UUID.randomUUID().toString()
             val request = JSONObject().put("schema_version", 1).put("operation_id", operation)
                 .put("expected", JSONObject().put("schema_version", 1).put("kind", "missing"))
-                .put("candidate_json", "{ \"schema_version\": 9 }")
+                .put("candidate_json", emptySession().toString())
             val first = store.persist(request)
             assertEquals("committed", first.getString("status")); assertEquals(1, first.getJSONObject("snapshot").getInt("generation"))
             assertEquals(first.toString(), store.persist(request).toString())
-            assertEquals("{ \"schema_version\": 9 }", store.load().getString("session_json"))
+            assertEquals(emptySession().toString(), store.load().getString("session_json"))
+            // The operation is identified by the candidate it committed, not by
+            // the request's spelling: the same session in different bytes is
+            // the same commit replayed.
+            assertEquals(first.toString(), store.persist(JSONObject(request.toString())
+                .put("candidate_json", " " + emptySession().toString() + " ")).toString())
             val competing = JSONObject(request.toString()).put("operation_id", UUID.randomUUID().toString())
-            assertEquals("conflict", store.persist(competing).getString("status"))
-            try { store.persist(JSONObject(request.toString()).put("candidate_json", "{\"schema_version\":9}")); fail("Operation reuse accepted different bytes") } catch (_: IllegalArgumentException) { }
+            val conflict = store.persist(competing)
+            assertEquals("conflict", conflict.getString("status"))
+            assertEquals("present", conflict.getJSONObject("current").getString("kind"))
+            // A conflict is not written down. The same operation may be retried
+            // once its author has re-read the authority, and then it commits.
+            val retried = store.persist(JSONObject(competing.toString())
+                .put("expected", JSONObject().put("schema_version", 1).put("kind", "present")
+                    .put("snapshot", first.getJSONObject("snapshot"))))
+            assertEquals("committed", retried.getString("status"))
+            assertEquals(2, retried.getJSONObject("snapshot").getInt("generation"))
+            // A different candidate under an operation that already committed
+            // conflicts; it never overwrites what that operation settled.
+            val reused = store.persist(JSONObject(request.toString())
+                .put("candidate_json", emptySession(JSONObject.NULL).put("project_context_destructive_epoch", 1).toString()))
+            assertEquals("conflict", reused.getString("status"))
             assertEquals("committed", store.query(JSONObject().put("schema_version", 1).put("operation_id", operation)).getString("status"))
-            assertEquals(1, store.load().getJSONObject("snapshot").getInt("generation"))
+            assertEquals("not_started", store.query(JSONObject().put("schema_version", 1)
+                .put("operation_id", UUID.randomUUID().toString())).getString("status"))
+            assertEquals(2, store.load().getJSONObject("snapshot").getInt("generation"))
         } finally { store.close(); context.deleteDatabase(name) }
     }
     @Test fun unsupportedAuthorityNeverGetsCommitted() {
@@ -125,9 +166,22 @@ class AndroidRuntimeStoreTest {
         try {
             val request = JSONObject().put("schema_version", 1).put("operation_id", UUID.randomUUID().toString())
                 .put("expected", JSONObject().put("schema_version", 1).put("kind", "missing"))
-                .put("candidate_json", "{\"schema_version\":9,\"workspace_authority_outbox\":[{}]}")
-            try { store.persist(request); fail("Unsupported authority committed") } catch (_: IllegalArgumentException) { }
-            assertEquals("missing", store.load().getString("status"))
+                .put("candidate_json", emptySession().put("project_context_destructive_transition", JSONObject()).toString())
+            // Two layers refuse native authority and the test cares that
+            // neither commits: the shared rules reject a journal they do not
+            // recognise, and Android's own policy rejects the ones they do,
+            // because this platform issues no project, workspace, tool or
+            // Agent authority yet.
+            for (carrier in listOf(request,
+                JSONObject(request.toString()).put("operation_id", UUID.randomUUID().toString())
+                    .put("candidate_json", emptySession().put("workspace_authority_outbox",
+                        org.json.JSONArray().put(JSONObject().put("schema_version", 1))).toString()),
+                JSONObject(request.toString()).put("operation_id", UUID.randomUUID().toString())
+                    .put("candidate_json", emptySession().put("agent_transcript_cleanup_outbox",
+                        org.json.JSONArray().put(JSONObject().put("schema_version", 1))).toString()))) {
+                try { store.persist(carrier); fail("Unsupported authority committed") } catch (_: RuntimeException) { }
+                assertEquals("missing", store.load().getString("status"))
+            }
         } finally { store.close(); context.deleteDatabase(name) }
     }
     @Test fun cancellationBeforeWorkerBindingNeverReachesNetwork() {

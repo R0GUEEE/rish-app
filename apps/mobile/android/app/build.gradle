@@ -30,6 +30,19 @@ if (rishFfiDirProperty != null && !rishGuestEnabled) {
 def rishStagedAbis = rishGuestEnabled
     ? (new File(rishFfiDir, "jniLibs").listFiles() ?: new File[0]).findAll { it.isDirectory() && new File(it, "librish_ffi.so").isFile() }.collect { it.name }.sort()
     : []
+// The shared Rust agent core is staged by
+// scripts/prepare-rish-agent-core-android.sh into android/rish-agent-core, or
+// wherever -PrishAgentCoreDir points. Without it the session store refuses to
+// persist rather than deciding anything locally.
+def rishAgentCoreDirProperty = providers.gradleProperty("rishAgentCoreDir").orNull
+def rishAgentCoreDir = rishAgentCoreDirProperty == null ? file("$rootDir/rish-agent-core") : file(rishAgentCoreDirProperty)
+def rishAgentCoreEnabled = new File(rishAgentCoreDir, "rish_agent_core.version").isFile()
+if (rishAgentCoreDirProperty != null && !rishAgentCoreEnabled) {
+    throw new GradleException("rishAgentCoreDir has no rish_agent_core.version manifest: ${rishAgentCoreDir}; run scripts/prepare-rish-agent-core-android.sh")
+}
+def rishAgentCoreAbis = rishAgentCoreEnabled
+    ? (new File(rishAgentCoreDir, "jniLibs").listFiles() ?: new File[0]).findAll { it.isDirectory() && new File(it, "librish_agent_ffi.so").isFile() }.collect { it.name }.sort()
+    : []
 def rishGuestAssetsDir = file("$rootDir/../ios/Rish/GuestAssets")
 if (rishGuestEnabled && !new File(rishGuestAssetsDir, "SHA256SUMS").isFile()) {
     throw new GradleException("guest boot assets are missing: ${rishGuestAssetsDir}")
@@ -164,6 +177,39 @@ android {
             keepDebugSymbols += ["**/libcodex.so", "**/libclaude_code.so", "**/libmusl_loader.so"]
         }
     }
+    if (rishGuestEnabled || rishAgentCoreEnabled) {
+        externalNativeBuild {
+            cmake {
+                path file("src/main/cpp/CMakeLists.txt")
+                version "3.22.1"
+            }
+        }
+        def cmakeArguments = ["-DANDROID_SUPPORT_FLEXIBLE_PAGE_SIZES=ON"]
+        def cmakeTargets = []
+        if (rishGuestEnabled) {
+            cmakeArguments += "-DRISH_FFI_DIR=${rishFfiDir.absolutePath}".toString()
+            cmakeTargets += "rish_guest_jni"
+        }
+        if (rishAgentCoreEnabled) {
+            cmakeArguments += "-DRISH_AGENT_CORE_DIR=${rishAgentCoreDir.absolutePath}".toString()
+            cmakeTargets += "rish_agent_core_jni"
+        }
+        defaultConfig {
+            externalNativeBuild {
+                cmake {
+                    arguments(*cmakeArguments)
+                    targets(*cmakeTargets)
+                }
+            }
+        }
+    }
+    if (rishAgentCoreEnabled) {
+        sourceSets {
+            main {
+                jniLibs.srcDirs += [new File(rishAgentCoreDir, "jniLibs")]
+            }
+        }
+    }
     if (rishGuestEnabled) {
         // A guest-enabled build ships only the ABIs the runtime was staged for.
         def requestedAbis = ((project.findProperty("reactNativeArchitectures") ?: "armeabi-v7a,arm64-v8a,x86,x86_64") as String)
@@ -177,20 +223,6 @@ android {
             }
             if (buildsNative && !missingAbis.isEmpty()) {
                 throw new GradleException("rish guest runtime is staged for ${rishStagedAbis} but reactNativeArchitectures requests ${requestedAbis}; pass -PreactNativeArchitectures=${rishStagedAbis.join(',')} or stage the missing ABIs with scripts/prepare-rish-android.sh")
-            }
-        }
-        externalNativeBuild {
-            cmake {
-                path file("src/main/cpp/CMakeLists.txt")
-                version "3.22.1"
-            }
-        }
-        defaultConfig {
-            externalNativeBuild {
-                cmake {
-                    arguments "-DRISH_FFI_DIR=${rishFfiDir.absolutePath}", "-DANDROID_SUPPORT_FLEXIBLE_PAGE_SIZES=ON"
-                    targets "rish_guest_jni"
-                }
             }
         }
         sourceSets {

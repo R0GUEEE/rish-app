@@ -724,6 +724,33 @@ cancelled. What stays native is what the plan always said stays: the
 transport, the streaming parser, the preview publisher, the credentials, and
 the round context a cancellation has to reach into.
 
+### One set of session rules on both platforms
+
+Android used to decide session persistence itself. Its CAS keyed replay on the
+whole request's bytes and threw when an operation id came back with different
+ones, stored conflicts as durable receipts, and accepted any candidate that
+merely said `schema_version: 9`. None of that is what the shared rules say, so
+a session written by one platform was not necessarily a session the other
+would accept or replay the same way.
+
+`scripts/prepare-rish-agent-core-android.sh` now builds the same core for
+`aarch64-linux-android` and stages it beside the guest runtime, and
+`src/main/cpp/rish_agent_core_jni.cpp` exposes the session reducer over JNI.
+`AndroidSessionStore` keeps SQLite as the storage mechanism and nothing else:
+the request shape, the candidate's acceptance and digest, the replay and
+expected-authority checks, and what a query may conclude all come from the
+core. Three differences are gone with it — replay is keyed on the candidate,
+so the same session in different bytes is the same commit; a conflict is no
+longer written down, so an operation may be retried once its author has
+re-read the authority; and a candidate is judged by the whole schema-9
+acceptance graph.
+
+Android still refuses candidates that carry native authority, because it
+issues none: that is a platform policy stated on top of the shared rules, not
+a second reading of them. The catalogue the core needs — which strings name a
+supported model, and which harness each belongs to — is collected from the
+candidate itself, exactly as `DSHSessionCoreEnvironment` does on iOS.
+
 ### Device-only storage metadata
 
 The session store and the agent WAL require every pinned item to report

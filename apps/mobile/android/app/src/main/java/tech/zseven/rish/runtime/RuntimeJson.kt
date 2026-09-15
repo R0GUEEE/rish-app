@@ -30,7 +30,6 @@ internal object RuntimeJson {
         }
         append('"')
     }
-    fun sessionDigest(candidate: String): String = sha("rish.chat-session.v1\u0000" + canonical(JSONObject(candidate)))
     fun sha(text: String): String = MessageDigest.getInstance("SHA-256").digest(text.toByteArray(Charsets.UTF_8)).joinToString("") { "%02x".format(it) }
     fun uuid(value: String): Boolean = Regex("[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}").matches(value)
     // React Native exposes every JavaScript number as Double. JSON serialization
