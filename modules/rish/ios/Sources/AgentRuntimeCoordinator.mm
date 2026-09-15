@@ -363,11 +363,6 @@ static NSDictionary *DSHRuntimeTarget(NSDictionary *request) {
   return [value isKindOfClass:NSDictionary.class] ? value : nil;
 }
 
-static NSDictionary *DSHRuntimeReferenceForRow(NSDictionary *row) {
-  id after = row[@"transcript_after"];
-  return after == NSNull.null || after == nil ? row[@"transcript_before"] : after;
-}
-
 static NSDictionary *DSHRuntimeExecutionCAS(NSDictionary *row) {
   NSDictionary *owner = row[@"owner"];
   BOOL owned = [owner isKindOfClass:NSDictionary.class];
@@ -391,14 +386,6 @@ static NSDictionary *DSHRuntimeExecutionCAS(NSDictionary *row) {
   };
 }
 
-static NSDictionary *DSHRuntimeFindLedgerRow(NSDictionary *state,
-                                             NSDictionary *locator) {
-  for (NSDictionary *row in state[@"ledger"]) {
-    if ([row[@"locator"] isEqual:locator]) return row;
-  }
-  return nil;
-}
-
 static BOOL DSHRuntimeControllerMatchesCheckpoint(NSDictionary *controllerCAS,
                                                   NSDictionary *checkpoint) {
   return [controllerCAS isKindOfClass:NSDictionary.class] &&
@@ -411,136 +398,20 @@ static BOOL DSHRuntimeControllerMatchesCheckpoint(NSDictionary *controllerCAS,
           isEqual:checkpoint[@"session_sha256"]];
 }
 
-static NSDictionary *DSHRuntimeLatestRound(NSDictionary *state,
-                                           NSString *taskId,
-                                           NSString *attemptId) {
-  NSDictionary *latest = nil;
-  for (NSDictionary *row in state[@"rounds"]) {
-    NSDictionary *locator = row[@"locator"];
-    if (![locator[@"task_id"] isEqual:taskId] ||
-        ![locator[@"attempt_id"] isEqual:attemptId]) continue;
-    if (latest == nil || [locator[@"round_index"] unsignedIntegerValue] >
-            [latest[@"locator"][@"round_index"] unsignedIntegerValue]) {
-      latest = row;
-    }
-  }
-  return latest;
-}
-
-static NSDictionary *DSHRuntimeCommitCancelResult(
-    DSHAgentNativeWAL *wal,
-    NSDictionary *request,
-    NSDictionary *started,
-    NSDictionary *result,
-    NSError **error) {
-  NSDictionary *target = request[@"target"];
-  NSString *status = result[@"status"];
-  NSString *terminalState = [status isEqualToString:@"conflict"]
-      ? @"conflict" : (([status isEqualToString:@"unknown"] ||
-                         [status isEqualToString:@"ambiguous"])
-          ? status : @"committed");
-  NSDictionary *resultRef = @{ @"schema_version" : @2, @"kind" : @"none" };
-  id resultRevision = nil;
-  if (![status isEqualToString:@"conflict"] &&
-      ![status isEqualToString:@"unknown"] &&
-      ![status isEqualToString:@"ambiguous"] &&
-      [target[@"kind"] isEqualToString:@"attempt"]) {
-    resultRevision = started[@"record"][@"authority_revision"];
-    resultRef = @{ @"schema_version" : @2, @"kind" : @"authority",
-      @"task_id" : target[@"task_id"], @"attempt_id" : target[@"attempt_id"],
-      @"authority_revision" : resultRevision };
-  } else if (![status isEqualToString:@"conflict"] &&
-      result[@"result_execution_revision"] != NSNull.null) {
-    resultRevision = result[@"result_execution_revision"];
-    resultRef = @{ @"schema_version" : @2, @"kind" : @"tool",
-      @"task_id" : target[@"task_id"], @"attempt_id" : target[@"attempt_id"],
-      @"round_id" : target[@"round_id"], @"round_index" : target[@"round_index"],
-      @"call_index" : target[@"call_index"], @"call_id" : target[@"call_id"],
-      @"execution_revision" : resultRevision };
-  } else if (![status isEqualToString:@"conflict"] &&
-             result[@"result_round_revision"] != NSNull.null) {
-    resultRevision = result[@"result_round_revision"];
-    resultRef = @{ @"schema_version" : @2, @"kind" : @"round",
-      @"task_id" : target[@"task_id"], @"attempt_id" : target[@"attempt_id"],
-      @"round_id" : target[@"round_id"], @"round_index" : target[@"round_index"],
-      @"round_revision" : resultRevision };
-  }
-  NSDictionary *safe = @{ @"schema_version" : @2,
-    @"result_kind" : @"cancel_agent_attempt", @"result" : result };
-  NSDictionary *committed = DSHAgentNativeWALCommitOperation(
-      wal, request[@"operation_id"], started[@"request_sha256"],
-      target[@"task_id"], target[@"attempt_id"], terminalState, status,
-      resultRef, resultRevision, safe, error);
-  return committed == nil ? nil : committed[@"result"][@"result"];
-}
-
 static NSDictionary *DSHRuntimeCommitRecoveryResult(
     DSHAgentNativeWAL *wal,
     NSDictionary *request,
     NSDictionary *started,
     NSDictionary *result,
     NSError **error) {
-  NSDictionary *target = request[@"target"];
-  NSString *status = result[@"status"];
-  NSString *terminalState = [status isEqualToString:@"conflict"]
-      ? @"conflict" : @"committed";
-  NSDictionary *resultRef = @{ @"schema_version" : @2, @"kind" : @"none" };
-  id resultRevision = nil;
-  if (![status isEqualToString:@"conflict"] &&
-      [target[@"kind"] isEqualToString:@"attempt"]) {
-    resultRevision = started[@"record"][@"authority_revision"];
-    resultRef = @{ @"schema_version" : @2, @"kind" : @"authority",
-      @"task_id" : target[@"task_id"], @"attempt_id" : target[@"attempt_id"],
-      @"authority_revision" : resultRevision };
-  } else if (![status isEqualToString:@"conflict"] &&
-             [target[@"kind"] isEqualToString:@"round"]) {
-    NSDictionary *completed = result[@"completed_round"];
-    resultRevision = [completed isKindOfClass:NSDictionary.class]
-        ? completed[@"result_round_revision"]
-        : request[@"expected_round_revision"];
-    NSDictionary *state = [wal snapshotWithError:error];
-    if (state == nil) return nil;
-    for (NSDictionary *row in state[@"rounds"]) {
-      NSDictionary *locator = row[@"locator"];
-      if ([locator[@"task_id"] isEqual:target[@"task_id"]] &&
-          [locator[@"attempt_id"] isEqual:target[@"attempt_id"]] &&
-          [locator[@"round_id"] isEqual:target[@"round_id"]] &&
-          [locator[@"round_index"] isEqual:target[@"round_index"]]) {
-        resultRevision = row[@"row_revision"];
-        break;
-      }
-    }
-    resultRef = @{ @"schema_version" : @2, @"kind" : @"round",
-      @"task_id" : target[@"task_id"], @"attempt_id" : target[@"attempt_id"],
-      @"round_id" : target[@"round_id"], @"round_index" : target[@"round_index"],
-      @"round_revision" : resultRevision };
-  } else if (![status isEqualToString:@"conflict"] &&
-             [target[@"kind"] isEqualToString:@"tool"]) {
-    NSDictionary *state = [wal snapshotWithError:error];
-    if (state == nil) return nil;
-    NSDictionary *locator = @{ @"schema_version" : @2,
-      @"task_id" : target[@"task_id"], @"attempt_id" : target[@"attempt_id"],
-      @"round_id" : target[@"round_id"], @"round_index" : target[@"round_index"],
-      @"call_index" : target[@"call_index"], @"call_id" : target[@"call_id"],
-      @"idempotency_key" : target[@"idempotency_key"] };
-    resultRevision = DSHRuntimeFindLedgerRow(state, locator)[@"row_revision"];
-    if (!DSHAgentSafeInteger(resultRevision, 9007199254740991ULL, NO)) {
-      DSHSetAgentNativeStoreError(error, DSHAgentNativeStoreErrorCorrupt);
-      return nil;
-    }
-    resultRef = @{ @"schema_version" : @2, @"kind" : @"tool",
-      @"task_id" : target[@"task_id"], @"attempt_id" : target[@"attempt_id"],
-      @"round_id" : target[@"round_id"], @"round_index" : target[@"round_index"],
-      @"call_index" : target[@"call_index"], @"call_id" : target[@"call_id"],
-      @"execution_revision" : resultRevision };
-  }
-  NSDictionary *safe = @{ @"schema_version" : @2,
-    @"result_kind" : @"recover_agent_attempt", @"result" : result };
-  NSDictionary *committed = DSHAgentNativeWALCommitOperation(
-      wal, request[@"operation_id"], started[@"request_sha256"],
-      target[@"task_id"], target[@"attempt_id"], terminalState, status,
-      resultRef, resultRevision, safe, error);
-  return committed == nil ? nil : committed[@"result"][@"result"];
+  NSDictionary *state = [wal snapshotWithError:error];
+  if (state == nil) return nil;
+  NSDictionary *decided = DSHRuntimeDecide(@{
+    @"op" : @"recovery_commit", @"state" : state, @"request" : request,
+    @"started" : started, @"settled" : result,
+  }, error);
+  if (decided == nil) return nil;
+  return DSHRuntimeCommitAlone(wal, decided[@"commit"], error);
 }
 
 @interface DSHAgentRuntimeCoordinator ()
@@ -782,31 +653,23 @@ static NSDictionary *DSHRuntimeCommitRecoveryResult(
 
 - (NSDictionary *)cancelAgentAttempt:(NSDictionary *)rawRequest
                                  error:(NSError **)error {
-  NSDictionary *request = DSHRuntimeRequest(rawRequest, @[
-    @"schema_version", @"operation_id", @"controller_cas",
-    @"committed_checkpoint", @"target", @"cancel_token",
-    @"expected_round_revision", @"expected_execution_revision",
-    @"expected_transcript", @"root",
-  ], error);
-  NSDictionary *target = DSHRuntimeTarget(request);
-  if (request == nil || target == nil ||
-      !DSHRuntimeControllerMatchesCheckpoint(request[@"controller_cas"],
-                                             request[@"committed_checkpoint"]) ||
-      ![request[@"controller_cas"][@"task_id"] isEqual:target[@"task_id"]] ||
-      ![request[@"controller_cas"][@"attempt_id"] isEqual:target[@"attempt_id"]] ||
-      ![request[@"cancel_token"][@"task_id"] isEqual:target[@"task_id"]] ||
-      ![request[@"cancel_token"][@"attempt_id"] isEqual:target[@"attempt_id"]]) {
+  NSDictionary *request = DSHAgentImmutableJSONCopy(rawRequest, error);
+  if (request == nil || DSHRuntimeDecide(@{
+        @"op" : @"target_request", @"kind" : @"cancel", @"request" : request,
+      }, error) == nil) {
     DSHSetAgentNativeStoreError(error, DSHAgentNativeStoreErrorInvalidArgument);
     return nil;
   }
-  NSString *requestSHA = DSHAgentHJ(@"agent-operation-request", @{
-    @"operation_kind" : @"cancel_agent_attempt", @"request" : request,
-  }, error);
+  NSDictionary *target = request[@"target"];
+  NSDictionary *controllerCAS = request[@"controller_cas"];
+  NSString *requestSHA = DSHRuntimeOperationRequestSHA(@"cancel_agent_attempt",
+                                                       request, error);
   NSDictionary *operationQuery = requestSHA == nil ? nil :
       DSHAgentNativeWALQueryOperation(self.wal, request[@"operation_id"],
           requestSHA, target[@"task_id"], target[@"attempt_id"], error);
   if (operationQuery == nil) return nil;
-  if ([operationQuery[@"status"] isEqualToString:@"found"] &&
+  BOOL operationFound = [operationQuery[@"status"] isEqualToString:@"found"];
+  if (operationFound &&
       ![operationQuery[@"record"][@"state"] isEqualToString:@"started"]) {
     NSDictionary *replay = DSHAgentNativeWALStartTargetOperation(
         self.wal, @"cancel_agent_attempt", request, target,
@@ -815,144 +678,93 @@ static NSDictionary *DSHRuntimeCommitRecoveryResult(
     return [replay[@"status"] isEqualToString:@"replayed"]
         ? replay[@"result"][@"result"] : nil;
   }
+  NSDictionary *checkpoint = request[@"committed_checkpoint"];
   NSDictionary *sourceProof = DSHRuntimeSessionProof(
-      self.preparedStore, request[@"controller_cas"][@"conversation_id"],
+      self.preparedStore, controllerCAS[@"conversation_id"],
       target[@"task_id"], target[@"attempt_id"],
-      request[@"controller_cas"][@"expected_controller_generation"],
-      request[@"controller_cas"][@"expected_journal_revision"],
-      request[@"committed_checkpoint"][@"session_generation"],
-      request[@"committed_checkpoint"][@"session_sha256"], error);
+      controllerCAS[@"expected_controller_generation"],
+      controllerCAS[@"expected_journal_revision"],
+      checkpoint[@"session_generation"], checkpoint[@"session_sha256"], error);
   if (sourceProof == nil) return nil;
+  NSDictionary *(^conflict)(NSString *) = ^NSDictionary *(NSString *failureCode) {
+    NSError *decideError = nil;
+    return DSHRuntimeDecide(@{
+      @"op" : @"target_conflict", @"failure_code" : failureCode,
+      @"request" : request, @"proof" : sourceProof,
+    }, &decideError)[@"output"];
+  };
   if (![sourceProof[@"matches"] boolValue]) {
     if (error != nullptr) *error = nil;
-    return @{ @"schema_version" : @2, @"status" : @"conflict",
-      @"operation_id" : request[@"operation_id"], @"target" : target,
-      @"failure_code" : @"E_AGENT_CONFLICT",
-      @"expected_controller_generation" : request[@"controller_cas"][@"expected_controller_generation"],
-      @"expected_journal_revision" : request[@"controller_cas"][@"expected_journal_revision"],
-      @"actual_controller_generation" : sourceProof[@"controller_generation"],
-      @"actual_journal_revision" : sourceProof[@"journal_revision"] };
+    return conflict(@"E_AGENT_CONFLICT");
   }
   if (!DSHRuntimeCancelSourceProof(sourceProof[@"session"], request, error)) {
     if (error != nullptr) *error = nil;
-    return @{ @"schema_version" : @2, @"status" : @"conflict",
-      @"operation_id" : request[@"operation_id"], @"target" : target,
-      @"failure_code" : @"E_AGENT_CANCELLED",
-      @"expected_controller_generation" : request[@"controller_cas"][@"expected_controller_generation"],
-      @"expected_journal_revision" : request[@"controller_cas"][@"expected_journal_revision"],
-      @"actual_controller_generation" : sourceProof[@"controller_generation"],
-      @"actual_journal_revision" : sourceProof[@"journal_revision"] };
+    return conflict(@"E_AGENT_CANCELLED");
   }
   if (![self.preparedStore validatePreparedRoot:request[@"root"]
       taskId:target[@"task_id"] attemptId:target[@"attempt_id"] error:error]) {
-    return @{ @"schema_version" : @2, @"status" : @"conflict",
-      @"operation_id" : request[@"operation_id"], @"target" : target,
-      @"failure_code" : @"E_AGENT_ROOT_STALE",
-      @"expected_controller_generation" : request[@"controller_cas"][@"expected_controller_generation"],
-      @"expected_journal_revision" : request[@"controller_cas"][@"expected_journal_revision"],
-      @"actual_controller_generation" : sourceProof[@"controller_generation"],
-      @"actual_journal_revision" : sourceProof[@"journal_revision"] };
+    return conflict(@"E_AGENT_ROOT_STALE");
   }
   NSDictionary *authority = [self.preparedStore
       nativeAuthorityForTaskId:target[@"task_id"]
                      attemptId:target[@"attempt_id"] error:error];
   if (authority == nil) return nil;
-  NSNumber *operationAuthorityRevision =
-      [operationQuery[@"status"] isEqualToString:@"found"]
-      ? operationQuery[@"record"][@"authority_revision"]
-      : authority[@"authority_revision"];
   NSDictionary *started = DSHAgentNativeWALStartTargetOperation(
       self.wal, @"cancel_agent_attempt", request, target,
-      target[@"task_id"], target[@"attempt_id"], operationAuthorityRevision,
-      error);
+      target[@"task_id"], target[@"attempt_id"],
+      operationFound ? operationQuery[@"record"][@"authority_revision"]
+                     : authority[@"authority_revision"], error);
   if ([started[@"status"] isEqualToString:@"replayed"]) {
     return started[@"result"][@"result"];
   }
   if (started == nil) return nil;
+  NSDictionary *(^settle)(NSDictionary *) = ^NSDictionary *(NSDictionary *result) {
+    NSDictionary *decided = DSHRuntimeDecide(@{
+      @"op" : @"cancel_commit", @"request" : request, @"started" : started,
+      @"settled" : result,
+    }, error);
+    if (decided == nil) return nil;
+    return DSHRuntimeCommitAlone(self.wal, decided[@"commit"], error);
+  };
   NSDictionary *state = [self.wal snapshotWithError:error];
   if (state == nil) return nil;
-  NSDictionary *row = nil;
-  NSString *kind = target[@"kind"];
-  if ([kind isEqualToString:@"tool"]) {
-    for (NSDictionary *candidate in state[@"ledger"]) {
-      NSDictionary *locator = candidate[@"locator"];
-      if ([locator[@"task_id"] isEqual:target[@"task_id"]] &&
-          [locator[@"attempt_id"] isEqual:target[@"attempt_id"]] &&
-          [locator[@"round_id"] isEqual:target[@"round_id"]] &&
-          [locator[@"call_index"] isEqual:target[@"call_index"]] &&
-          [locator[@"call_id"] isEqual:target[@"call_id"]] &&
-          [locator[@"idempotency_key"] isEqual:target[@"idempotency_key"]]) {
-        row = candidate;
-        break;
-      }
-    }
+  NSDictionary *plan = DSHRuntimeDecide(@{
+    @"op" : @"cancel_plan", @"state" : state, @"request" : request,
+  }, error);
+  if (plan == nil) return nil;
+  NSString *kind = plan[@"plan"];
+  if ([kind isEqualToString:@"round"]) {
+    NSDictionary *roundTarget = plan[@"round_target"];
+    NSDictionary *cancelled = [self.roundService cancelAgentRoundWithRequest:@{
+      @"schema_version" : @2, @"task_id" : target[@"task_id"],
+      @"attempt_id" : target[@"attempt_id"],
+      @"round_id" : roundTarget[@"round_id"],
+      @"round_index" : roundTarget[@"round_index"],
+      @"expected_round_revision" : plan[@"expected_round_revision"],
+      @"transcript" : request[@"expected_transcript"], @"root" : request[@"root"],
+      @"cancel_token" : request[@"cancel_token"][@"token"],
+    } error:error];
+    if (cancelled == nil) return nil;
+    NSDictionary *result = DSHRuntimeDecide(@{
+      @"op" : @"cancel_round_result", @"request" : request,
+      @"cancelled" : cancelled, @"proof" : sourceProof,
+    }, error)[@"output"];
+    return result == nil ? nil : settle(result);
   }
-  if ([kind isEqualToString:@"round"] ||
-      ([kind isEqualToString:@"attempt"] && row == nil)) {
-    NSDictionary *round = [kind isEqualToString:@"round"] ? nil :
-        DSHRuntimeLatestRound(state, target[@"task_id"], target[@"attempt_id"]);
-    NSDictionary *roundTarget = [kind isEqualToString:@"round"] ? target : round[@"locator"];
-    id revision = [kind isEqualToString:@"round"]
-        ? request[@"expected_round_revision"] : round[@"row_revision"];
-    if (roundTarget != nil && revision != NSNull.null) {
-      NSDictionary *cancelled = [self.roundService cancelAgentRoundWithRequest:@{
-        @"schema_version" : @2, @"task_id" : target[@"task_id"],
-        @"attempt_id" : target[@"attempt_id"], @"round_id" : roundTarget[@"round_id"],
-        @"round_index" : roundTarget[@"round_index"],
-        @"expected_round_revision" : revision,
-        @"transcript" : request[@"expected_transcript"], @"root" : request[@"root"],
-        @"cancel_token" : request[@"cancel_token"][@"token"],
-      } error:error];
-      if (cancelled == nil) return nil;
-      if ([cancelled[@"status"] isEqualToString:@"conflict"]) {
-        NSDictionary *conflict = @{ @"schema_version" : @2,
-          @"status" : @"conflict", @"operation_id" : request[@"operation_id"],
-          @"target" : target,
-          @"failure_code" : cancelled[@"failure_code"] ?: @"E_AGENT_CONFLICT",
-          @"expected_controller_generation" : request[@"controller_cas"][@"expected_controller_generation"],
-          @"expected_journal_revision" : request[@"controller_cas"][@"expected_journal_revision"],
-          @"actual_controller_generation" : sourceProof[@"controller_generation"],
-          @"actual_journal_revision" : sourceProof[@"journal_revision"] };
-        return DSHRuntimeCommitCancelResult(self.wal, request, started,
-                                            conflict, error);
-      }
-      NSDictionary *result = @{ @"schema_version" : @2,
-        @"status" : [cancelled[@"status"] isEqualToString:@"cancelled"]
-            ? @"cancelled" : @"cancel_requested",
-        @"operation_id" : request[@"operation_id"], @"target" : target,
-        @"result_round_revision" : cancelled[@"result_round_revision"],
-        @"result_execution_revision" : NSNull.null,
-        @"transcript" : cancelled[@"transcript"], @"receipt" : NSNull.null,
-        @"effect_may_have_occurred" : @NO,
-        @"observed_checkpoint" : request[@"committed_checkpoint"] };
-      return DSHRuntimeCommitCancelResult(self.wal, request, started, result,
-                                          error);
-    }
+  if ([kind isEqualToString:@"never_started"]) {
+    NSDictionary *result = DSHRuntimeDecide(@{
+      @"op" : @"cancel_never_started_result", @"request" : request,
+    }, error)[@"output"];
+    return result == nil ? nil : settle(result);
   }
-  if (row == nil && [kind isEqual:@"attempt"] &&
-      [request[@"cancel_token"][@"expected_phase"] isEqual:@"ready_for_round"] &&
-      DSHRuntimeLatestRound(state, target[@"task_id"], target[@"attempt_id"]) == nil) {
-    NSDictionary *result = @{ @"schema_version" : @2, @"status" : @"cancelled",
-      @"operation_id" : request[@"operation_id"], @"target" : target,
-      @"result_round_revision" : NSNull.null, @"result_execution_revision" : NSNull.null,
-      @"transcript" : request[@"expected_transcript"], @"receipt" : NSNull.null,
-      @"effect_may_have_occurred" : @NO,
-      @"observed_checkpoint" : request[@"committed_checkpoint"] };
-    return DSHRuntimeCommitCancelResult(self.wal, request, started, result, error);
+  if ([kind isEqualToString:@"not_found"]) {
+    NSDictionary *result = DSHRuntimeDecide(@{
+      @"op" : @"cancel_not_found_result", @"request" : request,
+    }, error)[@"output"];
+    return result == nil ? nil : settle(result);
   }
-  if (row == nil) {
-    NSDictionary *result = @{ @"schema_version" : @2, @"status" : @"unknown",
-      @"operation_id" : request[@"operation_id"], @"target" : target,
-      @"result_round_revision" : NSNull.null,
-      @"result_execution_revision" : NSNull.null,
-      @"transcript" : request[@"expected_transcript"], @"receipt" : NSNull.null,
-      @"effect_may_have_occurred" : @NO,
-      @"failure_code" : @"E_AGENT_NOT_FOUND",
-      @"observed_checkpoint" : request[@"committed_checkpoint"] };
-    return DSHRuntimeCommitCancelResult(self.wal, request, started, result,
-                                        error);
-  }
-  NSString *rowState = row[@"state"];
+  NSDictionary *row = plan[@"row"];
+  NSString *rowState = plan[@"state"];
   NSDictionary *updated = nil;
   if ([rowState isEqualToString:@"intent"] ||
       [rowState isEqualToString:@"cancel_requested"]) {
@@ -964,32 +776,18 @@ static NSDictionary *DSHRuntimeCommitRecoveryResult(
     updated = [self.ledger casAgentExecutionWithCAS:DSHRuntimeExecutionCAS(row)
         patch:@{ @"state" : @"cancel_requested" } error:error][@"row"];
   } else {
-    NSDictionary *conflict = @{ @"schema_version" : @2,
-      @"status" : @"conflict", @"operation_id" : request[@"operation_id"],
-      @"target" : target, @"failure_code" : @"E_AGENT_CANCELLED",
-      @"expected_controller_generation" : request[@"controller_cas"][@"expected_controller_generation"],
-      @"expected_journal_revision" : request[@"controller_cas"][@"expected_journal_revision"],
-      @"actual_controller_generation" : sourceProof[@"controller_generation"],
-      @"actual_journal_revision" : sourceProof[@"journal_revision"] };
-    return DSHRuntimeCommitCancelResult(self.wal, request, started, conflict,
-                                        error);
+    return settle(conflict(@"E_AGENT_CANCELLED"));
   }
   if (updated == nil) return nil;
-  NSString *status = [updated[@"state"] isEqualToString:@"cancelled"]
-      ? @"cancelled" : ([updated[@"state"] isEqualToString:@"cancel_requested"]
-          ? @"cancel_requested" : @"settled");
-  NSMutableDictionary *result = [@{ @"schema_version" : @2, @"status" : status,
-    @"operation_id" : request[@"operation_id"], @"target" : target,
-    @"result_round_revision" : NSNull.null,
-    @"result_execution_revision" : updated[@"row_revision"],
-    @"transcript" : DSHRuntimeReferenceForRow(updated),
-    @"receipt" : updated[@"receipt"],
-    @"effect_may_have_occurred" :
-        @([[self.wal dispatchStateForKind:@"execution" locator:updated[@"locator"]
-                                    error:nil] isEqualToString:@"dispatched"]),
-    @"observed_checkpoint" : request[@"committed_checkpoint"] } mutableCopy];
-  return DSHRuntimeCommitCancelResult(self.wal, request, started,
-                                      [result copy], error);
+  BOOL dispatched = [[self.wal dispatchStateForKind:@"execution"
+                                             locator:updated[@"locator"]
+                                               error:nil]
+      isEqualToString:@"dispatched"];
+  NSDictionary *result = DSHRuntimeDecide(@{
+    @"op" : @"cancel_row_result", @"request" : request, @"updated" : updated,
+    @"dispatched" : @(dispatched),
+  }, error)[@"output"];
+  return result == nil ? nil : settle(result);
 }
 
 - (NSDictionary *)recoverAgentAttempt:(NSDictionary *)rawRequest

@@ -683,6 +683,18 @@ keeps speaking where it always did. A refused finalize is not a failed call:
 it commits its own conflict as the operation's result, and the golden holds
 that case too.
 
+Phase 14 takes cancellation: the target request shape both target commands
+share, the conflict shape that names what the controller expected beside what
+the session says, the plan that decides whether a cancellation addresses a
+tool row, a round, an attempt that never launched one, or nothing the WAL
+knows, every result projection, and the reference each of the two commit
+mappings points its operation result at. The effects stay native — the round
+journal cancels the round, the ledger moves the row, the execution service
+interrupts an in-flight git_push — and the host still reads its own dispatch
+marker, because only it knows whether an execution was handed out. Cancel
+rewrites no WAL rows itself, so it rides on the existing suites; the rows it
+moves are written by services that are already ported and already locked.
+
 ### Device-only storage metadata
 
 The session store and the agent WAL require every pinned item to report

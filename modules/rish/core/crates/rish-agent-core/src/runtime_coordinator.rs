@@ -1525,6 +1525,375 @@ fn settlement_json(settlement: Settlement) -> Value {
     }
 }
 
+// MARK: - cancel
+
+const CANCEL_KEYS: &[&str] = &[
+    "schema_version",
+    "operation_id",
+    "controller_cas",
+    "committed_checkpoint",
+    "target",
+    "cancel_token",
+    "expected_round_revision",
+    "expected_execution_revision",
+    "expected_transcript",
+    "root",
+];
+
+const RECOVER_KEYS: &[&str] = &[
+    "schema_version",
+    "operation_id",
+    "controller_cas",
+    "committed_checkpoint",
+    "target",
+    "action",
+    "expected_round_revision",
+    "expected_execution_revision",
+    "expected_transcript",
+    "root",
+];
+
+/// `cancelAgentAttempt` and `recoverAgentAttempt` both address a target, and
+/// the controller's own CAS has to name the same attempt as that target.
+pub fn target_request(op: &str, request: &Value) -> Result<(), StoreError> {
+    let keys = match op {
+        "cancel" => CANCEL_KEYS,
+        "recover" => RECOVER_KEYS,
+        _ => return Err(StoreError::InvalidArgument),
+    };
+    let target = get(request, "target").filter(|target| target.is_object());
+    let cas = get(request, "controller_cas");
+    let token = get(request, "cancel_token");
+    if exact_keys(Some(request), keys).is_none()
+        || get(request, "schema_version") != Some(&json!(2))
+        || target.is_none()
+        || !controller_matches_checkpoint(request)
+        || at(cas, "task_id") != at(target, "task_id")
+        || at(cas, "attempt_id") != at(target, "attempt_id")
+        || (op == "cancel"
+            && (at(token, "task_id") != at(target, "task_id")
+                || at(token, "attempt_id") != at(target, "attempt_id")))
+    {
+        return Err(StoreError::InvalidArgument);
+    }
+    Ok(())
+}
+
+/// The conflict shape both target commands report, which names what the
+/// controller expected beside what the session actually says.
+pub fn target_conflict(
+    request: &Value,
+    proof: &Value,
+    failure_code: &str,
+    with_target: bool,
+) -> Value {
+    let cas = get(request, "controller_cas");
+    let mut conflict = Map::new();
+    conflict.insert("schema_version".into(), json!(2));
+    conflict.insert("status".into(), json!("conflict"));
+    conflict.insert("operation_id".into(), owned(get(request, "operation_id")));
+    if with_target {
+        conflict.insert("target".into(), owned(get(request, "target")));
+    }
+    conflict.insert("failure_code".into(), json!(failure_code));
+    conflict.insert(
+        "expected_controller_generation".into(),
+        owned(at(cas, "expected_controller_generation")),
+    );
+    conflict.insert(
+        "expected_journal_revision".into(),
+        owned(at(cas, "expected_journal_revision")),
+    );
+    conflict.insert(
+        "actual_controller_generation".into(),
+        owned(get(proof, "controller_generation")),
+    );
+    conflict.insert(
+        "actual_journal_revision".into(),
+        owned(get(proof, "journal_revision")),
+    );
+    Value::Object(conflict)
+}
+
+/// Which cancellation this command is: the target names a tool row, a round,
+/// an attempt that never started a round, or nothing the WAL knows about.
+pub fn cancel_plan(state: &Value, request: &Value) -> Value {
+    let target = get(request, "target");
+    let kind = as_str(at(target, "kind")).unwrap_or_default();
+    let task_id = at(target, "task_id");
+    let attempt_id = at(target, "attempt_id");
+    let row = if kind == "tool" {
+        array(get(state, "ledger")).iter().find(|candidate| {
+            let locator = get(candidate, "locator");
+            at(locator, "task_id") == task_id
+                && at(locator, "attempt_id") == attempt_id
+                && at(locator, "round_id") == at(target, "round_id")
+                && at(locator, "call_index") == at(target, "call_index")
+                && at(locator, "call_id") == at(target, "call_id")
+                && at(locator, "idempotency_key") == at(target, "idempotency_key")
+        })
+    } else {
+        None
+    };
+    if kind == "round" || (kind == "attempt" && row.is_none()) {
+        let latest = if kind == "round" {
+            None
+        } else {
+            latest_round(state, task_id, attempt_id)
+        };
+        let round_target = if kind == "round" {
+            owned(target)
+        } else {
+            owned(latest.and_then(|round| get(round, "locator")))
+        };
+        let revision = if kind == "round" {
+            owned(get(request, "expected_round_revision"))
+        } else {
+            owned(latest.and_then(|round| get(round, "row_revision")))
+        };
+        if !round_target.is_null() && !revision.is_null() {
+            return json!({
+                "plan": "round",
+                "round_target": round_target,
+                "expected_round_revision": revision,
+            });
+        }
+    }
+    if row.is_none()
+        && kind == "attempt"
+        && string_eq(
+            at(get(request, "cancel_token"), "expected_phase"),
+            "ready_for_round",
+        )
+        && latest_round(state, task_id, attempt_id).is_none()
+    {
+        // Nothing has been launched yet, so the attempt is simply cancelled.
+        return json!({ "plan": "never_started" });
+    }
+    match row {
+        None => json!({ "plan": "not_found" }),
+        Some(row) => json!({ "plan": "row", "row": row, "state": get(row, "state") }),
+    }
+}
+
+fn cancel_result(request: &Value, status: &str, fields: Map<String, Value>) -> Value {
+    let mut result = Map::new();
+    result.insert("schema_version".into(), json!(2));
+    result.insert("status".into(), json!(status));
+    result.insert("operation_id".into(), owned(get(request, "operation_id")));
+    result.insert("target".into(), owned(get(request, "target")));
+    result.insert("result_round_revision".into(), Value::Null);
+    result.insert("result_execution_revision".into(), Value::Null);
+    result.insert(
+        "transcript".into(),
+        owned(get(request, "expected_transcript")),
+    );
+    result.insert("receipt".into(), Value::Null);
+    result.insert("effect_may_have_occurred".into(), json!(false));
+    result.insert(
+        "observed_checkpoint".into(),
+        owned(get(request, "committed_checkpoint")),
+    );
+    for (key, value) in fields {
+        result.insert(key, value);
+    }
+    Value::Object(result)
+}
+
+/// The answer a round cancellation reports once the round journal has spoken.
+pub fn cancel_round_result(request: &Value, cancelled: &Value, proof: &Value) -> Value {
+    if string_eq(get(cancelled, "status"), "conflict") {
+        let code = as_str(get(cancelled, "failure_code")).unwrap_or("E_AGENT_CONFLICT");
+        return target_conflict(request, proof, code, true);
+    }
+    let status = if string_eq(get(cancelled, "status"), "cancelled") {
+        "cancelled"
+    } else {
+        "cancel_requested"
+    };
+    let mut fields = Map::new();
+    fields.insert(
+        "result_round_revision".into(),
+        owned(get(cancelled, "result_round_revision")),
+    );
+    fields.insert("transcript".into(), owned(get(cancelled, "transcript")));
+    cancel_result(request, status, fields)
+}
+
+/// The answer an attempt that never launched a round reports.
+pub fn cancel_never_started_result(request: &Value) -> Value {
+    cancel_result(request, "cancelled", Map::new())
+}
+
+/// The answer a cancellation of a row the WAL does not know reports.
+pub fn cancel_not_found_result(request: &Value) -> Value {
+    let mut fields = Map::new();
+    fields.insert("failure_code".into(), json!("E_AGENT_NOT_FOUND"));
+    cancel_result(request, "unknown", fields)
+}
+
+/// The answer a tool cancellation reports once the ledger has moved the row.
+/// `dispatched` is the host's own dispatch marker: only it knows whether the
+/// execution was handed out.
+pub fn cancel_row_result(request: &Value, updated: &Value, dispatched: bool) -> Value {
+    let status = match as_str(get(updated, "state")) {
+        Some("cancelled") => "cancelled",
+        Some("cancel_requested") => "cancel_requested",
+        _ => "settled",
+    };
+    let mut fields = Map::new();
+    fields.insert(
+        "result_execution_revision".into(),
+        owned(get(updated, "row_revision")),
+    );
+    fields.insert("transcript".into(), reference_for_row(updated));
+    fields.insert("receipt".into(), owned(get(updated, "receipt")));
+    fields.insert("effect_may_have_occurred".into(), json!(dispatched));
+    cancel_result(request, status, fields)
+}
+
+/// `DSHRuntimeCommitCancelResult`: which reference the cancellation's own
+/// operation result points at.
+pub fn cancel_commit(request: &Value, started: &Value, result: &Value) -> Value {
+    let target = get(request, "target");
+    let status = as_str(get(result, "status")).unwrap_or_default();
+    let terminal_state = match status {
+        "conflict" => "conflict",
+        "unknown" | "ambiguous" => status,
+        _ => "committed",
+    };
+    let unsettled = matches!(status, "conflict" | "unknown" | "ambiguous");
+    let mut result_ref = json!({ "schema_version": 2, "kind": "none" });
+    let mut revision = Value::Null;
+    if !unsettled && string_eq(at(target, "kind"), "attempt") {
+        revision = owned(at(get(started, "record"), "authority_revision"));
+        result_ref = json!({
+            "schema_version": 2, "kind": "authority",
+            "task_id": at(target, "task_id"), "attempt_id": at(target, "attempt_id"),
+            "authority_revision": revision,
+        });
+    } else if status != "conflict" && !is_null(get(result, "result_execution_revision")) {
+        revision = owned(get(result, "result_execution_revision"));
+        result_ref = json!({
+            "schema_version": 2, "kind": "tool",
+            "task_id": at(target, "task_id"), "attempt_id": at(target, "attempt_id"),
+            "round_id": at(target, "round_id"), "round_index": at(target, "round_index"),
+            "call_index": at(target, "call_index"), "call_id": at(target, "call_id"),
+            "execution_revision": revision,
+        });
+    } else if status != "conflict" && !is_null(get(result, "result_round_revision")) {
+        revision = owned(get(result, "result_round_revision"));
+        result_ref = json!({
+            "schema_version": 2, "kind": "round",
+            "task_id": at(target, "task_id"), "attempt_id": at(target, "attempt_id"),
+            "round_id": at(target, "round_id"), "round_index": at(target, "round_index"),
+            "round_revision": revision,
+        });
+    }
+    json!({
+        "operation_id": get(request, "operation_id"),
+        "request_sha256": get(started, "request_sha256"),
+        "task_id": at(target, "task_id"),
+        "attempt_id": at(target, "attempt_id"),
+        "terminal_state": terminal_state,
+        "result_status": status,
+        "result_ref": result_ref,
+        "result_revision": revision,
+        "safe_result": {
+            "schema_version": 2,
+            "result_kind": "cancel_agent_attempt",
+            "result": result,
+        },
+    })
+}
+
+/// `DSHRuntimeCommitRecoveryResult`. The round and tool revisions are read
+/// back from the state the host hands in, because the service the recovery
+/// just ran may have moved them.
+pub fn recovery_commit(
+    state: &Value,
+    request: &Value,
+    started: &Value,
+    result: &Value,
+) -> Result<Value, StoreError> {
+    let target = get(request, "target");
+    let status = as_str(get(result, "status")).unwrap_or_default();
+    let terminal_state = if status == "conflict" {
+        "conflict"
+    } else {
+        "committed"
+    };
+    let kind = as_str(at(target, "kind")).unwrap_or_default();
+    let mut result_ref = json!({ "schema_version": 2, "kind": "none" });
+    let mut revision = Value::Null;
+    if status != "conflict" && kind == "attempt" {
+        revision = owned(at(get(started, "record"), "authority_revision"));
+        result_ref = json!({
+            "schema_version": 2, "kind": "authority",
+            "task_id": at(target, "task_id"), "attempt_id": at(target, "attempt_id"),
+            "authority_revision": revision,
+        });
+    } else if status != "conflict" && kind == "round" {
+        let completed = get(result, "completed_round");
+        revision = if completed.is_some_and(Value::is_object) {
+            owned(completed.and_then(|round| get(round, "result_round_revision")))
+        } else {
+            owned(get(request, "expected_round_revision"))
+        };
+        for row in array(get(state, "rounds")) {
+            let locator = get(row, "locator");
+            if at(locator, "task_id") == at(target, "task_id")
+                && at(locator, "attempt_id") == at(target, "attempt_id")
+                && at(locator, "round_id") == at(target, "round_id")
+                && at(locator, "round_index") == at(target, "round_index")
+            {
+                revision = owned(get(row, "row_revision"));
+                break;
+            }
+        }
+        result_ref = json!({
+            "schema_version": 2, "kind": "round",
+            "task_id": at(target, "task_id"), "attempt_id": at(target, "attempt_id"),
+            "round_id": at(target, "round_id"), "round_index": at(target, "round_index"),
+            "round_revision": revision,
+        });
+    } else if status != "conflict" && kind == "tool" {
+        let locator = json!({
+            "schema_version": 2,
+            "task_id": at(target, "task_id"), "attempt_id": at(target, "attempt_id"),
+            "round_id": at(target, "round_id"), "round_index": at(target, "round_index"),
+            "call_index": at(target, "call_index"), "call_id": at(target, "call_id"),
+            "idempotency_key": at(target, "idempotency_key"),
+        });
+        revision = owned(find_ledger_row(state, &locator).and_then(|row| get(row, "row_revision")));
+        if safe_integer(Some(&revision), MAX_SAFE_INTEGER, false).is_none() {
+            return Err(StoreError::Corrupt);
+        }
+        result_ref = json!({
+            "schema_version": 2, "kind": "tool",
+            "task_id": at(target, "task_id"), "attempt_id": at(target, "attempt_id"),
+            "round_id": at(target, "round_id"), "round_index": at(target, "round_index"),
+            "call_index": at(target, "call_index"), "call_id": at(target, "call_id"),
+            "execution_revision": revision,
+        });
+    }
+    Ok(json!({
+        "operation_id": get(request, "operation_id"),
+        "request_sha256": get(started, "request_sha256"),
+        "task_id": at(target, "task_id"),
+        "attempt_id": at(target, "attempt_id"),
+        "terminal_state": terminal_state,
+        "result_status": status,
+        "result_ref": result_ref,
+        "result_revision": revision,
+        "safe_result": {
+            "schema_version": 2,
+            "result_kind": "recover_agent_attempt",
+            "result": result,
+        },
+    }))
+}
+
 /// `rish_agent_runtime_reduce`.
 pub fn reduce_json(input: &str) -> String {
     let value = match reduce_json_inner(input) {
@@ -1654,6 +2023,55 @@ fn reduce_json_inner(input: &str) -> Result<Value, StoreError> {
             let started = get(&envelope, "started").ok_or(StoreError::InvalidArgument)?;
             let kind = as_str(get(&envelope, "kind")).ok_or(StoreError::InvalidArgument)?;
             return Ok(already_missing_commit(request, started, kind));
+        }
+        "target_request" => {
+            let kind = as_str(get(&envelope, "kind")).ok_or(StoreError::InvalidArgument)?;
+            target_request(kind, request)?;
+        }
+        "target_conflict" => {
+            let proof = get(&envelope, "proof").ok_or(StoreError::InvalidArgument)?;
+            let code = as_str(get(&envelope, "failure_code")).ok_or(StoreError::InvalidArgument)?;
+            let with_target = get(&envelope, "with_target") != Some(&json!(false));
+            reply.insert(
+                "output".into(),
+                target_conflict(request, proof, code, with_target),
+            );
+        }
+        "cancel_plan" => return Ok(cancel_plan(state, request)),
+        "cancel_round_result" => {
+            let proof = get(&envelope, "proof").ok_or(StoreError::InvalidArgument)?;
+            let cancelled = get(&envelope, "cancelled").ok_or(StoreError::InvalidArgument)?;
+            reply.insert(
+                "output".into(),
+                cancel_round_result(request, cancelled, proof),
+            );
+        }
+        "cancel_never_started_result" => {
+            reply.insert("output".into(), cancel_never_started_result(request));
+        }
+        "cancel_not_found_result" => {
+            reply.insert("output".into(), cancel_not_found_result(request));
+        }
+        "cancel_row_result" => {
+            let updated = get(&envelope, "updated").ok_or(StoreError::InvalidArgument)?;
+            let dispatched = get(&envelope, "dispatched") == Some(&json!(true));
+            reply.insert(
+                "output".into(),
+                cancel_row_result(request, updated, dispatched),
+            );
+        }
+        "cancel_commit" => {
+            let started = get(&envelope, "started").ok_or(StoreError::InvalidArgument)?;
+            let result = get(&envelope, "settled").ok_or(StoreError::InvalidArgument)?;
+            reply.insert("commit".into(), cancel_commit(request, started, result));
+        }
+        "recovery_commit" => {
+            let started = get(&envelope, "started").ok_or(StoreError::InvalidArgument)?;
+            let result = get(&envelope, "settled").ok_or(StoreError::InvalidArgument)?;
+            reply.insert(
+                "commit".into(),
+                recovery_commit(state, request, started, result)?,
+            );
         }
         "cleanup_outbox_proof" => {
             reply.insert(
