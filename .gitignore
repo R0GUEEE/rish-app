@@ -1,4 +1,5 @@
 .build/
+/build/
 .worktrees/
 .DS_Store
 modules/rish/ios/Vendor/*.a

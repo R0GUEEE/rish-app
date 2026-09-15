@@ -1420,6 +1420,21 @@ static NSMutableDictionary *DSHAgentFreshWALState(void) {
 // `rish_agent_wal_state_reduce`). This side keeps the file, the descriptors,
 // the locks and the transaction; every row the loader re-validates is judged
 // there so both platforms accept exactly the same stored state.
+static NSDictionary *DSHAgentWALCoreReduce(NSString *op, id value) {
+  NSDictionary *envelope = @{ @"op" : op, @"value" : value ?: NSNull.null };
+  NSData *bytes = [NSJSONSerialization dataWithJSONObject:envelope options:0 error:nil];
+  if (bytes == nil) return nil;
+  char *raw = rish_agent_wal_state_reduce((const char *)bytes.bytes, bytes.length);
+  if (raw == NULL) return nil;
+  NSData *replyBytes = [NSData dataWithBytes:raw length:strlen(raw)];
+  rish_agent_string_free(raw);
+  id reply = [NSJSONSerialization JSONObjectWithData:replyBytes options:0 error:nil];
+  if (![reply isKindOfClass:NSDictionary.class] || ![reply[@"ok"] isEqual:@YES]) {
+    return nil;
+  }
+  return reply;
+}
+
 static BOOL DSHAgentWALCoreValid(NSString *op, id value, NSDictionary *env) {
   NSMutableDictionary *envelope = [@{
     @"op" : op, @"value" : value ?: NSNull.null,
@@ -1648,529 +1663,51 @@ static BOOL DSHAgentWALOperationResultShape(NSDictionary *snapshot) {
 }
 
 static BOOL DSHAgentWALBatchShapeV1(NSDictionary *batch) {
-  if (!DSHAgentExactDictionaryKeys(batch, @[
-        @"schema_version", @"task_id", @"attempt_id",
-        @"root_fingerprint_sha256", @"binding_revision",
-        @"manifest_sha256", @"manifest_calls", @"write_keys",
-        @"reserved_write_bytes", @"reservation_delta_bytes",
-        @"attempt_reserved_write_bytes", @"reservation_version", @"effect_gate",
-        @"created_at", @"updated_at",
-      ]) || !DSHAgentSafeInteger(batch[@"schema_version"], 1, NO) ||
-      !DSHAgentCanonicalUUID(batch[@"task_id"]) ||
-      !DSHAgentCanonicalUUID(batch[@"attempt_id"]) ||
-      !DSHAgentCanonicalSHA256(batch[@"root_fingerprint_sha256"]) ||
-      !DSHAgentSafeInteger(batch[@"binding_revision"],
-                          DSHAgentMaximumSafeInteger, NO) ||
-      !DSHAgentCanonicalSHA256(batch[@"manifest_sha256"]) ||
-      ![batch[@"manifest_calls"] isKindOfClass:NSArray.class] ||
-      [(NSArray *)batch[@"manifest_calls"] count] == 0 ||
-      [(NSArray *)batch[@"manifest_calls"] count] > 16 ||
-      ![batch[@"write_keys"] isKindOfClass:NSArray.class] ||
-      [(NSArray *)batch[@"write_keys"] count] > 16 ||
-      !DSHAgentSafeInteger(batch[@"reserved_write_bytes"],
-                          DSHAgentNativeWALMaxAttemptWriteBytes, YES) ||
-      !DSHAgentSafeInteger(batch[@"reservation_delta_bytes"],
-                          DSHAgentNativeWALMaxBatchWriteBytes, YES) ||
-      !DSHAgentSafeInteger(batch[@"attempt_reserved_write_bytes"],
-                          DSHAgentNativeWALMaxAttemptWriteBytes, YES) ||
-      !DSHAgentSafeInteger(batch[@"reservation_version"],
-                          DSHAgentMaximumSafeInteger, NO) ||
-      [batch[@"reserved_write_bytes"] unsignedIntegerValue] >
-          [batch[@"attempt_reserved_write_bytes"] unsignedIntegerValue] ||
-      [batch[@"reservation_delta_bytes"] unsignedIntegerValue] >
-          [batch[@"attempt_reserved_write_bytes"] unsignedIntegerValue] ||
-      ![batch[@"effect_gate"] isKindOfClass:NSString.class] ||
-      (![batch[@"effect_gate"] isEqualToString:@"closed"] &&
-       ![batch[@"effect_gate"] isEqualToString:@"open"] &&
-       ![batch[@"effect_gate"] isEqualToString:@"settled"] &&
-       ![batch[@"effect_gate"] isEqualToString:@"released"]) ||
-      !DSHAgentCanonicalTimestamp(batch[@"created_at"]) ||
-      !DSHAgentCanonicalTimestamp(batch[@"updated_at"])) {
-    return NO;
-  }
-  NSMutableSet *seen = [NSMutableSet set];
-  for (id key in batch[@"write_keys"]) {
-    if (!DSHAgentCanonicalSHA256(key) || [seen containsObject:key]) return NO;
-    [seen addObject:key];
-  }
-  NSMutableArray *manifestKeys = [NSMutableArray array];
-  NSMutableSet *manifestLocators = [NSMutableSet set];
-  NSNumber *previousCallIndex = nil;
-  NSString *batchRoundId = nil;
-  NSNumber *batchRoundIndex = nil;
-  for (NSDictionary *call in batch[@"manifest_calls"]) {
-    if (![call isKindOfClass:NSDictionary.class]) return NO;
-    NSDictionary *locator = call[@"locator"];
-    if (!DSHAgentExactDictionaryKeys(call, @[
-          @"locator", @"relative_path_sha256", @"prior", @"content_sha256",
-          @"content_bytes",
-        ]) || !DSHAgentExactDictionaryKeys(locator, @[
-          @"schema_version", @"task_id", @"attempt_id", @"round_id",
-          @"round_index", @"call_index", @"call_id", @"idempotency_key",
-        ]) || ![locator[@"schema_version"] isEqual:@2] ||
-        !DSHAgentCanonicalUUID(locator[@"task_id"]) ||
-        !DSHAgentCanonicalUUID(locator[@"attempt_id"]) ||
-        !DSHAgentCanonicalUUID(locator[@"round_id"]) ||
-        ![locator[@"task_id"] isEqual:batch[@"task_id"]] ||
-        ![locator[@"attempt_id"] isEqual:batch[@"attempt_id"]] ||
-        !DSHAgentSafeInteger(locator[@"round_index"], 7, YES) ||
-        !DSHAgentSafeInteger(locator[@"call_index"], 15, YES) ||
-        DSHAgentWALOpaqueCallID(locator[@"call_id"]) == NO ||
-        !DSHAgentCanonicalSHA256(locator[@"idempotency_key"]) ||
-        !DSHAgentCanonicalSHA256(call[@"relative_path_sha256"]) ||
-        !DSHAgentCanonicalSHA256(call[@"content_sha256"]) ||
-        !DSHAgentSafeInteger(call[@"content_bytes"],
-                            DSHAgentNativeWALMaxSingleWriteBytes, YES) ||
-        !DSHAgentWALWritePriorShape(call[@"prior"])) {
-      return NO;
-    }
-    NSData *key = DSHAgentCanonicalIdentityKey(locator);
-    if (key == nil || [manifestLocators containsObject:key]) return NO;
-    NSNumber *callIndex = locator[@"call_index"];
-    if ((previousCallIndex != nil &&
-         callIndex.unsignedIntegerValue <= previousCallIndex.unsignedIntegerValue) ||
-        (batchRoundId != nil && ![batchRoundId isEqual:locator[@"round_id"]]) ||
-        (batchRoundIndex != nil &&
-         ![batchRoundIndex isEqual:locator[@"round_index"]])) {
-      return NO;
-    }
-    previousCallIndex = callIndex;
-    batchRoundId = locator[@"round_id"];
-    batchRoundIndex = locator[@"round_index"];
-    [manifestLocators addObject:key];
-    [manifestKeys addObject:locator[@"idempotency_key"]];
-  }
-  NSError *manifestError = nil;
-  NSString *expectedManifest = DSHAgentHJ(@"write-manifest", @{
-    @"calls" : batch[@"manifest_calls"],
-  }, &manifestError);
-  return expectedManifest != nil &&
-      [expectedManifest isEqual:batch[@"manifest_sha256"]] &&
-      [manifestKeys isEqualToArray:batch[@"write_keys"]];
-}
-
-static BOOL DSHAgentWALManifestCallShapeV2(NSDictionary *call,
-                                           NSDictionary *batch,
-                                           NSMutableSet *locators,
-                                           NSNumber **previousCallIndex) {
-  NSDictionary *locator = call[@"locator"];
-  if (![call isKindOfClass:NSDictionary.class] ||
-      ![call[@"schema_version"] isEqual:@2] ||
-      ![call[@"mutation_kind"] isKindOfClass:NSString.class] ||
-      !DSHAgentExactDictionaryKeys(locator, @[
-        @"schema_version", @"task_id", @"attempt_id", @"round_id",
-        @"round_index", @"call_index", @"call_id", @"idempotency_key",
-      ]) || ![locator[@"schema_version"] isEqual:@2] ||
-      ![locator[@"task_id"] isEqual:batch[@"task_id"]] ||
-      ![locator[@"attempt_id"] isEqual:batch[@"attempt_id"]] ||
-      ![locator[@"round_id"] isEqual:batch[@"round_id"]] ||
-      ![locator[@"round_index"] isEqual:batch[@"round_index"]] ||
-      !DSHAgentCanonicalUUID(locator[@"task_id"]) ||
-      !DSHAgentCanonicalUUID(locator[@"attempt_id"]) ||
-      !DSHAgentCanonicalUUID(locator[@"round_id"]) ||
-      !DSHAgentSafeInteger(locator[@"round_index"], 7, YES) ||
-      !DSHAgentSafeInteger(locator[@"call_index"], 15, YES) ||
-      !DSHAgentWALOpaqueCallID(locator[@"call_id"]) ||
-      !DSHAgentCanonicalSHA256(locator[@"idempotency_key"]) ||
-      !DSHAgentCanonicalSHA256(call[@"precondition_sha256"])) return NO;
-  NSString *mutationKind = call[@"mutation_kind"];
-  if ([mutationKind isEqualToString:@"file_write"]) {
-    if (!DSHAgentExactDictionaryKeys(call, @[
-          @"schema_version", @"mutation_kind", @"locator",
-          @"precondition_sha256", @"relative_path_sha256", @"prior",
-          @"content_sha256", @"content_bytes",
-        ]) || !DSHAgentCanonicalSHA256(call[@"relative_path_sha256"]) ||
-        !DSHAgentWALWritePriorShape(call[@"prior"]) ||
-        !DSHAgentCanonicalSHA256(call[@"content_sha256"]) ||
-        !DSHAgentSafeInteger(call[@"content_bytes"],
-                            DSHAgentNativeWALMaxSingleWriteBytes, YES)) return NO;
-  } else if ([mutationKind isEqualToString:@"git_commit"] ||
-             [mutationKind isEqualToString:@"git_push"] || [mutationKind isEqualToString:@"start_guest_cgi"] || [mutationKind isEqualToString:@"stop_guest_cgi"]) {
-    if (!DSHAgentExactDictionaryKeys(call, @[
-          @"schema_version", @"mutation_kind", @"locator",
-          @"precondition_sha256", @"content_bytes",
-        ]) || ![call[@"content_bytes"] isEqual:@0]) return NO;
-  } else {
-    return NO;
-  }
-  NSData *key = DSHAgentCanonicalIdentityKey(locator);
-  if (key == nil || [locators containsObject:key] ||
-      (*previousCallIndex != nil &&
-       [locator[@"call_index"] unsignedIntegerValue] <=
-           [*previousCallIndex unsignedIntegerValue])) return NO;
-  [locators addObject:key];
-  *previousCallIndex = locator[@"call_index"];
-  return YES;
+  return DSHAgentWALCoreValid(@"batch_v1", batch, nil);
 }
 
 static BOOL DSHAgentWALBatchShapeV2(NSDictionary *batch) {
-  if (![batch isKindOfClass:NSDictionary.class] ||
-      ![batch[@"schema_version"] isEqual:@2] ||
-      ![batch[@"kind"] isKindOfClass:NSString.class] ||
-      !DSHAgentCanonicalUUID(batch[@"task_id"]) ||
-      !DSHAgentCanonicalUUID(batch[@"attempt_id"]) ||
-      !DSHAgentCanonicalUUID(batch[@"round_id"]) ||
-      !DSHAgentSafeInteger(batch[@"round_index"], 7, YES) ||
-      !DSHAgentSafeInteger(batch[@"batch_revision"],
-                          DSHAgentMaximumSafeInteger, NO) ||
-      !DSHAgentCanonicalTimestamp(batch[@"created_at"]) ||
-      !DSHAgentCanonicalTimestamp(batch[@"updated_at"])) return NO;
-  if ([batch[@"kind"] isEqualToString:@"read_only_batch"]) {
-    return DSHAgentExactDictionaryKeys(batch, @[
-             @"schema_version", @"kind", @"task_id", @"attempt_id", @"round_id",
-             @"round_index", @"batch_revision", @"manifest_sha256",
-             @"reservation_delta_bytes", @"reserved_write_bytes",
-             @"attempt_reserved_write_bytes", @"effect_gate", @"created_at",
-             @"updated_at",
-           ]) && batch[@"manifest_sha256"] == NSNull.null &&
-        [batch[@"reservation_delta_bytes"] isEqual:@0] &&
-        [batch[@"reserved_write_bytes"] isEqual:@0] &&
-        DSHAgentSafeInteger(batch[@"attempt_reserved_write_bytes"],
-                            DSHAgentNativeWALMaxAttemptWriteBytes, YES) &&
-        [batch[@"effect_gate"] isEqualToString:@"not_applicable"];
-  }
-  if (![batch[@"kind"] isEqualToString:@"write_batch"] ||
-      !DSHAgentExactDictionaryKeys(batch, @[
-        @"schema_version", @"kind", @"task_id", @"attempt_id", @"round_id",
-        @"round_index", @"batch_revision", @"root_fingerprint_sha256",
-        @"binding_revision", @"manifest_sha256", @"manifest_calls", @"write_keys",
-        @"reservation_delta_bytes", @"reserved_write_bytes",
-        @"attempt_reserved_write_bytes", @"effect_gate", @"created_at", @"updated_at",
-      ]) || !DSHAgentCanonicalSHA256(batch[@"root_fingerprint_sha256"]) ||
-      !DSHAgentSafeInteger(batch[@"binding_revision"],
-                          DSHAgentMaximumSafeInteger, NO) ||
-      !DSHAgentCanonicalSHA256(batch[@"manifest_sha256"]) ||
-      ![batch[@"manifest_calls"] isKindOfClass:NSArray.class] ||
-      [(NSArray *)batch[@"manifest_calls"] count] == 0 ||
-      [(NSArray *)batch[@"manifest_calls"] count] > 16 ||
-      ![batch[@"write_keys"] isKindOfClass:NSArray.class] ||
-      [(NSArray *)batch[@"write_keys"] count] !=
-          [(NSArray *)batch[@"manifest_calls"] count] ||
-      !DSHAgentSafeInteger(batch[@"reservation_delta_bytes"],
-                          DSHAgentNativeWALMaxBatchWriteBytes, YES) ||
-      !DSHAgentSafeInteger(batch[@"reserved_write_bytes"],
-                          DSHAgentNativeWALMaxAttemptWriteBytes, YES) ||
-      !DSHAgentSafeInteger(batch[@"attempt_reserved_write_bytes"],
-                          DSHAgentNativeWALMaxAttemptWriteBytes, YES) ||
-      [batch[@"reserved_write_bytes"] unsignedIntegerValue] >
-          [batch[@"attempt_reserved_write_bytes"] unsignedIntegerValue] ||
-      [batch[@"reservation_delta_bytes"] unsignedIntegerValue] >
-          [batch[@"attempt_reserved_write_bytes"] unsignedIntegerValue] ||
-      (![batch[@"effect_gate"] isEqualToString:@"closed"] &&
-       ![batch[@"effect_gate"] isEqualToString:@"open"] &&
-       ![batch[@"effect_gate"] isEqualToString:@"released"])) return NO;
-  NSMutableSet *locators = [NSMutableSet set];
-  NSMutableSet *writeKeys = [NSMutableSet set];
-  NSMutableArray *manifestWriteKeys = [NSMutableArray array];
-  NSNumber *previousCallIndex = nil;
-  for (NSDictionary *call in batch[@"manifest_calls"]) {
-    if (!DSHAgentWALManifestCallShapeV2(call, batch, locators,
-                                        &previousCallIndex)) return NO;
-    [manifestWriteKeys addObject:call[@"locator"][@"idempotency_key"]];
-  }
-  for (id key in batch[@"write_keys"]) {
-    if (!DSHAgentCanonicalSHA256(key) || [writeKeys containsObject:key]) return NO;
-    [writeKeys addObject:key];
-  }
-  NSError *digestError = nil;
-  NSString *manifest = DSHAgentHJ(@"write-manifest", @{
-    @"calls" : batch[@"manifest_calls"],
-  }, &digestError);
-  return [manifestWriteKeys isEqualToArray:batch[@"write_keys"]] &&
-      [manifest isEqual:batch[@"manifest_sha256"]];
+  return DSHAgentWALCoreValid(@"batch_v2", batch, nil);
 }
 
 static BOOL DSHAgentWALToolReceiptShape(NSDictionary *receipt) {
-  if (!DSHAgentExactDictionaryKeys(receipt, @[
-        @"schema_version", @"call_id", @"name", @"arguments_sha256",
-        @"result_sha256", @"result_bytes", @"truncated", @"duration_ms",
-        @"outcome", @"failure_code", @"approval_reference",
-      ]) || ![receipt[@"schema_version"] isEqual:@1] ||
-      !DSHAgentWALOpaqueCallID(receipt[@"call_id"]) ||
-      !DSHAgentBoundedUTF8String(receipt[@"name"], 64, NO, nullptr) ||
-      !DSHAgentCanonicalSHA256(receipt[@"arguments_sha256"]) ||
-      !DSHAgentCanonicalSHA256(receipt[@"result_sha256"]) ||
-      !DSHAgentSafeInteger(receipt[@"result_bytes"], 32 * 1024 * 1024, YES) ||
-      !DSHAgentIsBooleanNumber(receipt[@"truncated"]) ||
-      !DSHAgentSafeInteger(receipt[@"duration_ms"], 24 * 60 * 60 * 1000, YES) ||
-      !(receipt[@"approval_reference"] == NSNull.null ||
-        DSHAgentCanonicalUUID(receipt[@"approval_reference"]))) return NO;
-  NSString *outcome = receipt[@"outcome"];
-  NSSet *outcomes = [NSSet setWithArray:@[
-    @"ok", @"failed", @"denied", @"cancelled", @"ambiguous",
-  ]];
-  if (![outcomes containsObject:outcome]) return NO;
-  if ([outcome isEqualToString:@"ok"]) return receipt[@"failure_code"] == NSNull.null;
-  if (!DSHAgentFailureCode(receipt[@"failure_code"])) return NO;
-  return ![outcome isEqualToString:@"ambiguous"] ||
-      [receipt[@"failure_code"] isEqualToString:@"E_AGENT_EXECUTION_AMBIGUOUS"];
+  return DSHAgentWALCoreValid(@"tool_receipt", receipt, nil);
 }
 
 static BOOL DSHAgentWALDeniedCallShape(NSDictionary *row) {
-  if (!DSHAgentExactDictionaryKeys(row, @[
-        @"schema_version", @"task_id", @"attempt_id", @"round_id", @"round_index",
-        @"call_index", @"call_id", @"name", @"arguments_sha256",
-        @"root_fingerprint_sha256", @"binding_revision", @"transcript_before",
-        @"state", @"row_revision", @"feedback", @"transcript_after", @"receipt",
-        @"created_at", @"updated_at",
-      ]) || ![row[@"schema_version"] isEqual:@1] ||
-      !DSHAgentCanonicalUUID(row[@"task_id"]) ||
-      !DSHAgentCanonicalUUID(row[@"attempt_id"]) ||
-      !DSHAgentCanonicalUUID(row[@"round_id"]) ||
-      !DSHAgentSafeInteger(row[@"round_index"], 7, YES) ||
-      !DSHAgentSafeInteger(row[@"call_index"], 15, YES) ||
-      !DSHAgentWALOpaqueCallID(row[@"call_id"]) ||
-      !DSHAgentBoundedUTF8String(row[@"name"], 64, NO, nullptr) ||
-      !DSHAgentCanonicalSHA256(row[@"arguments_sha256"]) ||
-      !DSHAgentCanonicalSHA256(row[@"root_fingerprint_sha256"]) ||
-      !DSHAgentSafeInteger(row[@"binding_revision"],
-                          DSHAgentMaximumSafeInteger, NO) ||
-      !DSHAgentWALReferenceShape(row[@"transcript_before"]) ||
-      (![row[@"state"] isEqualToString:@"denied"] &&
-       ![row[@"state"] isEqualToString:@"rejected"]) ||
-      ![row[@"row_revision"] isEqual:@1] ||
-      !DSHAgentWALReferenceShape(row[@"transcript_after"]) ||
-      !DSHAgentWALToolReceiptShape(row[@"receipt"]) ||
-      !DSHAgentCanonicalTimestamp(row[@"created_at"]) ||
-      !DSHAgentCanonicalTimestamp(row[@"updated_at"])) return NO;
-  NSDictionary *feedback = row[@"feedback"];
-  NSDictionary *payload = feedback[@"payload"];
-  // `denied` rows are durable denials (unknown tool / capability); `rejected`
-  // rows are argument refusals settled at preparation as failed results with
-  // a value-free reason token.
-  BOOL rejectedRow = [row[@"state"] isEqualToString:@"rejected"];
-  NSString *expectedOutcome = rejectedRow ? @"failed" : @"denied";
-  BOOL payloadShape = rejectedRow
-      ? (DSHAgentExactDictionaryKeys(payload, @[
-            @"schema_version", @"failure_code", @"reason",
-          ]) &&
-         DSHAgentBoundedUTF8String(payload[@"reason"], 64, NO, nullptr) &&
-         [(NSString *)payload[@"reason"] rangeOfCharacterFromSet:
-             [[NSCharacterSet characterSetWithCharactersInString:
-                 @"abcdefghijklmnopqrstuvwxyz_"] invertedSet]].location == NSNotFound &&
-         ([payload[@"failure_code"] isEqualToString:@"E_AGENT_BAD_ARGUMENTS"] ||
-          [payload[@"failure_code"] isEqualToString:@"E_AGENT_BAD_PATH"]))
-      : (DSHAgentExactDictionaryKeys(payload, @[
-            @"schema_version", @"failure_code",
-          ]) &&
-         ([payload[@"failure_code"] isEqualToString:@"E_AGENT_UNKNOWN_TOOL"] ||
-          [payload[@"failure_code"] isEqualToString:@"E_AGENT_CAPABILITY"]));
-  if (!DSHAgentExactDictionaryKeys(feedback, @[
-        @"schema_version", @"name", @"outcome", @"payload",
-      ]) || ![feedback[@"schema_version"] isEqual:@1] ||
-      ![feedback[@"name"] isEqual:row[@"name"]] ||
-      ![feedback[@"outcome"] isEqualToString:expectedOutcome] ||
-      !payloadShape || ![payload[@"schema_version"] isEqual:@1]) return NO;
-  NSError *digestError = nil;
-  NSData *feedbackBytes = DSHAgentCanonicalJSON(feedback, &digestError);
-  NSString *resultSHA = DSHAgentHB(@"tool-result", feedbackBytes, &digestError);
-  NSDictionary *receipt = row[@"receipt"];
-  return feedbackBytes.length <= 8 * 1024 &&
-      [receipt[@"call_id"] isEqual:row[@"call_id"]] &&
-      [receipt[@"name"] isEqual:row[@"name"]] &&
-      [receipt[@"arguments_sha256"] isEqual:row[@"arguments_sha256"]] &&
-      [receipt[@"result_sha256"] isEqual:resultSHA] &&
-      [receipt[@"result_bytes"] isEqual:@(feedbackBytes.length)] &&
-      [receipt[@"outcome"] isEqualToString:expectedOutcome] &&
-      [receipt[@"failure_code"] isEqual:payload[@"failure_code"]];
+  return DSHAgentWALCoreValid(@"denied_call", row, nil);
 }
 
-static BOOL DSHAgentWALRoundCallV3Shape(NSDictionary *call,
-                                        NSUInteger expectedIndex,
-                                        BOOL *denied) {
-  if (!DSHAgentExactDictionaryKeys(call, @[
-        @"schema_version", @"call_index", @"call_id", @"name",
-        @"arguments_sha256", @"safe_summary_key", @"access", @"approval_state",
-      ]) || ![call[@"schema_version"] isEqual:@3] ||
-      ![call[@"call_index"] isEqual:@(expectedIndex)] ||
-      !DSHAgentWALOpaqueCallID(call[@"call_id"]) ||
-      !DSHAgentBoundedUTF8String(call[@"name"], 64, NO, nullptr) ||
-      !DSHAgentCanonicalSHA256(call[@"arguments_sha256"]) ||
-      !DSHAgentBoundedUTF8String(call[@"safe_summary_key"], 128, NO, nullptr)) {
-    return NO;
-  }
-  NSString *access = call[@"access"];
-  BOOL durable = [access isEqualToString:@"durable_deny"];
-  static NSSet<NSString *> *knownNames;
-  static dispatch_once_t onceToken;
-  dispatch_once(&onceToken, ^{
-    knownNames = [NSSet setWithArray:@[
-      @"list_dir", @"read_file", @"write_file", @"git_status", @"git_commit",
-      @"git_push", @"start_guest_cgi", @"stop_guest_cgi",
-    ]];
-  });
-  BOOL known = [knownNames containsObject:call[@"name"]];
-  if ((!durable && ![access isEqualToString:@"auto"] &&
-       ![access isEqualToString:@"conversation_confirm"] &&
-       ![access isEqualToString:@"confirm_once"]) ||
-      (durable && ![call[@"approval_state"] isEqualToString:@"durable_denied"]) ||
-      (!durable && ![call[@"approval_state"] isEqualToString:@"deferred"]) ||
-      (!known && (!durable ||
-                  ![call[@"safe_summary_key"] isEqualToString:@"agent.unknown"]))) {
-    return NO;
-  }
-  if (denied != nullptr) *denied = durable;
-  return YES;
-}
-
+// The core judges every V3 rule and hands back the schema-2 projection; the
+// round journal's own V2 entry validator still has the last word, so a V3 row
+// can never be accepted on relations the projection would fail.
 static BOOL DSHAgentWALRoundV3Shape(NSDictionary *row) {
-  if (!DSHAgentExactDictionaryKeys(row, @[
-        @"schema_version", @"locator", @"row_revision",
-        @"root_fingerprint_sha256", @"binding_revision", @"request_sha256",
-        @"transcript_before", @"launch_attempt", @"state", @"owner",
-        @"failure_code", @"completion_receipt", @"transcript_after", @"calls",
-        @"batch_class", @"executable_call_count", @"denied_call_count",
-        @"terminal_kind", @"created_at", @"updated_at",
-      ]) || ![row[@"schema_version"] isEqual:@3] ||
-      ![row[@"calls"] isKindOfClass:NSArray.class] ||
-      [(NSArray *)row[@"calls"] count] > 16 ||
-      !DSHAgentSafeInteger(row[@"executable_call_count"], 16, YES) ||
-      !DSHAgentSafeInteger(row[@"denied_call_count"], 16, YES)) return NO;
-  NSUInteger executableCount = 0;
-  NSUInteger deniedCount = 0;
-  NSMutableArray *v2Calls = [NSMutableArray array];
-  NSUInteger index = 0;
-  for (NSDictionary *call in row[@"calls"]) {
-    BOOL denied = NO;
-    if (!DSHAgentWALRoundCallV3Shape(call, index, &denied)) return NO;
-    denied ? deniedCount++ : executableCount++;
-    [v2Calls addObject:@{
-      @"schema_version" : @1,
-      @"call_id" : call[@"call_id"],
-      @"name" : call[@"name"],
-      @"arguments_sha256" : call[@"arguments_sha256"],
-      @"safe_summary_key" : call[@"safe_summary_key"],
-      @"access" : denied ? @"auto" : call[@"access"],
-    }];
-    index += 1;
-  }
-  if (![row[@"executable_call_count"] isEqual:@(executableCount)] ||
-      ![row[@"denied_call_count"] isEqual:@(deniedCount)]) return NO;
-  id batchClass = row[@"batch_class"];
-  if (index == 0) {
-    if (batchClass != NSNull.null || executableCount != 0 || deniedCount != 0) {
-      return NO;
-    }
-  } else {
-    NSString *expectedClass = deniedCount == 0 ? @"executable" :
-        (executableCount == 0 ? @"denied_only" : @"mixed");
-    if (![batchClass isEqualToString:expectedClass]) return NO;
-  }
-  if ([row[@"state"] isEqualToString:@"completed"]) {
-    NSString *terminalKind = row[@"terminal_kind"];
-    if ([terminalKind isEqualToString:@"tool_batch"] && index == 0) return NO;
-    if (([terminalKind isEqualToString:@"final"] ||
-         [terminalKind isEqualToString:@"blocked"]) && index != 0) return NO;
-  }
-  NSMutableDictionary *v2 = [row mutableCopy];
-  v2[@"schema_version"] = @2;
-  v2[@"calls"] = v2Calls;
-  [v2 removeObjectForKey:@"batch_class"];
-  [v2 removeObjectForKey:@"executable_call_count"];
-  [v2 removeObjectForKey:@"denied_call_count"];
-  return DSHAgentValidateRoundNativeEntryV2(v2, nullptr);
+  NSDictionary *reply = DSHAgentWALCoreReduce(@"round_v3", row);
+  return [reply[@"valid"] isEqual:@YES] &&
+      DSHAgentValidateRoundNativeEntryV2(reply[@"v2"], nullptr);
 }
 
 static NSDictionary *DSHAgentWALMigrateRoundV2ToV3(NSDictionary *row,
                                                     NSError **error) {
   if (![row[@"schema_version"] isEqual:@2] ||
       !DSHAgentValidateRoundNativeEntryV2(row, error)) return nil;
-  NSSet *knownNames = [NSSet setWithArray:@[
-    @"list_dir", @"read_file", @"write_file", @"git_status", @"git_commit",
-    @"git_push", @"start_guest_cgi", @"stop_guest_cgi",
-  ]];
-  NSMutableArray *calls = [NSMutableArray array];
-  NSUInteger executableCount = 0;
-  NSUInteger deniedCount = 0;
-  NSUInteger index = 0;
-  for (NSDictionary *call in row[@"calls"]) {
-    BOOL known = [knownNames containsObject:call[@"name"]];
-    NSString *access = known ? call[@"access"] : @"durable_deny";
-    NSString *summary = known ? call[@"safe_summary_key"] : @"agent.unknown";
-    [calls addObject:@{
-      @"schema_version" : @3,
-      @"call_index" : @(index),
-      @"call_id" : call[@"call_id"],
-      @"name" : call[@"name"],
-      @"arguments_sha256" : call[@"arguments_sha256"],
-      @"safe_summary_key" : summary,
-      @"access" : access,
-      @"approval_state" : known ? @"deferred" : @"durable_denied",
-    }];
-    known ? executableCount++ : deniedCount++;
-    index += 1;
-  }
-  if ([@"tool_batch" isEqual:row[@"terminal_kind"]] && index == 0) {
+  NSDictionary *reply = DSHAgentWALCoreReduce(@"migrate_round", row);
+  if (![reply[@"valid"] isEqual:@YES] ||
+      !DSHAgentValidateRoundNativeEntryV2(reply[@"v2"], nullptr)) {
     DSHSetAgentNativeStoreError(error, DSHAgentNativeStoreErrorCorrupt);
     return nil;
   }
-  NSMutableDictionary *migrated = [row mutableCopy];
-  migrated[@"schema_version"] = @3;
-  migrated[@"calls"] = calls;
-  migrated[@"batch_class"] = index == 0 ? NSNull.null :
-      (deniedCount == 0 ? @"executable" :
-       (executableCount == 0 ? @"denied_only" : @"mixed"));
-  migrated[@"executable_call_count"] = @(executableCount);
-  migrated[@"denied_call_count"] = @(deniedCount);
-  if (!DSHAgentWALRoundV3Shape(migrated)) {
-    DSHSetAgentNativeStoreError(error, DSHAgentNativeStoreErrorCorrupt);
-    return nil;
-  }
-  return migrated;
+  return reply[@"row"];
 }
 
 static NSDictionary *DSHAgentWALMigrateBatchV1ToV2(NSDictionary *batch,
                                                     NSError **error) {
-  if (!DSHAgentWALBatchShapeV1(batch)) {
+  NSDictionary *reply = DSHAgentWALCoreReduce(@"migrate_batch", batch);
+  if (![reply[@"valid"] isEqual:@YES]) {
     DSHSetAgentNativeStoreError(error, DSHAgentNativeStoreErrorCorrupt);
     return nil;
   }
-  NSDictionary *firstLocator = batch[@"manifest_calls"][0][@"locator"];
-  NSString *roundID = firstLocator[@"round_id"];
-  NSNumber *roundIndex = firstLocator[@"round_index"];
-  NSMutableArray *manifestCalls = [NSMutableArray array];
-  for (NSDictionary *call in batch[@"manifest_calls"]) {
-    NSDictionary *locator = call[@"locator"];
-    if (![locator[@"round_id"] isEqual:roundID] ||
-        ![locator[@"round_index"] isEqual:roundIndex]) {
-      DSHSetAgentNativeStoreError(error, DSHAgentNativeStoreErrorCorrupt);
-      return nil;
-    }
-    NSDictionary *precondition = @{
-      @"schema_version" : @2, @"kind" : @"write_file",
-      @"relative_path_sha256" : call[@"relative_path_sha256"],
-      @"prior" : call[@"prior"], @"content_sha256" : call[@"content_sha256"],
-      @"content_bytes" : call[@"content_bytes"],
-    };
-    NSString *preconditionSHA = DSHAgentHJ(@"tool-precondition", @{
-      @"schema_version" : @1, @"name" : @"write_file",
-      @"precondition" : precondition,
-    }, error);
-    if (preconditionSHA == nil) return nil;
-    [manifestCalls addObject:@{
-      @"schema_version" : @2, @"mutation_kind" : @"file_write",
-      @"locator" : locator, @"precondition_sha256" : preconditionSHA,
-      @"relative_path_sha256" : call[@"relative_path_sha256"],
-      @"prior" : call[@"prior"], @"content_sha256" : call[@"content_sha256"],
-      @"content_bytes" : call[@"content_bytes"],
-    }];
-  }
-  NSMutableDictionary *migrated = [batch mutableCopy];
-  migrated[@"schema_version"] = @2;
-  migrated[@"kind"] = @"write_batch";
-  migrated[@"round_id"] = roundID;
-  migrated[@"round_index"] = roundIndex;
-  migrated[@"batch_revision"] = batch[@"reservation_version"];
-  migrated[@"manifest_calls"] = manifestCalls;
-  migrated[@"manifest_sha256"] = DSHAgentHJ(@"write-manifest", @{
-    @"calls" : manifestCalls,
-  }, error);
-  [migrated removeObjectForKey:@"reservation_version"];
-  if (!DSHAgentWALBatchShapeV2(migrated)) {
-    DSHSetAgentNativeStoreError(error, DSHAgentNativeStoreErrorCorrupt);
-    return nil;
-  }
-  return migrated;
+  return reply[@"batch"];
 }
 
 static NSMutableDictionary *DSHAgentWALMigrateV1ToV2(NSDictionary *state,

@@ -605,6 +605,17 @@ digest). The file, the descriptors, the locks and the transaction stay
 native, and the loader reaches the core through
 `rish_agent_wal_state_reduce`.
 
+The second cut adds the rows those shapes are assembled into: the legacy
+write batch and its schema-2 successor (read-only batches carry no manifest
+at all, write batches must re-derive `manifest_sha256` from their own calls
+and list exactly those calls' idempotency keys), tool receipts, denied and
+rejected calls with their canonical feedback bytes, and the schema-3 round
+row. The round row is the one place the boundary is crossed twice: the core
+judges every V3 rule and returns the schema-2 projection, which the native
+`DSHAgentValidateRoundNativeEntryV2` still has to accept before the row is
+kept. The V1→V2 batch migration and the V2→V3 round migration move with
+them, so an old file upgrades identically on both platforms.
+
 ### Device-only storage metadata
 
 The session store and the agent WAL require every pinned item to report

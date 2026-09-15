@@ -925,9 +925,775 @@ fn reduce_json_inner(input: &str) -> Result<Value, crate::store::StoreError> {
         "operation" => operation_shape(value),
         "operation_result" => operation_result_shape(value),
         "opaque_call_id" => opaque_call_id(Some(value)),
+        "batch_v1" => batch_shape_v1(value),
+        "batch_v2" => batch_shape_v2(value),
+        "tool_receipt" => tool_receipt_shape(Some(value)),
+        "denied_call" => denied_call_shape(value),
+        "round_v3" => {
+            // The caller still puts the returned schema-2 projection through
+            // the round journal's own V2 entry validator.
+            return Ok(match round_v3_projection(value) {
+                Some(v2) => json!({ "valid": true, "v2": v2 }),
+                None => json!({ "valid": false, "v2": Value::Null }),
+            });
+        }
+        "migrate_round" => {
+            return Ok(match migrate_round_v2_to_v3(value) {
+                Some((row, v2)) => json!({ "valid": true, "row": row, "v2": v2 }),
+                None => json!({ "valid": false, "row": Value::Null, "v2": Value::Null }),
+            });
+        }
+        "migrate_batch" => {
+            return Ok(match migrate_batch_v1_to_v2(value) {
+                Some(batch) => json!({ "valid": true, "batch": batch }),
+                None => json!({ "valid": false, "batch": Value::Null }),
+            });
+        }
         _ => return Err(StoreError::InvalidArgument),
     };
     Ok(json!({ "valid": valid }))
+}
+
+// MARK: - batches, receipts, denied calls and rounds
+
+const KNOWN_TOOL_NAMES: &[&str] = &[
+    "list_dir",
+    "read_file",
+    "write_file",
+    "git_status",
+    "git_commit",
+    "git_push",
+    "start_guest_cgi",
+    "stop_guest_cgi",
+];
+
+/// `DSHAgentCanonicalIdentityKey`: the canonical bytes of a locator, used to
+/// prove two manifest calls are not the same call.
+fn identity_key(value: &Value) -> Option<Vec<u8>> {
+    canonical_json(value).ok()
+}
+
+fn manifest_locator_shape(locator: Option<&Value>) -> bool {
+    let keys = [
+        "schema_version",
+        "task_id",
+        "attempt_id",
+        "round_id",
+        "round_index",
+        "call_index",
+        "call_id",
+        "idempotency_key",
+    ];
+    let l = |key: &str| locator.and_then(|l| get(l, key));
+    exact_keys(locator, &keys).is_some()
+        && l("schema_version") == Some(&json!(2))
+        && canonical_uuid(l("task_id"))
+        && canonical_uuid(l("attempt_id"))
+        && canonical_uuid(l("round_id"))
+        && safe_integer(l("round_index"), 7, true).is_some()
+        && safe_integer(l("call_index"), 15, true).is_some()
+        && opaque_call_id(l("call_id"))
+        && canonical_sha256(l("idempotency_key"))
+}
+
+/// `DSHAgentWALBatchShapeV1`: the pre-schema-2 write batch still readable on
+/// disk. Its manifest is one ascending run of write_file calls in a single
+/// round, and `write_keys` is exactly their idempotency keys in order.
+pub fn batch_shape_v1(batch: &Value) -> bool {
+    let keys = [
+        "schema_version",
+        "task_id",
+        "attempt_id",
+        "root_fingerprint_sha256",
+        "binding_revision",
+        "manifest_sha256",
+        "manifest_calls",
+        "write_keys",
+        "reserved_write_bytes",
+        "reservation_delta_bytes",
+        "attempt_reserved_write_bytes",
+        "reservation_version",
+        "effect_gate",
+        "created_at",
+        "updated_at",
+    ];
+    let b = |key: &str| get(batch, key);
+    let calls = array(b("manifest_calls"));
+    if exact_keys(Some(batch), &keys).is_none()
+        || !schema(b("schema_version"), 1)
+        || !canonical_uuid(b("task_id"))
+        || !canonical_uuid(b("attempt_id"))
+        || !canonical_sha256(b("root_fingerprint_sha256"))
+        || safe_integer(b("binding_revision"), MAX_SAFE_INTEGER, false).is_none()
+        || !canonical_sha256(b("manifest_sha256"))
+        || !b("manifest_calls").is_some_and(Value::is_array)
+        || calls.is_empty()
+        || calls.len() > 16
+        || !b("write_keys").is_some_and(Value::is_array)
+        || array(b("write_keys")).len() > 16
+        || safe_integer(b("reserved_write_bytes"), MAX_ATTEMPT_WRITE_BYTES, true).is_none()
+        || safe_integer(b("reservation_delta_bytes"), MAX_BATCH_WRITE_BYTES, true).is_none()
+        || safe_integer(
+            b("attempt_reserved_write_bytes"),
+            MAX_ATTEMPT_WRITE_BYTES,
+            true,
+        )
+        .is_none()
+        || safe_integer(b("reservation_version"), MAX_SAFE_INTEGER, false).is_none()
+        || u64_of(b("reserved_write_bytes")) > u64_of(b("attempt_reserved_write_bytes"))
+        || u64_of(b("reservation_delta_bytes")) > u64_of(b("attempt_reserved_write_bytes"))
+        || !matches!(
+            as_str(b("effect_gate")),
+            Some("closed" | "open" | "settled" | "released")
+        )
+        || !canonical_timestamp(b("created_at"))
+        || !canonical_timestamp(b("updated_at"))
+    {
+        return false;
+    }
+    let mut seen_keys: Vec<&str> = Vec::new();
+    for key in array(b("write_keys")) {
+        let text = as_str(Some(key)).unwrap_or_default();
+        if !canonical_sha256(Some(key)) || seen_keys.contains(&text) {
+            return false;
+        }
+        seen_keys.push(text);
+    }
+    let mut manifest_keys: Vec<Value> = Vec::with_capacity(calls.len());
+    let mut locators: Vec<Vec<u8>> = Vec::with_capacity(calls.len());
+    let mut previous_index: Option<u64> = None;
+    let mut round_id: Option<&Value> = None;
+    let mut round_index: Option<&Value> = None;
+    for call in calls {
+        let locator = get(call, "locator");
+        if exact_keys(
+            Some(call),
+            &[
+                "locator",
+                "relative_path_sha256",
+                "prior",
+                "content_sha256",
+                "content_bytes",
+            ],
+        )
+        .is_none()
+            || !manifest_locator_shape(locator)
+            || !equal(locator.and_then(|l| get(l, "task_id")), b("task_id"))
+            || !equal(locator.and_then(|l| get(l, "attempt_id")), b("attempt_id"))
+            || !canonical_sha256(get(call, "relative_path_sha256"))
+            || !canonical_sha256(get(call, "content_sha256"))
+            || safe_integer(get(call, "content_bytes"), MAX_SINGLE_WRITE_BYTES, true).is_none()
+            || !write_prior_shape(get(call, "prior"))
+        {
+            return false;
+        }
+        let locator = locator.expect("checked");
+        let Some(key) = identity_key(locator) else {
+            return false;
+        };
+        if locators.contains(&key) {
+            return false;
+        }
+        let call_index = u64_of(get(locator, "call_index"));
+        if previous_index.is_some_and(|previous| call_index <= previous)
+            || round_id.is_some_and(|id| Some(id) != get(locator, "round_id"))
+            || round_index.is_some_and(|index| Some(index) != get(locator, "round_index"))
+        {
+            return false;
+        }
+        previous_index = Some(call_index);
+        round_id = get(locator, "round_id");
+        round_index = get(locator, "round_index");
+        locators.push(key);
+        manifest_keys.push(
+            get(locator, "idempotency_key")
+                .cloned()
+                .unwrap_or(Value::Null),
+        );
+    }
+    let manifest = hash_json("write-manifest", &json!({ "calls": b("manifest_calls") }));
+    as_str(b("manifest_sha256")) == manifest.as_deref()
+        && b("write_keys") == Some(&Value::Array(manifest_keys))
+}
+
+/// `DSHAgentWALManifestCallShapeV2`.
+fn manifest_call_shape_v2(
+    call: &Value,
+    batch: &Value,
+    locators: &mut Vec<Vec<u8>>,
+    previous_index: &mut Option<u64>,
+) -> bool {
+    let locator = get(call, "locator");
+    let l = |key: &str| locator.and_then(|l| get(l, key));
+    if !call.is_object()
+        || get(call, "schema_version") != Some(&json!(2))
+        || !get(call, "mutation_kind").is_some_and(Value::is_string)
+        || !manifest_locator_shape(locator)
+        || !equal(l("task_id"), get(batch, "task_id"))
+        || !equal(l("attempt_id"), get(batch, "attempt_id"))
+        || !equal(l("round_id"), get(batch, "round_id"))
+        || !equal(l("round_index"), get(batch, "round_index"))
+        || !canonical_sha256(get(call, "precondition_sha256"))
+    {
+        return false;
+    }
+    match as_str(get(call, "mutation_kind")) {
+        Some("file_write") => {
+            let keys = [
+                "schema_version",
+                "mutation_kind",
+                "locator",
+                "precondition_sha256",
+                "relative_path_sha256",
+                "prior",
+                "content_sha256",
+                "content_bytes",
+            ];
+            if exact_keys(Some(call), &keys).is_none()
+                || !canonical_sha256(get(call, "relative_path_sha256"))
+                || !write_prior_shape(get(call, "prior"))
+                || !canonical_sha256(get(call, "content_sha256"))
+                || safe_integer(get(call, "content_bytes"), MAX_SINGLE_WRITE_BYTES, true).is_none()
+            {
+                return false;
+            }
+        }
+        Some("git_commit" | "git_push" | "start_guest_cgi" | "stop_guest_cgi") => {
+            if exact_keys(
+                Some(call),
+                &[
+                    "schema_version",
+                    "mutation_kind",
+                    "locator",
+                    "precondition_sha256",
+                    "content_bytes",
+                ],
+            )
+            .is_none()
+                || get(call, "content_bytes") != Some(&json!(0))
+            {
+                return false;
+            }
+        }
+        _ => return false,
+    }
+    let Some(key) = identity_key(locator.expect("checked")) else {
+        return false;
+    };
+    let call_index = u64_of(l("call_index"));
+    if locators.contains(&key) || previous_index.is_some_and(|previous| call_index <= previous) {
+        return false;
+    }
+    locators.push(key);
+    *previous_index = Some(call_index);
+    true
+}
+
+/// `DSHAgentWALBatchShapeV2`: the read-only batch carries no manifest at all;
+/// the write batch's manifest digest and write keys must match its calls.
+pub fn batch_shape_v2(batch: &Value) -> bool {
+    let b = |key: &str| get(batch, key);
+    if !batch.is_object()
+        || b("schema_version") != Some(&json!(2))
+        || !b("kind").is_some_and(Value::is_string)
+        || !canonical_uuid(b("task_id"))
+        || !canonical_uuid(b("attempt_id"))
+        || !canonical_uuid(b("round_id"))
+        || safe_integer(b("round_index"), 7, true).is_none()
+        || safe_integer(b("batch_revision"), MAX_SAFE_INTEGER, false).is_none()
+        || !canonical_timestamp(b("created_at"))
+        || !canonical_timestamp(b("updated_at"))
+    {
+        return false;
+    }
+    if string_eq(b("kind"), "read_only_batch") {
+        let keys = [
+            "schema_version",
+            "kind",
+            "task_id",
+            "attempt_id",
+            "round_id",
+            "round_index",
+            "batch_revision",
+            "manifest_sha256",
+            "reservation_delta_bytes",
+            "reserved_write_bytes",
+            "attempt_reserved_write_bytes",
+            "effect_gate",
+            "created_at",
+            "updated_at",
+        ];
+        return exact_keys(Some(batch), &keys).is_some()
+            && is_null(b("manifest_sha256"))
+            && b("reservation_delta_bytes") == Some(&json!(0))
+            && b("reserved_write_bytes") == Some(&json!(0))
+            && safe_integer(
+                b("attempt_reserved_write_bytes"),
+                MAX_ATTEMPT_WRITE_BYTES,
+                true,
+            )
+            .is_some()
+            && string_eq(b("effect_gate"), "not_applicable");
+    }
+    let keys = [
+        "schema_version",
+        "kind",
+        "task_id",
+        "attempt_id",
+        "round_id",
+        "round_index",
+        "batch_revision",
+        "root_fingerprint_sha256",
+        "binding_revision",
+        "manifest_sha256",
+        "manifest_calls",
+        "write_keys",
+        "reservation_delta_bytes",
+        "reserved_write_bytes",
+        "attempt_reserved_write_bytes",
+        "effect_gate",
+        "created_at",
+        "updated_at",
+    ];
+    let calls = array(b("manifest_calls"));
+    if !string_eq(b("kind"), "write_batch")
+        || exact_keys(Some(batch), &keys).is_none()
+        || !canonical_sha256(b("root_fingerprint_sha256"))
+        || safe_integer(b("binding_revision"), MAX_SAFE_INTEGER, false).is_none()
+        || !canonical_sha256(b("manifest_sha256"))
+        || !b("manifest_calls").is_some_and(Value::is_array)
+        || calls.is_empty()
+        || calls.len() > 16
+        || !b("write_keys").is_some_and(Value::is_array)
+        || array(b("write_keys")).len() != calls.len()
+        || safe_integer(b("reservation_delta_bytes"), MAX_BATCH_WRITE_BYTES, true).is_none()
+        || safe_integer(b("reserved_write_bytes"), MAX_ATTEMPT_WRITE_BYTES, true).is_none()
+        || safe_integer(
+            b("attempt_reserved_write_bytes"),
+            MAX_ATTEMPT_WRITE_BYTES,
+            true,
+        )
+        .is_none()
+        || u64_of(b("reserved_write_bytes")) > u64_of(b("attempt_reserved_write_bytes"))
+        || u64_of(b("reservation_delta_bytes")) > u64_of(b("attempt_reserved_write_bytes"))
+        || !matches!(
+            as_str(b("effect_gate")),
+            Some("closed" | "open" | "released")
+        )
+    {
+        return false;
+    }
+    let mut locators: Vec<Vec<u8>> = Vec::with_capacity(calls.len());
+    let mut previous_index: Option<u64> = None;
+    let mut manifest_keys: Vec<Value> = Vec::with_capacity(calls.len());
+    for call in calls {
+        if !manifest_call_shape_v2(call, batch, &mut locators, &mut previous_index) {
+            return false;
+        }
+        manifest_keys.push(
+            get(call, "locator")
+                .and_then(|l| get(l, "idempotency_key"))
+                .cloned()
+                .unwrap_or(Value::Null),
+        );
+    }
+    let mut seen: Vec<&str> = Vec::new();
+    for key in array(b("write_keys")) {
+        let text = as_str(Some(key)).unwrap_or_default();
+        if !canonical_sha256(Some(key)) || seen.contains(&text) {
+            return false;
+        }
+        seen.push(text);
+    }
+    let manifest = hash_json("write-manifest", &json!({ "calls": b("manifest_calls") }));
+    b("write_keys") == Some(&Value::Array(manifest_keys))
+        && as_str(b("manifest_sha256")) == manifest.as_deref()
+}
+
+/// `DSHAgentWALToolReceiptShape`.
+pub fn tool_receipt_shape(receipt: Option<&Value>) -> bool {
+    let keys = [
+        "schema_version",
+        "call_id",
+        "name",
+        "arguments_sha256",
+        "result_sha256",
+        "result_bytes",
+        "truncated",
+        "duration_ms",
+        "outcome",
+        "failure_code",
+        "approval_reference",
+    ];
+    let r = |key: &str| receipt.and_then(|r| get(r, key));
+    if exact_keys(receipt, &keys).is_none()
+        || r("schema_version") != Some(&json!(1))
+        || !opaque_call_id(r("call_id"))
+        || bounded_utf8(r("name"), 64, false).is_none()
+        || !canonical_sha256(r("arguments_sha256"))
+        || !canonical_sha256(r("result_sha256"))
+        || safe_integer(r("result_bytes"), 32 * 1024 * 1024, true).is_none()
+        || !is_boolean(r("truncated"))
+        || safe_integer(r("duration_ms"), 24 * 60 * 60 * 1000, true).is_none()
+        || !(is_null(r("approval_reference")) || canonical_uuid(r("approval_reference")))
+    {
+        return false;
+    }
+    let outcome = as_str(r("outcome")).unwrap_or_default();
+    if !matches!(
+        outcome,
+        "ok" | "failed" | "denied" | "cancelled" | "ambiguous"
+    ) {
+        return false;
+    }
+    if outcome == "ok" {
+        return is_null(r("failure_code"));
+    }
+    if !crate::schema::failure_code(r("failure_code")) {
+        return false;
+    }
+    outcome != "ambiguous" || string_eq(r("failure_code"), "E_AGENT_EXECUTION_AMBIGUOUS")
+}
+
+/// `DSHAgentWALDeniedCallShape`: a durable denial or an argument refusal,
+/// settled at preparation with its own receipt and canonical feedback.
+pub fn denied_call_shape(row: &Value) -> bool {
+    let keys = [
+        "schema_version",
+        "task_id",
+        "attempt_id",
+        "round_id",
+        "round_index",
+        "call_index",
+        "call_id",
+        "name",
+        "arguments_sha256",
+        "root_fingerprint_sha256",
+        "binding_revision",
+        "transcript_before",
+        "state",
+        "row_revision",
+        "feedback",
+        "transcript_after",
+        "receipt",
+        "created_at",
+        "updated_at",
+    ];
+    let r = |key: &str| get(row, key);
+    if exact_keys(Some(row), &keys).is_none()
+        || r("schema_version") != Some(&json!(1))
+        || !canonical_uuid(r("task_id"))
+        || !canonical_uuid(r("attempt_id"))
+        || !canonical_uuid(r("round_id"))
+        || safe_integer(r("round_index"), 7, true).is_none()
+        || safe_integer(r("call_index"), 15, true).is_none()
+        || !opaque_call_id(r("call_id"))
+        || bounded_utf8(r("name"), 64, false).is_none()
+        || !canonical_sha256(r("arguments_sha256"))
+        || !canonical_sha256(r("root_fingerprint_sha256"))
+        || safe_integer(r("binding_revision"), MAX_SAFE_INTEGER, false).is_none()
+        || !reference_shape(r("transcript_before"))
+        || !matches!(as_str(r("state")), Some("denied" | "rejected"))
+        || r("row_revision") != Some(&json!(1))
+        || !reference_shape(r("transcript_after"))
+        || !tool_receipt_shape(r("receipt"))
+        || !canonical_timestamp(r("created_at"))
+        || !canonical_timestamp(r("updated_at"))
+    {
+        return false;
+    }
+    let feedback = r("feedback");
+    let payload = feedback.and_then(|f| get(f, "payload"));
+    let p = |key: &str| payload.and_then(|p| get(p, key));
+    // `denied` rows are durable denials (unknown tool / capability); `rejected`
+    // rows are argument refusals settled at preparation as failed results with
+    // a value-free reason token.
+    let rejected = string_eq(r("state"), "rejected");
+    let expected_outcome = if rejected { "failed" } else { "denied" };
+    let payload_shape = if rejected {
+        exact_keys(payload, &["schema_version", "failure_code", "reason"]).is_some()
+            && bounded_utf8(p("reason"), 64, false)
+                .is_some_and(|reason| reason.bytes().all(|b| b.is_ascii_lowercase() || b == b'_'))
+            && matches!(
+                as_str(p("failure_code")),
+                Some("E_AGENT_BAD_ARGUMENTS" | "E_AGENT_BAD_PATH")
+            )
+    } else {
+        exact_keys(payload, &["schema_version", "failure_code"]).is_some()
+            && matches!(
+                as_str(p("failure_code")),
+                Some("E_AGENT_UNKNOWN_TOOL" | "E_AGENT_CAPABILITY")
+            )
+    };
+    if exact_keys(feedback, &["schema_version", "name", "outcome", "payload"]).is_none()
+        || feedback.and_then(|f| get(f, "schema_version")) != Some(&json!(1))
+        || !equal(feedback.and_then(|f| get(f, "name")), r("name"))
+        || !string_eq(feedback.and_then(|f| get(f, "outcome")), expected_outcome)
+        || !payload_shape
+        || p("schema_version") != Some(&json!(1))
+    {
+        return false;
+    }
+    let Ok(bytes) = canonical_json(feedback.expect("checked")) else {
+        return false;
+    };
+    let Some(result_sha) = crate::canonical::hash_bytes("tool-result", &bytes) else {
+        return false;
+    };
+    let receipt = r("receipt");
+    let c = |key: &str| receipt.and_then(|r| get(r, key));
+    bytes.len() <= 8 * 1024
+        && equal(c("call_id"), r("call_id"))
+        && equal(c("name"), r("name"))
+        && equal(c("arguments_sha256"), r("arguments_sha256"))
+        && as_str(c("result_sha256")) == Some(result_sha.as_str())
+        && u64_of(c("result_bytes")) == bytes.len() as u64
+        && string_eq(c("outcome"), expected_outcome)
+        && equal(c("failure_code"), p("failure_code"))
+}
+
+/// `DSHAgentWALRoundCallV3Shape`; `Some(true)` when the call is a durable
+/// denial.
+fn round_call_v3_shape(call: &Value, expected_index: usize) -> Option<bool> {
+    let keys = [
+        "schema_version",
+        "call_index",
+        "call_id",
+        "name",
+        "arguments_sha256",
+        "safe_summary_key",
+        "access",
+        "approval_state",
+    ];
+    let c = |key: &str| get(call, key);
+    if exact_keys(Some(call), &keys).is_none()
+        || c("schema_version") != Some(&json!(3))
+        || c("call_index") != Some(&json!(expected_index))
+        || !opaque_call_id(c("call_id"))
+        || bounded_utf8(c("name"), 64, false).is_none()
+        || !canonical_sha256(c("arguments_sha256"))
+        || bounded_utf8(c("safe_summary_key"), 128, false).is_none()
+    {
+        return None;
+    }
+    let access = as_str(c("access")).unwrap_or_default();
+    let durable = access == "durable_deny";
+    let known = as_str(c("name")).is_some_and(|name| KNOWN_TOOL_NAMES.contains(&name));
+    let approval = if durable {
+        string_eq(c("approval_state"), "durable_denied")
+    } else {
+        matches!(access, "auto" | "conversation_confirm" | "confirm_once")
+            && string_eq(c("approval_state"), "deferred")
+    };
+    // An unknown tool can only appear as a durable denial, under the one
+    // summary key that carries no arguments.
+    if !approval || (!known && (!durable || !string_eq(c("safe_summary_key"), "agent.unknown"))) {
+        return None;
+    }
+    Some(durable)
+}
+
+/// `DSHAgentWALRoundV3Shape`'s own half: every V3 rule, and the schema-2
+/// projection the caller still puts through the round journal's V2 entry
+/// validator. `None` when a V3 rule fails.
+pub fn round_v3_projection(row: &Value) -> Option<Value> {
+    let r = |key: &str| get(row, key);
+    let keys = [
+        "schema_version",
+        "locator",
+        "row_revision",
+        "root_fingerprint_sha256",
+        "binding_revision",
+        "request_sha256",
+        "transcript_before",
+        "launch_attempt",
+        "state",
+        "owner",
+        "failure_code",
+        "completion_receipt",
+        "transcript_after",
+        "calls",
+        "batch_class",
+        "executable_call_count",
+        "denied_call_count",
+        "terminal_kind",
+        "created_at",
+        "updated_at",
+    ];
+    let calls = array(r("calls"));
+    if exact_keys(Some(row), &keys).is_none()
+        || r("schema_version") != Some(&json!(3))
+        || !r("calls").is_some_and(Value::is_array)
+        || calls.len() > 16
+        || safe_integer(r("executable_call_count"), 16, true).is_none()
+        || safe_integer(r("denied_call_count"), 16, true).is_none()
+    {
+        return None;
+    }
+    let mut executable = 0usize;
+    let mut denied_count = 0usize;
+    let mut v2_calls = Vec::with_capacity(calls.len());
+    for (index, call) in calls.iter().enumerate() {
+        let denied = round_call_v3_shape(call, index)?;
+        if denied {
+            denied_count += 1;
+        } else {
+            executable += 1;
+        }
+        v2_calls.push(json!({
+            "schema_version": 1,
+            "call_id": get(call, "call_id"),
+            "name": get(call, "name"),
+            "arguments_sha256": get(call, "arguments_sha256"),
+            "safe_summary_key": get(call, "safe_summary_key"),
+            // The V2 shape has no durable-deny access; a denied call projects
+            // back to the access it would have had.
+            "access": if denied { json!("auto") } else { get(call, "access").cloned().unwrap_or(Value::Null) },
+        }));
+    }
+    if r("executable_call_count") != Some(&json!(executable))
+        || r("denied_call_count") != Some(&json!(denied_count))
+    {
+        return None;
+    }
+    if calls.is_empty() {
+        if !is_null(r("batch_class")) || executable != 0 || denied_count != 0 {
+            return None;
+        }
+    } else {
+        let expected = if denied_count == 0 {
+            "executable"
+        } else if executable == 0 {
+            "denied_only"
+        } else {
+            "mixed"
+        };
+        if !string_eq(r("batch_class"), expected) {
+            return None;
+        }
+    }
+    if string_eq(r("state"), "completed") {
+        let terminal = as_str(r("terminal_kind")).unwrap_or_default();
+        if (terminal == "tool_batch" && calls.is_empty())
+            || (matches!(terminal, "final" | "blocked") && !calls.is_empty())
+        {
+            return None;
+        }
+    }
+    let mut v2 = row.as_object()?.clone();
+    v2.insert("schema_version".into(), json!(2));
+    v2.insert("calls".into(), Value::Array(v2_calls));
+    v2.remove("batch_class");
+    v2.remove("executable_call_count");
+    v2.remove("denied_call_count");
+    Some(Value::Object(v2))
+}
+
+// MARK: - migrations
+
+/// `DSHAgentWALMigrateRoundV2ToV3` after the caller has proved the row is a
+/// valid schema-2 round entry. Returns the migrated row and its own schema-2
+/// projection, which the caller still puts through the V2 entry validator.
+pub fn migrate_round_v2_to_v3(row: &Value) -> Option<(Value, Value)> {
+    if get(row, "schema_version") != Some(&json!(2)) {
+        return None;
+    }
+    let mut calls = Vec::new();
+    let mut executable = 0usize;
+    let mut denied = 0usize;
+    for (index, call) in array(get(row, "calls")).iter().enumerate() {
+        let known = as_str(get(call, "name")).is_some_and(|name| KNOWN_TOOL_NAMES.contains(&name));
+        calls.push(json!({
+            "schema_version": 3,
+            "call_index": index,
+            "call_id": get(call, "call_id"),
+            "name": get(call, "name"),
+            "arguments_sha256": get(call, "arguments_sha256"),
+            "safe_summary_key": if known { get(call, "safe_summary_key").cloned().unwrap_or(Value::Null) } else { json!("agent.unknown") },
+            "access": if known { get(call, "access").cloned().unwrap_or(Value::Null) } else { json!("durable_deny") },
+            "approval_state": if known { "deferred" } else { "durable_denied" },
+        }));
+        if known {
+            executable += 1;
+        } else {
+            denied += 1;
+        }
+    }
+    if string_eq(get(row, "terminal_kind"), "tool_batch") && calls.is_empty() {
+        return None;
+    }
+    let mut migrated = row.as_object()?.clone();
+    migrated.insert("schema_version".into(), json!(3));
+    let batch_class = if calls.is_empty() {
+        Value::Null
+    } else if denied == 0 {
+        json!("executable")
+    } else if executable == 0 {
+        json!("denied_only")
+    } else {
+        json!("mixed")
+    };
+    migrated.insert("calls".into(), Value::Array(calls));
+    migrated.insert("batch_class".into(), batch_class);
+    migrated.insert("executable_call_count".into(), json!(executable));
+    migrated.insert("denied_call_count".into(), json!(denied));
+    let migrated = Value::Object(migrated);
+    let v2 = round_v3_projection(&migrated)?;
+    Some((migrated, v2))
+}
+
+/// `DSHAgentWALMigrateBatchV1ToV2`: every legacy call becomes a file_write
+/// mutation with the precondition digest the ledger now stores.
+pub fn migrate_batch_v1_to_v2(batch: &Value) -> Option<Value> {
+    if !batch_shape_v1(batch) {
+        return None;
+    }
+    let calls = array(get(batch, "manifest_calls"));
+    let first = get(calls.first()?, "locator")?;
+    let round_id = get(first, "round_id")?.clone();
+    let round_index = get(first, "round_index")?.clone();
+    let mut manifest_calls = Vec::with_capacity(calls.len());
+    for call in calls {
+        let locator = get(call, "locator")?;
+        if get(locator, "round_id") != Some(&round_id)
+            || get(locator, "round_index") != Some(&round_index)
+        {
+            return None;
+        }
+        let precondition = json!({
+            "schema_version": 2, "kind": "write_file",
+            "relative_path_sha256": get(call, "relative_path_sha256"),
+            "prior": get(call, "prior"), "content_sha256": get(call, "content_sha256"),
+            "content_bytes": get(call, "content_bytes"),
+        });
+        let digest = hash_json(
+            "tool-precondition",
+            &json!({ "schema_version": 1, "name": "write_file", "precondition": precondition }),
+        )?;
+        manifest_calls.push(json!({
+            "schema_version": 2, "mutation_kind": "file_write",
+            "locator": locator, "precondition_sha256": digest,
+            "relative_path_sha256": get(call, "relative_path_sha256"),
+            "prior": get(call, "prior"), "content_sha256": get(call, "content_sha256"),
+            "content_bytes": get(call, "content_bytes"),
+        }));
+    }
+    let manifest_calls = Value::Array(manifest_calls);
+    let manifest = hash_json("write-manifest", &json!({ "calls": manifest_calls }))?;
+    let mut migrated = batch.as_object()?.clone();
+    migrated.insert("schema_version".into(), json!(2));
+    migrated.insert("kind".into(), json!("write_batch"));
+    migrated.insert("round_id".into(), round_id);
+    migrated.insert("round_index".into(), round_index);
+    migrated.insert(
+        "batch_revision".into(),
+        get(batch, "reservation_version")?.clone(),
+    );
+    migrated.insert("manifest_calls".into(), manifest_calls);
+    migrated.insert("manifest_sha256".into(), json!(manifest));
+    migrated.remove("reservation_version");
+    let migrated = Value::Object(migrated);
+    batch_shape_v2(&migrated).then_some(migrated)
 }
 
 #[cfg(test)]
