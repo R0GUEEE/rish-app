@@ -1420,8 +1420,12 @@ static NSMutableDictionary *DSHAgentFreshWALState(void) {
 // `rish_agent_wal_state_reduce`). This side keeps the file, the descriptors,
 // the locks and the transaction; every row the loader re-validates is judged
 // there so both platforms accept exactly the same stored state.
-static NSDictionary *DSHAgentWALCoreReduce(NSString *op, id value) {
-  NSDictionary *envelope = @{ @"op" : op, @"value" : value ?: NSNull.null };
+static NSDictionary *DSHAgentWALCoreReduceWithEnvironment(NSString *op, id value,
+                                                          NSDictionary *env) {
+  NSMutableDictionary *envelope = [@{
+    @"op" : op, @"value" : value ?: NSNull.null,
+  } mutableCopy];
+  if (env != nil) envelope[@"env"] = env;
   NSData *bytes = [NSJSONSerialization dataWithJSONObject:envelope options:0 error:nil];
   if (bytes == nil) return nil;
   char *raw = rish_agent_wal_state_reduce((const char *)bytes.bytes, bytes.length);
@@ -1433,6 +1437,10 @@ static NSDictionary *DSHAgentWALCoreReduce(NSString *op, id value) {
     return nil;
   }
   return reply;
+}
+
+static NSDictionary *DSHAgentWALCoreReduce(NSString *op, id value) {
+  return DSHAgentWALCoreReduceWithEnvironment(op, value, nil);
 }
 
 static BOOL DSHAgentWALCoreValid(NSString *op, id value, NSDictionary *env) {
@@ -1472,56 +1480,8 @@ static NSDictionary *DSHAgentWALCoreEnvironment(NSDictionary *authority) {
   };
 }
 
-static NSUInteger DSHAgentAttemptCount(NSArray *rows, NSString *attemptID) {
-  NSUInteger count = 0;
-  for (NSDictionary *row in rows) {
-    if (![row isKindOfClass:NSDictionary.class]) continue;
-    NSDictionary *locator = row[@"locator"];
-    if ([locator isKindOfClass:NSDictionary.class] &&
-        [locator[@"attempt_id"] isEqual:attemptID]) {
-      count += 1;
-    }
-  }
-  return count;
-}
-
 static BOOL DSHAgentWALReferenceShape(NSDictionary *reference) {
   return DSHAgentWALCoreValid(@"reference", reference, nil);
-}
-
-static BOOL DSHAgentWALTranscriptBound(NSDictionary *state,
-                                       NSDictionary *row) {
-  NSDictionary *before = row[@"transcript_before"];
-  NSString *stateName = row[@"state"];
-  if (![stateName isKindOfClass:NSString.class] ||
-      ![before isKindOfClass:NSDictionary.class]) return NO;
-  if (([stateName isEqualToString:@"completed"] ||
-       [stateName isEqualToString:@"settled"] ||
-       [stateName isEqualToString:@"cancelled"] ||
-       [stateName isEqualToString:@"ambiguous"]) &&
-      row[@"transcript_after"] != NSNull.null) {
-    before = row[@"transcript_after"];
-  }
-  NSDictionary *locator = row[@"locator"];
-  for (NSDictionary *transcript in state[@"transcripts"]) {
-    if ([transcript[@"transcript_ref"] isEqual:before[@"transcript_ref"]] &&
-        [transcript[@"attempt_id"] isEqual:locator[@"attempt_id"]] &&
-        [transcript[@"root_fingerprint_sha256"]
-            isEqual:row[@"root_fingerprint_sha256"]] &&
-        (([transcript[@"generation"] isEqual:before[@"generation"]] &&
-          [transcript[@"transcript_sha256"] isEqual:before[@"transcript_sha256"]] &&
-          [transcript[@"transcript_bytes"] isEqual:before[@"transcript_bytes"]]) ||
-         ([transcript[@"generation"] unsignedIntegerValue] >
-              [before[@"generation"] unsignedIntegerValue]) ||
-         (row[@"transcript_after"] == NSNull.null &&
-          (![stateName isEqualToString:@"intent"] &&
-           ![stateName isEqualToString:@"running"] &&
-           ![stateName isEqualToString:@"in_flight"] &&
-           ![stateName isEqualToString:@"cancel_requested"])))) {
-      return YES;
-    }
-  }
-  return NO;
 }
 
 static BOOL DSHAgentWALMessageShape(NSDictionary *message) {
@@ -1539,8 +1499,6 @@ static BOOL DSHAgentWALCleanupShape(NSDictionary *cleanup) {
 static BOOL DSHAgentWALDispatchShape(NSDictionary *dispatch) {
   return DSHAgentWALCoreValid(@"dispatch", dispatch, nil);
 }
-
-static NSData *DSHAgentCanonicalIdentityKey(id value);
 
 static BOOL DSHAgentWALWritePriorShape(NSDictionary *prior) {
   return DSHAgentWALCoreValid(@"write_prior", prior, nil);
@@ -1800,689 +1758,72 @@ static NSString *DSHAgentFindDispatchState(NSArray *dispatchRows,
                                            NSString *kind,
                                            NSDictionary *locator);
 
-static NSData *DSHAgentCanonicalIdentityKey(id value) {
-  NSError *canonicalError = nil;
-  return DSHAgentCanonicalJSON(value, &canonicalError);
-}
-
 /// WAL bootstrap rejects malformed rows before a typed view can accidentally
 /// use them. Full typed round/ledger validators are mandatory here; these
 /// checks additionally cover the shared envelope, cross-store bindings, and
 /// uniqueness relations.
-static BOOL DSHAgentWALRowsShape(NSDictionary *state, NSError **error) {
+// The typed round and execution-ledger entry validators stay native, so the
+// loader hands the core one verdict per row alongside the state. A ledger row
+// the native validator refuses comes back by index, and the native validator
+// is asked again so the error it reports is its own.
+static NSDictionary *DSHAgentWALRowVerdicts(NSDictionary *state) {
   const BOOL schemaV2 = [state[@"schema_version"] isEqual:@2];
-  NSMutableSet *transcriptRefs = [NSMutableSet set];
-  NSMutableSet *transcriptAttempts = [NSMutableSet set];
-  for (NSDictionary *transcript in state[@"transcripts"]) {
-    if (![transcript isKindOfClass:NSDictionary.class]) {
-      DSHSetAgentNativeStoreError(error, DSHAgentNativeStoreErrorCorrupt);
-      return NO;
-    }
-    if (!DSHAgentExactDictionaryKeys(transcript, @[
-          @"schema_version", @"transcript_ref", @"attempt_id",
-          @"root_fingerprint_sha256", @"generation", @"messages",
-          @"transcript_sha256", @"transcript_bytes", @"state",
-          @"retention_until", @"created_at", @"updated_at",
-        ]) || !DSHAgentSafeInteger(transcript[@"schema_version"], 1, NO) ||
-        !DSHAgentCanonicalUUID(transcript[@"transcript_ref"]) ||
-        !DSHAgentCanonicalUUID(transcript[@"attempt_id"]) ||
-        !DSHAgentCanonicalSHA256(transcript[@"root_fingerprint_sha256"]) ||
-        !DSHAgentSafeInteger(transcript[@"generation"], DSHAgentMaximumSafeInteger, YES) ||
-        ![transcript[@"messages"] isKindOfClass:NSArray.class] ||
-        [(NSArray *)transcript[@"messages"] count] > 1024 ||
-        !DSHAgentCanonicalSHA256(transcript[@"transcript_sha256"]) ||
-        !DSHAgentSafeInteger(transcript[@"transcript_bytes"],
-                            DSHAgentNativeWALMaxTranscriptBytes, YES) ||
-        ![transcript[@"state"] isKindOfClass:NSString.class] ||
-        (![transcript[@"state"] isEqualToString:@"open"] &&
-         ![transcript[@"state"] isEqualToString:@"terminal"] &&
-         ![transcript[@"state"] isEqualToString:@"cleanup_pending"]) ||
-        !(transcript[@"retention_until"] == NSNull.null ||
-          DSHAgentCanonicalTimestamp(transcript[@"retention_until"])) ||
-        !DSHAgentCanonicalTimestamp(transcript[@"created_at"]) ||
-        !DSHAgentCanonicalTimestamp(transcript[@"updated_at"])) {
-      DSHSetAgentNativeStoreError(error, DSHAgentNativeStoreErrorCorrupt);
-      return NO;
-    }
-    NSData *transcriptRef = DSHAgentCanonicalIdentityKey(
-        transcript[@"transcript_ref"]);
-    if (transcriptRef == nil || [transcriptRefs containsObject:transcriptRef] ||
-        [transcriptAttempts containsObject:transcript[@"attempt_id"]]) {
-      DSHSetAgentNativeStoreError(error, DSHAgentNativeStoreErrorCorrupt);
-      return NO;
-    }
-    [transcriptRefs addObject:transcriptRef];
-    [transcriptAttempts addObject:transcript[@"attempt_id"]];
-    for (NSDictionary *message in transcript[@"messages"]) {
-      if (!DSHAgentWALMessageShape(message)) {
-        DSHSetAgentNativeStoreError(error, DSHAgentNativeStoreErrorCorrupt);
-        return NO;
-      }
-    }
-    NSError *transcriptBytesError = nil;
-    NSData *transcriptEnvelope = DSHAgentCanonicalJSON(transcript, &transcriptBytesError);
-    if (transcriptEnvelope == nil) {
-      DSHSetAgentNativeStoreError(error, DSHAgentNativeStoreErrorCorrupt);
-      return NO;
-    }
-    NSDictionary *digestInput = @{
-      @"schema_version" : @1,
-      @"transcript_ref" : transcript[@"transcript_ref"],
-      @"attempt_id" : transcript[@"attempt_id"],
-      @"root_fingerprint_sha256" : transcript[@"root_fingerprint_sha256"],
-      @"generation" : transcript[@"generation"],
-      @"messages" : transcript[@"messages"],
-    };
-    NSError *transcriptDigestError = nil;
-    NSString *actualTranscriptDigest = DSHAgentHJ(
-        @"agent-transcript", digestInput, &transcriptDigestError);
-    NSData *transcriptDigestBytes = DSHAgentCanonicalJSON(digestInput,
-                                                           &transcriptDigestError);
-    if (actualTranscriptDigest == nil || transcriptDigestBytes == nil ||
-        ![transcript[@"transcript_bytes"] isEqual:@(transcriptDigestBytes.length)] ||
-        ![actualTranscriptDigest isEqual:transcript[@"transcript_sha256"]]) {
-      DSHSetAgentNativeStoreError(error, DSHAgentNativeStoreErrorCorrupt);
-      return NO;
-    }
+  NSMutableArray<NSNumber *> *roundValid = [NSMutableArray array];
+  for (id round in state[@"rounds"]) {
+    BOOL valid = [round isKindOfClass:NSDictionary.class] &&
+        (schemaV2 ? DSHAgentWALRoundV3Shape(round)
+                  : DSHAgentValidateRoundNativeEntryV2(round, nullptr));
+    [roundValid addObject:@(valid)];
   }
-  if (schemaV2) {
-    NSMutableSet *authorityKeys = [NSMutableSet set];
-    if ([(NSArray *)state[@"authorities"] count] >
-        DSHAgentNativeWALMaxAuthorities) {
-      DSHSetAgentNativeStoreError(error, DSHAgentNativeStoreErrorCapacity);
-      return NO;
-    }
-    for (NSDictionary *authority in state[@"authorities"]) {
-      if (!DSHAgentWALAuthorityShape(authority)) {
-        DSHSetAgentNativeStoreError(error, DSHAgentNativeStoreErrorCorrupt);
-        return NO;
-      }
-      NSString *key = [NSString stringWithFormat:@"%@:%@",
-          authority[@"task_id"], authority[@"attempt_id"]];
-      if ([authorityKeys containsObject:key]) {
-        DSHSetAgentNativeStoreError(error, DSHAgentNativeStoreErrorCorrupt);
-        return NO;
-      }
-      [authorityKeys addObject:key];
-      NSUInteger transcriptMatches = 0;
-      for (NSDictionary *transcript in state[@"transcripts"]) {
-        if ([transcript[@"transcript_ref"]
-                isEqual:authority[@"transcript"][@"transcript_ref"]]) {
-          transcriptMatches += 1;
-          if (![transcript[@"attempt_id"] isEqual:authority[@"attempt_id"]] ||
-              ![transcript[@"root_fingerprint_sha256"]
-                  isEqual:authority[@"root"][@"root_fingerprint_sha256"]]) {
-            DSHSetAgentNativeStoreError(error, DSHAgentNativeStoreErrorCorrupt);
-            return NO;
-          }
-        }
-      }
-      if (transcriptMatches != 1) {
-        DSHSetAgentNativeStoreError(error, DSHAgentNativeStoreErrorCorrupt);
-        return NO;
-      }
-    }
-    NSMutableDictionary<NSString *, NSDictionary *> *snapshotsByID =
-        [NSMutableDictionary dictionary];
-    if ([(NSArray *)state[@"operation_results"] count] >
-        DSHAgentNativeWALMaxOperations) {
-      DSHSetAgentNativeStoreError(error, DSHAgentNativeStoreErrorCapacity);
-      return NO;
-    }
-    for (NSDictionary *snapshot in state[@"operation_results"]) {
-      if (!DSHAgentWALOperationResultShape(snapshot) ||
-          snapshotsByID[snapshot[@"operation_id"]] != nil) {
-        DSHSetAgentNativeStoreError(error, DSHAgentNativeStoreErrorCorrupt);
-        return NO;
-      }
-      snapshotsByID[snapshot[@"operation_id"]] = snapshot;
-    }
-    NSMutableSet *operationIDs = [NSMutableSet set];
-    NSMutableDictionary<NSString *, NSNumber *> *operationCounts =
-        [NSMutableDictionary dictionary];
-    if ([(NSArray *)state[@"operations"] count] > DSHAgentNativeWALMaxOperations) {
-      DSHSetAgentNativeStoreError(error, DSHAgentNativeStoreErrorCapacity);
-      return NO;
-    }
-    for (NSDictionary *operation in state[@"operations"]) {
-      NSError *recordBytesError = nil;
-      NSData *recordBytes = DSHAgentCanonicalJSON(operation, &recordBytesError);
-      if (!DSHAgentWALOperationShape(operation) || recordBytes == nil ||
-          recordBytes.length > DSHAgentNativeWALMaxOperationRecordBytes ||
-          [operationIDs containsObject:operation[@"operation_id"]]) {
-        DSHSetAgentNativeStoreError(error, DSHAgentNativeStoreErrorCorrupt);
-        return NO;
-      }
-      [operationIDs addObject:operation[@"operation_id"]];
-      NSString *attemptID = operation[@"attempt_id"];
-      NSUInteger count = [operationCounts[attemptID] unsignedIntegerValue] + 1;
-      if (count > DSHAgentNativeWALMaxOperationsPerAttempt) {
-        DSHSetAgentNativeStoreError(error, DSHAgentNativeStoreErrorCapacity);
-        return NO;
-      }
-      operationCounts[attemptID] = @(count);
-      NSDictionary *snapshot = snapshotsByID[operation[@"operation_id"]];
-      if (operation[@"result_snapshot_ref"] == NSNull.null) {
-        if (snapshot != nil) {
-          DSHSetAgentNativeStoreError(error, DSHAgentNativeStoreErrorCorrupt);
-          return NO;
-        }
-      } else if (snapshot == nil ||
-                 ![snapshot[@"operation_kind"]
-                     isEqual:operation[@"operation_kind"]] ||
-                 ![snapshot[@"result_status"]
-                     isEqual:operation[@"result_status"]] ||
-                 ![snapshot[@"result_sha256"]
-                     isEqual:operation[@"result_snapshot_ref"][@"result_sha256"]] ||
-                 ![snapshot[@"result_bytes"]
-                     isEqual:operation[@"result_snapshot_ref"][@"result_bytes"]]) {
-        DSHSetAgentNativeStoreError(error, DSHAgentNativeStoreErrorCorrupt);
-        return NO;
-      }
-    }
-    for (NSString *operationID in snapshotsByID) {
-      if (![operationIDs containsObject:operationID]) {
-        DSHSetAgentNativeStoreError(error, DSHAgentNativeStoreErrorCorrupt);
-        return NO;
-      }
-    }
+  NSMutableArray<NSNumber *> *ledgerValid = [NSMutableArray array];
+  for (id ledger in state[@"ledger"]) {
+    BOOL valid = [ledger isKindOfClass:NSDictionary.class] &&
+        DSHAgentValidateExecutionLedgerEntryV2(ledger, nullptr);
+    [ledgerValid addObject:@(valid)];
   }
-  NSMutableSet *roundLocators = [NSMutableSet set];
-  for (NSDictionary *round in state[@"rounds"]) {
-    if (![round isKindOfClass:NSDictionary.class]) {
-      DSHSetAgentNativeStoreError(error, DSHAgentNativeStoreErrorCorrupt);
-      return NO;
-    }
-    NSDictionary *locator = round[@"locator"];
-    BOOL validRound = schemaV2 ? DSHAgentWALRoundV3Shape(round) :
-        DSHAgentValidateRoundNativeEntryV2(round, nullptr);
-    if (!validRound) {
-      DSHSetAgentNativeStoreError(error, DSHAgentNativeStoreErrorCorrupt);
-      return NO;
-    }
-    NSData *roundKey = DSHAgentCanonicalIdentityKey(locator);
-    if (roundKey == nil || [roundLocators containsObject:roundKey]) {
-      DSHSetAgentNativeStoreError(error, DSHAgentNativeStoreErrorCorrupt);
-      return NO;
-    }
-    [roundLocators addObject:roundKey];
-    if (!DSHAgentWALTranscriptBound(state, round)) {
-      DSHSetAgentNativeStoreError(error, DSHAgentNativeStoreErrorCorrupt);
-      return NO;
-    }
-  }
-  NSMutableDictionary<NSString *, NSNumber *> *roundCounts = [NSMutableDictionary dictionary];
-  for (NSDictionary *round in state[@"rounds"]) {
-    NSString *attemptId = round[@"locator"][@"attempt_id"];
-    NSUInteger count = [roundCounts[attemptId] unsignedIntegerValue];
-    if (count >= DSHAgentNativeWALMaxRoundRowsPerAttempt) {
-      DSHSetAgentNativeStoreError(error, DSHAgentNativeStoreErrorCapacity);
-      return NO;
-    }
-    roundCounts[attemptId] = @(count + 1);
-  }
-  NSMutableSet *ledgerLocators = [NSMutableSet set];
-  for (NSDictionary *ledger in state[@"ledger"]) {
-    if (![ledger isKindOfClass:NSDictionary.class]) {
-      DSHSetAgentNativeStoreError(error, DSHAgentNativeStoreErrorCorrupt);
-      return NO;
-    }
-    NSDictionary *locator = ledger[@"locator"];
-    if (!DSHAgentExactDictionaryKeys(ledger, @[
-          @"schema_version", @"locator", @"row_revision",
-          @"root_fingerprint_sha256", @"binding_revision", @"transcript_before",
-          @"name", @"arguments_sha256", @"precondition", @"reserved_write_bytes",
-          @"state", @"owner", @"settled_facts", @"transcript_after", @"receipt",
-          @"created_at", @"updated_at",
-        ]) || ![ledger[@"schema_version"] isEqual:@2] ||
-        !DSHAgentExactDictionaryKeys(locator, @[
-          @"schema_version", @"task_id", @"attempt_id", @"round_id",
-          @"round_index", @"call_index", @"call_id", @"idempotency_key",
-        ]) || ![locator[@"schema_version"] isEqual:@2] ||
-        !DSHAgentCanonicalUUID(locator[@"task_id"]) ||
-        !DSHAgentCanonicalUUID(locator[@"attempt_id"]) ||
-        !DSHAgentCanonicalUUID(locator[@"round_id"]) ||
-        !DSHAgentSafeInteger(locator[@"round_index"], 7, YES) ||
-        !DSHAgentSafeInteger(locator[@"call_index"], 15, YES) ||
-        !DSHAgentCanonicalSHA256(locator[@"idempotency_key"]) ||
-        !DSHAgentBoundedUTF8String(locator[@"call_id"], 128, NO, nullptr) ||
-        !DSHAgentSafeInteger(ledger[@"row_revision"], DSHAgentMaximumSafeInteger, NO) ||
-        !DSHAgentCanonicalSHA256(ledger[@"root_fingerprint_sha256"]) ||
-        !DSHAgentSafeInteger(ledger[@"binding_revision"], DSHAgentMaximumSafeInteger, NO) ||
-        !DSHAgentWALReferenceShape(ledger[@"transcript_before"]) ||
-        !DSHAgentBoundedUTF8String(ledger[@"name"], 64, NO, nullptr) ||
-        !DSHAgentCanonicalSHA256(ledger[@"arguments_sha256"]) ||
-        !DSHAgentSafeInteger(ledger[@"reserved_write_bytes"],
-                            DSHAgentNativeWALMaxSingleWriteBytes, YES) ||
-        ![ledger[@"state"] isKindOfClass:NSString.class] ||
-        (![ledger[@"state"] isEqualToString:@"intent"] &&
-         ![ledger[@"state"] isEqualToString:@"running"] &&
-         ![ledger[@"state"] isEqualToString:@"cancel_requested"] &&
-         ![ledger[@"state"] isEqualToString:@"settled"] &&
-         ![ledger[@"state"] isEqualToString:@"cancelled"] &&
-         ![ledger[@"state"] isEqualToString:@"unknown"] &&
-         ![ledger[@"state"] isEqualToString:@"ambiguous"]) ||
-        !DSHAgentCanonicalTimestamp(ledger[@"created_at"]) ||
-        !DSHAgentCanonicalTimestamp(ledger[@"updated_at"])) {
-      DSHSetAgentNativeStoreError(error, DSHAgentNativeStoreErrorCorrupt);
-      return NO;
-    }
-    NSData *ledgerKey = DSHAgentCanonicalIdentityKey(locator);
-    if (ledgerKey == nil || [ledgerLocators containsObject:ledgerKey]) {
-      DSHSetAgentNativeStoreError(error, DSHAgentNativeStoreErrorCorrupt);
-      return NO;
-    }
-    [ledgerLocators addObject:ledgerKey];
-    if (!DSHAgentValidateExecutionLedgerEntryV2(ledger, error)) {
-      return NO;
-    }
-    if (!DSHAgentWALTranscriptBound(state, ledger)) {
-      DSHSetAgentNativeStoreError(error, DSHAgentNativeStoreErrorCorrupt);
-      return NO;
-    }
-  }
-  NSMutableSet *reservationIdentities = [NSMutableSet set];
-  for (NSDictionary *reservation in state[@"reservations"]) {
-    if (!DSHAgentWALReservationShape(reservation)) {
-      DSHSetAgentNativeStoreError(error, DSHAgentNativeStoreErrorCorrupt);
-      return NO;
-    }
-    NSString *reservationKey = [NSString stringWithFormat:@"%@:%@",
-      reservation[@"task_id"], reservation[@"attempt_id"]];
-    if ([reservationIdentities containsObject:reservationKey]) {
-      DSHSetAgentNativeStoreError(error, DSHAgentNativeStoreErrorCorrupt);
-      return NO;
-    }
-    [reservationIdentities addObject:reservationKey];
-  }
-  NSMutableSet *cleanupIdentities = [NSMutableSet set];
-  for (NSDictionary *cleanup in state[@"cleanup"]) {
-    if (!DSHAgentWALCleanupShape(cleanup)) {
-      DSHSetAgentNativeStoreError(error, DSHAgentNativeStoreErrorCorrupt);
-      return NO;
-    }
-    if ([cleanupIdentities containsObject:cleanup[@"cleanup_id"]]) {
-      DSHSetAgentNativeStoreError(error, DSHAgentNativeStoreErrorCorrupt);
-      return NO;
-    }
-    [cleanupIdentities addObject:cleanup[@"cleanup_id"]];
-    NSUInteger matchingTranscripts = 0;
-    for (NSDictionary *transcript in state[@"transcripts"]) {
-      if (![transcript[@"transcript_ref"] isEqual:cleanup[@"transcript_ref"]]) {
-        continue;
-      }
-      matchingTranscripts += 1;
-      if (![transcript[@"attempt_id"] isEqual:cleanup[@"attempt_id"]] ||
-          ![transcript[@"transcript_sha256"]
-              isEqual:cleanup[@"transcript_sha256"]]) {
-        DSHSetAgentNativeStoreError(error, DSHAgentNativeStoreErrorCorrupt);
-        return NO;
-      }
-    }
-    if (([cleanup[@"status"] isEqualToString:@"pending"] &&
-         matchingTranscripts != 1) ||
-        ([cleanup[@"status"] isEqualToString:@"discarded"] &&
-         matchingTranscripts != 0)) {
-      DSHSetAgentNativeStoreError(error, DSHAgentNativeStoreErrorCorrupt);
-      return NO;
-    }
-  }
-  NSMutableSet *dispatchKeys = [NSMutableSet set];
-  for (NSDictionary *dispatch in state[@"dispatch"]) {
-    if (!DSHAgentWALDispatchShape(dispatch)) {
-      DSHSetAgentNativeStoreError(error, DSHAgentNativeStoreErrorCorrupt);
-      return NO;
-    }
-    NSError *dispatchBytesError = nil;
-    NSData *dispatchBytes = DSHAgentCanonicalJSON(dispatch[@"locator"], &dispatchBytesError);
-    NSString *dispatchKey = [NSString stringWithFormat:@"%@:%@",
-      dispatch[@"kind"], [[NSString alloc] initWithData:dispatchBytes ?: NSData.data
-                                                encoding:NSUTF8StringEncoding]];
-    if ([dispatchKeys containsObject:dispatchKey]) {
-      DSHSetAgentNativeStoreError(error, DSHAgentNativeStoreErrorCorrupt);
-      return NO;
-    }
-    [dispatchKeys addObject:dispatchKey];
-  }
-  NSMutableSet *batchKeys = [NSMutableSet set];
-  NSMutableDictionary<NSString *, NSNumber *> *batchCounts =
+  NSMutableArray<NSString *> *models = [NSMutableArray array];
+  NSMutableDictionary<NSString *, NSString *> *harnessByModel =
       [NSMutableDictionary dictionary];
-  for (NSDictionary *batch in state[@"batches"]) {
-    BOOL validBatch = schemaV2 ? DSHAgentWALBatchShapeV2(batch) :
-        DSHAgentWALBatchShapeV1(batch);
-    if (!validBatch) {
-      DSHSetAgentNativeStoreError(error, DSHAgentNativeStoreErrorCorrupt);
-      return NO;
-    }
-    NSString *identity = schemaV2
-        ? [NSString stringWithFormat:@"%@:%@:%@:%@:%@",
-            batch[@"task_id"], batch[@"attempt_id"], batch[@"round_id"],
-            batch[@"round_index"], batch[@"batch_revision"]]
-        : [NSString stringWithFormat:@"%@:%@:%@",
-            batch[@"task_id"], batch[@"attempt_id"], batch[@"manifest_sha256"]];
-    if ([batchKeys containsObject:identity]) {
-      DSHSetAgentNativeStoreError(error, DSHAgentNativeStoreErrorCorrupt);
-      return NO;
-    }
-    [batchKeys addObject:identity];
-    NSString *batchAttemptID = batch[@"attempt_id"];
-    NSUInteger batchCount = [batchCounts[batchAttemptID] unsignedIntegerValue] + 1;
-    if (schemaV2 && batchCount > DSHAgentNativeWALMaxBatchesPerAttempt) {
-      DSHSetAgentNativeStoreError(error, DSHAgentNativeStoreErrorCapacity);
-      return NO;
-    }
-    batchCounts[batchAttemptID] = @(batchCount);
-    if (schemaV2 && [batch[@"kind"] isEqualToString:@"read_only_batch"]) {
+  for (id authority in state[@"authorities"]) {
+    id model = [authority isKindOfClass:NSDictionary.class] ? authority[@"model"] : nil;
+    if (![model isKindOfClass:NSString.class] || harnessByModel[model] != nil ||
+        !DSHHarnessIsSupportedModel(model)) {
       continue;
     }
-    NSDictionary *reservation = nil;
-    for (NSDictionary *candidate in state[@"reservations"]) {
-      if ([candidate[@"task_id"] isEqual:batch[@"task_id"]] &&
-          [candidate[@"attempt_id"] isEqual:batch[@"attempt_id"]]) {
-        if (reservation != nil ||
-            ![candidate[@"root_fingerprint_sha256"]
-                isEqual:batch[@"root_fingerprint_sha256"]] ||
-            ![candidate[@"binding_revision"] isEqual:batch[@"binding_revision"]] ||
-            [batch[@"reservation_delta_bytes"] unsignedIntegerValue] >
-                [candidate[@"policy"][@"max_batch_write_bytes"] unsignedIntegerValue] ||
-            [(schemaV2 ? batch[@"batch_revision"] : batch[@"reservation_version"])
-                unsignedIntegerValue] >
-                [candidate[@"reservation_version"] unsignedIntegerValue]) {
-          DSHSetAgentNativeStoreError(error, DSHAgentNativeStoreErrorCorrupt);
-          return NO;
-        }
-        reservation = candidate;
-      }
-    }
-    if (reservation == nil) {
-      DSHSetAgentNativeStoreError(error, DSHAgentNativeStoreErrorCorrupt);
-      return NO;
-    }
-    for (NSDictionary *manifestCall in batch[@"manifest_calls"]) {
-      NSUInteger matchingRows = 0;
-      for (NSDictionary *ledger in state[@"ledger"]) {
-        if (![ledger[@"locator"] isEqual:manifestCall[@"locator"]]) continue;
-        matchingRows += 1;
-        NSDictionary *precondition = ledger[@"precondition"];
-        // Schema-one batches predate the mutation discriminator and contain
-        // file-write calls only.  Validate those rows against their legacy
-        // shape before the atomic bootstrap migration adds the V2 digest.
-        NSString *mutationKind = schemaV2
-            ? manifestCall[@"mutation_kind"] : @"file_write";
-        NSString *expectedName = [mutationKind isEqualToString:@"file_write"]
-            ? @"write_file" : mutationKind;
-        NSString *preconditionSHA = DSHAgentHJ(@"tool-precondition", @{
-          @"schema_version" : @1, @"name" : ledger[@"name"],
-          @"precondition" : precondition,
-        }, error);
-        BOOL released = NO;
-        for (NSDictionary *reservationKey in reservation[@"keys"]) {
-          if ([reservationKey[@"idempotency_key"]
-                  isEqual:manifestCall[@"locator"][@"idempotency_key"]] &&
-              [reservationKey[@"state"] isEqualToString:@"released"]) {
-            released = YES;
-            break;
-          }
-        }
-        if (![ledger[@"locator"][@"task_id"] isEqual:batch[@"task_id"]] ||
-            ![ledger[@"locator"][@"attempt_id"] isEqual:batch[@"attempt_id"]] ||
-            ![ledger[@"root_fingerprint_sha256"]
-                isEqual:batch[@"root_fingerprint_sha256"]] ||
-            ![ledger[@"binding_revision"] isEqual:batch[@"binding_revision"]] ||
-            ![ledger[@"name"] isEqual:expectedName] || preconditionSHA == nil ||
-            (schemaV2 &&
-             ![preconditionSHA isEqual:manifestCall[@"precondition_sha256"]])) {
-          DSHSetAgentNativeStoreError(error, DSHAgentNativeStoreErrorCorrupt);
-          return NO;
-        }
-        if ([mutationKind isEqualToString:@"file_write"]) {
-          if (![precondition[@"relative_path_sha256"]
-                  isEqual:manifestCall[@"relative_path_sha256"]] ||
-              ![precondition[@"prior"] isEqual:manifestCall[@"prior"]] ||
-              ![precondition[@"content_sha256"]
-                  isEqual:manifestCall[@"content_sha256"]] ||
-              ![precondition[@"content_bytes"]
-                  isEqual:manifestCall[@"content_bytes"]] ||
-              (![ledger[@"reserved_write_bytes"]
-                  isEqual:manifestCall[@"content_bytes"]] &&
-               !(([ledger[@"state"] isEqualToString:@"intent"] ||
-                  [ledger[@"state"] isEqualToString:@"cancelled"]) &&
-                 [ledger[@"reserved_write_bytes"] isEqual:@0] && released))) {
-            DSHSetAgentNativeStoreError(error, DSHAgentNativeStoreErrorCorrupt);
-            return NO;
-          }
-        } else if (![ledger[@"reserved_write_bytes"] isEqual:@0] || released) {
-          DSHSetAgentNativeStoreError(error, DSHAgentNativeStoreErrorCorrupt);
-          return NO;
-        }
-      }
-      if (matchingRows != 1) {
-        DSHSetAgentNativeStoreError(error, DSHAgentNativeStoreErrorCorrupt);
-        return NO;
-      }
-    }
+    NSString *harness = DSHHarnessIdForModel(model);
+    if (harness == nil) continue;
+    [models addObject:model];
+    harnessByModel[model] = harness;
   }
-  if (schemaV2) {
-    if ([(NSArray *)state[@"denied_calls"] count] >
-        DSHAgentNativeWALMaxDeniedCalls) {
-      DSHSetAgentNativeStoreError(error, DSHAgentNativeStoreErrorCapacity);
-      return NO;
-    }
-    NSMutableSet *denialKeys = [NSMutableSet set];
-    NSMutableDictionary<NSString *, NSNumber *> *denialCounts =
-        [NSMutableDictionary dictionary];
-    for (NSDictionary *deniedCall in state[@"denied_calls"]) {
-      NSError *denialBytesError = nil;
-      NSData *denialBytes = DSHAgentCanonicalJSON(deniedCall, &denialBytesError);
-      if (!DSHAgentWALDeniedCallShape(deniedCall) || denialBytes == nil ||
-          denialBytes.length > 8 * 1024) {
-        DSHSetAgentNativeStoreError(error, DSHAgentNativeStoreErrorCorrupt);
-        return NO;
-      }
-      NSArray *identity = @[
-        deniedCall[@"task_id"], deniedCall[@"attempt_id"], deniedCall[@"round_id"],
-        deniedCall[@"round_index"], deniedCall[@"call_index"], deniedCall[@"call_id"],
-        deniedCall[@"arguments_sha256"],
-      ];
-      NSData *identityKey = DSHAgentCanonicalIdentityKey(identity);
-      if (identityKey == nil || [denialKeys containsObject:identityKey]) {
-        DSHSetAgentNativeStoreError(error, DSHAgentNativeStoreErrorCorrupt);
-        return NO;
-      }
-      [denialKeys addObject:identityKey];
-      NSString *attemptID = deniedCall[@"attempt_id"];
-      NSUInteger count = [denialCounts[attemptID] unsignedIntegerValue] + 1;
-      if (count > DSHAgentNativeWALMaxDeniedCallsPerAttempt) {
-        DSHSetAgentNativeStoreError(error, DSHAgentNativeStoreErrorCapacity);
-        return NO;
-      }
-      denialCounts[attemptID] = @(count);
-      NSUInteger transcriptMatches = 0;
-      for (NSDictionary *transcript in state[@"transcripts"]) {
-        if (![transcript[@"transcript_ref"]
-                isEqual:deniedCall[@"transcript_after"][@"transcript_ref"]]) continue;
-        if (![transcript[@"attempt_id"] isEqual:deniedCall[@"attempt_id"]] ||
-            ![transcript[@"root_fingerprint_sha256"]
-                isEqual:deniedCall[@"root_fingerprint_sha256"]] ||
-            [transcript[@"generation"] unsignedLongLongValue] <
-                [deniedCall[@"transcript_after"][@"generation"]
-                    unsignedLongLongValue]) {
-          DSHSetAgentNativeStoreError(error, DSHAgentNativeStoreErrorCorrupt);
-          return NO;
-        }
-        transcriptMatches += 1;
-      }
-      if (transcriptMatches != 1) {
-        DSHSetAgentNativeStoreError(error, DSHAgentNativeStoreErrorCorrupt);
-        return NO;
-      }
-    }
-  }
-  for (NSDictionary *round in state[@"rounds"]) {
-    NSString *dispatchState = DSHAgentFindDispatchState(state[@"dispatch"],
-                                                         @"round",
-                                                         round[@"locator"]);
-    if (dispatchState == nil) {
-      DSHSetAgentNativeStoreError(error, DSHAgentNativeStoreErrorCorrupt);
-      return NO;
-    }
-    if (([round[@"state"] isEqualToString:@"failed_retryable"] ||
-         [round[@"state"] isEqualToString:@"cancelled"] ||
-         [round[@"state"] isEqualToString:@"unknown"]) &&
-        ![dispatchState isEqualToString:@"not_dispatched"]) {
-      DSHSetAgentNativeStoreError(error, DSHAgentNativeStoreErrorCorrupt);
-      return NO;
-    }
-    if ([round[@"state"] isEqualToString:@"completed"] &&
-        ![dispatchState isEqualToString:@"dispatched"]) {
-      DSHSetAgentNativeStoreError(error, DSHAgentNativeStoreErrorCorrupt);
-      return NO;
-    }
-  }
-  for (NSDictionary *ledger in state[@"ledger"]) {
-    NSString *dispatchState = DSHAgentFindDispatchState(state[@"dispatch"],
-                                                         @"execution",
-                                                         ledger[@"locator"]);
-    if (dispatchState == nil) {
-      DSHSetAgentNativeStoreError(error, DSHAgentNativeStoreErrorCorrupt);
-      return NO;
-    }
-    if ([ledger[@"state"] isEqualToString:@"cancelled"] &&
-        ![dispatchState isEqualToString:@"not_dispatched"]) {
-      DSHSetAgentNativeStoreError(error, DSHAgentNativeStoreErrorCorrupt);
-      return NO;
-    }
-    if ([ledger[@"state"] isEqualToString:@"intent"] &&
-        ![dispatchState isEqualToString:@"not_dispatched"]) {
-      DSHSetAgentNativeStoreError(error, DSHAgentNativeStoreErrorCorrupt);
-      return NO;
-    }
-    if ([ledger[@"state"] isEqualToString:@"unknown"] &&
-        ![dispatchState isEqualToString:@"not_dispatched"]) {
-      DSHSetAgentNativeStoreError(error, DSHAgentNativeStoreErrorCorrupt);
-      return NO;
-    }
-    if ([ledger[@"state"] isEqualToString:@"ambiguous"] &&
-        ![dispatchState isEqualToString:@"dispatched"]) {
-      DSHSetAgentNativeStoreError(error, DSHAgentNativeStoreErrorCorrupt);
-      return NO;
-    }
-    if ([ledger[@"state"] isEqualToString:@"settled"] &&
-        ![dispatchState isEqualToString:@"dispatched"]) {
-      // The only settlement without a dispatch is a user denial: the intent
-      // row was never dispatched, carries no settled facts or approval
-      // reference, and its receipt is exactly the denied-by-user shape.
-      NSDictionary *receipt = [ledger[@"receipt"] isKindOfClass:NSDictionary.class]
-          ? ledger[@"receipt"] : nil;
-      BOOL userDenial = [dispatchState isEqualToString:@"not_dispatched"] &&
-          receipt != nil &&
-          [receipt[@"outcome"] isEqualToString:@"denied"] &&
-          [receipt[@"failure_code"] isEqualToString:@"E_AGENT_DENIED_BY_USER"] &&
-          receipt[@"approval_reference"] == NSNull.null &&
-          ledger[@"settled_facts"] == NSNull.null &&
-          ledger[@"owner"] == NSNull.null;
-      if (!userDenial) {
-        DSHSetAgentNativeStoreError(error, DSHAgentNativeStoreErrorCorrupt);
-        return NO;
-      }
-    }
-  }
-  // Dispatch markers are a bijection with typed rows.  An orphan marker is
-  // not harmless metadata: it could otherwise be mistaken for proof about a
-  // later/reused locator.
-  for (NSDictionary *dispatch in state[@"dispatch"]) {
-    BOOL found = NO;
-    NSArray *rows = [dispatch[@"kind"] isEqualToString:@"round"]
-        ? state[@"rounds"] : state[@"ledger"];
-    for (NSDictionary *row in rows) {
-      if ([row[@"locator"] isEqual:dispatch[@"locator"]]) {
-        found = YES;
-        break;
-      }
-    }
-    if (!found) {
-      DSHSetAgentNativeStoreError(error, DSHAgentNativeStoreErrorCorrupt);
-      return NO;
-    }
-  }
-  return YES;
+  return @{
+    @"supported_models" : [models copy],
+    @"harness_by_model" : [harnessByModel copy],
+    @"provider_ids" : @[],
+    @"host_by_model" : @{},
+    @"provider_bindings" : @[],
+    @"round_valid" : [roundValid copy],
+    @"ledger_valid" : [ledgerValid copy],
+  };
 }
 
 static BOOL DSHAgentWALStateBasicValidation(NSDictionary *state,
                                             NSError **error) {
-  BOOL schemaV1 = [state[@"schema_version"] isEqual:@1];
-  BOOL schemaV2 = [state[@"schema_version"] isEqual:@2];
-  NSArray *rootKeys = schemaV1 ? DSHAgentWALV1Keys() : DSHAgentWALV2Keys();
-  if ((!schemaV1 && !schemaV2) ||
-      !DSHAgentExactDictionaryKeys(state, rootKeys) ||
-      !DSHAgentSafeInteger(state[@"generation"], DSHAgentMaximumSafeInteger,
-                           YES) ||
-      (schemaV2 &&
-       (![state[@"authorities"] isKindOfClass:NSArray.class] ||
-        ![state[@"operations"] isKindOfClass:NSArray.class] ||
-        ![state[@"operation_results"] isKindOfClass:NSArray.class] ||
-        ![state[@"denied_calls"] isKindOfClass:NSArray.class])) ||
-      ![state[@"transcripts"] isKindOfClass:NSArray.class] ||
-      ![state[@"rounds"] isKindOfClass:NSArray.class] ||
-      ![state[@"ledger"] isKindOfClass:NSArray.class] ||
-      ![state[@"reservations"] isKindOfClass:NSArray.class] ||
-      ![state[@"cleanup"] isKindOfClass:NSArray.class] ||
-      ![state[@"dispatch"] isKindOfClass:NSArray.class] ||
-      ![state[@"batches"] isKindOfClass:NSArray.class]) {
-    if (error != nullptr) *error = DSHAgentNativeStoreError(
-        DSHAgentNativeStoreErrorCorrupt);
-    return NO;
-  }
-  if ([(NSArray *)state[@"transcripts"] count] > DSHAgentNativeWALMaxTranscriptCount) {
-    if (error != nullptr) *error = DSHAgentNativeStoreError(
-        DSHAgentNativeStoreErrorCapacity);
-    return NO;
-  }
-  if ([(NSArray *)state[@"ledger"] count] > DSHAgentNativeWALMaxTranscriptCount *
-                                  DSHAgentNativeWALMaxLedgerRowsPerAttempt ||
-      [(NSArray *)state[@"rounds"] count] > DSHAgentNativeWALMaxTranscriptCount *
-                                   DSHAgentNativeWALMaxRoundRowsPerAttempt) {
-    if (error != nullptr) *error = DSHAgentNativeStoreError(
-        DSHAgentNativeStoreErrorCapacity);
-    return NO;
-  }
-  NSMutableSet *attempts = [NSMutableSet set];
-  for (NSDictionary *row in state[@"ledger"]) {
-    if (![row isKindOfClass:NSDictionary.class]) {
-      if (error != nullptr) *error = DSHAgentNativeStoreError(
-          DSHAgentNativeStoreErrorCorrupt);
-      return NO;
-    }
-    NSDictionary *locator = row[@"locator"];
-    if (![locator isKindOfClass:NSDictionary.class] ||
-        !DSHAgentBoundedUTF8String(locator[@"attempt_id"], 128, NO, nullptr)) {
-      if (error != nullptr) *error = DSHAgentNativeStoreError(
-          DSHAgentNativeStoreErrorCorrupt);
-      return NO;
-    }
-    NSString *attemptID = locator[@"attempt_id"];
-    [attempts addObject:attemptID];
-  }
-  for (NSString *attemptID in attempts) {
-    if (DSHAgentAttemptCount(state[@"ledger"], attemptID) >
-        DSHAgentNativeWALMaxLedgerRowsPerAttempt) {
-      if (error != nullptr) *error = DSHAgentNativeStoreError(
-          DSHAgentNativeStoreErrorCapacity);
+  NSDictionary *reply = DSHAgentWALCoreReduceWithEnvironment(
+      @"state_basic", state, DSHAgentWALRowVerdicts(state));
+  if ([reply[@"valid"] isEqual:@YES]) return YES;
+  NSString *kind = reply[@"error_kind"];
+  if ([kind isEqualToString:@"ledger"]) {
+    NSArray *rows = state[@"ledger"];
+    NSUInteger index = [reply[@"index"] unsignedIntegerValue];
+    if (index < rows.count &&
+        !DSHAgentValidateExecutionLedgerEntryV2(rows[index], error)) {
       return NO;
     }
   }
-  if (!DSHAgentWALRowsShape(state, error)) {
-    return NO;
-  }
-  NSError *canonicalError = nil;
-  NSData *canonical = DSHAgentCanonicalJSON(state, &canonicalError);
-  if (canonical == nil || canonical.length > DSHAgentNativeWALMaxStoreBytes) {
-    if (error != nullptr) *error = canonical == nil
-        ? DSHAgentNativeStoreError(DSHAgentNativeStoreErrorCorrupt)
-        : DSHAgentNativeStoreError(DSHAgentNativeStoreErrorCapacity);
-    return NO;
-  }
-  return YES;
+  DSHSetAgentNativeStoreError(error, [kind isEqualToString:@"capacity"]
+      ? DSHAgentNativeStoreErrorCapacity
+      : DSHAgentNativeStoreErrorCorrupt);
+  return NO;
 }
 
 static NSString *DSHAgentFindDispatchState(NSArray *dispatchRows,
@@ -3469,7 +2810,6 @@ NSDictionary *DSHAgentNativeWALRecordDeniedCall(DSHAgentNativeWAL *wal,
   }
   return committed ? DSHAgentImmutableJSONCopy(output, error) : nil;
 }
-
 
 static NSData *DSHAgentWALVerifiedBytes;
 

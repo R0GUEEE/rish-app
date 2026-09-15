@@ -616,6 +616,18 @@ judges every V3 rule and returns the schema-2 projection, which the native
 kept. The V1→V2 batch migration and the V2→V3 round migration move with
 them, so an old file upgrades identically on both platforms.
 
+The third cut moves the state-level validation itself: the root key lists for
+both schemas, the per-attempt capacities, the transcript digests, the
+authority and operation relations, the batch-to-reservation-to-ledger
+agreement, the denied-call identities, and the dispatch bijection with the one
+exception the WAL allows — a settled row with no dispatch is only ever a user
+denial. Two typed validators stay native because the round journal and the
+execution ledger still own them, so the loader computes one verdict per row
+and passes them in as host facts; a ledger row the native validator refuses
+comes back by index and is asked again, so the error the loader reports is
+still the ledger validator's own. `AgentNativeWAL.mm` is down from 4,690 lines
+to about 3,570.
+
 ### Device-only storage metadata
 
 The session store and the agent WAL require every pinned item to report

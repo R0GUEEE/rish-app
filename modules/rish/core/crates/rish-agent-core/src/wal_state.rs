@@ -949,6 +949,32 @@ fn reduce_json_inner(input: &str) -> Result<Value, crate::store::StoreError> {
                 None => json!({ "valid": false, "batch": Value::Null }),
             });
         }
+        "state_basic" => {
+            let env = crate::session_schema::env_from_json(get(&envelope, "env"));
+            let flags = |key: &str| {
+                get(&envelope, "env")
+                    .and_then(|env| get(env, key))
+                    .map(|value| {
+                        array(Some(value))
+                            .iter()
+                            .map(|flag| flag == &json!(true))
+                            .collect()
+                    })
+                    .unwrap_or_default()
+            };
+            let round_valid: Vec<bool> = flags("round_valid");
+            let ledger_valid: Vec<bool> = flags("ledger_valid");
+            return Ok(
+                match state_basic_validation(value, &env, &round_valid, &ledger_valid) {
+                    StateVerdict::Valid => json!({ "valid": true }),
+                    StateVerdict::Corrupt => json!({ "valid": false, "error_kind": "corrupt" }),
+                    StateVerdict::Capacity => json!({ "valid": false, "error_kind": "capacity" }),
+                    StateVerdict::Ledger(index) => {
+                        json!({ "valid": false, "error_kind": "ledger", "index": index })
+                    }
+                },
+            );
+        }
         _ => return Err(StoreError::InvalidArgument),
     };
     Ok(json!({ "valid": valid }))
@@ -1694,6 +1720,843 @@ pub fn migrate_batch_v1_to_v2(batch: &Value) -> Option<Value> {
     migrated.remove("reservation_version");
     let migrated = Value::Object(migrated);
     batch_shape_v2(&migrated).then_some(migrated)
+}
+
+// MARK: - the whole stored state
+
+const MAX_TRANSCRIPT_COUNT: usize = 128;
+const MAX_LEDGER_ROWS_PER_ATTEMPT: usize = 128;
+const MAX_ROUND_ROWS_PER_ATTEMPT: usize = 8;
+const MAX_STORE_BYTES: usize = 64 * 1024 * 1024;
+const MAX_AUTHORITIES: usize = 128;
+const MAX_OPERATIONS_PER_ATTEMPT: usize = 256;
+const MAX_OPERATIONS: usize = 2048;
+const MAX_OPERATION_RECORD_BYTES: usize = 16 * 1024;
+const MAX_BATCHES_PER_ATTEMPT: usize = 128;
+const MAX_DENIED_CALLS_PER_ATTEMPT: usize = 128;
+const MAX_DENIED_CALLS: usize = 2048;
+
+const V1_KEYS: &[&str] = &[
+    "schema_version",
+    "generation",
+    "transcripts",
+    "rounds",
+    "ledger",
+    "reservations",
+    "cleanup",
+    "dispatch",
+    "batches",
+];
+
+const V2_KEYS: &[&str] = &[
+    "schema_version",
+    "generation",
+    "authorities",
+    "operations",
+    "operation_results",
+    "transcripts",
+    "rounds",
+    "ledger",
+    "reservations",
+    "cleanup",
+    "dispatch",
+    "batches",
+    "denied_calls",
+];
+
+/// Why the loader refuses a stored state, or which typed row it wants the
+/// host's own validator to judge.
+pub enum StateVerdict {
+    Valid,
+    /// The state is not the shape the loader accepts.
+    Corrupt,
+    /// The state is well-formed but over one of the WAL's capacities.
+    Capacity,
+    /// Everything up to this ledger row holds; the host's execution-ledger
+    /// entry validator refused it and owns the error it reports.
+    Ledger(usize),
+}
+
+fn bool_at(verdicts: &[bool], index: usize) -> bool {
+    verdicts.get(index).copied().unwrap_or(false)
+}
+
+fn attempt_count(rows: &[Value], attempt_id: Option<&Value>) -> usize {
+    rows.iter()
+        .filter(|row| get(row, "locator").and_then(|l| get(l, "attempt_id")) == attempt_id)
+        .count()
+}
+
+/// `DSHAgentFindDispatchState`.
+fn dispatch_state<'a>(rows: &'a [Value], kind: &str, locator: Option<&Value>) -> Option<&'a str> {
+    rows.iter()
+        .find(|row| string_eq(get(row, "kind"), kind) && get(row, "locator") == locator)
+        .and_then(|row| as_str(get(row, "dispatch_state")))
+}
+
+/// `DSHAgentWALTranscriptBound`: the transcript a row names must still be the
+/// one it was written against, or a later generation of it.
+fn transcript_bound(state: &Value, row: &Value) -> bool {
+    let Some(state_name) = as_str(get(row, "state")) else {
+        return false;
+    };
+    let mut before = get(row, "transcript_before");
+    if !before.is_some_and(Value::is_object) {
+        return false;
+    }
+    let after = get(row, "transcript_after");
+    if matches!(
+        state_name,
+        "completed" | "settled" | "cancelled" | "ambiguous"
+    ) && !is_null(after)
+    {
+        before = after;
+    }
+    let before = before.expect("checked");
+    let locator = get(row, "locator");
+    array(get(state, "transcripts")).iter().any(|transcript| {
+        get(transcript, "transcript_ref") == get(before, "transcript_ref")
+            && get(transcript, "attempt_id") == locator.and_then(|l| get(l, "attempt_id"))
+            && get(transcript, "root_fingerprint_sha256") == get(row, "root_fingerprint_sha256")
+            && ((get(transcript, "generation") == get(before, "generation")
+                && get(transcript, "transcript_sha256") == get(before, "transcript_sha256")
+                && get(transcript, "transcript_bytes") == get(before, "transcript_bytes"))
+                || u64_of(get(transcript, "generation")) > u64_of(get(before, "generation"))
+                || (is_null(after)
+                    && !matches!(
+                        state_name,
+                        "intent" | "running" | "in_flight" | "cancel_requested"
+                    )))
+    })
+}
+
+fn transcripts_shape(state: &Value) -> StateVerdict {
+    let keys = [
+        "schema_version",
+        "transcript_ref",
+        "attempt_id",
+        "root_fingerprint_sha256",
+        "generation",
+        "messages",
+        "transcript_sha256",
+        "transcript_bytes",
+        "state",
+        "retention_until",
+        "created_at",
+        "updated_at",
+    ];
+    let mut refs: Vec<&Value> = Vec::new();
+    let mut attempts: Vec<&Value> = Vec::new();
+    for transcript in array(get(state, "transcripts")) {
+        let t = |key: &str| get(transcript, key);
+        let messages = array(t("messages"));
+        if !transcript.is_object()
+            || exact_keys(Some(transcript), &keys).is_none()
+            || !schema(t("schema_version"), 1)
+            || !canonical_uuid(t("transcript_ref"))
+            || !canonical_uuid(t("attempt_id"))
+            || !canonical_sha256(t("root_fingerprint_sha256"))
+            || safe_integer(t("generation"), MAX_SAFE_INTEGER, true).is_none()
+            || !t("messages").is_some_and(Value::is_array)
+            || messages.len() > 1024
+            || !canonical_sha256(t("transcript_sha256"))
+            || safe_integer(t("transcript_bytes"), MAX_TRANSCRIPT_BYTES, true).is_none()
+            || !matches!(
+                as_str(t("state")),
+                Some("open" | "terminal" | "cleanup_pending")
+            )
+            || !(is_null(t("retention_until")) || canonical_timestamp(t("retention_until")))
+            || !canonical_timestamp(t("created_at"))
+            || !canonical_timestamp(t("updated_at"))
+        {
+            return StateVerdict::Corrupt;
+        }
+        let reference = t("transcript_ref").expect("checked");
+        if refs.contains(&reference) || attempts.contains(&t("attempt_id").expect("checked")) {
+            return StateVerdict::Corrupt;
+        }
+        refs.push(reference);
+        attempts.push(t("attempt_id").expect("checked"));
+        if messages.iter().any(|message| !message_shape(message))
+            || canonical_json(transcript).is_err()
+        {
+            return StateVerdict::Corrupt;
+        }
+        let digest_input = json!({
+            "schema_version": 1,
+            "transcript_ref": t("transcript_ref"),
+            "attempt_id": t("attempt_id"),
+            "root_fingerprint_sha256": t("root_fingerprint_sha256"),
+            "generation": t("generation"),
+            "messages": t("messages"),
+        });
+        let (Some(digest), Ok(bytes)) = (
+            hash_json("agent-transcript", &digest_input),
+            canonical_json(&digest_input),
+        ) else {
+            return StateVerdict::Corrupt;
+        };
+        if u64_of(t("transcript_bytes")) != bytes.len() as u64
+            || as_str(t("transcript_sha256")) != Some(digest.as_str())
+        {
+            return StateVerdict::Corrupt;
+        }
+    }
+    StateVerdict::Valid
+}
+
+fn authorities_and_operations(state: &Value, env: &Env) -> StateVerdict {
+    let transcripts = array(get(state, "transcripts"));
+    let authorities = array(get(state, "authorities"));
+    if authorities.len() > MAX_AUTHORITIES {
+        return StateVerdict::Capacity;
+    }
+    let mut authority_keys: Vec<(Option<&Value>, Option<&Value>)> = Vec::new();
+    for authority in authorities {
+        if !authority_shape(authority, env) {
+            return StateVerdict::Corrupt;
+        }
+        let key = (get(authority, "task_id"), get(authority, "attempt_id"));
+        if authority_keys.contains(&key) {
+            return StateVerdict::Corrupt;
+        }
+        authority_keys.push(key);
+        let reference = get(authority, "transcript").and_then(|t| get(t, "transcript_ref"));
+        let mut matches = 0usize;
+        for transcript in transcripts {
+            if get(transcript, "transcript_ref") != reference {
+                continue;
+            }
+            matches += 1;
+            if get(transcript, "attempt_id") != get(authority, "attempt_id")
+                || get(transcript, "root_fingerprint_sha256")
+                    != get(authority, "root").and_then(|r| get(r, "root_fingerprint_sha256"))
+            {
+                return StateVerdict::Corrupt;
+            }
+        }
+        if matches != 1 {
+            return StateVerdict::Corrupt;
+        }
+    }
+    let snapshots = array(get(state, "operation_results"));
+    if snapshots.len() > MAX_OPERATIONS {
+        return StateVerdict::Capacity;
+    }
+    let mut by_id: Vec<(Option<&Value>, &Value)> = Vec::new();
+    for snapshot in snapshots {
+        let id = get(snapshot, "operation_id");
+        if !operation_result_shape(snapshot) || by_id.iter().any(|(other, _)| *other == id) {
+            return StateVerdict::Corrupt;
+        }
+        by_id.push((id, snapshot));
+    }
+    let operations = array(get(state, "operations"));
+    if operations.len() > MAX_OPERATIONS {
+        return StateVerdict::Capacity;
+    }
+    let mut ids: Vec<Option<&Value>> = Vec::new();
+    let mut counts: Vec<(Option<&Value>, usize)> = Vec::new();
+    for operation in operations {
+        let id = get(operation, "operation_id");
+        let record = canonical_json(operation);
+        if !operation_shape(operation)
+            || record
+                .as_ref()
+                .is_ok_and(|bytes| bytes.len() > MAX_OPERATION_RECORD_BYTES)
+            || record.is_err()
+            || ids.contains(&id)
+        {
+            return StateVerdict::Corrupt;
+        }
+        ids.push(id);
+        let attempt = get(operation, "attempt_id");
+        let count = counts
+            .iter()
+            .find(|(other, _)| *other == attempt)
+            .map_or(0, |(_, count)| *count)
+            + 1;
+        if count > MAX_OPERATIONS_PER_ATTEMPT {
+            return StateVerdict::Capacity;
+        }
+        counts.retain(|(other, _)| *other != attempt);
+        counts.push((attempt, count));
+        let snapshot = by_id
+            .iter()
+            .find(|(other, _)| *other == id)
+            .map(|(_, snapshot)| *snapshot);
+        let reference = get(operation, "result_snapshot_ref");
+        if is_null(reference) {
+            if snapshot.is_some() {
+                return StateVerdict::Corrupt;
+            }
+            continue;
+        }
+        let Some(snapshot) = snapshot else {
+            return StateVerdict::Corrupt;
+        };
+        if get(snapshot, "operation_kind") != get(operation, "operation_kind")
+            || get(snapshot, "result_status") != get(operation, "result_status")
+            || get(snapshot, "result_sha256") != reference.and_then(|r| get(r, "result_sha256"))
+            || get(snapshot, "result_bytes") != reference.and_then(|r| get(r, "result_bytes"))
+        {
+            return StateVerdict::Corrupt;
+        }
+    }
+    if by_id.iter().any(|(id, _)| !ids.contains(id)) {
+        return StateVerdict::Corrupt;
+    }
+    StateVerdict::Valid
+}
+
+fn ledger_rows(state: &Value, ledger_valid: &[bool]) -> StateVerdict {
+    let row_keys = [
+        "schema_version",
+        "locator",
+        "row_revision",
+        "root_fingerprint_sha256",
+        "binding_revision",
+        "transcript_before",
+        "name",
+        "arguments_sha256",
+        "precondition",
+        "reserved_write_bytes",
+        "state",
+        "owner",
+        "settled_facts",
+        "transcript_after",
+        "receipt",
+        "created_at",
+        "updated_at",
+    ];
+    let locator_keys = [
+        "schema_version",
+        "task_id",
+        "attempt_id",
+        "round_id",
+        "round_index",
+        "call_index",
+        "call_id",
+        "idempotency_key",
+    ];
+    let mut locators: Vec<&Value> = Vec::new();
+    for (index, ledger) in array(get(state, "ledger")).iter().enumerate() {
+        let locator = get(ledger, "locator");
+        let l = |key: &str| locator.and_then(|l| get(l, key));
+        let r = |key: &str| get(ledger, key);
+        if !ledger.is_object()
+            || exact_keys(Some(ledger), &row_keys).is_none()
+            || r("schema_version") != Some(&json!(2))
+            || exact_keys(locator, &locator_keys).is_none()
+            || l("schema_version") != Some(&json!(2))
+            || !canonical_uuid(l("task_id"))
+            || !canonical_uuid(l("attempt_id"))
+            || !canonical_uuid(l("round_id"))
+            || safe_integer(l("round_index"), 7, true).is_none()
+            || safe_integer(l("call_index"), 15, true).is_none()
+            || !canonical_sha256(l("idempotency_key"))
+            || bounded_utf8(l("call_id"), 128, false).is_none()
+            || safe_integer(r("row_revision"), MAX_SAFE_INTEGER, false).is_none()
+            || !canonical_sha256(r("root_fingerprint_sha256"))
+            || safe_integer(r("binding_revision"), MAX_SAFE_INTEGER, false).is_none()
+            || !reference_shape(r("transcript_before"))
+            || bounded_utf8(r("name"), 64, false).is_none()
+            || !canonical_sha256(r("arguments_sha256"))
+            || safe_integer(r("reserved_write_bytes"), MAX_SINGLE_WRITE_BYTES, true).is_none()
+            || !matches!(
+                as_str(r("state")),
+                Some(
+                    "intent"
+                        | "running"
+                        | "cancel_requested"
+                        | "settled"
+                        | "cancelled"
+                        | "unknown"
+                        | "ambiguous"
+                )
+            )
+            || !canonical_timestamp(r("created_at"))
+            || !canonical_timestamp(r("updated_at"))
+        {
+            return StateVerdict::Corrupt;
+        }
+        let locator = locator.expect("checked");
+        if locators.contains(&locator) {
+            return StateVerdict::Corrupt;
+        }
+        locators.push(locator);
+        if !bool_at(ledger_valid, index) {
+            return StateVerdict::Ledger(index);
+        }
+        if !transcript_bound(state, ledger) {
+            return StateVerdict::Corrupt;
+        }
+    }
+    StateVerdict::Valid
+}
+
+fn batches(state: &Value, schema_v2: bool) -> StateVerdict {
+    let reservations = array(get(state, "reservations"));
+    let ledger = array(get(state, "ledger"));
+    let mut identities: Vec<String> = Vec::new();
+    let mut counts: Vec<(Option<&Value>, usize)> = Vec::new();
+    for batch in array(get(state, "batches")) {
+        let b = |key: &str| get(batch, key);
+        let valid = if schema_v2 {
+            batch_shape_v2(batch)
+        } else {
+            batch_shape_v1(batch)
+        };
+        if !valid {
+            return StateVerdict::Corrupt;
+        }
+        let text = |key: &str| match b(key) {
+            Some(Value::String(value)) => value.clone(),
+            Some(value) => value.to_string(),
+            None => String::new(),
+        };
+        let identity = if schema_v2 {
+            format!(
+                "{}:{}:{}:{}:{}",
+                text("task_id"),
+                text("attempt_id"),
+                text("round_id"),
+                text("round_index"),
+                text("batch_revision")
+            )
+        } else {
+            format!(
+                "{}:{}:{}",
+                text("task_id"),
+                text("attempt_id"),
+                text("manifest_sha256")
+            )
+        };
+        if identities.contains(&identity) {
+            return StateVerdict::Corrupt;
+        }
+        identities.push(identity);
+        let attempt = b("attempt_id");
+        let count = counts
+            .iter()
+            .find(|(other, _)| *other == attempt)
+            .map_or(0, |(_, count)| *count)
+            + 1;
+        if schema_v2 && count > MAX_BATCHES_PER_ATTEMPT {
+            return StateVerdict::Capacity;
+        }
+        counts.retain(|(other, _)| *other != attempt);
+        counts.push((attempt, count));
+        if schema_v2 && string_eq(b("kind"), "read_only_batch") {
+            continue;
+        }
+        let mut reservation: Option<&Value> = None;
+        for candidate in reservations {
+            if get(candidate, "task_id") != b("task_id")
+                || get(candidate, "attempt_id") != b("attempt_id")
+            {
+                continue;
+            }
+            let version = if schema_v2 {
+                b("batch_revision")
+            } else {
+                b("reservation_version")
+            };
+            if reservation.is_some()
+                || get(candidate, "root_fingerprint_sha256") != b("root_fingerprint_sha256")
+                || get(candidate, "binding_revision") != b("binding_revision")
+                || u64_of(b("reservation_delta_bytes"))
+                    > u64_of(get(candidate, "policy").and_then(|p| get(p, "max_batch_write_bytes")))
+                || u64_of(version) > u64_of(get(candidate, "reservation_version"))
+            {
+                return StateVerdict::Corrupt;
+            }
+            reservation = Some(candidate);
+        }
+        let Some(reservation) = reservation else {
+            return StateVerdict::Corrupt;
+        };
+        for call in array(b("manifest_calls")) {
+            let call_locator = get(call, "locator");
+            let mut matching = 0usize;
+            for row in ledger {
+                if get(row, "locator") != call_locator {
+                    continue;
+                }
+                matching += 1;
+                // Schema-one batches predate the mutation discriminator and
+                // contain file-write calls only.
+                let mutation_kind = if schema_v2 {
+                    as_str(get(call, "mutation_kind")).unwrap_or_default()
+                } else {
+                    "file_write"
+                };
+                let expected_name = if mutation_kind == "file_write" {
+                    "write_file"
+                } else {
+                    mutation_kind
+                };
+                let precondition = get(row, "precondition");
+                let digest = hash_json(
+                    "tool-precondition",
+                    &json!({
+                        "schema_version": 1,
+                        "name": get(row, "name"),
+                        "precondition": precondition,
+                    }),
+                );
+                let released = array(get(reservation, "keys")).iter().any(|key| {
+                    get(key, "idempotency_key")
+                        == call_locator.and_then(|l| get(l, "idempotency_key"))
+                        && string_eq(get(key, "state"), "released")
+                });
+                if get(row, "locator").and_then(|l| get(l, "task_id")) != b("task_id")
+                    || get(row, "locator").and_then(|l| get(l, "attempt_id")) != b("attempt_id")
+                    || get(row, "root_fingerprint_sha256") != b("root_fingerprint_sha256")
+                    || get(row, "binding_revision") != b("binding_revision")
+                    || !string_eq(get(row, "name"), expected_name)
+                    || digest.is_none()
+                    || (schema_v2 && digest.as_deref() != as_str(get(call, "precondition_sha256")))
+                {
+                    return StateVerdict::Corrupt;
+                }
+                let p = |key: &str| precondition.and_then(|p| get(p, key));
+                if mutation_kind == "file_write" {
+                    let reserved_matches = get(row, "reserved_write_bytes")
+                        == get(call, "content_bytes")
+                        || (matches!(as_str(get(row, "state")), Some("intent" | "cancelled"))
+                            && get(row, "reserved_write_bytes") == Some(&json!(0))
+                            && released);
+                    if p("relative_path_sha256") != get(call, "relative_path_sha256")
+                        || p("prior") != get(call, "prior")
+                        || p("content_sha256") != get(call, "content_sha256")
+                        || p("content_bytes") != get(call, "content_bytes")
+                        || !reserved_matches
+                    {
+                        return StateVerdict::Corrupt;
+                    }
+                } else if get(row, "reserved_write_bytes") != Some(&json!(0)) || released {
+                    return StateVerdict::Corrupt;
+                }
+            }
+            if matching != 1 {
+                return StateVerdict::Corrupt;
+            }
+        }
+    }
+    StateVerdict::Valid
+}
+
+fn denied_calls(state: &Value) -> StateVerdict {
+    let rows = array(get(state, "denied_calls"));
+    if rows.len() > MAX_DENIED_CALLS {
+        return StateVerdict::Capacity;
+    }
+    let mut keys: Vec<Vec<u8>> = Vec::new();
+    let mut counts: Vec<(Option<&Value>, usize)> = Vec::new();
+    for row in rows {
+        let r = |key: &str| get(row, key);
+        let Ok(bytes) = canonical_json(row) else {
+            return StateVerdict::Corrupt;
+        };
+        if !denied_call_shape(row) || bytes.len() > 8 * 1024 {
+            return StateVerdict::Corrupt;
+        }
+        let identity = json!([
+            r("task_id"),
+            r("attempt_id"),
+            r("round_id"),
+            r("round_index"),
+            r("call_index"),
+            r("call_id"),
+            r("arguments_sha256"),
+        ]);
+        let Ok(key) = canonical_json(&identity) else {
+            return StateVerdict::Corrupt;
+        };
+        if keys.contains(&key) {
+            return StateVerdict::Corrupt;
+        }
+        keys.push(key);
+        let attempt = r("attempt_id");
+        let count = counts
+            .iter()
+            .find(|(other, _)| *other == attempt)
+            .map_or(0, |(_, count)| *count)
+            + 1;
+        if count > MAX_DENIED_CALLS_PER_ATTEMPT {
+            return StateVerdict::Capacity;
+        }
+        counts.retain(|(other, _)| *other != attempt);
+        counts.push((attempt, count));
+        let after = r("transcript_after");
+        let mut matches = 0usize;
+        for transcript in array(get(state, "transcripts")) {
+            if get(transcript, "transcript_ref") != after.and_then(|a| get(a, "transcript_ref")) {
+                continue;
+            }
+            if get(transcript, "attempt_id") != r("attempt_id")
+                || get(transcript, "root_fingerprint_sha256") != r("root_fingerprint_sha256")
+                || u64_of(get(transcript, "generation"))
+                    < u64_of(after.and_then(|a| get(a, "generation")))
+            {
+                return StateVerdict::Corrupt;
+            }
+            matches += 1;
+        }
+        if matches != 1 {
+            return StateVerdict::Corrupt;
+        }
+    }
+    StateVerdict::Valid
+}
+
+/// The dispatch relation: every round and ledger row needs its marker, the
+/// marker's state has to agree with the row's own state, and no marker may
+/// outlive its row — an orphan could otherwise be mistaken for proof about a
+/// reused locator.
+fn dispatch_relation(state: &Value) -> StateVerdict {
+    let markers = array(get(state, "dispatch"));
+    for round in array(get(state, "rounds")) {
+        let Some(marker) = dispatch_state(markers, "round", get(round, "locator")) else {
+            return StateVerdict::Corrupt;
+        };
+        let round_state = as_str(get(round, "state")).unwrap_or_default();
+        if (matches!(round_state, "failed_retryable" | "cancelled" | "unknown")
+            && marker != "not_dispatched")
+            || (round_state == "completed" && marker != "dispatched")
+        {
+            return StateVerdict::Corrupt;
+        }
+    }
+    for ledger in array(get(state, "ledger")) {
+        let Some(marker) = dispatch_state(markers, "execution", get(ledger, "locator")) else {
+            return StateVerdict::Corrupt;
+        };
+        let row_state = as_str(get(ledger, "state")).unwrap_or_default();
+        if matches!(row_state, "cancelled" | "intent" | "unknown") && marker != "not_dispatched" {
+            return StateVerdict::Corrupt;
+        }
+        if row_state == "ambiguous" && marker != "dispatched" {
+            return StateVerdict::Corrupt;
+        }
+        if row_state == "settled" && marker != "dispatched" {
+            // The only settlement without a dispatch is a user denial: the
+            // intent row was never dispatched, carries no settled facts or
+            // approval reference, and its receipt is exactly the
+            // denied-by-user shape.
+            let receipt = get(ledger, "receipt").filter(|receipt| receipt.is_object());
+            let user_denial = marker == "not_dispatched"
+                && receipt.is_some_and(|receipt| {
+                    string_eq(get(receipt, "outcome"), "denied")
+                        && string_eq(get(receipt, "failure_code"), "E_AGENT_DENIED_BY_USER")
+                        && is_null(get(receipt, "approval_reference"))
+                })
+                && is_null(get(ledger, "settled_facts"))
+                && is_null(get(ledger, "owner"));
+            if !user_denial {
+                return StateVerdict::Corrupt;
+            }
+        }
+    }
+    for marker in markers {
+        let rows = if string_eq(get(marker, "kind"), "round") {
+            array(get(state, "rounds"))
+        } else {
+            array(get(state, "ledger"))
+        };
+        if !rows
+            .iter()
+            .any(|row| get(row, "locator") == get(marker, "locator"))
+        {
+            return StateVerdict::Corrupt;
+        }
+    }
+    StateVerdict::Valid
+}
+
+/// `DSHAgentWALRowsShape`: the loader rejects malformed rows before a typed
+/// view can accidentally use them. The host's own round and ledger entry
+/// validators are mandatory here and reach this through `round_valid` and
+/// `ledger_valid`; these checks additionally cover the shared envelope, the
+/// cross-store bindings and the uniqueness relations.
+pub fn rows_shape(
+    state: &Value,
+    env: &Env,
+    round_valid: &[bool],
+    ledger_valid: &[bool],
+) -> StateVerdict {
+    let schema_v2 = get(state, "schema_version") == Some(&json!(2));
+    if let verdict @ (StateVerdict::Corrupt | StateVerdict::Capacity) = transcripts_shape(state) {
+        return verdict;
+    }
+    if schema_v2 {
+        if let verdict @ (StateVerdict::Corrupt | StateVerdict::Capacity) =
+            authorities_and_operations(state, env)
+        {
+            return verdict;
+        }
+    }
+    let mut locators: Vec<&Value> = Vec::new();
+    for (index, round) in array(get(state, "rounds")).iter().enumerate() {
+        if !round.is_object() || !bool_at(round_valid, index) {
+            return StateVerdict::Corrupt;
+        }
+        let Some(locator) = get(round, "locator") else {
+            return StateVerdict::Corrupt;
+        };
+        if locators.contains(&locator) || !transcript_bound(state, round) {
+            return StateVerdict::Corrupt;
+        }
+        locators.push(locator);
+    }
+    let mut counts: Vec<(Option<&Value>, usize)> = Vec::new();
+    for round in array(get(state, "rounds")) {
+        let attempt = get(round, "locator").and_then(|l| get(l, "attempt_id"));
+        let count = counts
+            .iter()
+            .find(|(other, _)| *other == attempt)
+            .map_or(0, |(_, count)| *count);
+        if count >= MAX_ROUND_ROWS_PER_ATTEMPT {
+            return StateVerdict::Capacity;
+        }
+        counts.retain(|(other, _)| *other != attempt);
+        counts.push((attempt, count + 1));
+    }
+    match ledger_rows(state, ledger_valid) {
+        StateVerdict::Valid => {}
+        verdict => return verdict,
+    }
+    let mut reservation_keys: Vec<(Option<&Value>, Option<&Value>)> = Vec::new();
+    for reservation in array(get(state, "reservations")) {
+        let key = (get(reservation, "task_id"), get(reservation, "attempt_id"));
+        if !reservation_shape(reservation) || reservation_keys.contains(&key) {
+            return StateVerdict::Corrupt;
+        }
+        reservation_keys.push(key);
+    }
+    let mut cleanup_ids: Vec<Option<&Value>> = Vec::new();
+    for cleanup in array(get(state, "cleanup")) {
+        let id = get(cleanup, "cleanup_id");
+        if !cleanup_shape(cleanup) || cleanup_ids.contains(&id) {
+            return StateVerdict::Corrupt;
+        }
+        cleanup_ids.push(id);
+        let mut matches = 0usize;
+        for transcript in array(get(state, "transcripts")) {
+            if get(transcript, "transcript_ref") != get(cleanup, "transcript_ref") {
+                continue;
+            }
+            matches += 1;
+            if get(transcript, "attempt_id") != get(cleanup, "attempt_id")
+                || get(transcript, "transcript_sha256") != get(cleanup, "transcript_sha256")
+            {
+                return StateVerdict::Corrupt;
+            }
+        }
+        let status = as_str(get(cleanup, "status")).unwrap_or_default();
+        if (status == "pending" && matches != 1) || (status == "discarded" && matches != 0) {
+            return StateVerdict::Corrupt;
+        }
+    }
+    let mut dispatch_keys: Vec<String> = Vec::new();
+    for marker in array(get(state, "dispatch")) {
+        if !dispatch_shape(marker) {
+            return StateVerdict::Corrupt;
+        }
+        let locator =
+            canonical_json(get(marker, "locator").unwrap_or(&Value::Null)).unwrap_or_default();
+        let key = format!(
+            "{}:{}",
+            as_str(get(marker, "kind")).unwrap_or_default(),
+            String::from_utf8_lossy(&locator)
+        );
+        if dispatch_keys.contains(&key) {
+            return StateVerdict::Corrupt;
+        }
+        dispatch_keys.push(key);
+    }
+    match batches(state, schema_v2) {
+        StateVerdict::Valid => {}
+        verdict => return verdict,
+    }
+    if schema_v2 {
+        match denied_calls(state) {
+            StateVerdict::Valid => {}
+            verdict => return verdict,
+        }
+    }
+    dispatch_relation(state)
+}
+
+/// `DSHAgentWALStateBasicValidation`: the root keys, the per-attempt
+/// capacities, every row relation and the stored file's own byte ceiling.
+pub fn state_basic_validation(
+    state: &Value,
+    env: &Env,
+    round_valid: &[bool],
+    ledger_valid: &[bool],
+) -> StateVerdict {
+    let schema_v1 = get(state, "schema_version") == Some(&json!(1));
+    let schema_v2 = get(state, "schema_version") == Some(&json!(2));
+    let root_keys = if schema_v1 { V1_KEYS } else { V2_KEYS };
+    let is_array = |key: &str| get(state, key).is_some_and(Value::is_array);
+    if (!schema_v1 && !schema_v2)
+        || exact_keys(Some(state), root_keys).is_none()
+        || safe_integer(get(state, "generation"), MAX_SAFE_INTEGER, true).is_none()
+        || (schema_v2
+            && !(is_array("authorities")
+                && is_array("operations")
+                && is_array("operation_results")
+                && is_array("denied_calls")))
+        || !is_array("transcripts")
+        || !is_array("rounds")
+        || !is_array("ledger")
+        || !is_array("reservations")
+        || !is_array("cleanup")
+        || !is_array("dispatch")
+        || !is_array("batches")
+    {
+        return StateVerdict::Corrupt;
+    }
+    if array(get(state, "transcripts")).len() > MAX_TRANSCRIPT_COUNT {
+        return StateVerdict::Capacity;
+    }
+    let ledger = array(get(state, "ledger"));
+    if ledger.len() > MAX_TRANSCRIPT_COUNT * MAX_LEDGER_ROWS_PER_ATTEMPT
+        || array(get(state, "rounds")).len() > MAX_TRANSCRIPT_COUNT * MAX_ROUND_ROWS_PER_ATTEMPT
+    {
+        return StateVerdict::Capacity;
+    }
+    let mut attempts: Vec<Option<&Value>> = Vec::new();
+    for row in ledger {
+        let locator = get(row, "locator");
+        if !row.is_object()
+            || !locator.is_some_and(Value::is_object)
+            || bounded_utf8(locator.and_then(|l| get(l, "attempt_id")), 128, false).is_none()
+        {
+            return StateVerdict::Corrupt;
+        }
+        let attempt = locator.and_then(|l| get(l, "attempt_id"));
+        if !attempts.contains(&attempt) {
+            attempts.push(attempt);
+        }
+    }
+    if attempts
+        .iter()
+        .any(|attempt| attempt_count(ledger, *attempt) > MAX_LEDGER_ROWS_PER_ATTEMPT)
+    {
+        return StateVerdict::Capacity;
+    }
+    match rows_shape(state, env, round_valid, ledger_valid) {
+        StateVerdict::Valid => {}
+        verdict => return verdict,
+    }
+    match canonical_json(state) {
+        Err(_) => StateVerdict::Corrupt,
+        Ok(bytes) if bytes.len() > MAX_STORE_BYTES => StateVerdict::Capacity,
+        Ok(_) => StateVerdict::Valid,
+    }
 }
 
 #[cfg(test)]
