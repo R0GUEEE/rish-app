@@ -944,6 +944,36 @@ Nothing recomputes a stored preview and compares it, so this is not a
 compatibility change: an old receipt keeps the text it was written with, and
 the preview's shape is unchanged.
 
+### Where model output becomes executable
+
+`DSHParseCompletionResponseSchema2` turned a provider's reply into the tool
+calls the engine runs. That is the boundary where untrusted model output
+becomes something executable — a call that gets through it is a call a person
+will be asked to approve — so it is now `completion_response.rs`
+(`rish_agent_completion_response_reduce`) and there is one copy of it.
+
+Unlike the store reducers it answers with a `failure_code`, not a store error
+code: a provider reply is not a store operation, and the controller uses these
+to decide whether a retry could possibly help.
+
+Two host facts stay behind, because the core cannot know them: whether a model
+is in this build's catalogue, and a fresh identifier for the compatibility
+path. Everything else is rule, including four worth naming:
+
+- **A length-limited reply never yields an executable call.** A reply cut off
+  mid-argument can still be syntactically valid JSON; running it would run a
+  call the model never finished writing.
+- **A tool call comes with the reasoning that produced it**, unless thinking
+  was off — the one exception being the compatibility path, which never had a
+  tool channel and so never had reasoning either.
+- **The compatibility path is deliberately narrow.** A model that describes a
+  call in prose is honoured only in two exact shapes, only when it sent no real
+  calls at all. Anything looser and ordinary prose that happens to be JSON
+  would become an executable call.
+- **Only omission means create-only.** An explicit `expected_revision`,
+  including a placeholder string, survives parsing so tool preparation can
+  report it; coercing it to null would turn a malformed update into a create.
+
 ### Predicting the commit id
 
 `AgentGitToolExecutor.mm` keeps libgit2 and hands the rest to `git_tool.rs`
