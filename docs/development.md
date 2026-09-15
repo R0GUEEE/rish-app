@@ -695,6 +695,15 @@ marker, because only it knows whether an execution was handed out. Cancel
 rewrites no WAL rows itself, so it rides on the existing suites; the rows it
 moves are written by services that are already ported and already locked.
 
+Recovery's own shapes move with it: its request validation, the conflict it
+reports (including the one case that reports a newer journal revision learned
+from its own attempt query rather than the session proof's), and the reference
+its operation result points at. What is left native in
+`recoverAgentAttempt` is the orchestration itself — in particular the provider
+retry continuation, the one step that leaves the serialized recovery authority
+and re-enters. That is the `Command → Effect → Event` refactor the plan
+describes and it is the next cut.
+
 ### Device-only storage metadata
 
 The session store and the agent WAL require every pinned item to report

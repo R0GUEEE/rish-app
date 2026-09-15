@@ -1586,6 +1586,7 @@ pub fn target_conflict(
     proof: &Value,
     failure_code: &str,
     with_target: bool,
+    actual_journal_revision: Option<&Value>,
 ) -> Value {
     let cas = get(request, "controller_cas");
     let mut conflict = Map::new();
@@ -1608,9 +1609,11 @@ pub fn target_conflict(
         "actual_controller_generation".into(),
         owned(get(proof, "controller_generation")),
     );
+    // A recovery that learned a newer journal revision from its own attempt
+    // query reports that one instead of the proof's.
     conflict.insert(
         "actual_journal_revision".into(),
-        owned(get(proof, "journal_revision")),
+        owned(actual_journal_revision.or_else(|| get(proof, "journal_revision"))),
     );
     Value::Object(conflict)
 }
@@ -1704,7 +1707,7 @@ fn cancel_result(request: &Value, status: &str, fields: Map<String, Value>) -> V
 pub fn cancel_round_result(request: &Value, cancelled: &Value, proof: &Value) -> Value {
     if string_eq(get(cancelled, "status"), "conflict") {
         let code = as_str(get(cancelled, "failure_code")).unwrap_or("E_AGENT_CONFLICT");
-        return target_conflict(request, proof, code, true);
+        return target_conflict(request, proof, code, true, None);
     }
     let status = if string_eq(get(cancelled, "status"), "cancelled") {
         "cancelled"
@@ -2032,9 +2035,10 @@ fn reduce_json_inner(input: &str) -> Result<Value, StoreError> {
             let proof = get(&envelope, "proof").ok_or(StoreError::InvalidArgument)?;
             let code = as_str(get(&envelope, "failure_code")).ok_or(StoreError::InvalidArgument)?;
             let with_target = get(&envelope, "with_target") != Some(&json!(false));
+            let journal = get(&envelope, "actual_journal_revision");
             reply.insert(
                 "output".into(),
-                target_conflict(request, proof, code, with_target),
+                target_conflict(request, proof, code, with_target, journal),
             );
         }
         "cancel_plan" => return Ok(cancel_plan(state, request)),

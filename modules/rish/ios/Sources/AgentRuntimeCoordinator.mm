@@ -358,11 +358,6 @@ static NSDictionary *DSHRuntimeRequest(id request, NSArray<NSString *> *keys,
   return copy;
 }
 
-static NSDictionary *DSHRuntimeTarget(NSDictionary *request) {
-  id value = request[@"target"];
-  return [value isKindOfClass:NSDictionary.class] ? value : nil;
-}
-
 static NSDictionary *DSHRuntimeExecutionCAS(NSDictionary *row) {
   NSDictionary *owner = row[@"owner"];
   BOOL owned = [owner isKindOfClass:NSDictionary.class];
@@ -384,18 +379,6 @@ static NSDictionary *DSHRuntimeExecutionCAS(NSDictionary *row) {
         row[@"root_fingerprint_sha256"],
     @"expected_binding_revision" : row[@"binding_revision"],
   };
-}
-
-static BOOL DSHRuntimeControllerMatchesCheckpoint(NSDictionary *controllerCAS,
-                                                  NSDictionary *checkpoint) {
-  return [controllerCAS isKindOfClass:NSDictionary.class] &&
-      [checkpoint isKindOfClass:NSDictionary.class] &&
-      [controllerCAS[@"expected_journal_revision"]
-          isEqual:checkpoint[@"journal_revision"]] &&
-      [controllerCAS[@"expected_session_generation"]
-          isEqual:checkpoint[@"session_generation"]] &&
-      [controllerCAS[@"expected_session_sha256"]
-          isEqual:checkpoint[@"session_sha256"]];
 }
 
 static NSDictionary *DSHRuntimeCommitRecoveryResult(
@@ -794,21 +777,14 @@ static NSDictionary *DSHRuntimeCommitRecoveryResult(
                                   error:(NSError **)error {
   __block NSDictionary *(^awaitRetry)(void) = nil;
   NSDictionary *preparedResult = DSHRuntimeSerializedResult(^NSDictionary *{
-  NSDictionary *request = DSHRuntimeRequest(rawRequest, @[
-    @"schema_version", @"operation_id", @"controller_cas",
-    @"committed_checkpoint", @"target", @"action",
-    @"expected_round_revision", @"expected_execution_revision",
-    @"expected_transcript", @"root",
-  ], error);
-  NSDictionary *target = DSHRuntimeTarget(request);
-  if (request == nil || target == nil ||
-      !DSHRuntimeControllerMatchesCheckpoint(request[@"controller_cas"],
-                                             request[@"committed_checkpoint"]) ||
-      ![request[@"controller_cas"][@"task_id"] isEqual:target[@"task_id"]] ||
-      ![request[@"controller_cas"][@"attempt_id"] isEqual:target[@"attempt_id"]]) {
+  NSDictionary *request = DSHAgentImmutableJSONCopy(rawRequest, error);
+  if (request == nil || DSHRuntimeDecide(@{
+        @"op" : @"target_request", @"kind" : @"recover", @"request" : request,
+      }, error) == nil) {
     DSHSetAgentNativeStoreError(error, DSHAgentNativeStoreErrorInvalidArgument);
     return nil;
   }
+  NSDictionary *target = request[@"target"];
   NSString *requestSHA = DSHAgentHJ(@"agent-operation-request", @{
     @"operation_kind" : @"recover_agent_attempt", @"request" : request,
   }, error);
@@ -833,15 +809,24 @@ static NSDictionary *DSHRuntimeCommitRecoveryResult(
       request[@"committed_checkpoint"][@"session_generation"],
       request[@"committed_checkpoint"][@"session_sha256"], error);
   if (sourceProof == nil) return nil;
+  NSDictionary *(^conflictWithJournal)(NSString *, id) =
+      ^NSDictionary *(NSString *failureCode, id actualJournalRevision) {
+    NSMutableDictionary *envelope = [@{
+      @"op" : @"target_conflict", @"failure_code" : failureCode,
+      @"request" : request, @"proof" : sourceProof, @"with_target" : @NO,
+    } mutableCopy];
+    if (actualJournalRevision != nil) {
+      envelope[@"actual_journal_revision"] = actualJournalRevision;
+    }
+    NSError *decideError = nil;
+    return DSHRuntimeDecide(envelope, &decideError)[@"output"];
+  };
+  NSDictionary *(^conflict)(NSString *) = ^NSDictionary *(NSString *failureCode) {
+    return conflictWithJournal(failureCode, nil);
+  };
   if (![sourceProof[@"matches"] boolValue]) {
     if (error != nullptr) *error = nil;
-    return @{ @"schema_version" : @2, @"status" : @"conflict",
-      @"operation_id" : request[@"operation_id"],
-      @"failure_code" : @"E_AGENT_CONFLICT",
-      @"expected_controller_generation" : request[@"controller_cas"][@"expected_controller_generation"],
-      @"expected_journal_revision" : request[@"controller_cas"][@"expected_journal_revision"],
-      @"actual_controller_generation" : sourceProof[@"controller_generation"],
-      @"actual_journal_revision" : sourceProof[@"journal_revision"] };
+    return conflict(@"E_AGENT_CONFLICT");
   }
   NSDictionary *(^queryAttempt)(NSError **) = ^NSDictionary *(NSError **queryError) {
     return [self queryAgentAttempt:@{
@@ -860,13 +845,8 @@ static NSDictionary *DSHRuntimeCommitRecoveryResult(
   NSDictionary *attemptQuery = queryAttempt(error);
   if (attemptQuery == nil) return nil;
   if ([attemptQuery[@"status"] isEqualToString:@"conflict"]) {
-    return @{ @"schema_version" : @2, @"status" : @"conflict",
-      @"operation_id" : request[@"operation_id"],
-      @"failure_code" : attemptQuery[@"failure_code"],
-      @"expected_controller_generation" : request[@"controller_cas"][@"expected_controller_generation"],
-      @"expected_journal_revision" : request[@"controller_cas"][@"expected_journal_revision"],
-      @"actual_controller_generation" : sourceProof[@"controller_generation"],
-      @"actual_journal_revision" : attemptQuery[@"actual_journal_revision"] };
+    return conflictWithJournal(attemptQuery[@"failure_code"],
+                               attemptQuery[@"actual_journal_revision"]);
   }
   NSDictionary *authority = [self.preparedStore
       nativeAuthorityForTaskId:target[@"task_id"]
@@ -911,30 +891,18 @@ static NSDictionary *DSHRuntimeCommitRecoveryResult(
     } error:error];
     if (roundRecovery == nil) return nil;
     if ([roundRecovery[@"status"] isEqualToString:@"conflict"]) {
-      NSDictionary *conflict = @{ @"schema_version" : @2, @"status" : @"conflict",
-        @"operation_id" : request[@"operation_id"],
-        @"failure_code" : roundRecovery[@"failure_code"] ?: @"E_AGENT_CONFLICT",
-        @"expected_controller_generation" : request[@"controller_cas"][@"expected_controller_generation"],
-        @"expected_journal_revision" : request[@"controller_cas"][@"expected_journal_revision"],
-        @"actual_controller_generation" : sourceProof[@"controller_generation"],
-        @"actual_journal_revision" : sourceProof[@"journal_revision"] };
+      NSDictionary *refused = conflict(roundRecovery[@"failure_code"] ?: @"E_AGENT_CONFLICT");
       return DSHRuntimeCommitRecoveryResult(self.wal, request, started,
-                                            conflict, error);
+                                            refused, error);
     }
     NSString *roundStatus = roundRecovery[@"status"];
     if ([request[@"action"] isEqualToString:@"retry_failed_round"]) {
       if (![roundStatus isEqualToString:@"failed_retryable"] ||
           ![roundRecovery[@"result_round_revision"]
               isEqual:request[@"expected_round_revision"]]) {
-        NSDictionary *conflict = @{ @"schema_version" : @2, @"status" : @"conflict",
-          @"operation_id" : request[@"operation_id"],
-          @"failure_code" : @"E_AGENT_CONFLICT",
-          @"expected_controller_generation" : request[@"controller_cas"][@"expected_controller_generation"],
-          @"expected_journal_revision" : request[@"controller_cas"][@"expected_journal_revision"],
-          @"actual_controller_generation" : sourceProof[@"controller_generation"],
-          @"actual_journal_revision" : sourceProof[@"journal_revision"] };
+        NSDictionary *refused = conflict(@"E_AGENT_CONFLICT");
         return DSHRuntimeCommitRecoveryResult(self.wal, request, started,
-                                              conflict, error);
+                                              refused, error);
       }
       NSDictionary *state = [self.wal snapshotWithError:error];
       NSDictionary *roundRow = nil;
@@ -985,15 +953,10 @@ static NSDictionary *DSHRuntimeCommitRecoveryResult(
       if (retried == nil) return nil;
       NSString *retryStatus = retried[@"status"];
       if ([retryStatus isEqualToString:@"conflict"]) {
-        NSDictionary *conflict = @{ @"schema_version" : @2,
-          @"status" : @"conflict", @"operation_id" : request[@"operation_id"],
-          @"failure_code" : retried[@"failure_code"] ?: @"E_AGENT_CONFLICT",
-          @"expected_controller_generation" : request[@"controller_cas"][@"expected_controller_generation"],
-          @"expected_journal_revision" : request[@"controller_cas"][@"expected_journal_revision"],
-          @"actual_controller_generation" : sourceProof[@"controller_generation"],
-          @"actual_journal_revision" : sourceProof[@"journal_revision"] };
+        NSDictionary *refused =
+            conflict(retried[@"failure_code"] ?: @"E_AGENT_CONFLICT");
         return DSHRuntimeCommitRecoveryResult(self.wal, request, started,
-                                              conflict, error);
+                                              refused, error);
       } else if ([retryStatus isEqualToString:@"completed"]) {
         NSDictionary *afterRetry = [self.roundService recoverAgentRoundWithRequest:@{
           @"schema_version" : @2, @"task_id" : target[@"task_id"],
@@ -1165,15 +1128,9 @@ static NSDictionary *DSHRuntimeCommitRecoveryResult(
       }
     }
     if ([toolRecovery[@"status"] isEqualToString:@"conflict"]) {
-      NSDictionary *conflict = @{ @"schema_version" : @2, @"status" : @"conflict",
-        @"operation_id" : request[@"operation_id"],
-        @"failure_code" : toolRecovery[@"failure_code"] ?: @"E_AGENT_CONFLICT",
-        @"expected_controller_generation" : request[@"controller_cas"][@"expected_controller_generation"],
-        @"expected_journal_revision" : request[@"controller_cas"][@"expected_journal_revision"],
-        @"actual_controller_generation" : sourceProof[@"controller_generation"],
-        @"actual_journal_revision" : sourceProof[@"journal_revision"] };
+      NSDictionary *refused = conflict(toolRecovery[@"failure_code"] ?: @"E_AGENT_CONFLICT");
       return DSHRuntimeCommitRecoveryResult(self.wal, request, started,
-                                            conflict, error);
+                                            refused, error);
     }
     NSString *toolStatus = toolRecovery[@"status"];
     if ([@[@"completed", @"failed", @"denied", @"cancelled", @"ambiguous"]
