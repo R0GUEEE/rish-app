@@ -97,6 +97,9 @@ begin
     info = IOSPlist.read(File.join(bundle, 'Info.plist'))
     abort 'Archive bundle identity/version mismatch' unless info['CFBundleIdentifier'] == identifier &&
       info['CFBundleShortVersionString'] == version && info['CFBundleVersion'] == build
+    if bundle == app && info['ITSAppUsesNonExemptEncryption'] != false
+      abort 'Archive must declare ITSAppUsesNonExemptEncryption as Boolean false'
+    end
     run!('codesign', '--verify', '--strict', bundle)
   end
   run!('ruby', File.join(ROOT, 'scripts/verify-no-bundled-secret.rb'), app)

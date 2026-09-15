@@ -21,8 +21,9 @@ must belong to the same team and support the target's entitlements.
 
 Create a team App Store Connect API key with permission to upload builds
 (Developer is sufficient for this upload-only workflow). Download its `.p8` once and keep it securely.
-Complete the app's export-compliance questionnaire in App Store Connect;
-this workflow does not assume an encryption exemption.
+The app's `Info.plist` declares `ITSAppUsesNonExemptEncryption` as Boolean
+`false`, as confirmed by the app owner. Future uploads carry this declaration
+automatically. Revisit it if the app's encryption or exemption status changes.
 
 ## GitHub setup
 
@@ -65,7 +66,7 @@ manual build numbers for the same marketing version; if one already exists,
 start a new marketing version or adjust the numbering before dispatch.
 
 A successful upload means Apple accepted the upload request. Wait for Apple
-processing, resolve export-compliance prompts, then enable the build for an
+processing, then enable the build for an
 internal testing group. External testing may require Beta App Review.
 The workflow does not submit an App Store release or enable external testers.
 
