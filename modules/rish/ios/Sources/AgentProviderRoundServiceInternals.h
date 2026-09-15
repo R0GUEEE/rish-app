@@ -80,5 +80,18 @@ FOUNDATION_EXPORT void DSHProviderFinishContext(
     NSString * _Nullable errorCode);
 FOUNDATION_EXPORT NSString * _Nullable DSHProviderLocatorKey(
     NSDictionary *locator);
+/// The arguments for the round operation's own commit: which reference the
+/// result points at, and the result itself.
+FOUNDATION_EXPORT NSDictionary * _Nullable DSHProviderStartedOperationCommit(
+    NSDictionary *request, NSString *requestSHA, NSDictionary * _Nullable row,
+    NSString *status, NSString * _Nullable failureCode);
+/// The public answer a completed round hands the controller.
+FOUNDATION_EXPORT NSDictionary * _Nullable DSHProviderPublicResult(
+    NSDictionary *request, NSDictionary *row, NSDictionary *round);
+/// The failure code a round row's state implies. `kind` is one of "query",
+/// "reconciled" or "cancelled"; "ownerless" additionally answers whether the
+/// state is one recovery may report directly, through `reportable`.
+FOUNDATION_EXPORT NSDictionary * _Nullable DSHProviderRoundFailureCode(
+    NSString *kind, NSString * _Nullable state);
 
 NS_ASSUME_NONNULL_END

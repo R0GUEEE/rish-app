@@ -107,7 +107,8 @@ char *rish_agent_runtime_reduce(const char *json, size_t json_length);
 /// selector_request, selector_matches, result_shape, round_cas, locator_key,
 /// assistant_message, public_receipt, recovered_projection, context_bundle,
 /// conflict, unknown_result, round_result, query_result, selector_conflict,
-/// failure_code, safe_result, tool_description, transcript_body.
+/// failure_code, safe_result, tool_description, transcript_body,
+/// started_operation_commit, public_result, round_failure_code.
 char *rish_agent_provider_round_reduce(const char *json, size_t json_length);
 
 /// "rish-agent-core <version> <git sha>" of the linked build; free with

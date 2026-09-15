@@ -715,6 +715,15 @@ serialized recovery authority, and the one continuation that leaves it to run
 the provider retry and re-enters when the answer arrives. The coordinator is
 down to 1,212 lines from 2,412.
 
+Phase 16 finishes the provider round service's own answers: the reference and
+result a round operation's commit points at, the public outcome a completed
+round hands the controller (final, tool_batch or blocked), and the failure code
+each row state implies for a query, for a round whose writer has provably
+released it, for one reconciled after that writer died, and for one just
+cancelled. What stays native is what the plan always said stays: the
+transport, the streaming parser, the preview publisher, the credentials, and
+the round context a cancellation has to reach into.
+
 ### Device-only storage metadata
 
 The session store and the agent WAL require every pinned item to report

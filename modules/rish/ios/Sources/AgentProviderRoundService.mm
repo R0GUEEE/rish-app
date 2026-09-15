@@ -341,110 +341,31 @@ static const int64_t DSHAgentRoundPreviewCoalesceNanoseconds = 50 * NSEC_PER_MSE
                                                      status:(NSString *)status
                                               failureCode:(NSString *)failureCode
                                                      error:(NSError **)error {
-  NSDictionary *result = nil;
-  NSDictionary *resultRef = nil;
-  NSNumber *resultRevision = (id)NSNull.null;
-  if ([status isEqualToString:@"conflict"]) {
-    NSDictionary *actualTranscript = [row isKindOfClass:NSDictionary.class]
-        ? ((id)row[@"transcript_after"] == NSNull.null
-            ? row[@"transcript_before"] : row[@"transcript_after"])
-        : request[@"transcript"];
-    result = DSHProviderConflictResult(
-        request[@"operation_id"], failureCode ?: @"E_AGENT_CONFLICT", request,
-        [row isKindOfClass:NSDictionary.class]
-            ? (row[@"row_revision"] ?: @0)
-            : request[@"expected_round_revision"],
-        [row isKindOfClass:NSDictionary.class]
-            ? (row[@"state"] ?: @"unknown")
-            : @"in_flight",
-        actualTranscript);
-    resultRef = @{ @"schema_version" : @2, @"kind" : @"none" };
-  } else if ([row isKindOfClass:NSDictionary.class]) {
-    result = DSHProviderRoundResultForRow(request, row, status, failureCode);
-    resultRef = @{
-      @"schema_version" : @2, @"kind" : @"round",
-      @"task_id" : request[@"task_id"],
-      @"attempt_id" : request[@"attempt_id"],
-      @"round_id" : request[@"round_id"],
-      @"round_index" : request[@"round_index"],
-      @"round_revision" : row[@"row_revision"] ?: @0,
-    };
-    resultRevision = row[@"row_revision"] ?: @0;
-  } else if ([status isEqualToString:@"conflict"]) {
-    result = DSHProviderConflictResult(
-        request[@"operation_id"], failureCode, request,
-        request[@"expected_round_revision"], @"in_flight",
-        request[@"transcript"]);
-    resultRef = @{ @"schema_version" : @2, @"kind" : @"none" };
-  } else {
-    result = DSHProviderUnknownResult(
-        request, status, [request[@"expected_round_revision"] unsignedIntegerValue],
-        failureCode);
-    resultRef = @{ @"schema_version" : @2, @"kind" : @"none" };
+  NSDictionary *commit = DSHProviderStartedOperationCommit(request, requestSHA,
+                                                            row, status,
+                                                            failureCode);
+  if (commit == nil) {
+    DSHSetProviderError(error, DSHAgentNativeStoreErrorCorrupt);
+    return nil;
   }
-  NSDictionary *safeResult = DSHProviderOperationSafeResult(result);
+  id revision = commit[@"result_revision"];
   return DSHAgentNativeWALCommitOperation(
-      self.wal, request[@"operation_id"], requestSHA,
-      request[@"task_id"], request[@"attempt_id"], status, status,
-      resultRef, resultRevision, safeResult, error);
+      self.wal, commit[@"operation_id"], commit[@"request_sha256"],
+      commit[@"task_id"], commit[@"attempt_id"], commit[@"terminal_state"],
+      commit[@"result_status"], commit[@"result_ref"],
+      revision == NSNull.null ? nil : revision, commit[@"safe_result"], error);
 }
 
 - (nullable NSDictionary *)publicResultForCompletedRow:(NSDictionary *)row
                                                 request:(NSDictionary *)request
                                                  error:(NSError **)error {
-  NSDictionary *after = row[@"transcript_after"];
   NSDictionary *round = [self roundProjectionForCompletedRow:row
                                                        request:request
                                                         error:error];
   if (round == nil) return nil;
-  NSString *kind = round[@"kind"];
-  NSDictionary *outcome = nil;
-  if ([kind isEqualToString:@"final"]) {
-    outcome = @{
-      @"schema_version" : @3,
-      @"kind" : @"final",
-      @"finish_reason" : @"stop",
-      @"completion_receipt" : round[@"completion_receipt"],
-      @"transcript" : round[@"transcript"],
-      @"text" : round[@"text"],
-      @"reasoning" : round[@"reasoning"],
-    };
-  } else if ([kind isEqualToString:@"tool_batch"]) {
-    outcome = @{
-      @"schema_version" : @3,
-      @"kind" : @"tool_batch",
-      @"finish_reason" : @"tool_calls",
-      @"completion_receipt" : round[@"completion_receipt"],
-      @"transcript" : round[@"transcript"],
-      @"calls" : round[@"calls"],
-      @"batch_class" : round[@"batch_class"],
-      @"executable_call_count" : round[@"executable_call_count"],
-      @"denied_call_count" : round[@"denied_call_count"],
-      @"reasoning" : round[@"reasoning"],
-    };
-  } else {
-    outcome = @{
-      @"schema_version" : @3,
-      @"kind" : @"blocked",
-      @"finish_reason" : round[@"finish_reason"],
-      @"completion_receipt" : round[@"completion_receipt"],
-      @"transcript" : round[@"transcript"],
-      @"failure_code" : round[@"failure_code"],
-    };
-  }
-  return @{
-    @"schema_version" : @2,
-    @"status" : @"completed",
-    @"operation_id" : request[@"operation_id"],
-    @"task_id" : request[@"task_id"],
-    @"attempt_id" : request[@"attempt_id"],
-    @"round_id" : request[@"round_id"],
-    @"round_index" : request[@"round_index"],
-    @"launch_attempt" : row[@"launch_attempt"],
-    @"result_round_revision" : row[@"row_revision"],
-    @"transcript" : after,
-    @"outcome" : outcome,
-  };
+  NSDictionary *result = DSHProviderPublicResult(request, row, round);
+  if (result == nil) DSHSetProviderError(error, DSHAgentNativeStoreErrorCorrupt);
+  return result;
 }
 
 - (nullable NSDictionary *)roundProjectionForCompletedRow:(NSDictionary *)row
@@ -1584,9 +1505,9 @@ static const int64_t DSHAgentRoundPreviewCoalesceNanoseconds = 50 * NSEC_PER_MSE
     if (projection != nil) queryResult[@"completed_round"] = projection;
     return [queryResult copy];
   }
+  NSDictionary *failure = DSHProviderRoundFailureCode(@"query", status);
   return DSHProviderQueryResultForRow(request, row, status,
-      [status isEqualToString:@"ambiguous"] ? @"E_AGENT_ROUND_AMBIGUOUS" :
-      ([status isEqualToString:@"unknown"] ? @"E_AGENT_PERSISTENCE" : nil));
+      failure[@"code"] == NSNull.null ? nil : failure[@"code"]);
 }
 - (nullable NSDictionary *)recoverAgentRoundWithRequest:(NSDictionary *)request
                                                    error:(NSError **)error {
@@ -1619,18 +1540,9 @@ static const int64_t DSHAgentRoundPreviewCoalesceNanoseconds = 50 * NSEC_PER_MSE
   NSDictionary *owner = row[@"owner"];
   if ((id)owner == NSNull.null) {
     NSString *state = row[@"state"];
-    if ([state isEqualToString:@"completed"] ||
-        [state isEqualToString:@"cancelled"] ||
-        [state isEqualToString:@"failed_retryable"] ||
-        [state isEqualToString:@"unknown"] ||
-        [state isEqualToString:@"ambiguous"]) {
-      NSString *failure = [state isEqualToString:@"cancelled"]
-          ? @"E_AGENT_CANCELLED"
-          : ([state isEqualToString:@"ambiguous"]
-                 ? @"E_AGENT_ROUND_AMBIGUOUS"
-                 : ([state isEqualToString:@"unknown"] ||
-                    [state isEqualToString:@"failed_retryable"]
-                        ? @"E_AGENT_PERSISTENCE" : nil));
+    NSDictionary *ownerless = DSHProviderRoundFailureCode(@"ownerless", state);
+    if ([ownerless[@"reportable"] isEqual:@YES]) {
+      NSString *failure = ownerless[@"code"] == NSNull.null ? nil : ownerless[@"code"];
       NSMutableDictionary *result = [DSHProviderQueryResultForRow(
           request, row, state, failure) mutableCopy];
       if ([state isEqualToString:@"completed"]) {
@@ -1655,8 +1567,7 @@ static const int64_t DSHAgentRoundPreviewCoalesceNanoseconds = 50 * NSEC_PER_MSE
   NSString *status = reconciledRow[@"state"];
   return DSHProviderQueryResultForRow(
       request, reconciledRow, status,
-      [status isEqualToString:@"failed_retryable"] ? @"E_AGENT_PERSISTENCE" :
-      @"E_AGENT_ROUND_AMBIGUOUS");
+      DSHProviderRoundFailureCode(@"reconciled", status)[@"code"]);
 }
 - (nullable NSDictionary *)cancelAgentRoundWithRequest:(NSDictionary *)request
                                                   error:(NSError **)error {
@@ -1709,8 +1620,10 @@ static const int64_t DSHAgentRoundPreviewCoalesceNanoseconds = 50 * NSEC_PER_MSE
   NSDictionary *cancelled = [self.rounds cancelAgentRoundV3WithCAS:cas error:error];
   NSDictionary *cancelledRow = cancelled[@"row"] ?: row;
   NSString *status = cancelledRow[@"state"];
+  NSDictionary *cancelledFailure = DSHProviderRoundFailureCode(@"cancelled",
+                                                                status);
   return DSHProviderQueryResultForRow(
       request, cancelledRow, status,
-      [status isEqualToString:@"cancelled"] ? @"E_AGENT_CANCELLED" : nil);
+      cancelledFailure[@"code"] == NSNull.null ? nil : cancelledFailure[@"code"]);
 }
 @end

@@ -408,6 +408,35 @@ NSString *DSHProviderLocatorKey(NSDictionary *locator) {
   return [key isKindOfClass:NSString.class] ? key : nil;
 }
 
+NSDictionary *DSHProviderStartedOperationCommit(NSDictionary *request,
+                                                NSString *requestSHA,
+                                                NSDictionary *row,
+                                                NSString *status,
+                                                NSString *failureCode) {
+  NSMutableDictionary *fields = [@{
+    @"request" : request ?: NSNull.null,
+    @"request_sha256" : requestSHA ?: NSNull.null,
+    @"status" : status ?: NSNull.null,
+  } mutableCopy];
+  if ([row isKindOfClass:NSDictionary.class]) fields[@"row"] = row;
+  if (failureCode != nil) fields[@"failure_code"] = failureCode;
+  return DSHProviderReduce(@"started_operation_commit", fields, nullptr)[@"commit"];
+}
+
+NSDictionary *DSHProviderPublicResult(NSDictionary *request, NSDictionary *row,
+                                      NSDictionary *round) {
+  return DSHProviderReduce(@"public_result", @{
+    @"request" : request ?: NSNull.null, @"row" : row ?: NSNull.null,
+    @"round" : round ?: NSNull.null,
+  }, nullptr)[@"output"];
+}
+
+NSDictionary *DSHProviderRoundFailureCode(NSString *kind, NSString *state) {
+  return DSHProviderReduce(@"round_failure_code", @{
+    @"kind" : kind ?: NSNull.null, @"state" : state ?: NSNull.null,
+  }, nullptr);
+}
+
 NSDictionary *DSHProviderRoundResultForRow(NSDictionary *request,
                                                   NSDictionary *row,
                                                   NSString *status,

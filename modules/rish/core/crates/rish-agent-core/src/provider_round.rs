@@ -910,6 +910,184 @@ pub fn transcript_for_body(native_messages: &[Value]) -> Result<Vec<Value>, Stor
 
 // MARK: - JSON envelope
 
+// MARK: - the service's own answers
+
+/// `commitStartedOperationForRequest:`: which reference a round operation's
+/// own result points at, and the result itself. A conflict never carries a
+/// revision; a row that exists names its own.
+pub fn started_operation_commit(
+    request: &Value,
+    request_sha256: &str,
+    row: Option<&Value>,
+    status: &str,
+    failure_code: Option<&str>,
+) -> Value {
+    let row = row.filter(|row| row.is_object());
+    let (result, result_ref, revision) = if status == "conflict" {
+        let actual_transcript = match row {
+            Some(row) => match row.get("transcript_after") {
+                Some(after) if !after.is_null() => after.clone(),
+                _ => row.get("transcript_before").cloned().unwrap_or(Value::Null),
+            },
+            None => request.get("transcript").cloned().unwrap_or(Value::Null),
+        };
+        let revision = match row {
+            Some(row) => row.get("row_revision").cloned().unwrap_or(json!(0)),
+            None => request
+                .get("expected_round_revision")
+                .cloned()
+                .unwrap_or(Value::Null),
+        };
+        let state = match row.and_then(|row| row.get("state")).and_then(Value::as_str) {
+            Some(state) => state,
+            None if row.is_some() => "unknown",
+            None => "in_flight",
+        };
+        let result = conflict_result(
+            request.get("operation_id"),
+            failure_code.unwrap_or("E_AGENT_CONFLICT"),
+            request,
+            Some(&revision),
+            Some(state),
+            Some(&actual_transcript),
+        );
+        (
+            result,
+            json!({ "schema_version": 2, "kind": "none" }),
+            Value::Null,
+        )
+    } else if let Some(row) = row {
+        let revision = row.get("row_revision").cloned().unwrap_or(json!(0));
+        let result = round_result_for_row(request, row, status, failure_code.unwrap_or_default());
+        let result_ref = json!({
+            "schema_version": 2, "kind": "round",
+            "task_id": request.get("task_id"),
+            "attempt_id": request.get("attempt_id"),
+            "round_id": request.get("round_id"),
+            "round_index": request.get("round_index"),
+            "round_revision": revision,
+        });
+        (result, result_ref, revision)
+    } else {
+        let result = unknown_result(
+            request,
+            status,
+            request
+                .get("expected_round_revision")
+                .and_then(Value::as_u64)
+                .unwrap_or(0),
+            failure_code.unwrap_or_default(),
+        );
+        (
+            result,
+            json!({ "schema_version": 2, "kind": "none" }),
+            Value::Null,
+        )
+    };
+    json!({
+        "operation_id": request.get("operation_id"),
+        "request_sha256": request_sha256,
+        "task_id": request.get("task_id"),
+        "attempt_id": request.get("attempt_id"),
+        "terminal_state": status,
+        "result_status": status,
+        "result_ref": result_ref,
+        "result_revision": revision,
+        "safe_result": operation_safe_result(&result),
+    })
+}
+
+/// `publicResultForCompletedRow:`: the outcome a completed round hands the
+/// controller, shaped by what the round turned out to be.
+pub fn public_result_for_completed_row(request: &Value, row: &Value, round: &Value) -> Value {
+    let receipt = round.get("completion_receipt");
+    let transcript = round.get("transcript");
+    let outcome = match round.get("kind").and_then(Value::as_str) {
+        Some("final") => json!({
+            "schema_version": 3,
+            "kind": "final",
+            "finish_reason": "stop",
+            "completion_receipt": receipt,
+            "transcript": transcript,
+            "text": round.get("text"),
+            "reasoning": round.get("reasoning"),
+        }),
+        Some("tool_batch") => json!({
+            "schema_version": 3,
+            "kind": "tool_batch",
+            "finish_reason": "tool_calls",
+            "completion_receipt": receipt,
+            "transcript": transcript,
+            "calls": round.get("calls"),
+            "batch_class": round.get("batch_class"),
+            "executable_call_count": round.get("executable_call_count"),
+            "denied_call_count": round.get("denied_call_count"),
+            "reasoning": round.get("reasoning"),
+        }),
+        _ => json!({
+            "schema_version": 3,
+            "kind": "blocked",
+            "finish_reason": round.get("finish_reason"),
+            "completion_receipt": receipt,
+            "transcript": transcript,
+            "failure_code": round.get("failure_code"),
+        }),
+    };
+    json!({
+        "schema_version": 2,
+        "status": "completed",
+        "operation_id": request.get("operation_id"),
+        "task_id": request.get("task_id"),
+        "attempt_id": request.get("attempt_id"),
+        "round_id": request.get("round_id"),
+        "round_index": request.get("round_index"),
+        "launch_attempt": row.get("launch_attempt"),
+        "result_round_revision": row.get("row_revision"),
+        "transcript": row.get("transcript_after"),
+        "outcome": outcome,
+    })
+}
+
+/// The failure code a query reports for a row it found, by the row's state.
+pub fn query_failure_code(state: &str) -> Option<&'static str> {
+    match state {
+        "ambiguous" => Some("E_AGENT_ROUND_AMBIGUOUS"),
+        "unknown" => Some("E_AGENT_PERSISTENCE"),
+        _ => None,
+    }
+}
+
+/// Whether a round whose writer has provably released it is in a state
+/// recovery can report directly, and the failure code that goes with it.
+pub fn recovered_ownerless_state(state: &str) -> Option<Option<&'static str>> {
+    match state {
+        "completed" => Some(None),
+        "cancelled" => Some(Some("E_AGENT_CANCELLED")),
+        "ambiguous" => Some(Some("E_AGENT_ROUND_AMBIGUOUS")),
+        "unknown" | "failed_retryable" => Some(Some("E_AGENT_PERSISTENCE")),
+        _ => None,
+    }
+}
+
+/// The failure code recovery reports after reconciling a dead writer's round:
+/// a retryable row is a persistence failure, anything else is ambiguous.
+pub fn reconciled_failure_code(state: &str) -> &'static str {
+    if state == "failed_retryable" {
+        "E_AGENT_PERSISTENCE"
+    } else {
+        "E_AGENT_ROUND_AMBIGUOUS"
+    }
+}
+
+/// The failure code a cancellation reports for the row it left behind.
+pub fn cancelled_failure_code(state: &str) -> Option<&'static str> {
+    if state == "cancelled" {
+        Some("E_AGENT_CANCELLED")
+    } else {
+        None
+    }
+}
+
 /// `{"op","request",...}` in; `{"ok":true,...}` or `{"ok":false,"error":<code>}` out.
 pub fn reduce_json(input: &str) -> String {
     let value = match reduce_json_inner(input) {
@@ -1022,6 +1200,29 @@ fn reduce_json_inner(input: &str) -> Result<Value, StoreError> {
             json!({ "code": failure_code(as_str(get(&envelope, "provider_error_code")), flag("digest_mismatch")) }),
         ),
         "safe_result" => Ok(json!({ "safe": operation_safe_result(field("result")?) })),
+        "started_operation_commit" => Ok(json!({ "commit": started_operation_commit(
+            field("request")?,
+            as_str(get(&envelope, "request_sha256")).ok_or(StoreError::InvalidArgument)?,
+            get(&envelope, "row"),
+            as_str(get(&envelope, "status")).ok_or(StoreError::InvalidArgument)?,
+            as_str(get(&envelope, "failure_code")),
+        )})),
+        "public_result" => Ok(json!({ "output": public_result_for_completed_row(
+            field("request")?, field("row")?, field("round")?,
+        )})),
+        "round_failure_code" => {
+            let state = as_str(get(&envelope, "state")).unwrap_or_default();
+            Ok(match as_str(get(&envelope, "kind")) {
+                Some("query") => json!({ "code": query_failure_code(state) }),
+                Some("reconciled") => json!({ "code": reconciled_failure_code(state) }),
+                Some("cancelled") => json!({ "code": cancelled_failure_code(state) }),
+                Some("ownerless") => match recovered_ownerless_state(state) {
+                    Some(code) => json!({ "reportable": true, "code": code }),
+                    None => json!({ "reportable": false, "code": Value::Null }),
+                },
+                _ => return Err(StoreError::InvalidArgument),
+            })
+        }
         "tool_description" => Ok(json!({ "description": tool_description(
             as_str(get(&envelope, "name")).ok_or(StoreError::InvalidArgument)?,
         )})),
