@@ -26,6 +26,166 @@
 @property(nonatomic, strong, readonly) DSHAgentTranscriptStore *transcripts;
 @end
 
+#include "rish_agent_core.h"
+
+// Every rule below lives in the shared core (modules/rish/core,
+// `rish_agent_runtime_reduce`). This side keeps the stores, the transactions
+// and the executors: it loads the session snapshot and the WAL state, calls
+// the typed services, and hands their answers back as facts.
+static NSDictionary *DSHRuntimeReduce(NSDictionary *envelope) {
+  NSData *bytes = [NSJSONSerialization dataWithJSONObject:envelope options:0
+                                                    error:nil];
+  if (bytes == nil) return nil;
+  char *raw = rish_agent_runtime_reduce((const char *)bytes.bytes, bytes.length);
+  if (raw == NULL) return nil;
+  NSData *replyBytes = [NSData dataWithBytes:raw length:strlen(raw)];
+  rish_agent_string_free(raw);
+  id reply = [NSJSONSerialization JSONObjectWithData:replyBytes options:0
+                                               error:nil];
+  if (![reply isKindOfClass:NSDictionary.class]) return nil;
+  return reply;
+}
+
+/// Runs one core decision and maps a refusal onto the store error vocabulary.
+static NSDictionary *DSHRuntimeDecide(NSDictionary *envelope, NSError **error) {
+  NSDictionary *reply = DSHRuntimeReduce(envelope);
+  if (reply == nil) {
+    DSHSetAgentNativeStoreError(error, DSHAgentNativeStoreErrorCorrupt);
+    return nil;
+  }
+  if (![reply[@"ok"] isEqual:@YES]) {
+    DSHSetAgentNativeStoreError(
+        error, (DSHAgentNativeStoreErrorCode)[reply[@"error"] integerValue]);
+    return nil;
+  }
+  return reply;
+}
+
+/// The committed session as a parsed object. `present` distinguishes a
+/// snapshot that could not be read at all from one that read but did not
+/// parse; the callers map those two differently.
+static NSDictionary *DSHRuntimeLoadSession(
+    DSHAgentPreparedAttemptStore *preparedStore,
+    NSDictionary *__strong *facts,
+    BOOL *present,
+    NSError **error) {
+  if (present != nullptr) *present = NO;
+  NSDictionary *loaded = [preparedStore.sessionSnapshotStore
+      loadSessionSnapshotWithError:error];
+  id sessionJSON = loaded[@"session_json"];
+  if (![loaded[@"status"] isEqualToString:@"present"] ||
+      ![loaded[@"snapshot"] isKindOfClass:NSDictionary.class] ||
+      ![sessionJSON isKindOfClass:NSString.class]) {
+    return nil;
+  }
+  if (present != nullptr) *present = YES;
+  if (facts != nullptr) {
+    *facts = @{
+      @"session_generation" : loaded[@"snapshot"][@"generation"] ?: NSNull.null,
+      @"session_sha256" : loaded[@"snapshot"][@"session_sha256"] ?: NSNull.null,
+    };
+  }
+  NSData *bytes = [sessionJSON dataUsingEncoding:NSUTF8StringEncoding];
+  id session = bytes == nil ? nil :
+      [NSJSONSerialization JSONObjectWithData:bytes options:0 error:nil];
+  return [session isKindOfClass:NSDictionary.class] ? session : nil;
+}
+
+static NSDictionary *DSHRuntimeSessionProof(
+    DSHAgentPreparedAttemptStore *preparedStore,
+    NSString *conversationId,
+    NSString *taskId,
+    NSString *attemptId,
+    NSNumber *expectedControllerGeneration,
+    NSNumber *expectedJournalRevision,
+    NSNumber *expectedSessionGeneration,
+    NSString *expectedSessionSHA256,
+    NSError **error) {
+  NSDictionary *facts = nil;
+  BOOL present = NO;
+  NSDictionary *session = DSHRuntimeLoadSession(preparedStore, &facts, &present,
+                                                error);
+  if (!present) {
+    if (error != nullptr && *error == nil) {
+      DSHSetAgentNativeStoreError(error, DSHAgentNativeStoreErrorPersistence);
+    }
+    return nil;
+  }
+  if (session == nil) {
+    DSHSetAgentNativeStoreError(error, DSHAgentNativeStoreErrorCorrupt);
+    return nil;
+  }
+  NSDictionary *reply = DSHRuntimeDecide(@{
+    @"op" : @"session_proof",
+    @"session" : session,
+    @"facts" : facts,
+    @"request" : @{
+      @"conversation_id" : conversationId ?: NSNull.null,
+      @"task_id" : taskId ?: NSNull.null,
+      @"attempt_id" : attemptId ?: NSNull.null,
+      @"expected_controller_generation" :
+          expectedControllerGeneration ?: NSNull.null,
+      @"expected_journal_revision" : expectedJournalRevision ?: NSNull.null,
+      @"expected_session_generation" : expectedSessionGeneration ?: NSNull.null,
+      @"expected_session_sha256" : expectedSessionSHA256 ?: NSNull.null,
+    },
+  }, error);
+  if (reply == nil) return nil;
+  NSMutableDictionary *proof = [reply[@"proof"] mutableCopy];
+  proof[@"session"] = session;
+  return proof;
+}
+
+static BOOL DSHRuntimeCancelSourceProof(NSDictionary *session,
+                                        NSDictionary *request,
+                                        NSError **error) {
+  NSDictionary *reply = DSHRuntimeReduce(@{
+    @"op" : @"cancel_source_proof",
+    @"session" : session ?: NSNull.null,
+    @"request" : request ?: NSNull.null,
+  });
+  if ([reply[@"proves"] isEqual:@YES]) return YES;
+  DSHSetAgentNativeStoreError(error, DSHAgentNativeStoreErrorConflict);
+  return NO;
+}
+
+static BOOL DSHRuntimeCleanupOutboxProof(
+    DSHAgentPreparedAttemptStore *preparedStore,
+    NSDictionary *request,
+    NSError **error) {
+  NSDictionary *session = DSHRuntimeLoadSession(preparedStore, nullptr, nullptr,
+                                                error);
+  NSDictionary *reply = session == nil ? nil : DSHRuntimeReduce(@{
+    @"op" : @"cleanup_outbox_proof",
+    @"session" : session,
+    @"request" : request ?: NSNull.null,
+  });
+  if ([reply[@"proves"] isEqual:@YES]) return YES;
+  DSHSetAgentNativeStoreError(error, DSHAgentNativeStoreErrorConflict);
+  return NO;
+}
+
+static NSString *DSHRuntimeChildOperationID(NSString *operationId,
+                                            NSString *purpose,
+                                            NSError **error) {
+  NSDictionary *reply = DSHRuntimeDecide(@{
+    @"op" : @"child_operation_id",
+    @"purpose" : purpose ?: NSNull.null,
+    @"request" : @{ @"operation_id" : operationId ?: NSNull.null },
+  }, error);
+  return reply[@"operation_id"];
+}
+
+static NSArray *DSHRuntimeLatestBatchCalls(NSDictionary *state,
+                                           NSDictionary *batch) {
+  NSDictionary *reply = DSHRuntimeReduce(@{
+    @"op" : @"latest_batch_calls",
+    @"state" : state ?: NSNull.null,
+    @"batch" : batch ?: NSNull.null,
+  });
+  return reply[@"calls"] ?: @[];
+}
+
 static NSDictionary *DSHRuntimeSerializedResult(NSDictionary *(^operation)(void)) {
   __block NSDictionary *result = nil;
   DSHSessionWorkspacePerformSync(^{ result = operation(); });
@@ -48,30 +208,6 @@ static NSDictionary *DSHRuntimeRequest(id request, NSArray<NSString *> *keys,
 static NSDictionary *DSHRuntimeTarget(NSDictionary *request) {
   id value = request[@"target"];
   return [value isKindOfClass:NSDictionary.class] ? value : nil;
-}
-
-static NSString *DSHRuntimeChildOperationID(NSString *operationId,
-                                            NSString *purpose,
-                                            NSError **error) {
-  NSString *digest = DSHAgentHJ(@"agent-child-operation", @{
-    @"operation_id" : operationId, @"purpose" : purpose,
-  }, error);
-  if (digest.length != 64) return nil;
-  NSMutableString *hex = [[digest substringToIndex:32] mutableCopy];
-  [hex replaceCharactersInRange:NSMakeRange(12, 1) withString:@"4"];
-  unichar variant = [hex characterAtIndex:16];
-  NSUInteger nibble = 0;
-  if (variant >= '0' && variant <= '9') nibble = variant - '0';
-  else nibble = 10 + variant - 'a';
-  [hex replaceCharactersInRange:NSMakeRange(16, 1)
-                      withString:[NSString stringWithFormat:@"%lx",
-                                  (unsigned long)((nibble & 0x3) | 0x8)]];
-  return [NSString stringWithFormat:@"%@-%@-%@-%@-%@",
-      [hex substringWithRange:NSMakeRange(0, 8)],
-      [hex substringWithRange:NSMakeRange(8, 4)],
-      [hex substringWithRange:NSMakeRange(12, 4)],
-      [hex substringWithRange:NSMakeRange(16, 4)],
-      [hex substringWithRange:NSMakeRange(20, 12)]];
 }
 
 static NSDictionary *DSHRuntimeReferenceForRow(NSDictionary *row) {
@@ -102,34 +238,6 @@ static NSDictionary *DSHRuntimeExecutionCAS(NSDictionary *row) {
   };
 }
 
-static NSString *DSHRuntimeToolStatus(NSDictionary *row) {
-  NSString *state = row[@"state"];
-  if (![state isEqualToString:@"settled"]) return state;
-  NSString *outcome = row[@"receipt"][@"outcome"];
-  return [outcome isEqualToString:@"ok"] ? @"completed" :
-      ([outcome isEqualToString:@"denied"] ? @"denied" : @"failed");
-}
-
-static NSDictionary *DSHRuntimeToolProjection(NSDictionary *row) {
-  NSDictionary *locator = row[@"locator"];
-  return @{
-    @"schema_version" : @2,
-    @"task_id" : locator[@"task_id"],
-    @"attempt_id" : locator[@"attempt_id"],
-    @"round_id" : locator[@"round_id"],
-    @"round_index" : locator[@"round_index"],
-    @"call_index" : locator[@"call_index"],
-    @"call_id" : locator[@"call_id"],
-    @"name" : row[@"name"],
-    @"arguments_sha256" : row[@"arguments_sha256"],
-    @"idempotency_key" : locator[@"idempotency_key"],
-    @"execution_revision" : row[@"row_revision"],
-    @"status" : DSHRuntimeToolStatus(row),
-    @"transcript" : DSHRuntimeReferenceForRow(row),
-    @"receipt" : row[@"receipt"],
-  };
-}
-
 static NSDictionary *DSHRuntimeFindAuthority(NSDictionary *state,
                                              NSString *taskId,
                                              NSString *attemptId) {
@@ -148,177 +256,6 @@ static NSDictionary *DSHRuntimeFindLedgerRow(NSDictionary *state,
   return nil;
 }
 
-static NSDictionary *DSHRuntimeSessionProof(
-    DSHAgentPreparedAttemptStore *preparedStore,
-    NSString *conversationId,
-    NSString *taskId,
-    NSString *attemptId,
-    NSNumber *expectedControllerGeneration,
-    NSNumber *expectedJournalRevision,
-    NSNumber *expectedSessionGeneration,
-    NSString *expectedSessionSHA256,
-    NSError **error) {
-  NSDictionary *loaded = [preparedStore.sessionSnapshotStore
-      loadSessionSnapshotWithError:error];
-  if (![loaded[@"status"] isEqualToString:@"present"] ||
-      ![loaded[@"snapshot"] isKindOfClass:NSDictionary.class] ||
-      ![loaded[@"session_json"] isKindOfClass:NSString.class]) {
-    if (error != nullptr && *error == nil) {
-      DSHSetAgentNativeStoreError(error, DSHAgentNativeStoreErrorPersistence);
-    }
-    return nil;
-  }
-  NSData *bytes = [loaded[@"session_json"] dataUsingEncoding:NSUTF8StringEncoding];
-  NSDictionary *session = bytes == nil ? nil :
-      [NSJSONSerialization JSONObjectWithData:bytes options:0 error:nil];
-  if (![session isKindOfClass:NSDictionary.class] ||
-      ![session[@"schema_version"] isEqual:@9] ||
-      ![session[@"conversations"] isKindOfClass:NSArray.class] ||
-      ![session[@"session_events"] isKindOfClass:NSArray.class]) {
-    DSHSetAgentNativeStoreError(error, DSHAgentNativeStoreErrorCorrupt);
-    return nil;
-  }
-  NSDictionary *conversation = nil;
-  NSDictionary *attempt = nil;
-  for (NSDictionary *candidate in session[@"conversations"]) {
-    if ([candidate[@"id"] isEqual:conversationId]) {
-      conversation = candidate;
-      break;
-    }
-  }
-  for (NSDictionary *candidate in conversation[@"attempts"]) {
-    if ([candidate[@"attempt_id"] isEqual:attemptId]) {
-      attempt = candidate;
-      break;
-    }
-  }
-  NSNumber *actualController = attempt[@"agent"][@"controller_generation"];
-  if (![attempt[@"turn_id"] isEqual:taskId] ||
-      !DSHAgentSafeInteger(actualController, 9007199254740991ULL, YES) ||
-      !DSHAgentSafeInteger(attempt[@"journal_revision"],
-                           9007199254740991ULL, YES)) {
-    DSHSetAgentNativeStoreError(error, DSHAgentNativeStoreErrorConflict);
-    return nil;
-  }
-  NSNumber *actualGeneration = loaded[@"snapshot"][@"generation"];
-  NSString *actualSHA = loaded[@"snapshot"][@"session_sha256"];
-  NSNumber *actualJournal = attempt[@"journal_revision"];
-  BOOL matches = [actualController isEqual:expectedControllerGeneration] &&
-      [actualJournal isEqual:expectedJournalRevision] &&
-      [actualGeneration isEqual:expectedSessionGeneration] &&
-      [actualSHA isEqual:expectedSessionSHA256];
-  return @{ @"matches" : @(matches),
-            @"controller_generation" : actualController,
-            @"journal_revision" : actualJournal,
-            @"session_generation" : actualGeneration,
-            @"session_sha256" : actualSHA,
-            @"session" : session };
-}
-
-static BOOL DSHRuntimeCancelSourceProof(
-    NSDictionary *session,
-    NSDictionary *request,
-    NSError **error) {
-  NSDictionary *target = request[@"target"];
-  NSDictionary *token = request[@"cancel_token"];
-  BOOL tokenShape = DSHAgentExactDictionaryKeys(token, @[
-    @"schema_version", @"issuer", @"source_event_id", @"token",
-    @"task_id", @"attempt_id", @"expected_phase", @"reason_code",
-  ]) && [token[@"schema_version"] isEqual:@2] &&
-      [token[@"issuer"] isEqualToString:@"completion_controller"] &&
-      DSHAgentCanonicalUUID(token[@"source_event_id"]) &&
-      [token[@"token"] isEqual:token[@"source_event_id"]] &&
-      DSHAgentCanonicalUUID(token[@"task_id"]) &&
-      DSHAgentCanonicalUUID(token[@"attempt_id"]) &&
-      [@[@"ready_for_round", @"batch_frozen", @"round_in_flight", @"approval_pending", @"execution_intent",
-         @"tool_result_pending"] containsObject:token[@"expected_phase"]] &&
-      [@[@"E_AGENT_CANCELLED", @"E_AGENT_ROOT_STALE",
-         @"E_AGENT_PERSISTENCE"] containsObject:token[@"reason_code"]] &&
-      [token[@"task_id"] isEqual:target[@"task_id"]] &&
-      [token[@"attempt_id"] isEqual:target[@"attempt_id"]];
-  if (![session[@"schema_version"] isEqual:@9] || !tokenShape) {
-    DSHSetAgentNativeStoreError(error, DSHAgentNativeStoreErrorConflict);
-    return NO;
-  }
-  NSDictionary *conversation = nil;
-  NSDictionary *attempt = nil;
-  for (NSDictionary *candidate in session[@"conversations"]) {
-    if ([candidate[@"id"] isEqual:request[@"controller_cas"][@"conversation_id"]]) {
-      conversation = candidate;
-      break;
-    }
-  }
-  for (NSDictionary *candidate in conversation[@"attempts"]) {
-    if ([candidate[@"attempt_id"] isEqual:target[@"attempt_id"]]) {
-      attempt = candidate;
-      break;
-    }
-  }
-  if (![attempt[@"turn_id"] isEqual:target[@"task_id"]] ||
-      ![attempt[@"agent"][@"phase"] isEqual:token[@"expected_phase"]]) {
-    DSHSetAgentNativeStoreError(error, DSHAgentNativeStoreErrorConflict);
-    return NO;
-  }
-  NSDictionary *matched = nil;
-  for (NSDictionary *event in session[@"session_events"]) {
-    if (![event[@"event_id"] isEqual:token[@"source_event_id"]]) continue;
-    if (matched != nil) {
-      DSHSetAgentNativeStoreError(error, DSHAgentNativeStoreErrorConflict);
-      return NO;
-    }
-    matched = event;
-  }
-  BOOL eventShape = DSHAgentExactDictionaryKeys(matched, @[
-    @"schema_version", @"event_id", @"attempt_id", @"seq", @"kind",
-    @"round_index", @"call_id", @"status", @"safe_summary_key",
-    @"arguments_sha256", @"result_sha256", @"approval_reference",
-    @"failure_code", @"created_at",
-  ]) && [matched[@"schema_version"] isEqual:@2] &&
-      [matched[@"kind"] isEqualToString:@"cancel"] &&
-      DSHAgentCanonicalUUID(matched[@"event_id"]) &&
-      DSHAgentCanonicalUUID(matched[@"attempt_id"]) &&
-      DSHAgentSafeInteger(matched[@"seq"], 9007199254740991ULL, YES) &&
-      matched[@"safe_summary_key"] == NSNull.null &&
-      matched[@"result_sha256"] == NSNull.null &&
-      [matched[@"approval_reference"] isEqual:matched[@"event_id"]] &&
-      DSHAgentCanonicalTimestamp(matched[@"created_at"]);
-  BOOL common = eventShape &&
-      [matched[@"attempt_id"] isEqual:target[@"attempt_id"]] &&
-      [matched[@"status"] isEqualToString:@"cancelled"] &&
-      [matched[@"failure_code"] isEqual:token[@"reason_code"]];
-  BOOL targetMatches = NO;
-  if ([target[@"kind"] isEqualToString:@"attempt"]) {
-    targetMatches = matched[@"round_index"] == NSNull.null &&
-        matched[@"call_id"] == NSNull.null &&
-        matched[@"arguments_sha256"] == NSNull.null;
-  } else if ([target[@"kind"] isEqualToString:@"round"]) {
-    targetMatches = [matched[@"round_index"] isEqual:target[@"round_index"]] &&
-        matched[@"call_id"] == NSNull.null &&
-        matched[@"arguments_sha256"] == NSNull.null;
-  } else if ([target[@"kind"] isEqualToString:@"tool"]) {
-    NSDictionary *journalCall = nil;
-    for (NSDictionary *candidate in attempt[@"agent"][@"batch"]) {
-      if (![candidate[@"call_id"] isEqual:target[@"call_id"]] ||
-          ![candidate[@"call_index"] isEqual:target[@"call_index"]]) continue;
-      if (journalCall != nil) {
-        DSHSetAgentNativeStoreError(error, DSHAgentNativeStoreErrorConflict);
-        return NO;
-      }
-      journalCall = candidate;
-    }
-    targetMatches = [matched[@"round_index"] isEqual:target[@"round_index"]] &&
-        [matched[@"call_id"] isEqual:target[@"call_id"]] &&
-        DSHAgentCanonicalSHA256(matched[@"arguments_sha256"]) &&
-        [attempt[@"agent"][@"round_index"] isEqual:target[@"round_index"]] &&
-        [journalCall[@"arguments_sha256"] isEqual:matched[@"arguments_sha256"]];
-  }
-  if (!common || !targetMatches) {
-    DSHSetAgentNativeStoreError(error, DSHAgentNativeStoreErrorConflict);
-    return NO;
-  }
-  return YES;
-}
-
 static BOOL DSHRuntimeControllerMatchesCheckpoint(NSDictionary *controllerCAS,
                                                   NSDictionary *checkpoint) {
   return [controllerCAS isKindOfClass:NSDictionary.class] &&
@@ -331,75 +268,12 @@ static BOOL DSHRuntimeControllerMatchesCheckpoint(NSDictionary *controllerCAS,
           isEqual:checkpoint[@"session_sha256"]];
 }
 
-static BOOL DSHRuntimeControllerMatchesIdentity(NSDictionary *controllerCAS,
-                                                NSString *conversationId,
-                                                NSString *taskId,
-                                                NSString *attemptId) {
-  return [controllerCAS isKindOfClass:NSDictionary.class] &&
-      [controllerCAS[@"conversation_id"] isEqual:conversationId] &&
-      [controllerCAS[@"task_id"] isEqual:taskId] &&
-      [controllerCAS[@"attempt_id"] isEqual:attemptId];
-}
-
 static NSDictionary *DSHRuntimeFindCleanup(NSDictionary *state,
                                            NSString *cleanupId) {
   for (NSDictionary *row in state[@"cleanup"]) {
     if ([row[@"cleanup_id"] isEqual:cleanupId]) return row;
   }
   return nil;
-}
-
-static BOOL DSHRuntimeCleanupOutboxProof(
-    DSHAgentPreparedAttemptStore *preparedStore,
-    NSDictionary *request,
-    NSError **error) {
-  NSDictionary *loaded = [preparedStore.sessionSnapshotStore
-      loadSessionSnapshotWithError:error];
-  id sessionJSON = loaded[@"session_json"];
-  if (![loaded[@"status"] isEqualToString:@"present"] ||
-      ![sessionJSON isKindOfClass:NSString.class]) {
-    DSHSetAgentNativeStoreError(error, DSHAgentNativeStoreErrorConflict);
-    return NO;
-  }
-  NSData *bytes = [sessionJSON dataUsingEncoding:NSUTF8StringEncoding];
-  NSDictionary *session = bytes == nil ? nil :
-      [NSJSONSerialization JSONObjectWithData:bytes options:0 error:nil];
-  if (![session isKindOfClass:NSDictionary.class]) {
-    DSHSetAgentNativeStoreError(error, DSHAgentNativeStoreErrorConflict);
-    return NO;
-  }
-  NSArray *outbox = session[@"agent_transcript_cleanup_outbox"];
-  if (![session[@"schema_version"] isEqual:@9] ||
-      ![outbox isKindOfClass:NSArray.class]) {
-    DSHSetAgentNativeStoreError(error, DSHAgentNativeStoreErrorConflict);
-    return NO;
-  }
-  NSDictionary *matched = nil;
-  for (NSDictionary *candidate in outbox) {
-    if (![candidate[@"cleanup_id"] isEqual:request[@"cleanup_id"]]) continue;
-    if (matched != nil) {
-      DSHSetAgentNativeStoreError(error, DSHAgentNativeStoreErrorConflict);
-      return NO;
-    }
-    matched = candidate;
-  }
-  BOOL matches = DSHAgentExactDictionaryKeys(matched, @[
-    @"schema_version", @"cleanup_id", @"conversation_id", @"task_id",
-    @"attempt_id", @"transcript_ref", @"transcript_sha256", @"reason",
-    @"created_at",
-  ]) && [matched[@"schema_version"] isEqual:@1] &&
-      [matched[@"conversation_id"] isEqual:request[@"conversation_id"]] &&
-      [matched[@"task_id"] isEqual:request[@"task_id"]] &&
-      [matched[@"attempt_id"] isEqual:request[@"attempt_id"]] &&
-      [matched[@"transcript_ref"] isEqual:request[@"transcript_ref"]] &&
-      [matched[@"transcript_sha256"] isEqual:request[@"transcript_sha256"]] &&
-      [@[@"completed", @"cancelled", @"failed", @"conversation_deleted"]
-          containsObject:matched[@"reason"]] &&
-      DSHAgentCanonicalTimestamp(matched[@"created_at"]);
-  if (!matches) {
-    DSHSetAgentNativeStoreError(error, DSHAgentNativeStoreErrorConflict);
-  }
-  return matches;
 }
 
 static NSDictionary *DSHRuntimeLatestRound(NSDictionary *state,
@@ -414,22 +288,6 @@ static NSDictionary *DSHRuntimeLatestRound(NSDictionary *state,
             [latest[@"locator"][@"round_index"] unsignedIntegerValue]) {
       latest = row;
     }
-  }
-  return latest;
-}
-
-static NSDictionary *DSHRuntimeLatestBatch(NSDictionary *state,
-                                           NSString *taskId,
-                                           NSString *attemptId) {
-  NSDictionary *latest = nil;
-  for (NSDictionary *row in state[@"batches"]) {
-    if (![row[@"task_id"] isEqual:taskId] ||
-        ![row[@"attempt_id"] isEqual:attemptId]) continue;
-    if (latest == nil || [row[@"round_index"] unsignedIntegerValue] >
-            [latest[@"round_index"] unsignedIntegerValue] ||
-        ([row[@"round_index"] isEqual:latest[@"round_index"]] &&
-         [row[@"batch_revision"] unsignedIntegerValue] >
-             [latest[@"batch_revision"] unsignedIntegerValue])) latest = row;
   }
   return latest;
 }
@@ -617,83 +475,6 @@ static NSDictionary *DSHRuntimeCommitRecoveryResult(
   return committed == nil ? nil : committed[@"result"][@"result"];
 }
 
-static NSArray *DSHRuntimeLatestBatchCalls(NSDictionary *state,
-                                          NSDictionary *batch) {
-  if (batch == nil) return @[];
-  NSArray *prepared = nil;
-  for (NSDictionary *snapshot in [state[@"operation_results"] reverseObjectEnumerator]) {
-    NSDictionary *wrapper = snapshot[@"result"];
-    NSDictionary *result = wrapper[@"result"];
-    NSDictionary *receipt = result[@"receipt"];
-    if ([wrapper[@"result_kind"] isEqualToString:@"prepare_agent_tool_batch"] &&
-        [receipt[@"task_id"] isEqual:batch[@"task_id"]] &&
-        [receipt[@"attempt_id"] isEqual:batch[@"attempt_id"]] &&
-        [receipt[@"round_id"] isEqual:batch[@"round_id"]] &&
-        [receipt[@"batch_revision"] isEqual:batch[@"batch_revision"]]) {
-      prepared = receipt[@"calls"];
-      break;
-    }
-  }
-  if (prepared == nil) return @[];
-  // Merge the persisted native bind decisions and ledger settlements into the
-  // prepare-time projection so recovery after a kill replays decisions and
-  // denial receipts instead of re-presenting already-settled calls.  The
-  // prepare projection stays the source of safe summaries, previews, and the
-  // native approval token envelopes.
-  NSMutableArray *merged = [NSMutableArray arrayWithCapacity:prepared.count];
-  for (NSDictionary *projection in prepared) {
-    NSMutableDictionary *call = [projection mutableCopy];
-    for (NSDictionary *snapshot in [state[@"operation_results"] reverseObjectEnumerator]) {
-      NSDictionary *wrapper = snapshot[@"result"];
-      if (![wrapper[@"result_kind"] isEqualToString:@"bind_agent_approval"]) continue;
-      NSDictionary *result = wrapper[@"result"][@"result"];
-      NSString *bindStatus = result[@"status"];
-      if (![bindStatus isEqualToString:@"bound"] &&
-          ![bindStatus isEqualToString:@"already_bound"]) continue;
-      if (![result[@"task_id"] isEqual:batch[@"task_id"]] ||
-          ![result[@"attempt_id"] isEqual:batch[@"attempt_id"]] ||
-          ![result[@"round_id"] isEqual:batch[@"round_id"]] ||
-          ![result[@"call_index"] isEqual:call[@"call_index"]] ||
-          ![result[@"call_id"] isEqual:call[@"call_id"]]) continue;
-      NSString *decision = result[@"decision"];
-      if ([decision isEqualToString:@"denied"] ||
-          [decision isEqualToString:@"cancelled"]) {
-        call[@"approval_state"] = decision;
-        call[@"approval_token"] = NSNull.null;
-        call[@"approval_reference"] = NSNull.null;
-      } else {
-        call[@"approval_state"] = @"bound";
-        call[@"approval_reference"] = result[@"approval_reference"];
-      }
-      if ([decision isEqualToString:@"denied"] &&
-          [result[@"receipt"] isKindOfClass:NSDictionary.class]) {
-        call[@"execution_status"] = @"denied";
-        call[@"receipt"] = result[@"receipt"];
-      }
-      break;
-    }
-    for (NSDictionary *row in state[@"ledger"]) {
-      NSDictionary *locator = row[@"locator"];
-      if (![locator[@"task_id"] isEqual:batch[@"task_id"]] ||
-          ![locator[@"attempt_id"] isEqual:batch[@"attempt_id"]] ||
-          ![locator[@"round_id"] isEqual:batch[@"round_id"]] ||
-          ![locator[@"round_index"] isEqual:batch[@"round_index"]] ||
-          ![locator[@"call_index"] isEqual:call[@"call_index"]] ||
-          ![locator[@"call_id"] isEqual:call[@"call_id"]] ||
-          ![locator[@"idempotency_key"] isEqual:call[@"idempotency_key"]]) continue;
-      call[@"native_row_revision"] = row[@"row_revision"];
-      if ([row[@"state"] isEqualToString:@"settled"]) {
-        call[@"execution_status"] = DSHRuntimeToolStatus(row);
-        call[@"receipt"] = row[@"receipt"];
-        call[@"execution_revision"] = row[@"row_revision"];
-      }
-      break;
-    }
-    [merged addObject:call];
-  }
-  return merged;
-}
-
 @interface DSHAgentRuntimeCoordinator ()
 @property(nonatomic, readwrite, getter=isAvailable) BOOL available;
 @property(nonatomic, strong, readwrite) DSHAgentNativeWAL *wal;
@@ -797,43 +578,32 @@ static NSArray *DSHRuntimeLatestBatchCalls(NSDictionary *state,
 
 - (NSDictionary *)queryAgentTool:(NSDictionary *)rawRequest
                              error:(NSError **)error {
-  NSDictionary *request = DSHRuntimeRequest(rawRequest, @[
-    @"schema_version", @"controller_cas", @"task_id", @"conversation_id",
-    @"attempt_id", @"round_id", @"round_index", @"call_index",
-    @"call_id", @"idempotency_key", @"expected_execution_revision",
-    @"expected_transcript", @"expected_root_fingerprint_sha256",
-    @"expected_workspace_binding_revision",
-  ], error);
-  if (request == nil || !DSHRuntimeControllerMatchesIdentity(
-      request[@"controller_cas"], request[@"conversation_id"],
-      request[@"task_id"], request[@"attempt_id"])) {
+  NSDictionary *request = DSHAgentImmutableJSONCopy(rawRequest, error);
+  NSDictionary *shape = request == nil ? nil : DSHRuntimeDecide(@{
+    @"op" : @"query_tool_request", @"request" : request,
+  }, error);
+  if (shape == nil) {
     DSHSetAgentNativeStoreError(error, DSHAgentNativeStoreErrorInvalidArgument);
     return nil;
   }
-  NSDictionary *locator = @{
-    @"schema_version" : @2, @"task_id" : request[@"task_id"],
-    @"attempt_id" : request[@"attempt_id"], @"round_id" : request[@"round_id"],
-    @"round_index" : request[@"round_index"], @"call_index" : request[@"call_index"],
-    @"call_id" : request[@"call_id"], @"idempotency_key" : request[@"idempotency_key"],
-  };
+  NSDictionary *locator = shape[@"locator"];
+  NSDictionary *controllerCAS = request[@"controller_cas"];
   NSDictionary *proof = DSHRuntimeSessionProof(
       self.preparedStore, request[@"conversation_id"], request[@"task_id"],
       request[@"attempt_id"],
-      request[@"controller_cas"][@"expected_controller_generation"],
-      request[@"controller_cas"][@"expected_journal_revision"],
-      request[@"controller_cas"][@"expected_session_generation"],
-      request[@"controller_cas"][@"expected_session_sha256"], error);
+      controllerCAS[@"expected_controller_generation"],
+      controllerCAS[@"expected_journal_revision"],
+      controllerCAS[@"expected_session_generation"],
+      controllerCAS[@"expected_session_sha256"], error);
   if (proof == nil) return nil;
   if (![proof[@"matches"] boolValue]) {
     NSDictionary *state = [self.wal snapshotWithError:error];
     if (state == nil) return nil;
-    NSNumber *actualRevision =
-        DSHRuntimeFindLedgerRow(state, locator)[@"row_revision"] ?: @0;
     if (error != nullptr) *error = nil;
-    return @{ @"schema_version" : @2, @"status" : @"conflict",
-      @"failure_code" : @"E_AGENT_CONFLICT",
-      @"expected_execution_revision" : request[@"expected_execution_revision"],
-      @"actual_execution_revision" : actualRevision };
+    return DSHRuntimeDecide(@{
+      @"op" : @"query_tool_session_conflict",
+      @"state" : state, @"request" : request,
+    }, error)[@"output"];
   }
   NSError *ledgerError = nil;
   NSDictionary *queried = [self.ledger queryAgentExecutionWithLocator:locator
@@ -849,99 +619,73 @@ static NSArray *DSHRuntimeLatestBatchCalls(NSDictionary *state,
     }
     NSDictionary *state = [self.wal snapshotWithError:error];
     if (state == nil) return nil;
-    NSDictionary *actualRow = DSHRuntimeFindLedgerRow(state, locator);
-    NSString *failureCode = @"E_AGENT_CONFLICT";
-    if (actualRow != nil &&
-        (![actualRow[@"root_fingerprint_sha256"]
-            isEqual:request[@"expected_root_fingerprint_sha256"]] ||
-         ![actualRow[@"binding_revision"]
-            isEqual:request[@"expected_workspace_binding_revision"]])) {
-      failureCode = @"E_AGENT_ROOT_STALE";
-    } else if (actualRow != nil &&
-               ![actualRow[@"transcript_before"]
-                   isEqual:request[@"expected_transcript"]]) {
-      failureCode = @"E_AGENT_TRANSCRIPT";
-    }
     if (error != nullptr) *error = nil;
-    return @{ @"schema_version" : @2, @"status" : @"conflict",
-      @"failure_code" : failureCode,
-      @"expected_execution_revision" : request[@"expected_execution_revision"],
-      @"actual_execution_revision" : actualRow[@"row_revision"] ?: @0 };
+    return DSHRuntimeDecide(@{
+      @"op" : @"query_tool_ledger_conflict",
+      @"state" : state, @"request" : request,
+    }, error)[@"output"];
   }
-  if ([queried[@"status"] isEqualToString:@"not_started"]) {
-    if ([request[@"expected_execution_revision"] isEqual:@0]) return queried;
-    return @{ @"schema_version" : @2, @"status" : @"conflict",
-      @"failure_code" : @"E_AGENT_CONFLICT",
-      @"expected_execution_revision" : request[@"expected_execution_revision"],
-      @"actual_execution_revision" : @0 };
-  }
-  NSDictionary *row = queried[@"row"];
-  if (![row[@"row_revision"] isEqual:request[@"expected_execution_revision"]]) {
-    return @{ @"schema_version" : @2, @"status" : @"conflict",
-      @"failure_code" : @"E_AGENT_CONFLICT",
-      @"expected_execution_revision" : request[@"expected_execution_revision"],
-      @"actual_execution_revision" : row[@"row_revision"] };
-  }
-  NSDictionary *tool = DSHRuntimeToolProjection(row);
-  return @{ @"schema_version" : @2, @"status" : tool[@"status"],
-            @"tool" : tool };
+  return DSHRuntimeDecide(@{
+    @"op" : @"query_tool_result",
+    @"queried" : queried, @"request" : request,
+  }, error)[@"output"];
 }
 
-- (NSDictionary *)readAgentRoundPresentations:(NSDictionary *)request error:(NSError **)error {
-  if (!DSHAgentExactDictionaryKeys(request, @[@"schema_version", @"conversation_id", @"attempt_id"]) || ![request[@"schema_version"] isEqual:@1] || !DSHAgentCanonicalUUID(request[@"conversation_id"]) || !DSHAgentCanonicalUUID(request[@"attempt_id"])) {
-    DSHSetAgentNativeStoreError(error, DSHAgentNativeStoreErrorInvalidArgument); return nil;
+- (NSDictionary *)readAgentRoundPresentations:(NSDictionary *)request
+                                          error:(NSError **)error {
+  if (DSHRuntimeDecide(@{
+        @"op" : @"presentations_request", @"request" : request ?: NSNull.null,
+      }, error) == nil) {
+    DSHSetAgentNativeStoreError(error, DSHAgentNativeStoreErrorInvalidArgument);
+    return nil;
   }
-  NSDictionary *loaded = [self.preparedStore.sessionSnapshotStore loadSessionSnapshotWithError:error];
-  NSData *bytes = [loaded[@"session_json"] isKindOfClass:NSString.class] ? [loaded[@"session_json"] dataUsingEncoding:NSUTF8StringEncoding] : nil;
-  NSDictionary *session = bytes ? [NSJSONSerialization JSONObjectWithData:bytes options:0 error:nil] : nil;
-  if (![loaded[@"status"] isEqual:@"present"] || ![session[@"conversations"] isKindOfClass:NSArray.class]) {
-    if (error && !*error) DSHSetAgentNativeStoreError(error, DSHAgentNativeStoreErrorUnavailable); return nil;
-  }
-  BOOL ownsAttempt = NO;
-  for (NSDictionary *conversation in session[@"conversations"]) {
-    if (![conversation[@"id"] isEqual:request[@"conversation_id"]]) continue;
-    for (NSDictionary *attempt in conversation[@"attempts"]) {
-      if ([attempt[@"attempt_id"] isEqual:request[@"attempt_id"]]) ownsAttempt = YES;
+  BOOL present = NO;
+  NSDictionary *session = DSHRuntimeLoadSession(self.preparedStore, nullptr,
+                                                 &present, error);
+  if (!present || session == nil) {
+    if (error != nullptr && *error == nil) {
+      DSHSetAgentNativeStoreError(error, DSHAgentNativeStoreErrorUnavailable);
     }
+    return nil;
   }
-  if (!ownsAttempt) { DSHSetAgentNativeStoreError(error, DSHAgentNativeStoreErrorNotFound); return nil; }
-  return [self.transcripts roundPresentationsForConversation:request[@"conversation_id"] attempt:request[@"attempt_id"] error:error];
+  NSDictionary *owns = DSHRuntimeReduce(@{
+    @"op" : @"session_owns_attempt",
+    @"session" : session, @"request" : request,
+  });
+  if (![owns[@"owns"] isEqual:@YES]) {
+    DSHSetAgentNativeStoreError(error, DSHAgentNativeStoreErrorNotFound);
+    return nil;
+  }
+  return [self.transcripts roundPresentationsForConversation:request[@"conversation_id"]
+                                                      attempt:request[@"attempt_id"]
+                                                        error:error];
 }
 
 - (NSDictionary *)queryAgentAttempt:(NSDictionary *)rawRequest
                                 error:(NSError **)error {
-  NSDictionary *request = DSHRuntimeRequest(rawRequest, @[
-    @"schema_version", @"controller_cas", @"task_id", @"conversation_id",
-    @"attempt_id", @"expected_journal_revision", @"expected_session_generation",
-    @"expected_session_sha256", @"expected_transcript",
-    @"expected_root_fingerprint_sha256", @"expected_workspace_binding_revision",
-  ], error);
-  if (request == nil || !DSHRuntimeControllerMatchesIdentity(
-      request[@"controller_cas"], request[@"conversation_id"],
-      request[@"task_id"], request[@"attempt_id"])) {
+  NSDictionary *request = DSHAgentImmutableJSONCopy(rawRequest, error);
+  if (request == nil || DSHRuntimeDecide(@{
+        @"op" : @"query_attempt_request", @"request" : request,
+      }, error) == nil) {
     DSHSetAgentNativeStoreError(error, DSHAgentNativeStoreErrorInvalidArgument);
     return nil;
   }
+  NSDictionary *controllerCAS = request[@"controller_cas"];
   NSDictionary *proof = DSHRuntimeSessionProof(
       self.preparedStore, request[@"conversation_id"], request[@"task_id"],
       request[@"attempt_id"],
-      request[@"controller_cas"][@"expected_controller_generation"],
-      request[@"controller_cas"][@"expected_journal_revision"],
-      request[@"controller_cas"][@"expected_session_generation"],
-      request[@"controller_cas"][@"expected_session_sha256"], error);
+      controllerCAS[@"expected_controller_generation"],
+      controllerCAS[@"expected_journal_revision"],
+      controllerCAS[@"expected_session_generation"],
+      controllerCAS[@"expected_session_sha256"], error);
   if (proof == nil) return nil;
-  BOOL requestCheckpointMatches =
-      [proof[@"journal_revision"] isEqual:request[@"expected_journal_revision"]] &&
-      [proof[@"session_generation"] isEqual:request[@"expected_session_generation"]] &&
-      [proof[@"session_sha256"] isEqual:request[@"expected_session_sha256"]];
-  if (![proof[@"matches"] boolValue] || !requestCheckpointMatches) {
+  NSDictionary *sessionConflict = DSHRuntimeDecide(@{
+    @"op" : @"query_attempt_session_conflict",
+    @"request" : request, @"proof" : proof,
+  }, error)[@"output"];
+  if ([sessionConflict isKindOfClass:NSDictionary.class]) {
     if (error != nullptr) *error = nil;
-    return @{ @"schema_version" : @2, @"status" : @"conflict",
-      @"failure_code" : @"E_AGENT_CONFLICT",
-      @"expected_journal_revision" : request[@"expected_journal_revision"],
-      @"actual_journal_revision" : proof[@"journal_revision"],
-      @"expected_session_generation" : request[@"expected_session_generation"],
-      @"actual_session_generation" : proof[@"session_generation"] };
+    return sessionConflict;
   }
   NSError *authorityError = nil;
   NSDictionary *base = [self.preparedStore preparedAttemptForTaskId:request[@"task_id"]
@@ -955,70 +699,17 @@ static NSArray *DSHRuntimeLatestBatchCalls(NSDictionary *state,
     if (error != nullptr) *error = authorityError;
     return nil;
   }
-  if (![base[@"conversation_id"] isEqual:request[@"conversation_id"]] ||
-      ![base[@"transcript"] isEqual:request[@"expected_transcript"]] ||
-      ![base[@"root"][@"root_fingerprint_sha256"]
-          isEqual:request[@"expected_root_fingerprint_sha256"]] ||
-      ![base[@"root"][@"workspace_binding_revision"]
-          isEqual:request[@"expected_workspace_binding_revision"]]) {
-    return @{ @"schema_version" : @2, @"status" : @"conflict",
-      @"failure_code" : @"E_AGENT_ROOT_STALE",
-      @"expected_journal_revision" : request[@"expected_journal_revision"],
-      @"actual_journal_revision" : proof[@"journal_revision"],
-      @"expected_session_generation" : request[@"expected_session_generation"],
-      @"actual_session_generation" : proof[@"session_generation"] };
-  }
+  NSDictionary *baseConflict = DSHRuntimeDecide(@{
+    @"op" : @"query_attempt_base_conflict",
+    @"request" : request, @"proof" : proof, @"base" : base,
+  }, error)[@"output"];
+  if ([baseConflict isKindOfClass:NSDictionary.class]) return baseConflict;
   NSDictionary *state = [self.wal snapshotWithError:error];
   if (state == nil) return nil;
-  NSMutableDictionary *attempt = [base mutableCopy];
-  attempt[@"controller_generation"] = proof[@"controller_generation"];
-  attempt[@"journal_revision"] = proof[@"journal_revision"];
-  NSDictionary *round = DSHRuntimeLatestRound(state, request[@"task_id"],
-                                               request[@"attempt_id"]);
-  NSDictionary *batch = DSHRuntimeLatestBatch(state, request[@"task_id"],
-                                               request[@"attempt_id"]);
-  if (round != nil) {
-    NSString *roundState = round[@"state"];
-    attempt[@"round_id"] = round[@"locator"][@"round_id"];
-    attempt[@"round_index"] = round[@"locator"][@"round_index"];
-    attempt[@"round_revision"] = round[@"row_revision"];
-    attempt[@"round_status"] = [roundState isEqualToString:@"in_flight"]
-        ? @"active" : roundState;
-    if ([roundState isEqualToString:@"in_flight"] ||
-        [roundState isEqualToString:@"cancel_requested"]) {
-      attempt[@"phase"] = @"round_in_flight";
-    } else if ([roundState isEqualToString:@"cancelled"]) {
-      attempt[@"phase"] = @"cancelled";
-    } else if ([roundState isEqualToString:@"unknown"] ||
-               [roundState isEqualToString:@"ambiguous"]) {
-      attempt[@"phase"] = roundState;
-    }
-  }
-  if (batch != nil) {
-    NSArray *calls = DSHRuntimeLatestBatchCalls(state, batch);
-    attempt[@"batch_kind"] = batch[@"kind"];
-    attempt[@"batch_revision"] = batch[@"batch_revision"];
-    attempt[@"manifest_sha256"] = batch[@"manifest_sha256"];
-    attempt[@"batch"] = calls;
-    // A batch whose every call already holds a receipt (executed, denied or
-    // refused at preparation) is waiting for the next round; approval checks
-    // only concern calls that are still unsettled.
-    BOOL allSettled = calls.count > 0;
-    BOOL pendingApproval = NO;
-    for (NSDictionary *call in calls) {
-      BOOL settled = call[@"receipt"] != nil && call[@"receipt"] != NSNull.null;
-      if (!settled) allSettled = NO;
-      if (!settled && [call[@"approval_state"] isEqualToString:@"pending"]) pendingApproval = YES;
-    }
-    attempt[@"phase"] = allSettled ? @"tool_result_pending"
-        : (pendingApproval ? @"approval_pending" : @"batch_frozen");
-  }
-  NSString *status = [@[@"terminal", @"cleanup_pending"]
-      containsObject:DSHRuntimeFindAuthority(state, request[@"task_id"],
-                                             request[@"attempt_id"])[@"state"]]
-      ? @"terminal" : @"active";
-  return @{ @"schema_version" : @2, @"status" : status,
-            @"attempt" : [attempt copy] };
+  return DSHRuntimeDecide(@{
+    @"op" : @"query_attempt_projection",
+    @"request" : request, @"proof" : proof, @"base" : base, @"state" : state,
+  }, error)[@"output"];
 }
 
 - (NSDictionary *)cancelAgentAttempt:(NSDictionary *)rawRequest

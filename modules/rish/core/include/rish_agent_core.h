@@ -93,6 +93,16 @@ char *rish_agent_wal_state_reduce(const char *json, size_t json_length);
 /// confirmed the transaction.
 char *rish_agent_wal_operation_reduce(const char *json, size_t json_length);
 
+/// One runtime-coordinator decision over
+/// {"op","request","state"?,"session"?,"facts"?,"proof"?,"base"?,"queried"?}:
+/// query_tool_request, query_attempt_request, presentations_request,
+/// session_proof, session_owns_attempt, query_tool_session_conflict,
+/// query_tool_ledger_conflict, query_tool_result,
+/// query_attempt_session_conflict, query_attempt_base_conflict,
+/// query_attempt_projection, tool_projection, latest_batch_calls,
+/// cleanup_outbox_proof, cancel_source_proof, child_operation_id.
+char *rish_agent_runtime_reduce(const char *json, size_t json_length);
+
 /// One provider-round decision over {"op","request",...}: round_request,
 /// selector_request, selector_matches, result_shape, round_cas, locator_key,
 /// assistant_message, public_receipt, recovered_projection, context_bundle,

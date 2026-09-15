@@ -9,6 +9,7 @@ use rish_agent_core::ledger_ops::reduce_json as ledger_reduce_json;
 use rish_agent_core::prepared_attempt::reduce_json as prepared_attempt_reduce_json;
 use rish_agent_core::provider_round::reduce_json as provider_round_reduce_json;
 use rish_agent_core::round_journal::reduce_json;
+use rish_agent_core::runtime_coordinator::reduce_json as runtime_reduce_json;
 use rish_agent_core::session_schema::reduce_json as session_reduce_json;
 use rish_agent_core::strict_json::parse_arguments;
 use rish_agent_core::tool_batch::reduce_json as tool_batch_reduce_json;
@@ -354,4 +355,20 @@ pub unsafe extern "C" fn rish_agent_wal_operation_reduce(
         return std::ptr::null_mut();
     };
     output(wal_operation_reduce_json(text))
+}
+
+/// Decides one runtime-coordinator step over the JSON envelope documented on
+/// `rish_agent_core::runtime_coordinator::reduce_json`.
+///
+/// # Safety
+/// `pointer` must reference `length` readable bytes or be null.
+#[no_mangle]
+pub unsafe extern "C" fn rish_agent_runtime_reduce(
+    pointer: *const c_char,
+    length: usize,
+) -> *mut c_char {
+    let Some(text) = input(pointer, length) else {
+        return std::ptr::null_mut();
+    };
+    output(runtime_reduce_json(text))
 }

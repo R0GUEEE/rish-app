@@ -20,6 +20,7 @@ pub mod ledger_ops;
 pub mod prepared_attempt;
 pub mod provider_round;
 pub mod round_journal;
+pub mod runtime_coordinator;
 pub mod schema;
 pub mod session_schema;
 pub mod store;

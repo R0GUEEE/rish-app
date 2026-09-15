@@ -656,6 +656,17 @@ simplification is that the clock is now read once per command instead of only
 on the paths that consume it. `AgentNativeWAL.mm` is down to about 2,840
 lines, from 4,690 when phase 10 began.
 
+Phase 12 starts on the coordinator, read-only half first. `runtime_coordinator.rs`
+owns the controller-facing request shapes, the session proof every one of them
+starts from, the tool and attempt projections, the merge of prepare-time
+projections with persisted bind decisions and ledger settlements, and the
+cleanup-outbox and cancel-source proofs the later cuts will need. The host
+still loads the session snapshot and the WAL state and calls the typed
+services; it passes the snapshot's generation and digest in as facts, because
+only it can read them. Unlike phase 11 this cut writes nothing, so it rides on
+the existing suites rather than a new golden — the recorded-golden treatment
+is reserved for the cuts that settle transactions.
+
 ### Device-only storage metadata
 
 The session store and the agent WAL require every pinned item to report
