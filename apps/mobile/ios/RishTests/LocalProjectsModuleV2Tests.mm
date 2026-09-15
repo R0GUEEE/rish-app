@@ -1,60 +1,14 @@
-#import <XCTest/XCTest.h>
+#import "LocalProjectsModuleV2TestSupport.h"
 
-#import "../../../../modules/rish/ios/Sources/LocalProjectAccess.h"
-#import "../../../../modules/rish/ios/Sources/LocalWorkspaceAccess.h"
 #import "../../../../modules/rish/ios/Sources/DSHGitSSHSupport.h"
+#import "../../../../modules/rish/ios/Sources/AgentPolicyService.h"
+#import "../../../../modules/rish/ios/Sources/AgentRootResolver.h"
+#import "../../../../modules/rish/ios/Sources/AgentToolRegistry.h"
+#import "../../../../modules/rish/ios/Sources/SessionWorkspaceCoordinator.h"
 
 #include <git2.h>
 #include <sys/stat.h>
 #include <unistd.h>
-
-@interface LocalProjectsModule : NSObject
-@end
-
-@interface LocalProjectsModule (V2Testing)
-- (nullable NSDictionary *)clonePublicRepositoryAtURL:(NSURL *)remoteURL
-                                                 name:(NSString *)name
-                                             proxyURL:(nullable NSString *)proxyURL
-                                           operation:(nullable id)operation
-                                        sshProfileId:(nullable NSString *)sshProfileId
-                                               error:(NSError **)error;
-- (nullable NSDictionary *)v2AttachWorkspaceProject:(NSDictionary *)request
-                                               error:(NSError **)error;
-- (BOOL)v2ReconcileAttachStagingForWorkspaceId:(NSString *)workspaceId
-                                          error:(NSError **)error;
-- (nullable NSDictionary *)v2ProjectForWorkspace:(NSDictionary *)root
-                                             error:(NSError **)error;
-- (DSHLocalProjectAccess *)v2LegacyProjectAccess;
-- (instancetype)initWithSupportURL:(nullable NSURL *)support
-                       projectAccess:(DSHLocalProjectAccess *)projectAccess;
-@end
-
-@interface LocalProjectsModule (SSHBridgeTesting)
-- (void)fetchForProject:(id)projectIdValue
-           sshProfileId:(id)profileIdValue
-               resolver:(void (^)(id result))resolve
-               rejecter:(void (^)(NSString *code, NSString *message, NSError *error))reject;
-- (void)listWithResolver:(void (^)(id result))resolve
-                rejecter:(void (^)(NSString *code, NSString *message, NSError *error))reject;
-@end
-
-@interface DSHLocalWorkspaceAccess (V2CapabilityTesting)
-- (NSSet<NSString *> *)operationalCapabilitiesForMetadataRecord:
-    (NSDictionary *)record
-                                                        authority:
-    (NSDictionary *)authority
-                                                           status:(NSString *)status;
-@end
-
-@interface LocalProjectsModuleV2Tests : XCTestCase
-@property(nonatomic, strong) NSURL *privateRoot;
-@property(nonatomic, strong) NSURL *documentsRoot;
-@property(nonatomic, strong) DSHLocalWorkspaceAccess *workspaceAccess;
-@property(nonatomic, strong) DSHLocalProjectAccess *projectAccess;
-@property(nonatomic, strong) LocalProjectsModule *module;
-@property(nonatomic, copy) NSDictionary *root;
-@property(nonatomic, strong) NSURL *legacyBaseRoot;
-@end
 
 @implementation LocalProjectsModuleV2Tests
 
@@ -333,6 +287,104 @@
   XCTAssertTrue([self.projectAccess validateWorkspaceLeaseIdentity:lease
                                                            rootRef:projectRoot
                                                              error:&error], @"%@", error);
+}
+
+- (void)testEnableGitPreservesExistingWorkspaceFilesAndPublishesNativeGitPolicy {
+  NSURL *workspaceRoot = [[self.documentsRoot
+      URLByAppendingPathComponent:@"Rish Workspaces" isDirectory:YES]
+      URLByAppendingPathComponent:@"Attach Fixture" isDirectory:YES];
+  NSURL *file = [workspaceRoot URLByAppendingPathComponent:@"demo.txt"];
+  NSData *originalBytes = [@"Existing demo file.\n保留原文件。\n"
+      dataUsingEncoding:NSUTF8StringEncoding];
+  NSError *error = nil;
+  XCTAssertTrue([originalBytes writeToURL:file options:NSDataWritingAtomic error:&error], @"%@", error);
+  struct stat originalRoot = {};
+  struct stat originalFile = {};
+  XCTAssertEqual(stat(workspaceRoot.fileSystemRepresentation, &originalRoot), 0);
+  XCTAssertEqual(stat(file.fileSystemRepresentation, &originalFile), 0);
+  NSDictionary *before = [self.module v2ProjectForWorkspace:self.root error:&error];
+  XCTAssertNil(error);
+  XCTAssertEqualObjects(before[@"status"], @"none");
+
+  // The real producer creates a private split gitdir and points its worktree
+  // at the existing root. No mocked project/storage layer participates.
+  NSDictionary *attached = [self attachWithRoot:self.root error:&error];
+  XCTAssertNil(error, @"%@", error);
+  XCTAssertEqualObjects(attached[@"status"], @"attached");
+  if (attached == nil) return;
+  NSString *projectId = attached[@"project"][@"project_id"];
+  XCTAssertTrue([DSHLocalProjectAccess isCanonicalProjectId:projectId]);
+  XCTAssertEqualObjects(attached[@"project"][@"workspace_id"], self.root[@"workspace_id"]);
+  XCTAssertEqualObjects(attached[@"project"][@"workspace_binding_revision"], self.root[@"binding_revision"]);
+  XCTAssertEqualObjects(attached[@"project"][@"git_topology"], @"private_split_gitdir");
+  XCTAssertEqualObjects([NSData dataWithContentsOfURL:file], originalBytes);
+  struct stat currentRoot = {};
+  struct stat currentFile = {};
+  XCTAssertEqual(stat(workspaceRoot.fileSystemRepresentation, &currentRoot), 0);
+  XCTAssertEqual(stat(file.fileSystemRepresentation, &currentFile), 0);
+  XCTAssertEqual(currentRoot.st_dev, originalRoot.st_dev);
+  XCTAssertEqual(currentRoot.st_ino, originalRoot.st_ino);
+  XCTAssertEqual(currentFile.st_dev, originalFile.st_dev);
+  XCTAssertEqual(currentFile.st_ino, originalFile.st_ino);
+  XCTAssertFalse([NSFileManager.defaultManager fileExistsAtPath:
+      [workspaceRoot URLByAppendingPathComponent:@".git"].path]);
+
+  NSDictionary *lookup = [self.module v2ProjectForWorkspace:self.root error:&error];
+  XCTAssertNil(error);
+  XCTAssertEqualObjects(lookup[@"status"], @"attached");
+  XCTAssertEqualObjects(lookup[@"project"][@"project_id"], projectId);
+  NSDictionary *projectRoot = @{
+    @"schema_version" : @1, @"workspace_id" : self.root[@"workspace_id"],
+    @"binding_revision" : self.root[@"binding_revision"], @"project_id" : projectId,
+  };
+  __attribute__((objc_precise_lifetime)) DSHLocalProjectLease *lease = [self.projectAccess
+      leaseWorkspaceRootRef:projectRoot mode:DSHLocalProjectAccessModeRead
+      includeMetadata:YES timeout:1 error:&error];
+  XCTAssertNotNil(lease, @"%@", error);
+  if (lease == nil) return;
+  XCTAssertTrue([self.projectAccess validateWorkspaceLeaseIdentity:lease rootRef:projectRoot error:&error]);
+  unsigned int fileStatus = GIT_STATUS_CURRENT;
+  XCTAssertEqual(git_status_file(&fileStatus, lease.repository, "demo.txt"), 0);
+  XCTAssertEqual(fileStatus, (unsigned int)GIT_STATUS_WT_NEW);
+  // Policy resolves its own fresh production lease; do not retain the first
+  // project lock across the second independently verified query.
+  lease = nil;
+
+  DSHAgentRootResolver *resolver = [[DSHAgentRootResolver alloc]
+      initWithWorkspaceAccess:self.workspaceAccess projectAccess:self.projectAccess];
+  NSDictionary *nativeRoot = [resolver resolveRootForWorkspaceId:self.root[@"workspace_id"]
+      projectId:projectId bindingRevision:self.root[@"binding_revision"] error:&error];
+  XCTAssertNil(error);
+  XCTAssertEqualObjects(nativeRoot[@"kind"], @"project");
+  DSHAgentPolicyService *policy = [[DSHAgentPolicyService alloc]
+      initWithRootResolver:resolver registry:[[DSHAgentToolRegistry alloc] init]
+      coordinator:DSHSessionWorkspaceCoordinator.sharedCoordinator];
+  NSDictionary *described = [policy describeRequest:@{
+    @"schema_version" : @1, @"workspace_id" : self.root[@"workspace_id"],
+    @"workspace_binding_revision" : self.root[@"binding_revision"], @"project_id" : projectId,
+  } error:&error];
+  XCTAssertNotNil(described, @"%@", error);
+  XCTAssertNil(error);
+  XCTAssertEqualObjects(described[@"workspace_id"], self.root[@"workspace_id"]);
+  XCTAssertEqualObjects(described[@"project_id"], projectId);
+  NSMutableDictionary *access = [NSMutableDictionary dictionary];
+  for (NSDictionary *tool in described[@"tools"]) access[tool[@"name"]] = tool[@"access"];
+  XCTAssertEqualObjects(access[@"git_status"], @"auto");
+  XCTAssertEqualObjects(access[@"git_commit"], @"conversation_confirm");
+  XCTAssertEqualObjects(access[@"git_push"], @"conversation_confirm");
+  for (NSString *capability in @[@"git_status", @"git_commit", @"git_push"]) {
+    XCTAssertTrue([described[@"capabilities"] containsObject:capability]);
+  }
+  // A second explicit enable from an older projectless chat finds the same
+  // native project instead of creating a second repository or moving files.
+  NSDictionary *again = [self.module v2AttachWorkspaceProject:@{
+    @"schema_version" : @1, @"operation_id" : @"44444444-4444-4444-8444-444444444444",
+    @"root" : self.root, @"mode" : @"init",
+  } error:&error];
+  XCTAssertNil(error);
+  XCTAssertEqualObjects(again[@"status"], @"already_attached");
+  XCTAssertEqualObjects(again[@"project"][@"project_id"], projectId);
+  XCTAssertEqualObjects([NSData dataWithContentsOfURL:file], originalBytes);
 }
 
 - (void)testAttachRejectsWrongRevisionAndRelationWithoutPublication {

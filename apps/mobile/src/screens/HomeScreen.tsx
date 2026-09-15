@@ -70,6 +70,10 @@ import {
   type SupportedModel,
 } from '../components/ModelPicker';
 import { LocalWorkspaces } from '../native/LocalWorkspaces';
+import {
+  createWorkspaceGitActivation,
+  workspaceGitActivationError as gitActivationErrorCode,
+} from '../workspaces/workspace-git-activation';
 import { createProjectWorkspaceRootResolver } from '../native/projectWorkspaceRoot';
 import { ProjectsSurface } from '../components/ProjectsSurface';
 import {
@@ -130,9 +134,9 @@ import {
 import { ApprovalComposer } from '../components/ApprovalComposer';
 import {
   AgentPolicySheet,
-  AGENT_POLICY_DEFAULT_BUDGET,
 } from '../components/AgentPolicySheet';
 import { projectAgentPolicy } from '../components/agent-policy-projection';
+import { useAgentPolicy } from '../components/use-agent-policy';
 import { QuestionComposer } from '../components/QuestionComposer';
 import { DEFAULT_APPROVAL_TIMEOUT_MS } from '../agent/AgentApprovals';
 import {
@@ -4233,21 +4237,24 @@ export function HomeScreen({
   // Effective policy projection for the read-only Agent policy panel. This
   // is display context only: native revalidates every capability and grant
   // before any effect.
+  const policyBindingRevision = activeConversation?.workspaceBinding?.bindingRevision ??
+    (activeWorkspaceId === null ? null : workspaceDescriptors[activeWorkspaceId]?.binding_revision ?? null);
+  const policyProjectId = activeConversation?.workspaceBinding?.projectId ?? activeConversation?.projectId ?? null;
+  const nativeAgentPolicy = useAgentPolicy({
+    visible: agentPolicyVisible,
+    workspaceId: activeWorkspaceId,
+    bindingRevision: policyBindingRevision,
+    projectId: policyProjectId,
+  });
   const agentPolicy = projectAgentPolicy({
     workspaceId: activeWorkspaceId,
-    projectId: activeConversation?.projectId ?? null,
-    binding: activeConversation?.workspaceBinding,
-    descriptor: activeWorkspaceId === null ? undefined : workspaceDescriptors[activeWorkspaceId],
-    attempt: completionState.conversationId === activeConversation?.id
-      ? activeConversation?.attempts.find(attempt => attempt.attemptId === completionState.attemptId)
-      : null,
+    bindingRevision: policyBindingRevision,
+    projectId: policyProjectId,
+    conversationId: activeConversation?.id ?? null,
+    status: nativeAgentPolicy.status,
+    policy: nativeAgentPolicy.policy,
+    grants: activeConversation?.agentGrants ?? activeConversation?.agent_grants ?? [],
   });
-  const agentPolicyBudget = (() => {
-    const journal = activeConversation?.attempts.find(
-      attempt => attempt.agent !== null && attempt.agent !== undefined,
-    )?.agent;
-    return journal?.policy ?? AGENT_POLICY_DEFAULT_BUDGET;
-  })();
 
   const revokeAgentGrant = useCallback(
     async (grantId: string): Promise<void> => {
@@ -4455,6 +4462,141 @@ export function HomeScreen({
       cancelled = true;
     };
   }, [workspaceRefreshToken]);
+
+  const [workspaceGitActivationBusy, setWorkspaceGitActivationBusy] = useState(false);
+  const [workspaceGitActivationError, setWorkspaceGitActivationError] = useState<string | null>(null);
+  const workspaceGitActivationBusyRef = useRef(false);
+  const agentPolicyVisibleRef = useRef(agentPolicyVisible);
+  agentPolicyVisibleRef.current = agentPolicyVisible;
+  const workspaceGitActivation = useMemo(() => createWorkspaceGitActivation({
+    resolve: request => LocalWorkspaces.resolve(request),
+    projectForWorkspace: root => LocalProjects.projectForWorkspaceV2(root),
+    attach: request => LocalProjects.attachWorkspaceProject(request),
+    createOperationId: () => LocalRuntime.createCompletionRequestId(),
+  }), []);
+  const workspaceGitActivationAvailable =
+    nativeAvailable && LocalProjects.isV2Available() && LocalWorkspaces.isAvailable() &&
+    activeConversation?.projectId === null && activeConversation.workspaceBinding != null &&
+    activeConversation.workspaceBinding.projectId === null &&
+    activeConversation.workspaceId === activeConversation.workspaceBinding.workspaceId &&
+    workspaceDescriptors[activeConversation.workspaceBinding.workspaceId]?.capabilities.git === true &&
+    workspaceDescriptors[activeConversation.workspaceBinding.workspaceId]?.capabilities.project_context === true;
+  const workspaceGitActivationBlocked =
+    !sessionProjectionReady.current || !lifecycleBootstrapReadyRef.current ||
+    navigationMutationInFlight.current || projectChatTransitionInFlight.current ||
+    completionBusy(completionState) || projectContextOwnsMutation(projectContextControllerState) ||
+    destructiveSurfaceBlocked() || workspaceBindingRecoveryVisible ||
+    workspaceBindingController.getState().phase === 'persistence_pending' ||
+    activeAttachmentOperation.current !== null || activeAttachmentPreviewId.current !== null ||
+    (chatState.workspaceAuthorityOutbox ?? []).some(entry => entry.workspaceId === activeWorkspaceId) ||
+    activeConversation?.attempts.some(attempt => attempt.status === 'prepared' || attempt.status === 'sending') === true;
+
+  const enableWorkspaceGit = useCallback(async () => {
+    const source = selectActiveConversation(store.getState());
+    const binding = source?.workspaceBinding;
+    if (
+      workspaceGitActivationBusyRef.current || projectChatTransitionInFlight.current ||
+      navigationMutationInFlight.current || !source || !binding || source.projectId !== null ||
+      binding.projectId !== null ||
+      source.workspaceId !== binding.workspaceId || !LocalProjects.isV2Available()
+    ) return;
+    const currentOwner = () =>
+      agentPolicyVisibleRef.current && sessionProjectionReady.current &&
+      lifecycleBootstrapReadyRef.current &&
+      selectActiveConversation(store.getState()) === source &&
+      !destructiveSurfaceBlocked() && !completionBusy(completionController.getState()) &&
+      !projectContextOwnsMutation(projectContextController.getState()) &&
+      activeAttachmentOperation.current === null && activeAttachmentPreviewId.current === null &&
+      workspaceBindingController.getState().phase !== 'persistence_pending' &&
+      !(store.getState().workspaceAuthorityOutbox ?? []).some(entry => entry.workspaceId === binding.workspaceId) &&
+      !source.attempts.some(attempt => attempt.status === 'prepared' || attempt.status === 'sending');
+    if (!currentOwner()) {
+      setWorkspaceGitActivationError('E_WORKSPACE_BUSY');
+      return;
+    }
+    workspaceGitActivationBusyRef.current = true;
+    projectChatTransitionInFlight.current = true;
+    setWorkspaceGitActivationBusy(true);
+    setWorkspaceGitActivationError(null);
+    let openedConversationId: string | null = null;
+    try {
+      const attached = await workspaceGitActivation.activate({
+        schema_version: 1, workspace_id: binding.workspaceId,
+        binding_revision: binding.bindingRevision, project_id: null,
+      }, currentOwner, async () => {
+        if (!projectContextLifecycleController.beforeConversationChange(source.id)) return false;
+        if (!(await projectContextController.beforeConversationChange(source.id)) || !currentOwner()) return false;
+        return await completionController.beforeConversationChange(source.id);
+      });
+      if (attached.status !== 'attached') {
+        setWorkspaceGitActivationError(attached.code);
+        return;
+      }
+      if (!currentOwner()) {
+        setWorkspaceGitActivationError('E_WORKSPACE_CONFLICT');
+        return;
+      }
+      // Existing attempts retain their frozen root. Like opening a project,
+      // use a new conversation and the existing guarded binding/CAS flow.
+      const conversationId = store.createConversation(newConversationOptions());
+      openedConversationId = conversationId;
+      const outcome = await workspaceBindingController.bindWorkspace({
+        conversationId, workspaceId: attached.workspace.workspace_id,
+        target: attached.workspace, expectedProjectId: attached.project.project_id,
+        requiredCapabilities: ['read', 'write', 'git', 'project_context'],
+      });
+      if (outcome.status !== 'committed' && outcome.status !== 'unchanged') {
+        setWorkspaceGitActivationError(outcome.code ?? 'E_WORKSPACE_CONFLICT');
+        setRequestFailure(outcome.code ?? 'E_WORKSPACE_CONFLICT');
+        if (outcome.status === 'unknown' || outcome.status === 'session_only' ||
+            workspaceBindingController.getState().phase === 'persistence_pending') {
+          setWorkspaceBindingRecoveryVisible(true);
+          setAgentPolicyVisible(false);
+        } else if (store.getState().selectedConversationId === conversationId) {
+          const empty = store.getState().conversations[conversationId];
+          if (empty?.messages.length === 0 && empty.attempts.length === 0) {
+            store.selectConversation(source.id);
+          }
+        }
+        return;
+      }
+      if (outcome.ownerDrifted || store.getState().selectedConversationId !== conversationId ||
+          outcome.root.workspace_id !== binding.workspaceId ||
+          outcome.root.project_id !== attached.project.project_id) {
+        setWorkspaceGitActivationError('E_WORKSPACE_CONFLICT');
+        return;
+      }
+      completionUiEpoch.current += 1;
+      invalidatePendingProjectSend();
+      setWorkspaceNames(previous => ({ ...previous, [binding.workspaceId]: outcome.workspace.display_name }));
+      setWorkspaceDescriptors(previous => ({ ...previous, [binding.workspaceId]: outcome.workspace }));
+      setWorkspaceRefreshToken(token => token + 1);
+      setActiveProjectName(outcome.workspace.display_name);
+      setWorkspaceBindingRecoveryVisible(false);
+      setRequestFailure(null);
+      setAgentPolicyVisible(false);
+      reconcileSelectedConversation(conversationId);
+    } catch (error) {
+      setWorkspaceGitActivationError(gitActivationErrorCode(error));
+      if (workspaceBindingController.getState().phase === 'persistence_pending') {
+        setWorkspaceBindingRecoveryVisible(true);
+        setAgentPolicyVisible(false);
+      } else if (openedConversationId !== null && store.getState().selectedConversationId === openedConversationId) {
+        const empty = store.getState().conversations[openedConversationId];
+        if (empty?.projectId === null && empty.messages.length === 0 && empty.attempts.length === 0) {
+          store.selectConversation(source.id);
+        }
+      }
+    } finally {
+      workspaceGitActivationBusyRef.current = false;
+      projectChatTransitionInFlight.current = false;
+      setWorkspaceGitActivationBusy(false);
+    }
+  }, [
+    completionController, destructiveSurfaceBlocked, invalidatePendingProjectSend,
+    newConversationOptions, projectContextController, projectContextLifecycleController,
+    reconcileSelectedConversation, store, workspaceBindingController, workspaceGitActivation,
+  ]);
 
   const openWorkspacePicker = useCallback(() => {
     if (
@@ -4726,6 +4868,8 @@ export function HomeScreen({
         setRequestFailure('E_WORKSPACE_CONFLICT');
         return;
       }
+      setWorkspaceNames(previous => ({ ...previous, [outcome.workspace.workspace_id]: outcome.workspace.display_name }));
+      setWorkspaceDescriptors(previous => ({ ...previous, [outcome.workspace.workspace_id]: outcome.workspace }));
       workspaceVisibleRef.current = true;
       setWorkspaceRoute({
         root: outcome.root,
@@ -6238,10 +6382,17 @@ export function HomeScreen({
             : workspaceNames[activeWorkspaceId] ?? null
         }
         capabilities={agentPolicy.capabilities}
-        guestServiceVerified={agentPolicy.guestServiceVerified}
+        toolAccess={agentPolicy.toolAccess}
+        policyStatus={agentPolicy.status}
+        onRetryPolicy={nativeAgentPolicy.retry}
         gitProjectRequired={agentPolicy.gitProjectRequired}
-        budget={agentPolicyBudget}
-        grants={activeConversation?.agentGrants ?? activeConversation?.agent_grants ?? []}
+        gitActivationAvailable={workspaceGitActivationAvailable}
+        gitActivationBlocked={workspaceGitActivationBlocked}
+        gitActivationBusy={workspaceGitActivationBusy}
+        gitActivationError={workspaceGitActivationError}
+        onEnableWorkspaceGit={enableWorkspaceGit}
+        budget={agentPolicy.budget}
+        grants={agentPolicy.grants}
         revokeBusy={agentPolicyRevokeBusy}
         revokeFailed={agentPolicyRevokeFailed}
         onClose={() => setAgentPolicyVisible(false)}

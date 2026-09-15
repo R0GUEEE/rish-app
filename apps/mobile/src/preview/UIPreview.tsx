@@ -47,6 +47,8 @@ export const UI_PREVIEW_KINDS = [
   'approval-single',
   'approval-batch',
   'policy-panel',
+  'policy-workspace',
+  'policy-workspace-zh',
   'message-list',
   'tool-activity',
   'project-review',
@@ -191,21 +193,29 @@ function UIPreviewContent({ kind }: { kind: UIPreviewKind }) {
         <View style={styles.previewSurfaceWide}>
           <ProjectReviewPreview {...PROJECT_REVIEW_PREVIEW} />
         </View>
-      ) : kind === 'policy-panel' ? (
+      ) : kind === 'policy-panel' || kind === 'policy-workspace' || kind === 'policy-workspace-zh' ? (
         <AgentPolicySheet
           budget={AGENT_POLICY_DEFAULT_BUDGET}
-          capabilities={[
-            'file_read',
-            'file_write',
-            'git_status',
-            'git_commit',
-            'git_push',
-          ]}
-          grants={PREVIEW_GRANTS}
+          capabilities={kind === 'policy-panel'
+            ? ['file_read', 'file_write', 'git_status', 'git_commit', 'git_push', 'guest_service']
+            : ['file_read', 'file_write', 'guest_service']}
+          toolAccess={{
+            list_dir: 'auto', read_file: 'auto', write_file: kind === 'policy-panel' ? 'conversation_allowed' : 'conversation_confirm',
+            git_status: kind === 'policy-panel' ? 'auto' : 'not_enabled',
+            git_commit: kind === 'policy-panel' ? 'conversation_confirm' : 'not_enabled',
+            git_push: kind === 'policy-panel' ? 'conversation_confirm' : 'not_enabled',
+            start_guest_cgi: 'conversation_confirm', stop_guest_cgi: 'conversation_confirm',
+          }}
+          policyStatus="ready"
+          onRetryPolicy={() => undefined}
+          gitProjectRequired={kind !== 'policy-panel'}
+          gitActivationAvailable={kind !== 'policy-panel'}
+          onEnableWorkspaceGit={() => setDecided('enable-git')}
+          grants={kind === 'policy-panel' ? PREVIEW_GRANTS : []}
           revokeBusy={false}
           revokeFailed={null}
           visible
-          workspaceName="Release notes"
+          workspaceName={kind === 'policy-panel' ? 'Release notes' : 'demo'}
           onClose={() => setDecided('closed')}
           onRevoke={grantId => setDecided(`revoke:${grantId}`)}
         />

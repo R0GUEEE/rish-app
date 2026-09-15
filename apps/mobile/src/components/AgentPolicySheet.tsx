@@ -1,6 +1,9 @@
-import React, { useMemo } from 'react';
+import React, { useCallback, useEffect, useMemo } from 'react';
 import {
+  Keyboard,
+  KeyboardAvoidingView,
   Modal,
+  Platform,
   Pressable,
   ScrollView,
   StyleSheet,
@@ -9,6 +12,7 @@ import {
   View,
 } from 'react-native';
 import X from 'lucide-react-native/icons/x';
+import { useSafeAreaInsets } from 'react-native-safe-area-context';
 
 import type { AgentCapability, AgentConversationGrantV2 } from '../state';
 import { useAppPresentation } from '../presentation/AppPresentation';
@@ -16,12 +20,12 @@ import type { ThemePalette } from '../theme';
 import { AppIcon } from './AppIcon';
 import {
   AGENT_POLICY_TOOLS,
-  agentToolAccess,
   type AgentPolicyAccess,
+  type AgentPolicyViewStatus,
   type PolicyTool,
 } from './agent-policy-projection';
 
-export { agentToolAccess, type AgentPolicyAccess } from './agent-policy-projection';
+export type { AgentPolicyAccess } from './agent-policy-projection';
 
 export type AgentPolicyBudget = {
   readonly max_single_write_bytes: number;
@@ -61,7 +65,15 @@ function capabilityLabel(capability: AgentCapability): string {
 function accessKey(access: AgentPolicyAccess): string {
   switch (access) {
     case 'unverified':
-      return 'runtime.unverified';
+      return 'agent.policy.access.unverified';
+    case 'checking':
+      return 'agent.policy.access.checking';
+    case 'conversation_allowed':
+      return 'agent.policy.access.conversation_allowed';
+    case 'not_enabled':
+      return 'agent.policy.access.not_enabled';
+    case 'unavailable':
+      return 'agent.policy.access.unavailable';
     case 'auto':
       return 'agent.policy.access.auto';
     case 'conversation_confirm':
@@ -76,7 +88,15 @@ function accessKey(access: AgentPolicyAccess): string {
 function accessBodyKey(access: AgentPolicyAccess): string {
   switch (access) {
     case 'unverified':
-      return 'agent.policy.serviceUnverifiedBody';
+      return 'agent.policy.unverifiedBody';
+    case 'checking':
+      return 'agent.policy.loading';
+    case 'conversation_allowed':
+      return 'agent.policy.access.conversation_allowedBody';
+    case 'not_enabled':
+      return 'agent.policy.gitNotEnabledBody';
+    case 'unavailable':
+      return 'agent.policy.access.durable_denyBody';
     case 'auto':
       return 'agent.policy.access.autoBody';
     case 'conversation_confirm':
@@ -113,9 +133,16 @@ type Props = {
   visible: boolean;
   workspaceName: string | null;
   capabilities: readonly AgentCapability[];
-  guestServiceVerified?: boolean;
+  toolAccess: Readonly<Record<PolicyTool, AgentPolicyAccess>>;
+  policyStatus: AgentPolicyViewStatus;
+  onRetryPolicy: () => void;
+  gitActivationAvailable?: boolean;
+  gitActivationBusy?: boolean;
+  gitActivationBlocked?: boolean;
+  gitActivationError?: string | null;
+  onEnableWorkspaceGit?: () => void;
   gitProjectRequired?: boolean;
-  budget: AgentPolicyBudget;
+  budget: AgentPolicyBudget | null;
   grants: readonly AgentConversationGrantV2[];
   revokeBusy: boolean;
   revokeFailed: string | null;
@@ -134,7 +161,14 @@ export function AgentPolicySheet({
   visible,
   workspaceName,
   capabilities,
-  guestServiceVerified = false,
+  toolAccess,
+  policyStatus,
+  onRetryPolicy,
+  gitActivationAvailable = false,
+  gitActivationBusy = false,
+  gitActivationBlocked = false,
+  gitActivationError = null,
+  onEnableWorkspaceGit,
   gitProjectRequired = false,
   budget,
   grants,
@@ -145,16 +179,27 @@ export function AgentPolicySheet({
 }: Props) {
   const { colors, t } = useAppPresentation();
   const { height: windowHeight } = useWindowDimensions();
+  const insets = useSafeAreaInsets();
   const styles = useMemo(() => createStyles(colors), [colors]);
-  // The panel scrolls inside a bounded sheet; taller windows get more of it
-  // without ever covering the whole screen.
-  const scrollMaxHeight = Math.max(320, Math.min(windowHeight * 0.66, 720));
+  const topInset = Math.max(insets.top, 12);
+  const bottomInset = Math.max(insets.bottom, 12);
+  // Bound the whole card, including its fixed header, and allow it to shrink
+  // further while a previous screen's keyboard is being dismissed.
+  const cardMaxHeight = Math.min(680, Math.max(0, windowHeight - topInset - bottomInset) * 0.82);
+  useEffect(() => {
+    if (visible) Keyboard.dismiss();
+  }, [visible]);
+  const close = useCallback(() => {
+    Keyboard.dismiss();
+    onClose();
+  }, [onClose]);
   if (!visible) return null;
-  const access = agentToolAccess(capabilities, guestServiceVerified);
+  const access = toolAccess;
+  const canEnableGit = gitActivationAvailable && !gitActivationBlocked && policyStatus === 'ready' && capabilities.includes('file_write');
   return (
     <Modal
       animationType="fade"
-      onRequestClose={onClose}
+      onRequestClose={close}
       presentationStyle="overFullScreen"
       statusBarTranslucent
       testID="agent-policy-modal"
@@ -162,11 +207,35 @@ export function AgentPolicySheet({
       visible
     >
       <View accessibilityViewIsModal style={styles.overlay}>
-        <View pointerEvents="box-none" style={styles.anchor}>
+        <Pressable
+          accessibilityLabel={t('agent.policy.close')}
+          accessibilityRole="button"
+          onPress={close}
+          style={styles.backdrop}
+          testID="agent-policy-backdrop"
+        />
+        <KeyboardAvoidingView
+          behavior={Platform.OS === 'ios' ? 'padding' : 'height'}
+          pointerEvents="box-none"
+          style={styles.keyboardAvoider}
+        >
+        <View
+          pointerEvents="box-none"
+          style={[
+            styles.anchor,
+            {
+              paddingTop: topInset,
+              paddingBottom: bottomInset,
+              paddingLeft: Math.max(insets.left, 18),
+              paddingRight: Math.max(insets.right, 18),
+            },
+          ]}
+          testID="agent-policy-viewport"
+        >
           <View
             accessibilityLabel={t('agent.policy.title')}
             role="dialog"
-            style={styles.card}
+            style={[styles.card, { maxHeight: cardMaxHeight }]}
             testID="agent-policy-card"
           >
             <View style={styles.headerRow}>
@@ -178,7 +247,7 @@ export function AgentPolicySheet({
                 accessibilityLabel={t('agent.policy.close')}
                 accessibilityRole="button"
                 hitSlop={8}
-                onPress={onClose}
+                onPress={close}
                 style={({ pressed }) => [
                   styles.closeButton,
                   pressed && styles.pressed,
@@ -190,17 +259,42 @@ export function AgentPolicySheet({
             </View>
             <ScrollView
               bounces={false}
-              style={[styles.scroll, { maxHeight: scrollMaxHeight }]}
+              keyboardShouldPersistTaps="handled"
+              style={styles.scroll}
+              testID="agent-policy-scroll"
             >
               <Text style={styles.sectionLabel}>{t('agent.policy.workspace')}</Text>
               <Text style={styles.workspaceName} testID="agent-policy-workspace">
                 {workspaceName ?? t('agent.policy.noWorkspace')}
               </Text>
+              {policyStatus === 'ready' && (
+                <Pressable accessibilityRole="button" onPress={onRetryPolicy}
+                  disabled={gitActivationBusy} testID="agent-policy-retry" style={styles.policyButton}>
+                  <Text style={styles.policyButtonText}>{t('agent.policy.refresh')}</Text>
+                </Pressable>
+              )}
+              {policyStatus !== 'ready' && (
+                <View testID="agent-policy-status">
+                  <Text style={styles.toolBody}>
+                    {t(policyStatus === 'unbound' ? 'agent.policy.selectWorkspace'
+                      : policyStatus === 'loading' ? 'agent.policy.loading'
+                      : policyStatus === 'unavailable' ? 'agent.policy.nativeUnavailable'
+                      : 'agent.policy.checkFailed')}
+                  </Text>
+                  {policyStatus !== 'unbound' && (
+                    <Pressable accessibilityRole="button" onPress={onRetryPolicy}
+                      disabled={policyStatus === 'loading'} testID="agent-policy-retry"
+                      style={styles.policyButton}>
+                      <Text style={styles.policyButtonText}>{t('agent.policy.refresh')}</Text>
+                    </Pressable>
+                  )}
+                </View>
+              )}
               <Text style={styles.sectionLabel}>{t('agent.policy.capabilities')}</Text>
               <View style={styles.chipRow} testID="agent-policy-capabilities">
                 {capabilities.length === 0 && (
                   <Text style={styles.emptyText}>
-                    {t('agent.policy.grantsEmpty')}
+                    {t(policyStatus === 'ready' ? 'agent.policy.noCapabilities' : 'agent.policy.unverifiedBody')}
                   </Text>
                 )}
                 {capabilities.map(capability => (
@@ -213,9 +307,27 @@ export function AgentPolicySheet({
               </View>
               <Text style={styles.sectionLabel}>{t('agent.policy.toolAccess')}</Text>
               {gitProjectRequired && (
-                <Text style={styles.toolBody} testID="agent-policy-git-project-required">
-                  {t('agent.policy.gitProjectRequired')}
-                </Text>
+                <View style={styles.gitSetup} testID="agent-policy-git-project-required">
+                  <Text style={styles.toolBody}>{t(gitActivationAvailable ? 'agent.policy.gitProjectRequired' : 'agent.policy.gitUnsupported')}</Text>
+                  {gitActivationAvailable && onEnableWorkspaceGit !== undefined && (
+                    <Pressable accessibilityRole="button" onPress={onEnableWorkspaceGit}
+                      disabled={!canEnableGit || gitActivationBusy}
+                      accessibilityState={{ disabled: !canEnableGit || gitActivationBusy, busy: gitActivationBusy }}
+                      style={styles.policyButton} testID="agent-policy-enable-git">
+                      <Text style={styles.policyButtonText}>
+                        {t(gitActivationBusy ? 'agent.policy.gitEnabling' : 'agent.policy.gitEnable')}
+                      </Text>
+                    </Pressable>
+                  )}
+                  {gitActivationAvailable && gitActivationBlocked && !gitActivationBusy && (
+                    <Text style={styles.toolBody}>{t('agent.policy.gitWaiting')}</Text>
+                  )}
+                  {gitActivationError !== null && (
+                    <Text style={styles.errorText} testID="agent-policy-git-error">
+                      {t('agent.policy.gitEnableFailed')}
+                    </Text>
+                  )}
+                </View>
               )}
               <View testID="agent-policy-tools">
                 {AGENT_POLICY_TOOLS.map(tool => (
@@ -229,11 +341,12 @@ export function AgentPolicySheet({
                       </Text>
                     </View>
                     <Text
+                      testID={`agent-policy-access-${tool}`}
                       style={[
                         styles.accessBadge,
                         access[tool] === 'durable_deny' && styles.accessDenied,
-                        access[tool] === 'auto' && styles.accessAuto,
-                        access[tool] === 'unverified' && styles.accessUnverified,
+                        (access[tool] === 'auto' || access[tool] === 'conversation_allowed') && styles.accessAuto,
+                        ['unverified', 'checking', 'unavailable', 'not_enabled'].includes(access[tool]) && styles.accessUnverified,
                       ]}
                     >
                       {t(accessKey(access[tool]) as never)}
@@ -241,6 +354,7 @@ export function AgentPolicySheet({
                   </View>
                 ))}
               </View>
+              {budget !== null && <>
               <Text style={styles.sectionLabel}>{t('agent.policy.writeBudget')}</Text>
               <View style={styles.budgetRow} testID="agent-policy-budget">
                 <BudgetCell
@@ -259,6 +373,7 @@ export function AgentPolicySheet({
                   styles={styles}
                 />
               </View>
+              </>}
               <Text style={styles.sectionLabel}>{t('agent.policy.grants')}</Text>
               <View testID="agent-policy-grants">
                 {grants.length === 0 && (
@@ -270,9 +385,10 @@ export function AgentPolicySheet({
                   <View key={grant.grant_id} style={styles.grantRow}>
                     <View style={styles.toolCopy}>
                       <Text style={styles.toolName}>
-                        {grant.tool_family === 'git_commit'
-                          ? t('agent.policy.grant.git_commit')
-                          : t('agent.policy.grant.file_write')}
+                        {t(grant.tool_family === 'git_commit' ? 'agent.policy.grant.git_commit'
+                          : grant.tool_family === 'git_push' ? 'agent.policy.grant.git_push'
+                          : grant.tool_family === 'guest_service' ? 'agent.policy.grant.guest_service'
+                          : 'agent.policy.grant.file_write')}
                       </Text>
                       <Text style={styles.toolBody}>
                         {t('agent.policy.grantScoped')}
@@ -306,6 +422,7 @@ export function AgentPolicySheet({
             </ScrollView>
           </View>
         </View>
+        </KeyboardAvoidingView>
       </View>
     </Modal>
   );
@@ -331,14 +448,24 @@ function BudgetCell({
 const createStyles = (colors: ThemePalette) =>
   StyleSheet.create({
     overlay: { flex: 1 },
+    backdrop: {
+      position: 'absolute',
+      top: 0,
+      right: 0,
+      bottom: 0,
+      left: 0,
+      backgroundColor: colors.scrim,
+    },
+    keyboardAvoider: { flex: 1 },
     anchor: {
       flex: 1,
-      justifyContent: 'flex-end',
-      alignItems: 'stretch',
-      paddingHorizontal: 18,
-      paddingBottom: 72,
+      justifyContent: 'center',
+      alignItems: 'center',
     },
     card: {
+      width: '100%',
+      maxWidth: 640,
+      flexShrink: 1,
       backgroundColor: colors.surface,
       borderRadius: 22,
       borderWidth: StyleSheet.hairlineWidth,
@@ -351,6 +478,7 @@ const createStyles = (colors: ThemePalette) =>
       elevation: 16,
     },
     headerRow: {
+      flexShrink: 0,
       flexDirection: 'row',
       alignItems: 'flex-start',
       justifyContent: 'space-between',
@@ -372,7 +500,7 @@ const createStyles = (colors: ThemePalette) =>
       justifyContent: 'center',
       backgroundColor: colors.surfaceRaised,
     },
-    scroll: { marginTop: 6 },
+    scroll: { flexGrow: 0, flexShrink: 1, marginTop: 6 },
     sectionLabel: {
       color: colors.muted,
       fontSize: 10,
@@ -433,6 +561,13 @@ const createStyles = (colors: ThemePalette) =>
       color: colors.muted,
       borderColor: colors.line,
     },
+    policyButtonText: { color: colors.accent, fontSize: 11, fontWeight: '700' },
+    policyButton: {
+      alignSelf: 'flex-start', paddingHorizontal: 10, paddingVertical: 8,
+      borderRadius: 10, borderWidth: StyleSheet.hairlineWidth,
+      borderColor: colors.accent, marginTop: 8,
+    },
+    gitSetup: { marginBottom: 10 },
     budgetRow: { flexDirection: 'row', gap: 8 },
     budgetCell: {
       flex: 1,

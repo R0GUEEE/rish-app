@@ -79,6 +79,13 @@ custom provider and save to return to the official configuration.
 
 The following describes the iOS surface unless another platform is named.
 
+- The Agent permissions panel reads current native workspace/project policy
+  on opening, refresh and foreground return, without creating a task or using
+  model credentials. It shows native tool modes and matching conversation grants.
+  Local Documents-owned workspaces can enable Git from this panel: files stay
+  in place, the private Git backend is attached, and a new Git-bound chat is
+  opened while the original chat is retained. Active tasks and pending saves
+  must finish before this binding transition.
 - Multiple local conversations: create, search, switch, auto-title, rename,
   delete with confirmation, and restore after process restart.
 - Per-conversation DeepSeek V4 Flash, V4 Pro, or multimodal Flash Vision Exp selection, complete multi-turn

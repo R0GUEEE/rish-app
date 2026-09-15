@@ -1,109 +1,108 @@
-import {
-  agentToolAccess,
-  projectAgentPolicy,
-} from '../src/components/agent-policy-projection';
+import type { AgentPolicyDescriptor } from '../src/native/agent-policy';
+import type { AgentConversationGrantV2 } from '../src/state';
+import { projectAgentPolicy } from '../src/components/agent-policy-projection';
 
-type PolicyContext = Parameters<typeof projectAgentPolicy>[0];
-const descriptor: NonNullable<PolicyContext['descriptor']> = {
-  schema_version: 2,
-  workspace_id: 'workspace-a',
-  binding_revision: 3,
-  display_name: 'Preview',
-  origin: 'rish_created',
-  status: 'ok',
-  capabilities: { read: true, write: true, git: false, project_context: false, files_visible: true },
-  created_at: '2026-09-14T00:00:00Z',
-  last_opened_at: '2026-09-14T00:00:00Z',
+const workspaceId = '11111111-1111-4111-8111-111111111111';
+const conversationId = '22222222-2222-4222-8222-222222222222';
+const projectId = '33333333-3333-4333-8333-333333333333';
+const policy: AgentPolicyDescriptor = {
+  schema_version: 1, workspace_id: workspaceId, workspace_binding_revision: 3, project_id: null,
+  root_fingerprint_sha256: 'a'.repeat(64), registry_version: 2, policy_version: 'agent-v1',
+  capabilities: ['file_read', 'file_write', 'guest_service'],
+  tools: [
+    { name: 'list_dir', access: 'auto' }, { name: 'read_file', access: 'auto' },
+    { name: 'write_file', access: 'conversation_confirm' },
+    { name: 'start_guest_cgi', access: 'conversation_confirm' },
+    { name: 'stop_guest_cgi', access: 'conversation_confirm' },
+  ],
+  budget: { max_single_write_bytes: 32768, max_batch_write_bytes: 524288, max_attempt_write_bytes: 4194304 },
 };
-const context: PolicyContext = {
-  workspaceId: 'workspace-a',
-  projectId: null,
-  descriptor,
-  binding: { schemaVersion: 1, workspaceId: 'workspace-a', bindingRevision: 3, projectId: null },
+const context = {
+  workspaceId, bindingRevision: 3, projectId: null, conversationId,
+  status: 'ready' as const, policy, grants: [],
 };
-const attempt: NonNullable<PolicyContext['attempt']> = {
-  status: 'sending',
-  workspaceId: 'workspace-a',
-  workspaceBindingRevision: 3,
-  agent: {
-    phase: 'round_in_flight',
-    tool_registry_version: 2,
-    root: {
-      schema_version: 1,
-      kind: 'workspace',
-      workspace_id: 'workspace-a',
-      workspace_binding_revision: 3,
-      project_id: null,
-      root_fingerprint_sha256: 'a'.repeat(64),
-      capabilities: ['file_read', 'file_write', 'guest_service'],
-    },
-  },
+const grant: AgentConversationGrantV2 = {
+  schema_version: 2, grant_id: '44444444-4444-4444-8444-444444444444', conversation_id: conversationId,
+  workspace_id: workspaceId, project_id: null, binding_revision: 3,
+  root_fingerprint_sha256: policy.root_fingerprint_sha256, tool_family: 'guest_service',
+  registry_version: 2, policy_version: 'agent-v1',
+  issued_for: { schema_version: 1, task_id: 'task', attempt_id: 'attempt' },
+  created_at: '2026-09-15T00:00:00Z',
 };
 
-test('file access does not imply service build support or Git project authority', () => {
-  const projection = projectAgentPolicy(context);
-  expect(projection.gitProjectRequired).toBe(true);
-  expect(projection.capabilities).toEqual(['file_read', 'file_write']);
-  expect(agentToolAccess(projection.capabilities, projection.guestServiceVerified)).toEqual({
-    list_dir: 'auto', read_file: 'auto', write_file: 'conversation_confirm',
-    git_status: 'durable_deny', git_commit: 'durable_deny', git_push: 'durable_deny',
-    start_guest_cgi: 'unverified', stop_guest_cgi: 'unverified',
-  });
+test('native policy shows services before a task and after it finishes without an attempt dependency', () => {
+  const result = projectAgentPolicy(context);
+  expect(result.status).toBe('ready');
+  expect(result.capabilities).toContain('guest_service');
+  expect(result.toolAccess.start_guest_cgi).toBe('conversation_confirm');
+  expect(result.toolAccess.stop_guest_cgi).toBe('conversation_confirm');
+  expect(result.toolAccess.git_status).toBe('not_enabled');
+  expect(result.budget).toEqual(policy.budget);
 });
 
-test('a current matching native root and registry can verify guest-service availability', () => {
-  const projection = projectAgentPolicy({ ...context, attempt });
-  expect(projection.guestServiceVerified).toBe(true);
-  expect(projection.capabilities).toContain('guest_service');
-  const access = agentToolAccess(projection.capabilities, projection.guestServiceVerified);
-  expect(access.start_guest_cgi).toBe('conversation_confirm');
-  expect(access.stop_guest_cgi).toBe('conversation_confirm');
-  expect(access.git_commit).toBe('durable_deny');
+test('Git access uses native modes instead of a hardcoded push approval mode', () => {
+  const result = projectAgentPolicy({ ...context, projectId, policy: {
+    ...policy, project_id: projectId, capabilities: [...policy.capabilities, 'git_status', 'git_commit', 'git_push'],
+    tools: [...policy.tools, { name: 'git_status', access: 'auto' },
+      { name: 'git_commit', access: 'conversation_confirm' }, { name: 'git_push', access: 'conversation_confirm' }],
+  } });
+  expect(result.gitProjectRequired).toBe(false);
+  expect(result.toolAccess.git_status).toBe('auto');
+  expect(result.toolAccess.git_push).toBe('conversation_confirm');
+});
+
+test('only current matching conversation grants change confirmation display', () => {
+  const result = projectAgentPolicy({ ...context, grants: [grant] });
+  expect(result.grants).toEqual([grant]);
+  expect(result.toolAccess.start_guest_cgi).toBe('conversation_allowed');
+  expect(result.toolAccess.stop_guest_cgi).toBe('conversation_allowed');
+  expect(result.toolAccess.write_file).toBe('conversation_confirm');
+});
+
+test.each<Partial<AgentConversationGrantV2>>([
+  { conversation_id: 'other' }, { workspace_id: 'other' }, { project_id: projectId },
+  { binding_revision: 2 }, { root_fingerprint_sha256: 'b'.repeat(64) }, { registry_version: 1 },
+])('does not show a stale or differently scoped grant as effective: %j', override => {
+  const result = projectAgentPolicy({ ...context, grants: [{ ...grant, ...override }] });
+  expect(result.grants).toEqual([]);
+  expect(result.toolAccess.start_guest_cgi).toBe('conversation_confirm');
+});
+
+test('does not turn a once-only native tool into a conversation grant', () => {
+  const result = projectAgentPolicy({ ...context, grants: [grant], policy: {
+    ...policy, tools: [{ name: 'start_guest_cgi', access: 'confirm_once' }],
+  } });
+  expect(result.grants).toEqual([]);
+  expect(result.toolAccess.start_guest_cgi).toBe('confirm_once');
+});
+
+test.each(['loading', 'error', 'unavailable', 'idle'] as const)('does not infer access while native status is %s', status => {
+  const result = projectAgentPolicy({ ...context, status, grants: [grant] });
+  expect(result.capabilities).toEqual([]);
+  expect(result.budget).toBeNull();
+  expect(result.grants).toEqual([]);
+  expect(new Set(Object.values(result.toolAccess))).toEqual(new Set([status === 'loading' ? 'checking' : 'unverified']));
 });
 
 test.each([
-  { ...attempt.agent!, tool_registry_version: 1 as const },
-  { ...attempt.agent!, root: { ...attempt.agent!.root, capabilities: ['file_read', 'file_write'] as const } },
-])('a verified runtime without the service feature or registry shows unavailable', agent => {
-  const projection = projectAgentPolicy({ ...context, attempt: { ...attempt, agent } });
-  expect(projection.guestServiceVerified).toBe(true);
-  expect(projection.capabilities).not.toContain('guest_service');
-  expect(agentToolAccess(projection.capabilities, projection.guestServiceVerified).start_guest_cgi).toBe('durable_deny');
+  { workspaceId: 'other' }, { bindingRevision: 4 }, { projectId }, { policy: null },
+])('hides a previous binding response synchronously: %j', override => {
+  const result = projectAgentPolicy({ ...context, ...override });
+  expect(result.status).toBe('loading');
+  expect(result.capabilities).toEqual([]);
+  expect(result.toolAccess.read_file).toBe('checking');
 });
 
-test.each<Partial<PolicyContext>>([
-  { attempt: null },
-  { attempt: { ...attempt, agent: null } },
-  { attempt: { ...attempt, status: 'completed' } },
-  { attempt: { ...attempt, status: 'failed' } },
-  { attempt: { ...attempt, workspaceId: 'another-workspace' } },
-  { attempt: { ...attempt, workspaceBindingRevision: 2 } },
-  { attempt: { ...attempt, agent: { ...attempt.agent!, phase: 'unknown' } } },
-  { attempt: { ...attempt, agent: { ...attempt.agent!, root: { ...attempt.agent!.root, workspace_binding_revision: 2 } } } },
-  { attempt: { ...attempt, agent: { ...attempt.agent!, root: { ...attempt.agent!.root, project_id: 'another-project' } } } },
-  { descriptor: { ...descriptor, binding_revision: 4 } },
-  { descriptor: { ...descriptor, status: 'revoked' } },
-  { binding: null },
-])('missing, historic, or mismatched evidence does not claim service is denied or supported: %j', override => {
-  const projection = projectAgentPolicy({ ...context, attempt, ...override });
-  expect(projection.guestServiceVerified).toBe(false);
-  expect(projection.capabilities).not.toContain('guest_service');
-  expect(agentToolAccess(projection.capabilities, projection.guestServiceVerified).start_guest_cgi).toBe('unverified');
+test('a verified unsupported feature is unavailable, not an unverified or user-denied permission', () => {
+  const result = projectAgentPolicy({ ...context, policy: { ...policy, capabilities: ['file_read'],
+    tools: [{ name: 'read_file', access: 'auto' }] } });
+  expect(result.toolAccess.start_guest_cgi).toBe('unavailable');
+  expect(result.toolAccess.write_file).toBe('unavailable');
 });
 
-test('Git access still requires a bound project with the workspace Git capability', () => {
-  const projection = projectAgentPolicy({
-    ...context,
-    projectId: 'project-a',
-    binding: { ...context.binding!, projectId: 'project-a' },
-    descriptor: { ...descriptor, capabilities: { ...descriptor.capabilities, git: true, project_context: true } },
-  });
-  expect(projection.gitProjectRequired).toBe(false);
-  const access = agentToolAccess(projection.capabilities, projection.guestServiceVerified);
-  expect(access.git_status).toBe('auto');
-  expect(access.git_commit).toBe('conversation_confirm');
-  expect(access.git_push).toBe('confirm_once');
-  expect(access.start_guest_cgi).toBe('unverified');
-  const withoutGit = projectAgentPolicy({ ...context, projectId: 'project-a' });
-  expect(withoutGit.capabilities).not.toContain('git_status');
+test('no workspace never shows stale capabilities or budgets', () => {
+  const result = projectAgentPolicy({ ...context, workspaceId: null });
+  expect(result.status).toBe('unbound');
+  expect(result.budget).toBeNull();
+  expect(result.capabilities).toEqual([]);
 });

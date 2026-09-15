@@ -34,6 +34,7 @@
 		8C311F650255DB45BBC37FB5 /* TaskExperienceAcceptance.swift in Sources */ = {isa = PBXBuildFile; fileRef = F2A1F0E39B54A7F9B1B123F6 /* TaskExperienceAcceptance.swift */; };
 		A0C400021AD99517003FC87E /* LocalWorkspacesModuleV2Tests.mm in Sources */ = {isa = PBXBuildFile; fileRef = A0C400011AD99517003FC87E /* LocalWorkspacesModuleV2Tests.mm */; };
 		A1C400021AD99517003FC87E /* AgentNativeStoreTests.mm in Sources */ = {isa = PBXBuildFile; fileRef = A1C400011AD99517003FC87E /* AgentNativeStoreTests.mm */; };
+		BBE400021AD99517003FC87E /* AgentPolicyTests.mm in Sources */ = {isa = PBXBuildFile; fileRef = BBE400011AD99517003FC87E /* AgentPolicyTests.mm */; };
 		A2C400021AD99517003FC87E /* AgentRuntimeModuleTests.mm in Sources */ = {isa = PBXBuildFile; fileRef = A2C400011AD99517003FC87E /* AgentRuntimeModuleTests.mm */; };
 		A3C400021AD99517003FC87E /* SessionSnapshotStoreTests.mm in Sources */ = {isa = PBXBuildFile; fileRef = A3C400011AD99517003FC87E /* SessionSnapshotStoreTests.mm */; };
 		A4C400021AD99517003FC87E /* SessionSnapshotsModuleTests.mm in Sources */ = {isa = PBXBuildFile; fileRef = A4C400011AD99517003FC87E /* SessionSnapshotsModuleTests.mm */; };
@@ -166,6 +167,7 @@
 		A0C400011AD99517003FC87E /* LocalWorkspacesModuleV2Tests.mm */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.cpp.objcpp; path = LocalWorkspacesModuleV2Tests.mm; sourceTree = "<group>"; };
 		A18A28FDB0056BD7A0EA7202 /* ClaudeSubscriptionTransportTests.mm */ = {isa = PBXFileReference; includeInIndex = 1; path = ClaudeSubscriptionTransportTests.mm; sourceTree = "<group>"; };
 		A1C400011AD99517003FC87E /* AgentNativeStoreTests.mm */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.cpp.objcpp; path = AgentNativeStoreTests.mm; sourceTree = "<group>"; };
+		BBE400011AD99517003FC87E /* AgentPolicyTests.mm */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.cpp.objcpp; path = AgentPolicyTests.mm; sourceTree = "<group>"; };
 		A2C400011AD99517003FC87E /* AgentRuntimeModuleTests.mm */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.cpp.objcpp; path = AgentRuntimeModuleTests.mm; sourceTree = "<group>"; };
 		A3C400011AD99517003FC87E /* SessionSnapshotStoreTests.mm */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.cpp.objcpp; path = SessionSnapshotStoreTests.mm; sourceTree = "<group>"; };
 		A4C400011AD99517003FC87E /* SessionSnapshotsModuleTests.mm */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.cpp.objcpp; path = SessionSnapshotsModuleTests.mm; sourceTree = "<group>"; };
@@ -276,6 +278,7 @@
 				00E356F81AD99517003FC87E /* ProjectContextPolicyTests.mm */,
 				A0C400011AD99517003FC87E /* LocalWorkspacesModuleV2Tests.mm */,
 				A1C400011AD99517003FC87E /* AgentNativeStoreTests.mm */,
+				BBE400011AD99517003FC87E /* AgentPolicyTests.mm */,
 				A2C400011AD99517003FC87E /* AgentRuntimeModuleTests.mm */,
 				A3C400011AD99517003FC87E /* SessionSnapshotStoreTests.mm */,
 				C0F400011AD99517003FC87E /* agent-begin-round-session.json */,
@@ -747,6 +750,7 @@
 				00E356F91AD99517003FC87E /* ProjectContextPolicyTests.mm in Sources */,
 				A0C400021AD99517003FC87E /* LocalWorkspacesModuleV2Tests.mm in Sources */,
 				A1C400021AD99517003FC87E /* AgentNativeStoreTests.mm in Sources */,
+				BBE400021AD99517003FC87E /* AgentPolicyTests.mm in Sources */,
 				A2C400021AD99517003FC87E /* AgentRuntimeModuleTests.mm in Sources */,
 				A3C400021AD99517003FC87E /* SessionSnapshotStoreTests.mm in Sources */,
 				A4C400021AD99517003FC87E /* SessionSnapshotsModuleTests.mm in Sources */,

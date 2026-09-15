@@ -16,6 +16,7 @@ import * as GlmAccount from '../src/harnessAuth/glmAccount';
 import { ProviderConfigurations } from '../src/providers/native';
 import { AppPresentationProvider } from '../src/presentation/AppPresentation';
 import { AccountSheet } from '../src/components/AccountSheet';
+import { AgentPolicySheet } from '../src/components/AgentPolicySheet';
 import { ChatDrawer } from '../src/components/ChatDrawer';
 import { ChatComposer } from '../src/components/ChatComposer';
 import { ConversationActionSheet } from '../src/components/ConversationActionSheet';
@@ -143,6 +144,7 @@ jest.mock('../src/native/LocalWorkspace', () => ({
 jest.mock('../src/native/LocalProjects', () => ({
   LocalProjects: {
     isAvailable: jest.fn(),
+    isV2Available: jest.fn(),
     list: jest.fn(),
     create: jest.fn(),
     clone: jest.fn(),
@@ -1550,6 +1552,7 @@ beforeEach(() => {
   mockLocalWorkspaces.bootstrapLegacyProject.mockReset();
   mockLocalWorkspaces.resolve.mockReset();
   mockLocalProjects.projectForWorkspaceV2.mockReset();
+  mockLocalWorkspaces.isAvailable.mockReset();
   Object.values(mockAgentRuntime).forEach(method => method.mockReset());
   bridgedSessionJSON = null;
   bridgedGeneration = 0;
@@ -1766,6 +1769,7 @@ beforeEach(() => {
     }),
   );
   mockLocalProjects.isAvailable.mockReturnValue(true);
+  mockLocalProjects.isV2Available.mockReturnValue(false);
   mockLocalProjects.list.mockResolvedValue({
     schema_version: 1,
     projects: [],
@@ -6898,6 +6902,13 @@ test('creates a second chat without overwriting the completed conversation', asy
 });
 
 test('creates a file through the app-owned workspace drawer', async () => {
+  mockLocalWorkspaces.isAvailable.mockReturnValue(true);
+  const workspace = appWorkspaceDescriptor();
+  workspace.capabilities.git = true;
+  workspace.capabilities.project_context = true;
+  mockLocalProjects.isV2Available.mockReturnValue(true);
+  mockLocalWorkspaces.create.mockResolvedValue(workspace);
+  mockLocalWorkspaces.resolve.mockResolvedValue({ schema_version: 1, disposition: 'direct', workspace });
   const renderer = await renderApp();
   const root = renderer.root;
 
@@ -6906,6 +6917,9 @@ test('creates a file through the app-owned workspace drawer', async () => {
   await act(async () => {
     await settle();
   });
+  expect(root.findByType(AgentPolicySheet).props.workspaceName).toBe('Workspace');
+  expect(root.findByType(AgentPolicySheet).props.gitActivationAvailable).toBe(true);
+  expect(mockLocalProjects.attachWorkspaceProject).not.toHaveBeenCalled();
   await act(async () => actionByLabel(root, 'New file').props.onPress());
   await act(async () => {
     root

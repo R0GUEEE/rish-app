@@ -29,6 +29,8 @@ xcodebuild build-for-testing -workspace apps/mobile/ios/Rish.xcworkspace \
   -derivedDataPath "$output/DerivedData" CODE_SIGNING_ALLOWED=NO \
   -only-testing:RishTests/RishGuestCgiLiveTests \
   -only-testing:RishTests/AgentGuestCgiAdapterTests \
+  -only-testing:RishTests/AgentPolicyTests \
+  -only-testing:RishTests/LocalProjectsModuleV2Tests/testEnableGitPreservesExistingWorkspaceFilesAndPublishesNativeGitPolicy \
   -only-testing:RishTests/RishGuestCgiHTTPTests \
   -only-testing:RishTests/SessionSnapshotStoreTests/testProtectionUsesFreshFileAttributesForDirectoryAndFile \
   -only-testing:RishTests/SessionSnapshotStoreTests/testFreshStoreLoadsAsMissingAndFirstCASCommitsV3 \
@@ -78,6 +80,8 @@ xcodebuild test-without-building -xctestrun "${plans[0]}" \
   -resultBundlePath "$output/Preview.xcresult" \
   -only-testing:RishTests/RishGuestCgiLiveTests \
   -only-testing:RishTests/AgentGuestCgiAdapterTests \
+  -only-testing:RishTests/AgentPolicyTests \
+  -only-testing:RishTests/LocalProjectsModuleV2Tests/testEnableGitPreservesExistingWorkspaceFilesAndPublishesNativeGitPolicy \
   -only-testing:RishTests/RishGuestCgiHTTPTests \
   -only-testing:RishTests/SessionSnapshotStoreTests/testProtectionUsesFreshFileAttributesForDirectoryAndFile \
   -only-testing:RishTests/SessionSnapshotStoreTests/testFreshStoreLoadsAsMissingAndFirstCASCommitsV3 \
@@ -103,6 +107,9 @@ import json, sys
 nodes = json.load(open(sys.argv[1]))['testNodes']
 required = {
     'testOptInRealGuestCgiCounterOverLoopback',
+    'testDescribeRealWorkspaceKeepsRegistryAndChatStorageUntouched',
+    'testDescribeRevalidatesBindingAndDoesNotSubstituteAnotherRoot',
+    'testEnableGitPreservesExistingWorkspaceFilesAndPublishesNativeGitPolicy',
     'testHTTPClientHonorsWholeRequestDeadlineAndRejectsTruncation',
     'testProtectionUsesFreshFileAttributesForDirectoryAndFile',
     'testFreshStoreLoadsAsMissingAndFirstCASCommitsV3',
