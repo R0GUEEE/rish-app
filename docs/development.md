@@ -593,6 +593,18 @@ order is locale-sensitive, and the request body digest binds the exact bytes
 that were sent. Both stay in `DSHProviderJSONSHA256` and reach the core as
 host facts.
 
+Phase 10 starts on the WAL itself, in the order the plan calls for: the
+stored row shapes first, the transaction and resident state later.
+`wal_state.rs` now owns what `AgentNativeWAL.mm` re-validated on every
+load — transcript references and messages, reservations, cleanup rows,
+dispatch markers, the frozen policy and tool registry, the attempt
+authority with the exact tool set its root capabilities imply, and the
+operation relation with its result references, safe results and result
+snapshots (including each snapshot's own byte length and domain-separated
+digest). The file, the descriptors, the locks and the transaction stay
+native, and the loader reaches the core through
+`rish_agent_wal_state_reduce`.
+
 ### Device-only storage metadata
 
 The session store and the agent WAL require every pinned item to report

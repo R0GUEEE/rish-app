@@ -79,6 +79,12 @@ char *rish_agent_tool_execution_reduce(const char *json, size_t json_length);
 char *rish_agent_prepared_attempt_reduce(const char *json, size_t json_length,
                                          const uint8_t *session, size_t session_length);
 
+/// Validates one stored WAL row over {"op","value","env"?}: reference,
+/// message, reservation, cleanup, dispatch, write_prior, policy, registry,
+/// authority, result_reference, snapshot_reference, operation,
+/// operation_result, opaque_call_id.
+char *rish_agent_wal_state_reduce(const char *json, size_t json_length);
+
 /// One provider-round decision over {"op","request",...}: round_request,
 /// selector_request, selector_matches, result_shape, round_cas, locator_key,
 /// assistant_message, public_receipt, recovered_projection, context_bundle,

@@ -1414,6 +1414,49 @@ static NSMutableDictionary *DSHAgentFreshWALState(void) {
   } mutableCopy];
 }
 
+#include "rish_agent_core.h"
+
+// The stored row shapes live in the shared core (modules/rish/core,
+// `rish_agent_wal_state_reduce`). This side keeps the file, the descriptors,
+// the locks and the transaction; every row the loader re-validates is judged
+// there so both platforms accept exactly the same stored state.
+static BOOL DSHAgentWALCoreValid(NSString *op, id value, NSDictionary *env) {
+  NSMutableDictionary *envelope = [@{
+    @"op" : op, @"value" : value ?: NSNull.null,
+  } mutableCopy];
+  if (env != nil) envelope[@"env"] = env;
+  NSData *bytes = [NSJSONSerialization dataWithJSONObject:envelope options:0 error:nil];
+  if (bytes == nil) return NO;
+  char *raw = rish_agent_wal_state_reduce((const char *)bytes.bytes, bytes.length);
+  if (raw == NULL) return NO;
+  NSData *replyBytes = [NSData dataWithBytes:raw length:strlen(raw)];
+  rish_agent_string_free(raw);
+  id reply = [NSJSONSerialization JSONObjectWithData:replyBytes options:0 error:nil];
+  return [reply isKindOfClass:NSDictionary.class] &&
+      [reply[@"ok"] isEqual:@YES] && [reply[@"valid"] isEqual:@YES];
+}
+
+// Catalogue answers the authority shape needs, collected from the strings
+// the row actually carries.
+static NSDictionary *DSHAgentWALCoreEnvironment(NSDictionary *authority) {
+  NSMutableArray<NSString *> *models = [NSMutableArray array];
+  NSMutableDictionary<NSString *, NSString *> *harnessByModel =
+      [NSMutableDictionary dictionary];
+  id model = authority[@"model"];
+  if ([model isKindOfClass:NSString.class] && DSHHarnessIsSupportedModel(model)) {
+    [models addObject:model];
+    NSString *harness = DSHHarnessIdForModel(model);
+    if (harness != nil) harnessByModel[model] = harness;
+  }
+  return @{
+    @"supported_models" : [models copy],
+    @"harness_by_model" : [harnessByModel copy],
+    @"provider_ids" : @[],
+    @"host_by_model" : @{},
+    @"provider_bindings" : @[],
+  };
+}
+
 static NSUInteger DSHAgentAttemptCount(NSArray *rows, NSString *attemptID) {
   NSUInteger count = 0;
   for (NSDictionary *row in rows) {
@@ -1428,15 +1471,7 @@ static NSUInteger DSHAgentAttemptCount(NSArray *rows, NSString *attemptID) {
 }
 
 static BOOL DSHAgentWALReferenceShape(NSDictionary *reference) {
-  return DSHAgentExactDictionaryKeys(reference, @[
-    @"schema_version", @"transcript_ref", @"generation",
-    @"transcript_sha256", @"transcript_bytes",
-  ]) && DSHAgentSafeInteger(reference[@"schema_version"], 1, NO) &&
-      DSHAgentCanonicalUUID(reference[@"transcript_ref"]) &&
-      DSHAgentSafeInteger(reference[@"generation"], DSHAgentMaximumSafeInteger, YES) &&
-      DSHAgentCanonicalSHA256(reference[@"transcript_sha256"]) &&
-      DSHAgentSafeInteger(reference[@"transcript_bytes"],
-                          DSHAgentNativeWALMaxTranscriptBytes, YES);
+  return DSHAgentWALCoreValid(@"reference", reference, nil);
 }
 
 static BOOL DSHAgentWALTranscriptBound(NSDictionary *state,
@@ -1474,441 +1509,35 @@ static BOOL DSHAgentWALTranscriptBound(NSDictionary *state,
   return NO;
 }
 
-static BOOL DSHAgentWALCanonicalFeedbackString(NSString *value) {
-  NSData *contentBytes = [value dataUsingEncoding:NSUTF8StringEncoding];
-  if (contentBytes == nil || contentBytes.length > DSHAgentNativeWALMaxTranscriptBytes) {
-    return NO;
-  }
-  NSError *contentError = nil;
-  id contentObject = [NSJSONSerialization JSONObjectWithData:contentBytes
-                                                        options:0
-                                                          error:&contentError];
-  NSData *canonicalContent = DSHAgentCanonicalJSON(contentObject, &contentError);
-  return canonicalContent != nil && [canonicalContent isEqualToData:contentBytes];
-}
-
 static BOOL DSHAgentWALMessageShape(NSDictionary *message) {
-  if (![message isKindOfClass:NSDictionary.class]) return NO;
-  NSString *role = message[@"role"];
-  if (!DSHAgentSafeInteger(message[@"schema_version"], 1, NO) ||
-      !DSHAgentSafeInteger(message[@"round_index"], 7, YES) ||
-      ![role isKindOfClass:NSString.class]) {
-    return NO;
-  }
-  if ([role isEqualToString:@"assistant"]) {
-    if (!DSHAgentExactDictionaryKeys(message, @[
-          @"schema_version", @"role", @"round_index", @"content",
-          @"reasoning_content", @"tool_calls",
-        ]) ||
-        !DSHAgentBoundedUTF8String(message[@"content"],
-                                   DSHAgentNativeWALMaxTranscriptBytes, YES,
-                                   nullptr) ||
-        !DSHAgentBoundedUTF8String(message[@"reasoning_content"],
-                                   DSHAgentNativeWALMaxTranscriptBytes, YES,
-                                   nullptr) ||
-        ![message[@"tool_calls"] isKindOfClass:NSArray.class] ||
-        [(NSArray *)message[@"tool_calls"] count] > 16) {
-      return NO;
-    }
-    for (NSDictionary *call in message[@"tool_calls"]) {
-      if (!DSHAgentExactDictionaryKeys(call, @[
-            @"schema_version", @"call_id", @"name", @"arguments_json",
-          ]) ||
-          !DSHAgentSafeInteger(call[@"schema_version"], 1, NO) ||
-          !DSHAgentBoundedUTF8String(call[@"call_id"], 128, NO, nullptr) ||
-          !DSHAgentBoundedUTF8String(call[@"name"], 64, NO, nullptr) ||
-          !DSHAgentParseArgumentsJSON(call[@"arguments_json"], nullptr)) {
-        return NO;
-      }
-      NSCharacterSet *callInvalid = [[NSCharacterSet
-          characterSetWithCharactersInString:
-              @"abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789._:-"]
-          invertedSet];
-      NSCharacterSet *nameInvalid = [[NSCharacterSet
-          characterSetWithCharactersInString:
-              @"abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_-"]
-          invertedSet];
-      if ([call[@"call_id"] rangeOfCharacterFromSet:callInvalid].location !=
-              NSNotFound ||
-          [call[@"name"] rangeOfCharacterFromSet:nameInvalid].location != NSNotFound) {
-        return NO;
-      }
-    }
-    return YES;
-  }
-  NSCharacterSet *toolCallInvalid = [[NSCharacterSet
-      characterSetWithCharactersInString:
-          @"abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789._:-"]
-      invertedSet];
-  return [role isEqualToString:@"tool"] &&
-      DSHAgentExactDictionaryKeys(message, @[
-        @"schema_version", @"role", @"round_index", @"call_id",
-        @"content", @"truncated",
-      ]) &&
-      DSHAgentBoundedUTF8String(message[@"call_id"], 128, NO, nullptr) &&
-      [message[@"call_id"] rangeOfCharacterFromSet:toolCallInvalid].location ==
-          NSNotFound &&
-      DSHAgentBoundedUTF8String(message[@"content"],
-                                DSHAgentNativeWALMaxTranscriptBytes, YES,
-                                nullptr) &&
-      DSHAgentWALCanonicalFeedbackString(message[@"content"]) &&
-      DSHAgentValidateNativeToolFeedbackString(message[@"content"], nullptr) &&
-      [message[@"truncated"] isKindOfClass:NSNumber.class] &&
-      CFGetTypeID((__bridge CFTypeRef)message[@"truncated"]) ==
-          CFBooleanGetTypeID();
+  return DSHAgentWALCoreValid(@"message", message, nil);
 }
 
 static BOOL DSHAgentWALReservationShape(NSDictionary *reservation) {
-  if (!DSHAgentExactDictionaryKeys(reservation, @[
-        @"schema_version", @"task_id", @"attempt_id",
-        @"root_fingerprint_sha256", @"binding_revision", @"policy",
-        @"reserved_write_bytes", @"reservation_version", @"keys",
-      ]) || !DSHAgentSafeInteger(reservation[@"schema_version"], 1, NO) ||
-      !DSHAgentCanonicalUUID(reservation[@"task_id"]) ||
-      !DSHAgentCanonicalUUID(reservation[@"attempt_id"]) ||
-      !DSHAgentCanonicalSHA256(reservation[@"root_fingerprint_sha256"]) ||
-      !DSHAgentSafeInteger(reservation[@"binding_revision"],
-                          DSHAgentMaximumSafeInteger, NO) ||
-      ![reservation[@"policy"] isKindOfClass:NSDictionary.class] ||
-      !DSHAgentSafeInteger(reservation[@"reserved_write_bytes"],
-                          DSHAgentNativeWALMaxAttemptWriteBytes, YES) ||
-      !DSHAgentSafeInteger(reservation[@"reservation_version"],
-                          DSHAgentMaximumSafeInteger, YES) ||
-      ![reservation[@"keys"] isKindOfClass:NSArray.class] ||
-      [(NSArray *)reservation[@"keys"] count] > 128) {
-    return NO;
-  }
-  NSDictionary *policy = reservation[@"policy"];
-  if (!DSHAgentExactDictionaryKeys(policy, @[
-        @"schema_version", @"policy_version", @"max_single_write_bytes",
-        @"max_batch_write_bytes", @"max_attempt_write_bytes",
-      ]) || !DSHAgentSafeInteger(policy[@"schema_version"], 1, NO) ||
-      !DSHAgentBoundedUTF8String(policy[@"policy_version"], 128, NO, nullptr) ||
-      !DSHAgentSafeInteger(policy[@"max_single_write_bytes"],
-                          DSHAgentNativeWALMaxSingleWriteBytes, NO) ||
-      [policy[@"max_single_write_bytes"] unsignedIntegerValue] !=
-          DSHAgentNativeWALMaxSingleWriteBytes ||
-      !DSHAgentSafeInteger(policy[@"max_batch_write_bytes"],
-                          DSHAgentNativeWALMaxBatchWriteBytes, NO) ||
-      [policy[@"max_batch_write_bytes"] unsignedIntegerValue] <
-          DSHAgentNativeWALMaxSingleWriteBytes ||
-      !DSHAgentSafeInteger(policy[@"max_attempt_write_bytes"],
-                          DSHAgentNativeWALMaxAttemptWriteBytes, NO) ||
-      [policy[@"max_attempt_write_bytes"] unsignedIntegerValue] <
-          [policy[@"max_batch_write_bytes"] unsignedIntegerValue]) {
-    return NO;
-  }
-  NSMutableSet *seen = [NSMutableSet set];
-  NSUInteger activeBytes = 0;
-  for (NSDictionary *key in reservation[@"keys"]) {
-    if (!DSHAgentExactDictionaryKeys(key, @[
-          @"idempotency_key", @"relative_path_sha256", @"content_sha256",
-          @"content_bytes", @"state",
-        ]) || !DSHAgentCanonicalSHA256(key[@"idempotency_key"]) ||
-        !DSHAgentCanonicalSHA256(key[@"relative_path_sha256"]) ||
-        !DSHAgentCanonicalSHA256(key[@"content_sha256"]) ||
-        !DSHAgentSafeInteger(key[@"content_bytes"],
-                            DSHAgentNativeWALMaxSingleWriteBytes, YES) ||
-        ![key[@"state"] isKindOfClass:NSString.class] ||
-        (![key[@"state"] isEqualToString:@"active"] &&
-         ![key[@"state"] isEqualToString:@"released"]) ||
-        [seen containsObject:key[@"idempotency_key"]]) {
-      return NO;
-    }
-    [seen addObject:key[@"idempotency_key"]];
-    if ([key[@"state"] isEqualToString:@"active"]) {
-      NSUInteger bytes = [key[@"content_bytes"] unsignedIntegerValue];
-      if (activeBytes > DSHAgentNativeWALMaxAttemptWriteBytes - bytes) return NO;
-      activeBytes += bytes;
-    }
-  }
-  return activeBytes == [reservation[@"reserved_write_bytes"] unsignedIntegerValue];
+  return DSHAgentWALCoreValid(@"reservation", reservation, nil);
 }
 
 static BOOL DSHAgentWALCleanupShape(NSDictionary *cleanup) {
-  return DSHAgentExactDictionaryKeys(cleanup, @[
-    @"schema_version", @"cleanup_id", @"attempt_id", @"transcript_ref",
-    @"transcript_sha256", @"cleanup_owner", @"reason", @"created_at",
-    @"status",
-  ]) && DSHAgentSafeInteger(cleanup[@"schema_version"], 1, NO) &&
-      DSHAgentCanonicalUUID(cleanup[@"cleanup_id"]) &&
-      DSHAgentCanonicalUUID(cleanup[@"attempt_id"]) &&
-      DSHAgentCanonicalUUID(cleanup[@"transcript_ref"]) &&
-      DSHAgentCanonicalSHA256(cleanup[@"transcript_sha256"]) &&
-      DSHAgentCanonicalUUID(cleanup[@"cleanup_owner"]) &&
-      DSHAgentCanonicalTimestamp(cleanup[@"created_at"]) &&
-      [cleanup[@"reason"] isKindOfClass:NSString.class] &&
-      [cleanup[@"status"] isKindOfClass:NSString.class] &&
-      ([cleanup[@"reason"] isEqualToString:@"completed"] ||
-       [cleanup[@"reason"] isEqualToString:@"cancelled"] ||
-       [cleanup[@"reason"] isEqualToString:@"failed"] ||
-       [cleanup[@"reason"] isEqualToString:@"conversation_deleted"]) &&
-      ([cleanup[@"status"] isEqualToString:@"pending"] ||
-       [cleanup[@"status"] isEqualToString:@"discarded"]);
+  return DSHAgentWALCoreValid(@"cleanup", cleanup, nil);
 }
 
 static BOOL DSHAgentWALDispatchShape(NSDictionary *dispatch) {
-  if (!DSHAgentExactDictionaryKeys(dispatch, @[
-        @"schema_version", @"kind", @"locator", @"dispatch_state",
-      ]) || !DSHAgentSafeInteger(dispatch[@"schema_version"], 1, NO) ||
-      ![dispatch[@"kind"] isKindOfClass:NSString.class] ||
-      ![dispatch[@"dispatch_state"] isKindOfClass:NSString.class] ||
-      (![dispatch[@"kind"] isEqualToString:@"round"] &&
-       ![dispatch[@"kind"] isEqualToString:@"execution"]) ||
-      ![dispatch[@"locator"] isKindOfClass:NSDictionary.class] ||
-      (![dispatch[@"dispatch_state"] isEqualToString:@"not_dispatched"] &&
-       ![dispatch[@"dispatch_state"] isEqualToString:@"dispatched"])) {
-    return NO;
-  }
-  NSDictionary *locator = dispatch[@"locator"];
-  if ([dispatch[@"kind"] isEqualToString:@"round"]) {
-    return DSHAgentExactDictionaryKeys(locator, @[
-             @"schema_version", @"task_id", @"attempt_id", @"round_id",
-             @"round_index",
-           ]) && [locator[@"schema_version"] isEqual:@1] &&
-        DSHAgentCanonicalUUID(locator[@"task_id"]) &&
-        DSHAgentCanonicalUUID(locator[@"attempt_id"]) &&
-        DSHAgentCanonicalUUID(locator[@"round_id"]) &&
-        DSHAgentSafeInteger(locator[@"round_index"], 7, YES);
-  }
-  return DSHAgentExactDictionaryKeys(locator, @[
-           @"schema_version", @"task_id", @"attempt_id", @"round_id",
-           @"round_index", @"call_index", @"call_id", @"idempotency_key",
-         ]) && [locator[@"schema_version"] isEqual:@2] &&
-      DSHAgentCanonicalUUID(locator[@"task_id"]) &&
-      DSHAgentCanonicalUUID(locator[@"attempt_id"]) &&
-      DSHAgentCanonicalUUID(locator[@"round_id"]) &&
-      DSHAgentSafeInteger(locator[@"round_index"], 7, YES) &&
-      DSHAgentSafeInteger(locator[@"call_index"], 15, YES) &&
-      DSHAgentBoundedUTF8String(locator[@"call_id"], 128, NO, nullptr) &&
-      DSHAgentCanonicalSHA256(locator[@"idempotency_key"]);
+  return DSHAgentWALCoreValid(@"dispatch", dispatch, nil);
 }
 
 static NSData *DSHAgentCanonicalIdentityKey(id value);
 
 static BOOL DSHAgentWALWritePriorShape(NSDictionary *prior) {
-  if (![prior isKindOfClass:NSDictionary.class]) return NO;
-  NSString *kind = prior[@"kind"];
-  if (![kind isKindOfClass:NSString.class]) return NO;
-  if ([kind isEqualToString:@"absent"]) {
-    return DSHAgentExactDictionaryKeys(prior, @[@"schema_version", @"kind"]) &&
-        DSHAgentSafeInteger(prior[@"schema_version"], 1, NO);
-  }
-  if ([kind isEqualToString:@"known"]) {
-    return DSHAgentExactDictionaryKeys(prior, @[
-      @"schema_version", @"kind", @"revision",
-    ]) && DSHAgentSafeInteger(prior[@"schema_version"], 1, NO) &&
-        DSHAgentBoundedUTF8String(prior[@"revision"], 256, NO, nullptr);
-  }
-  return [kind isEqualToString:@"unknown"] &&
-      DSHAgentExactDictionaryKeys(prior, @[
-        @"schema_version", @"kind", @"failure_code",
-      ]) && DSHAgentSafeInteger(prior[@"schema_version"], 1, NO) &&
-      DSHAgentFailureCode(prior[@"failure_code"]);
+  return DSHAgentWALCoreValid(@"write_prior", prior, nil);
 }
 
 static BOOL DSHAgentWALOpaqueCallID(id value) {
-  if (!DSHAgentBoundedUTF8String(value, 128, NO, nullptr)) return NO;
-  NSCharacterSet *invalid = [[NSCharacterSet
-      characterSetWithCharactersInString:
-          @"abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789._:-"]
-      invertedSet];
-  return [value rangeOfCharacterFromSet:invalid].location == NSNotFound;
-}
-
-static BOOL DSHAgentWALRootShape(NSDictionary *root) {
-  if (!DSHAgentExactDictionaryKeys(root, @[
-        @"schema_version", @"kind", @"workspace_id",
-        @"workspace_binding_revision", @"project_id",
-        @"root_fingerprint_sha256", @"capabilities",
-      ]) || ![root[@"schema_version"] isEqual:@1] ||
-      !DSHAgentCanonicalUUID(root[@"workspace_id"]) ||
-      !DSHAgentSafeInteger(root[@"workspace_binding_revision"],
-                          DSHAgentMaximumSafeInteger, NO) ||
-      !DSHAgentCanonicalSHA256(root[@"root_fingerprint_sha256"]) ||
-      ![root[@"capabilities"] isKindOfClass:NSArray.class] ||
-      [(NSArray *)root[@"capabilities"] count] > 6) {
-    return NO;
-  }
-  NSString *kind = root[@"kind"];
-  id projectID = root[@"project_id"];
-  if (![kind isEqualToString:@"project"] &&
-      ![kind isEqualToString:@"workspace"]) return NO;
-  if ([kind isEqualToString:@"project"] &&
-      !DSHAgentCanonicalUUID(projectID)) return NO;
-  if ([kind isEqualToString:@"workspace"] && projectID != NSNull.null) return NO;
-  NSSet *allowed = [NSSet setWithArray:@[
-    @"file_read", @"file_write", @"git_status", @"git_commit", @"git_push", @"guest_service",
-  ]];
-  NSMutableSet *seen = [NSMutableSet set];
-  for (id capability in root[@"capabilities"]) {
-    if (![capability isKindOfClass:NSString.class] ||
-        ![allowed containsObject:capability] || [seen containsObject:capability] ||
-        ([kind isEqualToString:@"workspace"] &&
-         [(NSString *)capability hasPrefix:@"git_"])) return NO;
-    [seen addObject:capability];
-  }
-  return YES;
-}
-
-static BOOL DSHAgentWALPolicyShape(NSDictionary *policy) {
-  if (!DSHAgentExactDictionaryKeys(policy, @[
-        @"schema_version", @"policy_version", @"max_single_write_bytes",
-        @"max_batch_write_bytes", @"max_attempt_write_bytes",
-      ]) || ![policy[@"schema_version"] isEqual:@1] ||
-      ![policy[@"policy_version"] isEqualToString:@"agent-v1"] ||
-      ![policy[@"max_single_write_bytes"]
-          isEqual:@(DSHAgentNativeWALMaxSingleWriteBytes)] ||
-      !DSHAgentSafeInteger(policy[@"max_batch_write_bytes"],
-                          DSHAgentNativeWALMaxBatchWriteBytes, NO) ||
-      [policy[@"max_batch_write_bytes"] unsignedIntegerValue] <
-          DSHAgentNativeWALMaxSingleWriteBytes ||
-      !DSHAgentSafeInteger(policy[@"max_attempt_write_bytes"],
-                          DSHAgentNativeWALMaxAttemptWriteBytes, NO) ||
-      [policy[@"max_attempt_write_bytes"] unsignedIntegerValue] <
-          [policy[@"max_batch_write_bytes"] unsignedIntegerValue]) {
-    return NO;
-  }
-  return YES;
-}
-
-static BOOL DSHAgentWALRegistryShape(NSDictionary *registry) {
-  if (!DSHAgentExactDictionaryKeys(registry, @[
-        @"schema_version", @"registry_version", @"toolset_sha256", @"tools",
-      ]) || ![registry[@"schema_version"] isEqual:@2] ||
-      (![registry[@"registry_version"] isEqual:@1] &&
-       ![registry[@"registry_version"] isEqual:@2]) ||
-      !DSHAgentCanonicalSHA256(registry[@"toolset_sha256"]) ||
-      ![registry[@"tools"] isKindOfClass:NSArray.class] ||
-      [(NSArray *)registry[@"tools"] count] > 8) return NO;
-  NSSet *names = [NSSet setWithArray:@[
-    @"list_dir", @"read_file", @"write_file", @"git_status", @"git_commit",
-    @"git_push", @"start_guest_cgi", @"stop_guest_cgi",
-  ]];
-  NSMutableSet *seen = [NSMutableSet set];
-  NSString *previous = nil;
-  for (NSDictionary *tool in registry[@"tools"]) {
-    if (!DSHAgentExactDictionaryKeys(tool, @[
-          @"schema_version", @"name", @"safe_summary_key", @"access",
-        ]) || ![tool[@"schema_version"] isEqual:@2] ||
-        ![names containsObject:tool[@"name"]] ||
-        [seen containsObject:tool[@"name"]] ||
-        !DSHAgentBoundedUTF8String(tool[@"safe_summary_key"], 128, NO, nullptr) ||
-        (![tool[@"access"] isEqualToString:@"auto"] &&
-         ![tool[@"access"] isEqualToString:@"conversation_confirm"] &&
-         ![tool[@"access"] isEqualToString:@"confirm_once"] &&
-         ![tool[@"access"] isEqualToString:@"durable_deny"]) ||
-        (previous != nil && [previous compare:tool[@"name"]
-                                    options:NSLiteralSearch] != NSOrderedAscending)) {
-      return NO;
-    }
-    previous = tool[@"name"];
-    [seen addObject:tool[@"name"]];
-  }
-  return YES;
+  return DSHAgentWALCoreValid(@"opaque_call_id", value, nil);
 }
 
 static BOOL DSHAgentWALAuthorityShape(NSDictionary *authority) {
-  if (!DSHAgentExactDictionaryKeys(authority, @[
-        @"schema_version", @"task_id", @"conversation_id", @"attempt_id",
-        @"root", @"policy", @"registry", @"transport_schema_version", @"model",
-        @"thinking_mode", @"visible_message_ids", @"visible_history_sha256",
-        @"visible_message_count", @"project_context_sha256", @"transcript",
-        @"reserved_write_bytes", @"authority_revision", @"state", @"cleanup_id",
-        @"created_at", @"updated_at",
-      ]) || ![authority[@"schema_version"] isEqual:@2] ||
-      !DSHAgentCanonicalUUID(authority[@"task_id"]) ||
-      !DSHAgentCanonicalUUID(authority[@"conversation_id"]) ||
-      !DSHAgentCanonicalUUID(authority[@"attempt_id"]) ||
-      !DSHAgentWALRootShape(authority[@"root"]) ||
-      !DSHAgentWALPolicyShape(authority[@"policy"]) ||
-      !DSHAgentWALRegistryShape(authority[@"registry"]) ||
-      (![authority[@"transport_schema_version"] isEqual:@2] &&
-       ![authority[@"transport_schema_version"] isEqual:@3]) ||
-      !DSHAgentBoundedUTF8String(authority[@"model"], 128, NO, nullptr) ||
-      !DSHAgentBoundedUTF8String(authority[@"thinking_mode"], 32, NO, nullptr) ||
-      ![authority[@"visible_message_ids"] isKindOfClass:NSArray.class] ||
-      [(NSArray *)authority[@"visible_message_ids"] count] > 96 ||
-      !DSHAgentCanonicalSHA256(authority[@"visible_history_sha256"]) ||
-      !DSHAgentSafeInteger(authority[@"visible_message_count"], 96, YES) ||
-      [(NSArray *)authority[@"visible_message_ids"] count] !=
-          [authority[@"visible_message_count"] unsignedIntegerValue] ||
-      !(authority[@"project_context_sha256"] == NSNull.null ||
-        DSHAgentCanonicalSHA256(authority[@"project_context_sha256"])) ||
-      !DSHAgentWALReferenceShape(authority[@"transcript"]) ||
-      !DSHAgentSafeInteger(authority[@"reserved_write_bytes"],
-                          DSHAgentNativeWALMaxAttemptWriteBytes, YES) ||
-      !DSHAgentSafeInteger(authority[@"authority_revision"],
-                          DSHAgentMaximumSafeInteger, NO) ||
-      !DSHAgentCanonicalTimestamp(authority[@"created_at"]) ||
-      !DSHAgentCanonicalTimestamp(authority[@"updated_at"])) return NO;
-  NSSet *models = DSHHarnessSupportedModels();
-  static NSSet *thinkingModes;
-  static dispatch_once_t onceToken;
-  dispatch_once(&onceToken, ^{
-    thinkingModes = [NSSet setWithArray:@[@"off", @"high", @"max"]];
-  });
-  if (![models containsObject:authority[@"model"]] ||
-      ![thinkingModes containsObject:authority[@"thinking_mode"]]) return NO;
-  NSDictionary *root = authority[@"root"];
-  NSSet *capabilities = [NSSet setWithArray:root[@"capabilities"]];
-  NSMutableDictionary<NSString *, NSString *> *expectedTools =
-      [NSMutableDictionary dictionary];
-  if ([capabilities containsObject:@"file_read"]) {
-    expectedTools[@"list_dir"] = @"auto";
-    expectedTools[@"read_file"] = @"auto";
-  }
-  if ([capabilities containsObject:@"file_write"]) {
-    expectedTools[@"write_file"] = @"conversation_confirm";
-  }
-  if ([root[@"kind"] isEqualToString:@"project"] &&
-      [capabilities containsObject:@"git_status"]) {
-    expectedTools[@"git_status"] = @"auto";
-  }
-  if ([root[@"kind"] isEqualToString:@"project"] &&
-      [capabilities containsObject:@"git_commit"]) {
-    expectedTools[@"git_commit"] = @"conversation_confirm";
-  }
-  if ([root[@"kind"] isEqualToString:@"project"] &&
-      [capabilities containsObject:@"git_push"]) {
-    // git_push follows the git_commit pattern (see AgentToolRegistry).
-    expectedTools[@"git_push"] = @"conversation_confirm";
-  }
-  if ([capabilities containsObject:@"guest_service"]) {
-    if (![authority[@"registry"][@"registry_version"] isEqual:@2]) return NO;
-    expectedTools[@"start_guest_cgi"] = @"conversation_confirm";
-    expectedTools[@"stop_guest_cgi"] = @"conversation_confirm";
-  }
-  if (expectedTools.count != [(NSArray *)authority[@"registry"][@"tools"] count]) {
-    return NO;
-  }
-  for (NSDictionary *tool in authority[@"registry"][@"tools"]) {
-    if ([expectedTools[tool[@"name"]] isEqual:tool[@"access"]]) continue;
-    // Authorities prepared by builds that registered git_push as once-only
-    // stay readable; the pulled device evidence fixtures carry that shape.
-    if ([tool[@"name"] isEqualToString:@"git_push"] &&
-        [tool[@"access"] isEqualToString:@"confirm_once"]) continue;
-    return NO;
-  }
-  if ([authority[@"transport_schema_version"] isEqual:@3]) {
-    if (![root[@"kind"] isEqualToString:@"project"] ||
-        root[@"project_id"] == NSNull.null ||
-        !DSHAgentCanonicalSHA256(authority[@"project_context_sha256"])) return NO;
-  } else if (authority[@"project_context_sha256"] != NSNull.null) {
-    return NO;
-  }
-  NSMutableSet *visibleIDs = [NSMutableSet set];
-  for (id visibleID in authority[@"visible_message_ids"]) {
-    if (!DSHAgentCanonicalUUID(visibleID) || [visibleIDs containsObject:visibleID]) {
-      return NO;
-    }
-    [visibleIDs addObject:visibleID];
-  }
-  NSString *state = authority[@"state"];
-  if (([state isEqualToString:@"prepared"] || [state isEqualToString:@"terminal"]) &&
-      authority[@"cleanup_id"] == NSNull.null) return YES;
-  return [state isEqualToString:@"cleanup_pending"] &&
-      DSHAgentCanonicalUUID(authority[@"cleanup_id"]);
+  return DSHAgentWALCoreValid(@"authority", authority,
+                              DSHAgentWALCoreEnvironment(authority));
 }
 
 static NSSet<NSString *> *DSHAgentWALOperationKinds(void) {
@@ -1959,61 +1588,7 @@ static BOOL DSHAgentWALOperationResultStatusAllowed(NSString *operationKind,
 }
 
 static BOOL DSHAgentWALResultReferenceShape(NSDictionary *reference) {
-  if (![reference isKindOfClass:NSDictionary.class] ||
-      ![reference[@"schema_version"] isEqual:@2] ||
-      ![reference[@"kind"] isKindOfClass:NSString.class]) return NO;
-  NSString *kind = reference[@"kind"];
-  if ([kind isEqualToString:@"none"]) {
-    return DSHAgentExactDictionaryKeys(reference, @[@"schema_version", @"kind"]);
-  }
-  if ([kind isEqualToString:@"cleanup"]) {
-    return DSHAgentExactDictionaryKeys(reference, @[
-      @"schema_version", @"kind", @"cleanup_id",
-    ]) && DSHAgentCanonicalUUID(reference[@"cleanup_id"]);
-  }
-  NSMutableArray *keys = [NSMutableArray arrayWithArray:@[
-    @"schema_version", @"kind", @"task_id", @"attempt_id",
-  ]];
-  if (!DSHAgentCanonicalUUID(reference[@"task_id"]) ||
-      !DSHAgentCanonicalUUID(reference[@"attempt_id"])) return NO;
-  if ([kind isEqualToString:@"authority"]) {
-    [keys addObject:@"authority_revision"];
-    return DSHAgentExactDictionaryKeys(reference, keys) &&
-        DSHAgentSafeInteger(reference[@"authority_revision"],
-                            DSHAgentMaximumSafeInteger, NO);
-  }
-  [keys addObjectsFromArray:@[@"round_id", @"round_index"]];
-  if (!DSHAgentCanonicalUUID(reference[@"round_id"]) ||
-      !DSHAgentSafeInteger(reference[@"round_index"], 7, YES)) return NO;
-  if ([kind isEqualToString:@"round"] || [kind isEqualToString:@"batch"]) {
-    NSString *revisionKey = [kind isEqualToString:@"round"]
-        ? @"round_revision" : @"batch_revision";
-    [keys addObject:revisionKey];
-    return DSHAgentExactDictionaryKeys(reference, keys) &&
-        DSHAgentSafeInteger(reference[revisionKey], DSHAgentMaximumSafeInteger, NO);
-  }
-  if (![kind isEqualToString:@"approval"] &&
-      ![kind isEqualToString:@"tool"] &&
-      ![kind isEqualToString:@"denied_call"]) return NO;
-  [keys addObjectsFromArray:@[@"call_index", @"call_id"]];
-  if (!DSHAgentSafeInteger(reference[@"call_index"], 15, YES) ||
-      !DSHAgentWALOpaqueCallID(reference[@"call_id"])) return NO;
-  NSString *revisionKey = [kind isEqualToString:@"approval"] ? @"batch_revision" :
-      ([kind isEqualToString:@"tool"] ? @"execution_revision" :
-       @"native_row_revision");
-  [keys addObject:revisionKey];
-  return DSHAgentExactDictionaryKeys(reference, keys) &&
-      DSHAgentSafeInteger(reference[revisionKey], DSHAgentMaximumSafeInteger, NO);
-}
-
-static BOOL DSHAgentWALSnapshotReferenceShape(NSDictionary *reference) {
-  return DSHAgentExactDictionaryKeys(reference, @[
-           @"schema_version", @"operation_id", @"result_sha256", @"result_bytes",
-         ]) && [reference[@"schema_version"] isEqual:@2] &&
-      DSHAgentCanonicalUUID(reference[@"operation_id"]) &&
-      DSHAgentCanonicalSHA256(reference[@"result_sha256"]) &&
-      DSHAgentSafeInteger(reference[@"result_bytes"],
-                          DSHAgentNativeWALMaxOperationResultBytes, NO);
+  return DSHAgentWALCoreValid(@"result_reference", reference, nil);
 }
 
 static BOOL DSHAgentWALContainsForbiddenSafeKey(id value) {
@@ -2065,85 +1640,11 @@ static BOOL DSHAgentWALSafeResultShape(NSDictionary *safeResult,
 }
 
 static BOOL DSHAgentWALOperationShape(NSDictionary *operation) {
-  if (!DSHAgentExactDictionaryKeys(operation, @[
-        @"schema_version", @"operation_id", @"operation_kind", @"request_sha256",
-        @"task_id", @"attempt_id", @"result_ref", @"state", @"result_status",
-        @"result_revision", @"result_snapshot_ref", @"authority_revision",
-        @"created_at", @"updated_at",
-      ]) || ![operation[@"schema_version"] isEqual:@2] ||
-      !DSHAgentCanonicalUUID(operation[@"operation_id"]) ||
-      ![DSHAgentWALOperationKinds() containsObject:operation[@"operation_kind"]] ||
-      !DSHAgentCanonicalSHA256(operation[@"request_sha256"]) ||
-      !DSHAgentCanonicalUUID(operation[@"task_id"]) ||
-      !DSHAgentCanonicalUUID(operation[@"attempt_id"]) ||
-      !DSHAgentWALResultReferenceShape(operation[@"result_ref"]) ||
-      !DSHAgentWALOperationResultStatusAllowed(operation[@"operation_kind"],
-                                               operation[@"result_status"]) ||
-      !(operation[@"result_revision"] == NSNull.null ||
-        DSHAgentSafeInteger(operation[@"result_revision"],
-                            DSHAgentMaximumSafeInteger, NO)) ||
-      !(operation[@"result_snapshot_ref"] == NSNull.null ||
-        DSHAgentWALSnapshotReferenceShape(operation[@"result_snapshot_ref"])) ||
-      !DSHAgentSafeInteger(operation[@"authority_revision"],
-                          DSHAgentMaximumSafeInteger, YES) ||
-      !DSHAgentCanonicalTimestamp(operation[@"created_at"]) ||
-      !DSHAgentCanonicalTimestamp(operation[@"updated_at"])) return NO;
-  NSString *state = operation[@"state"];
-  NSDictionary *resultRef = operation[@"result_ref"];
-  if (resultRef[@"task_id"] != nil &&
-      (![resultRef[@"task_id"] isEqual:operation[@"task_id"]] ||
-       ![resultRef[@"attempt_id"] isEqual:operation[@"attempt_id"]])) return NO;
-  if (operation[@"result_snapshot_ref"] != NSNull.null &&
-      ![operation[@"result_snapshot_ref"][@"operation_id"]
-          isEqual:operation[@"operation_id"]]) return NO;
-  BOOL none = [operation[@"result_ref"][@"kind"] isEqualToString:@"none"];
-  BOOL nullRevision = operation[@"result_revision"] == NSNull.null;
-  BOOL nullSnapshot = operation[@"result_snapshot_ref"] == NSNull.null;
-  if ([state isEqualToString:@"started"]) {
-    return none && nullRevision && nullSnapshot &&
-        [operation[@"result_status"] isEqualToString:@"pending"];
-  }
-  if ([state isEqualToString:@"committed"]) {
-    return !none && !nullRevision && !nullSnapshot;
-  }
-  if ([state isEqualToString:@"rejected"] ||
-      [state isEqualToString:@"conflict"]) {
-    return none && nullRevision && !nullSnapshot;
-  }
-  if ([state isEqualToString:@"unknown"] ||
-      [state isEqualToString:@"ambiguous"]) {
-    return (none == nullRevision) && !nullSnapshot;
-  }
-  return NO;
+  return DSHAgentWALCoreValid(@"operation", operation, nil);
 }
 
 static BOOL DSHAgentWALOperationResultShape(NSDictionary *snapshot) {
-  if (!DSHAgentExactDictionaryKeys(snapshot, @[
-        @"schema_version", @"operation_id", @"operation_kind", @"result_status",
-        @"result_sha256", @"result_bytes", @"result", @"created_at",
-      ]) || ![snapshot[@"schema_version"] isEqual:@2] ||
-      !DSHAgentCanonicalUUID(snapshot[@"operation_id"]) ||
-      ![DSHAgentWALOperationKinds() containsObject:snapshot[@"operation_kind"]] ||
-      !DSHAgentWALOperationResultStatusAllowed(snapshot[@"operation_kind"],
-                                               snapshot[@"result_status"]) ||
-      !DSHAgentCanonicalSHA256(snapshot[@"result_sha256"]) ||
-      !DSHAgentSafeInteger(snapshot[@"result_bytes"],
-                          DSHAgentNativeWALMaxOperationResultBytes, NO) ||
-      !DSHAgentCanonicalTimestamp(snapshot[@"created_at"]) ||
-      !DSHAgentWALSafeResultShape(snapshot[@"result"], snapshot[@"operation_kind"],
-                                  snapshot[@"operation_id"],
-                                  snapshot[@"result_status"])) return NO;
-  NSError *canonicalError = nil;
-  NSData *resultBytes = DSHAgentCanonicalJSON(snapshot[@"result"], &canonicalError);
-  NSString *resultSHA = DSHAgentHJ(@"agent-operation-result", @{
-    @"operation_kind" : snapshot[@"operation_kind"],
-    @"result_status" : snapshot[@"result_status"],
-    @"result" : snapshot[@"result"],
-  }, &canonicalError);
-  return resultBytes != nil && resultBytes.length > 0 &&
-      resultBytes.length <= DSHAgentNativeWALMaxOperationResultBytes &&
-      [snapshot[@"result_bytes"] isEqual:@(resultBytes.length)] &&
-      [snapshot[@"result_sha256"] isEqual:resultSHA];
+  return DSHAgentWALCoreValid(@"operation_result", snapshot, nil);
 }
 
 static BOOL DSHAgentWALBatchShapeV1(NSDictionary *batch) {

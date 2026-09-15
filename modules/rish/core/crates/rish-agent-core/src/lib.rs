@@ -27,6 +27,7 @@ pub mod strict_json;
 pub mod tool_batch;
 pub mod tool_execution;
 pub mod transcript_store;
+pub mod wal_state;
 
 /// Protocol version reported over the C ABI. Bumped when the JSON contract
 /// of any exported operation changes incompatibly.
