@@ -15,6 +15,7 @@
 
 pub mod canonical;
 pub mod execution_ledger;
+pub mod git_tool;
 pub mod ledger_batch;
 pub mod ledger_ops;
 pub mod prepared_attempt;

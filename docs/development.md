@@ -944,6 +944,40 @@ Nothing recomputes a stored preview and compares it, so this is not a
 compatibility change: an old receipt keeps the text it was written with, and
 the preview's shape is unchanged.
 
+### Predicting the commit id
+
+`AgentGitToolExecutor.mm` keeps libgit2 and hands the rest to `git_tool.rs`
+(`rish_agent_git_tool_reduce`): which staged paths a commit may contain, the
+exact bytes of the commit object, the id it will have, the timezone spelling,
+and the failure a Git tool may report.
+
+The id is the point. A `git_commit` precondition carries `expected_commit_oid` —
+the id the commit *will* get — so a crash between libgit2 writing the object
+and the ledger recording it is recoverable: the host looks for that exact id
+afterwards. Two implementations of the payload encoding would predict two
+different ids and the recovery would quietly find nothing. That is why the
+payload digest and the id come back from one call: a caller that could take
+them separately could mix two payloads.
+
+**SHA-1 is written out in the core rather than pulled in as a dependency.** The
+core had no SHA-1, and this is not a security primitive — Git's object format
+specifies it and nothing here depends on it being hard to forge. It is pinned
+against the standard vectors, and the commit case is pinned against
+`git hash-object -t commit`, not against our own output. (The first draft of
+that test asserted an id I had written by hand rather than measured; the
+implementation was right and the literal was wrong.)
+
+Two rules in the staged index worth keeping visible: only a plain or executable
+blob may be committed — a symlink, a gitlink or a directory entry is refused —
+and `.gitmodules` is refused by name, because a commit that introduces a
+submodule introduces a second repository this engine never audited. A path that
+escapes or names Git's own metadata is `E_AGENT_CONFLICT`, not
+`E_AGENT_INVALID`: the call was well formed, the working tree is not in a state
+this tool commits.
+
+The `git_push` reason vocabulary is closed in the core, so no server text can
+become a reason token in a transcript.
+
 ### The workspace executor decides nothing
 
 `AgentWorkspaceToolExecutor.mm` had a small capability and a lot of rule around

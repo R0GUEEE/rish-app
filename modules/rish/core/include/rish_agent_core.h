@@ -114,6 +114,14 @@ void rish_agent_wal_close(void *handle);
 /// to say and changes the toolset digest.
 char *rish_agent_tool_registry_reduce(const char *json, size_t json_length);
 
+/// One Git-tool decision over {"op",...}: timezone_string, timezone_minutes,
+/// index_digest,
+/// commit_identity, failure_result. libgit2 stays with the host; which staged
+/// paths may be committed, the exact bytes of the commit object and therefore
+/// the id it will have are decided here — predicting that id is what makes a
+/// crash between writing the object and recording it recoverable.
+char *rish_agent_git_tool_reduce(const char *json, size_t json_length);
+
 /// One workspace-tool decision over {"op",...}: bounds, path_components,
 /// revision, directory_listing, diff_preview, write_expected_prior, feedback,
 /// failure_result. The host owns the descriptors and the bytes; which paths it

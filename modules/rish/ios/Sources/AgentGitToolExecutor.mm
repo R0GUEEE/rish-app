@@ -8,9 +8,54 @@
 
 #import <CommonCrypto/CommonDigest.h>
 
+#include "rish_agent_core.h"
+
 #include <git2.h>
 #include <math.h>
 #include <string.h>
+
+// The Git tools' judgements live in the shared core (modules/rish/core,
+// `rish_agent_git_tool_reduce`): which staged paths a commit may contain, the
+// exact bytes of the commit object, and therefore the id it will have.  That
+// last one is load-bearing — the precondition carries `expected_commit_oid`,
+// so a crash between libgit2 writing the object and the ledger recording it is
+// recoverable by looking for that exact id.  Two implementations of the
+// payload encoding would predict two different ids and the recovery would
+// silently find nothing.  libgit2 itself stays here.
+static NSDictionary *DSHAgentGitReduce(NSString *op,
+                                       NSDictionary *fields,
+                                       NSError **error) {
+  NSMutableDictionary *envelope = [fields mutableCopy];
+  envelope[@"op"] = op;
+  NSData *bytes = [NSJSONSerialization dataWithJSONObject:envelope options:0
+                                                    error:nil];
+  char *raw = bytes == nil ? NULL : rish_agent_git_tool_reduce(
+      (const char *)bytes.bytes, bytes.length);
+  if (raw == NULL) {
+    DSHSetAgentNativeStoreError(error, DSHAgentNativeStoreErrorInvalidArgument);
+    return nil;
+  }
+  NSData *replyBytes = [NSData dataWithBytes:raw length:strlen(raw)];
+  rish_agent_string_free(raw);
+  id reply = [NSJSONSerialization JSONObjectWithData:replyBytes options:0
+                                                error:nil];
+  if (![reply isKindOfClass:NSDictionary.class]) {
+    DSHSetAgentNativeStoreError(error, DSHAgentNativeStoreErrorCorrupt);
+    return nil;
+  }
+  if ([reply[@"ok"] isEqual:@YES]) {
+    if (error != nullptr) *error = nil;
+    return reply;
+  }
+  NSInteger code = [reply[@"error"] isKindOfClass:NSNumber.class]
+      ? [reply[@"error"] integerValue] : 0;
+  if (code < DSHAgentNativeStoreErrorInvalidArgument ||
+      code > DSHAgentNativeStoreErrorPersistence) {
+    code = DSHAgentNativeStoreErrorCorrupt;
+  }
+  DSHSetAgentNativeStoreError(error, (DSHAgentNativeStoreErrorCode)code);
+  return nil;
+}
 
 static NSString *DSHAgentGitOID(const git_oid *oid) {
   if (oid == nullptr) return nil;
@@ -41,28 +86,25 @@ static NSString *DSHAgentGitCanonicalFeedback(NSDictionary *feedback,
   return value;
 }
 
+static NSDictionary *DSHAgentGitFailureWithReason(NSString *name,
+                                                   NSString *failureCode,
+                                                   NSString *reason,
+                                                   BOOL ambiguous,
+                                                   NSError **error) {
+  NSMutableDictionary *request = [@{
+    @"name" : name ?: NSNull.null,
+    @"failure_code" : failureCode ?: NSNull.null,
+    @"ambiguous" : @(ambiguous),
+  } mutableCopy];
+  if (reason != nil) request[@"reason"] = reason;
+  return DSHAgentGitReduce(@"failure_result", request, error)[@"result"];
+}
+
 static NSDictionary *DSHAgentGitFailure(NSString *name,
                                          NSString *failureCode,
                                          BOOL ambiguous,
                                          NSError **error) {
-  NSString *feedback = DSHAgentGitCanonicalFeedback(@{
-    @"schema_version" : @1,
-    @"name" : name,
-    @"outcome" : ambiguous ? @"ambiguous" : @"failed",
-    @"payload" : @{
-      @"schema_version" : @1,
-      @"failure_code" : failureCode,
-    },
-  }, error);
-  if (feedback == nil) return nil;
-  return @{
-    @"schema_version" : @1,
-    @"status" : ambiguous ? @"ambiguous" : @"failed",
-    @"feedback" : feedback,
-    @"settled_facts" : NSNull.null,
-    @"truncated" : @NO,
-    @"effect_may_have_occurred" : @(ambiguous),
-  };
+  return DSHAgentGitFailureWithReason(name, failureCode, nil, ambiguous, error);
 }
 
 static NSString *DSHAgentGitBranchReference(git_repository *repository,
@@ -117,30 +159,17 @@ static NSString *DSHAgentGitRawOriginURL(git_repository *repository) {
 /// git_push failures carry a value-free `reason` next to the stable failure
 /// code so the model can distinguish a non-fast-forward conflict from a
 /// moved remote or a rejected credential without any server text.
+/// git_push failures carry a value-free `reason` next to the stable failure
+/// code so the model can distinguish a non-fast-forward conflict from a
+/// moved remote or a rejected credential without any server text.  The set of
+/// tokens is closed in the core, so a server string cannot become one.
 static NSDictionary *DSHAgentGitPushFailure(NSString *name,
                                              NSString *failureCode,
                                              NSString *reason,
                                              BOOL ambiguous,
                                              NSError **error) {
-  NSString *feedback = DSHAgentGitCanonicalFeedback(@{
-    @"schema_version" : @1,
-    @"name" : name,
-    @"outcome" : ambiguous ? @"ambiguous" : @"failed",
-    @"payload" : @{
-      @"schema_version" : @1,
-      @"failure_code" : failureCode,
-      @"reason" : reason,
-    },
-  }, error);
-  if (feedback == nil) return nil;
-  return @{
-    @"schema_version" : @1,
-    @"status" : ambiguous ? @"ambiguous" : @"failed",
-    @"feedback" : feedback,
-    @"settled_facts" : NSNull.null,
-    @"truncated" : @NO,
-    @"effect_may_have_occurred" : @(ambiguous),
-  };
+  return DSHAgentGitFailureWithReason(name, failureCode, reason, ambiguous,
+                                      error);
 }
 
 static BOOL DSHAgentGitRemoteOID(git_repository *repository,
@@ -221,6 +250,10 @@ static NSDictionary *DSHAgentGitStatus(git_repository *repository,
   };
 }
 
+/// Hands the staged index to the core exactly as libgit2 reported it.  Which
+/// paths and modes may be committed, and the digest the precondition is taken
+/// over, are decided there.  A name that is not UTF-8 cannot be reported at
+/// all, so that one refusal stays here.
 static NSString *DSHAgentGitIndexDigest(git_index *index, NSError **error) {
   NSMutableArray *entries = [NSMutableArray array];
   size_t count = git_index_entrycount(index);
@@ -230,37 +263,23 @@ static NSString *DSHAgentGitIndexDigest(git_index *index, NSError **error) {
       DSHSetAgentNativeStoreError(error, DSHAgentNativeStoreErrorCorrupt);
       return nil;
     }
-    NSData *path = [NSData dataWithBytes:entry->path length:strlen(entry->path)];
-    NSString *pathString = [[NSString alloc] initWithData:path
-                                                 encoding:NSUTF8StringEncoding];
-    BOOL safeMode = entry->mode == GIT_FILEMODE_BLOB ||
-        entry->mode == GIT_FILEMODE_BLOB_EXECUTABLE;
-    if (pathString == nil ||
-        ![pathString isEqualToString:pathString.precomposedStringWithCanonicalMapping] ||
-        [pathString hasPrefix:@"/"] || [pathString containsString:@"\\"] ||
-        [pathString isEqualToString:@".gitmodules"] || !safeMode) {
-      DSHSetAgentNativeStoreError(error, DSHAgentNativeStoreErrorConflict);
+    NSString *path = [[NSString alloc]
+        initWithBytes:entry->path length:strlen(entry->path)
+             encoding:NSUTF8StringEncoding];
+    NSString *oid = DSHAgentGitOID(&entry->id);
+    if (path == nil || oid == nil) {
+      DSHSetAgentNativeStoreError(error, DSHAgentNativeStoreErrorCorrupt);
       return nil;
     }
-    for (NSString *component in [pathString componentsSeparatedByString:@"/"]) {
-      if (component.length == 0 || [component isEqualToString:@"."] ||
-          [component isEqualToString:@".."] ||
-          [component isEqualToString:@".git"]) {
-        DSHSetAgentNativeStoreError(error, DSHAgentNativeStoreErrorConflict);
-        return nil;
-      }
-    }
-    NSString *pathDigest = DSHAgentHB(@"relative-path", path, error);
-    NSString *oid = DSHAgentGitOID(&entry->id);
-    if (pathDigest == nil || oid == nil) return nil;
     [entries addObject:@{
-      @"path_sha256" : pathDigest,
-      @"mode" : @(entry->mode),
+      @"path" : path,
+      @"mode" : @((unsigned long long)entry->mode),
       @"oid" : oid,
       @"stage" : @(git_index_entry_stage(entry)),
     }];
   }
-  return DSHAgentHJ(@"git-index", @{ @"entries" : entries }, error);
+  return DSHAgentGitReduce(@"index_digest", @{ @"entries" : entries },
+                           error)[@"staged_index_sha256"];
 }
 
 static git_index *DSHAgentGitStageAll(git_repository *repository,
@@ -286,49 +305,43 @@ static git_index *DSHAgentGitStageAll(git_repository *repository,
   return index;
 }
 
-static NSString *DSHAgentGitTimezoneString(NSInteger minutes) {
-  unichar sign = minutes < 0 ? '-' : '+';
-  NSInteger absolute = labs(minutes);
-  return [NSString stringWithFormat:@"%C%02ld%02ld", sign,
-      (long)(absolute / 60), (long)(absolute % 60)];
-}
-
-static NSInteger DSHAgentGitTimezoneMinutes(NSString *value) {
-  NSInteger hours = [[value substringWithRange:NSMakeRange(1, 2)] integerValue];
-  NSInteger minutes = [[value substringWithRange:NSMakeRange(3, 2)] integerValue];
-  NSInteger total = hours * 60 + minutes;
-  return [value hasPrefix:@"-"] ? -total : total;
-}
-
-static NSData *DSHAgentGitCommitPayload(NSString *treeOID,
-                                        NSArray<NSString *> *parents,
-                                        NSDictionary *identity,
-                                        NSString *message) {
-  NSMutableString *payload = [NSMutableString stringWithFormat:@"tree %@\n",
-      treeOID];
-  for (NSString *parent in parents) [payload appendFormat:@"parent %@\n", parent];
-  NSString *person = [NSString stringWithFormat:
-      @"Rish Agent <agent@rish.local> %@ %@",
-      identity[@"timestamp_seconds"], identity[@"timezone_offset"]];
-  [payload appendFormat:@"author %@\ncommitter %@\nencoding UTF-8\n\n%@",
-      person, person, message];
-  return [payload dataUsingEncoding:NSUTF8StringEncoding];
-}
-
-static NSString *DSHAgentGitExpectedSHA1(NSData *payload) {
-  NSData *header = [[NSString stringWithFormat:@"commit %lu",
-      (unsigned long)payload.length] dataUsingEncoding:NSUTF8StringEncoding];
-  NSMutableData *object = [NSMutableData dataWithData:header];
-  const uint8_t terminator = 0;
-  [object appendBytes:&terminator length:1];
-  [object appendData:payload];
-  unsigned char digest[CC_SHA1_DIGEST_LENGTH] = {};
-  CC_SHA1(object.bytes, (CC_LONG)object.length, digest);
-  NSMutableString *hex = [NSMutableString stringWithCapacity:40];
-  for (NSUInteger index = 0; index < CC_SHA1_DIGEST_LENGTH; index += 1) {
-    [hex appendFormat:@"%02x", digest[index]];
+/// The commit object's digest and the id it will have, from the core, as one
+/// answer.  Returns nil when the identity cannot be spelled at all.
+static NSDictionary *DSHAgentGitCommitIdentity(NSString *tree,
+                                                NSArray<NSString *> *parents,
+                                                NSDictionary *identity,
+                                                NSString *message,
+                                                NSError **error) {
+  if (tree == nil || parents == nil || message == nil) {
+    DSHSetAgentNativeStoreError(error, DSHAgentNativeStoreErrorInvalidArgument);
+    return nil;
   }
-  return hex;
+  return DSHAgentGitReduce(@"commit_identity", @{
+    @"tree_oid" : tree,
+    @"parents" : parents,
+    @"timestamp_seconds" :
+        [identity[@"timestamp_seconds"] isKindOfClass:NSNumber.class]
+            ? [identity[@"timestamp_seconds"] stringValue] : @"",
+    @"timezone_offset" : identity[@"timezone_offset"] ?: @"",
+    @"message" : message,
+  }, error);
+}
+
+/// The inverse, for handing the stored offset back to libgit2's signature.
+static NSInteger DSHAgentGitTimezoneMinutes(NSString *value) {
+  NSDictionary *reply = DSHAgentGitReduce(@"timezone_minutes", @{
+    @"timezone_offset" : value ?: @"",
+  }, nullptr);
+  id minutes = reply[@"minutes"];
+  return [minutes isKindOfClass:NSNumber.class] ? [minutes integerValue] : 0;
+}
+
+static NSString *DSHAgentGitTimezoneString(NSInteger minutes) {
+  NSDictionary *reply = DSHAgentGitReduce(@"timezone_string", @{
+    @"minutes" : @((long long)minutes),
+  }, nullptr);
+  id offset = reply[@"timezone_offset"];
+  return [offset isKindOfClass:NSString.class] ? offset : @"+0000";
 }
 
 @interface DSHAgentGitToolExecutor ()
@@ -519,10 +532,10 @@ static NSString *DSHAgentGitExpectedSHA1(NSData *payload) {
       @"timezone_offset" : DSHAgentGitTimezoneString(timezoneMinutes),
     };
     NSArray *parents = preHead == nil ? @[] : @[preHead];
-    NSData *payload = DSHAgentGitCommitPayload(tree, parents, identity,
-                                               arguments[@"message"]);
-    NSString *payloadDigest = DSHAgentHB(@"git-commit-payload", payload, error);
-    if (payloadDigest == nil) return nil;
+    NSDictionary *commit = DSHAgentGitCommitIdentity(tree, parents, identity,
+                                                     arguments[@"message"],
+                                                     error);
+    if (commit == nil) return nil;
     return @{
       @"schema_version" : @1,
       @"precondition" : @{
@@ -542,8 +555,8 @@ static NSString *DSHAgentGitExpectedSHA1(NSData *payload) {
         @"signature_policy" : @"unsigned",
         @"extra_headers" : @[],
         @"stage_all" : @YES,
-        @"commit_payload_sha256" : payloadDigest,
-        @"expected_commit_oid" : DSHAgentGitExpectedSHA1(payload),
+        @"commit_payload_sha256" : commit[@"commit_payload_sha256"],
+        @"expected_commit_oid" : commit[@"expected_commit_oid"],
       },
       @"reserved_write_bytes" : @0,
     };
@@ -928,17 +941,17 @@ static NSString *const DSHAgentGitActiveCancelTokenKey =
           dataUsingEncoding:NSUTF8StringEncoding];
       NSString *messageSHA = messageBytes == nil ? nil
           : DSHAgentHB(@"commit-message", messageBytes, error);
-      NSData *payload = tree == nil ? nil : DSHAgentGitCommitPayload(
+      NSDictionary *commit = tree == nil ? nil : DSHAgentGitCommitIdentity(
           tree, precondition[@"ordered_parent_oids"],
-          precondition[@"author"], arguments[@"message"]);
-      NSString *payloadSHA = payload == nil ? nil
-          : DSHAgentHB(@"git-commit-payload", payload, error);
-      BOOL frozen = [indexDigest isEqual:precondition[@"staged_index_sha256"]] &&
+          precondition[@"author"], arguments[@"message"], nil);
+      BOOL frozen = commit != nil &&
+          [indexDigest isEqual:precondition[@"staged_index_sha256"]] &&
           [tree isEqual:precondition[@"tree_oid"]] &&
           [messageSHA isEqual:precondition[@"message_sha256"]] &&
           [@(messageBytes.length) isEqual:precondition[@"message_bytes"]] &&
-          [payloadSHA isEqual:precondition[@"commit_payload_sha256"]] &&
-          [DSHAgentGitExpectedSHA1(payload)
+          [commit[@"commit_payload_sha256"]
+              isEqual:precondition[@"commit_payload_sha256"]] &&
+          [commit[@"expected_commit_oid"]
               isEqual:precondition[@"expected_commit_oid"]];
       return @{ @"schema_version" : @1,
                 @"status" : frozen ? @"not_dispatched" : @"ambiguous" };
