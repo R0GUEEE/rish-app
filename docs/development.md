@@ -667,6 +667,22 @@ only it can read them. Unlike phase 11 this cut writes nothing, so it rides on
 the existing suites rather than a new golden — the recorded-golden treatment
 is reserved for the cuts that settle transactions.
 
+Phase 13 takes the settle path: finalize, discard and interrupt. All three
+prove something and then rewrite WAL rows in one transaction, so all three were
+recorded before they moved. `fixtures/runtime-coordinator-golden.json` holds 29
+commands taken from the native coordinator with those entry points
+instrumented: the committed WAL state, the request, the facts the typed stores
+answered with, the timestamps the coordinator's own clock handed out, and the
+answer and committed rows that followed.
+`crates/rish-agent-core/tests/runtime_coordinator.rs` replays every one. Like
+the other two goldens it cannot be regenerated.
+
+The core returns the arrays to replace plus the arguments for the WAL
+operation commit, which the host still makes itself, so the WAL's fault hook
+keeps speaking where it always did. A refused finalize is not a failed call:
+it commits its own conflict as the operation's result, and the golden holds
+that case too.
+
 ### Device-only storage metadata
 
 The session store and the agent WAL require every pinned item to report

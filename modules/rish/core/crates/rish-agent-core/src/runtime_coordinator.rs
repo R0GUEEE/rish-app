@@ -804,6 +804,727 @@ pub fn cancel_source_proof(session: &Value, request: &Value) -> bool {
     common && target_matches
 }
 
+// MARK: - finalize, discard and interrupt
+
+/// What the host does with the transaction it is holding. `commit` carries the
+/// arguments for the WAL operation commit the host still makes itself, so its
+/// fault hook keeps speaking where it always did.
+pub enum Settlement {
+    Settle {
+        changes: Map<String, Value>,
+        commit: Value,
+        output: Value,
+    },
+    Error(StoreError),
+}
+
+/// `DSHRuntimeControllerMatchesCheckpoint`.
+fn controller_matches_checkpoint(request: &Value) -> bool {
+    let cas = get(request, "controller_cas");
+    let checkpoint = get(request, "committed_checkpoint");
+    cas.is_some_and(Value::is_object)
+        && checkpoint.is_some_and(Value::is_object)
+        && at(cas, "expected_journal_revision") == at(checkpoint, "journal_revision")
+        && at(cas, "expected_session_generation") == at(checkpoint, "session_generation")
+        && at(cas, "expected_session_sha256") == at(checkpoint, "session_sha256")
+}
+
+const FINALIZE_KEYS: &[&str] = &[
+    "schema_version",
+    "operation_id",
+    "controller_cas",
+    "committed_checkpoint",
+    "task_id",
+    "conversation_id",
+    "attempt_id",
+    "terminal_reason",
+    "cleanup_id",
+    "transcript",
+    "root",
+];
+
+const DISCARD_KEYS: &[&str] = &[
+    "schema_version",
+    "operation_id",
+    "cleanup_id",
+    "task_id",
+    "conversation_id",
+    "attempt_id",
+    "transcript_ref",
+    "transcript_sha256",
+];
+
+const INTERRUPT_KEYS: &[&str] = &[
+    "schema_version",
+    "operation_id",
+    "cleanup_id",
+    "task_id",
+    "conversation_id",
+    "attempt_id",
+    "transcript_ref",
+    "transcript_sha256",
+    "reason",
+    "expected_session_generation",
+    "expected_session_sha256",
+];
+
+fn settle_request(op: &str, request: &Value) -> Result<(), StoreError> {
+    let keys = match op {
+        "finalize" => FINALIZE_KEYS,
+        "discard" => DISCARD_KEYS,
+        "interrupt" => INTERRUPT_KEYS,
+        _ => return Err(StoreError::InvalidArgument),
+    };
+    if exact_keys(Some(request), keys).is_none()
+        || get(request, "schema_version") != Some(&json!(2))
+        || (op == "finalize" && !controller_matches_checkpoint(request))
+        || (op == "interrupt"
+            && !matches!(
+                as_str(get(request, "reason")),
+                Some("completed" | "cancelled" | "failed")
+            ))
+    {
+        return Err(StoreError::InvalidArgument);
+    }
+    Ok(())
+}
+
+/// `DSHRuntimeInterruptionProof`: the committed session has to record the
+/// attempt as terminal and carry the exact cleanup-outbox entry, at exactly
+/// the snapshot the caller says it saw.
+pub fn interruption_proof(session: &Value, facts: &Value, request: &Value) -> bool {
+    if get(facts, "session_generation") != get(request, "expected_session_generation")
+        || get(facts, "session_sha256") != get(request, "expected_session_sha256")
+        || get(session, "schema_version") != Some(&json!(9))
+    {
+        return false;
+    }
+    let outbox = get(session, "agent_transcript_cleanup_outbox");
+    if !outbox.is_some_and(Value::is_array) {
+        return false;
+    }
+    let mut matched: Option<&Value> = None;
+    for candidate in array(outbox) {
+        if get(candidate, "cleanup_id") != get(request, "cleanup_id") {
+            continue;
+        }
+        if matched.is_some() {
+            return false;
+        }
+        matched = Some(candidate);
+    }
+    let keys = [
+        "schema_version",
+        "cleanup_id",
+        "conversation_id",
+        "task_id",
+        "attempt_id",
+        "transcript_ref",
+        "transcript_sha256",
+        "reason",
+        "created_at",
+    ];
+    let bound = |key: &str| at(matched, key) == get(request, key);
+    if exact_keys(matched, &keys).is_none()
+        || at(matched, "schema_version") != Some(&json!(1))
+        || !bound("conversation_id")
+        || !bound("task_id")
+        || !bound("attempt_id")
+        || !bound("transcript_ref")
+        || !bound("transcript_sha256")
+        || !bound("reason")
+        || !canonical_timestamp(at(matched, "created_at"))
+    {
+        return false;
+    }
+    let conversation = array(get(session, "conversations"))
+        .iter()
+        .find(|candidate| get(candidate, "id") == get(request, "conversation_id"));
+    let attempt = array(conversation.and_then(|c| get(c, "attempts")))
+        .iter()
+        .find(|candidate| get(candidate, "attempt_id") == get(request, "attempt_id"));
+    let Some(attempt) = attempt else { return false };
+    if get(attempt, "turn_id") != get(request, "task_id") {
+        return false;
+    }
+    let status = as_str(get(attempt, "status")).unwrap_or_default();
+    let agent = get(attempt, "agent");
+    // Either the controller recorded the interruption itself and there is no
+    // agent journal left, or the journal is terminal on exactly this
+    // transcript.
+    let interrupted = status == "failed"
+        && string_eq(get(attempt, "failure_code"), "E_ATTEMPT_INTERRUPTED")
+        && string_eq(at(matched, "reason"), "failed");
+    let journal_terminal = !is_null(agent) && {
+        let transcript = at(agent, "transcript");
+        matches!(status, "completed" | "cancelled" | "failed")
+            && at(transcript, "transcript_ref") == get(request, "transcript_ref")
+            && at(transcript, "transcript_sha256") == get(request, "transcript_sha256")
+    };
+    (interrupted && is_null(agent)) || journal_terminal
+}
+
+/// `DSHRuntimeExactDiscardedCleanup`: only a discarded cleanup row that still
+/// proves this exact transcript ownership may close an operation whose durable
+/// residue is already gone.
+pub fn exact_discarded_cleanup(state: &Value, request: &Value) -> bool {
+    let row = array(get(state, "cleanup"))
+        .iter()
+        .find(|row| get(row, "cleanup_id") == get(request, "cleanup_id"));
+    let bound = |key: &str| at(row, key) == get(request, key);
+    string_eq(at(row, "status"), "discarded")
+        && bound("attempt_id")
+        && bound("transcript_ref")
+        && bound("transcript_sha256")
+        && at(row, "cleanup_owner") == get(request, "task_id")
+}
+
+/// `DSHRuntimeFinalRoundProvesTranscriptAdvance`: a terminal provider round
+/// persists its assistant message and transcript row in one transaction, but
+/// unlike a tool batch there is no later ledger transaction to advance the
+/// prepared authority. Finalization may bridge exactly that one-generation gap
+/// only when the latest completed final/blocked round is the immutable proof
+/// for the requested transition.
+fn final_round_proves_transcript_advance(
+    state: &Value,
+    authority: &Value,
+    request: &Value,
+    expected_authority_revision: Option<&Value>,
+) -> bool {
+    if !string_eq(get(authority, "state"), "prepared")
+        || get(authority, "root") != get(request, "root")
+        || get(authority, "authority_revision") != expected_authority_revision
+    {
+        return false;
+    }
+    let before = get(authority, "transcript");
+    let after = get(request, "transcript");
+    if at(before, "transcript_ref") != at(after, "transcript_ref")
+        || u64_of(at(after, "generation")) != u64_of(at(before, "generation")) + 1
+    {
+        return false;
+    }
+    let latest = latest_round(state, get(request, "task_id"), get(request, "attempt_id"));
+    let mut proof: Option<&Value> = None;
+    let mut count = 0usize;
+    for round in array(get(state, "rounds")) {
+        let locator = get(round, "locator");
+        if at(locator, "task_id") != get(request, "task_id")
+            || at(locator, "attempt_id") != get(request, "attempt_id")
+            || !string_eq(get(round, "state"), "completed")
+            || get(round, "transcript_before") != before
+            || get(round, "transcript_after") != after
+        {
+            continue;
+        }
+        count += 1;
+        proof = Some(round);
+    }
+    if count != 1 || proof != latest {
+        return false;
+    }
+    let proof = proof.expect("checked");
+    let terminal_kind = as_str(get(proof, "terminal_kind")).unwrap_or_default();
+    let finish_reason =
+        as_str(get(proof, "completion_receipt").and_then(|receipt| get(receipt, "finish_reason")))
+            .unwrap_or_default();
+    match as_str(get(request, "terminal_reason")) {
+        Some("completed") => terminal_kind == "final" && finish_reason == "stop",
+        Some("failed") => {
+            terminal_kind == "blocked" && matches!(finish_reason, "length" | "content_filter")
+        }
+        // Cancellation never gains a transcript handoff exception.
+        _ => false,
+    }
+}
+
+fn commit_arguments(
+    request: &Value,
+    started: &Value,
+    result_status: &Value,
+    result_ref: Value,
+    result_revision: Value,
+    result_kind: &str,
+    result: &Value,
+) -> Value {
+    json!({
+        "operation_id": get(request, "operation_id"),
+        "request_sha256": get(started, "request_sha256"),
+        "task_id": get(request, "task_id"),
+        "attempt_id": get(request, "attempt_id"),
+        "terminal_state": "committed",
+        "result_status": result_status,
+        "result_ref": result_ref,
+        "result_revision": result_revision,
+        "safe_result": { "schema_version": 2, "result_kind": result_kind, "result": result },
+    })
+}
+
+/// `finalizeAgentAttempt`'s transaction body: the authority moves to
+/// cleanup_pending, the transcript to terminal, and the cleanup row is created
+/// if it is not already there.
+pub fn finalize_transaction(
+    state: &Value,
+    request: &Value,
+    started: &Value,
+    timestamp: &str,
+    retention_until: &str,
+) -> Settlement {
+    let task_id = get(request, "task_id");
+    let attempt_id = get(request, "attempt_id");
+    let transcript_ref = at(get(request, "transcript"), "transcript_ref");
+    let authorities = array(get(state, "authorities"));
+    let transcripts = array(get(state, "transcripts"));
+    let authority_index = authorities
+        .iter()
+        .position(|row| get(row, "task_id") == task_id && get(row, "attempt_id") == attempt_id);
+    let transcript_index = transcripts
+        .iter()
+        .position(|row| get(row, "transcript_ref") == transcript_ref);
+    let (Some(authority_index), Some(transcript_index)) = (authority_index, transcript_index)
+    else {
+        return Settlement::Error(StoreError::Conflict);
+    };
+    let authority = &authorities[authority_index];
+    let transcript = &transcripts[transcript_index];
+    let revision = at(get(started, "record"), "authority_revision");
+    let final_round_advance =
+        final_round_proves_transcript_advance(state, authority, request, revision);
+    let authority_current = get(authority, "conversation_id") == get(request, "conversation_id")
+        && get(authority, "root") == get(request, "root")
+        && (get(authority, "transcript") == get(request, "transcript") || final_round_advance)
+        && get(authority, "authority_revision") == revision
+        && (string_eq(get(authority, "state"), "prepared")
+            || (string_eq(get(authority, "state"), "cleanup_pending")
+                && get(authority, "cleanup_id") == get(request, "cleanup_id")));
+    let transcript_current = get(transcript, "attempt_id") == attempt_id
+        && get(transcript, "transcript_sha256")
+            == at(get(request, "transcript"), "transcript_sha256")
+        && matches!(as_str(get(transcript, "state")), Some("open" | "terminal"));
+    if !authority_current || !transcript_current {
+        return Settlement::Error(StoreError::Conflict);
+    }
+    let mut cleanup = array(get(state, "cleanup")).to_vec();
+    let mut cleanup_found = false;
+    for entry in &cleanup {
+        if get(entry, "cleanup_id") != get(request, "cleanup_id") {
+            continue;
+        }
+        cleanup_found = true;
+        if get(entry, "attempt_id") != attempt_id
+            || get(entry, "transcript_ref") != transcript_ref
+            || get(entry, "transcript_sha256")
+                != at(get(request, "transcript"), "transcript_sha256")
+            || get(entry, "cleanup_owner") != task_id
+            || get(entry, "reason") != get(request, "terminal_reason")
+        {
+            return Settlement::Error(StoreError::Conflict);
+        }
+    }
+    if !cleanup_found {
+        cleanup.push(json!({
+            "schema_version": 1,
+            "cleanup_id": get(request, "cleanup_id"),
+            "attempt_id": attempt_id,
+            "transcript_ref": transcript_ref,
+            "transcript_sha256": at(get(request, "transcript"), "transcript_sha256"),
+            "cleanup_owner": task_id,
+            "reason": get(request, "terminal_reason"),
+            "created_at": timestamp,
+            "status": "pending",
+        }));
+    }
+    let revision_value = u64_of(get(authority, "authority_revision"));
+    let already_terminal = string_eq(get(authority, "state"), "cleanup_pending")
+        && cleanup_found
+        && string_eq(get(transcript, "state"), "terminal");
+    let result_revision = if already_terminal {
+        revision_value
+    } else {
+        revision_value + 1
+    };
+    let mut authorities = authorities.to_vec();
+    let mut transcripts = transcripts.to_vec();
+    if !already_terminal {
+        let mut updated = transcripts[transcript_index]
+            .as_object()
+            .cloned()
+            .unwrap_or_default();
+        updated.insert("state".into(), json!("terminal"));
+        updated.insert("retention_until".into(), json!(retention_until));
+        updated.insert("updated_at".into(), json!(timestamp));
+        transcripts[transcript_index] = Value::Object(updated);
+        let mut updated = authorities[authority_index]
+            .as_object()
+            .cloned()
+            .unwrap_or_default();
+        updated.insert("state".into(), json!("cleanup_pending"));
+        updated.insert("cleanup_id".into(), owned(get(request, "cleanup_id")));
+        updated.insert("transcript".into(), owned(get(request, "transcript")));
+        updated.insert("authority_revision".into(), json!(result_revision));
+        updated.insert("updated_at".into(), json!(timestamp));
+        authorities[authority_index] = Value::Object(updated);
+    }
+    let status = if already_terminal {
+        "already_terminal"
+    } else {
+        "terminal"
+    };
+    let result = json!({
+        "schema_version": 2,
+        "status": status,
+        "operation_id": get(request, "operation_id"),
+        "cleanup_id": get(request, "cleanup_id"),
+        "transcript": get(request, "transcript"),
+    });
+    let mut changes = Map::new();
+    changes.insert("authorities".into(), Value::Array(authorities));
+    changes.insert("transcripts".into(), Value::Array(transcripts));
+    changes.insert("cleanup".into(), Value::Array(cleanup));
+    let commit = commit_arguments(
+        request,
+        started,
+        &json!(status),
+        json!({
+            "schema_version": 2,
+            "kind": "authority",
+            "task_id": task_id,
+            "attempt_id": attempt_id,
+            "authority_revision": result_revision,
+        }),
+        json!(result_revision),
+        "finalize_agent_attempt",
+        &result,
+    );
+    Settlement::Settle {
+        changes,
+        commit,
+        output: result,
+    }
+}
+
+/// The conflict result a refused finalize commits, so a retry sees the same
+/// answer instead of racing again.
+pub fn finalize_conflict_commit(request: &Value, started: &Value, failure_code: &str) -> Value {
+    let result = json!({
+        "schema_version": 2,
+        "status": "conflict",
+        "operation_id": get(request, "operation_id"),
+        "failure_code": failure_code,
+    });
+    let mut commit = commit_arguments(
+        request,
+        started,
+        &json!("conflict"),
+        json!({ "schema_version": 2, "kind": "none" }),
+        Value::Null,
+        "finalize_agent_attempt",
+        &result,
+    );
+    if let Some(commit) = commit.as_object_mut() {
+        commit.insert("terminal_state".into(), json!("conflict"));
+    }
+    json!({ "commit": commit, "output": result })
+}
+
+/// Whether a row's writer has provably released it. The WAL's owner sweep
+/// retires a dead writer's row and sets its owner to null, so an explicit null
+/// owner is the record that no writer holds the row any more; a row that still
+/// names an owner, or carries no owner field at all, is not provably abandoned
+/// and fails closed.
+fn row_owner_is_released(row: &Value) -> bool {
+    matches!(get(row, "owner"), Some(Value::Null))
+}
+
+/// Whether an operation of this kind can touch anything outside the WAL. Only
+/// tool execution reaches the workspace or a git remote; every other kind
+/// rewrites WAL rows and nothing else. An unknown kind is treated as reaching
+/// the workspace so a future kind fails closed until it is listed here.
+fn operation_kind_reaches_workspace(kind: Option<&Value>) -> bool {
+    !matches!(
+        as_str(kind),
+        Some(
+            "prepare_agent_attempt"
+                | "complete_agent_round_v2"
+                | "prepare_agent_tool_batch"
+                | "bind_agent_approval"
+                | "finalize_agent_attempt"
+                | "interrupt_agent_attempt"
+                | "cancel_agent_attempt"
+                | "discard_agent_attempt"
+                | "recover_agent_attempt"
+        )
+    )
+}
+
+/// The residue discard's three relaxations, named as the caller passes them.
+fn option_set(options: &Value, name: &str) -> bool {
+    array(Some(options))
+        .iter()
+        .any(|option| string_eq(Some(option), name))
+}
+
+fn row_attempt(row: &Value) -> Option<&Value> {
+    get(row, "attempt_id").or_else(|| get(row, "locator").and_then(|l| get(l, "attempt_id")))
+}
+
+/// `DSHRuntimeDiscardAttemptResidue`: fail-closed discard of every WAL row one
+/// attempt owns. The caller has already proven the authority and started the
+/// operation; this refuses while any round outcome or executed effect is
+/// unprovable, and hands back the rows to keep.
+pub fn residue_discard(
+    state: &Value,
+    request: &Value,
+    operation_kind: &str,
+    options: &Value,
+    started: &Value,
+    timestamp: &str,
+) -> Settlement {
+    let attempt_id = get(request, "attempt_id");
+    let mut cleanup = array(get(state, "cleanup")).to_vec();
+    let mut cleanup_index = cleanup
+        .iter()
+        .position(|row| get(row, "cleanup_id") == get(request, "cleanup_id"));
+    if cleanup_index.is_none() && option_set(options, "create_cleanup_row") {
+        cleanup.push(json!({
+            "schema_version": 1,
+            "cleanup_id": get(request, "cleanup_id"),
+            "attempt_id": attempt_id,
+            "transcript_ref": get(request, "transcript_ref"),
+            "transcript_sha256": get(request, "transcript_sha256"),
+            "cleanup_owner": get(request, "task_id"),
+            "reason": get(request, "reason"),
+            "created_at": timestamp,
+            "status": "pending",
+        }));
+        cleanup_index = Some(cleanup.len() - 1);
+    }
+    let Some(cleanup_index) = cleanup_index else {
+        return Settlement::Error(StoreError::Conflict);
+    };
+    {
+        let row = &cleanup[cleanup_index];
+        let bound = |key: &str| get(row, key) == get(request, key);
+        if get(row, "attempt_id") != attempt_id
+            || !bound("transcript_ref")
+            || !bound("transcript_sha256")
+            || get(row, "cleanup_owner") != get(request, "task_id")
+            || !string_eq(get(row, "status"), "pending")
+        {
+            return Settlement::Error(StoreError::Conflict);
+        }
+    }
+    for round in array(get(state, "rounds")) {
+        if get(round, "locator").and_then(|l| get(l, "attempt_id")) != attempt_id {
+            continue;
+        }
+        let round_state = as_str(get(round, "state")).unwrap_or_default();
+        // A round that still has a live writer is never discarded: its outcome
+        // may still arrive. The owner sweep retires a dead writer's round to
+        // unknown/ambiguous and releases the owner, and such a row is exactly
+        // the residue an interrupt exists to clear. A round is a provider call
+        // and reaches no workspace or git remote; the ledger and dispatch
+        // checks below remain the sole proof for anything that did.
+        if matches!(round_state, "in_flight" | "cancel_requested") {
+            return Settlement::Error(StoreError::Conflict);
+        }
+        if matches!(round_state, "unknown" | "ambiguous")
+            && !(option_set(options, "unsettled_rounds") && row_owner_is_released(round))
+        {
+            return Settlement::Error(StoreError::Conflict);
+        }
+    }
+    for row in array(get(state, "ledger")) {
+        let locator = get(row, "locator");
+        if at(locator, "attempt_id") != attempt_id {
+            continue;
+        }
+        let row_state = as_str(get(row, "state")).unwrap_or_default();
+        if matches!(
+            row_state,
+            "running" | "cancel_requested" | "unknown" | "ambiguous"
+        ) {
+            return Settlement::Error(StoreError::Conflict);
+        }
+        if row_state != "intent" {
+            continue;
+        }
+        if !option_set(options, "undispatched_intents") {
+            return Settlement::Error(StoreError::Conflict);
+        }
+        for dispatch in array(get(state, "dispatch")) {
+            if !string_eq(get(dispatch, "kind"), "execution") || get(dispatch, "locator") != locator
+            {
+                continue;
+            }
+            if string_eq(get(dispatch, "dispatch_state"), "dispatched") {
+                return Settlement::Error(StoreError::Conflict);
+            }
+        }
+    }
+    let mut kept_operations = Vec::new();
+    let mut removed: Vec<&Value> = Vec::new();
+    for operation in array(get(state, "operations")) {
+        if get(operation, "attempt_id") != attempt_id
+            || get(operation, "operation_id") == get(request, "operation_id")
+        {
+            kept_operations.push(operation.clone());
+            continue;
+        }
+        let operation_state = as_str(get(operation, "state")).unwrap_or_default();
+        let unsettled = matches!(operation_state, "started" | "unknown" | "ambiguous");
+        // An unsettled operation only blocks the discard when it could have
+        // reached the workspace: whether an execute ran is proven by its ledger
+        // row and dispatch marker above, and a settled row cannot hide a
+        // started execute. Every other kind mutates nothing but this WAL, so
+        // the residue it left is exactly what is discarded here. A dead
+        // writer's ambiguous round, or a finalize that never committed, would
+        // otherwise pin the attempt forever.
+        if unsettled && operation_kind_reaches_workspace(get(operation, "operation_kind")) {
+            return Settlement::Error(StoreError::Conflict);
+        }
+        if !unsettled && !matches!(operation_state, "committed" | "rejected" | "conflict") {
+            return Settlement::Error(StoreError::Corrupt);
+        }
+        if let Some(id) = get(operation, "operation_id") {
+            removed.push(id);
+        }
+    }
+    let kept_results: Vec<Value> = array(get(state, "operation_results"))
+        .iter()
+        .filter(|result| !get(result, "operation_id").is_some_and(|id| removed.contains(&id)))
+        .cloned()
+        .collect();
+    let mut updated_cleanup = cleanup[cleanup_index]
+        .as_object()
+        .cloned()
+        .unwrap_or_default();
+    updated_cleanup.insert("status".into(), json!("discarded"));
+    cleanup[cleanup_index] = Value::Object(updated_cleanup);
+    let keep = |rows: &[Value]| -> Value {
+        Value::Array(
+            rows.iter()
+                .filter(|row| row_attempt(row) != attempt_id)
+                .cloned()
+                .collect(),
+        )
+    };
+    let mut changes = Map::new();
+    for key in [
+        "authorities",
+        "rounds",
+        "ledger",
+        "reservations",
+        "batches",
+        "denied_calls",
+    ] {
+        changes.insert(key.into(), keep(array(get(state, key))));
+    }
+    changes.insert(
+        "dispatch".into(),
+        Value::Array(
+            array(get(state, "dispatch"))
+                .iter()
+                .filter(|row| get(row, "locator").and_then(|l| get(l, "attempt_id")) != attempt_id)
+                .cloned()
+                .collect(),
+        ),
+    );
+    changes.insert(
+        "transcripts".into(),
+        Value::Array(
+            array(get(state, "transcripts"))
+                .iter()
+                .filter(|row| get(row, "attempt_id") != attempt_id)
+                .cloned()
+                .collect(),
+        ),
+    );
+    changes.insert("cleanup".into(), Value::Array(cleanup));
+    changes.insert("operations".into(), Value::Array(kept_operations));
+    changes.insert("operation_results".into(), Value::Array(kept_results));
+    let result = json!({
+        "schema_version": 2,
+        "status": "discarded",
+        "operation_id": get(request, "operation_id"),
+        "cleanup_id": get(request, "cleanup_id"),
+    });
+    let commit = commit_arguments(
+        request,
+        started,
+        &json!("discarded"),
+        json!({ "schema_version": 2, "kind": "cleanup", "cleanup_id": get(request, "cleanup_id") }),
+        json!(1),
+        operation_kind,
+        &result,
+    );
+    Settlement::Settle {
+        changes,
+        commit,
+        output: result,
+    }
+}
+
+/// The already-missing close: the durable residue is gone, so the operation is
+/// committed with nothing to discard.
+pub fn already_missing_commit(request: &Value, started: &Value, operation_kind: &str) -> Value {
+    let result = json!({
+        "schema_version": 2,
+        "status": "already_missing",
+        "operation_id": get(request, "operation_id"),
+        "cleanup_id": get(request, "cleanup_id"),
+    });
+    let commit = commit_arguments(
+        request,
+        started,
+        &json!("already_missing"),
+        json!({ "schema_version": 2, "kind": "cleanup", "cleanup_id": get(request, "cleanup_id") }),
+        json!(1),
+        operation_kind,
+        &result,
+    );
+    json!({ "commit": commit, "output": result })
+}
+
+/// Whether the attempt's authority is in a state this command may settle.
+pub fn settle_authority_state(state: &Value, request: &Value, op: &str) -> Value {
+    let authority = find_authority(state, get(request, "task_id"), get(request, "attempt_id"));
+    let Some(authority) = authority else {
+        return json!({ "authority": Value::Null, "settles": false });
+    };
+    let settles = get(authority, "conversation_id") == get(request, "conversation_id")
+        && match op {
+            // A discard only ever follows a committed finalize.
+            "discard" => {
+                string_eq(get(authority, "state"), "cleanup_pending")
+                    && get(authority, "cleanup_id") == get(request, "cleanup_id")
+            }
+            // An interrupt also clears a writer that died while still prepared.
+            _ => {
+                string_eq(get(authority, "state"), "prepared")
+                    || (string_eq(get(authority, "state"), "cleanup_pending")
+                        && get(authority, "cleanup_id") == get(request, "cleanup_id"))
+            }
+        };
+    json!({ "authority": authority, "settles": settles })
+}
+
+fn settlement_json(settlement: Settlement) -> Value {
+    match settlement {
+        Settlement::Settle {
+            changes,
+            commit,
+            output,
+        } => json!({
+            "result": "settle",
+            "changes": Value::Object(changes),
+            "commit": commit,
+            "output": output,
+        }),
+        Settlement::Error(error) => json!({ "result": "error", "error": error.code() }),
+    }
+}
+
 /// `rish_agent_runtime_reduce`.
 pub fn reduce_json(input: &str) -> String {
     let value = match reduce_json_inner(input) {
@@ -885,6 +1606,54 @@ fn reduce_json_inner(input: &str) -> Result<Value, StoreError> {
         "latest_batch_calls" => {
             let batch = get(&envelope, "batch").unwrap_or(&Value::Null);
             reply.insert("calls".into(), latest_batch_calls(state, batch));
+        }
+        "settle_request" => {
+            let kind = as_str(get(&envelope, "kind")).ok_or(StoreError::InvalidArgument)?;
+            settle_request(kind, request)?;
+        }
+        "interruption_proof" => {
+            let facts = get(&envelope, "facts").unwrap_or(&Value::Null);
+            reply.insert(
+                "proves".into(),
+                json!(interruption_proof(session, facts, request)),
+            );
+        }
+        "exact_discarded_cleanup" => {
+            reply.insert(
+                "proves".into(),
+                json!(exact_discarded_cleanup(state, request)),
+            );
+        }
+        "settle_authority_state" => {
+            let kind = as_str(get(&envelope, "kind")).ok_or(StoreError::InvalidArgument)?;
+            return Ok(settle_authority_state(state, request, kind));
+        }
+        "finalize_transaction" => {
+            let started = get(&envelope, "started").ok_or(StoreError::InvalidArgument)?;
+            let timestamp = as_str(get(&envelope, "timestamp")).unwrap_or_default();
+            let retention = as_str(get(&envelope, "retention_until")).unwrap_or_default();
+            return Ok(settlement_json(finalize_transaction(
+                state, request, started, timestamp, retention,
+            )));
+        }
+        "finalize_conflict" => {
+            let started = get(&envelope, "started").ok_or(StoreError::InvalidArgument)?;
+            let code = as_str(get(&envelope, "failure_code")).ok_or(StoreError::InvalidArgument)?;
+            return Ok(finalize_conflict_commit(request, started, code));
+        }
+        "residue_discard" => {
+            let started = get(&envelope, "started").ok_or(StoreError::InvalidArgument)?;
+            let kind = as_str(get(&envelope, "kind")).ok_or(StoreError::InvalidArgument)?;
+            let options = get(&envelope, "options").unwrap_or(&Value::Null);
+            let timestamp = as_str(get(&envelope, "timestamp")).unwrap_or_default();
+            return Ok(settlement_json(residue_discard(
+                state, request, kind, options, started, timestamp,
+            )));
+        }
+        "already_missing" => {
+            let started = get(&envelope, "started").ok_or(StoreError::InvalidArgument)?;
+            let kind = as_str(get(&envelope, "kind")).ok_or(StoreError::InvalidArgument)?;
+            return Ok(already_missing_commit(request, started, kind));
         }
         "cleanup_outbox_proof" => {
             reply.insert(
