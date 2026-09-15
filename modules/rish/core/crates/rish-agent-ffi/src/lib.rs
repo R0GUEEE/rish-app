@@ -16,6 +16,7 @@ use rish_agent_core::tool_batch::reduce_json as tool_batch_reduce_json;
 use rish_agent_core::tool_execution::reduce_json as tool_execution_reduce_json;
 use rish_agent_core::transcript_store::reduce_json as transcript_reduce_json;
 use rish_agent_core::wal_operations::reduce_json as wal_operation_reduce_json;
+use rish_agent_core::wal_resident::{Confirmation, Resident};
 use rish_agent_core::wal_state::reduce_json as wal_state_reduce_json;
 use std::ffi::CString;
 use std::os::raw::c_char;
@@ -355,6 +356,128 @@ pub unsafe extern "C" fn rish_agent_wal_operation_reduce(
         return std::ptr::null_mut();
     };
     output(wal_operation_reduce_json(text))
+}
+
+/// One storage root's resident WAL state. The host holds the root lock, so
+/// contention is not expected; the mutex is here so a handle can never be torn
+/// by a caller that forgets.
+struct WalHandle(std::sync::Mutex<Resident>);
+
+fn wal_handle<'a>(pointer: *mut std::ffi::c_void) -> Option<&'a WalHandle> {
+    if pointer.is_null() {
+        return None;
+    }
+    // Safety: the pointer came from rish_agent_wal_open and has not been freed.
+    Some(unsafe { &*(pointer.cast::<WalHandle>()) })
+}
+
+/// Adopts a committed WAL state the host has just read and validated, and
+/// returns an opaque handle. Returns null when the state is not JSON. Release
+/// it with `rish_agent_wal_close`.
+///
+/// # Safety
+/// `pointer` must reference `length` readable bytes or be null.
+#[no_mangle]
+pub unsafe extern "C" fn rish_agent_wal_open(
+    pointer: *const c_char,
+    length: usize,
+) -> *mut std::ffi::c_void {
+    let Some(text) = input(pointer, length) else {
+        return std::ptr::null_mut();
+    };
+    let Ok(state) = serde_json::from_str(text) else {
+        return std::ptr::null_mut();
+    };
+    let handle = Box::new(WalHandle(std::sync::Mutex::new(Resident::open(state))));
+    Box::into_raw(handle).cast::<std::ffi::c_void>()
+}
+
+/// The committed state as JSON, or null once the handle has been invalidated
+/// by an unknown confirmation — then only a fresh read can say what is on disk.
+///
+/// # Safety
+/// `handle` must come from `rish_agent_wal_open` and not have been closed.
+#[no_mangle]
+pub unsafe extern "C" fn rish_agent_wal_snapshot(handle: *mut std::ffi::c_void) -> *mut c_char {
+    let Some(handle) = wal_handle(handle) else {
+        return std::ptr::null_mut();
+    };
+    let Ok(resident) = handle.0.lock() else {
+        return std::ptr::null_mut();
+    };
+    match resident.snapshot() {
+        Some(state) => output(state.to_string()),
+        None => std::ptr::null_mut(),
+    }
+}
+
+/// Takes the candidate state and returns the exact bytes the host must write,
+/// or null when the handle is invalid or already holds a candidate.
+///
+/// # Safety
+/// `handle` must come from `rish_agent_wal_open`; `pointer` must reference
+/// `length` readable bytes or be null.
+#[no_mangle]
+pub unsafe extern "C" fn rish_agent_wal_begin(
+    handle: *mut std::ffi::c_void,
+    pointer: *const c_char,
+    length: usize,
+) -> *mut c_char {
+    let (Some(handle), Some(text)) = (wal_handle(handle), input(pointer, length)) else {
+        return std::ptr::null_mut();
+    };
+    let (Ok(candidate), Ok(mut resident)) = (serde_json::from_str(text), handle.0.lock()) else {
+        return std::ptr::null_mut();
+    };
+    match resident.begin(candidate) {
+        Ok(bytes) => match String::from_utf8(bytes) {
+            Ok(text) => output(text),
+            Err(_) => std::ptr::null_mut(),
+        },
+        Err(_) => std::ptr::null_mut(),
+    }
+}
+
+/// Resolves the outstanding candidate. `outcome` is "committed",
+/// "not_committed" or "unknown"; the reply is
+/// `{"ok":true,"published":<bool>}` or `{"ok":false,"error":<code>}`. An
+/// unknown outcome invalidates the handle rather than assuming either way.
+///
+/// # Safety
+/// `handle` must come from `rish_agent_wal_open`; `pointer` must reference
+/// `length` readable bytes or be null.
+#[no_mangle]
+pub unsafe extern "C" fn rish_agent_wal_confirm(
+    handle: *mut std::ffi::c_void,
+    pointer: *const c_char,
+    length: usize,
+) -> *mut c_char {
+    let (Some(handle), Some(text)) = (wal_handle(handle), input(pointer, length)) else {
+        return std::ptr::null_mut();
+    };
+    let (Some(confirmation), Ok(mut resident)) = (Confirmation::parse(text), handle.0.lock())
+    else {
+        return std::ptr::null_mut();
+    };
+    output(
+        match resident.confirm(confirmation) {
+            Ok(published) => serde_json::json!({ "ok": true, "published": published }),
+            Err(error) => serde_json::json!({ "ok": false, "error": error.code() }),
+        }
+        .to_string(),
+    )
+}
+
+/// Releases a handle. Null is ignored.
+///
+/// # Safety
+/// `handle` must come from `rish_agent_wal_open` and must not be used again.
+#[no_mangle]
+pub unsafe extern "C" fn rish_agent_wal_close(handle: *mut std::ffi::c_void) {
+    if handle.is_null() {
+        return;
+    }
+    drop(unsafe { Box::from_raw(handle.cast::<WalHandle>()) });
 }
 
 /// Decides one runtime-coordinator step over the JSON envelope documented on

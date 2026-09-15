@@ -1047,6 +1047,49 @@ static NSString *DSHWALTestInode(NSString *path) {
   XCTAssertEqual(error.code, DSHAgentNativeStoreErrorConflict);
 }
 
+/// The core holds the committed state between transactions, so the store no
+/// longer re-reads the file to learn what is committed. It is only allowed to
+/// trust that while the file it was read from is still the file on disk: a
+/// fixture, a restore or any future tool that replaces the WAL behind the
+/// store's back must be seen, not served from memory.
+- (void)testCommittedStateIsRereadWhenTheFileIsReplacedBehindTheStore {
+  NSError *error = nil;
+  XCTAssertTrue([self.wal performAtomicTransaction:^BOOL(NSMutableDictionary *state,
+                                                          NSError **mutationError) {
+    (void)mutationError;
+    state[@"cleanup"] = @[];
+    return YES;
+  } error:&error]);
+  XCTAssertNil(error);
+  NSDictionary *committed = [self.wal snapshotWithError:&error];
+  XCTAssertNotNil(committed);
+  NSUInteger generation = [committed[@"generation"] unsignedIntegerValue];
+
+  // Replace the file with a state the store has never seen. Its generation is
+  // far ahead, so a stale resident state would refuse the next write for a
+  // generation conflict instead of building on these bytes.
+  NSMutableDictionary *replaced = [@{
+    @"schema_version" : @2, @"generation" : @(generation + 41),
+    @"authorities" : @[], @"operations" : @[], @"operation_results" : @[],
+    @"transcripts" : @[], @"rounds" : @[], @"ledger" : @[],
+    @"reservations" : @[], @"cleanup" : @[], @"dispatch" : @[],
+    @"batches" : @[], @"denied_calls" : @[],
+  } mutableCopy];
+  XCTAssertTrue([self writeCanonicalWALState:replaced error:&error], @"%@", error);
+
+  __block NSUInteger observed = 0;
+  XCTAssertTrue([self.wal performAtomicTransaction:^BOOL(NSMutableDictionary *state,
+                                                          NSError **mutationError) {
+    (void)mutationError;
+    observed = [state[@"generation"] unsignedIntegerValue];
+    return YES;
+  } error:&error]);
+  XCTAssertNil(error);
+  XCTAssertEqual(observed, generation + 41);
+  XCTAssertEqual([[self.wal snapshotWithError:&error][@"generation"] unsignedIntegerValue],
+                 generation + 42);
+}
+
 - (void)testSchemaOneMigrationIsAtomicExactAndUpgradesRoundV3MixedBatch {
   NSError *error = nil;
   NSDictionary *transcript = [self.transcripts

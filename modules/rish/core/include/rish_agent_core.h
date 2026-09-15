@@ -93,6 +93,21 @@ char *rish_agent_wal_state_reduce(const char *json, size_t json_length);
 /// confirmed the transaction.
 char *rish_agent_wal_operation_reduce(const char *json, size_t json_length);
 
+/// One storage root's resident WAL state. rish_agent_wal_open adopts a state
+/// the host has read and validated and returns an opaque handle;
+/// rish_agent_wal_snapshot reads the committed state back;
+/// rish_agent_wal_begin takes a candidate and returns the exact bytes to
+/// write; rish_agent_wal_confirm resolves it with "committed",
+/// "not_committed" or "unknown". An unknown confirmation is never downgraded
+/// to not-committed: it invalidates the handle, snapshot then returns NULL,
+/// and only a fresh read from disk can make a new one. Close with
+/// rish_agent_wal_close.
+void *rish_agent_wal_open(const char *json, size_t json_length);
+char *rish_agent_wal_snapshot(void *handle);
+char *rish_agent_wal_begin(void *handle, const char *json, size_t json_length);
+char *rish_agent_wal_confirm(void *handle, const char *outcome, size_t outcome_length);
+void rish_agent_wal_close(void *handle);
+
 /// One runtime-coordinator decision over
 /// {"op","request","state"?,"session"?,"facts"?,"proof"?,"base"?,"queried"?}:
 /// query_tool_request, query_attempt_request, presentations_request,

@@ -768,6 +768,31 @@ to make a test pass destroys the only evidence that the port was faithful. The
 mutation walk that expands the session corpus into its golden is part of the
 same contract for the same reason.
 
+### The WAL's resident state
+
+The core now holds each storage root's committed state behind an opaque handle
+(`wal_resident.rs`), so a transaction that already knows what is committed does
+not re-read and re-parse the file to find out. The host still owns the file,
+the lock and the write; what moved is who remembers.
+
+The contract is the three-state confirmation the plan calls for, and the rule
+it exists to keep: **a write that failed is not a write that did not happen.**
+`writeStateLocked:` now reports which of the three it ended in — provably not
+committed before the rename, durable after the directory fsync, and unknown in
+between. A committed confirmation publishes the candidate; a not-committed one
+discards it and leaves the handle usable; an unknown one neither publishes nor
+discards, because which of those is true is exactly what is not known. It
+invalidates the handle instead, and the next transaction reads the file again.
+
+Two rules keep the cache sound. The handle belongs to the root rather than to
+an instance, because several `DSHAgentNativeWAL` objects can address one root
+and there must never be two owners of one state. And it is trusted only while
+the file it was read from is still the file on disk — device, inode, size and
+mtime are compared before every use — so a fixture, a restore or any future
+tool that replaces the WAL behind the store's back is seen rather than served
+from memory. `testCommittedStateIsRereadWhenTheFileIsReplacedBehindTheStore`
+is that case, and it fails without the identity check.
+
 ### Device-only storage metadata
 
 The session store and the agent WAL require every pinned item to report

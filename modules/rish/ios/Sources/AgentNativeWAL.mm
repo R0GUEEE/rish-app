@@ -1457,6 +1457,189 @@ static NSDictionary *DSHAgentWALCoreEnvironment(NSDictionary *authority) {
   };
 }
 
+@interface DSHAgentNativeWAL (DSHAgentNativeWALResidentState)
+- (nullable NSDictionary *)loadStateLocked:(NSError **)error;
+@end
+
+// MARK: - the resident committed state
+//
+// The core holds each storage root's committed state behind an opaque handle
+// (modules/rish/core, wal_resident.rs), so a transaction that already knows
+// what is committed does not re-read and re-parse the file to find out.
+//
+// Two rules keep that sound. The handle belongs to the root, not to an
+// instance, because several DSHAgentNativeWAL objects can address one root and
+// there must never be two owners of one state. And the handle is only trusted
+// while the file it was read from is still the file on disk: anything that
+// replaces the WAL behind our back — a test fixture, a restore, a future tool
+// — changes the identity below and the state is read again.
+
+typedef NS_ENUM(NSUInteger, DSHAgentWALConfirmation) {
+  // The bytes are durable.
+  DSHAgentWALConfirmationCommitted = 0,
+  // The bytes provably never replaced the committed file.
+  DSHAgentWALConfirmationNotCommitted,
+  // Neither could be established. The file may or may not be the candidate.
+  DSHAgentWALConfirmationUnknown,
+};
+
+@interface DSHAgentWALResident : NSObject
+@property(nonatomic) void *handle;
+@property(nonatomic) dev_t device;
+@property(nonatomic) ino_t inode;
+@property(nonatomic) off_t size;
+@property(nonatomic) struct timespec modified;
+@property(nonatomic) BOOL missing;
+@end
+
+@implementation DSHAgentWALResident
+- (void)dealloc {
+  rish_agent_wal_close(_handle);
+  _handle = NULL;
+}
+@end
+
+static NSMutableDictionary<NSString *, DSHAgentWALResident *> *DSHAgentWALResidents(void) {
+  static NSMutableDictionary<NSString *, DSHAgentWALResident *> *residents;
+  static dispatch_once_t onceToken;
+  dispatch_once(&onceToken, ^{ residents = [NSMutableDictionary dictionary]; });
+  return residents;
+}
+
+static NSString *DSHAgentWALResidentKey(NSURL *rootURL) {
+  return rootURL.path.stringByStandardizingPath ?: @"<invalid>";
+}
+
+/// The identity of the committed file right now, or a missing marker.
+static BOOL DSHAgentWALFileIdentity(NSURL *rootURL, struct stat *metadata,
+                                    BOOL *missing) {
+  *missing = NO;
+  int rootDescriptor = DSHAgentOpenRootDescriptor(rootURL);
+  if (rootDescriptor < 0) return NO;
+  BOOL ok = fstatat(rootDescriptor, DSHAgentWALFileName.UTF8String, metadata,
+                    AT_SYMLINK_NOFOLLOW) == 0;
+  if (!ok && errno == ENOENT) {
+    *missing = YES;
+    ok = YES;
+    *metadata = (struct stat){};
+  }
+  close(rootDescriptor);
+  return ok;
+}
+
+static BOOL DSHAgentWALResidentMatches(DSHAgentWALResident *resident,
+                                       const struct stat *metadata,
+                                       BOOL missing) {
+  if (resident.missing != missing) return NO;
+  if (missing) return YES;
+  return resident.device == metadata->st_dev && resident.inode == metadata->st_ino &&
+      resident.size == metadata->st_size &&
+      resident.modified.tv_sec == metadata->st_mtimespec.tv_sec &&
+      resident.modified.tv_nsec == metadata->st_mtimespec.tv_nsec;
+}
+
+static void DSHAgentWALForgetResident(NSURL *rootURL) {
+  @synchronized (DSHAgentNativeWAL.class) {
+    [DSHAgentWALResidents() removeObjectForKey:DSHAgentWALResidentKey(rootURL)];
+  }
+}
+
+/// The committed state, from the resident handle when it still describes the
+/// file on disk, and from the file itself otherwise.
+static NSMutableDictionary *DSHAgentWALCommittedState(DSHAgentNativeWAL *wal,
+                                                      NSError **error) {
+  struct stat metadata = {};
+  BOOL missing = NO;
+  BOOL identified = DSHAgentWALFileIdentity(wal.rootURL, &metadata, &missing);
+  NSString *key = DSHAgentWALResidentKey(wal.rootURL);
+  if (identified) {
+    @synchronized (DSHAgentNativeWAL.class) {
+      DSHAgentWALResident *resident = DSHAgentWALResidents()[key];
+      if (resident != nil && DSHAgentWALResidentMatches(resident, &metadata, missing)) {
+        char *raw = rish_agent_wal_snapshot(resident.handle);
+        if (raw != NULL) {
+          NSData *bytes = [NSData dataWithBytes:raw length:strlen(raw)];
+          rish_agent_string_free(raw);
+          id state = [NSJSONSerialization JSONObjectWithData:bytes
+              options:NSJSONReadingMutableContainers | NSJSONReadingMutableLeaves
+                error:nil];
+          if ([state isKindOfClass:NSDictionary.class]) return [state mutableCopy];
+        }
+        // The handle can no longer say what is committed; only the file can.
+        [DSHAgentWALResidents() removeObjectForKey:key];
+      }
+    }
+  }
+  NSMutableDictionary *state = [[wal loadStateLocked:error] mutableCopy];
+  if (state == nil || !identified) return state;
+  NSData *bytes = [NSJSONSerialization dataWithJSONObject:state options:0 error:nil];
+  if (bytes == nil) return state;
+  void *handle = rish_agent_wal_open((const char *)bytes.bytes, bytes.length);
+  if (handle == NULL) return state;
+  DSHAgentWALResident *resident = [[DSHAgentWALResident alloc] init];
+  resident.handle = handle;
+  resident.device = metadata.st_dev;
+  resident.inode = metadata.st_ino;
+  resident.size = metadata.st_size;
+  resident.modified = metadata.st_mtimespec;
+  resident.missing = missing;
+  @synchronized (DSHAgentNativeWAL.class) { DSHAgentWALResidents()[key] = resident; }
+  return state;
+}
+
+/// Hands the candidate to the resident handle and resolves it with what the
+/// host learned. An unknown outcome drops the handle rather than guessing:
+/// the next transaction reads the file again.
+static void DSHAgentWALPublish(DSHAgentNativeWAL *wal, NSDictionary *candidate,
+                               DSHAgentWALConfirmation confirmation) {
+  NSString *key = DSHAgentWALResidentKey(wal.rootURL);
+  DSHAgentWALResident *resident = nil;
+  @synchronized (DSHAgentNativeWAL.class) { resident = DSHAgentWALResidents()[key]; }
+  if (resident == nil) return;
+  if (confirmation != DSHAgentWALConfirmationCommitted) {
+    // Nothing was published, and an unknown outcome means the handle can no
+    // longer describe the file either way.
+    if (confirmation == DSHAgentWALConfirmationUnknown) {
+      DSHAgentWALForgetResident(wal.rootURL);
+    }
+    return;
+  }
+  NSData *bytes = [NSJSONSerialization dataWithJSONObject:candidate options:0 error:nil];
+  BOOL published = NO;
+  if (bytes != nil) {
+    char *staged = rish_agent_wal_begin(resident.handle,
+                                        (const char *)bytes.bytes, bytes.length);
+    if (staged != NULL) {
+      rish_agent_string_free(staged);
+      const char *outcome = "committed";
+      char *reply = rish_agent_wal_confirm(resident.handle, outcome, strlen(outcome));
+      if (reply != NULL) {
+        NSData *replyBytes = [NSData dataWithBytes:reply length:strlen(reply)];
+        rish_agent_string_free(reply);
+        id parsed = [NSJSONSerialization JSONObjectWithData:replyBytes options:0 error:nil];
+        published = [parsed isKindOfClass:NSDictionary.class] &&
+            [parsed[@"published"] isEqual:@YES];
+      }
+    }
+  }
+  if (!published) {
+    DSHAgentWALForgetResident(wal.rootURL);
+    return;
+  }
+  // The file the state now describes is the one the write just left behind.
+  struct stat metadata = {};
+  BOOL missing = NO;
+  if (!DSHAgentWALFileIdentity(wal.rootURL, &metadata, &missing) || missing) {
+    DSHAgentWALForgetResident(wal.rootURL);
+    return;
+  }
+  resident.device = metadata.st_dev;
+  resident.inode = metadata.st_ino;
+  resident.size = metadata.st_size;
+  resident.modified = metadata.st_mtimespec;
+  resident.missing = NO;
+}
+
 static BOOL DSHAgentWALContainsForbiddenSafeKey(id value) {
   static NSSet<NSString *> *forbidden;
   static dispatch_once_t onceToken;
@@ -1698,6 +1881,7 @@ static NSString *DSHAgentFindDispatchState(NSArray *dispatchRows,
 @property(nonatomic) BOOL ownerReconciled;
 - (BOOL)writeStateLocked:(NSDictionary *)state
             oldGeneration:(NSUInteger)oldGeneration
+             confirmation:(DSHAgentWALConfirmation *)confirmation
                      error:(NSError **)error;
 - (BOOL)faultAtStage:(NSString *)stage error:(NSError **)error;
 @end
@@ -2305,9 +2489,12 @@ static void DSHAgentWALRememberVerifiedBytes(NSData *data) {
       if (error != nullptr) *error = loadError;
       return NO;
     }
+    DSHAgentWALConfirmation migrationConfirmation = DSHAgentWALConfirmationNotCommitted;
     if (![self writeStateLocked:migrated
                   oldGeneration:[state[@"generation"] unsignedIntegerValue]
+                   confirmation:&migrationConfirmation
                            error:&loadError]) {
+      DSHAgentWALForgetResident(self.rootURL);
       [self.lock unlock];
       if (error != nullptr) *error = loadError;
       return NO;
@@ -2330,7 +2517,11 @@ static void DSHAgentWALRememberVerifiedBytes(NSData *data) {
 
 - (BOOL)writeStateLocked:(NSDictionary *)state
                 oldGeneration:(NSUInteger)oldGeneration
+                 confirmation:(DSHAgentWALConfirmation *)confirmation
                          error:(NSError **)error {
+  // Until the rename takes effect nothing can have replaced the file; after
+  // it does, a later failure no longer proves that it did not.
+  if (confirmation != nullptr) *confirmation = DSHAgentWALConfirmationNotCommitted;
   NSError *validationError = nil;
   if (!DSHAgentWALStateBasicValidation(state, &validationError)) {
     if (error != nullptr) *error = validationError;
@@ -2419,6 +2610,7 @@ static void DSHAgentWALRememberVerifiedBytes(NSData *data) {
     DSHSetAgentNativeStoreError(error, DSHAgentNativeStoreErrorPersistence);
     return NO;
   }
+  if (confirmation != nullptr) *confirmation = DSHAgentWALConfirmationUnknown;
   struct stat replacedMetadata = {};
   BOOL replaced = fstatat(rootDescriptor, DSHAgentWALFileName.UTF8String,
                           &replacedMetadata, AT_SYMLINK_NOFOLLOW) == 0 &&
@@ -2434,6 +2626,7 @@ static void DSHAgentWALRememberVerifiedBytes(NSData *data) {
   if (!replaced || !synced ||
       ![self faultAtStage:@"wal.after_directory_fsync" error:error]) return NO;
   DSHAgentWALRememberVerifiedBytes(data);
+  if (confirmation != nullptr) *confirmation = DSHAgentWALConfirmationCommitted;
   return YES;
 }
 
@@ -2446,7 +2639,7 @@ static void DSHAgentWALRememberVerifiedBytes(NSData *data) {
   if (![self ensureStorageWithError:error]) return NO;
   [self.lock lock];
   NSError *loadError = nil;
-  NSMutableDictionary *state = [[self loadStateLocked:&loadError] mutableCopy];
+  NSMutableDictionary *state = DSHAgentWALCommittedState(self, &loadError);
   if (state == nil) {
     [self.lock unlock];
     if (error != nullptr) *error = loadError;
@@ -2486,16 +2679,21 @@ static void DSHAgentWALRememberVerifiedBytes(NSData *data) {
   }
   state[@"generation"] = @(oldGeneration + 1);
   NSError *commitError = nil;
+  DSHAgentWALConfirmation confirmation = DSHAgentWALConfirmationNotCommitted;
   BOOL committed = [self writeStateLocked:state
                             oldGeneration:oldGeneration
+                             confirmation:&confirmation
                                      error:&commitError];
   if (!committed && commitError.code == DSHAgentNativeStoreErrorCapacity &&
+      confirmation == DSHAgentWALConfirmationNotCommitted &&
       DSHAgentWALCompactAcknowledgedEvidence(state)) {
     commitError = nil;
     committed = [self writeStateLocked:state
                           oldGeneration:oldGeneration
+                           confirmation:&confirmation
                                    error:&commitError];
   }
+  DSHAgentWALPublish(self, state, confirmation);
   [self.lock unlock];
   if (!committed && error != nullptr) *error = commitError;
   return committed;
