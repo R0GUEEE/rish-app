@@ -629,6 +629,17 @@ const RESULT_STATUSES: &[&str] = &[
     "conflict",
 ];
 
+/// `DSHAgentWALKnownOperationResultStatus`: the closed set, plus the two
+/// statuses that belong to exactly one operation kind.
+pub fn known_result_status(status: Option<&Value>) -> bool {
+    matches!(
+        status.and_then(Value::as_str),
+        Some("settled" | "already_terminal")
+    ) || status
+        .and_then(Value::as_str)
+        .is_some_and(|status| RESULT_STATUSES.contains(&status))
+}
+
 /// `DSHAgentWALOperationResultStatusAllowed`: two statuses belong to exactly
 /// one operation kind.
 pub fn result_status_allowed(operation_kind: Option<&str>, status: Option<&str>) -> bool {
@@ -1728,13 +1739,13 @@ const MAX_TRANSCRIPT_COUNT: usize = 128;
 const MAX_LEDGER_ROWS_PER_ATTEMPT: usize = 128;
 const MAX_ROUND_ROWS_PER_ATTEMPT: usize = 8;
 const MAX_STORE_BYTES: usize = 64 * 1024 * 1024;
-const MAX_AUTHORITIES: usize = 128;
-const MAX_OPERATIONS_PER_ATTEMPT: usize = 256;
-const MAX_OPERATIONS: usize = 2048;
-const MAX_OPERATION_RECORD_BYTES: usize = 16 * 1024;
-const MAX_BATCHES_PER_ATTEMPT: usize = 128;
-const MAX_DENIED_CALLS_PER_ATTEMPT: usize = 128;
-const MAX_DENIED_CALLS: usize = 2048;
+pub const MAX_AUTHORITIES: usize = 128;
+pub const MAX_OPERATIONS_PER_ATTEMPT: usize = 256;
+pub const MAX_OPERATIONS: usize = 2048;
+pub const MAX_OPERATION_RECORD_BYTES: usize = 16 * 1024;
+pub const MAX_BATCHES_PER_ATTEMPT: usize = 128;
+pub const MAX_DENIED_CALLS_PER_ATTEMPT: usize = 128;
+pub const MAX_DENIED_CALLS: usize = 2048;
 
 const V1_KEYS: &[&str] = &[
     "schema_version",

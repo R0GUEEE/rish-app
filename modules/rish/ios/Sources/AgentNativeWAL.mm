@@ -65,29 +65,6 @@ static NSArray<NSString *> *DSHAgentWALV1Keys(void) {
   return keys;
 }
 
-static NSArray<NSString *> *DSHAgentWALV2Keys(void) {
-  static NSArray<NSString *> *keys;
-  static dispatch_once_t onceToken;
-  dispatch_once(&onceToken, ^{
-    keys = @[
-      @"schema_version",
-      @"generation",
-      @"authorities",
-      @"operations",
-      @"operation_results",
-      @"transcripts",
-      @"rounds",
-      @"ledger",
-      @"reservations",
-      @"cleanup",
-      @"dispatch",
-      @"batches",
-      @"denied_calls",
-    ];
-  });
-  return keys;
-}
-
 static BOOL DSHAgentIsBooleanNumber(id value) {
   return [value isKindOfClass:NSNumber.class] &&
       CFGetTypeID((__bridge CFTypeRef)value) == CFBooleanGetTypeID();
@@ -1480,90 +1457,6 @@ static NSDictionary *DSHAgentWALCoreEnvironment(NSDictionary *authority) {
   };
 }
 
-static BOOL DSHAgentWALReferenceShape(NSDictionary *reference) {
-  return DSHAgentWALCoreValid(@"reference", reference, nil);
-}
-
-static BOOL DSHAgentWALMessageShape(NSDictionary *message) {
-  return DSHAgentWALCoreValid(@"message", message, nil);
-}
-
-static BOOL DSHAgentWALReservationShape(NSDictionary *reservation) {
-  return DSHAgentWALCoreValid(@"reservation", reservation, nil);
-}
-
-static BOOL DSHAgentWALCleanupShape(NSDictionary *cleanup) {
-  return DSHAgentWALCoreValid(@"cleanup", cleanup, nil);
-}
-
-static BOOL DSHAgentWALDispatchShape(NSDictionary *dispatch) {
-  return DSHAgentWALCoreValid(@"dispatch", dispatch, nil);
-}
-
-static BOOL DSHAgentWALWritePriorShape(NSDictionary *prior) {
-  return DSHAgentWALCoreValid(@"write_prior", prior, nil);
-}
-
-static BOOL DSHAgentWALOpaqueCallID(id value) {
-  return DSHAgentWALCoreValid(@"opaque_call_id", value, nil);
-}
-
-static BOOL DSHAgentWALAuthorityShape(NSDictionary *authority) {
-  return DSHAgentWALCoreValid(@"authority", authority,
-                              DSHAgentWALCoreEnvironment(authority));
-}
-
-static NSSet<NSString *> *DSHAgentWALOperationKinds(void) {
-  static NSSet<NSString *> *values;
-  static dispatch_once_t onceToken;
-  dispatch_once(&onceToken, ^{
-    values = [NSSet setWithArray:@[
-      @"prepare_agent_attempt", @"complete_agent_round_v2",
-      @"prepare_agent_tool_batch", @"bind_agent_approval",
-      @"execute_agent_tool", @"cancel_agent_attempt", @"recover_agent_attempt",
-      @"finalize_agent_attempt", @"discard_agent_attempt",
-      @"interrupt_agent_attempt",
-    ]];
-  });
-  return values;
-}
-
-static NSSet<NSString *> *DSHAgentWALOperationResultStatuses(void) {
-  static NSSet<NSString *> *values;
-  static dispatch_once_t onceToken;
-  dispatch_once(&onceToken, ^{
-    values = [NSSet setWithArray:@[
-      @"prepared", @"already_prepared", @"not_agent", @"completed", @"in_flight",
-      @"failed_retryable", @"failed", @"cancel_requested", @"cancelled", @"unknown",
-      @"ambiguous", @"rejected", @"bound", @"already_bound", @"running",
-      @"denied", @"retryable", @"resumed", @"manual_reconciliation", @"terminal",
-      @"discarded", @"already_missing", @"pending", @"conflict",
-    ]];
-  });
-  return values;
-}
-
-static BOOL DSHAgentWALKnownOperationResultStatus(NSString *status) {
-  return [DSHAgentWALOperationResultStatuses() containsObject:status] ||
-      [status isEqualToString:@"settled"] ||
-      [status isEqualToString:@"already_terminal"];
-}
-
-static BOOL DSHAgentWALOperationResultStatusAllowed(NSString *operationKind,
-                                                    NSString *status) {
-  if ([status isEqualToString:@"settled"]) {
-    return [operationKind isEqualToString:@"cancel_agent_attempt"];
-  }
-  if ([status isEqualToString:@"already_terminal"]) {
-    return [operationKind isEqualToString:@"finalize_agent_attempt"];
-  }
-  return [DSHAgentWALOperationResultStatuses() containsObject:status];
-}
-
-static BOOL DSHAgentWALResultReferenceShape(NSDictionary *reference) {
-  return DSHAgentWALCoreValid(@"result_reference", reference, nil);
-}
-
 static BOOL DSHAgentWALContainsForbiddenSafeKey(id value) {
   static NSSet<NSString *> *forbidden;
   static dispatch_once_t onceToken;
@@ -1587,53 +1480,8 @@ static BOOL DSHAgentWALContainsForbiddenSafeKey(id value) {
   return NO;
 }
 
-static NSString *DSHAgentWALResultKindForOperationKind(NSString *operationKind) {
-  if ([operationKind isEqualToString:@"complete_agent_round_v2"]) {
-    return @"complete_agent_round_v2";
-  }
-  return operationKind;
-}
-
-static BOOL DSHAgentWALSafeResultShape(NSDictionary *safeResult,
-                                       NSString *operationKind,
-                                       NSString *operationID,
-                                       NSString *resultStatus) {
-  if (!DSHAgentExactDictionaryKeys(safeResult, @[
-        @"schema_version", @"result_kind", @"result",
-      ]) || ![safeResult[@"schema_version"] isEqual:@2] ||
-      ![safeResult[@"result_kind"]
-          isEqualToString:DSHAgentWALResultKindForOperationKind(operationKind)] ||
-      ![safeResult[@"result"] isKindOfClass:NSDictionary.class] ||
-      DSHAgentWALContainsForbiddenSafeKey(safeResult)) return NO;
-  NSDictionary *result = safeResult[@"result"];
-  return [result[@"schema_version"] isEqual:@2] &&
-      [result[@"operation_id"] isEqual:operationID] &&
-      [result[@"status"] isEqual:resultStatus] &&
-      DSHAgentCanonicalUUID(result[@"operation_id"]);
-}
-
-static BOOL DSHAgentWALOperationShape(NSDictionary *operation) {
-  return DSHAgentWALCoreValid(@"operation", operation, nil);
-}
-
-static BOOL DSHAgentWALOperationResultShape(NSDictionary *snapshot) {
-  return DSHAgentWALCoreValid(@"operation_result", snapshot, nil);
-}
-
-static BOOL DSHAgentWALBatchShapeV1(NSDictionary *batch) {
-  return DSHAgentWALCoreValid(@"batch_v1", batch, nil);
-}
-
 static BOOL DSHAgentWALBatchShapeV2(NSDictionary *batch) {
   return DSHAgentWALCoreValid(@"batch_v2", batch, nil);
-}
-
-static BOOL DSHAgentWALToolReceiptShape(NSDictionary *receipt) {
-  return DSHAgentWALCoreValid(@"tool_receipt", receipt, nil);
-}
-
-static BOOL DSHAgentWALDeniedCallShape(NSDictionary *row) {
-  return DSHAgentWALCoreValid(@"denied_call", row, nil);
 }
 
 // The core judges every V3 rule and hands back the schema-2 projection; the
@@ -1854,29 +1702,6 @@ static NSString *DSHAgentFindDispatchState(NSArray *dispatchRows,
 - (BOOL)faultAtStage:(NSString *)stage error:(NSError **)error;
 @end
 
-static NSDictionary *DSHAgentWALFindOperation(NSArray *operations,
-                                              NSString *operationID) {
-  for (NSDictionary *operation in operations) {
-    if ([operation[@"operation_id"] isEqual:operationID]) return operation;
-  }
-  return nil;
-}
-
-static NSDictionary *DSHAgentWALFindOperationResult(NSArray *results,
-                                                    NSString *operationID) {
-  for (NSDictionary *result in results) {
-    if ([result[@"operation_id"] isEqual:operationID]) return result;
-  }
-  return nil;
-}
-
-static BOOL DSHAgentWALCanonicalEqual(id left, id right) {
-  NSError *error = nil;
-  NSData *leftBytes = DSHAgentCanonicalJSON(left, &error);
-  NSData *rightBytes = DSHAgentCanonicalJSON(right, &error);
-  return leftBytes != nil && rightBytes != nil && [leftBytes isEqual:rightBytes];
-}
-
 static BOOL DSHAgentWALCompactAcknowledgedEvidence(NSMutableDictionary *state) {
   NSMutableSet *acknowledgedAttempts = [NSMutableSet set];
   for (NSDictionary *cleanup in state[@"cleanup"]) {
@@ -1953,203 +1778,97 @@ static BOOL DSHAgentWALCompactAcknowledgedEvidence(NSMutableDictionary *state) {
   return changed;
 }
 
-static NSString *DSHAgentWALRequestSHA(NSString *operationKind,
-                                      NSDictionary *request,
-                                      NSError **error) {
-  return DSHAgentHJ(@"agent-operation-request", @{
-    @"operation_kind" : operationKind,
-    @"request" : request,
-  }, error);
-}
+// MARK: - the operation relation
+//
+// start, query and commit — and the three records that share the same
+// transaction — are decided by the shared core over
+// `rish_agent_wal_operation_reduce`. This side keeps the file, the
+// descriptors, the lock, the transaction and the clock, and applies the
+// returned change set only inside a transaction it has written and confirmed.
+// The clock is read once per command rather than only on the paths that use
+// it; the WAL's clock is a plain wall clock in production and a constant in
+// every test that injects one.
 
-static NSDictionary *DSHAgentWALMakeOperationResult(
-    NSString *operationID,
-    NSString *operationKind,
-    NSString *resultStatus,
-    NSDictionary *safeResult,
-    NSString *timestamp,
-    NSError **error) {
-  if (!DSHAgentWALSafeResultShape(safeResult, operationKind, operationID,
-                                  resultStatus)) {
-    DSHSetAgentNativeStoreError(error, DSHAgentNativeStoreErrorInvalidArgument);
+static NSDictionary *DSHAgentWALOperationReduce(NSString *op, id state,
+                                                NSDictionary *arguments,
+                                                NSString *timestamp,
+                                                NSDictionary *snapshot) {
+  NSMutableDictionary *envelope = [@{
+    @"op" : op,
+    @"state" : state ?: NSNull.null,
+    @"arguments" : arguments ?: @{},
+  } mutableCopy];
+  if (timestamp != nil) envelope[@"timestamp"] = timestamp;
+  if (snapshot != nil) envelope[@"snapshot"] = snapshot;
+  NSData *bytes = [NSJSONSerialization dataWithJSONObject:envelope options:0
+                                                    error:nil];
+  if (bytes == nil) return nil;
+  char *raw = rish_agent_wal_operation_reduce((const char *)bytes.bytes,
+                                              bytes.length);
+  if (raw == NULL) return nil;
+  NSData *replyBytes = [NSData dataWithBytes:raw length:strlen(raw)];
+  rish_agent_string_free(raw);
+  id reply = [NSJSONSerialization JSONObjectWithData:replyBytes options:0
+                                               error:nil];
+  if (![reply isKindOfClass:NSDictionary.class] ||
+      ![reply[@"ok"] isEqual:@YES]) {
     return nil;
   }
-  NSData *resultBytes = DSHAgentCanonicalJSON(safeResult, error);
-  NSString *resultSHA = DSHAgentHJ(@"agent-operation-result", @{
-    @"operation_kind" : operationKind,
-    @"result_status" : resultStatus,
-    @"result" : safeResult,
-  }, error);
-  if (resultBytes == nil || resultBytes.length == 0 ||
-      resultBytes.length > DSHAgentNativeWALMaxOperationResultBytes ||
-      resultSHA == nil) {
-    DSHSetAgentNativeStoreError(error,
-        resultBytes != nil && resultBytes.length >
-            DSHAgentNativeWALMaxOperationResultBytes
-            ? DSHAgentNativeStoreErrorCapacity
-            : DSHAgentNativeStoreErrorInvalidArgument);
-    return nil;
-  }
-  NSDictionary *snapshot = @{
-    @"schema_version" : @2,
-    @"operation_id" : operationID,
-    @"operation_kind" : operationKind,
-    @"result_status" : resultStatus,
-    @"result_sha256" : resultSHA,
-    @"result_bytes" : @(resultBytes.length),
-    @"result" : safeResult,
-    @"created_at" : timestamp,
-  };
-  if (!DSHAgentWALOperationResultShape(snapshot)) {
-    DSHSetAgentNativeStoreError(error, DSHAgentNativeStoreErrorInvalidArgument);
-    return nil;
-  }
-  return snapshot;
+  return reply;
 }
 
-static NSDictionary *DSHAgentWALReplayEnvelope(NSDictionary *operation,
-                                               NSDictionary *snapshot) {
-  if (snapshot == nil) {
-    return @{
-      @"schema_version" : @2,
-      @"status" : @"started",
-      @"request_sha256" : operation[@"request_sha256"],
-      @"record" : operation,
-      @"result" : NSNull.null,
-    };
+/// Applies one reply inside the caller's transaction. Returns YES when the
+/// transaction must commit; a replay is the explicit no-op result, so it
+/// leaves the mutation error nil and consumes no generation.
+static BOOL DSHAgentWALApplyOperationReply(NSMutableDictionary *state,
+                                           NSDictionary *reply,
+                                           NSDictionary *__strong *output,
+                                           NSError **error) {
+  if (reply == nil) {
+    DSHSetAgentNativeStoreError(error, DSHAgentNativeStoreErrorCorrupt);
+    return NO;
   }
-  return @{
-    @"schema_version" : @2,
-    @"status" : @"replayed",
-    @"request_sha256" : operation[@"request_sha256"],
-    @"record" : operation,
-    @"result" : snapshot[@"result"],
-  };
-}
-
-static NSDictionary *DSHAgentWALStartValidatedOperation(
-    DSHAgentNativeWAL *wal,
-    NSString *operationKind,
-    NSString *operationID,
-    NSString *requestSHA,
-    NSString *taskId,
-    NSString *attemptId,
-    NSNumber *authorityRevision,
-    NSError **error) {
-  __block NSDictionary *output = nil;
-  BOOL committed = [wal performAtomicTransaction:^BOOL(
-      NSMutableDictionary *state, NSError **mutationError) {
-    NSDictionary *existing = DSHAgentWALFindOperation(state[@"operations"],
-                                                       operationID);
-    if (existing != nil) {
-      if (![existing[@"request_sha256"] isEqual:requestSHA] ||
-          ![existing[@"operation_kind"] isEqual:operationKind] ||
-          ![existing[@"task_id"] isEqual:taskId] ||
-          ![existing[@"attempt_id"] isEqual:attemptId] ||
-          ![existing[@"authority_revision"] isEqual:authorityRevision]) {
-        DSHSetAgentNativeStoreError(mutationError,
-                                    DSHAgentNativeStoreErrorConflict);
-        return NO;
-      }
-      NSDictionary *snapshot = DSHAgentWALFindOperationResult(
-          state[@"operation_results"], operationID);
-      output = DSHAgentWALReplayEnvelope(existing, snapshot);
-      return NO;
-    }
-    NSUInteger attemptCount = 0;
-    for (NSDictionary *candidate in state[@"operations"]) {
-      if ([candidate[@"attempt_id"] isEqual:attemptId]) attemptCount += 1;
-    }
-    if (attemptCount >= DSHAgentNativeWALMaxOperationsPerAttempt ||
-        [(NSArray *)state[@"operations"] count] >=
-            DSHAgentNativeWALMaxOperations) {
-      DSHAgentWALCompactAcknowledgedEvidence(state);
-      attemptCount = 0;
-      for (NSDictionary *candidate in state[@"operations"]) {
-        if ([candidate[@"attempt_id"] isEqual:attemptId]) attemptCount += 1;
-      }
-      if (attemptCount >= DSHAgentNativeWALMaxOperationsPerAttempt ||
-          [(NSArray *)state[@"operations"] count] >=
-              DSHAgentNativeWALMaxOperations) {
-        DSHSetAgentNativeStoreError(mutationError,
-                                    DSHAgentNativeStoreErrorCapacity);
-        return NO;
-      }
-    }
-    NSString *timestamp = [wal currentTimestamp];
-    NSDictionary *record = @{
-      @"schema_version" : @2,
-      @"operation_id" : operationID,
-      @"operation_kind" : operationKind,
-      @"request_sha256" : requestSHA,
-      @"task_id" : taskId,
-      @"attempt_id" : attemptId,
-      @"result_ref" : @{ @"schema_version" : @2, @"kind" : @"none" },
-      @"state" : @"started",
-      @"result_status" : @"pending",
-      @"result_revision" : NSNull.null,
-      @"result_snapshot_ref" : NSNull.null,
-      @"authority_revision" : authorityRevision,
-      @"created_at" : timestamp,
-      @"updated_at" : timestamp,
-    };
-    NSError *bytesError = nil;
-    NSData *recordBytes = DSHAgentCanonicalJSON(record, &bytesError);
-    if (!DSHAgentWALOperationShape(record) || recordBytes == nil ||
-        recordBytes.length > DSHAgentNativeWALMaxOperationRecordBytes) {
-      DSHSetAgentNativeStoreError(mutationError,
-          recordBytes != nil && recordBytes.length >
-              DSHAgentNativeWALMaxOperationRecordBytes
-              ? DSHAgentNativeStoreErrorCapacity
-              : DSHAgentNativeStoreErrorInvalidArgument);
-      return NO;
-    }
-    NSMutableArray *operations = [state[@"operations"] mutableCopy];
-    [operations addObject:record];
-    state[@"operations"] = operations;
-    output = DSHAgentWALReplayEnvelope(record, nil);
+  NSString *result = reply[@"result"];
+  if ([result isEqualToString:@"commit"]) {
+    NSDictionary *changes = reply[@"changes"];
+    for (NSString *key in changes) state[key] = changes[key];
+    if (output != nullptr) *output = reply[@"output"];
     return YES;
-  } error:error];
+  }
+  if ([result isEqualToString:@"replay"]) {
+    if (output != nullptr) *output = reply[@"output"];
+    return NO;
+  }
+  DSHSetAgentNativeStoreError(
+      error, (DSHAgentNativeStoreErrorCode)[reply[@"error"] integerValue]);
+  return NO;
+}
+
+static NSDictionary *DSHAgentWALFinishOperation(BOOL committed,
+                                                NSDictionary *output,
+                                                NSError **error) {
   if (!committed && output != nil && (error == nullptr || *error == nil)) {
     return DSHAgentImmutableJSONCopy(output, error);
   }
   return committed ? DSHAgentImmutableJSONCopy(output, error) : nil;
 }
 
-static BOOL DSHAgentWALTargetIdentity(NSDictionary *target,
-                                      NSString *taskId,
-                                      NSString *attemptId) {
-  if (![target isKindOfClass:NSDictionary.class] ||
-      ![target[@"schema_version"] isEqual:@2] ||
-      ![target[@"task_id"] isEqual:taskId] ||
-      ![target[@"attempt_id"] isEqual:attemptId] ||
-      !DSHAgentCanonicalUUID(taskId) || !DSHAgentCanonicalUUID(attemptId) ||
-      ![target[@"kind"] isKindOfClass:NSString.class]) return NO;
-  NSString *kind = target[@"kind"];
-  if ([kind isEqualToString:@"attempt"]) {
-    return DSHAgentExactDictionaryKeys(target, @[
-      @"schema_version", @"kind", @"task_id", @"attempt_id",
-    ]);
+static NSDictionary *DSHAgentWALPerformOperation(DSHAgentNativeWAL *wal,
+                                                 NSString *op,
+                                                 NSDictionary *arguments,
+                                                 NSError **error) {
+  if (wal == nil) {
+    DSHSetAgentNativeStoreError(error, DSHAgentNativeStoreErrorInvalidArgument);
+    return nil;
   }
-  if (![kind isEqualToString:@"round"] && ![kind isEqualToString:@"tool"]) {
-    return NO;
-  }
-  NSMutableArray<NSString *> *keys = [@[
-    @"schema_version", @"kind", @"task_id", @"attempt_id", @"round_id",
-    @"round_index",
-  ] mutableCopy];
-  if (!DSHAgentCanonicalUUID(target[@"round_id"]) ||
-      !DSHAgentSafeInteger(target[@"round_index"], 7, YES)) return NO;
-  if ([kind isEqualToString:@"round"]) {
-    return DSHAgentExactDictionaryKeys(target, keys);
-  }
-  [keys addObjectsFromArray:@[
-    @"call_index", @"call_id", @"idempotency_key",
-  ]];
-  return DSHAgentExactDictionaryKeys(target, keys) &&
-      DSHAgentSafeInteger(target[@"call_index"], 15, YES) &&
-      DSHAgentWALOpaqueCallID(target[@"call_id"]) &&
-      DSHAgentCanonicalSHA256(target[@"idempotency_key"]);
+  __block NSDictionary *output = nil;
+  BOOL committed = [wal performAtomicTransaction:^BOOL(
+      NSMutableDictionary *state, NSError **mutationError) {
+    NSDictionary *reply = DSHAgentWALOperationReduce(
+        op, state, arguments, [wal currentTimestamp], nil);
+    return DSHAgentWALApplyOperationReply(state, reply, &output, mutationError);
+  } error:error];
+  return DSHAgentWALFinishOperation(committed, output, error);
 }
 
 NSDictionary *DSHAgentNativeWALStartOperation(
@@ -2162,24 +1881,13 @@ NSDictionary *DSHAgentNativeWALStartOperation(
     NSError **error) {
   NSError *copyError = nil;
   NSDictionary *safeRequest = DSHAgentImmutableJSONCopy(request, &copyError);
-  NSString *operationID = safeRequest[@"operation_id"];
-  if (wal == nil || ![DSHAgentWALOperationKinds() containsObject:operationKind] ||
-      ![safeRequest isKindOfClass:NSDictionary.class] ||
-      ![safeRequest[@"schema_version"] isEqual:@2] ||
-      !DSHAgentCanonicalUUID(operationID) || !DSHAgentCanonicalUUID(taskId) ||
-      !DSHAgentCanonicalUUID(attemptId) ||
-      ![safeRequest[@"task_id"] isEqual:taskId] ||
-      ![safeRequest[@"attempt_id"] isEqual:attemptId] ||
-      !DSHAgentSafeInteger(authorityRevision, DSHAgentMaximumSafeInteger, YES) ||
-      DSHAgentWALContainsForbiddenSafeKey(safeRequest)) {
-    DSHSetAgentNativeStoreError(error, DSHAgentNativeStoreErrorInvalidArgument);
-    return nil;
-  }
-  NSString *requestSHA = DSHAgentWALRequestSHA(operationKind, safeRequest, error);
-  if (requestSHA == nil) return nil;
-  return DSHAgentWALStartValidatedOperation(
-      wal, operationKind, operationID, requestSHA, taskId, attemptId,
-      authorityRevision, error);
+  return DSHAgentWALPerformOperation(wal, @"start", @{
+    @"operation_kind" : operationKind ?: NSNull.null,
+    @"request" : safeRequest ?: NSNull.null,
+    @"task_id" : taskId ?: NSNull.null,
+    @"attempt_id" : attemptId ?: NSNull.null,
+    @"authority_revision" : authorityRevision ?: NSNull.null,
+  }, error);
 }
 
 NSDictionary *DSHAgentNativeWALStartTargetOperation(
@@ -2194,41 +1902,14 @@ NSDictionary *DSHAgentNativeWALStartTargetOperation(
   NSError *copyError = nil;
   NSDictionary *safeRequest = DSHAgentImmutableJSONCopy(request, &copyError);
   NSDictionary *safeTarget = DSHAgentImmutableJSONCopy(target, &copyError);
-  NSArray<NSString *> *requestKeys = nil;
-  if ([operationKind isEqualToString:@"cancel_agent_attempt"]) {
-    requestKeys = @[
-      @"schema_version", @"operation_id", @"controller_cas",
-      @"committed_checkpoint", @"target", @"cancel_token",
-      @"expected_round_revision", @"expected_execution_revision",
-      @"expected_transcript", @"root",
-    ];
-  } else if ([operationKind isEqualToString:@"recover_agent_attempt"]) {
-    requestKeys = @[
-      @"schema_version", @"operation_id", @"controller_cas",
-      @"committed_checkpoint", @"target", @"action",
-      @"expected_round_revision", @"expected_execution_revision",
-      @"expected_transcript", @"root",
-    ];
-  }
-  NSString *operationID = safeRequest[@"operation_id"];
-  if (wal == nil || requestKeys == nil ||
-      ![safeRequest isKindOfClass:NSDictionary.class] ||
-      ![safeTarget isKindOfClass:NSDictionary.class] ||
-      !DSHAgentExactDictionaryKeys(safeRequest, requestKeys) ||
-      ![safeRequest[@"schema_version"] isEqual:@2] ||
-      !DSHAgentCanonicalUUID(operationID) ||
-      !DSHAgentWALCanonicalEqual(safeRequest[@"target"], safeTarget) ||
-      !DSHAgentWALTargetIdentity(safeTarget, taskId, attemptId) ||
-      !DSHAgentSafeInteger(authorityRevision, DSHAgentMaximumSafeInteger, YES) ||
-      DSHAgentWALContainsForbiddenSafeKey(safeRequest)) {
-    DSHSetAgentNativeStoreError(error, DSHAgentNativeStoreErrorInvalidArgument);
-    return nil;
-  }
-  NSString *requestSHA = DSHAgentWALRequestSHA(operationKind, safeRequest, error);
-  if (requestSHA == nil) return nil;
-  return DSHAgentWALStartValidatedOperation(
-      wal, operationKind, operationID, requestSHA, taskId, attemptId,
-      authorityRevision, error);
+  return DSHAgentWALPerformOperation(wal, @"start_target", @{
+    @"operation_kind" : operationKind ?: NSNull.null,
+    @"request" : safeRequest ?: NSNull.null,
+    @"target" : safeTarget ?: NSNull.null,
+    @"task_id" : taskId ?: NSNull.null,
+    @"attempt_id" : attemptId ?: NSNull.null,
+    @"authority_revision" : authorityRevision ?: NSNull.null,
+  }, error);
 }
 
 NSDictionary *DSHAgentNativeWALQueryOperation(
@@ -2238,35 +1919,86 @@ NSDictionary *DSHAgentNativeWALQueryOperation(
     NSString *taskId,
     NSString *attemptId,
     NSError **error) {
-  if (wal == nil || !DSHAgentCanonicalUUID(operationId) ||
-      !DSHAgentCanonicalSHA256(requestSHA256) ||
-      !DSHAgentCanonicalUUID(taskId) || !DSHAgentCanonicalUUID(attemptId)) {
+  if (wal == nil) {
     DSHSetAgentNativeStoreError(error, DSHAgentNativeStoreErrorInvalidArgument);
     return nil;
   }
   NSDictionary *state = [wal snapshotWithError:error];
   if (state == nil) return nil;
-  NSDictionary *operation = DSHAgentWALFindOperation(state[@"operations"],
-                                                     operationId);
-  if (operation == nil) return @{
-    @"schema_version" : @2,
-    @"status" : @"not_started",
-  };
-  if (![operation[@"request_sha256"] isEqual:requestSHA256] ||
-      ![operation[@"task_id"] isEqual:taskId] ||
-      ![operation[@"attempt_id"] isEqual:attemptId]) {
-    return @{
-      @"schema_version" : @2,
-      @"status" : @"conflict",
-      @"actual_request_sha256" : operation[@"request_sha256"],
-      @"actual_state" : operation[@"state"],
-    };
-  }
+  NSDictionary *reply = DSHAgentWALOperationReduce(@"query", state, @{
+    @"operation_id" : operationId ?: NSNull.null,
+    @"request_sha256" : requestSHA256 ?: NSNull.null,
+    @"task_id" : taskId ?: NSNull.null,
+    @"attempt_id" : attemptId ?: NSNull.null,
+  }, nil, nil);
+  NSDictionary *output = nil;
+  DSHAgentWALApplyOperationReply([NSMutableDictionary dictionary], reply,
+                                 &output, error);
+  return output == nil ? nil : DSHAgentImmutableJSONCopy(output, error);
+}
+
+static NSDictionary *DSHAgentWALCommitArguments(NSString *operationId,
+                                                NSString *requestSHA256,
+                                                NSString *taskId,
+                                                NSString *attemptId,
+                                                NSString *terminalState,
+                                                NSString *resultStatus,
+                                                NSDictionary *resultRef,
+                                                NSNumber *resultRevision,
+                                                NSDictionary *safeResult) {
+  NSError *copyError = nil;
+  NSDictionary *immutableRef = DSHAgentImmutableJSONCopy(resultRef, &copyError);
+  NSDictionary *immutableResult = DSHAgentImmutableJSONCopy(safeResult,
+                                                            &copyError);
+  BOOL nullRevision = resultRevision == nil ||
+      resultRevision == (id)NSNull.null;
   return @{
-    @"schema_version" : @2,
-    @"status" : @"found",
-    @"record" : operation,
+    @"operation_id" : operationId ?: NSNull.null,
+    @"request_sha256" : requestSHA256 ?: NSNull.null,
+    @"task_id" : taskId ?: NSNull.null,
+    @"attempt_id" : attemptId ?: NSNull.null,
+    @"terminal_state" : terminalState ?: NSNull.null,
+    @"result_status" : resultStatus ?: NSNull.null,
+    @"result_ref" : immutableRef ?: NSNull.null,
+    @"result_revision" : nullRevision ? NSNull.null : resultRevision,
+    @"safe_result" : immutableResult ?: NSNull.null,
   };
+}
+
+/// The commit is decided in two halves so the in-state variant can still let
+/// the fault hook refuse exactly where it used to: after the relation has
+/// settled that this is a fresh commit, and before anything is written.
+static NSDictionary *DSHAgentWALCommitInState(NSMutableDictionary *state,
+                                              DSHAgentNativeWAL *wal,
+                                              NSDictionary *arguments,
+                                              BOOL fault,
+                                              BOOL *changed,
+                                              NSError **error) {
+  NSDictionary *prepared = DSHAgentWALOperationReduce(
+      @"commit_prepare", state, arguments, [wal currentTimestamp], nil);
+  if (prepared == nil) {
+    DSHSetAgentNativeStoreError(error, DSHAgentNativeStoreErrorCorrupt);
+    return nil;
+  }
+  if (![prepared[@"result"] isEqualToString:@"proceed"]) {
+    NSDictionary *output = nil;
+    DSHAgentWALApplyOperationReply(state, prepared, &output, error);
+    return output;
+  }
+  if (changed != nullptr) *changed = YES;
+  if (fault && ![wal faultAtStage:@"wal.operation.before_result_commit"
+                            error:error]) {
+    return nil;
+  }
+  NSDictionary *applied = DSHAgentWALOperationReduce(
+      @"commit_apply", state, arguments, [wal currentTimestamp],
+      prepared[@"snapshot"]);
+  NSDictionary *output = nil;
+  if (!DSHAgentWALApplyOperationReply(state, applied, &output, error) &&
+      changed != nullptr) {
+    *changed = NO;
+  }
+  return output;
 }
 
 NSDictionary *DSHAgentNativeWALCommitOperationInState(
@@ -2282,113 +2014,14 @@ NSDictionary *DSHAgentNativeWALCommitOperationInState(
     NSNumber *resultRevision,
     NSDictionary *safeResult,
     NSError **error) {
-  NSSet *terminalStates = [NSSet setWithArray:@[
-    @"committed", @"rejected", @"conflict", @"unknown", @"ambiguous",
-  ]];
-  NSError *copyError = nil;
-  NSDictionary *immutableRef = DSHAgentImmutableJSONCopy(resultRef, &copyError);
-  NSDictionary *immutableResult = DSHAgentImmutableJSONCopy(safeResult, &copyError);
-  if (![state isKindOfClass:NSMutableDictionary.class] || wal == nil ||
-      !DSHAgentCanonicalUUID(operationId) ||
-      !DSHAgentCanonicalSHA256(requestSHA256) ||
-      !DSHAgentCanonicalUUID(taskId) || !DSHAgentCanonicalUUID(attemptId) ||
-      ![terminalStates containsObject:terminalState] ||
-      !DSHAgentWALKnownOperationResultStatus(resultStatus) ||
-      !DSHAgentWALResultReferenceShape(immutableRef) ||
-      !(resultRevision == nil || resultRevision == (id)NSNull.null ||
-        DSHAgentSafeInteger(resultRevision, DSHAgentMaximumSafeInteger, NO)) ||
-      ![immutableResult isKindOfClass:NSDictionary.class]) {
+  if (![state isKindOfClass:NSMutableDictionary.class] || wal == nil) {
     DSHSetAgentNativeStoreError(error, DSHAgentNativeStoreErrorInvalidArgument);
     return nil;
   }
-  BOOL none = [immutableRef[@"kind"] isEqualToString:@"none"];
-  BOOL nullRevision = resultRevision == nil || resultRevision == (id)NSNull.null;
-  if (([terminalState isEqualToString:@"committed"] &&
-       (none || nullRevision)) ||
-      (([terminalState isEqualToString:@"rejected"] ||
-        [terminalState isEqualToString:@"conflict"]) &&
-       (!none || !nullRevision)) ||
-      (([terminalState isEqualToString:@"unknown"] ||
-        [terminalState isEqualToString:@"ambiguous"]) &&
-       (none != nullRevision))) {
-    DSHSetAgentNativeStoreError(error, DSHAgentNativeStoreErrorInvalidArgument);
-    return nil;
-  }
-  NSMutableArray *operations = [state[@"operations"] mutableCopy];
-  NSUInteger operationIndex = NSNotFound;
-  NSDictionary *operation = nil;
-  for (NSUInteger index = 0; index < operations.count; index += 1) {
-    if ([operations[index][@"operation_id"] isEqual:operationId]) {
-      operationIndex = index;
-      operation = operations[index];
-      break;
-    }
-  }
-  if (operation == nil || ![operation[@"request_sha256"] isEqual:requestSHA256] ||
-      ![operation[@"task_id"] isEqual:taskId] ||
-      ![operation[@"attempt_id"] isEqual:attemptId] ||
-      !DSHAgentWALOperationResultStatusAllowed(operation[@"operation_kind"],
-                                               resultStatus)) {
-    DSHSetAgentNativeStoreError(error, operation == nil
-        ? DSHAgentNativeStoreErrorNotFound : DSHAgentNativeStoreErrorConflict);
-    return nil;
-  }
-  NSDictionary *snapshot = DSHAgentWALMakeOperationResult(
-      operationId, operation[@"operation_kind"], resultStatus,
-      immutableResult, [wal currentTimestamp], error);
-  if (snapshot == nil) return nil;
-  NSDictionary *existingSnapshot = DSHAgentWALFindOperationResult(
-      state[@"operation_results"], operationId);
-  if (![operation[@"state"] isEqualToString:@"started"]) {
-    NSNumber *normalizedRevision = nullRevision ? (id)NSNull.null : resultRevision;
-    if ([operation[@"state"] isEqual:terminalState] &&
-        [operation[@"result_status"] isEqual:resultStatus] &&
-        [operation[@"result_ref"] isEqual:immutableRef] &&
-        [operation[@"result_revision"] isEqual:normalizedRevision] &&
-        DSHAgentWALCanonicalEqual(existingSnapshot, snapshot)) {
-      return DSHAgentWALReplayEnvelope(operation, existingSnapshot);
-    }
-    DSHSetAgentNativeStoreError(error, DSHAgentNativeStoreErrorConflict);
-    return nil;
-  }
-  if (existingSnapshot != nil ||
-      ![wal faultAtStage:@"wal.operation.before_result_commit" error:error]) {
-    if (existingSnapshot != nil) {
-      DSHSetAgentNativeStoreError(error, DSHAgentNativeStoreErrorCorrupt);
-    }
-    return nil;
-  }
-  NSMutableDictionary *updated = [operation mutableCopy];
-  updated[@"state"] = terminalState;
-  updated[@"result_status"] = resultStatus;
-  updated[@"result_ref"] = immutableRef;
-  updated[@"result_revision"] = nullRevision ? (id)NSNull.null : resultRevision;
-  updated[@"result_snapshot_ref"] = @{
-    @"schema_version" : @2, @"operation_id" : operationId,
-    @"result_sha256" : snapshot[@"result_sha256"],
-    @"result_bytes" : snapshot[@"result_bytes"],
-  };
-  updated[@"updated_at"] = [wal currentTimestamp];
-  NSData *recordBytes = DSHAgentCanonicalJSON(updated, error);
-  if (!DSHAgentWALOperationShape(updated) || recordBytes == nil ||
-      recordBytes.length > DSHAgentNativeWALMaxOperationRecordBytes) {
-    DSHSetAgentNativeStoreError(error,
-        recordBytes != nil && recordBytes.length >
-            DSHAgentNativeWALMaxOperationRecordBytes
-            ? DSHAgentNativeStoreErrorCapacity
-            : DSHAgentNativeStoreErrorInvalidArgument);
-    return nil;
-  }
-  NSMutableArray *results = [state[@"operation_results"] mutableCopy];
-  if (results.count >= DSHAgentNativeWALMaxOperations) {
-    DSHSetAgentNativeStoreError(error, DSHAgentNativeStoreErrorCapacity);
-    return nil;
-  }
-  operations[operationIndex] = updated;
-  [results addObject:snapshot];
-  state[@"operations"] = operations;
-  state[@"operation_results"] = results;
-  return DSHAgentWALReplayEnvelope(updated, snapshot);
+  NSDictionary *arguments = DSHAgentWALCommitArguments(
+      operationId, requestSHA256, taskId, attemptId, terminalState,
+      resultStatus, resultRef, resultRevision, safeResult);
+  return DSHAgentWALCommitInState(state, wal, arguments, YES, nullptr, error);
 }
 
 NSDictionary *DSHAgentNativeWALCommitOperation(
@@ -2403,123 +2036,22 @@ NSDictionary *DSHAgentNativeWALCommitOperation(
     NSNumber *resultRevision,
     NSDictionary *safeResult,
     NSError **error) {
-  NSSet *terminalStates = [NSSet setWithArray:@[
-    @"committed", @"rejected", @"conflict", @"unknown", @"ambiguous",
-  ]];
-  NSError *copyError = nil;
-  NSDictionary *immutableRef = DSHAgentImmutableJSONCopy(resultRef, &copyError);
-  NSDictionary *immutableResult = DSHAgentImmutableJSONCopy(safeResult, &copyError);
-  if (wal == nil || !DSHAgentCanonicalUUID(operationId) ||
-      !DSHAgentCanonicalSHA256(requestSHA256) || !DSHAgentCanonicalUUID(taskId) ||
-      !DSHAgentCanonicalUUID(attemptId) ||
-      ![terminalStates containsObject:terminalState] ||
-      !DSHAgentWALKnownOperationResultStatus(resultStatus) ||
-      !DSHAgentWALResultReferenceShape(immutableRef) ||
-      !(resultRevision == nil || resultRevision == (id)NSNull.null ||
-        DSHAgentSafeInteger(resultRevision, DSHAgentMaximumSafeInteger, NO)) ||
-      ![immutableResult isKindOfClass:NSDictionary.class]) {
+  if (wal == nil) {
     DSHSetAgentNativeStoreError(error, DSHAgentNativeStoreErrorInvalidArgument);
     return nil;
   }
-  BOOL none = [immutableRef[@"kind"] isEqualToString:@"none"];
-  BOOL nullRevision = resultRevision == nil || resultRevision == (id)NSNull.null;
-  if (([terminalState isEqualToString:@"committed"] &&
-       (none || nullRevision)) ||
-      (([terminalState isEqualToString:@"rejected"] ||
-        [terminalState isEqualToString:@"conflict"]) &&
-       (!none || !nullRevision)) ||
-      (([terminalState isEqualToString:@"unknown"] ||
-        [terminalState isEqualToString:@"ambiguous"]) &&
-       (none != nullRevision))) {
-    DSHSetAgentNativeStoreError(error, DSHAgentNativeStoreErrorInvalidArgument);
-    return nil;
-  }
+  NSDictionary *arguments = DSHAgentWALCommitArguments(
+      operationId, requestSHA256, taskId, attemptId, terminalState,
+      resultStatus, resultRef, resultRevision, safeResult);
   __block NSDictionary *output = nil;
   BOOL committed = [wal performAtomicTransaction:^BOOL(
       NSMutableDictionary *state, NSError **mutationError) {
-    NSMutableArray *operations = [state[@"operations"] mutableCopy];
-    NSUInteger operationIndex = NSNotFound;
-    NSDictionary *operation = nil;
-    for (NSUInteger index = 0; index < operations.count; index += 1) {
-      if ([operations[index][@"operation_id"] isEqual:operationId]) {
-        operationIndex = index;
-        operation = operations[index];
-        break;
-      }
-    }
-    if (operation == nil || ![operation[@"request_sha256"] isEqual:requestSHA256] ||
-        ![operation[@"task_id"] isEqual:taskId] ||
-        ![operation[@"attempt_id"] isEqual:attemptId] ||
-        !DSHAgentWALOperationResultStatusAllowed(operation[@"operation_kind"],
-                                                 resultStatus)) {
-      DSHSetAgentNativeStoreError(mutationError,
-                                  operation == nil
-                                      ? DSHAgentNativeStoreErrorNotFound
-                                      : DSHAgentNativeStoreErrorConflict);
-      return NO;
-    }
-    NSDictionary *snapshot = DSHAgentWALMakeOperationResult(
-        operationId, operation[@"operation_kind"], resultStatus,
-        immutableResult, [wal currentTimestamp], mutationError);
-    if (snapshot == nil) return NO;
-    NSDictionary *existingSnapshot = DSHAgentWALFindOperationResult(
-        state[@"operation_results"], operationId);
-    if (![operation[@"state"] isEqualToString:@"started"]) {
-      NSNumber *normalizedRevision = nullRevision ? (id)NSNull.null : resultRevision;
-      if ([operation[@"state"] isEqual:terminalState] &&
-          [operation[@"result_status"] isEqual:resultStatus] &&
-          [operation[@"result_ref"] isEqual:immutableRef] &&
-          [operation[@"result_revision"] isEqual:normalizedRevision] &&
-          DSHAgentWALCanonicalEqual(existingSnapshot, snapshot)) {
-        output = DSHAgentWALReplayEnvelope(operation, existingSnapshot);
-        return NO;
-      }
-      DSHSetAgentNativeStoreError(mutationError, DSHAgentNativeStoreErrorConflict);
-      return NO;
-    }
-    if (existingSnapshot != nil) {
-      DSHSetAgentNativeStoreError(mutationError, DSHAgentNativeStoreErrorCorrupt);
-      return NO;
-    }
-    NSMutableDictionary *updated = [operation mutableCopy];
-    updated[@"state"] = terminalState;
-    updated[@"result_status"] = resultStatus;
-    updated[@"result_ref"] = immutableRef;
-    updated[@"result_revision"] = nullRevision ? (id)NSNull.null : resultRevision;
-    updated[@"result_snapshot_ref"] = @{
-      @"schema_version" : @2,
-      @"operation_id" : operationId,
-      @"result_sha256" : snapshot[@"result_sha256"],
-      @"result_bytes" : snapshot[@"result_bytes"],
-    };
-    updated[@"updated_at"] = [wal currentTimestamp];
-    NSError *recordBytesError = nil;
-    NSData *recordBytes = DSHAgentCanonicalJSON(updated, &recordBytesError);
-    if (!DSHAgentWALOperationShape(updated) || recordBytes == nil ||
-        recordBytes.length > DSHAgentNativeWALMaxOperationRecordBytes) {
-      DSHSetAgentNativeStoreError(mutationError,
-          recordBytes != nil && recordBytes.length >
-              DSHAgentNativeWALMaxOperationRecordBytes
-              ? DSHAgentNativeStoreErrorCapacity
-              : DSHAgentNativeStoreErrorInvalidArgument);
-      return NO;
-    }
-    operations[operationIndex] = updated;
-    NSMutableArray *results = [state[@"operation_results"] mutableCopy];
-    if (results.count >= DSHAgentNativeWALMaxOperations) {
-      DSHSetAgentNativeStoreError(mutationError, DSHAgentNativeStoreErrorCapacity);
-      return NO;
-    }
-    [results addObject:snapshot];
-    state[@"operations"] = operations;
-    state[@"operation_results"] = results;
-    output = DSHAgentWALReplayEnvelope(updated, snapshot);
-    return YES;
+    BOOL changed = NO;
+    output = DSHAgentWALCommitInState(state, wal, arguments, NO, &changed,
+                                      mutationError);
+    return changed;
   } error:error];
-  if (!committed && output != nil && (error == nullptr || *error == nil)) {
-    return DSHAgentImmutableJSONCopy(output, error);
-  }
-  return committed ? DSHAgentImmutableJSONCopy(output, error) : nil;
+  return DSHAgentWALFinishOperation(committed, output, error);
 }
 
 NSDictionary *DSHAgentNativeWALPrepareAuthorityOperation(
@@ -2529,162 +2061,18 @@ NSDictionary *DSHAgentNativeWALPrepareAuthorityOperation(
     NSDictionary *safeResult,
     NSError **error) {
   NSError *copyError = nil;
-  NSDictionary *immutableAuthority = DSHAgentImmutableJSONCopy(authority, &copyError);
-  NSDictionary *immutableRequest = DSHAgentImmutableJSONCopy(request, &copyError);
-  NSDictionary *immutableResult = DSHAgentImmutableJSONCopy(safeResult, &copyError);
-  NSString *operationID = immutableRequest[@"operation_id"];
-  NSString *taskID = immutableAuthority[@"task_id"];
-  NSString *attemptID = immutableAuthority[@"attempt_id"];
-  NSString *resultStatus = immutableResult[@"result"][@"status"];
-  if (wal == nil || !DSHAgentWALAuthorityShape(immutableAuthority) ||
-      ![immutableAuthority[@"authority_revision"] isEqual:@1] ||
-      ![immutableRequest[@"schema_version"] isEqual:@2] ||
-      !DSHAgentCanonicalUUID(operationID) ||
-      ![immutableRequest[@"task_id"] isEqual:taskID] ||
-      ![immutableRequest[@"attempt_id"] isEqual:attemptID] ||
-      ![immutableRequest[@"conversation_id"]
-          isEqual:immutableAuthority[@"conversation_id"]] ||
-      DSHAgentWALContainsForbiddenSafeKey(immutableRequest) ||
-      !DSHAgentWALOperationResultStatusAllowed(@"prepare_agent_attempt",
-                                               resultStatus) ||
-      !DSHAgentWALSafeResultShape(immutableResult, @"prepare_agent_attempt",
-                                  operationID, resultStatus)) {
-    DSHSetAgentNativeStoreError(error, DSHAgentNativeStoreErrorInvalidArgument);
-    return nil;
-  }
-  NSString *requestSHA = DSHAgentWALRequestSHA(@"prepare_agent_attempt",
-                                               immutableRequest, error);
-  if (requestSHA == nil) return nil;
-  __block NSDictionary *output = nil;
-  BOOL committed = [wal performAtomicTransaction:^BOOL(
-      NSMutableDictionary *state, NSError **mutationError) {
-    NSDictionary *existingOperation = DSHAgentWALFindOperation(
-        state[@"operations"], operationID);
-    if (existingOperation != nil) {
-      if (![existingOperation[@"request_sha256"] isEqual:requestSHA] ||
-          ![existingOperation[@"operation_kind"]
-              isEqualToString:@"prepare_agent_attempt"] ||
-          ![existingOperation[@"task_id"] isEqual:taskID] ||
-          ![existingOperation[@"attempt_id"] isEqual:attemptID]) {
-        DSHSetAgentNativeStoreError(mutationError,
-                                    DSHAgentNativeStoreErrorConflict);
-        return NO;
-      }
-      NSDictionary *snapshot = DSHAgentWALFindOperationResult(
-          state[@"operation_results"], operationID);
-      if (snapshot == nil) {
-        DSHSetAgentNativeStoreError(mutationError,
-                                    DSHAgentNativeStoreErrorPersistence);
-        return NO;
-      }
-      output = DSHAgentWALReplayEnvelope(existingOperation, snapshot);
-      return NO;
-    }
-    NSDictionary *existingAuthority = nil;
-    for (NSDictionary *candidate in state[@"authorities"]) {
-      if ([candidate[@"task_id"] isEqual:taskID] &&
-          [candidate[@"attempt_id"] isEqual:attemptID]) {
-        existingAuthority = candidate;
-        break;
-      }
-    }
-    if (existingAuthority != nil ||
-        [(NSArray *)state[@"authorities"] count] >=
-            DSHAgentNativeWALMaxAuthorities) {
-      DSHSetAgentNativeStoreError(mutationError,
-          existingAuthority != nil ? DSHAgentNativeStoreErrorConflict :
-                                     DSHAgentNativeStoreErrorCapacity);
-      return NO;
-    }
-    NSUInteger operationCount = 0;
-    for (NSDictionary *operation in state[@"operations"]) {
-      if ([operation[@"attempt_id"] isEqual:attemptID]) operationCount += 1;
-    }
-    if (operationCount >= DSHAgentNativeWALMaxOperationsPerAttempt ||
-        [(NSArray *)state[@"operations"] count] >=
-            DSHAgentNativeWALMaxOperations ||
-        [(NSArray *)state[@"operation_results"] count] >=
-            DSHAgentNativeWALMaxOperations) {
-      DSHSetAgentNativeStoreError(mutationError,
-                                  DSHAgentNativeStoreErrorCapacity);
-      return NO;
-    }
-    BOOL transcriptMatches = NO;
-    for (NSDictionary *transcript in state[@"transcripts"]) {
-      if ([transcript[@"transcript_ref"]
-              isEqual:immutableAuthority[@"transcript"][@"transcript_ref"]] &&
-          [transcript[@"attempt_id"] isEqual:attemptID] &&
-          [transcript[@"root_fingerprint_sha256"]
-              isEqual:immutableAuthority[@"root"][@"root_fingerprint_sha256"]] &&
-          [transcript[@"generation"]
-              isEqual:immutableAuthority[@"transcript"][@"generation"]] &&
-          [transcript[@"transcript_sha256"]
-              isEqual:immutableAuthority[@"transcript"][@"transcript_sha256"]] &&
-          [transcript[@"transcript_bytes"]
-              isEqual:immutableAuthority[@"transcript"][@"transcript_bytes"]]) {
-        transcriptMatches = YES;
-        break;
-      }
-    }
-    if (!transcriptMatches) {
-      DSHSetAgentNativeStoreError(mutationError,
-                                  DSHAgentNativeStoreErrorConflict);
-      return NO;
-    }
-    NSString *timestamp = [wal currentTimestamp];
-    NSDictionary *snapshot = DSHAgentWALMakeOperationResult(
-        operationID, @"prepare_agent_attempt", resultStatus, immutableResult,
-        timestamp, mutationError);
-    if (snapshot == nil) return NO;
-    NSDictionary *resultRef = @{
-      @"schema_version" : @2,
-      @"kind" : @"authority",
-      @"task_id" : taskID,
-      @"attempt_id" : attemptID,
-      @"authority_revision" : @1,
-    };
-    NSDictionary *operation = @{
-      @"schema_version" : @2,
-      @"operation_id" : operationID,
-      @"operation_kind" : @"prepare_agent_attempt",
-      @"request_sha256" : requestSHA,
-      @"task_id" : taskID,
-      @"attempt_id" : attemptID,
-      @"result_ref" : resultRef,
-      @"state" : @"committed",
-      @"result_status" : resultStatus,
-      @"result_revision" : @1,
-      @"result_snapshot_ref" : @{
-        @"schema_version" : @2,
-        @"operation_id" : operationID,
-        @"result_sha256" : snapshot[@"result_sha256"],
-        @"result_bytes" : snapshot[@"result_bytes"],
-      },
-      @"authority_revision" : @1,
-      @"created_at" : timestamp,
-      @"updated_at" : timestamp,
-    };
-    if (!DSHAgentWALOperationShape(operation)) {
-      DSHSetAgentNativeStoreError(mutationError,
-                                  DSHAgentNativeStoreErrorInvalidArgument);
-      return NO;
-    }
-    NSMutableArray *authorities = [state[@"authorities"] mutableCopy];
-    NSMutableArray *operations = [state[@"operations"] mutableCopy];
-    NSMutableArray *results = [state[@"operation_results"] mutableCopy];
-    [authorities addObject:immutableAuthority];
-    [operations addObject:operation];
-    [results addObject:snapshot];
-    state[@"authorities"] = authorities;
-    state[@"operations"] = operations;
-    state[@"operation_results"] = results;
-    output = DSHAgentWALReplayEnvelope(operation, snapshot);
-    return YES;
-  } error:error];
-  if (!committed && output != nil && (error == nullptr || *error == nil)) {
-    return DSHAgentImmutableJSONCopy(output, error);
-  }
-  return committed ? DSHAgentImmutableJSONCopy(output, error) : nil;
+  NSDictionary *immutableAuthority = DSHAgentImmutableJSONCopy(authority,
+                                                               &copyError);
+  NSDictionary *immutableRequest = DSHAgentImmutableJSONCopy(request,
+                                                              &copyError);
+  NSDictionary *immutableResult = DSHAgentImmutableJSONCopy(safeResult,
+                                                             &copyError);
+  return DSHAgentWALPerformOperation(wal, @"prepare_authority", @{
+    @"authority" : immutableAuthority ?: NSNull.null,
+    @"request" : immutableRequest ?: NSNull.null,
+    @"safe_result" : immutableResult ?: NSNull.null,
+    @"env" : DSHAgentWALCoreEnvironment(immutableAuthority) ?: NSNull.null,
+  }, error);
 }
 
 NSDictionary *DSHAgentNativeWALRecordBatch(DSHAgentNativeWAL *wal,
@@ -2692,123 +2080,20 @@ NSDictionary *DSHAgentNativeWALRecordBatch(DSHAgentNativeWAL *wal,
                                            NSError **error) {
   NSError *copyError = nil;
   NSDictionary *immutableBatch = DSHAgentImmutableJSONCopy(batch, &copyError);
-  if (wal == nil || !DSHAgentWALBatchShapeV2(immutableBatch)) {
-    DSHSetAgentNativeStoreError(error, DSHAgentNativeStoreErrorInvalidArgument);
-    return nil;
-  }
-  __block NSDictionary *output = nil;
-  BOOL committed = [wal performAtomicTransaction:^BOOL(
-      NSMutableDictionary *state, NSError **mutationError) {
-    NSMutableArray *batches = [state[@"batches"] mutableCopy];
-    NSUInteger attemptCount = 0;
-    for (NSDictionary *candidate in batches) {
-      if ([candidate[@"attempt_id"] isEqual:immutableBatch[@"attempt_id"]]) {
-        attemptCount += 1;
-      }
-      BOOL sameIdentity =
-          [candidate[@"task_id"] isEqual:immutableBatch[@"task_id"]] &&
-          [candidate[@"attempt_id"] isEqual:immutableBatch[@"attempt_id"]] &&
-          [candidate[@"round_id"] isEqual:immutableBatch[@"round_id"]] &&
-          [candidate[@"round_index"] isEqual:immutableBatch[@"round_index"]] &&
-          [candidate[@"batch_revision"]
-              isEqual:immutableBatch[@"batch_revision"]];
-      if (!sameIdentity) continue;
-      if (!DSHAgentWALCanonicalEqual(candidate, immutableBatch)) {
-        DSHSetAgentNativeStoreError(mutationError,
-                                    DSHAgentNativeStoreErrorConflict);
-        return NO;
-      }
-      output = candidate;
-      return NO;
-    }
-    if (attemptCount >= DSHAgentNativeWALMaxBatchesPerAttempt) {
-      DSHAgentWALCompactAcknowledgedEvidence(state);
-      attemptCount = 0;
-      for (NSDictionary *candidate in state[@"batches"]) {
-        if ([candidate[@"attempt_id"] isEqual:immutableBatch[@"attempt_id"]]) {
-          attemptCount += 1;
-        }
-      }
-      if (attemptCount >= DSHAgentNativeWALMaxBatchesPerAttempt) {
-        DSHSetAgentNativeStoreError(mutationError,
-                                    DSHAgentNativeStoreErrorCapacity);
-        return NO;
-      }
-      batches = [state[@"batches"] mutableCopy];
-    }
-    [batches addObject:immutableBatch];
-    state[@"batches"] = batches;
-    output = immutableBatch;
-    return YES;
-  } error:error];
-  if (!committed && output != nil && (error == nullptr || *error == nil)) {
-    return DSHAgentImmutableJSONCopy(output, error);
-  }
-  return committed ? DSHAgentImmutableJSONCopy(output, error) : nil;
+  return DSHAgentWALPerformOperation(wal, @"record_batch", @{
+    @"batch" : immutableBatch ?: NSNull.null,
+  }, error);
 }
 
 NSDictionary *DSHAgentNativeWALRecordDeniedCall(DSHAgentNativeWAL *wal,
                                                 NSDictionary *deniedCall,
                                                 NSError **error) {
   NSError *copyError = nil;
-  NSDictionary *immutableCall = DSHAgentImmutableJSONCopy(deniedCall, &copyError);
-  if (wal == nil || !DSHAgentWALDeniedCallShape(immutableCall)) {
-    DSHSetAgentNativeStoreError(error, DSHAgentNativeStoreErrorInvalidArgument);
-    return nil;
-  }
-  __block NSDictionary *output = nil;
-  BOOL committed = [wal performAtomicTransaction:^BOOL(
-      NSMutableDictionary *state, NSError **mutationError) {
-    NSMutableArray *denials = [state[@"denied_calls"] mutableCopy];
-    NSUInteger attemptCount = 0;
-    for (NSDictionary *candidate in denials) {
-      if ([candidate[@"attempt_id"] isEqual:immutableCall[@"attempt_id"]]) {
-        attemptCount += 1;
-      }
-      BOOL sameIdentity =
-          [candidate[@"task_id"] isEqual:immutableCall[@"task_id"]] &&
-          [candidate[@"attempt_id"] isEqual:immutableCall[@"attempt_id"]] &&
-          [candidate[@"round_id"] isEqual:immutableCall[@"round_id"]] &&
-          [candidate[@"round_index"] isEqual:immutableCall[@"round_index"]] &&
-          [candidate[@"call_index"] isEqual:immutableCall[@"call_index"]] &&
-          [candidate[@"call_id"] isEqual:immutableCall[@"call_id"]] &&
-          [candidate[@"arguments_sha256"]
-              isEqual:immutableCall[@"arguments_sha256"]];
-      if (!sameIdentity) continue;
-      if (!DSHAgentWALCanonicalEqual(candidate, immutableCall)) {
-        DSHSetAgentNativeStoreError(mutationError,
-                                    DSHAgentNativeStoreErrorConflict);
-        return NO;
-      }
-      output = candidate;
-      return NO;
-    }
-    if (attemptCount >= DSHAgentNativeWALMaxDeniedCallsPerAttempt ||
-        denials.count >= DSHAgentNativeWALMaxDeniedCalls) {
-      DSHAgentWALCompactAcknowledgedEvidence(state);
-      denials = [state[@"denied_calls"] mutableCopy];
-      attemptCount = 0;
-      for (NSDictionary *candidate in denials) {
-        if ([candidate[@"attempt_id"] isEqual:immutableCall[@"attempt_id"]]) {
-          attemptCount += 1;
-        }
-      }
-      if (attemptCount >= DSHAgentNativeWALMaxDeniedCallsPerAttempt ||
-          denials.count >= DSHAgentNativeWALMaxDeniedCalls) {
-        DSHSetAgentNativeStoreError(mutationError,
-                                    DSHAgentNativeStoreErrorCapacity);
-        return NO;
-      }
-    }
-    [denials addObject:immutableCall];
-    state[@"denied_calls"] = denials;
-    output = immutableCall;
-    return YES;
-  } error:error];
-  if (!committed && output != nil && (error == nullptr || *error == nil)) {
-    return DSHAgentImmutableJSONCopy(output, error);
-  }
-  return committed ? DSHAgentImmutableJSONCopy(output, error) : nil;
+  NSDictionary *immutableCall = DSHAgentImmutableJSONCopy(deniedCall,
+                                                           &copyError);
+  return DSHAgentWALPerformOperation(wal, @"record_denied_call", @{
+    @"denied_call" : immutableCall ?: NSNull.null,
+  }, error);
 }
 
 static NSData *DSHAgentWALVerifiedBytes;

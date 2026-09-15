@@ -85,6 +85,14 @@ char *rish_agent_prepared_attempt_reduce(const char *json, size_t json_length,
 /// operation_result, opaque_call_id.
 char *rish_agent_wal_state_reduce(const char *json, size_t json_length);
 
+/// One WAL operation-relation decision over
+/// {"op","state","arguments","timestamp"?,"snapshot"?}: start, start_target,
+/// query, commit_prepare, commit_apply, prepare_authority, record_batch,
+/// record_denied_call. The reply is {"result":"commit"|"replay"|"proceed"|
+/// "error", ...}; the host applies "changes" only once it has written and
+/// confirmed the transaction.
+char *rish_agent_wal_operation_reduce(const char *json, size_t json_length);
+
 /// One provider-round decision over {"op","request",...}: round_request,
 /// selector_request, selector_matches, result_shape, round_cas, locator_key,
 /// assistant_message, public_receipt, recovered_projection, context_bundle,

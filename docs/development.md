@@ -633,6 +633,29 @@ comes back by index and is asked again, so the error the loader reports is
 still the ledger validator's own. `AgentNativeWAL.mm` is down from 4,690 lines
 to about 3,570.
 
+Phase 11 moves the operation relation itself — start, query and commit, plus
+the attempt authority, the write batch and the durable denial that share its
+transaction. It is the first cut where the core decides a *transaction*
+rather than judging a row, so it was recorded before it was moved:
+`fixtures/wal-transaction-golden.json` holds 440 commands taken from the
+native implementation by running the whole suite with its entry points
+instrumented, each one a committed state, a command, the timestamps the clock
+handed out, and the answer and committed rows that followed.
+`crates/rish-agent-core/tests/wal_operations.rs` replays every one of them.
+Like `session-golden.json` it cannot be regenerated: the native decisions it
+records are gone.
+
+The transaction stays where it was. `wal_operations.rs` is pure: it reads the
+committed state and returns either a replay, an error, or the top-level
+arrays to replace, and the host applies them only inside a transaction it has
+written and confirmed. The commit is split in two halves so the in-state
+variant can still let its fault hook refuse exactly where it used to — after
+the relation has settled that this is a fresh commit and before anything is
+written; the golden's faulted step asserts precisely that. The one deliberate
+simplification is that the clock is now read once per command instead of only
+on the paths that consume it. `AgentNativeWAL.mm` is down to about 2,840
+lines, from 4,690 when phase 10 began.
+
 ### Device-only storage metadata
 
 The session store and the agent WAL require every pinned item to report
