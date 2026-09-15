@@ -8,6 +8,8 @@
 
 #import <TargetConditionals.h>
 
+#include "rish_agent_core.h"
+
 #include <errno.h>
 #include <fcntl.h>
 #include <limits.h>
@@ -919,183 +921,47 @@ NSString *DSHAgentIdempotencyKeyForLocator(NSDictionary *locator,
   }, error);
 }
 
+// What a tool is allowed to report was ~190 lines here and is also
+// `execution_ledger::feedback_string_valid` in the shared core, which the
+// ledger already applies to every stored row.  Two copies of the contract
+// between "a tool ran" and "the engine believes something" is one too many, so
+// this is now the way a host reaches that one — `tool_feedback` on the
+// WAL-state reducer.  An oversized report stays a capacity refusal, which a
+// caller recovers from differently than a malformed one.
 BOOL DSHAgentValidateNativeToolFeedbackString(NSString *feedbackJSON,
                                               NSError **error) {
-  NSString *feedbackText = nil;
-  if (!DSHAgentBoundedUTF8String(feedbackJSON,
-                                DSHAgentNativeWALMaxTranscriptBytes, YES,
-                                &feedbackText)) {
+  if (![feedbackJSON isKindOfClass:NSString.class]) {
     DSHSetAgentNativeStoreError(error, DSHAgentNativeStoreErrorInvalidArgument);
     return NO;
   }
-  NSData *bytes = [feedbackText dataUsingEncoding:NSUTF8StringEncoding];
-  NSError *decodeError = nil;
-  id object = [NSJSONSerialization JSONObjectWithData:bytes options:0 error:&decodeError];
-  NSError *canonicalError = nil;
-  NSData *canonical = DSHAgentCanonicalJSON(object, &canonicalError);
-  if (canonical == nil || ![canonical isEqualToData:bytes] ||
-      ![object isKindOfClass:NSDictionary.class] ||
-      !DSHAgentExactDictionaryKeys(object, @[
-        @"schema_version", @"name", @"outcome", @"payload",
-      ]) || !DSHAgentSafeInteger(object[@"schema_version"], 1, NO) ||
-      !DSHAgentBoundedUTF8String(object[@"name"], 64, NO, nullptr) ||
-      ![object[@"payload"] isKindOfClass:NSDictionary.class]) {
+  NSData *bytes = [NSJSONSerialization dataWithJSONObject:@{
+    @"op" : @"tool_feedback", @"value" : feedbackJSON,
+  } options:0 error:nil];
+  char *raw = bytes == nil ? NULL : rish_agent_wal_state_reduce(
+      (const char *)bytes.bytes, bytes.length);
+  if (raw == NULL) {
     DSHSetAgentNativeStoreError(error, DSHAgentNativeStoreErrorInvalidArgument);
     return NO;
   }
-  NSDictionary *feedback = object;
-  NSDictionary *payload = feedback[@"payload"];
-  NSString *name = feedback[@"name"];
-  NSString *outcome = feedback[@"outcome"];
-  if (DSHAgentIsRuntimeTool(name)) {
-    BOOL valid = DSHAgentRuntimeContractValid(@"runtime_feedback", feedbackText);
-    if (!valid) DSHSetAgentNativeStoreError(error, DSHAgentNativeStoreErrorInvalidArgument);
-    return valid;
-  }
-  if ([name isEqualToString:@"list_dir"] && bytes.length > 64 * 1024) {
-    DSHSetAgentNativeStoreError(error, DSHAgentNativeStoreErrorCapacity);
+  NSData *replyBytes = [NSData dataWithBytes:raw length:strlen(raw)];
+  rish_agent_string_free(raw);
+  id reply = [NSJSONSerialization JSONObjectWithData:replyBytes options:0
+                                                error:nil];
+  if (![reply isKindOfClass:NSDictionary.class]) {
+    DSHSetAgentNativeStoreError(error, DSHAgentNativeStoreErrorCorrupt);
     return NO;
   }
-  NSCharacterSet *invalidName = [[NSCharacterSet
-      characterSetWithCharactersInString:
-          @"abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_-"]
-      invertedSet];
-  if ([name rangeOfCharacterFromSet:invalidName].location != NSNotFound) {
-    DSHSetAgentNativeStoreError(error, DSHAgentNativeStoreErrorInvalidArgument);
-    return NO;
-  }
-  if ([outcome isEqualToString:@"failed"] ||
-      [outcome isEqualToString:@"denied"] ||
-      [outcome isEqualToString:@"cancelled"] ||
-      [outcome isEqualToString:@"ambiguous"]) {
-    // git_push failures may carry a value-free `reason` token next to the
-    // stable failure code (non_fast_forward, remote_moved, auth_failed, ...).
-    NSCharacterSet *reasonAlphabet = [[NSCharacterSet
-        characterSetWithCharactersInString:@"abcdefghijklmnopqrstuvwxyz_"]
-        invertedSet];
-    BOOL validReason = payload[@"reason"] == nil ||
-        (DSHAgentExactDictionaryKeys(payload, @[
-            @"schema_version", @"failure_code", @"reason",
-          ]) &&
-         DSHAgentBoundedUTF8String(payload[@"reason"], 64, NO, nullptr) &&
-         [(NSString *)payload[@"reason"] rangeOfCharacterFromSet:reasonAlphabet]
-             .location == NSNotFound);
-    BOOL validFailure = (payload[@"reason"] != nil
-        ? validReason
-        : DSHAgentExactDictionaryKeys(payload, @[
-            @"schema_version", @"failure_code",
-          ])) && DSHAgentSafeInteger(payload[@"schema_version"], 1, NO) &&
-        DSHAgentFailureCode(payload[@"failure_code"]);
-    if (!validFailure && [outcome isEqualToString:@"denied"] &&
-        [payload[@"failure_code"] isEqualToString:@"E_AGENT_DENIED_BY_USER"]) {
-      // User denials optionally carry a bounded model-directed message.
-      validFailure = DSHAgentExactDictionaryKeys(payload, @[
-        @"schema_version", @"failure_code", @"user_message",
-      ]) && DSHAgentSafeInteger(payload[@"schema_version"], 1, NO) &&
-        (payload[@"user_message"] == NSNull.null ||
-         DSHAgentBoundedUTF8String(payload[@"user_message"], 2000, YES,
-                                   nullptr));
-    }
-    if (!validFailure) {
-      DSHSetAgentNativeStoreError(error, DSHAgentNativeStoreErrorInvalidArgument);
-      return NO;
-    }
+  if ([reply[@"ok"] isEqual:@YES]) {
+    if (error != nullptr) *error = nil;
     return YES;
   }
-  if (![outcome isEqualToString:@"ok"] ||
-      !DSHAgentSafeInteger(payload[@"schema_version"], 1, NO)) {
-    DSHSetAgentNativeStoreError(error, DSHAgentNativeStoreErrorInvalidArgument);
-    return NO;
+  NSInteger code = [reply[@"error"] isKindOfClass:NSNumber.class]
+      ? [reply[@"error"] integerValue] : 0;
+  if (code < DSHAgentNativeStoreErrorInvalidArgument ||
+      code > DSHAgentNativeStoreErrorPersistence) {
+    code = DSHAgentNativeStoreErrorInvalidArgument;
   }
-  if ([name isEqualToString:@"list_dir"]) {
-    if (!DSHAgentExactDictionaryKeys(payload, @[
-          @"schema_version", @"entries", @"truncated",
-        ]) || ![payload[@"entries"] isKindOfClass:NSArray.class] ||
-        [(NSArray *)payload[@"entries"] count] > 1000 ||
-        ![payload[@"truncated"] isKindOfClass:NSNumber.class] ||
-        CFGetTypeID((__bridge CFTypeRef)payload[@"truncated"]) != CFBooleanGetTypeID()) {
-      DSHSetAgentNativeStoreError(error, DSHAgentNativeStoreErrorInvalidArgument);
-      return NO;
-    }
-    for (NSDictionary *entry in payload[@"entries"]) {
-      if (!DSHAgentExactDictionaryKeys(entry, @[
-            @"schema_version", @"name", @"type", @"revision",
-          ]) || !DSHAgentSafeInteger(entry[@"schema_version"], 1, NO) ||
-          !DSHAgentBoundedUTF8String(entry[@"name"], 4096, NO, nullptr) ||
-          (![entry[@"type"] isEqualToString:@"file"] &&
-           ![entry[@"type"] isEqualToString:@"directory"]) ||
-          !DSHAgentBoundedUTF8String(entry[@"revision"], 256, NO, nullptr)) {
-        DSHSetAgentNativeStoreError(error, DSHAgentNativeStoreErrorInvalidArgument);
-        return NO;
-      }
-    }
-    return YES;
-  }
-  if ([name isEqualToString:@"read_file"]) {
-    if (bytes.length > 64 * 1024) {
-      DSHSetAgentNativeStoreError(error, DSHAgentNativeStoreErrorCapacity);
-      return NO;
-    }
-    return DSHAgentExactDictionaryKeys(payload, payload[@"sha256"] == nil
-        ? @[@"schema_version", @"content", @"revision", @"truncated"]
-        : @[@"schema_version", @"content", @"revision", @"truncated", @"sha256"]) &&
-        (payload[@"sha256"] == nil || (DSHAgentCanonicalSHA256(payload[@"sha256"]) && ![payload[@"truncated"] boolValue])) && DSHAgentBoundedUTF8String(payload[@"content"], 64 * 1024, YES,
-                                           nullptr) &&
-        DSHAgentBoundedUTF8String(payload[@"revision"], 256, NO, nullptr) &&
-        [payload[@"truncated"] isKindOfClass:NSNumber.class] &&
-        CFGetTypeID((__bridge CFTypeRef)payload[@"truncated"]) == CFBooleanGetTypeID();
-  }
-  if ([name isEqualToString:@"write_file"]) {
-    return DSHAgentExactDictionaryKeys(payload, payload[@"sha256"] == nil
-        ? @[@"schema_version", @"bytes", @"revision"]
-        : @[@"schema_version", @"bytes", @"revision", @"sha256"]) &&
-        (payload[@"sha256"] == nil || DSHAgentCanonicalSHA256(payload[@"sha256"])) && DSHAgentSafeInteger(payload[@"bytes"], 32768, YES) &&
-        DSHAgentBoundedUTF8String(payload[@"revision"], 256, NO, nullptr);
-  }
-  if ([name isEqualToString:@"start_guest_cgi"] || [name isEqualToString:@"stop_guest_cgi"]) {
-    BOOL start = [name isEqualToString:@"start_guest_cgi"];
-    if (!DSHAgentExactDictionaryKeys(payload, start ? @[@"schema_version", @"status", @"service_id", @"url"] : @[@"schema_version", @"status", @"service_id"]) || !DSHAgentCanonicalUUID(payload[@"service_id"]) || ![payload[@"status"] isEqual:(start ? @"running" : @"stopped")]) return NO;
-    if (!start) return YES;
-    if (!DSHAgentBoundedUTF8String(payload[@"url"], 128, NO, nullptr)) return NO;
-    NSURLComponents *url = [NSURLComponents componentsWithString:payload[@"url"]];
-    return [url.scheme isEqual:@"http"] && [url.host isEqual:@"127.0.0.1"] && url.port.integerValue > 0 && url.port.integerValue <= 65535 && [url.path isEqual:@"/"] && url.user == nil && url.password == nil && url.query == nil && url.fragment == nil;
-  }
-  if ([name isEqualToString:@"git_status"]) {
-    return DSHAgentExactDictionaryKeys(payload, @[
-             @"schema_version", @"branch", @"head_oid", @"clean",
-             @"has_conflicts", @"entry_count",
-           ]) && (payload[@"branch"] == NSNull.null ||
-                  DSHAgentBoundedUTF8String(payload[@"branch"], 1024, NO, nullptr)) &&
-        (payload[@"head_oid"] == NSNull.null ||
-         DSHAgentBoundedUTF8String(payload[@"head_oid"], 128, NO, nullptr)) &&
-        [payload[@"clean"] isKindOfClass:NSNumber.class] &&
-        CFGetTypeID((__bridge CFTypeRef)payload[@"clean"]) == CFBooleanGetTypeID() &&
-        [payload[@"has_conflicts"] isKindOfClass:NSNumber.class] &&
-        CFGetTypeID((__bridge CFTypeRef)payload[@"has_conflicts"]) == CFBooleanGetTypeID() &&
-        DSHAgentSafeInteger(payload[@"entry_count"], 1000000, YES);
-  }
-  if ([name isEqualToString:@"git_commit"]) {
-    return DSHAgentExactDictionaryKeys(payload, @[
-             @"schema_version", @"commit_oid", @"tree_oid",
-           ]) && DSHAgentBoundedUTF8String(payload[@"commit_oid"], 128, NO, nullptr) &&
-        DSHAgentBoundedUTF8String(payload[@"tree_oid"], 128, NO, nullptr);
-  }
-  if ([name isEqualToString:@"git_push"]) {
-    // `remote_oid` is the OID the server advertised after the push was
-    // accepted; older feedback without it stays valid.
-    BOOL exactKeys = payload[@"remote_oid"] == nil
-        ? DSHAgentExactDictionaryKeys(payload, @[
-            @"schema_version", @"remote", @"remote_ref", @"pushed_oid",
-          ])
-        : DSHAgentExactDictionaryKeys(payload, @[
-            @"schema_version", @"remote", @"remote_ref", @"pushed_oid",
-            @"remote_oid",
-          ]) && DSHAgentBoundedUTF8String(payload[@"remote_oid"], 128, NO, nullptr);
-    return exactKeys && [payload[@"remote"] isEqualToString:@"origin"] &&
-        DSHAgentBoundedUTF8String(payload[@"remote_ref"], 256, NO, nullptr) &&
-        DSHAgentBoundedUTF8String(payload[@"pushed_oid"], 128, NO, nullptr);
-  }
-  DSHSetAgentNativeStoreError(error, DSHAgentNativeStoreErrorInvalidArgument);
+  DSHSetAgentNativeStoreError(error, (DSHAgentNativeStoreErrorCode)code);
   return NO;
 }
 
@@ -1414,7 +1280,6 @@ static NSMutableDictionary *DSHAgentFreshWALState(void) {
   } mutableCopy];
 }
 
-#include "rish_agent_core.h"
 
 // The stored row shapes live in the shared core (modules/rish/core,
 // `rish_agent_wal_state_reduce`). This side keeps the file, the descriptors,

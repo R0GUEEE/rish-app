@@ -82,7 +82,7 @@ char *rish_agent_prepared_attempt_reduce(const char *json, size_t json_length,
 /// Validates one stored WAL row over {"op","value","env"?}: reference,
 /// message, reservation, cleanup, dispatch, write_prior, policy, registry,
 /// authority, result_reference, snapshot_reference, operation,
-/// operation_result, opaque_call_id.
+/// operation_result, opaque_call_id, tool_feedback.
 char *rish_agent_wal_state_reduce(const char *json, size_t json_length);
 
 /// One WAL operation-relation decision over

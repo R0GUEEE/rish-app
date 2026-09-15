@@ -945,6 +945,17 @@ fn reduce_json_inner(input: &str) -> Result<Value, crate::store::StoreError> {
     if let Some(result) = crate::runtime_tools::reduce_contract(op, value, get(&envelope, "name")) {
         return Ok(result);
     }
+    // What a tool is allowed to report. The rule is `feedback_string_valid`,
+    // which the ledger already applies to every stored row; this op is how a
+    // host reaches it, so an executor and a stored row cannot disagree about
+    // what a result may say. It answers through the error code rather than a
+    // `valid` flag because an oversized report is a capacity refusal, which a
+    // caller recovers from differently than a malformed one.
+    if op == "tool_feedback" {
+        let text = value.as_str().ok_or(StoreError::InvalidArgument)?;
+        crate::execution_ledger::feedback_string_valid(text)?;
+        return Ok(json!({ "valid": true }));
+    }
     let valid = match op {
         "reference" => reference_shape(Some(value)),
         "root" => root_full(Some(value)),

@@ -944,6 +944,27 @@ Nothing recomputes a stored preview and compares it, so this is not a
 compatibility change: an old receipt keeps the text it was written with, and
 the preview's shape is unchanged.
 
+### What a tool is allowed to report, once
+
+`DSHAgentValidateNativeToolFeedbackString` was ~190 lines in `AgentNativeWAL.mm`
+describing every tool's result payload. The same rule was already in the core
+as `execution_ledger::feedback_string_valid`, which the ledger applies to every
+stored row — and the Rust copy was ahead, because it had learned about the
+runtime tools while the ObjC one was being kept in step by hand.
+
+Two copies of the contract between "a tool ran" and "the engine believes
+something" is one too many, so the ObjC function is now how a host reaches the
+core's: `tool_feedback` on the WAL-state reducer. It answers through the error
+code rather than a `valid` flag, because an oversized report is
+`E_AGENT_CAPACITY` and a caller recovers from that differently than from a
+malformed one.
+
+Worth remembering when hunting for an existing rule before porting one: the
+Rust name need not resemble the ObjC name. Grepping for
+`DSHAgentValidateNativeToolFeedbackString` and for `tool_feedback` both missed
+`feedback_string_valid`, and a first attempt at this cut wrote a second Rust
+copy before the collision surfaced.
+
 ### Device-only storage metadata
 
 The session store and the agent WAL require every pinned item to report
