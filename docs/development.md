@@ -793,6 +793,33 @@ tool that replaces the WAL behind the store's back is seen rather than served
 from memory. `testCommittedStateIsRereadWhenTheFileIsReplacedBehindTheStore`
 is that case, and it fails without the identity check.
 
+### The WAL on Android
+
+The Android WAL writes the same bytes: `agent-native-wal-v1.json` under the
+app's no-backup directory, the whole state as canonical JSON, replaced by
+write-temp, fsync, rename, fsync-directory. The format is shared on purpose —
+every rule about what a stored state may look like already lives in the core,
+and a WAL pulled off a device replays through the same harness whichever
+platform wrote it. SQLite would have meant a second storage adapter and a
+second answer to "what is committed", which is exactly what the session store
+just stopped having.
+
+`android.system.Os` can fsync a directory from Kotlin, so the only JNI needed
+is the reducer bridge that already exists. The three-state confirmation is the
+same as iOS: everything before the rename is provably not committed, the
+directory fsync makes it durable, and a failure in between is unknown and
+refuses rather than guessing.
+
+Two Android-specific hazards are covered by tests because both were real bugs
+first. The resident state must not answer while a staging file is present —
+a torn transaction is exactly the hazard a cache would hide, so the check runs
+before the cache, not after. And every native call has to load the library
+first: the reducers did it through their own guard, the handle calls did not,
+and the WAL reached them on a path that had never loaded anything.
+
+`AgentRuntimeModule` is still a stub. This is the storage layer it will stand
+on, not the engine.
+
 ### Device-only storage metadata
 
 The session store and the agent WAL require every pinned item to report

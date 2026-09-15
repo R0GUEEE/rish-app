@@ -166,6 +166,87 @@ Java_tech_zseven_rish_runtime_RishAgentCoreNative_sessionReduce(
                input_utf8.size()));
 }
 
+// The WAL reducers take a single JSON envelope, like every other reducer.
+extern "C" JNIEXPORT jstring JNICALL
+Java_tech_zseven_rish_runtime_RishAgentCoreNative_walStateReduce(
+    JNIEnv *env, jclass, jstring request) {
+  std::string utf8;
+  if (request == nullptr || !JStringToUtf8(env, request, &utf8)) return nullptr;
+  return TakeOwnedReply(env, rish_agent_wal_state_reduce(utf8.data(), utf8.size()));
+}
+
+extern "C" JNIEXPORT jstring JNICALL
+Java_tech_zseven_rish_runtime_RishAgentCoreNative_walOperationReduce(
+    JNIEnv *env, jclass, jstring request) {
+  std::string utf8;
+  if (request == nullptr || !JStringToUtf8(env, request, &utf8)) return nullptr;
+  return TakeOwnedReply(env, rish_agent_wal_operation_reduce(utf8.data(), utf8.size()));
+}
+
+extern "C" JNIEXPORT jstring JNICALL
+Java_tech_zseven_rish_runtime_RishAgentCoreNative_runtimeReduce(
+    JNIEnv *env, jclass, jstring request) {
+  std::string utf8;
+  if (request == nullptr || !JStringToUtf8(env, request, &utf8)) return nullptr;
+  return TakeOwnedReply(env, rish_agent_runtime_reduce(utf8.data(), utf8.size()));
+}
+
+// The resident committed state. The handle crosses as an opaque jlong; the
+// caller owns it until walClose, exactly as on the C side.
+extern "C" JNIEXPORT jlong JNICALL
+Java_tech_zseven_rish_runtime_RishAgentCoreNative_walOpen(JNIEnv *env, jclass,
+                                                          jstring state) {
+  std::string utf8;
+  if (state == nullptr || !JStringToUtf8(env, state, &utf8)) return 0;
+  void *handle = rish_agent_wal_open(utf8.data(), utf8.size());
+  return static_cast<jlong>(reinterpret_cast<std::intptr_t>(handle));
+}
+
+extern "C" JNIEXPORT jstring JNICALL
+Java_tech_zseven_rish_runtime_RishAgentCoreNative_walSnapshot(JNIEnv *env, jclass,
+                                                              jlong handle) {
+  if (handle == 0) return nullptr;
+  return TakeOwnedReply(
+      env, rish_agent_wal_snapshot(reinterpret_cast<void *>(
+               static_cast<std::intptr_t>(handle))));
+}
+
+extern "C" JNIEXPORT jstring JNICALL
+Java_tech_zseven_rish_runtime_RishAgentCoreNative_walBegin(JNIEnv *env, jclass,
+                                                           jlong handle,
+                                                           jstring candidate) {
+  std::string utf8;
+  if (handle == 0 || candidate == nullptr || !JStringToUtf8(env, candidate, &utf8)) {
+    return nullptr;
+  }
+  return TakeOwnedReply(
+      env, rish_agent_wal_begin(
+               reinterpret_cast<void *>(static_cast<std::intptr_t>(handle)),
+               utf8.data(), utf8.size()));
+}
+
+extern "C" JNIEXPORT jstring JNICALL
+Java_tech_zseven_rish_runtime_RishAgentCoreNative_walConfirm(JNIEnv *env, jclass,
+                                                             jlong handle,
+                                                             jstring outcome) {
+  std::string utf8;
+  if (handle == 0 || outcome == nullptr || !JStringToUtf8(env, outcome, &utf8)) {
+    return nullptr;
+  }
+  return TakeOwnedReply(
+      env, rish_agent_wal_confirm(
+               reinterpret_cast<void *>(static_cast<std::intptr_t>(handle)),
+               utf8.data(), utf8.size()));
+}
+
+extern "C" JNIEXPORT void JNICALL
+Java_tech_zseven_rish_runtime_RishAgentCoreNative_walClose(JNIEnv *, jclass,
+                                                           jlong handle) {
+  if (handle == 0) return;
+  rish_agent_wal_close(
+      reinterpret_cast<void *>(static_cast<std::intptr_t>(handle)));
+}
+
 extern "C" JNIEXPORT jstring JNICALL
 Java_tech_zseven_rish_runtime_RishAgentCoreNative_canonicalJson(
     JNIEnv *env, jclass, jstring json) {

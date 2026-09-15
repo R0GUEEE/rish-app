@@ -36,6 +36,30 @@ internal object RishAgentCoreNative {
      */
     @JvmStatic external fun sessionReduce(requestJson: String, input: String?): String?
 
+    /** One stored-WAL-row decision over the `{"op","value","env"?}` envelope. */
+    @JvmStatic external fun walStateReduce(requestJson: String): String?
+
+    /** One WAL operation-relation decision. */
+    @JvmStatic external fun walOperationReduce(requestJson: String): String?
+
+    /** One runtime-coordinator decision. */
+    @JvmStatic external fun runtimeReduce(requestJson: String): String?
+
+    /** Adopts a committed WAL state and returns an opaque handle, or 0. */
+    @JvmStatic external fun walOpen(stateJson: String): Long
+
+    /** The committed state, or null once the handle has been invalidated. */
+    @JvmStatic external fun walSnapshot(handle: Long): String?
+
+    /** Takes a candidate and returns the exact bytes to write, or null. */
+    @JvmStatic external fun walBegin(handle: Long, candidateJson: String): String?
+
+    /** Resolves the candidate with "committed", "not_committed" or "unknown". */
+    @JvmStatic external fun walConfirm(handle: Long, outcome: String): String?
+
+    /** Releases a handle. Zero is ignored. */
+    @JvmStatic external fun walClose(handle: Long)
+
     /** Canonical JSON of a JSON text, or null when it cannot be canonicalised. */
     @JvmStatic external fun canonicalJson(json: String): String?
 
@@ -51,6 +75,58 @@ internal object RishAgentCoreNative {
         val parsed = JSONObject(reply)
         if (parsed.optBoolean("ok")) return parsed
         error("the shared agent core refused ${request.optString("op")}: ${parsed.opt("error")}")
+    }
+
+    private fun requireAvailable() {
+        check(available) { "the shared agent core is not staged in this build" }
+    }
+
+    // The raw externals are unbound until `available` has loaded the
+    // libraries, so nothing may call them directly. These wrappers are the
+    // only way in, and each one loads first.
+
+    /** Canonical JSON of a JSON text, or null when it cannot be canonicalised. */
+    fun canonical(json: String): String? {
+        requireAvailable()
+        return canonicalJson(json)
+    }
+
+    /** Adopts a committed WAL state and returns an opaque handle, or 0. */
+    fun openWal(stateJson: String): Long {
+        requireAvailable()
+        return walOpen(stateJson)
+    }
+
+    /** The committed state, or null once the handle has been invalidated. */
+    fun snapshotWal(handle: Long): String? {
+        requireAvailable()
+        return walSnapshot(handle)
+    }
+
+    /** Takes a candidate and returns the exact bytes to write, or null. */
+    fun beginWal(handle: Long, candidateJson: String): String? {
+        requireAvailable()
+        return walBegin(handle, candidateJson)
+    }
+
+    /** Resolves the candidate with "committed", "not_committed" or "unknown". */
+    fun confirmWal(handle: Long, outcome: String): String? {
+        requireAvailable()
+        return walConfirm(handle, outcome)
+    }
+
+    /** Releases a handle; a build without the core has none to release. */
+    fun closeWal(handle: Long) {
+        if (available) walClose(handle)
+    }
+
+    /** One stored-WAL-row or operation-relation decision, or null on refusal. */
+    fun wal(request: JSONObject, operation: Boolean = false): JSONObject? {
+        if (!available) return null
+        val reply = (if (operation) walOperationReduce(request.toString())
+                     else walStateReduce(request.toString())) ?: return null
+        val parsed = JSONObject(reply)
+        return if (parsed.optBoolean("ok")) parsed else null
     }
 
     /** The same call, with a refusal reported as null instead of thrown. */
