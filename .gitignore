@@ -2,6 +2,7 @@
 /build/
 .worktrees/
 .DS_Store
+__pycache__/
 modules/rish/ios/Vendor/*.a
 modules/rish/ios/Vendor/libgit2.xcframework/
 modules/rish/ios/Vendor/libcrypto.xcframework/

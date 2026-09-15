@@ -1,5 +1,6 @@
 #import "HarnessAuthService.h"
 #import "ClaudeOfficialSession.h"
+#import "DSHGuestRuntimeState.h"
 
 #import <CommonCrypto/CommonDigest.h>
 #import <Security/Security.h>
@@ -1164,16 +1165,28 @@ static NSURL *DSHAuthInitrdWithCredential(NSURL *baseURL, NSData *credential,
     @"handshake_budget_units": @40000000000ULL,
   };
   NSData *encoded = [NSJSONSerialization dataWithJSONObject:request options:0 error:nil];
-  void *session = encoded == nil ? NULL : rish_vm_boot_session(
-      (const char *)encoded.bytes, encoded.length);
+  DSHGuestVMOwner *owner = [DSHGuestRuntimeState.sharedState acquireGuestOwner];
+  if (!owner) {
+    if (overlayURL) [NSFileManager.defaultManager removeItemAtURL:overlayURL error:nil];
+    @synchronized (self) {
+      if (self.generation == generation && [self.activeSessionId isEqual:sessionId]) {
+        self.activeErrorCode = @"E_GUEST_BUSY"; self.lastErrorCode = self.activeErrorCode;
+        self.activeSessionId = nil;
+      }
+    }
+    return;
+  }
+  void *session = NULL;
+  @try {
+  session = encoded == nil ? NULL : rish_vm_boot_session((const char *)encoded.bytes, encoded.length);
   if (overlayURL != nil) [[NSFileManager defaultManager] removeItemAtURL:overlayURL error:nil];
   if (session == NULL) {
     [self finishCodexLoginWithGeneration:generation response:nil];
     return;
   }
+  [DSHGuestRuntimeState.sharedState setGuestRuntimeMounted:YES owner:owner];
   @synchronized (self) {
     if (self.generation != generation || ![self.activeSessionId isEqualToString:sessionId]) {
-      rish_vm_session_free(session);
       return;
     }
   }
@@ -1201,7 +1214,6 @@ static NSURL *DSHAuthInitrdWithCredential(NSURL *baseURL, NSData *credential,
     }
   }
   if (![loginResponse[@"ok"] boolValue] || [loginResponse[@"exit_code"] integerValue] != 0) {
-    rish_vm_session_free(session);
     [self finishCodexLoginWithGeneration:generation response:nil];
     return;
   }
@@ -1225,8 +1237,14 @@ static NSURL *DSHAuthInitrdWithCredential(NSURL *baseURL, NSData *credential,
       committed = DSHAuthStoreCredential(DSHHarnessAuthHarnessCodex, credential);
     }
   }
-  rish_vm_session_free(session);
   [self finishCodexLoginWithGeneration:generation response:committed ? @{} : nil];
+  } @catch (__unused NSException *exception) {
+    [self finishCodexLoginWithGeneration:generation response:nil];
+  } @finally {
+    if (session) rish_vm_session_free(session);
+    if (overlayURL) [NSFileManager.defaultManager removeItemAtURL:overlayURL error:nil];
+    [DSHGuestRuntimeState.sharedState releaseGuestOwner:owner];
+  }
 }
 
 - (void)finishCodexLoginWithGeneration:(NSUInteger)generation

@@ -49,6 +49,6 @@ Pod::Spec.new do |spec|
     'UIKit',
     'UniformTypeIdentifiers',
   ]
-  spec.libraries = ['c++']
+  spec.libraries = ['c++', 'z']
   spec.dependency 'React-Core'
 end

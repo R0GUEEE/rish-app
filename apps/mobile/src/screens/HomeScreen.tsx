@@ -58,6 +58,8 @@ import { ConversationActionSheet } from '../components/ConversationActionSheet';
 import { EmptyChat } from '../components/EmptyChat';
 import { MessageList, type DisplayMessage } from '../components/MessageList';
 import { MirrorSettingsSheet } from '../components/MirrorSettingsSheet';
+import { RuntimeEnvironmentSheet } from '../components/runtime-environment-sheet';
+import { RuntimeProgramSheet } from '../components/runtime-program-sheet';
 import { ConversationOptionsPicker } from '../components/ConversationOptionsPicker';
 import { HarnessPicker } from '../components/HarnessPicker';
 import type { StructuredBlock } from '../components/StructuredContent';
@@ -751,6 +753,19 @@ export function HomeScreen({
   } | null>(null);
   const [modelVisible, setModelVisible] = useState(false);
   const [mirrorsVisible, setMirrorsVisible] = useState(false);
+  const [environmentsVisible, setEnvironmentsVisible] = useState(false);
+  const [programVisible, setProgramVisible] = useState(false);
+  const [programContext, setProgramContext] = useState<{
+    root: WorkspaceRootRefV1;
+    label: string;
+    conversationId: string | null;
+  } | null>(null);
+  const pendingProgramOpenRef = useRef<{
+    source: 'files' | 'environments';
+    context: NonNullable<typeof programContext>;
+    selectedConversationId: string | null;
+  } | null>(null);
+  const programOpenBlockedRef = useRef(true);
   const [harnessesVisible, setHarnessesVisible] = useState(false);
   const harnessesVisibleRef = useRef(false);
   harnessesVisibleRef.current = harnessesVisible;
@@ -2139,6 +2154,10 @@ export function HomeScreen({
           setSettingsVisible(false);
           setAccountVisible(false);
           setMirrorsVisible(false);
+          setEnvironmentsVisible(false);
+          setProgramVisible(false);
+          setProgramContext(null);
+          pendingProgramOpenRef.current = null;
           setModelVisible(false);
           setComposerOptionsVisible(false);
           workspacePickerGenerationRef.current += 1;
@@ -2298,6 +2317,17 @@ export function HomeScreen({
   }, [lifecycleBootstrapReady, seedMarkdownDemo, store]);
 
   const activeProjectId = activeConversation?.projectId ?? null;
+  useEffect(() => {
+    if (pendingProgramOpenRef.current !== null &&
+        pendingProgramOpenRef.current.selectedConversationId !== (activeConversation?.id ?? null)) {
+      pendingProgramOpenRef.current = null;
+    }
+    if (programContext?.conversationId != null &&
+        programContext.conversationId !== activeConversation?.id) {
+      setProgramVisible(false);
+      setProgramContext(null);
+    }
+  }, [activeConversation?.id, programContext]);
   const workspaceOwnerConversationRef = useRef<string | null>(null);
   useEffect(() => {
     const previous = workspaceOwnerConversationRef.current;
@@ -4490,6 +4520,24 @@ export function HomeScreen({
     activeAttachmentOperation.current !== null || activeAttachmentPreviewId.current !== null ||
     (chatState.workspaceAuthorityOutbox ?? []).some(entry => entry.workspaceId === activeWorkspaceId) ||
     activeConversation?.attempts.some(attempt => attempt.status === 'prepared' || attempt.status === 'sending') === true;
+  programOpenBlockedRef.current = workspaceGitActivationBlocked;
+  const finishProgramSurfaceTransition = useCallback((source: 'files' | 'environments') => {
+    const pending = pendingProgramOpenRef.current;
+    if (pending === null || pending.source !== source) return;
+    pendingProgramOpenRef.current = null;
+    const current = selectActiveConversation(store.getState());
+    if (programOpenBlockedRef.current ||
+        (current?.id ?? null) !== pending.selectedConversationId) return;
+    if (pending.context.conversationId !== null) {
+      const binding = current?.workspaceBinding;
+      if (current?.id !== pending.context.conversationId || binding == null ||
+          binding.workspaceId !== pending.context.root.workspace_id ||
+          binding.bindingRevision !== pending.context.root.binding_revision ||
+          binding.projectId !== pending.context.root.project_id) return;
+    }
+    setProgramContext(pending.context);
+    setProgramVisible(true);
+  }, [store]);
 
   const enableWorkspaceGit = useCallback(async () => {
     const source = selectActiveConversation(store.getState());
@@ -5919,6 +5967,8 @@ export function HomeScreen({
     settingsVisible ||
     accountVisible ||
     mirrorsVisible ||
+    environmentsVisible ||
+    programVisible ||
     modelVisible ||
     composerOptionsVisible ||
     workspaceSheetVisible ||
@@ -6415,7 +6465,7 @@ export function HomeScreen({
         busy={credentialBusy}
         harnessName={activeHarness.name}
         providerName={providerName}
-        covered={mirrorsVisible || modelVisible}
+        covered={mirrorsVisible || modelVisible || environmentsVisible || programVisible}
         credentialConfigured={credentialConfigured}
         model={activeModel}
         runtimeAvailable={nativeAvailable}
@@ -6439,6 +6489,10 @@ export function HomeScreen({
         onOpenMirrors={() => {
           if (!settingsSourceIsLive(settingsRenderEpoch)) return;
           setMirrorsVisible(true);
+        }}
+        onOpenEnvironments={() => {
+          if (!settingsSourceIsLive(settingsRenderEpoch)) return;
+          setEnvironmentsVisible(true);
         }}
         onOpenRuntime={() => {
           if (!settingsSourceIsLive(settingsRenderEpoch)) return;
@@ -6501,6 +6555,39 @@ export function HomeScreen({
         onDismiss={() => undefined}
         onPreferencesChanged={() => {
           persist().catch(() => undefined);
+        }}
+      />
+      <RuntimeEnvironmentSheet
+        visible={environmentsVisible}
+        workspaceId={activeWorkspaceId}
+        onClose={() => setEnvironmentsVisible(false)}
+        onDismiss={() => finishProgramSurfaceTransition('environments')}
+        onRun={activeConversation?.workspaceBinding == null || workspaceGitActivationBlocked ? undefined : () => {
+          const conversation = selectActiveConversation(store.getState());
+          const binding = conversation?.workspaceBinding;
+          if (conversation === null || binding == null || workspaceGitActivationBlocked) return;
+          pendingProgramOpenRef.current = { source: 'environments', selectedConversationId: conversation.id, context: {
+            root: {
+              schema_version: 1,
+              workspace_id: binding.workspaceId,
+              binding_revision: binding.bindingRevision,
+              project_id: binding.projectId,
+            },
+            label: workspaceNames[binding.workspaceId] ?? '',
+            conversationId: conversation.id,
+          }};
+          setEnvironmentsVisible(false);
+        }}
+      />
+      <RuntimeProgramSheet
+        visible={programVisible}
+        ownerKey={activeConversation?.id ?? 'no-conversation'}
+        root={programContext?.root ?? null}
+        workspaceName={programContext?.label}
+        blocked={workspaceGitActivationBlocked}
+        onClose={() => {
+          setProgramVisible(false);
+          setProgramContext(null);
         }}
       />
       <HarnessPicker
@@ -6865,6 +6952,21 @@ export function HomeScreen({
         workspaceRoot={workspaceRoute?.root}
         readOnly={preferences.toolPermission === 'read-only'}
         visible={workspaceVisible}
+        runProgramBlocked={workspaceGitActivationBlocked}
+        onRunProgram={() => {
+          if (workspaceRoute === null || !workspaceVisibleRef.current || workspaceGitActivationBlocked) return;
+          pendingProgramOpenRef.current = { source: 'files', selectedConversationId: store.getState().selectedConversationId, context: {
+            root: workspaceRoute.root,
+            label: workspaceRoute.label,
+            conversationId: workspaceRoute.conversationId,
+          }};
+          workspaceSurfaceNonceRef.current += 1;
+          workspaceBindingController.invalidate();
+          workspaceVisibleRef.current = false;
+          setWorkspaceVisible(false);
+          setWorkspaceRoute(null);
+        }}
+        onDismiss={() => finishProgramSurfaceTransition('files')}
         onClose={() => {
           workspaceSurfaceNonceRef.current += 1;
           workspaceBindingController.invalidate();

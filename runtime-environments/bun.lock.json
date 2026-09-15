@@ -1,0 +1,138 @@
+{
+  "schema_version": 1,
+  "environment_id": "bun-1-4-0-alpine3-23-amd64",
+  "family": "bun",
+  "display_name": "Bun",
+  "version": "1.4.0",
+  "architecture": "x86_64",
+  "kernel_sha256": "1e6bf9027720c75c3ed0d79171f21b5791ee40ca9795d07c7c6e04dc5ea2ae90",
+  "minimum_memory_mib": 1024,
+  "disk_mib": 512,
+  "entrypoint": "usr/bin/bun",
+  "entry_links": {},
+  "alpine_version": "3.23",
+  "indexes": [
+    {
+      "url": "https://dl-cdn.alpinelinux.org/alpine/v3.23/main/x86_64/APKINDEX.tar.gz",
+      "bytes": 523519,
+      "sha256": "c7053063d79c7741cc09e74d7ea5ebe05bbafcbb9ec70e6e46d4a1379c264b68",
+      "signature_key": "alpine-devel@lists.alpinelinux.org-6165ee59.rsa.pub"
+    },
+    {
+      "url": "https://dl-cdn.alpinelinux.org/alpine/v3.23/community/x86_64/APKINDEX.tar.gz",
+      "bytes": 2383350,
+      "sha256": "a893cd9f671a29565885b7272ddf2ef05c857a8560ba98d164abdabe41a0777b",
+      "signature_key": "alpine-devel@lists.alpinelinux.org-6165ee59.rsa.pub"
+    }
+  ],
+  "packages": [
+    {
+      "name": "busybox",
+      "version": "1.37.0-r30",
+      "filename": "busybox-1.37.0-r30.apk",
+      "url": "https://dl-cdn.alpinelinux.org/alpine/v3.23/main/x86_64/busybox-1.37.0-r30.apk",
+      "package_bytes": 504726,
+      "installed_bytes": 813480,
+      "control_checksum": "Q18TR4AbuWsapA0X+CI3w/T/AqRyU=",
+      "license": "GPL-2.0-only",
+      "dependencies": [
+        "so:libc.musl-x86_64.so.1"
+      ],
+      "source_origin": "busybox",
+      "source_commit": "1e823a60eb85606954b3a5af5f8e5bbd1ea680cf",
+      "source_recipe_url": "https://raw.githubusercontent.com/alpinelinux/aports/1e823a60eb85606954b3a5af5f8e5bbd1ea680cf/main/busybox/APKBUILD",
+      "source_tree_url": "https://github.com/alpinelinux/aports/tree/1e823a60eb85606954b3a5af5f8e5bbd1ea680cf/main/busybox",
+      "sha256": "2fea8c73710994099eaec6832b69a0f70163e0d6ee13848af3a5270a16d15c5c",
+      "source_recipe_sha256": "fb2323ac3121c6cd1122c42cabbd19ec28a29a1cf434a4c0759792c63a1c63a8"
+    },
+    {
+      "name": "ca-certificates-bundle",
+      "version": "20260611-r0",
+      "filename": "ca-certificates-bundle-20260611-r0.apk",
+      "url": "https://dl-cdn.alpinelinux.org/alpine/v3.23/main/x86_64/ca-certificates-bundle-20260611-r0.apk",
+      "package_bytes": 107337,
+      "installed_bytes": 179359,
+      "control_checksum": "Q1QSBCJavNY+6xpzdm5qLo6JS3Qjs=",
+      "license": "MPL-2.0 AND MIT",
+      "dependencies": [],
+      "source_origin": "ca-certificates",
+      "source_commit": "6e30aafe4fa807ba70797509731f1e7d644dc8f3",
+      "source_recipe_url": "https://raw.githubusercontent.com/alpinelinux/aports/6e30aafe4fa807ba70797509731f1e7d644dc8f3/main/ca-certificates/APKBUILD",
+      "source_tree_url": "https://github.com/alpinelinux/aports/tree/6e30aafe4fa807ba70797509731f1e7d644dc8f3/main/ca-certificates",
+      "sha256": "17320275acf188b8d8a4a01f1af94e9e842b50faec33ce13c1ed9b6e7ef653ec",
+      "source_recipe_sha256": "a1429622d05b27e016c1266312be8a9a7e4610da01d7d40826b1681677c53843"
+    },
+    {
+      "name": "libgcc",
+      "version": "15.2.0-r2",
+      "filename": "libgcc-15.2.0-r2.apk",
+      "url": "https://dl-cdn.alpinelinux.org/alpine/v3.23/main/x86_64/libgcc-15.2.0-r2.apk",
+      "package_bytes": 80358,
+      "installed_bytes": 173920,
+      "control_checksum": "Q1V/zL6e6/I/LE847iok+LC91Qj/c=",
+      "license": "GPL-2.0-or-later AND LGPL-2.1-or-later",
+      "dependencies": [
+        "so:libc.musl-x86_64.so.1"
+      ],
+      "source_origin": "gcc",
+      "source_commit": "7fa6e7fd3465c5ff89cc33a56d20bf4d59105aaf",
+      "source_recipe_url": "https://raw.githubusercontent.com/alpinelinux/aports/7fa6e7fd3465c5ff89cc33a56d20bf4d59105aaf/main/gcc/APKBUILD",
+      "source_tree_url": "https://github.com/alpinelinux/aports/tree/7fa6e7fd3465c5ff89cc33a56d20bf4d59105aaf/main/gcc",
+      "sha256": "4279d14cbf43311312d3a7d43619f4c15ede2e46d5608ba421ed157ded57c700",
+      "source_recipe_sha256": "92b3dc5997085add8c4debbcca374af63101a17fc7fdb2038927c60029f26081"
+    },
+    {
+      "name": "libstdc++",
+      "version": "15.2.0-r2",
+      "filename": "libstdc++-15.2.0-r2.apk",
+      "url": "https://dl-cdn.alpinelinux.org/alpine/v3.23/main/x86_64/libstdc++-15.2.0-r2.apk",
+      "package_bytes": 961296,
+      "installed_bytes": 2804104,
+      "control_checksum": "Q1Uo13QXoWcGRor4UvKFmtAPF24mY=",
+      "license": "GPL-2.0-or-later AND LGPL-2.1-or-later",
+      "dependencies": [
+        "so:libc.musl-x86_64.so.1",
+        "so:libgcc_s.so.1"
+      ],
+      "source_origin": "gcc",
+      "source_commit": "7fa6e7fd3465c5ff89cc33a56d20bf4d59105aaf",
+      "source_recipe_url": "https://raw.githubusercontent.com/alpinelinux/aports/7fa6e7fd3465c5ff89cc33a56d20bf4d59105aaf/main/gcc/APKBUILD",
+      "source_tree_url": "https://github.com/alpinelinux/aports/tree/7fa6e7fd3465c5ff89cc33a56d20bf4d59105aaf/main/gcc",
+      "sha256": "d4be2967a06d78b499f5e136323f4ebe51ad367b381933b3369539499c4f5752",
+      "source_recipe_sha256": "92b3dc5997085add8c4debbcca374af63101a17fc7fdb2038927c60029f26081"
+    },
+    {
+      "name": "musl",
+      "version": "1.2.5-r23",
+      "filename": "musl-1.2.5-r23.apk",
+      "url": "https://dl-cdn.alpinelinux.org/alpine/v3.23/main/x86_64/musl-1.2.5-r23.apk",
+      "package_bytes": 414071,
+      "installed_bytes": 666216,
+      "control_checksum": "Q1G2xQQm08BlbpxaVnpaWWAcf0MHo=",
+      "license": "MIT",
+      "dependencies": [],
+      "source_origin": "musl",
+      "source_commit": "8aef0c37b0ad23dc4137f0e4755b97a59dc698b8",
+      "source_recipe_url": "https://raw.githubusercontent.com/alpinelinux/aports/8aef0c37b0ad23dc4137f0e4755b97a59dc698b8/main/musl/APKBUILD",
+      "source_tree_url": "https://github.com/alpinelinux/aports/tree/8aef0c37b0ad23dc4137f0e4755b97a59dc698b8/main/musl",
+      "sha256": "4f3c4a7bf9f51d2c91007e333b17459362ffd881b4a343e8da07b6c50c4f4a0d",
+      "source_recipe_sha256": "e8425e24c5c3c6d8f74b4412b11c6990fda6dbf7648c79ec6e2efa082fc5adcf"
+    }
+  ],
+  "minimum_scratch_bytes": 50331648,
+  "verification_status": "built_artifacts_require_current_rish_execution",
+  "extra_archives": [
+    {
+      "kind": "bun-official-zip",
+      "filename": "bun-linux-x64-musl-baseline.zip",
+      "url": "https://github.com/oven-sh/bun/releases/download/bun-v1.4.0/bun-linux-x64-musl-baseline.zip",
+      "bytes": 34056109,
+      "sha256": "618c4bc1f94b02337ee210003c0b7c066f11548a8cdc5109df10db043dc47ca2",
+      "digest_source_url": "https://api.github.com/repos/oven-sh/bun/releases/tags/bun-v1.4.0",
+      "member": "bun-linux-x64-musl-baseline/bun",
+      "binary_sha256": "805ecd8b91244de1c14d8d7e24841add8cb15c4eefffd17ce3d93cb87b3162ed",
+      "license": "MIT and bundled dependency licenses",
+      "source_tree_url": "https://github.com/oven-sh/bun/tree/bun-v1.4.0"
+    }
+  ]
+}

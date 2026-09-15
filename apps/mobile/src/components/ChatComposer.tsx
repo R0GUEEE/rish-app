@@ -280,7 +280,7 @@ export function ChatComposer(props: Props) {
             <AppIcon color={colors.text} icon={Plus} size={19} />
           )}
         </Pressable>
-        {props.configured && props.onWorkspacePress !== undefined && (
+        {props.onWorkspacePress !== undefined && (
           <Pressable
             accessibilityLabel={t('messages.chooseWorkspace')}
             accessibilityRole="button"

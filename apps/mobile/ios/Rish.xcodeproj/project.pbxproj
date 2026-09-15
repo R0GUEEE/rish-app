@@ -34,6 +34,10 @@
 		8C311F650255DB45BBC37FB5 /* TaskExperienceAcceptance.swift in Sources */ = {isa = PBXBuildFile; fileRef = F2A1F0E39B54A7F9B1B123F6 /* TaskExperienceAcceptance.swift */; };
 		A0C400021AD99517003FC87E /* LocalWorkspacesModuleV2Tests.mm in Sources */ = {isa = PBXBuildFile; fileRef = A0C400011AD99517003FC87E /* LocalWorkspacesModuleV2Tests.mm */; };
 		A1C400021AD99517003FC87E /* AgentNativeStoreTests.mm in Sources */ = {isa = PBXBuildFile; fileRef = A1C400011AD99517003FC87E /* AgentNativeStoreTests.mm */; };
+		BBE4000C1AD99517003FC87E /* RuntimeEnvironmentLiveTests.mm in Sources */ = {isa = PBXBuildFile; fileRef = BBE4000B1AD99517003FC87E /* RuntimeEnvironmentLiveTests.mm */; };
+		BBE4000A1AD99517003FC87E /* GuestVMOwnershipTests.mm in Sources */ = {isa = PBXBuildFile; fileRef = BBE400091AD99517003FC87E /* GuestVMOwnershipTests.mm */; };
+		BBE400061AD99517003FC87E /* RuntimeProgramTests.mm in Sources */ = {isa = PBXBuildFile; fileRef = BBE400051AD99517003FC87E /* RuntimeProgramTests.mm */; };
+		BBE400041AD99517003FC87E /* RuntimeEnvironmentStoreTests.mm in Sources */ = {isa = PBXBuildFile; fileRef = BBE400031AD99517003FC87E /* RuntimeEnvironmentStoreTests.mm */; };
 		A2C400021AD99517003FC87E /* AgentRuntimeModuleTests.mm in Sources */ = {isa = PBXBuildFile; fileRef = A2C400011AD99517003FC87E /* AgentRuntimeModuleTests.mm */; };
 		A3C400021AD99517003FC87E /* SessionSnapshotStoreTests.mm in Sources */ = {isa = PBXBuildFile; fileRef = A3C400011AD99517003FC87E /* SessionSnapshotStoreTests.mm */; };
 		A4C400021AD99517003FC87E /* SessionSnapshotsModuleTests.mm in Sources */ = {isa = PBXBuildFile; fileRef = A4C400011AD99517003FC87E /* SessionSnapshotsModuleTests.mm */; };
@@ -71,6 +75,7 @@
 		D5C400021AD99517003FC87E /* CompletionV2Tests.mm in Sources */ = {isa = PBXBuildFile; fileRef = D5C400011AD99517003FC87E /* CompletionV2Tests.mm */; };
 		D5E2000000000000000000A1 /* vmlinuz-virt-6.18.35 in Resources */ = {isa = PBXBuildFile; fileRef = D5E1000000000000000000A1 /* vmlinuz-virt-6.18.35 */; };
 		D5E2000000000000000000A2 /* rish-container.cpio in Resources */ = {isa = PBXBuildFile; fileRef = D5E1000000000000000000A2 /* rish-container.cpio */; };
+		BBE400081AD99517003FC87E /* RuntimeEnvironmentCatalog.json in Resources */ = {isa = PBXBuildFile; fileRef = BBE400071AD99517003FC87E /* RuntimeEnvironmentCatalog.json */; };
 		D5E2000000000000000000A4 /* LocalGuestModuleTests.mm in Sources */ = {isa = PBXBuildFile; fileRef = D5E1000000000000000000A4 /* LocalGuestModuleTests.mm */; };
 		D5F400021AD99517003FC87E /* codex-stream-cases.json in Resources */ = {isa = PBXBuildFile; fileRef = D5F400011AD99517003FC87E /* codex-stream-cases.json */; };
 		D6C400021AD99517003FC87E /* ProjectContextProofTests.mm in Sources */ = {isa = PBXBuildFile; fileRef = D6C400011AD99517003FC87E /* ProjectContextProofTests.mm */; };
@@ -167,6 +172,10 @@
 		A0C400011AD99517003FC87E /* LocalWorkspacesModuleV2Tests.mm */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.cpp.objcpp; path = LocalWorkspacesModuleV2Tests.mm; sourceTree = "<group>"; };
 		A18A28FDB0056BD7A0EA7202 /* ClaudeSubscriptionTransportTests.mm */ = {isa = PBXFileReference; includeInIndex = 1; path = ClaudeSubscriptionTransportTests.mm; sourceTree = "<group>"; };
 		A1C400011AD99517003FC87E /* AgentNativeStoreTests.mm */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.cpp.objcpp; path = AgentNativeStoreTests.mm; sourceTree = "<group>"; };
+		BBE4000B1AD99517003FC87E /* RuntimeEnvironmentLiveTests.mm */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.cpp.objcpp; path = RuntimeEnvironmentLiveTests.mm; sourceTree = "<group>"; };
+		BBE400091AD99517003FC87E /* GuestVMOwnershipTests.mm */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.cpp.objcpp; path = GuestVMOwnershipTests.mm; sourceTree = "<group>"; };
+		BBE400051AD99517003FC87E /* RuntimeProgramTests.mm */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.cpp.objcpp; path = RuntimeProgramTests.mm; sourceTree = "<group>"; };
+		BBE400031AD99517003FC87E /* RuntimeEnvironmentStoreTests.mm */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.cpp.objcpp; path = RuntimeEnvironmentStoreTests.mm; sourceTree = "<group>"; };
 		A2C400011AD99517003FC87E /* AgentRuntimeModuleTests.mm */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.cpp.objcpp; path = AgentRuntimeModuleTests.mm; sourceTree = "<group>"; };
 		A3C400011AD99517003FC87E /* SessionSnapshotStoreTests.mm */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.cpp.objcpp; path = SessionSnapshotStoreTests.mm; sourceTree = "<group>"; };
 		A4C400011AD99517003FC87E /* SessionSnapshotsModuleTests.mm */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.cpp.objcpp; path = SessionSnapshotsModuleTests.mm; sourceTree = "<group>"; };
@@ -207,6 +216,7 @@
 		D5E1000000000000000000A1 /* vmlinuz-virt-6.18.35 */ = {isa = PBXFileReference; lastKnownFileType = file; path = "vmlinuz-virt-6.18.35"; sourceTree = "<group>"; };
 		D5E1000000000000000000A2 /* rish-container.cpio */ = {isa = PBXFileReference; lastKnownFileType = file; path = "rish-container.cpio"; sourceTree = "<group>"; };
 		D5E1000000000000000000A3 /* SHA256SUMS */ = {isa = PBXFileReference; lastKnownFileType = text; path = SHA256SUMS; sourceTree = "<group>"; };
+		BBE400071AD99517003FC87E /* RuntimeEnvironmentCatalog.json */ = {isa = PBXFileReference; lastKnownFileType = text.json; path = RuntimeEnvironmentCatalog.json; sourceTree = "<group>"; };
 		D5E1000000000000000000A4 /* LocalGuestModuleTests.mm */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.cpp.objcpp; path = LocalGuestModuleTests.mm; sourceTree = "<group>"; };
 		D5F400011AD99517003FC87E /* codex-stream-cases.json */ = {isa = PBXFileReference; lastKnownFileType = text.json; path = "Fixtures/codex-stream-cases.json"; sourceTree = "<group>"; };
 		D6C400011AD99517003FC87E /* ProjectContextProofTests.mm */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.cpp.objcpp; path = ProjectContextProofTests.mm; sourceTree = "<group>"; };
@@ -279,6 +289,10 @@
 				A0C400011AD99517003FC87E /* LocalWorkspacesModuleV2Tests.mm */,
 				A1C400011AD99517003FC87E /* AgentNativeStoreTests.mm */,
 				BBE400011AD99517003FC87E /* AgentPolicyTests.mm */,
+				BBE4000B1AD99517003FC87E /* RuntimeEnvironmentLiveTests.mm */,
+				BBE400091AD99517003FC87E /* GuestVMOwnershipTests.mm */,
+				BBE400051AD99517003FC87E /* RuntimeProgramTests.mm */,
+				BBE400031AD99517003FC87E /* RuntimeEnvironmentStoreTests.mm */,
 				A2C400011AD99517003FC87E /* AgentRuntimeModuleTests.mm */,
 				A3C400011AD99517003FC87E /* SessionSnapshotStoreTests.mm */,
 				C0F400011AD99517003FC87E /* agent-begin-round-session.json */,
@@ -446,6 +460,7 @@
 				D5E1000000000000000000A1 /* vmlinuz-virt-6.18.35 */,
 				D5E1000000000000000000A2 /* rish-container.cpio */,
 				D5E1000000000000000000A3 /* SHA256SUMS */,
+				BBE400071AD99517003FC87E /* RuntimeEnvironmentCatalog.json */,
 			);
 			path = Rish/GuestAssets;
 			sourceTree = "<group>";
@@ -615,6 +630,7 @@
 				40D5B5F596262FD65CF7C474 /* PrivacyInfo.xcprivacy in Resources */,
 				D5E2000000000000000000A1 /* vmlinuz-virt-6.18.35 in Resources */,
 				D5E2000000000000000000A2 /* rish-container.cpio in Resources */,
+				BBE400081AD99517003FC87E /* RuntimeEnvironmentCatalog.json in Resources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -751,6 +767,10 @@
 				A0C400021AD99517003FC87E /* LocalWorkspacesModuleV2Tests.mm in Sources */,
 				A1C400021AD99517003FC87E /* AgentNativeStoreTests.mm in Sources */,
 				BBE400021AD99517003FC87E /* AgentPolicyTests.mm in Sources */,
+				BBE4000C1AD99517003FC87E /* RuntimeEnvironmentLiveTests.mm in Sources */,
+				BBE4000A1AD99517003FC87E /* GuestVMOwnershipTests.mm in Sources */,
+				BBE400061AD99517003FC87E /* RuntimeProgramTests.mm in Sources */,
+				BBE400041AD99517003FC87E /* RuntimeEnvironmentStoreTests.mm in Sources */,
 				A2C400021AD99517003FC87E /* AgentRuntimeModuleTests.mm in Sources */,
 				A3C400021AD99517003FC87E /* SessionSnapshotStoreTests.mm in Sources */,
 				A4C400021AD99517003FC87E /* SessionSnapshotsModuleTests.mm in Sources */,

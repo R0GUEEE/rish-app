@@ -1,6 +1,7 @@
 #import "ClaudeOfficialSession.h"
 
 #import "HarnessAuthService.h"
+#import "DSHGuestRuntimeState.h"
 #import "rish.h"
 #include <sys/stat.h>
 
@@ -95,6 +96,7 @@ static BOOL DSHClaudeValidSessionId(id value) {
 // so FFI calls from worker threads never overlap each other or a session
 // free. Everything below is read and written under @synchronized(self).
 @property (nonatomic) void *vmHandle;
+@property (nonatomic, strong) DSHGuestVMOwner *vmOwner;
 @property (nonatomic) NSUInteger generation;
 @property (nonatomic) NSUInteger configurationRepairGeneration;
 @property (nonatomic, copy) NSString *activeSessionId;
@@ -155,6 +157,8 @@ static BOOL DSHClaudeValidSessionId(id value) {
       rish_vm_session_free(_vmHandle);
     }
     _vmHandle = NULL;
+    if (_vmOwner) [DSHGuestRuntimeState.sharedState releaseGuestOwner:_vmOwner];
+    _vmOwner = nil;
   }
 }
 
@@ -589,10 +593,17 @@ static BOOL DSHClaudeValidSessionId(id value) {
 /// created by this call; an existing image that fails to mount fails closed —
 /// it is never reformatted and its bytes are never inspected on the host.
 - (BOOL)ensureGuestMountedWithError:(NSString **)errorCode {
+  BOOL evictBeforeBoot = NO;
   @synchronized (self) {
     self.guestIdleEpoch += 1;
-    if (self.vmHandle != NULL) return YES;
+    if (self.vmHandle != NULL) {
+      if (!self.guestEvictionRequested) return YES;
+      evictBeforeBoot = YES;
+    }
   }
+  // A new request can register before the queued idle eviction runs. Honor
+  // the pending memory-pressure eviction here before reusing its large VM.
+  if (evictBeforeBoot) [self freeGuest];
   NSString *reason = nil;
   if (![self runtimeAvailableWithReason:&reason]) {
     if (errorCode) *errorCode = DSHClaudeErrorGuestBoot;
@@ -654,8 +665,17 @@ static BOOL DSHClaudeValidSessionId(id value) {
     @"handshake_budget_units": @40000000000ULL,
   };
   void *handle = NULL;
+  DSHGuestVMOwner *owner = [DSHGuestRuntimeState.sharedState acquireGuestOwner];
+  if (!owner) {
+    if (errorCode) *errorCode = @"E_GUEST_BUSY";
+    return NO;
+  }
+  @synchronized (self) { self.vmOwner = owner; }
+  @try {
   if (self.guestBootOverride) {
     if (!self.guestBootOverride(bootRequest)) {
+      [DSHGuestRuntimeState.sharedState releaseGuestOwner:owner];
+      @synchronized (self) { self.vmOwner = nil; }
       if (errorCode) *errorCode = DSHClaudeErrorGuestBoot;
       return NO;
     }
@@ -668,10 +688,13 @@ static BOOL DSHClaudeValidSessionId(id value) {
         : rish_vm_boot_session((const char *)encoded.bytes, encoded.length);
   }
   if (handle == NULL) {
+    [DSHGuestRuntimeState.sharedState releaseGuestOwner:owner];
+    @synchronized (self) { self.vmOwner = nil; }
     if (errorCode) *errorCode = DSHClaudeErrorGuestBoot;
     return NO;
   }
   @synchronized (self) { self.vmHandle = handle; }
+  [DSHGuestRuntimeState.sharedState setGuestRuntimeMounted:YES owner:owner];
 
   if (createdNow) {
     NSDictionary *mkfs = [self runGuestCommand:@[ @"mkfs.vfat", @"/dev/vda" ]
@@ -704,6 +727,11 @@ static BOOL DSHClaudeValidSessionId(id value) {
     return NO;
   }
   return YES;
+  } @catch (__unused NSException *exception) {
+    [self freeGuest];
+    if (errorCode) *errorCode = DSHClaudeErrorGuestBoot;
+    return NO;
+  }
 }
 
 /// Routed through the serial queue so a release can never race an in-flight
@@ -715,6 +743,8 @@ static BOOL DSHClaudeValidSessionId(id value) {
         rish_vm_session_free(self.vmHandle);
       }
       self.vmHandle = NULL;
+      if (self.vmOwner) [DSHGuestRuntimeState.sharedState releaseGuestOwner:self.vmOwner];
+      self.vmOwner = nil;
       self.guestIdleEpoch += 1;
       self.guestEvictionRequested = NO;
       self.cleanupPending = NO;

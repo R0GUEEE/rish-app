@@ -5,6 +5,7 @@
 @interface DSHClaudeOfficialSession (DeadlineTest)
 - (void)watchLoginSession:(NSString *)session generation:(NSUInteger)generation;
 - (void)ingestLoginChunk:(NSData *)chunk;
+- (void)freeGuest;
 @end
 
 // The tests below are pure-parser and injected-exchange only: they never run
@@ -220,9 +221,35 @@ static NSURL *TemporaryStorageDirectory(void) {
 @end
 
 @interface ClaudeOfficialSessionTests : XCTestCase
+@property(nonatomic, strong) NSMutableArray<DSHClaudeOfficialSession *> *injectedSessions;
 @end
 
 @implementation ClaudeOfficialSessionTests
+
+- (void)setUp {
+  [super setUp];
+  self.injectedSessions = [NSMutableArray array];
+}
+
+- (void)tearDown {
+  // Browser-output tests intentionally stop observing before their worker
+  // finishes. Cancel and drain those native actors before the next test so a
+  // real process-wide reservation is never bypassed or reset by the fixture.
+  for (DSHClaudeOfficialSession *session in self.injectedSessions) {
+    NSString *sessionId = [session valueForKey:@"activeSessionId"];
+    if (sessionId.length) {
+      XCTestExpectation *cancelled = [self expectationWithDescription:@"fixture login cancelled"];
+      [session cancelSession:sessionId completion:^(__unused NSDictionary *status) { [cancelled fulfill]; }];
+      [self waitForExpectations:@[cancelled] timeout:5];
+    }
+    XCTestExpectation *drained = [self expectationWithDescription:@"fixture guest released"];
+    dispatch_queue_t worker = [session valueForKey:@"workerQueue"];
+    dispatch_async(worker, ^{ [session freeGuest]; [drained fulfill]; });
+    [self waitForExpectations:@[drained] timeout:5];
+  }
+  self.injectedSessions = nil;
+  [super tearDown];
+}
 
 #pragma mark Pure parser: control exchange
 
@@ -410,6 +437,7 @@ static NSURL *TemporaryStorageDirectory(void) {
   session.guestBootOverride = ^BOOL(NSDictionary *request) {
     return [guest boot:request];
   };
+  [self.injectedSessions addObject:session];
   return session;
 }
 

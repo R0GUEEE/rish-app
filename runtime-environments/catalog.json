@@ -1,0 +1,107 @@
+{
+  "schema_version": 1,
+  "environments": [
+    {
+      "manifest": {
+        "architecture": "x86_64",
+        "disk_bytes": 134217728,
+        "disk_sha256": "11b30681e6051a9fb758e407d47358524084d1fb13a118bd9fbeb57764d1f190",
+        "display_name": "Python",
+        "environment_id": "python-3-12-14-alpine3-21-amd64",
+        "family": "python",
+        "kernel_sha256": "1e6bf9027720c75c3ed0d79171f21b5791ee40ca9795d07c7c6e04dc5ea2ae90",
+        "minimum_memory_mib": 512,
+        "schema_version": 1,
+        "version": "3.12.14"
+      },
+      "package_sha256": "e2065542086f6bdf13aaca5c908e1958df80028c2667e258d742b7a03b31d93d",
+      "package_bytes": 16633262,
+      "url": "https://github.com/ZSeven-W/rish-app/releases/download/runtime-environments-2026-09-15/python-3-12-14-alpine3-21-amd64.rishenv"
+    },
+    {
+      "manifest": {
+        "architecture": "x86_64",
+        "disk_bytes": 1073741824,
+        "disk_sha256": "c4730d4faa1b1df12c9c4f9152b9241c43ab12f87e66c44a2767bd36044bbdea",
+        "display_name": "Java 21",
+        "environment_id": "java-21-0-12-p8-alpine3-23-amd64",
+        "family": "java",
+        "kernel_sha256": "1e6bf9027720c75c3ed0d79171f21b5791ee40ca9795d07c7c6e04dc5ea2ae90",
+        "minimum_memory_mib": 1024,
+        "schema_version": 1,
+        "version": "21.0.12_p8"
+      },
+      "package_sha256": "807424202355109c3f06c05823e1972f2e3bfea3e642d45f42f8926e3925df8d",
+      "package_bytes": 163143721,
+      "url": "https://github.com/ZSeven-W/rish-app/releases/download/runtime-environments-2026-09-15/java-21-0-12-p8-alpine3-23-amd64.rishenv"
+    },
+    {
+      "manifest": {
+        "architecture": "x86_64",
+        "disk_bytes": 1073741824,
+        "disk_sha256": "64fb6637b69dc891206cc37dedcf089588df722dd47bd0f7e226fdb0a1b163df",
+        "display_name": "Go",
+        "environment_id": "go-1-25-10-alpine3-23-amd64",
+        "family": "go",
+        "kernel_sha256": "1e6bf9027720c75c3ed0d79171f21b5791ee40ca9795d07c7c6e04dc5ea2ae90",
+        "minimum_memory_mib": 1024,
+        "schema_version": 1,
+        "version": "1.25.10"
+      },
+      "package_sha256": "467904443b0b498df367c3223872b73b4859b273de0839049a8cfd6d3d359e18",
+      "package_bytes": 174202688,
+      "url": "https://github.com/ZSeven-W/rish-app/releases/download/runtime-environments-2026-09-15/go-1-25-10-alpine3-23-amd64.rishenv"
+    },
+    {
+      "manifest": {
+        "architecture": "x86_64",
+        "disk_bytes": 2147483648,
+        "disk_sha256": "c14972da18cefa573f439a1ea4ad808296cdb26e3ab6d5f8ded20dd7ba620c58",
+        "display_name": "Rust",
+        "environment_id": "rust-1-91-1-alpine3-23-amd64",
+        "family": "rust",
+        "kernel_sha256": "1e6bf9027720c75c3ed0d79171f21b5791ee40ca9795d07c7c6e04dc5ea2ae90",
+        "minimum_memory_mib": 1024,
+        "schema_version": 1,
+        "version": "1.91.1"
+      },
+      "package_sha256": "5d3070fd7f92104a04d9f4d711ab3935b0bd8ad72ca99f69d3638c1f24091d94",
+      "package_bytes": 238514637,
+      "url": "https://github.com/ZSeven-W/rish-app/releases/download/runtime-environments-2026-09-15/rust-1-91-1-alpine3-23-amd64.rishenv"
+    },
+    {
+      "manifest": {
+        "architecture": "x86_64",
+        "disk_bytes": 536870912,
+        "disk_sha256": "500eac96022a3ec88409cf7e91f6db6c32958446bf065374cdf96e3284fec8f6",
+        "display_name": "Node.js",
+        "environment_id": "node-24-18-1-alpine3-23-amd64",
+        "family": "node",
+        "kernel_sha256": "1e6bf9027720c75c3ed0d79171f21b5791ee40ca9795d07c7c6e04dc5ea2ae90",
+        "minimum_memory_mib": 768,
+        "schema_version": 1,
+        "version": "24.18.1"
+      },
+      "package_sha256": "7177a1dc1b72156e08dcd0ae350bcf013d1231966bf0bf9e59e499755fc3927f",
+      "package_bytes": 32586455,
+      "url": "https://github.com/ZSeven-W/rish-app/releases/download/runtime-environments-2026-09-15/node-24-18-1-alpine3-23-amd64.rishenv"
+    },
+    {
+      "manifest": {
+        "architecture": "x86_64",
+        "disk_bytes": 536870912,
+        "disk_sha256": "099fce34488a9e225ca59c4ae60c206a180495a648b20f82ccf4ffdae5ea2271",
+        "display_name": "Bun",
+        "environment_id": "bun-1-4-0-alpine3-23-amd64",
+        "family": "bun",
+        "kernel_sha256": "1e6bf9027720c75c3ed0d79171f21b5791ee40ca9795d07c7c6e04dc5ea2ae90",
+        "minimum_memory_mib": 1024,
+        "schema_version": 1,
+        "version": "1.4.0"
+      },
+      "package_sha256": "9c31a9620e97187357e64c04e49aae3b46f5ee95e1c992e9d5cbd1f4925a6602",
+      "package_bytes": 36577189,
+      "url": "https://github.com/ZSeven-W/rish-app/releases/download/runtime-environments-2026-09-15/bun-1-4-0-alpine3-23-amd64.rishenv"
+    }
+  ]
+}

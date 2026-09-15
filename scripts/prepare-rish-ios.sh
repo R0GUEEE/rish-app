@@ -4,7 +4,7 @@ set -euo pipefail
 # This is deliberately pinned. Updating rish for the app is a reviewed source
 # upgrade, not an accidental consequence of whatever happens to be checked out
 # next door when the mobile dependencies are prepared.
-readonly EXPECTED_RISH_COMMIT="674565009ffa06988cd74b19918f2ebb96fa833c"
+readonly EXPECTED_RISH_COMMIT="590a79d0f387e9e868528eca366d76c22530d833"
 readonly EXPECTED_RISH_REMOTE="git@github.com:ZSeven-W/rish.git"
 readonly EXPECTED_RISH_PUBLIC_REMOTE="https://github.com/ZSeven-W/rish.git"
 readonly EXPECTED_HEADER_SHA256="559658bbb27df27a1c7739a9a33525e3a897e9d34c0d93840c2270ac74e5d447"
@@ -145,7 +145,12 @@ verify_archive() {
     _rish_pull_image_json \
     _rish_vm_run_docker_json \
     _rish_vm_boot_session \
+    _rish_vm_boot_session_cancellable \
+    _rish_vm_cancel_new \
+    _rish_vm_cancel_request \
+    _rish_vm_cancel_free \
     _rish_vm_session_exec_json \
+    _rish_vm_session_exec_stream_json \
     _rish_vm_session_free \
     _rish_string_free; do
     xcrun nm -gU "${library}" 2>/dev/null | \

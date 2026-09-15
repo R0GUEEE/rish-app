@@ -18,7 +18,7 @@ object GuestAssets {
     const val KERNEL_NAME = "vmlinuz-virt-6.18.35"
     const val INITRAMFS_NAME = "rish-container.cpio"
     const val KERNEL_SHA256 = "1e6bf9027720c75c3ed0d79171f21b5791ee40ca9795d07c7c6e04dc5ea2ae90"
-    const val INITRAMFS_SHA256 = "ebcd2279be5dfc92b1c3264c355bb440a027079bcef2fa9be209654891479b9d"
+    const val INITRAMFS_SHA256 = "17923f268be4e0b6fbfa6d0410094fb9b9d216e69fd4341ffbb839ec592926b0"
 
     /** Fixed, known-good kernel command line for the baked container initramfs. */
     const val COMMAND_LINE =

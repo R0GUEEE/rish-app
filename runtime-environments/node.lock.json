@@ -1,0 +1,460 @@
+{
+  "schema_version": 1,
+  "environment_id": "node-24-18-1-alpine3-23-amd64",
+  "family": "node",
+  "display_name": "Node.js",
+  "version": "24.18.1",
+  "architecture": "x86_64",
+  "kernel_sha256": "1e6bf9027720c75c3ed0d79171f21b5791ee40ca9795d07c7c6e04dc5ea2ae90",
+  "minimum_memory_mib": 768,
+  "disk_mib": 512,
+  "entrypoint": "usr/bin/node",
+  "entry_links": {},
+  "alpine_version": "3.23",
+  "indexes": [
+    {
+      "url": "https://dl-cdn.alpinelinux.org/alpine/v3.23/main/x86_64/APKINDEX.tar.gz",
+      "bytes": 523519,
+      "sha256": "c7053063d79c7741cc09e74d7ea5ebe05bbafcbb9ec70e6e46d4a1379c264b68",
+      "signature_key": "alpine-devel@lists.alpinelinux.org-6165ee59.rsa.pub"
+    },
+    {
+      "url": "https://dl-cdn.alpinelinux.org/alpine/v3.23/community/x86_64/APKINDEX.tar.gz",
+      "bytes": 2383350,
+      "sha256": "a893cd9f671a29565885b7272ddf2ef05c857a8560ba98d164abdabe41a0777b",
+      "signature_key": "alpine-devel@lists.alpinelinux.org-6165ee59.rsa.pub"
+    }
+  ],
+  "packages": [
+    {
+      "name": "ada-libs",
+      "version": "3.3.0-r0",
+      "filename": "ada-libs-3.3.0-r0.apk",
+      "url": "https://dl-cdn.alpinelinux.org/alpine/v3.23/main/x86_64/ada-libs-3.3.0-r0.apk",
+      "package_bytes": 234020,
+      "installed_bytes": 700480,
+      "control_checksum": "Q1c3Mc5F5eryVwPEP5D0NDyA+GDt0=",
+      "license": "( Apache-2.0 OR MIT ) AND MPL-2.0",
+      "dependencies": [
+        "so:libc.musl-x86_64.so.1",
+        "so:libgcc_s.so.1",
+        "so:libstdc++.so.6"
+      ],
+      "source_origin": "ada",
+      "source_commit": "d279ef8c31170898285e2a989f62909992bff448",
+      "source_recipe_url": "https://raw.githubusercontent.com/alpinelinux/aports/d279ef8c31170898285e2a989f62909992bff448/main/ada/APKBUILD",
+      "source_tree_url": "https://github.com/alpinelinux/aports/tree/d279ef8c31170898285e2a989f62909992bff448/main/ada",
+      "sha256": "5afb61331b184c47e91d0637ecb706aaf30e9270e845a6c0417235bdec2009c1",
+      "source_recipe_sha256": "64feedf6a627f24988d0d54ed1ed5e4a4c2b8fb298d2ba7f65386ed521a9b080"
+    },
+    {
+      "name": "brotli-libs",
+      "version": "1.2.0-r0",
+      "filename": "brotli-libs-1.2.0-r0.apk",
+      "url": "https://dl-cdn.alpinelinux.org/alpine/v3.23/main/x86_64/brotli-libs-1.2.0-r0.apk",
+      "package_bytes": 429601,
+      "installed_bytes": 980488,
+      "control_checksum": "Q1CBRpRgLzXSdB6Rb9y0yaHg7FC0I=",
+      "license": "MIT",
+      "dependencies": [
+        "so:libc.musl-x86_64.so.1"
+      ],
+      "source_origin": "brotli",
+      "source_commit": "e1a74d1bc0c4e0308990de2e9ec9d82529fcac8f",
+      "source_recipe_url": "https://raw.githubusercontent.com/alpinelinux/aports/e1a74d1bc0c4e0308990de2e9ec9d82529fcac8f/main/brotli/APKBUILD",
+      "source_tree_url": "https://github.com/alpinelinux/aports/tree/e1a74d1bc0c4e0308990de2e9ec9d82529fcac8f/main/brotli",
+      "sha256": "09fbf1ddf0c71c6c4ab7bc12aef3452d8ace5adeab10c4c30214fc70f5e0e087",
+      "source_recipe_sha256": "e9ca27f8e9e1b9793b82b7e6b3501a9be5239f7be12a1458d35e234dd532b8a9"
+    },
+    {
+      "name": "busybox",
+      "version": "1.37.0-r30",
+      "filename": "busybox-1.37.0-r30.apk",
+      "url": "https://dl-cdn.alpinelinux.org/alpine/v3.23/main/x86_64/busybox-1.37.0-r30.apk",
+      "package_bytes": 504726,
+      "installed_bytes": 813480,
+      "control_checksum": "Q18TR4AbuWsapA0X+CI3w/T/AqRyU=",
+      "license": "GPL-2.0-only",
+      "dependencies": [
+        "so:libc.musl-x86_64.so.1"
+      ],
+      "source_origin": "busybox",
+      "source_commit": "1e823a60eb85606954b3a5af5f8e5bbd1ea680cf",
+      "source_recipe_url": "https://raw.githubusercontent.com/alpinelinux/aports/1e823a60eb85606954b3a5af5f8e5bbd1ea680cf/main/busybox/APKBUILD",
+      "source_tree_url": "https://github.com/alpinelinux/aports/tree/1e823a60eb85606954b3a5af5f8e5bbd1ea680cf/main/busybox",
+      "sha256": "2fea8c73710994099eaec6832b69a0f70163e0d6ee13848af3a5270a16d15c5c",
+      "source_recipe_sha256": "fb2323ac3121c6cd1122c42cabbd19ec28a29a1cf434a4c0759792c63a1c63a8"
+    },
+    {
+      "name": "c-ares",
+      "version": "1.34.8-r0",
+      "filename": "c-ares-1.34.8-r0.apk",
+      "url": "https://dl-cdn.alpinelinux.org/alpine/v3.23/main/x86_64/c-ares-1.34.8-r0.apk",
+      "package_bytes": 110636,
+      "installed_bytes": 243416,
+      "control_checksum": "Q1PY1O4JjyalIyROnm6z2AIweuOUg=",
+      "license": "MIT",
+      "dependencies": [
+        "so:libc.musl-x86_64.so.1"
+      ],
+      "source_origin": "c-ares",
+      "source_commit": "5d4c6f7c12416f51673a8364ae60a3046345f11f",
+      "source_recipe_url": "https://raw.githubusercontent.com/alpinelinux/aports/5d4c6f7c12416f51673a8364ae60a3046345f11f/main/c-ares/APKBUILD",
+      "source_tree_url": "https://github.com/alpinelinux/aports/tree/5d4c6f7c12416f51673a8364ae60a3046345f11f/main/c-ares",
+      "sha256": "7a570d080d05e60b1256ea73586924bf9a25f468c57aae10d1cdfe7fcc3f93a2",
+      "source_recipe_sha256": "b739af81063f71bc3f02279b355985a39473f698f656295295ac220004332075"
+    },
+    {
+      "name": "ca-certificates",
+      "version": "20260611-r0",
+      "filename": "ca-certificates-20260611-r0.apk",
+      "url": "https://dl-cdn.alpinelinux.org/alpine/v3.23/main/x86_64/ca-certificates-20260611-r0.apk",
+      "package_bytes": 129507,
+      "installed_bytes": 212873,
+      "control_checksum": "Q1mZk5ksCwRcmRTFFIJXwz63SZNhU=",
+      "license": "MPL-2.0 AND MIT",
+      "dependencies": [
+        "/bin/sh",
+        "so:libc.musl-x86_64.so.1",
+        "so:libcrypto.so.3"
+      ],
+      "source_origin": "ca-certificates",
+      "source_commit": "6e30aafe4fa807ba70797509731f1e7d644dc8f3",
+      "source_recipe_url": "https://raw.githubusercontent.com/alpinelinux/aports/6e30aafe4fa807ba70797509731f1e7d644dc8f3/main/ca-certificates/APKBUILD",
+      "source_tree_url": "https://github.com/alpinelinux/aports/tree/6e30aafe4fa807ba70797509731f1e7d644dc8f3/main/ca-certificates",
+      "sha256": "c252273ee146f2b20737fda0ff2e6a5a77b478e7cf15387c255d19362f2a7c07",
+      "source_recipe_sha256": "a1429622d05b27e016c1266312be8a9a7e4610da01d7d40826b1681677c53843"
+    },
+    {
+      "name": "ca-certificates-bundle",
+      "version": "20260611-r0",
+      "filename": "ca-certificates-bundle-20260611-r0.apk",
+      "url": "https://dl-cdn.alpinelinux.org/alpine/v3.23/main/x86_64/ca-certificates-bundle-20260611-r0.apk",
+      "package_bytes": 107337,
+      "installed_bytes": 179359,
+      "control_checksum": "Q1QSBCJavNY+6xpzdm5qLo6JS3Qjs=",
+      "license": "MPL-2.0 AND MIT",
+      "dependencies": [],
+      "source_origin": "ca-certificates",
+      "source_commit": "6e30aafe4fa807ba70797509731f1e7d644dc8f3",
+      "source_recipe_url": "https://raw.githubusercontent.com/alpinelinux/aports/6e30aafe4fa807ba70797509731f1e7d644dc8f3/main/ca-certificates/APKBUILD",
+      "source_tree_url": "https://github.com/alpinelinux/aports/tree/6e30aafe4fa807ba70797509731f1e7d644dc8f3/main/ca-certificates",
+      "sha256": "17320275acf188b8d8a4a01f1af94e9e842b50faec33ce13c1ed9b6e7ef653ec",
+      "source_recipe_sha256": "a1429622d05b27e016c1266312be8a9a7e4610da01d7d40826b1681677c53843"
+    },
+    {
+      "name": "icu-data-en",
+      "version": "76.1-r1",
+      "filename": "icu-data-en-76.1-r1.apk",
+      "url": "https://dl-cdn.alpinelinux.org/alpine/v3.23/main/x86_64/icu-data-en-76.1-r1.apk",
+      "package_bytes": 1016029,
+      "installed_bytes": 3008672,
+      "control_checksum": "Q1B3+6pjcFLd2NYgKDHcGaU7X/9w4=",
+      "license": "ICU",
+      "dependencies": [
+        "/bin/sh"
+      ],
+      "source_origin": "icu",
+      "source_commit": "f69cb964d00aba2d395adce1733a78f1318f3da8",
+      "source_recipe_url": "https://raw.githubusercontent.com/alpinelinux/aports/f69cb964d00aba2d395adce1733a78f1318f3da8/main/icu/APKBUILD",
+      "source_tree_url": "https://github.com/alpinelinux/aports/tree/f69cb964d00aba2d395adce1733a78f1318f3da8/main/icu",
+      "sha256": "82d55e064ca2ff15e6ef6c3b7009eb2e869469f56f36c0d84411b265825a3251",
+      "source_recipe_sha256": "af9706646e46ad0667cb8eaace7ce4de01e044a7db33eb639c22f2c9a571c7ea"
+    },
+    {
+      "name": "icu-libs",
+      "version": "76.1-r1",
+      "filename": "icu-libs-76.1-r1.apk",
+      "url": "https://dl-cdn.alpinelinux.org/alpine/v3.23/main/x86_64/icu-libs-76.1-r1.apk",
+      "package_bytes": 1920286,
+      "installed_bytes": 4762632,
+      "control_checksum": "Q1Wy55i6IPgx1k5UUmQxxS2Y4+35A=",
+      "license": "ICU",
+      "dependencies": [
+        "icu-data=76.1-r1",
+        "so:libc.musl-x86_64.so.1",
+        "so:libgcc_s.so.1",
+        "so:libstdc++.so.6"
+      ],
+      "source_origin": "icu",
+      "source_commit": "f69cb964d00aba2d395adce1733a78f1318f3da8",
+      "source_recipe_url": "https://raw.githubusercontent.com/alpinelinux/aports/f69cb964d00aba2d395adce1733a78f1318f3da8/main/icu/APKBUILD",
+      "source_tree_url": "https://github.com/alpinelinux/aports/tree/f69cb964d00aba2d395adce1733a78f1318f3da8/main/icu",
+      "sha256": "c6b53c168bb1af380fcbc305ff9e25c30e3cab756165fd7b8f77d4dac132aa4d",
+      "source_recipe_sha256": "af9706646e46ad0667cb8eaace7ce4de01e044a7db33eb639c22f2c9a571c7ea"
+    },
+    {
+      "name": "libcrypto3",
+      "version": "3.5.8-r0",
+      "filename": "libcrypto3-3.5.8-r0.apk",
+      "url": "https://dl-cdn.alpinelinux.org/alpine/v3.23/main/x86_64/libcrypto3-3.5.8-r0.apk",
+      "package_bytes": 1978546,
+      "installed_bytes": 5217878,
+      "control_checksum": "Q1xdIKUDa9EsUTBlKHkFS+ZYQpwdU=",
+      "license": "Apache-2.0",
+      "dependencies": [
+        "so:libc.musl-x86_64.so.1"
+      ],
+      "source_origin": "openssl",
+      "source_commit": "2b4b2590f782b95276d31dcaaf41554b1a597a0b",
+      "source_recipe_url": "https://raw.githubusercontent.com/alpinelinux/aports/2b4b2590f782b95276d31dcaaf41554b1a597a0b/main/openssl/APKBUILD",
+      "source_tree_url": "https://github.com/alpinelinux/aports/tree/2b4b2590f782b95276d31dcaaf41554b1a597a0b/main/openssl",
+      "sha256": "a5592b5cf276bc7a30ac7b161d46446085490b640faa1f839ea98eb15aacad31",
+      "source_recipe_sha256": "612ccf2841efe957089e825b50292a20efb0d9ba8ca3f2a292cefa2515963d21"
+    },
+    {
+      "name": "libgcc",
+      "version": "15.2.0-r2",
+      "filename": "libgcc-15.2.0-r2.apk",
+      "url": "https://dl-cdn.alpinelinux.org/alpine/v3.23/main/x86_64/libgcc-15.2.0-r2.apk",
+      "package_bytes": 80358,
+      "installed_bytes": 173920,
+      "control_checksum": "Q1V/zL6e6/I/LE847iok+LC91Qj/c=",
+      "license": "GPL-2.0-or-later AND LGPL-2.1-or-later",
+      "dependencies": [
+        "so:libc.musl-x86_64.so.1"
+      ],
+      "source_origin": "gcc",
+      "source_commit": "7fa6e7fd3465c5ff89cc33a56d20bf4d59105aaf",
+      "source_recipe_url": "https://raw.githubusercontent.com/alpinelinux/aports/7fa6e7fd3465c5ff89cc33a56d20bf4d59105aaf/main/gcc/APKBUILD",
+      "source_tree_url": "https://github.com/alpinelinux/aports/tree/7fa6e7fd3465c5ff89cc33a56d20bf4d59105aaf/main/gcc",
+      "sha256": "4279d14cbf43311312d3a7d43619f4c15ede2e46d5608ba421ed157ded57c700",
+      "source_recipe_sha256": "92b3dc5997085add8c4debbcca374af63101a17fc7fdb2038927c60029f26081"
+    },
+    {
+      "name": "libssl3",
+      "version": "3.5.8-r0",
+      "filename": "libssl3-3.5.8-r0.apk",
+      "url": "https://dl-cdn.alpinelinux.org/alpine/v3.23/main/x86_64/libssl3-3.5.8-r0.apk",
+      "package_bytes": 379263,
+      "installed_bytes": 839544,
+      "control_checksum": "Q1BxhIh0keD+/6VxhEGbE4dFAEe7k=",
+      "license": "Apache-2.0",
+      "dependencies": [
+        "libcrypto3=3.5.8-r0",
+        "so:libc.musl-x86_64.so.1",
+        "so:libcrypto.so.3"
+      ],
+      "source_origin": "openssl",
+      "source_commit": "2b4b2590f782b95276d31dcaaf41554b1a597a0b",
+      "source_recipe_url": "https://raw.githubusercontent.com/alpinelinux/aports/2b4b2590f782b95276d31dcaaf41554b1a597a0b/main/openssl/APKBUILD",
+      "source_tree_url": "https://github.com/alpinelinux/aports/tree/2b4b2590f782b95276d31dcaaf41554b1a597a0b/main/openssl",
+      "sha256": "f80b76cb5e5a52cfc1ced08f8dc3022adc0ce0a3d6e7741976731b22c71fe310",
+      "source_recipe_sha256": "612ccf2841efe957089e825b50292a20efb0d9ba8ca3f2a292cefa2515963d21"
+    },
+    {
+      "name": "libstdc++",
+      "version": "15.2.0-r2",
+      "filename": "libstdc++-15.2.0-r2.apk",
+      "url": "https://dl-cdn.alpinelinux.org/alpine/v3.23/main/x86_64/libstdc++-15.2.0-r2.apk",
+      "package_bytes": 961296,
+      "installed_bytes": 2804104,
+      "control_checksum": "Q1Uo13QXoWcGRor4UvKFmtAPF24mY=",
+      "license": "GPL-2.0-or-later AND LGPL-2.1-or-later",
+      "dependencies": [
+        "so:libc.musl-x86_64.so.1",
+        "so:libgcc_s.so.1"
+      ],
+      "source_origin": "gcc",
+      "source_commit": "7fa6e7fd3465c5ff89cc33a56d20bf4d59105aaf",
+      "source_recipe_url": "https://raw.githubusercontent.com/alpinelinux/aports/7fa6e7fd3465c5ff89cc33a56d20bf4d59105aaf/main/gcc/APKBUILD",
+      "source_tree_url": "https://github.com/alpinelinux/aports/tree/7fa6e7fd3465c5ff89cc33a56d20bf4d59105aaf/main/gcc",
+      "sha256": "d4be2967a06d78b499f5e136323f4ebe51ad367b381933b3369539499c4f5752",
+      "source_recipe_sha256": "92b3dc5997085add8c4debbcca374af63101a17fc7fdb2038927c60029f26081"
+    },
+    {
+      "name": "musl",
+      "version": "1.2.5-r23",
+      "filename": "musl-1.2.5-r23.apk",
+      "url": "https://dl-cdn.alpinelinux.org/alpine/v3.23/main/x86_64/musl-1.2.5-r23.apk",
+      "package_bytes": 414071,
+      "installed_bytes": 666216,
+      "control_checksum": "Q1G2xQQm08BlbpxaVnpaWWAcf0MHo=",
+      "license": "MIT",
+      "dependencies": [],
+      "source_origin": "musl",
+      "source_commit": "8aef0c37b0ad23dc4137f0e4755b97a59dc698b8",
+      "source_recipe_url": "https://raw.githubusercontent.com/alpinelinux/aports/8aef0c37b0ad23dc4137f0e4755b97a59dc698b8/main/musl/APKBUILD",
+      "source_tree_url": "https://github.com/alpinelinux/aports/tree/8aef0c37b0ad23dc4137f0e4755b97a59dc698b8/main/musl",
+      "sha256": "4f3c4a7bf9f51d2c91007e333b17459362ffd881b4a343e8da07b6c50c4f4a0d",
+      "source_recipe_sha256": "e8425e24c5c3c6d8f74b4412b11c6990fda6dbf7648c79ec6e2efa082fc5adcf"
+    },
+    {
+      "name": "nghttp2-libs",
+      "version": "1.69.0-r0",
+      "filename": "nghttp2-libs-1.69.0-r0.apk",
+      "url": "https://dl-cdn.alpinelinux.org/alpine/v3.23/main/x86_64/nghttp2-libs-1.69.0-r0.apk",
+      "package_bytes": 63226,
+      "installed_bytes": 132896,
+      "control_checksum": "Q1a4ZRIn3T+RVd7TDdwXF1en9bkaU=",
+      "license": "MIT",
+      "dependencies": [
+        "so:libc.musl-x86_64.so.1"
+      ],
+      "source_origin": "nghttp2",
+      "source_commit": "40d265063c14143f5ef8a35c216b9e6392d120a7",
+      "source_recipe_url": "https://raw.githubusercontent.com/alpinelinux/aports/40d265063c14143f5ef8a35c216b9e6392d120a7/main/nghttp2/APKBUILD",
+      "source_tree_url": "https://github.com/alpinelinux/aports/tree/40d265063c14143f5ef8a35c216b9e6392d120a7/main/nghttp2",
+      "sha256": "e52a5325b8720449ed4f123a33202794361b6b164c127abdb4b3c057467e7a41",
+      "source_recipe_sha256": "617e1bb3ac747d847c8b46d13d205daf5f0a05491cfaffedf7a09f154e353f40"
+    },
+    {
+      "name": "nodejs",
+      "version": "24.18.1-r0",
+      "filename": "nodejs-24.18.1-r0.apk",
+      "url": "https://dl-cdn.alpinelinux.org/alpine/v3.23/main/x86_64/nodejs-24.18.1-r0.apk",
+      "package_bytes": 19753406,
+      "installed_bytes": 55086400,
+      "control_checksum": "Q1WUs8DK/cJQDusc2jv4YscnkGfJk=",
+      "license": "MIT",
+      "dependencies": [
+        "ca-certificates",
+        "/bin/sh",
+        "so:libada.so.3",
+        "so:libbrotlidec.so.1",
+        "so:libbrotlienc.so.1",
+        "so:libc.musl-x86_64.so.1",
+        "so:libcares.so.2",
+        "so:libcrypto.so.3",
+        "so:libgcc_s.so.1",
+        "so:libicui18n.so.76",
+        "so:libicuuc.so.76",
+        "so:libnghttp2.so.14",
+        "so:libsimdjson.so.25",
+        "so:libsimdutf.so.27",
+        "so:libsqlite3.so.0",
+        "so:libssl.so.3",
+        "so:libstdc++.so.6",
+        "so:libz.so.1",
+        "so:libzstd.so.1"
+      ],
+      "source_origin": "nodejs",
+      "source_commit": "bcfd6a07384b425c00acfd1e2404e647271b2c45",
+      "source_recipe_url": "https://raw.githubusercontent.com/alpinelinux/aports/bcfd6a07384b425c00acfd1e2404e647271b2c45/main/nodejs/APKBUILD",
+      "source_tree_url": "https://github.com/alpinelinux/aports/tree/bcfd6a07384b425c00acfd1e2404e647271b2c45/main/nodejs",
+      "sha256": "3c78c9bc8a1d52cc18e79f94120d69ae7705dab1d77054dfa040a064bf344b87",
+      "source_recipe_sha256": "550ea60c17ddec5f9648bd2dcf38b9749518c66ec525f5238f02479395053849"
+    },
+    {
+      "name": "npm",
+      "version": "11.11.0-r0",
+      "filename": "npm-11.11.0-r0.apk",
+      "url": "https://dl-cdn.alpinelinux.org/alpine/v3.23/community/x86_64/npm-11.11.0-r0.apk",
+      "package_bytes": 2312152,
+      "installed_bytes": 7869171,
+      "control_checksum": "Q1kKkHrqA8nzU5Noesg73Py1IFL0c=",
+      "license": "Artistic-2.0",
+      "dependencies": [
+        "nodejs"
+      ],
+      "source_origin": "npm",
+      "source_commit": "6e6685692e442b96154e0ba05aeb5e784685ee44",
+      "source_recipe_url": "https://raw.githubusercontent.com/alpinelinux/aports/6e6685692e442b96154e0ba05aeb5e784685ee44/community/npm/APKBUILD",
+      "source_tree_url": "https://github.com/alpinelinux/aports/tree/6e6685692e442b96154e0ba05aeb5e784685ee44/community/npm",
+      "sha256": "9ceb98c5ee7b2a5f63b4d7b9a95f48682d5f169031bfe7dd60b68c922cea46e4",
+      "source_recipe_sha256": "f03e2f61ebdc72396f07435ddb85328deacb17fb0c9ff41ad6754ce764070f90"
+    },
+    {
+      "name": "simdjson",
+      "version": "3.12.0-r0",
+      "filename": "simdjson-3.12.0-r0.apk",
+      "url": "https://dl-cdn.alpinelinux.org/alpine/v3.23/main/x86_64/simdjson-3.12.0-r0.apk",
+      "package_bytes": 99532,
+      "installed_bytes": 240352,
+      "control_checksum": "Q14ObbJgQmj75Eezs7jq1GRYT04eo=",
+      "license": "Apache-2.0 OR MIT",
+      "dependencies": [
+        "so:libc.musl-x86_64.so.1",
+        "so:libgcc_s.so.1",
+        "so:libstdc++.so.6"
+      ],
+      "source_origin": "simdjson",
+      "source_commit": "2b5e2732388d9b1f35e9bcb835aa26b51607fe98",
+      "source_recipe_url": "https://raw.githubusercontent.com/alpinelinux/aports/2b5e2732388d9b1f35e9bcb835aa26b51607fe98/main/simdjson/APKBUILD",
+      "source_tree_url": "https://github.com/alpinelinux/aports/tree/2b5e2732388d9b1f35e9bcb835aa26b51607fe98/main/simdjson",
+      "sha256": "1dfe639550b5457018b7993a9ac9417a6b3d0e4ecbbdacf0ef0e3b42582173e4",
+      "source_recipe_sha256": "39f1005e7f71f0a3aaf337813c50c8e78f618c334ed31f9a5c06a01db86eddcf"
+    },
+    {
+      "name": "simdutf",
+      "version": "7.5.0-r1",
+      "filename": "simdutf-7.5.0-r1.apk",
+      "url": "https://dl-cdn.alpinelinux.org/alpine/v3.23/main/x86_64/simdutf-7.5.0-r1.apk",
+      "package_bytes": 236804,
+      "installed_bytes": 677840,
+      "control_checksum": "Q1Z52lBV0mZZ/SuVGL83baA9pevNw=",
+      "license": "Apache-2.0 OR MIT",
+      "dependencies": [
+        "so:libc.musl-x86_64.so.1",
+        "so:libgcc_s.so.1",
+        "so:libstdc++.so.6"
+      ],
+      "source_origin": "simdutf",
+      "source_commit": "2a88a9f9caa744b739ef289cd02d69f1beffa5c5",
+      "source_recipe_url": "https://raw.githubusercontent.com/alpinelinux/aports/2a88a9f9caa744b739ef289cd02d69f1beffa5c5/main/simdutf/APKBUILD",
+      "source_tree_url": "https://github.com/alpinelinux/aports/tree/2a88a9f9caa744b739ef289cd02d69f1beffa5c5/main/simdutf",
+      "sha256": "6ca498fdaf3eae672e656f3746c2b4a4740a1924d1210af43ec6233b4a5a1476",
+      "source_recipe_sha256": "6d9cb9ac3514adfb43f264d0a6876a0e7f044ed289108ccd4c51399a985454ac"
+    },
+    {
+      "name": "sqlite-libs",
+      "version": "3.53.4-r0",
+      "filename": "sqlite-libs-3.53.4-r0.apk",
+      "url": "https://dl-cdn.alpinelinux.org/alpine/v3.23/main/x86_64/sqlite-libs-3.53.4-r0.apk",
+      "package_bytes": 877766,
+      "installed_bytes": 1640464,
+      "control_checksum": "Q13TMQqTB64B2rsAGHcL97KWjv8Zk=",
+      "license": "blessing",
+      "dependencies": [
+        "so:libc.musl-x86_64.so.1"
+      ],
+      "source_origin": "sqlite",
+      "source_commit": "b45fc81206707171f23602615ce5619166014323",
+      "source_recipe_url": "https://raw.githubusercontent.com/alpinelinux/aports/b45fc81206707171f23602615ce5619166014323/main/sqlite/APKBUILD",
+      "source_tree_url": "https://github.com/alpinelinux/aports/tree/b45fc81206707171f23602615ce5619166014323/main/sqlite",
+      "sha256": "414be12c879052f4614a42a10fc12af67a88ba49e8e1e33f78cd9ddbbdb13fee",
+      "source_recipe_sha256": "8bbd40fd701b8cd5785262457351e1447a59fa51590cc172318269ffb124be68"
+    },
+    {
+      "name": "zlib",
+      "version": "1.3.2-r0",
+      "filename": "zlib-1.3.2-r0.apk",
+      "url": "https://dl-cdn.alpinelinux.org/alpine/v3.23/main/x86_64/zlib-1.3.2-r0.apk",
+      "package_bytes": 56191,
+      "installed_bytes": 108376,
+      "control_checksum": "Q1aLuX6lJV53qpdOZUdtZIMq1WKIo=",
+      "license": "Zlib",
+      "dependencies": [
+        "so:libc.musl-x86_64.so.1"
+      ],
+      "source_origin": "zlib",
+      "source_commit": "f8c94d2e1d318ab29eb4ac5f00225341c877ed65",
+      "source_recipe_url": "https://raw.githubusercontent.com/alpinelinux/aports/f8c94d2e1d318ab29eb4ac5f00225341c877ed65/main/zlib/APKBUILD",
+      "source_tree_url": "https://github.com/alpinelinux/aports/tree/f8c94d2e1d318ab29eb4ac5f00225341c877ed65/main/zlib",
+      "sha256": "f56dea63692059bd65854bb179b7551971a441000b0d98c5b031291ca0450b56",
+      "source_recipe_sha256": "e9ad3aa7ecf048f4bfa26b946275bee347f75254385320e90eecd3fd6651bcf4"
+    },
+    {
+      "name": "zstd-libs",
+      "version": "1.5.7-r2",
+      "filename": "zstd-libs-1.5.7-r2.apk",
+      "url": "https://dl-cdn.alpinelinux.org/alpine/v3.23/main/x86_64/zstd-libs-1.5.7-r2.apk",
+      "package_bytes": 373813,
+      "installed_bytes": 710336,
+      "control_checksum": "Q11Qe4rDxDNaQEBawg5JusnUNkK+Y=",
+      "license": "BSD-3-Clause OR GPL-2.0-or-later",
+      "dependencies": [
+        "so:libc.musl-x86_64.so.1"
+      ],
+      "source_origin": "zstd",
+      "source_commit": "3c6e2ee2b16f403d53eab39c4426eb61f003c322",
+      "source_recipe_url": "https://raw.githubusercontent.com/alpinelinux/aports/3c6e2ee2b16f403d53eab39c4426eb61f003c322/main/zstd/APKBUILD",
+      "source_tree_url": "https://github.com/alpinelinux/aports/tree/3c6e2ee2b16f403d53eab39c4426eb61f003c322/main/zstd",
+      "sha256": "d5fcc58f7f071a5658d97b09838668e4443203217631992915b8e60656904104",
+      "source_recipe_sha256": "635134417b866a71fc0684bfbc1f8b5ff660c3edcd68f1b0b1335f04963ef5c1"
+    }
+  ],
+  "minimum_scratch_bytes": 50331648,
+  "verification_status": "built_artifacts_require_current_rish_execution",
+  "extra_archives": []
+}

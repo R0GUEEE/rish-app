@@ -23,7 +23,7 @@ jobs:
   testflight:
     runs-on: macos-26
     environment: testflight
-    timeout-minutes: 120
+    timeout-minutes: 180
     env:
       DEVELOPER_DIR: /Applications/Xcode_26.6.app/Contents/Developer
       RELEASE_VERSION: ${{ inputs.version }}
@@ -113,6 +113,24 @@ jobs:
         # A cold app build can consume 23 minutes before guest boot and tests.
         timeout-minutes: 45
         run: bash scripts/ci/test-ios-preview.sh
+      - name: Cache pinned language packages
+        uses: actions/cache@v4
+        with:
+          path: .build/runtime-environment-fixtures
+          key: rish-language-packages-${{ hashFiles('runtime-environments/catalog.json') }}
+      - name: Execute all six installed language environments on iOS Simulator
+        timeout-minutes: 75
+        run: bash scripts/ci/test-ios-runtime-environments.sh
+      - name: Save language execution evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: language-execution-${{ env.RELEASE_BUILD }}
+          path: |
+            .build/runtime-environment-tests/tests.json
+            .build/runtime-environment-tests/Runtime.xcresult
+          if-no-files-found: ignore
+          retention-days: 14
       - name: Sign, archive and export IPA
         working-directory: apps/mobile
         env:

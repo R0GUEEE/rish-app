@@ -71,6 +71,7 @@ type Props = {
   onConfigureCredential: () => void;
   onOpenModelPicker: () => void;
   onOpenMirrors: () => void;
+  onOpenEnvironments?: () => void;
   onOpenRuntime: () => void;
   onPreferencesChanged: () => void;
   onProviderConfigurationChanged?: (harness: ConfigurableHarness | 'glm') => void;
@@ -440,6 +441,24 @@ export function SettingsSheet(props: Props) {
               </View>
               <AppIcon color={colors.faint} icon={ChevronRight} size={18} />
             </Pressable>
+            {props.onOpenEnvironments !== undefined && (
+              <>
+                <Divider />
+                <Pressable
+                  accessibilityLabel={t('settings.environments')}
+                  accessibilityRole="button"
+                  onPress={props.onOpenEnvironments}
+                  style={styles.linkRow}
+                >
+                  <SettingIcon icon={PackageOpen} />
+                  <View style={styles.flex}>
+                    <Text style={styles.settingTitle}>{t('settings.environments')}</Text>
+                    <Text style={styles.settingDescription}>{t('settings.environments.description')}</Text>
+                  </View>
+                  <AppIcon color={colors.faint} icon={ChevronRight} size={18} />
+                </Pressable>
+              </>
+            )}
             <Divider />
             <SettingHeader
               description={t('settings.toolPermission.description')}

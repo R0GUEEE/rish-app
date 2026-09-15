@@ -16,6 +16,7 @@ import FolderPlus from 'lucide-react-native/icons/folder-plus';
 import Hash from 'lucide-react-native/icons/hash';
 import ListChecks from 'lucide-react-native/icons/list-checks';
 import Pencil from 'lucide-react-native/icons/pencil';
+import Play from 'lucide-react-native/icons/play';
 import RefreshCw from 'lucide-react-native/icons/refresh-cw';
 import Save from 'lucide-react-native/icons/save';
 import Trash2 from 'lucide-react-native/icons/trash-2';
@@ -23,6 +24,9 @@ import X from 'lucide-react-native/icons/x';
 import {
   ActivityIndicator,
   Alert,
+  Keyboard,
+  KeyboardAvoidingView,
+  Platform,
   Pressable,
   ScrollView,
   StyleSheet,
@@ -133,6 +137,9 @@ export function WorkspaceDrawer({
   readOnly = false,
   visible,
   onClose,
+  onDismiss,
+  onRunProgram,
+  runProgramBlocked = false,
 }: {
   confirmDestructive?: boolean;
   workspaceRoot?: WorkspaceRootRefV1;
@@ -141,6 +148,9 @@ export function WorkspaceDrawer({
   readOnly?: boolean;
   visible: boolean;
   onClose: () => void;
+  onDismiss?: () => void;
+  onRunProgram?: () => void;
+  runProgramBlocked?: boolean;
 }) {
   const insets = useSafeAreaInsets();
   const { colors, t } = useAppPresentation();
@@ -185,6 +195,21 @@ export function WorkspaceDrawer({
   const [newName, setNewName] = useState('');
   const [renameEntry, setRenameEntry] = useState<WorkspaceEntry | null>(null);
   const [renameName, setRenameName] = useState('');
+  const filesScroll = useRef<React.ComponentRef<typeof ScrollView>>(null);
+  const nameFormTop = useRef(0);
+  const nameFormActive = useRef(false);
+  nameFormActive.current = visible && (createKind !== null || renameEntry !== null);
+  const revealNameForm = useCallback(() => {
+    if (!nameFormActive.current) return;
+    requestAnimationFrame(() => {
+      if (nameFormActive.current) filesScroll.current?.scrollTo({ y: nameFormTop.current, animated: true });
+    });
+  }, []);
+  useEffect(() => {
+    if (!visible) return;
+    const listener = Keyboard.addListener('keyboardDidShow', revealNameForm);
+    return () => listener.remove();
+  }, [visible, revealNameForm]);
   const [openFile, setOpenFile] = useState<WorkspaceEntry | null>(null);
   const openFileAuthorityRef = useRef<{
     root: WorkspaceRootRefV1;
@@ -896,8 +921,14 @@ export function WorkspaceDrawer({
     <SlidingPanel
       accessibilityLabel={t('files.title')}
       onClose={requestDrawerClose}
+      onDismiss={onDismiss}
       visible={visible}
     >
+      <KeyboardAvoidingView
+        behavior={Platform.OS === 'ios' ? 'padding' : 'height'}
+        enabled={visible}
+        style={styles.keyboardRoot}
+      >
       <View
         style={[
           styles.root,
@@ -925,8 +956,30 @@ export function WorkspaceDrawer({
           </Pressable>
         </View>
 
+        {onRunProgram !== undefined && rootReady && (
+          <Pressable
+            accessibilityLabel={t('files.runProgram')}
+            accessibilityRole="button"
+            disabled={busy || runProgramBlocked}
+            onPress={() => confirmEditorExit(() => {
+              closeEditor();
+              onRunProgram();
+            })}
+            style={styles.pathBar}
+          >
+            <AppIcon color={colors.text} icon={Play} size={18} />
+            <Text style={styles.pathText}>{t('files.runProgram')}</Text>
+          </Pressable>
+        )}
+
         {openFile === null ? (
-          <>
+          <ScrollView
+            ref={filesScroll}
+            style={styles.fileScroll}
+            contentContainerStyle={styles.fileScrollContent}
+            keyboardShouldPersistTaps="handled"
+            keyboardDismissMode="interactive"
+          >
             <View style={styles.pathBar}>
               {path.length > 0 && (
                 <Pressable
@@ -1026,7 +1079,10 @@ export function WorkspaceDrawer({
               </Pressable>
             </View>
             {createKind !== null && (
-              <View style={styles.inlineEditor}>
+              <View style={styles.inlineEditor} onLayout={event => {
+                nameFormTop.current = event.nativeEvent.layout.y;
+                if (Keyboard.isVisible()) revealNameForm();
+              }}>
                 <Text style={styles.inlineLabel}>
                   {createKind === 'file'
                     ? t('files.newFile')
@@ -1035,6 +1091,12 @@ export function WorkspaceDrawer({
                 <TextInput
                   accessibilityLabel={t('files.namePlaceholder')}
                   autoFocus
+                  autoCapitalize="none"
+                  autoCorrect={false}
+                  spellCheck={false}
+                  returnKeyType="done"
+                  onFocus={revealNameForm}
+                  onSubmitEditing={() => create().catch(() => undefined)}
                   onChangeText={setNewName}
                   placeholder={t('files.namePlaceholder')}
                   placeholderTextColor={colors.faint}
@@ -1076,13 +1138,22 @@ export function WorkspaceDrawer({
               </View>
             )}
             {renameEntry !== null && (
-              <View style={styles.inlineEditor}>
+              <View style={styles.inlineEditor} onLayout={event => {
+                nameFormTop.current = event.nativeEvent.layout.y;
+                if (Keyboard.isVisible()) revealNameForm();
+              }}>
                 <Text style={styles.inlineLabel}>
                   {t('files.rename', { name: renameEntry.name })}
                 </Text>
                 <TextInput
                   accessibilityLabel={t('common.rename')}
                   autoFocus
+                  autoCapitalize="none"
+                  autoCorrect={false}
+                  spellCheck={false}
+                  returnKeyType="done"
+                  onFocus={revealNameForm}
+                  onSubmitEditing={() => applyRename().catch(() => undefined)}
                   onChangeText={setRenameName}
                   placeholder={renameEntry.name}
                   placeholderTextColor={colors.faint}
@@ -1124,7 +1195,7 @@ export function WorkspaceDrawer({
                 </View>
               </View>
             )}
-            <ScrollView contentContainerStyle={styles.list}>
+            <View style={styles.list}>
               {busy && entries.length === 0 ? (
                 <View style={styles.loading}>
                   <ActivityIndicator color={colors.accent} />
@@ -1254,12 +1325,14 @@ export function WorkspaceDrawer({
                     </Pressable>
                   </View>
                 ))}
-            </ScrollView>
-          </>
+            </View>
+          </ScrollView>
         ) : (
           <ScrollView
+            style={styles.fileScroll}
             contentContainerStyle={styles.editor}
             keyboardDismissMode="interactive"
+            keyboardShouldPersistTaps="handled"
           >
             <Text style={styles.editorPath}>
               {displayPath(openFile.path, rootLabel)}
@@ -1267,6 +1340,9 @@ export function WorkspaceDrawer({
             <TextInput
               accessibilityLabel={t('files.content')}
               editable={!readOnly && !busy}
+              autoCapitalize="none"
+              autoCorrect={false}
+              spellCheck={false}
               multiline
               onChangeText={changeContent}
               placeholder={t('files.content')}
@@ -1389,12 +1465,16 @@ export function WorkspaceDrawer({
           </Text>
         )}
       </View>
+      </KeyboardAvoidingView>
     </SlidingPanel>
   );
 }
 
 const createStyles = (colors: ThemePalette) =>
   StyleSheet.create({
+    keyboardRoot: { flex: 1 },
+    fileScroll: { flex: 1 },
+    fileScrollContent: { paddingBottom: 16 },
     root: {
       flex: 1,
       backgroundColor: colors.background,

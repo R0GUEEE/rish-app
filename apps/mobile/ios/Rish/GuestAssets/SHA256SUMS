@@ -6,5 +6,5 @@
 # LocalGuestModule re-checks these digests at every boot and fails closed on
 # mismatch (E_GUEST_ASSET_INTEGRITY). The guest agent is rebuilt from the
 # pinned host revision; see guest-agent-build.json and scripts/refresh-guest-agent.py.
-ebcd2279be5dfc92b1c3264c355bb440a027079bcef2fa9be209654891479b9d  rish-container.cpio
+17923f268be4e0b6fbfa6d0410094fb9b9d216e69fd4341ffbb839ec592926b0  rish-container.cpio
 1e6bf9027720c75c3ed0d79171f21b5791ee40ca9795d07c7c6e04dc5ea2ae90  vmlinuz-virt-6.18.35

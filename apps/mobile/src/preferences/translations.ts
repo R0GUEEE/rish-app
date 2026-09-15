@@ -560,6 +560,8 @@ const enUS = {
   'settings.confirmDestructiveFiles.description':
     'Ask before deleting or overwriting local files.',
   'settings.packageMirrors': 'Package mirrors',
+  'settings.environments': 'Language environments',
+  'settings.environments.description': 'Download Python, Java, Go, Rust, Bun and Node.js only when needed.',
   'settings.packageMirrors.description':
     'Configure Alpine, pip, and npm sources for the local rish guest.',
   'settings.gitHttpsProxy': 'Git HTTPS proxy',
@@ -821,6 +823,7 @@ const enUS = {
   'files.namePlaceholder': 'Name',
   'files.create': 'Create',
   'files.close': 'Close files',
+  'files.runProgram': 'Run a program',
   'files.up': 'Up one folder',
   'files.refresh': 'Refresh files',
   'files.loading': 'Loading workspace…',
@@ -1518,6 +1521,8 @@ const zhCN: Readonly<Record<TranslationKey, string>> = {
   'settings.confirmDestructiveFiles': '危险操作前确认',
   'settings.confirmDestructiveFiles.description': '删除或覆盖本地文件前询问。',
   'settings.packageMirrors': '软件源镜像',
+  'settings.environments': '语言运行环境',
+  'settings.environments.description': '按需下载 Python、Java、Go、Rust、Bun 和 Node.js。',
   'settings.packageMirrors.description':
     '配置本地 rish guest 使用的 Alpine、pip 和 npm 软件源。',
   'settings.gitHttpsProxy': 'Git HTTPS 代理',
@@ -1769,6 +1774,7 @@ const zhCN: Readonly<Record<TranslationKey, string>> = {
   'files.namePlaceholder': '名称',
   'files.create': '创建',
   'files.close': '关闭文件',
+  'files.runProgram': '运行程序',
   'files.up': '返回上一级',
   'files.refresh': '刷新文件',
   'files.loading': '正在载入工作区…',

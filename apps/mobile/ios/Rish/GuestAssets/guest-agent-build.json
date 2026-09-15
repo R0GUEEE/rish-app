@@ -1,9 +1,103 @@
 {
-  "rish_commit": "674565009ffa06988cd74b19918f2ebb96fa833c",
+  "rish_commit": "590a79d0f387e9e868528eca366d76c22530d833",
   "rust_toolchain": "1.94",
   "target": "x86_64-unknown-linux-musl",
   "base_initramfs_sha256": "152905238ade87b7e1cd495508ff1bb92807b4440cc0ed056030e4dfd72caea0",
   "agent_sha256": "c03ce56dbcb28a04cb2307abc476ca92bbdae071aefb88057eb4ef586dfe403a",
-  "init_sha256": "359db280c6fd53a5e5499665e211acd91467974e8bc1124bf7e76d1442d29c4d",
-  "initramfs_sha256": "ebcd2279be5dfc92b1c3264c355bb440a027079bcef2fa9be209654891479b9d"
+  "init_sha256": "cab7504b8587d44cd3c1e732677801134bfe7bfb663411cac0bcb2ab775294c4",
+  "initramfs_sha256": "17923f268be4e0b6fbfa6d0410094fb9b9d216e69fd4341ffbb839ec592926b0",
+  "agent_rish_commit": "674565009ffa06988cd74b19918f2ebb96fa833c",
+  "kernel_modules": [
+    {
+      "path": "lib/modules/6.18.35-0-virt/kernel/drivers/block/virtio_blk.ko",
+      "sha256": "2229ae30e4205a9ddb57ffb242517c1108f9ddb31fc481ca5d68f1335637cd5f",
+      "bytes": 74215,
+      "source_asset": "initramfs-virt",
+      "source_sha256": "6d80a739fedeeb6cd63e24dd208845e22199c41a5fb2054941ef61ec30264fa9"
+    },
+    {
+      "path": "lib/modules/6.18.35-0-virt/kernel/fs/fat/fat.ko",
+      "sha256": "dd09359a929f9470bbfbbe66377166036cfad3e65c3d26e950c0e8608a3c3133",
+      "bytes": 228935,
+      "source_asset": "initramfs-virt",
+      "source_sha256": "6d80a739fedeeb6cd63e24dd208845e22199c41a5fb2054941ef61ec30264fa9"
+    },
+    {
+      "path": "lib/modules/6.18.35-0-virt/kernel/fs/fat/vfat.ko",
+      "sha256": "4847860f7d375de7ccb9bc55daa9d3453b7d8afca233dd4cc6defb8879cb3f6d",
+      "bytes": 59631,
+      "source_asset": "initramfs-virt",
+      "source_sha256": "6d80a739fedeeb6cd63e24dd208845e22199c41a5fb2054941ef61ec30264fa9"
+    },
+    {
+      "path": "lib/modules/6.18.35-0-virt/kernel/fs/nls/nls_cp437.ko",
+      "sha256": "72173746c8b2861fce8255ba87710ce131370f26c79d7dc173e15a9d93d3286d",
+      "bytes": 19143,
+      "source_asset": "initramfs-virt",
+      "source_sha256": "6d80a739fedeeb6cd63e24dd208845e22199c41a5fb2054941ef61ec30264fa9"
+    },
+    {
+      "path": "lib/modules/6.18.35-0-virt/kernel/fs/nls/nls_ascii.ko",
+      "sha256": "9448e21560dd59d7e353888cd925e50b685b2b92b5735e568a1aa78071be176b",
+      "bytes": 17255,
+      "source_asset": "initramfs-virt",
+      "source_sha256": "6d80a739fedeeb6cd63e24dd208845e22199c41a5fb2054941ef61ec30264fa9"
+    },
+    {
+      "path": "lib/modules/6.18.35-0-virt/kernel/fs/nls/nls_utf8.ko",
+      "sha256": "79a7310ec06e91d014b2b167c700f13f3b5534044aa2ea4d5a0f68cdb3708ba1",
+      "bytes": 14671,
+      "source_asset": "initramfs-virt",
+      "source_sha256": "6d80a739fedeeb6cd63e24dd208845e22199c41a5fb2054941ef61ec30264fa9"
+    },
+    {
+      "path": "lib/modules/6.18.35-0-virt/kernel/net/core/failover.ko",
+      "sha256": "0515e4062176bdb30b6e90e98c8ce7c34056da3969892eb6457dd90be1734167",
+      "bytes": 33343,
+      "source_asset": "initramfs-virt",
+      "source_sha256": "6d80a739fedeeb6cd63e24dd208845e22199c41a5fb2054941ef61ec30264fa9"
+    },
+    {
+      "path": "lib/modules/6.18.35-0-virt/kernel/drivers/net/net_failover.ko",
+      "sha256": "7a96f35ee688156e44583627144496cce1803e1c1490d2a03850dbf78c73f0b6",
+      "bytes": 56711,
+      "source_asset": "initramfs-virt",
+      "source_sha256": "6d80a739fedeeb6cd63e24dd208845e22199c41a5fb2054941ef61ec30264fa9"
+    },
+    {
+      "path": "lib/modules/6.18.35-0-virt/kernel/drivers/net/virtio_net.ko",
+      "sha256": "64924824bd3c079e78824610bf568186be17362552f899b87217caaae54310c7",
+      "bytes": 273055,
+      "source_asset": "initramfs-virt",
+      "source_sha256": "6d80a739fedeeb6cd63e24dd208845e22199c41a5fb2054941ef61ec30264fa9"
+    },
+    {
+      "path": "lib/modules/6.18.35-0-virt/kernel/lib/crc/crc16.ko",
+      "sha256": "1b5fd1173215d9c04e6a64e62898a6e531680dd16523da080a28227b28c38423",
+      "bytes": 11503,
+      "source_asset": "modloop-virt",
+      "source_sha256": "78907e7cc812d555f08d4e1133d090cf11fa197370882adfe67b0a5986ccb3f9"
+    },
+    {
+      "path": "lib/modules/6.18.35-0-virt/kernel/fs/mbcache.ko",
+      "sha256": "8298471918ce32a480952a419865571b4373d338ed76226f8b8dc7c0f018110e",
+      "bytes": 34263,
+      "source_asset": "modloop-virt",
+      "source_sha256": "78907e7cc812d555f08d4e1133d090cf11fa197370882adfe67b0a5986ccb3f9"
+    },
+    {
+      "path": "lib/modules/6.18.35-0-virt/kernel/fs/jbd2/jbd2.ko",
+      "sha256": "55c21d077817dbcc3d58b9d9c352f9ace2527b17a054f1749385735ddd5f65cd",
+      "bytes": 424879,
+      "source_asset": "modloop-virt",
+      "source_sha256": "78907e7cc812d555f08d4e1133d090cf11fa197370882adfe67b0a5986ccb3f9"
+    },
+    {
+      "path": "lib/modules/6.18.35-0-virt/kernel/fs/ext4/ext4.ko",
+      "sha256": "39468e84954c533d4857401ce78609ad45fadafedd0fef4b2fb0919b1e3de35e",
+      "bytes": 2412567,
+      "source_asset": "modloop-virt",
+      "source_sha256": "78907e7cc812d555f08d4e1133d090cf11fa197370882adfe67b0a5986ccb3f9"
+    }
+  ]
 }

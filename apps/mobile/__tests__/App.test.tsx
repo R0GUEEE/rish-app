@@ -32,6 +32,8 @@ import { ConversationOptionsPicker } from '../src/components/ConversationOptions
 import { HarnessPicker } from '../src/components/HarnessPicker';
 import { RuntimeEvidenceSheet } from '../src/components/RuntimeEvidenceSheet';
 import { WorkspaceDrawer } from '../src/components/WorkspaceDrawer';
+import { RuntimeEnvironmentSheet } from '../src/components/runtime-environment-sheet';
+import { RuntimeProgramSheet } from '../src/components/runtime-program-sheet';
 import { ApprovalComposer } from '../src/components/ApprovalComposer';
 import {
   createChatStore,
@@ -6945,6 +6947,47 @@ test('creates a file through the app-owned workspace drawer', async () => {
       }),
     }),
   );
+});
+
+test('local workspace selection remains available without a model API key', async () => {
+  mockLocalWorkspaces.isAvailable.mockReturnValue(true);
+  mockLocalRuntime.credentialStatusForSlot.mockResolvedValue({ status: 'missing' });
+  mockLocalRuntime.credentialStatus.mockResolvedValue({ status: 'missing' });
+  const renderer = await renderApp();
+  const root = renderer.root;
+  expect(root.findByType(ChatComposer).props.configured).toBe(false);
+  const chip = root.findByProps({ testID: 'composer-workspace-chip' });
+  expect(chip.props.disabled).toBe(false);
+  await act(async () => { chip.props.onPress(); await settle(); });
+  expect(root.findByType(WorkspacePickerSheet).props.visible).toBe(true);
+  expect(mockLocalRuntime.presentCredentialPromptForSlot).not.toHaveBeenCalled();
+});
+
+test('waits for environment native dismissal before opening the program surface', async () => {
+  mockLocalWorkspaces.isAvailable.mockReturnValue(true);
+  const workspace = appWorkspaceDescriptor();
+  mockLocalWorkspaces.create.mockResolvedValue(workspace);
+  mockLocalWorkspaces.resolve.mockResolvedValue({ schema_version: 1, disposition: 'direct', workspace });
+  const renderer = await renderApp();
+  const root = renderer.root;
+  await act(async () => actionByLabel(root, 'Open navigation').props.onPress());
+  await act(async () => { actionByLabel(root, 'Files').props.onPress(); await settle(); });
+  await act(async () => { root.findByType(WorkspaceDrawer).props.onClose(); await settle(); });
+  await act(async () => actionByLabel(root, 'Open navigation').props.onPress());
+  await act(async () => actionByLabel(root, 'Settings').props.onPress());
+  await act(async () => root.findByType(SettingsSheet).props.onOpenEnvironments());
+  expect(root.findByType(RuntimeEnvironmentSheet).props.visible).toBe(true);
+  await act(async () => root.findByType(RuntimeEnvironmentSheet).props.onRun());
+  expect(root.findByType(RuntimeEnvironmentSheet).props.visible).toBe(false);
+  expect(root.findByType(RuntimeProgramSheet).props.visible).toBe(false);
+  await act(async () => root.findByType(RuntimeEnvironmentSheet).props.onDismiss());
+  expect(root.findByType(RuntimeProgramSheet).props.visible).toBe(true);
+  expect(root.findByType(RuntimeProgramSheet).props.root).toEqual({
+    schema_version: 1, workspace_id: APP_WORKSPACE_ID, binding_revision: 1, project_id: null,
+  });
+  await act(async () => root.findByType(RuntimeProgramSheet).props.onClose());
+  await act(async () => root.findByType(RuntimeEnvironmentSheet).props.onDismiss());
+  expect(root.findByType(RuntimeProgramSheet).props.visible).toBe(false);
 });
 
 test('opens the honest local profile entry from the drawer footer', async () => {

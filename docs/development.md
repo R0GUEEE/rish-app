@@ -116,6 +116,11 @@ The following describes the iOS surface unless another platform is named.
   HTTPS bases, bounded speed tests, persistence, and native staging for the
   rish guest. The UI explicitly reports that the persistent guest is not
   mounted yet.
+- On-demand language environments install verified Python, Java, Go, Rust,
+  Bun and Node.js disks independently. An explicit Run action executes a
+  bounded workspace copy in the real guest, with stdout/stderr, exit state
+  and interruptible cancellation. Environment packages are cached; execution
+  disks are disposable. See [language environments](runtime-environments.md).
 - A right-side local Files drawer with nested directory navigation, text-file
   create/read/edit, revision-protected atomic save, rename, recoverable trash,
   restore, and real `sha256sum`/`wc` rish receipts. Files and folders can be

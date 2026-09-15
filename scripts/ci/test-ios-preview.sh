@@ -30,6 +30,19 @@ xcodebuild build-for-testing -workspace apps/mobile/ios/Rish.xcworkspace \
   -only-testing:RishTests/RishGuestCgiLiveTests \
   -only-testing:RishTests/AgentGuestCgiAdapterTests \
   -only-testing:RishTests/AgentPolicyTests \
+  -only-testing:RishTests/RuntimeProgramTests \
+  -only-testing:RishTests/GuestVMOwnershipTests \
+  -only-testing:RishTests/RuntimeEnvironmentStoreTests/testManifestRejectsUnsafeIdsAndWrongKernelAndInvalidNumericTypes \
+  -only-testing:RishTests/RuntimeEnvironmentStoreTests/testStreamedImportPersistsSelectionAndLeaseCannotMutateOriginalOrBeRemoved \
+  -only-testing:RishTests/RuntimeEnvironmentStoreTests/testCatalogSelectionNeedsNoDownloadAndPartialDirectoriesAreIgnoredAfterRestart \
+  -only-testing:RishTests/RuntimeEnvironmentStoreTests/testCorruptPackageTrailingStreamAndExpansionPastDeclaredLimitNeverInstall \
+  -only-testing:RishTests/RuntimeEnvironmentStoreTests/testOuterCatalogDigestAndSymlinkInputAreRejectedAndCancellationRemovesPartialDisk \
+  -only-testing:RishTests/RuntimeEnvironmentStoreTests/testInstalledDiskTamperingIsRejectedBeforeRunLease \
+  -only-testing:RishTests/RuntimeEnvironmentStoreTests/testDownloadStreamsOnlyExpectedBytesAndCleansCancellation \
+  -only-testing:RishTests/RuntimeEnvironmentStoreTests/testDownloadRefusesAdvertisedSizeMismatchBeforeKeepingBody \
+  -only-testing:RishTests/RuntimeEnvironmentStoreTests/testDownloadBoundsUnknownLengthAndRefusesCredentialURLsBeforeOpeningFile \
+  -only-testing:RishTests/RuntimeEnvironmentStoreTests/testCancelImportLeavesNoSelectablePartialAndRetryWorks \
+  -only-testing:RishTests/RuntimeEnvironmentStoreTests/testDownloadFailureNeverDeletesExistingDestination \
   -only-testing:RishTests/LocalProjectsModuleV2Tests/testEnableGitPreservesExistingWorkspaceFilesAndPublishesNativeGitPolicy \
   -only-testing:RishTests/RishGuestCgiHTTPTests \
   -only-testing:RishTests/SessionSnapshotStoreTests/testProtectionUsesFreshFileAttributesForDirectoryAndFile \
@@ -81,6 +94,19 @@ xcodebuild test-without-building -xctestrun "${plans[0]}" \
   -only-testing:RishTests/RishGuestCgiLiveTests \
   -only-testing:RishTests/AgentGuestCgiAdapterTests \
   -only-testing:RishTests/AgentPolicyTests \
+  -only-testing:RishTests/RuntimeProgramTests \
+  -only-testing:RishTests/GuestVMOwnershipTests \
+  -only-testing:RishTests/RuntimeEnvironmentStoreTests/testManifestRejectsUnsafeIdsAndWrongKernelAndInvalidNumericTypes \
+  -only-testing:RishTests/RuntimeEnvironmentStoreTests/testStreamedImportPersistsSelectionAndLeaseCannotMutateOriginalOrBeRemoved \
+  -only-testing:RishTests/RuntimeEnvironmentStoreTests/testCatalogSelectionNeedsNoDownloadAndPartialDirectoriesAreIgnoredAfterRestart \
+  -only-testing:RishTests/RuntimeEnvironmentStoreTests/testCorruptPackageTrailingStreamAndExpansionPastDeclaredLimitNeverInstall \
+  -only-testing:RishTests/RuntimeEnvironmentStoreTests/testOuterCatalogDigestAndSymlinkInputAreRejectedAndCancellationRemovesPartialDisk \
+  -only-testing:RishTests/RuntimeEnvironmentStoreTests/testInstalledDiskTamperingIsRejectedBeforeRunLease \
+  -only-testing:RishTests/RuntimeEnvironmentStoreTests/testDownloadStreamsOnlyExpectedBytesAndCleansCancellation \
+  -only-testing:RishTests/RuntimeEnvironmentStoreTests/testDownloadRefusesAdvertisedSizeMismatchBeforeKeepingBody \
+  -only-testing:RishTests/RuntimeEnvironmentStoreTests/testDownloadBoundsUnknownLengthAndRefusesCredentialURLsBeforeOpeningFile \
+  -only-testing:RishTests/RuntimeEnvironmentStoreTests/testCancelImportLeavesNoSelectablePartialAndRetryWorks \
+  -only-testing:RishTests/RuntimeEnvironmentStoreTests/testDownloadFailureNeverDeletesExistingDestination \
   -only-testing:RishTests/LocalProjectsModuleV2Tests/testEnableGitPreservesExistingWorkspaceFilesAndPublishesNativeGitPolicy \
   -only-testing:RishTests/RishGuestCgiHTTPTests \
   -only-testing:RishTests/SessionSnapshotStoreTests/testProtectionUsesFreshFileAttributesForDirectoryAndFile \
@@ -106,6 +132,11 @@ python3 - "$output/tests.json" <<'PY'
 import json, sys
 nodes = json.load(open(sys.argv[1]))['testNodes']
 required = {
+    'testStreamedImportPersistsSelectionAndLeaseCannotMutateOriginalOrBeRemoved',
+    'testCorruptPackageTrailingStreamAndExpansionPastDeclaredLimitNeverInstall',
+    'testForegroundRunCancellationDoesNotReportStoppedBeforeWorkerReturns',
+    'testRootIsRevalidatedAfterSlowEnvironmentCopyBeforeBoot',
+    'testOnlyOneConcurrentReservationWinsAndWrongOwnerCannotRelease',
     'testOptInRealGuestCgiCounterOverLoopback',
     'testDescribeRealWorkspaceKeepsRegistryAndChatStorageUntouched',
     'testDescribeRevalidatesBindingAndDoesNotSubstituteAnotherRoot',

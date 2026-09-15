@@ -2,19 +2,31 @@
 
 NS_ASSUME_NONNULL_BEGIN
 
-/// Process-wide view of whether a rish guest session is currently booted.
-///
-/// LocalGuestModule flips this flag when a session commits or is released;
-/// LocalMirrorsModule reads it so its receipt only reports
-/// `guest_runtime_mounted = true` while a guest is genuinely live. The flag is
-/// strictly in-process: it resets on every app launch and says nothing about
-/// whether staged overlay configuration reached the guest (it cannot today).
+/// Opaque process-local ownership; never serialized or supplied by JavaScript.
+@interface DSHGuestVMOwner : NSObject
+- (instancetype)init NS_UNAVAILABLE;
++ (instancetype)new NS_UNAVAILABLE;
+@end
+
+/// A process may reserve one guest during both boot and live execution. Locks
+/// protect only ownership changes; no VM boot, execution or teardown runs under
+/// them. Mounted state is an observation, separate from the reservation.
 @interface DSHGuestRuntimeState : NSObject
 
 + (instancetype)sharedState;
 
 @property(nonatomic, readonly) BOOL guestRuntimeMounted;
 
+/// nil means another guest owns the process reservation. Ownership is not
+/// transferred or preempted; the caller must retry after that guest stops.
+- (nullable DSHGuestVMOwner *)acquireGuestOwner;
+- (BOOL)setGuestRuntimeMounted:(BOOL)mounted owner:(DSHGuestVMOwner *)owner;
+/// Call only after the owner's guest handle is fully freed. A stale/wrong
+/// token cannot change the mounted flag or release the current reservation.
+- (BOOL)releaseGuestOwner:(DSHGuestVMOwner *)owner;
+
+/// Compatibility observation for older native tests. Ignored while a real
+/// owner is reserved; this method never grants or releases ownership.
 - (void)setGuestRuntimeMounted:(BOOL)mounted;
 
 @end

@@ -46,6 +46,19 @@ verify_archive() {
       /usr/bin/grep "[[:space:]]${symbol}$" >/dev/null || \
       fail "${label} is missing ${symbol}"
   done
+  # libgit2's private zlib is built with NO_GZIP. Its public symbols must
+  # never replace the SDK zlib used by runtime environment package decoding.
+  for symbol in _z_inflate _z_deflate; do
+    xcrun nm -gU "${library}" 2>/dev/null | \
+      /usr/bin/grep "[[:space:]]${symbol}$" >/dev/null || \
+      fail "${label} is missing private zlib symbol ${symbol}"
+  done
+  for symbol in _inflate _inflateInit2_ _deflate _zlibVersion; do
+    if xcrun nm -gU "${library}" 2>/dev/null | \
+      /usr/bin/grep "[[:space:]]${symbol}$" >/dev/null; then
+      fail "${label} exports unprefixed zlib symbol ${symbol}"
+    fi
+  done
 }
 
 if [[ -n ${CMAKE_BIN:-} ]]; then
@@ -109,6 +122,7 @@ build_slice() {
     -B "${build_root}" \
     -G "Unix Makefiles" \
     -DCMAKE_C_COMPILER="${CLANG}" \
+    -DCMAKE_C_FLAGS=-DZ_PREFIX \
     -DCMAKE_AR="${AR}" \
     -DCMAKE_RANLIB="${RANLIB}" \
     -DCMAKE_SYSTEM_NAME=iOS \
@@ -206,6 +220,7 @@ print -r -- "commit=${LIBGIT2_COMMIT}" >> "${VENDOR_ROOT}/libgit2.version"
 print -r -- "https=SecureTransport" >> "${VENDOR_ROOT}/libgit2.version"
 print -r -- "ssh=libssh2" >> "${VENDOR_ROOT}/libgit2.version"
 print -r -- "crypto=OpenSSL" >> "${VENDOR_ROOT}/libgit2.version"
+print -r -- "zlib=bundled-z-prefix" >> "${VENDOR_ROOT}/libgit2.version"
 print -r -- "libssh2_commit=a312b43325e3383c865a87bb1d26cb52e3292641" >> "${VENDOR_ROOT}/libgit2.version"
 print -r -- "openssl_commit=fe686e15d84334b284f883118ed92f64b409b3aa" >> "${VENDOR_ROOT}/libgit2.version"
 print -r -- "redirect_policy=caller-enforced-none" >> "${VENDOR_ROOT}/libgit2.version"

@@ -9,18 +9,16 @@
 
 #include "rish.h"
 
-// The pure-Rust x86_64 interpreter exposes no virtio-blk and no virtio-net,
-// so root_disk_path is deliberately omitted from the boot request (the FFI
-// materializes a throwaway scratch file itself) and nothing inside the guest
-// can reach any remote URL. The guest consumes the offline apk repository
-// baked into the initramfs at build time; see docs/mobile-guest-runtime.md.
+// This preview surface uses the bundled offline initramfs and omits network
+// and root_disk_path (the FFI creates its scratch disk). Language programs use
+// a separate disk/network configuration, with the same process-wide VM owner.
 
 NSString *const DSHGuestKernelResourceName = @"vmlinuz-virt-6.18.35";
 NSString *const DSHGuestInitramfsResourceName = @"rish-container.cpio";
 NSString *const DSHGuestKernelSha256 =
     @"1e6bf9027720c75c3ed0d79171f21b5791ee40ca9795d07c7c6e04dc5ea2ae90";
 NSString *const DSHGuestInitramfsSha256 =
-    @"ebcd2279be5dfc92b1c3264c355bb440a027079bcef2fa9be209654891479b9d";
+    @"17923f268be4e0b6fbfa6d0410094fb9b9d216e69fd4341ffbb839ec592926b0";
 
 NSString *const DSHGuestErrorInvalidRequest = @"E_GUEST_INVALID_REQUEST";
 NSString *const DSHGuestErrorAssetsMissing = @"E_GUEST_ASSETS_MISSING";
@@ -132,6 +130,7 @@ static const void *const DSHGuestStateQueueKey = &DSHGuestStateQueueKey;
 @property(nonatomic, assign) DSHGuestSessionState sessionState;
 @property(nonatomic, assign) void *session;
 @property(nonatomic, assign) BOOL shutdownRequested;
+@property(nonatomic, strong, nullable) DSHGuestVMOwner *vmOwner;
 @property(nonatomic, copy, nullable) NSURL *resolvedKernelURL;
 @property(nonatomic, copy, nullable) NSURL *resolvedInitramfsURL;
 @end
@@ -181,16 +180,29 @@ RCT_EXPORT_MODULE(LocalGuest)
   return self.resolvedInitramfsURL;
 }
 
+// Native-only seams permit lifecycle/concurrency tests to hold boot without
+// allocating a second VM. Production always verifies the pinned bundle.
+- (NSString *)bootAssetErrorCode {
+  if (self.resolvedKernelURL == nil || self.resolvedInitramfsURL == nil) return DSHGuestErrorAssetsMissing;
+  if (![DSHGuestHexSHA256OfFile(self.resolvedKernelURL) isEqual:DSHGuestKernelSha256] ||
+      ![DSHGuestHexSHA256OfFile(self.resolvedInitramfsURL) isEqual:DSHGuestInitramfsSha256])
+    return DSHGuestErrorAssetIntegrity;
+  return nil;
+}
+- (void *)bootSessionData:(NSData *)encoded {
+  return rish_vm_boot_session(static_cast<const char *>(encoded.bytes), encoded.length);
+}
+- (void)freeSessionHandle:(void *)handle { rish_vm_session_free(handle); }
+
 // Runs only on the state queue. Releases the live session exactly once and
 // clears the shared mounted flag.
 - (void)releaseSessionLocked {
   if (self.session != NULL) {
-    rish_vm_session_free(self.session);
+    [self freeSessionHandle:self.session];
     self.session = NULL;
   }
-  if (self.sessionState == DSHGuestSessionStateBooted) {
-    [[DSHGuestRuntimeState sharedState] setGuestRuntimeMounted:NO];
-  }
+  if (self.vmOwner) [DSHGuestRuntimeState.sharedState releaseGuestOwner:self.vmOwner];
+  self.vmOwner = nil;
 }
 
 - (void)reject:(void (^)(NSString *, NSString *, NSError *))reject
@@ -221,19 +233,16 @@ RCT_EXPORT_MODULE(LocalGuest)
            message:@"A guest session is already active."];
       return;
     }
-    if (self.resolvedKernelURL == nil || self.resolvedInitramfsURL == nil) {
-      [self reject:reject code:DSHGuestErrorAssetsMissing
-           message:@"Guest boot assets are missing from the app bundle."];
+    self.vmOwner = [DSHGuestRuntimeState.sharedState acquireGuestOwner];
+    if (self.vmOwner == nil) {
+      [self reject:reject code:@"E_GUEST_BUSY"
+           message:@"Another guest is starting or running. Stop it before starting this guest."];
       return;
     }
-    // Integrity preflight: the bundle copies must match the pinned digests
-    // recorded in GuestAssets/SHA256SUMS before anything is booted.
-    NSString *kernelDigest = DSHGuestHexSHA256OfFile(self.resolvedKernelURL);
-    NSString *initramfsDigest = DSHGuestHexSHA256OfFile(self.resolvedInitramfsURL);
-    if (![kernelDigest isEqualToString:DSHGuestKernelSha256] ||
-        ![initramfsDigest isEqualToString:DSHGuestInitramfsSha256]) {
-      [self reject:reject code:DSHGuestErrorAssetIntegrity
-           message:@"Guest boot asset digests do not match the pinned values."];
+    NSString *assetError = [self bootAssetErrorCode];
+    if (assetError != nil) {
+      [self releaseSessionLocked];
+      [self reject:reject code:assetError message:@"Guest boot assets are missing or failed verification."];
       return;
     }
 
@@ -257,6 +266,7 @@ RCT_EXPORT_MODULE(LocalGuest)
                                                        options:0
                                                          error:&error];
     if (encoded == nil) {
+      [self releaseSessionLocked];
       self.sessionState = DSHGuestSessionStateIdle;
       [self reject:reject code:DSHGuestErrorInvalidRequest
            message:@"Guest boot request could not be encoded."];
@@ -269,19 +279,22 @@ RCT_EXPORT_MODULE(LocalGuest)
     // or is cancelled.
     dispatch_async(self.bootQueue, ^{
       CFAbsoluteTime started = CFAbsoluteTimeGetCurrent();
-      void *handle = rish_vm_boot_session(
-          static_cast<const char *>(encoded.bytes), encoded.length);
+      void *handle = NULL;
+      @try { handle = [self bootSessionData:encoded]; }
+      @catch (__unused NSException *exception) { handle = NULL; }
       NSTimeInterval bootMilliseconds =
           (CFAbsoluteTimeGetCurrent() - started) * 1000.0;
       dispatch_async(self.stateQueue, ^{
         if (handle == NULL) {
+          [self releaseSessionLocked];
           self.sessionState = DSHGuestSessionStateIdle;
           [self reject:reject code:DSHGuestErrorBootFailed
                message:@"The guest failed to boot."];
           return;
         }
         if (self.shutdownRequested) {
-          rish_vm_session_free(handle);
+          [self freeSessionHandle:handle];
+          [self releaseSessionLocked];
           self.sessionState = DSHGuestSessionStateIdle;
           self.shutdownRequested = NO;
           [self reject:reject code:DSHGuestErrorBootCancelled
@@ -290,7 +303,7 @@ RCT_EXPORT_MODULE(LocalGuest)
         }
         self.session = handle;
         self.sessionState = DSHGuestSessionStateBooted;
-        [[DSHGuestRuntimeState sharedState] setGuestRuntimeMounted:YES];
+        [DSHGuestRuntimeState.sharedState setGuestRuntimeMounted:YES owner:self.vmOwner];
         resolve(@{
           @"schema_version" : @1,
           @"status" : @"booted",
