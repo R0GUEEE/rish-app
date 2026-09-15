@@ -944,6 +944,42 @@ Nothing recomputes a stored preview and compares it, so this is not a
 compatibility change: an old receipt keeps the text it was written with, and
 the preview's shape is unchanged.
 
+### The workspace executor decides nothing
+
+`AgentWorkspaceToolExecutor.mm` had a small capability and a lot of rule around
+it. The capability is a directory descriptor, bytes read and written, and
+`fstatat`; everything else — which paths a tool may name, what a revision is,
+what a listing looks like, what a person is shown before approving a write, and
+what a failed tool reports — is now `workspace_tool.rs`
+(`rish_agent_workspace_tool_reduce`).
+
+The path rule was the third copy in the tree: `execution_ledger.rs` and
+`tool_batch.rs` each had one, and this one added a per-component `NAME_MAX`
+bound and the "." allowance a listing needs. They no longer have to agree by
+inspection.
+
+Two orderings are load-bearing and easy to lose:
+
+- **The three ways a listing can refuse are reached in a fixed order.** In the
+  original they were interleaved with the directory walk: a name that is not
+  UTF-8 refuses straight away, but a full listing is at capacity *before* an
+  entry that merely cannot be exposed — a symlink, a device, a hard-linked
+  file — is judged. So the host now hands the core every entry `readdir`
+  returned, in `readdir` order, reporting such an entry as `"invalid"` (or
+  `"unnamed"`) rather than refusing it itself. That costs a few more `fstatat`
+  calls than the old short-circuit and keeps the answer identical. A first
+  version of this port refused in the host and got the capacity case wrong;
+  the ordering only survives if the rule owns it.
+- **A listing is ordered by name bytes**, not by locale, because the
+  fingerprint the precondition is taken over has to be the same on every
+  device that lists the same directory.
+
+The byte caps (path, read, prior read, entry count) are rules too, so the host
+asks the core for them once rather than keeping a second copy that could drift.
+So is the protected cap on anything a workspace tool reports: 64 KiB, tighter
+than the transcript bound the feedback contract itself applies, and applying to
+every workspace tool rather than only the two that carry content.
+
 ### What a tool is allowed to report, once
 
 `DSHAgentValidateNativeToolFeedbackString` was ~190 lines in `AgentNativeWAL.mm`

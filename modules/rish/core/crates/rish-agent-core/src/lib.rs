@@ -34,6 +34,7 @@ pub mod transcript_store;
 pub mod wal_operations;
 pub mod wal_resident;
 pub mod wal_state;
+pub mod workspace_tool;
 mod write_parent_plan;
 
 /// Protocol version reported over the C ABI. Bumped when the JSON contract

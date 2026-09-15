@@ -114,6 +114,13 @@ void rish_agent_wal_close(void *handle);
 /// to say and changes the toolset digest.
 char *rish_agent_tool_registry_reduce(const char *json, size_t json_length);
 
+/// One workspace-tool decision over {"op",...}: bounds, path_components,
+/// revision, directory_listing, diff_preview, write_expected_prior, feedback,
+/// failure_result. The host owns the descriptors and the bytes; which paths it
+/// may touch, what a listing looks like and what a person is shown before
+/// approving a write are decided here.
+char *rish_agent_workspace_tool_reduce(const char *json, size_t json_length);
+
 /// The frozen root projection over {"op",...}: projection_shape, capabilities,
 /// grants, resolve_request, workspace_projection, project_projection, root_ref,
 /// operation_mode, final_proof_request, matches. Resolving a root is the
