@@ -751,6 +751,23 @@ a second reading of them. The catalogue the core needs — which strings name a
 supported model, and which harness each belongs to — is collected from the
 candidate itself, exactly as `DSHSessionCoreEnvironment` does on iOS.
 
+### The frozen assets
+
+Six assets under `modules/rish/core/fixtures` were recorded from native
+implementations that have since been deleted, so none of them can be
+regenerated: the canonical-JSON corpus and golden, the session corpus and
+golden, the WAL transaction golden and the runtime-coordinator golden.
+`fixtures/FROZEN.md` pins each one's digest beside the commit it was recorded
+at and what it locks, and `scripts/verify-agent-core-fixtures.sh` checks them.
+The repository's Actions are disabled, so nothing else will — run it before
+trusting a green core suite.
+
+A test that disagrees with one of these is either a real behaviour change,
+which belongs in a new fixture beside them, or a porting mistake. Editing one
+to make a test pass destroys the only evidence that the port was faithful. The
+mutation walk that expands the session corpus into its golden is part of the
+same contract for the same reason.
+
 ### Device-only storage metadata
 
 The session store and the agent WAL require every pinned item to report
