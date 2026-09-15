@@ -5,18 +5,18 @@
       "manifest": {
         "architecture": "x86_64",
         "disk_bytes": 134217728,
-        "disk_sha256": "11b30681e6051a9fb758e407d47358524084d1fb13a118bd9fbeb57764d1f190",
+        "disk_sha256": "a8fb4e8180cfa927066354cfb92f646d561c8ccc4909785c7225707c38a3418d",
         "display_name": "Python",
-        "environment_id": "python-3-12-14-alpine3-21-amd64",
+        "environment_id": "python-3-12-14-alpine3-21-amd64-r1",
         "family": "python",
         "kernel_sha256": "1e6bf9027720c75c3ed0d79171f21b5791ee40ca9795d07c7c6e04dc5ea2ae90",
         "minimum_memory_mib": 512,
         "schema_version": 1,
-        "version": "3.12.14"
+        "version": "3.12.14+cache.1"
       },
-      "package_sha256": "e2065542086f6bdf13aaca5c908e1958df80028c2667e258d742b7a03b31d93d",
-      "package_bytes": 16633262,
-      "url": "https://github.com/ZSeven-W/rish-app/releases/download/runtime-environments-2026-09-15/python-3-12-14-alpine3-21-amd64.rishenv"
+      "package_sha256": "3b71553a39b004c826c29f8f37054f16072c269d11262dcb633035fded95fe19",
+      "package_bytes": 20803140,
+      "url": "https://github.com/ZSeven-W/rish-app/releases/download/runtime-environments-2026-09-15-r2/python-3-12-14-alpine3-21-amd64-r1.rishenv"
     },
     {
       "manifest": {

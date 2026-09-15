@@ -13,7 +13,7 @@ import time
 REPO = Path(__file__).resolve().parents[2]
 OUT = REPO / '.build/runtime-environments/packages'
 SCRIPTS = {
-    'python': '/usr/bin/python3 -I -B -c \'import sys; print("RISH_PYTHON_OK", sys.version.split()[0], 6 * 7, flush=True)\'',
+    'python': '/usr/bin/python3 -I -B -c \'import sys, json, socket, http.server; print("RISH_PYTHON_OK", sys.version.split()[0], 6 * 7, flush=True)\'',
     'java': "printf '%s\\n' 'class Main { public static void main(String[] args) { System.out.println(\"RISH_JAVA_OK \" + (6 * 7)); }}' > Main.java; /usr/bin/java /workspace/Main.java",
     'go': "printf '%s\\n' 'package main' 'import \"fmt\"' 'func main() { fmt.Println(\"RISH_GO_OK\", 6 * 7) }' > main.go; GOTOOLCHAIN=local GOPROXY=off /usr/bin/go run /workspace/main.go",
     'rust': "printf '%s\\n' 'fn main() { println!(\"RISH_RUST_OK {}\", 6 * 7); }' > main.rs; /usr/bin/rustc --edition=2024 main.rs -o main && ./main",

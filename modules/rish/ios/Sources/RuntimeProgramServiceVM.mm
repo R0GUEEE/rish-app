@@ -220,6 +220,18 @@ static void OnOutput(void *context, const char *bytes, size_t size) {
           "cp -a /tmp/rish-workspace/. /runtime/workspace/; "
           "mount -t proc proc /runtime/proc; mount --bind /sys /runtime/sys; "
           "mount --bind /dev /runtime/dev; mkdir -p /runtime/tmp/rish-home; "
+          // Resolve the active guest hostname locally. Standard servers such
+          // as Python HTTPServer query it before listening; that must not
+          // depend on external DNS. Preserve other package-provided aliases.
+          "if test -d /runtime/etc && test ! -L /runtime/etc; then "
+          "rish_hostname=$(/bin/busybox hostname); "
+          "rish_hosts=$(/bin/busybox mktemp /runtime/etc/.rish-hosts.XXXXXX); "
+          "printf '127.0.0.1 localhost %s\\n::1 localhost %s\\n' \"$rish_hostname\" \"$rish_hostname\" > \"$rish_hosts\"; "
+          "if test -f /runtime/etc/hosts && test ! -L /runtime/etc/hosts; then "
+          "cat /runtime/etc/hosts >> \"$rish_hosts\"; fi; "
+          "if test -L /runtime/etc/hosts; then rm -f /runtime/etc/hosts; fi; "
+          "test ! -d /runtime/etc/hosts; chmod 644 \"$rish_hosts\"; "
+          "mv -f \"$rish_hosts\" /runtime/etc/hosts; fi; "
           "if test -f /etc/resolv.conf && test -d /runtime/etc && test ! -L /runtime/etc; then "
           "rm -f /runtime/etc/resolv.conf; cp /etc/resolv.conf /runtime/etc/resolv.conf; fi";
       NSData *setupJSON = [NSJSONSerialization dataWithJSONObject:@{

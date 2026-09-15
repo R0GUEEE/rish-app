@@ -11,7 +11,7 @@ REPO = Path(__file__).resolve().parents[2]
 DIRECTORY = REPO / 'runtime-environments'
 DOWNLOADS = REPO / '.build/runtime-environments/packages/downloads'
 FAMILIES = {
-    'python': ('3.21', ['python3', 'py3-pip'], 'python3', 'Python', 128, 512, 'usr/bin/python3', {}),
+    'python': ('3.21', ['python3', 'python3-pyc', 'py3-pip'], 'python3', 'Python', 128, 512, 'usr/bin/python3', {}),
     'java': ('3.23', ['openjdk21-jdk'], 'openjdk21-jdk', 'Java 21', 1024, 1024, 'usr/bin/java',
              {'usr/bin/java': '../lib/jvm/java-21-openjdk/bin/java', 'usr/bin/javac': '../lib/jvm/java-21-openjdk/bin/javac'}),
     'go': ('3.23', ['go'], 'go', 'Go', 1024, 1024, 'usr/bin/go', {}),
@@ -65,6 +65,16 @@ def resolve(family: str) -> dict:
             'alpine_version': branch, 'indexes': indexes, 'packages': packages,
             'minimum_scratch_bytes': 48 * 1024 * 1024,
             'verification_status': 'built_artifacts_require_current_rish_execution', 'extra_archives': []}
+    if family == 'python':
+        # A new package identity preserves the already published uncached disk.
+        # Explicit roots are sufficient; this builder does not implement apk's
+        # install_if solver or execute package triggers.
+        if version != '3.12.14':
+            raise ValueError('review the Python cache policy before changing its runtime version')
+        lock['environment_id'] += '-r1'
+        lock['version'] += '+cache.1'
+        lock['python_bytecode'] = {'cache_tag': 'cpython-312', 'magic_hex': 'cb0d0d0a',
+                                  'invalidation': 'checked-hash', 'expected_stdlib_cache_files': 611}
     if family == 'bun':
         release = json.loads((DOWNLOADS / 'bun-release.json').read_text())
         if release.get('tag_name') != 'bun-v1.4.0':

@@ -21,6 +21,7 @@ import zipfile
 import apk
 import ext4
 import package as environment_package
+import python_cache
 
 REPO = Path(__file__).resolve().parents[2]
 LOCKS = REPO / 'runtime-environments'
@@ -92,6 +93,8 @@ def add_layout(entries: dict, lock: dict) -> None:
                   'extra_archives': lock.get('extra_archives', []),
                   'derived_archives': lock.get('derived_archives', []),
                   'build_scripts_executed_in_guest': False}
+    if lock['family'] == 'python':
+        provenance['python_bytecode'] = lock['python_bytecode']
     entries['usr/share/doc/rish-environment/sources.json'] = (
         stat.S_IFREG | 0o644, (json.dumps(provenance, sort_keys=True, indent=2) + '\n').encode())
     entries['usr/share/doc/rish-environment/README.txt'] = (
@@ -210,6 +213,7 @@ def build(family: str, output: Path, download_limit_mib: int, bootstrap_go_cache
                 raise ValueError('derived cache conflicts with signed package data')
             entries[name] = entry
     add_layout(entries, lock)
+    bytecode_validation = python_cache.validate(entries, lock)
     contents_bytes = sum(len(data) for mode, data in entries.values() if stat.S_ISREG(mode))
     if contents_bytes + 48 * 1024 * 1024 > lock['disk_mib'] * 1024 * 1024:
         raise ValueError('environment lacks required workspace/scratch capacity')
@@ -218,6 +222,11 @@ def build(family: str, output: Path, download_limit_mib: int, bootstrap_go_cache
     entries.clear()
     disk = work / 'rootfs.ext4'
     pack_ext4(root, disk, lock, output)
+    scratch_bytes = None
+    if family == 'python':
+        scratch_bytes = ext4.available_bytes(disk)
+        if scratch_bytes < 48 * 1024 * 1024:
+            raise ValueError('Python ext4 lacks the required 48 MiB of free scratch capacity')
     manifest = {key: lock[key] for key in ['schema_version', 'environment_id', 'family', 'display_name', 'version', 'architecture', 'kernel_sha256', 'minimum_memory_mib']}
     manifest.update({'disk_sha256': sha256(disk), 'disk_bytes': disk.stat().st_size})
     header = json.dumps(manifest, separators=(',', ':'), sort_keys=True).encode('utf-8')
@@ -240,6 +249,9 @@ def build(family: str, output: Path, download_limit_mib: int, bootstrap_go_cache
                'package_bytes': package.stat().st_size, 'disk_path': str(disk), 'rootfs_path': str(root),
                'contents_bytes': contents_bytes, 'lock_sha256': sha256(lock_path), 'verified_packages': verified,
                'execution_verified': False, 'backend': None, 'host_guest_code_execution': False, 'bootstrap_go_cache': bootstrap_go_cache}
+    if bytecode_validation:
+        receipt['python_bytecode_validation'] = bytecode_validation
+        receipt['free_scratch_bytes'] = scratch_bytes
     (output / (family + '.build.json')).write_text(json.dumps(receipt, indent=2) + '\n')
     print(json.dumps({key: receipt[key] for key in ['manifest', 'package_path', 'package_bytes', 'package_sha256', 'disk_path']}, indent=2), flush=True)
     return receipt

@@ -1,9 +1,9 @@
 {
   "schema_version": 1,
-  "environment_id": "python-3-12-14-alpine3-21-amd64",
+  "environment_id": "python-3-12-14-alpine3-21-amd64-r1",
   "family": "python",
   "display_name": "Python",
-  "version": "3.12.14",
+  "version": "3.12.14+cache.1",
   "architecture": "x86_64",
   "kernel_sha256": "1e6bf9027720c75c3ed0d79171f21b5791ee40ca9795d07c7c6e04dc5ea2ae90",
   "minimum_memory_mib": 512,
@@ -397,6 +397,23 @@
       "source_recipe_sha256": "d09d03afd7ac89f6093f1f686c3d3a843891c4e951449bdf6f6bebe58547a517"
     },
     {
+      "name": "pyc",
+      "version": "3.12.14-r0",
+      "filename": "pyc-3.12.14-r0.apk",
+      "url": "https://dl-cdn.alpinelinux.org/alpine/v3.21/main/x86_64/pyc-3.12.14-r0.apk",
+      "package_bytes": 1214,
+      "installed_bytes": 0,
+      "control_checksum": "Q1Fp3IOQHmZeDiMHt4wW/9Svo6A0A=",
+      "license": "PSF-2.0",
+      "dependencies": [],
+      "source_origin": "python3",
+      "source_commit": "1d63fc4da0e6ddeed22906b0e483e3a519810551",
+      "source_recipe_url": "https://raw.githubusercontent.com/alpinelinux/aports/1d63fc4da0e6ddeed22906b0e483e3a519810551/main/python3/APKBUILD",
+      "source_tree_url": "https://github.com/alpinelinux/aports/tree/1d63fc4da0e6ddeed22906b0e483e3a519810551/main/python3",
+      "source_recipe_sha256": "c669cafeb18d3dae55231e1b69952b6b91b0cd8e47a7416324a60dfa4ce1f297",
+      "sha256": "a8dfd1599ca1a75e51bc02b8dadd56390c4bca4e42bdb63a37f4bdebab7835e4"
+    },
+    {
       "name": "python3",
       "version": "3.12.14-r0",
       "filename": "python3-3.12.14-r0.apk",
@@ -428,6 +445,46 @@
       "source_recipe_url": "https://raw.githubusercontent.com/alpinelinux/aports/1d63fc4da0e6ddeed22906b0e483e3a519810551/main/python3/APKBUILD",
       "source_tree_url": "https://github.com/alpinelinux/aports/tree/1d63fc4da0e6ddeed22906b0e483e3a519810551/main/python3",
       "sha256": "fd3c107796c723259caa3ccf9c684875a77f2e57fa19a631e2d755c3cf21b0d4",
+      "source_recipe_sha256": "c669cafeb18d3dae55231e1b69952b6b91b0cd8e47a7416324a60dfa4ce1f297"
+    },
+    {
+      "name": "python3-pyc",
+      "version": "3.12.14-r0",
+      "filename": "python3-pyc-3.12.14-r0.apk",
+      "url": "https://dl-cdn.alpinelinux.org/alpine/v3.21/main/x86_64/python3-pyc-3.12.14-r0.apk",
+      "package_bytes": 1258,
+      "installed_bytes": 0,
+      "control_checksum": "Q1f0ifTIVV79Uk3w+C8AZQeNaszUw=",
+      "license": "PSF-2.0",
+      "dependencies": [
+        "python3-pycache-pyc0=3.12.14-r0",
+        "pyc"
+      ],
+      "source_origin": "python3",
+      "source_commit": "1d63fc4da0e6ddeed22906b0e483e3a519810551",
+      "source_recipe_url": "https://raw.githubusercontent.com/alpinelinux/aports/1d63fc4da0e6ddeed22906b0e483e3a519810551/main/python3/APKBUILD",
+      "source_tree_url": "https://github.com/alpinelinux/aports/tree/1d63fc4da0e6ddeed22906b0e483e3a519810551/main/python3",
+      "sha256": "1f058f0cd678f8d7865dc9492b106f6103a6afe435ff303eea7de36c2c0738ef",
+      "source_recipe_sha256": "c669cafeb18d3dae55231e1b69952b6b91b0cd8e47a7416324a60dfa4ce1f297"
+    },
+    {
+      "name": "python3-pycache-pyc0",
+      "version": "3.12.14-r0",
+      "filename": "python3-pycache-pyc0-3.12.14-r0.apk",
+      "url": "https://dl-cdn.alpinelinux.org/alpine/v3.21/main/x86_64/python3-pycache-pyc0-3.12.14-r0.apk",
+      "package_bytes": 4171078,
+      "installed_bytes": 10766624,
+      "control_checksum": "Q15vRJRxiFmGDNdYSoktrwWL7vAx0=",
+      "license": "PSF-2.0",
+      "dependencies": [
+        "libssl3>=3.3.0",
+        "libexpat>=2.8.0"
+      ],
+      "source_origin": "python3",
+      "source_commit": "1d63fc4da0e6ddeed22906b0e483e3a519810551",
+      "source_recipe_url": "https://raw.githubusercontent.com/alpinelinux/aports/1d63fc4da0e6ddeed22906b0e483e3a519810551/main/python3/APKBUILD",
+      "source_tree_url": "https://github.com/alpinelinux/aports/tree/1d63fc4da0e6ddeed22906b0e483e3a519810551/main/python3",
+      "sha256": "2e8f919ef24ca2320ce13f86b0d1184d17d30b4d8e114671ea96b1822cda8d81",
       "source_recipe_sha256": "c669cafeb18d3dae55231e1b69952b6b91b0cd8e47a7416324a60dfa4ce1f297"
     },
     {
@@ -510,5 +567,11 @@
   ],
   "minimum_scratch_bytes": 50331648,
   "verification_status": "built_artifacts_require_current_rish_execution",
-  "extra_archives": []
+  "extra_archives": [],
+  "python_bytecode": {
+    "cache_tag": "cpython-312",
+    "magic_hex": "cb0d0d0a",
+    "invalidation": "checked-hash",
+    "expected_stdlib_cache_files": 611
+  }
 }

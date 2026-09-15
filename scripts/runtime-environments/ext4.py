@@ -8,6 +8,25 @@ from pathlib import Path
 import struct
 
 
+def available_bytes(path: Path) -> int:
+    """Read actual free blocks after packing, rather than estimating payload size."""
+    with path.open('rb') as file:
+        file.seek(1024)
+        superblock = file.read(1024)
+    if len(superblock) != 1024 or struct.unpack_from('<H', superblock, 56)[0] != 0xEF53:
+        raise ValueError('invalid ext4 superblock')
+    u32 = lambda offset: struct.unpack_from('<I', superblock, offset)[0]
+    if u32(96) & 0x80:
+        raise ValueError('unsupported 64bit ext4 free-space layout')
+    if u32(24) != 2:
+        raise ValueError('unsupported ext4 block size')
+    block_size = 4096
+    blocks, reserved, free = u32(4), u32(8), u32(12)
+    if block_size != 4096 or blocks * block_size != path.stat().st_size or not reserved <= free <= blocks:
+        raise ValueError('invalid ext4 free-space geometry')
+    return (free - reserved) * block_size
+
+
 def normalize_metadata(path: Path, epoch: int) -> None:
     with path.open('r+b') as file, mmap.mmap(file.fileno(), 0) as disk:
         if not 1 << 20 <= len(disk) <= 4 << 30:

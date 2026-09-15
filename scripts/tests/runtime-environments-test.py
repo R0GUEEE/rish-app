@@ -213,4 +213,13 @@ class GoCacheTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, 'escaped'): module.normalize(path)
 
 
+def load_tests(loader, tests, pattern):
+    spec = importlib.util.spec_from_file_location('runtime_python_cache_tests',
+        ROOT / 'scripts/tests/runtime-python-cache-test.py')
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    tests.addTests(loader.loadTestsFromModule(module))
+    return tests
+
+
 if __name__ == '__main__': unittest.main(verbosity=2)

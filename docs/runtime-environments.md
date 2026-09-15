@@ -58,6 +58,12 @@ in that catalog. Package downloads are streamed and checked before an atomic
 installation. The installed disk is retained as an immutable template, and
 each run gets an independent writable copy.
 
+Python 3.12.14 cache revision 1 includes the matching official standard-library
+bytecode, so a new run can import modules such as `http.server` without first
+compiling their source in the software guest. It appears as `3.12.14+cache.1`;
+the Python language version is unchanged. The earlier package remains usable,
+and existing installations are not silently replaced.
+
 The application keeps control of the kernel and guest agent. Environment
 packages contain an x86_64 ext4 userland disk, not another native iOS
 executable. The package format and reproducible build tools are documented in

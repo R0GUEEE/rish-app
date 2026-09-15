@@ -6,7 +6,7 @@ or agent. Those remain controlled by the application.
 
 | Family | Locked runtime | Raw disk | Minimum RAM |
 | --- | --- | --- | --- |
-| Python | 3.12.14 + pip 24.3.1 (Alpine 3.21) | 128 MiB | 512 MiB |
+| Python | 3.12.14 + pip 24.3.1, cache revision 1 (Alpine 3.21) | 128 MiB | 512 MiB |
 | Java | OpenJDK 21.0.12_p8 (Alpine 3.23) | 1 GiB | 1 GiB |
 | Go | 1.25.10 (Alpine 3.23) | 1 GiB | 1 GiB |
 | Rust | 1.91.1, Cargo 1.91.1 (Alpine 3.23) | 2 GiB | 1 GiB |
@@ -82,6 +82,19 @@ corresponding source materials with distributed releases.
 Python includes pip and setuptools. Its pip configuration allows installation
 into this disposable guest root; it does not change host Python. Installed
 dependencies remain scoped to the run disk and are not silently written back.
+
+Python cache revision 1 has the distinct environment ID
+`python-3-12-14-alpine3-21-amd64-r1` and package version `3.12.14+cache.1`.
+The interpreter remains CPython 3.12.14. Its explicit `python3-pyc` dependency
+pulls the official `python3-pycache-pyc0` and `pyc` packages from the same signed
+Alpine index. The builder validates all 611 standard-library cache files:
+`cpython-312` filenames, target magic, checked-hash headers and matching source
+bytes. These hashes survive normalized inode timestamps. Bytecode is read as
+data; it is never imported or executed by the host builder. A missing or stale
+cache fails the build. The packed ext4 disk must retain at least 48 MiB free.
+This avoids recompiling standard-library source during every disposable run;
+user programs and newly installed dependencies still compile as needed.
+The original uncached Python release remains unchanged.
 
 Each rootfs includes `/usr/share/doc/rish-environment/sources.json` with the
 package sources and licenses. Packages' own license/notice files are retained.
