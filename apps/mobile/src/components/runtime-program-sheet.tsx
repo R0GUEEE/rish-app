@@ -55,6 +55,8 @@ export function RuntimeProgramSheet({ visible, onClose, root, workspaceName, blo
       autoCapitalize="none" autoCorrect={false} multiline maxLength={65536} style={styles.input} testID="runtime-args" />
     <Text style={styles.body}>{copy.argsHelp}</Text>
     {validation && <Text style={styles.error}>{copy[validation]}</Text>}
+    {environment?.family === 'java' && entry.toLowerCase().endsWith('.java') &&
+      <Text style={styles.body}>{copy.javaSourceBudget}</Text>}
     <View style={styles.row}>
       <Pressable accessibilityRole="button" disabled={disabled} style={[styles.button, disabled && styles.disabled]} testID="runtime-run" onPress={() => {
         if (!validProgramEntry(entry)) { setValidation('invalidEntry'); return; }

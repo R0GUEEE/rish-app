@@ -19,5 +19,9 @@ typedef void (^DSHRuntimeProgramOutput)(NSString *channel, NSData *data);
 + (nullable NSArray<NSString *> *)commandForFamily:(NSString *)family
                                          entryPath:(NSString *)entryPath
                                               args:(NSArray<NSString *> *)args;
+/// Native-only execution budget. Java source includes the JDK compiler;
+/// other entry types and language families retain the default budget.
++ (NSUInteger)executionTimeoutMillisecondsForFamily:(NSString *)family
+                                            entryPath:(NSString *)entryPath;
 @end
 NS_ASSUME_NONNULL_END

@@ -149,6 +149,12 @@ static void OnOutput(void *context, const char *bytes, size_t size) {
   [command addObjectsFromArray:args];
   return command;
 }
++ (NSUInteger)executionTimeoutMillisecondsForFamily:(NSString *)family entryPath:(NSString *)entryPath {
+  // Cold JDK source compilation exceeded ten minutes on the hosted runner.
+  // Keep the extension scoped and bounded; this does not affect cancellation.
+  return [family isEqual:@"java"] && DSHRuntimeProgramValidPath(entryPath) &&
+      [entryPath.pathExtension.lowercaseString isEqual:@"java"] ? 1200000 : 600000;
+}
 - (NSNumber *)executeLease:(DSHRuntimeEnvironmentLease *)lease snapshot:(DSHRuntimeWorkspaceSnapshot *)snapshot
                  entryPath:(NSString *)entryPath args:(NSArray<NSString *> *)args
                    started:(dispatch_block_t)started output:(DSHRuntimeProgramOutput)output error:(NSError **)error {
@@ -207,7 +213,9 @@ static void OnOutput(void *context, const char *bytes, size_t size) {
       if (self.cancelled) break;
       started();
       NSData *request = [NSJSONSerialization dataWithJSONObject:@{
-        @"protocol_version":@2, @"command":command, @"cwd":@"/", @"timeout_ms":@600000,
+        @"protocol_version":@2, @"command":command, @"cwd":@"/",
+        @"timeout_ms":@([DSHRuntimeProgramVM executionTimeoutMillisecondsForFamily:lease.manifest[@"family"]
+            entryPath:entryPath]),
         @"max_output_bytes":@524288,
         @"env":@{@"HOME":@"/tmp/rish-home", @"PATH":@"/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin",
                  @"TMPDIR":@"/tmp", @"GOCACHE":@"/tmp/go-build", @"CARGO_HOME":@"/tmp/cargo"},

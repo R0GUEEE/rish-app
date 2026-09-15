@@ -28,6 +28,9 @@ per file; Git metadata and build/dependency caches are excluded.
 Programs run while the app is in the foreground. Leaving the app cancels the
 run. A single guest can run at a time, including previews and official CLI
 login sessions. A busy guest must finish or stop before another starts.
+Execution is bounded to ten minutes. Java source-file compilation and execution
+has a separate twenty-minute limit to accommodate slower devices; Stop remains
+available throughout startup and execution.
 
 ## Delivery and validation
 

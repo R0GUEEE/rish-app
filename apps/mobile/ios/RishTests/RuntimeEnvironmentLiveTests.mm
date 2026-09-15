@@ -250,9 +250,12 @@ static BOOL Terminal(NSDictionary *receipt) {
   self.runLocator = @{@"schema_version":@1, @"run_id":receipt[@"run_id"]};
 }
 
-- (NSDictionary *)waitForMarker:(NSString *)marker requireTerminal:(BOOL)terminal {
+- (NSDictionary *)waitForMarker:(NSString *)marker requireTerminal:(BOOL)terminal
+                         family:(NSString *)family entry:(NSString *)entry {
   NSTimeInterval started = NSProcessInfo.processInfo.systemUptime;
-  NSTimeInterval deadline = started + 800;
+  NSTimeInterval timeout = 200.0 + [DSHRuntimeProgramVM
+      executionTimeoutMillisecondsForFamily:family entryPath:entry] / 1000.0;
+  NSTimeInterval deadline = started + timeout;
   NSString *lastStatus = nil;
   NSDictionary *receipt = nil;
   do {
@@ -266,7 +269,7 @@ static BOOL Terminal(NSDictionary *receipt) {
     if (!terminal && [receipt[@"stdout"] containsString:marker]) return receipt;
     [NSRunLoop.currentRunLoop runUntilDate:[NSDate dateWithTimeIntervalSinceNow:0.2]];
   } while (NSProcessInfo.processInfo.systemUptime < deadline);
-  XCTAssertTrue(Terminal(receipt), @"Program exceeded its 800-second boot/execution limit.");
+  XCTAssertTrue(Terminal(receipt), @"Program exceeded its %.0f-second boot/execution limit.", timeout);
   XCTAssertEqualObjects(receipt[@"status"], @"completed", @"%@", receipt);
   XCTAssertEqualObjects(receipt[@"exit_code"], @0, @"%@", receipt);
   XCTAssertEqualObjects(receipt[@"error_code"], NSNull.null);
@@ -279,7 +282,7 @@ static BOOL Terminal(NSDictionary *receipt) {
   NSData *bytes = [source dataUsingEncoding:NSUTF8StringEncoding];
   [self writeSource:bytes entry:entry];
   [self startEntry:entry];
-  [self waitForMarker:marker requireTerminal:YES];
+  [self waitForMarker:marker requireTerminal:YES family:family entry:entry];
   [self assertHostSource:bytes entry:entry];
 }
 
@@ -291,7 +294,8 @@ static BOOL Terminal(NSDictionary *receipt) {
       dataUsingEncoding:NSUTF8StringEncoding];
   [self writeSource:loop entry:@"stop.py"];
   [self startEntry:@"stop.py"];
-  NSDictionary *ready = [self waitForMarker:@"RISH_PYTHON_READY" requireTerminal:NO];
+  NSDictionary *ready = [self waitForMarker:@"RISH_PYTHON_READY" requireTerminal:NO
+      family:@"python" entry:@"stop.py"];
   XCTAssertEqualObjects(ready[@"status"], @"running");
   NSDictionary *stop = [self.programs stopRequest:self.runLocator error:nil];
   XCTAssertEqualObjects(stop[@"status"], @"stopping");

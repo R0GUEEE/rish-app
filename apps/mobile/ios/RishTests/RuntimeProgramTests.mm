@@ -285,4 +285,35 @@ static NSString *const Operation = @"22222222-2222-4222-8222-222222222222";
     XCTAssertTrue([command[5] containsString:@"\"$@\""]);
   }
 }
+- (void)testExecutionTimeoutExtendsOnlyValidatedJavaSourceEntries {
+  NSArray<NSArray *> *cases = @[
+    @[@"java", @"Main.java", @1200000],
+    @[@"java", @"Main.JAVA", @1200000],
+    @[@"java", @"src/Main.Java", @1200000],
+    @[@"java", @"main.jar", @600000],
+    @[@"java", @"main.JAR", @600000],
+    @[@"java", @"Main.java.jar", @600000],
+    @[@"java", @"Main.class", @600000],
+    @[@"java", @"Main", @600000],
+    @[@"java", @"Main.java ", @600000],
+    @[@"java", @"src.java/Main", @600000],
+    @[@"java", @"../Main.java", @600000],
+    @[@"java", @"/Main.java", @600000],
+    @[@"java", @"", @600000],
+    @[@"python", @"Main.java", @600000],
+    @[@"node", @"Main.JAVA", @600000],
+    @[@"bun", @"Main.java", @600000],
+    @[@"go", @"Main.java", @600000],
+    @[@"rust", @"Main.java", @600000],
+    @[@"unknown", @"Main.java", @600000],
+    @[@"JAVA", @"Main.java", @600000],
+  ];
+  for (NSArray *testCase in cases) {
+    NSUInteger timeout = [DSHRuntimeProgramVM executionTimeoutMillisecondsForFamily:testCase[0]
+        entryPath:testCase[1]];
+    XCTAssertEqual(timeout, [testCase[2] unsignedIntegerValue], @"%@", testCase);
+    XCTAssertGreaterThanOrEqual(timeout, 600000U);
+    XCTAssertLessThanOrEqual(timeout, 1200000U);
+  }
+}
 @end
