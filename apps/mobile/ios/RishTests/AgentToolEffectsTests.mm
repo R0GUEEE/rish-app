@@ -2533,6 +2533,128 @@
   XCTAssertEqualObjects(executes[0][@"state"], @"committed");
 }
 
+// Helper: create `content` at `path` through the executor and answer the
+// revision a following write must expect.
+- (NSString *)effectsWriteFile:(NSString *)path
+                       content:(NSString *)content
+                       fixture:(NSDictionary *)fixture
+                      revision:(NSString *)expectedRevision {
+  DSHAgentWorkspaceToolExecutor *workspace = fixture[@"workspace_executor"];
+  NSDictionary *write = @{ @"path" : path, @"content" : content,
+    @"expected_revision" : expectedRevision ?: NSNull.null };
+  NSError *error = nil;
+  NSDictionary *prepared = [workspace prepareToolNamed:@"write_file"
+      arguments:write root:fixture[@"root"] error:&error];
+  XCTAssertNil(error);
+  XCTAssertNotNil(prepared);
+  if (prepared == nil) return nil;
+  XCTAssertEqualObjects([workspace executeToolNamed:@"write_file"
+      arguments:write root:fixture[@"root"]
+      precondition:prepared[@"precondition"] error:&error][@"status"], @"ok");
+  XCTAssertNil(error);
+  NSDictionary *read = [workspace prepareToolNamed:@"read_file"
+      arguments:@{ @"path" : path } root:fixture[@"root"] error:&error];
+  XCTAssertNil(error);
+  return read[@"precondition"][@"source_revision"];
+}
+
+- (NSDictionary *)effectsRealWorkspaceFixture {
+  // Only the root and the executor are used by the preview tests; the batch
+  // request still needs a well-formed call, so it gets a trivial one.
+  return [self realWorkspaceServiceFixtureForRawCalls:@[@{
+    @"schema_version" : @1, @"call_id" : @"unused", @"name" : @"list_dir",
+    @"arguments_json" : @"{\"path\":null}" }]];
+}
+
+// The approval preview's byte budget is in UTF-8 bytes, and the clip that
+// enforces it used to be taken with -substringToIndex:, which counts UTF-16
+// units.  For CJK text the two disagree by a factor of three, so a preview of
+// 4,500 UTF-8 bytes is only 1,500 UTF-16 units and clipping it at index 2,048
+// raised NSRangeException — taking the process down at the exact moment the
+// human was being asked to approve a write.
+- (void)testAWideCharacterPreviewIsClippedByBytesAndDoesNotRaise {
+  NSDictionary *fixture = [self effectsRealWorkspaceFixture];
+  XCTAssertNotNil(fixture);
+  if (fixture == nil) return;
+  NSMutableString *prior = [NSMutableString string];
+  NSMutableString *next = [NSMutableString string];
+  // Wide enough that the 24-line hunk cap still leaves a preview over the
+  // 4,096-byte budget, while staying well under 2,048 UTF-16 units — the
+  // exact gap the old clip fell through.
+  NSString *tail = @"一直写下去一直写下去一直写下去一直写下去一直写下去";
+  for (NSUInteger index = 0; index < 60; index += 1) {
+    [prior appendFormat:@"旧的内容第%lu行%@\n", (unsigned long)index, tail];
+    [next appendFormat:@"新的内容第%lu行%@\n", (unsigned long)index, tail];
+  }
+  NSString *revision = [self effectsWriteFile:@"CJK.md" content:prior
+                                      fixture:fixture revision:nil];
+  XCTAssertNotNil(revision);
+  if (revision == nil) return;
+
+  DSHAgentWorkspaceToolExecutor *workspace = fixture[@"workspace_executor"];
+  NSError *error = nil;
+  NSDictionary *prepared = [workspace prepareToolNamed:@"write_file"
+      arguments:@{ @"path" : @"CJK.md", @"content" : next,
+                   @"expected_revision" : revision }
+      root:fixture[@"root"] error:&error];
+  XCTAssertNil(error);
+  XCTAssertNotNil(prepared);
+  if (prepared == nil) return;
+  NSDictionary *preview = prepared[@"approval_preview"];
+  NSString *diff = preview[@"diff_preview"];
+  XCTAssertTrue([diff isKindOfClass:NSString.class], @"%@", preview);
+  if (![diff isKindOfClass:NSString.class]) return;
+  // Clipped by bytes, on a character boundary, and honestly marked.
+  XCTAssertLessThanOrEqual(
+      [diff lengthOfBytesUsingEncoding:NSUTF8StringEncoding],
+      (NSUInteger)(4096 / 2) + 4);
+  XCTAssertTrue([diff hasSuffix:@"\n…"], @"%@", diff);
+  XCTAssertEqualObjects(preview[@"diff_truncated"], @YES);
+  // A clip that split a multi-byte sequence would not round-trip.
+  XCTAssertEqualObjects([[NSString alloc]
+      initWithData:[diff dataUsingEncoding:NSUTF8StringEncoding]
+          encoding:NSUTF8StringEncoding], diff);
+}
+
+// A file longer than the 2,000-line diff bound is compared only up to that
+// line.  The helper recorded that, then overwrote the flag with whether the
+// *hunk* had been truncated on the way out — so a 2,500-line file with one
+// changed line in the first 2,000 was presented as a complete preview, and
+// any change past line 2,000 was approved unseen.
+- (void)testAPreviewCutAtTheLineBoundStaysMarkedTruncated {
+  NSDictionary *fixture = [self effectsRealWorkspaceFixture];
+  XCTAssertNotNil(fixture);
+  if (fixture == nil) return;
+  NSMutableString *prior = [NSMutableString string];
+  for (NSUInteger index = 0; index < 2500; index += 1) {
+    [prior appendFormat:@"line %04lu\n", (unsigned long)index];
+  }
+  NSMutableString *next = [prior mutableCopy];
+  // One changed line well inside the bound, so the hunk itself is one line.
+  [next replaceOccurrencesOfString:@"line 0005\n" withString:@"LINE 0005\n"
+                           options:0 range:NSMakeRange(0, next.length)];
+  NSString *revision = [self effectsWriteFile:@"WIDE.md" content:prior
+                                      fixture:fixture revision:nil];
+  XCTAssertNotNil(revision);
+  if (revision == nil) return;
+
+  DSHAgentWorkspaceToolExecutor *workspace = fixture[@"workspace_executor"];
+  NSError *error = nil;
+  NSDictionary *prepared = [workspace prepareToolNamed:@"write_file"
+      arguments:@{ @"path" : @"WIDE.md", @"content" : next,
+                   @"expected_revision" : revision }
+      root:fixture[@"root"] error:&error];
+  XCTAssertNil(error);
+  XCTAssertNotNil(prepared);
+  if (prepared == nil) return;
+  NSDictionary *preview = prepared[@"approval_preview"];
+  // The hunk is one line, so nothing on the way out would raise the flag;
+  // only the line bound did, and it must survive.
+  XCTAssertTrue([preview[@"diff_preview"] containsString:@"-line 0005"],
+                @"%@", preview[@"diff_preview"]);
+  XCTAssertEqualObjects(preview[@"diff_truncated"], @YES, @"%@", preview);
+}
+
 // Device evidence (2026-09-04): the executor previewed a new-file write with
 // `prior = {schema_version, kind: absent}` while the ledger required the
 // prior to carry `bytes` as well, so every first write into a workspace was

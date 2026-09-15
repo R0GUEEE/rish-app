@@ -104,20 +104,23 @@ static BOOL DSHAgentApprovalLooksBinary(NSString *text) {
 }
 
 /// Anchored prefix/suffix line diff with a strict byte budget.  `truncatedOut`
-/// is set when the prior content, the hunk, or the final preview exceeded its
-/// bound, so the UI can mark the preview as incomplete.  Returns nil for
-/// binary content (a preview would leak bytes, not text).
+/// is *raised* — never cleared — when the hunk or the final preview exceeded
+/// its bound, so a caller that already truncated the prior read keeps saying
+/// so.  Returns nil for binary content (a preview would leak bytes, not text).
+static void DSHAgentApprovalRaise(BOOL *truncatedOut) {
+  if (truncatedOut != nullptr) *truncatedOut = YES;
+}
+
 static NSString *DSHAgentApprovalUnifiedDiff(NSString *prior,
                                               NSString *next,
                                               BOOL *truncatedOut) {
-  if (truncatedOut != nullptr) *truncatedOut = NO;
   if (DSHAgentApprovalLooksBinary(prior) ||
       DSHAgentApprovalLooksBinary(next)) return nil;
   NSArray<NSString *> *priorLines = DSHAgentApprovalLines(prior);
   NSArray<NSString *> *nextLines = DSHAgentApprovalLines(next);
   if (priorLines.count > DSHAgentApprovalMaxDiffLines ||
       nextLines.count > DSHAgentApprovalMaxDiffLines) {
-    if (truncatedOut != nullptr) *truncatedOut = YES;
+    DSHAgentApprovalRaise(truncatedOut);
     priorLines = [priorLines subarrayWithRange:
         NSMakeRange(0, MIN(priorLines.count, DSHAgentApprovalMaxDiffLines))];
     nextLines = [nextLines subarrayWithRange:
@@ -166,12 +169,27 @@ static NSString *DSHAgentApprovalUnifiedDiff(NSString *prior,
   }
   NSData *previewBytes = [preview dataUsingEncoding:NSUTF8StringEncoding];
   if (previewBytes.length > DSHAgentApprovalMaxPreviewBytes) {
-    if (truncatedOut != nullptr) *truncatedOut = YES;
-    NSString *clipped = [preview substringToIndex:
-        DSHAgentApprovalMaxPreviewBytes / 2];
-    return [clipped stringByAppendingString:@"\n…"];
+    DSHAgentApprovalRaise(truncatedOut);
+    // The budget is in UTF-8 bytes, so the clip must be too.  -getBytes:
+    // stops on a character boundary and never splits a multi-byte sequence;
+    // -substringToIndex: would take the same number as a UTF-16 index, which
+    // for CJK text is larger than the string and raises NSRangeException.
+    NSUInteger budget = DSHAgentApprovalMaxPreviewBytes / 2;
+    NSMutableData *clippedBytes = [NSMutableData dataWithLength:budget];
+    NSUInteger used = 0;
+    [preview getBytes:clippedBytes.mutableBytes
+            maxLength:budget
+           usedLength:&used
+             encoding:NSUTF8StringEncoding
+              options:0
+                range:NSMakeRange(0, preview.length)
+       remainingRange:NULL];
+    NSString *clipped = [[NSString alloc] initWithBytes:clippedBytes.bytes
+                                                 length:used
+                                               encoding:NSUTF8StringEncoding];
+    return [(clipped ?: @"") stringByAppendingString:@"\n…"];
   }
-  if (truncatedOut != nullptr) *truncatedOut = hunkTruncated;
+  if (hunkTruncated) DSHAgentApprovalRaise(truncatedOut);
   return preview;
 }
 

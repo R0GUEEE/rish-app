@@ -911,6 +911,39 @@ root needs a workspace subsystem and a project subsystem, neither of which
 exists on Android; that is product surface, not engine migration. The rules are
 in place for when it does.
 
+### The write-approval preview
+
+The preview a person approves before an agent writes a file is built in
+`AgentWorkspaceToolExecutor.mm`. Three of its bounds interact and two of them
+were wrong.
+
+The byte budget is 4,096 **UTF-8 bytes**, but the clip that enforced it used
+`-substringToIndex:`, which takes a **UTF-16** index. For CJK text the two
+differ by a factor of three: 1,500 Chinese characters are 4,500 UTF-8 bytes —
+over the budget, so the clip runs — but only 1,500 UTF-16 units, so clipping at
+index 2,048 raised `NSRangeException`. That is a hard crash on the approval
+path, reachable by any sufficiently large edit to a Chinese-language file. The
+clip now uses `-getBytes:maxLength:usedLength:…`, which stops on a character
+boundary and never splits a multi-byte sequence.
+
+The truncation flag was cleared on entry to the diff helper and assigned again
+on the way out, so each bound could erase the one before it. In particular a
+file longer than the 2,000-line diff bound with a small edit inside that bound
+was presented as a *complete* preview: anything past line 2,000 was approved
+unseen. The flag is now only ever raised, never cleared.
+
+The third case — a prior read cut off at 64 KiB — is not reachable today,
+because a single write is capped at 32 KiB, so a truncated prior always
+produces a hunk or a byte clip that raises the flag anyway. The helper no
+longer depends on that coincidence.
+
+Both reachable cases have tests in `AgentToolEffectsTests` that fail against
+the old helper, the first with the `NSRangeException` itself.
+
+Nothing recomputes a stored preview and compares it, so this is not a
+compatibility change: an old receipt keeps the text it was written with, and
+the preview's shape is unchanged.
+
 ### Device-only storage metadata
 
 The session store and the agent WAL require every pinned item to report
