@@ -834,6 +834,23 @@ and tool turns only, because user text lives in the session; `append` and
 `expected_transcript`, not `transcript`; and a root is the full seven-field
 form, not a path. Each of those is now a test.
 
+The round journal and the execution ledger follow, on the same facade shape:
+collect the view, call the reducer, apply the row, dispatch-marker and
+transcript effects it returns, and answer whether an owner is still alive in
+this process. Between them they turned up the mistake that would have been
+hardest to find from the outside: **`org.json.JSONObject` has no value
+equality**. Every "is this the row the locator names" comparison used `==`,
+which compares references, so a lookup simply never matched and the journal
+inserted a second row and a second dispatch marker instead of reporting
+already-present. `AndroidJson.equal` is the structural comparison those call
+sites now use; the state-level validation caught the duplicate marker, which is
+exactly what it is for.
+
+Three more shape facts the iOS call sites had always got right: a round locator
+is schema 1 while a round CAS is schema 2, an owner carries its own `task_id`
+and `heartbeat_at`, and `claim`/`mark_dispatched` take a full CAS rather than a
+revision.
+
 ### Device-only storage metadata
 
 The session store and the agent WAL require every pinned item to report

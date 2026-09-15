@@ -53,6 +53,22 @@ internal object RishAgentCoreNative {
 
     @JvmStatic external fun transcriptReduceNative(requestJson: String): String?
 
+    /** One schema-3 round-journal decision over `{"op","args","env","view"}`. */
+    fun roundReduce(requestJson: String): String? {
+        requireAvailable()
+        return roundReduceNative(requestJson)
+    }
+
+    @JvmStatic external fun roundReduceNative(requestJson: String): String?
+
+    /** One execution-ledger row decision over `{"op","args","env","view"}`. */
+    fun ledgerReduce(requestJson: String): String? {
+        requireAvailable()
+        return ledgerReduceNative(requestJson)
+    }
+
+    @JvmStatic external fun ledgerReduceNative(requestJson: String): String?
+
     /** Adopts a committed WAL state and returns an opaque handle, or 0. */
     @JvmStatic external fun walOpen(stateJson: String): Long
 

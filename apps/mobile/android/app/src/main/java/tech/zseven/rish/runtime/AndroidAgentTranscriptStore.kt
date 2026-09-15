@@ -50,8 +50,8 @@ internal class AndroidAgentTranscriptStore(private val wal: AndroidAgentWal) {
         if (transcripts != null) {
             for (index in 0 until transcripts.length()) {
                 val candidate = transcripts.optJSONObject(index) ?: continue
-                if (attemptId != null && candidate.opt("attempt_id") == attemptId) attemptRows.put(candidate)
-                if (row == null && transcriptRef != null && candidate.opt("transcript_ref") == transcriptRef) {
+                if (attemptId != null && AndroidJson.equal(candidate.opt("attempt_id"), attemptId)) attemptRows.put(candidate)
+                if (row == null && transcriptRef != null && AndroidJson.equal(candidate.opt("transcript_ref"), transcriptRef)) {
                     row = candidate
                 }
             }
@@ -60,7 +60,7 @@ internal class AndroidAgentTranscriptStore(private val wal: AndroidAgentWal) {
         state.optJSONArray("cleanup")?.let { table ->
             for (index in 0 until table.length()) {
                 val entry = table.optJSONObject(index) ?: continue
-                if (cleanupId != null && entry.opt("cleanup_id") == cleanupId) {
+                if (cleanupId != null && AndroidJson.equal(entry.opt("cleanup_id"), cleanupId)) {
                     cleanup.put(JSONObject().put("slot", index).put("record", entry))
                 }
             }
@@ -96,7 +96,7 @@ internal class AndroidAgentTranscriptStore(private val wal: AndroidAgentWal) {
                 val rows = state.optJSONArray("transcripts") ?: throw Refused(2)
                 var index = -1
                 for (cursor in 0 until rows.length()) {
-                    if (rows.optJSONObject(cursor)?.opt("transcript_ref") == reference) { index = cursor; break }
+                    if (AndroidJson.equal(rows.optJSONObject(cursor)?.opt("transcript_ref"), reference)) { index = cursor; break }
                 }
                 if (index < 0) throw Refused(2)
                 if (replacing) rows.put(index, change.getJSONObject("row")) else rows.remove(index)
