@@ -3,6 +3,8 @@
 
 #import "AgentNativeWAL.h"
 
+#include "rish_agent_core.h"
+
 #include <CoreFoundation/CoreFoundation.h>
 #include <math.h>
 
@@ -43,8 +45,6 @@
                                                  error:(NSError **)error;
 @end
 
-static const NSUInteger DSHAgentMaximumSafeInteger = 9007199254740991ULL;
-
 static NSError *DSHAgentRootError(DSHAgentNativeStoreErrorCode code) {
   return DSHAgentNativeStoreError(code);
 }
@@ -54,59 +54,75 @@ static void DSHSetRootError(NSError **error,
   if (error != nullptr) *error = DSHAgentRootError(code);
 }
 
-static BOOL DSHAgentRootCapabilityArray(id value,
-                                        BOOL project,
-                                        NSSet<NSString *> **setOut) {
-  if (![value isKindOfClass:NSArray.class] || [value count] > 6) return NO;
-  NSSet *allowed = [NSSet setWithArray:@[
-    @"file_read", @"file_write", @"git_status", @"git_commit", @"git_push", @"guest_service",
-  ]];
-  NSMutableSet *seen = [NSMutableSet set];
-  for (id item in (NSArray *)value) {
-    if (![item isKindOfClass:NSString.class] || ![allowed containsObject:item] ||
-        [seen containsObject:item] || (!project && [item hasPrefix:@"git_"])) {
-      return NO;
-    }
-    [seen addObject:item];
+// Resolving a root is this class's job and stays here: only the host owns the
+// workspace registry, the leases, the authority guard and libgit2.  Every
+// judgement it makes on the way — what a resolver argument may look like, what
+// projection a set of grants implies, how a workspace root is promoted to a
+// project root, which capability an operation mode needs and whether a final
+// proof asks for the leases it will use — is a rule, and the rules live in the
+// shared core (modules/rish/core, `rish_agent_root_reduce`).  What stays here
+// besides the host capability is the one build fact the core cannot know:
+// whether this binary has the guest CGI tools compiled in, which decides
+// whether a root can ever carry `guest_service`.
+#if DSH_GUEST_CGI_AVAILABLE
+static const BOOL DSHAgentRootGuestCGIAvailable = YES;
+#else
+static const BOOL DSHAgentRootGuestCGIAvailable = NO;
+#endif
+
+static NSDictionary *DSHAgentRootReduce(NSString *op,
+                                        NSDictionary *fields,
+                                        NSError **error) {
+  NSMutableDictionary *envelope = [fields mutableCopy];
+  envelope[@"op"] = op;
+  envelope[@"guest_cgi"] = @(DSHAgentRootGuestCGIAvailable);
+  NSData *bytes = [NSJSONSerialization dataWithJSONObject:envelope options:0
+                                                    error:nil];
+  if (bytes == nil) {
+    DSHSetRootError(error, DSHAgentNativeStoreErrorInvalidArgument);
+    return nil;
   }
-  if (setOut != nullptr) *setOut = [seen copy];
-  return YES;
+  char *raw = rish_agent_root_reduce((const char *)bytes.bytes, bytes.length);
+  if (raw == NULL) {
+    DSHSetRootError(error, DSHAgentNativeStoreErrorCorrupt);
+    return nil;
+  }
+  NSData *replyBytes = [NSData dataWithBytes:raw length:strlen(raw)];
+  rish_agent_string_free(raw);
+  id reply = [NSJSONSerialization JSONObjectWithData:replyBytes options:0
+                                                error:nil];
+  if (![reply isKindOfClass:NSDictionary.class]) {
+    DSHSetRootError(error, DSHAgentNativeStoreErrorCorrupt);
+    return nil;
+  }
+  if (![reply[@"ok"] isEqual:@YES]) {
+    NSInteger code = [reply[@"error"] isKindOfClass:NSNumber.class]
+        ? [reply[@"error"] integerValue] : 0;
+    if (code < DSHAgentNativeStoreErrorInvalidArgument ||
+        code > DSHAgentNativeStoreErrorPersistence) {
+      code = DSHAgentNativeStoreErrorCorrupt;
+    }
+    DSHSetRootError(error, (DSHAgentNativeStoreErrorCode)code);
+    return nil;
+  }
+  if (error != nullptr) *error = nil;
+  return reply;
 }
 
 static BOOL DSHAgentRootProjectionShape(NSDictionary *root,
                                          NSError **error) {
-  if (!DSHAgentIsImmutableFoundationJSON(root) ||
-      !DSHAgentExactDictionaryKeys(root, @[
-        @"schema_version", @"kind", @"workspace_id",
-        @"workspace_binding_revision", @"project_id",
-        @"root_fingerprint_sha256", @"capabilities",
-      ]) ||
-      !DSHAgentSafeInteger(root[@"schema_version"], 1, NO) ||
-      ![root[@"schema_version"] isEqual:@1] ||
-      !DSHAgentCanonicalUUID(root[@"workspace_id"]) ||
-      !DSHAgentSafeInteger(root[@"workspace_binding_revision"],
-                           DSHAgentMaximumSafeInteger, NO) ||
-      !DSHAgentCanonicalSHA256(root[@"root_fingerprint_sha256"])) {
+  // The immutability check is the one part that cannot travel: it is about
+  // this process's object graph, not about the value.  Everything the value
+  // itself must satisfy — the exact seven keys, the canonical identifiers, the
+  // kind/project_id agreement and the capability list — is `schema::root_full`
+  // in the core, the same rule stored roots in the journal and the ledger are
+  // already validated with.
+  if (!DSHAgentIsImmutableFoundationJSON(root)) {
     DSHSetRootError(error, DSHAgentNativeStoreErrorInvalidArgument);
     return NO;
   }
-  NSString *kind = root[@"kind"];
-  if (![kind isKindOfClass:NSString.class] ||
-      (![kind isEqualToString:@"project"] &&
-       ![kind isEqualToString:@"workspace"])) {
-    DSHSetRootError(error, DSHAgentNativeStoreErrorInvalidArgument);
-    return NO;
-  }
-  id projectId = root[@"project_id"];
-  BOOL project = [kind isEqualToString:@"project"];
-  if ((project && !DSHAgentCanonicalUUID(projectId)) ||
-      (!project && projectId != NSNull.null) ||
-      (project && projectId == NSNull.null) ||
-      !DSHAgentRootCapabilityArray(root[@"capabilities"], project, nullptr)) {
-    DSHSetRootError(error, DSHAgentNativeStoreErrorInvalidArgument);
-    return NO;
-  }
-  return YES;
+  return DSHAgentRootReduce(@"projection_shape", @{ @"value" : root },
+                            error) != nil;
 }
 
 static DSHAgentNativeStoreErrorCode DSHAgentMapWorkspaceError(NSError *error) {
@@ -144,21 +160,28 @@ static DSHAgentNativeStoreErrorCode DSHAgentMapProjectError(NSError *error) {
   }
 }
 
-static NSArray<NSString *> *DSHAgentCapabilitiesForWorkspace(
-    NSSet<NSString *> *available,
-    BOOL project) {
-  NSMutableArray *capabilities = [NSMutableArray array];
-  if ([available containsObject:@"read"]) [capabilities addObject:@"file_read"];
-  if ([available containsObject:@"write"]) [capabilities addObject:@"file_write"];
-  if (project && [available containsObject:@"git"]) {
-    [capabilities addObjectsFromArray:@[
-      @"git_status", @"git_commit", @"git_push",
-    ]];
+// The two enumerations are this platform's spelling of the modes the core
+// names; they translate, they do not decide.
+static NSString *DSHAgentRootOperationModeName(DSHAgentRootOperationMode mode) {
+  switch (mode) {
+    case DSHAgentRootOperationModeRead: return @"read";
+    case DSHAgentRootOperationModeWrite: return @"write";
+    case DSHAgentRootOperationModeGitRead: return @"git_read";
+    case DSHAgentRootOperationModeGitWrite: return @"git_write";
+    case DSHAgentRootOperationModeProjectContext: return @"project_context";
   }
-#if DSH_GUEST_CGI_AVAILABLE
-  if ([available containsObject:@"read"] && [available containsObject:@"write"]) [capabilities addObject:@"guest_service"];
-#endif
-  return [capabilities copy];
+  return @"";
+}
+
+static DSHLegacyBoundProjectRootOperationMode DSHLegacyBoundProjectMode(
+    NSString *name) {
+  if ([name isEqual:@"write"]) return DSHLegacyBoundProjectRootOperationModeWrite;
+  if ([name isEqual:@"git_read"]) return DSHLegacyBoundProjectRootOperationModeGitRead;
+  if ([name isEqual:@"git_write"]) return DSHLegacyBoundProjectRootOperationModeGitWrite;
+  if ([name isEqual:@"project_context"]) {
+    return DSHLegacyBoundProjectRootOperationModeProjectContext;
+  }
+  return DSHLegacyBoundProjectRootOperationModeRead;
 }
 
 @interface DSHAgentRootResolver ()
@@ -282,34 +305,35 @@ static NSArray<NSString *> *DSHAgentCapabilitiesForWorkspace(
   // LocalWorkspaceAccess stores a workspace binding without a project_id.
   // Project identity is supplied only by the independently verified
   // LocalProjectAccess lease below; never infer it from a missing dictionary
-  // value here.
-  NSArray *capabilities = DSHAgentCapabilitiesForWorkspace(available, NO);
-  return @{
-    @"schema_version" : @1,
-    @"kind" : @"workspace",
+  // value here, and the core refuses to put one in a workspace projection.
+  NSArray *grants = [[available allObjects]
+      filteredArrayUsingPredicate:[NSPredicate predicateWithBlock:
+          ^BOOL(id grant, __unused NSDictionary *bindings) {
+            return [@[ @"read", @"write", @"git" ] containsObject:grant];
+          }]];
+  return DSHAgentRootReduce(@"workspace_projection", @{
     @"workspace_id" : workspaceId,
-    @"workspace_binding_revision" : bindingRevision,
-    @"project_id" : NSNull.null,
+    @"binding_revision" : bindingRevision,
     @"root_fingerprint_sha256" : fingerprint,
-    @"capabilities" : capabilities,
-  };
+    @"grants" : grants,
+  }, error)[@"root"];
 }
 
 - (nullable NSDictionary *)resolveRootForWorkspaceId:(NSString *)workspaceId
                                            projectId:(NSString *)projectId
                                      bindingRevision:(NSNumber *)bindingRevision
                                                error:(NSError **)error {
-  BOOL noRoot = workspaceId == nil && projectId == nil && bindingRevision == nil;
-  if (noRoot) {
+  // Three absent arguments are "no root", which is not an error: an attempt may
+  // legitimately have none.  Anything else is a root request, and the core says
+  // whether it is a well-formed one.
+  NSDictionary *request = DSHAgentRootReduce(@"resolve_request", @{
+    @"workspace_id" : workspaceId ?: NSNull.null,
+    @"project_id" : projectId ?: NSNull.null,
+    @"binding_revision" : bindingRevision ?: NSNull.null,
+  }, error);
+  if (request == nil) return nil;
+  if ([request[@"outcome"] isEqual:@"none"]) {
     if (error != nullptr) *error = nil;
-    return nil;
-  }
-  if (![workspaceId isKindOfClass:NSString.class] ||
-      !DSHAgentCanonicalUUID(workspaceId) ||
-      ![bindingRevision isKindOfClass:NSNumber.class] ||
-      !DSHAgentSafeInteger(bindingRevision, DSHAgentMaximumSafeInteger, NO) ||
-      (projectId != nil && !DSHAgentCanonicalUUID(projectId))) {
-    DSHSetRootError(error, DSHAgentNativeStoreErrorInvalidArgument);
     return nil;
   }
 
@@ -327,15 +351,10 @@ static NSArray<NSString *> *DSHAgentCapabilitiesForWorkspace(
   // Legacy app-owned projects cannot produce a split-git workspace lease.
   // Build only the fixed safe projection, then ask the adapter to prove it
   // against both current workspace evidence and the legacy project lease.
-  NSMutableDictionary *legacyCandidate = [workspaceRoot mutableCopy];
-  legacyCandidate[@"kind"] = @"project";
-  legacyCandidate[@"project_id"] = projectId;
-  NSMutableArray *legacyCapabilities =
-      [legacyCandidate[@"capabilities"] mutableCopy];
-  [legacyCapabilities addObjectsFromArray:@[
-    @"git_status", @"git_commit", @"git_push",
-  ]];
-  legacyCandidate[@"capabilities"] = [legacyCapabilities copy];
+  NSDictionary *legacyCandidate = DSHAgentRootReduce(@"project_projection", @{
+    @"base" : workspaceRoot, @"project_id" : projectId,
+  }, error)[@"root"];
+  if (legacyCandidate == nil) return nil;
   if (self.legacyBoundProjectAccess != nil) {
     NSError *legacyError = nil;
     DSHLegacyBoundProjectRootDisposition disposition =
@@ -348,7 +367,7 @@ static NSArray<NSString *> *DSHAgentCapabilitiesForWorkspace(
             error:&legacyError];
     if (disposition == DSHLegacyBoundProjectRootDispositionHandled) {
       if (error != nullptr) *error = nil;
-      return [legacyCandidate copy];
+      return legacyCandidate;
     }
     if (disposition == DSHLegacyBoundProjectRootDispositionFailed) {
       DSHSetRootError(error,
@@ -366,12 +385,12 @@ static NSArray<NSString *> *DSHAgentCapabilitiesForWorkspace(
     DSHSetRootError(error, DSHAgentNativeStoreErrorUnavailable);
     return nil;
   }
-  NSDictionary *rootRef = @{
-    @"schema_version" : @1,
-    @"workspace_id" : workspaceId,
-    @"binding_revision" : bindingRevision,
-    @"project_id" : projectId,
-  };
+  // The same reference the legacy probe above was built from, derived from the
+  // same projection rather than assembled a second time from the arguments.
+  NSDictionary *rootRefReply = DSHAgentRootReduce(@"root_ref",
+      @{ @"root" : legacyCandidate }, error);
+  if (rootRefReply == nil) return nil;
+  NSDictionary *rootRef = rootRefReply[@"root_ref"];
   NSError *workspaceLeaseError = nil;
   DSHLocalWorkspaceLease *workspaceLease = [self.workspaceAccess
       leaseWorkspaceId:workspaceId
@@ -403,21 +422,14 @@ static NSArray<NSString *> *DSHAgentCapabilitiesForWorkspace(
     }
     return nil;
   }
-  NSMutableDictionary *result = [workspaceRoot mutableCopy];
-  result[@"kind"] = @"project";
-  result[@"project_id"] = projectId;
-  result[@"root_fingerprint_sha256"] = projectLease.rootFingerprintSHA256;
-  NSMutableArray *projectCapabilities = [result[@"capabilities"] mutableCopy];
-  if (![projectCapabilities containsObject:@"git_status"]) {
-    // LocalProjectAccess has already required and verified the native `git`
-    // capability.  Expose exactly the three fixed Agent Git capabilities in
-    // their canonical order; never expose the generic workspace capability.
-    [projectCapabilities addObjectsFromArray:@[
-      @"git_status", @"git_commit", @"git_push",
-    ]];
-  }
-  result[@"capabilities"] = [projectCapabilities copy];
-  return [result copy];
+  // LocalProjectAccess has already required and verified the native `git`
+  // capability, and the lease's fingerprint is the authoritative one.  The
+  // core appends exactly the three fixed Agent Git capabilities in their
+  // canonical order, once; the generic workspace capability is never exposed.
+  return DSHAgentRootReduce(@"project_projection", @{
+    @"base" : workspaceRoot, @"project_id" : projectId,
+    @"root_fingerprint_sha256" : projectLease.rootFingerprintSHA256,
+  }, error)[@"root"];
 }
 
 - (BOOL)validateFrozenRoot:(NSDictionary *)root error:(NSError **)error {
@@ -492,34 +504,28 @@ static NSArray<NSString *> *DSHAgentCapabilitiesForWorkspace(
           authorityMutationGuard:guard
                             error:error];
   if (base == nil) return NO;
-  NSMutableDictionary *expected = [base mutableCopy];
+  NSDictionary *expected = base;
   if ([root[@"kind"] isEqualToString:@"project"]) {
     if (self.projectAccess == nil) {
       DSHSetRootError(error, DSHAgentNativeStoreErrorUnavailable);
       return NO;
     }
-    NSDictionary *rootRef = @{
-      @"schema_version" : @1,
-      @"workspace_id" : root[@"workspace_id"],
-      @"binding_revision" : root[@"workspace_binding_revision"],
-      @"project_id" : root[@"project_id"],
-    };
+    NSDictionary *rootRef = DSHAgentRootReduce(@"root_ref",
+                                               @{ @"root" : root }, error);
+    if (rootRef == nil) return NO;
     NSError *bindingError = nil;
     NSDictionary *binding = [self.projectAccess
-        workspaceBindingForRootRef:rootRef
+        workspaceBindingForRootRef:rootRef[@"root_ref"]
              rootFingerprintSHA256:base[@"root_fingerprint_sha256"]
                             error:&bindingError];
     if (binding == nil) {
       DSHSetRootError(error, DSHAgentNativeStoreErrorOwnerLost);
       return NO;
     }
-    expected[@"kind"] = @"project";
-    expected[@"project_id"] = root[@"project_id"];
-    NSMutableArray *capabilities = [expected[@"capabilities"] mutableCopy];
-    [capabilities addObjectsFromArray:@[
-      @"git_status", @"git_commit", @"git_push",
-    ]];
-    expected[@"capabilities"] = [capabilities copy];
+    expected = DSHAgentRootReduce(@"project_projection", @{
+      @"base" : base, @"project_id" : root[@"project_id"],
+    }, error)[@"root"];
+    if (expected == nil) return NO;
   }
   if (![expected isEqual:root]) {
     DSHSetRootError(error, DSHAgentNativeStoreErrorOwnerLost);
@@ -540,22 +546,16 @@ static NSArray<NSString *> *DSHAgentCapabilitiesForWorkspace(
     }
     return nil;
   }
-  NSMutableSet *workspaceCapabilities = [NSMutableSet set];
-  for (NSString *capability in capabilities) {
-    if ([capability isEqualToString:@"file_read"]) {
-      [workspaceCapabilities addObject:@"read"];
-    } else if ([capability isEqualToString:@"file_write"]) {
-      [workspaceCapabilities addObject:@"write"];
-    } else if ([capability isEqualToString:@"guest_service"]) {
-      [workspaceCapabilities addObject:@"read"];
-      [workspaceCapabilities addObject:@"write"];
-    } else if ([capability hasPrefix:@"git_"]) {
-      [workspaceCapabilities addObject:@"git"];
-    } else {
-      DSHSetRootError(error, DSHAgentNativeStoreErrorInvalidArgument);
-      return nil;
-    }
-  }
+  // The inverse of the derivation that built this root's capabilities, and the
+  // core holds both directions so they cannot drift apart: a capability whose
+  // grant went missing here would be exercised under a lease never taken for
+  // it.
+  NSDictionary *grants = DSHAgentRootReduce(@"grants", @{
+    @"capabilities" : [capabilities allObjects],
+  }, error);
+  if (grants == nil) return nil;
+  NSSet *workspaceCapabilities =
+      [NSSet setWithArray:grants[@"grants"]];
   NSError *workspaceError = nil;
   DSHLocalWorkspaceLease *lease = [self.workspaceAccess
       leaseWorkspaceId:root[@"workspace_id"]
@@ -580,12 +580,10 @@ static NSArray<NSString *> *DSHAgentCapabilitiesForWorkspace(
     }
     return nil;
   }
-  NSDictionary *rootRef = @{
-    @"schema_version" : @1,
-    @"workspace_id" : root[@"workspace_id"],
-    @"binding_revision" : root[@"workspace_binding_revision"],
-    @"project_id" : root[@"project_id"],
-  };
+  NSDictionary *rootRefReply = DSHAgentRootReduce(@"root_ref",
+                                                 @{ @"root" : root }, error);
+  if (rootRefReply == nil) return nil;
+  NSDictionary *rootRef = rootRefReply[@"root_ref"];
   NSError *workspaceError = nil;
   DSHLocalWorkspaceLease *workspaceLease = [self.workspaceAccess
       leaseWorkspaceId:root[@"workspace_id"]
@@ -623,42 +621,22 @@ static NSArray<NSString *> *DSHAgentCapabilitiesForWorkspace(
                               timeout:(NSTimeInterval)timeout
                                 block:(DSHAgentRootOperation)block
                                 error:(NSError **)error {
-  if (!DSHAgentRootProjectionShape(root, error) || block == nil ||
-      !isfinite(timeout) || timeout < 0 || timeout > 30.0) {
+  if (block == nil) {
     DSHSetRootError(error, DSHAgentNativeStoreErrorInvalidArgument);
     return NO;
   }
-  DSHLegacyBoundProjectRootOperationMode legacyMode;
-  NSString *capability = nil;
-  switch (mode) {
-    case DSHAgentRootOperationModeRead:
-      legacyMode = DSHLegacyBoundProjectRootOperationModeRead;
-      capability = @"file_read";
-      break;
-    case DSHAgentRootOperationModeWrite:
-      legacyMode = DSHLegacyBoundProjectRootOperationModeWrite;
-      capability = @"file_write";
-      break;
-    case DSHAgentRootOperationModeGitRead:
-      legacyMode = DSHLegacyBoundProjectRootOperationModeGitRead;
-      capability = @"git_status";
-      break;
-    case DSHAgentRootOperationModeGitWrite:
-      legacyMode = DSHLegacyBoundProjectRootOperationModeGitWrite;
-      capability = @"git_commit";
-      break;
-    case DSHAgentRootOperationModeProjectContext:
-      legacyMode = DSHLegacyBoundProjectRootOperationModeProjectContext;
-      capability = @"file_read";
-      break;
-    default:
-      DSHSetRootError(error, DSHAgentNativeStoreErrorInvalidArgument);
-      return NO;
-  }
-  if (![root[@"capabilities"] containsObject:capability]) {
-    DSHSetRootError(error, DSHAgentNativeStoreErrorConflict);
-    return NO;
-  }
+  // The core names the capability this mode needs, bounds the timeout, and
+  // separates the two refusals: a root that cannot serve the mode is a
+  // conflict, an unknown mode or an out-of-range timeout a bad request.
+  NSDictionary *decision = DSHAgentRootReduce(@"operation_mode", @{
+    @"root" : root ?: NSNull.null,
+    @"mode" : DSHAgentRootOperationModeName(mode),
+    @"timeout" : @(timeout),
+  }, error);
+  if (decision == nil) return NO;
+  DSHLegacyBoundProjectRootOperationMode legacyMode =
+      DSHLegacyBoundProjectMode(decision[@"legacy_mode"]);
+  NSString *capability = decision[@"capability"];
 
   if ([root[@"kind"] isEqualToString:@"project"] &&
       self.legacyBoundProjectAccess != nil) {
@@ -740,33 +718,24 @@ static NSArray<NSString *> *DSHAgentCapabilitiesForWorkspace(
                  needsProjectLease:(BOOL)needsProjectLease
                projectWriteAccess:(BOOL)projectWriteAccess
                              error:(NSError **)error {
-  if (!DSHAgentRootProjectionShape(root, error) ||
-      ![capabilities isKindOfClass:NSSet.class]) {
+  if (![capabilities isKindOfClass:NSSet.class]) {
     DSHSetRootError(error, DSHAgentNativeStoreErrorInvalidArgument);
     return nil;
   }
-  BOOL hasFileWrite = [capabilities containsObject:@"file_write"];
-  BOOL hasGitWrite = [capabilities containsObject:@"git_commit"];
-  BOOL hasGitRead = [capabilities containsObject:@"git_status"];
-  BOOL hasGitPush = [capabilities containsObject:@"git_push"];
-  NSSet *allowed = [NSSet setWithArray:@[
-    @"file_read", @"file_write", @"git_status", @"git_commit", @"git_push", @"guest_service",
-  ]];
-  BOOL anyGit = hasGitRead || hasGitWrite || hasGitPush;
-  if (![capabilities isSubsetOfSet:allowed] ||
-      needsProjectLease != anyGit ||
-      projectWriteAccess != (hasGitWrite || hasGitPush)) {
-    DSHSetRootError(error, DSHAgentNativeStoreErrorInvalidArgument);
-    return nil;
-  }
-  DSHLegacyBoundProjectRootOperationMode legacyMode = hasGitWrite
-      ? DSHLegacyBoundProjectRootOperationModeGitWrite
-      : (hasFileWrite ? DSHLegacyBoundProjectRootOperationModeWrite
-                      : (hasGitRead
-                            ? DSHLegacyBoundProjectRootOperationModeGitRead
-                            : DSHLegacyBoundProjectRootOperationModeRead));
+  // A proof has to describe itself consistently: the leases it says it needs
+  // must be exactly the ones its capabilities imply, or it would be taken over
+  // something other than what the caller will then do with it.
+  NSDictionary *decision = DSHAgentRootReduce(@"final_proof_request", @{
+    @"root" : root ?: NSNull.null,
+    @"capabilities" : [capabilities allObjects],
+    @"needs_project_lease" : @(needsProjectLease),
+    @"project_write_access" : @(projectWriteAccess),
+  }, error);
+  if (decision == nil) return nil;
+  DSHLegacyBoundProjectRootOperationMode legacyMode =
+      DSHLegacyBoundProjectMode(decision[@"legacy_mode"]);
 
-  if (!hasGitPush && [root[@"kind"] isEqualToString:@"project"] &&
+  if ([decision[@"probe_legacy"] isEqual:@YES] &&
       self.legacyBoundProjectAccess != nil) {
     NSError *probeError = nil;
     DSHLegacyBoundProjectRootDisposition disposition =

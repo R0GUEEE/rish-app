@@ -8,6 +8,7 @@ use rish_agent_core::ledger_batch::reduce_json as ledger_batch_reduce_json;
 use rish_agent_core::ledger_ops::reduce_json as ledger_reduce_json;
 use rish_agent_core::prepared_attempt::reduce_json as prepared_attempt_reduce_json;
 use rish_agent_core::provider_round::reduce_json as provider_round_reduce_json;
+use rish_agent_core::root_projection::reduce_json as root_reduce_json;
 use rish_agent_core::round_journal::reduce_json;
 use rish_agent_core::runtime_coordinator::reduce_json as runtime_reduce_json;
 use rish_agent_core::session_schema::reduce_json as session_reduce_json;
@@ -271,6 +272,22 @@ pub unsafe extern "C" fn rish_agent_tool_registry_reduce(
         return std::ptr::null_mut();
     };
     output(tool_registry_reduce_json(text))
+}
+
+/// Runs one root-projection decision over the JSON envelope documented on
+/// `rish_agent_core::root_projection::reduce_json`.
+///
+/// # Safety
+/// `pointer` must reference `length` readable bytes or be null.
+#[no_mangle]
+pub unsafe extern "C" fn rish_agent_root_reduce(
+    pointer: *const c_char,
+    length: usize,
+) -> *mut c_char {
+    let Some(text) = input(pointer, length) else {
+        return std::ptr::null_mut();
+    };
+    output(root_reduce_json(text))
 }
 
 /// Runs one tool-execution-service decision over the JSON envelope

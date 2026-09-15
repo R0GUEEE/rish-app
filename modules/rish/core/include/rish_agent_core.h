@@ -114,6 +114,12 @@ void rish_agent_wal_close(void *handle);
 /// to say and changes the toolset digest.
 char *rish_agent_tool_registry_reduce(const char *json, size_t json_length);
 
+/// The frozen root projection over {"op",...}: projection_shape, capabilities,
+/// grants, resolve_request, workspace_projection, project_projection, root_ref,
+/// operation_mode, final_proof_request, matches. Resolving a root is the
+/// host's job; every judgement it makes on the way is decided here.
+char *rish_agent_root_reduce(const char *json, size_t json_length);
+
 /// One runtime-coordinator decision over
 /// {"op","request","state"?,"session"?,"facts"?,"proof"?,"base"?,"queried"?}:
 /// query_tool_request, query_attempt_request, presentations_request,

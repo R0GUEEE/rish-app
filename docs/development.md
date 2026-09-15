@@ -867,6 +867,50 @@ values are pinned in the core's tests — a change to the table changes them and
 invalidates every authority on every device, which is exactly the kind of
 change that should be hard to make by accident.
 
+### Resolving a root is a capability; judging one is a rule
+
+`AgentRootResolver.mm` does two different things in one file. It resolves a
+root — reads the workspace registry, checks the binding revision, takes the
+workspace and project leases, holds the authority mutation guard, talks to
+libgit2 — and that is host capability: nothing about it can be shared, because
+the two platforms do not have the same storage. But along the way it makes
+judgements, and those are rules: what a resolver argument may look like, which
+capabilities a set of workspace grants implies, how a workspace root is
+promoted to a project root, which capability an operation mode needs, and
+whether a final-proof request asks for the leases its capabilities will use.
+
+`root_projection.rs` owns the judgements (`rish_agent_root_reduce`); the
+resolver keeps the capability and calls into the core for every decision. The
+projection shape is not a new rule there — it is `schema::root_full`, the same
+one the round journal and the execution ledger already validate stored roots
+with, so the resolver and the stores can no longer disagree about what a root
+is.
+
+The sharpest case is the capability derivation and its inverse. One direction
+turns the host's grants (`read`, `write`, `git`) into Agent capabilities when a
+root is built; the other turns Agent capabilities back into the grants a lease
+must require before the root is used. They are read by different call sites and
+they must be exact inverses — a grant lost on the way back means a capability
+exercised under a lease that was never taken for it. The core holds both and a
+test round-trips all eight grant sets.
+
+`guest_service` is the one capability that is not a rename of a grant: it needs
+both file grants *and* a build with the guest CGI tools, so the host says
+whether this binary has them, exactly as it does for the toolset digest.
+
+Two consequences worth knowing. Promotion to a project root is idempotent — the
+three Git capabilities are appended once, in their canonical order — because
+the guarded validator re-derives an expectation from a base it may already
+hold. And a root that cannot serve an operation is `E_AGENT_CONFLICT`, not
+`E_AGENT_INVALID`: the request was well formed, the root simply does not carry
+the capability.
+
+Android does not call this reducer yet, and cannot: `LocalWorkspaceModule` and
+`LocalProjectsModule` there are stubs that reject every method. Resolving a
+root needs a workspace subsystem and a project subsystem, neither of which
+exists on Android; that is product surface, not engine migration. The rules are
+in place for when it does.
+
 ### Device-only storage metadata
 
 The session store and the agent WAL require every pinned item to report

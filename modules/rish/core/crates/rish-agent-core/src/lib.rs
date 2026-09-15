@@ -19,6 +19,7 @@ pub mod ledger_batch;
 pub mod ledger_ops;
 pub mod prepared_attempt;
 pub mod provider_round;
+pub mod root_projection;
 pub mod round_journal;
 pub mod runtime_coordinator;
 pub mod schema;
