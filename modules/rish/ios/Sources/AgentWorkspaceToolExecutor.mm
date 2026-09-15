@@ -1,4 +1,5 @@
 #import "AgentWorkspaceToolExecutor.h"
+#import "AgentWorkspaceParent.h"
 #import <CommonCrypto/CommonDigest.h>
 
 #import "AgentNativeWAL.h"
@@ -278,6 +279,12 @@ static NSDictionary *DSHAgentWorkspaceFailure(NSString *name,
   };
 }
 
+static NSDictionary *DSHAgentWorkspaceWriteFailure(NSString *name, NSString *code,
+    BOOL ambiguous, DSHAgentWorkspaceParentCreation *parents, NSError **error) {
+  BOOL cleaned = parents == nil || [parents removeCreatedDirectoriesWithError:nil];
+  return DSHAgentWorkspaceFailure(name, code, ambiguous || !cleaned, error);
+}
+
 static BOOL DSHAgentWorkspaceEntryList(int directoryDescriptor,
                                        NSArray **entriesOut,
                                        NSString **fingerprintOut,
@@ -400,6 +407,13 @@ static BOOL DSHAgentWorkspaceEntryList(int directoryDescriptor,
   return self;
 }
 
+- (DSHAgentWorkspaceParentCreation *)parentCreationForRoot:(int)rootDescriptor
+                                               components:(NSArray<NSString *> *)components
+                                                     plan:(NSDictionary *)plan {
+  return [[DSHAgentWorkspaceParentCreation alloc] initWithRootDescriptor:rootDescriptor
+      components:components plan:plan];
+}
+
 - (NSDictionary *)prepareToolNamed:(NSString *)name
                           arguments:(NSDictionary *)arguments
                                root:(NSDictionary *)root
@@ -468,19 +482,24 @@ static BOOL DSHAgentWorkspaceEntryList(int directoryDescriptor,
       };
       return YES;
     }
-    NSString *leaf = nil;
-    int parent = DSHAgentWorkspaceOpenParent(rootDescriptor, components, &leaf);
-    if (parent < 0) {
-      DSHSetAgentNativeStoreError(blockError, DSHAgentNativeStoreErrorInvalidArgument);
+    NSString *leaf = components.lastObject;
+    NSDictionary *parentPlan = nil;
+    int parent = write
+        ? DSHAgentWorkspaceProbeParent(rootDescriptor, components, &parentPlan, blockError)
+        : DSHAgentWorkspaceOpenParent(rootDescriptor, components, &leaf);
+    if (parent < 0 && parentPlan == nil) {
+      if (blockError != nullptr && *blockError == nil)
+        DSHSetAgentNativeStoreError(blockError, DSHAgentNativeStoreErrorInvalidArgument);
       return NO;
     }
     struct stat metadata = {};
-    int statResult = fstatat(parent, leaf.fileSystemRepresentation, &metadata,
-                             AT_SYMLINK_NOFOLLOW);
+    int statResult = parent < 0 ? -1 : fstatat(parent, leaf.fileSystemRepresentation,
+                                              &metadata, AT_SYMLINK_NOFOLLOW);
+    int lookupError = parent < 0 ? ENOENT : errno;
     if ([name isEqualToString:@"read_file"]) {
       if (statResult != 0 || !S_ISREG(metadata.st_mode) ||
           S_ISLNK(metadata.st_mode) || metadata.st_nlink != 1) {
-        close(parent);
+        if (parent >= 0) close(parent);
         DSHSetAgentNativeStoreError(blockError, DSHAgentNativeStoreErrorNotFound);
         return NO;
       }
@@ -495,7 +514,7 @@ static BOOL DSHAgentWorkspaceEntryList(int directoryDescriptor,
         @"prior" : NSNull.null, @"diff_preview" : NSNull.null,
         @"diff_truncated" : @NO,
       };
-      close(parent);
+      if (parent >= 0) close(parent);
       return YES;
     }
     BOOL exactWrite = DSHAgentExactDictionaryKeys(
@@ -509,8 +528,8 @@ static BOOL DSHAgentWorkspaceEntryList(int directoryDescriptor,
         content.length > DSHAgentNativeWALMaxSingleWriteBytes ||
         (statResult == 0 && (!S_ISREG(metadata.st_mode) ||
                             S_ISLNK(metadata.st_mode) || metadata.st_nlink != 1)) ||
-        (statResult != 0 && errno != ENOENT)) {
-      close(parent);
+        (statResult != 0 && lookupError != ENOENT)) {
+      if (parent >= 0) close(parent);
       DSHSetAgentNativeStoreError(blockError, DSHAgentNativeStoreErrorInvalidArgument);
       return NO;
     }
@@ -527,7 +546,7 @@ static BOOL DSHAgentWorkspaceEntryList(int directoryDescriptor,
                @"revision" : revision ?: @"" };
     }
     if (![expectedPrior isEqual:actualPrior]) {
-      close(parent);
+      if (parent >= 0) close(parent);
       DSHSetAgentNativeStoreError(blockError, DSHAgentNativeStoreErrorConflict);
       return NO;
     }
@@ -535,7 +554,7 @@ static BOOL DSHAgentWorkspaceEntryList(int directoryDescriptor,
     NSString *pathDigest = DSHAgentHB(@"relative-path", pathBytes, blockError);
     NSString *contentDigest = DSHAgentHB(@"file-content", content, blockError);
     if (pathDigest == nil || contentDigest == nil) {
-      close(parent);
+      if (parent >= 0) close(parent);
       return NO;
     }
     // Bounded prior-content read for the diff preview.  The precondition
@@ -562,15 +581,17 @@ static BOOL DSHAgentWorkspaceEntryList(int directoryDescriptor,
         priorContent = data;
       }
     }
-    precondition = @{
-      @"schema_version" : @2,
+    NSMutableDictionary *writeCondition = [@{
+      @"schema_version" : parentPlan == nil ? @2 : @3,
       @"kind" : @"write_file",
       @"relative_path_sha256" : pathDigest,
       @"prior" : actualPrior,
       @"content_sha256" : contentDigest,
       @"content_bytes" : @(content.length),
-    };
-    close(parent);
+    } mutableCopy];
+    if (parentPlan != nil) writeCondition[@"parent_plan"] = parentPlan;
+    precondition = [writeCondition copy];
+    if (parent >= 0) close(parent);
     NSString *priorText = priorContent == nil ? nil
         : [[NSString alloc] initWithData:priorContent
                                 encoding:NSUTF8StringEncoding];
@@ -643,6 +664,12 @@ static BOOL DSHAgentWorkspaceEntryList(int directoryDescriptor,
     return nil;
   }
   BOOL write = [name isEqualToString:@"write_file"];
+  BOOL createParents = write && [precondition[@"schema_version"] isEqual:@3];
+  if (createParents && (![precondition[@"prior"][@"kind"] isEqual:@"absent"] ||
+      !DSHAgentWorkspaceValidateParentPlan(precondition[@"parent_plan"], components, error))) return nil;
+  if (!createParents && precondition[@"parent_plan"] != nil) {
+    DSHSetAgentNativeStoreError(error, DSHAgentNativeStoreErrorInvalidArgument); return nil;
+  }
   NSString *agentCapability = write ? @"file_write" : @"file_read";
   if (![root[@"capabilities"] containsObject:agentCapability]) {
     DSHSetAgentNativeStoreError(error, DSHAgentNativeStoreErrorConflict);
@@ -714,11 +741,26 @@ static BOOL DSHAgentWorkspaceEntryList(int directoryDescriptor,
       };
       return YES;
     }
-    NSString *leaf = nil;
-    int parent = DSHAgentWorkspaceOpenParent(rootDescriptor, components, &leaf);
-    if (parent < 0) {
-      DSHSetAgentNativeStoreError(blockError, DSHAgentNativeStoreErrorInvalidArgument);
-      return NO;
+    NSString *leaf = components.lastObject;
+    DSHAgentWorkspaceParentCreation *parents = createParents
+        ? [self parentCreationForRoot:rootDescriptor components:components
+            plan:precondition[@"parent_plan"]] : nil;
+    int parent = -1;
+    if (parents != nil) {
+      NSError *parentError = nil;
+      if ([parents openParentWithError:&parentError]) parent = [parents duplicateParentDescriptor];
+      if (parent < 0) {
+        result = DSHAgentWorkspaceWriteFailure(name,
+            parentError.code == DSHAgentNativeStoreErrorConflict ? @"E_AGENT_CONFLICT" : @"E_AGENT_TOOL_FAILED",
+            NO, parents, blockError);
+        return result != nil;
+      }
+    } else {
+      parent = DSHAgentWorkspaceOpenParent(rootDescriptor, components, &leaf);
+      if (parent < 0) {
+        DSHSetAgentNativeStoreError(blockError, DSHAgentNativeStoreErrorInvalidArgument);
+        return NO;
+      }
     }
     if ([name isEqualToString:@"read_file"]) {
       int descriptor = openat(parent, leaf.fileSystemRepresentation,
@@ -787,15 +829,17 @@ static BOOL DSHAgentWorkspaceEntryList(int directoryDescriptor,
     struct stat before = {};
     int statResult = fstatat(parent, leaf.fileSystemRepresentation, &before,
                              AT_SYMLINK_NOFOLLOW);
+    int lookupError = errno;
     NSDictionary *actualPrior = statResult == 0
         ? @{ @"schema_version" : @1, @"kind" : @"known",
              @"revision" : DSHAgentWorkspaceRevision(before) }
         : @{ @"schema_version" : @1, @"kind" : @"absent" };
-    if (content == nil || ![actualPrior isEqual:precondition[@"prior"]] ||
+    if ((parents != nil && ![parents validateParentWithError:nil]) ||
+        content == nil || ![actualPrior isEqual:precondition[@"prior"]] ||
         (statResult == 0 && (!S_ISREG(before.st_mode) || S_ISLNK(before.st_mode))) ||
-        (statResult != 0 && errno != ENOENT)) {
+        (statResult != 0 && lookupError != ENOENT)) {
       close(parent);
-      result = DSHAgentWorkspaceFailure(name, @"E_AGENT_CONFLICT", NO,
+      result = DSHAgentWorkspaceWriteFailure(name, @"E_AGENT_CONFLICT", NO, parents,
                                         blockError);
       return result != nil;
     }
@@ -810,7 +854,7 @@ static BOOL DSHAgentWorkspaceEntryList(int directoryDescriptor,
           !DSHAgentWorkspaceStatMatches(parent, leaf, before, nullptr)) {
         if (existingDescriptor >= 0) close(existingDescriptor);
         close(parent);
-        result = DSHAgentWorkspaceFailure(name, @"E_AGENT_CONFLICT", NO,
+        result = DSHAgentWorkspaceWriteFailure(name, @"E_AGENT_CONFLICT", NO, parents,
                                           blockError);
         return result != nil;
       }
@@ -825,10 +869,10 @@ static BOOL DSHAgentWorkspaceEntryList(int directoryDescriptor,
         fsync(temporary) == 0 && fchmod(temporary, 0600) == 0;
     if (temporary >= 0 && close(temporary) != 0) durable = NO;
     if (!durable) {
-      unlinkat(parent, temporaryName.fileSystemRepresentation, 0);
+      if (temporary >= 0) unlinkat(parent, temporaryName.fileSystemRepresentation, 0);
       if (existingDescriptor >= 0) close(existingDescriptor);
       close(parent);
-      result = DSHAgentWorkspaceFailure(name, @"E_AGENT_TOOL_FAILED", NO,
+      result = DSHAgentWorkspaceWriteFailure(name, @"E_AGENT_TOOL_FAILED", NO, parents,
                                         blockError);
       return result != nil;
     }
@@ -844,9 +888,9 @@ static BOOL DSHAgentWorkspaceEntryList(int directoryDescriptor,
         unlinkat(parent, temporaryName.fileSystemRepresentation, 0);
         if (existingDescriptor >= 0) close(existingDescriptor);
         close(parent);
-        result = DSHAgentWorkspaceFailure(
+        result = DSHAgentWorkspaceWriteFailure(
             name, renameError == EEXIST ? @"E_AGENT_CONFLICT" : @"E_AGENT_TOOL_FAILED",
-            NO, blockError);
+            NO, parents, blockError);
         return result != nil;
       }
       durable = fsync(parent) == 0;
@@ -878,9 +922,9 @@ static BOOL DSHAgentWorkspaceEntryList(int directoryDescriptor,
         if (replacementDescriptor >= 0) close(replacementDescriptor);
         close(existingDescriptor);
         close(parent);
-        result = DSHAgentWorkspaceFailure(
+        result = DSHAgentWorkspaceWriteFailure(
             name, preconditionStillHolds ? @"E_AGENT_TOOL_FAILED" : @"E_AGENT_CONFLICT",
-            installed, blockError);
+            installed, parents, blockError);
         return result != nil;
       }
       durable = fsync(parent) == 0;
@@ -895,12 +939,13 @@ static BOOL DSHAgentWorkspaceEntryList(int directoryDescriptor,
     }
     if (existingDescriptor >= 0) close(existingDescriptor);
     struct stat after = {};
-    BOOL observed = fstatat(parent, leaf.fileSystemRepresentation, &after,
+    BOOL parentStable = parents == nil || [parents validateParentWithError:nil];
+    BOOL observed = parentStable && fstatat(parent, leaf.fileSystemRepresentation, &after,
                             AT_SYMLINK_NOFOLLOW) == 0 && S_ISREG(after.st_mode);
     close(parent);
     if (!durable || !observed) {
-      result = DSHAgentWorkspaceFailure(
-          name, @"E_AGENT_EXECUTION_AMBIGUOUS", YES, blockError);
+      result = DSHAgentWorkspaceWriteFailure(
+          name, @"E_AGENT_EXECUTION_AMBIGUOUS", YES, parents, blockError);
       return result != nil;
     }
     NSString *revision = DSHAgentWorkspaceRevision(after);
@@ -952,6 +997,9 @@ static BOOL DSHAgentWorkspaceEntryList(int directoryDescriptor,
     DSHSetAgentNativeStoreError(error, DSHAgentNativeStoreErrorInvalidArgument);
     return nil;
   }
+  BOOL plannedParents = [precondition[@"schema_version"] isEqual:@3];
+  if (plannedParents && (![precondition[@"prior"][@"kind"] isEqual:@"absent"] ||
+      !DSHAgentWorkspaceValidateParentPlan(precondition[@"parent_plan"], components, error))) return nil;
   __block NSDictionary *result = nil;
   if (![DSHAgentRootResolver validateAgentRootProjection:root error:error]) return nil;
   BOOL succeeded = [self.rootResolver performOperationForFrozenRoot:root
@@ -959,6 +1007,19 @@ static BOOL DSHAgentWorkspaceEntryList(int directoryDescriptor,
       block:^BOOL(int rootDescriptor, __unused git_repository *repository,
                   NSError **blockError) {
     (void)blockError;
+    if (plannedParents) {
+      BOOL stillAbsent = NO;
+      if (!DSHAgentWorkspaceParentPlanRemainsAbsent(rootDescriptor, components,
+          precondition[@"parent_plan"], &stillAbsent, nil)) {
+        result = @{ @"schema_version" : @1, @"status" : @"ambiguous" }; return YES;
+      }
+      if (stillAbsent) {
+        result = @{ @"schema_version" : @1, @"status" : @"not_dispatched" }; return YES;
+      }
+      // One originally missing parent now exists. Without a matching final
+      // file the write may have created directories before a crash; never
+      // erase that effect by calling it not dispatched or by cleaning here.
+    }
     NSString *leaf = nil;
     int parent = DSHAgentWorkspaceOpenParent(rootDescriptor, components, &leaf);
     struct stat metadata = {};
@@ -968,7 +1029,7 @@ static BOOL DSHAgentWorkspaceEntryList(int directoryDescriptor,
     if (statResult != 0 && lookupError == ENOENT &&
         [precondition[@"prior"][@"kind"] isEqualToString:@"absent"]) {
       struct stat recheck = {};
-      BOOL stillAbsent = parent >= 0 &&
+      BOOL stillAbsent = !plannedParents && parent >= 0 &&
           fstatat(parent, leaf.fileSystemRepresentation, &recheck,
                   AT_SYMLINK_NOFOLLOW) != 0 && errno == ENOENT;
       if (parent >= 0) close(parent);

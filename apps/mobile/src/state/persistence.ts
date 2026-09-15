@@ -1,3 +1,5 @@
+import { hasFrozenConversationGrant, hasLiveConversationGrant, isConversationGrantBoundCall } from '../agent/agent-conversation-grants';
+import { ALL_AGENT_TOOL_NAMES, ALL_AGENT_AUTO_TOOLS, agentToolRegistryCompatible } from '../agent/tool-registry';
 import { parseProviderBinding } from '../providers/configuration';
 import {
   ATTACHMENT_CHAT_STATE_SCHEMA_VERSION,
@@ -1577,7 +1579,7 @@ const agentCapabilities = new Set([
   'guest_service',
 ]);
 const isAgentRegistryVersion = (value: unknown): value is AgentRegistryVersion =>
-  value === 1 || value === 2;
+  value === 1 || value === 2 || value === 3;
 const sessionEventKinds = new Set([
   'round',
   'tool_call',
@@ -1597,15 +1599,7 @@ const sessionEventStatuses = new Set([
   'unknown',
   'ambiguous',
 ]);
-const registeredAgentTools = new Set([
-  'list_dir',
-  'read_file',
-  'write_file',
-  'git_status',
-  'git_commit',
-  'git_push',
-]);
-const autoAgentTools = new Set(['list_dir', 'read_file', 'git_status']);
+const autoAgentTools = new Set<string>(ALL_AGENT_AUTO_TOOLS);
 const safeSummaryKeys = new Set<string>(AGENT_SAFE_SUMMARY_KEYS);
 
 function agentFailureCode(
@@ -2174,8 +2168,7 @@ export function parsePersistedAgentCallJournalV3(
     raw.receipt === null
       ? null
       : parseAgentReceipt(raw.receipt, `${path}.receipt`);
-  const knownTool = registeredAgentTools.has(name) ||
-    (registryVersion === 2 && (name === 'start_guest_cgi' || name === 'stop_guest_cgi'));
+  const knownTool = (ALL_AGENT_TOOL_NAMES as readonly string[]).includes(name) && agentToolRegistryCompatible(name, registryVersion);
   const expectedAccess = knownTool
     ? autoAgentTools.has(name)
       ? 'auto'
@@ -2239,10 +2232,11 @@ export function parsePersistedAgentCallJournalV3(
       decision === 'allow_once' ||
       decision === 'allow_conversation')
   ) {
-    if (approvalToken === null) {
+    if (approvalToken === null && !isConversationGrantBoundCall({ name, access, approval_decision: decision,
+      approval_token: approvalToken, approval_reference: approvalReference, idempotency_key: idempotencyKey, native_row_revision: nativeRowRevision })) {
       return invalid(
         `${path}.approval_token`,
-        'gated decisions require a non-null opaque approval token',
+        'gated decisions require an opaque approval token or a bound conversation grant',
       );
     }
   }
@@ -2885,7 +2879,7 @@ export function parsePersistedAgentAttemptJournalV3(
   const policy = parseAgentPolicy(raw.policy, `${path}.policy`);
   const root = parseAgentRoot(raw.root, `${path}.root`);
   if (!isAgentRegistryVersion(raw.tool_registry_version)) {
-    return invalid(`${path}.tool_registry_version`, 'must equal 1 or 2');
+    return invalid(`${path}.tool_registry_version`, 'must equal 1, 2, or 3');
   }
   const toolsetSha256 = sha256(raw.toolset_sha256, `${path}.toolset_sha256`);
   const transcript = parseTranscriptReference(
@@ -3239,6 +3233,10 @@ export function parsePersistedAgentAttemptJournalV3(
       'cancelled requires all unsettled calls to be inert',
     );
   }
+  for (const [index, call] of effectiveBatch.entries()) {
+    if (!hasFrozenConversationGrant(call, { root, policy, tool_registry_version: raw.tool_registry_version, frozen_grant_ids: frozenGrantIds }))
+      invalid(`${path}.batch[${index}].approval_reference`, 'must reference a frozen grant for this tool family');
+  }
   return {
     schema_version: AGENT_ATTEMPT_JOURNAL_SCHEMA_VERSION_V3,
     phase,
@@ -3289,9 +3287,9 @@ function parseAgentGrant(
       'must be file_write, git_commit, git_push, or guest_service',
     );
   if (!isAgentRegistryVersion(raw.registry_version))
-    return invalid(`${path}.registry_version`, 'must equal 1 or 2');
-  if (raw.tool_family === 'guest_service' && raw.registry_version !== 2)
-    return invalid(`${path}.registry_version`, 'guest_service requires registry version 2');
+    return invalid(`${path}.registry_version`, 'must equal 1, 2, or 3');
+  if (raw.tool_family === 'guest_service' && raw.registry_version === 1)
+    return invalid(`${path}.registry_version`, 'guest_service requires registry version 2 or 3');
   const projectId =
     raw.project_id === null
       ? null
@@ -4687,6 +4685,10 @@ function parseConversation(
           'active Agent checkpoints require a prepared or completed attempt',
         );
       }
+      journal.batch.forEach((call, callIndex) => {
+        if (!hasLiveConversationGrant(call, journal, conversationId, agentGrants))
+          invalid(`${path}.attempts[${index}].agent.batch[${callIndex}].approval_reference`, 'must reference a matching live grant for this tool family');
+      });
       journal.frozen_grant_ids.forEach((grantId, grantIndex) => {
         const grant = grantsById.get(grantId);
         if (

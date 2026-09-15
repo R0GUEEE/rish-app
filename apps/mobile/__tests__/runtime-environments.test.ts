@@ -21,6 +21,28 @@ test('absence, partial modules and implemented false report unavailable', async 
   NativeModules.LocalEnvironments = { ...native, implemented: false };
   expect(LocalEnvironments.isAvailable()).toBe(false);
 });
+test('owned methods are optional and do not change the original seven-method availability', async () => {
+  expect(LocalEnvironments.supportsOwnedInstall()).toBe(true);
+  const legacy = { ...native } as Partial<typeof native>;
+  delete legacy.installEnvironmentOwned; delete legacy.cancelOwnedInstall;
+  NativeModules.LocalEnvironments = legacy;
+  expect(LocalEnvironments.isAvailable()).toBe(true);
+  expect(LocalEnvironments.supportsOwnedInstall()).toBe(false);
+  await expect(LocalEnvironments.installEnvironmentOwned({ schema_version: 1, operation_id: workspaceId,
+    environment_id: 'python-3-13' })).rejects.toMatchObject({ code: 'E_ENV_UNAVAILABLE' });
+  expect(native.installEnvironment).not.toHaveBeenCalled(); expect(native.cancelInstall).not.toHaveBeenCalled();
+});
+test('owned installation and cancellation bind only the explicit operation id', async () => {
+  const request = { schema_version: 1 as const, operation_id: workspaceId, environment_id: 'python-3-13' };
+  await LocalEnvironments.installEnvironmentOwned(request);
+  expect(native.installEnvironmentOwned).toHaveBeenCalledWith(request);
+  await LocalEnvironments.cancelOwnedInstall({ schema_version: 1, operation_id: workspaceId });
+  expect(native.cancelOwnedInstall).toHaveBeenCalledWith({ schema_version: 1, operation_id: workspaceId });
+  expect(native.cancelInstall).not.toHaveBeenCalled();
+  await expect(LocalEnvironments.cancelOwnedInstall({ schema_version: 1, operation_id: 'not-an-operation' })).rejects.toMatchObject({ code: 'E_ENV_BAD_ARGUMENTS' });
+  native.installEnvironmentOwned.mockResolvedValue(environment({ environment_id: 'other', state: 'installed' }));
+  await expect(LocalEnvironments.installEnvironmentOwned(request)).rejects.toMatchObject({ code: 'E_ENV_NATIVE' });
+});
 test('turbo fallback preserves native implementation binding', async () => {
   delete NativeModules.LocalEnvironments; turbo.mockReturnValue(native as never);
   expect(LocalEnvironments.isAvailable()).toBe(true);

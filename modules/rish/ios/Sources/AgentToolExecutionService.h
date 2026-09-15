@@ -35,6 +35,10 @@ NS_ASSUME_NONNULL_BEGIN
 /// The locator carries the same task/attempt/round/call identity as the ledger
 /// row. A missing registration is a no-op.
 - (void)requestCancelForExecutionLocator:(NSDictionary *)locator;
+/// Fast hint before RN cancellation enters the coordinator. The runtime
+/// executor verifies the entire target against its immutable native record.
+- (void)signalRuntimeCancellationRequest:(NSDictionary *)request;
+- (void)cancelRuntimeWork;
 
 @end
 

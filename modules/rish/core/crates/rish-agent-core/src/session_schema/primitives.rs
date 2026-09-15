@@ -499,6 +499,11 @@ pub const REGISTERED_TOOLS: &[&str] = &[
     "git_push",
     "start_guest_cgi",
     "stop_guest_cgi",
+    "list_runtime_environments",
+    "install_runtime_environment",
+    "run_program",
+    "start_runtime_service",
+    "stop_runtime_service",
 ];
 
 pub fn valid_agent_summary_key(value: Option<&Value>) -> bool {
@@ -511,6 +516,11 @@ pub fn valid_agent_summary_key(value: Option<&Value>) -> bool {
         "agent.git_push",
         "agent.start_guest_cgi",
         "agent.stop_guest_cgi",
+        "agent.list_runtime_environments",
+        "agent.install_runtime_environment",
+        "agent.run_program",
+        "agent.start_runtime_service",
+        "agent.stop_runtime_service",
         "agent.unknown",
     ];
     bounded_text(value, 128, false).is_some_and(|text| KEYS.contains(&text))
@@ -523,7 +533,10 @@ pub fn agent_summary_matches_name(summary: Option<&Value>, name: Option<&Value>)
     let (Some(summary), Some(name)) = (as_str(summary), as_str(name)) else {
         return false;
     };
-    if matches!(name, "start_guest_cgi" | "stop_guest_cgi") && summary == "agent.unknown" {
+    if (matches!(name, "start_guest_cgi" | "stop_guest_cgi")
+        || crate::runtime_tools::is_runtime(name))
+        && summary == "agent.unknown"
+    {
         return true;
     }
     let expected = if REGISTERED_TOOLS.contains(&name) {

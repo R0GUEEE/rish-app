@@ -2416,7 +2416,7 @@
  [adapter setValue:service forKey:@"service"];
  NSError *error = nil;
  DSHAgentToolBatchService *batch = fixture[@"batch_service"];
- NSMutableDictionary *batchRequest = [fixture[@"batch_request"] mutableCopy]; batchRequest[@"registry_version"] = @2;
+ NSMutableDictionary *batchRequest = [fixture[@"batch_request"] mutableCopy]; batchRequest[@"registry_version"] = fixture[@"registry"][@"registry_version"];
  NSDictionary *prepared = [batch prepareAgentToolBatchWithRequest:batchRequest error:&error];
  XCTAssertNil(error); XCTAssertEqualObjects(prepared[@"status"], @"prepared");
  if (![prepared[@"status"] isEqual:@"prepared"]) return;
@@ -2424,7 +2424,7 @@
  XCTAssertEqualObjects(receipt[@"effect_gate"], @"closed");
  XCTAssertEqualObjects(call[@"approval_state"], @"pending");
  XCTAssertEqualObjects(call[@"approval_preview"][@"paths"], (@[@"index.html", @"backend.sh"]));
- XCTAssertEqualObjects(call[@"approval_token"][@"registry_version"], @2);
+ XCTAssertEqualObjects(call[@"approval_token"][@"registry_version"], fixture[@"registry"][@"registry_version"]);
  XCTAssertEqual(service.starts, 0U);
  NSString *marker = @"91919191-9191-4191-8191-919191919191";
  NSArray *calls = @[[self persistedCallForProjection:call decision:@"allow_once" reference:marker]];
@@ -3097,7 +3097,7 @@
   XCTAssertEqual(git.effectCount, 1U);
 }
 
-- (void)testMissingParentRejectsWholeWriteBatchWithoutPartialEffects {
+- (void)testNonDirectoryParentRejectsWholeWriteBatchWithoutPartialEffects {
   NSDictionary *rawIndex = @{
     @"schema_version" : @1,
     @"call_id" : @"write-index",
@@ -3124,6 +3124,8 @@
         @"expected_revision" : NSNull.null},
       @{@"path" : @"data.json", @"content" : @"{\"ok\":true}\n",
         @"expected_revision" : NSNull.null},
+      @{@"path" : @"public", @"content" : @"keep this existing file\n",
+        @"expected_revision" : NSNull.null},
   ]) {
     NSDictionary *prepared = [executor prepareToolNamed:@"write_file"
                                              arguments:arguments
@@ -3143,8 +3145,9 @@
   NSDictionary *result = [fixture[@"batch_service"]
       prepareAgentToolBatchWithRequest:fixture[@"batch_request"] error:&error];
   XCTAssertNil(error);
-  // The missing parent refuses the first write; the whole batch settles as
-  // failed feedback without executing the valid second write.
+  // Missing directories can now be created after approval. An existing file
+  // cannot become a directory: refuse the entire batch without touching its
+  // valid sibling or replacing the existing parent.
   XCTAssertEqualObjects(result[@"status"], @"prepared", @"%@", result);
   XCTAssertEqualObjects(result[@"receipt"][@"calls"][0][@"receipt"][@"failure_code"], @"E_AGENT_BAD_PATH");
   XCTAssertEqualObjects(result[@"receipt"][@"calls"][1][@"receipt"][@"outcome"], @"failed");
@@ -3162,6 +3165,9 @@
       [@"{\"ok\":true}\n" dataUsingEncoding:NSUTF8StringEncoding]);
   XCTAssertNil([NSData dataWithContentsOfURL:
       [workspace URLByAppendingPathComponent:@"hello.txt"]]);
+  XCTAssertEqualObjects([NSData dataWithContentsOfURL:
+      [workspace URLByAppendingPathComponent:@"public"]],
+      [@"keep this existing file\n" dataUsingEncoding:NSUTF8StringEncoding]);
 }
 
 - (void)testOpenParentPermissionAndSymlinkFailuresStayBadPath {

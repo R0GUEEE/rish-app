@@ -46,7 +46,7 @@ fn array(value: Option<&Value>) -> &[Value] {
 }
 
 fn is_mutation(name: &str) -> bool {
-    matches!(name, "write_file" | "git_commit" | "git_push") || name.ends_with("_guest_cgi")
+    matches!(name, "write_file" | "git_commit" | "git_push") || crate::runtime_tools::is_guest(name)
 }
 
 fn is_workspace_tool(name: &str) -> bool {
@@ -227,7 +227,7 @@ pub fn prepare_request(request: &Value) -> Result<(), StoreError> {
         || safe_integer(r("expected_round_revision"), MAX_SAFE_INTEGER, false).is_none()
         || !batch_transcript(r("transcript"))
         || !batch_root(r("root"))
-        || !(r("registry_version") == Some(&json!(1)) || r("registry_version") == Some(&json!(2)))
+        || !crate::runtime_tools::registry_version(r("registry_version"))
         || !canonical_sha256(r("toolset_sha256"))
         || !string_eq(r("policy_version"), "agent-v1")
         || safe_integer(r("expected_batch_revision"), MAX_SAFE_INTEGER, true).is_none()
@@ -422,6 +422,11 @@ pub fn tool_arguments_accepted(
     let Some(tool_name) = tool_name_well_formed(name) else {
         return Err(SCHEMA);
     };
+    if crate::runtime_tools::is_runtime(tool_name) {
+        return crate::runtime_tools::arguments_valid(tool_name, arguments)
+            .then_some(())
+            .ok_or(SCHEMA);
+    }
     let object = Value::Object(arguments.clone());
     if is_workspace_tool(tool_name) {
         let list_directory = tool_name == "list_dir";
@@ -469,6 +474,20 @@ pub fn tool_arguments_accepted(
             {
                 return Err(SCHEMA);
             }
+            // A provider's stringified JSON/JS sentinel is not an opaque file
+            // revision. Refuse the new call as repairable tool feedback before
+            // a filesystem precondition can turn it into an attempt conflict.
+            // Do not put this check in the digest or persisted shape validators:
+            // historical calls, including malformed calls, must remain readable.
+            if matches!(
+                expected_revision.and_then(Value::as_str),
+                Some("null" | "undefined")
+            ) {
+                return Err((
+                    "E_AGENT_BAD_ARGUMENTS",
+                    "expected_revision_must_be_json_null_or_a_read_file_revision",
+                ));
+            }
             if content.len() as u64 > MAX_SINGLE_WRITE_BYTES {
                 return Err((
                     "E_AGENT_BAD_ARGUMENTS",
@@ -503,7 +522,9 @@ fn conversation_grant<'a>(
     let family = match name {
         "write_file" => "file_write",
         "git_commit" => "git_commit",
-        _ if name.ends_with("_guest_cgi") => "guest_service",
+        _ if crate::runtime_tools::is_mutation(name) || name.ends_with("_guest_cgi") => {
+            "guest_service"
+        }
         _ => return None,
     };
     grants.iter().find(|grant| {
@@ -519,9 +540,7 @@ fn conversation_grant<'a>(
                 get(root, "root_fingerprint_sha256"),
             )
             && string_eq(get(grant, "tool_family"), family)
-            && (get(grant, "registry_version") == Some(&json!(1))
-                || get(grant, "registry_version") == Some(&json!(2)))
-            && (!name.ends_with("_guest_cgi") || get(grant, "registry_version") == Some(&json!(2)))
+            && crate::runtime_tools::grant_supports_tool(get(grant, "registry_version"), name)
             && string_eq(get(grant, "policy_version"), "agent-v1")
             && canonical_uuid(get(grant, "grant_id"))
     })
@@ -543,7 +562,7 @@ fn rejection_reason(name: &str, failure_code: &str) -> &'static str {
 /// native message list (`None` when it could not be read); `grants` the
 /// committed conversation's `agent_grants`. Returns `{reject}` or
 /// `{calls, mutation_batch}` where each call carries either a `rejection` or
-/// the `executor` (`workspace` | `guest` | `git`) the host must run with the
+/// the `executor` (`workspace` | `guest` | `runtime` | `git`) the host must run with the
 /// parsed `arguments`, or neither for a durably denied call.
 pub fn prepare_calls(
     request: &Value,
@@ -614,6 +633,8 @@ pub fn prepare_calls(
                         executor = Value::String(
                             if is_workspace_tool(name) {
                                 "workspace"
+                            } else if crate::runtime_tools::is_runtime(name) {
+                                "runtime"
                             } else if name.ends_with("_guest_cgi") {
                                 "guest"
                             } else {
@@ -662,7 +683,7 @@ fn approval_preview_for(name: &str, prepared: Option<&Value>) -> Value {
         }
         return json!({ "schema_version": 1, "kind": "start_guest_cgi", "paths": paths, "content_bytes": Value::Null, "prior": Value::Null, "diff_preview": Value::Null, "diff_truncated": false });
     }
-    if matches!(name, "git_commit" | "git_push") || name.ends_with("_guest_cgi") {
+    if matches!(name, "git_commit" | "git_push") || crate::runtime_tools::is_guest(name) {
         // Git calls never carry file content; the preview names only the
         // mutation kind. Commit/push messages stay native-private.
         return json!({ "schema_version": 1, "kind": name, "paths": [], "content_bytes": Value::Null, "prior": Value::Null, "diff_preview": Value::Null, "diff_truncated": false });
@@ -687,6 +708,12 @@ pub fn prepare_finish(request: &Value, calls: &[Value], outcomes: &[Value]) -> V
         if rejection.is_null() && !is_null(get(call, "executor")) && get(call, "executor").is_some()
         {
             match outcome {
+                Some(outcome)
+                    if crate::runtime_tools::is_runtime(name)
+                        && crate::runtime_tools::prepare_rejection(get(outcome, "rejection")) =>
+                {
+                    rejection = get(outcome, "rejection").cloned().unwrap_or(Value::Null);
+                }
                 Some(outcome) if get(outcome, "prepared").is_some_and(Value::is_object) => {
                     prepared = get(outcome, "prepared")
                 }
@@ -753,9 +780,19 @@ pub fn prepare_finish(request: &Value, calls: &[Value], outcomes: &[Value]) -> V
             if map.get("rejection").is_some_and(Value::is_null)
                 && !string_eq(map.get("access"), "durable_deny")
             {
+                let failure_code = if !as_str(map.get("name"))
+                    .is_some_and(crate::runtime_tools::is_runtime)
+                    && matches!(
+                        as_str(get(&first, "failure_code")),
+                        Some("E_AGENT_CAPABILITY" | "E_AGENT_TOOL_FAILED")
+                    ) {
+                    json!("E_AGENT_BAD_ARGUMENTS")
+                } else {
+                    get(&first, "failure_code").cloned().unwrap_or(Value::Null)
+                };
                 map.insert(
                     "rejection".into(),
-                    json!({ "failure_code": get(&first, "failure_code"), "reason": "not_executed_because_another_call_was_rejected" }),
+                    json!({ "failure_code": failure_code, "reason": "not_executed_because_another_call_was_rejected" }),
                 );
                 map.insert("precondition".into(), Value::Null);
                 map.insert("reserved_write_bytes".into(), json!(0));
@@ -768,11 +805,11 @@ pub fn prepare_finish(request: &Value, calls: &[Value], outcomes: &[Value]) -> V
     let mut needs_project_write_lease = false;
     for call in &prepared_calls {
         let name = as_str(get(call, "name")).unwrap_or_default();
-        let capability = if matches!(name, "list_dir" | "read_file") {
+        let capability = if matches!(name, "list_dir" | "read_file" | "list_runtime_environments") {
             "file_read"
         } else if name == "write_file" {
             "file_write"
-        } else if name.ends_with("_guest_cgi") {
+        } else if crate::runtime_tools::is_guest(name) {
             "guest_service"
         } else if name.starts_with("git_") {
             needs_project_lease = true;
@@ -932,7 +969,7 @@ pub fn approval_token(value: Option<&Value>) -> bool {
         || !canonical_sha256(t("root_fingerprint_sha256"))
         || safe_integer(t("binding_revision"), MAX_SAFE_INTEGER, false).is_none()
         || !string_eq(t("policy_version"), "agent-v1")
-        || !(t("registry_version") == Some(&json!(1)) || t("registry_version") == Some(&json!(2)))
+        || !crate::runtime_tools::registry_version(t("registry_version"))
         || !matches!(
             as_str(t("access")),
             Some("conversation_confirm" | "confirm_once")
@@ -1302,7 +1339,7 @@ pub fn bind_check(
         let name = as_str(get(token, "name")).unwrap_or_default();
         let family = if name == "git_commit" {
             "git_commit"
-        } else if name.ends_with("_guest_cgi") {
+        } else if crate::runtime_tools::is_guest(name) {
             "guest_service"
         } else {
             "file_write"

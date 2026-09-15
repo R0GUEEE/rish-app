@@ -34,7 +34,7 @@ export function RuntimeEnvironmentSheet({ visible, onClose, onDismiss, workspace
     </>}
     {state.status === 'loading' && <Text style={styles.body}>{copy.loading}</Text>}
     {state.error && <Text accessibilityLiveRegion="polite" style={styles.error}>{copy.error} {state.error}</Text>}
-    {state.busy && <View style={styles.row}><Text style={styles.body}>{copy.busy}</Text>
+    {(state.busy || state.cancellable) && <View style={styles.row}><Text style={styles.body}>{copy.busy}</Text>
       {state.cancellable && <Pressable style={[styles.button, styles.secondary]} accessibilityRole="button" onPress={() => { state.cancel(); }} testID="runtime-cancel"><Text style={styles.secondaryText}>{copy.cancel}</Text></Pressable>}
     </View>}
     {available && RUNTIME_FAMILIES.map(family => {

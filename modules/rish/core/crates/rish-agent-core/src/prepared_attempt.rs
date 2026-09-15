@@ -195,7 +195,7 @@ pub fn request_shape(request: &Value, env: &Env) -> bool {
                 .and_then(Value::as_u64)
                 .unwrap_or(0)
         || !nullable_digest(r("project_context_sha256"))
-        || !(r("registry_version") == Some(&json!(1)) || r("registry_version") == Some(&json!(2)))
+        || !crate::runtime_tools::registry_version(r("registry_version"))
         || !(is_null(r("expected_policy_version"))
             || as_str(r("expected_policy_version")) == Some("agent-v1"))
         || !(is_null(r("expected_transcript")) || exact_reference(r("expected_transcript")))

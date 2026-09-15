@@ -39,6 +39,7 @@ test('manager shows all six languages with honest unpublished states, no implici
   const renderer = await render(<RuntimeEnvironmentSheet visible onClose={jest.fn()} workspaceId={null} />);
   for (const label of ['Python', 'Java', 'Go', 'Rust', 'Bun', 'Node.js']) expect(allText(renderer)).toContain(label);
   expect(allText(renderer)).toContain('No package is published');
+  expect(testNode(renderer, 'runtime-cancel')).toBeUndefined();
   expect(env.installEnvironment).not.toHaveBeenCalled(); expect(env.downloadEnvironment).not.toHaveBeenCalled();
 });
 test('safe-area modal has full backdrop, scroll and bounded card, with reachable close', async () => {
@@ -57,6 +58,30 @@ test('choose an uninstalled package records only preference; explicit Install st
   expect(env.selectEnvironment).toHaveBeenCalledWith({ schema_version: 1, workspace_id: workspaceId, environment_id: 'python-3-13' });
   expect(env.installEnvironment).not.toHaveBeenCalled();
   await press(renderer, 'runtime-install-python-3-13'); expect(env.installEnvironment).toHaveBeenCalledTimes(1);
+});
+test('manager exposes explicit cancellation for an Agent download even when this sheet started no operation', async () => {
+  env.listEnvironments.mockResolvedValue({ schema_version: 1,
+    environments: [environment({ state: 'downloading', downloaded_bytes: 100 })], selected_environment_id: null });
+  const close = jest.fn();
+  const renderer = await render(<RuntimeEnvironmentSheet visible onClose={close} workspaceId={workspaceId} />);
+  expect(testNode(renderer, 'runtime-cancel')).toBeDefined();
+  expect(env.installEnvironment).not.toHaveBeenCalled();
+  await press(renderer, 'runtime-environment-sheet-close');
+  await act(async () => { renderer.update(<RuntimeEnvironmentSheet visible={false} onClose={close} workspaceId={workspaceId} />); });
+  expect(close).toHaveBeenCalledTimes(1); expect(env.cancelInstall).not.toHaveBeenCalled();
+  await act(async () => { renderer.update(<RuntimeEnvironmentSheet visible onClose={close} workspaceId={workspaceId} />); });
+  env.listEnvironments.mockResolvedValue({ schema_version: 1,
+    environments: [environment({ state: 'failed', error_code: 'E_ENV_CANCELLED' })], selected_environment_id: null });
+  await press(renderer, 'runtime-cancel');
+  expect(env.cancelInstall).toHaveBeenCalledWith({ schema_version: 1 });
+  expect(testNode(renderer, 'runtime-cancel')).toBeUndefined();
+  expect(testNode(renderer, 'runtime-install-python-3-13').props.disabled).toBe(false);
+  env.listEnvironments.mockResolvedValue({ schema_version: 1,
+    environments: [environment({ state: 'installed' })], selected_environment_id: null });
+  await press(renderer, 'runtime-install-python-3-13');
+  expect(env.installEnvironment).toHaveBeenCalledTimes(1);
+  expect(allText(renderer)).toContain('Installed');
+  expect(testNode(renderer, 'runtime-cancel')).toBeUndefined();
 });
 test('rejects credential-bearing URL locally and imports only when clicked', async () => {
   const renderer = await render(<RuntimeEnvironmentSheet visible onClose={jest.fn()} workspaceId={workspaceId} />);

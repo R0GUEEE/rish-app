@@ -9,7 +9,9 @@ export type AgentPolicyCapability =
   | 'file_read' | 'file_write' | 'git_status' | 'git_commit' | 'git_push' | 'guest_service';
 export type AgentPolicyToolName =
   | 'list_dir' | 'read_file' | 'write_file' | 'git_status' | 'git_commit' | 'git_push'
-  | 'start_guest_cgi' | 'stop_guest_cgi';
+  | 'start_guest_cgi' | 'stop_guest_cgi'
+  | 'list_runtime_environments' | 'install_runtime_environment' | 'run_program'
+  | 'start_runtime_service' | 'stop_runtime_service';
 export type AgentPolicyAccess = 'auto' | 'conversation_confirm' | 'confirm_once' | 'durable_deny';
 export type AgentPolicyRequest = {
   readonly schema_version: 1;
@@ -19,7 +21,7 @@ export type AgentPolicyRequest = {
 };
 export type AgentPolicyDescriptor = AgentPolicyRequest & {
   readonly root_fingerprint_sha256: string;
-  readonly registry_version: 1 | 2;
+  readonly registry_version: 1 | 2 | 3;
   readonly policy_version: 'agent-v1';
   readonly capabilities: readonly AgentPolicyCapability[];
   readonly tools: readonly {
@@ -100,9 +102,13 @@ function validateRequest(value: unknown): AgentPolicyRequest {
 const capabilityNames: readonly AgentPolicyCapability[] = [
   'file_read', 'file_write', 'git_status', 'git_commit', 'git_push', 'guest_service',
 ];
-const toolNames: readonly AgentPolicyToolName[] = [
+const legacyToolNames: readonly AgentPolicyToolName[] = [
   'list_dir', 'read_file', 'write_file', 'git_status', 'git_commit', 'git_push',
   'start_guest_cgi', 'stop_guest_cgi',
+];
+const toolNames: readonly AgentPolicyToolName[] = [
+  ...legacyToolNames, 'list_runtime_environments', 'install_runtime_environment',
+  'run_program', 'start_runtime_service', 'stop_runtime_service',
 ];
 const accessNames: readonly AgentPolicyAccess[] = ['auto', 'conversation_confirm', 'confirm_once', 'durable_deny'];
 
@@ -122,13 +128,14 @@ function validateDescriptor(value: unknown, request: AgentPolicyRequest): AgentP
       result.project_id !== request.project_id) fail('E_AGENT_ROOT_STALE');
   if (typeof result.root_fingerprint_sha256 !== 'string' || result.root_fingerprint_sha256.length !== 64 ||
       !/^[0-9a-f]{64}$/u.test(result.root_fingerprint_sha256) ||
-      (result.registry_version !== 1 && result.registry_version !== 2) ||
+      (result.registry_version !== 1 && result.registry_version !== 2 && result.registry_version !== 3) ||
       result.policy_version !== 'agent-v1') fail('E_AGENT_NATIVE');
   const capabilities = array(result.capabilities, capabilityNames.length).map(candidate => member(candidate, capabilityNames));
   if (new Set(capabilities).size !== capabilities.length) fail('E_AGENT_NATIVE');
-  const tools = array(result.tools, toolNames.length).map(candidate => {
+  const versionToolNames = result.registry_version === 3 ? toolNames : legacyToolNames;
+  const tools = array(result.tools, versionToolNames.length).map(candidate => {
     const tool = record(candidate, ['name', 'access'], 'E_AGENT_NATIVE');
-    return Object.freeze({ name: member(tool.name, toolNames), access: member(tool.access, accessNames) });
+    return Object.freeze({ name: member(tool.name, versionToolNames), access: member(tool.access, accessNames) });
   });
   if (new Set(tools.map(tool => tool.name)).size !== tools.length) fail('E_AGENT_NATIVE');
   const budget = record(result.budget, ['max_single_write_bytes', 'max_batch_write_bytes', 'max_attempt_write_bytes'], 'E_AGENT_NATIVE');

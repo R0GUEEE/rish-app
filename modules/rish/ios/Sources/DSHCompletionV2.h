@@ -57,6 +57,10 @@ NSDictionary<NSString *, id> * _Nullable DSHParseCompletionResponseV2(
 /// sorted) to provider tool calls of the canonical {id, name, arguments}
 /// shape. Every provider transport runs its parsed calls through this so
 /// the Agent tool registry sees one argument shape regardless of dialect.
+/// Explicit revisions are never coerced: JSON null, opaque revision tokens,
+/// and invalid values such as the strings "null" or "undefined" remain as
+/// supplied. Argument validation belongs to tool preparation so a malformed
+/// call can receive tool feedback and its transcript remains readable.
 NSArray<NSDictionary<NSString *, id> *> *DSHCompletionNormalizeToolCalls(
     NSArray<NSDictionary<NSString *, id> *> * _Nullable toolCalls);
 

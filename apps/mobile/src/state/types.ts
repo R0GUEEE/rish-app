@@ -22,7 +22,7 @@ export type AgentCheckpointEvidence =
   | AgentControllerPreflightV1;
 
 /** Native tool registry generations accepted by the session boundary. */
-export type AgentRegistryVersion = 1 | 2;
+export type AgentRegistryVersion = 1 | 2 | 3;
 
 /**
  * Schema 8 is kept as a first-class migration input.  Schema 9 is the first
@@ -83,6 +83,11 @@ export const AGENT_SAFE_SUMMARY_KEYS = [
   'agent.git_push',
   'agent.start_guest_cgi',
   'agent.stop_guest_cgi',
+  'agent.list_runtime_environments',
+  'agent.install_runtime_environment',
+  'agent.run_program',
+  'agent.start_runtime_service',
+  'agent.stop_runtime_service',
   'agent.unknown',
 ] as const;
 export const MAX_AGENT_TRANSCRIPT_COUNT = 128;
@@ -604,7 +609,21 @@ export type AgentWritePriorV1 =
       readonly failure_code: AgentFailureCode;
     };
 
+export type AgentRuntimeOperationKind =
+  | 'list_runtime_environments'
+  | 'install_runtime_environment'
+  | 'run_program'
+  | 'start_runtime_service'
+  | 'stop_runtime_service';
+
 export type AgentOperationPreconditionV2 =
+  | {
+      readonly schema_version: 1;
+      readonly kind: AgentRuntimeOperationKind;
+      readonly arguments_sha256: string;
+      readonly snapshot_sha256: string | null;
+      readonly environment_sha256: string | null;
+    }
   | {
       readonly schema_version: 1;
       readonly kind: 'read_file';
@@ -661,6 +680,12 @@ export type AgentGitIdentityV1 = {
 };
 
 export type AgentOperationSettledFactsV1 =
+  | {
+      readonly schema_version: 1;
+      readonly kind: AgentRuntimeOperationKind;
+      readonly arguments_sha256: string;
+      readonly payload_sha256: string;
+    }
   | {
       readonly schema_version: 1;
       readonly kind: 'read_file';

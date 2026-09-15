@@ -100,6 +100,17 @@
 		F6A400021AD99517003FC87E /* RishGuestCgiLiveTests.mm in Sources */ = {isa = PBXBuildFile; fileRef = F6A400011AD99517003FC87E /* RishGuestCgiLiveTests.mm */; };
 		F7A400021AD99517003FC87E /* ZCodeAccountAuthServiceTests.mm in Sources */ = {isa = PBXBuildFile; fileRef = F7A400011AD99517003FC87E /* ZCodeAccountAuthServiceTests.mm */; };
 		F8A400021AD99517003FC87E /* ZCodePlanResolverTests.mm in Sources */ = {isa = PBXBuildFile; fileRef = F8A400011AD99517003FC87E /* ZCodePlanResolverTests.mm */; };
+		3F1B819D44893B93BD607E6F /* CompletionWriteRevisionTests.mm in Sources */ = {isa = PBXBuildFile; fileRef = FD5F2DA2EF087B3E88300FA1 /* CompletionWriteRevisionTests.mm */; };
+		D743A0B204AB64E28B8DE161 /* AgentWriteRevisionTests.mm in Sources */ = {isa = PBXBuildFile; fileRef = BABFD83A80C2DE877FB1C25B /* AgentWriteRevisionTests.mm */; };
+		DEE0648D35C74E9B9982621D /* AgentWorkspaceParentTests.mm in Sources */ = {isa = PBXBuildFile; fileRef = 5E744DAD76CF2EC027D2AFB0 /* AgentWorkspaceParentTests.mm */; };
+		6A327D05F50BB85852DF6DEA /* RuntimeEnvironmentOwnershipTests.mm in Sources */ = {isa = PBXBuildFile; fileRef = 214DBD1C29E11C99F377C86E /* RuntimeEnvironmentOwnershipTests.mm */; };
+		21DD2488228C162C7770CA5E /* RuntimeServiceVMTests.mm in Sources */ = {isa = PBXBuildFile; fileRef = DAA3900B34C5E357E2F218FF /* RuntimeServiceVMTests.mm */; };
+		F1AA2A0A94B11CFAEEC21151 /* RuntimeHTTPServerTests.mm in Sources */ = {isa = PBXBuildFile; fileRef = 4C582768E0782E8DA9AA197F /* RuntimeHTTPServerTests.mm */; };
+		89E533910F1A93F1534A909A /* AgentRuntimeContractTests.mm in Sources */ = {isa = PBXBuildFile; fileRef = C900062DC01E85BE325FA0DA /* AgentRuntimeContractTests.mm */; };
+		67399B5B703D5F8D8D358217 /* AgentRuntimeExecutorTests.mm in Sources */ = {isa = PBXBuildFile; fileRef = 1B1E6734AF894874E1E56127 /* AgentRuntimeExecutorTests.mm */; };
+		A9B6C005A80465CC58472408 /* AgentRuntimePublicCancelTests.mm in Sources */ = {isa = PBXBuildFile; fileRef = 9A3A7312A27C463A114258A5 /* AgentRuntimePublicCancelTests.mm */; };
+		39325981A7824300088681B7 /* AgentRuntimeServiceLiveTests.mm in Sources */ = {isa = PBXBuildFile; fileRef = 977AA057115A998247E5BE54 /* AgentRuntimeServiceLiveTests.mm */; };
+		C40ACF59BA5EAD2ABD17BF61 /* LocalEnvironmentsOwnedInstallTests.mm in Sources */ = {isa = PBXBuildFile; fileRef = 93F75617BDE810899ED522E4 /* LocalEnvironmentsOwnedInstallTests.mm */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXContainerItemProxy section */
@@ -243,6 +254,17 @@
 		F988BBD6DEFB3CF8939B5A42 /* CodexChatCredentialTests.mm */ = {isa = PBXFileReference; includeInIndex = 1; path = CodexChatCredentialTests.mm; sourceTree = "<group>"; };
 		F9F4AF3337E9FB1D1EB4EB40 /* Pods-RishTests.debug.xcconfig */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = text.xcconfig; name = "Pods-RishTests.debug.xcconfig"; path = "Target Support Files/Pods-RishTests/Pods-RishTests.debug.xcconfig"; sourceTree = "<group>"; };
 		FDF43AF166C9C586D3952C9F /* RishTaskWidget.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; name = RishTaskWidget.swift; path = RishTaskActivity/RishTaskWidget.swift; sourceTree = "<group>"; };
+		FD5F2DA2EF087B3E88300FA1 /* CompletionWriteRevisionTests.mm */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.cpp.objcpp; path = CompletionWriteRevisionTests.mm; sourceTree = "<group>"; };
+		BABFD83A80C2DE877FB1C25B /* AgentWriteRevisionTests.mm */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.cpp.objcpp; path = AgentWriteRevisionTests.mm; sourceTree = "<group>"; };
+		5E744DAD76CF2EC027D2AFB0 /* AgentWorkspaceParentTests.mm */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.cpp.objcpp; path = AgentWorkspaceParentTests.mm; sourceTree = "<group>"; };
+		214DBD1C29E11C99F377C86E /* RuntimeEnvironmentOwnershipTests.mm */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.cpp.objcpp; path = RuntimeEnvironmentOwnershipTests.mm; sourceTree = "<group>"; };
+		DAA3900B34C5E357E2F218FF /* RuntimeServiceVMTests.mm */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.cpp.objcpp; path = RuntimeServiceVMTests.mm; sourceTree = "<group>"; };
+		4C582768E0782E8DA9AA197F /* RuntimeHTTPServerTests.mm */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.cpp.objcpp; path = RuntimeHTTPServerTests.mm; sourceTree = "<group>"; };
+		C900062DC01E85BE325FA0DA /* AgentRuntimeContractTests.mm */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.cpp.objcpp; path = AgentRuntimeContractTests.mm; sourceTree = "<group>"; };
+		1B1E6734AF894874E1E56127 /* AgentRuntimeExecutorTests.mm */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.cpp.objcpp; path = AgentRuntimeExecutorTests.mm; sourceTree = "<group>"; };
+		9A3A7312A27C463A114258A5 /* AgentRuntimePublicCancelTests.mm */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.cpp.objcpp; path = AgentRuntimePublicCancelTests.mm; sourceTree = "<group>"; };
+		977AA057115A998247E5BE54 /* AgentRuntimeServiceLiveTests.mm */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.cpp.objcpp; path = AgentRuntimeServiceLiveTests.mm; sourceTree = "<group>"; };
+		93F75617BDE810899ED522E4 /* LocalEnvironmentsOwnedInstallTests.mm */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.cpp.objcpp; path = LocalEnvironmentsOwnedInstallTests.mm; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
 /* Begin PBXFrameworksBuildPhase section */
@@ -292,6 +314,17 @@
 				BBE4000B1AD99517003FC87E /* RuntimeEnvironmentLiveTests.mm */,
 				BBE400091AD99517003FC87E /* GuestVMOwnershipTests.mm */,
 				BBE400051AD99517003FC87E /* RuntimeProgramTests.mm */,
+				93F75617BDE810899ED522E4 /* LocalEnvironmentsOwnedInstallTests.mm */,
+				977AA057115A998247E5BE54 /* AgentRuntimeServiceLiveTests.mm */,
+				9A3A7312A27C463A114258A5 /* AgentRuntimePublicCancelTests.mm */,
+				1B1E6734AF894874E1E56127 /* AgentRuntimeExecutorTests.mm */,
+				C900062DC01E85BE325FA0DA /* AgentRuntimeContractTests.mm */,
+				4C582768E0782E8DA9AA197F /* RuntimeHTTPServerTests.mm */,
+				DAA3900B34C5E357E2F218FF /* RuntimeServiceVMTests.mm */,
+				214DBD1C29E11C99F377C86E /* RuntimeEnvironmentOwnershipTests.mm */,
+				5E744DAD76CF2EC027D2AFB0 /* AgentWorkspaceParentTests.mm */,
+				BABFD83A80C2DE877FB1C25B /* AgentWriteRevisionTests.mm */,
+				FD5F2DA2EF087B3E88300FA1 /* CompletionWriteRevisionTests.mm */,
 				BBE400031AD99517003FC87E /* RuntimeEnvironmentStoreTests.mm */,
 				A2C400011AD99517003FC87E /* AgentRuntimeModuleTests.mm */,
 				A3C400011AD99517003FC87E /* SessionSnapshotStoreTests.mm */,
@@ -770,6 +803,17 @@
 				BBE4000C1AD99517003FC87E /* RuntimeEnvironmentLiveTests.mm in Sources */,
 				BBE4000A1AD99517003FC87E /* GuestVMOwnershipTests.mm in Sources */,
 				BBE400061AD99517003FC87E /* RuntimeProgramTests.mm in Sources */,
+				C40ACF59BA5EAD2ABD17BF61 /* LocalEnvironmentsOwnedInstallTests.mm in Sources */,
+				39325981A7824300088681B7 /* AgentRuntimeServiceLiveTests.mm in Sources */,
+				A9B6C005A80465CC58472408 /* AgentRuntimePublicCancelTests.mm in Sources */,
+				67399B5B703D5F8D8D358217 /* AgentRuntimeExecutorTests.mm in Sources */,
+				89E533910F1A93F1534A909A /* AgentRuntimeContractTests.mm in Sources */,
+				F1AA2A0A94B11CFAEEC21151 /* RuntimeHTTPServerTests.mm in Sources */,
+				21DD2488228C162C7770CA5E /* RuntimeServiceVMTests.mm in Sources */,
+				6A327D05F50BB85852DF6DEA /* RuntimeEnvironmentOwnershipTests.mm in Sources */,
+				DEE0648D35C74E9B9982621D /* AgentWorkspaceParentTests.mm in Sources */,
+				D743A0B204AB64E28B8DE161 /* AgentWriteRevisionTests.mm in Sources */,
+				3F1B819D44893B93BD607E6F /* CompletionWriteRevisionTests.mm in Sources */,
 				BBE400041AD99517003FC87E /* RuntimeEnvironmentStoreTests.mm in Sources */,
 				A2C400021AD99517003FC87E /* AgentRuntimeModuleTests.mm in Sources */,
 				A3C400021AD99517003FC87E /* SessionSnapshotStoreTests.mm in Sources */,

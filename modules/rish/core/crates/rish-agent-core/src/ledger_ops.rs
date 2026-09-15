@@ -180,7 +180,14 @@ pub fn write_manifest_call_for_intent(intent: &Value) -> Option<Value> {
             "content_sha256": get(precondition, "content_sha256"),
             "content_bytes": get(precondition, "content_bytes"),
         })),
-        "git_commit" | "git_push" | "start_guest_cgi" | "stop_guest_cgi" => Some(json!({
+        "git_commit"
+        | "git_push"
+        | "start_guest_cgi"
+        | "stop_guest_cgi"
+        | "install_runtime_environment"
+        | "run_program"
+        | "start_runtime_service"
+        | "stop_runtime_service" => Some(json!({
             "schema_version": 2, "mutation_kind": name,
             "locator": get(intent, "locator"),
             "precondition_sha256": precondition_sha, "content_bytes": 0,
@@ -200,7 +207,15 @@ fn write_batch_effect_gate_open(view: &View, row: &Value) -> bool {
     let name = as_str(get(row, "name")).unwrap_or_default();
     if !matches!(
         name,
-        "write_file" | "git_commit" | "git_push" | "start_guest_cgi" | "stop_guest_cgi"
+        "write_file"
+            | "git_commit"
+            | "git_push"
+            | "start_guest_cgi"
+            | "stop_guest_cgi"
+            | "install_runtime_environment"
+            | "run_program"
+            | "start_runtime_service"
+            | "stop_runtime_service"
     ) {
         return true;
     }
@@ -872,7 +887,10 @@ fn settle(args: &Map<String, Value>, env: &Env, view: &View) -> Result<Effect, S
         || !message.is_object()
         || as_str(get(message, "role")) != Some("tool")
         || !receipt_shape(Some(receipt))
-        || !matches!(as_str(get(patch, "state")), Some("settled" | "ambiguous"))
+        || !(matches!(as_str(get(patch, "state")), Some("settled" | "ambiguous"))
+            || (as_str(get(receipt, "name")).is_some_and(crate::runtime_tools::is_runtime)
+                && as_str(get(patch, "state")) == Some("cancelled")
+                && as_str(get(receipt, "outcome")) == Some("cancelled")))
         || !operation_ok
     {
         return Err(StoreError::InvalidArgument);

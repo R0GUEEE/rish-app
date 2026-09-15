@@ -21,6 +21,13 @@ typedef void (^DSHEnvironmentCompletion)(NSDictionary *_Nullable descriptor, NSE
                      error:(NSError **)error;
 - (BOOL)removeEnvironmentId:(NSString *)environmentId error:(NSError **)error;
 - (void)installEnvironmentId:(NSString *)environmentId completion:(DSHEnvironmentCompletion)completion;
+// Native task ownership. A nil token means the completion already reported an
+// installed environment or refusal. Agent cancellation must use its own token.
+- (nullable NSString *)beginInstallEnvironmentId:(NSString *)environmentId
+                                      completion:(DSHEnvironmentCompletion)completion;
+- (BOOL)cancelInstallToken:(NSString *)token;
+- (nullable NSDictionary *)manifestForEnvironmentId:(NSString *)environmentId;
+- (nullable NSDictionary *)catalogManifestForEnvironmentId:(NSString *)environmentId;
 - (void)downloadURL:(NSString *)url completion:(DSHEnvironmentCompletion)completion;
 // Caller holds any security-scoped access until completion.
 - (void)importPackageURL:(NSURL *)url completion:(DSHEnvironmentCompletion)completion;

@@ -81,7 +81,7 @@ test.each([
 test.each([
   { schema_version: 2 }, { workspace_binding_revision: -1 }, { project_id: 'not-a-uuid' },
   { root_fingerprint_sha256: 'A'.repeat(64) }, { root_fingerprint_sha256: `${'a'.repeat(64)}\n` },
-  { registry_version: 3 }, { policy_version: 'agent-v2' }, { extra: 'secret' },
+  { registry_version: 4 }, { policy_version: 'agent-v2' }, { extra: 'secret' },
   { capabilities: ['shell'] }, { capabilities: ['file_read', 'file_read'] },
   { tools: [{ name: 'shell', access: 'auto' }] },
   { tools: [{ name: 'read_file', access: 'unverified' }] },
@@ -117,3 +117,44 @@ test.each(['E_AGENT_ROOT_STALE', 'E_AGENT_BAD_ARGUMENTS', 'E_AGENT_NATIVE', 'UNK
     await expect(AgentPolicy.describe(request)).rejects.toMatchObject({ code: expected, message: expected });
   },
 );
+
+
+const runtimeTools = [
+  { name: 'list_runtime_environments', access: 'auto' },
+  { name: 'install_runtime_environment', access: 'conversation_confirm' },
+  { name: 'run_program', access: 'conversation_confirm' },
+  { name: 'start_runtime_service', access: 'conversation_confirm' },
+  { name: 'stop_runtime_service', access: 'conversation_confirm' },
+];
+
+test('accepts the complete thirteen-tool registry v3 descriptor', async () => {
+  const raw = {
+    ...policy(), registry_version: 3,
+    capabilities: ['file_read', 'file_write', 'git_status', 'git_commit', 'git_push', 'guest_service'],
+    tools: [
+      { name: 'list_dir', access: 'auto' }, { name: 'read_file', access: 'auto' },
+      { name: 'write_file', access: 'conversation_confirm' },
+      { name: 'git_status', access: 'auto' }, { name: 'git_commit', access: 'conversation_confirm' },
+      { name: 'git_push', access: 'conversation_confirm' },
+      { name: 'start_guest_cgi', access: 'conversation_confirm' },
+      { name: 'stop_guest_cgi', access: 'conversation_confirm' }, ...runtimeTools,
+    ],
+  };
+  native.describe.mockResolvedValue(raw);
+  const result = await AgentPolicy.describe(request);
+  expect(result).toEqual(raw);
+  expect(result.tools).toHaveLength(13);
+  expect(result.tools.slice(-5)).toEqual(runtimeTools);
+  expect(result.tools.every(Object.isFrozen)).toBe(true);
+  native.describe.mockResolvedValue({ ...raw, tools: [...raw.tools, runtimeTools[0]] });
+  await expect(AgentPolicy.describe(request)).rejects.toMatchObject({ code: 'E_AGENT_NATIVE' });
+});
+
+test.each([1, 2])('preserves registry v%i and rejects every new runtime tool in it', async registry_version => {
+  native.describe.mockResolvedValue({ ...policy(), registry_version });
+  await expect(AgentPolicy.describe(request)).resolves.toMatchObject({ registry_version });
+  for (const tool of runtimeTools) {
+    native.describe.mockResolvedValue({ ...policy(), registry_version, tools: [tool] });
+    await expect(AgentPolicy.describe(request)).rejects.toMatchObject({ code: 'E_AGENT_NATIVE' });
+  }
+});

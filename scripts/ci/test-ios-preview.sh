@@ -31,6 +31,19 @@ xcodebuild build-for-testing -workspace apps/mobile/ios/Rish.xcworkspace \
   -only-testing:RishTests/AgentGuestCgiAdapterTests \
   -only-testing:RishTests/AgentPolicyTests \
   -only-testing:RishTests/RuntimeProgramTests \
+  -only-testing:RishTests/CompletionWriteRevisionTests \
+  -only-testing:RishTests/AgentWorkspaceParentTests \
+  -only-testing:RishTests/RuntimeEnvironmentOwnershipTests \
+  -only-testing:RishTests/RuntimeServiceVMTests \
+  -only-testing:RishTests/RuntimeHTTPServerTests \
+  -only-testing:RishTests/AgentRuntimeContractTests \
+  -only-testing:RishTests/AgentRuntimeExecutorTests \
+  -only-testing:RishTests/LocalEnvironmentsOwnedInstallTests \
+  -only-testing:RishTests/AgentToolEffectsTests/testNonDirectoryParentRejectsWholeWriteBatchWithoutPartialEffects \
+  -only-testing:RishTests/AgentToolEffectsTests/testGuestCgiRealBatchApprovalExecutionAndReplay \
+  -only-testing:RishTests/AgentToolEffectsTests/testPlaceholderWriteRevisionsSettleThenRepairCreateReadAndUpdate \
+  -only-testing:RishTests/AgentToolEffectsTests/testAWideCharacterPreviewIsClippedByBytesAndDoesNotRaise \
+  -only-testing:RishTests/AgentToolEffectsTests/testAPreviewCutAtTheLineBoundStaysMarkedTruncated \
   -only-testing:RishTests/GuestVMOwnershipTests \
   -only-testing:RishTests/RuntimeEnvironmentStoreTests/testManifestRejectsUnsafeIdsAndWrongKernelAndInvalidNumericTypes \
   -only-testing:RishTests/RuntimeEnvironmentStoreTests/testStreamedImportPersistsSelectionAndLeaseCannotMutateOriginalOrBeRemoved \
@@ -54,10 +67,13 @@ xcodebuild build-for-testing -workspace apps/mobile/ios/Rish.xcworkspace \
   -only-testing:RishTests/SessionSnapshotStoreTests/testV2ProtectionRejectsFreshReadbackLoss \
   -only-testing:RishTests/AgentPreparedAttemptStoreTests/testPrepareCommitsTranscriptAuthorityAndOperationAtomicallyAndReplays \
   -only-testing:RishTests/AgentProviderRoundServiceTests/testFreshWorkspaceSessionCASPreparesAndCompletesRealStoredAgentRound \
+  -only-testing:RishTests/AgentProviderRoundServiceTests/testFrozenLegacyRegistryKeepsOriginalProviderWriteSchemas \
+  -only-testing:RishTests/AgentProviderRoundServiceTests/testProviderRejectsWrongRegistryVersionBeforeDispatchEvenWithMatchingDigest \
   -only-testing:RishTests/AgentNativeStoreTests/testDeviceMetadataFirstTransactionAndRelaunchPreserveTranscript \
   -only-testing:RishTests/AgentNativeStoreTests/testDeviceMetadataFailuresPreserveCommittedWALBytes \
   -only-testing:RishTests/AgentNativeStoreTests/testDeviceMetadataReadFailureAndInodeSwapNeverReplaceCommittedWAL \
   -only-testing:RishTests/AgentNativeStoreTests/testWALProtectionUsesFreshFileAttributesForDirectoryAndFile \
+  -only-testing:RishTests/AgentNativeStoreTests/testCommittedStateIsRereadWhenTheFileIsReplacedBehindTheStore \
   -only-testing:RishTests/AgentRuntimeModuleTests/testRoundPersistenceDiagnosticsExposeOnlyFixedOperationAndKind \
   -only-testing:RishTests/AgentProviderRoundServiceTests/testRoundV3RejectsCreateAndDispatchWhenRealWALWriteFails \
   -only-testing:RishTests/AgentProviderRoundServiceTests/testFreshWorkspaceRoundCreationFailureDoesNotDispatchProvider \
@@ -95,6 +111,19 @@ xcodebuild test-without-building -xctestrun "${plans[0]}" \
   -only-testing:RishTests/AgentGuestCgiAdapterTests \
   -only-testing:RishTests/AgentPolicyTests \
   -only-testing:RishTests/RuntimeProgramTests \
+  -only-testing:RishTests/CompletionWriteRevisionTests \
+  -only-testing:RishTests/AgentWorkspaceParentTests \
+  -only-testing:RishTests/RuntimeEnvironmentOwnershipTests \
+  -only-testing:RishTests/RuntimeServiceVMTests \
+  -only-testing:RishTests/RuntimeHTTPServerTests \
+  -only-testing:RishTests/AgentRuntimeContractTests \
+  -only-testing:RishTests/AgentRuntimeExecutorTests \
+  -only-testing:RishTests/LocalEnvironmentsOwnedInstallTests \
+  -only-testing:RishTests/AgentToolEffectsTests/testNonDirectoryParentRejectsWholeWriteBatchWithoutPartialEffects \
+  -only-testing:RishTests/AgentToolEffectsTests/testGuestCgiRealBatchApprovalExecutionAndReplay \
+  -only-testing:RishTests/AgentToolEffectsTests/testPlaceholderWriteRevisionsSettleThenRepairCreateReadAndUpdate \
+  -only-testing:RishTests/AgentToolEffectsTests/testAWideCharacterPreviewIsClippedByBytesAndDoesNotRaise \
+  -only-testing:RishTests/AgentToolEffectsTests/testAPreviewCutAtTheLineBoundStaysMarkedTruncated \
   -only-testing:RishTests/GuestVMOwnershipTests \
   -only-testing:RishTests/RuntimeEnvironmentStoreTests/testManifestRejectsUnsafeIdsAndWrongKernelAndInvalidNumericTypes \
   -only-testing:RishTests/RuntimeEnvironmentStoreTests/testStreamedImportPersistsSelectionAndLeaseCannotMutateOriginalOrBeRemoved \
@@ -118,10 +147,13 @@ xcodebuild test-without-building -xctestrun "${plans[0]}" \
   -only-testing:RishTests/SessionSnapshotStoreTests/testV2ProtectionRejectsFreshReadbackLoss \
   -only-testing:RishTests/AgentPreparedAttemptStoreTests/testPrepareCommitsTranscriptAuthorityAndOperationAtomicallyAndReplays \
   -only-testing:RishTests/AgentProviderRoundServiceTests/testFreshWorkspaceSessionCASPreparesAndCompletesRealStoredAgentRound \
+  -only-testing:RishTests/AgentProviderRoundServiceTests/testFrozenLegacyRegistryKeepsOriginalProviderWriteSchemas \
+  -only-testing:RishTests/AgentProviderRoundServiceTests/testProviderRejectsWrongRegistryVersionBeforeDispatchEvenWithMatchingDigest \
   -only-testing:RishTests/AgentNativeStoreTests/testDeviceMetadataFirstTransactionAndRelaunchPreserveTranscript \
   -only-testing:RishTests/AgentNativeStoreTests/testDeviceMetadataFailuresPreserveCommittedWALBytes \
   -only-testing:RishTests/AgentNativeStoreTests/testDeviceMetadataReadFailureAndInodeSwapNeverReplaceCommittedWAL \
   -only-testing:RishTests/AgentNativeStoreTests/testWALProtectionUsesFreshFileAttributesForDirectoryAndFile \
+  -only-testing:RishTests/AgentNativeStoreTests/testCommittedStateIsRereadWhenTheFileIsReplacedBehindTheStore \
   -only-testing:RishTests/AgentRuntimeModuleTests/testRoundPersistenceDiagnosticsExposeOnlyFixedOperationAndKind \
   -only-testing:RishTests/AgentProviderRoundServiceTests/testRoundV3RejectsCreateAndDispatchWhenRealWALWriteFails \
   -only-testing:RishTests/AgentProviderRoundServiceTests/testFreshWorkspaceRoundCreationFailureDoesNotDispatchProvider \
@@ -132,6 +164,34 @@ python3 - "$output/tests.json" <<'PY'
 import json, sys
 nodes = json.load(open(sys.argv[1]))['testNodes']
 required = {
+    'testFrozenLegacyRegistryKeepsOriginalProviderWriteSchemas',
+    'testProviderRejectsWrongRegistryVersionBeforeDispatchEvenWithMatchingDigest',
+    'testBunCompatibilityIsBoundToAuditedDiskAndKeepsLiteralArgv',
+    'testAWideCharacterPreviewIsClippedByBytesAndDoesNotRaise',
+    'testAPreviewCutAtTheLineBoundStaysMarkedTruncated',
+    'testPublicModuleCancelsLongRuntimeProgramBeforeCoordinatorCAS',
+    'testPublicModuleCancelsServiceStartupBeforeCoordinatorCAS',
+    'testServiceFromPriorAttemptCanBeStoppedOnlyBySameConversationRoot',
+    'testEncodedControlCharacterFeedbackStaysWithinCanonicalBudget',
+    'testActiveServiceCanStopAtUnconfirmedReceiptCapacity',
+    'testBusyRefusalCleanupCannotCancelAnAgentDownload',
+    'testOldCleanupCannotCancelANewerManualInstallation',
+    'testNonDirectoryParentRejectsWholeWriteBatchWithoutPartialEffects',
+    'testGuestCgiRealBatchApprovalExecutionAndReplay',
+    'testPlaceholderWriteRevisionsSettleThenRepairCreateReadAndUpdate',
+    'testProtectedTranscriptReopensWithPlaceholderAndOpaqueWriteRevisions',
+    'testPrepareIsReadOnlyAndApprovedWriteCreatesNestedParents',
+    'testTwoPreparedWritesCanShareMissingParents',
+    'testCrashAfterMkdirWithoutFileRemainsAmbiguousAndRecoveryIsReadOnly',
+    'testRetiredAgentTokenCannotCancelTheNextManualDownload',
+    'testCachedInstallDoesNotDownloadOrOwnAnUnrelatedTransfer',
+    'testCancellationFromAnotherThreadWakesTheIdleService',
+    'testLoopbackForwardsGETQueryBinaryStatusAndRepeatedSetCookieHeaders',
+    'testPOSTRequiresSameOriginCookieAndForwardsBinaryBody',
+    'testStopClosesPendingRequestAndLateCallbackCannotWriteAfterRestart',
+    'testNativeRegistryVersionThreeExposesActualRuntimeToolsAndNullableWriteRevision',
+    'testPreviousRegistryDigestsStillValidateWithoutAdmittingRuntimeTools',
+    'testNativeRuntimeValidationUsesCoreForArgumentsAndDiagnosticFeedback',
     'testStreamedImportPersistsSelectionAndLeaseCannotMutateOriginalOrBeRemoved',
     'testCorruptPackageTrailingStreamAndExpansionPastDeclaredLimitNeverInstall',
     'testForegroundRunCancellationDoesNotReportStoppedBeforeWorkerReturns',
@@ -155,6 +215,7 @@ required = {
     'testDeviceMetadataFailuresPreserveCommittedWALBytes',
     'testDeviceMetadataReadFailureAndInodeSwapNeverReplaceCommittedWAL',
     'testWALProtectionUsesFreshFileAttributesForDirectoryAndFile',
+    'testCommittedStateIsRereadWhenTheFileIsReplacedBehindTheStore',
     'testRoundPersistenceDiagnosticsExposeOnlyFixedOperationAndKind',
     'testRoundV3RejectsCreateAndDispatchWhenRealWALWriteFails',
     'testFreshWorkspaceRoundCreationFailureDoesNotDispatchProvider',

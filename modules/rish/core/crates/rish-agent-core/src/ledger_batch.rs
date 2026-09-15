@@ -159,7 +159,16 @@ pub fn write_manifest_call_shape(call: Option<&Value>) -> bool {
                 && canonical_sha256(get(call, "content_sha256"))
                 && safe_integer(get(call, "content_bytes"), MAX_SINGLE_WRITE_BYTES, true).is_some()
         }
-        Some("git_commit" | "git_push" | "start_guest_cgi" | "stop_guest_cgi") => {
+        Some(
+            "git_commit"
+            | "git_push"
+            | "start_guest_cgi"
+            | "stop_guest_cgi"
+            | "install_runtime_environment"
+            | "run_program"
+            | "start_runtime_service"
+            | "stop_runtime_service",
+        ) => {
             exact_keys(
                 Some(call),
                 &[
@@ -206,6 +215,11 @@ pub fn approval_preview(preview: Option<&Value>) -> bool {
                     | "git_push"
                     | "start_guest_cgi"
                     | "stop_guest_cgi"
+                    | "list_runtime_environments"
+                    | "install_runtime_environment"
+                    | "run_program"
+                    | "start_runtime_service"
+                    | "stop_runtime_service"
             )
         )
         || paths.len() > 8
@@ -631,7 +645,11 @@ fn prepare_tool_batch(request: &Value, env: &Env, view: &View) -> Result<Effect,
         if let Some(supplied_rejection) = get(supplied, "rejection") {
             call_map.remove("rejection");
             if !supplied_rejection.is_null() {
-                if !ledger_rejection(Some(supplied_rejection)) {
+                if !(ledger_rejection(Some(supplied_rejection))
+                    || (as_str(get(supplied, "name"))
+                        .is_some_and(crate::runtime_tools::is_runtime)
+                        && crate::runtime_tools::prepare_rejection(Some(supplied_rejection))))
+                {
                     return Err(StoreError::InvalidArgument);
                 }
                 rejection = Some(supplied_rejection);
@@ -715,6 +733,11 @@ fn prepare_tool_batch(request: &Value, env: &Env, view: &View) -> Result<Effect,
                     | "git_push"
                     | "start_guest_cgi"
                     | "stop_guest_cgi"
+                    | "list_runtime_environments"
+                    | "install_runtime_environment"
+                    | "run_program"
+                    | "start_runtime_service"
+                    | "stop_runtime_service"
             );
             denied.push(DeniedCandidate {
                 call: call.clone(),
@@ -813,7 +836,14 @@ fn prepare_tool_batch(request: &Value, env: &Env, view: &View) -> Result<Effect,
         let file_mutation = name == "write_file";
         let git_mutation = matches!(
             name.as_str(),
-            "git_commit" | "git_push" | "start_guest_cgi" | "stop_guest_cgi"
+            "git_commit"
+                | "git_push"
+                | "start_guest_cgi"
+                | "stop_guest_cgi"
+                | "install_runtime_environment"
+                | "run_program"
+                | "start_runtime_service"
+                | "stop_runtime_service"
         );
         if file_mutation || git_mutation {
             if file_mutation {
@@ -1242,7 +1272,12 @@ fn prepare_tool_batch(request: &Value, env: &Env, view: &View) -> Result<Effect,
         timestamp,
     )?;
     let mut approval_registry_version = Value::from(
-        if matches!(get(root, "capabilities"), Some(Value::Array(caps)) if caps.iter().any(|c| c == "guest_service"))
+        if source_calls
+            .iter()
+            .any(|call| as_str(get(call, "name")).is_some_and(crate::runtime_tools::is_runtime))
+        {
+            3u64
+        } else if matches!(get(root, "capabilities"), Some(Value::Array(caps)) if caps.iter().any(|c| c == "guest_service"))
         {
             2u64
         } else {

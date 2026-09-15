@@ -194,6 +194,9 @@ static BOOL DSHSchema2OpaqueIdentifier(id value) {
 
 static NSDictionary *DSHSchema2NormalizeCreateOnlyWriteParameters(
     NSString *name, NSDictionary *parameters) {
+  // Only omission defaults to create-only. An explicit value, including a
+  // placeholder string, must survive parsing for tool-preparation feedback;
+  // coercing it to null would change a malformed update into a create request.
   NSString *path = nil;
   NSString *content = nil;
   if (![name isEqualToString:@"write_file"] ||

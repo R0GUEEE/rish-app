@@ -8,6 +8,9 @@
 #import "AgentTranscriptStore.h"
 #import "AgentWorkspaceToolExecutor.h"
 #import "DSHAgentGuestCgiToolExecutor.h"
+#import "DSHAgentRuntimeToolExecutor.h"
+#import "AgentRuntimeToolContracts.h"
+#import "SessionWorkspaceCoordinator.h"
 #import "DSHGitPushSupport.h"
 
 #include "rish_agent_core.h"
@@ -116,6 +119,29 @@ static BOOL DSHAgentExecutionValidateCommittedSession(
     return NO;
   }
   return YES;
+}
+
+// Long runtime operations survive harmless session-generation changes, but
+// never a selection/root change or replacement of the committed call intent.
+static BOOL DSHAgentRuntimeCurrentBinding(DSHAgentPreparedAttemptStore *preparedStore,
+    NSDictionary *request, BOOL executionIntentRequired) {
+  NSDictionary *loaded = [preparedStore.sessionSnapshotStore loadSessionSnapshotWithError:nil];
+  NSData *bytes = [loaded[@"session_json"] isKindOfClass:NSString.class]
+      ? [loaded[@"session_json"] dataUsingEncoding:NSUTF8StringEncoding] : nil;
+  NSDictionary *session = bytes ? [NSJSONSerialization JSONObjectWithData:bytes options:0 error:nil] : nil;
+  if (![session isKindOfClass:NSDictionary.class] ||
+      ![session[@"active_conversation_id"] isEqual:request[@"conversation_id"]]) return NO;
+  for (NSDictionary *conversation in session[@"conversations"]) {
+    if (![(conversation[@"id"] ?: conversation[@"conversation_id"]) isEqual:request[@"conversation_id"]]) continue;
+    NSDictionary *binding = conversation[@"workspace_binding"], *root = request[@"root"];
+    if (![binding isKindOfClass:NSDictionary.class] || ![binding[@"workspace_id"] isEqual:root[@"workspace_id"]] ||
+        ![binding[@"binding_revision"] isEqual:root[@"workspace_binding_revision"]] ||
+        ![binding[@"project_id"] isEqual:root[@"project_id"]]) return NO;
+    if (!executionIntentRequired) return YES;
+    return [DSHAgentExecutionReduce(@"session_matches", @{@"request":request, @"conversation":conversation,
+        @"require_execution_intent":@YES}, nil)[@"matches"] isEqual:@YES];
+  }
+  return NO;
 }
 
 static NSDictionary *DSHAgentExecutionWrappedResult(NSDictionary *result) {
@@ -260,13 +286,17 @@ static NSDictionary *DSHAgentExecutionHistoricalResult(
   } error:error];
 }
 
-- (NSDictionary *)executeAgentToolWithRequest:(NSDictionary *)request
+- (NSDictionary *)beginAgentToolWithRequest:(NSDictionary *)request
                                          error:(NSError **)error {
   if (![self validateExecuteRequest:request error:error]) return nil;
   BOOL historicalTerminal = NO;
   NSDictionary *historical = DSHAgentExecutionHistoricalResult(
       self.wal, request, &historicalTerminal, error);
-  if (historicalTerminal) return historical;
+  if (historicalTerminal) {
+    if (historical && DSHAgentIsRuntimeTool(request[@"name"]))
+      [[DSHAgentRuntimeToolExecutor existingExecutorForWorkspaceExecutor:self.workspaceExecutor] acknowledgeSettlementOwner:request];
+    return historical;
+  }
   NSDictionary *state = [self.wal snapshotWithError:error];
   if (state == nil) return nil;
   NSDictionary *authority = nil;
@@ -420,6 +450,30 @@ static NSDictionary *DSHAgentExecutionHistoricalResult(
     return DSHAgentExecutionConflict(
         self.wal, request, started, row, @"E_AGENT_CONFLICT", error);
   }
+  if (DSHAgentIsRuntimeTool(request[@"name"])) {
+    DSHAgentPreparedAttemptStore *prepared = self.preparedStore;
+    BOOL registered = [[DSHAgentRuntimeToolExecutor executorForWorkspaceExecutor:self.workspaceExecutor]
+        registerToolNamed:request[@"name"] arguments:arguments root:request[@"root"] owner:request
+        precondition:row[@"precondition"] validator:^BOOL(BOOL execution) {
+          return DSHAgentRuntimeCurrentBinding(prepared, request, execution);
+        }];
+    if (!registered) {
+      [self.wal unregisterNativeTaskId:nativeTaskID error:nil];
+      return DSHAgentExecutionConflict(self.wal, request, started, row, @"E_AGENT_CONFLICT", error);
+    }
+  }
+  return @{@"_native_execution_context":@YES, @"request":request, @"arguments":arguments,
+      @"row":row, @"started":started, @"native_task_id":nativeTaskID};
+}
+
+- (NSDictionary *)executeAgentToolWithRequest:(NSDictionary *)request error:(NSError **)error {
+  __block NSDictionary *context = nil;
+  BOOL beganOkay = [self.preparedStore.sessionSnapshotStore.coordinator performSyncWithError:^BOOL(NSError **inner) {
+    context = [self beginAgentToolWithRequest:request error:inner];
+    return context != nil;
+  } error:error];
+  if (!beganOkay || ![context[@"_native_execution_context"] isEqual:@YES]) return context;
+  NSDictionary *arguments = context[@"arguments"], *row = context[@"row"];
   NSDate *began = NSDate.date;
   NSDictionary *effect = nil;
   if ([request[@"name"] isEqualToString:@"list_dir"] ||
@@ -430,6 +484,10 @@ static NSDictionary *DSHAgentExecutionHistoricalResult(
                                                   root:request[@"root"]
                                           precondition:row[@"precondition"]
                                                  error:error];
+  } else if (DSHAgentIsRuntimeTool(request[@"name"])) {
+    effect = [[DSHAgentRuntimeToolExecutor executorForWorkspaceExecutor:self.workspaceExecutor]
+        executeToolNamed:request[@"name"] arguments:arguments root:request[@"root"] owner:request
+        precondition:row[@"precondition"]];
   } else if ([request[@"name"] hasSuffix:@"_guest_cgi"]) {
 #if DSH_GUEST_CGI_AVAILABLE
     effect = [[DSHAgentGuestCgiToolExecutor executorForWorkspaceExecutor:self.workspaceExecutor] executeSynchronouslyToolNamed:request[@"name"] arguments:arguments root:request[@"root"] owner:request precondition:row[@"precondition"]];
@@ -461,9 +519,50 @@ static NSDictionary *DSHAgentExecutionHistoricalResult(
       }
     }
   }
-  if ([request[@"name"] hasSuffix:@"_guest_cgi"] &&
-      !DSHAgentExecutionValidateCommittedSession(self.preparedStore, request, YES, nil)) {
-    [[DSHAgentGuestCgiToolExecutor executorForWorkspaceExecutor:self.workspaceExecutor] cancelAttempt:request[@"attempt_id"]];
+  __block NSDictionary *result = nil;
+  NSDictionary *finishedEffect = effect;
+  [self.preparedStore.sessionSnapshotStore.coordinator performSyncWithError:^BOOL(NSError **inner) {
+    result = [self finishAgentToolContext:context effect:finishedEffect began:began error:inner];
+    return result != nil;
+  } error:error];
+  return result;
+}
+
+- (NSDictionary *)finishAgentToolContext:(NSDictionary *)context effect:(NSDictionary *)initialEffect
+                                  began:(NSDate *)began error:(NSError **)error {
+  NSDictionary *request = context[@"request"], *started = context[@"started"];
+  NSDictionary *row = context[@"row"];
+  NSString *nativeTaskID = context[@"native_task_id"];
+  NSDictionary *effect = initialEffect;
+  if (DSHAgentIsRuntimeTool(request[@"name"])) {
+    NSDictionary *latest = [self executionRowInState:[self.wal snapshotWithError:nil] request:request];
+    BOOL sameOwner = latest != nil && [latest[@"locator"] isEqual:row[@"locator"]];
+    for (NSString *key in @[@"task_id", @"launch_id", @"native_task_id", @"owner_generation"])
+      sameOwner &= [latest[@"owner"][key] isEqual:row[@"owner"][key]];
+    if (!sameOwner) {
+      [[DSHAgentRuntimeToolExecutor executorForWorkspaceExecutor:self.workspaceExecutor] cancelAttempt:request[@"attempt_id"]];
+      [self.wal unregisterNativeTaskId:nativeTaskID error:nil];
+      return DSHAgentExecutionActiveResult(request, latest ?: row, @"ambiguous", YES);
+    }
+    row = latest;
+    if ([row[@"state"] isEqual:@"cancel_requested"]) {
+      NSData *bytes = DSHAgentCanonicalJSON(@{@"schema_version":@1, @"name":request[@"name"],
+          @"outcome":@"cancelled", @"payload":@{@"schema_version":@1, @"failure_code":@"E_AGENT_CANCELLED",
+            @"reason":@"runtime_cancelled"}}, nil);
+      effect = @{@"schema_version":@1, @"status":@"cancelled",
+          @"feedback":[[NSString alloc] initWithData:bytes encoding:NSUTF8StringEncoding],
+          @"settled_facts":NSNull.null, @"truncated":@NO,
+          @"effect_may_have_occurred":initialEffect[@"effect_may_have_occurred"] ?: @YES};
+    }
+  }
+  if (([request[@"name"] hasSuffix:@"_guest_cgi"] || DSHAgentIsRuntimeTool(request[@"name"])) &&
+      !(DSHAgentIsRuntimeTool(request[@"name"]) && [effect[@"status"] isEqual:@"cancelled"]) &&
+      !(DSHAgentIsRuntimeTool(request[@"name"])
+        ? DSHAgentRuntimeCurrentBinding(self.preparedStore, request, YES)
+        : DSHAgentExecutionValidateCommittedSession(self.preparedStore, request, YES, nil))) {
+    if (DSHAgentIsRuntimeTool(request[@"name"])) {
+      [[DSHAgentRuntimeToolExecutor executorForWorkspaceExecutor:self.workspaceExecutor] cancelAttempt:request[@"attempt_id"]];
+    } else [[DSHAgentGuestCgiToolExecutor executorForWorkspaceExecutor:self.workspaceExecutor] cancelAttempt:request[@"attempt_id"]];
     NSDictionary *ambiguous = DSHAgentExecutionReduce(@"ambiguous_effect", @{ @"request" : request }, nil);
     effect = ambiguous[@"effect"];
   }
@@ -504,6 +603,8 @@ static NSDictionary *DSHAgentExecutionHistoricalResult(
     DSHSetAgentNativeStoreError(error, DSHAgentNativeStoreErrorCorrupt);
     return nil;
   }
+  if (DSHAgentIsRuntimeTool(request[@"name"]))
+    [[DSHAgentRuntimeToolExecutor existingExecutorForWorkspaceExecutor:self.workspaceExecutor] acknowledgeSettlementOwner:request];
   return operationResult;
 }
 
@@ -513,7 +614,11 @@ static NSDictionary *DSHAgentExecutionHistoricalResult(
   BOOL historicalTerminal = NO;
   NSDictionary *historical = DSHAgentExecutionHistoricalResult(
       self.wal, request, &historicalTerminal, error);
-  if (historicalTerminal) return historical;
+  if (historicalTerminal) {
+    if (historical && DSHAgentIsRuntimeTool(request[@"name"]))
+      [[DSHAgentRuntimeToolExecutor existingExecutorForWorkspaceExecutor:self.workspaceExecutor] acknowledgeSettlementOwner:request];
+    return historical;
+  }
   if (!DSHAgentExecutionValidateCommittedSession(
           self.preparedStore, request, NO, error)) return nil;
   if (![self.preparedStore validatePreparedRoot:request[@"root"]
@@ -552,6 +657,10 @@ static NSDictionary *DSHAgentExecutionHistoricalResult(
                                                       root:request[@"root"]
                                               precondition:row[@"precondition"]
                                                      error:error];
+  } else if (DSHAgentIsRuntimeTool(request[@"name"])) {
+    recovered = [[DSHAgentRuntimeToolExecutor executorForWorkspaceExecutor:self.workspaceExecutor]
+        recoverToolNamed:request[@"name"] arguments:arguments root:request[@"root"] owner:request
+        precondition:row[@"precondition"]];
   } else if ([request[@"name"] hasSuffix:@"_guest_cgi"]) {
     // Process-owned services are never replayed during recovery.
     recovered = @{ @"schema_version": @1, @"status": @"ambiguous" };
@@ -575,6 +684,8 @@ static NSDictionary *DSHAgentExecutionHistoricalResult(
                                                             operation:settle[@"operation"]
                                                                 error:error];
     if (settled[@"row"] == nil) return nil;
+    if ([settled[@"operation_result"] isKindOfClass:NSDictionary.class] && DSHAgentIsRuntimeTool(request[@"name"]))
+      [[DSHAgentRuntimeToolExecutor existingExecutorForWorkspaceExecutor:self.workspaceExecutor] acknowledgeSettlementOwner:request];
     return settled[@"operation_result"];
   }
   return plan[@"result"];
@@ -588,7 +699,15 @@ static NSDictionary *DSHAgentExecutionHistoricalResult(
     token = self.pushCancelTokens[locatorKey];
   }
   [token cancel];
+  [[DSHAgentRuntimeToolExecutor existingExecutorForWorkspaceExecutor:self.workspaceExecutor] cancelLocator:locator];
   [[DSHAgentGuestCgiToolExecutor executorForWorkspaceExecutor:self.workspaceExecutor] cancelAttempt:locator[@"attempt_id"]];
+}
+
+- (void)signalRuntimeCancellationRequest:(NSDictionary *)request {
+  [[DSHAgentRuntimeToolExecutor existingExecutorForWorkspaceExecutor:self.workspaceExecutor] signalCancelRequest:request];
+}
+- (void)cancelRuntimeWork {
+  [[DSHAgentRuntimeToolExecutor existingExecutorForWorkspaceExecutor:self.workspaceExecutor] cancelAll];
 }
 
 @end

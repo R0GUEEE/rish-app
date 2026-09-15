@@ -22,15 +22,29 @@ static void EnvironmentReject(RCTPromiseRejectBlock reject, NSError *error) {
   reject(code, code, nil);
 }
 
+@interface DSHOwnedEnvironmentInstall : NSObject
+@property(nonatomic, copy) NSString *token;
+@property(nonatomic) BOOL started;
+@property(nonatomic) BOOL cancelled;
+@property(nonatomic) BOOL settled;
+@end
+@implementation DSHOwnedEnvironmentInstall
+@end
+
 @interface LocalEnvironmentsModule : NSObject <RCTBridgeModule, UIDocumentPickerDelegate>
 @property(nonatomic, copy) RCTPromiseResolveBlock importResolve;
 @property(nonatomic, copy) RCTPromiseRejectBlock importReject;
 @property(nonatomic, strong) UIDocumentPickerViewController *picker;
+// Keep bounded completion tombstones so a late cleanup cannot reuse a task ID.
+@property(nonatomic, strong) NSMutableDictionary<NSString *, DSHOwnedEnvironmentInstall *> *ownedInstalls;
 @end
 
 @implementation LocalEnvironmentsModule
 RCT_EXPORT_MODULE(LocalEnvironments)
 + (BOOL)requiresMainQueueSetup { return NO; }
+// Override only in native tests. Store calls must stay outside the module lock:
+// beginInstallEnvironmentId may invoke its completion synchronously.
+- (DSHRuntimeEnvironmentStore *)environmentStore { return DSHRuntimeEnvironmentStore.sharedStore; }
 
 RCT_REMAP_METHOD(listEnvironments, listEnvironmentsRequest:(id)request
     resolver:(RCTPromiseResolveBlock)resolve rejecter:(RCTPromiseRejectBlock)reject) {
@@ -71,6 +85,66 @@ RCT_REMAP_METHOD(installEnvironment, installEnvironmentRequest:(id)request
   [DSHRuntimeEnvironmentStore.sharedStore installEnvironmentId:request[@"environment_id"] completion:^(NSDictionary *result, NSError *error) {
     if (result) resolve(result); else EnvironmentReject(reject, error);
   }];
+}
+RCT_REMAP_METHOD(installEnvironmentOwned, installEnvironmentOwnedRequest:(id)request
+    resolver:(RCTPromiseResolveBlock)resolve rejecter:(RCTPromiseRejectBlock)reject) {
+  if (!EnvironmentRequest(request, @[@"operation_id",@"environment_id"])
+      || !DSHEnvironmentValidWorkspaceId(request[@"operation_id"])
+      || !DSHEnvironmentValidId(request[@"environment_id"])) {
+    EnvironmentReject(reject, DSHEnvironmentError(@"E_ENV_BAD_ARGUMENTS")); return;
+  }
+  NSString *operationId = request[@"operation_id"];
+  DSHOwnedEnvironmentInstall *operation = nil;
+  NSString *failure = nil;
+  @synchronized (self) {
+    if (!self.ownedInstalls) self.ownedInstalls = [NSMutableDictionary new];
+    operation = self.ownedInstalls[operationId];
+    if (operation.started) failure = @"E_ENV_CONFLICT";
+    else if (!operation && self.ownedInstalls.count >= 256) failure = @"E_ENV_LIMIT";
+    else {
+      if (!operation) { operation = [DSHOwnedEnvironmentInstall new]; self.ownedInstalls[operationId] = operation; }
+      operation.started = YES;
+      if (operation.cancelled) { operation.settled = YES; failure = @"E_ENV_CANCELLED"; }
+    }
+  }
+  if (failure) { EnvironmentReject(reject, DSHEnvironmentError(failure)); return; }
+  DSHRuntimeEnvironmentStore *store = [self environmentStore];
+  NSString *token = [store beginInstallEnvironmentId:request[@"environment_id"] completion:^(NSDictionary *result, NSError *error) {
+    BOOL cancelled = NO;
+    @synchronized (self) {
+      operation.settled = YES; operation.token = nil; cancelled = operation.cancelled;
+    }
+    if (cancelled) EnvironmentReject(reject, DSHEnvironmentError(@"E_ENV_CANCELLED"));
+    else if (result) resolve(result);
+    else EnvironmentReject(reject, error);
+  }];
+  BOOL cancelToken = NO;
+  @synchronized (self) {
+    if (!operation.settled) { operation.token = token; cancelToken = operation.cancelled && token != nil; }
+  }
+  if (cancelToken) [store cancelInstallToken:token];
+}
+RCT_REMAP_METHOD(cancelOwnedInstall, cancelOwnedInstallRequest:(id)request
+    resolver:(RCTPromiseResolveBlock)resolve rejecter:(RCTPromiseRejectBlock)reject) {
+  if (!EnvironmentRequest(request, @[@"operation_id"]) || !DSHEnvironmentValidWorkspaceId(request[@"operation_id"])) {
+    EnvironmentReject(reject, DSHEnvironmentError(@"E_ENV_BAD_ARGUMENTS")); return;
+  }
+  NSString *operationId = request[@"operation_id"], *token = nil;
+  BOOL limited = NO, settled = NO;
+  @synchronized (self) {
+    if (!self.ownedInstalls) self.ownedInstalls = [NSMutableDictionary new];
+    DSHOwnedEnvironmentInstall *operation = self.ownedInstalls[operationId];
+    if (!operation && self.ownedInstalls.count >= 256) limited = YES;
+    else {
+      // Remember cancellation even when React Native delivers it before install.
+      if (!operation) { operation = [DSHOwnedEnvironmentInstall new]; self.ownedInstalls[operationId] = operation; }
+      settled = operation.settled;
+      if (!settled) { operation.cancelled = YES; token = operation.token; }
+    }
+  }
+  if (limited) { EnvironmentReject(reject, DSHEnvironmentError(@"E_ENV_LIMIT")); return; }
+  if (token) [[self environmentStore] cancelInstallToken:token];
+  resolve(@{@"schema_version":@1,@"status":settled ? @"idle" : @"cancelled"});
 }
 RCT_REMAP_METHOD(downloadEnvironment, downloadEnvironmentRequest:(id)request
     resolver:(RCTPromiseResolveBlock)resolve rejecter:(RCTPromiseRejectBlock)reject) {

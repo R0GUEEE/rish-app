@@ -602,3 +602,81 @@ fn json_envelope_carries_slots_and_changes() {
     .unwrap();
     assert_eq!(failure, json!({ "ok": false, "error": 1 }));
 }
+
+#[test]
+fn runtime_cancellation_settles_after_same_owner_cancel_requested_cas() {
+    use rish_agent_core::tool_execution::{recover_plan, settlement_plan};
+    let transcript = transcript_state(vec![], 0);
+    let mut row = read_intent(&transcript);
+    let argument_text =
+        json!({"environment_id":"node-22","entry_path":"main.js","args":[]}).to_string();
+    let digest =
+        arguments_sha256(Some(&json!("run_program")), Some(&json!(argument_text))).unwrap();
+    row["name"] = json!("run_program");
+    row["arguments_sha256"] = json!(digest);
+    row["locator"] = locator(0, "runtime_call", &digest);
+    row["precondition"] = json!({"schema_version":1,"kind":"run_program","arguments_sha256":digest,"snapshot_sha256":"c".repeat(64),"environment_sha256":"d".repeat(64)});
+    row["state"] = json!("cancel_requested");
+    row["owner"] = owner();
+    row["row_revision"] = json!(4);
+    assert!(rish_agent_core::execution_ledger::ledger_row(&row));
+    let mut request = row["locator"].clone();
+    request["name"] = row["name"].clone();
+    request["arguments_sha256"] = row["arguments_sha256"].clone();
+    request["operation_id"] = json!("66666666-6666-4666-8666-666666666666");
+    request["approval_reference"] = Value::Null;
+    let feedback = json!({"schema_version":1,"name":"run_program","outcome":"cancelled","payload":{"schema_version":1,"failure_code":"E_AGENT_CANCELLED","reason":"program_cancelled"}});
+    let text = String::from_utf8(canonical_json(&feedback).unwrap()).unwrap();
+    let effect = json!({"schema_version":1,"status":"cancelled","feedback":text,"settled_facts":null,"truncated":false,"effect_may_have_occurred":true});
+    let plan = settlement_plan(&request, &row, &effect, Some(&json!("b".repeat(64))), 5).unwrap();
+    assert_eq!(plan["cas"]["expected_state"], "cancel_requested");
+    assert_eq!(plan["cas"]["expected_row_revision"], 4);
+    assert_eq!(plan["cas"]["expected_native_task_id"], NATIVE);
+    assert_eq!(plan["patch"]["state"], "cancelled");
+    let current = view(
+        Some(row.clone()),
+        vec![marker(&row, "dispatched")],
+        Some(transcript),
+    );
+    let settled = reduce("settle", &args(plan.clone()), &env(), &current).unwrap();
+    let final_row = replaced_row(&settled);
+    assert_eq!(final_row["state"], "cancelled");
+    assert_eq!(final_row["row_revision"], 5);
+    assert!(final_row["owner"].is_null());
+    assert!(final_row["settled_facts"].is_null());
+    assert_eq!(final_row["receipt"]["outcome"], "cancelled");
+    assert_eq!(settled.commit_operation.unwrap().result_status, "cancelled");
+    assert!(rish_agent_core::execution_ledger::ledger_row(&final_row));
+    let mut stale = plan.clone();
+    stale["cas"]["expected_state"] = json!("running");
+    stale["cas"]["expected_row_revision"] = json!(3);
+    assert_eq!(
+        reduce("settle", &args(stale), &env(), &current).unwrap_err(),
+        StoreError::Conflict
+    );
+    let mut other_owner = plan;
+    other_owner["cas"]["expected_native_task_id"] = json!(TASK);
+    assert_eq!(
+        reduce("settle", &args(other_owner), &env(), &current).unwrap_err(),
+        StoreError::Conflict
+    );
+    assert!(settlement_plan(
+        &request,
+        &final_row,
+        &effect,
+        Some(&json!("b".repeat(64))),
+        5
+    )
+    .is_err());
+    let recovered = recover_plan(
+        &request,
+        &row,
+        &json!({"schema_version":1,"status":"settled","effect":effect}),
+    )
+    .unwrap();
+    assert_eq!(
+        recovered["settle"]["cas"]["expected_state"],
+        "cancel_requested"
+    );
+    assert_eq!(recovered["settle"]["patch"]["state"], "cancelled");
+}

@@ -1,3 +1,4 @@
+import { ALL_AGENT_TOOL_NAMES, agentToolRegistryCompatible, agentRegistryToolLimit, isRuntimeAgentTool } from '../agent/tool-registry';
 import { isHarnessModelId } from '../harness/types';
 import { nativeImplementationAvailable } from './NativeImplementation';
 import { parseProviderBinding } from '../providers/configuration';
@@ -49,8 +50,8 @@ export type AgentRuntimeFailureCode =
   | 'E_COMPLETION_LENGTH'
   | 'E_COMPLETION_CONTENT_FILTER';
 
-/** Supported native tool registry generations. Version 2 is debug-only today. */
-export type AgentRegistryVersion = 1 | 2;
+/** Supported native tool registry generations; old sessions retain their version. */
+export type AgentRegistryVersion = 1 | 2 | 3;
 
 export type AgentFailureCode = Exclude<
   AgentRuntimeFailureCode,
@@ -201,7 +202,12 @@ export type AgentApprovalPreviewV1 = {
     | 'git_commit'
     | 'git_push'
     | 'start_guest_cgi'
-    | 'stop_guest_cgi';
+    | 'stop_guest_cgi'
+    | 'list_runtime_environments'
+    | 'install_runtime_environment'
+    | 'run_program'
+    | 'start_runtime_service'
+    | 'stop_runtime_service';
   readonly paths: readonly string[];
   readonly content_bytes: number | null;
   readonly prior:
@@ -1363,7 +1369,7 @@ const MAX_PROVIDER_ID_BYTES = 128;
 const MAX_DURATION_MS = 24 * 60 * 60 * 1000;
 
 function isAgentRegistryVersion(value: unknown): value is AgentRegistryVersion {
-  return value === 1 || value === 2;
+  return value === 1 || value === 2 || value === 3;
 }
 
 const runtimeFailureCodes = new Set<AgentRuntimeFailureCode>([
@@ -1952,21 +1958,11 @@ function validateRegistryTool(
     )
   )
     fail('E_AGENT_LEDGER');
-  const expected = new Set([
-    'list_dir',
-    'read_file',
-    'write_file',
-    'git_status',
-    'git_commit',
-    'git_push',
-    'start_guest_cgi',
-    'stop_guest_cgi',
-  ]).has(tool.name as string)
+  const expected = (ALL_AGENT_TOOL_NAMES as readonly string[]).includes(tool.name as string)
     ? `agent.${tool.name as string}`
     : 'agent.unknown';
   if (tool.safe_summary_key !== expected) fail('E_AGENT_LEDGER');
-  if (registryVersion === 1 &&
-      (tool.name === 'start_guest_cgi' || tool.name === 'stop_guest_cgi')) {
+  if (!agentToolRegistryCompatible(tool.name, registryVersion)) {
     fail('E_AGENT_LEDGER');
   }
   return tool as AgentRuntimeRegistryToolV2;
@@ -1987,7 +1983,7 @@ function validateRegistry(value: unknown): AgentRuntimeRegistryV2 {
   const registryVersion = registry.registry_version as AgentRegistryVersion;
   const tools = strictArray(
     registry.tools,
-    registryVersion === 2 ? 8 : 6,
+    agentRegistryToolLimit(registryVersion),
     0,
     'E_AGENT_LEDGER',
   ).map(tool => validateRegistryTool(tool, registryVersion));
@@ -2206,7 +2202,7 @@ function validateGrant(value: unknown): AgentConversationGrantV2 {
     !digest(grant.root_fingerprint_sha256) ||
     !['file_write', 'git_commit', 'git_push', 'guest_service'].includes(grant.tool_family as string) ||
     !isAgentRegistryVersion(grant.registry_version) ||
-    (grant.tool_family === 'guest_service' && grant.registry_version !== 2) ||
+    (grant.tool_family === 'guest_service' && grant.registry_version === 1) ||
     !boundedString(grant.policy_version, 128) ||
     !timestamp(grant.created_at)
   )
@@ -2262,7 +2258,7 @@ function validateApprovalToken(value: unknown): AgentApprovalBindingTokenV2 {
     !safeInteger(token.binding_revision, MAX_SAFE, false) ||
     token.policy_version !== 'agent-v1' ||
     !isAgentRegistryVersion(token.registry_version) ||
-    ((token.name === 'start_guest_cgi' || token.name === 'stop_guest_cgi') && token.registry_version !== 2) ||
+    !agentToolRegistryCompatible(token.name, token.registry_version) ||
     !['conversation_confirm', 'confirm_once'].includes(token.access as string)
   )
     fail('E_AGENT_APPROVAL');
@@ -2419,6 +2415,7 @@ function validateApprovalPreview(
       'git_push',
       'start_guest_cgi',
       'stop_guest_cgi',
+      'list_runtime_environments', 'install_runtime_environment', 'run_program', 'start_runtime_service', 'stop_runtime_service',
     ].includes(preview.kind as string) ||
     !Array.isArray(preview.paths) ||
     preview.paths.length > 8 ||
@@ -2474,6 +2471,9 @@ function validateApprovalPreview(
       preview.diff_preview !== null
     )
       fail('E_AGENT_LEDGER');
+  } else if (isRuntimeAgentTool(preview.kind)) {
+    const expectedPaths = preview.kind === 'run_program' || preview.kind === 'start_runtime_service' ? 1 : 0;
+    if (preview.paths.length !== expectedPaths || preview.content_bytes !== null || preview.prior !== null || preview.diff_preview !== null || preview.diff_truncated) fail('E_AGENT_LEDGER');
   } else if (preview.kind === 'stop_guest_cgi') {
     if (
       preview.paths.length !== 0 ||
@@ -2760,6 +2760,7 @@ function validateAttemptProjection(value: unknown): AgentAttemptProjectionV2 {
   const batch = strictArray(attempt.batch, 16, 0, 'E_AGENT_LEDGER').map(
     validateBatchCall,
   );
+  if (batch.some(call => !agentToolRegistryCompatible(call.name, registry.registry_version))) fail('E_AGENT_LEDGER');
   const grants = validateUuidArray(attempt.frozen_grant_ids, 2);
   assign(attempt, 'batch', batch);
   assign(attempt, 'frozen_grant_ids', grants);

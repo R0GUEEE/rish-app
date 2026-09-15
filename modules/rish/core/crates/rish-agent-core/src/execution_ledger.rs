@@ -328,6 +328,21 @@ pub fn raw_arguments_bind_intent(
     let Some(kind) = as_str(get(precondition, "kind")) else {
         return Err(StoreError::InvalidArgument);
     };
+    if crate::runtime_tools::is_runtime(name) {
+        if !crate::runtime_tools::arguments_valid(name, &arguments)
+            || !crate::runtime_tools::precondition_shape(Some(precondition))
+            || kind != name
+        {
+            return Err(StoreError::InvalidArgument);
+        }
+        return if crate::schema::arguments_sha256(get(intent, "name"), arguments_json).as_deref()
+            == as_str(get(precondition, "arguments_sha256"))
+        {
+            Ok(())
+        } else {
+            Err(StoreError::Conflict)
+        };
+    }
     match name {
         "write_file" => {
             let by_revision = exact_keys(
@@ -478,6 +493,9 @@ pub fn precondition_shape(value: Option<&Value>) -> bool {
         return false;
     };
     let schema1 = || safe_integer(map.get("schema_version"), 1, false).is_some();
+    if crate::runtime_tools::is_runtime(kind) {
+        return crate::runtime_tools::precondition_shape(value);
+    }
     match kind {
         "read_file" => {
             exact_keys(value, &["schema_version", "kind", "source_revision"]).is_some()
@@ -494,19 +512,23 @@ pub fn precondition_shape(value: Option<&Value>) -> bool {
                 && canonical_sha256(map.get("directory_fingerprint_sha256"))
         }
         "write_file" => {
-            exact_keys(
-                value,
-                &[
-                    "schema_version",
-                    "kind",
-                    "relative_path_sha256",
-                    "prior",
-                    "content_sha256",
-                    "content_bytes",
-                ],
-            )
-            .is_some()
-                && safe_integer(map.get("schema_version"), 2, false) == Some(2)
+            let mut keys = vec![
+                "schema_version",
+                "kind",
+                "relative_path_sha256",
+                "prior",
+                "content_sha256",
+                "content_bytes",
+            ];
+            let schema3 = safe_integer(map.get("schema_version"), 3, false) == Some(3);
+            if schema3 {
+                keys.push("parent_plan");
+            }
+            exact_keys(value, &keys).is_some()
+                && (safe_integer(map.get("schema_version"), 2, false) == Some(2)
+                    || (schema3
+                        && crate::write_parent_plan::valid(map.get("parent_plan"))
+                        && map.get("prior").and_then(|p| p.get("kind")) == Some(&json!("absent"))))
                 && canonical_sha256(map.get("relative_path_sha256"))
                 && write_prior(map.get("prior"))
                 && canonical_sha256(map.get("content_sha256"))
@@ -649,6 +671,9 @@ pub fn settled_facts_shape(value: Option<&Value>) -> bool {
         return false;
     };
     let schema1 = || safe_integer(map.get("schema_version"), 1, false).is_some();
+    if crate::runtime_tools::is_runtime(kind) {
+        return crate::runtime_tools::settled_facts_shape(value);
+    }
     match kind {
         "start_guest_cgi" | "stop_guest_cgi" => {
             let expected_status = if kind == "start_guest_cgi" {
@@ -725,6 +750,9 @@ pub fn settled_facts_match_feedback(row: &Value, feedback: &Value, facts: Option
     let precondition = get(row, "precondition").unwrap_or(&null);
     let kind = as_str(get(precondition, "kind"));
     let name = as_str(get(row, "name"));
+    if name.is_some_and(crate::runtime_tools::is_runtime) {
+        return crate::runtime_tools::facts_match_feedback(row, feedback, facts);
+    }
     match (kind, name) {
         (Some("read_file"), Some("read_file")) => {
             get(facts, "source_revision") == get(payload, "revision")
@@ -790,6 +818,11 @@ pub fn ledger_row(row: &Value) -> bool {
         return false;
     }
     let kind = as_str(get(precondition, "kind")).unwrap_or_default();
+    if crate::runtime_tools::is_runtime(kind)
+        && map.get("arguments_sha256") != get(precondition, "arguments_sha256")
+    {
+        return false;
+    }
     let state = as_str(map.get("state")).unwrap_or_default();
     let reserved = map.get("reserved_write_bytes");
     if kind == "write_file"
@@ -860,6 +893,9 @@ pub fn ledger_row(row: &Value) -> bool {
             };
             if get(facts, "kind") != get(precondition, "kind") {
                 return false;
+            }
+            if crate::runtime_tools::is_runtime(kind) {
+                return get(facts, "arguments_sha256") == get(precondition, "arguments_sha256");
             }
             match kind {
                 "write_file" => {
@@ -1058,7 +1094,9 @@ pub fn feedback_string_valid(text: &str) -> Result<(), StoreError> {
     }
     let name = as_str(map.get("name")).expect("checked");
     let outcome = as_str(map.get("outcome"));
-    if name == "list_dir" && text.len() > MAX_FEEDBACK_ENCODED_BYTES {
+    if (name == "list_dir" || crate::runtime_tools::is_runtime(name))
+        && text.len() > MAX_FEEDBACK_ENCODED_BYTES
+    {
         return Err(StoreError::Capacity);
     }
     if !name
@@ -1097,6 +1135,9 @@ pub fn feedback_string_valid(text: &str) -> Result<(), StoreError> {
                 && safe_integer(payload_map.get("schema_version"), 1, false).is_some()
                 && (is_null(user_message) || bounded_utf8(user_message, 2000, true).is_some());
         }
+        valid_failure = valid_failure
+            || (outcome == Some("failed")
+                && crate::runtime_tools::diagnostic_failure(name, payload));
         return if valid_failure {
             Ok(())
         } else {
@@ -1108,6 +1149,9 @@ pub fn feedback_string_valid(text: &str) -> Result<(), StoreError> {
         return Err(StoreError::InvalidArgument);
     }
     let ok = match name {
+        name if crate::runtime_tools::is_runtime(name) => {
+            crate::runtime_tools::success_payload(name, payload)
+        }
         "list_dir" => {
             let Some(Value::Array(entries)) = payload_map.get("entries") else {
                 return Err(StoreError::InvalidArgument);

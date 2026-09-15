@@ -27,6 +27,7 @@ import type {
   AgentRuntimeRegistryV2,
   AgentRuntimeTranscriptHandleV1,
   AgentApprovalBindingTokenV2,
+  AgentConversationGrantV2,
   AgentToolReceiptV1,
   AgentRoundReceiptV2,
   CompleteAgentRoundRequestV2,
@@ -1576,9 +1577,14 @@ describe('project Agent completion controller', () => {
     readonly finalRoundIndex?: number;
     readonly completedRoundRevision?: number;
     readonly finalReasoning?: string;
+    readonly responseOffset?: number;
+    readonly transcriptRef?: string;
     readonly cancelledCallIds?: readonly string[];
     /** Adds git_push to the frozen root capabilities and registry. */
     readonly pushCapable?: boolean;
+    /** Exercises the v3 guest-service registry and its live conversation grants. */
+    readonly runtimeCapable?: boolean;
+    readonly getConversationGrants?: () => readonly AgentConversationGrantV2[];
     /**
      * Round indexes whose batch native refuses at preparation: every call
      * comes back settled as a failed result (E_AGENT_BAD_PATH) and the
@@ -1611,9 +1617,11 @@ describe('project Agent completion controller', () => {
       workspace_binding_revision: 1,
       project_id: AGENT_PROJECT,
       root_fingerprint_sha256: ROOT_SHA,
-      capabilities: options.pushCapable
-        ? ['file_read', 'file_write', 'git_commit', 'git_push']
-        : ['file_read', 'file_write', 'git_commit'],
+      capabilities: [
+        'file_read', 'file_write', 'git_commit',
+        ...(options.pushCapable ? ['git_push' as const] : []),
+        ...(options.runtimeCapable ? ['guest_service' as const] : []),
+      ],
     };
     const policy: AgentRuntimePolicyV1 = {
       schema_version: 1,
@@ -1624,7 +1632,7 @@ describe('project Agent completion controller', () => {
     };
     const registry: AgentRuntimeRegistryV2 = {
       schema_version: 2,
-      registry_version: 1,
+      registry_version: options.runtimeCapable ? 3 : 1,
       toolset_sha256: TOOLSET_SHA,
       tools: [
         { schema_version: 2, name: 'write_file', safe_summary_key: 'agent.write_file', access: 'conversation_confirm' },
@@ -1632,11 +1640,30 @@ describe('project Agent completion controller', () => {
         ...(options.pushCapable
           ? [{ schema_version: 2 as const, name: 'git_push', safe_summary_key: 'agent.git_push', access: 'conversation_confirm' as const }]
           : []),
+        ...(options.runtimeCapable
+          ? ['install_runtime_environment', 'run_program', 'start_runtime_service'].map(name => ({
+              schema_version: 2 as const, name, safe_summary_key: `agent.${name}`,
+              access: 'conversation_confirm' as const,
+            }))
+          : []),
       ],
+    };
+    const conversationGrantFor = (name: string): AgentConversationGrantV2 | null => {
+      if (!options.runtimeCapable || !['install_runtime_environment', 'run_program', 'start_runtime_service'].includes(name)) return null;
+      return options.getConversationGrants?.().find(grant =>
+        grant.conversation_id === AGENT_CONVERSATION &&
+        grant.workspace_id === root.workspace_id &&
+        grant.project_id === root.project_id &&
+        grant.binding_revision === root.workspace_binding_revision &&
+        grant.root_fingerprint_sha256 === root.root_fingerprint_sha256 &&
+        grant.tool_family === 'guest_service' &&
+        grant.registry_version === registry.registry_version &&
+        grant.policy_version === policy.policy_version,
+      ) ?? null;
     };
     const transcript = (generation: number, digest: string): AgentRuntimeTranscriptHandleV1 => ({
       schema_version: 1,
-      transcript_ref: AGENT_TRANSCRIPT,
+      transcript_ref: options.transcriptRef ?? AGENT_TRANSCRIPT,
       generation,
       transcript_sha256: digest,
       transcript_bytes: generation * 10,
@@ -1692,8 +1719,8 @@ describe('project Agent completion controller', () => {
         round_id: request.round_id,
         round_index: request.round_index,
         provider_request_id:
-          `77777777-7777-4777-8777-${String(request.round_index + 1).padStart(12, '0')}`,
-        provider_response_id: `response-${request.round_index}`,
+          `77777777-7777-4777-8777-${String(request.round_index + (options.responseOffset ?? 0) + 1).padStart(12, '0')}`,
+        provider_response_id: `response-${request.round_index + (options.responseOffset ?? 0)}`,
         requested_model: request.model,
         model: request.model,
         thinking_mode: request.thinking_mode,
@@ -1781,7 +1808,7 @@ describe('project Agent completion controller', () => {
     const prepareAgentToolBatch = jest.fn(async (request: PrepareAgentToolBatchRequestV2) => {
       operations.push(prepareAgentToolBatch);
       const callsForRound = options.batchRounds?.[request.round_index] ?? defaultBatchCalls;
-      const hasMutation = callsForRound.some(call => call.name === 'write_file' || call.name === 'git_commit' || call.name === 'git_push');
+      const hasMutation = callsForRound.some(call => ['write_file', 'git_commit', 'git_push', 'install_runtime_environment', 'run_program', 'start_runtime_service'].includes(call.name));
       if (hasMutation && !writeRevisions.has(request.operation_id)) {
         writeRevisions.set(request.operation_id, ++writeReservationRevision);
       }
@@ -1811,7 +1838,7 @@ describe('project Agent completion controller', () => {
         root_fingerprint_sha256: ROOT_SHA,
         binding_revision: 1,
         policy_version: 'agent-v1',
-        registry_version: 1,
+        registry_version: registry.registry_version,
         access: call.access === 'confirm_once' ? 'confirm_once' : 'conversation_confirm',
         allowed_decisions: call.access === 'confirm_once'
           ? ['denied', 'allow_once', 'cancelled']
@@ -1819,6 +1846,7 @@ describe('project Agent completion controller', () => {
       });
       const calls: AgentBatchCallProjectionV2[] = callsForRound.map((call, callIndex) => {
         const durableDeny = call.access === 'durable_deny';
+        const grant = call.access === 'conversation_confirm' ? conversationGrantFor(call.name) : null;
         const idempotencyKey = durableDeny ? null : (request.round_index + callIndex + 4).toString(16).slice(-1).repeat(64);
         const refusedReceipt: AgentToolReceiptV1 | null = refused && !durableDeny
           ? {
@@ -1872,17 +1900,17 @@ describe('project Agent completion controller', () => {
                 }
               : {
                   schema_version: 1,
-                  kind: call.name as 'list_dir' | 'read_file' | 'git_commit' | 'git_push',
-                  paths: [],
+                  kind: call.name as 'list_dir' | 'read_file' | 'git_commit' | 'git_push' | 'install_runtime_environment' | 'run_program' | 'start_runtime_service',
+                  paths: call.name === 'run_program' || call.name === 'start_runtime_service' ? ['server.js'] : [],
                   content_bytes: null,
                   prior: null,
                   diff_preview: null,
                   diff_truncated: false,
                 },
           access: call.access,
-          approval_state: durableDeny ? 'denied' : call.access === 'auto' ? 'not_required' : refusedReceipt !== null ? 'cancelled' : 'pending',
-          approval_token: durableDeny || call.access === 'auto' || refusedReceipt !== null ? null : makeToken(callIndex, call),
-          approval_reference: null,
+          approval_state: durableDeny ? 'denied' : call.access === 'auto' ? 'not_required' : refusedReceipt !== null ? 'cancelled' : grant !== null ? 'bound' : 'pending',
+          approval_token: durableDeny || call.access === 'auto' || refusedReceipt !== null || grant !== null ? null : makeToken(callIndex, call),
+          approval_reference: grant?.grant_id ?? null,
           execution_status: durableDeny ? 'denied' : refusedReceipt !== null ? 'failed' : 'intent',
           execution_revision: durableDeny ? null : 1,
           native_row_revision: 1,
@@ -1936,7 +1964,7 @@ describe('project Agent completion controller', () => {
       const boundTranscript = request.decision === 'denied'
         ? {
             schema_version: 1 as const,
-            transcript_ref: AGENT_TRANSCRIPT,
+            transcript_ref: options.transcriptRef ?? AGENT_TRANSCRIPT,
             generation: deniedGeneration,
             transcript_sha256: deniedGeneration.toString(16).slice(-1).repeat(64),
             transcript_bytes: deniedGeneration * 10,
@@ -1945,14 +1973,14 @@ describe('project Agent completion controller', () => {
       const boundReference = request.decision === 'denied' || request.decision === 'cancelled'
         ? null
         : request.operation_id;
-      return { schema_version: 2 as const, status: 'bound' as const, operation_id: request.operation_id, task_id: request.task_id, attempt_id: request.attempt_id, round_id: request.round_id, call_index: request.call_index, call_id: request.call_id, decision: request.decision, approval_reference: boundReference, grant: null, result_batch_revision: request.batch_revision, observed_checkpoint: request.committed_checkpoint, receipt: boundReceipt, transcript: boundTranscript };
+      return { schema_version: 2 as const, status: 'bound' as const, operation_id: request.operation_id, task_id: request.task_id, attempt_id: request.attempt_id, round_id: request.round_id, call_index: request.call_index, call_id: request.call_id, decision: request.decision, approval_reference: boundReference, grant: request.decision === 'allow_conversation' ? conversationGrantFor(request.token.name) : null, result_batch_revision: request.batch_revision, observed_checkpoint: request.committed_checkpoint, receipt: boundReceipt, transcript: boundTranscript };
     });
     const executeAgentTool = jest.fn(async (request: ExecuteAgentToolRequestV2): Promise<ExecuteAgentToolResultV2> => {
       operations.push(executeAgentTool);
       const cancelled = options.cancelledCallIds?.includes(request.call_id) === true;
       const receipt: AgentToolReceiptV1 = { schema_version: 1, call_id: request.call_id, name: request.name, arguments_sha256: request.arguments_sha256, result_sha256: `${request.call_index + 6}`.repeat(64), result_bytes: 1, truncated: false, duration_ms: 1, outcome: cancelled ? 'cancelled' : 'ok', failure_code: cancelled ? 'E_AGENT_CANCELLED' : null, approval_reference: request.approval_reference };
       const nextGeneration = request.transcript.generation + 1;
-      const commonResult = { operation_id: request.operation_id, task_id: request.task_id, attempt_id: request.attempt_id, round_id: request.round_id, round_index: request.round_index, call_index: request.call_index, call_id: request.call_id, name: request.name, idempotency_key: request.idempotency_key, result_execution_revision: request.expected_execution_revision + 3, transcript: { schema_version: 1 as const, transcript_ref: AGENT_TRANSCRIPT, generation: nextGeneration, transcript_sha256: nextGeneration.toString(16).slice(-1).repeat(64), transcript_bytes: nextGeneration * 10 }, receipt };
+      const commonResult = { operation_id: request.operation_id, task_id: request.task_id, attempt_id: request.attempt_id, round_id: request.round_id, round_index: request.round_index, call_index: request.call_index, call_id: request.call_id, name: request.name, idempotency_key: request.idempotency_key, result_execution_revision: request.expected_execution_revision + 3, transcript: { schema_version: 1 as const, transcript_ref: options.transcriptRef ?? AGENT_TRANSCRIPT, generation: nextGeneration, transcript_sha256: nextGeneration.toString(16).slice(-1).repeat(64), transcript_bytes: nextGeneration * 10 }, receipt };
       if (cancelled) {
         return { schema_version: 2, status: 'cancelled', ...commonResult, effect_may_have_occurred: false };
       }
@@ -2990,6 +3018,275 @@ describe('project Agent completion controller', () => {
     expect(committedSessions[committedSessions.length - 1]).toMatch(/"tool_family":\s*"git_push"/u);
     assertSharedFixture(session!, 'agent-git-push-conversation-session.json');
   });
+
+  async function runtimeConversationGrantFlow(forgedReference = false) {
+    const store = agentStore();
+    const conversationId = store.getState().selectedConversationId!;
+    const runtime = makeRuntime([], {
+      runtimeCapable: true,
+      getConversationGrants: () => store.getState().conversations[conversationId]?.agentGrants ?? [],
+      batchRounds: [
+        [{ callId: 'install-runtime', name: 'install_runtime_environment', argumentsSha256: '4'.repeat(64), access: 'conversation_confirm' }],
+        [{ callId: 'run-runtime', name: 'run_program', argumentsSha256: '5'.repeat(64), access: 'conversation_confirm' }],
+        [{ callId: 'start-runtime', name: 'start_runtime_service', argumentsSha256: '6'.repeat(64), access: 'conversation_confirm' }],
+      ],
+      finalRoundIndex: 3,
+    });
+    if (forgedReference) {
+      const prepare = (runtime.prepareAgentToolBatch as jest.Mock).getMockImplementation()!;
+      (runtime.prepareAgentToolBatch as jest.Mock).mockImplementation(async (request: PrepareAgentToolBatchRequestV2) => {
+        const result = await prepare(request) as PrepareAgentToolBatchResultV2;
+        if (request.round_index !== 1 || result.status !== 'prepared') return result;
+        return {
+          ...result,
+          receipt: {
+            ...result.receipt,
+            calls: result.receipt.calls.map(call => ({
+              ...call,
+              approval_reference: 'ffffffff-ffff-4fff-8fff-ffffffffffff',
+            })),
+          },
+        };
+      });
+    }
+    const sessions: string[] = [];
+    const persist = committedPersistence(store);
+    const persistCurrent = jest.fn(async () => {
+      sessions.push(store.serialize());
+      return persist();
+    });
+    const requestAgentApproval = jest.fn(async () => ({
+      status: 'approved' as const, scope: 'conversation' as const,
+    }));
+    const operationIds = [
+      ...IDS,
+      ...Array.from({ length: 80 }, (_, index) =>
+        `00000000-0000-4000-8000-${(index + 1).toString(16).padStart(12, '0')}`),
+    ];
+    const controller = createCompletionController({
+      chat: store, persistCurrent, agentRuntime: runtime, requestAgentApproval,
+      completeRoundV2: jest.fn(), completeRoundV3: jest.fn(),
+      cancelRoundV2: jest.fn(), cancelRoundV3: jest.fn(),
+      createRoundId: jest.fn(() => operationIds.shift() ?? AGENT_TURN),
+      createOperationId: jest.fn(() => operationIds.shift() ?? AGENT_ATTEMPT),
+      now: () => NOW,
+    });
+    const beginExecution = jest.spyOn(store, 'checkpointAgentBatchAndBeginFirst');
+    const result = await controller.send({
+      conversationId, text: 'install Node, run it, then start its service', attachments: [],
+    });
+    return { store, conversationId, runtime, sessions, requestAgentApproval, beginExecution, result };
+  }
+
+  test('reuses an install conversation grant for native-bound run and service rounds and persists it', async () => {
+    const flow = await runtimeConversationGrantFlow();
+    expect(flow.result).toMatchObject({ status: 'completed' });
+    expect(flow.requestAgentApproval).toHaveBeenCalledTimes(1);
+    expect(flow.runtime.bindAgentApproval).toHaveBeenCalledTimes(1);
+    expect(flow.runtime.bindAgentApproval).toHaveBeenCalledWith(expect.objectContaining({
+      call_id: 'install-runtime', decision: 'allow_conversation',
+      token: expect.objectContaining({ registry_version: 3 }),
+    }));
+    const grants = flow.store.getState().conversations[flow.conversationId]!.agentGrants!;
+    expect(grants).toHaveLength(1);
+    const grant = grants[0]!;
+    expect(grant).toMatchObject({ tool_family: 'guest_service', registry_version: 3 });
+    const executions = (flow.runtime.executeAgentTool as jest.Mock).mock.calls.map(call => call[0] as ExecuteAgentToolRequestV2);
+    expect(executions.map(call => call.name)).toEqual([
+      'install_runtime_environment', 'run_program', 'start_runtime_service',
+    ]);
+    expect(executions.slice(1).map(call => call.approval_reference)).toEqual([grant.grant_id, grant.grant_id]);
+    expect(flow.beginExecution.mock.results.filter(result => result.value !== null)).toHaveLength(2);
+    const prepared = await Promise.all((flow.runtime.prepareAgentToolBatch as jest.Mock).mock.results.map(result => result.value));
+    expect(prepared.slice(1).map(result => result.receipt.calls[0])).toEqual([
+      expect.objectContaining({ call_id: 'run-runtime', approval_state: 'bound', approval_token: null, approval_reference: grant.grant_id }),
+      expect.objectContaining({ call_id: 'start-runtime', approval_state: 'bound', approval_token: null, approval_reference: grant.grant_id }),
+    ]);
+    for (const callId of ['run-runtime', 'start-runtime']) {
+      const boundSessions = flow.sessions.filter(session => {
+        const saved = JSON.parse(session);
+        return saved.conversations.some((conversation: any) => conversation.attempts.some((attempt: any) =>
+          attempt.agent?.batch.some((call: any) => call.call_id === callId && call.approval_reference === grant.grant_id)));
+      });
+      expect(boundSessions.length).toBeGreaterThan(0);
+      for (const session of boundSessions) {
+        const restored = hydrateChatState(session).conversations[flow.conversationId]!;
+        expect(restored.agentGrants).toEqual(grants);
+        const call = restored.attempts[0]!.agent!.batch.find(candidate => candidate.call_id === callId)!;
+        expect(call).toMatchObject({ approval_token: null, approval_reference: grant.grant_id });
+        expect(call.approval_decision).not.toBe('pending');
+      }
+    }
+    const hydrated = createChatStore({ initialState: hydrateChatState(flow.store.serialize()) });
+    expect(hydrated.getState().conversations[flow.conversationId]).toMatchObject({
+      agentGrants: grants, attempts: [expect.objectContaining({ status: 'completed' })],
+    });
+  });
+
+  test('reuses a persisted runtime conversation grant on the first batch of a new attempt', async () => {
+    const previous = await runtimeConversationGrantFlow();
+    expect(previous.result.status).toBe('completed');
+    const conversationId = previous.conversationId;
+    const grant = previous.store.getState().conversations[conversationId]!.agentGrants![0]!;
+    let sequence = 200;
+    const nextId = () => `00000000-0000-4000-8000-${(++sequence).toString(16).padStart(12, '0')}`;
+    const store = createChatStore({
+      initialState: hydrateChatState(previous.store.serialize()),
+      sessionAuthority: previous.store.getSessionAuthority()!,
+      now: () => LATER, createId: nextId, createLifecycleId: nextId,
+    });
+    const runtime = makeRuntime([], {
+      runtimeCapable: true,
+      getConversationGrants: () => store.getState().conversations[conversationId]!.agentGrants ?? [],
+      responseOffset: 20,
+      transcriptRef: '77777777-7777-4777-8777-777777777777',
+      batchRounds: [
+        [{ callId: 'run-again', name: 'run_program', argumentsSha256: '7'.repeat(64), access: 'conversation_confirm' }],
+        [{ callId: 'start-again', name: 'start_runtime_service', argumentsSha256: '8'.repeat(64), access: 'conversation_confirm' }],
+      ],
+      finalRoundIndex: 2,
+    });
+    const requestAgentApproval = jest.fn();
+    const controller = agentController(
+      store, runtime, committedPersistence(store), Array.from({ length: 80 }, nextId), requestAgentApproval, () => LATER,
+    );
+    const result = await controller.send({ conversationId, text: 'run and start again', attachments: [] });
+    expect(result.status).toBe('completed');
+    const preparation = await (runtime.prepareAgentAttempt as jest.Mock).mock.results[0]!.value;
+    expect(preparation.attempt.frozen_grant_ids).toEqual([]);
+    expect(preparation.attempt.attempt_id).not.toBe(grant.issued_for.attempt_id);
+    expect(requestAgentApproval).not.toHaveBeenCalled();
+    expect(runtime.bindAgentApproval).not.toHaveBeenCalled();
+    expect((runtime.executeAgentTool as jest.Mock).mock.calls.map(call => [call[0].name, call[0].approval_reference])).toEqual([
+      ['run_program', grant.grant_id], ['start_runtime_service', grant.grant_id],
+    ]);
+    const restored = hydrateChatState(store.serialize()).conversations[conversationId]!;
+    expect(restored.agentGrants).toEqual([grant]);
+    expect(restored.attempts).toHaveLength(2);
+    expect(restored.attempts.every(attempt => attempt.status === 'completed')).toBe(true);
+  });
+
+  test('recovers a committed grant-bound batch when its reply was lost before the JS checkpoint', async () => {
+    const previous = await runtimeConversationGrantFlow();
+    expect(previous.result.status).toBe('completed');
+    const conversationId = previous.conversationId;
+    const grant = previous.store.getState().conversations[conversationId]!.agentGrants![0]!;
+    let sequence = 500;
+    const nextId = () => `00000000-0000-4000-8000-${(++sequence).toString(16).padStart(12, '0')}`;
+    const store = createChatStore({ initialState: hydrateChatState(previous.store.serialize()),
+      sessionAuthority: previous.store.getSessionAuthority()!, now: () => LATER, createId: nextId, createLifecycleId: nextId });
+    const runtime = makeRuntime([], { runtimeCapable: true,
+      getConversationGrants: () => store.getState().conversations[conversationId]!.agentGrants ?? [],
+      responseOffset: 40, transcriptRef: '66666666-6666-4666-8666-666666666666',
+      batchRounds: [[{ callId: 'lost-reply-run', name: 'run_program', argumentsSha256: '8'.repeat(64), access: 'conversation_confirm' }]], finalRoundIndex: 1 });
+    const wal: { batch: AgentBatchReceiptV2 | null } = { batch: null };
+    const prepare = (runtime.prepareAgentToolBatch as jest.Mock).getMockImplementation()!;
+    (runtime.prepareAgentToolBatch as jest.Mock).mockImplementationOnce(async request => {
+      const result = await prepare(request) as PrepareAgentToolBatchResultV2;
+      if (result.status !== 'prepared') throw new Error('expected prepared WAL batch');
+      wal.batch = result.receipt;
+      throw { code: 'E_AGENT_PERSISTENCE' };
+    });
+    const approvals = jest.fn();
+    const controller = agentController(store, runtime, committedPersistence(store), Array.from({ length: 100 }, nextId), approvals, () => LATER);
+    expect(await controller.send({ conversationId, text: 'run after an uncertain prepare reply', attachments: [] })).toMatchObject({ status: 'retryable', code: 'E_AGENT_PERSISTENCE' });
+    expect(controller.getState().phase).toBe('resume_available');
+    const current = store.getState().conversations[conversationId]!.attempts[1]!;
+    const journal = current.agent!;
+    expect(journal.frozen_grant_ids).toEqual([]); expect(journal.batch).toEqual([]);
+    expect(wal.batch?.calls[0]).toMatchObject({ approval_state: 'bound', approval_token: null, approval_reference: grant.grant_id });
+    const prepared = await (runtime.prepareAgentAttempt as jest.Mock).mock.results[0]!.value;
+    const provider = await (runtime.completeAgentRoundV2 as jest.Mock).mock.results[0]!.value as CompleteAgentRoundResultV2;
+    if (provider.status !== 'completed' || provider.outcome.kind !== 'tool_batch' || wal.batch === null) throw new Error('missing native proof');
+    const roundOutcome = provider.outcome;
+    let recoveredCompletion = roundOutcome.completion_receipt;
+    let recoveredCalls = roundOutcome.calls;
+    let projection: AgentAttemptProjectionV2 = { ...prepared.attempt, phase: 'batch_frozen',
+      controller_generation: journal.controller_generation, journal_revision: current.journalRevision!,
+      transcript: wal.batch.transcript, round_index: 0, round_id: wal.batch.round_id,
+      round_revision: provider.result_round_revision, round_status: 'completed', batch_kind: wal.batch.batch_kind,
+      batch_revision: wal.batch.batch_revision, manifest_sha256: wal.batch.manifest_sha256,
+      call_index: 0, batch: wal.batch.calls, frozen_grant_ids: [], reserved_write_bytes: wal.batch.reserved_write_bytes };
+    (runtime.queryAgentAttempt as jest.Mock).mockImplementation(async () => ({ schema_version: 2, status: 'active', attempt: projection }));
+    (runtime.recoverAgentAttempt as jest.Mock).mockImplementation(async request => ({ schema_version: 2, status: 'resumed',
+      operation_id: request.operation_id, next_action: 'persist_batch', attempt: projection,
+      completed_round: { schema_version: 2, kind: 'tool_batch', task_id: current.turnId, attempt_id: current.attemptId,
+        round_id: projection.round_id, round_index: 0, launch_attempt: 1, result_round_revision: provider.result_round_revision,
+        transcript: wal.batch!.transcript, completion_receipt: recoveredCompletion,
+        text: '', reasoning: '', assistant_text_sha256: 'e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855',
+        reasoning_text_sha256: 'e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855',
+        calls: recoveredCalls, batch_class: 'executable', executable_call_count: 1, denied_call_count: 0 } }));
+    expect((await controller.resume(conversationId, current.attemptId)).status).toBe('retryable');
+    expect(runtime.executeAgentTool).not.toHaveBeenCalled();
+    expect(store.getState().conversations[conversationId]!.attempts[1]!.agent?.frozen_grant_ids).toEqual([]);
+    // The repaired native query derives this reference from committed WAL and the matching live grant.
+    projection = { ...projection, frozen_grant_ids: [grant.grant_id] };
+    recoveredCompletion = { ...roundOutcome.completion_receipt, provider_response_id: 'changed-recovered-response' };
+    expect((await controller.resume(conversationId, current.attemptId)).status).toBe('retryable');
+    expect(runtime.executeAgentTool).not.toHaveBeenCalled();
+    recoveredCompletion = roundOutcome.completion_receipt;
+    recoveredCalls = roundOutcome.calls.map(call => ({ ...call, arguments_sha256: '9'.repeat(64) }));
+    expect((await controller.resume(conversationId, current.attemptId)).status).toBe('retryable');
+    expect(runtime.executeAgentTool).not.toHaveBeenCalled();
+    recoveredCalls = roundOutcome.calls;
+    const verifiedProjection = projection;
+    const forgedGrantId = 'ffffffff-ffff-4fff-8fff-ffffffffffff';
+    projection = { ...projection, frozen_grant_ids: [forgedGrantId], batch: projection.batch.map(call => ({ ...call, approval_reference: forgedGrantId })) };
+    expect((await controller.resume(conversationId, current.attemptId)).status).toBe('retryable');
+    expect(runtime.executeAgentTool).not.toHaveBeenCalled();
+    projection = verifiedProjection;
+    const resumed = await controller.resume(conversationId, current.attemptId);
+    expect(resumed.status).toBe('completed');
+    expect(runtime.prepareAgentToolBatch).toHaveBeenCalledTimes(1);
+    expect(runtime.executeAgentTool).toHaveBeenCalledTimes(1);
+    expect(approvals).not.toHaveBeenCalled();
+    const restoredAttempt = hydrateChatState(store.serialize()).conversations[conversationId]!.attempts[1]!;
+    expect(restoredAttempt.status).toBe('completed');
+    expect(restoredAttempt.rounds).toHaveLength(2);
+    expect(new Set(restoredAttempt.rounds.map(round => round.roundId)).size).toBe(2);
+  });
+
+  test('does not execute a native-bound runtime call whose reference is a forged grant ID', async () => {
+    const flow = await runtimeConversationGrantFlow(true);
+    expect(flow.result).toMatchObject({ status: 'retryable', code: 'E_AGENT_CONFLICT' });
+    expect(flow.requestAgentApproval).toHaveBeenCalledTimes(1);
+    expect((flow.runtime.executeAgentTool as jest.Mock).mock.calls.map(call => call[0].name)).toEqual([
+      'install_runtime_environment',
+    ]);
+    expect(flow.runtime.completeAgentRoundV2).toHaveBeenCalledTimes(2);
+  });
+
+  test.each(['revoked', 'wrong tool family', 'wrong workspace binding', 'wrong root fingerprint', 'wrong registry', 'wrong policy'] as const)(
+    'rejects a persisted runtime grant-bound call with a %s grant before recovery can execute',
+    async corruption => {
+      const flow = await runtimeConversationGrantFlow();
+      expect(flow.result.status).toBe('completed');
+      const grant = flow.store.getState().conversations[flow.conversationId]!.agentGrants![0]!;
+      const session = flow.sessions.find(candidate => {
+        const saved = JSON.parse(candidate);
+        return saved.conversations.some((conversation: any) => conversation.attempts.some((attempt: any) =>
+          attempt.agent?.batch.some((call: any) => call.call_id === 'run-runtime' && call.approval_reference === grant.grant_id)));
+      });
+      expect(session).toBeDefined();
+      const saved = JSON.parse(session!);
+      const conversation = saved.conversations.find((candidate: any) => candidate.id === flow.conversationId);
+      expect(conversation.agent_grants).toHaveLength(1);
+      if (corruption === 'revoked') conversation.agent_grants = [];
+      if (corruption === 'wrong tool family') conversation.agent_grants[0].tool_family = 'file_write';
+      if (corruption === 'wrong workspace binding') conversation.agent_grants[0].binding_revision += 1;
+      if (corruption === 'wrong root fingerprint') conversation.agent_grants[0].root_fingerprint_sha256 = 'f'.repeat(64);
+      if (corruption === 'wrong registry') conversation.agent_grants[0].registry_version = 2;
+      if (corruption === 'wrong policy') conversation.agent_grants[0].policy_version = 'agent-v2';
+      const restartedRuntime = makeRuntime([], { runtimeCapable: true });
+      expect(() => {
+        const restored = createChatStore({ initialState: hydrateChatState(JSON.stringify(saved)) });
+        agentController(restored, restartedRuntime, committedPersistence(restored)).reconcileHydrated(flow.conversationId);
+      }).toThrow();
+      expect(restartedRuntime.queryAgentAttempt).not.toHaveBeenCalled();
+      expect(restartedRuntime.recoverAgentAttempt).not.toHaveBeenCalled();
+      expect(restartedRuntime.executeAgentTool).not.toHaveBeenCalled();
+    },
+  );
 
   test('serializes Claude Code and Codex Agent sessions into the shared native fixtures', async () => {
     const claude = await captureHarnessSessions('claude-code', 'claude-sonnet-5', 1);

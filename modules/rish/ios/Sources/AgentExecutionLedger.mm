@@ -1,4 +1,6 @@
 #import "AgentExecutionLedger.h"
+#import "AgentWriteParentPlan.h"
+#import "AgentRuntimeToolContracts.h"
 
 #include <math.h>
 #include "rish_agent_core.h"
@@ -164,6 +166,8 @@ static BOOL DSHAgentPrecondition(NSDictionary *precondition) {
   if (![precondition isKindOfClass:NSDictionary.class]) return NO;
   NSString *kind = precondition[@"kind"];
   if (![kind isKindOfClass:NSString.class]) return NO;
+  if (DSHAgentIsRuntimeTool(kind))
+    return DSHAgentRuntimeContractValid(@"runtime_precondition", precondition);
   if ([kind isEqualToString:@"read_file"]) {
     return DSHAgentExactDictionaryKeys(precondition, @[
       @"schema_version", @"kind", @"source_revision",
@@ -177,15 +181,8 @@ static BOOL DSHAgentPrecondition(NSDictionary *precondition) {
         DSHAgentCanonicalSHA256(precondition[@"directory_fingerprint_sha256"]);
   }
   if ([kind isEqualToString:@"write_file"]) {
-    return DSHAgentExactDictionaryKeys(precondition, @[
-      @"schema_version", @"kind", @"relative_path_sha256", @"prior",
-      @"content_sha256", @"content_bytes",
-    ]) && [precondition[@"schema_version"] isEqual:@2] &&
-        DSHAgentCanonicalSHA256(precondition[@"relative_path_sha256"]) &&
-        DSHAgentWritePrior(precondition[@"prior"]) &&
-        DSHAgentCanonicalSHA256(precondition[@"content_sha256"]) &&
-        DSHAgentSafeInteger(precondition[@"content_bytes"],
-                            DSHAgentNativeWALMaxSingleWriteBytes, YES);
+    return DSHAgentWriteFilePrecondition(precondition,
+        DSHAgentWritePrior(precondition[@"prior"]));
   }
   if ([kind isEqualToString:@"git_commit"]) {
     NSArray *keys = @[
@@ -274,6 +271,8 @@ static BOOL DSHAgentSettledFacts(NSDictionary *facts) {
   if (![facts isKindOfClass:NSDictionary.class]) return NO;
   NSString *kind = facts[@"kind"];
   if (![kind isKindOfClass:NSString.class]) return NO;
+  if (DSHAgentIsRuntimeTool(kind))
+    return DSHAgentRuntimeContractValid(@"runtime_facts", facts);
   if ([kind isEqualToString:@"start_guest_cgi"] || [kind isEqualToString:@"stop_guest_cgi"]) {
     return DSHAgentExactDictionaryKeys(facts, @[@"schema_version", @"kind", @"service_id", @"status"]) && [facts[@"schema_version"] isEqual:@1] && DSHAgentCanonicalUUID(facts[@"service_id"]) && [facts[@"status"] isEqual:([kind isEqual:@"start_guest_cgi"] ? @"running" : @"stopped")];
   }
@@ -402,6 +401,8 @@ static BOOL DSHAgentLedgerRow(NSDictionary *row) {
       if (facts == NSNull.null ||
           ![facts[@"kind"] isEqual:row[@"precondition"][@"kind"]]) return NO;
       NSString *kind = row[@"precondition"][@"kind"];
+      if (DSHAgentIsRuntimeTool(kind))
+        return [facts[@"arguments_sha256"] isEqual:row[@"precondition"][@"arguments_sha256"]];
       if ([kind isEqualToString:@"write_file"]) {
         return [facts[@"content_sha256"] isEqual:row[@"precondition"][@"content_sha256"]] &&
             DSHAgentBoundedUTF8String(facts[@"actual_revision"], 256, NO, nullptr);

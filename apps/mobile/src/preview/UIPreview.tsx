@@ -205,6 +205,9 @@ function UIPreviewContent({ kind }: { kind: UIPreviewKind }) {
             git_commit: kind === 'policy-panel' ? 'conversation_confirm' : 'not_enabled',
             git_push: kind === 'policy-panel' ? 'conversation_confirm' : 'not_enabled',
             start_guest_cgi: 'conversation_confirm', stop_guest_cgi: 'conversation_confirm',
+            list_runtime_environments: 'auto', install_runtime_environment: 'conversation_confirm',
+            run_program: 'conversation_confirm', start_runtime_service: 'conversation_confirm',
+            stop_runtime_service: 'conversation_confirm',
           }}
           policyStatus="ready"
           onRetryPolicy={() => undefined}

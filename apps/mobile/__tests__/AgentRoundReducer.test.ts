@@ -16,6 +16,9 @@ import {
   type AgentRuntimeRootV1,
   type AgentRuntimeTranscriptHandleV1,
 } from '../src/state';
+import { projectToolActivity } from '../src/components/toolActivityProjection';
+import { validateAgentStoreTransition } from '../src/agent/AgentStoreTransitions';
+import { parsePersistedAgentAttemptJournalV3 } from '../src/state/persistence';
 
 const T0 = '2026-08-30T00:00:00.000Z';
 const CONVERSATION_ID = '11111111-1111-4111-8111-111111111111';
@@ -104,6 +107,86 @@ function beginRoundPreflight(state: AgentRoundState): AgentControllerPreflightV1
 }
 
 describe('AgentRoundReducer high-level evidence boundary', () => {
+  test.each(['run_program', 'start_runtime_service'])('maps a frozen conversation grant for %s without inventing an approval token', name => {
+    const grantId = '99999999-9999-4999-8999-999999999999';
+    const state: AgentRoundState = { ...initialState(), tool_registry_version: 3, phase: 'round_in_flight',
+      root: { ...root, capabilities: ['file_read', 'guest_service'] }, frozen_grant_ids: [grantId],
+      round_lineage: { ...initialState().round_lineage!, status: 'active', native_row_revision: 1 } };
+    const controllerCas = cas(0, 0, 1), checkpoint = { schema_version: 1, journal_revision: 0, session_generation: 1, session_sha256: SHA };
+    const request = { schema_version: 2, operation_id: OPERATION_ID, controller_cas: controllerCas, committed_checkpoint: checkpoint,
+      task_id: TASK_ID, conversation_id: CONVERSATION_ID, attempt_id: ATTEMPT_ID, round_id: ROUND_ID, round_index: 0,
+      expected_round_revision: 1, transcript, root: state.root, registry_version: 3, toolset_sha256: SHA,
+      policy_version: 'agent-v1', expected_batch_revision: 0, expected_reserved_write_bytes: 0 };
+    const projection = { schema_version: 2, call_index: 0, call_id: 'granted-run', name, arguments_sha256: SHA,
+      idempotency_key: SHA, safe_summary_key: `agent.${name}`, access: 'conversation_confirm', approval_state: 'bound',
+      approval_token: null, approval_reference: grantId, execution_status: 'intent', execution_revision: 1,
+      native_row_revision: 1, receipt: null, approval_preview: { schema_version: 1, kind: name, paths: ['server.js'],
+        content_bytes: null, prior: null, diff_preview: null, diff_truncated: false } };
+    const evidence = validateAgentStoreTransition({ operation: 'prepare_agent_tool_batch', request, result: {
+      schema_version: 2, status: 'prepared', operation_id: OPERATION_ID, observed_checkpoint: checkpoint,
+      receipt: { schema_version: 2, task_id: TASK_ID, attempt_id: ATTEMPT_ID, round_id: ROUND_ID, round_index: 0,
+        batch_kind: 'write_batch', batch_revision: 1, manifest_sha256: SHA, transcript, calls: [projection],
+        batch_new_write_bytes: 0, reserved_write_bytes: 0, effect_gate: 'closed' },
+    } });
+    if (evidence === null || evidence.kind !== 'prepare_agent_tool_batch') throw new Error('invalid grant batch');
+    const frozen = reduceAgentRound(state, { type: 'freeze_batch', evidence }, T0);
+    expect(frozen.accepted).toBe(true);
+    expect(frozen.state.batch[0]).toMatchObject({ approval_decision: 'allow_conversation', approval_token: null, approval_reference: grantId });
+    expect(parsePersistedAgentAttemptJournalV3(frozen.state)).toEqual(frozen.state);
+    expect(reduceAgentRound({ ...state, frozen_grant_ids: [] }, { type: 'freeze_batch', evidence }, T0).accepted).toBe(false);
+    const execution = validateAgentControllerPreflight({ schema_version: 1, source: 'completion_controller', kind: 'begin_execution',
+      operation_id: OPERATION_ID, base_cas: { ...controllerCas, expected_controller_generation: frozen.state.controller_generation }, task_id: TASK_ID, conversation_id: CONVERSATION_ID, attempt_id: ATTEMPT_ID,
+      round_id: ROUND_ID, round_index: 0, batch_kind: 'write_batch', batch_revision: 1, manifest_sha256: SHA,
+      call_index: 0, call_id: projection.call_id, name, arguments_sha256: SHA, idempotency_key: SHA,
+      expected_execution_revision: 1, transcript, root: state.root, access: 'conversation_confirm', approval_state: 'bound',
+      approval_reference: grantId, source_event_id: OPERATION_ID });
+    if (execution === null || execution.kind !== 'begin_execution') throw new Error('invalid grant execution');
+    const executing = reduceAgentRound(frozen.state, { type: 'execution_intent', evidence: execution }, T0);
+    expect(executing.accepted).toBe(true);
+    expect(executing.state.phase).toBe('execution_intent');
+    expect(parsePersistedAgentAttemptJournalV3(executing.state).batch[0]?.approval_decision).toBe('allow_conversation');
+  });
+  test('keeps a declined runtime installation denied and continues to the next round', () => {
+    const call: AgentRoundState['batch'][number] = {
+      schema_version: 3, call_index: 0, call_id: 'install', name: 'install_runtime_environment',
+      arguments_sha256: SHA, safe_summary_key: 'agent.install_runtime_environment', access: 'conversation_confirm',
+      approval_token: 'install-approval', approval_decision: 'pending', approval_reference: null,
+      idempotency_key: null, native_row_revision: 1, receipt: null,
+    };
+    const state: AgentRoundState = { ...initialState(), tool_registry_version: 3, phase: 'approval_pending',
+      root: { ...root, capabilities: ['file_read', 'guest_service'] }, batch: [call], call_index: 0,
+      round_lineage: { ...initialState().round_lineage!, status: 'completed', native_row_revision: 1 } };
+    const evidence = validateAgentControllerPreflight({
+      schema_version: 1, source: 'completion_controller', kind: 'decide_approval', operation_id: OPERATION_ID,
+      base_cas: cas(0, 0, 1), conversation_id: CONVERSATION_ID, task_id: TASK_ID, attempt_id: ATTEMPT_ID,
+      round_id: ROUND_ID, round_index: 0, batch_revision: 1, manifest_sha256: SHA,
+      call_index: 0, call_id: call.call_id, name: call.name, arguments_sha256: SHA, approval_token: call.approval_token,
+      decision: 'denied', source_event_id: OPERATION_ID, access: 'conversation_confirm',
+      workspace_id: root.workspace_id, project_id: null, binding_revision: 1, root_fingerprint_sha256: SHA,
+      policy_version: 'agent-v1', registry_version: 3, tool_family: 'guest_service', grant: null,
+    });
+    if (evidence === null || evidence.kind !== 'decide_approval') throw new Error('invalid denial preflight');
+    const denied = reduceAgentRound(state, { type: 'decide_approval', evidence }, T0);
+    expect(denied.accepted).toBe(true);
+    expect(denied.state.batch[0]).toMatchObject({ approval_decision: 'denied', approval_token: null, approval_reference: null });
+    // The native bind result adds this protected denied receipt before the next round.
+    const settled: AgentRoundState = { ...denied.state, batch: [{ ...denied.state.batch[0]!, receipt: {
+      schema_version: 1, call_id: call.call_id, name: call.name, arguments_sha256: SHA, result_sha256: SHA,
+      result_bytes: 50, truncated: false, duration_ms: 0, outcome: 'denied',
+      failure_code: 'E_AGENT_DENIED_BY_USER', approval_reference: null,
+    } }] };
+    const next = reduceAgentRound(settled, { type: 'next_round', round_id: OPERATION_ID, round_index: 1 }, T0);
+    expect(next.accepted).toBe(true);
+    expect(next.state).toMatchObject({ phase: 'ready_for_round', batch: [], round_index: 1, tool_registry_version: 3 });
+    const event = { schema_version: 2 as const, event_id: 'call', attempt_id: ATTEMPT_ID, seq: 1,
+      kind: 'tool_call' as const, round_index: 0, call_id: call.call_id, status: 'approval' as const,
+      safe_summary_key: call.safe_summary_key, arguments_sha256: SHA, result_sha256: null, approval_reference: null,
+      failure_code: null, created_at: T0 };
+    expect(projectToolActivity([event, { ...event, event_id: 'result', seq: 2, kind: 'tool_result', status: 'denied',
+      result_sha256: SHA, failure_code: 'E_AGENT_DENIED_BY_USER' }], ATTEMPT_ID)[0]).toMatchObject({
+      name: call.name, status: 'error', denied: true, failureCode: 'E_AGENT_DENIED_BY_USER',
+    });
+  });
   test.each([
     ['ready_for_round', 'ready', true],
     ['round_in_flight', 'active', true],

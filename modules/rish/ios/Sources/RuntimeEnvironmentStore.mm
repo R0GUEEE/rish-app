@@ -213,10 +213,9 @@ static BOOL CatalogRecord(id record, NSString *kernel) {
 }
 - (NSString *)beginEnvironment:(NSString *)environmentId completion:(DSHEnvironmentCompletion)completion {
   @synchronized(self) {
-    if (!self.available || self.activeToken) {
-      completion(nil, DSHEnvironmentError(self.available ? @"E_ENV_BUSY" : @"E_ENV_STORAGE")); return nil;
-    }
+    if (!self.available) { completion(nil, DSHEnvironmentError(@"E_ENV_STORAGE")); return nil; }
     if (environmentId && self.installed[environmentId]) { completion([self descriptor:environmentId], nil); return nil; }
+    if (self.activeToken) { completion(nil, DSHEnvironmentError(@"E_ENV_BUSY")); return nil; }
     if (self.installed.count >= 32) { completion(nil, DSHEnvironmentError(@"E_ENV_LIMIT")); return nil; }
     self.activeToken = NSUUID.UUID.UUIDString.lowercaseString;
     self.activeEnvironmentId = environmentId; self.activeCancelled = NO;
@@ -230,6 +229,28 @@ static BOOL CatalogRecord(id record, NSString *kernel) {
     if (!self.activeToken) return NO;
     self.activeCancelled = YES; [self.download cancel]; [self.importCoordinator cancel]; return YES;
   }
+}
+- (BOOL)cancelInstallToken:(NSString *)token {
+  @synchronized(self) {
+    if (![token isKindOfClass:NSString.class] || ![self.activeToken isEqual:token]) return NO;
+    return [self cancelInstall];
+  }
+}
+- (NSDictionary *)copyManifestForEnvironmentId:(NSString *)environmentId catalogOnly:(BOOL)catalogOnly {
+  @synchronized(self) {
+    if (!DSHEnvironmentValidId(environmentId)) return nil;
+    NSDictionary *manifest = (!catalogOnly ? self.installed[environmentId] : nil)
+        ?: self.catalog[environmentId][@"manifest"];
+    if (!manifest) return nil;
+    NSData *json = [NSJSONSerialization dataWithJSONObject:manifest options:0 error:nil];
+    return json ? [NSJSONSerialization JSONObjectWithData:json options:0 error:nil] : nil;
+  }
+}
+- (NSDictionary *)manifestForEnvironmentId:(NSString *)environmentId {
+  return [self copyManifestForEnvironmentId:environmentId catalogOnly:NO];
+}
+- (NSDictionary *)catalogManifestForEnvironmentId:(NSString *)environmentId {
+  return [self copyManifestForEnvironmentId:environmentId catalogOnly:YES];
 }
 - (void)finishToken:(NSString *)token descriptor:(NSDictionary *)descriptor error:(NSError *)error
          directory:(NSURL *)directory completion:(DSHEnvironmentCompletion)completion {
@@ -284,12 +305,12 @@ static BOOL CatalogRecord(id record, NSString *kernel) {
   [self finishToken:token descriptor:descriptor error:error ?: (descriptor ? nil : DSHEnvironmentError(@"E_ENV_STORAGE"))
       directory:directory completion:completion];
 }
-- (void)startDownload:(NSString *)url record:(NSDictionary *)record environmentId:(NSString *)environmentId
+- (NSString *)startDownload:(NSString *)url record:(NSDictionary *)record environmentId:(NSString *)environmentId
           completion:(DSHEnvironmentCompletion)completion {
-  NSString *token = [self beginEnvironment:environmentId completion:completion]; if (!token) return;
+  NSString *token = [self beginEnvironment:environmentId completion:completion]; if (!token) return nil;
   NSURL *directory = [self.stagingURL URLByAppendingPathComponent:token isDirectory:YES];
   if (!DSHEnvironmentEnsureDirectory(directory)) {
-    [self finishToken:token descriptor:nil error:DSHEnvironmentError(@"E_ENV_STORAGE") directory:directory completion:completion]; return;
+    [self finishToken:token descriptor:nil error:DSHEnvironmentError(@"E_ENV_STORAGE") directory:directory completion:completion]; return nil;
   }
   NSURL *packageURL = [directory URLByAppendingPathComponent:@"package.rishenv"];
   DSHRuntimeEnvironmentDownload *download = [[DSHRuntimeEnvironmentDownload alloc] init];
@@ -306,12 +327,16 @@ static BOOL CatalogRecord(id record, NSString *kernel) {
           else [self unpack:packageURL record:record token:token directory:directory completion:completion];
         });
       }];
+  return token;
 }
 - (void)installEnvironmentId:(NSString *)environmentId completion:(DSHEnvironmentCompletion)completion {
+  [self beginInstallEnvironmentId:environmentId completion:completion];
+}
+- (NSString *)beginInstallEnvironmentId:(NSString *)environmentId completion:(DSHEnvironmentCompletion)completion {
   NSDictionary *record = nil;
   @synchronized(self) { if (DSHEnvironmentValidId(environmentId)) record = self.catalog[environmentId]; }
-  if (!record) { completion(nil, DSHEnvironmentError(@"E_ENV_NOT_FOUND")); return; }
-  [self startDownload:record[@"url"] record:record environmentId:environmentId completion:completion];
+  if (!record) { completion(nil, DSHEnvironmentError(@"E_ENV_NOT_FOUND")); return nil; }
+  return [self startDownload:record[@"url"] record:record environmentId:environmentId completion:completion];
 }
 - (void)downloadURL:(NSString *)url completion:(DSHEnvironmentCompletion)completion {
   if (!DSHEnvironmentValidHTTPSURL(url)) { completion(nil, DSHEnvironmentError(@"E_ENV_BAD_ARGUMENTS")); return; }

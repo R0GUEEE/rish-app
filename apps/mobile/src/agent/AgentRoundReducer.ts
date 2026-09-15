@@ -1,3 +1,5 @@
+import { hasFrozenConversationGrant, isConversationGrantBoundCall } from './agent-conversation-grants';
+import { ALL_AGENT_AUTO_TOOLS, ALL_AGENT_CONFIRM_TOOLS, agentToolRegistryCompatible, agentToolGrantFamily } from './tool-registry';
 /**
  * Pure V3 Agent journal reducer.
  *
@@ -44,8 +46,8 @@ export type AgentRoundEvidence =
   | AgentStoreTransitionEvidence
   | AgentControllerPreflightV1;
 
-export const AGENT_AUTO_TOOLS = ['list_dir', 'read_file', 'git_status'] as const;
-export const AGENT_CONFIRM_TOOLS = ['write_file', 'git_commit', 'git_push', 'start_guest_cgi', 'stop_guest_cgi'] as const;
+export const AGENT_AUTO_TOOLS = ALL_AGENT_AUTO_TOOLS;
+export const AGENT_CONFIRM_TOOLS = ALL_AGENT_CONFIRM_TOOLS;
 export const AGENT_ONCE_ONLY_TOOLS = [] as const;
 export const AGENT_TOOL_NAMES = [
   ...AGENT_AUTO_TOOLS,
@@ -65,6 +67,7 @@ const failureCodes = new Set<string>([
   'E_AGENT_ROUND_AMBIGUOUS', 'E_AGENT_EXECUTION_AMBIGUOUS',
   'E_AGENT_RETRY_LINEAGE', 'E_AGENT_PERSISTENCE', 'E_AGENT_CONFLICT',
   'E_AGENT_ROUND_LIMIT', 'E_AGENT_CANCELLED', 'E_AGENT_TOOL_FAILED',
+  'E_AGENT_DENIED_BY_USER',
   'E_COMPLETION_LENGTH', 'E_COMPLETION_CONTENT_FILTER',
 ]);
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/u;
@@ -188,7 +191,7 @@ function validRoot(root: AgentRuntimeRootV1): boolean {
   return true;
 }
 function validRegistryVersion(value: unknown): value is AgentRegistryVersion {
-  return value === 1 || value === 2;
+  return value === 1 || value === 2 || value === 3;
 }
 function validPolicy(policy: AgentRuntimePolicyV1): boolean {
   return policy.schema_version === 1 && policy.policy_version === 'agent-v1' && policy.max_single_write_bytes === MAX_AGENT_SINGLE_WRITE_BYTES && Number.isSafeInteger(policy.max_batch_write_bytes) && policy.max_batch_write_bytes >= MAX_AGENT_SINGLE_WRITE_BYTES && policy.max_batch_write_bytes <= 512 * 1024 && Number.isSafeInteger(policy.max_attempt_write_bytes) && policy.max_attempt_write_bytes >= policy.max_batch_write_bytes && policy.max_attempt_write_bytes <= 4 * 1024 * 1024;
@@ -202,6 +205,8 @@ function validReceipt(receipt: AgentToolReceiptV1, call?: PersistedAgentCallJour
 function validCall(call: PersistedAgentCallJournalV3, index: number): boolean {
   const access = agentToolAccess(call.name);
   if (call.schema_version !== 3 || call.call_index !== index || !isBoundedIdentifier(call.call_id) || typeof call.name !== 'string' || !PRINTABLE.test(call.name) || !isDigest(call.arguments_sha256) || !safeSummaryKeys.has(call.safe_summary_key) || call.safe_summary_key !== (allTools.has(call.name) ? `agent.${call.name}` : 'agent.unknown') || call.access !== access || !['pending', 'denied', 'allow_once', 'allow_conversation', 'cancelled'].includes(call.approval_decision) || (call.approval_token !== null && !isBoundedIdentifier(call.approval_token)) || (call.approval_reference !== null && !isBoundedIdentifier(call.approval_reference)) || (call.idempotency_key !== null && !isDigest(call.idempotency_key)) || (call.native_row_revision !== null && (!Number.isSafeInteger(call.native_row_revision) || call.native_row_revision < 1)) || (call.receipt !== null && (call.native_row_revision === null || !validReceipt(call.receipt, call)))) return false;
+  if (access === 'conversation_confirm' && call.approval_token === null &&
+      (call.approval_decision === 'allow_once' || call.approval_decision === 'allow_conversation') && !isConversationGrantBoundCall(call)) return false;
   if (access === 'auto' && (call.approval_token !== null || call.approval_reference !== null || call.approval_decision !== 'pending')) return false;
   if (access === 'durable_deny' && (call.approval_token !== null || call.approval_reference !== null || call.idempotency_key !== null || call.approval_decision !== 'denied')) return false;
   if ((access === 'conversation_confirm' || access === 'confirm_once') && call.approval_decision === 'pending' && call.approval_token === null) return false;
@@ -221,9 +226,8 @@ function validState(state: AgentRoundState): boolean {
   const ids = new Set<string>();
   for (let index = 0; index < state.batch.length; index += 1) {
     const call = state.batch[index]!;
-    if (!validCall(call, index) ||
-        (state.tool_registry_version === 1 &&
-          (call.name === 'start_guest_cgi' || call.name === 'stop_guest_cgi')) ||
+    if (!validCall(call, index) || !hasFrozenConversationGrant(call, state) ||
+        !agentToolRegistryCompatible(call.name, state.tool_registry_version) ||
         ids.has(call.call_id)) return false;
     ids.add(call.call_id);
   }
@@ -316,10 +320,12 @@ function evidenceRoundMatchesState(evidence: AgentRoundEvidence, state: AgentRou
 function copyUpdatedAt(value: string | undefined, fallback: string): string | null { return value === undefined ? fallback : isCanonicalTimestamp(value) ? value : null; }
 
 function callFromProjection(value: unknown, index: number): PersistedAgentCallJournalV3 | null {
-  const raw = exactRecord(value, ['schema_version', 'call_index', 'call_id', 'name', 'arguments_sha256', 'idempotency_key', 'safe_summary_key', 'access', 'approval_state', 'approval_token', 'approval_reference', 'execution_status', 'execution_revision', 'native_row_revision', 'receipt']);
+  const keys = ['schema_version', 'call_index', 'call_id', 'name', 'arguments_sha256', 'idempotency_key', 'safe_summary_key', 'access', 'approval_state', 'approval_token', 'approval_reference', 'execution_status', 'execution_revision', 'native_row_revision', 'receipt'];
+  const record = ownRecord(value);
+  const raw = exactRecord(value, record !== null && Object.hasOwn(record, 'approval_preview') ? [...keys, 'approval_preview'] : keys);
   if (raw === null || raw.schema_version !== 2 || raw.call_index !== index) return null;
   const token = raw.approval_token === null ? null : exactRecord(raw.approval_token, ['schema_version', 'token', 'controller_cas', 'task_id', 'attempt_id', 'round_id', 'round_index', 'batch_call_ids', 'batch_arguments_sha256', 'batch_revision', 'manifest_sha256', 'call_index', 'call_id', 'name', 'arguments_sha256', 'idempotency_key', 'root_fingerprint_sha256', 'binding_revision', 'policy_version', 'registry_version', 'access', 'allowed_decisions']);
-  const decision: AgentApprovalDecision = raw.approval_state === 'denied' ? 'denied' : raw.approval_state === 'cancelled' ? 'cancelled' : raw.approval_state === 'bound' ? 'allow_once' : 'pending';
+  const decision: AgentApprovalDecision = raw.approval_state === 'denied' ? 'denied' : raw.approval_state === 'cancelled' ? 'cancelled' : raw.approval_state === 'bound' ? token === null ? 'allow_conversation' : 'allow_once' : 'pending';
   return { schema_version: 3, call_index: index, call_id: raw.call_id as string, name: raw.name as string, arguments_sha256: raw.arguments_sha256 as string, safe_summary_key: raw.safe_summary_key as string, access: raw.access as AgentAccess, approval_token: token === null ? null : token.token as string, approval_decision: decision, approval_reference: raw.approval_reference as string | null, idempotency_key: raw.idempotency_key as string | null, native_row_revision: raw.native_row_revision as number | null, receipt: raw.receipt === null ? null : raw.receipt as AgentToolReceiptV1 };
 }
 function callFromPresentation(value: unknown, index: number): PersistedAgentCallJournalV3 | null {
@@ -390,6 +396,13 @@ export function reduceAgentRound(current: AgentRoundState, action: AgentRoundRed
       if (evidence?.kind !== 'decide_approval' || (state.phase !== 'approval_pending' && state.phase !== 'batch_frozen')) return reject(current);
       const call = state.batch[evidence.call_index]; if (call === undefined || call.call_id !== evidence.call_id || call.name !== evidence.name || call.arguments_sha256 !== evidence.arguments_sha256 || call.approval_token !== evidence.approval_token || call.access !== evidence.access || call.approval_decision !== 'pending') return reject(current);
       const decision = evidence.decision;
+      if (evidence.workspace_id !== state.root.workspace_id || evidence.project_id !== state.root.project_id ||
+          evidence.binding_revision !== state.root.workspace_binding_revision || evidence.root_fingerprint_sha256 !== state.root.root_fingerprint_sha256 ||
+          evidence.registry_version !== state.tool_registry_version || evidence.policy_version !== state.policy.policy_version || evidence.tool_family !== agentToolGrantFamily(call.name)) return reject(current);
+      if (decision === 'allow_conversation') {
+        if (evidence.grant === null) return reject(current);
+        if (!state.frozen_grant_ids.includes(evidence.grant.grant_id)) state.frozen_grant_ids.push(evidence.grant.grant_id);
+      }
       state.batch[evidence.call_index] = { ...call, approval_decision: decision, approval_token: decision === 'denied' || decision === 'cancelled' ? null : call.approval_token, approval_reference: decision === 'denied' || decision === 'cancelled' ? null : evidence.operation_id };
       state.call_index = nextPendingCall(state); state.phase = hasPendingApproval(state) ? 'approval_pending' : 'batch_frozen'; state.updated_at = at; return accept(current, state);
     }
@@ -406,7 +419,7 @@ export function reduceAgentRound(current: AgentRoundState, action: AgentRoundRed
         evidence.approval_state !== (call.access === 'auto' ? 'not_required' : 'bound') ||
         (call.access !== 'auto' && call.approval_decision !== 'allow_once' && call.approval_decision !== 'allow_conversation') ||
         call.approval_reference !== evidence.approval_reference ||
-        call.idempotency_key !== null ||
+        (call.idempotency_key !== null && call.idempotency_key !== evidence.idempotency_key) ||
         call.native_row_revision !== evidence.expected_execution_revision ||
         call.receipt !== null
       ) return reject(current);

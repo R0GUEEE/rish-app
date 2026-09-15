@@ -229,7 +229,7 @@ static NSDictionary *DSHPreparedTestRequest(BOOL project,
     @"visible_history_sha256" : DSHPreparedVisibleDigest(),
     @"visible_message_count" : @1,
     @"project_context_sha256" : contextSHA256 ?: NSNull.null,
-    @"registry_version" : @1,
+    @"registry_version" : @3,
     @"expected_policy_version" : NSNull.null,
     @"expected_transcript" : NSNull.null,
   };
@@ -280,6 +280,12 @@ static NSDictionary *DSHPreparedTestRoot(BOOL project,
   };
 }
 
+static NSDictionary *DSHPreparedToolNamed(NSDictionary *registry, NSString *name) {
+  for (NSDictionary *tool in registry[@"tools"])
+    if ([tool[@"name"] isEqual:name]) return tool;
+  return nil;
+}
+
 @interface AgentPreparedAttemptStoreTests : XCTestCase
 @end
 
@@ -293,12 +299,13 @@ static NSDictionary *DSHPreparedTestRoot(BOOL project,
   NSDictionary *projection = [registry registryForRoot:root error:&error];
   XCTAssertNil(error);
   XCTAssertNotNil(projection);
-  XCTAssertEqualObjects(projection[@"registry_version"], @2);
+  XCTAssertEqualObjects(projection[@"registry_version"], @3);
   XCTAssertEqualObjects(projection[@"toolset_sha256"], registry.toolsetSHA256);
   XCTAssertEqualObjects(
       [projection[@"tools"] valueForKey:@"name"],
-      (@[ @"list_dir", @"read_file", @"write_file" ]));
-  XCTAssertEqualObjects(projection[@"tools"][2][@"access"], @"conversation_confirm");
+      (@[ @"list_dir", @"list_runtime_environments", @"read_file", @"write_file" ]));
+  XCTAssertEqualObjects(DSHPreparedToolNamed(projection, @"list_runtime_environments")[@"access"], @"auto");
+  XCTAssertEqualObjects(DSHPreparedToolNamed(projection, @"write_file")[@"access"], @"conversation_confirm");
   XCTAssertTrue([registry validateToolsetSHA256:registry.toolsetSHA256 error:&error]);
   XCTAssertNil(error);
 
@@ -318,12 +325,16 @@ static NSDictionary *DSHPreparedTestRoot(BOOL project,
   DSHAgentToolRegistry *registry = [[DSHAgentToolRegistry alloc] init];
   NSDictionary *projection = [registry registryForRoot:root error:&error];
   XCTAssertNil(error);
+  // Keep the release-gate selector stable; v3 adds the read-only environment
+  // listing to the legacy six tools, while these five capabilities stay fixed.
+  XCTAssertEqualObjects(projection[@"registry_version"], @3);
   XCTAssertEqualObjects([projection[@"tools"] valueForKey:@"name"],
                         (@[ @"git_commit", @"git_push", @"git_status",
-                            @"list_dir", @"read_file", @"write_file" ]));
-  XCTAssertEqualObjects(projection[@"tools"][0][@"access"], @"conversation_confirm");
-  XCTAssertEqualObjects(projection[@"tools"][1][@"access"], @"conversation_confirm");
-  XCTAssertEqualObjects(projection[@"tools"][2][@"access"], @"auto");
+                            @"list_dir", @"list_runtime_environments", @"read_file", @"write_file" ]));
+  XCTAssertEqualObjects(DSHPreparedToolNamed(projection, @"git_commit")[@"access"], @"conversation_confirm");
+  XCTAssertEqualObjects(DSHPreparedToolNamed(projection, @"git_push")[@"access"], @"conversation_confirm");
+  XCTAssertEqualObjects(DSHPreparedToolNamed(projection, @"git_status")[@"access"], @"auto");
+  XCTAssertEqualObjects(DSHPreparedToolNamed(projection, @"list_runtime_environments")[@"access"], @"auto");
   NSDictionary *policy = [registry policyForRoot:root error:&error];
   XCTAssertNil(error);
   XCTAssertEqualObjects(policy[@"policy_version"], @"agent-v1");
@@ -560,8 +571,9 @@ static NSDictionary *DSHPreparedTestRoot(BOOL project,
   XCTAssertNil(error);
   XCTAssertEqualObjects(result[@"status"], @"prepared");
   XCTAssertEqualObjects(result[@"attempt"][@"root"][@"kind"], @"project");
-  XCTAssertEqual([(NSArray *)result[@"attempt"][@"registry"][@"tools"] count],
-                 (NSUInteger)6);
+  XCTAssertEqualObjects(result[@"attempt"][@"registry"][@"registry_version"], @3);
+  XCTAssertEqualObjects([result[@"attempt"][@"registry"][@"tools"] valueForKey:@"name"],
+      (@[@"git_commit", @"git_push", @"git_status", @"list_dir", @"list_runtime_environments", @"read_file", @"write_file"]));
   NSDictionary *authority = [store nativeAuthorityForTaskId:DSHPreparedTestAttempt
                                                    attemptId:DSHPreparedTestAttempt
                                                        error:&error];

@@ -7,6 +7,7 @@
 #import "AgentTranscriptStore.h"
 #import "AgentWorkspaceToolExecutor.h"
 #import "DSHAgentGuestCgiToolExecutor.h"
+#import "DSHAgentRuntimeToolExecutor.h"
 
 #include "rish_agent_core.h"
 
@@ -271,6 +272,13 @@ static NSDictionary *DSHAgentBatchConversation(NSDictionary *session,
                                                  arguments:arguments
                                                       root:root
                                                      error:&prepareError];
+    } else if ([executor isEqualToString:@"runtime"]) {
+      NSDictionary *outcome = [[DSHAgentRuntimeToolExecutor executorForWorkspaceExecutor:self.workspaceExecutor]
+          prepareToolNamed:name arguments:arguments root:root];
+      if ([outcome[@"rejection"] isKindOfClass:NSDictionary.class]) {
+        [outcomes addObject:outcome]; continue;
+      }
+      prepared = outcome;
     } else if ([executor isEqualToString:@"guest"]) {
       NSDictionary *condition = [[DSHAgentGuestCgiToolExecutor
           executorForWorkspaceExecutor:self.workspaceExecutor]

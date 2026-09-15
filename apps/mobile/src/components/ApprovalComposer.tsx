@@ -60,6 +60,16 @@ function toolSummaryKey(name: string): string {
       return 'agent.tool.start_guest_cgi';
     case 'stop_guest_cgi':
       return 'agent.tool.stop_guest_cgi';
+    case 'list_runtime_environments':
+      return 'agent.tool.list_runtime_environments';
+    case 'install_runtime_environment':
+      return 'agent.tool.install_runtime_environment';
+    case 'run_program':
+      return 'agent.tool.run_program';
+    case 'start_runtime_service':
+      return 'agent.tool.start_runtime_service';
+    case 'stop_runtime_service':
+      return 'agent.tool.stop_runtime_service';
     default:
       return 'agent.tool.unknown';
   }

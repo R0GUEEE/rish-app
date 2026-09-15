@@ -22,6 +22,7 @@ pub mod provider_round;
 pub mod root_projection;
 pub mod round_journal;
 pub mod runtime_coordinator;
+pub mod runtime_tools;
 pub mod schema;
 pub mod session_schema;
 pub mod store;
@@ -33,6 +34,7 @@ pub mod transcript_store;
 pub mod wal_operations;
 pub mod wal_resident;
 pub mod wal_state;
+mod write_parent_plan;
 
 /// Protocol version reported over the C ABI. Bumped when the JSON contract
 /// of any exported operation changes incompatibly.

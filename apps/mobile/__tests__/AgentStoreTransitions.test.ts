@@ -4,6 +4,7 @@ import {
   validateAgentStoreTransition,
   type AgentStoreTransitionEvidence,
 } from '../src/agent/AgentStoreTransitions';
+import { RUNTIME_AGENT_TOOLS, ALL_AGENT_AUTO_TOOLS, ALL_AGENT_TOOL_NAMES } from '../src/agent/tool-registry';
 
 const UUID_A = '11111111-1111-4111-8111-111111111111';
 const UUID_B = '22222222-2222-4222-8222-222222222222';
@@ -332,6 +333,60 @@ function makeCompleteRequestX(transport: 2 | 3) {
 }
 
 describe('AgentStoreTransitions', () => {
+  test('accepts the v3 thirteen-tool projection and rejects runtime tools under older versions', () => {
+    const tools = ALL_AGENT_TOOL_NAMES.map(name => ({ schema_version: 2, name,
+      safe_summary_key: `agent.${name}`, access: (ALL_AGENT_AUTO_TOOLS as readonly string[]).includes(name) ? 'auto' : 'conversation_confirm' }));
+    const result = { ...prepareResult, attempt: { ...projection, registry: { ...registry, registry_version: 3, tools } } };
+    const transition = { operation: 'prepare_agent_attempt', request: { ...prepareRequest, registry_version: 3 }, result };
+    expect(validateAgentStoreTransition(transition)?.kind).toBe('prepare_agent_attempt');
+    for (const name of RUNTIME_AGENT_TOOLS) for (const version of [1, 2]) {
+      expect(validateAgentStoreTransition({ ...transition, result: { ...result, attempt: { ...result.attempt,
+        registry: { ...result.attempt.registry, registry_version: version, tools: tools.filter(tool => tool.name === name) },
+      } } })).toBeNull();
+    }
+    expect(validateAgentStoreTransition({ ...transition, result: { ...result, attempt: { ...result.attempt,
+      registry: { ...result.attempt.registry, tools: tools.map(tool => tool.name === 'run_program' ? { ...tool, access: 'auto' } : tool) },
+    } } })).toBeNull();
+  });
+
+  test.each(RUNTIME_AGENT_TOOLS)('accepts a v3 %s batch with its bounded approval preview', name => {
+    const readOnly = name === 'list_runtime_environments';
+    const serviceRoot = { ...root, capabilities: [readOnly ? 'file_read' : 'guest_service'] };
+    const request = { schema_version: 2, operation_id: UUID_D, controller_cas: cas, committed_checkpoint: checkpoint,
+      task_id: UUID_B, conversation_id: UUID_A, attempt_id: UUID_C, round_id: UUID_D, round_index: 0,
+      expected_round_revision: 1, transcript, root: serviceRoot, registry_version: 3, toolset_sha256: SHA,
+      policy_version: 'agent-v1', expected_batch_revision: 0, expected_reserved_write_bytes: 0 };
+    const token = { schema_version: 2, token: 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa', controller_cas: cas,
+      task_id: UUID_B, attempt_id: UUID_C, round_id: UUID_D, round_index: 0, batch_call_ids: ['runtime-call'],
+      batch_arguments_sha256: [SHA], batch_revision: 1, manifest_sha256: SHA, call_index: 0, call_id: 'runtime-call',
+      name, arguments_sha256: SHA, idempotency_key: SHA, root_fingerprint_sha256: SHA, binding_revision: 1,
+      policy_version: 'agent-v1', registry_version: 3, access: 'conversation_confirm',
+      allowed_decisions: ['denied', 'allow_once', 'allow_conversation', 'cancelled'] };
+    const call = { schema_version: 2, call_index: 0, call_id: 'runtime-call', name, arguments_sha256: SHA,
+      idempotency_key: SHA, safe_summary_key: `agent.${name}`, access: readOnly ? 'auto' : 'conversation_confirm',
+      approval_state: readOnly ? 'not_required' : 'pending', approval_token: readOnly ? null : token,
+      approval_reference: null, execution_status: 'intent', execution_revision: 1, native_row_revision: null, receipt: null,
+      approval_preview: { schema_version: 1, kind: name, paths: name === 'run_program' || name === 'start_runtime_service' ? ['src/server.js'] : [],
+        content_bytes: null, prior: null, diff_preview: null, diff_truncated: false } };
+    const receipt = { schema_version: 2, task_id: UUID_B, attempt_id: UUID_C, round_id: UUID_D, round_index: 0,
+      batch_kind: readOnly ? 'read_only_batch' : 'write_batch', batch_revision: 1, manifest_sha256: readOnly ? null : SHA,
+      transcript, calls: [call], batch_new_write_bytes: 0, reserved_write_bytes: 0, effect_gate: readOnly ? 'not_applicable' : 'closed' };
+    const result = { schema_version: 2, status: 'prepared', operation_id: UUID_D, receipt, observed_checkpoint: checkpoint };
+    const transition = { operation: 'prepare_agent_tool_batch', request, result };
+    expect(validateAgentStoreTransition(transition)?.kind).toBe('prepare_agent_tool_batch');
+    const executeRequest = { schema_version: 2, operation_id: UUID_D, controller_cas: cas, committed_checkpoint: checkpoint,
+      task_id: UUID_B, conversation_id: UUID_A, attempt_id: UUID_C, round_id: UUID_D, round_index: 0,
+      batch_kind: receipt.batch_kind, manifest_sha256: receipt.manifest_sha256, expected_batch_revision: 1,
+      call_index: 0, call_id: call.call_id, name, arguments_sha256: SHA, idempotency_key: SHA,
+      expected_execution_revision: 1, transcript, root: serviceRoot, approval_reference: readOnly ? null : UUID_D };
+    expect(validateAgentStoreRequest('execute_agent_tool', executeRequest)).not.toBeNull();
+    expect(validateAgentStoreRequest('execute_agent_tool', { ...executeRequest, approval_reference: readOnly ? UUID_D : null })).toBeNull();
+    expect(validateAgentStoreTransition({ ...transition, request: { ...request, registry_version: 2 } })).toBeNull();
+    expect(validateAgentStoreTransition({ ...transition, request: { ...request, root: { ...serviceRoot, capabilities: [] } } })).toBeNull();
+    expect(validateAgentStoreTransition({ ...transition, result: { ...result, receipt: { ...receipt,
+      calls: [{ ...call, approval_preview: { ...call.approval_preview, paths: ['one', 'two'] } }],
+    } } })).toBeNull();
+  });
   test('accepts a complete prepare pair and emits a closed discriminated evidence union', () => {
     const evidence = validateAgentStoreTransition({
       operation: 'prepare_agent_attempt',

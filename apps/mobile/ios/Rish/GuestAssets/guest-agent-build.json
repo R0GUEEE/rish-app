@@ -1,5 +1,5 @@
 {
-  "rish_commit": "590a79d0f387e9e868528eca366d76c22530d833",
+  "rish_commit": "8358dae8f357381740e024f0102cbc1b9d882118",
   "rust_toolchain": "1.94",
   "target": "x86_64-unknown-linux-musl",
   "base_initramfs_sha256": "152905238ade87b7e1cd495508ff1bb92807b4440cc0ed056030e4dfd72caea0",

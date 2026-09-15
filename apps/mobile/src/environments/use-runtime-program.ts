@@ -9,7 +9,7 @@ import { RuntimeBridgeError } from './runtime-validation';
 
 type Input = { visible: boolean; root: WorkspaceRootRefV1 | null; blocked?: boolean; ownerKey?: string };
 type Phase = 'idle' | 'downloading' | 'preparing' | 'starting' | 'active' | 'finished';
-type Operation = { owner: object; cancelled: boolean; downloading: boolean; run: RuntimeProgramReceipt | null };
+type Operation = { owner: object; cancelled: boolean; downloading: boolean; installId: string | null; run: RuntimeProgramReceipt | null };
 type State = { owner: object; phase: Phase; receipt: RuntimeProgramReceipt | null; error: string | null };
 const rootKey = (root: WorkspaceRootRefV1 | null) => root === null ? '' :
   `${root.workspace_id}:${root.binding_revision}:${root.project_id ?? ''}`;
@@ -24,8 +24,8 @@ export function useRuntimeProgram({ visible, root, blocked = false, ownerKey = '
     pending.current === operation && owner.current.identity === operation.owner && owner.current.visible && !owner.current.blocked, []);
   const stopOperation = useCallback(async (operation: Operation) => {
     operation.cancelled = true;
-    if (operation.downloading) {
-      try { await LocalEnvironments.cancelInstall({ schema_version: 1 }); } catch { /* Start continuation remains cancelled. */ }
+    if (operation.downloading && operation.installId) {
+      try { await LocalEnvironments.cancelOwnedInstall({ schema_version: 1, operation_id: operation.installId }); } catch { /* Start continuation remains cancelled. */ }
     }
     if (operation.run && programActive(operation.run)) {
       try {
@@ -80,7 +80,7 @@ export function useRuntimeProgram({ visible, root, blocked = false, ownerKey = '
     if (!LocalPrograms.isAvailable() || !LocalEnvironments.isAvailable()) {
       setState({ owner: owner.current.identity, phase: 'finished', receipt: null, error: 'E_PROGRAM_UNAVAILABLE' }); return;
     }
-    const operation: Operation = { owner: owner.current.identity, cancelled: false, downloading: false, run: null };
+    const operation: Operation = { owner: owner.current.identity, cancelled: false, downloading: false, installId: null, run: null };
     pending.current = operation;
     const update = (phase: Phase) => { if (current(operation)) setState({ owner: operation.owner, phase, receipt: null, error: null }); };
     let workspace: WorkspaceRootRefV1;
@@ -89,7 +89,9 @@ export function useRuntimeProgram({ visible, root, blocked = false, ownerKey = '
     try {
       if (environment.state !== 'installed') {
         operation.downloading = true; update('downloading');
-        await LocalEnvironments.installEnvironment({ schema_version: 1, environment_id: environment.environment_id });
+        if (!LocalEnvironments.supportsOwnedInstall()) throw new RuntimeBridgeError('E_ENV_UNAVAILABLE');
+        operation.installId = createCompletionRequestId();
+        await LocalEnvironments.installEnvironmentOwned({ schema_version: 1, operation_id: operation.installId, environment_id: environment.environment_id });
         operation.downloading = false;
         if (!current(operation)) return;
       }

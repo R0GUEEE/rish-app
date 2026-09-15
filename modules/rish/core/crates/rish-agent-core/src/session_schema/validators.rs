@@ -880,13 +880,22 @@ impl Validator<'_> {
         let name = as_str(f("name")).unwrap_or_default();
         let access = as_str(f("access")).unwrap_or_default();
         let decision = as_str(f("approval_decision")).unwrap_or_default();
-        const AUTO: &[&str] = &["list_dir", "read_file", "git_status"];
+        const AUTO: &[&str] = &[
+            "list_dir",
+            "read_file",
+            "git_status",
+            "list_runtime_environments",
+        ];
         const CONVERSATION: &[&str] = &[
             "write_file",
             "git_commit",
             "git_push",
             "start_guest_cgi",
             "stop_guest_cgi",
+            "install_runtime_environment",
+            "run_program",
+            "start_runtime_service",
+            "stop_runtime_service",
         ];
         if !agent_summary_matches_name(f("safe_summary_key"), f("name")) {
             return false;
@@ -894,10 +903,13 @@ impl Validator<'_> {
         if !REGISTERED_TOOLS.contains(&name) && access != "durable_deny" {
             return false;
         }
-        if AUTO.contains(&name) && access != "auto" {
+        if AUTO.contains(&name)
+            && access != "auto"
+            && !(name == "list_runtime_environments" && access == "durable_deny")
+        {
             return false;
         }
-        let guest = matches!(name, "start_guest_cgi" | "stop_guest_cgi");
+        let guest = crate::runtime_tools::is_guest(name);
         if CONVERSATION.contains(&name)
             && access != "conversation_confirm"
             && !(guest && access == "durable_deny")
@@ -914,7 +926,7 @@ impl Validator<'_> {
         }
         let gated = matches!(access, "conversation_confirm" | "confirm_once");
         let terminal = matches!(decision, "denied" | "cancelled");
-        if gated && token_null && !terminal {
+        if gated && token_null && !terminal && !super::grant_reuse::call_shape(call) {
             return false;
         }
         if gated && terminal && (!token_null || !reference_null) {
@@ -976,7 +988,8 @@ impl Validator<'_> {
             || !is_dict(f("root"))
             || !self.agent_root(f("root").expect("checked"))
             || (!exact_schema(f("tool_registry_version"), 1)
-                && !exact_schema(f("tool_registry_version"), 2))
+                && !exact_schema(f("tool_registry_version"), 2)
+                && !exact_schema(f("tool_registry_version"), 3))
             || !canonical_digest(f("toolset_sha256"))
             || !is_dict(f("transcript"))
             || !self.transcript_reference(f("transcript").expect("checked"))
@@ -1002,6 +1015,8 @@ impl Validator<'_> {
             if !self.agent_call(call)
                 || uint(get(call, "call_index")) != index as u64
                 || call_ids.contains(call_id)
+                || (super::grant_reuse::call_shape(call)
+                    && !super::grant_reuse::journal_call_bound(call, journal))
             {
                 return false;
             }
@@ -1175,8 +1190,12 @@ impl Validator<'_> {
                 &["file_write", "git_commit", "git_push", "guest_service"],
             )
             || (matches!(family, "git_commit" | "git_push") && is_null(f("project_id")))
-            || (!exact_schema(f("registry_version"), 1) && !exact_schema(f("registry_version"), 2))
-            || (family == "guest_service" && !exact_schema(f("registry_version"), 2))
+            || (!exact_schema(f("registry_version"), 1)
+                && !exact_schema(f("registry_version"), 2)
+                && !exact_schema(f("registry_version"), 3))
+            || (family == "guest_service"
+                && !exact_schema(f("registry_version"), 2)
+                && !exact_schema(f("registry_version"), 3))
             || bounded_text(f("policy_version"), 256, false).is_none()
             || !is_dict(issued)
             || !exact_keys(
@@ -2153,6 +2172,9 @@ impl Validator<'_> {
                 let Some(journal) = present(get(attempt, "agent")) else {
                     continue;
                 };
+                if !super::grant_reuse::conversation_bound(journal, conversation) {
+                    return None;
+                }
                 let binding = f("workspace_binding");
                 let root = get(journal, "root");
                 if is_null(binding)

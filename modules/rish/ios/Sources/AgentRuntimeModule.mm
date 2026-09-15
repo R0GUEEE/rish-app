@@ -13,6 +13,7 @@
 #import "AgentRootResolver.h"
 #import "AgentRoundJournal.h"
 #import "AgentRuntimeCoordinator.h"
+#import "AgentRuntimeToolContracts.h"
 #import "AgentToolBatchService.h"
 #import "AgentToolExecutionService.h"
 #import "AgentTranscriptStore.h"
@@ -277,7 +278,7 @@ static NSString *DSHRuntimeFailureMessage(NSString *code, NSString *operation,
 static NSString *const DSHAgentRoundPreviewEventName = @"agentRoundPreview";
 
 @interface AgentRuntimeModule : RCTEventEmitter <RCTBridgeModule>
-@property(nonatomic, strong) id<DSHAgentRuntimeCoordinating> runtimeCoordinator;
+@property(atomic, strong) id<DSHAgentRuntimeCoordinating> runtimeCoordinator;
 @property(nonatomic, strong) DSHSessionWorkspaceCoordinator *serializationCoordinator;
 @property(nonatomic) NSUInteger previewObserverCount;
 /// Preview delivery pauses while the app is in the background: the round
@@ -342,7 +343,15 @@ RCT_EXPORT_MODULE(AgentRuntime)
 }
 
 - (void)dealloc {
+  if ([_runtimeCoordinator isKindOfClass:DSHAgentRuntimeCoordinator.class])
+    [((DSHAgentRuntimeCoordinator *)_runtimeCoordinator).executionService cancelRuntimeWork];
   [NSNotificationCenter.defaultCenter removeObserver:self];
+}
+
+- (void)invalidate {
+  if ([self.runtimeCoordinator isKindOfClass:DSHAgentRuntimeCoordinator.class])
+    [((DSHAgentRuntimeCoordinator *)self.runtimeCoordinator).executionService cancelRuntimeWork];
+  [super invalidate];
 }
 
 - (void)applicationDidEnterBackground:(__unused NSNotification *)notification {
@@ -455,12 +464,19 @@ RCT_EXPORT_MODULE(AgentRuntime)
                               @"E_AGENT_BAD_ARGUMENTS", nil);
     return;
   }
+  if ([name isEqual:@"cancel_agent_attempt"] &&
+      [self.runtimeCoordinator isKindOfClass:DSHAgentRuntimeCoordinator.class]) {
+    // This only signals a matching native-registered full locator/root/owner;
+    // the authoritative cancellation CAS remains on the coordinator below.
+    [((DSHAgentRuntimeCoordinator *)self.runtimeCoordinator).executionService
+        signalRuntimeCancellationRequest:request];
+  }
   [self.serializationCoordinator performAsync:^{
     NSError *error = nil;
     id<DSHAgentRuntimeCoordinating> coordinator =
         [self buildRuntimeCoordinator:&error];
-    // Coordinator construction is serialized; only provider rounds leave this
-    // queue. Their service serializes preparation and commit independently.
+    // Provider waits and runtime effects leave this queue. Each owns separate
+    // serialized preparation and settlement around its worker-only waiting.
     dispatch_block_t run = ^{
     CFAbsoluteTime began = CFAbsoluteTimeGetCurrent();
     NSError *invokeError = error;
@@ -509,6 +525,8 @@ RCT_EXPORT_MODULE(AgentRuntime)
                    rejecter:(RCTPromiseRejectBlock)reject) { \
     [self invoke:request resolver:resolve rejecter:reject \
         providerWait:([@#selector isEqualToString:@"completeAgentRoundV2"] || \
+          ([@#selector isEqualToString:@"executeAgentTool"] && \
+           [request isKindOfClass:NSDictionary.class] && DSHAgentIsRuntimeTool(request[@"name"])) || \
           ([@#selector isEqualToString:@"recoverAgentAttempt"] && \
            [request isKindOfClass:NSDictionary.class] && \
            [request[@"action"] isEqual:@"retry_failed_round"])) \

@@ -42,10 +42,8 @@ export function useRuntimeEnvironments({ visible, workspaceId }: Input) {
     return () => {
       clearInterval(timer); listener.remove();
       const pending = operation.current;
-      if (pending?.identity === identity && pending.download) {
-        operation.current = null;
-        LocalEnvironments.cancelInstall({ schema_version: 1 }).catch(() => undefined);
-      }
+      // Cached environments are app-wide. Closing a panel only detaches its UI.
+      if (pending?.identity === identity) operation.current = null;
     };
   }, [identity, refresh, visible]);
   const perform = useCallback(async (action: () => Promise<unknown>, download = false): Promise<boolean> => {
@@ -68,20 +66,25 @@ export function useRuntimeEnvironments({ visible, workspaceId }: Input) {
     }
   }, [current, refresh]);
   const cancel = useCallback(async () => {
+    const key = owner.current.identity;
+    if (!current(key)) return;
     const pending = operation.current;
-    if (!pending?.download) return;
+    const globalDownload = state.key === key && state.list?.environments.some(environment =>
+      environment.state === 'downloading' || environment.state === 'installing');
+    if (!pending?.download && !globalDownload) return;
     operation.current = null;
     try { await LocalEnvironments.cancelInstall({ schema_version: 1 }); }
     catch (error) {
-      if (current(pending.identity)) setState(previous => ({ ...previous, error: runtimeEnvironmentErrorCode(error) }));
+      if (current(key)) setState(previous => ({ ...previous, error: runtimeEnvironmentErrorCode(error) }));
     }
-    if (current(pending.identity)) { setBusy(null); await refresh(); }
-  }, [current, refresh]);
+    if (current(key)) { setBusy(null); await refresh(); }
+  }, [current, refresh, state]);
   return {
     status: state.key === identity ? state.status : 'loading' as const,
     list: state.key === identity ? state.list : null,
     error: state.key === identity ? state.error : null,
-    busy: busy === identity, cancellable: busy === identity && operation.current?.download === true,
+    busy: busy === identity, cancellable: (busy === identity && operation.current?.download === true) ||
+      (state.key === identity && state.list?.environments.some(environment => environment.state === 'downloading' || environment.state === 'installing') === true),
     refresh: async () => { setState(previous => ({ ...previous, error: null })); await refresh(); }, cancel,
     install: (environment_id: string) => perform(() => LocalEnvironments.installEnvironment({ schema_version: 1, environment_id }), true),
     importFile: () => perform(() => LocalEnvironments.importEnvironment(), true),

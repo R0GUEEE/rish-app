@@ -358,7 +358,8 @@ NSArray *DSHProviderToolsForAuthority(
   NSMutableArray *raw = [NSMutableArray array];
   for (NSDictionary *safeTool in authority[@"registry"][@"tools"]) {
     NSDictionary *native = [registry nativeDescriptorForToolName:safeTool[@"name"]
-                                                                error:error];
+                                                     registry:authority[@"registry"]
+                                                        error:error];
     if (native == nil) return nil;
     // The description the model is shown is shared with Android; the registry
     // supplies the tool's native identity and parameters.

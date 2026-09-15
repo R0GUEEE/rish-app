@@ -459,7 +459,12 @@ test('callbacks from a replaced single request cannot discard the new draft', as
 test.each([
   ['start_guest_cgi', 'Start a local preview service'],
   ['stop_guest_cgi', 'Stop the local preview service'],
-])('describes %s as a service operation, not a file read', async (toolName, label) => {
+  ['list_runtime_environments', 'List language environments'],
+  ['install_runtime_environment', 'Install a language environment'],
+  ['run_program', 'Run a program'],
+  ['start_runtime_service', 'Start a program server'],
+  ['stop_runtime_service', 'Stop the program server'],
+])('describes %s with its specific tool label', async (toolName, label) => {
   const { renderer } = await renderComposer([{ ...request, toolName }]);
   expect(renderer.root.findAllByProps({ children: label }).length).toBeGreaterThan(0);
   expect(renderer.root.findAllByProps({ children: 'Read a file' })).toHaveLength(0);

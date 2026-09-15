@@ -6,7 +6,7 @@ set -euo pipefail
 # deliberately identical to prepare-rish-ios.sh: updating rish for the app is
 # a reviewed source upgrade, not a side effect of whatever is checked out next
 # door. Both scripts must move together.
-readonly EXPECTED_RISH_COMMIT="590a79d0f387e9e868528eca366d76c22530d833"
+readonly EXPECTED_RISH_COMMIT="8358dae8f357381740e024f0102cbc1b9d882118"
 readonly EXPECTED_RISH_REMOTE="git@github.com:ZSeven-W/rish.git"
 readonly EXPECTED_RISH_PUBLIC_REMOTE="https://github.com/ZSeven-W/rish.git"
 readonly EXPECTED_HEADER_SHA256="cd4282d50ea46d4bf8cbaee73a5dc174f288bb9295e823b13af225a38012aa87"

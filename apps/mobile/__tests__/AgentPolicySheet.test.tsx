@@ -21,6 +21,9 @@ const props: React.ComponentProps<typeof AgentPolicySheet> = {
     list_dir: 'auto', read_file: 'auto', write_file: 'conversation_confirm',
     git_status: 'not_enabled', git_commit: 'not_enabled', git_push: 'not_enabled',
     start_guest_cgi: 'conversation_confirm', stop_guest_cgi: 'conversation_confirm',
+    list_runtime_environments: 'auto', install_runtime_environment: 'conversation_confirm',
+    run_program: 'conversation_confirm', start_runtime_service: 'conversation_confirm',
+    stop_runtime_service: 'conversation_confirm',
   },
   grants: [],
   revokeBusy: false,
@@ -140,4 +143,20 @@ test('failed policy reads offer a retry and do not expose raw Git errors', async
   await act(async () => { renderer.root.findByProps({ testID: 'agent-policy-retry' }).props.onPress(); });
   expect(onRetryPolicy).toHaveBeenCalledTimes(1);
   expect(JSON.stringify(renderer.toJSON())).not.toContain('private filesystem path');
+});
+
+
+test('shows all runtime tools with their effective access modes', async () => {
+  const renderer = await render();
+  const tools = [
+    ['list_runtime_environments', 'List language environments', 'Automatic'],
+    ['install_runtime_environment', 'Install a language environment', 'Approval required'],
+    ['run_program', 'Run a program', 'Approval required'],
+    ['start_runtime_service', 'Start a program server', 'Approval required'],
+    ['stop_runtime_service', 'Stop the program server', 'Approval required'],
+  ];
+  for (const [name, label, access] of tools) {
+    expect(renderer.root.findAllByProps({ children: label }).length).toBeGreaterThan(0);
+    expect(renderer.root.findByProps({ testID: `agent-policy-access-${name}` }).props.children).toBe(access);
+  }
 });

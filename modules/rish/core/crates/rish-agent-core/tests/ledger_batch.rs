@@ -383,3 +383,179 @@ fn json_envelope_round_trips() {
         ]
     );
 }
+
+#[test]
+fn runtime_mutations_freeze_zero_byte_manifests_under_conversation_approval() {
+    use rish_agent_core::runtime_tools;
+    for name in runtime_tools::NAMES {
+        let arguments = match *name {
+            "list_runtime_environments" => json!({}),
+            "install_runtime_environment" => json!({"environment_id":"node-22"}),
+            "run_program" => json!({"environment_id":"node-22","entry_path":"main.js","args":[]}),
+            "start_runtime_service" => {
+                json!({"environment_id":"node-22","entry_path":"server.js","args":[],"port":8080})
+            }
+            _ => json!({"service_id":TASK}),
+        };
+        let digest =
+            arguments_sha256(Some(&json!(name)), Some(&json!(arguments.to_string()))).unwrap();
+        let mutation = runtime_tools::is_mutation(name);
+        let precondition = json!({"schema_version":1,"kind":name,"arguments_sha256":digest,
+            "snapshot_sha256":if matches!(*name,"run_program"|"start_runtime_service") {json!("b".repeat(64))} else {Value::Null},
+            "environment_sha256":if matches!(*name,"list_runtime_environments"|"stop_runtime_service") {Value::Null} else {json!("c".repeat(64))}});
+        let call = json!({"call_index":0,"call_id":"runtime_call","name":name,"arguments_json":arguments.to_string(),"arguments_sha256":digest,
+            "safe_summary_key":format!("agent.{name}"),"access":if mutation {"conversation_confirm"} else {"auto"},
+            "precondition":precondition,"reserved_write_bytes":0});
+        let transcript = transcript_state();
+        let mut request = request(vec![call], &transcript, false);
+        request["root"]["capabilities"] = json!(["file_read", "guest_service"]);
+        let effect = reduce("prepare_tool_batch", &request, &env(), &view(&transcript)).unwrap();
+        assert_eq!(effect.output["reserved_write_bytes"], 0);
+        assert_eq!(
+            effect.output["effect_gate"],
+            if mutation { "closed" } else { "not_applicable" }
+        );
+        assert_eq!(
+            effect.output["calls"][0]["approval_state"],
+            if mutation { "pending" } else { "not_required" }
+        );
+        let batch = changes_of(&effect, |c| match c {
+            Change::InsertBatch(record) => Some(record),
+            _ => None,
+        })[0];
+        assert!(rish_agent_core::wal_state::batch_shape_v2(batch));
+        if mutation {
+            assert_eq!(batch["manifest_calls"][0]["mutation_kind"], *name);
+            assert_eq!(batch["manifest_calls"][0]["content_bytes"], 0);
+            assert!(rish_agent_core::ledger_batch::write_manifest_call_shape(
+                Some(&batch["manifest_calls"][0])
+            ));
+        }
+    }
+}
+
+#[test]
+fn installed_conversation_grant_freezes_runtime_calls_without_new_tokens() {
+    use rish_agent_core::tool_batch::{prepare_calls, prepare_finish};
+    const GRANT: &str = "abababab-abab-4bab-8bab-abababababab";
+    const CONVERSATION: &str = "55555555-5555-4555-8555-555555555555";
+    let mut runtime_root = root();
+    runtime_root["capabilities"] = json!(["file_read", "guest_service"]);
+    let grant = json!({"schema_version":2,"grant_id":GRANT,"conversation_id":CONVERSATION,
+        "workspace_id":runtime_root["workspace_id"],"project_id":null,"binding_revision":7,
+        "root_fingerprint_sha256":ROOT_DIGEST,"tool_family":"guest_service","registry_version":3,"policy_version":"agent-v1",
+        "issued_for":{"schema_version":1,"task_id":TASK,"attempt_id":"abababab-abab-4bab-8bab-babababababa"},"created_at":NOW});
+    for name in [
+        "install_runtime_environment",
+        "run_program",
+        "start_runtime_service",
+    ] {
+        let mut arguments = json!({"environment_id":"node-22"});
+        if name != "install_runtime_environment" {
+            arguments["entry_path"] = json!("main.js");
+            arguments["args"] = json!([]);
+        }
+        if name == "start_runtime_service" {
+            arguments["port"] = json!(8080);
+        }
+        let digest =
+            arguments_sha256(Some(&json!(name)), Some(&json!(arguments.to_string()))).unwrap();
+        let raw =
+            json!({"call_id":"runtime-call","name":name,"arguments_json":arguments.to_string()});
+        let messages = vec![json!({"role":"assistant","round_index":0,"tool_calls":[raw]})];
+        let presentation = json!({"calls":[{"call_index":0,"call_id":"runtime-call","name":name,"arguments_sha256":digest}]});
+        let authority = json!({"registry":{"tools":[{"schema_version":2,"name":name,"safe_summary_key":format!("agent.{name}"),"access":"conversation_confirm"}]}});
+        let prepare_request =
+            json!({"conversation_id":CONVERSATION,"root":runtime_root,"round_index":0});
+        let grants = if name == "install_runtime_environment" {
+            vec![]
+        } else {
+            vec![grant.clone()]
+        };
+        let analysis = prepare_calls(
+            &prepare_request,
+            &presentation,
+            Some(&messages),
+            &authority,
+            &grants,
+        );
+        let precondition = json!({"schema_version":1,"kind":name,"arguments_sha256":digest,
+            "snapshot_sha256":if name=="install_runtime_environment" {Value::Null} else {json!("c".repeat(64))},"environment_sha256":"d".repeat(64)});
+        let finished = prepare_finish(
+            &prepare_request,
+            analysis["calls"].as_array().unwrap(),
+            &[json!({"prepared":{"precondition":precondition,"reserved_write_bytes":0}})],
+        );
+        let transcript = transcript_state();
+        let mut request = request(
+            finished["prepared_calls"].as_array().unwrap().clone(),
+            &transcript,
+            true,
+        );
+        request["root"] = runtime_root.clone();
+        let mut snapshot = view(&transcript);
+        snapshot.rounds = vec![
+            json!({"locator":{"schema_version":1,"task_id":TASK,"attempt_id":ATTEMPT,"round_id":ROUND,"round_index":0},
+            "state":"completed","row_revision":3,"transcript_after":reference_of(&transcript),"terminal_kind":"tool_batch"}),
+        ];
+        let mut environment = env();
+        if name != "install_runtime_environment" {
+            environment.approval_tokens.clear();
+        }
+        let result = reduce("prepare_tool_batch", &request, &environment, &snapshot).unwrap();
+        let public = &result.output["calls"][0];
+        if name == "install_runtime_environment" {
+            assert_eq!(public["approval_state"], "pending");
+            assert!(public["approval_token"]["allowed_decisions"]
+                .as_array()
+                .unwrap()
+                .contains(&json!("allow_conversation")));
+        } else {
+            assert_eq!(public["approval_state"], "bound");
+            assert!(public["approval_token"].is_null());
+            assert_eq!(public["approval_reference"], GRANT);
+        }
+        let batch = changes_of(&result, |c| match c {
+            Change::InsertBatch(record) => Some(record),
+            _ => None,
+        })[0];
+        let reloaded: Value = serde_json::from_slice(&canonical_json(batch).unwrap()).unwrap();
+        assert!(rish_agent_core::wal_state::batch_shape_v2(&reloaded));
+        for field in [
+            "conversation_id",
+            "workspace_id",
+            "project_id",
+            "binding_revision",
+            "root_fingerprint_sha256",
+            "tool_family",
+            "registry_version",
+            "policy_version",
+        ] {
+            let mut wrong = grant.clone();
+            wrong[field] = if field == "registry_version" || field == "binding_revision" {
+                json!(99)
+            } else {
+                json!("wrong")
+            };
+            let refused = prepare_calls(
+                &prepare_request,
+                &presentation,
+                Some(&messages),
+                &authority,
+                &[wrong],
+            );
+            assert!(
+                refused["calls"][0]["grant_reference"].is_null(),
+                "{field} must require fresh approval"
+            );
+        }
+        assert!(prepare_calls(
+            &prepare_request,
+            &presentation,
+            Some(&messages),
+            &authority,
+            &[]
+        )["calls"][0]["grant_reference"]
+            .is_null());
+    }
+}

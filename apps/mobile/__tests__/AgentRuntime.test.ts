@@ -1,4 +1,5 @@
 import { NativeModules, TurboModuleRegistry } from 'react-native';
+import { ALL_AGENT_TOOL_NAMES, ALL_AGENT_AUTO_TOOLS, RUNTIME_AGENT_TOOLS } from '../src/agent/tool-registry';
 
 const native = {
   prepare_agent_attempt: jest.fn(),
@@ -682,6 +683,43 @@ test('accepts an explicitly versioned DEBUG v2 registry projection', async () =>
   ).resolves.toMatchObject({
     attempt: { registry: { registry_version: 2 } },
   });
+});
+
+test('accepts all thirteen v3 tools without changing the registry envelope schema', async () => {
+  const tools = ALL_AGENT_TOOL_NAMES.map(name => ({
+    schema_version: 2, name, safe_summary_key: `agent.${name}`,
+    access: (ALL_AGENT_AUTO_TOOLS as readonly string[]).includes(name) ? 'auto' : 'conversation_confirm',
+  }));
+  expect(tools).toHaveLength(13);
+  native.prepare_agent_attempt.mockResolvedValueOnce({
+    ...prepareResult, attempt: { ...attempt, registry: { ...registry, registry_version: 3, tools } },
+  });
+  await expect(AgentRuntime.prepareAgentAttempt({ ...prepareRequest, registry_version: 3 }))
+    .resolves.toMatchObject({ attempt: { registry: { schema_version: 2, registry_version: 3, tools } } });
+});
+
+test.each([1, 2] as const)('rejects every runtime descriptor in registry v%s', async registryVersion => {
+  for (const name of RUNTIME_AGENT_TOOLS) {
+    native.prepare_agent_attempt.mockResolvedValueOnce({
+      ...prepareResult, attempt: { ...attempt, registry: { ...registry, registry_version: registryVersion,
+        tools: [{ schema_version: 2, name, safe_summary_key: `agent.${name}`, access: name === 'list_runtime_environments' ? 'auto' : 'conversation_confirm' }],
+      } },
+    });
+    await expect(AgentRuntime.prepareAgentAttempt(prepareRequest)).rejects.toMatchObject({ code: 'E_AGENT_LEDGER' });
+  }
+});
+
+test('rejects a fourteenth registry v3 descriptor', async () => {
+  const tools = ALL_AGENT_TOOL_NAMES.map(name => ({
+    schema_version: 2, name, safe_summary_key: `agent.${name}`,
+    access: (ALL_AGENT_AUTO_TOOLS as readonly string[]).includes(name) ? 'auto' : 'conversation_confirm',
+  }));
+  native.prepare_agent_attempt.mockResolvedValueOnce({
+    ...prepareResult, attempt: { ...attempt, registry: { ...registry, registry_version: 3,
+      tools: [...tools, { schema_version: 2, name: 'unknown_extra', safe_summary_key: 'agent.unknown', access: 'durable_deny' }],
+    } },
+  });
+  await expect(AgentRuntime.prepareAgentAttempt(prepareRequest)).rejects.toMatchObject({ code: 'E_AGENT_LEDGER' });
 });
 
 test('rejects CGI descriptors inside a legacy v1 registry', async () => {

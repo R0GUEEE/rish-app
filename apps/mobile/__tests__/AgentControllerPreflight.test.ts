@@ -2,6 +2,7 @@ import {
   validateAgentControllerPreflight,
   type AgentControllerPreflightV1,
 } from '../src/agent/AgentControllerPreflight';
+import { RUNTIME_AGENT_TOOLS } from '../src/agent/tool-registry';
 
 const CONVERSATION_ID = '11111111-1111-4111-8111-111111111111';
 const TASK_ID = '22222222-2222-4222-8222-222222222222';
@@ -186,6 +187,28 @@ const cases = [
 ] as const;
 
 describe('AgentControllerPreflight', () => {
+  test.each(RUNTIME_AGENT_TOOLS.filter(name => name !== 'list_runtime_environments'))('binds %s to v3 guest-service approval and execution', name => {
+    const approval = { ...decideApproval, name, registry_version: 3,
+      tool_family: 'guest_service', grant: { ...grant, registry_version: 3, tool_family: 'guest_service' } };
+    expect(validateAgentControllerPreflight(approval)?.kind).toBe('decide_approval');
+    for (const registryVersion of [1, 2]) {
+      expect(validateAgentControllerPreflight({ ...approval, registry_version: registryVersion,
+        grant: { ...approval.grant, registry_version: registryVersion } })).toBeNull();
+    }
+    expect(validateAgentControllerPreflight({ ...approval, grant: { ...approval.grant, registry_version: 2 } })).toBeNull();
+    const execution = { ...beginExecution, name, root: { ...root, capabilities: ['guest_service'] } };
+    expect(validateAgentControllerPreflight(execution)?.kind).toBe('begin_execution');
+    expect(validateAgentControllerPreflight({ ...execution, root: { ...root, capabilities: ['file_read'] } })).toBeNull();
+    expect(validateAgentControllerPreflight({ ...execution, batch_kind: 'read_only_batch', manifest_sha256: null })).toBeNull();
+  });
+
+  test('lists environments through automatic file-read access only', () => {
+    const execution = { ...beginExecution, name: 'list_runtime_environments', batch_kind: 'read_only_batch',
+      manifest_sha256: null, access: 'auto', approval_state: 'not_required', approval_reference: null,
+      root: { ...root, capabilities: ['file_read'] } };
+    expect(validateAgentControllerPreflight(execution)?.kind).toBe('begin_execution');
+    expect(validateAgentControllerPreflight({ ...execution, root: { ...root, capabilities: ['guest_service'] } })).toBeNull();
+  });
   test.each(cases)('accepts the exact %s safe seed', (kind, input) => {
     const mapped = validateAgentControllerPreflight(input);
     expect(mapped).not.toBeNull();

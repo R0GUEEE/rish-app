@@ -547,6 +547,9 @@ pub fn query_attempt_projection(
     let task_id = get(request, "task_id");
     let attempt_id = get(request, "attempt_id");
     let mut attempt = base.as_object().cloned().unwrap_or_default();
+    if let Some(frozen) = crate::session_schema::frozen_ids_for_projection(proof, request, base) {
+        attempt.insert("frozen_grant_ids".into(), frozen);
+    }
     attempt.insert(
         "controller_generation".into(),
         owned(get(proof, "controller_generation")),
@@ -584,6 +587,11 @@ pub fn query_attempt_projection(
     }
     if let Some(batch) = latest_batch(state, task_id, attempt_id) {
         let calls = latest_batch_calls(state, batch);
+        if let Some(frozen) = crate::session_schema::frozen_ids_after_lost_prepare(
+            state, batch, &calls, proof, request, base,
+        ) {
+            attempt.insert("frozen_grant_ids".into(), frozen);
+        }
         attempt.insert("batch_kind".into(), owned(get(batch, "kind")));
         attempt.insert("batch_revision".into(), owned(get(batch, "batch_revision")));
         attempt.insert(

@@ -283,6 +283,36 @@ static NSString *const Operation = @"22222222-2222-4222-8222-222222222222";
     XCTAssertEqualObjects([command subarrayWithRange:NSMakeRange(8, args.count)], args);
     XCTAssertFalse([command[5] containsString:entry]);
     XCTAssertTrue([command[5] containsString:@"\"$@\""]);
+    XCTAssertFalse([command[5] containsString:@"SIMDUTF_FORCE_IMPLEMENTATION"]);
+  }
+}
+- (void)testBunCompatibilityIsBoundToAuditedDiskAndKeepsLiteralArgv {
+  NSString *digest = @"099fce34488a9e225ca59c4ae60c206a180495a648b20f82ccf4ffdae5ea2271";
+  NSString *entry = @"src/' $(touch nope).js";
+  NSArray *args = @[@"; echo nope", @"$HOME"];
+  for (NSString *family in @[@"bun", @"node", @"python", @"java", @"go", @"rust"]) {
+    for (NSString *disk in @[digest, [@"0" stringByPaddingToLength:64 withString:@"0" startingAtIndex:0]]) {
+      NSArray *command = [DSHRuntimeProgramVM commandForManifest:
+          @{@"family":family, @"disk_sha256":disk} entryPath:entry args:args];
+      XCTAssertNotNil(command);
+      XCTAssertEqual([command[5] containsString:@"export SIMDUTF_FORCE_IMPLEMENTATION=westmere; "],
+          [family isEqual:@"bun"] && [disk isEqual:digest]);
+      XCTAssertFalse([command[5] containsString:entry]);
+      XCTAssertEqualObjects(command[7], [@"/workspace/" stringByAppendingString:entry]);
+      XCTAssertEqualObjects([command subarrayWithRange:NSMakeRange(8, args.count)], args);
+    }
+  }
+  XCTAssertNil([DSHRuntimeProgramVM commandForManifest:@{} entryPath:entry args:args]);
+  XCTAssertNil(([DSHRuntimeProgramVM commandForManifest:@{@"family":@"bun", @"disk_sha256":digest}
+      entryPath:@"../escape.js" args:args]));
+}
+- (void)testLeadingDashEntryNeverBecomesAnInterpreterOption {
+  for (NSString *family in @[@"python", @"java", @"go", @"rust", @"bun", @"node"]) {
+    for (NSString *entry in @[@"-c", @"-p", @"-x.go", @"-x.rs"]) {
+      NSArray *command = [DSHRuntimeProgramVM commandForFamily:family entryPath:entry args:@[@"literal"]];
+      XCTAssertEqualObjects(command[7], [@"/workspace/" stringByAppendingString:entry]);
+      XCTAssertEqualObjects(command.lastObject, @"literal");
+    }
   }
 }
 - (void)testExecutionTimeoutExtendsOnlyValidatedJavaSourceEntries {

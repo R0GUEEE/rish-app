@@ -16,7 +16,7 @@ const reasons: Readonly<Record<string, TranslationKey>> = {
   E_WORKSPACE_UNAVAILABLE: 'recovery.unavailable',
   E_WORKSPACE_CAPABILITY: 'recovery.capability',
   E_WORKSPACE_CONFLICT: 'recovery.changed',
-  E_AGENT_CONFLICT: 'recovery.changed',
+  E_AGENT_CONFLICT: 'messages.toolFailure.conflict',
   E_CONTEXT_CHANGED: 'recovery.contextRefresh',
   E_CONTEXT_STORAGE: 'recovery.contextStorage',
   E_CONTEXT_SNAPSHOT_MISSING: 'recovery.contextRefresh',

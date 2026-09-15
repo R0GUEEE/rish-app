@@ -1,3 +1,5 @@
+import { conversationGrantIdsForBatch, hasFrozenConversationGrant, hasLiveConversationGrant, isConversationGrantBoundCall } from '../agent/agent-conversation-grants';
+import { ALL_AGENT_TOOL_NAMES, ALL_AGENT_AUTO_TOOLS, agentToolRegistryCompatible, isGuestServiceAgentTool } from '../agent/tool-registry';
 import { isHarnessModelId } from '../harness/types';
 import { providerHostMatches, parseProviderBinding } from '../providers/configuration';
 import {
@@ -1603,7 +1605,7 @@ const agentStatusValues = new Set<SessionEventV2['status']>([
 ]);
 const safeSummaryKeys = new Set<string>(AGENT_SAFE_SUMMARY_KEYS);
 const isAgentRegistryVersion = (value: unknown): value is AgentRegistryVersion =>
-  value === 1 || value === 2;
+  value === 1 || value === 2 || value === 3;
 
 export function isAgentFailureCode(value: unknown): value is AgentFailureCode {
   return (
@@ -1906,16 +1908,16 @@ function agentCallIsValid(value: unknown): value is PersistedAgentCallJournalV2 
     call.safe_summary_key.length > MAX_AGENT_SUMMARY_KEY_LENGTH ||
     !safeSummaryKeys.has(call.safe_summary_key) ||
     call.safe_summary_key !==
-      (['list_dir', 'read_file', 'write_file', 'git_status', 'git_commit', 'git_push', 'start_guest_cgi', 'stop_guest_cgi'].includes(call.name)
+      ((ALL_AGENT_TOOL_NAMES as readonly string[]).includes(call.name)
         ? `agent.${call.name}`
         : 'agent.unknown') ||
-    (['list_dir', 'read_file', 'git_status'].includes(call.name) &&
+    ((ALL_AGENT_AUTO_TOOLS as readonly string[]).includes(call.name) &&
       call.access !== 'auto') ||
     (['write_file', 'git_commit'].includes(call.name) &&
       call.access !== 'conversation_confirm') ||
     (call.name === 'git_push' && call.access !== 'conversation_confirm') ||
-    ((call.name === 'start_guest_cgi' || call.name === 'stop_guest_cgi') && call.access !== 'conversation_confirm') ||
-    (!['list_dir', 'read_file', 'write_file', 'git_status', 'git_commit', 'git_push', 'start_guest_cgi', 'stop_guest_cgi'].includes(call.name) &&
+    (isGuestServiceAgentTool(call.name) && call.access !== 'conversation_confirm') ||
+    (!(ALL_AGENT_TOOL_NAMES as readonly string[]).includes(call.name) &&
       call.access !== 'durable_deny') ||
     !agentAccessValues.has(call.access) ||
     !agentDecisionValues.has(call.approval_decision) ||
@@ -2019,8 +2021,7 @@ export function isAgentAttemptJournal(
     const call = journal.batch[index];
     if (
       !agentCallIsValid(call) ||
-      (journal.tool_registry_version === 1 &&
-        (call.name === 'start_guest_cgi' || call.name === 'stop_guest_cgi')) ||
+      !agentToolRegistryCompatible(call.name, journal.tool_registry_version) ||
       call.call_index !== index ||
       seenCallIds.has(call.call_id)
     ) return false;
@@ -2144,16 +2145,9 @@ function agentCallV3IsValid(value: unknown): value is PersistedAgentCallJournalV
   ])) return false;
   const call = value as PersistedAgentCallJournalV3;
   const knownTool =
-    call.name === 'list_dir' ||
-    call.name === 'read_file' ||
-    call.name === 'write_file' ||
-    call.name === 'git_status' ||
-    call.name === 'git_commit' ||
-    call.name === 'git_push' ||
-    call.name === 'start_guest_cgi' ||
-    call.name === 'stop_guest_cgi';
+    (ALL_AGENT_TOOL_NAMES as readonly string[]).includes(call.name);
   const expectedAccess = knownTool
-    ? call.name === 'list_dir' || call.name === 'read_file' || call.name === 'git_status'
+    ? (ALL_AGENT_AUTO_TOOLS as readonly string[]).includes(call.name)
       ? 'auto'
       : 'conversation_confirm'
     : 'durable_deny';
@@ -2199,7 +2193,7 @@ function agentCallV3IsValid(value: unknown): value is PersistedAgentCallJournalV
     (!gated ||
       (call.approval_decision === 'denied' || call.approval_decision === 'cancelled'
         ? call.approval_token === null && call.approval_reference === null
-        : call.approval_token !== null))
+        : call.approval_token !== null || isConversationGrantBoundCall(call)))
   );
 }
 
@@ -2253,9 +2247,8 @@ export function isAgentAttemptJournalV3(
   const ids = new Set<string>();
   for (let index = 0; index < journal.batch.length; index += 1) {
     const call = journal.batch[index];
-    if (!agentCallV3IsValid(call) ||
-        (journal.tool_registry_version === 1 &&
-          (call.name === 'start_guest_cgi' || call.name === 'stop_guest_cgi')) ||
+    if (!agentCallV3IsValid(call) || !hasFrozenConversationGrant(call, journal) ||
+        !agentToolRegistryCompatible(call.name, journal.tool_registry_version) ||
         call.call_index !== index || ids.has(call.call_id)) return false;
     ids.add(call.call_id);
   }
@@ -2360,7 +2353,7 @@ function agentGrantIsValid(value: unknown): value is AgentConversationGrantV2 {
       grant.tool_family === 'guest_service') &&
     (grant.tool_family === 'file_write' || grant.tool_family === 'guest_service' || grant.project_id !== null) &&
     isAgentRegistryVersion(grant.registry_version) &&
-    (grant.tool_family !== 'guest_service' || grant.registry_version === 2) &&
+    (grant.tool_family !== 'guest_service' || grant.registry_version >= 2) &&
     validIdentifier(grant.policy_version) &&
     isExactDataRecord(grant.issued_for, ['schema_version', 'task_id', 'attempt_id']) &&
     grant.issued_for.schema_version === 1 &&
@@ -2386,7 +2379,7 @@ function agentJournalMatchesConversation(
   const grants = new Map(
     (conversation.agentGrants ?? []).map(grant => [grant.grant_id, grant]),
   );
-  return journal.frozen_grant_ids.every(grantId => {
+  return journal.batch.every(call => hasLiveConversationGrant(call as PersistedAgentCallJournalV3, journal, conversation.id, [...grants.values()])) && journal.frozen_grant_ids.every(grantId => {
     const grant = grants.get(grantId);
     return (
       grant !== undefined &&
@@ -2752,6 +2745,7 @@ function applyFinalAgentCheckpoint(
     payload.journal,
     evidenceRoundReceiptFor(evidence),
     payload.at,
+    evidence.kind === 'recover_agent_attempt' && evidence.result.status === 'resumed' && evidence.result.next_action === 'persist_batch',
   );
   if (nextAgentAttempt === null) return state;
   const nextAttempt: TurnAttemptV1 = {
@@ -3950,7 +3944,9 @@ function projectionCallMatchesJournal(
       projection.execution_revision !== 1 ||
       (call.access === 'auto'
         ? call.approval_decision !== 'pending'
-        : call.approval_decision !== 'pending' ||
+        : isConversationGrantBoundCall(call)
+          ? false
+          : call.approval_decision !== 'pending' ||
           call.approval_token === null ||
           call.approval_reference !== null)
     ) return false;
@@ -3987,6 +3983,7 @@ function evidenceAttemptProjectionMatchesJournal(
     readonly conversationId: string;
     readonly attemptId: string;
   },
+  stage: 'attempt_projection' | 'prepared_batch' = 'attempt_projection',
 ): boolean {
   if (!isExactDataRecord(projection, [
     'schema_version',
@@ -4081,7 +4078,7 @@ function evidenceAttemptProjectionMatchesJournal(
       'execution_revision',
       'native_row_revision',
       'receipt',
-    ]) && projectionCallMatchesJournal(call, journal.batch[index]!),
+    ]) && projectionCallMatchesJournal(call, journal.batch[index]!, stage),
   );
 }
 
@@ -4162,10 +4159,13 @@ function highLevelEvidenceSupportsTransition(
     return next.phase === 'ready_for_round' && next.batch.length === 0 && next.call_index === null;
   }
   if (!isAgentAttemptJournalV3(current) || !agentPhaseTransitionIsLegalAny(current, next)) return false;
+  const importsPreparedGrantReferences = evidence.kind === 'prepare_agent_tool_batch' ||
+    (evidence.kind === 'recover_agent_attempt' && evidence.result.status === 'resumed' &&
+      evidence.result.next_action === 'persist_batch' && evidence.result.completed_round?.kind === 'tool_batch' && current.batch.length === 0);
   if (!sameAgentRoot(current.root, next.root) || !sameAgentPolicy(current.policy, next.policy) ||
     current.tool_registry_version !== next.tool_registry_version ||
     current.toolset_sha256 !== next.toolset_sha256 ||
-    !sameAgentStringArray(current.frozen_grant_ids, next.frozen_grant_ids) ||
+    !sameAgentStringArray(importsPreparedGrantReferences ? conversationGrantIdsForBatch(current, next.batch) : current.frozen_grant_ids, next.frozen_grant_ids) ||
     next.controller_generation !== current.controller_generation + 1) return false;
   const requestCas = evidence.request.controller_cas;
   if (requestCas.expected_controller_generation !== current.controller_generation) return false;
@@ -4531,7 +4531,7 @@ function highLevelEvidenceSupportsTransition(
     taskId: requestCas.task_id,
     conversationId: requestCas.conversation_id,
     attemptId: requestCas.attempt_id,
-  })) return false;
+  }, recovery.status === 'resumed' && recovery.next_action === 'persist_batch' ? 'prepared_batch' : 'attempt_projection')) return false;
   if (recovery.status === 'retryable') return next.phase === 'round_in_flight' || next.phase === 'failed';
   if (recovery.status === 'manual_reconciliation') return next.phase === 'unknown' || next.phase === 'ambiguous';
   if (recovery.status === 'terminal') return next.phase === 'final_response' || next.phase === 'cancelled' || next.phase === 'failed';
@@ -4682,6 +4682,7 @@ function agentOuterAttemptCheckpoint(
   journal: PersistedAgentAttemptJournalV2 | PersistedAgentAttemptJournalV3,
   roundReceipt: CompletionRoundReceiptV1 | undefined,
   at: string,
+  allowRecordedRound = false,
 ): TurnAttemptV1 | null {
   if (
     attempt.status === 'completed' ||
@@ -4703,16 +4704,19 @@ function agentOuterAttemptCheckpoint(
   ) return null;
   let rounds = attempt.rounds;
   if (roundReceipt !== undefined) {
+    const recorded = attempt.rounds[roundReceipt.roundIndex];
+    const alreadyRecorded = allowRecordedRound && recorded !== undefined &&
+      JSON.stringify(copyRoundReceipt(recorded)) === JSON.stringify(copyRoundReceipt(roundReceipt));
     if (
       !receiptIsValid(attempt, roundReceipt) ||
-      roundReceipt.roundIndex !== attempt.rounds.length ||
+      (!alreadyRecorded && roundReceipt.roundIndex !== attempt.rounds.length) ||
       journal.round_lineage === null ||
       journal.round_lineage.round_id !== roundReceipt.roundId ||
       journal.round_lineage.round_index !== roundReceipt.roundIndex ||
       journal.round_lineage.status !== 'completed' ||
-      attempt.rounds.some(round => round.roundId === roundReceipt.roundId)
+      (!alreadyRecorded && attempt.rounds.some(round => round.roundId === roundReceipt.roundId))
     ) return null;
-    rounds = [...attempt.rounds, copyRoundReceipt(roundReceipt)];
+    if (!alreadyRecorded) rounds = [...attempt.rounds, copyRoundReceipt(roundReceipt)];
   }
   const activeRound =
     journal.phase === 'round_in_flight' && journal.round_lineage !== null

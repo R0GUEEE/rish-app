@@ -73,6 +73,7 @@ test('recovery distinguishes protection, permission, download and persistence wi
   expect(recoveryMessage('E_WORKSPACE_REVOKED', t)).toContain('重新授权');
   expect(recoveryMessage('E_WORKSPACE_NOT_DOWNLOADED', t)).toContain('下载');
   expect(recoveryMessage('E_AGENT_PERSISTENCE', t)).toContain('保存');
+  expect(recoveryMessage('E_AGENT_CONFLICT', t)).toBe('文件版本、会话或工作区状态与这次操作冲突，请读取最新状态后再试。');
   expect(recoveryMessage('E_FUTURE_FAILURE', t)).toBe(t('recovery.generic'));
   expect(recoveryMessage('unknown native message', t)).toBe(
     t('recovery.generic'),

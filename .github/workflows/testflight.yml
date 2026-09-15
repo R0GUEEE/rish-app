@@ -23,7 +23,7 @@ jobs:
   testflight:
     runs-on: macos-26
     environment: testflight
-    timeout-minutes: 180
+    timeout-minutes: 240
     env:
       DEVELOPER_DIR: /Applications/Xcode_26.6.app/Contents/Developer
       RELEASE_VERSION: ${{ inputs.version }}
@@ -129,6 +129,26 @@ jobs:
           path: |
             .build/runtime-environment-tests/tests.json
             .build/runtime-environment-tests/Runtime.xcresult
+          if-no-files-found: ignore
+          retention-days: 14
+      - name: Verify real HTTP services in all six language environments
+        timeout-minutes: 90
+        env:
+          RISH_RUNTIME_SERVICES_LIVE: '1'
+        run: |
+          plans=("$PWD"/.build/preview-tests/DerivedData/Build/Products/*.xctestrun)
+          [[ ${#plans[@]} == 1 && -f "${plans[0]}" ]]
+          RISH_RUNTIME_SERVICES_XCTESTRUN="${plans[0]}" \
+            RISH_RUNTIME_SERVICES_OUTPUT_DIR="$PWD/.build/runtime-service-tests" \
+            bash scripts/ci/test-ios-runtime-services.sh
+      - name: Save language HTTP service evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: language-http-services-${{ env.RELEASE_BUILD }}
+          path: |
+            .build/runtime-service-tests/tests.json
+            .build/runtime-service-tests/RuntimeServices.xcresult
           if-no-files-found: ignore
           retention-days: 14
       - name: Sign, archive and export IPA

@@ -902,6 +902,22 @@ describe('schema-9 final Agent V3 contract', () => {
     expect(() => parsePersistedAgentCallJournalV3({...finalCall, name: 'unknown_service'}, '$', 2)).toThrow(/registered tool policy/);
   });
 
+  test('keeps v1/v2 sessions readable while allowing runtime calls only in v3', () => {
+    const names = ['list_runtime_environments', 'install_runtime_environment', 'run_program', 'start_runtime_service', 'stop_runtime_service'];
+    for (const name of names) {
+      const runtime = { ...finalCall, name, safe_summary_key: `agent.${name}`,
+        ...(name === 'list_runtime_environments' ? { access: 'auto', approval_token: null } : {}),
+      };
+      expect(parsePersistedAgentCallJournalV3(runtime, '$', 3)).toEqual(runtime);
+      for (const version of [1, 2] as const) {
+        expect(() => parsePersistedAgentCallJournalV3(runtime, '$', version)).toThrow(/registered tool policy/);
+        expect(parsePersistedAgentCallJournalV3(finalCall, '$', version)).toEqual(finalCall);
+        const oldDenial = { ...runtime, access: 'durable_deny', safe_summary_key: 'agent.unknown', approval_token: null, approval_decision: 'denied' };
+        expect(parsePersistedAgentCallJournalV3(oldDenial, '$', version).access).toBe('durable_deny');
+      }
+    }
+  });
+
   test('accepts an opaque final token and rejects a structured token object', () => {
     expect(parsePersistedAgentCallJournalV3(finalCall)).toEqual(finalCall);
     expect(() =>

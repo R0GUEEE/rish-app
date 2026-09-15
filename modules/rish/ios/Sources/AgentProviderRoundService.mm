@@ -541,6 +541,8 @@ static const int64_t DSHAgentRoundPreviewCoalesceNanoseconds = 50 * NSEC_PER_MSE
           isEqual:request[@"transport_schema_version"]] ||
       ![authority[@"project_context_sha256"]
           isEqual:request[@"project_context_sha256"]] ||
+      ![authority[@"registry"][@"registry_version"]
+          isEqual:request[@"registry_version"]] ||
       ![authority[@"registry"][@"toolset_sha256"]
           isEqual:request[@"toolset_sha256"]] ||
       ![authority[@"model"] isEqual:request[@"model"]] ||
@@ -1264,7 +1266,9 @@ static const int64_t DSHAgentRoundPreviewCoalesceNanoseconds = 50 * NSEC_PER_MSE
     NSError *argumentError = nil;
     NSString *argumentsSHA = DSHAgentArgumentsSHA256(name, arguments, &argumentError);
     NSDictionary *presentation = [self.preparedStore.toolRegistry
-        descriptorForToolName:name root:request[@"root"] error:&argumentError];
+        descriptorForToolName:name root:request[@"root"]
+        registry:authority[@"registry"]
+        error:&argumentError];
     if (argumentsSHA == nil || presentation == nil) {
       NSError *commitError = nil;
       NSDictionary *row = [self.rounds

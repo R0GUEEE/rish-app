@@ -149,15 +149,34 @@ static void OnOutput(void *context, const char *bytes, size_t size) {
   [command addObjectsFromArray:args];
   return command;
 }
++ (NSArray<NSString *> *)commandForManifest:(NSDictionary *)manifest entryPath:(NSString *)entryPath
+                                      args:(NSArray<NSString *> *)args {
+  if (![manifest isKindOfClass:NSDictionary.class] ||
+      ![manifest[@"family"] isKindOfClass:NSString.class]) return nil;
+  NSArray *command = [self commandForFamily:manifest[@"family"] entryPath:entryPath args:args];
+  if (!command) return nil;
+  // Shared by manual runs and Agent programs/services. This frozen Bun 1.4.0
+  // disk omits simdutf's scalar fallback; an unsupported backend returns zero
+  // progress for long-string scans. Its Westmere kernels are audited against
+  // the guest's instruction handlers. Other imported disks keep their defaults.
+  if ([manifest[@"family"] isEqual:@"bun"] && [manifest[@"disk_sha256"] isEqual:
+      @"099fce34488a9e225ca59c4ae60c206a180495a648b20f82ccf4ffdae5ea2271"]) {
+    NSMutableArray *configured = [command mutableCopy];
+    configured[5] = [@"export SIMDUTF_FORCE_IMPLEMENTATION=westmere; "
+        stringByAppendingString:command[5]];
+    return configured;
+  }
+  return command;
+}
 + (NSUInteger)executionTimeoutMillisecondsForFamily:(NSString *)family entryPath:(NSString *)entryPath {
   // Cold JDK source compilation exceeded ten minutes on the hosted runner.
   // Keep the extension scoped and bounded; this does not affect cancellation.
   return [family isEqual:@"java"] && DSHRuntimeProgramValidPath(entryPath) &&
       [entryPath.pathExtension.lowercaseString isEqual:@"java"] ? 1200000 : 600000;
 }
-- (NSNumber *)executeLease:(DSHRuntimeEnvironmentLease *)lease snapshot:(DSHRuntimeWorkspaceSnapshot *)snapshot
-                 entryPath:(NSString *)entryPath args:(NSArray<NSString *> *)args
-                   started:(dispatch_block_t)started output:(DSHRuntimeProgramOutput)output error:(NSError **)error {
+- (NSNumber *)performWithLease:(DSHRuntimeEnvironmentLease *)lease snapshot:(DSHRuntimeWorkspaceSnapshot *)snapshot
+                      operation:(DSHRuntimeVMOperation)operation error:(NSError **)error {
+  if (!operation) { if (error) *error = DSHRuntimeProgramError(@"E_PROGRAM_INVALID_REQUEST"); return nil; }
   NSString *failure = nil;
   NSNumber *exitCode = nil;
   NSURL *overlay = nil;
@@ -192,7 +211,10 @@ static void OnOutput(void *context, const char *bytes, size_t size) {
       if (self.cancelled) break;
       // This is constant application-owned shell text. Workspace names, file
       // contents and user argv are never interpolated into control commands.
-      NSString *setup = @"set -eu; mkdir -p /runtime; mount -t ext4 /dev/vda /runtime; "
+      // The minimal guest has no init service that raises loopback. Both
+      // language servers and their in-guest HTTP clients require it explicitly.
+      NSString *setup = @"set -eu; /bin/busybox ip link set lo up; "
+          "mkdir -p /runtime; mount -t ext4 /dev/vda /runtime; "
           "for p in workspace tmp proc sys dev; do test -d /runtime/$p && test ! -L /runtime/$p; done; "
           "rm -rf /runtime/workspace; mkdir -m 700 /runtime/workspace; "
           "cp -a /tmp/rish-workspace/. /runtime/workspace/; "
@@ -208,26 +230,10 @@ static void OnOutput(void *context, const char *bytes, size_t size) {
           (const char *)setupJSON.bytes, setupJSON.length)) : nil;
       if (![setupReply[@"exit_code"] isKindOfClass:NSNumber.class] ||
           [setupReply[@"exit_code"] integerValue] != 0) { failure = @"E_PROGRAM_EXEC"; break; }
-      NSArray *command = [DSHRuntimeProgramVM commandForFamily:lease.manifest[@"family"] entryPath:entryPath args:args];
-      if (!command) { failure = @"E_PROGRAM_ENVIRONMENT"; break; }
-      if (self.cancelled) break;
-      started();
-      NSData *request = [NSJSONSerialization dataWithJSONObject:@{
-        @"protocol_version":@2, @"command":command, @"cwd":@"/",
-        @"timeout_ms":@([DSHRuntimeProgramVM executionTimeoutMillisecondsForFamily:lease.manifest[@"family"]
-            entryPath:entryPath]),
-        @"max_output_bytes":@524288,
-        @"env":@{@"HOME":@"/tmp/rish-home", @"PATH":@"/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin",
-                 @"TMPDIR":@"/tmp", @"GOCACHE":@"/tmp/go-build", @"CARGO_HOME":@"/tmp/cargo"},
-      } options:0 error:nil];
-      NSDictionary *reply = request ? DecodeReply(rish_vm_session_exec_stream_json(session,
-          (const char *)request.bytes, request.length, (__bridge void *)output, OnOutput)) : nil;
-      if ([reply[@"exit_code"] isKindOfClass:NSNumber.class]) exitCode = reply[@"exit_code"];
-      else {
-        NSString *internal = [reply[@"error"] isKindOfClass:NSString.class] ? reply[@"error"] : @"";
-        failure = [internal containsString:@"E_VM_TIMEOUT"] ? @"E_PROGRAM_TIMEOUT" :
-            ([internal containsString:@"E_VM_OUTPUT_LIMIT"] ? @"E_PROGRAM_OUTPUT_LIMIT" : @"E_PROGRAM_EXEC");
-      }
+      NSError *operationError = nil;
+      exitCode = operation(session, &operationError);
+      if (operationError) failure = [operationError.domain isEqual:DSHRuntimeProgramErrorDomain]
+          ? DSHRuntimeProgramError(operationError.userInfo[@"code"]).userInfo[@"code"] : @"E_PROGRAM_NATIVE";
     } while (NO);
   } @catch (__unused NSException *exception) {
     failure = @"E_PROGRAM_NATIVE";
@@ -238,5 +244,29 @@ static void OnOutput(void *context, const char *bytes, size_t size) {
   }
   if (failure && error) *error = DSHRuntimeProgramError(failure);
   return exitCode;
+}
+- (NSNumber *)executeLease:(DSHRuntimeEnvironmentLease *)lease snapshot:(DSHRuntimeWorkspaceSnapshot *)snapshot
+                 entryPath:(NSString *)entryPath args:(NSArray<NSString *> *)args
+                   started:(dispatch_block_t)started output:(DSHRuntimeProgramOutput)output error:(NSError **)error {
+  return [self performWithLease:lease snapshot:snapshot operation:^NSNumber *(void *session, NSError **inner) {
+    NSArray *command = [DSHRuntimeProgramVM commandForManifest:lease.manifest entryPath:entryPath args:args];
+    if (!command) { *inner = DSHRuntimeProgramError(@"E_PROGRAM_ENVIRONMENT"); return nil; }
+    if (self.cancelled) return nil;
+    started();
+    NSData *request = [NSJSONSerialization dataWithJSONObject:@{
+      @"protocol_version":@2, @"command":command, @"cwd":@"/",
+      @"timeout_ms":@([DSHRuntimeProgramVM executionTimeoutMillisecondsForFamily:lease.manifest[@"family"]
+          entryPath:entryPath]), @"max_output_bytes":@524288,
+      @"env":@{@"HOME":@"/tmp/rish-home", @"PATH":@"/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin",
+               @"TMPDIR":@"/tmp", @"GOCACHE":@"/tmp/go-build", @"CARGO_HOME":@"/tmp/cargo"},
+    } options:0 error:nil];
+    NSDictionary *reply = request ? DecodeReply(rish_vm_session_exec_stream_json(session,
+        (const char *)request.bytes, request.length, (__bridge void *)output, OnOutput)) : nil;
+    if ([reply[@"exit_code"] isKindOfClass:NSNumber.class]) return reply[@"exit_code"];
+    NSString *internal = [reply[@"error"] isKindOfClass:NSString.class] ? reply[@"error"] : @"";
+    *inner = DSHRuntimeProgramError([internal containsString:@"E_VM_TIMEOUT"] ? @"E_PROGRAM_TIMEOUT" :
+        ([internal containsString:@"E_VM_OUTPUT_LIMIT"] ? @"E_PROGRAM_OUTPUT_LIMIT" : @"E_PROGRAM_EXEC"));
+    return nil;
+  } error:error];
 }
 @end

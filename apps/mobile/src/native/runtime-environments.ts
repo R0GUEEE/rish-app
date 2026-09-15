@@ -27,6 +27,7 @@ export const ENVIRONMENT_ERRORS = [
 export const runtimeEnvironmentErrorCode = (error: unknown): string => safeCode(error, ENVIRONMENT_ERRORS, 'E_ENV_NATIVE');
 const methods = ['listEnvironments', 'installEnvironment', 'importEnvironment', 'downloadEnvironment',
   'cancelInstall', 'removeEnvironment', 'selectEnvironment'] as const;
+const ownedMethods = ['installEnvironmentOwned', 'cancelOwnedInstall'] as const;
 const invalid = 'E_ENV_BAD_ARGUMENTS';
 function descriptor(value: unknown): RuntimeEnvironment {
   const r = exact(value, ['schema_version', 'environment_id', 'family', 'display_name', 'version', 'architecture',
@@ -48,6 +49,12 @@ async function call(name: typeof methods[number], request?: unknown): Promise<un
   try { return await (request === undefined ? native[name]() : native[name](request)); }
   catch (error) { throw new RuntimeBridgeError(runtimeEnvironmentErrorCode(error)); }
 }
+async function ownedCall(name: typeof ownedMethods[number], request: unknown): Promise<unknown> {
+  const native = nativeModule('LocalEnvironments', ownedMethods);
+  if (!native) reject('E_ENV_UNAVAILABLE');
+  try { return await native[name](request); }
+  catch (error) { throw new RuntimeBridgeError(runtimeEnvironmentErrorCode(error)); }
+}
 function idRequest(value: unknown) {
   const r = exact(value, ['schema_version', 'environment_id'], invalid);
   if (r.schema_version !== 1 || !environmentId(r.environment_id)) reject(invalid);
@@ -67,6 +74,7 @@ export function validEnvironmentURL(value: string): boolean {
 }
 export const LocalEnvironments = Object.freeze({
   isAvailable: () => nativeModule('LocalEnvironments', methods) !== null,
+  supportsOwnedInstall: () => nativeModule('LocalEnvironments', ownedMethods) !== null,
   async listEnvironments(request: { schema_version: 1; workspace_id: string | null }): Promise<RuntimeEnvironmentList> {
     const input = exact(request, ['schema_version', 'workspace_id'], invalid);
     if (input.schema_version !== 1 || (input.workspace_id !== null && !uuid(input.workspace_id))) reject(invalid);
@@ -82,6 +90,18 @@ export const LocalEnvironments = Object.freeze({
     const input = idRequest(request), result = descriptor(await call('installEnvironment', input));
     if (result.environment_id !== input.environment_id || result.state !== 'installed') reject('E_ENV_NATIVE');
     return result;
+  },
+  async installEnvironmentOwned(request: { schema_version: 1; operation_id: string; environment_id: string }): Promise<RuntimeEnvironment> {
+    const input = exact(request, ['schema_version', 'operation_id', 'environment_id'], invalid);
+    if (input.schema_version !== 1 || !uuid(input.operation_id) || !environmentId(input.environment_id)) reject(invalid);
+    const result = descriptor(await ownedCall('installEnvironmentOwned', input));
+    if (result.environment_id !== input.environment_id || result.state !== 'installed') reject('E_ENV_NATIVE');
+    return result;
+  },
+  async cancelOwnedInstall(request: { schema_version: 1; operation_id: string }) {
+    const input = exact(request, ['schema_version', 'operation_id'], invalid);
+    if (input.schema_version !== 1 || !uuid(input.operation_id)) reject(invalid);
+    return status(await ownedCall('cancelOwnedInstall', input), ['cancelled', 'idle']);
   },
   async importEnvironment(): Promise<RuntimeEnvironment | null> {
     const raw = await call('importEnvironment');

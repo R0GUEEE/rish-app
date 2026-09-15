@@ -1,3 +1,4 @@
+import { ALL_AGENT_AUTO_TOOLS, ALL_AGENT_CONFIRM_TOOLS, ALL_AGENT_TOOL_NAMES, agentToolRegistryCompatible, isGuestServiceAgentTool } from './tool-registry';
 /**
  * Closed, pure controller intent seeds for the Agent lifecycle.
  *
@@ -126,7 +127,7 @@ const OPAQUE = /^[A-Za-z0-9._:-]{1,128}$/u;
 const TOOL_NAME = /^[A-Za-z0-9._:-]{1,64}$/u;
 
 function isAgentRegistryVersion(value: unknown): value is AgentRegistryVersion {
-  return value === 1 || value === 2;
+  return value === 1 || value === 2 || value === 3;
 }
 
 const COMMON_KEYS = [
@@ -494,7 +495,7 @@ function validateGrant(value: unknown): AgentConversationGrantV2 | null {
     (grant.tool_family !== 'file_write' && grant.tool_family !== 'git_commit' && grant.tool_family !== 'git_push' && grant.tool_family !== 'guest_service') ||
     ((grant.tool_family === 'git_commit' || grant.tool_family === 'git_push') && grant.project_id === null) ||
     !isAgentRegistryVersion(grant.registry_version) ||
-    (grant.tool_family === 'guest_service' && grant.registry_version !== 2) ||
+    (grant.tool_family === 'guest_service' && grant.registry_version === 1) ||
     !opaque(grant.policy_version) ||
     !timestamp(grant.created_at)
   )
@@ -790,15 +791,11 @@ function validateApproval(
       (raw.access !== 'conversation_confirm' ||
         raw.tool_family !== 'git_push' ||
         raw.project_id === null)) ||
-    ((raw.name === 'start_guest_cgi' || raw.name === 'stop_guest_cgi') &&
+    (isGuestServiceAgentTool(raw.name) &&
       (raw.access !== 'conversation_confirm' ||
         raw.tool_family !== 'guest_service' ||
-        raw.registry_version !== 2)) ||
-    (raw.name !== 'write_file' &&
-      raw.name !== 'git_commit' &&
-      raw.name !== 'git_push' &&
-      raw.name !== 'start_guest_cgi' &&
-      raw.name !== 'stop_guest_cgi')
+        !agentToolRegistryCompatible(raw.name, raw.registry_version))) ||
+    (!(ALL_AGENT_CONFIRM_TOOLS as readonly string[]).includes(raw.name))
   )
     return null;
   const grant = raw.grant === null ? null : validateGrant(raw.grant);
@@ -878,25 +875,16 @@ function validateExecution(
   )
     return null;
   if (
-    ((raw.name === 'list_dir' ||
-      raw.name === 'read_file' ||
-      raw.name === 'git_status') &&
+    (((ALL_AGENT_AUTO_TOOLS as readonly string[]).includes(raw.name)) &&
       (raw.access !== 'auto' ||
         raw.approval_state !== 'not_required' ||
         raw.approval_reference !== null)) ||
-    ((raw.name === 'write_file' || raw.name === 'git_commit' || raw.name === 'git_push' || raw.name === 'start_guest_cgi' || raw.name === 'stop_guest_cgi') &&
+    (((ALL_AGENT_CONFIRM_TOOLS as readonly string[]).includes(raw.name)) &&
       (raw.batch_kind !== 'write_batch' ||
         raw.access !== 'conversation_confirm' ||
         raw.approval_state !== 'bound' ||
         raw.approval_reference === null)) ||
-    (raw.name !== 'list_dir' &&
-      raw.name !== 'read_file' &&
-      raw.name !== 'git_status' &&
-      raw.name !== 'write_file' &&
-      raw.name !== 'git_commit' &&
-      raw.name !== 'git_push' &&
-      raw.name !== 'start_guest_cgi' &&
-      raw.name !== 'stop_guest_cgi')
+    (!(ALL_AGENT_TOOL_NAMES as readonly string[]).includes(raw.name))
   )
     return null;
   const common = validateCommon(raw);
@@ -910,11 +898,11 @@ function validateExecution(
   )
     return null;
   const requiredCapability: AgentRuntimeRootV1['capabilities'][number] =
-    raw.name === 'list_dir' || raw.name === 'read_file'
+    raw.name === 'list_dir' || raw.name === 'read_file' || raw.name === 'list_runtime_environments'
       ? 'file_read'
       : raw.name === 'write_file'
         ? 'file_write'
-      : raw.name === 'start_guest_cgi' || raw.name === 'stop_guest_cgi'
+      : isGuestServiceAgentTool(raw.name)
         ? 'guest_service'
       : (raw.name as AgentRuntimeRootV1['capabilities'][number]);
   if (!root.capabilities.includes(requiredCapability)) return null;

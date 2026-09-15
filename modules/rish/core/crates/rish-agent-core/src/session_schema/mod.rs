@@ -11,6 +11,10 @@
 //! lexeme such as `1.0` is an integer here, `-0` is refused at the scanner.
 
 pub mod cas;
+mod grant_recovery;
+mod grant_reuse;
+pub(crate) use grant_recovery::frozen_ids_after_lost_prepare;
+pub(crate) use grant_reuse::frozen_ids_for_projection;
 mod primitives;
 mod scanner;
 mod validators;

@@ -1,3 +1,5 @@
+import { conversationGrantIdsForBatch, hasLiveConversationGrant, isConversationGrantBoundCall } from '../agent/agent-conversation-grants';
+import { isGuestServiceAgentTool } from '../agent/tool-registry';
 import { approvalMessageBudget } from '../agent/approvalMessage';
 import {
   agentRuntimeDiagnosticFromError,
@@ -599,7 +601,7 @@ function agentCallFromProjection(
       : projection.approval_state === 'cancelled'
         ? 'cancelled'
         : projection.approval_state === 'bound'
-          ? 'allow_once'
+          ? projection.approval_token === null ? 'allow_conversation' : 'allow_once'
           : 'pending';
   return {
     schema_version: 3,
@@ -1351,7 +1353,7 @@ export function createCompletionController(
         ? 'git_commit'
         : name === 'git_push'
           ? 'git_push'
-          : name === 'start_guest_cgi' || name === 'stop_guest_cgi'
+          : isGuestServiceAgentTool(name)
             ? 'guest_service'
           : null;
 
@@ -1436,7 +1438,7 @@ export function createCompletionController(
     visible_history_sha256: visible.digest,
     visible_message_count: visible.count,
     project_context_sha256: agentProjectContextSha(attempt),
-    registry_version: 1,
+    registry_version: 3,
     expected_policy_version: null,
     expected_transcript: null,
   });
@@ -1520,8 +1522,12 @@ export function createCompletionController(
     batchReceipt: AgentBatchReceiptV2,
     roundRevision: number,
     updatedAt: string,
-  ): PersistedAgentAttemptJournalV3 => {
+    conversation: Conversation,
+  ): PersistedAgentAttemptJournalV3 | null => {
     const calls = batchReceipt.calls.map(agentCallFromProjection);
+    const frozenGrantIds = conversationGrantIdsForBatch(journal, calls);
+    const grantJournal = { ...journal, frozen_grant_ids: frozenGrantIds };
+    if (frozenGrantIds.length > 2 || calls.some(call => !hasLiveConversationGrant(call, grantJournal, conversation.id, conversation.agentGrants ?? conversation.agent_grants ?? []))) return null;
     // Calls native already settled at preparation (refused arguments,
     // durable denials) need no approval; a batch settled in full is waiting
     // for the next round exactly like one whose calls all executed.
@@ -1552,6 +1558,7 @@ export function createCompletionController(
             },
       call_index: allSettled ? calls.length - 1 : calls.findIndex(call => call.receipt === null),
       batch: calls,
+      frozen_grant_ids: frozenGrantIds,
       reserved_write_bytes: batchReceipt.reserved_write_bytes,
       updated_at: updatedAt,
     };
@@ -2894,7 +2901,9 @@ export function createCompletionController(
           batchResult.receipt,
           result.result_round_revision,
           canonicalNow(dependencies.now),
+          completed.conversation,
         );
+        if (batchJournal === null) return await failAgentWithoutNative(conversationId, attemptId, 'E_AGENT_CONFLICT');
         const batchEvent = agentEvent(
           attemptId,
           batchOperationId,
@@ -2913,6 +2922,15 @@ export function createCompletionController(
         // round's transcript already carries the feedback.
         const settledEvents: PersistedSessionEventV3[] = [];
         for (const call of batchJournal.batch) {
+          if (isConversationGrantBoundCall(call)) {
+            const grantEventId = freshOperationId();
+            if (grantEventId === null) return await failAgentWithoutNative(conversationId, attemptId, 'E_AGENT_PERSISTENCE');
+            // Preserve the verified grant reference after this batch leaves the
+            // journal. This records reuse; it does not ask for another approval.
+            settledEvents.push({ ...agentEvent(attemptId, grantEventId, 'approval', request.round_index,
+              call.call_id, 'approval', call.safe_summary_key, call.arguments_sha256, null, call.approval_reference, null),
+              seq: batchEvent.seq + settledEvents.length + 1 });
+          }
           if (call.receipt === null || call.receipt.outcome !== 'failed') continue;
           const callEventId = freshOperationId();
           const resultEventId = freshOperationId();
@@ -2952,7 +2970,7 @@ export function createCompletionController(
           };
           const intent = intentForCall(conversationId, completed.attempt, batchJournal, firstIndex, intentCas, firstOperationId, batchAuthority);
           const combined = intent === null ? null : dependencies.chat.checkpointAgentBatchAndBeginFirst({
-            batch: { cas: batchCas, expectedAttempt: completed.attempt, journal: batchJournal, events: [batchEvent], evidence: batchEvidence },
+            batch: { cas: batchCas, expectedAttempt: completed.attempt, journal: batchJournal, events: [batchEvent, ...settledEvents], evidence: batchEvidence },
             next: { cas: intentCas, journal: intent.journal, callIndex: firstIndex, events: [], evidence: intent.preflight },
           });
           if (intent !== null && combined !== null) {
@@ -4655,7 +4673,20 @@ export function createCompletionController(
     );
     const currentCas = authorityFor(attempt, conversationId);
     if (currentCas === null) return await failAgentWithoutNative(conversationId, attemptId, 'E_AGENT_PERSISTENCE');
-    const transaction = dependencies.chat.setAgentJournal({ cas: currentCas, expectedAttempt: attempt, journal: recoveredJournal, events: [recoveryEvent], evidence });
+    const recoveryEvents: PersistedSessionEventV3[] = [recoveryEvent];
+    for (const call of recoveredJournal.batch) {
+      if (!isConversationGrantBoundCall(call)) continue;
+      if (!hasLiveConversationGrant(call, recoveredJournal, conversationId, located.conversation.agentGrants ?? located.conversation.agent_grants ?? [])) {
+        publish(stateFor('resume_available', { conversationId, turnId: attempt.turnId, attemptId, failureCode: 'E_AGENT_CONFLICT' }));
+        return outcome('retryable', state);
+      }
+      const grantEventId = freshOperationId();
+      if (grantEventId === null) return await failAgentWithoutNative(conversationId, attemptId, 'E_AGENT_PERSISTENCE');
+      recoveryEvents.push({ ...agentEvent(attemptId, grantEventId, 'approval', recoveredJournal.round_index,
+        call.call_id, 'approval', call.safe_summary_key, call.arguments_sha256, null, call.approval_reference, null),
+        seq: recoveryEvent.seq + recoveryEvents.length });
+    }
+    const transaction = dependencies.chat.setAgentJournal({ cas: currentCas, expectedAttempt: attempt, journal: recoveredJournal, events: recoveryEvents, evidence });
     if (transaction === null) {
       publish(stateFor('resume_available', { conversationId, turnId: attempt.turnId, attemptId, failureCode: 'E_AGENT_CONFLICT' }));
       return outcome('retryable', state);

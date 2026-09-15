@@ -106,3 +106,40 @@ test('no workspace never shows stale capabilities or budgets', () => {
   expect(result.budget).toBeNull();
   expect(result.capabilities).toEqual([]);
 });
+
+
+const runtimeTools = [
+  { name: 'list_runtime_environments', access: 'auto' },
+  { name: 'install_runtime_environment', access: 'conversation_confirm' },
+  { name: 'run_program', access: 'conversation_confirm' },
+  { name: 'start_runtime_service', access: 'conversation_confirm' },
+  { name: 'stop_runtime_service', access: 'conversation_confirm' },
+] as const;
+const runtimeMutations = runtimeTools.slice(1);
+
+test('runtime listing is automatic and all four native runtime mutations require confirmation', () => {
+  const result = projectAgentPolicy({ ...context, policy: {
+    ...policy, registry_version: 3, tools: [...policy.tools, ...runtimeTools],
+  } });
+  expect(result.toolAccess.list_runtime_environments).toBe('auto');
+  for (const tool of runtimeMutations) expect(result.toolAccess[tool.name]).toBe('conversation_confirm');
+});
+
+test('only a matching v3 guest-service grant covers new runtime mutations', () => {
+  const runtimePolicy: AgentPolicyDescriptor = { ...policy, registry_version: 3, tools: runtimeTools };
+  const granted = projectAgentPolicy({ ...context, policy: runtimePolicy,
+    grants: [{ ...grant, registry_version: 3 }] });
+  expect(granted.toolAccess.list_runtime_environments).toBe('auto');
+  for (const tool of runtimeMutations) expect(granted.toolAccess[tool.name]).toBe('conversation_allowed');
+  for (const staleGrant of [grant, { ...grant, registry_version: 1 as const }]) {
+    const result = projectAgentPolicy({ ...context, policy: runtimePolicy, grants: [staleGrant] });
+    expect(result.grants).toEqual([]);
+    for (const tool of runtimeMutations) expect(result.toolAccess[tool.name]).toBe('conversation_confirm');
+  }
+});
+
+test.each([1, 2] as const)('legacy registry v%i never derives runtime availability from a guest-service grant', registry_version => {
+  const result = projectAgentPolicy({ ...context, policy: { ...policy, registry_version },
+    grants: [{ ...grant, registry_version }] });
+  for (const tool of runtimeTools) expect(result.toolAccess[tool.name]).toBe('unavailable');
+});

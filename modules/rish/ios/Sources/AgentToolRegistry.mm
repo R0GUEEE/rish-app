@@ -22,6 +22,7 @@ static NSDictionary *DSHAgentRegistryReduce(NSString *op,
                                             NSError **error) {
   NSMutableDictionary *envelope = [fields mutableCopy];
   envelope[@"op"] = op;
+  if (!envelope[@"registry_version"]) envelope[@"registry_version"] = @3; // iOS runtime adapter.
   envelope[@"guest_cgi"] = @(DSHAgentGuestCGIAvailable);
   NSData *bytes = [NSJSONSerialization dataWithJSONObject:envelope options:0 error:nil];
   if (bytes == nil) {
@@ -33,9 +34,10 @@ static NSDictionary *DSHAgentRegistryReduce(NSString *op,
     DSHSetAgentNativeStoreError(error, DSHAgentNativeStoreErrorCorrupt);
     return nil;
   }
-  NSData *replyBytes = [NSData dataWithBytes:raw length:strlen(raw)];
+  size_t length = strnlen(raw, 1024 * 1024 + 1);
+  NSData *replyBytes = length <= 1024 * 1024 ? [NSData dataWithBytes:raw length:length] : nil;
   rish_agent_string_free(raw);
-  id reply = [NSJSONSerialization JSONObjectWithData:replyBytes options:0 error:nil];
+  id reply = replyBytes ? [NSJSONSerialization JSONObjectWithData:replyBytes options:0 error:nil] : nil;
   if (![reply isKindOfClass:NSDictionary.class]) {
     DSHSetAgentNativeStoreError(error, DSHAgentNativeStoreErrorCorrupt);
     return nil;
@@ -97,9 +99,40 @@ static NSDictionary *DSHAgentRegistryReduce(NSString *op,
   }, error)[@"descriptor"];
 }
 
+- (nullable NSDictionary *)descriptorForToolName:(NSString *)name
+                                             root:(NSDictionary *)root
+                                         registry:(NSDictionary *)registry
+                                            error:(NSError **)error {
+  if (![DSHAgentRootResolver validateAgentRootProjection:root error:error] ||
+      ![registry isKindOfClass:NSDictionary.class] || registry[@"registry_version"] == nil ||
+      !DSHAgentCanonicalSHA256(registry[@"toolset_sha256"])) {
+    if (error && *error == nil) DSHSetAgentNativeStoreError(error, DSHAgentNativeStoreErrorInvalidArgument);
+    return nil;
+  }
+  return DSHAgentRegistryReduce(@"frozen_descriptor", @{
+    @"name":name ?: @"", @"root":root, @"registry":registry,
+  }, error)[@"descriptor"];
+}
+
+- (nullable NSDictionary *)nativeDescriptorForToolName:(NSString *)name
+                                             registry:(NSDictionary *)registry
+                                                error:(NSError **)error {
+  if (![registry isKindOfClass:NSDictionary.class] || registry[@"registry_version"] == nil ||
+      !DSHAgentCanonicalSHA256(registry[@"toolset_sha256"])) {
+    DSHSetAgentNativeStoreError(error, DSHAgentNativeStoreErrorInvalidArgument);
+    return nil;
+  }
+  return DSHAgentRegistryReduce(@"native_descriptor", @{
+    @"name":name ?: @"", @"registry_version":registry[@"registry_version"],
+    @"toolset_sha256":registry[@"toolset_sha256"],
+  }, error)[@"descriptor"];
+}
+
 - (BOOL)validateToolsetSHA256:(NSString *)toolsetSHA256 error:(NSError **)error {
-  if (![toolsetSHA256 isKindOfClass:NSString.class] ||
-      ![toolsetSHA256 isEqualToString:self.toolsetSHA256]) {
+  NSDictionary *reply = DSHAgentRegistryReduce(@"toolset_valid", @{
+    @"toolset_sha256":toolsetSHA256 ?: NSNull.null,
+  }, nullptr);
+  if (![reply[@"valid"] isEqual:@YES]) {
     DSHSetAgentNativeStoreError(error, DSHAgentNativeStoreErrorConflict);
     return NO;
   }
@@ -125,8 +158,9 @@ static NSDictionary *DSHAgentRegistryReduce(NSString *op,
     }
     return NO;
   }
-  DSHAgentToolRegistry *instance = [[self alloc] init];
-  return [instance validateToolsetSHA256:registry[@"toolset_sha256"] error:error];
+  // The core checks the exact descriptor-table digest for the recorded
+  // registry version, including historical v1/v2 build variants.
+  return YES;
 }
 
 @end

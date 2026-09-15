@@ -24,20 +24,20 @@ beforeEach(() => {
   (LocalWorkspaces.resolve as jest.Mock).mockReset().mockResolvedValue(resolved());
   appState.mockImplementation((_event, listener) => { listeners.add(listener); return { remove: () => { listeners.delete(listener); } }; });
 });
-afterEach(async () => { if (renderer) await act(async () => { renderer!.unmount(); }); jest.useRealTimers(); });
+afterEach(async () => { if (renderer) await act(async () => { renderer!.unmount(); }); expect(env.cancelInstall).not.toHaveBeenCalled(); jest.useRealTimers(); });
 afterAll(() => { delete NativeModules.LocalEnvironments; delete NativeModules.LocalPrograms; turbo.mockRestore(); appState.mockRestore(); });
 test('opening a run panel never downloads or starts anything', async () => {
   await mount(); expect(current.phase).toBe('idle'); expect(current.available).toBe(true);
-  expect(env.installEnvironment).not.toHaveBeenCalled(); expect(native.startProgram).not.toHaveBeenCalled();
+  expect(env.installEnvironmentOwned).not.toHaveBeenCalled(); expect(native.startProgram).not.toHaveBeenCalled();
 });
 test('first explicit run installs only its selected language, resolves workspace again, then starts without credentials', async () => {
   await mount();
   await act(async () => { await current.start(environment(), 'src/main.py', ['hello world']); });
-  expect(env.installEnvironment).toHaveBeenCalledTimes(1);
-  expect(env.installEnvironment).toHaveBeenCalledWith({ schema_version: 1, environment_id: 'python-3-13' });
+  expect(env.installEnvironmentOwned).toHaveBeenCalledTimes(1);
+  expect(env.installEnvironmentOwned).toHaveBeenCalledWith({ schema_version: 1, operation_id: expect.stringMatching(/^[a-f0-9-]{36}$/u), environment_id: 'python-3-13' });
   expect(LocalWorkspaces.resolve).toHaveBeenCalledWith({ schema_version: 1, workspace_id: root.workspace_id,
     expected_binding_revision: 1, required_capabilities: ['read'] });
-  expect(env.installEnvironment.mock.invocationCallOrder[0]).toBeLessThan((LocalWorkspaces.resolve as jest.Mock).mock.invocationCallOrder[0]);
+  expect(env.installEnvironmentOwned.mock.invocationCallOrder[0]).toBeLessThan((LocalWorkspaces.resolve as jest.Mock).mock.invocationCallOrder[0]);
   expect((LocalWorkspaces.resolve as jest.Mock).mock.invocationCallOrder[0]).toBeLessThan(native.startProgram.mock.invocationCallOrder[0]);
   expect(native.startProgram).toHaveBeenCalledWith(expect.objectContaining({ root, entry_path: 'src/main.py', args: ['hello world'] }));
   expect(current.receipt?.status).toBe('running');
@@ -46,7 +46,7 @@ test('an installed environment skips download; rapid Run clicks cannot start two
   await mount(); const pendingStart = deferred<unknown>(); native.startProgram.mockReturnValue(pendingStart.promise);
   let first!: Promise<void>;
   await act(async () => { first = current.start(environment({ state: 'installed' }), 'main.py', []); await current.start(environment({ state: 'installed' }), 'main.py', []); });
-  expect(env.installEnvironment).not.toHaveBeenCalled(); expect(native.startProgram).toHaveBeenCalledTimes(1);
+  expect(env.installEnvironmentOwned).not.toHaveBeenCalled(); expect(native.startProgram).toHaveBeenCalledTimes(1);
   await act(async () => { pendingStart.resolve(receipt()); await first; });
 });
 test.each([
@@ -55,22 +55,44 @@ test.each([
   { ...props, root: { ...root, project_id: otherWorkspaceId } },
   { ...props, ownerKey: 'chat-2' }, { ...props, blocked: true }, { ...props, visible: false },
 ])('owner change during download cancels it and cannot start stale workspace %#', async next => {
-  await mount(); const download = deferred<unknown>(); env.installEnvironment.mockReturnValue(download.promise);
+  await mount(); const download = deferred<unknown>(); env.installEnvironmentOwned.mockReturnValue(download.promise);
   let completion!: Promise<void>;
   await act(async () => { completion = current.start(environment(), 'main.py', []); });
   expect(current.phase).toBe('downloading');
   await update(next); expect(current.receipt).toBeNull();
   await act(async () => { download.resolve(environment({ state: 'installed' })); await completion; });
-  expect(env.cancelInstall).toHaveBeenCalledTimes(1); expect(native.startProgram).not.toHaveBeenCalled();
+  expect(env.cancelOwnedInstall).toHaveBeenCalledTimes(1); expect(native.startProgram).not.toHaveBeenCalled();
   expect(LocalWorkspaces.resolve).not.toHaveBeenCalled();
 });
 test('Cancel download prevents a later success from automatically running', async () => {
-  await mount(); const download = deferred<unknown>(); env.installEnvironment.mockReturnValue(download.promise);
+  await mount(); const download = deferred<unknown>(); env.installEnvironmentOwned.mockReturnValue(download.promise);
   let completion!: Promise<void>;
   await act(async () => { completion = current.start(environment(), 'main.py', []); });
   await act(async () => { await current.stop(); });
   await act(async () => { download.resolve(environment({ state: 'installed' })); await completion; });
   expect(current.busy).toBe(false); expect(current.error).toBe('E_ENV_CANCELLED'); expect(native.startProgram).not.toHaveBeenCalled();
+  expect(env.cancelOwnedInstall).toHaveBeenCalledWith({ schema_version: 1, operation_id: env.installEnvironmentOwned.mock.calls[0][0].operation_id });
+});
+test('cleanup before a delayed BUSY response only cancels its own operation', async () => {
+  await mount(); const busy = deferred<unknown>(); env.installEnvironmentOwned.mockReturnValueOnce(busy.promise);
+  let completion!: Promise<void>;
+  await act(async () => { completion = current.start(environment(), 'main.py', []); });
+  const ownedId = env.installEnvironmentOwned.mock.calls[0][0].operation_id;
+  await update({ ...props, visible: false });
+  await act(async () => { busy.reject({ code: 'E_ENV_BUSY' }); await completion; });
+  expect(env.cancelOwnedInstall).toHaveBeenCalledWith({ schema_version: 1, operation_id: ownedId });
+  expect(env.cancelInstall).not.toHaveBeenCalled();
+  expect(native.startProgram).not.toHaveBeenCalled();
+});
+test('older native modules still run installed environments and never fall back to global cancellation', async () => {
+  const legacy = { ...env } as Partial<typeof env>;
+  delete legacy.installEnvironmentOwned; delete legacy.cancelOwnedInstall;
+  NativeModules.LocalEnvironments = legacy;
+  await mount(); expect(current.available).toBe(true);
+  await act(async () => { await current.start(environment(), 'main.py', []); });
+  expect(current.error).toBe('E_ENV_UNAVAILABLE'); expect(env.installEnvironment).not.toHaveBeenCalled();
+  await act(async () => { await current.start(environment({ state: 'installed' }), 'main.py', []); });
+  expect(native.startProgram).toHaveBeenCalledTimes(1);
 });
 test('workspace changing after download but before native resolve returns cannot start', async () => {
   await mount(); const resolve = deferred<unknown>(); (LocalWorkspaces.resolve as jest.Mock).mockReturnValue(resolve.promise);
@@ -121,5 +143,5 @@ test('background cancels a running foreground program', async () => {
 });
 test.each([{ ...props, root: null }, { ...props, blocked: true }, { ...props, visible: false }])('does not start when context is unavailable %#', async input => {
   await mount(input); await act(async () => { await current.start(environment(), 'main.py', []); });
-  expect(env.installEnvironment).not.toHaveBeenCalled(); expect(native.startProgram).not.toHaveBeenCalled();
+  expect(env.installEnvironmentOwned).not.toHaveBeenCalled(); expect(native.startProgram).not.toHaveBeenCalled();
 });

@@ -411,10 +411,15 @@ pub fn registry_shape(registry: Option<&Value>) -> bool {
     )
     .is_none()
         || r("schema_version") != Some(&json!(2))
-        || !(r("registry_version") == Some(&json!(1)) || r("registry_version") == Some(&json!(2)))
+        || !crate::runtime_tools::registry_version(r("registry_version"))
         || !canonical_sha256(r("toolset_sha256"))
         || !r("tools").is_some_and(Value::is_array)
-        || array(r("tools")).len() > 8
+        || array(r("tools")).len()
+            > if r("registry_version") == Some(&json!(3)) {
+                13
+            } else {
+                8
+            }
     {
         return false;
     }
@@ -427,6 +432,11 @@ pub fn registry_shape(registry: Option<&Value>) -> bool {
         "git_push",
         "start_guest_cgi",
         "stop_guest_cgi",
+        "list_runtime_environments",
+        "install_runtime_environment",
+        "run_program",
+        "start_runtime_service",
+        "stop_runtime_service",
     ];
     let mut seen: Vec<&str> = Vec::new();
     let mut previous: Option<&str> = None;
@@ -439,6 +449,7 @@ pub fn registry_shape(registry: Option<&Value>) -> bool {
         .is_none()
             || get(tool, "schema_version") != Some(&json!(2))
             || !NAMES.contains(&name)
+            || (crate::runtime_tools::is_runtime(name) && r("registry_version") != Some(&json!(3)))
             || seen.contains(&name)
             || bounded_utf8(get(tool, "safe_summary_key"), 128, false).is_none()
             || !matches!(
@@ -517,11 +528,16 @@ pub fn authority_shape(authority: &Value, env: &Env) -> bool {
         .filter_map(|c| as_str(Some(c)))
         .collect();
     let has = |name: &str| capabilities.contains(&name);
+    let runtime_registry =
+        get(a("registry").expect("checked"), "registry_version") == Some(&json!(3));
     let project = string_eq(get(root, "kind"), "project");
     let mut expected: Vec<(&str, &str)> = Vec::new();
     if has("file_read") {
         expected.push(("list_dir", "auto"));
         expected.push(("read_file", "auto"));
+        if runtime_registry {
+            expected.push(("list_runtime_environments", "auto"));
+        }
     }
     if has("file_write") {
         expected.push(("write_file", "conversation_confirm"));
@@ -537,11 +553,20 @@ pub fn authority_shape(authority: &Value, env: &Env) -> bool {
         expected.push(("git_push", "conversation_confirm"));
     }
     if has("guest_service") {
-        if get(a("registry").expect("checked"), "registry_version") != Some(&json!(2)) {
+        if !runtime_registry
+            && get(a("registry").expect("checked"), "registry_version") != Some(&json!(2))
+        {
             return false;
         }
         expected.push(("start_guest_cgi", "conversation_confirm"));
         expected.push(("stop_guest_cgi", "conversation_confirm"));
+        if runtime_registry {
+            expected.extend(
+                crate::runtime_tools::MUTATIONS
+                    .iter()
+                    .map(|name| (*name, "conversation_confirm")),
+            );
+        }
     }
     let tools = array(get(a("registry").expect("checked"), "tools"));
     if expected.len() != tools.len() {
@@ -917,6 +942,9 @@ fn reduce_json_inner(input: &str) -> Result<Value, crate::store::StoreError> {
     let envelope: Value = serde_json::from_str(input).map_err(|_| StoreError::Corrupt)?;
     let op = as_str(get(&envelope, "op")).ok_or(StoreError::Corrupt)?;
     let value = get(&envelope, "value").ok_or(StoreError::InvalidArgument)?;
+    if let Some(result) = crate::runtime_tools::reduce_contract(op, value, get(&envelope, "name")) {
+        return Ok(result);
+    }
     let valid = match op {
         "reference" => reference_shape(Some(value)),
         "root" => root_full(Some(value)),
@@ -1002,6 +1030,11 @@ const KNOWN_TOOL_NAMES: &[&str] = &[
     "git_push",
     "start_guest_cgi",
     "stop_guest_cgi",
+    "list_runtime_environments",
+    "install_runtime_environment",
+    "run_program",
+    "start_runtime_service",
+    "stop_runtime_service",
 ];
 
 /// `DSHAgentCanonicalIdentityKey`: the canonical bytes of a locator, used to
@@ -1195,7 +1228,16 @@ fn manifest_call_shape_v2(
                 return false;
             }
         }
-        Some("git_commit" | "git_push" | "start_guest_cgi" | "stop_guest_cgi") => {
+        Some(
+            "git_commit"
+            | "git_push"
+            | "start_guest_cgi"
+            | "stop_guest_cgi"
+            | "install_runtime_environment"
+            | "run_program"
+            | "start_runtime_service"
+            | "stop_runtime_service",
+        ) => {
             if exact_keys(
                 Some(call),
                 &[
@@ -1451,10 +1493,14 @@ pub fn denied_call_shape(row: &Value) -> bool {
         exact_keys(payload, &["schema_version", "failure_code", "reason"]).is_some()
             && bounded_utf8(p("reason"), 64, false)
                 .is_some_and(|reason| reason.bytes().all(|b| b.is_ascii_lowercase() || b == b'_'))
-            && matches!(
+            && (matches!(
                 as_str(p("failure_code")),
                 Some("E_AGENT_BAD_ARGUMENTS" | "E_AGENT_BAD_PATH")
-            )
+            ) || (as_str(r("name")).is_some_and(crate::runtime_tools::is_runtime)
+                && matches!(
+                    as_str(p("failure_code")),
+                    Some("E_AGENT_CAPABILITY" | "E_AGENT_TOOL_FAILED")
+                )))
     } else {
         exact_keys(payload, &["schema_version", "failure_code"]).is_some()
             && matches!(

@@ -7,6 +7,7 @@ import {
 } from '../src/components/StructuredContent';
 import { AppPresentationProvider } from '../src/presentation/AppPresentation';
 import { createPreferencesStore } from '../src/preferences';
+import type { AgentFailureCode } from '../src/state/types';
 
 const blocks: StructuredBlock[] = [
   {
@@ -212,6 +213,79 @@ test('renders failed tool results as assertive errors without a success icon', a
     0,
   );
   expect(root.findByProps({ children: 'permission denied' })).toBeDefined();
+});
+
+test.each<[AgentFailureCode, string]>([
+  ['E_AGENT_BAD_ARGUMENTS', 'The tool arguments were rejected.'],
+  ['E_AGENT_BAD_PATH', 'The file path or revision arguments were rejected.'],
+  ['E_AGENT_DENIED_BY_USER', 'You declined approval for this tool call.'],
+  ['E_AGENT_CAPABILITY', 'This workspace or runtime does not support the requested action.'],
+  ['E_AGENT_TOOL_FAILED', 'The tool reported an execution failure. This record contains no further execution details.'],
+])('shows %s even when a failed call has no output and takes 0 ms', async (failureCode, description) => {
+  let renderer!: ReactTestRenderer.ReactTestRenderer;
+  await act(async () => {
+    renderer = ReactTestRenderer.create(<StructuredContent blocks={[{
+      id: 'failed', type: 'tool-call', name: 'write_file', arguments: '',
+      status: 'error', durationMs: 0, failureCode,
+    }]} />);
+  });
+  // The stable code is visible before the user expands the card.
+  expect(renderer.root.findByProps({ testID: 'tool-failure-code' }).props.children).toBe(failureCode);
+  expect(renderer.root.findAllByProps({ children: description })).toHaveLength(0);
+  await act(async () => {
+    renderer.root.findByProps({ accessibilityLabel: 'Expand tool call details for write_file' }).props.onPress();
+  });
+  expect(renderer.root.findByProps({ children: description })).toBeDefined();
+  expect(JSON.stringify(renderer.toJSON())).not.toContain('(no output)');
+});
+
+test.each<StructuredBlock>([
+  { id: 'legacy-call', type: 'tool-call', name: 'write_file', arguments: '', status: 'error' },
+  { id: 'legacy-result', type: 'tool-result', name: 'write_file', output: '', isError: true },
+])('uses an honest fallback for an old failed record without details: $id', async block => {
+  const store = createPreferencesStore();
+  store.setLocale('zh-CN');
+  let renderer!: ReactTestRenderer.ReactTestRenderer;
+  await act(async () => {
+    renderer = ReactTestRenderer.create(
+      <AppPresentationProvider store={store}>
+        <StructuredContent autoExpandTools blocks={[block]} />
+      </AppPresentationProvider>,
+    );
+  });
+  expect(renderer.root.findByProps({ children: '工具调用失败，但这条记录未包含错误详情。' })).toBeDefined();
+  expect(renderer.root.findAllByProps({ testID: 'tool-failure-code' })).toHaveLength(0);
+  expect(JSON.stringify(renderer.toJSON())).not.toContain('（无输出）');
+});
+
+test('shows denial without inventing a code or attributing it to user approval', async () => {
+  let renderer!: ReactTestRenderer.ReactTestRenderer;
+  await act(async () => {
+    renderer = ReactTestRenderer.create(<StructuredContent autoExpandTools blocks={[{
+      id: 'denied', type: 'tool-call', name: 'write_file', arguments: '',
+      status: 'error', denied: true,
+    }]} />);
+  });
+  expect(renderer.root.findByProps({ children: 'The tool call was denied. This record contains no further reason.' })).toBeDefined();
+  expect(renderer.root.findAllByProps({ testID: 'tool-failure-code' })).toHaveLength(0);
+});
+
+test('localizes a recorded parameter rejection and keeps arguments separate from the failure', async () => {
+  const store = createPreferencesStore();
+  store.setLocale('zh-CN');
+  let renderer!: ReactTestRenderer.ReactTestRenderer;
+  await act(async () => {
+    renderer = ReactTestRenderer.create(
+      <AppPresentationProvider store={store}>
+        <StructuredContent autoExpandTools blocks={[{
+          id: 'rejected', type: 'tool-call', name: 'write_file', arguments: '{"path":"app.js"}',
+          status: 'error', failureCode: 'E_AGENT_BAD_ARGUMENTS',
+        }]} />
+      </AppPresentationProvider>,
+    );
+  });
+  expect(renderer.root.findByProps({ children: '工具参数校验未通过。\n\n{"path":"app.js"}' })).toBeDefined();
+  expect(renderer.root.findByProps({ testID: 'tool-failure-code' }).props.children).toBe('E_AGENT_BAD_ARGUMENTS');
 });
 
 test('announces running tool calls as busy status updates', async () => {

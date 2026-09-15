@@ -1,3 +1,4 @@
+import { ALL_AGENT_TOOL_NAMES, ALL_AGENT_AUTO_TOOLS, ALL_AGENT_CONFIRM_TOOLS, agentToolRegistryCompatible, agentRegistryToolLimit, isGuestServiceAgentTool, isRuntimeAgentTool, agentToolGrantFamily } from './tool-registry';
 import { parseProviderBinding } from '../providers/configuration';
 /**
  * Closed, RN-side evidence for the high-level Agent Runtime boundary.
@@ -151,28 +152,12 @@ const SHA256 = /^[0-9a-f]{64}$/u;
 const OPAQUE = /^[A-Za-z0-9._:-]{1,128}$/u;
 const PRINTABLE = /^[\x21-\x7e]+$/u;
 const SAFE_SUMMARY = new Set([
-  'agent.list_dir',
-  'agent.read_file',
-  'agent.write_file',
-  'agent.git_status',
-  'agent.git_commit',
-  'agent.git_push',
-  'agent.start_guest_cgi',
-  'agent.stop_guest_cgi',
+  ...ALL_AGENT_TOOL_NAMES.map(tool => `agent.${tool}`),
   'agent.unknown',
 ]);
-const TOOL_NAMES = new Set([
-  'list_dir',
-  'read_file',
-  'write_file',
-  'git_status',
-  'git_commit',
-  'git_push',
-  'start_guest_cgi',
-  'stop_guest_cgi',
-]);
+const TOOL_NAMES = new Set<string>(ALL_AGENT_TOOL_NAMES);
 function isAgentRegistryVersion(value: unknown): value is AgentRegistryVersion {
-  return value === 1 || value === 2;
+  return value === 1 || value === 2 || value === 3;
 }
 const RECEIPT_FAILURE_CODES = new Set<Exclude<AgentRuntimeFailureCode, 'E_AGENT_NATIVE' | 'E_AGENT_NOT_FOUND'>>([
   'E_AGENT_UNKNOWN_TOOL',
@@ -611,16 +596,16 @@ function validatePolicy(value: unknown): AgentRuntimePolicyV1 | null {
 }
 
 function expectedAccess(toolName: string): AgentRuntimeRegistryToolV2['access'] {
-  if (toolName === 'list_dir' || toolName === 'read_file' || toolName === 'git_status') return 'auto';
+  if ((ALL_AGENT_AUTO_TOOLS as readonly string[]).includes(toolName)) return 'auto';
   if (toolName === 'write_file' || toolName === 'git_commit' || toolName === 'git_push') return 'conversation_confirm';
-  if (toolName === 'start_guest_cgi' || toolName === 'stop_guest_cgi') return 'conversation_confirm';
+  if (isGuestServiceAgentTool(toolName)) return 'conversation_confirm';
   return 'durable_deny';
 }
 
 function validateRegistry(value: unknown): AgentRuntimeRegistryV2 | null {
   const raw = exact(value, ['schema_version', 'registry_version', 'toolset_sha256', 'tools']);
   if (raw === null || raw.schema_version !== 2 || !isAgentRegistryVersion(raw.registry_version) || !digest(raw.toolset_sha256)) return null;
-  const rows = arrayValue(raw.tools, raw.registry_version === 2 ? 8 : 6);
+  const rows = arrayValue(raw.tools, agentRegistryToolLimit(raw.registry_version));
   if (rows === null) return null;
   const tools: AgentRuntimeRegistryToolV2[] = [];
   const seen = new Set<string>();
@@ -630,8 +615,7 @@ function validateRegistry(value: unknown): AgentRuntimeRegistryV2 | null {
       !enumValue(tool.access, ['auto', 'conversation_confirm', 'confirm_once', 'durable_deny'] as const) ||
       !name(tool.safe_summary_key) || !SAFE_SUMMARY.has(tool.safe_summary_key) ||
       tool.safe_summary_key !== (TOOL_NAMES.has(tool.name) ? `agent.${tool.name}` : 'agent.unknown') ||
-      (raw.registry_version === 1 &&
-        (tool.name === 'start_guest_cgi' || tool.name === 'stop_guest_cgi')) ||
+      !agentToolRegistryCompatible(tool.name, raw.registry_version) ||
       tool.access !== expectedAccess(tool.name)) return null;
     seen.add(tool.name);
     tools.push({
@@ -714,7 +698,7 @@ function validateApprovalToken(value: unknown): AgentApprovalBindingTokenV2 | nu
     !digest(raw.arguments_sha256) || !digest(raw.idempotency_key) || !digest(raw.root_fingerprint_sha256) ||
     !safeInteger(raw.binding_revision, Number.MAX_SAFE_INTEGER - 1, false) || raw.policy_version !== 'agent-v1' ||
     !isAgentRegistryVersion(raw.registry_version) ||
-    ((raw.name === 'start_guest_cgi' || raw.name === 'stop_guest_cgi') && raw.registry_version !== 2) ||
+    !agentToolRegistryCompatible(raw.name, raw.registry_version) ||
     !enumValue(raw.access, ['conversation_confirm', 'confirm_once'] as const)) return null;
   const controllerCas = validateCAS(raw.controller_cas);
   if (controllerCas === null || controllerCas.task_id !== raw.task_id || controllerCas.attempt_id !== raw.attempt_id) return null;
@@ -811,12 +795,12 @@ function expectedToolFamily(toolName: string): AgentConversationGrantV2['tool_fa
   if (toolName === 'write_file') return 'file_write';
   if (toolName === 'git_commit') return 'git_commit';
   if (toolName === 'git_push') return 'git_push';
-  if (toolName === 'start_guest_cgi' || toolName === 'stop_guest_cgi') return 'guest_service';
+  if (isGuestServiceAgentTool(toolName)) return 'guest_service';
   return null;
 }
 
 function rootCanUse(root: AgentRuntimeRootV1, toolName: string): boolean {
-  const capability = toolName === 'list_dir' || toolName === 'read_file'
+  const capability = toolName === 'list_dir' || toolName === 'read_file' || toolName === 'list_runtime_environments'
     ? 'file_read'
     : toolName === 'write_file'
       ? 'file_write'
@@ -826,7 +810,7 @@ function rootCanUse(root: AgentRuntimeRootV1, toolName: string): boolean {
           ? 'git_commit'
           : toolName === 'git_push'
             ? 'git_push'
-            : toolName === 'start_guest_cgi' || toolName === 'stop_guest_cgi'
+            : isGuestServiceAgentTool(toolName)
               ? 'guest_service'
             : null;
   return capability === null || root.capabilities.includes(capability);
@@ -1050,8 +1034,8 @@ function validateExecuteRequest(value: unknown): ExecuteAgentToolRequestV2 | nul
   const root = validateRoot(raw.root);
   const identity = identityCAS(raw);
   if (transcript === null || root === null || identity === null || !TOOL_NAMES.has(raw.name) || !rootCanUse(root, raw.name)) return null;
-  if (raw.batch_kind === 'read_only_batch' && (raw.name === 'write_file' || raw.name === 'git_commit' || raw.name === 'git_push' || raw.name === 'start_guest_cgi' || raw.name === 'stop_guest_cgi')) return null;
-  const auto = raw.name === 'list_dir' || raw.name === 'read_file' || raw.name === 'git_status';
+  if (raw.batch_kind === 'read_only_batch' && ((ALL_AGENT_CONFIRM_TOOLS as readonly string[]).includes(raw.name))) return null;
+  const auto = (ALL_AGENT_AUTO_TOOLS as readonly string[]).includes(raw.name);
   if (auto ? raw.approval_reference !== null : raw.approval_reference === null) return null;
   return { ...raw, controller_cas: identity.cas, committed_checkpoint: identity.checkpoint, transcript, root } as ExecuteAgentToolRequestV2;
 }
@@ -1195,7 +1179,7 @@ function validateRoundOutcome(value: unknown, request: CompleteAgentRoundRequest
   if (calls.some(call => call === null)) return null;
   const callIds = new Set<string>();
   for (const call of calls) {
-    if (call === null || callIds.has(call.call_id)) return null;
+    if (call === null || callIds.has(call.call_id) || !agentToolRegistryCompatible(call.name, request.registry_version)) return null;
     callIds.add(call.call_id);
   }
   if (batch.executable_call_count + batch.denied_call_count !== calls.length ||
@@ -1242,7 +1226,7 @@ function validateAttemptProjection(value: unknown): AgentAttemptProjectionV2 | n
   const calls = batch as AgentBatchCallProjectionV2[];
   const callIds = new Set<string>();
   for (const [index, call] of calls.entries()) {
-    if (call.call_index !== index || callIds.has(call.call_id)) return null;
+    if (call.call_index !== index || callIds.has(call.call_id) || !agentToolRegistryCompatible(call.name, registry.registry_version)) return null;
     callIds.add(call.call_id);
   }
   if (raw.round_id === null && (raw.round_revision !== null || raw.round_status !== null)) return null;
@@ -1313,7 +1297,7 @@ function validateApprovalPreview(
 ): AgentApprovalPreviewV1 | null {
   if (value === null) return null;
   const raw = exact(value, ['schema_version', 'kind', 'paths', 'content_bytes', 'prior', 'diff_preview', 'diff_truncated']);
-  if (raw === null || raw.schema_version !== 1 || !enumValue(raw.kind, ['list_dir', 'read_file', 'write_file', 'git_commit', 'git_push', 'start_guest_cgi', 'stop_guest_cgi'] as const)) return null;
+  if (raw === null || raw.schema_version !== 1 || !enumValue(raw.kind, ['list_dir', 'read_file', 'write_file', 'git_commit', 'git_push', 'start_guest_cgi', 'stop_guest_cgi', 'list_runtime_environments', 'install_runtime_environment', 'run_program', 'start_runtime_service', 'stop_runtime_service'] as const)) return null;
   const paths = copyStringArray(raw.paths, 8, previewPath);
   if (paths === null ||
     (raw.content_bytes !== null && !safeInteger(raw.content_bytes, 32768)) || typeof raw.diff_truncated !== 'boolean' ||
@@ -1334,6 +1318,9 @@ function validateApprovalPreview(
     if (((paths.length !== 2 && paths.length !== 3) &&
          !(allowLegacyGuestCgiEmpty && paths.length === 0)) ||
         raw.content_bytes !== null || prior !== null || raw.diff_preview !== null) return null;
+  } else if (isRuntimeAgentTool(raw.kind)) {
+    const expectedPaths = raw.kind === 'run_program' || raw.kind === 'start_runtime_service' ? 1 : 0;
+    if (paths.length !== expectedPaths || raw.content_bytes !== null || prior !== null || raw.diff_preview !== null || raw.diff_truncated) return null;
   } else if (raw.kind === 'stop_guest_cgi') {
     if (paths.length !== 0 || raw.content_bytes !== null || prior !== null || raw.diff_preview !== null) return null;
   } else if (raw.content_bytes !== null || prior !== null || raw.diff_preview !== null) return null;
@@ -1374,7 +1361,10 @@ function validateBatchCall(value: unknown): AgentBatchCallProjectionV2 | null {
   if (raw.approval_state === 'not_required' && raw.access !== 'auto') return null;
   if (raw.access !== 'durable_deny' && raw.approval_state === 'pending' && raw.access !== 'conversation_confirm' && raw.access !== 'confirm_once') return null;
   if (raw.approval_state === 'pending' && raw.approval_reference !== null) return null;
-  if (raw.approval_state === 'bound' && (raw.approval_reference === null || raw.access === 'auto' || raw.access === 'durable_deny' || token === null || raw.idempotency_key === null)) return null;
+  // Native grant reuse has no newly issued token. This only validates its
+  // shape; Store checkpoints and hydration require the referenced live grant
+  // to match the conversation, frozen root, registry, policy, and tool family.
+  if (raw.approval_state === 'bound' && (raw.approval_reference === null || raw.access === 'auto' || raw.access === 'durable_deny' || (token === null && (raw.access !== 'conversation_confirm' || agentToolGrantFamily(raw.name) === null || raw.native_row_revision === null)) || raw.idempotency_key === null)) return null;
   if ((raw.approval_state === 'denied' || raw.approval_state === 'cancelled') && (token !== null || raw.approval_reference !== null || raw.access === 'auto')) return null;
   if (token !== null && (token.call_index !== raw.call_index || token.call_id !== raw.call_id || token.name !== raw.name || token.arguments_sha256 !== raw.arguments_sha256 || token.access !== raw.access || token.idempotency_key !== raw.idempotency_key)) return null;
   if (receipt !== null && (receipt.call_id !== raw.call_id || receipt.name !== raw.name || receipt.arguments_sha256 !== raw.arguments_sha256 || receipt.approval_reference !== raw.approval_reference || receipt.outcome === 'ok' && receipt.failure_code !== null || receipt.outcome !== 'ok' && receipt.failure_code === null)) return null;
@@ -1486,7 +1476,7 @@ function validateBatchReceipt(value: unknown, request: PrepareAgentToolBatchRequ
       raw.batch_revision !== request.expected_round_revision) return null;
   if (!transcriptRelation(request.transcript, transcript)) return null;
   for (const call of calls as AgentBatchCallProjectionV2[]) {
-    if (!rootCanUse(request.root, call.name)) return null;
+    if (!rootCanUse(request.root, call.name) || !agentToolRegistryCompatible(call.name, request.registry_version)) return null;
     const token = call.approval_token;
     if (token !== null && (
       !sameControllerCAS(token.controller_cas, request.controller_cas) ||
@@ -1507,11 +1497,7 @@ function validateBatchReceipt(value: unknown, request: PrepareAgentToolBatchRequ
   const hasMutation = calls.some(
     call =>
       call!.receipt === null && (
-        call!.name === 'write_file' ||
-        call!.name === 'git_commit' ||
-        call!.name === 'git_push' ||
-        call!.name === 'start_guest_cgi' ||
-        call!.name === 'stop_guest_cgi'),
+        (ALL_AGENT_CONFIRM_TOOLS as readonly string[]).includes(call!.name)),
   );
   if (
     (raw.batch_kind === 'write_batch' &&
@@ -1587,7 +1573,7 @@ function validateBindResult(value: unknown, request: BindAgentApprovalRequestV2)
 
 function validateGrant(value: unknown): AgentConversationGrantV2 | null {
   const raw = exact(value, ['schema_version', 'grant_id', 'conversation_id', 'workspace_id', 'project_id', 'binding_revision', 'root_fingerprint_sha256', 'tool_family', 'registry_version', 'policy_version', 'issued_for', 'created_at']);
-  if (raw === null || raw.schema_version !== 2 || !uuid(raw.grant_id) || !uuid(raw.conversation_id) || !uuid(raw.workspace_id) || !nullableUuid(raw.project_id) || !safeInteger(raw.binding_revision, Number.MAX_SAFE_INTEGER - 1, false) || !digest(raw.root_fingerprint_sha256) || !enumValue(raw.tool_family, ['file_write', 'git_commit', 'git_push', 'guest_service'] as const) || !isAgentRegistryVersion(raw.registry_version) || (raw.tool_family === 'guest_service' && raw.registry_version !== 2) || raw.policy_version !== 'agent-v1' || !timestamp(raw.created_at)) return null;
+  if (raw === null || raw.schema_version !== 2 || !uuid(raw.grant_id) || !uuid(raw.conversation_id) || !uuid(raw.workspace_id) || !nullableUuid(raw.project_id) || !safeInteger(raw.binding_revision, Number.MAX_SAFE_INTEGER - 1, false) || !digest(raw.root_fingerprint_sha256) || !enumValue(raw.tool_family, ['file_write', 'git_commit', 'git_push', 'guest_service'] as const) || !isAgentRegistryVersion(raw.registry_version) || (raw.tool_family === 'guest_service' && raw.registry_version === 1) || raw.policy_version !== 'agent-v1' || !timestamp(raw.created_at)) return null;
   const issued = exact(raw.issued_for, ['schema_version', 'task_id', 'attempt_id']);
   return issued !== null && issued.schema_version === 1 && uuid(issued.task_id) && uuid(issued.attempt_id) ? raw as unknown as AgentConversationGrantV2 : null;
 }
@@ -1696,7 +1682,18 @@ function validateRecoverResult(value: unknown, request: RecoverAgentAttemptReque
     if (result.next_action === 'retry_same_round' || result.next_action === 'inspect_native_state') return null;
     if (result.next_action === 'persist_final' && (completedRound === null || completedRound.kind !== 'final')) return null;
     if (result.next_action === 'persist_round' && completedRound === null) return null;
-    if (result.next_action === 'persist_batch' && (completedRound === null || completedRound.kind !== 'tool_batch')) return null;
+    if (result.next_action === 'persist_batch') {
+      if (completedRound === null || completedRound.kind !== 'tool_batch') return null;
+      // A completed provider round may precede batch preparation. When native
+      // returns prepared WAL rows, every row must bind to that recovered round.
+      if (attempt.batch.length > 0 && (completedRound.calls.length !== attempt.batch.length ||
+          completedRound.calls.some((call, index) => {
+            const prepared = attempt.batch[index];
+            return prepared === undefined || call.call_index !== prepared.call_index || call.call_id !== prepared.call_id ||
+              call.name !== prepared.name || call.arguments_sha256 !== prepared.arguments_sha256 ||
+              call.safe_summary_key !== prepared.safe_summary_key || call.access !== prepared.access;
+          }))) return null;
+    }
     if ((result.next_action === 'persist_approval' || result.next_action === 'persist_tool_result' || result.next_action === 'none') && completedRound !== null) return null;
   } else if (result.status === 'retryable') {
     if (result.next_action !== 'retry_same_round' || completedRound !== null || attempt.phase !== 'failed') return null;

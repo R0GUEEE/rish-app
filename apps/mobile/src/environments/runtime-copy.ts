@@ -1,6 +1,6 @@
 const en = {
   title: 'Language environments', runTitle: 'Run a program', close: 'Close', refresh: 'Refresh',
-  intro: 'Install Python, Java, Go, Rust, Bun or Node.js only when you need it. Packages are stored on this device and can be removed later.',
+  intro: 'Use Python, Java, Go, Rust, Bun or Node.js on demand. The agent can install packages for a task with your allowed permissions. You can also install, import or delete them here.',
   empty: 'No package is published for this language yet. Import a compatible .rishenv file or add its HTTPS URL.',
   unavailable: 'Language environments are not available in this version on this device.',
   loading: 'Loading environments…', install: 'Install', remove: 'Delete', select: 'Choose', selected: 'Selected',
@@ -27,7 +27,7 @@ const en = {
 };
 const zh: typeof en = {
   title: '语言运行环境', runTitle: '运行程序', close: '关闭', refresh: '刷新',
-  intro: '按需安装 Python、Java、Go、Rust、Bun 或 Node.js。环境保存在本机，不再需要时可以删除。',
+  intro: '按需使用 Python、Java、Go、Rust、Bun 或 Node.js。智能体可按任务需要和已授予的权限安装环境，你也可以在这里手动安装、导入或删除。',
   empty: '这个语言还没有已发布的环境包。可以导入兼容的 .rishenv 文件，或添加 HTTPS 下载地址。',
   unavailable: '当前设备上的这个版本暂不支持语言运行环境。',
   loading: '正在读取运行环境…', install: '安装', remove: '删除', select: '选择', selected: '已选择',

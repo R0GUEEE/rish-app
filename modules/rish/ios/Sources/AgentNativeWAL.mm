@@ -1,4 +1,5 @@
 #import "AgentNativeWAL.h"
+#import "AgentRuntimeToolContracts.h"
 #import "RishHarnessCatalog.h"
 
 #import "DSHWorkspaceCanonical.h"
@@ -782,6 +783,13 @@ BOOL DSHAgentToolArgumentsAccepted(NSString *name,
     return DSHAgentToolArgumentsRefused(failureCode, reason,
         @"E_AGENT_BAD_ARGUMENTS", @"arguments_do_not_match_tool_schema");
   }
+  if (DSHAgentIsRuntimeTool(toolName)) {
+    NSDictionary *validation = DSHAgentRuntimeContract(@"runtime_arguments", arguments, toolName);
+    if ([validation[@"valid"] isEqual:@YES]) return YES;
+    return DSHAgentToolArgumentsRefused(failureCode, reason,
+        validation[@"failure_code"] ?: @"E_AGENT_BAD_ARGUMENTS",
+        validation[@"reason"] ?: @"arguments_do_not_match_tool_schema");
+  }
   if ([toolName isEqualToString:@"write_file"] ||
       [toolName isEqualToString:@"read_file"] ||
       [toolName isEqualToString:@"list_dir"]) {
@@ -823,6 +831,16 @@ BOOL DSHAgentToolArgumentsAccepted(NSString *name,
         (expectedPrior != nil && !DSHAgentArgumentWritePriorShape(expectedPrior))) {
       return DSHAgentToolArgumentsRefused(failureCode, reason,
           @"E_AGENT_BAD_ARGUMENTS", @"arguments_do_not_match_tool_schema");
+    }
+    // Admission of a new call is separate from its durable identity/shape.
+    // Keep malformed historical calls readable, but do not send a provider's
+    // stringified sentinel to the executor as a stale file revision. It must
+    // settle as repairable feedback, without silently changing it to null.
+    if ([expectedRevision isEqual:@"null"] ||
+        [expectedRevision isEqual:@"undefined"]) {
+      return DSHAgentToolArgumentsRefused(failureCode, reason,
+          @"E_AGENT_BAD_ARGUMENTS",
+          @"expected_revision_must_be_json_null_or_a_read_file_revision");
     }
     if (contentBytes.length > DSHAgentNativeWALMaxSingleWriteBytes) {
       return DSHAgentToolArgumentsRefused(failureCode, reason,
@@ -929,6 +947,11 @@ BOOL DSHAgentValidateNativeToolFeedbackString(NSString *feedbackJSON,
   NSDictionary *payload = feedback[@"payload"];
   NSString *name = feedback[@"name"];
   NSString *outcome = feedback[@"outcome"];
+  if (DSHAgentIsRuntimeTool(name)) {
+    BOOL valid = DSHAgentRuntimeContractValid(@"runtime_feedback", feedbackText);
+    if (!valid) DSHSetAgentNativeStoreError(error, DSHAgentNativeStoreErrorInvalidArgument);
+    return valid;
+  }
   if ([name isEqualToString:@"list_dir"] && bytes.length > 64 * 1024) {
     DSHSetAgentNativeStoreError(error, DSHAgentNativeStoreErrorCapacity);
     return NO;

@@ -10,7 +10,7 @@ import Clock from 'lucide-react-native/icons/clock';
 import LoaderCircle from 'lucide-react-native/icons/loader-circle';
 
 import { useAppPresentation } from '../presentation/AppPresentation';
-import type { AttachmentDescriptor } from '../state';
+import type { AgentFailureCode, AttachmentDescriptor } from '../state';
 import { fonts, type ThemePalette } from '../theme';
 import { AppIcon } from './AppIcon';
 import { SpinningIcon } from './SpinningIcon';
@@ -28,6 +28,8 @@ export type StructuredBlock =
       arguments: string;
       status: 'pending' | 'running' | 'success' | 'error' | 'cancelled' | 'unknown';
       durationMs?: number;
+      failureCode?: AgentFailureCode;
+      denied?: boolean;
     }
   | {
       id: string;
@@ -62,6 +64,9 @@ type Labels = LabelOverrides & {
   complete: string;
   duration: (durationMs: number) => string;
   noOutput: string;
+  noFailureDetails: string;
+  denied: string;
+  failureDescription: (code: AgentFailureCode) => string;
 };
 
 export function StructuredContent({
@@ -131,6 +136,26 @@ export function StructuredContent({
       duration: durationMs =>
         t('messages.durationMs', { milliseconds: durationMs }),
       noOutput: t('messages.noToolOutput'),
+      noFailureDetails: t('messages.toolFailure.noDetails'),
+      denied: t('messages.toolFailure.denied'),
+      failureDescription: code => {
+        switch (code) {
+          case 'E_AGENT_BAD_ARGUMENTS': return t('messages.toolFailure.arguments');
+          case 'E_AGENT_BAD_PATH': return t('messages.toolFailure.path');
+          case 'E_AGENT_DENIED_BY_USER': return t('messages.toolFailure.deniedByUser');
+          case 'E_AGENT_CAPABILITY': return t('messages.toolFailure.capability');
+          case 'E_AGENT_APPROVAL': return t('messages.toolFailure.approval');
+          case 'E_AGENT_TOOL_FAILED': return t('messages.toolFailure.execution');
+          case 'E_AGENT_NO_ROOT': return t('messages.toolFailure.noWorkspace');
+          case 'E_AGENT_ROOT_STALE': return t('messages.toolFailure.workspaceChanged');
+          case 'E_AGENT_CONFLICT': return t('messages.toolFailure.conflict');
+          case 'E_AGENT_PERSISTENCE': return t('messages.toolFailure.persistence');
+          case 'E_AGENT_CANCELLED': return t('messages.toolFailure.cancelled');
+          case 'E_AGENT_EXECUTION_AMBIGUOUS': return t('messages.toolFailure.ambiguous');
+          case 'E_AGENT_UNKNOWN_TOOL': return t('messages.toolFailure.unknownTool');
+          default: return t('messages.toolFailure.recorded');
+        }
+      },
     }),
     [labelOverrides, t],
   );
@@ -298,7 +323,17 @@ function ToolBlock({
   const pending = isCall && block.status === 'pending';
   const cancelled = isCall && block.status === 'cancelled';
   const succeeded = isCall ? block.status === 'success' : !failed;
-  const detail = isCall ? block.arguments : block.output;
+  const output = isCall ? block.arguments : block.output;
+  const failureCode = isCall ? block.failureCode : undefined;
+  const failureDescription = failureCode !== undefined
+    ? labels.failureDescription(failureCode)
+    : isCall && block.denied
+    ? labels.denied
+    : failed && (isCall || !output.trim())
+    ? labels.noFailureDetails
+    : undefined;
+  const detail = [failureDescription, output.trim() ? output : undefined]
+    .filter(value => value !== undefined).join('\n\n');
   const caption = isCall
     ? block.durationMs === undefined ? labels.status(block.status) : `${labels.status(block.status)} · ${labels.duration(block.durationMs)}`
     : failed
@@ -403,6 +438,11 @@ function ToolBlock({
           style={styles.chevron}
         />
       </Pressable>
+      {failureCode !== undefined && (
+        <Text selectable style={styles.toolFailureCode} testID="tool-failure-code">
+          {failureCode}
+        </Text>
+      )}
       {expanded && (
         <Text
           selectable
@@ -518,5 +558,13 @@ const createStyles = (colors: ThemePalette) =>
       padding: 12,
     },
     toolDetailFailed: { color: colors.danger, borderTopColor: colors.danger },
+    toolFailureCode: {
+      color: colors.danger,
+      fontFamily: fonts.mono,
+      fontSize: 11,
+      lineHeight: 17,
+      paddingHorizontal: 12,
+      paddingBottom: 10,
+    },
     pressed: { opacity: 0.58 },
   });

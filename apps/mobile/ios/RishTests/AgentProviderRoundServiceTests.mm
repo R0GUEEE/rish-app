@@ -479,7 +479,7 @@ static NSDictionary *DSHProviderSmokeRequest(NSDictionary *root,
     @"project_context_sha256" : NSNull.null,
     @"transcript" : transcript,
     @"root" : root,
-    @"registry_version" : @1,
+    @"registry_version" : @3, // This helper creates fresh iOS authorities.
     @"toolset_sha256" : toolsetSHA256,
   };
 }
@@ -1448,6 +1448,8 @@ static NSDictionary *DSHProviderSmokeQueryRequest(NSDictionary *root,
 
 - (void)testCompatWriteDefaultsCreateOnlyRevisionAndCompletesToolBatch {
   DSHProviderSmokeFixture *fixture = [[DSHProviderSmokeFixture alloc] init];
+  XCTAssertEqualObjects(fixture.prepared.authority[@"registry"][@"registry_version"], @3);
+  XCTAssertEqualObjects(fixture.request[@"registry_version"], fixture.prepared.authority[@"registry"][@"registry_version"]);
   NSString *encoded = @"{\"name\":\"write_file\",\"arguments\":{\"path\":\"RISH_HARNESS_PROOF_20260901.md\",\"content\":\"Rish real-device harness proof.\"}}";
   NSError *error = nil;
   NSDictionary *parsed = DSHParseCompletionResponseSchema2(@{
@@ -1503,15 +1505,76 @@ static NSDictionary *DSHProviderSmokeQueryRequest(NSDictionary *root,
     }
   }
   XCTAssertNotNil(writeFunction);
-  XCTAssertTrue([writeFunction[@"description"] containsString:@"OMIT expected_revision"]);
+  XCTAssertTrue([writeFunction[@"description"] containsString:@"omit expected_revision or pass JSON null"]);
+  XCTAssertTrue([writeFunction[@"description"] containsString:@"asserts the file does not exist"]);
   XCTAssertTrue([writeFunction[@"description"] containsString:@"exact revision"]);
   XCTAssertEqualObjects(writeFunction[@"parameters"][@"properties"]
                              [@"expected_revision"][@"type"],
-                        @"string");
+                        (@[@"string", @"null"]));
   XCTAssertFalse([writeFunction[@"parameters"][@"required"]
       containsObject:@"expected_revision"]);
   NSDictionary *state = [fixture.wal snapshotWithError:nil];
   XCTAssertEqualObjects(state[@"operations"][0][@"state"], @"committed");
+}
+
+- (void)testFrozenLegacyRegistryKeepsOriginalProviderWriteSchemas {
+  DSHProviderSmokeFixture *fixture = [[DSHProviderSmokeFixture alloc] init];
+  NSArray *cases = @[
+    @{@"version":@1, @"digest":@"89e677a4e537ca45b7f4ac300cb0ba110d9ca9717e872d522e1b0c2036fc00cb", @"type":@"string", @"required":@NO},
+    @{@"version":@1, @"digest":@"6ac56c1bdcf7619b062a4d93eac9886cd68dc352a36cd8573e35ba749edde5b9", @"type":@"string", @"required":@YES},
+    @{@"version":@1, @"digest":@"e12ce6ea32bb3f634151a2c886deb5b409362c773893e8a29c27923f578a7098", @"type":@[@"string", @"null"], @"required":@YES},
+    @{@"version":@2, @"digest":@"62e426ffac0cc058b8affcbc8744549eeb91bc9a99923bb1982ec42c47e8a60c", @"type":@"string", @"required":@NO},
+    @{@"version":@2, @"digest":@"bbdeb99de07223175703fb9748e16444f1f89e0b072283d030be9017c2fdebd4", @"type":@"string", @"required":@NO},
+  ];
+  NSMutableArray *safeTools = [NSMutableArray array];
+  for (NSDictionary *tool in fixture.prepared.authority[@"registry"][@"tools"])
+    if ([@[@"list_dir", @"read_file", @"write_file"] containsObject:tool[@"name"]]) [safeTools addObject:tool];
+  for (NSDictionary *history in cases) {
+    NSDictionary *legacy = DSHAgentImmutableJSONCopy(@{@"schema_version":@2,
+      @"registry_version":history[@"version"], @"toolset_sha256":history[@"digest"], @"tools":[safeTools copy]}, nil);
+    NSError *error = nil;
+    XCTAssertTrue([DSHAgentToolRegistry validateRegistryProjection:legacy root:fixture.root error:&error]);
+    XCTAssertNil(error);
+    NSMutableDictionary *authority = [fixture.prepared.authority mutableCopy]; authority[@"registry"] = legacy;
+    NSArray *providerTools = DSHProviderToolsForAuthority([authority copy], fixture.prepared.toolRegistry, &error);
+    XCTAssertNotNil(providerTools); XCTAssertNil(error); XCTAssertEqual(providerTools.count, 3U);
+    NSDictionary *writeFunction = nil;
+    for (NSDictionary *tool in providerTools)
+      if ([tool[@"function"][@"name"] isEqual:@"write_file"]) writeFunction = tool[@"function"];
+    XCTAssertNotNil(writeFunction);
+    XCTAssertEqualObjects(writeFunction[@"parameters"][@"properties"][@"expected_revision"][@"type"], history[@"type"]);
+    XCTAssertEqual([writeFunction[@"parameters"][@"required"] containsObject:@"expected_revision"], [history[@"required"] boolValue]);
+    XCTAssertFalse([[providerTools valueForKeyPath:@"function.name"] containsObject:@"list_runtime_environments"]);
+
+    // A complete legacy request, not just a standalone descriptor lookup,
+    // must send the old table even though this registry instance defaults v3.
+    DSHProviderSmokeFixture *legacyFixture = [[DSHProviderSmokeFixture alloc] init];
+    legacyFixture.prepared.authority = [authority copy];
+    NSMutableDictionary *legacyRequest = [legacyFixture.request mutableCopy];
+    legacyRequest[@"registry_version"] = history[@"version"];
+    legacyRequest[@"toolset_sha256"] = history[@"digest"];
+    NSDictionary *result = [legacyFixture.service completeAgentRoundV2WithRequest:[legacyRequest copy] error:&error];
+    XCTAssertNil(error); XCTAssertEqualObjects(result[@"status"], @"completed");
+    XCTAssertEqual(legacyFixture.transport.startCount, 1U);
+    NSDictionary *body = [NSJSONSerialization JSONObjectWithData:legacyFixture.transport.lastBodyData options:0 error:&error];
+    XCTAssertNil(error); XCTAssertEqualObjects(body[@"tools"], providerTools);
+    [NSFileManager.defaultManager removeItemAtURL:legacyFixture.walRoot error:nil];
+  }
+  [NSFileManager.defaultManager removeItemAtURL:fixture.walRoot error:nil];
+}
+
+- (void)testProviderRejectsWrongRegistryVersionBeforeDispatchEvenWithMatchingDigest {
+  for (NSNumber *wrongVersion in @[@1, @2]) {
+    DSHProviderSmokeFixture *fixture = [[DSHProviderSmokeFixture alloc] init];
+    NSMutableDictionary *request = [fixture.request mutableCopy]; request[@"registry_version"] = wrongVersion;
+    XCTAssertEqualObjects(request[@"toolset_sha256"], fixture.prepared.authority[@"registry"][@"toolset_sha256"]);
+    NSError *error = nil;
+    NSDictionary *result = [fixture.service completeAgentRoundV2WithRequest:[request copy] error:&error];
+    XCTAssertNil(error); XCTAssertEqualObjects(result[@"status"], @"conflict");
+    XCTAssertEqualObjects(result[@"failure_code"], @"E_AGENT_CONFLICT");
+    XCTAssertEqual(fixture.transport.startCount, 0U); XCTAssertEqual(fixture.rounds.createCount, 0U);
+    [NSFileManager.defaultManager removeItemAtURL:fixture.walRoot error:nil];
+  }
 }
 
 - (void)testProviderReceiptCorrelationMustMatchTheReservedRequest {
@@ -2692,7 +2755,7 @@ static NSDictionary *DSHProviderSmokeQueryRequest(NSDictionary *root,
       @"transport_schema_version" : @2, @"harness_id" : @"dsh", @"model" : @"deepseek-v4-flash",
       @"thinking_mode" : @"high", @"visible_message_ids" : attempt[@"visible_message_ids"],
       @"visible_history_sha256" : visibleDigest, @"visible_message_count" : @1,
-      @"project_context_sha256" : NSNull.null, @"registry_version" : @1,
+      @"project_context_sha256" : NSNull.null, @"registry_version" : @3,
       @"expected_policy_version" : NSNull.null, @"expected_transcript" : NSNull.null,
     }) error:&error];
     XCTAssertNil(error, @"prepare agent: %@", error);

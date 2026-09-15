@@ -22,6 +22,8 @@ export function environmentNative() {
   return {
     listEnvironments: jest.fn().mockResolvedValue({ schema_version: 1, environments: [environment()], selected_environment_id: 'python-3-13' }),
     installEnvironment: jest.fn().mockResolvedValue(environment({ state: 'installed' })),
+    installEnvironmentOwned: jest.fn().mockResolvedValue(environment({ state: 'installed' })),
+    cancelOwnedInstall: jest.fn().mockResolvedValue({ schema_version: 1, status: 'cancelled' }),
     importEnvironment: jest.fn().mockResolvedValue(null),
     downloadEnvironment: jest.fn().mockResolvedValue(environment({ state: 'installed' })),
     cancelInstall: jest.fn().mockResolvedValue({ schema_version: 1, status: 'cancelled' }),

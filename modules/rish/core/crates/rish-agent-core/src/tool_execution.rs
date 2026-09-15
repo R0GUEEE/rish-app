@@ -43,7 +43,7 @@ fn or_null(value: Option<&Value>) -> Value {
 }
 
 fn is_mutation(name: &str) -> bool {
-    matches!(name, "write_file" | "git_commit" | "git_push") || name.ends_with("_guest_cgi")
+    matches!(name, "write_file" | "git_commit" | "git_push") || crate::runtime_tools::is_guest(name)
 }
 
 // MARK: - request
@@ -352,7 +352,9 @@ fn conversation_grant_bound(grants: Option<&[Value]>, request: &Value) -> bool {
         "write_file" => "file_write",
         "git_commit" => "git_commit",
         "git_push" => "git_push",
-        _ if name.ends_with("_guest_cgi") => "guest_service",
+        _ if crate::runtime_tools::is_mutation(name) || name.ends_with("_guest_cgi") => {
+            "guest_service"
+        }
         _ => return false,
     };
     if is_null(get(request, "approval_reference")) {
@@ -383,9 +385,7 @@ fn conversation_grant_bound(grants: Option<&[Value]>, request: &Value) -> bool {
                 root.and_then(|r| get(r, "root_fingerprint_sha256")),
             )
             && string_eq(get(grant, "tool_family"), family)
-            && (get(grant, "registry_version") == Some(&json!(1))
-                || get(grant, "registry_version") == Some(&json!(2)))
-            && (family != "guest_service" || get(grant, "registry_version") == Some(&json!(2)))
+            && crate::runtime_tools::grant_supports_tool(get(grant, "registry_version"), name)
             && string_eq(get(grant, "policy_version"), "agent-v1")
     })
 }
@@ -765,6 +765,21 @@ pub fn settlement_plan(
     let Some(feedback_text) = as_str(get(effect, "feedback")) else {
         return Err(StoreError::InvalidArgument);
     };
+    let runtime = as_str(get(request, "name")).is_some_and(crate::runtime_tools::is_runtime);
+    let expected_state = if runtime {
+        if get(row, "name") != get(request, "name")
+            || get(row, "arguments_sha256") != get(request, "arguments_sha256")
+            || !crate::runtime_tools::effect_valid(row, effect)
+        {
+            return Err(StoreError::Conflict);
+        }
+        match as_str(get(row, "state")) {
+            Some(state @ ("running" | "cancel_requested")) => state,
+            _ => return Err(StoreError::Conflict),
+        }
+    } else {
+        "running"
+    };
     let feedback_bytes = feedback_text.as_bytes();
     let result_sha =
         hash_bytes("tool-result", feedback_bytes).ok_or(StoreError::InvalidArgument)?;
@@ -796,9 +811,9 @@ pub fn settlement_plan(
     });
     let ambiguous = outcome == "ambiguous";
     Ok(json!({
-        "cas": execution_cas(row, "running"),
+        "cas": execution_cas(row, expected_state),
         "patch": {
-            "state": if ambiguous { "ambiguous" } else { "settled" },
+            "state": if ambiguous { "ambiguous" } else if runtime && outcome == "cancelled" { "cancelled" } else { "settled" },
             "settled_facts": get(effect, "settled_facts"), "receipt": receipt,
         },
         "message": message,
@@ -851,6 +866,20 @@ pub fn recover_plan(request: &Value, row: &Value, recovered: &Value) -> Result<V
             Some("running" | "cancel_requested")
         )
     {
+        if crate::runtime_tools::is_runtime(name) {
+            if let Some(effect) =
+                get(recovered, "effect").filter(|e| crate::runtime_tools::effect_valid(row, e))
+            {
+                let recovery_sha = hash_json(
+                    "agent-operation-request",
+                    &json!({ "operation_kind": "execute_agent_tool", "request": request }),
+                )
+                .ok_or(StoreError::InvalidArgument)?;
+                return Ok(
+                    json!({ "settle": settlement_plan(request, row, effect, Some(&json!(recovery_sha)), 0)? }),
+                );
+            }
+        }
         let mut payload: Option<Value> = None;
         let mut facts: Option<Value> = None;
         if name == "write_file"
