@@ -851,6 +851,22 @@ is schema 1 while a round CAS is schema 2, an owner carries its own `task_id`
 and `heartbeat_at`, and `claim`/`mark_dispatched` take a full CAS rather than a
 revision.
 
+### The tool table is a table
+
+`AgentToolRegistry.mm` held the frozen tool descriptors, the access each root
+capability implies, the write policy and the toolset digest. The table is a
+pure table and the digest taken over it is what every stored authority is
+bound to, so a second copy on Android would have been a second source of
+truth for a compatibility contract. `tool_registry.rs` owns it now, and both
+platforms read it.
+
+One thing does stay with the host, because the core cannot know it: whether
+this build has the guest CGI tools compiled in. iOS answers from
+`DSH_GUEST_CGI_AVAILABLE`, Android answers no, and the digest follows. Both
+values are pinned in the core's tests — a change to the table changes them and
+invalidates every authority on every device, which is exactly the kind of
+change that should be hard to make by accident.
+
 ### Device-only storage metadata
 
 The session store and the agent WAL require every pinned item to report

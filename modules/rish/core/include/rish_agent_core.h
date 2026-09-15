@@ -108,6 +108,12 @@ char *rish_agent_wal_begin(void *handle, const char *json, size_t json_length);
 char *rish_agent_wal_confirm(void *handle, const char *outcome, size_t outcome_length);
 void rish_agent_wal_close(void *handle);
 
+/// The frozen tool table over {"op","guest_cgi"?,"root"?,"name"?,"registry"?}:
+/// toolset_sha256, registry, policy, descriptor, native_descriptor,
+/// registry_shape. Whether this build has the guest CGI tools is the host's
+/// to say and changes the toolset digest.
+char *rish_agent_tool_registry_reduce(const char *json, size_t json_length);
+
 /// One runtime-coordinator decision over
 /// {"op","request","state"?,"session"?,"facts"?,"proof"?,"base"?,"queried"?}:
 /// query_tool_request, query_attempt_request, presentations_request,

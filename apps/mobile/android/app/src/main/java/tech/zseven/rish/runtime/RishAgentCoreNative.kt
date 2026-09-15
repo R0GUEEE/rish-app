@@ -69,6 +69,14 @@ internal object RishAgentCoreNative {
 
     @JvmStatic external fun ledgerReduceNative(requestJson: String): String?
 
+    /** One tool-registry question over `{"op","guest_cgi",...}`. */
+    fun toolRegistryReduce(requestJson: String): String? {
+        requireAvailable()
+        return toolRegistryReduceNative(requestJson)
+    }
+
+    @JvmStatic external fun toolRegistryReduceNative(requestJson: String): String?
+
     /** Adopts a committed WAL state and returns an opaque handle, or 0. */
     @JvmStatic external fun walOpen(stateJson: String): Long
 
