@@ -45,6 +45,14 @@ internal object RishAgentCoreNative {
     /** One runtime-coordinator decision. */
     @JvmStatic external fun runtimeReduce(requestJson: String): String?
 
+    /** One transcript-store decision over `{"op","request","env","view"}`. */
+    fun transcriptReduce(requestJson: String): String? {
+        requireAvailable()
+        return transcriptReduceNative(requestJson)
+    }
+
+    @JvmStatic external fun transcriptReduceNative(requestJson: String): String?
+
     /** Adopts a committed WAL state and returns an opaque handle, or 0. */
     @JvmStatic external fun walOpen(stateJson: String): Long
 

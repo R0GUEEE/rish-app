@@ -820,6 +820,20 @@ and the WAL reached them on a path that had never loaded anything.
 `AgentRuntimeModule` is still a stub. This is the storage layer it will stand
 on, not the engine.
 
+The transcript store follows it, as a facade over the same reducer iOS calls:
+the host owns the WAL transaction, generates the fresh transcript id and the
+retention timestamp, collects the view, and applies the returned changes
+verbatim. The round-presentation file cache iOS keeps is display only, not
+authority, and is not mirrored.
+
+Writing the Android facade is also the first time the shared rules have been
+read by someone who did not write the iOS one, and that found three things
+the iOS call sites had simply always got right: a transcript holds assistant
+and tool turns only, because user text lives in the session; `append` and
+`mark_terminal` name the row they expect to still be there through
+`expected_transcript`, not `transcript`; and a root is the full seven-field
+form, not a path. Each of those is now a test.
+
 ### Device-only storage metadata
 
 The session store and the agent WAL require every pinned item to report
