@@ -922,6 +922,15 @@ Two properties worth naming because a port loses them quietly:
   hostile input that is about to be refused. That check stays on the host side
   of the call; the core bounds the path too, but by then the copy has happened.
 
+`decisionForContentData:` moved with it. Its order is the rule — a file over
+budget is refused before its bytes are looked at, a NUL makes it binary before
+it is decoded, and only then does encoding matter — and one Foundation detail
+had to be reproduced rather than tidied up: the control scan walks **UTF-16
+code units**, because `characterIsMember:` takes a `unichar`. A format
+character outside the BMP arrives as two surrogates, neither of which is a
+control character, so it passes. Writing that scan over code *points* in Rust
+would have made the core stricter than the rule it was replacing.
+
 The second one was a regression this cut introduced and
 `testPublicStringInputsAreBoundedBeforeNormalization` caught it — it hands the
 policy a string that reports a length of a megabyte and throws if anything
