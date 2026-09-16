@@ -92,23 +92,53 @@ internal class AndroidWorkspaceRegistry(val root: File) {
 
     private fun loadRegistry(): JSONObject {
         if (!registryFile.exists()) return emptyRegistry()
-        val text = try {
-            registryFile.readText()
+        val bytes = try {
+            registryFile.readBytes()
         } catch (_: Exception) {
             throw Refused("E_WORKSPACE_PERSISTENCE")
         }
+        // Before the parse: one complete value, bounded in depth and nodes, no
+        // duplicate keys, no negative zero. A corrupt file costs a refusal
+        // rather than an unbounded walk, and `JSONObject` would have taken the
+        // *last* of two duplicate keys without saying so.
+        if (!RishAgentCoreNative.workspaceJsonBounded(bytes)) {
+            throw Refused("E_WORKSPACE_CORRUPT")
+        }
         val parsed = try {
-            JSONObject(text)
+            JSONObject(String(bytes, Charsets.UTF_8))
         } catch (_: Exception) {
             // A registry that will not parse is corrupt. It is never silently
             // replaced with an empty one: that would lose every binding.
             throw Refused("E_WORKSPACE_CORRUPT")
         }
-        if (parsed.opt("schema_version") != 1 || parsed.opt("generation") !is Int ||
-            parsed.optJSONArray("records") == null
-        ) {
-            throw Refused("E_WORKSPACE_CORRUPT")
+        // The whole shape is the shared rule's: the envelope, the capacity,
+        // every record, the ascending order, and the uniqueness of the folded
+        // directory names. Only the folding is this host's.
+        val records = parsed.optJSONArray("records")
+        val foldings = JSONArray()
+        if (records != null) {
+            for (index in 0 until records.length()) {
+                val record = records.optJSONObject(index)
+                val display = record?.opt("display_name")
+                val directory = record?.opt("owned_directory_name")
+                foldings.put(
+                    JSONObject()
+                        .put(
+                            "display_name",
+                            if (display is String) folded(display) else JSONObject.NULL,
+                        )
+                        .put(
+                            "directory_name",
+                            if (directory is String) folded(directory) else JSONObject.NULL,
+                        ),
+                )
+            }
         }
+        val reply = RishAgentCoreNative.workspaceRecord(
+            JSONObject().put("op", "registry_shape").put("registry", parsed)
+                .put("folded", foldings),
+        )
+        if (reply?.optBoolean("valid") != true) throw Refused("E_WORKSPACE_CORRUPT")
         return parsed
     }
 
@@ -129,6 +159,12 @@ internal class AndroidWorkspaceRegistry(val root: File) {
         if (!RuntimeJson.uuid(workspaceId)) throw Refused("E_WORKSPACE_INVALID")
         val registry = loadRegistry()
         if (recordFor(registry, workspaceId) != null) throw Refused("E_WORKSPACE_CONFLICT")
+        // A full registry refuses rather than dropping a binding somebody uses.
+        val room = RishAgentCoreNative.workspaceRecord(
+            JSONObject().put("op", "registry_has_room")
+                .put("count", registry.getJSONArray("records").length()),
+        )
+        if (room?.optBoolean("has_room") != true) throw Refused("E_WORKSPACE_BUSY")
         if (!container.isDirectory && !container.mkdirs()) {
             throw Refused("E_WORKSPACE_PERSISTENCE")
         }
@@ -154,8 +190,12 @@ internal class AndroidWorkspaceRegistry(val root: File) {
         val authority = sealAuthority(record, directory, now)
         writeJson(authorityFile(workspaceId, 1), authority)
 
-        val records = registry.getJSONArray("records")
-        records.put(record)
+        // Records are stored in ascending workspace id order, because the
+        // registry's canonical JSON is what a journal's
+        // `previous_registry_sha256` is taken over: the same records in a
+        // different order digest differently. Appending would have written a
+        // registry this device could no longer read.
+        val records = insertedInOrder(registry.getJSONArray("records"), record)
         writeJson(
             registryFile,
             JSONObject().put("schema_version", 1)
@@ -384,6 +424,23 @@ internal class AndroidWorkspaceRegistry(val root: File) {
             temporary.delete()
             throw Refused("E_WORKSPACE_PERSISTENCE")
         }
+    }
+
+    /** The records with [record] in its sorted place. */
+    private fun insertedInOrder(records: JSONArray, record: JSONObject): JSONArray {
+        val id = record.getString("workspace_id")
+        val ordered = JSONArray()
+        var inserted = false
+        for (index in 0 until records.length()) {
+            val existing = records.getJSONObject(index)
+            if (!inserted && existing.optString("workspace_id") > id) {
+                ordered.put(record)
+                inserted = true
+            }
+            ordered.put(existing)
+        }
+        if (!inserted) ordered.put(record)
+        return ordered
     }
 
     private fun recordFor(registry: JSONObject, workspaceId: String): JSONObject? {

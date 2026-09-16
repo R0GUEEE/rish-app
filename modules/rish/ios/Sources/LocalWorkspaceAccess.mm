@@ -245,6 +245,7 @@ static BOOL DSHCanonicalDisplayName(id value);
 static NSDictionary *DSHWorkspaceAuthorityReduce(NSString *op,
                                                  NSDictionary *fields);
 static NSString *DSHWorkspaceFoldedName(id value);
+static NSString *DSHUnsignedIntegerString(unsigned long long value);
 
 // Evidence is built in memory and carries its capabilities as an NSSet, which
 // NSJSONSerialization will not encode. Crossing to the core turns it into an
@@ -569,24 +570,24 @@ static BOOL DSHSameNode(const struct stat &left, const struct stat &right) {
          left.st_mode == right.st_mode;
 }
 
+// Which directory an authority was sealed over lives in the shared core
+// (modules/rish/core, `rish_agent_workspace_authority_reduce`). `fstat` is
+// this host's; that only the inode is compared — because iOS renumbers the
+// data volume across reboots — is the rule, and it is now stated once rather
+// than here and again in the legacy matcher.
 static BOOL DSHWorkspaceDescriptorMatchesAuthority(
     int descriptor,
     NSDictionary *authority) {
-  if (descriptor < 0 || ![authority isKindOfClass:NSDictionary.class]) {
-    return NO;
-  }
+  if (descriptor < 0) return NO;
   struct stat state = {};
-  if (fstat(descriptor, &state) != 0 || !S_ISDIR(state.st_mode) ||
-      S_ISLNK(state.st_mode)) {
-    return NO;
-  }
-  // st_dev is not durable across reboots (iOS renumbers the data volume), so
-  // only the inode is compared against the persisted authority. Callers reach
-  // this descriptor by walking down from the app container, which is what a
-  // matching device id used to stand for.
-  unsigned long long expectedInode = strtoull(
-      [authority[@"inode_id"] UTF8String], nullptr, 10);
-  return (unsigned long long)state.st_ino == expectedInode;
+  if (fstat(descriptor, &state) != 0) return NO;
+  BOOL isDirectory = S_ISDIR(state.st_mode) && !S_ISLNK(state.st_mode);
+  return [DSHWorkspaceAuthorityReduce(@"descriptor_matches_authority", @{
+    @"authority" : [authority isKindOfClass:NSDictionary.class] ? authority
+                                                                : NSNull.null,
+    @"inode_id" : DSHUnsignedIntegerString((unsigned long long)state.st_ino),
+    @"is_directory" : isDirectory ? @YES : @NO,
+  })[@"matches"] isEqual:@YES];
 }
 
 static NSString *DSHUnsignedIntegerString(unsigned long long value) {

@@ -3,6 +3,7 @@ package tech.zseven.rish
 import android.system.Os
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import androidx.test.platform.app.InstrumentationRegistry
+import org.json.JSONArray
 import org.json.JSONObject
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
@@ -242,7 +243,78 @@ class AndroidWorkspaceRegistryTest {
         assertTrue(store.list().isEmpty())
     }
 
-    /** A registry that will not parse is corrupt, never quietly replaced. */
+    /**
+     * Records are stored in ascending workspace id order, because the
+     * registry's canonical JSON is what a journal's
+     * `previous_registry_sha256` is taken over: the same records in a
+     * different order digest differently. Creating appends in the right place,
+     * and a registry written any other way would not load.
+     */
+    @Test
+    fun recordsAreStoredInAscendingWorkspaceIdOrder() {
+        val store = registry()
+        val ids = (0 until 6).map { store.create("Space $it").getString("workspace_id") }
+        val records = store.registry().getJSONArray("records")
+        assertEquals(ids.size, records.length())
+        val stored = (0 until records.length())
+            .map { records.getJSONObject(it).getString("workspace_id") }
+        assertEquals(stored.sorted(), stored)
+        assertEquals(ids.sorted(), stored)
+        // And it still reads back, which is the point of the order.
+        assertEquals(ids.size, store.list().size)
+    }
+
+    /**
+     * The whole registry shape is the shared rule's now, so a file the rule
+     * refuses is refused here — including one that would only fail the
+     * ordering, which this host could never have written.
+     */
+    @Test
+    fun aRegistryTheSharedRuleRefusesIsNotLoaded() {
+        val store = registry()
+        store.create("Alpha")
+        store.create("Beta")
+        val file = File(store.root, "registry.json")
+        val parsed = JSONObject(file.readText())
+        val records = parsed.getJSONArray("records")
+        // Reverse the order; nothing else changes.
+        val reversed = JSONArray()
+        for (index in records.length() - 1 downTo 0) reversed.put(records.getJSONObject(index))
+        file.writeText(JSONObject(parsed.toString()).put("records", reversed).toString())
+        assertEquals(
+            "E_WORKSPACE_CORRUPT",
+            refusedCode("a registry out of order") { store.registry() },
+        )
+    }
+
+    /**
+     * Bytes are vetted before the parse. `JSONObject` would have taken the
+     * last of two duplicate keys without saying so — the shared scanner
+     * refuses the file instead.
+     */
+    @Test
+    fun aRegistryWithADuplicateKeyIsRefusedBeforeItIsParsed() {
+        val store = registry()
+        store.create("Alpha")
+        val file = File(store.root, "registry.json")
+        val text = file.readText()
+        assertTrue(text.contains("\"generation\""))
+        // Appended, so it is the one org.json keeps: a value the writer never
+        // wrote survives the parse and nothing says so.
+        file.writeText(text.dropLast(1) + ",\"generation\":99}")
+        assertEquals(
+            "E_WORKSPACE_CORRUPT",
+            refusedCode("a registry with a duplicate key") { store.registry() },
+        )
+        // And the scanner is what refused it. JSONObject accepts the same
+        // bytes and keeps the last occurrence, so the generation it reports is
+        // one nothing ever wrote — which is the whole hazard, and why the
+        // bytes are vetted before the parse rather than after.
+        assertFalse(RishAgentCoreNative.workspaceJsonBounded(file.readBytes()))
+        assertEquals(99, JSONObject(file.readText()).getInt("generation"))
+    }
+
+    /** A registry that will not parse is corrupt, never quietly replaced. */    /** A registry that will not parse is corrupt, never quietly replaced. */
     @Test
     fun aCorruptRegistryIsNeverReplacedWithAnEmptyOne() {
         val store = registry()

@@ -101,6 +101,8 @@ internal object RishAgentCoreNative {
         requestJson: String, session: String?): String?
 
     /** Canonical JSON of a JSON text, or null when it cannot be canonicalised. */
+    @JvmStatic external fun workspaceJsonBoundedNative(bytes: ByteArray): Boolean
+
     @JvmStatic external fun rootReduceNative(requestJson: String): String?
 
     @JvmStatic external fun workspaceRecordReduceNative(requestJson: String): String?
@@ -208,6 +210,16 @@ internal object RishAgentCoreNative {
      * A host that cannot reach the core has no second set of workspace rules
      * to fall back to, so it refuses too.
      */
+    /**
+     * Whether stored bytes are JSON the engine will look at. Raw bytes, not an
+     * envelope: the question is about bytes that may not be JSON.
+     *
+     * A build without the core cannot answer, and answers no — refusing to
+     * read a file it cannot vet is the only honest option.
+     */
+    fun workspaceJsonBounded(bytes: ByteArray): Boolean =
+        available && workspaceJsonBoundedNative(bytes)
+
     fun agentRoot(request: JSONObject): JSONObject? =
         workspaceReply(request) { rootReduceNative(it) }
 

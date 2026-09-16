@@ -307,6 +307,21 @@ Java_tech_zseven_rish_runtime_RishAgentCoreNative_rootReduceNative(
   return TakeOwnedReply(env, rish_agent_root_reduce(utf8.data(), utf8.size()));
 }
 
+// The stored-JSON scan takes raw bytes rather than an envelope, because the
+// question is about bytes that may not be JSON at all.
+extern "C" JNIEXPORT jboolean JNICALL
+Java_tech_zseven_rish_runtime_RishAgentCoreNative_workspaceJsonBoundedNative(
+    JNIEnv *env, jclass, jbyteArray bytes) {
+  if (bytes == nullptr) return JNI_FALSE;
+  jsize length = env->GetArrayLength(bytes);
+  jbyte *elements = env->GetByteArrayElements(bytes, nullptr);
+  if (elements == nullptr) return JNI_FALSE;
+  unsigned char accepted = rish_agent_workspace_json_bounded(
+      reinterpret_cast<const char *>(elements), static_cast<size_t>(length));
+  env->ReleaseByteArrayElements(bytes, elements, JNI_ABORT);
+  return accepted == 1 ? JNI_TRUE : JNI_FALSE;
+}
+
 // The resident committed state. The handle crosses as an opaque jlong; the
 // caller owns it until walClose, exactly as on the C side.
 extern "C" JNIEXPORT jlong JNICALL

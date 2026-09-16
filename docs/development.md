@@ -1203,6 +1203,44 @@ asking whether the record is the right shape, not comparing the directory
 identity, and inventing the fingerprint instead of asking for it. The last one
 fails nine of the twelve.
 
+### Android reads its registry the way iOS does
+
+Two things, and the second only became possible because of the first.
+
+**One place says device ids are not durable.**
+`DSHWorkspaceDescriptorMatchesAuthority` — the last rule left in
+`LocalWorkspaceAccess.mm` — now asks `descriptor_matches_authority`. Only the
+inode is compared, because iOS renumbers the data volume across reboots and a
+persisted `st_dev` would fail a perfectly good root after a restart. What a
+matching device id used to stand for, "this is inside our own container", is
+carried by *how* the caller got the descriptor: it walked down from the app
+container. That reasoning used to be written out twice, here and in the legacy
+matcher. It is written once now.
+
+**Android's registry uses the shared rules it was written before.**
+`AndroidWorkspaceRegistry` was checking `schema_version`, `generation` and
+`records` by hand and parsing with `JSONObject` directly. It now runs the byte
+scanner before the parse and `registry_shape` after it, and asks
+`registry_has_room` before creating — a bound it did not have at all.
+
+**That change made ascending order a rule Android had to obey, and it did
+not.** `create` appended; the registry it wrote would have failed to load on
+the next launch. Caught while writing the change rather than by a test, but
+`recordsAreStoredInAscendingWorkspaceIdOrder` now pins it. The order matters
+for the reason given above: the registry's canonical JSON is what a journal's
+`previous_registry_sha256` is taken over.
+
+**`org.json` keeps the last of two duplicate keys, silently.**
+`aRegistryWithADuplicateKeyIsRefusedBeforeItIsParsed` appends a second
+`generation` to a real registry file and asserts two things: the scanner
+refuses the bytes, *and* `JSONObject` happily parses them and reports a
+generation nothing ever wrote. The second assertion is the one that says why
+the scan has to happen before the parse rather than after.
+
+The first version of that test put the duplicate first and expected it to win.
+It lost — the original came later in the text. The fixture was wrong, not the
+claim; it appends now.
+
 ### Whether stored bytes are JSON worth looking at
 
 `workspace_json.rs` ports `DSHJSONHasBoundedExactStructure` and its scanner. It

@@ -1121,3 +1121,80 @@ fn the_reducer_answers_the_evidence_ops_too() {
         json!({ "ok": true, "matches": true })
     );
 }
+
+/// An open directory is the root an authority was sealed over when its inode
+/// matches — and **only** its inode. iOS renumbers the data volume across
+/// reboots, so comparing a persisted device id would fail a perfectly good
+/// root after a restart.
+#[test]
+fn a_descriptor_is_matched_on_its_inode_alone() {
+    let authority = owned();
+    let inode = authority["inode_id"].clone();
+    assert!(descriptor_matches_authority(
+        Some(&authority),
+        Some(&inode),
+        true
+    ));
+    // A different directory.
+    assert!(!descriptor_matches_authority(
+        Some(&authority),
+        Some(&json!("999")),
+        true
+    ));
+    // Something that is not a directory is not this root, whatever its inode.
+    assert!(!descriptor_matches_authority(
+        Some(&authority),
+        Some(&inode),
+        false
+    ));
+    // The inode has to be the canonical spelling the authority holds, so a
+    // number or a padded string is not a match rather than a lucky one.
+    for bad in [
+        json!(1234567),
+        json!("01234567"),
+        json!(""),
+        json!(Value::Null),
+    ] {
+        assert!(
+            !descriptor_matches_authority(Some(&authority), Some(&bad), true),
+            "{bad}"
+        );
+    }
+    assert!(!descriptor_matches_authority(Some(&authority), None, true));
+    assert!(!descriptor_matches_authority(None, Some(&inode), true));
+    // The device id is deliberately not consulted: an authority whose stored
+    // device id no longer exists still matches its directory.
+    let mut renumbered = owned();
+    renumbered["device_id"] = json!("16777299");
+    assert!(descriptor_matches_authority(
+        Some(&renumbered),
+        Some(&inode),
+        true
+    ));
+}
+
+#[test]
+fn the_reducer_answers_the_descriptor_op() {
+    let authority = owned();
+    let reply: Value = serde_json::from_str(&reduce_json(
+        &json!({
+            "op": "descriptor_matches_authority",
+            "authority": authority.clone(),
+            "inode_id": authority["inode_id"].clone(),
+            "is_directory": true,
+        })
+        .to_string(),
+    ))
+    .expect("reply");
+    assert_eq!(reply, json!({ "ok": true, "matches": true }));
+    // A host that did not say whether it is a directory has not matched.
+    let reply = reduce_json(
+        &json!({
+            "op": "descriptor_matches_authority",
+            "authority": authority.clone(),
+            "inode_id": authority["inode_id"].clone(),
+        })
+        .to_string(),
+    );
+    assert_eq!(reply, r#"{"matches":false,"ok":true}"#);
+}

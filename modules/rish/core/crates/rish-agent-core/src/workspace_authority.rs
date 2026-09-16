@@ -435,7 +435,34 @@ pub fn capabilities_set(value: Option<&Value>) -> bool {
     true
 }
 
-/// `DSHLegacyPhysicalIdentityMatchesAuthority`.
+/// `DSHWorkspaceDescriptorMatchesAuthority`: whether an open directory is the
+/// one an authority was sealed over.
+///
+/// **Only the inode is compared**, for the same reason the legacy matcher
+/// below gives: iOS renumbers the data volume across reboots, so a persisted
+/// `st_dev` would fail a perfectly good root after a restart. What a matching
+/// device id used to stand for — "this is inside our own container" — is
+/// carried instead by *how* the caller got here: it walked down from the app
+/// container to open the descriptor. Stating that in one place rather than two
+/// is why this lives here.
+///
+/// Whether the descriptor is a directory and not a symlink is the host's to
+/// determine; it passes `is_directory` along with the inode it read.
+pub fn descriptor_matches_authority(
+    authority: Option<&Value>,
+    inode: Option<&Value>,
+    is_directory: bool,
+) -> bool {
+    if !is_directory {
+        return false;
+    }
+    let Some(authority) = authority else {
+        return false;
+    };
+    unsigned_string(inode) && authority.get("inode_id") == inode
+}
+
+/// `DSHLegacyPhysicalIdentityMatchesAuthority`./// `DSHLegacyPhysicalIdentityMatchesAuthority`.
 ///
 /// **Device ids are deliberately absent.** iOS renumbers the data volume
 /// across reboots, so a persisted `st_dev` is not evidence about a directory —
@@ -564,6 +591,16 @@ fn reduce_json_inner(input: &str) -> Option<Value> {
         "capabilities_set" => {
             return Some(json!({
                 "ok": true, "valid": capabilities_set(envelope.get("value"))
+            }))
+        }
+        "descriptor_matches_authority" => {
+            return Some(json!({
+                "ok": true,
+                "matches": descriptor_matches_authority(
+                    envelope.get("authority"),
+                    envelope.get("inode_id"),
+                    envelope.get("is_directory") == Some(&json!(true)),
+                ),
             }))
         }
         "legacy_identity_matches_authority" => {
