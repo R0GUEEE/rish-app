@@ -158,6 +158,14 @@ char *rish_agent_workspace_record_reduce(const char *json, size_t json_length);
 /// length and SHA-256 come in as facts, the cap and the match stay in the core.
 char *rish_agent_workspace_authority_reduce(const char *json, size_t json_length);
 
+/// One workspace directory-name decision over {"op",...}: internal_component,
+/// candidate. The host walks ordinals and folds each candidate, because
+/// folding is host-specific; what each ordinal is called, and where a name is
+/// cut to make room for its suffix, are the rule. Truncation is a projection:
+/// the host supplies the display name's grapheme clusters, the core picks the
+/// cut, so a cluster is never split.
+char *rish_agent_workspace_directory_name_reduce(const char *json, size_t json_length);
+
 /// One workspace-grant decision over {"op",...}: operational_grants,
 /// descriptor. Which grants a locator kind implies and how they are shown;
 /// deriving the status itself stays with the host, because it resolves a

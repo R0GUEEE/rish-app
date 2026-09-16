@@ -2190,6 +2190,54 @@ static NSString *const DSHDigestB =
                         @"sCrAtCh (2)");
 }
 
+// A display name at the 120-byte bound has to give up bytes to make room for
+// its ordinal suffix, and the cut falls on a composed character sequence.
+// Foundation used to do that cutting inline; the core does it now, over
+// clusters the host supplies, so this pins that the two agree. If the cut ever
+// fell on a byte or a scalar boundary, the name would end in half a flag.
+- (void)testOccupiedDisplayNameAtTheBoundIsTruncatedOnAClusterBoundary {
+  NSURL *documents = [self documentsRootForRoot:self.rootURL];
+  NSURL *container = [self ownedWorkspacesRootForRoot:self.rootURL];
+  XCTAssertTrue([NSFileManager.defaultManager createDirectoryAtURL:container
+                                       withIntermediateDirectories:YES
+                                                        attributes:nil
+                                                             error:nil]);
+  NSString *flag = @"\U0001F1EF\U0001F1F5";
+  XCTAssertEqual([flag lengthOfBytesUsingEncoding:NSUTF8StringEncoding], 8u);
+  NSMutableString *name = [NSMutableString string];
+  for (NSUInteger index = 0; index < 15; index += 1) [name appendString:flag];
+  XCTAssertEqual([name lengthOfBytesUsingEncoding:NSUTF8StringEncoding], 120u);
+
+  NSURL *preexisting = [container URLByAppendingPathComponent:name
+                                                  isDirectory:YES];
+  XCTAssertEqual(mkdir(preexisting.fileSystemRepresentation, 0700), 0);
+
+  DSHLocalWorkspaceAccess *access =
+      [self accessWithRoot:self.rootURL
+          documentsRootURL:documents
+                     fault:nil
+             UUIDGenerator:^NSString *{
+               return DSHWorkspaceA;
+             }];
+  NSError *error = nil;
+  NSDictionary *created =
+      [access createRishOwnedWorkspaceWithDisplayName:name
+                                          operationId:DSHOperationA
+                                                error:&error];
+  XCTAssertNotNil(created, @"%@", error);
+
+  NSMutableString *expected = [NSMutableString string];
+  for (NSUInteger index = 0; index < 14; index += 1) [expected appendString:flag];
+  [expected appendString:@" (1)"];
+  XCTAssertEqual([expected lengthOfBytesUsingEncoding:NSUTF8StringEncoding], 116u);
+  NSString *allocated = [self recordForRoot:self.rootURL
+                                workspaceId:DSHWorkspaceA][@"owned_directory_name"];
+  XCTAssertEqualObjects(allocated, expected);
+  // Nothing partial survived the cut: every flag in the name is whole.
+  NSUInteger whole = [[allocated componentsSeparatedByString:flag] count] - 1;
+  XCTAssertEqual(whole, 14u);
+}
+
 - (void)testCreateRishOwnedWorkspaceRejectsInvalidDisplayNamesBeforeDocumentsMutation {
   NSURL *documents = [self documentsRootForRoot:self.rootURL];
   NSArray<NSString *> *invalidNames = @[

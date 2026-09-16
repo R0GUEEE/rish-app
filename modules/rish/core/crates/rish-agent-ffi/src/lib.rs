@@ -27,6 +27,7 @@ use rish_agent_core::wal_state::reduce_json as wal_state_reduce_json;
 use rish_agent_core::workspace_fingerprint::reduce_json as workspace_fingerprint_reduce_json;
 use rish_agent_core::workspace_grants::reduce_json as workspace_grants_reduce_json;
 use rish_agent_core::workspace_authority::reduce_json as workspace_authority_reduce_json;
+use rish_agent_core::workspace_directory_name::reduce_json as workspace_directory_name_reduce_json;
 use rish_agent_core::workspace_record::reduce_json as workspace_record_reduce_json;
 use rish_agent_core::workspace_tool::reduce_json as workspace_tool_reduce_json;
 use std::ffi::CString;
@@ -411,6 +412,25 @@ pub unsafe extern "C" fn rish_agent_workspace_authority_reduce(
         return std::ptr::null_mut();
     };
     output(workspace_authority_reduce_json(text))
+}
+
+/// Runs one workspace directory-name decision over the JSON envelope
+/// documented on `rish_agent_core::workspace_directory_name::reduce_json` —
+/// what a registry-owned path component may be, and what an occupied display
+/// name is called at each ordinal. Folding and grapheme segmentation stay with
+/// the host; where the cut falls does not.
+///
+/// # Safety
+/// `pointer` must reference `length` readable bytes or be null.
+#[no_mangle]
+pub unsafe extern "C" fn rish_agent_workspace_directory_name_reduce(
+    pointer: *const c_char,
+    length: usize,
+) -> *mut c_char {
+    let Some(text) = input(pointer, length) else {
+        return std::ptr::null_mut();
+    };
+    output(workspace_directory_name_reduce_json(text))
 }
 
 /// Runs one workspace-grant decision over the JSON envelope documented on

@@ -1137,6 +1137,32 @@ project-context policy uses — and the reserved-name check (`rish workspaces`,
 the `.rish-` prefix) is on the folded spelling so case and diacritics cannot
 dodge it. A host that could not fold refuses rather than guessing.
 
+### What a workspace's directory is called
+
+`workspace_directory_name.rs` ports `DSHInternalComponent`,
+`DSHTruncateDisplayNameForSuffix` and the naming half of
+`allocateOwnedDirectoryNameForDisplayName:`.
+
+**The loop stays with the host, the names do not.** Deciding whether a
+candidate is taken needs folding, and folding is host-specific — Foundation
+folds case and diacritics together under `en_US_POSIX`, a JVM host does
+neither the same way. So the host walks ordinals and asks the core what each
+ordinal is called. What each one *is* called is the rule.
+
+**Truncation is a projection.** Foundation cuts on composed character
+sequences. Cutting anywhere else writes a character nobody typed: a name of
+fifteen 🇯🇵 flags is exactly 120 bytes, and making room for `" (1)"` on a byte
+or scalar boundary would leave a lone regional indicator on the end. The host
+supplies the clusters; the core decides where the cut falls, and a cluster goes
+in whole or not at all.
+
+`testOccupiedDisplayNameAtTheBoundIsTruncatedOnAClusterBoundary` pins that
+against Foundation, and it was checked by making the host pass UTF-16 units
+instead of clusters — it fails.
+
+`NAME_MAX` is 255 on both Darwin and Linux, so that bound is in the core rather
+than handed across.
+
 ### What a stored authority looks like
 
 `workspace_authority.rs` is the fourth workspace rule, and the one that ties

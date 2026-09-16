@@ -39,6 +39,7 @@ pub mod wal_operations;
 pub mod wal_resident;
 pub mod wal_state;
 pub mod workspace_authority;
+pub mod workspace_directory_name;
 pub mod workspace_fingerprint;
 pub mod workspace_grants;
 pub mod workspace_record;

@@ -914,18 +914,33 @@ static BOOL DSHWriteAll(int descriptor, const uint8_t *bytes, size_t length) {
   return YES;
 }
 
+// What the registry may call a component of its own, and what an occupied
+// display name is called at each ordinal, live in the shared core
+// (modules/rish/core, `rish_agent_workspace_directory_name_reduce`). Grapheme
+// segmentation stays here: Foundation cuts on composed character sequences,
+// and a name cut anywhere else is a different name.
+static NSDictionary *DSHWorkspaceDirectoryNameReduce(NSString *op,
+                                                     NSDictionary *fields) {
+  NSMutableDictionary *envelope = [fields mutableCopy];
+  envelope[@"op"] = op;
+  NSData *bytes = [NSJSONSerialization dataWithJSONObject:envelope options:0
+                                                    error:nil];
+  char *raw = bytes == nil ? NULL
+      : rish_agent_workspace_directory_name_reduce((const char *)bytes.bytes,
+                                                   bytes.length);
+  if (raw == NULL) return nil;
+  NSData *replyBytes = [NSData dataWithBytes:raw length:strlen(raw)];
+  rish_agent_string_free(raw);
+  id reply = [NSJSONSerialization JSONObjectWithData:replyBytes options:0
+                                                error:nil];
+  return [reply isKindOfClass:NSDictionary.class] &&
+      [reply[@"ok"] isEqual:@YES] ? reply : nil;
+}
+
 static BOOL DSHInternalComponent(id value) {
-  if (![value isKindOfClass:NSString.class]) return NO;
-  NSString *component = value;
-  NSData *bytes = [component dataUsingEncoding:NSUTF8StringEncoding
-                         allowLossyConversion:NO];
-  return bytes.length > 0 && bytes.length <= NAME_MAX &&
-         [component rangeOfString:@"/"].location == NSNotFound &&
-         [component rangeOfString:@"\\"].location == NSNotFound &&
-         [component rangeOfString:@"\0"].location == NSNotFound &&
-         [component rangeOfCharacterFromSet:NSCharacterSet.controlCharacterSet]
-             .location == NSNotFound &&
-         ![component isEqual:@"."] && ![component isEqual:@".."];
+  return [DSHWorkspaceDirectoryNameReduce(@"internal_component", @{
+    @"value" : value ?: NSNull.null,
+  })[@"valid"] isEqual:@YES];
 }
 
 static NSString *DSHFilesystemFoldedComponent(NSString *component) {
@@ -938,25 +953,28 @@ static NSString *DSHFilesystemFoldedComponent(NSString *component) {
   return folded.lowercaseString;
 }
 
-static NSString *DSHTruncateDisplayNameForSuffix(NSString *base,
-                                                  NSString *suffix) {
-  NSUInteger suffixBytes =
-      [suffix lengthOfBytesUsingEncoding:NSUTF8StringEncoding];
-  if (suffixBytes >= 120) return nil;
-  NSUInteger budget = 120 - suffixBytes;
-  NSMutableString *prefix = [NSMutableString string];
+// The grapheme clusters are the host fact; where the cut falls is the rule.
+static NSArray<NSString *> *DSHComposedCharacterSequences(NSString *text) {
+  if (![text isKindOfClass:NSString.class]) return nil;
+  NSMutableArray<NSString *> *clusters = [NSMutableArray array];
   NSUInteger index = 0;
-  while (index < base.length) {
-    NSRange sequence = [base rangeOfComposedCharacterSequenceAtIndex:index];
-    NSString *candidate = [base substringWithRange:
-        NSMakeRange(0, NSMaxRange(sequence))];
-    if ([candidate lengthOfBytesUsingEncoding:NSUTF8StringEncoding] > budget) {
-      break;
-    }
-    [prefix appendString:[base substringWithRange:sequence]];
+  while (index < text.length) {
+    NSRange sequence = [text rangeOfComposedCharacterSequenceAtIndex:index];
+    [clusters addObject:[text substringWithRange:sequence]];
     index = NSMaxRange(sequence);
   }
-  return [prefix stringByAppendingString:suffix];
+  return clusters;
+}
+
+static NSString *DSHOwnedDirectoryNameCandidate(NSString *base,
+                                                NSUInteger ordinal) {
+  NSArray<NSString *> *clusters = DSHComposedCharacterSequences(base);
+  if (clusters == nil) return nil;
+  id candidate = DSHWorkspaceDirectoryNameReduce(@"candidate", @{
+    @"graphemes" : clusters,
+    @"ordinal" : @(ordinal),
+  })[@"candidate"];
+  return [candidate isKindOfClass:NSString.class] ? candidate : nil;
 }
 
 @class DSHLocalWorkspaceAuthorityLock;
@@ -1326,9 +1344,7 @@ static NSString *DSHTruncateDisplayNameForSuffix(NSString *base,
   NSUInteger ordinal = 0;
   while ([occupied containsObject:DSHFilesystemFoldedComponent(candidate)]) {
     ordinal += 1;
-    NSString *suffix = [NSString stringWithFormat:@" (%lu)",
-                                                  (unsigned long)ordinal];
-    candidate = DSHTruncateDisplayNameForSuffix(displayName, suffix);
+    candidate = DSHOwnedDirectoryNameCandidate(displayName, ordinal);
     if (candidate == nil || !DSHInternalComponent(candidate)) {
       DSHSetWorkspaceError(error, DSHLocalWorkspaceAccessErrorInvalid);
       return nil;
