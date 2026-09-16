@@ -120,13 +120,10 @@ fn an_internal_component_is_one_path_component() {
 /// The reducer answers every op it claims to, and refuses the rest.
 #[test]
 fn the_reducer_answers_every_op_it_claims_to() {
-    let reply = reduce_json(
-        &json!({ "op": "internal_component", "value": "Rish" }).to_string(),
-    );
+    let reply = reduce_json(&json!({ "op": "internal_component", "value": "Rish" }).to_string());
     assert_eq!(reply, r#"{"ok":true,"valid":true}"#);
     let reply = reduce_json(
-        &json!({ "op": "candidate", "graphemes": ["R", "i", "s", "h"], "ordinal": 2 })
-            .to_string(),
+        &json!({ "op": "candidate", "graphemes": ["R", "i", "s", "h"], "ordinal": 2 }).to_string(),
     );
     assert_eq!(reply, r#"{"candidate":"Rish (2)","ok":true}"#);
     for input in [

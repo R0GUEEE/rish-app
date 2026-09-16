@@ -241,7 +241,6 @@ pub fn legacy_authority(authority: Option<&Value>, record: &Value) -> bool {
         && fingerprint_valid(authority.expect("checked"), record)
 }
 
-
 // MARK: - migration
 //
 // An authority written before root fingerprints existed carries every field
@@ -337,7 +336,10 @@ pub fn granted_migration(
 /// `DSHValidLegacyPhysicalIdentity`: what the host re-read from the project on
 /// disk. Every identifier is positive — a legacy root that reports device or
 /// inode zero names nothing and cannot be verified.
-pub fn legacy_physical_identity(identity: Option<&Value>, expected_metadata: Option<&Value>) -> bool {
+pub fn legacy_physical_identity(
+    identity: Option<&Value>,
+    expected_metadata: Option<&Value>,
+) -> bool {
     let Some(map) = exact_keys(
         identity,
         &[
@@ -392,7 +394,12 @@ pub fn legacy_migration(
         || !matches_record(
             map,
             record,
-            &["workspace_id", "binding_revision", "legacy_project_id", "display_name"],
+            &[
+                "workspace_id",
+                "binding_revision",
+                "legacy_project_id",
+                "display_name",
+            ],
         )
         || !canonical_sha256(map.get("root_identity_sha256"))
         || !canonical_timestamp(map.get("created_at"))

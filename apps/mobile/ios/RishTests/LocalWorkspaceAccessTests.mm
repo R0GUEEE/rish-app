@@ -2325,6 +2325,43 @@ static NSString *const DSHDigestB =
   XCTAssertEqualObjects(after, broken);
 }
 
+// One operation id names one outcome. A receipt store holding two of them
+// cannot say which retry is the one that happened, so the store is refused
+// whole rather than read past the duplicate. Nothing exercised that before.
+- (void)testAReceiptStoreWithARepeatedOperationIdIsRefused {
+  NSURL *documents = [self documentsRootForRoot:self.rootURL];
+  DSHLocalWorkspaceAccess *access =
+      [self accessWithRoot:self.rootURL
+          documentsRootURL:documents
+                     fault:nil
+             UUIDGenerator:^NSString *{
+               return DSHWorkspaceA;
+             }];
+  NSError *error = nil;
+  XCTAssertNotNil([access createRishOwnedWorkspaceWithDisplayName:@"Scratch"
+                                                      operationId:DSHOperationA
+                                                            error:&error],
+                  @"%@", error);
+  NSURL *receiptsURL = [self receiptsURLForRoot:self.rootURL];
+  NSMutableDictionary *envelope = [[NSJSONSerialization
+      JSONObjectWithData:[NSData dataWithContentsOfURL:receiptsURL]
+                 options:0 error:nil] mutableCopy];
+  NSDictionary *receipt = ((NSArray *)envelope[@"receipts"]).firstObject;
+  XCTAssertNotNil(receipt);
+  // The same operation id twice, with the second disagreeing about the
+  // outcome — exactly the case a retry could not resolve.
+  NSMutableDictionary *twin = [receipt mutableCopy];
+  twin[@"operation"] = @"delete_owned";
+  twin[@"outcome"] = @"purge_pending";
+  envelope[@"receipts"] = @[receipt, twin];
+  [self secureWriteObject:envelope toURL:receiptsURL];
+
+  DSHLocalWorkspaceAccess *restarted = [self access];
+  error = nil;
+  XCTAssertNil([restarted queryOperationId:DSHOperationA error:&error]);
+  XCTAssertEqualObjects(error.userInfo[@"code"], @"E_WORKSPACE_PERSISTENCE");
+}
+
 - (void)testCreateRishOwnedWorkspaceRejectsInvalidDisplayNamesBeforeDocumentsMutation {
   NSURL *documents = [self documentsRootForRoot:self.rootURL];
   NSArray<NSString *> *invalidNames = @[

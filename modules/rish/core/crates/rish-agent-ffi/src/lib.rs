@@ -24,10 +24,11 @@ use rish_agent_core::transcript_store::reduce_json as transcript_reduce_json;
 use rish_agent_core::wal_operations::reduce_json as wal_operation_reduce_json;
 use rish_agent_core::wal_resident::{Confirmation, Resident};
 use rish_agent_core::wal_state::reduce_json as wal_state_reduce_json;
-use rish_agent_core::workspace_fingerprint::reduce_json as workspace_fingerprint_reduce_json;
-use rish_agent_core::workspace_grants::reduce_json as workspace_grants_reduce_json;
 use rish_agent_core::workspace_authority::reduce_json as workspace_authority_reduce_json;
 use rish_agent_core::workspace_directory_name::reduce_json as workspace_directory_name_reduce_json;
+use rish_agent_core::workspace_fingerprint::reduce_json as workspace_fingerprint_reduce_json;
+use rish_agent_core::workspace_grants::reduce_json as workspace_grants_reduce_json;
+use rish_agent_core::workspace_receipt::reduce_json as workspace_receipt_reduce_json;
 use rish_agent_core::workspace_record::reduce_json as workspace_record_reduce_json;
 use rish_agent_core::workspace_tool::reduce_json as workspace_tool_reduce_json;
 use std::ffi::CString;
@@ -376,6 +377,25 @@ pub unsafe extern "C" fn rish_agent_git_tool_reduce(
         return std::ptr::null_mut();
     };
     output(git_tool_reduce_json(text))
+}
+
+/// Runs one workspace-receipt decision over the JSON envelope documented on
+/// `rish_agent_core::workspace_receipt::reduce_json` — what a stored operation
+/// receipt looks like, what a caller is shown of one, and whether one has
+/// outlived its retry window. Parsing the timestamp stays with the host: it
+/// passes the age it measured.
+///
+/// # Safety
+/// `pointer` must reference `length` readable bytes or be null.
+#[no_mangle]
+pub unsafe extern "C" fn rish_agent_workspace_receipt_reduce(
+    pointer: *const c_char,
+    length: usize,
+) -> *mut c_char {
+    let Some(text) = input(pointer, length) else {
+        return std::ptr::null_mut();
+    };
+    output(workspace_receipt_reduce_json(text))
 }
 
 /// Runs one workspace-record decision over the JSON envelope documented on

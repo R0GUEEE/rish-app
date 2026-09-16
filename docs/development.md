@@ -1203,6 +1203,43 @@ asking whether the record is the right shape, not comparing the directory
 identity, and inventing the fingerprint instead of asking for it. The last one
 fails nine of the twelve.
 
+### What a workspace operation receipt is
+
+`workspace_receipt.rs` ports `validReceipt:`, `validLegacyReceipt:`,
+`DSHPublicOperationReceipt`, the store checks in `loadReceipts:`, the capacity
+check and the expiry test in `pruneReceipts:`.
+
+A receipt is how a retried operation is recognised as the one that already
+happened. Two things follow:
+
+- **One operation id names one outcome.** A store holding the id twice cannot
+  say which retry is the one that happened, so the store is refused whole
+  rather than read past the duplicate.
+- **`request_sha256` is an idempotency secret.** It binds the receipt to the
+  request that produced it, so the public projection leaves it out — handing it
+  over would let a caller claim recognition of an operation it never made. The
+  projection enumerates its keys rather than copying them.
+
+Two closed relations worth naming: only `delete_owned` can be `purge_pending`,
+because only a delete leaves content behind to purge; and `bootstrap_legacy`
+can only have committed, at revision 1, because bootstrapping is what *creates*
+the binding — a bootstrap receipt at revision 2 would claim the binding existed
+before it was made.
+
+A1 receipts predate `request_sha256` and stay readable. They are not rewritten
+in place: the record and the authority are what a retry is validated against,
+so nothing is gained by inventing a digest for a request nobody kept. The two
+shapes are each exact, so a new receipt cannot pass as an old one either.
+
+The timestamp stays with the host — the calendar is Foundation's — and the host
+passes the age it measured. A receipt whose timestamp will not parse counts as
+expired: it can never be matched against a retry, so keeping it is pure cost.
+The capacity moved too, so 2048 has one copy rather than two.
+
+`testAReceiptStoreWithARepeatedOperationIdIsRefused` is new; the duplicate case
+had no coverage. The public projection's withholding was already covered by two
+existing query tests.
+
 ### Upgrading an authority written before fingerprints
 
 The three `DSHMigrate*Authority` functions, `DSHValidLegacyPhysicalIdentity`

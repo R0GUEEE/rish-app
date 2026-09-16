@@ -145,6 +145,13 @@ char *rish_agent_completion_response_reduce(const char *json, size_t json_length
 /// crash between writing the object and recording it recoverable.
 char *rish_agent_git_tool_reduce(const char *json, size_t json_length);
 
+/// One workspace-receipt decision over {"op",...}: receipt_shape,
+/// legacy_receipt_shape, readable_receipt, store_shape, public_receipt,
+/// expired. The public projection withholds request_sha256, which is how a
+/// retry is recognised. Parsing the committed timestamp stays with the host;
+/// it passes the age it measured, and an unreadable one counts as expired.
+char *rish_agent_workspace_receipt_reduce(const char *json, size_t json_length);
+
 /// One workspace-record decision over {"op",...}: record_shape, display_name,
 /// capabilities_array, binding_revision_advance. The origin fixes the locator
 /// kind, the location class and which optional identity is present; folding

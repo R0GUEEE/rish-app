@@ -22,8 +22,6 @@ static const NSUInteger DSHWorkspaceRegistryMaxRecords = 1024;
 static const NSUInteger DSHWorkspaceAuthorityMaxBytes = 512 * 1024;
 static const NSUInteger DSHWorkspaceBookmarkMaxBytes = 256 * 1024;
 static const NSUInteger DSHWorkspaceReceiptStoreMaxBytes = 4 * 1024 * 1024;
-static const NSUInteger DSHWorkspaceReceiptCapacity = 2048;
-static const NSTimeInterval DSHWorkspaceReceiptTTL = 30 * 24 * 60 * 60;
 static const unsigned long long DSHWorkspaceMaxSafeInteger =
     9007199254740991ULL;
 
@@ -858,6 +856,41 @@ static BOOL DSHWriteAll(int descriptor, const uint8_t *bytes, size_t length) {
 // (modules/rish/core, `rish_agent_workspace_directory_name_reduce`). Grapheme
 // segmentation stays here: Foundation cuts on composed character sequences,
 // and a name cut anywhere else is a different name.
+// What a stored operation receipt looks like, what a caller is shown of one,
+// and when one has outlived its retry window live in the shared core
+// (modules/rish/core, `rish_agent_workspace_receipt_reduce`). Reading the
+// committed timestamp stays here: the calendar is Foundation's, and the host
+// passes the age it measured.
+static NSDictionary *DSHWorkspaceReceiptReduce(NSString *op,
+                                               NSDictionary *fields) {
+  NSMutableDictionary *envelope = [fields mutableCopy];
+  envelope[@"op"] = op;
+  NSData *bytes = [NSJSONSerialization dataWithJSONObject:envelope options:0
+                                                    error:nil];
+  char *raw = bytes == nil ? NULL : rish_agent_workspace_receipt_reduce(
+      (const char *)bytes.bytes, bytes.length);
+  if (raw == NULL) return nil;
+  NSData *replyBytes = [NSData dataWithBytes:raw length:strlen(raw)];
+  rish_agent_string_free(raw);
+  id reply = [NSJSONSerialization JSONObjectWithData:replyBytes options:0
+                                                error:nil];
+  return [reply isKindOfClass:NSDictionary.class] &&
+      [reply[@"ok"] isEqual:@YES] ? reply : nil;
+}
+
+static BOOL DSHWorkspaceReceiptsHaveRoom(NSUInteger count) {
+  return [DSHWorkspaceReceiptReduce(@"has_room", @{
+    @"count" : @(count),
+  })[@"has_room"] isEqual:@YES];
+}
+
+static NSDictionary *DSHPublicOperationReceipt(NSDictionary *receipt) {
+  id projected = DSHWorkspaceReceiptReduce(@"public_receipt", @{
+    @"receipt" : receipt ?: NSNull.null,
+  })[@"receipt"];
+  return [projected isKindOfClass:NSDictionary.class] ? projected : nil;
+}
+
 static NSDictionary *DSHWorkspaceDirectoryNameReduce(NSString *op,
                                                      NSDictionary *fields) {
   NSMutableDictionary *envelope = [fields mutableCopy];
@@ -2012,37 +2045,9 @@ static NSString *DSHOwnedDirectoryNameCandidate(NSString *base,
 }
 
 - (BOOL)validReceipt:(NSDictionary *)receipt {
-  NSArray *keys = @[
-    @"schema_version", @"operation_id", @"workspace_id", @"operation",
-    @"binding_revision", @"registry_generation", @"registry_sha256",
-    @"request_sha256", @"outcome", @"committed_at",
-  ];
-  NSSet *operations = [NSSet setWithArray:
-      @[@"create", @"import", @"regrant", @"forget", @"delete_owned",
-        @"bootstrap_legacy"]];
-  BOOL structurallyValid = DSHExactKeys(receipt, keys) &&
-      DSHSchemaVersionIsOne(receipt[@"schema_version"]) &&
-      DSHCanonicalUUID(receipt[@"operation_id"]) &&
-      DSHCanonicalUUID(receipt[@"workspace_id"]) &&
-      [operations containsObject:receipt[@"operation"]] &&
-      DSHIsSafeInteger(receipt[@"binding_revision"], NO) &&
-      DSHIsSafeInteger(receipt[@"registry_generation"], YES) &&
-      DSHCanonicalSHA256(receipt[@"registry_sha256"]) &&
-      DSHCanonicalSHA256(receipt[@"request_sha256"]) &&
-      ([receipt[@"outcome"] isEqual:@"committed"] ||
-       [receipt[@"outcome"] isEqual:@"purge_pending"]) &&
-      DSHCanonicalTimestamp(receipt[@"committed_at"]);
-  if (!structurallyValid) return NO;
-  if ([receipt[@"outcome"] isEqual:@"purge_pending"] &&
-      ![receipt[@"operation"] isEqual:@"delete_owned"]) {
-    return NO;
-  }
-  if ([receipt[@"operation"] isEqual:@"bootstrap_legacy"] &&
-      (![receipt[@"outcome"] isEqual:@"committed"] ||
-       ![receipt[@"binding_revision"] isEqual:@1])) {
-    return NO;
-  }
-  return YES;
+  return [DSHWorkspaceReceiptReduce(@"receipt_shape", @{
+    @"receipt" : receipt ?: NSNull.null,
+  })[@"valid"] isEqual:@YES];
 }
 
 // A1 receipts predate request_sha256.  They remain readable and are not
@@ -2050,84 +2055,28 @@ static NSString *DSHOwnedDirectoryNameCandidate(NSString *base,
 // truth used to validate a retry.  New receipts continue to require the
 // request digest above.
 - (BOOL)validLegacyReceipt:(NSDictionary *)receipt {
-  NSArray *keys = @[
-    @"schema_version", @"operation_id", @"workspace_id", @"operation",
-    @"binding_revision", @"registry_generation", @"registry_sha256",
-    @"outcome", @"committed_at",
-  ];
-  NSSet *operations = [NSSet setWithArray:
-      @[@"create", @"import", @"regrant", @"forget", @"delete_owned",
-        @"bootstrap_legacy"]];
-  if (!DSHExactKeys(receipt, keys) ||
-      !DSHSchemaVersionIsOne(receipt[@"schema_version"]) ||
-      !DSHCanonicalUUID(receipt[@"operation_id"]) ||
-      !DSHCanonicalUUID(receipt[@"workspace_id"]) ||
-      ![operations containsObject:receipt[@"operation"]] ||
-      !DSHIsSafeInteger(receipt[@"binding_revision"], NO) ||
-      !DSHIsSafeInteger(receipt[@"registry_generation"], YES) ||
-      !DSHCanonicalSHA256(receipt[@"registry_sha256"]) ||
-      (![receipt[@"outcome"] isEqual:@"committed"] &&
-       ![receipt[@"outcome"] isEqual:@"purge_pending"]) ||
-      !DSHCanonicalTimestamp(receipt[@"committed_at"])) {
-    return NO;
-  }
-  if ([receipt[@"outcome"] isEqual:@"purge_pending"] &&
-      ![receipt[@"operation"] isEqual:@"delete_owned"]) {
-    return NO;
-  }
-  if ([receipt[@"operation"] isEqual:@"bootstrap_legacy"] &&
-      (![receipt[@"outcome"] isEqual:@"committed"] ||
-       ![receipt[@"binding_revision"] isEqual:@1])) {
-    return NO;
-  }
-  return YES;
-}
-
-static NSDictionary *DSHPublicOperationReceipt(NSDictionary *receipt) {
-  if (![receipt isKindOfClass:NSDictionary.class]) return nil;
-  // request_sha256 is a private idempotency binding. It is intentionally
-  // omitted from the public query result even though it remains in the
-  // protected receipt store for retry/conflict detection.
-  return @{
-    @"schema_version" : receipt[@"schema_version"],
-    @"operation_id" : receipt[@"operation_id"],
-    @"workspace_id" : receipt[@"workspace_id"],
-    @"operation" : receipt[@"operation"],
-    @"binding_revision" : receipt[@"binding_revision"],
-    @"registry_generation" : receipt[@"registry_generation"],
-    @"registry_sha256" : receipt[@"registry_sha256"],
-    @"outcome" : receipt[@"outcome"],
-    @"committed_at" : receipt[@"committed_at"],
-  };
+  return [DSHWorkspaceReceiptReduce(@"legacy_receipt_shape", @{
+    @"receipt" : receipt ?: NSNull.null,
+  })[@"valid"] isEqual:@YES];
 }
 
 - (nullable NSMutableArray<NSDictionary *> *)loadReceipts:(NSError **)error {
   NSDictionary *envelope = [self readProtectedObjectAtURL:self.receiptsURL
                                                   maxBytes:DSHWorkspaceReceiptStoreMaxBytes
                                                      error:error];
+  // The store's whole shape — the envelope, the capacity, every receipt
+  // readable in one form or the other, and no operation id twice — is one
+  // judgement, and it is the core's.
   if (envelope == nil ||
-      !DSHExactKeys(envelope, @[@"schema_version", @"receipts"]) ||
-      !DSHSchemaVersionIsOne(envelope[@"schema_version"]) ||
-      ![envelope[@"receipts"] isKindOfClass:NSArray.class] ||
-      [envelope[@"receipts"] count] > DSHWorkspaceReceiptCapacity) {
+      ![DSHWorkspaceReceiptReduce(@"store_shape", @{
+        @"envelope" : envelope ?: NSNull.null,
+      })[@"valid"] isEqual:@YES]) {
     if (envelope != nil) {
       DSHSetWorkspaceError(error, DSHLocalWorkspaceAccessErrorPersistence);
     }
     return nil;
   }
-  NSMutableArray *result = [NSMutableArray array];
-  NSMutableSet *operationIds = [NSMutableSet set];
-  for (id receipt in envelope[@"receipts"]) {
-    if (![receipt isKindOfClass:NSDictionary.class] ||
-        (![self validReceipt:receipt] && ![self validLegacyReceipt:receipt]) ||
-        [operationIds containsObject:receipt[@"operation_id"]]) {
-      DSHSetWorkspaceError(error, DSHLocalWorkspaceAccessErrorPersistence);
-      return nil;
-    }
-    [operationIds addObject:receipt[@"operation_id"]];
-    [result addObject:receipt];
-  }
-  return result;
+  return [envelope[@"receipts"] mutableCopy];
 }
 
 - (BOOL)pruneReceipts:(NSMutableArray<NSDictionary *> *)receipts
@@ -2139,12 +2088,16 @@ static NSDictionary *DSHPublicOperationReceipt(NSDictionary *receipt) {
     return NO;
   }
   NSUInteger before = receipts.count;
+  // Reading the timestamp is Foundation's job; how long is too long is not.
   NSIndexSet *expired = [receipts indexesOfObjectsPassingTest:
       ^BOOL(NSDictionary *receipt, NSUInteger index, BOOL *stop) {
         NSDate *committed = [DSHTimestampFormatter()
             dateFromString:receipt[@"committed_at"]];
-        return committed == nil ||
-               [now timeIntervalSinceDate:committed] > DSHWorkspaceReceiptTTL;
+        NSDictionary *fields = committed == nil
+            ? @{}
+            : @{ @"age_seconds" : @([now timeIntervalSinceDate:committed]) };
+        return [DSHWorkspaceReceiptReduce(@"expired", fields)[@"expired"]
+            isEqual:@YES];
       }];
   [receipts removeObjectsAtIndexes:expired];
   if (write && before != receipts.count) {
@@ -2796,7 +2749,7 @@ static BOOL DSHOwnedAuthorityMatchesJournal(NSDictionary *authority,
       return NO;
     }
   } else {
-    if (receipts.count >= DSHWorkspaceReceiptCapacity) {
+    if (!DSHWorkspaceReceiptsHaveRoom(receipts.count)) {
       DSHSetWorkspaceError(error, DSHLocalWorkspaceAccessErrorBusy);
       return NO;
     }
@@ -3718,7 +3671,7 @@ static void DSHWorkspaceSetOperationalStatusError(NSString *status,
                                   status:@"ok"
                             capabilities:capabilities];
       }
-      if (receipts.count >= DSHWorkspaceReceiptCapacity) {
+      if (!DSHWorkspaceReceiptsHaveRoom(receipts.count)) {
         DSHSetWorkspaceError(error, DSHLocalWorkspaceAccessErrorBusy);
         return nil;
       }

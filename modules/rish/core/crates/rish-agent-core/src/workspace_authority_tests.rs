@@ -69,7 +69,10 @@ fn bookmark() -> Value {
 }
 
 fn bookmark_bytes(sha: &str) -> BookmarkBytes<'_> {
-    BookmarkBytes { sha256: Some(sha), length: 8 }
+    BookmarkBytes {
+        sha256: Some(sha),
+        length: 8,
+    }
 }
 
 fn granted() -> Value {
@@ -189,19 +192,28 @@ fn an_authority_cannot_be_moved_to_another_record() {
             "owned",
             owned(),
             owned_record(),
-            vec![("workspace_id", json!(OTHER)), ("binding_revision", json!(4))],
+            vec![
+                ("workspace_id", json!(OTHER)),
+                ("binding_revision", json!(4)),
+            ],
         ),
         (
             "bookmark",
             bookmark(),
             granted_record(),
-            vec![("workspace_id", json!(OTHER)), ("binding_revision", json!(6))],
+            vec![
+                ("workspace_id", json!(OTHER)),
+                ("binding_revision", json!(6)),
+            ],
         ),
         (
             "granted",
             granted(),
             granted_record(),
-            vec![("workspace_id", json!(OTHER)), ("binding_revision", json!(6))],
+            vec![
+                ("workspace_id", json!(OTHER)),
+                ("binding_revision", json!(6)),
+            ],
         ),
         (
             "legacy",
@@ -243,7 +255,10 @@ fn an_owned_authority_names_the_records_own_directory() {
     record["owned_directory_name"] = json!("ws-somewhere-else");
     assert!(!owned_authority(Some(&authority), &record));
     // A record with no directory at all has no digest to match.
-    record.as_object_mut().expect("object").remove("owned_directory_name");
+    record
+        .as_object_mut()
+        .expect("object")
+        .remove("owned_directory_name");
     assert!(!owned_authority(Some(&authority), &record));
     record["owned_directory_name"] = json!(7);
     assert!(!owned_authority(Some(&authority), &record));
@@ -319,7 +334,10 @@ fn a_bookmark_must_match_the_bytes_the_host_decoded() {
     assert!(!bookmark_authority(
         Some(&authority),
         &record,
-        &BookmarkBytes { sha256: None, length: 8 }
+        &BookmarkBytes {
+            sha256: None,
+            length: 8
+        }
     ));
     // A digest that is not the bytes' digest is someone else's bookmark.
     assert!(!bookmark_authority(
@@ -331,12 +349,18 @@ fn a_bookmark_must_match_the_bytes_the_host_decoded() {
     assert!(bookmark_authority(
         Some(&authority),
         &record,
-        &BookmarkBytes { sha256: Some(&digest('b')), length: MAX_BOOKMARK_BYTES }
+        &BookmarkBytes {
+            sha256: Some(&digest('b')),
+            length: MAX_BOOKMARK_BYTES
+        }
     ));
     assert!(!bookmark_authority(
         Some(&authority),
         &record,
-        &BookmarkBytes { sha256: Some(&digest('b')), length: MAX_BOOKMARK_BYTES + 1 }
+        &BookmarkBytes {
+            sha256: Some(&digest('b')),
+            length: MAX_BOOKMARK_BYTES + 1
+        }
     ));
     assert_eq!(MAX_BOOKMARK_BYTES, 262_144);
 }
@@ -346,16 +370,15 @@ fn a_bookmark_must_match_the_bytes_the_host_decoded() {
 #[test]
 fn a_granted_authority_is_tied_to_its_bookmark() {
     let record = granted_record();
-    assert!(granted_authority(
-        Some(&granted()),
-        &record,
-        &bookmark()
-    ));
+    assert!(granted_authority(Some(&granted()), &record, &bookmark()));
     let mut other = bookmark();
     other["bookmark_sha256"] = json!(digest('c'));
     assert!(!granted_authority(Some(&granted()), &record, &other));
     // A bookmark with no digest at all cannot stand in for one.
-    other.as_object_mut().expect("object").remove("bookmark_sha256");
+    other
+        .as_object_mut()
+        .expect("object")
+        .remove("bookmark_sha256");
     assert!(!granted_authority(Some(&granted()), &record, &other));
     assert!(!granted_authority(Some(&granted()), &record, &Value::Null));
 }
@@ -450,9 +473,11 @@ fn timestamps_and_digests_are_canonical() {
         let mut authority = bookmark();
         authority["bookmark_sha256"] = bad.clone();
         assert!(
-            !bookmark_authority(Some(&authority), &granted_record, &bookmark_bytes(
-                bad.as_str().unwrap_or("")
-            )),
+            !bookmark_authority(
+                Some(&authority),
+                &granted_record,
+                &bookmark_bytes(bad.as_str().unwrap_or(""))
+            ),
             "{bad}"
         );
     }
@@ -481,7 +506,12 @@ fn legacy_capabilities_are_the_canonical_list() {
 #[test]
 fn a_non_object_is_never_an_authority() {
     let record = owned_record();
-    for value in [None, Some(&Value::Null), Some(&json!([])), Some(&json!("x"))] {
+    for value in [
+        None,
+        Some(&Value::Null),
+        Some(&json!([])),
+        Some(&json!("x")),
+    ] {
         assert!(!owned_authority(value, &record));
         assert!(!legacy_authority(value, &legacy_record()));
         assert!(!granted_authority(value, &granted_record(), &bookmark()));
@@ -523,8 +553,7 @@ fn the_reducer_answers_every_op_it_claims_to() {
         ),
     ];
     for (name, envelope) in &cases {
-        let reply: Value =
-            serde_json::from_str(&reduce_json(&envelope.to_string())).expect("json");
+        let reply: Value = serde_json::from_str(&reduce_json(&envelope.to_string())).expect("json");
         assert_eq!(reply, json!({ "ok": true, "valid": true }), "{name}");
     }
     // An unknown op, a missing record and malformed input are all refusals,
@@ -602,14 +631,14 @@ fn migrating_an_authority_produces_one_the_validator_accepts() {
     assert!(owned_authority(Some(&migrated), &record));
 
     let granted_record = granted_record();
-    let migrated = granted_migration(
-        Some(&unsealed(&granted())),
-        &granted_record,
-        &bookmark(),
-    )
-    .expect("migrated");
+    let migrated = granted_migration(Some(&unsealed(&granted())), &granted_record, &bookmark())
+        .expect("migrated");
     assert_eq!(migrated, granted());
-    assert!(granted_authority(Some(&migrated), &granted_record, &bookmark()));
+    assert!(granted_authority(
+        Some(&migrated),
+        &granted_record,
+        &bookmark()
+    ));
 }
 
 /// The legacy migration folds in what the host re-read from disk before
@@ -663,10 +692,7 @@ fn a_legacy_seal_survives_a_later_capability_list() {
     ] {
         let mut changed = sealed.clone();
         changed["capabilities"] = capabilities.clone();
-        assert!(
-            legacy_authority(Some(&changed), &record),
-            "{capabilities}"
-        );
+        assert!(legacy_authority(Some(&changed), &record), "{capabilities}");
     }
     // The owned shape does fold in its digest, so it does not behave this way.
     let owned_record = owned_record();
@@ -779,14 +805,20 @@ fn a_physical_identity_is_about_the_authoritys_own_project() {
     ] {
         let mut zeroed = physical_identity();
         zeroed[key] = json!("0");
-        assert!(!legacy_physical_identity(Some(&zeroed), Some(&expected)), "{key}");
+        assert!(
+            !legacy_physical_identity(Some(&zeroed), Some(&expected)),
+            "{key}"
+        );
     }
     // The shape is exact.
     let mut extra = physical_identity();
     extra["extra"] = json!(1);
     assert!(!legacy_physical_identity(Some(&extra), Some(&expected)));
     let mut short = physical_identity();
-    short.as_object_mut().expect("object").remove("git_device_id");
+    short
+        .as_object_mut()
+        .expect("object")
+        .remove("git_device_id");
     assert!(!legacy_physical_identity(Some(&short), Some(&expected)));
     assert!(!legacy_physical_identity(None, Some(&expected)));
     // A legacy migration with no identity at all has nothing to fold in.
@@ -807,15 +839,15 @@ fn verified_capabilities_are_put_in_the_stored_order() {
         ordered_capabilities(&names(&["write", "write"])),
         names(&["write"])
     );
-    assert_eq!(ordered_capabilities(&names(&["teleport"])), Vec::<String>::new());
+    assert_eq!(
+        ordered_capabilities(&names(&["teleport"])),
+        Vec::<String>::new()
+    );
     assert_eq!(ordered_capabilities(&[]), Vec::<String>::new());
     // Whatever comes out is a list the record rule accepts.
-    assert!(capabilities_array(Some(&json!(ordered_capabilities(&names(&[
-        "git",
-        "project_context",
-        "read",
-        "write"
-    ]))))));
+    assert!(capabilities_array(Some(&json!(ordered_capabilities(
+        &names(&["git", "project_context", "read", "write"])
+    )))));
 }
 
 /// The migration ops answer with an authority, not a verdict, and the two
@@ -852,7 +884,10 @@ fn the_reducer_answers_the_migration_ops_too() {
     let reply = run(json!({
         "op": "ordered_capabilities", "available": ["git", "read"]
     }));
-    assert_eq!(reply, json!({ "ok": true, "capabilities": ["read", "git"] }));
+    assert_eq!(
+        reply,
+        json!({ "ok": true, "capabilities": ["read", "git"] })
+    );
 
     for input in [
         json!({ "op": "ordered_capabilities", "available": [1] }).to_string(),
@@ -893,6 +928,9 @@ fn a_migration_requires_the_evidence_to_be_about_this_project() {
     // And the stored shape is wider than the migration's: this one validates
     // with the two digests disagreeing, because nothing re-reads the project
     // at validation time.
-    assert_ne!(legacy()["root_identity_sha256"], legacy()["project_metadata_sha256"]);
+    assert_ne!(
+        legacy()["root_identity_sha256"],
+        legacy()["project_metadata_sha256"]
+    );
     assert!(legacy_authority(Some(&legacy()), &record));
 }
