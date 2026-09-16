@@ -1203,6 +1203,42 @@ asking whether the record is the right shape, not comparing the directory
 identity, and inventing the fingerprint instead of asking for it. The last one
 fails nine of the twelve.
 
+### What a project binding is
+
+`project_access.rs` is the first cut into the project subsystem, the peer of
+the workspace subsystem: a workspace is a folder someone granted, a project is
+a Git working tree inside one. It ports `DSHLocalProjectRootRefIsValid`,
+`DSHLocalProjectCanonicalRootRef`, `DSHLocalProjectBindingIsValid`,
+`DSHLocalProjectBindingDigest`, `DSHValidStoredMetadataRecord` and
+`DSHLocalProjectCanonicalLegacyDisplayName` from `LocalProjectAccess.mm`,
+which had no core calls at all.
+
+**A binding restates the root reference's identity and the root fingerprint.**
+That is its job: one found beside a project has to prove it was written for
+*this* root at *this* revision, or it is a binding for something else that
+happens to be in the way.
+
+**The git directory path is not in the binding's digest.** It is a local fact
+that differs between installs of the same project, and folding it in would make
+two devices disagree about a binding they agree about. It also cannot cross as
+an `NSURL`, so the host hands over its path and whether it was a file URL at
+all — a projection, like the others.
+
+Stored project metadata's timestamps are **bounded, not parsed**. The record
+predates the canonical timestamp rule, and refusing an old project over its
+date format would lose the project rather than fix the date. Said here so the
+looseness reads as a decision.
+
+**A projection that is not load-bearing, said out loud.** Foundation's
+`whitespaceAndNewlineCharacterSet` includes U+200B where Rust's `trim` does
+not, so the legacy display name's trimming is handed across. It changes nothing
+these tests can reach: U+200B is a format character, and
+`path_control_or_format` already refuses it — replacing the host's answer with
+`name.trim()` leaves every test green. The projection stays because
+Foundation's set cannot be enumerated from this side and being wrong about it
+would mean accepting a padded name the writing device refuses. A guard against
+an unknown, held deliberately rather than by accident.
+
 ### What a destructive workspace operation needs before it runs
 
 `workspace_clearance.rs` ports `DSHWorkspaceClearanceCanonicalOperationFields`,

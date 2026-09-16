@@ -10,6 +10,7 @@ use rish_agent_core::git_tool::reduce_json as git_tool_reduce_json;
 use rish_agent_core::ledger_batch::reduce_json as ledger_batch_reduce_json;
 use rish_agent_core::ledger_ops::reduce_json as ledger_reduce_json;
 use rish_agent_core::prepared_attempt::reduce_json as prepared_attempt_reduce_json;
+use rish_agent_core::project_access::reduce_json as project_access_reduce_json;
 use rish_agent_core::project_context_policy::reduce_json as project_context_reduce_json;
 use rish_agent_core::provider_round::reduce_json as provider_round_reduce_json;
 use rish_agent_core::root_projection::reduce_json as root_reduce_json;
@@ -381,6 +382,25 @@ pub unsafe extern "C" fn rish_agent_git_tool_reduce(
         return std::ptr::null_mut();
     };
     output(git_tool_reduce_json(text))
+}
+
+/// Runs one project-access decision over the JSON envelope documented on
+/// `rish_agent_core::project_access::reduce_json` — what a project binding,
+/// its root reference and its stored metadata look like. The git directory
+/// crosses as a path and a flag rather than an `NSURL`, and Foundation's
+/// trimming crosses as the trimmed spelling.
+///
+/// # Safety
+/// `pointer` must reference `length` readable bytes or be null.
+#[no_mangle]
+pub unsafe extern "C" fn rish_agent_project_access_reduce(
+    pointer: *const c_char,
+    length: usize,
+) -> *mut c_char {
+    let Some(text) = input(pointer, length) else {
+        return std::ptr::null_mut();
+    };
+    output(project_access_reduce_json(text))
 }
 
 /// Runs one workspace-clearance decision over the JSON envelope documented on

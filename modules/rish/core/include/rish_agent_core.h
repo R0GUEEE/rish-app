@@ -145,6 +145,14 @@ char *rish_agent_completion_response_reduce(const char *json, size_t json_length
 /// crash between writing the object and recording it recoverable.
 char *rish_agent_git_tool_reduce(const char *json, size_t json_length);
 
+/// One project-access decision over {"op",...}: root_ref_valid,
+/// canonical_root_ref, binding_valid, binding_digest, stored_metadata_valid,
+/// legacy_display_name. A binding restates its root reference's identity and
+/// the root fingerprint, so it cannot be read as belonging to a root it was
+/// not written for. Its digest leaves out the private git directory path,
+/// which differs between installs of one project.
+char *rish_agent_project_access_reduce(const char *json, size_t json_length);
+
 /// One workspace-clearance decision over {"op",...}: operation_shape,
 /// receipt_shape, session_reference_valid, receipt_authorises. A clearance is
 /// the proof that a destructive workspace operation was authorised against a
