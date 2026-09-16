@@ -37,6 +37,7 @@ use rish_agent_core::workspace_fingerprint::reduce_json as workspace_fingerprint
 use rish_agent_core::workspace_grants::reduce_json as workspace_grants_reduce_json;
 use rish_agent_core::workspace_journal::reduce_json as workspace_journal_reduce_json;
 use rish_agent_core::workspace_json::bounded_exact_structure;
+use rish_agent_core::workspace_read_tools::reduce_json as workspace_read_tools_reduce_json;
 use rish_agent_core::workspace_receipt::reduce_json as workspace_receipt_reduce_json;
 use rish_agent_core::workspace_record::reduce_json as workspace_record_reduce_json;
 use rish_agent_core::workspace_tool::reduce_json as workspace_tool_reduce_json;
@@ -552,6 +553,24 @@ pub unsafe extern "C" fn rish_agent_workspace_journal_reduce(
         return std::ptr::null_mut();
     };
     output(workspace_journal_reduce_json(text))
+}
+
+/// Runs one workspace read-tool decision over the JSON envelope documented on
+/// `rish_agent_core::workspace_read_tools::reduce_json` — which readers a
+/// workspace exposes and what their options may be. The list is closed, and an
+/// option key the rule does not recognise is refused rather than ignored.
+///
+/// # Safety
+/// `pointer` must reference `length` readable bytes or be null.
+#[no_mangle]
+pub unsafe extern "C" fn rish_agent_workspace_read_tools_reduce(
+    pointer: *const c_char,
+    length: usize,
+) -> *mut c_char {
+    let Some(text) = input(pointer, length) else {
+        return std::ptr::null_mut();
+    };
+    output(workspace_read_tools_reduce_json(text))
 }
 
 /// Runs one workspace-receipt decision over the JSON envelope documented on

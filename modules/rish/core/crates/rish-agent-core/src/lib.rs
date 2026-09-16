@@ -51,6 +51,7 @@ pub mod workspace_fingerprint;
 pub mod workspace_grants;
 pub mod workspace_journal;
 pub mod workspace_json;
+pub mod workspace_read_tools;
 pub mod workspace_receipt;
 pub mod workspace_record;
 pub mod workspace_tool;

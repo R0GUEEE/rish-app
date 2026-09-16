@@ -1203,6 +1203,27 @@ asking whether the record is the right shape, not comparing the directory
 identity, and inventing the fingerprint instead of asking for it. The last one
 fails nine of the twelve.
 
+### The six readers a workspace exposes
+
+`workspace_read_tools.rs` ports `LWToolNameValid`, `LWToolOptionsValid` and the
+output bound from `LocalWorkspaceModule.mm`.
+
+**The tool list is closed, and that is the point.** These run against a folder
+a person granted, so the surface is six named readers — `cat`, `grep`, `head`,
+`tail`, `wc`, `sha256sum` — and nothing else. Not "any command", not a string
+that happens to start with one of them.
+
+**An unknown option key is refused, not ignored.** Ignoring it would run a
+different command than the caller asked for and report success. Each of the
+four keys has its own shape: a positive line count within 1000, one of three
+metrics, a non-empty pattern under 1 KiB, and a real boolean — `1` is not a
+boolean here.
+
+The same commit removed the **third** copy of the workspace error table, which
+`LocalWorkspaceModule.mm` carried after `LocalWorkspaceAccess.mm` and the core.
+It asks `workspace_error` now. An error that already carries a public code
+keeps it: it came from a layer that had already made the decision.
+
 ### Which project failure JavaScript is told about
 
 `project_module.rs` ports `LPV2StableErrorCode`, `LPV2CanonicalOID`,

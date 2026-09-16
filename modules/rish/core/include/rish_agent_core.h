@@ -211,6 +211,12 @@ unsigned char rish_agent_workspace_json_bounded(const char *bytes, size_t length
 /// strings the journal holds.
 char *rish_agent_workspace_journal_reduce(const char *json, size_t json_length);
 
+/// One workspace read-tool decision over {"op",...}: tool_name_valid,
+/// tool_options_valid, output_length_valid, tools. The tool list is closed —
+/// six named readers over a folder a person granted — and an option key the
+/// rule does not recognise is refused rather than ignored.
+char *rish_agent_workspace_read_tools_reduce(const char *json, size_t json_length);
+
 /// One workspace-receipt decision over {"op",...}: receipt_shape,
 /// legacy_receipt_shape, readable_receipt, store_shape, public_receipt,
 /// expired. The public projection withholds request_sha256, which is how a
