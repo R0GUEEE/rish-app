@@ -108,29 +108,9 @@ static void DSHSetWorkspaceError(NSError **error,
   if (error != nil) *error = DSHWorkspaceError(code);
 }
 
-static BOOL DSHExactKeys(NSDictionary *dictionary,
-                         NSArray<NSString *> *keys) {
-  if (![dictionary isKindOfClass:NSDictionary.class] ||
-      dictionary.count != keys.count) {
-    return NO;
-  }
-  NSSet *allowed = [NSSet setWithArray:keys];
-  for (id key in dictionary) {
-    if (![key isKindOfClass:NSString.class] || ![allowed containsObject:key]) {
-      return NO;
-    }
-  }
-  return YES;
-}
-
 static BOOL DSHIsBooleanNumber(id value) {
   return [value isKindOfClass:NSNumber.class] &&
          CFGetTypeID((__bridge CFTypeRef)value) == CFBooleanGetTypeID();
-}
-
-static BOOL DSHSchemaVersionIsOne(id value) {
-  return [value isKindOfClass:NSNumber.class] &&
-         !DSHIsBooleanNumber(value) && [value isEqual:@1];
 }
 
 static BOOL DSHIsSafeInteger(id value, BOOL allowZero) {
@@ -232,10 +212,6 @@ static BOOL DSHCanonicalUnsignedIntegerString(id value) {
   errno = 0;
   (void)strtoull(string.UTF8String, nullptr, 10);
   return errno != ERANGE;
-}
-
-static BOOL DSHCanonicalPositiveIntegerString(id value) {
-  return DSHCanonicalUnsignedIntegerString(value) && ![value isEqual:@"0"];
 }
 
 static BOOL DSHCanonicalCapabilitiesSet(id value);
