@@ -1203,6 +1203,39 @@ asking whether the record is the right shape, not comparing the directory
 identity, and inventing the fingerprint instead of asking for it. The last one
 fails nine of the twelve.
 
+### How a context snapshot is named
+
+`project_context_service.rs` ports `DSHServiceV2ReferenceId`,
+`DSHServiceV2RootsEqual`, `DSHServiceV2BoundedString` and
+`DSHServiceCanonicalDigest`. The root reference rule is **not** re-stated: this
+file carried a second copy of the one `project_access` owns, and now asks for
+it.
+
+**The reference id is derived, not chosen.** `ProjectContextStore` names a
+prepare transaction by the suffix of an `active:<uuid>` key, so if that uuid
+were the conversation's, two workspaces using one conversation id could evict
+or authorise one another's snapshot. It is a digest over the whole authority
+tuple — root, root fingerprint, conversation — shaped into a UUID with the
+version and variant bits set, because the store checks it is a canonical id.
+
+**A round trip is not a parity test, and this is the proof.** While a core
+built with a changed derivation domain was staged, all 106
+`ProjectContextWorkspaceV2Tests` passed: a round trip writes and reads with
+whatever derivation it has, so self-consistency survives any change to it. Only
+an already-stored snapshot would notice — and there are none in a fresh test.
+
+`testReferenceIdMatchesTheOriginalDerivation` is the real check: the original
+ObjC algorithm, transcribed and running against Foundation and CommonCrypto as
+it did, against the core, over twelve tuples. It failed on all twelve against
+that mutated core, which is how it is known to be load-bearing rather than
+assumed.
+
+**And the reason that mutated core was still staged is worth recording too.**
+Restoring the Rust source is not enough: `prepare-rish-agent-core.sh` has to
+run again, or the linked xcframework is the old one. The first parity run
+reported a mismatch that did not exist. Same trap as a stale `.app`, one layer
+down.
+
 ### What an interrupted context swap resolves to
 
 `project_context_store.rs` ports the store's naming rules and its recovery

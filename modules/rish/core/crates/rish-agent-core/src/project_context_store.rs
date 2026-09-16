@@ -150,9 +150,7 @@ pub fn recover_references(references: &Map<String, Value>, valid_ids: &[String])
         if canonical_snapshot_id(&new_id) {
             let crash_before_swap = new_id == rollback_id && rollback_id != NO_PRIOR_SNAPSHOT_ID;
             if !crash_before_swap {
-                if rollback_id != NO_PRIOR_SNAPSHOT_ID
-                    && valid_ids.contains(&rollback_id)
-                {
+                if rollback_id != NO_PRIOR_SNAPSHOT_ID && valid_ids.contains(&rollback_id) {
                     result.insert(active_key.clone(), json!(rollback_id));
                 } else {
                     // Nothing to go back to: the conversation had no snapshot

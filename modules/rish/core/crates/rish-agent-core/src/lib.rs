@@ -24,6 +24,7 @@ pub mod ledger_ops;
 pub mod prepared_attempt;
 pub mod project_access;
 pub mod project_context_policy;
+pub mod project_context_service;
 pub mod project_context_store;
 pub mod provider_round;
 pub mod root_projection;

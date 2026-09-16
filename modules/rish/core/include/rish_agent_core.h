@@ -145,6 +145,12 @@ char *rish_agent_completion_response_reduce(const char *json, size_t json_length
 /// crash between writing the object and recording it recoverable.
 char *rish_agent_git_tool_reduce(const char *json, size_t json_length);
 
+/// One project-context-service decision over {"op",...}: reference_id,
+/// roots_equal, canonical_digest, bounded_string. The reference id is derived
+/// from the whole authority tuple rather than chosen, so two workspaces using
+/// one conversation id cannot evict or authorise one another's snapshot.
+char *rish_agent_project_context_service_reduce(const char *json, size_t json_length);
+
 /// One project-context-store decision over {"op",...}: canonical_snapshot_id,
 /// safe_reference_key, hex_digest, settable_reference_key,
 /// prepare_transaction_key, recover_references. A reference is a name pointing
