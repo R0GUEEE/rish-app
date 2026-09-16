@@ -867,6 +867,33 @@ values are pinned in the core's tests — a change to the table changes them and
 invalidates every authority on every device, which is exactly the kind of
 change that should be hard to make by accident.
 
+### The approval preview's bounds, pinned
+
+The preview is what a person reads before approving a write, so what its bounds
+**hide** is as much the rule as what they show. Seven cases are now pinned
+against `DSHAgentApprovalUnifiedDiff` as it stood at `8e33d06`, the last commit
+before it moved into the core:
+
+- the hunk header names where the change starts, one-based, and counts the
+  whole change rather than the part shown;
+- three unchanged lines of context either side, both taken from the prior;
+- at most 24 lines each way, with `…` between the added lines and the trailing
+  context; exactly 24 is not truncation;
+- **past 2,000 lines both sides are cut before anything is compared**, so a
+  change below that line is not elided from the hunk — it is never seen, and
+  the truncation flag is the only thing that says so. That is why the flag may
+  only ever be raised;
+- over 4,096 bytes the preview is cut to half the budget on a character
+  boundary, with `…` appended;
+- an insertion or deletion anchors on what did not move rather than reporting
+  the whole file;
+- a file ending in a newline has a trailing empty line, which anchors the
+  suffix and is then emitted as a context line that renders as a lone space.
+  Odd-looking, and exactly what the original did.
+
+Both bounds were verified load-bearing by widening them and watching the
+assertions fail.
+
 ### What a person is told the agent may do
 
 `AgentPolicyService`'s describe result is a *safe projection*: it is handed to
