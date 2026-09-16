@@ -145,6 +145,13 @@ char *rish_agent_completion_response_reduce(const char *json, size_t json_length
 /// crash between writing the object and recording it recoverable.
 char *rish_agent_git_tool_reduce(const char *json, size_t json_length);
 
+/// One workspace-clearance decision over {"op",...}: operation_shape,
+/// receipt_shape, session_reference_valid, receipt_authorises. A clearance is
+/// the proof that a destructive workspace operation was authorised against a
+/// specific committed session, so its receipt names that session's generation
+/// and digest. Its bounds are the workspace receipt store's, not a second set.
+char *rish_agent_workspace_clearance_reduce(const char *json, size_t json_length);
+
 /// One workspace-error decision over {"op",...}: projection, codes. Which
 /// public code and message a workspace failure is reported as. A caller
 /// branches on the code and a person's retry depends on it, so the mapping is

@@ -1203,6 +1203,36 @@ asking whether the record is the right shape, not comparing the directory
 identity, and inventing the fingerprint instead of asking for it. The last one
 fails nine of the twelve.
 
+### What a destructive workspace operation needs before it runs
+
+`workspace_clearance.rs` ports `DSHWorkspaceClearanceCanonicalOperationFields`,
+`DSHWorkspaceClearanceReceiptFields` and
+`DSHWorkspaceClearanceSessionReferenceValid`.
+
+A clearance is the proof that a destructive operation — forget, or delete the
+owned content — was authorised against **a specific committed session**. That
+is why the receipt names the session's generation and digest: without them,
+"they said yes" could mean yes to a different state. `receipt_authorises` is
+new rather than ported; it states in one place what the store checked in
+several: the receipt id, the operation id, the workspace and the binding
+revision must all agree. A receipt for the right workspace at the wrong binding
+is consent for a root that has since been rebound.
+
+A session generation counts from one. Generation zero means no session has ever
+been committed, which nobody can have agreed to.
+
+**The clearance store's bounds are the workspace receipt store's bounds** —
+2048 receipts, thirty days — and they are now re-exported from
+`workspace_receipt` rather than written out again. They were already the same
+numbers in two files; two stores expiring on different schedules would have
+been a policy nobody decided on, one edit away.
+
+`WorkspaceClearanceStore.mm` also carried its own complete set of schema
+primitives (`ClearanceUUID`, `ClearanceDigest`, `ClearanceTimestamp`,
+`ClearanceExactKeys`, …) — a third copy after `LocalWorkspaceAccess.mm` and the
+core. The ones the ported rules used are gone; the rest still back the file's
+storage paths and stay for now.
+
 ### Android reads its registry the way iOS does
 
 Two things, and the second only became possible because of the first.
