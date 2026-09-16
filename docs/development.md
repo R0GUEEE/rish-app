@@ -1203,6 +1203,39 @@ asking whether the record is the right shape, not comparing the directory
 identity, and inventing the fingerprint instead of asking for it. The last one
 fails nine of the twelve.
 
+### What a project-context result may say
+
+`project_context_bridge.rs` ports `DSHPCSafeRelativePath` and
+`DSHPCBoundedString` from `LocalProjectContextModule.mm`. The identifier,
+digest and OID rules that file also carried are `project_module`'s, and are
+re-used rather than restated.
+
+**This path rule is not `execution_ledger::relative_path_argument`**, and the
+two are deliberately kept apart. That one bounds an agent's tool *argument* at
+512 bytes and demands NFC; this one bounds a *reported* path at 4096 and does
+not, because it describes a file that already exists rather than naming one to
+act on. It also refuses a `.` component, which the other allows.
+`it_is_not_the_agents_tool_argument_rule` pins three inputs where they
+disagree, so merging them later is a decision rather than an accident.
+
+### The iOS baseline, stated properly
+
+After the container-anchor fix, the persistent failures are **five**:
+`LegacyBoundProjectRootAccessTests
+testVerifiedLegacyRootRunsFileWriteStatusAndCommitEndToEnd` and four
+`RuntimeEnvironmentStoreTests`. Three UI tests —
+`DeviceCloneDriveUITests` twice over and `HarnessEvidenceUITests` — fail on
+some runs and pass on others; a run where all three passed has been observed.
+
+Three further one-off failures were seen across this work and each passed 3/3
+in isolation and did not reproduce on a second full run:
+`AgentProviderRoundServiceTests testSynchronousBoundTaskReturnedByTransportIsNotCancelled`,
+`CompletionV2StreamTests testCancelBeforeTaskBindDoesNotPoisonTheCompletionSlot`
+and `CompletionV2Tests testSchema1RedirectStillFollowsAndCompletes`. All three
+are in async transport paths and none is touched by this work. **Counting them
+as "pre-existing failures" would be wrong in both directions** — they are
+neither stable nor caused here.
+
 ### The six readers a workspace exposes
 
 `workspace_read_tools.rs` ports `LWToolNameValid`, `LWToolOptionsValid` and the

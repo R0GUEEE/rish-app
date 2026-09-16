@@ -12,6 +12,7 @@ use rish_agent_core::ledger_batch::reduce_json as ledger_batch_reduce_json;
 use rish_agent_core::ledger_ops::reduce_json as ledger_reduce_json;
 use rish_agent_core::prepared_attempt::reduce_json as prepared_attempt_reduce_json;
 use rish_agent_core::project_access::reduce_json as project_access_reduce_json;
+use rish_agent_core::project_context_bridge::reduce_json as project_context_bridge_reduce_json;
 use rish_agent_core::project_context_policy::reduce_json as project_context_reduce_json;
 use rish_agent_core::project_context_service::reduce_json as project_context_service_reduce_json;
 use rish_agent_core::project_context_store::reduce_json as project_context_store_reduce_json;
@@ -405,6 +406,23 @@ pub unsafe extern "C" fn rish_agent_project_module_reduce(
         return std::ptr::null_mut();
     };
     output(project_module_reduce_json(text))
+}
+
+/// Runs one project-context-bridge decision over the JSON envelope documented
+/// on `rish_agent_core::project_context_bridge::reduce_json` — what a
+/// project-context result may say at the boundary to JavaScript.
+///
+/// # Safety
+/// `pointer` must reference `length` readable bytes or be null.
+#[no_mangle]
+pub unsafe extern "C" fn rish_agent_project_context_bridge_reduce(
+    pointer: *const c_char,
+    length: usize,
+) -> *mut c_char {
+    let Some(text) = input(pointer, length) else {
+        return std::ptr::null_mut();
+    };
+    output(project_context_bridge_reduce_json(text))
 }
 
 /// Runs one project-context-service decision over the JSON envelope documented

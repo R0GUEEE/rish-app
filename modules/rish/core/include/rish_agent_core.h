@@ -152,6 +152,13 @@ char *rish_agent_git_tool_reduce(const char *json, size_t json_length);
 /// E_PROJECT_NATIVE rather than a guess.
 char *rish_agent_project_module_reduce(const char *json, size_t json_length);
 
+/// One project-context-bridge decision over {"op",...}: safe_relative_path,
+/// bounded_string. A reported path stays inside the project: no leading slash,
+/// no backslash, no NUL, no control or format characters, and every component
+/// a real name. This is not the agent's tool-argument path rule; the two have
+/// different bounds and are deliberately kept apart.
+char *rish_agent_project_context_bridge_reduce(const char *json, size_t json_length);
+
 /// One project-context-service decision over {"op",...}: reference_id,
 /// roots_equal, canonical_digest, bounded_string. The reference id is derived
 /// from the whole authority tuple rather than chosen, so two workspaces using
