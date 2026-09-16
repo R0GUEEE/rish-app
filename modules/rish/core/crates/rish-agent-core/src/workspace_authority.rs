@@ -1,5 +1,5 @@
-//! What a stored workspace authority looks like, and how it is tied to its
-//! record.
+//! What a stored workspace authority looks like, how it is tied to its record,
+//! and how one written before fingerprints existed is upgraded.
 //!
 //! Ported from `DSHValidOwnedAuthority`, `DSHValidBookmarkAuthority`,
 //! `DSHValidGrantedAuthority` and `DSHValidLegacyAuthority` in
@@ -22,8 +22,8 @@ use serde_json::{json, Map, Value};
 
 use crate::canonical::sha256_hex;
 use crate::schema::{canonical_sha256, canonical_timestamp, exact_keys};
-use crate::workspace_fingerprint::fingerprint_valid;
-use crate::workspace_record::capabilities_array;
+use crate::workspace_fingerprint::{fingerprint, fingerprint_input, fingerprint_valid};
+use crate::workspace_record::{capabilities_array, CAPABILITY_ORDER};
 
 /// A security-scoped bookmark is at most this many bytes.
 pub const MAX_BOOKMARK_BYTES: u64 = 256 * 1024;
@@ -241,6 +241,188 @@ pub fn legacy_authority(authority: Option<&Value>, record: &Value) -> bool {
         && fingerprint_valid(authority.expect("checked"), record)
 }
 
+
+// MARK: - migration
+//
+// An authority written before root fingerprints existed carries every field
+// its shape names except that one. Upgrading it is sealing it: the same
+// contents, with the fingerprint they imply. Nothing else is rewritten, so an
+// upgrade can never turn an authority into a claim over something its own
+// bytes did not already say.
+//
+// The pre-fingerprint shapes are checked with the same rules as the sealed
+// ones, less that key. What they are *not* checked against is the record's own
+// `created_at` and `last_opened_at` in the legacy case — the validator demands
+// those match and the migration does not, which means an old legacy authority
+// whose timestamps have drifted can be upgraded into one that still fails to
+// validate. That is the original's behaviour and it is left alone; see
+// `a_migrated_legacy_authority_can_still_fail_to_validate`.
+
+/// Seals an authority with the fingerprint its own contents imply.
+fn sealed(authority: Map<String, Value>, record: &Value) -> Option<Value> {
+    let authority = Value::Object(authority);
+    let input = fingerprint_input(record, &authority)?;
+    let sha = fingerprint(Some(&input))?;
+    let mut map = authority.as_object()?.clone();
+    map.insert("root_fingerprint_sha256".to_string(), json!(sha));
+    Some(Value::Object(map))
+}
+
+/// `DSHMigrateOwnedAuthority`.
+pub fn owned_migration(authority: Option<&Value>, record: &Value) -> Option<Value> {
+    let map = exact_keys(
+        authority,
+        &[
+            "schema_version",
+            "workspace_id",
+            "binding_revision",
+            "device_id",
+            "inode_id",
+            "directory_name_sha256",
+            "recorded_at",
+        ],
+    )?;
+    let Some(Value::String(directory)) = record.get("owned_directory_name") else {
+        return None;
+    };
+    if map.get("schema_version") != Some(&json!(1))
+        || !matches_record(map, record, &["workspace_id", "binding_revision"])
+        || !unsigned_string(map.get("device_id"))
+        || !unsigned_string(map.get("inode_id"))
+        || map.get("directory_name_sha256") != Some(&json!(sha256_hex(directory.as_bytes())))
+        || !canonical_timestamp(map.get("recorded_at"))
+    {
+        return None;
+    }
+    sealed(map.clone(), record)
+}
+
+/// `DSHMigrateGrantedAuthority`.
+pub fn granted_migration(
+    authority: Option<&Value>,
+    record: &Value,
+    bookmark_authority_value: &Value,
+) -> Option<Value> {
+    let map = exact_keys(
+        authority,
+        &[
+            "schema_version",
+            "workspace_id",
+            "binding_revision",
+            "volume_identifier_sha256",
+            "resource_identifier_sha256",
+            "device_id",
+            "inode_id",
+            "bookmark_sha256",
+            "classified_at",
+        ],
+    )?;
+    if map.get("schema_version") != Some(&json!(1))
+        || !matches_record(map, record, &["workspace_id", "binding_revision"])
+        || !canonical_sha256(map.get("volume_identifier_sha256"))
+        || !canonical_sha256(map.get("resource_identifier_sha256"))
+        || !unsigned_string(map.get("device_id"))
+        || !unsigned_string(map.get("inode_id"))
+        || !same_value(
+            map.get("bookmark_sha256"),
+            bookmark_authority_value.get("bookmark_sha256"),
+        )
+        || !canonical_timestamp(map.get("classified_at"))
+    {
+        return None;
+    }
+    sealed(map.clone(), record)
+}
+
+/// `DSHValidLegacyPhysicalIdentity`: what the host re-read from the project on
+/// disk. Every identifier is positive — a legacy root that reports device or
+/// inode zero names nothing and cannot be verified.
+pub fn legacy_physical_identity(identity: Option<&Value>, expected_metadata: Option<&Value>) -> bool {
+    let Some(map) = exact_keys(
+        identity,
+        &[
+            "project_metadata_sha256",
+            "projects_root_device_id",
+            "projects_root_inode_id",
+            "repository_device_id",
+            "repository_inode_id",
+            "git_device_id",
+            "git_inode_id",
+        ],
+    ) else {
+        return false;
+    };
+    map.get("project_metadata_sha256").is_some()
+        && map.get("project_metadata_sha256") == expected_metadata
+        && canonical_sha256(map.get("project_metadata_sha256"))
+        && [
+            "projects_root_device_id",
+            "projects_root_inode_id",
+            "repository_device_id",
+            "repository_inode_id",
+            "git_device_id",
+            "git_inode_id",
+        ]
+        .iter()
+        .all(|key| positive_string(map.get(*key)))
+}
+
+/// `DSHMigrateLegacyAuthority`. The physical identity is folded in before the
+/// seal, because the fingerprint is taken over all three device/inode pairs.
+pub fn legacy_migration(
+    authority: Option<&Value>,
+    record: &Value,
+    physical: Option<&Value>,
+) -> Option<Value> {
+    let map = exact_keys(
+        authority,
+        &[
+            "schema_version",
+            "workspace_id",
+            "binding_revision",
+            "legacy_project_id",
+            "root_identity_sha256",
+            "display_name",
+            "created_at",
+            "last_opened_at",
+            "recorded_at",
+        ],
+    )?;
+    if map.get("schema_version") != Some(&json!(1))
+        || !matches_record(
+            map,
+            record,
+            &["workspace_id", "binding_revision", "legacy_project_id", "display_name"],
+        )
+        || !canonical_sha256(map.get("root_identity_sha256"))
+        || !canonical_timestamp(map.get("created_at"))
+        || !canonical_timestamp(map.get("last_opened_at"))
+        || !canonical_timestamp(map.get("recorded_at"))
+    {
+        return None;
+    }
+    if !legacy_physical_identity(physical, map.get("root_identity_sha256")) {
+        return None;
+    }
+    let mut merged = map.clone();
+    for (key, value) in physical?.as_object()? {
+        merged.insert(key.clone(), value.clone());
+    }
+    sealed(merged, record)
+}
+
+/// The capabilities the host verified, in the one order a stored authority may
+/// spell them. The legacy fingerprint folds in no authority digest, so these
+/// are added *after* the seal and the seal still holds — which is also why the
+/// capability list is not what makes a legacy root trustworthy.
+pub fn ordered_capabilities(available: &[String]) -> Vec<String> {
+    CAPABILITY_ORDER
+        .iter()
+        .filter(|name| available.iter().any(|have| have == *name))
+        .map(|name| (*name).to_string())
+        .collect()
+}
+
 fn text<'a>(envelope: &'a Map<String, Value>, key: &str) -> Option<&'a str> {
     envelope.get(key).and_then(Value::as_str)
 }
@@ -257,8 +439,35 @@ fn reduce_json_inner(input: &str) -> Option<Value> {
     let parsed: Value = serde_json::from_str(input).ok()?;
     let envelope = parsed.as_object()?;
     let authority = envelope.get("authority");
+    let op = text(envelope, "op")?;
+    // Two ops are about neither an authority nor a record, so they are
+    // answered before one is demanded: asking the host to hand over a record
+    // it has no use for would be an invitation to invent one.
+    match op {
+        "legacy_physical_identity" => {
+            return Some(json!({
+                "ok": true,
+                "valid": legacy_physical_identity(
+                    envelope.get("identity"),
+                    envelope.get("expected_metadata_sha256"),
+                ),
+            }))
+        }
+        "ordered_capabilities" => {
+            let available: Vec<String> = envelope
+                .get("available")?
+                .as_array()?
+                .iter()
+                .map(|item| item.as_str().map(str::to_owned))
+                .collect::<Option<Vec<String>>>()?;
+            return Some(json!({
+                "ok": true, "capabilities": ordered_capabilities(&available)
+            }));
+        }
+        _ => {}
+    }
     let record = envelope.get("record")?;
-    let valid = match text(envelope, "op")? {
+    let valid = match op {
         "owned" => owned_authority(authority, record),
         "bookmark" => bookmark_authority(
             authority,
@@ -277,6 +486,29 @@ fn reduce_json_inner(input: &str) -> Option<Value> {
             envelope.get("bookmark_authority").unwrap_or(&Value::Null),
         ),
         "legacy" => legacy_authority(authority, record),
+        // The migrations answer with an authority rather than a verdict, so
+        // they return early: `valid` would say nothing about them.
+        "owned_migration" => {
+            return Some(json!({
+                "ok": true, "authority": owned_migration(authority, record)
+            }))
+        }
+        "granted_migration" => {
+            return Some(json!({
+                "ok": true,
+                "authority": granted_migration(
+                    authority,
+                    record,
+                    envelope.get("bookmark_authority").unwrap_or(&Value::Null),
+                ),
+            }))
+        }
+        "legacy_migration" => {
+            return Some(json!({
+                "ok": true,
+                "authority": legacy_migration(authority, record, envelope.get("physical_identity")),
+            }))
+        }
         _ => return None,
     };
     Some(json!({ "ok": true, "valid": valid }))

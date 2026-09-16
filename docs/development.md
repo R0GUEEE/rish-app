@@ -1203,6 +1203,48 @@ asking whether the record is the right shape, not comparing the directory
 identity, and inventing the fingerprint instead of asking for it. The last one
 fails nine of the twelve.
 
+### Upgrading an authority written before fingerprints
+
+The three `DSHMigrate*Authority` functions, `DSHValidLegacyPhysicalIdentity`
+and the capability ordering now live in `workspace_authority.rs` beside the
+validators they mirror. `DSHCapabilityOrder` is gone: the one order a stored
+capability list may be spelled in has a single copy, in the core.
+
+**Upgrading is sealing.** The same contents, with the fingerprint they imply.
+Nothing is rewritten, so an upgrade can never turn an authority into a claim
+over something its own bytes did not already say. An authority that already
+carries a fingerprint is refused — the shape is exact — so a *broken* seal can
+never be repaired into a working one.
+
+Three asymmetries between migrating and validating, all the original's and all
+left alone rather than tidied:
+
+- The legacy migration requires the physical identity's metadata digest to be
+  the authority's own `root_identity_sha256`. The validator never compares
+  those two, so a stored legacy authority may carry different ones. Migration
+  is the narrower gate on purpose: it is the step that decides what a root is
+  worth *from evidence*, rather than reading back what someone already wrote.
+- The legacy migration checks `created_at` and `last_opened_at` are canonical
+  timestamps but not that they match the record's; the validator demands they
+  match. So a drifted legacy authority upgrades into one that still fails to
+  validate. The upgrade never invents agreement it did not find.
+- The legacy fingerprint folds in **no** authority digest, which is why the
+  caller can add the capability list after the seal and the seal still holds.
+  That is load-bearing and also the honest limit of a legacy fingerprint: it
+  covers the identity, not the whole object.
+
+**The suite covered none of this before.** Nothing on iOS wrote a
+pre-fingerprint authority, so the migration rules could have been anything.
+`testAnAuthorityWrittenBeforeFingerprintsIsUpgradedInPlace` writes one and
+checks it comes back sealed to exactly the fingerprint it had; it was verified
+by making `DSHMigrateOwnedAuthority` return nil, which fails it.
+
+`testAnIncompleteAuthorityIsNotUpgraded` was wrong on the first attempt: it
+expected the listing to report that one workspace as unavailable. It does not —
+it fails **closed** with `E_WORKSPACE_PERSISTENCE`. Storage that cannot be read
+as itself is not one workspace in a bad state; it is storage that cannot be
+trusted to describe any of them. Measured, then asserted.
+
 ### What a workspace's directory is called
 
 `workspace_directory_name.rs` ports `DSHInternalComponent`,

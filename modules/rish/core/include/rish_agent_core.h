@@ -153,9 +153,12 @@ char *rish_agent_git_tool_reduce(const char *json, size_t json_length);
 char *rish_agent_workspace_record_reduce(const char *json, size_t json_length);
 
 /// One workspace-authority decision over {"op",...}: owned, bookmark, granted,
-/// legacy. Each shape restates its record's identity and ends in the
-/// fingerprint. Base64 decoding stays with the host: the decoded bookmark's
-/// length and SHA-256 come in as facts, the cap and the match stay in the core.
+/// legacy, their three migrations, legacy_physical_identity and
+/// ordered_capabilities. Each shape restates its record's identity and ends in
+/// the fingerprint. Base64 decoding stays with the host: the decoded
+/// bookmark's length and SHA-256 come in as facts, the cap and the match stay
+/// in the core. A migration answers with an authority, or null when the one it
+/// was given cannot be upgraded.
 char *rish_agent_workspace_authority_reduce(const char *json, size_t json_length);
 
 /// One workspace directory-name decision over {"op",...}: internal_component,

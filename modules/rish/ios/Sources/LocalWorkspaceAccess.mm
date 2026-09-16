@@ -325,22 +325,16 @@ static BOOL DSHValidLegacyEvidence(NSDictionary *identity,
       DSHCanonicalPositiveIntegerString(identity[@"git_inode_id"]);
 }
 
+// Defined below, next to the other workspace reducers.
+static NSDictionary *DSHWorkspaceAuthorityReduce(NSString *op,
+                                                 NSDictionary *fields);
+
 static BOOL DSHValidLegacyPhysicalIdentity(NSDictionary *identity,
                                            NSString *expectedMetadata) {
-  NSArray *keys = @[
-    @"project_metadata_sha256", @"projects_root_device_id",
-    @"projects_root_inode_id", @"repository_device_id",
-    @"repository_inode_id", @"git_device_id", @"git_inode_id",
-  ];
-  return DSHExactKeys(identity, keys) &&
-      [identity[@"project_metadata_sha256"] isEqual:expectedMetadata] &&
-      DSHCanonicalSHA256(identity[@"project_metadata_sha256"]) &&
-      DSHCanonicalPositiveIntegerString(identity[@"projects_root_device_id"]) &&
-      DSHCanonicalPositiveIntegerString(identity[@"projects_root_inode_id"]) &&
-      DSHCanonicalPositiveIntegerString(identity[@"repository_device_id"]) &&
-      DSHCanonicalPositiveIntegerString(identity[@"repository_inode_id"]) &&
-      DSHCanonicalPositiveIntegerString(identity[@"git_device_id"]) &&
-      DSHCanonicalPositiveIntegerString(identity[@"git_inode_id"]);
+  return [DSHWorkspaceAuthorityReduce(@"legacy_physical_identity", @{
+    @"identity" : identity ?: NSNull.null,
+    @"expected_metadata_sha256" : expectedMetadata ?: NSNull.null,
+  })[@"valid"] isEqual:@YES];
 }
 
 static BOOL DSHLegacyPhysicalIdentityMatchesAuthority(
@@ -507,98 +501,37 @@ static NSDictionary *DSHLegacyFingerprintInput(NSDictionary *record,
   };
 }
 
+static NSDictionary *DSHAuthorityMigration(NSString *op, NSDictionary *authority,
+                                           NSDictionary *record,
+                                           NSDictionary *extra) {
+  NSMutableDictionary *fields = [NSMutableDictionary dictionaryWithDictionary:@{
+    @"authority" : authority ?: NSNull.null,
+    @"record" : record ?: NSNull.null,
+  }];
+  [fields addEntriesFromDictionary:extra ?: @{}];
+  id migrated = DSHWorkspaceAuthorityReduce(op, fields)[@"authority"];
+  return [migrated isKindOfClass:NSDictionary.class] ? migrated : nil;
+}
+
 static NSDictionary *DSHMigrateOwnedAuthority(NSDictionary *authority,
                                               NSDictionary *record) {
-  NSArray *keys = @[
-    @"schema_version", @"workspace_id", @"binding_revision", @"device_id",
-    @"inode_id", @"directory_name_sha256", @"recorded_at",
-  ];
-  NSString *directoryName = record[@"owned_directory_name"];
-  NSData *directoryBytes =
-      [directoryName dataUsingEncoding:NSUTF8StringEncoding allowLossyConversion:NO];
-  if (!DSHExactKeys(authority, keys) ||
-      !DSHSchemaVersionIsOne(authority[@"schema_version"]) ||
-      ![authority[@"workspace_id"] isEqual:record[@"workspace_id"]] ||
-      ![authority[@"binding_revision"] isEqual:record[@"binding_revision"]] ||
-      !DSHCanonicalUnsignedIntegerString(authority[@"device_id"]) ||
-      !DSHCanonicalUnsignedIntegerString(authority[@"inode_id"]) ||
-      ![authority[@"directory_name_sha256"] isEqual:DSHSHA256(directoryBytes)] ||
-      !DSHCanonicalTimestamp(authority[@"recorded_at"])) {
-    return nil;
-  }
-  NSMutableDictionary *migrated = [authority mutableCopy];
-  NSString *authorityDigest = DSHAuthorityDigestWithoutFingerprint(authority);
-  NSDictionary *input = DSHDocumentsOwnedFingerprintInput(record, authority,
-                                                          authorityDigest);
-  NSString *fingerprint = DSHWorkspaceRootFingerprintSHA256(input, nil);
-  if (fingerprint == nil) return nil;
-  migrated[@"root_fingerprint_sha256"] = fingerprint;
-  return migrated;
+  return DSHAuthorityMigration(@"owned_migration", authority, record, nil);
 }
 
 static NSDictionary *DSHMigrateGrantedAuthority(NSDictionary *authority,
                                                 NSDictionary *record,
                                                 NSDictionary *bookmark) {
-  NSArray *keys = @[
-    @"schema_version", @"workspace_id", @"binding_revision",
-    @"volume_identifier_sha256", @"resource_identifier_sha256", @"device_id",
-    @"inode_id", @"bookmark_sha256", @"classified_at",
-  ];
-  if (!DSHExactKeys(authority, keys) ||
-      !DSHSchemaVersionIsOne(authority[@"schema_version"]) ||
-      ![authority[@"workspace_id"] isEqual:record[@"workspace_id"]] ||
-      ![authority[@"binding_revision"] isEqual:record[@"binding_revision"]] ||
-      !DSHCanonicalSHA256(authority[@"volume_identifier_sha256"]) ||
-      !DSHCanonicalSHA256(authority[@"resource_identifier_sha256"]) ||
-      !DSHCanonicalUnsignedIntegerString(authority[@"device_id"]) ||
-      !DSHCanonicalUnsignedIntegerString(authority[@"inode_id"]) ||
-      ![authority[@"bookmark_sha256"] isEqual:bookmark[@"bookmark_sha256"]] ||
-      !DSHCanonicalTimestamp(authority[@"classified_at"])) {
-    return nil;
-  }
-  NSMutableDictionary *migrated = [authority mutableCopy];
-  NSString *authorityDigest = DSHAuthorityDigestWithoutFingerprint(authority);
-  NSDictionary *input = DSHGrantedFingerprintInput(record, authority,
-                                                   authorityDigest);
-  NSString *fingerprint = DSHWorkspaceRootFingerprintSHA256(input, nil);
-  if (fingerprint == nil) return nil;
-  migrated[@"root_fingerprint_sha256"] = fingerprint;
-  return migrated;
+  return DSHAuthorityMigration(@"granted_migration", authority, record, @{
+    @"bookmark_authority" : bookmark ?: NSNull.null,
+  });
 }
 
 static NSDictionary *DSHMigrateLegacyAuthority(NSDictionary *authority,
                                                NSDictionary *record,
                                                NSDictionary *physicalIdentity) {
-  NSArray *keys = @[
-    @"schema_version", @"workspace_id", @"binding_revision",
-    @"legacy_project_id", @"root_identity_sha256", @"display_name",
-    @"created_at", @"last_opened_at", @"recorded_at",
-  ];
-  if (!DSHExactKeys(authority, keys) ||
-      !DSHSchemaVersionIsOne(authority[@"schema_version"]) ||
-      ![authority[@"workspace_id"] isEqual:record[@"workspace_id"]] ||
-      ![authority[@"binding_revision"] isEqual:record[@"binding_revision"]] ||
-      ![authority[@"legacy_project_id"] isEqual:record[@"legacy_project_id"]] ||
-      !DSHCanonicalSHA256(authority[@"root_identity_sha256"]) ||
-      ![authority[@"display_name"] isEqual:record[@"display_name"]] ||
-      !DSHCanonicalTimestamp(authority[@"created_at"]) ||
-      !DSHCanonicalTimestamp(authority[@"last_opened_at"]) ||
-      !DSHCanonicalTimestamp(authority[@"recorded_at"])) {
-    return nil;
-  }
-  if (!DSHValidLegacyPhysicalIdentity(
-          physicalIdentity, authority[@"root_identity_sha256"])) {
-    return nil;
-  }
-  NSMutableDictionary *migrated = [authority mutableCopy];
-  [migrated addEntriesFromDictionary:physicalIdentity];
-  NSString *authorityDigest = DSHAuthorityDigestWithoutFingerprint(migrated);
-  NSDictionary *input = DSHLegacyFingerprintInput(record, migrated,
-                                                  authorityDigest);
-  NSString *fingerprint = DSHWorkspaceRootFingerprintSHA256(input, nil);
-  if (fingerprint == nil) return nil;
-  migrated[@"root_fingerprint_sha256"] = fingerprint;
-  return migrated;
+  return DSHAuthorityMigration(@"legacy_migration", authority, record, @{
+    @"physical_identity" : physicalIdentity ?: NSNull.null,
+  });
 }
 
 // Request digests are persisted in private authority records so an operation
@@ -772,8 +705,17 @@ static BOOL DSHJSONHasBoundedExactStructure(NSData *data) {
   return index == data.length;
 }
 
-static NSArray<NSString *> *DSHCapabilityOrder(void) {
-  return @[@"read", @"write", @"git", @"project_context"];
+// The one order a stored capability list may be spelled in lives in the core
+// (`ordered_capabilities`), so the host keeps no second copy of the names.
+static NSArray<NSString *> *DSHOrderedCapabilities(id available) {
+  NSMutableArray *names = [NSMutableArray array];
+  for (id item in available) {
+    if ([item isKindOfClass:NSString.class]) [names addObject:item];
+  }
+  id ordered = DSHWorkspaceAuthorityReduce(@"ordered_capabilities", @{
+    @"available" : names,
+  })[@"capabilities"];
+  return [ordered isKindOfClass:NSArray.class] ? ordered : nil;
 }
 
 static BOOL DSHCanonicalCapabilitiesArray(id value) {
@@ -783,14 +725,11 @@ static BOOL DSHCanonicalCapabilitiesArray(id value) {
 }
 
 static BOOL DSHCanonicalCapabilitiesSet(id value) {
-  if (![value isKindOfClass:NSSet.class] || [value count] > 4) return NO;
-  NSSet *allowed = [NSSet setWithArray:DSHCapabilityOrder()];
-  for (id item in value) {
-    if (![item isKindOfClass:NSString.class] || ![allowed containsObject:item]) {
-      return NO;
-    }
-  }
-  return YES;
+  if (![value isKindOfClass:NSSet.class]) return NO;
+  // Ordering drops every name that is not a capability, so a set survives it
+  // whole only when it was made of capabilities to begin with.
+  NSArray *ordered = DSHOrderedCapabilities(value);
+  return ordered != nil && ordered.count == [value count];
 }
 
 static BOOL DSHValidWorkspaceRecord(NSDictionary *record) {
@@ -1156,12 +1095,8 @@ static NSString *DSHOwnedDirectoryNameCandidate(NSString *base,
   NSMutableDictionary *migrated =
       [DSHMigrateLegacyAuthority(authority, record, physical) mutableCopy];
   if (migrated == nil) return nil;
-  NSMutableArray *orderedCapabilities = [NSMutableArray array];
-  for (NSString *capability in DSHCapabilityOrder()) {
-    if ([evidence[@"capabilities"] containsObject:capability]) {
-      [orderedCapabilities addObject:capability];
-    }
-  }
+  NSArray *orderedCapabilities = DSHOrderedCapabilities(evidence[@"capabilities"]);
+  if (orderedCapabilities == nil) return nil;
   migrated[@"capabilities"] = orderedCapabilities;
   return migrated;
 }
@@ -4087,11 +4022,7 @@ static void DSHWorkspaceSetOperationalStatusError(NSString *status,
         @"legacy_project_id" : projectId,
         @"root_identity_sha256" : identity,
         @"display_name" : displayName,
-        @"capabilities" : [DSHCapabilityOrder()
-            filteredArrayUsingPredicate:[NSPredicate predicateWithBlock:
-                ^BOOL(NSString *capability, __unused NSDictionary *bindings) {
-                  return [capabilities containsObject:capability];
-                }]],
+        @"capabilities" : DSHOrderedCapabilities(capabilities) ?: NSNull.null,
         @"created_at" : timestamp,
         @"last_opened_at" : timestamp,
         @"recorded_at" : timestamp,

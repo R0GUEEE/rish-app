@@ -564,3 +564,335 @@ fn a_revision_is_compared_by_value() {
         assert!(!owned_authority(Some(&authority), &record), "{bad}");
     }
 }
+
+// MARK: - migration
+
+/// The pre-fingerprint form of a sealed authority: the same object, minus the
+/// one key that did not exist when it was written.
+fn unsealed(authority: &Value) -> Value {
+    let mut map = authority.as_object().expect("object").clone();
+    map.remove("root_fingerprint_sha256");
+    Value::Object(map)
+}
+
+/// What the host re-read from the project on disk. Its metadata digest is the
+/// authority's own `root_identity_sha256`: the caller only reaches the
+/// migration once the evidence it found agrees with what the authority claims,
+/// and the rule re-checks that rather than taking the caller's word.
+fn physical_identity() -> Value {
+    json!({
+        "project_metadata_sha256": digest('1'),
+        "projects_root_device_id": "16777232",
+        "projects_root_inode_id": "11",
+        "repository_device_id": "16777232",
+        "repository_inode_id": "22",
+        "git_device_id": "16777232",
+        "git_inode_id": "33",
+    })
+}
+
+/// Upgrading is sealing: the contents are untouched and the fingerprint they
+/// imply is added. So a migrated authority is exactly the one the validator
+/// already accepts — which is the only reason upgrading is safe at all.
+#[test]
+fn migrating_an_authority_produces_one_the_validator_accepts() {
+    let record = owned_record();
+    let migrated = owned_migration(Some(&unsealed(&owned())), &record).expect("migrated");
+    assert_eq!(migrated, owned());
+    assert!(owned_authority(Some(&migrated), &record));
+
+    let granted_record = granted_record();
+    let migrated = granted_migration(
+        Some(&unsealed(&granted())),
+        &granted_record,
+        &bookmark(),
+    )
+    .expect("migrated");
+    assert_eq!(migrated, granted());
+    assert!(granted_authority(Some(&migrated), &granted_record, &bookmark()));
+}
+
+/// The legacy migration folds in what the host re-read from disk before
+/// sealing, because the fingerprint is taken over all three device/inode
+/// pairs. The result validates once its capabilities are added.
+#[test]
+fn a_legacy_migration_folds_in_the_physical_identity_before_sealing() {
+    let record = legacy_record();
+    let mut bare = unsealed(&legacy());
+    let map = bare.as_object_mut().expect("object");
+    for key in [
+        "capabilities",
+        "project_metadata_sha256",
+        "projects_root_device_id",
+        "projects_root_inode_id",
+        "repository_device_id",
+        "repository_inode_id",
+        "git_device_id",
+        "git_inode_id",
+    ] {
+        map.remove(key);
+    }
+    let migrated =
+        legacy_migration(Some(&bare), &record, Some(&physical_identity())).expect("migrated");
+    assert_eq!(migrated["git_inode_id"], json!("33"));
+    assert_eq!(migrated["project_metadata_sha256"], json!(digest('1')));
+    // Not yet valid: the capability list is added by the caller afterwards.
+    assert!(!legacy_authority(Some(&migrated), &record));
+    let mut whole = migrated.clone();
+    whole["capabilities"] = json!(ordered_capabilities(&[
+        "git".to_string(),
+        "read".to_string(),
+        "write".to_string()
+    ]));
+    assert!(legacy_authority(Some(&whole), &record));
+}
+
+/// The legacy fingerprint folds in no authority digest, so adding the
+/// capability list after sealing does not disturb the seal. That is load
+/// bearing — the caller relies on it — and it is also the honest limit of a
+/// legacy fingerprint: it covers the identity, not the whole object.
+#[test]
+fn a_legacy_seal_survives_a_later_capability_list() {
+    let record = legacy_record();
+    let sealed = legacy();
+    assert!(legacy_authority(Some(&sealed), &record));
+    for capabilities in [
+        json!(["read"]),
+        json!(["read", "write"]),
+        json!(["read", "write", "git", "project_context"]),
+    ] {
+        let mut changed = sealed.clone();
+        changed["capabilities"] = capabilities.clone();
+        assert!(
+            legacy_authority(Some(&changed), &record),
+            "{capabilities}"
+        );
+    }
+    // The owned shape does fold in its digest, so it does not behave this way.
+    let owned_record = owned_record();
+    let mut tampered = owned();
+    tampered["recorded_at"] = json!(LATER);
+    assert!(!owned_authority(Some(&tampered), &owned_record));
+}
+
+/// The migration checks a legacy authority's timestamps are canonical but does
+/// not require them to be the record's, while the validator does. So an old
+/// authority whose timestamps have drifted upgrades into one that still fails
+/// to validate. This is the original's behaviour, named rather than quietly
+/// changed: the upgrade never invents agreement it did not find.
+#[test]
+fn a_migrated_legacy_authority_can_still_fail_to_validate() {
+    let record = legacy_record();
+    let mut bare = unsealed(&legacy());
+    let map = bare.as_object_mut().expect("object");
+    for key in [
+        "capabilities",
+        "project_metadata_sha256",
+        "projects_root_device_id",
+        "projects_root_inode_id",
+        "repository_device_id",
+        "repository_inode_id",
+        "git_device_id",
+        "git_inode_id",
+    ] {
+        map.remove(key);
+    }
+    bare["created_at"] = json!(LATER);
+    let migrated =
+        legacy_migration(Some(&bare), &record, Some(&physical_identity())).expect("migrated");
+    let mut whole = migrated.clone();
+    whole["capabilities"] = json!(["read"]);
+    assert_eq!(whole["created_at"], json!(LATER));
+    assert!(!legacy_authority(Some(&whole), &record));
+}
+
+/// An authority that already carries a fingerprint is not a pre-fingerprint
+/// authority, and re-sealing one would let a broken seal be repaired into a
+/// working one. The shape is exact, so it is refused.
+#[test]
+fn an_already_sealed_authority_is_not_migrated() {
+    assert!(owned_migration(Some(&owned()), &owned_record()).is_none());
+    assert!(granted_migration(Some(&granted()), &granted_record(), &bookmark()).is_none());
+    assert!(legacy_migration(
+        Some(&legacy()),
+        &legacy_record(),
+        Some(&physical_identity())
+    )
+    .is_none());
+    // And a broken one stays broken rather than being resealed.
+    let mut broken = owned();
+    broken["root_fingerprint_sha256"] = json!(digest('9'));
+    assert!(!owned_authority(Some(&broken), &owned_record()));
+    assert!(owned_migration(Some(&broken), &owned_record()).is_none());
+}
+
+/// A migration checks everything the validator checks, less the fingerprint.
+/// An authority that would not validate once sealed is not upgraded.
+#[test]
+fn a_migration_refuses_what_the_validator_would_refuse() {
+    let record = owned_record();
+    let bare = unsealed(&owned());
+    assert!(owned_migration(Some(&bare), &record).is_some());
+    for (key, value) in [
+        ("schema_version", json!(2)),
+        ("workspace_id", json!(OTHER)),
+        ("binding_revision", json!(4)),
+        ("device_id", json!("0x10")),
+        ("inode_id", json!(7)),
+        ("directory_name_sha256", json!(digest('a'))),
+        ("recorded_at", json!("2026-02-03T04:05:06Z")),
+    ] {
+        let mut broken = bare.clone();
+        broken[key] = value;
+        assert!(owned_migration(Some(&broken), &record).is_none(), "{key}");
+    }
+    // A record naming a different directory is a different root.
+    let mut moved = record.clone();
+    moved["owned_directory_name"] = json!("elsewhere");
+    assert!(owned_migration(Some(&bare), &moved).is_none());
+}
+
+/// The physical identity is what the host re-read from the project on disk. It
+/// has to be about the same project the authority names, and every identifier
+/// has to be positive — a legacy root reporting device or inode zero names
+/// nothing.
+#[test]
+fn a_physical_identity_is_about_the_authoritys_own_project() {
+    let expected = json!(digest('1'));
+    assert!(legacy_physical_identity(
+        Some(&physical_identity()),
+        Some(&expected)
+    ));
+    // A different project's metadata is a different project.
+    assert!(!legacy_physical_identity(
+        Some(&physical_identity()),
+        Some(&json!(digest('3')))
+    ));
+    assert!(!legacy_physical_identity(Some(&physical_identity()), None));
+    for key in [
+        "projects_root_device_id",
+        "projects_root_inode_id",
+        "repository_device_id",
+        "repository_inode_id",
+        "git_device_id",
+        "git_inode_id",
+    ] {
+        let mut zeroed = physical_identity();
+        zeroed[key] = json!("0");
+        assert!(!legacy_physical_identity(Some(&zeroed), Some(&expected)), "{key}");
+    }
+    // The shape is exact.
+    let mut extra = physical_identity();
+    extra["extra"] = json!(1);
+    assert!(!legacy_physical_identity(Some(&extra), Some(&expected)));
+    let mut short = physical_identity();
+    short.as_object_mut().expect("object").remove("git_device_id");
+    assert!(!legacy_physical_identity(Some(&short), Some(&expected)));
+    assert!(!legacy_physical_identity(None, Some(&expected)));
+    // A legacy migration with no identity at all has nothing to fold in.
+    assert!(legacy_migration(Some(&unsealed(&legacy())), &legacy_record(), None).is_none());
+}
+
+/// Capabilities go in the one order a stored authority may spell them,
+/// whatever order the host verified them in, and a name the host invented is
+/// not a capability.
+#[test]
+fn verified_capabilities_are_put_in_the_stored_order() {
+    let names = |items: &[&str]| items.iter().map(|s| (*s).to_string()).collect::<Vec<_>>();
+    assert_eq!(
+        ordered_capabilities(&names(&["project_context", "git", "read"])),
+        names(&["read", "git", "project_context"])
+    );
+    assert_eq!(
+        ordered_capabilities(&names(&["write", "write"])),
+        names(&["write"])
+    );
+    assert_eq!(ordered_capabilities(&names(&["teleport"])), Vec::<String>::new());
+    assert_eq!(ordered_capabilities(&[]), Vec::<String>::new());
+    // Whatever comes out is a list the record rule accepts.
+    assert!(capabilities_array(Some(&json!(ordered_capabilities(&names(&[
+        "git",
+        "project_context",
+        "read",
+        "write"
+    ]))))));
+}
+
+/// The migration ops answer with an authority, not a verdict, and the two
+/// record-free ops are answered without demanding a record.
+#[test]
+fn the_reducer_answers_the_migration_ops_too() {
+    let run = |value: Value| -> Value {
+        serde_json::from_str(&reduce_json(&value.to_string())).expect("reply")
+    };
+    let reply = run(json!({
+        "op": "owned_migration", "authority": unsealed(&owned()), "record": owned_record()
+    }));
+    assert_eq!(reply["ok"], json!(true));
+    assert_eq!(reply["authority"], owned());
+    // A refusal is a null authority, not `ok: false`: the envelope was one the
+    // rule acts on, and its answer is "this cannot be upgraded".
+    let reply = run(json!({
+        "op": "owned_migration", "authority": owned(), "record": owned_record()
+    }));
+    assert_eq!(reply, json!({ "ok": true, "authority": Value::Null }));
+
+    let reply = run(json!({
+        "op": "granted_migration", "authority": unsealed(&granted()),
+        "record": granted_record(), "bookmark_authority": bookmark(),
+    }));
+    assert_eq!(reply["authority"], granted());
+
+    let reply = run(json!({
+        "op": "legacy_physical_identity",
+        "identity": physical_identity(), "expected_metadata_sha256": digest('1'),
+    }));
+    assert_eq!(reply, json!({ "ok": true, "valid": true }));
+
+    let reply = run(json!({
+        "op": "ordered_capabilities", "available": ["git", "read"]
+    }));
+    assert_eq!(reply, json!({ "ok": true, "capabilities": ["read", "git"] }));
+
+    for input in [
+        json!({ "op": "ordered_capabilities", "available": [1] }).to_string(),
+        json!({ "op": "ordered_capabilities" }).to_string(),
+        json!({ "op": "legacy_migration", "authority": unsealed(&legacy()) }).to_string(),
+    ] {
+        assert_eq!(reduce_json(&input), r#"{"ok":false}"#, "{input}");
+    }
+}
+
+/// The migration insists the evidence is about the project the authority
+/// names — the physical identity's metadata digest must be the authority's own
+/// `root_identity_sha256`. The *validator* never compares those two, so a
+/// stored legacy authority may carry different ones. Migration is the
+/// narrower gate, and deliberately: it is the step that decides what a root is
+/// worth, from evidence, rather than reading back what someone already wrote.
+#[test]
+fn a_migration_requires_the_evidence_to_be_about_this_project() {
+    let record = legacy_record();
+    let mut bare = unsealed(&legacy());
+    let map = bare.as_object_mut().expect("object");
+    for key in [
+        "capabilities",
+        "project_metadata_sha256",
+        "projects_root_device_id",
+        "projects_root_inode_id",
+        "repository_device_id",
+        "repository_inode_id",
+        "git_device_id",
+        "git_inode_id",
+    ] {
+        map.remove(key);
+    }
+    assert!(legacy_migration(Some(&bare), &record, Some(&physical_identity())).is_some());
+    let mut elsewhere = physical_identity();
+    elsewhere["project_metadata_sha256"] = json!(digest('7'));
+    assert!(legacy_migration(Some(&bare), &record, Some(&elsewhere)).is_none());
+    // And the stored shape is wider than the migration's: this one validates
+    // with the two digests disagreeing, because nothing re-reads the project
+    // at validation time.
+    assert_ne!(legacy()["root_identity_sha256"], legacy()["project_metadata_sha256"]);
+    assert!(legacy_authority(Some(&legacy()), &record));
+}

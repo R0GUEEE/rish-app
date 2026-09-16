@@ -2238,6 +2238,93 @@ static NSString *const DSHDigestB =
   XCTAssertEqual(whole, 14u);
 }
 
+// An authority written before root fingerprints existed carries every field
+// its shape names except that one. Opening it upgrades it in place: the same
+// contents, sealed with the fingerprint they imply. Nothing else in the suite
+// exercised that path, so this is the only thing standing between the
+// migration rules and a green board that means nothing.
+- (void)testAnAuthorityWrittenBeforeFingerprintsIsUpgradedInPlace {
+  NSURL *documents = [self documentsRootForRoot:self.rootURL];
+  DSHLocalWorkspaceAccess *access =
+      [self accessWithRoot:self.rootURL
+          documentsRootURL:documents
+                     fault:nil
+             UUIDGenerator:^NSString *{
+               return DSHWorkspaceA;
+             }];
+  NSError *error = nil;
+  XCTAssertNotNil([access createRishOwnedWorkspaceWithDisplayName:@"Scratch"
+                                                      operationId:DSHOperationA
+                                                            error:&error],
+                  @"%@", error);
+  NSURL *authorityURL = [self authorityURLForRoot:self.rootURL kind:@"owned"
+                                      workspaceId:DSHWorkspaceA revision:1];
+  NSDictionary *sealed = [NSJSONSerialization
+      JSONObjectWithData:[NSData dataWithContentsOfURL:authorityURL]
+                 options:0 error:nil];
+  NSString *fingerprint = sealed[@"root_fingerprint_sha256"];
+  XCTAssertEqual(fingerprint.length, 64u);
+
+  // Roll it back to the pre-fingerprint shape.
+  NSMutableDictionary *old = [sealed mutableCopy];
+  [old removeObjectForKey:@"root_fingerprint_sha256"];
+  [self secureWriteObject:old toURL:authorityURL];
+
+  NSArray *metadata = [access listWorkspaceMetadataWithError:&error];
+  XCTAssertNotNil(metadata, @"%@", error);
+  XCTAssertEqual(metadata.count, 1u);
+  XCTAssertEqualObjects(metadata.firstObject[@"status"], @"ok");
+
+  // Upgraded in place, and to exactly the fingerprint it had before: the
+  // migration seals the contents it was given and invents nothing.
+  NSDictionary *upgraded = [NSJSONSerialization
+      JSONObjectWithData:[NSData dataWithContentsOfURL:authorityURL]
+                 options:0 error:nil];
+  XCTAssertEqualObjects(upgraded, sealed);
+  XCTAssertEqualObjects(upgraded[@"root_fingerprint_sha256"], fingerprint);
+}
+
+// An authority missing a field its shape names is not a pre-fingerprint
+// authority, so there is nothing to upgrade — and the listing fails **closed**
+// with E_WORKSPACE_PERSISTENCE rather than reporting that one workspace as
+// unavailable. Storage that cannot be read as itself is not a workspace in a
+// bad state; it is storage that cannot be trusted to describe any of them.
+// (Measured, not assumed: the first draft of this test expected a per-record
+// non-ok status and was wrong.)
+- (void)testAnIncompleteAuthorityIsNotUpgraded {
+  NSURL *documents = [self documentsRootForRoot:self.rootURL];
+  DSHLocalWorkspaceAccess *access =
+      [self accessWithRoot:self.rootURL
+          documentsRootURL:documents
+                     fault:nil
+             UUIDGenerator:^NSString *{
+               return DSHWorkspaceA;
+             }];
+  NSError *error = nil;
+  XCTAssertNotNil([access createRishOwnedWorkspaceWithDisplayName:@"Scratch"
+                                                      operationId:DSHOperationA
+                                                            error:&error],
+                  @"%@", error);
+  NSURL *authorityURL = [self authorityURLForRoot:self.rootURL kind:@"owned"
+                                      workspaceId:DSHWorkspaceA revision:1];
+  NSMutableDictionary *broken = [[NSJSONSerialization
+      JSONObjectWithData:[NSData dataWithContentsOfURL:authorityURL]
+                 options:0 error:nil] mutableCopy];
+  [broken removeObjectForKey:@"root_fingerprint_sha256"];
+  [broken removeObjectForKey:@"inode_id"];
+  [self secureWriteObject:broken toURL:authorityURL];
+
+  error = nil;
+  XCTAssertNil([access listWorkspaceMetadataWithError:&error]);
+  XCTAssertEqualObjects(error.domain, @"dev.zseven.rish.local-workspace-access");
+  XCTAssertEqualObjects(error.userInfo[@"code"], @"E_WORKSPACE_PERSISTENCE");
+  // Left exactly as it was found.
+  NSDictionary *after = [NSJSONSerialization
+      JSONObjectWithData:[NSData dataWithContentsOfURL:authorityURL]
+                 options:0 error:nil];
+  XCTAssertEqualObjects(after, broken);
+}
+
 - (void)testCreateRishOwnedWorkspaceRejectsInvalidDisplayNamesBeforeDocumentsMutation {
   NSURL *documents = [self documentsRootForRoot:self.rootURL];
   NSArray<NSString *> *invalidNames = @[
