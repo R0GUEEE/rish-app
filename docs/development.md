@@ -1203,6 +1203,34 @@ asking whether the record is the right shape, not comparing the directory
 identity, and inventing the fingerprint instead of asking for it. The last one
 fails nine of the twelve.
 
+### Which project failure JavaScript is told about
+
+`project_module.rs` ports `LPV2StableErrorCode`, `LPV2CanonicalOID`,
+`LPV2CanonicalOperationId`, `LPV2BoundedString` and `LPV2ClipUTF8` from
+`LocalProjectsModule.mm`, which had no core calls at all.
+
+**The stable code is the contract.** JavaScript branches on it, so the mapping
+from an internal failure in one of three domains to an `E_…` string is a rule
+both platforms answer alike. An unrecognised failure becomes
+`E_PROJECT_NATIVE`, not a guess: a caller must not be able to branch on a
+failure that does not exist.
+
+**The workspace half re-uses `workspace_error`** rather than keeping a second
+spelling of the same codes — they were two tables with the same contents, one
+edit from disagreeing. One deliberate difference remains and is tested: a busy
+picker is reported to a project operation as plain `E_WORKSPACE_BUSY`, because
+a project operation has nothing to say about the picker.
+
+`clip_utf8` backs off to a character boundary. Taking the byte bound literally
+would cut a multi-byte character in half and produce a string no consumer could
+read; the test checks the result is always a prefix of the input across every
+bound from 0 to 12.
+
+An **operation id** may be the nil UUID, unlike a snapshot id — it is the
+caller's to choose and nothing reads a sentinel out of it. The test asserts
+both, side by side, so the difference reads as intended rather than as an
+inconsistency.
+
 ### How a context snapshot is named
 
 `project_context_service.rs` ports `DSHServiceV2ReferenceId`,

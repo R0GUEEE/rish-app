@@ -26,6 +26,7 @@ pub mod project_access;
 pub mod project_context_policy;
 pub mod project_context_service;
 pub mod project_context_store;
+pub mod project_module;
 pub mod provider_round;
 pub mod root_projection;
 pub mod round_journal;

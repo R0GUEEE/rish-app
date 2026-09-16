@@ -145,6 +145,13 @@ char *rish_agent_completion_response_reduce(const char *json, size_t json_length
 /// crash between writing the object and recording it recoverable.
 char *rish_agent_git_tool_reduce(const char *json, size_t json_length);
 
+/// One project-module decision over {"op",...}: canonical_oid,
+/// canonical_operation_id, bounded_string, clip_utf8, stable_error_code.
+/// JavaScript branches on the stable code, so the mapping from an internal
+/// failure in one of three domains is contract; an unrecognised failure is
+/// E_PROJECT_NATIVE rather than a guess.
+char *rish_agent_project_module_reduce(const char *json, size_t json_length);
+
 /// One project-context-service decision over {"op",...}: reference_id,
 /// roots_equal, canonical_digest, bounded_string. The reference id is derived
 /// from the whole authority tuple rather than chosen, so two workspaces using
