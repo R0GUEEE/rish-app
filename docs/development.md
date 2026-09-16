@@ -1110,6 +1110,33 @@ to 25. `the_reducer_answers_every_op_it_claims_to` now drives every op through
 `reduce_json` itself and fails against that bug. **A reducer needs a test that
 goes through the reducer**, not only through the functions behind it.
 
+### What a stored workspace record looks like
+
+`workspace_record.rs` is the third workspace rule, after the fingerprint and
+the grants: it is the record those two are computed over.
+
+**The origin fixes everything else.** A record does not get to name a locator
+kind, a location class, an owned directory and a legacy project independently —
+each origin fixes all four, and a record that mixes them is not a record. A
+documents-owned origin has a directory name and no legacy project; a granted
+folder has neither; a legacy origin has a project and no directory.
+
+Two rules worth naming:
+
+- **A capability array has one spelling.** At most four, each known, no
+  repeats, in the fixed order — so a stored record digests the same everywhere,
+  which matters because the fingerprint covers it.
+- **A binding revision advances by exactly one.** A gap would let two rebinds
+  look like one, and a repeat would let a stale authority pass as current.
+  Running out of safe integers is its own answer, not a conflict: at the top of
+  the range that binding can never be rebound again.
+
+Case-and-diacritic folding stays with the host. Foundation folds both together
+under `en_US_POSIX` — neither lowercasing nor the case folding the
+project-context policy uses — and the reserved-name check (`rish workspaces`,
+the `.rish-` prefix) is on the folded spelling so case and diacritics cannot
+dodge it. A host that could not fold refuses rather than guessing.
+
 ### What a stored workspace record may do
 
 `workspace_grants.rs` is the second workspace rule to move, and with

@@ -40,6 +40,7 @@ pub mod wal_resident;
 pub mod wal_state;
 pub mod workspace_fingerprint;
 pub mod workspace_grants;
+pub mod workspace_record;
 pub mod workspace_tool;
 mod write_parent_plan;
 

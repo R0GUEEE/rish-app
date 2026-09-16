@@ -145,6 +145,13 @@ char *rish_agent_completion_response_reduce(const char *json, size_t json_length
 /// crash between writing the object and recording it recoverable.
 char *rish_agent_git_tool_reduce(const char *json, size_t json_length);
 
+/// One workspace-record decision over {"op",...}: record_shape, display_name,
+/// capabilities_array, binding_revision_advance. The origin fixes the locator
+/// kind, the location class and which optional identity is present; folding
+/// stays with the host, because Foundation folds case and diacritics together
+/// under en_US_POSIX.
+char *rish_agent_workspace_record_reduce(const char *json, size_t json_length);
+
 /// One workspace-grant decision over {"op",...}: operational_grants,
 /// descriptor. Which grants a locator kind implies and how they are shown;
 /// deriving the status itself stays with the host, because it resolves a

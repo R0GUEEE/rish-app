@@ -359,31 +359,40 @@ static BOOL DSHLegacyPhysicalIdentityMatchesAuthority(
   return YES;
 }
 
-static BOOL DSHCanonicalDisplayName(id value) {
-  if (![value isKindOfClass:NSString.class]) return NO;
-  NSString *name = value;
-  NSString *normalized = [name precomposedStringWithCanonicalMapping];
-  if (![normalized isEqual:name]) return NO;
-  NSData *bytes = [name dataUsingEncoding:NSUTF8StringEncoding
-                     allowLossyConversion:NO];
-  if (bytes.length == 0 || bytes.length > 120) return NO;
-  NSString *trimmed = [name
-      stringByTrimmingCharactersInSet:NSCharacterSet.whitespaceAndNewlineCharacterSet];
-  if (![trimmed isEqual:name] || [name hasPrefix:@"."] ||
-      [name isEqual:@"."] || [name isEqual:@".."] ||
-      [name rangeOfString:@"/"].location != NSNotFound ||
-      [name rangeOfString:@"\\"].location != NSNotFound ||
-      [name rangeOfString:@":"].location != NSNotFound ||
-      [name rangeOfString:@"\0"].location != NSNotFound ||
-      [name rangeOfCharacterFromSet:NSCharacterSet.controlCharacterSet].location !=
-          NSNotFound) {
-    return NO;
-  }
-  NSString *folded = [name stringByFoldingWithOptions:
+// Which registry records are well formed lives in the shared core
+// (modules/rish/core, `rish_agent_workspace_record_reduce`). Folding stays
+// here: Foundation folds case and diacritics together under en_US_POSIX, which
+// is neither lowercasing nor the case folding the project-context policy uses.
+static NSDictionary *DSHWorkspaceRecordReduce(NSString *op,
+                                              NSDictionary *fields) {
+  NSMutableDictionary *envelope = [fields mutableCopy];
+  envelope[@"op"] = op;
+  NSData *bytes = [NSJSONSerialization dataWithJSONObject:envelope options:0
+                                                    error:nil];
+  char *raw = bytes == nil ? NULL : rish_agent_workspace_record_reduce(
+      (const char *)bytes.bytes, bytes.length);
+  if (raw == NULL) return nil;
+  NSData *replyBytes = [NSData dataWithBytes:raw length:strlen(raw)];
+  rish_agent_string_free(raw);
+  id reply = [NSJSONSerialization JSONObjectWithData:replyBytes options:0
+                                                error:nil];
+  return [reply isKindOfClass:NSDictionary.class] &&
+      [reply[@"ok"] isEqual:@YES] ? reply : nil;
+}
+
+static NSString *DSHWorkspaceFoldedName(id value) {
+  if (![value isKindOfClass:NSString.class]) return nil;
+  return [value stringByFoldingWithOptions:
       NSCaseInsensitiveSearch | NSDiacriticInsensitiveSearch
-                                           locale:[NSLocale localeWithLocaleIdentifier:@"en_US_POSIX"]];
-  return ![folded isEqual:@"rish workspaces"] &&
-         ![folded hasPrefix:@".rish-"];
+                                    locale:[NSLocale localeWithLocaleIdentifier:@"en_US_POSIX"]];
+}
+
+static BOOL DSHCanonicalDisplayName(id value) {
+  NSString *folded = DSHWorkspaceFoldedName(value);
+  return [DSHWorkspaceRecordReduce(@"display_name", @{
+    @"value" : value ?: NSNull.null,
+    @"folded" : folded ?: NSNull.null,
+  })[@"valid"] isEqual:@YES];
 }
 
 static BOOL DSHSafeDirectoryName(id value) {
@@ -801,21 +810,9 @@ static NSArray<NSString *> *DSHCapabilityOrder(void) {
 }
 
 static BOOL DSHCanonicalCapabilitiesArray(id value) {
-  if (![value isKindOfClass:NSArray.class] || [value count] > 4) return NO;
-  NSArray *array = value;
-  NSArray *order = DSHCapabilityOrder();
-  NSInteger previous = -1;
-  NSMutableSet *seen = [NSMutableSet set];
-  for (id item in array) {
-    if (![item isKindOfClass:NSString.class] || [seen containsObject:item]) {
-      return NO;
-    }
-    NSUInteger index = [order indexOfObject:item];
-    if (index == NSNotFound || (NSInteger)index <= previous) return NO;
-    [seen addObject:item];
-    previous = (NSInteger)index;
-  }
-  return YES;
+  return [DSHWorkspaceRecordReduce(@"capabilities_array", @{
+    @"value" : value ?: NSNull.null,
+  })[@"valid"] isEqual:@YES];
 }
 
 static BOOL DSHCanonicalCapabilitiesSet(id value) {
@@ -830,42 +827,14 @@ static BOOL DSHCanonicalCapabilitiesSet(id value) {
 }
 
 static BOOL DSHValidWorkspaceRecord(NSDictionary *record) {
-  NSArray *keys = @[
-    @"schema_version", @"workspace_id", @"display_name", @"origin",
-    @"root_locator_kind", @"location_class", @"owned_directory_name",
-    @"legacy_project_id", @"binding_revision", @"created_at",
-    @"last_opened_at",
-  ];
-  if (!DSHExactKeys(record, keys) ||
-      !DSHSchemaVersionIsOne(record[@"schema_version"]) ||
-      !DSHCanonicalUUID(record[@"workspace_id"]) ||
-      !DSHCanonicalDisplayName(record[@"display_name"]) ||
-      !DSHIsSafeInteger(record[@"binding_revision"], NO) ||
-      !DSHCanonicalTimestamp(record[@"created_at"]) ||
-      !DSHCanonicalTimestamp(record[@"last_opened_at"])) {
-    return NO;
-  }
-  NSString *origin = record[@"origin"];
-  NSString *locator = record[@"root_locator_kind"];
-  NSString *locationClass = record[@"location_class"];
-  id owned = record[@"owned_directory_name"];
-  id legacy = record[@"legacy_project_id"];
-  if ([origin isEqual:@"rish_created"] || [origin isEqual:@"imported"]) {
-    return [locator isEqual:@"documents_owned"] &&
-           [locationClass isEqual:@"rish_owned"] &&
-           DSHSafeDirectoryName(owned) && legacy == NSNull.null;
-  }
-  if ([origin isEqual:@"granted_folder"]) {
-    return [locator isEqual:@"security_scoped"] &&
-           [locationClass isEqual:@"proven_local"] &&
-           owned == NSNull.null && legacy == NSNull.null;
-  }
-  if ([origin isEqual:@"legacy_app_owned"]) {
-    return [locator isEqual:@"legacy_app_owned"] &&
-           [locationClass isEqual:@"rish_owned"] &&
-           owned == NSNull.null && DSHCanonicalUUID(legacy);
-  }
-  return NO;
+  if (![record isKindOfClass:NSDictionary.class]) return NO;
+  NSString *display = DSHWorkspaceFoldedName(record[@"display_name"]);
+  NSString *directory = DSHWorkspaceFoldedName(record[@"owned_directory_name"]);
+  return [DSHWorkspaceRecordReduce(@"record_shape", @{
+    @"record" : record,
+    @"folded_display_name" : display ?: NSNull.null,
+    @"folded_directory_name" : directory ?: NSNull.null,
+  })[@"valid"] isEqual:@YES];
 }
 
 static BOOL DSHValidLegacyAuthority(NSDictionary *authority,
