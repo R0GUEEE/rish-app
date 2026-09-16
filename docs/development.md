@@ -1137,6 +1137,37 @@ project-context policy uses — and the reserved-name check (`rish workspaces`,
 the `.rish-` prefix) is on the folded spelling so case and diacritics cannot
 dodge it. A host that could not fold refuses rather than guessing.
 
+### Android resolves a root
+
+`AndroidAgentRootResolver.kt` turns a workspace binding into the root an agent
+attempt runs against, and `AndroidPreparedAttemptStore` now prepares one for
+real instead of refusing every rooted request.
+
+**What an Android workspace root can do: read and write files.** The registry
+grants read, write and git, but the shared rule only turns `git` into Agent Git
+capabilities for a *project* root, and there is no project subsystem here;
+`guest_service` needs the guest CGI tools, which this build does not ship. So
+the projection is exactly `["file_read", "file_write"]`, and the test pins that
+rather than asserting something vaguer.
+
+**A project root is refused, not approximated.** A project root needs an
+independently verified lease. Answering a project request with a workspace root
+wearing a project's name would hand the caller authority it never established.
+
+**The session store now accepts workspace-bound conversations.** It used to
+refuse `workspace_id` and `workspace_binding` outright, which made the
+root-stale branch unreachable — the request and the stored attempt always
+disagreed first, so a test that looked like it covered rooted requests covered
+nothing of the sort. `project_id` and `project_context` stay refused. Whether a
+binding can still be *proved* is decided where it is used: a session records
+what the person chose, the resolver decides what that is still worth.
+
+`aRootedAttemptResolvesItsWorkspaceAndPreparesForReal` is the first prepared
+attempt on this platform that is not a rejection — an authority and a
+transcript, against a root whose fingerprint is the registry's. Checked by
+mutation: dropping the resolved root from the transaction fails one test, and
+restoring the session store's old refusal fails four.
+
 ### Android's workspace registry
 
 `AndroidWorkspaceRegistry.kt` is the first workspace subsystem on Android. It

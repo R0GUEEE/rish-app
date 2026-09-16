@@ -101,6 +101,8 @@ internal object RishAgentCoreNative {
         requestJson: String, session: String?): String?
 
     /** Canonical JSON of a JSON text, or null when it cannot be canonicalised. */
+    @JvmStatic external fun rootReduceNative(requestJson: String): String?
+
     @JvmStatic external fun workspaceRecordReduceNative(requestJson: String): String?
 
     @JvmStatic external fun workspaceFingerprintReduceNative(requestJson: String): String?
@@ -206,6 +208,9 @@ internal object RishAgentCoreNative {
      * A host that cannot reach the core has no second set of workspace rules
      * to fall back to, so it refuses too.
      */
+    fun agentRoot(request: JSONObject): JSONObject? =
+        workspaceReply(request) { rootReduceNative(it) }
+
     fun workspaceRecord(request: JSONObject): JSONObject? =
         workspaceReply(request) { workspaceRecordReduceNative(it) }
 

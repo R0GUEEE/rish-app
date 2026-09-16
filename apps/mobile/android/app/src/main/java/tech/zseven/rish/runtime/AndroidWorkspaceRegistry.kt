@@ -195,6 +195,19 @@ internal class AndroidWorkspaceRegistry(val root: File) {
     }
 
     /**
+     * The root fingerprint of a provable workspace, or null. It is read from
+     * the authority rather than recomputed: the authority is the thing that
+     * was verified, and it is only handed back while it still proves the
+     * directory on disk.
+     */
+    fun fingerprintFor(workspaceId: String): String? = synchronized(lock) {
+        val record = recordFor(loadRegistry(), workspaceId) ?: return null
+        if (!recordValid(record)) return null
+        val authority = authorityFor(record) ?: return null
+        authority.optString("root_fingerprint_sha256").takeIf { it.length == 64 }
+    }
+
+    /**
      * What an agent may do with this workspace, as the shared rule states it.
      * A root that cannot be proven grants nothing — not "read only", nothing.
      */
