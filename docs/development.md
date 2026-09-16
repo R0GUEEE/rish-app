@@ -1203,6 +1203,45 @@ asking whether the record is the right shape, not comparing the directory
 identity, and inventing the fingerprint instead of asking for it. The last one
 fails nine of the twelve.
 
+### Whether stored bytes are JSON worth looking at
+
+`workspace_json.rs` ports `DSHJSONHasBoundedExactStructure` and its scanner. It
+runs before the parse, on raw bytes that may be corrupt or hand-edited: one
+complete value, at most 64 levels and 100,000 nodes, no duplicate keys in any
+object however spelled, no negative zero, nothing after it. It is the reason a
+bad registry costs a refusal rather than an unbounded walk — and Android's
+registry, which currently just calls `JSONObject(text)`, can now have the same
+guard.
+
+**The core already had two scanners of this shape, and this is a third.**
+`strict_json` (tool arguments) and `session_schema::scanner` (the session
+snapshot) look almost identical. They are not interchangeable:
+
+| | top level | nodes | raw `0x7f` in a string |
+| --- | --- | --- | --- |
+| `strict_json` | object | 30,000 | refused |
+| `session_schema::scanner` | object | 250,000 | refused |
+| `workspace_json` | any value | 100,000 | **accepted** |
+
+The third column is the one that matters. Reusing either of the others would
+refuse a stored registry the current engine accepts. That file almost certainly
+does not exist — Foundation escapes control characters when it writes, and
+every string position refuses `0x7f` downstream anyway — but *almost certainly*
+is not *verified*, and this is the acceptance rule for data already on people's
+devices. A test asserts the difference rather than a comment claiming it.
+Unifying the three is a decision to take knowingly, not one that arrives by
+reuse.
+
+This reducer takes the **raw bytes** rather than a JSON envelope, because the
+question is about bytes that may not be JSON — there is nothing to put an
+envelope around.
+
+**One guard that is not load-bearing, said out loud.** The scanner's own
+`< 0x20` check mirrors the ObjC line for line, but removing it leaves every
+test green: serde refuses the same bytes when the token is decoded. The test
+now says so and asserts the redundancy, rather than looking like proof it is
+not.
+
 ### Sealing an authority, and the registry file itself
 
 Two duplications closed.

@@ -30,6 +30,7 @@ use rish_agent_core::workspace_error::reduce_json as workspace_error_reduce_json
 use rish_agent_core::workspace_fingerprint::reduce_json as workspace_fingerprint_reduce_json;
 use rish_agent_core::workspace_grants::reduce_json as workspace_grants_reduce_json;
 use rish_agent_core::workspace_journal::reduce_json as workspace_journal_reduce_json;
+use rish_agent_core::workspace_json::bounded_exact_structure;
 use rish_agent_core::workspace_receipt::reduce_json as workspace_receipt_reduce_json;
 use rish_agent_core::workspace_record::reduce_json as workspace_record_reduce_json;
 use rish_agent_core::workspace_tool::reduce_json as workspace_tool_reduce_json;
@@ -397,6 +398,26 @@ pub unsafe extern "C" fn rish_agent_workspace_error_reduce(
         return std::ptr::null_mut();
     };
     output(workspace_error_reduce_json(text))
+}
+
+/// Whether stored workspace bytes are JSON this engine will look at:
+/// `rish_agent_core::workspace_json::bounded_exact_structure`. Unlike the
+/// other reducers this takes the raw bytes rather than an envelope, because
+/// the whole question is about bytes that may not be JSON at all. Returns 1
+/// for acceptable, 0 otherwise.
+///
+/// # Safety
+/// `pointer` must reference `length` readable bytes or be null.
+#[no_mangle]
+pub unsafe extern "C" fn rish_agent_workspace_json_bounded(
+    pointer: *const c_char,
+    length: usize,
+) -> u8 {
+    if pointer.is_null() {
+        return 0;
+    }
+    let bytes = std::slice::from_raw_parts(pointer as *const u8, length);
+    u8::from(bounded_exact_structure(bytes))
 }
 
 /// Runs one workspace-journal decision over the JSON envelope documented on

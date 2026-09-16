@@ -152,6 +152,13 @@ char *rish_agent_git_tool_reduce(const char *json, size_t json_length);
 /// projects to null; no code is invented for it.
 char *rish_agent_workspace_error_reduce(const char *json, size_t json_length);
 
+/// Whether stored workspace bytes are JSON this engine will look at: one
+/// complete value, at most 64 levels and 100,000 nodes, no duplicate keys in
+/// any object, no negative zero, and nothing after it. Takes the raw bytes
+/// rather than an envelope, because the question is about bytes that may not
+/// be JSON. Returns 1 for acceptable, 0 otherwise.
+unsigned char rish_agent_workspace_json_bounded(const char *bytes, size_t length);
+
 /// One workspace-journal decision over {"op",...}: journal_shape,
 /// legacy_journal_shape, readable_journal, identity_present, identity_matches,
 /// owned_authority_matches, create_request_sha256, bootstrap_request_sha256.
