@@ -1110,6 +1110,41 @@ to 25. `the_reducer_answers_every_op_it_claims_to` now drives every op through
 `reduce_json` itself and fails against that bug. **A reducer needs a test that
 goes through the reducer**, not only through the functions behind it.
 
+### The workspace root fingerprint
+
+This is the first rule of the workspace subsystem to move, and it moves first
+on purpose. The root fingerprint is what an Agent root projection carries and
+what a lease proves, so **two implementations would mean an authority written
+on one platform is invalid on the other**. Building Android's workspace
+subsystem against a second Kotlin copy of this would have been the exact thing
+the shared core exists to prevent — so the rule goes to the core before the
+Android host code that will need it exists.
+
+`workspace_fingerprint.rs` owns the three shapes and the digest:
+
+- `rish_created` / `imported` → a directory this app owns: device, inode, and
+  the digest of its name;
+- `granted_folder` → a folder the person granted: volume and resource
+  identifiers plus the security-scoped bookmark;
+- `legacy_app_owned` → the pre-workspace layout: three separate device/inode
+  pairs.
+
+The first two fold in `authority_sha256`, the digest of the authority record
+*without* its own fingerprint, so the fingerprint covers everything the record
+says about itself and cannot be carried to a record that says something else.
+That digest is a **plain** SHA-256 over canonical JSON, not domain-separated,
+because that is what the stored records were written with.
+
+Device and inode numbers travel as strings in their shortest decimal spelling:
+they outrun a safe integer on some filesystems, and two spellings of one number
+would be two roots.
+
+**Verified by real parity, not by a replica agreeing with itself.** Both
+implementations are still present, so `WorkspaceFingerprintParityTests` puts
+the same inputs through `DSHWorkspaceRootFingerprintSHA256` and through the
+core and asserts the digests are equal — for all three origins — and that both
+refuse the same nine malformed inputs.
+
 ### Android serves its first agent operation
 
 `AgentRuntime.prepare_agent_attempt` is no longer a rejection on Android. It
@@ -1309,6 +1344,18 @@ place once and read it back before refusing, the way `LocalWorkspaceAccess`
 migrates a legacy `NSFileProtectionComplete` item. Without that repair an
 upgraded container fails every WAL read with `E_AGENT_PERSISTENCE` and never
 recovers, which the simulator can never show.
+
+### Checking an Xcode build result
+
+`grep "error:"` over `xcodebuild` output is not a build check. Objective-C
+selector fragments such as `error:(NSError **)error` contain that substring, so
+a build full of deprecation context matches it dozens of times, and a `head -N`
+after the grep then hides the one line that mattered. A failing build read this
+way looks clean, and the stale `.app` left behind fails to launch with
+`Launchd job spawn failed` — which reads like a wedged simulator and is not.
+
+Check the outcome, not the noise: `xcodebuild … | tail -3` and look for
+`** TEST BUILD SUCCEEDED **`, or grep `"^\*\* "`.
 
 ## Quality gates
 
