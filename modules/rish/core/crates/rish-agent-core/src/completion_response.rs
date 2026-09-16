@@ -86,6 +86,79 @@ fn trim_response(text: &str) -> &str {
     text.trim_matches(|ch: char| ch.is_whitespace() || ch == '\u{200b}')
 }
 
+/// Every failure a completion round may report. The controller switches on
+/// these to decide whether a retry could possibly help, so the set is closed:
+/// a code outside it would be a failure nothing knows how to recover from.
+pub const FAILURE_CODES: &[&str] = &[
+    "E_COMPLETION_BODY_INVALID",
+    "E_COMPLETION_BODY_TOO_LARGE",
+    "E_COMPLETION_BUSY",
+    "E_COMPLETION_CANCELLED",
+    "E_COMPLETION_CONTENT_FILTER",
+    "E_COMPLETION_CONTEXT_INVALID",
+    "E_COMPLETION_CONTEXT_UNSUPPORTED",
+    "E_COMPLETION_CREDENTIAL_CHANGED",
+    "E_COMPLETION_CREDENTIAL_UNAVAILABLE",
+    "E_COMPLETION_EMPTY_RESPONSE",
+    "E_COMPLETION_FINISH_RELATION",
+    "E_COMPLETION_HISTORY",
+    "E_COMPLETION_HTTP_429",
+    "E_COMPLETION_HTTP_STATUS",
+    "E_COMPLETION_IDENTIFIER",
+    "E_COMPLETION_LENGTH",
+    "E_COMPLETION_MODEL",
+    "E_COMPLETION_MODEL_MISMATCH",
+    "E_COMPLETION_NATIVE",
+    "E_COMPLETION_PROVIDER_REQUEST_ID",
+    "E_COMPLETION_PROVIDER_RESPONSE_ID",
+    "E_COMPLETION_REDIRECT",
+    "E_COMPLETION_RESPONSE_JSON",
+    "E_COMPLETION_RESPONSE_MODEL",
+    "E_COMPLETION_RESPONSE_SIZE",
+    "E_COMPLETION_ROUND",
+    "E_COMPLETION_SCHEMA",
+    "E_COMPLETION_THINKING",
+    "E_COMPLETION_TIMEOUT",
+    "E_COMPLETION_TOOL_CALL_INVALID",
+    "E_COMPLETION_TOOLS",
+    "E_COMPLETION_TRANSCRIPT",
+    "E_COMPLETION_TRANSPORT",
+];
+
+/// The subset a parser refusal may name.
+const PARSER_FAILURE_CODES: &[&str] = &[
+    RESPONSE_JSON,
+    RESPONSE_ID,
+    RESPONSE_MODEL,
+    MODEL_MISMATCH,
+    EMPTY_RESPONSE,
+    TOOL_CALL_INVALID,
+    FINISH_RELATION,
+    LENGTH,
+];
+
+/// `DSHCompletionTransportParserErrorCode`. Fail-closed on purpose: a verbose
+/// diagnostic, a third-party error or a store code must not travel onward as
+/// something the controller will switch on.
+pub fn parser_failure_code(candidate: Option<&str>) -> &'static str {
+    candidate
+        .and_then(|text| PARSER_FAILURE_CODES.iter().find(|code| **code == text))
+        .copied()
+        .unwrap_or(EMPTY_RESPONSE)
+}
+
+/// `providerErrorCodeForHTTPStatus`. An unauthenticated or forbidden call
+/// means the stored credential is unusable; a rate limit or provider overload
+/// gets its own code so the caller can back off rather than retry as a generic
+/// status failure.
+pub fn http_status_failure_code(status: i64) -> &'static str {
+    match status {
+        401 | 403 => "E_COMPLETION_CREDENTIAL_UNAVAILABLE",
+        429 | 529 => "E_COMPLETION_HTTP_429",
+        _ => "E_COMPLETION_HTTP_STATUS",
+    }
+}
+
 /// What the host must tell the parser, because the core cannot know it.
 pub struct Facts<'a> {
     /// Whether `model` is in this build's catalogue.
@@ -339,8 +412,25 @@ pub fn reduce_json(input: &str) -> String {
 
 fn reduce_json_inner(input: &str) -> Result<Value, &'static str> {
     let envelope: Value = serde_json::from_str(input).map_err(|_| RESPONSE_JSON)?;
-    if envelope.get("op").and_then(Value::as_str) != Some("parse") {
-        return Err(RESPONSE_JSON);
+    // Dispatched before the parse envelope is read: these two answer from the
+    // op alone and need none of the facts a parse does.
+    match envelope.get("op").and_then(Value::as_str) {
+        Some("http_status_failure") => {
+            let status = envelope
+                .get("status")
+                .and_then(Value::as_i64)
+                .ok_or(RESPONSE_JSON)?;
+            return Ok(json!({ "ok": true, "failure_code": http_status_failure_code(status) }));
+        }
+        Some("parser_failure") => {
+            return Ok(json!({
+                "ok": true,
+                "failure_code": parser_failure_code(
+                    envelope.get("candidate").and_then(Value::as_str)),
+            }));
+        }
+        Some("parse") => {}
+        _ => return Err(RESPONSE_JSON),
     }
     let facts = Facts {
         model_supported: envelope.get("model_supported") == Some(&Value::Bool(true)),

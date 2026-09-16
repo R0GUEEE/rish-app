@@ -944,6 +944,44 @@ Nothing recomputes a stored preview and compares it, so this is not a
 compatibility change: an old receipt keeps the text it was written with, and
 the preview's shape is unchanged.
 
+### The completion failure vocabulary
+
+Which failure a completion round may report is a closed set of 33 codes, and
+the controller switches on them to decide whether a retry could possibly help.
+They were scattered as string literals across the transports; `FAILURE_CODES`
+in `completion_response.rs` is now the list, with the two rules that pick from
+it:
+
+- **`http_status_failure_code`** — 401/403 mean the stored credential is
+  unusable, 429/529 get their own code so a caller backs off rather than
+  retrying as a generic status failure, everything else is a plain status
+  failure.
+- **`parser_failure_code`** — fail-closed. A parser refusal may only name one
+  of the eight parse codes; a verbose diagnostic, a third-party `NSError`, or a
+  store code becomes `E_COMPLETION_EMPTY_RESPONSE` rather than travelling
+  onward as something the controller would switch on.
+
+What stays in the transports is the capability: `NSURLSession`, streaming,
+redirect handling, credential generation, timeouts and the diagnostics.
+
+`DSHCompletionNormalizeToolCalls` was going to move with them and did not, for
+a reason worth recording. It re-serialises normalised arguments with
+`NSJSONWritingSortedKeys`, and Foundation's sorted-key output is **not** the
+core's canonical JSON — which is exactly the fidelity gap the
+`foundation-json-v1` projection exists to close, by asking the host to do the
+encoding. Moving the second pass would mean running that projection for a
+belt-and-braces normalisation the parser has already applied. Not worth the
+machinery; it stays with the host.
+
+A note on how the first version of this cut failed, because the failure mode is
+easy to repeat. The new ops were added to the reducer *below* its
+`op != "parse"` early return, so every one of them answered "not JSON" and both
+mappings silently fell back to their default code. Nothing in the core noticed —
+its tests called the functions directly — and the iOS suite went from 9 failures
+to 25. `the_reducer_answers_every_op_it_claims_to` now drives every op through
+`reduce_json` itself and fails against that bug. **A reducer needs a test that
+goes through the reducer**, not only through the functions behind it.
+
 ### The cross-store seam, and what covers it
 
 `prepare_agent_attempt` is the only operation that reads the committed session

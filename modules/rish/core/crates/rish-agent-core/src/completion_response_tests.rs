@@ -355,3 +355,66 @@ fn malformed_projection_facts_do_not_fall_back_to_the_portable_writer() {
     input["projection_contract"] = json!("unknown");
     assert_eq!(reduce(&input)["failure_code"], RESPONSE_JSON);
 }
+
+#[test]
+fn a_status_the_credential_cannot_survive_is_named_as_such() {
+    assert_eq!(
+        http_status_failure_code(401),
+        "E_COMPLETION_CREDENTIAL_UNAVAILABLE"
+    );
+    assert_eq!(
+        http_status_failure_code(403),
+        "E_COMPLETION_CREDENTIAL_UNAVAILABLE"
+    );
+    // A rate limit and a provider overload are one thing to back off from.
+    assert_eq!(http_status_failure_code(429), "E_COMPLETION_HTTP_429");
+    assert_eq!(http_status_failure_code(529), "E_COMPLETION_HTTP_429");
+    assert_eq!(http_status_failure_code(500), "E_COMPLETION_HTTP_STATUS");
+    assert_eq!(http_status_failure_code(404), "E_COMPLETION_HTTP_STATUS");
+    for status in [401, 403, 429, 529, 500, 404, 418] {
+        assert!(FAILURE_CODES.contains(&http_status_failure_code(status)));
+    }
+}
+
+/// The seam is fail-closed: a diagnostic string must never travel as a failure
+/// code the controller will switch on.
+#[test]
+fn an_unrecognised_parser_message_becomes_an_empty_response() {
+    assert_eq!(parser_failure_code(Some(LENGTH)), LENGTH);
+    assert_eq!(
+        parser_failure_code(Some("Cocoa error 3840.")),
+        EMPTY_RESPONSE
+    );
+    assert_eq!(parser_failure_code(None), EMPTY_RESPONSE);
+    // A store code is not a completion code.
+    assert_eq!(
+        parser_failure_code(Some("E_AGENT_CONFLICT")),
+        EMPTY_RESPONSE
+    );
+}
+
+/// Every op driven through `reduce_json` itself. A first version of these two
+/// sat below the reducer's `parse` guard and answered "not JSON" to every
+/// caller; only the iOS suite caught it, because the core's tests called the
+/// functions directly. A reducer needs a test that goes through the reducer.
+#[test]
+fn the_reducer_answers_every_op_it_claims_to() {
+    let run = |value: Value| -> Value {
+        serde_json::from_str(&reduce_json(&value.to_string())).expect("reply")
+    };
+    let reply = run(json!({ "op": "http_status_failure", "status": 429 }));
+    assert_eq!(reply["ok"], json!(true));
+    assert_eq!(reply["failure_code"], json!("E_COMPLETION_HTTP_429"));
+    let reply = run(json!({ "op": "parser_failure", "candidate": LENGTH }));
+    assert_eq!(reply["failure_code"], json!(LENGTH));
+    let reply = run(json!({
+        "op": "parse", "requested_model": "m", "model_supported": true,
+        "thinking_mode": "off", "fallback_call_id": "x",
+        "response": { "id": "r", "model": "m",
+            "choices": [{ "message": { "role": "assistant", "content": "hi" },
+                          "finish_reason": "stop" }] },
+    }));
+    assert_eq!(reply["parsed"]["text"], json!("hi"));
+    // An op it does not know is refused, not silently parsed.
+    assert_eq!(run(json!({ "op": "teleport" }))["ok"], json!(false));
+}
