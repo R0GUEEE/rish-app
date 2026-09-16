@@ -114,6 +114,12 @@ void rish_agent_wal_close(void *handle);
 /// to say and changes the toolset digest.
 char *rish_agent_tool_registry_reduce(const char *json, size_t json_length);
 
+/// One agent-policy decision over {"op",...}: request_shape, budget_shape,
+/// root_matches_request, projection. The projection is handed to the UI, so
+/// its keys are enumerated rather than copied: no path, no descriptor table,
+/// no arguments, nothing that could be mistaken for an authority handle.
+char *rish_agent_policy_reduce(const char *json, size_t json_length);
+
 /// One chat-read-v1 project-context policy decision over {"op",...}:
 /// normalize, path_decision. Which of a repository may be sent to a model is
 /// decided here; case folding stays with the host, because Foundation folds

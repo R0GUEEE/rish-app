@@ -13,6 +13,7 @@
 //! ([`round_journal`]), driven by the ObjC facade that still owns the WAL
 //! transaction, and the bounded primitive validators it needs ([`schema`]).
 
+pub mod agent_policy;
 pub mod canonical;
 pub mod completion_response;
 pub mod execution_ledger;

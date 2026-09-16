@@ -867,6 +867,31 @@ values are pinned in the core's tests — a change to the table changes them and
 invalidates every authority on every device, which is exactly the kind of
 change that should be hard to make by accident.
 
+### What a person is told the agent may do
+
+`AgentPolicyService`'s describe result is a *safe projection*: it is handed to
+the JavaScript layer and shown in the UI, so the interesting property is not
+what it contains but what it must never contain — a filesystem path, the native
+descriptor table, tool arguments, or anything that could be mistaken for an
+authority handle. `agent_policy.rs` enumerates its keys rather than copying
+them from the inputs, and a test feeds it a registry carrying an absolute path,
+a parameter schema, an arguments string and the toolset digest, then asserts
+none of them reach the output.
+
+Three rules moved with it:
+
+- the request shape (exact keys, canonical workspace id, a binding revision
+  that starts at 1);
+- the budget shape, including the invariant the three bounds **nest** —
+  a single write cannot exceed what a batch may spend, and a batch cannot
+  exceed what an attempt may;
+- the agreement check between the resolved root and the request. A resolver
+  that answered for a different workspace, revision or project answered a
+  different question, and the display would be about something else.
+
+The root fingerprint stays in the projection on purpose: it lets a UI notice
+that a grant display has gone stale. It grants no execution authority.
+
 ### What of a repository may be sent to a model
 
 `chat-read-v1`'s path policy — which directory, filename or extension is a
