@@ -1110,6 +1110,32 @@ to 25. `the_reducer_answers_every_op_it_claims_to` now drives every op through
 `reduce_json` itself and fails against that bug. **A reducer needs a test that
 goes through the reducer**, not only through the functions behind it.
 
+### What a stored workspace record may do
+
+`workspace_grants.rs` is the second workspace rule to move, and with
+`root_projection::capabilities_for_grants` it completes the chain from a stored
+record to what an agent may do with it: **locator kind → grants → Agent
+capabilities**.
+
+- a **documents-owned** root is produced and verified natively, so it grants
+  read, write, git and project context;
+- a **granted folder** grants read and write only. It has no native coordinated
+  Git, project-context or Files producer, and the advertised contract stays
+  honest until those consumers exist;
+- a **legacy** root grants what the host could verify. Verification means
+  re-reading the project metadata and comparing physical identity, which only
+  the host can do, so the answer is handed across rather than guessed at —
+  "could not verify" and "verified as nothing" both end in no grants, but they
+  are not the same thing;
+- nothing is granted unless the status is exactly `ok`.
+
+Deriving the status stays with the host: it resolves a security-scoped
+bookmark, starts a scope and stats a directory. What a status *means* travels.
+
+`files_visible` is in the projection but is not a grant — it says the folder
+shows up in Files, so it is true for a documents-owned root even when that root
+is unavailable, and a capability list can never turn it on.
+
 ### The workspace root fingerprint
 
 This is the first rule of the workspace subsystem to move, and it moves first
@@ -1344,6 +1370,20 @@ place once and read it back before refusing, the way `LocalWorkspaceAccess`
 migrates a legacy `NSFileProtectionComplete` item. Without that repair an
 upgraded container fails every WAL read with `E_AGENT_PERSISTENCE` and never
 recovers, which the simulator can never show.
+
+### Editing Objective-C by pattern
+
+Two mistakes in this program came from replacing text between two markers found
+by a plain search:
+
+- the first occurrence of a selector is often its **declaration** in a class
+  extension, not its implementation. Anchor the search after
+  `@implementation <Class>`.
+- the *end* marker must be searched for **after the start index**. Searching
+  the whole file can return a declaration that sits earlier, which makes the
+  end precede the start and silently duplicates everything between them. That
+  produced "duplicate interface definition" errors a hundred lines away from
+  the actual edit.
 
 ### Checking an Xcode build result
 
