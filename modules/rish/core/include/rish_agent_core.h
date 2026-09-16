@@ -145,6 +145,13 @@ char *rish_agent_completion_response_reduce(const char *json, size_t json_length
 /// crash between writing the object and recording it recoverable.
 char *rish_agent_git_tool_reduce(const char *json, size_t json_length);
 
+/// One project-context-store decision over {"op",...}: canonical_snapshot_id,
+/// safe_reference_key, hex_digest, settable_reference_key,
+/// prepare_transaction_key, recover_references. A reference is a name pointing
+/// at a snapshot; only retry: keys may be set by a caller, and a txn:prepare:
+/// key still present at launch means the process died mid-swap.
+char *rish_agent_project_context_store_reduce(const char *json, size_t json_length);
+
 /// One container-anchor decision over {"op",...}: anchor_segment_count,
 /// last_app_container_index, canonical_uuid_text. Where a path stops being the
 /// app's own container: the innermost Containers/Data/Application/<UUID> tail

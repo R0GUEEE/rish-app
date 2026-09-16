@@ -1203,6 +1203,37 @@ asking whether the record is the right shape, not comparing the directory
 identity, and inventing the fingerprint instead of asking for it. The last one
 fails nine of the twelve.
 
+### What an interrupted context swap resolves to
+
+`project_context_store.rs` ports the store's naming rules and its recovery
+sweep from `ProjectContextStore.mm`.
+
+**A reference is a name pointing at a snapshot**, in three namespaces:
+`active:<conversation>` (what a conversation is using), `retry:<…>` (held so a
+retry can reuse it, and the **only** kind a caller may set), and
+`txn:prepare:<conversation>` (written before `active:` is swapped, holding the
+id to go back to). A caller that could write `active:` could point a
+conversation at a snapshot of its choosing.
+
+A `txn:prepare:` key still present at launch means the process died mid-swap.
+**The subtle case is `crash_before_swap`:** when `active:` still holds the id
+the transaction recorded, the swap never happened, so there is nothing to undo
+and the new snapshot is *not* collected. Undoing there would throw away the
+snapshot the conversation is actually using.
+
+The sentinel `00000000-…-000000000000` means "there was no prior snapshot". It
+is deliberately not a valid snapshot id: rolling back to it would point a
+conversation at something that never existed.
+
+**Three checks inside the loop are redundant with the sweep that follows**, and
+the mutation test says so rather than leaving them looking proven: refusing to
+roll back to the sentinel, refusing to roll back to an id that is gone, and
+removing the transaction key. In each case the sweep drops the same key a
+moment later, so no input the host can produce tells them apart. They stay
+because they mirror the original line for line and because the sweep is a
+separate rule that could change — `the_sweep_is_what_actually_drops_them` pins
+why, so anyone loosening the sweep knows those three stop being redundant.
+
 ### Where the app's own container ends
 
 `container_anchor.rs` ports `DSHIsCanonicalUUIDText`,
