@@ -1203,6 +1203,43 @@ asking whether the record is the right shape, not comparing the directory
 identity, and inventing the fingerprint instead of asking for it. The last one
 fails nine of the twelve.
 
+### Where the app's own container ends
+
+`container_anchor.rs` ports `DSHIsCanonicalUUIDText`,
+`DSHComponentsEndWithAppContainer`, `DSHLastAppContainerComponentIndex`,
+`DSHComponentsContainTraversal`, `DSHContainerAnchorSegmentCountForPaths` and
+`DSHContainerRootScanSegmentCount`.
+
+**This rule exists because guessing path shape got it wrong on real devices.**
+The walker used to scan for an `Application` component followed by
+`Application Support`, which never matches
+`/private/var/mobile/Containers/Data/Application/<UUID>/…`, so it fell back to
+opening `/private/var` — which the sandbox refuses with EPERM. The anchor is
+derived from the container root instead.
+
+**The innermost `Containers/Data/Application/<UUID>` wins.** A container root
+must also *end* at its own UUID: one carrying anything after it is not a
+container root, and anchoring there would let the caller choose where the walk
+starts. Traversal is refused at derivation time as well as during the walk, so
+an anchor is never derived from a traversal-shaped path.
+
+Splitting a path stays with the host: `pathComponents` is Foundation's and
+keeps a leading `"/"` a naive split would not.
+
+**A test whose name described something it did not test.** The first version of
+`the_innermost_container_wins` used the simulator layout — but the CoreSimulator
+device UUID there is not preceded by the container tail, so there is only *one*
+candidate and scanning from either end gives the same answer. Reversing the
+search left every test green. It now uses a path with two real container tails,
+and the mutation fails.
+
+**And one of the nine pre-existing iOS failures was a test defect, now fixed.**
+`ContainerAnchorTests testSimulatorShapePathAnchorsAtAppContainerRoot` asserted
+the literal index 12, derived from a shallower `NSHomeDirectory()` than this
+machine has; here the answer is 22. The expectation is computed from the
+container root now, which is what the anchor is supposed to make unnecessary.
+The baseline is eight failures, not nine.
+
 ### What a project binding is
 
 `project_access.rs` is the first cut into the project subsystem, the peer of

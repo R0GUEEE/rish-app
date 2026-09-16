@@ -6,6 +6,7 @@
 use rish_agent_core::agent_policy::reduce_json as agent_policy_reduce_json;
 use rish_agent_core::canonical::{canonical_json, hash_bytes, hash_json};
 use rish_agent_core::completion_response::reduce_json as completion_response_reduce_json;
+use rish_agent_core::container_anchor::reduce_json as container_anchor_reduce_json;
 use rish_agent_core::git_tool::reduce_json as git_tool_reduce_json;
 use rish_agent_core::ledger_batch::reduce_json as ledger_batch_reduce_json;
 use rish_agent_core::ledger_ops::reduce_json as ledger_reduce_json;
@@ -382,6 +383,25 @@ pub unsafe extern "C" fn rish_agent_git_tool_reduce(
         return std::ptr::null_mut();
     };
     output(git_tool_reduce_json(text))
+}
+
+/// Runs one container-anchor decision over the JSON envelope documented on
+/// `rish_agent_core::container_anchor::reduce_json` — where a path stops being
+/// the app's own container and starts being a place inside it. Splitting a
+/// path into components stays with the host, because `pathComponents` is
+/// Foundation's and keeps a leading "/" a naive split would not.
+///
+/// # Safety
+/// `pointer` must reference `length` readable bytes or be null.
+#[no_mangle]
+pub unsafe extern "C" fn rish_agent_container_anchor_reduce(
+    pointer: *const c_char,
+    length: usize,
+) -> *mut c_char {
+    let Some(text) = input(pointer, length) else {
+        return std::ptr::null_mut();
+    };
+    output(container_anchor_reduce_json(text))
 }
 
 /// Runs one project-access decision over the JSON envelope documented on

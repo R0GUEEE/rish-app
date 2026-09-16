@@ -223,79 +223,71 @@ static NSString *DSHApplyTrustedSystemAliases(NSString *path) {
   return path;
 }
 
-static BOOL DSHIsCanonicalUUIDText(NSString *component) {
-  if (component.length != 36) return NO;
-  NSUUID *uuid = [[NSUUID alloc] initWithUUIDString:component];
-  return uuid != nil &&
-      [uuid.UUIDString.lowercaseString isEqualToString:component.lowercaseString];
-}
-
-// True when components[index-3..index] read Containers/Data/Application/
-// <UUID> — the shared tail of both container layouts:
-//   device:    /private/var/mobile/Containers/Data/Application/<UUID>/...
-//   simulator: <...>/CoreSimulator/Devices/<uuid>/data/Containers/Data/
-//              Application/<uuid>/...
-static BOOL DSHComponentsEndWithAppContainer(NSArray<NSString *> *components,
-                                             NSUInteger index) {
-  return index >= 3 && [components[index - 3] isEqual:@"Containers"] &&
-      [components[index - 2] isEqual:@"Data"] &&
-      [components[index - 1] isEqual:@"Application"] &&
-      DSHIsCanonicalUUIDText(components[index]);
-}
-
-static NSUInteger DSHLastAppContainerComponentIndex(
-    NSArray<NSString *> *components) {
-  for (NSUInteger index = components.count; index > 0; index--) {
-    NSUInteger candidate = index - 1;
-    if (DSHComponentsEndWithAppContainer(components, candidate)) {
-      return candidate;
-    }
-  }
-  return NSNotFound;
-}
-
-static BOOL DSHComponentsHavePrefix(NSArray<NSString *> *components,
-                                    NSArray<NSString *> *prefix) {
-  if (prefix.count > components.count) return NO;
-  for (NSUInteger index = 0; index < prefix.count; index++) {
-    if (![components[index] isEqual:prefix[index]]) return NO;
-  }
-  return YES;
-}
-
-// Traversal components anywhere in the path are refused at derivation time
-// (the strict walk also refuses them, but failing early keeps the anchor
-// itself from ever being derived from a traversal-shaped path).
-static BOOL DSHComponentsContainTraversal(NSArray<NSString *> *components) {
-  for (NSString *component in components) {
-    if ([component isEqual:@"."] || [component isEqual:@".."]) return YES;
-  }
-  return NO;
+// Where a path stops being the app's own container lives in the shared core
+// (modules/rish/core, `rish_agent_container_anchor_reduce`). Splitting a path
+// into components stays here: `pathComponents` is Foundation's, and it keeps a
+// leading "/" that a naive split would not.
+static NSArray<NSString *> *DSHContainerAnchorComponents(NSString *path) {
+  return [path isKindOfClass:NSString.class] ? path.pathComponents : nil;
 }
 
 NSUInteger DSHContainerAnchorSegmentCountForPaths(NSString *targetPath,
                                                   NSString *containerRootPath) {
-  if (![targetPath isKindOfClass:NSString.class] ||
-      ![containerRootPath isKindOfClass:NSString.class]) {
+  NSArray<NSString *> *target = DSHContainerAnchorComponents(targetPath);
+  NSArray<NSString *> *root = DSHContainerAnchorComponents(containerRootPath);
+  if (target == nil || root == nil) return NSNotFound;
+  NSData *bytes = [NSJSONSerialization dataWithJSONObject:@{
+    @"op" : @"anchor_segment_count",
+    @"target" : target,
+    @"container_root" : root,
+  } options:0 error:nil];
+  char *raw = bytes == nil ? NULL : rish_agent_container_anchor_reduce(
+      (const char *)bytes.bytes, bytes.length);
+  if (raw == NULL) return NSNotFound;
+  NSData *replyBytes = [NSData dataWithBytes:raw length:strlen(raw)];
+  rish_agent_string_free(raw);
+  id reply = [NSJSONSerialization JSONObjectWithData:replyBytes options:0
+                                                error:nil];
+  if (![reply isKindOfClass:NSDictionary.class] ||
+      ![reply[@"ok"] isEqual:@YES]) {
     return NSNotFound;
   }
-  NSArray<NSString *> *components = targetPath.pathComponents;
-  NSArray<NSString *> *containerComponents = containerRootPath.pathComponents;
-  NSUInteger rootIndex = DSHLastAppContainerComponentIndex(containerComponents);
-  if (DSHComponentsContainTraversal(components) ||
-      DSHComponentsContainTraversal(containerComponents) ||
-      rootIndex == NSNotFound || rootIndex + 1 != containerComponents.count ||
-      !DSHComponentsHavePrefix(components, containerComponents)) {
+  id segments = reply[@"segments"];
+  return [segments isKindOfClass:NSNumber.class]
+      ? [segments unsignedIntegerValue]
+      : NSNotFound;
+}
+
+// One component list in, one index out. `op` and `key` name which of the two
+// index-shaped answers is wanted.
+static NSUInteger DSHContainerAnchorIndex(NSString *op, NSString *key,
+                                          NSArray<NSString *> *components) {
+  if (components == nil) return NSNotFound;
+  NSData *bytes = [NSJSONSerialization dataWithJSONObject:@{
+    @"op" : op,
+    [op isEqual:@"scan_segment_count"] ? @"target" : @"components" : components,
+  } options:0 error:nil];
+  char *raw = bytes == nil ? NULL : rish_agent_container_anchor_reduce(
+      (const char *)bytes.bytes, bytes.length);
+  if (raw == NULL) return NSNotFound;
+  NSData *replyBytes = [NSData dataWithBytes:raw length:strlen(raw)];
+  rish_agent_string_free(raw);
+  id reply = [NSJSONSerialization JSONObjectWithData:replyBytes options:0
+                                                error:nil];
+  if (![reply isKindOfClass:NSDictionary.class] ||
+      ![reply[@"ok"] isEqual:@YES]) {
     return NSNotFound;
   }
-  return rootIndex;
+  id index = reply[key];
+  return [index isKindOfClass:NSNumber.class] ? [index unsignedIntegerValue]
+                                              : NSNotFound;
 }
 
 NSUInteger DSHContainerRootScanSegmentCount(NSString *path) {
   if (![path isKindOfClass:NSString.class]) return NSNotFound;
-  NSArray<NSString *> *components = path.pathComponents;
-  if (DSHComponentsContainTraversal(components)) return NSNotFound;
-  return DSHLastAppContainerComponentIndex(components);
+  // The same rule without a root to check against.
+  return DSHContainerAnchorIndex(@"scan_segment_count", @"segments",
+                                 path.pathComponents);
 }
 
 BOOL DSHLocalProjectAccessValidateWorkspaceRootRefV1(
@@ -381,8 +373,8 @@ static int DSHOpenAnchoredAbsoluteDirectory(
     } else {
       NSString *physicalHome = DSHApplyTrustedSystemAliases(homePath);
       NSArray<NSString *> *homeComponents = physicalHome.pathComponents;
-      NSUInteger homeRootIndex =
-          DSHLastAppContainerComponentIndex(homeComponents);
+      NSUInteger homeRootIndex = DSHContainerAnchorIndex(
+          @"last_app_container_index", @"index", homeComponents);
       if (homeRootIndex != NSNotFound &&
           homeRootIndex + 1 == homeComponents.count) {
         containerRootPath = physicalHome;
