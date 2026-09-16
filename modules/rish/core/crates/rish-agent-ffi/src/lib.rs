@@ -28,6 +28,7 @@ use rish_agent_core::workspace_authority::reduce_json as workspace_authority_red
 use rish_agent_core::workspace_directory_name::reduce_json as workspace_directory_name_reduce_json;
 use rish_agent_core::workspace_fingerprint::reduce_json as workspace_fingerprint_reduce_json;
 use rish_agent_core::workspace_grants::reduce_json as workspace_grants_reduce_json;
+use rish_agent_core::workspace_journal::reduce_json as workspace_journal_reduce_json;
 use rish_agent_core::workspace_receipt::reduce_json as workspace_receipt_reduce_json;
 use rish_agent_core::workspace_record::reduce_json as workspace_record_reduce_json;
 use rish_agent_core::workspace_tool::reduce_json as workspace_tool_reduce_json;
@@ -377,6 +378,25 @@ pub unsafe extern "C" fn rish_agent_git_tool_reduce(
         return std::ptr::null_mut();
     };
     output(git_tool_reduce_json(text))
+}
+
+/// Runs one workspace-journal decision over the JSON envelope documented on
+/// `rish_agent_core::workspace_journal::reduce_json` — what an operation
+/// journal looks like mid-flight, and how its recorded identity relates to
+/// what is on disk. Statting stays with the host, which passes the four
+/// identifiers it read as the canonical strings the journal holds.
+///
+/// # Safety
+/// `pointer` must reference `length` readable bytes or be null.
+#[no_mangle]
+pub unsafe extern "C" fn rish_agent_workspace_journal_reduce(
+    pointer: *const c_char,
+    length: usize,
+) -> *mut c_char {
+    let Some(text) = input(pointer, length) else {
+        return std::ptr::null_mut();
+    };
+    output(workspace_journal_reduce_json(text))
 }
 
 /// Runs one workspace-receipt decision over the JSON envelope documented on

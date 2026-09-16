@@ -2467,6 +2467,64 @@ static NSString *const DSHDigestB =
                         @"not_started");
 }
 
+// The journal records the staging directory's device, inode, uid and gid, and
+// recovery checks them against what it stats before it touches anything. A
+// journal whose recorded identity is not the directory on disk describes some
+// other directory, so recovery refuses and preserves the evidence rather than
+// deleting a folder it cannot account for.
+//
+// Nothing exercised this before: making DSHJournalIdentityMatchesState return
+// YES unconditionally left all 68 tests green.
+- (void)testRecoveryRefusesAJournalWhoseIdentityIsNotTheDirectoryOnDisk {
+  NSURL *documents = [self documentsRootForRoot:self.rootURL];
+  DSHLocalWorkspaceAccess *access =
+      [self accessWithRoot:self.rootURL
+          documentsRootURL:documents
+                     fault:^BOOL(NSString *stage) {
+                       return [stage isEqual:@"create_after_staging_fsync"];
+                     }
+             UUIDGenerator:^NSString *{
+               return DSHWorkspaceA;
+             }];
+  NSError *error = nil;
+  XCTAssertNil([access createRishOwnedWorkspaceWithDisplayName:@"Crash"
+                                                   operationId:DSHOperationA
+                                                         error:&error]);
+  NSURL *journalURL = [self journalURLForRoot:self.rootURL];
+  NSMutableDictionary *journal = [[NSJSONSerialization
+      JSONObjectWithData:[NSData dataWithContentsOfURL:journalURL]
+                 options:0 error:nil] mutableCopy];
+  XCTAssertEqualObjects(journal[@"phase"], @"prepared");
+  NSString *recordedInode = journal[@"staging_inode_id"];
+  XCTAssertTrue([recordedInode isKindOfClass:NSString.class]);
+  NSString *stagingName = journal[@"staging_name"];
+  NSURL *staging = [[self ownedWorkspacesRootForRoot:self.rootURL]
+      URLByAppendingPathComponent:stagingName isDirectory:YES];
+  XCTAssertTrue([NSFileManager.defaultManager
+      fileExistsAtPath:staging.path]);
+
+  // Same directory, a different inode recorded: this journal is about some
+  // other folder.
+  journal[@"staging_inode_id"] =
+      [@(recordedInode.longLongValue + 1) stringValue];
+  [self secureWriteObject:journal toURL:journalURL];
+
+  DSHLocalWorkspaceAccess *restarted =
+      [self accessWithRoot:self.rootURL
+          documentsRootURL:documents
+                     fault:nil
+             UUIDGenerator:^NSString *{
+               return DSHWorkspaceA;
+             }];
+  error = nil;
+  XCTAssertNil([restarted listWorkspaceMetadataWithError:&error]);
+  XCTAssertEqualObjects(error.userInfo[@"code"], @"E_WORKSPACE_CONFLICT");
+  // The evidence is left exactly where it was.
+  XCTAssertTrue([NSFileManager.defaultManager fileExistsAtPath:staging.path]);
+  XCTAssertTrue([NSFileManager.defaultManager
+      fileExistsAtPath:journalURL.path]);
+}
+
 - (void)testRishOwnedCreateRegistryFailureRecoversAuthorityReadyPublication {
   NSURL *documents = [self documentsRootForRoot:self.rootURL];
   DSHLocalWorkspaceAccess *access =

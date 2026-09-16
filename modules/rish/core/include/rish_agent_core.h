@@ -145,6 +145,15 @@ char *rish_agent_completion_response_reduce(const char *json, size_t json_length
 /// crash between writing the object and recording it recoverable.
 char *rish_agent_git_tool_reduce(const char *json, size_t json_length);
 
+/// One workspace-journal decision over {"op",...}: journal_shape,
+/// legacy_journal_shape, readable_journal, identity_present, identity_matches,
+/// owned_authority_matches, create_request_sha256, bootstrap_request_sha256.
+/// A journal binds itself to its own request, a phase says which digests exist
+/// yet, and physical identity is recorded in fours. Statting stays with the
+/// host: it passes st_dev/st_ino/st_uid/st_gid as the canonical decimal
+/// strings the journal holds.
+char *rish_agent_workspace_journal_reduce(const char *json, size_t json_length);
+
 /// One workspace-receipt decision over {"op",...}: receipt_shape,
 /// legacy_receipt_shape, readable_receipt, store_shape, public_receipt,
 /// expired. The public projection withholds request_sha256, which is how a

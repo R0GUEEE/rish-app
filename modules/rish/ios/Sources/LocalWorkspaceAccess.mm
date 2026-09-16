@@ -536,19 +536,22 @@ static NSDictionary *DSHMigrateLegacyAuthority(NSDictionary *authority,
 // id cannot be replayed with a different user request.  Keep the digest input
 // deliberately small and value-free: the raw request never crosses the
 // native/JS boundary or appears in a receipt.
+// Defined below, next to the other workspace reducers.
+static NSDictionary *DSHWorkspaceJournalReduce(NSString *op,
+                                               NSDictionary *fields);
+
 static NSString *DSHCreateRequestSHA256(NSString *displayName) {
-  return DSHSHA256(DSHCanonicalJSON(@{
-    @"operation" : @"create",
-    @"display_name" : displayName,
-  }));
+  id digest = DSHWorkspaceJournalReduce(@"create_request_sha256", @{
+    @"display_name" : displayName ?: NSNull.null,
+  })[@"digest"];
+  return [digest isKindOfClass:NSString.class] ? digest : nil;
 }
 
 static NSString *DSHBootstrapRequestSHA256(NSString *projectId) {
-  return DSHSHA256(DSHCanonicalJSON(@{
-    @"schema_version" : @1,
-    @"operation" : @"bootstrap_legacy",
-    @"project_id" : projectId,
-  }));
+  id digest = DSHWorkspaceJournalReduce(@"bootstrap_request_sha256", @{
+    @"project_id" : projectId ?: NSNull.null,
+  })[@"digest"];
+  return [digest isKindOfClass:NSString.class] ? digest : nil;
 }
 
 static void DSHJSONSkipWhitespace(const uint8_t *bytes,
@@ -861,6 +864,27 @@ static BOOL DSHWriteAll(int descriptor, const uint8_t *bytes, size_t length) {
 // (modules/rish/core, `rish_agent_workspace_receipt_reduce`). Reading the
 // committed timestamp stays here: the calendar is Foundation's, and the host
 // passes the age it measured.
+// What an operation journal looks like mid-flight, and how its recorded
+// identity relates to what is on disk, live in the shared core
+// (modules/rish/core, `rish_agent_workspace_journal_reduce`). Statting stays
+// here; what the four numbers have to be does not.
+static NSDictionary *DSHWorkspaceJournalReduce(NSString *op,
+                                               NSDictionary *fields) {
+  NSMutableDictionary *envelope = [fields mutableCopy];
+  envelope[@"op"] = op;
+  NSData *bytes = [NSJSONSerialization dataWithJSONObject:envelope options:0
+                                                    error:nil];
+  char *raw = bytes == nil ? NULL : rish_agent_workspace_journal_reduce(
+      (const char *)bytes.bytes, bytes.length);
+  if (raw == NULL) return nil;
+  NSData *replyBytes = [NSData dataWithBytes:raw length:strlen(raw)];
+  rish_agent_string_free(raw);
+  id reply = [NSJSONSerialization JSONObjectWithData:replyBytes options:0
+                                                error:nil];
+  return [reply isKindOfClass:NSDictionary.class] &&
+      [reply[@"ok"] isEqual:@YES] ? reply : nil;
+}
+
 static NSDictionary *DSHWorkspaceReceiptReduce(NSString *op,
                                                NSDictionary *fields) {
   NSMutableDictionary *envelope = [fields mutableCopy];
@@ -2119,114 +2143,11 @@ static NSString *DSHOwnedDirectoryNameCandidate(NSString *base,
 }
 
 - (BOOL)validJournal:(NSDictionary *)journal {
-  NSArray *keys = @[
-    @"schema_version", @"operation_id", @"workspace_id", @"operation",
-    @"phase", @"binding_revision", @"previous_registry_generation",
-    @"previous_registry_sha256", @"authority_sha256", @"record_sha256",
-    @"staging_name", @"destination_name", @"display_name",
-    @"request_sha256", @"staging_device_id", @"staging_inode_id",
-    @"staging_uid", @"staging_gid", @"destination_device_id",
-    @"destination_inode_id", @"destination_uid", @"destination_gid",
-    @"legacy_project_id", @"clearance_receipt_id", @"confirmation_id",
-    @"created_at", @"last_opened_at", @"updated_at",
-  ];
-  // Task B adds the one Rish-owned creation transaction. Future import,
-  // regrant, and destructive journals remain untouched and fail closed until
-  // their exact recovery engines ship.
-  NSSet *operations = [NSSet setWithArray:@[@"bootstrap_legacy", @"create"]];
-  NSSet *phases = [NSSet setWithArray:
-      @[@"prepared", @"authority_ready", @"registry_committed"]];
-  if (!DSHExactKeys(journal, keys) ||
-      !DSHSchemaVersionIsOne(journal[@"schema_version"]) ||
-      !DSHCanonicalUUID(journal[@"operation_id"]) ||
-      !DSHCanonicalUUID(journal[@"workspace_id"]) ||
-      ![operations containsObject:journal[@"operation"]] ||
-      ![phases containsObject:journal[@"phase"]] ||
-      !DSHIsSafeInteger(journal[@"binding_revision"], NO) ||
-      !DSHIsSafeInteger(journal[@"previous_registry_generation"], YES) ||
-      !DSHCanonicalSHA256(journal[@"previous_registry_sha256"]) ||
-      !DSHCanonicalDisplayName(journal[@"display_name"]) ||
-      !DSHCanonicalSHA256(journal[@"request_sha256"]) ||
-      !DSHCanonicalTimestamp(journal[@"last_opened_at"]) ||
-      !DSHCanonicalTimestamp(journal[@"created_at"]) ||
-      !DSHCanonicalTimestamp(journal[@"updated_at"])) {
-    return NO;
-  }
-  BOOL prepared = [journal[@"phase"] isEqual:@"prepared"];
-  if (prepared) {
-    if (journal[@"authority_sha256"] != NSNull.null ||
-        journal[@"record_sha256"] != NSNull.null) return NO;
-  } else if (!DSHCanonicalSHA256(journal[@"authority_sha256"]) ||
-             !DSHCanonicalSHA256(journal[@"record_sha256"])) {
-    return NO;
-  }
-  NSArray *nullableStrings = @[@"staging_name", @"destination_name",
-                               @"clearance_receipt_id", @"confirmation_id",
-                               @"staging_device_id", @"staging_inode_id",
-                               @"staging_uid", @"staging_gid",
-                               @"destination_device_id",
-                               @"destination_inode_id", @"destination_uid",
-                               @"destination_gid"];
-  for (NSString *key in nullableStrings) {
-    if (journal[key] != NSNull.null &&
-        ![journal[key] isKindOfClass:NSString.class]) return NO;
-  }
-  NSArray *identityPrefixes = @[@"staging_", @"destination_"];
-  for (NSString *prefix in identityPrefixes) {
-    NSArray *identityKeys = @[
-      [prefix stringByAppendingString:@"device_id"],
-      [prefix stringByAppendingString:@"inode_id"],
-      [prefix stringByAppendingString:@"uid"],
-      [prefix stringByAppendingString:@"gid"],
-    ];
-    BOOL any = NO;
-    BOOL all = YES;
-    for (NSString *key in identityKeys) {
-      BOOL present = journal[key] != NSNull.null;
-      any = any || present;
-      all = all && present && DSHCanonicalUnsignedIntegerString(journal[key]);
-    }
-    if (any != all) return NO;
-  }
-  if ([journal[@"operation"] isEqual:@"bootstrap_legacy"]) {
-    return [journal[@"binding_revision"] isEqual:@1] &&
-           DSHCanonicalUUID(journal[@"legacy_project_id"]) &&
-           [journal[@"request_sha256"]
-               isEqual:DSHBootstrapRequestSHA256(journal[@"legacy_project_id"])] &&
-           journal[@"staging_name"] == NSNull.null &&
-           journal[@"destination_name"] == NSNull.null &&
-           journal[@"staging_device_id"] == NSNull.null &&
-           journal[@"staging_inode_id"] == NSNull.null &&
-           journal[@"staging_uid"] == NSNull.null &&
-           journal[@"staging_gid"] == NSNull.null &&
-           journal[@"destination_device_id"] == NSNull.null &&
-           journal[@"destination_inode_id"] == NSNull.null &&
-           journal[@"destination_uid"] == NSNull.null &&
-           journal[@"destination_gid"] == NSNull.null &&
-           journal[@"clearance_receipt_id"] == NSNull.null &&
-           journal[@"confirmation_id"] == NSNull.null;
-  }
-  if ([journal[@"operation"] isEqual:@"create"]) {
-    return [journal[@"binding_revision"] isEqual:@1] &&
-           DSHInternalComponent(journal[@"staging_name"]) &&
-           DSHInternalComponent(journal[@"destination_name"]) &&
-           ![journal[@"staging_name"] isEqual:journal[@"destination_name"]] &&
-           [journal[@"request_sha256"]
-               isEqual:DSHCreateRequestSHA256(journal[@"display_name"])] &&
-           journal[@"legacy_project_id"] == NSNull.null &&
-           journal[@"clearance_receipt_id"] == NSNull.null &&
-           journal[@"confirmation_id"] == NSNull.null &&
-           (([journal[@"phase"] isEqual:@"prepared"]) ||
-            (journal[@"staging_device_id"] != NSNull.null &&
-             journal[@"staging_inode_id"] != NSNull.null &&
-             journal[@"staging_uid"] != NSNull.null &&
-             journal[@"staging_gid"] != NSNull.null &&
-             journal[@"destination_device_id"] != NSNull.null &&
-             journal[@"destination_inode_id"] != NSNull.null &&
-             journal[@"destination_uid"] != NSNull.null &&
-             journal[@"destination_gid"] != NSNull.null));
-  }
-  return NO;
+  NSString *folded = DSHWorkspaceFoldedName(journal[@"display_name"]);
+  return [DSHWorkspaceJournalReduce(@"journal_shape", @{
+    @"journal" : journal ?: NSNull.null,
+    @"folded_display_name" : folded ?: NSNull.null,
+  })[@"valid"] isEqual:@YES];
 }
 
 // A1 shipped a schema-1 bootstrap journal before Workspace B added the
@@ -2235,39 +2156,9 @@ static NSString *DSHOwnedDirectoryNameCandidate(NSString *base,
 // stricter create journal above is still required for every new Files-visible
 // transaction.
 - (BOOL)validLegacyJournal:(NSDictionary *)journal {
-  NSArray *keys = @[
-    @"schema_version", @"operation_id", @"workspace_id", @"operation",
-    @"phase", @"binding_revision", @"previous_registry_generation",
-    @"previous_registry_sha256", @"authority_sha256", @"record_sha256",
-    @"staging_name", @"destination_name", @"legacy_project_id",
-    @"clearance_receipt_id", @"confirmation_id", @"created_at", @"updated_at",
-  ];
-  NSSet *phases = [NSSet setWithArray:
-      @[@"prepared", @"authority_ready", @"registry_committed"]];
-  if (!DSHExactKeys(journal, keys) ||
-      !DSHSchemaVersionIsOne(journal[@"schema_version"]) ||
-      !DSHCanonicalUUID(journal[@"operation_id"]) ||
-      !DSHCanonicalUUID(journal[@"workspace_id"]) ||
-      ![journal[@"operation"] isEqual:@"bootstrap_legacy"] ||
-      ![phases containsObject:journal[@"phase"]] ||
-      !DSHIsSafeInteger(journal[@"binding_revision"], NO) ||
-      !DSHIsSafeInteger(journal[@"previous_registry_generation"], YES) ||
-      !DSHCanonicalSHA256(journal[@"previous_registry_sha256"]) ||
-      !DSHCanonicalTimestamp(journal[@"created_at"]) ||
-      !DSHCanonicalTimestamp(journal[@"updated_at"]) ||
-      !DSHCanonicalUUID(journal[@"legacy_project_id"]) ||
-      journal[@"staging_name"] != NSNull.null ||
-      journal[@"destination_name"] != NSNull.null ||
-      journal[@"clearance_receipt_id"] != NSNull.null ||
-      journal[@"confirmation_id"] != NSNull.null) {
-    return NO;
-  }
-  BOOL prepared = [journal[@"phase"] isEqual:@"prepared"];
-  return prepared
-      ? (journal[@"authority_sha256"] == NSNull.null &&
-         journal[@"record_sha256"] == NSNull.null)
-      : (DSHCanonicalSHA256(journal[@"authority_sha256"]) &&
-         DSHCanonicalSHA256(journal[@"record_sha256"]));
+  return [DSHWorkspaceJournalReduce(@"legacy_journal_shape", @{
+    @"journal" : journal ?: NSNull.null,
+  })[@"valid"] isEqual:@YES];
 }
 
 - (nullable NSDictionary *)loadJournalIfPresent:(NSError **)error {
@@ -2339,47 +2230,37 @@ static NSString *DSHOwnedDirectoryNameCandidate(NSString *base,
 
 static BOOL DSHJournalIdentityPresent(NSDictionary *journal,
                                       NSString *prefix) {
-  NSArray *keys = @[
-    [prefix stringByAppendingString:@"device_id"],
-    [prefix stringByAppendingString:@"inode_id"],
-    [prefix stringByAppendingString:@"uid"],
-    [prefix stringByAppendingString:@"gid"],
-  ];
-  for (NSString *key in keys) {
-    if (!DSHCanonicalUnsignedIntegerString(journal[key])) return NO;
-  }
-  return YES;
+  return [DSHWorkspaceJournalReduce(@"identity_present", @{
+    @"journal" : journal ?: NSNull.null,
+    @"prefix" : prefix ?: NSNull.null,
+  })[@"present"] isEqual:@YES];
 }
 
+// Statting is the host's; what the four numbers have to be is not. They cross
+// as the same canonical decimal strings the journal holds, which is exact:
+// a canonical unsigned string and the number it denotes are in bijection.
 static BOOL DSHJournalIdentityMatchesState(NSDictionary *journal,
                                            NSString *prefix,
                                            const struct stat &state) {
-  if (!DSHJournalIdentityPresent(journal, prefix)) return NO;
-  unsigned long long expectedDevice = strtoull(
-      [journal[[prefix stringByAppendingString:@"device_id"]] UTF8String],
-      NULL, 10);
-  unsigned long long expectedInode = strtoull(
-      [journal[[prefix stringByAppendingString:@"inode_id"]] UTF8String],
-      NULL, 10);
-  unsigned long long expectedUID = strtoull(
-      [journal[[prefix stringByAppendingString:@"uid"]] UTF8String], NULL, 10);
-  unsigned long long expectedGID = strtoull(
-      [journal[[prefix stringByAppendingString:@"gid"]] UTF8String], NULL, 10);
-  return (unsigned long long)state.st_dev == expectedDevice &&
-         (unsigned long long)state.st_ino == expectedInode &&
-         (unsigned long long)state.st_uid == expectedUID &&
-         (unsigned long long)state.st_gid == expectedGID;
+  NSDictionary *observed = @{
+    @"device_id" : DSHUnsignedIntegerString((unsigned long long)state.st_dev),
+    @"inode_id" : DSHUnsignedIntegerString((unsigned long long)state.st_ino),
+    @"uid" : DSHUnsignedIntegerString((unsigned long long)state.st_uid),
+    @"gid" : DSHUnsignedIntegerString((unsigned long long)state.st_gid),
+  };
+  return [DSHWorkspaceJournalReduce(@"identity_matches", @{
+    @"journal" : journal ?: NSNull.null,
+    @"prefix" : prefix ?: NSNull.null,
+    @"observed" : observed,
+  })[@"matches"] isEqual:@YES];
 }
 
 static BOOL DSHOwnedAuthorityMatchesJournal(NSDictionary *authority,
                                             NSDictionary *journal) {
-  NSString *prefix = DSHJournalIdentityPresent(journal, @"destination_")
-      ? @"destination_"
-      : @"staging_";
-  return [authority[@"device_id"]
-              isEqual:journal[[prefix stringByAppendingString:@"device_id"]]] &&
-         [authority[@"inode_id"]
-              isEqual:journal[[prefix stringByAppendingString:@"inode_id"]]];
+  return [DSHWorkspaceJournalReduce(@"owned_authority_matches", @{
+    @"authority" : authority ?: NSNull.null,
+    @"journal" : journal ?: NSNull.null,
+  })[@"matches"] isEqual:@YES];
 }
 
 - (BOOL)inspectCreateArtifactNamed:(NSString *)name

@@ -1203,6 +1203,50 @@ asking whether the record is the right shape, not comparing the directory
 identity, and inventing the fingerprint instead of asking for it. The last one
 fails nine of the twelve.
 
+### What an operation journal is, and how recovery reads it
+
+`workspace_journal.rs` ports `validJournal:`, `validLegacyJournal:`,
+`DSHCreateRequestSHA256`, `DSHBootstrapRequestSHA256`,
+`DSHJournalIdentityPresent`, `DSHJournalIdentityMatchesState` and
+`DSHOwnedAuthorityMatchesJournal`.
+
+A journal is what makes a workspace operation recoverable: written before the
+directory moves, updated as each phase lands, read on the next launch to decide
+whether an interrupted operation should be finished or undone. Three rules
+follow.
+
+- **A journal binds itself to its own request.** `request_sha256` must be the
+  digest of the request the journal claims to be carrying out, so a journal
+  cannot be replayed as a different operation than the one that was asked for.
+- **A phase says which digests exist yet.** `prepared` has neither an authority
+  nor a record digest; any later phase has both. A journal claiming one at
+  `prepared` describes a state that cannot have occurred.
+- **Physical identity is recorded in fours.** Device, inode, uid and gid are
+  present together or not at all. Three of four is not partial evidence — it is
+  a journal no recovery engine can check against a directory.
+
+Statting stays with the host, which passes the four numbers as the same
+canonical decimal strings the journal holds. That comparison is exact rather
+than a shortcut: a canonical unsigned string and the number it denotes are in
+bijection, which is what makes insisting on the canonical spelling worth
+anything.
+
+**A coverage hole this cut found.** After delegating, making
+`DSHJournalIdentityMatchesState` return `YES` unconditionally left all 68
+`LocalWorkspaceAccessTests` green — the relation that decides whether a
+journal's recorded directory is the one on disk was never exercised
+negatively, on either side of the migration.
+`testRecoveryRefusesAJournalWhoseIdentityIsNotTheDirectoryOnDisk` closes it:
+it interrupts a create, edits the recorded inode, and asserts recovery refuses
+with `E_WORKSPACE_CONFLICT` and leaves both the folder and the journal alone.
+With that test present the same mutation fails.
+
+One behaviour named rather than tightened: an identity-less authority and an
+identity-less journal do "match", because `[NSNull isEqual:NSNull]` is `YES`
+and the port reproduces it. It is unreachable — `owned_authority` requires
+canonical unsigned strings before anything gets that far — and tightening it
+would be a second reading of one rule on one platform.
+
 ### What a workspace operation receipt is
 
 `workspace_receipt.rs` ports `validReceipt:`, `validLegacyReceipt:`,

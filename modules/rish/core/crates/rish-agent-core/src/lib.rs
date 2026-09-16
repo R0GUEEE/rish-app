@@ -42,6 +42,7 @@ pub mod workspace_authority;
 pub mod workspace_directory_name;
 pub mod workspace_fingerprint;
 pub mod workspace_grants;
+pub mod workspace_journal;
 pub mod workspace_receipt;
 pub mod workspace_record;
 pub mod workspace_tool;
