@@ -21,7 +21,9 @@ use serde_json::{json, Map, Value};
 use unicode_normalization::UnicodeNormalization;
 
 use crate::project_context_policy::REASON_POLICY;
-use crate::schema::{canonical_timestamp, canonical_uuid, exact_keys, is_null, MAX_SAFE_INTEGER};
+use crate::schema::{
+    canonical_timestamp, canonical_uuid, exact_keys, is_null, safe_integer, MAX_SAFE_INTEGER,
+};
 use crate::workspace_tool::path_control_or_format;
 
 /// The four grants, in the order a stored capability array must list them.
@@ -169,7 +171,90 @@ pub fn record_shape(
     }
 }
 
-/// What a binding revision may advance to, and why it may not.
+/// The registry holds at most this many records.
+pub const MAX_RECORDS: usize = 1024;
+
+/// What the host folded for one record, so the core can judge the registry as
+/// a whole without doing any folding itself.
+pub struct FoldedRecord<'a> {
+    pub display_name: Option<&'a str>,
+    pub directory_name: Option<&'a str>,
+}
+
+/// The registry file's own shape, from `loadRegistry:`.
+///
+/// Three invariants beyond "every record is a record":
+///
+/// - **Workspace ids are strictly ascending.** Not merely unique — sorted. The
+///   registry's canonical JSON is what `previous_registry_sha256` is taken
+///   over, so two registries holding the same records in a different order
+///   would digest differently and every journal written against one would be
+///   unrecoverable against the other.
+/// - **No two records share a folded directory name.** Two workspaces whose
+///   folders differ only by case or accent are one folder on this filesystem,
+///   and the second would silently write into the first.
+/// - **The count is bounded**, so a corrupted or hostile file cannot make
+///   every launch walk an unbounded list.
+pub fn registry_shape(registry: Option<&Value>, folded: &[FoldedRecord]) -> bool {
+    let Some(map) = exact_keys(registry, &["schema_version", "generation", "records"]) else {
+        return false;
+    };
+    if map.get("schema_version") != Some(&json!(1))
+        || safe_integer(map.get("generation"), MAX_SAFE_INTEGER, true).is_none()
+    {
+        return false;
+    }
+    let Some(Value::Array(records)) = map.get("records") else {
+        return false;
+    };
+    if records.len() > MAX_RECORDS || records.len() != folded.len() {
+        return false;
+    }
+    let mut previous: Option<&str> = None;
+    let mut directories: Vec<&str> = Vec::with_capacity(records.len());
+    for (record, folded) in records.iter().zip(folded) {
+        if !record_shape(Some(record), folded.display_name, folded.directory_name) {
+            return false;
+        }
+        let Some(id) = record.get("workspace_id").and_then(Value::as_str) else {
+            return false;
+        };
+        if previous.is_some_and(|seen| seen >= id) {
+            return false;
+        }
+        previous = Some(id);
+        // A record with no owned directory occupies no name.
+        if !is_null(record.get("owned_directory_name")) {
+            let Some(name) = folded.directory_name else {
+                return false;
+            };
+            if directories.contains(&name) {
+                return false;
+            }
+            directories.push(name);
+        }
+    }
+    true
+}
+
+/// Whether one more record fits. A full registry refuses the operation rather
+/// than dropping a binding somebody still uses.
+pub fn registry_has_room(count: Option<u64>) -> bool {
+    match count {
+        Some(count) => count < MAX_RECORDS as u64,
+        None => false,
+    }
+}
+
+/// The layout manifest: the one object that says this store was initialised.
+pub fn layout_manifest_shape(manifest: Option<&Value>) -> bool {
+    let Some(map) = exact_keys(manifest, &["schema_version", "initialized_at"]) else {
+        return false;
+    };
+    map.get("schema_version") == Some(&json!(1)) && canonical_timestamp(map.get("initialized_at"))
+}
+
+/// What a binding revision may advance to, and why it may not./// What a binding revision may advance to, and why it may not.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Advance {
     Ok,
@@ -243,6 +328,27 @@ fn reduce_json_inner(input: &str) -> Option<Value> {
         }
         // The policy reason is re-exported so a caller that refuses a record
         // has one vocabulary rather than two.
+        "registry_shape" => {
+            let items = envelope.get("folded")?.as_array()?;
+            let folded: Vec<FoldedRecord> = items
+                .iter()
+                .map(|item| FoldedRecord {
+                    display_name: item.get("display_name").and_then(Value::as_str),
+                    directory_name: item.get("directory_name").and_then(Value::as_str),
+                })
+                .collect();
+            Some(json!({
+                "ok": true,
+                "valid": registry_shape(envelope.get("registry"), &folded),
+            }))
+        }
+        "registry_has_room" => Some(json!({
+            "ok": true,
+            "has_room": registry_has_room(envelope.get("count").and_then(Value::as_u64)),
+        })),
+        "layout_manifest_shape" => Some(json!({
+            "ok": true, "valid": layout_manifest_shape(envelope.get("manifest"))
+        })),
         "reason" => Some(json!({ "ok": true, "reason": REASON_POLICY })),
         _ => None,
     }

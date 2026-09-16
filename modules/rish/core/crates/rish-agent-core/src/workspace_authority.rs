@@ -22,7 +22,7 @@ use serde_json::{json, Map, Value};
 
 use crate::canonical::sha256_hex;
 use crate::schema::{canonical_sha256, canonical_timestamp, exact_keys};
-use crate::workspace_fingerprint::{fingerprint, fingerprint_input, fingerprint_valid};
+use crate::workspace_fingerprint::{fingerprint_valid, seal};
 use crate::workspace_record::{capabilities_array, display_name, CAPABILITY_ORDER};
 
 /// A security-scoped bookmark is at most this many bytes.
@@ -257,12 +257,12 @@ pub fn legacy_authority(authority: Option<&Value>, record: &Value) -> bool {
 // validate. That is the original's behaviour and it is left alone; see
 // `a_migrated_legacy_authority_can_still_fail_to_validate`.
 
-/// Seals an authority with the fingerprint its own contents imply.
+/// Seals an authority with the fingerprint its own contents imply. One copy of
+/// that step, shared with the creation path, so an upgrade and a fresh write
+/// cannot seal differently.
 fn sealed(authority: Map<String, Value>, record: &Value) -> Option<Value> {
-    let authority = Value::Object(authority);
-    let input = fingerprint_input(record, &authority)?;
-    let sha = fingerprint(Some(&input))?;
-    let mut map = authority.as_object()?.clone();
+    let mut map = authority;
+    let sha = seal(record, &Value::Object(map.clone()))?;
     map.insert("root_fingerprint_sha256".to_string(), json!(sha));
     Some(Value::Object(map))
 }

@@ -1203,6 +1203,50 @@ asking whether the record is the right shape, not comparing the directory
 identity, and inventing the fingerprint instead of asking for it. The last one
 fails nine of the twelve.
 
+### Sealing an authority, and the registry file itself
+
+Two duplications closed.
+
+**Sealing.** `workspace_fingerprint::seal` is the writing side of
+`fingerprint_valid`: build the input, hash it, one step. The host used to do
+that in three — `DSHAuthorityDigestWithoutFingerprint`, one of three
+`*FingerprintInput` builders, `DSHWorkspaceRootFingerprintSHA256` — at each
+creation site, which is the same rule written twice. All four helpers are gone
+from `LocalWorkspaceAccess.mm`; `workspace_authority`'s own upgrade path uses
+`seal` too, so an upgrade and a fresh write cannot seal differently.
+`DSHWorkspaceRootFingerprintSHA256` stays in `DSHWorkspaceCanonical.mm`, where
+`WorkspaceFingerprintParityTests` compares it against the core — that is the
+evidence the two agree, and deleting it would delete the evidence.
+
+**The registry file.** `registry_shape` now owns what `loadRegistry:` used to
+check inline. Three invariants beyond "every record is a record":
+
+- **Workspace ids are strictly ascending**, not merely unique. The registry's
+  canonical JSON is what `previous_registry_sha256` is taken over, so the same
+  records in a different order digest differently and every journal written
+  against one would be unrecoverable against the other.
+- **No two records share a folded directory name.** Two workspaces whose
+  folders differ only by case or accent are one folder on this filesystem, and
+  the second would silently write into the first.
+- **The count is bounded** at 1024, which now has one copy rather than two.
+
+The host folds each record's two names and hands them across in order; a short
+list is refused rather than judged halfway.
+
+**Asserting a constant proves nothing.** The first version of the capacity test
+said `assert_eq!(MAX_RECORDS, 1024)` and nothing else, and deleting the bound
+left it green. It now builds a registry of 1024 records and one of 1025.
+
+`layout_manifest_shape` moved with it.
+
+**What is deliberately *not* delegated:** the primitive predicates
+(`DSHCanonicalUUID`, `DSHCanonicalTimestamp` and friends) still used at the
+public API boundary, where they check a caller's arguments before anything is
+read or written. They run dozens of times per launch and the composite rules
+behind them all go through the core, so a duplicated primitive on an argument
+path is a much smaller risk than a duplicated *stored shape* was. Said plainly
+rather than quietly left.
+
 ### Which failure a caller is told about
 
 `workspace_error.rs` ports `DSHWorkspacePublicCode` and

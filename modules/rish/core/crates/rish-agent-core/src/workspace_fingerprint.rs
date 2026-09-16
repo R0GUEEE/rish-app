@@ -226,7 +226,16 @@ pub fn fingerprint_input(record: &Value, authority: &Value) -> Option<Value> {
     })
 }
 
-/// Whether an authority's stored fingerprint is the one its own contents imply.
+/// The fingerprint a record and an unsealed authority imply — the writing side
+/// of `fingerprint_valid`. Building the input and hashing it is one step from
+/// the host's point of view, and keeping it one step here means the two sides
+/// cannot drift: whatever seals an authority is exactly what will later be
+/// asked to recognise it.
+pub fn seal(record: &Value, authority: &Value) -> Option<String> {
+    fingerprint(Some(&fingerprint_input(record, authority)?))
+}
+
+/// Whether an authority's stored fingerprint is the one its own contents imply./// Whether an authority's stored fingerprint is the one its own contents imply.
 pub fn fingerprint_valid(authority: &Value, record: &Value) -> bool {
     let Some(stored) = authority.get("root_fingerprint_sha256") else {
         return false;
@@ -259,6 +268,10 @@ fn reduce_json_inner(input: &str) -> Option<Value> {
         "fingerprint_input" => Some(json!({
             "ok": true,
             "input": fingerprint_input(envelope.get("record")?, envelope.get("authority")?)
+        })),
+        "seal" => Some(json!({
+            "ok": true,
+            "fingerprint": seal(envelope.get("record")?, envelope.get("authority")?),
         })),
         "fingerprint_valid" => Some(json!({
             "ok": true,

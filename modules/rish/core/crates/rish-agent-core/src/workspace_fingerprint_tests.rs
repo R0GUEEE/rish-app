@@ -197,3 +197,85 @@ fn the_reducer_answers_its_ops() {
     assert!(canonical_sha256(Some(&reply["digest"])));
     assert_eq!(run(json!({ "op": "teleport" }))["ok"], json!(false));
 }
+
+/// Sealing and recognising are the same step read in two directions. Whatever
+/// `seal` produces is exactly what `fingerprint_valid` will later accept, for
+/// every origin — which is the only reason a freshly written authority opens
+/// on the next launch.
+#[test]
+fn what_seal_writes_is_what_fingerprint_valid_accepts() {
+    let cases = [
+        ("rish_created", owned_record(), owned_authority()),
+        (
+            "granted_folder",
+            json!({
+                "origin": "granted_folder", "workspace_id": WORKSPACE,
+                "binding_revision": 2
+            }),
+            json!({
+                "schema_version": 1,
+                "volume_identifier_sha256": digest('1'),
+                "resource_identifier_sha256": digest('2'),
+                "device_id": "16777232", "inode_id": "42",
+                "bookmark_sha256": digest('3'),
+                "root_fingerprint_sha256": digest('f'),
+            }),
+        ),
+        (
+            "legacy_app_owned",
+            json!({
+                "origin": "legacy_app_owned", "workspace_id": WORKSPACE,
+                "binding_revision": 5
+            }),
+            json!({
+                "schema_version": 1,
+                "legacy_project_id": PROJECT,
+                "project_metadata_sha256": digest('4'),
+                "projects_root_device_id": "16777232",
+                "projects_root_inode_id": "11",
+                "repository_device_id": "16777232",
+                "repository_inode_id": "22",
+                "git_device_id": "16777232",
+                "git_inode_id": "33",
+                "root_fingerprint_sha256": digest('f'),
+            }),
+        ),
+    ];
+    for (origin, record, mut authority) in cases {
+        let sha = seal(&record, &authority).unwrap_or_else(|| panic!("{origin}"));
+        authority["root_fingerprint_sha256"] = json!(sha.clone());
+        assert!(fingerprint_valid(&authority, &record), "{origin}");
+        // And it is the same answer as building the input by hand, so the
+        // one-step form is not a second rule.
+        let input = fingerprint_input(&record, &authority).expect("input");
+        assert_eq!(fingerprint(Some(&input)), Some(sha), "{origin}");
+    }
+    // An origin the rule does not know seals to nothing.
+    assert!(seal(
+        &json!({ "origin": "elsewhere", "workspace_id": WORKSPACE, "binding_revision": 1 }),
+        &owned_authority()
+    )
+    .is_none());
+}
+
+/// The reducer's `seal` op answers with the same digest, and refuses an
+/// envelope missing either half rather than sealing over a default.
+#[test]
+fn the_reducer_seals() {
+    let record = owned_record();
+    let authority = owned_authority();
+    let reply: Value = serde_json::from_str(&reduce_json(
+        &json!({ "op": "seal", "record": record, "authority": authority }).to_string(),
+    ))
+    .expect("reply");
+    assert_eq!(
+        reply["fingerprint"],
+        json!(seal(&record, &authority).expect("seal"))
+    );
+    for input in [
+        json!({ "op": "seal", "record": record }).to_string(),
+        json!({ "op": "seal", "authority": authority }).to_string(),
+    ] {
+        assert_eq!(reduce_json(&input), r#"{"ok":false}"#, "{input}");
+    }
+}
