@@ -1137,6 +1137,41 @@ project-context policy uses — and the reserved-name check (`rish workspaces`,
 the `.rish-` prefix) is on the folded spelling so case and diacritics cannot
 dodge it. A host that could not fold refuses rather than guessing.
 
+### Android's workspace registry
+
+`AndroidWorkspaceRegistry.kt` is the first workspace subsystem on Android. It
+writes the same record, authority and fingerprint iOS writes, validated by the
+same shared rules, so growing it later is new code over the same bytes rather
+than a migration.
+
+**Scope, and why.** Only the `rish_created` origin can exist on Android: there
+are no security-scoped bookmarks and no legacy iOS projects, so those two
+shapes are unreachable and are rejected rather than stubbed. There is no
+rebinding either — an app-private directory keeps its identity for as long as
+the app is installed, and the one event that changes it takes the data with it
+— so every record is at binding revision 1 and nothing there exercises
+`binding_revision_advance`.
+
+**Folding is per-host and that is fine.** iOS folds with Foundation under
+`en_US_POSIX`; Android uses NFD with combining marks dropped, lowercased in the
+root locale. The two do not always agree. A folded name is never stored, only
+compared against other names on the same device; everything that *is* stored
+goes through the shared rules.
+
+**Inode reuse.** `aReplacedDirectoryIsNotTheSameRoot` originally deleted the
+directory and recreated it — and passed the old identity straight back, because
+the freed inode is handed out again immediately. The test now moves the
+directory instead, which keeps the old inode allocated, and asserts that the
+replacement really did get a different one so it cannot quietly stop testing.
+Worth naming as a limit of the design: physical identity catches a folder
+swapped for a *different* one, not a folder deleted and rebuilt in its place.
+Neither platform claims otherwise.
+
+The twelve instrumentation tests were checked by breaking three rules: not
+asking whether the record is the right shape, not comparing the directory
+identity, and inventing the fingerprint instead of asking for it. The last one
+fails nine of the twelve.
+
 ### What a workspace's directory is called
 
 `workspace_directory_name.rs` ports `DSHInternalComponent`,
