@@ -934,3 +934,190 @@ fn a_migration_requires_the_evidence_to_be_about_this_project() {
     );
     assert!(legacy_authority(Some(&legacy()), &record));
 }
+
+// MARK: - legacy evidence
+
+fn evidence() -> Value {
+    json!({
+        "project_id": PROJECT,
+        "display_name": "Rish",
+        "metadata_sha256": digest('1'),
+        "capabilities": ["git", "read"],
+        "projects_root_device_id": "16777232",
+        "projects_root_inode_id": "11",
+        "repository_device_id": "16777232",
+        "repository_inode_id": "22",
+        "git_device_id": "16777232",
+        "git_inode_id": "33",
+    })
+}
+
+/// Evidence is about one project, and the caller says which. Evidence for a
+/// different project is not weaker evidence; it is about something else.
+#[test]
+fn evidence_is_about_the_project_the_caller_asked_about() {
+    let project = json!(PROJECT);
+    assert!(legacy_evidence(
+        Some(&evidence()),
+        Some(&project),
+        Some("rish")
+    ));
+    assert!(!legacy_evidence(
+        Some(&evidence()),
+        Some(&json!(OTHER)),
+        Some("rish")
+    ));
+    assert!(!legacy_evidence(Some(&evidence()), None, Some("rish")));
+    // A display name is a display name, folded by the host as everywhere else.
+    assert!(!legacy_evidence(Some(&evidence()), Some(&project), None));
+    let mut reserved = evidence();
+    reserved["display_name"] = json!("Rish Workspaces");
+    assert!(!legacy_evidence(
+        Some(&reserved),
+        Some(&project),
+        Some("rish workspaces")
+    ));
+    assert!(!legacy_evidence(None, Some(&project), Some("rish")));
+}
+
+#[test]
+fn evidence_is_exact_and_every_identifier_is_positive() {
+    let project = json!(PROJECT);
+    let mut extra = evidence();
+    extra["extra"] = json!(1);
+    assert!(!legacy_evidence(Some(&extra), Some(&project), Some("rish")));
+    for key in evidence().as_object().expect("object").keys() {
+        let mut short = evidence();
+        short.as_object_mut().expect("object").remove(key);
+        assert!(
+            !legacy_evidence(Some(&short), Some(&project), Some("rish")),
+            "without {key}"
+        );
+    }
+    for key in [
+        "projects_root_device_id",
+        "projects_root_inode_id",
+        "repository_device_id",
+        "repository_inode_id",
+        "git_device_id",
+        "git_inode_id",
+    ] {
+        for bad in [json!("0"), json!(11), json!("011"), json!(Value::Null)] {
+            let mut broken = evidence();
+            broken[key] = bad.clone();
+            assert!(
+                !legacy_evidence(Some(&broken), Some(&project), Some("rish")),
+                "{key} = {bad}"
+            );
+        }
+    }
+    let mut digestless = evidence();
+    digestless["metadata_sha256"] = json!("abc");
+    assert!(!legacy_evidence(
+        Some(&digestless),
+        Some(&project),
+        Some("rish")
+    ));
+}
+
+/// Evidence carries a *set*, so the order it was collected in does not matter
+/// — only that every member is a capability and none repeats. The stored
+/// authority's list is the ordered one; that is what `ordered_capabilities` is
+/// for, and the two are not the same rule.
+#[test]
+fn evidence_capabilities_are_a_set_not_a_list() {
+    for good in [
+        json!([]),
+        json!(["read"]),
+        json!(["project_context", "read"]),
+        json!(["read", "write", "git", "project_context"]),
+    ] {
+        assert!(capabilities_set(Some(&good)), "{good}");
+    }
+    for bad in [
+        json!(["read", "read"]),
+        json!(["launch"]),
+        json!([1]),
+        json!("read"),
+        json!(Value::Null),
+    ] {
+        assert!(!capabilities_set(Some(&bad)), "{bad}");
+    }
+    assert!(!capabilities_set(None));
+    // Out of order is fine for a set and not for a stored list.
+    let unordered = json!(["git", "read"]);
+    assert!(capabilities_set(Some(&unordered)));
+    assert!(!capabilities_array(Some(&unordered)));
+}
+
+/// **Device ids are deliberately not compared.** iOS renumbers the data volume
+/// across reboots, so a persisted `st_dev` is not evidence about a directory:
+/// comparing it would fail a perfectly good legacy root after a restart. The
+/// three inodes, all reached from this app's own container, carry the identity.
+#[test]
+fn a_legacy_identity_is_matched_on_inodes_alone() {
+    let authority = legacy();
+    assert!(legacy_identity_matches_authority(
+        Some(&evidence()),
+        Some(&authority)
+    ));
+    // A renumbered volume does not break the match.
+    let mut rebooted = evidence();
+    for key in [
+        "projects_root_device_id",
+        "repository_device_id",
+        "git_device_id",
+    ] {
+        rebooted[key] = json!("16777299");
+    }
+    assert!(legacy_identity_matches_authority(
+        Some(&rebooted),
+        Some(&authority)
+    ));
+    // A different inode is a different directory.
+    for key in [
+        "projects_root_inode_id",
+        "repository_inode_id",
+        "git_inode_id",
+    ] {
+        let mut moved = evidence();
+        moved[key] = json!("99");
+        assert!(
+            !legacy_identity_matches_authority(Some(&moved), Some(&authority)),
+            "{key}"
+        );
+        let mut absent = evidence();
+        absent.as_object_mut().expect("object").remove(key);
+        assert!(
+            !legacy_identity_matches_authority(Some(&absent), Some(&authority)),
+            "{key} absent"
+        );
+    }
+    assert!(!legacy_identity_matches_authority(None, Some(&authority)));
+    assert!(!legacy_identity_matches_authority(Some(&evidence()), None));
+}
+
+#[test]
+fn the_reducer_answers_the_evidence_ops_too() {
+    let run = |value: Value| -> Value {
+        serde_json::from_str(&reduce_json(&value.to_string())).expect("reply")
+    };
+    assert_eq!(
+        run(json!({
+            "op": "legacy_evidence", "identity": evidence(),
+            "expected_project_id": PROJECT, "folded_display_name": "rish",
+        })),
+        json!({ "ok": true, "valid": true })
+    );
+    assert_eq!(
+        run(json!({ "op": "capabilities_set", "value": ["git", "read"] })),
+        json!({ "ok": true, "valid": true })
+    );
+    assert_eq!(
+        run(json!({
+            "op": "legacy_identity_matches_authority",
+            "identity": evidence(), "authority": legacy(),
+        })),
+        json!({ "ok": true, "matches": true })
+    );
+}

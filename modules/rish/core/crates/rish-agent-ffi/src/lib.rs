@@ -26,6 +26,7 @@ use rish_agent_core::wal_resident::{Confirmation, Resident};
 use rish_agent_core::wal_state::reduce_json as wal_state_reduce_json;
 use rish_agent_core::workspace_authority::reduce_json as workspace_authority_reduce_json;
 use rish_agent_core::workspace_directory_name::reduce_json as workspace_directory_name_reduce_json;
+use rish_agent_core::workspace_error::reduce_json as workspace_error_reduce_json;
 use rish_agent_core::workspace_fingerprint::reduce_json as workspace_fingerprint_reduce_json;
 use rish_agent_core::workspace_grants::reduce_json as workspace_grants_reduce_json;
 use rish_agent_core::workspace_journal::reduce_json as workspace_journal_reduce_json;
@@ -378,6 +379,24 @@ pub unsafe extern "C" fn rish_agent_git_tool_reduce(
         return std::ptr::null_mut();
     };
     output(git_tool_reduce_json(text))
+}
+
+/// Runs one workspace-error decision over the JSON envelope documented on
+/// `rish_agent_core::workspace_error::reduce_json` — which public code and
+/// message a workspace failure is reported as. The mapping is contract: a
+/// caller branches on the code, so both platforms have to answer alike.
+///
+/// # Safety
+/// `pointer` must reference `length` readable bytes or be null.
+#[no_mangle]
+pub unsafe extern "C" fn rish_agent_workspace_error_reduce(
+    pointer: *const c_char,
+    length: usize,
+) -> *mut c_char {
+    let Some(text) = input(pointer, length) else {
+        return std::ptr::null_mut();
+    };
+    output(workspace_error_reduce_json(text))
 }
 
 /// Runs one workspace-journal decision over the JSON envelope documented on

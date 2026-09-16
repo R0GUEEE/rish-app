@@ -1203,6 +1203,47 @@ asking whether the record is the right shape, not comparing the directory
 identity, and inventing the fingerprint instead of asking for it. The last one
 fails nine of the twelve.
 
+### Which failure a caller is told about
+
+`workspace_error.rs` ports `DSHWorkspacePublicCode` and
+`DSHWorkspacePublicMessage`. This is contract, not a lookup table two
+platforms may each keep a copy of: the public code is what the JS layer
+branches on and what a person's retry depends on. `E_WORKSPACE_CONFLICT` says
+"try again", `E_WORKSPACE_PERSISTENCE` says "this store cannot be read", and a
+caller that cannot tell them apart cannot behave correctly.
+
+The numbers 1..19 are on the wire, so the table is dense and unique and the
+test says so. A number the engine does not define projects to nothing — no code
+is invented for it, because a caller must not be able to branch on a failure
+that does not exist.
+
+The messages are the fixed English fallback the native layer attaches, not
+localisation: the product's translated strings are chosen in the UI from the
+code.
+
+### What the host found when it re-read a legacy project
+
+`legacy_evidence`, `capabilities_set` and `legacy_identity_matches_authority`
+join the legacy rules already in `workspace_authority.rs`.
+
+**Device ids are deliberately not compared.** iOS renumbers the data volume
+across reboots, so a persisted `st_dev` is not evidence about a directory —
+comparing it would fail a perfectly good legacy root after a restart. The three
+inodes, all reached from this app's own container, carry the identity.
+
+Evidence carries a capability **set**, where order does not matter; a stored
+authority carries the ordered list. They are two rules, and
+`evidence_capabilities_are_a_set_not_a_list` pins that one accepts what the
+other refuses.
+
+**An NSSet does not cross a JSON boundary.** The first delegation passed the
+evidence dictionary straight into the envelope, `NSJSONSerialization` refused
+to encode the `NSSet` under `capabilities`, the envelope never serialised, and
+every legacy root became `E_WORKSPACE_UNAVAILABLE` — 192 failures. The host now
+turns sets into arrays on the way out. Worth keeping: unlike the journal
+identity relation, this path is *thoroughly* covered, and the suite said so
+immediately.
+
 ### What an operation journal is, and how recovery reads it
 
 `workspace_journal.rs` ports `validJournal:`, `validLegacyJournal:`,

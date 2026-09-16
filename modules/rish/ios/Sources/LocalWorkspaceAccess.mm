@@ -66,102 +66,42 @@ static BOOL DSHWorkspaceStoreProtectionValidAtURL(NSURL *url) {
 #endif
 }
 
-static NSString *DSHWorkspacePublicCode(
+// Which public code and message a failure is reported as lives in the shared
+// core (modules/rish/core, `rish_agent_workspace_error_reduce`). A caller
+// branches on the code and a person's retry depends on it, so the mapping is
+// contract, not a lookup table the two platforms may each keep a copy of.
+static NSDictionary *DSHWorkspaceErrorProjection(
     DSHLocalWorkspaceAccessErrorCode code) {
-  switch (code) {
-    case DSHLocalWorkspaceAccessErrorInvalid:
-      return @"E_WORKSPACE_INVALID";
-    case DSHLocalWorkspaceAccessErrorNotFound:
-      return @"E_WORKSPACE_NOT_FOUND";
-    case DSHLocalWorkspaceAccessErrorBusy:
-      return @"E_WORKSPACE_BUSY";
-    case DSHLocalWorkspaceAccessErrorPickerBusy:
-      return @"E_WORKSPACE_PICKER_BUSY";
-    case DSHLocalWorkspaceAccessErrorSelectionExpired:
-      return @"E_WORKSPACE_SELECTION_EXPIRED";
-    case DSHLocalWorkspaceAccessErrorRevisionStale:
-      return @"E_WORKSPACE_REVISION_STALE";
-    case DSHLocalWorkspaceAccessErrorRevisionOverflow:
-      return @"E_WORKSPACE_REVISION_OVERFLOW";
-    case DSHLocalWorkspaceAccessErrorStatusStale:
-      return @"E_WORKSPACE_STATUS_STALE";
-    case DSHLocalWorkspaceAccessErrorRevoked:
-      return @"E_WORKSPACE_REVOKED";
-    case DSHLocalWorkspaceAccessErrorUnavailable:
-      return @"E_WORKSPACE_UNAVAILABLE";
-    case DSHLocalWorkspaceAccessErrorNotDownloaded:
-      return @"E_WORKSPACE_NOT_DOWNLOADED";
-    case DSHLocalWorkspaceAccessErrorImportRequired:
-      return @"E_WORKSPACE_IMPORT_REQUIRED";
-    case DSHLocalWorkspaceAccessErrorCapability:
-      return @"E_WORKSPACE_CAPABILITY";
-    case DSHLocalWorkspaceAccessErrorRootChanged:
-      return @"E_WORKSPACE_ROOT_CHANGED";
-    case DSHLocalWorkspaceAccessErrorReferenced:
-      return @"E_WORKSPACE_REFERENCED";
-    case DSHLocalWorkspaceAccessErrorConfirmation:
-      return @"E_WORKSPACE_CONFIRMATION";
-    case DSHLocalWorkspaceAccessErrorConflict:
-      return @"E_WORKSPACE_CONFLICT";
-    case DSHLocalWorkspaceAccessErrorIO:
-      return @"E_WORKSPACE_IO";
-    case DSHLocalWorkspaceAccessErrorPersistence:
-      return @"E_WORKSPACE_PERSISTENCE";
+  NSData *bytes = [NSJSONSerialization dataWithJSONObject:@{
+    @"op" : @"projection",
+    @"code" : @((unsigned long long)code),
+  } options:0 error:nil];
+  char *raw = bytes == nil ? NULL : rish_agent_workspace_error_reduce(
+      (const char *)bytes.bytes, bytes.length);
+  if (raw == NULL) return nil;
+  NSData *replyBytes = [NSData dataWithBytes:raw length:strlen(raw)];
+  rish_agent_string_free(raw);
+  id reply = [NSJSONSerialization JSONObjectWithData:replyBytes options:0
+                                                error:nil];
+  if (![reply isKindOfClass:NSDictionary.class] ||
+      ![reply[@"ok"] isEqual:@YES]) {
+    return nil;
   }
-}
-
-static NSString *DSHWorkspacePublicMessage(
-    DSHLocalWorkspaceAccessErrorCode code) {
-  switch (code) {
-    case DSHLocalWorkspaceAccessErrorInvalid:
-      return @"Workspace request is invalid.";
-    case DSHLocalWorkspaceAccessErrorNotFound:
-      return @"Workspace is not available.";
-    case DSHLocalWorkspaceAccessErrorBusy:
-      return @"Workspace storage is busy.";
-    case DSHLocalWorkspaceAccessErrorPickerBusy:
-      return @"Another workspace picker operation is active.";
-    case DSHLocalWorkspaceAccessErrorSelectionExpired:
-      return @"Workspace picker selection has expired.";
-    case DSHLocalWorkspaceAccessErrorRevisionStale:
-      return @"Workspace binding is stale.";
-    case DSHLocalWorkspaceAccessErrorRevisionOverflow:
-      return @"Workspace binding cannot be advanced.";
-    case DSHLocalWorkspaceAccessErrorStatusStale:
-      return @"Workspace authority is stale.";
-    case DSHLocalWorkspaceAccessErrorRevoked:
-      return @"Workspace authority was revoked.";
-    case DSHLocalWorkspaceAccessErrorUnavailable:
-      return @"Workspace is unavailable.";
-    case DSHLocalWorkspaceAccessErrorNotDownloaded:
-      return @"Workspace content is not downloaded.";
-    case DSHLocalWorkspaceAccessErrorImportRequired:
-      return @"Workspace import is required.";
-    case DSHLocalWorkspaceAccessErrorCapability:
-      return @"Workspace capability is unavailable.";
-    case DSHLocalWorkspaceAccessErrorRootChanged:
-      return @"Workspace root changed.";
-    case DSHLocalWorkspaceAccessErrorReferenced:
-      return @"Workspace is still referenced.";
-    case DSHLocalWorkspaceAccessErrorConfirmation:
-      return @"Workspace confirmation is invalid.";
-    case DSHLocalWorkspaceAccessErrorConflict:
-      return @"Workspace storage changed concurrently.";
-    case DSHLocalWorkspaceAccessErrorIO:
-      return @"Workspace operation failed.";
-    case DSHLocalWorkspaceAccessErrorPersistence:
-      return @"Workspace storage is invalid.";
-  }
+  id projection = reply[@"projection"];
+  return [projection isKindOfClass:NSDictionary.class] ? projection : nil;
 }
 
 static NSError *DSHWorkspaceError(DSHLocalWorkspaceAccessErrorCode code) {
+  NSDictionary *projection = DSHWorkspaceErrorProjection(code);
+  // A code the core does not define is not one this file can raise, so there
+  // is nothing honest to report but the number itself.
+  NSDictionary *userInfo = projection == nil ? @{} : @{
+    @"code" : projection[@"code"],
+    NSLocalizedDescriptionKey : projection[@"message"],
+  };
   return [NSError errorWithDomain:DSHLocalWorkspaceAccessErrorDomain
                              code:code
-                         userInfo:@{
-                           @"code" : DSHWorkspacePublicCode(code),
-                           NSLocalizedDescriptionKey :
-                               DSHWorkspacePublicMessage(code),
-                         }];
+                         userInfo:userInfo];
 }
 
 static void DSHSetWorkspaceError(NSError **error,
@@ -301,31 +241,36 @@ static BOOL DSHCanonicalPositiveIntegerString(id value) {
 
 static BOOL DSHCanonicalCapabilitiesSet(id value);
 static BOOL DSHCanonicalDisplayName(id value);
+// Defined below, next to the other workspace reducers and the folding that
+// only Foundation can do.
+static NSDictionary *DSHWorkspaceAuthorityReduce(NSString *op,
+                                                 NSDictionary *fields);
+static NSString *DSHWorkspaceFoldedName(id value);
+
+// Evidence is built in memory and carries its capabilities as an NSSet, which
+// NSJSONSerialization will not encode. Crossing to the core turns it into an
+// array; the rule there is a set rule, so the order it comes out in does not
+// matter and is not relied on.
+static NSDictionary *DSHJSONSafeEvidence(NSDictionary *identity) {
+  if (![identity isKindOfClass:NSDictionary.class]) return nil;
+  NSMutableDictionary *copy = [identity mutableCopy];
+  for (NSString *key in identity) {
+    id value = identity[key];
+    if ([value isKindOfClass:NSSet.class]) copy[key] = [value allObjects];
+  }
+  return copy;
+}
 
 static BOOL DSHValidLegacyEvidence(NSDictionary *identity,
                                    NSString *expectedProjectId) {
-  NSArray *keys = @[
-    @"project_id", @"display_name", @"metadata_sha256", @"capabilities",
-    @"projects_root_device_id",
-    @"projects_root_inode_id", @"repository_device_id",
-    @"repository_inode_id", @"git_device_id", @"git_inode_id",
-  ];
-  return DSHExactKeys(identity, keys) &&
-      [identity[@"project_id"] isEqual:expectedProjectId] &&
-      DSHCanonicalDisplayName(identity[@"display_name"]) &&
-      DSHCanonicalSHA256(identity[@"metadata_sha256"]) &&
-      DSHCanonicalCapabilitiesSet(identity[@"capabilities"]) &&
-      DSHCanonicalPositiveIntegerString(identity[@"projects_root_device_id"]) &&
-      DSHCanonicalPositiveIntegerString(identity[@"projects_root_inode_id"]) &&
-      DSHCanonicalPositiveIntegerString(identity[@"repository_device_id"]) &&
-      DSHCanonicalPositiveIntegerString(identity[@"repository_inode_id"]) &&
-      DSHCanonicalPositiveIntegerString(identity[@"git_device_id"]) &&
-      DSHCanonicalPositiveIntegerString(identity[@"git_inode_id"]);
+  NSString *folded = DSHWorkspaceFoldedName(identity[@"display_name"]);
+  identity = DSHJSONSafeEvidence(identity);
+  return [DSHWorkspaceAuthorityReduce(@"legacy_evidence", @{
+    @"identity" : identity ?: NSNull.null,
+    @"expected_project_id" : expectedProjectId ?: NSNull.null,
+    @"folded_display_name" : folded ?: NSNull.null,
+  })[@"valid"] isEqual:@YES];
 }
-
-// Defined below, next to the other workspace reducers.
-static NSDictionary *DSHWorkspaceAuthorityReduce(NSString *op,
-                                                 NSDictionary *fields);
 
 static BOOL DSHValidLegacyPhysicalIdentity(NSDictionary *identity,
                                            NSString *expectedMetadata) {
@@ -338,17 +283,10 @@ static BOOL DSHValidLegacyPhysicalIdentity(NSDictionary *identity,
 static BOOL DSHLegacyPhysicalIdentityMatchesAuthority(
     NSDictionary *identity,
     NSDictionary *authority) {
-  // Device ids are deliberately absent: iOS renumbers the data volume across
-  // reboots, so a persisted st_dev is not evidence about the directory. The
-  // three inodes, all reached from this app's own container, carry the
-  // identity.
-  NSArray *keys = @[
-    @"projects_root_inode_id", @"repository_inode_id", @"git_inode_id",
-  ];
-  for (NSString *key in keys) {
-    if (![identity[key] isEqual:authority[key]]) return NO;
-  }
-  return YES;
+  return [DSHWorkspaceAuthorityReduce(@"legacy_identity_matches_authority", @{
+    @"identity" : DSHJSONSafeEvidence(identity) ?: NSNull.null,
+    @"authority" : authority ?: NSNull.null,
+  })[@"matches"] isEqual:@YES];
 }
 
 // Which registry records are well formed lives in the shared core

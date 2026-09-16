@@ -145,6 +145,13 @@ char *rish_agent_completion_response_reduce(const char *json, size_t json_length
 /// crash between writing the object and recording it recoverable.
 char *rish_agent_git_tool_reduce(const char *json, size_t json_length);
 
+/// One workspace-error decision over {"op",...}: projection, codes. Which
+/// public code and message a workspace failure is reported as. A caller
+/// branches on the code and a person's retry depends on it, so the mapping is
+/// contract rather than a lookup table. A number this engine does not define
+/// projects to null; no code is invented for it.
+char *rish_agent_workspace_error_reduce(const char *json, size_t json_length);
+
 /// One workspace-journal decision over {"op",...}: journal_shape,
 /// legacy_journal_shape, readable_journal, identity_present, identity_matches,
 /// owned_authority_matches, create_request_sha256, bootstrap_request_sha256.
@@ -169,7 +176,8 @@ char *rish_agent_workspace_receipt_reduce(const char *json, size_t json_length);
 char *rish_agent_workspace_record_reduce(const char *json, size_t json_length);
 
 /// One workspace-authority decision over {"op",...}: owned, bookmark, granted,
-/// legacy, their three migrations, legacy_physical_identity and
+/// legacy, their three migrations, legacy_physical_identity, legacy_evidence,
+/// capabilities_set, legacy_identity_matches_authority and
 /// ordered_capabilities. Each shape restates its record's identity and ends in
 /// the fingerprint. Base64 decoding stays with the host: the decoded
 /// bookmark's length and SHA-256 come in as facts, the cap and the match stay

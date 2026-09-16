@@ -23,7 +23,7 @@ use serde_json::{json, Map, Value};
 use crate::canonical::sha256_hex;
 use crate::schema::{canonical_sha256, canonical_timestamp, exact_keys};
 use crate::workspace_fingerprint::{fingerprint, fingerprint_input, fingerprint_valid};
-use crate::workspace_record::{capabilities_array, CAPABILITY_ORDER};
+use crate::workspace_record::{capabilities_array, display_name, CAPABILITY_ORDER};
 
 /// A security-scoped bookmark is at most this many bytes.
 pub const MAX_BOOKMARK_BYTES: u64 = 256 * 1024;
@@ -369,7 +369,98 @@ pub fn legacy_physical_identity(
         .all(|key| positive_string(map.get(*key)))
 }
 
-/// `DSHMigrateLegacyAuthority`. The physical identity is folded in before the
+/// `DSHValidLegacyEvidence`: what the host found when it re-read a legacy
+/// project on disk, before any of it is written down. The display name is a
+/// display name, so the host's folding comes in the same way `record_shape`
+/// takes it.
+///
+/// This is the widest legacy shape: it carries the project's own identity and
+/// the capabilities the host could verify, and the migration narrows it to the
+/// physical identity that gets sealed.
+pub fn legacy_evidence(
+    identity: Option<&Value>,
+    expected_project_id: Option<&Value>,
+    folded_display_name: Option<&str>,
+) -> bool {
+    let Some(map) = exact_keys(
+        identity,
+        &[
+            "project_id",
+            "display_name",
+            "metadata_sha256",
+            "capabilities",
+            "projects_root_device_id",
+            "projects_root_inode_id",
+            "repository_device_id",
+            "repository_inode_id",
+            "git_device_id",
+            "git_inode_id",
+        ],
+    ) else {
+        return false;
+    };
+    map.get("project_id").is_some()
+        && map.get("project_id") == expected_project_id
+        && display_name(map.get("display_name"), folded_display_name)
+        && canonical_sha256(map.get("metadata_sha256"))
+        && capabilities_set(map.get("capabilities"))
+        && [
+            "projects_root_device_id",
+            "projects_root_inode_id",
+            "repository_device_id",
+            "repository_inode_id",
+            "git_device_id",
+            "git_inode_id",
+        ]
+        .iter()
+        .all(|key| positive_string(map.get(*key)))
+}
+
+/// `DSHCanonicalCapabilitiesSet`. Evidence carries a *set*, so order does not
+/// matter here — only that every member is a capability and none repeats.
+pub fn capabilities_set(value: Option<&Value>) -> bool {
+    let Some(Value::Array(items)) = value else {
+        return false;
+    };
+    let mut seen: Vec<&str> = Vec::with_capacity(items.len());
+    for item in items {
+        let Some(name) = item.as_str() else {
+            return false;
+        };
+        if !CAPABILITY_ORDER.contains(&name) || seen.contains(&name) {
+            return false;
+        }
+        seen.push(name);
+    }
+    true
+}
+
+/// `DSHLegacyPhysicalIdentityMatchesAuthority`.
+///
+/// **Device ids are deliberately absent.** iOS renumbers the data volume
+/// across reboots, so a persisted `st_dev` is not evidence about a directory —
+/// comparing it would fail a perfectly good root after a restart. The three
+/// inodes, all reached from this app's own container, carry the identity.
+pub fn legacy_identity_matches_authority(
+    identity: Option<&Value>,
+    authority: Option<&Value>,
+) -> bool {
+    let (Some(identity), Some(authority)) = (identity, authority) else {
+        return false;
+    };
+    [
+        "projects_root_inode_id",
+        "repository_inode_id",
+        "git_inode_id",
+    ]
+    .iter()
+    .all(|key| {
+        let recorded = identity.get(*key);
+        recorded.is_some() && recorded == authority.get(*key)
+    })
+}
+
+/// `DSHMigrateLegacyAuthority`. The physical identity is folded in before the/// `DSHMigrateLegacyAuthority`. The physical identity is folded in before the
 /// seal, because the fingerprint is taken over all three device/inode pairs.
 pub fn legacy_migration(
     authority: Option<&Value>,
@@ -457,6 +548,30 @@ fn reduce_json_inner(input: &str) -> Option<Value> {
                 "valid": legacy_physical_identity(
                     envelope.get("identity"),
                     envelope.get("expected_metadata_sha256"),
+                ),
+            }))
+        }
+        "legacy_evidence" => {
+            return Some(json!({
+                "ok": true,
+                "valid": legacy_evidence(
+                    envelope.get("identity"),
+                    envelope.get("expected_project_id"),
+                    text(envelope, "folded_display_name"),
+                ),
+            }))
+        }
+        "capabilities_set" => {
+            return Some(json!({
+                "ok": true, "valid": capabilities_set(envelope.get("value"))
+            }))
+        }
+        "legacy_identity_matches_authority" => {
+            return Some(json!({
+                "ok": true,
+                "matches": legacy_identity_matches_authority(
+                    envelope.get("identity"),
+                    envelope.get("authority"),
                 ),
             }))
         }
