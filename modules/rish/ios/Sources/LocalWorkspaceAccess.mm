@@ -459,17 +459,6 @@ static NSDictionary *DSHDocumentsOwnedFingerprintInput(
   };
 }
 
-static BOOL DSHValidDocumentsOwnedFingerprint(NSDictionary *authority,
-                                              NSDictionary *record) {
-  NSString *fingerprint = authority[@"root_fingerprint_sha256"];
-  if (!DSHCanonicalSHA256(fingerprint)) return NO;
-  NSString *authorityDigest = DSHAuthorityDigestWithoutFingerprint(authority);
-  NSDictionary *input = DSHDocumentsOwnedFingerprintInput(record, authority,
-                                                          authorityDigest);
-  NSString *expected = DSHWorkspaceRootFingerprintSHA256(input, nil);
-  return expected != nil && [fingerprint isEqual:expected];
-}
-
 static NSDictionary *DSHGrantedFingerprintInput(NSDictionary *record,
                                                 NSDictionary *authority,
                                                 NSString *authorityDigest) {
@@ -491,17 +480,6 @@ static NSDictionary *DSHGrantedFingerprintInput(NSDictionary *record,
     @"bookmark_sha256" : authority[@"bookmark_sha256"],
     @"authority_sha256" : authorityDigest,
   };
-}
-
-static BOOL DSHValidGrantedFingerprint(NSDictionary *authority,
-                                       NSDictionary *record) {
-  NSString *fingerprint = authority[@"root_fingerprint_sha256"];
-  if (!DSHCanonicalSHA256(fingerprint)) return NO;
-  NSString *authorityDigest = DSHAuthorityDigestWithoutFingerprint(authority);
-  NSDictionary *input = DSHGrantedFingerprintInput(record, authority,
-                                                   authorityDigest);
-  NSString *expected = DSHWorkspaceRootFingerprintSHA256(input, nil);
-  return expected != nil && [fingerprint isEqual:expected];
 }
 
 static NSDictionary *DSHLegacyFingerprintInput(NSDictionary *record,
@@ -527,17 +505,6 @@ static NSDictionary *DSHLegacyFingerprintInput(NSDictionary *record,
     @"git_device_id" : authority[@"git_device_id"],
     @"git_inode_id" : authority[@"git_inode_id"],
   };
-}
-
-static BOOL DSHValidLegacyFingerprint(NSDictionary *authority,
-                                      NSDictionary *record) {
-  NSString *fingerprint = authority[@"root_fingerprint_sha256"];
-  if (!DSHCanonicalSHA256(fingerprint)) return NO;
-  NSString *authorityDigest = DSHAuthorityDigestWithoutFingerprint(authority);
-  NSDictionary *input = DSHLegacyFingerprintInput(record, authority,
-                                                  authorityDigest);
-  NSString *expected = DSHWorkspaceRootFingerprintSHA256(input, nil);
-  return expected != nil && [fingerprint isEqual:expected];
 }
 
 static NSDictionary *DSHMigrateOwnedAuthority(NSDictionary *authority,
@@ -837,103 +804,76 @@ static BOOL DSHValidWorkspaceRecord(NSDictionary *record) {
   })[@"valid"] isEqual:@YES];
 }
 
+// What a stored authority looks like, and how it is tied to its record, lives
+// in the shared core (modules/rish/core,
+// `rish_agent_workspace_authority_reduce`). Base64 decoding stays here: the
+// core has no base64, and turning bytes back out of a string is mechanical.
+// The rules the bytes have to satisfy — the cap, and that the claimed digest
+// is the digest of what decoded — travel with everything else.
+static NSDictionary *DSHWorkspaceAuthorityReduce(NSString *op,
+                                                 NSDictionary *fields) {
+  NSMutableDictionary *envelope = [fields mutableCopy];
+  envelope[@"op"] = op;
+  NSData *bytes = [NSJSONSerialization dataWithJSONObject:envelope options:0
+                                                    error:nil];
+  char *raw = bytes == nil ? NULL : rish_agent_workspace_authority_reduce(
+      (const char *)bytes.bytes, bytes.length);
+  if (raw == NULL) return nil;
+  NSData *replyBytes = [NSData dataWithBytes:raw length:strlen(raw)];
+  rish_agent_string_free(raw);
+  id reply = [NSJSONSerialization JSONObjectWithData:replyBytes options:0
+                                                error:nil];
+  return [reply isKindOfClass:NSDictionary.class] &&
+      [reply[@"ok"] isEqual:@YES] ? reply : nil;
+}
+
+static BOOL DSHAuthorityValid(NSString *op, NSDictionary *authority,
+                              NSDictionary *record, NSDictionary *extra) {
+  NSMutableDictionary *fields = [NSMutableDictionary dictionaryWithDictionary:@{
+    @"authority" : authority ?: NSNull.null,
+    @"record" : record ?: NSNull.null,
+  }];
+  [fields addEntriesFromDictionary:extra ?: @{}];
+  return [DSHWorkspaceAuthorityReduce(op, fields)[@"valid"] isEqual:@YES];
+}
+
 static BOOL DSHValidLegacyAuthority(NSDictionary *authority,
                                     NSDictionary *record) {
-  NSArray *keys = @[
-    @"schema_version", @"workspace_id", @"binding_revision",
-    @"legacy_project_id", @"root_identity_sha256", @"display_name",
-    @"capabilities", @"created_at", @"last_opened_at", @"recorded_at",
-    @"project_metadata_sha256", @"projects_root_device_id",
-    @"projects_root_inode_id", @"repository_device_id",
-    @"repository_inode_id", @"git_device_id", @"git_inode_id",
-    @"root_fingerprint_sha256",
-  ];
-  return DSHExactKeys(authority, keys) &&
-      DSHSchemaVersionIsOne(authority[@"schema_version"]) &&
-      [authority[@"workspace_id"] isEqual:record[@"workspace_id"]] &&
-      [authority[@"binding_revision"] isEqual:record[@"binding_revision"]] &&
-      [authority[@"legacy_project_id"] isEqual:record[@"legacy_project_id"]] &&
-      DSHCanonicalSHA256(authority[@"root_identity_sha256"]) &&
-      [authority[@"display_name"] isEqual:record[@"display_name"]] &&
-      DSHCanonicalCapabilitiesArray(authority[@"capabilities"]) &&
-      [authority[@"created_at"] isEqual:record[@"created_at"]] &&
-      [authority[@"last_opened_at"] isEqual:record[@"last_opened_at"]] &&
-      DSHCanonicalTimestamp(authority[@"recorded_at"]) &&
-      DSHCanonicalSHA256(authority[@"project_metadata_sha256"]) &&
-      DSHCanonicalPositiveIntegerString(authority[@"projects_root_device_id"]) &&
-      DSHCanonicalPositiveIntegerString(authority[@"projects_root_inode_id"]) &&
-      DSHCanonicalPositiveIntegerString(authority[@"repository_device_id"]) &&
-      DSHCanonicalPositiveIntegerString(authority[@"repository_inode_id"]) &&
-      DSHCanonicalPositiveIntegerString(authority[@"git_device_id"]) &&
-      DSHCanonicalPositiveIntegerString(authority[@"git_inode_id"]) &&
-      DSHValidLegacyFingerprint(authority, record);
+  return DSHAuthorityValid(@"legacy", authority, record, nil);
 }
 
 static BOOL DSHValidOwnedAuthority(NSDictionary *authority,
                                    NSDictionary *record) {
-  NSArray *keys = @[
-    @"schema_version", @"workspace_id", @"binding_revision", @"device_id",
-    @"inode_id", @"directory_name_sha256", @"recorded_at",
-    @"root_fingerprint_sha256",
-  ];
-  BOOL exactShape = DSHExactKeys(authority, keys);
-  NSString *directoryName = record[@"owned_directory_name"];
-  NSData *directoryBytes =
-      [directoryName dataUsingEncoding:NSUTF8StringEncoding allowLossyConversion:NO];
-  return exactShape &&
-      DSHSchemaVersionIsOne(authority[@"schema_version"]) &&
-      [authority[@"workspace_id"] isEqual:record[@"workspace_id"]] &&
-      [authority[@"binding_revision"] isEqual:record[@"binding_revision"]] &&
-      DSHCanonicalUnsignedIntegerString(authority[@"device_id"]) &&
-      DSHCanonicalUnsignedIntegerString(authority[@"inode_id"]) &&
-      [authority[@"directory_name_sha256"] isEqual:DSHSHA256(directoryBytes)] &&
-      DSHCanonicalTimestamp(authority[@"recorded_at"]) &&
-      DSHValidDocumentsOwnedFingerprint(authority, record);
+  return DSHAuthorityValid(@"owned", authority, record, nil);
 }
 
 static BOOL DSHValidBookmarkAuthority(NSDictionary *authority,
                                       NSDictionary *record) {
-  NSArray *keys = @[
-    @"schema_version", @"workspace_id", @"binding_revision",
-    @"bookmark_sha256", @"bookmark_bytes_base64", @"recorded_at",
-  ];
-  if (!DSHExactKeys(authority, keys) ||
-      !DSHSchemaVersionIsOne(authority[@"schema_version"]) ||
-      ![authority[@"workspace_id"] isEqual:record[@"workspace_id"]] ||
-      ![authority[@"binding_revision"] isEqual:record[@"binding_revision"]] ||
-      !DSHCanonicalSHA256(authority[@"bookmark_sha256"]) ||
-      ![authority[@"bookmark_bytes_base64"] isKindOfClass:NSString.class] ||
-      !DSHCanonicalTimestamp(authority[@"recorded_at"])) {
-    return NO;
-  }
-  NSData *bookmark = [[NSData alloc]
-      initWithBase64EncodedString:authority[@"bookmark_bytes_base64"]
-                          options:0];
-  return bookmark != nil && bookmark.length <= DSHWorkspaceBookmarkMaxBytes &&
-         [authority[@"bookmark_sha256"] isEqual:DSHSHA256(bookmark)];
+  id encoded = [authority isKindOfClass:NSDictionary.class]
+      ? authority[@"bookmark_bytes_base64"] : nil;
+  NSData *bookmark = [encoded isKindOfClass:NSString.class]
+      ? [[NSData alloc] initWithBase64EncodedString:encoded options:0]
+      : nil;
+  // Bytes that did not decode are reported as absent, not as zero bytes: the
+  // core must not mistake a broken string for an empty bookmark.
+  return DSHAuthorityValid(@"bookmark", authority, record, @{
+    @"bookmark_bytes_sha256" : bookmark == nil ? (id)NSNull.null
+                                               : (id)DSHSHA256(bookmark),
+    @"bookmark_bytes_length" : bookmark == nil ? (id)NSNull.null
+                                               : (id)@(bookmark.length),
+  });
 }
 
 static BOOL DSHValidGrantedAuthority(NSDictionary *authority,
                                      NSDictionary *record,
                                      NSDictionary *bookmark) {
-  NSArray *keys = @[
-    @"schema_version", @"workspace_id", @"binding_revision",
-    @"volume_identifier_sha256", @"resource_identifier_sha256", @"device_id",
-    @"inode_id", @"bookmark_sha256", @"classified_at",
-    @"root_fingerprint_sha256",
-  ];
-  return DSHExactKeys(authority, keys) &&
-      DSHSchemaVersionIsOne(authority[@"schema_version"]) &&
-      [authority[@"workspace_id"] isEqual:record[@"workspace_id"]] &&
-      [authority[@"binding_revision"] isEqual:record[@"binding_revision"]] &&
-      DSHCanonicalSHA256(authority[@"volume_identifier_sha256"]) &&
-      DSHCanonicalSHA256(authority[@"resource_identifier_sha256"]) &&
-      DSHCanonicalUnsignedIntegerString(authority[@"device_id"]) &&
-      DSHCanonicalUnsignedIntegerString(authority[@"inode_id"]) &&
-      [authority[@"bookmark_sha256"] isEqual:bookmark[@"bookmark_sha256"]] &&
-      DSHCanonicalTimestamp(authority[@"classified_at"]) &&
-      DSHValidGrantedFingerprint(authority, record);
+  return DSHAuthorityValid(@"granted", authority, record, @{
+    @"bookmark_authority" : bookmark ?: NSNull.null,
+  });
 }
+
+
+
 
 static BOOL DSHSameNode(const struct stat &left, const struct stat &right) {
   return left.st_dev == right.st_dev && left.st_ino == right.st_ino &&

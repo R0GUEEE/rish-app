@@ -26,6 +26,7 @@ use rish_agent_core::wal_resident::{Confirmation, Resident};
 use rish_agent_core::wal_state::reduce_json as wal_state_reduce_json;
 use rish_agent_core::workspace_fingerprint::reduce_json as workspace_fingerprint_reduce_json;
 use rish_agent_core::workspace_grants::reduce_json as workspace_grants_reduce_json;
+use rish_agent_core::workspace_authority::reduce_json as workspace_authority_reduce_json;
 use rish_agent_core::workspace_record::reduce_json as workspace_record_reduce_json;
 use rish_agent_core::workspace_tool::reduce_json as workspace_tool_reduce_json;
 use std::ffi::CString;
@@ -391,6 +392,25 @@ pub unsafe extern "C" fn rish_agent_workspace_record_reduce(
         return std::ptr::null_mut();
     };
     output(workspace_record_reduce_json(text))
+}
+
+/// Runs one workspace-authority decision over the JSON envelope documented on
+/// `rish_agent_core::workspace_authority::reduce_json` — what a stored
+/// authority looks like and how it is tied to its record. Base64 decoding
+/// stays with the host; the decoded bookmark's length and digest come in as
+/// facts.
+///
+/// # Safety
+/// `pointer` must reference `length` readable bytes or be null.
+#[no_mangle]
+pub unsafe extern "C" fn rish_agent_workspace_authority_reduce(
+    pointer: *const c_char,
+    length: usize,
+) -> *mut c_char {
+    let Some(text) = input(pointer, length) else {
+        return std::ptr::null_mut();
+    };
+    output(workspace_authority_reduce_json(text))
 }
 
 /// Runs one workspace-grant decision over the JSON envelope documented on

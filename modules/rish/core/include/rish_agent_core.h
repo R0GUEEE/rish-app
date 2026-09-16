@@ -152,6 +152,12 @@ char *rish_agent_git_tool_reduce(const char *json, size_t json_length);
 /// under en_US_POSIX.
 char *rish_agent_workspace_record_reduce(const char *json, size_t json_length);
 
+/// One workspace-authority decision over {"op",...}: owned, bookmark, granted,
+/// legacy. Each shape restates its record's identity and ends in the
+/// fingerprint. Base64 decoding stays with the host: the decoded bookmark's
+/// length and SHA-256 come in as facts, the cap and the match stay in the core.
+char *rish_agent_workspace_authority_reduce(const char *json, size_t json_length);
+
 /// One workspace-grant decision over {"op",...}: operational_grants,
 /// descriptor. Which grants a locator kind implies and how they are shown;
 /// deriving the status itself stays with the host, because it resolves a

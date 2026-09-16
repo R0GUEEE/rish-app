@@ -1137,6 +1137,45 @@ project-context policy uses — and the reserved-name check (`rish workspaces`,
 the `.rish-` prefix) is on the folded spelling so case and diacritics cannot
 dodge it. A host that could not fold refuses rather than guessing.
 
+### What a stored authority looks like
+
+`workspace_authority.rs` is the fourth workspace rule, and the one that ties
+the other three together. Four shapes — owned, bookmark, granted, legacy — each
+restating its record's identity and each ending in the fingerprint from
+`workspace_fingerprint`.
+
+**The cross-check is the point.** An authority that is well formed but names a
+different workspace, a different binding revision or (for a legacy root) a
+different display name than the record it was loaded for is not that record's
+authority. The owned shape goes further: its directory digest must be the
+digest of the directory the *record* names, so an authority cannot claim a
+folder the registry never bound. The granted shape carries the bookmark's
+digest rather than the bookmark, and it must be the digest the bookmark
+authority recorded — the two are halves of one grant.
+
+**Base64 stays with the host.** The core has no base64, and decoding is
+mechanical. The host decodes and passes the decoded length and SHA-256; the
+rules — that the bytes fit the 256 KiB cap and that the claimed digest is the
+digest of what decoded — travel. Bytes that did not decode are reported as
+*absent*, never as zero bytes, so a broken string cannot read as an empty
+bookmark.
+
+Two Foundation notes:
+
+- `isEqual:` compares two `NSNumber`s by value, so a binding revision written
+  `3.0` still names binding 3. `same_value` reproduces that. The other
+  `NSNumber` coincidence — `@YES` equalling `@1` — is deliberately *not*
+  reproduced: nothing writes a boolean revision, and carrying that accident
+  into the rule would widen it.
+- Device and inode identifiers are canonical unsigned integer strings. They are
+  tested against the rule directly rather than through a sealed authority: a
+  non-canonical identifier also breaks the fingerprint input, so composing the
+  two would not show which check did the work. **A test that two guards both
+  reject something proves neither of them.**
+
+The legacy shape's six device/inode fields are *positive*, not merely unsigned:
+zero names nothing, and a legacy root reporting it is not verifiable.
+
 ### What a stored workspace record may do
 
 `workspace_grants.rs` is the second workspace rule to move, and with
