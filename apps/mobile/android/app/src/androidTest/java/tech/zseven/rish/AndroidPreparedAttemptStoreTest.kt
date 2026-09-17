@@ -20,6 +20,8 @@ import tech.zseven.rish.runtime.RishAgentCoreNative
 import java.io.File
 import java.util.UUID
 
+private typealias Ids = AgentSessionFixture.Ids
+
 /**
  * `prepare_agent_attempt` is the only operation that reads the committed
  * session and writes the agent WAL in one breath, and the two stores are not
@@ -49,96 +51,7 @@ class AndroidPreparedAttemptStoreTest {
     private fun walRoot(): File =
         File(context.noBackupFilesDir, "prepared-test-${UUID.randomUUID()}").apply { mkdirs() }
 
-    /**
-     * A schema-9 session carrying the conversation and the attempt the request
-     * names. An empty session would be refused as a mismatch long before the
-     * cross-store seam, which is the thing under test.
-     */
-    private fun session(ids: Ids, epoch: Int = 0, workspace: String? = null): JSONObject {
-        val message = JSONObject().put("id", ids.message).put("role", "user")
-            .put("text", "hello").put("created_at", STAMP)
-            .put("attachments", JSONArray())
-        val attempt = JSONObject().put("schema_version", 3)
-            .put("attempt_id", ids.attempt).put("turn_id", ids.task)
-            .put("status", "prepared")
-            .put("visible_message_ids", JSONArray().put(ids.message))
-            // A prepared attempt with no rounds carries no history digest:
-            // the digest only becomes meaningful once a round was sent, and
-            // the session schema refuses one without that provenance.
-            .put("visible_history_sha256", JSONObject.NULL)
-            .put("attachment_ids", JSONArray())
-            .put("model_id", MODEL).put("thinking_mode", THINKING)
-            .put("context_disposition", "unbound")
-            .put("context_project_id", JSONObject.NULL)
-            .put("project_context", JSONObject.NULL)
-            .put("active_round", JSONObject.NULL).put("rounds", JSONArray())
-            .put("assistant_message_id", JSONObject.NULL)
-            .put("failure_code", JSONObject.NULL)
-            .put("created_at", STAMP).put("updated_at", STAMP)
-            .put("workspace_id", workspace ?: JSONObject.NULL)
-            .put("workspace_binding_revision", if (workspace == null) JSONObject.NULL else 1)
-            .put("journal_revision", 0).put("agent", JSONObject.NULL)
-        val conversation = JSONObject().put("id", ids.conversation)
-            .put("project_id", JSONObject.NULL)
-            .put("workspace_id", workspace ?: JSONObject.NULL)
-            .put("runtime_context_id", JSONObject.NULL)
-            .put("project_context", JSONObject.NULL)
-            .put("title", "t").put("title_source", "auto")
-            .put("model_id", MODEL).put("thinking_mode", THINKING)
-            .put("messages", JSONArray().put(message))
-            // An attempt must belong to a turn, and the turn's user message
-            // is what fixes the visible history the attempt may claim.
-            .put("turns", JSONArray().put(JSONObject().put("schema_version", 1)
-                .put("turn_id", ids.task).put("user_message_id", ids.message)
-                .put("attempt_ids", JSONArray().put(ids.attempt))
-                .put("created_at", STAMP)))
-            .put("attempts", JSONArray().put(attempt))
-            .put("created_at", STAMP).put("updated_at", STAMP)
-            .put(
-                "workspace_binding",
-                if (workspace == null) JSONObject.NULL
-                else JSONObject().put("schema_version", 1)
-                    .put("workspace_id", workspace).put("binding_revision", 1)
-                    .put("project_id", JSONObject.NULL),
-            )
-            .put("workspace_bootstrap_state", "none")
-            .put("agent_grants", JSONArray())
-        return JSONObject().put("schema_version", 9)
-            .put("workspace_authority_outbox", JSONArray())
-            .put("agent_transcript_cleanup_outbox", JSONArray())
-            .put("project_context_destructive_epoch", epoch)
-            .put("project_context_destructive_transition", JSONObject.NULL)
-            .put("active_conversation_id", JSONObject.NULL)
-            .put("conversations", JSONArray().put(conversation))
-            .put("messages", JSONArray())
-            .put("session_events", JSONArray())
-            .put("preferences", JSONObject().put("schema_version", 1)
-                .put("theme_mode", "system").put("locale", "system")
-                .put("default_model", MODEL).put("thinking_mode", THINKING)
-                .put("tool_permission", "read-only").put("show_reasoning", false)
-                .put("auto_expand_tools", false)
-                .put("confirm_destructive_file_actions", true))
-    }
 
-    /**
-     * Commits a session carrying `ids` and answers the checkpoint. The bytes
-     * are canonicalised first: the prepared-attempt store reads the committed
-     * session's *exact* bytes and refuses anything that is not its own
-     * canonical form, which is also what the real controller writes.
-     */
-    private fun commitSession(store: AndroidSessionStore, ids: Ids, epoch: Int = 0,
-                              expected: JSONObject? = null,
-                              workspace: String? = null): JSONObject {
-        val candidate = RishAgentCoreNative.canonical(session(ids, epoch, workspace).toString())
-            ?: error("the session fixture is not canonicalisable")
-        val reply = store.persist(JSONObject().put("schema_version", 1)
-            .put("operation_id", UUID.randomUUID().toString())
-            .put("expected", expected ?: JSONObject().put("schema_version", 1)
-                .put("kind", "missing"))
-            .put("candidate_json", candidate))
-        assertEquals("committed", reply.getString("status"))
-        return reply.getJSONObject("snapshot")
-    }
 
     private fun request(snapshot: JSONObject, ids: Ids, workspace: String? = null): JSONObject {
         val cas = JSONObject().put("schema_version", 1)
@@ -170,14 +83,6 @@ class AndroidPreparedAttemptStoreTest {
             .put("expected_policy_version", JSONObject.NULL)
             .put("expected_transcript", JSONObject.NULL)
     }
-
-    private data class Ids(
-        val operation: String = UUID.randomUUID().toString(),
-        val task: String = UUID.randomUUID().toString(),
-        val conversation: String = UUID.randomUUID().toString(),
-        val attempt: String = UUID.randomUUID().toString(),
-        val message: String = UUID.randomUUID().toString(),
-    )
 
     /**
      * The same fixture with a real workspace registry behind it, so a rooted
@@ -224,7 +129,7 @@ class AndroidPreparedAttemptStoreTest {
 
     @Test fun aRootlessAttemptCommitsItsRejectionDurablyAndReplays() = fixture { sessions, wal, store ->
         val ids = Ids()
-        val snapshot = commitSession(sessions, ids)
+        val snapshot = AgentSessionFixture.commit(sessions, ids)
         val first = store.prepareAgentAttempt(request(snapshot, ids))
         // The rootless outcome, named so nobody reads this as success.
         assertEquals("not_agent", first.optString("status"))
@@ -257,14 +162,11 @@ class AndroidPreparedAttemptStoreTest {
      */
     @Test fun aSessionThatMovedUnderTheAttemptIsAConflictAndWritesNothing() = fixture { sessions, wal, store ->
         val ids = Ids()
-        val stale = commitSession(sessions, ids)
+        val stale = AgentSessionFixture.commit(sessions, ids)
         // The controller re-commits the session between taking the checkpoint
         // and preparing the attempt.
-        val moved = commitSession(sessions, ids, epoch = 1,
-            expected = JSONObject().put("schema_version", 1).put("kind", "present")
-                .put("snapshot", JSONObject().put("schema_version", 1)
-                    .put("generation", stale.getLong("generation"))
-                    .put("session_sha256", stale.getString("session_sha256"))))
+        val moved = AgentSessionFixture.commit(sessions, ids, epoch = 1,
+            expected = AgentSessionFixture.expecting(stale))
         assertNotEquals(stale.getLong("generation"), moved.getLong("generation"))
 
         val before = wal.snapshot().getLong("generation")
@@ -290,7 +192,7 @@ class AndroidPreparedAttemptStoreTest {
             run {
                 val sessions = AndroidSessionStore(context, name)
                 val wal = AndroidAgentWal(root)
-                snapshot = commitSession(sessions, ids)
+                snapshot = AgentSessionFixture.commit(sessions, ids)
                 AndroidPreparedAttemptStore(sessions, wal)
                     .prepareAgentAttempt(request(snapshot, ids))
                 sessions.close()
@@ -326,7 +228,7 @@ class AndroidPreparedAttemptStoreTest {
      */
     @Test fun anAttemptNamingAWorkspaceIsRefusedAndWritesNothing() = fixture { sessions, wal, store ->
         val ids = Ids()
-        val snapshot = commitSession(sessions, ids)
+        val snapshot = AgentSessionFixture.commit(sessions, ids)
         val rooted = request(snapshot, ids)
             .put("workspace_id", UUID.randomUUID().toString())
             .put("workspace_binding_revision", 1)
@@ -350,7 +252,7 @@ class AndroidPreparedAttemptStoreTest {
         val ids = Ids()
         // The shared session store is whatever this device already has, so the
         // checkpoint is taken from a session committed through it.
-        val snapshot = commitSession(runtime.sessions, ids)
+        val snapshot = AgentSessionFixture.commit(runtime.sessions, ids)
         val before = runtime.agentWal.snapshot().getLong("generation")
         val result = runtime.preparedAttempts.prepareAgentAttempt(request(snapshot, ids))
         assertEquals("not_agent", result.optString("status"))
@@ -366,7 +268,7 @@ class AndroidPreparedAttemptStoreTest {
 
     @Test fun anAttemptHasNoAuthorityToFind() = fixture { sessions, _, store ->
         val ids = Ids()
-        val snapshot = commitSession(sessions, ids)
+        val snapshot = AgentSessionFixture.commit(sessions, ids)
         store.prepareAgentAttempt(request(snapshot, ids))
         assertNull(store.authorityFor(ids.task, ids.attempt))
     }
@@ -378,9 +280,9 @@ class AndroidPreparedAttemptStoreTest {
                 .put("attachments", JSONArray()))))
 
     private companion object {
-        const val MODEL = "deepseek-v4-flash"
-        const val THINKING = "off"
-        const val STAMP = "2026-09-16T00:00:00.000Z"
+        const val MODEL = AgentSessionFixture.MODEL
+        const val THINKING = AgentSessionFixture.THINKING
+        const val STAMP = AgentSessionFixture.STAMP
     }
 
     /**
@@ -394,7 +296,7 @@ class AndroidPreparedAttemptStoreTest {
     @Test fun aRootedAttemptResolvesItsWorkspaceAndPreparesForReal() = rootedFixture { sessions, wal, store, workspaces ->
         val workspace = workspaces.create("Scratch").getString("workspace_id")
         val ids = Ids()
-        val snapshot = commitSession(sessions, ids, workspace = workspace)
+        val snapshot = AgentSessionFixture.commit(sessions, ids, workspace = workspace)
         val before = wal.snapshot().getLong("generation")
         val result = store.prepareAgentAttempt(request(snapshot, ids, workspace))
         assertEquals("prepared", result.optString("status"))
@@ -426,7 +328,7 @@ class AndroidPreparedAttemptStoreTest {
     @Test fun aRootedAttemptWhoseRootCannotBeProvenIsStale() = rootedFixture { sessions, wal, store, workspaces ->
         val workspace = workspaces.create("Scratch").getString("workspace_id")
         val ids = Ids()
-        val snapshot = commitSession(sessions, ids, workspace = workspace)
+        val snapshot = AgentSessionFixture.commit(sessions, ids, workspace = workspace)
         // Break the authority so the root stops proving out.
         val file = File(File(workspaces.root, "bindings"), "owned-$workspace-r1.json")
         val authority = JSONObject(file.readText())
@@ -448,7 +350,7 @@ class AndroidPreparedAttemptStoreTest {
     @Test fun aRootedAttemptNamingAnUnknownWorkspaceIsStale() = rootedFixture { sessions, wal, store, _ ->
         val workspace = UUID.randomUUID().toString()
         val ids = Ids()
-        val snapshot = commitSession(sessions, ids, workspace = workspace)
+        val snapshot = AgentSessionFixture.commit(sessions, ids, workspace = workspace)
         val before = wal.snapshot().getLong("generation")
         val result = store.prepareAgentAttempt(request(snapshot, ids, workspace))
         assertEquals("conflict", result.optString("status"))
@@ -464,7 +366,7 @@ class AndroidPreparedAttemptStoreTest {
     @Test fun aStoreWithNoResolverTreatsEveryRootAsStale() = rootedFixture { sessions, wal, _, workspaces ->
         val workspace = workspaces.create("Scratch").getString("workspace_id")
         val ids = Ids()
-        val snapshot = commitSession(sessions, ids, workspace = workspace)
+        val snapshot = AgentSessionFixture.commit(sessions, ids, workspace = workspace)
         val rootless = AndroidPreparedAttemptStore(sessions, wal)
         val result = rootless.prepareAgentAttempt(request(snapshot, ids, workspace))
         assertEquals("conflict", result.optString("status"))

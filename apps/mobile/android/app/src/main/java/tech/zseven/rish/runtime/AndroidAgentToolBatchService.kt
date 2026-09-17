@@ -56,10 +56,8 @@ internal class AndroidAgentToolBatchService(
         val attemptId = request.optString("attempt_id")
         val root = request.optJSONObject("root") ?: throw Refused(BAD_ARGUMENTS)
 
-        val conversation = sessions.load().optJSONObject("conversation")
-        val sessionOk = decide(
-            JSONObject().put("op", "prepare_request").put("request", request),
-        ).let { conversation != null }
+        val session = AndroidCommittedSession.load(sessions, request)
+        val sessionOk = AndroidCommittedSession.conversation(session, request) != null
         val resolved = roots.resolve(
             workspaceId = root.optString("workspace_id").takeIf { it.isNotEmpty() },
             projectId = root.opt("project_id")?.takeIf { it != JSONObject.NULL } as? String,

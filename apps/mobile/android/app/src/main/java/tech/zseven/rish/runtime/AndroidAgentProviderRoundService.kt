@@ -85,8 +85,11 @@ internal class AndroidAgentProviderRoundService(
         val attemptId = request.optString("attempt_id")
         val authority = prepared.authorityFor(taskId, attemptId)
             ?: throw Refused(CONFLICT)
-        val conversation = sessions.load().optJSONObject("conversation")
-            ?: throw Refused(CONFLICT)
+        // The session the request was built against, not whichever one is
+        // stored now. A round decided over a session that has since moved on
+        // is a conflict the controller recovers from by re-reading.
+        val session = AndroidCommittedSession.load(sessions, request) ?: throw Refused(CONFLICT)
+        AndroidCommittedSession.conversation(session, request) ?: throw Refused(CONFLICT)
 
         val state = wal.snapshot()
         val row = rowFor(state, locator) ?: throw Refused(CONFLICT)

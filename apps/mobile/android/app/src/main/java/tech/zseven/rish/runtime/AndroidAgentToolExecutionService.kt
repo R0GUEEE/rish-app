@@ -64,7 +64,12 @@ internal class AndroidAgentToolExecutionService(
         val attemptId = request.optString("attempt_id")
         val root = request.optJSONObject("root") ?: throw Refused(BAD_ARGUMENTS)
 
-        val conversation = sessions.load().optJSONObject("conversation")
+        // The conversation as the committed checkpoint saw it. The core reads
+        // it to relate the call to the batch the person approved, so a session
+        // that has moved on must read as absent rather than as a newer one.
+        val conversation = AndroidCommittedSession.conversation(
+            AndroidCommittedSession.load(sessions, request), request,
+        )
         val state = wal.snapshot()
         val authority = prepared.authorityFor(taskId, attemptId)
         // Whether the root still proves out is the resolver's answer, and the
