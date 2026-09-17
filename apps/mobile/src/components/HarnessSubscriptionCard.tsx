@@ -105,10 +105,20 @@ export function HarnessSubscriptionCard({ id, visible, disabled: externalDisable
     }
   }, [currentState?.status]);
 
+  // Every control this card owns is gated on actionBusy, and nothing resets it:
+  // the card stays mounted for the session and the reset effect leaves it
+  // alone. A rejected await used to strand it, killing the whole card in
+  // silence. The flag is released here no matter how the work ends.
+  const runAction = async (work: () => Promise<void>) => {
+    actionBusyRef.current = true; setActionBusy(true);
+    try { await work(); } catch { setStatusUnreadable(true); }
+    finally { actionBusyRef.current = false; setActionBusy(false); setLocalProgress(null); }
+  };
   const begin = async () => {
-    if (actionBusyRef.current || disabled) return; actionBusyRef.current = true; setActionBusy(true); setBrowserError(false); setLocalProgress('starting');
-    const scope = scopeRef.current; if (!scope) { actionBusyRef.current = false; setActionBusy(false); setLocalProgress(null); return; }
-    const next = await Auth.startHarnessLogin(id); actionBusyRef.current = false; setActionBusy(false); setLocalProgress(null); apply(next, scope);
+    if (actionBusyRef.current || disabled) return;
+    const scope = scopeRef.current; if (!scope) return;
+    setBrowserError(false); setLocalProgress('starting');
+    await runAction(async () => { apply(await Auth.startHarnessLogin(id), scope); });
   };
   const openAuthorization = () => {
     const login = state?.login;
@@ -118,10 +128,10 @@ export function HarnessSubscriptionCard({ id, visible, disabled: externalDisable
       .then(() => { setBrowserError(false); })
       .catch(() => { setLocalProgress(null); setBrowserError(true); });
   };
-  const cancel = async () => { const login = state?.login; const scope = scopeRef.current; if (!login || !scope || actionBusyRef.current) return; actionBusyRef.current = true; setActionBusy(true); setBrowserError(false); apply(await Auth.cancelHarnessLogin(id, login.session_id), scope); actionBusyRef.current = false; setActionBusy(false); };
-  const logout = async () => { const scope = scopeRef.current; if (!scope || actionBusyRef.current) return; actionBusyRef.current = true; setActionBusy(true); setBrowserError(false); apply(await Auth.logoutHarness(id), scope); actionBusyRef.current = false; setActionBusy(false); };
-  const submitCode = async () => { const login = state?.login; const scope = scopeRef.current; if (!login?.can_submit_code || !scope || actionBusyRef.current) return; actionBusyRef.current = true; setActionBusy(true); setBrowserError(false); apply(await Auth.presentHarnessLoginCode(id, login.session_id, locale), scope); actionBusyRef.current = false; setActionBusy(false); };
-  const selectAccount = async () => { if (actionBusyRef.current || currentState?.status !== 'signed_in') return; actionBusyRef.current = true; setActionBusy(true); setChatSourceError(null); const source = await (id === 'claude-code' ? Auth.selectClaudeChatSource('subscription') : Auth.selectCodexChatSource('subscription')); setChatSource(source); setChatSourceError(source.error_code); if (!source.error_code) onCredentialChanged?.(source); actionBusyRef.current = false; setActionBusy(false); };
+  const cancel = async () => { const login = state?.login; const scope = scopeRef.current; if (!login || !scope || actionBusyRef.current) return; setBrowserError(false); await runAction(async () => { apply(await Auth.cancelHarnessLogin(id, login.session_id), scope); }); };
+  const logout = async () => { const scope = scopeRef.current; if (!scope || actionBusyRef.current) return; setBrowserError(false); await runAction(async () => { apply(await Auth.logoutHarness(id), scope); }); };
+  const submitCode = async () => { const login = state?.login; const scope = scopeRef.current; if (!login?.can_submit_code || !scope || actionBusyRef.current) return; setBrowserError(false); await runAction(async () => { apply(await Auth.presentHarnessLoginCode(id, login.session_id, locale), scope); }); };
+  const selectAccount = async () => { if (actionBusyRef.current || currentState?.status !== 'signed_in') return; setChatSourceError(null); await runAction(async () => { const source = await (id === 'claude-code' ? Auth.selectClaudeChatSource('subscription') : Auth.selectCodexChatSource('subscription')); setChatSource(source); setChatSourceError(source.error_code); if (!source.error_code) onCredentialChanged?.(source); }); };
   const expired = currentState?.login?.expires_at !== undefined && currentState.login.expires_at * 1000 <= Date.now();
   const progressPhase = currentState?.status === 'authorizing' ? currentState.login?.phase ?? (currentState.login?.user_code ? 'waiting_for_browser' : 'starting') : null;
   const startingText = t(id === 'claude-code' ? 'settings.auth.progressStartingClaude' : 'settings.auth.progressStarting');
