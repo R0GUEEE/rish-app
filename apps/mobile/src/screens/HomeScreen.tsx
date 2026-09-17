@@ -1811,7 +1811,18 @@ export function HomeScreen({
               await projectContextLifecycleController.beginDestructiveTransition(
                 begin.token,
               );
-            if (outcome.status !== 'completed') return false;
+            if (outcome.status !== 'completed') {
+              // The transition has already begun, so the Store is latched with
+              // the write unsettled. Returning bare left that invisible: this
+              // is the surface every other lifecycle outcome reaches.
+              if (
+                outcome.status === 'blocked' ||
+                outcome.status === 'cleanup_pending' ||
+                outcome.status === 'persistence_pending'
+              )
+                setRequestFailure(outcome.code);
+              return false;
+            }
             return { status: 'rebound' as const };
           } catch {
             return false;
