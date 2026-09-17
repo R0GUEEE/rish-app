@@ -19,6 +19,14 @@ internal class AndroidRuntimeState private constructor(val app: Application) {
     val workspaces = AndroidWorkspaceRegistry(java.io.File(app.filesDir, "workspaces"))
     val roots = AndroidAgentRootResolver(workspaces)
     val preparedAttempts = AndroidPreparedAttemptStore(sessions, agentWal, roots)
+    /// Which native tasks this process still owns; a persisted owner from a
+    /// previous launch is not alive, so its rows can be recovered.
+    val liveTasks = AndroidLiveTasks()
+    val executionLedger = AndroidAgentExecutionLedger(agentWal, liveTasks)
+    val workspaceTools = AndroidWorkspaceToolExecutor(workspaces, roots)
+    val toolExecution = AndroidAgentToolExecutionService(
+        agentWal, sessions, preparedAttempts, executionLedger, roots, workspaceTools, liveTasks,
+    )
     val transport = AndroidModelTransport(credentials, configurations)
     val subscriptionAuth = AndroidSubscriptionAuthManager(app)
     val io = Executors.newFixedThreadPool(2)
