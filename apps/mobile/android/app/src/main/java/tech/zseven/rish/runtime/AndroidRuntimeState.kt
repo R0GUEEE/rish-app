@@ -24,6 +24,7 @@ internal class AndroidRuntimeState private constructor(val app: Application) {
     val liveTasks = AndroidLiveTasks()
     val executionLedger = AndroidAgentExecutionLedger(agentWal, liveTasks)
     val workspaceTools = AndroidWorkspaceToolExecutor(workspaces, roots)
+    val agentRounds = AndroidAgentRoundJournal(agentWal, liveTasks)
     val toolBatch = AndroidAgentToolBatchService(
         agentWal, sessions, preparedAttempts, executionLedger, roots, workspaceTools,
     )
@@ -31,6 +32,9 @@ internal class AndroidRuntimeState private constructor(val app: Application) {
         agentWal, sessions, preparedAttempts, executionLedger, roots, workspaceTools, liveTasks,
     )
     val transport = AndroidModelTransport(credentials, configurations)
+    val providerRound = AndroidAgentProviderRoundService(
+        sessions, preparedAttempts, agentRounds, roots, AndroidAgentToolRegistry, transport, agentWal,
+    )
     val subscriptionAuth = AndroidSubscriptionAuthManager(app)
     val io = Executors.newFixedThreadPool(2)
     @Volatile var selectedSlot = "DEEPSEEK_API_KEY"

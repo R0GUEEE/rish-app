@@ -8,6 +8,7 @@ import com.facebook.react.bridge.ReactMethod
 import com.facebook.react.bridge.ReadableMap
 import org.json.JSONObject
 import tech.zseven.rish.RishUnavailable
+import tech.zseven.rish.runtime.AndroidAgentProviderRoundService
 import tech.zseven.rish.runtime.AndroidAgentToolBatchService
 import tech.zseven.rish.runtime.AndroidAgentToolExecutionService
 import tech.zseven.rish.runtime.AndroidPreparedAttemptStore
@@ -63,7 +64,24 @@ class AgentRuntimeModule(reactContext: ReactApplicationContext) :
     }
 
     @ReactMethod
-    fun complete_agent_round_v2(request: ReadableMap?, promise: Promise) = RishUnavailable.reject("AgentRuntime", "E_AGENT_NATIVE", promise)
+    fun complete_agent_round_v2(request: ReadableMap?, promise: Promise) {
+        val captured = try {
+            JSONObject(requireNotNull(request).toHashMap())
+        } catch (_: Exception) {
+            promise.reject("E_AGENT_BAD_ARGUMENTS", "Agent round request is invalid")
+            return
+        }
+        runtime.io.execute {
+            try {
+                val result = runtime.providerRound.completeRound(captured)
+                promise.resolve(Arguments.makeNativeMap(RuntimeJson.map(result)))
+            } catch (refused: AndroidAgentProviderRoundService.Refused) {
+                promise.reject(refused.code, "Agent round could not be completed")
+            } catch (_: Exception) {
+                promise.reject("E_AGENT_NATIVE", "Agent round could not be completed")
+            }
+        }
+    }
 
     @ReactMethod
     fun prepare_agent_tool_batch(request: ReadableMap?, promise: Promise) {
