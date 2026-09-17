@@ -31,6 +31,11 @@ internal class AndroidRuntimeState private constructor(val app: Application) {
     val toolExecution = AndroidAgentToolExecutionService(
         agentWal, sessions, preparedAttempts, executionLedger, roots, workspaceTools, liveTasks,
     )
+    /// The native operation relation every settling operation writes through.
+    val agentOperations = AndroidAgentOperations(agentWal)
+    val approvals = AndroidAgentApprovalService(
+        agentWal, sessions, executionLedger, agentOperations, roots,
+    )
     val transport = AndroidModelTransport(credentials, configurations)
     val providerRound = AndroidAgentProviderRoundService(
         sessions, preparedAttempts, agentRounds, roots, AndroidAgentToolRegistry, transport, agentWal,

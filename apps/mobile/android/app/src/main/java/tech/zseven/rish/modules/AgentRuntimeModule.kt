@@ -9,6 +9,7 @@ import com.facebook.react.bridge.ReadableMap
 import org.json.JSONObject
 import tech.zseven.rish.RishUnavailable
 import tech.zseven.rish.runtime.AndroidAgentProviderRoundService
+import tech.zseven.rish.runtime.AndroidAgentApprovalService
 import tech.zseven.rish.runtime.AndroidAgentToolBatchService
 import tech.zseven.rish.runtime.AndroidAgentToolExecutionService
 import tech.zseven.rish.runtime.AndroidPreparedAttemptStore
@@ -104,7 +105,24 @@ class AgentRuntimeModule(reactContext: ReactApplicationContext) :
     }
 
     @ReactMethod
-    fun bind_agent_approval(request: ReadableMap?, promise: Promise) = RishUnavailable.reject("AgentRuntime", "E_AGENT_NATIVE", promise)
+    fun bind_agent_approval(request: ReadableMap?, promise: Promise) {
+        val captured = try {
+            JSONObject(requireNotNull(request).toHashMap())
+        } catch (_: Exception) {
+            promise.reject("E_AGENT_BAD_ARGUMENTS", "Agent approval request is invalid")
+            return
+        }
+        runtime.io.execute {
+            try {
+                val result = runtime.approvals.bind(captured)
+                promise.resolve(Arguments.makeNativeMap(RuntimeJson.map(result)))
+            } catch (refused: AndroidAgentApprovalService.Refused) {
+                promise.reject(refused.code, "Agent approval could not be bound")
+            } catch (_: Exception) {
+                promise.reject("E_AGENT_NATIVE", "Agent approval could not be bound")
+            }
+        }
+    }
 
     @ReactMethod
     fun execute_agent_tool(request: ReadableMap?, promise: Promise) {

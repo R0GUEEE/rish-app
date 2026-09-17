@@ -136,8 +136,9 @@ internal object AgentSessionFixture {
         )
 
     /** The checkpoint a request carries for a committed snapshot. */
-    fun checkpoint(snapshot: JSONObject): JSONObject = JSONObject()
+    fun checkpoint(snapshot: JSONObject, journalRevision: Int = 0): JSONObject = JSONObject()
         .put("schema_version", 1)
+        .put("journal_revision", journalRevision)
         .put("session_generation", snapshot.getLong("generation"))
         .put("session_sha256", snapshot.getString("session_sha256"))
 }

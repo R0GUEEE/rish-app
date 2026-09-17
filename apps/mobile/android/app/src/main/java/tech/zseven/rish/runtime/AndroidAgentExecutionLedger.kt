@@ -109,6 +109,92 @@ internal class AndroidAgentExecutionLedger(
         }
     }
 
+    /** What one reducer step decided, and whether it wants the state kept. */
+    private class Step(val output: JSONObject?, val committed: Boolean)
+
+    /**
+     * One reducer step over a state the caller owns.
+     *
+     * Split out of [run] so a step can also run inside a transaction someone
+     * else opened. A denied approval is the case that needs it: the settlement
+     * and the operation commit that records it have to land together or a kill
+     * between them would lose the person's refusal.
+     */
+    private fun step(
+        state: JSONObject,
+        op: String,
+        args: JSONObject,
+        locator: Any?,
+        taskId: Any?,
+        attemptId: Any?,
+        expectedTranscript: JSONObject?,
+        argOwner: Any?,
+        readOnly: Boolean,
+        extraEnv: JSONObject? = null,
+    ): Step {
+        val rows = state.optJSONArray("ledger") ?: JSONArray()
+        var row: JSONObject? = null
+        var rowIndex = -1
+        var attemptRowCount = 0
+        for (index in 0 until rows.length()) {
+            val candidate = rows.optJSONObject(index) ?: continue
+            if (row == null && locator != null && AndroidJson.equal(candidate.opt("locator"), locator)) {
+                row = candidate; rowIndex = index
+            }
+            if (attemptId != null &&
+                AndroidJson.equal(candidate.optJSONObject("locator")?.opt("attempt_id"), attemptId)) {
+                attemptRowCount += 1
+            }
+        }
+        val dispatch = JSONArray()
+        state.optJSONArray("dispatch")?.let { markers ->
+            for (index in 0 until markers.length()) {
+                val marker = markers.optJSONObject(index) ?: continue
+                if (marker.optString("kind") == "execution" && attemptId != null &&
+                    AndroidJson.equal(marker.optJSONObject("locator")?.opt("attempt_id"), attemptId)) {
+                    dispatch.put(marker)
+                }
+            }
+        }
+        val transcripts = state.optJSONArray("transcripts")
+        // The bound transcript is the one the row names; an insert has no
+        // row yet, so the intent argument names it instead.
+        val bound = row?.opt("transcript_before")
+            ?: args.optJSONObject("intent")?.opt("transcript_before")
+        val boundIndex = transcriptIndex(transcripts,
+            (bound as? JSONObject)?.opt("transcript_ref"))
+        val expectedIndex = transcriptIndex(transcripts,
+            expectedTranscript?.opt("transcript_ref"))
+        val authorityTable = state.optJSONArray("authorities")
+        val authorities: Any = if (authorityTable == null || authorityTable.length() == 0) {
+            JSONObject.NULL
+        } else {
+            slotted(authorityTable) { record ->
+                taskId != null && attemptId != null &&
+                    AndroidJson.equal(record.opt("task_id"), taskId) &&
+                    AndroidJson.equal(record.opt("attempt_id"), attemptId)
+            }
+        }
+        val env = JSONObject().put("launch_id", AndroidAgentWal.launchId)
+            .put("now", AndroidClock.now()).put("attempt_row_count", attemptRowCount)
+        extraEnv?.let { for (name in it.keys()) env.put(name, it.get(name)) }
+        val result = reduce(JSONObject().put("op", op).put("args", args).put("env", env)
+            .put("view", JSONObject()
+                .put("row", row ?: JSONObject.NULL)
+                .put("dispatch", dispatch)
+                .put("transcript", if (boundIndex < 0) JSONObject.NULL else transcripts!!.getJSONObject(boundIndex))
+                .put("expected_transcript", if (expectedIndex < 0) JSONObject.NULL else transcripts!!.getJSONObject(expectedIndex))
+                .put("reservations", slotted(state.optJSONArray("reservations")) { AndroidJson.equal(it.opt("attempt_id"), attemptId) })
+                .put("batches", slotted(state.optJSONArray("batches")) { AndroidJson.equal(it.opt("attempt_id"), attemptId) })
+                .put("authorities", authorities)
+                .put("arg_owner_alive", ownerAlive(argOwner))
+                .put("row_owner_alive", ownerAlive(row?.opt("owner")))))
+        val output = result.optJSONObject("output") ?: throw Refused(2)
+        if (readOnly || !result.optBoolean("commit")) return Step(output, false)
+        apply(state, result.optJSONArray("changes") ?: JSONArray(), rowIndex)
+        return Step(output, true)
+    }
+
     private fun run(
         op: String,
         args: JSONObject,
@@ -121,68 +207,13 @@ internal class AndroidAgentExecutionLedger(
         extraEnv: JSONObject? = null,
     ): JSONObject? {
         var output: JSONObject? = null
-        val body: (JSONObject) -> Boolean = body@ { state ->
-            val rows = state.optJSONArray("ledger") ?: JSONArray()
-            var row: JSONObject? = null
-            var rowIndex = -1
-            var attemptRowCount = 0
-            for (index in 0 until rows.length()) {
-                val candidate = rows.optJSONObject(index) ?: continue
-                if (row == null && locator != null && AndroidJson.equal(candidate.opt("locator"), locator)) {
-                    row = candidate; rowIndex = index
-                }
-                if (attemptId != null &&
-                    AndroidJson.equal(candidate.optJSONObject("locator")?.opt("attempt_id"), attemptId)) {
-                    attemptRowCount += 1
-                }
-            }
-            val dispatch = JSONArray()
-            state.optJSONArray("dispatch")?.let { markers ->
-                for (index in 0 until markers.length()) {
-                    val marker = markers.optJSONObject(index) ?: continue
-                    if (marker.optString("kind") == "execution" && attemptId != null &&
-                        AndroidJson.equal(marker.optJSONObject("locator")?.opt("attempt_id"), attemptId)) {
-                        dispatch.put(marker)
-                    }
-                }
-            }
-            val transcripts = state.optJSONArray("transcripts")
-            // The bound transcript is the one the row names; an insert has no
-            // row yet, so the intent argument names it instead.
-            val bound = row?.opt("transcript_before")
-                ?: args.optJSONObject("intent")?.opt("transcript_before")
-            val boundIndex = transcriptIndex(transcripts,
-                (bound as? JSONObject)?.opt("transcript_ref"))
-            val expectedIndex = transcriptIndex(transcripts,
-                expectedTranscript?.opt("transcript_ref"))
-            val authorityTable = state.optJSONArray("authorities")
-            val authorities: Any = if (authorityTable == null || authorityTable.length() == 0) {
-                JSONObject.NULL
-            } else {
-                slotted(authorityTable) { record ->
-                    taskId != null && attemptId != null &&
-                        AndroidJson.equal(record.opt("task_id"), taskId) &&
-                        AndroidJson.equal(record.opt("attempt_id"), attemptId)
-                }
-            }
-            val env = JSONObject().put("launch_id", AndroidAgentWal.launchId)
-                .put("now", AndroidClock.now()).put("attempt_row_count", attemptRowCount)
-            extraEnv?.let { for (name in it.keys()) env.put(name, it.get(name)) }
-            val result = reduce(JSONObject().put("op", op).put("args", args).put("env", env)
-                .put("view", JSONObject()
-                    .put("row", row ?: JSONObject.NULL)
-                    .put("dispatch", dispatch)
-                    .put("transcript", if (boundIndex < 0) JSONObject.NULL else transcripts!!.getJSONObject(boundIndex))
-                    .put("expected_transcript", if (expectedIndex < 0) JSONObject.NULL else transcripts!!.getJSONObject(expectedIndex))
-                    .put("reservations", slotted(state.optJSONArray("reservations")) { AndroidJson.equal(it.opt("attempt_id"), attemptId) })
-                    .put("batches", slotted(state.optJSONArray("batches")) { AndroidJson.equal(it.opt("attempt_id"), attemptId) })
-                    .put("authorities", authorities)
-                    .put("arg_owner_alive", ownerAlive(argOwner))
-                    .put("row_owner_alive", ownerAlive(row?.opt("owner")))))
-            output = result.optJSONObject("output") ?: throw Refused(2)
-            if (readOnly || !result.optBoolean("commit")) return@body false
-            apply(state, result.optJSONArray("changes") ?: JSONArray(), rowIndex)
-            true
+        val body: (JSONObject) -> Boolean = { state ->
+            val decided = step(
+                state, op, args, locator, taskId, attemptId,
+                expectedTranscript, argOwner, readOnly, extraEnv,
+            )
+            output = decided.output
+            decided.committed
         }
         if (readOnly) {
             body(wal.snapshot())
@@ -340,6 +371,45 @@ internal class AndroidAgentExecutionLedger(
         }
         wal.transaction(body)
         return output
+    }
+
+    /**
+     * `settle_denied_approval`, over a state an outer transaction owns.
+     *
+     * A person's refusal is not a bare decision: it settles the intent row
+     * that was never dispatched with a denied receipt and appends the exact
+     * protected feedback the model is shown, and the operation result that
+     * records the bind has to land in the same transaction. A kill between
+     * the two would leave a refusal the controller cannot see, and the next
+     * round would ask the model to try the same call again.
+     *
+     * Answers null when the reducer would not commit; the caller fails the
+     * whole transaction rather than committing half of it.
+     */
+    fun settleDeniedApprovalInState(
+        state: JSONObject,
+        locator: JSONObject,
+        root: JSONObject,
+        expectedTranscript: JSONObject,
+        policy: JSONObject,
+        expectedReservedWriteBytes: Any?,
+        feedbackJson: String,
+        timestamp: String,
+    ): JSONObject? {
+        val args = JSONObject()
+            .put("locator", locator)
+            .put("root", root)
+            .put("expected_transcript", expectedTranscript)
+            .put("policy", policy)
+            .put("expected_reserved_write_bytes", expectedReservedWriteBytes ?: 0)
+            .put("feedback_json", feedbackJson)
+            .put("timestamp", timestamp)
+        val decided = step(
+            state, "settle_denied_approval", args, locator,
+            locator.opt("task_id"), locator.opt("attempt_id"),
+            expectedTranscript, null, false,
+        )
+        return if (decided.committed) decided.output else null
     }
 
     fun query(locator: JSONObject, expectedTranscript: JSONObject?, root: JSONObject?): JSONObject? =
