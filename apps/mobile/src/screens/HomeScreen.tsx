@@ -3867,11 +3867,18 @@ export function HomeScreen({
     [destructiveAuthorityActive, nativeAvailable, projectContextController],
   );
 
+  // A docked Drawer never dismisses: SlidingSurface returns before it can fire
+  // onDismiss (SlidingSurface.tsx:76). Every caller that stages work for the
+  // dismissal and then closes would strand it on a wide layout, so the hand-off
+  // runs here instead. It re-validates what it was given, so a close that
+  // staged nothing is a no-op.
+  const drawerDismissHandoff = useRef<(() => void) | null>(null);
   const closeDrawerSurface = useCallback(() => {
     drawerSurfaceEpoch.current += 1;
     drawerVisibleRef.current = false;
     setDrawerVisible(false);
-  }, []);
+    if (wideLayout) drawerDismissHandoff.current?.();
+  }, [wideLayout]);
 
   const createConversation = useCallback(async (
     expectedDrawerEpoch: number,
@@ -4951,7 +4958,9 @@ export function HomeScreen({
         !projectsVisibleRef.current ||
         contextSheetVisibleRef.current ||
         lifecycleIntentRef.current !== null ||
-        directProjectMutationOutboxRef.current !== null ||
+        // A settled recovery outbox is handled below, by handing off to the
+        // recovery surface. Refusing it here made that branch unreachable and
+        // the control silent.
         store.getState().projectContextDestructiveTransition !== null
       )
         return;
@@ -5932,6 +5941,7 @@ export function HomeScreen({
     }
     open?.();
   }, [lifecycleIntentIsLive, projectContextLifecycleController, store]);
+  drawerDismissHandoff.current = handleDrawerDismiss;
 
   const handleActionDismiss = useCallback(() => {
     const open = afterActionDismiss.current;
