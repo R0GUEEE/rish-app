@@ -3873,6 +3873,7 @@ export function HomeScreen({
   // runs here instead. It re-validates what it was given, so a close that
   // staged nothing is a no-op.
   const drawerDismissHandoff = useRef<(() => void) | null>(null);
+  const drawerRecoveryRouter = useRef<((epoch: number) => boolean) | null>(null);
   const closeDrawerSurface = useCallback(() => {
     drawerSurfaceEpoch.current += 1;
     drawerVisibleRef.current = false;
@@ -4472,7 +4473,8 @@ export function HomeScreen({
   }, [presentSettingsSurface, rootSurfaceAdmissionAllowed]);
 
   const openSettingsFromDrawer = useCallback((expectedEpoch: number) => {
-    if (!drawerSourceIsLive(expectedEpoch)) return;
+    if (!drawerSourceIsLive(expectedEpoch, true)) return;
+    if (drawerRecoveryRouter.current?.(expectedEpoch) === true) return;
     presentSettingsSurface();
   }, [drawerSourceIsLive, presentSettingsSurface]);
 
@@ -5839,7 +5841,8 @@ export function HomeScreen({
     expectedEpoch: number,
     open: () => void,
   ) => {
-    if (!drawerSourceIsLive(expectedEpoch)) return;
+    if (!drawerSourceIsLive(expectedEpoch, true)) return;
+    if (drawerRecoveryRouter.current?.(expectedEpoch) === true) return;
     if (wideLayout) {
       closeDrawerSurface();
       open();
@@ -5942,6 +5945,32 @@ export function HomeScreen({
     open?.();
   }, [lifecycleIntentIsLive, projectContextLifecycleController, store]);
   drawerDismissHandoff.current = handleDrawerDismiss;
+
+  // The Drawer is admitted with rootSurfaceAdmissionAllowed(true), so it opens
+  // while a settled recovery waits. Its actions ask the strict guard, which
+  // refuses exactly that state. Rather than each one doing nothing and saying
+  // nothing, they take the person to the recovery the Drawer was opened over.
+  const routeDrawerActionToRecovery = useCallback(
+    (expectedDrawerEpoch: number) => {
+      if (!destructiveAuthorityActive() || destructiveAuthorityActive(true))
+        return false;
+      openPendingLifecycleFromDrawer(
+        lifecycleIntent,
+        lifecycleToken,
+        directProjectMutationView,
+        expectedDrawerEpoch,
+      );
+      return true;
+    },
+    [
+      destructiveAuthorityActive,
+      directProjectMutationView,
+      lifecycleIntent,
+      lifecycleToken,
+      openPendingLifecycleFromDrawer,
+    ],
+  );
+  drawerRecoveryRouter.current = routeDrawerActionToRecovery;
 
   const handleActionDismiss = useCallback(() => {
     const open = afterActionDismiss.current;
@@ -6370,7 +6399,8 @@ export function HomeScreen({
         onDismiss={handleDrawerDismiss}
         onNewChat={() => createConversation(drawerRenderEpoch)}
         onOpenAccount={() => {
-          if (!drawerSourceIsLive(drawerRenderEpoch)) return;
+          if (!drawerSourceIsLive(drawerRenderEpoch, true)) return;
+          if (routeDrawerActionToRecovery(drawerRenderEpoch)) return;
           setAccountVisible(true);
         }}
         onOpenConversationMenu={id =>

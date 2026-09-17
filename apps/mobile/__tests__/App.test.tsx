@@ -5458,6 +5458,49 @@ describe('project context Home integration H3', () => {
     expect(visibleContextSheets(root)).toHaveLength(1);
   });
 
+  // Settings is one of six Drawer controls that asked the strict guard while
+  // the Drawer itself was admitted by the tolerant one. Each was inert and
+  // silent in this state; they route to the recovery instead.
+  test('routes Drawer Settings to direct recovery while an ambiguous write is settled', async () => {
+    const fixture = storedSetupProject();
+    queuePresentSession(fixture.stored.serialize());
+    const persisted = deferred<boolean>();
+    const renderer = await renderAppOpeningStoredConversation();
+    const root = renderer.root;
+    mockSessionSnapshots.casPersistSession.mockImplementationOnce(
+      async request => {
+        const saved = await persisted.promise;
+        return saved ? commitBridgedCandidate(request) : unknownResult();
+      },
+    );
+    await openProjectsSurface(root);
+    await act(async () => {
+      root.findByType(ProjectsSurface).props.onUnbindFromChat();
+      await settle();
+    });
+    await act(async () => root.findByType(ProjectsSurface).props.onClose());
+    mockSessionSnapshots.querySessionCommit.mockResolvedValueOnce({
+      schema_version: 1,
+      status: 'unknown',
+    });
+    persisted.resolve(false);
+    await act(async () => {
+      await settle();
+      await settle();
+      root.findByType(ProjectsSurface).props.onDismiss();
+    });
+
+    await act(async () => actionByLabel(root, 'Open navigation').props.onPress());
+    await act(async () => {
+      root.findByType(ChatDrawer).props.onOpenSettings();
+      root.findByType(ChatDrawer).props.onDismiss();
+      await settle();
+    });
+
+    expect(root.findByType(SettingsSheet).props.visible).toBe(false);
+    expect(visibleContextSheets(root)).toHaveLength(1);
+  });
+
   // A docked Drawer never fires onDismiss, so a hand-off staged for the
   // dismissal has to run when the Drawer closes or it is stranded and the
   // control is silent again -- on the layout where the Drawer is always there.
