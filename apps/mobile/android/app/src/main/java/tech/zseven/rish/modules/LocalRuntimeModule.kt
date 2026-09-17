@@ -4,6 +4,7 @@ import android.app.AlertDialog
 import android.text.InputType
 import android.text.method.PasswordTransformationMethod
 import android.widget.EditText
+import android.util.Log
 import com.facebook.react.bridge.*
 import tech.zseven.rish.runtime.*
 import org.json.JSONArray
@@ -24,7 +25,12 @@ class LocalRuntimeModule(private val react: ReactApplicationContext) : ReactCont
     private fun resolve(promise: Promise, value: JSONObject) = promise.resolve(Arguments.makeNativeMap(RuntimeJson.map(value)))
     private fun reject(promise: Promise, error: Exception) {
         val code = (error as? RuntimeFailure)?.code ?: "E_COMPLETION_NATIVE"
-        promise.reject(code, code) // No provider bodies, URLs with credentials, or secret values.
+        // The code that crosses the bridge stays opaque on purpose -- it must
+        // carry no provider body, no URL with credentials and no secret. The
+        // reason still has to be visible *here*, or a refusal on this side is
+        // indistinguishable from any other and can only be found by guessing.
+        Log.w("RishRuntime", "native runtime call refused as $code", error)
+        promise.reject(code, code)
     }
     private fun io(promise: Promise, action: () -> JSONObject) { runtime.io.execute { try { resolve(promise, action()) } catch(error: Exception) { reject(promise, error) } } }
     @ReactMethod fun bootstrap(promise: Promise) = io(promise) { runtime.proof() }

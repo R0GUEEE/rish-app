@@ -88,11 +88,7 @@ class LocalProjectsModule(private val react: ReactApplicationContext) :
                 // workspace this device holds is the resolver's answer, not
                 // this module's. Asking it also refuses a root that names a
                 // project, which is exactly what must not be answered here.
-                val resolved = runtime.roots.resolve(
-                    workspaceId = root.optString("workspace_id").takeIf { it.isNotEmpty() },
-                    projectId = root.opt("project_id")?.takeIf { it != JSONObject.NULL } as? String,
-                    bindingRevision = root.opt("binding_revision") as? Int,
-                )
+                val resolved = runtime.roots.resolveWorkspaceRef(root)
                 if (resolved == null) {
                     RishUnavailable.reject("LocalProjects", "E_PROJECT_NATIVE", promise)
                     return@execute

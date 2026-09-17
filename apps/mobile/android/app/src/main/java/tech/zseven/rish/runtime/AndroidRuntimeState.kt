@@ -25,6 +25,7 @@ internal class AndroidRuntimeState private constructor(val app: Application) {
     val executionLedger = AndroidAgentExecutionLedger(agentWal, liveTasks)
     val workspaceTools = AndroidWorkspaceToolExecutor(workspaces, roots)
     val agentRounds = AndroidAgentRoundJournal(agentWal, liveTasks)
+    val agentTranscripts = AndroidAgentTranscriptStore(agentWal)
     val toolBatch = AndroidAgentToolBatchService(
         agentWal, sessions, preparedAttempts, executionLedger, roots, workspaceTools,
     )
@@ -40,6 +41,7 @@ internal class AndroidRuntimeState private constructor(val app: Application) {
     val transport = AndroidModelTransport(credentials, configurations)
     val providerRound = AndroidAgentProviderRoundService(
         sessions, preparedAttempts, agentRounds, roots, AndroidAgentToolRegistry, transport, agentWal,
+        agentOperations, liveTasks, agentTranscripts,
     )
     val subscriptionAuth = AndroidSubscriptionAuthManager(app)
     val io = Executors.newFixedThreadPool(2)

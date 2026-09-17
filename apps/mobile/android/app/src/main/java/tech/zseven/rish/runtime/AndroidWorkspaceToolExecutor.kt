@@ -112,11 +112,7 @@ internal class AndroidWorkspaceToolExecutor(
         // and the fingerprint the registry sealed it under. It deliberately
         // carries no path: where the directory is stays with the registry, and
         // a path is not something JavaScript's root reference should imply.
-        val resolved = roots.resolve(
-            workspaceId = workspaceId,
-            projectId = root.opt("project_id")?.takeIf { it != JSONObject.NULL } as? String,
-            bindingRevision = root.opt("binding_revision") as? Int,
-        ) ?: throw Refused(CONFLICT)
+        val resolved = roots.resolveAgentProjection(root) ?: throw Refused(CONFLICT)
         val directory = workspaces.rootFor(workspaceId ?: throw Refused(CONFLICT))
             ?: throw Refused(CONFLICT)
         if (!directory.isDirectory) throw Refused(CONFLICT)
@@ -255,11 +251,7 @@ internal class AndroidWorkspaceToolExecutor(
     /** The directory a root names, with the capability the tool needs. */
     private fun rootDirectory(name: String, root: JSONObject): File {
         val workspaceId = root.optString("workspace_id").takeIf { it.isNotEmpty() }
-        val resolved = roots.resolve(
-            workspaceId = workspaceId,
-            projectId = root.opt("project_id")?.takeIf { it != JSONObject.NULL } as? String,
-            bindingRevision = root.opt("binding_revision") as? Int,
-        ) ?: throw Refused(CONFLICT)
+        val resolved = roots.resolveAgentProjection(root) ?: throw Refused(CONFLICT)
         val directory = workspaces.rootFor(workspaceId ?: throw Refused(CONFLICT))
             ?: throw Refused(CONFLICT)
         if (!directory.isDirectory) throw Refused(CONFLICT)

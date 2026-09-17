@@ -58,11 +58,7 @@ internal class AndroidAgentToolBatchService(
 
         val session = AndroidCommittedSession.load(sessions, request)
         val sessionOk = AndroidCommittedSession.conversation(session, request) != null
-        val resolved = roots.resolve(
-            workspaceId = root.optString("workspace_id").takeIf { it.isNotEmpty() },
-            projectId = root.opt("project_id")?.takeIf { it != JSONObject.NULL } as? String,
-            bindingRevision = root.opt("binding_revision") as? Int,
-        )
+        val resolved = roots.resolveAgentProjection(root)
         val state = wal.snapshot()
         val authority = prepared.authorityFor(taskId, attemptId)
         val round = roundFor(state, request)

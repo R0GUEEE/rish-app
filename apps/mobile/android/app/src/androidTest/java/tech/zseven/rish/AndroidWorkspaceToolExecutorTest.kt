@@ -41,10 +41,14 @@ class AndroidWorkspaceToolExecutorTest {
         val registry = AndroidWorkspaceRegistry(home)
         val record = registry.create(displayName = "executor test")
         val id = record.getString("workspace_id")
-        val root = JSONObject().put("schema_version", 1).put("workspace_id", id)
-            .put("binding_revision", record.getInt("binding_revision"))
-            .put("project_id", JSONObject.NULL)
-        val executor = AndroidWorkspaceToolExecutor(registry, AndroidAgentRootResolver(registry))
+        val roots = AndroidAgentRootResolver(registry)
+        // The root a request carries is the resolver's own projection -- the
+        // one the controller was handed by a previous resolve, spelling its
+        // binding `workspace_binding_revision`. Building one by hand here is
+        // how a fixture ends up certifying a shape production never sends.
+        val root = roots.resolve(id, null, record.getInt("binding_revision"))
+            ?: error("the registry did not resolve the workspace it just created")
+        val executor = AndroidWorkspaceToolExecutor(registry, roots)
         try {
             body(executor, root, registry.rootFor(id)!!)
         } finally {
@@ -124,9 +128,11 @@ class AndroidWorkspaceToolExecutorTest {
     /** A root naming a workspace this device does not hold has no directory. */
     @Test
     fun aRootThisDeviceDoesNotHoldIsRefused() = fixture { executor, _, _ ->
-        val stranger = JSONObject().put("schema_version", 1)
+        val stranger = JSONObject().put("schema_version", 1).put("kind", "workspace")
             .put("workspace_id", UUID.randomUUID().toString())
-            .put("binding_revision", 1).put("project_id", JSONObject.NULL)
+            .put("workspace_binding_revision", 1).put("project_id", JSONObject.NULL)
+            .put("root_fingerprint_sha256", "0".repeat(64))
+            .put("capabilities", org.json.JSONArray().put("file_read"))
         val refused = try {
             executor.execute("list_dir", JSONObject(), stranger)
             false

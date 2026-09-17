@@ -31,6 +31,54 @@ internal class AndroidAgentRootResolver(private val workspaces: AndroidWorkspace
      * request names no root, names a project, names a workspace this device
      * does not hold, or names one whose directory can no longer be proven.
      */
+    /**
+     * Resolves the root projection an **agent** request carries.
+     *
+     * There are two root shapes crossing this bridge and they spell the
+     * binding differently. `AgentRuntimeRootV1` -- what every agent operation
+     * carries -- says `workspace_binding_revision`; `WorkspaceRootRefV1` --
+     * what the workspace and project modules take -- says `binding_revision`.
+     * Reading the wrong one yields null, which resolves nothing and reports a
+     * root that cannot be proved: indistinguishable, from the outside, from a
+     * root that genuinely moved. That is how the agent path stayed shut on
+     * this platform without a single test going red, so the two now have two
+     * names and neither caller has to remember which spelling it holds.
+     */
+    fun resolveAgentProjection(root: JSONObject?): JSONObject? {
+        val projection = root ?: return null
+        return resolve(
+            workspaceId = projection.optString("workspace_id").takeIf { it.isNotEmpty() },
+            projectId = projection.opt("project_id")?.takeIf { it != JSONObject.NULL } as? String,
+            bindingRevision = revisionOf(projection, "workspace_binding_revision"),
+        )
+    }
+
+    /** Resolves a `WorkspaceRootRefV1`, which spells it `binding_revision`. */
+    fun resolveWorkspaceRef(root: JSONObject?): JSONObject? {
+        val reference = root ?: return null
+        return resolve(
+            workspaceId = reference.optString("workspace_id").takeIf { it.isNotEmpty() },
+            projectId = reference.opt("project_id")?.takeIf { it != JSONObject.NULL } as? String,
+            bindingRevision = revisionOf(reference, "binding_revision"),
+        )
+    }
+
+    /**
+     * A binding revision as it actually arrives, not as a cast hopes.
+     *
+     * Numbers cross the React Native bridge as `Double`, so `opt(key) as? Int`
+     * answers null for every revision a real request carries -- while a
+     * JSONObject built in a test with `put(key, 1)` holds an `Integer` and
+     * casts fine. That asymmetry is why every root in production failed to
+     * resolve while the tests over the same code stayed green.
+     */
+    private fun revisionOf(value: JSONObject, key: String): Int? =
+        when (val raw = value.opt(key)) {
+            is Number -> raw.toInt()
+            is String -> raw.toIntOrNull()
+            else -> null
+        }
+
     fun resolve(
         workspaceId: String?,
         projectId: String?,

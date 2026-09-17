@@ -1,5 +1,6 @@
 package tech.zseven.rish.modules
 
+import android.util.Log
 import com.facebook.react.bridge.Arguments
 import com.facebook.react.bridge.Promise
 import com.facebook.react.bridge.ReactApplicationContext
@@ -57,6 +58,8 @@ class AgentRuntimeModule(reactContext: ReactApplicationContext) :
 
     override fun getName(): String = "AgentRuntime"
 
+    private companion object { const val TAG = "RishAgent" }
+
     @ReactMethod
     fun prepare_agent_attempt(request: ReadableMap?, promise: Promise) {
         val captured = try {
@@ -72,8 +75,10 @@ class AgentRuntimeModule(reactContext: ReactApplicationContext) :
             } catch (refused: AndroidPreparedAttemptStore.Refused) {
                 // The store's own vocabulary reaches JS unchanged; a code the
                 // controller does not know would be worse than a stable one.
+                Log.w(TAG, "Agent attempt could not be prepared: ${refused.code}", refused)
                 promise.reject(refused.code, "Agent attempt could not be prepared")
-            } catch (_: Exception) {
+            } catch (failure: Exception) {
+                Log.w(TAG, "Agent attempt could not be prepared", failure)
                 promise.reject("E_AGENT_NATIVE", "Agent attempt could not be prepared")
             }
         }
@@ -92,8 +97,10 @@ class AgentRuntimeModule(reactContext: ReactApplicationContext) :
                 val result = runtime.providerRound.completeRound(captured)
                 promise.resolve(Arguments.makeNativeMap(RuntimeJson.map(result)))
             } catch (refused: AndroidAgentProviderRoundService.Refused) {
+                Log.w(TAG, "Agent round could not be completed: ${refused.code}")
                 promise.reject(refused.code, "Agent round could not be completed")
-            } catch (_: Exception) {
+            } catch (failure: Exception) {
+                Log.w(TAG, "Agent round could not be completed", failure)
                 promise.reject("E_AGENT_NATIVE", "Agent round could not be completed")
             }
         }
@@ -112,8 +119,10 @@ class AgentRuntimeModule(reactContext: ReactApplicationContext) :
                 val result = runtime.toolBatch.prepare(captured)
                 promise.resolve(Arguments.makeNativeMap(RuntimeJson.map(result)))
             } catch (refused: AndroidAgentToolBatchService.Refused) {
+                Log.w(TAG, "Agent tool batch could not be prepared: ${refused.code}")
                 promise.reject(refused.code, "Agent tool batch could not be prepared")
-            } catch (_: Exception) {
+            } catch (failure: Exception) {
+                Log.w(TAG, "Agent tool batch could not be prepared", failure)
                 promise.reject("E_AGENT_NATIVE", "Agent tool batch could not be prepared")
             }
         }
@@ -132,8 +141,10 @@ class AgentRuntimeModule(reactContext: ReactApplicationContext) :
                 val result = runtime.approvals.bind(captured)
                 promise.resolve(Arguments.makeNativeMap(RuntimeJson.map(result)))
             } catch (refused: AndroidAgentApprovalService.Refused) {
+                Log.w(TAG, "Agent approval could not be bound: ${refused.code}")
                 promise.reject(refused.code, "Agent approval could not be bound")
-            } catch (_: Exception) {
+            } catch (failure: Exception) {
+                Log.w(TAG, "Agent approval could not be bound", failure)
                 promise.reject("E_AGENT_NATIVE", "Agent approval could not be bound")
             }
         }
@@ -155,7 +166,8 @@ class AgentRuntimeModule(reactContext: ReactApplicationContext) :
                 // The service's vocabulary is the controller's; a code it does
                 // not know would be worse than a stable one.
                 promise.reject(refused.code, "Agent tool could not be executed")
-            } catch (_: Exception) {
+            } catch (failure: Exception) {
+                Log.w(TAG, "Agent tool could not be executed", failure)
                 promise.reject("E_AGENT_NATIVE", "Agent tool could not be executed")
             }
         }
@@ -200,8 +212,10 @@ class AgentRuntimeModule(reactContext: ReactApplicationContext) :
                 val result = runtime.lifecycle.finalize(captured)
                 promise.resolve(Arguments.makeNativeMap(RuntimeJson.map(result)))
             } catch (refused: AndroidAgentLifecycleService.Refused) {
+                Log.w(TAG, "Agent attempt could not be finalized: ${refused.code}")
                 promise.reject(refused.code, "Agent attempt could not be finalized")
-            } catch (_: Exception) {
+            } catch (failure: Exception) {
+                Log.w(TAG, "Agent attempt could not be finalized", failure)
                 promise.reject("E_AGENT_NATIVE", "Agent attempt could not be finalized")
             }
         }
@@ -220,8 +234,10 @@ class AgentRuntimeModule(reactContext: ReactApplicationContext) :
                 val result = runtime.lifecycle.discard(captured)
                 promise.resolve(Arguments.makeNativeMap(RuntimeJson.map(result)))
             } catch (refused: AndroidAgentLifecycleService.Refused) {
+                Log.w(TAG, "Agent attempt could not be discarded: ${refused.code}")
                 promise.reject(refused.code, "Agent attempt could not be discarded")
-            } catch (_: Exception) {
+            } catch (failure: Exception) {
+                Log.w(TAG, "Agent attempt could not be discarded", failure)
                 promise.reject("E_AGENT_NATIVE", "Agent attempt could not be discarded")
             }
         }

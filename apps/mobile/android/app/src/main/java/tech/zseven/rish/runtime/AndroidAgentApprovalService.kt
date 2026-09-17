@@ -77,14 +77,8 @@ internal class AndroidAgentApprovalService(
      * binding revision that has moved is a different root, not a stale copy of
      * this one.
      */
-    private fun rootStillProves(authority: JSONObject?): Boolean {
-        val root = authority?.optJSONObject("root") ?: return false
-        return roots.resolve(
-            workspaceId = root.optString("workspace_id").takeIf { it.isNotEmpty() },
-            projectId = root.opt("project_id")?.takeIf { it != JSONObject.NULL } as? String,
-            bindingRevision = root.opt("workspace_binding_revision") as? Int,
-        ) != null
-    }
+    private fun rootStillProves(authority: JSONObject?): Boolean =
+        roots.resolveAgentProjection(authority?.optJSONObject("root")) != null
 
     fun bind(request: JSONObject): JSONObject {
         // Shape and the request's internal token relation first. A request

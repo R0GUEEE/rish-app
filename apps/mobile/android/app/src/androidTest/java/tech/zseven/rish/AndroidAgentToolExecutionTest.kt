@@ -59,8 +59,11 @@ class AndroidAgentToolExecutionTest {
         .put(
             "root",
             JSONObject().put("schema_version", 1)
+                .put("kind", "workspace")
                 .put("workspace_id", "66666666-6666-4666-8666-666666666666")
-                .put("binding_revision", 1).put("project_id", JSONObject.NULL),
+                .put("workspace_binding_revision", 1).put("project_id", JSONObject.NULL)
+                .put("root_fingerprint_sha256", "0000000000000000000000000000000000000000000000000000000000000000")
+                .put("capabilities", org.json.JSONArray().put("file_read").put("file_write")),
         )
 
     /**

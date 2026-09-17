@@ -74,11 +74,7 @@ internal class AndroidAgentToolExecutionService(
         val authority = prepared.authorityFor(taskId, attemptId)
         // Whether the root still proves out is the resolver's answer, and the
         // core only needs to know that it did.
-        val rootOk = roots.resolve(
-            workspaceId = root.optString("workspace_id").takeIf { it.isNotEmpty() },
-            projectId = root.opt("project_id")?.takeIf { it != JSONObject.NULL } as? String,
-            bindingRevision = root.opt("binding_revision") as? Int,
-        ) != null
+        val rootOk = roots.resolveAgentProjection(root) != null
 
         val view = JSONObject()
             .put("op", "precheck").put("request", request)

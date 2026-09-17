@@ -120,11 +120,7 @@ internal class AndroidAgentLifecycleService(
             (value as? JSONObject)?.let { RishAgentCoreNative.canonical(it.toString()) }
         }
         if (canonical(frozen) == null || canonical(frozen) != canonical(root)) return false
-        return roots.resolve(
-            workspaceId = frozen.optString("workspace_id").takeIf { it.isNotEmpty() },
-            projectId = frozen.opt("project_id")?.takeIf { it != JSONObject.NULL } as? String,
-            bindingRevision = frozen.opt("workspace_binding_revision") as? Int,
-        ) != null
+        return roots.resolveAgentProjection(frozen) != null
     }
 
     // MARK: - finalize

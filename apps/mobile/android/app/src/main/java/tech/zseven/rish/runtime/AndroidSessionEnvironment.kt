@@ -33,9 +33,15 @@ internal object AndroidSessionEnvironment {
     private fun harnessOrNull(model: String): String? =
         try { AndroidProviderConfiguration.harness(model) } catch (_: IllegalStateException) { null }
 
-    fun forCandidate(candidate: JSONObject): JSONObject {
+    /**
+     * The catalogue facts carried by whatever JSON is handed in. The mechanism
+     * is the value's own strings, so this serves a session candidate and an
+     * agent round request alike -- which is what `DSHProviderEnvironment` does
+     * on iOS, over the request it is about to judge.
+     */
+    fun facts(value: JSONObject): JSONObject {
         val strings = sortedSetOf<String>()
-        collect(candidate, strings)
+        collect(value, strings)
         val models = JSONArray()
         val harnessByModel = JSONObject()
         val providers = JSONArray()

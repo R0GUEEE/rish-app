@@ -54,8 +54,19 @@ internal class AndroidSessionStore(context: Context, name: String = "rish.sessio
                 .put("snapshot", JSONObject.NULL).put("session_json", JSONObject.NULL).put("writer_launch_instance_id", JSONObject.NULL).put("current_launch_instance_id", launchId)
             val candidate = cursor.getString(2)
             check(candidateDigest(candidate) == cursor.getString(1)) { "Corrupt session snapshot" }
+            // The bytes handed out are canonical, exactly as iOS's
+            // `loadResultForState:` hands out `DSHSessionCanonicalJSON`.
+            // Everything downstream that gives these bytes back to the core --
+            // the prepared-attempt store above all -- is refused outright when
+            // they are not the core's own canonical form, and the controller
+            // writes a candidate in insertion order. Storing what it wrote and
+            // answering with what the rules can read is the same split iOS
+            // makes; the digest stays over the stored bytes, because that is
+            // what it is a digest *of*.
+            val canonical = RishAgentCoreNative.canonical(candidate)
+                ?: error("Corrupt session snapshot: the stored candidate is not JSON the core reads")
             return JSONObject().put("schema_version", 1).put("status", "present")
-                .put("snapshot", reference(cursor.getLong(0), cursor.getString(1))).put("session_json", candidate)
+                .put("snapshot", reference(cursor.getLong(0), cursor.getString(1))).put("session_json", canonical)
                 .put("writer_launch_instance_id", cursor.getString(3)).put("current_launch_instance_id", launchId)
         }
     }
@@ -95,21 +106,46 @@ internal class AndroidSessionStore(context: Context, name: String = "rish.sessio
      * where it is used, not here. A session records what the person chose; the
      * root resolver decides what that is still worth.
      *
-     * `project_id` and `project_context` stay refused: there is no project
-     * subsystem to issue or verify them.
+     * **Agent journals are no longer among them either.** This platform now
+     * serves the operations a turn walks through, so a conversation carries an
+     * `agent` journal on its attempt, `agent_grants` the person allowed,
+     * `session_events` recording what they decided, and cleanup entries a
+     * finished attempt left behind. Refusing those was the last gate on the
+     * agent path: every one of them is written by the first turn that runs a
+     * tool, so storage refused the save and the turn failed with
+     * E_AGENT_PERSISTENCE before anything could change on disk.
+     *
+     * The shared schema already says what a well-formed one of each looks
+     * like, and the core judges the candidate's bytes before this runs. What
+     * is left here is only the platform question: *can this build issue or
+     * verify the thing at all?*
+     *
+     * `project_id`, `project_context` and the destructive-transition journal
+     * stay refused: there is no project subsystem to issue or verify them.
+     * `workspace_authority_outbox` stays refused too -- it is filled when a
+     * workspace is forgotten, and nothing here drains it, so accepting one
+     * would store a request no part of this build will ever answer.
+     *
+     * One thing this does let through that nothing here consumes:
+     * `agent_transcript_cleanup_outbox` entries accumulate, because
+     * `query_agent_cleanup` still refuses. They are records of transcripts to
+     * sweep, not authority, and `discard_agent_attempt` -- which is served --
+     * is what actually removes the residue they describe.
      */
     private fun refuseUnsupportedAuthority(parsed: JSONObject) {
-        for (field in listOf("workspace_authority_outbox", "agent_transcript_cleanup_outbox", "session_events")) {
-            require((parsed.optJSONArray(field)?.length() ?: 0) == 0) { "Native authority journals are not supported on Android yet" }
+        require((parsed.optJSONArray("workspace_authority_outbox")?.length() ?: 0) == 0) {
+            "Workspace authority journals are not supported on Android yet"
         }
-        require(parsed.isNull("project_context_destructive_transition"))
+        require(parsed.isNull("project_context_destructive_transition")) {
+            "Project journals are not supported on Android"
+        }
         parsed.optJSONArray("conversations")?.let { conversations ->
             for (index in 0 until conversations.length()) {
                 val conversation = conversations.getJSONObject(index)
-                for (field in listOf("project_id", "project_context")) require(conversation.isNull(field))
-                require((conversation.optJSONArray("agent_grants")?.length() ?: 0) == 0)
-                conversation.optJSONArray("attempts")?.let { attempts ->
-                    for (i in 0 until attempts.length()) require(attempts.getJSONObject(i).isNull("agent"))
+                for (field in listOf("project_id", "project_context")) {
+                    require(conversation.isNull(field)) {
+                        "Project journals are not supported on Android"
+                    }
                 }
             }
         }
@@ -124,7 +160,7 @@ internal class AndroidSessionStore(context: Context, name: String = "rish.sessio
         // catalogue facts come from this build, because only it knows them.
         val parsed = JSONObject(candidate)
         val digest = RishAgentCoreNative.session(JSONObject().put("op", "candidate")
-            .put("env", AndroidSessionEnvironment.forCandidate(parsed)), candidate).getString("digest")
+            .put("env", AndroidSessionEnvironment.facts(parsed)), candidate).getString("digest")
         refuseUnsupportedAuthority(parsed)
         val operation = request.getString("operation_id")
         val expected = request.getJSONObject("expected")
