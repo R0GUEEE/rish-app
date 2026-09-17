@@ -37,6 +37,10 @@ export function HarnessSubscriptionCard({ id, visible, disabled: externalDisable
   rawStateRef.current = rawState;
   const [actionBusy, setActionBusy] = useState(false);
   const [browserError, setBrowserError] = useState(false);
+  // A status that cannot be read leaves no state to explain itself, and the
+  // button is disabled while it is null. Without this the card sits on
+  // "checking" for as long as the app is open and the control says nothing.
+  const [statusUnreadable, setStatusUnreadable] = useState(false);
   const [localProgress, setLocalProgress] = useState<'starting' | 'verifying' | null>(null);
   const [chatSource, setChatSource] = useState<CodexChatSource | null>(null);
   const [chatSourceError, setChatSourceError] = useState<string | null>(null);
@@ -57,13 +61,13 @@ export function HarnessSubscriptionCard({ id, visible, disabled: externalDisable
   const apply = useCallback((next: HarnessAuthStatus, scope: object & { id: HarnessSubscriptionId; epoch: number }) => {
     if (scopeRef.current === scope && next.harness_id === scope.id && scope.epoch === epoch.current) setRawState(next);
   }, []);
-  const refresh = useCallback(async (scope: object & { id: HarnessSubscriptionId; epoch: number }) => { if (scopeRef.current !== scope || refreshBusy.current.has(scope)) return; refreshBusy.current.add(scope); try { apply(await Auth.harnessAuthStatus(scope.id), scope); } finally { refreshBusy.current.delete(scope); } }, [apply]);
+  const refresh = useCallback(async (scope: object & { id: HarnessSubscriptionId; epoch: number }) => { if (scopeRef.current !== scope || refreshBusy.current.has(scope)) return; refreshBusy.current.add(scope); try { apply(await Auth.harnessAuthStatus(scope.id), scope); if (scopeRef.current === scope) setStatusUnreadable(false); } catch { if (scopeRef.current === scope) setStatusUnreadable(true); } finally { refreshBusy.current.delete(scope); } }, [apply]);
   const stopPolling = useCallback(() => { if (poll.current) clearTimeout(poll.current); poll.current = null; }, []);
   const startPolling = useCallback((scope: object & { id: HarnessSubscriptionId; epoch: number }) => { stopPolling(); const tick = () => { if (scopeRef.current !== scope || AppState.currentState !== 'active') return; refresh(scope).finally(() => { if (scopeRef.current === scope) poll.current = setTimeout(tick, 2500); }); }; poll.current = setTimeout(tick, 2500); }, [refresh, stopPolling]);
   startPollingRef.current = startPolling;
 
   useEffect(() => {
-    setRawState(null); setLocalProgress(null); setBrowserError(false); setChatSource(null); setChatSourceError(null); authTransition.current = null; const scope = { id, epoch: ++epoch.current }; scopeRef.current = scope;
+    setRawState(null); setLocalProgress(null); setBrowserError(false); setStatusUnreadable(false); setChatSource(null); setChatSourceError(null); authTransition.current = null; const scope = { id, epoch: ++epoch.current }; scopeRef.current = scope;
     if (!visible) { stopPolling(); return; }
     refresh(scope).catch(() => undefined);
     const sub = AppState.addEventListener('change', next => { if (next === 'active') { refresh(scope).catch(() => undefined); if (rawStateRef.current?.status === 'authorizing') startPollingRef.current?.(scope); } else stopPolling(); });
@@ -133,7 +137,7 @@ export function HarnessSubscriptionCard({ id, visible, disabled: externalDisable
     {currentState?.status === 'signed_in' && currentState.account && <Text style={styles.settingDescription}>{currentState.account.label}{currentState.account.plan ? ` · ${currentState.account.plan}` : ''}</Text>}
     {currentState?.status === 'signed_in' && chatSource && <Text style={styles.settingDescription}>{t(chatSource.source === 'subscription' ? 'settings.auth.chatSourceSubscription' : 'settings.auth.chatSourceApiKey')}{chatSource.ready ? '' : ` · ${t('settings.auth.chatSourceNotReady')}`}</Text>}
     {chatSourceError && <Text style={styles.proxyError}>{t('settings.auth.chatSourceError')}</Text>}
-    {(currentState?.status === 'unavailable' || currentState?.runtime.available === false) && <Text style={styles.proxyError}>{unavailableReason}</Text>}
+    {(currentState?.status === 'unavailable' || currentState?.runtime.available === false || (currentState === null && statusUnreadable)) && <Text style={styles.proxyError}>{unavailableReason}</Text>}
     {currentState?.status === 'authorizing' && currentState.login?.user_code && <><Text selectable style={styles.authCode}>{currentState.login.user_code}</Text>{id === 'codex' && <Text style={styles.credentialBody}>{t('settings.auth.codePasteHint')}</Text>}</>}
     {browserError && <Text style={styles.proxyError}>{t('settings.auth.browserError')}</Text>}
     <View style={styles.buttonRow}>
