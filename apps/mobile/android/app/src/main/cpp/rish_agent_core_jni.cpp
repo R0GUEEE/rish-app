@@ -322,6 +322,22 @@ Java_tech_zseven_rish_runtime_RishAgentCoreNative_workspaceJsonBoundedNative(
   return accepted == 1 ? JNI_TRUE : JNI_FALSE;
 }
 
+extern "C" JNIEXPORT jstring JNICALL
+Java_tech_zseven_rish_runtime_RishAgentCoreNative_workspaceReceiptReduceNative(
+    JNIEnv *env, jclass, jstring request) {
+  std::string utf8;
+  if (request == nullptr || !JStringToUtf8(env, request, &utf8)) return nullptr;
+  return TakeOwnedReply(env, rish_agent_workspace_receipt_reduce(utf8.data(), utf8.size()));
+}
+
+extern "C" JNIEXPORT jstring JNICALL
+Java_tech_zseven_rish_runtime_RishAgentCoreNative_workspaceJournalReduceNative(
+    JNIEnv *env, jclass, jstring request) {
+  std::string utf8;
+  if (request == nullptr || !JStringToUtf8(env, request, &utf8)) return nullptr;
+  return TakeOwnedReply(env, rish_agent_workspace_journal_reduce(utf8.data(), utf8.size()));
+}
+
 // The resident committed state. The handle crosses as an opaque jlong; the
 // caller owns it until walClose, exactly as on the C side.
 extern "C" JNIEXPORT jlong JNICALL

@@ -40,6 +40,7 @@ internal class AndroidWorkspaceRegistry(val root: File) {
         /** The container that holds every owned workspace directory. */
         const val CONTAINER_NAME = "Rish Workspaces"
         private const val REGISTRY_NAME = "registry.json"
+        private const val RECEIPTS_NAME = "receipts.json"
         private const val BINDINGS_DIR = "bindings"
 
         /**
@@ -49,6 +50,10 @@ internal class AndroidWorkspaceRegistry(val root: File) {
         fun emptyRegistry(): JSONObject = JSONObject()
             .put("schema_version", 1).put("generation", 0)
             .put("records", JSONArray())
+
+        /** The empty receipt store, which a fresh install has. */
+        fun emptyReceipts(): JSONObject = JSONObject()
+            .put("schema_version", 1).put("receipts", JSONArray())
 
         /**
          * This host's folding. Not Foundation's, and it does not claim to be.
@@ -83,6 +88,7 @@ internal class AndroidWorkspaceRegistry(val root: File) {
 
     private val container = File(root, CONTAINER_NAME)
     private val registryFile = File(root, REGISTRY_NAME)
+    private val receiptsFile = File(root, RECEIPTS_NAME)
     private val bindings = File(root, BINDINGS_DIR)
 
     private val lock = Any()
@@ -154,9 +160,15 @@ internal class AndroidWorkspaceRegistry(val root: File) {
         displayName: String,
         workspaceId: String = UUID.randomUUID().toString(),
         now: String = RuntimeJson.now(),
+        operationId: String = UUID.randomUUID().toString(),
     ): JSONObject = synchronized(lock) {
         if (!RishAgentCoreNative.available) throw Refused("E_WORKSPACE_UNAVAILABLE")
         if (!RuntimeJson.uuid(workspaceId)) throw Refused("E_WORKSPACE_INVALID")
+        if (!RuntimeJson.uuid(operationId)) throw Refused("E_WORKSPACE_INVALID")
+        // A retried operation is the one that already happened, not a second
+        // one. Without this a crash between the directory and the registry
+        // would leave the person with two workspaces where they asked for one.
+        replayedRecord(operationId, displayName)?.let { return@synchronized it }
         val registry = loadRegistry()
         if (recordFor(registry, workspaceId) != null) throw Refused("E_WORKSPACE_CONFLICT")
         // A full registry refuses rather than dropping a binding somebody uses.
@@ -196,12 +208,16 @@ internal class AndroidWorkspaceRegistry(val root: File) {
         // different order digest differently. Appending would have written a
         // registry this device could no longer read.
         val records = insertedInOrder(registry.getJSONArray("records"), record)
-        writeJson(
-            registryFile,
-            JSONObject().put("schema_version", 1)
-                .put("generation", registry.getInt("generation") + 1)
-                .put("records", records),
-        )
+        val generation = registry.getInt("generation") + 1
+        val published = JSONObject().put("schema_version", 1)
+            .put("generation", generation).put("records", records)
+        writeJson(registryFile, published)
+        // The receipt is written last, so a crash before it leaves an
+        // unreceipted workspace rather than a receipt for one that is not
+        // there. A retry then finds no receipt and refuses on the directory
+        // that already exists, which is a visible failure instead of a silent
+        // second workspace.
+        writeReceipt(operationId, record, generation, published, displayName, now)
         record
     }
 
@@ -232,6 +248,120 @@ internal class AndroidWorkspaceRegistry(val root: File) {
         if (!recordValid(record)) return null
         if (authorityFor(record) == null) return null
         File(container, record.getString("owned_directory_name"))
+    }
+
+    /**
+     * The receipt store, or the empty one. A store the shared rule refuses is
+     * corrupt: it is never replaced with an empty one, because that would let
+     * every operation in it run a second time.
+     */
+    fun receipts(): JSONObject = synchronized(lock) { loadReceipts() }
+
+    private fun loadReceipts(): JSONObject {
+        if (!receiptsFile.exists()) return emptyReceipts()
+        val bytes = try {
+            receiptsFile.readBytes()
+        } catch (_: Exception) {
+            throw Refused("E_WORKSPACE_PERSISTENCE")
+        }
+        if (!RishAgentCoreNative.workspaceJsonBounded(bytes)) {
+            throw Refused("E_WORKSPACE_CORRUPT")
+        }
+        val parsed = try {
+            JSONObject(String(bytes, Charsets.UTF_8))
+        } catch (_: Exception) {
+            throw Refused("E_WORKSPACE_CORRUPT")
+        }
+        val reply = RishAgentCoreNative.workspaceReceipt(
+            JSONObject().put("op", "store_shape").put("envelope", parsed),
+        )
+        if (reply?.optBoolean("valid") != true) throw Refused("E_WORKSPACE_CORRUPT")
+        return parsed
+    }
+
+    /** What a caller is shown of an operation, or null if it never happened. */
+    fun queryOperation(operationId: String): JSONObject? = synchronized(lock) {
+        val receipt = receiptFor(loadReceipts(), operationId) ?: return null
+        RishAgentCoreNative.workspaceReceipt(
+            JSONObject().put("op", "public_receipt").put("receipt", receipt),
+        )?.optJSONObject("receipt")
+    }
+
+    private fun receiptFor(store: JSONObject, operationId: String): JSONObject? {
+        val receipts = store.getJSONArray("receipts")
+        for (index in 0 until receipts.length()) {
+            val receipt = receipts.optJSONObject(index) ?: continue
+            if (receipt.optString("operation_id") == operationId) return receipt
+        }
+        return null
+    }
+
+    /**
+     * The record a receipt names, when this operation already ran *and* the
+     * request was the same one. A receipt whose request digest disagrees is a
+     * different operation reusing an id, and it is refused rather than
+     * answered with somebody else's workspace.
+     */
+    private fun replayedRecord(operationId: String, displayName: String): JSONObject? {
+        val receipt = receiptFor(loadReceipts(), operationId) ?: return null
+        val expected = RishAgentCoreNative.workspaceJournal(
+            JSONObject().put("op", "create_request_sha256")
+                .put("display_name", displayName),
+        )?.optString("digest")
+        if (expected.isNullOrEmpty() ||
+            receipt.optString("request_sha256") != expected
+        ) {
+            throw Refused("E_WORKSPACE_CONFLICT")
+        }
+        val record = recordFor(loadRegistry(), receipt.optString("workspace_id"))
+            ?: throw Refused("E_WORKSPACE_PERSISTENCE")
+        return record
+    }
+
+    private fun writeReceipt(
+        operationId: String,
+        record: JSONObject,
+        generation: Int,
+        published: JSONObject,
+        displayName: String,
+        now: String,
+    ) {
+        val store = loadReceipts()
+        val digest = RishAgentCoreNative.workspaceJournal(
+            JSONObject().put("op", "create_request_sha256")
+                .put("display_name", displayName),
+        )?.optString("digest")
+        if (digest.isNullOrEmpty()) throw Refused("E_WORKSPACE_PERSISTENCE")
+        val canonical = RishAgentCoreNative.canonical(published.toString())
+            ?: throw Refused("E_WORKSPACE_PERSISTENCE")
+        val receipt = JSONObject()
+            .put("schema_version", 1)
+            .put("operation_id", operationId)
+            .put("workspace_id", record.getString("workspace_id"))
+            .put("operation", "create")
+            .put("binding_revision", record.getInt("binding_revision"))
+            // The generation and digest of the registry this committed
+            // *against*, so a receipt describes one state of the store.
+            .put("registry_generation", generation)
+            .put("registry_sha256", sha256(canonical.toByteArray(Charsets.UTF_8)))
+            .put("request_sha256", digest)
+            .put("outcome", "committed")
+            .put("committed_at", now)
+        val reply = RishAgentCoreNative.workspaceReceipt(
+            JSONObject().put("op", "receipt_shape").put("receipt", receipt),
+        )
+        if (reply?.optBoolean("valid") != true) throw Refused("E_WORKSPACE_PERSISTENCE")
+        val room = RishAgentCoreNative.workspaceReceipt(
+            JSONObject().put("op", "has_room")
+                .put("count", store.getJSONArray("receipts").length()),
+        )
+        if (room?.optBoolean("has_room") != true) throw Refused("E_WORKSPACE_BUSY")
+        val receipts = store.getJSONArray("receipts")
+        receipts.put(receipt)
+        writeJson(
+            receiptsFile,
+            JSONObject().put("schema_version", 1).put("receipts", receipts),
+        )
     }
 
     /**

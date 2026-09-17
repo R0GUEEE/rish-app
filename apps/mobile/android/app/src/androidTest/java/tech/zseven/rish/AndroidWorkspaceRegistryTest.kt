@@ -326,7 +326,97 @@ class AndroidWorkspaceRegistryTest {
         )
     }
 
-    /** The empty registry is a state a fresh install has, not an absence. */
+    /**
+     * A retried operation is the one that already happened, not a second one.
+     * Without a receipt store a crash between the directory and the registry
+     * would leave the person with two workspaces where they asked for one.
+     */
+    @Test
+    fun retryingAnOperationReturnsTheWorkspaceItAlreadyMade() {
+        val store = registry()
+        val operation = UUID.randomUUID().toString()
+        val first = store.create("Scratch", operationId = operation)
+        val again = store.create("Scratch", operationId = operation)
+        assertEquals(
+            first.getString("workspace_id"),
+            again.getString("workspace_id"),
+        )
+        assertEquals(1, store.list().size)
+        assertEquals(1, store.registry().getInt("generation"))
+        assertEquals(1, store.receipts().getJSONArray("receipts").length())
+        // The directory was not made twice either.
+        assertEquals(
+            1,
+            container(store).list()?.count { it.startsWith("Scratch") } ?: 0,
+        )
+    }
+
+    /**
+     * A receipt binds the operation to the request that produced it. The same
+     * id with a different request is a different operation reusing an id, and
+     * it is refused rather than answered with somebody else's workspace.
+     */
+    @Test
+    fun anOperationIdCannotBeReusedForADifferentRequest() {
+        val store = registry()
+        val operation = UUID.randomUUID().toString()
+        store.create("Scratch", operationId = operation)
+        assertEquals(
+            "E_WORKSPACE_CONFLICT",
+            refusedCode("the same id for another display name") {
+                store.create("Notes", operationId = operation)
+            },
+        )
+        assertEquals(1, store.list().size)
+    }
+
+    /** What a caller is shown of an operation withholds the request digest. */
+    @Test
+    fun queryingAnOperationWithholdsTheRequestDigest() {
+        val store = registry()
+        val operation = UUID.randomUUID().toString()
+        val record = store.create("Scratch", operationId = operation)
+        val query = store.queryOperation(operation)
+        assertNotNull(query)
+        assertEquals(operation, query!!.getString("operation_id"))
+        assertEquals(record.getString("workspace_id"), query.getString("workspace_id"))
+        assertEquals("create", query.getString("operation"))
+        assertEquals("committed", query.getString("outcome"))
+        // The idempotency binding stays in the store.
+        assertTrue(query.isNull("request_sha256"))
+        assertTrue(
+            store.receipts().getJSONArray("receipts").getJSONObject(0)
+                .getString("request_sha256").length == 64,
+        )
+        // An operation that never happened has nothing to show.
+        assertNull(store.queryOperation(UUID.randomUUID().toString()))
+    }
+
+    /**
+     * A receipt store the shared rule refuses is corrupt. It is never replaced
+     * with an empty one: that would let every operation in it run again.
+     */
+    @Test
+    fun aCorruptReceiptStoreIsNeverReplacedWithAnEmptyOne() {
+        val store = registry()
+        store.create("Scratch")
+        val file = File(store.root, "receipts.json")
+        val text = file.readText()
+        // Two receipts with one operation id: the store cannot say which
+        // retry is the one that happened.
+        val parsed = JSONObject(text)
+        val only = parsed.getJSONArray("receipts").getJSONObject(0)
+        parsed.getJSONArray("receipts").put(JSONObject(only.toString()))
+        file.writeText(parsed.toString())
+        assertEquals(
+            "E_WORKSPACE_CORRUPT",
+            refusedCode("a receipt store with a repeated operation id") {
+                store.receipts()
+            },
+        )
+    }
+
+    /** The empty registry is a state a fresh install has, not an absence. */    /** The empty registry is a state a fresh install has, not an absence. */
     @Test
     fun aFreshInstallHasAnEmptyRegistry() {
         val store = registry()

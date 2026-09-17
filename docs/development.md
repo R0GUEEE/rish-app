@@ -1203,6 +1203,26 @@ asking whether the record is the right shape, not comparing the directory
 identity, and inventing the fingerprint instead of asking for it. The last one
 fails nine of the twelve.
 
+### Android operations are idempotent now
+
+`AndroidWorkspaceRegistry` had no notion of an operation id: a retry after a
+crash created a *second* workspace where the person asked for one. It has a
+receipt store now, on the rules `workspace_receipt` already held and which
+nothing on Android exercised.
+
+`create` takes an operation id, replays the receipt if one exists, and writes
+one last — **after** the registry. A crash before the receipt leaves an
+unreceipted workspace rather than a receipt for one that is not there; the
+retry then finds no receipt and refuses on the directory that already exists,
+which is a visible failure instead of a silent second workspace.
+
+**A receipt binds the operation to its request.** The same id with a different
+display name is a different operation reusing an id, and it is refused rather
+than answered with somebody else's workspace.
+
+`queryOperation` returns the public projection, which withholds
+`request_sha256` — the same rule iOS follows, for the same reason.
+
 ### What a project-context result may say
 
 `project_context_bridge.rs` ports `DSHPCSafeRelativePath` and

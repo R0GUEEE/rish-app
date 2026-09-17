@@ -105,6 +105,10 @@ internal object RishAgentCoreNative {
 
     @JvmStatic external fun rootReduceNative(requestJson: String): String?
 
+    @JvmStatic external fun workspaceReceiptReduceNative(requestJson: String): String?
+
+    @JvmStatic external fun workspaceJournalReduceNative(requestJson: String): String?
+
     @JvmStatic external fun workspaceRecordReduceNative(requestJson: String): String?
 
     @JvmStatic external fun workspaceFingerprintReduceNative(requestJson: String): String?
@@ -222,6 +226,12 @@ internal object RishAgentCoreNative {
 
     fun agentRoot(request: JSONObject): JSONObject? =
         workspaceReply(request) { rootReduceNative(it) }
+
+    fun workspaceReceipt(request: JSONObject): JSONObject? =
+        workspaceReply(request) { workspaceReceiptReduceNative(it) }
+
+    fun workspaceJournal(request: JSONObject): JSONObject? =
+        workspaceReply(request) { workspaceJournalReduceNative(it) }
 
     fun workspaceRecord(request: JSONObject): JSONObject? =
         workspaceReply(request) { workspaceRecordReduceNative(it) }
