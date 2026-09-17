@@ -24,6 +24,9 @@ internal class AndroidRuntimeState private constructor(val app: Application) {
     val liveTasks = AndroidLiveTasks()
     val executionLedger = AndroidAgentExecutionLedger(agentWal, liveTasks)
     val workspaceTools = AndroidWorkspaceToolExecutor(workspaces, roots)
+    val toolBatch = AndroidAgentToolBatchService(
+        agentWal, sessions, preparedAttempts, executionLedger, roots, workspaceTools,
+    )
     val toolExecution = AndroidAgentToolExecutionService(
         agentWal, sessions, preparedAttempts, executionLedger, roots, workspaceTools, liveTasks,
     )
