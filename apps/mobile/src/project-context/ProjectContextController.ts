@@ -2395,6 +2395,13 @@ export function createProjectContextController(
       return applyPage(operation, page, true);
     } catch (error) {
       return failList(operation, error);
+    } finally {
+      // setFailure and failList publish a phase and nothing else, so a failed
+      // page left this set. Load more then refuses for good and Prepare stays
+      // disabled with it, which the sheet gives no way to undo.
+      if (state.list.loadingMore) {
+        publish({ list: { ...state.list, loadingMore: false } });
+      }
     }
   };
 
