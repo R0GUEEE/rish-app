@@ -4,7 +4,7 @@ set -euo pipefail
 # This is deliberately pinned. Updating rish for the app is a reviewed source
 # upgrade, not an accidental consequence of whatever happens to be checked out
 # next door when the mobile dependencies are prepared.
-readonly EXPECTED_RISH_COMMIT="8358dae8f357381740e024f0102cbc1b9d882118"
+readonly EXPECTED_RISH_COMMIT="9020e9648115bd9ae8eb5215dd3e7ac76620da3f"
 readonly EXPECTED_RISH_REMOTE="git@github.com:ZSeven-W/rish.git"
 readonly EXPECTED_RISH_PUBLIC_REMOTE="https://github.com/ZSeven-W/rish.git"
 readonly EXPECTED_HEADER_SHA256="cd4282d50ea46d4bf8cbaee73a5dc174f288bb9295e823b13af225a38012aa87"
