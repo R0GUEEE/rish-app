@@ -16,4 +16,5 @@ object NativeProbe {
     @JvmStatic external fun readFile(path: String): String
     @JvmStatic external fun mapAnonymous(mib: Int): String
     @JvmStatic external fun mapExecutable(): String
+    @JvmStatic external fun tempStatus(): String
 }

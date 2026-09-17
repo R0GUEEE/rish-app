@@ -29,6 +29,8 @@ import tech.zseven.rish.guest.GuestSessionController
 import tech.zseven.rish.guest.RishGuestNative
 import java.io.BufferedReader
 import java.io.InputStreamReader
+import java.net.HttpURLConnection
+import java.net.URL
 import java.util.concurrent.CountDownLatch
 import java.util.concurrent.TimeUnit
 
@@ -48,10 +50,16 @@ import java.util.concurrent.TimeUnit
  */
 class GuestProbeActivity : Activity() {
 
+    private companion object {
+        /** The machine that served this APK. */
+        const val REPORT_HOST = "192.168.11.85:8765"
+    }
+
     private lateinit var output: TextView
     private lateinit var run: Button
     private lateinit var settings: Button
     private lateinit var copy: Button
+    private lateinit var send: Button
     private val main = Handler(Looper.getMainLooper())
     @Volatile private var running = false
     private var failures = 0
@@ -80,6 +88,10 @@ class GuestProbeActivity : Activity() {
         }
         // The report is the whole deliverable and it leaves this device by
         // hand. Photographing a scrolling log loses most of it.
+        send = Button(this).apply {
+            text = "Send report to the Mac"
+            setOnClickListener { sendReport() }
+        }
         copy = Button(this).apply {
             text = "Copy report"
             setOnClickListener {
@@ -101,6 +113,7 @@ class GuestProbeActivity : Activity() {
         root.addView(run, LinearLayout.LayoutParams(MATCH_PARENT, WRAP_CONTENT))
         root.addView(settings, LinearLayout.LayoutParams(MATCH_PARENT, WRAP_CONTENT))
         root.addView(copy, LinearLayout.LayoutParams(MATCH_PARENT, WRAP_CONTENT))
+        root.addView(send, LinearLayout.LayoutParams(MATCH_PARENT, WRAP_CONTENT))
         root.addView(output, LinearLayout.LayoutParams(MATCH_PARENT, MATCH_PARENT))
         setContentView(root)
         header()
@@ -156,6 +169,33 @@ class GuestProbeActivity : Activity() {
             line("settings at all, so developer options and wireless debugging")
             line("do not exist here and no host can attach over adb.")
         }
+    }
+
+    /**
+     * POSTs the report to the machine that built this APK, so the findings stop
+     * travelling by photograph. The address is the host this APK was served
+     * from; nothing else is contacted, and the button is the only thing that
+     * sends. The guest run itself needs no network and does not use one.
+     */
+    private fun sendReport() {
+        val text = output.text.toString()
+        Thread({
+            val outcome = try {
+                val url = URL("http://$REPORT_HOST/report")
+                (url.openConnection() as HttpURLConnection).run {
+                    requestMethod = "POST"
+                    doOutput = true
+                    connectTimeout = 8000
+                    readTimeout = 8000
+                    setRequestProperty("Content-Type", "text/plain; charset=utf-8")
+                    outputStream.use { it.write(text.toByteArray()) }
+                    "sent ${text.length} characters, HTTP $responseCode"
+                }
+            } catch (error: Throwable) {
+                "could not send: ${error.javaClass.simpleName}: ${error.message}"
+            }
+            main.post { Toast.makeText(this, outcome, Toast.LENGTH_LONG).show() }
+        }, "report-sender").start()
     }
 
     private fun start() {
@@ -258,6 +298,7 @@ class GuestProbeActivity : Activity() {
             line("  staging threw ${error.javaClass.simpleName}: ${error.message}")
             null
         }
+        NativeProbe.tempStatus().lines().forEach { line("  $it") }
         if (staged != null) {
             line("  kernel    ${staged.kernelPath}")
             NativeProbe.readFile(staged.kernelPath).lines().forEach { line("    $it") }

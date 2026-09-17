@@ -13,8 +13,11 @@
 #include <cstring>
 #include <fcntl.h>
 #include <string>
+#include <vector>
 #include <sys/mman.h>
 #include <sys/stat.h>
+#include <sys/statvfs.h>
+#include <cstdlib>
 #include <unistd.h>
 
 namespace {
@@ -111,4 +114,57 @@ Java_tech_zseven_rish_guestprobe_NativeProbe_mapExecutable(JNIEnv *env, jclass) 
   if (address == MAP_FAILED) return env->NewStringUTF(Describe("mmap 1 MiB rwx", false, ErrnoText()).c_str());
   ::munmap(address, bytes);
   return env->NewStringUTF(Describe("mmap 1 MiB rwx", true, "").c_str());
+}
+
+
+/**
+ * Where Rust's `std::env::temp_dir()` would point, and whether a 64 MiB file
+ * can actually be made there.
+ *
+ * boot_channel() creates a throwaway root disk with tempfile::NamedTempFile
+ * and calls set_len(64 MiB) on it -- an initramfs boot never reads it, but the
+ * VM config demands a path. temp_dir() honours TMPDIR and otherwise falls back
+ * to /tmp, which does not exist on Android. Stock Android sets TMPDIR to the
+ * app's cache directory; a container need not. That single call would fail in
+ * microseconds, before any memory is touched, identically at every guest size.
+ */
+extern "C" JNIEXPORT jstring JNICALL
+Java_tech_zseven_rish_guestprobe_NativeProbe_tempStatus(JNIEnv *env, jclass) {
+  std::string result;
+  const char *tmpdir = ::getenv("TMPDIR");
+  result += "TMPDIR=";
+  result += (tmpdir == nullptr ? "(unset -- Rust falls back to /tmp)" : tmpdir);
+
+  const char *dir = (tmpdir == nullptr || *tmpdir == '\0') ? "/tmp" : tmpdir;
+  struct stat info {};
+  if (::stat(dir, &info) != 0) {
+    result += "\n" + Describe("temp dir exists", false, ErrnoText());
+    return env->NewStringUTF(result.c_str());
+  }
+  result += "\n" + Describe("temp dir exists", true, dir);
+
+  std::string tmpl = std::string(dir) + "/rishprobeXXXXXX";
+  std::vector<char> path(tmpl.begin(), tmpl.end());
+  path.push_back('\0');
+  int fd = ::mkstemp(path.data());
+  if (fd < 0) {
+    result += "\n" + Describe("create a temp file", false, ErrnoText());
+    return env->NewStringUTF(result.c_str());
+  }
+  result += "\n" + Describe("create a temp file", true, path.data());
+  // The same 64 MiB the scratch root disk is sized to.
+  if (::ftruncate(fd, 64L * 1024 * 1024) != 0) {
+    result += "\n" + Describe("size it to 64 MiB", false, ErrnoText());
+  } else {
+    result += "\n" + Describe("size it to 64 MiB", true, "");
+  }
+  struct statvfs vfs {};
+  if (::statvfs(dir, &vfs) == 0) {
+    unsigned long long free_mib =
+        (static_cast<unsigned long long>(vfs.f_bavail) * vfs.f_frsize) / (1024ull * 1024ull);
+    result += "\n" + Describe("free space", true, std::to_string(free_mib) + " MiB");
+  }
+  ::close(fd);
+  ::unlink(path.data());
+  return env->NewStringUTF(result.c_str());
 }
