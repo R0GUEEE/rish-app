@@ -139,6 +139,138 @@ internal class AndroidWorkspaceToolExecutor(
         }
     }
 
+    /**
+     * What a call asserts about the world before it runs, and what a person
+     * would be approving. The batch gate needs both before any effect: a
+     * precondition the ledger row carries, and a preview that never contains
+     * the file's bytes beyond the core's own prior-read cap.
+     *
+     * Shapes are the core's and iOS's, not this file's. A `read_file` asserts
+     * the revision it read; a `write_file` asserts the prior the caller
+     * claimed, and refuses when the disk disagrees -- that check is why a
+     * stale write is a conflict here rather than a silent overwrite later.
+     */
+    fun prepare(name: String, arguments: JSONObject, root: JSONObject): JSONObject {
+        if (name !in tools) throw Refused(INVALID)
+        val directory = rootDirectory(name, root)
+        return when (name) {
+            "list_dir" -> prepareList(directory, arguments)
+            "read_file" -> prepareRead(directory, arguments)
+            else -> prepareWrite(directory, arguments)
+        }
+    }
+
+    private fun prepareList(root: File, arguments: JSONObject): JSONObject {
+        val keys = arguments.keys().asSequence().toSet()
+        if (keys.isNotEmpty() && keys != setOf("path")) throw Refused(INVALID)
+        val requested = if (keys.isEmpty()) "" else path(arguments)
+        val parts = components(requested, allowRoot = true)
+        val directory = resolve(root, parts)
+        if (!directory.isDirectory) throw Refused(NOT_FOUND)
+        val names = (directory.listFiles() ?: throw Refused(PERSISTENCE))
+            .sortedBy { it.name }
+            .joinToString("\n") { "${it.name}:${if (it.isDirectory) "d" else "f"}" }
+        val fingerprint = RishAgentCoreNative.hashBytes(
+            "directory-listing", names.toByteArray(Charsets.UTF_8),
+        ) ?: throw Refused(PERSISTENCE)
+        return JSONObject()
+            .put(
+                "precondition",
+                JSONObject().put("schema_version", 1).put("kind", "list_dir")
+                    .put("directory_fingerprint_sha256", fingerprint),
+            )
+            .put("approval_preview", preview("list_dir", if (parts.isEmpty()) JSONArray() else JSONArray().put(requested)))
+    }
+
+    private fun prepareRead(root: File, arguments: JSONObject): JSONObject {
+        if (arguments.keys().asSequence().toSet() != setOf("path")) throw Refused(INVALID)
+        val requested = path(arguments)
+        val file = resolve(root, components(requested, allowRoot = false))
+        if (!file.isFile) throw Refused(NOT_FOUND)
+        return JSONObject()
+            .put(
+                "precondition",
+                JSONObject().put("schema_version", 1).put("kind", "read_file")
+                    .put("source_revision", revision(file)),
+            )
+            .put("approval_preview", preview("read_file", JSONArray().put(requested)))
+    }
+
+    private fun prepareWrite(root: File, arguments: JSONObject): JSONObject {
+        val content = arguments.opt("content")
+        if (content !is String) throw Refused(INVALID)
+        val requested = path(arguments)
+        val file = resolve(root, components(requested, allowRoot = false))
+        // Which prior a write asserts is the core's reading of its arguments,
+        // not this file's: a call naming neither form asserts the file absent.
+        val expected = rule(
+            JSONObject().put("op", "write_expected_prior").put("arguments", arguments),
+        ).optJSONObject("expected_prior") ?: throw Refused(INVALID)
+        val actual = if (file.isFile) {
+            JSONObject().put("schema_version", 1).put("kind", "known")
+                .put("revision", revision(file))
+        } else {
+            if (file.exists()) throw Refused(CONFLICT)
+            JSONObject().put("schema_version", 1).put("kind", "absent")
+        }
+        // Compared in the core's canonical form, not by toString(): two JSON
+        // objects with the same content can print their keys in different
+        // orders, and they did -- the core emits them sorted and a JSONObject
+        // built here keeps insertion order, so every fresh write looked like a
+        // conflict. "The same value" is the canonicaliser's answer, and it is
+        // the one both platforms already use to decide it.
+        val same = RishAgentCoreNative.canonical(expected.toString())
+            ?.let { it == RishAgentCoreNative.canonical(actual.toString()) } ?: false
+        if (!same) throw Refused(CONFLICT)
+        val bytes = content.toByteArray(Charsets.UTF_8)
+        val pathDigest = RishAgentCoreNative.hashBytes(
+            "relative-path", requested.toByteArray(Charsets.UTF_8),
+        ) ?: throw Refused(PERSISTENCE)
+        val contentDigest = RishAgentCoreNative.hashBytes("file-content", bytes)
+            ?: throw Refused(PERSISTENCE)
+        return JSONObject()
+            .put(
+                "precondition",
+                JSONObject().put("schema_version", 2).put("kind", "write_file")
+                    .put("relative_path_sha256", pathDigest).put("prior", actual)
+                    .put("content_sha256", contentDigest).put("content_bytes", bytes.size),
+            )
+            .put(
+                "approval_preview",
+                JSONObject().put("schema_version", 1).put("kind", "write_file")
+                    .put("paths", JSONArray().put(requested))
+                    .put("content_bytes", bytes.size)
+                    .put("prior", actual)
+                    .put("diff_preview", JSONObject.NULL)
+                    .put("diff_truncated", false),
+            )
+    }
+
+    /** A read never previews content; only what it would touch. */
+    private fun preview(kind: String, paths: JSONArray): JSONObject = JSONObject()
+        .put("schema_version", 1).put("kind", kind).put("paths", paths)
+        .put("content_bytes", JSONObject.NULL).put("prior", JSONObject.NULL)
+        .put("diff_preview", JSONObject.NULL).put("diff_truncated", false)
+
+    /** The directory a root names, with the capability the tool needs. */
+    private fun rootDirectory(name: String, root: JSONObject): File {
+        val workspaceId = root.optString("workspace_id").takeIf { it.isNotEmpty() }
+        val resolved = roots.resolve(
+            workspaceId = workspaceId,
+            projectId = root.opt("project_id")?.takeIf { it != JSONObject.NULL } as? String,
+            bindingRevision = root.opt("binding_revision") as? Int,
+        ) ?: throw Refused(CONFLICT)
+        val directory = workspaces.rootFor(workspaceId ?: throw Refused(CONFLICT))
+            ?: throw Refused(CONFLICT)
+        if (!directory.isDirectory) throw Refused(CONFLICT)
+        val capabilities = resolved.optJSONArray("capabilities") ?: JSONArray()
+        val needed = if (name == "write_file") "file_write" else "file_read"
+        if ((0 until capabilities.length()).none { capabilities.optString(it) == needed }) {
+            throw Refused(CONFLICT)
+        }
+        return directory
+    }
+
     private fun path(arguments: JSONObject, key: String = "path"): String {
         val value = arguments.opt(key)
         if (value !is String) throw Refused(INVALID)

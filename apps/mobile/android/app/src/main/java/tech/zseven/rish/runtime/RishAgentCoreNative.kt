@@ -49,6 +49,12 @@ internal object RishAgentCoreNative {
      */
     @JvmStatic external fun workspaceToolReduce(requestJson: String): String?
 
+    /** `DSHAgentHB`: SHA-256 over tagged raw bytes. */
+    @JvmStatic external fun hashBytes(tag: String, bytes: ByteArray): String?
+
+    /** The canonical form of tool arguments the strict parser accepts. */
+    @JvmStatic external fun parseArguments(requestJson: String): String?
+
     // The rest of the core's decision surface, bound in one go rather than one
     // at a time as each layer above turned out to need it. A binding is not an
     // implementation: these say only that the rule can be asked from here.

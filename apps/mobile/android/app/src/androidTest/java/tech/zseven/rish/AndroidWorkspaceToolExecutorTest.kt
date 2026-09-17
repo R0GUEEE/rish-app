@@ -135,4 +135,63 @@ class AndroidWorkspaceToolExecutorTest {
         }
         assertTrue(refused)
     }
+
+    /**
+     * The preparation step is what the batch gate needs before any effect: what
+     * the call asserts about the world, and what a person would be approving.
+     */
+    @Test
+    fun preparingACallStatesWhatItAsserts() = fixture { executor, root, _ ->
+        executor.execute("write_file", JSONObject().put("path", "a.txt").put("content", "a"), root)
+
+        val read = executor.prepare("read_file", JSONObject().put("path", "a.txt"), root)
+        val readCondition = read.getJSONObject("precondition")
+        assertEquals("read_file", readCondition.getString("kind"))
+        assertTrue(readCondition.getString("source_revision").contains(":"))
+        // A preview never carries the file's bytes.
+        assertTrue(read.getJSONObject("approval_preview").isNull("content_bytes"))
+
+        val list = executor.prepare("list_dir", JSONObject(), root)
+        assertEquals(
+            64,
+            list.getJSONObject("precondition").getString("directory_fingerprint_sha256").length,
+        )
+    }
+
+    /**
+     * A write asserts the prior it expects, and the disk has to agree. This is
+     * the check that makes a stale write a conflict now rather than a silent
+     * overwrite later, so it has to refuse both ways round.
+     */
+    @Test
+    fun aWriteWhosePriorIsWrongIsRefusedBeforeAnythingHappens() = fixture { executor, root, directory ->
+        // Absent is what a write with no expected_revision asserts.
+        val fresh = executor.prepare(
+            "write_file",
+            JSONObject().put("path", "new.txt").put("content", "hello"),
+            root,
+        )
+        val condition = fresh.getJSONObject("precondition")
+        assertEquals("write_file", condition.getString("kind"))
+        assertEquals("absent", condition.getJSONObject("prior").getString("kind"))
+        assertEquals(5, condition.getInt("content_bytes"))
+        assertEquals(64, condition.getString("relative_path_sha256").length)
+        assertEquals(64, condition.getString("content_sha256").length)
+        // Nothing was written by preparing.
+        assertFalse(File(directory, "new.txt").exists())
+
+        // Once the file exists, the same call asserts a prior that is wrong.
+        executor.execute("write_file", JSONObject().put("path", "new.txt").put("content", "x"), root)
+        val refused = try {
+            executor.prepare(
+                "write_file",
+                JSONObject().put("path", "new.txt").put("content", "hello"),
+                root,
+            )
+            false
+        } catch (_: AndroidWorkspaceToolExecutor.Refused) {
+            true
+        }
+        assertTrue("a write asserting absence over an existing file must be refused", refused)
+    }
 }

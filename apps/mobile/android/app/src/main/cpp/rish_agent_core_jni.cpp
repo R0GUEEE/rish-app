@@ -219,6 +219,33 @@ Java_tech_zseven_rish_runtime_RishAgentCoreNative_walOperationReduce(
   return TakeOwnedReply(env, rish_agent_wal_operation_reduce(utf8.data(), utf8.size()));
 }
 
+// SHA-256 over raw bytes with a tagged prefix. A write's precondition names
+// the path and the content by these digests, and a host that spelled them
+// itself would be inventing an identity two platforms have to agree on.
+extern "C" JNIEXPORT jstring JNICALL
+Java_tech_zseven_rish_runtime_RishAgentCoreNative_hashBytes(
+    JNIEnv *env, jclass, jstring tag, jbyteArray bytes) {
+  std::string tagUtf8;
+  if (tag == nullptr || !JStringToUtf8(env, tag, &tagUtf8)) return nullptr;
+  if (bytes == nullptr) return nullptr;
+  jsize length = env->GetArrayLength(bytes);
+  std::vector<uint8_t> buffer(static_cast<size_t>(length));
+  if (length > 0) {
+    env->GetByteArrayRegion(bytes, 0, length, reinterpret_cast<jbyte *>(buffer.data()));
+  }
+  return TakeOwnedReply(env, rish_agent_hash_bytes(
+      tagUtf8.data(), tagUtf8.size(), buffer.data(), buffer.size()));
+}
+
+/// The canonical form of tool arguments, when the strict parser accepts them.
+extern "C" JNIEXPORT jstring JNICALL
+Java_tech_zseven_rish_runtime_RishAgentCoreNative_parseArguments(
+    JNIEnv *env, jclass, jstring request) {
+  std::string utf8;
+  if (request == nullptr || !JStringToUtf8(env, request, &utf8)) return nullptr;
+  return TakeOwnedReply(env, rish_agent_parse_arguments(utf8.data(), utf8.size()));
+}
+
 // The rest of the core's decision surface. Android bound 29 of the 47 entry
 // points, and the eighteen below were the ones the agent path needed: a tool
 // batch, a tool execution, a ledger batch, a provider round, a policy. Each
