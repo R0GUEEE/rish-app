@@ -3838,14 +3838,19 @@ export function HomeScreen({
     [destructiveAuthorityActive, nativeAvailable, projectContextController],
   );
 
+  // The drawer is admitted with rootSurfaceAdmissionAllowed(true), which
+  // tolerates a settled recovery. An action that refuses what admission
+  // allowed is a button that does nothing and says nothing, so an entry guard
+  // asks with the same tolerance and routes to the recovery sheet itself.
+  // Re-validation after an await stays strict: nothing destructive proceeds.
   const drawerSourceIsLive = useCallback(
-    (expectedEpoch: number) =>
+    (expectedEpoch: number, allowSettledDirectRecovery = false) =>
       (!nativeAvailable || sessionProjectionReady.current) &&
       lifecycleBootstrapReadyRef.current &&
       (wideLayout || drawerVisibleRef.current) &&
       drawerSurfaceEpoch.current === expectedEpoch &&
       !contextSheetVisibleRef.current &&
-      !destructiveAuthorityActive() &&
+      !destructiveAuthorityActive(allowSettledDirectRecovery) &&
       !projectContextOperationInFlight(projectContextController.getState()),
     [destructiveAuthorityActive, nativeAvailable, projectContextController, wideLayout],
   );
@@ -3873,7 +3878,7 @@ export function HomeScreen({
   ) => {
     if (
       navigationMutationInFlight.current ||
-      !drawerSourceIsLive(expectedDrawerEpoch)
+      !drawerSourceIsLive(expectedDrawerEpoch, true)
     )
       return;
     navigationMutationInFlight.current = true;
@@ -3980,7 +3985,7 @@ export function HomeScreen({
     async (id: string, expectedDrawerEpoch: number) => {
       if (
         navigationMutationInFlight.current ||
-        !drawerSourceIsLive(expectedDrawerEpoch)
+        !drawerSourceIsLive(expectedDrawerEpoch, true)
       )
         return;
       navigationMutationInFlight.current = true;

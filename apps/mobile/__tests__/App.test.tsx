@@ -5411,6 +5411,53 @@ describe('project context Home integration H3', () => {
     expect(actionByLabel(root, 'Pending project cleanup')).toBeDefined();
   });
 
+  // The Drawer is admitted while this recovery is settled, so its actions have
+  // to answer. Refusing what admission allowed made New chat do nothing at all
+  // and say nothing, with no way to reach the recovery it was waiting on.
+  test('routes New chat to direct recovery while an ambiguous write is settled', async () => {
+    const fixture = storedSetupProject();
+    queuePresentSession(fixture.stored.serialize());
+    const persisted = deferred<boolean>();
+    const renderer = await renderAppOpeningStoredConversation();
+    const root = renderer.root;
+    mockSessionSnapshots.casPersistSession.mockImplementationOnce(
+      async request => {
+        const saved = await persisted.promise;
+        return saved ? commitBridgedCandidate(request) : unknownResult();
+      },
+    );
+    await openProjectsSurface(root);
+    await act(async () => {
+      root.findByType(ProjectsSurface).props.onUnbindFromChat();
+      await settle();
+    });
+    await act(async () => root.findByType(ProjectsSurface).props.onClose());
+    mockSessionSnapshots.querySessionCommit.mockResolvedValueOnce({
+      schema_version: 1,
+      status: 'unknown',
+    });
+    persisted.resolve(false);
+    await act(async () => {
+      await settle();
+      await settle();
+      root.findByType(ProjectsSurface).props.onDismiss();
+    });
+
+    await act(async () => actionByLabel(root, 'Open navigation').props.onPress());
+    expect(root.findByType(ChatDrawer).props.visible).toBe(true);
+    const openedConversationId = root.findByType(ChatDrawer).props.activeId;
+
+    await act(async () => {
+      await root.findByType(ChatDrawer).props.onNewChat();
+      root.findByType(ChatDrawer).props.onDismiss();
+      await settle();
+    });
+
+    expect(root.findByType(ChatDrawer).props.visible).toBe(false);
+    expect(root.findByType(ChatDrawer).props.activeId).toBe(openedConversationId);
+    expect(visibleContextSheets(root)).toHaveLength(1);
+  });
+
   test('drops a queued Drawer opener when bootstrap restores lifecycle recovery first', async () => {
     const loaded = deferred<string | null>();
     const fixture = storedLifecycleCheckpoint('cleanup_pending');
