@@ -49,6 +49,27 @@ internal object RishAgentCoreNative {
      */
     @JvmStatic external fun workspaceToolReduce(requestJson: String): String?
 
+    // The rest of the core's decision surface, bound in one go rather than one
+    // at a time as each layer above turned out to need it. A binding is not an
+    // implementation: these say only that the rule can be asked from here.
+    @JvmStatic external fun completionResponseReduce(requestJson: String): String?
+    @JvmStatic external fun containerAnchorReduce(requestJson: String): String?
+    @JvmStatic external fun gitToolReduce(requestJson: String): String?
+    @JvmStatic external fun ledgerBatchReduce(requestJson: String): String?
+    @JvmStatic external fun policyReduce(requestJson: String): String?
+    @JvmStatic external fun projectAccessReduce(requestJson: String): String?
+    @JvmStatic external fun projectContextBridgeReduce(requestJson: String): String?
+    @JvmStatic external fun projectContextReduce(requestJson: String, content: ByteArray?): String?
+    @JvmStatic external fun projectContextServiceReduce(requestJson: String): String?
+    @JvmStatic external fun projectContextStoreReduce(requestJson: String): String?
+    @JvmStatic external fun projectModuleReduce(requestJson: String): String?
+    @JvmStatic external fun providerRoundReduce(requestJson: String): String?
+    @JvmStatic external fun toolBatchReduce(requestJson: String): String?
+    @JvmStatic external fun toolExecutionReduce(requestJson: String): String?
+    @JvmStatic external fun workspaceClearanceReduce(requestJson: String): String?
+    @JvmStatic external fun workspaceErrorReduce(requestJson: String): String?
+    @JvmStatic external fun workspaceReadToolsReduce(requestJson: String): String?
+
     /** One runtime-coordinator decision. */
     @JvmStatic external fun runtimeReduce(requestJson: String): String?
 
