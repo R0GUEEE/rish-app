@@ -24,22 +24,36 @@ import tech.zseven.rish.runtime.RuntimeJson
  * (RCT_EXPORT_MODULE(AgentRuntime)) and the JS wrapper in
  * apps/mobile/src/native/AgentRuntime.ts.
  *
- * `prepare_agent_attempt` is served: it reads the committed session and writes
- * the agent WAL through the shared core, exactly as iOS does. Every attempt
- * here is **rootless**, because Android resolves no workspace root, so the core
- * commits it as `not_agent` / `E_AGENT_NO_ROOT` — a definite answer meaning
- * "this attempt gets no agent authority", not "there is no agent engine". The
- * rest of the surface still rejects with "E_AGENT_NATIVE".
+ * The five operations a turn walks through are served, each through the shared
+ * core and the same reducers iOS calls: `prepare_agent_attempt`,
+ * `complete_agent_round_v2`, `prepare_agent_tool_batch`, `bind_agent_approval`
+ * and `execute_agent_tool`, and the two that end it, `finalize_agent_attempt`
+ * and `discard_agent_attempt`. Attempts are no longer rootless -- this platform
+ * resolves a workspace root through AndroidWorkspaceRegistry, so an attempt
+ * bound to a directory gets real agent authority over it.
  *
- * `implemented` stays false: the JS layer reads it as "the whole agent surface
- * is available", and one served operation is not that.
+ * **`implemented` is now true, and that turns the whole surface on.** The JS
+ * layer reads it as "this runtime may be used at all": with it false, nothing
+ * below is ever called. So it cannot be flipped one operation at a time, and
+ * flipping it is a statement about what still refuses:
+ *
+ * - `cancel_agent_attempt`, `recover_agent_attempt` and `query_agent_attempt`
+ *   still reject. The controller calls them to stop a run and to pick one up
+ *   after a kill. Until they are served, stopping a turn and resuming one
+ *   across a restart both fail -- loudly, with E_AGENT_NATIVE, rather than
+ *   silently doing the wrong thing.
+ * - `interrupt_agent_attempt`, `query_agent_tool` and `query_agent_cleanup`
+ *   reject too; the controller does not call them.
+ *
+ * Streaming is also absent: a round's text arrives whole rather than as it is
+ * written.
  */
 class AgentRuntimeModule(reactContext: ReactApplicationContext) :
     ReactContextBaseJavaModule(reactContext) {
 
     private val runtime = AndroidRuntimeState.get(reactContext)
 
-    override fun getConstants(): MutableMap<String, Any> = mutableMapOf("implemented" to false)
+    override fun getConstants(): MutableMap<String, Any> = mutableMapOf("implemented" to true)
 
     override fun getName(): String = "AgentRuntime"
 
