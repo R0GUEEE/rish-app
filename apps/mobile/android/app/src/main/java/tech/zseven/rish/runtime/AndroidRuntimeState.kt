@@ -33,6 +33,7 @@ internal class AndroidRuntimeState private constructor(val app: Application) {
     )
     /// The native operation relation every settling operation writes through.
     val agentOperations = AndroidAgentOperations(agentWal)
+    val lifecycle = AndroidAgentLifecycleService(agentWal, sessions, agentOperations, roots)
     val approvals = AndroidAgentApprovalService(
         agentWal, sessions, executionLedger, agentOperations, roots,
     )

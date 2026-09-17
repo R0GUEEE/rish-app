@@ -10,6 +10,7 @@ import org.json.JSONObject
 import tech.zseven.rish.RishUnavailable
 import tech.zseven.rish.runtime.AndroidAgentProviderRoundService
 import tech.zseven.rish.runtime.AndroidAgentApprovalService
+import tech.zseven.rish.runtime.AndroidAgentLifecycleService
 import tech.zseven.rish.runtime.AndroidAgentToolBatchService
 import tech.zseven.rish.runtime.AndroidAgentToolExecutionService
 import tech.zseven.rish.runtime.AndroidPreparedAttemptStore
@@ -173,10 +174,44 @@ class AgentRuntimeModule(reactContext: ReactApplicationContext) :
     fun recover_agent_attempt(request: ReadableMap?, promise: Promise) = RishUnavailable.reject("AgentRuntime", "E_AGENT_NATIVE", promise)
 
     @ReactMethod
-    fun finalize_agent_attempt(request: ReadableMap?, promise: Promise) = RishUnavailable.reject("AgentRuntime", "E_AGENT_NATIVE", promise)
+    fun finalize_agent_attempt(request: ReadableMap?, promise: Promise) {
+        val captured = try {
+            JSONObject(requireNotNull(request).toHashMap())
+        } catch (_: Exception) {
+            promise.reject("E_AGENT_BAD_ARGUMENTS", "Agent attempt could not be finalized")
+            return
+        }
+        runtime.io.execute {
+            try {
+                val result = runtime.lifecycle.finalize(captured)
+                promise.resolve(Arguments.makeNativeMap(RuntimeJson.map(result)))
+            } catch (refused: AndroidAgentLifecycleService.Refused) {
+                promise.reject(refused.code, "Agent attempt could not be finalized")
+            } catch (_: Exception) {
+                promise.reject("E_AGENT_NATIVE", "Agent attempt could not be finalized")
+            }
+        }
+    }
 
     @ReactMethod
-    fun discard_agent_attempt(request: ReadableMap?, promise: Promise) = RishUnavailable.reject("AgentRuntime", "E_AGENT_NATIVE", promise)
+    fun discard_agent_attempt(request: ReadableMap?, promise: Promise) {
+        val captured = try {
+            JSONObject(requireNotNull(request).toHashMap())
+        } catch (_: Exception) {
+            promise.reject("E_AGENT_BAD_ARGUMENTS", "Agent attempt could not be discarded")
+            return
+        }
+        runtime.io.execute {
+            try {
+                val result = runtime.lifecycle.discard(captured)
+                promise.resolve(Arguments.makeNativeMap(RuntimeJson.map(result)))
+            } catch (refused: AndroidAgentLifecycleService.Refused) {
+                promise.reject(refused.code, "Agent attempt could not be discarded")
+            } catch (_: Exception) {
+                promise.reject("E_AGENT_NATIVE", "Agent attempt could not be discarded")
+            }
+        }
+    }
 
     @ReactMethod
     fun query_agent_cleanup(request: ReadableMap?, promise: Promise) = RishUnavailable.reject("AgentRuntime", "E_AGENT_NATIVE", promise)

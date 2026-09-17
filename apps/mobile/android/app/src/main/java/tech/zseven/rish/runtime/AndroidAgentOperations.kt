@@ -136,6 +136,55 @@ internal class AndroidAgentOperations(private val wal: AndroidAgentWal) {
         )
     }
 
+    /**
+     * What the relation already knows about one request: `not_started`,
+     * `found` with the record, or `conflict` when this operation id was used
+     * for a different request.
+     */
+    fun queryInState(
+        state: JSONObject,
+        operationId: Any?,
+        requestSha256: Any?,
+        taskId: Any?,
+        attemptId: Any?,
+    ): JSONObject {
+        val arguments = JSONObject()
+            .put("operation_id", operationId).put("request_sha256", requestSha256)
+            .put("task_id", taskId).put("attempt_id", attemptId)
+        val reply = reduce(
+            JSONObject().put("op", "query").put("state", state)
+                .put("arguments", arguments).put("timestamp", ""),
+        )
+        return when (reply.optString("result")) {
+            "replay" -> reply.optJSONObject("output") ?: throw Refused(NATIVE)
+            else -> throw Refused(codeFor(reply.optInt("error", 2)))
+        }
+    }
+
+    /**
+     * The digest the relation identifies a request by. The core derives it
+     * from the operation kind, so this only names the kind.
+     */
+    fun requestSha256(kind: String, request: JSONObject): String =
+        RishAgentCoreNative.hash(
+            "agent-operation-request",
+            JSONObject().put("operation_kind", kind).put("request", request),
+        )
+
+    /** Applies a commit descriptor the coordinator decided. */
+    fun commitDecidedInState(state: JSONObject, commit: JSONObject, timestamp: String): JSONObject =
+        commitInState(
+            state,
+            commit.opt("operation_id"), commit.opt("request_sha256"),
+            commit.opt("task_id"), commit.opt("attempt_id"),
+            commit.optString("terminal_state"), commit.optString("result_status"),
+            commit.optJSONObject("result_ref")
+                ?: JSONObject().put("schema_version", 2).put("kind", "none"),
+            commit.opt("result_revision")?.takeIf { it != JSONObject.NULL },
+            commit.optJSONObject("safe_result") ?: throw Refused(NATIVE),
+            timestamp,
+        )
+
     /** What a settled operation answered, from a commit or start envelope. */
     fun settledResult(envelope: JSONObject?): JSONObject? =
         envelope?.optJSONObject("result")?.optJSONObject("result")
