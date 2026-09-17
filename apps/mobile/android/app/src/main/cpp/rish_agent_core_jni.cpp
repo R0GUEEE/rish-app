@@ -220,6 +220,14 @@ Java_tech_zseven_rish_runtime_RishAgentCoreNative_walOperationReduce(
 }
 
 extern "C" JNIEXPORT jstring JNICALL
+Java_tech_zseven_rish_runtime_RishAgentCoreNative_workspaceToolReduce(
+    JNIEnv *env, jclass, jstring request) {
+  std::string utf8;
+  if (request == nullptr || !JStringToUtf8(env, request, &utf8)) return nullptr;
+  return TakeOwnedReply(env, rish_agent_workspace_tool_reduce(utf8.data(), utf8.size()));
+}
+
+extern "C" JNIEXPORT jstring JNICALL
 Java_tech_zseven_rish_runtime_RishAgentCoreNative_runtimeReduce(
     JNIEnv *env, jclass, jstring request) {
   std::string utf8;

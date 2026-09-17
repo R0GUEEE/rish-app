@@ -42,6 +42,13 @@ internal object RishAgentCoreNative {
     /** One WAL operation-relation decision. */
     @JvmStatic external fun walOperationReduce(requestJson: String): String?
 
+    /**
+     * One workspace-tool decision: what a file tool may read or write, what a
+     * listing includes, what a refusal is called. The host opens the file; the
+     * rule about it is the core's, and it is the same rule iOS asks.
+     */
+    @JvmStatic external fun workspaceToolReduce(requestJson: String): String?
+
     /** One runtime-coordinator decision. */
     @JvmStatic external fun runtimeReduce(requestJson: String): String?
 
@@ -247,6 +254,10 @@ internal object RishAgentCoreNative {
 
     fun workspaceDirectoryName(request: JSONObject): JSONObject? =
         workspaceReply(request) { workspaceDirectoryNameReduceNative(it) }
+
+    /** What a file tool may do, decided by the same rule iOS asks. */
+    fun workspaceTool(request: JSONObject): JSONObject? =
+        workspaceReply(request) { workspaceToolReduce(it) }
 
     private inline fun workspaceReply(
         request: JSONObject,
