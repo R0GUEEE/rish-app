@@ -2129,6 +2129,11 @@ export function HomeScreen({
       return;
     }
     let restoredSelection = false;
+    // Set only once the probe effect below has been handed the job of
+    // clearing runtimeChecking. A throw before that point must not leave
+    // the flag set: Retry load is disabled by it, and retrySessionLoad
+    // refuses on it too, so the only offered way out would be gone.
+    let probeOwnsRuntimeChecking = false;
     try {
       const load = sessionAvailable
         ? await sessionPersistence.loadSessionSnapshotOutcome()
@@ -2194,6 +2199,7 @@ export function HomeScreen({
       setSelectionHydrated(restoredSelection);
       lifecycleBootstrapReadyRef.current = restoredSelection;
       setLifecycleBootstrapReady(restoredSelection);
+      probeOwnsRuntimeChecking = restoredSelection;
       if (
         restoredSelection &&
         store.getState().projectContextDestructiveTransition === null &&
@@ -2216,7 +2222,7 @@ export function HomeScreen({
         ensureConversation();
       setChatState(store.getState());
     } finally {
-      if (!restoredSelection) setRuntimeChecking(false);
+      if (!probeOwnsRuntimeChecking) setRuntimeChecking(false);
       if (!restoredSelection) {
         lifecycleBootstrapReadyRef.current = false;
         setLifecycleBootstrapReady(false);
@@ -3495,6 +3501,7 @@ export function HomeScreen({
       return;
     }
     lifecycleActionInFlight.current = true;
+    try {
     if (
       !(await projectContextController.beforeConversationChange(
         expected.conversationId,
@@ -3529,6 +3536,13 @@ export function HomeScreen({
       expected.conversationId,
       expected.selectedConversationId,
     );
+    } finally {
+      // finishLifecycleOutcome releases this, but only when it is reached.
+      // A rejected await before it stranded the flag, and every lifecycle
+      // recovery control is gated on it -- as is destructiveAuthorityActive,
+      // so conversation switching went with it.
+      lifecycleActionInFlight.current = false;
+    }
   }, [
     completionController,
     finishLifecycleOutcome,
@@ -3554,16 +3568,24 @@ export function HomeScreen({
         return;
       }
       lifecycleActionInFlight.current = true;
-      const result =
-        await projectContextLifecycleController.retryDestructivePersistence(
-          expected,
+      try {
+        const result =
+          await projectContextLifecycleController.retryDestructivePersistence(
+            expected,
+          );
+        await finishLifecycleOutcome(
+          result,
+          expected.action,
+          expected.conversationId,
+          store.getState().selectedConversationId,
         );
-      await finishLifecycleOutcome(
-        result,
-        expected.action,
-        expected.conversationId,
-        store.getState().selectedConversationId,
-      );
+      } finally {
+      // finishLifecycleOutcome releases this, but only when it is reached.
+      // A rejected await before it stranded the flag, and every lifecycle
+      // recovery control is gated on it -- as is destructiveAuthorityActive,
+      // so conversation switching went with it.
+        lifecycleActionInFlight.current = false;
+      }
     }, [finishLifecycleOutcome, projectContextLifecycleController, store],
   );
 
@@ -3584,16 +3606,22 @@ export function HomeScreen({
         return;
       }
       lifecycleActionInFlight.current = true;
-      const result =
-        await projectContextLifecycleController.retryDestructiveCleanup(
-          expected,
+      try {
+        const result =
+          await projectContextLifecycleController.retryDestructiveCleanup(
+            expected,
+          );
+        await finishLifecycleOutcome(
+          result,
+          expected.action,
+          expected.conversationId,
+          store.getState().selectedConversationId,
         );
-      await finishLifecycleOutcome(
-        result,
-        expected.action,
-        expected.conversationId,
-        store.getState().selectedConversationId,
-      );
+      } finally {
+        // See confirmLifecycleIntent: the flag has to be released whatever the
+        // await does, or every lifecycle recovery control stays inert.
+        lifecycleActionInFlight.current = false;
+      }
     }, [finishLifecycleOutcome, projectContextLifecycleController, store],
   );
 
