@@ -2,6 +2,8 @@ package tech.zseven.rish.guestprobe
 
 import android.app.Activity
 import android.app.ActivityManager
+import android.content.ClipData
+import android.content.ClipboardManager
 import android.content.Context
 import android.content.Intent
 import android.provider.Settings
@@ -19,6 +21,7 @@ import android.view.ViewGroup.LayoutParams.WRAP_CONTENT
 import android.widget.Button
 import android.widget.LinearLayout
 import android.widget.TextView
+import android.widget.Toast
 import tech.zseven.rish.guest.AndroidGuestAssets
 import tech.zseven.rish.guest.GuestAssets
 import tech.zseven.rish.guest.GuestRuntimeState
@@ -48,6 +51,7 @@ class GuestProbeActivity : Activity() {
     private lateinit var output: TextView
     private lateinit var run: Button
     private lateinit var settings: Button
+    private lateinit var copy: Button
     private val main = Handler(Looper.getMainLooper())
     @Volatile private var running = false
     private var failures = 0
@@ -74,6 +78,18 @@ class GuestProbeActivity : Activity() {
             text = "Try to open developer settings"
             setOnClickListener { openSettings() }
         }
+        // The report is the whole deliverable and it leaves this device by
+        // hand. Photographing a scrolling log loses most of it.
+        copy = Button(this).apply {
+            text = "Copy report"
+            setOnClickListener {
+                val text = output.text.toString()
+                (getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager)
+                    .setPrimaryClip(ClipData.newPlainText("rish guest probe", text))
+                Toast.makeText(this@GuestProbeActivity,
+                    "Copied ${text.length} characters", Toast.LENGTH_SHORT).show()
+            }
+        }
         output = TextView(this).apply {
             typeface = Typeface.MONOSPACE
             setTextSize(TypedValue.COMPLEX_UNIT_SP, 11f)
@@ -84,6 +100,7 @@ class GuestProbeActivity : Activity() {
         }
         root.addView(run, LinearLayout.LayoutParams(MATCH_PARENT, WRAP_CONTENT))
         root.addView(settings, LinearLayout.LayoutParams(MATCH_PARENT, WRAP_CONTENT))
+        root.addView(copy, LinearLayout.LayoutParams(MATCH_PARENT, WRAP_CONTENT))
         root.addView(output, LinearLayout.LayoutParams(MATCH_PARENT, MATCH_PARENT))
         setContentView(root)
         header()
@@ -223,6 +240,35 @@ class GuestProbeActivity : Activity() {
         return call
     }
 
+    /**
+     * Why the boot could have failed in 30ms without reading a 12 MiB kernel.
+     * The rejection code cannot say, and on the device that matters the log
+     * carried nothing from the runtime, so ask the three questions directly.
+     */
+    private fun diagnose() {
+        line("")
+        line("== native diagnostics ==")
+        if (!NativeProbe.available) {
+            line("  libguestprobe_jni.so did not load; no native answers available")
+            return
+        }
+        val staged = try {
+            AndroidGuestAssets(this).stage()
+        } catch (error: Throwable) {
+            line("  staging threw ${error.javaClass.simpleName}: ${error.message}")
+            null
+        }
+        if (staged != null) {
+            line("  kernel    ${staged.kernelPath}")
+            NativeProbe.readFile(staged.kernelPath).lines().forEach { line("    $it") }
+            line("  initramfs ${staged.initramfsPath}")
+            NativeProbe.readFile(staged.initramfsPath).lines().forEach { line("    $it") }
+        }
+        line("  ${NativeProbe.mapAnonymous(768)}")
+        line("  ${NativeProbe.mapAnonymous(256)}")
+        line("  ${NativeProbe.mapExecutable()}")
+    }
+
     private fun probe() {
         val started = System.currentTimeMillis()
         var booted = false
@@ -266,7 +312,8 @@ class GuestProbeActivity : Activity() {
             }
 
             if (!booted) {
-                dumpOwnLog(60)
+                diagnose()
+                dumpOwnLog(25)
             } else {
                 check("status == booted", receipt!!["status"] == "booted", "got ${receipt["status"]}")
                 check("kernel name matches", receipt["kernel"] == GuestAssets.KERNEL_NAME, "got ${receipt["kernel"]}")
@@ -342,11 +389,12 @@ class GuestProbeActivity : Activity() {
 
     /** Always the last thing printed, whatever happened above it. */
     private fun summarise(started: Long, booted: Boolean) {
-        val seconds = (System.currentTimeMillis() - started) / 1000
+        val elapsed = System.currentTimeMillis() - started
+        val seconds = if (elapsed >= 1000) "${elapsed / 1000}s" else "${elapsed}ms"
         val verdict = when {
-            failures == 0 -> "ALL $checks CHECKS PASSED in ${seconds}s"
-            !booted -> "$failures of $checks CHECKS FAILED in ${seconds}s -- the guest did not boot here"
-            else -> "$failures of $checks CHECKS FAILED in ${seconds}s"
+            failures == 0 -> "ALL $checks CHECKS PASSED in ${seconds}"
+            !booted -> "$failures of $checks CHECKS FAILED in $seconds -- the guest did not boot here"
+            else -> "$failures of $checks CHECKS FAILED in $seconds"
         }
         main.post {
             running = false
