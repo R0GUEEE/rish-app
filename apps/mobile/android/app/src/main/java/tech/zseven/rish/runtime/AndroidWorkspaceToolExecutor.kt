@@ -149,11 +149,22 @@ internal class AndroidWorkspaceToolExecutor(
     fun prepare(name: String, arguments: JSONObject, root: JSONObject): JSONObject {
         if (name !in tools) throw Refused(INVALID)
         val directory = rootDirectory(name, root)
-        return when (name) {
+        val prepared = when (name) {
             "list_dir" -> prepareList(directory, arguments)
             "read_file" -> prepareRead(directory, arguments)
             else -> prepareWrite(directory, arguments)
         }
+        // What the call reserves is part of the prepared shape, not an extra:
+        // the ledger holds a write's reservation to its precondition's
+        // content_bytes, and a prepared call that omits the key reserves zero
+        // -- which refuses every write batch as a conflict. Only a write
+        // reserves anything, exactly as iOS reports it.
+        val reserved = if (name == "write_file") {
+            prepared.getJSONObject("precondition").optInt("content_bytes")
+        } else {
+            0
+        }
+        return prepared.put("schema_version", 1).put("reserved_write_bytes", reserved)
     }
 
     private fun prepareList(root: File, arguments: JSONObject): JSONObject {
@@ -163,12 +174,11 @@ internal class AndroidWorkspaceToolExecutor(
         val parts = components(requested, allowRoot = true)
         val directory = resolve(root, parts)
         if (!directory.isDirectory) throw Refused(NOT_FOUND)
-        val names = (directory.listFiles() ?: throw Refused(PERSISTENCE))
-            .sortedBy { it.name }
-            .joinToString("\n") { "${it.name}:${if (it.isDirectory) "d" else "f"}" }
-        val fingerprint = RishAgentCoreNative.hashBytes(
-            "directory-listing", names.toByteArray(Charsets.UTF_8),
-        ) ?: throw Refused(PERSISTENCE)
+        // The fingerprint a listing asserts is the core's, over the public
+        // entries it would report -- not one this file invents. A home-made
+        // digest agrees with nothing the ledger or the other platform computes.
+        val fingerprint = listing(directory).optString("directory_fingerprint_sha256")
+            .takeIf { it.isNotEmpty() } ?: throw Refused(PERSISTENCE)
         return JSONObject()
             .put(
                 "precondition",
@@ -218,6 +228,16 @@ internal class AndroidWorkspaceToolExecutor(
         val same = RishAgentCoreNative.canonical(expected.toString())
             ?.let { it == RishAgentCoreNative.canonical(actual.toString()) } ?: false
         if (!same) throw Refused(CONFLICT)
+        // The preview's prior is not the precondition's: the ledger validates
+        // it as exactly {schema_version, kind, bytes}, so a `revision` there --
+        // or a missing `bytes` -- refuses the whole batch as invalid. iOS
+        // builds the two shapes separately for the same reason.
+        val priorPreview = JSONObject().put("schema_version", 1)
+            .put("kind", actual.optString("kind"))
+            .put(
+                "bytes",
+                if (file.isFile) file.length().toInt() else JSONObject.NULL,
+            )
         val bytes = content.toByteArray(Charsets.UTF_8)
         val pathDigest = RishAgentCoreNative.hashBytes(
             "relative-path", requested.toByteArray(Charsets.UTF_8),
@@ -236,7 +256,7 @@ internal class AndroidWorkspaceToolExecutor(
                 JSONObject().put("schema_version", 1).put("kind", "write_file")
                     .put("paths", JSONArray().put(requested))
                     .put("content_bytes", bytes.size)
-                    .put("prior", actual)
+                    .put("prior", priorPreview)
                     .put("diff_preview", JSONObject.NULL)
                     .put("diff_truncated", false),
             )
@@ -269,6 +289,60 @@ internal class AndroidWorkspaceToolExecutor(
         return value
     }
 
+    /**
+     * What a finished tool reports, in the one shape the ledger settles.
+     *
+     * `feedback` is the canonical JSON *string* of the model-facing object,
+     * built and validated by the core: the settlement reducer parses it, hashes
+     * it and holds it to the feedback contract, so a host that returns its own
+     * loose object settles nothing. `settled_facts` is what the row records
+     * about the world afterwards, and `effect_may_have_occurred` is the only
+     * thing a retry needs to know.
+     */
+    private fun effect(
+        feedback: String,
+        settledFacts: Any,
+        truncated: Boolean,
+        mayHaveOccurred: Boolean,
+    ): JSONObject = JSONObject().put("schema_version", 1)
+        .put("status", "ok").put("feedback", feedback)
+        .put("settled_facts", settledFacts).put("truncated", truncated)
+        .put("effect_may_have_occurred", mayHaveOccurred)
+
+    /** The core's canonical feedback string, or null when it will not fit. */
+    private fun feedbackOrNull(name: String, payload: JSONObject): String? =
+        RishAgentCoreNative.workspaceTool(
+            JSONObject().put("op", "feedback").put(
+                "feedback",
+                JSONObject().put("schema_version", 1).put("name", name)
+                    .put("outcome", "ok").put("payload", payload),
+            ),
+        )?.optString("feedback")?.takeIf { it.isNotEmpty() }
+
+    /** Plain SHA-256, hex: what the feedback payload's `sha256` means. */
+    private fun sha256(bytes: ByteArray): String =
+        java.security.MessageDigest.getInstance("SHA-256").digest(bytes)
+            .joinToString("") { "%02x".format(it) }
+
+    /**
+     * The directory as the core reads it: which entries are public, and the
+     * fingerprint over them. Both sides of a listing -- what a call asserts
+     * when it is prepared and what it reports when it runs -- come from here,
+     * so the two cannot disagree.
+     */
+    private fun listing(directory: File): JSONObject {
+        val children = directory.listFiles() ?: throw Refused(PERSISTENCE)
+        val entries = JSONArray()
+        for (child in children.sortedBy { it.name }) {
+            entries.put(
+                JSONObject().put("name", child.name)
+                    .put("kind", if (child.isDirectory) "directory" else "file")
+                    .put("revision", revision(child)),
+            )
+        }
+        return rule(JSONObject().put("op", "directory_listing").put("entries", entries))
+    }
+
     private fun readFile(root: File, arguments: JSONObject): JSONObject {
         if (arguments.keys().asSequence().toSet() != setOf("path")) throw Refused(INVALID)
         val file = resolve(root, components(path(arguments), allowRoot = false))
@@ -291,10 +365,22 @@ internal class AndroidWorkspaceToolExecutor(
             throw Refused(PERSISTENCE)
         }
         val truncated = bytes.size > cap
-        val content = String(if (truncated) bytes.copyOf(cap) else bytes, Charsets.UTF_8)
-        return JSONObject().put("schema_version", 1).put("kind", "file_read")
-            .put("content", content).put("truncated", truncated)
-            .put("revision", revision(file))
+        val kept = if (truncated) bytes.copyOf(cap) else bytes
+        val content = String(kept, Charsets.UTF_8)
+        val source = revision(file)
+        // A truncated read carries no digest: the bytes it reports are not the
+        // bytes of the file, and the contract refuses a sha256 beside them.
+        val payload = JSONObject().put("schema_version", 1).put("content", content)
+            .put("revision", source).put("truncated", truncated)
+        if (!truncated) payload.put("sha256", sha256(kept))
+        val feedback = feedbackOrNull("read_file", payload) ?: throw Refused(PERSISTENCE)
+        return effect(
+            feedback,
+            JSONObject().put("schema_version", 1).put("kind", "read_file")
+                .put("source_revision", source),
+            truncated,
+            mayHaveOccurred = false,
+        )
     }
 
     private fun writeFile(root: File, arguments: JSONObject): JSONObject {
@@ -321,8 +407,24 @@ internal class AndroidWorkspaceToolExecutor(
             staging.delete()
             throw Refused(PERSISTENCE)
         }
-        return JSONObject().put("schema_version", 1).put("kind", "file_write")
-            .put("revision", revision(file))
+        val bytes = content.toByteArray(Charsets.UTF_8)
+        val actual = revision(file)
+        val digest = sha256(bytes)
+        val feedback = feedbackOrNull(
+            "write_file",
+            JSONObject().put("schema_version", 1).put("bytes", bytes.size)
+                .put("revision", actual).put("sha256", digest),
+        ) ?: throw Refused(PERSISTENCE)
+        // The write happened; whatever comes next, a retry must not assume it
+        // did not.
+        return effect(
+            feedback,
+            JSONObject().put("schema_version", 1).put("kind", "write_file")
+                .put("actual_revision", actual)
+                .put("content_sha256", RishAgentCoreNative.hashBytes("file-content", bytes)),
+            truncated = false,
+            mayHaveOccurred = true,
+        )
     }
 
     private fun listDir(root: File, arguments: JSONObject): JSONObject {
@@ -331,33 +433,35 @@ internal class AndroidWorkspaceToolExecutor(
         val requested = if (keys.isEmpty()) "" else path(arguments)
         val directory = resolve(root, components(requested, allowRoot = true))
         if (!directory.isDirectory) throw Refused(NOT_FOUND)
-        val children = directory.listFiles() ?: throw Refused(PERSISTENCE)
-        val entries = JSONArray()
-        // Which entries a listing includes, and when it is full, is the rule's.
-        // Sorted first so two devices reading one directory agree on what the
-        // cap left out.
-        for (child in children.sortedBy { it.name }) {
-            val decision = rule(
-                JSONObject().put("op", "directory_entry_decision")
-                    .put("visible_count", entries.length())
-                    .put(
-                        "entry",
-                        JSONObject().put("name", child.name)
-                            .put("kind", if (child.isDirectory) "directory" else "file")
-                            .put("revision", revision(child)),
-                    ),
-            )
-            when (decision.optString("decision")) {
-                "include" -> entries.put(
-                    JSONObject().put("name", child.name)
-                        .put("kind", if (child.isDirectory) "directory" else "file"),
+        val listed = listing(directory)
+        val entries = listed.optJSONArray("entries") ?: throw Refused(PERSISTENCE)
+        // A listing that will not fit the feedback cap drops its last entries
+        // and says so, rather than failing the call: the model is better served
+        // by a truncated listing than by nothing. The core decides what fits.
+        var visible = entries
+        var truncated = false
+        while (true) {
+            val payload = JSONObject().put("schema_version", 1)
+                .put("entries", visible).put("truncated", truncated)
+            val feedback = feedbackOrNull("list_dir", payload)
+            if (feedback != null) {
+                return effect(
+                    feedback,
+                    JSONObject().put("schema_version", 1).put("kind", "list_dir")
+                        .put(
+                            "directory_fingerprint_sha256",
+                            listed.optString("directory_fingerprint_sha256"),
+                        ),
+                    truncated,
+                    mayHaveOccurred = false,
                 )
-                "skip" -> Unit
-                else -> break
             }
+            if (visible.length() == 0) throw Refused(PERSISTENCE)
+            val shorter = JSONArray()
+            for (index in 0 until visible.length() - 1) shorter.put(visible.get(index))
+            visible = shorter
+            truncated = true
         }
-        return JSONObject().put("schema_version", 1).put("kind", "directory_list")
-            .put("entries", entries)
     }
 
     private companion object {

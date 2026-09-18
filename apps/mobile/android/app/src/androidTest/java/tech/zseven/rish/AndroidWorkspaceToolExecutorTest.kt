@@ -63,7 +63,18 @@ class AndroidWorkspaceToolExecutorTest {
             JSONObject().put("path", "notes/todo.md").put("content", "one\ntwo\n"),
             root,
         )
-        assertEquals("file_write", written.getString("kind"))
+        // What an executed tool returns is an effect the ledger settles, not a
+        // reply of this file's own devising: the model-facing feedback as the
+        // core's canonical string, the facts the row records, and whether a
+        // retry must assume the effect happened.
+        assertEquals("ok", written.getString("status"))
+        assertTrue(written.getBoolean("effect_may_have_occurred"))
+        val writeFacts = written.getJSONObject("settled_facts")
+        assertEquals("write_file", writeFacts.getString("kind"))
+        val writeFeedback = JSONObject(written.getString("feedback"))
+        assertEquals("write_file", writeFeedback.getString("name"))
+        assertEquals("ok", writeFeedback.getString("outcome"))
+        assertEquals(8, writeFeedback.getJSONObject("payload").getInt("bytes"))
 
         // The reply is not the evidence. The file is.
         val file = File(directory, "notes/todo.md")
@@ -71,10 +82,16 @@ class AndroidWorkspaceToolExecutorTest {
         assertEquals("one\ntwo\n", file.readText())
 
         val read = executor.execute("read_file", JSONObject().put("path", "notes/todo.md"), root)
-        assertEquals("one\ntwo\n", read.getString("content"))
-        assertFalse(read.getBoolean("truncated"))
+        assertFalse(read.getBoolean("effect_may_have_occurred"))
+        val readPayload = JSONObject(read.getString("feedback")).getJSONObject("payload")
+        assertEquals("one\ntwo\n", readPayload.getString("content"))
+        assertFalse(readPayload.getBoolean("truncated"))
         // The revision names the state the host read, and a write moves it.
-        assertEquals(written.getString("revision"), read.getString("revision"))
+        assertEquals(
+            writeFeedback.getJSONObject("payload").getString("revision"),
+            readPayload.getString("revision"),
+        )
+        assertEquals(writeFacts.getString("actual_revision"), readPayload.getString("revision"))
     }
 
     @Test
@@ -82,9 +99,24 @@ class AndroidWorkspaceToolExecutorTest {
         executor.execute("write_file", JSONObject().put("path", "a.txt").put("content", "a"), root)
         executor.execute("write_file", JSONObject().put("path", "b.txt").put("content", "b"), root)
         val listing = executor.execute("list_dir", JSONObject(), root)
-        val entries = listing.getJSONArray("entries")
+        val payload = JSONObject(listing.getString("feedback")).getJSONObject("payload")
+        val entries = payload.getJSONArray("entries")
         val names = (0 until entries.length()).map { entries.getJSONObject(it).getString("name") }
         assertTrue("$names", names.containsAll(listOf("a.txt", "b.txt")))
+        // The entry shape is the core's contract, not this file's: a feedback
+        // whose entries are spelled otherwise is refused when the call settles.
+        assertEquals(
+            setOf("schema_version", "name", "type", "revision"),
+            entries.getJSONObject(0).keys().asSequence().toSet(),
+        )
+        assertFalse(payload.getBoolean("truncated"))
+        // Preparing a listing and running it must agree on the fingerprint, or
+        // what the person approved is not what the ledger settles.
+        assertEquals(
+            executor.prepare("list_dir", JSONObject(), root)
+                .getJSONObject("precondition").getString("directory_fingerprint_sha256"),
+            listing.getJSONObject("settled_facts").getString("directory_fingerprint_sha256"),
+        )
     }
 
     /**
@@ -157,11 +189,14 @@ class AndroidWorkspaceToolExecutorTest {
         // A preview never carries the file's bytes.
         assertTrue(read.getJSONObject("approval_preview").isNull("content_bytes"))
 
+        assertEquals(0, read.getInt("reserved_write_bytes"))
+
         val list = executor.prepare("list_dir", JSONObject(), root)
         assertEquals(
             64,
             list.getJSONObject("precondition").getString("directory_fingerprint_sha256").length,
         )
+        assertEquals(0, list.getInt("reserved_write_bytes"))
     }
 
     /**
@@ -183,6 +218,19 @@ class AndroidWorkspaceToolExecutorTest {
         assertEquals(5, condition.getInt("content_bytes"))
         assertEquals(64, condition.getString("relative_path_sha256").length)
         assertEquals(64, condition.getString("content_sha256").length)
+        // A write reserves what it will put on disk. The ledger holds this
+        // against the precondition and refuses the whole batch when it is 0.
+        assertEquals(5, fresh.getInt("reserved_write_bytes"))
+        // The preview's prior is a different shape from the precondition's:
+        // exactly {schema_version, kind, bytes}, with no revision. The ledger
+        // validates the key set, so the wrong shape loses the batch.
+        val previewPrior = fresh.getJSONObject("approval_preview").getJSONObject("prior")
+        assertEquals(
+            setOf("schema_version", "kind", "bytes"),
+            previewPrior.keys().asSequence().toSet(),
+        )
+        assertEquals("absent", previewPrior.getString("kind"))
+        assertTrue(previewPrior.isNull("bytes"))
         // Nothing was written by preparing.
         assertFalse(File(directory, "new.txt").exists())
 
