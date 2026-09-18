@@ -243,6 +243,18 @@ internal class AndroidAgentExecutionLedger(
         val output = result.optJSONObject("output") ?: throw Refused(2)
         if (readOnly || !result.optBoolean("commit")) return Step(output, false)
         apply(state, result.optJSONArray("changes") ?: JSONArray(), rowIndex)
+        // An operation the reducer decided is committed in the same
+        // transaction, and its result is what the caller is owed: the
+        // reducer leaves `operation_result` null for the host to fill, and a
+        // settle that skips it answers a row where JavaScript expects a
+        // result.
+        result.optJSONObject("commit_operation")?.let { operation ->
+            val committed = operations.commitDecidedInState(state, operation, AndroidClock.now())
+            output.put(
+                "operation_result",
+                operations.settledResult(committed) ?: throw Refused(4),
+            )
+        }
         return Step(output, true)
     }
 
@@ -330,6 +342,168 @@ internal class AndroidAgentExecutionLedger(
             cas.optJSONObject("locator")?.opt("task_id"),
             cas.optJSONObject("locator")?.opt("attempt_id"), null, null, false)
 
+    /** Every transcript as the reducer reads it: the row without its messages. */
+    private fun summaries(transcripts: JSONArray?): JSONArray {
+        val summaries = JSONArray()
+        if (transcripts == null) return summaries
+        for (index in 0 until transcripts.length()) {
+            val transcript = transcripts.optJSONObject(index) ?: continue
+            val summary = JSONObject(transcript.toString())
+            summary.remove("messages")
+            summaries.put(summary)
+        }
+        return summaries
+    }
+
+    /**
+     * What the batch reducer is allowed to see of one attempt.
+     *
+     * Both batch operations read the same tables through the same filters --
+     * `prepare_tool_batch` writes the batch and `open_effect_gate` unlocks it
+     * -- so the view is built once. A gate request names no transcript, and
+     * the reducer does not read one for it.
+     */
+    private fun batchView(
+        state: JSONObject,
+        taskId: Any?,
+        attemptId: Any?,
+        roundId: Any?,
+        transcriptRef: Any?,
+    ): JSONObject {
+        val ledgerRows = JSONArray()
+        state.optJSONArray("ledger")?.let { rows ->
+            for (index in 0 until rows.length()) {
+                val row = rows.optJSONObject(index) ?: continue
+                if (AndroidJson.equal(row.optJSONObject("locator")?.opt("attempt_id"), attemptId)) {
+                    ledgerRows.put(row)
+                }
+            }
+        }
+        val dispatch = JSONArray()
+        state.optJSONArray("dispatch")?.let { markers ->
+            for (index in 0 until markers.length()) {
+                val marker = markers.optJSONObject(index) ?: continue
+                if (marker.optString("kind") == "execution" &&
+                    AndroidJson.equal(marker.optJSONObject("locator")?.opt("attempt_id"), attemptId)) {
+                    dispatch.put(marker)
+                }
+            }
+        }
+        // A round row carries its identity in its `locator`. Matching on a
+        // top-level `round_id` puts no round in the view at all, and the
+        // reducer refuses a batch whose round it cannot see.
+        val rounds = JSONArray()
+        state.optJSONArray("rounds")?.let { table ->
+            for (index in 0 until table.length()) {
+                val round = table.optJSONObject(index) ?: continue
+                val locator = round.optJSONObject("locator") ?: continue
+                if (AndroidJson.equal(locator.opt("round_id"), roundId) &&
+                    AndroidJson.equal(locator.opt("attempt_id"), attemptId)
+                ) {
+                    rounds.put(round)
+                }
+            }
+        }
+        val transcripts = state.optJSONArray("transcripts")
+        val transcriptIndex = transcriptIndex(transcripts, transcriptRef)
+        val authorityTable = state.optJSONArray("authorities")
+        val authorities: Any = if (authorityTable == null) JSONObject.NULL else slotted(authorityTable) {
+            AndroidJson.equal(it.opt("task_id"), taskId) &&
+                AndroidJson.equal(it.opt("attempt_id"), attemptId)
+        }
+        // A stored operation result names its attempt on the inside: the
+        // snapshot is `{operation_id, operation_kind, result, ...}` and only
+        // the result it wraps -- or, for a batch, the receipt inside that --
+        // carries task_id and attempt_id. Filtering on the snapshot's own keys
+        // matched nothing, which left the reducer with no receipt to prove an
+        // approval against and refused every write batch's gate as a conflict.
+        val operationResults = JSONArray()
+        state.optJSONArray("operation_results")?.let { table ->
+            for (index in 0 until table.length()) {
+                val record = table.optJSONObject(index) ?: continue
+                val result = record.optJSONObject("result")?.optJSONObject("result")
+                val receipt = result?.optJSONObject("receipt")
+                val direct = AndroidJson.equal(result?.opt("task_id"), taskId) &&
+                    AndroidJson.equal(result?.opt("attempt_id"), attemptId)
+                val viaReceipt = AndroidJson.equal(receipt?.opt("task_id"), taskId) &&
+                    AndroidJson.equal(receipt?.opt("attempt_id"), attemptId)
+                if (taskId != null && (direct || viaReceipt)) operationResults.put(record)
+            }
+        }
+        val view = JSONObject()
+            .put("tables_present", true)
+            .put("rounds", rounds)
+            .put("batches", slotted(state.optJSONArray("batches")) {
+                AndroidJson.equal(it.opt("attempt_id"), attemptId)
+            })
+            .put("reservations", slotted(state.optJSONArray("reservations")) {
+                AndroidJson.equal(it.opt("task_id"), taskId) &&
+                    AndroidJson.equal(it.opt("attempt_id"), attemptId)
+            })
+            .put(
+                "transcript",
+                if (transcriptIndex < 0) JSONObject.NULL
+                else transcripts?.optJSONObject(transcriptIndex) ?: JSONObject.NULL,
+            )
+            // Every transcript without its messages. The reducer relates a
+            // ledger row to the transcript it was cut from through these, and
+            // an empty list makes that relation unprovable: it is what refused
+            // every write batch's effect gate as not found.
+            .put("transcript_summaries", summaries(transcripts))
+            .put("ledger_rows", ledgerRows)
+            .put("dispatch", dispatch)
+            .put("denied_calls", JSONArray())
+            .put("denied_attempt_count", 0)
+            .put("denied_total_count", 0)
+            .put("authorities", authorities)
+            .put("authorities_present", (authorityTable?.length() ?: 0) > 0)
+            .put("operations_present", (state.optJSONArray("operations")?.length() ?: 0) > 0)
+            .put("operation_results", operationResults)
+
+        return view
+    }
+
+    /**
+     * Opens a mutation batch's effect gate, through
+     * `rish_agent_ledger_batch_reduce`.
+     *
+     * A prepared write batch is created closed: the ledger refuses to dispatch
+     * any call in it until the approvals the person gave are proved against
+     * the manifest the batch froze. This is that proof, and it is the step
+     * between binding an approval and running the write -- without it a
+     * write's `mark_dispatched` is a conflict forever, while reads, which need
+     * no gate, go through.
+     */
+    fun openEffectGate(request: JSONObject): JSONObject? {
+        var output: JSONObject? = null
+        val body: (JSONObject) -> Boolean = body@ { state ->
+            val view = batchView(
+                state, request.opt("task_id"), request.opt("attempt_id"),
+                request.opt("round_id"), null,
+            )
+            val env = JSONObject()
+                .put("launch_id", AndroidAgentWal.launchId)
+                .put("now", RuntimeJson.now())
+                .put("approval_tokens", JSONArray())
+            val reply = try {
+                reduce(
+                    JSONObject().put("op", "open_effect_gate").put("request", request)
+                        .put("env", env).put("view", view),
+                    batch = true,
+                )
+            } catch (refused: Refused) {
+                android.util.Log.w("RishAgent", "open_effect_gate refused: ${refused.code}")
+                return@body false
+            }
+            output = reply.optJSONObject("output") ?: reply
+            if (!reply.optBoolean("commit")) return@body false
+            apply(state, reply.optJSONArray("changes") ?: JSONArray(), -1)
+            true
+        }
+        wal.transaction(body)
+        return output
+    }
+
     /**
      * Writes a prepared tool batch and the ledger rows it implies, through
      * `rish_agent_ledger_batch_reduce`.
@@ -354,84 +528,10 @@ internal class AndroidAgentExecutionLedger(
         val attemptId = request.opt("attempt_id")
         val roundId = request.opt("round_id")
         val body: (JSONObject) -> Boolean = body@ { state ->
-            val ledgerRows = JSONArray()
-            state.optJSONArray("ledger")?.let { rows ->
-                for (index in 0 until rows.length()) {
-                    val row = rows.optJSONObject(index) ?: continue
-                    if (AndroidJson.equal(row.optJSONObject("locator")?.opt("attempt_id"), attemptId)) {
-                        ledgerRows.put(row)
-                    }
-                }
-            }
-            val dispatch = JSONArray()
-            state.optJSONArray("dispatch")?.let { markers ->
-                for (index in 0 until markers.length()) {
-                    val marker = markers.optJSONObject(index) ?: continue
-                    if (marker.optString("kind") == "execution" &&
-                        AndroidJson.equal(marker.optJSONObject("locator")?.opt("attempt_id"), attemptId)) {
-                        dispatch.put(marker)
-                    }
-                }
-            }
-            // A round row carries its identity in its `locator`. Matching on a
-            // top-level `round_id` puts no round in the view at all, and the
-            // reducer refuses a batch whose round it cannot see.
-            val rounds = JSONArray()
-            state.optJSONArray("rounds")?.let { table ->
-                for (index in 0 until table.length()) {
-                    val round = table.optJSONObject(index) ?: continue
-                    val locator = round.optJSONObject("locator") ?: continue
-                    if (AndroidJson.equal(locator.opt("round_id"), roundId) &&
-                        AndroidJson.equal(locator.opt("attempt_id"), attemptId)
-                    ) {
-                        rounds.put(round)
-                    }
-                }
-            }
-            val transcripts = state.optJSONArray("transcripts")
-            val transcriptIndex = transcriptIndex(
-                transcripts, request.optJSONObject("transcript")?.opt("transcript_ref"),
+            val view = batchView(
+                state, taskId, attemptId, roundId,
+                request.optJSONObject("transcript")?.opt("transcript_ref"),
             )
-            val authorityTable = state.optJSONArray("authorities")
-            val authorities: Any = if (authorityTable == null) JSONObject.NULL else slotted(authorityTable) {
-                AndroidJson.equal(it.opt("task_id"), taskId) &&
-                    AndroidJson.equal(it.opt("attempt_id"), attemptId)
-            }
-            val operationResults = JSONArray()
-            state.optJSONArray("operation_results")?.let { table ->
-                for (index in 0 until table.length()) {
-                    val record = table.optJSONObject(index) ?: continue
-                    if (AndroidJson.equal(record.opt("task_id"), taskId) &&
-                        AndroidJson.equal(record.opt("attempt_id"), attemptId)) {
-                        operationResults.put(record)
-                    }
-                }
-            }
-            val view = JSONObject()
-                .put("tables_present", true)
-                .put("rounds", rounds)
-                .put("batches", slotted(state.optJSONArray("batches")) {
-                    AndroidJson.equal(it.opt("attempt_id"), attemptId)
-                })
-                .put("reservations", slotted(state.optJSONArray("reservations")) {
-                    AndroidJson.equal(it.opt("task_id"), taskId) &&
-                        AndroidJson.equal(it.opt("attempt_id"), attemptId)
-                })
-                .put(
-                    "transcript",
-                    if (transcriptIndex < 0) JSONObject.NULL
-                    else transcripts?.optJSONObject(transcriptIndex) ?: JSONObject.NULL,
-                )
-                .put("transcript_summaries", JSONArray())
-                .put("ledger_rows", ledgerRows)
-                .put("dispatch", dispatch)
-                .put("denied_calls", JSONArray())
-                .put("denied_attempt_count", 0)
-                .put("denied_total_count", 0)
-                .put("authorities", authorities)
-                .put("authorities_present", authorityTable != null)
-                .put("operations_present", state.optJSONArray("operation_results") != null)
-                .put("operation_results", operationResults)
             val env = JSONObject()
                 .put("launch_id", AndroidAgentWal.launchId)
                 .put("now", RuntimeJson.now())

@@ -28,6 +28,7 @@ internal class AndroidAgentToolExecutionService(
     private val workspaceTools: AndroidWorkspaceToolExecutor,
     private val liveTasks: AndroidLiveTasks,
     private val transcripts: AndroidAgentTranscriptStore,
+    private val operations: AndroidAgentOperations,
 ) {
     class Refused(val code: String) : Exception(code)
 
@@ -36,7 +37,16 @@ internal class AndroidAgentToolExecutionService(
         val reply = RishAgentCoreNative.toolExecutionReduce(envelope.toString())
             ?: throw Refused(NATIVE)
         val parsed = JSONObject(reply)
-        if (!parsed.optBoolean("ok")) throw Refused(codeFor(parsed.optInt("error", 2)))
+        if (!parsed.optBoolean("ok")) {
+            // Which decision refused, and why, is otherwise invisible: the
+            // bridge only reports the code, and every step of an execution
+            // goes through here.
+            android.util.Log.w(
+                "RishAgent",
+                "execution refused ${envelope.optString("op")}: ${parsed.optInt("error", 2)}",
+            )
+            throw Refused(codeFor(parsed.optInt("error", 2)))
+        }
         return parsed
     }
 
@@ -71,8 +81,30 @@ internal class AndroidAgentToolExecutionService(
         val conversation = AndroidCommittedSession.conversation(
             AndroidCommittedSession.load(sessions, request), request,
         )
-        val state = wal.snapshot()
         val authority = prepared.authorityFor(taskId, attemptId)
+        // An execution is an operation, and an operation has to be started
+        // before it can be settled: the commit the settlement carries finds no
+        // record otherwise, and the ledger refuses it. A replay answers with
+        // what the first run recorded rather than running the tool twice.
+        //
+        // A same-operation replay must settle against the authority revision
+        // its own start froze -- claiming the row may have advanced the live
+        // one -- so an existing record's revision wins.
+        var replayed: JSONObject? = null
+        wal.transaction { live ->
+            val revision = authority?.opt("authority_revision")
+            val started = operations.startInState(
+                live, "execute_agent_tool", request,
+                operationRevision(live, request) ?: revision, RuntimeJson.now(),
+            )
+            if (started.optString("status") == "replayed") {
+                replayed = operations.settledResult(started)
+            }
+            replayed == null
+        }
+        replayed?.let { return it }
+
+        val state = wal.snapshot()
         // Whether the root still proves out is the resolver's answer, and the
         // core only needs to know that it did.
         val rootOk = roots.resolveAgentProjection(root) != null
@@ -98,6 +130,18 @@ internal class AndroidAgentToolExecutionService(
         return run(request, row, state)
     }
 
+    /** The authority revision an already-started operation froze, if any. */
+    private fun operationRevision(state: JSONObject, request: JSONObject): Any? {
+        val records = state.optJSONArray("operations") ?: return null
+        for (index in 0 until records.length()) {
+            val record = records.optJSONObject(index) ?: continue
+            if (AndroidJson.equal(record.opt("operation_id"), request.opt("operation_id"))) {
+                return record.opt("authority_revision")
+            }
+        }
+        return null
+    }
+
     /**
      * Claim, dispatch, do the work, settle. The order is the point: a row is
      * marked dispatched **before** the effect, so a crash in between leaves a
@@ -105,6 +149,15 @@ internal class AndroidAgentToolExecutionService(
      * did not.
      */
     private fun run(request: JSONObject, row: JSONObject, state: JSONObject): JSONObject {
+        // A mutation batch is frozen closed when it is prepared, and the
+        // ledger refuses to dispatch anything in it until the approvals the
+        // person gave are proved against the manifest. That proof is this
+        // step. Reads need no gate, and the core says which is which.
+        val gate = decide(JSONObject().put("op", "effect_gate").put("request", request))
+        if (gate.optBoolean("needed")) {
+            val gateRequest = gate.optJSONObject("request") ?: throw Refused(NATIVE)
+            ledger.openEffectGate(gateRequest) ?: throw Refused(APPROVAL)
+        }
         val claimCas = decide(
             JSONObject().put("op", "execution_cas").put("request", request)
                 .put("row", row).put("state", "intent"),
@@ -149,14 +202,22 @@ internal class AndroidAgentToolExecutionService(
         val plan = decide(
             JSONObject().put("op", "settlement").put("request", request)
                 .put("row", dispatched).put("effect", effect)
-                .put("duration_ms", duration),
+                .put("duration_ms", duration)
+                // The operation the settlement commits is named by the same
+                // digest its start recorded; without it the ledger refuses the
+                // settle as invalid.
+                .put(
+                    "request_sha256",
+                    operations.requestSha256("execute_agent_tool", request),
+                ),
         )
-        val settlement = plan.optJSONObject("settlement") ?: throw Refused(NATIVE)
-        val settleCas = decide(
-            JSONObject().put("op", "execution_cas").put("request", request)
-                .put("row", dispatched).put("state", "running"),
-        ).optJSONObject("cas") ?: throw Refused(CONFLICT)
-        if (ledger.settle(settleCas, settlement) == null) {
+        // The plan *is* the settlement: the core hands back the CAS it expects,
+        // the patch, the tool message and the operation to commit. There is no
+        // `settlement` key to unwrap, and the CAS is the plan's -- deciding a
+        // fresh one here would assert a state the plan did not.
+        val settleCas = plan.optJSONObject("cas") ?: throw Refused(NATIVE)
+        val settled = ledger.settle(settleCas, plan)
+        if (settled == null) {
             // The effect happened and the ledger did not record it. That is
             // not a failure to execute; it is a failure to remember, and the
             // core spells the difference.
@@ -165,10 +226,10 @@ internal class AndroidAgentToolExecutionService(
                     .put("row", dispatched).put("plan", plan).put("effect", effect),
             ).optJSONObject("result") ?: throw Refused(PERSISTENCE)
         }
-        val settled = rowFor(wal.snapshot(), request) ?: throw Refused(CONFLICT)
-        return decide(
-            JSONObject().put("op", "safe_result").put("request", request).put("row", settled),
-        ).optJSONObject("result") ?: throw Refused(NATIVE)
+        // What the settled operation answered is the operation's own result,
+        // recorded with it. Re-deriving one from the row would return a result
+        // the WAL never stored.
+        return settled.optJSONObject("operation_result") ?: throw Refused(NATIVE)
     }
 
     /**
@@ -219,5 +280,6 @@ internal class AndroidAgentToolExecutionService(
         const val CONFLICT = "E_AGENT_CONFLICT"
         const val BAD_ARGUMENTS = "E_AGENT_BAD_ARGUMENTS"
         const val PERSISTENCE = "E_AGENT_PERSISTENCE"
+        const val APPROVAL = "E_AGENT_APPROVAL"
     }
 }
