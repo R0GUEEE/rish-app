@@ -4522,6 +4522,22 @@ export function createCompletionController(
         idempotency_key: call.idempotency_key,
       };
     }
+    // A round whose outcome this journal already carries has nothing left to
+    // reconcile, and asking about it is not merely useless: the round
+    // selector binds the request's transcript to the row's *before*
+    // transcript, and a committed round has moved the journal past it. Every
+    // recovery of an attempt waiting on an approval therefore answered
+    // E_AGENT_CONFLICT instead of putting the question back on screen. The
+    // attempt itself is the right target: the query already says where the
+    // turn stands, and the controller resumes from there.
+    if (lineage.status === 'completed') {
+      return {
+        schema_version: 2,
+        kind: 'attempt',
+        task_id: attempt.turnId,
+        attempt_id: attempt.attemptId,
+      };
+    }
     return {
       schema_version: 2,
       kind: 'round',
@@ -4795,6 +4811,13 @@ export function createCompletionController(
       const recoveredBatchAuthority = agentBatchAuthorityFromProjection(recovered.attempt);
       if (recoveredBatchAuthority !== null) {
         updateAgentRun({ batchAuthority: recoveredBatchAuthority });
+      }
+      // Approval tokens live only in this run, and a recovery is a new run:
+      // without taking them back from the projection a turn recovered while
+      // it was waiting for a person could never ask again, because the call
+      // it wanted approved had no token to show.
+      if (agentRun !== null) {
+        agentRun = rememberAgentTokens(agentRun, recovered.attempt.batch);
       }
       if (recoveredJournal.phase === 'ready_for_round' || recoveredJournal.phase === 'tool_result_pending') return await runAgentRound(conversationId, attemptId, runEpoch);
       if (recoveredJournal.phase === 'batch_frozen' || recoveredJournal.phase === 'approval_pending') return await runAgentBatch(conversationId, attemptId, runEpoch);

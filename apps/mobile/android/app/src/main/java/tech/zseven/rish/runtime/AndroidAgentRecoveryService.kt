@@ -324,6 +324,16 @@ internal class AndroidAgentRecoveryService(
         journalRevision: Any?,
     ): JSONObject = conflictOutput(request, failureCode, journalRevision)
 
+    /**
+     * A recovery's conflict, in the shape the bridge reads.
+     *
+     * Two things are easy to get wrong here and both were. A recovery
+     * conflict carries no `target` -- only a cancellation's does -- so the
+     * core is told `with_target: false`; and the two `actual_*` fields are
+     * integers the reader validates, so the proof has to be the session's own
+     * rather than a bare `matches: false`, which left both null and made
+     * every recovery conflict unreadable.
+     */
     private fun conflictOutput(
         request: JSONObject,
         failureCode: String,
@@ -331,11 +341,60 @@ internal class AndroidAgentRecoveryService(
     ): JSONObject {
         val envelope = JSONObject().put("op", "target_conflict")
             .put("failure_code", failureCode).put("request", request)
-            .put("proof", JSONObject().put("matches", false))
+            .put("with_target", false)
+            .put("proof", conflictProof(request))
         if (journalRevision != null && journalRevision != JSONObject.NULL) {
             envelope.put("actual_journal_revision", journalRevision)
         }
         return runtime(envelope).optJSONObject("output") ?: throw Refused(NATIVE)
+    }
+
+    /** What the session says about this attempt right now. */
+    private fun conflictProof(request: JSONObject): JSONObject {
+        val cas = request.optJSONObject("controller_cas") ?: JSONObject()
+        val unknown = JSONObject().put("matches", false)
+            .put("controller_generation", 0).put("journal_revision", 0)
+        val stored = sessions.load()
+        if (stored.optString("status") != "present") return unknown
+        val snapshot = stored.optJSONObject("snapshot") ?: return unknown
+        val session = try {
+            JSONObject(stored.opt("session_json") as? String ?: return unknown)
+        } catch (_: org.json.JSONException) {
+            return unknown
+        }
+        val facts = JSONObject()
+            .put("session_generation", snapshot.opt("generation"))
+            .put("session_sha256", snapshot.opt("session_sha256"))
+        val proof = runtime(
+            JSONObject().put("op", "session_proof")
+                .put("session", session).put("facts", facts)
+                .put(
+                    "request",
+                    JSONObject()
+                        .put("conversation_id", cas.opt("conversation_id"))
+                        .put("task_id", cas.opt("task_id"))
+                        .put("attempt_id", cas.opt("attempt_id"))
+                        .put(
+                            "expected_controller_generation",
+                            cas.opt("expected_controller_generation"),
+                        )
+                        .put("expected_journal_revision", cas.opt("expected_journal_revision"))
+                        .put(
+                            "expected_session_generation",
+                            cas.opt("expected_session_generation"),
+                        )
+                        .put("expected_session_sha256", cas.opt("expected_session_sha256")),
+                ),
+        ).optJSONObject("proof") ?: return unknown
+        // A session that does not hold this attempt at all reports nothing;
+        // the reader still needs two integers.
+        if (proof.opt("controller_generation") == null ||
+            proof.opt("controller_generation") == JSONObject.NULL
+        ) proof.put("controller_generation", 0)
+        if (proof.opt("journal_revision") == null ||
+            proof.opt("journal_revision") == JSONObject.NULL
+        ) proof.put("journal_revision", 0)
+        return proof
     }
 
     private fun commit(

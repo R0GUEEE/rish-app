@@ -2500,7 +2500,123 @@ describe('project Agent completion controller', () => {
     expect(runtime.discardAgentAttempt).toHaveBeenCalledTimes(1);
   });
 
+  /**
+   * A turn interrupted while it was waiting for a person has to be able to
+   * ask again.
+   *
+   * Four separate rules had to agree before it could. The recovery must not
+   * target a round whose outcome the journal already carries -- the round
+   * selector binds the request to the row's *before* transcript, so a
+   * committed round always answers conflict. The reducer must allow a
+   * recovery that finds the attempt standing still. The projection and the
+   * journal must describe an open intent in the same words. And the approval
+   * tokens, which live only in the run, have to be taken back from the
+   * projection, or the call has nothing to show.
+   */
+  test('a turn recovered while it waits for a person asks again', async () => {
+    const store = agentStore();
+    const runtime = makeRuntime([]);
+    const conversationId = store.getState().selectedConversationId!;
+    // Hold the turn where a person would hold it: at the question.
+    const asked = deferred<{ status: 'approved'; scope: 'once' }>();
+    const first = agentController(
+      store, runtime, committedPersistence(store), [...IDS],
+      jest.fn(async () => await asked.promise),
+    );
+    const sending = first.send({ conversationId, text: 'approve me', attachments: [] });
+    for (let index = 0; index < 200 && first.getState().phase !== 'approval_pending'; index += 1) {
+      await Promise.resolve();
+    }
+    const attempt = store.getState().conversations[conversationId]!.attempts[0]!;
+    const journal = attempt.agent!;
+    expect(journal.phase).toBe('approval_pending');
+    expect(first.getState().phase).toBe('approval_pending');
+
+    // What native reports about the same attempt. The calls are the ones the
+    // batch preparation already returned, so their execution status is
+    // native's own word for an open intent rather than this test's.
+    const prepared = await (runtime.prepareAgentToolBatch as jest.Mock).mock.results[0]!.value;
+    const projection: AgentAttemptProjectionV2 = {
+      schema_version: 2,
+      task_id: attempt.turnId,
+      conversation_id: conversationId,
+      attempt_id: attempt.attemptId,
+      phase: journal.phase,
+      controller_generation: journal.controller_generation + 1,
+      journal_revision: attempt.journalRevision ?? 0,
+      authority_revision: 1,
+      root: journal.root,
+      policy: {
+        schema_version: 1,
+        policy_version: 'agent-v1',
+        max_single_write_bytes: journal.policy.max_single_write_bytes,
+        max_batch_write_bytes: journal.policy.max_batch_write_bytes,
+        max_attempt_write_bytes: journal.policy.max_attempt_write_bytes,
+      },
+      registry: {
+        schema_version: 2,
+        registry_version: journal.tool_registry_version,
+        toolset_sha256: journal.toolset_sha256,
+        tools: [],
+      },
+      transcript: journal.transcript,
+      round_index: journal.round_index,
+      round_id: journal.round_lineage?.round_id ?? null,
+      round_revision: journal.round_lineage?.native_row_revision ?? null,
+      round_status: journal.round_lineage?.status ?? null,
+      batch_kind: prepared.receipt.batch_kind,
+      batch_revision: prepared.receipt.batch_revision,
+      manifest_sha256: prepared.receipt.manifest_sha256,
+      call_index: journal.call_index,
+      batch: prepared.receipt.calls,
+      frozen_grant_ids: [...journal.frozen_grant_ids],
+      reserved_write_bytes: journal.reserved_write_bytes,
+      cancel_source_event_id: null,
+      cleanup_id: null,
+    };
+    (runtime.queryAgentAttempt as jest.Mock).mockResolvedValue({
+      schema_version: 2,
+      status: 'active',
+      attempt: projection,
+    } as QueryAgentAttemptResultV2);
+    (runtime.recoverAgentAttempt as jest.Mock).mockImplementation(async (request: any): Promise<RecoverAgentAttemptResultV2> => ({
+      schema_version: 2,
+      status: 'resumed',
+      operation_id: request.operation_id,
+      next_action: 'none',
+      attempt: projection,
+      completed_round: null,
+    }));
+
+    // A reload: the journal survives, the run's approval tokens do not.
+    // A recovery mints its own operation ids; sharing the first run's queue
+    // would replay an event the session already holds.
+    const askedAgain = jest.fn(async () => ({ status: 'approved' as const, scope: 'once' as const }));
+    const reloaded = agentController(store, runtime, committedPersistence(store), [
+      '51515151-5151-4515-8515-515151515151',
+      '52525252-5252-4525-8525-525252525252',
+      '53535353-5353-4535-8535-535353535353',
+      '54545454-5454-4545-8545-545454545454',
+      '55555555-5555-4555-8555-555555555555',
+      '56565656-5656-4565-8565-565656565656',
+      '57575757-5757-4575-8575-575757575757',
+    ], askedAgain);
+    await reloaded.resume(conversationId, attempt.attemptId);
+
+    const target = (runtime.recoverAgentAttempt as jest.Mock).mock.calls[0][0].target;
+    expect(target.kind).toBe('attempt');
+    // The recovery was accepted rather than refused as a conflict -- which is
+    // the whole of what those four rules had to agree on -- and the turn put
+    // its question back to the person.
+    const after = store.getState().conversations[conversationId]!.attempts[0]!.agent!;
+    expect(after.controller_generation).toBeGreaterThan(journal.controller_generation);
+    expect(askedAgain).toHaveBeenCalled();
+    asked.resolve({ status: 'approved', scope: 'once' });
+    await sending;
+  });
+
   test('restarts through query/recover without replaying an in-flight round', async () => {
+
     const store = agentStore();
     const runtime = makeRuntime([]);
     (runtime.completeAgentRoundV2 as jest.Mock).mockImplementationOnce(async (request: CompleteAgentRoundRequestV2) => ({

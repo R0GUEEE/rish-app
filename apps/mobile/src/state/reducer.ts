@@ -3963,12 +3963,22 @@ function projectionCallMatchesJournal(
           ? 'denied'
           : call.approval_decision === 'cancelled'
             ? 'cancelled'
-            : 'not_started'
+            // A call that already has a ledger row is an open intent, which
+            // is what native calls it -- the `prepared_batch` stage below
+            // expects exactly that for the same shape. Demanding
+            // `not_started` here meant no attempt waiting on an approval
+            // could ever be recovered: its projection and its journal
+            // described the same call in two different words.
+            : call.native_row_revision === null
+              ? 'not_started'
+              : 'intent'
       : call.receipt.outcome === 'ok'
         ? 'completed'
         : call.receipt.outcome;
   if (projection.execution_status !== expectedExecutionStatus) return false;
-  if (projection.execution_revision !== (call.receipt === null ? null : call.native_row_revision)) return false;
+  // The revision of the ledger row this call owns, which an open intent has
+  // as surely as a settled result does.
+  if (projection.execution_revision !== call.native_row_revision) return false;
   return projection.native_row_revision === call.native_row_revision &&
     (call.receipt === null
       ? projection.receipt === null
@@ -4541,12 +4551,24 @@ function highLevelEvidenceSupportsTransition(
     evidence.request.target.kind === 'attempt' &&
     recovery.completed_round === null
   ) {
-    return current.phase === 'round_in_flight' &&
-      current.round_lineage?.native_row_revision === null &&
-      next.phase === 'ready_for_round' &&
-      next.round_lineage === null &&
-      next.batch.length === 0 &&
-      next.call_index === null;
+    // A round that never reached native at all is reset to the start.
+    if (
+      current.phase === 'round_in_flight' &&
+      current.round_lineage?.native_row_revision === null
+    ) {
+      return next.phase === 'ready_for_round' &&
+        next.round_lineage === null &&
+        next.batch.length === 0 &&
+        next.call_index === null;
+    }
+    // Otherwise the attempt is simply standing still -- waiting on an
+    // approval, or between rounds -- and there is nothing to reconcile.
+    // Native said where it stands, the projection check above already bound
+    // `next` to that answer, so the only transition this can be is the one
+    // that leaves it there. Without this the reducer refused every recovery
+    // of a turn that was waiting for a person, and the question never came
+    // back on screen.
+    return next.phase === current.phase;
   }
   switch (recovery.next_action) {
     case 'persist_round':
