@@ -242,12 +242,56 @@ internal class AndroidAgentLifecycleService(
 
     // MARK: - discard
 
-    fun discard(request: JSONObject): JSONObject {
+    fun discard(request: JSONObject): JSONObject = settleResidue(
+        request, "discard", "discard_agent_attempt", JSONArray(),
+    )
+
+    /**
+     * `interrupt_agent_attempt`: the same residue settlement as a discard, for
+     * an attempt whose process went away.
+     *
+     * This is how the controller drains its cleanup outbox. An entry stays
+     * durable until this answers, so while the operation refused, every
+     * interrupted attempt left one behind and the next launch tried again.
+     *
+     * The two differences from a discard are the proof and the effects: the
+     * session has to say this attempt really was interrupted, and the
+     * settlement also closes undispatched intents and unsettled rounds and
+     * writes the cleanup row.
+     */
+    fun interrupt(request: JSONObject): JSONObject {
         runtime(
-            JSONObject().put("op", "settle_request").put("kind", "discard")
+            JSONObject().put("op", "settle_request").put("kind", "interrupt")
                 .put("request", request),
         )
-        val kind = "discard_agent_attempt"
+        val session = loadSession() ?: throw Refused(PERSISTENCE)
+        val proves = runtime(
+            JSONObject().put("op", "interruption_proof")
+                .put("session", session.session).put("facts", session.facts)
+                .put("request", request),
+        ).optBoolean("proves")
+        if (!proves) throw Refused(CONFLICT)
+        return settleResidue(
+            request, "interrupt", "interrupt_agent_attempt",
+            JSONArray().put("undispatched_intents").put("create_cleanup_row")
+                .put("unsettled_rounds"),
+            validated = true,
+        )
+    }
+
+    private fun settleResidue(
+        request: JSONObject,
+        authorityKind: String,
+        kind: String,
+        options: JSONArray,
+        validated: Boolean = false,
+    ): JSONObject {
+        if (!validated) {
+            runtime(
+                JSONObject().put("op", "settle_request").put("kind", authorityKind)
+                    .put("request", request),
+            )
+        }
         val sha = operations.requestSha256(kind, request)
         val timestamp = AndroidClock.now()
         val session = loadSession()
@@ -256,7 +300,9 @@ internal class AndroidAgentLifecycleService(
         var refusal: String? = null
         val committed = wal.transaction { state ->
             try {
-                output = discardIn(state, request, kind, sha, session, timestamp)
+                output = discardIn(
+                    state, request, kind, authorityKind, options, sha, session, timestamp,
+                )
                 output != null && wroteSomething
             } catch (refused: Refused) {
                 refusal = refused.code; false
@@ -274,6 +320,8 @@ internal class AndroidAgentLifecycleService(
         state: JSONObject,
         request: JSONObject,
         kind: String,
+        authorityKind: String,
+        options: JSONArray,
         sha: String,
         session: Loaded?,
         timestamp: String,
@@ -293,7 +341,7 @@ internal class AndroidAgentLifecycleService(
         }
 
         val authorityState = runtime(
-            JSONObject().put("op", "settle_authority_state").put("kind", "discard")
+            JSONObject().put("op", "settle_authority_state").put("kind", authorityKind)
                 .put("state", state).put("request", request),
         )
         if (authorityState.isNull("authority")) {
@@ -326,7 +374,7 @@ internal class AndroidAgentLifecycleService(
 
         val decided = runtime(
             JSONObject().put("op", "residue_discard").put("kind", kind)
-                .put("options", JSONArray()).put("state", state)
+                .put("options", options).put("state", state)
                 .put("request", request).put("started", started)
                 .put("timestamp", timestamp),
         )

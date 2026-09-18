@@ -189,13 +189,31 @@ class AgentRuntimeModule(reactContext: ReactApplicationContext) :
      * however much else was built: the wrapper checks that every operation is a
      * function before it reads anything at all.
      *
-     * Interrupting is not implemented, so it refuses. A method that exists and
-     * says no is what the shape check needs; a method that is missing makes the
-     * whole surface unavailable.
+     * It is also how the cleanup outbox drains: an entry stays durable until
+     * this answers for it.
      */
     @ReactMethod
-    fun interrupt_agent_attempt(request: ReadableMap?, promise: Promise) =
-        RishUnavailable.reject("AgentRuntime", "E_AGENT_NATIVE", promise)
+    fun interrupt_agent_attempt(request: ReadableMap?, promise: Promise) {
+        val captured = try {
+            JSONObject(requireNotNull(request).toHashMap())
+        } catch (failure: Exception) {
+            Log.w(TAG, "Agent interruption request is invalid", failure)
+            promise.reject("E_AGENT_BAD_ARGUMENTS", "Agent interruption request is invalid")
+            return
+        }
+        runtime.io.execute {
+            try {
+                val result = runtime.lifecycle.interrupt(captured)
+                promise.resolve(Arguments.makeNativeMap(RuntimeJson.map(result)))
+            } catch (refused: AndroidAgentLifecycleService.Refused) {
+                Log.w(TAG, "Agent attempt could not be interrupted: ${refused.code}")
+                promise.reject(refused.code, "Agent attempt could not be interrupted")
+            } catch (failure: Exception) {
+                Log.w(TAG, "Agent attempt could not be interrupted", failure)
+                promise.reject("E_AGENT_NATIVE", "Agent attempt could not be interrupted")
+            }
+        }
+    }
 
     @ReactMethod
     fun cancel_agent_attempt(request: ReadableMap?, promise: Promise) {

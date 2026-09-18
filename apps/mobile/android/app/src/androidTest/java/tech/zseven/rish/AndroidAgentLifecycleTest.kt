@@ -180,6 +180,52 @@ class AndroidAgentLifecycleTest {
         }
     }
 
+    private fun interruptRequest(f: Fixture): JSONObject = JSONObject()
+        .put("schema_version", 2)
+        .put("operation_id", UUID.randomUUID().toString())
+        .put("cleanup_id", UUID.randomUUID().toString())
+        .put("task_id", f.ids.task).put("conversation_id", f.ids.conversation)
+        .put("attempt_id", f.ids.attempt)
+        .put("transcript_ref", UUID.randomUUID().toString())
+        .put("transcript_sha256", DIGEST)
+        .put("reason", "failed")
+        .put("expected_session_generation", f.snapshot.getLong("generation"))
+        .put("expected_session_sha256", f.snapshot.getString("session_sha256"))
+
+    /**
+     * An interruption the session does not record is a conflict, not a
+     * settlement. This is the drain the controller runs over its cleanup
+     * outbox, and an entry it cannot prove must stay durable rather than be
+     * quietly dropped: the attempt behind it can never be resumed either way,
+     * and the next launch tries again.
+     */
+    @Test
+    fun anInterruptionTheSessionDoesNotRecordIsAConflict() = fixture { f ->
+        val code = try {
+            "settled: " + f.service.interrupt(interruptRequest(f))
+        } catch (refused: AndroidAgentLifecycleService.Refused) {
+            refused.code
+        }
+        assertEquals("E_AGENT_CONFLICT", code)
+    }
+
+    /** And one whose shape the coordinator refuses never reads a store. */
+    @Test
+    fun aMalformedInterruptionIsRefusedOnItsShape() = fixture { f ->
+        for (broken in listOf(
+            JSONObject(),
+            interruptRequest(f).put("schema_version", 1),
+            JSONObject(interruptRequest(f).toString()).also { it.remove("reason") },
+        )) {
+            val code = try {
+                f.service.interrupt(broken).toString()
+            } catch (refused: AndroidAgentLifecycleService.Refused) {
+                refused.code
+            }
+            assertTrue("$broken was not refused: $code", code.startsWith("E_AGENT_"))
+        }
+    }
+
     /** The bridge's own wiring holds this service, and holds one of it. */
     @Test
     fun theBridgeOwnsThisService() {
