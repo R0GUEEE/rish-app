@@ -474,6 +474,116 @@ internal class AndroidAgentProviderRoundService(
     }
 
     /**
+     * Reconciles a round after a restart, for `recover_agent_attempt`.
+     *
+     * The question a recovery asks is not "what happened" but "is anyone
+     * still doing it". A row whose owner is alive in *this* launch is still in
+     * flight and is left alone; a row whose writer died with the process is
+     * reclaimed, and what it is reclaimed *as* -- retryable, ambiguous,
+     * completed -- is the core's reading of the state it was left in. A row
+     * with no owner at all was released deliberately, and only some states are
+     * reportable from there.
+     *
+     * This never calls the provider. A round that was in flight when the app
+     * died has no reply to wait for; the reply, if it arrived, was lost with
+     * the process that asked for it.
+     */
+    fun recoverRound(request: JSONObject): JSONObject {
+        val root = request.optJSONObject("root")
+        val rootOk = roots.resolveAgentProjection(root) != null
+        val located = decide(
+            JSONObject().put("op", "selector_request").put("request", request)
+                .put("cancellation", false).put("root_ok", rootOk).put("env", env(request)),
+        )
+        val locator = located.optJSONObject("locator") ?: throw Refused(BAD_ARGUMENTS)
+        if (!rootOk) {
+            return conflictResult(
+                request,
+                JSONObject().put("row_revision", request.opt("expected_round_revision"))
+                    .put("state", "unknown")
+                    .put("transcript_before", request.opt("transcript")),
+                "E_AGENT_ROOT_STALE",
+            )
+        }
+        val query = rounds.query(locator) ?: throw Refused(PERSISTENCE)
+        val row = query.optJSONObject("row") ?: return query
+        val matches = decide(
+            JSONObject().put("op", "selector_matches").put("request", request).put("row", row),
+        ).optBoolean("matches")
+        if (!matches) return conflictResult(request, row, "E_AGENT_CONFLICT")
+
+        val owner = row.optJSONObject("owner")
+        if (owner == null) {
+            // Released on purpose. Only some states can be reported from an
+            // ownerless row; the rest are a conflict the controller retries.
+            val state = row.optString("state")
+            val ownerless = decide(
+                JSONObject().put("op", "round_failure_code").put("kind", "ownerless")
+                    .put("state", state),
+            )
+            if (!ownerless.optBoolean("reportable")) throw Refused(CONFLICT)
+            return queryResult(request, row, state, ownerless.opt("code"))
+        }
+        if (liveTasks.isAlive(
+                owner.optString("native_task_id"), owner.optString("launch_id"),
+            )
+        ) {
+            return queryResult(request, row, "in_flight", null)
+        }
+
+        val cas = decide(JSONObject().put("op", "round_cas").put("row", row))
+            .optJSONObject("cas") ?: throw Refused(NATIVE)
+        val reconciled = rounds.reconcile(locator, cas)?.optJSONObject("row") ?: row
+        val state = reconciled.optString("state")
+        val failure = decide(
+            JSONObject().put("op", "round_failure_code").put("kind", "reconciled")
+                .put("state", state),
+        ).opt("code")
+        return queryResult(request, reconciled, state, failure)
+    }
+
+    private fun queryResult(
+        request: JSONObject,
+        row: JSONObject,
+        status: String,
+        failureCode: Any?,
+    ): JSONObject {
+        val result = decide(
+            JSONObject().put("op", "query_result").put("request", request)
+                .put("row", row).put("status", status)
+                .put("failure_code", failureCode ?: JSONObject.NULL),
+        ).optJSONObject("result") ?: throw Refused(NATIVE)
+        // A completed round the controller never saw settle carries the round
+        // itself, so the recovery can hand back what the model actually said
+        // rather than only that it finished.
+        if (status == "completed") {
+            completedProjection(request, row)?.let { result.put("completed_round", it) }
+        }
+        return result
+    }
+
+    /** What a completed row says, as the core projects it for a recovery. */
+    private fun completedProjection(request: JSONObject, row: JSONObject): JSONObject? {
+        val messages = transcripts.nativeMessages(
+            JSONObject().put("schema_version", 1)
+                .put("attempt_id", request.opt("attempt_id"))
+                .put("root", request.opt("root"))
+                .put("transcript", row.opt("transcript_after") ?: request.opt("transcript")),
+        ) ?: return null
+        return try {
+            decide(
+                JSONObject().put("op", "recovered_projection").put("request", request)
+                    .put("row", row).put("messages", messages),
+            ).optJSONObject("projection")
+        } catch (refused: Refused) {
+            // A projection the core will not build is not worth failing a
+            // recovery over: the status it reports is already true.
+            android.util.Log.w("RishAgent", "completed round not projectable: ${refused.code}")
+            null
+        }
+    }
+
+    /**
      * Cancels a round in flight, for `cancel_agent_attempt`.
      *
      * Two things have to happen and neither is enough alone: the provider call

@@ -143,6 +143,99 @@ internal class AndroidAgentToolExecutionService(
     }
 
     /**
+     * Works out what became of a tool call whose process died, for
+     * `recover_agent_attempt`.
+     *
+     * Nothing is re-run here. The row says what was claimed; the world says
+     * whether the effect landed; the core turns the two into either a
+     * settlement to commit or a result to report. A recovery that re-ran a
+     * write would be the one way to write a file twice.
+     */
+    fun recover(request: JSONObject): JSONObject {
+        decide(JSONObject().put("op", "request").put("request", request))
+        // An operation that already settled answers with what it answered
+        // then. Anything else that is not simply started is a conflict.
+        historicalResult(request)?.let { return it }
+
+        val state = wal.snapshot()
+        val row = rowFor(state, request)
+            ?: return JSONObject().put("schema_version", 2).put("status", "not_started")
+        val rowState = row.optString("state")
+        if (rowState == "settled" || rowState == "cancelled" || rowState == "ambiguous") {
+            return decide(
+                JSONObject().put("op", "safe_result").put("request", request).put("row", row),
+            ).optJSONObject("result") ?: throw Refused(NATIVE)
+        }
+
+        val messages = transcripts.nativeMessages(
+            JSONObject().put("schema_version", 1)
+                .put("attempt_id", request.opt("attempt_id"))
+                .put("root", request.opt("root"))
+                .put("transcript", row.opt("transcript_before")),
+        ) ?: throw Refused(CONFLICT)
+        val arguments = decide(
+            JSONObject().put("op", "recover_arguments").put("request", request)
+                .put("messages", messages),
+        ).optJSONObject("arguments") ?: throw Refused(BAD_ARGUMENTS)
+
+        val name = request.optString("name")
+        val recovered = if (name in workspaceTools.tools) {
+            try {
+                workspaceTools.recover(
+                    name, arguments, request.optJSONObject("root") ?: JSONObject(),
+                    row.optJSONObject("precondition"),
+                )
+            } catch (refused: AndroidWorkspaceToolExecutor.Refused) {
+                // The disk could not answer. That is not proof the effect did
+                // not happen, and recovery must never say it was.
+                android.util.Log.w("RishAgent", "tool recovery unresolved: $name ${refused.code}")
+                JSONObject().put("schema_version", 1).put("status", "ambiguous")
+            }
+        } else {
+            // Nothing else runs on this platform yet, so nothing else can have
+            // been dispatched by it.
+            JSONObject().put("schema_version", 1).put("status", "not_dispatched")
+        }
+
+        val plan = decide(
+            JSONObject().put("op", "recover").put("request", request).put("row", row)
+                .put("recovered", recovered),
+        )
+        val settle = plan.optJSONObject("settle")
+            ?: return plan.optJSONObject("result") ?: throw Refused(NATIVE)
+        val settled = ledger.settle(settle.optJSONObject("cas") ?: throw Refused(NATIVE), settle)
+            ?: throw Refused(CONFLICT)
+        return settled.optJSONObject("operation_result") ?: throw Refused(NATIVE)
+    }
+
+    /** What this operation already answered, if it is past answering. */
+    private fun historicalResult(request: JSONObject): JSONObject? {
+        val sha = operations.requestSha256("execute_agent_tool", request)
+        val state = wal.snapshot()
+        val query = operations.queryInState(
+            state, request.opt("operation_id"), sha,
+            request.opt("task_id"), request.opt("attempt_id"),
+        )
+        val status = query.optString("status")
+        val record = query.optJSONObject("record")
+        if (status == "not_started" || (status == "found" && record?.optString("state") == "started")) {
+            return null
+        }
+        if (status != "found") throw Refused(CONFLICT)
+        val results = state.optJSONArray("operation_results") ?: throw Refused(NATIVE)
+        for (index in 0 until results.length()) {
+            val snapshot = results.optJSONObject(index) ?: continue
+            if (AndroidJson.equal(snapshot.opt("operation_id"), request.opt("operation_id")) &&
+                snapshot.optString("operation_kind") == "execute_agent_tool"
+            ) {
+                return snapshot.optJSONObject("result")?.optJSONObject("result")
+                    ?: throw Refused(NATIVE)
+            }
+        }
+        throw Refused(NATIVE)
+    }
+
+    /**
      * Claim, dispatch, do the work, settle. The order is the point: a row is
      * marked dispatched **before** the effect, so a crash in between leaves a
      * row that says an effect may have happened rather than one that says it

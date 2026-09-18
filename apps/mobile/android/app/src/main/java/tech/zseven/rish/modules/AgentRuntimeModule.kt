@@ -10,6 +10,8 @@ import com.facebook.react.bridge.ReadableMap
 import org.json.JSONObject
 import tech.zseven.rish.RishUnavailable
 import tech.zseven.rish.runtime.AndroidAgentProviderRoundService
+import tech.zseven.rish.runtime.AndroidAgentQueryService
+import tech.zseven.rish.runtime.AndroidAgentRecoveryService
 import tech.zseven.rish.runtime.AndroidAgentApprovalService
 import tech.zseven.rish.runtime.AndroidAgentCancelService
 import tech.zseven.rish.runtime.AndroidAgentLifecycleService
@@ -219,13 +221,53 @@ class AgentRuntimeModule(reactContext: ReactApplicationContext) :
     }
 
     @ReactMethod
-    fun query_agent_attempt(request: ReadableMap?, promise: Promise) = RishUnavailable.reject("AgentRuntime", "E_AGENT_NATIVE", promise)
+    fun query_agent_attempt(request: ReadableMap?, promise: Promise) {
+        val captured = try {
+            JSONObject(requireNotNull(request).toHashMap())
+        } catch (failure: Exception) {
+            Log.w(TAG, "Agent attempt query is invalid", failure)
+            promise.reject("E_AGENT_BAD_ARGUMENTS", "Agent attempt query is invalid")
+            return
+        }
+        runtime.io.execute {
+            try {
+                val result = runtime.queries.query(captured)
+                promise.resolve(Arguments.makeNativeMap(RuntimeJson.map(result)))
+            } catch (refused: AndroidAgentQueryService.Refused) {
+                Log.w(TAG, "Agent attempt could not be queried: ${refused.code}")
+                promise.reject(refused.code, "Agent attempt could not be queried")
+            } catch (failure: Exception) {
+                Log.w(TAG, "Agent attempt could not be queried", failure)
+                promise.reject("E_AGENT_NATIVE", "Agent attempt could not be queried")
+            }
+        }
+    }
 
     @ReactMethod
     fun query_agent_tool(request: ReadableMap?, promise: Promise) = RishUnavailable.reject("AgentRuntime", "E_AGENT_NATIVE", promise)
 
     @ReactMethod
-    fun recover_agent_attempt(request: ReadableMap?, promise: Promise) = RishUnavailable.reject("AgentRuntime", "E_AGENT_NATIVE", promise)
+    fun recover_agent_attempt(request: ReadableMap?, promise: Promise) {
+        val captured = try {
+            JSONObject(requireNotNull(request).toHashMap())
+        } catch (failure: Exception) {
+            Log.w(TAG, "Agent recovery request is invalid", failure)
+            promise.reject("E_AGENT_BAD_ARGUMENTS", "Agent recovery request is invalid")
+            return
+        }
+        runtime.io.execute {
+            try {
+                val result = runtime.recovery.recover(captured)
+                promise.resolve(Arguments.makeNativeMap(RuntimeJson.map(result)))
+            } catch (refused: AndroidAgentRecoveryService.Refused) {
+                Log.w(TAG, "Agent attempt could not be recovered: ${refused.code}")
+                promise.reject(refused.code, "Agent attempt could not be recovered")
+            } catch (failure: Exception) {
+                Log.w(TAG, "Agent attempt could not be recovered", failure)
+                promise.reject("E_AGENT_NATIVE", "Agent attempt could not be recovered")
+            }
+        }
+    }
 
     @ReactMethod
     fun finalize_agent_attempt(request: ReadableMap?, promise: Promise) {

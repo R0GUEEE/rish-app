@@ -290,6 +290,75 @@ internal class AndroidWorkspaceToolExecutor(
     }
 
     /**
+     * What the world says about a call whose process died, for a recovery.
+     *
+     * Three answers, and only three: `not_dispatched` when the effect provably
+     * never happened, `settled` when it provably did, and `ambiguous` when the
+     * disk cannot tell -- which the core turns into a failure the model is
+     * shown rather than a silent retry. Guessing `not_dispatched` when a write
+     * may have landed is how an agent writes a file twice.
+     *
+     * A read or a listing has no effect to find, so it is re-prepared: the
+     * same precondition means nothing moved and the call can simply be run
+     * again; anything else means the world changed under it.
+     */
+    fun recover(
+        name: String,
+        arguments: JSONObject,
+        root: JSONObject,
+        precondition: JSONObject?,
+    ): JSONObject {
+        if (name !in tools) throw Refused(INVALID)
+        if (name != "write_file") {
+            val fresh = prepare(name, arguments, root).optJSONObject("precondition")
+            return status(if (sameJson(fresh, precondition)) "not_dispatched" else "ambiguous")
+        }
+        val directory = rootDirectory(name, root)
+        val content = arguments.opt("content") as? String ?: throw Refused(INVALID)
+        val requested = path(arguments)
+        val file = resolve(directory, components(requested, allowRoot = false))
+        val prior = precondition?.optJSONObject("prior")
+        val priorKind = prior?.optString("kind")
+        if (!file.exists()) {
+            // Still absent, and absence is what the call asserted: nothing
+            // happened. If it asserted otherwise the file is simply gone, and
+            // this cannot say by whose hand.
+            return status(if (priorKind == "absent") "not_dispatched" else "ambiguous")
+        }
+        if (!file.isFile) return status("ambiguous")
+        val before = revision(file)
+        if (priorKind == "known" && prior.optString("revision") == before) {
+            // The file is exactly as the call found it: the write never landed.
+            return status("not_dispatched")
+        }
+        val bytes = content.toByteArray(Charsets.UTF_8)
+        if (file.length() != bytes.size.toLong()) return status("ambiguous")
+        val actual = try {
+            file.readBytes()
+        } catch (_: IOException) {
+            return status("ambiguous")
+        }
+        // Read between two readings of the revision: a file being written
+        // while this looks at it is ambiguous, not settled.
+        val stable = revision(file) == before
+        val digest = RishAgentCoreNative.hashBytes("file-content", actual)
+        val landed = stable && digest != null &&
+            digest == precondition?.optString("content_sha256")
+        return status(if (landed) "settled" else "ambiguous").put("actual_revision", before)
+    }
+
+    private fun status(value: String): JSONObject =
+        JSONObject().put("schema_version", 1).put("status", value)
+
+    /** Two JSON values are the same value when the core canonicalises alike. */
+    private fun sameJson(left: JSONObject?, right: JSONObject?): Boolean {
+        if (left == null || right == null) return false
+        val canonical = { value: JSONObject -> RishAgentCoreNative.canonical(value.toString()) }
+        val a = canonical(left) ?: return false
+        return a == canonical(right)
+    }
+
+    /**
      * What a finished tool reports, in the one shape the ledger settles.
      *
      * `feedback` is the canonical JSON *string* of the model-facing object,
