@@ -27,6 +27,7 @@ internal class AndroidAgentToolExecutionService(
     private val roots: AndroidAgentRootResolver,
     private val workspaceTools: AndroidWorkspaceToolExecutor,
     private val liveTasks: AndroidLiveTasks,
+    private val transcripts: AndroidAgentTranscriptStore,
 ) {
     class Refused(val code: String) : Exception(code)
 
@@ -108,19 +109,36 @@ internal class AndroidAgentToolExecutionService(
             JSONObject().put("op", "execution_cas").put("request", request)
                 .put("row", row).put("state", "intent"),
         ).optJSONObject("cas") ?: throw Refused(CONFLICT)
+        // The core refuses a claim whose owner is not alive in this process,
+        // so the task is registered before it is claimed -- the same relation
+        // the round journal insists on.
+        liveTasks.register(request.optString("operation_id"))
         val owner = ownerFor(request)
         ledger.claim(claimCas, owner) ?: throw Refused(CONFLICT)
 
         val claimed = rowFor(wal.snapshot(), request) ?: throw Refused(CONFLICT)
         val dispatchCas = decide(
             JSONObject().put("op", "execution_cas").put("request", request)
-                .put("row", claimed).put("state", "claimed"),
+                // A claimed row's state is `running`; "claimed" and
+                // "dispatched" are not states a row is ever in. Dispatch is a
+                // separate marker, so the row is still running when it is set
+                // and still running when the effect settles.
+                .put("row", claimed).put("state", "running"),
         ).optJSONObject("cas") ?: throw Refused(CONFLICT)
         ledger.markDispatched(dispatchCas) ?: throw Refused(CONFLICT)
 
+        // The arguments are read back out of the transcript that recorded the
+        // call -- its own native messages, not the WAL's transcripts table.
+        // This is the third place that substitution has cost a layer.
+        val messages = transcripts.nativeMessages(
+            JSONObject().put("schema_version", 1)
+                .put("attempt_id", request.opt("attempt_id"))
+                .put("root", request.opt("root"))
+                .put("transcript", claimed.opt("transcript_before")),
+        ) ?: JSONArray()
         val arguments = decide(
             JSONObject().put("op", "arguments").put("request", request)
-                .put("messages", state.optJSONArray("transcripts") ?: JSONArray()),
+                .put("messages", messages),
         ).optJSONObject("arguments") ?: throw Refused(BAD_ARGUMENTS)
 
         val began = System.currentTimeMillis()
@@ -136,7 +154,7 @@ internal class AndroidAgentToolExecutionService(
         val settlement = plan.optJSONObject("settlement") ?: throw Refused(NATIVE)
         val settleCas = decide(
             JSONObject().put("op", "execution_cas").put("request", request)
-                .put("row", dispatched).put("state", "dispatched"),
+                .put("row", dispatched).put("state", "running"),
         ).optJSONObject("cas") ?: throw Refused(CONFLICT)
         if (ledger.settle(settleCas, settlement) == null) {
             // The effect happened and the ledger did not record it. That is
@@ -168,7 +186,12 @@ internal class AndroidAgentToolExecutionService(
         }
         return try {
             workspaceTools.execute(name, arguments, request.optJSONObject("root") ?: JSONObject())
+                .also { android.util.Log.w("RishAgent", "tool $name ran") }
         } catch (refused: AndroidWorkspaceToolExecutor.Refused) {
+            // The tool's own refusal becomes a failure the model is shown; it
+            // must still be visible here, or an effect that never happened is
+            // indistinguishable from one that did nothing.
+            android.util.Log.w("RishAgent", "tool $name refused: ${refused.code}", refused)
             decide(JSONObject().put("op", "generic_failure").put("request", request))
                 .optJSONObject("effect") ?: throw Refused(NATIVE)
         }

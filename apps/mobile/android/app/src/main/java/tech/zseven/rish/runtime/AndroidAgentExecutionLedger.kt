@@ -18,11 +18,34 @@ internal class AndroidAgentExecutionLedger(
 ) {
     class Refused(val code: Int) : RuntimeException("E_AGENT_STORE_$code")
 
-    private fun reduce(envelope: JSONObject): JSONObject {
+    private fun reduce(envelope: JSONObject): JSONObject = reduce(envelope, batch = false)
+
+    /**
+     * One reducer step.
+     *
+     * The row operations and the batch preparation are two different reducers
+     * with two different vocabularies: `rish_agent_ledger_reduce` knows
+     * `insert`, `claim`, `settle`; `rish_agent_ledger_batch_reduce` knows
+     * `prepare_tool_batch`. Sending a batch to the first one is not a refusal
+     * with a reason -- it is an op it has never heard of, answered as Corrupt.
+     */
+    private fun reduce(envelope: JSONObject, batch: Boolean): JSONObject {
         check(RishAgentCoreNative.available) { "the shared agent core is not staged in this build" }
-        val reply = RishAgentCoreNative.ledgerReduce(envelope.toString()) ?: throw Refused(2)
+        val reply = (
+            if (batch) {
+                RishAgentCoreNative.ledgerBatchReduce(envelope.toString())
+            } else {
+                RishAgentCoreNative.ledgerReduce(envelope.toString())
+            }
+            ) ?: throw Refused(2)
         val parsed = JSONObject(reply)
-        if (!parsed.optBoolean("ok")) throw Refused(parsed.optInt("error", 2))
+        if (!parsed.optBoolean("ok")) {
+            android.util.Log.w(
+                "RishAgent",
+                "ledger refused ${envelope.optString("op")}: ${parsed.optInt("error", 2)}",
+            )
+            throw Refused(parsed.optInt("error", 2))
+        }
         return parsed
     }
 
@@ -93,6 +116,25 @@ internal class AndroidAgentExecutionLedger(
                     transcripts.put(at, row)
                     state.put("transcripts", transcripts)
                 }
+                // A batch preparation appends rather than replaces: the
+                // attempt's first batch and its first reservation do not exist
+                // yet, and a kind this side does not know is refused as a
+                // corrupt change.
+                "insert_denied_call" -> {
+                    val denied = state.optJSONArray("denied_calls") ?: JSONArray()
+                    denied.put(change.getJSONObject("record"))
+                    state.put("denied_calls", denied)
+                }
+                "insert_batch", "insert_reservation" -> {
+                    val table = if (change.optString("kind") == "insert_batch") {
+                        "batches"
+                    } else {
+                        "reservations"
+                    }
+                    val records = state.optJSONArray(table) ?: JSONArray()
+                    records.put(change.getJSONObject("record"))
+                    state.put(table, records)
+                }
                 "replace_reservation", "replace_batch", "replace_authority" -> {
                     val table = when (change.optString("kind")) {
                         "replace_reservation" -> "reservations"
@@ -105,7 +147,15 @@ internal class AndroidAgentExecutionLedger(
                     records.put(slot, change.getJSONObject("record"))
                     state.put(table, records)
                 }
-                else -> throw Refused(2)
+                else -> {
+                    // A change this side cannot apply is a corrupt change, and
+                    // which one it was is the entire diagnosis.
+                    android.util.Log.w(
+                        "RishAgent",
+                        "unapplicable ledger change: ${change.optString("kind")}",
+                    )
+                    throw Refused(2)
+                }
             }
         }
     }
@@ -231,10 +281,24 @@ internal class AndroidAgentExecutionLedger(
             locatorOf(insertCas), insertCas.opt("task_id"), insertCas.opt("attempt_id"),
             null, intent.opt("owner"), false)
 
+    /**
+     * Claims an intent row for this process.
+     *
+     * The core reads `locator` and `expected_row_revision` directly, not a CAS
+     * to unpack, and it refuses a claim whose owner this process cannot vouch
+     * for -- `arg_owner_alive` -- so the caller must have registered the task
+     * before asking.
+     */
     fun claim(cas: JSONObject, owner: JSONObject): JSONObject? =
-        run("claim", JSONObject().put("cas", cas).put("owner", owner), locatorOf(cas),
+        run(
+            "claim",
+            JSONObject().put("locator", cas.opt("locator"))
+                .put("expected_row_revision", cas.opt("expected_row_revision"))
+                .put("owner", owner),
+            locatorOf(cas),
             cas.optJSONObject("locator")?.opt("task_id"),
-            cas.optJSONObject("locator")?.opt("attempt_id"), null, owner, false)
+            cas.optJSONObject("locator")?.opt("attempt_id"), null, owner, false,
+        )
 
     fun cas(cas: JSONObject, patch: JSONObject): JSONObject? =
         run("cas", JSONObject().put("cas", cas).put("patch", patch), locatorOf(cas),
@@ -246,8 +310,18 @@ internal class AndroidAgentExecutionLedger(
             cas.optJSONObject("locator")?.opt("task_id"),
             cas.optJSONObject("locator")?.opt("attempt_id"), null, null, false)
 
+    /**
+     * Settles a dispatched row with the plan the core built.
+     *
+     * The plan already *is* the arguments -- `patch`, `message` and the
+     * optional `operation` -- so it is spread beside the CAS rather than
+     * nested under a name the reducer never reads.
+     */
     fun settle(cas: JSONObject, settlement: JSONObject): JSONObject? =
-        run("settle", JSONObject().put("cas", cas).put("settlement", settlement), locatorOf(cas),
+        run("settle", JSONObject().put("cas", cas)
+            .put("patch", settlement.opt("patch"))
+            .put("message", settlement.opt("message"))
+            .put("operation", settlement.opt("operation") ?: JSONObject.NULL), locatorOf(cas),
             cas.optJSONObject("locator")?.opt("task_id"),
             cas.optJSONObject("locator")?.opt("attempt_id"), null, null, false)
 
@@ -366,6 +440,7 @@ internal class AndroidAgentExecutionLedger(
                 reduce(
                     JSONObject().put("op", "prepare_tool_batch").put("request", request)
                         .put("env", env).put("view", view),
+                    batch = true,
                 )
             } catch (refused: Refused) {
                 android.util.Log.w("RishAgent", "prepare_tool_batch refused: ${refused.code}")

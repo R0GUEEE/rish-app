@@ -65,6 +65,22 @@ internal class AndroidAgentToolBatchService(
         val authority = prepared.authorityFor(taskId, attemptId)
         val round = roundFor(state, request)
 
+        // The operation relation is started before anything is written, as
+        // iOS does: the ledger's own commit settles *this* operation, and a
+        // commit with nothing started finds no record to settle.
+        var replayed: JSONObject? = null
+        wal.transaction { live ->
+            val started = operations.startInState(
+                live, "prepare_agent_tool_batch", request,
+                authority?.opt("authority_revision"), RuntimeJson.now(),
+            )
+            if (started.optString("status") == "replayed") {
+                replayed = operations.settledResult(started)
+            }
+            replayed == null
+        }
+        replayed?.let { return it }
+
         val gate = decide(
             JSONObject().put("op", "prepare_gate").put("request", request)
                 .put("authority", authority ?: JSONObject.NULL)
@@ -170,6 +186,13 @@ internal class AndroidAgentToolBatchService(
         return try {
             JSONObject().put("prepared", workspaceTools.prepare(name, arguments, root))
         } catch (refused: AndroidWorkspaceToolExecutor.Refused) {
+            // A probe that refuses becomes a rejection the round carries, not
+            // a lost batch -- but which call refused, and why, is otherwise
+            // invisible from the outside.
+            android.util.Log.w(
+                "RishAgent",
+                "tool probe refused: $name ${refused.code}",
+            )
             JSONObject().put("error", errorFor(refused.code))
         }
     }

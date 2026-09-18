@@ -33,6 +33,7 @@ internal class AndroidRuntimeState private constructor(val app: Application) {
     )
     val toolExecution = AndroidAgentToolExecutionService(
         agentWal, sessions, preparedAttempts, executionLedger, roots, workspaceTools, liveTasks,
+        agentTranscripts,
     )
     val lifecycle = AndroidAgentLifecycleService(agentWal, sessions, agentOperations, roots)
     val approvals = AndroidAgentApprovalService(
