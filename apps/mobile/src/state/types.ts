@@ -1563,6 +1563,28 @@ export type ChatAction =
         readonly cleanupId: string;
         readonly expectedCleanup: AgentTranscriptCleanupV1;
       };
+    }
+  | {
+      /**
+       * Give up on an attempt whose round the device can never resolve.
+       *
+       * A round that reached the provider and was never answered settles
+       * `ambiguous`, and recovery answers that with manual reconciliation
+       * forever: the model may have done the work, so nothing may replay it.
+       * This is the person saying so. It records the attempt exactly as a
+       * dead writer's is recorded at hydration -- failed with
+       * E_ATTEMPT_INTERRUPTED, journal kept as evidence -- and enqueues the
+       * cleanup that lets the native interrupt settle the residue an
+       * ambiguous round leaves behind.
+       */
+      readonly type: 'agent/abandon-unresolved';
+      readonly payload: {
+        readonly conversationId: string;
+        readonly attemptId: string;
+        readonly expectedAttempt: TurnAttemptV1;
+        readonly cleanup: AgentTranscriptCleanupV1;
+        readonly at: string;
+      };
     };
 
 export type PersistedChatMessageV2 = {

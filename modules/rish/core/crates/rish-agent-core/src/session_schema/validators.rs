@@ -2044,7 +2044,18 @@ impl Validator<'_> {
                             .get(as_str(Some(prior_id)).unwrap_or_default())
                             .copied()
                             .is_some_and(|prior| {
-                                len(get(prior, "rounds")) > 0
+                                // An agent attempt's rounds live in its
+                                // journal rather than in `rounds`: the lineage
+                                // there is the same receipt this rule asks
+                                // for. Without it a turn could never be asked
+                                // again after an agent attempt that had
+                                // started a round, because the digest the new
+                                // attempt freezes would have no provenance.
+                                (len(get(prior, "rounds")) > 0
+                                    || !is_null(
+                                        get(prior, "agent")
+                                            .and_then(|agent| get(agent, "round_lineage")),
+                                    ))
                                     && as_str(get(prior, "visible_history_sha256"))
                                         == visible_history
                                     && self.frozen_attempt_equal(prior, attempt)

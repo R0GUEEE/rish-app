@@ -541,6 +541,15 @@ export type ChatStore = {
   enqueueAgentTranscriptCleanup(
     input: AgentCleanupInput,
   ): AgentCheckpointTransaction | null;
+  /**
+   * Record an attempt whose round the device can never resolve as given up
+   * on, and enqueue the cleanup that settles its native residue. See the
+   * `agent/abandon-unresolved` action for what that means and why the two
+   * happen together.
+   */
+  abandonUnresolvedAgentAttempt(
+    input: AgentCleanupInput,
+  ): AgentCheckpointTransaction | null;
   acknowledgeAgentTranscriptCleanup(
     cleanupId: string,
     expectedCleanup: AgentTranscriptCleanupV1,
@@ -1815,6 +1824,7 @@ export function createChatStore(options: ChatStoreOptions = {}): ChatStore {
       action.type === 'agent/approval-checkpoint' ||
       action.type === 'conversation/agent-grants' ||
       action.type === 'agent/cleanup-enqueue' ||
+      action.type === 'agent/abandon-unresolved' ||
       action.type === 'agent/cleanup-ack' ||
       action.type === 'conversation/delete-with-agent-cleanup'
     ) {
@@ -3759,6 +3769,21 @@ export function createChatStore(options: ChatStoreOptions = {}): ChatStore {
         normalized.attemptId,
         capturedAuthority,
       );
+    },
+    abandonUnresolvedAgentAttempt: input => {
+      if (notificationDepth > 0) return null;
+      const capturedAuthority = readSessionAuthority();
+      const applied = applyAction({
+        type: 'agent/abandon-unresolved',
+        payload: {
+          conversationId: input.conversationId,
+          attemptId: input.attemptId,
+          expectedAttempt: input.expectedAttempt,
+          cleanup: input.cleanup,
+          at: canonicalNow(now),
+        },
+      });
+      return cleanupEnqueueTransaction(applied, input, capturedAuthority);
     },
     enqueueAgentTranscriptCleanup: input => {
       if (notificationDepth > 0) return null;

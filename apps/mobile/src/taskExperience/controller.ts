@@ -80,6 +80,7 @@ export function withTaskExperience(
     send: (...args) => run(() => controller.send(...args)),
     retry: (...args) => run(() => controller.retry(...args)),
     resume: (...args) => run(() => controller.resume(...args)),
+    abandonAndRetry: (...args) => run(() => controller.abandonAndRetry(...args)),
     retryPersistence: () => run(() => controller.retryPersistence()),
     retryCommit: () => run(() => controller.retryCommit()),
   };

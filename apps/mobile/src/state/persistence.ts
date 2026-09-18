@@ -4897,7 +4897,15 @@ function parseConversation(
               const previous = attemptById.get(previousAttemptId);
               return (
                 previous !== undefined &&
-                previous.rounds.length > 0 &&
+                // An agent attempt's rounds live in its journal, not in
+                // `rounds`: the lineage there is the same receipt this rule
+                // asks for. Without it a turn could never be asked again
+                // after an agent attempt that had started a round, because
+                // the digest it froze would have no provenance.
+                (previous.rounds.length > 0 ||
+                  (previous.agent !== undefined &&
+                    previous.agent !== null &&
+                    previous.agent.round_lineage !== null)) &&
                 previous.visibleHistorySha256 ===
                   attempt.visibleHistorySha256 &&
                 sameFrozenAttempt(previous, attempt)

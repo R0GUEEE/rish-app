@@ -5633,6 +5633,7 @@ function destructiveTargetConversationId(action: ChatAction): string | null {
     case 'attempt/agent-advance-call':
     case 'attempt/agent-final-checkpoint':
     case 'agent/cleanup-enqueue':
+    case 'agent/abandon-unresolved':
       return action.payload.conversationId;
     case 'conversation/agent-grants':
       return action.payload.conversationId;
@@ -7086,6 +7087,59 @@ export function chatReducer(state: ChatState, action: ChatAction): ChatState {
           ...outbox,
           { ...payload.cleanup },
         ],
+      };
+    }
+
+    case 'agent/abandon-unresolved': {
+      const payload = action.payload;
+      const conversation = state.conversations[payload.conversationId];
+      const index =
+        conversation === undefined
+          ? -1
+          : attemptIndex(conversation, payload.attemptId);
+      const attempt = conversation?.attempts[index];
+      const journal = attempt?.agent;
+      const outbox = state.agentTranscriptCleanupOutbox ?? [];
+      if (
+        conversation === undefined ||
+        attempt === undefined ||
+        payload.expectedAttempt !== attempt ||
+        journal === undefined ||
+        journal === null ||
+        !isAgentAttemptJournalV3(journal) ||
+        // Only the two answers the device cannot resolve by itself. A
+        // resumable attempt is resumed, and a terminal one is already over.
+        (journal.phase !== 'ambiguous' && journal.phase !== 'unknown') ||
+        attempt.failureCode === 'E_ATTEMPT_INTERRUPTED' ||
+        attempt.assistantMessageId !== null ||
+        !isCanonicalTimestamp(payload.at) ||
+        !cleanupEntryIsValid(payload.cleanup) ||
+        payload.cleanup.reason !== 'failed' ||
+        payload.cleanup.conversation_id !== payload.conversationId ||
+        payload.cleanup.task_id !== attempt.turnId ||
+        payload.cleanup.attempt_id !== payload.attemptId ||
+        payload.cleanup.transcript_ref !== journal.transcript.transcript_ref ||
+        payload.cleanup.transcript_sha256 !==
+          journal.transcript.transcript_sha256 ||
+        outbox.length >= MAX_AGENT_CLEANUP_OUTBOX_ENTRIES ||
+        outbox.some(entry => entry.cleanup_id === payload.cleanup.cleanup_id)
+      ) return state;
+      // Recorded exactly as hydration records a dead writer's attempt: the
+      // journal stays as the round and transcript evidence, and the failure
+      // code is the one the retry reducer accepts a journal with.
+      const abandoned: TurnAttemptV1 = {
+        ...attempt,
+        status: 'failed',
+        activeRound: null,
+        failureCode: 'E_ATTEMPT_INTERRUPTED',
+        updatedAt: payload.at,
+      };
+      return {
+        ...withConversation(
+          state,
+          replaceAttempt(conversation, index, abandoned),
+        ),
+        agentTranscriptCleanupOutbox: [...outbox, { ...payload.cleanup }],
       };
     }
 
