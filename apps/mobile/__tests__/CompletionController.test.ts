@@ -2371,6 +2371,42 @@ describe('project Agent completion controller', () => {
     } finally { jest.useRealTimers(); }
   });
 
+  /**
+   * A round the provider never answered ends the attempt. The store keeps
+   * terminal Agent phases on the atomic final checkpoint, so a failed round
+   * that was checkpointed through the ordinary controller transaction was
+   * refused outright: the journal stayed `round_in_flight`, the attempt stayed
+   * `sending`, and the turn could neither finish nor be recovered.
+   */
+  test('a round that failed retryably ends the attempt instead of leaving it sending', async () => {
+    const store = agentStore();
+    const runtime = makeRuntime([]);
+    (runtime.completeAgentRoundV2 as jest.Mock).mockImplementationOnce(async (request: CompleteAgentRoundRequestV2) => ({
+      schema_version: 2,
+      status: 'failed_retryable',
+      operation_id: request.operation_id,
+      task_id: request.task_id,
+      attempt_id: request.attempt_id,
+      round_id: request.round_id,
+      round_index: request.round_index,
+      launch_attempt: request.launch_attempt,
+      result_round_revision: 1,
+      transcript: request.transcript,
+      failure_code: 'E_AGENT_ROUND_AMBIGUOUS',
+    }));
+    const controller = agentController(store, runtime, committedPersistence(store));
+    const conversationId = store.getState().selectedConversationId!;
+    await controller.send({ conversationId, text: 'offline round', attachments: [] });
+    const attempt = store.getState().conversations[conversationId]!.attempts[0]!;
+    expect(attempt.agent!.phase).toBe('failed');
+    expect(attempt.agent!.round_lineage!.status).toBe('failed_retryable');
+    expect(attempt.status).toBe('failed');
+    // The terminal checkpoint carries its cleanup, and finalize/discard drain
+    // it: a refused checkpoint reached neither.
+    expect(runtime.finalizeAgentAttempt).toHaveBeenCalledTimes(1);
+    expect(runtime.discardAgentAttempt).toHaveBeenCalledTimes(1);
+  });
+
   test('restarts through query/recover without replaying an in-flight round', async () => {
     const store = agentStore();
     const runtime = makeRuntime([]);

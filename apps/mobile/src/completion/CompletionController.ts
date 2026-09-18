@@ -2642,6 +2642,12 @@ export function createCompletionController(
           : result.status === 'unknown'
             ? 'unknown'
             : 'ambiguous';
+    // A failed or cancelled round ends the attempt. The store keeps terminal
+    // Agent phases on the atomic final checkpoint -- the ordinary controller
+    // checkpoint refuses them outright -- so those two commit through
+    // `completeAgentAttempt` with no assistant message, exactly as a settled
+    // cancellation does.
+    const terminal = phase === 'failed' || phase === 'cancelled';
     const nextJournal: PersistedAgentAttemptJournalV3 = {
       ...copyAgentJournal(current),
       phase,
@@ -2665,24 +2671,43 @@ export function createCompletionController(
     if (eventId === null) {
       return await failAgentWithoutNative(conversationId, attemptId, 'E_AGENT_PERSISTENCE');
     }
-    const event = agentEvent(
-      attemptId,
-      eventId,
-      'round',
-      request.round_index,
-      null,
-      'running',
-      null,
-      null,
-      null,
-      null,
-      null,
-      transitionCreatedAt,
-    );
+    // The atomic final checkpoint reads one terminal event and matches every
+    // field of it, including the failure code the reducer derives: a round
+    // that failed retryably carries no completion receipt, so the code is
+    // always E_AGENT_PERSISTENCE.
+    const event = terminal
+      ? agentEvent(
+          attemptId,
+          eventId,
+          'terminal',
+          null,
+          null,
+          phase === 'cancelled' ? 'cancelled' : 'failed',
+          null,
+          null,
+          null,
+          null,
+          phase === 'cancelled' ? 'E_AGENT_CANCELLED' : 'E_AGENT_PERSISTENCE',
+          transitionCreatedAt,
+        )
+      : agentEvent(
+          attemptId,
+          eventId,
+          'round',
+          request.round_index,
+          null,
+          'running',
+          null,
+          null,
+          null,
+          null,
+          null,
+          transitionCreatedAt,
+        );
     // Unknown/ambiguous rounds still own unresolved native evidence. Only a
     // settled failed/cancelled journal may enqueue transcript cleanup; the
     // store deliberately rejects cleanup on the unresolved checkpoints.
-    const needsCleanup = phase === 'failed' || phase === 'cancelled';
+    const needsCleanup = terminal;
     const cleanup = needsCleanup
         ? agentCleanupFor(
             conversationId,
@@ -2698,14 +2723,15 @@ export function createCompletionController(
     const cas = authorityFor(located.attempt, conversationId);
     if (cas === null) return await failAgentWithoutNative(conversationId, attemptId, 'E_AGENT_PERSISTENCE');
     const transaction =
-      phase === 'cancelled'
-        ? dependencies.chat.cancelAgentAttempt({
+      terminal && cleanup !== null && cleanup !== undefined
+        ? dependencies.chat.completeAgentAttempt({
             cas,
             expectedAttempt: located.attempt,
             journal: nextJournal,
             events: [event],
             evidence,
-            ...(cleanup === null || cleanup === undefined ? {} : { cleanup }),
+            assistantMessage: null,
+            cleanup,
           })
         : dependencies.chat.failAgentAttempt({
             cas,
@@ -2713,7 +2739,6 @@ export function createCompletionController(
             journal: nextJournal,
             events: [event],
             evidence,
-            ...(cleanup === null || cleanup === undefined ? {} : { cleanup }),
           });
     if (transaction === null) return await failAgentWithoutNative(conversationId, attemptId, 'E_AGENT_CONFLICT');
     if (phase !== 'round_in_flight' && cleanup !== null && cleanup !== undefined) {
@@ -2739,7 +2764,7 @@ export function createCompletionController(
         if (agentRuntime === undefined) return outcome('cancelled', state);
         // A cancelled/unknown/ambiguous round is never re-executed. Keep the
         // durable terminal candidate visible; recovery owns any later probe.
-        if (phase === 'cancelled' && cleanup !== null && cleanup !== undefined) {
+        if (terminal && cleanup !== null && cleanup !== undefined) {
           const finalized = await finalizeAgent(
             conversationId,
             attemptId,
