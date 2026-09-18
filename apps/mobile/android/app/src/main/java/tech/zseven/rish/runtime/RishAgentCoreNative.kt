@@ -286,6 +286,10 @@ internal object RishAgentCoreNative {
     fun workspaceTool(request: JSONObject): JSONObject? =
         workspaceReply(request) { workspaceToolReduce(it) }
 
+    /** What the agent may do in one binding, for the permissions sheet. */
+    fun agentPolicy(request: JSONObject): JSONObject? =
+        workspaceReply(request) { policyReduce(it) }
+
     private inline fun workspaceReply(
         request: JSONObject,
         reduce: (String) -> String?,

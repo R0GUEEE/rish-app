@@ -36,20 +36,17 @@ import tech.zseven.rish.runtime.RuntimeJson
  * resolves a workspace root through AndroidWorkspaceRegistry, so an attempt
  * bound to a directory gets real agent authority over it.
  *
- * **`implemented` is now true, and that turns the whole surface on.** The JS
- * layer reads it as "this runtime may be used at all": with it false, nothing
- * below is ever called. So it cannot be flipped one operation at a time, and
- * flipping it is a statement about what still refuses:
+ * **`implemented` is true, and that turns the whole surface on.** The JS layer
+ * reads it as "this runtime may be used at all": with it false, nothing below
+ * is ever called, so it cannot be flipped one operation at a time.
  *
- * - `cancel_agent_attempt`, `recover_agent_attempt` and `query_agent_attempt`
- *   still reject. The controller calls them to stop a run and to pick one up
- *   after a kill. Until they are served, stopping a turn and resuming one
- *   across a restart both fail -- loudly, with E_AGENT_NATIVE, rather than
- *   silently doing the wrong thing.
- * - `interrupt_agent_attempt`, `query_agent_tool` and `query_agent_cleanup`
- *   reject too; the controller does not call them.
+ * All thirteen are now served: the seven above, plus `cancel_agent_attempt`,
+ * `recover_agent_attempt`, `interrupt_agent_attempt` and the three queries.
+ * What each one has actually been seen to do is in the commits that added it;
+ * recovery in particular reconciles correctly but has not been seen to resume
+ * a turn, and `retry_failed_round` is refused rather than reconciled.
  *
- * Streaming is also absent: a round's text arrives whole rather than as it is
+ * Streaming is absent: a round's text arrives whole rather than as it is
  * written.
  */
 class AgentRuntimeModule(reactContext: ReactApplicationContext) :
