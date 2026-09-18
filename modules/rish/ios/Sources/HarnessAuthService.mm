@@ -1254,23 +1254,50 @@ static NSURL *DSHAuthInitrdWithCredential(NSURL *baseURL, NSData *credential,
   char *raw = NULL;
   @synchronized (self) { self.streamGeneration = generation; }
   NSString *home = @"/tmp/rish-auth-home";
-  // The CLI is the official release, downloaded in the guest and kept on the
-  // data disk. The disk is raw rather than a file system: the guest has no
-  // mkfs, and a tar stream needs neither. An empty disk simply extracts
-  // nothing, which is how a first login tells itself to install.
-  NSString *script = [NSString stringWithFormat:
+  // Installing and signing in are separate guest commands. Sharing one budget
+  // meant a slow download ate the sign-in's, and the person watching could not
+  // tell a download from a wait for the device code -- both are just a spinner.
+  // The disk is raw rather than a file system: the guest has no mkfs and a tar
+  // stream needs none. An empty disk extracts nothing, which is how a first
+  // login knows to install.
+  NSString *install = [NSString stringWithFormat:
       @"set -e; umask 077; mkdir -p %@ /opt/harness;"
       @" tar -xf /dev/vdb -C /opt/harness 2>/dev/null || true;"
-      @" if [ ! -x /opt/harness/codex ]; then"
-      @"   wget -qO /tmp/codex.tgz '%@' || exit 69;"
-      @"   tar -xzf /tmp/codex.tgz -C /opt/harness;"
-      @"   mv -f /opt/harness/codex-* /opt/harness/codex 2>/dev/null || true;"
-      @"   chmod 0755 /opt/harness/codex;"
-      @"   tar -cf /dev/vdb -C /opt/harness .;"
+      @" if [ -x /opt/harness/codex ]; then exit 0; fi;"
+      @" wget -qO /tmp/codex.tgz '%@' || exit 69;"
+      @" tar -xzf /tmp/codex.tgz -C /opt/harness || exit 70;"
+      @" if [ ! -e /opt/harness/codex ]; then"
+      @"   mv -f /opt/harness/codex-* /opt/harness/codex || exit 70;"
       @" fi;"
-      @" export HOME=%@;"
+      @" chmod 0755 /opt/harness/codex;"
+      @" /opt/harness/codex --version >/dev/null 2>&1 || exit 71;"
+      @" tar -cf /dev/vdb -C /opt/harness . || exit 72;"
+      @" exit 0",
+      home, DSHHarnessAuthCodexReleaseURL];
+  NSDictionary *installed = DSHAuthExecResponse(session, @[ @"sh", @"-lc", install ]);
+  NSInteger installExit = [installed[@"exit_code"] integerValue];
+  if (![installed[@"ok"] boolValue] || installExit != 0) {
+    @synchronized (self) {
+      if (self.generation == generation &&
+          [self.activeSessionId isEqualToString:sessionId]) {
+        // Which step failed is the whole question when nothing is on screen:
+        // a download, an unpack, a binary the guest cannot run, or a disk it
+        // could not write are four different problems.
+        self.activeErrorCode = installExit == 69 ? @"E_HARNESS_AUTH_CLI_DOWNLOAD_FAILED"
+            : installExit == 70 ? @"E_HARNESS_AUTH_CLI_UNPACK_FAILED"
+            : installExit == 71 ? @"E_HARNESS_AUTH_CLI_NOT_EXECUTABLE"
+            : installExit == 72 ? @"E_HARNESS_AUTH_CLI_STORE_FAILED"
+            : @"E_HARNESS_AUTH_CLI_INSTALL_FAILED";
+        self.lastErrorCode = self.activeErrorCode;
+      }
+    }
+    [self finishCodexLoginWithGeneration:generation response:nil];
+    return;
+  }
+  NSString *script = [NSString stringWithFormat:
+      @"set -e; umask 077; mkdir -p %@; export HOME=%@;"
       @" exec timeout 600 /opt/harness/codex login --device-auth",
-      home, DSHHarnessAuthCodexReleaseURL, home];
+      home, home];
   NSArray *command = @[ @"sh", @"-lc", script ];
   NSData *commandData = [NSJSONSerialization dataWithJSONObject:@{ @"command": command }
                                                                   options:0 error:nil];
@@ -1287,19 +1314,8 @@ static NSURL *DSHAuthInitrdWithCredential(NSURL *baseURL, NSData *credential,
     }
   }
   if (![loginResponse[@"ok"] boolValue] || [loginResponse[@"exit_code"] integerValue] != 0) {
-    // The install and the sign-in are one command, so without this they fail
-    // as the same thing. A guest that could not fetch the CLI is a different
-    // problem from a sign-in that was refused, and only one of them is about
-    // the person's account. 69 is the exit the install step reserves.
-    if ([loginResponse[@"exit_code"] integerValue] == 69) {
-      @synchronized (self) {
-        if (self.generation == generation &&
-            [self.activeSessionId isEqualToString:sessionId]) {
-          self.activeErrorCode = @"E_HARNESS_AUTH_CLI_DOWNLOAD_FAILED";
-          self.lastErrorCode = self.activeErrorCode;
-        }
-      }
-    }
+    // Installing is its own command now, so reaching here means the sign-in
+    // itself failed rather than the CLI being missing.
     [self finishCodexLoginWithGeneration:generation response:nil];
     return;
   }
