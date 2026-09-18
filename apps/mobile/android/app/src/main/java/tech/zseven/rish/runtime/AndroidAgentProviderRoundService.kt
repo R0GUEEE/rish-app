@@ -290,11 +290,30 @@ internal class AndroidAgentProviderRoundService(
             return settle(request, locator, completeCas, reply, root ?: JSONObject(), authority)
         }
 
-        val settled = rowFor(wal.snapshot(), locator) ?: throw Refused(CONFLICT)
+        // The provider call failed, so nobody is running this round any more.
+        // Release the owner first -- the core refuses to reconcile a row whose
+        // owner is still alive -- then reconcile the row out of `in_flight`.
+        // Leaving it there is residue no discard will ever clear: an
+        // `in_flight` round pins its attempt, so the turn can never be
+        // finalized and its cleanup never drains. iOS releases and reconciles
+        // at exactly this point.
+        liveTasks.unregister(nativeTaskId)
+        val reconciled = rounds.reconcile(locator, completeCas)?.optJSONObject("row")
+        val settled = reconciled ?: rowFor(wal.snapshot(), locator) ?: throw Refused(CONFLICT)
+        // The reconcile decides what the round became: a request that never
+        // reached the provider is `failed_retryable`, one that did is
+        // `ambiguous`. Reporting the row's own state keeps the controller's
+        // journal and this WAL saying the same thing.
+        val settledState = settled.optString("state")
+        val reportedStatus =
+            if (settledState.isEmpty() || settledState == "in_flight" ||
+                settledState == "cancel_requested"
+            ) status else settledState
+        val reportedFailure = settled.optString("failure_code").ifEmpty { failure }
         return decide(
             JSONObject().put("op", "round_result").put("request", request)
-                .put("row", settled).put("status", status)
-                .put("failure_code", failure),
+                .put("row", settled).put("status", reportedStatus)
+                .put("failure_code", reportedFailure),
         ).optJSONObject("result") ?: throw Refused(NATIVE)
     }
 
