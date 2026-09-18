@@ -3,7 +3,7 @@ package tech.zseven.rish.runtime
 import org.json.JSONObject
 
 /**
- * `recover_agent_attempt` on Android, for the `reconcile` action.
+ * `recover_agent_attempt` on Android.
  *
  * Mirrors the recovering half of modules/rish/ios/Sources/AgentRuntimeCoordinator.mm.
  * This is what a restarted app does with a turn that was in the middle of
@@ -18,10 +18,10 @@ import org.json.JSONObject
  * what all of that means; this file supplies the two recoveries and the
  * transaction.
  *
- * **Not here: `retry_failed_round`.** The controller only asks for it after a
- * reconcile reports a retryable round, and re-launching a round needs the
- * retry half of the round service. A request for it is refused rather than
- * silently reconciled.
+ * `retry_failed_round` re-launches a round the reconcile just found failed
+ * retryably -- once, as the next launch attempt, under a child operation of
+ * this recovery. Whether it may happen at all is the core's answer over what
+ * the reconcile found, and a round that failed any other way is never re-sent.
  */
 internal class AndroidAgentRecoveryService(
     private val wal: AndroidAgentWal,
@@ -62,7 +62,8 @@ internal class AndroidAgentRecoveryService(
             JSONObject().put("op", "target_request").put("kind", "recover")
                 .put("request", request),
         )
-        if (request.optString("action") != "reconcile") throw Refused(NATIVE)
+        val action = request.optString("action")
+        if (action != "reconcile" && action != "retry_failed_round") throw Refused(NATIVE)
         val target = request.optJSONObject("target") ?: throw Refused(BAD_ARGUMENTS)
         val cas = request.optJSONObject("controller_cas") ?: JSONObject()
         val checkpoint = request.optJSONObject("committed_checkpoint") ?: JSONObject()
@@ -146,10 +147,18 @@ internal class AndroidAgentRecoveryService(
                         ),
                     )
                 }
-                val outcome = runtime(
-                    JSONObject().put("op", "recover_round_outcome").put("recovery", recovery),
-                ).opt("settled")
-                if (outcome != null && outcome != JSONObject.NULL) settled = outcome
+                if (action == "retry_failed_round") {
+                    settled = retryRound(request, target, authority, recovery)
+                        ?: return commit(
+                            request, startedOperation, timestamp,
+                            conflictOutput(request, "E_AGENT_CONFLICT", null),
+                        )
+                } else {
+                    val outcome = runtime(
+                        JSONObject().put("op", "recover_round_outcome").put("recovery", recovery),
+                    ).opt("settled")
+                    if (outcome != null && outcome != JSONObject.NULL) settled = outcome
+                }
             }
             "tool" -> {
                 val child = runtime(
@@ -217,6 +226,68 @@ internal class AndroidAgentRecoveryService(
         return commit(request, startedOperation, timestamp, result)
     }
 
+    /**
+     * Launches a retryable round again, for `action: "retry_failed_round"`.
+     *
+     * A retry is not a new round: it re-launches the row that failed, once,
+     * as the next launch attempt, under a child operation of this recovery so
+     * the two can be told apart afterwards. Whether it may happen at all is
+     * the core's answer over what the reconcile just found -- a round that
+     * did not fail retryably is never re-sent.
+     *
+     * Answers null when the core refuses the retry, which the caller commits
+     * as a conflict.
+     */
+    private fun retryRound(
+        request: JSONObject,
+        target: JSONObject,
+        authority: JSONObject,
+        recovery: JSONObject,
+    ): Any? {
+        val allowed = runtime(
+            JSONObject().put("op", "recover_retry_allowed").put("request", request)
+                .put("recovery", recovery),
+        ).optBoolean("allowed")
+        if (!allowed) return null
+        val launch = runtime(
+            JSONObject().put("op", "recover_retry_launch_attempt")
+                .put("state", wal.snapshot()).put("request", request),
+        ).opt("launch_attempt") ?: return null
+        val child = runtime(
+            JSONObject().put("op", "child_operation_id").put("request", request)
+                .put("purpose", "retry-round"),
+        ).optString("operation_id").takeIf { it.isNotEmpty() } ?: throw Refused(NATIVE)
+        val retryRequest = runtime(
+            JSONObject().put("op", "recover_retry_request").put("request", request)
+                .put("authority", authority).put("launch_attempt", launch)
+                .put("child_operation_id", child),
+        ).optJSONObject("request") ?: throw Refused(NATIVE)
+
+        val retried = try {
+            rounds.completeRound(retryRequest, retryFailedRound = true)
+        } catch (refused: AndroidAgentProviderRoundService.Refused) {
+            android.util.Log.w("RishAgent", "round retry refused: ${refused.code}")
+            return null
+        }
+        if (retried.optString("status") == "conflict") return null
+        // What the re-launched round became is read the same way the first
+        // reconcile read it, so the two answers are the same kind of answer.
+        val after = if (retried.optString("status") != "completed") null else rounds.recoverRound(
+            JSONObject().put("schema_version", 2)
+                .put("task_id", target.opt("task_id"))
+                .put("attempt_id", target.opt("attempt_id"))
+                .put("round_id", target.opt("round_id"))
+                .put("round_index", target.opt("round_index"))
+                .put("expected_round_revision", retried.opt("result_round_revision"))
+                .put("transcript", request.opt("expected_transcript"))
+                .put("root", request.opt("root")),
+        )
+        return runtime(
+            JSONObject().put("op", "recover_retry_outcome").put("retried", retried)
+                .put("after_retry", after ?: JSONObject.NULL),
+        ).opt("settled")
+    }
+
     private fun queryAttempt(
         request: JSONObject,
         target: JSONObject,
@@ -231,13 +302,18 @@ internal class AndroidAgentRecoveryService(
             .put("expected_session_generation", checkpoint.opt("session_generation"))
             .put("expected_session_sha256", checkpoint.opt("session_sha256"))
             .put("expected_transcript", request.opt("expected_transcript"))
+            // `put(key, null)` *removes* the key on Android, and the shape
+            // rule counts keys: a request whose root carries neither field
+            // would be refused as malformed rather than as a stale root.
             .put(
                 "expected_root_fingerprint_sha256",
-                request.optJSONObject("root")?.opt("root_fingerprint_sha256"),
+                request.optJSONObject("root")?.opt("root_fingerprint_sha256")
+                    ?: JSONObject.NULL,
             )
             .put(
                 "expected_workspace_binding_revision",
-                request.optJSONObject("root")?.opt("workspace_binding_revision"),
+                request.optJSONObject("root")?.opt("workspace_binding_revision")
+                    ?: JSONObject.NULL,
             ),
     )
 

@@ -78,7 +78,7 @@ internal class AndroidAgentProviderRoundService(
     private fun env(request: JSONObject): JSONObject =
         AndroidSessionEnvironment.facts(request)
 
-    fun completeRound(request: JSONObject): JSONObject {
+    fun completeRound(request: JSONObject, retryFailedRound: Boolean = false): JSONObject {
         val root = request.optJSONObject("root")
         val rootOk = roots.resolveAgentProjection(root) != null
         if (!rootOk) android.util.Log.w("RishAgent", "round root did not resolve: $root")
@@ -113,6 +113,28 @@ internal class AndroidAgentProviderRoundService(
         liveTasks.register(nativeTaskId)
         val owner = ownerFor(request)
         val existing = rowFor(wal.snapshot(), locator)
+        if (retryFailedRound) {
+            // A retry re-launches a row that failed retryably, and only that:
+            // the row must still be the one the caller saw, it must not have
+            // been launched eight times already, and this must be the very
+            // next launch. Anything else is a conflict, not a second attempt
+            // at someone else's round.
+            val previous = existing?.optInt("launch_attempt", -1) ?: -1
+            val shaped = existing != null &&
+                existing.optString("state") == "failed_retryable" &&
+                AndroidJson.equal(
+                    existing.opt("row_revision"), request.opt("expected_round_revision"),
+                ) &&
+                previous in 0..7 &&
+                request.optInt("launch_attempt", -1) == previous + 1
+            if (!shaped) {
+                android.util.Log.w(
+                    "RishAgent",
+                    "round retry refused: state=${existing?.optString("state")} launch=$previous",
+                )
+                throw Refused(CONFLICT)
+            }
+        }
         if (existing == null) {
             rounds.create(insertCas(request, locator), startedRound(request, locator, owner))
                 ?: throw Refused(PERSISTENCE)
