@@ -22,18 +22,18 @@ internal class AndroidRuntimeState private constructor(val app: Application) {
     /// Which native tasks this process still owns; a persisted owner from a
     /// previous launch is not alive, so its rows can be recovered.
     val liveTasks = AndroidLiveTasks()
-    val executionLedger = AndroidAgentExecutionLedger(agentWal, liveTasks)
+    val agentOperations = AndroidAgentOperations(agentWal)
+    val executionLedger = AndroidAgentExecutionLedger(agentWal, liveTasks, agentOperations)
     val workspaceTools = AndroidWorkspaceToolExecutor(workspaces, roots)
     val agentRounds = AndroidAgentRoundJournal(agentWal, liveTasks)
     val agentTranscripts = AndroidAgentTranscriptStore(agentWal)
     val toolBatch = AndroidAgentToolBatchService(
         agentWal, sessions, preparedAttempts, executionLedger, roots, workspaceTools,
+        agentOperations, agentTranscripts,
     )
     val toolExecution = AndroidAgentToolExecutionService(
         agentWal, sessions, preparedAttempts, executionLedger, roots, workspaceTools, liveTasks,
     )
-    /// The native operation relation every settling operation writes through.
-    val agentOperations = AndroidAgentOperations(agentWal)
     val lifecycle = AndroidAgentLifecycleService(agentWal, sessions, agentOperations, roots)
     val approvals = AndroidAgentApprovalService(
         agentWal, sessions, executionLedger, agentOperations, roots,

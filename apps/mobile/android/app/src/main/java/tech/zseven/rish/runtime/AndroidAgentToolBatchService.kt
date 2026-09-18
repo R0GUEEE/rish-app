@@ -30,6 +30,8 @@ internal class AndroidAgentToolBatchService(
     private val ledger: AndroidAgentExecutionLedger,
     private val roots: AndroidAgentRootResolver,
     private val workspaceTools: AndroidWorkspaceToolExecutor,
+    private val operations: AndroidAgentOperations,
+    private val transcripts: AndroidAgentTranscriptStore,
 ) {
     class Refused(val code: String) : Exception(code)
 
@@ -70,16 +72,39 @@ internal class AndroidAgentToolBatchService(
                 .put("session_ok", sessionOk)
                 .put("root_ok", resolved != null),
         )
-        if (!gate.optBoolean("proceed")) return gate
+        if (!gate.optBoolean("proceed")) {
+            // The rejection the controller reads is the `reject` value, not
+            // the reducer's envelope around it.
+            val rejected = gate.optJSONObject("reject") ?: throw Refused(NATIVE)
+            android.util.Log.w(
+                "RishAgent",
+                "batch gate refused: ${rejected.optString("failure_code")}",
+            )
+            return rejected
+        }
 
+        // `messages` is the transcript's own native messages -- the round's
+        // assistant turn and its calls -- not the WAL's transcripts table. And
+        // `grants` is what the *person* has allowed in this conversation, not
+        // what the root is capable of: a capability list in its place makes
+        // every call look ungranted.
+        val messages = transcripts.nativeMessages(
+            JSONObject().put("schema_version", 1)
+                .put("attempt_id", request.opt("attempt_id"))
+                .put("root", root)
+                .put("transcript", request.opt("transcript")),
+        ) ?: JSONArray()
+        val grants = AndroidCommittedSession.conversation(session, request)
+            ?.optJSONArray("agent_grants") ?: JSONArray()
         val analysis = decide(
             JSONObject().put("op", "prepare_calls").put("request", request)
                 .put("round", round ?: JSONObject.NULL)
-                .put("messages", state.optJSONArray("transcripts") ?: JSONArray())
+                .put("messages", messages)
                 .put("authority", authority ?: JSONObject.NULL)
-                .put("grants", resolved?.optJSONArray("capabilities") ?: JSONArray()),
+                .put("grants", grants),
         )
-        val calls = analysis.optJSONArray("calls") ?: return analysis
+        val calls = analysis.optJSONArray("calls")
+            ?: return analysis.optJSONObject("reject") ?: throw Refused(NATIVE)
 
         // The probes. One per call, in order, and the order is kept because
         // the core reads the outcomes positionally.
@@ -102,14 +127,23 @@ internal class AndroidAgentToolBatchService(
                 .put("authority", authority ?: JSONObject.NULL)
                 .put("final_authority", finalAuthority ?: JSONObject.NULL)
                 .put("started_authority_revision", authority?.opt("authority_revision") ?: JSONObject.NULL)
-                .put("request_sha256", JSONObject.NULL)
+                .put(
+                    "request_sha256",
+                    operations.requestSha256("prepare_agent_tool_batch", request),
+                )
                 .put("prepared_calls", preparedCalls)
                 .put("mutation_batch", finished.optBoolean("mutation_batch")),
         )
-        val internal = final.optJSONObject("internal") ?: return final
+        val internal = final.optJSONObject("internal")
+            ?: return final.optJSONObject("reject") ?: throw Refused(NATIVE)
 
-        val tokens = (0 until preparedCalls.length()).map { UUID.randomUUID().toString() }
-        return ledger.prepareToolBatch(internal, tokens) ?: decide(
+        // One per call the reducer may need to mint an approval for. A batch
+        // carries at most sixteen calls and the reducer takes what it needs,
+        // so this is generous by design: running out mid-way is a corrupt
+        // batch, not a smaller one.
+        val tokens = (0 until 16).map { UUID.randomUUID().toString() }
+        ledger.prepareToolBatch(internal, tokens)?.let { return it }
+        return decide(
             JSONObject().put("op", "prepare_ledger_failure").put("request", request)
                 .put("native_code", 3).put("prepared_calls", preparedCalls),
         ).optJSONObject("rejected") ?: throw Refused(PERSISTENCE)
@@ -148,11 +182,23 @@ internal class AndroidAgentToolBatchService(
         else -> 1
     }
 
+    /**
+     * The round row this batch belongs to.
+     *
+     * A row carries its identity in its `locator`, not at the top level, so
+     * matching on `round_id` off the row itself never found one -- and a batch
+     * with no round is a conflict, which is exactly what this reported.
+     */
     private fun roundFor(state: JSONObject, request: JSONObject): JSONObject? {
         val rounds = state.optJSONArray("rounds") ?: return null
         for (index in 0 until rounds.length()) {
             val round = rounds.optJSONObject(index) ?: continue
-            if (AndroidJson.equal(round.opt("round_id"), request.opt("round_id"))) return round
+            val locator = round.optJSONObject("locator") ?: continue
+            if (AndroidJson.equal(locator.opt("round_id"), request.opt("round_id")) &&
+                AndroidJson.equal(locator.opt("attempt_id"), request.opt("attempt_id"))
+            ) {
+                return round
+            }
         }
         return null
     }

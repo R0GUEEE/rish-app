@@ -14,6 +14,7 @@ import org.json.JSONObject
 internal class AndroidAgentExecutionLedger(
     private val wal: AndroidAgentWal,
     private val liveTasks: AndroidLiveTasks,
+    private val operations: AndroidAgentOperations,
 ) {
     class Refused(val code: Int) : RuntimeException("E_AGENT_STORE_$code")
 
@@ -298,11 +299,19 @@ internal class AndroidAgentExecutionLedger(
                     }
                 }
             }
+            // A round row carries its identity in its `locator`. Matching on a
+            // top-level `round_id` puts no round in the view at all, and the
+            // reducer refuses a batch whose round it cannot see.
             val rounds = JSONArray()
             state.optJSONArray("rounds")?.let { table ->
                 for (index in 0 until table.length()) {
                     val round = table.optJSONObject(index) ?: continue
-                    if (AndroidJson.equal(round.opt("round_id"), roundId)) rounds.put(round)
+                    val locator = round.optJSONObject("locator") ?: continue
+                    if (AndroidJson.equal(locator.opt("round_id"), roundId) &&
+                        AndroidJson.equal(locator.opt("attempt_id"), attemptId)
+                    ) {
+                        rounds.put(round)
+                    }
                 }
             }
             val transcripts = state.optJSONArray("transcripts")
@@ -358,7 +367,8 @@ internal class AndroidAgentExecutionLedger(
                     JSONObject().put("op", "prepare_tool_batch").put("request", request)
                         .put("env", env).put("view", view),
                 )
-            } catch (_: Refused) {
+            } catch (refused: Refused) {
+                android.util.Log.w("RishAgent", "prepare_tool_batch refused: ${refused.code}")
                 return@body false
             }
             // The reducer returns changes and an output; the facade applies
@@ -366,7 +376,21 @@ internal class AndroidAgentExecutionLedger(
             // batch insert names no existing row, so there is no slot to
             // replace and the row index is deliberately absent.
             apply(state, reply.optJSONArray("changes") ?: JSONArray(), -1)
-            output = reply.optJSONObject("output") ?: reply
+            // The reducer's own output is the batch record, with its
+            // `operation_result` left null for the host to fill: the operation
+            // commit it hands back is what produces the result the controller
+            // is given, and skipping it returns a record JavaScript refuses as
+            // E_AGENT_LEDGER.
+            val commitOperation = reply.optJSONObject("commit_operation")
+            output = if (commitOperation == null) {
+                reply.optJSONObject("output") ?: reply
+            } else {
+                val committed = operations.commitDecidedInState(
+                    state, commitOperation, AndroidClock.now(),
+                )
+                operations.settledResult(committed)
+                    ?: throw Refused(4)
+            }
             true
         }
         wal.transaction(body)
