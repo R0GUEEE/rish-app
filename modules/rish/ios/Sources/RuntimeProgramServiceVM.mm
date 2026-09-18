@@ -176,10 +176,15 @@ static void OnOutput(void *context, const char *bytes, size_t size) {
   // runner, and Go reached 683s against a ten-minute bound on that same
   // runner having taken 476s on a faster one. So the bound follows whether
   // the launcher compiles, not the family. It does not affect cancellation.
+  //
+  // The bound is thirty minutes because runner speed varies 20-60% between
+  // otherwise identical runs: Java compiled in 1315s on one slow runner while
+  // finishing in ~980s on faster ones, so a twenty-minute ceiling it already
+  // fills leaves no room for the slowest one and fails there.
   BOOL compiles = [family isEqual:@"go"] || [family isEqual:@"rust"] ||
       ([family isEqual:@"java"] && DSHRuntimeProgramValidPath(entryPath) &&
        [entryPath.pathExtension.lowercaseString isEqual:@"java"]);
-  return compiles ? 1200000 : 600000;
+  return compiles ? 1800000 : 600000;
 }
 - (NSNumber *)performWithLease:(DSHRuntimeEnvironmentLease *)lease snapshot:(DSHRuntimeWorkspaceSnapshot *)snapshot
                       operation:(DSHRuntimeVMOperation)operation error:(NSError **)error {

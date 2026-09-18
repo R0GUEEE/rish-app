@@ -317,9 +317,9 @@ static NSString *const Operation = @"22222222-2222-4222-8222-222222222222";
 }
 - (void)testExecutionTimeoutExtendsOnlyCompilingLaunchersAndValidatedJavaSource {
   NSArray<NSArray *> *cases = @[
-    @[@"java", @"Main.java", @1200000],
-    @[@"java", @"Main.JAVA", @1200000],
-    @[@"java", @"src/Main.Java", @1200000],
+    @[@"java", @"Main.java", @1800000],
+    @[@"java", @"Main.JAVA", @1800000],
+    @[@"java", @"src/Main.Java", @1800000],
     @[@"java", @"main.jar", @600000],
     @[@"java", @"main.JAR", @600000],
     @[@"java", @"Main.java.jar", @600000],
@@ -336,11 +336,11 @@ static NSString *const Operation = @"22222222-2222-4222-8222-222222222222";
     @[@"unknown", @"Main.java", @600000],
     @[@"JAVA", @"Main.java", @600000],
     // Their launchers always compile, so the entry cannot shorten the bound.
-    @[@"go", @"main.go", @1200000],
-    @[@"go", @"Main.java", @1200000],
-    @[@"go", @"", @1200000],
-    @[@"rust", @"main.rs", @1200000],
-    @[@"rust", @"Main.java", @1200000],
+    @[@"go", @"main.go", @1800000],
+    @[@"go", @"Main.java", @1800000],
+    @[@"go", @"", @1800000],
+    @[@"rust", @"main.rs", @1800000],
+    @[@"rust", @"Main.java", @1800000],
     @[@"GO", @"main.go", @600000],
     @[@"Rust", @"main.rs", @600000],
   ];
@@ -349,7 +349,7 @@ static NSString *const Operation = @"22222222-2222-4222-8222-222222222222";
         entryPath:testCase[1]];
     XCTAssertEqual(timeout, [testCase[2] unsignedIntegerValue], @"%@", testCase);
     XCTAssertGreaterThanOrEqual(timeout, 600000U);
-    XCTAssertLessThanOrEqual(timeout, 1200000U);
+    XCTAssertLessThanOrEqual(timeout, 1800000U);
   }
 }
 @end
