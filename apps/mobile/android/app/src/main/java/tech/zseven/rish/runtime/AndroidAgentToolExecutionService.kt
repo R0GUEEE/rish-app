@@ -258,7 +258,19 @@ internal class AndroidAgentToolExecutionService(
         // The core refuses a claim whose owner is not alive in this process,
         // so the task is registered before it is claimed -- the same relation
         // the round journal insists on.
-        liveTasks.register(request.optString("operation_id"))
+        val nativeTaskId = request.optString("operation_id")
+        liveTasks.register(nativeTaskId)
+        return try {
+            claimed(request, claimCas)
+        } finally {
+            // Alive only while the call is being run, exactly as the round
+            // does: a dispatched row whose owner never dies can never be
+            // recovered by the process that owns it.
+            liveTasks.unregister(nativeTaskId)
+        }
+    }
+
+    private fun claimed(request: JSONObject, claimCas: JSONObject): JSONObject {
         val owner = ownerFor(request)
         ledger.claim(claimCas, owner) ?: throw Refused(CONFLICT)
 

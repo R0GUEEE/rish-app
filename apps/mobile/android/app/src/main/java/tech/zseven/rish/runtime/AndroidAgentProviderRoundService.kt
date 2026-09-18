@@ -111,6 +111,28 @@ internal class AndroidAgentProviderRoundService(
         // create one. iOS registers the same id for the same reason.
         val nativeTaskId = request.optString("operation_id")
         liveTasks.register(nativeTaskId)
+        return try {
+            launched(request, locator, root, authority, conversation, nativeTaskId, retryFailedRound)
+        } finally {
+            // The owner is alive only while this round is being run. Leaving
+            // it registered told every later reader that a round nobody was
+            // running was still in flight -- so a failed round could never be
+            // reclaimed and recovery could never take one over, in this
+            // process. iOS releases the same id on every exit for the same
+            // reason.
+            liveTasks.unregister(nativeTaskId)
+        }
+    }
+
+    private fun launched(
+        request: JSONObject,
+        locator: JSONObject,
+        root: JSONObject?,
+        authority: JSONObject,
+        conversation: JSONObject,
+        nativeTaskId: String,
+        retryFailedRound: Boolean,
+    ): JSONObject {
         val owner = ownerFor(request)
         val existing = rowFor(wal.snapshot(), locator)
         if (retryFailedRound) {
