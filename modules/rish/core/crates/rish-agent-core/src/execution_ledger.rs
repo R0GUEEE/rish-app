@@ -355,13 +355,21 @@ pub fn raw_arguments_bind_intent(
                 &["path", "content", "expected_prior"],
             )
             .is_some();
+            // The third shape `write_expected_prior` documents: a call that
+            // names neither expectation asserts the file is absent. Only this
+            // reading of a write had held out for one of the other two, so a
+            // model's plain {path, content} write was refused as invalid here
+            // after the tool had already accepted and previewed it.
+            let bare = exact_keys(Some(&arguments_value), &["path", "content"]).is_some();
             let Some(content) = as_str(arguments.get("content")) else {
                 return Err(StoreError::InvalidArgument);
             };
-            if (!by_revision && !by_prior) || kind != "write_file" {
+            if (!by_revision && !by_prior && !bare) || kind != "write_file" {
                 return Err(StoreError::InvalidArgument);
             }
-            let argument_prior = if let Some(revision) = arguments.get("expected_revision") {
+            let argument_prior = if bare {
+                json!({ "schema_version": 1, "kind": "absent" })
+            } else if let Some(revision) = arguments.get("expected_revision") {
                 if revision.is_null() {
                     json!({ "schema_version": 1, "kind": "absent" })
                 } else if let Some(text) = bounded_utf8(Some(revision), 256, false) {
@@ -1422,6 +1430,22 @@ mod tests {
             r#"{"path":"notes.md","content":"hello","expected_prior":{"schema_version":1,"kind":"absent"}}"#
         );
         assert_eq!(raw_arguments_bind_intent(Some(&by_prior), &intent), Ok(()));
+        // The third shape: a write naming neither expectation asserts the file
+        // is absent, and binds to the same precondition the other two do.
+        let bare = json!(r#"{"path":"notes.md","content":"hello"}"#);
+        assert_eq!(raw_arguments_bind_intent(Some(&bare), &intent), Ok(()));
+        let known = json!({
+            "name": "write_file",
+            "precondition": {
+                "schema_version": 2, "kind": "write_file", "relative_path_sha256": path_digest,
+                "prior": { "schema_version": 1, "kind": "known", "revision": "1:2:3:4:5" },
+                "content_sha256": content_digest, "content_bytes": 5,
+            },
+        });
+        assert_eq!(
+            raw_arguments_bind_intent(Some(&bare), &known),
+            Err(StoreError::Conflict)
+        );
         let other_content =
             json!(r#"{"path":"notes.md","content":"hellp","expected_revision":null}"#);
         assert_eq!(

@@ -461,8 +461,16 @@ pub fn tool_arguments_accepted(
             let content = arguments.get("content");
             let expected_revision = arguments.get("expected_revision");
             let expected_prior = arguments.get("expected_prior");
-            let keys_ok = exact_keys(Some(&object), &["path", "content", "expected_revision"])
-                .is_some()
+            // The provider schema this tool is advertised with lists only
+            // `path` and `content` as required, so a model that follows it and
+            // omits the optional `expected_revision` was being told its call
+            // did not match the schema it had just been given. Omitting the
+            // field asserts the same thing passing null asserts -- that no
+            // prior revision is claimed -- and the write's own precondition
+            // still decides whether that is true of the disk.
+            let keys_ok = exact_keys(Some(&object), &["path", "content"]).is_some()
+                || exact_keys(Some(&object), &["path", "content", "expected_revision"])
+                    .is_some()
                 || exact_keys(Some(&object), &["path", "content", "expected_prior"]).is_some();
             let Some(Value::String(content)) = content else {
                 return Err(SCHEMA);

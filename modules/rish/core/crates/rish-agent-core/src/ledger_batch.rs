@@ -642,8 +642,12 @@ fn prepare_tool_batch(request: &Value, env: &Env, view: &View) -> Result<Effect,
     for (index, supplied) in calls.iter().enumerate() {
         let mut rejection: Option<&Value> = None;
         let mut call_map = object_map(supplied);
-        if let Some(supplied_rejection) = get(supplied, "rejection") {
-            call_map.remove("rejection");
+        // `prepare_calls` writes this key on every call and leaves it null when
+        // there is nothing to reject. Removing it only when it is non-null left
+        // an accepted call carrying a key the exact-key check below refuses --
+        // so a rejected call could be prepared and an accepted one never could.
+        let supplied_rejection = call_map.remove("rejection");
+        if let Some(supplied_rejection) = supplied_rejection.as_ref() {
             if !supplied_rejection.is_null() {
                 if !(ledger_rejection(Some(supplied_rejection))
                     || (as_str(get(supplied, "name"))
