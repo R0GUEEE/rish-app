@@ -64,7 +64,8 @@ class AgentRuntimeModule(reactContext: ReactApplicationContext) :
     fun prepare_agent_attempt(request: ReadableMap?, promise: Promise) {
         val captured = try {
             JSONObject(requireNotNull(request).toHashMap())
-        } catch (_: Exception) {
+        } catch (failure: Exception) {
+            Log.w(TAG, "Agent attempt request is invalid", failure)
             promise.reject("E_AGENT_BAD_ARGUMENTS", "Agent attempt request is invalid")
             return
         }
@@ -88,7 +89,8 @@ class AgentRuntimeModule(reactContext: ReactApplicationContext) :
     fun complete_agent_round_v2(request: ReadableMap?, promise: Promise) {
         val captured = try {
             JSONObject(requireNotNull(request).toHashMap())
-        } catch (_: Exception) {
+        } catch (failure: Exception) {
+            Log.w(TAG, "Agent round request is invalid", failure)
             promise.reject("E_AGENT_BAD_ARGUMENTS", "Agent round request is invalid")
             return
         }
@@ -110,7 +112,8 @@ class AgentRuntimeModule(reactContext: ReactApplicationContext) :
     fun prepare_agent_tool_batch(request: ReadableMap?, promise: Promise) {
         val captured = try {
             JSONObject(requireNotNull(request).toHashMap())
-        } catch (_: Exception) {
+        } catch (failure: Exception) {
+            Log.w(TAG, "Agent tool batch request is invalid", failure)
             promise.reject("E_AGENT_BAD_ARGUMENTS", "Agent tool batch request is invalid")
             return
         }
@@ -132,7 +135,8 @@ class AgentRuntimeModule(reactContext: ReactApplicationContext) :
     fun bind_agent_approval(request: ReadableMap?, promise: Promise) {
         val captured = try {
             JSONObject(requireNotNull(request).toHashMap())
-        } catch (_: Exception) {
+        } catch (failure: Exception) {
+            Log.w(TAG, "Agent approval request is invalid", failure)
             promise.reject("E_AGENT_BAD_ARGUMENTS", "Agent approval request is invalid")
             return
         }
@@ -154,7 +158,8 @@ class AgentRuntimeModule(reactContext: ReactApplicationContext) :
     fun execute_agent_tool(request: ReadableMap?, promise: Promise) {
         val captured = try {
             JSONObject(requireNotNull(request).toHashMap())
-        } catch (_: Exception) {
+        } catch (failure: Exception) {
+            Log.w(TAG, "Agent tool request is invalid", failure)
             promise.reject("E_AGENT_BAD_ARGUMENTS", "Agent tool request is invalid")
             return
         }
@@ -165,6 +170,8 @@ class AgentRuntimeModule(reactContext: ReactApplicationContext) :
             } catch (refused: AndroidAgentToolExecutionService.Refused) {
                 // The service's vocabulary is the controller's; a code it does
                 // not know would be worse than a stable one.
+                Log.w(TAG, "Agent tool could not be executed: ${refused.code}")
+
                 promise.reject(refused.code, "Agent tool could not be executed")
             } catch (failure: Exception) {
                 Log.w(TAG, "Agent tool could not be executed", failure)
@@ -203,7 +210,8 @@ class AgentRuntimeModule(reactContext: ReactApplicationContext) :
     fun finalize_agent_attempt(request: ReadableMap?, promise: Promise) {
         val captured = try {
             JSONObject(requireNotNull(request).toHashMap())
-        } catch (_: Exception) {
+        } catch (failure: Exception) {
+            Log.w(TAG, "Agent attempt could not be finalized", failure)
             promise.reject("E_AGENT_BAD_ARGUMENTS", "Agent attempt could not be finalized")
             return
         }
@@ -225,7 +233,8 @@ class AgentRuntimeModule(reactContext: ReactApplicationContext) :
     fun discard_agent_attempt(request: ReadableMap?, promise: Promise) {
         val captured = try {
             JSONObject(requireNotNull(request).toHashMap())
-        } catch (_: Exception) {
+        } catch (failure: Exception) {
+            Log.w(TAG, "Agent attempt could not be discarded", failure)
             promise.reject("E_AGENT_BAD_ARGUMENTS", "Agent attempt could not be discarded")
             return
         }
