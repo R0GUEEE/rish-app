@@ -194,6 +194,21 @@ internal class AndroidPreparedAttemptStore(
         error("E_AGENT_PERSISTENCE: the transaction committed without a result")
     }
 
+    /**
+     * The prepared attempt a query reads: the stored authority as the core
+     * projects it. The projection is the shape every caller outside this store
+     * is allowed to see, and the generations are zero because a query asserts
+     * none of its own.
+     */
+    fun preparedAttemptFor(taskId: String, attemptId: String): JSONObject? {
+        val authority = authorityFor(taskId, attemptId) ?: return null
+        return reduce(
+            "projection",
+            JSONObject().put("request", JSONObject()).put("authority", authority)
+                .put("controller_generation", 0).put("journal_revision", 0),
+        )?.optJSONObject("projection")
+    }
+
     /** The stored authority for one attempt, or null. */
     fun authorityFor(taskId: String, attemptId: String): JSONObject? {
         val authorities = wal.snapshot().optJSONArray("authorities") ?: return null
