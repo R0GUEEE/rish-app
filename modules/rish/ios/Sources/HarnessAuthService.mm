@@ -1287,6 +1287,19 @@ static NSURL *DSHAuthInitrdWithCredential(NSURL *baseURL, NSData *credential,
     }
   }
   if (![loginResponse[@"ok"] boolValue] || [loginResponse[@"exit_code"] integerValue] != 0) {
+    // The install and the sign-in are one command, so without this they fail
+    // as the same thing. A guest that could not fetch the CLI is a different
+    // problem from a sign-in that was refused, and only one of them is about
+    // the person's account. 69 is the exit the install step reserves.
+    if ([loginResponse[@"exit_code"] integerValue] == 69) {
+      @synchronized (self) {
+        if (self.generation == generation &&
+            [self.activeSessionId isEqualToString:sessionId]) {
+          self.activeErrorCode = @"E_HARNESS_AUTH_CLI_DOWNLOAD_FAILED";
+          self.lastErrorCode = self.activeErrorCode;
+        }
+      }
+    }
     [self finishCodexLoginWithGeneration:generation response:nil];
     return;
   }
