@@ -23,6 +23,8 @@ internal class AndroidAgentQueryService(
     private val wal: AndroidAgentWal,
     private val sessions: AndroidSessionStore,
     private val prepared: AndroidPreparedAttemptStore,
+    private val ledger: AndroidAgentExecutionLedger,
+    private val transcripts: AndroidAgentTranscriptStore,
 ) {
     class Refused(val code: String) : Exception(code)
 
@@ -76,6 +78,66 @@ internal class AndroidAgentQueryService(
         ).optJSONObject("output") ?: throw Refused(NATIVE)
     }
 
+    /**
+     * `query_agent_tool`: what the ledger says about one call.
+     *
+     * A session that has moved and a ledger row that will not bind to the
+     * transcript or the root are two different refusals, and the core shapes
+     * both from the live state rather than this file guessing which applies.
+     */
+    fun queryTool(request: JSONObject): JSONObject {
+        val locator = runtime(
+            JSONObject().put("op", "query_tool_request").put("request", request),
+        ).optJSONObject("locator") ?: throw Refused(BAD_ARGUMENTS)
+        val loaded = loadSession() ?: throw Refused(PERSISTENCE)
+        val proof = sessionProof(request, loaded)
+        if (!proof.optBoolean("matches")) {
+            return runtime(
+                JSONObject().put("op", "query_tool_session_conflict")
+                    .put("state", wal.snapshot()).put("request", request),
+            ).optJSONObject("output") ?: throw Refused(NATIVE)
+        }
+        val queried = ledger.query(
+            locator,
+            request.optJSONObject("expected_transcript"),
+            JSONObject().put("schema_version", 1)
+                .put(
+                    "root_fingerprint_sha256",
+                    request.opt("expected_root_fingerprint_sha256"),
+                )
+                .put("binding_revision", request.opt("expected_workspace_binding_revision")),
+        ) ?: return runtime(
+            // The ledger refused to bind the row. Which row, and to what, is
+            // the core's answer over the live state.
+            JSONObject().put("op", "query_tool_ledger_conflict")
+                .put("state", wal.snapshot()).put("request", request),
+        ).optJSONObject("output") ?: throw Refused(NATIVE)
+        return runtime(
+            JSONObject().put("op", "query_tool_result")
+                .put("queried", queried).put("request", request),
+        ).optJSONObject("output") ?: throw Refused(NATIVE)
+    }
+
+    /**
+     * `query_agent_cleanup`: whether a discarded attempt's transcript residue
+     * is gone yet. The controller drains its cleanup outbox by asking, and an
+     * operation that always refused left those entries accumulating.
+     */
+    fun queryCleanup(request: JSONObject): JSONObject {
+        val cleanupId = request.opt("cleanup_id")
+        if (request.keys().asSequence().toSet() != setOf("schema_version", "cleanup_id") ||
+            request.optInt("schema_version", 0) != 2 ||
+            cleanupId !is String
+        ) {
+            throw Refused(BAD_ARGUMENTS)
+        }
+        val result = transcripts.queryCleanup(
+            JSONObject().put("schema_version", 1).put("cleanup_id", cleanupId),
+        ) ?: throw Refused(PERSISTENCE)
+        return JSONObject().put("schema_version", 2)
+            .put("status", result.opt("status")).put("cleanup_id", cleanupId)
+    }
+
     private class Loaded(val session: JSONObject, val facts: JSONObject)
 
     private fun loadSession(): Loaded? {
@@ -124,5 +186,6 @@ internal class AndroidAgentQueryService(
     private companion object {
         const val NATIVE = "E_AGENT_NATIVE"
         const val PERSISTENCE = "E_AGENT_PERSISTENCE"
+        const val BAD_ARGUMENTS = "E_AGENT_BAD_ARGUMENTS"
     }
 }

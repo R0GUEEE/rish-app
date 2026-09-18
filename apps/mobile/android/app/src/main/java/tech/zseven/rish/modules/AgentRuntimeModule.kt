@@ -244,7 +244,26 @@ class AgentRuntimeModule(reactContext: ReactApplicationContext) :
     }
 
     @ReactMethod
-    fun query_agent_tool(request: ReadableMap?, promise: Promise) = RishUnavailable.reject("AgentRuntime", "E_AGENT_NATIVE", promise)
+    fun query_agent_tool(request: ReadableMap?, promise: Promise) {
+        val captured = try {
+            JSONObject(requireNotNull(request).toHashMap())
+        } catch (failure: Exception) {
+            Log.w(TAG, "Agent tool could not be queried: request is invalid", failure)
+            promise.reject("E_AGENT_BAD_ARGUMENTS", "Agent tool could not be queried")
+            return
+        }
+        runtime.io.execute {
+            try {
+                promise.resolve(Arguments.makeNativeMap(RuntimeJson.map(runtime.queries.queryTool(captured))))
+            } catch (refused: AndroidAgentQueryService.Refused) {
+                Log.w(TAG, "Agent tool could not be queried: ${refused.code}")
+                promise.reject(refused.code, "Agent tool could not be queried")
+            } catch (failure: Exception) {
+                Log.w(TAG, "Agent tool could not be queried", failure)
+                promise.reject("E_AGENT_NATIVE", "Agent tool could not be queried")
+            }
+        }
+    }
 
     @ReactMethod
     fun recover_agent_attempt(request: ReadableMap?, promise: Promise) {
@@ -316,5 +335,24 @@ class AgentRuntimeModule(reactContext: ReactApplicationContext) :
     }
 
     @ReactMethod
-    fun query_agent_cleanup(request: ReadableMap?, promise: Promise) = RishUnavailable.reject("AgentRuntime", "E_AGENT_NATIVE", promise)
+    fun query_agent_cleanup(request: ReadableMap?, promise: Promise) {
+        val captured = try {
+            JSONObject(requireNotNull(request).toHashMap())
+        } catch (failure: Exception) {
+            Log.w(TAG, "Agent cleanup could not be queried: request is invalid", failure)
+            promise.reject("E_AGENT_BAD_ARGUMENTS", "Agent cleanup could not be queried")
+            return
+        }
+        runtime.io.execute {
+            try {
+                promise.resolve(Arguments.makeNativeMap(RuntimeJson.map(runtime.queries.queryCleanup(captured))))
+            } catch (refused: AndroidAgentQueryService.Refused) {
+                Log.w(TAG, "Agent cleanup could not be queried: ${refused.code}")
+                promise.reject(refused.code, "Agent cleanup could not be queried")
+            } catch (failure: Exception) {
+                Log.w(TAG, "Agent cleanup could not be queried", failure)
+                promise.reject("E_AGENT_NATIVE", "Agent cleanup could not be queried")
+            }
+        }
+    }
 }

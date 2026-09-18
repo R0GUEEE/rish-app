@@ -44,7 +44,9 @@ internal class AndroidRuntimeState private constructor(val app: Application) {
         sessions, preparedAttempts, agentRounds, roots, AndroidAgentToolRegistry, transport, agentWal,
         agentOperations, liveTasks, agentTranscripts,
     )
-    val queries = AndroidAgentQueryService(agentWal, sessions, preparedAttempts)
+    val queries = AndroidAgentQueryService(
+        agentWal, sessions, preparedAttempts, executionLedger, agentTranscripts,
+    )
     val recovery = AndroidAgentRecoveryService(
         agentWal, sessions, preparedAttempts, queries, providerRound, toolExecution, roots,
         agentOperations,
