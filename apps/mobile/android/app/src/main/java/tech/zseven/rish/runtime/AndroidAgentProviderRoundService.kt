@@ -99,7 +99,8 @@ internal class AndroidAgentProviderRoundService(
         // stored now. A round decided over a session that has since moved on
         // is a conflict the controller recovers from by re-reading.
         val session = AndroidCommittedSession.load(sessions, request) ?: throw Refused(CONFLICT)
-        AndroidCommittedSession.conversation(session, request) ?: throw Refused(CONFLICT)
+        val conversation = AndroidCommittedSession.conversation(session, request)
+            ?: throw Refused(CONFLICT)
 
         // The first time a round is asked for, its row does not exist yet:
         // this operation is what creates it. Only a retry finds one, and a
@@ -157,12 +158,29 @@ internal class AndroidAgentProviderRoundService(
             val name = names.optJSONObject(index)?.optString("name")
                 ?: names.optString(index).takeIf { it.isNotEmpty() }
                 ?: continue
-            // The core describes a tool from its *name*: the description a
-            // model is shown is the rule's, not the registry descriptor's.
+            // The registry supplies a tool's native identity and its
+            // parameters; the core supplies the sentence the model is shown,
+            // as a *string*. Reading that string as an object is how a root
+            // with three tools declared none of them, and a model with no
+            // tools answers a request to write a file by explaining how the
+            // person could write it themselves.
+            val native = try {
+                tools.nativeDescriptor(name)
+            } catch (_: Exception) {
+                continue
+            }
             val described = decide(
-                JSONObject().put("op", "tool_description").put("name", name),
-            ).optJSONObject("description")
-            if (described != null) declared.put(described)
+                JSONObject().put("op", "tool_description").put("name", native.optString("name")),
+            ).optString("description", "")
+            declared.put(
+                JSONObject().put("type", "function")
+                    .put("name", native.opt("name"))
+                    .put(
+                        "description",
+                        described.ifEmpty { native.optString("safe_summary_key") },
+                    )
+                    .put("parameters", native.opt("parameters") ?: JSONObject()),
+            )
         }
 
         var providerError: String? = null
@@ -179,8 +197,8 @@ internal class AndroidAgentProviderRoundService(
                 .put("attempt_id", request.optString("attempt_id"))
                 .put("round_index", request.optInt("round_index"))
                 .put("thinking_mode", request.optString("thinking_mode", "off"))
-                .put("visible_history", body)
-                .put("round_transcript", JSONArray())
+                .put("visible_history", visibleHistory(conversation, authority))
+                .put("round_transcript", body)
                 .put("project_context", JSONObject.NULL)
                 .put("tools", declared)
             transport.execute(transport.prepare(envelope.toString()))
@@ -192,18 +210,7 @@ internal class AndroidAgentProviderRoundService(
             null
         }
 
-        // Untrusted model output becomes calls here, by the core's rule and
-        // not by reading fields off a provider's JSON in Kotlin.
-        val parsed = if (reply == null) null else RishAgentCoreNative.completionResponseReduce(
-            JSONObject().put("op", "parse").put("response", reply)
-                .put("requested_model", request.optString("model"))
-                .put("model_supported", true)
-                .put("thinking_mode", request.optString("thinking_mode", "off"))
-                .put("fallback_call_id", request.optString("round_id"))
-                .toString(),
-        )?.let { JSONObject(it) }?.takeIf { it.optBoolean("ok") }
-
-        val status = if (reply == null || parsed == null) "failed_retryable" else "completed"
+        val status = if (reply == null) "failed_retryable" else "completed"
         // A completed round carries no failure code. A failed one carries the
         // code the *core* derives from what the provider said -- the mapping
         // from a transport error to an agent failure is a rule, not a lookup
@@ -218,10 +225,9 @@ internal class AndroidAgentProviderRoundService(
         val completeCas = decide(
             JSONObject().put("op", "round_cas").put("row", dispatched),
         ).optJSONObject("cas") ?: throw Refused(CONFLICT)
-        val patch = JSONObject().put("status", status)
-            .put("failure_code", if (failure.isEmpty()) JSONObject.NULL else failure)
-            .put("reply", parsed?.opt("parsed") ?: JSONObject.NULL)
-        rounds.complete(completeCas, patch) ?: throw Refused(PERSISTENCE)
+        if (reply != null) {
+            return settle(request, locator, completeCas, reply, root ?: JSONObject(), authority)
+        }
 
         val settled = rowFor(wal.snapshot(), locator) ?: throw Refused(CONFLICT)
         return decide(
@@ -229,6 +235,212 @@ internal class AndroidAgentProviderRoundService(
                 .put("row", settled).put("status", status)
                 .put("failure_code", failure),
         ).optJSONObject("result") ?: throw Refused(NATIVE)
+    }
+
+    /**
+     * Settles a round the provider answered.
+     *
+     * Every shape here is the core's: the per-call identity and its arguments
+     * digest, the assistant message the transcript records, and the receipt.
+     * What this file contributes is the *order* -- a call the registry cannot
+     * describe, or arguments that do not parse, fails the round rather than
+     * being written as something the model did not say.
+     */
+    private fun settle(
+        request: JSONObject,
+        locator: JSONObject,
+        cas: JSONObject,
+        reply: JSONObject,
+        root: JSONObject,
+        authority: JSONObject,
+    ): JSONObject {
+        val stated = reply.optJSONArray("tool_calls") ?: JSONArray()
+        val calls = JSONArray()
+        val presentations = JSONArray()
+        for (index in 0 until stated.length()) {
+            val call = stated.optJSONObject(index) ?: continue
+            val name = call.optString("name")
+            val arguments = call.optString("arguments")
+            // The strict parser takes the arguments text itself and answers
+            // their canonical form, not an envelope with an `ok` flag.
+            val parsedArguments = RishAgentCoreNative.parseArguments(arguments)
+                ?.let { JSONObject(it) } ?: throw Refused(TRANSCRIPT)
+            val digest = RishAgentCoreNative.hash(
+                "tool-arguments",
+                JSONObject().put("name", name).put("arguments", parsedArguments),
+            )
+            val descriptor = try {
+                tools.descriptorForTool(name, root)
+            } catch (failure: Exception) {
+                android.util.Log.w("RishAgent", "settle: no descriptor for $name", failure)
+                throw Refused(TRANSCRIPT)
+            }
+            val access = descriptor.optString("access")
+            calls.put(
+                JSONObject().put("schema_version", 3).put("call_index", index)
+                    .put("call_id", call.opt("id")).put("name", name)
+                    .put("arguments_sha256", digest)
+                    .put("safe_summary_key", descriptor.opt("safe_summary_key"))
+                    .put("access", access)
+                    .put(
+                        "approval_state",
+                        if (access == "durable_deny") "durable_denied" else "deferred",
+                    ),
+            )
+            presentations.put(
+                JSONObject().put("call_id", call.opt("id")).put("name", name)
+                    .put("arguments", arguments),
+            )
+        }
+
+        val message = decide(
+            JSONObject().put("op", "assistant_message").put(
+                "message",
+                JSONObject().put("schema_version", 1).put("role", "assistant")
+                    .put("round_index", request.opt("round_index"))
+                    .put("content", reply.optString("text"))
+                    .put("reasoning_content", reply.optString("reasoning"))
+                    .put("tool_calls", presentations),
+            ),
+        ).optJSONObject("message") ?: throw Refused(TRANSCRIPT)
+
+        // The journal's receipt is exact: the keys below and `harness_id`,
+        // nothing else. `public_receipt` builds the *other* one -- what the
+        // controller is handed -- and its extra fields are refused here.
+        // Mirrors the literal in AgentProviderRoundService.mm.
+        val receipt = JSONObject()
+            .put("schema_version", 1)
+            .put("transport_schema_version", request.opt("transport_schema_version"))
+            .put("turn_id", request.opt("task_id"))
+            .put("attempt_id", request.opt("attempt_id"))
+            .put("round_id", request.opt("round_id"))
+            .put("round_index", request.opt("round_index"))
+            .put("harness_id", reply.opt("harness_id") ?: request.opt("harness_id"))
+            .put("provider_request_id", reply.opt("provider_request_id"))
+            .put("provider_response_id", reply.opt("provider_response_id"))
+            .put("requested_model", request.opt("model"))
+            .put("model", request.opt("model"))
+            .put("thinking_mode", request.opt("thinking_mode"))
+            .put("finish_reason", reply.optString("finish_reason"))
+            .put("latency_ms", reply.opt("latency_ms") ?: 0)
+            .put(
+                "visible_history_sha256",
+                reply.opt("visible_history_sha256") ?: request.opt("visible_history_sha256"),
+            )
+            .put("model_input_sha256", reply.opt("model_input_sha256"))
+            .put("request_body_sha256", reply.opt("request_body_sha256"))
+            .put("project_context_receipt", JSONObject.NULL)
+
+        val terminal = when (reply.optString("finish_reason")) {
+            "stop" -> "final"
+            "tool_calls" -> "tool_batch"
+            else -> "blocked"
+        }
+        val completed = rounds.complete(
+            locator, cas, JSONArray().put(message), receipt, terminal, calls, root,
+        ) ?: throw Refused(PERSISTENCE)
+
+        // What the controller is handed. This is the *public* receipt -- the
+        // one `public_receipt` builds -- and an outcome whose kind is the
+        // round's terminal kind. The journal's receipt above is a different
+        // record with a different exact shape; they are not interchangeable.
+        val publicReceipt = decide(
+            JSONObject().put("op", "public_receipt").put("provider", reply)
+                .put("request", request)
+                .put("provider_request_id", reply.opt("provider_request_id"))
+                .put("context_receipt", JSONObject.NULL),
+        ).optJSONObject("receipt") ?: throw Refused(NATIVE)
+        val after = completed.opt("transcript") ?: JSONObject.NULL
+        val revision = completed.optJSONObject("row")?.opt("row_revision")
+
+        var denied = 0
+        for (index in 0 until calls.length()) {
+            if (calls.optJSONObject(index)?.optString("access") == "durable_deny") denied += 1
+        }
+        val outcome = JSONObject().put("schema_version", 3)
+            .put("finish_reason", reply.optString("finish_reason"))
+            .put("completion_receipt", publicReceipt).put("transcript", after)
+        when (terminal) {
+            "final" -> outcome.put("kind", "final")
+                .put("text", reply.optString("text"))
+                .put("reasoning", reply.optString("reasoning"))
+            "tool_batch" -> outcome.put("kind", "tool_batch").put("calls", calls)
+                .put(
+                    "batch_class",
+                    when (denied) {
+                        0 -> "executable"
+                        calls.length() -> "denied_only"
+                        else -> "mixed"
+                    },
+                )
+                .put("executable_call_count", calls.length() - denied)
+                .put("denied_call_count", denied)
+                .put("reasoning", reply.optString("reasoning"))
+            else -> outcome.put("kind", "blocked").put(
+                "failure_code",
+                if (reply.optString("finish_reason") == "length") {
+                    "E_COMPLETION_LENGTH"
+                } else {
+                    "E_COMPLETION_CONTENT_FILTER"
+                },
+            )
+        }
+        return JSONObject().put("schema_version", 2).put("status", "completed")
+            .put("operation_id", request.opt("operation_id"))
+            .put("task_id", request.opt("task_id"))
+            .put("attempt_id", request.opt("attempt_id"))
+            .put("round_id", request.opt("round_id"))
+            .put("round_index", request.opt("round_index"))
+            .put("launch_attempt", request.opt("launch_attempt"))
+            .put("result_round_revision", revision)
+            .put("transcript", after)
+            .put("outcome", outcome)
+    }
+
+    /**
+     * What the person can see of this conversation, as the model is shown it.
+     *
+     * The authority names the exact messages -- `visible_message_ids` -- and
+     * the committed session holds their text. Neither is the transcript: that
+     * records what *this round* already did, which is `round_transcript`, and
+     * sending one in place of the other leaves the model with no question to
+     * answer.
+     *
+     * Mirrors `DSHRuntimeVisibleHistory`. A named message the session does not
+     * carry is a conflict, not a message to skip.
+     */
+    private fun visibleHistory(conversation: JSONObject, authority: JSONObject): JSONArray {
+        val byId = HashMap<String, JSONObject>()
+        val messages = conversation.optJSONArray("messages") ?: JSONArray()
+        for (index in 0 until messages.length()) {
+            val message = messages.optJSONObject(index) ?: continue
+            (message.opt("id") as? String)?.let { byId[it] = message }
+        }
+        val ids = authority.optJSONArray("visible_message_ids") ?: JSONArray()
+        val visible = JSONArray()
+        for (index in 0 until ids.length()) {
+            val message = byId[ids.optString(index)] ?: throw Refused(CONFLICT)
+            val attachments = JSONArray()
+            val carried = message.optJSONArray("attachments") ?: JSONArray()
+            for (at in 0 until carried.length()) {
+                val attachment = carried.optJSONObject(at) ?: continue
+                attachments.put(
+                    JSONObject()
+                        .put("schema_version", attachment.opt("schema_version"))
+                        .put("id", attachment.opt("id"))
+                        .put("kind", attachment.opt("kind"))
+                        .put("name", attachment.opt("name"))
+                        .put("mime_type", attachment.opt("mime_type"))
+                        .put("size", attachment.opt("size")),
+                )
+            }
+            visible.put(
+                JSONObject().put("role", message.opt("role"))
+                    .put("content", message.opt("text"))
+                    .put("attachments", attachments),
+            )
+        }
+        return visible
     }
 
     /**
