@@ -1,54 +1,108 @@
 package tech.zseven.rish.modules
 
+import android.util.Log
+import com.facebook.react.bridge.Arguments
 import com.facebook.react.bridge.Promise
 import com.facebook.react.bridge.ReactApplicationContext
 import com.facebook.react.bridge.ReactContextBaseJavaModule
 import com.facebook.react.bridge.ReactMethod
 import com.facebook.react.bridge.ReadableMap
+import org.json.JSONObject
 import tech.zseven.rish.RishUnavailable
+import tech.zseven.rish.runtime.AndroidRuntimeState
+import tech.zseven.rish.runtime.AndroidWorkspaceFiles
+import tech.zseven.rish.runtime.RuntimeJson
 
 /**
- * LocalWorkspace — phase-1 Android skeleton.
+ * LocalWorkspace on Android: what the Files drawer lists and opens.
  *
- * Mirrors the iOS registration in modules/rish/ios/Sources/LocalWorkspaceModule.mm
- * (RCT_EXPORT_MODULE(LocalWorkspace)) and the JS wrapper in
- * apps/mobile/src/native/LocalWorkspace.ts. Every method rejects with the JS-
- * recognized "E_WORKSPACE_UNAVAILABLE" unavailable code; no success results are stubbed.
+ * The rules live in [AndroidWorkspaceFiles]. Listing, reading and writing are
+ * served; creating directories, renaming, trashing and restoring are not
+ * implemented on this platform and keep rejecting, so the drawer can browse
+ * and read without anything here pretending to more than it does.
  */
 class LocalWorkspaceModule(reactContext: ReactApplicationContext) :
     ReactContextBaseJavaModule(reactContext) {
 
-    override fun getConstants(): MutableMap<String, Any> = mutableMapOf("implemented" to false)
+    private val runtime = AndroidRuntimeState.get(reactContext)
+
+    override fun getConstants(): MutableMap<String, Any> = mutableMapOf("implemented" to true)
 
     override fun getName(): String = "LocalWorkspace"
 
+    /**
+     * Not answered here. The capability record asserts a recoverable,
+     * listable trash and a set of portable tools; this platform has neither
+     * yet, and the reader falls back to its own defaults when the method is
+     * absent rather than being told something untrue.
+     */
     @ReactMethod
-    fun capabilities(promise: Promise) = RishUnavailable.reject("LocalWorkspace", "E_WORKSPACE_UNAVAILABLE", promise)
+    fun capabilities(promise: Promise) =
+        RishUnavailable.reject("LocalWorkspace", "E_WORKSPACE_UNAVAILABLE", promise)
 
     @ReactMethod
-    fun listV2(request: ReadableMap?, promise: Promise) = RishUnavailable.reject("LocalWorkspace", "E_WORKSPACE_UNAVAILABLE", promise)
+    fun listV2(request: ReadableMap?, promise: Promise) =
+        answer("listV2", request, promise) { runtime.workspaceFiles.list(it) }
 
     @ReactMethod
-    fun readV2(request: ReadableMap?, promise: Promise) = RishUnavailable.reject("LocalWorkspace", "E_WORKSPACE_UNAVAILABLE", promise)
+    fun readV2(request: ReadableMap?, promise: Promise) =
+        answer("readV2", request, promise) { runtime.workspaceFiles.read(it) }
 
     @ReactMethod
-    fun writeV2(request: ReadableMap?, promise: Promise) = RishUnavailable.reject("LocalWorkspace", "E_WORKSPACE_UNAVAILABLE", promise)
+    fun writeV2(request: ReadableMap?, promise: Promise) =
+        answer("writeV2", request, promise) { runtime.workspaceFiles.write(it) }
 
     @ReactMethod
-    fun createDirectoryV2(request: ReadableMap?, promise: Promise) = RishUnavailable.reject("LocalWorkspace", "E_WORKSPACE_UNAVAILABLE", promise)
+    fun listTrashV2(request: ReadableMap?, promise: Promise) =
+        answer("listTrashV2", request, promise) { runtime.workspaceFiles.listTrash(it) }
 
     @ReactMethod
-    fun renameEntryV2(request: ReadableMap?, promise: Promise) = RishUnavailable.reject("LocalWorkspace", "E_WORKSPACE_UNAVAILABLE", promise)
+    fun createDirectoryV2(request: ReadableMap?, promise: Promise) =
+        RishUnavailable.reject("LocalWorkspace", "E_WORKSPACE_UNAVAILABLE", promise)
 
     @ReactMethod
-    fun trashEntryV2(request: ReadableMap?, promise: Promise) = RishUnavailable.reject("LocalWorkspace", "E_WORKSPACE_UNAVAILABLE", promise)
+    fun renameEntryV2(request: ReadableMap?, promise: Promise) =
+        RishUnavailable.reject("LocalWorkspace", "E_WORKSPACE_UNAVAILABLE", promise)
 
     @ReactMethod
-    fun listTrashV2(request: ReadableMap?, promise: Promise) = RishUnavailable.reject("LocalWorkspace", "E_WORKSPACE_UNAVAILABLE", promise)
+    fun trashEntryV2(request: ReadableMap?, promise: Promise) =
+        RishUnavailable.reject("LocalWorkspace", "E_WORKSPACE_UNAVAILABLE", promise)
 
     @ReactMethod
-    fun restoreFromTrashV2(request: ReadableMap?, promise: Promise) = RishUnavailable.reject("LocalWorkspace", "E_WORKSPACE_UNAVAILABLE", promise)
+    fun restoreFromTrashV2(request: ReadableMap?, promise: Promise) =
+        RishUnavailable.reject("LocalWorkspace", "E_WORKSPACE_UNAVAILABLE", promise)
 
     @ReactMethod
-    fun executePortableToolV2(request: ReadableMap?, promise: Promise) = RishUnavailable.reject("LocalWorkspace", "E_WORKSPACE_UNAVAILABLE", promise)
+    fun executePortableToolV2(request: ReadableMap?, promise: Promise) =
+        RishUnavailable.reject("LocalWorkspace", "E_WORKSPACE_UNAVAILABLE", promise)
+
+    private fun answer(
+        operation: String,
+        request: ReadableMap?,
+        promise: Promise,
+        body: (JSONObject?) -> JSONObject,
+    ) {
+        val captured = try {
+            request?.let { JSONObject(it.toHashMap()) }
+        } catch (failure: Exception) {
+            Log.w(TAG, "$operation request is invalid", failure)
+            promise.reject("E_WORKSPACE_INVALID", "Workspace request is invalid")
+            return
+        }
+        runtime.io.execute {
+            try {
+                promise.resolve(Arguments.makeNativeMap(RuntimeJson.map(body(captured))))
+            } catch (refused: AndroidWorkspaceFiles.Refused) {
+                Log.w(TAG, "$operation refused: ${refused.code}")
+                promise.reject(refused.code, refused.reason)
+            } catch (failure: Exception) {
+                Log.w(TAG, "$operation could not be answered", failure)
+                promise.reject("E_WORKSPACE_PERSISTENCE", "Workspace could not be read")
+            }
+        }
+    }
+
+    private companion object {
+        const val TAG = "RishWorkspace"
+    }
 }
