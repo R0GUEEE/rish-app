@@ -30,7 +30,65 @@ internal object AgentSessionFixture {
         val message: String = UUID.randomUUID().toString(),
     )
 
-    fun session(ids: Ids, epoch: Int = 0, workspace: String? = null): JSONObject {
+    /**
+     * The agent journal a cancellable attempt carries, in the shape a real
+     * turn writes it: taken from a device's own committed session rather than
+     * invented here, because the session schema validates every field of it
+     * and a hand-built one tests the fixture rather than the rule.
+     */
+    fun agentJournal(workspace: String, phase: String = "ready_for_round"): JSONObject =
+        JSONObject().put("schema_version", 3).put("phase", phase)
+            .put("controller_generation", 1).put("round_index", 0)
+            .put("call_index", JSONObject.NULL).put("batch", JSONArray())
+            .put("frozen_grant_ids", JSONArray())
+            .put("round_lineage", JSONObject.NULL)
+            .put("reserved_write_bytes", 0)
+            .put("tool_registry_version", 2)
+            .put("toolset_sha256", DIGEST)
+            .put(
+                "policy",
+                JSONObject().put("schema_version", 1).put("policy_version", "agent-v1")
+                    .put("max_single_write_bytes", 32768)
+                    .put("max_batch_write_bytes", 524288)
+                    .put("max_attempt_write_bytes", 4194304),
+            )
+            .put(
+                "root",
+                JSONObject().put("schema_version", 1).put("kind", "workspace")
+                    .put("workspace_id", workspace).put("workspace_binding_revision", 1)
+                    .put("project_id", JSONObject.NULL)
+                    .put("root_fingerprint_sha256", DIGEST)
+                    .put("capabilities", JSONArray().put("file_read").put("file_write")),
+            )
+            .put(
+                "transcript",
+                JSONObject().put("schema_version", 1)
+                    .put("transcript_ref", UUID.randomUUID().toString())
+                    .put("transcript_sha256", DIGEST)
+                    .put("transcript_bytes", 250).put("generation", 0),
+            )
+            .put("updated_at", STAMP)
+
+    /** The `cancel` event a stopped attempt's token points at. */
+    fun cancelEvent(attempt: String, eventId: String): JSONObject = JSONObject()
+        .put("schema_version", 2).put("event_id", eventId)
+        .put("attempt_id", attempt).put("seq", 1).put("kind", "cancel")
+        .put("round_index", JSONObject.NULL).put("call_id", JSONObject.NULL)
+        .put("status", "cancelled").put("safe_summary_key", JSONObject.NULL)
+        .put("arguments_sha256", JSONObject.NULL).put("result_sha256", JSONObject.NULL)
+        .put("approval_reference", eventId)
+        .put("failure_code", "E_AGENT_CANCELLED")
+        .put("created_at", STAMP)
+
+    const val DIGEST = "aa00000000000000000000000000000000000000000000000000000000000000"
+
+    fun session(
+        ids: Ids,
+        epoch: Int = 0,
+        workspace: String? = null,
+        agent: JSONObject? = null,
+        events: JSONArray? = null,
+    ): JSONObject {
         val message = JSONObject().put("id", ids.message).put("role", "user")
             .put("text", "hello").put("created_at", STAMP)
             .put("attachments", JSONArray())
@@ -53,7 +111,10 @@ internal object AgentSessionFixture {
             .put("created_at", STAMP).put("updated_at", STAMP)
             .put("workspace_id", workspace ?: JSONObject.NULL)
             .put("workspace_binding_revision", if (workspace == null) JSONObject.NULL else 1)
-            .put("journal_revision", 0).put("agent", JSONObject.NULL)
+            // An attempt carrying an agent journal has been written to at
+            // least once; the session schema refuses a journal at revision 0.
+            .put("journal_revision", if (agent == null) 0 else 1)
+            .put("agent", agent ?: JSONObject.NULL)
         val conversation = JSONObject().put("id", ids.conversation)
             .put("project_id", JSONObject.NULL)
             .put("workspace_id", workspace ?: JSONObject.NULL)
@@ -87,7 +148,7 @@ internal object AgentSessionFixture {
             .put("active_conversation_id", JSONObject.NULL)
             .put("conversations", JSONArray().put(conversation))
             .put("messages", JSONArray())
-            .put("session_events", JSONArray())
+            .put("session_events", events ?: JSONArray())
             .put("preferences", JSONObject().put("schema_version", 1)
                 .put("theme_mode", "system").put("locale", "system")
                 .put("default_model", MODEL).put("thinking_mode", THINKING)
@@ -107,8 +168,12 @@ internal object AgentSessionFixture {
         epoch: Int = 0,
         expected: JSONObject? = null,
         workspace: String? = null,
+        agent: JSONObject? = null,
+        events: JSONArray? = null,
     ): JSONObject {
-        val candidate = RishAgentCoreNative.canonical(session(ids, epoch, workspace).toString())
+        val candidate = RishAgentCoreNative.canonical(
+            session(ids, epoch, workspace, agent, events).toString(),
+        )
             ?: error("the session fixture is not canonicalisable")
         val reply = store.persist(
             JSONObject().put("schema_version", 1)

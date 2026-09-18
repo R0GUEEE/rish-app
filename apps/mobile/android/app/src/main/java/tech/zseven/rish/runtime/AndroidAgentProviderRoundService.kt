@@ -473,6 +473,73 @@ internal class AndroidAgentProviderRoundService(
             .put("created_at", now).put("updated_at", now)
     }
 
+    /**
+     * Cancels a round in flight, for `cancel_agent_attempt`.
+     *
+     * Two things have to happen and neither is enough alone: the provider call
+     * has to stop, and the row has to say so. The transport holds the call by
+     * the round id it was prepared under, so cancelling it interrupts a reply
+     * that may be minutes from arriving; the journal then moves the row, and
+     * what the caller is told about it is the core's query result, not this
+     * file's reading of the row.
+     *
+     * A cancellation names a row that already exists, so the selector is
+     * validated as a cancellation -- iOS passes the same two flags -- and a
+     * root that no longer proves out is a conflict rather than a refusal: the
+     * person asked to stop, and they are told what state it stopped in.
+     */
+    fun cancelRound(request: JSONObject): JSONObject {
+        val root = request.optJSONObject("root")
+        val rootOk = roots.resolveAgentProjection(root) != null
+        val located = decide(
+            JSONObject().put("op", "selector_request").put("request", request)
+                .put("cancellation", true).put("root_ok", rootOk).put("env", env(request)),
+        )
+        val locator = located.optJSONObject("locator") ?: throw Refused(BAD_ARGUMENTS)
+        if (!rootOk) {
+            return conflictResult(
+                request,
+                JSONObject().put("row_revision", request.opt("expected_round_revision"))
+                    .put("state", "unknown")
+                    .put("transcript_before", request.opt("transcript")),
+                "E_AGENT_ROOT_STALE",
+            )
+        }
+        val query = rounds.query(locator) ?: throw Refused(PERSISTENCE)
+        val row = query.optJSONObject("row") ?: return query
+        val matches = decide(
+            JSONObject().put("op", "selector_matches").put("request", request).put("row", row),
+        ).optBoolean("matches")
+        if (!matches) return conflictResult(request, row, "E_AGENT_CONFLICT")
+
+        val cas = decide(JSONObject().put("op", "round_cas").put("row", row))
+            .optJSONObject("cas") ?: throw Refused(NATIVE)
+        // The provider call is keyed by the round id it was prepared under.
+        // Stopping it is what makes cancelling immediate rather than a note
+        // the next reply overwrites.
+        transport.cancel(request.optString("round_id"))
+        val cancelled = rounds.cancel(cas)?.optJSONObject("row") ?: row
+        val state = cancelled.optString("state")
+        val failure = decide(
+            JSONObject().put("op", "round_failure_code").put("kind", "cancelled")
+                .put("state", state),
+        ).opt("code")
+        return decide(
+            JSONObject().put("op", "query_result").put("request", request)
+                .put("row", cancelled).put("status", state)
+                .put("failure_code", failure ?: JSONObject.NULL),
+        ).optJSONObject("result") ?: throw Refused(NATIVE)
+    }
+
+    private fun conflictResult(
+        request: JSONObject,
+        row: JSONObject,
+        failureCode: String,
+    ): JSONObject = decide(
+        JSONObject().put("op", "selector_conflict").put("request", request)
+            .put("row", row).put("failure_code", failureCode),
+    ).optJSONObject("result") ?: throw Refused(NATIVE)
+
     /** What the insert asserts about a world that has no such row yet. */
     private fun insertCas(request: JSONObject, locator: JSONObject): JSONObject {
         val transcript = request.optJSONObject("transcript")

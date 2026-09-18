@@ -88,6 +88,38 @@ internal class AndroidAgentOperations(private val wal: AndroidAgentWal) {
     }
 
     /**
+     * Starts the relation for a request that names its attempt in `target`.
+     *
+     * A cancellation or a recovery does not carry `task_id` at the top level,
+     * and the plain `start` refuses a request whose ids do not match the ones
+     * it is given. `start_target` is the core's reading of exactly that shape,
+     * and it validates the target as well as the request.
+     */
+    fun startTargetInState(
+        state: JSONObject,
+        kind: String,
+        request: JSONObject,
+        target: JSONObject,
+        authorityRevision: Any?,
+        timestamp: String,
+    ): JSONObject {
+        val arguments = JSONObject()
+            .put("request", request)
+            .put("target", target)
+            .put("operation_kind", kind)
+            .put("task_id", target.opt("task_id"))
+            .put("attempt_id", target.opt("attempt_id"))
+            .put("authority_revision", authorityRevision ?: 0)
+        return outcome(
+            reduce(
+                JSONObject().put("op", "start_target").put("state", state)
+                    .put("arguments", arguments).put("timestamp", timestamp),
+            ),
+            state,
+        )
+    }
+
+    /**
      * Settles a started operation with its result, over a state the caller
      * owns. Two reducer calls because the core splits the decision from the
      * write: the first says whether this commit is allowed and what the stored

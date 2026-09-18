@@ -44,6 +44,10 @@ internal class AndroidRuntimeState private constructor(val app: Application) {
         sessions, preparedAttempts, agentRounds, roots, AndroidAgentToolRegistry, transport, agentWal,
         agentOperations, liveTasks, agentTranscripts,
     )
+    val cancellation = AndroidAgentCancelService(
+        agentWal, sessions, preparedAttempts, executionLedger, providerRound, roots,
+        agentOperations,
+    )
     val subscriptionAuth = AndroidSubscriptionAuthManager(app)
     val io = Executors.newFixedThreadPool(2)
     @Volatile var selectedSlot = "DEEPSEEK_API_KEY"

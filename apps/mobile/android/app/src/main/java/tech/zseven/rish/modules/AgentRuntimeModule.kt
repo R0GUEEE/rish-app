@@ -11,6 +11,7 @@ import org.json.JSONObject
 import tech.zseven.rish.RishUnavailable
 import tech.zseven.rish.runtime.AndroidAgentProviderRoundService
 import tech.zseven.rish.runtime.AndroidAgentApprovalService
+import tech.zseven.rish.runtime.AndroidAgentCancelService
 import tech.zseven.rish.runtime.AndroidAgentLifecycleService
 import tech.zseven.rish.runtime.AndroidAgentToolBatchService
 import tech.zseven.rish.runtime.AndroidAgentToolExecutionService
@@ -195,7 +196,27 @@ class AgentRuntimeModule(reactContext: ReactApplicationContext) :
         RishUnavailable.reject("AgentRuntime", "E_AGENT_NATIVE", promise)
 
     @ReactMethod
-    fun cancel_agent_attempt(request: ReadableMap?, promise: Promise) = RishUnavailable.reject("AgentRuntime", "E_AGENT_NATIVE", promise)
+    fun cancel_agent_attempt(request: ReadableMap?, promise: Promise) {
+        val captured = try {
+            JSONObject(requireNotNull(request).toHashMap())
+        } catch (failure: Exception) {
+            Log.w(TAG, "Agent cancellation request is invalid", failure)
+            promise.reject("E_AGENT_BAD_ARGUMENTS", "Agent cancellation request is invalid")
+            return
+        }
+        runtime.io.execute {
+            try {
+                val result = runtime.cancellation.cancel(captured)
+                promise.resolve(Arguments.makeNativeMap(RuntimeJson.map(result)))
+            } catch (refused: AndroidAgentCancelService.Refused) {
+                Log.w(TAG, "Agent attempt could not be cancelled: ${refused.code}")
+                promise.reject(refused.code, "Agent attempt could not be cancelled")
+            } catch (failure: Exception) {
+                Log.w(TAG, "Agent attempt could not be cancelled", failure)
+                promise.reject("E_AGENT_NATIVE", "Agent attempt could not be cancelled")
+            }
+        }
+    }
 
     @ReactMethod
     fun query_agent_attempt(request: ReadableMap?, promise: Promise) = RishUnavailable.reject("AgentRuntime", "E_AGENT_NATIVE", promise)
