@@ -80,6 +80,12 @@ export function RuntimeEvidenceSheet({
         : t('runtime.pending'),
     ],
     [
+      t('runtime.row.workspaceTools'),
+      proof?.checks.workspace_tools_available === true
+        ? t('runtime.verified')
+        : t('runtime.pending'),
+    ],
+    [
       t('runtime.row.rish'),
       proof?.checks.rish_applet_executed
         ? `${proof.rish_probe.path_kind ?? t('runtime.applet')} · protocol ${

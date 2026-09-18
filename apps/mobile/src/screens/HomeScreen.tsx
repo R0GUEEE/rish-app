@@ -2687,7 +2687,12 @@ export function HomeScreen({
     : runtimeLocal
     ? t('runtime.status.verified')
     : proof?.platform?.startsWith('android')
-    ? t(proof.checks.model_response_received ? 'runtime.status.chatReadyToolsPending' : 'runtime.status.chatConfiguredToolsPending')
+    // The guest applet and the workspace tools are separate things. Saying
+    // "local tools unavailable" while list_dir and write_file were running
+    // was one sentence covering both, and it was wrong about one of them.
+    ? t(proof.checks.workspace_tools_available === true
+        ? (proof.checks.model_response_received ? 'runtime.status.chatReadyToolsLocal' : 'runtime.status.chatConfiguredToolsLocal')
+        : (proof.checks.model_response_received ? 'runtime.status.chatReadyToolsPending' : 'runtime.status.chatConfiguredToolsPending'))
     : t('runtime.status.incomplete');
   const runtimeStatus: RuntimeVerificationStatus = runtimeChecking
     ? 'checking'

@@ -80,7 +80,12 @@ internal class AndroidRuntimeState private constructor(val app: Application) {
             .put("mac_dsh_port_3180_reachable", JSONObject.NULL)
             .put("checks", JSONObject().put("credential_in_keychain", false).put("credential_in_secure_store", hasCredential)
                 .put("model_response_received", model != null && AndroidProviderConfiguration.harness(model) == harness)
-                .put("session_restored_after_restart", restored).put("rish_applet_executed", false))
+                .put("session_restored_after_restart", restored).put("rish_applet_executed", false)
+                // The guest applet and the workspace tools are two different
+                // things, and this build has one of them. Reporting only the
+                // applet made the status say "local tools unavailable" while
+                // list_dir, read_file and write_file were running.
+                .put("workspace_tools_available", RishAgentCoreNative.available))
         transport.lastProof?.let { proof.put("model_response", JSONObject(it.toString())) }
         return JSONObject().put("proof", proof).put("rish", JSONObject().put("available", false))
     }

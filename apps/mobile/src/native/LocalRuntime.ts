@@ -45,6 +45,9 @@ export type RuntimeProofChecks = {
   model_response_received: boolean;
   session_restored_after_restart: boolean;
   rish_applet_executed: boolean;
+  // The workspace tools -- list_dir, read_file, write_file -- run without the
+  // guest applet. A platform that has one and not the other says so here.
+  workspace_tools_available?: boolean;
 };
 
 export type RuntimeProof = {

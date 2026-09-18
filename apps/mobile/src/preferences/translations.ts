@@ -663,6 +663,7 @@ const enUS = {
   'runtime.row.credential': 'Credential',
   'runtime.row.model': 'Model',
   'runtime.row.rish': 'rish',
+  'runtime.row.workspaceTools': 'Workspace tools',
   'runtime.row.macDsh': 'Mac DSH :3180',
   'runtime.row.restartRestore': 'Restart restore',
   'runtime.row.process': 'Process',
@@ -686,6 +687,8 @@ const enUS = {
   'runtime.status.verified': 'Local substrate · rish verified',
   'runtime.status.chatConfiguredToolsPending': 'Chat configured · local tools unavailable',
   'runtime.status.chatReadyToolsPending': 'Chat ready · local tools unavailable',
+  'runtime.status.chatConfiguredToolsLocal': 'Chat configured · tools on device',
+  'runtime.status.chatReadyToolsLocal': 'Chat ready · tools on device',
   'runtime.status.incomplete': 'Local substrate · incomplete',
 
   'projects.close': 'Close projects',
@@ -1646,6 +1649,7 @@ const zhCN: Readonly<Record<TranslationKey, string>> = {
   'runtime.row.credential': '凭证',
   'runtime.row.model': '模型',
   'runtime.row.rish': 'rish',
+  'runtime.row.workspaceTools': '工作区工具',
   'runtime.row.macDsh': 'Mac DSH :3180',
   'runtime.row.restartRestore': '重启恢复',
   'runtime.row.process': '进程',
@@ -1669,6 +1673,8 @@ const zhCN: Readonly<Record<TranslationKey, string>> = {
   'runtime.status.verified': '本地基础层 · rish 已验证',
   'runtime.status.chatConfiguredToolsPending': '聊天已配置 · 本地工具未就绪',
   'runtime.status.chatReadyToolsPending': '聊天可用 · 本地工具未就绪',
+  'runtime.status.chatConfiguredToolsLocal': '聊天已配置 · 工具在本机',
+  'runtime.status.chatReadyToolsLocal': '聊天可用 · 工具在本机',
   'runtime.status.incomplete': '本地基础层 · 尚未完成',
 
   'projects.close': '关闭项目',
