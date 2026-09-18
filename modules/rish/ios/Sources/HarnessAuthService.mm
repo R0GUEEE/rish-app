@@ -546,15 +546,19 @@ static BOOL DSHAuthValidSessionId(id value) {
 - (DSHClaudeOfficialSession *)validatedClaudeSession {
   @synchronized (self) {
     if (self.cachedClaudeSession != nil) return self.cachedClaudeSession;
-    NSDictionary *manifest = DSHAuthManifestForBundle(self.bundle);
-    if (![manifest[@"harnesses"][@"claude-code"] isKindOfClass:NSDictionary.class]) return nil;
-    NSDictionary *asset = DSHAuthAssetInfo(self.bundle, @"claude-code", manifest);
-    if (![asset[@"available"] boolValue]) return nil;
+    // Claude runs its CLI in the guest, installed from the host download. The
+    // session exists only once the shared guest assets, a home disk and the
+    // downloaded CLI are all present; until then the card shows the install
+    // button (statusForHarnessId supplies the install snapshot).
+    NSDictionary *assets = DSHAuthSharedGuestAssets(self.bundle);
+    NSURL *cli = [DSHHarnessAuthService installedCliURLForHarness:DSHHarnessAuthHarnessClaudeCode];
     NSURL *support = [NSFileManager.defaultManager URLsForDirectory:NSApplicationSupportDirectory inDomains:NSUserDomainMask].firstObject;
+    if (assets == nil || cli == nil || support == nil) return nil;
     self.cachedClaudeSession = [[DSHClaudeOfficialSession alloc]
-        initWithKernelURL:asset[@"kernel_url"] initrdURL:asset[@"initrd_url"]
+        initWithKernelURL:assets[@"kernel_url"] initrdURL:assets[@"initrd_url"]
         storageDirectory:[support URLByAppendingPathComponent:@"official-claude" isDirectory:YES]
-        version:asset[@"version"]];
+        version:DSHClaudeCliVersion];
+    self.cachedClaudeSession.cliDeliveryURL = cli;
     if (self.cachedClaudeSession.shouldRestoreSavedSession) {
       self.claudeRestorePending = YES;
       [self.cachedClaudeSession refresh:^(__unused NSDictionary *status) {
@@ -757,18 +761,22 @@ static BOOL DSHAuthValidSessionId(id value) {
   if ([harnessId isEqual:@"claude-code"]) {
     DSHClaudeOfficialSession *runner = [self validatedClaudeSession];
     if (runner != nil) return runner.status;
+    // No session yet means the CLI is not installed. Report unavailable with
+    // the install snapshot so the card offers the download and shows progress.
+    NSMutableDictionary *status = DSHAuthBaseStatus(harnessId,
+        DSHAuthRuntime(NO, nil, @"cli-not-installed"));
+    status[@"install"] = [self installSnapshotForHarness:harnessId];
+    return status;
   }
   if (!DSHAuthSupportedHarness(harnessId)) return @{};
-  // Both subscriptions run their CLI in the guest, so sign-in is available only
-  // once the CLI has been downloaded. The install field carries the download
-  // phase and progress so the card can offer the Install button and show it.
-  NSDictionary *install = [self installSnapshotForHarness:harnessId];
-  BOOL available = [install[@"phase"] isEqual:@"ready"];
-  NSString *reason = available ? nil : @"cli-not-installed";
+  // Codex signs in and chats host-side over HTTPS, so it needs no CLI and is
+  // available at once. (Claude returned earlier through its own session, which
+  // is gated on the CLI download.)
+  BOOL available = [harnessId isEqualToString:DSHHarnessAuthHarnessCodex];
+  NSString *reason = available ? nil : @"claude-original-auth-transport-unavailable";
   NSMutableDictionary *status = DSHAuthBaseStatus(
       harnessId,
       DSHAuthRuntime(available, nil, reason));
-  status[@"install"] = install;
   if (available) {
     NSString *activeSession = nil;
     NSString *activeURL = nil;
