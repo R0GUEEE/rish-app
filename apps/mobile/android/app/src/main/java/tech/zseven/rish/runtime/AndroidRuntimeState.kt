@@ -56,6 +56,10 @@ internal class AndroidRuntimeState private constructor(val app: Application) {
         agentWal, sessions, preparedAttempts, executionLedger, providerRound, roots,
         agentOperations,
     )
+    /// The guest's package mirrors, staged into an app-private overlay that
+    /// no booted guest reads yet -- the same overlay, and the same standing
+    /// caveat, as iOS.
+    val mirrors = AndroidMirrorStore(app.filesDir)
     val subscriptionAuth = AndroidSubscriptionAuthManager(app)
     val io = Executors.newFixedThreadPool(2)
     /**
