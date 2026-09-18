@@ -58,6 +58,15 @@ internal class AndroidRuntimeState private constructor(val app: Application) {
     )
     val subscriptionAuth = AndroidSubscriptionAuthManager(app)
     val io = Executors.newFixedThreadPool(2)
+    /**
+     * Where a round's preview goes, when anyone is listening.
+     *
+     * The bridge sets this when JavaScript subscribes and clears it when the
+     * last listener goes away; the round service only asks for a stream when
+     * it is set. Preview material is display-only and is never persisted, so
+     * nothing downstream depends on whether it was delivered.
+     */
+    @Volatile var roundPreview: ((JSONObject) -> Unit)? = null
     @Volatile var selectedSlot = "DEEPSEEK_API_KEY"
     @Volatile var restored = false
     companion object {
@@ -65,6 +74,9 @@ internal class AndroidRuntimeState private constructor(val app: Application) {
         fun get(context: Context): AndroidRuntimeState = instance ?: synchronized(this) {
             instance ?: AndroidRuntimeState(context.applicationContext as Application).also { instance = it }
         }
+
+        /** The runtime if one exists; a service deep in a turn never makes one. */
+        fun current(): AndroidRuntimeState? = instance
     }
     fun loadSnapshot(): JSONObject = sessions.load().also {
         if(it.getString("status") == "present" && it.getString("writer_launch_instance_id") != AndroidSessionStore.launchId) restored = true

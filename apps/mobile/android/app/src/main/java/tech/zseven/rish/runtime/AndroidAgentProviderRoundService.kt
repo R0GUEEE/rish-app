@@ -201,7 +201,24 @@ internal class AndroidAgentProviderRoundService(
                 .put("round_transcript", body)
                 .put("project_context", JSONObject.NULL)
                 .put("tools", declared)
-            transport.execute(transport.prepare(envelope.toString()))
+            val prepared = transport.prepare(envelope.toString())
+            // Correlation first: a preview event that cannot be tied to the
+            // round it belongs to is not display material, it is noise.
+            val preview = previewSink(request, locator)
+            try {
+                transport.execute(prepared, preview).also {
+                    preview?.invoke(JSONObject().put("kind", "end").put("status", "validated"))
+                }
+            } catch (failure: Exception) {
+                preview?.invoke(
+                    JSONObject().put("kind", "end").put("status", "failed")
+                        .put(
+                            "failure_code",
+                            (failure as? RuntimeFailure)?.code ?: "E_COMPLETION_NATIVE",
+                        ),
+                )
+                throw failure
+            }
         } catch (failure: Exception) {
             // What the provider said is what decides the round's failure code,
             // so the transport's own vocabulary is kept rather than discarded.
@@ -649,6 +666,45 @@ internal class AndroidAgentProviderRoundService(
         JSONObject().put("op", "selector_conflict").put("request", request)
             .put("row", row).put("failure_code", failureCode),
     ).optJSONObject("result") ?: throw Refused(NATIVE)
+
+    /**
+     * The sink a round's provider call reports through, or null when nobody is
+     * watching.
+     *
+     * Every event carries the correlation the display keys on and a sequence
+     * number, and the host counts the sequence rather than the provider: the
+     * chunks are not numbered, and a preview that skipped one would be
+     * rendered as a gap rather than as the text that arrived.
+     */
+    private fun previewSink(
+        request: JSONObject,
+        locator: JSONObject,
+    ): ((JSONObject) -> Unit)? {
+        val publish = AndroidRuntimeState.current()?.roundPreview ?: return null
+        val correlation = JSONObject()
+            .put("schema_version", 1)
+            .put("task_id", request.opt("task_id"))
+            .put("attempt_id", request.opt("attempt_id"))
+            .put("round_id", locator.opt("round_id"))
+            .put("round_index", locator.opt("round_index"))
+            .put("operation_id", request.opt("operation_id"))
+            .put("provider_request_id", request.opt("operation_id"))
+            .put("harness_id", request.optString("harness_id", "dsh"))
+        // The display refuses a sequence that starts at zero: the first event
+        // a round ever sends is seq 1.
+        var seq = 1
+        return { event ->
+            val payload = JSONObject(correlation.toString())
+            for (key in event.keys()) payload.put(key, event.get(key))
+            if (!payload.has("kind")) payload.put("kind", "delta")
+            if (payload.optString("kind") == "end" && !payload.has("truncated")) {
+                payload.put("truncated", false)
+            }
+            payload.put("seq", seq)
+            seq += 1
+            publish(payload)
+        }
+    }
 
     /** What the insert asserts about a world that has no such row yet. */
     private fun insertCas(request: JSONObject, locator: JSONObject): JSONObject {

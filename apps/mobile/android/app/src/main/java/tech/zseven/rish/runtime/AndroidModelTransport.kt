@@ -140,7 +140,123 @@ internal class AndroidModelTransport(private val credentials: AndroidCredentialS
         return tools
     }
 
-    fun execute(request: Prepared): JSONObject {
+    /**
+     * Reads a server-sent event stream into the reply the rest of this file
+     * already knows how to read.
+     *
+     * Each `data:` line is a chat-completions chunk: the first carries the
+     * response id and the model, the rest carry deltas. Text, reasoning and
+     * tool-call fragments are accumulated by the same rules the provider would
+     * have applied itself, and handed to the sink as they arrive. `[DONE]`
+     * ends it; a stream that ends without a finish reason is a truncated
+     * response, not a silent success.
+     */
+    internal fun assembleStream(stream: java.io.InputStream, sink: (JSONObject) -> Unit): JSONObject {
+        var id: String? = null
+        var model: String? = null
+        var finish: String? = null
+        val text = StringBuilder()
+        val reasoning = StringBuilder()
+        // Tool calls arrive in fragments keyed by index: the name once, the
+        // arguments a few characters at a time.
+        val calls = sortedMapOf<Int, JSONObject>()
+        var read = 0L
+        stream.bufferedReader(Charsets.UTF_8).use { reader ->
+            while (true) {
+                val line = reader.readLine() ?: break
+                read += line.length + 1
+                if (read > 4 * 1024 * 1024) fail("E_COMPLETION_RESPONSE_SIZE")
+                if (!line.startsWith("data:")) continue
+                val payload = line.removePrefix("data:").trim()
+                if (payload.isEmpty()) continue
+                if (payload == "[DONE]") break
+                val chunk = try {
+                    JSONObject(payload)
+                } catch (_: Exception) {
+                    fail("E_COMPLETION_RESPONSE_JSON")
+                }
+                if (id == null) id = chunk.optString("id").takeIf { it.isNotEmpty() }
+                if (model == null) model = chunk.optString("model").takeIf { it.isNotEmpty() }
+                val choice = chunk.optJSONArray("choices")?.optJSONObject(0) ?: continue
+                choice.optString("finish_reason").takeIf { it.isNotEmpty() && it != "null" }
+                    ?.let { finish = it }
+                val delta = choice.optJSONObject("delta") ?: JSONObject()
+                val event = JSONObject()
+                stringOrEmpty(delta, "content").takeIf { it.isNotEmpty() }?.let {
+                    text.append(it); event.put("text", it)
+                }
+                stringOrEmpty(delta, "reasoning_content").takeIf { it.isNotEmpty() }?.let {
+                    reasoning.append(it); event.put("reasoning", it)
+                }
+                delta.optJSONArray("tool_calls")?.let { fragments ->
+                    val previewed = JSONArray()
+                    for (index in 0 until fragments.length()) {
+                        val fragment = fragments.optJSONObject(index) ?: continue
+                        val slot = fragment.optInt("index", index)
+                        val call = calls.getOrPut(slot) {
+                            JSONObject().put("id", "").put("name", "").put("arguments", "")
+                        }
+                        val preview = JSONObject().put("index", slot)
+                        fragment.optString("id").takeIf { it.isNotEmpty() }?.let {
+                            call.put("id", it); preview.put("id", it)
+                        }
+                        val function = fragment.optJSONObject("function")
+                        function?.optString("name")?.takeIf { it.isNotEmpty() }?.let {
+                            call.put("name", it); preview.put("name", it)
+                        }
+                        function?.optString("arguments")?.takeIf { it.isNotEmpty() }?.let {
+                            call.put("arguments", call.optString("arguments") + it)
+                            preview.put("arguments", it)
+                        }
+                        previewed.put(preview)
+                    }
+                    if (previewed.length() > 0) event.put("tool_calls", previewed)
+                }
+                finish?.let { event.put("finish_reason", it) }
+                // An empty chunk -- a keep-alive, or usage-only -- is nothing
+                // to show.
+                if (event.length() > 0) sink(event)
+            }
+        }
+        if (id == null || model == null || finish == null) fail("E_COMPLETION_RESPONSE_JSON")
+        val message = JSONObject().put("role", "assistant")
+            .put("content", text.toString()).put("reasoning_content", reasoning.toString())
+        if (calls.isNotEmpty()) {
+            val assembled = JSONArray()
+            for ((_, call) in calls) {
+                assembled.put(
+                    JSONObject().put("id", call.optString("id")).put("type", "function")
+                        .put(
+                            "function",
+                            JSONObject().put("name", call.optString("name"))
+                                .put("arguments", call.optString("arguments")),
+                        ),
+                )
+            }
+            message.put("tool_calls", assembled)
+        }
+        return JSONObject().put("id", id).put("model", model)
+            .put(
+                "choices",
+                JSONArray().put(
+                    JSONObject().put("index", 0).put("message", message)
+                        .put("finish_reason", finish),
+                ),
+            )
+    }
+
+    /**
+     * Runs one prepared request.
+     *
+     * `sink` asks for the reply as it arrives: on chat-completions the request
+     * is sent with `stream: true` and each chunk is handed over as it is
+     * parsed, for display only. What the round *decides* never comes from the
+     * chunks -- they are reassembled into exactly the reply shape the
+     * non-streaming path produces, and everything below this point is the same
+     * code reading the same object. A preview that disagreed with the settled
+     * round would be worse than no preview.
+     */
+    fun execute(request: Prepared, sink: ((JSONObject) -> Unit)? = null): JSONObject {
         val started = android.os.SystemClock.elapsedRealtime()
         try {
             val input = request.input
@@ -169,7 +285,8 @@ internal class AndroidModelTransport(private val credentials: AndroidCredentialS
             }
             val declared = input.optJSONArray("tools") ?: JSONArray()
             val wireModel = config.getJSONObject("model_mappings").optString(request.model, request.model)
-            val body = JSONObject().put("model", wireModel).put("stream", false)
+            val streaming = sink != null && protocol == "chat-completions"
+            val body = JSONObject().put("model", wireModel).put("stream", streaming)
             when(protocol) {
                 "messages" -> {
                     body.put("messages", messages).put("max_tokens", 8192)
@@ -203,6 +320,7 @@ internal class AndroidModelTransport(private val credentials: AndroidCredentialS
                 val builder = Request.Builder().url(config.getString("endpoint_url"))
                     .header("User-Agent", "Rish/Android").header("X-Client-Request-Id", providerRequestId)
                     .post(encoded.toRequestBody("application/json".toMediaType()))
+                if (streaming) builder.header("Accept", "text/event-stream")
                 when(config.getString("auth_type")) {
                     "bearer" -> builder.header("Authorization", "Bearer $secret")
                     "x-api-key" -> builder.header("x-api-key", secret)
@@ -216,14 +334,18 @@ internal class AndroidModelTransport(private val credentials: AndroidCredentialS
                 if(http.code == 429) fail("E_COMPLETION_HTTP_429")
                 if(!http.isSuccessful) throw RuntimeFailure("E_COMPLETION_HTTP_STATUS", http.code)
                 val stream = http.body?.byteStream() ?: fail("E_COMPLETION_RESPONSE_JSON")
-                val bytes = ByteArrayOutputStream(); val buffer = ByteArray(8192)
-                stream.use { source ->
-                    while(true) { val count = source.read(buffer); if(count < 0) break
-                        if(bytes.size() + count > 4 * 1024 * 1024) fail("E_COMPLETION_RESPONSE_SIZE")
-                        bytes.write(buffer, 0, count)
+                if (streaming) {
+                    assembleStream(stream, sink!!)
+                } else {
+                    val bytes = ByteArrayOutputStream(); val buffer = ByteArray(8192)
+                    stream.use { source ->
+                        while(true) { val count = source.read(buffer); if(count < 0) break
+                            if(bytes.size() + count > 4 * 1024 * 1024) fail("E_COMPLETION_RESPONSE_SIZE")
+                            bytes.write(buffer, 0, count)
+                        }
                     }
+                    try { JSONObject(bytes.toString("UTF-8")) } catch (_: Exception) { fail("E_COMPLETION_RESPONSE_JSON") }
                 }
-                try { JSONObject(bytes.toString("UTF-8")) } catch (_: Exception) { fail("E_COMPLETION_RESPONSE_JSON") }
             }
             synchronized(lock) { own(request) }
             val reported = response.optString("model", "")

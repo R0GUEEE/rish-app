@@ -7,6 +7,7 @@ import com.facebook.react.bridge.ReactApplicationContext
 import com.facebook.react.bridge.ReactContextBaseJavaModule
 import com.facebook.react.bridge.ReactMethod
 import com.facebook.react.bridge.ReadableMap
+import com.facebook.react.modules.core.DeviceEventManagerModule
 import org.json.JSONObject
 import tech.zseven.rish.RishUnavailable
 import tech.zseven.rish.runtime.AndroidAgentProviderRoundService
@@ -56,9 +57,47 @@ class AgentRuntimeModule(reactContext: ReactApplicationContext) :
 
     override fun getConstants(): MutableMap<String, Any> = mutableMapOf("implemented" to true)
 
+    /**
+     * `agentRoundPreview`: a round's reply as it arrives.
+     *
+     * Display only. It is never persisted and never enters a proof, and the
+     * round still decides on the reassembled reply, so a dropped event costs
+     * nothing but the watching. The sink is installed only while JavaScript is
+     * listening -- a stream nobody is watching is not worth asking a provider
+     * for.
+     */
+    private val listeners = java.util.concurrent.atomic.AtomicInteger(0)
+
+    @ReactMethod
+    fun addListener(eventName: String?) {
+        if (listeners.incrementAndGet() == 1) {
+            runtime.roundPreview = { event ->
+                try {
+                    reactApplicationContext
+                        .getJSModule(DeviceEventManagerModule.RCTDeviceEventEmitter::class.java)
+                        .emit(PREVIEW_EVENT, Arguments.makeNativeMap(RuntimeJson.map(event)))
+                } catch (failure: Exception) {
+                    // A preview that cannot be delivered is not a failed round.
+                    Log.w(TAG, "round preview not delivered", failure)
+                }
+            }
+        }
+    }
+
+    @ReactMethod
+    fun removeListeners(count: Double) {
+        if (listeners.addAndGet(-count.toInt().coerceAtLeast(0)).coerceAtLeast(0) == 0) {
+            listeners.set(0)
+            runtime.roundPreview = null
+        }
+    }
+
     override fun getName(): String = "AgentRuntime"
 
-    private companion object { const val TAG = "RishAgent" }
+    private companion object {
+        const val TAG = "RishAgent"
+        const val PREVIEW_EVENT = "agentRoundPreview"
+    }
 
     @ReactMethod
     fun prepare_agent_attempt(request: ReadableMap?, promise: Promise) {
