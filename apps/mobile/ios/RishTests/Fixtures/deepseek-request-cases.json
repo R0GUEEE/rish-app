@@ -9,40 +9,77 @@
       "model": "deepseek-v4-flash",
       "thinking_mode": "off",
       "streaming": true,
-      "messages": [{ "role": "user", "content": "Say hello" }],
+      "messages": [
+        {
+          "role": "user",
+          "content": "Say hello"
+        }
+      ],
       "tools": [],
       "body": {
         "model": "deepseek-v4-flash",
         "stream": true,
-        "thinking": { "type": "disabled" },
+        "thinking": {
+          "type": "disabled"
+        },
         "max_tokens": 1024,
-        "messages": [{ "role": "user", "content": "Say hello" }]
+        "messages": [
+          {
+            "role": "user",
+            "content": "Say hello"
+          }
+        ]
       },
-      "body_sha256": "3229b6d3f62b7c74e06e518e74ee9e304630f5646ba247e8b8aa82f4aa6289d2"
+      "body_sha256": "3229b6d3f62b7c74e06e518e74ee9e304630f5646ba247e8b8aa82f4aa6289d2",
+      "hosts": [
+        "ios",
+        "android"
+      ]
     },
     {
       "name": "plain_thinking_high",
       "model": "deepseek-v4-flash",
       "thinking_mode": "high",
       "streaming": true,
-      "messages": [{ "role": "user", "content": "Say hello" }],
+      "messages": [
+        {
+          "role": "user",
+          "content": "Say hello"
+        }
+      ],
       "tools": [],
       "body": {
         "model": "deepseek-v4-flash",
         "stream": true,
-        "thinking": { "type": "enabled" },
+        "thinking": {
+          "type": "enabled"
+        },
         "reasoning_effort": "high",
         "max_tokens": 4096,
-        "messages": [{ "role": "user", "content": "Say hello" }]
+        "messages": [
+          {
+            "role": "user",
+            "content": "Say hello"
+          }
+        ]
       },
-      "body_sha256": "0f2fde380a751ba312587fe3aac3699e6be8df2c50c2a2a7ab28c5eccdfe91ce"
+      "body_sha256": "0f2fde380a751ba312587fe3aac3699e6be8df2c50c2a2a7ab28c5eccdfe91ce",
+      "hosts": [
+        "ios",
+        "android"
+      ]
     },
     {
       "name": "tools_thinking_off",
       "model": "deepseek-v4-flash",
       "thinking_mode": "off",
       "streaming": true,
-      "messages": [{ "role": "user", "content": "Write a file" }],
+      "messages": [
+        {
+          "role": "user",
+          "content": "Write a file"
+        }
+      ],
       "tools": [
         {
           "type": "function",
@@ -51,8 +88,14 @@
             "description": "Write a file into the workspace",
             "parameters": {
               "type": "object",
-              "properties": { "path": { "type": "string" } },
-              "required": ["path"]
+              "properties": {
+                "path": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "path"
+              ]
             }
           }
         }
@@ -60,58 +103,15 @@
       "body": {
         "model": "deepseek-v4-flash",
         "stream": true,
-        "thinking": { "type": "disabled" },
+        "thinking": {
+          "type": "disabled"
+        },
         "max_tokens": 8192,
-        "messages": [{ "role": "user", "content": "Write a file" }],
-        "tools": [
-          {
-            "type": "function",
-            "function": {
-              "name": "write_file",
-              "description": "Write a file into the workspace",
-              "parameters": {
-                "type": "object",
-                "properties": { "path": { "type": "string" } },
-                "required": ["path"]
-              }
-            }
-          }
-        ]
-      },
-      "body_sha256": "dfa6cb17602f11b4b2817f70b9da0e215a88d38f68f9faffd28c756aa5ad06aa"
-    },
-    {
-      "name": "tools_thinking_max",
-      "model": "deepseek-v4-pro",
-      "thinking_mode": "max",
-      "streaming": false,
-      "messages": [
-        { "role": "user", "content": "Write a file" },
-        { "role": "assistant", "content": "On it" }
-      ],
-      "tools": [
-        {
-          "type": "function",
-          "function": {
-            "name": "write_file",
-            "description": "Write a file into the workspace",
-            "parameters": {
-              "type": "object",
-              "properties": { "path": { "type": "string" } },
-              "required": ["path"]
-            }
-          }
-        }
-      ],
-      "body": {
-        "model": "deepseek-v4-pro",
-        "stream": false,
-        "thinking": { "type": "enabled" },
-        "reasoning_effort": "max",
-        "max_tokens": 16384,
         "messages": [
-          { "role": "user", "content": "Write a file" },
-          { "role": "assistant", "content": "On it" }
+          {
+            "role": "user",
+            "content": "Write a file"
+          }
         ],
         "tools": [
           {
@@ -121,14 +121,104 @@
               "description": "Write a file into the workspace",
               "parameters": {
                 "type": "object",
-                "properties": { "path": { "type": "string" } },
-                "required": ["path"]
+                "properties": {
+                  "path": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "path"
+                ]
               }
             }
           }
         ]
       },
-      "body_sha256": "1395bab7d116561ec60bb546618925b2b35b23bce4524e75e986f9d885686601"
+      "body_sha256": "dfa6cb17602f11b4b2817f70b9da0e215a88d38f68f9faffd28c756aa5ad06aa",
+      "hosts": [
+        "ios",
+        "android"
+      ]
+    },
+    {
+      "name": "tools_thinking_max",
+      "model": "deepseek-v4-pro",
+      "thinking_mode": "max",
+      "streaming": false,
+      "messages": [
+        {
+          "role": "user",
+          "content": "Write a file"
+        },
+        {
+          "role": "assistant",
+          "content": "On it"
+        }
+      ],
+      "tools": [
+        {
+          "type": "function",
+          "function": {
+            "name": "write_file",
+            "description": "Write a file into the workspace",
+            "parameters": {
+              "type": "object",
+              "properties": {
+                "path": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "path"
+              ]
+            }
+          }
+        }
+      ],
+      "body": {
+        "model": "deepseek-v4-pro",
+        "stream": false,
+        "thinking": {
+          "type": "enabled"
+        },
+        "reasoning_effort": "max",
+        "max_tokens": 16384,
+        "messages": [
+          {
+            "role": "user",
+            "content": "Write a file"
+          },
+          {
+            "role": "assistant",
+            "content": "On it"
+          }
+        ],
+        "tools": [
+          {
+            "type": "function",
+            "function": {
+              "name": "write_file",
+              "description": "Write a file into the workspace",
+              "parameters": {
+                "type": "object",
+                "properties": {
+                  "path": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "path"
+                ]
+              }
+            }
+          }
+        ]
+      },
+      "body_sha256": "1395bab7d116561ec60bb546618925b2b35b23bce4524e75e986f9d885686601",
+      "hosts": [
+        "ios",
+        "android"
+      ]
     },
     {
       "name": "text_that_needs_escaping",
@@ -136,19 +226,38 @@
       "thinking_mode": "off",
       "streaming": true,
       "messages": [
-        { "role": "user", "content": "引号 \" 反斜杠 \\ 换行 \n 斜杠 / 和 emoji 🙂" }
+        {
+          "role": "user",
+          "content": "引号 \" 反斜杠 \\ 换行 \n 斜杠 / 和 emoji 🙂"
+        }
       ],
       "tools": [],
       "body": {
         "model": "deepseek-v4-flash",
         "stream": true,
-        "thinking": { "type": "disabled" },
+        "thinking": {
+          "type": "disabled"
+        },
         "max_tokens": 1024,
         "messages": [
-          { "role": "user", "content": "引号 \" 反斜杠 \\ 换行 \n 斜杠 / 和 emoji 🙂" }
+          {
+            "role": "user",
+            "content": "引号 \" 反斜杠 \\ 换行 \n 斜杠 / 和 emoji 🙂"
+          }
         ]
       },
-      "body_sha256": "b7e0b758185abc72e4b07164bf89165ac3fd87ce1c71be79e3aef2a6cb18d792"
+      "body_sha256": "b7e0b758185abc72e4b07164bf89165ac3fd87ce1c71be79e3aef2a6cb18d792",
+      "hosts": [
+        "ios",
+        "android"
+      ]
+    }
+  ],
+  "host_gaps": [
+    {
+      "host": "none",
+      "what": "both hosts build these through the shared core",
+      "detail": "This dialect's body moved into crates/rish-agent-core/src/completion_request.rs along with the other two. The core's own tests read this file, so the three suites and the implementation are held to one recording."
     }
   ]
 }

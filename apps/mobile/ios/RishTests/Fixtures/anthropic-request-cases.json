@@ -18,7 +18,8 @@
       ],
       "tools": [],
       "hosts": [
-        "ios"
+        "ios",
+        "android"
       ],
       "body": {
         "model": "claude-sonnet-5",
@@ -39,8 +40,7 @@
         },
         "max_tokens": 8192
       },
-      "body_sha256": "123714ba530956d1f4c453fbc299b481ff2ab6851d04612e0494aca20fb3f3ed",
-      "why": "Android sends no thinking key at all when thinking is off."
+      "body_sha256": "123714ba530956d1f4c453fbc299b481ff2ab6851d04612e0494aca20fb3f3ed"
     },
     {
       "name": "sonnet_thinking_high",
@@ -56,7 +56,8 @@
       ],
       "tools": [],
       "hosts": [
-        "ios"
+        "ios",
+        "android"
       ],
       "body": {
         "model": "claude-sonnet-5",
@@ -81,8 +82,7 @@
         },
         "max_tokens": 16384
       },
-      "body_sha256": "9ca55474e8c56d2edcf1666700adb07d9612f8cc48d876bd4900a260b1ab8fb2",
-      "why": "Android omits display and keeps max_tokens at 8192."
+      "body_sha256": "9ca55474e8c56d2edcf1666700adb07d9612f8cc48d876bd4900a260b1ab8fb2"
     },
     {
       "name": "sonnet_thinking_max",
@@ -98,7 +98,8 @@
       ],
       "tools": [],
       "hosts": [
-        "ios"
+        "ios",
+        "android"
       ],
       "body": {
         "model": "claude-sonnet-5",
@@ -123,8 +124,7 @@
         },
         "max_tokens": 16384
       },
-      "body_sha256": "18c331b7bb29efc8a8753a5d045aef4ed475cada06121d891dab28b758309794",
-      "why": "Same gap as the high case: Android omits display and keeps max_tokens at 8192."
+      "body_sha256": "18c331b7bb29efc8a8753a5d045aef4ed475cada06121d891dab28b758309794"
     },
     {
       "name": "haiku_thinking_off",
@@ -253,7 +253,8 @@
       ],
       "tools": [],
       "hosts": [
-        "ios"
+        "ios",
+        "android"
       ],
       "body": {
         "model": "claude-fable-5-1",
@@ -274,8 +275,7 @@
         },
         "max_tokens": 8192
       },
-      "body_sha256": "2b63438fb791d4d6da62861af5c0e64fae3c4b97f11a831efa892b112d3a9eca",
-      "why": "Thinking cannot be disabled on this family. Android has no such family."
+      "body_sha256": "2b63438fb791d4d6da62861af5c0e64fae3c4b97f11a831efa892b112d3a9eca"
     },
     {
       "name": "fable_thinking_high",
@@ -291,7 +291,8 @@
       ],
       "tools": [],
       "hosts": [
-        "ios"
+        "ios",
+        "android"
       ],
       "body": {
         "model": "claude-fable-5-1",
@@ -316,8 +317,7 @@
         },
         "max_tokens": 16384
       },
-      "body_sha256": "2a337fdba6094571ba2e84d0a769ac5e93cb4c1bc81119592cc9609c19c27992",
-      "why": "Android has no always-on family, so it falls into the adaptive branch and gets neither display nor the raised ceiling."
+      "body_sha256": "2a337fdba6094571ba2e84d0a769ac5e93cb4c1bc81119592cc9609c19c27992"
     },
     {
       "name": "glm_over_anthropic_high",
@@ -356,8 +356,7 @@
         },
         "max_tokens": 12288
       },
-      "body_sha256": "acf52c1983457d9ecb0f82faddbb2dda5606c40dbe465ad275b2eacf276f27cb",
-      "why": "GLM speaks the Anthropic endpoint but takes the classic budget form."
+      "body_sha256": "acf52c1983457d9ecb0f82faddbb2dda5606c40dbe465ad275b2eacf276f27cb"
     },
     {
       "name": "system_and_tools",
@@ -396,7 +395,8 @@
         }
       ],
       "hosts": [
-        "ios"
+        "ios",
+        "android"
       ],
       "body": {
         "model": "claude-sonnet-5",
@@ -440,8 +440,7 @@
           }
         ]
       },
-      "body_sha256": "88591719ed809b3b205b3743a4947d89dcc65c51264b02713ec6e46dd2678849",
-      "why": "The system turn leaves the message list and becomes a system block."
+      "body_sha256": "88591719ed809b3b205b3743a4947d89dcc65c51264b02713ec6e46dd2678849"
     },
     {
       "name": "budget_family_continuation_runs_unthinking",
@@ -495,7 +494,8 @@
         }
       ],
       "hosts": [
-        "ios"
+        "ios",
+        "android"
       ],
       "body": {
         "model": "claude-haiku-4-5-20251001",
@@ -553,20 +553,14 @@
           }
         ]
       },
-      "body_sha256": "ca2c35bc98b0feb9515ecb04023cae3fb44ff9dbdb1068229439663f8e07e49b",
-      "why": "A continuation round replays a tool_use turn whose thinking blocks are not in the closed transcript, and the budget API rejects that with thinking on -- so the round runs unthinking. Android has no such rule."
+      "body_sha256": "ca2c35bc98b0feb9515ecb04023cae3fb44ff9dbdb1068229439663f8e07e49b"
     }
   ],
   "host_gaps": [
     {
-      "host": "android",
-      "what": "turns are sent as plain string content, not content blocks",
-      "detail": "This host puts `{role, content: \"text\"}` on the wire where iOS puts `{role, content: [{type: text, ...}]}`. Anthropic accepts both for plain text, but a tool_use or tool_result turn has no string form, which is the same reason this host refuses a round transcript on this protocol at all. So a case replayed here feeds `body.messages` as the input: what is under test is the body around the turns, and turning turns into blocks is a layer this host does not have yet."
-    },
-    {
-      "host": "android",
-      "what": "no system block, and no tools",
-      "detail": "A system turn is sent as an ordinary message rather than lifted into `system`, and tools are never translated into `input_schema` form, so an Anthropic round here cannot call one."
+      "host": "none",
+      "what": "both hosts build these through the shared core",
+      "detail": "Every gap this file recorded closed at once when the body moved into crates/rish-agent-core/src/completion_request.rs: the ceilings, the thinking vocabularies, `store`, `strict`, the summary that carries the mode, and the rewriting of turns into content blocks. The core's own tests read this file, so the three suites and the implementation are held to one recording."
     }
   ]
 }

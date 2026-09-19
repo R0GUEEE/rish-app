@@ -15,6 +15,7 @@
 
 pub mod agent_policy;
 pub mod canonical;
+pub mod completion_request;
 pub mod completion_response;
 pub mod completion_stream;
 pub mod container_anchor;

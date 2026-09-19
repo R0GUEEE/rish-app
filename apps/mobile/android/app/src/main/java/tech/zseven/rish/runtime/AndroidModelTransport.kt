@@ -124,71 +124,38 @@ internal class AndroidModelTransport(private val credentials: AndroidCredentialS
     }
 
     /**
-     * The Anthropic request body.
+     * One round's request body, from the shared core.
      *
-     * Only the budget family is built the way iOS builds it: the models whose
-     * thinking is a token budget, which is Haiku and GLM over the
-     * Anthropic-compatible endpoint. The adaptive and always-on families are
-     * not -- see the cases in
-     * ios/RishTests/Fixtures/anthropic-request-cases.json that list only
-     * `ios`, each of which says what is missing. This host also refuses a
-     * round transcript on this protocol, so an Anthropic agent round does
-     * not reach here at all.
+     * `send_reasoning` stays a host decision because it is a property of the
+     * configured endpoint rather than of the round: a provider that does not
+     * accept a thinking vocabulary is told the round is unthinking.
      */
-    internal fun messagesBody(
-        body: JSONObject,
+    internal fun requestBody(
+        protocol: String,
         wireModel: String,
         thinkingMode: String,
         sendReasoning: Boolean,
-        messages: JSONArray,
-    ): JSONObject {
-        body.put("messages", messages).put("max_tokens", 8192)
-        if (sendReasoning && thinkingMode != "off") {
-            if (wireModel.startsWith("glm", true) || wireModel.startsWith("claude-haiku")) {
-                val budget = if (thinkingMode == "max") 16000 else 4096
-                body.put("thinking", JSONObject().put("type", "enabled").put("budget_tokens", budget))
-                    .put("max_tokens", budget + 8192)
-            } else {
-                body.put("thinking", JSONObject().put("type", "adaptive"))
-                    .put("output_config", JSONObject().put("effort", thinkingMode))
-            }
-        }
-        return body
-    }
-
-    /**
-     * The chat-completions request body, and the ceiling that goes with it.
-     *
-     * The ceiling is four numbers, not one. A round with tools has to be able
-     * to return a whole file inside its arguments, and a thinking round needs
-     * room for the reasoning on top of that. This read one number for all
-     * four cases, which cut a thinking tool round to half the room iOS gives
-     * it -- long tool arguments were being truncated by the request, not by
-     * the model. Frozen in
-     * ios/RishTests/Fixtures/deepseek-request-cases.json.
-     */
-    internal fun chatCompletionsBody(
-        body: JSONObject,
-        thinkingMode: String,
-        sendReasoning: Boolean,
+        streaming: Boolean,
         messages: JSONArray,
         tools: JSONArray,
     ): JSONObject {
-        val thinking = thinkingMode != "off"
-        body.put("messages", messages).put(
-            "max_tokens",
-            if (tools.length() > 0) {
-                if (thinking) 16384 else 8192
-            } else {
-                if (thinking) 4096 else 1024
-            },
-        )
-        if (tools.length() > 0) body.put("tools", tools)
-        if (sendReasoning) {
-            body.put("thinking", JSONObject().put("type", if (thinking) "enabled" else "disabled"))
-            if (thinking) body.put("reasoning_effort", thinkingMode)
+        if (!RishAgentCoreNative.available) fail("E_COMPLETION_BODY_INVALID")
+        val envelope = JSONObject().put("op", "request_body").put("dialect", protocol)
+            .put("model", wireModel)
+            .put("thinking_mode", if (sendReasoning) thinkingMode else "off")
+            .put("streaming", streaming)
+            .put("messages", messages).put("tools", tools)
+        val reply = RishAgentCoreNative.completionResponseReduce(envelope.toString())
+            ?: fail("E_COMPLETION_BODY_INVALID")
+        val answer = try {
+            JSONObject(reply)
+        } catch (_: Exception) {
+            fail("E_COMPLETION_BODY_INVALID")
         }
-        return body
+        if (!answer.optBoolean("ok")) {
+            fail(answer.optString("failure_code").ifEmpty { "E_COMPLETION_BODY_INVALID" })
+        }
+        return answer.getJSONObject("body")
     }
 
     private fun functionTools(declared: JSONArray): JSONArray {
@@ -320,25 +287,16 @@ internal class AndroidModelTransport(private val credentials: AndroidCredentialS
             val declared = input.optJSONArray("tools") ?: JSONArray()
             val wireModel = config.getJSONObject("model_mappings").optString(request.model, request.model)
             val streaming = sink != null && protocol == "chat-completions"
-            val body = JSONObject().put("model", wireModel).put("stream", streaming)
-            when(protocol) {
-                "messages" -> messagesBody(
-                    body, wireModel, input.getString("thinking_mode"),
-                    config.getBoolean("send_reasoning"), messages,
-                )
-                "chat-completions" -> chatCompletionsBody(
-                    body, input.getString("thinking_mode"), config.getBoolean("send_reasoning"),
-                    messages, if (declared.length() > 0) functionTools(declared) else JSONArray(),
-                )
-                "responses" -> {
-                    body.put("input", messages).put("max_output_tokens", 8192)
-                    if(config.getBoolean("send_reasoning") && input.getString("thinking_mode") != "off")
-                        body.put("reasoning", JSONObject().put("effort", input.getString("thinking_mode")))
-                }
-                else -> fail("E_COMPLETION_BODY_INVALID")
-            }
-            // What goes on the wire is what the receipt binds, and that is
-            // the receipt encoding rather than the canonical one.
+            // The body is the shared core's, for every dialect. What each one
+            // asks for -- the ceiling that follows the round's shape, the
+            // thinking vocabulary that follows the model family, `store`,
+            // `strict`, the rewriting of turns into content blocks -- was
+            // written here once per dialect and got four of them wrong.
+            val body = requestBody(
+                protocol, wireModel, input.getString("thinking_mode"),
+                config.getBoolean("send_reasoning"), streaming,
+                messages, functionTools(declared),
+            )
             val encoded = RuntimeJson.receiptJson(body)
             val providerRequestId = UUID.randomUUID().toString()
             val httpCall: Call = synchronized(lock) {

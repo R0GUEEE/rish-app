@@ -44,28 +44,38 @@ class AndroidProviderRequestFixtureTest {
         )
     }
 
-    @Test fun deepSeekRequestBodiesMatchTheFrozenOnes() {
-        val fixture = fixture("deepseek-request-cases.json")
+    /**
+     * Every frozen body, rebuilt through this host's transport.
+     *
+     * All three dialects are the shared core's now, so this host claims every
+     * case. It used to claim four of twenty-two; the rest closed when the
+     * body moved rather than one at a time.
+     */
+    private fun replay(file: String, dialect: String, harness: String) {
+        val fixture = fixture(file)
         assertEquals(1, fixture.getInt("schema_version"))
-        assertEquals("dsh", fixture.getString("harness_id"))
+        assertEquals(harness, fixture.getString("harness_id"))
         val cases = fixture.getJSONArray("cases")
         assertTrue("${cases.length()}", cases.length() > 3)
         val transport = transport()
         for (index in 0 until cases.length()) {
             val entry = cases.getJSONObject(index)
             val name = entry.getString("name")
-            val body = transport.chatCompletionsBody(
-                JSONObject().put("model", entry.getString("model"))
-                    .put("stream", entry.getBoolean("streaming")),
+            val hosts = entry.getJSONArray("hosts")
+            assertTrue(
+                "$name no longer claims android",
+                (0 until hosts.length()).any { hosts.getString(it) == "android" },
+            )
+            val body = transport.requestBody(
+                dialect,
+                entry.getString("model"),
                 entry.getString("thinking_mode"),
-                // The official DeepSeek configuration always sends reasoning.
+                // The official configurations for these all send reasoning.
                 true,
+                entry.getBoolean("streaming"),
                 entry.getJSONArray("messages"),
                 entry.getJSONArray("tools"),
             )
-            // Compared through the receipt encoding, which is both what goes
-            // on the wire and what the digest is taken over -- so a key this
-            // host adds or drops shows up here rather than on a provider.
             assertEquals(
                 "$name body",
                 RuntimeJson.receiptJson(entry.getJSONObject("body")),
@@ -79,89 +89,14 @@ class AndroidProviderRequestFixtureTest {
         }
     }
 
-    /**
-     * The encoding a receipt binds is not the canonical one, and the two are
-     * only ever the same when nothing needs escaping. A round that names a
-     * file has a slash in it, which is the case that matters.
-     */
-    /**
-     * The Anthropic bodies, for the cases this host claims. A case the
-     * fixture lists as `ios` only is a gap it records rather than a test that
-     * fails; `host_gaps` in the fixture says what those gaps are.
-     *
-     * The turns go in already shaped, taken from the frozen body: what is
-     * under test here is the body built around them, because turning turns
-     * into content blocks is a layer this host does not have.
-     */
-    @Test fun anthropicRequestBodiesMatchTheOnesThisHostClaims() {
-        val fixture = fixture("anthropic-request-cases.json")
-        assertEquals("claude-code", fixture.getString("harness_id"))
-        val cases = fixture.getJSONArray("cases")
-        val transport = transport()
-        var claimed = 0
-        for (index in 0 until cases.length()) {
-            val entry = cases.getJSONObject(index)
-            val hosts = entry.getJSONArray("hosts")
-            if ((0 until hosts.length()).none { hosts.getString(it) == "android" }) continue
-            claimed += 1
-            val name = entry.getString("name")
-            val frozen = entry.getJSONObject("body")
-            val body = transport.messagesBody(
-                JSONObject().put("model", entry.getString("model"))
-                    .put("stream", entry.getBoolean("streaming")),
-                entry.getString("model"),
-                entry.getString("thinking_mode"),
-                true,
-                frozen.getJSONArray("messages"),
-            )
-            assertEquals(
-                "$name body",
-                RuntimeJson.receiptJson(frozen),
-                RuntimeJson.receiptJson(body),
-            )
-            assertEquals(
-                "$name digest",
-                entry.getString("body_sha256"),
-                RuntimeJson.sha(RuntimeJson.receiptJson(body)),
-            )
-        }
-        assertTrue("no case claimed android", claimed > 0)
-        // And every gap the fixture records says which host it is about.
-        val gaps = fixture.getJSONArray("host_gaps")
-        assertTrue("$gaps", gaps.length() > 0)
-        for (index in 0 until gaps.length()) {
-            assertTrue(gaps.getJSONObject(index).getString("detail").isNotEmpty())
-        }
-    }
+    @Test fun deepSeekRequestBodiesMatchTheFrozenOnes() =
+        replay("deepseek-request-cases.json", "chat-completions", "dsh")
 
-    /**
-     * The responses dialect, which this host claims none of.
-     *
-     * A fixture nobody here matches is still worth reading in this suite:
-     * the assertion is that the gap is written down and stays written down.
-     * A case that later starts listing `android` turns this into a real
-     * replay without anyone having to remember to come back for it.
-     */
-    @Test fun theResponsesDialectIsRecordedAsUnbuiltHere() {
-        val fixture = fixture("openai-request-cases.json")
-        assertEquals("codex", fixture.getString("harness_id"))
-        val cases = fixture.getJSONArray("cases")
-        assertTrue("${cases.length()}", cases.length() > 3)
-        for (index in 0 until cases.length()) {
-            val entry = cases.getJSONObject(index)
-            val hosts = entry.getJSONArray("hosts")
-            val claimed = (0 until hosts.length()).any { hosts.getString(it) == "android" }
-            if (claimed) {
-                throw AssertionError(
-                    "${entry.getString("name")} now lists android: replay it here " +
-                        "instead of counting it as a gap",
-                )
-            }
-            assertTrue(entry.getString("name"), entry.getString("why").isNotEmpty())
-        }
-        val gaps = fixture.getJSONArray("host_gaps")
-        assertTrue("$gaps", gaps.length() > 0)
-    }
+    @Test fun anthropicRequestBodiesMatchTheFrozenOnes() =
+        replay("anthropic-request-cases.json", "messages", "claude-code")
+
+    @Test fun responsesRequestBodiesMatchTheFrozenOnes() =
+        replay("openai-request-cases.json", "responses", "codex")
 
     @Test fun theReceiptEncodingEscapesWhatTheCanonicalOneDoesNot() {
         val value = JSONObject().put("path", "workspace/notes.txt")
