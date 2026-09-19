@@ -32,4 +32,18 @@ internal object RishLibgit2Native {
      * only initialises proves none of them.
      */
     @JvmStatic external fun roundTrip(path: String): String
+
+    /**
+     * A repository's index and working state, as JSON.
+     *
+     * `{"ok":true,"head":…,"branch":…,"repository_state":…,
+     *   "index_checksum":…,"entries":[{path,oid,mode,size,stage,git_state}]}`
+     * or `{"ok":false,"stage":…,"error":…}`.
+     *
+     * This layer holds no policy: which of these paths may be sent, and what
+     * a selection of them becomes, is decided above it and mostly in the
+     * shared core already. Entries come back sorted by path so two hosts
+     * reading one repository produce the same bytes.
+     */
+    @JvmStatic external fun readRepositoryState(path: String): String
 }

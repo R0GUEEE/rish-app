@@ -110,6 +110,13 @@ Java_tech_zseven_rish_runtime_RishLibgit2Native_roundTrip(JNIEnv *env, jclass,
       fail("write_tree");
       break;
     }
+    // The tree is in the object database but the index is still only in
+    // memory; `git add` writes it, and anything that reads the repository
+    // afterwards reads the file rather than this process.
+    if (git_index_write(index) != 0) {
+      fail("index_write");
+      break;
+    }
     if (git_signature_new(&who, "Rish", "rish@example.invalid", 1700000000, 0) != 0) {
       fail("signature");
       break;
