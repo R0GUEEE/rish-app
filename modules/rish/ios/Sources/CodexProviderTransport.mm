@@ -123,265 +123,45 @@ static BOOL CodexAppendItems(NSMutableArray *input, NSDictionary *message,
   return NO;
 }
 
-/// Responses output index as the tool-call fragment index (0..15).
-static NSNumber * _Nullable CodexStreamOutputIndex(id value) {
-  if (![value isKindOfClass:NSNumber.class] ||
-      CFGetTypeID((__bridge CFTypeRef)value) == CFBooleanGetTypeID()) return nil;
-  double position = [value doubleValue];
-  if (position != floor(position) || position < 0 || position > 15) return nil;
-  return @((NSInteger)position);
+
+
+@implementation CodexStreamEventParser
+
+// The framing, the limits and the reading of a OpenAI event are all the
+// shared core's (crates/rish-agent-core/src/completion_stream.rs). What is
+// left here is this wire's name and this transport's error codes, because a
+// caller that switched on 3301..3308 still has to see them.
+
+- (NSString *)wire {
+  return @"responses";
 }
 
-static NSDictionary<NSString *, id> * _Nullable CodexDecodeEvent(
-    NSString *eventName, NSArray<NSString *> *dataLines,
-    NSDictionary * _Nullable * _Nullable chunkOut, NSError **error) {
-  if (chunkOut != nil) *chunkOut = nil;
-  if (dataLines.count == 0) return nil;
-  NSString *data = [dataLines componentsJoinedByString:@"\n"];
-  if ([data isEqualToString:@"[DONE]"]) return @{@"type": @"done"};
-  if ([[data stringByTrimmingCharactersInSet:
-      NSCharacterSet.whitespaceAndNewlineCharacterSet] length] == 0) {
-    return nil;
-  }
-  NSData *json = [data dataUsingEncoding:NSUTF8StringEncoding];
-  if (json == nil) {
-    if (error != nil) *error = CodexTransportError(3301, @"SSE event is not valid UTF-8");
-    return nil;
-  }
-  NSDictionary *chunk = CodexDictionary(
-      [NSJSONSerialization JSONObjectWithData:json options:0 error:nil]);
-  if (chunk == nil) {
-    if (error != nil) *error = CodexTransportError(3302, @"SSE event is not a JSON object");
-    return nil;
-  }
-  if (chunkOut != nil) *chunkOut = chunk;
-  NSString *kind = CodexString(chunk[@"type"]) ?: eventName;
-  if ([kind isEqualToString:@"response.failed"] || [kind isEqualToString:@"error"]) {
-    if (error != nil) {
-      NSDictionary *response = CodexDictionary(chunk[@"response"]);
-      NSString *reason = CodexString(CodexDictionary(response[@"error"])[@"code"]) ?:
-          CodexString(chunk[@"code"]) ?: @"failed";
-      *error = CodexTransportError(3303,
-          [@"OpenAI stream error: " stringByAppendingString:reason]);
-    }
-    return nil;
-  }
-  if ([kind isEqualToString:@"response.output_text.delta"]) {
-    NSString *text = CodexString(chunk[@"delta"]);
-    return text.length > 0 ? @{@"type": @"delta", @"content": text} : nil;
-  }
-  if ([kind isEqualToString:@"response.reasoning_summary_text.delta"]) {
-    NSString *text = CodexString(chunk[@"delta"]);
-    return text.length > 0 ? @{@"type": @"delta", @"reasoning": text} : nil;
-  }
-  if ([kind isEqualToString:@"response.completed"] ||
-      [kind isEqualToString:@"response.incomplete"]) {
-    NSDictionary *response = CodexDictionary(chunk[@"response"]);
-    if (response == nil) return @{@"type": @"done"};
-    NSString *finish = CodexFinishReasonForResponse(
-        response, CodexOutputHasFunctionCall(response));
-    if (finish == nil) {
-      if (error != nil) *error = CodexTransportError(3307, @"Unknown Responses status");
-      return nil;
-    }
-    return @{@"type": @"delta", @"finish_reason": finish};
-  }
-  if ([kind isEqualToString:@"response.output_item.added"]) {
-    NSDictionary *item = CodexDictionary(chunk[@"item"]);
-    if (![CodexString(item[@"type"]) isEqualToString:@"function_call"]) return nil;
-    NSNumber *index = CodexStreamOutputIndex(chunk[@"output_index"]);
-    NSString *callId = CodexString(item[@"call_id"]);
-    NSString *name = CodexString(item[@"name"]);
-    if (index == nil || callId.length == 0 || name.length == 0) {
-      if (error != nil) *error = CodexTransportError(3308, @"Responses function_call item is not usable");
-      return nil;
-    }
-    return @{@"type": @"delta",
-             @"tool_calls": @[ @{@"index": index, @"id": callId, @"name": name} ]};
-  }
-  if ([kind isEqualToString:@"response.function_call_arguments.delta"]) {
-    NSNumber *index = CodexStreamOutputIndex(chunk[@"output_index"]);
-    NSString *fragment = CodexString(chunk[@"delta"]);
-    if (index == nil) {
-      if (error != nil) *error = CodexTransportError(3308, @"Responses arguments delta has no output index");
-      return nil;
-    }
-    return fragment.length > 0
-        ? @{@"type": @"delta", @"tool_calls": @[ @{@"index": index, @"arguments": fragment} ]}
-        : nil;
-  }
-  // response.created/in_progress, content_part.*, function_call_arguments.done
-  // and reasoning_summary_part.* carry no presentable delta.
-  return nil;
+- (NSError *)alreadyFinished {
+  return CodexTransportError(3304, @"Stream already finished");
 }
 
-@implementation CodexStreamEventParser {
-  NSMutableData *_pending;
-  NSMutableArray<NSString *> *_dataLines;
-  NSString *_eventName;
-  BOOL _finished;
-}
-
-@synthesize streamedResponseId = _streamedResponseId;
-@synthesize streamedModel = _streamedModel;
-
-- (void)noteChunkIdentity:(NSDictionary *)chunk {
-  NSString *kind = CodexString(chunk[@"type"]);
-  if (![kind isEqualToString:@"response.created"] &&
-      ![kind isEqualToString:@"response.completed"] &&
-      ![kind isEqualToString:@"response.incomplete"]) return;
-  NSDictionary *response = CodexDictionary(chunk[@"response"]);
-  if (_streamedResponseId == nil && CodexString(response[@"id"]).length > 0) {
-    _streamedResponseId = [response[@"id"] copy];
+- (NSError *)refusalForReason:(NSString *)reason fallback:(NSError *)failure {
+  if ([reason isEqualToString:@"not_utf8"]) {
+    return CodexTransportError(3301, @"SSE line is not valid UTF-8");
   }
-  if (_streamedModel == nil && CodexString(response[@"model"]).length > 0) {
-    _streamedModel = [response[@"model"] copy];
+  if ([reason isEqualToString:@"stream_error"]) {
+    return CodexTransportError(3303, @"OpenAI stream error");
   }
-}
-
-- (instancetype)init {
-  self = [super init];
-  if (self != nil) {
-    _pending = [NSMutableData data];
-    _dataLines = [NSMutableArray array];
-    _eventName = nil;
+  if ([reason isEqualToString:@"line_too_long"] ||
+      [reason isEqualToString:@"stream_too_long"]) {
+    return CodexTransportError(3305, @"SSE line exceeds the size limit");
   }
-  return self;
-}
-
-- (void)reset {
-  _streamedResponseId = nil;
-  _streamedModel = nil;
-  _pending = [NSMutableData data];
-  [_dataLines removeAllObjects];
-  _eventName = nil;
-  _finished = NO;
-}
-
-- (NSArray<NSDictionary<NSString *, id> *> *)appendBytes:(const uint8_t *)bytes
-                                                      length:(NSUInteger)length
-                                                        error:(NSError **)error {
-  if (_finished) {
-    if (error != nil) {
-      *error = CodexTransportError(3304, @"Stream already finished");
-    }
-    return nil;
+  if ([reason isEqualToString:@"too_many_lines"]) {
+    return CodexTransportError(3306, @"SSE event has too many lines");
   }
-  if (length == 0) return @[];
-  [_pending appendBytes:bytes length:length];
-  NSMutableArray<NSDictionary<NSString *, id> *> *deltas = [NSMutableArray array];
-  while (YES) {
-    const void *base = _pending.bytes;
-    NSUInteger total = _pending.length;
-    const uint8_t *nl = static_cast<const uint8_t *>(memchr(base, '\n', total));
-    if (nl == nullptr) {
-      if (total > (NSUInteger)CodexStreamMaxLineBytes) {
-        if (error != nil) {
-          *error = CodexTransportError(3305, @"SSE line exceeds the size limit");
-        }
-        return nil;
-      }
-      break;
-    }
-    NSUInteger lineLength = static_cast<NSUInteger>(
-        reinterpret_cast<const uint8_t *>(nl) - static_cast<const uint8_t *>(base));
-    if (lineLength > (NSUInteger)CodexStreamMaxLineBytes) {
-      if (error != nil) {
-        *error = CodexTransportError(3305, @"SSE line exceeds the size limit");
-      }
-      return nil;
-    }
-    NSData *lineData = [NSData dataWithBytes:base length:lineLength];
-    NSString *line = [[NSString alloc] initWithData:lineData
-                                           encoding:NSUTF8StringEncoding];
-    if (line == nil) {
-      if (error != nil) {
-        *error = CodexTransportError(3301, @"SSE line is not valid UTF-8");
-      }
-      return nil;
-    }
-    if ([line hasSuffix:@"\r"]) {
-      line = [line substringToIndex:line.length - 1];
-    }
-    [_pending replaceBytesInRange:NSMakeRange(0, lineLength + 1)
-                        withBytes:nullptr length:0];
-    if (line.length == 0) {
-      if (_dataLines.count > 0) {
-        if (_dataLines.count > (NSUInteger)CodexStreamMaxBufferedLines) {
-          if (error != nil) {
-            *error = CodexTransportError(3306, @"SSE event has too many lines");
-          }
-          return nil;
-        }
-        NSDictionary *chunk = nil;
-        NSDictionary<NSString *, id> *delta = CodexDecodeEvent(
-            _eventName, _dataLines, &chunk, error);
-        [_dataLines removeAllObjects];
-        _eventName = nil;
-        if (chunk != nil) [self noteChunkIdentity:chunk];
-        if (delta != nil) [deltas addObject:delta];
-        else if (error != nil && *error != nil) return nil;
-      }
-      continue;
-    }
-    if ([line hasPrefix:@":"]) continue;
-    if ([line hasPrefix:@"event:"]) {
-      NSString *name = [line substringFromIndex:6];
-      if ([name hasPrefix:@" "]) name = [name substringFromIndex:1];
-      _eventName = [name copy];
-      continue;
-    }
-    if ([line hasPrefix:@"data:"]) {
-      if (_dataLines.count >= (NSUInteger)CodexStreamMaxBufferedLines) {
-        if (error != nil) {
-          *error = CodexTransportError(3306, @"SSE event has too many lines");
-        }
-        return nil;
-      }
-      NSString *payload = [line substringFromIndex:5];
-      if ([payload hasPrefix:@" "]) payload = [payload substringFromIndex:1];
-      [_dataLines addObject:payload];
-    }
+  if ([reason isEqualToString:@"unknown_status"]) {
+    return CodexTransportError(3307, @"Unknown terminal status");
   }
-  return deltas.count > 0 ? deltas : @[];
-}
-
-- (NSArray<NSDictionary<NSString *, id> *> *)finish:(NSError **)error {
-  if (_finished) {
-    if (error != nil) {
-      *error = CodexTransportError(3304, @"Stream already finished");
-    }
-    return nil;
+  if ([reason isEqualToString:@"unusable_item"] ||
+      [reason isEqualToString:@"tool_fragment"]) {
+    return CodexTransportError(3308, @"Streamed tool item is not usable");
   }
-  _finished = YES;
-  NSMutableArray<NSDictionary<NSString *, id> *> *deltas = [NSMutableArray array];
-  if (_pending.length > 0) {
-    NSString *line = [[NSString alloc] initWithData:_pending
-                                           encoding:NSUTF8StringEncoding];
-    if (line == nil) {
-      if (error != nil) {
-        *error = CodexTransportError(3301, @"SSE trailing bytes are not valid UTF-8");
-      }
-      return nil;
-    }
-    if ([line hasSuffix:@"\r"]) line = [line substringToIndex:line.length - 1];
-    if ([line hasPrefix:@"data:"]) {
-      NSString *payload = [line substringFromIndex:5];
-      if ([payload hasPrefix:@" "]) payload = [payload substringFromIndex:1];
-      [_dataLines addObject:payload];
-    }
-    _pending = [NSMutableData data];
-  }
-  if (_dataLines.count > 0) {
-    NSDictionary *chunk = nil;
-    NSDictionary<NSString *, id> *delta = CodexDecodeEvent(
-        _eventName, _dataLines, &chunk, error);
-    [_dataLines removeAllObjects];
-    if (chunk != nil) [self noteChunkIdentity:chunk];
-    if (delta != nil) [deltas addObject:delta];
-    else if (error != nil && *error != nil) return nil;
-  }
-  return deltas;
+  return CodexTransportError(3302, @"SSE event is not a JSON object");
 }
 
 @end

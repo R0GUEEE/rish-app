@@ -844,3 +844,215 @@ fn a_call_keeps_the_first_name_it_was_given() {
         }),
     );
 }
+
+/// Reads a stream off one of the other two wires.
+fn wired(wire: &str, pieces: &[&[u8]]) -> (Value, Vec<Value>) {
+    let mut state = Value::Null;
+    let mut previews = Vec::new();
+    for piece in pieces {
+        let answer = stream_chunk(&json!({
+            "state": state,
+            "wire": wire,
+            "chunk_base64": encode_base64(piece),
+        }));
+        assert_eq!(answer["ok"], json!(true), "the chunk was refused: {answer}");
+        state = answer["state"].clone();
+        previews.extend(answer["previews"].as_array().expect("previews").clone());
+    }
+    (state, previews)
+}
+
+/// Codex's responses wire: the output index is the tool-call index, the
+/// identity arrives on `response.created`, and the finish reason is read off
+/// the terminal response object rather than stated.
+#[test]
+fn the_responses_wire_reads_a_whole_round() {
+    let wire = concat!(
+        "event: response.created\n",
+        "data: {\"type\":\"response.created\",\"response\":{\"id\":\"resp_1\",\"model\":\"gpt-x\"}}\n\n",
+        "event: response.reasoning_summary_text.delta\n",
+        "data: {\"type\":\"response.reasoning_summary_text.delta\",\"delta\":\"why\"}\n\n",
+        "event: response.output_text.delta\n",
+        "data: {\"type\":\"response.output_text.delta\",\"delta\":\"here\"}\n\n",
+        "event: response.output_item.added\n",
+        "data: {\"type\":\"response.output_item.added\",\"output_index\":0,\
+         \"item\":{\"type\":\"function_call\",\"call_id\":\"c1\",\"name\":\"read_file\"}}\n\n",
+        "data: {\"type\":\"response.function_call_arguments.delta\",\"output_index\":0,\
+         \"delta\":\"{\\\"path\\\"\"}\n\n",
+        "data: {\"type\":\"response.function_call_arguments.delta\",\"output_index\":0,\
+         \"delta\":\":\\\"a.txt\\\"}\"}\n\n",
+        "data: {\"type\":\"response.completed\",\"response\":{\"id\":\"resp_1\",\
+         \"model\":\"gpt-x\",\"status\":\"completed\",\
+         \"output\":[{\"type\":\"function_call\"}]}}\n\n",
+    );
+    let (state, previews) = wired("responses", &[wire.as_bytes()]);
+    assert_eq!(previews[0], json!({ "reasoning": "why" }));
+    assert_eq!(previews[1], json!({ "text": "here" }));
+    assert_eq!(
+        previews[2]["tool_calls"][0],
+        json!({ "index": 0, "id": "c1", "name": "read_file" }),
+    );
+
+    // And it assembles back into the shape Codex sends when it does not
+    // stream, which is what settles the round.
+    let response = shaped(&state, "responses");
+    assert_eq!(response["id"], json!("resp_1"));
+    assert_eq!(response["status"], json!("completed"));
+    assert_eq!(
+        response["output"].as_array().expect("output").last(),
+        Some(&json!({ "type": "function_call", "call_id": "c1", "name": "read_file",
+                      "arguments": "{\"path\":\"a.txt\"}" })),
+    );
+}
+
+/// Anthropic's messages wire: the block index is the tool-call index, the
+/// arguments arrive as partial JSON, and the stop reason is translated.
+#[test]
+fn the_messages_wire_reads_a_whole_round() {
+    let wire = concat!(
+        "event: message_start\n",
+        "data: {\"type\":\"message_start\",\"message\":{\"id\":\"msg_1\",\"model\":\"claude-x\"}}\n\n",
+        "data: {\"type\":\"content_block_delta\",\"index\":0,\
+         \"delta\":{\"type\":\"thinking_delta\",\"thinking\":\"why\"}}\n\n",
+        "data: {\"type\":\"content_block_delta\",\"index\":0,\
+         \"delta\":{\"type\":\"text_delta\",\"text\":\"here\"}}\n\n",
+        "data: {\"type\":\"content_block_start\",\"index\":1,\
+         \"content_block\":{\"type\":\"tool_use\",\"id\":\"tu_1\",\"name\":\"read_file\"}}\n\n",
+        "data: {\"type\":\"content_block_delta\",\"index\":1,\
+         \"delta\":{\"type\":\"input_json_delta\",\"partial_json\":\"{\\\"path\\\"\"}}\n\n",
+        "data: {\"type\":\"content_block_delta\",\"index\":1,\
+         \"delta\":{\"type\":\"input_json_delta\",\"partial_json\":\":\\\"a.txt\\\"}\"}}\n\n",
+        "data: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"tool_use\"}}\n\n",
+    );
+    let (state, previews) = wired("messages", &[wire.as_bytes()]);
+    assert_eq!(previews[0], json!({ "reasoning": "why" }));
+    assert_eq!(previews[1], json!({ "text": "here" }));
+    assert_eq!(previews[2]["tool_calls"][0]["name"], json!("read_file"));
+    assert_eq!(previews.last().expect("a last event")["finish_reason"], json!("tool_calls"));
+
+    let response = shaped(&state, "messages");
+    assert_eq!(response["id"], json!("msg_1"));
+    assert_eq!(response["stop_reason"], json!("tool_use"));
+    assert_eq!(
+        response["content"].as_array().expect("content").last(),
+        Some(&json!({ "type": "tool_use", "id": "tu_1", "name": "read_file",
+                      "input": { "path": "a.txt" } })),
+    );
+}
+
+/// What each of the other two wires refuses, and in its own word for it.
+#[test]
+fn the_other_wires_refuse_what_they_cannot_read() {
+    let sent = |wire: &str, event: &str| {
+        stream_chunk(&json!({
+            "state": Value::Null,
+            "wire": wire,
+            "chunk_base64": encode_base64(format!("data: {event}\n\n").as_bytes()),
+        }))
+    };
+    // A provider that says in the stream that the round failed.
+    assert_eq!(
+        refusal(&sent("responses", "{\"type\":\"response.failed\"}")),
+        ("E_COMPLETION_RESPONSE_JSON", "stream_error"),
+    );
+    assert_eq!(
+        refusal(&sent("messages", "{\"type\":\"error\",\"error\":{\"type\":\"overloaded\"}}")),
+        ("E_COMPLETION_RESPONSE_JSON", "stream_error"),
+    );
+    // A status or stop reason neither knows how to read. Defaulting either
+    // to a turn that ended normally would settle a round on a guess.
+    assert_eq!(
+        refusal(&sent(
+            "responses",
+            "{\"type\":\"response.completed\",\"response\":{\"status\":\"cancelled\"}}",
+        )),
+        ("E_COMPLETION_RESPONSE_JSON", "unknown_status"),
+    );
+    assert_eq!(
+        refusal(&sent(
+            "messages",
+            "{\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"who_knows\"}}",
+        )),
+        ("E_COMPLETION_RESPONSE_JSON", "unknown_status"),
+    );
+    // An item that names a call but cannot be placed.
+    assert_eq!(
+        refusal(&sent(
+            "responses",
+            "{\"type\":\"response.output_item.added\",\
+             \"item\":{\"type\":\"function_call\",\"call_id\":\"c\",\"name\":\"n\"}}",
+        )),
+        ("E_COMPLETION_RESPONSE_JSON", "unusable_item"),
+    );
+    assert_eq!(
+        refusal(&sent(
+            "messages",
+            "{\"type\":\"content_block_start\",\"index\":99,\
+             \"content_block\":{\"type\":\"tool_use\",\"id\":\"t\",\"name\":\"n\"}}",
+        )),
+        ("E_COMPLETION_RESPONSE_JSON", "unusable_item"),
+    );
+}
+
+/// The `event:` line is a fallback, not the authority: a payload that names
+/// itself an error is an error even when the event line says otherwise.
+#[test]
+fn the_payloads_own_type_wins_over_the_event_line() {
+    let wire = "event: response.output_text.delta\n\
+                data: {\"type\":\"response.failed\"}\n\n";
+    assert_eq!(
+        refusal(&stream_chunk(&json!({
+            "state": Value::Null,
+            "wire": "responses",
+            "chunk_base64": encode_base64(wire.as_bytes()),
+        }))),
+        ("E_COMPLETION_RESPONSE_JSON", "stream_error"),
+    );
+    // And with no type at all the event line is what there is to go on.
+    let named = "event: response.output_text.delta\ndata: {\"delta\":\"x\"}\n\n";
+    let (_, previews) = wired("responses", &[named.as_bytes()]);
+    assert_eq!(previews, vec![json!({ "text": "x" })]);
+}
+
+/// The wire is named once and carried, so a chunk boundary between the
+/// `event:` line and its `data:` line changes nothing.
+#[test]
+fn the_wire_and_the_event_name_survive_a_chunk_boundary() {
+    let wire = "event: response.output_text.delta\ndata: {\"delta\":\"split\"}\n\n";
+    let bytes = wire.as_bytes();
+    let cut = wire.find("data:").expect("a data line");
+    let mut state = stream_chunk(&json!({
+        "state": Value::Null,
+        "wire": "responses",
+        "chunk_base64": encode_base64(&bytes[..cut]),
+    }));
+    assert_eq!(state["previews"], json!([]));
+    // The second chunk does not name the wire again.
+    let answer = stream_chunk(&json!({
+        "state": state["state"].clone(),
+        "chunk_base64": encode_base64(&bytes[cut..]),
+    }));
+    state = answer;
+    assert_eq!(state["previews"], json!([{ "text": "split" }]));
+}
+
+/// Each wire says a stream is over in its own way, and the host is told the
+/// same thing either way: chat completions send `[DONE]`, Anthropic sends
+/// `message_stop`, and Codex sends a terminal response event.
+#[test]
+fn every_wire_says_when_it_is_over() {
+    let over = |wire: &str, event: &str| {
+        let answer = stream_chunk(&json!({
+            "state": Value::Null,
+            "wire": wire,
+            "chunk_base64": encode_base64(format!("data: {event}\n\n").as_bytes()),
+        }));
+        assert_eq!(answer["ok"], json!(true), "{answer}");
+        answer["done"].clone()
+    };
+    assert_eq!(over("chat-completions", "[DONE]"), json!(true));
+    assert_eq!(over("messages", "{\"type\":\"message_stop\"}"), json!(true));
+    assert_eq!(over("responses", "{\"type\":\"response.completed\"}"), json!(true));
+    // And an event that is not the end does not claim to be one.
+    assert_eq!(over("messages", "{\"type\":\"content_block_stop\",\"index\":0}"), json!(false));
+}

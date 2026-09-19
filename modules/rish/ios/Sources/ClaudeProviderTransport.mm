@@ -178,280 +178,45 @@ static BOOL ClaudeLastAssistantUsesTools(NSArray *converted) {
   return NO;
 }
 
-/// Anthropic content block index as the tool-call fragment index (0..15).
-static NSNumber * _Nullable ClaudeStreamBlockIndex(id value) {
-  if (![value isKindOfClass:NSNumber.class] ||
-      CFGetTypeID((__bridge CFTypeRef)value) == CFBooleanGetTypeID()) return nil;
-  double position = [value doubleValue];
-  if (position != floor(position) || position < 0 || position > 15) return nil;
-  return @((NSInteger)position);
+
+
+@implementation ClaudeStreamEventParser
+
+// The framing, the limits and the reading of a Anthropic event are all the
+// shared core's (crates/rish-agent-core/src/completion_stream.rs). What is
+// left here is this wire's name and this transport's error codes, because a
+// caller that switched on 2301..2308 still has to see them.
+
+- (NSString *)wire {
+  return @"messages";
 }
 
-static NSDictionary<NSString *, id> * _Nullable ClaudeDecodeEvent(
-    NSString *eventName, NSArray<NSString *> *dataLines,
-    NSDictionary * _Nullable * _Nullable chunkOut, NSError **error) {
-  if (chunkOut != nil) *chunkOut = nil;
-  if (dataLines.count == 0) return nil;
-  NSString *data = [dataLines componentsJoinedByString:@"\n"];
-  if ([data isEqualToString:@"[DONE]"]) return @{@"type": @"done"};
-  if ([[data stringByTrimmingCharactersInSet:
-      NSCharacterSet.whitespaceAndNewlineCharacterSet] length] == 0) {
-    return nil;
-  }
-  NSData *json = [data dataUsingEncoding:NSUTF8StringEncoding];
-  if (json == nil) {
-    if (error != nil) {
-      *error = ClaudeTransportError(2301, @"SSE event is not valid UTF-8");
-    }
-    return nil;
-  }
-  NSDictionary *chunk = ClaudeDictionary(
-      [NSJSONSerialization JSONObjectWithData:json options:0 error:nil]);
-  if (chunk == nil) {
-    if (error != nil) {
-      *error = ClaudeTransportError(2302, @"SSE event is not a JSON object");
-    }
-    return nil;
-  }
-  if (chunkOut != nil) *chunkOut = chunk;
-  // The SSE `event:` name and the payload `type` agree on the wire; the
-  // payload is authoritative so a missing event line cannot hide an error.
-  NSString *kind = ClaudeString(chunk[@"type"]) ?: eventName;
-  if ([kind isEqualToString:@"error"]) {
-    if (error != nil) {
-      NSString *reason = ClaudeString(ClaudeDictionary(chunk[@"error"])[@"type"]) ?:
-          @"stream_error";
-      *error = ClaudeTransportError(2303,
-          [@"Anthropic stream error: " stringByAppendingString:reason]);
-    }
-    return nil;
-  }
-  if ([kind isEqualToString:@"content_block_delta"]) {
-    NSDictionary *delta = ClaudeDictionary(chunk[@"delta"]);
-    NSString *deltaKind = ClaudeString(delta[@"type"]);
-    if ([deltaKind isEqualToString:@"text_delta"]) {
-      NSString *text = ClaudeString(delta[@"text"]);
-      return text.length > 0 ? @{@"type": @"delta", @"content": text} : nil;
-    }
-    if ([deltaKind isEqualToString:@"thinking_delta"]) {
-      NSString *thinking = ClaudeString(delta[@"thinking"]);
-      return thinking.length > 0
-          ? @{@"type": @"delta", @"reasoning": thinking} : nil;
-    }
-    if ([deltaKind isEqualToString:@"input_json_delta"]) {
-      NSString *partial = ClaudeString(delta[@"partial_json"]);
-      NSNumber *index = ClaudeStreamBlockIndex(chunk[@"index"]);
-      if (index == nil) {
-        if (error != nil) {
-          *error = ClaudeTransportError(2308, @"Anthropic tool fragment has no block index");
-        }
-        return nil;
-      }
-      return partial.length > 0
-          ? @{@"type": @"delta", @"tool_calls": @[ @{@"index": index, @"arguments": partial} ]}
-          : nil;
-    }
-    // signature_delta carries nothing presentable.
-    return nil;
-  }
-  if ([kind isEqualToString:@"content_block_start"]) {
-    NSDictionary *block = ClaudeDictionary(chunk[@"content_block"]);
-    if (![ClaudeString(block[@"type"]) isEqualToString:@"tool_use"]) return nil;
-    NSNumber *index = ClaudeStreamBlockIndex(chunk[@"index"]);
-    NSString *identifier = ClaudeString(block[@"id"]);
-    NSString *name = ClaudeString(block[@"name"]);
-    if (index == nil || identifier.length == 0 || name.length == 0) {
-      if (error != nil) {
-        *error = ClaudeTransportError(2308, @"Anthropic tool_use block is not usable");
-      }
-      return nil;
-    }
-    return @{@"type": @"delta",
-             @"tool_calls": @[ @{@"index": index, @"id": identifier, @"name": name} ]};
-  }
-  if ([kind isEqualToString:@"message_delta"]) {
-    NSString *stopReason = ClaudeString(ClaudeDictionary(chunk[@"delta"])[@"stop_reason"]);
-    if (stopReason == nil) return nil;
-    NSString *finish = ClaudeFinishReasonForStopReason(stopReason);
-    if (finish == nil) {
-      if (error != nil) {
-        *error = ClaudeTransportError(2307, @"Unknown Anthropic stop_reason");
-      }
-      return nil;
-    }
-    return @{@"type": @"delta", @"finish_reason": finish};
-  }
-  if ([kind isEqualToString:@"message_stop"]) {
-    return @{@"type": @"done"};
-  }
-  // message_start, content_block_stop, ping: no delta.
-  return nil;
+- (NSError *)alreadyFinished {
+  return ClaudeTransportError(2304, @"Stream already finished");
 }
 
-@implementation ClaudeStreamEventParser {
-  NSMutableData *_pending;
-  NSMutableArray<NSString *> *_dataLines;
-  NSString *_eventName;
-  BOOL _finished;
-}
-
-@synthesize streamedResponseId = _streamedResponseId;
-@synthesize streamedModel = _streamedModel;
-
-- (void)noteChunkIdentity:(NSDictionary *)chunk {
-  if (![ClaudeString(chunk[@"type"]) isEqualToString:@"message_start"]) return;
-  NSDictionary *message = ClaudeDictionary(chunk[@"message"]);
-  if (_streamedResponseId == nil && ClaudeString(message[@"id"]).length > 0) {
-    _streamedResponseId = [message[@"id"] copy];
+- (NSError *)refusalForReason:(NSString *)reason fallback:(NSError *)failure {
+  if ([reason isEqualToString:@"not_utf8"]) {
+    return ClaudeTransportError(2301, @"SSE line is not valid UTF-8");
   }
-  if (_streamedModel == nil && ClaudeString(message[@"model"]).length > 0) {
-    _streamedModel = [message[@"model"] copy];
+  if ([reason isEqualToString:@"stream_error"]) {
+    return ClaudeTransportError(2303, @"Anthropic stream error");
   }
-}
-
-- (instancetype)init {
-  self = [super init];
-  if (self != nil) {
-    _pending = [NSMutableData data];
-    _dataLines = [NSMutableArray array];
-    _eventName = nil;
+  if ([reason isEqualToString:@"line_too_long"] ||
+      [reason isEqualToString:@"stream_too_long"]) {
+    return ClaudeTransportError(2305, @"SSE line exceeds the size limit");
   }
-  return self;
-}
-
-- (void)reset {
-  _streamedResponseId = nil;
-  _streamedModel = nil;
-  _pending = [NSMutableData data];
-  [_dataLines removeAllObjects];
-  _eventName = nil;
-  _finished = NO;
-}
-
-- (NSArray<NSDictionary<NSString *, id> *> *)appendBytes:(const uint8_t *)bytes
-                                                      length:(NSUInteger)length
-                                                        error:(NSError **)error {
-  if (_finished) {
-    if (error != nil) {
-      *error = ClaudeTransportError(2304, @"Stream already finished");
-    }
-    return nil;
+  if ([reason isEqualToString:@"too_many_lines"]) {
+    return ClaudeTransportError(2306, @"SSE event has too many lines");
   }
-  if (length == 0) return @[];
-  [_pending appendBytes:bytes length:length];
-  NSMutableArray<NSDictionary<NSString *, id> *> *deltas = [NSMutableArray array];
-  while (YES) {
-    const void *base = _pending.bytes;
-    NSUInteger total = _pending.length;
-    const uint8_t *nl = static_cast<const uint8_t *>(memchr(base, '\n', total));
-    if (nl == nullptr) {
-      if (total > (NSUInteger)ClaudeStreamMaxLineBytes) {
-        if (error != nil) {
-          *error = ClaudeTransportError(2305, @"SSE line exceeds the size limit");
-        }
-        return nil;
-      }
-      break;
-    }
-    NSUInteger lineLength = static_cast<NSUInteger>(
-        reinterpret_cast<const uint8_t *>(nl) - static_cast<const uint8_t *>(base));
-    if (lineLength > (NSUInteger)ClaudeStreamMaxLineBytes) {
-      if (error != nil) {
-        *error = ClaudeTransportError(2305, @"SSE line exceeds the size limit");
-      }
-      return nil;
-    }
-    NSData *lineData = [NSData dataWithBytes:base length:lineLength];
-    NSString *line = [[NSString alloc] initWithData:lineData
-                                           encoding:NSUTF8StringEncoding];
-    if (line == nil) {
-      if (error != nil) {
-        *error = ClaudeTransportError(2301, @"SSE line is not valid UTF-8");
-      }
-      return nil;
-    }
-    if ([line hasSuffix:@"\r"]) {
-      line = [line substringToIndex:line.length - 1];
-    }
-    [_pending replaceBytesInRange:NSMakeRange(0, lineLength + 1)
-                        withBytes:nullptr length:0];
-    if (line.length == 0) {
-      if (_dataLines.count > 0) {
-        if (_dataLines.count > (NSUInteger)ClaudeStreamMaxBufferedLines) {
-          if (error != nil) {
-            *error = ClaudeTransportError(2306, @"SSE event has too many lines");
-          }
-          return nil;
-        }
-        NSDictionary *chunk = nil;
-        NSDictionary<NSString *, id> *delta = ClaudeDecodeEvent(
-            _eventName, _dataLines, &chunk, error);
-        [_dataLines removeAllObjects];
-        _eventName = nil;
-        if (chunk != nil) [self noteChunkIdentity:chunk];
-        if (delta != nil) [deltas addObject:delta];
-        else if (error != nil && *error != nil) return nil;
-      }
-      continue;
-    }
-    if ([line hasPrefix:@":"]) continue;
-    if ([line hasPrefix:@"event:"]) {
-      NSString *name = [line substringFromIndex:6];
-      if ([name hasPrefix:@" "]) name = [name substringFromIndex:1];
-      _eventName = [name copy];
-      continue;
-    }
-    if ([line hasPrefix:@"data:"]) {
-      if (_dataLines.count >= (NSUInteger)ClaudeStreamMaxBufferedLines) {
-        if (error != nil) {
-          *error = ClaudeTransportError(2306, @"SSE event has too many lines");
-        }
-        return nil;
-      }
-      NSString *payload = [line substringFromIndex:5];
-      if ([payload hasPrefix:@" "]) payload = [payload substringFromIndex:1];
-      [_dataLines addObject:payload];
-    }
+  if ([reason isEqualToString:@"unknown_status"]) {
+    return ClaudeTransportError(2307, @"Unknown terminal status");
   }
-  return deltas.count > 0 ? deltas : @[];
-}
-
-- (NSArray<NSDictionary<NSString *, id> *> *)finish:(NSError **)error {
-  if (_finished) {
-    if (error != nil) {
-      *error = ClaudeTransportError(2304, @"Stream already finished");
-    }
-    return nil;
+  if ([reason isEqualToString:@"unusable_item"] ||
+      [reason isEqualToString:@"tool_fragment"]) {
+    return ClaudeTransportError(2308, @"Streamed tool item is not usable");
   }
-  _finished = YES;
-  NSMutableArray<NSDictionary<NSString *, id> *> *deltas = [NSMutableArray array];
-  if (_pending.length > 0) {
-    NSString *line = [[NSString alloc] initWithData:_pending
-                                           encoding:NSUTF8StringEncoding];
-    if (line == nil) {
-      if (error != nil) {
-        *error = ClaudeTransportError(2301, @"SSE trailing bytes are not valid UTF-8");
-      }
-      return nil;
-    }
-    if ([line hasSuffix:@"\r"]) line = [line substringToIndex:line.length - 1];
-    if ([line hasPrefix:@"data:"]) {
-      NSString *payload = [line substringFromIndex:5];
-      if ([payload hasPrefix:@" "]) payload = [payload substringFromIndex:1];
-      [_dataLines addObject:payload];
-    }
-    _pending = [NSMutableData data];
-  }
-  if (_dataLines.count > 0) {
-    NSDictionary *chunk = nil;
-    NSDictionary<NSString *, id> *delta = ClaudeDecodeEvent(
-        _eventName, _dataLines, &chunk, error);
-    [_dataLines removeAllObjects];
-    if (chunk != nil) [self noteChunkIdentity:chunk];
-    if (delta != nil) [deltas addObject:delta];
-    else if (error != nil && *error != nil) return nil;
-  }
-  return deltas;
+  return ClaudeTransportError(2302, @"SSE event is not a JSON object");
 }
 
 @end

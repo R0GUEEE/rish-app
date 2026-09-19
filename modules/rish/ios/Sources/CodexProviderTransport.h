@@ -1,28 +1,17 @@
 #import <Foundation/Foundation.h>
 
 #import "DSHCompletionProviderTransport.h"
+#import "DSHStreamEvents.h"
 
 NS_ASSUME_NONNULL_BEGIN
 
-/// Incremental Server-Sent-Events parser for the OpenAI Responses API
-/// streaming dialect (response.output_text.delta,
-/// response.reasoning_summary_text.delta,
-/// response.function_call_arguments.delta, response.completed). Emits the
-/// same delta vocabulary as DSHStreamEventParser:
-/// {type:"delta", content?, reasoning?, finish_reason?}.
-@interface CodexStreamEventParser : NSObject <DSHProviderStreamEventParsing>
-/// Identity from `response.created` / `response.completed`; nil until seen.
-@property(nonatomic, copy, readonly, nullable) NSString *streamedResponseId;
-@property(nonatomic, copy, readonly, nullable) NSString *streamedModel;
-
-- (nullable NSArray<NSDictionary<NSString *, id> *> *)appendBytes:(const uint8_t *)bytes
-                                                             length:(NSUInteger)length
-                                                               error:(NSError **)error;
-
-- (nullable NSArray<NSDictionary<NSString *, id> *> *)finish:(NSError **)error;
-
-- (void)reset;
-
+/// The OpenAI Responses streaming dialect. The reading is the shared core's
+/// (`wire: responses`); this names the wire and keeps this transport's own
+/// error codes, 3301..3308. The identity comes from `response.created` /
+/// `response.completed` and the emitted vocabulary is the one every parser
+/// here emits: {type:"delta", content?, reasoning?, tool_calls?,
+/// finish_reason?} and {type:"done"}.
+@interface CodexStreamEventParser : DSHStreamEventParser
 @end
 
 /// Codex Harness provider transport. Overrides the DeepSeek dialect hooks of

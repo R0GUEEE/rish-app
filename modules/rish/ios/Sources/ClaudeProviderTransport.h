@@ -1,27 +1,15 @@
 #import <Foundation/Foundation.h>
 
 #import "DSHCompletionProviderTransport.h"
+#import "DSHStreamEvents.h"
 
 NS_ASSUME_NONNULL_BEGIN
 
-/// Incremental Server-Sent-Events parser for the Anthropic Messages API
-/// streaming dialect (message_start / content_block_start /
-/// content_block_delta / message_delta / message_stop). Emits the same
-/// delta vocabulary as DSHStreamEventParser:
-/// {type:"delta", content?, reasoning?, finish_reason?}.
-@interface ClaudeStreamEventParser : NSObject <DSHProviderStreamEventParsing>
-/// Identity from `message_start` (message id / model); nil until seen.
-@property(nonatomic, copy, readonly, nullable) NSString *streamedResponseId;
-@property(nonatomic, copy, readonly, nullable) NSString *streamedModel;
-
-- (nullable NSArray<NSDictionary<NSString *, id> *> *)appendBytes:(const uint8_t *)bytes
-                                                             length:(NSUInteger)length
-                                                               error:(NSError **)error;
-
-- (nullable NSArray<NSDictionary<NSString *, id> *> *)finish:(NSError **)error;
-
-- (void)reset;
-
+/// The Anthropic messages streaming dialect. The reading is the shared
+/// core's (`wire: messages`); this names the wire and keeps this transport's
+/// own error codes, 2301..2308. Anthropic ends a stream with `message_stop`
+/// rather than `[DONE]`, which arrives as the same {type:"done"}.
+@interface ClaudeStreamEventParser : DSHStreamEventParser
 @end
 
 /// Claude Code Harness provider transport. Overrides the DeepSeek dialect

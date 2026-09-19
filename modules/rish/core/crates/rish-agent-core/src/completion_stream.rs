@@ -77,6 +77,12 @@ const TOO_MANY_LINES: Failure = unreadable("too_many_lines");
 const INCOMPLETE: Failure = unreadable("incomplete");
 /// An envelope this cannot read at all.
 const BAD_REQUEST: Failure = unreadable("bad_request");
+/// The provider said, in the stream, that the round failed.
+const STREAM_ERROR: Failure = unreadable("stream_error");
+/// A status or stop reason this does not know how to read.
+const UNKNOWN_STATUS: Failure = unreadable("unknown_status");
+/// An output item or content block that cannot be placed or read.
+const UNUSABLE_ITEM: Failure = unreadable("unusable_item");
 /// One line longer than a line may be.
 const LINE_TOO_LONG: Failure = oversized("line_too_long");
 /// More bytes than a reply may be.
@@ -84,11 +90,49 @@ const STREAM_TOO_LONG: Failure = oversized("stream_too_long");
 /// More than the host budgeted for what the reply says.
 const OVER_BUDGET: Failure = oversized("over_budget");
 
+/// The wire a stream is read from.
+///
+/// The framing is the same for all three -- lines, `event:` and `data:`
+/// fields, a blank line ending an event -- so only what one event *means*
+/// differs, and that is all this chooses.
+#[derive(PartialEq, Eq, Clone, Copy)]
+enum Wire {
+    /// OpenAI chat completions: DeepSeek, GLM.
+    ChatCompletions,
+    /// OpenAI responses: Codex.
+    Responses,
+    /// Anthropic messages: Claude.
+    Messages,
+}
+
+impl Wire {
+    fn named(name: Option<&str>) -> Self {
+        match name {
+            Some("responses") => Wire::Responses,
+            Some("messages") => Wire::Messages,
+            _ => Wire::ChatCompletions,
+        }
+    }
+
+    fn name(self) -> &'static str {
+        match self {
+            Wire::ChatCompletions => "chat-completions",
+            Wire::Responses => "responses",
+            Wire::Messages => "messages",
+        }
+    }
+}
+
 /// The state the host carries between chunks. Opaque to it; plain JSON here
 /// so a stuck stream can be read in a log.
 struct Stream {
     carry: Vec<u8>,
     event: Vec<String>,
+    /// The `event:` line naming what is accumulating, for the dialects that
+    /// send one. The payload's own `type` wins where both are present, so a
+    /// missing `event:` line can never hide an error.
+    event_name: Option<String>,
+    wire: Wire,
     id: Option<String>,
     model: Option<String>,
     finish: Option<String>,
@@ -111,6 +155,8 @@ impl Stream {
         Stream {
             carry: Vec::new(),
             event: Vec::new(),
+            event_name: None,
+            wire: Wire::ChatCompletions,
             id: None,
             model: None,
             finish: None,
@@ -179,6 +225,8 @@ impl Stream {
             )
             .ok_or(BAD_REQUEST)?,
             event,
+            event_name: text_at("event_name"),
+            wire: Wire::named(map.get("wire").and_then(Value::as_str)),
             id: text_at("id"),
             model: text_at("model"),
             finish: text_at("finish_reason"),
@@ -195,6 +243,8 @@ impl Stream {
             "schema_version": 1,
             "carry_base64": encode_base64(&self.carry),
             "event": self.event,
+            "event_name": self.event_name,
+            "wire": self.wire.name(),
             "id": self.id,
             "model": self.model,
             "finish_reason": self.finish,
@@ -289,8 +339,13 @@ fn line_read(state: &mut Stream, line: &[u8]) -> Result<Option<Value>, Failure> 
         // A comment or a keep-alive, which ends nothing.
         return Ok(None);
     }
+    if let Some(name) = line.strip_prefix("event:") {
+        // Names what is about to arrive; it ends nothing.
+        state.event_name = Some(name.strip_prefix(' ').unwrap_or(name).to_owned());
+        return Ok(None);
+    }
     let Some(payload) = line.strip_prefix("data:") else {
-        // `event:`, `id:`, `retry:` and anything else: not read, not an end.
+        // `id:`, `retry:` and anything else: not read, not an end.
         return Ok(None);
     };
     // SSE strips one space after the colon, and no more: the rest is payload.
@@ -343,6 +398,19 @@ fn settle(state: &mut Stream) -> Result<Option<Value>, Failure> {
     let Some(object) = decoded.as_object() else {
         return Err(NOT_AN_OBJECT);
     };
+    let named = state.event_name.take();
+    match state.wire {
+        Wire::ChatCompletions => chat_completions_event(state, object),
+        Wire::Responses => responses_event(state, object, named.as_deref()),
+        Wire::Messages => messages_event(state, object, named.as_deref()),
+    }
+}
+
+/// One OpenAI chat-completions chunk: DeepSeek and GLM.
+fn chat_completions_event(
+    state: &mut Stream,
+    object: &Map<String, Value>,
+) -> Result<Option<Value>, Failure> {
     if state.id.is_none() {
         state.id = non_empty(object.get("id"));
     }
@@ -373,6 +441,256 @@ fn settle(state: &mut Stream) -> Result<Option<Value>, Failure> {
     apply(state, said)
 }
 
+/// One OpenAI responses event: Codex.
+///
+/// The output index doubles as the tool-call index, so two calls stay apart
+/// by where the provider put them in its output.
+fn responses_event(
+    state: &mut Stream,
+    object: &Map<String, Value>,
+    named: Option<&str>,
+) -> Result<Option<Value>, Failure> {
+    // The payload's own type is authoritative; the `event:` line is a
+    // fallback, so a missing one cannot hide an error.
+    let kind = non_empty(object.get("type"))
+        .or_else(|| named.map(str::to_owned))
+        .unwrap_or_default();
+    let response = object.get("response").and_then(Value::as_object);
+    if matches!(kind.as_str(), "response.created" | "response.completed" | "response.incomplete") {
+        if let Some(response) = response {
+            if state.id.is_none() {
+                state.id = non_empty(response.get("id"));
+            }
+            if state.model.is_none() {
+                state.model = non_empty(response.get("model"));
+            }
+        }
+    }
+    let said = match kind.as_str() {
+        "response.failed" | "error" => return Err(STREAM_ERROR),
+        "response.output_text.delta" => Said {
+            text: non_empty(object.get("delta")),
+            ..Said::nothing()
+        },
+        "response.reasoning_summary_text.delta" => Said {
+            reasoning: non_empty(object.get("delta")),
+            ..Said::nothing()
+        },
+        "response.completed" | "response.incomplete" => {
+            let Some(response) = response else {
+                // Terminal but with nothing to read: the round is over, and
+                // that it is over is the whole of what this event says.
+                state.done = true;
+                return Ok(None);
+            };
+            Said {
+                finish: Some(responses_finish(response).ok_or(UNKNOWN_STATUS)?),
+                ..Said::nothing()
+            }
+        }
+        "response.output_item.added" => {
+            let item = object.get("item").and_then(Value::as_object);
+            if item.and_then(|item| non_empty(item.get("type"))).as_deref()
+                != Some("function_call")
+            {
+                return Ok(None);
+            }
+            let item = item.expect("checked above");
+            let (Some(index), Some(id), Some(name)) = (
+                output_index(object.get("output_index")),
+                non_empty(item.get("call_id")),
+                non_empty(item.get("name")),
+            ) else {
+                return Err(UNUSABLE_ITEM);
+            };
+            Said {
+                fragments: vec![Fragment {
+                    index,
+                    id: Some(id),
+                    name: Some(name),
+                    arguments: None,
+                }],
+                ..Said::nothing()
+            }
+        }
+        "response.function_call_arguments.delta" => {
+            let index = output_index(object.get("output_index")).ok_or(UNUSABLE_ITEM)?;
+            match non_empty(object.get("delta")) {
+                None => return Ok(None),
+                Some(arguments) => Said {
+                    fragments: vec![Fragment {
+                        index,
+                        id: None,
+                        name: None,
+                        arguments: Some(arguments),
+                    }],
+                    ..Said::nothing()
+                },
+            }
+        }
+        // response.created, in_progress, content_part.*, arguments.done and
+        // reasoning_summary_part.* carry nothing to show.
+        _ => return Ok(None),
+    };
+    apply(state, said)
+}
+
+/// What a finished responses object says the reason was.
+fn responses_finish(response: &Map<String, Value>) -> Option<String> {
+    let has_call = response
+        .get("output")
+        .and_then(Value::as_array)
+        .is_some_and(|items| {
+            items.iter().any(|item| {
+                item.get("type").and_then(Value::as_str) == Some("function_call")
+            })
+        });
+    match non_empty(response.get("status"))
+        .unwrap_or_else(|| "completed".to_owned())
+        .as_str()
+    {
+        "completed" => Some(if has_call { "tool_calls" } else { "stop" }.to_owned()),
+        "incomplete" => Some(
+            if response
+                .get("incomplete_details")
+                .and_then(Value::as_object)
+                .and_then(|details| non_empty(details.get("reason")))
+                .as_deref()
+                == Some("content_filter")
+            {
+                "content_filter"
+            } else {
+                "length"
+            }
+            .to_owned(),
+        ),
+        _ => None,
+    }
+}
+
+/// One Anthropic messages event: Claude.
+///
+/// The content-block index doubles as the tool-call index.
+fn messages_event(
+    state: &mut Stream,
+    object: &Map<String, Value>,
+    named: Option<&str>,
+) -> Result<Option<Value>, Failure> {
+    let kind = non_empty(object.get("type"))
+        .or_else(|| named.map(str::to_owned))
+        .unwrap_or_default();
+    if let Some(message) = object.get("message").and_then(Value::as_object) {
+        if state.id.is_none() {
+            state.id = non_empty(message.get("id"));
+        }
+        if state.model.is_none() {
+            state.model = non_empty(message.get("model"));
+        }
+    }
+    let empty = Map::new();
+    let said = match kind.as_str() {
+        "error" => return Err(STREAM_ERROR),
+        "content_block_delta" => {
+            let delta = object
+                .get("delta")
+                .and_then(Value::as_object)
+                .unwrap_or(&empty);
+            match non_empty(delta.get("type")).unwrap_or_default().as_str() {
+                "text_delta" => Said {
+                    text: non_empty(delta.get("text")),
+                    ..Said::nothing()
+                },
+                "thinking_delta" => Said {
+                    reasoning: non_empty(delta.get("thinking")),
+                    ..Said::nothing()
+                },
+                "input_json_delta" => {
+                    let index = output_index(object.get("index")).ok_or(UNUSABLE_ITEM)?;
+                    match non_empty(delta.get("partial_json")) {
+                        None => return Ok(None),
+                        Some(arguments) => Said {
+                            fragments: vec![Fragment {
+                                index,
+                                id: None,
+                                name: None,
+                                arguments: Some(arguments),
+                            }],
+                            ..Said::nothing()
+                        },
+                    }
+                }
+                // signature_delta carries nothing to show.
+                _ => return Ok(None),
+            }
+        }
+        "content_block_start" => {
+            let block = object.get("content_block").and_then(Value::as_object);
+            if block.and_then(|block| non_empty(block.get("type"))).as_deref()
+                != Some("tool_use")
+            {
+                return Ok(None);
+            }
+            let block = block.expect("checked above");
+            let (Some(index), Some(id), Some(name)) = (
+                output_index(object.get("index")),
+                non_empty(block.get("id")),
+                non_empty(block.get("name")),
+            ) else {
+                return Err(UNUSABLE_ITEM);
+            };
+            Said {
+                fragments: vec![Fragment {
+                    index,
+                    id: Some(id),
+                    name: Some(name),
+                    arguments: None,
+                }],
+                ..Said::nothing()
+            }
+        }
+        "message_stop" => {
+            // Anthropic ends a stream by saying so rather than with `[DONE]`.
+            state.done = true;
+            return Ok(None);
+        }
+        "message_delta" => {
+            let stop = object
+                .get("delta")
+                .and_then(Value::as_object)
+                .and_then(|delta| non_empty(delta.get("stop_reason")));
+            let Some(stop) = stop else { return Ok(None) };
+            Said {
+                finish: Some(messages_finish(&stop).ok_or(UNKNOWN_STATUS)?),
+                ..Said::nothing()
+            }
+        }
+        _ => return Ok(None),
+    };
+    apply(state, said)
+}
+
+/// Anthropic's stop reasons in the one vocabulary the app accumulates.
+fn messages_finish(stop: &str) -> Option<String> {
+    Some(
+        match stop {
+            "end_turn" | "stop_sequence" | "pause_turn" => "stop",
+            "tool_use" => "tool_calls",
+            "max_tokens" => "length",
+            "refusal" => "content_filter",
+            _ => return None,
+        }
+        .to_owned(),
+    )
+}
+
+/// An output or block index, which is also a tool-call index.
+fn output_index(value: Option<&Value>) -> Option<i64> {
+    value
+        .filter(|value| !value.is_boolean())
+        .and_then(Value::as_i64)
+        .filter(|index| (0..MAX_TOOL_CALLS as i64).contains(index))
+}
+
 /// One chunk's worth of what a reply said, in neither host's spelling.
 ///
 /// A chat-completions chunk and a host's own delta describe the same thing
@@ -385,6 +703,18 @@ struct Said {
     reasoning: Option<String>,
     finish: Option<String>,
     fragments: Vec<Fragment>,
+}
+
+impl Said {
+    /// Nothing said, for the events that fill in one field of it.
+    fn nothing() -> Self {
+        Said {
+            text: None,
+            reasoning: None,
+            finish: None,
+            fragments: Vec::new(),
+        }
+    }
 }
 
 struct Fragment {
@@ -761,6 +1091,10 @@ pub fn stream_chunk(envelope: &Value) -> Value {
 
 fn chunked(envelope: &Value) -> Result<Value, Failure> {
     let mut state = Stream::from_value(envelope.get("state"))?;
+    // Named once, on the first chunk, and carried from there.
+    if let Some(wire) = envelope.get("wire").and_then(Value::as_str) {
+        state.wire = Wire::named(Some(wire));
+    }
     let bytes = decode_base64(
         envelope
             .get("chunk_base64")

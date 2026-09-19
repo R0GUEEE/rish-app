@@ -44,6 +44,19 @@ typedef NSDictionary<NSString *, id> DSHStreamDelta;
 /// Resets to a clean state for reuse.
 - (void)reset;
 
+/// The wire this reads, as the shared core names it: `chat-completions`,
+/// `responses` or `messages`. A dialect overrides this and the two hooks
+/// below, and nothing else -- the framing, the limits and the reading of an
+/// event all live in the core.
+- (NSString *)wire;
+
+/// Translates the core's word for a refusal into this parser's own error
+/// domain and codes. `failure` is the default, in this file's vocabulary.
+- (NSError *)refusalForReason:(NSString *)reason fallback:(NSError *)failure;
+
+/// Feeding or flushing a stream that is already over.
+- (NSError *)alreadyFinished;
+
 @end
 
 /// Error domain / codes for the assembler (2201 over budget, 2202 tool

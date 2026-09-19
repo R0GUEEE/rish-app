@@ -77,6 +77,12 @@ static NSDictionary * _Nullable DSHStreamReduce(NSDictionary *envelope,
   return parsed;
 }
 
+/// The core's word for a refusal, from the error it was written into.
+static NSString *DSHStreamReasonOf(NSError *error) {
+  NSString *reason = error.userInfo[DSHStreamFailureReasonKey];
+  return [reason isKindOfClass:NSString.class] ? reason : @"";
+}
+
 @interface DSHStreamEventParser ()
 /// The core's state, opaque here; NSNull before the first chunk.
 @property(nonatomic, strong) id state;
@@ -102,6 +108,25 @@ static NSDictionary * _Nullable DSHStreamReduce(NSDictionary *envelope,
   self.sawTerminator = NO;
   self.streamedResponseId = nil;
   self.streamedModel = nil;
+}
+
+/// The wire this reads, as the shared core names it. A dialect overrides
+/// this and its two error hooks; the framing, the limits and the reading
+/// are the core's.
+- (NSString *)wire {
+  return @"chat-completions";
+}
+
+/// The core's refusal in this parser's own error domain and codes. The
+/// default is this file's, which is what DeepSeek and GLM have always
+/// reported.
+- (NSError *)refusalForReason:(NSString *)reason fallback:(NSError *)failure {
+  return failure;
+}
+
+/// Feeding or flushing a stream that is already over.
+- (NSError *)alreadyFinished {
+  return DSHStreamError(2103, @"Stream already finished");
 }
 
 /// The core's preview vocabulary in this file's delta vocabulary.
@@ -160,37 +185,48 @@ static DSHStreamDelta *DSHDeltaFromPreview(NSDictionary *preview) {
                                     length:(NSUInteger)length
                                       error:(NSError **)error {
   if (self.finished) {
-    if (error != nil) {
-      *error = DSHStreamError(2103, @"Stream already finished");
-    }
+    if (error != nil) *error = [self alreadyFinished];
     return nil;
   }
   if (length == 0) return @[];
   NSString *encoded = [[NSData dataWithBytes:bytes length:length]
       base64EncodedStringWithOptions:0];
+  NSError *refused = nil;
   NSDictionary *answer = DSHStreamReduce(@{
     @"op" : @"stream_chunk",
     @"state" : self.state,
+    @"wire" : [self wire],
     @"chunk_base64" : encoded,
-  }, error);
-  return answer == nil ? nil : [self acceptAnswer:answer];
+  }, &refused);
+  if (answer == nil) {
+    if (error != nil) {
+      *error = [self refusalForReason:DSHStreamReasonOf(refused) fallback:refused];
+    }
+    return nil;
+  }
+  return [self acceptAnswer:answer];
 }
 
 - (NSArray<DSHStreamDelta *> *)finish:(NSError **)error {
   if (self.finished) {
-    if (error != nil) {
-      *error = DSHStreamError(2103, @"Stream already finished");
-    }
+    if (error != nil) *error = [self alreadyFinished];
     return nil;
   }
   self.finished = YES;
   // Whatever is still carried is a final line the socket never terminated,
   // and a final event nothing closed. Both are read rather than dropped.
+  NSError *refused = nil;
   NSDictionary *answer = DSHStreamReduce(@{
     @"op" : @"stream_flush",
     @"state" : self.state,
-  }, error);
-  return answer == nil ? nil : [self acceptAnswer:answer];
+  }, &refused);
+  if (answer == nil) {
+    if (error != nil) {
+      *error = [self refusalForReason:DSHStreamReasonOf(refused) fallback:refused];
+    }
+    return nil;
+  }
+  return [self acceptAnswer:answer];
 }
 
 @end
