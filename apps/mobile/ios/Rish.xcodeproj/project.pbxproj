@@ -82,6 +82,7 @@
 		D6F400021AD99517003FC87E /* deepseek-stream-cases.json in Resources */ = {isa = PBXBuildFile; fileRef = D6F400011AD99517003FC87E /* deepseek-stream-cases.json */; };
 		A1B400041AD99517003FC87E /* deepseek-request-cases.json in Resources */ = {isa = PBXBuildFile; fileRef = A1B400031AD99517003FC87E /* deepseek-request-cases.json */; };
 		A1B400061AD99517003FC87E /* anthropic-request-cases.json in Resources */ = {isa = PBXBuildFile; fileRef = A1B400051AD99517003FC87E /* anthropic-request-cases.json */; };
+		A1B400081AD99517003FC87E /* openai-request-cases.json in Resources */ = {isa = PBXBuildFile; fileRef = A1B400071AD99517003FC87E /* openai-request-cases.json */; };
 		D7C400021AD99517003FC87E /* LocalProjectContextModuleTests.mm in Sources */ = {isa = PBXBuildFile; fileRef = D7C400011AD99517003FC87E /* LocalProjectContextModuleTests.mm */; };
 		D8C400021AD99517003FC87E /* ProjectContextCompletionV3Tests.mm in Sources */ = {isa = PBXBuildFile; fileRef = D8C400011AD99517003FC87E /* ProjectContextCompletionV3Tests.mm */; };
 		D8F400021AD99517003FC87E /* canonical-corpus.json in Resources */ = {isa = PBXBuildFile; fileRef = D8F400011AD99517003FC87E /* canonical-corpus.json */; };
@@ -241,6 +242,7 @@
 		D6F400011AD99517003FC87E /* deepseek-stream-cases.json */ = {isa = PBXFileReference; lastKnownFileType = text.json; path = "Fixtures/deepseek-stream-cases.json"; sourceTree = "<group>"; };
 		A1B400031AD99517003FC87E /* deepseek-request-cases.json */ = {isa = PBXFileReference; lastKnownFileType = text.json; path = "Fixtures/deepseek-request-cases.json"; sourceTree = "<group>"; };
 		A1B400051AD99517003FC87E /* anthropic-request-cases.json */ = {isa = PBXFileReference; lastKnownFileType = text.json; path = "Fixtures/anthropic-request-cases.json"; sourceTree = "<group>"; };
+		A1B400071AD99517003FC87E /* openai-request-cases.json */ = {isa = PBXFileReference; lastKnownFileType = text.json; path = "Fixtures/openai-request-cases.json"; sourceTree = "<group>"; };
 		D7C400011AD99517003FC87E /* LocalProjectContextModuleTests.mm */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.cpp.objcpp; path = LocalProjectContextModuleTests.mm; sourceTree = "<group>"; };
 		D8C400011AD99517003FC87E /* ProjectContextCompletionV3Tests.mm */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.cpp.objcpp; path = ProjectContextCompletionV3Tests.mm; sourceTree = "<group>"; };
 		D8F400011AD99517003FC87E /* canonical-corpus.json */ = {isa = PBXFileReference; lastKnownFileType = text.json; name = "canonical-corpus.json"; path = "../../../../modules/rish/core/fixtures/canonical-corpus.json"; sourceTree = "<group>"; };
@@ -358,6 +360,7 @@
 				D6F400011AD99517003FC87E /* deepseek-stream-cases.json */,
 				A1B400031AD99517003FC87E /* deepseek-request-cases.json */,
 				A1B400051AD99517003FC87E /* anthropic-request-cases.json */,
+				A1B400071AD99517003FC87E /* openai-request-cases.json */,
 				D8F400011AD99517003FC87E /* canonical-corpus.json */,
 				D9F400011AD99517003FC87E /* canonical-golden.json */,
 				C3F400011AD99517003FC87E /* agent-interrupted-recovery-session.json */,
@@ -657,6 +660,7 @@
 				D6F400021AD99517003FC87E /* deepseek-stream-cases.json in Resources */,
 				A1B400041AD99517003FC87E /* deepseek-request-cases.json in Resources */,
 				A1B400061AD99517003FC87E /* anthropic-request-cases.json in Resources */,
+				A1B400081AD99517003FC87E /* openai-request-cases.json in Resources */,
 				D8F400021AD99517003FC87E /* canonical-corpus.json in Resources */,
 				D9F400021AD99517003FC87E /* canonical-golden.json in Resources */,
 				C3F400021AD99517003FC87E /* agent-interrupted-recovery-session.json in Resources */,

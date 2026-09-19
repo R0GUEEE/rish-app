@@ -3,6 +3,7 @@
 #import <CommonCrypto/CommonDigest.h>
 
 #import "../../../../modules/rish/ios/Sources/ClaudeProviderTransport.h"
+#import "../../../../modules/rish/ios/Sources/CodexProviderTransport.h"
 #import "../../../../modules/rish/ios/Sources/DshProviderTransport.h"
 #import "../../../../modules/rish/ios/Sources/DSHCompletionProviderTransport.h"
 
@@ -57,6 +58,9 @@
   if ([name isEqualToString:@"glm"]) {
     return [[GlmProviderTransport alloc] init];
   }
+  if ([name isEqualToString:@"codex"]) {
+    return [[CodexProviderTransport alloc] init];
+  }
   return fallback;
 }
 
@@ -95,6 +99,11 @@
 - (void)testAnthropicRequestBodiesAreFrozen {
   [self replayFixture:@"anthropic-request-cases"
             transport:[[ClaudeProviderTransport alloc] init]];
+}
+
+- (void)testOpenAIResponsesRequestBodiesAreFrozen {
+  [self replayFixture:@"openai-request-cases"
+            transport:[[CodexProviderTransport alloc] init]];
 }
 
 @end

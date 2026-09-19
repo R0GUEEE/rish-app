@@ -134,6 +134,35 @@ class AndroidProviderRequestFixtureTest {
         }
     }
 
+    /**
+     * The responses dialect, which this host claims none of.
+     *
+     * A fixture nobody here matches is still worth reading in this suite:
+     * the assertion is that the gap is written down and stays written down.
+     * A case that later starts listing `android` turns this into a real
+     * replay without anyone having to remember to come back for it.
+     */
+    @Test fun theResponsesDialectIsRecordedAsUnbuiltHere() {
+        val fixture = fixture("openai-request-cases.json")
+        assertEquals("codex", fixture.getString("harness_id"))
+        val cases = fixture.getJSONArray("cases")
+        assertTrue("${cases.length()}", cases.length() > 3)
+        for (index in 0 until cases.length()) {
+            val entry = cases.getJSONObject(index)
+            val hosts = entry.getJSONArray("hosts")
+            val claimed = (0 until hosts.length()).any { hosts.getString(it) == "android" }
+            if (claimed) {
+                throw AssertionError(
+                    "${entry.getString("name")} now lists android: replay it here " +
+                        "instead of counting it as a gap",
+                )
+            }
+            assertTrue(entry.getString("name"), entry.getString("why").isNotEmpty())
+        }
+        val gaps = fixture.getJSONArray("host_gaps")
+        assertTrue("$gaps", gaps.length() > 0)
+    }
+
     @Test fun theReceiptEncodingEscapesWhatTheCanonicalOneDoesNot() {
         val value = JSONObject().put("path", "workspace/notes.txt")
         assertEquals("""{"path":"workspace\/notes.txt"}""", RuntimeJson.receiptJson(value))

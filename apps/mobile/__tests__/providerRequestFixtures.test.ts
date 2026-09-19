@@ -35,6 +35,7 @@ const nodeCrypto = jest.requireActual('node:crypto') as {
 const FIXTURES: ReadonlyArray<{ readonly file: string; readonly harnessId: HarnessId }> = [
   { file: 'deepseek-request-cases.json', harnessId: 'dsh' },
   { file: 'anthropic-request-cases.json', harnessId: 'claude-code' },
+  { file: 'openai-request-cases.json', harnessId: 'codex' },
 ];
 const HOSTS = new Set(['ios', 'android']);
 
@@ -136,7 +137,9 @@ describe.each(FIXTURES)('frozen $file', ({ file, harnessId }) => {
     for (const entry of fixture.cases) {
       expect(entry.body.model).toBe(entry.model);
       expect(entry.body.stream).toBe(entry.streaming);
-      expect(typeof entry.body.max_tokens).toBe('number');
+      // Every dialect caps the round; only the key differs.
+      const ceiling = entry.body.max_tokens ?? entry.body.max_output_tokens;
+      expect(typeof ceiling).toBe('number');
       if (harnessId === 'dsh') {
         // This dialect sends the turns as they are; Anthropic rewrites them
         // into content blocks, which is the dialect's own business.
@@ -146,6 +149,33 @@ describe.each(FIXTURES)('frozen $file', ({ file, harnessId }) => {
         expect(entry.body.tools).toBeUndefined();
       } else {
         expect(Array.isArray(entry.body.tools)).toBe(true);
+      }
+    }
+  });
+
+  /**
+   * The responses dialect keeps a round off OpenAI's servers and never lets
+   * an optional tool parameter be read as required. Both are one word in the
+   * body and neither is visible anywhere else, which is exactly why they are
+   * asserted here.
+   */
+  test('a responses round is not stored, and its tools are not strict', () => {
+    if (harnessId !== 'codex') return;
+    for (const entry of fixture.cases) {
+      expect(entry.body.store).toBe(false);
+      for (const tool of (entry.body.tools ?? []) as Record<string, unknown>[]) {
+        expect(tool.strict).toBe(false);
+        expect(tool.type).toBe('function');
+      }
+      // The effort is fixed; the summary is what carries the mode.
+      const reasoning = entry.body.reasoning as
+        | { effort: string; summary: string }
+        | undefined;
+      if (entry.thinking_mode === 'off') {
+        expect(reasoning).toBeUndefined();
+      } else {
+        expect(reasoning?.effort).toBe('high');
+        expect(reasoning?.summary).toBe(entry.thinking_mode === 'max' ? 'detailed' : 'auto');
       }
     }
   });

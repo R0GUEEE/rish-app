@@ -1,0 +1,374 @@
+{
+  "schema_version": 1,
+  "harness_id": "codex",
+  "provider": "openai",
+  "note": "The request body each host must build for an OpenAI responses round. Frozen from iOS. `hosts` names the hosts that already produce this body; a case listing only ios is a gap recorded rather than asserted, and `why` says what it is. `body_sha256` is SHA-256 over the body with sorted keys and a forward slash escaped, which is the encoding a receipt binds.",
+  "host_gaps": [
+    {
+      "host": "android",
+      "what": "the responses dialect is barely built",
+      "detail": "This host sends the chat-completions turn list as `input` rather than responses items, keeps max_output_tokens at 8192 for every round, never sends `store`, sends the thinking mode as the reasoning effort with no summary, and translates no tools. Every case here is therefore ios-only; the fixture is what the work has to reach."
+    }
+  ],
+  "cases": [
+    {
+      "name": "plain_thinking_off",
+      "transport": "codex",
+      "model": "gpt-5.6",
+      "thinking_mode": "off",
+      "streaming": true,
+      "messages": [
+        {
+          "role": "user",
+          "content": "Say hello"
+        }
+      ],
+      "tools": [],
+      "hosts": [
+        "ios"
+      ],
+      "body": {
+        "model": "gpt-5.6",
+        "stream": true,
+        "store": false,
+        "max_output_tokens": 8192,
+        "input": [
+          {
+            "type": "message",
+            "role": "user",
+            "content": [
+              {
+                "type": "input_text",
+                "text": "Say hello"
+              }
+            ]
+          }
+        ]
+      },
+      "body_sha256": "da8f5d9e39732887e71b55c2131c8c3f0ff00107c315937cef73bfca1d994147",
+      "why": "This host sends max_output_tokens 8192 for every round and never sends store."
+    },
+    {
+      "name": "plain_thinking_high",
+      "transport": "codex",
+      "model": "gpt-5.6",
+      "thinking_mode": "high",
+      "streaming": true,
+      "messages": [
+        {
+          "role": "user",
+          "content": "Say hello"
+        }
+      ],
+      "tools": [],
+      "hosts": [
+        "ios"
+      ],
+      "body": {
+        "model": "gpt-5.6",
+        "stream": true,
+        "store": false,
+        "max_output_tokens": 16384,
+        "input": [
+          {
+            "type": "message",
+            "role": "user",
+            "content": [
+              {
+                "type": "input_text",
+                "text": "Say hello"
+              }
+            ]
+          }
+        ],
+        "reasoning": {
+          "effort": "high",
+          "summary": "auto"
+        }
+      },
+      "body_sha256": "49ba5571af380b92275f70d364d62ea993b1f5458cd11696dc48a83cee19d20c",
+      "why": "The effort is always high here and the summary carries the mode; this host sends the mode as the effort and no summary at all."
+    },
+    {
+      "name": "plain_thinking_max",
+      "transport": "codex",
+      "model": "gpt-5.6-mini",
+      "thinking_mode": "max",
+      "streaming": true,
+      "messages": [
+        {
+          "role": "user",
+          "content": "Say hello"
+        }
+      ],
+      "tools": [],
+      "hosts": [
+        "ios"
+      ],
+      "body": {
+        "model": "gpt-5.6-mini",
+        "stream": true,
+        "store": false,
+        "max_output_tokens": 16384,
+        "input": [
+          {
+            "type": "message",
+            "role": "user",
+            "content": [
+              {
+                "type": "input_text",
+                "text": "Say hello"
+              }
+            ]
+          }
+        ],
+        "reasoning": {
+          "effort": "high",
+          "summary": "detailed"
+        }
+      },
+      "body_sha256": "fc7ee12c8fca0711fb87eea3d373af106243156d7e00844992fecd79e7b41dee",
+      "why": "Only the summary tells max from high; this host sends effort max instead."
+    },
+    {
+      "name": "tools_thinking_off",
+      "transport": "codex",
+      "model": "gpt-5.6",
+      "thinking_mode": "off",
+      "streaming": true,
+      "messages": [
+        {
+          "role": "user",
+          "content": "Write a file"
+        }
+      ],
+      "tools": [
+        {
+          "type": "function",
+          "function": {
+            "name": "write_file",
+            "description": "Write a file into the workspace",
+            "parameters": {
+              "type": "object",
+              "properties": {
+                "path": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "path"
+              ]
+            }
+          }
+        }
+      ],
+      "hosts": [
+        "ios"
+      ],
+      "body": {
+        "model": "gpt-5.6",
+        "stream": true,
+        "store": false,
+        "max_output_tokens": 8192,
+        "input": [
+          {
+            "type": "message",
+            "role": "user",
+            "content": [
+              {
+                "type": "input_text",
+                "text": "Write a file"
+              }
+            ]
+          }
+        ],
+        "tools": [
+          {
+            "type": "function",
+            "name": "write_file",
+            "parameters": {
+              "type": "object",
+              "properties": {
+                "path": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "path"
+              ]
+            },
+            "strict": false,
+            "description": "Write a file into the workspace"
+          }
+        ]
+      },
+      "body_sha256": "9440e877d9ec7a6e0a455571e411b0a6e66b4218e080cfdfbb80778859de7fed",
+      "why": "Tools are never translated into the responses shape on this host."
+    },
+    {
+      "name": "system_becomes_instructions",
+      "transport": "codex",
+      "model": "gpt-5.6",
+      "thinking_mode": "off",
+      "streaming": false,
+      "messages": [
+        {
+          "role": "system",
+          "content": "You are terse."
+        },
+        {
+          "role": "system",
+          "content": "Answer in one line."
+        },
+        {
+          "role": "user",
+          "content": "Say hello"
+        }
+      ],
+      "tools": [],
+      "hosts": [
+        "ios"
+      ],
+      "body": {
+        "model": "gpt-5.6",
+        "stream": false,
+        "store": false,
+        "max_output_tokens": 8192,
+        "input": [
+          {
+            "type": "message",
+            "role": "user",
+            "content": [
+              {
+                "type": "input_text",
+                "text": "Say hello"
+              }
+            ]
+          }
+        ],
+        "instructions": "You are terse.\n\nAnswer in one line."
+      },
+      "body_sha256": "0b26edebe6389eae475e3e35e8712dfb976f2676abcf503d59ffd0f1770479af",
+      "why": "System turns leave the input entirely and are joined into instructions; this host leaves them in the turn list."
+    },
+    {
+      "name": "tool_round_continuation",
+      "transport": "codex",
+      "model": "gpt-5.6",
+      "thinking_mode": "high",
+      "streaming": true,
+      "messages": [
+        {
+          "role": "user",
+          "content": "Write a file"
+        },
+        {
+          "role": "assistant",
+          "content": "On it",
+          "tool_calls": [
+            {
+              "id": "call_1",
+              "type": "function",
+              "function": {
+                "name": "write_file",
+                "arguments": "{\"path\":\"a.txt\"}"
+              }
+            }
+          ]
+        },
+        {
+          "role": "tool",
+          "tool_call_id": "call_1",
+          "content": "written"
+        }
+      ],
+      "tools": [
+        {
+          "type": "function",
+          "function": {
+            "name": "write_file",
+            "description": "Write a file into the workspace",
+            "parameters": {
+              "type": "object",
+              "properties": {
+                "path": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "path"
+              ]
+            }
+          }
+        }
+      ],
+      "hosts": [
+        "ios"
+      ],
+      "body": {
+        "model": "gpt-5.6",
+        "stream": true,
+        "store": false,
+        "max_output_tokens": 16384,
+        "input": [
+          {
+            "type": "message",
+            "role": "user",
+            "content": [
+              {
+                "type": "input_text",
+                "text": "Write a file"
+              }
+            ]
+          },
+          {
+            "type": "message",
+            "role": "assistant",
+            "content": [
+              {
+                "type": "output_text",
+                "text": "On it"
+              }
+            ]
+          },
+          {
+            "type": "function_call",
+            "call_id": "call_1",
+            "name": "write_file",
+            "arguments": "{\"path\":\"a.txt\"}"
+          },
+          {
+            "type": "function_call_output",
+            "call_id": "call_1",
+            "output": "written"
+          }
+        ],
+        "tools": [
+          {
+            "type": "function",
+            "name": "write_file",
+            "parameters": {
+              "type": "object",
+              "properties": {
+                "path": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "path"
+              ]
+            },
+            "strict": false,
+            "description": "Write a file into the workspace"
+          }
+        ],
+        "reasoning": {
+          "effort": "high",
+          "summary": "auto"
+        }
+      },
+      "body_sha256": "be4ad8d96e984a11b22cb3df583703de5054263c9c100e97ff9942b3d74ee1d1",
+      "why": "A tool round becomes four flat input items, not three turns. This host refuses a round transcript on this protocol, so it never builds one."
+    }
+  ]
+}
