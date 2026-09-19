@@ -31,5 +31,20 @@
             <category android:name="android.intent.category.LAUNCHER" />
         </intent-filter>
       </activity>
+
+        <!--
+            Attachments and camera captures are app-private files; a viewer
+            or a camera needs a content URI to reach one, and this is the
+            only door. `rish_file_paths.xml` opens exactly two directories.
+        -->
+        <provider
+            android:name="androidx.core.content.FileProvider"
+            android:authorities="${applicationId}.fileprovider"
+            android:exported="false"
+            android:grantUriPermissions="true">
+            <meta-data
+                android:name="android.support.FILE_PROVIDER_PATHS"
+                android:resource="@xml/rish_file_paths" />
+        </provider>
     </application>
 </manifest>

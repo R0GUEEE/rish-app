@@ -1,0 +1,11 @@
+<?xml version="1.0" encoding="utf-8" ?>
+<paths>
+    <!--
+        The only two places an attachment ever lives: the store this app
+        copies picked files into, and the scratch file a camera writes its
+        photograph to before it is taken in. Nothing else is shareable, so a
+        viewer handed one of these URIs can reach nothing else.
+    -->
+    <files-path name="rish-attachments" path="attachments/" />
+    <cache-path name="rish-captures" path="captures/" />
+</paths>

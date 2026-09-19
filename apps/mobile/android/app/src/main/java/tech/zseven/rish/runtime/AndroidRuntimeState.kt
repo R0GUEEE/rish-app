@@ -56,6 +56,9 @@ internal class AndroidRuntimeState private constructor(val app: Application) {
         agentWal, sessions, preparedAttempts, executionLedger, providerRound, roots,
         agentOperations,
     )
+    /// Files a person attached to a message: copied in once, because a
+    /// document URI is a borrowed permission and a draft has to outlive it.
+    val attachments = AndroidAttachmentStore(app.filesDir)
     /// What the Files drawer lists and opens, over the same roots and the
     /// same core rules the agent's tools use.
     val workspaceFiles = AndroidWorkspaceFiles(workspaces, roots)
