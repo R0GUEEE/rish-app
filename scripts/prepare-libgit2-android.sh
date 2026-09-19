@@ -104,16 +104,21 @@ cached() {
      -f ${witness} ]]
 }
 
-readonly OPENSSL_SOURCE=${DEPS_ROOT}/openssl-src
+# Each library gets its own checkout rather than sharing the iOS one. The
+# shared tree carries that build's generated assembly -- perlasm emits a
+# Mach-O flavour for Apple and a GNU one here -- and make will not regenerate
+# a .S that is newer than its .pl. Excluding artefacts one kind at a time was
+# how this was found twice; a separate checkout is how it stops.
+readonly OPENSSL_SOURCE=${DEPS_ROOT}/openssl-src-android-checkout
 readonly OPENSSL_INSTALL=${DEPS_ROOT}/openssl-android-install
-readonly LIBSSH2_SOURCE=${DEPS_ROOT}/libssh2-src
+readonly LIBSSH2_SOURCE=${DEPS_ROOT}/libssh2-src-android
 readonly LIBSSH2_INSTALL=${DEPS_ROOT}/libssh2-android-install
 readonly LIBGIT2_SOURCE=${DEPS_ROOT}/libgit2-src-android
 readonly LIBGIT2_BUILD=${DEPS_ROOT}/libgit2-android-build
 readonly LIBGIT2_INSTALL=${DEPS_ROOT}/libgit2-android-install
 
 build_openssl() {
-  local fingerprint="source=${OPENSSL_COMMIT};target=android-arm64;api=${ANDROID_API_LEVEL};options=no-shared,no-tests,no-apps,no-docs,no-async,no-dso,no-engine,no-zlib,no-zstd,no-legacy"
+  local fingerprint="source=${OPENSSL_COMMIT};target=android-arm64;api=${ANDROID_API_LEVEL};options=no-shared,no-tests,no-apps,no-docs,no-async,no-dso,no-engine,no-zlib,no-zstd,no-legacy;march=armv8-a+crypto"
   if cached "${OPENSSL_INSTALL}" "${fingerprint}" "${OPENSSL_INSTALL}/lib/libcrypto.a"; then
     print "prepare-libgit2-android: OpenSSL is current"
     return
@@ -122,13 +127,25 @@ build_openssl() {
   local slice=${DEPS_ROOT}/openssl-src-android
   rm -rf -- "${slice}" "${OPENSSL_INSTALL}"
   mkdir -p "${slice}"
-  (cd "${OPENSSL_SOURCE}" && tar -cf - --exclude='./.git' .) | tar -x -C "${slice}"
+  # The source tree is shared with the iOS vendor build, which leaves its own
+  # object files in it. Copying those over means make finds a Mach-O .o newer
+  # than its .S and never rebuilds it -- which links, fails, and says nothing
+  # about why. Carry the source and nothing else.
+  (cd "${OPENSSL_SOURCE}" && tar -cf - --exclude='./.git' \
+    --exclude='*.o' --exclude='*.a' --exclude='*.d' .) | tar -x -C "${slice}"
+  find "${slice}" -name '*.o' -delete
   (
     cd "${slice}"
     # OpenSSL's own Android support wants the NDK on PATH and reads
     # ANDROID_NDK_ROOT; it picks the compiler out of the toolchain itself.
+    #
+    # The crypto extensions have to be enabled for the assembly to assemble
+    # at all. That does not require them at runtime: OpenSSL reads the
+    # processor's capabilities through armcap and only dispatches to those
+    # paths on a chip that has them.
     PATH="${NDK_BIN}:${PATH}" ANDROID_NDK_ROOT="${ndk_root}" \
       ./Configure android-arm64 -D__ANDROID_API__="${ANDROID_API_LEVEL}" \
+        -march=armv8-a+crypto \
         no-shared no-tests no-apps no-docs no-async no-dso no-engine \
         no-zlib no-zstd no-legacy \
         --prefix="${OPENSSL_INSTALL}" --openssldir="${OPENSSL_INSTALL}/ssl"
@@ -139,6 +156,13 @@ build_openssl() {
   ) >| "${DEPS_ROOT}/openssl-android.log" 2>&1 ||
     fail "OpenSSL build failed; see ${DEPS_ROOT}/openssl-android.log"
   [[ -f ${OPENSSL_INSTALL}/lib/libcrypto.a ]] || fail "OpenSSL produced no libcrypto.a"
+  # Every member, not just the C ones: the assembly is what came out wrong.
+  local stray
+  stray=$("${NDK_BIN}/llvm-objdump" -f "${OPENSSL_INSTALL}/lib/libcrypto.a" 2>/dev/null |
+    /usr/bin/awk '$1 == "architecture:" { print $2 }' |
+    /usr/bin/sort -u | /usr/bin/grep -v '^aarch64$' || true)
+  [[ -z ${stray} ]] ||
+    fail "OpenSSL archive has non-aarch64 members: ${stray}"
   print -r -- "${fingerprint}" > "${OPENSSL_INSTALL}/.prepare-fingerprint"
 }
 

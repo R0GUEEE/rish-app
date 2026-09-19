@@ -46,3 +46,27 @@ if(DEFINED RISH_AGENT_CORE_DIR)
   rish_add_shim(rish_agent_core_jni rish_agent_core_jni.cpp
                 "${RISH_AGENT_CORE_DIR}" rish_agent_ffi)
 endif()
+
+# libgit2 and its two dependencies are staged as static archives per ABI by
+# scripts/prepare-libgit2-android.sh. Unlike the Rust cdylibs above they are
+# linked into a shim rather than loaded beside it, so the app ships one more
+# .so rather than four.
+if(DEFINED RISH_LIBGIT2_DIR)
+  foreach(library libgit2 libssh2 libssl libcrypto)
+    set(archive "${RISH_LIBGIT2_DIR}/${ANDROID_ABI}/${library}.a")
+    if(NOT EXISTS "${archive}")
+      message(FATAL_ERROR "no staged ${library} for ${ANDROID_ABI}: ${archive}")
+    endif()
+    add_library(rish_${library} STATIC IMPORTED)
+    set_target_properties(rish_${library} PROPERTIES IMPORTED_LOCATION "${archive}")
+  endforeach()
+  add_library(rish_libgit2_jni SHARED rish_libgit2_jni.cpp)
+  target_include_directories(rish_libgit2_jni PRIVATE "${RISH_LIBGIT2_DIR}/include")
+  target_compile_features(rish_libgit2_jni PRIVATE cxx_std_17)
+  target_compile_options(rish_libgit2_jni PRIVATE -fvisibility=hidden -Wall -Wextra)
+  # libgit2 needs libssh2, which needs OpenSSL; the order is what the static
+  # linker resolves against.
+  target_link_libraries(
+    rish_libgit2_jni PRIVATE rish_libgit2 rish_libssh2 rish_libssl rish_libcrypto
+  )
+endif()

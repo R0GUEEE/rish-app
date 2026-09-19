@@ -37,6 +37,12 @@ def rishStagedAbis = rishGuestEnabled
 def rishAgentCoreDirProperty = providers.gradleProperty("rishAgentCoreDir").orNull
 def rishAgentCoreDir = rishAgentCoreDirProperty == null ? file("$rootDir/rish-agent-core") : file(rishAgentCoreDirProperty)
 def rishAgentCoreEnabled = new File(rishAgentCoreDir, "rish_agent_core.version").isFile()
+// libgit2, staged by scripts/prepare-libgit2-android.sh. A build without it
+// simply has no project context, the same way one without the agent core has
+// no agent: the shim is only compiled when its library is there.
+def rishLibgit2DirProperty = project.findProperty("rishLibgit2Dir")
+def rishLibgit2Dir = rishLibgit2DirProperty == null ? file("$rootDir/rish-libgit2") : file(rishLibgit2DirProperty)
+def rishLibgit2Enabled = new File(rishLibgit2Dir, "libgit2.version").isFile()
 if (rishAgentCoreDirProperty != null && !rishAgentCoreEnabled) {
     throw new GradleException("rishAgentCoreDir has no rish_agent_core.version manifest: ${rishAgentCoreDir}; run scripts/prepare-rish-agent-core-android.sh")
 }
@@ -199,6 +205,10 @@ android {
         if (rishAgentCoreEnabled) {
             cmakeArguments += "-DRISH_AGENT_CORE_DIR=${rishAgentCoreDir.absolutePath}".toString()
             cmakeTargets += "rish_agent_core_jni"
+        }
+        if (rishLibgit2Enabled) {
+            cmakeArguments += "-DRISH_LIBGIT2_DIR=${rishLibgit2Dir.absolutePath}".toString()
+            cmakeTargets += "rish_libgit2_jni"
         }
         defaultConfig {
             externalNativeBuild {
