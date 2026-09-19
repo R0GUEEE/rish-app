@@ -2,6 +2,7 @@
 
 #import <CommonCrypto/CommonDigest.h>
 
+#import "../../../../modules/rish/ios/Sources/ClaudeProviderTransport.h"
 #import "../../../../modules/rish/ios/Sources/DshProviderTransport.h"
 #import "../../../../modules/rish/ios/Sources/DSHCompletionProviderTransport.h"
 
@@ -47,6 +48,18 @@
   return [hex copy];
 }
 
+/// The transport a case names, or the fixture's own when it names none.
+- (DSHCompletionProviderTransport *)transportNamed:(NSString *)name
+                                           fallback:(DSHCompletionProviderTransport *)fallback {
+  if ([name isEqualToString:@"claude-code"]) {
+    return [[ClaudeProviderTransport alloc] init];
+  }
+  if ([name isEqualToString:@"glm"]) {
+    return [[GlmProviderTransport alloc] init];
+  }
+  return fallback;
+}
+
 - (void)replayFixture:(NSString *)name
             transport:(DSHCompletionProviderTransport *)transport {
   NSDictionary *fixture = [self fixtureNamed:name];
@@ -60,7 +73,7 @@
     XCTAssertFalse([names containsObject:caseName], @"duplicate case %@", caseName);
     [names addObject:caseName];
     NSError *error = nil;
-    NSDictionary *body = [transport
+    NSDictionary *body = [[self transportNamed:entry[@"transport"] fallback:transport]
         providerRequestBodyForModel:entry[@"model"]
                        thinkingMode:entry[@"thinking_mode"]
                            messages:entry[@"messages"]
@@ -77,6 +90,11 @@
 - (void)testDeepSeekRequestBodiesAreFrozen {
   [self replayFixture:@"deepseek-request-cases"
             transport:[[DshProviderTransport alloc] init]];
+}
+
+- (void)testAnthropicRequestBodiesAreFrozen {
+  [self replayFixture:@"anthropic-request-cases"
+            transport:[[ClaudeProviderTransport alloc] init]];
 }
 
 @end

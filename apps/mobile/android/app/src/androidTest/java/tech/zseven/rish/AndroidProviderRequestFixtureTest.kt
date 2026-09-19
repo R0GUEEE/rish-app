@@ -84,6 +84,56 @@ class AndroidProviderRequestFixtureTest {
      * only ever the same when nothing needs escaping. A round that names a
      * file has a slash in it, which is the case that matters.
      */
+    /**
+     * The Anthropic bodies, for the cases this host claims. A case the
+     * fixture lists as `ios` only is a gap it records rather than a test that
+     * fails; `host_gaps` in the fixture says what those gaps are.
+     *
+     * The turns go in already shaped, taken from the frozen body: what is
+     * under test here is the body built around them, because turning turns
+     * into content blocks is a layer this host does not have.
+     */
+    @Test fun anthropicRequestBodiesMatchTheOnesThisHostClaims() {
+        val fixture = fixture("anthropic-request-cases.json")
+        assertEquals("claude-code", fixture.getString("harness_id"))
+        val cases = fixture.getJSONArray("cases")
+        val transport = transport()
+        var claimed = 0
+        for (index in 0 until cases.length()) {
+            val entry = cases.getJSONObject(index)
+            val hosts = entry.getJSONArray("hosts")
+            if ((0 until hosts.length()).none { hosts.getString(it) == "android" }) continue
+            claimed += 1
+            val name = entry.getString("name")
+            val frozen = entry.getJSONObject("body")
+            val body = transport.messagesBody(
+                JSONObject().put("model", entry.getString("model"))
+                    .put("stream", entry.getBoolean("streaming")),
+                entry.getString("model"),
+                entry.getString("thinking_mode"),
+                true,
+                frozen.getJSONArray("messages"),
+            )
+            assertEquals(
+                "$name body",
+                RuntimeJson.receiptJson(frozen),
+                RuntimeJson.receiptJson(body),
+            )
+            assertEquals(
+                "$name digest",
+                entry.getString("body_sha256"),
+                RuntimeJson.sha(RuntimeJson.receiptJson(body)),
+            )
+        }
+        assertTrue("no case claimed android", claimed > 0)
+        // And every gap the fixture records says which host it is about.
+        val gaps = fixture.getJSONArray("host_gaps")
+        assertTrue("$gaps", gaps.length() > 0)
+        for (index in 0 until gaps.length()) {
+            assertTrue(gaps.getJSONObject(index).getString("detail").isNotEmpty())
+        }
+    }
+
     @Test fun theReceiptEncodingEscapesWhatTheCanonicalOneDoesNot() {
         val value = JSONObject().put("path", "workspace/notes.txt")
         assertEquals("""{"path":"workspace\/notes.txt"}""", RuntimeJson.receiptJson(value))

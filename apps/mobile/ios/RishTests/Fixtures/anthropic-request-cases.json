@@ -1,0 +1,572 @@
+{
+  "schema_version": 1,
+  "harness_id": "claude-code",
+  "provider": "anthropic",
+  "note": "The request body each host must build for an Anthropic round. Frozen from iOS. `hosts` names the hosts that already produce this body: a case listing only ios is a gap in the other host, recorded rather than asserted, and the `why` beside it says what the gap is. `body_sha256` is SHA-256 over the body with sorted keys and a forward slash escaped, which is the encoding a receipt binds.",
+  "cases": [
+    {
+      "name": "sonnet_thinking_off",
+      "transport": "claude-code",
+      "model": "claude-sonnet-5",
+      "thinking_mode": "off",
+      "streaming": true,
+      "messages": [
+        {
+          "role": "user",
+          "content": "Say hello"
+        }
+      ],
+      "tools": [],
+      "hosts": [
+        "ios"
+      ],
+      "body": {
+        "model": "claude-sonnet-5",
+        "stream": true,
+        "messages": [
+          {
+            "role": "user",
+            "content": [
+              {
+                "type": "text",
+                "text": "Say hello"
+              }
+            ]
+          }
+        ],
+        "thinking": {
+          "type": "disabled"
+        },
+        "max_tokens": 8192
+      },
+      "body_sha256": "123714ba530956d1f4c453fbc299b481ff2ab6851d04612e0494aca20fb3f3ed",
+      "why": "Android sends no thinking key at all when thinking is off."
+    },
+    {
+      "name": "sonnet_thinking_high",
+      "transport": "claude-code",
+      "model": "claude-sonnet-5",
+      "thinking_mode": "high",
+      "streaming": true,
+      "messages": [
+        {
+          "role": "user",
+          "content": "Say hello"
+        }
+      ],
+      "tools": [],
+      "hosts": [
+        "ios"
+      ],
+      "body": {
+        "model": "claude-sonnet-5",
+        "stream": true,
+        "messages": [
+          {
+            "role": "user",
+            "content": [
+              {
+                "type": "text",
+                "text": "Say hello"
+              }
+            ]
+          }
+        ],
+        "thinking": {
+          "type": "adaptive",
+          "display": "summarized"
+        },
+        "output_config": {
+          "effort": "high"
+        },
+        "max_tokens": 16384
+      },
+      "body_sha256": "9ca55474e8c56d2edcf1666700adb07d9612f8cc48d876bd4900a260b1ab8fb2",
+      "why": "Android omits display and keeps max_tokens at 8192."
+    },
+    {
+      "name": "sonnet_thinking_max",
+      "transport": "claude-code",
+      "model": "claude-sonnet-5",
+      "thinking_mode": "max",
+      "streaming": true,
+      "messages": [
+        {
+          "role": "user",
+          "content": "Say hello"
+        }
+      ],
+      "tools": [],
+      "hosts": [
+        "ios"
+      ],
+      "body": {
+        "model": "claude-sonnet-5",
+        "stream": true,
+        "messages": [
+          {
+            "role": "user",
+            "content": [
+              {
+                "type": "text",
+                "text": "Say hello"
+              }
+            ]
+          }
+        ],
+        "thinking": {
+          "type": "adaptive",
+          "display": "summarized"
+        },
+        "output_config": {
+          "effort": "max"
+        },
+        "max_tokens": 16384
+      },
+      "body_sha256": "18c331b7bb29efc8a8753a5d045aef4ed475cada06121d891dab28b758309794",
+      "why": "Same gap as the high case: Android omits display and keeps max_tokens at 8192."
+    },
+    {
+      "name": "haiku_thinking_off",
+      "transport": "claude-code",
+      "model": "claude-haiku-4-5-20251001",
+      "thinking_mode": "off",
+      "streaming": true,
+      "messages": [
+        {
+          "role": "user",
+          "content": "Say hello"
+        }
+      ],
+      "tools": [],
+      "hosts": [
+        "ios",
+        "android"
+      ],
+      "body": {
+        "model": "claude-haiku-4-5-20251001",
+        "stream": true,
+        "messages": [
+          {
+            "role": "user",
+            "content": [
+              {
+                "type": "text",
+                "text": "Say hello"
+              }
+            ]
+          }
+        ],
+        "max_tokens": 8192
+      },
+      "body_sha256": "9e9d39adf87fb9a253984d41c2911a54a318cb3a953531296bb21214da156bd9"
+    },
+    {
+      "name": "haiku_thinking_high",
+      "transport": "claude-code",
+      "model": "claude-haiku-4-5-20251001",
+      "thinking_mode": "high",
+      "streaming": true,
+      "messages": [
+        {
+          "role": "user",
+          "content": "Say hello"
+        }
+      ],
+      "tools": [],
+      "hosts": [
+        "ios",
+        "android"
+      ],
+      "body": {
+        "model": "claude-haiku-4-5-20251001",
+        "stream": true,
+        "messages": [
+          {
+            "role": "user",
+            "content": [
+              {
+                "type": "text",
+                "text": "Say hello"
+              }
+            ]
+          }
+        ],
+        "thinking": {
+          "type": "enabled",
+          "budget_tokens": 4096
+        },
+        "max_tokens": 12288
+      },
+      "body_sha256": "dd270a6b797914108c01b5b0bcba6a154c461bb85d6fbbb4a1a4f269214aad3b"
+    },
+    {
+      "name": "haiku_thinking_max",
+      "transport": "claude-code",
+      "model": "claude-haiku-4-5-20251001",
+      "thinking_mode": "max",
+      "streaming": true,
+      "messages": [
+        {
+          "role": "user",
+          "content": "Say hello"
+        }
+      ],
+      "tools": [],
+      "hosts": [
+        "ios",
+        "android"
+      ],
+      "body": {
+        "model": "claude-haiku-4-5-20251001",
+        "stream": true,
+        "messages": [
+          {
+            "role": "user",
+            "content": [
+              {
+                "type": "text",
+                "text": "Say hello"
+              }
+            ]
+          }
+        ],
+        "thinking": {
+          "type": "enabled",
+          "budget_tokens": 16000
+        },
+        "max_tokens": 24192
+      },
+      "body_sha256": "273c6fb4542e84eb2cc0b83ed5201ec8bfc6ee1f8b5dffd4c1f23d803d4c6f3e"
+    },
+    {
+      "name": "fable_thinking_off",
+      "transport": "claude-code",
+      "model": "claude-fable-5-1",
+      "thinking_mode": "off",
+      "streaming": true,
+      "messages": [
+        {
+          "role": "user",
+          "content": "Say hello"
+        }
+      ],
+      "tools": [],
+      "hosts": [
+        "ios"
+      ],
+      "body": {
+        "model": "claude-fable-5-1",
+        "stream": true,
+        "messages": [
+          {
+            "role": "user",
+            "content": [
+              {
+                "type": "text",
+                "text": "Say hello"
+              }
+            ]
+          }
+        ],
+        "output_config": {
+          "effort": "low"
+        },
+        "max_tokens": 8192
+      },
+      "body_sha256": "2b63438fb791d4d6da62861af5c0e64fae3c4b97f11a831efa892b112d3a9eca",
+      "why": "Thinking cannot be disabled on this family. Android has no such family."
+    },
+    {
+      "name": "fable_thinking_high",
+      "transport": "claude-code",
+      "model": "claude-fable-5-1",
+      "thinking_mode": "high",
+      "streaming": true,
+      "messages": [
+        {
+          "role": "user",
+          "content": "Say hello"
+        }
+      ],
+      "tools": [],
+      "hosts": [
+        "ios"
+      ],
+      "body": {
+        "model": "claude-fable-5-1",
+        "stream": true,
+        "messages": [
+          {
+            "role": "user",
+            "content": [
+              {
+                "type": "text",
+                "text": "Say hello"
+              }
+            ]
+          }
+        ],
+        "thinking": {
+          "type": "adaptive",
+          "display": "summarized"
+        },
+        "output_config": {
+          "effort": "high"
+        },
+        "max_tokens": 16384
+      },
+      "body_sha256": "2a337fdba6094571ba2e84d0a769ac5e93cb4c1bc81119592cc9609c19c27992",
+      "why": "Android has no always-on family, so it falls into the adaptive branch and gets neither display nor the raised ceiling."
+    },
+    {
+      "name": "glm_over_anthropic_high",
+      "transport": "glm",
+      "model": "GLM-5.3",
+      "thinking_mode": "high",
+      "streaming": true,
+      "messages": [
+        {
+          "role": "user",
+          "content": "Say hello"
+        }
+      ],
+      "tools": [],
+      "hosts": [
+        "ios",
+        "android"
+      ],
+      "body": {
+        "model": "GLM-5.3",
+        "stream": true,
+        "messages": [
+          {
+            "role": "user",
+            "content": [
+              {
+                "type": "text",
+                "text": "Say hello"
+              }
+            ]
+          }
+        ],
+        "thinking": {
+          "type": "enabled",
+          "budget_tokens": 4096
+        },
+        "max_tokens": 12288
+      },
+      "body_sha256": "acf52c1983457d9ecb0f82faddbb2dda5606c40dbe465ad275b2eacf276f27cb",
+      "why": "GLM speaks the Anthropic endpoint but takes the classic budget form."
+    },
+    {
+      "name": "system_and_tools",
+      "transport": "claude-code",
+      "model": "claude-sonnet-5",
+      "thinking_mode": "off",
+      "streaming": true,
+      "messages": [
+        {
+          "role": "system",
+          "content": "You are terse."
+        },
+        {
+          "role": "user",
+          "content": "Write a file"
+        }
+      ],
+      "tools": [
+        {
+          "type": "function",
+          "function": {
+            "name": "write_file",
+            "description": "Write a file into the workspace",
+            "parameters": {
+              "type": "object",
+              "properties": {
+                "path": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "path"
+              ]
+            }
+          }
+        }
+      ],
+      "hosts": [
+        "ios"
+      ],
+      "body": {
+        "model": "claude-sonnet-5",
+        "stream": true,
+        "messages": [
+          {
+            "role": "user",
+            "content": [
+              {
+                "type": "text",
+                "text": "Write a file"
+              }
+            ]
+          }
+        ],
+        "thinking": {
+          "type": "disabled"
+        },
+        "max_tokens": 8192,
+        "tools": [
+          {
+            "name": "write_file",
+            "input_schema": {
+              "type": "object",
+              "properties": {
+                "path": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "path"
+              ]
+            },
+            "description": "Write a file into the workspace"
+          }
+        ],
+        "system": [
+          {
+            "type": "text",
+            "text": "You are terse."
+          }
+        ]
+      },
+      "body_sha256": "88591719ed809b3b205b3743a4947d89dcc65c51264b02713ec6e46dd2678849",
+      "why": "The system turn leaves the message list and becomes a system block."
+    },
+    {
+      "name": "budget_family_continuation_runs_unthinking",
+      "transport": "claude-code",
+      "model": "claude-haiku-4-5-20251001",
+      "thinking_mode": "high",
+      "streaming": true,
+      "messages": [
+        {
+          "role": "user",
+          "content": "Write a file"
+        },
+        {
+          "role": "assistant",
+          "content": "",
+          "tool_calls": [
+            {
+              "id": "call_1",
+              "type": "function",
+              "function": {
+                "name": "write_file",
+                "arguments": "{\"path\":\"a.txt\"}"
+              }
+            }
+          ]
+        },
+        {
+          "role": "tool",
+          "tool_call_id": "call_1",
+          "content": "written"
+        }
+      ],
+      "tools": [
+        {
+          "type": "function",
+          "function": {
+            "name": "write_file",
+            "description": "Write a file into the workspace",
+            "parameters": {
+              "type": "object",
+              "properties": {
+                "path": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "path"
+              ]
+            }
+          }
+        }
+      ],
+      "hosts": [
+        "ios"
+      ],
+      "body": {
+        "model": "claude-haiku-4-5-20251001",
+        "stream": true,
+        "messages": [
+          {
+            "role": "user",
+            "content": [
+              {
+                "type": "text",
+                "text": "Write a file"
+              }
+            ]
+          },
+          {
+            "role": "assistant",
+            "content": [
+              {
+                "type": "tool_use",
+                "id": "call_1",
+                "name": "write_file",
+                "input": {
+                  "path": "a.txt"
+                }
+              }
+            ]
+          },
+          {
+            "role": "user",
+            "content": [
+              {
+                "type": "tool_result",
+                "tool_use_id": "call_1",
+                "content": "written"
+              }
+            ]
+          }
+        ],
+        "max_tokens": 8192,
+        "tools": [
+          {
+            "name": "write_file",
+            "input_schema": {
+              "type": "object",
+              "properties": {
+                "path": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "path"
+              ]
+            },
+            "description": "Write a file into the workspace"
+          }
+        ]
+      },
+      "body_sha256": "ca2c35bc98b0feb9515ecb04023cae3fb44ff9dbdb1068229439663f8e07e49b",
+      "why": "A continuation round replays a tool_use turn whose thinking blocks are not in the closed transcript, and the budget API rejects that with thinking on -- so the round runs unthinking. Android has no such rule."
+    }
+  ],
+  "host_gaps": [
+    {
+      "host": "android",
+      "what": "turns are sent as plain string content, not content blocks",
+      "detail": "This host puts `{role, content: \"text\"}` on the wire where iOS puts `{role, content: [{type: text, ...}]}`. Anthropic accepts both for plain text, but a tool_use or tool_result turn has no string form, which is the same reason this host refuses a round transcript on this protocol at all. So a case replayed here feeds `body.messages` as the input: what is under test is the body around the turns, and turning turns into blocks is a layer this host does not have yet."
+    },
+    {
+      "host": "android",
+      "what": "no system block, and no tools",
+      "detail": "A system turn is sent as an ordinary message rather than lifted into `system`, and tools are never translated into `input_schema` form, so an Anthropic round here cannot call one."
+    }
+  ]
+}

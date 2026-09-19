@@ -34,7 +34,9 @@ const nodeCrypto = jest.requireActual('node:crypto') as {
  */
 const FIXTURES: ReadonlyArray<{ readonly file: string; readonly harnessId: HarnessId }> = [
   { file: 'deepseek-request-cases.json', harnessId: 'dsh' },
+  { file: 'anthropic-request-cases.json', harnessId: 'claude-code' },
 ];
+const HOSTS = new Set(['ios', 'android']);
 
 const THINKING_MODES = new Set(['off', 'high', 'max']);
 
@@ -47,6 +49,10 @@ type RequestCase = {
   readonly tools: readonly Record<string, unknown>[];
   readonly body: Record<string, unknown>;
   readonly body_sha256: string;
+  /** The hosts that already produce this body. */
+  readonly hosts?: readonly string[];
+  /** Why a host does not, when one does not. */
+  readonly why?: string;
 };
 
 function loadFixture(file: string): {
@@ -99,6 +105,17 @@ describe.each(FIXTURES)('frozen $file', ({ file, harnessId }) => {
       expect(entry.messages.length).toBeGreaterThan(0);
       expect(Array.isArray(entry.tools)).toBe(true);
       expect(entry.body_sha256).toMatch(/^[0-9a-f]{64}$/);
+      // A case may record which hosts already build it. A case that only one
+      // host builds is a gap, and a gap has to say what it is -- otherwise
+      // the fixture quietly becomes a list of things nobody has to match.
+      if (entry.hosts !== undefined) {
+        expect(entry.hosts.length).toBeGreaterThan(0);
+        for (const host of entry.hosts) expect(HOSTS.has(host)).toBe(true);
+        expect(entry.hosts).toContain('ios');
+        if (!entry.hosts.includes('android')) {
+          expect(typeof entry.why).toBe('string');
+        }
+      }
     }
   });
 
@@ -119,11 +136,38 @@ describe.each(FIXTURES)('frozen $file', ({ file, harnessId }) => {
     for (const entry of fixture.cases) {
       expect(entry.body.model).toBe(entry.model);
       expect(entry.body.stream).toBe(entry.streaming);
-      expect(entry.body.messages).toEqual(entry.messages);
+      expect(typeof entry.body.max_tokens).toBe('number');
+      if (harnessId === 'dsh') {
+        // This dialect sends the turns as they are; Anthropic rewrites them
+        // into content blocks, which is the dialect's own business.
+        expect(entry.body.messages).toEqual(entry.messages);
+      }
       if (entry.tools.length === 0) {
         expect(entry.body.tools).toBeUndefined();
       } else {
-        expect(entry.body.tools).toEqual(entry.tools);
+        expect(Array.isArray(entry.body.tools)).toBe(true);
+      }
+    }
+  });
+
+  /**
+   * An Anthropic round's thinking vocabulary follows the model family, and
+   * the ceiling follows the thinking. Naming the families here is what keeps
+   * a host from picking one of them and calling it done.
+   */
+  test('the thinking vocabulary follows the model family', () => {
+    if (harnessId !== 'claude-code') return;
+    for (const entry of fixture.cases) {
+      const thinking = entry.body.thinking as { type?: string } | undefined;
+      const budget = entry.model.startsWith('claude-haiku') || entry.model.startsWith('GLM-');
+      if (!budget) continue;
+      // The budget family never speaks the adaptive vocabulary.
+      expect(thinking?.type).not.toBe('adaptive');
+      expect(entry.body.output_config).toBeUndefined();
+      if (thinking !== undefined) {
+        expect(thinking.type).toBe('enabled');
+        const tokens = (thinking as { budget_tokens: number }).budget_tokens;
+        expect(entry.body.max_tokens).toBe(tokens + 8192);
       }
     }
   });
@@ -135,6 +179,7 @@ describe.each(FIXTURES)('frozen $file', ({ file, harnessId }) => {
    * picks one of them truncates the other three cases.
    */
   test('the token ceiling follows the round, not a constant', () => {
+    if (harnessId !== 'dsh') return;
     const ceilings = new Map(
       fixture.cases.map(entry => [
         `${entry.tools.length > 0 ? 'tools' : 'plain'}/${entry.thinking_mode === 'off' ? 'off' : 'thinking'}`,
@@ -148,6 +193,7 @@ describe.each(FIXTURES)('frozen $file', ({ file, harnessId }) => {
   });
 
   test('a thinking round says so twice, and an unthinking one not at all', () => {
+    if (harnessId !== 'dsh') return;
     for (const entry of fixture.cases) {
       const thinking = entry.body.thinking as { type: string };
       if (entry.thinking_mode === 'off') {

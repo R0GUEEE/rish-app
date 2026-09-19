@@ -124,6 +124,39 @@ internal class AndroidModelTransport(private val credentials: AndroidCredentialS
     }
 
     /**
+     * The Anthropic request body.
+     *
+     * Only the budget family is built the way iOS builds it: the models whose
+     * thinking is a token budget, which is Haiku and GLM over the
+     * Anthropic-compatible endpoint. The adaptive and always-on families are
+     * not -- see the cases in
+     * ios/RishTests/Fixtures/anthropic-request-cases.json that list only
+     * `ios`, each of which says what is missing. This host also refuses a
+     * round transcript on this protocol, so an Anthropic agent round does
+     * not reach here at all.
+     */
+    internal fun messagesBody(
+        body: JSONObject,
+        wireModel: String,
+        thinkingMode: String,
+        sendReasoning: Boolean,
+        messages: JSONArray,
+    ): JSONObject {
+        body.put("messages", messages).put("max_tokens", 8192)
+        if (sendReasoning && thinkingMode != "off") {
+            if (wireModel.startsWith("glm", true) || wireModel.startsWith("claude-haiku")) {
+                val budget = if (thinkingMode == "max") 16000 else 4096
+                body.put("thinking", JSONObject().put("type", "enabled").put("budget_tokens", budget))
+                    .put("max_tokens", budget + 8192)
+            } else {
+                body.put("thinking", JSONObject().put("type", "adaptive"))
+                    .put("output_config", JSONObject().put("effort", thinkingMode))
+            }
+        }
+        return body
+    }
+
+    /**
      * The chat-completions request body, and the ceiling that goes with it.
      *
      * The ceiling is four numbers, not one. A round with tools has to be able
@@ -289,15 +322,10 @@ internal class AndroidModelTransport(private val credentials: AndroidCredentialS
             val streaming = sink != null && protocol == "chat-completions"
             val body = JSONObject().put("model", wireModel).put("stream", streaming)
             when(protocol) {
-                "messages" -> {
-                    body.put("messages", messages).put("max_tokens", 8192)
-                    if(config.getBoolean("send_reasoning") && input.getString("thinking_mode") != "off") {
-                        if(wireModel.startsWith("glm", true) || wireModel.startsWith("claude-haiku")) {
-                            val budget = if(input.getString("thinking_mode") == "max") 16000 else 4096
-                            body.put("thinking", JSONObject().put("type", "enabled").put("budget_tokens", budget)).put("max_tokens", budget + 8192)
-                        } else body.put("thinking", JSONObject().put("type", "adaptive")).put("output_config", JSONObject().put("effort", input.getString("thinking_mode")))
-                    }
-                }
+                "messages" -> messagesBody(
+                    body, wireModel, input.getString("thinking_mode"),
+                    config.getBoolean("send_reasoning"), messages,
+                )
                 "chat-completions" -> chatCompletionsBody(
                     body, input.getString("thinking_mode"), config.getBoolean("send_reasoning"),
                     messages, if (declared.length() > 0) functionTools(declared) else JSONArray(),
