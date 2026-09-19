@@ -1,4 +1,4 @@
-import React, { useMemo, useRef, useState } from 'react';
+import React, { useEffect, useMemo, useRef, useState } from 'react';
 import type { LucideIcon } from 'lucide-react-native';
 import ArrowUp from 'lucide-react-native/icons/arrow-up';
 import Camera from 'lucide-react-native/icons/camera';
@@ -16,6 +16,7 @@ import {
   Image,
   Keyboard,
   Modal,
+  Platform,
   Pressable,
   ScrollView,
   StyleSheet,
@@ -118,6 +119,22 @@ export function ChatComposer(props: Props) {
       props.onAddAttachment(source, ownershipKey);
     }
   };
+
+  /**
+   * `Modal.onDismiss` is iOS-only.
+   *
+   * Everywhere else it is never called, so the source a person chose stayed
+   * pending forever and the picker never opened -- the menu closed and
+   * nothing happened. The sheet closing is observed here instead, which is
+   * the same moment for the same reason: the picker is presented once this
+   * menu is out of the way.
+   */
+  const dismissedRef = useRef(finishAttachmentMenuDismiss);
+  dismissedRef.current = finishAttachmentMenuDismiss;
+  useEffect(() => {
+    if (Platform.OS === 'ios' || attachmentMenuVisible) return;
+    dismissedRef.current();
+  }, [attachmentMenuVisible]);
 
   return (
     <View style={styles.shell}>
