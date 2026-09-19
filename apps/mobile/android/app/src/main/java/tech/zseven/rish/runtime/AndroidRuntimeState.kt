@@ -62,6 +62,11 @@ internal class AndroidRuntimeState private constructor(val app: Application) {
     /// What the Files drawer lists and opens, over the same roots and the
     /// same core rules the agent's tools use.
     val workspaceFiles = AndroidWorkspaceFiles(workspaces, roots)
+    /// Documents coming into a workspace or going back out, staged first so
+    /// a half-finished import can be finished instead of repeated.
+    val documentTransfers = AndroidDocumentTransfers(
+        app.filesDir, workspaceFiles, workspaces, roots,
+    )
     /// The guest's package mirrors, staged into an app-private overlay that
     /// no booted guest reads yet -- the same overlay, and the same standing
     /// caveat, as iOS.

@@ -356,6 +356,14 @@ internal class AndroidWorkspaceFiles(
             ?: throw Refused(NOT_FOUND, "This device does not hold that workspace")
     }
 
+    /**
+     * The same containment rule, for a transfer that needs a path resolved
+     * without going through a request shape. Exposed rather than duplicated:
+     * an import must land inside exactly the directories a listing shows.
+     */
+    fun resolveForTransfer(root: File, path: String): File =
+        resolve(root, path, allowRoot = true)
+
     private fun resolve(root: File, path: String, allowRoot: Boolean): File {
         if (path.toByteArray(Charsets.UTF_8).size > MAX_PATH_BYTES) {
             throw Refused(INVALID, "Path is too long")
