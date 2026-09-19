@@ -144,105 +144,63 @@ internal class AndroidModelTransport(private val credentials: AndroidCredentialS
      * Reads a server-sent event stream into the reply the rest of this file
      * already knows how to read.
      *
-     * Each `data:` line is a chat-completions chunk: the first carries the
-     * response id and the model, the rest carry deltas. Text, reasoning and
-     * tool-call fragments are accumulated by the same rules the provider would
-     * have applied itself, and handed to the sink as they arrive. `[DONE]`
-     * ends it; a stream that ends without a finish reason is a truncated
-     * response, not a silent success.
+     * The parsing is not here. This hands the socket's bytes to the shared
+     * core a chunk at a time and passes back whatever previews it answers
+     * with; the core carries the state between calls and assembles the final
+     * reply. That matters because a reader that splits the stream into lines
+     * -- which is what this used to do -- cannot be asked about the cases
+     * that actually break: a character cut in half by a chunk boundary, three
+     * events in one read, a `data:` line delivered in pieces. iOS runs the
+     * same reducer, so a stream that parses on one platform parses on both.
+     *
+     * `[DONE]` ends it; a stream that ends without a finish reason is a
+     * truncated response, not a silent success, and the core says so.
      */
     internal fun assembleStream(stream: java.io.InputStream, sink: (JSONObject) -> Unit): JSONObject {
-        var id: String? = null
-        var model: String? = null
-        var finish: String? = null
-        val text = StringBuilder()
-        val reasoning = StringBuilder()
-        // Tool calls arrive in fragments keyed by index: the name once, the
-        // arguments a few characters at a time.
-        val calls = sortedMapOf<Int, JSONObject>()
-        var read = 0L
-        stream.bufferedReader(Charsets.UTF_8).use { reader ->
+        var state: Any = JSONObject.NULL
+        val buffer = ByteArray(8192)
+        stream.use { source ->
             while (true) {
-                val line = reader.readLine() ?: break
-                read += line.length + 1
-                if (read > 4 * 1024 * 1024) fail("E_COMPLETION_RESPONSE_SIZE")
-                if (!line.startsWith("data:")) continue
-                val payload = line.removePrefix("data:").trim()
-                if (payload.isEmpty()) continue
-                if (payload == "[DONE]") break
-                val chunk = try {
-                    JSONObject(payload)
-                } catch (_: Exception) {
-                    fail("E_COMPLETION_RESPONSE_JSON")
-                }
-                if (id == null) id = chunk.optString("id").takeIf { it.isNotEmpty() }
-                if (model == null) model = chunk.optString("model").takeIf { it.isNotEmpty() }
-                val choice = chunk.optJSONArray("choices")?.optJSONObject(0) ?: continue
-                choice.optString("finish_reason").takeIf { it.isNotEmpty() && it != "null" }
-                    ?.let { finish = it }
-                val delta = choice.optJSONObject("delta") ?: JSONObject()
-                val event = JSONObject()
-                stringOrEmpty(delta, "content").takeIf { it.isNotEmpty() }?.let {
-                    text.append(it); event.put("text", it)
-                }
-                stringOrEmpty(delta, "reasoning_content").takeIf { it.isNotEmpty() }?.let {
-                    reasoning.append(it); event.put("reasoning", it)
-                }
-                delta.optJSONArray("tool_calls")?.let { fragments ->
-                    val previewed = JSONArray()
-                    for (index in 0 until fragments.length()) {
-                        val fragment = fragments.optJSONObject(index) ?: continue
-                        val slot = fragment.optInt("index", index)
-                        val call = calls.getOrPut(slot) {
-                            JSONObject().put("id", "").put("name", "").put("arguments", "")
-                        }
-                        val preview = JSONObject().put("index", slot)
-                        fragment.optString("id").takeIf { it.isNotEmpty() }?.let {
-                            call.put("id", it); preview.put("id", it)
-                        }
-                        val function = fragment.optJSONObject("function")
-                        function?.optString("name")?.takeIf { it.isNotEmpty() }?.let {
-                            call.put("name", it); preview.put("name", it)
-                        }
-                        function?.optString("arguments")?.takeIf { it.isNotEmpty() }?.let {
-                            call.put("arguments", call.optString("arguments") + it)
-                            preview.put("arguments", it)
-                        }
-                        previewed.put(preview)
-                    }
-                    if (previewed.length() > 0) event.put("tool_calls", previewed)
-                }
-                finish?.let { event.put("finish_reason", it) }
-                // An empty chunk -- a keep-alive, or usage-only -- is nothing
-                // to show.
-                if (event.length() > 0) sink(event)
-            }
-        }
-        if (id == null || model == null || finish == null) fail("E_COMPLETION_RESPONSE_JSON")
-        val message = JSONObject().put("role", "assistant")
-            .put("content", text.toString()).put("reasoning_content", reasoning.toString())
-        if (calls.isNotEmpty()) {
-            val assembled = JSONArray()
-            for ((_, call) in calls) {
-                assembled.put(
-                    JSONObject().put("id", call.optString("id")).put("type", "function")
-                        .put(
-                            "function",
-                            JSONObject().put("name", call.optString("name"))
-                                .put("arguments", call.optString("arguments")),
+                val count = source.read(buffer)
+                if (count < 0) break
+                if (count == 0) continue
+                val answer = streamReduce(
+                    JSONObject().put("op", "stream_chunk").put("state", state).put(
+                        "chunk_base64",
+                        android.util.Base64.encodeToString(
+                            buffer.copyOf(count), android.util.Base64.NO_WRAP,
                         ),
+                    ),
                 )
+                state = answer.getJSONObject("state")
+                val previews = answer.optJSONArray("previews") ?: JSONArray()
+                for (index in 0 until previews.length()) {
+                    previews.optJSONObject(index)?.let(sink)
+                }
             }
-            message.put("tool_calls", assembled)
         }
-        return JSONObject().put("id", id).put("model", model)
-            .put(
-                "choices",
-                JSONArray().put(
-                    JSONObject().put("index", 0).put("message", message)
-                        .put("finish_reason", finish),
-                ),
-            )
+        return streamReduce(JSONObject().put("op", "stream_finish").put("state", state))
+            .getJSONObject("response")
+    }
+
+    /**
+     * One call into the core's completion reducer, with its refusal turned
+     * into this file's own failure. A build without the core staged cannot
+     * read a stream at all, and says that rather than half-reading one.
+     */
+    private fun streamReduce(request: JSONObject): JSONObject {
+        if (!RishAgentCoreNative.available) fail("E_COMPLETION_RESPONSE_JSON")
+        val reply = RishAgentCoreNative.completionResponseReduce(request.toString())
+            ?: fail("E_COMPLETION_RESPONSE_JSON")
+        val answer = try {
+            JSONObject(reply)
+        } catch (_: Exception) {
+            fail("E_COMPLETION_RESPONSE_JSON")
+        }
+        if (!answer.optBoolean("ok")) {
+            fail(answer.optString("failure_code").ifEmpty { "E_COMPLETION_RESPONSE_JSON" })
+        }
+        return answer
     }
 
     /**

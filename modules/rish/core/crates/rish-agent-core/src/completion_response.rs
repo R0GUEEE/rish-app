@@ -429,6 +429,11 @@ fn reduce_json_inner(input: &str) -> Result<Value, &'static str> {
                     envelope.get("candidate").and_then(Value::as_str)),
             }));
         }
+        // The streaming reducer answers on this symbol too: a streamed reply
+        // and a whole one are the same thing to everything downstream, so
+        // they cross the bridge through the same door.
+        Some("stream_chunk") => return crate::completion_stream::stream_chunk(&envelope),
+        Some("stream_finish") => return crate::completion_stream::stream_finish(&envelope),
         Some("parse") => {}
         _ => return Err(RESPONSE_JSON),
     }
