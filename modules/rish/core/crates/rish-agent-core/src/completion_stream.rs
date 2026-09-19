@@ -19,12 +19,13 @@
 //! a line and on a tool-call fragment, and Android's refusal to read the
 //! literal string `"null"` as a finish reason.
 //!
-//! One deliberate narrowing. SSE lets one event carry several `data:` lines,
-//! joined by newlines, and iOS accumulated them until a blank line; here each
-//! `data:` line is its own event, which is what Android did and what every
-//! provider this app speaks to actually sends. A provider that split a chunk
-//! across `data:` lines would fail as unreadable JSON rather than be misread,
-//! so the narrowing fails closed and says so.
+//! The two hosts also framed events differently, and this keeps both. SSE
+//! lets one event carry several `data:` lines joined by newlines, ended by a
+//! blank line, which is what iOS read; every provider this app speaks to puts
+//! one event on one line and Android read that. So a `data:` line is
+//! dispatched the moment what has accumulated is a complete event, and
+//! otherwise held for the next one. Per-line streams behave exactly as they
+//! did, and a split event is joined rather than misread.
 
 use serde_json::{json, Map, Value};
 
@@ -34,6 +35,10 @@ const MAX_STREAM_BYTES: u64 = 4 * 1024 * 1024;
 const MAX_LINE_BYTES: usize = 256 * 1024;
 /// How many calls one reply may ask for, from the non-streaming parser.
 const MAX_TOOL_CALLS: usize = 16;
+/// `data:` lines one event may be spelled across, from
+/// `DSHStreamMaxBufferedLines`. Reaching it means what is accumulating never
+/// was an event.
+const MAX_EVENT_LINES: usize = 64;
 
 const RESPONSE_JSON: &str = "E_COMPLETION_RESPONSE_JSON";
 const RESPONSE_SIZE: &str = "E_COMPLETION_RESPONSE_SIZE";
@@ -42,6 +47,7 @@ const RESPONSE_SIZE: &str = "E_COMPLETION_RESPONSE_SIZE";
 /// so a stuck stream can be read in a log.
 struct Stream {
     carry: Vec<u8>,
+    event: Vec<String>,
     id: Option<String>,
     model: Option<String>,
     finish: Option<String>,
@@ -63,6 +69,7 @@ impl Stream {
     fn new() -> Self {
         Stream {
             carry: Vec::new(),
+            event: Vec::new(),
             id: None,
             model: None,
             finish: None,
@@ -115,6 +122,14 @@ impl Stream {
                 .collect::<Result<Vec<Call>, &'static str>>()?,
             Some(_) => return Err(RESPONSE_JSON),
         };
+        let event = match map.get("event") {
+            None | Some(Value::Null) => Vec::new(),
+            Some(Value::Array(lines)) => lines
+                .iter()
+                .map(|line| line.as_str().map(str::to_owned).ok_or(RESPONSE_JSON))
+                .collect::<Result<Vec<String>, &'static str>>()?,
+            Some(_) => return Err(RESPONSE_JSON),
+        };
         Ok(Stream {
             carry: decode_base64(
                 map.get("carry_base64")
@@ -122,6 +137,7 @@ impl Stream {
                     .unwrap_or(""),
             )
             .ok_or(RESPONSE_JSON)?,
+            event,
             id: text_at("id"),
             model: text_at("model"),
             finish: text_at("finish_reason"),
@@ -137,6 +153,7 @@ impl Stream {
         json!({
             "schema_version": 1,
             "carry_base64": encode_base64(&self.carry),
+            "event": self.event,
             "id": self.id,
             "model": self.model,
             "finish_reason": self.finish,
@@ -151,6 +168,16 @@ impl Stream {
             "done": self.done,
             "bytes": self.bytes,
         })
+    }
+
+    /// Bytes of what the reply says: text, reasoning and tool arguments.
+    fn spoken(&self) -> u64 {
+        (self.text.len() + self.reasoning.len()) as u64
+            + self
+                .calls
+                .iter()
+                .map(|call| call.arguments.len() as u64)
+                .sum::<u64>()
     }
 
     fn call_at(&mut self, index: i64) -> &mut Call {
@@ -198,24 +225,68 @@ fn chunk(state: &mut Stream, bytes: &[u8]) -> Result<Vec<Value>, &'static str> {
         if end > 0 && line[end - 1] == b'\r' {
             end -= 1;
         }
-        if let Some(event) = line_event(state, &line[..end])? {
+        if let Some(event) = line_read(state, &line[..end])? {
             previews.push(event);
         }
     }
     Ok(previews)
 }
 
-/// One complete line, which may be a comment, a keep-alive, or an event.
-fn line_event(state: &mut Stream, line: &[u8]) -> Result<Option<Value>, &'static str> {
-    // Anything that is not valid UTF-8 cannot be a `data:` line; a stream
-    // that carries such bytes is not one this reads.
+/// One complete line of framing: a comment, a field this does not read, a
+/// blank line ending an event, or another `data:` line of one.
+fn line_read(state: &mut Stream, line: &[u8]) -> Result<Option<Value>, &'static str> {
+    // Anything that is not valid UTF-8 cannot be a line this reads, and must
+    // not be mistaken for a blank one.
     let Ok(line) = std::str::from_utf8(line) else {
         return Err(RESPONSE_JSON);
     };
+    if line.is_empty() {
+        // A blank line ends whatever was accumulating, complete or not.
+        return settle(state);
+    }
+    if line.starts_with(':') {
+        // A comment or a keep-alive, which ends nothing.
+        return Ok(None);
+    }
     let Some(payload) = line.strip_prefix("data:") else {
+        // `event:`, `id:`, `retry:` and anything else: not read, not an end.
         return Ok(None);
     };
+    // SSE strips one space after the colon, and no more: the rest is payload.
+    state
+        .event
+        .push(payload.strip_prefix(' ').unwrap_or(payload).to_owned());
+    // An event is usually one line, and this is where that is noticed: what
+    // has accumulated goes out the moment it is a whole event, so a per-line
+    // stream never waits for the blank line that ends it.
+    if whole(&state.event) {
+        return settle(state);
+    }
+    if state.event.len() > MAX_EVENT_LINES {
+        // Whatever this is, it stopped being an event some lines ago.
+        return Err(RESPONSE_JSON);
+    }
+    Ok(None)
+}
+
+/// Whether the accumulated lines already say everything an event says.
+fn whole(lines: &[String]) -> bool {
+    let joined = lines.join("\n");
+    let trimmed = joined.trim();
+    trimmed.is_empty()
+        || trimmed == "[DONE]"
+        || serde_json::from_str::<Value>(trimmed).is_ok_and(|value| value.is_object())
+}
+
+/// Reads whatever has accumulated as one event and starts the next.
+fn settle(state: &mut Stream) -> Result<Option<Value>, &'static str> {
+    if state.event.is_empty() {
+        return Ok(None);
+    }
+    let payload = state.event.join("\n");
+    state.event.clear();
     let payload = payload.trim();
+    // A bare `data:` keep-alive carries nothing, which is not a failure.
     if payload.is_empty() {
         return Ok(None);
     }
@@ -322,21 +393,39 @@ fn line_event(state: &mut Stream, line: &[u8]) -> Result<Option<Value>, &'static
     })
 }
 
+/// What the host wants of the assembled reply, where the two differ.
+struct Assembly {
+    /// `off`, `high` or `max`; a turn that asked to think says so in the
+    /// reply even when the model sent no reasoning.
+    thinking_mode: String,
+    /// Whether a stream that never said what it was fails here, or is
+    /// answered with nulls for the response parser to reject.
+    require_identity: bool,
+}
+
+impl Assembly {
+    fn from_envelope(envelope: &Value) -> Self {
+        Assembly {
+            thinking_mode: envelope
+                .get("thinking_mode")
+                .and_then(Value::as_str)
+                .unwrap_or("off")
+                .to_owned(),
+            require_identity: envelope.get("require_identity") != Some(&Value::Bool(false)),
+        }
+    }
+}
+
 /// The reply the stream described, in the shape a whole response arrives in.
-fn finish(state: &Stream) -> Result<Value, &'static str> {
-    let (Some(id), Some(model), Some(finish)) =
-        (state.id.clone(), state.model.clone(), state.finish.clone())
-    else {
+fn finish(state: &Stream, want: &Assembly) -> Result<Value, &'static str> {
+    if want.require_identity
+        && (state.id.is_none() || state.model.is_none() || state.finish.is_none())
+    {
         // A stream that stopped before it said what it was is not a reply.
         return Err(RESPONSE_JSON);
-    };
+    }
     let mut message = Map::new();
     message.insert("role".into(), json!("assistant"));
-    message.insert("content".into(), Value::String(state.text.clone()));
-    message.insert(
-        "reasoning_content".into(),
-        Value::String(state.reasoning.clone()),
-    );
     if !state.calls.is_empty() {
         let mut calls: Vec<&Call> = state.calls.iter().collect();
         // The wire may interleave fragments; the batch is ordered by index,
@@ -348,20 +437,55 @@ fn finish(state: &Stream) -> Result<Value, &'static str> {
                 calls
                     .into_iter()
                     .map(|call| {
-                        json!({
-                            "id": call.id,
-                            "type": "function",
-                            "function": { "name": call.name, "arguments": call.arguments },
-                        })
+                        let mut function = Map::new();
+                        if !call.name.is_empty() {
+                            function.insert("name".into(), json!(call.name));
+                        }
+                        function.insert("arguments".into(), json!(call.arguments));
+                        let mut entry = Map::new();
+                        if !call.id.is_empty() {
+                            entry.insert("id".into(), json!(call.id));
+                        }
+                        entry.insert("type".into(), json!("function"));
+                        entry.insert("function".into(), Value::Object(function));
+                        // A call the provider never named or identified keeps
+                        // the key absent rather than empty, so the response
+                        // parser refuses it exactly as it refuses a malformed
+                        // one that arrived whole.
+                        Value::Object(entry)
                     })
                     .collect(),
             ),
         );
     }
+    // A tool-only turn carries null content, which is what the provider sends
+    // when it does not stream.
+    message.insert(
+        "content".into(),
+        if state.text.is_empty() && message.contains_key("tool_calls") {
+            Value::Null
+        } else {
+            Value::String(state.text.clone())
+        },
+    );
+    // Reasoning is reported when there was any, and when the turn asked to
+    // think -- an empty string then says the model returned none, which is
+    // not the same as a turn that never asked.
+    if !state.reasoning.is_empty() || want.thinking_mode != "off" {
+        message.insert(
+            "reasoning_content".into(),
+            Value::String(state.reasoning.clone()),
+        );
+    }
     Ok(json!({
-        "id": id,
-        "model": model,
-        "choices": [{ "index": 0, "message": Value::Object(message), "finish_reason": finish }],
+        "id": state.id,
+        "object": "chat.completion",
+        "model": state.model,
+        "choices": [{
+            "index": 0,
+            "message": Value::Object(message),
+            "finish_reason": state.finish,
+        }],
     }))
 }
 
@@ -372,7 +496,8 @@ fn non_empty(value: Option<&Value>) -> Option<String> {
     }
 }
 
-/// `{"op":"stream_chunk","state":<state|null>,"chunk_base64":"..."}`
+/// `{"op":"stream_chunk","state":<state|null>,"chunk_base64":"...",
+/// "maximum_bytes":N}`
 pub fn stream_chunk(envelope: &Value) -> Result<Value, &'static str> {
     let mut state = Stream::from_value(envelope.get("state"))?;
     let bytes = decode_base64(
@@ -383,13 +508,23 @@ pub fn stream_chunk(envelope: &Value) -> Result<Value, &'static str> {
     )
     .ok_or(RESPONSE_JSON)?;
     let previews = chunk(&mut state, &bytes)?;
+    // The budget is on what the reply *says*, not on what crossed the wire,
+    // and it is checked as the stream runs so a runaway one is stopped where
+    // it happens rather than at the end.
+    if let Some(budget) = envelope.get("maximum_bytes").and_then(Value::as_u64) {
+        if state.spoken() > budget {
+            return Err(RESPONSE_SIZE);
+        }
+    }
     Ok(json!({ "ok": true, "state": state.to_value(), "previews": previews }))
 }
 
-/// `{"op":"stream_finish","state":<state>}`
+/// `{"op":"stream_finish","state":<state>,"thinking_mode":"off",
+/// "require_identity":true}`
 pub fn stream_finish(envelope: &Value) -> Result<Value, &'static str> {
     let state = Stream::from_value(envelope.get("state"))?;
-    Ok(json!({ "ok": true, "response": finish(&state)? }))
+    let want = Assembly::from_envelope(envelope);
+    Ok(json!({ "ok": true, "response": finish(&state, &want)? }))
 }
 
 const ALPHABET: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";

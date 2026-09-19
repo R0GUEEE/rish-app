@@ -156,7 +156,11 @@ internal class AndroidModelTransport(private val credentials: AndroidCredentialS
      * `[DONE]` ends it; a stream that ends without a finish reason is a
      * truncated response, not a silent success, and the core says so.
      */
-    internal fun assembleStream(stream: java.io.InputStream, sink: (JSONObject) -> Unit): JSONObject {
+    internal fun assembleStream(
+        stream: java.io.InputStream,
+        thinkingMode: String = "off",
+        sink: (JSONObject) -> Unit,
+    ): JSONObject {
         var state: Any = JSONObject.NULL
         val buffer = ByteArray(8192)
         stream.use { source ->
@@ -179,8 +183,12 @@ internal class AndroidModelTransport(private val credentials: AndroidCredentialS
                 }
             }
         }
-        return streamReduce(JSONObject().put("op", "stream_finish").put("state", state))
-            .getJSONObject("response")
+        // The thinking mode travels with the assembly: a turn that asked to
+        // think reports the reasoning it got, even when that is none.
+        return streamReduce(
+            JSONObject().put("op", "stream_finish").put("state", state)
+                .put("thinking_mode", thinkingMode),
+        ).getJSONObject("response")
     }
 
     /**
@@ -293,7 +301,7 @@ internal class AndroidModelTransport(private val credentials: AndroidCredentialS
                 if(!http.isSuccessful) throw RuntimeFailure("E_COMPLETION_HTTP_STATUS", http.code)
                 val stream = http.body?.byteStream() ?: fail("E_COMPLETION_RESPONSE_JSON")
                 if (streaming) {
-                    assembleStream(stream, sink!!)
+                    assembleStream(stream, input.getString("thinking_mode"), sink!!)
                 } else {
                     val bytes = ByteArrayOutputStream(); val buffer = ByteArray(8192)
                     stream.use { source ->

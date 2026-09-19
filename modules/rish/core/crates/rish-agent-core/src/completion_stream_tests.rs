@@ -72,9 +72,11 @@ fn a_stream_becomes_the_reply_a_whole_response_would_be() {
     assert_eq!(response["id"], json!(HOST));
     assert_eq!(response["model"], json!("deepseek-chat"));
     assert_eq!(response["choices"][0]["finish_reason"], json!("stop"));
+    assert_eq!(response["object"], json!("chat.completion"));
+    // A turn that did not ask to think, and got none, says nothing about it.
     assert_eq!(
         message(&response),
-        json!({ "role": "assistant", "content": "Hello world", "reasoning_content": "" }),
+        json!({ "role": "assistant", "content": "Hello world" }),
     );
 }
 
@@ -275,6 +277,79 @@ fn reasoning_is_its_own_channel() {
     );
 }
 
+/// A turn that asked to think reports the reasoning it got, even when that
+/// is none: an empty string says the model returned none, and saying nothing
+/// would say the turn never asked.
+#[test]
+fn a_thinking_turn_reports_reasoning_it_never_got() {
+    let (state, _) = feed(&[transcript().as_bytes()]);
+    let response = stream_finish(&json!({ "state": state, "thinking_mode": "high" }))
+        .expect("the stream did not assemble")["response"]
+        .clone();
+    assert_eq!(message(&response)["reasoning_content"], json!(""));
+}
+
+/// A tool-only turn carries null content, which is what the provider sends
+/// when it does not stream -- and a call it never named keeps the key absent
+/// rather than empty, so the response parser refuses it the same way.
+#[test]
+fn a_tool_only_turn_carries_null_content() {
+    let wire = format!(
+        "data: {{\"id\":\"{HOST}\",\"model\":\"m\",\"choices\":[{{\"delta\":\
+         {{\"tool_calls\":[{{\"index\":0,\"function\":{{\"arguments\":\"{{}}\"}}}}]}},\
+         \"finish_reason\":\"tool_calls\"}}]}}\n\n"
+    );
+    let (state, _) = feed(&[wire.as_bytes()]);
+    let message = message(&assembled(&state));
+    assert_eq!(message["content"], Value::Null);
+    assert_eq!(
+        message["tool_calls"],
+        json!([{ "type": "function", "function": { "arguments": "{}" } }]),
+    );
+}
+
+/// The host may ask for the nulls instead of the failure, so that a reply
+/// that never said what it was is refused by the response parser, with the
+/// code that names what was missing.
+#[test]
+fn a_host_may_take_the_nulls_instead_of_the_failure() {
+    let wire = format!(
+        "data: {{\"id\":\"{HOST}\",\"model\":\"m\",\"choices\":[{{\"delta\":\
+         {{\"content\":\"half\"}}}}]}}\n\n"
+    );
+    let (state, _) = feed(&[wire.as_bytes()]);
+    assert_eq!(
+        stream_finish(&json!({ "state": state.clone() })),
+        Err("E_COMPLETION_RESPONSE_JSON"),
+    );
+    let response = stream_finish(&json!({ "state": state, "require_identity": false }))
+        .expect("the nulls were refused")["response"]
+        .clone();
+    assert_eq!(response["choices"][0]["finish_reason"], Value::Null);
+    assert_eq!(response["id"], json!(HOST));
+}
+
+/// What the reply *says* is budgeted, and the budget is checked as the
+/// stream runs rather than once it is over.
+#[test]
+fn a_reply_past_its_budget_is_refused_where_it_happens() {
+    let say = |piece: &str| {
+        format!(
+            "data: {{\"id\":\"{HOST}\",\"model\":\"m\",\"choices\":[{{\"delta\":\
+             {{\"content\":\"{piece}\"}}}}]}}\n\n"
+        )
+    };
+    let budgeted = |state: Value, wire: &str| {
+        stream_chunk(&json!({
+            "state": state,
+            "chunk_base64": encode_base64(wire.as_bytes()),
+            "maximum_bytes": 8,
+        }))
+    };
+    let state = budgeted(Value::Null, &say("12345678")).expect("within budget")["state"].clone();
+    assert_eq!(budgeted(state, &say("9")), Err("E_COMPLETION_RESPONSE_SIZE"));
+}
+
 /// Framing this parser must step over: comments, keep-alives, blank data,
 /// event names, CRLF line ends, and a chunk that says nothing to show.
 #[test]
@@ -450,4 +525,50 @@ fn base64_round_trips_every_byte_and_every_length() {
     assert_eq!(decode_base64("!!!!"), None);
     // Padding bits that are not zero are not a base64 text this wrote.
     assert_eq!(decode_base64("AB"), None);
+}
+
+/// SSE lets one event be spelled across several `data:` lines, joined by
+/// newlines and ended by a blank line. No provider here sends one, but iOS
+/// read them, so this does too -- and a comment in the middle of one does
+/// not split it.
+#[test]
+fn an_event_spelled_across_several_data_lines_is_one_event() {
+    let wire = format!(
+        "data: {{\"id\":\"{HOST}\",\"model\":\"m\",\n\
+         : still the same event\n\
+         data: \"choices\":[{{\"delta\":{{\"content\":\"split\"}},\n\
+         data: \"finish_reason\":\"stop\"}}]}}\n\
+         \n\
+         data: [DONE]\n\n"
+    );
+    let (state, previews) = feed(&[wire.as_bytes()]);
+    assert_eq!(previews, vec![json!({ "text": "split", "finish_reason": "stop" })]);
+    assert_eq!(message(&assembled(&state))["content"], json!("split"));
+}
+
+/// Lines that never add up to an event are refused rather than accumulated
+/// until the stream cap: the failure says the reply was unreadable, which is
+/// what happened, not that it was too big.
+#[test]
+fn lines_that_never_become_an_event_are_refused() {
+    let wire = "data: {\n".repeat(65);
+    assert_eq!(
+        stream_chunk(&json!({
+            "state": Value::Null,
+            "chunk_base64": encode_base64(wire.as_bytes()),
+        })),
+        Err("E_COMPLETION_RESPONSE_JSON"),
+    );
+}
+
+/// SSE strips one space after the colon and no more, so a payload that
+/// begins with whitespace keeps the rest of it.
+#[test]
+fn only_the_first_space_after_the_colon_is_framing() {
+    let wire = format!(
+        "data:{{\"id\":\"{HOST}\",\"model\":\"m\",\"choices\":[{{\"delta\":\
+         {{\"content\":\" indented\"}},\"finish_reason\":\"stop\"}}]}}\n\n"
+    );
+    let (state, _) = feed(&[wire.as_bytes()]);
+    assert_eq!(message(&assembled(&state))["content"], json!(" indented"));
 }
