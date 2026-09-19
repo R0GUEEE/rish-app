@@ -14,6 +14,11 @@ modules/rish/ios/Vendor/rish_agent_core.version
 modules/rish/ios/include/rish.h
 apps/mobile/android/rish-ffi/
 apps/mobile/android/rish-agent-core/
+# The Android libgit2 vendor build, like the iOS one: the archives are a
+# reproducible build product and stay out, the version file records the pins
+# and digests that make it reproducible and stays in.
+apps/mobile/android/rish-libgit2/*
+!apps/mobile/android/rish-libgit2/libgit2.version
 
 # Optional phone-local official CLI auth assets are verified build inputs,
 # never source-controlled release artifacts. Keep the directory itself so a
