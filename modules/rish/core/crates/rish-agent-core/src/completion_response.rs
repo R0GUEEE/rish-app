@@ -431,9 +431,12 @@ fn reduce_json_inner(input: &str) -> Result<Value, &'static str> {
         }
         // The streaming reducer answers on this symbol too: a streamed reply
         // and a whole one are the same thing to everything downstream, so
-        // they cross the bridge through the same door.
-        Some("stream_chunk") => return crate::completion_stream::stream_chunk(&envelope),
-        Some("stream_finish") => return crate::completion_stream::stream_finish(&envelope),
+        // they cross the bridge through the same door. These answer with
+        // their own refusal rather than a bare code: a stream has six ways
+        // of being unreadable and the hosts name them.
+        Some("stream_chunk") => return Ok(crate::completion_stream::stream_chunk(&envelope)),
+        Some("stream_flush") => return Ok(crate::completion_stream::stream_flush(&envelope)),
+        Some("stream_finish") => return Ok(crate::completion_stream::stream_finish(&envelope)),
         Some("parse") => {}
         _ => return Err(RESPONSE_JSON),
     }

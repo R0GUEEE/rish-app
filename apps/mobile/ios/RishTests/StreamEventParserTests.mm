@@ -76,10 +76,14 @@
   XCTAssertEqualObjects(deltas.lastObject[@"type"], @"done");
 }
 
-- (void)testMultiDataLineEventsAreJoinedPerSSESpec {
+- (void)testTwoCompleteEventsOnConsecutiveDataLinesAreTwoEvents {
   DSHStreamEventParser *parser = [self parser];
-  // A JSON payload deliberately split across two data: lines at a safe
-  // boundary (between two complete events it must NOT merge).
+  // Two whole events on consecutive data: lines, with no blank line between
+  // them. This parser used to join them per the SSE spec and fail closed on
+  // the invalid JSON that made; the shared core reads each one as soon as it
+  // is whole, which is what every provider this app speaks to sends and what
+  // Android always did. A well-formed stream is no longer thrown away for
+  // want of a blank line.
   NSString *stream =
       @"data: {\"choices\":[{\"delta\":{\"content\":\"a\"}}]}\n"
       @"data: {\"choices\":[{\"delta\":{\"content\":\"b\"}}]}\n\n";
@@ -87,8 +91,27 @@
   NSError *error = nil;
   NSArray *deltas = [parser appendBytes:(const uint8_t *)c length:strlen(c)
                                   error:&error];
-  // Joined with \n the payload is invalid JSON → fail closed.
-  XCTAssertNotNil(error);
+  XCTAssertNil(error);
+  XCTAssertEqual(deltas.count, 2u);
+  XCTAssertEqualObjects(deltas.firstObject[@"content"], @"a");
+  XCTAssertEqualObjects(deltas.lastObject[@"content"], @"b");
+}
+
+- (void)testAnEventSpelledAcrossDataLinesIsStillJoined {
+  DSHStreamEventParser *parser = [self parser];
+  // And the spec's own case still works: one event whose JSON is split
+  // across two data: lines is joined, because neither half is whole on its
+  // own and the blank line ends it.
+  NSString *stream =
+      @"data: {\"choices\":[{\"delta\":\n"
+      @"data: {\"content\":\"joined\"}}]}\n\n";
+  const char *c = stream.UTF8String;
+  NSError *error = nil;
+  NSArray *deltas = [parser appendBytes:(const uint8_t *)c length:strlen(c)
+                                  error:&error];
+  XCTAssertNil(error);
+  XCTAssertEqual(deltas.count, 1u);
+  XCTAssertEqualObjects(deltas.firstObject[@"content"], @"joined");
 }
 
 - (void)testFinishFlushesATrailingUnterminatedEvent {
@@ -150,22 +173,42 @@
 }
 
 
-- (void)testUnterminatedEventWithTooManyDataLinesFailsClosed {
+- (void)testLinesThatNeverBecomeAnEventFailClosed {
   DSHStreamEventParser *parser = [self parser];
-  // An event that never sends its blank-line terminator must not grow the
-  // line buffer without bound: the cap is enforced while lines accumulate.
+  // Lines that never add up to an event must not grow the buffer without
+  // bound. The cap is on what is *accumulating*: a line that is already a
+  // whole event is read and never accumulates, so the fragments here are
+  // deliberately half of one.
   NSMutableString *stream = [NSMutableString string];
   for (NSInteger index = 0;
       index < DSHStreamMaxBufferedLines + 2; index += 1) {
-    [stream appendFormat:@"data: {\"line\":%ld}\n", (long)index];
+    [stream appendFormat:@"data: {\"line\":%ld,\n", (long)index];
   }
   const char *c = stream.UTF8String;
   NSError *error = nil;
   XCTAssertNil([parser appendBytes:(const uint8_t *)c length:strlen(c)
                               error:&error]);
   XCTAssertNotNil(error);
-  XCTAssertEqual(error.domain, DSHStreamEventErrorDomain);
+  XCTAssertEqualObjects(error.domain, DSHStreamEventErrorDomain);
   XCTAssertEqual(error.code, 2105);
+}
+
+- (void)testManyWholeEventsInOneReadAreAllRead {
+  DSHStreamEventParser *parser = [self parser];
+  // The same count of lines, each one a whole event: nothing accumulates,
+  // so there is no cap to reach and every one of them is read.
+  NSMutableString *stream = [NSMutableString string];
+  for (NSInteger index = 0;
+      index < DSHStreamMaxBufferedLines + 2; index += 1) {
+    [stream appendFormat:
+        @"data: {\"choices\":[{\"delta\":{\"content\":\"%ld\"}}]}\n", (long)index];
+  }
+  const char *c = stream.UTF8String;
+  NSError *error = nil;
+  NSArray *deltas = [parser appendBytes:(const uint8_t *)c length:strlen(c)
+                                  error:&error];
+  XCTAssertNil(error);
+  XCTAssertEqual(deltas.count, (NSUInteger)(DSHStreamMaxBufferedLines + 2));
 }
 
 - (void)testInvalidUTF8LineFailsClosedInsteadOfEndingTheEvent {

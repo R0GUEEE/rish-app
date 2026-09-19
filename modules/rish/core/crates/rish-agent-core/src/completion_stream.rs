@@ -43,6 +43,47 @@ const MAX_EVENT_LINES: usize = 64;
 const RESPONSE_JSON: &str = "E_COMPLETION_RESPONSE_JSON";
 const RESPONSE_SIZE: &str = "E_COMPLETION_RESPONSE_SIZE";
 
+/// Why a stream was refused, beside the code the host reports.
+///
+/// The code is what the round records; the reason is what the host needs to
+/// say the same thing its own vocabulary said before it asked the core --
+/// iOS distinguishes six of these and its tests name them, so a single code
+/// for "unreadable" would lose what the move was supposed to preserve.
+#[derive(Debug, PartialEq, Eq, Clone, Copy)]
+pub struct Failure {
+    pub code: &'static str,
+    pub reason: &'static str,
+}
+
+const fn unreadable(reason: &'static str) -> Failure {
+    Failure { code: RESPONSE_JSON, reason }
+}
+
+const fn oversized(reason: &'static str) -> Failure {
+    Failure { code: RESPONSE_SIZE, reason }
+}
+
+/// A line, or trailing bytes, that are not valid UTF-8.
+const NOT_UTF8: Failure = unreadable("not_utf8");
+/// A `data:` payload that is not JSON at all.
+const NOT_JSON: Failure = unreadable("not_json");
+/// JSON that is not an object, which no chunk is.
+const NOT_AN_OBJECT: Failure = unreadable("not_an_object");
+/// A tool-call fragment that cannot be placed or read.
+const TOOL_FRAGMENT: Failure = unreadable("tool_fragment");
+/// Lines that never added up to an event.
+const TOO_MANY_LINES: Failure = unreadable("too_many_lines");
+/// A stream that stopped before it said what it was.
+const INCOMPLETE: Failure = unreadable("incomplete");
+/// An envelope this cannot read at all.
+const BAD_REQUEST: Failure = unreadable("bad_request");
+/// One line longer than a line may be.
+const LINE_TOO_LONG: Failure = oversized("line_too_long");
+/// More bytes than a reply may be.
+const STREAM_TOO_LONG: Failure = oversized("stream_too_long");
+/// More than the host budgeted for what the reply says.
+const OVER_BUDGET: Failure = oversized("over_budget");
+
 /// The state the host carries between chunks. Opaque to it; plain JSON here
 /// so a stuck stream can be read in a log.
 struct Stream {
@@ -81,14 +122,14 @@ impl Stream {
         }
     }
 
-    fn from_value(value: Option<&Value>) -> Result<Self, &'static str> {
+    fn from_value(value: Option<&Value>) -> Result<Self, Failure> {
         let Some(value) = value else {
             return Ok(Stream::new());
         };
         if value.is_null() {
             return Ok(Stream::new());
         }
-        let map = value.as_object().ok_or(RESPONSE_JSON)?;
+        let map = value.as_object().ok_or(BAD_REQUEST)?;
         let text_at = |key: &str| -> Option<String> {
             map.get(key).and_then(Value::as_str).map(str::to_owned)
         };
@@ -101,7 +142,7 @@ impl Stream {
                         index: item
                             .get("index")
                             .and_then(Value::as_i64)
-                            .ok_or(RESPONSE_JSON)?,
+                            .ok_or(BAD_REQUEST)?,
                         id: item
                             .get("id")
                             .and_then(Value::as_str)
@@ -119,16 +160,16 @@ impl Stream {
                             .to_owned(),
                     })
                 })
-                .collect::<Result<Vec<Call>, &'static str>>()?,
-            Some(_) => return Err(RESPONSE_JSON),
+                .collect::<Result<Vec<Call>, Failure>>()?,
+            Some(_) => return Err(BAD_REQUEST),
         };
         let event = match map.get("event") {
             None | Some(Value::Null) => Vec::new(),
             Some(Value::Array(lines)) => lines
                 .iter()
-                .map(|line| line.as_str().map(str::to_owned).ok_or(RESPONSE_JSON))
-                .collect::<Result<Vec<String>, &'static str>>()?,
-            Some(_) => return Err(RESPONSE_JSON),
+                .map(|line| line.as_str().map(str::to_owned).ok_or(BAD_REQUEST))
+                .collect::<Result<Vec<String>, Failure>>()?,
+            Some(_) => return Err(BAD_REQUEST),
         };
         Ok(Stream {
             carry: decode_base64(
@@ -136,7 +177,7 @@ impl Stream {
                     .and_then(Value::as_str)
                     .unwrap_or(""),
             )
-            .ok_or(RESPONSE_JSON)?,
+            .ok_or(BAD_REQUEST)?,
             event,
             id: text_at("id"),
             model: text_at("model"),
@@ -196,12 +237,12 @@ impl Stream {
 }
 
 /// Feeds one chunk in and answers the previews it produced.
-fn chunk(state: &mut Stream, bytes: &[u8]) -> Result<Vec<Value>, &'static str> {
+fn chunk(state: &mut Stream, bytes: &[u8]) -> Result<Vec<Value>, Failure> {
     // The cap is on the whole stream, which is also what bounds the carry: a
     // line that never ends is carried undecoded, and reaches this first.
     state.bytes = state.bytes.saturating_add(bytes.len() as u64);
     if state.bytes > MAX_STREAM_BYTES {
-        return Err(RESPONSE_SIZE);
+        return Err(STREAM_TOO_LONG);
     }
     state.carry.extend_from_slice(bytes);
     let mut previews = Vec::new();
@@ -211,12 +252,12 @@ fn chunk(state: &mut Stream, bytes: &[u8]) -> Result<Vec<Value>, &'static str> {
             // undecoded, and a provider with no newline in a quarter of a
             // mebibyte is not sending events.
             if state.carry.len() > MAX_LINE_BYTES {
-                return Err(RESPONSE_SIZE);
+                return Err(LINE_TOO_LONG);
             }
             break;
         };
         if position > MAX_LINE_BYTES {
-            return Err(RESPONSE_SIZE);
+            return Err(LINE_TOO_LONG);
         }
         let line: Vec<u8> = state.carry.drain(..=position).collect();
         // The newline, and a carriage return before it, belong to the framing
@@ -234,11 +275,11 @@ fn chunk(state: &mut Stream, bytes: &[u8]) -> Result<Vec<Value>, &'static str> {
 
 /// One complete line of framing: a comment, a field this does not read, a
 /// blank line ending an event, or another `data:` line of one.
-fn line_read(state: &mut Stream, line: &[u8]) -> Result<Option<Value>, &'static str> {
+fn line_read(state: &mut Stream, line: &[u8]) -> Result<Option<Value>, Failure> {
     // Anything that is not valid UTF-8 cannot be a line this reads, and must
     // not be mistaken for a blank one.
     let Ok(line) = std::str::from_utf8(line) else {
-        return Err(RESPONSE_JSON);
+        return Err(NOT_UTF8);
     };
     if line.is_empty() {
         // A blank line ends whatever was accumulating, complete or not.
@@ -264,7 +305,7 @@ fn line_read(state: &mut Stream, line: &[u8]) -> Result<Option<Value>, &'static 
     }
     if state.event.len() > MAX_EVENT_LINES {
         // Whatever this is, it stopped being an event some lines ago.
-        return Err(RESPONSE_JSON);
+        return Err(TOO_MANY_LINES);
     }
     Ok(None)
 }
@@ -279,7 +320,7 @@ fn whole(lines: &[String]) -> bool {
 }
 
 /// Reads whatever has accumulated as one event and starts the next.
-fn settle(state: &mut Stream) -> Result<Option<Value>, &'static str> {
+fn settle(state: &mut Stream) -> Result<Option<Value>, Failure> {
     if state.event.is_empty() {
         return Ok(None);
     }
@@ -298,9 +339,9 @@ fn settle(state: &mut Stream) -> Result<Option<Value>, &'static str> {
     if state.done {
         return Ok(None);
     }
-    let decoded: Value = serde_json::from_str(payload).map_err(|_| RESPONSE_JSON)?;
+    let decoded: Value = serde_json::from_str(payload).map_err(|_| NOT_JSON)?;
     let Some(object) = decoded.as_object() else {
-        return Err(RESPONSE_JSON);
+        return Err(NOT_AN_OBJECT);
     };
     if state.id.is_none() {
         state.id = non_empty(object.get("id"));
@@ -318,9 +359,11 @@ fn settle(state: &mut Stream) -> Result<Option<Value>, &'static str> {
     };
     // A finish reason spelled as the string "null" is how some providers say
     // "not yet"; it is not a reason.
+    let mut said_finish = None;
     if let Some(reason) = non_empty(choice.get("finish_reason")) {
         if reason != "null" {
-            state.finish = Some(reason);
+            state.finish = Some(reason.clone());
+            said_finish = Some(reason);
         }
     }
     let empty = Map::new();
@@ -343,19 +386,19 @@ fn settle(state: &mut Stream) -> Result<Option<Value>, &'static str> {
     let fragments = match delta.get("tool_calls") {
         None | Some(Value::Null) => &Vec::new()[..],
         Some(Value::Array(fragments)) if fragments.len() <= MAX_TOOL_CALLS => &fragments[..],
-        Some(_) => return Err(RESPONSE_JSON),
+        Some(_) => return Err(TOOL_FRAGMENT),
     };
     {
         let mut previewed = Vec::new();
         for fragment in fragments {
             let Some(fragment) = fragment.as_object() else {
-                return Err(RESPONSE_JSON);
+                return Err(TOOL_FRAGMENT);
             };
             // The index is what keeps two interleaved calls apart, so a
             // fragment without a usable one cannot be placed at all.
             let slot = match fragment.get("index").and_then(Value::as_i64) {
                 Some(slot) if (0..MAX_TOOL_CALLS as i64).contains(&slot) => slot,
-                _ => return Err(RESPONSE_JSON),
+                _ => return Err(TOOL_FRAGMENT),
             };
             let mut preview = Map::new();
             preview.insert("index".into(), json!(slot));
@@ -382,7 +425,10 @@ fn settle(state: &mut Stream) -> Result<Option<Value>, &'static str> {
             event.insert("tool_calls".into(), Value::Array(previewed));
         }
     }
-    if let Some(reason) = state.finish.clone() {
+    // What a preview reports is what *this* event said, so a reason is
+    // carried once, by the event that gave it, rather than repeated on
+    // everything that follows.
+    if let Some(reason) = said_finish {
         event.insert("finish_reason".into(), Value::String(reason));
     }
     // A keep-alive, or a chunk carrying only usage, is nothing to show.
@@ -417,12 +463,12 @@ impl Assembly {
 }
 
 /// The reply the stream described, in the shape a whole response arrives in.
-fn finish(state: &Stream, want: &Assembly) -> Result<Value, &'static str> {
+fn finish(state: &Stream, want: &Assembly) -> Result<Value, Failure> {
     if want.require_identity
         && (state.id.is_none() || state.model.is_none() || state.finish.is_none())
     {
         // A stream that stopped before it said what it was is not a reply.
-        return Err(RESPONSE_JSON);
+        return Err(INCOMPLETE);
     }
     let mut message = Map::new();
     message.insert("role".into(), json!("assistant"));
@@ -498,33 +544,90 @@ fn non_empty(value: Option<&Value>) -> Option<String> {
 
 /// `{"op":"stream_chunk","state":<state|null>,"chunk_base64":"...",
 /// "maximum_bytes":N}`
-pub fn stream_chunk(envelope: &Value) -> Result<Value, &'static str> {
+pub fn stream_chunk(envelope: &Value) -> Value {
+    refused_or(chunked(envelope))
+}
+
+fn chunked(envelope: &Value) -> Result<Value, Failure> {
     let mut state = Stream::from_value(envelope.get("state"))?;
     let bytes = decode_base64(
         envelope
             .get("chunk_base64")
             .and_then(Value::as_str)
-            .ok_or(RESPONSE_JSON)?,
+            .ok_or(BAD_REQUEST)?,
     )
-    .ok_or(RESPONSE_JSON)?;
+    .ok_or(BAD_REQUEST)?;
     let previews = chunk(&mut state, &bytes)?;
     // The budget is on what the reply *says*, not on what crossed the wire,
     // and it is checked as the stream runs so a runaway one is stopped where
     // it happens rather than at the end.
     if let Some(budget) = envelope.get("maximum_bytes").and_then(Value::as_u64) {
         if state.spoken() > budget {
-            return Err(RESPONSE_SIZE);
+            return Err(OVER_BUDGET);
         }
     }
-    Ok(json!({ "ok": true, "state": state.to_value(), "previews": previews }))
+    Ok(json!({
+        "ok": true,
+        "state": state.to_value(),
+        "previews": previews,
+        // `[DONE]` is not a preview -- there is nothing to show -- but the
+        // host needs to know the provider said it.
+        "done": state.done,
+    }))
+}
+
+/// `{"op":"stream_flush","state":<state>}`
+///
+/// The end of the socket, which is not the end of a line. Whatever is still
+/// carried is read as a final line and whatever that leaves accumulated is
+/// read as a final event, so a provider that stopped without its last
+/// newline is understood rather than dropped.
+pub fn stream_flush(envelope: &Value) -> Value {
+    refused_or(flushed(envelope))
+}
+
+fn flushed(envelope: &Value) -> Result<Value, Failure> {
+    let mut state = Stream::from_value(envelope.get("state"))?;
+    let mut previews = Vec::new();
+    if !state.carry.is_empty() {
+        let line = std::mem::take(&mut state.carry);
+        let end = if line.last() == Some(&b'\r') {
+            line.len() - 1
+        } else {
+            line.len()
+        };
+        if let Some(preview) = line_read(&mut state, &line[..end])? {
+            previews.push(preview);
+        }
+    }
+    if let Some(preview) = settle(&mut state)? {
+        previews.push(preview);
+    }
+    Ok(json!({
+        "ok": true,
+        "state": state.to_value(),
+        "previews": previews,
+        "done": state.done,
+    }))
 }
 
 /// `{"op":"stream_finish","state":<state>,"thinking_mode":"off",
 /// "require_identity":true}`
-pub fn stream_finish(envelope: &Value) -> Result<Value, &'static str> {
+pub fn stream_finish(envelope: &Value) -> Value {
+    refused_or(finished(envelope))
+}
+
+fn finished(envelope: &Value) -> Result<Value, Failure> {
     let state = Stream::from_value(envelope.get("state"))?;
     let want = Assembly::from_envelope(envelope);
     Ok(json!({ "ok": true, "response": finish(&state, &want)? }))
+}
+
+/// The answer, or the refusal written out for the host to translate.
+fn refused_or(answer: Result<Value, Failure>) -> Value {
+    answer.unwrap_or_else(|failure| {
+        json!({ "ok": false, "failure_code": failure.code, "reason": failure.reason })
+    })
 }
 
 const ALPHABET: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";

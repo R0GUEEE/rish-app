@@ -2,6 +2,8 @@
 
 #include <math.h>
 
+#include "rish_agent_core.h"
+
 NSString * const DSHStreamEventErrorDomain = @"DSHStreamEventError";
 
 const NSInteger DSHStreamMaxLineBytes = 262144;        // 256 KiB per SSE line
@@ -13,151 +15,138 @@ static NSError *DSHStreamError(NSInteger code, NSString *message) {
                          userInfo:@{NSLocalizedDescriptionKey: message}];
 }
 
+// The parsing itself lives in the shared core
+// (crates/rish-agent-core/src/completion_stream.rs), which Android reads the
+// same stream through. What stays here is the vocabulary: this class keeps
+// the interface and the error codes it always had, and translates. The core
+// carries the state between calls, so a chunk boundary may fall anywhere --
+// inside a line, inside a token, inside a character -- which is the part
+// neither host could test while each had its own reader.
+
+/// The core's reason for refusing, in this file's error codes.
+static NSError *DSHStreamFailure(NSDictionary *answer) {
+  NSString *reason = [answer[@"reason"] isKindOfClass:NSString.class]
+      ? answer[@"reason"] : @"";
+  NSDictionary *codes = @{
+    @"not_utf8" : @[ @2101, @"SSE event is not valid UTF-8" ],
+    @"not_json" : @[ @2102, @"SSE event is not a JSON object" ],
+    @"not_an_object" : @[ @2102, @"SSE event is not a JSON object" ],
+    @"bad_request" : @[ @2102, @"SSE event is not a JSON object" ],
+    @"line_too_long" : @[ @2104, @"SSE line exceeds the size limit" ],
+    @"stream_too_long" : @[ @2104, @"SSE line exceeds the size limit" ],
+    @"too_many_lines" : @[ @2105, @"SSE event has too many lines" ],
+    @"tool_fragment" : @[ @2106, @"SSE tool_calls fragment is not usable" ],
+  };
+  NSArray *named = codes[reason];
+  return named != nil
+      ? DSHStreamError([named[0] integerValue], named[1])
+      : DSHStreamError(2102, @"SSE event is not a JSON object");
+}
+
+/// One call into the core's stream reducer.
+static NSDictionary * _Nullable DSHStreamReduce(NSDictionary *envelope,
+                                                NSError **error) {
+  NSData *bytes = [NSJSONSerialization dataWithJSONObject:envelope
+                                                  options:0
+                                                    error:nil];
+  char *raw = bytes == nil ? NULL
+      : rish_agent_completion_response_reduce((const char *)bytes.bytes,
+                                              bytes.length);
+  if (raw == NULL) {
+    if (error != nil) *error = DSHStreamError(2102, @"SSE event is not a JSON object");
+    return nil;
+  }
+  NSData *reply = [NSData dataWithBytes:raw length:strlen(raw)];
+  rish_agent_string_free(raw);
+  id parsed = [NSJSONSerialization JSONObjectWithData:reply options:0 error:nil];
+  if (![parsed isKindOfClass:NSDictionary.class]) {
+    if (error != nil) *error = DSHStreamError(2102, @"SSE event is not a JSON object");
+    return nil;
+  }
+  if (![parsed[@"ok"] isEqual:@YES]) {
+    if (error != nil) *error = DSHStreamFailure(parsed);
+    return nil;
+  }
+  return parsed;
+}
+
 @interface DSHStreamEventParser ()
-@property(nonatomic, strong) NSMutableData *pending;
-@property(nonatomic, strong) NSMutableArray<NSString *> *eventLines;
+/// The core's state, opaque here; NSNull before the first chunk.
+@property(nonatomic, strong) id state;
 @property(nonatomic, assign) BOOL finished;
+@property(nonatomic, assign) BOOL sawTerminator;
 @property(nonatomic, copy, readwrite, nullable) NSString *streamedResponseId;
 @property(nonatomic, copy, readwrite, nullable) NSString *streamedModel;
 @end
-
-/// Sanitizes one OpenAI-style streamed `tool_calls` fragment into
-/// {index, id?, name?, arguments?}. Returns nil for an unusable shape.
-static NSDictionary * _Nullable DSHDecodeToolCallFragment(id raw) {
-  if (![raw isKindOfClass:NSDictionary.class]) return nil;
-  NSDictionary *fragment = raw;
-  id index = fragment[@"index"];
-  if (![index isKindOfClass:NSNumber.class] ||
-      CFGetTypeID((__bridge CFTypeRef)index) == CFBooleanGetTypeID()) return nil;
-  double position = [index doubleValue];
-  if (position != floor(position) || position < 0 || position > 15) return nil;
-  NSMutableDictionary *out = [NSMutableDictionary dictionary];
-  out[@"index"] = @((NSInteger)position);
-  if ([fragment[@"id"] isKindOfClass:NSString.class] &&
-      [fragment[@"id"] length] > 0) out[@"id"] = fragment[@"id"];
-  NSDictionary *function = [fragment[@"function"] isKindOfClass:NSDictionary.class]
-      ? fragment[@"function"] : @{};
-  if ([function[@"name"] isKindOfClass:NSString.class] &&
-      [function[@"name"] length] > 0) out[@"name"] = function[@"name"];
-  if ([function[@"arguments"] isKindOfClass:NSString.class] &&
-      [function[@"arguments"] length] > 0) out[@"arguments"] = function[@"arguments"];
-  return out;
-}
 
 @implementation DSHStreamEventParser
 
 - (instancetype)init {
   self = [super init];
   if (self) {
-    _pending = [NSMutableData data];
-    _eventLines = [NSMutableArray array];
+    _state = NSNull.null;
   }
   return self;
 }
 
 - (void)reset {
-  self.pending = [NSMutableData data];
-  [self.eventLines removeAllObjects];
+  self.state = NSNull.null;
   self.finished = NO;
+  self.sawTerminator = NO;
   self.streamedResponseId = nil;
   self.streamedModel = nil;
 }
 
-- (void)noteChunkIdentity:(NSDictionary *)chunk {
-  if (self.streamedResponseId == nil &&
-      [chunk[@"id"] isKindOfClass:NSString.class] && [chunk[@"id"] length] > 0) {
-    self.streamedResponseId = chunk[@"id"];
+/// The core's preview vocabulary in this file's delta vocabulary.
+static DSHStreamDelta *DSHDeltaFromPreview(NSDictionary *preview) {
+  NSMutableDictionary *delta = [NSMutableDictionary dictionary];
+  delta[@"type"] = @"delta";
+  if ([preview[@"text"] isKindOfClass:NSString.class]) {
+    delta[@"content"] = preview[@"text"];
   }
-  if (self.streamedModel == nil &&
-      [chunk[@"model"] isKindOfClass:NSString.class] && [chunk[@"model"] length] > 0) {
-    self.streamedModel = chunk[@"model"];
+  if ([preview[@"reasoning"] isKindOfClass:NSString.class]) {
+    delta[@"reasoning"] = preview[@"reasoning"];
   }
+  if ([preview[@"tool_calls"] isKindOfClass:NSArray.class]) {
+    delta[@"tool_calls"] = preview[@"tool_calls"];
+  }
+  if ([preview[@"finish_reason"] isKindOfClass:NSString.class]) {
+    delta[@"finish_reason"] = preview[@"finish_reason"];
+  }
+  return delta;
 }
 
-/// Decodes one complete SSE event (its accumulated data lines) into a
-/// delta dictionary, or nil for keep-alives/comments/blank data.
-static DSHStreamDelta * _Nullable DSHDecodeEventLines(
-    NSArray<NSString *> *lines, NSDictionary * _Nullable * _Nullable chunkOut,
-    NSError **error) {
-  if (chunkOut != nil) *chunkOut = nil;
-  if (lines.count == 0) return nil;
-  NSString *data = [lines componentsJoinedByString:@"\n"];
-  if ([data isEqualToString:@"[DONE]"]) {
-    return @{@"type": @"done"};
-  }
-  // Blank data (e.g. a bare "data: " keep-alive) is a legal SSE no-op,
-  // not a JSON decode failure.
-  if ([[data stringByTrimmingCharactersInSet:
-      NSCharacterSet.whitespaceAndNewlineCharacterSet] length] == 0) {
-    return nil;
-  }
-  NSData *json = [data dataUsingEncoding:NSUTF8StringEncoding];
-  if (json == nil) {
-    if (error != nil) {
-      *error = DSHStreamError(2101, @"SSE event is not valid UTF-8");
+/// Takes what one reduce answered: the new state, the identity it has seen,
+/// and the deltas to emit.
+- (NSArray<DSHStreamDelta *> *)acceptAnswer:(NSDictionary *)answer {
+  NSDictionary *state = [answer[@"state"] isKindOfClass:NSDictionary.class]
+      ? answer[@"state"] : nil;
+  if (state != nil) {
+    self.state = state;
+    if (self.streamedResponseId == nil &&
+        [state[@"id"] isKindOfClass:NSString.class]) {
+      self.streamedResponseId = state[@"id"];
     }
-    return nil;
-  }
-  NSError *decodeError = nil;
-  NSDictionary *chunk = [NSJSONSerialization JSONObjectWithData:json
-      options:0 error:&decodeError];
-  if (![chunk isKindOfClass:NSDictionary.class]) {
-    if (error != nil) {
-      *error = DSHStreamError(2102, @"SSE event is not a JSON object");
-    }
-    return nil;
-  }
-  if (chunkOut != nil) *chunkOut = chunk;
-  NSArray *choices = [chunk[@"choices"] isKindOfClass:NSArray.class]
-      ? chunk[@"choices"] : @[];
-  NSDictionary *choice = choices.count > 0 &&
-      [choices.firstObject isKindOfClass:NSDictionary.class]
-      ? choices.firstObject : nil;
-  if (choice == nil) {
-    // Rate-limit/style chunks without choices are tolerated as no-ops.
-    return nil;
-  }
-  NSDictionary *delta = [choice[@"delta"] isKindOfClass:NSDictionary.class]
-      ? choice[@"delta"] : @{};
-  NSString *content = [delta[@"content"] isKindOfClass:NSString.class]
-      ? delta[@"content"] : nil;
-  NSString *reasoning = [delta[@"reasoning_content"] isKindOfClass:NSString.class]
-      ? delta[@"reasoning_content"] : nil;
-  NSString *finish = [choice[@"finish_reason"] isKindOfClass:NSString.class]
-      ? choice[@"finish_reason"] : nil;
-  NSMutableArray *toolCalls = nil;
-  if (delta[@"tool_calls"] != nil && delta[@"tool_calls"] != NSNull.null) {
-    if (![delta[@"tool_calls"] isKindOfClass:NSArray.class] ||
-        [delta[@"tool_calls"] count] > 16) {
-      if (error != nil) {
-        *error = DSHStreamError(2106, @"SSE tool_calls fragment is not usable");
-      }
-      return nil;
-    }
-    toolCalls = [NSMutableArray array];
-    for (id raw in delta[@"tool_calls"]) {
-      NSDictionary *fragment = DSHDecodeToolCallFragment(raw);
-      if (fragment == nil) {
-        if (error != nil) {
-          *error = DSHStreamError(2106, @"SSE tool_calls fragment is not usable");
-        }
-        return nil;
-      }
-      [toolCalls addObject:fragment];
+    if (self.streamedModel == nil &&
+        [state[@"model"] isKindOfClass:NSString.class]) {
+      self.streamedModel = state[@"model"];
     }
   }
-  if ((content == nil || content.length == 0) &&
-      (reasoning == nil || reasoning.length == 0) && finish == nil &&
-      toolCalls.count == 0) {
-    return nil;
+  NSMutableArray<DSHStreamDelta *> *deltas = [NSMutableArray array];
+  NSArray *previews = [answer[@"previews"] isKindOfClass:NSArray.class]
+      ? answer[@"previews"] : @[];
+  for (id preview in previews) {
+    if ([preview isKindOfClass:NSDictionary.class]) {
+      [deltas addObject:DSHDeltaFromPreview(preview)];
+    }
   }
-  NSMutableDictionary *out = [NSMutableDictionary dictionary];
-  out[@"type"] = @"delta";
-  if (content != nil && content.length > 0) out[@"content"] = content;
-  if (reasoning != nil && reasoning.length > 0) out[@"reasoning"] = reasoning;
-  if (finish != nil && finish.length > 0) out[@"finish_reason"] = finish;
-  if (toolCalls.count > 0) out[@"tool_calls"] = [toolCalls copy];
-  return out;
+  // `[DONE]` shows nothing, so the core does not preview it; nothing can
+  // follow it either, so saying it here says it in the right place.
+  if (!self.sawTerminator && [answer[@"done"] isEqual:@YES]) {
+    self.sawTerminator = YES;
+    [deltas addObject:@{@"type" : @"done"}];
+  }
+  return deltas;
 }
 
 - (NSArray<DSHStreamDelta *> *)appendBytes:(const uint8_t *)bytes
@@ -170,92 +159,14 @@ static DSHStreamDelta * _Nullable DSHDecodeEventLines(
     return nil;
   }
   if (length == 0) return @[];
-
-  [self.pending appendBytes:bytes length:length];
-
-  NSMutableArray<DSHStreamDelta *> *deltas = [NSMutableArray array];
-  while (YES) {
-    // Find the next newline in pending.
-    const void *base = self.pending.bytes;
-    NSUInteger total = self.pending.length;
-    const uint8_t *nl = static_cast<const uint8_t *>(
-        memchr(base, '\n', total));
-    if (nl == nullptr) {
-      if (total > (NSUInteger)DSHStreamMaxLineBytes) {
-        if (error != nil) {
-          *error = DSHStreamError(2104, @"SSE line exceeds the size limit");
-        }
-        return nil;
-      }
-      break;
-    }
-    NSUInteger lineLength = static_cast<NSUInteger>(
-        reinterpret_cast<const uint8_t *>(nl) -
-        static_cast<const uint8_t *>(base));
-    if (lineLength > (NSUInteger)DSHStreamMaxLineBytes) {
-      if (error != nil) {
-        *error = DSHStreamError(2104, @"SSE line exceeds the size limit");
-      }
-      return nil;
-    }
-    NSData *lineData = [NSData dataWithBytes:base length:lineLength];
-    NSString *line = [[NSString alloc] initWithData:lineData
-                                           encoding:NSUTF8StringEncoding];
-    if (line == nil) {
-      // Fail closed: an undecodable line must never be mistaken for a
-      // blank line (nil.length == 0) or silently dropped.
-      if (error != nil) {
-        *error = DSHStreamError(2101, @"SSE line is not valid UTF-8");
-      }
-      return nil;
-    }
-    // Strip a trailing CR from CRLF transports.
-    if ([line hasSuffix:@"\r"]) {
-      line = [line substringToIndex:line.length - 1];
-    }
-    [self.pending replaceBytesInRange:NSMakeRange(0, lineLength + 1)
-                            withBytes:nullptr length:0];
-
-    if (line.length == 0) {
-      // Blank line: the accumulated event is complete.
-      if (self.eventLines.count > 0) {
-        if (self.eventLines.count > (NSUInteger)DSHStreamMaxBufferedLines) {
-          if (error != nil) {
-            *error = DSHStreamError(2105, @"SSE event has too many lines");
-          }
-          return nil;
-        }
-        NSDictionary *chunk = nil;
-        DSHStreamDelta *delta = DSHDecodeEventLines(self.eventLines, &chunk, error);
-        [self.eventLines removeAllObjects];
-        if (chunk != nil) [self noteChunkIdentity:chunk];
-        if (delta != nil) [deltas addObject:delta];
-        else if (error != nil && *error != nil) return nil;
-      }
-      continue;
-    }
-    if ([line hasPrefix:@":"]) {
-      // SSE comment / keep-alive.
-      continue;
-    }
-    if ([line hasPrefix:@"data:"]) {
-      // Enforce the buffered-line cap as lines accumulate, not only when
-      // the terminating blank line finally arrives: an unterminated event
-      // must not grow the line buffer without bound.
-      if (self.eventLines.count >= (NSUInteger)DSHStreamMaxBufferedLines) {
-        if (error != nil) {
-          *error = DSHStreamError(2105, @"SSE event has too many lines");
-        }
-        return nil;
-      }
-      NSString *payload = [line substringFromIndex:5];
-      if ([payload hasPrefix:@" "]) payload = [payload substringFromIndex:1];
-      [self.eventLines addObject:payload];
-      continue;
-    }
-    // Other field names (event:, id:, retry:) are ignored per SSE spec.
-  }
-  return deltas.count > 0 ? deltas : @[];
+  NSString *encoded = [[NSData dataWithBytes:bytes length:length]
+      base64EncodedStringWithOptions:0];
+  NSDictionary *answer = DSHStreamReduce(@{
+    @"op" : @"stream_chunk",
+    @"state" : self.state,
+    @"chunk_base64" : encoded,
+  }, error);
+  return answer == nil ? nil : [self acceptAnswer:answer];
 }
 
 - (NSArray<DSHStreamDelta *> *)finish:(NSError **)error {
@@ -266,35 +177,13 @@ static DSHStreamDelta * _Nullable DSHDecodeEventLines(
     return nil;
   }
   self.finished = YES;
-  NSMutableArray<DSHStreamDelta *> *deltas = [NSMutableArray array];
-  if (self.pending.length > 0) {
-    // Tolerate one unterminated final line — but never silently drop
-    // bytes that are not valid UTF-8: fail closed instead.
-    NSString *line = [[NSString alloc] initWithData:self.pending
-                                           encoding:NSUTF8StringEncoding];
-    if (line == nil) {
-      if (error != nil) {
-        *error = DSHStreamError(2101, @"SSE trailing bytes are not valid UTF-8");
-      }
-      return nil;
-    }
-    if ([line hasSuffix:@"\r"]) line = [line substringToIndex:line.length - 1];
-    if ([line hasPrefix:@"data:"]) {
-      NSString *payload = [line substringFromIndex:5];
-      if ([payload hasPrefix:@" "]) payload = [payload substringFromIndex:1];
-      [self.eventLines addObject:payload];
-    }
-    self.pending = [NSMutableData data];
-  }
-  if (self.eventLines.count > 0) {
-    NSDictionary *chunk = nil;
-    DSHStreamDelta *delta = DSHDecodeEventLines(self.eventLines, &chunk, error);
-    [self.eventLines removeAllObjects];
-    if (chunk != nil) [self noteChunkIdentity:chunk];
-    if (delta != nil) [deltas addObject:delta];
-    else if (error != nil && *error != nil) return nil;
-  }
-  return deltas;
+  // Whatever is still carried is a final line the socket never terminated,
+  // and a final event nothing closed. Both are read rather than dropped.
+  NSDictionary *answer = DSHStreamReduce(@{
+    @"op" : @"stream_flush",
+    @"state" : self.state,
+  }, error);
+  return answer == nil ? nil : [self acceptAnswer:answer];
 }
 
 @end
