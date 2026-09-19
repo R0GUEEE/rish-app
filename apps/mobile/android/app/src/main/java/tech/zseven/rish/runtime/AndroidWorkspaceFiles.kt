@@ -11,6 +11,7 @@ import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
 import java.util.TimeZone
+import java.util.UUID
 
 /**
  * The Files browser's view of a workspace, on Android.
@@ -24,10 +25,10 @@ import java.util.TimeZone
  * rules; only the spelling of a revision differs, because this bridge's
  * reader requires a digest where the agent's tools carry opaque metadata.
  *
- * **What is here.** Listing, reading and writing. Creating directories,
- * renaming, trashing and restoring are not implemented on this platform yet:
- * they reject rather than pretend, and the trash listing is empty because
- * nothing can put anything in it.
+ * **What is here.** Listing, reading, writing, creating directories,
+ * renaming, and a recoverable trash. Portable tools and the capability
+ * record still reject: the record asserts a tool set this platform does not
+ * have, and asserting it would be a claim rather than an answer.
  */
 internal class AndroidWorkspaceFiles(
     private val workspaces: AndroidWorkspaceRegistry,
@@ -51,6 +52,10 @@ internal class AndroidWorkspaceFiles(
             // A symbolic link leads out of the root by definition; the agent's
             // executor refuses one for the same reason.
             .filter { !isLink(it) }
+            // The trash and a half-written file are this store's bookkeeping,
+            // not the person's files. `.git` stays visible: the reader knows
+            // about it and protects it itself.
+            .filter { !hidden(path, it.name) }
             .take(max)
             .forEach { entries.put(entry(root, it, join(path, it.name))) }
         return JSONObject()
@@ -143,25 +148,170 @@ internal class AndroidWorkspaceFiles(
             .put("created", !existed)
     }
 
-    /**
-     * `listTrashV2`: always empty, and truthfully so. Trashing is not
-     * implemented on this platform, so nothing has ever been put there; the
-     * drawer asks for this list beside every directory it opens, and a
-     * refusal here would make browsing impossible rather than telling anyone
-     * anything.
-     */
-    fun listTrash(request: JSONObject?): JSONObject {
-        val captured = exact(request, "schema_version", "root", "max_entries")
-        directory(captured)
-        val max = integer(captured, "max_entries")
-        if (max < 1 || max > MAX_LIST_ENTRIES) throw Refused(INVALID, "max_entries is out of range")
+    /** `createDirectoryV2`: one directory, where nothing is yet. */
+    fun createDirectory(request: JSONObject?): JSONObject {
+        val captured = exact(request, "schema_version", "root", "path")
+        val root = directory(captured)
+        val path = captured.optString("path")
+        val target = resolve(root, path, allowRoot = false)
+        if (target.exists()) throw Refused(CONFLICT, "Something already exists at that path")
+        val parent = target.parentFile ?: throw Refused(INVALID, "Path is invalid")
+        if (!parent.isDirectory) throw Refused(NOT_FOUND, "No such directory")
+        if (!target.mkdir()) throw Refused(PERSISTENCE, "Directory could not be created")
         return JSONObject()
             .put("schema_version", 1)
             .put("root", captured.getJSONObject("root"))
-            .put("entries", JSONArray())
-            // Nothing has been trashed, so nothing there is unreadable either.
-            .put("invalid_record_count", 0)
+            .put("directory", entry(root, target, path))
     }
+
+    /** `renameEntryV2`: a move within the workspace, never over something. */
+    fun rename(request: JSONObject?): JSONObject {
+        val captured = exact(request, "schema_version", "root", "source_path", "destination_path")
+        val root = directory(captured)
+        val from = captured.optString("source_path")
+        val to = captured.optString("destination_path")
+        if (from == to) throw Refused(INVALID, "Source and destination are the same")
+        val source = resolve(root, from, allowRoot = false)
+        val destination = resolve(root, to, allowRoot = false)
+        if (!source.exists()) throw Refused(NOT_FOUND, "No such file or directory")
+        if (destination.exists()) throw Refused(CONFLICT, "Something already exists at that path")
+        // Moving a directory into itself leaves it unreachable, and the
+        // rename would appear to succeed.
+        if (source.isDirectory && destination.canonicalPath.startsWith(source.canonicalPath + File.separator)) {
+            throw Refused(CONFLICT, "A folder cannot be moved into itself")
+        }
+        val parent = destination.parentFile ?: throw Refused(INVALID, "Path is invalid")
+        if (!parent.isDirectory) throw Refused(NOT_FOUND, "No such directory")
+        if (!source.renameTo(destination)) throw Refused(PERSISTENCE, "Entry could not be renamed")
+        return JSONObject()
+            .put("schema_version", 1)
+            .put("root", captured.getJSONObject("root"))
+            .put("entry", entry(root, destination, to))
+            .put("from", from)
+    }
+
+    /**
+     * `trashEntryV2`: recoverable deletion.
+     *
+     * The entry is moved whole into `.trash/<trash_id>/payload/`, beside a
+     * receipt that remembers where it came from. Nothing is unlinked, so a
+     * restore is a move back rather than a rebuild, and a trash that cannot
+     * be read is reported as a count rather than pretended away.
+     */
+    fun trash(request: JSONObject?): JSONObject {
+        val captured = exact(request, "schema_version", "root", "path")
+        val root = directory(captured)
+        val path = captured.optString("path")
+        val target = resolve(root, path, allowRoot = false)
+        if (!target.exists()) throw Refused(NOT_FOUND, "No such file or directory")
+        if (isLink(target)) throw Refused(CONFLICT, "That entry is a link")
+        val kind = if (target.isDirectory) "directory" else "file"
+        val trashId = UUID.randomUUID().toString()
+        val holder = File(trashRoot(root), trashId)
+        val payload = File(holder, PAYLOAD)
+        if (!payload.mkdirs()) throw Refused(PERSISTENCE, "Trash could not be written")
+        val receipt = JSONObject()
+            .put("schema_version", 1)
+            .put("trash_id", trashId)
+            .put("original_path", path)
+            .put("kind", kind)
+            .put("deleted_at", AndroidClock.now())
+        // The receipt lands first: an entry with a payload and no receipt is
+        // unrecoverable, while a receipt with no payload is merely reported
+        // as an unreadable record.
+        try {
+            File(holder, RECEIPT).writeText(receipt.toString())
+        } catch (_: IOException) {
+            holder.deleteRecursively()
+            throw Refused(PERSISTENCE, "Trash could not be written")
+        }
+        if (!target.renameTo(File(payload, target.name))) {
+            holder.deleteRecursively()
+            throw Refused(PERSISTENCE, "Entry could not be moved to the trash")
+        }
+        return JSONObject()
+            .put("schema_version", 1)
+            .put("root", captured.getJSONObject("root"))
+            .put("receipt", receipt)
+    }
+
+    /** `listTrashV2`: the receipts, newest first, and how many were unreadable. */
+    fun listTrash(request: JSONObject?): JSONObject {
+        val captured = exact(request, "schema_version", "root", "max_entries")
+        val root = directory(captured)
+        val max = integer(captured, "max_entries")
+        if (max < 1 || max > MAX_LIST_ENTRIES) throw Refused(INVALID, "max_entries is out of range")
+        val holders = trashRoot(root).listFiles()?.filter { it.isDirectory } ?: emptyList()
+        var invalid = 0
+        val receipts = mutableListOf<JSONObject>()
+        for (holder in holders) {
+            val receipt = readReceipt(holder)
+            if (receipt == null || !File(holder, PAYLOAD).isDirectory) invalid += 1
+            else receipts.add(receipt)
+        }
+        receipts.sortByDescending { it.optString("deleted_at") }
+        val entries = JSONArray()
+        receipts.take(max).forEach { entries.put(it) }
+        return JSONObject()
+            .put("schema_version", 1)
+            .put("root", captured.getJSONObject("root"))
+            .put("entries", entries)
+            // Bounded by the same cap the entries are: this is a hint for the
+            // reader, not a census.
+            .put("invalid_record_count", minOf(invalid, max))
+    }
+
+    /** `restoreFromTrashV2`: the move back, refused rather than overwriting. */
+    fun restore(request: JSONObject?): JSONObject {
+        val captured = exact(request, "schema_version", "root", "trash_id", "destination_path")
+        val root = directory(captured)
+        val trashId = captured.opt("trash_id") as? String
+            ?: throw Refused(INVALID, "trash_id is invalid")
+        if (!UUID_PATTERN.matches(trashId)) throw Refused(INVALID, "trash_id is invalid")
+        val holder = File(trashRoot(root), trashId)
+        val receipt = readReceipt(holder) ?: throw Refused(NOT_FOUND, "No such trashed entry")
+        val payload = File(holder, PAYLOAD).listFiles()?.firstOrNull()
+            ?: throw Refused(NOT_FOUND, "That trashed entry has no contents")
+        val requested = captured.opt("destination_path")?.takeIf { it != JSONObject.NULL } as? String
+        val path = requested ?: receipt.optString("original_path")
+        val target = resolve(root, path, allowRoot = false)
+        if (target.exists()) throw Refused(CONFLICT, "Something already exists at that path")
+        val parent = target.parentFile ?: throw Refused(INVALID, "Path is invalid")
+        if (!parent.isDirectory) throw Refused(NOT_FOUND, "No such directory")
+        if (!payload.renameTo(target)) throw Refused(PERSISTENCE, "Entry could not be restored")
+        // The holder is bookkeeping; if it survives the restore it is listed
+        // as an unreadable record rather than offered again.
+        holder.deleteRecursively()
+        return JSONObject()
+            .put("schema_version", 1)
+            .put("root", captured.getJSONObject("root"))
+            .put("entry", entry(root, target, path))
+            .put("trash_id", trashId)
+            .put("original_path", receipt.optString("original_path"))
+    }
+
+    private fun trashRoot(root: File): File {
+        val trash = File(root, TRASH)
+        if (!trash.isDirectory && !trash.mkdirs()) {
+            throw Refused(PERSISTENCE, "Trash could not be opened")
+        }
+        return trash
+    }
+
+    private fun readReceipt(holder: File): JSONObject? {
+        val file = File(holder, RECEIPT)
+        if (!file.isFile) return null
+        return try {
+            val receipt = JSONObject(file.readText())
+            // A receipt that does not name this holder is not this holder's.
+            if (receipt.optString("trash_id") != holder.name) null else receipt
+        } catch (_: Exception) {
+            null
+        }
+    }
+
+    private fun hidden(path: String, name: String): Boolean =
+        (path.isEmpty() && name == TRASH) || name.endsWith(".rish-staging")
 
     private fun exact(request: JSONObject?, vararg keys: String): JSONObject {
         val captured = request ?: throw Refused(INVALID, "Workspace request is missing")
@@ -306,6 +456,11 @@ internal class AndroidWorkspaceFiles(
     private companion object {
         val format = SimpleDateFormat("yyyy-MM-dd'T'HH:mm:ss.SSS'Z'", Locale.US)
             .apply { timeZone = TimeZone.getTimeZone("UTC") }
+        val UUID_PATTERN =
+            Regex("^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$")
+        const val TRASH = ".trash"
+        const val PAYLOAD = "payload"
+        const val RECEIPT = "receipt.json"
         const val MAX_PATH_BYTES = 1024
         const val MAX_TEXT_BYTES = 1024 * 1024
         const val MAX_LIST_ENTRIES = 1000

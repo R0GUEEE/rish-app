@@ -60,6 +60,9 @@ class AndroidWorkspaceFilesTest {
         }
     }
 
+    private val UUID_SHAPE =
+        Regex("^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$")
+
     private fun refusal(body: () -> JSONObject): String = try {
         "answered: " + body()
     } catch (refused: AndroidWorkspaceFiles.Refused) {
@@ -210,22 +213,171 @@ class AndroidWorkspaceFilesTest {
         assertEquals("E_WORKSPACE_INVALID", refusal { f.files.list(listRequest(f, "", max = 0)) })
     }
 
-    /**
-     * The trash is empty and says so. Nothing can be put there on this
-     * platform, and the drawer asks for this list beside every directory it
-     * opens -- a refusal would stop it browsing at all.
-     */
-    @Test fun theTrashIsEmptyRatherThanUnavailable() = fixture { f ->
+    /** An empty workspace has an empty trash, and says so. */
+    @Test fun theTrashStartsEmpty() = fixture { f ->
         val trash = f.files.listTrash(
             JSONObject().put("schema_version", 1).put("root", f.root).put("max_entries", 8),
         )
         assertEquals(0, trash.getJSONArray("entries").length())
+        assertEquals(0, trash.getInt("invalid_record_count"))
+    }
+
+    /**
+     * Deleting is recoverable: the entry is moved whole, the receipt
+     * remembers where it came from, and restoring is the move back.
+     */
+    @Test fun aTrashedEntryComesBackWhereItWas() = fixture { f ->
+        f.files.write(writeRequest(f, "notes.md", "keep me\n"))
+        val receipt = f.files.trash(
+            JSONObject().put("schema_version", 1).put("root", f.root).put("path", "notes.md"),
+        ).getJSONObject("receipt")
+        assertEquals("notes.md", receipt.getString("original_path"))
+        assertEquals("file", receipt.getString("kind"))
+        assertTrue(receipt.getString("trash_id").matches(UUID_SHAPE))
+        assertTrue(
+            receipt.getString("deleted_at"),
+            receipt.getString("deleted_at")
+                .matches(Regex("^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}\\.\\d{3}Z$")),
+        )
+        // Gone from the listing, and the trash itself is never listed.
+        assertEquals(0, f.files.list(listRequest(f, "")).getJSONArray("entries").length())
+
+        val listed = f.files.listTrash(
+            JSONObject().put("schema_version", 1).put("root", f.root).put("max_entries", 8),
+        )
+        assertEquals(1, listed.getJSONArray("entries").length())
+        assertEquals(
+            receipt.getString("trash_id"),
+            listed.getJSONArray("entries").getJSONObject(0).getString("trash_id"),
+        )
+
+        val restored = f.files.restore(
+            JSONObject().put("schema_version", 1).put("root", f.root)
+                .put("trash_id", receipt.getString("trash_id"))
+                .put("destination_path", JSONObject.NULL),
+        )
+        assertEquals("notes.md", restored.getJSONObject("entry").getString("path"))
+        assertEquals("keep me\n", f.files.read(readRequest(f, "notes.md")).getString("content"))
+        assertEquals(
+            0,
+            f.files.listTrash(
+                JSONObject().put("schema_version", 1).put("root", f.root).put("max_entries", 8),
+            ).getJSONArray("entries").length(),
+        )
+    }
+
+    /** A restore never writes over what is there now. */
+    @Test fun aRestoreWillNotOverwrite() = fixture { f ->
+        f.files.write(writeRequest(f, "notes.md", "first\n"))
+        val receipt = f.files.trash(
+            JSONObject().put("schema_version", 1).put("root", f.root).put("path", "notes.md"),
+        ).getJSONObject("receipt")
+        f.files.write(writeRequest(f, "notes.md", "second\n"))
+        assertEquals(
+            "E_WORKSPACE_CONFLICT",
+            refusal {
+                f.files.restore(
+                    JSONObject().put("schema_version", 1).put("root", f.root)
+                        .put("trash_id", receipt.getString("trash_id"))
+                        .put("destination_path", JSONObject.NULL),
+                )
+            },
+        )
+        // The one that is there is untouched, and the trashed one is still
+        // recoverable somewhere else.
+        assertEquals("second\n", f.files.read(readRequest(f, "notes.md")).getString("content"))
+        val elsewhere = f.files.restore(
+            JSONObject().put("schema_version", 1).put("root", f.root)
+                .put("trash_id", receipt.getString("trash_id"))
+                .put("destination_path", "notes-old.md"),
+        )
+        assertEquals("notes-old.md", elsewhere.getJSONObject("entry").getString("path"))
+        assertEquals("first\n", f.files.read(readRequest(f, "notes-old.md")).getString("content"))
+    }
+
+    /** A folder is trashed whole, contents and all. */
+    @Test fun aTrashedFolderKeepsItsContents() = fixture { f ->
+        File(f.directory, "src").mkdirs()
+        f.files.write(writeRequest(f, "src/main.kt", "fun main() {}\n"))
+        val receipt = f.files.trash(
+            JSONObject().put("schema_version", 1).put("root", f.root).put("path", "src"),
+        ).getJSONObject("receipt")
+        assertEquals("directory", receipt.getString("kind"))
+        f.files.restore(
+            JSONObject().put("schema_version", 1).put("root", f.root)
+                .put("trash_id", receipt.getString("trash_id"))
+                .put("destination_path", JSONObject.NULL),
+        )
+        assertEquals("fun main() {}\n", f.files.read(readRequest(f, "src/main.kt")).getString("content"))
+    }
+
+    /** A new folder, and a rename that will not land on something. */
+    @Test fun aFolderIsCreatedAndAnEntryRenamed() = fixture { f ->
+        val made = f.files.createDirectory(
+            JSONObject().put("schema_version", 1).put("root", f.root).put("path", "docs"),
+        )
+        assertEquals("directory", made.getJSONObject("directory").getString("kind"))
+        assertEquals(
+            "E_WORKSPACE_CONFLICT",
+            refusal {
+                f.files.createDirectory(
+                    JSONObject().put("schema_version", 1).put("root", f.root).put("path", "docs"),
+                )
+            },
+        )
+        f.files.write(writeRequest(f, "docs/one.md", "one\n"))
+        val renamed = f.files.rename(
+            JSONObject().put("schema_version", 1).put("root", f.root)
+                .put("source_path", "docs/one.md").put("destination_path", "docs/two.md"),
+        )
+        assertEquals("docs/two.md", renamed.getJSONObject("entry").getString("path"))
+        assertEquals("docs/one.md", renamed.getString("from"))
+        assertEquals("one\n", f.files.read(readRequest(f, "docs/two.md")).getString("content"))
+        // A rename never writes over an existing entry, and a folder cannot
+        // swallow itself.
+        f.files.write(writeRequest(f, "docs/three.md", "three\n"))
+        assertEquals(
+            "E_WORKSPACE_CONFLICT",
+            refusal {
+                f.files.rename(
+                    JSONObject().put("schema_version", 1).put("root", f.root)
+                        .put("source_path", "docs/two.md").put("destination_path", "docs/three.md"),
+                )
+            },
+        )
+        assertEquals(
+            "E_WORKSPACE_CONFLICT",
+            refusal {
+                f.files.rename(
+                    JSONObject().put("schema_version", 1).put("root", f.root)
+                        .put("source_path", "docs").put("destination_path", "docs/inner"),
+                )
+            },
+        )
+    }
+
+    /** A trash holder without its contents is counted, not offered. */
+    @Test fun anUnreadableTrashRecordIsCountedRatherThanListed() = fixture { f ->
+        f.files.write(writeRequest(f, "notes.md", "gone\n"))
+        val receipt = f.files.trash(
+            JSONObject().put("schema_version", 1).put("root", f.root).put("path", "notes.md"),
+        ).getJSONObject("receipt")
+        File(File(f.directory, ".trash"), receipt.getString("trash_id") + "/payload")
+            .deleteRecursively()
+        val listed = f.files.listTrash(
+            JSONObject().put("schema_version", 1).put("root", f.root).put("max_entries", 8),
+        )
+        assertEquals(0, listed.getJSONArray("entries").length())
+        assertEquals(1, listed.getInt("invalid_record_count"))
     }
 
     /** The bridge serves the three operations the reader requires. */
     @Test fun theBridgeOwnsTheseOperations() {
         val methods = tech.zseven.rish.modules.LocalWorkspaceModule::class.java.methods.map { it.name }
-        for (name in listOf("listV2", "readV2", "writeV2", "listTrashV2")) {
+        for (name in listOf(
+            "listV2", "readV2", "writeV2", "listTrashV2",
+            "createDirectoryV2", "renameEntryV2", "trashEntryV2", "restoreFromTrashV2",
+        )) {
             assertTrue("$name must be declared", name in methods)
         }
     }

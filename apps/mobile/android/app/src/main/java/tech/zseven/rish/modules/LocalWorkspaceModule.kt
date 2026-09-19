@@ -16,10 +16,10 @@ import tech.zseven.rish.runtime.RuntimeJson
 /**
  * LocalWorkspace on Android: what the Files drawer lists and opens.
  *
- * The rules live in [AndroidWorkspaceFiles]. Listing, reading and writing are
- * served; creating directories, renaming, trashing and restoring are not
- * implemented on this platform and keep rejecting, so the drawer can browse
- * and read without anything here pretending to more than it does.
+ * The rules live in [AndroidWorkspaceFiles]: listing, reading, writing,
+ * creating directories, renaming, and a recoverable trash. Portable tools and
+ * the capability record still reject, because the record asserts a tool set
+ * this platform does not have.
  */
 class LocalWorkspaceModule(reactContext: ReactApplicationContext) :
     ReactContextBaseJavaModule(reactContext) {
@@ -58,19 +58,19 @@ class LocalWorkspaceModule(reactContext: ReactApplicationContext) :
 
     @ReactMethod
     fun createDirectoryV2(request: ReadableMap?, promise: Promise) =
-        RishUnavailable.reject("LocalWorkspace", "E_WORKSPACE_UNAVAILABLE", promise)
+        answer("createDirectoryV2", request, promise) { runtime.workspaceFiles.createDirectory(it) }
 
     @ReactMethod
     fun renameEntryV2(request: ReadableMap?, promise: Promise) =
-        RishUnavailable.reject("LocalWorkspace", "E_WORKSPACE_UNAVAILABLE", promise)
+        answer("renameEntryV2", request, promise) { runtime.workspaceFiles.rename(it) }
 
     @ReactMethod
     fun trashEntryV2(request: ReadableMap?, promise: Promise) =
-        RishUnavailable.reject("LocalWorkspace", "E_WORKSPACE_UNAVAILABLE", promise)
+        answer("trashEntryV2", request, promise) { runtime.workspaceFiles.trash(it) }
 
     @ReactMethod
     fun restoreFromTrashV2(request: ReadableMap?, promise: Promise) =
-        RishUnavailable.reject("LocalWorkspace", "E_WORKSPACE_UNAVAILABLE", promise)
+        answer("restoreFromTrashV2", request, promise) { runtime.workspaceFiles.restore(it) }
 
     @ReactMethod
     fun executePortableToolV2(request: ReadableMap?, promise: Promise) =
