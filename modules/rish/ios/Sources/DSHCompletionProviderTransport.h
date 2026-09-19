@@ -33,6 +33,14 @@ typedef void (^DSHCompletionProviderTransportRedirectDecisionBlock)(BOOL rejecte
 typedef void (^DSHCompletionProviderTransportDiagnosticBlock)(NSDictionary *diagnostic);
 #endif
 
+/// One round's request body, built by the shared core for the named dialect
+/// (`chat-completions`, `messages` or `responses`). Returns nil and sets
+/// `failureCode` to the core's word for the refusal.
+NSDictionary * _Nullable DSHCompletionTransportRequestBody(
+    NSString *dialect, NSString *model, NSString *thinkingMode,
+    NSArray *messages, NSArray *tools, BOOL streaming,
+    NSString * _Nullable * _Nullable failureCode);
+
 @protocol DSHProviderStreamEventParsing <NSObject>
 
 /// Feed raw chunk bytes. Returns the deltas decoded from complete SSE

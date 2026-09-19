@@ -269,84 +269,18 @@ static BOOL ClaudeLastAssistantUsesTools(NSArray *converted) {
     if (error != nil) *error = ClaudeTransportError(2201, @"E_COMPLETION_MODEL");
     return nil;
   }
-  NSMutableArray *systemBlocks = [NSMutableArray array];
-  NSMutableArray *converted = [NSMutableArray array];
-  for (NSDictionary *message in messages) {
-    NSString *role = ClaudeString(message[@"role"]);
-    if ([role isEqualToString:@"system"]) {
-      NSString *text = ClaudeString(message[@"content"]) ?: @"";
-      if (text.length > 0) {
-        [systemBlocks addObject:@{@"type": @"text", @"text": text}];
-      }
-      continue;
-    }
-    if (!ClaudeAppendMessage(converted, message, error)) return nil;
+  // The body, the model families and the rewriting of turns into content
+  // blocks are all the shared core's; what stays here is this transport's
+  // vocabulary for refusing.
+  NSString *failure = nil;
+  NSDictionary *body = DSHCompletionTransportRequestBody(
+      @"messages", model, thinkingMode, messages, tools, streaming, &failure);
+  if (body == nil && error != nil) {
+    *error = [failure isEqualToString:@"E_COMPLETION_TOOLS"]
+        ? ClaudeTransportError(2210, failure)
+        : ClaudeTransportError(2202, failure);
   }
-  NSMutableArray *claudeTools = [NSMutableArray array];
-  for (id rawTool in tools) {
-    NSDictionary *tool = ClaudeDictionary(rawTool);
-    NSDictionary *function = ClaudeDictionary(tool[@"function"]);
-    NSString *name = ClaudeString(function[@"name"]);
-    NSString *description = ClaudeString(function[@"description"]);
-    NSDictionary *parameters = ClaudeDictionary(function[@"parameters"]);
-    if (name == nil || parameters == nil) {
-      if (error != nil) *error = ClaudeTransportError(2210, @"E_COMPLETION_TOOLS");
-      return nil;
-    }
-    NSMutableDictionary *entry = [@{@"name": name, @"input_schema": parameters}
-        mutableCopy];
-    if (description != nil) entry[@"description"] = description;
-    [claudeTools addObject:[entry copy]];
-  }
-  BOOL thinking = ![thinkingMode isEqualToString:@"off"];
-  BOOL maximal = [thinkingMode isEqualToString:@"max"];
-  NSString *effort = maximal ? @"max" : @"high";
-  NSInteger maxTokens = ClaudeMaxTokensPlain;
-  NSMutableDictionary *body = [@{
-    @"model": model,
-    @"stream": @(streaming),
-    @"messages": [converted copy],
-  } mutableCopy];
-  switch (ClaudeFamilyForModel(model)) {
-    case ClaudeThinkingFamilyBudget: {
-      // Continuation rounds replay tool_use turns whose thinking blocks
-      // (and signatures) are not in the closed transcript; the budget API
-      // rejects such a turn with thinking enabled, so it runs unthinking.
-      if (thinking && !ClaudeLastAssistantUsesTools(converted)) {
-        NSInteger budget = maximal ? ClaudeHaikuBudgetMax : ClaudeHaikuBudgetHigh;
-        body[@"thinking"] = @{@"type": @"enabled", @"budget_tokens": @(budget)};
-        maxTokens = budget + ClaudeMaxTokensPlain;
-      }
-      break;
-    }
-    case ClaudeThinkingFamilyAdaptive: {
-      if (thinking) {
-        body[@"thinking"] = @{@"type": @"adaptive", @"display": @"summarized"};
-        body[@"output_config"] = @{@"effort": effort};
-        maxTokens = ClaudeMaxTokensThinking;
-      } else {
-        body[@"thinking"] = @{@"type": @"disabled"};
-      }
-      break;
-    }
-    case ClaudeThinkingFamilyAlwaysOn: {
-      if (thinking) {
-        body[@"thinking"] = @{@"type": @"adaptive", @"display": @"summarized"};
-        body[@"output_config"] = @{@"effort": effort};
-        maxTokens = ClaudeMaxTokensThinking;
-      } else {
-        // Thinking cannot be disabled on this family; the default omitted
-        // display keeps the reasoning presentation empty and low effort
-        // keeps the round short.
-        body[@"output_config"] = @{@"effort": @"low"};
-      }
-      break;
-    }
-  }
-  body[@"max_tokens"] = @(maxTokens);
-  if (systemBlocks.count > 0) body[@"system"] = [systemBlocks copy];
-  if (claudeTools.count > 0) body[@"tools"] = [claudeTools copy];
-  return [body copy];
+  return body;
 }
 
 - (NSDictionary<NSString *, id> *)providerParseResponseData:(NSData *)data

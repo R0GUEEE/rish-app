@@ -29,12 +29,17 @@ static NSString * const DSHCompletionTransportErrorDomain = @"DSHCompletionTrans
                                                     streaming:(BOOL)streaming
                                                         error:(NSError **)error {
   if (error != nil) *error = nil;
-  NSDictionary *body = DSHCompletionRequestBodyV2(
-      model, thinkingMode, messages, tools);
-  if (body == nil) return nil;
-  NSMutableDictionary *bodyCopy = [body mutableCopy];
-  bodyCopy[@"stream"] = @(streaming);
-  return [bodyCopy copy];
+  // The body is the shared core's, for this dialect and the other two.
+  NSString *failure = nil;
+  NSDictionary *body = DSHCompletionTransportRequestBody(
+      @"chat-completions", model, thinkingMode, messages, tools, streaming,
+      &failure);
+  if (body == nil && error != nil) {
+    *error = [NSError errorWithDomain:DSHCompletionTransportErrorDomain
+                                 code:2001
+                             userInfo:@{NSLocalizedDescriptionKey: failure}];
+  }
+  return body;
 }
 
 - (NSDictionary<NSString *, id> *)providerParseResponseData:(NSData *)data

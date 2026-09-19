@@ -206,56 +206,17 @@ static BOOL CodexAppendItems(NSMutableArray *input, NSDictionary *message,
     if (error != nil) *error = CodexTransportError(3201, @"E_COMPLETION_MODEL");
     return nil;
   }
-  NSMutableArray *instructions = [NSMutableArray array];
-  NSMutableArray *input = [NSMutableArray array];
-  for (NSDictionary *message in messages) {
-    NSString *role = CodexString(message[@"role"]);
-    if ([role isEqualToString:@"system"]) {
-      NSString *text = CodexString(message[@"content"]) ?: @"";
-      if (text.length > 0) [instructions addObject:text];
-      continue;
-    }
-    if (!CodexAppendItems(input, message, error)) return nil;
+  // Flat input items, `store`, and the summary that carries the thinking
+  // mode all live in the shared core now.
+  NSString *failure = nil;
+  NSDictionary *body = DSHCompletionTransportRequestBody(
+      @"responses", model, thinkingMode, messages, tools, streaming, &failure);
+  if (body == nil && error != nil) {
+    *error = [failure isEqualToString:@"E_COMPLETION_TOOLS"]
+        ? CodexTransportError(3210, failure)
+        : CodexTransportError(3202, failure);
   }
-  NSMutableArray *codexTools = [NSMutableArray array];
-  for (id rawTool in tools) {
-    NSDictionary *tool = CodexDictionary(rawTool);
-    NSDictionary *function = CodexDictionary(tool[@"function"]);
-    NSString *name = CodexString(function[@"name"]);
-    NSString *description = CodexString(function[@"description"]);
-    NSDictionary *parameters = CodexDictionary(function[@"parameters"]);
-    if (name == nil || parameters == nil) {
-      if (error != nil) *error = CodexTransportError(3210, @"E_COMPLETION_TOOLS");
-      return nil;
-    }
-    // The registry schemas keep optional parameters, so strict mode (which
-    // demands every property be required) is off explicitly.
-    NSMutableDictionary *entry = [@{
-      @"type": @"function", @"name": name, @"parameters": parameters,
-      @"strict": @NO,
-    } mutableCopy];
-    if (description != nil) entry[@"description"] = description;
-    [codexTools addObject:[entry copy]];
-  }
-  BOOL thinking = ![thinkingMode isEqualToString:@"off"];
-  BOOL maximal = [thinkingMode isEqualToString:@"max"];
-  NSMutableDictionary *body = [@{
-    @"model": model,
-    @"stream": @(streaming),
-    @"store": @NO,
-    @"max_output_tokens": @(thinking ? CodexMaxOutputTokensReasoning
-                                     : CodexMaxOutputTokensPlain),
-    @"input": [input copy],
-  } mutableCopy];
-  if (instructions.count > 0) {
-    body[@"instructions"] = [instructions componentsJoinedByString:@"\n\n"];
-  }
-  if (codexTools.count > 0) body[@"tools"] = [codexTools copy];
-  if (thinking) {
-    body[@"reasoning"] = @{@"effort": @"high",
-                           @"summary": maximal ? @"detailed" : @"auto"};
-  }
-  return [body copy];
+  return body;
 }
 
 - (NSDictionary<NSString *, id> *)providerParseResponseData:(NSData *)data

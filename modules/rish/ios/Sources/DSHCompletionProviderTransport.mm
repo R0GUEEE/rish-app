@@ -46,6 +46,51 @@ static BOOL DSHCompletionTransportValidRequestId(NSString *value) {
 // the controller switches on these codes to decide whether a retry could help,
 // so a code outside the set would be a failure nothing knows how to recover
 // from.
+/// One round's request body, from the shared core
+/// (crates/rish-agent-core/src/completion_request.rs).
+///
+/// Every dialect's body is built there, from the same recorded cases in
+/// RishTests/Fixtures that this suite replays. `failureCode` comes back as
+/// the core's own word for a refusal, so each dialect can report it in the
+/// numbers its callers already switch on.
+NSDictionary *DSHCompletionTransportRequestBody(NSString *dialect,
+                                                NSString *model,
+                                                NSString *thinkingMode,
+                                                NSArray *messages,
+                                                NSArray *tools,
+                                                BOOL streaming,
+                                                NSString **failureCode) {
+  if (failureCode != nil) *failureCode = @"E_COMPLETION_BODY_INVALID";
+  NSDictionary *envelope = @{
+    @"op" : @"request_body",
+    @"dialect" : dialect,
+    @"model" : model ?: @"",
+    @"thinking_mode" : thinkingMode ?: @"",
+    @"streaming" : @(streaming),
+    @"messages" : messages ?: @[],
+    @"tools" : tools ?: @[],
+  };
+  if (![NSJSONSerialization isValidJSONObject:envelope]) return nil;
+  NSData *bytes = [NSJSONSerialization dataWithJSONObject:envelope options:0
+                                                    error:nil];
+  char *raw = bytes == nil ? NULL : rish_agent_completion_response_reduce(
+      (const char *)bytes.bytes, bytes.length);
+  if (raw == NULL) return nil;
+  NSData *replyBytes = [NSData dataWithBytes:raw length:strlen(raw)];
+  rish_agent_string_free(raw);
+  id reply = [NSJSONSerialization JSONObjectWithData:replyBytes options:0
+                                                error:nil];
+  if (![reply isKindOfClass:NSDictionary.class]) return nil;
+  if (![reply[@"ok"] isEqual:@YES]) {
+    if (failureCode != nil && [reply[@"failure_code"] isKindOfClass:NSString.class]) {
+      *failureCode = reply[@"failure_code"];
+    }
+    return nil;
+  }
+  NSDictionary *body = reply[@"body"];
+  return [body isKindOfClass:NSDictionary.class] ? body : nil;
+}
+
 static NSString *DSHCompletionTransportFailureCode(NSString *op,
                                                     NSDictionary *fields,
                                                     NSString *fallback) {
