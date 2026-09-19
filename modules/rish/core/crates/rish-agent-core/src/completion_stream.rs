@@ -357,78 +357,130 @@ fn settle(state: &mut Stream) -> Result<Option<Value>, Failure> {
     else {
         return Ok(None);
     };
-    // A finish reason spelled as the string "null" is how some providers say
-    // "not yet"; it is not a reason.
-    let mut said_finish = None;
-    if let Some(reason) = non_empty(choice.get("finish_reason")) {
-        if reason != "null" {
-            state.finish = Some(reason.clone());
-            said_finish = Some(reason);
-        }
-    }
     let empty = Map::new();
     let delta = choice
         .get("delta")
         .and_then(Value::as_object)
         .unwrap_or(&empty);
+    let said = Said {
+        text: non_empty(delta.get("content")),
+        reasoning: non_empty(delta.get("reasoning_content")),
+        // A finish reason spelled as the string "null" is how some providers
+        // say "not yet"; it is not a reason.
+        finish: non_empty(choice.get("finish_reason")).filter(|reason| reason != "null"),
+        fragments: fragments_of(delta.get("tool_calls"), "function")?,
+    };
+    apply(state, said)
+}
+
+/// One chunk's worth of what a reply said, in neither host's spelling.
+///
+/// A chat-completions chunk and a host's own delta describe the same thing
+/// differently, so both are read into this and accumulated by one piece of
+/// code. That is the point of the type: a reply assembled from a provider
+/// this core parses and one assembled from a dialect it does not cannot
+/// drift apart.
+struct Said {
+    text: Option<String>,
+    reasoning: Option<String>,
+    finish: Option<String>,
+    fragments: Vec<Fragment>,
+}
+
+struct Fragment {
+    index: i64,
+    id: Option<String>,
+    name: Option<String>,
+    arguments: Option<String>,
+}
+
+/// Tool-call fragments, from a list that may not be one.
+///
+/// `nested` names the key holding the name and the arguments: a provider
+/// chunk puts them under `function`, a host's own delta puts them beside the
+/// index. A fragment this cannot read is not one to skip -- what it
+/// describes is a call a person would be asked to approve -- so an unusable
+/// one ends the stream.
+fn fragments_of(value: Option<&Value>, nested: &str) -> Result<Vec<Fragment>, Failure> {
+    let listed = match value {
+        None | Some(Value::Null) => return Ok(Vec::new()),
+        Some(Value::Array(listed)) if listed.len() <= MAX_TOOL_CALLS => listed,
+        Some(_) => return Err(TOOL_FRAGMENT),
+    };
+    let mut fragments = Vec::with_capacity(listed.len());
+    for fragment in listed {
+        let Some(fragment) = fragment.as_object() else {
+            return Err(TOOL_FRAGMENT);
+        };
+        // The index is what keeps two interleaved calls apart, so a fragment
+        // without a usable one cannot be placed at all.
+        let index = match fragment.get("index").and_then(Value::as_i64) {
+            Some(index) if (0..MAX_TOOL_CALLS as i64).contains(&index) => index,
+            _ => return Err(TOOL_FRAGMENT),
+        };
+        let inner = fragment.get(nested).and_then(Value::as_object);
+        let at = |key: &str| -> Option<String> {
+            match inner {
+                Some(inner) => non_empty(inner.get(key)),
+                None if nested.is_empty() => non_empty(fragment.get(key)),
+                None => None,
+            }
+        };
+        fragments.push(Fragment {
+            index,
+            id: non_empty(fragment.get("id")),
+            name: at("name"),
+            arguments: at("arguments"),
+        });
+    }
+    Ok(fragments)
+}
+
+/// Accumulates what was said and answers what to show for it.
+fn apply(state: &mut Stream, said: Said) -> Result<Option<Value>, Failure> {
     let mut event = Map::new();
-    if let Some(piece) = non_empty(delta.get("content")) {
+    if let Some(piece) = said.text {
         state.text.push_str(&piece);
         event.insert("text".into(), Value::String(piece));
     }
-    if let Some(piece) = non_empty(delta.get("reasoning_content")) {
+    if let Some(piece) = said.reasoning {
         state.reasoning.push_str(&piece);
         event.insert("reasoning".into(), Value::String(piece));
     }
-    // A tool-call fragment this cannot read is not a fragment to skip: what
-    // it describes is a call a person would be asked to approve, so an
-    // unusable one ends the stream.
-    let fragments = match delta.get("tool_calls") {
-        None | Some(Value::Null) => &Vec::new()[..],
-        Some(Value::Array(fragments)) if fragments.len() <= MAX_TOOL_CALLS => &fragments[..],
-        Some(_) => return Err(TOOL_FRAGMENT),
-    };
-    {
-        let mut previewed = Vec::new();
-        for fragment in fragments {
-            let Some(fragment) = fragment.as_object() else {
-                return Err(TOOL_FRAGMENT);
-            };
-            // The index is what keeps two interleaved calls apart, so a
-            // fragment without a usable one cannot be placed at all.
-            let slot = match fragment.get("index").and_then(Value::as_i64) {
-                Some(slot) if (0..MAX_TOOL_CALLS as i64).contains(&slot) => slot,
-                _ => return Err(TOOL_FRAGMENT),
-            };
-            let mut preview = Map::new();
-            preview.insert("index".into(), json!(slot));
-            let identifier = non_empty(fragment.get("id"));
-            let function = fragment.get("function").and_then(Value::as_object);
-            let name = function.and_then(|function| non_empty(function.get("name")));
-            let arguments = function.and_then(|function| non_empty(function.get("arguments")));
-            let call = state.call_at(slot);
-            if let Some(identifier) = identifier {
+    let mut previewed = Vec::new();
+    for fragment in said.fragments {
+        let mut preview = Map::new();
+        preview.insert("index".into(), json!(fragment.index));
+        let call = state.call_at(fragment.index);
+        // A call is identified and named once. A provider that says either
+        // twice for the same index is contradicting itself, and the first
+        // answer is the one the fragments after it were adding to.
+        if let Some(identifier) = fragment.id {
+            if call.id.is_empty() {
                 call.id = identifier.clone();
-                preview.insert("id".into(), Value::String(identifier));
             }
-            if let Some(name) = name {
+            preview.insert("id".into(), Value::String(identifier));
+        }
+        if let Some(name) = fragment.name {
+            if call.name.is_empty() {
                 call.name = name.clone();
-                preview.insert("name".into(), Value::String(name));
             }
-            if let Some(arguments) = arguments {
-                call.arguments.push_str(&arguments);
-                preview.insert("arguments".into(), Value::String(arguments));
-            }
-            previewed.push(Value::Object(preview));
+            preview.insert("name".into(), Value::String(name));
         }
-        if !previewed.is_empty() {
-            event.insert("tool_calls".into(), Value::Array(previewed));
+        if let Some(arguments) = fragment.arguments {
+            call.arguments.push_str(&arguments);
+            preview.insert("arguments".into(), Value::String(arguments));
         }
+        previewed.push(Value::Object(preview));
+    }
+    if !previewed.is_empty() {
+        event.insert("tool_calls".into(), Value::Array(previewed));
     }
     // What a preview reports is what *this* event said, so a reason is
     // carried once, by the event that gave it, rather than repeated on
     // everything that follows.
-    if let Some(reason) = said_finish {
+    if let Some(reason) = said.finish {
+        state.finish = Some(reason.clone());
         event.insert("finish_reason".into(), Value::String(reason));
     }
     // A keep-alive, or a chunk carrying only usage, is nothing to show.
@@ -439,6 +491,31 @@ fn settle(state: &mut Stream) -> Result<Option<Value>, Failure> {
     })
 }
 
+/// The wire shape a reply is assembled into.
+///
+/// A round is settled by the same parser that reads a whole response, so a
+/// streamed reply has to look like one the provider sent in one piece --
+/// which means three shapes, because three providers say it three ways.
+#[derive(PartialEq, Eq, Clone, Copy)]
+enum Dialect {
+    /// OpenAI `chat.completion`: DeepSeek, GLM.
+    ChatCompletions,
+    /// OpenAI responses: Codex.
+    Responses,
+    /// Anthropic messages: Claude.
+    Messages,
+}
+
+impl Dialect {
+    fn named(name: Option<&str>) -> Self {
+        match name {
+            Some("responses") => Dialect::Responses,
+            Some("messages") => Dialect::Messages,
+            _ => Dialect::ChatCompletions,
+        }
+    }
+}
+
 /// What the host wants of the assembled reply, where the two differ.
 struct Assembly {
     /// `off`, `high` or `max`; a turn that asked to think says so in the
@@ -447,6 +524,8 @@ struct Assembly {
     /// Whether a stream that never said what it was fails here, or is
     /// answered with nulls for the response parser to reject.
     require_identity: bool,
+    /// The shape to answer in.
+    dialect: Dialect,
 }
 
 impl Assembly {
@@ -458,6 +537,7 @@ impl Assembly {
                 .unwrap_or("off")
                 .to_owned(),
             require_identity: envelope.get("require_identity") != Some(&Value::Bool(false)),
+            dialect: Dialect::named(envelope.get("dialect").and_then(Value::as_str)),
         }
     }
 }
@@ -470,18 +550,30 @@ fn finish(state: &Stream, want: &Assembly) -> Result<Value, Failure> {
         // A stream that stopped before it said what it was is not a reply.
         return Err(INCOMPLETE);
     }
+    // The wire may interleave fragments; the batch is ordered by index,
+    // because that is the order the model asked for.
+    let mut calls: Vec<&Call> = state.calls.iter().collect();
+    calls.sort_by_key(|call| call.index);
+    // A turn that asked to think reports the reasoning it got, even when
+    // that is none; a turn that never asked says nothing about it.
+    let spoke_reasoning = !state.reasoning.is_empty() || want.thinking_mode != "off";
+    Ok(match want.dialect {
+        Dialect::ChatCompletions => chat_completion(state, &calls, spoke_reasoning),
+        Dialect::Responses => response_output(state, &calls, spoke_reasoning),
+        Dialect::Messages => message_content(state, &calls, spoke_reasoning),
+    })
+}
+
+/// OpenAI's `chat.completion`, which DeepSeek and GLM answer in.
+fn chat_completion(state: &Stream, calls: &[&Call], reasoning: bool) -> Value {
     let mut message = Map::new();
     message.insert("role".into(), json!("assistant"));
-    if !state.calls.is_empty() {
-        let mut calls: Vec<&Call> = state.calls.iter().collect();
-        // The wire may interleave fragments; the batch is ordered by index,
-        // because that is the order the model asked for.
-        calls.sort_by_key(|call| call.index);
+    if !calls.is_empty() {
         message.insert(
             "tool_calls".into(),
             Value::Array(
                 calls
-                    .into_iter()
+                    .iter()
                     .map(|call| {
                         let mut function = Map::new();
                         if !call.name.is_empty() {
@@ -508,22 +600,19 @@ fn finish(state: &Stream, want: &Assembly) -> Result<Value, Failure> {
     // when it does not stream.
     message.insert(
         "content".into(),
-        if state.text.is_empty() && message.contains_key("tool_calls") {
+        if state.text.is_empty() && !calls.is_empty() {
             Value::Null
         } else {
             Value::String(state.text.clone())
         },
     );
-    // Reasoning is reported when there was any, and when the turn asked to
-    // think -- an empty string then says the model returned none, which is
-    // not the same as a turn that never asked.
-    if !state.reasoning.is_empty() || want.thinking_mode != "off" {
+    if reasoning {
         message.insert(
             "reasoning_content".into(),
             Value::String(state.reasoning.clone()),
         );
     }
-    Ok(json!({
+    json!({
         "id": state.id,
         "object": "chat.completion",
         "model": state.model,
@@ -532,7 +621,129 @@ fn finish(state: &Stream, want: &Assembly) -> Result<Value, Failure> {
             "message": Value::Object(message),
             "finish_reason": state.finish,
         }],
-    }))
+    })
+}
+
+/// OpenAI's responses shape, which Codex answers in: a list of output items
+/// rather than one message, and a status rather than a finish reason.
+fn response_output(state: &Stream, calls: &[&Call], reasoning: bool) -> Value {
+    let mut output = Vec::new();
+    if reasoning {
+        output.push(json!({
+            "type": "reasoning",
+            "summary": [{ "type": "summary_text", "text": state.reasoning }],
+        }));
+    }
+    if !state.text.is_empty() {
+        output.push(json!({
+            "type": "message",
+            "role": "assistant",
+            "content": [{ "type": "output_text", "text": state.text }],
+        }));
+    }
+    for call in calls {
+        let mut item = Map::new();
+        item.insert("type".into(), json!("function_call"));
+        if !call.id.is_empty() {
+            item.insert("call_id".into(), json!(call.id));
+        }
+        if !call.name.is_empty() {
+            item.insert("name".into(), json!(call.name));
+        }
+        item.insert("arguments".into(), json!(call.arguments));
+        output.push(Value::Object(item));
+    }
+    let mut object = Map::new();
+    object.insert("object".into(), json!("response"));
+    if let Some(id) = &state.id {
+        object.insert("id".into(), json!(id));
+    }
+    if let Some(model) = &state.model {
+        object.insert("model".into(), json!(model));
+    }
+    object.insert("output".into(), Value::Array(output));
+    // A stream that stopped short is in progress, not complete: the status
+    // is what this dialect's parser reads to decide that.
+    match state.finish.as_deref() {
+        Some("stop") | Some("tool_calls") => {
+            object.insert("status".into(), json!("completed"));
+        }
+        Some(reason @ ("length" | "content_filter")) => {
+            object.insert("status".into(), json!("incomplete"));
+            object.insert(
+                "incomplete_details".into(),
+                json!({ "reason": if reason == "length" {
+                    "max_output_tokens"
+                } else {
+                    "content_filter"
+                } }),
+            );
+        }
+        _ => {
+            object.insert("status".into(), json!("in_progress"));
+        }
+    }
+    Value::Object(object)
+}
+
+/// Anthropic's messages shape, which Claude answers in: content blocks, and
+/// tool input as an object rather than a string of JSON.
+fn message_content(state: &Stream, calls: &[&Call], reasoning: bool) -> Value {
+    let mut content = Vec::new();
+    if reasoning {
+        content.push(json!({ "type": "thinking", "thinking": state.reasoning }));
+    }
+    if !state.text.is_empty() {
+        content.push(json!({ "type": "text", "text": state.text }));
+    }
+    for call in calls {
+        let mut block = Map::new();
+        block.insert("type".into(), json!("tool_use"));
+        if !call.id.is_empty() {
+            block.insert("id".into(), json!(call.id));
+        }
+        if !call.name.is_empty() {
+            block.insert("name".into(), json!(call.name));
+        }
+        // Anthropic sends an empty input as "" or "{}"; anything that is not
+        // an object stays null, for the response parser to refuse.
+        block.insert(
+            "input".into(),
+            if call.arguments.is_empty() {
+                json!({})
+            } else {
+                serde_json::from_str::<Value>(&call.arguments)
+                    .ok()
+                    .filter(Value::is_object)
+                    .unwrap_or(Value::Null)
+            },
+        );
+        content.push(Value::Object(block));
+    }
+    let mut object = Map::new();
+    object.insert("type".into(), json!("message"));
+    object.insert("role".into(), json!("assistant"));
+    if let Some(id) = &state.id {
+        object.insert("id".into(), json!(id));
+    }
+    if let Some(model) = &state.model {
+        object.insert("model".into(), json!(model));
+    }
+    object.insert("content".into(), Value::Array(content));
+    // A stream that never delivered message_delta is incomplete: an unknown
+    // stop reason makes the parser reject it rather than default to a turn
+    // that ended normally.
+    object.insert(
+        "stop_reason".into(),
+        json!(match state.finish.as_deref() {
+            Some("stop") => "end_turn",
+            Some("tool_calls") => "tool_use",
+            Some("length") => "max_tokens",
+            Some("content_filter") => "refusal",
+            _ => "stream_incomplete",
+        }),
+    );
+    Value::Object(object)
 }
 
 fn non_empty(value: Option<&Value>) -> Option<String> {
@@ -576,6 +787,61 @@ fn chunked(envelope: &Value) -> Result<Value, Failure> {
     }))
 }
 
+/// `{"op":"assemble_delta","state":<state|null>,"delta":{...},"id":"...",
+/// "model":"...","maximum_bytes":N}`
+///
+/// For a dialect this core does not parse. Codex and Anthropic speak their
+/// own wire and their hosts reduce it to one delta vocabulary; this takes
+/// that vocabulary and accumulates it exactly as a parsed chunk is
+/// accumulated, so all three dialects assemble through one piece of code.
+pub fn assemble_delta(envelope: &Value) -> Value {
+    refused_or(assembled(envelope))
+}
+
+fn assembled(envelope: &Value) -> Result<Value, Failure> {
+    let mut state = Stream::from_value(envelope.get("state"))?;
+    // The identity is observed on the wire, not in the delta, so the host
+    // hands it over beside one. The first non-empty answer wins.
+    if state.id.is_none() {
+        state.id = non_empty(envelope.get("id"));
+    }
+    if state.model.is_none() {
+        state.model = non_empty(envelope.get("model"));
+    }
+    let empty = Map::new();
+    let delta = envelope
+        .get("delta")
+        .and_then(Value::as_object)
+        .unwrap_or(&empty);
+    // Only a delta says anything; `done` and the rest are framing.
+    let preview = if delta.get("type") == Some(&json!("delta")) {
+        apply(
+            &mut state,
+            Said {
+                text: non_empty(delta.get("content")),
+                reasoning: non_empty(delta.get("reasoning")),
+                finish: non_empty(delta.get("finish_reason")),
+                // This vocabulary puts the name and the arguments beside the
+                // index rather than under a `function`.
+                fragments: fragments_of(delta.get("tool_calls"), "")?,
+            },
+        )?
+    } else {
+        None
+    };
+    if let Some(budget) = envelope.get("maximum_bytes").and_then(Value::as_u64) {
+        if state.spoken() > budget {
+            return Err(OVER_BUDGET);
+        }
+    }
+    Ok(json!({
+        "ok": true,
+        "state": state.to_value(),
+        "previews": preview.map(|one| vec![one]).unwrap_or_default(),
+        "done": state.done,
+    }))
+}
+
 /// `{"op":"stream_flush","state":<state>}`
 ///
 /// The end of the socket, which is not the end of a line. Whatever is still
@@ -612,7 +878,7 @@ fn flushed(envelope: &Value) -> Result<Value, Failure> {
 }
 
 /// `{"op":"stream_finish","state":<state>,"thinking_mode":"off",
-/// "require_identity":true}`
+/// "require_identity":true,"dialect":"chat-completions"}`
 pub fn stream_finish(envelope: &Value) -> Value {
     refused_or(finished(envelope))
 }

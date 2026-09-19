@@ -9,6 +9,8 @@ NSString * const DSHStreamEventErrorDomain = @"DSHStreamEventError";
 const NSInteger DSHStreamMaxLineBytes = 262144;        // 256 KiB per SSE line
 const NSInteger DSHStreamMaxBufferedLines = 64;        // events held between feeds
 
+NSString * const DSHStreamFailureReasonKey = @"DSHStreamFailureReason";
+
 static NSError *DSHStreamError(NSInteger code, NSString *message) {
   return [NSError errorWithDomain:DSHStreamEventErrorDomain
                              code:code
@@ -38,9 +40,14 @@ static NSError *DSHStreamFailure(NSDictionary *answer) {
     @"tool_fragment" : @[ @2106, @"SSE tool_calls fragment is not usable" ],
   };
   NSArray *named = codes[reason];
-  return named != nil
+  NSError *error = named != nil
       ? DSHStreamError([named[0] integerValue], named[1])
       : DSHStreamError(2102, @"SSE event is not a JSON object");
+  // The core's own word for what went wrong, carried along so a caller that
+  // distinguishes more finely than these codes do can read it.
+  NSMutableDictionary *info = [error.userInfo mutableCopy];
+  info[DSHStreamFailureReasonKey] = reason;
+  return [NSError errorWithDomain:error.domain code:error.code userInfo:[info copy]];
 }
 
 /// One call into the core's stream reducer.
@@ -190,6 +197,12 @@ static DSHStreamDelta *DSHDeltaFromPreview(NSDictionary *preview) {
 
 #pragma mark - Response assembler
 
+// Like the parser above, this keeps its interface and gives up its
+// implementation. The accumulation and all three wire shapes live in
+// crates/rish-agent-core/src/completion_stream.rs, where a reply assembled
+// from a stream this core parses and one assembled from a dialect it does
+// not are the same code. What a dialect chooses here is a name.
+
 NSString * const DSHStreamAssemblerErrorDomain = @"DSHStreamAssemblerError";
 
 static NSError *DSHAssemblerError(NSInteger code, NSString *message) {
@@ -199,17 +212,12 @@ static NSError *DSHAssemblerError(NSInteger code, NSString *message) {
 }
 
 @interface DSHStreamResponseAssembler ()
+/// The core's state, opaque here; NSNull before the first delta.
+@property(nonatomic, strong) id state;
 @property(nonatomic, copy) NSString *thinkingMode;
 @property(nonatomic) NSUInteger maximumBytes;
-@property(nonatomic, readwrite) NSUInteger accumulatedBytes;
-@property(nonatomic, strong) NSMutableString *text;
-@property(nonatomic, strong) NSMutableString *reasoning;
-@property(nonatomic) BOOL sawReasoning;
-@property(nonatomic, copy, nullable) NSString *finishReason;
 @property(nonatomic, copy, nullable) NSString *responseId;
 @property(nonatomic, copy, nullable) NSString *model;
-/// index -> {id, name, arguments(NSMutableString)}
-@property(nonatomic, strong) NSMutableDictionary<NSNumber *, NSMutableDictionary *> *calls;
 @end
 
 @implementation DSHStreamResponseAssembler
@@ -218,13 +226,17 @@ static NSError *DSHAssemblerError(NSInteger code, NSString *message) {
                         maximumBytes:(NSUInteger)maximumBytes {
   self = [super init];
   if (self) {
+    _state = NSNull.null;
     _thinkingMode = [thinkingMode copy] ?: @"off";
     _maximumBytes = maximumBytes;
-    _text = [NSMutableString string];
-    _reasoning = [NSMutableString string];
-    _calls = [NSMutableDictionary dictionary];
   }
   return self;
+}
+
+/// The wire shape this assembler answers in. `chat-completions` unless a
+/// dialect says otherwise; the names are the core's.
+- (NSString *)dialect {
+  return @"chat-completions";
 }
 
 - (void)noteResponseId:(NSString *)responseId model:(NSString *)model {
@@ -236,124 +248,60 @@ static NSError *DSHAssemblerError(NSInteger code, NSString *message) {
 
 - (BOOL)appendDelta:(DSHStreamDelta *)delta error:(NSError **)error {
   if (error != nil) *error = nil;
-  if (![delta isKindOfClass:NSDictionary.class] ||
-      ![delta[@"type"] isEqual:@"delta"]) return YES;
-  NSString *content = [delta[@"content"] isKindOfClass:NSString.class]
-      ? delta[@"content"] : nil;
-  NSString *reasoning = [delta[@"reasoning"] isKindOfClass:NSString.class]
-      ? delta[@"reasoning"] : nil;
-  NSUInteger bytes = [content lengthOfBytesUsingEncoding:NSUTF8StringEncoding] +
-      [reasoning lengthOfBytesUsingEncoding:NSUTF8StringEncoding];
-  NSArray *fragments = [delta[@"tool_calls"] isKindOfClass:NSArray.class]
-      ? delta[@"tool_calls"] : @[];
-  for (NSDictionary *fragment in fragments) {
-    bytes += [[fragment[@"arguments"] isKindOfClass:NSString.class]
-        ? fragment[@"arguments"] : @"" lengthOfBytesUsingEncoding:NSUTF8StringEncoding];
-  }
-  if (bytes > self.maximumBytes - MIN(self.accumulatedBytes, self.maximumBytes)) {
+  if (![delta isKindOfClass:NSDictionary.class]) return YES;
+  NSMutableDictionary *envelope = [NSMutableDictionary dictionary];
+  envelope[@"op"] = @"assemble_delta";
+  envelope[@"state"] = self.state;
+  envelope[@"delta"] = delta;
+  if (self.responseId != nil) envelope[@"id"] = self.responseId;
+  if (self.model != nil) envelope[@"model"] = self.model;
+  envelope[@"maximum_bytes"] = @(self.maximumBytes);
+  NSError *refused = nil;
+  NSDictionary *answer = DSHStreamReduce(envelope, &refused);
+  if (answer == nil) {
     if (error != nil) {
-      *error = DSHAssemblerError(2201, @"Streamed response exceeds the byte budget");
+      // A budget refusal and an unusable fragment are different things to
+      // the transport: one is a reply too large, the other a call that
+      // cannot be run.
+      *error = [refused.userInfo[DSHStreamFailureReasonKey] isEqual:@"over_budget"]
+          ? DSHAssemblerError(2201, @"Streamed response exceeds the byte budget")
+          : DSHAssemblerError(2202, @"Streamed tool fragment cannot be placed");
     }
     return NO;
   }
-  self.accumulatedBytes += bytes;
-  if (content != nil) [self.text appendString:content];
-  if (reasoning != nil) {
-    self.sawReasoning = YES;
-    [self.reasoning appendString:reasoning];
-  }
-  for (NSDictionary *fragment in fragments) {
-    NSNumber *index = fragment[@"index"];
-    if (![index isKindOfClass:NSNumber.class]) {
-      if (error != nil) {
-        *error = DSHAssemblerError(2202, @"Streamed tool fragment cannot be placed");
-      }
-      return NO;
-    }
-    NSMutableDictionary *call = self.calls[index];
-    if (call == nil) {
-      if (self.calls.count >= 16) {
-        if (error != nil) {
-          *error = DSHAssemblerError(2202, @"Streamed tool fragment cannot be placed");
-        }
-        return NO;
-      }
-      call = [@{ @"arguments" : [NSMutableString string] } mutableCopy];
-      self.calls[index] = call;
-    }
-    if (fragment[@"id"] != nil && call[@"id"] == nil) call[@"id"] = fragment[@"id"];
-    if (fragment[@"name"] != nil && call[@"name"] == nil) call[@"name"] = fragment[@"name"];
-    if (fragment[@"arguments"] != nil) {
-      [(NSMutableString *)call[@"arguments"] appendString:fragment[@"arguments"]];
-    }
-  }
-  if ([delta[@"finish_reason"] isKindOfClass:NSString.class] &&
-      [delta[@"finish_reason"] length] > 0) {
-    self.finishReason = delta[@"finish_reason"];
-  }
+  self.state = answer[@"state"] ?: NSNull.null;
   return YES;
 }
 
-- (NSString *)assembledText { return [self.text copy]; }
-- (NSString *)assembledReasoning { return [self.reasoning copy]; }
-- (BOOL)assembledSawReasoning { return self.sawReasoning; }
-- (NSString *)assembledFinishReason { return self.finishReason; }
-- (NSString *)assembledResponseId { return self.responseId; }
-- (NSString *)assembledModel { return self.model; }
-- (NSString *)assembledThinkingMode { return self.thinkingMode; }
-
-- (NSArray<DSHStreamAssembledCall *> *)assembledToolCalls {
-  NSArray<NSNumber *> *indexes = [self.calls.allKeys
-      sortedArrayUsingSelector:@selector(compare:)];
-  NSMutableArray *calls = [NSMutableArray arrayWithCapacity:indexes.count];
-  for (NSNumber *index in indexes) {
-    NSDictionary *call = self.calls[index];
-    NSMutableDictionary *entry = [NSMutableDictionary dictionary];
-    entry[@"index"] = index;
-    if (call[@"id"] != nil) entry[@"id"] = call[@"id"];
-    if (call[@"name"] != nil) entry[@"name"] = call[@"name"];
-    entry[@"arguments"] = [call[@"arguments"] copy];
-    [calls addObject:[entry copy]];
+- (NSUInteger)accumulatedBytes {
+  if (![self.state isKindOfClass:NSDictionary.class]) return 0;
+  NSDictionary *state = self.state;
+  NSUInteger bytes =
+      [[state[@"text"] isKindOfClass:NSString.class] ? state[@"text"] : @""
+          lengthOfBytesUsingEncoding:NSUTF8StringEncoding] +
+      [[state[@"reasoning"] isKindOfClass:NSString.class] ? state[@"reasoning"] : @""
+          lengthOfBytesUsingEncoding:NSUTF8StringEncoding];
+  for (id call in ([state[@"calls"] isKindOfClass:NSArray.class] ? state[@"calls"] : @[])) {
+    if (![call isKindOfClass:NSDictionary.class]) continue;
+    NSString *arguments = [call[@"arguments"] isKindOfClass:NSString.class]
+        ? call[@"arguments"] : @"";
+    bytes += [arguments lengthOfBytesUsingEncoding:NSUTF8StringEncoding];
   }
-  return [calls copy];
+  return bytes;
 }
 
 - (NSDictionary<NSString *, id> *)responseObject {
-  NSMutableDictionary *message = [NSMutableDictionary dictionary];
-  message[@"role"] = @"assistant";
-  NSArray<NSNumber *> *indexes = [self.calls.allKeys
-      sortedArrayUsingSelector:@selector(compare:)];
-  NSMutableArray *toolCalls = [NSMutableArray arrayWithCapacity:indexes.count];
-  for (NSNumber *index in indexes) {
-    NSDictionary *call = self.calls[index];
-    // Absent id/name stay absent so the response parser rejects the call
-    // the same way it rejects a malformed single-shot call.
-    NSMutableDictionary *function = [NSMutableDictionary dictionary];
-    if (call[@"name"] != nil) function[@"name"] = call[@"name"];
-    function[@"arguments"] = [call[@"arguments"] copy];
-    NSMutableDictionary *entry = [NSMutableDictionary dictionary];
-    if (call[@"id"] != nil) entry[@"id"] = call[@"id"];
-    entry[@"type"] = @"function";
-    entry[@"function"] = function;
-    [toolCalls addObject:entry];
-  }
-  // DeepSeek's single-shot shape carries null content for a tool-only turn.
-  message[@"content"] = self.text.length == 0 && toolCalls.count > 0
-      ? (id)NSNull.null : [self.text copy];
-  if (self.sawReasoning || ![self.thinkingMode isEqualToString:@"off"]) {
-    message[@"reasoning_content"] = [self.reasoning copy];
-  }
-  if (toolCalls.count > 0) message[@"tool_calls"] = toolCalls;
-  return @{
-    @"id" : self.responseId ?: (id)NSNull.null,
-    @"object" : @"chat.completion",
-    @"model" : self.model ?: (id)NSNull.null,
-    @"choices" : @[ @{
-      @"index" : @0,
-      @"message" : message,
-      @"finish_reason" : self.finishReason ?: (id)NSNull.null,
-    } ],
-  };
+  NSDictionary *answer = DSHStreamReduce(@{
+    @"op" : @"stream_finish",
+    @"state" : self.state,
+    @"thinking_mode" : self.thinkingMode,
+    @"dialect" : [self dialect],
+    // Missing identity or finish reason is left for the response parser to
+    // reject, which is how it names what was missing.
+    @"require_identity" : @NO,
+  }, nil);
+  NSDictionary *response = answer[@"response"];
+  return [response isKindOfClass:NSDictionary.class] ? response : @{};
 }
 
 @end

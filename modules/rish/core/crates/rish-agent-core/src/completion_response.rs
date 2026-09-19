@@ -436,6 +436,7 @@ fn reduce_json_inner(input: &str) -> Result<Value, &'static str> {
         // of being unreadable and the hosts name them.
         Some("stream_chunk") => return Ok(crate::completion_stream::stream_chunk(&envelope)),
         Some("stream_flush") => return Ok(crate::completion_stream::stream_flush(&envelope)),
+        Some("assemble_delta") => return Ok(crate::completion_stream::assemble_delta(&envelope)),
         Some("stream_finish") => return Ok(crate::completion_stream::stream_finish(&envelope)),
         Some("parse") => {}
         _ => return Err(RESPONSE_JSON),

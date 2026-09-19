@@ -464,42 +464,10 @@ static NSDictionary<NSString *, id> * _Nullable ClaudeDecodeEvent(
 
 @implementation ClaudeStreamResponseAssembler
 
-- (NSDictionary<NSString *, id> *)responseObject {
-  NSMutableArray *content = [NSMutableArray array];
-  if (self.assembledSawReasoning) {
-    [content addObject:@{@"type": @"thinking", @"thinking": self.assembledReasoning}];
-  }
-  if (self.assembledText.length > 0) {
-    [content addObject:@{@"type": @"text", @"text": self.assembledText}];
-  }
-  for (NSDictionary *call in self.assembledToolCalls) {
-    NSData *bytes = [call[@"arguments"] dataUsingEncoding:NSUTF8StringEncoding];
-    // Anthropic sends an empty input as "" or "{}" on the wire.
-    id input = bytes.length == 0 ? @{} : [NSJSONSerialization JSONObjectWithData:bytes options:0 error:nil];
-    NSMutableDictionary *block = [NSMutableDictionary dictionary];
-    block[@"type"] = @"tool_use";
-    if (call[@"id"] != nil) block[@"id"] = call[@"id"];
-    if (call[@"name"] != nil) block[@"name"] = call[@"name"];
-    block[@"input"] = [input isKindOfClass:NSDictionary.class] ? input : (id)NSNull.null;
-    [content addObject:[block copy]];
-  }
-  static NSDictionary<NSString *, NSString *> *stopReasons = nil;
-  static dispatch_once_t onceToken;
-  dispatch_once(&onceToken, ^{
-    stopReasons = @{@"stop": @"end_turn", @"tool_calls": @"tool_use",
-                    @"length": @"max_tokens", @"content_filter": @"refusal"};
-  });
-  NSString *finish = self.assembledFinishReason;
-  NSMutableDictionary *object = [NSMutableDictionary dictionary];
-  object[@"type"] = @"message";
-  object[@"role"] = @"assistant";
-  if (self.assembledResponseId != nil) object[@"id"] = self.assembledResponseId;
-  if (self.assembledModel != nil) object[@"model"] = self.assembledModel;
-  object[@"content"] = [content copy];
-  // A stream that never delivered message_delta is incomplete: an unknown
-  // stop_reason makes the parser reject it instead of defaulting to end_turn.
-  object[@"stop_reason"] = finish == nil ? @"stream_incomplete" : (stopReasons[finish] ?: @"stream_incomplete");
-  return [object copy];
+// The accumulation and this wire shape are the shared core's; all that is
+// left of this dialect is its name.
+- (NSString *)dialect {
+  return @"messages";
 }
 
 @end

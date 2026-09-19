@@ -15,6 +15,11 @@ extern const NSInteger DSHStreamMaxBufferedLines;
 /// object, 2103 already finished, 2104 oversized line, 2105 too many lines).
 extern NSString * const DSHStreamEventErrorDomain;
 
+/// The shared core's own word for the refusal, in an error's userInfo. The
+/// codes above are this file's vocabulary; this is the core's, for a caller
+/// that distinguishes more finely than they do.
+extern NSString * const DSHStreamFailureReasonKey;
+
 /// A parsed streaming delta emitted to JS.
 typedef NSDictionary<NSString *, id> DSHStreamDelta;
 
@@ -59,10 +64,10 @@ extern NSString * const DSHStreamAssemblerErrorDomain;
 /// One assembled tool call: index, optional id/name, concatenated arguments.
 typedef NSDictionary<NSString *, id> DSHStreamAssembledCall;
 
-/// Accumulates text, reasoning, tool fragments, finish reason and identity;
-/// `responseObject` emits the OpenAI `chat.completion` shape (DeepSeek and
-/// other chat-completions dialects). Subclasses reuse the accumulation and
-/// override `responseObject` for their own wire shape. Pure state, no I/O.
+/// Accumulates text, reasoning, tool fragments, finish reason and identity
+/// through the shared core, and emits the wire shape its `dialect` names.
+/// A dialect overrides `dialect`; the accumulation, the byte budget and all
+/// three shapes live in the core.
 @interface DSHStreamResponseAssembler : NSObject <DSHProviderStreamResponseAssembling>
 
 - (instancetype)initWithThinkingMode:(NSString *)thinkingMode
@@ -84,16 +89,10 @@ typedef NSDictionary<NSString *, id> DSHStreamAssembledCall;
 /// identity or finish reason is left for the response parser to reject.
 - (NSDictionary<NSString *, id> *)responseObject;
 
-/// Accumulated state for subclasses building another wire shape.
-@property(nonatomic, copy, readonly) NSString *assembledText;
-@property(nonatomic, copy, readonly) NSString *assembledReasoning;
-@property(nonatomic, readonly) BOOL assembledSawReasoning;
-@property(nonatomic, copy, readonly, nullable) NSString *assembledFinishReason;
-@property(nonatomic, copy, readonly, nullable) NSString *assembledResponseId;
-@property(nonatomic, copy, readonly, nullable) NSString *assembledModel;
-@property(nonatomic, copy, readonly) NSString *assembledThinkingMode;
-/// Sorted by index; each {index, id?, name?, arguments}.
-@property(nonatomic, copy, readonly) NSArray<DSHStreamAssembledCall *> *assembledToolCalls;
+/// The wire shape to answer in, as the shared core names it:
+/// `chat-completions`, `responses` or `messages`. A dialect overrides this
+/// and nothing else -- the accumulation and all three shapes are the core's.
+- (NSString *)dialect;
 
 @end
 

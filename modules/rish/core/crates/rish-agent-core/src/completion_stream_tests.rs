@@ -657,3 +657,190 @@ fn a_finish_reason_is_previewed_once() {
     // And the reply still ends the way the provider said it did.
     assert_eq!(assembled(&state)["choices"][0]["finish_reason"], json!("stop"));
 }
+
+/// A delta from a dialect this core does not parse accumulates exactly as a
+/// parsed chunk does. Codex and Anthropic reduce their own wire to this
+/// vocabulary, and the reply they get is assembled by the same code.
+fn delta(state: Value, delta: Value) -> Value {
+    let answer = assemble_delta(&json!({
+        "op": "assemble_delta",
+        "state": state,
+        "delta": delta,
+        "id": "resp-1",
+        "model": "some-model",
+    }));
+    assert_eq!(answer["ok"], json!(true), "the delta was refused: {answer}");
+    answer
+}
+
+#[test]
+fn a_hosts_own_delta_accumulates_like_a_parsed_chunk() {
+    let mut state = Value::Null;
+    let mut previews = Vec::new();
+    for one in [
+        json!({ "type": "delta", "reasoning": "thinking" }),
+        json!({ "type": "delta", "content": "half " }),
+        json!({ "type": "delta", "content": "and half" }),
+        json!({ "type": "delta", "tool_calls": [
+            { "index": 0, "id": "call_a", "name": "read_file", "arguments": "{\"a\"" }
+        ] }),
+        json!({ "type": "delta", "tool_calls": [{ "index": 0, "arguments": ":1}" }] }),
+        json!({ "type": "delta", "finish_reason": "tool_calls" }),
+        // Framing, which says nothing.
+        json!({ "type": "done" }),
+    ] {
+        let answer = delta(state, one);
+        state = answer["state"].clone();
+        previews.extend(answer["previews"].as_array().expect("previews").clone());
+    }
+    assert_eq!(previews.len(), 6);
+    let message = message(&assembled(&state));
+    assert_eq!(message["content"], json!("half and half"));
+    assert_eq!(message["reasoning_content"], json!("thinking"));
+    assert_eq!(
+        message["tool_calls"][0]["function"],
+        json!({ "name": "read_file", "arguments": "{\"a\":1}" }),
+    );
+}
+
+/// The same refusals apply to a delta as to a chunk: a fragment that cannot
+/// be placed ends the stream, and so does going past the budget.
+#[test]
+fn a_delta_is_refused_on_the_same_terms() {
+    let unplaceable = assemble_delta(&json!({
+        "state": Value::Null,
+        "delta": { "type": "delta", "tool_calls": [{ "name": "no_index" }] },
+    }));
+    assert_eq!(
+        refusal(&unplaceable),
+        ("E_COMPLETION_RESPONSE_JSON", "tool_fragment"),
+    );
+    let over = assemble_delta(&json!({
+        "state": Value::Null,
+        "delta": { "type": "delta", "content": "123456789" },
+        "maximum_bytes": 8,
+    }));
+    assert_eq!(refusal(&over), ("E_COMPLETION_RESPONSE_SIZE", "over_budget"));
+}
+
+/// One accumulated stream, three wire shapes, because three providers say a
+/// reply three ways and the round is settled by the parser for each.
+fn spoken_turn() -> Value {
+    let wire = format!(
+        "data: {{\"id\":\"{HOST}\",\"model\":\"m\",\"choices\":[{{\"delta\":\
+         {{\"reasoning_content\":\"why\",\"content\":\"here it is\",\"tool_calls\":\
+         [{{\"index\":0,\"id\":\"c1\",\"function\":{{\"name\":\"read_file\",\
+         \"arguments\":\"{{\\\"path\\\":\\\"a.txt\\\"}}\"}}}}]}},\
+         \"finish_reason\":\"tool_calls\"}}]}}\n\n"
+    );
+    feed(&[wire.as_bytes()]).0
+}
+
+fn shaped(state: &Value, dialect: &str) -> Value {
+    let answer = stream_finish(&json!({ "state": state.clone(), "dialect": dialect }));
+    assert_eq!(answer["ok"], json!(true), "{answer}");
+    answer["response"].clone()
+}
+
+#[test]
+fn the_responses_dialect_answers_in_output_items() {
+    let response = shaped(&spoken_turn(), "responses");
+    assert_eq!(response["object"], json!("response"));
+    assert_eq!(response["status"], json!("completed"));
+    assert_eq!(
+        response["output"],
+        json!([
+            { "type": "reasoning", "summary": [{ "type": "summary_text", "text": "why" }] },
+            { "type": "message", "role": "assistant",
+              "content": [{ "type": "output_text", "text": "here it is" }] },
+            { "type": "function_call", "call_id": "c1", "name": "read_file",
+              "arguments": "{\"path\":\"a.txt\"}" },
+        ]),
+    );
+}
+
+#[test]
+fn the_messages_dialect_answers_in_content_blocks() {
+    let response = shaped(&spoken_turn(), "messages");
+    assert_eq!(response["type"], json!("message"));
+    assert_eq!(response["stop_reason"], json!("tool_use"));
+    assert_eq!(
+        response["content"],
+        json!([
+            { "type": "thinking", "thinking": "why" },
+            { "type": "text", "text": "here it is" },
+            // The arguments become an object here, because that is what
+            // Anthropic sends when it does not stream.
+            { "type": "tool_use", "id": "c1", "name": "read_file",
+              "input": { "path": "a.txt" } },
+        ]),
+    );
+}
+
+/// A stream that stopped before it said how it ended must be refused by each
+/// dialect's own parser, so each says so in its own vocabulary rather than
+/// defaulting to a turn that ended normally.
+#[test]
+fn a_turn_that_never_ended_says_so_in_every_dialect() {
+    let wire = format!(
+        "data: {{\"id\":\"{HOST}\",\"model\":\"m\",\"choices\":[{{\"delta\":\
+         {{\"content\":\"half\"}}}}]}}\n\n"
+    );
+    let (state, _) = feed(&[wire.as_bytes()]);
+    let loosely = |dialect: &str| {
+        stream_finish(&json!({
+            "state": state.clone(),
+            "dialect": dialect,
+            "require_identity": false,
+        }))["response"]
+            .clone()
+    };
+    assert_eq!(loosely("responses")["status"], json!("in_progress"));
+    assert_eq!(loosely("messages")["stop_reason"], json!("stream_incomplete"));
+    assert_eq!(
+        loosely("chat-completions")["choices"][0]["finish_reason"],
+        Value::Null,
+    );
+    // A length stop is incomplete rather than merely unfinished.
+    assert_eq!(
+        shaped(&spoken_turn(), "responses")["incomplete_details"],
+        Value::Null,
+    );
+}
+
+/// A call is identified and named once. A second answer for the same index
+/// contradicts the first, and the fragments in between were adding to the
+/// first -- so that is the one the reply keeps.
+#[test]
+fn a_call_keeps_the_first_name_it_was_given() {
+    let fragment = |body: &str| {
+        format!(
+            "data: {{\"id\":\"{HOST}\",\"model\":\"m\",\"choices\":[{{\"delta\":\
+             {{\"tool_calls\":[{body}]}}}}]}}\n\n"
+        )
+    };
+    let mut wire = fragment(
+        "{\"index\":0,\"id\":\"call_a\",\"function\":{\"name\":\"read_file\",\
+         \"arguments\":\"{\\\"a\\\"\"}}",
+    );
+    wire.push_str(&fragment(
+        "{\"index\":0,\"id\":\"call_z\",\"function\":{\"name\":\"write_file\",\
+         \"arguments\":\":1}\"}}",
+    ));
+    wire.push_str(&format!(
+        "data: {{\"id\":\"{HOST}\",\"model\":\"m\",\"choices\":[{{\"delta\":{{}},\
+         \"finish_reason\":\"tool_calls\"}}]}}\n\n"
+    ));
+    let (state, previews) = feed(&[wire.as_bytes()]);
+    // The preview still reports what the wire said, because that is what the
+    // wire said; only what is kept is the first answer.
+    assert_eq!(previews[1]["tool_calls"][0]["id"], json!("call_z"));
+    assert_eq!(
+        message(&assembled(&state))["tool_calls"][0],
+        json!({
+            "id": "call_a",
+            "type": "function",
+            "function": { "name": "read_file", "arguments": "{\"a\":1}" },
+        }),
+    );
+}

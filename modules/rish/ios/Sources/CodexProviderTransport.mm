@@ -394,40 +394,10 @@ static NSDictionary<NSString *, id> * _Nullable CodexDecodeEvent(
 
 @implementation CodexStreamResponseAssembler
 
-- (NSDictionary<NSString *, id> *)responseObject {
-  NSMutableArray *output = [NSMutableArray array];
-  if (self.assembledSawReasoning) {
-    [output addObject:@{@"type": @"reasoning",
-                        @"summary": @[ @{@"type": @"summary_text", @"text": self.assembledReasoning} ]}];
-  }
-  if (self.assembledText.length > 0) {
-    [output addObject:@{@"type": @"message", @"role": @"assistant",
-                        @"content": @[ @{@"type": @"output_text", @"text": self.assembledText} ]}];
-  }
-  for (NSDictionary *call in self.assembledToolCalls) {
-    NSMutableDictionary *item = [NSMutableDictionary dictionary];
-    item[@"type"] = @"function_call";
-    if (call[@"id"] != nil) item[@"call_id"] = call[@"id"];
-    if (call[@"name"] != nil) item[@"name"] = call[@"name"];
-    item[@"arguments"] = call[@"arguments"];
-    [output addObject:[item copy]];
-  }
-  NSString *finish = self.assembledFinishReason;
-  NSMutableDictionary *object = [NSMutableDictionary dictionary];
-  object[@"object"] = @"response";
-  if (self.assembledResponseId != nil) object[@"id"] = self.assembledResponseId;
-  if (self.assembledModel != nil) object[@"model"] = self.assembledModel;
-  object[@"output"] = [output copy];
-  if ([finish isEqualToString:@"stop"] || [finish isEqualToString:@"tool_calls"]) {
-    object[@"status"] = @"completed";
-  } else if ([finish isEqualToString:@"length"] || [finish isEqualToString:@"content_filter"]) {
-    object[@"status"] = @"incomplete";
-    object[@"incomplete_details"] = @{@"reason": [finish isEqualToString:@"length"]
-        ? @"max_output_tokens" : @"content_filter"};
-  } else {
-    object[@"status"] = @"in_progress";
-  }
-  return [object copy];
+// The accumulation and this wire shape are the shared core's; all that is
+// left of this dialect is its name.
+- (NSString *)dialect {
+  return @"responses";
 }
 
 @end
