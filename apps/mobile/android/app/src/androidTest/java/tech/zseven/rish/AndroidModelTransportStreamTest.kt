@@ -14,7 +14,13 @@ import tech.zseven.rish.runtime.AndroidModelTransport
 import tech.zseven.rish.runtime.AndroidProviderConfiguration
 import tech.zseven.rish.runtime.RishAgentCoreNative
 import java.io.InputStream
+import java.net.InetAddress
+import java.net.InetSocketAddress
+import java.net.ServerSocket
 import java.util.UUID
+import java.util.concurrent.CountDownLatch
+import java.util.concurrent.TimeUnit
+import org.json.JSONArray
 
 /**
  * Reassembling a streamed reply.
@@ -171,6 +177,251 @@ class AndroidModelTransportStreamTest {
             // however many reads it took.
             assertEquals("$size: $events", 4, events.size)
         }
+    }
+
+
+    /**
+     * The whole path, on a real socket.
+     *
+     * Everything above this point hands bytes to the assembler directly. This
+     * one runs a server, lets the app's own HTTP client fetch from it, and
+     * checks what the round is settled on -- request built, sent, streamed
+     * back through the shared core, reassembled, and read by the same code
+     * that reads a reply that arrived whole. Until this existed, no test had
+     * ever put a socket under the streaming path.
+     *
+     * The bytes go out in pieces with a pause between them, so the chunk
+     * boundaries are the network's rather than the test's.
+     */
+    private class Streamer(private val pieces: List<String>) {
+        val socket: ServerSocket = ServerSocket().apply {
+            reuseAddress = true
+            bind(InetSocketAddress(InetAddress.getByName("127.0.0.1"), 0))
+        }
+        val ready = CountDownLatch(1)
+        @Volatile var request: String = ""
+
+        fun start() {
+            Thread {
+                socket.use { server ->
+                    server.accept().use { client ->
+                        val input = client.getInputStream()
+                        // Read the head, then the body the head declared.
+                        val head = StringBuilder()
+                        while (!head.endsWith("\r\n\r\n")) {
+                            val next = input.read()
+                            if (next < 0) return@use
+                            head.append(next.toChar())
+                        }
+                        val length = Regex("(?i)content-length: *(\\d+)")
+                            .find(head)?.groupValues?.get(1)?.toInt() ?: 0
+                        val body = ByteArray(length)
+                        var read = 0
+                        while (read < length) {
+                            val count = input.read(body, read, length - read)
+                            if (count < 0) break
+                            read += count
+                        }
+                        request = head.toString() + String(body, Charsets.UTF_8)
+                        val out = client.getOutputStream()
+                        out.write(
+                            ("HTTP/1.1 200 OK\r\n" +
+                                "Content-Type: text/event-stream\r\n" +
+                                "Cache-Control: no-cache\r\n" +
+                                "Connection: close\r\n\r\n").toByteArray(),
+                        )
+                        out.flush()
+                        ready.countDown()
+                        for (piece in pieces) {
+                            out.write(piece.toByteArray(Charsets.UTF_8))
+                            out.flush()
+                            Thread.sleep(15)
+                        }
+                    }
+                }
+            }.apply { isDaemon = true }.start()
+        }
+    }
+
+    @Test
+    fun aStreamedRoundGoesOutAndComesBackOverASocket() {
+        assumeTrue("rish agent core is not staged in this build", RishAgentCoreNative.available)
+        val namespace = "stream-socket-${UUID.randomUUID()}"
+        val credentials = AndroidCredentialStore(context, namespace)
+        val configurations = AndroidProviderConfiguration(context, "$namespace.providers")
+        val transport = AndroidModelTransport(credentials, configurations)
+
+        // An event per line, split so the pieces land mid-event and mid-token.
+        val streamer = Streamer(
+            listOf(
+                """data: {"id":"resp-socket","model":"gpt-5.6","choices":[{"delta":{"content":"He""",
+                """llo"}}]}""" + "\n\n" +
+                    """data: {"id":"resp-socket","model":"gpt-5.6","choices":[{"delta":{"content":" there"},"finish_re""",
+                """ason":"stop"}]}""" + "\n\ndata: [DONE]\n\n",
+            ),
+        )
+        streamer.start()
+        val port = streamer.socket.localPort
+
+        configurations.save(
+            JSONObject().put("schema_version", 1).put("harness_id", "codex")
+                .put("name", "Local stream").put("endpoint_url", "http://127.0.0.1:$port/v1/chat/completions")
+                .put("protocol", "chat-completions").put("auth_type", "bearer")
+                .put("model_mappings", JSONObject().put("gpt-5.6", "gpt-5.6"))
+                .put("send_reasoning", false).put("full_url", true),
+        )
+        transport.put("OPENAI_API_KEY", transport.account("OPENAI_API_KEY"), "local-test-key")
+
+        val roundId = UUID.randomUUID().toString()
+        val request = JSONObject().put("schema_version", 2).put("harness_id", "codex")
+            .put("turn_id", UUID.randomUUID().toString())
+            .put("attempt_id", UUID.randomUUID().toString())
+            .put("round_id", roundId).put("round_index", 0)
+            .put("model", "gpt-5.6").put("thinking_mode", "off")
+            .put("project_context", JSONObject.NULL)
+            .put(
+                "visible_history",
+                JSONArray().put(
+                    JSONObject().put("role", "user").put("content", "Say hello")
+                        .put("attachments", JSONArray()),
+                ),
+            )
+            .put("round_transcript", JSONArray()).put("tools", JSONArray())
+
+        val seen = mutableListOf<JSONObject>()
+        val result = transport.execute(transport.prepare(request.toString())) { seen.add(it) }
+
+        // The request really went out, asking for a stream.
+        assertTrue(streamer.ready.await(20, TimeUnit.SECONDS))
+        assertTrue(streamer.request, streamer.request.contains("Accept: text/event-stream"))
+        assertTrue(streamer.request, streamer.request.contains("\"stream\":true"))
+        assertTrue(streamer.request, streamer.request.contains("Authorization: Bearer local-test-key"))
+
+        // The pieces were previewed as they arrived, not once at the end.
+        assertEquals("$seen", 2, seen.size)
+        assertEquals("Hello", seen[0].getString("text"))
+        assertEquals(" there", seen[1].getString("text"))
+        assertEquals("stop", seen[1].getString("finish_reason"))
+
+        // And the round is settled on the reassembled reply, read by the same
+        // code that reads one that arrived whole.
+        assertEquals("Hello there", result.getString("text"))
+        assertEquals("stop", result.getString("finish_reason"))
+        assertEquals("gpt-5.6", result.getString("model"))
+        assertEquals(roundId, result.getString("round_id"))
+        assertEquals("resp-socket", result.getString("provider_response_id"))
+        assertEquals(0, result.getJSONArray("tool_calls").length())
+        assertEquals(1, transport.sentRequestCount)
+    }
+
+
+    /** The fixture every socket test shares: a local provider and a round. */
+    private class Wired(val transport: AndroidModelTransport, val port: Int, val roundId: String) {
+        fun request(): JSONObject = JSONObject().put("schema_version", 2)
+            .put("harness_id", "codex").put("turn_id", UUID.randomUUID().toString())
+            .put("attempt_id", UUID.randomUUID().toString())
+            .put("round_id", roundId).put("round_index", 0)
+            .put("model", "gpt-5.6").put("thinking_mode", "off")
+            .put("project_context", JSONObject.NULL)
+            .put(
+                "visible_history",
+                JSONArray().put(
+                    JSONObject().put("role", "user").put("content", "Say hello")
+                        .put("attachments", JSONArray()),
+                ),
+            )
+            .put("round_transcript", JSONArray()).put("tools", JSONArray())
+    }
+
+    private fun wired(streamer: Streamer): Wired {
+        val namespace = "stream-socket-${UUID.randomUUID()}"
+        val configurations = AndroidProviderConfiguration(context, "$namespace.providers")
+        val transport =
+            AndroidModelTransport(AndroidCredentialStore(context, namespace), configurations)
+        streamer.start()
+        configurations.save(
+            JSONObject().put("schema_version", 1).put("harness_id", "codex")
+                .put("name", "Local stream")
+                .put("endpoint_url", "http://127.0.0.1:${streamer.socket.localPort}/v1/chat/completions")
+                .put("protocol", "chat-completions").put("auth_type", "bearer")
+                .put("model_mappings", JSONObject().put("gpt-5.6", "gpt-5.6"))
+                .put("send_reasoning", false).put("full_url", true),
+        )
+        transport.put("OPENAI_API_KEY", transport.account("OPENAI_API_KEY"), "local-test-key")
+        return Wired(transport, streamer.socket.localPort, UUID.randomUUID().toString())
+    }
+
+    /**
+     * The round an agent actually runs: a tool call, whose name arrives once
+     * and whose arguments arrive a few characters at a time, over a socket
+     * that breaks them wherever it likes. Reassembled wrongly, the round asks
+     * a person to approve a call with half a path in it.
+     */
+    @Test
+    fun aStreamedToolCallSurvivesTheSocket() {
+        assumeTrue("rish agent core is not staged in this build", RishAgentCoreNative.available)
+        val head = """data: {"id":"resp-tool","model":"gpt-5.6","choices":[{"delta":{"tool_calls":"""
+        val streamer = Streamer(
+            listOf(
+                head + """[{"index":0,"id":"call_1","function":{"name":"write_fi""",
+                """le","arguments":"{\"pa"}}]}}]}""" + "\n\n" + head,
+                """[{"index":0,"function":{"arguments":"th\":\"notes.txt\"}"}}]}}]}""" + "\n\n",
+                """data: {"id":"resp-tool","model":"gpt-5.6","choices":[{"delta":{},"finish_reason":"tool_calls"}]}""" +
+                    "\n\ndata: [DONE]\n\n",
+            ),
+        )
+        val wired = wired(streamer)
+        val seen = mutableListOf<JSONObject>()
+        val result = wired.transport.execute(
+            wired.transport.prepare(wired.request().toString()),
+        ) { seen.add(it) }
+
+        assertEquals("tool_calls", result.getString("finish_reason"))
+        val calls = result.getJSONArray("tool_calls")
+        assertEquals("$calls", 1, calls.length())
+        val call = calls.getJSONObject(0)
+        assertEquals("call_1", call.getString("id"))
+        assertEquals("write_file", call.getString("name"))
+        assertEquals("""{"path":"notes.txt"}""", call.getString("arguments"))
+        // The name was previewed once, when it arrived, and the arguments in
+        // the pieces they arrived in -- never the accumulation.
+        assertTrue("$seen", seen.size >= 2)
+        assertEquals(
+            "write_file",
+            seen[0].getJSONArray("tool_calls").getJSONObject(0).getString("name"),
+        )
+    }
+
+    /**
+     * A provider that hangs up mid-reply. Everything it said is discarded,
+     * because a turn that never said how it ended is not a reply -- and a
+     * round settled on half a sentence would be worse than a failed one.
+     */
+    @Test
+    fun aSocketThatHangsUpMidReplyFailsTheRound() {
+        assumeTrue("rish agent core is not staged in this build", RishAgentCoreNative.available)
+        val streamer = Streamer(
+            listOf(
+                """data: {"id":"resp-cut","model":"gpt-5.6","choices":[{"delta":{"content":"half a sen""" +
+                    """tence"}}]}""" + "\n\n" +
+                    """data: {"id":"resp-cut","model":"gpt-5.6","choices":[{"delta":{"content":"and then not""",
+            ),
+        )
+        val wired = wired(streamer)
+        val seen = mutableListOf<JSONObject>()
+        val code = try {
+            wired.transport.execute(
+                wired.transport.prepare(wired.request().toString()),
+            ) { seen.add(it) }
+            "answered"
+        } catch (failure: tech.zseven.rish.runtime.RuntimeFailure) {
+            failure.code
+        }
+        assertEquals("E_COMPLETION_RESPONSE_JSON", code)
+        // What did arrive was shown while it arrived; it is the *reply* that
+        // is refused, not the preview.
+        assertEquals("$seen", 1, seen.size)
+        assertEquals("half a sentence", seen[0].getString("text"))
     }
 
     /** A stream that stops without a finish reason is a truncated reply. */
