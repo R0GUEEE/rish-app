@@ -124,6 +124,63 @@ internal class AndroidModelTransport(private val credentials: AndroidCredentialS
     }
 
     /**
+     * What a provider's reply says, in the one vocabulary every dialect
+     * reduces to.
+     *
+     * The other two dialects come from the shared core, which is where the
+     * reading of a tool call and of a reasoning summary lives. This host
+     * refused Anthropic's tool_use blocks outright and read no reasoning at
+     * all from a responses reply, so those two dialects could neither send a
+     * tool nor hear about one. chat-completions stays here for now: its
+     * reply is the shape everything else is assembled into, and the core
+     * parses it on a separate path.
+     */
+    internal fun parseResponse(protocol: String, response: JSONObject): JSONObject {
+        if (protocol != "chat-completions") return readReply(protocol, response)
+        val choice = response.getJSONArray("choices").getJSONObject(0)
+        val message = choice.getJSONObject("message")
+        val calls = JSONArray()
+        // The calls the model asked for, carried back as the provider stated
+        // them. What they *mean* -- whether the name is a tool, whether the
+        // arguments parse, what may run -- stays the core's.
+        val raw = message.optJSONArray("tool_calls") ?: JSONArray()
+        for (index in 0 until raw.length()) {
+            val call = raw.optJSONObject(index) ?: continue
+            val function = call.optJSONObject("function") ?: continue
+            calls.put(
+                JSONObject().put("id", call.optString("id"))
+                    .put("name", function.optString("name"))
+                    .put("arguments", function.optString("arguments")),
+            )
+        }
+        return JSONObject().put("text", stringOrEmpty(message, "content"))
+            .put("reasoning", stringOrEmpty(message, "reasoning_content"))
+            .put("finish_reason", choice.getString("finish_reason"))
+            .put("tool_calls", calls)
+    }
+
+    /** One reply, read by the shared core for the dialect that sent it. */
+    private fun readReply(protocol: String, response: JSONObject): JSONObject {
+        if (!RishAgentCoreNative.available) fail("E_COMPLETION_RESPONSE_JSON")
+        val envelope = JSONObject().put("op", "read_reply").put("dialect", protocol)
+            // The host decides whether the model that answered is the model
+            // that was asked; the core records the one that was requested.
+            .put("requested_model", response.optString("model", ""))
+            .put("response", response)
+        val reply = RishAgentCoreNative.completionResponseReduce(envelope.toString())
+            ?: fail("E_COMPLETION_RESPONSE_JSON")
+        val answer = try {
+            JSONObject(reply)
+        } catch (_: Exception) {
+            fail("E_COMPLETION_RESPONSE_JSON")
+        }
+        if (!answer.optBoolean("ok")) {
+            fail(answer.optString("failure_code").ifEmpty { "E_COMPLETION_RESPONSE_JSON" })
+        }
+        return answer.getJSONObject("reply")
+    }
+
+    /**
      * One round's request body, from the shared core.
      *
      * `send_reasoning` stays a host decision because it is a property of the
@@ -362,70 +419,11 @@ internal class AndroidModelTransport(private val credentials: AndroidCredentialS
                     "completion_model_alias harness=dsh requested_model=$wireModel reported_model=deepseek-flash",
                 )
             }
-            val text: String
-            val reasoning: String
-            val finish: String
-            val calls = JSONArray()
-            when(protocol) {
-                "chat-completions" -> {
-                    val choice = response.getJSONArray("choices").getJSONObject(0)
-                    val message = choice.getJSONObject("message")
-                    text = stringOrEmpty(message, "content"); reasoning = stringOrEmpty(message, "reasoning_content")
-                    finish = choice.getString("finish_reason")
-                    // The calls the model asked for, carried back as the
-                    // provider stated them. What they *mean* -- whether the
-                    // name is a tool, whether the arguments parse, what may
-                    // run -- stays the core's; this only stops discarding
-                    // them, which is what left a round with tools it could
-                    // send and no way to hear an answer.
-                    val raw = message.optJSONArray("tool_calls") ?: JSONArray()
-                    for (index in 0 until raw.length()) {
-                        val call = raw.optJSONObject(index) ?: continue
-                        val function = call.optJSONObject("function") ?: continue
-                        calls.put(
-                            JSONObject().put("id", call.optString("id"))
-                                .put("name", function.optString("name"))
-                                .put("arguments", function.optString("arguments")),
-                        )
-                    }
-                }
-                "messages" -> {
-                    val content = response.getJSONArray("content")
-                    val chunks = mutableListOf<String>(); val thoughts = mutableListOf<String>()
-                    for(index in 0 until content.length()) {
-                        val block = content.getJSONObject(index)
-                        when(block.getString("type")) {
-                            "text" -> chunks.add(block.getString("text"))
-                            "thinking" -> thoughts.add(stringOrEmpty(block, "thinking"))
-                            else -> fail("E_COMPLETION_TOOL_CALL_INVALID")
-                        }
-                    }
-                    text = chunks.joinToString(""); reasoning = thoughts.joinToString("")
-                    finish = when(response.getString("stop_reason")) { "end_turn", "stop_sequence" -> "stop"; "max_tokens" -> "length"; else -> fail("E_COMPLETION_FINISH_RELATION") }
-                }
-                else -> {
-                    val chunks = mutableListOf<String>(); val output = response.getJSONArray("output")
-                    for(index in 0 until output.length()) {
-                        val item = output.getJSONObject(index)
-                        if(item.getString("type") == "message") {
-                            val content = item.getJSONArray("content")
-                            for(i in 0 until content.length()) {
-                                val block = content.getJSONObject(i)
-                                if(block.getString("type") == "output_text") chunks.add(block.getString("text"))
-                            }
-                        } else if(item.getString("type") != "reasoning") fail("E_COMPLETION_TOOL_CALL_INVALID")
-                    }
-                    text = chunks.joinToString(""); reasoning = ""
-                    finish = when(response.optString("status")) {
-                        "completed" -> "stop"
-                        "incomplete" -> if(response.optJSONObject("incomplete_details")?.optString("reason") == "max_output_tokens") "length" else fail("E_COMPLETION_FINISH_RELATION")
-                        else -> fail("E_COMPLETION_FINISH_RELATION")
-                    }
-                }
-            }
-            // A turn that only asks for a tool carries no text, and that is
-            // not an empty response -- it is the answer.
-            if(text.isBlank() && calls.length() == 0) fail("E_COMPLETION_EMPTY_RESPONSE")
+            val read = parseResponse(protocol, response)
+            val text = read.getString("text")
+            val reasoning = read.getString("reasoning")
+            val finish = read.getString("finish_reason")
+            val calls = read.getJSONArray("tool_calls")
             if(finish !in setOf("stop", "length", "tool_calls")) fail("E_COMPLETION_FINISH_RELATION")
             if((finish == "tool_calls") != (calls.length() > 0)) fail("E_COMPLETION_FINISH_RELATION")
             val responseId = response.getString("id"); if(responseId.isBlank() || responseId.length > 256) fail("E_COMPLETION_PROVIDER_RESPONSE_ID")

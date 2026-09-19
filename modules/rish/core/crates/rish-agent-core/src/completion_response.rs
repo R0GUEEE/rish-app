@@ -440,6 +440,7 @@ fn reduce_json_inner(input: &str) -> Result<Value, &'static str> {
         // The request side of the same round, which each host also had its
         // own copy of, for each of three dialects.
         Some("request_body") => return Ok(crate::completion_request::request_body(&envelope)),
+        Some("read_reply") => return Ok(crate::completion_reply::read_reply(&envelope)),
         Some("stream_finish") => return Ok(crate::completion_stream::stream_finish(&envelope)),
         Some("parse") => {}
         _ => return Err(RESPONSE_JSON),

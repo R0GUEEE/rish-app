@@ -1,0 +1,248 @@
+{
+  "schema_version": 1,
+  "harness_id": "claude-code",
+  "provider": "anthropic",
+  "note": "What each host must read back out of a provider's reply. `parsed` is the one vocabulary every dialect reduces to; a case with `failure_code` instead must be refused with that code rather than read. Frozen from iOS, the host whose receipts have shipped.",
+  "cases": [
+    {
+      "name": "text_only",
+      "transport": "claude-code",
+      "requested_model": "claude-sonnet-5",
+      "thinking_mode": "off",
+      "response": {
+        "id": "msg_1",
+        "model": "claude-sonnet-5",
+        "type": "message",
+        "role": "assistant",
+        "content": [
+          {
+            "type": "text",
+            "text": "hello"
+          }
+        ],
+        "stop_reason": "end_turn"
+      },
+      "hosts": [
+        "ios",
+        "android"
+      ],
+      "parsed": {
+        "provider_response_id": "msg_1",
+        "model": "claude-sonnet-5",
+        "text": "hello",
+        "reasoning": "",
+        "tool_calls": [],
+        "finish_reason": "stop"
+      }
+    },
+    {
+      "name": "thinking_and_text",
+      "transport": "claude-code",
+      "requested_model": "claude-sonnet-5",
+      "thinking_mode": "high",
+      "response": {
+        "id": "msg_2",
+        "model": "claude-sonnet-5",
+        "type": "message",
+        "role": "assistant",
+        "content": [
+          {
+            "type": "thinking",
+            "thinking": "why"
+          },
+          {
+            "type": "text",
+            "text": "because"
+          }
+        ],
+        "stop_reason": "stop_sequence"
+      },
+      "hosts": [
+        "ios",
+        "android"
+      ],
+      "parsed": {
+        "provider_response_id": "msg_2",
+        "model": "claude-sonnet-5",
+        "text": "because",
+        "reasoning": "why",
+        "tool_calls": [],
+        "finish_reason": "stop"
+      }
+    },
+    {
+      "name": "tool_use",
+      "transport": "claude-code",
+      "requested_model": "claude-sonnet-5",
+      "thinking_mode": "off",
+      "response": {
+        "id": "msg_3",
+        "model": "claude-sonnet-5",
+        "type": "message",
+        "role": "assistant",
+        "content": [
+          {
+            "type": "text",
+            "text": "on it"
+          },
+          {
+            "type": "tool_use",
+            "id": "tu_1",
+            "name": "write_file",
+            "input": {
+              "path": "notes.txt"
+            }
+          }
+        ],
+        "stop_reason": "tool_use"
+      },
+      "hosts": [
+        "ios",
+        "android"
+      ],
+      "parsed": {
+        "provider_response_id": "msg_3",
+        "model": "claude-sonnet-5",
+        "text": "on it",
+        "reasoning": "",
+        "tool_calls": [
+          {
+            "id": "tu_1",
+            "name": "write_file",
+            "arguments": "{\"path\":\"notes.txt\"}"
+          }
+        ],
+        "finish_reason": "tool_calls"
+      }
+    },
+    {
+      "name": "max_tokens",
+      "transport": "claude-code",
+      "requested_model": "claude-sonnet-5",
+      "thinking_mode": "off",
+      "response": {
+        "id": "msg_4",
+        "model": "claude-sonnet-5",
+        "type": "message",
+        "role": "assistant",
+        "content": [
+          {
+            "type": "text",
+            "text": "cut off"
+          }
+        ],
+        "stop_reason": "max_tokens"
+      },
+      "hosts": [
+        "ios",
+        "android"
+      ],
+      "parsed": {
+        "provider_response_id": "msg_4",
+        "model": "claude-sonnet-5",
+        "text": "cut off",
+        "reasoning": "",
+        "tool_calls": [],
+        "finish_reason": "length"
+      }
+    },
+    {
+      "name": "refusal_says_nothing",
+      "transport": "claude-code",
+      "requested_model": "claude-sonnet-5",
+      "thinking_mode": "off",
+      "response": {
+        "id": "msg_5",
+        "model": "claude-sonnet-5",
+        "type": "message",
+        "role": "assistant",
+        "content": [],
+        "stop_reason": "refusal"
+      },
+      "hosts": [
+        "ios",
+        "android"
+      ],
+      "parsed": {
+        "provider_response_id": "msg_5",
+        "model": "claude-sonnet-5",
+        "text": "",
+        "reasoning": "",
+        "tool_calls": [],
+        "finish_reason": "content_filter"
+      },
+      "why": "A refusal is the one empty reply that is a reply."
+    },
+    {
+      "name": "unknown_stop_reason_fails_closed",
+      "transport": "claude-code",
+      "requested_model": "claude-sonnet-5",
+      "thinking_mode": "off",
+      "response": {
+        "id": "msg_6",
+        "model": "claude-sonnet-5",
+        "type": "message",
+        "role": "assistant",
+        "content": [
+          {
+            "type": "text",
+            "text": "x"
+          }
+        ],
+        "stop_reason": "something_new"
+      },
+      "hosts": [
+        "ios",
+        "android"
+      ],
+      "failure_code": "E_COMPLETION_FINISH_RELATION",
+      "why": "A stop reason this does not know is not guessed at."
+    },
+    {
+      "name": "finish_must_agree_with_calls",
+      "transport": "claude-code",
+      "requested_model": "claude-sonnet-5",
+      "thinking_mode": "off",
+      "response": {
+        "id": "msg_7",
+        "model": "claude-sonnet-5",
+        "type": "message",
+        "role": "assistant",
+        "content": [
+          {
+            "type": "tool_use",
+            "id": "t",
+            "name": "n",
+            "input": {}
+          }
+        ],
+        "stop_reason": "end_turn"
+      },
+      "hosts": [
+        "ios",
+        "android"
+      ],
+      "failure_code": "E_COMPLETION_FINISH_RELATION",
+      "why": "A turn that asked for a tool but did not say so is not readable."
+    },
+    {
+      "name": "empty_reply_is_refused",
+      "transport": "claude-code",
+      "requested_model": "claude-sonnet-5",
+      "thinking_mode": "off",
+      "response": {
+        "id": "msg_8",
+        "model": "claude-sonnet-5",
+        "type": "message",
+        "role": "assistant",
+        "content": [],
+        "stop_reason": "end_turn"
+      },
+      "hosts": [
+        "ios",
+        "android"
+      ],
+      "failure_code": "E_COMPLETION_EMPTY_RESPONSE"
+    }
+  ]
+}

@@ -1,0 +1,197 @@
+{
+  "schema_version": 1,
+  "harness_id": "codex",
+  "provider": "openai",
+  "note": "What each host must read back out of a provider's reply. `parsed` is the one vocabulary every dialect reduces to; a case with `failure_code` instead must be refused with that code rather than read. Frozen from iOS, the host whose receipts have shipped.",
+  "cases": [
+    {
+      "name": "text_only",
+      "transport": "codex",
+      "requested_model": "gpt-5.6",
+      "thinking_mode": "off",
+      "response": {
+        "id": "resp_1",
+        "model": "gpt-5.6",
+        "object": "response",
+        "status": "completed",
+        "output": [
+          {
+            "type": "message",
+            "role": "assistant",
+            "content": [
+              {
+                "type": "output_text",
+                "text": "hello"
+              }
+            ]
+          }
+        ]
+      },
+      "hosts": [
+        "ios",
+        "android"
+      ],
+      "parsed": {
+        "provider_response_id": "resp_1",
+        "model": "gpt-5.6",
+        "text": "hello",
+        "reasoning": "",
+        "tool_calls": [],
+        "finish_reason": "stop"
+      }
+    },
+    {
+      "name": "reasoning_summary",
+      "transport": "codex",
+      "requested_model": "gpt-5.6",
+      "thinking_mode": "high",
+      "response": {
+        "id": "resp_2",
+        "model": "gpt-5.6",
+        "object": "response",
+        "status": "completed",
+        "output": [
+          {
+            "type": "reasoning",
+            "summary": [
+              {
+                "type": "summary_text",
+                "text": "why"
+              }
+            ]
+          },
+          {
+            "type": "message",
+            "role": "assistant",
+            "content": [
+              {
+                "type": "output_text",
+                "text": "because"
+              }
+            ]
+          }
+        ]
+      },
+      "hosts": [
+        "ios",
+        "android"
+      ],
+      "parsed": {
+        "provider_response_id": "resp_2",
+        "model": "gpt-5.6",
+        "text": "because",
+        "reasoning": "why",
+        "tool_calls": [],
+        "finish_reason": "stop"
+      },
+      "why": "Android reads no reasoning at all on this dialect."
+    },
+    {
+      "name": "function_call",
+      "transport": "codex",
+      "requested_model": "gpt-5.6",
+      "thinking_mode": "off",
+      "response": {
+        "id": "resp_3",
+        "model": "gpt-5.6",
+        "object": "response",
+        "status": "completed",
+        "output": [
+          {
+            "type": "function_call",
+            "call_id": "c_1",
+            "name": "write_file",
+            "arguments": "{\"path\":\"notes.txt\"}"
+          }
+        ]
+      },
+      "hosts": [
+        "ios",
+        "android"
+      ],
+      "parsed": {
+        "provider_response_id": "resp_3",
+        "model": "gpt-5.6",
+        "text": "",
+        "reasoning": "",
+        "tool_calls": [
+          {
+            "id": "c_1",
+            "name": "write_file",
+            "arguments": "{\"path\":\"notes.txt\"}"
+          }
+        ],
+        "finish_reason": "tool_calls"
+      }
+    },
+    {
+      "name": "incomplete_is_length",
+      "transport": "codex",
+      "requested_model": "gpt-5.6",
+      "thinking_mode": "off",
+      "response": {
+        "id": "resp_4",
+        "model": "gpt-5.6",
+        "object": "response",
+        "status": "incomplete",
+        "incomplete_details": {
+          "reason": "max_output_tokens"
+        },
+        "output": [
+          {
+            "type": "message",
+            "role": "assistant",
+            "content": [
+              {
+                "type": "output_text",
+                "text": "cut"
+              }
+            ]
+          }
+        ]
+      },
+      "hosts": [
+        "ios",
+        "android"
+      ],
+      "parsed": {
+        "provider_response_id": "resp_4",
+        "model": "gpt-5.6",
+        "text": "cut",
+        "reasoning": "",
+        "tool_calls": [],
+        "finish_reason": "length"
+      }
+    },
+    {
+      "name": "still_in_progress_fails_closed",
+      "transport": "codex",
+      "requested_model": "gpt-5.6",
+      "thinking_mode": "off",
+      "response": {
+        "id": "resp_5",
+        "model": "gpt-5.6",
+        "object": "response",
+        "status": "in_progress",
+        "output": [
+          {
+            "type": "message",
+            "role": "assistant",
+            "content": [
+              {
+                "type": "output_text",
+                "text": "partial"
+              }
+            ]
+          }
+        ]
+      },
+      "hosts": [
+        "ios",
+        "android"
+      ],
+      "failure_code": "E_COMPLETION_FINISH_RELATION",
+      "why": "A stream that never finished is not a reply to settle a round on."
+    }
+  ]
+}
