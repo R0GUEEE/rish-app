@@ -30,6 +30,44 @@ internal object RuntimeJson {
         }
         append('"')
     }
+    /**
+     * The second JSON byte protocol, and the only one a provider round uses.
+     *
+     * A round's receipt binds the bytes that were actually sent, and those
+     * are `NSJSONSerialization` with sorted keys -- which writes a forward
+     * slash as an escape. [canonical] does not, and must not start to: it
+     * hashes session state, where the bytes are already committed. So this
+     * is its own encoding with its own name, and the two never meet.
+     *
+     * A round whose tool arguments carry a path has a slash in it, so the
+     * difference is not hypothetical: it is every round that touches a file.
+     * See ios/RishTests/Fixtures/deepseek-request-cases.json.
+     */
+    fun receiptJson(value: Any?): String = when (value) {
+        null, JSONObject.NULL -> "null"
+        is JSONObject -> value.keys().asSequence().toList().sorted()
+            .joinToString(",", "{", "}") { receiptQuote(it) + ":" + receiptJson(value.get(it)) }
+        is JSONArray -> (0 until value.length()).joinToString(",", "[", "]") { receiptJson(value.get(it)) }
+        is String -> receiptQuote(value)
+        else -> canonical(value)
+    }
+
+    private fun receiptQuote(text: String): String = buildString {
+        append('"')
+        for (char in text) when (char) {
+            '"' -> append("\\\"")
+            '\\' -> append("\\\\")
+            '/' -> append("\\/")
+            '\b' -> append("\\b")
+            '\u000c' -> append("\\f")
+            '\n' -> append("\\n")
+            '\r' -> append("\\r")
+            '\t' -> append("\\t")
+            else -> if (char.code < 32) append("\\u%04x".format(char.code)) else append(char)
+        }
+        append('"')
+    }
+
     fun sha(text: String): String = MessageDigest.getInstance("SHA-256").digest(text.toByteArray(Charsets.UTF_8)).joinToString("") { "%02x".format(it) }
     fun uuid(value: String): Boolean = Regex("[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}").matches(value)
     // React Native exposes every JavaScript number as Double. JSON serialization

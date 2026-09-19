@@ -80,6 +80,7 @@
 		D5F400021AD99517003FC87E /* codex-stream-cases.json in Resources */ = {isa = PBXBuildFile; fileRef = D5F400011AD99517003FC87E /* codex-stream-cases.json */; };
 		D6C400021AD99517003FC87E /* ProjectContextProofTests.mm in Sources */ = {isa = PBXBuildFile; fileRef = D6C400011AD99517003FC87E /* ProjectContextProofTests.mm */; };
 		D6F400021AD99517003FC87E /* deepseek-stream-cases.json in Resources */ = {isa = PBXBuildFile; fileRef = D6F400011AD99517003FC87E /* deepseek-stream-cases.json */; };
+		A1B400041AD99517003FC87E /* deepseek-request-cases.json in Resources */ = {isa = PBXBuildFile; fileRef = A1B400031AD99517003FC87E /* deepseek-request-cases.json */; };
 		D7C400021AD99517003FC87E /* LocalProjectContextModuleTests.mm in Sources */ = {isa = PBXBuildFile; fileRef = D7C400011AD99517003FC87E /* LocalProjectContextModuleTests.mm */; };
 		D8C400021AD99517003FC87E /* ProjectContextCompletionV3Tests.mm in Sources */ = {isa = PBXBuildFile; fileRef = D8C400011AD99517003FC87E /* ProjectContextCompletionV3Tests.mm */; };
 		D8F400021AD99517003FC87E /* canonical-corpus.json in Resources */ = {isa = PBXBuildFile; fileRef = D8F400011AD99517003FC87E /* canonical-corpus.json */; };
@@ -88,6 +89,7 @@
 		E1C400021AD99517003FC87E /* ClaudeProviderTransportTests.mm in Sources */ = {isa = PBXBuildFile; fileRef = E1C400011AD99517003FC87E /* ClaudeProviderTransportTests.mm */; };
 		E2C400021AD99517003FC87E /* CodexProviderTransportTests.mm in Sources */ = {isa = PBXBuildFile; fileRef = E2C400011AD99517003FC87E /* CodexProviderTransportTests.mm */; };
 		E3C400021AD99517003FC87E /* ProviderStreamFixtureTests.mm in Sources */ = {isa = PBXBuildFile; fileRef = E3C400011AD99517003FC87E /* ProviderStreamFixtureTests.mm */; };
+		A1B400021AD99517003FC87E /* ProviderRequestFixtureTests.mm in Sources */ = {isa = PBXBuildFile; fileRef = A1B400011AD99517003FC87E /* ProviderRequestFixtureTests.mm */; };
 		E499A3C7C97A8E3F11B46FE9 /* TaskAttributes.swift in Sources */ = {isa = PBXBuildFile; fileRef = 9A8ACD2C493DA7F9D27E1886 /* TaskAttributes.swift */; };
 		E5180925E431440F0A7A9A44 /* CodexChatCredentialTests.mm in Sources */ = {isa = PBXBuildFile; fileRef = F988BBD6DEFB3CF8939B5A42 /* CodexChatCredentialTests.mm */; };
 		E7A2B4012C9FC4196B3C00A1 /* ContainerAnchorTests.mm in Sources */ = {isa = PBXBuildFile; fileRef = E7A2B4012C9FC4196B3C00A0 /* ContainerAnchorTests.mm */; };
@@ -236,6 +238,7 @@
 		D5F400011AD99517003FC87E /* codex-stream-cases.json */ = {isa = PBXFileReference; lastKnownFileType = text.json; path = "Fixtures/codex-stream-cases.json"; sourceTree = "<group>"; };
 		D6C400011AD99517003FC87E /* ProjectContextProofTests.mm */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.cpp.objcpp; path = ProjectContextProofTests.mm; sourceTree = "<group>"; };
 		D6F400011AD99517003FC87E /* deepseek-stream-cases.json */ = {isa = PBXFileReference; lastKnownFileType = text.json; path = "Fixtures/deepseek-stream-cases.json"; sourceTree = "<group>"; };
+		A1B400031AD99517003FC87E /* deepseek-request-cases.json */ = {isa = PBXFileReference; lastKnownFileType = text.json; path = "Fixtures/deepseek-request-cases.json"; sourceTree = "<group>"; };
 		D7C400011AD99517003FC87E /* LocalProjectContextModuleTests.mm */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.cpp.objcpp; path = LocalProjectContextModuleTests.mm; sourceTree = "<group>"; };
 		D8C400011AD99517003FC87E /* ProjectContextCompletionV3Tests.mm */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.cpp.objcpp; path = ProjectContextCompletionV3Tests.mm; sourceTree = "<group>"; };
 		D8F400011AD99517003FC87E /* canonical-corpus.json */ = {isa = PBXFileReference; lastKnownFileType = text.json; name = "canonical-corpus.json"; path = "../../../../modules/rish/core/fixtures/canonical-corpus.json"; sourceTree = "<group>"; };
@@ -244,6 +247,7 @@
 		E1C400011AD99517003FC87E /* ClaudeProviderTransportTests.mm */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.cpp.objcpp; path = ClaudeProviderTransportTests.mm; sourceTree = "<group>"; };
 		E2C400011AD99517003FC87E /* CodexProviderTransportTests.mm */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.cpp.objcpp; path = CodexProviderTransportTests.mm; sourceTree = "<group>"; };
 		E3C400011AD99517003FC87E /* ProviderStreamFixtureTests.mm */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.cpp.objcpp; path = ProviderStreamFixtureTests.mm; sourceTree = "<group>"; };
+		A1B400011AD99517003FC87E /* ProviderRequestFixtureTests.mm */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.cpp.objcpp; path = "ProviderRequestFixtureTests.mm"; sourceTree = "<group>"; };
 		E7A2B4012C9FC4196B3C00A0 /* ContainerAnchorTests.mm */ = {isa = PBXFileReference; includeInIndex = 1; path = ContainerAnchorTests.mm; sourceTree = "<group>"; };
 		ED297162215061F000B7C4FE /* JavaScriptCore.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = JavaScriptCore.framework; path = System/Library/Frameworks/JavaScriptCore.framework; sourceTree = SDKROOT; };
 		F1A400011AD99517003FC87E /* HarnessAuthServiceTests.mm */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.cpp.objcpp; path = HarnessAuthServiceTests.mm; sourceTree = "<group>"; };
@@ -350,6 +354,7 @@
 				D4F400A11AD99517003FC87E /* glm-stream-cases.json */,
 				D5F400011AD99517003FC87E /* codex-stream-cases.json */,
 				D6F400011AD99517003FC87E /* deepseek-stream-cases.json */,
+				A1B400031AD99517003FC87E /* deepseek-request-cases.json */,
 				D8F400011AD99517003FC87E /* canonical-corpus.json */,
 				D9F400011AD99517003FC87E /* canonical-golden.json */,
 				C3F400011AD99517003FC87E /* agent-interrupted-recovery-session.json */,
@@ -371,6 +376,7 @@
 				E1C400011AD99517003FC87E /* ClaudeProviderTransportTests.mm */,
 				E2C400011AD99517003FC87E /* CodexProviderTransportTests.mm */,
 				E3C400011AD99517003FC87E /* ProviderStreamFixtureTests.mm */,
+				A1B400011AD99517003FC87E /* ProviderRequestFixtureTests.mm */,
 				ABD400011AD99517003FC87E /* AgentPreparedAttemptStoreTests.mm */,
 				ABE400011AD99517003FC87E /* AgentProviderRoundServiceTests.mm */,
 				ABF400011AD99517003FC87E /* LegacyBoundProjectRootAccessTests.mm */,
@@ -646,6 +652,7 @@
 				D4F400A21AD99517003FC87E /* glm-stream-cases.json in Resources */,
 				D5F400021AD99517003FC87E /* codex-stream-cases.json in Resources */,
 				D6F400021AD99517003FC87E /* deepseek-stream-cases.json in Resources */,
+				A1B400041AD99517003FC87E /* deepseek-request-cases.json in Resources */,
 				D8F400021AD99517003FC87E /* canonical-corpus.json in Resources */,
 				D9F400021AD99517003FC87E /* canonical-golden.json in Resources */,
 				C3F400021AD99517003FC87E /* agent-interrupted-recovery-session.json in Resources */,
@@ -827,6 +834,7 @@
 				E1C400021AD99517003FC87E /* ClaudeProviderTransportTests.mm in Sources */,
 				E2C400021AD99517003FC87E /* CodexProviderTransportTests.mm in Sources */,
 				E3C400021AD99517003FC87E /* ProviderStreamFixtureTests.mm in Sources */,
+				A1B400021AD99517003FC87E /* ProviderRequestFixtureTests.mm in Sources */,
 				ABD400021AD99517003FC87E /* AgentPreparedAttemptStoreTests.mm in Sources */,
 				ABE400021AD99517003FC87E /* AgentProviderRoundServiceTests.mm in Sources */,
 				ABF400021AD99517003FC87E /* LegacyBoundProjectRootAccessTests.mm in Sources */,

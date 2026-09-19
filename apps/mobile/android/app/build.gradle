@@ -241,6 +241,14 @@ android {
         }
     }
     testBuildType project.findProperty("rishTestBuildType") ?: "debug"
+    sourceSets {
+        androidTest {
+            // The recorded provider fixtures have one home, next to the iOS
+            // suite that first froze them. Copying them here would mean two
+            // truths that can drift; reading them here cannot.
+            assets.srcDirs += [file("../../ios/RishTests/Fixtures")]
+        }
+    }
     defaultConfig {
         applicationId "tech.zseven.rish"
         minSdkVersion rootProject.ext.minSdkVersion

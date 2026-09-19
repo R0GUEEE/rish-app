@@ -123,6 +123,41 @@ internal class AndroidModelTransport(private val credentials: AndroidCredentialS
         return message
     }
 
+    /**
+     * The chat-completions request body, and the ceiling that goes with it.
+     *
+     * The ceiling is four numbers, not one. A round with tools has to be able
+     * to return a whole file inside its arguments, and a thinking round needs
+     * room for the reasoning on top of that. This read one number for all
+     * four cases, which cut a thinking tool round to half the room iOS gives
+     * it -- long tool arguments were being truncated by the request, not by
+     * the model. Frozen in
+     * ios/RishTests/Fixtures/deepseek-request-cases.json.
+     */
+    internal fun chatCompletionsBody(
+        body: JSONObject,
+        thinkingMode: String,
+        sendReasoning: Boolean,
+        messages: JSONArray,
+        tools: JSONArray,
+    ): JSONObject {
+        val thinking = thinkingMode != "off"
+        body.put("messages", messages).put(
+            "max_tokens",
+            if (tools.length() > 0) {
+                if (thinking) 16384 else 8192
+            } else {
+                if (thinking) 4096 else 1024
+            },
+        )
+        if (tools.length() > 0) body.put("tools", tools)
+        if (sendReasoning) {
+            body.put("thinking", JSONObject().put("type", if (thinking) "enabled" else "disabled"))
+            if (thinking) body.put("reasoning_effort", thinkingMode)
+        }
+        return body
+    }
+
     private fun functionTools(declared: JSONArray): JSONArray {
         val tools = JSONArray()
         for (index in 0 until declared.length()) {
@@ -263,14 +298,10 @@ internal class AndroidModelTransport(private val credentials: AndroidCredentialS
                         } else body.put("thinking", JSONObject().put("type", "adaptive")).put("output_config", JSONObject().put("effort", input.getString("thinking_mode")))
                     }
                 }
-                "chat-completions" -> {
-                    body.put("messages", messages).put("max_tokens", 8192)
-                    if (declared.length() > 0) body.put("tools", functionTools(declared))
-                    if(config.getBoolean("send_reasoning")) {
-                        body.put("thinking", JSONObject().put("type", if(input.getString("thinking_mode") == "off") "disabled" else "enabled"))
-                        if(input.getString("thinking_mode") != "off") body.put("reasoning_effort", input.getString("thinking_mode"))
-                    }
-                }
+                "chat-completions" -> chatCompletionsBody(
+                    body, input.getString("thinking_mode"), config.getBoolean("send_reasoning"),
+                    messages, if (declared.length() > 0) functionTools(declared) else JSONArray(),
+                )
                 "responses" -> {
                     body.put("input", messages).put("max_output_tokens", 8192)
                     if(config.getBoolean("send_reasoning") && input.getString("thinking_mode") != "off")
@@ -278,7 +309,9 @@ internal class AndroidModelTransport(private val credentials: AndroidCredentialS
                 }
                 else -> fail("E_COMPLETION_BODY_INVALID")
             }
-            val encoded = RuntimeJson.canonical(body)
+            // What goes on the wire is what the receipt binds, and that is
+            // the receipt encoding rather than the canonical one.
+            val encoded = RuntimeJson.receiptJson(body)
             val providerRequestId = UUID.randomUUID().toString()
             val httpCall: Call = synchronized(lock) {
                 own(request)
@@ -419,8 +452,11 @@ internal class AndroidModelTransport(private val credentials: AndroidCredentialS
                 result.put("harness_id", request.harness).put("turn_id", input.getString("turn_id"))
                     .put("attempt_id", input.getString("attempt_id")).put("round_id", request.id).put("round_index", input.getInt("round_index"))
                     .put("requested_model", request.model).put("provider_request_id", providerRequestId).put("provider_response_id", responseId)
-                    .put("visible_history_sha256", RuntimeJson.sha(RuntimeJson.canonical(history)))
-                    .put("model_input_sha256", RuntimeJson.sha(RuntimeJson.canonical(messages)))
+                    // Both of these are provider-input digests, so both are
+                    // the receipt encoding -- the same one iOS has always
+                    // written them with.
+                    .put("visible_history_sha256", RuntimeJson.sha(RuntimeJson.receiptJson(history)))
+                    .put("model_input_sha256", RuntimeJson.sha(RuntimeJson.receiptJson(messages)))
                     .put("request_body_sha256", RuntimeJson.sha(encoded)).put("project_context_receipt", JSONObject.NULL)
                 configurations.binding(config, request.model)?.let { result.put("provider_configuration", it) }
             }
