@@ -39,6 +39,9 @@ import {
   type ProjectPushReceipt,
   type ProjectStatusEntry,
 } from '../native/LocalProjects';
+import { LocalRuntime } from '../native/LocalRuntime';
+import { listWorkspaceProjects } from '../native/workspaceProjects';
+import type { WorkspaceRootRefV1 } from '../native/WorkspaceRoot';
 import { useAppPresentation } from '../presentation/AppPresentation';
 import { fonts, hitSlop, type ThemePalette } from '../theme';
 import { AppIcon } from './AppIcon';
@@ -75,6 +78,37 @@ function cloneIsActive(operation: ProjectCloneOperation | null) {
 type CreateMode = 'create' | 'clone' | null;
 type ProjectTab = 'files' | 'changes';
 type DiffMode = 'staged' | 'unstaged';
+
+/**
+ * A row of the list: a legacy project (`root === null`, the v1 API by
+ * project id) or a project attached to a workspace (`root` set, the V2 API
+ * by workspace root -- the only kind Android has).
+ */
+type ProjectRow = LocalProject & {
+  readonly root: WorkspaceRootRefV1 | null;
+  readonly workspaceName: string | null;
+};
+
+const WORKSPACE_DIFF_MAX_BYTES = 512 * 1024;
+
+/** A legacy project as a row: the v1 API by id, no workspace root. */
+function legacyRow(project: LocalProject): ProjectRow {
+  return { ...project, root: null, workspaceName: null };
+}
+
+/** The row as the callers outside this surface know a project: without the row's own fields. */
+function projectOf(row: ProjectRow): LocalProject {
+  const { root: _root, workspaceName: _workspaceName, ...project } = row;
+  return project;
+}
+
+/** A V2 answer in the v1 shape the panel renders; the root is the row's. */
+function legacyShaped<T extends { schema_version: 2; root: WorkspaceRootRefV1 }>(
+  value: T,
+): Omit<T, 'schema_version' | 'root'> & { schema_version: 1 } {
+  const { root: _root, schema_version: _version, ...rest } = value;
+  return { ...rest, schema_version: 1 };
+}
 
 export type ProjectReviewPreviewProps = {
   status: ProjectGitStatus | null;
@@ -256,8 +290,8 @@ export function ProjectsSurface({
   const wideLayout = containerWidth >= 900;
   const { colors, locale, preferences, t } = useAppPresentation();
   const styles = useMemo(() => createStyles(colors), [colors]);
-  const [projects, setProjects] = useState<LocalProject[]>([]);
-  const [selected, setSelected] = useState<LocalProject | null>(null);
+  const [projects, setProjects] = useState<ProjectRow[]>([]);
+  const [selected, setSelected] = useState<ProjectRow | null>(null);
   const [status, setStatus] = useState<ProjectGitStatus | null>(null);
   const [diffs, setDiffs] = useState<{
     staged: ProjectDiff | null;
@@ -270,6 +304,14 @@ export function ProjectsSurface({
   const [selectedDiffPath, setSelectedDiffPath] = useState<string | null>(null);
   const diffRevision = useRef(0);
   const diff = diffs[diffMode];
+  // A legacy project shows the path Rish owns; a workspace project has no
+  // such path -- its worktree is the workspace itself.
+  const worktreeLabel =
+    selected === null
+      ? ''
+      : selected.root !== null
+        ? t('projects.workspaceProject', { workspace: selected.workspaceName ?? '' })
+        : selected.workspace_path;
   const [credential, setCredential] = useState<ProjectCredentialStatus | null>(
     null,
   );
@@ -312,7 +354,7 @@ export function ProjectsSurface({
   const [error, setError] = useState<string | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
   const [tasks] = useState(() => new ProjectViewTasks());
-  const selectedRef = useRef<LocalProject | null>(null);
+  const selectedRef = useRef<ProjectRow | null>(null);
   const remoteDraftDirty = useRef(false);
   const remoteDraftRevision = useRef(0);
   const reloadCurrentRef = useRef<(() => void) | null>(null);
@@ -347,7 +389,7 @@ export function ProjectsSurface({
     [syncBusy, tasks],
   );
   const selectView = useCallback(
-    (project: LocalProject | null) => {
+    (project: ProjectRow | null) => {
       tasks.invalidate(project?.id ?? null);
       selectedRef.current = project;
       remoteDraftDirty.current = false;
@@ -387,16 +429,50 @@ export function ProjectsSurface({
 
   const loadProjects = useCallback(async () => {
     if (!tasks.visible) return;
-    if (!LocalProjects.isAvailable()) {
+    const legacyAvailable = LocalProjects.isAvailable();
+    const workspaceAvailable = LocalProjects.isV2Available();
+    if (!legacyAvailable && !workspaceAvailable) {
       setError(t('projects.unavailable'));
       return;
     }
     const task = beginTask('list');
     setError(null);
     try {
-      const listing = await LocalProjects.list();
+      // The legacy listing and the workspace-attached projects are two
+      // sources. A build with only the second (Android) answers the first
+      // with a refusal, which is not an error worth a banner.
+      let legacyFailure: unknown = null;
+      const [legacy, attached] = await Promise.all([
+        legacyAvailable
+          ? LocalProjects.list().catch((caught: unknown) => {
+              legacyFailure = caught;
+              return { schema_version: 1 as const, projects: [] as LocalProject[] };
+            })
+          : Promise.resolve({ schema_version: 1 as const, projects: [] as LocalProject[] }),
+        workspaceAvailable ? listWorkspaceProjects() : Promise.resolve([]),
+      ]);
       if (!tasks.owns(task)) return;
-      setProjects(listing.projects);
+      if (legacyFailure !== null && !workspaceAvailable) throw legacyFailure;
+      const legacyIds = new Set(legacy.projects.map(row => row.id));
+      const rows: ProjectRow[] = [
+        ...legacy.projects.map(legacyRow),
+        ...[...attached]
+          .filter(row => !legacyIds.has(row.projectId))
+          .sort((left, right) => right.lastOpenedAt.localeCompare(left.lastOpenedAt))
+          .map(row => ({
+            schema_version: 1 as const,
+            id: row.projectId,
+            name: row.name,
+            workspace_path: `projects/${row.projectId}/repo` as const,
+            created_at: row.createdAt,
+            updated_at: row.lastOpenedAt,
+            origin_url: null,
+            root: row.root,
+            workspaceName: row.workspaceName,
+          })),
+      ];
+      const listing = { projects: rows };
+      setProjects(rows);
       const previous = selectedRef.current;
       if (previous !== null) {
         const next =
@@ -416,7 +492,7 @@ export function ProjectsSurface({
   }, [beginTask, finishTask, selectView, t, tasks]);
 
   const loadDetail = useCallback(
-    async (project: LocalProject) => {
+    async (project: ProjectRow) => {
       if (!tasks.visible || selectedRef.current?.id !== project.id) return;
       diffRevision.current += 1;
       setDiffPage(null);
@@ -431,17 +507,35 @@ export function ProjectsSurface({
           stagedDiff,
           nextCredential,
           nextReceipts,
-        ] = await Promise.all([
-          LocalProjects.status(project.id),
-          LocalProjects.diff(project.id, { staged: false }),
-          LocalProjects.diff(project.id, { staged: true }),
-          project.origin_url === null
-            ? Promise.resolve(null)
-            : LocalProjects.credentialStatus(project.id),
-          project.origin_url === null
-            ? Promise.resolve(null)
-            : LocalProjects.pushReceipts(project.id),
-        ]);
+        ] = project.root !== null
+          ? await Promise.all([
+              LocalProjects.statusV2({ schema_version: 1, root: project.root }).then(legacyShaped),
+              LocalProjects.diffV2({
+                schema_version: 1,
+                root: project.root,
+                max_bytes: WORKSPACE_DIFF_MAX_BYTES,
+                staged: false,
+              }).then(legacyShaped),
+              LocalProjects.diffV2({
+                schema_version: 1,
+                root: project.root,
+                max_bytes: WORKSPACE_DIFF_MAX_BYTES,
+                staged: true,
+              }).then(legacyShaped),
+              Promise.resolve(null),
+              Promise.resolve(null),
+            ])
+          : await Promise.all([
+              LocalProjects.status(project.id),
+              LocalProjects.diff(project.id, { staged: false }),
+              LocalProjects.diff(project.id, { staged: true }),
+              project.origin_url === null
+                ? Promise.resolve(null)
+                : LocalProjects.credentialStatus(project.id),
+              project.origin_url === null
+                ? Promise.resolve(null)
+                : LocalProjects.pushReceipts(project.id),
+            ]);
         if (!tasks.owns(task)) return;
         setStatus(nextStatus);
         setDiffs({ unstaged: unstagedDiff, staged: stagedDiff });
@@ -489,7 +583,7 @@ export function ProjectsSurface({
   }, [loadDetail, refreshToken, selected, visible]);
 
   const openProject = useCallback(
-    (project: LocalProject) => {
+    (project: ProjectRow) => {
       if (!tasks.visible || selectedRef.current !== null) return;
       selectView(project);
       setTab(wideLayout ? 'changes' : 'files');
@@ -524,7 +618,7 @@ export function ProjectsSurface({
       const owner = cloneOwner.current;
       cloneOwner.current = null;
       if (operation.phase === 'succeeded' && operation.project !== null) {
-        const project = operation.project;
+        const project = legacyRow(operation.project);
         setProjects(previous => [
           project,
           ...previous.filter(item => item.id !== project.id),
@@ -632,7 +726,7 @@ export function ProjectsSurface({
           }
           return;
         }
-        const project = await LocalProjects.create(trimmedName);
+        const project = legacyRow(await LocalProjects.create(trimmedName));
         if (!tasks.owns(task)) return;
         setProjects(previous => [
           project,
@@ -685,7 +779,10 @@ export function ProjectsSurface({
     setError(null);
     setNotice(null);
     try {
-      const nextStatus = await LocalProjects.stageAll(selected.id);
+      const nextStatus =
+        selected.root !== null
+          ? legacyShaped(await LocalProjects.stageAllV2({ schema_version: 1, root: selected.root }))
+          : await LocalProjects.stageAll(selected.id);
       if (!tasks.owns(task)) return;
       diffModeRef.current = 'staged';
       setDiffMode('staged');
@@ -721,7 +818,7 @@ export function ProjectsSurface({
   const reviewDiffPage = useCallback(
     async (offset: number, snapshot: string | null, history: number[]) => {
       const project = selectedRef.current;
-      if (project === null || !tasks.visible) return;
+      if (project === null || project.root !== null || !tasks.visible) return;
       const mode = diffModeRef.current ?? 'unstaged';
       const revision = diffRevision.current;
       const task = beginTask('diff');
@@ -754,7 +851,7 @@ export function ProjectsSurface({
     const task = beginTask('files');
     setError(null);
     try {
-      await onOpenFiles(project, () => tasks.owns(task));
+      await onOpenFiles(projectOf(project), () => tasks.owns(task));
     } catch (caught) {
       if (tasks.owns(task))
         setError(t('projects.operationFailed', { error: errorText(caught) }));
@@ -779,11 +876,26 @@ export function ProjectsSurface({
     setError(null);
     setNotice(null);
     try {
-      await LocalProjects.commit(selected.id, {
-        message: commitMessage.trim(),
-        authorName: authorName.trim(),
-        authorEmail: authorEmail.trim(),
-      });
+      if (selected.root !== null) {
+        // The V2 commit is guarded by the head the person reviewed: a
+        // repository that moved under them refuses rather than committing
+        // on top of something they never saw.
+        await LocalProjects.commitV2({
+          schema_version: 1,
+          root: selected.root,
+          operation_id: LocalRuntime.createCompletionRequestId(),
+          message: commitMessage.trim(),
+          author_name: authorName.trim(),
+          author_email: authorEmail.trim(),
+          expected_head_oid: status?.head_oid ?? null,
+        });
+      } else {
+        await LocalProjects.commit(selected.id, {
+          message: commitMessage.trim(),
+          authorName: authorName.trim(),
+          authorEmail: authorEmail.trim(),
+        });
+      }
       if (!tasks.owns(task)) return;
       setCommitMessage(current => (current === commitMessage ? '' : current));
       setNotice(t('projects.committedSuccess'));
@@ -1176,6 +1288,7 @@ export function ProjectsSurface({
               selectedPath={selectedDiffPath}
               onSelectPath={setSelectedDiffPath}
               onReviewPage={reviewDiffPage}
+              pagingAvailable={selected.root === null}
               status={status}
               styles={styles}
               onStageAll={stageAll}
@@ -1203,7 +1316,7 @@ export function ProjectsSurface({
                   </Text>
                   <Text numberOfLines={1} style={styles.statusMeta}>
                     {status === null
-                      ? selected.workspace_path
+                      ? worktreeLabel
                       : `${status.branch ?? t('projects.unbornBranch')} · ${t(
                           'projects.aheadBehind',
                           {
@@ -1262,7 +1375,7 @@ export function ProjectsSurface({
             {tab === 'files' ? (
               <View style={styles.card}>
                 <Text style={styles.cardTitle}>{t('projects.root')}</Text>
-                <Text style={styles.mono}>{selected.workspace_path}</Text>
+                <Text style={styles.mono}>{worktreeLabel}</Text>
                 <Text style={styles.cardBody}>{t('projects.scopedFiles')}</Text>
                 <Pressable
                   accessibilityLabel={
@@ -1274,7 +1387,7 @@ export function ProjectsSurface({
                   onPress={
                     boundProjectId === selected.id
                       ? onUnbindFromChat
-                      : () => onChatInProject?.(selected)
+                      : () => onChatInProject?.(projectOf(selected))
                   }
                   style={({ pressed }) => [
                     styles.primaryButton,
@@ -1314,6 +1427,7 @@ export function ProjectsSurface({
                 selectedPath={selectedDiffPath}
                 onSelectPath={setSelectedDiffPath}
                 onReviewPage={reviewDiffPage}
+                pagingAvailable={selected.root === null}
                 status={status}
                 styles={styles}
                 onStageAll={stageAll}
@@ -1396,6 +1510,12 @@ export function ProjectsSurface({
               </Pressable>
             </View>
 
+            {selected.root !== null ? (
+              <View style={styles.card}>
+                <Text style={styles.cardBody}>{t('projects.workspaceReadOnlyRemote')}</Text>
+              </View>
+            ) : (
+              <>
             <SectionLabel label={t('projects.remoteSection')} styles={styles} />
             <View style={styles.card}>
               <Field
@@ -1553,6 +1673,8 @@ export function ProjectsSurface({
                 )}
               </View>
             )}
+              </>
+            )}
           </ScrollView>
         )}
           </View>
@@ -1627,12 +1749,12 @@ function ProjectList({
   onConfigureSSH: () => Promise<void>;
   createMode: CreateMode;
   name: string;
-  projects: LocalProject[];
+  projects: ProjectRow[];
   styles: ReturnType<typeof createStyles>;
   onChangeCloneUrl: (value: string) => void;
   onChangeName: (value: string) => void;
   onChooseMode: (mode: CreateMode) => void;
-  onOpenProject: (project: LocalProject) => void;
+  onOpenProject: (project: ProjectRow) => void;
   onSubmit: (mode: Exclude<CreateMode, null>) => Promise<void>;
 }) {
   const { colors, t } = useAppPresentation();
@@ -1837,9 +1959,13 @@ function ProjectList({
                   {project.name}
                 </Text>
                 <Text numberOfLines={1} style={styles.projectMeta}>
-                  {project.origin_url === null
-                    ? t('projects.local')
-                    : project.origin_url}
+                  {project.root !== null
+                    ? t('projects.workspaceProject', {
+                        workspace: project.workspaceName ?? '',
+                      })
+                    : project.origin_url === null
+                      ? t('projects.local')
+                      : project.origin_url}
                 </Text>
               </View>
               <AppIcon
@@ -1876,6 +2002,7 @@ function ChangesPanel({
   styles,
   onStageAll,
   readOnly = false,
+  pagingAvailable = true,
 }: {
   diffMode: DiffMode;
   diffPage: ProjectDiffPage | null;
@@ -1888,6 +2015,8 @@ function ChangesPanel({
     snapshot: string | null,
     history: number[],
   ) => Promise<void>;
+  /** Paged review is a v1 (legacy project) call; a workspace project's diff is already bounded. */
+  pagingAvailable?: boolean;
   busy: boolean;
   diff: ProjectDiff | null;
   status: ProjectGitStatus | null;
@@ -2073,7 +2202,7 @@ function ChangesPanel({
           </Pressable>
         </View>
       )}
-      {!readOnly && diffPage === null && (diff?.files.length ?? 0) > 0 && (
+      {!readOnly && pagingAvailable && diffPage === null && (diff?.files.length ?? 0) > 0 && (
         <Pressable
           accessibilityRole="button"
           accessibilityLabel={t('projects.reviewDiffPages')}

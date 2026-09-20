@@ -131,6 +131,17 @@ test('requires the complete V2 Git capability set and echoes the root', async ()
   await expect(
     LocalProjects.diffV2({ schema_version: 1, root: root(), max_bytes: 1024 }),
   ).resolves.toMatchObject({ schema_version: 2, root: root() });
+  // `staged` is optional at the call and always present at the bridge.
+  expect(native.diffV2).toHaveBeenLastCalledWith({
+    schema_version: 1, root: root(), max_bytes: 1024, staged: false,
+  });
+  await LocalProjects.diffV2({ schema_version: 1, root: root(), max_bytes: 1024, staged: true });
+  expect(native.diffV2).toHaveBeenLastCalledWith({
+    schema_version: 1, root: root(), max_bytes: 1024, staged: true,
+  });
+  await expect(
+    LocalProjects.diffV2({ schema_version: 1, root: root(), max_bytes: 1024, staged: 'yes' }),
+  ).rejects.toMatchObject({ code: 'E_PROJECT_REQUEST_INVALID' });
   await expect(
     LocalProjects.commitV2({
       schema_version: 1,

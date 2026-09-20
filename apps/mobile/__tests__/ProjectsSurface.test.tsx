@@ -15,10 +15,21 @@ import {
   translate,
 } from '../src/preferences';
 
+jest.mock('../src/native/workspaceProjects', () => ({
+  listWorkspaceProjects: jest.fn(async () => []),
+}));
+jest.mock('../src/native/LocalRuntime', () => ({
+  LocalRuntime: { createCompletionRequestId: jest.fn(() => 'op-1') },
+}));
 jest.mock('../src/native/LocalProjects', () => ({
   LocalProjects: {
     isAvailable: jest.fn(),
+    isV2Available: jest.fn(),
     list: jest.fn(),
+    statusV2: jest.fn(),
+    diffV2: jest.fn(),
+    stageAllV2: jest.fn(),
+    commitV2: jest.fn(),
     create: jest.fn(),
     clone: jest.fn(),
     startClone: jest.fn(),
@@ -255,9 +266,34 @@ async function openProject(renderer: Renderer) {
   });
 }
 
+const mockWorkspaceProjects = (
+  jest.requireMock('../src/native/workspaceProjects') as {
+    listWorkspaceProjects: jest.Mock;
+  }
+).listWorkspaceProjects;
+
+const workspaceRoot = {
+  schema_version: 1 as const,
+  workspace_id: '11111111-1111-4111-8111-111111111111',
+  binding_revision: 1,
+  project_id: '22222222-2222-4222-8222-222222222222',
+};
+
+const workspaceProject = {
+  projectId: workspaceRoot.project_id,
+  name: 'Smoke',
+  workspaceId: workspaceRoot.workspace_id,
+  workspaceName: 'Smoke',
+  root: workspaceRoot,
+  createdAt: '2026-09-20T00:00:00.000Z',
+  lastOpenedAt: '2026-09-20T00:00:00.000Z',
+};
+
 beforeEach(() => {
   jest.clearAllMocks();
   mockLocalProjects.isAvailable.mockReturnValue(true);
+  mockLocalProjects.isV2Available.mockReturnValue(false);
+  mockWorkspaceProjects.mockResolvedValue([]);
   mockLocalProjects.list.mockResolvedValue({
     schema_version: 1,
     projects: [project],
@@ -1449,4 +1485,54 @@ test('shows a Files root error on the project surface and permits retry', async 
   expect(
     actionByLabel(renderer.root, 'Open project files').props.disabled,
   ).toBe(false);
+});
+
+test('lists a workspace-attached project when the legacy listing is refused, and drives it through V2', async () => {
+  // Android: the v1 module refuses everything, the V2 root API is complete.
+  mockLocalProjects.isV2Available.mockReturnValue(true);
+  mockLocalProjects.list.mockRejectedValue(Object.assign(new Error('E_PROJECT_NATIVE'), { code: 'E_PROJECT_NATIVE' }));
+  mockWorkspaceProjects.mockResolvedValue([workspaceProject]);
+  const v2Status = { ...dirtyStatus, schema_version: 2, root: workspaceRoot, project_id: workspaceRoot.project_id };
+  mockLocalProjects.statusV2.mockResolvedValue(v2Status);
+  mockLocalProjects.diffV2.mockImplementation(async (request: { staged: boolean }) => ({
+    ...diff, schema_version: 2, root: workspaceRoot, project_id: workspaceRoot.project_id, staged: request.staged,
+  }));
+  mockLocalProjects.stageAllV2.mockResolvedValue(v2Status);
+  mockLocalProjects.commitV2.mockResolvedValue({
+    schema_version: 2, root: workspaceRoot, project_id: workspaceRoot.project_id,
+    oid: 'abcdef0123456789', summary: 'initial', committed_at: '2026-09-20T00:00:00.000Z',
+  });
+  const onChatInProject = jest.fn();
+  const renderer = await renderSurface({ onChatInProject });
+  // No banner for the refused legacy listing; the workspace project is a row.
+  expect(renderer.root.findAllByProps({ children: 'Workspace · Smoke' }).length).toBeGreaterThan(0);
+  const row = renderer.root.findByProps({ testID: 'projects-row-Smoke' });
+  await act(async () => { row.props.onPress(); await settle(); });
+  expect(mockLocalProjects.statusV2).toHaveBeenCalledWith({ schema_version: 1, root: workspaceRoot });
+  expect(mockLocalProjects.diffV2).toHaveBeenCalledWith(expect.objectContaining({ root: workspaceRoot, staged: false }));
+  expect(mockLocalProjects.diffV2).toHaveBeenCalledWith(expect.objectContaining({ root: workspaceRoot, staged: true }));
+  expect(mockLocalProjects.status).not.toHaveBeenCalled();
+  // Remote, credentials and push are not offered for a workspace project.
+  expect(renderer.root.findAllByProps({ accessibilityLabel: 'Save origin' }).length).toBe(0);
+  expect(renderer.root.findAllByProps({ accessibilityLabel: 'Push' }).length).toBe(0);
+
+  await act(async () => actionByLabel(renderer.root, 'Changes').props.onPress());
+  await act(async () => { actionByLabel(renderer.root, 'Stage all changes').props.onPress(); await settle(); });
+  expect(mockLocalProjects.stageAllV2).toHaveBeenCalledWith({ schema_version: 1, root: workspaceRoot });
+  expect(mockLocalProjects.stageAll).not.toHaveBeenCalled();
+
+  await act(async () => inputByLabel(renderer.root, 'Commit message').props.onChangeText('initial'));
+  await act(async () => inputByLabel(renderer.root, 'Author name').props.onChangeText('Rish'));
+  await act(async () => inputByLabel(renderer.root, 'Author email').props.onChangeText('rish@example.invalid'));
+  await act(async () => { actionByLabel(renderer.root, 'Commit staged changes').props.onPress(); await settle(); });
+  expect(mockLocalProjects.commitV2).toHaveBeenCalledWith({
+    schema_version: 1,
+    root: workspaceRoot,
+    operation_id: 'op-1',
+    message: 'initial',
+    author_name: 'Rish',
+    author_email: 'rish@example.invalid',
+    expected_head_oid: dirtyStatus.head_oid,
+  });
+  expect(mockLocalProjects.commit).not.toHaveBeenCalled();
 });

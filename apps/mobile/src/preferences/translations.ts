@@ -696,6 +696,9 @@ const enUS = {
   'projects.back': 'Back to projects',
   'projects.title': 'Projects',
   'projects.onDevice': 'ON THIS DEVICE',
+  'projects.workspaceProject': 'Workspace · {workspace}',
+  'projects.workspaceReadOnlyRemote':
+    'This project lives in a workspace. Remotes, credentials and push are not available for it yet.',
   'projects.description':
     'Each project is an isolated local Git worktree owned by Rish.',
   'projects.newProject': 'New project',
@@ -1683,6 +1686,8 @@ const zhCN: Readonly<Record<TranslationKey, string>> = {
   'projects.back': '返回项目列表',
   'projects.title': '项目',
   'projects.onDevice': '此设备',
+  'projects.workspaceProject': '工作区 · {workspace}',
+  'projects.workspaceReadOnlyRemote': '这个项目属于工作区，暂不支持远程、凭据与推送。',
   'projects.description': '每个项目都是由 Rish 管理的独立本地 Git 工作树。',
   'projects.newProject': '新建项目',
   'projects.cloneRepository': '克隆仓库',

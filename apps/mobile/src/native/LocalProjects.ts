@@ -194,6 +194,8 @@ export type GitWorkspaceRequestV1 = {
 
 export type GitDiffRequestV1 = GitWorkspaceRequestV1 & {
   max_bytes: number;
+  /** The index against HEAD when true; the working tree against the index otherwise. */
+  staged: boolean;
 };
 
 export type GitCommitRequestV1 = GitWorkspaceRequestV1 & {
@@ -1085,12 +1087,26 @@ function projectV2WorkspaceRequest(value: unknown): GitWorkspaceRequestV1 {
 }
 
 function projectV2DiffRequest(value: unknown): GitDiffRequestV1 {
-  const row = projectV2ExactRecord(value, ['schema_version', 'root', 'max_bytes'], 'E_PROJECT_REQUEST_INVALID');
-  if (row.schema_version !== 1) return projectV2Fail('E_PROJECT_REQUEST_INVALID');
+  // `staged` may be left out by callers that only ever wanted the working
+  // tree; the request that reaches native always carries it.
+  const hasStaged =
+    typeof value === 'object' && value !== null &&
+    Object.prototype.hasOwnProperty.call(value, 'staged');
+  const row = projectV2ExactRecord(
+    value,
+    hasStaged
+      ? ['schema_version', 'root', 'max_bytes', 'staged']
+      : ['schema_version', 'root', 'max_bytes'],
+    'E_PROJECT_REQUEST_INVALID',
+  );
+  if (row.schema_version !== 1 || (hasStaged && typeof row.staged !== 'boolean')) {
+    return projectV2Fail('E_PROJECT_REQUEST_INVALID');
+  }
   return {
     schema_version: 1,
     root: projectV2RequestRoot(row.root),
     max_bytes: projectV2DiffMaxBytes(row.max_bytes),
+    staged: hasStaged ? (row.staged as boolean) : false,
   };
 }
 

@@ -36,8 +36,11 @@ internal class AndroidProjectGit(
             else -> throw refused(REQUEST_INVALID, "git diff request is invalid")
         }
         if (limit < 1 || limit > MAX_DIFF_BYTES) throw refused(REQUEST_INVALID, "git diff request is invalid")
+        // The index against HEAD, or the working tree against the index: the
+        // panel shows both, and a commit review is the first.
+        val staged = request.opt("staged") as? Boolean ?: throw refused(REQUEST_INVALID, "git diff request is invalid")
         val opened = open(request, write = false)
-        val diff = answer(RishLibgit2Native.diff(opened.gitDir, opened.workDir, false, CONTEXT_LINES))
+        val diff = answer(RishLibgit2Native.diff(opened.gitDir, opened.workDir, staged, CONTEXT_LINES))
         // The patch is clipped to what the caller will take, on a character
         // boundary, and the clip counts as truncation.
         val clipped = RishAgentCoreNative.projectModuleReduce(
@@ -144,7 +147,7 @@ internal class AndroidProjectGit(
         private const val MAX_AUTHOR_NAME_BYTES = 120
         private const val MAX_EMAIL_BYTES = 254
         private val WORKSPACE_KEYS = setOf("schema_version", "root")
-        private val DIFF_KEYS = setOf("schema_version", "root", "max_bytes")
+        private val DIFF_KEYS = setOf("schema_version", "root", "max_bytes", "staged")
         private val COMMIT_KEYS = setOf(
             "schema_version", "root", "operation_id", "message", "author_name", "author_email", "expected_head_oid",
         )

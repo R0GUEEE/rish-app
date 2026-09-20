@@ -4796,9 +4796,15 @@ RCT_REMAP_METHOD(diffV2,
             [maxValue doubleValue] && [maxValue unsignedIntegerValue] >= 1 &&
         [maxValue unsignedIntegerValue] <= LPV2MaxDiffBytes &&
         (double)[maxValue unsignedIntegerValue] == [maxValue doubleValue];
+    // `staged` chooses the index against HEAD over the working tree against
+    // the index; the panel asks for both, a commit review for the first.
+    id stagedValue = request[@"staged"];
+    BOOL validStaged = [stagedValue isKindOfClass:NSNumber.class] &&
+        CFGetTypeID((__bridge CFTypeRef)stagedValue) == CFBooleanGetTypeID();
     inputValid = LPV2ExactKeys(request,
-                               @[@"schema_version", @"root", @"max_bytes"]) &&
-        [request[@"schema_version"] isEqual:@1] && root != nil && validMax;
+                               @[@"schema_version", @"root", @"max_bytes", @"staged"]) &&
+        [request[@"schema_version"] isEqual:@1] && root != nil && validMax &&
+        validStaged;
   } @catch (__unused NSException *exception) {
     validationError = LPError(3199, @"Git diff request is invalid");
   }
@@ -4807,6 +4813,7 @@ RCT_REMAP_METHOD(diffV2,
     return;
   }
   NSUInteger maxBytes = [maxValue unsignedIntegerValue];
+  BOOL staged = [request[@"staged"] boolValue];
   dispatch_async(self.projectQueue, ^{
     NSError *error = nil;
     DSHLocalProjectLease *lease = [self v2LeaseForRoot:root
@@ -4814,7 +4821,7 @@ RCT_REMAP_METHOD(diffV2,
                                                   error:&error];
     NSDictionary *diff = lease == nil ? nil
         : [self diffForRepository:lease.repository
-                           projectId:root[@"project_id"] staged:NO
+                           projectId:root[@"project_id"] staged:staged
                        contextLines:3 error:&error];
     BOOL valid = diff != nil && [self.projectAccessV2
         validateWorkspaceLeaseIdentity:lease rootRef:root error:&error];

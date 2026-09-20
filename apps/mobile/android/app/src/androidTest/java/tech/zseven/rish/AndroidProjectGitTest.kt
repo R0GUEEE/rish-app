@@ -44,7 +44,7 @@ class AndroidProjectGitTest {
             .put("schema_version", 1).put("workspace_id", workspaceId)
             .put("binding_revision", 1).put("project_id", projectId ?: JSONObject.NULL)
         fun request(): JSONObject = JSONObject().put("schema_version", 1).put("root", root(projectId))
-        fun diffRequest(maxBytes: Any = 1024 * 1024): JSONObject = request().put("max_bytes", maxBytes)
+        fun diffRequest(maxBytes: Any = 1024 * 1024, staged: Any = false): JSONObject = request().put("max_bytes", maxBytes).put("staged", staged)
         fun commitRequest(
             message: String = "first\n\nbody",
             name: String = "Rish",
@@ -108,6 +108,11 @@ class AndroidProjectGitTest {
         assertTrue(diff.getString("patch"), diff.getString("patch").contains("+hello"))
 
         val staged = f.git.stageAll(f.request())
+        // Two diffs, two sides: the index against HEAD carries what was
+        // staged, the working tree against the index nothing.
+        assertTrue(f.git.diff(f.diffRequest(staged = true)).getBoolean("staged"))
+        assertTrue(f.git.diff(f.diffRequest(staged = true)).getJSONArray("files").length() > 0)
+        assertFalse(f.git.diff(f.diffRequest(staged = false)).getBoolean("staged"))
         assertEquals("added", entries(staged).getValue("notes.md").getString("index_status"))
         assertEquals("unmodified", entries(staged).getValue("notes.md").getString("worktree_status"))
         assertEquals(0, f.git.diff(f.diffRequest()).getJSONArray("files").length())
@@ -156,6 +161,8 @@ class AndroidProjectGitTest {
         assertEquals("E_PROJECT_REQUEST_INVALID", refusal { f.git.status(f.request().put("extra", 1)) })
         assertEquals("E_PROJECT_REQUEST_INVALID", refusal { f.git.status(f.request().put("root", f.root())) })
         assertEquals("E_PROJECT_REQUEST_INVALID", refusal { f.git.diff(f.diffRequest(maxBytes = 0)) })
+        assertEquals("E_PROJECT_REQUEST_INVALID", refusal { f.git.diff(f.diffRequest(staged = "yes")) })
+        assertEquals("E_PROJECT_REQUEST_INVALID", refusal { f.git.diff(f.diffRequest().also { it.remove("staged") }) })
         assertEquals("E_PROJECT_REQUEST_INVALID", refusal { f.git.diff(f.diffRequest(maxBytes = 1024 * 1024 + 1)) })
         assertEquals("E_PROJECT_REQUEST_INVALID", refusal { f.git.diff(f.diffRequest(maxBytes = true)) })
         assertEquals("E_PROJECT_REQUEST_INVALID", refusal { f.git.commit(f.commitRequest(message = "  \n")) })

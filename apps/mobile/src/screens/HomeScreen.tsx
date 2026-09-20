@@ -153,6 +153,7 @@ import {
 } from '../completion/SessionPersistence';
 import { readRuntimeEvidence } from '../runtime/evidence';
 import { LocalProjects, type LocalProject } from '../native/LocalProjects';
+import { workspaceProjectName } from '../native/workspaceProjects';
 import type { WorkspaceDescriptorV2 } from '../native/LocalWorkspaces';
 import { LocalProjectContext } from '../native/LocalProjectContext';
 import { LocalAttachments } from '../native/LocalAttachments';
@@ -2403,13 +2404,14 @@ export function HomeScreen({
         cancelled = true;
       };
     }
+    // The legacy listing knows legacy projects; a project attached to a
+    // workspace is named by the workspace. On Android only the second exists.
     LocalProjects.list()
-      .then(listing => {
-        if (cancelled) return;
-        setActiveProjectName(
-          listing.projects.find(project => project.id === activeProjectId)
-            ?.name ?? null,
-        );
+      .then(listing => listing.projects.find(project => project.id === activeProjectId)?.name ?? null)
+      .catch(() => null)
+      .then(name => name ?? workspaceProjectName(activeProjectId))
+      .then(name => {
+        if (!cancelled) setActiveProjectName(name);
       })
       .catch(() => {
         if (!cancelled) setActiveProjectName(null);
