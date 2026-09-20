@@ -207,6 +207,20 @@ internal class AndroidWorkspaceProjects(
             ?: throw Refused(UNAVAILABLE, "workspace project is unavailable")
     }
 
+    /**
+     * `LPV2ProjectDisplayName`: the project is named after the workspace it
+     * lives in, and a name that would not survive as a path component --
+     * empty, oversized, a control character, a slash, `.` or `..` -- falls
+     * back to the project id rather than being repaired.
+     */
+    private fun projectDisplayName(candidate: Any?, projectId: String): String {
+        val name = candidate as? String ?: return projectId
+        if (name.isEmpty() || name.toByteArray(Charsets.UTF_8).size > MAX_DISPLAY_NAME_BYTES ||
+            name.any { it.isISOControl() } || '/' in name || '\\' in name || name == "." || name == ".."
+        ) return projectId
+        return name
+    }
+
     private fun descriptor(root: JSONObject, projectId: String, displayName: String): JSONObject =
         JSONObject().put("schema_version", 2).put("project_id", projectId)
             .put("workspace_id", root.getString("workspace_id"))
@@ -228,6 +242,7 @@ internal class AndroidWorkspaceProjects(
             ?: throw Refused(UNAVAILABLE, "workspace project is unavailable")
         val fingerprint = rootFingerprint(workspaceId, root.get("binding_revision"))
         val projectId = UUID.randomUUID().toString()
+        val displayName = projectDisplayName(descriptor.opt("display_name"), projectId)
         val parent = File(gitdirs, workspaceId)
         val staging = File(parent, STAGING_PREFIX + operationId)
         val journal = File(parent, STAGING_PREFIX + operationId + JOURNAL_SUFFIX)
@@ -259,7 +274,7 @@ internal class AndroidWorkspaceProjects(
                 File(staging, BINDING_NAME),
                 JSONObject().put("schema_version", 2).put("workspace_id", workspaceId)
                     .put("binding_revision", root.get("binding_revision")).put("project_id", projectId)
-                    .put("display_name", projectId).put("git_topology", GIT_TOPOLOGY)
+                    .put("display_name", displayName).put("git_topology", GIT_TOPOLOGY)
                     .put("git_directory_relative", "$GITDIRS_NAME/$workspaceId/$projectId")
                     .put("root_fingerprint_sha256", fingerprint),
             )

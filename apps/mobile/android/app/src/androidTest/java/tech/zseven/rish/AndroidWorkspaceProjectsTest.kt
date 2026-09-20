@@ -82,7 +82,8 @@ class AndroidWorkspaceProjectsTest {
         assertEquals(2, project.getInt("schema_version"))
         assertEquals(f.workspaceId, project.getString("workspace_id"))
         assertEquals(1, project.getInt("workspace_binding_revision"))
-        assertEquals(projectId, project.getString("display_name"))
+        // Named after its workspace, as iOS names it; not after itself.
+        assertEquals("Scratch", project.getString("display_name"))
         assertEquals("private_split_gitdir", project.getString("git_topology"))
 
         // The layout iOS keeps: gitdir beside the registry, binding inside

@@ -67,7 +67,12 @@ class LocalProjectContextModule(private val react: ReactApplicationContext) :
         }
         runtime.io.execute {
             try {
-                promise.resolve(Arguments.makeNativeMap(RuntimeJson.map(runtime.projectContext.listCandidates(captured))))
+                val page = runtime.projectContext.listCandidates(captured)
+                // A count and nothing else: the paths stay on the device. The
+                // line tells a listing that came back empty apart from one
+                // that never reached this module.
+                Log.i(TAG, "listCandidatesV2 answered ${page.optJSONArray("candidates")?.length() ?: -1} candidates")
+                promise.resolve(Arguments.makeNativeMap(RuntimeJson.map(page)))
             } catch (refused: AndroidProjectContextService.Refused) {
                 // The code and nothing else: a reason could name a path.
                 Log.w(TAG, "listCandidatesV2 refused: ${refused.code}")

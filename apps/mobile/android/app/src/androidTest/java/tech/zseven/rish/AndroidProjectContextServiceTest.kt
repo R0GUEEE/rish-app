@@ -70,6 +70,40 @@ class AndroidProjectContextServiceTest {
         throw IllegalStateException()
     }
 
+    /**
+     * After the agent's own `git_commit` -- stage everything, commit -- the
+     * index still holds every file, and every one of them is a candidate,
+     * unchanged. On a device this listing came back empty once, and the
+     * question was whether the native page or the JavaScript above it was
+     * dropping them.
+     */
+    @Test
+    fun aCommittedIndexStillListsEveryFileAsAnUnchangedCandidate() {
+        val f = fixture()
+        for ((path, text) in listOf("README.md" to "# Smoke\n", "src/main.kt" to "fun main() {}\n", "secrets.env" to "API_TOKEN=sk-live-abcdefghijklmnopqrstuvwxyz012345\n")) {
+            File(f.workspaceDir, path).apply { parentFile?.mkdirs() }.writeText(text)
+        }
+        val tools = tech.zseven.rish.runtime.AndroidAgentGitToolExecutor(f.projects, f.workspaces, f.roots)
+        val root = f.roots.resolve(f.workspaceId, f.projectId, 1)!!
+        val precondition = tools.prepare("git_commit", JSONObject().put("message", "initial"), root).getJSONObject("precondition")
+        val committed = tools.execute("git_commit", JSONObject().put("message", "initial"), root, precondition)
+        assertEquals(committed.toString(), "ok", committed.getString("status"))
+
+        val page = f.service.listCandidates(f.request())
+        val candidates = page.getJSONArray("candidates")
+        val paths = (0 until candidates.length()).map { candidates.getJSONObject(it).getString("path") }
+        assertEquals(listOf("README.md", "secrets.env", "src/main.kt"), paths.sorted())
+        for (index in 0 until candidates.length()) {
+            val candidate = candidates.getJSONObject(index)
+            assertEquals(candidate.toString(), "unchanged", candidate.getString("git_state"))
+            if (candidate.getString("path") == "secrets.env") {
+                assertFalse(candidate.getBoolean("eligible")); assertEquals("secret_path", candidate.getString("omission_reason"))
+            } else {
+                assertTrue(candidate.toString(), candidate.getBoolean("eligible"))
+            }
+        }
+    }
+
     @Test
     fun listsTheAttachedProjectsCandidatesForTheRoot() {
         val f = fixture()
