@@ -75,7 +75,11 @@ internal class AndroidAgentGitToolExecutor(
         return when (name) {
             "git_status" -> {
                 val status = status(opened)
-                val payload = JSONObject(status.toString()).put("schema_version", 1)
+                // The model-facing payload is exactly the six keys the core's
+                // feedback rule names; the native reply's `ok` is transport,
+                // and with it in place the ledger refuses to settle the row.
+                val payload = JSONObject().put("schema_version", 1)
+                for (key in listOf("branch", "head_oid", "clean", "has_conflicts", "entry_count")) payload.put(key, status.get(key))
                 effect(
                     feedback(name, payload),
                     JSONObject().put("schema_version", 1).put("kind", "git_status").put("head_oid", status.opt("head_oid")),

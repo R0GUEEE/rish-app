@@ -168,11 +168,15 @@ internal class AndroidAgentToolExecutionService(
             ).optJSONObject("result") ?: throw Refused(NATIVE)
         }
 
+        // Read under the transcript the request names -- the one the
+        // controller carries now -- as iOS does. The row's `transcript_before`
+        // is the generation the batch was prepared at, and every call in the
+        // batch after the first settles against a transcript past it.
         val messages = transcripts.nativeMessages(
             JSONObject().put("schema_version", 1)
                 .put("attempt_id", request.opt("attempt_id"))
                 .put("root", request.opt("root"))
-                .put("transcript", row.opt("transcript_before")),
+                .put("transcript", request.opt("transcript")),
         ) ?: throw Refused(CONFLICT)
         val arguments = decide(
             JSONObject().put("op", "recover_arguments").put("request", request)
@@ -288,12 +292,15 @@ internal class AndroidAgentToolExecutionService(
 
         // The arguments are read back out of the transcript that recorded the
         // call -- its own native messages, not the WAL's transcripts table.
-        // This is the third place that substitution has cost a layer.
+        // Under the transcript the *request* names, as iOS reads it: the
+        // row's `transcript_before` is the generation the batch was prepared
+        // at, and once the first call in a batch settles the transcript has
+        // moved past it, so the second call would read as a conflict.
         val messages = transcripts.nativeMessages(
             JSONObject().put("schema_version", 1)
                 .put("attempt_id", request.opt("attempt_id"))
                 .put("root", request.opt("root"))
-                .put("transcript", claimed.opt("transcript_before")),
+                .put("transcript", request.opt("transcript")),
         ) ?: JSONArray()
         val arguments = decide(
             JSONObject().put("op", "arguments").put("request", request)

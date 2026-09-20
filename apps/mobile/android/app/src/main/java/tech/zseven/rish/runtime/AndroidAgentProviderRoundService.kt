@@ -232,7 +232,10 @@ internal class AndroidAgentProviderRoundService(
         // asks its service for the envelope under the attempt's consent,
         // checks it against what the attempt recorded, and the core's
         // context_bundle rule releases the system messages and the receipt.
-        val (contextReceipt, contextMessages) = if (request.opt("transport_schema_version") == 3) {
+        // The bridge hands every number over as a Double, so `== 3` against
+        // an Int literal is false for a request JavaScript sent and true for
+        // one a test built; read it as a number.
+        val (contextReceipt, contextMessages) = if (request.optInt("transport_schema_version") == 3) {
             contextBundle(request, authority, conversation)
         } else {
             Pair(null, null)

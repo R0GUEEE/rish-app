@@ -64,6 +64,13 @@ class AndroidAgentGitToolExecutorTest {
         assertEquals("ok", status.getString("status"))
         assertTrue(payload(status).getBoolean("clean"))
         assertTrue(payload(status).isNull("head_oid"))
+        // Exactly what the core's `feedback_payload` rule accepts for
+        // git_status, and nothing the native reply added: with `ok` left in,
+        // the ledger refused to settle the row on a real device.
+        assertEquals(
+            setOf("schema_version", "branch", "head_oid", "clean", "has_conflicts", "entry_count"),
+            payload(status).keys().asSequence().toSet(),
+        )
 
         File(f.workDir, "notes.md").writeText("first\n")
         val prepared = f.tools.prepare("git_commit", JSONObject().put("message", "first"), f.root)
@@ -82,6 +89,7 @@ class AndroidAgentGitToolExecutorTest {
         val commitOid = committed.getJSONObject("settled_facts").getString("actual_commit_oid")
         assertEquals(precondition.getString("expected_commit_oid"), commitOid)
         assertEquals(commitOid, payload(committed).getString("commit_oid"))
+        assertEquals(setOf("schema_version", "commit_oid", "tree_oid"), payload(committed).keys().asSequence().toSet())
         // HEAD moved to it, the index was written, and status says so.
         val after = f.tools.execute("git_status", JSONObject(), f.root, f.tools.prepare("git_status", JSONObject(), f.root).getJSONObject("precondition"))
         assertEquals(commitOid, payload(after).getString("head_oid"))

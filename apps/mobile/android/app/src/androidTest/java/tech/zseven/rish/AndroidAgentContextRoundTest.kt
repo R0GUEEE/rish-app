@@ -134,7 +134,7 @@ class AndroidAgentContextRoundTest {
                 .put("source_fingerprint", manifest.getString("source_fingerprint"))
                 .put("context_bytes", manifest.getInt("context_bytes"))
                 .put("consent_receipt_id", consent.getString("consent_receipt_id"))
-                .put("provider", "codex").put("policy", "chat-read-v1").put("policy_version", "chat-read-v1.0.0")
+                .put("provider", "openai").put("policy", "chat-read-v1").put("policy_version", "chat-read-v1.0.0")
             val first = AgentSessionFixture.commit(sessions, ids, workspace = workspaceId, model = MODEL, attemptContext = attemptContext)
 
             // Prepared against the project root, at transport schema 3.
@@ -191,7 +191,9 @@ class AndroidAgentContextRoundTest {
                 AndroidAgentOperations(wal), liveTasks, AndroidAgentTranscriptStore(wal), snapshots,
             )
             val roundId = UUID.randomUUID().toString()
-            val result = service.completeRound(
+            // The request in the shape the bridge delivers it: every number a
+            // Double, because `ReadableMap.toHashMap()` knows no integers.
+            val result = service.completeRound(bridged(
                 JSONObject().put("schema_version", 2).put("operation_id", UUID.randomUUID().toString())
                     .put("controller_cas", controllerCas(ids, second, 1, 1))
                     .put("committed_checkpoint", AgentSessionFixture.checkpoint(second, 1))
@@ -205,7 +207,7 @@ class AndroidAgentContextRoundTest {
                     // which is what JavaScript carries from the authority.
                     .put("root", authority.getJSONObject("root"))
                     .put("registry_version", 2).put("toolset_sha256", AndroidAgentToolRegistry.toolsetSha256()),
-            )
+            ))
 
             // What went out: the envelope first, then the conversation.
             assertTrue(provider.served.await(20, TimeUnit.SECONDS))
@@ -253,6 +255,16 @@ class AndroidAgentContextRoundTest {
         "visible-history",
         JSONObject().put("messages", JSONArray().put(JSONObject().put("role", "user").put("content", "hello").put("attachments", JSONArray()))),
     )
+
+    /** Numbers as the React Native bridge delivers them: all Double. */
+    private fun bridged(value: Any?): Any? = when (value) {
+        is JSONObject -> JSONObject().also { out -> for (key in value.keys()) out.put(key, bridged(value.get(key))) }
+        is JSONArray -> JSONArray().also { out -> for (index in 0 until value.length()) out.put(bridged(value.get(index))) }
+        is Int -> value.toDouble()
+        is Long -> value.toDouble()
+        else -> value
+    }
+    private fun bridged(value: JSONObject): JSONObject = bridged(value as Any?) as JSONObject
 
     private companion object {
         const val MODEL = "gpt-5.6"
