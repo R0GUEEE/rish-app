@@ -33,7 +33,6 @@ import java.util.UUID
  */
 internal class AndroidWorkspaceProjects(
     private val workspaces: AndroidWorkspaceRegistry,
-    private val roots: AndroidAgentRootResolver,
     private val gitdirs: File = File(workspaces.root, GITDIRS_NAME),
 ) {
     /** A refusal by iOS's number; [code] is what JavaScript is told. */
@@ -61,6 +60,7 @@ internal class AndroidWorkspaceProjects(
      * an operation id answers what that operation answered.
      */
     fun attach(rawRequest: JSONObject?): JSONObject = synchronized(lock) {
+        if (!RishLibgit2Native.require()) throw Refused(UNAVAILABLE, "libgit2 is not available")
         val request = rawRequest ?: throw Refused(REQUEST_INVALID, "attach request is missing")
         if (!exactKeys(request, ATTACH_KEYS) || request.opt("schema_version") != 1) {
             throw Refused(REQUEST_INVALID, "attach request is invalid")
@@ -127,10 +127,14 @@ internal class AndroidWorkspaceProjects(
     }
 
     /** The project descriptor JavaScript reads, re-verified against the binding on disk. */
-    fun verifiedDescriptor(root: JSONObject, projectId: String): JSONObject {
+    fun verifiedDescriptor(root: JSONObject, projectId: String): JSONObject =
+        verifiedDescriptorAndBinding(root, projectId).first
+
+    /** The descriptor and the binding it was read from, for a caller that binds to the binding's digest. */
+    fun verifiedDescriptorAndBinding(root: JSONObject, projectId: String): Pair<JSONObject, JSONObject> {
         val attached = rootWith(root, projectId)
         val binding = binding(attached, projectId)
-        return descriptor(attached, projectId, binding.getString("display_name"))
+        return Pair(descriptor(attached, projectId, binding.getString("display_name")), binding)
     }
 
     // --- reading ----------------------------------------------------------
@@ -189,16 +193,17 @@ internal class AndroidWorkspaceProjects(
     }
 
     /**
-     * The workspace's current fingerprint, from the resolver: a root that no
-     * longer resolves -- wrong revision, changed directory, no authority --
-     * has no fingerprint to compare against.
+     * The workspace's current fingerprint: the registry's record at this
+     * revision, provable now. A root that no longer holds -- wrong revision,
+     * changed directory, no authority -- has no fingerprint to compare
+     * against, and a binding cannot be checked against nothing.
      */
     private fun rootFingerprint(workspaceId: String, bindingRevision: Any): String {
-        val resolved = roots.resolveWorkspaceRef(
-            JSONObject().put("schema_version", 1).put("workspace_id", workspaceId)
-                .put("binding_revision", bindingRevision).put("project_id", JSONObject.NULL),
-        ) ?: throw Refused(UNAVAILABLE, "workspace project is unavailable")
-        return resolved.optString("root_fingerprint_sha256").takeIf { canonicalDigest(it) }
+        val record = workspaces.list().firstOrNull { it.optString("workspace_id") == workspaceId }
+            ?: throw Refused(UNAVAILABLE, "workspace project is unavailable")
+        if (record.opt("binding_revision") != bindingRevision) throw Refused(UNAVAILABLE, "workspace project is unavailable")
+        if (workspaces.descriptor(workspaceId)?.optString("status") != "ok") throw Refused(UNAVAILABLE, "workspace project is unavailable")
+        return workspaces.fingerprintFor(workspaceId)?.takeIf { canonicalDigest(it) }
             ?: throw Refused(UNAVAILABLE, "workspace project is unavailable")
     }
 

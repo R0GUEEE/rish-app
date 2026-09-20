@@ -94,6 +94,7 @@ internal class AndroidProjectGit(
      * workspace grants what the operation needs. `v2LeaseForRoot` on iOS.
      */
     private fun open(request: JSONObject, write: Boolean): Opened {
+        if (!RishLibgit2Native.require()) throw refused(UNAVAILABLE, "libgit2 is not available")
         val root = projects.canonicalRoot(request.optJSONObject("root"), projectRequired = true)
         val workspaceId = root.getString("workspace_id")
         val projectId = root.getString("project_id")

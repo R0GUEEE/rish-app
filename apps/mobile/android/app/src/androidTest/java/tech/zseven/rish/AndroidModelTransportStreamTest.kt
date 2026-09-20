@@ -6,6 +6,7 @@ import androidx.test.platform.app.InstrumentationRegistry
 import org.json.JSONObject
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertTrue
+import org.junit.Assert.fail
 import org.junit.Assume.assumeTrue
 import org.junit.Test
 import org.junit.runner.RunWith
@@ -13,6 +14,7 @@ import tech.zseven.rish.runtime.AndroidCredentialStore
 import tech.zseven.rish.runtime.AndroidModelTransport
 import tech.zseven.rish.runtime.AndroidProviderConfiguration
 import tech.zseven.rish.runtime.RishAgentCoreNative
+import tech.zseven.rish.runtime.RuntimeFailure
 import java.io.InputStream
 import java.net.InetAddress
 import java.net.InetSocketAddress
@@ -436,5 +438,45 @@ class AndroidModelTransportStreamTest {
             true
         }
         assertTrue("a truncated stream must not answer as a complete reply", refused)
+    }
+
+    /**
+     * A round that carries a verified project context sends it first, as a
+     * system message ahead of everything the person said -- the shape iOS
+     * prepends and the core's request body carries for every dialect.
+     */
+    @Test
+    fun aProjectContextGoesOutAheadOfTheConversation() {
+        assumeTrue("rish agent core is not staged in this build", RishAgentCoreNative.available)
+        val streamer = Streamer(
+            listOf(
+                """data: {"id":"resp-ctx","model":"gpt-5.6","choices":[{"delta":{"content":"ok"},"finish_reason":"stop"}]}""" +
+                    "\n\ndata: [DONE]\n\n",
+            ),
+        )
+        val wired = wired(streamer)
+        val envelope = "RISH-PROJECT-CONTEXT/2\nMETA 2\n{}\nEND\n"
+        val request = wired.request().put(
+            "project_context",
+            JSONArray().put(JSONObject().put("role", "system").put("content", envelope).put("attachments", JSONArray())),
+        )
+        val result = wired.transport.execute(wired.transport.prepare(request.toString())) {}
+        assertEquals("ok", result.getString("text"))
+        assertTrue(streamer.ready.await(20, TimeUnit.SECONDS))
+        val body = JSONObject(streamer.request.substringAfter("\r\n\r\n"))
+        val messages = body.getJSONArray("messages")
+        assertEquals("system", messages.getJSONObject(0).getString("role"))
+        assertEquals(envelope, messages.getJSONObject(0).getString("content"))
+        assertEquals("user", messages.getJSONObject(1).getString("role"))
+        assertEquals("Say hello", messages.getJSONObject(1).getString("content"))
+
+        // A context that is not a list of system messages is refused before anything is sent.
+        val bad = wired.request().put("project_context", JSONArray().put(JSONObject().put("role", "user").put("content", "x")))
+        try {
+            wired.transport.prepare(bad.toString())
+            fail("expected a refusal")
+        } catch (failure: RuntimeFailure) {
+            assertEquals("E_COMPLETION_CONTEXT_UNSUPPORTED", failure.code)
+        }
     }
 }

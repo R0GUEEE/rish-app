@@ -22,7 +22,10 @@ import org.json.JSONObject
  * stale one to be repaired: [resolve] returns null and the caller reports the
  * binding as stale.
  */
-internal class AndroidAgentRootResolver(private val workspaces: AndroidWorkspaceRegistry) {
+internal class AndroidAgentRootResolver(
+    private val workspaces: AndroidWorkspaceRegistry,
+    private val projects: AndroidWorkspaceProjects = AndroidWorkspaceProjects(workspaces),
+) {
     /** The grants a workspace root may carry; a project's three are not here. */
     private val workspaceGrants = listOf("read", "write", "git")
 
@@ -93,9 +96,6 @@ internal class AndroidAgentRootResolver(private val workspaces: AndroidWorkspace
                 .put("binding_revision", bindingRevision ?: JSONObject.NULL),
         ) ?: return null
         if (request.optString("outcome") != "resolve") return null
-        // A project root is a question this platform cannot answer.
-        if (request.optString("kind") != "workspace") return null
-
         val id = request.optString("workspace_id")
         val revision = request.optInt("binding_revision", -1)
         if (revision < 0) return null
@@ -125,7 +125,24 @@ internal class AndroidAgentRootResolver(private val workspaces: AndroidWorkspace
                 // every stored authority is bound to says so too.
                 .put("guest_cgi", false),
         ) ?: return null
-        return reply.optJSONObject("root")
+        val workspaceRoot = reply.optJSONObject("root") ?: return null
+        if (request.optString("kind") != "project") return workspaceRoot
+        // A project root: the workspace, promoted once the binding beside the
+        // project's gitdir proves it belongs to this root at this revision.
+        // The core appends the three Git capabilities; the fingerprint is
+        // the one the workspace authority carries now, which the binding was
+        // checked against.
+        val projectRef = JSONObject().put("schema_version", 1).put("workspace_id", id)
+            .put("binding_revision", revision).put("project_id", projectId)
+        try {
+            projects.verifiedDescriptor(projectRef, projectId ?: return null)
+        } catch (_: AndroidWorkspaceProjects.Refused) {
+            return null
+        }
+        return RishAgentCoreNative.agentRoot(
+            JSONObject().put("op", "project_projection").put("base", workspaceRoot)
+                .put("project_id", projectId).put("root_fingerprint_sha256", fingerprint),
+        )?.optJSONObject("root")
     }
 
 }

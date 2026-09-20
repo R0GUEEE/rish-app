@@ -10,6 +10,7 @@ import org.junit.Assert.assertTrue
 import org.junit.Test
 import org.junit.runner.RunWith
 import tech.zseven.rish.runtime.AndroidAgentRootResolver
+import tech.zseven.rish.runtime.AndroidWorkspaceProjects
 import tech.zseven.rish.runtime.AndroidWorkspaceRegistry
 import tech.zseven.rish.runtime.RishAgentCoreNative
 import java.io.File
@@ -69,15 +70,34 @@ class AndroidAgentRootResolverTest {
     }
 
     /**
-     * A project root needs an independently verified project lease, and there
-     * is no project subsystem here. The request is refused rather than
-     * answered with a workspace root wearing a project's name.
+     * A project root is the workspace root promoted, once the binding beside
+     * the project's gitdir proves the project belongs to this root at this
+     * revision. A project id nothing attached is refused rather than answered
+     * with a workspace root wearing a project's name.
      */
     @Test
-    fun aProjectRootIsNotResolvableOnThisPlatform() {
+    fun aProjectRootResolvesOnceAttached() {
         val (workspaces, roots) = fixture()
         val id = workspaces.create("Scratch").getString("workspace_id")
         assertNull(roots.resolve(id, UUID.randomUUID().toString(), 1))
+        val projects = AndroidWorkspaceProjects(workspaces)
+        val projectId = projects.attach(
+            JSONObject().put("schema_version", 1).put("operation_id", UUID.randomUUID().toString())
+                .put("mode", "init")
+                .put("root", JSONObject().put("schema_version", 1).put("workspace_id", id)
+                    .put("binding_revision", 1).put("project_id", JSONObject.NULL)),
+        ).getJSONObject("project").getString("project_id")
+        val root = roots.resolve(id, projectId, 1)
+        assertNotNull(root)
+        assertEquals("project", root!!.getString("kind"))
+        assertEquals(projectId, root.getString("project_id"))
+        assertEquals(workspaces.fingerprintFor(id), root.getString("root_fingerprint_sha256"))
+        val capabilities = root.getJSONArray("capabilities")
+        val names = (0 until capabilities.length()).map { capabilities.getString(it) }
+        assertTrue(names.toString(), names.containsAll(listOf("git_status", "git_commit", "git_push")))
+        // Another project id, and another revision, are other roots.
+        assertNull(roots.resolve(id, UUID.randomUUID().toString(), 1))
+        assertNull(roots.resolve(id, projectId, 2))
     }
 
     /** Three absent arguments are "no root", which is not an error. */

@@ -7,8 +7,10 @@ import com.facebook.react.bridge.ReactApplicationContext
 import com.facebook.react.bridge.ReactContextBaseJavaModule
 import com.facebook.react.bridge.ReactMethod
 import com.facebook.react.bridge.ReadableMap
+import org.json.JSONObject
 import tech.zseven.rish.RishUnavailable
 import tech.zseven.rish.runtime.AndroidProjectContextService
+import tech.zseven.rish.runtime.AndroidProjectContextSnapshots
 import tech.zseven.rish.runtime.AndroidRuntimeState
 import tech.zseven.rish.runtime.RishAgentCoreNative
 import tech.zseven.rish.runtime.RishLibgit2Native
@@ -21,9 +23,10 @@ import tech.zseven.rish.runtime.RuntimeJson
  * (RCT_EXPORT_MODULE(LocalProjectContext)) and the JS wrapper in
  * apps/mobile/src/native/LocalProjectContext.ts.
  *
- * [listCandidatesV2] answers, through [AndroidProjectContextService]. The
- * snapshot operations -- prepare, confirm, inspect, discard, send -- still
- * reject with the JS-recognized "E_CONTEXT_NATIVE"; no success is stubbed.
+ * [listCandidatesV2] answers through [AndroidProjectContextService]; the
+ * snapshot operations -- prepare, confirm, inspect, discard and the verified
+ * send -- through [AndroidProjectContextSnapshots]. The v1 methods, which
+ * only a legacy iOS project could serve, still reject with "E_CONTEXT_NATIVE".
  */
 class LocalProjectContextModule(private val react: ReactApplicationContext) :
     ReactContextBaseJavaModule(react) {
@@ -77,19 +80,53 @@ class LocalProjectContextModule(private val react: ReactApplicationContext) :
     }
 
     @ReactMethod
-    fun prepareCandidateV2(request: ReadableMap?, promise: Promise) = RishUnavailable.reject("LocalProjectContext", "E_CONTEXT_NATIVE", promise)
+    fun prepareCandidateV2(request: ReadableMap?, promise: Promise) =
+        answer("prepareCandidateV2", request, promise) { runtime.projectSnapshots.prepare(it) }
 
     @ReactMethod
-    fun confirmSnapshotV2(request: ReadableMap?, promise: Promise) = RishUnavailable.reject("LocalProjectContext", "E_CONTEXT_NATIVE", promise)
+    fun confirmSnapshotV2(request: ReadableMap?, promise: Promise) =
+        answer("confirmSnapshotV2", request, promise) { runtime.projectSnapshots.confirm(it) }
 
     @ReactMethod
-    fun inspectSnapshotV2(request: ReadableMap?, promise: Promise) = RishUnavailable.reject("LocalProjectContext", "E_CONTEXT_NATIVE", promise)
+    fun inspectSnapshotV2(request: ReadableMap?, promise: Promise) =
+        answer("inspectSnapshotV2", request, promise) { runtime.projectSnapshots.inspect(it) }
 
     @ReactMethod
-    fun discardProjectContextV2(request: ReadableMap?, promise: Promise) = RishUnavailable.reject("LocalProjectContext", "E_CONTEXT_NATIVE", promise)
+    fun discardProjectContextV2(request: ReadableMap?, promise: Promise) =
+        answer("discardProjectContextV2", request, promise) { runtime.projectSnapshots.discard(it) }
 
+    /**
+     * The envelope is consumed inside native code -- the agent round takes
+     * it -- and only its receipt is projected through React Native.
+     */
     @ReactMethod
-    fun verifiedSendProjectContextV2(request: ReadableMap?, promise: Promise) = RishUnavailable.reject("LocalProjectContext", "E_CONTEXT_NATIVE", promise)
+    fun verifiedSendProjectContextV2(request: ReadableMap?, promise: Promise) =
+        answer("verifiedSendProjectContextV2", request, promise) { runtime.projectSnapshots.verifiedEnvelope(it, true).second }
+
+    private fun answer(operation: String, request: ReadableMap?, promise: Promise, body: (JSONObject?) -> JSONObject) {
+        if (!RishAgentCoreNative.available || !RishLibgit2Native.available) {
+            RishUnavailable.reject("LocalProjectContext", "E_CONTEXT_NATIVE", promise)
+            return
+        }
+        val captured = try {
+            request?.let { RuntimeJson.fromBridgeMap(it.toHashMap()) }
+        } catch (_: Exception) {
+            promise.reject("E_CONTEXT_REQUEST_INVALID", "E_CONTEXT_REQUEST_INVALID")
+            return
+        }
+        runtime.io.execute {
+            try {
+                promise.resolve(Arguments.makeNativeMap(RuntimeJson.map(body(captured))))
+            } catch (refused: AndroidProjectContextSnapshots.Refused) {
+                // The code and nothing else: a reason could name a path.
+                Log.w(TAG, "$operation refused: ${refused.code}")
+                promise.reject(refused.code, refused.code)
+            } catch (failure: Throwable) {
+                Log.w(TAG, "$operation could not be answered", failure)
+                promise.reject("E_CONTEXT_NATIVE", "E_CONTEXT_NATIVE")
+            }
+        }
+    }
 
     private companion object {
         const val TAG = "RishProjectContext"

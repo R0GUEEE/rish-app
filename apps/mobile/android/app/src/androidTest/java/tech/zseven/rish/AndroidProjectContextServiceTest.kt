@@ -29,8 +29,8 @@ class AndroidProjectContextServiceTest {
 
     private class Fixture(registryRoot: File) {
         val workspaces = AndroidWorkspaceRegistry(registryRoot)
-        val roots = AndroidAgentRootResolver(workspaces)
-        val projects = AndroidWorkspaceProjects(workspaces, roots)
+        val projects = AndroidWorkspaceProjects(workspaces)
+        val roots = AndroidAgentRootResolver(workspaces, projects)
         val service = AndroidProjectContextService(projects, roots)
         val workspaceId: String = workspaces.create("Scratch").getString("workspace_id")
         val workspaceDir: File = workspaces.rootFor(workspaceId)!!

@@ -17,6 +17,14 @@ internal object RishLibgit2Native {
         }
     }
 
+    /**
+     * Loads the library, or says it cannot. Every entry point that reaches a
+     * native symbol calls this first: `available` is lazy, and a caller that
+     * happened to be the first in a process to touch libgit2 got an
+     * UnsatisfiedLinkError instead of an answer.
+     */
+    fun require(): Boolean = available
+
     /** The library's own version, for the receipt that records which one ran. */
     @JvmStatic external fun version(): String
 
@@ -86,4 +94,33 @@ internal object RishLibgit2Native {
         gitDir: String?, workDir: String, message: String, authorName: String, authorEmail: String,
         expectedHead: String?,
     ): ByteArray
+
+    // --- capturing a selection --------------------------------------------
+    //
+    // What `captureLease` reads from git on iOS, with nothing decided: the
+    // decisions are AndroidProjectContextCapture's. Options and byte shapes
+    // are iOS's, so a fingerprint and a patch come out the same.
+
+    /**
+     * `{"ok":true,"head_oid","branch","head_target","repository_state",
+     *   "index_checksum","entries":[{path,stage,mode,size,oid}],
+     *   "status_rows":[{kind,status,old_path,new_path,old_mode,new_mode,old_oid,new_oid}]}`
+     * or `{"ok":false,"code":"project_unavailable"|"integrity"|"budget_exceeded","stage":...}`.
+     */
+    @JvmStatic external fun captureRepository(gitDir: String?, workDir: String): ByteArray
+
+    @JvmStatic external fun blobExists(gitDir: String?, workDir: String, oid: String): Boolean
+
+    /** A blob's raw bytes, or null when there is no such blob. */
+    @JvmStatic external fun blob(gitDir: String?, workDir: String, oid: String): ByteArray?
+
+    /**
+     * The serialized patch between two revisions of one file, or null when
+     * git cannot say or the patch is not clean text. Staged compares blobs;
+     * otherwise the old blob against [newBuffer].
+     */
+    @JvmStatic external fun patch(
+        gitDir: String?, workDir: String, staged: Boolean, oldOid: String, oldPath: String,
+        newOid: String, newPath: String, newBuffer: ByteArray?,
+    ): ByteArray?
 }

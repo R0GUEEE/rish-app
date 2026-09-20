@@ -32,8 +32,8 @@ class AndroidWorkspaceProjectsTest {
 
     private class Fixture(val registryRoot: File) {
         val workspaces = AndroidWorkspaceRegistry(registryRoot)
-        val roots = AndroidAgentRootResolver(workspaces)
-        val projects = AndroidWorkspaceProjects(workspaces, roots)
+        val projects = AndroidWorkspaceProjects(workspaces)
+        val roots = AndroidAgentRootResolver(workspaces, projects)
         val workspaceId: String = workspaces.create("Scratch").getString("workspace_id")
         fun root(projectId: String? = null): JSONObject = JSONObject()
             .put("schema_version", 1).put("workspace_id", workspaceId)
@@ -206,7 +206,7 @@ class AndroidWorkspaceProjectsTest {
                 .put("staging_name", ".rish-attach-$operation").put("final_name", projectId)
                 .put("phase", "published").toString(),
         )
-        val fresh = AndroidWorkspaceProjects(f.workspaces, f.roots)
+        val fresh = AndroidWorkspaceProjects(f.workspaces)
         val found = fresh.projectFor(f.root())
         assertEquals("attached", found.getString("status"))
         assertEquals(projectId, found.getJSONObject("project").getString("project_id"))
@@ -221,7 +221,7 @@ class AndroidWorkspaceProjectsTest {
                 .put("staging_name", ".rish-attach-$operation").put("final_name", projectId)
                 .put("phase", "published").toString(),
         )
-        val stuck = AndroidWorkspaceProjects(f.workspaces, f.roots)
+        val stuck = AndroidWorkspaceProjects(f.workspaces)
         assertEquals("E_PROJECT_STORAGE_UNSAFE", refusal { stuck.projectFor(f.root()) })
         assertEquals("E_PROJECT_STORAGE_UNSAFE", refusal { stuck.attach(f.attach()) })
     }

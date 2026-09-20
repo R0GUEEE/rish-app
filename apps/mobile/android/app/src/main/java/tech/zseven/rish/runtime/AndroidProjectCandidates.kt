@@ -34,6 +34,7 @@ internal class AndroidProjectCandidates {
      * it is a workspace's project -- and decides every entry once.
      */
     fun capture(gitDir: String?, workDir: String): Capture {
+        if (!RishLibgit2Native.require()) throw Refused(UNAVAILABLE, "libgit2 is not available")
         val state = JSONObject(RishLibgit2Native.readRepositoryState(gitDir, workDir))
         if (!state.optBoolean("ok")) {
             throw Refused(UNAVAILABLE, "repository could not be read at ${state.optString("stage")}")

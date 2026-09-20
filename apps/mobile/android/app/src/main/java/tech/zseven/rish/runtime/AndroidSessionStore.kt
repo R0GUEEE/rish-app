@@ -120,9 +120,10 @@ internal class AndroidSessionStore(context: Context, name: String = "rish.sessio
      * is left here is only the platform question: *can this build issue or
      * verify the thing at all?*
      *
-     * `project_id`, `project_context` and the destructive-transition journal
-     * stay refused: there is no project subsystem to issue or verify them.
-     * `workspace_authority_outbox` stays refused too -- it is filled when a
+     * A conversation's `project_id` and `project_context` are the core's to
+     * judge now that a workspace can be attached to a project here; only the
+     * destructive-transition journal stays refused, since nothing on this
+     * platform issues one. `workspace_authority_outbox` stays refused too -- it is filled when a
      * workspace is forgotten, and nothing here drains it, so accepting one
      * would store a request no part of this build will ever answer.
      *
@@ -138,16 +139,6 @@ internal class AndroidSessionStore(context: Context, name: String = "rish.sessio
         }
         require(parsed.isNull("project_context_destructive_transition")) {
             "Project journals are not supported on Android"
-        }
-        parsed.optJSONArray("conversations")?.let { conversations ->
-            for (index in 0 until conversations.length()) {
-                val conversation = conversations.getJSONObject(index)
-                for (field in listOf("project_id", "project_context")) {
-                    require(conversation.isNull(field)) {
-                        "Project journals are not supported on Android"
-                    }
-                }
-            }
         }
     }
 

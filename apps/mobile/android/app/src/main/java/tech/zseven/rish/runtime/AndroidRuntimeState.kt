@@ -17,12 +17,20 @@ internal class AndroidRuntimeState private constructor(val app: Application) {
     /// App-private workspace roots. Android resolves only these: no
     /// security-scoped folders, no legacy projects, no rebinding yet.
     val workspaces = AndroidWorkspaceRegistry(java.io.File(app.filesDir, "workspaces"))
-    val roots = AndroidAgentRootResolver(workspaces)
     /// The git project a workspace is attached to: a private gitdir beside
     /// the registry, paired with the workspace root as its working tree.
-    val workspaceProjects = AndroidWorkspaceProjects(workspaces, roots)
+    val workspaceProjects = AndroidWorkspaceProjects(workspaces)
+    val roots = AndroidAgentRootResolver(workspaces, workspaceProjects)
     val projectContext = AndroidProjectContextService(workspaceProjects, roots)
     val projectGit = AndroidProjectGit(workspaceProjects, workspaces)
+    /// Prepared context snapshots, outside backup like the agent WAL.
+    val projectContextStore = AndroidProjectContextStore(java.io.File(app.noBackupFilesDir, "project-context"))
+    val projectSnapshots = AndroidProjectContextSnapshots(
+        workspaceProjects, roots, projectContextStore,
+        providerBinding = { model ->
+            try { configurations.binding(configurations.forModel(model), model) } catch (_: Exception) { null }
+        },
+    )
     val preparedAttempts = AndroidPreparedAttemptStore(sessions, agentWal, roots)
     /// Which native tasks this process still owns; a persisted owner from a
     /// previous launch is not alive, so its rows can be recovered.
@@ -48,7 +56,7 @@ internal class AndroidRuntimeState private constructor(val app: Application) {
     val transport = AndroidModelTransport(credentials, configurations)
     val providerRound = AndroidAgentProviderRoundService(
         sessions, preparedAttempts, agentRounds, roots, AndroidAgentToolRegistry, transport, agentWal,
-        agentOperations, liveTasks, agentTranscripts,
+        agentOperations, liveTasks, agentTranscripts, projectSnapshots,
     )
     val queries = AndroidAgentQueryService(
         agentWal, sessions, preparedAttempts, executionLedger, agentTranscripts,

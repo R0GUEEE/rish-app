@@ -88,6 +88,8 @@ internal object AgentSessionFixture {
         workspace: String? = null,
         agent: JSONObject? = null,
         events: JSONArray? = null,
+        model: String = MODEL,
+        attemptContext: JSONObject? = null,
     ): JSONObject {
         val message = JSONObject().put("id", ids.message).put("role", "user")
             .put("text", "hello").put("created_at", STAMP)
@@ -101,10 +103,12 @@ internal object AgentSessionFixture {
             // the session schema refuses one without that provenance.
             .put("visible_history_sha256", JSONObject.NULL)
             .put("attachment_ids", JSONArray())
-            .put("model_id", MODEL).put("thinking_mode", THINKING)
-            .put("context_disposition", "unbound")
-            .put("context_project_id", JSONObject.NULL)
-            .put("project_context", JSONObject.NULL)
+            .put("model_id", model).put("thinking_mode", THINKING)
+            // A verified attempt carries the snapshot it was prepared with;
+            // an unbound one carries nothing and names no project.
+            .put("context_disposition", if (attemptContext == null) "unbound" else "verified")
+            .put("context_project_id", attemptContext?.opt("project_id") ?: JSONObject.NULL)
+            .put("project_context", attemptContext ?: JSONObject.NULL)
             .put("active_round", JSONObject.NULL).put("rounds", JSONArray())
             .put("assistant_message_id", JSONObject.NULL)
             .put("failure_code", JSONObject.NULL)
@@ -115,13 +119,26 @@ internal object AgentSessionFixture {
             // least once; the session schema refuses a journal at revision 0.
             .put("journal_revision", if (agent == null) 0 else 1)
             .put("agent", agent ?: JSONObject.NULL)
+        // A conversation whose attempt carries a verified context names the
+        // same project and runtime context, and holds a project-context
+        // record of its own -- the minimal "unavailable" one here, which the
+        // schema accepts without a manifest.
+        val contextProject = attemptContext?.opt("project_id") as? String
         val conversation = JSONObject().put("id", ids.conversation)
-            .put("project_id", JSONObject.NULL)
+            .put("project_id", contextProject ?: JSONObject.NULL)
             .put("workspace_id", workspace ?: JSONObject.NULL)
-            .put("runtime_context_id", JSONObject.NULL)
-            .put("project_context", JSONObject.NULL)
+            .put("runtime_context_id", attemptContext?.opt("runtime_context_id") ?: JSONObject.NULL)
+            .put(
+                "project_context",
+                if (contextProject == null) JSONObject.NULL
+                else JSONObject().put("schema_version", 1).put("project_id", contextProject)
+                    .put("status", "unavailable").put("selected_paths", JSONArray())
+                    .put("active_preparation_id", JSONObject.NULL).put("manifest", JSONObject.NULL)
+                    .put("consent", JSONObject.NULL).put("stale_reason", JSONObject.NULL)
+                    .put("error_code", JSONObject.NULL),
+            )
             .put("title", "t").put("title_source", "auto")
-            .put("model_id", MODEL).put("thinking_mode", THINKING)
+            .put("model_id", model).put("thinking_mode", THINKING)
             .put("messages", JSONArray().put(message))
             // An attempt must belong to a turn, and the turn's user message
             // is what fixes the visible history the attempt may claim.
@@ -136,7 +153,7 @@ internal object AgentSessionFixture {
                 if (workspace == null) JSONObject.NULL
                 else JSONObject().put("schema_version", 1)
                     .put("workspace_id", workspace).put("binding_revision", 1)
-                    .put("project_id", JSONObject.NULL),
+                    .put("project_id", contextProject ?: JSONObject.NULL),
             )
             .put("workspace_bootstrap_state", "none")
             .put("agent_grants", JSONArray())
@@ -151,7 +168,7 @@ internal object AgentSessionFixture {
             .put("session_events", events ?: JSONArray())
             .put("preferences", JSONObject().put("schema_version", 1)
                 .put("theme_mode", "system").put("locale", "system")
-                .put("default_model", MODEL).put("thinking_mode", THINKING)
+                .put("default_model", model).put("thinking_mode", THINKING)
                 .put("tool_permission", "read-only").put("show_reasoning", false)
                 .put("auto_expand_tools", false)
                 .put("confirm_destructive_file_actions", true))
@@ -170,9 +187,11 @@ internal object AgentSessionFixture {
         workspace: String? = null,
         agent: JSONObject? = null,
         events: JSONArray? = null,
+        model: String = MODEL,
+        attemptContext: JSONObject? = null,
     ): JSONObject {
         val candidate = RishAgentCoreNative.canonical(
-            session(ids, epoch, workspace, agent, events).toString(),
+            session(ids, epoch, workspace, agent, events, model, attemptContext).toString(),
         )
             ?: error("the session fixture is not canonicalisable")
         val reply = store.persist(

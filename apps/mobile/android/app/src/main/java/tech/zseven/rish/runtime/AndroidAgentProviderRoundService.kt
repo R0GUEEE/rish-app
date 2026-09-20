@@ -40,6 +40,7 @@ internal class AndroidAgentProviderRoundService(
     private val operations: AndroidAgentOperations,
     private val liveTasks: AndroidLiveTasks,
     private val transcripts: AndroidAgentTranscriptStore,
+    private val snapshots: AndroidProjectContextSnapshots? = null,
 ) {
     class Refused(val code: String) : Exception(code)
 
@@ -227,6 +228,16 @@ internal class AndroidAgentProviderRoundService(
             )
         }
 
+        // The verified project context, when the attempt carries one. iOS
+        // asks its service for the envelope under the attempt's consent,
+        // checks it against what the attempt recorded, and the core's
+        // context_bundle rule releases the system messages and the receipt.
+        val (contextReceipt, contextMessages) = if (request.opt("transport_schema_version") == 3) {
+            contextBundle(request, authority, conversation)
+        } else {
+            Pair(null, null)
+        }
+
         var providerError: String? = null
         val reply = try {
             val envelope = JSONObject()
@@ -243,7 +254,7 @@ internal class AndroidAgentProviderRoundService(
                 .put("thinking_mode", request.optString("thinking_mode", "off"))
                 .put("visible_history", visibleHistory(conversation, authority))
                 .put("round_transcript", body)
-                .put("project_context", JSONObject.NULL)
+                .put("project_context", contextMessages ?: JSONObject.NULL)
                 .put("tools", declared)
             val prepared = transport.prepare(envelope.toString())
             // Correlation first: a preview event that cannot be tied to the
@@ -287,7 +298,7 @@ internal class AndroidAgentProviderRoundService(
             JSONObject().put("op", "round_cas").put("row", dispatched),
         ).optJSONObject("cas") ?: throw Refused(CONFLICT)
         if (reply != null) {
-            return settle(request, locator, completeCas, reply, root ?: JSONObject(), authority)
+            return settle(request, locator, completeCas, reply, root ?: JSONObject(), authority, contextReceipt)
         }
 
         // The provider call failed, so nobody is running this round any more.
@@ -333,6 +344,7 @@ internal class AndroidAgentProviderRoundService(
         reply: JSONObject,
         root: JSONObject,
         authority: JSONObject,
+        contextReceipt: JSONObject?,
     ): JSONObject {
         val stated = reply.optJSONArray("tool_calls") ?: JSONArray()
         val calls = JSONArray()
@@ -409,7 +421,7 @@ internal class AndroidAgentProviderRoundService(
             )
             .put("model_input_sha256", reply.opt("model_input_sha256"))
             .put("request_body_sha256", reply.opt("request_body_sha256"))
-            .put("project_context_receipt", JSONObject.NULL)
+            .put("project_context_receipt", contextReceipt ?: JSONObject.NULL)
 
         val terminal = when (reply.optString("finish_reason")) {
             "stop" -> "final"
@@ -428,7 +440,9 @@ internal class AndroidAgentProviderRoundService(
             JSONObject().put("op", "public_receipt").put("provider", reply)
                 .put("request", request)
                 .put("provider_request_id", reply.opt("provider_request_id"))
-                .put("context_receipt", JSONObject.NULL),
+                // The public receipt carries the context receipt too: a
+                // transport-3 receipt without one is refused by the reader.
+                .put("context_receipt", contextReceipt ?: JSONObject.NULL),
         ).optJSONObject("receipt") ?: throw Refused(NATIVE)
         val after = completed.opt("transcript") ?: JSONObject.NULL
         val revision = completed.optJSONObject("row")?.opt("row_revision")
@@ -489,6 +503,71 @@ internal class AndroidAgentProviderRoundService(
      * Mirrors `DSHRuntimeVisibleHistory`. A named message the session does not
      * carry is a conflict, not a message to skip.
      */
+    /**
+     * `DSHRuntimeContextBundle`, then `DSHProviderContextBundle`: the attempt's
+     * project context, verified against the live project on a first round
+     * and against the frozen snapshot on a continuation, and released by
+     * the core as the receipt and the system messages to prepend.
+     */
+    private fun contextBundle(request: JSONObject, authority: JSONObject, conversation: JSONObject): Pair<JSONObject, JSONArray> {
+        val service = snapshots ?: throw Refused(CONFLICT)
+        val attempts = conversation.optJSONArray("attempts") ?: JSONArray()
+        var context: JSONObject? = null
+        for (index in 0 until attempts.length()) {
+            val attempt = attempts.optJSONObject(index) ?: continue
+            if (attempt.optString("attempt_id") == request.optString("attempt_id")) {
+                context = attempt.optJSONObject("project_context")
+                break
+            }
+        }
+        val recorded = context ?: throw Refused(CONFLICT)
+        val authorityRoot = authority.optJSONObject("root") ?: throw Refused(CONFLICT)
+        val rootRef = JSONObject().put("schema_version", 1)
+            .put("workspace_id", authorityRoot.opt("workspace_id"))
+            .put("binding_revision", authorityRoot.opt("workspace_binding_revision"))
+            .put("project_id", authorityRoot.opt("project_id"))
+        val verifiedRequest = JSONObject().put("schema_version", 2)
+            .put("snapshot_id", recorded.opt("snapshot_id"))
+            .put("consent_receipt_id", recorded.opt("consent_receipt_id"))
+            .put("root", rootRef)
+            .put("conversation_id", recorded.opt("runtime_context_id"))
+            .put("model_id", authority.opt("model"))
+            .put("policy", recorded.opt("policy"))
+        val continuation = (authority.optJSONObject("transcript")?.optLong("generation") ?: 0L) > 0L
+        val (envelope, receipt) = try {
+            service.verifiedEnvelope(verifiedRequest, requireLiveSource = !continuation)
+        } catch (refused: AndroidProjectContextSnapshots.Refused) {
+            android.util.Log.w("RishAgent", "project context refused: ${refused.code}")
+            throw Refused(CONFLICT)
+        }
+        val content = String(envelope, Charsets.UTF_8)
+        if (recorded.optLong("context_bytes", -1L) != envelope.size.toLong() ||
+            receipt.optString("snapshot_sha256") != recorded.optString("snapshot_sha256") ||
+            receipt.optString("source_fingerprint") != recorded.optString("source_fingerprint")
+        ) {
+            throw Refused(CONFLICT)
+        }
+        val bundle = JSONObject()
+            .put("project_context_sha256", authority.opt("project_context_sha256"))
+            .put(
+                "receipt",
+                JSONObject().put("schema_version", 1).put("snapshot_id", recorded.opt("snapshot_id"))
+                    .put("snapshot_sha256", recorded.opt("snapshot_sha256"))
+                    .put("source_fingerprint", recorded.opt("source_fingerprint"))
+                    .put("context_bytes", recorded.opt("context_bytes"))
+                    .put("verified_at", receipt.opt("verified_at")),
+            )
+            .put("messages", JSONArray().put(JSONObject().put("role", "system").put("content", content).put("attachments", JSONArray())))
+        val released = decide(
+            JSONObject().put("op", "context_bundle").put("bundle", bundle)
+                .put("expected_digest", request.opt("project_context_sha256")),
+        )
+        return Pair(
+            released.optJSONObject("receipt") ?: throw Refused(CONFLICT),
+            released.optJSONArray("messages") ?: throw Refused(CONFLICT),
+        )
+    }
+
     private fun visibleHistory(conversation: JSONObject, authority: JSONObject): JSONArray {
         val byId = HashMap<String, JSONObject>()
         val messages = conversation.optJSONArray("messages") ?: JSONArray()

@@ -47,7 +47,17 @@ internal class AndroidModelTransport(private val credentials: AndroidCredentialS
         val toolCount = input.optJSONArray("tools")?.length() ?: 0
         if (toolCount > 64) fail("E_COMPLETION_CONTEXT_UNSUPPORTED")
         if (schema == 2) {
-            if (!input.isNull("project_context")) fail("E_COMPLETION_CONTEXT_UNSUPPORTED")
+            // The verified project context, when the round carries one: the
+            // system messages the core's context_bundle released, already
+            // checked. Bounded here rather than trusted.
+            if (!input.isNull("project_context")) {
+                val context = input.optJSONArray("project_context") ?: fail("E_COMPLETION_CONTEXT_UNSUPPORTED")
+                if (context.length() !in 1..32) fail("E_COMPLETION_CONTEXT_UNSUPPORTED")
+                for (index in 0 until context.length()) {
+                    val message = context.optJSONObject(index) ?: fail("E_COMPLETION_CONTEXT_UNSUPPORTED")
+                    if (message.optString("role") != "system" || message.opt("content") !is String) fail("E_COMPLETION_CONTEXT_UNSUPPORTED")
+                }
+            }
             // The round transcript is judged in execute, where the protocol is
             // known: only chat-completions can carry one.
             if ((input.optJSONArray("round_transcript")?.length() ?: 0) > 64) fail("E_COMPLETION_CONTEXT_UNSUPPORTED")
@@ -321,6 +331,15 @@ internal class AndroidModelTransport(private val credentials: AndroidCredentialS
             val history = input.getJSONArray(if(input.getInt("schema_version") == 2) "visible_history" else "history")
             if (history.length() !in 1..512) fail("E_COMPLETION_HISTORY")
             val messages = JSONArray()
+            // The project context comes first, as iOS prepends it: what the
+            // model is told about the project precedes what was said in it.
+            val context = if (input.isNull("project_context")) null else input.optJSONArray("project_context")
+            if (context != null) {
+                for (index in 0 until context.length()) {
+                    val message = context.getJSONObject(index)
+                    messages.put(JSONObject().put("role", "system").put("content", message.getString("content")))
+                }
+            }
             for (index in 0 until history.length()) {
                 val item = history.getJSONObject(index)
                 if (item.getString("role") !in setOf("user", "assistant") || (item.optJSONArray("attachments")?.length() ?: 0) != 0) fail("E_COMPLETION_CONTEXT_UNSUPPORTED")
