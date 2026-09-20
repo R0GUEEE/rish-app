@@ -65,30 +65,6 @@ static BOOL DSHAuthSupportedHarness(id harnessId) {
          [harnessId isEqualToString:DSHHarnessAuthHarnessClaudeCode];
 }
 
-static BOOL DSHAuthSafeRelativeResource(id value) {
-  if (![value isKindOfClass:NSString.class]) return NO;
-  NSString *resource = value;
-  if (resource.length == 0 || resource.length > 256 ||
-      [resource hasPrefix:@"/"] || [resource containsString:@"\\"] ||
-      [resource containsString:@".."] || [resource containsString:@"\0"]) {
-    return NO;
-  }
-  NSCharacterSet *invalid = [[NSCharacterSet
-      characterSetWithCharactersInString:
-          @"abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_-./"]
-      invertedSet];
-  return [resource rangeOfCharacterFromSet:invalid].location == NSNotFound;
-}
-
-static BOOL DSHAuthSHA256(id value) {
-  if (![value isKindOfClass:NSString.class]) return NO;
-  NSString *digest = value;
-  if (digest.length != CC_SHA256_DIGEST_LENGTH * 2) return NO;
-  NSCharacterSet *nonHex = [[NSCharacterSet
-      characterSetWithCharactersInString:@"0123456789abcdef"] invertedSet];
-  return [digest rangeOfCharacterFromSet:nonHex].location == NSNotFound;
-}
-
 static NSString *DSHAuthSHA256File(NSURL *url) {
   NSInputStream *stream = [NSInputStream inputStreamWithURL:url];
   if (stream == nil) return nil;
@@ -118,94 +94,6 @@ static NSString *DSHAuthSHA256File(NSURL *url) {
     [hex appendFormat:@"%02x", digest[index]];
   }
   return hex;
-}
-
-static NSDictionary *DSHAuthManifestForBundle(NSBundle *bundle) {
-  NSURL *manifestURL = [bundle URLForResource:DSHHarnessAuthManifestName
-                                  withExtension:@"json"];
-  if (manifestURL == nil) {
-    manifestURL = [bundle URLForResource:DSHHarnessAuthManifestName
-                             withExtension:@"json"
-                              subdirectory:@"HarnessAuth"];
-  }
-  NSData *data = manifestURL == nil
-      ? nil
-      : [NSData dataWithContentsOfURL:manifestURL options:0 error:nil];
-  if (data == nil || data.length == 0 || data.length > 32 * 1024) return nil;
-  NSDictionary *manifest = [NSJSONSerialization JSONObjectWithData:data
-                                                              options:0
-                                                                error:nil];
-  if (![manifest isKindOfClass:NSDictionary.class] ||
-      ![manifest[@"schema_version"] isEqual:@1] ||
-      ![manifest[@"harnesses"] isKindOfClass:NSDictionary.class]) {
-    return nil;
-  }
-  NSDictionary *harnesses = manifest[@"harnesses"];
-  for (NSString *harnessId in @[DSHHarnessAuthHarnessCodex, DSHHarnessAuthHarnessClaudeCode]) {
-    NSDictionary *entry = harnesses[harnessId];
-    if (entry == nil && [harnessId isEqual:DSHHarnessAuthHarnessClaudeCode]) continue;
-    if (![entry isKindOfClass:NSDictionary.class] ||
-        entry.count != 5 ||
-        ![entry[@"version"] isKindOfClass:NSString.class] ||
-        [entry[@"version"] length] == 0 || [entry[@"version"] length] > 64 ||
-        !DSHAuthSafeRelativeResource(entry[@"kernel_resource"]) ||
-        !DSHAuthSafeRelativeResource(entry[@"initrd_resource"]) ||
-        !DSHAuthSHA256(entry[@"kernel_sha256"]) ||
-        !DSHAuthSHA256(entry[@"initrd_sha256"])) {
-      return nil;
-    }
-  }
-  return manifest;
-}
-
-static NSDictionary *DSHAuthAssetInfo(NSBundle *bundle, NSString *harnessId,
-                                      NSDictionary *manifest) {
-  NSDictionary *entry = manifest[@"harnesses"][harnessId];
-  NSString *resource = entry[@"cli_resource"];
-  NSURL *root = bundle.resourceURL;
-  NSURL *url = resource.length > 0 ? [root URLByAppendingPathComponent:resource] : nil;
-  NSString *rootPath = root.path.stringByStandardizingPath;
-  NSString *path = url.path.stringByStandardizingPath;
-  BOOL insideBundle = [path hasPrefix:[rootPath stringByAppendingString:@"/"]];
-  BOOL regular = NO;
-  NSDictionary *attributes = nil;
-  if (insideBundle) {
-    attributes = [[NSFileManager defaultManager] attributesOfItemAtPath:path
-                                                                    error:nil];
-    regular = [attributes[NSFileType] isEqual:NSFileTypeRegular];
-  }
-  NSString *digest = regular ? DSHAuthSHA256File(url) : nil;
-  BOOL available = resource.length == 0 || (regular &&
-      [digest isEqualToString:entry[@"sha256"]]);
-  NSString *reason = nil;
-  if (DSHAuthSupportedHarness(harnessId) && available) {
-    for (NSString *key in @[ @"kernel_resource", @"initrd_resource" ]) {
-      NSString *assetResource = entry[key];
-      NSURL *assetURL = [root URLByAppendingPathComponent:assetResource];
-      NSDictionary *attrs = [[NSFileManager defaultManager]
-          attributesOfItemAtPath:assetURL.path error:nil];
-      if (![attrs[NSFileType] isEqual:NSFileTypeRegular] ||
-          ![DSHAuthSHA256File(assetURL) isEqualToString:
-              entry[[key isEqualToString:@"kernel_resource"]
-                  ? @"kernel_sha256" : @"initrd_sha256"]]) {
-        available = NO;
-        reason = [key isEqualToString:@"kernel_resource"]
-            ? @"official-cli-kernel-asset-invalid"
-            : @"official-cli-initrd-asset-invalid";
-        break;
-      }
-    }
-  }
-  if (resource.length > 0 && !regular) reason = @"official-cli-asset-missing";
-  else if (reason == nil && !available) reason = @"official-cli-asset-integrity-failed";
-  return @{
-    @"available": @(available),
-    @"version": entry[@"version"],
-    @"reason": reason ?: [NSNull null],
-    @"cli_url": url ?: [NSNull null],
-    @"kernel_url": [root URLByAppendingPathComponent:entry[@"kernel_resource"] ?: @""],
-    @"initrd_url": [root URLByAppendingPathComponent:entry[@"initrd_resource"] ?: @""],
-  };
 }
 
 static NSMutableDictionary *DSHAuthBaseStatus(NSString *harnessId,
@@ -360,6 +248,7 @@ static BOOL DSHAuthValidSessionId(id value) {
 // Read under @synchronized(self); surfaced through statusForHarnessId.
 @property(nonatomic, strong) NSMutableDictionary<NSString *, NSMutableDictionary *> *installState;
 @property(nonatomic, strong) NSMutableDictionary<NSString *, NSURLSessionDownloadTask *> *installTasks;
+@property(nonatomic, strong) NSURLSession *cliDownloadSession;
 - (DSHClaudeOfficialSession *)validatedClaudeSession;
 - (void)receiveStreamEvent:(const char *)event length:(size_t)length;
 - (void)runCodexLoginForSession:(NSString *)sessionId generation:(NSUInteger)generation;
@@ -392,6 +281,9 @@ static BOOL DSHAuthValidSessionId(id value) {
     _codexRefreshWaiters = [NSMutableArray array];
     _installState = [NSMutableDictionary dictionary];
     _installTasks = [NSMutableDictionary dictionary];
+    // Reconnect the background download session at launch so a transfer that
+    // finished while the app was away is processed, and its result reported.
+    [self cliDownloadSession];
   }
   return self;
 }
@@ -680,6 +572,24 @@ static BOOL DSHAuthValidSessionId(id value) {
 /// Begins a host-side download of the harness CLI. Idempotent: an install that
 /// is already present or already running is left alone. Progress and the final
 /// phase are read back through statusForHarnessId.
+/// One background URLSession, shared and reconnected on init. A 226 MB
+/// download has to survive the app being backgrounded or terminated, which an
+/// ephemeral session does not: the system keeps a background transfer running
+/// and hands its result back through the delegate when the app returns.
+- (NSURLSession *)cliDownloadSession {
+  @synchronized (self) {
+    if (_cliDownloadSession != nil) return _cliDownloadSession;
+    NSURLSessionConfiguration *configuration = [NSURLSessionConfiguration
+        backgroundSessionConfigurationWithIdentifier:@"tech.zseven.rish.harness-cli-download"];
+    configuration.sessionSendsLaunchEvents = YES;
+    configuration.timeoutIntervalForResource = 6 * 3600;
+    _cliDownloadSession = [NSURLSession sessionWithConfiguration:configuration
+                                                        delegate:self
+                                                   delegateQueue:nil];
+    return _cliDownloadSession;
+  }
+}
+
 - (void)installCliForHarness:(NSString *)harnessId {
   NSDictionary *descriptor = [DSHHarnessAuthService cliDescriptorForHarness:harnessId];
   if (descriptor == nil) return;
@@ -690,52 +600,77 @@ static BOOL DSHAuthValidSessionId(id value) {
   @synchronized (self) {
     if (self.installTasks[harnessId] != nil) return;
   }
-  NSURL *directory = [DSHHarnessAuthService cliDirectory];
-  if (directory == nil) {
+  if ([DSHHarnessAuthService cliDirectory] == nil) {
     [self setInstallPhase:@"failed" fraction:nil errorCode:@"E_HARNESS_CLI_STORAGE_UNAVAILABLE"
                forHarness:harnessId];
     return;
   }
   [self setInstallPhase:@"downloading" fraction:@0 errorCode:nil forHarness:harnessId];
-  NSURLSessionConfiguration *configuration = [NSURLSessionConfiguration ephemeralSessionConfiguration];
-  configuration.timeoutIntervalForResource = 1800;
-  NSURLSession *session = [NSURLSession sessionWithConfiguration:configuration
-                                                        delegate:self
-                                                   delegateQueue:nil];
-  __weak DSHHarnessAuthService *weakSelf = self;
-  NSURL *target = [directory URLByAppendingPathComponent:descriptor[@"file"]];
-  NSURLSessionDownloadTask *task = [session downloadTaskWithURL:[NSURL URLWithString:descriptor[@"url"]]
-      completionHandler:^(NSURL *location, NSURLResponse *response, NSError *error) {
-    DSHHarnessAuthService *strong = weakSelf;
-    if (strong == nil) return;
-    @synchronized (strong) { [strong.installTasks removeObjectForKey:harnessId]; }
-    NSHTTPURLResponse *http = [response isKindOfClass:NSHTTPURLResponse.class] ? (NSHTTPURLResponse *)response : nil;
-    if (error != nil || http == nil || http.statusCode < 200 || http.statusCode >= 300 || location == nil) {
-      [strong setInstallPhase:@"failed" fraction:nil errorCode:@"E_HARNESS_CLI_DOWNLOAD_FAILED"
-                   forHarness:harnessId];
-      return;
-    }
-    NSFileManager *files = NSFileManager.defaultManager;
-    NSDictionary *attributes = [files attributesOfItemAtPath:location.path error:nil];
-    if ([attributes[NSFileSize] unsignedLongLongValue] < DSHCliMinimumBytes) {
-      [strong setInstallPhase:@"failed" fraction:nil errorCode:@"E_HARNESS_CLI_DOWNLOAD_TRUNCATED"
-                   forHarness:harnessId];
-      return;
-    }
-    // Replace atomically: a half-written target must never look installed.
-    [files removeItemAtURL:target error:nil];
-    NSError *moveError = nil;
-    if (![files moveItemAtURL:location toURL:target error:&moveError]) {
-      [strong setInstallPhase:@"failed" fraction:nil errorCode:@"E_HARNESS_CLI_STORE_FAILED"
-                   forHarness:harnessId];
-      return;
-    }
-    [files setAttributes:@{NSFileProtectionKey: NSFileProtectionComplete}
-            ofItemAtPath:target.path error:nil];
-    [strong setInstallPhase:@"ready" fraction:@1 errorCode:nil forHarness:harnessId];
-  }];
+  NSURLSessionDownloadTask *task = [[self cliDownloadSession]
+      downloadTaskWithURL:[NSURL URLWithString:descriptor[@"url"]]];
+  // The harness rides on the task, not a captured block: after a background
+  // relaunch installTasks is empty but the task's description survives.
+  task.taskDescription = harnessId;
   @synchronized (self) { self.installTasks[harnessId] = task; }
   [task resume];
+}
+
+/// The harness a download task carries, from its description; the in-memory map
+/// is only a convenience for the same app run.
+- (NSString *)harnessForTask:(NSURLSessionTask *)task {
+  if ([task.taskDescription isKindOfClass:NSString.class] &&
+      [DSHHarnessAuthService cliDescriptorForHarness:task.taskDescription] != nil) {
+    return task.taskDescription;
+  }
+  return nil;
+}
+
+- (void)URLSession:(NSURLSession *)session
+      downloadTask:(NSURLSessionDownloadTask *)downloadTask
+didFinishDownloadingToURL:(NSURL *)location {
+  NSString *harness = [self harnessForTask:downloadTask];
+  NSDictionary *descriptor = harness == nil ? nil : [DSHHarnessAuthService cliDescriptorForHarness:harness];
+  NSURL *directory = [DSHHarnessAuthService cliDirectory];
+  if (descriptor == nil || directory == nil) return;
+  NSHTTPURLResponse *http = [downloadTask.response isKindOfClass:NSHTTPURLResponse.class]
+      ? (NSHTTPURLResponse *)downloadTask.response : nil;
+  if (http != nil && (http.statusCode < 200 || http.statusCode >= 300)) {
+    [self setInstallPhase:@"failed" fraction:nil errorCode:@"E_HARNESS_CLI_DOWNLOAD_FAILED"
+               forHarness:harness];
+    return;
+  }
+  NSFileManager *files = NSFileManager.defaultManager;
+  // The temp file is deleted when this delegate returns, so move it now.
+  if ([[files attributesOfItemAtPath:location.path error:nil][NSFileSize]
+          unsignedLongLongValue] < DSHCliMinimumBytes) {
+    [self setInstallPhase:@"failed" fraction:nil errorCode:@"E_HARNESS_CLI_DOWNLOAD_TRUNCATED"
+               forHarness:harness];
+    return;
+  }
+  NSURL *target = [directory URLByAppendingPathComponent:descriptor[@"file"]];
+  [files removeItemAtURL:target error:nil];
+  if (![files moveItemAtURL:location toURL:target error:nil]) {
+    [self setInstallPhase:@"failed" fraction:nil errorCode:@"E_HARNESS_CLI_STORE_FAILED"
+               forHarness:harness];
+    return;
+  }
+  [files setAttributes:@{NSFileProtectionKey: NSFileProtectionComplete}
+          ofItemAtPath:target.path error:nil];
+  [self setInstallPhase:@"ready" fraction:@1 errorCode:nil forHarness:harness];
+}
+
+- (void)URLSession:(NSURLSession *)session
+              task:(NSURLSessionTask *)task
+didCompleteWithError:(NSError *)error {
+  NSString *harness = [self harnessForTask:task];
+  if (harness == nil) return;
+  @synchronized (self) { [self.installTasks removeObjectForKey:harness]; }
+  // Success is handled in didFinishDownloadingToURL; only a real error lands a
+  // failure here, and never over a download that already stored the file.
+  if (error != nil && [DSHHarnessAuthService installedCliURLForHarness:harness] == nil) {
+    [self setInstallPhase:@"failed" fraction:nil errorCode:@"E_HARNESS_CLI_DOWNLOAD_FAILED"
+               forHarness:harness];
+  }
 }
 
 - (void)URLSession:(NSURLSession *)session
@@ -744,14 +679,9 @@ static BOOL DSHAuthValidSessionId(id value) {
          totalBytesWritten:(int64_t)totalBytesWritten
  totalBytesExpectedToWrite:(int64_t)totalBytesExpectedToWrite {
   if (totalBytesExpectedToWrite <= 0) return;
-  double fraction = (double)totalBytesWritten / (double)totalBytesExpectedToWrite;
-  __block NSString *harness = nil;
-  @synchronized (self) {
-    for (NSString *key in self.installTasks) {
-      if (self.installTasks[key] == downloadTask) { harness = key; break; }
-    }
-  }
+  NSString *harness = [self harnessForTask:downloadTask];
   if (harness != nil) {
+    double fraction = (double)totalBytesWritten / (double)totalBytesExpectedToWrite;
     [self setInstallPhase:@"downloading" fraction:@(MIN(1.0, MAX(0.0, fraction)))
                 errorCode:nil forHarness:harness];
   }
