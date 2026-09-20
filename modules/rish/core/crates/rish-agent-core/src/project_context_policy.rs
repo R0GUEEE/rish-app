@@ -401,6 +401,20 @@ fn reduce_json_inner(input: &str, content: &[u8]) -> Option<Value> {
             let (eligible, reason) = content_decision(content);
             Some(json!({ "ok": true, "eligible": eligible, "omission_reason": reason }))
         }
+        // `secretDecisionForData:`, over the same bytes. Both hosts ask this
+        // rather than keeping a scanner each; the fixture holds them to it.
+        "secret_decision" => {
+            let suspected = crate::project_context_secrets::suspected_secret(content);
+            Some(json!({
+                "ok": true,
+                "suspected_secret": suspected,
+                "omission_reason": if suspected {
+                    Some(crate::project_context_secrets::REASON_SUSPECTED_SECRET)
+                } else {
+                    None
+                },
+            }))
+        }
         _ => None,
     }
 }

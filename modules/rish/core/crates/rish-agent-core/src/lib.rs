@@ -28,6 +28,7 @@ pub mod prepared_attempt;
 pub mod project_access;
 pub mod project_context_bridge;
 pub mod project_context_policy;
+pub mod project_context_secrets;
 pub mod project_context_service;
 pub mod project_context_store;
 pub mod project_module;
