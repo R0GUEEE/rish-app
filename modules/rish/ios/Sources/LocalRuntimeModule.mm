@@ -25,6 +25,7 @@
 #import <PDFKit/PDFKit.h>
 #import <React/RCTBridgeModule.h>
 #import <React/RCTUtils.h>
+#import <UIKit/UIKit.h>
 #import <Security/Security.h>
 #import <TargetConditionals.h>
 #import <UIKit/UIKit.h>
@@ -829,6 +830,7 @@ static BOOL DSHCanConnectToMacProxy(void) {
 @property(nonatomic) NSUInteger credentialGeneration;
 @property(nonatomic, strong) NSMutableDictionary<NSString *, NSNumber *> *slotCredentialGenerations;
 @property(nonatomic) NSInteger activeCompletionSchemaVersion;
+@property(nonatomic) UIBackgroundTaskIdentifier activeCompletionBackgroundTask;
 @property(nonatomic, copy) NSString *activeCompletionCredentialSlot;
 @property(nonatomic, copy) RCTPromiseRejectBlock activeCompletionRejecter;
 @property(nonatomic, copy) RCTPromiseRejectBlock activeCompletionStreamRejecter;
@@ -928,6 +930,9 @@ RCT_EXPORT_MODULE(LocalRuntime)
                                            NSError **error))attachmentResolver {
   self = [super init];
   if (self != nil) {
+    // UIBackgroundTaskInvalid is NSUIntegerMax, not zero, so the sentinel has
+    // to be set explicitly or a fresh module would read 0 as a live task id.
+    _activeCompletionBackgroundTask = UIBackgroundTaskInvalid;
     _stateQueue = dispatch_queue_create("tech.zseven.rish.local-runtime", DISPATCH_QUEUE_SERIAL);
     configuration = [configuration copy] ?:
         NSURLSessionConfiguration.ephemeralSessionConfiguration;
@@ -1961,7 +1966,35 @@ RCT_EXPORT_MODULE(LocalRuntime)
   }
 }
 
+/// Holds a background execution assertion while a completion is in flight, so
+/// a turn that was running when the app was backgrounded gets iOS's grace
+/// window to finish rather than being suspended the instant the screen locks.
+/// iOS caps that window at a few minutes, so it lets a turn complete -- it does
+/// not keep a whole multi-turn agent running in the background, which the
+/// system does not permit. Idempotent; released in clearActiveCompletionLocked.
+- (void)beginCompletionBackgroundTaskLocked {
+  if (self.activeCompletionBackgroundTask != UIBackgroundTaskInvalid) return;
+  UIApplication *application = RCTSharedApplication();
+  if (application == nil) return;
+  __weak LocalRuntimeModule *weakSelf = self;
+  self.activeCompletionBackgroundTask = [application
+      beginBackgroundTaskWithName:@"tech.zseven.rish.completion"
+                expirationHandler:^{
+    LocalRuntimeModule *strong = weakSelf;
+    if (strong == nil) return;
+    @synchronized (strong) { [strong endCompletionBackgroundTaskLocked]; }
+  }];
+}
+
+- (void)endCompletionBackgroundTaskLocked {
+  if (self.activeCompletionBackgroundTask == UIBackgroundTaskInvalid) return;
+  UIBackgroundTaskIdentifier task = self.activeCompletionBackgroundTask;
+  self.activeCompletionBackgroundTask = UIBackgroundTaskInvalid;
+  [RCTSharedApplication() endBackgroundTask:task];
+}
+
 - (void)clearActiveCompletionLocked {
+  [self endCompletionBackgroundTaskLocked];
   self.activeCompletionTask = nil;
   self.activeCompletionExecution = nil;
   self.activeCompletionRequestId = nil;
@@ -2033,6 +2066,7 @@ RCT_EXPORT_MODULE(LocalRuntime)
     self.activeCompletionGeneration = self.completionGeneration;
     self.activeCompletionSchemaVersion = schemaVersion;
     self.activeCompletionRequestId = roundId;
+    [self beginCompletionBackgroundTaskLocked];
     self.activeCompletionCredentialSlot = account;
     self.activeCompletionRejecter = rejecter;
     self.activeCompletionStreamRejecter = nil;
@@ -3270,6 +3304,7 @@ RCT_REMAP_METHOD(complete,
     previousTask = self.activeCompletionTask;
     self.activeCompletionTask = task;
     self.activeCompletionRequestId = requestId;
+    [self beginCompletionBackgroundTaskLocked];
     self.activeCompletionCredentialSlot = DSHCredentialAccount;
     self.activeCompletionGeneration = completionGeneration;
     self.activeCompletionSchemaVersion = 1;
@@ -3802,6 +3837,7 @@ RCT_REMAP_METHOD(completeV2Stream,
     completionGeneration = self.completionGeneration;
     self.activeCompletionGeneration = completionGeneration;
     self.activeCompletionRequestId = requestId;
+    [self beginCompletionBackgroundTaskLocked];
     self.activeCompletionCredentialSlot = credentialAccount;
     // Schema value 2 makes the legacy complete() and completeV2 busy
     // guards treat the streaming round like any in-flight completion.
@@ -4345,6 +4381,7 @@ RCT_REMAP_METHOD(completeV2,
     previousTask = self.activeCompletionTask;
     self.activeCompletionTask = task;
     self.activeCompletionRequestId = requestId;
+    [self beginCompletionBackgroundTaskLocked];
     self.activeCompletionCredentialSlot = DSHCredentialAccount;
     self.activeCompletionGeneration = completionGeneration;
     self.activeCompletionSchemaVersion = 1;
