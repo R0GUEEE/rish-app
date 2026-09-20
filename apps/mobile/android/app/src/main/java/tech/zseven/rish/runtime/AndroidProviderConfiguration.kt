@@ -19,6 +19,35 @@ internal class AndroidProviderConfiguration(context: Context, namespace: String 
             else -> error("E_COMPLETION_MODEL_MISMATCH")
         }
         fun profileDigest(value: JSONObject) = RuntimeJson.sha("rish.provider-configuration-v1.v1\u0000" + RuntimeJson.canonical(value))
+        private val bindingKeys = setOf("schema_version", "harness_id", "endpoint_url", "protocol", "auth_type", "send_reasoning", "model_id", "profile_id")
+        /**
+         * `DSHValidateProviderBinding`: a binding is the record `binding()`
+         * would issue for this model today -- exact keys, a custom-capable
+         * harness that is the model's, a normalised endpoint that is its own
+         * normal form, and a profile digest over everything but itself.
+         */
+        fun validBinding(raw: Any?, model: String?): Boolean {
+            val binding = raw as? JSONObject ?: return false
+            if (binding.keys().asSequence().toSet() != bindingKeys || binding.opt("schema_version") != 1) return false
+            val harness = binding.opt("harness_id") as? String ?: return false
+            if (harness !in setOf("codex", "claude-code")) return false
+            if (model == null || (try { harness(model) } catch (_: IllegalStateException) { null }) != harness) return false
+            val wire = binding.opt("model_id") as? String ?: return false
+            if (wire.isEmpty() || wire.toByteArray(Charsets.UTF_8).size > 128 || wire.any { it.isWhitespace() || it.isISOControl() }) return false
+            if (binding.opt("send_reasoning") !is Boolean) return false
+            if (binding.opt("auth_type") !in setOf("bearer", "x-api-key", "api-key")) return false
+            val protocol = binding.opt("protocol") as? String ?: return false
+            if (protocol !in setOf("messages", "chat-completions", "responses")) return false
+            val endpoint = binding.opt("endpoint_url") as? String ?: return false
+            if (endpoint.isEmpty() || endpoint.length > 2048 || endpoint.any { it.isISOControl() }) return false
+            val url = endpoint.trim().toHttpUrlOrNull() ?: return false
+            val local = url.host in setOf("localhost", "127.0.0.1", "::1", "[::1]")
+            if (url.username.isNotEmpty() || url.password.isNotEmpty() || url.query != null || url.fragment != null) return false
+            if (!(url.isHttps || (local && url.scheme == "http"))) return false
+            if (url.toString() != endpoint) return false
+            val identity = JSONObject(binding.toString()); identity.remove("profile_id")
+            return binding.opt("profile_id") == profileDigest(identity)
+        }
     }
     fun read(harness: String): JSONObject {
         require(harness in setOf("codex", "claude-code"))
