@@ -2490,8 +2490,12 @@ export function HomeScreen({
         : projectContextControllerState.phase === 'persistence_pending' ||
           projectContextControllerState.phase === 'cleanup_pending'
         ? 'recovery'
-        : projectContextControllerState.failureCode !== null ||
-            projectContextControllerState.phase === 'blocked'
+        // A blocked phase with no failure is a stale, errored or
+        // unavailable *context*, which the strip already reads from the
+        // context state itself; only a controller failure is an error here.
+        // Mapping every blocked phase to error showed "Error" for a context
+        // the agent had merely made stale by committing.
+        : projectContextControllerState.failureCode !== null
           ? 'error'
           : projectContextControllerState.phase === 'inspecting' ||
               projectContextControllerState.phase === 'preparing' ||
@@ -5496,7 +5500,22 @@ export function HomeScreen({
       return;
     }
     const controllerState = projectContextController.getState();
-    if (sameProjectContextOwner(controllerState.owner, selected)) return;
+    if (sameProjectContextOwner(controllerState.owner, selected)) {
+      // Already attached (the workspace picker attaches on binding), so
+      // there is no attach to wait for -- but a sheet opened onto a context
+      // with no snapshot still needs its candidate listing, or it opens on
+      // "No project files found" until the person taps Refresh files.
+      const token = projectContextController.getActionToken();
+      if (
+        selected.projectContext.snapshot === null &&
+        token !== null &&
+        controllerState.list.candidates.length === 0 &&
+        !controllerState.list.loading
+      ) {
+        projectContextController.search(token, '').catch(() => undefined);
+      }
+      return;
+    }
     projectContextController
       .attachConversation(selected.id)
       .then(() => {

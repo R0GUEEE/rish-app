@@ -1690,6 +1690,11 @@ export function createProjectContextController(
       finishOperation(operation);
       return setFailure('E_CONTEXT_OWNER_STALE');
     }
+    // Every settlement below is awaited: a `return <promise>` inside this
+    // try would run the `finally` -- which clears the active operation --
+    // before the settlement judged whether the operation was still live,
+    // and the settlement would then report E_CONTEXT_OWNER_STALE against
+    // itself.
     try {
       let inspection: ProjectContextInspectionV1;
       if (operation.root !== null) {
@@ -1733,10 +1738,10 @@ export function createProjectContextController(
         return setFailure('E_CONTEXT_RESULT_INVALID');
       }
       if (inspection.state === 'prepared') {
-        return acceptPreparedInspection(operation, inspection);
+        return await acceptPreparedInspection(operation, inspection);
       }
       if (inspection.state === 'stale') {
-        return invalidateInspectedContext(operation, {
+        return await invalidateInspectedContext(operation, {
           type: 'project_changed',
         });
       }
@@ -1751,14 +1756,14 @@ export function createProjectContextController(
         publish({ phase: 'idle', failureCode: null });
         return completed;
       }
-      return invalidateInspectedContext(operation, {
+      return await invalidateInspectedContext(operation, {
         type: 'project_changed',
       });
     } catch (error) {
       if (!operationLive(operation)) return rejectStale();
       const code = controllerError(error);
       if (code === 'E_CONTEXT_SNAPSHOT_MISSING') {
-        return invalidateInspectedContext(operation, {
+        return await invalidateInspectedContext(operation, {
           type: 'snapshot_missing',
         });
       }

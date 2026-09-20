@@ -1638,11 +1638,22 @@ describe('ProjectContextController V1', () => {
       state: 'stale',
       manifest: manifest(SNAPSHOT_A),
     });
-    await ready.controller.inspect(actionToken(ready));
+    // The invalidation is persisted and settled by *this* operation. An
+    // `inspect` that returned the pending settlement without awaiting it
+    // ran its `finally` first, cleared the active operation, and the
+    // settlement then judged itself stale: the sheet showed
+    // E_CONTEXT_OWNER_STALE after every commit the agent made.
+    await expect(ready.controller.inspect(actionToken(ready))).resolves.toEqual(
+      { status: 'completed' },
+    );
     expect(ready.store.applyProjectContextAction).toHaveBeenCalledWith(
       CONVERSATION_ID,
       { type: 'project_changed' },
     );
+    expect(ready.controller.getState()).toMatchObject({
+      phase: 'blocked',
+      failureCode: null,
+    });
 
     const missing = controllerHarness({ ready: true });
     missing.native.inspect.mockRejectedValueOnce(
