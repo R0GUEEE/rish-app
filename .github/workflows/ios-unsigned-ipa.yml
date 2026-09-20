@@ -1,0 +1,203 @@
+name: Build unsigned iOS IPA
+
+# Fork-friendly build: produces an UNSIGNED .ipa plus dSYMs, with no Apple
+# developer account, certificate or provisioning profile involved.
+#
+# The upstream `iOS TestFlight` workflow signs and uploads to App Store
+# Connect, so it needs five repository secrets. This workflow deliberately
+# skips signing, App Store Connect and the long simulator test suites; it only
+# builds the pinned native dependencies and archives the app for a device.
+#
+# The resulting IPA has no signature. Re-sign it on-device with AltStore /
+# SideStore / Feather, or with `codesign` + a provisioning profile.
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: Marketing version written into the IPA (for example 1.0.0)
+        required: true
+        default: '1.0.0'
+      create_release:
+        description: Publish the IPA as a GitHub Release asset
+        type: boolean
+        default: true
+
+permissions:
+  contents: write
+
+concurrency:
+  group: rish-unsigned-ipa
+  cancel-in-progress: false
+
+jobs:
+  ipa:
+    runs-on: macos-26
+    timeout-minutes: 180
+    env:
+      # prepare-rish-ios.sh pins Xcode 26.6 (17F113) and the iOS 26.5 SDK.
+      DEVELOPER_DIR: /Applications/Xcode_26.6.app/Contents/Developer
+      RELEASE_VERSION: ${{ inputs.version }}
+      RISH_IOS_GUEST_CGI_ENABLED: '1'
+      BUILD_DIR: ${{ github.workspace }}/.build/unsigned-ipa
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - name: Validate version and select the pinned Xcode
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import os, re
+          version = os.environ['RELEASE_VERSION']
+          if not re.fullmatch(r'[0-9]{1,4}\.[0-9]{1,2}(\.[0-9]{1,2})?', version):
+              raise SystemExit(f'Invalid marketing version: {version}')
+          PY
+          echo "RELEASE_BUILD=${GITHUB_RUN_NUMBER}" >> "$GITHUB_ENV"
+          if [[ ! -d "$DEVELOPER_DIR" ]]; then
+            echo "::error::Pinned Xcode is missing from this runner image. Installed:" >&2
+            ls -d /Applications/Xcode*.app >&2 || true
+            exit 1
+          fi
+          xcodebuild -version
+          xcrun --sdk iphoneos --show-sdk-version
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22.11.0'
+          cache: npm
+          cache-dependency-path: apps/mobile/package-lock.json
+
+      - uses: ruby/setup-ruby@v1
+        with:
+          ruby-version: '3.3'
+          bundler-cache: true
+          working-directory: apps/mobile
+
+      - name: Install JavaScript dependencies
+        run: npm ci --prefix apps/mobile
+
+      - name: Restore pinned native dependencies
+        id: native-cache
+        uses: actions/cache/restore@v4
+        with:
+          path: |
+            modules/rish/ios/Vendor
+            modules/rish/ios/include/rish.h
+          key: rish-ios-arm64-unsigned-xcode-26.6-v1-${{ hashFiles('scripts/prepare-*-ios.sh', 'scripts/prepare-rish-agent-core.sh', 'modules/rish/ios/*.podspec', 'modules/rish/core/Cargo.toml', 'modules/rish/core/Cargo.lock', 'modules/rish/core/rust-toolchain.toml', 'modules/rish/core/include/**', 'modules/rish/core/crates/**') }}
+
+      - name: Prepare pinned native dependencies
+        if: steps.native-cache.outputs.cache-hit != 'true'
+        timeout-minutes: 90
+        run: |
+          set -euo pipefail
+          rustup toolchain install 1.94 --profile minimal
+          rustup target add --toolchain 1.94 aarch64-apple-ios aarch64-apple-ios-sim
+          ./scripts/prepare-rish-ios.sh
+          ./scripts/prepare-rish-agent-core.sh
+          ./scripts/prepare-libgit2-ios.sh
+          ls -la modules/rish/ios/Vendor
+
+      - name: Cache prepared native dependencies
+        if: steps.native-cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v4
+        with:
+          path: |
+            modules/rish/ios/Vendor
+            modules/rish/ios/include/rish.h
+          key: ${{ steps.native-cache.outputs.cache-primary-key }}
+
+      - name: Install Pods
+        working-directory: apps/mobile
+        run: |
+          set -euo pipefail
+          bundle exec pod install --project-directory=ios
+          printf 'export NODE_BINARY=%s\n' "$(command -v node)" > ios/.xcode.env.local
+          cat ios/.xcode.env.local
+
+      - name: Archive the app without signing
+        env:
+          # Pods-Rish-frameworks.sh skips its codesign work when these are set.
+          CODE_SIGNING_ALLOWED: 'NO'
+          CODE_SIGNING_REQUIRED: 'NO'
+          EXPANDED_CODE_SIGN_IDENTITY: ''
+        run: |
+          set -euo pipefail
+          mkdir -p "$BUILD_DIR"
+          xcodebuild \
+            -workspace apps/mobile/ios/Rish.xcworkspace \
+            -scheme Rish \
+            -configuration Release \
+            -destination 'generic/platform=iOS' \
+            -archivePath "$BUILD_DIR/Rish.xcarchive" \
+            CODE_SIGNING_ALLOWED=NO \
+            CODE_SIGNING_REQUIRED=NO \
+            CODE_SIGN_IDENTITY="" \
+            CODE_SIGN_ENTITLEMENTS="" \
+            EXPANDED_CODE_SIGN_IDENTITY="" \
+            MARKETING_VERSION="$RELEASE_VERSION" \
+            CURRENT_PROJECT_VERSION="$RELEASE_BUILD" \
+            archive
+
+      - name: Package and verify the unsigned IPA
+        run: |
+          set -euo pipefail
+          APP="$BUILD_DIR/Rish.xcarchive/Products/Applications/Rish.app"
+          IPA="$BUILD_DIR/Rish-$RELEASE_VERSION-unsigned.ipa"
+          STAGE="$BUILD_DIR/ipa"
+          [[ -d "$APP" ]] || { echo "::error::No Rish.app in the archive"; exit 1; }
+
+          rm -rf "$STAGE"
+          mkdir -p "$STAGE/Payload"
+          ditto "$APP" "$STAGE/Payload/Rish.app"
+          (cd "$STAGE" && zip -qry "$IPA" Payload)
+
+          echo "### Unsigned IPA" >> "$GITHUB_STEP_SUMMARY"
+          plutil -extract CFBundleIdentifier raw "$APP/Info.plist" | sed 's/^/- bundle id: /' >> "$GITHUB_STEP_SUMMARY"
+          echo "- version: $(plutil -extract CFBundleShortVersionString raw "$APP/Info.plist") ($(plutil -extract CFBundleVersion raw "$APP/Info.plist"))" >> "$GITHUB_STEP_SUMMARY"
+          echo "- architecture: $(lipo -archs "$APP/Rish")" >> "$GITHUB_STEP_SUMMARY"
+          echo "- size: $(( $(stat -f%z "$IPA") / 1048576 )) MB" >> "$GITHUB_STEP_SUMMARY"
+
+          [[ "$(plutil -extract CFBundleIdentifier raw "$APP/Info.plist")" == "tech.zseven.rish" ]]
+          [[ "$(plutil -extract CFBundleShortVersionString raw "$APP/Info.plist")" == "$RELEASE_VERSION" ]]
+          [[ "$(plutil -extract CFBundleVersion raw "$APP/Info.plist")" == "$RELEASE_BUILD" ]]
+          [[ "$(lipo -archs "$APP/Rish")" == "arm64" ]]
+          [[ -d "$APP/PlugIns/RishTaskActivity.appex" ]]
+          [[ "$(unzip -l "$IPA" | grep -c 'Payload/Rish.app/Rish$')" == "1" ]]
+          echo "IPA=$IPA" >> "$GITHUB_ENV"
+
+      - name: Check the archive carries no bundled secret
+        continue-on-error: true
+        run: ruby scripts/verify-no-bundled-secret.rb "$BUILD_DIR/Rish.xcarchive/Products/Applications/Rish.app"
+
+      - name: Upload the IPA and dSYMs
+        uses: actions/upload-artifact@v4
+        with:
+          name: Rish-${{ inputs.version }}-${{ env.RELEASE_BUILD }}-unsigned
+          path: |
+            .build/unsigned-ipa/*.ipa
+            .build/unsigned-ipa/Rish.xcarchive/dSYMs
+          if-no-files-found: error
+          retention-days: 30
+
+      - name: Publish the IPA as a release asset
+        if: inputs.create_release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          tag="ios-unsigned-${RELEASE_VERSION}-${RELEASE_BUILD}"
+          gh release create "$tag" "$IPA" \
+            --repo "$GITHUB_REPOSITORY" \
+            --title "Rish ${RELEASE_VERSION} (unsigned IPA, build ${RELEASE_BUILD})" \
+            --notes "$(cat <<'NOTES'
+          Unsigned build of the React Native app, archived for a physical device
+          with `CODE_SIGNING_ALLOWED=NO`. No Apple certificate or provisioning
+          profile is involved, so this IPA is not installable as-is.
+
+          Install it by re-signing on device with AltStore, SideStore or Feather,
+          or locally with `codesign` plus a provisioning profile for
+          `tech.zseven.rish` and its `tech.zseven.rish.taskactivity` extension.
+          NOTES
+          )"
