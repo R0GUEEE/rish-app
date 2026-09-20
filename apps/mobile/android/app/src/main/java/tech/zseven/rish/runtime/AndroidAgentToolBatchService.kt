@@ -32,6 +32,7 @@ internal class AndroidAgentToolBatchService(
     private val workspaceTools: AndroidWorkspaceToolExecutor,
     private val operations: AndroidAgentOperations,
     private val transcripts: AndroidAgentTranscriptStore,
+    private val gitTools: AndroidAgentGitToolExecutor? = null,
 ) {
     class Refused(val code: String) : Exception(code)
 
@@ -177,14 +178,15 @@ internal class AndroidAgentToolBatchService(
         }
         if (!call.isNull("rejection")) return JSONObject()
         val name = call.optString("name")
-        if (name !in workspaceTools.tools) {
+        val git = gitTools?.takeIf { name in it.tools }
+        if (name !in workspaceTools.tools && git == null) {
             // Not servable here. The core's own invalid-argument mapping turns
             // this into the right rejection for the tool's family.
             return JSONObject().put("error", 1)
         }
         val arguments = call.optJSONObject("arguments") ?: JSONObject()
         return try {
-            JSONObject().put("prepared", workspaceTools.prepare(name, arguments, root))
+            JSONObject().put("prepared", git?.prepare(name, arguments, root) ?: workspaceTools.prepare(name, arguments, root))
         } catch (refused: AndroidWorkspaceToolExecutor.Refused) {
             // A probe that refuses becomes a rejection the round carries, not
             // a lost batch -- but which call refused, and why, is otherwise

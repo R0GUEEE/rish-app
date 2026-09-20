@@ -38,16 +38,18 @@ internal class AndroidRuntimeState private constructor(val app: Application) {
     val agentOperations = AndroidAgentOperations(agentWal)
     val executionLedger = AndroidAgentExecutionLedger(agentWal, liveTasks, agentOperations)
     val workspaceTools = AndroidWorkspaceToolExecutor(workspaces, roots)
+    /// The agent's git_status and git_commit, over an attached project.
+    val gitTools = AndroidAgentGitToolExecutor(workspaceProjects, workspaces, roots)
     val agentPolicy = AndroidAgentPolicyService(roots, AndroidAgentToolRegistry)
     val agentRounds = AndroidAgentRoundJournal(agentWal, liveTasks)
     val agentTranscripts = AndroidAgentTranscriptStore(agentWal)
     val toolBatch = AndroidAgentToolBatchService(
         agentWal, sessions, preparedAttempts, executionLedger, roots, workspaceTools,
-        agentOperations, agentTranscripts,
+        agentOperations, agentTranscripts, gitTools,
     )
     val toolExecution = AndroidAgentToolExecutionService(
         agentWal, sessions, preparedAttempts, executionLedger, roots, workspaceTools, liveTasks,
-        agentTranscripts, agentOperations,
+        agentTranscripts, agentOperations, gitTools,
     )
     val lifecycle = AndroidAgentLifecycleService(agentWal, sessions, agentOperations, roots)
     val approvals = AndroidAgentApprovalService(

@@ -123,4 +123,28 @@ internal object RishLibgit2Native {
         gitDir: String?, workDir: String, staged: Boolean, oldOid: String, oldPath: String,
         newOid: String, newPath: String, newBuffer: ByteArray?,
     ): ByteArray?
+
+    // --- the agent's git tools --------------------------------------------
+    //
+    // AgentGitToolSupport.mm's half. The commit is made only with the id the
+    // core predicted; see AndroidAgentGitToolExecutor.
+
+    /** `{ok, reference|null, branch|null, head_oid|null, head_reference_name|null}`. */
+    @JvmStatic external fun agentBranch(gitDir: String?, workDir: String): ByteArray
+
+    /** `{ok, branch, head_oid, clean, has_conflicts, entry_count}`. */
+    @JvmStatic external fun agentStatus(gitDir: String?, workDir: String): ByteArray
+
+    /** The tree a stage-all would commit and its index rows; nothing is written. */
+    @JvmStatic external fun agentStage(gitDir: String?, workDir: String): ByteArray
+
+    /**
+     * Stages, commits without moving HEAD, requires the predicted id, then
+     * moves HEAD from [expectedHead] (null: unborn) and writes the index.
+     * `{ok, commit_oid, tree_oid}` or `{ok:false, failure}`.
+     */
+    @JvmStatic external fun agentCommit(
+        gitDir: String?, workDir: String, message: String, timestampSeconds: Long, timezoneMinutes: Int,
+        expectedHead: String?, expectedTree: String, expectedCommit: String,
+    ): ByteArray
 }

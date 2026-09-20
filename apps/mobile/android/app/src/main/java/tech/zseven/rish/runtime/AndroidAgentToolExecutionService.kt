@@ -29,6 +29,7 @@ internal class AndroidAgentToolExecutionService(
     private val liveTasks: AndroidLiveTasks,
     private val transcripts: AndroidAgentTranscriptStore,
     private val operations: AndroidAgentOperations,
+    private val gitTools: AndroidAgentGitToolExecutor? = null,
 ) {
     class Refused(val code: String) : Exception(code)
 
@@ -179,12 +180,12 @@ internal class AndroidAgentToolExecutionService(
         ).optJSONObject("arguments") ?: throw Refused(BAD_ARGUMENTS)
 
         val name = request.optString("name")
-        val recovered = if (name in workspaceTools.tools) {
+        val git = gitTools?.takeIf { name in it.tools }
+        val recovered = if (name in workspaceTools.tools || git != null) {
             try {
-                workspaceTools.recover(
-                    name, arguments, request.optJSONObject("root") ?: JSONObject(),
-                    row.optJSONObject("precondition"),
-                )
+                val root = request.optJSONObject("root") ?: JSONObject()
+                git?.recover(name, arguments, root, row.optJSONObject("precondition"))
+                    ?: workspaceTools.recover(name, arguments, root, row.optJSONObject("precondition"))
             } catch (refused: AndroidWorkspaceToolExecutor.Refused) {
                 // The disk could not answer. That is not proof the effect did
                 // not happen, and recovery must never say it was.
@@ -300,7 +301,7 @@ internal class AndroidAgentToolExecutionService(
         ).optJSONObject("arguments") ?: throw Refused(BAD_ARGUMENTS)
 
         val began = System.currentTimeMillis()
-        val effect = effectOf(request, arguments)
+        val effect = effectOf(request, arguments, claimed.optJSONObject("precondition"))
         val duration = System.currentTimeMillis() - began
 
         val dispatched = rowFor(wal.snapshot(), request) ?: throw Refused(CONFLICT)
@@ -343,15 +344,18 @@ internal class AndroidAgentToolExecutionService(
      * handler -- becomes the core's generic failure rather than a crash or a
      * silence, so the round sees a settled call it can carry on from.
      */
-    private fun effectOf(request: JSONObject, arguments: JSONObject): JSONObject {
+    private fun effectOf(request: JSONObject, arguments: JSONObject, precondition: JSONObject?): JSONObject {
         val name = request.optString("name")
-        if (name !in workspaceTools.tools) {
+        val git = gitTools?.takeIf { name in it.tools }
+        if (name !in workspaceTools.tools && git == null) {
             return decide(
                 JSONObject().put("op", "generic_failure").put("request", request),
             ).optJSONObject("effect") ?: throw Refused(NATIVE)
         }
         return try {
-            workspaceTools.execute(name, arguments, request.optJSONObject("root") ?: JSONObject())
+            val root = request.optJSONObject("root") ?: JSONObject()
+            (git?.execute(name, arguments, root, precondition)
+                ?: workspaceTools.execute(name, arguments, root))
                 .also { android.util.Log.w("RishAgent", "tool $name ran") }
         } catch (refused: AndroidWorkspaceToolExecutor.Refused) {
             // The tool's own refusal becomes a failure the model is shown; it

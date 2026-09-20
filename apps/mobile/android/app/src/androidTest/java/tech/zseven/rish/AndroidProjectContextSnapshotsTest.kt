@@ -162,10 +162,12 @@ class AndroidProjectContextSnapshotsTest {
         assertTrue(frozen.contentEquals(envelope))
         assertEquals("E_CONTEXT_CHANGED", refusal { f.snapshots.discard(f.snapshotRequest(snapshotId)) })
 
-        // Putting the bytes back does not put the snapshot back: what was
-        // observed about the file -- its times, its inode -- moved with it,
-        // and a stale snapshot is replaced by preparing again, not revived.
-        File(f.workspaceDir, "README.md").writeText("# hello\n")
+        // A stale snapshot is replaced by preparing again, not revived. (The
+        // file is left different from both earlier versions: stat times are
+        // whole seconds here, so putting the exact bytes back within the same
+        // second can reproduce the fingerprint, and that is not what this
+        // asserts.)
+        File(f.workspaceDir, "README.md").writeText("# hello, third time\n")
         assertEquals("stale", f.snapshots.inspect(f.snapshotRequest(snapshotId)).getString("state"))
         val replacement = f.snapshots.prepare(f.prepareRequest("README.md"))
         val replacementId = replacement.getString("snapshot_id")
