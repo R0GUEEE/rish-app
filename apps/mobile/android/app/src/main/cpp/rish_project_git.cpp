@@ -9,6 +9,11 @@
 //
 // The answer is deliberately flat and sorted, because the caller compares it
 // against what the other host produces for the same repository.
+//
+// A workspace's project keeps its git directory outside the workspace, in the
+// app's private storage, the way iOS does: a bare repository whose working
+// tree is set to the workspace root at every open. Nothing in the workspace
+// says it is a repository, and the person's files stay the person's.
 
 #include <jni.h>
 
@@ -18,39 +23,15 @@
 
 #include <git2.h>
 
+#include "rish_git_support.h"
+
 namespace {
 
-/// A JSON string, escaped the way any JSON writer must.
-std::string Quoted(const char *value) {
-  std::string out = "\"";
-  for (const char *cursor = value == nullptr ? "" : value; *cursor != '\0'; cursor += 1) {
-    const unsigned char c = static_cast<unsigned char>(*cursor);
-    switch (c) {
-      case '"': out += "\\\""; break;
-      case '\\': out += "\\\\"; break;
-      case '\b': out += "\\b"; break;
-      case '\f': out += "\\f"; break;
-      case '\n': out += "\\n"; break;
-      case '\r': out += "\\r"; break;
-      case '\t': out += "\\t"; break;
-      default:
-        if (c < 0x20) {
-          char escape[7];
-          snprintf(escape, sizeof(escape), "\\u%04x", c);
-          out += escape;
-        } else {
-          out += static_cast<char>(c);
-        }
-    }
-  }
-  return out + "\"";
-}
-
-std::string Oid(const git_oid *id) {
-  char hex[GIT_OID_SHA1_HEXSIZE + 1];
-  git_oid_tostr(hex, sizeof(hex), id);
-  return std::string(hex);
-}
+using rish::Chars;
+using rish::Oid;
+using rish::OpenRepository;
+using rish::Quoted;
+using rish::Release;
 
 /// One entry of the index, before anything decides what to do with it.
 struct Entry {
@@ -94,7 +75,79 @@ void MarkDeltas(std::vector<Entry> &entries, git_diff *diff, bool staged_side) {
 
 extern "C" {
 
-/// Reads `path` as a repository and answers its index and working state.
+/// `git init --bare` at `gitdir`, paired with `workdir` as its working tree
+/// for this one handle, so that the pairing is proven to work before the
+/// gitdir is published. Answers "ok" or "error:<stage>:<why>".
+JNIEXPORT jstring JNICALL
+Java_tech_zseven_rish_runtime_RishLibgit2Native_initSplitRepository(
+    JNIEnv *env, jclass, jstring gitDirValue, jstring workDirValue) {
+  const char *gitdir = Chars(env, gitDirValue);
+  const char *workdir = Chars(env, workDirValue);
+  std::string answer = "ok";
+  git_repository *repository = nullptr;
+  do {
+    if (gitdir == nullptr || workdir == nullptr) {
+      answer = "error:path:";
+      break;
+    }
+    git_repository_init_options options = GIT_REPOSITORY_INIT_OPTIONS_INIT;
+    options.flags = GIT_REPOSITORY_INIT_BARE | GIT_REPOSITORY_INIT_MKPATH;
+    options.mode = 0700;
+    options.initial_head = "main";
+    if (git_repository_init_ext(&repository, gitdir, &options) != 0) {
+      answer = "error:init:" + (git_error_last() && git_error_last()->message
+                                    ? std::string(git_error_last()->message)
+                                    : std::string());
+      break;
+    }
+    if (git_repository_set_workdir(repository, workdir, 0) != 0 ||
+        git_repository_is_bare(repository)) {
+      answer = "error:workdir:" + (git_error_last() && git_error_last()->message
+                                       ? std::string(git_error_last()->message)
+                                       : std::string());
+      break;
+    }
+  } while (false);
+  if (repository != nullptr) git_repository_free(repository);
+  Release(env, gitDirValue, gitdir);
+  Release(env, workDirValue, workdir);
+  return env->NewStringUTF(answer.c_str());
+}
+
+/// `git add <path>`: stages one file into the index and writes it. A test
+/// helper, so a repository can be given more than the one file `roundTrip`
+/// commits. Answers "ok" or "error:<stage>:<why>".
+JNIEXPORT jstring JNICALL
+Java_tech_zseven_rish_runtime_RishLibgit2Native_stagePath(
+    JNIEnv *env, jclass, jstring gitDirValue, jstring workDirValue, jstring pathValue) {
+  const char *gitdir = Chars(env, gitDirValue);
+  const char *workdir = Chars(env, workDirValue);
+  const char *path = Chars(env, pathValue);
+  std::string answer = "ok";
+  git_repository *repository = nullptr;
+  git_index *index = nullptr;
+  const auto fail = [&answer](const char *stage) {
+    const git_error *error = git_error_last();
+    answer = std::string("error:") + stage + ":" +
+             (error != nullptr && error->message != nullptr ? error->message : "");
+  };
+  do {
+    if (workdir == nullptr || path == nullptr) { answer = "error:path:"; break; }
+    const char *stage = OpenRepository(&repository, gitdir, workdir);
+    if (stage != nullptr) { fail(stage); break; }
+    if (git_repository_index(&index, repository) != 0) { fail("index"); break; }
+    if (git_index_add_bypath(index, path) != 0) { fail("add"); break; }
+    if (git_index_write(index) != 0) { fail("index_write"); break; }
+  } while (false);
+  if (index != nullptr) git_index_free(index);
+  if (repository != nullptr) git_repository_free(repository);
+  Release(env, gitDirValue, gitdir);
+  Release(env, workDirValue, workdir);
+  Release(env, pathValue, path);
+  return env->NewStringUTF(answer.c_str());
+}
+
+/// Reads a repository and answers its index and working state.
 ///
 /// `{"ok":true,"head":…,"branch":…,"repository_state":…,"index_checksum":…,
 ///   "entries":[{path,oid,mode,size,stage,staged,unstaged}]}`
@@ -102,9 +155,13 @@ extern "C" {
 /// hosts reading one repository produce the same bytes.
 JNIEXPORT jstring JNICALL
 Java_tech_zseven_rish_runtime_RishLibgit2Native_readRepositoryState(
-    JNIEnv *env, jclass, jstring pathValue) {
-  const char *path = env->GetStringUTFChars(pathValue, nullptr);
-  if (path == nullptr) return env->NewStringUTF("{\"ok\":false,\"stage\":\"path\"}");
+    JNIEnv *env, jclass, jstring gitDirValue, jstring workDirValue) {
+  const char *gitdir = Chars(env, gitDirValue);
+  const char *workdir = Chars(env, workDirValue);
+  if (workdir == nullptr) {
+    Release(env, gitDirValue, gitdir);
+    return env->NewStringUTF("{\"ok\":false,\"stage\":\"path\"}");
+  }
 
   git_repository *repository = nullptr;
   git_index *index = nullptr;
@@ -116,8 +173,9 @@ Java_tech_zseven_rish_runtime_RishLibgit2Native_readRepositoryState(
   std::string answer;
 
   do {
-    if (git_repository_open(&repository, path) != 0) {
-      answer = Failure("open");
+    const char *open_stage = OpenRepository(&repository, gitdir, workdir);
+    if (open_stage != nullptr) {
+      answer = Failure(open_stage);
       break;
     }
     if (git_repository_index(&index, repository) != 0) {
@@ -222,7 +280,8 @@ Java_tech_zseven_rish_runtime_RishLibgit2Native_readRepositoryState(
   if (head != nullptr) git_reference_free(head);
   if (index != nullptr) git_index_free(index);
   if (repository != nullptr) git_repository_free(repository);
-  env->ReleaseStringUTFChars(pathValue, path);
+  Release(env, gitDirValue, gitdir);
+  Release(env, workDirValue, workdir);
   return env->NewStringUTF(answer.c_str());
 }
 

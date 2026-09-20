@@ -9,7 +9,9 @@ import com.facebook.react.bridge.ReadableMap
 import org.json.JSONObject
 import tech.zseven.rish.RishUnavailable
 import tech.zseven.rish.runtime.AndroidRuntimeState
+import tech.zseven.rish.runtime.AndroidWorkspaceProjects
 import tech.zseven.rish.runtime.RishAgentCoreNative
+import tech.zseven.rish.runtime.RishLibgit2Native
 import tech.zseven.rish.runtime.RuntimeJson
 
 /**
@@ -19,11 +21,12 @@ import tech.zseven.rish.runtime.RuntimeJson
  * (RCT_EXPORT_MODULE(LocalProjects)) and the JS wrapper in
  * apps/mobile/src/native/LocalProjects.ts.
  *
- * Only [projectForWorkspaceV2] answers. It is the question the workspace
- * binding asks after it resolves a workspace and before it commits: whether a
- * git project is attached to this root. A workspace this app owns and just
- * made has none, and saying so is what lets a person bind a working directory
- * at all -- rejecting it failed the whole bind at the last step.
+ * [projectForWorkspaceV2] and [attachWorkspaceProject] answer, through
+ * [AndroidWorkspaceProjects]: whether a git project is attached to a workspace
+ * root, and attaching one. That is what turns a bound working directory into
+ * something the project context can list. The git panel's local operations
+ * -- [statusV2], [diffV2], [stageAllV2], [commitV2] -- answer through
+ * [tech.zseven.rish.runtime.AndroidProjectGit].
  *
  * Everything else still rejects with the JS-recognized "E_PROJECT_NATIVE"; no
  * success is stubbed anywhere, and nothing here pretends a repository exists.
@@ -34,7 +37,7 @@ class LocalProjectsModule(private val react: ReactApplicationContext) :
     private val runtime by lazy { AndroidRuntimeState.get(react) }
 
     override fun getConstants(): MutableMap<String, Any> =
-        mutableMapOf("implemented" to RishAgentCoreNative.available)
+        mutableMapOf("implemented" to (RishAgentCoreNative.available && RishLibgit2Native.available))
 
     override fun getName(): String = "LocalProjects"
 
@@ -75,31 +78,44 @@ class LocalProjectsModule(private val react: ReactApplicationContext) :
     fun push(projectId: String?, options: ReadableMap?, promise: Promise) = RishUnavailable.reject("LocalProjects", "E_PROJECT_NATIVE", promise)
 
     @ReactMethod
-    fun attachWorkspaceProject(request: ReadableMap?, promise: Promise) = RishUnavailable.reject("LocalProjects", "E_PROJECT_NATIVE", promise)
+    fun attachWorkspaceProject(request: ReadableMap?, promise: Promise) =
+        answer("attachWorkspaceProject", request, promise) { runtime.workspaceProjects.attach(it) }
 
     @ReactMethod
-    fun projectForWorkspaceV2(request: ReadableMap?, promise: Promise) {
+    fun projectForWorkspaceV2(request: ReadableMap?, promise: Promise) =
+        answer("projectForWorkspaceV2", request, promise) { runtime.workspaceProjects.projectFor(it) }
+
+    /**
+     * A refusal carries the stable code the shared rule maps iOS's number to,
+     * and no detail: a message could name a directory, and a path is not
+     * JavaScript's to see. Anything else is the native failure JS already
+     * knows how to sanitize.
+     */
+    private fun answer(
+        operation: String,
+        request: ReadableMap?,
+        promise: Promise,
+        body: (JSONObject?) -> JSONObject,
+    ) {
+        if (!RishAgentCoreNative.available || !RishLibgit2Native.available) {
+            RishUnavailable.reject("LocalProjects", "E_PROJECT_NATIVE", promise)
+            return
+        }
+        val captured = try {
+            request?.let { RuntimeJson.fromBridgeMap(it.toHashMap()) }
+        } catch (_: Exception) {
+            promise.reject("E_PROJECT_REQUEST_INVALID", "E_PROJECT_REQUEST_INVALID")
+            return
+        }
         runtime.io.execute {
             try {
-                val root = RuntimeJson.fromBridgeMap(
-                    (request ?: throw IllegalArgumentException("root")).toHashMap(),
-                )
-                // The root reference is the agent's, and whether it names a
-                // workspace this device holds is the resolver's answer, not
-                // this module's. Asking it also refuses a root that names a
-                // project, which is exactly what must not be answered here.
-                val resolved = runtime.roots.resolveWorkspaceRef(root)
-                if (resolved == null) {
-                    RishUnavailable.reject("LocalProjects", "E_PROJECT_NATIVE", promise)
-                    return@execute
-                }
-                // No project is attached to a workspace this app owns: nothing
-                // here ever attached one, and `attachWorkspaceProject` still
-                // refuses. "none" is the true answer, not a placeholder.
-                val reply = JSONObject().put("schema_version", 1).put("status", "none")
-                promise.resolve(Arguments.makeNativeMap(RuntimeJson.map(reply)))
-            } catch (error: Throwable) {
-                RishUnavailable.reject("LocalProjects", "E_PROJECT_NATIVE", promise)
+                promise.resolve(Arguments.makeNativeMap(RuntimeJson.map(body(captured))))
+            } catch (refused: AndroidWorkspaceProjects.Refused) {
+                android.util.Log.w(TAG, "$operation refused: ${refused.number}")
+                promise.reject(refused.code, refused.code)
+            } catch (failure: Throwable) {
+                android.util.Log.w(TAG, "$operation could not be answered", failure)
+                promise.reject("E_PROJECT_NATIVE", "E_PROJECT_NATIVE")
             }
         }
     }
@@ -111,17 +127,25 @@ class LocalProjectsModule(private val react: ReactApplicationContext) :
     fun commitProjectDetachV1(request: ReadableMap?, promise: Promise) = RishUnavailable.reject("LocalProjects", "E_PROJECT_NATIVE", promise)
 
     @ReactMethod
-    fun statusV2(request: ReadableMap?, promise: Promise) = RishUnavailable.reject("LocalProjects", "E_PROJECT_NATIVE", promise)
+    fun statusV2(request: ReadableMap?, promise: Promise) =
+        answer("statusV2", request, promise) { runtime.projectGit.status(it) }
 
     @ReactMethod
-    fun diffV2(request: ReadableMap?, promise: Promise) = RishUnavailable.reject("LocalProjects", "E_PROJECT_NATIVE", promise)
+    fun diffV2(request: ReadableMap?, promise: Promise) =
+        answer("diffV2", request, promise) { runtime.projectGit.diff(it) }
 
     @ReactMethod
-    fun stageAllV2(request: ReadableMap?, promise: Promise) = RishUnavailable.reject("LocalProjects", "E_PROJECT_NATIVE", promise)
+    fun stageAllV2(request: ReadableMap?, promise: Promise) =
+        answer("stageAllV2", request, promise) { runtime.projectGit.stageAll(it) }
 
     @ReactMethod
-    fun commitV2(request: ReadableMap?, promise: Promise) = RishUnavailable.reject("LocalProjects", "E_PROJECT_NATIVE", promise)
+    fun commitV2(request: ReadableMap?, promise: Promise) =
+        answer("commitV2", request, promise) { runtime.projectGit.commit(it) }
 
     @ReactMethod
     fun pushV2(request: ReadableMap?, promise: Promise) = RishUnavailable.reject("LocalProjects", "E_PROJECT_NATIVE", promise)
+
+    private companion object {
+        const val TAG = "RishProjects"
+    }
 }

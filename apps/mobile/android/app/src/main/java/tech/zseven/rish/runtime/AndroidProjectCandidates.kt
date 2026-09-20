@@ -29,8 +29,12 @@ internal class AndroidProjectCandidates {
     // listing on one device, not a value with meaning anywhere else.
     private val cursorKey = ByteArray(32).also { SecureRandom().nextBytes(it) }
 
-    fun capture(repositoryPath: String): Capture {
-        val state = JSONObject(RishLibgit2Native.readRepositoryState(repositoryPath))
+    /**
+     * Reads the repository at [workDir] -- through the private [gitDir] when
+     * it is a workspace's project -- and decides every entry once.
+     */
+    fun capture(gitDir: String?, workDir: String): Capture {
+        val state = JSONObject(RishLibgit2Native.readRepositoryState(gitDir, workDir))
         if (!state.optBoolean("ok")) {
             throw Refused(UNAVAILABLE, "repository could not be read at ${state.optString("stage")}")
         }
@@ -186,12 +190,16 @@ internal class AndroidProjectCandidates {
     }
 
     companion object {
-        const val INVALID = "E_CONTEXT_INVALID"
-        const val INVALID_CURSOR = "E_CONTEXT_INVALID_CURSOR"
+        // The codes are the ones JavaScript branches on; a code it does not
+        // know collapses to E_CONTEXT_NATIVE and tells the person nothing. A
+        // malformed cursor is a bad request, as iOS reports it; a cursor from
+        // another state of the project is [CHANGED].
+        const val INVALID = "E_CONTEXT_REQUEST_INVALID"
+        const val INVALID_CURSOR = "E_CONTEXT_REQUEST_INVALID"
         const val CHANGED = "E_CONTEXT_CHANGED"
         const val INTEGRITY = "E_CONTEXT_INTEGRITY"
         const val BUDGET = "E_CONTEXT_BUDGET"
-        const val UNAVAILABLE = "E_CONTEXT_UNAVAILABLE"
+        const val UNAVAILABLE = "E_PROJECT_NOT_FOUND"
         private const val POLICY = "policy"
         private const val BUDGET_EXCEEDED = "budget_exceeded"
         private const val MAX_FILE_BYTES = 64L * 1024

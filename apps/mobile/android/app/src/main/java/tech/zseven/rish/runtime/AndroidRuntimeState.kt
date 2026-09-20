@@ -18,6 +18,11 @@ internal class AndroidRuntimeState private constructor(val app: Application) {
     /// security-scoped folders, no legacy projects, no rebinding yet.
     val workspaces = AndroidWorkspaceRegistry(java.io.File(app.filesDir, "workspaces"))
     val roots = AndroidAgentRootResolver(workspaces)
+    /// The git project a workspace is attached to: a private gitdir beside
+    /// the registry, paired with the workspace root as its working tree.
+    val workspaceProjects = AndroidWorkspaceProjects(workspaces, roots)
+    val projectContext = AndroidProjectContextService(workspaceProjects, roots)
+    val projectGit = AndroidProjectGit(workspaceProjects, workspaces)
     val preparedAttempts = AndroidPreparedAttemptStore(sessions, agentWal, roots)
     /// Which native tasks this process still owns; a persisted owner from a
     /// previous launch is not alive, so its rows can be recovered.

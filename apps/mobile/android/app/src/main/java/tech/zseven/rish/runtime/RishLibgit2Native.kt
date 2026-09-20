@@ -40,13 +40,50 @@ internal object RishLibgit2Native {
      *   "index_checksum":…,"entries":[{path,oid,mode,size,stage,staged,unstaged}]}`
      * or `{"ok":false,"stage":…,"error":…}`.
      *
+     * [gitDir] is null for a plain repository whose `.git` is in [workDir].
+     * A workspace's project is the other shape: a private bare gitdir, paired
+     * with the workspace root as its working tree at every open, the way iOS
+     * keeps it -- nothing inside the workspace says it is a repository.
+     *
      * This layer holds no policy: which of these paths may be sent, and what
      * a selection of them becomes, is decided above it and mostly in the
      * shared core already. Entries come back sorted by path so two hosts
      * reading one repository produce the same bytes.
      */
-    @JvmStatic external fun readRepositoryState(path: String): String
+    @JvmStatic external fun readRepositoryState(gitDir: String?, workDir: String): String
+
+    /**
+     * `git init --bare` at [gitDir], paired once with [workDir] to prove the
+     * pairing works before the directory is published. `ok` or
+     * `error:<stage>:<why>`.
+     */
+    @JvmStatic external fun initSplitRepository(gitDir: String, workDir: String): String
 
     /** `git add <path>` for a test that needs more than one staged file. */
-    @JvmStatic external fun stagePath(root: String, path: String): String
+    @JvmStatic external fun stagePath(gitDir: String?, workDir: String, path: String): String
+
+    // --- the git panel ----------------------------------------------------
+    //
+    // Answers come back as UTF-8 bytes of JSON, `{"ok":true,...}` or
+    // `{"ok":false,"number":<iOS error number>,"stage":...,"error":...}`.
+    // Bytes rather than a string because a patch may hold a four-byte
+    // character, which NewStringUTF's modified UTF-8 cannot carry.
+
+    /** `statusForRepository`: branch, head, ahead/behind, and every changed path. */
+    @JvmStatic external fun status(gitDir: String?, workDir: String): ByteArray
+
+    /** `diffForRepository`: per-file stats and up to a mebibyte of patch text. */
+    @JvmStatic external fun diff(gitDir: String?, workDir: String, staged: Boolean, contextLines: Int): ByteArray
+
+    /** `git add -A`, answering the status that results. */
+    @JvmStatic external fun stageAll(gitDir: String?, workDir: String): ByteArray
+
+    /**
+     * Commits the index on HEAD when HEAD is [expectedHead] (null: no commit
+     * yet). `{"ok":true,"oid":...}`, or 3110 when HEAD moved.
+     */
+    @JvmStatic external fun commit(
+        gitDir: String?, workDir: String, message: String, authorName: String, authorEmail: String,
+        expectedHead: String?,
+    ): ByteArray
 }

@@ -39,7 +39,7 @@ class AndroidProjectGitStateTest {
     }
 
     private fun read(root: File): JSONObject {
-        val answer = JSONObject(RishLibgit2Native.readRepositoryState(root.absolutePath))
+        val answer = JSONObject(RishLibgit2Native.readRepositoryState(null, root.absolutePath))
         assertTrue("$answer", answer.getBoolean("ok"))
         return answer
     }
@@ -103,8 +103,8 @@ class AndroidProjectGitStateTest {
         RishLibgit2Native.roundTrip(root.absolutePath)
         File(root, "b.txt").writeText("second\n")
         File(root, "a.txt").writeText("first\n")
-        val first = RishLibgit2Native.readRepositoryState(root.absolutePath)
-        val second = RishLibgit2Native.readRepositoryState(root.absolutePath)
+        val first = RishLibgit2Native.readRepositoryState(null, root.absolutePath)
+        val second = RishLibgit2Native.readRepositoryState(null, root.absolutePath)
         assertEquals(first, second)
         // And untracked files are not in the index, so they are not entries.
         val paths = entriesOf(JSONObject(first)).keys
@@ -113,7 +113,7 @@ class AndroidProjectGitStateTest {
 
     /** A path that is not a repository is refused, with where it stopped. */
     @Test fun somethingThatIsNotARepositoryIsRefused() = repository { root ->
-        val answer = JSONObject(RishLibgit2Native.readRepositoryState(root.absolutePath))
+        val answer = JSONObject(RishLibgit2Native.readRepositoryState(null, root.absolutePath))
         assertEquals("$answer", false, answer.getBoolean("ok"))
         assertEquals("open", answer.getString("stage"))
     }

@@ -45,7 +45,7 @@ class AndroidProjectCandidatesTest {
         capture.candidates.associateBy { it.getString("path") }
 
     @Test fun aCommittedFileIsAnUnchangedEligibleCandidate() = project { root, listing ->
-        val hello = byPath(listing.capture(root.absolutePath)).getValue("hello.txt")
+        val hello = byPath(listing.capture(null, root.absolutePath)).getValue("hello.txt")
         assertEquals(true, hello.getBoolean("eligible"))
         assertEquals("unchanged", hello.getString("git_state"))
         assertTrue(hello.isNull("omission_reason"))
@@ -55,7 +55,7 @@ class AndroidProjectCandidatesTest {
 
     @Test fun anEditedFileIsUnstagedAndStillEligible() = project { root, listing ->
         File(root, "hello.txt").writeText("edited\n")
-        val hello = byPath(listing.capture(root.absolutePath)).getValue("hello.txt")
+        val hello = byPath(listing.capture(null, root.absolutePath)).getValue("hello.txt")
         assertEquals("unstaged", hello.getString("git_state"))
         assertEquals(true, hello.getBoolean("eligible"))
     }
@@ -65,13 +65,13 @@ class AndroidProjectCandidatesTest {
         // Add more files through a second commit-less index write: the floor
         // helper only commits one file, so stage the rest by hand via git.
         stage(root, "b.txt", "b\n"); stage(root, "a.txt", "a\n"); stage(root, "Z.txt", "z\n")
-        val paths = listing.capture(root.absolutePath).candidates.map { it.getString("path") }
+        val paths = listing.capture(null, root.absolutePath).candidates.map { it.getString("path") }
         assertEquals(listOf("Z.txt", "a.txt", "b.txt", "hello.txt"), paths)
     }
 
     @Test fun aQueryNarrowsByFoldedSubstring() = project { root, listing ->
         stage(root, "docs/README.md", "r\n"); stage(root, "src/main.rs", "m\n")
-        val capture = listing.capture(root.absolutePath)
+        val capture = listing.capture(null, root.absolutePath)
         val page = listing.page(capture, query = "readme", cursor = null)
         val paths = (0 until page.getJSONArray("candidates").length())
             .map { page.getJSONArray("candidates").getJSONObject(it).getString("path") }
@@ -81,7 +81,7 @@ class AndroidProjectCandidatesTest {
 
     @Test fun aCursorContinuesTheSameListingAndNothingElse() = project { root, listing ->
         stage(root, "a.txt", "a\n"); stage(root, "b.txt", "b\n"); stage(root, "c.txt", "c\n")
-        val capture = listing.capture(root.absolutePath)
+        val capture = listing.capture(null, root.absolutePath)
         val first = listing.page(capture, "", null, limit = 2)
         assertEquals(2, first.getJSONArray("candidates").length())
         val cursor = first.getString("next_cursor")
@@ -95,7 +95,7 @@ class AndroidProjectCandidatesTest {
         assertEquals(AndroidProjectCandidates.INVALID_CURSOR, refusal { listing.page(capture, "", forged) })
         // And a listing taken after the project changed is a different listing.
         File(root, "a.txt").writeText("changed\n")
-        val moved = listing.capture(root.absolutePath)
+        val moved = listing.capture(null, root.absolutePath)
         assertEquals(AndroidProjectCandidates.CHANGED, refusal { listing.page(moved, "", cursor) })
         // A cursor from another process (another key) is not accepted either.
         assertEquals(AndroidProjectCandidates.INVALID_CURSOR, refusal { AndroidProjectCandidates().page(capture, "", cursor) })
@@ -106,6 +106,6 @@ class AndroidProjectCandidatesTest {
     /** Writes a file and stages it, the way `git add` does. */
     private fun stage(root: File, path: String, text: String) {
         val file = File(root, path); file.parentFile?.mkdirs(); file.writeText(text)
-        assertEquals("ok", RishLibgit2Native.stagePath(root.absolutePath, path))
+        assertEquals("ok", RishLibgit2Native.stagePath(null, root.absolutePath, path))
     }
 }
