@@ -59,9 +59,11 @@ struct Entry {
   unsigned int mode = 0;
   unsigned long long size = 0;
   int stage = 0;
-  // "unchanged" until a diff says otherwise; "conflicted" when the entry is
-  // one side of an unresolved merge.
-  std::string state;
+  // Which of the two diffs touched this path. Reducing the pair to one
+  // word -- and treating a stage other than zero as a conflict -- is the
+  // caller's, because iOS does it there and the two must agree.
+  bool staged = false;
+  bool unstaged = false;
 };
 
 std::string Failure(const std::string &stage) {
@@ -71,18 +73,19 @@ std::string Failure(const std::string &stage) {
          Quoted(why.c_str()) + "}";
 }
 
-/// Marks every path a diff touched with `state`, leaving the rest alone.
-void MarkDeltas(std::vector<Entry> &entries, git_diff *diff, const char *state) {
+/// Marks every path a diff touched. Both sides of a delta count: a rename
+/// touches the path it left and the path it arrived at, and iOS marks both.
+void MarkDeltas(std::vector<Entry> &entries, git_diff *diff, bool staged_side) {
   const size_t count = git_diff_num_deltas(diff);
   for (size_t index = 0; index < count; index += 1) {
     const git_diff_delta *delta = git_diff_get_delta(diff, index);
     if (delta == nullptr) continue;
-    const char *path = delta->new_file.path != nullptr ? delta->new_file.path
-                                                       : delta->old_file.path;
-    if (path == nullptr) continue;
-    for (Entry &entry : entries) {
-      // A conflicted entry is already saying something more specific.
-      if (entry.path == path && entry.state != "conflicted") entry.state = state;
+    for (const char *path : {delta->old_file.path, delta->new_file.path}) {
+      if (path == nullptr) continue;
+      for (Entry &entry : entries) {
+        if (entry.path != path) continue;
+        if (staged_side) entry.staged = true; else entry.unstaged = true;
+      }
     }
   }
 }
@@ -93,7 +96,8 @@ extern "C" {
 
 /// Reads `path` as a repository and answers its index and working state.
 ///
-/// `{"ok":true,"head":…,"branch":…,"state":…,"index_checksum":…,"entries":[…]}`
+/// `{"ok":true,"head":…,"branch":…,"repository_state":…,"index_checksum":…,
+///   "entries":[{path,oid,mode,size,stage,staged,unstaged}]}`
 /// or `{"ok":false,"stage":…,"error":…}`. Entries are sorted by path so two
 /// hosts reading one repository produce the same bytes.
 JNIEXPORT jstring JNICALL
@@ -137,9 +141,6 @@ Java_tech_zseven_rish_runtime_RishLibgit2Native_readRepositoryState(
       entry.mode = raw->mode;
       entry.size = raw->file_size;
       entry.stage = GIT_INDEX_ENTRY_STAGE(raw);
-      // A stage other than zero is one side of an unresolved merge, and no
-      // diff below will say anything more useful about it.
-      entry.state = entry.stage != 0 ? "conflicted" : "unchanged";
       entries.push_back(std::move(entry));
     }
 
@@ -178,8 +179,8 @@ Java_tech_zseven_rish_runtime_RishLibgit2Native_readRepositoryState(
       answer = Failure("diff_unstaged");
       break;
     }
-    MarkDeltas(entries, staged, "staged");
-    MarkDeltas(entries, unstaged, "modified");
+    MarkDeltas(entries, staged, true);
+    MarkDeltas(entries, unstaged, false);
 
     std::sort(entries.begin(), entries.end(), [](const Entry &left, const Entry &right) {
       if (left.path != right.path) return left.path < right.path;
@@ -206,7 +207,8 @@ Java_tech_zseven_rish_runtime_RishLibgit2Native_readRepositoryState(
       out += ",\"mode\":" + std::to_string(entry.mode);
       out += ",\"size\":" + std::to_string(entry.size);
       out += ",\"stage\":" + std::to_string(entry.stage);
-      out += ",\"git_state\":" + Quoted(entry.state.c_str());
+      out += std::string(",\"staged\":") + (entry.staged ? "true" : "false");
+      out += std::string(",\"unstaged\":") + (entry.unstaged ? "true" : "false");
       out += "}";
     }
     out += "]}";

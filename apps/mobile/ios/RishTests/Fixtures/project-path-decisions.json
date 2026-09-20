@@ -1,0 +1,409 @@
+{
+  "schema_version": 1,
+  "note": "What the path policy decides for each relative path, frozen from iOS. The tables (which name is a secret, generated, a lockfile, binary) live in the shared core; what this freezes is everything the host does before calling it -- NFC normalization, Unicode case folding, Foundation's extension and stem rules, and the structural refusals -- which is where two hosts can disagree. `decision` is {normalized_path, eligible, omission_reason}.",
+  "cases": [
+    {
+      "name": "plain_source",
+      "path": "src/main.rs",
+      "decision": {
+        "eligible": true,
+        "normalized_path": "src/main.rs",
+        "omission_reason": null
+      }
+    },
+    {
+      "name": "upper_case_readme",
+      "path": "README.MD",
+      "decision": {
+        "eligible": true,
+        "normalized_path": "README.MD",
+        "omission_reason": null
+      },
+      "why": "Case is folded before the tables are consulted."
+    },
+    {
+      "name": "mixed_case_dir_and_ext",
+      "path": "Src/Main.RS",
+      "decision": {
+        "eligible": true,
+        "normalized_path": "Src/Main.RS",
+        "omission_reason": null
+      }
+    },
+    {
+      "name": "no_extension",
+      "path": "Makefile",
+      "decision": {
+        "eligible": true,
+        "normalized_path": "Makefile",
+        "omission_reason": null
+      }
+    },
+    {
+      "name": "license",
+      "path": "LICENSE",
+      "decision": {
+        "eligible": true,
+        "normalized_path": "LICENSE",
+        "omission_reason": null
+      }
+    },
+    {
+      "name": "dotfile_no_extension",
+      "path": ".gitignore",
+      "decision": {
+        "eligible": true,
+        "normalized_path": ".gitignore",
+        "omission_reason": null
+      },
+      "why": "A leading dot is not an extension separator to Foundation."
+    },
+    {
+      "name": "two_extensions",
+      "path": "archive.tar.gz",
+      "decision": {
+        "eligible": false,
+        "normalized_path": "archive.tar.gz",
+        "omission_reason": "binary"
+      }
+    },
+    {
+      "name": "three_dots",
+      "path": "a.b.c",
+      "decision": {
+        "eligible": true,
+        "normalized_path": "a.b.c",
+        "omission_reason": null
+      }
+    },
+    {
+      "name": "trailing_dot",
+      "path": "name.",
+      "decision": {
+        "eligible": false,
+        "normalized_path": "name.",
+        "omission_reason": "policy"
+      }
+    },
+    {
+      "name": "dot_in_dir_not_file",
+      "path": "v1.2/main",
+      "decision": {
+        "eligible": false,
+        "normalized_path": "v1.2/main",
+        "omission_reason": "policy"
+      }
+    },
+    {
+      "name": "cjk_filename",
+      "path": "docs/说明.md",
+      "decision": {
+        "eligible": true,
+        "normalized_path": "docs/说明.md",
+        "omission_reason": null
+      }
+    },
+    {
+      "name": "nfd_composed_on_the_way_in",
+      "path": "café.txt",
+      "decision": {
+        "eligible": true,
+        "normalized_path": "café.txt",
+        "omission_reason": null
+      },
+      "why": "Written NFD; the normalized path must come back NFC."
+    },
+    {
+      "name": "sharp_s",
+      "path": "straße.txt",
+      "decision": {
+        "eligible": true,
+        "normalized_path": "straße.txt",
+        "omission_reason": null
+      },
+      "why": "CFStringFold case-folds ß; a lowercasing host would not."
+    },
+    {
+      "name": "turkish_capital_dotted_i",
+      "path": "İstanbul.txt",
+      "decision": {
+        "eligible": true,
+        "normalized_path": "İstanbul.txt",
+        "omission_reason": null
+      },
+      "why": "İ folds to i̇ (two code points) under Unicode folding."
+    },
+    {
+      "name": "greek_final_sigma",
+      "path": "Σίσυφος.txt",
+      "decision": {
+        "eligible": true,
+        "normalized_path": "Σίσυφος.txt",
+        "omission_reason": null
+      }
+    },
+    {
+      "name": "fullwidth_letters",
+      "path": "ＲＥＡＤＭＥ.md",
+      "decision": {
+        "eligible": true,
+        "normalized_path": "ＲＥＡＤＭＥ.md",
+        "omission_reason": null
+      }
+    },
+    {
+      "name": "secret_env",
+      "path": ".env",
+      "decision": {
+        "eligible": false,
+        "normalized_path": ".env",
+        "omission_reason": "secret_path"
+      }
+    },
+    {
+      "name": "secret_env_upper",
+      "path": ".ENV",
+      "decision": {
+        "eligible": false,
+        "normalized_path": ".ENV",
+        "omission_reason": "secret_path"
+      }
+    },
+    {
+      "name": "secret_ssh_key",
+      "path": "id_rsa",
+      "decision": {
+        "eligible": false,
+        "normalized_path": "id_rsa",
+        "omission_reason": "secret_path"
+      }
+    },
+    {
+      "name": "secret_in_dir",
+      "path": "config/credentials.yml",
+      "decision": {
+        "eligible": false,
+        "normalized_path": "config/credentials.yml",
+        "omission_reason": "secret_path"
+      }
+    },
+    {
+      "name": "secret_pem",
+      "path": "certs/server.pem",
+      "decision": {
+        "eligible": false,
+        "normalized_path": "certs/server.pem",
+        "omission_reason": "secret_path"
+      }
+    },
+    {
+      "name": "generated_node_modules",
+      "path": "node_modules/left-pad/index.js",
+      "decision": {
+        "eligible": false,
+        "normalized_path": "node_modules/left-pad/index.js",
+        "omission_reason": "generated"
+      }
+    },
+    {
+      "name": "generated_dist",
+      "path": "dist/bundle.js",
+      "decision": {
+        "eligible": false,
+        "normalized_path": "dist/bundle.js",
+        "omission_reason": "generated"
+      }
+    },
+    {
+      "name": "generated_build_upper",
+      "path": "BUILD/out.o",
+      "decision": {
+        "eligible": false,
+        "normalized_path": "BUILD/out.o",
+        "omission_reason": "generated"
+      }
+    },
+    {
+      "name": "generated_target",
+      "path": "target/debug/app",
+      "decision": {
+        "eligible": false,
+        "normalized_path": "target/debug/app",
+        "omission_reason": "generated"
+      }
+    },
+    {
+      "name": "lockfile_npm",
+      "path": "package-lock.json",
+      "decision": {
+        "eligible": false,
+        "normalized_path": "package-lock.json",
+        "omission_reason": "lockfile"
+      }
+    },
+    {
+      "name": "lockfile_cargo",
+      "path": "Cargo.lock",
+      "decision": {
+        "eligible": false,
+        "normalized_path": "Cargo.lock",
+        "omission_reason": "lockfile"
+      }
+    },
+    {
+      "name": "lockfile_yarn",
+      "path": "yarn.lock",
+      "decision": {
+        "eligible": false,
+        "normalized_path": "yarn.lock",
+        "omission_reason": "lockfile"
+      }
+    },
+    {
+      "name": "binary_png",
+      "path": "assets/logo.png",
+      "decision": {
+        "eligible": false,
+        "normalized_path": "assets/logo.png",
+        "omission_reason": "binary"
+      }
+    },
+    {
+      "name": "binary_dylib",
+      "path": "lib/libfoo.dylib",
+      "decision": {
+        "eligible": false,
+        "normalized_path": "lib/libfoo.dylib",
+        "omission_reason": "binary"
+      }
+    },
+    {
+      "name": "binary_by_extension_upper",
+      "path": "DATA.BIN",
+      "decision": {
+        "eligible": false,
+        "normalized_path": "DATA.BIN",
+        "omission_reason": "binary"
+      }
+    },
+    {
+      "name": "absolute_path",
+      "path": "/etc/passwd",
+      "decision": {
+        "eligible": false,
+        "normalized_path": "/etc/passwd",
+        "omission_reason": "policy"
+      }
+    },
+    {
+      "name": "parent_traversal",
+      "path": "../outside",
+      "decision": {
+        "eligible": false,
+        "normalized_path": "../outside",
+        "omission_reason": "policy"
+      }
+    },
+    {
+      "name": "parent_in_middle",
+      "path": "src/../secret",
+      "decision": {
+        "eligible": false,
+        "normalized_path": "src/../secret",
+        "omission_reason": "policy"
+      }
+    },
+    {
+      "name": "double_slash",
+      "path": "a//b",
+      "decision": {
+        "eligible": false,
+        "normalized_path": "a//b",
+        "omission_reason": "policy"
+      }
+    },
+    {
+      "name": "dot_component",
+      "path": "a/./b",
+      "decision": {
+        "eligible": false,
+        "normalized_path": "a/./b",
+        "omission_reason": "policy"
+      }
+    },
+    {
+      "name": "tilde_home",
+      "path": "~/x",
+      "decision": {
+        "eligible": false,
+        "normalized_path": "~/x",
+        "omission_reason": "policy"
+      }
+    },
+    {
+      "name": "windows_drive",
+      "path": "C:/x",
+      "decision": {
+        "eligible": false,
+        "normalized_path": "C:/x",
+        "omission_reason": "policy"
+      }
+    },
+    {
+      "name": "backslash",
+      "path": "a\\b",
+      "decision": {
+        "eligible": false,
+        "normalized_path": "a\\b",
+        "omission_reason": "policy"
+      }
+    },
+    {
+      "name": "trailing_slash",
+      "path": "dir/",
+      "decision": {
+        "eligible": false,
+        "normalized_path": "dir/",
+        "omission_reason": "policy"
+      }
+    },
+    {
+      "name": "empty",
+      "path": "",
+      "decision": {
+        "eligible": false,
+        "normalized_path": "",
+        "omission_reason": "policy"
+      }
+    },
+    {
+      "name": "control_character",
+      "path": "a\u0001b",
+      "decision": {
+        "eligible": false,
+        "normalized_path": "a\u0001b",
+        "omission_reason": "policy"
+      }
+    },
+    {
+      "name": "too_deep",
+      "path": "d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/f",
+      "decision": {
+        "eligible": false,
+        "normalized_path": "d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/f",
+        "omission_reason": "policy"
+      },
+      "why": "MaxDepth is 24 components."
+    },
+    {
+      "name": "too_long",
+      "path": "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",
+      "decision": {
+        "eligible": false,
+        "normalized_path": "",
+        "omission_reason": "policy"
+      },
+      "why": "MaxRelativePathCharacters is 4096."
+    }
+  ]
+}

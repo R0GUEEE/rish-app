@@ -37,7 +37,7 @@ internal object RishLibgit2Native {
      * A repository's index and working state, as JSON.
      *
      * `{"ok":true,"head":…,"branch":…,"repository_state":…,
-     *   "index_checksum":…,"entries":[{path,oid,mode,size,stage,git_state}]}`
+     *   "index_checksum":…,"entries":[{path,oid,mode,size,stage,staged,unstaged}]}`
      * or `{"ok":false,"stage":…,"error":…}`.
      *
      * This layer holds no policy: which of these paths may be sent, and what
@@ -46,4 +46,7 @@ internal object RishLibgit2Native {
      * reading one repository produce the same bytes.
      */
     @JvmStatic external fun readRepositoryState(path: String): String
+
+    /** `git add <path>` for a test that needs more than one staged file. */
+    @JvmStatic external fun stagePath(root: String, path: String): String
 }

@@ -62,7 +62,10 @@ class AndroidProjectGitStateTest {
         assertEquals(0, answer.getInt("repository_state"))
         val entries = entriesOf(answer)
         val hello = entries.getValue("hello.txt")
-        assertEquals("unchanged", hello.getString("git_state"))
+        // Neither diff touched it. Turning the pair into one word is the
+        // candidate layer's job, so this layer reports the pair.
+        assertEquals(false, hello.getBoolean("staged"))
+        assertEquals(false, hello.getBoolean("unstaged"))
         assertEquals(0, hello.getInt("stage"))
         assertEquals(19L, hello.getLong("size"))
         // A regular file, which is what the mode says and what eligibility
@@ -76,7 +79,8 @@ class AndroidProjectGitStateTest {
         RishLibgit2Native.roundTrip(root.absolutePath)
         File(root, "hello.txt").writeText("changed on the device\n")
         val hello = entriesOf(read(root)).getValue("hello.txt")
-        assertEquals("modified", hello.getString("git_state"))
+        assertEquals(true, hello.getBoolean("unstaged"))
+        assertEquals(false, hello.getBoolean("staged"))
     }
 
     /** A repository with no commits yet is not an error; it is a state. */

@@ -147,6 +147,35 @@ Java_tech_zseven_rish_runtime_RishLibgit2Native_roundTrip(JNIEnv *env, jclass,
   return MakeString(env, answer);
 }
 
+/// `git add <path>`: stages one file into the index and writes it. A test
+/// helper, so a repository can be given more than the one file `roundTrip`
+/// commits. Answers "ok" or "error:<stage>:<why>".
+JNIEXPORT jstring JNICALL
+Java_tech_zseven_rish_runtime_RishLibgit2Native_stagePath(JNIEnv *env, jclass,
+                                                          jstring rootValue,
+                                                          jstring pathValue) {
+  const char *root = env->GetStringUTFChars(rootValue, nullptr);
+  const char *path = env->GetStringUTFChars(pathValue, nullptr);
+  std::string answer = "ok";
+  git_repository *repository = nullptr;
+  git_index *index = nullptr;
+  const auto fail = [&answer](const char *stage) {
+    answer = std::string("error:") + stage + ":" + LastError();
+  };
+  do {
+    if (root == nullptr || path == nullptr) { answer = "error:path"; break; }
+    if (git_repository_open(&repository, root) != 0) { fail("open"); break; }
+    if (git_repository_index(&index, repository) != 0) { fail("index"); break; }
+    if (git_index_add_bypath(index, path) != 0) { fail("add"); break; }
+    if (git_index_write(index) != 0) { fail("index_write"); break; }
+  } while (false);
+  if (index != nullptr) git_index_free(index);
+  if (repository != nullptr) git_repository_free(repository);
+  if (root != nullptr) env->ReleaseStringUTFChars(rootValue, root);
+  if (path != nullptr) env->ReleaseStringUTFChars(pathValue, path);
+  return MakeString(env, answer);
+}
+
 JNIEXPORT jint JNICALL JNI_OnLoad(JavaVM *, void *) {
   git_libgit2_init();
   return JNI_VERSION_1_6;
