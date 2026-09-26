@@ -558,3 +558,101 @@ fn a_round_settled_before_dispatch_keeps_its_stated_cause() {
         );
     }
 }
+
+// Races around a cancellation that names its round at revision 0 (the reply
+// carrying the row's revision is the one being stopped). The plan takes the
+// WAL's revision; these pin that it never lets the cancel win what it lost.
+
+fn wal_with(row: &Value) -> Value {
+    json!({ "rounds": [row] })
+}
+
+fn round_cancel_request(round_id: &str, attempt_id: &str, revision: u64) -> Value {
+    json!({
+        "target": { "schema_version": 2, "kind": "round", "task_id": TASK, "attempt_id": attempt_id,
+                    "round_id": round_id, "round_index": 0 },
+        "expected_round_revision": revision,
+    })
+}
+
+/// The CAS a host builds from a round plan: the row it read, at the revision
+/// the plan settled on.
+fn cas_at(row: &Value, revision: &Value) -> Value {
+    let mut cas = cas_for(row);
+    cas["expected_row_revision"] = revision.clone();
+    cas
+}
+
+fn cancel_planned(row: &Value, revision: u64) -> Result<Value, StoreError> {
+    let plan = rish_agent_core::runtime_coordinator::cancel_plan(
+        &wal_with(row),
+        &round_cancel_request(ROUND, ATTEMPT, revision),
+    );
+    assert_eq!(plan["plan"], "round");
+    reduce(
+        "cancel",
+        &args(json!({ "cas": cas_at(row, &plan["expected_round_revision"]) })),
+        &env(),
+        &view(Some(row.clone()), Some("dispatched")),
+    )
+    .map(|effect| effect.row.unwrap())
+}
+
+// The reply finished before the stop arrived: the WAL's revision is the
+// completed row's, and a completed row is not cancelled.
+#[test]
+fn a_completion_that_won_is_not_cancelled_at_the_wal_revision() {
+    let mut completed = in_flight_row();
+    completed["state"] = json!("completed");
+    completed["row_revision"] = json!(2);
+    completed["owner"] = Value::Null;
+    assert_eq!(cancel_planned(&completed, 0).unwrap_err(), StoreError::Conflict);
+}
+
+// The plan read revision 1; the reply completed (revision 2) before the
+// cancel committed. The CAS the plan produced no longer matches.
+#[test]
+fn a_completion_after_the_plan_makes_the_cancel_conflict() {
+    let row = in_flight_row();
+    let plan = rish_agent_core::runtime_coordinator::cancel_plan(
+        &wal_with(&row),
+        &round_cancel_request(ROUND, ATTEMPT, 0),
+    );
+    let cas = cas_at(&row, &plan["expected_round_revision"]);
+    let mut moved = row.clone();
+    moved["state"] = json!("completed");
+    moved["row_revision"] = json!(2);
+    let lost = reduce("cancel", &args(json!({ "cas": cas })), &env(), &view(Some(moved), Some("dispatched")));
+    assert_eq!(lost.unwrap_err(), StoreError::Conflict);
+}
+
+// A nonzero revision is what the controller heard; a stale one is kept and
+// refused, never replaced by the WAL's.
+#[test]
+fn a_stale_nonzero_revision_still_conflicts() {
+    let mut row = in_flight_row();
+    row["row_revision"] = json!(4);
+    let plan = rish_agent_core::runtime_coordinator::cancel_plan(
+        &wal_with(&row),
+        &round_cancel_request(ROUND, ATTEMPT, 3),
+    );
+    assert_eq!(plan["expected_round_revision"], json!(3));
+    assert_eq!(cancel_planned(&row, 3).unwrap_err(), StoreError::Conflict);
+    // The same row at the revision it has is cancelled.
+    assert_eq!(cancel_planned(&row, 0).unwrap()["state"], "cancel_requested");
+}
+
+// Revision 0 borrows only from the row the target names: another round or
+// another attempt lends it nothing.
+#[test]
+fn revision_zero_borrows_only_from_the_named_round() {
+    let row = in_flight_row();
+    let other_round = "99999999-9999-4999-8999-999999999999";
+    for (round_id, attempt_id) in [(other_round, ATTEMPT), (ROUND, other_round)] {
+        let plan = rish_agent_core::runtime_coordinator::cancel_plan(
+            &wal_with(&row),
+            &round_cancel_request(round_id, attempt_id, 0),
+        );
+        assert_ne!(plan["plan"], "round", "{round_id} {attempt_id}");
+    }
+}
