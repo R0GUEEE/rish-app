@@ -29,3 +29,35 @@ export function agentAmbiguityCode(
     ? 'E_AGENT_EXECUTION_AMBIGUOUS'
     : 'E_AGENT_ROUND_AMBIGUOUS';
 }
+
+type RecoveryAmbiguityJournal = {
+  readonly phase: string;
+  readonly batch: readonly {
+    readonly receipt: { readonly outcome: string } | null;
+    readonly idempotency_key?: string | null;
+    readonly native_row_revision?: number | null;
+  }[];
+};
+
+/**
+ * The uncertainty a recovery tells the person about, read conservatively.
+ *
+ * `agentAmbiguityCode` is the stored rule and stays as it is: persisted
+ * attempts are checked against it. A recovery notice may know more, and must
+ * not soften a tool warning: a recovery aimed at a tool is about that tool,
+ * and a call whose execution intent was recorded (an idempotency key and a
+ * native row) but that holds no receipt yet may already have run. Only when
+ * neither holds is it the round that is uncertain.
+ */
+export function agentRecoveryAmbiguityCode(
+  journal: RecoveryAmbiguityJournal,
+  targetKind?: 'round' | 'tool' | 'attempt' | null,
+): 'E_AGENT_ROUND_AMBIGUOUS' | 'E_AGENT_EXECUTION_AMBIGUOUS' {
+  if (targetKind === 'tool') return 'E_AGENT_EXECUTION_AMBIGUOUS';
+  const started = journal.batch.some(call =>
+    call.receipt === null &&
+    call.idempotency_key !== undefined && call.idempotency_key !== null &&
+    call.native_row_revision !== undefined && call.native_row_revision !== null,
+  );
+  return started ? 'E_AGENT_EXECUTION_AMBIGUOUS' : agentAmbiguityCode(journal);
+}

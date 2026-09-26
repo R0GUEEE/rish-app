@@ -31,7 +31,7 @@ import {
   type AgentStoreTransitionEvidence,
 } from '../agent/AgentStoreTransitions';
 import { AGENT_FAILURE_CODES, type AgentFailureCode } from '../state/types';
-import { agentAmbiguityCode } from '../agent/AgentAmbiguity';
+import { agentAmbiguityCode, agentRecoveryAmbiguityCode } from '../agent/AgentAmbiguity';
 import type {
   AgentApprovalBindingTokenV2,
   AgentApprovalPreviewV1,
@@ -4827,7 +4827,7 @@ export function createCompletionController(
     if (recovered.status === 'manual_reconciliation' &&
         recovered.attempt.phase !== 'ambiguous' && recovered.attempt.phase !== 'unknown') {
       // Nothing the journal can take: say which uncertainty it is and wait.
-      publish(stateFor('resume_available', { conversationId, turnId: attempt.turnId, attemptId, failureCode: agentAmbiguityCode(journal) }));
+      publish(stateFor('resume_available', { conversationId, turnId: attempt.turnId, attemptId, failureCode: agentRecoveryAmbiguityCode(journal, target.kind) }));
       return outcome('retryable', state);
     }
     if (recovered.status !== 'manual_reconciliation' && recovered.completed_round !== null && recovered.completed_round.kind === 'final') {
@@ -4919,7 +4919,7 @@ export function createCompletionController(
         // older phase, "a tool may already have run" was said over a round
         // that called none, and "Continue response" led back to the same
         // notice (beta report, 2026-09-25).
-        const ambiguity = agentAmbiguityCode(recoveredJournal);
+        const ambiguity = agentRecoveryAmbiguityCode(recoveredJournal, target.kind);
         publish(stateFor('resume_available', { conversationId, turnId: attempt.turnId, attemptId, roundId: recoveredJournal.round_lineage?.round_id ?? null, transportSchemaVersion: agentTransportSchema(attempt), failureCode: ambiguity }));
         return outcome('retryable', state);
       }

@@ -2655,6 +2655,97 @@ describe('project Agent completion controller', () => {
     await sending;
   });
 
+  // A reply stopped mid-way: its row moved past what the journal heard, and
+  // native answers manual reconciliation with the round ambiguous. Resume
+  // asks at the revision the query read, keeps the ambiguity in the journal
+  // (which offers "Retry this turn") and says it is the round, not a tool.
+  test('a stopped round resumes at the queried revision and keeps its ambiguity', async () => {
+
+    const store = agentStore();
+    const runtime = makeRuntime([]);
+    (runtime.completeAgentRoundV2 as jest.Mock).mockImplementationOnce(async (request: CompleteAgentRoundRequestV2) => ({
+      schema_version: 2,
+      status: 'in_flight',
+      operation_id: request.operation_id,
+      task_id: request.task_id,
+      attempt_id: request.attempt_id,
+      round_id: request.round_id,
+      round_index: request.round_index,
+      launch_attempt: request.launch_attempt,
+      result_round_revision: 1,
+      transcript: request.transcript,
+    }));
+    const firstController = agentController(store, runtime, committedPersistence(store));
+    const conversationId = store.getState().selectedConversationId!;
+    const first = await firstController.send({ conversationId, text: 'resume me', attachments: [] });
+    expect(first.status).toBe('retryable');
+    expect(firstController.getState().phase).toBe('resume_available');
+    expect(runtime.completeAgentRoundV2).toHaveBeenCalledTimes(1);
+
+    const attempt = store.getState().conversations[conversationId]!.attempts[0]!;
+    const journal = attempt.agent!;
+    const projection: AgentAttemptProjectionV2 = {
+      schema_version: 2,
+      task_id: attempt.turnId,
+      conversation_id: conversationId,
+      attempt_id: attempt.attemptId,
+      phase: journal.phase,
+      controller_generation: journal.controller_generation,
+      journal_revision: attempt.journalRevision ?? 0,
+      authority_revision: 1,
+      root: journal.root,
+      policy: {
+        schema_version: 1,
+        policy_version: 'agent-v1',
+        max_single_write_bytes: journal.policy.max_single_write_bytes,
+        max_batch_write_bytes: journal.policy.max_batch_write_bytes,
+        max_attempt_write_bytes: journal.policy.max_attempt_write_bytes,
+      },
+      registry: {
+        schema_version: 2,
+        registry_version: journal.tool_registry_version,
+        toolset_sha256: journal.toolset_sha256,
+        tools: [],
+      },
+      transcript: journal.transcript,
+      round_index: journal.round_index,
+      round_id: journal.round_lineage?.round_id ?? null,
+      round_revision: journal.round_lineage?.native_row_revision ?? null,
+      round_status: journal.round_lineage?.status ?? null,
+      batch_kind: null,
+      batch_revision: null,
+      manifest_sha256: null,
+      call_index: null,
+      batch: [],
+      frozen_grant_ids: [...journal.frozen_grant_ids],
+      reserved_write_bytes: journal.reserved_write_bytes,
+      cancel_source_event_id: null,
+      cleanup_id: null,
+    };
+    const advanced: AgentAttemptProjectionV2 = { ...projection, round_revision: 5 };
+    const ambiguous: AgentAttemptProjectionV2 = { ...projection, phase: 'ambiguous', round_revision: 5, round_status: 'ambiguous' };
+    (runtime.queryAgentAttempt as jest.Mock).mockResolvedValue({
+      schema_version: 2, status: 'active', attempt: advanced,
+    } as QueryAgentAttemptResultV2);
+    (runtime.recoverAgentAttempt as jest.Mock).mockImplementation(async (request: any): Promise<RecoverAgentAttemptResultV2> => ({
+      schema_version: 2, status: 'manual_reconciliation', operation_id: request.operation_id,
+      next_action: 'inspect_native_state', attempt: ambiguous, completed_round: null,
+    }));
+    // A restarted app mints ids of its own; reusing the first run's would
+    // collide with the events that run already wrote.
+    const restarted = agentController(store, runtime, committedPersistence(store), [
+      '61616161-6161-4616-8616-616161616161',
+      '62626262-6262-4626-8626-626262626262',
+      '63636363-6363-4636-8636-636363636363',
+    ]);
+    const recovered = await restarted.resume(conversationId, attempt.attemptId);
+    expect(recovered.status).toBe('retryable');
+    expect((runtime.recoverAgentAttempt as jest.Mock).mock.calls[0][0].expected_round_revision).toBe(5);
+    expect(restarted.getState()).toMatchObject({ phase: 'resume_available', failureCode: 'E_AGENT_ROUND_AMBIGUOUS' });
+    expect(store.getState().conversations[conversationId]!.attempts[0]!.agent!.phase).toBe('ambiguous');
+    expect(runtime.completeAgentRoundV2).toHaveBeenCalledTimes(1);
+  });
+
   test('restarts through query/recover without replaying an in-flight round', async () => {
 
     const store = agentStore();
