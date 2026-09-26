@@ -3265,7 +3265,7 @@ static NSDictionary *AgentEffectsProxyControl(NSString *base, NSString *method, 
   XCTAssertEqual(git_remote_set_url(repository, "origin",
       "https://github.com/octocat/Hello-World.git"), 0);
   DSHAgentGitToolExecutor *executor = fixture[@"executor"];
-  executor.proxyProvider = ^NSString * { return proxy; };
+  executor.proxyProvider = ^NSString *(BOOL *unavailable) { (void)unavailable; return proxy; };
   NSInteger (^tunnels)(void) = ^NSInteger {
     return [AgentEffectsProxyControl(proxy, @"GET", @"/__rish_stats")[@"connects"][@"github.com:443"] integerValue];
   };
@@ -3310,13 +3310,47 @@ static NSDictionary *AgentEffectsProxyControl(NSString *base, NSString *method, 
     return @{ @"status" : @"present",
               @"session_json" : [[NSString alloc] initWithData:json encoding:NSUTF8StringEncoding] };
   };
-  XCTAssertEqualObjects(DSHCommittedGitProxyURL(loaded(@"http://127.0.0.1:7897")), @"http://127.0.0.1:7897/");
-  XCTAssertEqualObjects(DSHCommittedGitProxyURL(loaded(@"HTTPS://Proxy.Example:443/")), @"https://proxy.example:443/");
-  XCTAssertNil(DSHCommittedGitProxyURL(loaded(nil)));
-  XCTAssertNil(DSHCommittedGitProxyURL(loaded(NSNull.null)));
-  XCTAssertNil(DSHCommittedGitProxyURL(loaded(@"proxy:3128")));
-  XCTAssertNil(DSHCommittedGitProxyURL(@{ @"status" : @"missing", @"session_json" : NSNull.null }));
-  XCTAssertNil(DSHCommittedGitProxyURL(nil));
+  BOOL unavailable = NO;
+  XCTAssertEqualObjects(DSHCommittedGitProxyURL(loaded(@"http://127.0.0.1:7897"), &unavailable), @"http://127.0.0.1:7897/");
+  XCTAssertFalse(unavailable);
+  XCTAssertEqualObjects(DSHCommittedGitProxyURL(loaded(@"HTTPS://Proxy.Example:443/"), &unavailable), @"https://proxy.example:443/");
+  XCTAssertNil(DSHCommittedGitProxyURL(loaded(nil), &unavailable));
+  XCTAssertFalse(unavailable);
+  XCTAssertNil(DSHCommittedGitProxyURL(loaded(NSNull.null), &unavailable));
+  XCTAssertFalse(unavailable);
+  // No session yet: nothing set, so no proxy.
+  XCTAssertNil(DSHCommittedGitProxyURL(@{ @"status" : @"missing", @"session_json" : NSNull.null }, &unavailable));
+  XCTAssertFalse(unavailable);
+  // A setting that cannot be read is not "no proxy".
+  XCTAssertNil(DSHCommittedGitProxyURL(loaded(@"proxy:3128"), &unavailable));
+  XCTAssertTrue(unavailable);
+  XCTAssertNil(DSHCommittedGitProxyURL(nil, &unavailable));
+  XCTAssertTrue(unavailable);
+  XCTAssertNil(DSHCommittedGitProxyURL(@{ @"status" : @"present", @"session_json" : @"{not json" }, &unavailable));
+  XCTAssertTrue(unavailable);
+}
+
+// A proxy setting that cannot be read stops the remote step before any
+// connection: going direct would pass a proxy the person set.
+- (void)testAnUnreadableProxySettingStopsTheRemoteStep {
+  NSDictionary *fixture = [self realGitExecutorFixtureNamed:@"agent-proxy-unreadable"
+      projectID:@"77777777-7777-4777-8777-777777777772"];
+  XCTAssertNotNil(fixture);
+  if (fixture == nil) return;
+  git_repository *repository = nullptr;
+  XCTAssertEqual(git_repository_open(&repository, [fixture[@"repository_url"] fileSystemRepresentation]), 0);
+  XCTAssertEqual(git_remote_set_url(repository, "origin", "https://github.com/octocat/Hello-World.git"), 0);
+  git_repository_free(repository);
+  DSHAgentGitToolExecutor *executor = fixture[@"executor"];
+  executor.proxyProvider = ^NSString *(BOOL *unavailable) { *unavailable = YES; return nil; };
+  NSError *error = nil;
+  XCTAssertNil([executor prepareToolNamed:@"git_push" arguments:@{} root:fixture[@"root"] error:&error]);
+  XCTAssertEqual(error.code, DSHAgentNativeStoreErrorConflict);
+  NSDictionary *precondition = @{ @"schema_version" : @1, @"kind" : @"git_push", @"remote" : @"origin",
+      @"remote_ref" : @"refs/heads/main", @"pre_remote_oid" : fixture[@"base_oid"], @"target_oid" : fixture[@"base_oid"] };
+  NSDictionary *recovered = [executor recoverToolNamed:@"git_push" arguments:@{} root:fixture[@"root"]
+      precondition:precondition error:&error];
+  XCTAssertEqualObjects(recovered[@"status"], @"ambiguous");
 }
 
 @end

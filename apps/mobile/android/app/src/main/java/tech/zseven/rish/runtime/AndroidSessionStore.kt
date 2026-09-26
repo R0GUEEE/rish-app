@@ -93,17 +93,23 @@ internal class AndroidSessionStore(context: Context, name: String = "rish.sessio
     }
     @Synchronized fun load(): JSONObject = load(readableDatabase)
 
+    /** The committed proxy setting could not be read: not the same as none. */
+    class GitProxyUnavailable : Exception("git proxy setting unavailable")
+
     /**
      * The Git HTTPS proxy in the last committed session's preferences, in the
-     * one spelling libgit2 is handed, or null for none. The core validated it
-     * when it was committed; a value that no longer reads is treated as none
-     * rather than guessed at.
+     * one spelling libgit2 is handed, or null for none -- no session yet, or
+     * no proxy in it. A setting that cannot be read (the store, the JSON, a
+     * value that no longer validates) throws [GitProxyUnavailable]: treating
+     * it as none would send the traffic straight past a proxy the person set.
      */
     fun committedGitProxy(): String? {
-        val loaded = try { load() } catch (_: Exception) { return null }
-        val session = loaded.opt("session_json") as? String ?: return null
-        val raw = try { JSONObject(session).optJSONObject("preferences")?.opt("git_https_proxy_url") } catch (_: Exception) { null }
-        return try { AndroidGitProxyUrl.canonical(raw) } catch (_: AndroidGitProxyUrl.Invalid) { null }
+        val loaded = try { load() } catch (_: Exception) { throw GitProxyUnavailable() }
+        if (loaded.optString("status") != "present") return null
+        val session = loaded.opt("session_json") as? String ?: throw GitProxyUnavailable()
+        val preferences = try { JSONObject(session).optJSONObject("preferences") } catch (_: Exception) { throw GitProxyUnavailable() }
+        val raw = preferences?.opt("git_https_proxy_url")
+        return try { AndroidGitProxyUrl.canonical(raw) } catch (_: AndroidGitProxyUrl.Invalid) { throw GitProxyUnavailable() }
     }
 
     /**

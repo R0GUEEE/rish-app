@@ -98,7 +98,7 @@ internal class AndroidAgentGitToolExecutor(
                 // What the remote holds now is the precondition the push
                 // asserts; a remote this device cannot ask is not a push it
                 // can prepare.
-                val origin = origin(opened) ?: throw refused(CONFLICT)
+                val origin = try { origin(opened) } catch (_: ProxyUnavailable) { throw refused(CONFLICT) } ?: throw refused(CONFLICT)
                 val preRemote = remoteOid(opened, origin, reference) ?: throw refused(CONFLICT)
                 JSONObject().put("schema_version", 1).put("reserved_write_bytes", 0).put(
                     "precondition",
@@ -179,7 +179,9 @@ internal class AndroidAgentGitToolExecutor(
                 // Origin policy: a validated HTTPS (or LAN-HTTP) URL is pushed
                 // with the stored credential; an absolute local path needs
                 // none. Anything else is refused before any connection.
-                val origin = origin(opened) ?: return failure(name, "E_AGENT_TOOL_FAILED", ambiguous = false, reason = "origin_unsafe")
+                val origin = try { origin(opened) } catch (_: ProxyUnavailable) {
+                    return failure(name, "E_AGENT_TOOL_FAILED", ambiguous = false, reason = "proxy")
+                } ?: return failure(name, "E_AGENT_TOOL_FAILED", ambiguous = false, reason = "origin_unsafe")
                 if (origin.host.isNotEmpty() && origin.token.isEmpty()) {
                     return failure(name, "E_AGENT_TOOL_FAILED", ambiguous = false, reason = "credential_missing")
                 }
@@ -254,7 +256,7 @@ internal class AndroidAgentGitToolExecutor(
             // The remote itself says whether the push landed: at the target
             // it settled, where it was found it was never dispatched, and
             // anything else -- or a remote that cannot be asked -- is ambiguous.
-            val origin = origin(opened) ?: return status("ambiguous")
+            val origin = try { origin(opened) } catch (_: ProxyUnavailable) { return status("ambiguous") } ?: return status("ambiguous")
             val actual = remoteOid(opened, origin, precondition.optString("remote_ref")) ?: return status("ambiguous")
             if (actual.oid != null && actual.oid == precondition.optString("target_oid")) {
                 return status("settled").put("actual_remote_oid", actual.oid)
@@ -325,7 +327,8 @@ internal class AndroidAgentGitToolExecutor(
             val credential = credentials?.read(opened.projectId, host)
             // A proxy with a plain-http remote is refused, as the panel refuses
             // it: libgit2 would send that remote straight past the proxy.
-            val via = proxy()
+            // A setting that cannot be read stops the step; it is not "none".
+            val via = try { proxy() } catch (_: Exception) { throw ProxyUnavailable() }
             if (!AndroidGitProxyUrl.usableWith(via, url)) return null
             return Origin(url, host, credential?.username ?: "", credential?.token ?: "", via ?: "")
         }
@@ -333,6 +336,9 @@ internal class AndroidAgentGitToolExecutor(
     }
 
     private class RemoteOid(val oid: String?)
+
+    /** The proxy setting could not be read; the remote step stops. */
+    private class ProxyUnavailable : Exception()
 
     /** What origin advertises for `reference`, or null when it could not be asked. */
     private fun remoteOid(opened: Opened, origin: Origin, reference: String): RemoteOid? {

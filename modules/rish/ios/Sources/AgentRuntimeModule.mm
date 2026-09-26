@@ -441,8 +441,8 @@ RCT_EXPORT_MODULE(AgentRuntime)
   // proxy in the last committed session's preferences, which the core
   // validated when it was committed. A value that no longer reads is none.
   __weak DSHSessionSnapshotStore *weakSessions = sessions;
-  gitExecutor.proxyProvider = ^NSString *{
-    return DSHCommittedGitProxyURL([weakSessions loadSessionSnapshotWithError:nil]);
+  gitExecutor.proxyProvider = ^NSString *(BOOL *unavailable) {
+    return DSHCommittedGitProxyURL([weakSessions loadSessionSnapshotWithError:nil], unavailable);
   };
   DSHAgentToolBatchService *batch = [[DSHAgentToolBatchService alloc]
       initWithWAL:wal ledger:ledger preparedStore:prepared

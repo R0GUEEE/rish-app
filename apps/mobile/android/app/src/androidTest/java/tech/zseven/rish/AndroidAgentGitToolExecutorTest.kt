@@ -37,7 +37,11 @@ class AndroidAgentGitToolExecutorTest {
         val credentials = AndroidGitCredentials(context, "rish.git-credentials.test-${UUID.randomUUID()}")
         /** The proxy the committed session would hold; null for none. */
         var proxy: String? = null
-        val tools = AndroidAgentGitToolExecutor(projects, workspaces, roots, credentials) { proxy }
+        /** The committed setting cannot be read, as a failed store read would say. */
+        var proxyUnreadable = false
+        val tools = AndroidAgentGitToolExecutor(projects, workspaces, roots, credentials) {
+            if (proxyUnreadable) throw IllegalStateException("unreadable") else proxy
+        }
         val workspaceId: String = workspaces.create("Scratch").getString("workspace_id")
         val workDir: File = workspaces.rootFor(workspaceId)!!
         val projectId: String = projects.attach(
@@ -261,6 +265,29 @@ class AndroidAgentGitToolExecutorTest {
         assertEquals(false, missing.getBoolean("effect_may_have_occurred"))
         // Preparing needs the remote's answer; a remote that cannot be asked is not a push to prepare.
         assertEquals("E_AGENT_CONFLICT", refusal { prepush(f) })
+        assertEquals("ambiguous", recoverPush(f, precondition).getString("status"))
+        f.scratch.deleteRecursively()
+    }
+
+    /**
+     * A proxy setting that cannot be read is not "no proxy": the remote step
+     * stops before any connection, rather than going straight past a proxy
+     * the person set.
+     */
+    @Test
+    fun anUnreadableProxySettingStopsTheRemoteStep() {
+        val f = fixture()
+        val head = f.agentCommit("a.txt", "one\n", "first")
+        assertEquals("ok", RishLibgit2Native.setRemote(f.gitDir.absolutePath, f.workDir.absolutePath, "https://github.com/octocat/Hello-World.git"))
+        f.credentials.store(f.projectId, "github.com", "rish-test", "not-a-token", 3600)
+        f.proxyUnreadable = true
+        val precondition = JSONObject().put("schema_version", 1).put("kind", "git_push").put("remote", "origin")
+            .put("remote_ref", "refs/heads/main").put("pre_remote_oid", JSONObject.NULL).put("target_oid", head)
+        assertEquals("E_AGENT_CONFLICT", refusal { prepush(f) })
+        val pushed = push(f, precondition)
+        assertEquals("failed", pushed.getString("status"))
+        assertEquals("proxy", payload(pushed).getString("reason"))
+        assertEquals(false, pushed.getBoolean("effect_may_have_occurred"))
         assertEquals("ambiguous", recoverPush(f, precondition).getString("status"))
         f.scratch.deleteRecursively()
     }

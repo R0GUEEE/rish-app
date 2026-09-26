@@ -891,14 +891,28 @@ NSString *DSHGitCanonicalProxyURL(id value, BOOL *invalid) {
   return proxyURL;
 }
 
-NSString *DSHCommittedGitProxyURL(NSDictionary *loaded) {
-  id json = [loaded isKindOfClass:NSDictionary.class] ? loaded[@"session_json"] : nil;
-  if (![json isKindOfClass:NSString.class]) return nil;
-  NSData *bytes = [(NSString *)json dataUsingEncoding:NSUTF8StringEncoding];
+NSString *DSHCommittedGitProxyURL(NSDictionary *loaded, BOOL *unavailable) {
+  BOOL ignored = NO;
+  if (unavailable == nullptr) unavailable = &ignored;
+  *unavailable = NO;
+  if (![loaded isKindOfClass:NSDictionary.class]) {
+    *unavailable = YES;
+    return nil;
+  }
+  if (![loaded[@"status"] isEqual:@"present"]) return nil;
+  id json = loaded[@"session_json"];
+  NSData *bytes = [json isKindOfClass:NSString.class] ? [(NSString *)json dataUsingEncoding:NSUTF8StringEncoding] : nil;
   id session = bytes == nil ? nil : [NSJSONSerialization JSONObjectWithData:bytes options:0 error:nil];
-  id preferences = [session isKindOfClass:NSDictionary.class] ? session[@"preferences"] : nil;
+  if (![session isKindOfClass:NSDictionary.class]) {
+    *unavailable = YES;
+    return nil;
+  }
+  id preferences = session[@"preferences"];
   id raw = [preferences isKindOfClass:NSDictionary.class] ? preferences[@"git_https_proxy_url"] : nil;
-  return DSHGitCanonicalProxyURL(raw, nil);
+  BOOL invalid = NO;
+  NSString *proxy = DSHGitCanonicalProxyURL(raw, &invalid);
+  if (invalid) *unavailable = YES;
+  return proxy;
 }
 
 BOOL DSHGitProxyFailed(NSString *proxyURL) {

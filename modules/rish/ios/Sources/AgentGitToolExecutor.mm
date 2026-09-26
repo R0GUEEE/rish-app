@@ -239,9 +239,11 @@
     DSHSetAgentNativeStoreError(error, DSHAgentNativeStoreErrorConflict);
     return nil;
   }
-  NSString *proxyURL = [self proxyForOrigin:DSHAgentGitRawOriginURL(repository)];
-  if (proxyURL == (id)NSNull.null) {
-    // A proxy with a plain-http origin: libgit2 would go straight past it.
+  NSString *refusal = nil;
+  NSString *proxyURL = [self proxyForOrigin:DSHAgentGitRawOriginURL(repository) refusal:&refusal];
+  if (refusal != nil) {
+    // A proxy with a plain-http origin, or a proxy setting that cannot be
+    // read: either way the probe would not go where the person asked.
     DSHSetAgentNativeStoreError(error, DSHAgentNativeStoreErrorConflict);
     return nil;
   }
@@ -473,10 +475,10 @@ static NSString *const DSHAgentGitActiveCancelTokenKey =
   }
   // A proxy with a plain-http origin is refused before anything else, as
   // the panel refuses it: libgit2 would send that origin past the proxy.
-  NSString *proxyURL = localPathOrigin ? nil : [self proxyForOrigin:rawOrigin];
-  if (proxyURL == (id)NSNull.null) {
-    return DSHAgentGitPushFailure(name, @"E_AGENT_TOOL_FAILED",
-                                  @"origin_unsafe", NO, error);
+  NSString *refusal = nil;
+  NSString *proxyURL = localPathOrigin ? nil : [self proxyForOrigin:rawOrigin refusal:&refusal];
+  if (refusal != nil) {
+    return DSHAgentGitPushFailure(name, @"E_AGENT_TOOL_FAILED", refusal, NO, error);
   }
   NSString *host = validatedOrigin.host.lowercaseString;
   NSDictionary *credential = nil;
@@ -649,8 +651,9 @@ static NSString *const DSHAgentGitActiveCancelTokenKey =
   }
   if ([name isEqualToString:@"git_push"]) {
     NSString *remoteRef = precondition[@"remote_ref"];
-    NSString *proxyURL = [self proxyForOrigin:DSHAgentGitRawOriginURL(repository)];
-    if (proxyURL == (id)NSNull.null) {
+    NSString *refusal = nil;
+    NSString *proxyURL = [self proxyForOrigin:DSHAgentGitRawOriginURL(repository) refusal:&refusal];
+    if (refusal != nil) {
       return @{ @"schema_version" : @1, @"status" : @"ambiguous" };
     }
     NSString *actual = nil;
@@ -670,13 +673,25 @@ static NSString *const DSHAgentGitActiveCancelTokenKey =
   return @{ @"schema_version" : @1, @"status" : @"not_dispatched" };
 }
 
-/// The proxy the remote step goes through: nil for none (or a local-path
-/// origin, which has no network), NSNull when a proxy is set but the origin
-/// is not https -- libgit2 would send that one straight past the proxy.
-- (id)proxyForOrigin:(NSString *)rawOrigin {
-  NSString *proxy = self.proxyProvider != nil ? self.proxyProvider() : nil;
-  if (proxy.length == 0 || [rawOrigin hasPrefix:@"/"]) return nil;
-  return [rawOrigin.lowercaseString hasPrefix:@"https://"] ? proxy : (id)NSNull.null;
+/// The proxy the remote step goes through, or nil for none (a local-path
+/// origin has no network). `*refusal` names why the step must stop instead:
+/// `proxy` when the setting cannot be read -- "no proxy" would go straight
+/// past one the person set -- and `origin_unsafe` when a proxy is set but
+/// the origin is not https, which libgit2 would send past the proxy.
+- (nullable NSString *)proxyForOrigin:(NSString *)rawOrigin refusal:(NSString **)refusal {
+  if ([rawOrigin hasPrefix:@"/"]) return nil;
+  BOOL unavailable = NO;
+  NSString *proxy = self.proxyProvider != nil ? self.proxyProvider(&unavailable) : nil;
+  if (unavailable) {
+    *refusal = @"proxy";
+    return nil;
+  }
+  if (proxy.length == 0) return nil;
+  if (![rawOrigin.lowercaseString hasPrefix:@"https://"]) {
+    *refusal = @"origin_unsafe";
+    return nil;
+  }
+  return proxy;
 }
 
 @end
