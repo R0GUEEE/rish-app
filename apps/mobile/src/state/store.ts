@@ -65,6 +65,7 @@ import {
 import { projectAgentVisibleHistory } from '../agent/AgentVisibleHistory';
 import { isProjectContextSendable } from '../project-context/reducer';
 import { harnessForModel, isHarnessId, providerForModel } from '../harness/types';
+import { refusedAttemptRetryable } from '../agent/AgentRefusalRetry';
 import type {
   ProjectContextAction,
   ProjectContextConsentV1,
@@ -3331,11 +3332,13 @@ export function createChatStore(options: ChatStoreOptions = {}): ChatStore {
       if (
         source.agent !== undefined &&
         source.agent !== null &&
-        source.failureCode !== 'E_ATTEMPT_INTERRUPTED'
+        source.failureCode !== 'E_ATTEMPT_INTERRUPTED' &&
+        !refusedAttemptRetryable(state, conversationId, sourceAttemptId)
       ) {
         // Live Agent attempts own their native recovery path; an interrupted
         // attempt's writer is dead, so it must never be resumed and retry
-        // always prepares a fresh legacy attempt in the same turn.
+        // always prepares a fresh legacy attempt in the same turn. So may a
+        // turn the provider refused on its first round, before anything ran.
         return null;
       }
       const attemptId = createLifecycleId('attempt');

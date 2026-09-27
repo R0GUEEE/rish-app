@@ -32,6 +32,7 @@ import {
 } from '../agent/AgentStoreTransitions';
 import { AGENT_FAILURE_CODES, type AgentFailureCode } from '../state/types';
 import { agentAmbiguityCode, agentRecoveryAmbiguityCode } from '../agent/AgentAmbiguity';
+import { refusedAttemptRetryable } from '../agent/AgentRefusalRetry';
 import type {
   AgentApprovalBindingTokenV2,
   AgentApprovalPreviewV1,
@@ -5341,7 +5342,11 @@ export function createCompletionController(
       if (
         source?.attempt.agent !== undefined &&
         source.attempt.agent !== null &&
-        source.attempt.failureCode !== 'E_ATTEMPT_INTERRUPTED'
+        source.attempt.failureCode !== 'E_ATTEMPT_INTERRUPTED' &&
+        // A turn the provider refused on its first round, before anything
+        // ran, is asked again as a fresh attempt -- the store and reducer
+        // recheck the same rule when the attempt is created.
+        !refusedAttemptRetryable(dependencies.chat.getState(), conversationId, attemptId)
       ) {
         epoch += 1;
         agentRun = {
@@ -5878,7 +5883,13 @@ export function createCompletionController(
         ) === true;
       const cancelledAgent = attempt?.status === 'cancelled' &&
         attempt.agent?.phase === 'cancelled';
-      if (completedAgentHasAssistant || cancelledAgent) {
+      // A failed round settled through the atomic final checkpoint is just as
+      // terminal: its residue was discarded and there is nothing native to
+      // resume. Offering to resume it after a restart asked recovery about an
+      // attempt that no longer exists, and hid the refusal's own notice.
+      const failedAgent = attempt?.status === 'failed' &&
+        attempt.agent?.phase === 'failed';
+      if (completedAgentHasAssistant || cancelledAgent || failedAgent) {
         // A completed or cancelled Agent checkpoint is terminal and must never
         // re-enter provider/tool recovery after hydration. Transcript cleanup,
         // if still present in the durable outbox, remains independently owned

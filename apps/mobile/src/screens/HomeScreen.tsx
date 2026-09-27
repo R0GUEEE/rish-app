@@ -142,6 +142,7 @@ import { projectAgentPolicy } from '../components/agent-policy-projection';
 import { useAgentPolicy } from '../components/use-agent-policy';
 import { QuestionComposer } from '../components/QuestionComposer';
 import { DEFAULT_APPROVAL_TIMEOUT_MS } from '../agent/AgentApprovals';
+import { refusedAttemptRetryable } from '../agent/AgentRefusalRetry';
 import {
   createSessionPersistenceCoordinator,
   sessionSnapshotSHA256,
@@ -1969,6 +1970,18 @@ export function HomeScreen({
           attempt.agent?.phase === 'unknown'),
     ) === true;
   const completionNoticeVisible = completionActionVisible;
+  // A turn the provider refused on its first round, before anything ran, can
+  // be asked again once the person has fixed what the notice names. It is
+  // read from the durable attempt, so the notice and the button survive a
+  // restart, and only while nothing else is running.
+  const latestAttempt = activeConversation?.attempts.at(-1) ?? null;
+  const refusedRetryAttempt =
+    activeConversation !== null &&
+    latestAttempt !== null &&
+    completionState.phase === 'idle' &&
+    refusedAttemptRetryable(chatState, activeConversation.id, latestAttempt.attemptId)
+      ? latestAttempt
+      : null;
   const durabilityFailure =
     completionState.phase === 'persistence_pending' ||
     completionState.phase === 'commit_pending'
@@ -1982,7 +1995,9 @@ export function HomeScreen({
         (completionState.phase === 'resume_available'
           ? 'E_ATTEMPT_INTERRUPTED'
           : t('home.responseStopped'))
-      : null);
+      : null) ??
+    refusedRetryAttempt?.failureCode ??
+    null;
 
   // The provider's own refusal behind a failed round of the chat on screen:
   // read at render, since the failure that shows it is what re-renders.
@@ -3454,6 +3469,57 @@ export function HomeScreen({
         );
       }
       if (result !== null) applyCompletionOutcome(result, outcomeEpoch);
+    } finally {
+      retryActionInFlight.current = false;
+    }
+  }, [
+    applyCompletionOutcome,
+    completionController,
+    refreshProof,
+    restoreCurrentSessionAuthority,
+    store,
+    t,
+  ]);
+
+  /**
+   * Ask a refused turn again as a fresh attempt in the same turn.
+   *
+   * The same guards as `retry`, and the rule is read again after the session
+   * authority is restored: the button may have been drawn from a state that
+   * has since moved on.
+   */
+  const retryRefused = useCallback(async (conversationId: string, attemptId: string) => {
+    if (
+      retryActionInFlight.current ||
+      directProjectMutationOutboxRef.current !== null ||
+      lifecycleIntentRef.current !== null ||
+      store.getState().projectContextDestructiveTransition !== null ||
+      activeAttachmentOperation.current !== null ||
+      activeAttachmentPreviewId.current !== null ||
+      completionController.getState().phase !== 'idle' ||
+      !refusedAttemptRetryable(store.getState(), conversationId, attemptId)
+    )
+      return;
+    if (!(await restoreCurrentSessionAuthority())) {
+      setStorageWarning(t('home.persistenceUnavailable'));
+      return;
+    }
+    if (
+      retryActionInFlight.current ||
+      completionController.getState().phase !== 'idle' ||
+      !refusedAttemptRetryable(store.getState(), conversationId, attemptId)
+    )
+      return;
+    retryActionInFlight.current = true;
+    const outcomeEpoch = ++completionUiEpoch.current;
+    setRequestFailure(null);
+    try {
+      const result = await completionController.retry(
+        conversationId,
+        attemptId,
+        { onCommitted: () => refreshProof().catch(() => undefined) },
+      );
+      applyCompletionOutcome(result, outcomeEpoch);
     } finally {
       retryActionInFlight.current = false;
     }
@@ -6496,6 +6562,28 @@ export function HomeScreen({
                   ]}
                 >
                   <Text style={styles.retryText}>{completionRecoveryLabel(completionState.phase, t)}</Text>
+                </Pressable>
+              )}
+              {refusedRetryAttempt !== null && activeConversation !== null && !completionActionVisible && (
+                <Pressable
+                  accessibilityLabel={t('messages.retry')}
+                  accessibilityRole="button"
+                  accessibilityState={{
+                    disabled:
+                      attachmentBusy || previewingAttachmentId !== null,
+                  }}
+                  disabled={attachmentBusy || previewingAttachmentId !== null}
+                  hitSlop={hitSlop}
+                  onPress={() =>
+                    retryRefused(activeConversation.id, refusedRetryAttempt.attemptId).catch(() => undefined)
+                  }
+                  style={({ pressed }) => [
+                    styles.retry,
+                    pressed && styles.pressed,
+                  ]}
+                  testID="retry-refused-turn"
+                >
+                  <Text style={styles.retryText}>{t('messages.retry')}</Text>
                 </Pressable>
               )}
               {completionAgentUnresolved && visibleRequestFailure !== null && (

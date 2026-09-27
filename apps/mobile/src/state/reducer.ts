@@ -97,6 +97,7 @@ import type {
 } from '../project-context/types';
 import { DEFAULT_APP_PREFERENCES } from '../preferences/reducer';
 import { serializeAppPreferences } from '../preferences/persistence';
+import { refusedAttemptRetryable } from '../agent/AgentRefusalRetry';
 
 export const DEFAULT_CONVERSATION_TITLE = 'New chat';
 export const DEFAULT_MODEL_ID: ModelId = 'deepseek-v4-flash';
@@ -6920,7 +6921,10 @@ export function chatReducer(state: ChatState, action: ChatAction): ChatState {
         (source.status !== 'failed' && source.status !== 'cancelled') ||
         (source !== undefined &&
           hasAgentJournalOrReceipt(source) &&
-          source.failureCode !== 'E_ATTEMPT_INTERRUPTED') ||
+          source.failureCode !== 'E_ATTEMPT_INTERRUPTED' &&
+          // A turn whose first round the provider refused, before anything
+          // ran, starts over as the person would by sending it again.
+          !refusedAttemptRetryable(state, action.payload.conversationId, source.attemptId)) ||
         turn === undefined ||
         hasPendingAttempt ||
         !sourceIsCurrentVisibleHistory ||
