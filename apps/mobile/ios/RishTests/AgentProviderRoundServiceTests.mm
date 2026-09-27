@@ -170,6 +170,8 @@ static NSString *const DSHProviderSmokeDigest =
 @property(nonatomic) BOOL reconcileToFailedRetryable;
 @property(nonatomic) BOOL failNextWALTransactionAfterComplete;
 @property(nonatomic, copy) NSDictionary *lastTransportEvidence;
+@property(nonatomic, copy) NSString *reconcileFailureCode;
+@property(nonatomic) BOOL failNextWALTransactionAfterReconcile;
 @end
 
 @interface DSHProviderCommitFailingWAL : DSHAgentNativeWAL
@@ -263,11 +265,16 @@ static NSString *const DSHProviderSmokeDigest =
       ? @"failed_retryable" : @"ambiguous";
   row[@"owner"] = NSNull.null;
   row[@"failure_code"] = self.reconcileToFailedRetryable
-      ? @"E_AGENT_PERSISTENCE" : @"E_AGENT_ROUND_AMBIGUOUS";
+      ? (self.reconcileFailureCode ?: @"E_AGENT_PERSISTENCE") : @"E_AGENT_ROUND_AMBIGUOUS";
   row[@"completion_receipt"] = NSNull.null;
   row[@"transcript_after"] = NSNull.null;
   row[@"terminal_kind"] = NSNull.null;
   self.row = row;
+  if (self.failNextWALTransactionAfterReconcile &&
+      [self.wal isKindOfClass:DSHProviderCommitFailingWAL.class]) {
+    ((DSHProviderCommitFailingWAL *)self.wal).failNextTransaction = YES;
+    self.failNextWALTransactionAfterReconcile = NO;
+  }
   return @{ @"schema_version" : @3, @"status" : @"ambiguous", @"row" : self.row };
 }
 - (NSDictionary *)cancelAgentRoundV3WithCAS:(NSDictionary *)cas
@@ -2004,6 +2011,43 @@ static NSDictionary *DSHProviderSmokeQueryRequest(NSDictionary *root,
   XCTAssertEqual(error.code, DSHAgentNativeStoreErrorConflict);
   XCTAssertNil(ignoredReceipt);
   XCTAssertNil(ignoredMessages);
+}
+
+// The refusal reached the row, but the operation's result was never written.
+// Replaying the operation answers from the settled row -- failed_retryable,
+// with its recorded cause -- instead of calling it unknown, and sends nothing.
+- (void)testStartedOperationReplaysARefusedRoundFromItsSettledRow {
+  DSHProviderSmokeFixture *fixture =
+      [[DSHProviderSmokeFixture alloc] initWithFaultingCommit:YES];
+  fixture.transport.rejectCredentialGeneration = YES;
+  fixture.rounds.reconcileToFailedRetryable = YES;
+  fixture.rounds.reconcileFailureCode = @"E_AGENT_PROVIDER_CREDENTIAL";
+  fixture.rounds.failNextWALTransactionAfterReconcile = YES;
+  NSError *error = nil;
+  NSDictionary *first = [fixture.service completeAgentRoundV2WithRequest:fixture.request
+                                                                     error:&error];
+  XCTAssertNil(first);
+  XCTAssertEqual(error.code, DSHAgentNativeStoreErrorPersistence);
+  error = nil;
+  NSDictionary *state = [fixture.wal snapshotWithError:&error];
+  XCTAssertEqualObjects(state[@"operations"][0][@"state"], @"started");
+  XCTAssertEqualObjects(fixture.rounds.row[@"state"], @"failed_retryable");
+
+  NSDictionary *replayed = [fixture.service completeAgentRoundV2WithRequest:fixture.request
+                                                                        error:&error];
+  XCTAssertNil(error);
+  XCTAssertEqualObjects(replayed[@"status"], @"failed_retryable");
+  XCTAssertEqualObjects(replayed[@"failure_code"], @"E_AGENT_PROVIDER_CREDENTIAL");
+  XCTAssertEqual(fixture.transport.startCount, (NSUInteger)1);
+  state = [fixture.wal snapshotWithError:&error];
+  XCTAssertEqualObjects(state[@"operations"][0][@"state"], @"committed");
+  XCTAssertEqualObjects(state[@"operations"][0][@"result_status"], @"failed_retryable");
+  // And the committed answer is what a later replay reads back.
+  NSDictionary *again = [fixture.service completeAgentRoundV2WithRequest:fixture.request
+                                                                     error:&error];
+  XCTAssertEqualObjects(again[@"status"], @"failed_retryable");
+  XCTAssertEqual(fixture.transport.startCount, (NSUInteger)1);
+  [NSFileManager.defaultManager removeItemAtURL:fixture.walRoot error:nil];
 }
 
 - (void)testStartedOperationRecoversCompletedRoundWithoutAnotherHTTPRequest {

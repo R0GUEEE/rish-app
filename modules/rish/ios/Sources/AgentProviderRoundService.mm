@@ -490,6 +490,38 @@ static const int64_t DSHAgentRoundPreviewCoalesceNanoseconds = 50 * NSEC_PER_MSE
         [roundRow[@"state"] isEqualToString:@"unknown"] ||
         [roundRow[@"state"] isEqualToString:@"ambiguous"] ||
         ([roundRow[@"state"] isEqualToString:@"completed"] && !ownerAlive);
+    // A round settled failed_retryable -- a provider's refusal, a request
+    // that could not be built -- whose operation result was never written:
+    // the row is the answer, and it says the round is settled and safe to
+    // relaunch. Reporting it `unknown` turned a replayed refusal into an
+    // uncertainty the settled row contradicts. It is committed as Android
+    // commits it, and nothing is dispatched again.
+    if ([roundRow[@"state"] isEqualToString:@"failed_retryable"]) {
+      NSString *recorded = DSHProviderRoundFailureCode(@"reconciled", @"failed_retryable",
+                                                       roundRow[@"failure_code"])[@"code"];
+      NSString *failureCode = [recorded isKindOfClass:NSString.class]
+          ? recorded : @"E_AGENT_PERSISTENCE";
+      NSDictionary *settled = DSHProviderRoundResultForRow(
+          request, roundRow, @"failed_retryable", failureCode);
+      NSDictionary *resultRef = @{
+        @"schema_version" : @2, @"kind" : @"round",
+        @"task_id" : request[@"task_id"],
+        @"attempt_id" : request[@"attempt_id"],
+        @"round_id" : request[@"round_id"],
+        @"round_index" : request[@"round_index"],
+        @"round_revision" : roundRow[@"row_revision"] ?: @1,
+      };
+      NSError *commitError = nil;
+      NSDictionary *committed = settled == nil ? nil : DSHAgentNativeWALCommitOperation(
+          self.wal, request[@"operation_id"], requestSHA,
+          request[@"task_id"], request[@"attempt_id"], @"committed",
+          @"failed_retryable", resultRef, roundRow[@"row_revision"] ?: @1,
+          DSHProviderOperationSafeResult(settled), &commitError);
+      if (committed != nil) {
+        if (error != nullptr) *error = nil;
+        return settled;
+      }
+    }
     if (knownTerminalRow) {
       NSString *operationStatus = [roundRow[@"state"] isEqualToString:@"ambiguous"]
           ? @"ambiguous" : @"unknown";
