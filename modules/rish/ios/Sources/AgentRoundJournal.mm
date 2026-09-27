@@ -470,6 +470,33 @@ static NSDictionary *DSHAgentRoundReduce(NSDictionary *envelope,
       marker[@"dispatch_state"] = @"dispatched";
       nextDispatch[markerIndex] = [marker copy];
       state[@"dispatch"] = nextDispatch;
+    } else if ([dispatchEffect isEqual:@"reset_not_dispatched"]) {
+      // The provider refused the request in full: the row is
+      // failed_retryable, and the marker goes back in the same transaction,
+      // or the WAL holds a state the core calls corrupt.
+      NSMutableArray *nextDispatch = [dispatch mutableCopy];
+      NSUInteger markerIndex = NSNotFound;
+      for (NSUInteger index = 0; index < nextDispatch.count; index += 1) {
+        NSDictionary *candidate = nextDispatch[index];
+        if ([candidate[@"kind"] isEqualToString:@"round"] &&
+            [candidate[@"locator"] isEqual:locator]) {
+          markerIndex = index;
+          break;
+        }
+      }
+      if (markerIndex == NSNotFound) {
+        DSHSetAgentNativeStoreError(mutationError, DSHAgentNativeStoreErrorCorrupt);
+        return NO;
+      }
+      NSMutableDictionary *marker = [nextDispatch[markerIndex] mutableCopy];
+      marker[@"dispatch_state"] = @"not_dispatched";
+      nextDispatch[markerIndex] = [marker copy];
+      state[@"dispatch"] = nextDispatch;
+    } else if (dispatchEffect != nil && dispatchEffect != NSNull.null) {
+      // An effect this file does not know must not be dropped: the row
+      // beside it would be committed without it.
+      DSHSetAgentNativeStoreError(mutationError, DSHAgentNativeStoreErrorCorrupt);
+      return NO;
     }
     id nextTranscript = result[@"transcript"];
     if ([nextTranscript isKindOfClass:NSDictionary.class]) {
@@ -593,10 +620,21 @@ static id DSHAgentRoundLocatorOf(id container) {
 - (NSDictionary *)reconcileAgentRoundV3OwnerLossWithLocator:(NSDictionary *)locator
                                                  expectedCAS:(NSDictionary *)cas
                                                         error:(NSError **)error {
+  return [self reconcileAgentRoundV3OwnerLossWithLocator:locator
+                                              expectedCAS:cas
+                                        transportEvidence:nil
+                                                    error:error];
+}
+
+- (NSDictionary *)reconcileAgentRoundV3OwnerLossWithLocator:(NSDictionary *)locator
+                                                 expectedCAS:(NSDictionary *)cas
+                                           transportEvidence:(NSDictionary *)evidence
+                                                        error:(NSError **)error {
   return [self runV3Operation:@"reconcile"
                          args:@{
                            @"locator" : DSHAgentRoundArgument(locator),
                            @"cas" : DSHAgentRoundArgument(cas),
+                           @"transport_evidence" : evidence ?: NSNull.null,
                          }
                       locator:locator
                      argOwner:nil

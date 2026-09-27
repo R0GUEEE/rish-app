@@ -493,11 +493,20 @@ static const int64_t DSHAgentRoundPreviewCoalesceNanoseconds = 50 * NSEC_PER_MSE
     if (knownTerminalRow) {
       NSString *operationStatus = [roundRow[@"state"] isEqualToString:@"ambiguous"]
           ? @"ambiguous" : @"unknown";
+      // A retryable row keeps the cause it recorded -- a provider's refusal,
+      // a request that could not be built -- which the core prefers to the
+      // generic "could not be saved".
+      NSString *recordedCause = [roundRow[@"state"] isEqualToString:@"failed_retryable"]
+          ? DSHProviderRoundFailureCode(@"reconciled", @"failed_retryable",
+                                        roundRow[@"failure_code"])[@"code"]
+          : nil;
       NSString *failureCode = [roundRow[@"state"] isEqualToString:@"cancelled"]
           ? @"E_AGENT_CANCELLED"
-          : ([roundRow[@"state"] isEqualToString:@"failed_retryable"] ||
-             [roundRow[@"state"] isEqualToString:@"unknown"]
-                 ? @"E_AGENT_PERSISTENCE" : @"E_AGENT_ROUND_AMBIGUOUS");
+          : ([recordedCause isKindOfClass:NSString.class]
+                 ? recordedCause
+                 : ([roundRow[@"state"] isEqualToString:@"failed_retryable"] ||
+                    [roundRow[@"state"] isEqualToString:@"unknown"]
+                        ? @"E_AGENT_PERSISTENCE" : @"E_AGENT_ROUND_AMBIGUOUS"));
       NSError *commitError = nil;
       NSDictionary *committed = [self
           commitStartedOperationForRequest:request
@@ -1253,14 +1262,39 @@ static const int64_t DSHAgentRoundPreviewCoalesceNanoseconds = 50 * NSEC_PER_MSE
     NSString *safeProviderError = providerErrorCode == nil ? @"none" : ([knownProviderErrors containsObject:providerErrorCode] ? providerErrorCode : @"other");
     os_log_error(OS_LOG_DEFAULT, "agent_round_validation signaled=%{public}d result_present=%{public}d provider_error=%{public}@ correlation_matches=%{public}d digests_match=%{public}d", signaled, providerResult != nil, safeProviderError, providerCorrelationMatches, providerDigestsMatch);
 
+    // What the transport heard, when the provider refused the request with
+    // a status line: evidence the core may accept as proof the round was
+    // turned away. Only for the dispatch this call made -- a row cancelled
+    // or taken over since is not the one that was refused -- and bound to
+    // the owner it went out under.
+    NSDictionary *evidence = nil;
+    if (refusalStatus >= 100 && refusalStatus <= 599 && dispatchStillCurrent &&
+        [latestRow[@"owner"] isKindOfClass:NSDictionary.class]) {
+      evidence = @{
+        @"kind" : @"http_rejected",
+        @"http_status" : @(refusalStatus),
+        @"owner" : latestRow[@"owner"],
+      };
+    }
     NSDictionary *reconciled = [self.rounds reconcileAgentRoundV3OwnerLossWithLocator:
-        locator expectedCAS:effectiveCAS error:&operationError];
+        locator expectedCAS:effectiveCAS transportEvidence:evidence error:&operationError];
     NSDictionary *row = reconciled[@"row"] ?: persistedRow;
     BOOL digestMismatch = providerResult != nil &&
         (!providerDigestsMatch || !providerCorrelationMatches);
+    // The reconcile decides what the round became. A provider's refusal
+    // leaves it failed_retryable with the cause the core derived; a round
+    // stopped before dispatch is cancelled; anything else is ambiguous, as
+    // before. Reporting the row's own state keeps the controller's journal
+    // and the WAL saying the same thing, as Android does.
+    NSString *settledState = [row[@"state"] isKindOfClass:NSString.class] ? row[@"state"] : @"";
+    BOOL settled = [settledState isEqualToString:@"failed_retryable"] ||
+        [settledState isEqualToString:@"cancelled"];
+    NSString *reportedStatus = settled ? settledState : @"ambiguous";
+    NSString *reportedFailure = settled && [row[@"failure_code"] isKindOfClass:NSString.class]
+        ? row[@"failure_code"]
+        : DSHProviderFailureCode(providerErrorCode, digestMismatch);
     NSDictionary *unknown = DSHProviderRoundResultForRow(
-        request, row, @"ambiguous",
-        DSHProviderFailureCode(providerErrorCode, digestMismatch));
+        request, row, reportedStatus, reportedFailure);
     NSDictionary *safeResult = DSHProviderOperationSafeResult(unknown);
     NSDictionary *resultRef = @{
       @"schema_version" : @2, @"kind" : @"round",
@@ -1270,7 +1304,8 @@ static const int64_t DSHAgentRoundPreviewCoalesceNanoseconds = 50 * NSEC_PER_MSE
     };
     NSDictionary *operationCommit = DSHAgentNativeWALCommitOperation(
         self.wal, request[@"operation_id"], requestSHA,
-        request[@"task_id"], request[@"attempt_id"], @"ambiguous", @"ambiguous",
+        request[@"task_id"], request[@"attempt_id"],
+        settled ? @"committed" : @"ambiguous", reportedStatus,
         resultRef, row[@"row_revision"] ?: @1, safeResult, &operationError);
     if (operationCommit == nil) {
       if (error != nullptr) *error = operationError ?: DSHAgentNativeStoreError(
@@ -1565,7 +1600,7 @@ static const int64_t DSHAgentRoundPreviewCoalesceNanoseconds = 50 * NSEC_PER_MSE
     if (projection != nil) queryResult[@"completed_round"] = projection;
     return [queryResult copy];
   }
-  NSDictionary *failure = DSHProviderRoundFailureCode(@"query", status);
+  NSDictionary *failure = DSHProviderRoundFailureCode(@"query", status, row[@"failure_code"]);
   return DSHProviderQueryResultForRow(request, row, status,
       failure[@"code"] == NSNull.null ? nil : failure[@"code"]);
 }
@@ -1600,7 +1635,7 @@ static const int64_t DSHAgentRoundPreviewCoalesceNanoseconds = 50 * NSEC_PER_MSE
   NSDictionary *owner = row[@"owner"];
   if ((id)owner == NSNull.null) {
     NSString *state = row[@"state"];
-    NSDictionary *ownerless = DSHProviderRoundFailureCode(@"ownerless", state);
+    NSDictionary *ownerless = DSHProviderRoundFailureCode(@"ownerless", state, row[@"failure_code"]);
     if ([ownerless[@"reportable"] isEqual:@YES]) {
       NSString *failure = ownerless[@"code"] == NSNull.null ? nil : ownerless[@"code"];
       NSMutableDictionary *result = [DSHProviderQueryResultForRow(
@@ -1627,7 +1662,7 @@ static const int64_t DSHAgentRoundPreviewCoalesceNanoseconds = 50 * NSEC_PER_MSE
   NSString *status = reconciledRow[@"state"];
   return DSHProviderQueryResultForRow(
       request, reconciledRow, status,
-      DSHProviderRoundFailureCode(@"reconciled", status)[@"code"]);
+      DSHProviderRoundFailureCode(@"reconciled", status, reconciledRow[@"failure_code"])[@"code"]);
 }
 - (nullable NSDictionary *)cancelAgentRoundWithRequest:(NSDictionary *)request
                                                   error:(NSError **)error {
@@ -1681,7 +1716,7 @@ static const int64_t DSHAgentRoundPreviewCoalesceNanoseconds = 50 * NSEC_PER_MSE
   NSDictionary *cancelledRow = cancelled[@"row"] ?: row;
   NSString *status = cancelledRow[@"state"];
   NSDictionary *cancelledFailure = DSHProviderRoundFailureCode(@"cancelled",
-                                                                status);
+                                                                status, nil);
   return DSHProviderQueryResultForRow(
       request, cancelledRow, status,
       cancelledFailure[@"code"] == NSNull.null ? nil : cancelledFailure[@"code"]);

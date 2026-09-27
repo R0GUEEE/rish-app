@@ -656,3 +656,130 @@ fn revision_zero_borrows_only_from_the_named_round() {
         assert_ne!(plan["plan"], "round", "{round_id} {attempt_id}");
     }
 }
+
+// A provider's refusal heard in full: the transport reports the status and
+// the owner it dispatched under; the core names the cause.
+
+fn refused_by(row: &Value, dispatch: &str, status: u64, owner: Value) -> Result<rish_agent_core::round_journal::Effect, StoreError> {
+    let mut dead = view(Some(row.clone()), Some(dispatch));
+    dead.row_owner_alive = false;
+    reduce(
+        "reconcile",
+        &args(json!({
+            "locator": locator(), "cas": cas_for(row),
+            "transport_evidence": { "kind": "http_rejected", "http_status": status, "owner": owner },
+        })),
+        &env(),
+        &dead,
+    )
+}
+
+#[test]
+fn a_refusal_the_provider_answered_is_retryable_with_its_cause() {
+    for (status, code) in [
+        (401, "E_AGENT_PROVIDER_CREDENTIAL"),
+        (403, "E_AGENT_PROVIDER_FORBIDDEN"),
+        (404, "E_AGENT_PROVIDER_NOT_FOUND"),
+        (429, "E_AGENT_PROVIDER_RATE_LIMITED"),
+        (400, "E_AGENT_PROVIDER_REFUSED"),
+        (422, "E_AGENT_PROVIDER_REFUSED"),
+    ] {
+        let effect = refused_by(&in_flight_row(), "dispatched", status, owner()).unwrap();
+        let row = effect.row.unwrap();
+        assert_eq!(row["state"], "failed_retryable", "{status}");
+        assert_eq!(row["failure_code"], code, "{status}");
+        assert!(row["owner"].is_null());
+        // Recorded and cleared in one commit: failed_retryable beside a
+        // dispatched marker is corrupt, and a reclaim needs it clear.
+        assert_eq!(effect.dispatch, Some(DispatchEffect::ResetNotDispatched), "{status}");
+    }
+}
+
+// What a status does not prove stays ambiguous: the server giving up on a
+// slow request, a proxy noting the client left, and every 5xx.
+#[test]
+fn a_status_that_proves_no_refusal_stays_ambiguous() {
+    for status in [408, 499, 500, 502, 503, 504, 200, 302] {
+        let effect = refused_by(&in_flight_row(), "dispatched", status, owner()).unwrap();
+        assert_eq!(effect.row.unwrap()["state"], "ambiguous", "{status}");
+        assert_eq!(effect.dispatch, None, "{status}");
+    }
+}
+
+// Evidence speaks only for the dispatch that produced it.
+#[test]
+fn a_refusal_is_bound_to_the_dispatch_that_heard_it() {
+    // Another owner's refusal.
+    let mut stranger = owner();
+    stranger["native_task_id"] = json!("66666666-6666-4666-8666-666666666666");
+    let effect = refused_by(&in_flight_row(), "dispatched", 401, stranger).unwrap();
+    assert_eq!(effect.row.unwrap()["state"], "ambiguous");
+
+    // A round the person stopped meanwhile is not the round that was refused.
+    let mut stopping = in_flight_row();
+    stopping["state"] = json!("cancel_requested");
+    let effect = refused_by(&stopping, "dispatched", 401, owner()).unwrap();
+    assert_eq!(effect.row.unwrap()["state"], "ambiguous");
+
+    // Never dispatched: the existing rule decides, and no reset is needed.
+    let effect = refused_by(&in_flight_row(), "not_dispatched", 401, owner()).unwrap();
+    let row = effect.row.unwrap();
+    assert_eq!(row["state"], "failed_retryable");
+    assert_eq!(row["failure_code"], "E_AGENT_PERSISTENCE");
+    assert_eq!(effect.dispatch, None);
+}
+
+// A caller cannot talk a dispatched round out of its ambiguity by naming a
+// cause itself, with or without evidence.
+#[test]
+fn a_stated_cause_never_replaces_the_derived_one() {
+    let mut dead = view(Some(in_flight_row()), Some("dispatched"));
+    dead.row_owner_alive = false;
+    let stated = reduce(
+        "reconcile",
+        &args(json!({ "locator": locator(), "cas": cas_for(&in_flight_row()),
+                      "failure_code": "E_AGENT_PROVIDER_CREDENTIAL" })),
+        &env(),
+        &dead,
+    )
+    .unwrap();
+    assert_eq!(stated.row.unwrap()["state"], "ambiguous");
+}
+
+#[test]
+fn malformed_evidence_is_a_host_bug() {
+    let mut dead = view(Some(in_flight_row()), Some("dispatched"));
+    dead.row_owner_alive = false;
+    for evidence in [
+        json!({ "kind": "answered", "http_status": 401, "owner": owner() }),
+        json!({ "kind": "http_rejected", "http_status": "401", "owner": owner() }),
+        json!({ "kind": "http_rejected", "http_status": 401 }),
+        json!({ "kind": "http_rejected", "http_status": 401, "owner": owner(), "code": "E" }),
+        json!({ "kind": "http_rejected", "http_status": 99, "owner": owner() }),
+        json!("http_rejected"),
+    ] {
+        let result = reduce(
+            "reconcile",
+            &args(json!({ "locator": locator(), "cas": cas_for(&in_flight_row()),
+                          "transport_evidence": evidence })),
+            &env(),
+            &dead,
+        );
+        assert_eq!(result.unwrap_err(), StoreError::InvalidArgument, "{evidence}");
+    }
+}
+
+#[test]
+fn the_reset_travels_through_the_json_envelope() {
+    let envelope = json!({
+        "op": "reconcile",
+        "args": { "locator": locator(), "cas": cas_for(&in_flight_row()),
+                  "transport_evidence": { "kind": "http_rejected", "http_status": 401, "owner": owner() } },
+        "env": { "launch_id": LAUNCH, "now": LATER, "round_count": 1, "supported_models": ["deepseek-v4-flash"], "receipt_harness_id": null, "receipt_binding_valid": false },
+        "view": { "row": in_flight_row(), "dispatch_state": "dispatched", "transcript": null, "arg_owner_alive": false, "row_owner_alive": false },
+    });
+    let output: Value = serde_json::from_str(&reduce_json(&envelope.to_string())).unwrap();
+    assert_eq!(output["ok"], true);
+    assert_eq!(output["dispatch"], "reset_not_dispatched");
+    assert_eq!(output["row"]["failure_code"], "E_AGENT_PROVIDER_CREDENTIAL");
+}

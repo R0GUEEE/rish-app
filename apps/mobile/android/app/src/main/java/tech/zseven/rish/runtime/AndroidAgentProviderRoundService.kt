@@ -281,9 +281,13 @@ internal class AndroidAgentProviderRoundService(
 
         // The request exists and the transport has accepted it, so from here
         // on a silence really could mean the provider saw it.
+        // The owner the request went out under, which is what a refusal the
+        // transport hears is evidence about.
+        var dispatchOwner: JSONObject? = null
         if (prepared != null) {
             try {
                 val claimed = rowFor(wal.snapshot(), locator) ?: throw Refused(PERSISTENCE)
+                dispatchOwner = claimed.optJSONObject("owner")
                 val dispatchCas = decide(
                     JSONObject().put("op", "round_cas").put("row", claimed),
                 ).optJSONObject("cas") ?: throw Refused(CONFLICT)
@@ -297,6 +301,7 @@ internal class AndroidAgentProviderRoundService(
             }
         }
 
+        var refusalStatus: Int? = null
         val reply = if (prepared == null) null else try {
             // Correlation first: a preview event that cannot be tied to the
             // round it belongs to is not display material, it is noise.
@@ -316,6 +321,9 @@ internal class AndroidAgentProviderRoundService(
             }
         } catch (failure: Exception) {
             providerError = (failure as? RuntimeFailure)?.code
+            // A status line the provider sent is what the transport heard;
+            // the core decides whether it proves a refusal.
+            refusalStatus = (failure as? RuntimeFailure)?.httpStatus?.takeIf { it in 100..599 }
             android.util.Log.w("RishAgent", "round transport failed: $providerError", failure)
             null
         }
@@ -351,7 +359,13 @@ internal class AndroidAgentProviderRoundService(
         // was being built is the only account of why this turn ended, and
         // the core keeps it only for a round it can see was never
         // dispatched, so an ambiguity cannot be talked out of.
-        val reconciled = rounds.reconcile(locator, completeCas, failure.ifEmpty { null })
+        val evidence = if (refusalStatus != null && dispatchOwner != null) {
+            JSONObject().put("kind", "http_rejected").put("http_status", refusalStatus)
+                .put("owner", dispatchOwner)
+        } else {
+            null
+        }
+        val reconciled = rounds.reconcile(locator, completeCas, failure.ifEmpty { null }, evidence)
             ?.optJSONObject("row")
         val settled = reconciled ?: rowFor(wal.snapshot(), locator) ?: throw Refused(CONFLICT)
         // The reconcile decides what the round became: a request that never

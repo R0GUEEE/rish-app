@@ -169,6 +169,7 @@ static NSString *const DSHProviderSmokeDigest =
 @property(nonatomic, copy) NSArray *completedMessages;
 @property(nonatomic) BOOL reconcileToFailedRetryable;
 @property(nonatomic) BOOL failNextWALTransactionAfterComplete;
+@property(nonatomic, copy) NSDictionary *lastTransportEvidence;
 @end
 
 @interface DSHProviderCommitFailingWAL : DSHAgentNativeWAL
@@ -251,9 +252,11 @@ static NSString *const DSHProviderSmokeDigest =
 }
 - (NSDictionary *)reconcileAgentRoundV3OwnerLossWithLocator:(NSDictionary *)locator
                                                   expectedCAS:(NSDictionary *)cas
+                                            transportEvidence:(NSDictionary *)evidence
                                                          error:(NSError **)error {
   if (error != nullptr) *error = nil;
   self.reconcileCount += 1;
+  self.lastTransportEvidence = evidence;
   NSMutableDictionary *row = [self.row mutableCopy];
   row[@"row_revision"] = @3;
   row[@"state"] = self.reconcileToFailedRetryable
@@ -2663,6 +2666,115 @@ static NSDictionary *DSHProviderSmokeQueryRequest(NSDictionary *root,
   [NSFileManager.defaultManager removeItemAtURL:walRoot error:nil];
 }
 
+// The real journal over the real WAL: a dispatched round the provider
+// refused with 401 becomes failed_retryable with the cause the core derived,
+// and its dispatch marker is reset in the same transaction -- a WAL holding
+// failed_retryable beside a dispatched marker would not load again.
+- (void)testRoundV3ProviderRefusalIsRetryableAndResetsItsMarker {
+  NSURL *walRoot = [NSURL fileURLWithPath:[NSTemporaryDirectory()
+      stringByAppendingPathComponent:NSUUID.UUID.UUIDString]];
+  DSHAgentNativeWAL *wal = [[DSHAgentNativeWAL alloc]
+      initWithRootURL:walRoot
+      clock:^NSDate *{
+        return [NSDate dateWithTimeIntervalSince1970:1700000000];
+      }
+      identifierGenerator:^NSString *{
+        return @"aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
+      }
+      faultHook:nil];
+  NSError *error = nil;
+  NSDictionary *root = DSHProviderSmokeRoot();
+  DSHAgentTranscriptStore *transcripts = [[DSHAgentTranscriptStore alloc]
+      initWithWAL:wal];
+  NSDictionary *transcript = [transcripts
+      createAgentTranscriptWithRequest:@{
+        @"schema_version" : @1,
+        @"attempt_id" : DSHProviderSmokeAttempt,
+        @"root" : root,
+      }
+      error:&error];
+  NSDictionary *locator = @{
+    @"schema_version" : @1,
+    @"task_id" : DSHProviderSmokeTask,
+    @"attempt_id" : DSHProviderSmokeAttempt,
+    @"round_id" : DSHProviderSmokeRound,
+    @"round_index" : @0,
+  };
+  NSDictionary *deadOwner = @{
+    @"schema_version" : @1,
+    @"task_id" : DSHProviderSmokeTask,
+    @"launch_id" : wal.launchId,
+    @"native_task_id" : @"99999999-9999-4999-8999-999999999999",
+    @"owner_generation" : @1,
+    @"heartbeat_at" : wal.currentTimestamp,
+  };
+  NSDictionary *row = @{
+    @"schema_version" : @3,
+    @"locator" : locator,
+    @"row_revision" : @2,
+    @"root_fingerprint_sha256" : root[@"root_fingerprint_sha256"],
+    @"binding_revision" : @7,
+    @"request_sha256" : DSHProviderSmokeDigest,
+    @"transcript_before" : transcript,
+    @"launch_attempt" : @1,
+    @"state" : @"in_flight",
+    @"owner" : deadOwner,
+    @"failure_code" : NSNull.null,
+    @"completion_receipt" : NSNull.null,
+    @"transcript_after" : NSNull.null,
+    @"calls" : @[],
+    @"batch_class" : NSNull.null,
+    @"executable_call_count" : @0,
+    @"denied_call_count" : @0,
+    @"terminal_kind" : NSNull.null,
+    @"created_at" : wal.currentTimestamp,
+    @"updated_at" : wal.currentTimestamp,
+  };
+  BOOL inserted = [wal performAtomicTransaction:^BOOL(
+      NSMutableDictionary *state, NSError **mutationError) {
+    NSMutableArray *roundRows = [state[@"rounds"] mutableCopy];
+    NSMutableArray *dispatch = [state[@"dispatch"] mutableCopy];
+    [roundRows addObject:row];
+    [dispatch addObject:@{
+      @"schema_version" : @1,
+      @"kind" : @"round",
+      @"locator" : locator,
+      @"dispatch_state" : @"dispatched",
+    }];
+    state[@"rounds"] = roundRows;
+    state[@"dispatch"] = dispatch;
+    return YES;
+  } error:&error];
+  XCTAssertTrue(inserted);
+  DSHAgentRoundJournal *journal = [[DSHAgentRoundJournal alloc] initWithWAL:wal];
+  NSDictionary *cas = DSHProviderRoundCASForRow(row);
+  NSDictionary *reconciled = [journal
+      reconcileAgentRoundV3OwnerLossWithLocator:locator
+                                      expectedCAS:cas
+                                transportEvidence:@{
+                                  @"kind" : @"http_rejected",
+                                  @"http_status" : @401,
+                                  @"owner" : deadOwner,
+                                }
+                                             error:&error];
+  XCTAssertNil(error);
+  XCTAssertEqualObjects(reconciled[@"row"][@"state"], @"failed_retryable");
+  XCTAssertEqualObjects(reconciled[@"row"][@"failure_code"],
+                        @"E_AGENT_PROVIDER_CREDENTIAL");
+  NSDictionary *snapshot = [wal snapshotWithError:&error];
+  XCTAssertEqualObjects(snapshot[@"dispatch"][0][@"dispatch_state"], @"not_dispatched");
+  // A second reader of the same directory accepts the committed state.
+  DSHAgentNativeWAL *reopened = [[DSHAgentNativeWAL alloc]
+      initWithRootURL:walRoot
+      clock:^NSDate *{ return [NSDate dateWithTimeIntervalSince1970:1700000000]; }
+      identifierGenerator:^NSString *{ return @"bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb"; }
+      faultHook:nil];
+  NSDictionary *reread = [reopened snapshotWithError:&error];
+  XCTAssertNil(error);
+  XCTAssertEqualObjects(reread[@"rounds"][0][@"failure_code"], @"E_AGENT_PROVIDER_CREDENTIAL");
+  [NSFileManager.defaultManager removeItemAtURL:walRoot error:nil];
+}
+
 
 - (void)testCustomProviderIdentitySurvivesNativeRoundAndOperationReplay {
   DSHProviderSmokeFixture *fixture = [[DSHProviderSmokeFixture alloc] init];
@@ -2706,6 +2818,56 @@ static NSDictionary *DSHProviderSmokeQueryRequest(NSDictionary *root,
   NSDictionary *replayed = [service completeAgentRoundV2WithRequest:request error:&error];
   XCTAssertEqualObjects(replayed, result);
   XCTAssertEqual([DSHProviderURLProtocol requestCount], 1u);
+  [session invalidateAndCancel]; [defaults removePersistentDomainForName:suite];
+}
+
+// A relay that refuses the key answers with a status line. The service hands
+// what the transport heard to the journal -- the status and the owner the
+// request went out under -- and reports the row the core settled, rather
+// than calling every failed dispatch ambiguous.
+- (void)testARelaysRefusalIsHandedToTheJournalAsEvidence {
+  DSHProviderSmokeFixture *fixture = [[DSHProviderSmokeFixture alloc] init];
+  fixture.rounds.reconcileToFailedRetryable = YES;
+  NSMutableDictionary *authority = [fixture.prepared.authority mutableCopy]; authority[@"model"] = @"claude-sonnet-5";
+  fixture.prepared.authority = authority;
+  NSString *suite = [@"refused-round-" stringByAppendingString:NSUUID.UUID.UUIDString];
+  NSUserDefaults *defaults = [[NSUserDefaults alloc] initWithSuiteName:suite];
+  DSHProviderConfigurationStore *profiles = [[DSHProviderConfigurationStore alloc] initWithDefaults:defaults];
+  [profiles saveConfiguration:@{@"schema_version": @1, @"harness_id": @"claude-code", @"name": @"Relay",
+      @"endpoint_url": @"https://relay.example/v1/messages", @"protocol": @"messages", @"auth_type": @"bearer",
+      @"send_reasoning": @NO, @"model_mappings": @{@"claude-sonnet-5": @"relay-model"}} error:nil];
+  NSURLSessionConfiguration *sessionConfiguration = NSURLSessionConfiguration.ephemeralSessionConfiguration;
+  sessionConfiguration.protocolClasses = @[DSHProviderURLProtocol.class];
+  NSURLSession *session = [NSURLSession sessionWithConfiguration:sessionConfiguration];
+  DSHConfiguredProviderTransport *transport = [[DSHConfiguredProviderTransport alloc] initWithHarness:@"claude-code"
+      session:session uuidGenerator:^NSString *{ return NSUUID.UUID.UUIDString.lowercaseString; }
+      monotonicClock:nil store:profiles];
+  DSHAgentProviderRoundService *service = [[DSHAgentProviderRoundService alloc]
+      initWithWAL:fixture.wal preparedStore:fixture.prepared transcripts:fixture.transcripts rounds:fixture.rounds
+      transport:fixture.transport claudeTransport:transport codexTransport:nil glmTransport:nil
+      credentialProvider:^NSString *(NSString *harness, NSUInteger *generation) {
+        if (generation) *generation = 1; return @"synthetic-relay-key";
+      } visibleHistoryProvider:^NSArray *(NSDictionary *value, NSError **error) {
+        return @[@{@"role": @"user", @"content": @"hello"}];
+      } contextReceiptProvider:nil];
+  [DSHProviderURLProtocol setHandler:^(NSURLProtocol *p, NSURLRequest *request) {
+    NSData *data = [@"{\"error\":\"invalid key\"}" dataUsingEncoding:NSUTF8StringEncoding];
+    NSHTTPURLResponse *response = [[NSHTTPURLResponse alloc] initWithURL:request.URL statusCode:401 HTTPVersion:@"HTTP/1.1" headerFields:@{@"Content-Type": @"application/json"}];
+    [p.client URLProtocol:p didReceiveResponse:response cacheStoragePolicy:NSURLCacheStorageNotAllowed];
+    [p.client URLProtocol:p didLoadData:data]; [p.client URLProtocolDidFinishLoading:p];
+  }];
+  NSMutableDictionary *request = [fixture.request mutableCopy]; request[@"model"] = @"claude-sonnet-5"; request[@"harness_id"] = @"claude-code";
+  NSError *error = nil;
+  NSDictionary *result = [service completeAgentRoundV2WithRequest:request error:&error];
+  XCTAssertNotNil(result, @"%@", error);
+  NSDictionary *evidence = fixture.rounds.lastTransportEvidence;
+  XCTAssertEqualObjects(evidence[@"kind"], @"http_rejected");
+  XCTAssertEqualObjects(evidence[@"http_status"], @401);
+  XCTAssertTrue([evidence[@"owner"] isKindOfClass:NSDictionary.class]);
+  XCTAssertEqualObjects(evidence[@"owner"][@"task_id"], request[@"task_id"]);
+  // The row the journal settled is what the controller hears.
+  XCTAssertEqualObjects(result[@"status"], @"failed_retryable");
+  XCTAssertEqualObjects(result[@"failure_code"], fixture.rounds.row[@"failure_code"]);
   [session invalidateAndCancel]; [defaults removePersistentDomainForName:suite];
 }
 

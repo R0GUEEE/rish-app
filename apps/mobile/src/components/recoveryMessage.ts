@@ -20,6 +20,13 @@ const reasons: Readonly<Record<string, TranslationKey>> = {
   E_AGENT_CAPABILITY: 'recovery.agentCapability',
   E_AGENT_ROUND_AMBIGUOUS: 'recovery.roundAmbiguous',
   E_AGENT_EXECUTION_AMBIGUOUS: 'recovery.executionAmbiguous',
+  // A round the provider refused in full, named by the core from the HTTP
+  // status: kept in the journal, so these read the same after a restart.
+  E_AGENT_PROVIDER_CREDENTIAL: 'recovery.provider.keyRejected',
+  E_AGENT_PROVIDER_FORBIDDEN: 'recovery.provider.forbidden',
+  E_AGENT_PROVIDER_NOT_FOUND: 'recovery.provider.notFound',
+  E_AGENT_PROVIDER_RATE_LIMITED: 'recovery.rateLimit',
+  E_AGENT_PROVIDER_REFUSED: 'recovery.provider.refused',
   E_CONTEXT_CHANGED: 'recovery.contextRefresh',
   E_CONTEXT_STORAGE: 'recovery.contextStorage',
   E_CONTEXT_SNAPSHOT_MISSING: 'recovery.contextRefresh',

@@ -48,7 +48,12 @@ export type AgentRuntimeFailureCode =
   | 'E_AGENT_NOT_FOUND'
   | 'E_AGENT_CAPACITY'
   | 'E_COMPLETION_LENGTH'
-  | 'E_COMPLETION_CONTENT_FILTER';
+  | 'E_COMPLETION_CONTENT_FILTER'
+  | 'E_AGENT_PROVIDER_CREDENTIAL'
+  | 'E_AGENT_PROVIDER_FORBIDDEN'
+  | 'E_AGENT_PROVIDER_NOT_FOUND'
+  | 'E_AGENT_PROVIDER_RATE_LIMITED'
+  | 'E_AGENT_PROVIDER_REFUSED';
 
 /** Supported native tool registry generations; old sessions retain their version. */
 export type AgentRegistryVersion = 1 | 2 | 3;
@@ -1397,6 +1402,11 @@ const runtimeFailureCodes = new Set<AgentRuntimeFailureCode>([
   'E_COMPLETION_LENGTH',
   'E_COMPLETION_CONTENT_FILTER',
   'E_AGENT_DENIED_BY_USER',
+  'E_AGENT_PROVIDER_CREDENTIAL',
+  'E_AGENT_PROVIDER_FORBIDDEN',
+  'E_AGENT_PROVIDER_NOT_FOUND',
+  'E_AGENT_PROVIDER_RATE_LIMITED',
+  'E_AGENT_PROVIDER_REFUSED',
 ]);
 
 const agentFailureCodes = new Set<AgentFailureCode>([

@@ -283,6 +283,11 @@ BOOL DSHAgentFailureCode(id value) {
       @"E_COMPLETION_LENGTH",
       @"E_COMPLETION_CONTENT_FILTER",
       @"E_AGENT_DENIED_BY_USER",
+      @"E_AGENT_PROVIDER_CREDENTIAL",
+      @"E_AGENT_PROVIDER_FORBIDDEN",
+      @"E_AGENT_PROVIDER_NOT_FOUND",
+      @"E_AGENT_PROVIDER_RATE_LIMITED",
+      @"E_AGENT_PROVIDER_REFUSED",
     ]];
   });
   return [codes containsObject:value];

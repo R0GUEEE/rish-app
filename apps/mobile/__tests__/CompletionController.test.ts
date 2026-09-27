@@ -2539,6 +2539,47 @@ describe('project Agent completion controller', () => {
     expect(runtime.discardAgentAttempt).toHaveBeenCalledTimes(1);
   });
 
+  // A provider that refused the round in full -- a relay's 401, 403, 404,
+  // 429 or other 4xx -- is no longer ambiguous: native records the cause the
+  // core derived from the status, and the attempt ends with it, saved in a
+  // session every reader accepts.
+  test.each([
+    'E_AGENT_PROVIDER_CREDENTIAL',
+    'E_AGENT_PROVIDER_FORBIDDEN',
+    'E_AGENT_PROVIDER_NOT_FOUND',
+    'E_AGENT_PROVIDER_RATE_LIMITED',
+    'E_AGENT_PROVIDER_REFUSED',
+  ] as const)('a round the provider refused ends the attempt with %s', async code => {
+    const store = agentStore();
+    const runtime = makeRuntime([]);
+    (runtime.completeAgentRoundV2 as jest.Mock).mockImplementationOnce(async (request: CompleteAgentRoundRequestV2) => ({
+      schema_version: 2,
+      status: 'failed_retryable',
+      operation_id: request.operation_id,
+      task_id: request.task_id,
+      attempt_id: request.attempt_id,
+      round_id: request.round_id,
+      round_index: request.round_index,
+      launch_attempt: request.launch_attempt,
+      result_round_revision: 3,
+      transcript: request.transcript,
+      failure_code: code,
+    }));
+    const persist = committedPersistence(store);
+    const controller = agentController(store, runtime, persist);
+    const conversationId = store.getState().selectedConversationId!;
+    const result = await controller.send({ conversationId, text: 'refused round', attachments: [] });
+    expect(result).toMatchObject({ status: 'failed', code });
+    const attempt = store.getState().conversations[conversationId]!.attempts[0]!;
+    expect(attempt.status).toBe('failed');
+    expect(attempt.failureCode).toBe(code);
+    expect(attempt.agent!.round_lineage!.status).toBe('failed_retryable');
+    // Saved and read back: the session validators take the new codes.
+    expect(persist).toHaveBeenCalled();
+    const reloaded = hydrateChatState(JSON.parse(store.serialize()));
+    expect(reloaded.conversations[conversationId]!.attempts[0]!.failureCode).toBe(code);
+  });
+
 
   /**
    * A turn interrupted while it was waiting for a person has to be able to

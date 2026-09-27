@@ -432,9 +432,10 @@ NSDictionary *DSHProviderPublicResult(NSDictionary *request, NSDictionary *row,
   }, nullptr)[@"output"];
 }
 
-NSDictionary *DSHProviderRoundFailureCode(NSString *kind, NSString *state) {
+NSDictionary *DSHProviderRoundFailureCode(NSString *kind, NSString *state, id recorded) {
   return DSHProviderReduce(@"round_failure_code", @{
     @"kind" : kind ?: NSNull.null, @"state" : state ?: NSNull.null,
+    @"recorded" : [recorded isKindOfClass:NSString.class] ? recorded : NSNull.null,
   }, nullptr);
 }
 

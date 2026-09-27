@@ -50,3 +50,18 @@ test('a plain chat says what the provider answered, in words', () => {
   expect(recoveryMessage('E_COMPLETION_CREDENTIAL_UNAVAILABLE', t)).toBe(t('recovery.credential'));
   expect(t('recovery.provider.statusUnknown')).not.toBe(t('recovery.generic'));
 });
+
+// A round the provider refused in full ends with a code of its own, which
+// the journal keeps: the words are the same after a restart, and a generic
+// refusal adds the status while this launch still holds it.
+test('a refused round reads in words from its own code', () => {
+  const { recoveryMessage } = require('../src/components/recoveryMessage') as typeof import('../src/components/recoveryMessage');
+  expect(recoveryMessage('E_AGENT_PROVIDER_CREDENTIAL', t)).toContain('HTTP 401');
+  expect(recoveryMessage('E_AGENT_PROVIDER_FORBIDDEN', t)).toContain('HTTP 403');
+  expect(recoveryMessage('E_AGENT_PROVIDER_NOT_FOUND', t)).toContain('HTTP 404');
+  expect(recoveryMessage('E_AGENT_PROVIDER_RATE_LIMITED', t)).toBe(t('recovery.rateLimit'));
+  expect(recoveryMessage('E_AGENT_PROVIDER_REFUSED', t)).toBe(t('recovery.provider.refused'));
+  expect(providerFailureMessage('E_AGENT_PROVIDER_REFUSED', failure('E_COMPLETION_HTTP_STATUS', 422), t)).toContain('HTTP 422');
+  // The specific codes say it themselves; nothing is layered on top.
+  expect(providerFailureMessage('E_AGENT_PROVIDER_CREDENTIAL', failure('E_COMPLETION_CREDENTIAL_UNAVAILABLE', 401), t)).toBeNull();
+});

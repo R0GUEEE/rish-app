@@ -537,7 +537,7 @@ internal class AndroidModelTransport(
             }
             val response = httpCall.execute().use { http ->
                 if(http.code in 300..399) fail("E_COMPLETION_REDIRECT")
-                if(http.code == 429) fail("E_COMPLETION_HTTP_429")
+                if(http.code == 429) throw RuntimeFailure("E_COMPLETION_HTTP_429", http.code)
                 // A refused key, as iOS and the core name it; the status still
                 // travels, for the notice that says which it was.
                 if(http.code == 401 || http.code == 403) throw RuntimeFailure("E_COMPLETION_CREDENTIAL_UNAVAILABLE", http.code)

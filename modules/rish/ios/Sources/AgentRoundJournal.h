@@ -40,6 +40,13 @@ NS_ASSUME_NONNULL_BEGIN
 - (nullable NSDictionary *)reconcileAgentRoundV3OwnerLossWithLocator:(NSDictionary *)locator
                                                           expectedCAS:(NSDictionary *)cas
                                                                  error:(NSError **)error;
+/// `evidence` is what the transport heard when the provider refused the
+/// request -- `{kind: http_rejected, http_status, owner}`. The core alone
+/// decides whether it proves the round was turned away.
+- (nullable NSDictionary *)reconcileAgentRoundV3OwnerLossWithLocator:(NSDictionary *)locator
+                                                          expectedCAS:(NSDictionary *)cas
+                                                    transportEvidence:(nullable NSDictionary *)evidence
+                                                                 error:(NSError **)error;
 - (nullable NSDictionary *)queryAgentRoundV3WithLocator:(NSDictionary *)locator
                                                      error:(NSError **)error;
 

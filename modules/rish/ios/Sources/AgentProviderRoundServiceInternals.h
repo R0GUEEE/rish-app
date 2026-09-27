@@ -99,7 +99,9 @@ FOUNDATION_EXPORT NSDictionary * _Nullable DSHProviderPublicResult(
 /// The failure code a round row's state implies. `kind` is one of "query",
 /// "reconciled" or "cancelled"; "ownerless" additionally answers whether the
 /// state is one recovery may report directly, through `reportable`.
+/// `recorded` is the cause the row itself keeps, which the core prefers to
+/// the generic answer and never lets soften an ambiguity.
 FOUNDATION_EXPORT NSDictionary * _Nullable DSHProviderRoundFailureCode(
-    NSString *kind, NSString * _Nullable state);
+    NSString *kind, NSString * _Nullable state, id _Nullable recorded);
 
 NS_ASSUME_NONNULL_END

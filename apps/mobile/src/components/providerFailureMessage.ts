@@ -1,11 +1,17 @@
 import type { ProviderFailure } from '../completion/CompletionController';
 import type { Translator } from '../preferences';
 
-/** The round codes a provider's own refusal can hide behind. */
+/**
+ * The round codes a provider's own refusal can hide behind. A generic
+ * refusal also takes the status the transport heard, while this launch
+ * still holds it; the specific ones (a key, a permission, an address, a
+ * rate limit) already say it in their own words.
+ */
 const ROUND_CODES = new Set([
   'E_AGENT_ROUND_AMBIGUOUS',
   'E_AGENT_TRANSCRIPT',
   'E_AGENT_TOOL_FAILED',
+  'E_AGENT_PROVIDER_REFUSED',
 ]);
 
 const UNREADABLE = new Set([
