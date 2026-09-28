@@ -101,6 +101,9 @@ FOUNDATION_EXPORT NSDictionary * _Nullable DSHProviderPublicResult(
 /// state is one recovery may report directly, through `reportable`.
 /// `recorded` is the cause the row itself keeps, which the core prefers to
 /// the generic answer and never lets soften an ambiguity.
+/// A round's reasoning as the controller shows it: itself within the
+/// presentation limit, otherwise its opening and end around a marker.
+FOUNDATION_EXPORT NSString *DSHProviderPresentationExcerpt(NSString *reasoning);
 FOUNDATION_EXPORT NSDictionary * _Nullable DSHProviderRoundFailureCode(
     NSString *kind, NSString * _Nullable state, id _Nullable recorded);
 

@@ -508,13 +508,22 @@ internal class AndroidAgentProviderRoundService(
         for (index in 0 until calls.length()) {
             if (calls.optJSONObject(index)?.optString("access") == "durable_deny") denied += 1
         }
+        // The transcript above keeps the whole reasoning -- a later round of
+        // this turn hands it back to the provider -- but the answer shows an
+        // excerpt within what the controller accepts, cut by the same core
+        // rule the projection uses. A "max" reasoning past it was committed
+        // and then refused by the controller on every read, so the turn could
+        // never finish (beta report, 2026-09-28).
+        val shownReasoning = decide(
+            JSONObject().put("op", "presentation_excerpt").put("text", reply.optString("reasoning")),
+        ).optString("text")
         val outcome = JSONObject().put("schema_version", 3)
             .put("finish_reason", reply.optString("finish_reason"))
             .put("completion_receipt", publicReceipt).put("transcript", after)
         when (terminal) {
             "final" -> outcome.put("kind", "final")
                 .put("text", reply.optString("text"))
-                .put("reasoning", reply.optString("reasoning"))
+                .put("reasoning", shownReasoning)
             "tool_batch" -> outcome.put("kind", "tool_batch").put("calls", calls)
                 .put(
                     "batch_class",
@@ -526,7 +535,7 @@ internal class AndroidAgentProviderRoundService(
                 )
                 .put("executable_call_count", calls.length() - denied)
                 .put("denied_call_count", denied)
-                .put("reasoning", reply.optString("reasoning"))
+                .put("reasoning", shownReasoning)
             else -> outcome.put("kind", "blocked").put(
                 "failure_code",
                 if (reply.optString("finish_reason") == "length") {

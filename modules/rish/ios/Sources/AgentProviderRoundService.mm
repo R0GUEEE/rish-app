@@ -1517,12 +1517,18 @@ static const int64_t DSHAgentRoundPreviewCoalesceNanoseconds = 50 * NSEC_PER_MSE
   NSDictionary *publicReceipt = DSHProviderPublicReceipt(providerResult, request,
                                                           providerRequestId,
                                                           contextReceipt);
+  // The transcript keeps the whole reasoning -- a later round of this turn
+  // hands it back to the provider -- but the answer shows an excerpt within
+  // what the controller accepts, cut by the core rule the projection uses.
+  // A "max" reasoning past it was refused by the controller on every read,
+  // so the turn could never finish (beta report, 2026-09-28).
+  NSString *shownReasoning = DSHProviderPresentationExcerpt(providerResult[@"reasoning"] ?: @"");
   NSDictionary *outcome = nil;
   if ([finishReason isEqualToString:@"stop"]) {
     outcome = @{
       @"schema_version" : @3, @"kind" : @"final", @"finish_reason" : @"stop",
       @"completion_receipt" : publicReceipt, @"transcript" : after,
-      @"text" : providerResult[@"text"] ?: @"", @"reasoning" : providerResult[@"reasoning"] ?: @"",
+      @"text" : providerResult[@"text"] ?: @"", @"reasoning" : shownReasoning,
     };
   } else if ([finishReason isEqualToString:@"tool_calls"]) {
     NSUInteger denied = 0;
@@ -1536,7 +1542,7 @@ static const int64_t DSHAgentRoundPreviewCoalesceNanoseconds = 50 * NSEC_PER_MSE
       @"batch_class" : denied == 0 ? @"executable" : denied == nativeCalls.count ? @"denied_only" : @"mixed",
       @"executable_call_count" : @(nativeCalls.count - denied),
       @"denied_call_count" : @(denied),
-      @"reasoning" : providerResult[@"reasoning"] ?: @"",
+      @"reasoning" : shownReasoning,
     };
   } else {
     NSString *failure = [finishReason isEqualToString:@"length"]

@@ -164,6 +164,37 @@ class AndroidAgentContextRoundTest {
         }
     }
 
+    /**
+     * A "max" reasoning past what the controller accepts. The transcript keeps
+     * all of it (a later round hands it back to the provider); the answer
+     * shows the core's excerpt. It used to be committed whole here and then
+     * refused by the controller on every read, so the turn never finished.
+     */
+    @Test
+    fun aReasoningPastThePresentationLimitIsShownAsAnExcerpt() {
+        val reasoning = "开头" + "鹈".repeat(400 * 1024 / 3) + "结尾"
+        val reply = JSONObject().put("id", "resp-long").put("model", MODEL).put(
+            "choices",
+            JSONArray().put(
+                JSONObject().put("finish_reason", "stop").put(
+                    "message",
+                    JSONObject().put("role", "assistant").put("content", "done")
+                        .put("reasoning_content", reasoning),
+                ),
+            ),
+        ).toString()
+        roundAgainst("200 OK", reply) { ran ->
+            assertTrue(ran.provider.served.await(20, TimeUnit.SECONDS))
+            assertEquals(ran.result.toString().take(300), "completed", ran.result.getString("status"))
+            val shown = ran.result.getJSONObject("outcome").getString("reasoning")
+            assertTrue(shown.toByteArray(Charsets.UTF_8).size <= 256 * 1024)
+            assertTrue(shown.startsWith("开头"))
+            assertTrue(shown.endsWith("结尾"))
+            assertTrue(shown.contains("[…]"))
+            assertEquals("done", ran.result.getJSONObject("outcome").getString("text"))
+        }
+    }
+
     private fun roundAgainst(status: String, reply: String, check: (Ran) -> Unit) {
         assumeTrue("rish agent core is not staged in this build", RishAgentCoreNative.available)
         assumeTrue("libgit2 is not staged in this build", RishLibgit2Native.available)

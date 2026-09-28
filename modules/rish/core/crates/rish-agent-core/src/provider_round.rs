@@ -26,6 +26,33 @@ const MAX_SAFE_INTEGER: u64 = 9_007_199_254_740_991;
 const MAX_ARGUMENTS_BYTES: usize = 32_768;
 /// The project-context budget one round may carry.
 const MAX_CONTEXT_BYTES: u64 = 256 * 1024;
+/// What the controller accepts for a round's text or reasoning
+/// (`MAX_TEXT_BYTES` in `native/AgentRuntime.ts`).
+pub const MAX_PRESENTATION_BYTES: usize = 256 * 1024;
+/// How much of an over-long reasoning's opening an excerpt keeps; the rest of
+/// the budget goes to its end, where the reasoning arrives at its answer.
+const EXCERPT_HEAD_BYTES: usize = 64 * 1024;
+/// Stands where the middle of an over-long reasoning was left out.
+pub const EXCERPT_MARKER: &str = "\n\n[…]\n\n";
+
+/// `text` itself when it fits in `budget` bytes; otherwise its opening and
+/// its end around [`EXCERPT_MARKER`], cut on character boundaries, in at most
+/// `budget` bytes. Idempotent: an excerpt already fits.
+pub fn presentation_excerpt(text: &str, budget: usize) -> String {
+    if text.len() <= budget {
+        return text.to_owned();
+    }
+    let floor = |index: usize| (0..=index.min(text.len())).rev().find(|&at| text.is_char_boundary(at)).unwrap_or(0);
+    let ceil = |index: usize| (index.min(text.len())..=text.len()).find(|&at| text.is_char_boundary(at)).unwrap_or(text.len());
+    let room = budget.saturating_sub(EXCERPT_MARKER.len());
+    let head_end = floor(EXCERPT_HEAD_BYTES.min(room));
+    let tail_start = ceil(text.len() - (room - head_end));
+    let mut excerpt = String::with_capacity(budget);
+    excerpt.push_str(&text[..head_end]);
+    excerpt.push_str(EXCERPT_MARKER);
+    excerpt.push_str(&text[tail_start..]);
+    excerpt
+}
 
 fn equal(left: Option<&Value>, right: Option<&Value>) -> bool {
     matches!((left, right), (Some(l), Some(r)) if l == r)
@@ -468,6 +495,13 @@ pub fn recovered_round_projection(
     let (Some(text), Some(reasoning)) = (text, reasoning) else {
         return Err(StoreError::Conflict);
     };
+    // The transcript keeps every byte the model reasoned -- a later round of
+    // the same turn hands it back to the provider -- but what the controller
+    // shows and stores is an excerpt within the presentation limit. A "max"
+    // reasoning past it used to be committed here and then refused by the
+    // controller, on this answer and on every recovery after it, so the turn
+    // could never finish (beta report, 2026-09-28).
+    let reasoning = presentation_excerpt(reasoning, MAX_PRESENTATION_BYTES);
     if !get(assistant, "tool_calls").is_some_and(Value::is_array) {
         return Err(StoreError::Conflict);
     }
@@ -1250,6 +1284,12 @@ fn reduce_json_inner(input: &str) -> Result<Value, StoreError> {
             as_str(get(&envelope, "status")).ok_or(StoreError::InvalidArgument)?,
             as_str(get(&envelope, "failure_code")),
         )})),
+        // What a round's reasoning shows as, when the host builds the answer
+        // itself rather than from the projection.
+        "presentation_excerpt" => Ok(json!({ "text": presentation_excerpt(
+            as_str(get(&envelope, "text")).ok_or(StoreError::InvalidArgument)?,
+            MAX_PRESENTATION_BYTES,
+        )})),
         "public_result" => Ok(json!({ "output": public_result_for_completed_row(
             field("request")?, field("row")?, field("round")?,
         )})),
@@ -1282,6 +1322,51 @@ fn reduce_json_inner(input: &str) -> Result<Value, StoreError> {
         )})),
         "transcript_body" => Ok(json!({ "messages": transcript_for_body(messages())? })),
         _ => Err(StoreError::InvalidArgument),
+    }
+}
+
+#[cfg(test)]
+mod excerpt_tests {
+    use super::*;
+
+    #[test]
+    fn a_reasoning_within_the_limit_is_untouched() {
+        let text = "思".repeat(1000);
+        assert_eq!(presentation_excerpt(&text, MAX_PRESENTATION_BYTES), text);
+    }
+
+    // 400 KB of three-byte characters: the excerpt fits the limit exactly on
+    // character boundaries, keeps the opening and the end, and says where
+    // the middle was.
+    #[test]
+    fn an_over_long_reasoning_keeps_its_opening_and_its_end() {
+        let text = format!("开头{}结尾", "鹈".repeat(400 * 1024 / 3));
+        let excerpt = presentation_excerpt(&text, MAX_PRESENTATION_BYTES);
+        assert!(excerpt.len() <= MAX_PRESENTATION_BYTES, "{}", excerpt.len());
+        assert!(excerpt.len() > MAX_PRESENTATION_BYTES - 8);
+        assert!(excerpt.starts_with("开头"));
+        assert!(excerpt.ends_with("结尾"));
+        assert!(excerpt.contains(EXCERPT_MARKER));
+        // Idempotent: a second pass changes nothing.
+        assert_eq!(presentation_excerpt(&excerpt, MAX_PRESENTATION_BYTES), excerpt);
+    }
+
+    // The hosts build a fresh round's answer themselves and ask for the same
+    // cut through the envelope.
+    #[test]
+    fn the_hosts_get_the_same_cut_through_the_envelope() {
+        let text = "思".repeat(400 * 1024 / 3);
+        let reply: Value = serde_json::from_str(&reduce_json(
+            &json!({ "op": "presentation_excerpt", "text": text }).to_string(),
+        ))
+        .unwrap();
+        assert_eq!(reply["ok"], json!(true));
+        assert_eq!(reply["text"], json!(presentation_excerpt(&text, MAX_PRESENTATION_BYTES)));
+        let refused: Value = serde_json::from_str(&reduce_json(
+            &json!({ "op": "presentation_excerpt" }).to_string(),
+        ))
+        .unwrap();
+        assert_eq!(refused["ok"], json!(false));
     }
 }
 

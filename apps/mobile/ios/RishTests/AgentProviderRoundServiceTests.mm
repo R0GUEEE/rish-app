@@ -1803,6 +1803,49 @@ static NSDictionary *DSHProviderSmokeQueryRequest(NSDictionary *root,
   [NSFileManager.defaultManager removeItemAtURL:fixture.walRoot error:nil];
 }
 
+// A "max" reasoning past what the controller accepts: the answer and the
+// recovered projection both carry the core's excerpt, whose digest is its
+// own, so neither is refused on every read (beta report, 2026-09-28).
+- (void)testALongReasoningIsShownAsAnExcerptFreshAndRecovered {
+  DSHProviderSmokeFixture *fixture = [[DSHProviderSmokeFixture alloc] init];
+  NSMutableString *reasoning = [NSMutableString stringWithString:@"开头"];
+  for (NSUInteger index = 0; index < 400 * 1024 / 3; index += 1) [reasoning appendString:@"鹈"];
+  [reasoning appendString:@"结尾"];
+  NSMutableDictionary *result = [fixture.transport.result mutableCopy];
+  result[@"reasoning"] = reasoning;
+  fixture.transport.result = result;
+  NSError *error = nil;
+  NSDictionary *completed = [fixture.service
+      completeAgentRoundV2WithRequest:fixture.request error:&error];
+  XCTAssertNil(error);
+  NSString *shown = completed[@"outcome"][@"reasoning"];
+  XCTAssertTrue([shown isKindOfClass:NSString.class]);
+  XCTAssertLessThanOrEqual([shown lengthOfBytesUsingEncoding:NSUTF8StringEncoding], (NSUInteger)(256 * 1024));
+  XCTAssertTrue([shown hasPrefix:@"开头"]);
+  XCTAssertTrue([shown hasSuffix:@"结尾"]);
+  XCTAssertTrue([shown containsString:@"[…]"]);
+
+  fixture.transcripts.messages = @[
+    @{
+      @"schema_version" : @1,
+      @"role" : @"assistant",
+      @"round_index" : @0,
+      @"content" : @"done",
+      @"reasoning_content" : reasoning,
+      @"tool_calls" : @[],
+    },
+  ];
+  NSDictionary *selector = DSHProviderSmokeQueryRequest(
+      fixture.root, fixture.transcript, 3, NO);
+  NSDictionary *recovered = [fixture.service recoverAgentRoundWithRequest:selector
+                                                                       error:&error];
+  XCTAssertNil(error);
+  NSDictionary *round = recovered[@"completed_round"];
+  XCTAssertEqualObjects(round[@"reasoning"], shown);
+  XCTAssertEqualObjects(round[@"reasoning_text_sha256"], DSHWorkspaceSHA256Hex([shown dataUsingEncoding:NSUTF8StringEncoding]));
+  [NSFileManager.defaultManager removeItemAtURL:fixture.walRoot error:nil];
+}
+
 - (void)testRecoverCompletedRoundReturnsExactRedactedProjection {
   DSHProviderSmokeFixture *fixture = [[DSHProviderSmokeFixture alloc] init];
   NSError *error = nil;
