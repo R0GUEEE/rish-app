@@ -43,6 +43,9 @@ export function providerFailureMessage(
     return t('recovery.provider.credential', { status: status ?? '401/403' });
   }
   if (failure.code === 'E_COMPLETION_HTTP_429' || status === 429) return t('recovery.rateLimit');
+  // The answer arrived whole and was past what this app holds -- "max"
+  // thinking on a long task. Not an answer that never came.
+  if (failure.code === 'E_COMPLETION_RESPONSE_SIZE') return t('recovery.provider.tooLong');
   if (status === 404) return t('recovery.provider.notFound');
   if (failure.code === 'E_COMPLETION_HTTP_STATUS') {
     return t('recovery.provider.status', { status: status ?? '?' });

@@ -65,3 +65,10 @@ test('a refused round reads in words from its own code', () => {
   // The specific codes say it themselves; nothing is layered on top.
   expect(providerFailureMessage('E_AGENT_PROVIDER_CREDENTIAL', failure('E_COMPLETION_CREDENTIAL_UNAVAILABLE', 401), t)).toBeNull();
 });
+
+// An answer past what the app keeps arrived whole: it is not one that never
+// came, whatever the round's own (ambiguous) code says.
+test('an answer too long to keep is said as such', () => {
+  expect(providerFailureMessage('E_AGENT_ROUND_AMBIGUOUS', failure('E_COMPLETION_RESPONSE_SIZE'), t)).toBe(t('recovery.provider.tooLong'));
+  expect(t('recovery.provider.tooLong')).toContain('拆');
+});
