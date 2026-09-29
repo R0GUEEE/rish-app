@@ -72,3 +72,8 @@ test('an answer too long to keep is said as such', () => {
   expect(providerFailureMessage('E_AGENT_ROUND_AMBIGUOUS', failure('E_COMPLETION_RESPONSE_SIZE'), t)).toBe(t('recovery.provider.tooLong'));
   expect(t('recovery.provider.tooLong')).toContain('拆');
 });
+
+// An answer that arrived and could not be recorded is neither lost nor run.
+test('an answer that could not be recorded is said as such', () => {
+  expect(providerFailureMessage('E_AGENT_ROUND_AMBIGUOUS', failure('E_COMPLETION_ANSWER_UNRECORDED'), t)).toBe(t('recovery.provider.unrecorded'));
+});

@@ -195,6 +195,43 @@ class AndroidAgentContextRoundTest {
         }
     }
 
+    /**
+     * An answer that arrives but cannot be recorded -- a write_file whose
+     * arguments pass what a transcript holds. It used to throw out of the
+     * round with the row still in flight under a dead owner, and every later
+     * recovery answered it with a conflict, forever. It now settles as a
+     * failed provider call does: reconciled, ambiguous, the row out of flight.
+     */
+    @Test
+    fun anAnswerThatCannotBeRecordedSettlesTheRound() {
+        val content = "<circle/>".repeat(40 * 1024 / 9)
+        val arguments = JSONObject().put("path", "pelican.html").put("content", content).toString()
+        val reply = JSONObject().put("id", "resp-big-call").put("model", MODEL).put(
+            "choices",
+            JSONArray().put(
+                JSONObject().put("finish_reason", "tool_calls").put(
+                    "message",
+                    JSONObject().put("role", "assistant").put("content", JSONObject.NULL).put(
+                        "tool_calls",
+                        JSONArray().put(
+                            JSONObject().put("id", "call_big").put("type", "function").put(
+                                "function",
+                                JSONObject().put("name", "write_file").put("arguments", arguments),
+                            ),
+                        ),
+                    ),
+                ),
+            ),
+        ).toString()
+        roundAgainst("200 OK", reply) { ran ->
+            assertTrue(ran.provider.served.await(20, TimeUnit.SECONDS))
+            assertEquals(ran.result.toString().take(300), "ambiguous", ran.result.getString("status"))
+            val row = ran.wal.snapshot().getJSONArray("rounds").getJSONObject(0)
+            assertEquals("ambiguous", row.getString("state"))
+            assertEquals(JSONObject.NULL, row.get("owner"))
+        }
+    }
+
     private fun roundAgainst(status: String, reply: String, check: (Ran) -> Unit) {
         assumeTrue("rish agent core is not staged in this build", RishAgentCoreNative.available)
         assumeTrue("libgit2 is not staged in this build", RishLibgit2Native.available)

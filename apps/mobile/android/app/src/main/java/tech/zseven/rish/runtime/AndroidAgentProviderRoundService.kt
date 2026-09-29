@@ -302,14 +302,16 @@ internal class AndroidAgentProviderRoundService(
         }
 
         var refusalStatus: Int? = null
+        // The preview ends once the answer is recorded, not when the stream
+        // does: an answer that arrives and then cannot be recorded has to be
+        // able to say so.
+        var preview: ((JSONObject) -> Unit)? = null
         val reply = if (prepared == null) null else try {
             // Correlation first: a preview event that cannot be tied to the
             // round it belongs to is not display material, it is noise.
-            val preview = previewSink(request, locator)
+            preview = previewSink(request, locator)
             try {
-                transport.execute(prepared, preview).also {
-                    preview?.invoke(JSONObject().put("kind", "end").put("status", "validated"))
-                }
+                transport.execute(prepared, preview)
             } catch (failure: Exception) {
                 val end = JSONObject().put("kind", "end").put("status", "failed")
                     .put("failure_code", (failure as? RuntimeFailure)?.code ?: "E_COMPLETION_NATIVE")
@@ -344,7 +346,46 @@ internal class AndroidAgentProviderRoundService(
             JSONObject().put("op", "round_cas").put("row", dispatched),
         ).optJSONObject("cas") ?: throw Refused(CONFLICT)
         if (reply != null) {
-            return settle(request, locator, completeCas, reply, root ?: JSONObject(), authority, contextReceipt)
+            try {
+                return settle(request, locator, completeCas, reply, root ?: JSONObject(), authority, contextReceipt)
+                    .also { preview?.invoke(JSONObject().put("kind", "end").put("status", "validated")) }
+            } catch (failure: Exception) {
+                // The answer came whole; what failed is recording it.
+                preview?.invoke(
+                    JSONObject().put("kind", "end").put("status", "failed")
+                        .put("failure_code", "E_COMPLETION_ANSWER_UNRECORDED"),
+                )
+                // The answer arrived but could not be recorded -- a call's
+                // arguments past what a transcript holds, a transcript past its
+                // budget. Throwing left the row in flight under a dead owner,
+                // and every later recovery answered it with a conflict: the
+                // turn could neither finish nor be given up (beta report,
+                // 2026-09-29). Settle it as a failed provider call is settled:
+                // the owner released, the row reconciled -- dispatched, so
+                // ambiguous, which offers "Retry this turn" -- and the row's
+                // own state reported.
+                val settledRow = rowFor(wal.snapshot(), locator)
+                val stillOpen = settledRow?.optString("state") in setOf("in_flight", "cancel_requested")
+                if (!stillOpen) throw failure
+                android.util.Log.w(
+                    "RishAgent",
+                    "round answer could not be recorded: ${(failure as? Refused)?.code ?: failure.javaClass.simpleName}",
+                    failure,
+                )
+                liveTasks.unregister(nativeTaskId)
+                val openCas = decide(
+                    JSONObject().put("op", "round_cas").put("row", settledRow),
+                ).optJSONObject("cas") ?: throw failure
+                val reconciled = rounds.reconcile(locator, openCas)?.optJSONObject("row")
+                    ?: rowFor(wal.snapshot(), locator) ?: throw failure
+                val reconciledState = reconciled.optString("state")
+                if (reconciledState == "in_flight" || reconciledState == "cancel_requested") throw failure
+                return decide(
+                    JSONObject().put("op", "round_result").put("request", request)
+                        .put("row", reconciled).put("status", reconciledState)
+                        .put("failure_code", reconciled.optString("failure_code").ifEmpty { "E_AGENT_ROUND_AMBIGUOUS" }),
+                ).optJSONObject("result") ?: throw failure
+            }
         }
 
         // The provider call failed, so nobody is running this round any more.

@@ -46,6 +46,9 @@ export function providerFailureMessage(
   // The answer arrived whole and was past what this app holds -- "max"
   // thinking on a long task. Not an answer that never came.
   if (failure.code === 'E_COMPLETION_RESPONSE_SIZE') return t('recovery.provider.tooLong');
+  // The answer arrived and could not be recorded -- a file written in one
+  // call past what a round holds. Nothing ran; the turn can be asked again.
+  if (failure.code === 'E_COMPLETION_ANSWER_UNRECORDED') return t('recovery.provider.unrecorded');
   if (status === 404) return t('recovery.provider.notFound');
   if (failure.code === 'E_COMPLETION_HTTP_STATUS') {
     return t('recovery.provider.status', { status: status ?? '?' });
