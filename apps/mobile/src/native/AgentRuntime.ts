@@ -1353,8 +1353,7 @@ export class AgentRuntimeError extends Error {
     super(code);
     this.name = 'AgentRuntimeError';
     this.code = code;
-    this.diagnostic = code === 'E_AGENT_PERSISTENCE'
-      ? parseAgentRuntimeDiagnostic(diagnostic) : null;
+    this.diagnostic = parseAgentRuntimeDiagnostic(diagnostic);
   }
 }
 
@@ -5646,7 +5645,7 @@ async function invokeNative<Request, Result>(
   } catch (error) {
     throw new AgentRuntimeError(
       nativeFailureCode(error, 'E_AGENT_PERSISTENCE'),
-      selector === 'complete_agent_round_v2' ? agentRuntimeDiagnosticFromError(error) : null,
+      agentRuntimeDiagnosticFromError(error),
     );
   }
   try {

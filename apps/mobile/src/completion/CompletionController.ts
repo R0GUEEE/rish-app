@@ -4770,7 +4770,7 @@ export function createCompletionController(
       });
     } catch (error) {
       if (runEpoch !== epoch) return outcome('cancelled', state);
-      publish(stateFor('resume_available', { conversationId, turnId: attempt.turnId, attemptId, failureCode: agentFailure(error) }));
+      publish(stateFor('resume_available', { conversationId, turnId: attempt.turnId, attemptId, failureCode: agentFailure(error), failureDiagnostic: agentRuntimeDiagnosticFromError(error) }));
       return outcome('retryable', state);
     }
     if (runEpoch !== epoch) return outcome('cancelled', state);
@@ -4813,7 +4813,7 @@ export function createCompletionController(
     try {
       recovered = await agentRuntime.recoverAgentAttempt(recoveryRequest);
     } catch (error) {
-      publish(stateFor('resume_available', { conversationId, turnId: attempt.turnId, attemptId, failureCode: agentFailure(error) }));
+      publish(stateFor('resume_available', { conversationId, turnId: attempt.turnId, attemptId, failureCode: agentFailure(error), failureDiagnostic: agentRuntimeDiagnosticFromError(error) }));
       return outcome('retryable', state);
     }
     const evidence = mapEvidence('recover_agent_attempt', recoveryRequest, recovered);

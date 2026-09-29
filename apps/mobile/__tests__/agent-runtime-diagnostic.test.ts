@@ -27,11 +27,30 @@ test.each([
   })).toBeNull();
 });
 
-test('does not evaluate accessors or accept diagnostics for a different error', () => {
+test('does not evaluate accessors or accept diagnostics without a stable code', () => {
   const getter = jest.fn(() => marker);
   expect(agentRuntimeDiagnosticFromError(Object.defineProperty(
     { code: 'E_AGENT_PERSISTENCE' }, 'diagnostic', { get: getter },
   ))).toBeNull();
   expect(getter).not.toHaveBeenCalled();
-  expect(agentRuntimeDiagnosticFromError({ code: 'E_AGENT_CONFLICT', diagnostic: marker })).toBeNull();
+  expect(agentRuntimeDiagnosticFromError({ code: 'not a code', diagnostic: marker })).toBeNull();
+  // A message whose first line is not the rejection's own code is not read.
+  expect(agentRuntimeDiagnosticFromError({
+    code: 'E_AGENT_NATIVE', message: `E_AGENT_CONFLICT\n${marker}`,
+  })).toBeNull();
+});
+
+// What Android now answers with for any refusal: the operation, whether a
+// rule refused or something threw, the class and the app method -- which is
+// what turns a bare E_COMPLETION_NATIVE into a place in the code.
+test('reads the structured provenance of any native rejection', () => {
+  const diagnostic = 'agent_runtime/v1 operation=recover_agent_attempt kind=refused code=E_AGENT_NATIVE cause=Refused site=AndroidAgentRecoveryService.recover:212';
+  expect(agentRuntimeDiagnosticFromError({
+    code: 'E_AGENT_NATIVE', message: `E_AGENT_NATIVE\n${diagnostic}`,
+  })).toBe(diagnostic);
+  const thrown = 'agent_runtime/v1 operation=complete_agent_round_v2 kind=exception code=E_AGENT_NATIVE cause=JSONException site=AndroidAgentProviderRoundService$settle$1.invoke:431';
+  expect(parseAgentRuntimeDiagnostic(thrown)).toBe(thrown);
+  // Anything a person wrote cannot ride along.
+  expect(parseAgentRuntimeDiagnostic(`${thrown} note=hello`)).toBeNull();
+  expect(parseAgentRuntimeDiagnostic(thrown.replace('cause=JSONException', 'cause=/data/user/0'))).toBeNull();
 });
