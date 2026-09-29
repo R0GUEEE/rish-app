@@ -34,6 +34,41 @@ class LocalRuntimeModule(private val react: ReactApplicationContext) : ReactCont
     }
     private fun io(promise: Promise, action: () -> JSONObject) { runtime.io.execute { try { resolve(promise, action()) } catch(error: Exception) { reject(promise, error) } } }
     @ReactMethod fun bootstrap(promise: Promise) = io(promise) { runtime.proof() }
+
+    /**
+     * Puts a diagnostic report on the clipboard, for a tester to paste rather
+     * than screenshot. The report is assembled in JavaScript from value-free
+     * facts; this only copies it. Answers false rather than failing.
+     */
+    @ReactMethod fun copyText(text: String, promise: Promise) {
+        if (text.length > 64 * 1024) { promise.resolve(false); return }
+        UiThreadUtil.runOnUiThread {
+            try {
+                val clipboard = react.getSystemService(android.content.Context.CLIPBOARD_SERVICE)
+                    as android.content.ClipboardManager
+                clipboard.setPrimaryClip(android.content.ClipData.newPlainText("Rish diagnostics", text))
+                promise.resolve(true)
+            } catch (error: Exception) {
+                Log.w("RishRuntime", "diagnostic report could not be copied", error)
+                promise.resolve(false)
+            }
+        }
+    }
+
+    /** What build and device a diagnostic report comes from. */
+    @ReactMethod fun buildInfo(promise: Promise) {
+        promise.resolve(
+            Arguments.makeNativeMap(
+                mapOf(
+                    "build" to tech.zseven.rish.BuildConfig.RISH_BUILD_COMMIT,
+                    "platform" to "android",
+                    "os" to android.os.Build.VERSION.RELEASE,
+                    "api" to android.os.Build.VERSION.SDK_INT,
+                    "device" to "${android.os.Build.MANUFACTURER} ${android.os.Build.MODEL}",
+                ),
+            ),
+        )
+    }
     /**
      * The runtime proof for one harness. JavaScript asks this for every
      * harness but DSH since 2026-09-11 and, when the method is missing,

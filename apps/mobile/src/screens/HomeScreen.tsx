@@ -143,6 +143,8 @@ import { useAgentPolicy } from '../components/use-agent-policy';
 import { QuestionComposer } from '../components/QuestionComposer';
 import { DEFAULT_APPROVAL_TIMEOUT_MS } from '../agent/AgentApprovals';
 import { refusedAttemptRetryable } from '../agent/AgentRefusalRetry';
+import { buildErrorReport } from '../diagnostics/errorReport';
+import { buildInfo, copyText } from '../native/Diagnostics';
 import {
   createSessionPersistenceCoordinator,
   sessionSnapshotSHA256,
@@ -2006,6 +2008,25 @@ export function HomeScreen({
   const providerRefusalMessage = providerFailureNow?.attemptId === lastAttemptId
     ? providerFailureMessage(visibleRequestFailure, providerFailureNow, t) : null;
   const providerRefusal = providerRefusalMessage !== null ? providerFailureNow : null;
+
+  // A report a tester can paste instead of a screenshot of one code: the
+  // failure as this screen and the durable attempt know it, value-free
+  // (errorReport.ts says what may appear in it and what never does).
+  const copyFailureReport = useCallback(async (): Promise<boolean> => {
+    const info = await buildInfo();
+    const state = store.getState();
+    const conversationId = activeConversation?.id ?? null;
+    const report = buildErrorReport({
+      now: new Date().toISOString(),
+      build: info,
+      notice: visibleRequestFailure ?? storageWarning ?? '',
+      controller: completionController.getState(),
+      providerFailure: providerFailureNow?.attemptId === lastAttemptId ? providerFailureNow : null,
+      conversation: conversationId === null ? null : state.conversations[conversationId] ?? null,
+      sessionEvents: state.sessionEvents ?? [],
+    });
+    return copyText(report);
+  }, [activeConversation?.id, completionController, lastAttemptId, providerFailureNow, storageWarning, store, visibleRequestFailure]);
 
   const applyCompletionOutcome = useCallback(
     (result: CompletionControllerOutcome, expectedEpoch: number) => {
@@ -6530,6 +6551,7 @@ export function HomeScreen({
                     : visibleRequestFailure ?? storageWarning ?? ''}
                 message={providerRefusalMessage ?? (recoveryCode(visibleRequestFailure ?? storageWarning ?? '') === null
                   ? visibleRequestFailure ?? storageWarning ?? undefined : undefined)}
+                onCopyReport={copyFailureReport}
               />
               {sessionLoadFailure !== null && (
                 <Pressable

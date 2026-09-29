@@ -2327,6 +2327,30 @@ static NSString *DSHCredentialPromptPlaceholder(NSString *account) {
   }
   return YES;
 }
+// Puts a diagnostic report on the clipboard, for a tester to paste rather
+// than screenshot. The report is assembled in JavaScript from value-free
+// facts; this only copies it. Answers NO rather than failing.
+RCT_REMAP_METHOD(copyText, copyText:(NSString *)text resolver:(RCTPromiseResolveBlock)resolve rejecter:(__unused RCTPromiseRejectBlock)reject) {
+  if (![text isKindOfClass:NSString.class] || text.length > 64 * 1024) { resolve(@NO); return; }
+  dispatch_async(dispatch_get_main_queue(), ^{
+    UIPasteboard.generalPasteboard.string = text;
+    resolve(@YES);
+  });
+}
+// What build and device a diagnostic report comes from.
+RCT_REMAP_METHOD(buildInfo, buildInfoWithResolver:(RCTPromiseResolveBlock)resolve rejecter:(__unused RCTPromiseRejectBlock)reject) {
+  NSDictionary *bundle = NSBundle.mainBundle.infoDictionary;
+  NSString *build = [bundle[@"RishBuildCommit"] isKindOfClass:NSString.class] ? bundle[@"RishBuildCommit"]
+      : ([bundle[@"CFBundleVersion"] isKindOfClass:NSString.class] ? bundle[@"CFBundleVersion"] : @"unknown");
+  dispatch_async(dispatch_get_main_queue(), ^{
+    resolve(@{
+      @"build" : build,
+      @"platform" : @"ios",
+      @"os" : UIDevice.currentDevice.systemVersion ?: @"",
+      @"device" : UIDevice.currentDevice.model ?: @"",
+    });
+  });
+}
 RCT_REMAP_METHOD(dshModelCatalog, dshModelCatalogWithResolver:(RCTPromiseResolveBlock)resolve rejecter:(RCTPromiseRejectBlock)reject) {
   NSDictionary *value = DSHDshModelCatalog();
   if (value) resolve(value); else reject(@"E_MODEL_CATALOG", @"E_MODEL_CATALOG", nil);
