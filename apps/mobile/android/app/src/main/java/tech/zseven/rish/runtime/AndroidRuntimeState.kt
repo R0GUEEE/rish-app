@@ -21,8 +21,17 @@ internal class AndroidRuntimeState private constructor(val app: Application) {
     /// the registry, paired with the workspace root as its working tree.
     val workspaceProjects = AndroidWorkspaceProjects(workspaces)
     val roots = AndroidAgentRootResolver(workspaces, workspaceProjects)
+    /// Forgetting a workspace and deleting its owned content, cleared
+    /// against the committed session and journaled on disk.
+    val workspaceRemoval = AndroidWorkspaceRemoval(sessions, workspaces, workspaceProjects)
     val projectContext = AndroidProjectContextService(workspaceProjects, roots)
-    val projectGit = AndroidProjectGit(workspaceProjects, workspaces)
+    /// Git HTTPS credentials by (project, host), and the roots OpenSSL trusts
+    /// when a push leaves the device.
+    val gitCredentials = AndroidGitCredentials(app)
+    val gitRoots = AndroidGitCertificates.ensure(app)
+    val projectGit = AndroidProjectGit(workspaceProjects, workspaces, gitCredentials)
+    /// A public repository into a new workspace, the network half staged first.
+    val workspaceClone = AndroidWorkspaceClone(app, workspaces, workspaceProjects, gitCredentials)
     /// Prepared context snapshots, outside backup like the agent WAL.
     val projectContextStore = AndroidProjectContextStore(java.io.File(app.noBackupFilesDir, "project-context"))
     val projectSnapshots = AndroidProjectContextSnapshots(
@@ -38,8 +47,8 @@ internal class AndroidRuntimeState private constructor(val app: Application) {
     val agentOperations = AndroidAgentOperations(agentWal)
     val executionLedger = AndroidAgentExecutionLedger(agentWal, liveTasks, agentOperations)
     val workspaceTools = AndroidWorkspaceToolExecutor(workspaces, roots)
-    /// The agent's git_status and git_commit, over an attached project.
-    val gitTools = AndroidAgentGitToolExecutor(workspaceProjects, workspaces, roots)
+    /// The agent's git_status, git_commit and git_push, over an attached project.
+    val gitTools = AndroidAgentGitToolExecutor(workspaceProjects, workspaces, roots, gitCredentials) { sessions.committedGitProxy() }
     val agentPolicy = AndroidAgentPolicyService(roots, AndroidAgentToolRegistry)
     val agentRounds = AndroidAgentRoundJournal(agentWal, liveTasks)
     val agentTranscripts = AndroidAgentTranscriptStore(agentWal)
@@ -55,7 +64,10 @@ internal class AndroidRuntimeState private constructor(val app: Application) {
     val approvals = AndroidAgentApprovalService(
         agentWal, sessions, executionLedger, agentOperations, roots,
     )
-    val transport = AndroidModelTransport(credentials, configurations)
+    /// Files a person attached to a message: copied in once, because a
+    /// document URI is a borrowed permission and a draft has to outlive it.
+    val attachments = AndroidAttachmentStore(app.filesDir)
+    val transport = AndroidModelTransport(credentials, configurations, attachments)
     val providerRound = AndroidAgentProviderRoundService(
         sessions, preparedAttempts, agentRounds, roots, AndroidAgentToolRegistry, transport, agentWal,
         agentOperations, liveTasks, agentTranscripts, projectSnapshots,
@@ -71,9 +83,6 @@ internal class AndroidRuntimeState private constructor(val app: Application) {
         agentWal, sessions, preparedAttempts, executionLedger, providerRound, roots,
         agentOperations,
     )
-    /// Files a person attached to a message: copied in once, because a
-    /// document URI is a borrowed permission and a draft has to outlive it.
-    val attachments = AndroidAttachmentStore(app.filesDir)
     /// What the Files drawer lists and opens, over the same roots and the
     /// same core rules the agent's tools use.
     val workspaceFiles = AndroidWorkspaceFiles(workspaces, roots)

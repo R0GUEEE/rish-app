@@ -66,7 +66,33 @@ typedef NS_ENUM(NSInteger, DSHGitPushOutcome) {
   DSHGitPushOutcomeTimedOut,
   DSHGitPushOutcomeCancelled,
   DSHGitPushOutcomeFailed,
+  /// The proxy the person set refused, failed or could not be reached.
+  /// Last, so the values before it keep their numbers.
+  DSHGitPushOutcomeProxyFailed,
 };
+
+/// Whether libgit2's last error came from `proxyURL` rather than the
+/// repository: libgit2 words every proxy refusal "proxy ..." (including a
+/// 407, which it returns as GIT_EAUTH), and names an unreachable proxy's
+/// host in the connect error. NO when no proxy is set. Ask before treating
+/// GIT_EAUTH as the repository turning a credential away.
+BOOL DSHGitProxyFailed(NSString *_Nullable proxyURL);
+
+/// The one spelling libgit2 is handed for a person's HTTPS proxy,
+/// `scheme://host:port/`: an http or https proxy with a host and an explicit
+/// port and nothing else (no path, credentials, query or fragment). nil for
+/// nil, NSNull or an empty string (no proxy); nil with `*invalid = YES` for
+/// anything else. The panel's options and the committed session's
+/// preferences are judged by the same rule.
+NSString *_Nullable DSHGitCanonicalProxyURL(id _Nullable value, BOOL *_Nullable invalid);
+
+/// The Git proxy a loaded session snapshot holds
+/// (`preferences.git_https_proxy_url`, canonical), or nil for none: no
+/// session yet, or no proxy in it. A snapshot that could not be loaded or
+/// read, or a value that no longer validates, sets `*unavailable` -- that is
+/// not "no proxy". `loaded` is what DSHSessionSnapshotStore's
+/// loadSessionSnapshotWithError: answers (nil when it failed).
+NSString *_Nullable DSHCommittedGitProxyURL(NSDictionary *_Nullable loaded, BOOL *_Nullable unavailable);
 
 /// Cancellation token polled by the bounded push runner.
 @interface DSHGitPushCancelToken : NSObject

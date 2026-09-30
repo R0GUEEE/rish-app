@@ -58,7 +58,24 @@ class LocalAttachmentsModule(reactContext: ReactApplicationContext) :
         reactContext.addActivityEventListener(this)
     }
 
-    override fun getConstants(): MutableMap<String, Any> = mutableMapOf("implemented" to true)
+    /**
+     * `model_delivery` lists the attachment kinds this platform can actually
+     * put in front of a model: an image becomes a content part, text is folded
+     * into the message, and a PDF becomes its pages drawn as pictures, all in
+     * `AndroidAttachmentContent`. `model_vision_kinds` lists the kinds that
+     * therefore need a model that reads images -- on Android a PDF does, on
+     * iOS (which reads its text, and exports no such key) only an image.
+     *
+     * JavaScript reads this to stop a send before a turn starts, with the
+     * draft and the attachment kept, rather than letting the person watch a
+     * round fail for a reason nothing explains. iOS exports no such key, and
+     * an absent key means every kind.
+     */
+    override fun getConstants(): MutableMap<String, Any> = mutableMapOf(
+        "implemented" to true,
+        "model_delivery" to listOf("image", "text", "pdf"),
+        "model_vision_kinds" to listOf("image", "pdf"),
+    )
 
     override fun getName(): String = "LocalAttachments"
 

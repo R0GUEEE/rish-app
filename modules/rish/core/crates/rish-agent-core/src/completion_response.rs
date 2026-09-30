@@ -31,6 +31,13 @@ pub const FINISH_RELATION: &str = "E_COMPLETION_FINISH_RELATION";
 pub const MAX_ARGUMENTS_BYTES: usize = 32768;
 const MAX_TOOL_NAME: usize = 64;
 const MAX_TEXT_BYTES: usize = 256 * 1024;
+/// Reasoning is protocol state, not the answer: a later round of the same
+/// turn hands it back to the provider, and "max" thinking writes far more
+/// than an answer does. It is bounded here only loosely -- the turn's
+/// transcript budget (2 MiB) is what really holds it -- and what the person
+/// sees is an excerpt within the presentation limit
+/// (`provider_round::presentation_excerpt`).
+const MAX_REASONING_BYTES: usize = 1024 * 1024;
 const MAX_TOOL_CALLS: usize = 16;
 const MAX_IDENTIFIER_BYTES: usize = 128;
 
@@ -237,7 +244,7 @@ fn parse_projected(
     let raw_reasoning = message.get("reasoning_content");
     let reasoning: String = match raw_reasoning {
         None | Some(Value::Null) => String::new(),
-        other => bounded_utf8(other, MAX_TEXT_BYTES, true)
+        other => bounded_utf8(other, MAX_REASONING_BYTES, true)
             .ok_or(EMPTY_RESPONSE)?
             .to_string(),
     };

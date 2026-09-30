@@ -418,3 +418,31 @@ fn the_reducer_answers_every_op_it_claims_to() {
     // An op it does not know is refused, not silently parsed.
     assert_eq!(run(json!({ "op": "teleport" }))["ok"], json!(false));
 }
+
+/// "Max" thinking writes more reasoning than an answer: past the answer's
+/// 256 KiB, up to 1 MiB, it is accepted (the turn's transcript budget holds
+/// it; the person sees an excerpt). The answer itself keeps its limit.
+#[test]
+fn a_long_reasoning_is_accepted_but_not_an_unbounded_one() {
+    let long = "鹈".repeat(300 * 1024 / 3);
+    let parsed = parse(
+        &response(json!({ "role": "assistant", "content": "done", "reasoning_content": long }), "stop"),
+        &facts("max"),
+    )
+    .expect("a 300 KiB reasoning parses");
+    assert_eq!(parsed["reasoning"].as_str().map(str::len), Some(long.len()));
+
+    let unbounded = "r".repeat(MAX_REASONING_BYTES + 1);
+    assert!(parse(
+        &response(json!({ "role": "assistant", "content": "done", "reasoning_content": unbounded }), "stop"),
+        &facts("max"),
+    )
+    .is_err());
+
+    let long_answer = "a".repeat(MAX_TEXT_BYTES + 1);
+    assert!(parse(
+        &response(json!({ "role": "assistant", "content": long_answer }), "stop"),
+        &facts("off"),
+    )
+    .is_err());
+}

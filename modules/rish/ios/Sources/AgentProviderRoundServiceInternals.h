@@ -1,6 +1,14 @@
 #import "AgentProviderRoundService.h"
+#import "LocalAttachmentStore.h"
 
 NS_ASSUME_NONNULL_BEGIN
+
+/// Where an attachment reference's bytes come from. Defaults to the store's
+/// own resolver; a test puts a double here to exercise the projection without
+/// a real attachment on disk.
+@interface DSHAgentProviderRoundService ()
+@property(nonatomic, copy) DSHAttachmentResolver attachmentResolver;
+@end
 
 /// Private native-only state shared by the provider coordinator and its
 /// bounded helper functions.  It is never exposed through RCT.
@@ -91,7 +99,12 @@ FOUNDATION_EXPORT NSDictionary * _Nullable DSHProviderPublicResult(
 /// The failure code a round row's state implies. `kind` is one of "query",
 /// "reconciled" or "cancelled"; "ownerless" additionally answers whether the
 /// state is one recovery may report directly, through `reportable`.
+/// `recorded` is the cause the row itself keeps, which the core prefers to
+/// the generic answer and never lets soften an ambiguity.
+/// A round's reasoning as the controller shows it: itself within the
+/// presentation limit, otherwise its opening and end around a marker.
+FOUNDATION_EXPORT NSString *DSHProviderPresentationExcerpt(NSString *reasoning);
 FOUNDATION_EXPORT NSDictionary * _Nullable DSHProviderRoundFailureCode(
-    NSString *kind, NSString * _Nullable state);
+    NSString *kind, NSString * _Nullable state, id _Nullable recorded);
 
 NS_ASSUME_NONNULL_END

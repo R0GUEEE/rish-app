@@ -822,6 +822,9 @@ static BOOL DSHCanConnectToMacProxy(void) {
 @property(nonatomic, strong) DSHCompletionProviderTransport *codexProviderTransport;
 @property(nonatomic, strong) CodexSubscriptionTransport *codexSubscriptionTransport;
 @property(nonatomic, strong) GlmProviderTransport *glmProviderTransport;
+/// DSH and GLM through a relay the person configured.
+@property(nonatomic, strong) DSHCompletionProviderTransport *dshConfiguredTransport;
+@property(nonatomic, strong) DSHCompletionProviderTransport *glmConfiguredTransport;
 @property(nonatomic, strong) NSURLSessionDataTask *activeCompletionTask;
 @property(nonatomic, strong) id<DSHCompletionExecution> activeCompletionExecution;
 @property(nonatomic, copy) NSString *activeCompletionRequestId;
@@ -868,6 +871,158 @@ static BOOL DSHCanConnectToMacProxy(void) {
                      resolver:(RCTPromiseResolveBlock)resolve
                       rejecter:(RCTPromiseRejectBlock)reject;
 @end
+
+// The one projection of a visible history's attachment references into what
+// a model is shown, for the plain chat path and the Agent round path alike.
+//
+// It used to be a LocalRuntimeModule method, which is why only the chat path
+// used it: the Agent round service passed the visible history straight to
+// the request builder, which reads a message's `content` and ignores its
+// `attachments`, so an image attached to an Agent turn was silently dropped
+// and the model answered about a picture it was never shown.
+NSArray<NSDictionary *> *DSHProjectHistoryAttachments(
+    NSArray *history, NSString *model, DSHAttachmentResolver _Nullable resolver,
+    NSError **error) {
+  if (resolver == nil) {
+    if (error != nil) {
+      *error = DSHLocalRuntimeError(1024, @"Message attachments are invalid");
+    }
+    return nil;
+  }
+  NSMutableArray<NSDictionary *> *messages =
+      [NSMutableArray arrayWithCapacity:history.count];
+  NSUInteger attachmentCount = 0;
+  uint64_t attachmentBytes = 0;
+  NSUInteger expandedBytes = 0;
+  for (NSDictionary *message in history) {
+    NSString *role = DSHString(message[@"role"]);
+    NSString *content = DSHString(message[@"content"]);
+    NSArray *attachmentEntries = DSHArray(message[@"attachments"]);
+    BOOL hasPrompt = [[content stringByTrimmingCharactersInSet:
+        NSCharacterSet.whitespaceAndNewlineCharacterSet] length] > 0;
+    NSMutableSet<NSString *> *messageAttachmentIDs = [NSMutableSet set];
+    NSMutableArray<NSString *> *orderedText = [NSMutableArray array];
+    NSMutableArray<NSDictionary *> *orderedParts = [NSMutableArray array];
+    BOOL hasImage = NO;
+    for (id attachmentEntry in attachmentEntries) {
+      NSData *payload = nil;
+      NSDictionary *manifest = nil;
+      NSDictionary *reference = resolver(
+          attachmentEntry, &payload, &manifest, error);
+      NSString *identifier = DSHString(reference[@"id"]);
+      if (reference == nil || [messageAttachmentIDs containsObject:identifier]) {
+        if (reference != nil && error != nil) {
+          *error = DSHLocalRuntimeError(1032,
+              @"Duplicate attachment reference");
+        }
+        return nil;
+      }
+      [messageAttachmentIDs addObject:identifier];
+      uint64_t size = [reference[@"size"] unsignedLongLongValue];
+      if (attachmentCount >= DSHMaximumAttachmentCount ||
+          size > DSHMaximumAttachmentBytes - attachmentBytes) {
+        if (error != nil) {
+          *error = DSHLocalRuntimeError(1033,
+              @"Conversation attachments exceed the request limit");
+        }
+        return nil;
+      }
+      attachmentCount += 1;
+      attachmentBytes += size;
+      NSString *kind = DSHString(reference[@"kind"]);
+      if ([kind isEqualToString:@"image"]) {
+        if (!DSHDshModelSupportsImages(model) ||
+            payload == nil ||
+            payload.length != [manifest[@"size"] unsignedLongLongValue]) {
+          if (error != nil) {
+            *error = DSHLocalRuntimeError(1035,
+                @"Image attachment cannot be read safely");
+          }
+          return nil;
+        }
+        NSString *mimeType = DSHString(manifest[@"mime_type"]);
+        NSString *encoded = [payload base64EncodedStringWithOptions:0];
+        NSString *dataURL = [NSString stringWithFormat:@"data:%@;base64,%@",
+            mimeType, encoded];
+        [orderedParts addObject:@{
+          @"type": @"image_url",
+          @"image_url": @{@"url": dataURL},
+        }];
+        hasImage = YES;
+      } else {
+        NSString *text = nil;
+        NSString *label = nil;
+        if ([kind isEqualToString:@"text"]) {
+          text = DSHReadUTF8Attachment(payload, error);
+          label = @"TEXT";
+        } else if ([kind isEqualToString:@"pdf"]) {
+          text = DSHExtractPDFAttachment(payload, error);
+          label = @"PDF";
+        }
+        if (text == nil || label == nil) {
+          if (error != nil && *error == nil) {
+            *error = DSHLocalRuntimeError(1036,
+                @"Unsupported attachment kind");
+          }
+          return nil;
+        }
+        NSString *projection = DSHDelimitedAttachment(reference, text, label);
+        [orderedText addObject:projection];
+        [orderedParts addObject:@{@"type": @"text", @"text": projection}];
+      }
+    }
+
+    id providerContent = nil;
+    if (!hasImage) {
+      NSMutableArray<NSString *> *parts = [NSMutableArray array];
+      if (hasPrompt) [parts addObject:content];
+      [parts addObjectsFromArray:orderedText];
+      providerContent = [parts componentsJoinedByString:@"\n\n"];
+      NSUInteger messageBytes =
+          [providerContent lengthOfBytesUsingEncoding:NSUTF8StringEncoding];
+      if (messageBytes > DSHMaximumExpandedHistoryBytes - expandedBytes) {
+        if (error != nil) {
+          *error = DSHLocalRuntimeError(1037,
+              @"Expanded attachment text exceeds the request limit");
+        }
+        return nil;
+      }
+      expandedBytes += messageBytes;
+    } else {
+      NSMutableArray<NSDictionary *> *parts = [NSMutableArray array];
+      if (hasPrompt) {
+        [parts addObject:@{@"type": @"text", @"text": content}];
+      }
+      [parts addObjectsFromArray:orderedParts];
+      NSUInteger messageBytes = hasPrompt
+          ? [content lengthOfBytesUsingEncoding:NSUTF8StringEncoding] : 0;
+      for (NSDictionary *part in orderedParts) {
+        if ([part[@"type"] isEqualToString:@"text"]) {
+          messageBytes += [part[@"text"]
+              lengthOfBytesUsingEncoding:NSUTF8StringEncoding];
+        }
+      }
+      if (messageBytes > DSHMaximumExpandedHistoryBytes - expandedBytes) {
+        if (error != nil) {
+          *error = DSHLocalRuntimeError(1037,
+              @"Expanded attachment text exceeds the request limit");
+        }
+        return nil;
+      }
+      expandedBytes += messageBytes;
+      providerContent = parts;
+    }
+    [messages addObject:@{@"role": role, @"content": providerContent}];
+  }
+  return messages;
+}
+
+DSHAttachmentResolver DSHDefaultAttachmentResolver(void) {
+  return [^NSDictionary *(id value, NSData **payloadData,
+                          NSDictionary **manifestOut, NSError **error) {
+    return DSHResolveAttachmentReference(value, payloadData, manifestOut, error);
+  } copy];
+}
 
 @implementation LocalRuntimeModule
 
@@ -1033,6 +1188,14 @@ RCT_EXPORT_MODULE(LocalRuntime)
         initWithHarness:@"codex" session:_modelSession
         uuidGenerator:_completionV2UUIDGenerator
         monotonicClock:_completionV2MonotonicClock store:DSHProviderConfigurationStore.sharedStore];
+    _dshConfiguredTransport = [[DSHConfiguredProviderTransport alloc]
+        initWithHarness:@"dsh" session:_modelSession
+        uuidGenerator:_completionV2UUIDGenerator
+        monotonicClock:_completionV2MonotonicClock store:DSHProviderConfigurationStore.sharedStore];
+    _glmConfiguredTransport = [[DSHConfiguredProviderTransport alloc]
+        initWithHarness:@"glm" session:_modelSession
+        uuidGenerator:_completionV2UUIDGenerator
+        monotonicClock:_completionV2MonotonicClock store:DSHProviderConfigurationStore.sharedStore];
     _codexSubscriptionTransport = [[CodexSubscriptionTransport alloc]
         initWithSession:_modelSession uuidGenerator:_completionV2UUIDGenerator
         monotonicClock:_completionV2MonotonicClock];
@@ -1067,8 +1230,10 @@ RCT_EXPORT_MODULE(LocalRuntime)
     }
   }
   if ([harnessId isEqualToString:@"codex"]) return [[self.harnessAuthService codexChatSource] isEqual:@"api_key"] ? self.codexProviderTransport : self.codexSubscriptionTransport;
-  if ([harnessId isEqualToString:@"glm"]) return self.glmProviderTransport;
-  return self.completionProviderTransport;
+  // A relay configured for GLM replaces its account and its endpoint.
+  if ([harnessId isEqualToString:@"glm"])
+    return DSHHarnessUsesCustomProvider(@"glm") ? self.glmConfiguredTransport : self.glmProviderTransport;
+  return DSHHarnessUsesCustomProvider(@"dsh") ? self.dshConfiguredTransport : self.completionProviderTransport;
 }
 
 - (NSString *)credentialAccountForHarnessId:(NSString *)harnessId {
@@ -1171,7 +1336,9 @@ RCT_EXPORT_MODULE(LocalRuntime)
             [status[@"runtime"][@"available"] boolValue])
         ? errSecSuccess : errSecItemNotFound;
   }
-  if ([account isEqual:@"BIGMODEL_API_KEY"]) {
+  // A relay configured for GLM keeps its own key; the account choice is
+  // for GLM's own service.
+  if ([account isEqual:@"BIGMODEL_API_KEY"] && !DSHHarnessUsesCustomProvider(@"glm")) {
     NSString *source = [self.glmCredentialSelection source];
     if (!source) return errSecDecode;
     if (![source isEqual:@"api_key"])
@@ -1202,7 +1369,7 @@ RCT_EXPORT_MODULE(LocalRuntime)
     // accessor, so no token or synthetic API key crosses this method.
     return nil;
   }
-  if ([account isEqual:@"BIGMODEL_API_KEY"]) {
+  if ([account isEqual:@"BIGMODEL_API_KEY"] && !DSHHarnessUsesCustomProvider(@"glm")) {
     NSString *source = [self.glmCredentialSelection source];
     if (!source) return nil;
     if (![source isEqual:@"api_key"]) return [self.glmCredentialSelection credentialWithAccountAuth:self.zcodeAccountAuthService];
@@ -1266,6 +1433,8 @@ RCT_EXPORT_MODULE(LocalRuntime)
     [self.claudeProviderTransport cancelTask:task];
     [self.codexProviderTransport cancelTask:task];
     [self.codexSubscriptionTransport cancelTask:task];
+    [self.dshConfiguredTransport cancelTask:task];
+    [self.glmConfiguredTransport cancelTask:task];
   }
   if (execution != nil) [execution cancel];
   if (strictRejecter != nil) {
@@ -1494,132 +1663,8 @@ RCT_EXPORT_MODULE(LocalRuntime)
     (NSArray *)history
     model:(NSString *)model
     error:(NSError **)error {
-  NSMutableArray<NSDictionary *> *messages =
-      [NSMutableArray arrayWithCapacity:history.count];
-  NSUInteger attachmentCount = 0;
-  uint64_t attachmentBytes = 0;
-  NSUInteger expandedBytes = 0;
-  for (NSDictionary *message in history) {
-    NSString *role = DSHString(message[@"role"]);
-    NSString *content = DSHString(message[@"content"]);
-    NSArray *attachmentEntries = DSHArray(message[@"attachments"]);
-    BOOL hasPrompt = [[content stringByTrimmingCharactersInSet:
-        NSCharacterSet.whitespaceAndNewlineCharacterSet] length] > 0;
-    NSMutableSet<NSString *> *messageAttachmentIDs = [NSMutableSet set];
-    NSMutableArray<NSString *> *orderedText = [NSMutableArray array];
-    NSMutableArray<NSDictionary *> *orderedParts = [NSMutableArray array];
-    BOOL hasImage = NO;
-    for (id attachmentEntry in attachmentEntries) {
-      NSData *payload = nil;
-      NSDictionary *manifest = nil;
-      NSDictionary *reference = self.completionAttachmentResolver(
-          attachmentEntry, &payload, &manifest, error);
-      NSString *identifier = DSHString(reference[@"id"]);
-      if (reference == nil || [messageAttachmentIDs containsObject:identifier]) {
-        if (reference != nil && error != nil) {
-          *error = DSHLocalRuntimeError(1032,
-              @"Duplicate attachment reference");
-        }
-        return nil;
-      }
-      [messageAttachmentIDs addObject:identifier];
-      uint64_t size = [reference[@"size"] unsignedLongLongValue];
-      if (attachmentCount >= DSHMaximumAttachmentCount ||
-          size > DSHMaximumAttachmentBytes - attachmentBytes) {
-        if (error != nil) {
-          *error = DSHLocalRuntimeError(1033,
-              @"Conversation attachments exceed the request limit");
-        }
-        return nil;
-      }
-      attachmentCount += 1;
-      attachmentBytes += size;
-      NSString *kind = DSHString(reference[@"kind"]);
-      if ([kind isEqualToString:@"image"]) {
-        if (!DSHDshModelSupportsImages(model) ||
-            payload == nil ||
-            payload.length != [manifest[@"size"] unsignedLongLongValue]) {
-          if (error != nil) {
-            *error = DSHLocalRuntimeError(1035,
-                @"Image attachment cannot be read safely");
-          }
-          return nil;
-        }
-        NSString *mimeType = DSHString(manifest[@"mime_type"]);
-        NSString *encoded = [payload base64EncodedStringWithOptions:0];
-        NSString *dataURL = [NSString stringWithFormat:@"data:%@;base64,%@",
-            mimeType, encoded];
-        [orderedParts addObject:@{
-          @"type": @"image_url",
-          @"image_url": @{@"url": dataURL},
-        }];
-        hasImage = YES;
-      } else {
-        NSString *text = nil;
-        NSString *label = nil;
-        if ([kind isEqualToString:@"text"]) {
-          text = DSHReadUTF8Attachment(payload, error);
-          label = @"TEXT";
-        } else if ([kind isEqualToString:@"pdf"]) {
-          text = DSHExtractPDFAttachment(payload, error);
-          label = @"PDF";
-        }
-        if (text == nil || label == nil) {
-          if (error != nil && *error == nil) {
-            *error = DSHLocalRuntimeError(1036,
-                @"Unsupported attachment kind");
-          }
-          return nil;
-        }
-        NSString *projection = DSHDelimitedAttachment(reference, text, label);
-        [orderedText addObject:projection];
-        [orderedParts addObject:@{@"type": @"text", @"text": projection}];
-      }
-    }
-
-    id providerContent = nil;
-    if (!hasImage) {
-      NSMutableArray<NSString *> *parts = [NSMutableArray array];
-      if (hasPrompt) [parts addObject:content];
-      [parts addObjectsFromArray:orderedText];
-      providerContent = [parts componentsJoinedByString:@"\n\n"];
-      NSUInteger messageBytes =
-          [providerContent lengthOfBytesUsingEncoding:NSUTF8StringEncoding];
-      if (messageBytes > DSHMaximumExpandedHistoryBytes - expandedBytes) {
-        if (error != nil) {
-          *error = DSHLocalRuntimeError(1037,
-              @"Expanded attachment text exceeds the request limit");
-        }
-        return nil;
-      }
-      expandedBytes += messageBytes;
-    } else {
-      NSMutableArray<NSDictionary *> *parts = [NSMutableArray array];
-      if (hasPrompt) {
-        [parts addObject:@{@"type": @"text", @"text": content}];
-      }
-      [parts addObjectsFromArray:orderedParts];
-      NSUInteger messageBytes = hasPrompt
-          ? [content lengthOfBytesUsingEncoding:NSUTF8StringEncoding] : 0;
-      for (NSDictionary *part in orderedParts) {
-        if ([part[@"type"] isEqualToString:@"text"]) {
-          messageBytes += [part[@"text"]
-              lengthOfBytesUsingEncoding:NSUTF8StringEncoding];
-        }
-      }
-      if (messageBytes > DSHMaximumExpandedHistoryBytes - expandedBytes) {
-        if (error != nil) {
-          *error = DSHLocalRuntimeError(1037,
-              @"Expanded attachment text exceeds the request limit");
-        }
-        return nil;
-      }
-      expandedBytes += messageBytes;
-      providerContent = parts;
-    }
-    [messages addObject:@{@"role": role, @"content": providerContent}];
-  }
-  return messages;
+  return DSHProjectHistoryAttachments(
+      history, model, self.completionAttachmentResolver, error);
 }
 
 - (BOOL)importStagedCredential:(NSError **)error {
@@ -2212,6 +2257,8 @@ willPerformHTTPRedirection:(__unused NSHTTPURLResponse *)response
               : ([self.codexProviderTransport handlesTask:task]
                   ? self.codexProviderTransport : nil));
   if (!owningTransport && [self.codexSubscriptionTransport handlesTask:task]) owningTransport = self.codexSubscriptionTransport;
+  if (!owningTransport && [self.dshConfiguredTransport handlesTask:task]) owningTransport = self.dshConfiguredTransport;
+  if (!owningTransport && [self.glmConfiguredTransport handlesTask:task]) owningTransport = self.glmConfiguredTransport;
   if (owningTransport != nil) {
     [owningTransport handleHTTPRedirectionForTask:task
         newRequest:request
@@ -2262,7 +2309,8 @@ static NSString *DSHCredentialPromptPlaceholder(NSString *account) {
   @synchronized(self) {
     if (self.activeCompletionRequestId != nil || [self.claudeProviderTransport hasActiveRequests] || [self.claudeSubscriptionTransport hasActiveRequests] ||
         [self.codexProviderTransport hasActiveRequests] || [self.codexSubscriptionTransport hasActiveRequests] || [self.completionProviderTransport hasActiveRequests] ||
-        [self.glmProviderTransport hasActiveRequests]) return NO;
+        [self.glmProviderTransport hasActiveRequests] || [self.dshConfiguredTransport hasActiveRequests] ||
+        [self.glmConfiguredTransport hasActiveRequests]) return NO;
   }
   NSError *error = nil;
   DSHSessionSnapshotStore *store = [[DSHSessionSnapshotStore alloc] initWithError:&error];
@@ -2278,6 +2326,30 @@ static NSString *DSHCredentialPromptPlaceholder(NSString *account) {
     }
   }
   return YES;
+}
+// Puts a diagnostic report on the clipboard, for a tester to paste rather
+// than screenshot. The report is assembled in JavaScript from value-free
+// facts; this only copies it. Answers NO rather than failing.
+RCT_REMAP_METHOD(copyText, copyText:(NSString *)text resolver:(RCTPromiseResolveBlock)resolve rejecter:(__unused RCTPromiseRejectBlock)reject) {
+  if (![text isKindOfClass:NSString.class] || text.length > 64 * 1024) { resolve(@NO); return; }
+  dispatch_async(dispatch_get_main_queue(), ^{
+    UIPasteboard.generalPasteboard.string = text;
+    resolve(@YES);
+  });
+}
+// What build and device a diagnostic report comes from.
+RCT_REMAP_METHOD(buildInfo, buildInfoWithResolver:(RCTPromiseResolveBlock)resolve rejecter:(__unused RCTPromiseRejectBlock)reject) {
+  NSDictionary *bundle = NSBundle.mainBundle.infoDictionary;
+  NSString *build = [bundle[@"RishBuildCommit"] isKindOfClass:NSString.class] ? bundle[@"RishBuildCommit"]
+      : ([bundle[@"CFBundleVersion"] isKindOfClass:NSString.class] ? bundle[@"CFBundleVersion"] : @"unknown");
+  dispatch_async(dispatch_get_main_queue(), ^{
+    resolve(@{
+      @"build" : build,
+      @"platform" : @"ios",
+      @"os" : UIDevice.currentDevice.systemVersion ?: @"",
+      @"device" : UIDevice.currentDevice.model ?: @"",
+    });
+  });
 }
 RCT_REMAP_METHOD(dshModelCatalog, dshModelCatalogWithResolver:(RCTPromiseResolveBlock)resolve rejecter:(RCTPromiseRejectBlock)reject) {
   NSDictionary *value = DSHDshModelCatalog();
@@ -2320,7 +2392,7 @@ RCT_REMAP_METHOD(saveProviderConfiguration, saveProviderConfiguration:(NSDiction
 }
 RCT_REMAP_METHOD(resetProviderConfiguration, resetProviderConfigurationForHarness:(NSString *)harness
                  resolver:(RCTPromiseResolveBlock)resolve rejecter:(RCTPromiseRejectBlock)reject) {
-  if (![@[@"claude-code", @"codex"] containsObject:harness]) { reject(@"E_PROVIDER_CONFIGURATION", @"E_PROVIDER_CONFIGURATION", nil); return; }
+  if (![@[@"claude-code", @"codex", @"dsh", @"glm"] containsObject:harness]) { reject(@"E_PROVIDER_CONFIGURATION", @"E_PROVIDER_CONFIGURATION", nil); return; }
   [DSHSessionWorkspaceCoordinator.sharedCoordinator performAsync:^{
     if (![self providerConfigurationCanChange]) { reject(@"E_COMPLETION_BUSY", @"E_COMPLETION_BUSY", nil); return; }
     @synchronized(self) {
@@ -2846,7 +2918,7 @@ RCT_REMAP_METHOD(presentCredentialPromptForSlot,
   NSString *boundAccount = DSHEffectiveCredentialAccount(slot);
   NSString *title = DSHCredentialPromptTitle(slot, usesChinese);
   if (boundAccount != nil && ![boundAccount isEqual:slot]) {
-    NSString *harness = [slot isEqual:@"ANTHROPIC_API_KEY"] ? @"claude-code" : @"codex";
+    NSString *harness = DSHConfigurableHarnessForSlot(slot);
     NSDictionary *configuration = [DSHProviderConfigurationStore.sharedStore configurationForHarness:harness];
     title = [NSString stringWithFormat:@"%@ · %@", configuration[@"name"],
              [NSURL URLWithString:configuration[@"endpoint_url"]].host];
@@ -3961,7 +4033,9 @@ RCT_REMAP_METHOD(completeV2Stream,
       self.completionProviderTransport ?: (id)NSNull.null,
       self.claudeProviderTransport ?: (id)NSNull.null,
       self.codexProviderTransport ?: (id)NSNull.null,
-      self.glmProviderTransport ?: (id)NSNull.null ]) {
+      self.glmProviderTransport ?: (id)NSNull.null,
+      self.dshConfiguredTransport ?: (id)NSNull.null,
+      self.glmConfiguredTransport ?: (id)NSNull.null ]) {
     if ((id)transport != NSNull.null && [transport handlesTask:task]) return transport;
   }
   return nil;

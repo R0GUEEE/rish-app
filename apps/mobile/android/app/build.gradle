@@ -159,6 +159,19 @@ def releaseSigning = {
  */
 def jscFlavor = 'io.github.react-native-community:jsc-android:2026004.+'
 
+// The commit a build was made from, for the diagnostic report a tester copies
+// from an error notice: versionName is "1.0" on every build, so it names none.
+def rishBuildCommit = { ->
+    try {
+        def process = ["git", "rev-parse", "--short", "HEAD"].execute(null, rootProject.projectDir)
+        def text = process.text.trim()
+        process.waitFor()
+        return process.exitValue() == 0 && text ==~ /[0-9a-f]{7,12}/ ? text : "unknown"
+    } catch (ignored) {
+        return "unknown"
+    }
+}()
+
 android {
     ndkVersion rootProject.ext.ndkVersion
     buildToolsVersion rootProject.ext.buildToolsVersion
@@ -266,6 +279,7 @@ android {
         buildConfigField "boolean", "RISH_STANDALONE", rishStandalone.toString()
         buildConfigField "boolean", "RISH_OFFICIAL_CLI_ENABLED", officialCliEnabled.toString()
         buildConfigField "boolean", "RISH_GUEST_RUNTIME_BUNDLED", rishGuestEnabled.toString()
+        buildConfigField "String", "RISH_BUILD_COMMIT", "\"${rishBuildCommit}\""
         manifestPlaceholders.officialCliProbeEnabled = officialCliProbeEnabled
         versionCode 1
         versionName "1.0"

@@ -34,6 +34,57 @@ class LocalRuntimeModule(private val react: ReactApplicationContext) : ReactCont
     }
     private fun io(promise: Promise, action: () -> JSONObject) { runtime.io.execute { try { resolve(promise, action()) } catch(error: Exception) { reject(promise, error) } } }
     @ReactMethod fun bootstrap(promise: Promise) = io(promise) { runtime.proof() }
+
+    /**
+     * Puts a diagnostic report on the clipboard, for a tester to paste rather
+     * than screenshot. The report is assembled in JavaScript from value-free
+     * facts; this only copies it. Answers false rather than failing.
+     */
+    @ReactMethod fun copyText(text: String, promise: Promise) {
+        if (text.length > 64 * 1024) { promise.resolve(false); return }
+        UiThreadUtil.runOnUiThread {
+            try {
+                val clipboard = react.getSystemService(android.content.Context.CLIPBOARD_SERVICE)
+                    as android.content.ClipboardManager
+                clipboard.setPrimaryClip(android.content.ClipData.newPlainText("Rish diagnostics", text))
+                promise.resolve(true)
+            } catch (error: Exception) {
+                Log.w("RishRuntime", "diagnostic report could not be copied", error)
+                promise.resolve(false)
+            }
+        }
+    }
+
+    /** What build and device a diagnostic report comes from. */
+    @ReactMethod fun buildInfo(promise: Promise) {
+        promise.resolve(
+            Arguments.makeNativeMap(
+                mapOf(
+                    "build" to tech.zseven.rish.BuildConfig.RISH_BUILD_COMMIT,
+                    "platform" to "android",
+                    "os" to android.os.Build.VERSION.RELEASE,
+                    "api" to android.os.Build.VERSION.SDK_INT,
+                    "device" to "${android.os.Build.MANUFACTURER} ${android.os.Build.MODEL}",
+                ),
+            ),
+        )
+    }
+    /**
+     * The runtime proof for one harness. JavaScript asks this for every
+     * harness but DSH since 2026-09-11 and, when the method is missing,
+     * refuses with "harness-aware runtime bootstrap is unavailable" -- which
+     * on Android turned every configured Claude Code / Codex / GLM key into
+     * "Local proof failed" and a blocked composer (2026-09-21). The proof is
+     * the same record `bootstrap` answers, taken for that harness's slot.
+     */
+    @ReactMethod fun bootstrapForHarness(harnessId: String, promise: Promise) = io(promise) {
+        val slot = when (harnessId) {
+            "dsh" -> "DEEPSEEK_API_KEY"; "glm" -> "BIGMODEL_API_KEY"; "codex" -> "OPENAI_API_KEY"; "claude-code" -> "ANTHROPIC_API_KEY"
+            else -> throw IllegalArgumentException("E_RUNTIME_HARNESS")
+        }
+        runtime.selectedSlot = slot
+        runtime.proof()
+    }
     @ReactMethod fun credentialStatus(promise: Promise) = credentialStatusForSlot("DEEPSEEK_API_KEY", promise)
     @ReactMethod fun credentialStatusForSlot(slot: String, promise: Promise) = io(promise) {
         require(slot in AndroidCredentialStore.slots); runtime.selectedSlot = slot

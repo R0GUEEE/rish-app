@@ -112,7 +112,8 @@ internal class AndroidAgentRoundJournal(
                 if (rowIndex < 0) rounds.put(next) else rounds.put(rowIndex, next)
                 state.put("rounds", rounds)
             }
-            when (result.optString("dispatch")) {
+            // optString answers "null" for a JSON null, which is no effect.
+            when (if (result.isNull("dispatch")) "" else result.optString("dispatch")) {
                 "insert_not_dispatched" -> {
                     dispatch.put(JSONObject().put("schema_version", 1).put("kind", "round")
                         .put("locator", result.getJSONObject("row").opt("locator"))
@@ -132,6 +133,26 @@ internal class AndroidAgentRoundJournal(
                         .put("dispatch_state", "dispatched"))
                     state.put("dispatch", dispatch)
                 }
+                // The provider refused the request in full: the row is
+                // failed_retryable, and the marker goes back in the same
+                // transaction, or the WAL holds a state the core calls corrupt.
+                "reset_not_dispatched" -> {
+                    var marker = -1
+                    for (index in 0 until dispatch.length()) {
+                        val candidate = dispatch.optJSONObject(index) ?: continue
+                        if (candidate.optString("kind") == "round" && AndroidJson.equal(candidate.opt("locator"), locator)) {
+                            marker = index; break
+                        }
+                    }
+                    if (marker < 0) throw Refused(2)
+                    dispatch.put(marker, JSONObject(dispatch.getJSONObject(marker).toString())
+                        .put("dispatch_state", "not_dispatched"))
+                    state.put("dispatch", dispatch)
+                }
+                "" -> {}
+                // An effect this file does not know must not be dropped: the
+                // row beside it would be committed without it.
+                else -> throw Refused(2)
             }
             result.optJSONObject("transcript")?.let { next ->
                 if (transcriptIndex < 0) throw Refused(2)
@@ -195,9 +216,32 @@ internal class AndroidAgentRoundJournal(
      * every caller quietly fell back to the row it already had -- which is
      * how a round nobody was running stayed `in_flight` for good.
      */
-    fun reconcile(locator: JSONObject, expectedCas: JSONObject): JSONObject? =
-        run("reconcile", JSONObject().put("locator", locator).put("cas", expectedCas),
-            locator, null, null, false, false)
+    /**
+     * Settles a round whose writer is gone.
+     *
+     * `cause` is what the caller knows about why, and the core takes it only
+     * for a round that was never dispatched -- a dispatched round whose
+     * answer never came is ambiguous whatever its writer believed. Without
+     * it the row records the generic "could not be saved", which is what
+     * every later reader and every restart then has to report.
+     *
+     * `evidence` is what the transport heard when the provider refused the
+     * request -- `{kind: http_rejected, http_status, owner}` -- and the core
+     * alone decides whether it proves the round was turned away.
+     */
+    fun reconcile(
+        locator: JSONObject,
+        expectedCas: JSONObject,
+        cause: String? = null,
+        evidence: JSONObject? = null,
+    ): JSONObject? =
+        run(
+            "reconcile",
+            JSONObject().put("locator", locator).put("cas", expectedCas)
+                .put("failure_code", cause ?: JSONObject.NULL)
+                .put("transport_evidence", evidence ?: JSONObject.NULL),
+            locator, null, null, false, false,
+        )
 
     fun query(locator: JSONObject): JSONObject? =
         run("query", JSONObject().put("locator", locator), locator, null, null, false, true)

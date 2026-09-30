@@ -740,6 +740,185 @@ didCompleteWithError:(NSError *)error {
   }
 }
 
+// A relay the person configured answers for the model they chose under
+// whatever name it uses. Refusing every name but the exact one made custom
+// relays fail after the answer arrived -- "only Claude works" (2026-09-24).
+- (void)testCustomProvidersAcceptWhateverNameTheRelayReportsButRecordTheChosenModel {
+  for (NSString *protocol in @[@"messages", @"responses", @"chat-completions"]) {
+    for (id reported in @[@"deepseek-chat", @"relay-model-2025-01-01", NSNull.null, @"<absent>", @7]) {
+      [ClaudeTransportURLProtocol reset];
+      NSString *suite = [@"custom-alias-" stringByAppendingString:NSUUID.UUID.UUIDString];
+      NSUserDefaults *defaults = [[NSUserDefaults alloc] initWithSuiteName:suite];
+      DSHProviderConfigurationStore *store = [[DSHProviderConfigurationStore alloc] initWithDefaults:defaults];
+      [store saveConfiguration:[self customConfiguration:protocol endpoint:@"https://relay.example/v1"] error:nil];
+      DSHConfiguredProviderTransport *transport = [[DSHConfiguredProviderTransport alloc]
+          initWithHarness:@"claude-code" session:self.session uuidGenerator:nil monotonicClock:nil store:store];
+      [ClaudeTransportURLProtocol setHandler:^(NSURLProtocol *p, NSURLRequest *request) {
+        NSMutableDictionary *payload = nil;
+        if ([protocol isEqual:@"messages"]) {
+          payload = [@{@"id": @"response-alias", @"content": @[@{@"type": @"text", @"text": @"answer"}], @"stop_reason": @"end_turn"} mutableCopy];
+        } else if ([protocol isEqual:@"responses"]) {
+          payload = [@{@"id": @"response-alias", @"status": @"completed", @"output": @[@{@"type": @"message", @"role": @"assistant", @"content": @[@{@"type": @"output_text", @"text": @"answer"}]}]} mutableCopy];
+        } else {
+          payload = [@{@"id": @"response-alias", @"choices": @[@{@"finish_reason": @"stop", @"message": @{@"role": @"assistant", @"content": @"answer"}}]} mutableCopy];
+        }
+        if (![reported isEqual:@"<absent>"]) payload[@"model"] = reported;
+        [self respond:p request:request data:[self jsonData:payload] status:200];
+      }];
+      NSDictionary *result = nil; NSString *errorCode = nil;
+      [self startRoundWithTransport:transport model:@"claude-sonnet-5" schemaVersion:2 result:&result errorCode:&errorCode];
+      if ([reported isKindOfClass:NSNumber.class]) {
+        // Not a name at all: still refused.
+        XCTAssertEqualObjects(errorCode, @"E_COMPLETION_MODEL_MISMATCH", @"%@ %@", protocol, reported);
+      } else {
+        XCTAssertNil(errorCode, @"%@ %@", protocol, reported);
+        XCTAssertEqualObjects(result[@"model"], @"claude-sonnet-5", @"%@ %@", protocol, reported);
+      }
+      [defaults removePersistentDomainForName:suite];
+    }
+  }
+}
+
+// DeepSeek and GLM through a relay, on every protocol: the testers asked
+// for all four harnesses, not only Claude Code and Codex (2026-09-24).
+- (void)testDshAndGlmGoThroughARelayOnEveryProtocol {
+  NSDictionary *models = @{@"dsh": @"deepseek-v4-flash", @"glm": @"GLM-5.3"};
+  for (NSString *harness in models) {
+    NSString *model = models[harness];
+    for (NSString *protocol in @[@"messages", @"responses", @"chat-completions"]) {
+      [ClaudeTransportURLProtocol reset];
+      NSString *suite = [@"custom-other-" stringByAppendingString:NSUUID.UUID.UUIDString];
+      NSUserDefaults *defaults = [[NSUserDefaults alloc] initWithSuiteName:suite];
+      DSHProviderConfigurationStore *store = [[DSHProviderConfigurationStore alloc] initWithDefaults:defaults];
+      XCTAssertEqualObjects([store configurationForHarness:harness][@"official"], @YES, @"%@", harness);
+      NSDictionary *saved = [store saveConfiguration:@{@"schema_version": @1, @"harness_id": harness, @"name": @"Relay",
+          @"protocol": protocol, @"endpoint_url": @"https://relay.example/v1", @"auth_type": @"bearer",
+          @"send_reasoning": @NO, @"model_mappings": @{model: @"relay-model"}} error:nil];
+      XCTAssertNotNil(saved, @"%@ %@", harness, protocol);
+      DSHConfiguredProviderTransport *transport = [[DSHConfiguredProviderTransport alloc]
+          initWithHarness:harness session:self.session uuidGenerator:nil monotonicClock:nil store:store];
+      NSDictionary *binding = [transport providerConfigurationForModel:model];
+      XCTAssertTrue(DSHValidateProviderBinding(binding, model), @"%@ %@", harness, protocol);
+      // The body the relay receives: the mapped model, and no reasoning
+      // settings, since this relay was told not to receive them.
+      NSError *bodyError = nil;
+      NSDictionary *body = [transport providerRequestBodyForModel:model thinkingMode:@"high"
+          messages:@[@{@"role": @"user", @"content": @"hi"}] tools:@[] streaming:NO error:&bodyError];
+      XCTAssertNil(bodyError, @"%@ %@", harness, protocol);
+      XCTAssertEqualObjects(body[@"model"], @"relay-model", @"%@ %@", harness, protocol);
+      XCTAssertNil(body[@"thinking"], @"%@ %@", harness, protocol);
+      XCTAssertNil(body[@"reasoning_effort"], @"%@ %@", harness, protocol);
+      [ClaudeTransportURLProtocol setHandler:^(NSURLProtocol *p, NSURLRequest *request) {
+        XCTAssertEqualObjects(request.URL.host, @"relay.example");
+        NSDictionary *payload = [protocol isEqual:@"messages"]
+            ? @{@"id": @"r", @"model": @"relay-model", @"content": @[@{@"type": @"text", @"text": @"answer"}], @"stop_reason": @"end_turn"}
+            : ([protocol isEqual:@"responses"]
+               ? @{@"id": @"r", @"model": @"relay-model", @"status": @"completed", @"output": @[@{@"type": @"message", @"role": @"assistant", @"content": @[@{@"type": @"output_text", @"text": @"answer"}]}]}
+               : @{@"id": @"r", @"model": @"relay-model", @"choices": @[@{@"finish_reason": @"stop", @"message": @{@"role": @"assistant", @"content": @"answer"}}]});
+        [self respond:p request:request data:[self jsonData:payload] status:200];
+      }];
+      NSDictionary *result = nil; NSString *errorCode = nil;
+      [self startRoundWithTransport:transport model:model schemaVersion:2 result:&result errorCode:&errorCode];
+      XCTAssertNil(errorCode, @"%@ %@", harness, protocol);
+      XCTAssertEqualObjects(result[@"text"], @"answer", @"%@ %@", harness, protocol);
+      XCTAssertEqualObjects(result[@"model"], model, @"%@ %@", harness, protocol);
+      XCTAssertEqualObjects(result[@"provider_configuration"], binding, @"%@ %@", harness, protocol);
+      [defaults removePersistentDomainForName:suite];
+    }
+  }
+}
+
+- (void)testDshAndGlmRelayKeysHaveTheirOwnNamespace {
+  DSHProviderConfigurationStore *store = DSHProviderConfigurationStore.sharedStore;
+  NSDictionary *slots = @{@"dsh": @"DEEPSEEK_API_KEY", @"glm": @"BIGMODEL_API_KEY"};
+  NSDictionary *models = @{@"dsh": @"deepseek-v4-flash", @"glm": @"GLM-5.3"};
+  for (NSString *harness in slots) {
+    NSDictionary *original = [store configurationForHarness:harness];
+    @try {
+      XCTAssertFalse(DSHHarnessUsesCustomProvider(harness));
+      XCTAssertEqualObjects(DSHEffectiveCredentialAccount(slots[harness]), slots[harness]);
+      [store saveConfiguration:@{@"schema_version": @1, @"harness_id": harness, @"name": @"Relay",
+          @"protocol": @"chat-completions", @"endpoint_url": @"https://relay.example/v1", @"auth_type": @"bearer",
+          @"send_reasoning": @NO, @"model_mappings": @{}} error:nil];
+      XCTAssertTrue(DSHHarnessUsesCustomProvider(harness));
+      NSString *account = DSHEffectiveCredentialAccount(slots[harness]);
+      NSString *prefix = [NSString stringWithFormat:@"CUSTOM_PROVIDER_%@_", harness];
+      BOOL namespaced = [account hasPrefix:prefix];
+      XCTAssertTrue(namespaced, @"%@", account);
+      XCTAssertNotNil(DSHProviderBindingForModel(models[harness]));
+      [store resetHarness:harness];
+      XCTAssertEqualObjects(DSHEffectiveCredentialAccount(slots[harness]), slots[harness]);
+      XCTAssertNil(DSHProviderBindingForModel(models[harness]));
+    } @finally {
+      if ([original[@"official"] boolValue]) [store resetHarness:harness];
+      else [store saveConfiguration:original error:nil];
+    }
+  }
+}
+
+// A relay that sends no response id, or one a receipt cannot hold, is
+// answered under an id of ours rather than refused after the reply arrived.
+- (void)testARelayResponseIdThatCannotBeKeptIsReplaced {
+  NSString *longId = [@"" stringByPaddingToLength:200 withString:@"x" startingAtIndex:0];
+  for (NSString *protocol in @[@"messages", @"responses", @"chat-completions"]) {
+    for (id sent in @[@"<absent>", @"chatcmpl/with spaces", longId, @7, @"kept-id"]) {
+      [ClaudeTransportURLProtocol reset];
+      NSString *suite = [@"custom-id-" stringByAppendingString:NSUUID.UUID.UUIDString];
+      NSUserDefaults *defaults = [[NSUserDefaults alloc] initWithSuiteName:suite];
+      DSHProviderConfigurationStore *store = [[DSHProviderConfigurationStore alloc] initWithDefaults:defaults];
+      [store saveConfiguration:[self customConfiguration:protocol endpoint:@"https://relay.example/v1"] error:nil];
+      DSHConfiguredProviderTransport *transport = [[DSHConfiguredProviderTransport alloc]
+          initWithHarness:@"claude-code" session:self.session uuidGenerator:nil monotonicClock:nil store:store];
+      [ClaudeTransportURLProtocol setHandler:^(NSURLProtocol *p, NSURLRequest *request) {
+        NSMutableDictionary *payload = [protocol isEqual:@"messages"]
+            ? [@{@"model": @"relay-model", @"content": @[@{@"type": @"text", @"text": @"answer"}], @"stop_reason": @"end_turn"} mutableCopy]
+            : ([protocol isEqual:@"responses"]
+               ? [@{@"model": @"relay-model", @"status": @"completed", @"output": @[@{@"type": @"message", @"role": @"assistant", @"content": @[@{@"type": @"output_text", @"text": @"answer"}]}]} mutableCopy]
+               : [@{@"model": @"relay-model", @"choices": @[@{@"finish_reason": @"stop", @"message": @{@"role": @"assistant", @"content": @"answer"}}]} mutableCopy]);
+        if (![sent isEqual:@"<absent>"]) payload[@"id"] = sent;
+        [self respond:p request:request data:[self jsonData:payload] status:200];
+      }];
+      NSDictionary *result = nil; NSString *errorCode = nil;
+      [self startRoundWithTransport:transport model:@"claude-sonnet-5" schemaVersion:2 result:&result errorCode:&errorCode];
+      XCTAssertNil(errorCode, @"%@ %@", protocol, sent);
+      NSString *kept = result[@"provider_response_id"];
+      if ([sent isEqual:@"kept-id"]) {
+        XCTAssertEqualObjects(kept, @"kept-id", @"%@", protocol);
+      } else {
+        BOOL replaced = [kept hasPrefix:@"rish-"];
+        XCTAssertTrue(replaced, @"%@ %@ -> %@", protocol, sent, kept);
+      }
+      [defaults removePersistentDomainForName:suite];
+    }
+  }
+}
+
+// The status a relay refused a request with is kept for the round to show:
+// "HTTP 401" tells a person to check the key, where the round's code alone
+// says only that the round is ambiguous. Taken once.
+- (void)testARelayRefusalKeepsItsHTTPStatusForTheRound {
+  for (NSNumber *status in @[@401, @404, @502]) {
+    [ClaudeTransportURLProtocol reset];
+    NSString *suite = [@"custom-status-" stringByAppendingString:NSUUID.UUID.UUIDString];
+    NSUserDefaults *defaults = [[NSUserDefaults alloc] initWithSuiteName:suite];
+    DSHProviderConfigurationStore *store = [[DSHProviderConfigurationStore alloc] initWithDefaults:defaults];
+    [store saveConfiguration:[self customConfiguration:@"chat-completions" endpoint:@"https://relay.example/v1"] error:nil];
+    DSHConfiguredProviderTransport *transport = [[DSHConfiguredProviderTransport alloc]
+        initWithHarness:@"claude-code" session:self.session uuidGenerator:nil monotonicClock:nil store:store];
+    [ClaudeTransportURLProtocol setHandler:^(NSURLProtocol *p, NSURLRequest *request) {
+      [self respond:p request:request data:[self jsonData:@{@"error": @{@"message": @"no"}}] status:status.integerValue];
+    }];
+    NSDictionary *result = nil; NSString *errorCode = nil;
+    [self startRoundWithTransport:transport model:@"claude-sonnet-5" schemaVersion:2 result:&result errorCode:&errorCode];
+    XCTAssertNil(result);
+    XCTAssertNotNil(errorCode);
+    NSString *providerId = @"44444444-4444-4444-8444-444444444444";
+    XCTAssertEqual([transport takeRefusalHTTPStatusForProviderRequestId:providerId], status.integerValue);
+    XCTAssertEqual([transport takeRefusalHTTPStatusForProviderRequestId:providerId], 0);
+    [defaults removePersistentDomainForName:suite];
+  }
+}
+
 - (void)testChangingCustomProviderRejectsTheOldInFlightResponse {
   NSString *suite = [@"custom-race-" stringByAppendingString:NSUUID.UUID.UUIDString];
   NSUserDefaults *defaults = [[NSUserDefaults alloc] initWithSuiteName:suite];

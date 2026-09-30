@@ -853,6 +853,39 @@ function isNative(value: unknown): value is LocalWorkspacesNativeV1 {
 export const LocalWorkspaces = {
   isAvailable: () => isNative(currentNative()),
 
+  /**
+   * Whether this platform can let the person choose a folder outside the
+   * app. A host that says nothing has one (iOS); only a host that exports
+   * `folder_picker: false` does not, and its callers must not offer the
+   * action at all -- `presentFolderPicker` and `importSelection` refuse
+   * there, and an offered button that always fails is worse than no button.
+   */
+  isFolderPickerAvailable: (): boolean => {
+    const value = currentNative();
+    if (!isNative(value)) return false;
+    try {
+      return Reflect.get(value as object, 'folder_picker') !== false;
+    } catch {
+      return false;
+    }
+  },
+
+  /**
+   * Whether forgetting a workspace and deleting its owned content are real
+   * on this platform. The native module says so with a constant; a module
+   * that only stubs the methods says nothing, and nothing is refused before
+   * any state changes rather than after the session has been cleared.
+   */
+  isRemovalAvailable: (): boolean => {
+    const value = currentNative();
+    if (!isNative(value)) return false;
+    try {
+      return Reflect.get(value as object, 'removal') === true;
+    } catch {
+      return false;
+    }
+  },
+
   list: async (): Promise<WorkspaceListingV1> => parseListing(await requiredNative().list()),
 
   create: async (request: WorkspaceCreateRequestV1): Promise<WorkspaceDescriptorV2> => {

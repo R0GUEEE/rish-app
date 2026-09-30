@@ -170,11 +170,7 @@ internal class AndroidAgentProviderRoundService(
             ).optJSONObject("cas") ?: throw Refused(CONFLICT)
             rounds.claim(cas, owner) ?: throw Refused(CONFLICT)
         }
-        val claimed = rowFor(wal.snapshot(), locator) ?: throw Refused(PERSISTENCE)
-        val dispatchCas = decide(
-            JSONObject().put("op", "round_cas").put("row", claimed),
-        ).optJSONObject("cas") ?: throw Refused(CONFLICT)
-        rounds.markDispatched(dispatchCas) ?: throw Refused(CONFLICT)
+        rowFor(wal.snapshot(), locator) ?: throw Refused(PERSISTENCE)
 
         // What the model is shown of the conversation so far. The messages are
         // the transcript's own -- the store reads them out of the WAL under
@@ -241,8 +237,23 @@ internal class AndroidAgentProviderRoundService(
             Pair(null, null)
         }
 
+        // Everything above and below this point runs while the round is still
+        // `not_dispatched`, and the marker is only set once the request has
+        // been built and the transport has accepted it. iOS does the same: it
+        // assembles messages, tools and the provider body, and marks dispatched
+        // only after all of that succeeded.
+        //
+        // **Why the order matters.** A refusal raised while the request is
+        // being built -- an attachment this transport cannot carry, a protocol
+        // that cannot express a round transcript, a body over the limit -- is
+        // proof that nothing was sent. Marking first made the core reconcile
+        // such a round as `ambiguous`, and the person was shown
+        // `E_AGENT_EXECUTION_AMBIGUOUS` over a turn that provably never left
+        // the device, with only retries that could not succeed. The marker
+        // still commits *before* the network call, because a crash during the
+        // call must leave a round that may have happened.
         var providerError: String? = null
-        val reply = try {
+        val prepared = try {
             val envelope = JSONObject()
                 .put("schema_version", 2)
                 .put("harness_id", request.optString("harness_id"))
@@ -259,28 +270,62 @@ internal class AndroidAgentProviderRoundService(
                 .put("round_transcript", body)
                 .put("project_context", contextMessages ?: JSONObject.NULL)
                 .put("tools", declared)
-            val prepared = transport.prepare(envelope.toString())
+            transport.prepare(envelope.toString()).also { transport.validate(it) }
+        } catch (failure: Exception) {
+            // What the transport said is what decides the round's failure
+            // code, so its own vocabulary is kept rather than discarded.
+            providerError = (failure as? RuntimeFailure)?.code
+            android.util.Log.w("RishAgent", "round preparation refused: $providerError", failure)
+            null
+        }
+
+        // The request exists and the transport has accepted it, so from here
+        // on a silence really could mean the provider saw it.
+        // The owner the request went out under, which is what a refusal the
+        // transport hears is evidence about.
+        var dispatchOwner: JSONObject? = null
+        if (prepared != null) {
+            try {
+                val claimed = rowFor(wal.snapshot(), locator) ?: throw Refused(PERSISTENCE)
+                dispatchOwner = claimed.optJSONObject("owner")
+                val dispatchCas = decide(
+                    JSONObject().put("op", "round_cas").put("row", claimed),
+                ).optJSONObject("cas") ?: throw Refused(CONFLICT)
+                rounds.markDispatched(dispatchCas) ?: throw Refused(CONFLICT)
+            } catch (failure: Throwable) {
+                // The request holds a transport slot that only a run gives
+                // back. Leaving it there would refuse the next round as busy
+                // over a request nobody ever sent.
+                transport.discard(prepared)
+                throw failure
+            }
+        }
+
+        var refusalStatus: Int? = null
+        // The preview ends once the answer is recorded, not when the stream
+        // does: an answer that arrives and then cannot be recorded has to be
+        // able to say so.
+        var preview: ((JSONObject) -> Unit)? = null
+        val reply = if (prepared == null) null else try {
             // Correlation first: a preview event that cannot be tied to the
             // round it belongs to is not display material, it is noise.
-            val preview = previewSink(request, locator)
+            preview = previewSink(request, locator)
             try {
-                transport.execute(prepared, preview).also {
-                    preview?.invoke(JSONObject().put("kind", "end").put("status", "validated"))
-                }
+                transport.execute(prepared, preview)
             } catch (failure: Exception) {
-                preview?.invoke(
-                    JSONObject().put("kind", "end").put("status", "failed")
-                        .put(
-                            "failure_code",
-                            (failure as? RuntimeFailure)?.code ?: "E_COMPLETION_NATIVE",
-                        ),
-                )
+                val end = JSONObject().put("kind", "end").put("status", "failed")
+                    .put("failure_code", (failure as? RuntimeFailure)?.code ?: "E_COMPLETION_NATIVE")
+                // The status a provider refused with -- 401 is a key, 404 an
+                // address -- is what tells a person which setting to fix.
+                (failure as? RuntimeFailure)?.httpStatus?.takeIf { it in 100..599 }?.let { end.put("http_status", it) }
+                preview?.invoke(end)
                 throw failure
             }
         } catch (failure: Exception) {
-            // What the provider said is what decides the round's failure code,
-            // so the transport's own vocabulary is kept rather than discarded.
             providerError = (failure as? RuntimeFailure)?.code
+            // A status line the provider sent is what the transport heard;
+            // the core decides whether it proves a refusal.
+            refusalStatus = (failure as? RuntimeFailure)?.httpStatus?.takeIf { it in 100..599 }
             android.util.Log.w("RishAgent", "round transport failed: $providerError", failure)
             null
         }
@@ -301,7 +346,46 @@ internal class AndroidAgentProviderRoundService(
             JSONObject().put("op", "round_cas").put("row", dispatched),
         ).optJSONObject("cas") ?: throw Refused(CONFLICT)
         if (reply != null) {
-            return settle(request, locator, completeCas, reply, root ?: JSONObject(), authority, contextReceipt)
+            try {
+                return settle(request, locator, completeCas, reply, root ?: JSONObject(), authority, contextReceipt)
+                    .also { preview?.invoke(JSONObject().put("kind", "end").put("status", "validated")) }
+            } catch (failure: Exception) {
+                // The answer came whole; what failed is recording it.
+                preview?.invoke(
+                    JSONObject().put("kind", "end").put("status", "failed")
+                        .put("failure_code", "E_COMPLETION_ANSWER_UNRECORDED"),
+                )
+                // The answer arrived but could not be recorded -- a call's
+                // arguments past what a transcript holds, a transcript past its
+                // budget. Throwing left the row in flight under a dead owner,
+                // and every later recovery answered it with a conflict: the
+                // turn could neither finish nor be given up (beta report,
+                // 2026-09-29). Settle it as a failed provider call is settled:
+                // the owner released, the row reconciled -- dispatched, so
+                // ambiguous, which offers "Retry this turn" -- and the row's
+                // own state reported.
+                val settledRow = rowFor(wal.snapshot(), locator)
+                val stillOpen = settledRow?.optString("state") in setOf("in_flight", "cancel_requested")
+                if (!stillOpen) throw failure
+                android.util.Log.w(
+                    "RishAgent",
+                    "round answer could not be recorded: ${(failure as? Refused)?.code ?: failure.javaClass.simpleName}",
+                    failure,
+                )
+                liveTasks.unregister(nativeTaskId)
+                val openCas = decide(
+                    JSONObject().put("op", "round_cas").put("row", settledRow),
+                ).optJSONObject("cas") ?: throw failure
+                val reconciled = rounds.reconcile(locator, openCas)?.optJSONObject("row")
+                    ?: rowFor(wal.snapshot(), locator) ?: throw failure
+                val reconciledState = reconciled.optString("state")
+                if (reconciledState == "in_flight" || reconciledState == "cancel_requested") throw failure
+                return decide(
+                    JSONObject().put("op", "round_result").put("request", request)
+                        .put("row", reconciled).put("status", reconciledState)
+                        .put("failure_code", reconciled.optString("failure_code").ifEmpty { "E_AGENT_ROUND_AMBIGUOUS" }),
+                ).optJSONObject("result") ?: throw failure
+            }
         }
 
         // The provider call failed, so nobody is running this round any more.
@@ -312,7 +396,18 @@ internal class AndroidAgentProviderRoundService(
         // finalized and its cleanup never drains. iOS releases and reconciles
         // at exactly this point.
         liveTasks.unregister(nativeTaskId)
-        val reconciled = rounds.reconcile(locator, completeCas)?.optJSONObject("row")
+        // The cause travels into the row. A refusal raised while the request
+        // was being built is the only account of why this turn ended, and
+        // the core keeps it only for a round it can see was never
+        // dispatched, so an ambiguity cannot be talked out of.
+        val evidence = if (refusalStatus != null && dispatchOwner != null) {
+            JSONObject().put("kind", "http_rejected").put("http_status", refusalStatus)
+                .put("owner", dispatchOwner)
+        } else {
+            null
+        }
+        val reconciled = rounds.reconcile(locator, completeCas, failure.ifEmpty { null }, evidence)
+            ?.optJSONObject("row")
         val settled = reconciled ?: rowFor(wal.snapshot(), locator) ?: throw Refused(CONFLICT)
         // The reconcile decides what the round became: a request that never
         // reached the provider is `failed_retryable`, one that did is
@@ -454,13 +549,22 @@ internal class AndroidAgentProviderRoundService(
         for (index in 0 until calls.length()) {
             if (calls.optJSONObject(index)?.optString("access") == "durable_deny") denied += 1
         }
+        // The transcript above keeps the whole reasoning -- a later round of
+        // this turn hands it back to the provider -- but the answer shows an
+        // excerpt within what the controller accepts, cut by the same core
+        // rule the projection uses. A "max" reasoning past it was committed
+        // and then refused by the controller on every read, so the turn could
+        // never finish (beta report, 2026-09-28).
+        val shownReasoning = decide(
+            JSONObject().put("op", "presentation_excerpt").put("text", reply.optString("reasoning")),
+        ).optString("text")
         val outcome = JSONObject().put("schema_version", 3)
             .put("finish_reason", reply.optString("finish_reason"))
             .put("completion_receipt", publicReceipt).put("transcript", after)
         when (terminal) {
             "final" -> outcome.put("kind", "final")
                 .put("text", reply.optString("text"))
-                .put("reasoning", reply.optString("reasoning"))
+                .put("reasoning", shownReasoning)
             "tool_batch" -> outcome.put("kind", "tool_batch").put("calls", calls)
                 .put(
                     "batch_class",
@@ -472,7 +576,7 @@ internal class AndroidAgentProviderRoundService(
                 )
                 .put("executable_call_count", calls.length() - denied)
                 .put("denied_call_count", denied)
-                .put("reasoning", reply.optString("reasoning"))
+                .put("reasoning", shownReasoning)
             else -> outcome.put("kind", "blocked").put(
                 "failure_code",
                 if (reply.optString("finish_reason") == "length") {
@@ -681,7 +785,8 @@ internal class AndroidAgentProviderRoundService(
             val state = row.optString("state")
             val ownerless = decide(
                 JSONObject().put("op", "round_failure_code").put("kind", "ownerless")
-                    .put("state", state),
+                    .put("state", state)
+                    .put("recorded", row.opt("failure_code") ?: JSONObject.NULL),
             )
             if (!ownerless.optBoolean("reportable")) throw Refused(CONFLICT)
             return queryResult(request, row, state, ownerless.opt("code"))
@@ -699,7 +804,8 @@ internal class AndroidAgentProviderRoundService(
         val state = reconciled.optString("state")
         val failure = decide(
             JSONObject().put("op", "round_failure_code").put("kind", "reconciled")
-                .put("state", state),
+                .put("state", state)
+                .put("recorded", reconciled.opt("failure_code") ?: JSONObject.NULL),
         ).opt("code")
         return queryResult(request, reconciled, state, failure)
     }

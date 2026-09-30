@@ -17,6 +17,16 @@ const reasons: Readonly<Record<string, TranslationKey>> = {
   E_WORKSPACE_CAPABILITY: 'recovery.capability',
   E_WORKSPACE_CONFLICT: 'recovery.changed',
   E_AGENT_CONFLICT: 'messages.toolFailure.conflict',
+  E_AGENT_CAPABILITY: 'recovery.agentCapability',
+  E_AGENT_ROUND_AMBIGUOUS: 'recovery.roundAmbiguous',
+  E_AGENT_EXECUTION_AMBIGUOUS: 'recovery.executionAmbiguous',
+  // A round the provider refused in full, named by the core from the HTTP
+  // status: kept in the journal, so these read the same after a restart.
+  E_AGENT_PROVIDER_CREDENTIAL: 'recovery.provider.keyRejected',
+  E_AGENT_PROVIDER_FORBIDDEN: 'recovery.provider.forbidden',
+  E_AGENT_PROVIDER_NOT_FOUND: 'recovery.provider.notFound',
+  E_AGENT_PROVIDER_RATE_LIMITED: 'recovery.rateLimit',
+  E_AGENT_PROVIDER_REFUSED: 'recovery.provider.refused',
   E_CONTEXT_CHANGED: 'recovery.contextRefresh',
   E_CONTEXT_STORAGE: 'recovery.contextStorage',
   E_CONTEXT_SNAPSHOT_MISSING: 'recovery.contextRefresh',
@@ -24,12 +34,29 @@ const reasons: Readonly<Record<string, TranslationKey>> = {
   E_WORKSPACE_BUSY: 'recovery.busy',
   E_COMPLETION_BUSY: 'recovery.busy',
   E_WORKSPACE_CLEARANCE_UNAVAILABLE: 'recovery.clearance',
+  E_WORKSPACE_REMOVAL_PENDING: 'workspaces.removalPending',
   E_COMPLETION_TIMEOUT: 'recovery.timeout',
   E_COMPLETION_LENGTH: 'recovery.outputLimit',
   E_COMPLETION_TRANSPORT: 'recovery.network',
   E_COMPLETION_HTTP_429: 'recovery.rateLimit',
   E_COMPLETION_CREDENTIAL_UNAVAILABLE: 'recovery.credential',
   E_COMPLETION_CREDENTIAL_CHANGED: 'recovery.credential',
+  // Refusals about what a message carries, found before anything is sent.
+  E_COMPLETION_BODY_TOO_LARGE: 'recovery.attachmentsTooLarge',
+  E_COMPLETION_CONTEXT_UNSUPPORTED: 'recovery.attachmentUnsupported',
+  E_COMPLETION_CONTEXT_INVALID: 'recovery.attachmentUnreadable',
+  E_COMPLETION_HISTORY: 'recovery.history',
+  // What a provider -- often a relay -- answered, in a plain chat as much as
+  // behind an agent round (where providerFailureMessage adds the status).
+  E_COMPLETION_HTTP_STATUS: 'recovery.provider.statusUnknown',
+  E_COMPLETION_REDIRECT: 'recovery.provider.statusUnknown',
+  E_COMPLETION_RESPONSE_JSON: 'recovery.provider.unreadableUnknown',
+  E_COMPLETION_RESPONSE_MODEL: 'recovery.provider.unreadableUnknown',
+  E_COMPLETION_MODEL_MISMATCH: 'recovery.provider.unreadableUnknown',
+  E_COMPLETION_PROVIDER_RESPONSE_ID: 'recovery.provider.unreadableUnknown',
+  E_COMPLETION_EMPTY_RESPONSE: 'recovery.provider.unreadableUnknown',
+  E_COMPLETION_TOOL_CALL_INVALID: 'recovery.provider.unreadableUnknown',
+  E_COMPLETION_FINISH_RELATION: 'recovery.provider.unreadableUnknown',
 };
 
 export function recoveryCode(error: string): string | null {

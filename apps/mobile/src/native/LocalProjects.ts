@@ -234,6 +234,150 @@ export type ProjectPushResultV2 = Omit<ProjectPushResult, 'schema_version'> & {
   root: WorkspaceRootRefV1;
 };
 
+export type GitRemoteRequestV1 = GitWorkspaceRequestV1 & {
+  url: string;
+};
+
+export type GitCredentialPromptRequestV1 = GitWorkspaceRequestV1 & {
+  locale: 'zh-CN' | 'en';
+};
+
+export type GitCancelPushRequestV1 = GitWorkspaceRequestV1 & {
+  operation_id: string;
+};
+
+export type GitFetchRequestV1 = GitWorkspaceRequestV1 & {
+  operation_id: string;
+  remote: 'origin';
+  /** The Git HTTPS proxy every connection goes through, or null for none. */
+  https_proxy_url: string | null;
+};
+
+export type GitPullRequestV1 = GitWorkspaceRequestV1 & {
+  expected_head_oid: string;
+};
+
+/**
+ * A merge of the upstream the person just fetched into a diverged branch.
+ * Bound to what they reviewed: the branch by name, the local tip, and the
+ * fetched upstream tip -- two branches can share a commit, and a later
+ * fetch can move the upstream.
+ */
+export type GitMergeRequestV1 = GitWorkspaceRequestV1 & {
+  operation_id: string;
+  expected_branch: string;
+  expected_head_oid: string;
+  expected_remote_oid: string;
+  author_name: string;
+  author_email: string;
+};
+
+/** One conflicting entry: each side's path, or null where that side has none. */
+export type ProjectMergeConflictV2 = {
+  ancestor: string | null;
+  ours: string | null;
+  theirs: string | null;
+};
+
+/**
+ * What a merge did. Only `merged` changed anything; the rest leave the
+ * branch, index and working tree exactly as they were.
+ */
+export type ProjectMergeResultV2 = {
+  schema_version: 2;
+  root: WorkspaceRootRefV1;
+  project_id: string;
+  branch: string;
+  outcome: 'merged' | 'up_to_date' | 'fast_forward_available' | 'conflicts' | 'obstructed';
+  oid: string;
+  previous_oid: string;
+  conflicts: ProjectMergeConflictV2[];
+  paths: string[];
+};
+
+/** What origin holds for the current branch after a fetch, and where the local branch stands. */
+export type ProjectFetchResultV2 = {
+  schema_version: 2;
+  root: WorkspaceRootRefV1;
+  project_id: string;
+  remote: 'origin';
+  branch: string;
+  remote_oid: string | null;
+  ahead: number;
+  behind: number;
+  fetched_at: string;
+};
+
+export type ProjectPushReceiptsV2 = {
+  schema_version: 2;
+  root: WorkspaceRootRefV1;
+  project_id: string;
+  receipts: ProjectPushReceipt[];
+};
+
+export type WorkspaceCloneRequestV1 = {
+  schema_version: 1;
+  operation_id: string;
+  url: string;
+  display_name: string;
+  /** `prompt`: use the credential typed for this operation id (see presentCloneCredentialPromptV2). */
+  credential_reference?: 'prompt';
+  /** The Git HTTPS proxy every connection goes through, or null for none. */
+  https_proxy_url: string | null;
+};
+
+/** What the clone credential prompt answers: never the secret. */
+export type WorkspaceCloneCredentialV2 = {
+  schema_version: 2;
+  operation_id: string;
+  host: string;
+  expiry_seconds: number;
+};
+
+/** A public repository cloned into a new workspace with a project attached. */
+export type WorkspaceCloneResultV2 = {
+  schema_version: 2;
+  root: WorkspaceRootRefV1;
+  project: LocalProjectDescriptorV2;
+  workspace: { workspace_id: string; display_name: string };
+  branch: string;
+  oid: string;
+};
+
+/** A fast-forward: `updated` is false when the branch was already at origin's tip. */
+export type ProjectPullResultV2 = {
+  schema_version: 2;
+  root: WorkspaceRootRefV1;
+  project_id: string;
+  branch: string;
+  oid: string;
+  previous_oid: string;
+  updated: boolean;
+};
+
+/** The origin of a workspace project: `url` and `host` are null together when none is set. */
+export type ProjectRemoteV2 = {
+  schema_version: 2;
+  root: WorkspaceRootRefV1;
+  project_id: string;
+  remote: 'origin';
+  url: string | null;
+  host: string | null;
+};
+
+export type ProjectCredentialStatusV2 = Omit<ProjectCredentialStatus, 'schema_version'> & {
+  schema_version: 2;
+  root: WorkspaceRootRefV1;
+};
+
+export type ProjectPushCancellationV2 = {
+  schema_version: 2;
+  root: WorkspaceRootRefV1;
+  project_id: string;
+  operation_id: string;
+  status: 'cancel_requested' | 'not_running';
+};
+
 export type ProjectGitTransportOptions = {
   httpsProxyUrl?: string | null;
   sshProfileId?: string | null;
@@ -345,6 +489,21 @@ type NativeLocalProjects = {
   stageAllV2?(request: GitWorkspaceRequestV1): Promise<unknown>;
   commitV2?(request: GitCommitRequestV1): Promise<unknown>;
   pushV2?(request: GitPushRequestV1): Promise<unknown>;
+  setRemoteV2?(request: GitRemoteRequestV1): Promise<unknown>;
+  remoteV2?(request: GitWorkspaceRequestV1): Promise<unknown>;
+  credentialStatusV2?(request: GitWorkspaceRequestV1): Promise<unknown>;
+  presentCredentialPromptV2?(request: GitCredentialPromptRequestV1): Promise<unknown>;
+  clearCredentialV2?(request: GitWorkspaceRequestV1): Promise<unknown>;
+  cancelPushV2?(request: GitCancelPushRequestV1): Promise<unknown>;
+  fetchV2?(request: GitFetchRequestV1): Promise<unknown>;
+  pullFastForwardV2?(request: GitPullRequestV1): Promise<unknown>;
+  mergeRemoteV2?(request: GitMergeRequestV1): Promise<unknown>;
+  pushReceiptsV2?(request: GitWorkspaceRequestV1): Promise<unknown>;
+  cloneWorkspaceV2?(request: WorkspaceCloneRequestV1): Promise<unknown>;
+  cancelWorkspaceCloneV2?(request: { schema_version: 1; operation_id: string }): Promise<unknown>;
+  presentCloneCredentialPromptV2?(request: {
+    schema_version: 1; operation_id: string; url: string; locale: 'zh-CN' | 'en';
+  }): Promise<unknown>;
 };
 
 const native = NativeModules.LocalProjects as unknown;
@@ -373,6 +532,9 @@ const projectV2ErrorCodes = new Set([
   'E_PROJECT_CREDENTIAL',
   'E_PROJECT_TIMEOUT',
   'E_PROJECT_CANCELLED',
+  'E_PROJECT_MERGE_UNSUPPORTED',
+  'E_PROJECT_RECOVERY_REQUIRED',
+  'E_PROJECT_PROXY',
 ]);
 
 export class ProjectGitBridgeError extends Error {
@@ -1080,6 +1242,417 @@ function projectV2PushRequest(value: unknown): GitPushRequestV1 {
   };
 }
 
+function projectV2RemoteRequest(value: unknown): GitRemoteRequestV1 {
+  const row = projectV2ExactRecord(value, ['schema_version', 'root', 'url'], 'E_PROJECT_REQUEST_INVALID');
+  if (row.schema_version !== 1 || !projectV2String(row.url, 2048)) {
+    return projectV2Fail('E_PROJECT_REQUEST_INVALID');
+  }
+  return { schema_version: 1, root: projectV2RequestRoot(row.root), url: row.url };
+}
+
+function projectV2CredentialPromptRequest(value: unknown): GitCredentialPromptRequestV1 {
+  const row = projectV2ExactRecord(value, ['schema_version', 'root', 'locale'], 'E_PROJECT_REQUEST_INVALID');
+  if (row.schema_version !== 1 || (row.locale !== 'zh-CN' && row.locale !== 'en')) {
+    return projectV2Fail('E_PROJECT_REQUEST_INVALID');
+  }
+  return { schema_version: 1, root: projectV2RequestRoot(row.root), locale: row.locale };
+}
+
+function projectV2FetchRequest(value: unknown): GitFetchRequestV1 {
+  const row = projectV2ExactRecord(
+    value,
+    ['schema_version', 'root', 'operation_id', 'remote', 'https_proxy_url'],
+    'E_PROJECT_REQUEST_INVALID',
+  );
+  if (row.schema_version !== 1 || row.remote !== 'origin') return projectV2Fail('E_PROJECT_REQUEST_INVALID');
+  return {
+    schema_version: 1,
+    root: projectV2RequestRoot(row.root),
+    operation_id: projectV2OperationId(row.operation_id),
+    remote: 'origin',
+    https_proxy_url: projectV2ProxyURL(row.https_proxy_url),
+  };
+}
+
+function projectV2PullRequest(value: unknown): GitPullRequestV1 {
+  const row = projectV2ExactRecord(value, ['schema_version', 'root', 'expected_head_oid'], 'E_PROJECT_REQUEST_INVALID');
+  if (row.schema_version !== 1 || !projectV2OID(row.expected_head_oid)) {
+    return projectV2Fail('E_PROJECT_REQUEST_INVALID');
+  }
+  return {
+    schema_version: 1,
+    root: projectV2RequestRoot(row.root),
+    expected_head_oid: row.expected_head_oid as string,
+  };
+}
+
+function projectV2MergeRequest(value: unknown): GitMergeRequestV1 {
+  const row = projectV2ExactRecord(value, [
+    'schema_version', 'root', 'operation_id', 'expected_branch', 'expected_head_oid',
+    'expected_remote_oid', 'author_name', 'author_email',
+  ], 'E_PROJECT_REQUEST_INVALID');
+  if (
+    row.schema_version !== 1 ||
+    typeof row.expected_branch !== 'string' ||
+    !projectV2Branch(row.expected_branch) ||
+    !projectV2OID(row.expected_head_oid) ||
+    !projectV2OID(row.expected_remote_oid) ||
+    !projectV2String(row.author_name, 120) ||
+    !projectV2Email(row.author_email)
+  ) {
+    return projectV2Fail('E_PROJECT_REQUEST_INVALID');
+  }
+  return {
+    schema_version: 1,
+    root: projectV2RequestRoot(row.root),
+    operation_id: projectV2OperationId(row.operation_id),
+    expected_branch: row.expected_branch,
+    expected_head_oid: row.expected_head_oid as string,
+    expected_remote_oid: row.expected_remote_oid as string,
+    author_name: projectV2Bounded(row.author_name, 120),
+    author_email: row.author_email as string,
+  };
+}
+
+const MERGE_OUTCOMES = ['merged', 'up_to_date', 'fast_forward_available', 'conflicts', 'obstructed'] as const;
+
+function projectV2MergePath(value: unknown): value is string | null {
+  return value === null || projectV2String(value, 4096);
+}
+
+function projectV2Merge(
+  value: unknown,
+  request: GitMergeRequestV1,
+): ProjectMergeResultV2 {
+  const row = projectV2ExactRecord(value, [
+    'schema_version', 'root', 'project_id', 'branch', 'outcome', 'oid', 'previous_oid', 'conflicts', 'paths',
+  ], 'E_PROJECT_RESULT_INVALID');
+  const root = projectV2RootResult(row.root, request.root);
+  const outcome = row.outcome as ProjectMergeResultV2['outcome'];
+  if (
+    row.schema_version !== 2 ||
+    row.project_id !== request.root.project_id ||
+    row.branch !== request.expected_branch ||
+    !(MERGE_OUTCOMES as readonly string[]).includes(outcome) ||
+    !projectV2OID(row.oid) ||
+    row.previous_oid !== request.expected_head_oid ||
+    // Only a merge moves the branch; every other outcome is a promise that
+    // nothing did, and a result that says otherwise is not believed.
+    (outcome === 'merged') === (row.oid === row.previous_oid) ||
+    !Array.isArray(row.conflicts) || row.conflicts.length > 64 ||
+    !Array.isArray(row.paths) || row.paths.length > 64 ||
+    (outcome !== 'conflicts' && row.conflicts.length > 0) ||
+    (outcome !== 'obstructed' && row.paths.length > 0)
+  ) {
+    return projectV2Fail('E_PROJECT_RESULT_INVALID');
+  }
+  const conflicts = row.conflicts.map(entry => {
+    const conflict = projectV2ExactRecord(entry, ['ancestor', 'ours', 'theirs'], 'E_PROJECT_RESULT_INVALID');
+    if (
+      !projectV2MergePath(conflict.ancestor) ||
+      !projectV2MergePath(conflict.ours) ||
+      !projectV2MergePath(conflict.theirs)
+    ) {
+      return projectV2Fail('E_PROJECT_RESULT_INVALID');
+    }
+    return {
+      ancestor: conflict.ancestor as string | null,
+      ours: conflict.ours as string | null,
+      theirs: conflict.theirs as string | null,
+    };
+  });
+  const paths = row.paths.map(path =>
+    projectV2String(path, 4096) ? path : projectV2Fail('E_PROJECT_RESULT_INVALID'),
+  );
+  return {
+    schema_version: 2,
+    root,
+    project_id: request.root.project_id as string,
+    branch: request.expected_branch,
+    outcome,
+    oid: row.oid as string,
+    previous_oid: row.previous_oid as string,
+    conflicts,
+    paths,
+  };
+}
+
+function projectV2Fetch(
+  value: unknown,
+  expectedRoot: WorkspaceRootRefV1,
+): ProjectFetchResultV2 {
+  const row = projectV2ExactRecord(value, [
+    'schema_version', 'root', 'project_id', 'remote', 'branch', 'remote_oid', 'ahead', 'behind', 'fetched_at',
+  ], 'E_PROJECT_RESULT_INVALID');
+  const root = projectV2RootResult(row.root, expectedRoot);
+  if (
+    row.schema_version !== 2 ||
+    row.project_id !== expectedRoot.project_id ||
+    row.remote !== 'origin' ||
+    typeof row.branch !== 'string' ||
+    !projectV2Branch(row.branch) ||
+    !projectV2OID(row.remote_oid, true) ||
+    !projectV2SafeInteger(row.ahead) ||
+    !projectV2SafeInteger(row.behind) ||
+    !projectV2Timestamp(row.fetched_at)
+  ) {
+    return projectV2Fail('E_PROJECT_RESULT_INVALID');
+  }
+  return {
+    schema_version: 2,
+    root,
+    project_id: expectedRoot.project_id as string,
+    remote: 'origin',
+    branch: row.branch as string,
+    remote_oid: row.remote_oid as string | null,
+    ahead: row.ahead as number,
+    behind: row.behind as number,
+    fetched_at: row.fetched_at,
+  };
+}
+
+function projectV2Pull(
+  value: unknown,
+  expectedRoot: WorkspaceRootRefV1,
+): ProjectPullResultV2 {
+  const row = projectV2ExactRecord(value, [
+    'schema_version', 'root', 'project_id', 'branch', 'oid', 'previous_oid', 'updated',
+  ], 'E_PROJECT_RESULT_INVALID');
+  const root = projectV2RootResult(row.root, expectedRoot);
+  if (
+    row.schema_version !== 2 ||
+    row.project_id !== expectedRoot.project_id ||
+    typeof row.branch !== 'string' ||
+    !projectV2Branch(row.branch) ||
+    !projectV2OID(row.oid) ||
+    !projectV2OID(row.previous_oid) ||
+    typeof row.updated !== 'boolean' ||
+    (row.updated === false) !== (row.oid === row.previous_oid)
+  ) {
+    return projectV2Fail('E_PROJECT_RESULT_INVALID');
+  }
+  return {
+    schema_version: 2,
+    root,
+    project_id: expectedRoot.project_id as string,
+    branch: row.branch as string,
+    oid: row.oid as string,
+    previous_oid: row.previous_oid as string,
+    updated: row.updated,
+  };
+}
+
+function projectV2Receipt(value: unknown): ProjectPushReceipt {
+  const row = projectV2ExactRecord(value, [
+    'schema_version', 'remote', 'host', 'branch', 'local_oid', 'remote_oid', 'pushed_at',
+  ], 'E_PROJECT_RESULT_INVALID');
+  if (
+    row.schema_version !== 1 ||
+    row.remote !== 'origin' ||
+    !projectV2Host(row.host) ||
+    typeof row.branch !== 'string' ||
+    !projectV2Branch(row.branch) ||
+    !projectV2OID(row.local_oid) ||
+    !projectV2OID(row.remote_oid) ||
+    !projectV2Timestamp(row.pushed_at)
+  ) {
+    return projectV2Fail('E_PROJECT_RESULT_INVALID');
+  }
+  return {
+    schema_version: 1,
+    remote: 'origin',
+    host: row.host,
+    branch: row.branch as string,
+    local_oid: row.local_oid as string,
+    remote_oid: row.remote_oid as string,
+    pushed_at: row.pushed_at,
+  };
+}
+
+function projectV2Receipts(
+  value: unknown,
+  expectedRoot: WorkspaceRootRefV1,
+): ProjectPushReceiptsV2 {
+  const row = projectV2ExactRecord(value, [
+    'schema_version', 'root', 'project_id', 'receipts',
+  ], 'E_PROJECT_RESULT_INVALID');
+  const root = projectV2RootResult(row.root, expectedRoot);
+  if (
+    row.schema_version !== 2 ||
+    row.project_id !== expectedRoot.project_id ||
+    !Array.isArray(row.receipts) ||
+    row.receipts.length > 25
+  ) {
+    return projectV2Fail('E_PROJECT_RESULT_INVALID');
+  }
+  return {
+    schema_version: 2,
+    root,
+    project_id: expectedRoot.project_id as string,
+    receipts: projectV2ArrayMap.call(row.receipts, projectV2Receipt) as ProjectPushReceipt[],
+  };
+}
+
+function projectV2WorkspaceCloneRequest(value: unknown): WorkspaceCloneRequestV1 {
+  const record = value as { credential_reference?: unknown } | null;
+  const withCredential = typeof record === 'object' && record !== null && 'credential_reference' in record;
+  const row = projectV2ExactRecord(
+    value,
+    withCredential
+      ? ['schema_version', 'operation_id', 'url', 'display_name', 'https_proxy_url', 'credential_reference']
+      : ['schema_version', 'operation_id', 'url', 'display_name', 'https_proxy_url'],
+    'E_PROJECT_REQUEST_INVALID',
+  );
+  if (row.schema_version !== 1 || !projectV2String(row.url, 2048) || !projectV2String(row.display_name, 120) ||
+      (withCredential && row.credential_reference !== 'prompt')) {
+    return projectV2Fail('E_PROJECT_REQUEST_INVALID');
+  }
+  return {
+    schema_version: 1,
+    operation_id: projectV2OperationId(row.operation_id),
+    url: row.url,
+    display_name: row.display_name,
+    https_proxy_url: projectV2ProxyURL(row.https_proxy_url),
+    ...(withCredential ? { credential_reference: 'prompt' as const } : {}),
+  };
+}
+
+function projectV2WorkspaceClone(value: unknown): WorkspaceCloneResultV2 {
+  const row = projectV2ExactRecord(value, [
+    'schema_version', 'root', 'project', 'workspace', 'branch', 'oid',
+  ], 'E_PROJECT_RESULT_INVALID');
+  const root = projectV2RootResult(row.root);
+  const workspace = projectV2ExactRecord(row.workspace, ['workspace_id', 'display_name'], 'E_PROJECT_RESULT_INVALID');
+  const project = projectV2Descriptor(row.project);
+  if (
+    row.schema_version !== 2 ||
+    root.project_id !== project.project_id ||
+    root.workspace_id !== project.workspace_id ||
+    workspace.workspace_id !== root.workspace_id ||
+    !projectV2String(workspace.display_name, 120) ||
+    typeof row.branch !== 'string' ||
+    !projectV2Branch(row.branch) ||
+    !projectV2OID(row.oid)
+  ) {
+    return projectV2Fail('E_PROJECT_RESULT_INVALID');
+  }
+  return {
+    schema_version: 2,
+    root,
+    project,
+    workspace: { workspace_id: workspace.workspace_id as string, display_name: workspace.display_name },
+    branch: row.branch as string,
+    oid: row.oid as string,
+  };
+}
+
+function projectV2CancelPushRequest(value: unknown): GitCancelPushRequestV1 {
+  const row = projectV2ExactRecord(value, ['schema_version', 'root', 'operation_id'], 'E_PROJECT_REQUEST_INVALID');
+  if (row.schema_version !== 1) return projectV2Fail('E_PROJECT_REQUEST_INVALID');
+  return {
+    schema_version: 1,
+    root: projectV2RequestRoot(row.root),
+    operation_id: projectV2OperationId(row.operation_id),
+  };
+}
+
+function projectV2Host(value: unknown): value is string {
+  return typeof value === 'string' && /^[a-z0-9.:\-\[\]]{1,253}$/u.test(value);
+}
+
+function projectV2Remote(
+  value: unknown,
+  expectedRoot: WorkspaceRootRefV1,
+): ProjectRemoteV2 {
+  const row = projectV2ExactRecord(value, [
+    'schema_version', 'root', 'project_id', 'remote', 'url', 'host',
+  ], 'E_PROJECT_RESULT_INVALID');
+  const root = projectV2RootResult(row.root, expectedRoot);
+  const unset = row.url === null && row.host === null;
+  const set = projectV2String(row.url, 2048) && projectV2Host(row.host);
+  if (
+    row.schema_version !== 2 ||
+    row.project_id !== expectedRoot.project_id ||
+    row.remote !== 'origin' ||
+    !(unset || set)
+  ) {
+    return projectV2Fail('E_PROJECT_RESULT_INVALID');
+  }
+  return {
+    schema_version: 2,
+    root,
+    project_id: expectedRoot.project_id as string,
+    remote: 'origin',
+    url: row.url as string | null,
+    host: row.host as string | null,
+  };
+}
+
+function projectV2CredentialStatus(
+  value: unknown,
+  expectedRoot: WorkspaceRootRefV1,
+): ProjectCredentialStatusV2 {
+  // A configured credential carries its expiry; an absent one carries nothing
+  // else. Either way the answer never holds a username or a token.
+  const configured =
+    typeof value === 'object' && value !== null &&
+    Object.prototype.hasOwnProperty.call(value, 'expires_at');
+  const row = projectV2ExactRecord(value, configured
+    ? ['schema_version', 'root', 'project_id', 'host', 'configured', 'expires_at', 'expiry_seconds']
+    : ['schema_version', 'root', 'project_id', 'host', 'configured'],
+  'E_PROJECT_RESULT_INVALID');
+  const root = projectV2RootResult(row.root, expectedRoot);
+  if (
+    row.schema_version !== 2 ||
+    row.project_id !== expectedRoot.project_id ||
+    !projectV2Host(row.host) ||
+    row.configured !== configured ||
+    (configured &&
+      (!projectV2SafeInteger(row.expires_at, 1) ||
+        !projectV2SafeInteger(row.expiry_seconds, 1)))
+  ) {
+    return projectV2Fail('E_PROJECT_RESULT_INVALID');
+  }
+  const status: ProjectCredentialStatusV2 = {
+    schema_version: 2,
+    root,
+    project_id: expectedRoot.project_id as string,
+    host: row.host,
+    configured,
+  };
+  if (configured) {
+    status.expires_at = row.expires_at as number;
+    status.expiry_seconds = row.expiry_seconds as number;
+  }
+  return status;
+}
+
+function projectV2PushCancellation(
+  value: unknown,
+  expectedRoot: WorkspaceRootRefV1,
+  expectedOperationId: string,
+): ProjectPushCancellationV2 {
+  const row = projectV2ExactRecord(value, [
+    'schema_version', 'root', 'project_id', 'operation_id', 'status',
+  ], 'E_PROJECT_RESULT_INVALID');
+  const root = projectV2RootResult(row.root, expectedRoot);
+  if (
+    row.schema_version !== 2 ||
+    row.project_id !== expectedRoot.project_id ||
+    row.operation_id !== expectedOperationId ||
+    (row.status !== 'cancel_requested' && row.status !== 'not_running')
+  ) {
+    return projectV2Fail('E_PROJECT_RESULT_INVALID');
+  }
+  return {
+    schema_version: 2,
+    root,
+    project_id: expectedRoot.project_id as string,
+    operation_id: expectedOperationId,
+    status: row.status,
+  };
+}
+
 function projectV2WorkspaceRequest(value: unknown): GitWorkspaceRequestV1 {
   const row = projectV2ExactRecord(value, ['schema_version', 'root'], 'E_PROJECT_REQUEST_INVALID');
   if (row.schema_version !== 1) return projectV2Fail('E_PROJECT_REQUEST_INVALID');
@@ -1358,7 +1931,16 @@ function hasV2Capabilities(value: unknown): value is NativeLocalProjects {
       typeof row.diffV2 === 'function' &&
       typeof row.stageAllV2 === 'function' &&
       typeof row.commitV2 === 'function' &&
-      typeof row.pushV2 === 'function'
+      typeof row.pushV2 === 'function' &&
+      typeof row.setRemoteV2 === 'function' &&
+      typeof row.remoteV2 === 'function' &&
+      typeof row.credentialStatusV2 === 'function' &&
+      typeof row.presentCredentialPromptV2 === 'function' &&
+      typeof row.clearCredentialV2 === 'function' &&
+      typeof row.cancelPushV2 === 'function' &&
+      typeof row.fetchV2 === 'function' &&
+      typeof row.pullFastForwardV2 === 'function' &&
+      typeof row.pushReceiptsV2 === 'function'
     );
   } catch {
     return false;
@@ -1465,6 +2047,16 @@ function reviewPage(value: unknown, projectId: string, staged: boolean, offset: 
 
 export const LocalProjects = {
   isAvailable: () => hasNativeCapabilities(native),
+  /** Whether the legacy clone controls exist here (they do not on Android, whose module stubs the rest). */
+  isLegacyCloneAvailable: (): boolean => {
+    try {
+      const row = native as Partial<NativeLocalProjects> | null;
+      return hasNativeCapabilities(native) && typeof row?.startClone === 'function' &&
+        typeof row?.cancelClone === 'function';
+    } catch {
+      return false;
+    }
+  },
   startClone: async (
     url: string,
     name?: string,
@@ -1662,6 +2254,237 @@ export const LocalProjects = {
       return await projectV2Boundary(
         () => requiredV2().pushV2!(request),
         raw => projectV2Push(raw, request.root),
+      );
+    } catch (error) {
+      throw projectV2Error(error);
+    }
+  },
+  setRemoteV2: async (requestValue: unknown): Promise<ProjectRemoteV2> => {
+    try {
+      const request = projectV2RemoteRequest(requestValue);
+      return await projectV2Boundary(
+        () => requiredV2().setRemoteV2!(request),
+        raw => projectV2Remote(raw, request.root),
+      );
+    } catch (error) {
+      throw projectV2Error(error);
+    }
+  },
+  remoteV2: async (requestValue: unknown): Promise<ProjectRemoteV2> => {
+    try {
+      const request = projectV2WorkspaceRequest(requestValue);
+      return await projectV2Boundary(
+        () => requiredV2().remoteV2!(request),
+        raw => projectV2Remote(raw, request.root),
+      );
+    } catch (error) {
+      throw projectV2Error(error);
+    }
+  },
+  credentialStatusV2: async (
+    requestValue: unknown,
+  ): Promise<ProjectCredentialStatusV2> => {
+    try {
+      const request = projectV2WorkspaceRequest(requestValue);
+      return await projectV2Boundary(
+        () => requiredV2().credentialStatusV2!(request),
+        raw => projectV2CredentialStatus(raw, request.root),
+      );
+    } catch (error) {
+      throw projectV2Error(error);
+    }
+  },
+  /** The native prompt takes the username and token; JS only ever sees the status. */
+  presentCredentialPromptV2: async (
+    requestValue: unknown,
+  ): Promise<ProjectCredentialStatusV2> => {
+    try {
+      const request = projectV2CredentialPromptRequest(requestValue);
+      return await projectV2Boundary(
+        () => requiredV2().presentCredentialPromptV2!(request),
+        raw => projectV2CredentialStatus(raw, request.root),
+      );
+    } catch (error) {
+      throw projectV2Error(error);
+    }
+  },
+  clearCredentialV2: async (
+    requestValue: unknown,
+  ): Promise<ProjectCredentialStatusV2> => {
+    try {
+      const request = projectV2WorkspaceRequest(requestValue);
+      return await projectV2Boundary(
+        () => requiredV2().clearCredentialV2!(request),
+        raw => projectV2CredentialStatus(raw, request.root),
+      );
+    } catch (error) {
+      throw projectV2Error(error);
+    }
+  },
+  /** Whether this build clones a public repository into a new workspace (Android). */
+  isWorkspaceCloneAvailable: (): boolean => {
+    try {
+      const row = native as Partial<NativeLocalProjects> | null;
+      return hasV2Capabilities(native) && typeof row?.cloneWorkspaceV2 === 'function' &&
+        typeof row?.cancelWorkspaceCloneV2 === 'function';
+    } catch {
+      return false;
+    }
+  },
+  /** A public HTTPS repository into a new workspace with its project attached; the network runs before anything is made. */
+  cloneWorkspaceV2: async (requestValue: unknown): Promise<WorkspaceCloneResultV2> => {
+    try {
+      const request = projectV2WorkspaceCloneRequest(requestValue);
+      const row = native as Partial<NativeLocalProjects> | null;
+      if (!hasV2Capabilities(native) || typeof row?.cloneWorkspaceV2 !== 'function') projectV2Fail('E_PROJECT_NATIVE');
+      return await projectV2Boundary(
+        () => row!.cloneWorkspaceV2!(request),
+        projectV2WorkspaceClone,
+      );
+    } catch (error) {
+      throw projectV2Error(error);
+    }
+  },
+  /** Whether a clone that asks for a credential can be given one here (Android). */
+  isCloneCredentialPromptAvailable: (): boolean => {
+    try {
+      const row = native as Partial<NativeLocalProjects> | null;
+      return LocalProjects.isWorkspaceCloneAvailable() && typeof row?.presentCloneCredentialPromptV2 === 'function';
+    } catch {
+      return false;
+    }
+  },
+  /**
+   * The native credential dialog for one clone. The secret stays native,
+   * keyed by the operation id; the clone that names it with
+   * `credential_reference: 'prompt'` uses it, and a clone that succeeds keeps
+   * it for the new project. Dismissing the dialog rejects E_PROJECT_CANCELLED.
+   */
+  presentCloneCredentialPromptV2: async (requestValue: unknown): Promise<WorkspaceCloneCredentialV2> => {
+    try {
+      const row = projectV2ExactRecord(requestValue, ['schema_version', 'operation_id', 'url', 'locale'], 'E_PROJECT_REQUEST_INVALID');
+      if (row.schema_version !== 1 || !projectV2String(row.url, 2048) || (row.locale !== 'zh-CN' && row.locale !== 'en')) {
+        return projectV2Fail('E_PROJECT_REQUEST_INVALID');
+      }
+      const request = {
+        schema_version: 1 as const,
+        operation_id: projectV2OperationId(row.operation_id),
+        url: row.url,
+        locale: row.locale as 'zh-CN' | 'en',
+      };
+      const native_ = native as Partial<NativeLocalProjects> | null;
+      if (!hasV2Capabilities(native) || typeof native_?.presentCloneCredentialPromptV2 !== 'function') projectV2Fail('E_PROJECT_NATIVE');
+      return await projectV2Boundary(
+        () => native_!.presentCloneCredentialPromptV2!(request),
+        raw => {
+          const answer = projectV2ExactRecord(raw, ['schema_version', 'operation_id', 'host', 'expiry_seconds'], 'E_PROJECT_RESULT_INVALID');
+          if (answer.schema_version !== 2 || answer.operation_id !== request.operation_id ||
+              !projectV2String(answer.host, 253) || typeof answer.expiry_seconds !== 'number' ||
+              !Number.isSafeInteger(answer.expiry_seconds) || answer.expiry_seconds <= 0) {
+            return projectV2Fail('E_PROJECT_RESULT_INVALID');
+          }
+          return {
+            schema_version: 2 as const,
+            operation_id: answer.operation_id,
+            host: answer.host,
+            expiry_seconds: answer.expiry_seconds,
+          };
+        },
+      );
+    } catch (error) {
+      throw projectV2Error(error);
+    }
+  },
+  cancelWorkspaceCloneV2: async (operationIdValue: unknown): Promise<'cancel_requested' | 'not_running'> => {
+    try {
+      const operationId = projectV2OperationId(operationIdValue);
+      const row = native as Partial<NativeLocalProjects> | null;
+      if (!hasV2Capabilities(native) || typeof row?.cancelWorkspaceCloneV2 !== 'function') projectV2Fail('E_PROJECT_NATIVE');
+      return await projectV2Boundary(
+        () => row!.cancelWorkspaceCloneV2!({ schema_version: 1, operation_id: operationId }),
+        raw => {
+          const answer = projectV2ExactRecord(raw, ['schema_version', 'operation_id', 'status'], 'E_PROJECT_RESULT_INVALID');
+          if (answer.schema_version !== 2 || answer.operation_id !== operationId ||
+              (answer.status !== 'cancel_requested' && answer.status !== 'not_running')) {
+            return projectV2Fail('E_PROJECT_RESULT_INVALID');
+          }
+          return answer.status;
+        },
+      );
+    } catch (error) {
+      throw projectV2Error(error);
+    }
+  },
+  /** What every recorded push of a workspace project proved, oldest first. */
+  pushReceiptsV2: async (requestValue: unknown): Promise<ProjectPushReceiptsV2> => {
+    try {
+      const request = projectV2WorkspaceRequest(requestValue);
+      return await projectV2Boundary(
+        () => requiredV2().pushReceiptsV2!(request),
+        raw => projectV2Receipts(raw, request.root),
+      );
+    } catch (error) {
+      throw projectV2Error(error);
+    }
+  },
+  /** `git fetch origin` for a workspace project; cancelled through cancelPushV2 with the same operation id. */
+  fetchV2: async (requestValue: unknown): Promise<ProjectFetchResultV2> => {
+    try {
+      const request = projectV2FetchRequest(requestValue);
+      return await projectV2Boundary(
+        () => requiredV2().fetchV2!(request),
+        raw => projectV2Fetch(raw, request.root),
+      );
+    } catch (error) {
+      throw projectV2Error(error);
+    }
+  },
+  /** Moves the current branch to origin's tip only as a fast-forward over an unchanged tree; fetch first. */
+  pullFastForwardV2: async (requestValue: unknown): Promise<ProjectPullResultV2> => {
+    try {
+      const request = projectV2PullRequest(requestValue);
+      return await projectV2Boundary(
+        () => requiredV2().pullFastForwardV2!(request),
+        raw => projectV2Pull(raw, request.root),
+      );
+    } catch (error) {
+      throw projectV2Error(error);
+    }
+  },
+  /**
+   * Whether this platform can merge a diverged branch. Separate from the V2
+   * set on purpose: a platform without it keeps everything else.
+   */
+  isMergeAvailable: (): boolean => {
+    try {
+      return hasV2Capabilities(native) &&
+        typeof (native as NativeLocalProjects).mergeRemoteV2 === 'function';
+    } catch {
+      return false;
+    }
+  },
+  /** Merges the fetched upstream into a diverged branch, only when the merge is clean. */
+  mergeRemoteV2: async (requestValue: unknown): Promise<ProjectMergeResultV2> => {
+    try {
+      const request = projectV2MergeRequest(requestValue);
+      const module = requiredV2();
+      if (typeof module.mergeRemoteV2 !== 'function') projectV2Fail('E_PROJECT_NATIVE');
+      return await projectV2Boundary(
+        () => module.mergeRemoteV2!(request),
+        raw => projectV2Merge(raw, request),
+      );
+    } catch (error) {
+      throw projectV2Error(error);
+    }
+  },
+  cancelPushV2: async (
+    requestValue: unknown,
+  ): Promise<ProjectPushCancellationV2> => {
+    try {
+      const request = projectV2CancelPushRequest(requestValue);
+      return await projectV2Boundary(
+        () => requiredV2().cancelPushV2!(request),
+        raw => projectV2PushCancellation(raw, request.root, request.operation_id),
       );
     } catch (error) {
       throw projectV2Error(error);

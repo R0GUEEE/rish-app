@@ -139,6 +139,11 @@ pub fn failure_code(value: Option<&Value>) -> bool {
         "E_COMPLETION_LENGTH",
         "E_COMPLETION_CONTENT_FILTER",
         "E_AGENT_DENIED_BY_USER",
+        "E_AGENT_PROVIDER_CREDENTIAL",
+        "E_AGENT_PROVIDER_FORBIDDEN",
+        "E_AGENT_PROVIDER_NOT_FOUND",
+        "E_AGENT_PROVIDER_RATE_LIMITED",
+        "E_AGENT_PROVIDER_REFUSED",
     ];
     match bounded_utf8(value, 128, false) {
         Some(code) => CODES.contains(&code),

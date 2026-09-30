@@ -10,6 +10,19 @@ const native = {
   stageAllV2: jest.fn(),
   commitV2: jest.fn(),
   pushV2: jest.fn(),
+  setRemoteV2: jest.fn(),
+  remoteV2: jest.fn(),
+  credentialStatusV2: jest.fn(),
+  presentCredentialPromptV2: jest.fn(),
+  clearCredentialV2: jest.fn(),
+  cancelPushV2: jest.fn(),
+  fetchV2: jest.fn(),
+  pullFastForwardV2: jest.fn(),
+  mergeRemoteV2: jest.fn() as jest.Mock | undefined,
+  pushReceiptsV2: jest.fn(),
+  cloneWorkspaceV2: jest.fn(),
+  cancelWorkspaceCloneV2: jest.fn(),
+  presentCloneCredentialPromptV2: jest.fn(),
 };
 
 (NativeModules as Record<string, unknown>).LocalProjects = native;
@@ -340,4 +353,341 @@ test('rejects a V2 push result whose root binding is stale', async () => {
       https_proxy_url: 'https://proxy.example.com:8443/',
     }),
   ).rejects.toMatchObject({ code: 'E_PROJECT_RESULT_INVALID' });
+});
+
+test('remote, credential and cancel travel by root and never carry a token', async () => {
+  const remote = {
+    schema_version: 2, root: root(), project_id: PROJECT_ID, remote: 'origin',
+    url: 'https://github.com/example/demo.git', host: 'github.com',
+  };
+  native.setRemoteV2.mockResolvedValue(remote);
+  native.remoteV2.mockResolvedValue({ ...remote, url: null, host: null });
+  await expect(
+    LocalProjects.setRemoteV2({ schema_version: 1, root: root(), url: 'https://github.com/example/demo.git' }),
+  ).resolves.toEqual(remote);
+  expect(native.setRemoteV2).toHaveBeenCalledWith({
+    schema_version: 1, root: root(), url: 'https://github.com/example/demo.git',
+  });
+  await expect(LocalProjects.remoteV2({ schema_version: 1, root: root() })).resolves.toMatchObject({
+    url: null, host: null,
+  });
+  // Half an origin is no origin.
+  native.remoteV2.mockResolvedValueOnce({ ...remote, host: null });
+  await expect(LocalProjects.remoteV2({ schema_version: 1, root: root() })).rejects.toMatchObject({
+    code: 'E_PROJECT_RESULT_INVALID',
+  });
+  await expect(
+    LocalProjects.setRemoteV2({ schema_version: 1, root: root(), url: '' }),
+  ).rejects.toMatchObject({ code: 'E_PROJECT_REQUEST_INVALID' });
+  expect(native.setRemoteV2).toHaveBeenCalledTimes(1);
+
+  const absent = {
+    schema_version: 2, root: root(), project_id: PROJECT_ID, host: 'github.com', configured: false,
+  };
+  const present = { ...absent, configured: true, expires_at: 1_800_000_000, expiry_seconds: 3600 };
+  native.credentialStatusV2.mockResolvedValue(absent);
+  native.presentCredentialPromptV2.mockResolvedValue(present);
+  native.clearCredentialV2.mockResolvedValue(absent);
+  await expect(LocalProjects.credentialStatusV2({ schema_version: 1, root: root() })).resolves.toEqual(absent);
+  await expect(
+    LocalProjects.presentCredentialPromptV2({ schema_version: 1, root: root(), locale: 'zh-CN' }),
+  ).resolves.toEqual(present);
+  expect(native.presentCredentialPromptV2).toHaveBeenCalledWith({
+    schema_version: 1, root: root(), locale: 'zh-CN',
+  });
+  await expect(
+    LocalProjects.presentCredentialPromptV2({ schema_version: 1, root: root(), locale: 'fr' }),
+  ).rejects.toMatchObject({ code: 'E_PROJECT_REQUEST_INVALID' });
+  // A status that echoes the secret, or claims configured without an expiry, is refused whole.
+  native.credentialStatusV2.mockResolvedValueOnce({ ...present, token: 'ghp_x' });
+  await expect(LocalProjects.credentialStatusV2({ schema_version: 1, root: root() })).rejects.toMatchObject({
+    code: 'E_PROJECT_RESULT_INVALID',
+  });
+  native.credentialStatusV2.mockResolvedValueOnce({ ...absent, configured: true });
+  await expect(LocalProjects.credentialStatusV2({ schema_version: 1, root: root() })).rejects.toMatchObject({
+    code: 'E_PROJECT_RESULT_INVALID',
+  });
+  await expect(LocalProjects.clearCredentialV2({ schema_version: 1, root: root() })).resolves.toEqual(absent);
+
+  native.cancelPushV2.mockResolvedValue({
+    schema_version: 2, root: root(), project_id: PROJECT_ID, operation_id: OPERATION_ID, status: 'not_running',
+  });
+  await expect(
+    LocalProjects.cancelPushV2({ schema_version: 1, root: root(), operation_id: OPERATION_ID }),
+  ).resolves.toMatchObject({ status: 'not_running' });
+  native.cancelPushV2.mockResolvedValueOnce({
+    schema_version: 2, root: root(), project_id: PROJECT_ID, operation_id: CHECKPOINT_ID, status: 'cancel_requested',
+  });
+  await expect(
+    LocalProjects.cancelPushV2({ schema_version: 1, root: root(), operation_id: OPERATION_ID }),
+  ).rejects.toMatchObject({ code: 'E_PROJECT_RESULT_INVALID' });
+
+  const partial = native as { cancelPushV2?: jest.Mock };
+  const cancel = partial.cancelPushV2;
+  delete partial.cancelPushV2;
+  expect(LocalProjects.isV2Available()).toBe(false);
+  partial.cancelPushV2 = cancel;
+});
+
+test('fetch and fast-forward pull travel by root and are held to their shapes', async () => {
+  const fetched = {
+    schema_version: 2, root: root(), project_id: PROJECT_ID, remote: 'origin', branch: 'main',
+    remote_oid: OID, ahead: 0, behind: 2, fetched_at: '2026-09-21T00:00:00.000Z',
+  };
+  native.fetchV2.mockResolvedValue(fetched);
+  await expect(
+    LocalProjects.fetchV2({ schema_version: 1, root: root(), operation_id: OPERATION_ID, remote: 'origin', https_proxy_url: null }),
+  ).resolves.toEqual(fetched);
+  expect(native.fetchV2).toHaveBeenCalledWith({
+    schema_version: 1, root: root(), operation_id: OPERATION_ID, remote: 'origin', https_proxy_url: null,
+  });
+  // The person's proxy travels with the fetch, in its one canonical spelling;
+  // a malformed one, or none at all where the key is required, never leaves JS.
+  await LocalProjects.fetchV2({
+    schema_version: 1, root: root(), operation_id: OPERATION_ID, remote: 'origin', https_proxy_url: 'http://127.0.0.1:7890',
+  });
+  expect(native.fetchV2).toHaveBeenLastCalledWith(expect.objectContaining({ https_proxy_url: 'http://127.0.0.1:7890/' }));
+  const dispatchedFetches = native.fetchV2.mock.calls.length;
+  for (const bad of [{ https_proxy_url: 'proxy:3128' }, { https_proxy_url: 'http://u:p@proxy.example.com:1/' }, {}]) {
+    await expect(
+      LocalProjects.fetchV2({ schema_version: 1, root: root(), operation_id: OPERATION_ID, remote: 'origin', ...bad }),
+    ).rejects.toMatchObject({ code: 'E_PROJECT_REQUEST_INVALID' });
+  }
+  expect(native.fetchV2.mock.calls.length).toBe(dispatchedFetches);
+  // Nothing fetched for the branch is an answer, not a refusal.
+  native.fetchV2.mockResolvedValueOnce({ ...fetched, remote_oid: null, behind: 0 });
+  await expect(
+    LocalProjects.fetchV2({ schema_version: 1, root: root(), operation_id: OPERATION_ID, remote: 'origin', https_proxy_url: null }),
+  ).resolves.toMatchObject({ remote_oid: null, behind: 0 });
+  await expect(
+    LocalProjects.fetchV2({ schema_version: 1, root: root(), operation_id: OPERATION_ID, remote: 'upstream', https_proxy_url: null }),
+  ).rejects.toMatchObject({ code: 'E_PROJECT_REQUEST_INVALID' });
+  native.fetchV2.mockResolvedValueOnce({ ...fetched, behind: -1 });
+  await expect(
+    LocalProjects.fetchV2({ schema_version: 1, root: root(), operation_id: OPERATION_ID, remote: 'origin', https_proxy_url: null }),
+  ).rejects.toMatchObject({ code: 'E_PROJECT_RESULT_INVALID' });
+
+  const previous = 'c'.repeat(40);
+  const pulled = {
+    schema_version: 2, root: root(), project_id: PROJECT_ID, branch: 'main', oid: OID, previous_oid: previous, updated: true,
+  };
+  native.pullFastForwardV2.mockResolvedValue(pulled);
+  await expect(
+    LocalProjects.pullFastForwardV2({ schema_version: 1, root: root(), expected_head_oid: previous }),
+  ).resolves.toEqual(pulled);
+  expect(native.pullFastForwardV2).toHaveBeenCalledWith({
+    schema_version: 1, root: root(), expected_head_oid: previous,
+  });
+  native.pullFastForwardV2.mockResolvedValueOnce({ ...pulled, oid: previous, updated: false });
+  await expect(
+    LocalProjects.pullFastForwardV2({ schema_version: 1, root: root(), expected_head_oid: previous }),
+  ).resolves.toMatchObject({ updated: false });
+  // `updated` must agree with the oids.
+  native.pullFastForwardV2.mockResolvedValueOnce({ ...pulled, updated: false });
+  await expect(
+    LocalProjects.pullFastForwardV2({ schema_version: 1, root: root(), expected_head_oid: previous }),
+  ).rejects.toMatchObject({ code: 'E_PROJECT_RESULT_INVALID' });
+  await expect(
+    LocalProjects.pullFastForwardV2({ schema_version: 1, root: root(), expected_head_oid: null }),
+  ).rejects.toMatchObject({ code: 'E_PROJECT_REQUEST_INVALID' });
+  // A proxy that failed is said as such, not as a generic native failure.
+  native.fetchV2.mockRejectedValueOnce(Object.assign(new Error('E_PROJECT_PROXY'), { code: 'E_PROJECT_PROXY' }));
+  await expect(
+    LocalProjects.fetchV2({ schema_version: 1, root: root(), operation_id: OPERATION_ID, remote: 'origin', https_proxy_url: null }),
+  ).rejects.toMatchObject({ code: 'E_PROJECT_PROXY' });
+  native.pullFastForwardV2.mockRejectedValueOnce(
+    Object.assign(new Error('E_PROJECT_NON_FAST_FORWARD'), { code: 'E_PROJECT_NON_FAST_FORWARD' }),
+  );
+  await expect(
+    LocalProjects.pullFastForwardV2({ schema_version: 1, root: root(), expected_head_oid: previous }),
+  ).rejects.toMatchObject({ code: 'E_PROJECT_NON_FAST_FORWARD' });
+});
+
+test('a merge travels by root, is bound to the reviewed branch and tips, and is held to its outcome', async () => {
+  const ours = 'c'.repeat(40);
+  const theirs = 'd'.repeat(40);
+  const merge = 'e'.repeat(40);
+  const request = {
+    schema_version: 1, root: root(), operation_id: OPERATION_ID, expected_branch: 'main',
+    expected_head_oid: ours, expected_remote_oid: theirs, author_name: 'Rish Bot', author_email: 'rish@example.invalid',
+  };
+  const merged = {
+    schema_version: 2, root: root(), project_id: PROJECT_ID, branch: 'main', outcome: 'merged',
+    oid: merge, previous_oid: ours, conflicts: [], paths: [],
+  };
+  expect(LocalProjects.isMergeAvailable()).toBe(true);
+  native.mergeRemoteV2!.mockResolvedValue(merged);
+  await expect(LocalProjects.mergeRemoteV2(request)).resolves.toEqual(merged);
+  expect(native.mergeRemoteV2).toHaveBeenCalledWith(request);
+
+  // Every outcome but a merge promises the branch did not move.
+  const conflicts = [{ ancestor: 'a.txt', ours: 'a.txt', theirs: 'a.txt' }, { ancestor: 'b.txt', ours: null, theirs: 'b.txt' }];
+  native.mergeRemoteV2!.mockResolvedValueOnce({ ...merged, outcome: 'conflicts', oid: ours, conflicts });
+  await expect(LocalProjects.mergeRemoteV2(request)).resolves.toMatchObject({ outcome: 'conflicts', conflicts });
+  native.mergeRemoteV2!.mockResolvedValueOnce({ ...merged, outcome: 'obstructed', oid: ours, paths: ['build/out.txt'] });
+  await expect(LocalProjects.mergeRemoteV2(request)).resolves.toMatchObject({ paths: ['build/out.txt'] });
+  for (const hostile of [
+    { ...merged, outcome: 'conflicts', conflicts },
+    { ...merged, oid: ours },
+    { ...merged, outcome: 'up_to_date' },
+    { ...merged, outcome: 'rebased' },
+    { ...merged, branch: 'other' },
+    { ...merged, previous_oid: theirs },
+    { ...merged, paths: ['x'] },
+    { ...merged, outcome: 'obstructed', oid: ours, conflicts },
+    { ...merged, outcome: 'conflicts', oid: ours, conflicts: [{ ancestor: null, ours: 'a' }] },
+    { ...merged, extra: true },
+  ]) {
+    native.mergeRemoteV2!.mockResolvedValueOnce(hostile);
+    await expect(LocalProjects.mergeRemoteV2(request)).rejects.toMatchObject({ code: 'E_PROJECT_RESULT_INVALID' });
+  }
+
+  for (const bad of [
+    { ...request, expected_remote_oid: 'abc' },
+    { ...request, expected_head_oid: null },
+    { ...request, expected_branch: '' },
+    { ...request, author_email: 'rish' },
+    { ...request, author_name: '' },
+    { ...request, operation_id: 'nope' },
+    { ...request, force: true },
+  ]) {
+    await expect(LocalProjects.mergeRemoteV2(bad)).rejects.toMatchObject({ code: 'E_PROJECT_REQUEST_INVALID' });
+  }
+  const dispatched = native.mergeRemoteV2!.mock.calls.length;
+  expect(dispatched).toBe(13);
+
+  for (const code of ['E_PROJECT_MERGE_UNSUPPORTED', 'E_PROJECT_RECOVERY_REQUIRED']) {
+    native.mergeRemoteV2!.mockRejectedValueOnce(Object.assign(new Error(code), { code }));
+    await expect(LocalProjects.mergeRemoteV2(request)).rejects.toMatchObject({ code });
+  }
+
+  // A platform without merge keeps the rest of V2, and says it cannot merge.
+  const saved = native.mergeRemoteV2;
+  native.mergeRemoteV2 = undefined;
+  try {
+    expect(LocalProjects.isMergeAvailable()).toBe(false);
+    expect(LocalProjects.isV2Available()).toBe(true);
+    await expect(LocalProjects.mergeRemoteV2(request)).rejects.toMatchObject({ code: 'E_PROJECT_NATIVE' });
+  } finally {
+    native.mergeRemoteV2 = saved;
+  }
+});
+
+test('push receipts travel by root and carry only what a push proved', async () => {
+  const receipt = {
+    schema_version: 1, remote: 'origin', host: 'github.com', branch: 'main',
+    local_oid: OID, remote_oid: OID, pushed_at: '2026-09-21T00:00:00.000Z',
+  };
+  native.pushReceiptsV2.mockResolvedValue({ schema_version: 2, root: root(), project_id: PROJECT_ID, receipts: [receipt] });
+  await expect(LocalProjects.pushReceiptsV2({ schema_version: 1, root: root() })).resolves.toEqual({
+    schema_version: 2, root: root(), project_id: PROJECT_ID, receipts: [receipt],
+  });
+  expect(native.pushReceiptsV2).toHaveBeenCalledWith({ schema_version: 1, root: root() });
+  native.pushReceiptsV2.mockResolvedValueOnce({ schema_version: 2, root: root(), project_id: PROJECT_ID, receipts: [{ ...receipt, token: 'x' }] });
+  await expect(LocalProjects.pushReceiptsV2({ schema_version: 1, root: root() })).rejects.toMatchObject({
+    code: 'E_PROJECT_RESULT_INVALID',
+  });
+  native.pushReceiptsV2.mockResolvedValueOnce({ schema_version: 2, root: root(), project_id: PROJECT_ID, receipts: [] });
+  await expect(LocalProjects.pushReceiptsV2({ schema_version: 1, root: root() })).resolves.toMatchObject({ receipts: [] });
+});
+
+test('a workspace clone is requested by url and name and answers the attached project', async () => {
+  const cloned = {
+    schema_version: 2, root: root(), project: project(),
+    workspace: { workspace_id: WORKSPACE_ID, display_name: 'V2 Project' }, branch: 'main', oid: OID,
+  };
+  native.cloneWorkspaceV2.mockResolvedValue(cloned);
+  expect(LocalProjects.isWorkspaceCloneAvailable()).toBe(true);
+  await expect(
+    LocalProjects.cloneWorkspaceV2({ schema_version: 1, operation_id: OPERATION_ID, url: 'https://github.com/example/demo.git', display_name: 'demo', https_proxy_url: null }),
+  ).resolves.toEqual(cloned);
+  expect(native.cloneWorkspaceV2).toHaveBeenCalledWith({
+    schema_version: 1, operation_id: OPERATION_ID, url: 'https://github.com/example/demo.git', display_name: 'demo', https_proxy_url: null,
+  });
+  // The answer must agree with itself: root, project and workspace name one thing.
+  native.cloneWorkspaceV2.mockResolvedValueOnce({ ...cloned, workspace: { workspace_id: PROJECT_ID, display_name: 'x' } });
+  await expect(
+    LocalProjects.cloneWorkspaceV2({ schema_version: 1, operation_id: OPERATION_ID, url: 'https://github.com/example/demo.git', display_name: 'demo', https_proxy_url: null }),
+  ).rejects.toMatchObject({ code: 'E_PROJECT_RESULT_INVALID' });
+  await expect(
+    LocalProjects.cloneWorkspaceV2({ schema_version: 1, operation_id: OPERATION_ID, url: '', display_name: 'demo', https_proxy_url: null }),
+  ).rejects.toMatchObject({ code: 'E_PROJECT_REQUEST_INVALID' });
+  await LocalProjects.cloneWorkspaceV2({
+    schema_version: 1, operation_id: OPERATION_ID, url: 'https://github.com/example/demo.git', display_name: 'demo',
+    https_proxy_url: 'https://proxy.example.com:8443',
+  });
+  expect(native.cloneWorkspaceV2).toHaveBeenLastCalledWith(
+    expect.objectContaining({ https_proxy_url: 'https://proxy.example.com:8443/' }),
+  );
+  await expect(
+    LocalProjects.cloneWorkspaceV2({ schema_version: 1, operation_id: OPERATION_ID, url: 'https://github.com/example/demo.git', display_name: 'demo' }),
+  ).rejects.toMatchObject({ code: 'E_PROJECT_REQUEST_INVALID' });
+  native.cancelWorkspaceCloneV2.mockResolvedValue({ schema_version: 2, operation_id: OPERATION_ID, status: 'cancel_requested' });
+  await expect(LocalProjects.cancelWorkspaceCloneV2(OPERATION_ID)).resolves.toBe('cancel_requested');
+  const partial = native as { cloneWorkspaceV2?: jest.Mock };
+  const clone = partial.cloneWorkspaceV2;
+  delete partial.cloneWorkspaceV2;
+  // Not part of the V2 Git set: a build without it still has V2 Git.
+  expect(LocalProjects.isV2Available()).toBe(true);
+  expect(LocalProjects.isWorkspaceCloneAvailable()).toBe(false);
+  partial.cloneWorkspaceV2 = clone;
+});
+
+test('a clone that asks for a credential is given one through the native prompt, by operation id', async () => {
+  native.presentCloneCredentialPromptV2.mockResolvedValue({
+    schema_version: 2, operation_id: OPERATION_ID, host: 'github.com', expiry_seconds: 3600,
+  });
+  expect(LocalProjects.isCloneCredentialPromptAvailable()).toBe(true);
+  await expect(
+    LocalProjects.presentCloneCredentialPromptV2({
+      schema_version: 1, operation_id: OPERATION_ID, url: 'https://github.com/example/demo.git', locale: 'en',
+    }),
+  ).resolves.toEqual({ schema_version: 2, operation_id: OPERATION_ID, host: 'github.com', expiry_seconds: 3600 });
+  expect(native.presentCloneCredentialPromptV2).toHaveBeenCalledWith({
+    schema_version: 1, operation_id: OPERATION_ID, url: 'https://github.com/example/demo.git', locale: 'en',
+  });
+  // The answer names the operation it was asked for, and never a secret.
+  native.presentCloneCredentialPromptV2.mockResolvedValueOnce({
+    schema_version: 2, operation_id: PROJECT_ID, host: 'github.com', expiry_seconds: 3600,
+  });
+  await expect(
+    LocalProjects.presentCloneCredentialPromptV2({
+      schema_version: 1, operation_id: OPERATION_ID, url: 'https://github.com/example/demo.git', locale: 'en',
+    }),
+  ).rejects.toMatchObject({ code: 'E_PROJECT_RESULT_INVALID' });
+  native.presentCloneCredentialPromptV2.mockResolvedValueOnce({
+    schema_version: 2, operation_id: OPERATION_ID, host: 'github.com', expiry_seconds: 3600, token: 'leak',
+  });
+  await expect(
+    LocalProjects.presentCloneCredentialPromptV2({
+      schema_version: 1, operation_id: OPERATION_ID, url: 'https://github.com/example/demo.git', locale: 'en',
+    }),
+  ).rejects.toMatchObject({ code: 'E_PROJECT_RESULT_INVALID' });
+  await expect(
+    LocalProjects.presentCloneCredentialPromptV2({
+      schema_version: 1, operation_id: OPERATION_ID, url: 'https://github.com/example/demo.git', locale: 'fr',
+    }),
+  ).rejects.toMatchObject({ code: 'E_PROJECT_REQUEST_INVALID' });
+  // The clone then names the credential by reference only.
+  const cloned = {
+    schema_version: 2, root: root(), project: project(),
+    workspace: { workspace_id: WORKSPACE_ID, display_name: 'demo' }, branch: 'main', oid: OID,
+  };
+  native.cloneWorkspaceV2.mockResolvedValue(cloned);
+  await expect(
+    LocalProjects.cloneWorkspaceV2({
+      schema_version: 1, operation_id: OPERATION_ID, url: 'https://github.com/example/demo.git', display_name: 'demo', https_proxy_url: null,
+      credential_reference: 'prompt',
+    }),
+  ).resolves.toEqual(cloned);
+  expect(native.cloneWorkspaceV2).toHaveBeenLastCalledWith({
+    schema_version: 1, operation_id: OPERATION_ID, url: 'https://github.com/example/demo.git', display_name: 'demo', https_proxy_url: null,
+    credential_reference: 'prompt',
+  });
+  await expect(
+    LocalProjects.cloneWorkspaceV2({
+      schema_version: 1, operation_id: OPERATION_ID, url: 'https://github.com/example/demo.git', display_name: 'demo', https_proxy_url: null,
+      credential_reference: 'stored',
+    }),
+  ).rejects.toMatchObject({ code: 'E_PROJECT_REQUEST_INVALID' });
 });

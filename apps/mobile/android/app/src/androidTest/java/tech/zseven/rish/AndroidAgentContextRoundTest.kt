@@ -52,7 +52,7 @@ class AndroidAgentContextRoundTest {
     private val context = InstrumentationRegistry.getInstrumentation().targetContext
 
     /** A provider that records one request and answers a fixed chat-completions stream. */
-    private class Provider(private val reply: String) {
+    private class Provider(private val reply: String, private val status: String = "200 OK") {
         val socket: ServerSocket = ServerSocket().apply {
             reuseAddress = true
             bind(InetSocketAddress(InetAddress.getByName("127.0.0.1"), 0))
@@ -82,7 +82,7 @@ class AndroidAgentContextRoundTest {
                         request = head.toString() + String(body, Charsets.UTF_8)
                         val out = client.getOutputStream()
                         out.write(
-                            ("HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nConnection: close\r\n" +
+                            ("HTTP/1.1 $status\r\nContent-Type: application/json\r\nConnection: close\r\n" +
                                 "Content-Length: ${reply.toByteArray().size}\r\n\r\n").toByteArray(),
                         )
                         out.write(reply.toByteArray(Charsets.UTF_8))
@@ -94,8 +94,145 @@ class AndroidAgentContextRoundTest {
         }
     }
 
+    /** What one round against a provider on this device left behind. */
+    private class Ran(
+        val result: JSONObject,
+        val provider: Provider,
+        val manifest: JSONObject,
+        val snapshotId: String,
+        val wal: AndroidAgentWal,
+    )
+
     @Test
     fun aRoundWithAProjectContextSendsTheVerifiedEnvelopeFirstAndJournalsItsReceipt() {
+        roundAgainst(
+            "200 OK",
+            """{"id":"resp-context","model":"$MODEL","choices":[{"message":{"role":"assistant","content":"I read it."},"finish_reason":"stop"}]}""",
+        ) { ran ->
+            val result = ran.result
+            val provider = ran.provider
+            val manifest = ran.manifest
+            val snapshotId = ran.snapshotId
+            // What went out: the envelope first, then the conversation.
+            assertTrue(provider.served.await(20, TimeUnit.SECONDS))
+            val body = JSONObject(provider.request.substringAfter("\r\n\r\n"))
+            val messages = body.getJSONArray("messages")
+            assertEquals(body.toString(), "system", messages.getJSONObject(0).getString("role"))
+            val envelope = messages.getJSONObject(0).getString("content")
+            assertTrue(envelope.take(60), envelope.startsWith("RISH-PROJECT-CONTEXT/2\nMETA "))
+            assertTrue(envelope.contains("# the project"))
+            assertEquals(manifest.getInt("context_bytes"), envelope.toByteArray(Charsets.UTF_8).size)
+            assertEquals("user", messages.getJSONObject(1).getString("role"))
+            assertEquals("hello", messages.getJSONObject(1).getString("content"))
+
+            // What came back: a final round, whose public receipt carries the
+            // receipt for exactly that snapshot.
+            assertEquals(result.toString(), "completed", result.getString("status"))
+            val outcome = result.getJSONObject("outcome")
+            assertEquals("final", outcome.getString("kind"))
+            assertEquals("I read it.", outcome.getString("text"))
+            val receipt = outcome.getJSONObject("completion_receipt")
+            val contextReceipt = receipt.getJSONObject("project_context_receipt")
+            assertEquals(snapshotId, contextReceipt.getString("snapshot_id"))
+            assertEquals(manifest.getString("snapshot_sha256"), contextReceipt.getString("snapshot_sha256"))
+            assertEquals(manifest.getInt("context_bytes"), contextReceipt.getInt("context_bytes"))
+            assertEquals(3, receipt.getInt("transport_schema_version"))
+        }
+    }
+
+    /**
+     * A relay that refuses the key answers 401 with a status line. The round
+     * was turned away, not lost: it settles failed_retryable with the cause
+     * the core names from the status, and the dispatch marker is reset in the
+     * same WAL transaction -- where it used to settle ambiguous, "may have
+     * reached the service", which sent a person setting up a relay nowhere.
+     */
+    @Test
+    fun aRoundTheRelayRefusedSettlesWithItsCause() {
+        roundAgainst("401 Unauthorized", """{"error":{"message":"invalid api key"}}""") { ran ->
+            assertTrue(ran.provider.served.await(20, TimeUnit.SECONDS))
+            assertEquals(ran.result.toString(), "failed_retryable", ran.result.getString("status"))
+            assertEquals("E_AGENT_PROVIDER_CREDENTIAL", ran.result.getString("failure_code"))
+            val snapshot = ran.wal.snapshot()
+            val row = snapshot.getJSONArray("rounds").getJSONObject(0)
+            assertEquals("failed_retryable", row.getString("state"))
+            assertEquals("E_AGENT_PROVIDER_CREDENTIAL", row.getString("failure_code"))
+            val marker = snapshot.getJSONArray("dispatch").let { markers ->
+                (0 until markers.length()).map { markers.getJSONObject(it) }.first { it.optString("kind") == "round" }
+            }
+            assertEquals("not_dispatched", marker.getString("dispatch_state"))
+        }
+    }
+
+    /**
+     * A "max" reasoning past what the controller accepts. The transcript keeps
+     * all of it (a later round hands it back to the provider); the answer
+     * shows the core's excerpt. It used to be committed whole here and then
+     * refused by the controller on every read, so the turn never finished.
+     */
+    @Test
+    fun aReasoningPastThePresentationLimitIsShownAsAnExcerpt() {
+        val reasoning = "开头" + "鹈".repeat(400 * 1024 / 3) + "结尾"
+        val reply = JSONObject().put("id", "resp-long").put("model", MODEL).put(
+            "choices",
+            JSONArray().put(
+                JSONObject().put("finish_reason", "stop").put(
+                    "message",
+                    JSONObject().put("role", "assistant").put("content", "done")
+                        .put("reasoning_content", reasoning),
+                ),
+            ),
+        ).toString()
+        roundAgainst("200 OK", reply) { ran ->
+            assertTrue(ran.provider.served.await(20, TimeUnit.SECONDS))
+            assertEquals(ran.result.toString().take(300), "completed", ran.result.getString("status"))
+            val shown = ran.result.getJSONObject("outcome").getString("reasoning")
+            assertTrue(shown.toByteArray(Charsets.UTF_8).size <= 256 * 1024)
+            assertTrue(shown.startsWith("开头"))
+            assertTrue(shown.endsWith("结尾"))
+            assertTrue(shown.contains("[…]"))
+            assertEquals("done", ran.result.getJSONObject("outcome").getString("text"))
+        }
+    }
+
+    /**
+     * An answer that arrives but cannot be recorded -- a write_file whose
+     * arguments pass what a transcript holds. It used to throw out of the
+     * round with the row still in flight under a dead owner, and every later
+     * recovery answered it with a conflict, forever. It now settles as a
+     * failed provider call does: reconciled, ambiguous, the row out of flight.
+     */
+    @Test
+    fun anAnswerThatCannotBeRecordedSettlesTheRound() {
+        val content = "<circle/>".repeat(40 * 1024 / 9)
+        val arguments = JSONObject().put("path", "pelican.html").put("content", content).toString()
+        val reply = JSONObject().put("id", "resp-big-call").put("model", MODEL).put(
+            "choices",
+            JSONArray().put(
+                JSONObject().put("finish_reason", "tool_calls").put(
+                    "message",
+                    JSONObject().put("role", "assistant").put("content", JSONObject.NULL).put(
+                        "tool_calls",
+                        JSONArray().put(
+                            JSONObject().put("id", "call_big").put("type", "function").put(
+                                "function",
+                                JSONObject().put("name", "write_file").put("arguments", arguments),
+                            ),
+                        ),
+                    ),
+                ),
+            ),
+        ).toString()
+        roundAgainst("200 OK", reply) { ran ->
+            assertTrue(ran.provider.served.await(20, TimeUnit.SECONDS))
+            assertEquals(ran.result.toString().take(300), "ambiguous", ran.result.getString("status"))
+            val row = ran.wal.snapshot().getJSONArray("rounds").getJSONObject(0)
+            assertEquals("ambiguous", row.getString("state"))
+            assertEquals(JSONObject.NULL, row.get("owner"))
+        }
+    }
+
+    private fun roundAgainst(status: String, reply: String, check: (Ran) -> Unit) {
         assumeTrue("rish agent core is not staged in this build", RishAgentCoreNative.available)
         assumeTrue("libgit2 is not staged in this build", RishLibgit2Native.available)
         val scratch = File(context.noBackupFilesDir, "context-round-${UUID.randomUUID()}").apply { mkdirs() }
@@ -169,9 +306,7 @@ class AndroidAgentContextRoundTest {
             )
 
             // A provider on this device.
-            val provider = Provider(
-                """{"id":"resp-context","model":"$MODEL","choices":[{"message":{"role":"assistant","content":"I read it."},"finish_reason":"stop"}]}""",
-            )
+            val provider = Provider(reply, status)
             provider.start()
             val namespace = "context-round-${UUID.randomUUID()}"
             val configurations = AndroidProviderConfiguration(context, "$namespace.providers")
@@ -208,31 +343,7 @@ class AndroidAgentContextRoundTest {
                     .put("root", authority.getJSONObject("root"))
                     .put("registry_version", 2).put("toolset_sha256", AndroidAgentToolRegistry.toolsetSha256()),
             ))
-
-            // What went out: the envelope first, then the conversation.
-            assertTrue(provider.served.await(20, TimeUnit.SECONDS))
-            val body = JSONObject(provider.request.substringAfter("\r\n\r\n"))
-            val messages = body.getJSONArray("messages")
-            assertEquals(body.toString(), "system", messages.getJSONObject(0).getString("role"))
-            val envelope = messages.getJSONObject(0).getString("content")
-            assertTrue(envelope.take(60), envelope.startsWith("RISH-PROJECT-CONTEXT/2\nMETA "))
-            assertTrue(envelope.contains("# the project"))
-            assertEquals(manifest.getInt("context_bytes"), envelope.toByteArray(Charsets.UTF_8).size)
-            assertEquals("user", messages.getJSONObject(1).getString("role"))
-            assertEquals("hello", messages.getJSONObject(1).getString("content"))
-
-            // What came back: a final round, whose public receipt carries the
-            // receipt for exactly that snapshot.
-            assertEquals(result.toString(), "completed", result.getString("status"))
-            val outcome = result.getJSONObject("outcome")
-            assertEquals("final", outcome.getString("kind"))
-            assertEquals("I read it.", outcome.getString("text"))
-            val receipt = outcome.getJSONObject("completion_receipt")
-            val contextReceipt = receipt.getJSONObject("project_context_receipt")
-            assertEquals(snapshotId, contextReceipt.getString("snapshot_id"))
-            assertEquals(manifest.getString("snapshot_sha256"), contextReceipt.getString("snapshot_sha256"))
-            assertEquals(manifest.getInt("context_bytes"), contextReceipt.getInt("context_bytes"))
-            assertEquals(3, receipt.getInt("transport_schema_version"))
+            check(Ran(result, provider, manifest, snapshotId, wal))
         } finally {
             sessions.close()
             context.deleteDatabase(databaseName)

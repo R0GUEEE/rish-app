@@ -486,3 +486,300 @@ fn json_envelope_round_trips_effects_and_errors() {
     let malformed: Value = serde_json::from_str(&reduce_json("not json")).unwrap();
     assert_eq!(malformed, json!({ "ok": false, "error": 2 }));
 }
+
+/// A round that provably never left the device keeps the reason it did not.
+///
+/// A refusal raised while the request was being built -- an attachment the
+/// transport cannot carry, a dialect that cannot express a round transcript
+/// -- is the only account of why the turn ended. Every later reader takes
+/// the row's code and recovery after a restart has nothing else, so the row
+/// is where the cause has to live. It used to be flattened to
+/// E_AGENT_PERSISTENCE, which reads to a person as a save that could not be
+/// confirmed, with Retry save as the only advice.
+#[test]
+fn a_round_settled_before_dispatch_keeps_its_stated_cause() {
+    let row = in_flight_row();
+    let mut dead = view(Some(row.clone()), Some("not_dispatched"));
+    dead.row_owner_alive = false;
+    let stated = reduce(
+        "reconcile",
+        &args(json!({
+            "locator": locator(),
+            "cas": cas_for(&row),
+            "failure_code": "E_AGENT_CAPABILITY",
+        })),
+        &env(),
+        &dead,
+    )
+    .unwrap();
+    let settled = stated.row.unwrap();
+    assert_eq!(settled["state"], "failed_retryable");
+    assert_eq!(settled["failure_code"], "E_AGENT_CAPABILITY");
+
+    // A dispatched round is ambiguous whatever its writer believes. Letting
+    // a caller name a confident cause here would turn an ambiguity into
+    // false certainty, which is the one thing the marker exists to prevent.
+    let mut dead_dispatched = dead.clone();
+    dead_dispatched.dispatch_state = Some("dispatched".to_string());
+    let dispatched = reduce(
+        "reconcile",
+        &args(json!({
+            "locator": locator(),
+            "cas": cas_for(&row),
+            "failure_code": "E_AGENT_CAPABILITY",
+        })),
+        &env(),
+        &dead_dispatched,
+    )
+    .unwrap();
+    assert_eq!(
+        dispatched.row.unwrap()["failure_code"],
+        "E_AGENT_ROUND_AMBIGUOUS",
+    );
+
+    // A cause outside the closed union, and the generic answer restated, are
+    // both ignored rather than written.
+    for ignored in [json!("not a code"), json!("E_AGENT_PERSISTENCE"), json!(7)] {
+        let answer = reduce(
+            "reconcile",
+            &args(json!({
+                "locator": locator(),
+                "cas": cas_for(&row),
+                "failure_code": ignored,
+            })),
+            &env(),
+            &dead,
+        )
+        .unwrap();
+        assert_eq!(
+            answer.row.unwrap()["failure_code"],
+            "E_AGENT_PERSISTENCE",
+            "{ignored}",
+        );
+    }
+}
+
+// Races around a cancellation that names its round at revision 0 (the reply
+// carrying the row's revision is the one being stopped). The plan takes the
+// WAL's revision; these pin that it never lets the cancel win what it lost.
+
+fn wal_with(row: &Value) -> Value {
+    json!({ "rounds": [row] })
+}
+
+fn round_cancel_request(round_id: &str, attempt_id: &str, revision: u64) -> Value {
+    json!({
+        "target": { "schema_version": 2, "kind": "round", "task_id": TASK, "attempt_id": attempt_id,
+                    "round_id": round_id, "round_index": 0 },
+        "expected_round_revision": revision,
+    })
+}
+
+/// The CAS a host builds from a round plan: the row it read, at the revision
+/// the plan settled on.
+fn cas_at(row: &Value, revision: &Value) -> Value {
+    let mut cas = cas_for(row);
+    cas["expected_row_revision"] = revision.clone();
+    cas
+}
+
+fn cancel_planned(row: &Value, revision: u64) -> Result<Value, StoreError> {
+    let plan = rish_agent_core::runtime_coordinator::cancel_plan(
+        &wal_with(row),
+        &round_cancel_request(ROUND, ATTEMPT, revision),
+    );
+    assert_eq!(plan["plan"], "round");
+    reduce(
+        "cancel",
+        &args(json!({ "cas": cas_at(row, &plan["expected_round_revision"]) })),
+        &env(),
+        &view(Some(row.clone()), Some("dispatched")),
+    )
+    .map(|effect| effect.row.unwrap())
+}
+
+// The reply finished before the stop arrived: the WAL's revision is the
+// completed row's, and a completed row is not cancelled.
+#[test]
+fn a_completion_that_won_is_not_cancelled_at_the_wal_revision() {
+    let mut completed = in_flight_row();
+    completed["state"] = json!("completed");
+    completed["row_revision"] = json!(2);
+    completed["owner"] = Value::Null;
+    assert_eq!(cancel_planned(&completed, 0).unwrap_err(), StoreError::Conflict);
+}
+
+// The plan read revision 1; the reply completed (revision 2) before the
+// cancel committed. The CAS the plan produced no longer matches.
+#[test]
+fn a_completion_after_the_plan_makes_the_cancel_conflict() {
+    let row = in_flight_row();
+    let plan = rish_agent_core::runtime_coordinator::cancel_plan(
+        &wal_with(&row),
+        &round_cancel_request(ROUND, ATTEMPT, 0),
+    );
+    let cas = cas_at(&row, &plan["expected_round_revision"]);
+    let mut moved = row.clone();
+    moved["state"] = json!("completed");
+    moved["row_revision"] = json!(2);
+    let lost = reduce("cancel", &args(json!({ "cas": cas })), &env(), &view(Some(moved), Some("dispatched")));
+    assert_eq!(lost.unwrap_err(), StoreError::Conflict);
+}
+
+// A nonzero revision is what the controller heard; a stale one is kept and
+// refused, never replaced by the WAL's.
+#[test]
+fn a_stale_nonzero_revision_still_conflicts() {
+    let mut row = in_flight_row();
+    row["row_revision"] = json!(4);
+    let plan = rish_agent_core::runtime_coordinator::cancel_plan(
+        &wal_with(&row),
+        &round_cancel_request(ROUND, ATTEMPT, 3),
+    );
+    assert_eq!(plan["expected_round_revision"], json!(3));
+    assert_eq!(cancel_planned(&row, 3).unwrap_err(), StoreError::Conflict);
+    // The same row at the revision it has is cancelled.
+    assert_eq!(cancel_planned(&row, 0).unwrap()["state"], "cancel_requested");
+}
+
+// Revision 0 borrows only from the row the target names: another round or
+// another attempt lends it nothing.
+#[test]
+fn revision_zero_borrows_only_from_the_named_round() {
+    let row = in_flight_row();
+    let other_round = "99999999-9999-4999-8999-999999999999";
+    for (round_id, attempt_id) in [(other_round, ATTEMPT), (ROUND, other_round)] {
+        let plan = rish_agent_core::runtime_coordinator::cancel_plan(
+            &wal_with(&row),
+            &round_cancel_request(round_id, attempt_id, 0),
+        );
+        assert_ne!(plan["plan"], "round", "{round_id} {attempt_id}");
+    }
+}
+
+// A provider's refusal heard in full: the transport reports the status and
+// the owner it dispatched under; the core names the cause.
+
+fn refused_by(row: &Value, dispatch: &str, status: u64, owner: Value) -> Result<rish_agent_core::round_journal::Effect, StoreError> {
+    let mut dead = view(Some(row.clone()), Some(dispatch));
+    dead.row_owner_alive = false;
+    reduce(
+        "reconcile",
+        &args(json!({
+            "locator": locator(), "cas": cas_for(row),
+            "transport_evidence": { "kind": "http_rejected", "http_status": status, "owner": owner },
+        })),
+        &env(),
+        &dead,
+    )
+}
+
+#[test]
+fn a_refusal_the_provider_answered_is_retryable_with_its_cause() {
+    for (status, code) in [
+        (401, "E_AGENT_PROVIDER_CREDENTIAL"),
+        (403, "E_AGENT_PROVIDER_FORBIDDEN"),
+        (404, "E_AGENT_PROVIDER_NOT_FOUND"),
+        (429, "E_AGENT_PROVIDER_RATE_LIMITED"),
+        (400, "E_AGENT_PROVIDER_REFUSED"),
+        (422, "E_AGENT_PROVIDER_REFUSED"),
+    ] {
+        let effect = refused_by(&in_flight_row(), "dispatched", status, owner()).unwrap();
+        let row = effect.row.unwrap();
+        assert_eq!(row["state"], "failed_retryable", "{status}");
+        assert_eq!(row["failure_code"], code, "{status}");
+        assert!(row["owner"].is_null());
+        // Recorded and cleared in one commit: failed_retryable beside a
+        // dispatched marker is corrupt, and a reclaim needs it clear.
+        assert_eq!(effect.dispatch, Some(DispatchEffect::ResetNotDispatched), "{status}");
+    }
+}
+
+// What a status does not prove stays ambiguous: the server giving up on a
+// slow request, a proxy noting the client left, and every 5xx.
+#[test]
+fn a_status_that_proves_no_refusal_stays_ambiguous() {
+    for status in [408, 499, 500, 502, 503, 504, 200, 302] {
+        let effect = refused_by(&in_flight_row(), "dispatched", status, owner()).unwrap();
+        assert_eq!(effect.row.unwrap()["state"], "ambiguous", "{status}");
+        assert_eq!(effect.dispatch, None, "{status}");
+    }
+}
+
+// Evidence speaks only for the dispatch that produced it.
+#[test]
+fn a_refusal_is_bound_to_the_dispatch_that_heard_it() {
+    // Another owner's refusal.
+    let mut stranger = owner();
+    stranger["native_task_id"] = json!("66666666-6666-4666-8666-666666666666");
+    let effect = refused_by(&in_flight_row(), "dispatched", 401, stranger).unwrap();
+    assert_eq!(effect.row.unwrap()["state"], "ambiguous");
+
+    // A round the person stopped meanwhile is not the round that was refused.
+    let mut stopping = in_flight_row();
+    stopping["state"] = json!("cancel_requested");
+    let effect = refused_by(&stopping, "dispatched", 401, owner()).unwrap();
+    assert_eq!(effect.row.unwrap()["state"], "ambiguous");
+
+    // Never dispatched: the existing rule decides, and no reset is needed.
+    let effect = refused_by(&in_flight_row(), "not_dispatched", 401, owner()).unwrap();
+    let row = effect.row.unwrap();
+    assert_eq!(row["state"], "failed_retryable");
+    assert_eq!(row["failure_code"], "E_AGENT_PERSISTENCE");
+    assert_eq!(effect.dispatch, None);
+}
+
+// A caller cannot talk a dispatched round out of its ambiguity by naming a
+// cause itself, with or without evidence.
+#[test]
+fn a_stated_cause_never_replaces_the_derived_one() {
+    let mut dead = view(Some(in_flight_row()), Some("dispatched"));
+    dead.row_owner_alive = false;
+    let stated = reduce(
+        "reconcile",
+        &args(json!({ "locator": locator(), "cas": cas_for(&in_flight_row()),
+                      "failure_code": "E_AGENT_PROVIDER_CREDENTIAL" })),
+        &env(),
+        &dead,
+    )
+    .unwrap();
+    assert_eq!(stated.row.unwrap()["state"], "ambiguous");
+}
+
+#[test]
+fn malformed_evidence_is_a_host_bug() {
+    let mut dead = view(Some(in_flight_row()), Some("dispatched"));
+    dead.row_owner_alive = false;
+    for evidence in [
+        json!({ "kind": "answered", "http_status": 401, "owner": owner() }),
+        json!({ "kind": "http_rejected", "http_status": "401", "owner": owner() }),
+        json!({ "kind": "http_rejected", "http_status": 401 }),
+        json!({ "kind": "http_rejected", "http_status": 401, "owner": owner(), "code": "E" }),
+        json!({ "kind": "http_rejected", "http_status": 99, "owner": owner() }),
+        json!("http_rejected"),
+    ] {
+        let result = reduce(
+            "reconcile",
+            &args(json!({ "locator": locator(), "cas": cas_for(&in_flight_row()),
+                          "transport_evidence": evidence })),
+            &env(),
+            &dead,
+        );
+        assert_eq!(result.unwrap_err(), StoreError::InvalidArgument, "{evidence}");
+    }
+}
+
+#[test]
+fn the_reset_travels_through_the_json_envelope() {
+    let envelope = json!({
+        "op": "reconcile",
+        "args": { "locator": locator(), "cas": cas_for(&in_flight_row()),
+                  "transport_evidence": { "kind": "http_rejected", "http_status": 401, "owner": owner() } },
+        "env": { "launch_id": LAUNCH, "now": LATER, "round_count": 1, "supported_models": ["deepseek-v4-flash"], "receipt_harness_id": null, "receipt_binding_valid": false },
+        "view": { "row": in_flight_row(), "dispatch_state": "dispatched", "transcript": null, "arg_owner_alive": false, "row_owner_alive": false },
+    });
+    let output: Value = serde_json::from_str(&reduce_json(&envelope.to_string())).unwrap();
+    assert_eq!(output["ok"], true);
+    assert_eq!(output["dispatch"], "reset_not_dispatched");
+    assert_eq!(output["row"]["failure_code"], "E_AGENT_PROVIDER_CREDENTIAL");
+}

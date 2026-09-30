@@ -118,3 +118,57 @@ test.each(['en-US', 'zh-CN'] as const)('preserves and explains the output-limit 
   expect(failure.message).not.toContain('private provider output');
   expect(recoveryMessage(failure.code, createTranslator(locale))).toBe(createTranslator(locale)('recovery.outputLimit'));
 });
+
+test('a refused attachment says what to change, on both hosts', () => {
+  const zh = createTranslator('zh-CN');
+  const en = createTranslator('en-US');
+  // Android's projection refusals, which used to read only as "could not finish".
+  expect(recoveryMessage('E_COMPLETION_BODY_TOO_LARGE', zh)).toContain('20 页');
+  expect(recoveryMessage('E_COMPLETION_BODY_TOO_LARGE', en)).toContain('20 pages');
+  expect(recoveryMessage('E_COMPLETION_CONTEXT_UNSUPPORTED', zh)).toContain('加密的 PDF');
+  expect(recoveryMessage('E_COMPLETION_CONTEXT_INVALID', en)).toContain('attach it again');
+  // iOS reports an attachment it cannot project as history.
+  expect(recoveryMessage('E_COMPLETION_HISTORY', zh)).toContain('附件');
+  for (const code of [
+    'E_COMPLETION_BODY_TOO_LARGE', 'E_COMPLETION_CONTEXT_UNSUPPORTED',
+    'E_COMPLETION_CONTEXT_INVALID', 'E_COMPLETION_HISTORY',
+  ]) {
+    expect(recoveryMessage(code, en)).not.toBe(en('recovery.generic'));
+  }
+});
+
+// A tester pastes a report instead of a screenshot of one code: the icon is
+// there only when the screen can build one, and says whether it was copied.
+test('offers to copy a diagnostic report and says whether it did', async () => {
+  const t = createTranslator('zh-CN');
+  const store = createPreferencesStore({
+    initialPreferences: { ...createDefaultPreferences(), locale: 'zh-CN' },
+  });
+  let renderer!: ReactTestRenderer;
+  await act(async () => {
+    renderer = create(
+      <AppPresentationProvider store={store}>
+        <RecoveryNotice error="E_COMPLETION_NATIVE" />
+      </AppPresentationProvider>,
+    );
+  });
+  expect(renderer.root.findAllByProps({ testID: 'recovery-copy-report' })).toHaveLength(0);
+
+  for (const copied of [true, false]) {
+    const onCopyReport = jest.fn(async () => copied);
+    await act(async () => {
+      renderer.update(
+        <AppPresentationProvider store={store}>
+          <RecoveryNotice error="E_COMPLETION_NATIVE" onCopyReport={onCopyReport} />
+        </AppPresentationProvider>,
+      );
+    });
+    await act(async () => {
+      renderer.root.findByProps({ testID: 'recovery-copy-report' }).props.onPress();
+    });
+    expect(onCopyReport).toHaveBeenCalledTimes(1);
+    expect(renderer.root.findByProps({ testID: 'recovery-copy-state' }).props.children)
+      .toBe(t(copied ? 'recovery.reportCopied' : 'recovery.reportNotCopied'));
+  }
+  await act(async () => renderer.unmount());
+});

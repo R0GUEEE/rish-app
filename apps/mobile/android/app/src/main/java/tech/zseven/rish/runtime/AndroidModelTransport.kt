@@ -12,12 +12,30 @@ import java.util.UUID
 import java.util.concurrent.TimeUnit
 
 internal class RuntimeFailure(val code: String, val httpStatus: Int? = null) : Exception(code)
-internal class AndroidModelTransport(private val credentials: AndroidCredentialStore, val configurations: AndroidProviderConfiguration) {
+internal class AndroidModelTransport(
+    private val credentials: AndroidCredentialStore,
+    val configurations: AndroidProviderConfiguration,
+    // The bytes behind an attachment reference. Absent in a test that only
+    // builds request bodies; a request that carries an attachment is then
+    // refused rather than sent without it.
+    attachments: AndroidAttachmentStore? = null,
+) {
+    private val content = AndroidAttachmentContent(attachments)
     private val lock = Any()
     private var revision = 0L
     private val active = mutableMapOf<String, Prepared>()
+    // How long a reply may take is not how long it may stay silent. A round
+    // that thinks at the highest setting and writes a whole file streams for
+    // minutes; the old 150 s ceiling on the whole call cut such replies off
+    // while they were still arriving, and a dispatched round cut off is an
+    // ambiguous one (beta report, 2026-09-25). The call now has 15 minutes --
+    // the ceiling iOS's subscription transport and round wait already use --
+    // and silence is what times out: 120 s without a byte on a stream, 600 s
+    // for a reply that only arrives whole.
     private val client = OkHttpClient.Builder().followRedirects(false).followSslRedirects(false)
-        .retryOnConnectionFailure(false).connectTimeout(20, TimeUnit.SECONDS).readTimeout(120, TimeUnit.SECONDS).callTimeout(150, TimeUnit.SECONDS).build()
+        .retryOnConnectionFailure(false).connectTimeout(20, TimeUnit.SECONDS).readTimeout(120, TimeUnit.SECONDS)
+        .callTimeout(900, TimeUnit.SECONDS).build()
+    private val wholeReplyClient = client.newBuilder().readTimeout(600, TimeUnit.SECONDS).build()
     @Volatile var sentRequestCount = 0
         private set
     fun activeRequestCount(): Int = synchronized(lock) { active.size }
@@ -29,6 +47,16 @@ internal class AndroidModelTransport(private val credentials: AndroidCredentialS
         val configuration: JSONObject, val account: String, val revision: Long) {
         var call: Call? = null
         var cancelled = false
+        /**
+         * The messages this request will be sent as, built once.
+         *
+         * `validate` builds them before the round is marked dispatched and
+         * `execute` sends them after, and an attachment is megabytes of
+         * base64: reading and encoding the same files twice would be slow,
+         * and worse, it would let the two disagree if a file changed in
+         * between. What was validated is what is sent.
+         */
+        var composed: JSONArray? = null
     }
     private fun fail(code: String): Nothing = throw RuntimeFailure(code)
     fun prepare(text: String): Prepared = synchronized(lock) {
@@ -58,8 +86,8 @@ internal class AndroidModelTransport(private val credentials: AndroidCredentialS
                     if (message.optString("role") != "system" || message.opt("content") !is String) fail("E_COMPLETION_CONTEXT_UNSUPPORTED")
                 }
             }
-            // The round transcript is judged in execute, where the protocol is
-            // known: only chat-completions can carry one.
+            // The round transcript's turns are judged by the core when it
+            // writes the request body, for whichever protocol carries them.
             if ((input.optJSONArray("round_transcript")?.length() ?: 0) > 64) fail("E_COMPLETION_CONTEXT_UNSUPPORTED")
             if (!RuntimeJson.uuid(input.getString("turn_id")) || !RuntimeJson.uuid(input.getString("attempt_id"))) fail("E_COMPLETION_IDENTIFIER")
             if (input.opt("round_index") !is Int || input.getInt("round_index") !in 0..7) fail("E_COMPLETION_ROUND")
@@ -112,6 +140,9 @@ internal class AndroidModelTransport(private val credentials: AndroidCredentialS
      * directly rather than only through a network call.
      */
     internal fun functionToolsForTest(declared: JSONArray): JSONArray = functionTools(declared)
+
+    /** The messages a validated request will be sent as, for tests. */
+    internal fun composedForTest(request: Prepared): JSONArray = composeMessages(request)
 
     /**
      * One round-transcript entry as a provider message.
@@ -261,6 +292,8 @@ internal class AndroidModelTransport(private val credentials: AndroidCredentialS
     internal fun assembleStream(
         stream: java.io.InputStream,
         thinkingMode: String = "off",
+        unnamedModel: String? = null,
+        unnamedId: String? = null,
         sink: (JSONObject) -> Unit,
     ): JSONObject {
         var state: Any = JSONObject.NULL
@@ -285,6 +318,18 @@ internal class AndroidModelTransport(private val credentials: AndroidCredentialS
                 }
             }
         }
+        // A relay may stream without ever naming a model. For a configured
+        // provider that is not a stream that stopped short: it answered the
+        // model it was asked, and the identity check that follows accepts it.
+        val assembled = state as? JSONObject
+        if (unnamedModel != null && assembled != null && (assembled.isNull("model") || assembled.optString("model").isEmpty())) {
+            assembled.put("model", unnamedModel)
+        }
+        // Nor an id, or one this app cannot keep: the round is named by the
+        // request instead (see `relayResponseId`).
+        if (unnamedId != null && assembled != null && !relayIdUsable(assembled.opt("id"))) {
+            assembled.put("id", unnamedId)
+        }
         // The thinking mode travels with the assembly: a turn that asked to
         // think reports the reasoning it got, even when that is none.
         return streamReduce(
@@ -298,6 +343,12 @@ internal class AndroidModelTransport(private val credentials: AndroidCredentialS
      * into this file's own failure. A build without the core staged cannot
      * read a stream at all, and says that rather than half-reading one.
      */
+    /** A response id a receipt can hold as it is. */
+    private fun relayIdUsable(value: Any?): Boolean {
+        val text = value as? String ?: return false
+        return text.length in 1..128 && text.all { it.isLetterOrDigit() && it.code < 128 || it in "._:-" }
+    }
+
     private fun streamReduce(request: JSONObject): JSONObject {
         if (!RishAgentCoreNative.available) fail("E_COMPLETION_RESPONSE_JSON")
         val reply = RishAgentCoreNative.completionResponseReduce(request.toString())
@@ -324,45 +375,131 @@ internal class AndroidModelTransport(private val credentials: AndroidCredentialS
      * code reading the same object. A preview that disagreed with the settled
      * round would be worse than no preview.
      */
+    /**
+     * The messages this request will be sent as, and every refusal that can
+     * be decided without touching the network.
+     *
+     * Pulled out of `execute` so a caller can learn *before* it commits to
+     * having dispatched anything that the request is one this transport
+     * cannot carry. An attachment it cannot deliver, a round transcript in a
+     * dialect that cannot express one, a message over the size limit: none of
+     * those depend on the provider, and a round stopped by one of them
+     * provably never left the device. `execute` calls this too, so there is
+     * one rule rather than two that can drift.
+     */
+    private fun composeMessages(request: Prepared): JSONArray {
+        request.composed?.let { return it }
+        val input = request.input
+        val history = input.getJSONArray(if(input.getInt("schema_version") == 2) "visible_history" else "history")
+        if (history.length() !in 1..512) fail("E_COMPLETION_HISTORY")
+        val messages = JSONArray()
+        // The project context comes first, as iOS prepends it: what the
+        // model is told about the project precedes what was said in it.
+        val context = if (input.isNull("project_context")) null else input.optJSONArray("project_context")
+        if (context != null) {
+            for (index in 0 until context.length()) {
+                val message = context.getJSONObject(index)
+                messages.put(JSONObject().put("role", "system").put("content", message.getString("content")))
+            }
+        }
+        // Whether the model this request will actually reach can read an
+        // image. It is the *wire* model that is asked about, not the logical
+        // slot: a custom provider maps a slot to whatever it serves, and the
+        // capability belongs to what is really being addressed. A relay that
+        // maps a slot to the same model id is believed; one that maps it to
+        // an id nothing knows answers no, and the picture is refused rather
+        // than sent to a model that may confidently describe what it never
+        // received. JavaScript makes the same call against the logical model,
+        // which is the same answer whenever the mapping is the identity.
+        val configuration = request.configuration
+        val wire = configuration.getJSONObject("model_mappings")
+            .optString(request.model, request.model)
+        val supportsImages = AndroidDshModelCatalog.supportsImages(wire)
+        val budget = AndroidAttachmentContent.Budget()
+        for (index in 0 until history.length()) {
+            val item = history.getJSONObject(index)
+            if (item.getString("role") !in setOf("user", "assistant")) fail("E_COMPLETION_CONTEXT_UNSUPPORTED")
+            // Only the person's turn may carry attachments, and only their
+            // turn is ever projected: an assistant turn with one is a
+            // transcript nothing here wrote.
+            val carried = item.optJSONArray("attachments")?.length() ?: 0
+            if (carried != 0 && item.getString("role") != "user") {
+                fail("E_COMPLETION_CONTEXT_UNSUPPORTED")
+            }
+            val projected = try {
+                content.project(item, supportsImages, budget)
+            } catch (refused: AndroidAttachmentContent.Refused) {
+                fail(refused.code)
+            }
+            if (projected.words.toByteArray().size > 1024 * 1024) fail("E_COMPLETION_BODY_TOO_LARGE")
+            // A turn with no picture keeps a plain string, which is what
+            // every frozen request body records.
+            val body = if (projected.pictures.length() == 0) {
+                projected.words as Any
+            } else {
+                val parts = JSONArray()
+                if (projected.words.isNotEmpty()) {
+                    parts.put(JSONObject().put("type", "text").put("text", projected.words))
+                }
+                for (at in 0 until projected.pictures.length()) parts.put(projected.pictures.get(at))
+                parts as Any
+            }
+            messages.put(JSONObject().put("role", item.getString("role")).put("content", body))
+        }
+        // What this round already did: the assistant turn that asked for a
+        // tool, and the results that came back. Without it the model is
+        // told nothing of the call it just made and asks for it again, so
+        // a turn with a tool in it could never finish. The turns go in
+        // OpenAI's shape on every protocol: the core's request body rewrites
+        // them into tool_use/tool_result blocks for Messages and
+        // function_call items for Responses, as it does for iOS.
+        val round = input.optJSONArray("round_transcript") ?: JSONArray()
+        if (round.length() != 0) {
+            for (index in 0 until round.length()) {
+                messages.put(roundMessage(round.getJSONObject(index)))
+            }
+        }
+        request.composed = messages
+        return messages
+    }
+
+    /**
+     * Raises now whatever `execute` would raise before it sends anything.
+     *
+     * A prepared request holds a slot in `active` that only `execute` frees,
+     * so a refusal here has to give the slot back; otherwise the next round
+     * is refused as busy over a request that was never run.
+     */
+    fun validate(request: Prepared) {
+        try {
+            composeMessages(request)
+        } catch (failure: Throwable) {
+            discard(request)
+            throw failure
+        }
+    }
+
+    /**
+     * Gives a prepared request's slot back without running it, for a caller
+     * that prepared one and then could not go through with it.
+     */
+    fun discard(request: Prepared) = synchronized(lock) {
+        if (active[request.id] === request) active.remove(request.id)
+        Unit
+    }
+
     fun execute(request: Prepared, sink: ((JSONObject) -> Unit)? = null): JSONObject {
         val started = android.os.SystemClock.elapsedRealtime()
         try {
             val input = request.input
             val history = input.getJSONArray(if(input.getInt("schema_version") == 2) "visible_history" else "history")
-            if (history.length() !in 1..512) fail("E_COMPLETION_HISTORY")
-            val messages = JSONArray()
-            // The project context comes first, as iOS prepends it: what the
-            // model is told about the project precedes what was said in it.
-            val context = if (input.isNull("project_context")) null else input.optJSONArray("project_context")
-            if (context != null) {
-                for (index in 0 until context.length()) {
-                    val message = context.getJSONObject(index)
-                    messages.put(JSONObject().put("role", "system").put("content", message.getString("content")))
-                }
-            }
-            for (index in 0 until history.length()) {
-                val item = history.getJSONObject(index)
-                if (item.getString("role") !in setOf("user", "assistant") || (item.optJSONArray("attachments")?.length() ?: 0) != 0) fail("E_COMPLETION_CONTEXT_UNSUPPORTED")
-                val text = item.getString("content")
-                if (text.toByteArray().size > 1024 * 1024) fail("E_COMPLETION_BODY_TOO_LARGE")
-                messages.put(JSONObject().put("role", item.getString("role")).put("content", text))
-            }
             val config = request.configuration
             val protocol = config.getString("protocol")
-            // What this round already did: the assistant turn that asked for a
-            // tool, and the results that came back. Without it the model is
-            // told nothing of the call it just made and asks for it again, so
-            // a turn with a tool in it could never finish.
-            val round = input.optJSONArray("round_transcript") ?: JSONArray()
-            if (round.length() != 0) {
-                if (protocol != "chat-completions") fail("E_COMPLETION_CONTEXT_UNSUPPORTED")
-                for (index in 0 until round.length()) {
-                    messages.put(roundMessage(round.getJSONObject(index)))
-                }
-            }
+            val messages = composeMessages(request)
             val declared = input.optJSONArray("tools") ?: JSONArray()
             val wireModel = config.getJSONObject("model_mappings").optString(request.model, request.model)
             val streaming = sink != null && protocol == "chat-completions"
+            val custom = !config.optBoolean("official")
             // The body is the shared core's, for every dialect. What each one
             // asks for -- the ceiling that follows the round's shape, the
             // thinking vocabulary that follows the model family, `store`,
@@ -373,6 +510,13 @@ internal class AndroidModelTransport(private val credentials: AndroidCredentialS
                 config.getBoolean("send_reasoning"), streaming,
                 messages, functionTools(declared),
             )
+            if (custom && !config.getBoolean("send_reasoning")) {
+                // What iOS's ConfiguredProviderTransport strips: a relay the
+                // person told not to receive reasoning settings gets none, not
+                // `"thinking":{"type":"disabled"}` -- a strict OpenAI-compatible
+                // endpoint answers an unknown parameter with 400.
+                for (key in listOf("thinking", "reasoning", "reasoning_effort", "output_config")) body.remove(key)
+            }
             val encoded = RuntimeJson.receiptJson(body)
             val providerRequestId = UUID.randomUUID().toString()
             val httpCall: Call = synchronized(lock) {
@@ -388,15 +532,22 @@ internal class AndroidModelTransport(private val credentials: AndroidCredentialS
                     "api-key" -> builder.header("api-key", secret)
                 }
                 if(protocol == "messages") builder.header("anthropic-version", "2023-06-01")
-                client.newCall(builder.build()).also { request.call = it; sentRequestCount += 1 }
+                (if (streaming) client else wholeReplyClient).newCall(builder.build())
+                    .also { request.call = it; sentRequestCount += 1 }
             }
             val response = httpCall.execute().use { http ->
                 if(http.code in 300..399) fail("E_COMPLETION_REDIRECT")
-                if(http.code == 429) fail("E_COMPLETION_HTTP_429")
+                if(http.code == 429) throw RuntimeFailure("E_COMPLETION_HTTP_429", http.code)
+                // A refused key, as iOS and the core name it; the status still
+                // travels, for the notice that says which it was.
+                if(http.code == 401 || http.code == 403) throw RuntimeFailure("E_COMPLETION_CREDENTIAL_UNAVAILABLE", http.code)
                 if(!http.isSuccessful) throw RuntimeFailure("E_COMPLETION_HTTP_STATUS", http.code)
                 val stream = http.body?.byteStream() ?: fail("E_COMPLETION_RESPONSE_JSON")
                 if (streaming) {
-                    assembleStream(stream, input.getString("thinking_mode"), sink!!)
+                    assembleStream(
+                        stream, input.getString("thinking_mode"),
+                        if (custom) wireModel else null, if (custom) "rish-$providerRequestId" else null, sink!!,
+                    )
                 } else {
                     val bytes = ByteArrayOutputStream(); val buffer = ByteArray(8192)
                     stream.use { source ->
@@ -423,10 +574,26 @@ internal class AndroidModelTransport(private val credentials: AndroidCredentialS
                 config.getString("endpoint_url") == "https://api.deepseek.com/chat/completions" &&
                     wireModel in setOf("deepseek-v4-flash", "deepseek-v4-flash-vision-exp") &&
                     reported == "deepseek-flash"
-            if (!(reported == wireModel || documentedLegacyAlias ||
+            // A configured (third-party) provider answers under the rule iOS's
+            // ConfiguredProviderTransport applies: any name the relay reports,
+            // or none. Relays route one requested model to another backend
+            // and report that one (`gpt-5.6` answered as `deepseek-chat`);
+            // refusing it made custom providers fail after the reply had
+            // already arrived. The chosen model is what the round records.
+            val configuredMatches = custom && AndroidConfiguredModelIdentity.matches(protocol, wireModel, response.opt("model"))
+            if (!(reported == wireModel || documentedLegacyAlias || configuredMatches ||
                     (glmWire && reported.all { it.code < 128 } && reported.equals(wireModel, ignoreCase = true)))
             ) {
                 fail("E_COMPLETION_RESPONSE_MODEL")
+            }
+            if (configuredMatches && reported != wireModel) {
+                // The core reads the reply for the model that was asked; the
+                // relay's spelling is what was answered, not a second model.
+                response.put("model", wireModel)
+                android.util.Log.i(
+                    "RishRuntime",
+                    "completion_model_alias harness=${request.harness} requested_model=$wireModel reported_model=${reported.ifEmpty { "(absent)" }}",
+                )
             }
             if (documentedLegacyAlias) {
                 // Never claim raw equality: the receipt keeps the canonical
@@ -437,6 +604,14 @@ internal class AndroidModelTransport(private val credentials: AndroidCredentialS
                     "RishRuntime",
                     "completion_model_alias harness=dsh requested_model=$wireModel reported_model=deepseek-flash",
                 )
+            }
+            if (custom && !relayIdUsable(response.opt("id"))) {
+                // A relay may send no id, or one outside what a receipt can
+                // hold (1-128 of [A-Za-z0-9._:-]). Refusing the reply over it
+                // failed the round after the answer had arrived; the round is
+                // named by our own request id instead, which is unique.
+                android.util.Log.i("RishRuntime", "completion_response_id_substituted harness=${request.harness}")
+                response.put("id", "rish-$providerRequestId")
             }
             val read = parseResponse(protocol, response)
             val text = read.getString("text")

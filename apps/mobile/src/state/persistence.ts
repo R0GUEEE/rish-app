@@ -1,3 +1,4 @@
+import { agentAmbiguityCode } from '../agent/AgentAmbiguity';
 import { hasFrozenConversationGrant, hasLiveConversationGrant, isConversationGrantBoundCall } from '../agent/agent-conversation-grants';
 import { ALL_AGENT_TOOL_NAMES, ALL_AGENT_AUTO_TOOLS, agentToolRegistryCompatible } from '../agent/tool-registry';
 import { parseProviderBinding } from '../providers/configuration';
@@ -4635,22 +4636,26 @@ function parseConversation(
           'failed Agent journals require a failed attempt',
         );
       }
+      // A failed journal may now carry the cause the round itself reported,
+      // so this no longer names the handful of codes JavaScript used to
+      // invent. What it still holds is the part that means something: the
+      // two completion codes stay coupled to the finish reason that proves
+      // them, and the codes belonging to the other two failed phases are
+      // refused, so `failed`, `unknown` and `ambiguous` stay tellable apart
+      // on the way back in.
       if (
         journal.phase === 'failed' &&
-        attempt.failureCode !== 'E_AGENT_PERSISTENCE' &&
-        attempt.failureCode !== 'E_AGENT_ROUND_LIMIT' &&
-        !(
-          attempt.failureCode === 'E_COMPLETION_LENGTH' &&
-          attempt.rounds.at(-1)?.finishReason === 'length'
-        ) &&
-        !(
-          attempt.failureCode === 'E_COMPLETION_CONTENT_FILTER' &&
-          attempt.rounds.at(-1)?.finishReason === 'content_filter'
-        )
+        (attempt.failureCode === null ||
+          attempt.failureCode === 'E_AGENT_CONFLICT' ||
+          attempt.failureCode === 'E_AGENT_EXECUTION_AMBIGUOUS' ||
+          (attempt.failureCode === 'E_COMPLETION_LENGTH' &&
+            attempt.rounds.at(-1)?.finishReason !== 'length') ||
+          (attempt.failureCode === 'E_COMPLETION_CONTENT_FILTER' &&
+            attempt.rounds.at(-1)?.finishReason !== 'content_filter'))
       ) {
         invalid(
           `${path}.attempts[${index}].failure_code`,
-          'failed Agent journals require a stable completion, persistence, or round-limit code',
+          'failed Agent journals require a cause that is not another phase\'s',
         );
       }
       if (
@@ -4662,9 +4667,18 @@ function parseConversation(
           'unknown Agent journals require the conflict failure code',
         );
       }
+      // An ambiguous journal carries whichever uncertainty it actually has --
+      // a round that may have reached the service, or a tool that may have
+      // run -- and `agentAmbiguityCode` says which from the batch. Sessions
+      // written before that distinction existed recorded every ambiguity as
+      // an execution one, and they stay readable: that older code is still
+      // accepted here. The reverse is not: a journal whose batch holds an
+      // ambiguous receipt must keep saying a tool may have run, because that
+      // is the warning that sends the person to check their files.
       if (
         journal.phase === 'ambiguous' &&
-        attempt.failureCode !== 'E_AGENT_EXECUTION_AMBIGUOUS'
+        attempt.failureCode !== 'E_AGENT_EXECUTION_AMBIGUOUS' &&
+        attempt.failureCode !== agentAmbiguityCode(journal)
       ) {
         invalid(
           `${path}.attempts[${index}].failure_code`,
@@ -6136,7 +6150,6 @@ export function hydrateChatState(
 
   const lifecycleIds = new Set<string>();
   const providerRequestIds = new Set<string>();
-  const providerResponseIds = new Set<string>();
   const claimLifecycleId = (value: string, path: string) => {
     if (lifecycleIds.has(value)) invalid(path, 'must be globally unique');
     lifecycleIds.add(value);
@@ -6184,14 +6197,9 @@ export function hydrateChatState(
             'must be globally unique',
           );
         }
+        // Only the request id is ours to keep unique: relays reuse a
+        // response id across rounds.
         providerRequestIds.add(round.providerRequestId);
-        if (providerResponseIds.has(round.providerResponseId)) {
-          invalid(
-            `${roundPath}.provider_response_id`,
-            'must be globally unique',
-          );
-        }
-        providerResponseIds.add(round.providerResponseId);
       });
       if (attempt.activeRound !== null) {
         claimLifecycleId(

@@ -65,6 +65,9 @@ pub enum DispatchEffect {
     InsertNotDispatched,
     /// Set the existing marker to `dispatched`.
     MarkDispatched,
+    /// Set the existing marker back to `not_dispatched`: the provider
+    /// refused the request in full, so relaunching it is a new request.
+    ResetNotDispatched,
 }
 
 /// The decided transition. `commit == false` with an `output` reproduces the
@@ -1018,6 +1021,61 @@ fn cancel(args: &Map<String, Value>, env: &Env, view: &View) -> Result<Effect, S
     })
 }
 
+/// The cause a provider's refusal proves, when the transport heard one.
+///
+/// A dispatched round whose answer never came is ambiguous: the provider may
+/// have seen it. A round the provider *answered with a refusal* is not -- a
+/// status line and headers came back, and a 4xx says the request was turned
+/// away before any reply was made. The host reports only what it heard
+/// (`http_rejected`, the status, and the owner it dispatched under); the
+/// cause is derived here, so no caller can name a confident one.
+///
+/// Only 4xx proves a refusal, and not all of it: 408 is the server giving up
+/// on a request that was slow to arrive, and 499 is a proxy's own note that
+/// the client went away -- neither says what the provider did with the
+/// request. 5xx, timeouts, resets and truncated streams stay ambiguous: a
+/// relay's 502 can follow a reply the upstream made and billed.
+///
+/// The evidence is bound to the dispatch that produced it: the owner it
+/// names must be the row's owner, and the row must still be `in_flight` --
+/// a round cancelled or reclaimed since belongs to someone else's account.
+/// A malformed envelope is a host bug; a refusal that proves nothing is
+/// simply not evidence.
+fn refusal_cause(
+    args: &Map<String, Value>,
+    existing: &Value,
+    dispatch_state: &str,
+) -> Result<Option<&'static str>, StoreError> {
+    let Some(evidence) = args.get("transport_evidence").filter(|value| !value.is_null()) else {
+        return Ok(None);
+    };
+    let Some(fields) = crate::schema::exact_keys(Some(evidence), &["kind", "http_status", "owner"]) else {
+        return Err(StoreError::InvalidArgument);
+    };
+    let status = fields.get("http_status").and_then(Value::as_u64);
+    if !string_eq(fields.get("kind"), "http_rejected")
+        || !matches!(status, Some(100..=599))
+        || !fields.get("owner").is_some_and(Value::is_object)
+    {
+        return Err(StoreError::InvalidArgument);
+    }
+    if dispatch_state != "dispatched"
+        || !string_eq(get(existing, "state"), "in_flight")
+        || fields.get("owner") != get(existing, "owner")
+    {
+        return Ok(None);
+    }
+    Ok(match status {
+        Some(401) => Some("E_AGENT_PROVIDER_CREDENTIAL"),
+        Some(403) => Some("E_AGENT_PROVIDER_FORBIDDEN"),
+        Some(404) => Some("E_AGENT_PROVIDER_NOT_FOUND"),
+        Some(429) => Some("E_AGENT_PROVIDER_RATE_LIMITED"),
+        Some(408 | 499) => None,
+        Some(400..=499) => Some("E_AGENT_PROVIDER_REFUSED"),
+        _ => None,
+    })
+}
+
 fn reconcile(args: &Map<String, Value>, env: &Env, view: &View) -> Result<Effect, StoreError> {
     let locator = args.get("locator").unwrap_or(&Value::Null);
     let cas = args.get("cas").unwrap_or(&Value::Null);
@@ -1043,18 +1101,38 @@ fn reconcile(args: &Map<String, Value>, env: &Env, view: &View) -> Result<Effect
     };
     let not_dispatched = dispatch_state == "not_dispatched";
     let cancel_before_dispatch = state == Some("cancel_requested") && not_dispatched;
+    let refused = refusal_cause(args, existing, dispatch_state)?;
     let mut row = row_map(existing);
     let next_state = if cancel_before_dispatch {
         "cancelled"
-    } else if not_dispatched {
+    } else if not_dispatched || refused.is_some() {
         "failed_retryable"
     } else {
         "ambiguous"
     };
-    let failure = if cancel_before_dispatch {
+    // The cause, when the caller knows one and the round provably never
+    // left the device.
+    //
+    // A refusal raised while the request was being built -- an attachment
+    // the transport cannot carry, a dialect that cannot express a round
+    // transcript -- is the only account of why the turn ended, and it dies
+    // here unless the row keeps it: every later reader takes the row's code,
+    // and recovery after a restart has nothing else to read.
+    //
+    // It is honoured **only** for a round that was never dispatched. A
+    // dispatched round whose answer never came is ambiguous no matter what
+    // its writer believes, and letting a caller name a confident cause there
+    // would turn an ambiguity into false certainty -- the one thing this
+    // whole marker exists to prevent.
+    let stated = as_str(args.get("failure_code"))
+        .filter(|_| not_dispatched && !cancel_before_dispatch)
+        .filter(|code| crate::schema::failure_code(args.get("failure_code")) && *code != "E_AGENT_ROUND_AMBIGUOUS");
+    let failure = if let Some(cause) = refused {
+        cause
+    } else if cancel_before_dispatch {
         "E_AGENT_CANCELLED"
     } else if not_dispatched {
-        "E_AGENT_PERSISTENCE"
+        stated.unwrap_or("E_AGENT_PERSISTENCE")
     } else {
         "E_AGENT_ROUND_AMBIGUOUS"
     };
@@ -1090,6 +1168,10 @@ fn reconcile(args: &Map<String, Value>, env: &Env, view: &View) -> Result<Effect
         commit: true,
         output: round_v3_output(&row, next_state),
         row: Some(row),
+        // A failed_retryable row with a dispatched marker is corrupt, and a
+        // reclaim needs the marker clear: the refusal resets it in the same
+        // commit that records it.
+        dispatch: refused.map(|_| DispatchEffect::ResetNotDispatched),
         ..Default::default()
     })
 }
@@ -1146,6 +1228,7 @@ pub fn reduce_json(input: &str) -> String {
             "dispatch": effect.dispatch.map(|d| match d {
                 DispatchEffect::InsertNotDispatched => "insert_not_dispatched",
                 DispatchEffect::MarkDispatched => "mark_dispatched",
+                DispatchEffect::ResetNotDispatched => "reset_not_dispatched",
             }),
             "transcript": effect.transcript,
         }),

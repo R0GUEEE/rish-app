@@ -30,6 +30,9 @@ import {
   validateAgentStoreTransition,
   type AgentStoreTransitionEvidence,
 } from '../agent/AgentStoreTransitions';
+import { AGENT_FAILURE_CODES, type AgentFailureCode } from '../state/types';
+import { agentAmbiguityCode, agentRecoveryAmbiguityCode } from '../agent/AgentAmbiguity';
+import { refusedAttemptRetryable } from '../agent/AgentRefusalRetry';
 import type {
   AgentApprovalBindingTokenV2,
   AgentApprovalPreviewV1,
@@ -203,6 +206,9 @@ export type CompletionControllerEvents = {
 export type CompletionControllerOutcome = {
   readonly status:
     | 'completed'
+    /** The attempt settled as failed; nothing is left to resume, and `code`
+     * says why, for the person. */
+    | 'failed'
     | 'blocked'
     | 'persistence_pending'
     | 'retryable'
@@ -276,10 +282,24 @@ export type CompletionControllerDependencies = {
 /** Streamed previews of the active attempt's rounds, keyed by round id. */
 export type AgentRoundPreviews = Readonly<Record<string, AgentRoundPreviewState>>;
 
+/**
+ * What the transport said when an attempt's last round failed: the
+ * provider's own refusal (an HTTP status, a reply that could not be read).
+ * Display only -- the round's recorded outcome is unchanged, and a
+ * dispatched round stays ambiguous -- but "the service refused the key"
+ * is what a person configuring a relay needs to see.
+ */
+export type ProviderFailure = {
+  readonly attemptId: string;
+  readonly code: string;
+  readonly httpStatus: number | null;
+};
+
 export type CompletionController = {
   getState(): CompletionControllerState;
   subscribe(listener: (state: CompletionControllerState) => void): () => void;
   getPreviews(): AgentRoundPreviews;
+  getProviderFailure?(): ProviderFailure | null;
   subscribePreviews(listener: (previews: AgentRoundPreviews) => void): () => void;
   send(
     input: CompletionControllerInput,
@@ -459,6 +479,35 @@ function errorCode(error: unknown): AttemptFailureCode {
     // Hostile thrown values collapse to the stable native code.
   }
   return 'E_COMPLETION_NATIVE';
+}
+
+/**
+ * Says out loud that a native agent result failed the store's validation.
+ *
+ * The validator answers only yes or no, and every caller that gets a `null`
+ * turns it into the same opaque failure -- twice now a beta report has been a
+ * contract mismatch that left no trace anywhere to read. What gets written is
+ * the shape, never the content: the operation, the status, and each key with
+ * the type of its value. A missing key, a boolean arriving as a number, a
+ * status nothing expects -- the whole class of mismatch this keeps hitting --
+ * is visible in that, and no message text, path or secret can be.
+ */
+function rejectedTransition(operation: string, result: unknown, error?: unknown): void {
+  let shape: string = typeof result;
+  try {
+    if (typeof result === 'object' && result !== null) {
+      const status = Reflect.get(result, 'status');
+      const keys = Object.keys(result)
+        .slice(0, 64)
+        .map(key => `${key}:${typeof Reflect.get(result, key)}`)
+        .join(',');
+      shape = `status=${typeof status === 'string' ? status : typeof status} {${keys}}`;
+    }
+  } catch {
+    // A hostile result still deserves the operation name.
+  }
+  const reason = error === undefined ? '' : ` threw=${String(error).slice(0, 200)}`;
+  console.warn(`[rish] agent transition rejected op=${operation}${reason} ${shape}`);
 }
 
 function visibleHistory(
@@ -742,6 +791,9 @@ export function createCompletionController(
   // Streamed round previews: ephemeral, per attempt, replaced by the
   // validated result and dropped when the run settles.
   let roundPreviews: AgentRoundPreviews = Object.freeze({});
+  // Kept past clearPreviews: a failure state clears the previews in the same
+  // publish that has to explain it.
+  let providerFailure: ProviderFailure | null = null;
   let previewAttemptId: string | null = null;
   let previewKeys = new Map<string, { readonly operationId: string }>();
   let previewUnsubscribe: (() => void) | null = null;
@@ -779,10 +831,19 @@ export function createCompletionController(
       });
     const next = reduceAgentRoundPreview(current, event);
     if (next === roundPreviews[event.roundId]) return;
+    if (next.ended?.status === 'failed' && next.ended.failureCode !== null) {
+      providerFailure = Object.freeze({
+        attemptId: event.attemptId,
+        code: next.ended.failureCode,
+        httpStatus: next.ended.httpStatus,
+      });
+    }
     publishPreviews(Object.freeze({ ...roundPreviews, [event.roundId]: next }));
   };
   const openPreview = (attemptId: string, roundId: string, operationId: string): void => {
     if (previewAttemptId !== attemptId) clearPreviews();
+    // A new round starts over: an earlier round's refusal is not its story.
+    providerFailure = null;
     previewAttemptId = attemptId;
     previewKeys.set(roundId, { operationId });
     if (previewUnsubscribe === null && dependencies.previewSource !== undefined) {
@@ -981,8 +1042,10 @@ export function createCompletionController(
   ): AgentStoreTransitionEvidence | null => {
     try {
       const evidence = validateAgentStoreTransition({ operation, request, result });
+      if (evidence === null) rejectedTransition(operation, result);
       return evidence;
-    } catch {
+    } catch (error) {
+      rejectedTransition(operation, result, error);
       return null;
     }
   };
@@ -2747,9 +2810,19 @@ export function createCompletionController(
       return await failAgentWithoutNative(conversationId, attemptId, 'E_AGENT_PERSISTENCE');
     }
     // The atomic final checkpoint reads one terminal event and matches every
-    // field of it, including the failure code the reducer derives: a round
-    // that failed retryably carries no completion receipt, so the code is
-    // always E_AGENT_PERSISTENCE.
+    // field of it, including the failure code the reducer derives, so the
+    // two have to agree. A round that failed retryably carries no completion
+    // receipt, but it does carry the code native derived from what the
+    // provider -- or the transport, before the request ever left -- said.
+    // The reducer's `evidenceRoundCauseFor` reads the same value and refuses
+    // the same two codes, which belong to other phases.
+    const roundCause =
+      result.status === 'failed_retryable' &&
+      result.failure_code !== 'E_AGENT_CONFLICT' &&
+      result.failure_code !== 'E_AGENT_EXECUTION_AMBIGUOUS' &&
+      (AGENT_FAILURE_CODES as readonly string[]).includes(result.failure_code)
+        ? (result.failure_code as AgentFailureCode)
+        : 'E_AGENT_PERSISTENCE';
     const event = terminal
       ? agentEvent(
           attemptId,
@@ -2762,7 +2835,7 @@ export function createCompletionController(
           null,
           null,
           null,
-          phase === 'cancelled' ? 'E_AGENT_CANCELLED' : 'E_AGENT_PERSISTENCE',
+          phase === 'cancelled' ? 'E_AGENT_CANCELLED' : roundCause,
           transitionCreatedAt,
         )
       : agentEvent(
@@ -2849,9 +2922,16 @@ export function createCompletionController(
             cleanup,
             cas,
           );
+          // The attempt is settled either way, but a failed round must still
+          // say why: reported as completed, the screen cleared its notice
+          // and a refusal before dispatch (a PDF past the page cap) showed
+          // the person nothing at all.
+          if (phase === 'failed' && finalized.status === 'completed') {
+            return { ...finalized, status: 'failed', code: roundCause };
+          }
           return finalized;
         }
-        publish(stateFor('retryable', { conversationId, turnId: located.attempt.turnId, attemptId, roundId: request.round_id, transportSchemaVersion: request.transport_schema_version, failureCode: result.status === 'unknown' ? 'E_AGENT_CONFLICT' : 'E_AGENT_EXECUTION_AMBIGUOUS' }));
+        publish(stateFor('retryable', { conversationId, turnId: located.attempt.turnId, attemptId, roundId: request.round_id, transportSchemaVersion: request.transport_schema_version, failureCode: result.status === 'unknown' ? 'E_AGENT_CONFLICT' : 'E_AGENT_ROUND_AMBIGUOUS' }));
         return outcome('retryable', state);
       },
       runEpoch,
@@ -4690,7 +4770,7 @@ export function createCompletionController(
       });
     } catch (error) {
       if (runEpoch !== epoch) return outcome('cancelled', state);
-      publish(stateFor('resume_available', { conversationId, turnId: attempt.turnId, attemptId, failureCode: agentFailure(error) }));
+      publish(stateFor('resume_available', { conversationId, turnId: attempt.turnId, attemptId, failureCode: agentFailure(error), failureDiagnostic: agentRuntimeDiagnosticFromError(error) }));
       return outcome('retryable', state);
     }
     if (runEpoch !== epoch) return outcome('cancelled', state);
@@ -4711,8 +4791,16 @@ export function createCompletionController(
       committed_checkpoint: authorityCheckpoint,
       target,
       action: 'reconcile',
+      // The revision the durable row has now, as the query just read it. A
+      // round stopped mid-reply is moved twice -- by the cancellation, then
+      // by its own call ending -- and the journal only heard the first, so
+      // resuming it with the journal's revision was always a conflict
+      // (beta report, 2026-09-25). The CAS still holds against any change
+      // after this read.
       expected_round_revision: target.kind === 'round'
-        ? journal.round_lineage?.native_row_revision ?? 0
+        ? (queried.attempt.round_id === target.round_id && queried.attempt.round_revision !== null
+          ? queried.attempt.round_revision
+          : journal.round_lineage?.native_row_revision ?? 0)
         : null,
       expected_execution_revision: target.kind === 'tool'
         ? journal.batch[target.call_index]?.native_row_revision ?? 0
@@ -4725,7 +4813,7 @@ export function createCompletionController(
     try {
       recovered = await agentRuntime.recoverAgentAttempt(recoveryRequest);
     } catch (error) {
-      publish(stateFor('resume_available', { conversationId, turnId: attempt.turnId, attemptId, failureCode: agentFailure(error) }));
+      publish(stateFor('resume_available', { conversationId, turnId: attempt.turnId, attemptId, failureCode: agentFailure(error), failureDiagnostic: agentRuntimeDiagnosticFromError(error) }));
       return outcome('retryable', state);
     }
     const evidence = mapEvidence('recover_agent_attempt', recoveryRequest, recovered);
@@ -4733,15 +4821,17 @@ export function createCompletionController(
       publish(stateFor('resume_available', { conversationId, turnId: attempt.turnId, attemptId, failureCode: 'E_AGENT_CONFLICT' }));
       return outcome('retryable', state);
     }
-    if (recovered.status === 'manual_reconciliation') {
-      publish(stateFor('resume_available', { conversationId, turnId: attempt.turnId, attemptId, failureCode: 'E_AGENT_EXECUTION_AMBIGUOUS' }));
-      return outcome('retryable', state);
-    }
     if (recovered.status === 'retryable') {
       publish(stateFor('retryable', { conversationId, turnId: attempt.turnId, attemptId, failureCode: 'E_AGENT_PERSISTENCE' }));
       return outcome('retryable', state);
     }
-    if (recovered.completed_round !== null && recovered.completed_round.kind === 'final') {
+    if (recovered.status === 'manual_reconciliation' &&
+        recovered.attempt.phase !== 'ambiguous' && recovered.attempt.phase !== 'unknown') {
+      // Nothing the journal can take: say which uncertainty it is and wait.
+      publish(stateFor('resume_available', { conversationId, turnId: attempt.turnId, attemptId, failureCode: agentRecoveryAmbiguityCode(journal, target.kind) }));
+      return outcome('retryable', state);
+    }
+    if (recovered.status !== 'manual_reconciliation' && recovered.completed_round !== null && recovered.completed_round.kind === 'final') {
       return await finishRecoveredFinal(conversationId, attemptId, runEpoch, recoveryRequest, recovered, evidence, events);
     }
     const recoveredProjection = agentJournalFromProjection(
@@ -4821,6 +4911,19 @@ export function createCompletionController(
       }
       if (recoveredJournal.phase === 'ready_for_round' || recoveredJournal.phase === 'tool_result_pending') return await runAgentRound(conversationId, attemptId, runEpoch);
       if (recoveredJournal.phase === 'batch_frozen' || recoveredJournal.phase === 'approval_pending') return await runAgentBatch(conversationId, attemptId, runEpoch);
+      if (recovered.status === 'manual_reconciliation') {
+        // The native row is ambiguous and now the journal says so too, which
+        // is what offers "Retry this turn". Which uncertainty it is decides
+        // the words: a tool that may have run sends the person to their files
+        // first; a round whose reply never came -- a reply stopped mid-way,
+        // above all -- only may have cost a call. Before, the journal kept its
+        // older phase, "a tool may already have run" was said over a round
+        // that called none, and "Continue response" led back to the same
+        // notice (beta report, 2026-09-25).
+        const ambiguity = agentRecoveryAmbiguityCode(recoveredJournal, target.kind);
+        publish(stateFor('resume_available', { conversationId, turnId: attempt.turnId, attemptId, roundId: recoveredJournal.round_lineage?.round_id ?? null, transportSchemaVersion: agentTransportSchema(attempt), failureCode: ambiguity }));
+        return outcome('retryable', state);
+      }
       publish(stateFor('retryable', { conversationId, turnId: attempt.turnId, attemptId, failureCode: 'E_AGENT_PERSISTENCE' }));
       return outcome('retryable', state);
     }, runEpoch, { conversationId, turnId: attempt.turnId, attemptId });
@@ -5138,6 +5241,7 @@ export function createCompletionController(
       return () => listeners.delete(listener);
     },
     getPreviews: () => roundPreviews,
+    getProviderFailure: () => providerFailure,
     subscribePreviews: listener => {
       previewListeners.add(listener);
       return () => previewListeners.delete(listener);
@@ -5238,7 +5342,11 @@ export function createCompletionController(
       if (
         source?.attempt.agent !== undefined &&
         source.attempt.agent !== null &&
-        source.attempt.failureCode !== 'E_ATTEMPT_INTERRUPTED'
+        source.attempt.failureCode !== 'E_ATTEMPT_INTERRUPTED' &&
+        // A turn the provider refused on its first round, before anything
+        // ran, is asked again as a fresh attempt -- the store and reducer
+        // recheck the same rule when the attempt is created.
+        !refusedAttemptRetryable(dependencies.chat.getState(), conversationId, attemptId)
       ) {
         epoch += 1;
         agentRun = {
@@ -5775,7 +5883,13 @@ export function createCompletionController(
         ) === true;
       const cancelledAgent = attempt?.status === 'cancelled' &&
         attempt.agent?.phase === 'cancelled';
-      if (completedAgentHasAssistant || cancelledAgent) {
+      // A failed round settled through the atomic final checkpoint is just as
+      // terminal: its residue was discarded and there is nothing native to
+      // resume. Offering to resume it after a restart asked recovery about an
+      // attempt that no longer exists, and hid the refusal's own notice.
+      const failedAgent = attempt?.status === 'failed' &&
+        attempt.agent?.phase === 'failed';
+      if (completedAgentHasAssistant || cancelledAgent || failedAgent) {
         // A completed or cancelled Agent checkpoint is terminal and must never
         // re-enter provider/tool recovery after hydration. Transcript cleanup,
         // if still present in the durable outbox, remains independently owned
@@ -5793,10 +5907,15 @@ export function createCompletionController(
             attemptId: attempt.attemptId,
             roundId: attempt.agent.round_lineage?.round_id ?? null,
             transportSchemaVersion: agentTransportSchema(attempt),
+            // What a cold start shows has to be what a warm one showed. An
+            // unknown journal is the conflict the warm path publishes; an
+            // ambiguous one is whichever uncertainty its batch records.
             failureCode:
-              attempt.agent.phase === 'unknown' || attempt.agent.phase === 'ambiguous'
-                ? 'E_AGENT_EXECUTION_AMBIGUOUS'
-                : null,
+              attempt.agent.phase === 'unknown'
+                ? 'E_AGENT_CONFLICT'
+                : attempt.agent.phase === 'ambiguous'
+                  ? agentAmbiguityCode(attempt.agent)
+                  : null,
           }),
         );
       } else if (attempt?.status === 'prepared' && attempt.rounds.length === 0) {

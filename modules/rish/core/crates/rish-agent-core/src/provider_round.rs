@@ -26,6 +26,33 @@ const MAX_SAFE_INTEGER: u64 = 9_007_199_254_740_991;
 const MAX_ARGUMENTS_BYTES: usize = 32_768;
 /// The project-context budget one round may carry.
 const MAX_CONTEXT_BYTES: u64 = 256 * 1024;
+/// What the controller accepts for a round's text or reasoning
+/// (`MAX_TEXT_BYTES` in `native/AgentRuntime.ts`).
+pub const MAX_PRESENTATION_BYTES: usize = 256 * 1024;
+/// How much of an over-long reasoning's opening an excerpt keeps; the rest of
+/// the budget goes to its end, where the reasoning arrives at its answer.
+const EXCERPT_HEAD_BYTES: usize = 64 * 1024;
+/// Stands where the middle of an over-long reasoning was left out.
+pub const EXCERPT_MARKER: &str = "\n\n[…]\n\n";
+
+/// `text` itself when it fits in `budget` bytes; otherwise its opening and
+/// its end around [`EXCERPT_MARKER`], cut on character boundaries, in at most
+/// `budget` bytes. Idempotent: an excerpt already fits.
+pub fn presentation_excerpt(text: &str, budget: usize) -> String {
+    if text.len() <= budget {
+        return text.to_owned();
+    }
+    let floor = |index: usize| (0..=index.min(text.len())).rev().find(|&at| text.is_char_boundary(at)).unwrap_or(0);
+    let ceil = |index: usize| (index.min(text.len())..=text.len()).find(|&at| text.is_char_boundary(at)).unwrap_or(text.len());
+    let room = budget.saturating_sub(EXCERPT_MARKER.len());
+    let head_end = floor(EXCERPT_HEAD_BYTES.min(room));
+    let tail_start = ceil(text.len() - (room - head_end));
+    let mut excerpt = String::with_capacity(budget);
+    excerpt.push_str(&text[..head_end]);
+    excerpt.push_str(EXCERPT_MARKER);
+    excerpt.push_str(&text[tail_start..]);
+    excerpt
+}
 
 fn equal(left: Option<&Value>, right: Option<&Value>) -> bool {
     matches!((left, right), (Some(l), Some(r)) if l == r)
@@ -468,6 +495,13 @@ pub fn recovered_round_projection(
     let (Some(text), Some(reasoning)) = (text, reasoning) else {
         return Err(StoreError::Conflict);
     };
+    // The transcript keeps every byte the model reasoned -- a later round of
+    // the same turn hands it back to the provider -- but what the controller
+    // shows and stores is an excerpt within the presentation limit. A "max"
+    // reasoning past it used to be committed here and then refused by the
+    // controller, on this answer and on every recovery after it, so the turn
+    // could never finish (beta report, 2026-09-28).
+    let reasoning = presentation_excerpt(reasoning, MAX_PRESENTATION_BYTES);
     if !get(assistant, "tool_calls").is_some_and(Value::is_array) {
         return Err(StoreError::Conflict);
     }
@@ -840,6 +874,21 @@ pub fn failure_code(provider_error_code: Option<&str>, digest_mismatch: bool) ->
         | "E_COMPLETION_TOOL_CALL_INVALID"
         | "E_COMPLETION_FINISH_RELATION" => "E_AGENT_TRANSCRIPT",
         "E_COMPLETION_CREDENTIAL_CHANGED" => "E_AGENT_PERSISTENCE",
+        // Refusals the transport raises while *building* the request: an
+        // attachment it cannot carry, a dialect that cannot express a round
+        // transcript, a body past a limit, a model or a thinking mode it does
+        // not know. None of them depend on the provider, so none of them are
+        // ambiguous -- the request never left the device -- and none of them
+        // will succeed unchanged. Saying `E_AGENT_ROUND_AMBIGUOUS` here told
+        // a person their turn might have happened and offered them a retry
+        // that could only fail again.
+        "E_COMPLETION_CONTEXT_UNSUPPORTED"
+        | "E_COMPLETION_CONTEXT_INVALID"
+        | "E_COMPLETION_BODY_TOO_LARGE"
+        | "E_COMPLETION_HISTORY"
+        | "E_COMPLETION_TOOLS"
+        | "E_COMPLETION_THINKING"
+        | "E_COMPLETION_MODEL" => "E_AGENT_CAPABILITY",
         _ => "E_AGENT_ROUND_AMBIGUOUS",
     }
 }
@@ -1084,6 +1133,29 @@ pub fn reconciled_failure_code(state: &str) -> &'static str {
     }
 }
 
+/// The cause a row recorded, when it is worth more than the generic answer
+/// its state alone would give.
+///
+/// Three rules, and each one is load-bearing:
+/// - an **ambiguous** round answers with its ambiguity whatever the row
+///   says, because no recorded cause can establish that a dispatched
+///   request was not acted on;
+/// - a recorded `E_AGENT_PERSISTENCE` is the fallback itself, so it adds
+///   nothing and is ignored;
+/// - anything outside the closed failure-code union is not read at all.
+fn recorded_cause<'a>(envelope: &'a Value, state: &str) -> Option<&'a str> {
+    if state == "ambiguous" {
+        return None;
+    }
+    let value = get(envelope, "recorded");
+    if !crate::schema::failure_code(value) {
+        return None;
+    }
+    as_str(value).filter(|code| {
+        *code != "E_AGENT_PERSISTENCE" && *code != "E_AGENT_ROUND_AMBIGUOUS"
+    })
+}
+
 /// The failure code a cancellation reports for the row it left behind.
 pub fn cancelled_failure_code(state: &str) -> Option<&'static str> {
     if state == "cancelled" {
@@ -1212,17 +1284,34 @@ fn reduce_json_inner(input: &str) -> Result<Value, StoreError> {
             as_str(get(&envelope, "status")).ok_or(StoreError::InvalidArgument)?,
             as_str(get(&envelope, "failure_code")),
         )})),
+        // What a round's reasoning shows as, when the host builds the answer
+        // itself rather than from the projection.
+        "presentation_excerpt" => Ok(json!({ "text": presentation_excerpt(
+            as_str(get(&envelope, "text")).ok_or(StoreError::InvalidArgument)?,
+            MAX_PRESENTATION_BYTES,
+        )})),
         "public_result" => Ok(json!({ "output": public_result_for_completed_row(
             field("request")?, field("row")?, field("round")?,
         )})),
         "round_failure_code" => {
             let state = as_str(get(&envelope, "state")).unwrap_or_default();
+            // What the row itself recorded, when it recorded anything more
+            // than the generic fallback. A round settled with a known local
+            // cause keeps it in the row precisely so a reader after a
+            // restart has something better than "could not be saved" to
+            // say. `recorded_cause` refuses to soften an ambiguity, so this
+            // can only ever make an answer more specific, never less honest.
+            let recorded = recorded_cause(&envelope, state);
             Ok(match as_str(get(&envelope, "kind")) {
-                Some("query") => json!({ "code": query_failure_code(state) }),
-                Some("reconciled") => json!({ "code": reconciled_failure_code(state) }),
+                Some("query") => json!({
+                    "code": recorded.or_else(|| query_failure_code(state)),
+                }),
+                Some("reconciled") => json!({
+                    "code": recorded.unwrap_or_else(|| reconciled_failure_code(state)),
+                }),
                 Some("cancelled") => json!({ "code": cancelled_failure_code(state) }),
                 Some("ownerless") => match recovered_ownerless_state(state) {
-                    Some(code) => json!({ "reportable": true, "code": code }),
+                    Some(code) => json!({ "reportable": true, "code": recorded.or(code) }),
                     None => json!({ "reportable": false, "code": Value::Null }),
                 },
                 _ => return Err(StoreError::InvalidArgument),
@@ -1233,6 +1322,51 @@ fn reduce_json_inner(input: &str) -> Result<Value, StoreError> {
         )})),
         "transcript_body" => Ok(json!({ "messages": transcript_for_body(messages())? })),
         _ => Err(StoreError::InvalidArgument),
+    }
+}
+
+#[cfg(test)]
+mod excerpt_tests {
+    use super::*;
+
+    #[test]
+    fn a_reasoning_within_the_limit_is_untouched() {
+        let text = "思".repeat(1000);
+        assert_eq!(presentation_excerpt(&text, MAX_PRESENTATION_BYTES), text);
+    }
+
+    // 400 KB of three-byte characters: the excerpt fits the limit exactly on
+    // character boundaries, keeps the opening and the end, and says where
+    // the middle was.
+    #[test]
+    fn an_over_long_reasoning_keeps_its_opening_and_its_end() {
+        let text = format!("开头{}结尾", "鹈".repeat(400 * 1024 / 3));
+        let excerpt = presentation_excerpt(&text, MAX_PRESENTATION_BYTES);
+        assert!(excerpt.len() <= MAX_PRESENTATION_BYTES, "{}", excerpt.len());
+        assert!(excerpt.len() > MAX_PRESENTATION_BYTES - 8);
+        assert!(excerpt.starts_with("开头"));
+        assert!(excerpt.ends_with("结尾"));
+        assert!(excerpt.contains(EXCERPT_MARKER));
+        // Idempotent: a second pass changes nothing.
+        assert_eq!(presentation_excerpt(&excerpt, MAX_PRESENTATION_BYTES), excerpt);
+    }
+
+    // The hosts build a fresh round's answer themselves and ask for the same
+    // cut through the envelope.
+    #[test]
+    fn the_hosts_get_the_same_cut_through_the_envelope() {
+        let text = "思".repeat(400 * 1024 / 3);
+        let reply: Value = serde_json::from_str(&reduce_json(
+            &json!({ "op": "presentation_excerpt", "text": text }).to_string(),
+        ))
+        .unwrap();
+        assert_eq!(reply["ok"], json!(true));
+        assert_eq!(reply["text"], json!(presentation_excerpt(&text, MAX_PRESENTATION_BYTES)));
+        let refused: Value = serde_json::from_str(&reduce_json(
+            &json!({ "op": "presentation_excerpt" }).to_string(),
+        ))
+        .unwrap();
+        assert_eq!(refused["ok"], json!(false));
     }
 }
 
@@ -1309,6 +1443,91 @@ mod tests {
         assert_eq!(
             context_bundle(Some(&wrong), Some(&digest)),
             Err(StoreError::Conflict)
+        );
+    }
+
+    /// A refusal raised while the request was being built is not an
+    /// ambiguity. Nothing was sent, so nothing may have happened, and
+    /// nothing will change on a retry. Saying `E_AGENT_ROUND_AMBIGUOUS`
+    /// here told a person their turn might have gone through and offered
+    /// them a retry that could only fail the same way.
+    #[test]
+    fn a_refusal_raised_before_anything_was_sent_is_not_an_ambiguity() {
+        for local in [
+            "E_COMPLETION_CONTEXT_UNSUPPORTED",
+            "E_COMPLETION_CONTEXT_INVALID",
+            "E_COMPLETION_BODY_TOO_LARGE",
+            "E_COMPLETION_HISTORY",
+            "E_COMPLETION_TOOLS",
+            "E_COMPLETION_THINKING",
+            "E_COMPLETION_MODEL",
+        ] {
+            assert_eq!(failure_code(Some(local), false), "E_AGENT_CAPABILITY", "{local}");
+        }
+        // A silence from the provider still is one: the request went, and
+        // what became of it is genuinely unknown.
+        for remote in ["E_COMPLETION_TIMEOUT", "E_COMPLETION_TRANSPORT", ""] {
+            assert_eq!(
+                failure_code(Some(remote), false),
+                "E_AGENT_ROUND_AMBIGUOUS",
+                "{remote}",
+            );
+        }
+        // And a digest mismatch outranks everything, as it always has.
+        assert_eq!(
+            failure_code(Some("E_COMPLETION_CONTEXT_UNSUPPORTED"), true),
+            "E_AGENT_TRANSCRIPT",
+        );
+    }
+
+    /// A reader after a restart gets the cause the row recorded, not the
+    /// generic answer the state alone would give -- except over an
+    /// ambiguity, which no recorded cause may soften.
+    #[test]
+    fn a_recorded_cause_outranks_the_generic_answer_but_never_an_ambiguity() {
+        let answer = |kind: &str, state: &str, recorded: Value| {
+            let envelope = json!({
+                "op": "round_failure_code",
+                "kind": kind,
+                "state": state,
+                "recorded": recorded,
+            });
+            let reply: Value = serde_json::from_str(&reduce_json(&envelope.to_string()))
+                .expect("the query answers JSON");
+            assert_eq!(reply["ok"], json!(true), "{reply}");
+            reply
+        };
+        assert_eq!(
+            answer("reconciled", "failed_retryable", json!("E_AGENT_CAPABILITY"))["code"],
+            json!("E_AGENT_CAPABILITY"),
+        );
+        assert_eq!(
+            answer("ownerless", "failed_retryable", json!("E_AGENT_CAPABILITY"))["code"],
+            json!("E_AGENT_CAPABILITY"),
+        );
+        assert_eq!(
+            answer("query", "unknown", json!("E_AGENT_CAPABILITY"))["code"],
+            json!("E_AGENT_CAPABILITY"),
+        );
+        // Nothing recorded, and the generic answers stand.
+        assert_eq!(
+            answer("reconciled", "failed_retryable", Value::Null)["code"],
+            json!("E_AGENT_PERSISTENCE"),
+        );
+        // An ambiguous round answers with its ambiguity whatever the row
+        // says: a recorded cause cannot establish that a dispatched request
+        // was not acted on.
+        for kind in ["reconciled", "query", "ownerless"] {
+            assert_eq!(
+                answer(kind, "ambiguous", json!("E_AGENT_CAPABILITY"))["code"],
+                json!("E_AGENT_ROUND_AMBIGUOUS"),
+                "{kind}",
+            );
+        }
+        // And a value outside the closed union is not read at all.
+        assert_eq!(
+            answer("reconciled", "failed_retryable", json!("nonsense"))["code"],
+            json!("E_AGENT_PERSISTENCE"),
         );
     }
 }

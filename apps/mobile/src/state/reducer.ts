@@ -1,3 +1,4 @@
+import { agentAmbiguityCode } from '../agent/AgentAmbiguity';
 import { conversationGrantIdsForBatch, hasFrozenConversationGrant, hasLiveConversationGrant, isConversationGrantBoundCall } from '../agent/agent-conversation-grants';
 import { ALL_AGENT_TOOL_NAMES, ALL_AGENT_AUTO_TOOLS, agentToolRegistryCompatible, isGuestServiceAgentTool } from '../agent/tool-registry';
 import { isHarnessModelId } from '../harness/types';
@@ -96,6 +97,7 @@ import type {
 } from '../project-context/types';
 import { DEFAULT_APP_PREFERENCES } from '../preferences/reducer';
 import { serializeAppPreferences } from '../preferences/persistence';
+import { refusedAttemptRetryable } from '../agent/AgentRefusalRetry';
 
 export const DEFAULT_CONVERSATION_TITLE = 'New chat';
 export const DEFAULT_MODEL_ID: ModelId = 'deepseek-v4-flash';
@@ -1631,6 +1633,11 @@ export function isAgentFailureCode(value: unknown): value is AgentFailureCode {
       'E_AGENT_DENIED_BY_USER',
       'E_COMPLETION_LENGTH',
       'E_COMPLETION_CONTENT_FILTER',
+      'E_AGENT_PROVIDER_CREDENTIAL',
+      'E_AGENT_PROVIDER_FORBIDDEN',
+      'E_AGENT_PROVIDER_NOT_FOUND',
+      'E_AGENT_PROVIDER_RATE_LIMITED',
+      'E_AGENT_PROVIDER_REFUSED',
     ].includes(value)
   );
 }
@@ -2746,6 +2753,7 @@ function applyFinalAgentCheckpoint(
     evidenceRoundReceiptFor(evidence),
     payload.at,
     evidence.kind === 'recover_agent_attempt' && evidence.result.status === 'resumed' && evidence.result.next_action === 'persist_batch',
+    evidenceRoundCauseFor(evidence),
   );
   if (nextAgentAttempt === null) return state;
   const nextAttempt: TurnAttemptV1 = {
@@ -2880,7 +2888,7 @@ function agentFinalMaterial(
         : journal.round_index >= MAX_AGENT_ROUNDS - 1 &&
             journal.round_lineage?.status === 'completed'
           ? 'E_AGENT_ROUND_LIMIT'
-          : 'E_AGENT_PERSISTENCE';
+          : (evidenceRoundCauseFor(evidence) ?? 'E_AGENT_PERSISTENCE');
   return {
     receipt,
     text: null,
@@ -4092,6 +4100,35 @@ function evidenceAttemptProjectionMatchesJournal(
   );
 }
 
+/**
+ * Why a round ended, when the round said so.
+ *
+ * A round that failed retryably carries the code native derived from what
+ * the provider -- or the transport, before the request ever reached one --
+ * reported. It is the only account of why the turn ended, and both the
+ * attempt and the terminal event are derived from this one answer so the two
+ * can never disagree about it.
+ *
+ * The codes that belong to other phases are refused here: the conflict code
+ * is what an `unknown` journal means and the execution ambiguity is what an
+ * `ambiguous` one means, and a `failed` journal wearing either would make
+ * the three indistinguishable on the way back in.
+ */
+function evidenceRoundCauseFor(
+  evidence: AgentCheckpointEvidence,
+): AgentFailureCode | null {
+  if (isControllerPreflight(evidence)) return null;
+  if (
+    evidence.kind !== 'complete_agent_round_v2' ||
+    evidence.result.status !== 'failed_retryable'
+  ) return null;
+  const code = evidence.result.failure_code;
+  if (!isAgentFailureCode(code)) return null;
+  return code === 'E_AGENT_CONFLICT' || code === 'E_AGENT_EXECUTION_AMBIGUOUS'
+    ? null
+    : code;
+}
+
 function evidenceRoundReceiptFor(
   evidence: AgentCheckpointEvidence,
 ): CompletionRoundReceiptV1 | undefined {
@@ -4705,6 +4742,10 @@ function agentOuterAttemptCheckpoint(
   roundReceipt: CompletionRoundReceiptV1 | undefined,
   at: string,
   allowRecordedRound = false,
+  // Why the round ended, from the same evidence the terminal event reads. A
+  // checkpoint with no evidence to read passes nothing and the generic
+  // answer stands, which is what a journal-only checkpoint has always done.
+  cause: AgentFailureCode | null = null,
 ): TurnAttemptV1 | null {
   if (
     attempt.status === 'completed' ||
@@ -4760,8 +4801,11 @@ function agentOuterAttemptCheckpoint(
   const failureCode: TurnAttemptV1['failureCode'] =
     status !== 'failed'
       ? null
+      // Which uncertainty this is decides what the person is told: a round
+      // that may have reached the service, or a tool that may already have
+      // changed their files. `agentAmbiguityCode` reads it off the batch.
       : journal.phase === 'ambiguous'
-        ? 'E_AGENT_EXECUTION_AMBIGUOUS'
+        ? agentAmbiguityCode(journal)
         : journal.phase === 'unknown'
           ? 'E_AGENT_CONFLICT'
           : journal.phase === 'failed' &&
@@ -4773,6 +4817,8 @@ function agentOuterAttemptCheckpoint(
           : journal.round_index >= MAX_AGENT_ROUNDS - 1 &&
               journal.round_lineage?.status === 'completed'
             ? 'E_AGENT_ROUND_LIMIT'
+          : journal.phase === 'failed' && cause !== null
+            ? cause
           : 'E_AGENT_PERSISTENCE';
   return {
     ...attempt,
@@ -5402,10 +5448,10 @@ function hasProviderReceiptId(
 ): boolean {
   return Object.values(state.conversations).some(conversation =>
     conversation.attempts.some(attempt =>
+      // The request id is ours and never repeats; the response id is the
+      // provider's, and relays hand the same one back round after round.
       attempt.rounds.some(
-        round =>
-          round.providerRequestId === receipt.providerRequestId ||
-          round.providerResponseId === receipt.providerResponseId,
+        round => round.providerRequestId === receipt.providerRequestId,
       ),
     ),
   );
@@ -6875,7 +6921,10 @@ export function chatReducer(state: ChatState, action: ChatAction): ChatState {
         (source.status !== 'failed' && source.status !== 'cancelled') ||
         (source !== undefined &&
           hasAgentJournalOrReceipt(source) &&
-          source.failureCode !== 'E_ATTEMPT_INTERRUPTED') ||
+          source.failureCode !== 'E_ATTEMPT_INTERRUPTED' &&
+          // A turn whose first round the provider refused, before anything
+          // ran, starts over as the person would by sending it again.
+          !refusedAttemptRetryable(state, action.payload.conversationId, source.attemptId)) ||
         turn === undefined ||
         hasPendingAttempt ||
         !sourceIsCurrentVisibleHistory ||

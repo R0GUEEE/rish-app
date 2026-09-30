@@ -203,6 +203,11 @@ pub fn valid_agent_failure_code(value: Option<&Value>) -> bool {
         "E_AGENT_CANCELLED",
         "E_AGENT_TOOL_FAILED",
         "E_AGENT_DENIED_BY_USER",
+        "E_AGENT_PROVIDER_CREDENTIAL",
+        "E_AGENT_PROVIDER_FORBIDDEN",
+        "E_AGENT_PROVIDER_NOT_FOUND",
+        "E_AGENT_PROVIDER_RATE_LIMITED",
+        "E_AGENT_PROVIDER_REFUSED",
     ];
     let Some(text) = as_str(value) else {
         return false;

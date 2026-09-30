@@ -15,6 +15,15 @@ static NSError *ProviderError(NSString *code) {
 @property(nonatomic, strong) CodexProviderTransport *responses;
 @property(nonatomic, strong) DshProviderTransport *chat;
 @end
+static BOOL DSHRelayResponseIdUsable(id value) {
+  if (![value isKindOfClass:NSString.class]) return NO;
+  NSString *text = value;
+  if (text.length < 1 || text.length > 128) return NO;
+  NSCharacterSet *allowed = [NSCharacterSet characterSetWithCharactersInString:
+      @"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789._:-"];
+  return [text rangeOfCharacterFromSet:allowed.invertedSet].location == NSNotFound;
+}
+
 @implementation DSHConfiguredProviderTransport
 - (instancetype)initWithHarness:(NSString *)harness session:(NSURLSession *)session
                    uuidGenerator:(NSString *(^)(void))uuidGenerator
@@ -87,15 +96,33 @@ static NSError *ProviderError(NSString *code) {
   id echoed = raw[@"model"];
   BOOL messages = [profile[@"protocol"] isEqual:@"messages"];
   BOOL chat = [profile[@"protocol"] isEqual:@"chat-completions"];
-  BOOL matches = [echoed isKindOfClass:NSString.class] &&
-      ([echoed isEqual:wireModel] || (messages && [echoed hasPrefix:[wireModel stringByAppendingString:@"-"]]));
-  if (!matches && !(echoed == nil && !chat)) {
+  // A relay the person configured answers for the model they chose under
+  // whatever name it uses -- a dated name, or the model it redirected to.
+  // Any bounded printable name is accepted, and so is none; the name never
+  // selects anything, the chosen model stays on the receipt, and what the
+  // relay reported is logged. Same rule as Android's
+  // AndroidConfiguredModelIdentity.
+  BOOL reportedAcceptable = echoed == nil || echoed == NSNull.null ||
+      ([echoed isKindOfClass:NSString.class] && [(NSString *)echoed length] <= 256 &&
+       [(NSString *)echoed rangeOfCharacterFromSet:NSCharacterSet.controlCharacterSet].location == NSNotFound);
+  if (!reportedAcceptable) {
     if (error) *error = ProviderError(@"E_COMPLETION_MODEL_MISMATCH"); return nil;
+  }
+  if ([echoed isKindOfClass:NSString.class] && ![echoed isEqual:wireModel]) {
+    NSLog(@"completion_model_alias requested_model=%@ reported_model=%@", wireModel, echoed);
   }
   NSString *parseModel = messages ? @"claude-haiku-4-5-20251001" : (chat ? model : @"gpt-5.6");
   if ([[self dialect] providerSupportsModel:model]) parseModel = model;
   NSMutableDictionary *decoded = [raw mutableCopy];
   decoded[@"model"] = parseModel;
+  // A relay may send no response id, or one a receipt cannot hold (1-128 of
+  // [A-Za-z0-9._:-]). Refusing the reply over it failed the round after the
+  // answer had arrived; it is named by an id of ours instead. Rounds are
+  // deduplicated by the request id, so this one need not be the provider's.
+  if (!DSHRelayResponseIdUsable(raw[@"id"])) {
+    NSLog(@"completion_response_id_substituted harness=%@", self.harness);
+    decoded[@"id"] = [@"rish-" stringByAppendingString:NSUUID.UUID.UUIDString.lowercaseString];
+  }
   if (chat) {
     NSArray *choices = [decoded[@"choices"] isKindOfClass:NSArray.class] ? decoded[@"choices"] : nil;
     NSDictionary *choice = choices.count == 1 && [choices[0] isKindOfClass:NSDictionary.class] ? choices[0] : nil;

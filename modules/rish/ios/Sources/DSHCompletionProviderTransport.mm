@@ -156,6 +156,7 @@ static NSString *DSHCompletionTransportParserErrorCode(NSError *error) {
 @property(nonatomic, copy) NSString *(^uuidGenerator)(void);
 @property(nonatomic, copy) NSTimeInterval (^monotonicClock)(void);
 @property(nonatomic, strong) NSMutableDictionary<NSNumber *, DSHCompletionProviderTransportContext *> *contexts;
+@property(nonatomic, strong) NSMutableDictionary<NSString *, NSNumber *> *refusalStatuses;
 @end
 
 @interface DSHHTTPCompletionExecution : NSObject <DSHCompletionExecution>
@@ -585,6 +586,14 @@ static NSString *DSHCompletionTransportDiagnosticKind(NSError *error,
                           responseStatus:@(http.statusCode)
                        callbackSignaled:owned.completion != nil];
 #endif
+        if (owned.providerRequestId.length > 0) {
+          @synchronized (self) {
+            if (self.refusalStatuses == nil) self.refusalStatuses = [NSMutableDictionary dictionary];
+            // Bounded: a status nobody takes is dropped with the oldest.
+            if (self.refusalStatuses.count >= 16) [self.refusalStatuses removeAllObjects];
+            self.refusalStatuses[owned.providerRequestId] = @(http.statusCode);
+          }
+        }
         if (owned.completion != nil) {
           owned.completion(nil, [self providerErrorCodeForHTTPStatus:http.statusCode
                                                                  data:data]);
@@ -886,6 +895,15 @@ static NSString *DSHCompletionTransportDiagnosticKind(NSError *error,
   return nil;
 }
 
+- (NSInteger)takeRefusalHTTPStatusForProviderRequestId:(NSString *)providerRequestId {
+  if (providerRequestId.length == 0) return 0;
+  @synchronized (self) {
+    NSNumber *status = self.refusalStatuses[providerRequestId];
+    [self.refusalStatuses removeObjectForKey:providerRequestId];
+    return status.integerValue;
+  }
+}
+
 - (NSString *)providerErrorCodeForHTTPStatus:(NSInteger)statusCode
                                          data:(NSData *)data {
   // An unauthenticated or forbidden call means the stored credential is
@@ -915,8 +933,11 @@ static NSString *DSHCompletionTransportDiagnosticKind(NSError *error,
   return NO;
 }
 
+// Silence, not length, is what times out: 120 s without a byte on a stream,
+// 600 s for a reply that only arrives whole. A round that thinks at the
+// highest setting and writes a whole file takes minutes.
 - (NSTimeInterval)providerTimeoutIntervalForStreaming:(BOOL)streaming {
-  return streaming ? 120 : 90;
+  return streaming ? 120 : 600;
 }
 
 - (NSString *)providerHarnessId {
@@ -926,7 +947,10 @@ static NSString *DSHCompletionTransportDiagnosticKind(NSError *error,
 
 - (BOOL)isReadyWithCredential:(NSString *)credential { return [credential isKindOfClass:NSString.class] && credential.length > 0; }
 - (BOOL)supportsTools { return YES; }
-- (NSTimeInterval)executionTimeoutInterval { return 120; }
+// The whole round: 15 minutes, as the subscription transport has. 120 s cut
+// long replies off while they were still arriving, and a dispatched round
+// cut off is an ambiguous one (beta report, 2026-09-25).
+- (NSTimeInterval)executionTimeoutInterval { return 900; }
 - (id<DSHCompletionExecution>)startExecutionWithSchemaVersion:(NSInteger)schemaVersion
                                                            roundId:(NSString *)roundId
                                                           generation:(NSUInteger)generation

@@ -432,9 +432,19 @@ NSDictionary *DSHProviderPublicResult(NSDictionary *request, NSDictionary *row,
   }, nullptr)[@"output"];
 }
 
-NSDictionary *DSHProviderRoundFailureCode(NSString *kind, NSString *state) {
+NSString *DSHProviderPresentationExcerpt(NSString *reasoning) {
+  NSDictionary *reply = DSHProviderReduce(@"presentation_excerpt", @{
+    @"text" : reasoning ?: @"",
+  }, nullptr);
+  // A rule that cannot answer leaves nothing to show rather than a value the
+  // controller would refuse.
+  return [reply[@"text"] isKindOfClass:NSString.class] ? reply[@"text"] : @"";
+}
+
+NSDictionary *DSHProviderRoundFailureCode(NSString *kind, NSString *state, id recorded) {
   return DSHProviderReduce(@"round_failure_code", @{
     @"kind" : kind ?: NSNull.null, @"state" : state ?: NSNull.null,
+    @"recorded" : [recorded isKindOfClass:NSString.class] ? recorded : NSNull.null,
   }, nullptr);
 }
 

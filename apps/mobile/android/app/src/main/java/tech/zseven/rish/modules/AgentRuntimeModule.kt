@@ -116,10 +116,10 @@ class AgentRuntimeModule(reactContext: ReactApplicationContext) :
                 // The store's own vocabulary reaches JS unchanged; a code the
                 // controller does not know would be worse than a stable one.
                 Log.w(TAG, "Agent attempt could not be prepared: ${refused.code}", refused)
-                promise.reject(refused.code, "Agent attempt could not be prepared")
+                promise.reject(refused.code, diagnosed("prepare_agent_attempt", refused.code, refused))
             } catch (failure: Exception) {
                 Log.w(TAG, "Agent attempt could not be prepared", failure)
-                promise.reject("E_AGENT_NATIVE", "Agent attempt could not be prepared")
+                promise.reject("E_AGENT_NATIVE", diagnosed("prepare_agent_attempt", "E_AGENT_NATIVE", failure))
             }
         }
     }
@@ -139,10 +139,10 @@ class AgentRuntimeModule(reactContext: ReactApplicationContext) :
                 promise.resolve(Arguments.makeNativeMap(RuntimeJson.map(result)))
             } catch (refused: AndroidAgentProviderRoundService.Refused) {
                 Log.w(TAG, "Agent round could not be completed: ${refused.code}")
-                promise.reject(refused.code, "Agent round could not be completed")
+                promise.reject(refused.code, diagnosed("complete_agent_round_v2", refused.code, refused))
             } catch (failure: Exception) {
                 Log.w(TAG, "Agent round could not be completed", failure)
-                promise.reject("E_AGENT_NATIVE", "Agent round could not be completed")
+                promise.reject("E_AGENT_NATIVE", diagnosed("complete_agent_round_v2", "E_AGENT_NATIVE", failure))
             }
         }
     }
@@ -162,10 +162,10 @@ class AgentRuntimeModule(reactContext: ReactApplicationContext) :
                 promise.resolve(Arguments.makeNativeMap(RuntimeJson.map(result)))
             } catch (refused: AndroidAgentToolBatchService.Refused) {
                 Log.w(TAG, "Agent tool batch could not be prepared: ${refused.code}")
-                promise.reject(refused.code, "Agent tool batch could not be prepared")
+                promise.reject(refused.code, diagnosed("prepare_agent_tool_batch", refused.code, refused))
             } catch (failure: Exception) {
                 Log.w(TAG, "Agent tool batch could not be prepared", failure)
-                promise.reject("E_AGENT_NATIVE", "Agent tool batch could not be prepared")
+                promise.reject("E_AGENT_NATIVE", diagnosed("prepare_agent_tool_batch", "E_AGENT_NATIVE", failure))
             }
         }
     }
@@ -185,10 +185,10 @@ class AgentRuntimeModule(reactContext: ReactApplicationContext) :
                 promise.resolve(Arguments.makeNativeMap(RuntimeJson.map(result)))
             } catch (refused: AndroidAgentApprovalService.Refused) {
                 Log.w(TAG, "Agent approval could not be bound: ${refused.code}")
-                promise.reject(refused.code, "Agent approval could not be bound")
+                promise.reject(refused.code, diagnosed("bind_agent_approval", refused.code, refused))
             } catch (failure: Exception) {
                 Log.w(TAG, "Agent approval could not be bound", failure)
-                promise.reject("E_AGENT_NATIVE", "Agent approval could not be bound")
+                promise.reject("E_AGENT_NATIVE", diagnosed("bind_agent_approval", "E_AGENT_NATIVE", failure))
             }
         }
     }
@@ -211,10 +211,10 @@ class AgentRuntimeModule(reactContext: ReactApplicationContext) :
                 // not know would be worse than a stable one.
                 Log.w(TAG, "Agent tool could not be executed: ${refused.code}")
 
-                promise.reject(refused.code, "Agent tool could not be executed")
+                promise.reject(refused.code, diagnosed("execute_agent_tool", refused.code, refused))
             } catch (failure: Exception) {
                 Log.w(TAG, "Agent tool could not be executed", failure)
-                promise.reject("E_AGENT_NATIVE", "Agent tool could not be executed")
+                promise.reject("E_AGENT_NATIVE", diagnosed("execute_agent_tool", "E_AGENT_NATIVE", failure))
             }
         }
     }
@@ -243,10 +243,10 @@ class AgentRuntimeModule(reactContext: ReactApplicationContext) :
                 promise.resolve(Arguments.makeNativeMap(RuntimeJson.map(result)))
             } catch (refused: AndroidAgentLifecycleService.Refused) {
                 Log.w(TAG, "Agent attempt could not be interrupted: ${refused.code}")
-                promise.reject(refused.code, "Agent attempt could not be interrupted")
+                promise.reject(refused.code, diagnosed("interrupt_agent_attempt", refused.code, refused))
             } catch (failure: Exception) {
                 Log.w(TAG, "Agent attempt could not be interrupted", failure)
-                promise.reject("E_AGENT_NATIVE", "Agent attempt could not be interrupted")
+                promise.reject("E_AGENT_NATIVE", diagnosed("interrupt_agent_attempt", "E_AGENT_NATIVE", failure))
             }
         }
     }
@@ -266,10 +266,10 @@ class AgentRuntimeModule(reactContext: ReactApplicationContext) :
                 promise.resolve(Arguments.makeNativeMap(RuntimeJson.map(result)))
             } catch (refused: AndroidAgentCancelService.Refused) {
                 Log.w(TAG, "Agent attempt could not be cancelled: ${refused.code}")
-                promise.reject(refused.code, "Agent attempt could not be cancelled")
+                promise.reject(refused.code, diagnosed("cancel_agent_attempt", refused.code, refused))
             } catch (failure: Exception) {
                 Log.w(TAG, "Agent attempt could not be cancelled", failure)
-                promise.reject("E_AGENT_NATIVE", "Agent attempt could not be cancelled")
+                promise.reject("E_AGENT_NATIVE", diagnosed("cancel_agent_attempt", "E_AGENT_NATIVE", failure))
             }
         }
     }
@@ -289,10 +289,10 @@ class AgentRuntimeModule(reactContext: ReactApplicationContext) :
                 promise.resolve(Arguments.makeNativeMap(RuntimeJson.map(result)))
             } catch (refused: AndroidAgentQueryService.Refused) {
                 Log.w(TAG, "Agent attempt could not be queried: ${refused.code}")
-                promise.reject(refused.code, "Agent attempt could not be queried")
+                promise.reject(refused.code, diagnosed("query_agent_attempt", refused.code, refused))
             } catch (failure: Exception) {
                 Log.w(TAG, "Agent attempt could not be queried", failure)
-                promise.reject("E_AGENT_NATIVE", "Agent attempt could not be queried")
+                promise.reject("E_AGENT_NATIVE", diagnosed("query_agent_attempt", "E_AGENT_NATIVE", failure))
             }
         }
     }
@@ -311,10 +311,10 @@ class AgentRuntimeModule(reactContext: ReactApplicationContext) :
                 promise.resolve(Arguments.makeNativeMap(RuntimeJson.map(runtime.queries.queryTool(captured))))
             } catch (refused: AndroidAgentQueryService.Refused) {
                 Log.w(TAG, "Agent tool could not be queried: ${refused.code}")
-                promise.reject(refused.code, "Agent tool could not be queried")
+                promise.reject(refused.code, diagnosed("query_agent_tool", refused.code, refused))
             } catch (failure: Exception) {
                 Log.w(TAG, "Agent tool could not be queried", failure)
-                promise.reject("E_AGENT_NATIVE", "Agent tool could not be queried")
+                promise.reject("E_AGENT_NATIVE", diagnosed("query_agent_tool", "E_AGENT_NATIVE", failure))
             }
         }
     }
@@ -334,10 +334,10 @@ class AgentRuntimeModule(reactContext: ReactApplicationContext) :
                 promise.resolve(Arguments.makeNativeMap(RuntimeJson.map(result)))
             } catch (refused: AndroidAgentRecoveryService.Refused) {
                 Log.w(TAG, "Agent attempt could not be recovered: ${refused.code}")
-                promise.reject(refused.code, "Agent attempt could not be recovered")
+                promise.reject(refused.code, diagnosed("recover_agent_attempt", refused.code, refused))
             } catch (failure: Exception) {
                 Log.w(TAG, "Agent attempt could not be recovered", failure)
-                promise.reject("E_AGENT_NATIVE", "Agent attempt could not be recovered")
+                promise.reject("E_AGENT_NATIVE", diagnosed("recover_agent_attempt", "E_AGENT_NATIVE", failure))
             }
         }
     }
@@ -357,10 +357,10 @@ class AgentRuntimeModule(reactContext: ReactApplicationContext) :
                 promise.resolve(Arguments.makeNativeMap(RuntimeJson.map(result)))
             } catch (refused: AndroidAgentLifecycleService.Refused) {
                 Log.w(TAG, "Agent attempt could not be finalized: ${refused.code}")
-                promise.reject(refused.code, "Agent attempt could not be finalized")
+                promise.reject(refused.code, diagnosed("finalize_agent_attempt", refused.code, refused))
             } catch (failure: Exception) {
                 Log.w(TAG, "Agent attempt could not be finalized", failure)
-                promise.reject("E_AGENT_NATIVE", "Agent attempt could not be finalized")
+                promise.reject("E_AGENT_NATIVE", diagnosed("finalize_agent_attempt", "E_AGENT_NATIVE", failure))
             }
         }
     }
@@ -380,10 +380,10 @@ class AgentRuntimeModule(reactContext: ReactApplicationContext) :
                 promise.resolve(Arguments.makeNativeMap(RuntimeJson.map(result)))
             } catch (refused: AndroidAgentLifecycleService.Refused) {
                 Log.w(TAG, "Agent attempt could not be discarded: ${refused.code}")
-                promise.reject(refused.code, "Agent attempt could not be discarded")
+                promise.reject(refused.code, diagnosed("discard_agent_attempt", refused.code, refused))
             } catch (failure: Exception) {
                 Log.w(TAG, "Agent attempt could not be discarded", failure)
-                promise.reject("E_AGENT_NATIVE", "Agent attempt could not be discarded")
+                promise.reject("E_AGENT_NATIVE", diagnosed("discard_agent_attempt", "E_AGENT_NATIVE", failure))
             }
         }
     }
@@ -402,10 +402,10 @@ class AgentRuntimeModule(reactContext: ReactApplicationContext) :
                 promise.resolve(Arguments.makeNativeMap(RuntimeJson.map(runtime.queries.queryCleanup(captured))))
             } catch (refused: AndroidAgentQueryService.Refused) {
                 Log.w(TAG, "Agent cleanup could not be queried: ${refused.code}")
-                promise.reject(refused.code, "Agent cleanup could not be queried")
+                promise.reject(refused.code, diagnosed("query_agent_cleanup", refused.code, refused))
             } catch (failure: Exception) {
                 Log.w(TAG, "Agent cleanup could not be queried", failure)
-                promise.reject("E_AGENT_NATIVE", "Agent cleanup could not be queried")
+                promise.reject("E_AGENT_NATIVE", diagnosed("query_agent_cleanup", "E_AGENT_NATIVE", failure))
             }
         }
     }

@@ -117,6 +117,46 @@ export type ProjectReviewPreviewProps = {
   diffMode?: DiffMode;
 };
 
+/** A workspace name from a repository URL: its last path segment without `.git`. */
+function workspaceNameFromUrl(url: string): string {
+  const segment = url.replace(/\/+$/u, '').split('/').pop() ?? '';
+  const name = segment.replace(/\.git$/iu, '').trim();
+  return name.length === 0 ? 'Repository' : name.slice(0, 120);
+}
+
+/** The stable code a bridge rejection carries, or an empty string. */
+function errorCode(error: unknown): string {
+  return typeof error === 'object' && error !== null && 'code' in error
+    ? String((error as { code?: unknown }).code)
+    : '';
+}
+
+/**
+ * A workspace project's origin and credential, in the panel's v1 shape with
+ * the origin URL alongside: null when no origin is set. The origin is read
+ * first because the credential is scoped to its host.
+ */
+async function workspaceCredential(
+  root: WorkspaceRootRefV1,
+): Promise<(ProjectCredentialStatus & { origin_url: string }) | null> {
+  const remote = await LocalProjects.remoteV2({ schema_version: 1, root });
+  if (remote.url === null) return null;
+  const status = legacyShaped(
+    await LocalProjects.credentialStatusV2({ schema_version: 1, root }),
+  );
+  return { ...status, origin_url: remote.url };
+}
+
+/** A workspace project's push receipts in the panel's v1 shape, or null when it has no origin to have pushed to. */
+async function workspaceReceipts(
+  root: WorkspaceRootRefV1,
+): Promise<{ schema_version: 1; project_id: string; receipts: ProjectPushReceipt[] } | null> {
+  const remote = await LocalProjects.remoteV2({ schema_version: 1, root });
+  if (remote.url === null) return null;
+  const receipts = await LocalProjects.pushReceiptsV2({ schema_version: 1, root });
+  return { schema_version: 1, project_id: receipts.project_id, receipts: receipts.receipts };
+}
+
 function errorText(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
 }
@@ -349,8 +389,18 @@ export function ProjectsSurface({
   const [remoteUrl, setRemoteUrl] = useState('');
   const [busy, setBusy] = useState(false);
   const [pushing, setPushing] = useState(false);
+  const pushOperationId = useRef<string | null>(null);
+  /** A clone into a new workspace (Android): its operation id while the network runs. */
+  const [workspaceClone, setWorkspaceClone] = useState<{ operationId: string; url: string } | null>(null);
+  const workspaceCloneRef = useRef<string | null>(null);
   const [pushBranch, setPushBranch] = useState('');
   const [receipt, setReceipt] = useState<ProjectPushReceipt | null>(null);
+  /**
+   * What the last fetch of this view saw upstream. A merge is bound to it:
+   * the person merges what they fetched, and a later fetch that moved the
+   * upstream makes the native side refuse rather than merge something unseen.
+   */
+  const [fetched, setFetched] = useState<{ projectId: string; branch: string; remoteOid: string } | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
   const [tasks] = useState(() => new ProjectViewTasks());
@@ -405,6 +455,7 @@ export function ProjectsSurface({
       setSelectedDiffPath(null);
       setCredential(null);
       setReceipt(null);
+      setFetched(null);
       setRemoteUrl(project?.origin_url ?? '');
       setError(null);
       setNotice(null);
@@ -522,8 +573,8 @@ export function ProjectsSurface({
                 max_bytes: WORKSPACE_DIFF_MAX_BYTES,
                 staged: true,
               }).then(legacyShaped),
-              Promise.resolve(null),
-              Promise.resolve(null),
+              workspaceCredential(project.root),
+              workspaceReceipts(project.root),
             ])
           : await Promise.all([
               LocalProjects.status(project.id),
@@ -537,6 +588,27 @@ export function ProjectsSurface({
                 : LocalProjects.pushReceipts(project.id),
             ]);
         if (!tasks.owns(task)) return;
+        // A workspace project's origin lives in its git config, not in a
+        // listing: the credential status names it, or says there is none.
+        if (project.root !== null) {
+          let originUrl: string | null = null;
+          if (
+            nextCredential !== null &&
+            'origin_url' in nextCredential &&
+            typeof nextCredential.origin_url === 'string'
+          ) {
+            originUrl = nextCredential.origin_url;
+          }
+          if (originUrl !== project.origin_url) {
+            const updated = { ...project, origin_url: originUrl };
+            selectedRef.current = updated;
+            setSelected(updated);
+            setProjects(previous =>
+              previous.map(row => (row.id === updated.id ? updated : row)),
+            );
+            project = updated;
+          }
+        }
         setStatus(nextStatus);
         setDiffs({ unstaged: unstagedDiff, staged: stagedDiff });
         const mode =
@@ -667,6 +739,12 @@ export function ProjectsSurface({
     };
   }, [applyCloneSnapshot, visible, cloneOperation?.operation_id]);
 
+  const cancelWorkspaceClone = useCallback(() => {
+    const operationId = workspaceCloneRef.current;
+    if (operationId === null) return;
+    LocalProjects.cancelWorkspaceCloneV2(operationId).catch(() => undefined);
+  }, []);
+
   const cancelClone = useCallback(async () => {
     const operation = cloneOperationRef.current;
     if (!cloneIsActive(operation) || operation === null) return;
@@ -705,6 +783,85 @@ export function ProjectsSurface({
       setError(null);
       setNotice(null);
       try {
+        if (kind === 'clone' && !LocalProjects.isLegacyCloneAvailable() && LocalProjects.isWorkspaceCloneAvailable()) {
+          // No legacy clone on this build: the repository becomes a new
+          // workspace with its project attached, and the row appears in the
+          // list the way any workspace project does.
+          const operationId = LocalRuntime.createCompletionRequestId();
+          workspaceCloneRef.current = operationId;
+          setWorkspaceClone({ operationId, url: trimmedUrl });
+          const cloneRequest = {
+            schema_version: 1 as const,
+            operation_id: operationId,
+            url: trimmedUrl,
+            display_name: trimmedName.length === 0 ? workspaceNameFromUrl(trimmedUrl) : trimmedName,
+            https_proxy_url: preferences.gitHttpsProxyUrl,
+          };
+          try {
+            let cloned;
+            try {
+              cloned = await LocalProjects.cloneWorkspaceV2(cloneRequest);
+            } catch (first) {
+              // A repository that asks for a credential gets one chance: the
+              // native dialog, then the same clone again with what was typed.
+              // The secret never comes through here.
+              if (!tasks.owns(task) || errorCode(first) !== 'E_PROJECT_CREDENTIAL' ||
+                  !LocalProjects.isCloneCredentialPromptAvailable() || workspaceCloneRef.current !== operationId) {
+                throw first;
+              }
+              await LocalProjects.presentCloneCredentialPromptV2({
+                schema_version: 1,
+                operation_id: operationId,
+                url: trimmedUrl,
+                locale: locale === 'zh-CN' ? 'zh-CN' : 'en',
+              });
+              if (!tasks.owns(task) || workspaceCloneRef.current !== operationId) return;
+              try {
+                cloned = await LocalProjects.cloneWorkspaceV2({ ...cloneRequest, credential_reference: 'prompt' });
+              } catch (second) {
+                if (errorCode(second) === 'E_PROJECT_CREDENTIAL') {
+                  throw Object.assign(new Error('E_PROJECT_CREDENTIAL_REJECTED'), { code: 'E_PROJECT_CREDENTIAL_REJECTED' });
+                }
+                throw second;
+              }
+            }
+            if (!tasks.owns(task)) return;
+            setCreateMode(null);
+            setName('');
+            setCloneUrl('');
+            const row: ProjectRow = {
+              schema_version: 1,
+              id: cloned.project.project_id,
+              name: cloned.project.display_name,
+              workspace_path: `projects/${cloned.project.project_id}/repo`,
+              origin_url: trimmedUrl,
+              created_at: new Date().toISOString(),
+              updated_at: new Date().toISOString(),
+              root: cloned.root,
+              workspaceName: cloned.workspace.display_name,
+            };
+            setProjects(previous => [row, ...previous.filter(item => item.id !== row.id)]);
+            selectView(row);
+            setNotice(t('projects.clonedSuccess'));
+            setTab('files');
+          } catch (caught) {
+            if (!tasks.owns(task)) return;
+            const code = errorCode(caught);
+            if (code === 'E_PROJECT_CANCELLED') setNotice(t('projects.cloneCancelled'));
+            else if (code === 'E_PROJECT_PROXY') setError(t('projects.proxyFailed', { proxy: preferences.gitHttpsProxyUrl ?? '' }));
+            else if (code === 'E_PROJECT_CREDENTIAL') setError(t('projects.cloneAuthRequired'));
+            else if (code === 'E_PROJECT_CREDENTIAL_REJECTED') setError(t('projects.cloneCredentialRejected'));
+            else if (code === 'E_PROJECT_TIMEOUT') setError(t('projects.cloneTimeout'));
+            else if (code === 'E_PROJECT_REQUEST_INVALID') setError(t('projects.cloneUrlInvalid'));
+            else setError(t('projects.operationFailed', { error: errorText(caught) }));
+          } finally {
+            if (workspaceCloneRef.current === operationId) {
+              workspaceCloneRef.current = null;
+              setWorkspaceClone(null);
+            }
+          }
+          return;
+        }
         if (kind === 'clone') {
           cloneStarting.current = true;
           setStartingClone(true);
@@ -933,15 +1090,21 @@ export function ProjectsSurface({
     setError(null);
     setNotice(null);
     try {
-      const remote = await LocalProjects.setRemote(
-        selected.id,
-        remoteUrl.trim(),
-      );
+      const remote =
+        selected.root !== null
+          ? await LocalProjects.setRemoteV2({
+              schema_version: 1,
+              root: selected.root,
+              url: remoteUrl.trim(),
+            })
+          : await LocalProjects.setRemote(selected.id, remoteUrl.trim());
       if (!tasks.owns(task)) return;
-      const updated = { ...selected, origin_url: remote.url };
+      // A set origin is never null; the union only says the read-back can be.
+      const originUrl = remote.url ?? remoteUrl.trim();
+      const updated = { ...selected, origin_url: originUrl };
       if (remoteDraftRevision.current === draftRevision) {
         remoteDraftDirty.current = false;
-        setRemoteUrl(remote.url);
+        setRemoteUrl(originUrl);
       }
       selectedRef.current = updated;
       setSelected(updated);
@@ -950,7 +1113,13 @@ export function ProjectsSurface({
           project.id === updated.id ? updated : project,
         ),
       );
-      const nextCredential = await LocalProjects.credentialStatus(selected.id);
+      const nextCredential =
+        selected.root !== null
+          ? await LocalProjects.credentialStatusV2({
+              schema_version: 1,
+              root: selected.root,
+            }).then(legacyShaped)
+          : await LocalProjects.credentialStatus(selected.id);
       if (!tasks.owns(task)) return;
       setCredential(nextCredential);
       setNotice(t('projects.remoteSaved'));
@@ -975,14 +1144,21 @@ export function ProjectsSurface({
     setError(null);
     setNotice(null);
     try {
-      const nextCredential = await LocalProjects.presentCredentialPrompt(
-        selected.id,
-        locale === 'zh-CN' ? 'zh-CN' : 'en',
-      );
+      const promptLocale = locale === 'zh-CN' ? 'zh-CN' : 'en';
+      const nextCredential =
+        selected.root !== null
+          ? await LocalProjects.presentCredentialPromptV2({
+              schema_version: 1,
+              root: selected.root,
+              locale: promptLocale,
+            }).then(legacyShaped)
+          : await LocalProjects.presentCredentialPrompt(selected.id, promptLocale);
       if (!tasks.owns(task)) return;
       setCredential(nextCredential);
     } catch (caught) {
       if (!tasks.owns(task)) return;
+      // Dismissing the native prompt is not a failure.
+      if (errorCode(caught) === 'E_PROJECT_CANCELLED') return;
       setError(t('projects.operationFailed', { error: errorText(caught) }));
     } finally {
       finishTask(task);
@@ -1002,7 +1178,13 @@ export function ProjectsSurface({
     setError(null);
     setNotice(null);
     try {
-      const nextCredential = await LocalProjects.clearCredential(selected.id);
+      const nextCredential =
+        selected.root !== null
+          ? await LocalProjects.clearCredentialV2({
+              schema_version: 1,
+              root: selected.root,
+            }).then(legacyShaped)
+          : await LocalProjects.clearCredential(selected.id);
       if (!tasks.owns(task)) return;
       setCredential(nextCredential);
       setNotice(t('projects.credentialCleared'));
@@ -1027,7 +1209,7 @@ export function ProjectsSurface({
       tasks.busy
     )
       return;
-    const target = pushBranch.trim();
+    const target = selected.root !== null ? '' : pushBranch.trim();
     const host = remoteHost(selected.origin_url);
     const newBranch = target.length > 0 && target !== status.branch;
     // A confirmation belongs to this exact view and target, not a later visit.
@@ -1061,10 +1243,24 @@ export function ProjectsSurface({
             const task = beginTask('push');
             setError(null);
             setNotice(null);
-            LocalProjects.push(selected.id, {
-              httpsProxyUrl: preferences.gitHttpsProxyUrl,
-              ...(newBranch ? { branch: target } : {}),
-            })
+            const operationId = LocalRuntime.createCompletionRequestId();
+            pushOperationId.current = operationId;
+            const pushed =
+              selected.root !== null
+                ? LocalProjects.pushV2({
+                    schema_version: 1,
+                    root: selected.root,
+                    operation_id: operationId,
+                    remote: 'origin',
+                    expected_local_oid: status.head_oid,
+                    credential_reference: 'panel',
+                    https_proxy_url: preferences.gitHttpsProxyUrl,
+                  }).then(result => ({ ...legacyShaped(result), receipt: undefined }))
+                : LocalProjects.push(selected.id, {
+                    httpsProxyUrl: preferences.gitHttpsProxyUrl,
+                    ...(newBranch ? { branch: target } : {}),
+                  });
+            pushed
               .then(result => {
                 if (!tasks.owns(task)) return;
                 setNotice(t('projects.pushSuccess'));
@@ -1078,22 +1274,23 @@ export function ProjectsSurface({
               })
               .catch(caught => {
                 if (!tasks.owns(task)) return;
-                const code =
-                  typeof caught === 'object' &&
-                  caught !== null &&
-                  'code' in caught
-                    ? String((caught as { code?: unknown }).code)
-                    : '';
-                if (code === 'non-fast-forward') {
+                const code = errorCode(caught);
+                if (code === 'non-fast-forward' || code === 'E_PROJECT_NON_FAST_FORWARD') {
                   setError(t('projects.pushNonFastForward'));
-                } else if (code === 'rejected') {
+                } else if (code === 'E_PROJECT_PROXY') {
+                  setError(t('projects.proxyFailed', { proxy: preferences.gitHttpsProxyUrl ?? '' }));
+                } else if (code === 'rejected' || code === 'E_PROJECT_CREDENTIAL') {
                   setError(t('projects.pushRejected'));
                 } else if (code === 'conflict') {
                   setError(t('projects.pushBranchConflict'));
-                } else if (code === 'timeout') {
+                } else if (code === 'timeout' || code === 'E_PROJECT_TIMEOUT') {
                   setError(t('projects.pushTimeout'));
-                } else if (code === 'cancelled') {
+                } else if (code === 'cancelled' || code === 'E_PROJECT_CANCELLED') {
                   setError(t('projects.pushCancelled'));
+                } else if (code === 'E_PROJECT_UNAVAILABLE' && selected.root !== null) {
+                  setError(t('projects.pushCredentialMissing'));
+                } else if (code === 'E_PROJECT_CONFLICT' && selected.root !== null) {
+                  setError(t('projects.pushHeadChanged'));
                 } else {
                   setError(
                     t('projects.operationFailed', {
@@ -1103,6 +1300,9 @@ export function ProjectsSurface({
                 }
               })
               .finally(() => {
+                if (pushOperationId.current === operationId) {
+                  pushOperationId.current = null;
+                }
                 finishTask(task);
               });
           },
@@ -1121,8 +1321,225 @@ export function ProjectsSurface({
     tasks,
   ]);
 
+  /** `git fetch origin` for a workspace project: what the remote holds now, and how far behind the branch is. */
+  const fetchRemote = useCallback(async () => {
+    if (
+      selected === null ||
+      selected.root === null ||
+      selectedRef.current?.id !== selected.id ||
+      selected.origin_url === null ||
+      !tasks.visible ||
+      tasks.busy
+    )
+      return;
+    const task = beginTask('push');
+    const operationId = LocalRuntime.createCompletionRequestId();
+    pushOperationId.current = operationId;
+    setError(null);
+    setNotice(null);
+    try {
+      const result = await LocalProjects.fetchV2({
+        schema_version: 1,
+        root: selected.root,
+        operation_id: operationId,
+        remote: 'origin',
+        https_proxy_url: preferences.gitHttpsProxyUrl,
+      });
+      if (!tasks.owns(task)) return;
+      setFetched(
+        result.remote_oid === null
+          ? null
+          : { projectId: selected.id, branch: result.branch, remoteOid: result.remote_oid },
+      );
+      setNotice(
+        result.remote_oid === null
+          ? t('projects.fetchedNothing')
+          : t('projects.fetched', { ahead: result.ahead, behind: result.behind }),
+      );
+      await loadDetail(selected);
+    } catch (caught) {
+      if (!tasks.owns(task)) return;
+      const code = errorCode(caught);
+      if (code === 'E_PROJECT_PROXY') setError(t('projects.proxyFailed', { proxy: preferences.gitHttpsProxyUrl ?? '' }));
+      else if (code === 'E_PROJECT_CREDENTIAL') setError(t('projects.pushRejected'));
+      else if (code === 'E_PROJECT_TIMEOUT') setError(t('projects.pushTimeout'));
+      else if (code === 'E_PROJECT_CANCELLED') setError(t('projects.pushCancelled'));
+      else setError(t('projects.operationFailed', { error: errorText(caught) }));
+    } finally {
+      if (pushOperationId.current === operationId) pushOperationId.current = null;
+      finishTask(task);
+    }
+  }, [beginTask, finishTask, loadDetail, preferences.gitHttpsProxyUrl, selected, t, tasks]);
+
+  /** Moves the branch to origin's tip only as a fast-forward over an unchanged tree. */
+  const pullFastForward = useCallback(async () => {
+    if (
+      selected === null ||
+      selected.root === null ||
+      selectedRef.current?.id !== selected.id ||
+      status === null ||
+      status.head_oid === null ||
+      !tasks.visible ||
+      tasks.busy
+    )
+      return;
+    const task = beginTask('mutation');
+    setError(null);
+    setNotice(null);
+    try {
+      const pulled = await LocalProjects.pullFastForwardV2({
+        schema_version: 1,
+        root: selected.root,
+        expected_head_oid: status.head_oid,
+      });
+      if (!tasks.owns(task)) return;
+      setNotice(
+        pulled.updated
+          ? t('projects.pulled', { oid: pulled.oid.slice(0, 12) })
+          : t('projects.pullUpToDate'),
+      );
+      await loadDetail(selected);
+    } catch (caught) {
+      if (!tasks.owns(task)) return;
+      const code = errorCode(caught);
+      if (code === 'E_PROJECT_NON_FAST_FORWARD')
+        setError(t(LocalProjects.isMergeAvailable() ? 'projects.pullDivergedMerge' : 'projects.pullDiverged'));
+      else if (code === 'E_PROJECT_CONFLICT') setError(t('projects.pullDirty'));
+      else if (code === 'E_WORKSPACE_CONFIRMATION') setError(t('projects.pullNothingFetched'));
+      else setError(t('projects.operationFailed', { error: errorText(caught) }));
+    } finally {
+      finishTask(task);
+    }
+  }, [beginTask, finishTask, loadDetail, selected, status, t, tasks]);
+
+  /** Whether the fetched upstream can be merged into this diverged branch from here. */
+  const mergeable =
+    selected !== null &&
+    selected.root !== null &&
+    status !== null &&
+    status.head_oid !== null &&
+    status.branch !== null &&
+    status.ahead > 0 &&
+    status.behind > 0 &&
+    fetched !== null &&
+    fetched.projectId === selected.id &&
+    fetched.branch === status.branch &&
+    LocalProjects.isMergeAvailable();
+
+  /**
+   * Merges what the person fetched into a diverged branch, only when the
+   * merge is clean: a conflict, or a file in the way, is reported and
+   * nothing is written.
+   */
+  const mergeRemote = useCallback(() => {
+    if (
+      !mergeable ||
+      selected === null ||
+      selected.root === null ||
+      status === null ||
+      status.head_oid === null ||
+      status.branch === null ||
+      fetched === null ||
+      !tasks.visible ||
+      tasks.busy
+    )
+      return;
+    if (authorName.trim().length === 0 || authorEmail.trim().length === 0) {
+      setError(t('projects.mergeNeedsAuthor'));
+      return;
+    }
+    const root = selected.root;
+    const branch = status.branch;
+    const head = status.head_oid;
+    const theirs = fetched.remoteOid;
+    const signedName = authorName.trim();
+    const signedEmail = authorEmail.trim();
+    const confirmation = tasks.begin('mutation');
+    tasks.finish(confirmation);
+    Alert.alert(
+      t('projects.mergeTitle'),
+      t('projects.mergeBody', { branch }),
+      [
+        { text: t('common.cancel'), style: 'cancel' },
+        {
+          text: t('projects.mergeConfirm'),
+          onPress: () => {
+            if (!tasks.owns(confirmation) || tasks.busy) return;
+            const task = beginTask('mutation');
+            setError(null);
+            setNotice(null);
+            LocalProjects.mergeRemoteV2({
+              schema_version: 1,
+              root,
+              operation_id: LocalRuntime.createCompletionRequestId(),
+              expected_branch: branch,
+              expected_head_oid: head,
+              expected_remote_oid: theirs,
+              author_name: signedName,
+              author_email: signedEmail,
+            })
+              .then(async merged => {
+                if (!tasks.owns(task)) return;
+                const listed = (paths: string[]) => paths.slice(0, 8).join(', ') +
+                  (paths.length > 8 ? ` +${paths.length - 8}` : '');
+                // Only a merge changed anything; the refusals leave the view
+                // as it was, so their message is not wiped by a reload.
+                if (merged.outcome === 'merged') {
+                  await loadDetail(selected);
+                  if (!tasks.owns(task)) return;
+                  setNotice(t('projects.merged', { oid: merged.oid.slice(0, 12) }));
+                } else if (merged.outcome === 'up_to_date') {
+                  setNotice(t('projects.pullUpToDate'));
+                } else if (merged.outcome === 'fast_forward_available') {
+                  setNotice(t('projects.mergeFastForward'));
+                } else if (merged.outcome === 'conflicts') {
+                  setError(t('projects.mergeConflicts', {
+                    paths: listed(merged.conflicts.map(entry => entry.ours ?? entry.theirs ?? entry.ancestor ?? '')),
+                  }));
+                } else {
+                  setError(t('projects.mergeObstructed', { paths: listed(merged.paths) }));
+                }
+              })
+              .catch(caught => {
+                if (!tasks.owns(task)) return;
+                const code = errorCode(caught);
+                if (code === 'E_PROJECT_CONFLICT') setError(t('projects.pullDirty'));
+                else if (code === 'E_WORKSPACE_CONFIRMATION') setError(t('projects.mergeStale'));
+                else if (code === 'E_PROJECT_MERGE_UNSUPPORTED') setError(t('projects.mergeUnsupported'));
+                else if (code === 'E_PROJECT_RECOVERY_REQUIRED') setError(t('projects.mergeRecovery'));
+                else setError(t('projects.operationFailed', { error: errorText(caught) }));
+              })
+              .finally(() => finishTask(task));
+          },
+        },
+      ],
+    );
+  }, [
+    authorEmail,
+    authorName,
+    beginTask,
+    fetched,
+    finishTask,
+    loadDetail,
+    mergeable,
+    selected,
+    status,
+    t,
+    tasks,
+  ]);
+
   const cancelPush = useCallback(() => {
     if (selected === null || !pushing) return;
+    const operationId = pushOperationId.current;
+    if (selected.root !== null) {
+      if (operationId === null) return;
+      LocalProjects.cancelPushV2({
+        schema_version: 1,
+        root: selected.root,
+        operation_id: operationId,
+      }).catch(() => undefined);
+      return;
+    }
     LocalProjects.cancelPush(selected.id).catch(() => undefined);
   }, [pushing, selected]);
 
@@ -1247,6 +1664,8 @@ export function ProjectsSurface({
             createMode={createMode}
             cloneOperation={cloneOperation}
             onCancelClone={cancelClone}
+            workspaceClone={workspaceClone}
+            onCancelWorkspaceClone={cancelWorkspaceClone}
             name={name}
             projects={projects}
             styles={styles}
@@ -1510,12 +1929,6 @@ export function ProjectsSurface({
               </Pressable>
             </View>
 
-            {selected.root !== null ? (
-              <View style={styles.card}>
-                <Text style={styles.cardBody}>{t('projects.workspaceReadOnlyRemote')}</Text>
-              </View>
-            ) : (
-              <>
             <SectionLabel label={t('projects.remoteSection')} styles={styles} />
             <View style={styles.card}>
               <Field
@@ -1607,15 +2020,76 @@ export function ProjectsSurface({
                       </Text>
                     </Pressable>
                   )}
-                  <Field
-                    autoCapitalize="none"
-                    autoCorrect={false}
-                    label={t('projects.pushBranchLabel')}
-                    placeholder={t('projects.pushBranchPlaceholder')}
-                    styles={styles}
-                    value={pushBranch}
-                    onChangeText={setPushBranch}
-                  />
+                  {selected.root === null && (
+                    <Field
+                      autoCapitalize="none"
+                      autoCorrect={false}
+                      label={t('projects.pushBranchLabel')}
+                      placeholder={t('projects.pushBranchPlaceholder')}
+                      styles={styles}
+                      value={pushBranch}
+                      onChangeText={setPushBranch}
+                    />
+                  )}
+                  {selected.root !== null && (
+                    <View style={styles.actionRow}>
+                      <Pressable
+                        accessibilityLabel={t('projects.fetch')}
+                        accessibilityRole="button"
+                        accessibilityState={{ disabled: busy }}
+                        disabled={busy}
+                        onPress={() => fetchRemote().catch(() => undefined)}
+                        style={({ pressed }) => [
+                          styles.secondaryButton,
+                          styles.flex,
+                          busy && styles.disabled,
+                          pressed && styles.pressed,
+                        ]}
+                      >
+                        <Text style={styles.secondaryButtonText}>
+                          {t('projects.fetch')}
+                        </Text>
+                      </Pressable>
+                      <Pressable
+                        accessibilityLabel={t('projects.pull')}
+                        accessibilityRole="button"
+                        accessibilityState={{
+                          disabled: busy || status === null || status.head_oid === null || status.behind === 0,
+                        }}
+                        disabled={busy || status === null || status.head_oid === null || status.behind === 0}
+                        onPress={() => pullFastForward().catch(() => undefined)}
+                        style={({ pressed }) => [
+                          styles.secondaryButton,
+                          styles.flex,
+                          (busy || status === null || status.head_oid === null || status.behind === 0) &&
+                            styles.disabled,
+                          pressed && styles.pressed,
+                        ]}
+                      >
+                        <Text style={styles.secondaryButtonText}>
+                          {t('projects.pull')}
+                        </Text>
+                      </Pressable>
+                    </View>
+                  )}
+                  {mergeable && (
+                    <Pressable
+                      accessibilityLabel={t('projects.merge')}
+                      accessibilityRole="button"
+                      accessibilityState={{ disabled: busy }}
+                      disabled={busy}
+                      onPress={mergeRemote}
+                      style={({ pressed }) => [
+                        styles.secondaryButton,
+                        busy && styles.disabled,
+                        pressed && styles.pressed,
+                      ]}
+                    >
+                      <Text style={styles.secondaryButtonText}>
+                        {t('projects.merge')}
+                      </Text>
+                    </Pressable>
+                  )}
                   <Pressable
                     accessibilityLabel={t('projects.push')}
                     accessibilityRole="button"
@@ -1672,8 +2146,6 @@ export function ProjectsSurface({
                   </Text>
                 )}
               </View>
-            )}
-              </>
             )}
           </ScrollView>
         )}
@@ -1737,8 +2209,12 @@ function ProjectList({
   onChooseMode,
   onOpenProject,
   onSubmit,
+  workspaceClone,
+  onCancelWorkspaceClone,
 }: {
   cloneOperation: ProjectCloneOperation | null;
+  workspaceClone: { operationId: string; url: string } | null;
+  onCancelWorkspaceClone: () => void;
   onCancelClone: () => Promise<void>;
   busy: boolean;
   cloneUrl: string;
@@ -1857,6 +2333,20 @@ function ProjectList({
             value={name}
             onChangeText={onChangeName}
           />
+          {workspaceClone !== null && (
+            <View style={styles.card} testID="projects-workspace-clone">
+              <Text style={styles.cardTitle}>{t('projects.cloningWorkspace')}</Text>
+              <Text style={styles.cardBody}>{workspaceClone.url}</Text>
+              <Pressable
+                accessibilityLabel={t('projects.cancelClone')}
+                accessibilityRole="button"
+                onPress={onCancelWorkspaceClone}
+                style={({ pressed }) => [styles.textButton, pressed && styles.pressed]}
+              >
+                <Text style={styles.textButtonDanger}>{t('common.cancel')}</Text>
+              </Pressable>
+            </View>
+          )}
           {createMode === 'clone' && (
             <>
               <View style={styles.fieldGap} />
@@ -2421,6 +2911,7 @@ const createStyles = (colors: ThemePalette) =>
       paddingHorizontal: 18,
     },
     flex: { flex: 1, minWidth: 0 },
+    actionRow: { flexDirection: 'row', gap: 8, marginTop: 8 },
     header: {
       height: 58,
       flexDirection: 'row',

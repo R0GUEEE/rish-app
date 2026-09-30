@@ -169,6 +169,9 @@ static NSString *const DSHProviderSmokeDigest =
 @property(nonatomic, copy) NSArray *completedMessages;
 @property(nonatomic) BOOL reconcileToFailedRetryable;
 @property(nonatomic) BOOL failNextWALTransactionAfterComplete;
+@property(nonatomic, copy) NSDictionary *lastTransportEvidence;
+@property(nonatomic, copy) NSString *reconcileFailureCode;
+@property(nonatomic) BOOL failNextWALTransactionAfterReconcile;
 @end
 
 @interface DSHProviderCommitFailingWAL : DSHAgentNativeWAL
@@ -251,20 +254,27 @@ static NSString *const DSHProviderSmokeDigest =
 }
 - (NSDictionary *)reconcileAgentRoundV3OwnerLossWithLocator:(NSDictionary *)locator
                                                   expectedCAS:(NSDictionary *)cas
+                                            transportEvidence:(NSDictionary *)evidence
                                                          error:(NSError **)error {
   if (error != nullptr) *error = nil;
   self.reconcileCount += 1;
+  self.lastTransportEvidence = evidence;
   NSMutableDictionary *row = [self.row mutableCopy];
   row[@"row_revision"] = @3;
   row[@"state"] = self.reconcileToFailedRetryable
       ? @"failed_retryable" : @"ambiguous";
   row[@"owner"] = NSNull.null;
   row[@"failure_code"] = self.reconcileToFailedRetryable
-      ? @"E_AGENT_PERSISTENCE" : @"E_AGENT_ROUND_AMBIGUOUS";
+      ? (self.reconcileFailureCode ?: @"E_AGENT_PERSISTENCE") : @"E_AGENT_ROUND_AMBIGUOUS";
   row[@"completion_receipt"] = NSNull.null;
   row[@"transcript_after"] = NSNull.null;
   row[@"terminal_kind"] = NSNull.null;
   self.row = row;
+  if (self.failNextWALTransactionAfterReconcile &&
+      [self.wal isKindOfClass:DSHProviderCommitFailingWAL.class]) {
+    ((DSHProviderCommitFailingWAL *)self.wal).failNextTransaction = YES;
+    self.failNextWALTransactionAfterReconcile = NO;
+  }
   return @{ @"schema_version" : @3, @"status" : @"ambiguous", @"row" : self.row };
 }
 - (NSDictionary *)cancelAgentRoundV3WithCAS:(NSDictionary *)cas
@@ -414,9 +424,20 @@ static NSDictionary *DSHProviderSmokeTranscript(void) {
   };
 }
 
+// The conversation the smoke fixture's round is about. A test that needs a
+// different one -- an attachment, say -- sets this before building its
+// fixture and clears it after, so the digest the request carries and the
+// history the service reads can never drift apart.
+static NSArray *DSHProviderSmokeHistoryOverride = nil;
+
+static NSArray *DSHProviderSmokeHistory(void) {
+  return DSHProviderSmokeHistoryOverride
+      ?: @[ @{ @"role" : @"user", @"content" : @"hello" } ];
+}
+
 static NSString *DSHProviderSmokeVisibleDigest(void) {
   return DSHAgentHJ(@"visible-history", @{
-    @"messages" : @[ @{ @"role" : @"user", @"content" : @"hello" } ],
+    @"messages" : DSHProviderSmokeHistory(),
   }, nil);
 }
 
@@ -665,7 +686,7 @@ static NSDictionary *DSHProviderSmokeQueryRequest(NSDictionary *root,
           (void)authority; if (error != nullptr) *error = nil;
           weakSelf.historyCalls += 1;
           if (!weakSelf.historyAvailable) return nil;
-          return @[ @{ @"role" : @"user", @"content" : @"hello" } ];
+          return DSHProviderSmokeHistory();
         }];
   }
   return self;
@@ -713,6 +734,106 @@ static NSDictionary *DSHProviderSmokeQueryRequest(NSDictionary *root,
     @{ @"type" : @"delta", @"content" : @"ne", @"finish_reason" : @"stop" },
   ];
   return transport;
+}
+
+// An image attached to an Agent turn reaches the provider as its own bytes.
+//
+// The round service used to hand the visible history straight to the
+// request builder, which reads a message's `content` and ignores its
+// `attachments`: the model was asked about a picture it was never shown. The
+// chat path has always projected attachments; the Agent path now calls the
+// same projection. What is asserted is the bytes, because a check that only
+// found an image part would pass over an empty one.
+- (void)testAnImageAttachedToAnAgentTurnReachesTheProviderAsItsOwnBytes {
+  const uint8_t bytes[] = {0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A, 0x01, 0x02};
+  NSData *png = [NSData dataWithBytes:bytes length:sizeof(bytes)];
+  NSDictionary *reference = @{
+    @"schema_version" : @1,
+    @"id" : @"aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+    @"kind" : @"image",
+    @"name" : @"probe.png",
+    @"mime_type" : @"image/png",
+    @"size" : @(png.length),
+  };
+  DSHProviderSmokeHistoryOverride = @[ @{
+    @"role" : @"user", @"content" : @"what is this", @"attachments" : @[ reference ],
+  } ];
+  @try {
+    DSHProviderSmokeFixture *fixture = [[DSHProviderSmokeFixture alloc] init];
+    fixture.service.attachmentResolver =
+        ^NSDictionary *(__unused id value, NSData **payload, NSDictionary **manifest,
+                        NSError **error) {
+          if (error != nullptr) *error = nil;
+          if (payload != nullptr) *payload = png;
+          if (manifest != nullptr) {
+            *manifest = @{ @"mime_type" : @"image/png", @"size" : @(png.length) };
+          }
+          return reference;
+        };
+    NSError *error = nil;
+    (void)[fixture.service completeAgentRoundV2WithRequest:fixture.request error:&error];
+
+    XCTAssertEqual(fixture.transport.startCount, (NSUInteger)1);
+    NSString *expectedURL = [NSString stringWithFormat:@"data:image/png;base64,%@",
+                             [png base64EncodedStringWithOptions:0]];
+    NSDictionary *userTurn = nil;
+    for (NSDictionary *message in fixture.transport.lastModelInput) {
+      if ([message[@"role"] isEqual:@"user"]) userTurn = message;
+    }
+    NSArray *parts = userTurn[@"content"];
+    XCTAssertTrue([parts isKindOfClass:NSArray.class], @"%@", userTurn);
+    NSString *url = nil;
+    for (NSDictionary *part in parts) {
+      if ([part[@"type"] isEqual:@"image_url"]) url = part[@"image_url"][@"url"];
+    }
+    XCTAssertEqualObjects(url, expectedURL);
+    // And the body the provider would receive carries it too, rather than
+    // the app's own `attachments` metadata.
+    NSString *body = [[NSString alloc] initWithData:fixture.transport.lastBodyData
+                                           encoding:NSUTF8StringEncoding];
+    XCTAssertTrue([body containsString:[png base64EncodedStringWithOptions:0]], @"%@", body);
+    XCTAssertFalse([body containsString:@"\"attachments\""], @"%@", body);
+  } @finally {
+    DSHProviderSmokeHistoryOverride = nil;
+  }
+}
+
+// An attachment this path cannot carry fails the round before anything is
+// sent, as a capability refusal the person can act on -- not an ambiguity,
+// because nothing was dispatched, and not a silent drop, because the model
+// would then answer about a file it never received.
+- (void)testAnAttachmentThatCannotBeCarriedIsRefusedBeforeDispatch {
+  NSDictionary *reference = @{
+    @"schema_version" : @1,
+    @"id" : @"bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb",
+    @"kind" : @"image",
+    @"name" : @"gone.png",
+    @"mime_type" : @"image/png",
+    @"size" : @3,
+  };
+  DSHProviderSmokeHistoryOverride = @[ @{
+    @"role" : @"user", @"content" : @"what is this", @"attachments" : @[ reference ],
+  } ];
+  @try {
+    DSHProviderSmokeFixture *fixture = [[DSHProviderSmokeFixture alloc] init];
+    fixture.service.attachmentResolver =
+        ^NSDictionary *(__unused id value, __unused NSData **payload,
+                        __unused NSDictionary **manifest, NSError **error) {
+          if (error != nullptr) {
+            *error = [NSError errorWithDomain:@"test" code:1 userInfo:nil];
+          }
+          return nil;
+        };
+    NSError *error = nil;
+    NSDictionary *result =
+        [fixture.service completeAgentRoundV2WithRequest:fixture.request error:&error];
+    XCTAssertNil(result);
+    XCTAssertEqualObjects(error.userInfo[@"code"], @"E_AGENT_CAPABILITY");
+    XCTAssertEqual(fixture.transport.startCount, (NSUInteger)0,
+                   @"nothing may be sent for a request that cannot be carried");
+  } @finally {
+    DSHProviderSmokeHistoryOverride = nil;
+  }
 }
 
 - (void)testStreamedRoundPublishesOrderedPreviewEventsAndOneValidatedEnd {
@@ -1682,6 +1803,49 @@ static NSDictionary *DSHProviderSmokeQueryRequest(NSDictionary *root,
   [NSFileManager.defaultManager removeItemAtURL:fixture.walRoot error:nil];
 }
 
+// A "max" reasoning past what the controller accepts: the answer and the
+// recovered projection both carry the core's excerpt, whose digest is its
+// own, so neither is refused on every read (beta report, 2026-09-28).
+- (void)testALongReasoningIsShownAsAnExcerptFreshAndRecovered {
+  DSHProviderSmokeFixture *fixture = [[DSHProviderSmokeFixture alloc] init];
+  NSMutableString *reasoning = [NSMutableString stringWithString:@"开头"];
+  for (NSUInteger index = 0; index < 400 * 1024 / 3; index += 1) [reasoning appendString:@"鹈"];
+  [reasoning appendString:@"结尾"];
+  NSMutableDictionary *result = [fixture.transport.result mutableCopy];
+  result[@"reasoning"] = reasoning;
+  fixture.transport.result = result;
+  NSError *error = nil;
+  NSDictionary *completed = [fixture.service
+      completeAgentRoundV2WithRequest:fixture.request error:&error];
+  XCTAssertNil(error);
+  NSString *shown = completed[@"outcome"][@"reasoning"];
+  XCTAssertTrue([shown isKindOfClass:NSString.class]);
+  XCTAssertLessThanOrEqual([shown lengthOfBytesUsingEncoding:NSUTF8StringEncoding], (NSUInteger)(256 * 1024));
+  XCTAssertTrue([shown hasPrefix:@"开头"]);
+  XCTAssertTrue([shown hasSuffix:@"结尾"]);
+  XCTAssertTrue([shown containsString:@"[…]"]);
+
+  fixture.transcripts.messages = @[
+    @{
+      @"schema_version" : @1,
+      @"role" : @"assistant",
+      @"round_index" : @0,
+      @"content" : @"done",
+      @"reasoning_content" : reasoning,
+      @"tool_calls" : @[],
+    },
+  ];
+  NSDictionary *selector = DSHProviderSmokeQueryRequest(
+      fixture.root, fixture.transcript, 3, NO);
+  NSDictionary *recovered = [fixture.service recoverAgentRoundWithRequest:selector
+                                                                       error:&error];
+  XCTAssertNil(error);
+  NSDictionary *round = recovered[@"completed_round"];
+  XCTAssertEqualObjects(round[@"reasoning"], shown);
+  XCTAssertEqualObjects(round[@"reasoning_text_sha256"], DSHWorkspaceSHA256Hex([shown dataUsingEncoding:NSUTF8StringEncoding]));
+  [NSFileManager.defaultManager removeItemAtURL:fixture.walRoot error:nil];
+}
+
 - (void)testRecoverCompletedRoundReturnsExactRedactedProjection {
   DSHProviderSmokeFixture *fixture = [[DSHProviderSmokeFixture alloc] init];
   NSError *error = nil;
@@ -1890,6 +2054,43 @@ static NSDictionary *DSHProviderSmokeQueryRequest(NSDictionary *root,
   XCTAssertEqual(error.code, DSHAgentNativeStoreErrorConflict);
   XCTAssertNil(ignoredReceipt);
   XCTAssertNil(ignoredMessages);
+}
+
+// The refusal reached the row, but the operation's result was never written.
+// Replaying the operation answers from the settled row -- failed_retryable,
+// with its recorded cause -- instead of calling it unknown, and sends nothing.
+- (void)testStartedOperationReplaysARefusedRoundFromItsSettledRow {
+  DSHProviderSmokeFixture *fixture =
+      [[DSHProviderSmokeFixture alloc] initWithFaultingCommit:YES];
+  fixture.transport.rejectCredentialGeneration = YES;
+  fixture.rounds.reconcileToFailedRetryable = YES;
+  fixture.rounds.reconcileFailureCode = @"E_AGENT_PROVIDER_CREDENTIAL";
+  fixture.rounds.failNextWALTransactionAfterReconcile = YES;
+  NSError *error = nil;
+  NSDictionary *first = [fixture.service completeAgentRoundV2WithRequest:fixture.request
+                                                                     error:&error];
+  XCTAssertNil(first);
+  XCTAssertEqual(error.code, DSHAgentNativeStoreErrorPersistence);
+  error = nil;
+  NSDictionary *state = [fixture.wal snapshotWithError:&error];
+  XCTAssertEqualObjects(state[@"operations"][0][@"state"], @"started");
+  XCTAssertEqualObjects(fixture.rounds.row[@"state"], @"failed_retryable");
+
+  NSDictionary *replayed = [fixture.service completeAgentRoundV2WithRequest:fixture.request
+                                                                        error:&error];
+  XCTAssertNil(error);
+  XCTAssertEqualObjects(replayed[@"status"], @"failed_retryable");
+  XCTAssertEqualObjects(replayed[@"failure_code"], @"E_AGENT_PROVIDER_CREDENTIAL");
+  XCTAssertEqual(fixture.transport.startCount, (NSUInteger)1);
+  state = [fixture.wal snapshotWithError:&error];
+  XCTAssertEqualObjects(state[@"operations"][0][@"state"], @"committed");
+  XCTAssertEqualObjects(state[@"operations"][0][@"result_status"], @"failed_retryable");
+  // And the committed answer is what a later replay reads back.
+  NSDictionary *again = [fixture.service completeAgentRoundV2WithRequest:fixture.request
+                                                                     error:&error];
+  XCTAssertEqualObjects(again[@"status"], @"failed_retryable");
+  XCTAssertEqual(fixture.transport.startCount, (NSUInteger)1);
+  [NSFileManager.defaultManager removeItemAtURL:fixture.walRoot error:nil];
 }
 
 - (void)testStartedOperationRecoversCompletedRoundWithoutAnotherHTTPRequest {
@@ -2552,6 +2753,115 @@ static NSDictionary *DSHProviderSmokeQueryRequest(NSDictionary *root,
   [NSFileManager.defaultManager removeItemAtURL:walRoot error:nil];
 }
 
+// The real journal over the real WAL: a dispatched round the provider
+// refused with 401 becomes failed_retryable with the cause the core derived,
+// and its dispatch marker is reset in the same transaction -- a WAL holding
+// failed_retryable beside a dispatched marker would not load again.
+- (void)testRoundV3ProviderRefusalIsRetryableAndResetsItsMarker {
+  NSURL *walRoot = [NSURL fileURLWithPath:[NSTemporaryDirectory()
+      stringByAppendingPathComponent:NSUUID.UUID.UUIDString]];
+  DSHAgentNativeWAL *wal = [[DSHAgentNativeWAL alloc]
+      initWithRootURL:walRoot
+      clock:^NSDate *{
+        return [NSDate dateWithTimeIntervalSince1970:1700000000];
+      }
+      identifierGenerator:^NSString *{
+        return @"aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
+      }
+      faultHook:nil];
+  NSError *error = nil;
+  NSDictionary *root = DSHProviderSmokeRoot();
+  DSHAgentTranscriptStore *transcripts = [[DSHAgentTranscriptStore alloc]
+      initWithWAL:wal];
+  NSDictionary *transcript = [transcripts
+      createAgentTranscriptWithRequest:@{
+        @"schema_version" : @1,
+        @"attempt_id" : DSHProviderSmokeAttempt,
+        @"root" : root,
+      }
+      error:&error];
+  NSDictionary *locator = @{
+    @"schema_version" : @1,
+    @"task_id" : DSHProviderSmokeTask,
+    @"attempt_id" : DSHProviderSmokeAttempt,
+    @"round_id" : DSHProviderSmokeRound,
+    @"round_index" : @0,
+  };
+  NSDictionary *deadOwner = @{
+    @"schema_version" : @1,
+    @"task_id" : DSHProviderSmokeTask,
+    @"launch_id" : wal.launchId,
+    @"native_task_id" : @"99999999-9999-4999-8999-999999999999",
+    @"owner_generation" : @1,
+    @"heartbeat_at" : wal.currentTimestamp,
+  };
+  NSDictionary *row = @{
+    @"schema_version" : @3,
+    @"locator" : locator,
+    @"row_revision" : @2,
+    @"root_fingerprint_sha256" : root[@"root_fingerprint_sha256"],
+    @"binding_revision" : @7,
+    @"request_sha256" : DSHProviderSmokeDigest,
+    @"transcript_before" : transcript,
+    @"launch_attempt" : @1,
+    @"state" : @"in_flight",
+    @"owner" : deadOwner,
+    @"failure_code" : NSNull.null,
+    @"completion_receipt" : NSNull.null,
+    @"transcript_after" : NSNull.null,
+    @"calls" : @[],
+    @"batch_class" : NSNull.null,
+    @"executable_call_count" : @0,
+    @"denied_call_count" : @0,
+    @"terminal_kind" : NSNull.null,
+    @"created_at" : wal.currentTimestamp,
+    @"updated_at" : wal.currentTimestamp,
+  };
+  BOOL inserted = [wal performAtomicTransaction:^BOOL(
+      NSMutableDictionary *state, NSError **mutationError) {
+    NSMutableArray *roundRows = [state[@"rounds"] mutableCopy];
+    NSMutableArray *dispatch = [state[@"dispatch"] mutableCopy];
+    [roundRows addObject:row];
+    [dispatch addObject:@{
+      @"schema_version" : @1,
+      @"kind" : @"round",
+      @"locator" : locator,
+      @"dispatch_state" : @"dispatched",
+    }];
+    state[@"rounds"] = roundRows;
+    state[@"dispatch"] = dispatch;
+    return YES;
+  } error:&error];
+  XCTAssertTrue(inserted);
+  DSHAgentRoundJournal *journal = [[DSHAgentRoundJournal alloc] initWithWAL:wal];
+  NSDictionary *cas = DSHProviderRoundCASForRow(row);
+  NSDictionary *reconciled = [journal
+      reconcileAgentRoundV3OwnerLossWithLocator:locator
+                                      expectedCAS:cas
+                                transportEvidence:@{
+                                  @"kind" : @"http_rejected",
+                                  @"http_status" : @401,
+                                  @"owner" : deadOwner,
+                                }
+                                             error:&error];
+  XCTAssertNil(error);
+  XCTAssertEqualObjects(reconciled[@"row"][@"state"], @"failed_retryable");
+  XCTAssertEqualObjects(reconciled[@"row"][@"failure_code"],
+                        @"E_AGENT_PROVIDER_CREDENTIAL");
+  NSDictionary *snapshot = [wal snapshotWithError:&error];
+  XCTAssertEqualObjects(snapshot[@"dispatch"][0][@"dispatch_state"], @"not_dispatched");
+  // A second reader of the same directory accepts the committed state.
+  DSHAgentNativeWAL *reopened = [[DSHAgentNativeWAL alloc]
+      initWithRootURL:walRoot
+      clock:^NSDate *{ return [NSDate dateWithTimeIntervalSince1970:1700000000]; }
+      identifierGenerator:^NSString *{ return @"bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb"; }
+      faultHook:nil];
+  NSDictionary *reread = [reopened snapshotWithError:&error];
+  XCTAssertNil(error);
+  XCTAssertEqualObjects(reread[@"rounds"][0][@"failure_code"], @"E_AGENT_PROVIDER_CREDENTIAL");
+  [NSFileManager.defaultManager removeItemAtURL:walRoot error:nil];
+}
+
 
 - (void)testCustomProviderIdentitySurvivesNativeRoundAndOperationReplay {
   DSHProviderSmokeFixture *fixture = [[DSHProviderSmokeFixture alloc] init];
@@ -2595,6 +2905,56 @@ static NSDictionary *DSHProviderSmokeQueryRequest(NSDictionary *root,
   NSDictionary *replayed = [service completeAgentRoundV2WithRequest:request error:&error];
   XCTAssertEqualObjects(replayed, result);
   XCTAssertEqual([DSHProviderURLProtocol requestCount], 1u);
+  [session invalidateAndCancel]; [defaults removePersistentDomainForName:suite];
+}
+
+// A relay that refuses the key answers with a status line. The service hands
+// what the transport heard to the journal -- the status and the owner the
+// request went out under -- and reports the row the core settled, rather
+// than calling every failed dispatch ambiguous.
+- (void)testARelaysRefusalIsHandedToTheJournalAsEvidence {
+  DSHProviderSmokeFixture *fixture = [[DSHProviderSmokeFixture alloc] init];
+  fixture.rounds.reconcileToFailedRetryable = YES;
+  NSMutableDictionary *authority = [fixture.prepared.authority mutableCopy]; authority[@"model"] = @"claude-sonnet-5";
+  fixture.prepared.authority = authority;
+  NSString *suite = [@"refused-round-" stringByAppendingString:NSUUID.UUID.UUIDString];
+  NSUserDefaults *defaults = [[NSUserDefaults alloc] initWithSuiteName:suite];
+  DSHProviderConfigurationStore *profiles = [[DSHProviderConfigurationStore alloc] initWithDefaults:defaults];
+  [profiles saveConfiguration:@{@"schema_version": @1, @"harness_id": @"claude-code", @"name": @"Relay",
+      @"endpoint_url": @"https://relay.example/v1/messages", @"protocol": @"messages", @"auth_type": @"bearer",
+      @"send_reasoning": @NO, @"model_mappings": @{@"claude-sonnet-5": @"relay-model"}} error:nil];
+  NSURLSessionConfiguration *sessionConfiguration = NSURLSessionConfiguration.ephemeralSessionConfiguration;
+  sessionConfiguration.protocolClasses = @[DSHProviderURLProtocol.class];
+  NSURLSession *session = [NSURLSession sessionWithConfiguration:sessionConfiguration];
+  DSHConfiguredProviderTransport *transport = [[DSHConfiguredProviderTransport alloc] initWithHarness:@"claude-code"
+      session:session uuidGenerator:^NSString *{ return NSUUID.UUID.UUIDString.lowercaseString; }
+      monotonicClock:nil store:profiles];
+  DSHAgentProviderRoundService *service = [[DSHAgentProviderRoundService alloc]
+      initWithWAL:fixture.wal preparedStore:fixture.prepared transcripts:fixture.transcripts rounds:fixture.rounds
+      transport:fixture.transport claudeTransport:transport codexTransport:nil glmTransport:nil
+      credentialProvider:^NSString *(NSString *harness, NSUInteger *generation) {
+        if (generation) *generation = 1; return @"synthetic-relay-key";
+      } visibleHistoryProvider:^NSArray *(NSDictionary *value, NSError **error) {
+        return @[@{@"role": @"user", @"content": @"hello"}];
+      } contextReceiptProvider:nil];
+  [DSHProviderURLProtocol setHandler:^(NSURLProtocol *p, NSURLRequest *request) {
+    NSData *data = [@"{\"error\":\"invalid key\"}" dataUsingEncoding:NSUTF8StringEncoding];
+    NSHTTPURLResponse *response = [[NSHTTPURLResponse alloc] initWithURL:request.URL statusCode:401 HTTPVersion:@"HTTP/1.1" headerFields:@{@"Content-Type": @"application/json"}];
+    [p.client URLProtocol:p didReceiveResponse:response cacheStoragePolicy:NSURLCacheStorageNotAllowed];
+    [p.client URLProtocol:p didLoadData:data]; [p.client URLProtocolDidFinishLoading:p];
+  }];
+  NSMutableDictionary *request = [fixture.request mutableCopy]; request[@"model"] = @"claude-sonnet-5"; request[@"harness_id"] = @"claude-code";
+  NSError *error = nil;
+  NSDictionary *result = [service completeAgentRoundV2WithRequest:request error:&error];
+  XCTAssertNotNil(result, @"%@", error);
+  NSDictionary *evidence = fixture.rounds.lastTransportEvidence;
+  XCTAssertEqualObjects(evidence[@"kind"], @"http_rejected");
+  XCTAssertEqualObjects(evidence[@"http_status"], @401);
+  XCTAssertTrue([evidence[@"owner"] isKindOfClass:NSDictionary.class]);
+  XCTAssertEqualObjects(evidence[@"owner"][@"task_id"], request[@"task_id"]);
+  // The row the journal settled is what the controller hears.
+  XCTAssertEqualObjects(result[@"status"], @"failed_retryable");
+  XCTAssertEqualObjects(result[@"failure_code"], fixture.rounds.row[@"failure_code"]);
   [session invalidateAndCancel]; [defaults removePersistentDomainForName:suite];
 }
 

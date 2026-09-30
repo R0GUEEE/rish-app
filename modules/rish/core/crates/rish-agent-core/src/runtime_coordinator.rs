@@ -558,7 +558,8 @@ pub fn query_attempt_projection(
         "journal_revision".into(),
         owned(get(proof, "journal_revision")),
     );
-    if let Some(round) = latest_round(state, task_id, attempt_id) {
+    let latest = latest_round(state, task_id, attempt_id);
+    if let Some(round) = latest {
         let locator = get(round, "locator");
         let state_name = as_str(get(round, "state")).unwrap_or_default();
         attempt.insert("round_id".into(), owned(at(locator, "round_id")));
@@ -585,7 +586,22 @@ pub fn query_attempt_projection(
             _ => {}
         }
     }
-    if let Some(batch) = latest_batch(state, task_id, attempt_id) {
+    // A batch speaks for the attempt only when it is the latest round's own,
+    // and only once that round has settled. A later round that is still in
+    // flight, stopped, unknown or ambiguous is the attempt's state: letting
+    // round 0's settled batch overwrite round 1's `ambiguous` with
+    // `tool_result_pending` left a stopped turn unrecoverable.
+    let batch_speaks = |batch: &Value| match latest {
+        None => true,
+        Some(round) => {
+            let unresolved = matches!(
+                as_str(get(round, "state")).unwrap_or_default(),
+                "in_flight" | "cancel_requested" | "unknown" | "ambiguous" | "cancelled"
+            );
+            !unresolved && get(batch, "round_index") == at(get(round, "locator"), "round_index")
+        }
+    };
+    if let Some(batch) = latest_batch(state, task_id, attempt_id).filter(|batch| batch_speaks(batch)) {
         let calls = latest_batch_calls(state, batch);
         if let Some(frozen) = crate::session_schema::frozen_ids_after_lost_prepare(
             state, batch, &calls, proof, request, base,
@@ -1658,7 +1674,29 @@ pub fn cancel_plan(state: &Value, request: &Value) -> Value {
             owned(latest.and_then(|round| get(round, "locator")))
         };
         let revision = if kind == "round" {
-            owned(get(request, "expected_round_revision"))
+            // A controller that cancels a round still in flight has not yet
+            // heard the row's revision back -- the reply that carries it is
+            // the one being stopped -- and says 0, which no row ever has.
+            // The round the target names is then taken at the revision the
+            // WAL holds, as an attempt cancellation already is. Without
+            // this, every cancellation of a running round was refused as a
+            // malformed selector (leaving the app mid-reply, 2026-09-25).
+            let requested = get(request, "expected_round_revision");
+            if requested == Some(&json!(0)) {
+                owned(
+                    array(get(state, "rounds"))
+                        .iter()
+                        .find(|candidate| {
+                            let locator = get(candidate, "locator");
+                            at(locator, "task_id") == task_id
+                                && at(locator, "attempt_id") == attempt_id
+                                && at(locator, "round_id") == at(target, "round_id")
+                        })
+                        .and_then(|round| get(round, "row_revision")),
+                )
+            } else {
+                owned(requested)
+            }
         } else {
             owned(latest.and_then(|round| get(round, "row_revision")))
         };
@@ -2455,4 +2493,94 @@ fn reduce_json_inner(input: &str) -> Result<Value, StoreError> {
         _ => return Err(StoreError::InvalidArgument),
     }
     Ok(Value::Object(reply))
+}
+
+#[cfg(test)]
+mod cancel_plan_tests {
+    use super::cancel_plan;
+    use serde_json::json;
+
+    const TASK: &str = "11111111-1111-4111-8111-111111111111";
+    const ATTEMPT: &str = "22222222-2222-4222-8222-222222222222";
+    const ROUND: &str = "33333333-3333-4333-8333-333333333333";
+
+    fn state() -> serde_json::Value {
+        json!({ "rounds": [
+            { "locator": { "task_id": TASK, "attempt_id": ATTEMPT, "round_id": ROUND, "round_index": 0 },
+              "row_revision": 3, "state": "in_flight" },
+        ] })
+    }
+
+    fn request(revision: u64) -> serde_json::Value {
+        json!({
+            "target": { "schema_version": 2, "kind": "round", "task_id": TASK, "attempt_id": ATTEMPT,
+                        "round_id": ROUND, "round_index": 0 },
+            "expected_round_revision": revision,
+        })
+    }
+
+    // A controller cancelling a round still in flight has not heard its row
+    // revision yet and says 0; the plan takes the round at the WAL's revision.
+    #[test]
+    fn a_running_round_is_cancelled_at_the_revision_the_wal_holds() {
+        let plan = cancel_plan(&state(), &request(0));
+        assert_eq!(plan["plan"], json!("round"));
+        assert_eq!(plan["expected_round_revision"], json!(3));
+    }
+
+    // A revision the controller did hear is kept: a stale one still conflicts
+    // where the selector compares it with the row.
+    #[test]
+    fn a_known_revision_is_kept_as_asked() {
+        assert_eq!(cancel_plan(&state(), &request(2))["expected_round_revision"], json!(2));
+    }
+
+    // Nothing in the WAL for that round and nothing known: no round plan.
+    #[test]
+    fn an_unknown_round_with_no_revision_is_not_a_round_plan() {
+        let empty = json!({ "rounds": [] });
+        assert_ne!(cancel_plan(&empty, &request(0))["plan"], json!("round"));
+    }
+}
+
+#[cfg(test)]
+mod projection_tests {
+    use super::query_attempt_projection;
+    use serde_json::json;
+
+    const TASK: &str = "11111111-1111-4111-8111-111111111111";
+    const ATTEMPT: &str = "22222222-2222-4222-8222-222222222222";
+
+    fn state(round1: &str) -> serde_json::Value {
+        json!({
+            "rounds": [
+                { "locator": { "task_id": TASK, "attempt_id": ATTEMPT, "round_id": "r0", "round_index": 0 },
+                  "row_revision": 4, "state": "completed" },
+                { "locator": { "task_id": TASK, "attempt_id": ATTEMPT, "round_id": "r1", "round_index": 1 },
+                  "row_revision": 4, "state": round1 },
+            ],
+            "batches": [
+                { "task_id": TASK, "attempt_id": ATTEMPT, "round_index": 0, "batch_revision": 2,
+                  "kind": "tools", "manifest_sha256": "m" },
+            ],
+        })
+    }
+
+    fn project(state: &serde_json::Value) -> serde_json::Value {
+        let request = json!({ "task_id": TASK, "attempt_id": ATTEMPT });
+        query_attempt_projection(state, &json!({}), &json!({}), &request)["attempt"].clone()
+    }
+
+    // Round 0 ran its tools; round 1 was stopped mid-reply. The attempt is
+    // round 1's ambiguity, not round 0's settled batch.
+    #[test]
+    fn a_later_unresolved_round_outranks_an_earlier_batch() {
+        for round1 in ["ambiguous", "unknown", "in_flight", "cancel_requested"] {
+            let attempt = project(&state(round1));
+            assert_ne!(attempt["phase"], json!("tool_result_pending"), "{round1}");
+            assert_ne!(attempt["phase"], json!("batch_frozen"), "{round1}");
+            assert_eq!(attempt["round_id"], json!("r1"), "{round1}");
+        }
+        assert_eq!(project(&state("ambiguous"))["phase"], json!("ambiguous"));
+    }
 }

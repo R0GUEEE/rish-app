@@ -277,7 +277,14 @@ export type AgentFailureCode =
   | 'E_AGENT_TOOL_FAILED'
   | 'E_AGENT_DENIED_BY_USER'
   | 'E_COMPLETION_LENGTH'
-  | 'E_COMPLETION_CONTENT_FILTER';
+  | 'E_COMPLETION_CONTENT_FILTER'
+  // A provider's refusal the transport heard in full; the core derives
+  // which from the HTTP status.
+  | 'E_AGENT_PROVIDER_CREDENTIAL'
+  | 'E_AGENT_PROVIDER_FORBIDDEN'
+  | 'E_AGENT_PROVIDER_NOT_FOUND'
+  | 'E_AGENT_PROVIDER_RATE_LIMITED'
+  | 'E_AGENT_PROVIDER_REFUSED';
 
 export const AGENT_FAILURE_CODES = [
   'E_AGENT_UNKNOWN_TOOL',
@@ -300,6 +307,11 @@ export const AGENT_FAILURE_CODES = [
   'E_AGENT_DENIED_BY_USER',
   'E_COMPLETION_LENGTH',
   'E_COMPLETION_CONTENT_FILTER',
+  'E_AGENT_PROVIDER_CREDENTIAL',
+  'E_AGENT_PROVIDER_FORBIDDEN',
+  'E_AGENT_PROVIDER_NOT_FOUND',
+  'E_AGENT_PROVIDER_RATE_LIMITED',
+  'E_AGENT_PROVIDER_REFUSED',
 ] as const satisfies readonly AgentFailureCode[];
 
 export type AgentCapability =

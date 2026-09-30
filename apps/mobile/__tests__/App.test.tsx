@@ -112,6 +112,8 @@ jest.mock('../src/agent/runAgentTurn', () => ({
 jest.mock('../src/native/LocalAttachments', () => ({
   LocalAttachments: {
     isAvailable: jest.fn(),
+    isKindDeliverable: jest.fn(() => true),
+    kindNeedsVision: jest.fn((kind: string) => kind === 'image'),
     present: jest.fn(),
     discard: jest.fn(),
     prune: jest.fn(),
@@ -199,6 +201,8 @@ jest.mock('../src/native/LocalMirrors', () => ({
 jest.mock('../src/native/LocalWorkspaces', () => ({
   LocalWorkspaces: {
     isAvailable: jest.fn(),
+    isRemovalAvailable: jest.fn(() => false),
+    isFolderPickerAvailable: jest.fn(() => true),
     list: jest.fn(),
     create: jest.fn(),
     bootstrapLegacyProject: jest.fn(),
@@ -1013,6 +1017,49 @@ test('binds the active conversation to a chosen local workspace', async () => {
   );
 });
 
+test('choosing a workspace for a chat with history opens a new chat in it and leaves that one alone', async () => {
+  // Reported from a phone: after chatting, the workspace sheet "did nothing"
+  // and showed E_WORKSPACE_CONFLICT. A chat's workspace is frozen into its
+  // attempts, so the store refuses to change it once there are any.
+  mockLocalWorkspaces.list.mockResolvedValue({
+    schema_version: 1,
+    workspaces: [appWorkspaceDescriptor('aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa', 'Alpha')],
+  });
+  const renderer = await renderApp();
+  const root = renderer.root;
+  await act(async () => root.findByType(ChatComposer).props.onChange('first question'));
+  await act(async () => {
+    root.findByType(ChatComposer).props.onSend();
+    await settle();
+  });
+  const sourceId = lastPersistedState().conversations.find(
+    conversation => conversation.workspace_id === null,
+  )?.id;
+  expect(sourceId).toBeDefined();
+
+  await act(async () => actionByLabel(root, 'Choose workspace').props.onPress());
+  await act(async () => settle());
+  // The sheet says what choosing will do before the person chooses.
+  expect(root.findAllByProps({ testID: 'workspace-picker-new-chat-hint' }).length).toBeGreaterThan(0);
+  await act(async () => {
+    const sheet = root.findByProps({ testID: 'workspace-picker-sheet' }) as ReactTestInstance;
+    actionByLabel(sheet, 'Use Alpha').props.onPress();
+    await settle();
+    await settle();
+  });
+
+  expect(
+    root.findAllByProps({ testID: 'workspace-picker-sheet' }).filter(node => typeof node.type === 'string'),
+  ).toHaveLength(0);
+  const conversations = lastPersistedState().conversations;
+  const source = conversations.find(conversation => conversation.id === sourceId);
+  const opened = conversations.find(conversation => conversation.id !== sourceId);
+  // The chat with history is untouched; a new one carries the workspace.
+  expect(source?.workspace_id).toBeNull();
+  expect(opened?.workspace_id).toBe('aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa');
+  expect(JSON.stringify(renderer.toJSON()).includes('E_WORKSPACE_CONFLICT')).toBe(false);
+});
+
 test('creates a new project chat from a workspace-only active conversation', async () => {
   jest.useFakeTimers();
   const harnessWorkspaceId = 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa';
@@ -1636,6 +1683,8 @@ beforeEach(() => {
   });
   mockLocalRuntime.clearCredential.mockResolvedValue({ status: 'cleared' });
   mockLocalAttachments.isAvailable.mockReturnValue(true);
+  mockLocalAttachments.isKindDeliverable.mockReturnValue(true);
+  mockLocalAttachments.kindNeedsVision.mockImplementation((kind: string) => kind === 'image');
   mockLocalAttachments.present.mockResolvedValue({
     schema_version: 1,
     status: 'cancelled',
@@ -6200,6 +6249,107 @@ test('adds an image attachment, keeps V4 Flash, and sends without text', async (
   expect(mockLocalRuntime.recordModelTransition).not.toHaveBeenCalled();
 });
 
+test('refuses to send an attachment of a kind the platform cannot deliver, keeping the draft', async () => {
+  // Android delivers images and text but cannot read a PDF. Before this
+  // guard every attachment started a turn anyway and the round came back as
+  // E_AGENT_EXECUTION_AMBIGUOUS, over a request that provably never left the
+  // device, with only retries that could not succeed.
+  mockLocalAttachments.isKindDeliverable.mockImplementation(kind => kind !== 'pdf');
+  mockLocalAttachments.present.mockResolvedValueOnce({
+    schema_version: 1,
+    status: 'selected',
+    attachments: [
+      {
+        schema_version: 1,
+        id: 'pdf-1',
+        kind: 'pdf',
+        name: 'contract.pdf',
+        mime_type: 'application/pdf',
+        size: 2048,
+      },
+    ],
+  });
+  const renderer = await renderApp();
+  const root = renderer.root;
+
+  await act(async () => actionByLabel(root, 'Add attachment').props.onPress());
+  const attachmentModal = root.findByProps({
+    testID: 'attachment-menu-modal',
+  });
+  await act(async () => actionByLabel(root, 'Files').props.onPress());
+  await act(async () => {
+    attachmentModal.props.onDismiss();
+    await settle();
+  });
+  expect(actionByLabel(root, 'Remove contract.pdf')).toBeDefined();
+
+  await act(async () => {
+    actionByLabel(root, 'Send message').props.onPress();
+    await settle();
+  });
+
+  expect(mockLocalRuntime.completeV2).not.toHaveBeenCalled();
+  // The draft and its attachment survive, so the person can remove the file
+  // and send the same words.
+  expect(actionByLabel(root, 'Remove contract.pdf')).toBeDefined();
+  expect(
+    JSON.stringify(renderer.toJSON()).includes(
+      'a kind this build cannot show a model',
+    ),
+  ).toBe(true);
+});
+
+async function sendPdfOnV4Pro(root: ReactTestInstance) {
+  mockLocalAttachments.present.mockResolvedValueOnce({
+    schema_version: 1,
+    status: 'selected',
+    attachments: [
+      {
+        schema_version: 1,
+        id: 'pdf-vision-1',
+        kind: 'pdf',
+        name: 'scan.pdf',
+        mime_type: 'application/pdf',
+        size: 2048,
+      },
+    ],
+  });
+  await act(async () => composerOptionsChip(root).props.onPress());
+  await act(async () => {
+    optionInComposerPanel(root, 'Use V4 Pro').props.onPress();
+    await settle();
+  });
+  await act(async () => optionInComposerPanel(root, 'Done').props.onPress());
+  await act(async () => actionByLabel(root, 'Add attachment').props.onPress());
+  await chooseAttachmentSource(root, 'Files');
+  await act(async () => {
+    root.findByProps({ accessibilityLabel: 'Message DSH' }).props.onChangeText('Summarise this');
+    await settle();
+  });
+  await act(async () => {
+    actionByLabel(root, 'Send message').props.onPress();
+    await settle();
+  });
+}
+
+test('a PDF sent as page pictures (Android) moves a text-only model to one that reads images', async () => {
+  mockLocalAttachments.kindNeedsVision.mockImplementation((kind: string) => kind === 'image' || kind === 'pdf');
+  const renderer = await renderApp();
+  await sendPdfOnV4Pro(renderer.root);
+  const sent = mockLocalRuntime.completeV2.mock.calls.at(-1)?.[0]?.model;
+  expect(sent).toBeDefined();
+  expect(sent).not.toBe('deepseek-v4-pro');
+  expect(['deepseek-v4-flash', 'deepseek-v4-flash-vision-exp']).toContain(sent);
+  expect(lastPersistedState().conversations[0]?.model_id).toBe(sent);
+});
+
+test('a PDF sent as text (iOS) keeps a text-only model', async () => {
+  const renderer = await renderApp();
+  await sendPdfOnV4Pro(renderer.root);
+  expect(mockLocalRuntime.completeV2.mock.calls.at(-1)?.[0]?.model).toBe('deepseek-v4-pro');
+  expect(lastPersistedState().conversations[0]?.model_id).toBe('deepseek-v4-pro');
+});
+
 test('ignores a stale attachment-menu dismissal after completion ownership changes', async () => {
   let activeRequest: StrictCompletionRequest | undefined;
   let resolveCompletion:
@@ -10384,7 +10534,9 @@ test.each([
       expect(claude).not.toHaveBeenCalled();
       expect(mockLocalRuntime.credentialStatusForSlot).toHaveBeenCalledWith('DEEPSEEK_API_KEY');
       expect(mockLocalRuntime.credentialStatusForSlot).not.toHaveBeenCalledWith('ANTHROPIC_API_KEY');
-      expect(provider).not.toHaveBeenCalled();
+      // DSH can go through a relay too: after hydration it reads its own
+      // provider configuration, and no other harness's.
+      expect(provider.mock.calls.every(([id]) => id === 'dsh')).toBe(true);
     } else {
       expect(claude).toHaveBeenCalled();
       expect(mockLocalRuntime.credentialStatus).not.toHaveBeenCalled();

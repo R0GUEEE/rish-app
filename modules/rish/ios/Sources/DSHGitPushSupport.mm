@@ -547,6 +547,7 @@ static DSHGitPushResult *DSHGitPushExecute(DSHGitPushRequest *request,
     if (remote != nullptr) git_remote_free(remote);
     if (state->interruptedByCancel) result.outcome = DSHGitPushOutcomeCancelled;
     else if (state->interruptedByDeadline) result.outcome = DSHGitPushOutcomeTimedOut;
+    else if (DSHGitProxyFailed(request.proxyURL)) result.outcome = DSHGitPushOutcomeProxyFailed;
     else if (code == GIT_EAUTH) result.outcome = DSHGitPushOutcomeAuthFailure;
     else result.outcome = DSHGitPushOutcomeFailed;
     return result;
@@ -579,6 +580,7 @@ static DSHGitPushResult *DSHGitPushExecute(DSHGitPushRequest *request,
     result.effectMayHaveOccurred = state->bytesMayHaveBeenSent;
     if (state->interruptedByCancel) result.outcome = DSHGitPushOutcomeCancelled;
     else if (state->interruptedByDeadline) result.outcome = DSHGitPushOutcomeTimedOut;
+    else if (DSHGitProxyFailed(request.proxyURL)) result.outcome = DSHGitPushOutcomeProxyFailed;
     else if (code == GIT_EAUTH) result.outcome = DSHGitPushOutcomeAuthFailure;
     else {
       result.outcome = DSHGitPushOutcomeFailed;
@@ -837,4 +839,91 @@ NSArray<NSDictionary *> *DSHGitPushLoadReceipts(int directoryDescriptor,
                                                 NSString *projectId,
                                                 NSError **error) {
   return DSHGitPushLoadReceiptsInternal(directoryDescriptor, projectId, error);
+}
+
+NSString *DSHGitCanonicalProxyURL(id value, BOOL *invalid) {
+  if (invalid != nullptr) *invalid = NO;
+  if (value == nil || value == NSNull.null) return nil;
+  if (![value isKindOfClass:NSString.class]) {
+    if (invalid != nullptr) *invalid = YES;
+    return nil;
+  }
+  NSString *input = value;
+  if (input.length == 0) return nil;
+  BOOL (^fail)(void) = ^BOOL {
+    if (invalid != nullptr) *invalid = YES;
+    return NO;
+  };
+  NSCharacterSet *controls = NSCharacterSet.controlCharacterSet;
+  if (input.length > 2048 || [input rangeOfCharacterFromSet:controls].location != NSNotFound ||
+      ![input isEqualToString:[input stringByTrimmingCharactersInSet:
+          NSCharacterSet.whitespaceAndNewlineCharacterSet]]) {
+    fail();
+    return nil;
+  }
+  NSURLComponents *components = [NSURLComponents componentsWithString:input];
+  NSString *scheme = components.scheme.lowercaseString;
+  NSString *host = components.host;
+  NSNumber *port = components.port;
+  NSString *path = components.path;
+  BOOL valid = ([scheme isEqualToString:@"http"] || [scheme isEqualToString:@"https"]) &&
+      host.length > 0 && [host rangeOfCharacterFromSet:controls].location == NSNotFound &&
+      port != nil && port.integerValue >= 1 && port.integerValue <= 65535 &&
+      (path.length == 0 || [path isEqualToString:@"/"]) &&
+      components.user == nil && components.password == nil &&
+      components.query == nil && components.fragment == nil && components.URL != nil;
+  if (!valid) {
+    fail();
+    return nil;
+  }
+  NSURLComponents *canonical = [[NSURLComponents alloc] init];
+  canonical.scheme = scheme;
+  // Lower-case, as Android's AndroidGitProxyUrl spells it: one proxy, one
+  // string, whichever host reads it.
+  canonical.host = host.lowercaseString;
+  canonical.port = port;
+  canonical.path = @"/";
+  NSString *proxyURL = canonical.URL.absoluteString;
+  if (proxyURL.length == 0 || proxyURL.length > 2048) {
+    fail();
+    return nil;
+  }
+  return proxyURL;
+}
+
+NSString *DSHCommittedGitProxyURL(NSDictionary *loaded, BOOL *unavailable) {
+  BOOL ignored = NO;
+  if (unavailable == nullptr) unavailable = &ignored;
+  *unavailable = NO;
+  if (![loaded isKindOfClass:NSDictionary.class]) {
+    *unavailable = YES;
+    return nil;
+  }
+  if (![loaded[@"status"] isEqual:@"present"]) return nil;
+  id json = loaded[@"session_json"];
+  NSData *bytes = [json isKindOfClass:NSString.class] ? [(NSString *)json dataUsingEncoding:NSUTF8StringEncoding] : nil;
+  id session = bytes == nil ? nil : [NSJSONSerialization JSONObjectWithData:bytes options:0 error:nil];
+  if (![session isKindOfClass:NSDictionary.class]) {
+    *unavailable = YES;
+    return nil;
+  }
+  id preferences = session[@"preferences"];
+  id raw = [preferences isKindOfClass:NSDictionary.class] ? preferences[@"git_https_proxy_url"] : nil;
+  BOOL invalid = NO;
+  NSString *proxy = DSHGitCanonicalProxyURL(raw, &invalid);
+  if (invalid) *unavailable = YES;
+  return proxy;
+}
+
+BOOL DSHGitProxyFailed(NSString *proxyURL) {
+  if (proxyURL.length == 0) return NO;
+  const git_error *last = git_error_last();
+  NSString *message = last != nullptr && last->message != nullptr
+      ? [NSString stringWithUTF8String:last->message] : nil;
+  if (message.length == 0) return NO;
+  if ([message hasPrefix:@"proxy "]) return YES;
+  NSString *host = [NSURLComponents componentsWithString:proxyURL].host;
+  if (host.length == 0) return NO;
+  return [message containsString:[@"failed to connect to " stringByAppendingString:host]] ||
+      [message containsString:[@"failed to resolve address for " stringByAppendingString:host]];
 }

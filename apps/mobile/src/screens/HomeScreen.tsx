@@ -9,6 +9,7 @@ import { useTaskActions } from '../taskExperience/useTaskActions';
 import { ProviderConfigurations } from '../providers/native';
 import type { ProviderConfiguration } from '../providers/configuration';
 import { RecoveryNotice } from '../components/RecoveryNotice';
+import { providerFailureDetail, providerFailureMessage } from '../components/providerFailureMessage';
 import { completionRecoveryLabel, recoveryCode } from '../components/recoveryMessage';
 import React, {
   useCallback,
@@ -141,6 +142,9 @@ import { projectAgentPolicy } from '../components/agent-policy-projection';
 import { useAgentPolicy } from '../components/use-agent-policy';
 import { QuestionComposer } from '../components/QuestionComposer';
 import { DEFAULT_APPROVAL_TIMEOUT_MS } from '../agent/AgentApprovals';
+import { refusedAttemptRetryable } from '../agent/AgentRefusalRetry';
+import { buildErrorReport } from '../diagnostics/errorReport';
+import { buildInfo, copyText } from '../native/Diagnostics';
 import {
   createSessionPersistenceCoordinator,
   sessionSnapshotSHA256,
@@ -189,6 +193,7 @@ import {
   type ProjectContextLifecycleControllerState,
 } from '../project-context';
 import { useAppPresentation } from '../presentation/AppPresentation';
+import { useKeyboardHeight } from '../layout/keyboard';
 import {
   resolveAdaptiveLayout,
   WIDE_CONTENT_MAX_WIDTH,
@@ -201,6 +206,12 @@ import { AgentRuntime } from '../native/AgentRuntime';
 import {
   WorkspaceBindingController,
 } from '../workspaces/WorkspaceBindingController';
+import {
+  WorkspaceRemovalCoordinator,
+  type WorkspaceRemovalAction,
+  type WorkspaceRemovalOutcome,
+  type WorkspaceRemovalTarget,
+} from '../workspaces/WorkspaceRemoval';
 import {
   assertWorkspaceRootRefV1,
   type WorkspaceRootRefV1,
@@ -673,6 +684,7 @@ export function HomeScreen({
   seedMarkdownDemo?: boolean;
 }) {
   const insets = useSafeAreaInsets();
+  const keyboardHeight = useKeyboardHeight();
   const { width: windowWidth } = useWindowDimensions();
   const { isWide: wideLayout } = resolveAdaptiveLayout(windowWidth);
   const {
@@ -874,6 +886,9 @@ export function HomeScreen({
   const retryActionInFlight = useRef(false);
   const started = useRef(false);
   const nativeAvailable = useMemo(() => LocalRuntime.isAvailable(), []);
+  // Forget and delete are only offered where native can carry them out;
+  // elsewhere the picker keeps its inert legacy button.
+  const workspaceRemovalAvailable = useMemo(() => LocalWorkspaces.isRemovalAvailable(), []);
   const [sessionSnapshotsAvailable, setSessionSnapshotsAvailable] = useState<
     boolean | null
   >(
@@ -939,21 +954,24 @@ export function HomeScreen({
     }
     return () => { cancelled = true; };
   }, [activeHarnessId, selectionHydrated, lifecycleBootstrapReady, nativeAvailable, providerConfigurationRevision, settingsVisible]);
-  const subscriptionNeedsAttention = activeHarnessId === 'glm' && glmSubscriptionState !== null;
   const [providerOverride, setProviderOverride] = useState<ProviderConfiguration | null>(null);
   useEffect(() => {
     let cancelled = false;
     setProviderOverride(null);
-    if (selectionHydrated && lifecycleBootstrapReady && nativeAvailable && (activeHarnessId === 'claude-code' || activeHarnessId === 'codex') && ProviderConfigurations.isAvailable()) {
+    if (selectionHydrated && lifecycleBootstrapReady && nativeAvailable && ProviderConfigurations.isAvailable()) {
       ProviderConfigurations.read(activeHarnessId).then(async value => {
         if (cancelled) return;
+        // DSH and GLM have no subscription path: a relay configured for
+        // them is what they use.
         const subscription = activeHarnessId === 'codex' ? (await codexChatSource()).source === 'subscription'
-          : (await claudeChatSource()).source === 'subscription';
+          : activeHarnessId === 'claude-code' ? (await claudeChatSource()).source === 'subscription' : false;
         if (!cancelled) setProviderOverride(subscription || value.official ? null : value);
       }).catch(() => undefined);
     }
     return () => { cancelled = true; };
   }, [activeHarnessId, selectionHydrated, lifecycleBootstrapReady, nativeAvailable, providerConfigurationRevision]);
+  // A relay configured for GLM replaces its account: nothing to sign in to.
+  const subscriptionNeedsAttention = activeHarnessId === 'glm' && glmSubscriptionState !== null && providerOverride === null;
   const providerName = (providerOverride?.harness_id === activeHarnessId ? providerOverride.name : null) ?? {
     dsh: 'DeepSeek',
     'claude-code': 'Anthropic',
@@ -1405,6 +1423,16 @@ export function HomeScreen({
     [installSessionAuthority, sessionPersistence],
   );
 
+  /** Runs one native session write behind every write already queued. */
+  const enqueueSessionWrite = useCallback(<T,>(work: () => Promise<T>): Promise<T> => {
+    const operation = sessionWriteTailRef.current.then(work, work);
+    sessionWriteTailRef.current = operation.then(
+      () => undefined,
+      () => undefined,
+    );
+    return operation;
+  }, []);
+
   const persistSessionCandidate = useCallback(
     (
       candidateJSON: string,
@@ -1599,6 +1627,58 @@ export function HomeScreen({
 
   const persistCurrentRef = useRef(persistCurrent);
   persistCurrentRef.current = persistCurrent;
+
+  // Forgetting and deleting workspaces: one coordinator owns the clearance,
+  // the native call and the acknowledgement, and the launch-time drain of
+  // requests an earlier launch left in the outbox.
+  const translateRef = useRef(t);
+  translateRef.current = t;
+  const workspaceRemoval = useMemo(
+    () =>
+      new WorkspaceRemovalCoordinator({
+        store,
+        serialize: () => synchronizePreferencesIntoChatState(),
+        enqueueSessionWrite,
+        persist: async () => (await persistCurrentRef.current()).status === 'committed',
+        createOperationId: () => LocalRuntime.createCompletionRequestId(),
+        confirmDelete: (workspace: WorkspaceRemovalTarget) =>
+          new Promise<boolean>(resolve => {
+            const translate = translateRef.current;
+            Alert.alert(
+              translate('workspaces.deleteTitle'),
+              translate('workspaces.deleteBody', { name: workspace.display_name }),
+              [
+                { text: translate('common.cancel'), style: 'cancel', onPress: () => resolve(false) },
+                { text: translate('common.delete'), style: 'destructive', onPress: () => resolve(true) },
+              ],
+              { cancelable: true, onDismiss: () => resolve(false) },
+            );
+          }),
+      }),
+    [enqueueSessionWrite, store, synchronizePreferencesIntoChatState],
+  );
+
+  const removeWorkspace = useCallback(
+    async (
+      workspace: WorkspaceRemovalTarget,
+      action: WorkspaceRemovalAction,
+    ): Promise<WorkspaceRemovalOutcome> => {
+      if (!nativeAvailable || !sessionSnapshotsAvailableRef.current || !sessionProjectionReady.current) {
+        return { status: 'unavailable' };
+      }
+      const outcome = await workspaceRemoval.remove(workspace, action);
+      if (outcome.status === 'forgotten' || outcome.status === 'deleted') {
+        setWorkspaceDescriptors(previous =>
+          Object.fromEntries(
+            Object.entries(previous).filter(([id]) => id !== workspace.workspace_id),
+          ),
+        );
+        setWorkspaceRefreshToken(token => token + 1);
+      }
+      return outcome;
+    },
+    [nativeAvailable, workspaceRemoval],
+  );
 
   // One UI broker is shared by the durable controller and the composers.
   // The adapter below projects only safe call metadata; raw arguments and
@@ -1892,6 +1972,18 @@ export function HomeScreen({
           attempt.agent?.phase === 'unknown'),
     ) === true;
   const completionNoticeVisible = completionActionVisible;
+  // A turn the provider refused on its first round, before anything ran, can
+  // be asked again once the person has fixed what the notice names. It is
+  // read from the durable attempt, so the notice and the button survive a
+  // restart, and only while nothing else is running.
+  const latestAttempt = activeConversation?.attempts.at(-1) ?? null;
+  const refusedRetryAttempt =
+    activeConversation !== null &&
+    latestAttempt !== null &&
+    completionState.phase === 'idle' &&
+    refusedAttemptRetryable(chatState, activeConversation.id, latestAttempt.attemptId)
+      ? latestAttempt
+      : null;
   const durabilityFailure =
     completionState.phase === 'persistence_pending' ||
     completionState.phase === 'commit_pending'
@@ -1905,7 +1997,36 @@ export function HomeScreen({
         (completionState.phase === 'resume_available'
           ? 'E_ATTEMPT_INTERRUPTED'
           : t('home.responseStopped'))
-      : null);
+      : null) ??
+    refusedRetryAttempt?.failureCode ??
+    null;
+
+  // The provider's own refusal behind a failed round of the chat on screen:
+  // read at render, since the failure that shows it is what re-renders.
+  const lastAttemptId = activeConversation?.attempts.at(-1)?.attemptId ?? null;
+  const providerFailureNow = completionController.getProviderFailure?.() ?? null;
+  const providerRefusalMessage = providerFailureNow?.attemptId === lastAttemptId
+    ? providerFailureMessage(visibleRequestFailure, providerFailureNow, t) : null;
+  const providerRefusal = providerRefusalMessage !== null ? providerFailureNow : null;
+
+  // A report a tester can paste instead of a screenshot of one code: the
+  // failure as this screen and the durable attempt know it, value-free
+  // (errorReport.ts says what may appear in it and what never does).
+  const copyFailureReport = useCallback(async (): Promise<boolean> => {
+    const info = await buildInfo();
+    const state = store.getState();
+    const conversationId = activeConversation?.id ?? null;
+    const report = buildErrorReport({
+      now: new Date().toISOString(),
+      build: info,
+      notice: visibleRequestFailure ?? storageWarning ?? '',
+      controller: completionController.getState(),
+      providerFailure: providerFailureNow?.attemptId === lastAttemptId ? providerFailureNow : null,
+      conversation: conversationId === null ? null : state.conversations[conversationId] ?? null,
+      sessionEvents: state.sessionEvents ?? [],
+    });
+    return copyText(report);
+  }, [activeConversation?.id, completionController, lastAttemptId, providerFailureNow, storageWarning, store, visibleRequestFailure]);
 
   const applyCompletionOutcome = useCallback(
     (result: CompletionControllerOutcome, expectedEpoch: number) => {
@@ -2128,11 +2249,13 @@ export function HomeScreen({
       }
       if (store.getSessionAuthority() !== null) {
         drainInterruptedAgentCleanup().catch(() => undefined);
+        workspaceRemoval.drain().catch(() => undefined);
       }
       return true;
     },
     [
       drainInterruptedAgentCleanup,
+      workspaceRemoval,
       ensureConversation,
       installSessionAuthority,
       preferencesStore,
@@ -3188,11 +3311,31 @@ export function HomeScreen({
       store.getState(),
       conversationId,
     );
+    // An attachment of a kind this platform cannot put in front of a model.
+    // Sending the words around one while dropping the file itself would
+    // answer a question about something the model never saw. Refusing here
+    // keeps the draft and the attachment and says why, instead of starting a
+    // round that fails for a reason nothing explains. The history is checked
+    // too, because every round sends it again.
+    const undeliverable = [
+      ...(beforeAppend?.messages ?? []).flatMap(
+        message => message.attachments ?? [],
+      ),
+      ...outgoingAttachments,
+    ].find(attachment => !LocalAttachments.isKindDeliverable(attachment.kind));
+    if (undeliverable !== undefined) {
+      setRequestFailure(
+        t('messages.attachment.kindUnsupported', { name: undeliverable.name }),
+      );
+      return;
+    }
+    // Images, and on Android PDFs (sent as their pages drawn), need a model
+    // that reads pictures.
     const historyNeedsVision =
       beforeAppend?.messages.some(message =>
-        message.attachments?.some(attachment => attachment.kind === 'image'),
+        message.attachments?.some(attachment => LocalAttachments.kindNeedsVision(attachment.kind)),
       ) === true ||
-      outgoingAttachments.some(attachment => attachment.kind === 'image');
+      outgoingAttachments.some(attachment => LocalAttachments.kindNeedsVision(attachment.kind));
     const imageHarness = beforeAppend === null
       ? null
       : BUILTIN_HARNESSES.get(harnessForModel(beforeAppend.modelId));
@@ -3347,6 +3490,57 @@ export function HomeScreen({
         );
       }
       if (result !== null) applyCompletionOutcome(result, outcomeEpoch);
+    } finally {
+      retryActionInFlight.current = false;
+    }
+  }, [
+    applyCompletionOutcome,
+    completionController,
+    refreshProof,
+    restoreCurrentSessionAuthority,
+    store,
+    t,
+  ]);
+
+  /**
+   * Ask a refused turn again as a fresh attempt in the same turn.
+   *
+   * The same guards as `retry`, and the rule is read again after the session
+   * authority is restored: the button may have been drawn from a state that
+   * has since moved on.
+   */
+  const retryRefused = useCallback(async (conversationId: string, attemptId: string) => {
+    if (
+      retryActionInFlight.current ||
+      directProjectMutationOutboxRef.current !== null ||
+      lifecycleIntentRef.current !== null ||
+      store.getState().projectContextDestructiveTransition !== null ||
+      activeAttachmentOperation.current !== null ||
+      activeAttachmentPreviewId.current !== null ||
+      completionController.getState().phase !== 'idle' ||
+      !refusedAttemptRetryable(store.getState(), conversationId, attemptId)
+    )
+      return;
+    if (!(await restoreCurrentSessionAuthority())) {
+      setStorageWarning(t('home.persistenceUnavailable'));
+      return;
+    }
+    if (
+      retryActionInFlight.current ||
+      completionController.getState().phase !== 'idle' ||
+      !refusedAttemptRetryable(store.getState(), conversationId, attemptId)
+    )
+      return;
+    retryActionInFlight.current = true;
+    const outcomeEpoch = ++completionUiEpoch.current;
+    setRequestFailure(null);
+    try {
+      const result = await completionController.retry(
+        conversationId,
+        attemptId,
+        { onCommitted: () => refreshProof().catch(() => undefined) },
+      );
+      applyCompletionOutcome(result, outcomeEpoch);
     } finally {
       retryActionInFlight.current = false;
     }
@@ -4837,78 +5031,126 @@ export function HomeScreen({
       )
         return;
       invalidatePendingProjectSend();
-      const conversationId = ensureConversation();
-      workspaceBindingController
-        .bindWorkspace({
-          conversationId,
-          workspaceId,
-          pickerGeneration,
-          surfaceNonce,
-          requiredCapabilities:
-            preferences.toolPermission === 'read-only'
-              ? ['read']
-              : ['read', 'write'],
-        })
-        .then(outcome => {
-          if (
-            outcome.status !== 'committed' &&
-            outcome.status !== 'unchanged'
-          ) {
+      /** Binds the picked workspace to `conversationId`; answers whether it did. */
+      const bindPicked = (conversationId: string): Promise<boolean> =>
+        workspaceBindingController
+          .bindWorkspace({
+            conversationId,
+            workspaceId,
+            pickerGeneration,
+            surfaceNonce,
+            requiredCapabilities:
+              preferences.toolPermission === 'read-only'
+                ? ['read']
+                : ['read', 'write'],
+          })
+          .then(outcome => {
             if (
-              outcome.status === 'unknown' ||
-              outcome.status === 'session_only'
+              outcome.status !== 'committed' &&
+              outcome.status !== 'unchanged'
             ) {
-              setWorkspaceBindingRecoveryVisible(true);
-              if ('code' in outcome) setRequestFailure(outcome.code);
-            } else if (
-              outcome.status === 'stale' &&
-              workspaceBindingController.getState().phase ===
-                'persistence_pending'
-            ) {
-              setWorkspaceBindingRecoveryVisible(true);
-              setRequestFailure('E_WORKSPACE_PERSISTENCE');
-            } else if (
-              outcome.status !== 'stale' &&
-              outcome.code !== undefined
-            ) {
-              setRequestFailure(outcome.code);
+              if (
+                outcome.status === 'unknown' ||
+                outcome.status === 'session_only'
+              ) {
+                setWorkspaceBindingRecoveryVisible(true);
+                if ('code' in outcome) setRequestFailure(outcome.code);
+              } else if (
+                outcome.status === 'stale' &&
+                workspaceBindingController.getState().phase ===
+                  'persistence_pending'
+              ) {
+                setWorkspaceBindingRecoveryVisible(true);
+                setRequestFailure('E_WORKSPACE_PERSISTENCE');
+              } else if (
+                outcome.status !== 'stale' &&
+                outcome.code !== undefined
+              ) {
+                setRequestFailure(outcome.code);
+              }
+              return false;
             }
-            return;
+            if (
+              workspacePickerGenerationRef.current !== pickerGeneration ||
+              workspaceSurfaceNonceRef.current !== surfaceNonce
+            ) {
+              // The binding is durable. A dismissed/replaced picker cannot
+              // publish a late conflict banner into the current conversation.
+              // Controller ownership checks and uncertain-write recovery remain intact.
+              return true;
+            }
+            if ('ownerDrifted' in outcome && outcome.ownerDrifted) {
+              setChatState(store.getState());
+              setRequestFailure('E_WORKSPACE_CONFLICT');
+              return true;
+            }
+            setRequestFailure(previous => previous === 'E_WORKSPACE_CONFLICT' ? null : previous);
+            setWorkspaceNames(previous => ({
+              ...previous,
+              [outcome.workspace.workspace_id]: outcome.workspace.display_name,
+            }));
+            setWorkspaceDescriptors(previous => ({
+              ...previous,
+              [outcome.workspace.workspace_id]: outcome.workspace,
+            }));
+            setWorkspaceBindingRecoveryVisible(false);
+            closeWorkspacePicker();
+            return true;
+          })
+          .catch(error => {
+            setRequestFailure(errorText(error));
+            return false;
+          });
+
+      // A conversation's workspace is frozen into its attempts, and the
+      // store refuses to change it once there are any. Choosing a workspace
+      // for a chat with history used to fail as E_WORKSPACE_CONFLICT with the
+      // sheet left open, which read as the tap being ignored. It opens a new
+      // chat in that workspace instead -- the way opening a project does --
+      // and the chat the person was in stays exactly as it was.
+      const source = expectedConversation;
+      if (source === null || (source.attempts.length === 0 && source.messages.length === 0)) {
+        bindPicked(ensureConversation()).catch(() => undefined);
+        return;
+      }
+      if (navigationMutationInFlight.current) return;
+      navigationMutationInFlight.current = true;
+      const stillSource = () => selectActiveConversation(store.getState()) === source;
+      (async () => {
+        try {
+          if (!projectContextLifecycleController.beforeConversationChange(source.id)) return;
+          if (!(await projectContextController.beforeConversationChange(source.id)) || !stillSource()) return;
+          if (!(await completionController.beforeConversationChange(source.id)) || !stillSource()) return;
+          completionUiEpoch.current += 1;
+          const conversationId = store.createConversation(newConversationOptions());
+          setRequestFailure(null);
+          reconcileSelectedConversation(conversationId);
+          const bound = await bindPicked(conversationId);
+          if (!bound && store.getState().selectedConversationId === conversationId) {
+            const opened = store.getState().conversations[conversationId];
+            if (opened?.messages.length === 0 && opened.attempts.length === 0) {
+              store.selectConversation(source.id);
+              reconcileSelectedConversation(source.id);
+            }
           }
-          if (
-            workspacePickerGenerationRef.current !== pickerGeneration ||
-            workspaceSurfaceNonceRef.current !== surfaceNonce
-          ) {
-            // The binding is durable. A dismissed/replaced picker cannot
-            // publish a late conflict banner into the current conversation.
-            // Controller ownership checks and uncertain-write recovery remain intact.
-            return;
-          }
-          if ('ownerDrifted' in outcome && outcome.ownerDrifted) {
-            setChatState(store.getState());
-            setRequestFailure('E_WORKSPACE_CONFLICT');
-            return;
-          }
-          setRequestFailure(previous => previous === 'E_WORKSPACE_CONFLICT' ? null : previous);
-          setWorkspaceNames(previous => ({
-            ...previous,
-            [outcome.workspace.workspace_id]: outcome.workspace.display_name,
-          }));
-          setWorkspaceDescriptors(previous => ({
-            ...previous,
-            [outcome.workspace.workspace_id]: outcome.workspace,
-          }));
-          setWorkspaceBindingRecoveryVisible(false);
-          closeWorkspacePicker();
-        })
-        .catch(error => setRequestFailure(errorText(error)));
+          await persist();
+        } finally {
+          navigationMutationInFlight.current = false;
+        }
+      })().catch(error => setRequestFailure(errorText(error)));
     },
     [
       closeWorkspacePicker,
+      completionController,
       destructiveSurfaceBlocked,
       ensureConversation,
       invalidatePendingProjectSend,
+      newConversationOptions,
+      persist,
       preferences.toolPermission,
+      projectContextController,
+      projectContextLifecycleController,
+      reconcileSelectedConversation,
       store,
       workspaceBindingController,
     ],
@@ -5877,6 +6119,18 @@ export function HomeScreen({
     store,
   ]);
 
+  // A switch the completion refuses used to be a tap that did nothing; the
+  // picker says why instead (beta report, 2026-09-24).
+  const harnessSwitchNotice = !completionBusy(completionState)
+    ? null
+    : completionState.conversationId !== null && completionState.conversationId !== activeConversation?.id
+      ? t('harness.blocked.elsewhere')
+      : completionState.phase === 'resume_available'
+      ? t('harness.blocked.unfinished')
+      : completionState.phase === 'approval_pending'
+        ? t('harness.blocked.approval')
+        : t('harness.blocked.busy');
+
   const selectHarness = useCallback(
     (harnessId: string) => {
       if (
@@ -6276,7 +6530,13 @@ export function HomeScreen({
         <View
           style={[
             styles.bottomArea,
-            { paddingBottom: Math.max(insets.bottom, 11) },
+            // Android draws edge to edge since RN 0.87, so the window no
+            // longer shrinks for the keyboard and the composer was simply
+            // covered by it. The height the keyboard reports is measured
+            // from the top of the navigation bar, so the bottom inset is
+            // still needed underneath it. iOS reports zero here and keeps
+            // the screen's KeyboardAvoidingView.
+            { paddingBottom: Math.max(insets.bottom, 11) + keyboardHeight },
           ]}
         >
           {(visibleRequestFailure !== null || storageWarning !== null) && (
@@ -6286,9 +6546,12 @@ export function HomeScreen({
                   visibleRequestFailure === completionState.failureCode &&
                   completionState.failureDiagnostic !== undefined
                   ? `${visibleRequestFailure}\n${completionState.failureDiagnostic}`
-                  : visibleRequestFailure ?? storageWarning ?? ''}
-                message={recoveryCode(visibleRequestFailure ?? storageWarning ?? '') === null
-                  ? visibleRequestFailure ?? storageWarning ?? undefined : undefined}
+                  : providerRefusal !== null
+                    ? `${visibleRequestFailure}\n${providerFailureDetail(providerRefusal)}`
+                    : visibleRequestFailure ?? storageWarning ?? ''}
+                message={providerRefusalMessage ?? (recoveryCode(visibleRequestFailure ?? storageWarning ?? '') === null
+                  ? visibleRequestFailure ?? storageWarning ?? undefined : undefined)}
+                onCopyReport={copyFailureReport}
               />
               {sessionLoadFailure !== null && (
                 <Pressable
@@ -6321,6 +6584,28 @@ export function HomeScreen({
                   ]}
                 >
                   <Text style={styles.retryText}>{completionRecoveryLabel(completionState.phase, t)}</Text>
+                </Pressable>
+              )}
+              {refusedRetryAttempt !== null && activeConversation !== null && !completionActionVisible && (
+                <Pressable
+                  accessibilityLabel={t('messages.retry')}
+                  accessibilityRole="button"
+                  accessibilityState={{
+                    disabled:
+                      attachmentBusy || previewingAttachmentId !== null,
+                  }}
+                  disabled={attachmentBusy || previewingAttachmentId !== null}
+                  hitSlop={hitSlop}
+                  onPress={() =>
+                    retryRefused(activeConversation.id, refusedRetryAttempt.attemptId).catch(() => undefined)
+                  }
+                  style={({ pressed }) => [
+                    styles.retry,
+                    pressed && styles.pressed,
+                  ]}
+                  testID="retry-refused-turn"
+                >
+                  <Text style={styles.retryText}>{t('messages.retry')}</Text>
                 </Pressable>
               )}
               {completionAgentUnresolved && visibleRequestFailure !== null && (
@@ -6514,7 +6799,7 @@ export function HomeScreen({
             }}
             onCancel={() => cancel(completionState)}
             onChange={changeDraft}
-            onLogin={sessionLoadFailure !== null || activeHarnessId === 'dsh' ? undefined : () => {
+            onLogin={sessionLoadFailure !== null || activeHarnessId === 'dsh' || (activeHarnessId === 'glm' && providerOverride !== null) ? undefined : () => {
               if (!rootSurfaceAdmissionAllowed() || credentialBusy) return;
               presentSettingsSurface();
               setSettingsAuthOnly(true);
@@ -6759,6 +7044,11 @@ export function HomeScreen({
         visible={workspaceSheetVisible}
         onClose={closeWorkspacePicker}
         onSelect={workspacePickerOnSelect}
+        startsNewChat={
+          activeConversation !== null &&
+          (activeConversation.attempts.length > 0 || activeConversation.messages.length > 0)
+        }
+        onRemove={workspaceRemovalAvailable ? removeWorkspace : undefined}
       />
       <MirrorSettingsSheet
         visible={mirrorsVisible}
@@ -6802,7 +7092,9 @@ export function HomeScreen({
         }}
       />
       <HarnessPicker
+        notice={harnessSwitchNotice}
         disabled={
+          harnessSwitchNotice !== null ||
           requestState === 'sending' ||
           attachmentBusy ||
           previewingAttachmentId !== null ||

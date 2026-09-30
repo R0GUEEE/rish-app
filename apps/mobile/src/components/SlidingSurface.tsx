@@ -8,6 +8,7 @@ import {
   useWindowDimensions,
   View,
 } from 'react-native';
+import { useKeyboardHeight } from '../layout/keyboard';
 
 type Props = React.PropsWithChildren<{
   accessibilityLabel?: string;
@@ -43,6 +44,7 @@ export function SlidingSurface({
 }: Props) {
   const { width, height } = useWindowDimensions();
   const panelWidth = Math.min(width * widthRatio, maxWidth);
+  const keyboardHeight = useKeyboardHeight();
   const progress = useRef(new Animated.Value(visible ? 1 : 0)).current;
   const presented = useRef(false);
   const onDismissRef = useRef(onDismiss);
@@ -146,7 +148,11 @@ export function SlidingSurface({
   );
 
   return (
-    <View pointerEvents={active ? 'auto' : 'none'} style={styles.container}>
+    <View
+      pointerEvents={active ? 'auto' : 'none'}
+      style={[styles.container, keyboardHeight > 0 && { paddingBottom: keyboardHeight }]}
+      testID="sliding-surface-container"
+    >
       <View style={styles.row}>
         {side === 'right' && scrim && scrimView}
         <Animated.View

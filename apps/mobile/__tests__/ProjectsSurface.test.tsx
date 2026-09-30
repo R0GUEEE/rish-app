@@ -30,6 +30,24 @@ jest.mock('../src/native/LocalProjects', () => ({
     diffV2: jest.fn(),
     stageAllV2: jest.fn(),
     commitV2: jest.fn(),
+    pushV2: jest.fn(),
+    setRemoteV2: jest.fn(),
+    remoteV2: jest.fn(),
+    credentialStatusV2: jest.fn(),
+    presentCredentialPromptV2: jest.fn(),
+    clearCredentialV2: jest.fn(),
+    cancelPushV2: jest.fn(),
+    fetchV2: jest.fn(),
+    pullFastForwardV2: jest.fn(),
+    isMergeAvailable: jest.fn(),
+    mergeRemoteV2: jest.fn(),
+    pushReceiptsV2: jest.fn(),
+    isLegacyCloneAvailable: jest.fn(),
+    isWorkspaceCloneAvailable: jest.fn(),
+    cloneWorkspaceV2: jest.fn(),
+    cancelWorkspaceCloneV2: jest.fn(),
+    isCloneCredentialPromptAvailable: jest.fn(),
+    presentCloneCredentialPromptV2: jest.fn(),
     create: jest.fn(),
     clone: jest.fn(),
     startClone: jest.fn(),
@@ -293,6 +311,8 @@ beforeEach(() => {
   jest.clearAllMocks();
   mockLocalProjects.isAvailable.mockReturnValue(true);
   mockLocalProjects.isV2Available.mockReturnValue(false);
+  mockLocalProjects.isLegacyCloneAvailable.mockReturnValue(true);
+  mockLocalProjects.isWorkspaceCloneAvailable.mockReturnValue(false);
   mockWorkspaceProjects.mockResolvedValue([]);
   mockLocalProjects.list.mockResolvedValue({
     schema_version: 1,
@@ -373,6 +393,13 @@ beforeEach(() => {
     schema_version: 1,
     project_id: project.id,
     cancelled: true,
+  });
+  mockLocalProjects.remoteV2.mockResolvedValue({
+    schema_version: 2, root: workspaceRoot, project_id: workspaceRoot.project_id,
+    remote: 'origin', url: null, host: null,
+  });
+  mockLocalProjects.pushReceiptsV2.mockResolvedValue({
+    schema_version: 2, root: workspaceRoot, project_id: workspaceRoot.project_id, receipts: [],
   });
 });
 
@@ -1512,8 +1539,10 @@ test('lists a workspace-attached project when the legacy listing is refused, and
   expect(mockLocalProjects.diffV2).toHaveBeenCalledWith(expect.objectContaining({ root: workspaceRoot, staged: false }));
   expect(mockLocalProjects.diffV2).toHaveBeenCalledWith(expect.objectContaining({ root: workspaceRoot, staged: true }));
   expect(mockLocalProjects.status).not.toHaveBeenCalled();
-  // Remote, credentials and push are not offered for a workspace project.
-  expect(renderer.root.findAllByProps({ accessibilityLabel: 'Save origin' }).length).toBe(0);
+  // The origin is read by root; without one there is nothing to push to.
+  expect(mockLocalProjects.remoteV2).toHaveBeenCalledWith({ schema_version: 1, root: workspaceRoot });
+  expect(mockLocalProjects.credentialStatusV2).not.toHaveBeenCalled();
+  expect(renderer.root.findAllByProps({ accessibilityLabel: 'Save origin' }).length).toBeGreaterThan(0);
   expect(renderer.root.findAllByProps({ accessibilityLabel: 'Push' }).length).toBe(0);
 
   await act(async () => actionByLabel(renderer.root, 'Changes').props.onPress());
@@ -1535,4 +1564,434 @@ test('lists a workspace-attached project when the legacy listing is refused, and
     expected_head_oid: dirtyStatus.head_oid,
   });
   expect(mockLocalProjects.commit).not.toHaveBeenCalled();
+});
+
+test('a workspace project sets its origin, provisions a credential natively and pushes by root', async () => {
+  mockLocalProjects.isV2Available.mockReturnValue(true);
+  mockLocalProjects.list.mockRejectedValue(Object.assign(new Error('E_PROJECT_NATIVE'), { code: 'E_PROJECT_NATIVE' }));
+  mockWorkspaceProjects.mockResolvedValue([workspaceProject]);
+  const v2Status = { ...dirtyStatus, schema_version: 2, root: workspaceRoot, project_id: workspaceRoot.project_id };
+  mockLocalProjects.statusV2.mockResolvedValue(v2Status);
+  mockLocalProjects.diffV2.mockImplementation(async (request: { staged: boolean }) => ({
+    ...diff, schema_version: 2, root: workspaceRoot, project_id: workspaceRoot.project_id, staged: request.staged,
+  }));
+  const url = 'https://github.com/example/demo.git';
+  const remote = {
+    schema_version: 2, root: workspaceRoot, project_id: workspaceRoot.project_id, remote: 'origin', url, host: 'github.com',
+  };
+  const absent = { schema_version: 2, root: workspaceRoot, project_id: workspaceRoot.project_id, host: 'github.com', configured: false };
+  const present = { ...absent, configured: true, expires_at: 1_800_000_000, expiry_seconds: 3600 };
+  mockLocalProjects.setRemoteV2.mockResolvedValue(remote);
+  mockLocalProjects.credentialStatusV2.mockResolvedValue(absent);
+  mockLocalProjects.presentCredentialPromptV2.mockResolvedValue(present);
+  mockLocalProjects.clearCredentialV2.mockResolvedValue(absent);
+  mockLocalProjects.pushV2.mockResolvedValue({
+    schema_version: 2, root: workspaceRoot, project_id: workspaceRoot.project_id,
+    remote: 'origin', branch: 'main', oid: dirtyStatus.head_oid, pushed_at: '2026-09-20T00:00:00.000Z',
+  });
+  const alert = jest.spyOn(Alert, 'alert').mockImplementation(() => undefined);
+  const renderer = await renderSurface();
+  const row = renderer.root.findByProps({ testID: 'projects-row-Smoke' });
+  await act(async () => { row.props.onPress(); await settle(); });
+
+  await act(async () => inputByLabel(renderer.root, 'Origin HTTPS URL').props.onChangeText(url));
+  // Once saved, every reload reads the origin back and the credential with it.
+  mockLocalProjects.remoteV2.mockResolvedValue(remote);
+  await act(async () => { actionByLabel(renderer.root, 'Save origin').props.onPress(); await settle(); });
+  expect(mockLocalProjects.setRemoteV2).toHaveBeenCalledWith({ schema_version: 1, root: workspaceRoot, url });
+  expect(mockLocalProjects.setRemote).not.toHaveBeenCalled();
+  expect(mockLocalProjects.credentialStatusV2).toHaveBeenCalledWith({ schema_version: 1, root: workspaceRoot });
+  // The saved origin re-reads the detail; let that settle before provisioning.
+  await act(async () => { await settle(); await settle(); });
+
+  await act(async () => { actionByLabel(renderer.root, 'Configure remote credential').props.onPress(); await settle(); });
+  expect(mockLocalProjects.presentCredentialPromptV2).toHaveBeenCalledWith({
+    schema_version: 1, root: workspaceRoot, locale: 'en',
+  });
+  expect(mockLocalProjects.presentCredentialPrompt).not.toHaveBeenCalled();
+  expect(renderer.root.findAllByProps({ accessibilityLabel: 'Clear remote credential' }).length).toBeGreaterThan(0);
+  // From here on the store answers what the prompt provisioned.
+  mockLocalProjects.credentialStatusV2.mockResolvedValue(present);
+  // No branch field for a workspace project: V2 pushes the current branch.
+  expect(renderer.root.findAllByProps({ accessibilityLabel: 'Push as new branch (optional)' }).length).toBe(0);
+
+  await act(async () => actionByLabel(renderer.root, 'Push').props.onPress());
+  expect(mockLocalProjects.pushV2).not.toHaveBeenCalled();
+  const buttons = alert.mock.calls[alert.mock.calls.length - 1]?.[2];
+  const confirm = Array.isArray(buttons) ? buttons.find(button => button.text === 'Push now') : undefined;
+  await act(async () => { confirm?.onPress?.(); await settle(); });
+  expect(mockLocalProjects.pushV2).toHaveBeenCalledWith({
+    schema_version: 1,
+    root: workspaceRoot,
+    operation_id: 'op-1',
+    remote: 'origin',
+    expected_local_oid: dirtyStatus.head_oid,
+    credential_reference: 'panel',
+    https_proxy_url: null,
+  });
+  expect(mockLocalProjects.push).not.toHaveBeenCalled();
+  expect(renderer.root.findAllByProps({ children: 'Branch pushed successfully.' }).length).toBeGreaterThan(0);
+  // The reload after the push reads the receipt the native side recorded.
+  mockLocalProjects.pushReceiptsV2.mockResolvedValue({
+    schema_version: 2, root: workspaceRoot, project_id: workspaceRoot.project_id,
+    receipts: [{
+      schema_version: 1, remote: 'origin', host: 'github.com', branch: 'main',
+      local_oid: dirtyStatus.head_oid, remote_oid: dirtyStatus.head_oid, pushed_at: '2026-09-21T00:00:00.000Z',
+    }],
+  });
+  await act(async () => { actionByLabel(renderer.root, 'Refresh project status').props.onPress(); await settle(); await settle(); });
+  expect(mockLocalProjects.pushReceiptsV2).toHaveBeenCalledWith({ schema_version: 1, root: workspaceRoot });
+  expect(renderer.root.findAllByProps({ children: 'Last push receipt' }).length).toBeGreaterThan(0);
+  expect(
+    renderer.root.findAll(instance => typeof instance.props.accessibilityLabel === 'string' &&
+      instance.props.accessibilityLabel.includes('github.com')).length,
+  ).toBeGreaterThan(0);
+
+  // A V2 refusal reads as the same message the legacy path shows.
+  mockLocalProjects.pushV2.mockRejectedValueOnce(
+    Object.assign(new Error('E_PROJECT_NON_FAST_FORWARD'), { code: 'E_PROJECT_NON_FAST_FORWARD' }),
+  );
+  await act(async () => actionByLabel(renderer.root, 'Push').props.onPress());
+  const again = alert.mock.calls[alert.mock.calls.length - 1]?.[2];
+  const confirmAgain = Array.isArray(again) ? again.find(button => button.text === 'Push now') : undefined;
+  await act(async () => { confirmAgain?.onPress?.(); await settle(); });
+  expect(renderer.root.findAllByProps({ accessibilityRole: 'alert' }).length).toBeGreaterThan(0);
+  expect(
+    renderer.root.findAll(instance => typeof instance.props.children === 'string' &&
+      instance.props.children.startsWith('The remote rejected the push: the branch is not fast-forward')).length,
+  ).toBeGreaterThan(0);
+
+  await act(async () => { actionByLabel(renderer.root, 'Clear remote credential').props.onPress(); await settle(); });
+  expect(mockLocalProjects.clearCredentialV2).toHaveBeenCalledWith({ schema_version: 1, root: workspaceRoot });
+  alert.mockRestore();
+});
+
+test('a workspace project fetches and fast-forwards by root, and a diverged branch is explained', async () => {
+  mockLocalProjects.isV2Available.mockReturnValue(true);
+  mockLocalProjects.list.mockRejectedValue(Object.assign(new Error('E_PROJECT_NATIVE'), { code: 'E_PROJECT_NATIVE' }));
+  mockWorkspaceProjects.mockResolvedValue([workspaceProject]);
+  const v2Status = { ...dirtyStatus, schema_version: 2, root: workspaceRoot, project_id: workspaceRoot.project_id, behind: 1 };
+  mockLocalProjects.statusV2.mockResolvedValue(v2Status);
+  mockLocalProjects.diffV2.mockImplementation(async (request: { staged: boolean }) => ({
+    ...diff, schema_version: 2, root: workspaceRoot, project_id: workspaceRoot.project_id, staged: request.staged,
+  }));
+  const url = 'https://github.com/example/demo.git';
+  mockLocalProjects.remoteV2.mockResolvedValue({
+    schema_version: 2, root: workspaceRoot, project_id: workspaceRoot.project_id, remote: 'origin', url, host: 'github.com',
+  });
+  mockLocalProjects.credentialStatusV2.mockResolvedValue({
+    schema_version: 2, root: workspaceRoot, project_id: workspaceRoot.project_id, host: 'github.com', configured: true,
+    expires_at: 1_800_000_000, expiry_seconds: 3600,
+  });
+  mockLocalProjects.fetchV2.mockResolvedValue({
+    schema_version: 2, root: workspaceRoot, project_id: workspaceRoot.project_id, remote: 'origin', branch: 'main',
+    remote_oid: 'f'.repeat(40), ahead: 0, behind: 1, fetched_at: '2026-09-21T00:00:00.000Z',
+  });
+  mockLocalProjects.pullFastForwardV2.mockResolvedValue({
+    schema_version: 2, root: workspaceRoot, project_id: workspaceRoot.project_id, branch: 'main',
+    oid: 'f'.repeat(40), previous_oid: dirtyStatus.head_oid, updated: true,
+  });
+  const renderer = await renderSurface();
+  const row = renderer.root.findByProps({ testID: 'projects-row-Smoke' });
+  await act(async () => { row.props.onPress(); await settle(); });
+  await act(async () => { await settle(); await settle(); });
+
+  await act(async () => { actionByLabel(renderer.root, 'Fetch').props.onPress(); await settle(); });
+  expect(mockLocalProjects.fetchV2).toHaveBeenCalledWith({
+    schema_version: 1, root: workspaceRoot, operation_id: 'op-1', remote: 'origin', https_proxy_url: null,
+  });
+  expect(renderer.root.findAllByProps({ children: 'Fetched. Ahead 0 · behind 1.' }).length).toBeGreaterThan(0);
+
+  await act(async () => { await settle(); await settle(); });
+  await act(async () => { actionByLabel(renderer.root, 'Pull (fast-forward)').props.onPress(); await settle(); });
+  expect(mockLocalProjects.pullFastForwardV2).toHaveBeenCalledWith({
+    schema_version: 1, root: workspaceRoot, expected_head_oid: dirtyStatus.head_oid,
+  });
+  expect(renderer.root.findAllByProps({ children: `Fast-forwarded to ${'f'.repeat(12)}.` }).length).toBeGreaterThan(0);
+
+  await act(async () => { await settle(); await settle(); });
+  mockLocalProjects.pullFastForwardV2.mockRejectedValueOnce(
+    Object.assign(new Error('E_PROJECT_NON_FAST_FORWARD'), { code: 'E_PROJECT_NON_FAST_FORWARD' }),
+  );
+  await act(async () => { actionByLabel(renderer.root, 'Pull (fast-forward)').props.onPress(); await settle(); });
+  expect(
+    renderer.root.findAll(instance => typeof instance.props.children === 'string' &&
+      instance.props.children.startsWith('Local and remote histories have diverged')).length,
+  ).toBeGreaterThan(0);
+});
+
+test('a diverged branch merges what was fetched, bound to the reviewed tips, and a conflict names its files', async () => {
+  const alert = jest.spyOn(Alert, 'alert').mockImplementation(() => undefined);
+  mockLocalProjects.isV2Available.mockReturnValue(true);
+  mockLocalProjects.isMergeAvailable.mockReturnValue(true);
+  mockLocalProjects.list.mockRejectedValue(Object.assign(new Error('E_PROJECT_NATIVE'), { code: 'E_PROJECT_NATIVE' }));
+  mockWorkspaceProjects.mockResolvedValue([workspaceProject]);
+  const v2Status = { ...dirtyStatus, schema_version: 2, root: workspaceRoot, project_id: workspaceRoot.project_id, ahead: 1, behind: 1 };
+  mockLocalProjects.statusV2.mockResolvedValue(v2Status);
+  mockLocalProjects.diffV2.mockImplementation(async (request: { staged: boolean }) => ({
+    ...diff, schema_version: 2, root: workspaceRoot, project_id: workspaceRoot.project_id, staged: request.staged,
+  }));
+  mockLocalProjects.remoteV2.mockResolvedValue({
+    schema_version: 2, root: workspaceRoot, project_id: workspaceRoot.project_id, remote: 'origin',
+    url: 'https://github.com/example/demo.git', host: 'github.com',
+  });
+  mockLocalProjects.credentialStatusV2.mockResolvedValue({
+    schema_version: 2, root: workspaceRoot, project_id: workspaceRoot.project_id, host: 'github.com', configured: true,
+    expires_at: 1_800_000_000, expiry_seconds: 3600,
+  });
+  const theirs = 'f'.repeat(40);
+  mockLocalProjects.fetchV2.mockResolvedValue({
+    schema_version: 2, root: workspaceRoot, project_id: workspaceRoot.project_id, remote: 'origin', branch: 'main',
+    remote_oid: theirs, ahead: 1, behind: 1, fetched_at: '2026-09-23T00:00:00.000Z',
+  });
+  const merged = {
+    schema_version: 2, root: workspaceRoot, project_id: workspaceRoot.project_id, branch: 'main', outcome: 'merged',
+    oid: 'e'.repeat(40), previous_oid: dirtyStatus.head_oid, conflicts: [], paths: [],
+  };
+  mockLocalProjects.mergeRemoteV2.mockResolvedValue(merged);
+  const renderer = await renderSurface();
+  const row = renderer.root.findByProps({ testID: 'projects-row-Smoke' });
+  await act(async () => { row.props.onPress(); await settle(); });
+  await act(async () => { await settle(); await settle(); });
+
+  // Nothing fetched in this view: nothing to bind a merge to.
+  expect(renderer.root.findAllByProps({ accessibilityLabel: 'Merge remote changes' }).length).toBe(0);
+  mockLocalProjects.pullFastForwardV2.mockRejectedValueOnce(
+    Object.assign(new Error('E_PROJECT_NON_FAST_FORWARD'), { code: 'E_PROJECT_NON_FAST_FORWARD' }),
+  );
+  await act(async () => { actionByLabel(renderer.root, 'Pull (fast-forward)').props.onPress(); await settle(); });
+  expect(renderer.root.findAllByProps({
+    children: 'Local and remote histories have diverged. Merge the remote changes below, or push to a different branch.',
+  }).length).toBeGreaterThan(0);
+
+  await act(async () => { actionByLabel(renderer.root, 'Fetch').props.onPress(); await settle(); await settle(); });
+  // No identity yet: refused before any confirmation.
+  await act(async () => { actionByLabel(renderer.root, 'Merge remote changes').props.onPress(); await settle(); });
+  expect(alert).not.toHaveBeenCalled();
+  expect(renderer.root.findAllByProps({
+    children: 'Enter an author name and email above; the merge commit is signed with them.',
+  }).length).toBeGreaterThan(0);
+
+  await act(async () => inputByLabel(renderer.root, 'Author name').props.onChangeText('Rish Bot'));
+  await act(async () => inputByLabel(renderer.root, 'Author email').props.onChangeText('rish@example.invalid'));
+  const confirmMerge = async () => {
+    await act(async () => { actionByLabel(renderer.root, 'Merge remote changes').props.onPress(); await settle(); });
+    const buttons = alert.mock.calls[alert.mock.calls.length - 1]?.[2];
+    const confirm = Array.isArray(buttons) ? buttons.find(button => button.text === 'Merge') : undefined;
+    await act(async () => { confirm?.onPress?.(); await settle(); await settle(); });
+  };
+  await confirmMerge();
+  expect(mockLocalProjects.mergeRemoteV2).toHaveBeenCalledWith({
+    schema_version: 1,
+    root: workspaceRoot,
+    operation_id: 'op-1',
+    expected_branch: 'main',
+    expected_head_oid: dirtyStatus.head_oid,
+    expected_remote_oid: theirs,
+    author_name: 'Rish Bot',
+    author_email: 'rish@example.invalid',
+  });
+  expect(renderer.root.findAllByProps({ children: `Merged into ${'e'.repeat(12)}.` }).length).toBeGreaterThan(0);
+
+  mockLocalProjects.mergeRemoteV2.mockResolvedValueOnce({
+    ...merged, outcome: 'conflicts', oid: dirtyStatus.head_oid,
+    conflicts: [{ ancestor: 'a.txt', ours: 'a.txt', theirs: 'a.txt' }, { ancestor: 'b.txt', ours: null, theirs: 'b.txt' }],
+  });
+  await confirmMerge();
+  expect(renderer.root.findAllByProps({
+    children: 'The merge would conflict in: a.txt, b.txt. Nothing was changed; resolve it elsewhere.',
+  }).length).toBeGreaterThan(0);
+
+  mockLocalProjects.mergeRemoteV2.mockRejectedValueOnce(
+    Object.assign(new Error('E_WORKSPACE_CONFIRMATION'), { code: 'E_WORKSPACE_CONFIRMATION' }),
+  );
+  await confirmMerge();
+  expect(renderer.root.findAllByProps({
+    children: 'The remote moved since the last fetch. Fetch again, then merge.',
+  }).length).toBeGreaterThan(0);
+
+  // A platform that cannot merge offers nothing, and says so when diverged.
+  mockLocalProjects.isMergeAvailable.mockReturnValue(false);
+  await act(async () => { actionByLabel(renderer.root, 'Refresh project status').props.onPress(); await settle(); await settle(); });
+  expect(renderer.root.findAllByProps({ accessibilityLabel: 'Merge remote changes' }).length).toBe(0);
+  alert.mockRestore();
+});
+
+test('a workspace project fetches and pushes through the Git proxy the person set', async () => {
+  // Android used to refuse a push while a proxy was set, and no fetch or
+  // clone ever carried one; both hosts now send every one through it.
+  const alert = jest.spyOn(Alert, 'alert').mockImplementation(() => undefined);
+  const gitHttpsProxyUrl = 'http://127.0.0.1:7890/';
+  mockLocalProjects.isV2Available.mockReturnValue(true);
+  mockLocalProjects.list.mockRejectedValue(Object.assign(new Error('E_PROJECT_NATIVE'), { code: 'E_PROJECT_NATIVE' }));
+  mockWorkspaceProjects.mockResolvedValue([workspaceProject]);
+  mockLocalProjects.statusV2.mockResolvedValue({ ...dirtyStatus, schema_version: 2, root: workspaceRoot, project_id: workspaceRoot.project_id });
+  mockLocalProjects.diffV2.mockImplementation(async (request: { staged: boolean }) => ({
+    ...diff, schema_version: 2, root: workspaceRoot, project_id: workspaceRoot.project_id, staged: request.staged,
+  }));
+  mockLocalProjects.remoteV2.mockResolvedValue({
+    schema_version: 2, root: workspaceRoot, project_id: workspaceRoot.project_id, remote: 'origin',
+    url: 'https://github.com/example/demo.git', host: 'github.com',
+  });
+  mockLocalProjects.credentialStatusV2.mockResolvedValue({
+    schema_version: 2, root: workspaceRoot, project_id: workspaceRoot.project_id, host: 'github.com', configured: true,
+    expires_at: 1_800_000_000, expiry_seconds: 3600,
+  });
+  mockLocalProjects.fetchV2.mockResolvedValue({
+    schema_version: 2, root: workspaceRoot, project_id: workspaceRoot.project_id, remote: 'origin', branch: 'main',
+    remote_oid: 'f'.repeat(40), ahead: 1, behind: 0, fetched_at: '2026-09-23T00:00:00.000Z',
+  });
+  mockLocalProjects.pushV2.mockResolvedValue({
+    schema_version: 2, root: workspaceRoot, project_id: workspaceRoot.project_id, remote: 'origin', branch: 'main',
+    oid: dirtyStatus.head_oid, pushed_at: '2026-09-23T00:00:00.000Z',
+  });
+  mockLocalProjects.pushReceiptsV2.mockResolvedValue({
+    schema_version: 2, root: workspaceRoot, project_id: workspaceRoot.project_id, receipts: [],
+  });
+  const renderer = await renderSurface({ gitHttpsProxyUrl });
+  const row = renderer.root.findByProps({ testID: 'projects-row-Smoke' });
+  await act(async () => { row.props.onPress(); await settle(); });
+  await act(async () => { await settle(); await settle(); });
+
+  await act(async () => { actionByLabel(renderer.root, 'Fetch').props.onPress(); await settle(); });
+  expect(mockLocalProjects.fetchV2).toHaveBeenCalledWith(expect.objectContaining({ https_proxy_url: gitHttpsProxyUrl }));
+  // When the proxy fails, the person is told it was the proxy, and which.
+  mockLocalProjects.fetchV2.mockRejectedValueOnce(Object.assign(new Error('E_PROJECT_PROXY'), { code: 'E_PROJECT_PROXY' }));
+  await act(async () => { await settle(); await settle(); });
+  await act(async () => { actionByLabel(renderer.root, 'Fetch').props.onPress(); await settle(); });
+  expect(
+    renderer.root.findAll(instance => typeof instance.props.children === 'string' &&
+      instance.props.children.startsWith(`The Git proxy ${gitHttpsProxyUrl} refused`)).length,
+  ).toBeGreaterThan(0);
+
+  await act(async () => { await settle(); await settle(); });
+  await act(async () => actionByLabel(renderer.root, 'Push').props.onPress());
+  const buttons = alert.mock.calls[alert.mock.calls.length - 1]?.[2];
+  const confirm = Array.isArray(buttons) ? buttons.find(button => button.text === 'Push now') : undefined;
+  await act(async () => { confirm?.onPress?.(); await settle(); });
+  expect(mockLocalProjects.pushV2).toHaveBeenCalledWith(expect.objectContaining({ https_proxy_url: gitHttpsProxyUrl }));
+  alert.mockRestore();
+});
+
+test('without legacy projects a clone becomes a new workspace project, and can be cancelled while it runs', async () => {
+  // Android: the legacy module is linked (its methods stubbed) but has no clone controls.
+  mockLocalProjects.isAvailable.mockReturnValue(true);
+  mockLocalProjects.isLegacyCloneAvailable.mockReturnValue(false);
+  mockLocalProjects.list.mockRejectedValue(Object.assign(new Error('E_PROJECT_NATIVE'), { code: 'E_PROJECT_NATIVE' }));
+  mockLocalProjects.isV2Available.mockReturnValue(true);
+  mockLocalProjects.isWorkspaceCloneAvailable.mockReturnValue(true);
+  mockWorkspaceProjects.mockResolvedValue([]);
+  const v2Status = { ...dirtyStatus, schema_version: 2, root: workspaceRoot, project_id: workspaceRoot.project_id };
+  mockLocalProjects.statusV2.mockResolvedValue(v2Status);
+  mockLocalProjects.diffV2.mockImplementation(async (request: { staged: boolean }) => ({
+    ...diff, schema_version: 2, root: workspaceRoot, project_id: workspaceRoot.project_id, staged: request.staged,
+  }));
+  const held = deferred<unknown>();
+  mockLocalProjects.cloneWorkspaceV2.mockReturnValue(held.promise);
+  mockLocalProjects.cancelWorkspaceCloneV2.mockResolvedValue('cancel_requested');
+  const renderer = await renderSurface();
+  await act(async () => { actionByLabel(renderer.root, 'Clone repository').props.onPress(); await settle(); });
+  await act(async () => inputByLabel(renderer.root, 'Remote URL').props.onChangeText('https://github.com/example/demo.git'));
+  await act(async () => { actionByLabel(renderer.root, 'Clone').props.onPress(); await settle(); });
+  expect(mockLocalProjects.cloneWorkspaceV2).toHaveBeenCalledWith({
+    schema_version: 1, operation_id: 'op-1', url: 'https://github.com/example/demo.git', display_name: 'demo',
+    https_proxy_url: null,
+  });
+  expect(mockLocalProjects.startClone).not.toHaveBeenCalled();
+  expect(renderer.root.findAllByProps({ testID: 'projects-workspace-clone' }).length).toBeGreaterThan(0);
+  // Cancel asks native by the same operation id.
+  await act(async () => { actionByLabel(renderer.root, 'Cancel repository clone').props.onPress(); await settle(); });
+  expect(mockLocalProjects.cancelWorkspaceCloneV2).toHaveBeenCalledWith('op-1');
+  await act(async () => {
+    held.resolve({
+      schema_version: 2, root: workspaceRoot,
+      project: {
+        schema_version: 2, project_id: workspaceRoot.project_id, workspace_id: workspaceRoot.workspace_id,
+        workspace_binding_revision: 1, display_name: 'demo', git_topology: 'private_split_gitdir',
+      },
+      workspace: { workspace_id: workspaceRoot.workspace_id, display_name: 'demo' }, branch: 'main', oid: 'f'.repeat(40),
+    });
+    await settle(); await settle();
+  });
+  expect(renderer.root.findAllByProps({ testID: 'projects-workspace-clone' }).length).toBe(0);
+  expect(renderer.root.findAllByProps({ children: 'Repository cloned locally.' }).length).toBeGreaterThan(0);
+  // The new project opened by its root.
+  expect(mockLocalProjects.statusV2).toHaveBeenCalledWith({ schema_version: 1, root: workspaceRoot });
+});
+
+function privateCloneSetup() {
+  mockLocalProjects.isLegacyCloneAvailable.mockReturnValue(false);
+  mockLocalProjects.isWorkspaceCloneAvailable.mockReturnValue(true);
+  mockLocalProjects.isCloneCredentialPromptAvailable.mockReturnValue(true);
+  mockWorkspaceProjects.mockResolvedValue([]);
+  const v2Status = { ...dirtyStatus, schema_version: 2, root: workspaceRoot, project_id: workspaceRoot.project_id };
+  mockLocalProjects.statusV2.mockResolvedValue(v2Status);
+  mockLocalProjects.diffV2.mockImplementation(async (request: { staged: boolean }) => ({
+    ...diff, schema_version: 2, root: workspaceRoot, project_id: workspaceRoot.project_id, staged: request.staged,
+  }));
+  return {
+    refused: Object.assign(new Error('E_PROJECT_CREDENTIAL'), { code: 'E_PROJECT_CREDENTIAL' }),
+    cloned: {
+      schema_version: 2, root: workspaceRoot,
+      project: {
+        schema_version: 2, project_id: workspaceRoot.project_id, workspace_id: workspaceRoot.workspace_id,
+        workspace_binding_revision: 1, display_name: 'demo', git_topology: 'private_split_gitdir',
+      },
+      workspace: { workspace_id: workspaceRoot.workspace_id, display_name: 'demo' }, branch: 'main', oid: 'f'.repeat(40),
+    },
+  };
+}
+
+async function startPrivateClone(renderer: Awaited<ReturnType<typeof renderSurface>>, url: string) {
+  await act(async () => { actionByLabel(renderer.root, 'Clone repository').props.onPress(); await settle(); });
+  await act(async () => inputByLabel(renderer.root, 'Remote URL').props.onChangeText(url));
+  await act(async () => { actionByLabel(renderer.root, 'Clone').props.onPress(); await settle(); await settle(); await settle(); });
+}
+
+test('a workspace clone that asks for a credential gets the native prompt once and is retried with it', async () => {
+  const { refused, cloned } = privateCloneSetup();
+  mockLocalProjects.cloneWorkspaceV2.mockRejectedValueOnce(refused).mockResolvedValueOnce(cloned);
+  mockLocalProjects.presentCloneCredentialPromptV2.mockResolvedValue({
+    schema_version: 2, operation_id: 'op-1', host: 'github.com', expiry_seconds: 3600,
+  });
+  const renderer = await renderSurface();
+  await startPrivateClone(renderer, 'https://github.com/example/demo.git');
+  // Prompted for the same operation and URL, then cloned again naming the credential by reference.
+  expect(mockLocalProjects.presentCloneCredentialPromptV2).toHaveBeenCalledWith({
+    schema_version: 1, operation_id: 'op-1', url: 'https://github.com/example/demo.git', locale: 'en',
+  });
+  expect(mockLocalProjects.cloneWorkspaceV2).toHaveBeenCalledTimes(2);
+  expect(mockLocalProjects.cloneWorkspaceV2).toHaveBeenLastCalledWith({
+    schema_version: 1, operation_id: 'op-1', url: 'https://github.com/example/demo.git', display_name: 'demo',
+    https_proxy_url: null, credential_reference: 'prompt',
+  });
+  expect(renderer.root.findAllByProps({ children: 'Repository cloned locally.' }).length).toBeGreaterThan(0);
+});
+
+test('dismissing the clone credential prompt is a cancelled clone', async () => {
+  const { refused } = privateCloneSetup();
+  mockLocalProjects.cloneWorkspaceV2.mockRejectedValue(refused);
+  mockLocalProjects.presentCloneCredentialPromptV2.mockRejectedValue(
+    Object.assign(new Error('E_PROJECT_CANCELLED'), { code: 'E_PROJECT_CANCELLED' }),
+  );
+  const renderer = await renderSurface();
+  await startPrivateClone(renderer, 'https://github.com/example/private.git');
+  expect(mockLocalProjects.cloneWorkspaceV2).toHaveBeenCalledTimes(1);
+  expect(renderer.root.findAllByProps({ children: 'Clone cancelled. Nothing was created.' }).length).toBeGreaterThan(0);
+});
+
+test('a clone credential the remote turns away is reported and nothing is created', async () => {
+  const { refused } = privateCloneSetup();
+  mockLocalProjects.cloneWorkspaceV2.mockRejectedValue(refused);
+  mockLocalProjects.presentCloneCredentialPromptV2.mockResolvedValue({
+    schema_version: 2, operation_id: 'op-1', host: 'github.com', expiry_seconds: 3600,
+  });
+  const renderer = await renderSurface();
+  await startPrivateClone(renderer, 'https://github.com/example/private.git');
+  expect(mockLocalProjects.cloneWorkspaceV2).toHaveBeenCalledTimes(2);
+  expect(mockLocalProjects.presentCloneCredentialPromptV2).toHaveBeenCalledTimes(1);
+  expect(
+    renderer.root.findAllByProps({ children: 'The repository did not accept that credential. Nothing was created.' }).length,
+  ).toBeGreaterThan(0);
+  expect(renderer.root.findAllByProps({ testID: 'projects-workspace-clone' }).length).toBe(0);
 });

@@ -14,6 +14,7 @@ import tech.zseven.rish.runtime.AndroidProjectContextSnapshots
 import tech.zseven.rish.runtime.AndroidRuntimeState
 import tech.zseven.rish.runtime.RishAgentCoreNative
 import tech.zseven.rish.runtime.RishLibgit2Native
+import tech.zseven.rish.runtime.AndroidWorkspaceRegistry
 import tech.zseven.rish.runtime.RuntimeJson
 
 /**
@@ -51,7 +52,23 @@ class LocalProjectContextModule(private val react: ReactApplicationContext) :
     fun inspectProjectContext(snapshotId: String?, promise: Promise) = RishUnavailable.reject("LocalProjectContext", "E_CONTEXT_NATIVE", promise)
 
     @ReactMethod
-    fun discardProjectContext(snapshotId: String?, promise: Promise) = RishUnavailable.reject("LocalProjectContext", "E_CONTEXT_NATIVE", promise)
+    fun discardProjectContext(snapshotId: String?, promise: Promise) {
+        if (!RishAgentCoreNative.available || !RishLibgit2Native.available) {
+            RishUnavailable.reject("LocalProjectContext", "E_CONTEXT_NATIVE", promise)
+            return
+        }
+        runtime.io.execute {
+            try {
+                promise.resolve(Arguments.makeNativeMap(RuntimeJson.map(runtime.projectSnapshots.discardById(snapshotId))))
+            } catch (refused: AndroidProjectContextSnapshots.Refused) {
+                Log.w(TAG, "discardProjectContext refused: ${refused.code}")
+                promise.reject(refused.code, refused.code)
+            } catch (failure: Throwable) {
+                Log.w(TAG, "discardProjectContext could not be answered", failure)
+                promise.reject("E_CONTEXT_NATIVE", "E_CONTEXT_NATIVE")
+            }
+        }
+    }
 
     @ReactMethod
     fun listCandidatesV2(request: ReadableMap?, promise: Promise) {
@@ -119,9 +136,15 @@ class LocalProjectContextModule(private val react: ReactApplicationContext) :
             promise.reject("E_CONTEXT_REQUEST_INVALID", "E_CONTEXT_REQUEST_INVALID")
             return
         }
+        val workspaceId = captured?.optJSONObject("root")?.optString("workspace_id")?.takeIf { RuntimeJson.uuid(it) }
         runtime.io.execute {
             try {
-                promise.resolve(Arguments.makeNativeMap(RuntimeJson.map(body(captured))))
+                val answered = if (workspaceId == null) body(captured)
+                    else runtime.workspaces.holding(workspaceId) { body(captured) }
+                promise.resolve(Arguments.makeNativeMap(RuntimeJson.map(answered)))
+            } catch (busy: AndroidWorkspaceRegistry.Refused) {
+                Log.w(TAG, "$operation refused: ${busy.code}")
+                promise.reject(busy.code, busy.code)
             } catch (refused: AndroidProjectContextSnapshots.Refused) {
                 // The code and nothing else: a reason could name a path.
                 Log.w(TAG, "$operation refused: ${refused.code}")

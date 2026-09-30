@@ -38,6 +38,10 @@ import {
   type WorkspaceForgetAuthorization,
   type WorkspacePickerSelection,
 } from '../workspaces/WorkspacePickerController';
+import type {
+  WorkspaceRemovalAction,
+  WorkspaceRemovalOutcome,
+} from '../workspaces/WorkspaceRemoval';
 import { AppIcon } from './AppIcon';
 import { RecoveryNotice } from './RecoveryNotice';
 import { recoveryErrorText } from './recoveryMessage';
@@ -55,6 +59,12 @@ export type WorkspacePickerSheetProps = {
   onClose: () => void;
   onSelect: (workspaceId: string) => void;
   /**
+   * The conversation already has turns. Its workspace is frozen into them,
+   * so choosing one here opens a new chat in it; the sheet says so first
+   * rather than letting the choice look ignored.
+   */
+  startsNewChat?: boolean;
+  /**
    * Native-issued clearance from the session coordinator. The picker never
    * creates either ID and refuses to call native forget without both.
    */
@@ -63,6 +73,15 @@ export type WorkspacePickerSheetProps = {
     | ((
         workspace: WorkspaceDescriptor,
       ) => WorkspaceForgetAuthorization | null | undefined);
+  /**
+   * The removal coordinator, when the host has one: it owns the clearance,
+   * the native call and the acknowledgement. A granted folder is forgotten
+   * (its files stay); an owned workspace is deleted, files and history.
+   */
+  onRemove?: (
+    workspace: WorkspaceDescriptor,
+    action: WorkspaceRemovalAction,
+  ) => Promise<WorkspaceRemovalOutcome>;
 };
 
 /**
@@ -75,9 +94,18 @@ export function WorkspacePickerSheet({
   activeWorkspaceId,
   onClose,
   onSelect,
+  startsNewChat = false,
   forgetAuthorization,
+  onRemove,
 }: WorkspacePickerSheetProps) {
   const { colors, t } = useAppPresentation();
+  // Choosing a folder outside the app is not something every platform can
+  // do; where it cannot, the two actions are not offered at all rather than
+  // refusing when tapped.
+  const folderPickerAvailable = useMemo(
+    () => LocalWorkspaces.isFolderPickerAvailable(),
+    [],
+  );
   const { height: windowHeight } = useWindowDimensions();
   const insets = useSafeAreaInsets();
   const styles = useMemo(() => createWorkspacePickerStyles(colors), [colors]);
@@ -434,6 +462,34 @@ export function WorkspacePickerSheet({
     [controller, resolveForgetAuthorization, runAction],
   );
 
+  const removeWorkspace = useCallback(
+    (workspace: WorkspaceDescriptor, action: WorkspaceRemovalAction) =>
+      runAction(async () => {
+        if (onRemove === undefined) throw new Error('E_WORKSPACE_UNAVAILABLE');
+        const outcome = await onRemove(workspace, action);
+        switch (outcome.status) {
+          case 'forgotten':
+          case 'deleted':
+            // Removing the active workspace unbinds the conversation, which
+            // changes this sheet's owner; the list is reloaded against the
+            // owner as it is now rather than skipped as stale.
+            await reload(surfaceGenerationRef.current, ownerGenerationRef.current);
+            return false;
+          case 'cancelled':
+            return false;
+          case 'blocked':
+            throw new Error('E_WORKSPACE_CLEARANCE_UNAVAILABLE');
+          case 'unavailable':
+            throw new Error('E_WORKSPACE_UNAVAILABLE');
+          case 'pending':
+            throw new Error('E_WORKSPACE_REMOVAL_PENDING');
+          case 'retired':
+            throw new Error(outcome.code);
+        }
+      }),
+    [onRemove, reload, runAction],
+  );
+
   return (
     <Modal
       animationType="none"
@@ -492,6 +548,11 @@ export function WorkspacePickerSheet({
               testID="workspace-picker-sheet"
             >
               <Text style={styles.title}>{t('workspaces.title')}</Text>
+              {startsNewChat && (
+                <Text style={styles.hint} testID="workspace-picker-new-chat-hint">
+                  {t('workspaces.startsNewChat')}
+                </Text>
+              )}
               {pendingSelection !== null && (
                 <View
                   accessibilityLabel={pendingSelection.display_name}
@@ -632,24 +693,51 @@ export function WorkspacePickerSheet({
                                   </Text>
                                 </Pressable>
                               )}
-                            <Pressable
-                              accessibilityLabel={t('workspaces.forget', {
-                                name: row.display_name,
-                              })}
-                              accessibilityRole="button"
-                              disabled={busy}
-                              onPress={() => {
-                                forgetWorkspace(row).catch(() => undefined);
-                              }}
-                              style={({ pressed }) => [
-                                styles.forgetButton,
-                                pressed && styles.pressed,
-                              ]}
-                            >
-                              <Text style={styles.forgetText}>
-                                {t('common.forget')}
-                              </Text>
-                            </Pressable>
+                            {onRemove !== undefined && row.origin !== 'granted_folder' ? (
+                              <Pressable
+                                accessibilityLabel={t('workspaces.delete', {
+                                  name: row.display_name,
+                                })}
+                                accessibilityRole="button"
+                                disabled={busy}
+                                onPress={() => {
+                                  removeWorkspace(row, 'delete_owned').catch(() => undefined);
+                                }}
+                                style={({ pressed }) => [
+                                  styles.forgetButton,
+                                  pressed && styles.pressed,
+                                ]}
+                                testID={`workspace-picker-delete-${row.workspace_id}`}
+                              >
+                                <Text style={styles.forgetText}>
+                                  {t('common.delete')}
+                                </Text>
+                              </Pressable>
+                            ) : (
+                              <Pressable
+                                accessibilityLabel={t('workspaces.forget', {
+                                  name: row.display_name,
+                                })}
+                                accessibilityRole="button"
+                                disabled={busy}
+                                onPress={() => {
+                                  if (onRemove !== undefined) {
+                                    removeWorkspace(row, 'forget').catch(() => undefined);
+                                  } else {
+                                    forgetWorkspace(row).catch(() => undefined);
+                                  }
+                                }}
+                                style={({ pressed }) => [
+                                  styles.forgetButton,
+                                  pressed && styles.pressed,
+                                ]}
+                                testID={`workspace-picker-forget-${row.workspace_id}`}
+                              >
+                                <Text style={styles.forgetText}>
+                                  {t('common.forget')}
+                                </Text>
+                              </Pressable>
+                            )}
                           </View>
                         </View>
                       </View>
@@ -704,44 +792,46 @@ export function WorkspacePickerSheet({
                   )}
                 </Pressable>
               </View>
-              <View style={styles.footerRow}>
-                <Pressable
-                  accessibilityLabel={t('workspaces.openFolder')}
-                  accessibilityRole="button"
-                  disabled={busy || pendingSelection !== null}
-                  onPress={() => {
-                    presentFolderPicker('grant_or_import').catch(
-                      () => undefined,
-                    );
-                  }}
-                  style={({ pressed }) => [
-                    styles.footerAction,
-                    pressed && styles.pressed,
-                  ]}
-                >
-                  <AppIcon color={colors.accent} icon={FolderOpen} size={17} />
-                  <Text style={styles.footerActionText}>
-                    {t('workspaces.openFolder')}
-                  </Text>
-                </Pressable>
-                <Pressable
-                  accessibilityLabel={t('workspaces.importFolder')}
-                  accessibilityRole="button"
-                  disabled={busy || pendingSelection !== null}
-                  onPress={() => {
-                    presentFolderPicker('import_only').catch(() => undefined);
-                  }}
-                  style={({ pressed }) => [
-                    styles.footerAction,
-                    pressed && styles.pressed,
-                  ]}
-                >
-                  <AppIcon color={colors.accent} icon={FolderInput} size={17} />
-                  <Text style={styles.footerActionText}>
-                    {t('workspaces.importFolder')}
-                  </Text>
-                </Pressable>
-              </View>
+              {folderPickerAvailable && (
+                <View style={styles.footerRow}>
+                  <Pressable
+                    accessibilityLabel={t('workspaces.openFolder')}
+                    accessibilityRole="button"
+                    disabled={busy || pendingSelection !== null}
+                    onPress={() => {
+                      presentFolderPicker('grant_or_import').catch(
+                        () => undefined,
+                      );
+                    }}
+                    style={({ pressed }) => [
+                      styles.footerAction,
+                      pressed && styles.pressed,
+                    ]}
+                  >
+                    <AppIcon color={colors.accent} icon={FolderOpen} size={17} />
+                    <Text style={styles.footerActionText}>
+                      {t('workspaces.openFolder')}
+                    </Text>
+                  </Pressable>
+                  <Pressable
+                    accessibilityLabel={t('workspaces.importFolder')}
+                    accessibilityRole="button"
+                    disabled={busy || pendingSelection !== null}
+                    onPress={() => {
+                      presentFolderPicker('import_only').catch(() => undefined);
+                    }}
+                    style={({ pressed }) => [
+                      styles.footerAction,
+                      pressed && styles.pressed,
+                    ]}
+                  >
+                    <AppIcon color={colors.accent} icon={FolderInput} size={17} />
+                    <Text style={styles.footerActionText}>
+                      {t('workspaces.importFolder')}
+                    </Text>
+                  </Pressable>
+                </View>
+              )}
             </ScrollView>
           </Animated.View>
         </KeyboardAvoidingView>

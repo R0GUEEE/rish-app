@@ -13,7 +13,13 @@ import java.util.TimeZone
  * can conclude afterwards. The commit's object id is predicted by the core
  * before libgit2 writes anything and the commit is made only if it comes
  * out with that id, so a crash between the object and the ledger row leaves
- * exactly the id recovery looks for. `git_push` stays unserved here.
+ * exactly the id recovery looks for.
+ *
+ * `git_push` pushes the current branch to origin with the credential the
+ * panel stored for origin's host (an absolute local path needs none): the
+ * precondition records what the remote advertised at prepare time, the
+ * push refuses to upload over a remote that moved since, and recovery reads
+ * the remote again to tell settled from not dispatched.
  *
  * Refusals use [AndroidWorkspaceToolExecutor.Refused] so the batch and
  * execution services map them the way they map every other tool's.
@@ -22,12 +28,31 @@ internal class AndroidAgentGitToolExecutor(
     private val projects: AndroidWorkspaceProjects,
     private val workspaces: AndroidWorkspaceRegistry,
     private val roots: AndroidAgentRootResolver,
+    private val credentials: AndroidGitCredentials? = null,
+    /**
+     * The HTTPS proxy the person set for Git, as the last committed session
+     * holds it -- the commit that approved the call is in it -- or null for
+     * none. The agent's remote traffic goes where the panel's does.
+     */
+    private val proxy: () -> String? = { null },
 ) {
-    val tools: List<String> = listOf("git_status", "git_commit")
+    val tools: List<String> = listOf("git_status", "git_commit", "git_push")
 
-    private class Opened(val gitDir: String, val workDir: String)
+    private class Opened(val gitDir: String, val workDir: String, val projectId: String)
 
-    fun prepare(name: String, arguments: JSONObject, root: JSONObject): JSONObject {
+    /** Where a push goes: a validated network URL with its credential, or an absolute local path with none. */
+    private class Origin(val url: String, val host: String, val username: String, val token: String, val proxy: String = "")
+
+    /** Runs [body] holding the workspace the root names, so a removal waits for it. */
+    private inline fun <T> held(root: JSONObject, crossinline body: () -> T): T {
+        val workspaceId = root.optString("workspace_id")
+        return if (RuntimeJson.uuid(workspaceId)) workspaces.holding(workspaceId) { body() } else body()
+    }
+
+    fun prepare(name: String, arguments: JSONObject, root: JSONObject): JSONObject =
+        held(root) { prepareHeld(name, arguments, root) }
+
+    private fun prepareHeld(name: String, arguments: JSONObject, root: JSONObject): JSONObject {
         val opened = open(name, root)
         return when (name) {
             "git_status" -> {
@@ -65,11 +90,31 @@ internal class AndroidAgentGitToolExecutor(
                         .put("expected_commit_oid", commit.getString("expected_commit_oid")),
                 )
             }
+            "git_push" -> {
+                if (arguments.length() != 0) throw refused(INVALID)
+                val head = branch(opened)
+                val reference = head.opt("reference") as? String ?: throw refused(CONFLICT)
+                val target = head.opt("head_oid") as? String ?: throw refused(CONFLICT)
+                // What the remote holds now is the precondition the push
+                // asserts; a remote this device cannot ask is not a push it
+                // can prepare.
+                val origin = try { origin(opened) } catch (_: ProxyUnavailable) { throw refused(CONFLICT) } ?: throw refused(CONFLICT)
+                val preRemote = remoteOid(opened, origin, reference) ?: throw refused(CONFLICT)
+                JSONObject().put("schema_version", 1).put("reserved_write_bytes", 0).put(
+                    "precondition",
+                    JSONObject().put("schema_version", 1).put("kind", "git_push").put("remote", "origin")
+                        .put("remote_ref", reference).put("pre_remote_oid", preRemote.oid ?: JSONObject.NULL)
+                        .put("target_oid", target),
+                )
+            }
             else -> throw refused(INVALID)
         }
     }
 
-    fun execute(name: String, arguments: JSONObject, root: JSONObject, precondition: JSONObject?): JSONObject {
+    fun execute(name: String, arguments: JSONObject, root: JSONObject, precondition: JSONObject?): JSONObject =
+        held(root) { executeHeld(name, arguments, root, precondition) }
+
+    private fun executeHeld(name: String, arguments: JSONObject, root: JSONObject, precondition: JSONObject?): JSONObject {
         if (precondition == null || precondition.opt("kind") != name) throw refused(INVALID)
         val opened = open(name, root)
         return when (name) {
@@ -121,14 +166,104 @@ internal class AndroidAgentGitToolExecutor(
                     mayHaveOccurred = true,
                 )
             }
+            "git_push" -> {
+                if (arguments.length() != 0) throw refused(INVALID)
+                val head = branch(opened)
+                val reference = head.opt("reference") as? String
+                val target = head.opt("head_oid") as? String
+                if (reference == null || target == null || reference != precondition.optString("remote_ref") ||
+                    target != precondition.optString("target_oid")
+                ) {
+                    return failure(name, "E_AGENT_CONFLICT", ambiguous = false)
+                }
+                // Origin policy: a validated HTTPS (or LAN-HTTP) URL is pushed
+                // with the stored credential; an absolute local path needs
+                // none. Anything else is refused before any connection.
+                val origin = try { origin(opened) } catch (_: ProxyUnavailable) {
+                    return failure(name, "E_AGENT_TOOL_FAILED", ambiguous = false, reason = "proxy")
+                } ?: return failure(name, "E_AGENT_TOOL_FAILED", ambiguous = false, reason = "origin_unsafe")
+                if (origin.host.isNotEmpty() && origin.token.isEmpty()) {
+                    return failure(name, "E_AGENT_TOOL_FAILED", ambiguous = false, reason = "credential_missing")
+                }
+                val expected = precondition.opt("pre_remote_oid").takeIf { it != JSONObject.NULL } as? String
+                val reply = JSONObject(
+                    String(
+                        RishLibgit2Native.push(
+                            opened.gitDir, opened.workDir, java.util.UUID.randomUUID().toString(), origin.url, origin.host,
+                            reference, target, origin.username, origin.token, PUSH_TIMEOUT_SECONDS, true, expected ?: "",
+                            origin.proxy,
+                        ),
+                        Charsets.UTF_8,
+                    ),
+                )
+                if (!reply.optBoolean("ok")) return failure(name, "E_AGENT_TOOL_FAILED", ambiguous = false, reason = "transport")
+                val sent = reply.optBoolean("effect_may_have_occurred")
+                when (reply.optString("outcome")) {
+                    "success" -> Unit
+                    "conflict" -> return failure(name, "E_AGENT_CONFLICT", ambiguous = false, reason = "remote_moved")
+                    "non_fast_forward" -> return failure(name, "E_AGENT_CONFLICT", ambiguous = false, reason = "non_fast_forward")
+                    "rejected" -> return failure(name, "E_AGENT_TOOL_FAILED", ambiguous = false, reason = "rejected")
+                    "auth_failure" -> return failure(name, "E_AGENT_TOOL_FAILED", ambiguous = false, reason = "auth_failed")
+                    "timed_out" -> return failure(name, "E_AGENT_EXECUTION_AMBIGUOUS", ambiguous = true, reason = "timeout")
+                    // The proxy refused or could not reach the remote: named
+                    // apart, so the person looks at the proxy, not the remote.
+                    "proxy_failed" -> return if (sent) failure(name, "E_AGENT_EXECUTION_AMBIGUOUS", ambiguous = true, reason = "proxy")
+                        else failure(name, "E_AGENT_TOOL_FAILED", ambiguous = false, reason = "proxy")
+                    "cancelled" -> return if (sent) failure(name, "E_AGENT_EXECUTION_AMBIGUOUS", ambiguous = true, reason = "cancelled")
+                        else failure(name, "E_AGENT_CANCELLED", ambiguous = false, reason = "cancelled")
+                    // Once the request went out, a lost response cannot prove
+                    // that the server rejected the update.
+                    else -> return if (sent) failure(name, "E_AGENT_EXECUTION_AMBIGUOUS", ambiguous = true, reason = "transport")
+                        else failure(name, "E_AGENT_TOOL_FAILED", ambiguous = false, reason = "transport")
+                }
+                val remoteOid = reply.optString("remote_oid").takeIf { it.isNotEmpty() } ?: target
+                val branchName = head.optString("branch")
+                if (RishLibgit2Native.setTrackingReference(opened.gitDir, opened.workDir, branchName, target) != "ok") {
+                    return failure(name, "E_AGENT_EXECUTION_AMBIGUOUS", ambiguous = true)
+                }
+                // The receipt the panel shows; iOS records one here too, with
+                // `localhost` standing in for a path origin.
+                try {
+                    AndroidGitPushReceipts.record(
+                        java.io.File(opened.gitDir), opened.projectId,
+                        AndroidGitPushReceipts.receipt(origin.host.ifEmpty { "localhost" }, branchName, target, remoteOid, RuntimeJson.now()),
+                    )
+                } catch (refused: AndroidWorkspaceProjects.Refused) {
+                    android.util.Log.w("RishAgent", "push receipt not recorded: ${refused.number}")
+                }
+                effect(
+                    feedback(
+                        name,
+                        JSONObject().put("schema_version", 1).put("remote", "origin").put("remote_ref", reference)
+                            .put("pushed_oid", target).put("remote_oid", remoteOid),
+                    ),
+                    JSONObject().put("schema_version", 1).put("kind", "git_push").put("actual_remote_oid", remoteOid),
+                    mayHaveOccurred = true,
+                )
+            }
             else -> throw refused(INVALID)
         }
     }
 
     /** What recovery can tell about a commit that may or may not have landed. */
-    fun recover(name: String, arguments: JSONObject, root: JSONObject, precondition: JSONObject?): JSONObject {
-        if (name != "git_commit" || precondition == null) return status("not_dispatched")
+    fun recover(name: String, arguments: JSONObject, root: JSONObject, precondition: JSONObject?): JSONObject =
+        held(root) { recoverHeld(name, arguments, root, precondition) }
+
+    private fun recoverHeld(name: String, arguments: JSONObject, root: JSONObject, precondition: JSONObject?): JSONObject {
+        if (precondition == null || (name != "git_commit" && name != "git_push")) return status("not_dispatched")
         val opened = open(name, root)
+        if (name == "git_push") {
+            // The remote itself says whether the push landed: at the target
+            // it settled, where it was found it was never dispatched, and
+            // anything else -- or a remote that cannot be asked -- is ambiguous.
+            val origin = try { origin(opened) } catch (_: ProxyUnavailable) { return status("ambiguous") } ?: return status("ambiguous")
+            val actual = remoteOid(opened, origin, precondition.optString("remote_ref")) ?: return status("ambiguous")
+            if (actual.oid != null && actual.oid == precondition.optString("target_oid")) {
+                return status("settled").put("actual_remote_oid", actual.oid)
+            }
+            val prior = precondition.opt("pre_remote_oid").takeIf { it != JSONObject.NULL } as? String
+            return status(if (prior == actual.oid) "not_dispatched" else "ambiguous")
+        }
         val head = branch(opened).opt("head_oid").takeIf { it != JSONObject.NULL } as? String
         if (head != null && head == precondition.optString("expected_commit_oid")) {
             return status("settled").put("actual_commit_oid", head)
@@ -172,7 +307,52 @@ internal class AndroidAgentGitToolExecutor(
         val workspaceId = resolved.getString("workspace_id")
         val projectId = resolved.getString("project_id")
         val workDir = workspaces.rootFor(workspaceId) ?: throw refused(CONFLICT)
-        return Opened(projects.gitDirectory(workspaceId, projectId).absolutePath, workDir.absolutePath)
+        return Opened(projects.gitDirectory(workspaceId, projectId).absolutePath, workDir.absolutePath, projectId)
+    }
+
+    // --- the remote -----------------------------------------------------------
+
+    /**
+     * The origin as this tool may use it, or null when there is none or it is
+     * not one this app pushes to. A network URL carries the credential the
+     * panel stored for its host (empty when none is stored); an absolute
+     * local path -- the native test transport -- is used as configured.
+     */
+    private fun origin(opened: Opened): Origin? {
+        val reply = JSONObject(String(RishLibgit2Native.remoteUrl(opened.gitDir, opened.workDir), Charsets.UTF_8))
+        if (!reply.optBoolean("ok")) return null
+        val raw = reply.opt("url") as? String ?: return null
+        AndroidGitRemoteUrl.validated(raw)?.let { url ->
+            val host = AndroidGitRemoteUrl.hostOf(url)
+            val credential = credentials?.read(opened.projectId, host)
+            // A proxy with a plain-http remote is refused, as the panel refuses
+            // it: libgit2 would send that remote straight past the proxy.
+            // A setting that cannot be read stops the step; it is not "none".
+            val via = try { proxy() } catch (_: Exception) { throw ProxyUnavailable() }
+            if (!AndroidGitProxyUrl.usableWith(via, url)) return null
+            return Origin(url, host, credential?.username ?: "", credential?.token ?: "", via ?: "")
+        }
+        return if (raw.startsWith("/")) Origin("", "", "", "") else null
+    }
+
+    private class RemoteOid(val oid: String?)
+
+    /** The proxy setting could not be read; the remote step stops. */
+    private class ProxyUnavailable : Exception()
+
+    /** What origin advertises for `reference`, or null when it could not be asked. */
+    private fun remoteOid(opened: Opened, origin: Origin, reference: String): RemoteOid? {
+        val reply = JSONObject(
+            String(
+                RishLibgit2Native.remoteRefOid(
+                    opened.gitDir, opened.workDir, origin.url, origin.host, reference, origin.username, origin.token,
+                    PUSH_TIMEOUT_SECONDS, origin.proxy,
+                ),
+                Charsets.UTF_8,
+            ),
+        )
+        if (!reply.optBoolean("ok")) return null
+        return RemoteOid(reply.opt("oid").takeIf { it != JSONObject.NULL } as? String)
     }
 
     // --- git, through libgit2 -------------------------------------------------
@@ -211,9 +391,12 @@ internal class AndroidAgentGitToolExecutor(
     private fun timezoneMinutes(offset: String): Int =
         gitRule(JSONObject().put("op", "timezone_minutes").put("timezone_offset", offset)).getInt("minutes")
 
-    private fun failure(name: String, code: String, ambiguous: Boolean): JSONObject =
-        gitRule(JSONObject().put("op", "failure_result").put("name", name).put("failure_code", code).put("ambiguous", ambiguous))
-            .getJSONObject("result")
+    /** A push failure carries a value-free `reason` from the core's closed set; a server string never becomes one. */
+    private fun failure(name: String, code: String, ambiguous: Boolean, reason: String? = null): JSONObject =
+        gitRule(
+            JSONObject().put("op", "failure_result").put("name", name).put("failure_code", code).put("ambiguous", ambiguous)
+                .apply { if (reason != null) put("reason", reason) },
+        ).getJSONObject("result")
 
     /**
      * `DSHAgentGitCanonicalFeedback`: the model-facing object as the core's
@@ -250,5 +433,6 @@ internal class AndroidAgentGitToolExecutor(
         const val INVALID = "E_AGENT_BAD_ARGUMENTS"
         const val CONFLICT = "E_AGENT_CONFLICT"
         const val PERSISTENCE = "E_AGENT_PERSISTENCE"
+        const val PUSH_TIMEOUT_SECONDS = 60
     }
 }
