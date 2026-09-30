@@ -27,6 +27,7 @@ function renderDrawer(
   activeId: string | null = null,
   pendingProjectCleanup = false,
   onOpenPendingProjectCleanup = noop,
+  pinnedIds: readonly string[] = [],
 ) {
   let renderer: ReactTestRenderer.ReactTestRenderer | undefined;
   const store = createPreferencesStore({
@@ -38,6 +39,7 @@ function renderDrawer(
         <ChatDrawer
           activeId={activeId}
           conversations={conversations}
+          pinnedIds={pinnedIds}
           runtimeLabel="verified"
           runtimeStatus="verified"
           covered={false}
@@ -142,4 +144,78 @@ test('shows one value-free 44 point pending cleanup action when requested', asyn
   );
   await act(async () => action.props.onPress());
   expect(onOpen).toHaveBeenCalledTimes(1);
+});
+
+/** The heading a section draws, with the count beside it. */
+function heading(
+  renderer: ReactTestRenderer.ReactTestRenderer,
+  testID: string,
+): unknown[] {
+  return renderer.root
+    .findAllByProps({ testID })
+    .flatMap(node => node.findAllByType(Text))
+    .map(node => node.props.children);
+}
+
+test('a pinned conversation is listed under its own heading, not in recent', async () => {
+  const renderer = renderDrawer(
+    [
+      { id: 'pin-1', title: 'Kept close', preview: 'p', updatedAt: NOW, messageCount: 2 },
+      { id: 'recent-1', title: 'Something else', preview: 'q', updatedAt: NOW - 1000, messageCount: 2 },
+    ],
+    null,
+    false,
+    noop,
+    ['pin-1'],
+  );
+
+  expect(heading(renderer, 'drawer-pinned')).toEqual(['PINNED', 1]);
+  expect(heading(renderer, 'drawer-recent')).toEqual(['RECENT', 1]);
+  const output = JSON.stringify(renderer.toJSON());
+  expect(output).toContain('Open chat Kept close');
+  expect(output).toContain('Open chat Something else');
+});
+
+test('without pins there is no pinned heading at all', async () => {
+  const renderer = renderDrawer([
+    { id: 'recent-1', title: 'Something else', preview: 'q', updatedAt: NOW, messageCount: 2 },
+  ]);
+
+  expect(renderer.root.findAllByProps({ testID: 'drawer-pinned' })).toHaveLength(0);
+  expect(heading(renderer, 'drawer-recent')).toEqual(['RECENT', 1]);
+});
+
+test('a pin naming a conversation that is gone is not drawn', async () => {
+  const renderer = renderDrawer(
+    [{ id: 'recent-1', title: 'Something else', preview: 'q', updatedAt: NOW, messageCount: 2 }],
+    null,
+    false,
+    noop,
+    ['deleted'],
+  );
+
+  expect(renderer.root.findAllByProps({ testID: 'drawer-pinned' })).toHaveLength(0);
+  expect(heading(renderer, 'drawer-recent')).toEqual(['RECENT', 1]);
+});
+
+test('searching keeps a matching pinned conversation on its shelf', async () => {
+  const renderer = renderDrawer(
+    [
+      { id: 'pin-1', title: 'Kept close', preview: 'p', updatedAt: NOW, messageCount: 2 },
+      { id: 'recent-1', title: 'Something else', preview: 'q', updatedAt: NOW, messageCount: 2 },
+    ],
+    null,
+    false,
+    noop,
+    ['pin-1'],
+  );
+
+  const search = renderer.root
+    .findAllByProps({ accessibilityLabel: 'Search conversations' })
+    .find(node => typeof node.props.onChangeText === 'function');
+  if (search === undefined) throw new Error('no search field');
+  await act(async () => search.props.onChangeText('kept'));
+
+  expect(heading(renderer, 'drawer-pinned')).toEqual(['PINNED', 1]);
+  expect(renderer.root.findAllByProps({ testID: 'drawer-recent' })).toHaveLength(0);
 });
