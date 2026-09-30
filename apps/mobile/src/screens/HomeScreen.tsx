@@ -22,6 +22,7 @@ import CircleAlert from 'lucide-react-native/icons/circle-alert';
 import CircleEllipsis from 'lucide-react-native/icons/circle-ellipsis';
 import LoaderCircle from 'lucide-react-native/icons/loader-circle';
 import Menu from 'lucide-react-native/icons/menu';
+import SlidersHorizontal from 'lucide-react-native/icons/sliders-horizontal';
 import {
   Alert,
   AccessibilityInfo,
@@ -95,6 +96,8 @@ import {
   type RuntimeVerificationStatus,
 } from '../components/RuntimeEvidenceSheet';
 import { SettingsSheet } from '../components/SettingsSheet';
+import { PresetSheet } from '../components/PresetSheet';
+import { createAgentPreset, type AgentPreset } from '../presets/presets';
 import { WorkspaceDrawer } from '../components/WorkspaceDrawer';
 import { WorkspacePickerSheet } from '../components/WorkspacePickerSheet';
 import {
@@ -704,6 +707,60 @@ export function HomeScreen({
     [],
   );
   const selectColdStartConversation = useMemo(createColdStartConversationSelection, []);
+  const [presetSheetVisible, setPresetSheetVisible] = useState(false);
+
+  /**
+   * Puts a preset into effect.
+   *
+   * Two of the three settings belong to the conversation and one is a
+   * preference, so a single preset has two owners. Both are reached through
+   * their own API: the chat store mints the timestamps its own actions need,
+   * so nothing here has to build one. Applying to no conversation still sets
+   * the permission, which is what a person flicking through presets before
+   * starting a chat expects.
+   */
+  const applyPreset = useCallback(
+    (preset: AgentPreset) => {
+      const conversationId = store.getState().selectedConversationId;
+      if (conversationId !== null) {
+        store.setModel(conversationId, preset.modelId);
+        store.setThinkingMode(conversationId, preset.thinkingMode);
+      }
+      preferencesStore.setToolPermission(preset.toolPermission);
+    },
+    [store, preferencesStore],
+  );
+
+  /** Saves what the current screen would send as a new preset. */
+  const saveCurrentPreset = useCallback(
+    (name: string) => {
+      const conversationId = store.getState().selectedConversationId;
+      const conversation =
+        conversationId === null
+          ? null
+          : selectConversationById(store.getState(), conversationId);
+      const preset = createAgentPreset({
+        id: LocalRuntime.createCompletionRequestId(),
+        name,
+        modelId: conversation?.modelId ?? preferences.defaultModel,
+        thinkingMode: conversation?.thinkingMode ?? preferences.thinkingMode,
+        toolPermission: preferences.toolPermission,
+      });
+      if (preset !== null) preferencesStore.saveAgentPreset(preset);
+    },
+    [
+      store,
+      preferencesStore,
+      preferences.defaultModel,
+      preferences.thinkingMode,
+      preferences.toolPermission,
+    ],
+  );
+
+  const deletePreset = useCallback(
+    (id: string) => preferencesStore.deleteAgentPreset(id),
+    [preferencesStore],
+  );
   const [chatState, setChatState] = useState<ChatState>(() => store.getState());
   const [draft, setDraft] = useState('');
   const draftRef = useRef('');
@@ -6494,6 +6551,16 @@ export function HomeScreen({
           >
             <AppIcon color={colors.text} icon={Menu} size={20} />
           </RoundButton>
+          <RoundButton
+            accessibilityLabel={t('presets.open')}
+            testID="home-open-presets"
+            onPress={() => {
+              if (!rootSurfaceAdmissionAllowed(true)) return;
+              setPresetSheetVisible(true);
+            }}
+          >
+            <AppIcon color={colors.text} icon={SlidersHorizontal} size={20} />
+          </RoundButton>
           <View style={styles.titleWrap}>
             <BrandMark compact size={30} />
             {activeConversation !== null &&
@@ -6988,6 +7055,19 @@ export function HomeScreen({
         onDismiss={handleActionDismiss}
         onExport={exportConversation}
         onRename={renameConversation}
+      />
+      <PresetSheet
+        current={{
+          modelId: activeModel,
+          thinkingMode: activeConversation?.thinkingMode ?? preferences.thinkingMode,
+          toolPermission: preferences.toolPermission,
+        }}
+        onApply={applyPreset}
+        onClose={() => setPresetSheetVisible(false)}
+        onDelete={deletePreset}
+        onSaveCurrent={saveCurrentPreset}
+        presets={preferences.agentPresets}
+        visible={presetSheetVisible}
       />
       <SettingsSheet
         authOnly={settingsAuthOnly}

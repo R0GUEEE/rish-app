@@ -193,6 +193,7 @@ const enUS = {
   'conversation.saveTitleButton': 'Save title',
   'conversation.export': 'Export as Markdown',
   'presets.eyebrow': 'ROUND SETTINGS',
+  'presets.open': 'Open presets',
   'presets.title': 'Presets',
   'presets.empty':
     'No presets yet. Set a model, thinking mode and write access you like, then save them here.',
@@ -1288,6 +1289,7 @@ const zhCN: Readonly<Record<TranslationKey, string>> = {
   'conversation.saveTitleButton': '保存标题',
   'conversation.export': '导出为 Markdown',
   'presets.eyebrow': '回合设置',
+  'presets.open': '打开预设',
   'presets.title': '预设',
   'presets.empty': '还没有预设。先选好模型、思考模式和写入权限，然后在这里保存。',
   'presets.apply': '应用 {name}',

@@ -18,7 +18,6 @@ import {
 } from '../preferences/types';
 import {
   CONVERSATION_THINKING_MODES,
-  type ChatAction,
   type ConversationThinkingMode,
 } from '../state/types';
 
@@ -155,25 +154,4 @@ export function renameAgentPreset(
   const trimmed = name.trim();
   if (existing.name === trimmed) return presets;
   return upsertAgentPreset(presets, { ...existing, name: trimmed });
-}
-
-/**
- * The actions that put a preset into effect for one conversation.
- *
- * The permission is a preference and the model and thinking mode belong to the
- * conversation, so applying one is three actions with two different targets.
- * Returned rather than dispatched so the mapping can be asserted directly.
- */
-export function presetApplicationActions(
-  preset: AgentPreset,
-  conversationId: string,
-  at: string,
-): readonly ChatAction[] {
-  return [
-    { type: 'conversation/set-model', payload: { id: conversationId, modelId: preset.modelId, at } },
-    {
-      type: 'conversation/set-thinking',
-      payload: { id: conversationId, thinkingMode: preset.thinkingMode, at },
-    },
-  ];
 }

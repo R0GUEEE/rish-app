@@ -6,7 +6,6 @@ import {
   isAgentPreset,
   isPresetId,
   isPresetName,
-  presetApplicationActions,
   removeAgentPreset,
   renameAgentPreset,
   upsertAgentPreset,
@@ -178,32 +177,6 @@ describe('remove and rename', () => {
     const list = [preset({ id: 'a' }), preset({ id: 'b' })];
     expect(findAgentPreset(list, 'b')?.id).toBe('b');
     expect(findAgentPreset(list, 'c')).toBeNull();
-  });
-});
-
-describe('presetApplicationActions', () => {
-  test('sets the model and the thinking mode on the named conversation', () => {
-    const actions = presetApplicationActions(
-      preset({ modelId: 'claude-sonnet-5', thinkingMode: 'high' }),
-      'conv-1',
-      '2026-09-30T08:00:00.000Z',
-    );
-    expect(actions).toEqual([
-      {
-        type: 'conversation/set-model',
-        payload: { id: 'conv-1', modelId: 'claude-sonnet-5', at: '2026-09-30T08:00:00.000Z' },
-      },
-      {
-        type: 'conversation/set-thinking',
-        payload: { id: 'conv-1', thinkingMode: 'high', at: '2026-09-30T08:00:00.000Z' },
-      },
-    ]);
-  });
-
-  test('never targets a conversation it was not given', () => {
-    for (const action of presetApplicationActions(preset(), 'conv-9', 'now')) {
-      expect(action.payload).toMatchObject({ id: 'conv-9' });
-    }
   });
 });
 
