@@ -59,6 +59,7 @@ describe('app preferences reducer and selectors', () => {
         npm: { enabled: false, baseUrl: 'https://registry.npmjs.org/' },
       },
       messageFeedback: {},
+      pinnedConversations: [],
       agentPresets: [],
     });
     expect(preferences).not.toBe(DEFAULT_APP_PREFERENCES);
@@ -190,6 +191,7 @@ describe('strict preferences persistence', () => {
         },
       },
       messageFeedback: {},
+      pinnedConversations: [],
       agentPresets: [],
     };
   }
@@ -228,6 +230,7 @@ describe('strict preferences persistence', () => {
         },
       },
       message_feedback: {},
+      pinned_conversations: [],
       agent_presets: [],
     });
     expect(hydrateAppPreferences(first)).toEqual(preferences);

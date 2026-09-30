@@ -15,6 +15,7 @@ import {
   isLocalePreference,
   isMessageFeedbackRating,
   isMirrorCategory,
+  isPinnedConversationId,
   isThemeMode,
   isThinkingMode,
   isToolPermissionMode,
@@ -22,7 +23,11 @@ import {
   normalizeMirrorBaseUrl,
 } from './reducer';
 import { normalizeGitHttpsProxyUrl } from './gitProxy';
-import { MAX_MESSAGE_FEEDBACK_ENTRIES } from './types';
+import {
+  MAX_MESSAGE_FEEDBACK_ENTRIES,
+  MAX_PINNED_CONVERSATIONS,
+  type PinnedConversationPreferences,
+} from './types';
 
 type UnknownRecord = Record<string, unknown>;
 
@@ -40,6 +45,7 @@ const persistedKeys: ReadonlySet<string> = new Set([
   'git_https_proxy_url',
   'mirrors',
   'message_feedback',
+  'pinned_conversations',
   'agent_presets',
 ]);
 
@@ -181,6 +187,51 @@ function decodeMessageFeedback(value: unknown): MessageFeedbackPreferences {
 }
 
 /**
+ * The pinned conversations.
+ *
+ * Absent is the ordinary case for a state written before pinning existed, so
+ * it hydrates to empty rather than failing. Anything present is held to the
+ * same rule the reducer enforces — bounded, and each entry one conversation —
+ * as a whole list, because a pin silently dropped on load is a shelf a person
+ * arranged and the app quietly rearranged. Duplicate ids are refused for the
+ * same reason: one conversation cannot be pinned twice.
+ */
+function decodePinnedConversations(
+  value: unknown,
+): PinnedConversationPreferences {
+  if (value === undefined || value === null) return [];
+  if (!Array.isArray(value)) {
+    return invalid(
+      '$.pinned_conversations',
+      'must be a list of conversation ids',
+    );
+  }
+  if (value.length > MAX_PINNED_CONVERSATIONS) {
+    return invalid(
+      '$.pinned_conversations',
+      `must hold at most ${MAX_PINNED_CONVERSATIONS} conversations`,
+    );
+  }
+  const seen = new Set<string>();
+  for (const entry of value) {
+    if (!isPinnedConversationId(entry)) {
+      return invalid(
+        '$.pinned_conversations',
+        'must hold bounded printable conversation ids',
+      );
+    }
+    if (seen.has(entry)) {
+      return invalid(
+        '$.pinned_conversations',
+        'must not repeat a conversation',
+      );
+    }
+    seen.add(entry);
+  }
+  return value as PinnedConversationPreferences;
+}
+
+/**
  * The saved presets.
  *
  * Absent is the ordinary case for a state written before presets existed, so
@@ -253,6 +304,7 @@ export function hydrateAppPreferences(input: unknown): AppPreferences {  const r
     gitHttpsProxyUrl: decodeGitHttpsProxyUrl(raw.git_https_proxy_url),
     mirrors: decodeMirrors(raw.mirrors),
     messageFeedback: decodeMessageFeedback(raw.message_feedback),
+    pinnedConversations: decodePinnedConversations(raw.pinned_conversations),
     agentPresets: decodeAgentPresets(raw.agent_presets),
   };
 }
@@ -304,6 +356,7 @@ export function serializeAppPreferences(preferences: AppPreferences): string {
       },
     },
     message_feedback: preferences.messageFeedback,
+    pinned_conversations: preferences.pinnedConversations,
     agent_presets: preferences.agentPresets,
   };
   hydrateAppPreferences(persisted);

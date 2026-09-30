@@ -25,6 +25,16 @@ export const MESSAGE_FEEDBACK_RATINGS = ['up', 'down'] as const;
 export const MAX_MESSAGE_FEEDBACK_ENTRIES = 500 as const;
 /** The longest message id a rating may be keyed by. */
 export const MAX_FEEDBACK_MESSAGE_ID_LENGTH = 256 as const;
+/**
+ * The most conversations that can be pinned at once.
+ *
+ * A pin list is a curated shelf rather than history, so it is bounded the same
+ * way feedback is: nothing else prunes it, and a hand-edited blob must not be
+ * able to make it unbounded.
+ */
+export const MAX_PINNED_CONVERSATIONS = 50 as const;
+/** The longest conversation id a pin may carry. */
+export const MAX_PINNED_CONVERSATION_ID_LENGTH = 256 as const;
 
 export type ThemeMode = (typeof THEME_MODES)[number];
 export type ResolvedTheme = Exclude<ThemeMode, 'system'>;
@@ -46,6 +56,14 @@ export type MessageFeedbackRating = (typeof MESSAGE_FEEDBACK_RATINGS)[number];
 export type MessageFeedbackPreferences = Readonly<
   Record<string, MessageFeedbackRating>
 >;
+/**
+ * The conversations kept at the top of the drawer, most recently pinned first.
+ *
+ * Order is the order they were pinned, not the order they were last used: the
+ * shelf is what a person arranged, and it must not rearrange itself while they
+ * are working.
+ */
+export type PinnedConversationPreferences = readonly string[];
 
 export type AppPreferences = {
   readonly schemaVersion: typeof APP_PREFERENCES_SCHEMA_VERSION;
@@ -61,6 +79,7 @@ export type AppPreferences = {
   readonly gitHttpsProxyUrl: string | null;
   readonly mirrors: MirrorPreferences;
   readonly messageFeedback: MessageFeedbackPreferences;
+  readonly pinnedConversations: PinnedConversationPreferences;
   readonly agentPresets: AgentPresetPreferences;
 };
 
@@ -83,6 +102,7 @@ export type PersistedAppPreferencesV1 = {
     >
   >;
   readonly message_feedback?: MessageFeedbackPreferences;
+  readonly pinned_conversations?: PinnedConversationPreferences;
   readonly agent_presets?: AgentPresetPreferences;
 };
 
@@ -141,6 +161,14 @@ export type PreferencesAction =
         readonly messageId: string;
         /** null clears the rating the person left. */
         readonly rating: MessageFeedbackRating | null;
+      };
+    }
+  | {
+      readonly type: 'preferences/set-conversation-pin';
+      readonly payload: {
+        readonly conversationId: string;
+        /** false removes the pin; true adds or keeps it. */
+        readonly pinned: boolean;
       };
     }
   | {

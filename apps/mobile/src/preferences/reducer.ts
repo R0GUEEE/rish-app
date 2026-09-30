@@ -4,6 +4,8 @@ import {
   LOCALE_PREFERENCES,
   MAX_FEEDBACK_MESSAGE_ID_LENGTH,
   MAX_MESSAGE_FEEDBACK_ENTRIES,
+  MAX_PINNED_CONVERSATION_ID_LENGTH,
+  MAX_PINNED_CONVERSATIONS,
   MESSAGE_FEEDBACK_RATINGS,
   MIRROR_CATEGORIES,
   THEME_MODES,
@@ -16,6 +18,7 @@ import {
   type MessageFeedbackRating,
   type MirrorCategory,
   type MirrorPreferences,
+  type PinnedConversationPreferences,
   type PreferencesAction,
   type ThemeMode,
   type ThinkingMode,
@@ -45,6 +48,11 @@ const NO_MESSAGE_FEEDBACK: MessageFeedbackPreferences = Object.freeze({});
 /** Shared until someone saves a preset; never mutated in place. */
 const NO_AGENT_PRESETS: AgentPresetPreferences = Object.freeze([]);
 
+/** Shared until someone pins a conversation; never mutated in place. */
+const NO_PINNED_CONVERSATIONS: PinnedConversationPreferences = Object.freeze(
+  [],
+);
+
 export const DEFAULT_APP_PREFERENCES: AppPreferences = Object.freeze({
   schemaVersion: APP_PREFERENCES_SCHEMA_VERSION,
   themeMode: 'system',
@@ -59,6 +67,7 @@ export const DEFAULT_APP_PREFERENCES: AppPreferences = Object.freeze({
   gitHttpsProxyUrl: null,
   mirrors: DEFAULT_MIRROR_PREFERENCES,
   messageFeedback: NO_MESSAGE_FEEDBACK,
+  pinnedConversations: NO_PINNED_CONVERSATIONS,
   agentPresets: NO_AGENT_PRESETS,
 });
 
@@ -204,6 +213,61 @@ export function setMessageFeedback(
   return { ...preferences, messageFeedback: next };
 }
 
+/**
+ * Whether an id could name a conversation that can be pinned.
+ *
+ * Conversation ids are app-generated, so this bounds rather than
+ * pattern-matches, exactly as a message id is bounded.
+ */
+export function isPinnedConversationId(value: unknown): value is string {
+  return (
+    typeof value === 'string' &&
+    value.length > 0 &&
+    value.length <= MAX_PINNED_CONVERSATION_ID_LENGTH &&
+    !/[\u0000-\u001f\u007f]/u.test(value)
+  );
+}
+
+/**
+ * Pins, keeps or unpins one conversation.
+ *
+ * Pinning moves the id to the front, so the shelf reads newest-pin-first and
+ * pinning something already on it is a no-op rather than a reorder. When the
+ * shelf is full the oldest pin goes: the newest arrangement is the one a
+ * person is making right now, and a bound that refused the new pin instead
+ * would look like the button was broken.
+ */
+export function setConversationPin(
+  preferences: AppPreferences,
+  conversationId: string,
+  pinned: boolean,
+): AppPreferences {
+  if (!isPinnedConversationId(conversationId)) return preferences;
+  if (typeof pinned !== 'boolean') return preferences;
+
+  const current = preferences.pinnedConversations;
+  const at = current.indexOf(conversationId);
+  if (!pinned) {
+    if (at === -1) return preferences;
+    return {
+      ...preferences,
+      pinnedConversations: current.filter(id => id !== conversationId),
+    };
+  }
+  if (at === 0) return preferences;
+
+  const without =
+    at === -1 ? current : current.filter(id => id !== conversationId);
+  const next = [conversationId, ...without];
+  return {
+    ...preferences,
+    pinnedConversations:
+      next.length > MAX_PINNED_CONVERSATIONS
+        ? next.slice(0, MAX_PINNED_CONVERSATIONS)
+        : next,
+  };
+}
+
 function setPreference<Key extends keyof AppPreferences>(
   preferences: AppPreferences,
   key: Key,
@@ -319,6 +383,12 @@ export function preferencesReducer(
         action.payload.messageId,
         action.payload.rating,
       );
+    case 'preferences/set-conversation-pin':
+      return setConversationPin(
+        preferences,
+        action.payload.conversationId,
+        action.payload.pinned,
+      );
     case 'preferences/set-agent-presets': {
       const next = normalizeAgentPresets(action.payload.agentPresets);
       if (next === null || next === preferences.agentPresets) {
@@ -389,6 +459,16 @@ export const selectGitHttpsProxyUrl = (
 export const selectMessageFeedback = (
   preferences: AppPreferences,
 ): MessageFeedbackPreferences => preferences.messageFeedback;
+
+export const selectPinnedConversations = (
+  preferences: AppPreferences,
+): PinnedConversationPreferences => preferences.pinnedConversations;
+
+/** Whether one conversation is on the shelf. */
+export const isConversationPinned = (
+  preferences: AppPreferences,
+  conversationId: string,
+): boolean => preferences.pinnedConversations.includes(conversationId);
 
 export const selectAgentPresets = (
   preferences: AppPreferences,

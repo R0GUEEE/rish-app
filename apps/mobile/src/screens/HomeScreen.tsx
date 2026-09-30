@@ -2651,6 +2651,19 @@ export function HomeScreen({
     },
     [chatState],
   );
+  /**
+   * The pins that still name a conversation.
+   *
+   * A pin is a preference, so it outlives the chat it pointed at. Pruning it
+   * inside the delete path would mean threading the preference store through
+   * the project-mutation outbox; filtering here keeps a stale id out of the
+   * drawer instead, and the list is bounded, so it cannot grow unnoticed.
+   */
+  const pinnedConversationIds = useMemo(() => {
+    const pinned = preferences.pinnedConversations;
+    if (pinned.length === 0) return pinned;
+    return pinned.filter(id => chatState.conversations[id] !== undefined);
+  }, [preferences.pinnedConversations, chatState.conversations]);
   const activeModel = activeConversation?.modelId ??
     defaultModelForHarness(preferences.selectedHarnessId, preferences.defaultModel);
   const activeThinkingMode =
@@ -4819,6 +4832,24 @@ export function HomeScreen({
       copyText(markdown).catch(() => undefined),
     );
   }, [actionConversationId, store]);
+
+  /**
+   * Pins the conversation the action sheet is open for, or unpins it.
+   *
+   * The sheet stays up and nothing here needs the drawer's epoch dance: this
+   * changes where a chat is listed, not whether anything is trusted.
+   */
+  const togglePinnedConversation = useCallback(() => {
+    if (actionConversationId === null) return;
+    preferencesStore.setConversationPin(
+      actionConversationId,
+      !preferences.pinnedConversations.includes(actionConversationId),
+    );
+  }, [
+    actionConversationId,
+    preferences.pinnedConversations,
+    preferencesStore,
+  ]);
 
   const requestDeleteConversation = useCallback(() => {
     if (
@@ -7016,6 +7047,7 @@ export function HomeScreen({
       <ChatDrawer
         activeId={chatState.selectedConversationId}
         conversations={conversationSummaries}
+        pinnedIds={pinnedConversationIds}
         covered={settingsVisible || accountVisible || mirrorsVisible}
         pendingProjectCleanup={
           lifecycleSheetActive &&
@@ -7136,6 +7168,11 @@ export function HomeScreen({
         onDismiss={handleActionDismiss}
         onExport={exportConversation}
         onRename={renameConversation}
+        onTogglePin={togglePinnedConversation}
+        pinned={
+          actionConversationId !== null &&
+          pinnedConversationIds.includes(actionConversationId)
+        }
       />
       <UsageSheet
         conversations={Object.values(chatState.conversations)}

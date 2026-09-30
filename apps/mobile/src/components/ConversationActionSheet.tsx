@@ -15,6 +15,8 @@ import {
   View,
 } from 'react-native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
+import Pin from 'lucide-react-native/icons/pin';
+import PinOff from 'lucide-react-native/icons/pin-off';
 import Save from 'lucide-react-native/icons/save';
 import Share from 'lucide-react-native/icons/share';
 import Trash2 from 'lucide-react-native/icons/trash-2';
@@ -32,6 +34,15 @@ type Props = {
   onRename: (title: string) => void;
   /** Writes the conversation out as Markdown. */
   onExport: () => void;
+  /** Whether the conversation is already on the pinned shelf. */
+  pinned: boolean;
+  /**
+   * Moves the conversation onto the shelf or off it.
+   *
+   * The sheet stays open: pinning is a small arrangement, not a commitment,
+   * and the row has to be able to say what it became.
+   */
+  onTogglePin: () => void;
 };
 
 export function ConversationActionSheet(props: Props) {
@@ -124,6 +135,25 @@ export function ConversationActionSheet(props: Props) {
           <Text style={styles.exportText}>{t('conversation.export')}</Text>
         </Pressable>
         <Pressable
+          accessibilityLabel={
+            props.pinned ? t('conversation.unpin') : t('conversation.pin')
+          }
+          accessibilityRole="button"
+          accessibilityState={{ selected: props.pinned }}
+          onPress={props.onTogglePin}
+          style={({ pressed }) => [styles.pin, pressed && styles.pressed]}
+          testID="conversation-toggle-pin"
+        >
+          <AppIcon
+            color={props.pinned ? colors.accent : colors.text}
+            icon={props.pinned ? PinOff : Pin}
+            size={17}
+          />
+          <Text style={[styles.pinText, props.pinned && styles.pinTextActive]}>
+            {props.pinned ? t('conversation.unpin') : t('conversation.pin')}
+          </Text>
+        </Pressable>
+        <Pressable
           accessibilityLabel={t('conversation.delete')}
           accessibilityRole="button"
           onPress={props.onDelete}
@@ -203,6 +233,20 @@ const createStyles = (colors: ThemePalette) =>
       marginTop: 9,
     },
     exportText: { color: colors.text, fontSize: 13, fontWeight: '700' },
+    pin: {
+      height: 46,
+      borderRadius: 15,
+      backgroundColor: colors.surfaceRaised,
+      borderColor: colors.line,
+      borderWidth: 1,
+      flexDirection: 'row',
+      alignItems: 'center',
+      justifyContent: 'center',
+      gap: 8,
+      marginTop: 9,
+    },
+    pinText: { color: colors.text, fontSize: 13, fontWeight: '700' },
+    pinTextActive: { color: colors.accent },
     delete: {
       height: 46,
       borderRadius: 15,

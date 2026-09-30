@@ -7,6 +7,7 @@ import ChevronRight from 'lucide-react-native/icons/chevron-right';
 import Ellipsis from 'lucide-react-native/icons/ellipsis';
 import FolderKanban from 'lucide-react-native/icons/folder-kanban';
 import FolderOpen from 'lucide-react-native/icons/folder-open';
+import Pin from 'lucide-react-native/icons/pin';
 import Plus from 'lucide-react-native/icons/plus';
 import RefreshCw from 'lucide-react-native/icons/refresh-cw';
 import Search from 'lucide-react-native/icons/search';
@@ -28,6 +29,10 @@ import { WIDE_SIDEBAR_WIDTH } from '../layout/adaptive';
 import { fonts, hitSlop, type ThemePalette } from '../theme';
 import { AppIcon } from './AppIcon';
 import { BrandMark } from './BrandMark';
+import {
+  matchesConversationQuery,
+  partitionConversations,
+} from './chatDrawerSections';
 import type { RuntimeVerificationStatus } from './RuntimeEvidenceSheet';
 import { SlidingSurface } from './SlidingSurface';
 
@@ -45,6 +50,8 @@ export type ConversationSummary = {
 type Props = {
   activeId: string | null;
   conversations: ConversationSummary[];
+  /** Pinned conversation ids, most recently pinned first. */
+  pinnedIds: readonly string[];
   runtimeLabel: string;
   runtimeStatus: RuntimeVerificationStatus;
   covered: boolean;
@@ -90,13 +97,98 @@ export function ChatDrawer(props: Props) {
     () => props.conversations.filter(c => (c.messageCount ?? 0) > 0),
     [props.conversations],
   );
-  const filtered = useMemo(() => {
-    const normalized = query.trim().toLocaleLowerCase();
-    if (normalized.length === 0) return history;
-    return history.filter(item =>
-      `${item.title}\n${item.preview}`.toLocaleLowerCase().includes(normalized),
+  const filtered = useMemo(
+    () => history.filter(item => matchesConversationQuery(item, query)),
+    [history, query],
+  );
+  // Both lists are searched: a pinned chat that matches must stay findable,
+  // and it stays on the shelf rather than moving into RECENT while it does.
+  const sections = useMemo(
+    () => partitionConversations(filtered, props.pinnedIds),
+    [filtered, props.pinnedIds],
+  );
+  const visibleCount = sections.pinned.length + sections.recent.length;
+
+  const renderConversationRow = (
+    item: ConversationSummary,
+    pinned: boolean,
+  ) => {
+    const active = item.id === props.activeId;
+    return (
+      <View
+        key={item.id}
+        style={[styles.conversationRow, active && styles.conversationRowActive]}
+      >
+        {active && <View style={styles.activeRail} />}
+        <Pressable
+          accessibilityLabel={t('drawer.openChat', { title: item.title })}
+          accessibilityRole="button"
+          accessibilityState={{ selected: active }}
+          onPress={() => props.onSelect(item.id)}
+          style={({ pressed }) => [
+            styles.conversationMain,
+            pressed && styles.pressed,
+          ]}
+        >
+          <View style={styles.conversationTitleRow}>
+            <Text numberOfLines={1} style={styles.conversationTitle}>
+              {item.title}
+            </Text>
+            {pinned && (
+              // Decorative: the row's own label already names the chat, and
+              // "pinned" is where it is, not what it is.
+              <View accessible={false} style={styles.pinnedMark}>
+                <AppIcon color={colors.accent} icon={Pin} size={11} />
+              </View>
+            )}
+            <Text style={styles.conversationTime}>
+              {timeLabel(item.updatedAt, locale, t)}
+            </Text>
+          </View>
+          <Text
+            numberOfLines={1}
+            style={[
+              styles.conversationPreview,
+              item.interrupted === true && styles.interruptedPreview,
+            ]}
+          >
+            {item.interrupted === true
+              ? t('drawer.interrupted')
+              : item.preview || t('drawer.emptyConversation')}
+          </Text>
+        </Pressable>
+        <Pressable
+          accessibilityLabel={t('drawer.chatActions', { title: item.title })}
+          accessibilityRole="button"
+          hitSlop={hitSlop}
+          onPress={() => props.onOpenConversationMenu(item.id)}
+          style={({ pressed }) => [
+            styles.moreButton,
+            pressed && styles.pressed,
+          ]}
+        >
+          <AppIcon color={colors.muted} icon={Ellipsis} size={18} />
+        </Pressable>
+      </View>
     );
-  }, [history, query]);
+  };
+
+  /** A heading and its rows; a section with nothing in it is not drawn. */
+  const renderSection = (
+    label: string,
+    items: readonly ConversationSummary[],
+    pinned: boolean,
+    testID: string,
+  ) =>
+    items.length === 0 ? null : (
+      <React.Fragment key={testID}>
+        <View style={styles.sectionHeader} testID={testID}>
+          <Text style={styles.sectionLabel}>{label}</Text>
+          <Text style={styles.sectionCount}>{items.length}</Text>
+        </View>
+        {items.map(item => renderConversationRow(item, pinned))}
+      </React.Fragment>
+    );
 
   return (
     <SlidingSurface
@@ -212,16 +304,16 @@ export function ChatDrawer(props: Props) {
           />
         </View>
 
-        <View style={styles.sectionHeader}>
-          <Text style={styles.sectionLabel}>{t('drawer.recent')}</Text>
-          <Text style={styles.sectionCount}>{filtered.length}</Text>
-        </View>
-
+        {/*
+          Two sections, one scroll: a pinned chat is searched and opened like
+          any other, and it stays where it was put. A row is rendered the same
+          way in both lists, apart from the mark that says it is pinned.
+        */}
         <ScrollView
           contentContainerStyle={styles.conversationList}
           keyboardShouldPersistTaps="handled"
         >
-          {filtered.length === 0 ? (
+          {visibleCount === 0 ? (
             <View style={styles.noResults}>
               <Text style={styles.noResultsTitle}>
                 {t('drawer.noMatchingChats')}
@@ -231,66 +323,20 @@ export function ChatDrawer(props: Props) {
               </Text>
             </View>
           ) : (
-            filtered.map(item => {
-              const active = item.id === props.activeId;
-              return (
-                <View
-                  key={item.id}
-                  style={[
-                    styles.conversationRow,
-                    active && styles.conversationRowActive,
-                  ]}
-                >
-                  {active && <View style={styles.activeRail} />}
-                  <Pressable
-                    accessibilityLabel={t('drawer.openChat', {
-                      title: item.title,
-                    })}
-                    accessibilityRole="button"
-                    accessibilityState={{ selected: active }}
-                    onPress={() => props.onSelect(item.id)}
-                    style={({ pressed }) => [
-                      styles.conversationMain,
-                      pressed && styles.pressed,
-                    ]}
-                  >
-                    <View style={styles.conversationTitleRow}>
-                      <Text numberOfLines={1} style={styles.conversationTitle}>
-                        {item.title}
-                      </Text>
-                      <Text style={styles.conversationTime}>
-                        {timeLabel(item.updatedAt, locale, t)}
-                      </Text>
-                    </View>
-                    <Text
-                      numberOfLines={1}
-                      style={[
-                        styles.conversationPreview,
-                        item.interrupted === true && styles.interruptedPreview,
-                      ]}
-                    >
-                      {item.interrupted === true
-                        ? t('drawer.interrupted')
-                        : item.preview || t('drawer.emptyConversation')}
-                    </Text>
-                  </Pressable>
-                  <Pressable
-                    accessibilityLabel={t('drawer.chatActions', {
-                      title: item.title,
-                    })}
-                    accessibilityRole="button"
-                    hitSlop={hitSlop}
-                    onPress={() => props.onOpenConversationMenu(item.id)}
-                    style={({ pressed }) => [
-                      styles.moreButton,
-                      pressed && styles.pressed,
-                    ]}
-                  >
-                    <AppIcon color={colors.muted} icon={Ellipsis} size={18} />
-                  </Pressable>
-                </View>
-              );
-            })
+            <>
+              {renderSection(
+                t('drawer.pinned'),
+                sections.pinned,
+                true,
+                'drawer-pinned',
+              )}
+              {renderSection(
+                t('drawer.recent'),
+                sections.recent,
+                false,
+                'drawer-recent',
+              )}
+            </>
           )}
         </ScrollView>
 
@@ -509,6 +555,7 @@ const createStyles = (colors: ThemePalette) =>
       fontSize: 14,
       fontWeight: '600',
     },
+    pinnedMark: { marginLeft: 6, flexShrink: 0 },
     conversationTime: {
       color: colors.faint,
       fontFamily: fonts.mono,
