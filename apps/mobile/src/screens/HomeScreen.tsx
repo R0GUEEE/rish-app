@@ -23,6 +23,7 @@ import CircleEllipsis from 'lucide-react-native/icons/circle-ellipsis';
 import LoaderCircle from 'lucide-react-native/icons/loader-circle';
 import Menu from 'lucide-react-native/icons/menu';
 import SlidersHorizontal from 'lucide-react-native/icons/sliders-horizontal';
+import ChartColumn from 'lucide-react-native/icons/chart-column';
 import {
   Alert,
   AccessibilityInfo,
@@ -97,6 +98,7 @@ import {
 } from '../components/RuntimeEvidenceSheet';
 import { SettingsSheet } from '../components/SettingsSheet';
 import { PresetSheet } from '../components/PresetSheet';
+import { UsageSheet } from '../components/UsageSheet';
 import { createAgentPreset, type AgentPreset } from '../presets/presets';
 import { WorkspaceDrawer } from '../components/WorkspaceDrawer';
 import { WorkspacePickerSheet } from '../components/WorkspacePickerSheet';
@@ -708,6 +710,7 @@ export function HomeScreen({
   );
   const selectColdStartConversation = useMemo(createColdStartConversationSelection, []);
   const [presetSheetVisible, setPresetSheetVisible] = useState(false);
+  const [usageSheetVisible, setUsageSheetVisible] = useState(false);
 
   /**
    * Puts a preset into effect.
@@ -6627,6 +6630,16 @@ export function HomeScreen({
           >
             <AppIcon color={colors.text} icon={SlidersHorizontal} size={20} />
           </RoundButton>
+          <RoundButton
+            accessibilityLabel={t('usage.open')}
+            testID="home-open-usage"
+            onPress={() => {
+              if (!rootSurfaceAdmissionAllowed(true)) return;
+              setUsageSheetVisible(true);
+            }}
+          >
+            <AppIcon color={colors.text} icon={ChartColumn} size={20} />
+          </RoundButton>
           <View style={styles.titleWrap}>
             <BrandMark compact size={30} />
             {activeConversation !== null &&
@@ -7123,6 +7136,11 @@ export function HomeScreen({
         onDismiss={handleActionDismiss}
         onExport={exportConversation}
         onRename={renameConversation}
+      />
+      <UsageSheet
+        conversations={Object.values(chatState.conversations)}
+        onClose={() => setUsageSheetVisible(false)}
+        visible={usageSheetVisible}
       />
       <PresetSheet
         current={{

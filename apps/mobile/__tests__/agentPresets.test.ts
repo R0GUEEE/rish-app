@@ -57,7 +57,8 @@ describe('isAgentPreset', () => {
   });
 
   test('refuses a preset that is missing or carrying extra fields', () => {
-    const { toolPermission: _drop, ...missing } = preset();
+    const missing = { ...preset() } as Record<string, unknown>;
+    delete missing.toolPermission;
     expect(isAgentPreset(missing)).toBe(false);
     expect(isAgentPreset({ ...preset(), extra: true })).toBe(false);
   });

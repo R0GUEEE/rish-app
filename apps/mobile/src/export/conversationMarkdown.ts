@@ -1,4 +1,5 @@
 import type { ChatRole } from '../state';
+import { formatBytes } from '../format/bytes';
 
 /**
  * A conversation as the exporter reads it.
@@ -37,15 +38,11 @@ const ROLE_LABELS: Record<ChatRole, string> = {
   assistant: 'Assistant',
 };
 
-/** Bytes as a person reads them, for the attachment line. */
-export function formatAttachmentSize(bytes: number): string {
-  if (!Number.isFinite(bytes) || bytes < 0) return '0 B';
-  if (bytes < 1024) return `${Math.round(bytes)} B`;
-  const kib = bytes / 1024;
-  if (kib < 1024) return `${kib < 10 ? kib.toFixed(1) : Math.round(kib)} KB`;
-  const mib = kib / 1024;
-  return `${mib < 10 ? mib.toFixed(1) : Math.round(mib)} MB`;
-}
+/**
+ * The attachment line's size. The rule itself is shared with the usage sheet,
+ * so a context and an attachment of the same size cannot round differently.
+ */
+export const formatAttachmentSize = formatBytes;
 
 /**
  * One message as Markdown.

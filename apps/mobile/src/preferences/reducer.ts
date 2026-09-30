@@ -21,12 +21,8 @@ import {
   type ThinkingMode,
   type ToolPermissionMode,
 } from './types';
-import { isGitHttpsProxyUrl, normalizeGitHttpsProxyUrl } from './gitProxy';
-import {
-  MAX_AGENT_PRESETS,
-  isAgentPreset,
-  type AgentPreset,
-} from '../presets/presets';
+import { normalizeGitHttpsProxyUrl } from './gitProxy';
+import { MAX_AGENT_PRESETS, isAgentPreset } from '../presets/presets';
 import type { AgentPresetPreferences } from './types';
 
 export { isGitHttpsProxyUrl, normalizeGitHttpsProxyUrl } from './gitProxy';
