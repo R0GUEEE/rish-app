@@ -53,6 +53,11 @@ synthetic_exact = Set.new([
   "ghp_#{'0' * 24}",
   'ghp_ABCDEFGHIJKLMNOPQRSTUVWXYZ1234567890',
   "sk-test_#{'0' * 24}",
+  # The Android project-context test asserted that a file naming an API token
+  # is omitted from context, and reachable history still carries it after the
+  # Android app was removed. Its subject was secret detection, so the fixture
+  # has to look like a credential; it is one fixed value, not a prefix.
+  'sk-live-abcdefghijklmnopqrstuvwxyz012345',
 ])
 non_secret_exact = Set.new([
   'sk-ecdsa-sha2-nistp256-cert-v01',
