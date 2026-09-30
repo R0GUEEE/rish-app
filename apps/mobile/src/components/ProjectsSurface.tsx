@@ -910,6 +910,7 @@ export function ProjectsSurface({
       beginTask,
       cloneUrl,
       finishTask,
+      locale,
       name,
       preferences.gitHttpsProxyUrl,
       selectView,
