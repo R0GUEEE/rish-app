@@ -2,6 +2,9 @@ import { isDeepSeekModelId } from '../harness/types';
 import {
   APP_PREFERENCES_SCHEMA_VERSION,
   LOCALE_PREFERENCES,
+  MAX_FEEDBACK_MESSAGE_ID_LENGTH,
+  MAX_MESSAGE_FEEDBACK_ENTRIES,
+  MESSAGE_FEEDBACK_RATINGS,
   MIRROR_CATEGORIES,
   THEME_MODES,
   THINKING_MODES,
@@ -9,6 +12,8 @@ import {
   type AppPreferences,
   type DefaultModelId,
   type LocalePreference,
+  type MessageFeedbackPreferences,
+  type MessageFeedbackRating,
   type MirrorCategory,
   type MirrorPreferences,
   type PreferencesAction,
@@ -32,6 +37,9 @@ export const DEFAULT_MIRROR_PREFERENCES: MirrorPreferences = {
   npm: { enabled: false, baseUrl: DEFAULT_MIRROR_URLS.npm },
 };
 
+/** Shared until someone rates a message; never mutated in place. */
+const NO_MESSAGE_FEEDBACK: MessageFeedbackPreferences = Object.freeze({});
+
 export const DEFAULT_APP_PREFERENCES: AppPreferences = Object.freeze({
   schemaVersion: APP_PREFERENCES_SCHEMA_VERSION,
   themeMode: 'system',
@@ -45,6 +53,7 @@ export const DEFAULT_APP_PREFERENCES: AppPreferences = Object.freeze({
   confirmDestructiveFileActions: true,
   gitHttpsProxyUrl: null,
   mirrors: DEFAULT_MIRROR_PREFERENCES,
+  messageFeedback: NO_MESSAGE_FEEDBACK,
 });
 
 const themes: ReadonlySet<string> = new Set(THEME_MODES);
@@ -52,6 +61,7 @@ const locales: ReadonlySet<string> = new Set(LOCALE_PREFERENCES);
 const thinkingModes: ReadonlySet<string> = new Set(THINKING_MODES);
 const toolPermissionModes: ReadonlySet<string> = new Set(TOOL_PERMISSION_MODES);
 const mirrorCategories: ReadonlySet<string> = new Set(MIRROR_CATEGORIES);
+const feedbackRatings: ReadonlySet<string> = new Set(MESSAGE_FEEDBACK_RATINGS);
 
 export function createDefaultPreferences(): AppPreferences {
   return {
@@ -118,6 +128,74 @@ export function isToolPermissionMode(
   value: unknown,
 ): value is ToolPermissionMode {
   return typeof value === 'string' && toolPermissionModes.has(value);
+}
+
+export function isMessageFeedbackRating(
+  value: unknown,
+): value is MessageFeedbackRating {
+  return typeof value === 'string' && feedbackRatings.has(value);
+}
+
+/**
+ * Whether a message id can key a rating.
+ *
+ * Ids are app-generated, so this bounds rather than pattern-matches: a
+ * non-empty printable string within the length the persisted schema allows.
+ */
+export function isFeedbackMessageId(value: unknown): value is string {
+  return (
+    typeof value === 'string' &&
+    value.length > 0 &&
+    value.length <= MAX_FEEDBACK_MESSAGE_ID_LENGTH &&
+    !/[\u0000-\u001f\u007f]/u.test(value)
+  );
+}
+
+/**
+ * Records, changes or clears one rating.
+ *
+ * Deleting is what makes the control a toggle rather than a one-way switch,
+ * and the bound is enforced here because this map is the only thing that ever
+ * grows: when it is full the oldest rating goes, so the most recent feedback
+ * is what survives.
+ */
+export function setMessageFeedback(
+  preferences: AppPreferences,
+  messageId: string,
+  rating: MessageFeedbackRating | null,
+): AppPreferences {
+  if (!isFeedbackMessageId(messageId)) return preferences;
+  if (rating !== null && !isMessageFeedbackRating(rating)) return preferences;
+
+  const current = preferences.messageFeedback;
+  const existing = Object.prototype.hasOwnProperty.call(current, messageId)
+    ? current[messageId]
+    : null;
+  if (existing === rating) return preferences;
+
+  if (rating === null) {
+    const next: Record<string, MessageFeedbackRating> = { ...current };
+    delete next[messageId];
+    return { ...preferences, messageFeedback: next };
+  }
+
+  // Object key order is insertion order for string keys, so re-inserting a
+  // changed rating also makes it the most recent -- which is what the
+  // eviction below then treats it as.
+  const next: Record<string, MessageFeedbackRating> = {};
+  for (const [key, value] of Object.entries(current)) {
+    if (key !== messageId) next[key] = value;
+  }
+  next[messageId] = rating;
+
+  const keys = Object.keys(next);
+  if (keys.length > MAX_MESSAGE_FEEDBACK_ENTRIES) {
+    const overflow = keys.length - MAX_MESSAGE_FEEDBACK_ENTRIES;
+    const bounded: Record<string, MessageFeedbackRating> = {};
+    for (const key of keys.slice(overflow)) bounded[key] = next[key];
+    return { ...preferences, messageFeedback: bounded };
+  }
+  return { ...preferences, messageFeedback: next };
 }
 
 function setPreference<Key extends keyof AppPreferences>(
@@ -229,6 +307,12 @@ export function preferencesReducer(
         },
       };
     }
+    case 'preferences/set-message-feedback':
+      return setMessageFeedback(
+        preferences,
+        action.payload.messageId,
+        action.payload.rating,
+      );
     case 'preferences/reset': {
       const defaults = DEFAULT_APP_PREFERENCES;
       const alreadyDefault = (
@@ -280,3 +364,14 @@ export const selectConfirmDestructiveFileActions = (
 export const selectGitHttpsProxyUrl = (
   preferences: AppPreferences,
 ): string | null => preferences.gitHttpsProxyUrl;
+
+export const selectMessageFeedback = (
+  preferences: AppPreferences,
+): MessageFeedbackPreferences => preferences.messageFeedback;
+
+/** What the person rated one message, or null when they have not. */
+export const selectMessageFeedbackFor = (
+  preferences: AppPreferences,
+  messageId: string,
+): MessageFeedbackRating | null =>
+  preferences.messageFeedback[messageId] ?? null;

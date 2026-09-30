@@ -4,6 +4,7 @@ import type {
   AppPreferences,
   DefaultModelId,
   LocalePreference,
+  MessageFeedbackRating,
   MirrorCategory,
   PreferencesAction,
   ThemeMode,
@@ -35,6 +36,11 @@ export type PreferencesStore = {
     category: MirrorCategory,
     preference: { enabled: boolean; baseUrl: string },
   ): void;
+  /** Pass null to clear the rating; pass the current one to leave it. */
+  setMessageFeedback(
+    messageId: string,
+    rating: MessageFeedbackRating | null,
+  ): void;
   reset(): void;
   serialize(): string;
   hydrate(input: unknown): AppPreferences;
@@ -61,7 +67,20 @@ function preferencesEqual(
       category =>
         left.mirrors[category].enabled === right.mirrors[category].enabled &&
         left.mirrors[category].baseUrl === right.mirrors[category].baseUrl,
-    )
+    ) &&
+    // Feedback decides whether a rating control re-renders, so a changed
+    // rating has to count as a change -- comparing the maps by reference
+    // would let a re-created-but-equal map notify, and comparing nothing at
+    // all would swallow every rating.
+    (() => {
+      const keys = Object.keys(left.messageFeedback);
+      return (
+        keys.length === Object.keys(right.messageFeedback).length &&
+        keys.every(
+          key => left.messageFeedback[key] === right.messageFeedback[key],
+        )
+      );
+    })()
   );
 }
 
@@ -151,6 +170,12 @@ export function createPreferencesStore(
     },
     reset: () => {
       dispatch({ type: 'preferences/reset' });
+    },
+    setMessageFeedback: (messageId, rating) => {
+      dispatch({
+        type: 'preferences/set-message-feedback',
+        payload: { messageId, rating },
+      });
     },
     serialize: () => serializeAppPreferences(preferences),
     hydrate: input => publish(hydrateAppPreferences(input)),

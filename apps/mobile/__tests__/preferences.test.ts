@@ -58,6 +58,7 @@ describe('app preferences reducer and selectors', () => {
         pip: { enabled: false, baseUrl: 'https://pypi.org/simple/' },
         npm: { enabled: false, baseUrl: 'https://registry.npmjs.org/' },
       },
+      messageFeedback: {},
     });
     expect(preferences).not.toBe(DEFAULT_APP_PREFERENCES);
     expect(Object.isFrozen(DEFAULT_APP_PREFERENCES)).toBe(true);
@@ -187,6 +188,7 @@ describe('strict preferences persistence', () => {
           baseUrl: 'https://registry.npmjs.org/',
         },
       },
+      messageFeedback: {},
     };
   }
 
@@ -223,6 +225,7 @@ describe('strict preferences persistence', () => {
           base_url: 'https://registry.npmjs.org/',
         },
       },
+      message_feedback: {},
     });
     expect(hydrateAppPreferences(first)).toEqual(preferences);
   });

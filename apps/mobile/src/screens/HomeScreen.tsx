@@ -28,6 +28,7 @@ import {
   findNodeHandle,
   KeyboardAvoidingView,
   ScrollView,
+  Share,
   Pressable,
   StyleSheet,
   Text,
@@ -144,6 +145,8 @@ import { DEFAULT_APPROVAL_TIMEOUT_MS } from '../agent/AgentApprovals';
 import { refusedAttemptRetryable } from '../agent/AgentRefusalRetry';
 import { buildErrorReport } from '../diagnostics/errorReport';
 import { buildInfo, copyText } from '../native/Diagnostics';
+import { conversationToMarkdown } from '../export/conversationMarkdown';
+import type { MessageFeedbackRating } from '../preferences/types';
 import {
   createSessionPersistenceCoordinator,
   sessionSnapshotSHA256,
@@ -4647,6 +4650,50 @@ export function HomeScreen({
     [agentPolicyRevokeBusy, persistCurrent, store],
   );
 
+  /**
+   * Copies one message's text.
+   *
+   * A refused clipboard is silent on purpose: the control simply never says
+   * "Copied", and an alert over the transcript would be a worse answer to a
+   * copy that did not happen.
+   */
+  const copyMessage = useCallback((message: DisplayMessage) => {
+    copyText(message.text).catch(() => undefined);
+  }, []);
+
+  const feedbackForMessage = useCallback(
+    (messageId: string): MessageFeedbackRating | null =>
+      preferences.messageFeedback[messageId] ?? null,
+    [preferences.messageFeedback],
+  );
+
+  const rateMessage = useCallback(
+    (messageId: string, rating: MessageFeedbackRating | null) => {
+      preferencesStore.setMessageFeedback(messageId, rating);
+    },
+    [preferencesStore],
+  );
+
+  /**
+   * Exports the conversation the action sheet was opened for as Markdown.
+   *
+   * The share sheet is offered first because it is the only route that can
+   * hand the transcript to another app; when the platform refuses it, the
+   * clipboard is the fallback rather than doing nothing at all.
+   */
+  const exportConversation = useCallback(() => {
+    if (actionConversationId === null) return;
+    const conversation = selectConversationById(
+      store.getState(),
+      actionConversationId,
+    );
+    if (conversation === null) return;
+    const markdown = conversationToMarkdown(conversation);
+    Share.share({ message: markdown }).catch(() =>
+      copyText(markdown).catch(() => undefined),
+    );
+  }, [actionConversationId, store]);
+
   const requestDeleteConversation = useCallback(() => {
     if (
       actionConversationId === null ||
@@ -6505,7 +6552,10 @@ export function HomeScreen({
           <MessageList
             key={activeConversation?.id ?? 'no-conversation'}
             autoExpandTools={preferences.autoExpandTools}
+            feedbackFor={feedbackForMessage}
             messages={activeMessages}
+            onCopyMessage={copyMessage}
+            onFeedbackMessage={rateMessage}
             onPreviewAttachment={id => {
               presentAttachmentPreview(id, attachmentOwnershipKey).catch(
                 () => undefined,
@@ -6936,6 +6986,7 @@ export function HomeScreen({
         }}
         onDelete={requestDeleteConversation}
         onDismiss={handleActionDismiss}
+        onExport={exportConversation}
         onRename={renameConversation}
       />
       <SettingsSheet

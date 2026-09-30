@@ -16,6 +16,7 @@ import {
 } from 'react-native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import Save from 'lucide-react-native/icons/save';
+import Share from 'lucide-react-native/icons/share';
 import Trash2 from 'lucide-react-native/icons/trash-2';
 
 import { useAppPresentation } from '../presentation/AppPresentation';
@@ -29,6 +30,8 @@ type Props = {
   onDelete: () => void;
   onDismiss: () => void;
   onRename: (title: string) => void;
+  /** Writes the conversation out as Markdown. */
+  onExport: () => void;
 };
 
 export function ConversationActionSheet(props: Props) {
@@ -112,6 +115,15 @@ export function ConversationActionSheet(props: Props) {
           </Text>
         </Pressable>
         <Pressable
+          accessibilityLabel={t('conversation.export')}
+          accessibilityRole="button"
+          onPress={props.onExport}
+          style={({ pressed }) => [styles.export, pressed && styles.pressed]}
+        >
+          <AppIcon color={colors.text} icon={Share} size={17} />
+          <Text style={styles.exportText}>{t('conversation.export')}</Text>
+        </Pressable>
+        <Pressable
           accessibilityLabel={t('conversation.delete')}
           accessibilityRole="button"
           onPress={props.onDelete}
@@ -178,6 +190,19 @@ const createStyles = (colors: ThemePalette) =>
     },
     saveText: { color: colors.background, fontSize: 14, fontWeight: '700' },
     disabled: { opacity: 0.3 },
+    export: {
+      height: 46,
+      borderRadius: 15,
+      backgroundColor: colors.surfaceRaised,
+      borderColor: colors.line,
+      borderWidth: 1,
+      flexDirection: 'row',
+      alignItems: 'center',
+      justifyContent: 'center',
+      gap: 8,
+      marginTop: 9,
+    },
+    exportText: { color: colors.text, fontSize: 13, fontWeight: '700' },
     delete: {
       height: 46,
       borderRadius: 15,

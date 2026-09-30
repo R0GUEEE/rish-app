@@ -9,6 +9,10 @@ import FileImage from 'lucide-react-native/icons/file-image';
 import FileText from 'lucide-react-native/icons/file-text';
 import ChevronDown from 'lucide-react-native/icons/chevron-down';
 import Sparkles from 'lucide-react-native/icons/sparkles';
+import Check from 'lucide-react-native/icons/check';
+import Copy from 'lucide-react-native/icons/copy';
+import ThumbsDown from 'lucide-react-native/icons/thumbs-down';
+import ThumbsUp from 'lucide-react-native/icons/thumbs-up';
 import {
   type NativeScrollEvent,
   ActivityIndicator,
@@ -27,6 +31,7 @@ import {
   type ProviderId,
 } from '../harness/types';
 import type { AttachmentDescriptor } from '../state';
+import type { MessageFeedbackRating } from '../preferences/types';
 import { fonts, type ThemePalette } from '../theme';
 import { StructuredContent, type StructuredBlock } from './StructuredContent';
 import { InlineMarkdown } from './InlineMarkdown';
@@ -62,7 +67,121 @@ type MessageListProps = {
   onPreviewAttachment?: (id: string) => void;
   previewingAttachmentId?: string | null;
   showReasoning?: boolean;
+  /** Copies one message's text. Omit to hide the control entirely. */
+  onCopyMessage?: (message: DisplayMessage) => void;
+  /**
+   * Leaves, changes or clears a rating on an assistant message. Null clears.
+   * Omit to hide the rating controls.
+   */
+  onFeedbackMessage?: (
+    messageId: string,
+    rating: MessageFeedbackRating | null,
+  ) => void;
+  /** The rating already left on a message, or null. */
+  feedbackFor?: (messageId: string) => MessageFeedbackRating | null;
 };
+
+/**
+ * The controls under one message.
+ *
+ * Copy is offered on both roles, because copying your own prompt back out is
+ * as ordinary as copying the answer. Rating is offered only on an assistant
+ * message, because there is nothing to rate about a prompt the person wrote
+ * themselves. Both controls are absent -- not disabled -- when the screen that
+ * owns the transcript passes no handler, so a read-only surface stays clean.
+ */
+function MessageActions({
+  message,
+  onCopyMessage,
+  onFeedbackMessage,
+  rating,
+  copied,
+}: {
+  message: DisplayMessage;
+  onCopyMessage?: (message: DisplayMessage) => void;
+  onFeedbackMessage?: (
+    messageId: string,
+    rating: MessageFeedbackRating | null,
+  ) => void;
+  rating: MessageFeedbackRating | null;
+  copied: boolean;
+}) {
+  const { colors, t } = useAppPresentation();
+  const styles = useMemo(() => createStyles(colors), [colors]);
+  if (onCopyMessage === undefined && onFeedbackMessage === undefined) {
+    return null;
+  }
+  const rate = (next: MessageFeedbackRating) =>
+    onFeedbackMessage?.(message.id, rating === next ? null : next);
+  // The assistant's own wording is "Copy response"; the person's own prompt is
+  // just "Copy". Both were already in the translation table.
+  const copyLabel = message.role === 'assistant'
+    ? t('messages.copy')
+    : t('messages.copyMessage');
+  return (
+    <View style={styles.actions}>
+      {onCopyMessage !== undefined && (
+        <Pressable
+          accessibilityLabel={copied ? t('messages.copied') : copyLabel}
+          accessibilityRole="button"
+          onPress={() => onCopyMessage(message)}
+          style={({ pressed }) => [
+            styles.action,
+            pressed && styles.actionPressed,
+          ]}
+          testID={`message-copy-${message.id}`}
+        >
+          <AppIcon
+            color={copied ? colors.accent : colors.muted}
+            icon={copied ? Check : Copy}
+            size={14}
+          />
+          <Text style={[styles.actionText, copied && styles.actionTextActive]}>
+            {copied ? t('messages.copied') : copyLabel}
+          </Text>
+        </Pressable>
+      )}
+      {onFeedbackMessage !== undefined && message.role === 'assistant' && (
+        <>
+          <Pressable
+            accessibilityLabel={t('messages.goodResponse')}
+            accessibilityRole="button"
+            accessibilityState={{ selected: rating === 'up' }}
+            onPress={() => rate('up')}
+            style={({ pressed }) => [
+              styles.action,
+              pressed && styles.actionPressed,
+            ]}
+            testID={`message-feedback-up-${message.id}`}
+          >
+            <AppIcon
+              color={rating === 'up' ? colors.accent : colors.muted}
+              icon={ThumbsUp}
+              size={14}
+            />
+          </Pressable>
+          <Pressable
+            accessibilityLabel={t('messages.badResponse')}
+            accessibilityRole="button"
+            accessibilityState={{ selected: rating === 'down' }}
+            onPress={() => rate('down')}
+            style={({ pressed }) => [
+              styles.action,
+              pressed && styles.actionPressed,
+            ]}
+            testID={`message-feedback-down-${message.id}`}
+          >
+            <AppIcon
+              color={rating === 'down' ? colors.danger : colors.muted}
+              icon={ThumbsDown}
+              size={14}
+            />
+          </Pressable>
+        </>
+      )}
+    </View>
+  );
+}
 
 export const MessageList = React.forwardRef<
   React.ComponentRef<typeof ScrollView>,
@@ -74,11 +193,33 @@ export const MessageList = React.forwardRef<
     onPreviewAttachment,
     previewingAttachmentId = null,
     showReasoning = true,
+    onCopyMessage,
+    onFeedbackMessage,
+    feedbackFor,
   },
   forwardedRef,
 ) {
   const { colors, t } = useAppPresentation();
   const styles = useMemo(() => createStyles(colors), [colors]);
+  /**
+   * Which message was copied most recently.
+   *
+   * Copy has no visible result of its own, so the control says "Copied"
+   * instead of leaving a person to guess. It is deliberately not reset on a
+   * timer: a checkmark that vanishes while it is being read is worse than one
+   * that stays until the next copy.
+   */
+  const [copiedMessageId, setCopiedMessageId] = useState<string | null>(null);
+  const copyMessage = useMemo(
+    () =>
+      onCopyMessage === undefined
+        ? undefined
+        : (message: DisplayMessage) => {
+            onCopyMessage(message);
+            setCopiedMessageId(message.id);
+          },
+    [onCopyMessage],
+  );
   const structuredLabels = useMemo(
     () => ({
       thinking: t('messages.thinking'),
@@ -216,6 +357,12 @@ export const MessageList = React.forwardRef<
               {message.text.length > 0 && (
                 <InlineMarkdown selectable textStyle={styles.userText} tokens={tokenizePlainLinks(message.text)} />
               )}
+              <MessageActions
+                copied={copiedMessageId === message.id}
+                message={message}
+                onCopyMessage={copyMessage}
+                rating={null}
+              />
             </View>
           ) : (
             <View
@@ -255,6 +402,13 @@ export const MessageList = React.forwardRef<
               {message.meta !== undefined && (
                 <Text style={styles.meta}>{message.meta}</Text>
               )}
+              <MessageActions
+                copied={copiedMessageId === message.id}
+                message={message}
+                onCopyMessage={copyMessage}
+                onFeedbackMessage={onFeedbackMessage}
+                rating={feedbackFor?.(message.id) ?? null}
+              />
             </View>
           ),
         )}
@@ -397,4 +551,22 @@ const createStyles = (colors: ThemePalette) =>
       fontSize: 9,
       marginTop: 11,
     },
+    actions: {
+      flexDirection: 'row',
+      alignItems: 'center',
+      gap: 6,
+      marginTop: 9,
+    },
+    action: {
+      flexDirection: 'row',
+      alignItems: 'center',
+      gap: 5,
+      minHeight: 30,
+      paddingHorizontal: 9,
+      borderRadius: 11,
+      backgroundColor: colors.surfaceWarm,
+    },
+    actionPressed: { opacity: 0.6 },
+    actionText: { color: colors.muted, fontSize: 10, fontWeight: '700' },
+    actionTextActive: { color: colors.accent },
   });

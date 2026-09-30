@@ -2,14 +2,18 @@ import {
   APP_PREFERENCES_SCHEMA_VERSION,
   PreferencesValidationError,
   type AppPreferences,
+  type MessageFeedbackPreferences,
+  type MessageFeedbackRating,
   type PersistedAppPreferencesV1,
   type PreferencesHydrationResult,
 } from './types';
 import {
   createDefaultPreferences,
   isDefaultModelId,
+  isFeedbackMessageId,
   isHarnessId,
   isLocalePreference,
+  isMessageFeedbackRating,
   isMirrorCategory,
   isThemeMode,
   isThinkingMode,
@@ -17,6 +21,7 @@ import {
   normalizeMirrorBaseUrl,
 } from './reducer';
 import { normalizeGitHttpsProxyUrl } from './gitProxy';
+import { MAX_MESSAGE_FEEDBACK_ENTRIES } from './types';
 
 type UnknownRecord = Record<string, unknown>;
 
@@ -33,6 +38,7 @@ const persistedKeys: ReadonlySet<string> = new Set([
   'confirm_destructive_file_actions',
   'git_https_proxy_url',
   'mirrors',
+  'message_feedback',
 ]);
 
 function invalid(path: string, message: string): never {
@@ -131,6 +137,47 @@ function decodeGitHttpsProxyUrl(value: unknown): string | null {
   return normalized;
 }
 
+/**
+ * Ratings by message id.
+ *
+ * Absent is the ordinary case for a state written before this existed, so it
+ * hydrates to empty rather than failing. Everything else is checked: a rating
+ * is only ever one of the two known values, keyed by something that could be
+ * a message id, and bounded so a hand-edited blob cannot make it unbounded.
+ */
+function decodeMessageFeedback(value: unknown): MessageFeedbackPreferences {
+  if (value === undefined || value === null) return {};
+  if (typeof value !== 'object' || Array.isArray(value)) {
+    return invalid('$.message_feedback', 'must be an object');
+  }
+  const raw = value as UnknownRecord;
+  const keys = Object.keys(raw);
+  if (keys.length > MAX_MESSAGE_FEEDBACK_ENTRIES) {
+    return invalid(
+      '$.message_feedback',
+      `must hold at most ${MAX_MESSAGE_FEEDBACK_ENTRIES} ratings`,
+    );
+  }
+  const feedback: Record<string, MessageFeedbackRating> = {};
+  for (const key of keys) {
+    if (!isFeedbackMessageId(key)) {
+      return invalid(
+        `$.message_feedback.${key}`,
+        'must be keyed by a bounded printable message id',
+      );
+    }
+    const rating = raw[key];
+    if (!isMessageFeedbackRating(rating)) {
+      return invalid(
+        `$.message_feedback.${key}`,
+        'must be up or down',
+      );
+    }
+    feedback[key] = rating;
+  }
+  return feedback;
+}
+
 export function hydrateAppPreferences(input: unknown): AppPreferences {
   const raw = record(decode(input));
   if (required(raw, 'schema_version') !== APP_PREFERENCES_SCHEMA_VERSION) {
@@ -182,6 +229,7 @@ export function hydrateAppPreferences(input: unknown): AppPreferences {
     ),
     gitHttpsProxyUrl: decodeGitHttpsProxyUrl(raw.git_https_proxy_url),
     mirrors: decodeMirrors(raw.mirrors),
+    messageFeedback: decodeMessageFeedback(raw.message_feedback),
   };
 }
 
@@ -231,6 +279,7 @@ export function serializeAppPreferences(preferences: AppPreferences): string {
         base_url: preferences.mirrors.npm.baseUrl,
       },
     },
+    message_feedback: preferences.messageFeedback,
   };
   hydrateAppPreferences(persisted);
   return JSON.stringify(persisted);

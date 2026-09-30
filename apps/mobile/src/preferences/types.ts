@@ -11,6 +11,17 @@ export const DEFAULT_MODEL_IDS = [
 export const THINKING_MODES = ['off', 'high', 'max'] as const;
 export const TOOL_PERMISSION_MODES = ['read-only', 'workspace-write'] as const;
 export const MIRROR_CATEGORIES = ['alpine', 'pip', 'npm'] as const;
+/** The ratings a person can leave on an assistant message. */
+export const MESSAGE_FEEDBACK_RATINGS = ['up', 'down'] as const;
+/**
+ * How many ratings are kept. Feedback is stored apart from the chat state so
+ * it needs no schema migration, which means nothing else prunes it: this bound
+ * is what keeps the preference blob from growing for the life of the install.
+ * The oldest rating is dropped first.
+ */
+export const MAX_MESSAGE_FEEDBACK_ENTRIES = 500 as const;
+/** The longest message id a rating may be keyed by. */
+export const MAX_FEEDBACK_MESSAGE_ID_LENGTH = 256 as const;
 
 export type ThemeMode = (typeof THEME_MODES)[number];
 export type ResolvedTheme = Exclude<ThemeMode, 'system'>;
@@ -27,6 +38,11 @@ export type MirrorPreference = {
 export type MirrorPreferences = Readonly<
   Record<MirrorCategory, MirrorPreference>
 >;
+export type MessageFeedbackRating = (typeof MESSAGE_FEEDBACK_RATINGS)[number];
+/** Ratings by message id. Absent means the person has not rated that message. */
+export type MessageFeedbackPreferences = Readonly<
+  Record<string, MessageFeedbackRating>
+>;
 
 export type AppPreferences = {
   readonly schemaVersion: typeof APP_PREFERENCES_SCHEMA_VERSION;
@@ -41,6 +57,7 @@ export type AppPreferences = {
   readonly confirmDestructiveFileActions: boolean;
   readonly gitHttpsProxyUrl: string | null;
   readonly mirrors: MirrorPreferences;
+  readonly messageFeedback: MessageFeedbackPreferences;
 };
 
 export type PersistedAppPreferencesV1 = {
@@ -61,6 +78,7 @@ export type PersistedAppPreferencesV1 = {
       { readonly enabled: boolean; readonly base_url: string }
     >
   >;
+  readonly message_feedback?: MessageFeedbackPreferences;
 };
 
 export type PreferencesAction =
@@ -110,6 +128,14 @@ export type PreferencesAction =
         readonly category: MirrorCategory;
         readonly enabled: boolean;
         readonly baseUrl: string;
+      };
+    }
+  | {
+      readonly type: 'preferences/set-message-feedback';
+      readonly payload: {
+        readonly messageId: string;
+        /** null clears the rating the person left. */
+        readonly rating: MessageFeedbackRating | null;
       };
     }
   | { readonly type: 'preferences/reset' };
