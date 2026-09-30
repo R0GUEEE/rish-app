@@ -13,6 +13,8 @@ import Check from 'lucide-react-native/icons/check';
 import Copy from 'lucide-react-native/icons/copy';
 import ThumbsDown from 'lucide-react-native/icons/thumbs-down';
 import ThumbsUp from 'lucide-react-native/icons/thumbs-up';
+import Pencil from 'lucide-react-native/icons/pencil';
+import RefreshCw from 'lucide-react-native/icons/refresh-cw';
 import {
   type NativeScrollEvent,
   ActivityIndicator,
@@ -79,21 +81,28 @@ type MessageListProps = {
   ) => void;
   /** The rating already left on a message, or null. */
   feedbackFor?: (messageId: string) => MessageFeedbackRating | null;
+  /** Rewinds a prompt into the composer so it can be changed and sent again. */
+  onEditMessage?: (message: DisplayMessage) => void;
+  /** Reissues the prompt a reply answered. */
+  onRegenerateMessage?: (message: DisplayMessage) => void;
 };
 
 /**
  * The controls under one message.
  *
  * Copy is offered on both roles, because copying your own prompt back out is
- * as ordinary as copying the answer. Rating is offered only on an assistant
- * message, because there is nothing to rate about a prompt the person wrote
- * themselves. Both controls are absent -- not disabled -- when the screen that
- * owns the transcript passes no handler, so a read-only surface stays clean.
+ * as ordinary as copying the answer. Rating and regenerate are offered only on
+ * a reply, and edit only on a prompt: there is nothing to rate or reissue
+ * about words the person wrote, and nothing to edit about the model's. Every
+ * control is absent -- not disabled -- when the screen that owns the
+ * transcript passes no handler, so a read-only surface stays clean.
  */
 function MessageActions({
   message,
   onCopyMessage,
   onFeedbackMessage,
+  onEditMessage,
+  onRegenerateMessage,
   rating,
   copied,
 }: {
@@ -103,12 +112,19 @@ function MessageActions({
     messageId: string,
     rating: MessageFeedbackRating | null,
   ) => void;
+  onEditMessage?: (message: DisplayMessage) => void;
+  onRegenerateMessage?: (message: DisplayMessage) => void;
   rating: MessageFeedbackRating | null;
   copied: boolean;
 }) {
   const { colors, t } = useAppPresentation();
   const styles = useMemo(() => createStyles(colors), [colors]);
-  if (onCopyMessage === undefined && onFeedbackMessage === undefined) {
+  if (
+    onCopyMessage === undefined &&
+    onFeedbackMessage === undefined &&
+    onEditMessage === undefined &&
+    onRegenerateMessage === undefined
+  ) {
     return null;
   }
   const rate = (next: MessageFeedbackRating) =>
@@ -139,6 +155,36 @@ function MessageActions({
           <Text style={[styles.actionText, copied && styles.actionTextActive]}>
             {copied ? t('messages.copied') : copyLabel}
           </Text>
+        </Pressable>
+      )}
+      {onEditMessage !== undefined && message.role === 'user' && (
+        <Pressable
+          accessibilityLabel={t('messages.edit')}
+          accessibilityRole="button"
+          onPress={() => onEditMessage(message)}
+          style={({ pressed }) => [
+            styles.action,
+            pressed && styles.actionPressed,
+          ]}
+          testID={`message-edit-${message.id}`}
+        >
+          <AppIcon color={colors.muted} icon={Pencil} size={14} />
+          <Text style={styles.actionText}>{t('messages.edit')}</Text>
+        </Pressable>
+      )}
+      {onRegenerateMessage !== undefined && message.role === 'assistant' && (
+        <Pressable
+          accessibilityLabel={t('messages.regenerate')}
+          accessibilityRole="button"
+          onPress={() => onRegenerateMessage(message)}
+          style={({ pressed }) => [
+            styles.action,
+            pressed && styles.actionPressed,
+          ]}
+          testID={`message-regenerate-${message.id}`}
+        >
+          <AppIcon color={colors.muted} icon={RefreshCw} size={14} />
+          <Text style={styles.actionText}>{t('messages.regenerate')}</Text>
         </Pressable>
       )}
       {onFeedbackMessage !== undefined && message.role === 'assistant' && (
@@ -193,6 +239,8 @@ export const MessageList = React.forwardRef<
     onPreviewAttachment,
     previewingAttachmentId = null,
     showReasoning = true,
+    onEditMessage,
+    onRegenerateMessage,
     onCopyMessage,
     onFeedbackMessage,
     feedbackFor,
@@ -361,6 +409,7 @@ export const MessageList = React.forwardRef<
                 copied={copiedMessageId === message.id}
                 message={message}
                 onCopyMessage={copyMessage}
+                onEditMessage={onEditMessage}
                 rating={null}
               />
             </View>
@@ -407,6 +456,7 @@ export const MessageList = React.forwardRef<
                 message={message}
                 onCopyMessage={copyMessage}
                 onFeedbackMessage={onFeedbackMessage}
+                onRegenerateMessage={onRegenerateMessage}
                 rating={feedbackFor?.(message.id) ?? null}
               />
             </View>

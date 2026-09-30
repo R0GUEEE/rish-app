@@ -3331,10 +3331,15 @@ export function HomeScreen({
     ],
   );
 
-  const send = useCallback(async () => {
+  const send = useCallback(async (override?: {
+    readonly text: string;
+    readonly attachments?: readonly AttachmentDescriptor[];
+  }) => {
     if (!sessionProjectionReady.current) return;
-    const prompt = draft;
-    const outgoingAttachments = draftAttachments;
+    // Regenerating a turn reissues text the composer no longer holds, so a
+    // caller may hand over what to send rather than relying on the draft.
+    const prompt = override?.text ?? draft;
+    const outgoingAttachments = override?.attachments ?? draftAttachments;
     const selectedConversation = selectActiveConversation(store.getState());
     const contextControllerState = projectContextController.getState();
     if (
@@ -4717,6 +4722,67 @@ export function HomeScreen({
   const copyMessage = useCallback((message: DisplayMessage) => {
     copyText(message.text).catch(() => undefined);
   }, []);
+
+  /**
+   * Editing a prompt rewinds it into the composer.
+   *
+   * Nothing is sent here: the person gets their own words and attachments back,
+   * changes them, and presses send as usual. That reuses the one send path
+   * instead of growing a second one behind an "edit mode", which also means an
+   * edit can never send something the composer would have refused.
+   */
+  const editPrompt = useCallback(
+    (message: DisplayMessage) => {
+      const conversationId = store.getState().selectedConversationId;
+      if (conversationId === null) return;
+      store.truncateFrom(conversationId, message.id);
+      setDraft(message.text);
+      setDraftAttachments([...(message.attachments ?? [])]);
+    },
+    [store],
+  );
+
+  /**
+   * Regenerating a reply reissues the prompt it answered.
+   *
+   * The reply and everything after it go, then that same prompt is sent again
+   * with the attachments it carried. The reducer refuses the rewind while a
+   * round is in flight or when an Agent journal owns what would be dropped, so
+   * the prompt is checked for still being present before anything is sent --
+   * sending anyway would append a second answer to a turn that never rewound.
+   */
+  const regenerateReply = useCallback(
+    (message: DisplayMessage) => {
+      const state = store.getState();
+      const conversationId = state.selectedConversationId;
+      if (conversationId === null) return;
+      const conversation = selectConversationById(state, conversationId);
+      if (conversation === null) return;
+      const at = conversation.messages.findIndex(entry => entry.id === message.id);
+      if (at < 0) return;
+      // The prompt this reply answered is the nearest one before it.
+      let prompt: (typeof conversation.messages)[number] | null = null;
+      for (let index = at; index >= 0; index -= 1) {
+        if (conversation.messages[index].role === 'user') {
+          prompt = conversation.messages[index];
+          break;
+        }
+      }
+      if (prompt === null) return;
+      store.truncateFrom(conversationId, prompt.id);
+      const stillThere =
+        store
+          .getState()
+          .conversations[conversationId]?.messages.some(
+            entry => entry.id === prompt.id,
+          ) ?? false;
+      if (stillThere) return;
+      send({ text: prompt.text, attachments: prompt.attachments ?? [] }).catch(
+        () => undefined,
+      );
+    },
+    [store, send],
+  );
 
   const feedbackForMessage = useCallback(
     (messageId: string): MessageFeedbackRating | null =>
@@ -6622,7 +6688,9 @@ export function HomeScreen({
             feedbackFor={feedbackForMessage}
             messages={activeMessages}
             onCopyMessage={copyMessage}
+            onEditMessage={editPrompt}
             onFeedbackMessage={rateMessage}
+            onRegenerateMessage={regenerateReply}
             onPreviewAttachment={id => {
               presentAttachmentPreview(id, attachmentOwnershipKey).catch(
                 () => undefined,

@@ -156,3 +156,60 @@ describe('per-message actions', () => {
     );
   });
 });
+
+describe('edit and regenerate', () => {
+  test('offer nothing when the surface passes no handler', () => {
+    const tree = renderList();
+    expect(has(tree, 'message-edit-u1')).toBe(false);
+    expect(has(tree, 'message-regenerate-a1')).toBe(false);
+  });
+
+  test('edit belongs to a prompt and regenerate to a reply', () => {
+    const tree = renderList({
+      onEditMessage: () => undefined,
+      onRegenerateMessage: () => undefined,
+    });
+    expect(has(tree, 'message-edit-u1')).toBe(true);
+    expect(has(tree, 'message-edit-a1')).toBe(false);
+    expect(has(tree, 'message-regenerate-a1')).toBe(true);
+    expect(has(tree, 'message-regenerate-u1')).toBe(false);
+  });
+
+  test('pressing edit hands over the prompt it belongs to', () => {
+    const edited: DisplayMessage[] = [];
+    const tree = renderList({ onEditMessage: message => edited.push(message) });
+    act(() => {
+      find(tree, 'message-edit-u1')[0].props.onPress();
+    });
+    expect(edited.map(message => message.id)).toEqual(['u1']);
+    expect(edited[0].text).toBe('Why is the parser slow?');
+  });
+
+  test('pressing regenerate hands over the reply it belongs to', () => {
+    const regenerated: DisplayMessage[] = [];
+    const tree = renderList({
+      onRegenerateMessage: message => regenerated.push(message),
+    });
+    act(() => {
+      find(tree, 'message-regenerate-a1')[0].props.onPress();
+    });
+    expect(regenerated.map(message => message.id)).toEqual(['a1']);
+  });
+
+  test('a prompt cannot be regenerated and a reply cannot be edited', () => {
+    const edited: DisplayMessage[] = [];
+    const regenerated: DisplayMessage[] = [];
+    const tree = renderList({
+      onEditMessage: message => edited.push(message),
+      onRegenerateMessage: message => regenerated.push(message),
+    });
+    // Both controls exist for their own role, so neither list can receive the
+    // other role by accident.
+    act(() => {
+      find(tree, 'message-edit-u1')[0].props.onPress();
+      find(tree, 'message-regenerate-a1')[0].props.onPress();
+    });
+    expect(edited.map(message => message.role)).toEqual(['user']);
+    expect(regenerated.map(message => message.role)).toEqual(['assistant']);
+  });
+});
