@@ -206,3 +206,75 @@ describe('summarizeContextUsage', () => {
     expect(JSON.stringify(input)).toBe(frozen);
   });
 });
+
+describe('per-model totals', () => {
+  const forModel = (id: string, model: string, tokens: number, bytes: number) =>
+    conversation({
+      id,
+      projectContext: {
+        status: 'ready',
+        manifest: {
+          project_name: 'p',
+          model,
+          context_bytes: bytes,
+          estimated_tokens: tokens,
+          captured_at: `2026-01-0${tokens % 9}T00:00:00.000Z`,
+        },
+      },
+    });
+
+  test('groups by model, heaviest first', () => {
+    const summary = summarizeContextUsage([
+      forModel('a', 'deepseek-v4-flash', 100, 400),
+      forModel('b', 'claude-sonnet-5', 900, 3600),
+      forModel('c', 'deepseek-v4-flash', 50, 200),
+    ]);
+    expect(summary.byModel.map(entry => entry.model)).toEqual([
+      'claude-sonnet-5',
+      'deepseek-v4-flash',
+    ]);
+    expect(summary.byModel[0]).toEqual({
+      model: 'claude-sonnet-5',
+      conversations: 1,
+      estimatedTokens: 900,
+      contextBytes: 3600,
+    });
+    expect(summary.byModel[1]).toEqual({
+      model: 'deepseek-v4-flash',
+      conversations: 2,
+      estimatedTokens: 150,
+      contextBytes: 600,
+    });
+  });
+
+  test('breaks a tie on the model name, so the order is stable', () => {
+    const summary = summarizeContextUsage([
+      forModel('a', 'z-model', 100, 400),
+      forModel('b', 'a-model', 100, 400),
+    ]);
+    expect(summary.byModel.map(entry => entry.model)).toEqual([
+      'a-model',
+      'z-model',
+    ]);
+  });
+
+  test('keeps a snapshot that recorded no model, rather than hiding its tokens', () => {
+    const summary = summarizeContextUsage([
+      forModel('a', 'known', 100, 400),
+      forModel('b', '', 50, 200),
+    ]);
+    const unrecorded = summary.byModel.find(entry => entry.model === '');
+    expect(unrecorded?.estimatedTokens).toBe(50);
+    // The parts must add up to the total shown above them.
+    expect(
+      summary.byModel.reduce((total, entry) => total + entry.estimatedTokens, 0),
+    ).toBe(summary.totalEstimatedTokens);
+    expect(
+      summary.byModel.reduce((total, entry) => total + entry.conversations, 0),
+    ).toBe(summary.conversations);
+  });
+
+  test('an empty summary has no models at all', () => {
+    expect(summarizeContextUsage([]).byModel).toEqual([]);
+  });
+});

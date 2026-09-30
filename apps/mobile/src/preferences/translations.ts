@@ -213,6 +213,8 @@ const enUS = {
   'usage.contextLabel': 'CONTEXT',
   'usage.chatsLabel': 'CHATS',
   'usage.filesLabel': 'FILES',
+  'usage.byModel': 'BY MODEL',
+  'usage.unknownModel': 'Model not recorded',
   'conversation.delete': 'Delete conversation',
   'conversation.deleteConfirmTitle': 'Delete this conversation?',
   'conversation.deleteConfirmBody':
@@ -1317,6 +1319,8 @@ const zhCN: Readonly<Record<TranslationKey, string>> = {
   'usage.contextLabel': '上下文',
   'usage.chatsLabel': '对话',
   'usage.filesLabel': '文件',
+  'usage.byModel': '按模型',
+  'usage.unknownModel': '未记录模型',
   'conversation.delete': '删除对话',
   'conversation.deleteConfirmTitle': '删除这个对话？',
   'conversation.deleteConfirmBody':

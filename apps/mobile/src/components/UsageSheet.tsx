@@ -93,6 +93,33 @@ export function UsageSheet(props: Props) {
               </View>
             </View>
 
+            {summary.byModel.length > 0 && (
+              <>
+                <Text style={styles.sectionLabel}>{t('usage.byModel')}</Text>
+                <View style={styles.models} testID="usage-by-model">
+                  {summary.byModel.map(total => (
+                    <View
+                      key={total.model}
+                      style={styles.modelRow}
+                      testID={`usage-model-${total.model === '' ? 'unrecorded' : total.model}`}
+                    >
+                      <Text numberOfLines={1} style={styles.modelName}>
+                        {total.model === ''
+                          ? t('usage.unknownModel')
+                          : total.model}
+                      </Text>
+                      <Text style={styles.modelMeta}>
+                        {`${formatCount(total.conversations)} · ${formatBytes(total.contextBytes)}`}
+                      </Text>
+                      <Text style={styles.rowTokens}>
+                        {`~${formatCount(total.estimatedTokens)}`}
+                      </Text>
+                    </View>
+                  ))}
+                </View>
+              </>
+            )}
+
             <ScrollView
               style={styles.list}
               contentContainerStyle={styles.listContent}
@@ -200,6 +227,29 @@ const createStyles = (colors: ThemePalette) =>
       letterSpacing: 1,
     },
     list: { maxHeight: 260, marginTop: 14 },
+    sectionLabel: {
+      color: colors.accent,
+      fontSize: 9,
+      fontWeight: '800',
+      letterSpacing: 2,
+      marginTop: 20,
+    },
+    models: { gap: 6, marginTop: 10 },
+    modelRow: {
+      flexDirection: 'row',
+      alignItems: 'center',
+      gap: 10,
+      minHeight: 40,
+      borderRadius: 13,
+      backgroundColor: colors.surfaceWarm,
+      paddingHorizontal: 14,
+    },
+    modelName: { flex: 1, minWidth: 0, color: colors.text, fontSize: 13, fontWeight: '700' },
+    modelMeta: {
+      color: colors.muted,
+      fontSize: 8,
+      fontFamily: fonts.mono,
+    },
     listContent: { gap: 8 },
     row: {
       flexDirection: 'row',

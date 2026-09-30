@@ -130,4 +130,40 @@ describe('UsageSheet', () => {
       'No conversation has attached project context yet.',
     );
   });
+
+  test('groups the estimates by the model each snapshot recorded', () => {
+    const renderer = render([
+      contextConversation('a', {
+        project_name: 'one',
+        model: 'claude-sonnet-5',
+        context_bytes: 400,
+        estimated_tokens: 100,
+      }),
+      contextConversation('b', {
+        project_name: 'two',
+        model: 'claude-sonnet-5',
+        context_bytes: 400,
+        estimated_tokens: 100,
+      }),
+      contextConversation('c', {
+        project_name: 'three',
+        model: 'deepseek-v4-flash',
+        context_bytes: 400,
+        estimated_tokens: 500,
+      }),
+    ]);
+    expect(renderer.root.findAllByProps({ testID: 'usage-by-model' }).length).toBeGreaterThan(0);
+    // The heaviest model is listed, and the counts are per model not per row.
+    expect(texts(renderer).join('\n')).toContain('claude-sonnet-5');
+    expect(texts(renderer).join('\n')).toContain('deepseek-v4-flash');
+    expect(texts(renderer).join('\n')).toContain('2 · 800 B');
+  });
+
+  test('a snapshot that recorded no model is named rather than dropped', () => {
+    const renderer = render([
+      contextConversation('a', { project_name: 'one', context_bytes: 400, estimated_tokens: 100 }),
+    ]);
+    expect(renderer.root.findAllByProps({ testID: 'usage-model-unrecorded' }).length).toBeGreaterThan(0);
+    expect(texts(renderer).join('\n')).toContain('Model not recorded');
+  });
 });

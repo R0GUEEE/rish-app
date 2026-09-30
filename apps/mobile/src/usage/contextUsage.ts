@@ -26,6 +26,15 @@ export type ContextUsageEntry = {
   readonly omittedFiles: number;
 };
 
+/** One model's share of the estimates, so a per-model view is possible. */
+export type ContextUsageModelTotal = {
+  /** The model the snapshot recorded; empty when it recorded none. */
+  readonly model: string;
+  readonly conversations: number;
+  readonly estimatedTokens: number;
+  readonly contextBytes: number;
+};
+
 export type ContextUsageSummary = {
   readonly entries: readonly ContextUsageEntry[];
   /** Conversations carrying a context snapshot; the rest contribute nothing. */
@@ -34,6 +43,8 @@ export type ContextUsageSummary = {
   readonly totalEstimatedTokens: number;
   readonly includedFiles: number;
   readonly omittedFiles: number;
+  /** The same totals grouped by the model each snapshot was captured for. */
+  readonly byModel: readonly ContextUsageModelTotal[];
 };
 
 /** The manifest fields this reads, structurally, so no union shape can break it. */
@@ -63,6 +74,7 @@ const EMPTY: ContextUsageSummary = Object.freeze({
   totalEstimatedTokens: 0,
   includedFiles: 0,
   omittedFiles: 0,
+  byModel: Object.freeze([]),
 });
 
 function count(value: unknown): number {
@@ -147,5 +159,35 @@ export function summarizeContextUsage(
     ),
     includedFiles: entries.reduce((total, entry) => total + entry.includedFiles, 0),
     omittedFiles: entries.reduce((total, entry) => total + entry.omittedFiles, 0),
+    byModel: perModelTotals(entries),
   };
+}
+
+/**
+ * The same entries grouped by model, heaviest first.
+ *
+ * Ties break on the model name so the order is stable rather than following
+ * whichever conversation happened to be read first. A snapshot that recorded
+ * no model is grouped under the empty string rather than dropped: its tokens
+ * were still spent, and hiding them would make the parts disagree with the
+ * total above them.
+ */
+function perModelTotals(
+  entries: readonly ContextUsageEntry[],
+): readonly ContextUsageModelTotal[] {
+  const totals = new Map<string, ContextUsageModelTotal>();
+  for (const entry of entries) {
+    const existing = totals.get(entry.model);
+    totals.set(entry.model, {
+      model: entry.model,
+      conversations: (existing?.conversations ?? 0) + 1,
+      estimatedTokens: (existing?.estimatedTokens ?? 0) + entry.estimatedTokens,
+      contextBytes: (existing?.contextBytes ?? 0) + entry.contextBytes,
+    });
+  }
+  return [...totals.values()].sort(
+    (left, right) =>
+      right.estimatedTokens - left.estimatedTokens ||
+      left.model.localeCompare(right.model),
+  );
 }
