@@ -18,6 +18,7 @@ import {
   isThemeMode,
   isThinkingMode,
   isToolPermissionMode,
+  normalizeAgentPresets,
   normalizeMirrorBaseUrl,
 } from './reducer';
 import { normalizeGitHttpsProxyUrl } from './gitProxy';
@@ -39,6 +40,7 @@ const persistedKeys: ReadonlySet<string> = new Set([
   'git_https_proxy_url',
   'mirrors',
   'message_feedback',
+  'agent_presets',
 ]);
 
 function invalid(path: string, message: string): never {
@@ -178,8 +180,29 @@ function decodeMessageFeedback(value: unknown): MessageFeedbackPreferences {
   return feedback;
 }
 
-export function hydrateAppPreferences(input: unknown): AppPreferences {
-  const raw = record(decode(input));
+/**
+ * The saved presets.
+ *
+ * Absent is the ordinary case for a state written before presets existed, so
+ * it hydrates to empty rather than failing. Anything present is held to the
+ * same rule the store applies: a bounded list of complete, uniquely named
+ * presets, or the whole state is refused rather than partly read.
+ */
+function decodeAgentPresets(
+  value: unknown,
+): AppPreferences['agentPresets'] {
+  if (value === undefined || value === null) return [];
+  const presets = normalizeAgentPresets(value);
+  if (presets === null) {
+    return invalid(
+      '$.agent_presets',
+      'must be a bounded list of complete presets with unique ids',
+    );
+  }
+  return presets;
+}
+
+export function hydrateAppPreferences(input: unknown): AppPreferences {  const raw = record(decode(input));
   if (required(raw, 'schema_version') !== APP_PREFERENCES_SCHEMA_VERSION) {
     return invalid(
       '$.schema_version',
@@ -230,6 +253,7 @@ export function hydrateAppPreferences(input: unknown): AppPreferences {
     gitHttpsProxyUrl: decodeGitHttpsProxyUrl(raw.git_https_proxy_url),
     mirrors: decodeMirrors(raw.mirrors),
     messageFeedback: decodeMessageFeedback(raw.message_feedback),
+    agentPresets: decodeAgentPresets(raw.agent_presets),
   };
 }
 
@@ -280,6 +304,7 @@ export function serializeAppPreferences(preferences: AppPreferences): string {
       },
     },
     message_feedback: preferences.messageFeedback,
+    agent_presets: preferences.agentPresets,
   };
   hydrateAppPreferences(persisted);
   return JSON.stringify(persisted);

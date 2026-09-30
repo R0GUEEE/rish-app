@@ -11,6 +11,9 @@ export const DEFAULT_MODEL_IDS = [
 export const THINKING_MODES = ['off', 'high', 'max'] as const;
 export const TOOL_PERMISSION_MODES = ['read-only', 'workspace-write'] as const;
 export const MIRROR_CATEGORIES = ['alpine', 'pip', 'npm'] as const;
+/** The most presets that are kept; see `MAX_AGENT_PRESETS` for the rule. */
+export const MAX_PERSISTED_AGENT_PRESETS = 50 as const;
+export type AgentPresetPreferences = readonly import('../presets/presets').AgentPreset[];
 /** The ratings a person can leave on an assistant message. */
 export const MESSAGE_FEEDBACK_RATINGS = ['up', 'down'] as const;
 /**
@@ -58,6 +61,7 @@ export type AppPreferences = {
   readonly gitHttpsProxyUrl: string | null;
   readonly mirrors: MirrorPreferences;
   readonly messageFeedback: MessageFeedbackPreferences;
+  readonly agentPresets: AgentPresetPreferences;
 };
 
 export type PersistedAppPreferencesV1 = {
@@ -79,6 +83,7 @@ export type PersistedAppPreferencesV1 = {
     >
   >;
   readonly message_feedback?: MessageFeedbackPreferences;
+  readonly agent_presets?: AgentPresetPreferences;
 };
 
 export type PreferencesAction =
@@ -137,6 +142,10 @@ export type PreferencesAction =
         /** null clears the rating the person left. */
         readonly rating: MessageFeedbackRating | null;
       };
+    }
+  | {
+      readonly type: 'preferences/set-agent-presets';
+      readonly payload: { readonly agentPresets: AgentPresetPreferences };
     }
   | { readonly type: 'preferences/reset' };
 

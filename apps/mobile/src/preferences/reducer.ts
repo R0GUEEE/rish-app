@@ -21,7 +21,13 @@ import {
   type ThinkingMode,
   type ToolPermissionMode,
 } from './types';
-import { normalizeGitHttpsProxyUrl } from './gitProxy';
+import { isGitHttpsProxyUrl, normalizeGitHttpsProxyUrl } from './gitProxy';
+import {
+  MAX_AGENT_PRESETS,
+  isAgentPreset,
+  type AgentPreset,
+} from '../presets/presets';
+import type { AgentPresetPreferences } from './types';
 
 export { isGitHttpsProxyUrl, normalizeGitHttpsProxyUrl } from './gitProxy';
 
@@ -40,6 +46,9 @@ export const DEFAULT_MIRROR_PREFERENCES: MirrorPreferences = {
 /** Shared until someone rates a message; never mutated in place. */
 const NO_MESSAGE_FEEDBACK: MessageFeedbackPreferences = Object.freeze({});
 
+/** Shared until someone saves a preset; never mutated in place. */
+const NO_AGENT_PRESETS: AgentPresetPreferences = Object.freeze([]);
+
 export const DEFAULT_APP_PREFERENCES: AppPreferences = Object.freeze({
   schemaVersion: APP_PREFERENCES_SCHEMA_VERSION,
   themeMode: 'system',
@@ -54,6 +63,7 @@ export const DEFAULT_APP_PREFERENCES: AppPreferences = Object.freeze({
   gitHttpsProxyUrl: null,
   mirrors: DEFAULT_MIRROR_PREFERENCES,
   messageFeedback: NO_MESSAGE_FEEDBACK,
+  agentPresets: NO_AGENT_PRESETS,
 });
 
 const themes: ReadonlySet<string> = new Set(THEME_MODES);
@@ -313,6 +323,21 @@ export function preferencesReducer(
         action.payload.messageId,
         action.payload.rating,
       );
+    case 'preferences/set-agent-presets': {
+      const next = normalizeAgentPresets(action.payload.agentPresets);
+      if (next === null || next === preferences.agentPresets) {
+        return preferences;
+      }
+      // An equal-but-recreated list must not count as a change, or a store
+      // that rebuilds it every render would notify forever.
+      if (
+        next.length === preferences.agentPresets.length &&
+        next.every((entry, index) => entry === preferences.agentPresets[index])
+      ) {
+        return preferences;
+      }
+      return { ...preferences, agentPresets: next };
+    }
     case 'preferences/reset': {
       const defaults = DEFAULT_APP_PREFERENCES;
       const alreadyDefault = (
@@ -368,6 +393,31 @@ export const selectGitHttpsProxyUrl = (
 export const selectMessageFeedback = (
   preferences: AppPreferences,
 ): MessageFeedbackPreferences => preferences.messageFeedback;
+
+export const selectAgentPresets = (
+  preferences: AppPreferences,
+): AgentPresetPreferences => preferences.agentPresets;
+
+/**
+ * The whole list, or null when any entry is not a preset a round could honour.
+ *
+ * Validated as a whole rather than filtered per entry: a list that silently
+ * drops what it cannot read is a list that loses a person's work without
+ * saying so. Duplicate ids are refused because two presets under one name can
+ * never both be applied.
+ */
+export function normalizeAgentPresets(
+  value: unknown,
+): AgentPresetPreferences | null {
+  if (!Array.isArray(value) || value.length > MAX_AGENT_PRESETS) return null;
+  const seen = new Set<string>();
+  for (const entry of value) {
+    if (!isAgentPreset(entry)) return null;
+    if (seen.has(entry.id)) return null;
+    seen.add(entry.id);
+  }
+  return value as AgentPresetPreferences;
+}
 
 /** What the person rated one message, or null when they have not. */
 export const selectMessageFeedbackFor = (

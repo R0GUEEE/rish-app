@@ -8257,6 +8257,7 @@
     }
   ],
   "preferences": {
+    "agent_presets": [],
     "auto_expand_tools": false,
     "confirm_destructive_file_actions": true,
     "default_model": "deepseek-v4-flash",

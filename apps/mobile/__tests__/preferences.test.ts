@@ -59,6 +59,7 @@ describe('app preferences reducer and selectors', () => {
         npm: { enabled: false, baseUrl: 'https://registry.npmjs.org/' },
       },
       messageFeedback: {},
+      agentPresets: [],
     });
     expect(preferences).not.toBe(DEFAULT_APP_PREFERENCES);
     expect(Object.isFrozen(DEFAULT_APP_PREFERENCES)).toBe(true);
@@ -189,6 +190,7 @@ describe('strict preferences persistence', () => {
         },
       },
       messageFeedback: {},
+      agentPresets: [],
     };
   }
 
@@ -226,6 +228,7 @@ describe('strict preferences persistence', () => {
         },
       },
       message_feedback: {},
+      agent_presets: [],
     });
     expect(hydrateAppPreferences(first)).toEqual(preferences);
   });

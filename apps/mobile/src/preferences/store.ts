@@ -1,6 +1,12 @@
 import { hydrateAppPreferences, serializeAppPreferences } from './persistence';
 import { createDefaultPreferences, preferencesReducer } from './reducer';
+import {
+  removeAgentPreset,
+  upsertAgentPreset,
+  type AgentPreset,
+} from '../presets/presets';
 import type {
+  AgentPresetPreferences,
   AppPreferences,
   DefaultModelId,
   LocalePreference,
@@ -41,6 +47,11 @@ export type PreferencesStore = {
     messageId: string,
     rating: MessageFeedbackRating | null,
   ): void;
+  /** Replaces the whole list; the reducer refuses anything invalid. */
+  setAgentPresets(agentPresets: AgentPresetPreferences): void;
+  /** Adds a preset, or replaces the one carrying the same id. */
+  saveAgentPreset(preset: AgentPreset): void;
+  deleteAgentPreset(id: string): void;
   reset(): void;
   serialize(): string;
   hydrate(input: unknown): AppPreferences;
@@ -80,7 +91,14 @@ function preferencesEqual(
           key => left.messageFeedback[key] === right.messageFeedback[key],
         )
       );
-    })()
+    })() &&
+    // Presets are compared by entry, not by deep equality: the screen keeps
+    // the same object for an untouched preset, so identity is enough and a
+    // rebuilt-but-equal list stays a non-event.
+    left.agentPresets.length === right.agentPresets.length &&
+    left.agentPresets.every(
+      (preset, index) => preset === right.agentPresets[index],
+    )
   );
 }
 
@@ -175,6 +193,21 @@ export function createPreferencesStore(
       dispatch({
         type: 'preferences/set-message-feedback',
         payload: { messageId, rating },
+      });
+    },
+    setAgentPresets: agentPresets => {
+      dispatch({ type: 'preferences/set-agent-presets', payload: { agentPresets } });
+    },
+    saveAgentPreset: preset => {
+      dispatch({
+        type: 'preferences/set-agent-presets',
+        payload: { agentPresets: upsertAgentPreset(preferences.agentPresets, preset) },
+      });
+    },
+    deleteAgentPreset: id => {
+      dispatch({
+        type: 'preferences/set-agent-presets',
+        payload: { agentPresets: removeAgentPreset(preferences.agentPresets, id) },
       });
     },
     serialize: () => serializeAppPreferences(preferences),
