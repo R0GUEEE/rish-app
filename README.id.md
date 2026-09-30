@@ -201,8 +201,6 @@ memisahkan kemampuan yang terverifikasi dari jalur eksperimental.
 | Platform | Cakupan saat ini |
 | --- | --- |
 | iOS / iPadOS | Percakapan native, lampiran, Files, Git, dan alat Agent terkendali; termasuk tata letak iPad adaptif. |
-| Android | Obrolan API native, penyimpanan kredensial, pemulihan sesi, dan notifikasi tugas terlingkup. Eksekusi lokal Agent, Files, dan Git belum tersedia. |
-| HarmonyOS | Pemeriksaan sementara pada kontainer kompatibilitas Android tidak menetapkan dukungan HarmonyOS native. |
 
 | Koneksi | Metode saat ini |
 | --- | --- |
@@ -248,10 +246,6 @@ cd ../../..
 npm run ios --prefix apps/mobile
 ```
 
-**Android:** Dengan lingkungan pengembangan Android yang telah dikonfigurasi,
-jalankan `npm run android --prefix apps/mobile`. Panduan pengembang juga
-membahas [APK uji mandiri](docs/development.md#install-and-run-the-react-native-app).
-
 Buka aplikasinya, pilih model, dan hubungkan dengan kunci API atau akun yang
 didukung. Di iOS, buat atau pilih proyek, tinjau konteksnya, lalu mulai tugas.
 Masuk dengan langganan Codex dan Claude Code memerlukan build eksperimental
@@ -262,8 +256,8 @@ di penyimpanan aman native.
 ## Progres dan kontribusi
 
 Pratinjau sumber pertama sedang disiapkan. Rilis mendatang akan ditandai
-**Pre-release**. Kompatibilitas Harness yang lengkap, eksekusi lokal Android,
-dan operasi latar belakang berkelanjutan masih terbatas. Lihat
+**Pre-release**. Kompatibilitas Harness yang lengkap dan operasi latar belakang
+berkelanjutan masih terbatas. Lihat
 [cakupan pratinjau dan peta jalan](docs/releases/v0.1.0.md).
 
 Kontribusi untuk dokumentasi, dukungan platform, kompatibilitas model, dan

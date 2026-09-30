@@ -28,7 +28,6 @@ import {
   findNodeHandle,
   KeyboardAvoidingView,
   ScrollView,
-  Platform,
   Pressable,
   StyleSheet,
   Text,
@@ -193,7 +192,6 @@ import {
   type ProjectContextLifecycleControllerState,
 } from '../project-context';
 import { useAppPresentation } from '../presentation/AppPresentation';
-import { useKeyboardHeight } from '../layout/keyboard';
 import {
   resolveAdaptiveLayout,
   WIDE_CONTENT_MAX_WIDTH,
@@ -684,7 +682,6 @@ export function HomeScreen({
   seedMarkdownDemo?: boolean;
 }) {
   const insets = useSafeAreaInsets();
-  const keyboardHeight = useKeyboardHeight();
   const { width: windowWidth } = useWindowDimensions();
   const { isWide: wideLayout } = resolveAdaptiveLayout(windowWidth);
   const {
@@ -2528,7 +2525,7 @@ export function HomeScreen({
       };
     }
     // The legacy listing knows legacy projects; a project attached to a
-    // workspace is named by the workspace. On Android only the second exists.
+    // workspace is named by the workspace.
     LocalProjects.list()
       .then(listing => listing.projects.find(project => project.id === activeProjectId)?.name ?? null)
       .catch(() => null)
@@ -2815,7 +2812,7 @@ export function HomeScreen({
   ]);
   const runtimeLocal =
     proof !== null &&
-    (proof.checks.credential_in_keychain || proof.checks.credential_in_secure_store === true) &&
+    (proof.checks.credential_in_keychain) &&
     proof.checks.rish_applet_executed &&
     !proof.mac_dsh_port_3180_reachable;
   const runtimeLabel = sessionLoadFailure !== null ? t('recovery.loadBlocked') : codexModelsLoading ? t('messages.loadingSubscriptionModels') : runtimeChecking
@@ -2832,13 +2829,6 @@ export function HomeScreen({
     ? t('runtime.status.proxyDetected')
     : runtimeLocal
     ? t('runtime.status.verified')
-    : proof?.platform?.startsWith('android')
-    // The guest applet and the workspace tools are separate things. Saying
-    // "local tools unavailable" while list_dir and write_file were running
-    // was one sentence covering both, and it was wrong about one of them.
-    ? t(proof.checks.workspace_tools_available === true
-        ? (proof.checks.model_response_received ? 'runtime.status.chatReadyToolsLocal' : 'runtime.status.chatConfiguredToolsLocal')
-        : (proof.checks.model_response_received ? 'runtime.status.chatReadyToolsPending' : 'runtime.status.chatConfiguredToolsPending'))
     : t('runtime.status.incomplete');
   const runtimeStatus: RuntimeVerificationStatus = runtimeChecking
     ? 'checking'
@@ -3329,8 +3319,7 @@ export function HomeScreen({
       );
       return;
     }
-    // Images, and on Android PDFs (sent as their pages drawn), need a model
-    // that reads pictures.
+    // Images need a model that reads pictures.
     const historyNeedsVision =
       beforeAppend?.messages.some(message =>
         message.attachments?.some(attachment => LocalAttachments.kindNeedsVision(attachment.kind)),
@@ -6432,7 +6421,7 @@ export function HomeScreen({
 
   return (
     <KeyboardAvoidingView
-      behavior={Platform.OS === 'ios' ? 'padding' : undefined}
+      behavior="padding"
       style={styles.root}
     >
       <View
@@ -6530,13 +6519,7 @@ export function HomeScreen({
         <View
           style={[
             styles.bottomArea,
-            // Android draws edge to edge since RN 0.87, so the window no
-            // longer shrinks for the keyboard and the composer was simply
-            // covered by it. The height the keyboard reports is measured
-            // from the top of the navigation bar, so the bottom inset is
-            // still needed underneath it. iOS reports zero here and keeps
-            // the screen's KeyboardAvoidingView.
-            { paddingBottom: Math.max(insets.bottom, 11) + keyboardHeight },
+            { paddingBottom: Math.max(insets.bottom, 11) },
           ]}
         >
           {(visibleRequestFailure !== null || storageWarning !== null) && (
@@ -6648,7 +6631,7 @@ export function HomeScreen({
           {attachmentNotice !== null && visibleRequestFailure === null && (
             <View
               accessibilityLiveRegion="polite"
-              accessibilityRole={Platform.OS === 'android' ? 'text' : 'status'}
+              accessibilityRole={'status'}
               style={styles.attachmentNotice}
             >
               <Text numberOfLines={2} style={styles.attachmentNoticeText}>
@@ -6662,7 +6645,7 @@ export function HomeScreen({
             visibleRequestFailure === null && (
             <View
               accessibilityLiveRegion="polite"
-              accessibilityRole={Platform.OS === 'android' ? 'text' : 'status'}
+              accessibilityRole={'status'}
               style={styles.workspaceHint}
               testID="workspace-unbound-hint"
             >

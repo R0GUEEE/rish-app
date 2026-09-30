@@ -77,8 +77,6 @@ custom provider and save to return to the official configuration.
 
 ## Current mobile product
 
-The following describes the iOS surface unless another platform is named.
-
 - The Agent permissions panel reads current native workspace/project policy
   on opening, refresh and foreground return, without creating a task or using
   model credentials. It shows native tool modes and matching conversation grants.
@@ -278,111 +276,13 @@ the repository root:
 npm run ios --prefix apps/mobile
 ```
 
-For Android UI development, after the npm installation above:
-
-```sh
-npm run android --prefix apps/mobile
-```
-
-Android task alerts, per-conversation mute, and user-started foreground-service
-lifecycle are implemented and have scoped emulator tests. Android uses an
-ongoing notification instead of iOS Live Activities. These checks do not prove
-model, file/Git, or Agent execution.
-
-Android now supports pure-text API chat through native OkHttp, Android Keystore
-encrypted credentials, scoped custom-provider profiles, and atomic SQLite session
-snapshots. API33 emulator checks cover DSH, GLM, GLM-backed Codex/Claude Code
-profiles, and UI send/save/reopen without replay. Those profiles test API adapters,
-not the official CLI harnesses or subscription login. Attachments, project context,
-file/Git, and Agent execution remain unavailable; runtime status honestly
-reports incomplete. Debug UI uses Metro; standalone Release and physical Android
-device acceptance remain pending.
-
-### Android guest runtime
-
-The rish Linux guest runs on Android through the same pure-Rust x86_64
-interpreter the iOS app uses. It is opt-in at build time because it adds the
-runtime library and the 22 MB of guest boot assets to the APK:
-
-```sh
-scripts/prepare-rish-android.sh
-apps/mobile/android/gradlew -p apps/mobile/android :app:assembleDebug -PreactNativeArchitectures=arm64-v8a
-```
-
-`prepare-rish-android.sh` carries the same rish commit, `rish.h`, `Cargo.lock`
-and Rust pins as `prepare-rish-ios.sh`, builds `rish-ffi` with the pinned NDK
-(27.1.12297006, API 24, 16 KiB page alignment), verifies the ELF machine,
-segment alignment, Bionic-only dependencies and exported symbols, and stages
-`apps/mobile/android/rish-ffi/` (gitignored) with a provenance manifest.
-`RISH_ANDROID_ABIS` selects ABIs (default `arm64-v8a`; `x86_64` needs the
-`x86_64-linux-android` Rust target). Gradle packages the runtime, compiles the
-JNI shim under `app/src/main/cpp/`, and copies the pinned kernel and initramfs
-from `apps/mobile/ios/Rish/GuestAssets/` into the APK assets; it refuses a
-`reactNativeArchitectures` set the runtime was not staged for. Without the
-staged directory the build stays a lite build and `LocalGuest` reports
-`implemented = false`.
-
-`LocalGuestModule` (Kotlin, `tech.zseven.rish.guest`) mirrors the iOS module:
-fail-closed request validation, digest verification of the staged assets before
-every boot, one session per process, boot on a dedicated thread, exec
-serialised with shutdown, and receipts that never carry paths. JVM unit tests
-cover the state machine against a fake runtime; the instrumented
-`LocalGuestBootTest` is the real proof and skips on a lite build:
-
-```sh
-apps/mobile/android/gradlew -p apps/mobile/android :app:connectedDebugAndroidTest \
-  -PreactNativeArchitectures=arm64-v8a \
-  -Pandroid.testInstrumentationRunnerArguments.class=tech.zseven.rish.LocalGuestBootTest
-```
-
-On the arm64 API 33 emulator it boots the guest in about 34 s with 768 MiB,
-reports `uname -m` as `x86_64`, installs `tree` from the offline apk repository
-baked into the initramfs, runs it, and shuts down. This proves the runtime and
-guest are genuinely in the APK and bootable; nothing in the Android UI drives
-the guest yet, because the Agent runtime, workspace and file modules that use
-it on iOS are still unavailable on Android.
-
-For temporary Android compatibility-container testing, build a self-contained
-debug-signed APK with bundled JS and developer-server support disabled:
-
-```sh
-apps/mobile/android/gradlew -p apps/mobile/android :app:assembleDebug -PrishStandalone=true -PreactNativeArchitectures=arm64-v8a
-```
-
-This remains a test build, not a production-signed release. Its launcher was
-checked on the API33 emulator with airplane mode enabled; HarmonyOS compatibility
-container installation and execution require a separate device check.
-
-### Android release signing
-
-Release builds never use the React Native debug keystore. `assembleRelease`,
-`bundleRelease` and `installRelease` fail with an explanation unless you supply
-a key, either as `apps/mobile/android/keystore.properties` (gitignored):
-
-```properties
-storeFile=/absolute/or/android-relative/path/to/release.jks
-storePassword=...
-keyAlias=...
-keyPassword=...
-```
-
-or as the environment `RISH_ANDROID_KEYSTORE`, `RISH_ANDROID_KEYSTORE_PASSWORD`,
-`RISH_ANDROID_KEY_ALIAS` and `RISH_ANDROID_KEY_PASSWORD` for CI. A properties
-file that points at `debug.keystore` is refused. Debug builds keep the debug
-key, and unit tests and configuration never need release signing.
-
 ## Editable DSH model catalog
 
 In Settings, use **DSH model catalog** to add exact provider model IDs, display
 names and image-input capability declarations, or edit/remove entries and restore
-defaults. iOS and Android persist the catalog natively. Up to 32 selectable models
+defaults. iOS persists the catalog natively. Up to 32 selectable models
 are supported; removed identities remain readable in existing conversations.
 Adding a provider-supported model does not require another app update.
-
-Android status now distinguishes configured chat from unavailable local tools.
-API chat and session storage do not imply that file/Git, Agent or rish execution
-has been implemented. Image capability declarations cannot add capabilities that
-the provider or platform does not support.
 
 ## Build and verify the iOS local-substrate proof
 
@@ -439,8 +339,8 @@ boolean is not sufficient evidence.
 ## Shared agent core (Rust)
 
 `modules/rish/core` is a Cargo workspace (`rish-agent-core` for domain logic,
-`rish-agent-ffi` for the C boundary) that will carry the Agent engine for both
-platforms. The Objective-C++ engine under `modules/rish/ios/Sources` stays the
+`rish-agent-ffi` for the C boundary) that carries the Agent engine. The
+Objective-C++ engine under `modules/rish/ios/Sources` stays the
 reference until each piece is migrated behind its existing interface.
 
 Phase 0 ports the byte-level contracts every later piece depends on: canonical
@@ -619,7 +519,7 @@ row. The round row is the one place the boundary is crossed twice: the core
 judges every V3 rule and returns the schema-2 projection, which the native
 `DSHAgentValidateRoundNativeEntryV2` still has to accept before the row is
 kept. The V1→V2 batch migration and the V2→V3 round migration move with
-them, so an old file upgrades identically on both platforms.
+them, so an old file upgrades identically.
 
 The third cut moves the state-level validation itself: the root key lists for
 both schemas, the per-attempt capacities, the transcript digests, the
@@ -724,32 +624,26 @@ cancelled. What stays native is what the plan always said stays: the
 transport, the streaming parser, the preview publisher, the credentials, and
 the round context a cancellation has to reach into.
 
-### One set of session rules on both platforms
+### One set of session rules
 
-Android used to decide session persistence itself. Its CAS keyed replay on the
-whole request's bytes and threw when an operation id came back with different
-ones, stored conflicts as durable receipts, and accepted any candidate that
-merely said `schema_version: 9`. None of that is what the shared rules say, so
-a session written by one platform was not necessarily a session the other
-would accept or replay the same way.
+Session persistence itself is a rule, not a host decision: the CAS keyed replay
+on the candidate rather than the whole request's bytes, the treatment of a
+conflict, and the schema-9 acceptance graph all come from the shared core. A
+host that kept its own reading of them would not necessarily accept or replay
+the same session the same way.
 
-`scripts/prepare-rish-agent-core-android.sh` now builds the same core for
-`aarch64-linux-android` and stages it beside the guest runtime, and
-`src/main/cpp/rish_agent_core_jni.cpp` exposes the session reducer over JNI.
-`AndroidSessionStore` keeps SQLite as the storage mechanism and nothing else:
+The host keeps SQLite as the storage mechanism and nothing else:
 the request shape, the candidate's acceptance and digest, the replay and
 expected-authority checks, and what a query may conclude all come from the
-core. Three differences are gone with it — replay is keyed on the candidate,
+core. Three consequences follow — replay is keyed on the candidate,
 so the same session in different bytes is the same commit; a conflict is no
 longer written down, so an operation may be retried once its author has
 re-read the authority; and a candidate is judged by the whole schema-9
 acceptance graph.
 
-Android still refuses candidates that carry native authority, because it
-issues none: that is a platform policy stated on top of the shared rules, not
-a second reading of them. The catalogue the core needs — which strings name a
-supported model, and which harness each belongs to — is collected from the
-candidate itself, exactly as `DSHSessionCoreEnvironment` does on iOS.
+The catalogue the core needs — which strings name a supported model, and which
+harness each belongs to — is collected from the candidate itself, exactly as
+`DSHSessionCoreEnvironment` does on iOS.
 
 ### The frozen assets
 
@@ -793,77 +687,54 @@ tool that replaces the WAL behind the store's back is seen rather than served
 from memory. `testCommittedStateIsRereadWhenTheFileIsReplacedBehindTheStore`
 is that case, and it fails without the identity check.
 
-### The WAL on Android
+### The WAL facade
 
-The Android WAL writes the same bytes: `agent-native-wal-v1.json` under the
-app's no-backup directory, the whole state as canonical JSON, replaced by
-write-temp, fsync, rename, fsync-directory. The format is shared on purpose —
-every rule about what a stored state may look like already lives in the core,
-and a WAL pulled off a device replays through the same harness whichever
-platform wrote it. SQLite would have meant a second storage adapter and a
-second answer to "what is committed", which is exactly what the session store
-just stopped having.
+The WAL writes `agent-native-wal-v1.json` under the app's no-backup directory:
+the whole state as canonical JSON, replaced by write-temp, fsync, rename,
+fsync-directory. The format is shared on purpose — every rule about what a
+stored state may look like already lives in the core, and a WAL pulled off a
+device replays through the same harness. SQLite would have meant a second
+storage adapter and a second answer to "what is committed", which is exactly
+what the session store just stopped having.
 
-`android.system.Os` can fsync a directory from Kotlin, so the only JNI needed
-is the reducer bridge that already exists. The three-state confirmation is the
-same as iOS: everything before the rename is provably not committed, the
-directory fsync makes it durable, and a failure in between is unknown and
-refuses rather than guessing.
-
-Two Android-specific hazards are covered by tests because both were real bugs
-first. The resident state must not answer while a staging file is present —
-a torn transaction is exactly the hazard a cache would hide, so the check runs
-before the cache, not after. And every native call has to load the library
-first: the reducers did it through their own guard, the handle calls did not,
-and the WAL reached them on a path that had never loaded anything.
+The three-state confirmation holds: everything before the rename is provably
+not committed, the directory fsync makes it durable, and a failure in between
+is unknown and refuses rather than guessing.
 
 `AgentRuntimeModule` is still a stub. This is the storage layer it will stand
 on, not the engine.
 
-The transcript store follows it, as a facade over the same reducer iOS calls:
-the host owns the WAL transaction, generates the fresh transcript id and the
-retention timestamp, collects the view, and applies the returned changes
-verbatim. The round-presentation file cache iOS keeps is display only, not
-authority, and is not mirrored.
-
-Writing the Android facade is also the first time the shared rules have been
-read by someone who did not write the iOS one, and that found three things
-the iOS call sites had simply always got right: a transcript holds assistant
-and tool turns only, because user text lives in the session; `append` and
-`mark_terminal` name the row they expect to still be there through
-`expected_transcript`, not `transcript`; and a root is the full seven-field
-form, not a path. Each of those is now a test.
+The transcript store follows it, as a facade over the same reducer the core
+exposes: the host owns the WAL transaction, generates the fresh transcript id
+and the retention timestamp, collects the view, and applies the returned changes
+verbatim. The round-presentation file cache is display only, not authority.
 
 The round journal and the execution ledger follow, on the same facade shape:
 collect the view, call the reducer, apply the row, dispatch-marker and
 transcript effects it returns, and answer whether an owner is still alive in
-this process. Between them they turned up the mistake that would have been
-hardest to find from the outside: **`org.json.JSONObject` has no value
-equality**. Every "is this the row the locator names" comparison used `==`,
-which compares references, so a lookup simply never matched and the journal
-inserted a second row and a second dispatch marker instead of reporting
-already-present. `AndroidJson.equal` is the structural comparison those call
-sites now use; the state-level validation caught the duplicate marker, which is
-exactly what it is for.
+this process.
 
-Three more shape facts the iOS call sites had always got right: a round locator
-is schema 1 while a round CAS is schema 2, an owner carries its own `task_id`
-and `heartbeat_at`, and `claim`/`mark_dispatched` take a full CAS rather than a
-revision.
+Four shape facts the facade validates: a transcript holds assistant
+and tool turns only, because user text lives in the session; `append` and
+`mark_terminal` name the row they expect to still be there through
+`expected_transcript`, not `transcript`; a root is the full seven-field form,
+not a path; and a round locator is schema 1 while a round CAS is schema 2, an
+owner carries its own `task_id` and `heartbeat_at`, and
+`claim`/`mark_dispatched` take a full CAS rather than a revision.
 
 ### The tool table is a table
 
 `AgentToolRegistry.mm` held the frozen tool descriptors, the access each root
 capability implies, the write policy and the toolset digest. The table is a
 pure table and the digest taken over it is what every stored authority is
-bound to, so a second copy on Android would have been a second source of
-truth for a compatibility contract. `tool_registry.rs` owns it now, and both
-platforms read it.
+bound to, so a second copy would have been a second source of
+truth for a compatibility contract. `tool_registry.rs` owns it now, and the
+host reads it.
 
 One thing does stay with the host, because the core cannot know it: whether
 this build has the guest CGI tools compiled in. iOS answers from
-`DSH_GUEST_CGI_AVAILABLE`, Android answers no, and the digest follows. Both
-values are pinned in the core's tests — a change to the table changes them and
+`DSH_GUEST_CGI_AVAILABLE`, and the digest follows. That
+value is pinned in the core's tests — a change to the table changes it and
 invalidates every authority on every device, which is exactly the kind of
 change that should be hard to make by accident.
 
@@ -1001,7 +872,7 @@ against the same inputs and assert identical output, as
 root — reads the workspace registry, checks the binding revision, takes the
 workspace and project leases, holds the authority mutation guard, talks to
 libgit2 — and that is host capability: nothing about it can be shared, because
-the two platforms do not have the same storage. But along the way it makes
+storage is the host's own. But along the way it makes
 judgements, and those are rules: what a resolver argument may look like, which
 capabilities a set of workspace grants implies, how a workspace root is
 promoted to a project root, which capability an operation mode needs, and
@@ -1032,12 +903,6 @@ the guarded validator re-derives an expectation from a base it may already
 hold. And a root that cannot serve an operation is `E_AGENT_CONFLICT`, not
 `E_AGENT_INVALID`: the request was well formed, the root simply does not carry
 the capability.
-
-Android does not call this reducer yet, and cannot: `LocalWorkspaceModule` and
-`LocalProjectsModule` there are stubs that reject every method. Resolving a
-root needs a workspace subsystem and a project subsystem, neither of which
-exists on Android; that is product surface, not engine migration. The rules are
-in place for when it does.
 
 ### The write-approval preview
 
@@ -1137,157 +1002,6 @@ project-context policy uses — and the reserved-name check (`rish workspaces`,
 the `.rish-` prefix) is on the folded spelling so case and diacritics cannot
 dodge it. A host that could not fold refuses rather than guessing.
 
-### Android resolves a root
-
-`AndroidAgentRootResolver.kt` turns a workspace binding into the root an agent
-attempt runs against, and `AndroidPreparedAttemptStore` now prepares one for
-real instead of refusing every rooted request.
-
-**What an Android workspace root can do: read and write files.** The registry
-grants read, write and git, but the shared rule only turns `git` into Agent Git
-capabilities for a *project* root, and there is no project subsystem here;
-`guest_service` needs the guest CGI tools, which this build does not ship. So
-the projection is exactly `["file_read", "file_write"]`, and the test pins that
-rather than asserting something vaguer.
-
-**A project root is refused, not approximated.** A project root needs an
-independently verified lease. Answering a project request with a workspace root
-wearing a project's name would hand the caller authority it never established.
-
-**The session store now accepts workspace-bound conversations.** It used to
-refuse `workspace_id` and `workspace_binding` outright, which made the
-root-stale branch unreachable — the request and the stored attempt always
-disagreed first, so a test that looked like it covered rooted requests covered
-nothing of the sort. `project_id` and `project_context` stay refused. Whether a
-binding can still be *proved* is decided where it is used: a session records
-what the person chose, the resolver decides what that is still worth.
-
-`aRootedAttemptResolvesItsWorkspaceAndPreparesForReal` is the first prepared
-attempt on this platform that is not a rejection — an authority and a
-transcript, against a root whose fingerprint is the registry's. Checked by
-mutation: dropping the resolved root from the transaction fails one test, and
-restoring the session store's old refusal fails four.
-
-### Android's workspace registry
-
-`AndroidWorkspaceRegistry.kt` is the first workspace subsystem on Android. It
-writes the same record, authority and fingerprint iOS writes, validated by the
-same shared rules, so growing it later is new code over the same bytes rather
-than a migration.
-
-**Scope, and why.** Only the `rish_created` origin can exist on Android: there
-are no security-scoped bookmarks and no legacy iOS projects, so those two
-shapes are unreachable and are rejected rather than stubbed. There is no
-rebinding either — an app-private directory keeps its identity for as long as
-the app is installed, and the one event that changes it takes the data with it
-— so every record is at binding revision 1 and nothing there exercises
-`binding_revision_advance`.
-
-**Folding is per-host and that is fine.** iOS folds with Foundation under
-`en_US_POSIX`; Android uses NFD with combining marks dropped, lowercased in the
-root locale. The two do not always agree. A folded name is never stored, only
-compared against other names on the same device; everything that *is* stored
-goes through the shared rules.
-
-**Inode reuse.** `aReplacedDirectoryIsNotTheSameRoot` originally deleted the
-directory and recreated it — and passed the old identity straight back, because
-the freed inode is handed out again immediately. The test now moves the
-directory instead, which keeps the old inode allocated, and asserts that the
-replacement really did get a different one so it cannot quietly stop testing.
-Worth naming as a limit of the design: physical identity catches a folder
-swapped for a *different* one, not a folder deleted and rebuilt in its place.
-Neither platform claims otherwise.
-
-The twelve instrumentation tests were checked by breaking three rules: not
-asking whether the record is the right shape, not comparing the directory
-identity, and inventing the fingerprint instead of asking for it. The last one
-fails nine of the twelve.
-
-### The Android baseline, corrected
-
-Three of the five Android instrumentation failures reported throughout this
-work were **the launch defect above**, not the environment. With
-`libappmodules.so` built and a warm Metro, the suite is 105 tests with **two**
-failures:
-
-- `AndroidSubscriptionCliExecutionTest
-  officialClisExecuteFromExtractedNativeLibraryDir` — fails with *"Run this
-  probe only with `-PrishOfficialCliDir=...`"*. It is an opt-in probe that
-  **asserts instead of skipping** when its input is absent, so it fails every
-  ordinary run. Not an app defect; worth turning into a skip so the suite stops
-  carrying a permanent false red.
-- `DshModelCatalogUiTest addModelThroughReactEditorPersistsInNativeCatalog` —
-  *"Expected catalog UI not displayed"*, failing 2/2 in isolation. A stable,
-  real, pre-existing failure that predates this work and has not been
-  investigated.
-
-**Debug needs a warm Metro.** `HomeScreenRenderTest` waits 30s for the screen,
-and a cold Metro bundle for this app takes longer; the same test passes once
-the bundle is warm. Run `npx react-native start` and fetch
-`/index.bundle?platform=android` once before the UI suites, or they will look
-broken.
-
-**The lesson worth keeping:** "pre-existing environmental failure" is a label
-that has to be earned each time. Three of these five were a real defect wearing
-that label, and the only reason it surfaced was building a *release* package —
-the one configuration that bundles its JS and so cannot hide behind Metro.
-
-### The Android app could not launch, and the release build proved it
-
-`libappmodules.so` was not in the APK — neither release nor debug. It is the
-library React Native's New Architecture generates to register every TurboModule
-and Fabric component, and without it the app starts, fails
-`TurboModuleRegistry.getEnforcing('PlatformConstants')`, and **aborts**:
-
-```
-E ReactNativeJS: Invariant Violation: TurboModuleRegistry.getEnforcing(...):
-  'PlatformConstants' could not be found.
-F libc    : Fatal signal 6 (SIGABRT) ... (mqt_v_js)
-```
-
-**The cause was the CMake entry point.** `app/build.gradle` pointed
-`externalNativeBuild` at `src/main/cpp/CMakeLists.txt` — the Rish JNI shims —
-so Gradle built those two libraries and never React Native's `appmodules`
-target. `newArchEnabled=true` the whole time; nothing said so.
-
-The fix is a CMake file in `src/main/jni/` that includes
-`ReactNative-application.cmake` and pulls in `../cpp` for the shims, with
-`appmodules` added to the target list. **The directory matters:**
-`ReactNative-application.cmake` globs `*.cpp` next to itself and, finding any,
-uses those *instead of* its own `OnLoad.cpp` — so the shims have to stay in
-their own directory or they would silently replace React Native's entry point.
-
-**How it stayed hidden.** A debug build needs Metro, so a debug launch fails
-for that reason too and the two look alike; the four React-screen
-instrumentation tests were being reported as environmental. Only the release
-APK, which bundles its JS and needs no Metro, showed the real fault. A release
-build is not just packaging — it is the only configuration where that class of
-defect is visible.
-
-Verified after the fix: the release APK installs, launches, `MainActivity`
-reaches `ResumedActivity`, and the UI renders (`RISH · ON DEVICE`, `Choose
-workspace`). Before it, `am start` was followed by SIGABRT.
-
-### Android operations are idempotent now
-
-`AndroidWorkspaceRegistry` had no notion of an operation id: a retry after a
-crash created a *second* workspace where the person asked for one. It has a
-receipt store now, on the rules `workspace_receipt` already held and which
-nothing on Android exercised.
-
-`create` takes an operation id, replays the receipt if one exists, and writes
-one last — **after** the registry. A crash before the receipt leaves an
-unreceipted workspace rather than a receipt for one that is not there; the
-retry then finds no receipt and refuses on the directory that already exists,
-which is a visible failure instead of a silent second workspace.
-
-**A receipt binds the operation to its request.** The same id with a different
-display name is a different operation reusing an id, and it is refused rather
-than answered with somebody else's workspace.
-
-`queryOperation` returns the public projection, which withholds
-`request_sha256` — the same rule iOS follows, for the same reason.
-
 ### What a project-context result may say
 
 `project_context_bridge.rs` ports `DSHPCSafeRelativePath` and
@@ -1350,7 +1064,7 @@ keeps it: it came from a layer that had already made the decision.
 
 **The stable code is the contract.** JavaScript branches on it, so the mapping
 from an internal failure in one of three domains to an `E_…` string is a rule
-both platforms answer alike. An unrecognised failure becomes
+the engine answers alike. An unrecognised failure becomes
 `E_PROJECT_NATIVE`, not a guess: a caller must not be able to branch on a
 failure that does not exist.
 
@@ -1537,11 +1251,8 @@ primitives (`ClearanceUUID`, `ClearanceDigest`, `ClearanceTimestamp`,
 core. The ones the ported rules used are gone; the rest still back the file's
 storage paths and stay for now.
 
-### Android reads its registry the way iOS does
+### One place says device ids are not durable
 
-Two things, and the second only became possible because of the first.
-
-**One place says device ids are not durable.**
 `DSHWorkspaceDescriptorMatchesAuthority` — the last rule left in
 `LocalWorkspaceAccess.mm` — now asks `descriptor_matches_authority`. Only the
 inode is compared, because iOS renumbers the data volume across reboots and a
@@ -1551,39 +1262,13 @@ carried by *how* the caller got the descriptor: it walked down from the app
 container. That reasoning used to be written out twice, here and in the legacy
 matcher. It is written once now.
 
-**Android's registry uses the shared rules it was written before.**
-`AndroidWorkspaceRegistry` was checking `schema_version`, `generation` and
-`records` by hand and parsing with `JSONObject` directly. It now runs the byte
-scanner before the parse and `registry_shape` after it, and asks
-`registry_has_room` before creating — a bound it did not have at all.
-
-**That change made ascending order a rule Android had to obey, and it did
-not.** `create` appended; the registry it wrote would have failed to load on
-the next launch. Caught while writing the change rather than by a test, but
-`recordsAreStoredInAscendingWorkspaceIdOrder` now pins it. The order matters
-for the reason given above: the registry's canonical JSON is what a journal's
-`previous_registry_sha256` is taken over.
-
-**`org.json` keeps the last of two duplicate keys, silently.**
-`aRegistryWithADuplicateKeyIsRefusedBeforeItIsParsed` appends a second
-`generation` to a real registry file and asserts two things: the scanner
-refuses the bytes, *and* `JSONObject` happily parses them and reports a
-generation nothing ever wrote. The second assertion is the one that says why
-the scan has to happen before the parse rather than after.
-
-The first version of that test put the duplicate first and expected it to win.
-It lost — the original came later in the text. The fixture was wrong, not the
-claim; it appends now.
-
 ### Whether stored bytes are JSON worth looking at
 
 `workspace_json.rs` ports `DSHJSONHasBoundedExactStructure` and its scanner. It
 runs before the parse, on raw bytes that may be corrupt or hand-edited: one
 complete value, at most 64 levels and 100,000 nodes, no duplicate keys in any
 object however spelled, no negative zero, nothing after it. It is the reason a
-bad registry costs a refusal rather than an unbounded walk — and Android's
-registry, which currently just calls `JSONObject(text)`, can now have the same
-guard.
+bad registry costs a refusal rather than an unbounded walk.
 
 **The core already had two scanners of this shape, and this is a third.**
 `strict_json` (tool arguments) and `session_schema::scanner` (the session
@@ -1661,8 +1346,8 @@ rather than quietly left.
 ### Which failure a caller is told about
 
 `workspace_error.rs` ports `DSHWorkspacePublicCode` and
-`DSHWorkspacePublicMessage`. This is contract, not a lookup table two
-platforms may each keep a copy of: the public code is what the JS layer
+`DSHWorkspacePublicMessage`. This is contract, not a lookup table a host may
+keep its own copy of: the public code is what the JS layer
 branches on and what a person's retry depends on. `E_WORKSPACE_CONFLICT` says
 "try again", `E_WORKSPACE_PERSISTENCE` says "this store cannot be read", and a
 caller that cannot tell them apart cannot behave correctly.
@@ -1830,8 +1515,8 @@ trusted to describe any of them. Measured, then asserted.
 
 **The loop stays with the host, the names do not.** Deciding whether a
 candidate is taken needs folding, and folding is host-specific — Foundation
-folds case and diacritics together under `en_US_POSIX`, a JVM host does
-neither the same way. So the host walks ordinals and asks the core what each
+folds case and diacritics together under `en_US_POSIX`, and the core carries no
+folding table of its own. So the host walks ordinals and asks the core what each
 ordinal is called. What each one *is* called is the rule.
 
 **Truncation is a projection.** Foundation cuts on composed character
@@ -1918,10 +1603,9 @@ is unavailable, and a capability list can never turn it on.
 This is the first rule of the workspace subsystem to move, and it moves first
 on purpose. The root fingerprint is what an Agent root projection carries and
 what a lease proves, so **two implementations would mean an authority written
-on one platform is invalid on the other**. Building Android's workspace
-subsystem against a second Kotlin copy of this would have been the exact thing
-the shared core exists to prevent — so the rule goes to the core before the
-Android host code that will need it exists.
+by one is invalid for the other**. A second implementation would have been the
+exact thing the shared core exists to prevent, so the rule goes to the core
+first.
 
 `workspace_fingerprint.rs` owns the three shapes and the digest:
 
@@ -1948,45 +1632,17 @@ the same inputs through `DSHWorkspaceRootFingerprintSHA256` and through the
 core and asserts the digests are equal — for all three origins — and that both
 refuse the same nine malformed inputs.
 
-### Android serves its first agent operation
-
-`AgentRuntime.prepare_agent_attempt` is no longer a rejection on Android. It
-reads the committed session and writes the agent WAL through the shared core,
-exactly as iOS does.
-
-Every attempt there is **rootless**, because Android resolves no workspace
-root, so the core commits it as `not_agent` / `E_AGENT_NO_ROOT`. That is a
-definite answer — "this attempt gets no agent authority" — and it is a
-different thing from `E_AGENT_NATIVE`, which says "there is no agent engine
-here". The controller can treat an Android chat as an attempt without tools
-rather than as a platform without an engine.
-
-`implemented` stays `false`. The JS layer reads that constant as "the whole
-agent surface is available", and one served operation is not that. The rest of
-the surface still rejects.
-
 ### The cross-store seam, and what covers it
 
 `prepare_agent_attempt` is the only operation that reads the committed session
 and writes the agent WAL in one breath, and the two stores are not atomic with
 each other: the session is SQLite, the WAL is a file. The window between "the
 session says generation N" and "the WAL has committed an operation bound to N"
-is the one place in the engine where a crash can leave them disagreeing, and
-until now nothing exercised it on either platform.
+is the one place in the engine where a crash can leave them disagreeing, so it
+is the seam the rooted iOS coverage has to exercise.
 
-`AndroidPreparedAttemptStore` plus `AndroidPreparedAttemptStoreTest` cover it —
-with a scope that has to be stated, not assumed. Android can resolve no root,
-so every attempt there is rootless, and the core commits a rootless attempt as
-`not_agent` / `E_AGENT_NO_ROOT` with the operation in state `rejected`, no
-authority and no transcript. **So this is the seam on the rejection path only.**
-It covers the session read, the checkpoint relation, the durable WAL write,
-replay of the same operation, and a fresh process finding the committed
-operation rather than repeating it. It says nothing about successful authority
-creation, which still needs the rooted iOS coverage.
-
-Three things the session fixture had to get right, each of which cost a round
-trip through the emulator before it was found by feeding the same bytes to the
-core directly:
+Three things the session fixture has to get right, each of which is found by
+feeding the same bytes to the core directly:
 
 - **An attempt belongs to a turn.** `turns` is not decoration: the attempt's
   `turn_id` must name one, the turn must list the attempt, and the turn's
@@ -1998,14 +1654,6 @@ core directly:
 - **The committed session's bytes must be canonical.** The prepared-attempt
   store reads the *exact* bytes, so a fixture serialised in insertion order is
   refused — as the real controller's bytes never would be.
-
-One branch is deliberately left uncovered and marked as such: the store refuses
-a request naming a workspace with `E_AGENT_ROOT_STALE`, but that branch is
-unreachable on Android today, because `session_matches` runs first and a stored
-attempt can never carry a workspace here — `AndroidSessionStore` refuses to
-persist a workspace-bound session at all. The request conflicts before the root
-is ever consulted. The branch stays because it states the platform limit
-honestly, but it is not covered and is not counted as covered.
 
 ### Where model output becomes executable
 
@@ -2185,9 +1833,6 @@ npm run typecheck
 npm run lint
 npm test -- --runInBand
 
-cd android
-./gradlew assembleDebug
-
 cd ../../..
 ruby scripts/verify-no-bundled-secret.rb
 ruby scripts/verify-no-bundled-secret.rb \
@@ -2249,7 +1894,6 @@ raw native error message, exception reason, path or credential.
   private-key formats, LFS, submodules, signed commits, and SSH push. The
   current Git slice intentionally supports a smaller auditable HTTPS workflow
   plus native SSH clone/fetch.
-- Android native local runtime/workspace adapters and device proof.
 
 Detailed DSH parity, mobile UI, and runtime proof records are maintained
 separately from this source repository. This README keeps the implementation

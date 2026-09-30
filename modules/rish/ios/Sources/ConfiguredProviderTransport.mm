@@ -100,8 +100,7 @@ static BOOL DSHRelayResponseIdUsable(id value) {
   // whatever name it uses -- a dated name, or the model it redirected to.
   // Any bounded printable name is accepted, and so is none; the name never
   // selects anything, the chosen model stays on the receipt, and what the
-  // relay reported is logged. Same rule as Android's
-  // AndroidConfiguredModelIdentity.
+  // relay reported is logged. Any bounded printable name is accepted.
   BOOL reportedAcceptable = echoed == nil || echoed == NSNull.null ||
       ([echoed isKindOfClass:NSString.class] && [(NSString *)echoed length] <= 256 &&
        [(NSString *)echoed rangeOfCharacterFromSet:NSCharacterSet.controlCharacterSet].location == NSNotFound);

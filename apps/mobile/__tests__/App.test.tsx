@@ -6250,7 +6250,7 @@ test('adds an image attachment, keeps V4 Flash, and sends without text', async (
 });
 
 test('refuses to send an attachment of a kind the platform cannot deliver, keeping the draft', async () => {
-  // Android delivers images and text but cannot read a PDF. Before this
+  // A build delivers images and text but cannot read a PDF. Before this
   // guard every attachment started a turn anyway and the round came back as
   // E_AGENT_EXECUTION_AMBIGUOUS, over a request that provably never left the
   // device, with only retries that could not succeed.
@@ -6332,7 +6332,7 @@ async function sendPdfOnV4Pro(root: ReactTestInstance) {
   });
 }
 
-test('a PDF sent as page pictures (Android) moves a text-only model to one that reads images', async () => {
+test('a PDF sent as page pictures moves a text-only model to one that reads images', async () => {
   mockLocalAttachments.kindNeedsVision.mockImplementation((kind: string) => kind === 'image' || kind === 'pdf');
   const renderer = await renderApp();
   await sendPdfOnV4Pro(renderer.root);
@@ -6343,7 +6343,7 @@ test('a PDF sent as page pictures (Android) moves a text-only model to one that 
   expect(lastPersistedState().conversations[0]?.model_id).toBe(sent);
 });
 
-test('a PDF sent as text (iOS) keeps a text-only model', async () => {
+test('a PDF sent as text keeps a text-only model', async () => {
   const renderer = await renderApp();
   await sendPdfOnV4Pro(renderer.root);
   expect(mockLocalRuntime.completeV2.mock.calls.at(-1)?.[0]?.model).toBe('deepseek-v4-pro');

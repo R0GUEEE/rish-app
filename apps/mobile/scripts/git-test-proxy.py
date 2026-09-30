@@ -17,8 +17,8 @@ Usage:
 that cannot reach the remote directly; the count is still of this proxy's
 tunnels.
 
-The Android emulator reaches it at http://10.0.2.2:PORT/, the iOS simulator
-at http://127.0.0.1:PORT/. Bind to loopback only: it is an open proxy.
+The iOS simulator reaches it at http://127.0.0.1:PORT/. Bind to loopback
+only: it is an open proxy.
 """
 
 import argparse

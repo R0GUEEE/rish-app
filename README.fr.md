@@ -210,8 +210,6 @@ des pistes expérimentales.
 | Plateforme | Étendue actuelle |
 | --- | --- |
 | iOS / iPadOS | Conversations natives, pièces jointes, Fichiers, Git et outils Agent contrôlés ; inclut des mises en page iPad adaptatives. |
-| Android | Conversations API natives, stockage des identifiants, récupération de session et notifications de tâches ciblées. L'exécution locale de l'Agent, des Fichiers et de Git n'est pas encore disponible. |
-| HarmonyOS | Des vérifications temporaires dans le conteneur de compatibilité Android n'établissent pas de prise en charge native d'HarmonyOS. |
 
 | Connexion | Méthode actuelle |
 | --- | --- |
@@ -261,10 +259,6 @@ cd ../../..
 npm run ios --prefix apps/mobile
 ```
 
-**Android :** Avec un environnement de développement Android configuré,
-exécutez `npm run android --prefix apps/mobile`. Le guide du développeur couvre
-également les [APK de test autonomes](docs/development.md#install-and-run-the-react-native-app).
-
 Ouvrez l'application, choisissez un modèle, puis connectez-vous avec une clé
 API ou un compte pris en charge. Sur iOS, créez ou sélectionnez un projet,
 examinez son contexte et lancez une tâche. La connexion par abonnement à Codex
@@ -276,10 +270,9 @@ le stockage sécurisé natif.
 ## Avancement et contributions
 
 Le premier aperçu des sources est en préparation. Les prochaines versions
-porteront la mention **Pre-release**. La compatibilité Harness complète,
-l'exécution locale sur Android et le fonctionnement continu en arrière-plan
-restent limités. Consultez [l'étendue de l'aperçu et la feuille de
-route](docs/releases/v0.1.0.md).
+porteront la mention **Pre-release**. La compatibilité Harness complète et le
+fonctionnement continu en arrière-plan restent limités. Consultez
+[l'étendue de l'aperçu et la feuille de route](docs/releases/v0.1.0.md).
 
 Les contributions à la documentation, à la prise en charge des plateformes, à
 la compatibilité des modèles et aux correctifs reproductibles sont les

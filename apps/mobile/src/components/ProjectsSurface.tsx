@@ -82,7 +82,7 @@ type DiffMode = 'staged' | 'unstaged';
 /**
  * A row of the list: a legacy project (`root === null`, the v1 API by
  * project id) or a project attached to a workspace (`root` set, the V2 API
- * by workspace root -- the only kind Android has).
+ * by workspace root).
  */
 type ProjectRow = LocalProject & {
   readonly root: WorkspaceRootRefV1 | null;
@@ -390,7 +390,7 @@ export function ProjectsSurface({
   const [busy, setBusy] = useState(false);
   const [pushing, setPushing] = useState(false);
   const pushOperationId = useRef<string | null>(null);
-  /** A clone into a new workspace (Android): its operation id while the network runs. */
+  /** A clone into a new workspace: its operation id while the network runs. */
   const [workspaceClone, setWorkspaceClone] = useState<{ operationId: string; url: string } | null>(null);
   const workspaceCloneRef = useRef<string | null>(null);
   const [pushBranch, setPushBranch] = useState('');
@@ -490,8 +490,8 @@ export function ProjectsSurface({
     setError(null);
     try {
       // The legacy listing and the workspace-attached projects are two
-      // sources. A build with only the second (Android) answers the first
-      // with a refusal, which is not an error worth a banner.
+      // sources. A build with only the second answers the first with a
+      // refusal, which is not an error worth a banner.
       let legacyFailure: unknown = null;
       const [legacy, attached] = await Promise.all([
         legacyAvailable

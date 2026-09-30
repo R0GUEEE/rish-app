@@ -187,8 +187,6 @@ Rish는 네이티브 파일/Git 작업, Rish 런타임, 실험적인 Linux 게�
 | 플랫폼 | 현재 범위 |
 | --- | --- |
 | iOS / iPadOS | 네이티브 대화, 첨부 파일, 파일 앱, Git, 제어되는 에이전트 도구. 적응형 iPad 레이아웃 포함. |
-| Android | 네이티브 API 채팅, 자격 증명 저장, 세션 복구, 범위가 지정된 작업 알림. 로컬 에이전트, 파일, Git 실행은 아직 사용할 수 없습니다. |
-| HarmonyOS | 일시적인 Android 호환 컨테이너 확인만으로는 네이티브 HarmonyOS 지원을 확립한 것이 아닙니다. |
 
 | 연결 | 현재 방법 |
 | --- | --- |
@@ -232,10 +230,6 @@ cd ../../..
 npm run ios --prefix apps/mobile
 ```
 
-**Android:** Android 개발 환경을 구성한 상태에서
-`npm run android --prefix apps/mobile`을 실행하세요. 개발자 안내에는
-[독립 실행형 테스트 APK](docs/development.md#install-and-run-the-react-native-app)도 다루고 있습니다.
-
 앱을 열고, 모델을 선택하고, API 키 또는 지원되는 계정으로 연결하세요.
 iOS에서는 프로젝트를 만들거나 선택하고, 컨텍스트를 검토하고, 작업을 시작하세요. Codex와
 Claude Code 구독 로그인에는 선택적 실험 빌드가 필요합니다([개발자 안내](docs/development.md) 참고).
@@ -245,7 +239,7 @@ BigModel은 [계정 안내](docs/zcode-account-login.md)를 참고하세요. 자
 ## 진행 상황과 기여
 
 첫 번째 소스 프리뷰를 준비 중입니다. 향후 릴리스에는 **Pre-release** 표시가
-붙습니다. 완전한 하니스 호환성, Android 로컬 실행, 연속 백그라운드 작동은
+붙습니다. 완전한 하니스 호환성과 연속 백그라운드 작동은
 여전히 제한적입니다. [프리뷰 범위와 로드맵](docs/releases/v0.1.0.md)을
 참고하세요.
 

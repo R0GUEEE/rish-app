@@ -32,8 +32,7 @@
       },
       "body_sha256": "3229b6d3f62b7c74e06e518e74ee9e304630f5646ba247e8b8aa82f4aa6289d2",
       "hosts": [
-        "ios",
-        "android"
+        "ios"
       ]
     },
     {
@@ -65,8 +64,7 @@
       },
       "body_sha256": "0f2fde380a751ba312587fe3aac3699e6be8df2c50c2a2a7ab28c5eccdfe91ce",
       "hosts": [
-        "ios",
-        "android"
+        "ios"
       ]
     },
     {
@@ -136,8 +134,7 @@
       },
       "body_sha256": "dfa6cb17602f11b4b2817f70b9da0e215a88d38f68f9faffd28c756aa5ad06aa",
       "hosts": [
-        "ios",
-        "android"
+        "ios"
       ]
     },
     {
@@ -216,8 +213,7 @@
       },
       "body_sha256": "1395bab7d116561ec60bb546618925b2b35b23bce4524e75e986f9d885686601",
       "hosts": [
-        "ios",
-        "android"
+        "ios"
       ]
     },
     {
@@ -248,8 +244,7 @@
       },
       "body_sha256": "b7e0b758185abc72e4b07164bf89165ac3fd87ce1c71be79e3aef2a6cb18d792",
       "hosts": [
-        "ios",
-        "android"
+        "ios"
       ]
     },
     {
@@ -301,8 +296,7 @@
       },
       "body_sha256": "544bdb183962f24b08d09eb5bb1d9364d7b476fa89ff47bea02577e79a9a838c",
       "hosts": [
-        "ios",
-        "android"
+        "ios"
       ]
     }
   ],

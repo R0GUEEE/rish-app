@@ -194,8 +194,6 @@ verified capabilities from experimental paths.
 | Platform | Current scope |
 | --- | --- |
 | iOS / iPadOS | Native conversations, attachments, Files, Git, and controlled Agent tools; includes adaptive iPad layouts. |
-| Android | Native API chat, credential storage, session recovery, and scoped task notifications. Local Agent, Files, and Git execution are not yet available. |
-| HarmonyOS | Temporary Android compatibility-container checks do not establish native HarmonyOS support. |
 
 | Connection | Current method |
 | --- | --- |
@@ -239,10 +237,6 @@ cd ../../..
 npm run ios --prefix apps/mobile
 ```
 
-**Android:** With an Android development environment configured, run
-`npm run android --prefix apps/mobile`. The developer guide also covers
-[standalone test APKs](docs/development.md#install-and-run-the-react-native-app).
-
 Open the app, choose a model, and connect with an API key or a supported account.
 On iOS, create or select a project, review its context, and start a task. Codex and Claude Code
 subscription sign-in requires an optional experimental build (see the [developer guide](docs/development.md));
@@ -252,8 +246,8 @@ stay in native secure storage.
 ## Progress and contributing
 
 The first source preview is in preparation. Future releases will be marked
-**Pre-release**. Complete Harness compatibility, Android local execution, and
-continuous background operation remain limited. See the
+**Pre-release**. Complete Harness compatibility and continuous background
+operation remain limited. See the
 [preview scope and roadmap](docs/releases/v0.1.0.md).
 
 Contributions to documentation, platform support, model compatibility, and

@@ -5,8 +5,8 @@ import { assertWorkspaceRootRefV1, type WorkspaceRootRefV1 } from './WorkspaceRo
 /**
  * A project attached to a workspace, as the Projects surface lists it: the
  * V2 descriptor plus the root every V2 Git call takes. The legacy listing
- * (`LocalProjects.list`) knows nothing of these -- on Android it does not
- * exist at all -- so the surface asks the workspaces instead.
+ * (`LocalProjects.list`) knows nothing of these, so the surface asks the
+ * workspaces instead.
  */
 export type WorkspaceProject = {
   readonly projectId: string;

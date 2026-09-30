@@ -23,8 +23,7 @@
         "stop_reason": "end_turn"
       },
       "hosts": [
-        "ios",
-        "android"
+        "ios"
       ],
       "parsed": {
         "provider_response_id": "msg_1",
@@ -58,8 +57,7 @@
         "stop_reason": "stop_sequence"
       },
       "hosts": [
-        "ios",
-        "android"
+        "ios"
       ],
       "parsed": {
         "provider_response_id": "msg_2",
@@ -97,8 +95,7 @@
         "stop_reason": "tool_use"
       },
       "hosts": [
-        "ios",
-        "android"
+        "ios"
       ],
       "parsed": {
         "provider_response_id": "msg_3",
@@ -134,8 +131,7 @@
         "stop_reason": "max_tokens"
       },
       "hosts": [
-        "ios",
-        "android"
+        "ios"
       ],
       "parsed": {
         "provider_response_id": "msg_4",
@@ -160,8 +156,7 @@
         "stop_reason": "refusal"
       },
       "hosts": [
-        "ios",
-        "android"
+        "ios"
       ],
       "parsed": {
         "provider_response_id": "msg_5",
@@ -192,8 +187,7 @@
         "stop_reason": "something_new"
       },
       "hosts": [
-        "ios",
-        "android"
+        "ios"
       ],
       "failure_code": "E_COMPLETION_FINISH_RELATION",
       "why": "A stop reason this does not know is not guessed at."
@@ -219,8 +213,7 @@
         "stop_reason": "end_turn"
       },
       "hosts": [
-        "ios",
-        "android"
+        "ios"
       ],
       "failure_code": "E_COMPLETION_FINISH_RELATION",
       "why": "A turn that asked for a tool but did not say so is not readable."
@@ -239,8 +232,7 @@
         "stop_reason": "end_turn"
       },
       "hosts": [
-        "ios",
-        "android"
+        "ios"
       ],
       "failure_code": "E_COMPLETION_EMPTY_RESPONSE"
     }

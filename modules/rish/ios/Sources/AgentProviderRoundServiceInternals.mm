@@ -361,8 +361,8 @@ NSArray *DSHProviderToolsForAuthority(
                                                      registry:authority[@"registry"]
                                                         error:error];
     if (native == nil) return nil;
-    // The description the model is shown is shared with Android; the registry
-    // supplies the tool's native identity and parameters.
+    // The description the model is shown comes from the shared core; the
+    // registry supplies the tool's native identity and parameters.
     NSDictionary *described = DSHProviderReduce(@"tool_description", @{
       @"name" : native[@"name"],
     }, nullptr);

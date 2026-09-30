@@ -164,8 +164,6 @@ Rish 結合原生檔案/Git 操作、Rish 執行環境與實驗性的 Linux Gues
 | 平台 | 目前範圍 |
 | --- | --- |
 | iOS / iPadOS | 原生對話、附件、檔案、Git 與受控 Agent 工具；包含 iPad 自適應版面配置。 |
-| Android | 原生 API 對話、憑證儲存、工作階段恢復與限定範圍的任務通知。本機 Agent、檔案與 Git 執行尚不可用。 |
-| HarmonyOS | 以 Android 相容容器進行的臨時檢查，並不構成原生 HarmonyOS 支援。 |
 
 | 連線 | 目前方式 |
 | --- | --- |
@@ -207,13 +205,11 @@ cd ../../..
 npm run ios --prefix apps/mobile
 ```
 
-**Android：** 在已設定 Android 開發環境的情況下，執行 `npm run android --prefix apps/mobile`。開發指南也涵蓋[獨立測試 APK](docs/development.md#install-and-run-the-react-native-app)的說明。
-
 開啟 App、選擇模型，並以 API Key 或支援的帳號連線。在 iOS 上建立或選擇專案、確認專案上下文後開始任務。Codex 與 Claude Code 的訂閱登入需要選配的實驗性建置（見[開發指南](docs/development.md)）；BigModel 帳號請參閱[帳號指南](docs/zcode-account-login.md)。憑證會保存在原生安全儲存空間中。
 
 ## 進展與參與
 
-第一個原始碼預覽正在準備中，未來版本將標記為 **Pre-release**。完整的 Harness 相容性、Android 本機執行與持續背景執行仍有限制。詳見[預覽範圍與路線圖](docs/releases/v0.1.0.md)。
+第一個原始碼預覽正在準備中，未來版本將標記為 **Pre-release**。完整的 Harness 相容性與持續背景執行仍有限制。詳見[預覽範圍與路線圖](docs/releases/v0.1.0.md)。
 
 歡迎針對文件、平台支援、模型相容性與可重現的修正提出貢獻。請先閱讀 [CONTRIBUTING](CONTRIBUTING.md)。若有安全問題，請先查閱 [SECURITY](SECURITY.md) 再分享細節；切勿公開張貼憑證或敏感資料。
 

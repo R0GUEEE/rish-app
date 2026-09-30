@@ -1,5 +1,3 @@
-import { Platform } from 'react-native';
-
 export type ThemePalette = {
   background: string;
   surface: string;
@@ -61,9 +59,9 @@ export const lightColors: ThemePalette = {
 export const colors = darkColors;
 
 export const fonts = {
-  display: Platform.select({ ios: 'New York', android: 'serif' }),
-  body: Platform.select({ ios: 'SF Pro Text', android: 'sans-serif' }),
-  mono: Platform.select({ ios: 'SF Mono', android: 'monospace' }),
+  display: 'New York',
+  body: 'SF Pro Text',
+  mono: 'SF Mono',
 };
 
 export const hitSlop = 10;

@@ -191,8 +191,6 @@ experimentellen Pfaden.
 | Plattform | Aktueller Umfang |
 | --- | --- |
 | iOS / iPadOS | Native Gespräche, Anhänge, Dateien, Git und kontrollierte Agent-Tools; inklusive adaptiver iPad-Layouts. |
-| Android | Nativer API-Chat, Speicherung von Zugangsdaten, Sitzungswiederherstellung und bereichsbezogene Aufgabenbenachrichtigungen. Lokale Ausführung von Agent, Dateien und Git ist noch nicht verfügbar. |
-| HarmonyOS | Temporäre Prüfungen im Android-Kompatibilitätscontainer begründen keine native HarmonyOS-Unterstützung. |
 
 | Verbindung | Aktuelle Methode |
 | --- | --- |
@@ -238,10 +236,6 @@ cd ../../..
 npm run ios --prefix apps/mobile
 ```
 
-**Android:** Mit einer eingerichteten Android-Entwicklungsumgebung führe
-`npm run android --prefix apps/mobile` aus. Der Entwickler-Leitfaden behandelt
-außerdem [eigenständige Test-APKs](docs/development.md#install-and-run-the-react-native-app).
-
 Öffne die App, wähle ein Modell und verbinde dich mit einem API-Key oder einem
 unterstützten Konto. Lege auf iOS ein Projekt an oder wähle eines, prüfe seinen
 Kontext und starte eine Aufgabe. Die Abo-Anmeldung für Codex und Claude Code
@@ -253,8 +247,8 @@ sicheren Speicher.
 ## Fortschritt und Mitwirken
 
 Die erste Quellcode-Vorschau ist in Vorbereitung. Künftige Releases werden als
-**Pre-release** markiert. Vollständige Harness-Kompatibilität, lokale Ausführung
-unter Android und durchgehender Hintergrundbetrieb bleiben eingeschränkt. Siehe
+**Pre-release** markiert. Vollständige Harness-Kompatibilität und durchgehender
+Hintergrundbetrieb bleiben eingeschränkt. Siehe
 den [Umfang der Vorschau und die Roadmap](docs/releases/v0.1.0.md).
 
 Beiträge zu Dokumentation, Plattformunterstützung, Modellkompatibilität und

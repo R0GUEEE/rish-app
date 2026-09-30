@@ -1,5 +1,5 @@
-// See rish_project_merge.h. Compiled by the Android CMake build and included
-// by modules/rish/ios/Sources/LocalProjectsModule.mm, so it keeps to
+// See rish_project_merge.h. Included by
+// modules/rish/ios/Sources/LocalProjectsModule.mm, so it keeps to
 // libgit2 and the C++ standard library and defines nothing outside
 // rish::merge.
 

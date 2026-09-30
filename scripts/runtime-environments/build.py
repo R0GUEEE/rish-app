@@ -122,7 +122,7 @@ def add_layout(entries: dict, lock: dict) -> None:
 
 def pack_ext4(root: Path, disk: Path, lock: dict, output: Path) -> None:
     mke2fs = os.environ.get('RISH_MKE2FS') or shutil.which('mke2fs')
-    for candidate in [Path('/opt/homebrew/opt/e2fsprogs/sbin/mke2fs'), Path.home() / 'Library/Android/sdk/platform-tools/mke2fs']:
+    for candidate in [Path('/opt/homebrew/opt/e2fsprogs/sbin/mke2fs')]:
         if not mke2fs and candidate.is_file():
             mke2fs = str(candidate)
     if not mke2fs:

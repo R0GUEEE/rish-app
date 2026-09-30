@@ -10,8 +10,8 @@ root = Dir.mktmpdir('rish-secret-scanner-')
 begin
   samples = {
     'ios/Tests/real.txt' => 'ghp_' + ('A' * 24),
-    'androidTest/real.txt' => 'sk-proj-' + ('B' * 24),
-    'androidTest/real-separators.txt' => 'sk-proj-' + ('B' * 10) + '-_' + ('C' * 14),
+    'ios/RishTests/real.txt' => 'sk-proj-' + ('B' * 24),
+    'ios/RishTests/real-separators.txt' => 'sk-proj-' + ('B' * 10) + '-_' + ('C' * 14),
     'near-example.txt' => 'example ghp_' + ('C' * 24),
     'explicit-fake.txt' => 'ghp_' + ('0' * 24),
     'blob.bin' => "\0ASIA" + ('D' * 16),
@@ -28,7 +28,7 @@ begin
 
   checks = [
     [['ios/Tests'], false],
-    [['androidTest'], false],
+    [['ios/RishTests'], false],
     [['near-example.txt'], false],
     [['explicit-fake.txt'], true],
     [['blob.bin'], false],

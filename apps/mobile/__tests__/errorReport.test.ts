@@ -25,11 +25,11 @@ test('a report carries the failure and nothing a person wrote', () => {
   } as never;
   const report = buildErrorReport({
     now: '2026-09-30T08:00:00.000Z',
-    build: { build: '9f19451', platform: 'android', os: '13', api: 33, device: 'Google Pixel XL' },
+    build: { build: '9f19451', platform: 'ios', os: '18.0', device: 'iPhone 16 Pro' },
     notice: 'E_COMPLETION_NATIVE',
     controller: {
       phase: 'resume_available', failureCode: 'E_COMPLETION_NATIVE',
-      failureDiagnostic: 'agent_runtime/v1 operation=recover_agent_attempt kind=refused code=E_AGENT_NATIVE cause=Refused site=AndroidAgentRecoveryService.recover:212',
+      failureDiagnostic: 'agent_runtime/v1 operation=recover_agent_attempt kind=refused code=E_AGENT_NATIVE cause=Refused site=DSHProviderRoundService.recoverAgentAttempt:212',
       attemptId: '40404040-4040-4404-8404-404040404040', roundId: null,
     },
     providerFailure: { code: 'E_COMPLETION_HTTP_STATUS', httpStatus: 502 },
@@ -40,9 +40,9 @@ test('a report carries the failure and nothing a person wrote', () => {
     ] as never,
   });
   for (const expected of [
-    'build: 9f19451 · android 13 (API 33) · Google Pixel XL',
+    'build: 9f19451 · ios 18.0 · iPhone 16 Pro',
     'notice: E_COMPLETION_NATIVE',
-    'site=AndroidAgentRecoveryService.recover:212',
+    'site=DSHProviderRoundService.recoverAgentAttempt:212',
     'provider: E_COMPLETION_HTTP_STATUS HTTP 502',
     'thinking=max', 'workspace=yes',
     'phase=ambiguous', 'lineage=ambiguous launch=1 rev=5',

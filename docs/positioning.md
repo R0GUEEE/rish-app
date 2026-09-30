@@ -26,8 +26,7 @@ For source-preview announcements, include the current availability alongside
 that introduction:
 
 > 当前为实验性源码预览准备阶段。iOS 已实现本地会话、文件、Git 与受控 Agent
-> 工具执行；Android 已支持 API 对话和本地会话保存，本地 Agent、文件与 Git
-> 执行仍待完成。完整 Harness 能力尚未全部验证。
+> 工具执行。完整 Harness 能力尚未全部验证。
 
 Update this availability paragraph from verified release evidence when the
 candidate changes. The brand line is a product positioning statement, not a

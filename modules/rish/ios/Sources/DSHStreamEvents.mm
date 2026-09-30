@@ -18,12 +18,11 @@ static NSError *DSHStreamError(NSInteger code, NSString *message) {
 }
 
 // The parsing itself lives in the shared core
-// (crates/rish-agent-core/src/completion_stream.rs), which Android reads the
-// same stream through. What stays here is the vocabulary: this class keeps
-// the interface and the error codes it always had, and translates. The core
-// carries the state between calls, so a chunk boundary may fall anywhere --
-// inside a line, inside a token, inside a character -- which is the part
-// neither host could test while each had its own reader.
+// (crates/rish-agent-core/src/completion_stream.rs). What stays here is the
+// vocabulary: this class keeps the interface and the error codes it always
+// had, and translates. The core carries the state between calls, so a chunk
+// boundary may fall anywhere -- inside a line, inside a token, inside a
+// character -- which is the part a host-side line reader could not test.
 
 /// The core's reason for refusing, in this file's error codes.
 static NSError *DSHStreamFailure(NSDictionary *answer) {

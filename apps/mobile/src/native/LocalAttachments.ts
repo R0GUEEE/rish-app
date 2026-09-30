@@ -93,9 +93,9 @@ function kindDeliverable(kind: AttachmentKind): boolean {
 /**
  * Whether an attachment of this kind needs a model that reads images here.
  *
- * An image always does. A PDF does on Android, which sends its pages as
- * pictures, and not on iOS, which sends its text. A platform that exports no
- * `model_vision_kinds` treats only images as pictures.
+ * An image always does. A PDF does not: this build sends its text, not its
+ * pages as pictures. A platform that exports no `model_vision_kinds` treats
+ * only images as pictures.
  */
 function kindNeedsVision(kind: AttachmentKind): boolean {
   if (kind === 'image') return true;

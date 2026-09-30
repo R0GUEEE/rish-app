@@ -166,8 +166,6 @@ Rish 的受控工具在手机本地执行，会话和工作区由 App 管理。�
 | 平台 | 当前范围 |
 | --- | --- |
 | iOS / iPadOS | 原生会话、附件、文件、Git、受控 Agent 工具执行；包含 iPad 布局适配。 |
-| Android | 原生 API 对话、凭据存储、会话恢复和部分任务通知；本地 Agent、文件与 Git 执行待完成。 |
-| HarmonyOS | Android 兼容容器的临时测试不代表原生鸿蒙支持。 |
 
 | 模型接入 | 当前方式 |
 | --- | --- |
@@ -209,13 +207,11 @@ cd ../../..
 npm run ios --prefix apps/mobile
 ```
 
-**Android：** 配置好 Android 开发环境后运行 `npm run android --prefix apps/mobile`。[独立测试 APK 的构建方法](docs/development.md#install-and-run-the-react-native-app)另见开发文档。
-
 打开 App 后，选择模型，通过 API Key 或该构建支持的账号入口连接。iOS 上创建或选择项目，确认项目上下文，再开始任务。Codex 和 Claude Code 订阅登录需要可选实验构建（见[开发文档](docs/development.md)）；BigModel 账号接入见[说明](docs/zcode-account-login.md)。凭据由原生安全存储保管。
 
 ## 进展与参与
 
-Rish 正在准备首个源码预览，后续发布将标记为 **Pre-release**。当前完整 Harness 兼容、Android 本地执行和持续后台运行仍有明确限制，详见[当前范围与路线](docs/releases/v0.1.0.md)。
+Rish 正在准备首个源码预览，后续发布将标记为 **Pre-release**。当前完整 Harness 兼容和持续后台运行仍有明确限制，详见[当前范围与路线](docs/releases/v0.1.0.md)。
 
 欢迎从文档、平台适配、模型兼容和可复现的问题入手参与。开始前请阅读[贡献指南](CONTRIBUTING.md)；安全问题请先查看[安全策略](SECURITY.md)，不要在公开讨论中贴凭据或敏感数据。
 

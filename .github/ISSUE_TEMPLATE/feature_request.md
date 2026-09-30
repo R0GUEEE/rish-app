@@ -16,7 +16,7 @@ How you handle it now, and where the current behaviour stops you.
 
 ## Scope
 
-- Platform: iOS / Android / both
+- Platform: iOS
 - Harness or model, if it only applies to one:
 - Does this need network access, a new tool, or a new permission?
 

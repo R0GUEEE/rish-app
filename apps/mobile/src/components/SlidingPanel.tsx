@@ -3,7 +3,6 @@ import {
   Animated,
   Easing,
   Modal,
-  Platform,
   Pressable,
   StyleSheet,
   useWindowDimensions,
@@ -51,10 +50,10 @@ export function SlidingPanel({
     setMounted(false);
 
     // React Native only forwards Modal.onDismiss on iOS. Our own horizontal
-    // animation has already finished here, so Android can safely advance a
-    // queued surface without an arbitrary delay. Tests use the same path so
-    // modal hand-off assertions stay deterministic.
-    if (Platform.OS !== 'ios' || disableAnimations) reportDismissed();
+    // animation has already finished here, so tests can advance a queued
+    // surface without an arbitrary delay, keeping modal hand-off assertions
+    // deterministic.
+    if (disableAnimations) reportDismissed();
   }, [reportDismissed]);
 
   const animateClosed = useCallback(

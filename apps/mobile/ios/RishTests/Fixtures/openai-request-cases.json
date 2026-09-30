@@ -2,7 +2,7 @@
   "schema_version": 1,
   "harness_id": "codex",
   "provider": "openai",
-  "note": "The request body each host must build for an OpenAI responses round. Frozen from iOS. `hosts` names the hosts that already produce this body; a case listing only ios is a gap recorded rather than asserted, and `why` says what it is. `body_sha256` is SHA-256 over the body with sorted keys and a forward slash escaped, which is the encoding a receipt binds.",
+  "note": "The request body each host must build for an OpenAI responses round. Frozen from iOS. `hosts` names the hosts that already produce this body; iOS is the shipped host. `body_sha256` is SHA-256 over the body with sorted keys and a forward slash escaped, which is the encoding a receipt binds.",
   "host_gaps": [
     {
       "host": "none",
@@ -25,8 +25,7 @@
       ],
       "tools": [],
       "hosts": [
-        "ios",
-        "android"
+        "ios"
       ],
       "body": {
         "model": "gpt-5.6",
@@ -62,8 +61,7 @@
       ],
       "tools": [],
       "hosts": [
-        "ios",
-        "android"
+        "ios"
       ],
       "body": {
         "model": "gpt-5.6",
@@ -103,8 +101,7 @@
       ],
       "tools": [],
       "hosts": [
-        "ios",
-        "android"
+        "ios"
       ],
       "body": {
         "model": "gpt-5.6-mini",
@@ -163,8 +160,7 @@
         }
       ],
       "hosts": [
-        "ios",
-        "android"
+        "ios"
       ],
       "body": {
         "model": "gpt-5.6",
@@ -227,8 +223,7 @@
       ],
       "tools": [],
       "hosts": [
-        "ios",
-        "android"
+        "ios"
       ],
       "body": {
         "model": "gpt-5.6",
@@ -303,8 +298,7 @@
         }
       ],
       "hosts": [
-        "ios",
-        "android"
+        "ios"
       ],
       "body": {
         "model": "gpt-5.6",
@@ -421,8 +415,7 @@
       },
       "body_sha256": "779b5e149af07a2ce11225505069427a523df08bf49d3d09d36d980c60e85175",
       "hosts": [
-        "ios",
-        "android"
+        "ios"
       ]
     }
   ]

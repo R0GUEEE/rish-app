@@ -167,8 +167,6 @@ Rish combina operaciones nativas de archivos y Git, el runtime de Rish y un Linu
 | Plataforma | Alcance actual |
 | --- | --- |
 | iOS / iPadOS | Conversaciones nativas, adjuntos, Archivos, Git y herramientas controladas del Agente; incluye diseños adaptativos para iPad. |
-| Android | Chat nativo por API, almacenamiento de credenciales, recuperación de sesión y notificaciones de tareas con ámbito acotado. La ejecución local del Agente, de Archivos y de Git aún no está disponible. |
-| HarmonyOS | Las comprobaciones temporales en el contenedor de compatibilidad de Android no establecen soporte nativo de HarmonyOS. |
 
 | Conexión | Método actual |
 | --- | --- |
@@ -210,13 +208,11 @@ cd ../../..
 npm run ios --prefix apps/mobile
 ```
 
-**Android:** Con un entorno de desarrollo de Android configurado, ejecuta `npm run android --prefix apps/mobile`. La guía para desarrolladores también cubre los [APK de prueba independientes](docs/development.md#install-and-run-the-react-native-app).
-
 Abre la app, elige un modelo y conéctate con una clave de API o con una cuenta admitida. En iOS, crea o selecciona un proyecto, revisa su contexto y empieza una tarea. El inicio de sesión con suscripción de Codex y Claude Code requiere una compilación experimental opcional (consulta la [guía para desarrolladores](docs/development.md)); para BigModel, consulta la [guía de cuentas](docs/zcode-account-login.md). Las credenciales permanecen en el almacenamiento seguro nativo.
 
 ## Progreso y contribuciones
 
-La primera vista previa del código fuente está en preparación. Las próximas versiones se marcarán como **Pre-release**. La compatibilidad completa de Harness, la ejecución local en Android y la operación continua en segundo plano siguen siendo limitadas. Consulta el [alcance y la hoja de ruta de la vista previa](docs/releases/v0.1.0.md).
+La primera vista previa del código fuente está en preparación. Las próximas versiones se marcarán como **Pre-release**. La compatibilidad completa de Harness y la operación continua en segundo plano siguen siendo limitadas. Consulta el [alcance y la hoja de ruta de la vista previa](docs/releases/v0.1.0.md).
 
 Se agradecen las contribuciones a la documentación, al soporte de plataformas, a la compatibilidad de modelos y a las correcciones reproducibles. Lee primero [CONTRIBUTING](CONTRIBUTING.md). Para problemas de seguridad, consulta [SECURITY](SECURITY.md) antes de compartir detalles; nunca publiques credenciales ni datos sensibles públicamente.
 

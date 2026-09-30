@@ -1,8 +1,6 @@
-// Merging a diverged branch with its upstream, for the Git panel: the part
-// both hosts share. Android wraps it in JNI (rish_project_merge.cpp under
-// apps/mobile/android/app/src/main/cpp); iOS includes the implementation
-// from LocalProjectsModule.mm and hands it the repository its write lease
-// already holds.
+// Merging a diverged branch with its upstream, for the Git panel. iOS includes
+// the implementation from LocalProjectsModule.mm and hands it the repository
+// its write lease already holds.
 //
 // Every function borrows the repository -- it neither opens nor frees it --
 // and answers one JSON object as a string. The journal, the lease and the

@@ -878,8 +878,7 @@ NSString *DSHGitCanonicalProxyURL(id value, BOOL *invalid) {
   }
   NSURLComponents *canonical = [[NSURLComponents alloc] init];
   canonical.scheme = scheme;
-  // Lower-case, as Android's AndroidGitProxyUrl spells it: one proxy, one
-  // string, whichever host reads it.
+  // Lower-case: one proxy, one string, whichever build reads it.
   canonical.host = host.lowercaseString;
   canonical.port = port;
   canonical.path = @"/";

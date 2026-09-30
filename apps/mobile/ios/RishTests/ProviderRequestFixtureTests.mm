@@ -12,12 +12,11 @@
 /// A round's receipt binds two digests that are not this project's canonical
 /// JSON: the provider input digest is `NSJSONWritingSortedKeys`, and the
 /// request body digest binds the exact bytes that were sent. Moving the
-/// encoding anywhere -- into the shared core, or into another host -- must
+/// encoding anywhere -- into the shared core, or out of this host -- must
 /// not change either, so both are recorded here before anything moves.
 ///
-/// The fixture is shared: Android replays it through its own transport and
-/// jest owns the contract of the fixture itself, so no host can widen what
-/// goes out without the other two saying so.
+/// jest owns the contract of the fixture itself, so the transport cannot
+/// widen what goes out without the fixture test saying so.
 @interface ProviderRequestFixtureTests : XCTestCase
 @end
 

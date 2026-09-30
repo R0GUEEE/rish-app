@@ -21,12 +21,3 @@ test('app and Live Activity inherit the same release version and build number', 
     assert.match(plist, /<key>CFBundleVersion<\/key>\s*<string>\$\(CURRENT_PROJECT_VERSION\)<\/string>/);
   }
 });
-
-test('Android application and entry point packages match the release identifier', () => {
-  const gradle = read('apps/mobile/android/app/build.gradle');
-  assert.match(gradle, /namespace "tech\.zseven\.rish"/);
-  assert.match(gradle, /applicationId "tech\.zseven\.rish"/);
-  for (const entry of ['MainActivity', 'MainApplication']) {
-    assert.match(read(`apps/mobile/android/app/src/main/java/tech/zseven/rish/${entry}.kt`), /^package tech\.zseven\.rish$/m);
-  }
-});

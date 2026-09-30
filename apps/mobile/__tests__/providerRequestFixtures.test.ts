@@ -19,11 +19,11 @@ const nodeCrypto = jest.requireActual('node:crypto') as {
 };
 
 /**
- * The frozen request bodies, shared with the native suites
- * (ProviderRequestFixtureTests.mm builds each one through its transport, and
- * Android replays the same fixture through its own). jest owns the contract
- * of the fixture itself: that every case records a digest of exactly the
- * body beside it, under exactly the encoding a receipt binds.
+ * The frozen request bodies, shared with the native suite
+ * (ProviderRequestFixtureTests.mm builds each one through its transport).
+ * jest owns the contract of the fixture itself: that every case records a
+ * digest of exactly the body beside it, under exactly the encoding a receipt
+ * binds.
  *
  * That encoding is not this project's canonical JSON. It is sorted keys with
  * a forward slash written as an escape, which is what NSJSONSerialization
@@ -37,7 +37,7 @@ const FIXTURES: ReadonlyArray<{ readonly file: string; readonly harnessId: Harne
   { file: 'anthropic-request-cases.json', harnessId: 'claude-code' },
   { file: 'openai-request-cases.json', harnessId: 'codex' },
 ];
-const HOSTS = new Set(['ios', 'android']);
+const HOSTS = new Set(['ios']);
 
 const THINKING_MODES = new Set(['off', 'high', 'max']);
 
@@ -106,16 +106,12 @@ describe.each(FIXTURES)('frozen $file', ({ file, harnessId }) => {
       expect(entry.messages.length).toBeGreaterThan(0);
       expect(Array.isArray(entry.tools)).toBe(true);
       expect(entry.body_sha256).toMatch(/^[0-9a-f]{64}$/);
-      // A case may record which hosts already build it. A case that only one
-      // host builds is a gap, and a gap has to say what it is -- otherwise
-      // the fixture quietly becomes a list of things nobody has to match.
+      // A case may record which hosts already build it. iOS is the shipped
+      // host, so every case that names its hosts must name ios.
       if (entry.hosts !== undefined) {
         expect(entry.hosts.length).toBeGreaterThan(0);
         for (const host of entry.hosts) expect(HOSTS.has(host)).toBe(true);
         expect(entry.hosts).toContain('ios');
-        if (!entry.hosts.includes('android')) {
-          expect(typeof entry.why).toBe('string');
-        }
       }
     }
   });

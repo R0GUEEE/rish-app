@@ -2047,7 +2047,7 @@ function reviewPage(value: unknown, projectId: string, staged: boolean, offset: 
 
 export const LocalProjects = {
   isAvailable: () => hasNativeCapabilities(native),
-  /** Whether the legacy clone controls exist here (they do not on Android, whose module stubs the rest). */
+  /** Whether the legacy clone controls exist here (a build whose module stubs the rest reports false). */
   isLegacyCloneAvailable: (): boolean => {
     try {
       const row = native as Partial<NativeLocalProjects> | null;
@@ -2321,7 +2321,7 @@ export const LocalProjects = {
       throw projectV2Error(error);
     }
   },
-  /** Whether this build clones a public repository into a new workspace (Android). */
+  /** Whether this build clones a public repository into a new workspace. */
   isWorkspaceCloneAvailable: (): boolean => {
     try {
       const row = native as Partial<NativeLocalProjects> | null;
@@ -2345,7 +2345,7 @@ export const LocalProjects = {
       throw projectV2Error(error);
     }
   },
-  /** Whether a clone that asks for a credential can be given one here (Android). */
+  /** Whether a clone that asks for a credential can be given one here. */
   isCloneCredentialPromptAvailable: (): boolean => {
     try {
       const row = native as Partial<NativeLocalProjects> | null;

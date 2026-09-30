@@ -202,8 +202,6 @@ phân biệt rõ các khả năng đã xác minh và các hướng thử nghiệ
 | Nền tảng | Phạm vi hiện tại |
 | --- | --- |
 | iOS / iPadOS | Hội thoại gốc, tệp đính kèm, Files, Git và các công cụ Agent được kiểm soát; bao gồm bố cục iPad thích ứng. |
-| Android | Trò chuyện API gốc, lưu trữ thông tin đăng nhập, khôi phục phiên và thông báo nhiệm vụ theo phạm vi. Thực thi Agent, Files và Git cục bộ chưa khả dụng. |
-| HarmonyOS | Các kiểm tra tạm thời trên bộ chứa tương thích Android chưa xác lập hỗ trợ HarmonyOS gốc. |
 
 | Kết nối | Phương thức hiện tại |
 | --- | --- |
@@ -248,10 +246,6 @@ cd ../../..
 npm run ios --prefix apps/mobile
 ```
 
-**Android:** Với môi trường phát triển Android đã được cấu hình, chạy
-`npm run android --prefix apps/mobile`. Hướng dẫn nhà phát triển cũng đề cập
-đến [các APK kiểm thử độc lập](docs/development.md#install-and-run-the-react-native-app).
-
 Mở ứng dụng, chọn một mô hình và kết nối bằng khóa API hoặc một tài khoản được
 hỗ trợ. Trên iOS, tạo hoặc chọn một dự án, xem xét ngữ cảnh của nó và bắt đầu
 một nhiệm vụ. Đăng nhập bằng gói đăng ký của Codex và Claude Code yêu cầu bản
@@ -262,8 +256,8 @@ xem [hướng dẫn tài khoản](docs/zcode-account-login.md) cho BigModel. Th�
 ## Tiến độ và đóng góp
 
 Bản xem trước mã nguồn đầu tiên đang được chuẩn bị. Các bản phát hành tương lai
-sẽ được đánh dấu **Pre-release**. Khả năng tương thích đầy đủ với các bộ khung,
-thực thi cục bộ trên Android và hoạt động nền liên tục vẫn còn hạn chế. Xem
+sẽ được đánh dấu **Pre-release**. Khả năng tương thích đầy đủ với các bộ khung
+và hoạt động nền liên tục vẫn còn hạn chế. Xem
 [phạm vi và lộ trình của bản xem trước](docs/releases/v0.1.0.md).
 
 Chúng tôi hoan nghênh các đóng góp cho tài liệu, hỗ trợ nền tảng, khả năng tương

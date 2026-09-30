@@ -131,7 +131,7 @@ fn historical_digest_selects_its_original_write_schema_and_access() {
 }
 
 #[test]
-fn android_default_stays_v2_and_ios_must_explicitly_opt_into_v3() {
+fn default_stays_v2_and_v3_must_be_asked_for_explicitly() {
     let default = reduce(json!({"op":"registry","guest_cgi":false,"root":all_root()}));
     assert_eq!(default["registry"]["registry_version"], 2);
     assert_eq!(default["registry"]["toolset_sha256"], V2);

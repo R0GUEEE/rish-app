@@ -18,11 +18,8 @@ export const requiredFiles = [
   'apps/mobile/ios/Rish/AppDelegate.swift',
   'apps/mobile/ios/Rish/Info.plist',
   'apps/mobile/ios/Rish/Rish.entitlements',
-  'apps/mobile/android/gradlew',
-  'apps/mobile/android/gradle/wrapper/gradle-wrapper.jar',
-  'apps/mobile/android/app/src/main/java/tech/zseven/rish/MainActivity.kt',
   'modules/rish/ios/RishLocalRuntime.podspec',
-  // Git logic both hosts compile: Android's CMake and LocalProjectsModule.mm.
+  // Git logic the iOS runtime compiles via LocalProjectsModule.mm.
   'modules/rish/shared/git/rish_project_merge.h',
   'modules/rish/shared/git/rish_project_merge.cpp',
   'run-simulator.sh',
@@ -36,7 +33,7 @@ export const requiredFiles = [
 ];
 
 const portableFiles = requiredFiles.filter(file =>
-  /(?:\.sh|\.swift|\.kt|\.podspec|\.pbxproj|\.xcscheme|\.xcworkspacedata|\.xcode\.env|Podfile)$/.test(file));
+  /(?:\.sh|\.swift|\.podspec|\.pbxproj|\.xcscheme|\.xcworkspacedata|\.xcode\.env|Podfile)$/.test(file));
 
 export function auditSource(sourceRoot) {
   const root = fs.realpathSync(sourceRoot);
@@ -84,7 +81,6 @@ export function auditSource(sourceRoot) {
   if (app && app.name !== 'Rish') errors.push('apps/mobile/app.json: native component name must be Rish');
   for (const [file, expected] of [
     ['apps/mobile/ios/Rish/AppDelegate.swift', /withModuleName:\s*"Rish"/],
-    ['apps/mobile/android/app/src/main/java/tech/zseven/rish/MainActivity.kt', /getMainComponentName\(\):\s*String\s*=\s*"Rish"/],
     ['apps/mobile/ios/Rish.xcworkspace/contents.xcworkspacedata', /location\s*=\s*"group:Rish\.xcodeproj"/],
     ['apps/mobile/ios/Rish.xcodeproj/xcshareddata/xcschemes/Rish.xcscheme', /ReferencedContainer\s*=\s*"container:Rish\.xcodeproj"/],
   ]) {

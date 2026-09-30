@@ -187,8 +187,6 @@ deneysel yollardan ayırır.
 | Platform | Mevcut kapsam |
 | --- | --- |
 | iOS / iPadOS | Yerel sohbetler, ekler, Dosyalar, Git ve kontrollü Ajan araçları; uyarlanabilir iPad düzenleri dahil. |
-| Android | Yerel API sohbeti, kimlik bilgisi depolama, oturum kurtarma ve kapsamlandırılmış görev bildirimleri. Yerel Ajan, Dosyalar ve Git yürütmesi henüz kullanılamıyor. |
-| HarmonyOS | Geçici Android uyumluluk konteyneri denetimleri, yerel HarmonyOS desteği oluşturmaz. |
 
 | Bağlantı | Mevcut yöntem |
 | --- | --- |
@@ -233,11 +231,6 @@ cd ../../..
 npm run ios --prefix apps/mobile
 ```
 
-**Android:** Yapılandırılmış bir Android geliştirme ortamıyla
-`npm run android --prefix apps/mobile` komutunu çalıştırın. Geliştirici kılavuzu
-[bağımsız test APK'larını](docs/development.md#install-and-run-the-react-native-app)
-da kapsar.
-
 Uygulamayı açın, bir model seçin ve bir API anahtarı veya desteklenen bir hesapla
 bağlanın. iOS'ta bir proje oluşturun veya seçin, bağlamını inceleyin ve bir görev
 başlatın. Codex ve Claude Code abonelik girişi isteğe bağlı deneysel bir yapı
@@ -248,8 +241,8 @@ depolamada kalır.
 ## İlerleme ve katkıda bulunma
 
 İlk kaynak önizlemesi hazırlanıyor. Gelecekteki sürümler **Pre-release** olarak
-işaretlenecek. Eksiksiz Harness uyumluluğu, Android'de yerel yürütme ve sürekli arka
-plan işlemi sınırlı olmaya devam ediyor. [Önizleme kapsamına ve yol
+işaretlenecek. Eksiksiz Harness uyumluluğu ve sürekli arka plan işlemi sınırlı
+olmaya devam ediyor. [Önizleme kapsamına ve yol
 haritasına](docs/releases/v0.1.0.md) bakın.
 
 Dokümantasyon, platform desteği, model uyumluluğu ve yeniden üretilebilir düzeltmelere

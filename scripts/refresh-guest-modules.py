@@ -159,8 +159,7 @@ def main():
     replacements = {}
     if args.preview is None:
         new_sha = sha(candidate)
-        for path in [ASSETS / 'SHA256SUMS', ROOT / 'modules/rish/ios/Sources/LocalGuestModule.mm',
-                     ROOT / 'apps/mobile/android/app/src/main/java/tech/zseven/rish/guest/GuestAssets.kt']:
+        for path in [ASSETS / 'SHA256SUMS', ROOT / 'modules/rish/ios/Sources/LocalGuestModule.mm']:
             text = path.read_text()
             if old_sha not in text:
                 candidate_path.unlink(missing_ok=True)

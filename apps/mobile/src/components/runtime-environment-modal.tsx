@@ -1,5 +1,5 @@
-import React, { useEffect, useMemo, useRef } from 'react';
-import { Keyboard, KeyboardAvoidingView, Modal, Platform, Pressable, ScrollView, StyleSheet, Text, useWindowDimensions, View } from 'react-native';
+import React, { useEffect, useMemo } from 'react';
+import { Keyboard, KeyboardAvoidingView, Modal, Pressable, ScrollView, StyleSheet, Text, useWindowDimensions, View } from 'react-native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { useAppPresentation } from '../presentation/AppPresentation';
 import type { ThemePalette } from '../theme';
@@ -10,16 +10,9 @@ export function RuntimeEnvironmentModal({ visible, title, onClose, onDismiss, te
   const { colors, locale } = useAppPresentation(), insets = useSafeAreaInsets();
   const { height } = useWindowDimensions(), styles = useMemo(() => runtimeStyles(colors), [colors]);
   useEffect(() => { if (visible) Keyboard.dismiss(); }, [visible]);
-  const wasVisible = useRef(visible);
-  useEffect(() => {
-    const closed = wasVisible.current && !visible;
-    wasVisible.current = visible;
-    // Android dialogs do not share iOS's presenting-controller transition.
-    if (closed && Platform.OS !== 'ios') onDismiss?.();
-  }, [visible, onDismiss]);
   const safeHeight = Math.max(0, height - Math.max(12, insets.top) - Math.max(12, insets.bottom));
   return <Modal visible={visible} transparent animationType="fade" onRequestClose={onClose} onDismiss={onDismiss} statusBarTranslucent>
-    <KeyboardAvoidingView style={styles.overlay} behavior={Platform.OS === 'ios' ? 'padding' : 'height'}>
+    <KeyboardAvoidingView style={styles.overlay} behavior="padding">
       <Pressable testID={`${testID}-backdrop`} accessibilityRole="button" accessibilityLabel={runtimeCopy(locale).close} style={StyleSheet.absoluteFill} onPress={onClose} />
       <View style={[styles.card, { maxHeight: safeHeight * 0.9, marginTop: Math.max(12, insets.top), marginBottom: Math.max(12, insets.bottom) }]} accessibilityViewIsModal testID={testID}>
         <View style={styles.heading}><Text accessibilityRole="header" style={styles.title}>{title}</Text>
@@ -50,7 +43,7 @@ export function runtimeStyles(colors: ThemePalette) {
     input: { minHeight: 48, color: colors.text, backgroundColor: colors.surfaceRaised, borderColor: colors.line, borderWidth: 1, borderRadius: 12, padding: 12, fontSize: 15 },
     progressTrack: { height: 4, borderRadius: 2, overflow: 'hidden', backgroundColor: colors.line },
     progress: { height: 4, backgroundColor: colors.accent },
-    output: { color: colors.text, fontSize: 12, lineHeight: 18, fontFamily: Platform.OS === 'ios' ? 'Menlo' : 'monospace' },
+    output: { color: colors.text, fontSize: 12, lineHeight: 18, fontFamily: 'Menlo' },
     notice: { padding: 12, borderRadius: 12, backgroundColor: colors.surfaceWarm, gap: 6 },
   });
 }

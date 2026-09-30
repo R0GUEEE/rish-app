@@ -28,8 +28,7 @@
         ]
       },
       "hosts": [
-        "ios",
-        "android"
+        "ios"
       ],
       "parsed": {
         "provider_response_id": "resp_1",
@@ -73,8 +72,7 @@
         ]
       },
       "hosts": [
-        "ios",
-        "android"
+        "ios"
       ],
       "parsed": {
         "provider_response_id": "resp_2",
@@ -83,8 +81,7 @@
         "reasoning": "why",
         "tool_calls": [],
         "finish_reason": "stop"
-      },
-      "why": "Android reads no reasoning at all on this dialect."
+      }
     },
     {
       "name": "function_call",
@@ -106,8 +103,7 @@
         ]
       },
       "hosts": [
-        "ios",
-        "android"
+        "ios"
       ],
       "parsed": {
         "provider_response_id": "resp_3",
@@ -151,8 +147,7 @@
         ]
       },
       "hosts": [
-        "ios",
-        "android"
+        "ios"
       ],
       "parsed": {
         "provider_response_id": "resp_4",
@@ -187,8 +182,7 @@
         ]
       },
       "hosts": [
-        "ios",
-        "android"
+        "ios"
       ],
       "failure_code": "E_COMPLETION_FINISH_RELATION",
       "why": "A stream that never finished is not a reply to settle a round on."

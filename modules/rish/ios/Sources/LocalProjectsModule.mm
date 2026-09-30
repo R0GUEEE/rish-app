@@ -18,9 +18,9 @@
 #include <errno.h>
 #include <fcntl.h>
 #include <git2.h>
-// The merge both hosts share (modules/rish/shared/git). Included rather than
-// listed in the podspec so the pod's layout and source globs stay as they
-// are; Android compiles the same file from its CMake build.
+// The merge lives in the shared tree (modules/rish/shared/git). Included
+// rather than listed in the podspec so the pod's layout and source globs stay
+// as they are.
 #include "../../shared/git/rish_project_merge.cpp"
 #include <netinet/in.h>
 #include <sys/stat.h>
@@ -5170,7 +5170,7 @@ RCT_REMAP_METHOD(pushV2,
 }
 
 /// The V2 remote descriptor: `url` and `host` are null together when the
-/// project has no origin. What JavaScript renders and what Android answers.
+/// project has no origin. What JavaScript renders and what this answers.
 - (NSDictionary *)v2RemoteDescriptorForRoot:(NSDictionary *)root
                                      origin:(nullable NSString *)origin {
   NSString *host = origin == nil ? nil
@@ -5903,7 +5903,7 @@ static std::string LPMergeText(NSString *value) {
   return utf8 == nullptr ? std::string() : std::string(utf8);
 }
 
-/// A branch name as the panel can show one; the same rule as Android.
+/// A branch name as the panel can show one.
 static BOOL LPMergeBranchShaped(id value) {
   NSString *text = LPString(value);
   if (text.length == 0 || text.length > 255 || [text hasPrefix:@"refs/"] || [text containsString:@".."]) return NO;

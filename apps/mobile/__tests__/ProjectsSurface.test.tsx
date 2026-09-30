@@ -1515,7 +1515,7 @@ test('shows a Files root error on the project surface and permits retry', async 
 });
 
 test('lists a workspace-attached project when the legacy listing is refused, and drives it through V2', async () => {
-  // Android: the v1 module refuses everything, the V2 root API is complete.
+  // The v1 module refuses everything; the V2 root API is complete.
   mockLocalProjects.isV2Available.mockReturnValue(true);
   mockLocalProjects.list.mockRejectedValue(Object.assign(new Error('E_PROJECT_NATIVE'), { code: 'E_PROJECT_NATIVE' }));
   mockWorkspaceProjects.mockResolvedValue([workspaceProject]);
@@ -1818,8 +1818,8 @@ test('a diverged branch merges what was fetched, bound to the reviewed tips, and
 });
 
 test('a workspace project fetches and pushes through the Git proxy the person set', async () => {
-  // Android used to refuse a push while a proxy was set, and no fetch or
-  // clone ever carried one; both hosts now send every one through it.
+  // A push used to be refused while a proxy was set, and no fetch or clone
+  // ever carried one; every one now goes through it.
   const alert = jest.spyOn(Alert, 'alert').mockImplementation(() => undefined);
   const gitHttpsProxyUrl = 'http://127.0.0.1:7890/';
   mockLocalProjects.isV2Available.mockReturnValue(true);
@@ -1874,7 +1874,7 @@ test('a workspace project fetches and pushes through the Git proxy the person se
 });
 
 test('without legacy projects a clone becomes a new workspace project, and can be cancelled while it runs', async () => {
-  // Android: the legacy module is linked (its methods stubbed) but has no clone controls.
+  // The legacy module is linked (its methods stubbed) but has no clone controls.
   mockLocalProjects.isAvailable.mockReturnValue(true);
   mockLocalProjects.isLegacyCloneAvailable.mockReturnValue(false);
   mockLocalProjects.list.mockRejectedValue(Object.assign(new Error('E_PROJECT_NATIVE'), { code: 'E_PROJECT_NATIVE' }));

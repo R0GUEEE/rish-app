@@ -44,10 +44,6 @@ provider host are not mounted yet.
 - Package mirror manager for Alpine APK, Python pip, and Node npm with presets,
   custom HTTPS URLs, speed tests, and native rish guest-overlay staging.
 
-Android compiles the shared React Native UI but currently fails closed for
-local runtime/workspace operations. Android KeyStore, native model transport,
-session persistence, rish bindings, and device proof remain to be implemented.
-
 ## Toolchain
 
 - React Native 0.87.0 and React 19.2.3
@@ -71,12 +67,6 @@ cd ..
 npm run ios
 ```
 
-Android UI development:
-
-```sh
-npm run android
-```
-
 The self-contained iOS Release proof also requires the pinned rish source
 checkout. From the repository root, run `./scripts/prepare-rish-ios.sh` to
 fetch a temporary detached copy, or pass a reviewed checkout path (also
@@ -92,9 +82,6 @@ root [`README.md`](../../README.md).
 npm run typecheck
 npm run lint
 npm test -- --runInBand
-
-cd android
-./gradlew assembleDebug
 ```
 
 The Jest suite covers strict chat/preference state, deterministic persistence,

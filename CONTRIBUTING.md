@@ -56,8 +56,8 @@ ruby scripts/verify-no-bundled-secret.rb
 ```
 
 The current checks are maintainer guidance rather than a promise that every
-platform or product feature is complete. Android local runtime, full
-`local_harness`, and App Store distribution have separate status boundaries.
+platform or product feature is complete. Full `local_harness` and App Store
+distribution have separate status boundaries.
 
 ## Changes and review
 

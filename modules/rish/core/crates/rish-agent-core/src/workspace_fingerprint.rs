@@ -4,11 +4,10 @@
 //! `DSHWorkspaceCanonical.mm` and the three input builders in
 //! `LocalWorkspaceAccess.mm`. This is the first rule of the workspace
 //! subsystem to move, and it moves first on purpose: the root fingerprint is
-//! what an Agent root projection carries and what a lease proves, so two
-//! implementations of it would mean an authority written on one platform is
-//! invalid on the other. Building Android's workspace subsystem against a
-//! second Kotlin copy of this would have been the exact thing this core exists
-//! to prevent.
+//! what an Agent root projection carries and what a lease proves, so a second
+//! implementation of it would mean an authority written by one build is not
+//! portable to another. A parallel copy of this rule is the exact thing this
+//! core exists to prevent.
 //!
 //! Three origins, three shapes, one digest:
 //!

@@ -1,10 +1,9 @@
 //! Turning a streamed completion into the reply a non-streamed one would be.
 //!
-//! Both hosts had their own copy of this: iOS in `DSHStreamEvents.mm`,
-//! Android in `AndroidModelTransport`. Android's leaned on a platform line
-//! reader, which hid the cases that actually break a stream parser -- a
-//! multi-byte character split across two chunks, a `data:` line arriving in
-//! three pieces, two events in one read.
+//! iOS had its own copy of this in `DSHStreamEvents.mm`. The host-side copy
+//! leaned on a platform line reader, which hid the cases that actually break
+//! a stream parser -- a multi-byte character split across two chunks, a
+//! `data:` line arriving in three pieces, two events in one read.
 //!
 //! So this takes bytes, not lines. The host hands over whatever the socket
 //! gave it and carries an opaque state between calls; only complete lines are
@@ -14,15 +13,14 @@
 //! [`crate::completion_response::parse`], the digests, the receipt -- is the
 //! same code for a streamed reply as for a whole one.
 //!
-//! Where the two hosts disagreed, this keeps the stricter rule, so that
-//! adopting it can only narrow what a provider gets away with: iOS's caps on
-//! a line and on a tool-call fragment, and Android's refusal to read the
-//! literal string `"null"` as a finish reason.
+//! This keeps the stricter of the rules the host used to apply, so that
+//! adopting it can only narrow what a provider gets away with: a cap on a
+//! line and on a tool-call fragment, and a refusal to read the literal string
+//! `"null"` as a finish reason.
 //!
-//! The two hosts also framed events differently, and this keeps both. SSE
-//! lets one event carry several `data:` lines joined by newlines, ended by a
-//! blank line, which is what iOS read; every provider this app speaks to puts
-//! one event on one line and Android read that. So a `data:` line is
+//! Events are framed both ways SSE allows. SSE lets one event carry several
+//! `data:` lines joined by newlines, ended by a blank line; every provider
+//! this app speaks to puts one event on one line. So a `data:` line is
 //! dispatched the moment what has accumulated is a complete event, and
 //! otherwise held for the next one. Per-line streams behave exactly as they
 //! did, and a split event is joined rather than misread.

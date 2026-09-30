@@ -467,8 +467,8 @@ static BOOL RV2PushMain(git_repository *repository) {
 // GIT_CHECKOUT_SAFE protects tracked changes and untracked files but not
 // ignored ones: if the incoming commit starts tracking a path ignored here,
 // the checkout wrote straight over it, and nothing in the cleanliness check
-// saw it because status does not list ignored files. Reproduced on Android
-// first, where the pull answered `updated` over the person's own file.
+// saw it because status does not list ignored files. The pull used to answer
+// `updated` straight over the person's own file.
 - (void)testAFastForwardNeverOverwritesAnIgnoredLocalFile {
   NSError *error = nil;
   NSString *code = nil;
@@ -555,8 +555,8 @@ static BOOL RV2PushMain(git_repository *repository) {
 }
 
 // ---------------------------------------------------------------------------
-// Merge after divergence. The merge itself is the shared C++ Android runs
-// too (modules/rish/shared/git); these pin what iOS wraps around it: the
+// Merge after divergence. The merge itself is the shared C++
+// (modules/rish/shared/git); these pin what iOS wraps around it: the
 // lease, the journal in the private gitdir, recovery and the codes.
 
 static NSString *RV2Hex(const git_oid *oid) {

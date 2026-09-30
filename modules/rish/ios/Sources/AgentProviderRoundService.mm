@@ -494,8 +494,8 @@ static const int64_t DSHAgentRoundPreviewCoalesceNanoseconds = 50 * NSEC_PER_MSE
     // that could not be built -- whose operation result was never written:
     // the row is the answer, and it says the round is settled and safe to
     // relaunch. Reporting it `unknown` turned a replayed refusal into an
-    // uncertainty the settled row contradicts. It is committed as Android
-    // commits it, and nothing is dispatched again.
+    // uncertainty the settled row contradicts. It is committed as the row
+    // records it, and nothing is dispatched again.
     if ([roundRow[@"state"] isEqualToString:@"failed_retryable"]) {
       NSString *recorded = DSHProviderRoundFailureCode(@"reconciled", @"failed_retryable",
                                                        roundRow[@"failure_code"])[@"code"];
@@ -1280,7 +1280,7 @@ static const int64_t DSHAgentRoundPreviewCoalesceNanoseconds = 50 * NSEC_PER_MSE
       [providerResult[@"request_body_sha256"] isEqual:actualBodyDigest];
   if (!signaled || providerResult == nil || providerErrorCode != nil ||
       !providerCorrelationMatches || !providerDigestsMatch) {
-    // The transport's own code, as Android sends it: what the provider said
+    // The transport's own code is what is sent: what the provider said
     // (E_COMPLETION_HTTP_STATUS and its status) is what the notice explains,
     // where the round's code alone says only that the round is ambiguous.
     NSInteger refusalStatus = [providerTransport takeRefusalHTTPStatusForProviderRequestId:providerRequestId];
@@ -1317,7 +1317,7 @@ static const int64_t DSHAgentRoundPreviewCoalesceNanoseconds = 50 * NSEC_PER_MSE
     // leaves it failed_retryable with the cause the core derived; a round
     // stopped before dispatch is cancelled; anything else is ambiguous, as
     // before. Reporting the row's own state keeps the controller's journal
-    // and the WAL saying the same thing, as Android does.
+    // and the WAL saying the same thing.
     NSString *settledState = [row[@"state"] isKindOfClass:NSString.class] ? row[@"state"] : @"";
     BOOL settled = [settledState isEqualToString:@"failed_retryable"] ||
         [settledState isEqualToString:@"cancelled"];

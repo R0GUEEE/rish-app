@@ -81,9 +81,8 @@
   // Two whole events on consecutive data: lines, with no blank line between
   // them. This parser used to join them per the SSE spec and fail closed on
   // the invalid JSON that made; the shared core reads each one as soon as it
-  // is whole, which is what every provider this app speaks to sends and what
-  // Android always did. A well-formed stream is no longer thrown away for
-  // want of a blank line.
+  // is whole, which is what every provider this app speaks to sends. A
+  // well-formed stream is no longer thrown away for want of a blank line.
   NSString *stream =
       @"data: {\"choices\":[{\"delta\":{\"content\":\"a\"}}]}\n"
       @"data: {\"choices\":[{\"delta\":{\"content\":\"b\"}}]}\n\n";

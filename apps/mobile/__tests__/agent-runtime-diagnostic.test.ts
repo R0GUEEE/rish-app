@@ -40,17 +40,17 @@ test('does not evaluate accessors or accept diagnostics without a stable code', 
   })).toBeNull();
 });
 
-// What Android now answers with for any refusal: the operation, whether a
-// rule refused or something threw, the class and the app method -- which is
-// what turns a bare E_COMPLETION_NATIVE into a place in the code.
+// What a native refusal answers with: the operation, whether a rule refused or
+// something threw, the class and the app method -- which is what turns a bare
+// E_COMPLETION_NATIVE into a place in the code.
 test('reads the structured provenance of any native rejection', () => {
-  const diagnostic = 'agent_runtime/v1 operation=recover_agent_attempt kind=refused code=E_AGENT_NATIVE cause=Refused site=AndroidAgentRecoveryService.recover:212';
+  const diagnostic = 'agent_runtime/v1 operation=recover_agent_attempt kind=refused code=E_AGENT_NATIVE cause=Refused site=DSHProviderRoundService.recoverAgentAttempt:212';
   expect(agentRuntimeDiagnosticFromError({
     code: 'E_AGENT_NATIVE', message: `E_AGENT_NATIVE\n${diagnostic}`,
   })).toBe(diagnostic);
-  const thrown = 'agent_runtime/v1 operation=complete_agent_round_v2 kind=exception code=E_AGENT_NATIVE cause=JSONException site=AndroidAgentProviderRoundService$settle$1.invoke:431';
+  const thrown = 'agent_runtime/v1 operation=complete_agent_round_v2 kind=exception code=E_AGENT_NATIVE cause=NSJSONError site=AgentRuntimeModule.completeAgentRoundV2$1.invoke:431';
   expect(parseAgentRuntimeDiagnostic(thrown)).toBe(thrown);
   // Anything a person wrote cannot ride along.
   expect(parseAgentRuntimeDiagnostic(`${thrown} note=hello`)).toBeNull();
-  expect(parseAgentRuntimeDiagnostic(thrown.replace('cause=JSONException', 'cause=/data/user/0'))).toBeNull();
+  expect(parseAgentRuntimeDiagnostic(thrown.replace('cause=NSJSONError', 'cause=/data/user/0'))).toBeNull();
 });

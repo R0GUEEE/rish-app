@@ -1,5 +1,5 @@
 import React, { useEffect, useMemo, useState } from 'react';
-import { Platform, Pressable, StyleSheet, Text, View } from 'react-native';
+import { Pressable, StyleSheet, Text, View } from 'react-native';
 import BrainCircuit from 'lucide-react-native/icons/brain-circuit';
 import ChevronDown from 'lucide-react-native/icons/chevron-down';
 import ChevronUp from 'lucide-react-native/icons/chevron-up';
@@ -230,7 +230,7 @@ function ActivityBlock({ label }: { label: string }) {
     <View
       accessibilityLabel={label}
       accessibilityLiveRegion="polite"
-      accessibilityRole={Platform.OS === 'android' ? 'text' : 'status'}
+      accessibilityRole={'status'}
       style={styles.activityRow}
       testID="activity-block"
     >
@@ -280,7 +280,7 @@ function ReasoningBlock({
           <Text
             accessibilityLabel={caption}
             accessibilityLiveRegion="polite"
-            accessibilityRole={Platform.OS === 'android' ? 'text' : 'status'}
+            accessibilityRole={'status'}
             style={styles.blockCaption}
           >
             {caption}
@@ -421,7 +421,7 @@ function ToolBlock({
         <Text
           accessibilityLabel={announcement}
           accessibilityLiveRegion={failed ? 'assertive' : 'polite'}
-          accessibilityRole={failed ? 'alert' : Platform.OS === 'android' ? 'text' : 'status'}
+          accessibilityRole={failed ? 'alert' : 'status'}
           style={[
             styles.status,
             succeeded && styles.statusSucceeded,

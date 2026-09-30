@@ -54,9 +54,7 @@ five direct packages exhaust the JavaScript or native dependency graph.
 
 The app tracks a kernel and CPIO guest payload under
 `apps/mobile/ios/Rish/GuestAssets/`, with `SHA256SUMS` for the exact bytes.
-The same two files are packaged into the Android APK as assets when the
-runtime is staged with `scripts/prepare-rish-android.sh`; there is one copy in
-the source tree and one set of pinned digests.
+There is one copy in the source tree and one set of pinned digests.
 The pinned sibling Rish source provides the guest provenance and license
 correspondence in
 [`guest/x86_64/SOURCES-AND-LICENSES.md`](https://github.com/ZSeven-W/rish/blob/ef660dc81fa31cbe279b1f4ba355a97734ff1740/guest/x86_64/SOURCES-AND-LICENSES.md)

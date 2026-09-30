@@ -10,7 +10,6 @@ import {
   AccessibilityInfo,
   ActivityIndicator,
   FlatList,
-  Platform,
   findNodeHandle,
   Pressable,
   ScrollView,
@@ -797,7 +796,7 @@ export function ProjectContextSheet(props: ProjectContextSheetProps) {
       {candidateNotice !== null && (
         <Text
           accessibilityLiveRegion="polite"
-          accessibilityRole={props.errorCode === null ? (Platform.OS === 'android' ? 'text' : 'status') : 'alert'}
+          accessibilityRole={props.errorCode === null ? 'status' : 'alert'}
           style={props.errorCode === null ? styles.notice : styles.error}
         >
           {candidateNotice}
@@ -916,7 +915,7 @@ export function ProjectContextSheet(props: ProjectContextSheetProps) {
         {failure !== null && (
           <Text
             accessibilityLiveRegion="polite"
-            accessibilityRole={props.errorCode === null ? (Platform.OS === 'android' ? 'text' : 'status') : 'alert'}
+            accessibilityRole={props.errorCode === null ? 'status' : 'alert'}
             style={props.errorCode === null ? styles.notice : styles.error}
           >
             {failure}
@@ -1036,7 +1035,7 @@ export function ProjectContextSheet(props: ProjectContextSheetProps) {
       {recoveryNotice !== null && (
         <Text
           accessibilityLiveRegion="polite"
-          accessibilityRole={props.errorCode === null ? (Platform.OS === 'android' ? 'text' : 'status') : 'alert'}
+          accessibilityRole={props.errorCode === null ? 'status' : 'alert'}
           style={props.errorCode === null ? styles.notice : styles.error}
         >
           {recoveryNotice}
@@ -1172,7 +1171,7 @@ export function ProjectContextSheet(props: ProjectContextSheetProps) {
       >
         <Text
           accessibilityLiveRegion="polite"
-          accessibilityRole={error === null ? (Platform.OS === 'android' ? 'text' : 'status') : 'alert'}
+          accessibilityRole={error === null ? 'status' : 'alert'}
           style={error === null ? styles.notice : styles.error}
         >
           {error ?? status}
@@ -1258,7 +1257,7 @@ export function ProjectContextSheet(props: ProjectContextSheetProps) {
         {props.checking && (
           <Text
             accessibilityLiveRegion="polite"
-            accessibilityRole={Platform.OS === 'android' ? 'text' : 'status'}
+            accessibilityRole={'status'}
             style={styles.checkingNotice}
           >
             {t('context.sheet.checking')}

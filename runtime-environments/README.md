@@ -33,7 +33,7 @@ python3 scripts/tests/runtime-environments-test.py
 ```
 
 `RISH_MKE2FS` may select the trusted host `mke2fs` executable. Otherwise the
-standard path, Homebrew e2fsprogs and Android SDK platform-tools are checked.
+standard path and Homebrew e2fsprogs are checked.
 The currently verified builder uses mke2fs 1.46.6. Reuse the same tool version
 for byte-identical disks; its allocation/layout choices are part of the build.
 

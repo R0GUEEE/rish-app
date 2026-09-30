@@ -433,7 +433,7 @@ fn projected_tools(root: &Value, guest_cgi: bool, version: u64) -> Result<Vec<Va
     )
 }
 
-/// Default v2 is deliberately unchanged for the Android adapter.
+/// The default stays at v2; v3 has to be asked for explicitly.
 pub fn registry_for_root(root: &Value, guest_cgi: bool) -> Result<Value, StoreError> {
     registry_for_root_version(root, guest_cgi, 2)
 }

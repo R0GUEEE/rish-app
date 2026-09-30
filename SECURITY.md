@@ -9,7 +9,7 @@ public issue while the owner decides how reports should be handled.
 
 Please treat these as security-sensitive boundaries:
 
-- provider credentials and native Keychain/Keystore storage;
+- provider credentials and native Keychain storage;
 - project, Files, Git, guest, and workspace isolation;
 - path traversal, symlink handling, `.git` exposure, and destructive actions;
 - bundled guest binaries, downloaded dependencies, and integrity checks;

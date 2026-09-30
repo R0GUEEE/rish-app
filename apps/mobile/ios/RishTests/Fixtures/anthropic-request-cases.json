@@ -2,7 +2,7 @@
   "schema_version": 1,
   "harness_id": "claude-code",
   "provider": "anthropic",
-  "note": "The request body each host must build for an Anthropic round. Frozen from iOS. `hosts` names the hosts that already produce this body: a case listing only ios is a gap in the other host, recorded rather than asserted, and the `why` beside it says what the gap is. `body_sha256` is SHA-256 over the body with sorted keys and a forward slash escaped, which is the encoding a receipt binds.",
+  "note": "The request body each host must build for an Anthropic round. Frozen from iOS. `hosts` names the hosts that already produce this body; iOS is the shipped host. `body_sha256` is SHA-256 over the body with sorted keys and a forward slash escaped, which is the encoding a receipt binds.",
   "cases": [
     {
       "name": "sonnet_thinking_off",
@@ -18,8 +18,7 @@
       ],
       "tools": [],
       "hosts": [
-        "ios",
-        "android"
+        "ios"
       ],
       "body": {
         "model": "claude-sonnet-5",
@@ -56,8 +55,7 @@
       ],
       "tools": [],
       "hosts": [
-        "ios",
-        "android"
+        "ios"
       ],
       "body": {
         "model": "claude-sonnet-5",
@@ -98,8 +96,7 @@
       ],
       "tools": [],
       "hosts": [
-        "ios",
-        "android"
+        "ios"
       ],
       "body": {
         "model": "claude-sonnet-5",
@@ -140,8 +137,7 @@
       ],
       "tools": [],
       "hosts": [
-        "ios",
-        "android"
+        "ios"
       ],
       "body": {
         "model": "claude-haiku-4-5-20251001",
@@ -175,8 +171,7 @@
       ],
       "tools": [],
       "hosts": [
-        "ios",
-        "android"
+        "ios"
       ],
       "body": {
         "model": "claude-haiku-4-5-20251001",
@@ -214,8 +209,7 @@
       ],
       "tools": [],
       "hosts": [
-        "ios",
-        "android"
+        "ios"
       ],
       "body": {
         "model": "claude-haiku-4-5-20251001",
@@ -253,8 +247,7 @@
       ],
       "tools": [],
       "hosts": [
-        "ios",
-        "android"
+        "ios"
       ],
       "body": {
         "model": "claude-fable-5-1",
@@ -291,8 +284,7 @@
       ],
       "tools": [],
       "hosts": [
-        "ios",
-        "android"
+        "ios"
       ],
       "body": {
         "model": "claude-fable-5-1",
@@ -333,8 +325,7 @@
       ],
       "tools": [],
       "hosts": [
-        "ios",
-        "android"
+        "ios"
       ],
       "body": {
         "model": "GLM-5.3",
@@ -395,8 +386,7 @@
         }
       ],
       "hosts": [
-        "ios",
-        "android"
+        "ios"
       ],
       "body": {
         "model": "claude-sonnet-5",
@@ -494,8 +484,7 @@
         }
       ],
       "hosts": [
-        "ios",
-        "android"
+        "ios"
       ],
       "body": {
         "model": "claude-haiku-4-5-20251001",
@@ -611,8 +600,7 @@
       },
       "body_sha256": "a11540707329eedb2ed64445e31e289cd5572d752d1e82be24f497a0b1389fb0",
       "hosts": [
-        "ios",
-        "android"
+        "ios"
       ]
     }
   ],
