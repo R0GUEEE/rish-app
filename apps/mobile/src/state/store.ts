@@ -400,6 +400,12 @@ export type ChatStore = {
   deleteConversation(id: string): void;
   setModel(id: string, modelId: ModelId): void;
   setThinkingMode(id: string, thinkingMode: ConversationThinkingMode): void;
+  /**
+   * Drops a prompt and everything after it so its turn can be reissued.
+   * Refused by the reducer while a round is in flight or when an Agent
+   * journal owns any of what would be dropped.
+   */
+  truncateFrom(id: string, messageId: string): void;
   bindConversationToProject(id: string, projectId: string): void;
   unbindConversationFromProject(id: string): void;
   bindConversationToWorkspace(id: string, workspaceId: string): void;
@@ -2675,6 +2681,12 @@ export function createChatStore(options: ChatStoreOptions = {}): ChatStore {
       dispatch({
         type: 'conversation/set-thinking',
         payload: { id, thinkingMode, at: canonicalNow(now) },
+      });
+    },
+    truncateFrom: (id, messageId) => {
+      dispatch({
+        type: 'conversation/truncate-from',
+        payload: { conversationId: id, messageId, at: canonicalNow(now) },
       });
     },
     bindConversationToProject: (id, projectId) => {

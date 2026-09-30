@@ -5688,6 +5688,7 @@ function destructiveTargetConversationId(action: ChatAction): string | null {
         typeof action.payload.scope.conversationId === 'string'
         ? action.payload.scope.conversationId
         : null;
+    case 'conversation/truncate-from':
     case 'message/append':
     case 'turn/prepare':
     case 'attempt/start-round':
@@ -6604,6 +6605,79 @@ export function chatReducer(state: ChatState, action: ChatAction): ChatState {
             : null,
         updatedAt: laterTimestamp(owned.conversation.updatedAt, payload.at),
       });
+    }
+
+    case 'conversation/truncate-from': {
+      const { conversationId, messageId, at } = action.payload;
+      const conversation = state.conversations[conversationId];
+      if (
+        conversation === undefined ||
+        !isCanonicalTimestamp(at) ||
+        state.projectContextDestructiveTransition !== null ||
+        requiresDestructiveLifecycle(conversation)
+      ) {
+        return state;
+      }
+      const cut = conversation.messages.findIndex(
+        message => message.id === messageId,
+      );
+      // Only a prompt starts a turn, so only a prompt can be the cut point.
+      if (cut < 0 || conversation.messages[cut].role !== 'user') return state;
+      // A round still in flight owns the turn it is writing. Truncating under
+      // it would leave that round settling into a transcript that is gone.
+      if (
+        conversation.attempts.some(
+          attempt =>
+            attempt.status === 'prepared' || attempt.status === 'sending',
+        )
+      ) {
+        return state;
+      }
+      const droppedMessages = new Set(
+        conversation.messages.slice(cut).map(message => message.id),
+      );
+      const droppedTurnIds = new Set(
+        conversation.turns
+          .filter(turn => droppedMessages.has(turn.userMessageId))
+          .map(turn => turn.turnId),
+      );
+      const droppedAttempts = conversation.attempts.filter(attempt =>
+        droppedTurnIds.has(attempt.turnId),
+      );
+      // An Agent journal is a recovery owner with a native transcript behind
+      // it. Releasing one needs the terminal-phase evidence and the bounded
+      // cleanup outbox that deletion collects; nothing here can produce that,
+      // so this refuses rather than orphaning a transcript.
+      if (
+        droppedAttempts.some(
+          attempt => attempt.agent !== undefined && attempt.agent !== null,
+        )
+      ) {
+        return state;
+      }
+      const droppedAttemptIds = new Set(
+        droppedAttempts.map(attempt => attempt.attemptId),
+      );
+      const truncated: Conversation = {
+        ...conversation,
+        messages: conversation.messages.slice(0, cut),
+        turns: conversation.turns.filter(turn => !droppedTurnIds.has(turn.turnId)),
+        attempts: conversation.attempts.filter(
+          attempt => !droppedAttemptIds.has(attempt.attemptId),
+        ),
+        updatedAt: laterTimestamp(conversation.updatedAt, at),
+      };
+      const next = withConversation(state, truncated);
+      const events = state.sessionEvents;
+      if (events === undefined || droppedAttemptIds.size === 0) return next;
+      // Session events are display history keyed by attempt, so an event whose
+      // attempt is gone has nothing left to describe.
+      return {
+        ...next,
+        sessionEvents: events.filter(
+          event => !droppedAttemptIds.has(event.attempt_id),
+        ),
+      };
     }
 
     case 'message/append': {

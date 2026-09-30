@@ -1410,6 +1410,20 @@ export type ChatAction =
       };
     }
   | {
+      /**
+       * Drops a user message and everything after it, so that turn can be
+       * edited or reissued. Refused while a round is in flight, and refused
+       * when an Agent journal owns any of what would be dropped: releasing
+       * one of those is the deletion path's job, not this one's.
+       */
+      readonly type: 'conversation/truncate-from';
+      readonly payload: {
+        readonly conversationId: string;
+        readonly messageId: string;
+        readonly at: string;
+      };
+    }
+  | {
       readonly type: 'message/append';
       readonly payload: {
         readonly conversationId: string;
