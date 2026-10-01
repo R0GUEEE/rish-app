@@ -151,10 +151,12 @@ function heading(
   renderer: ReactTestRenderer.ReactTestRenderer,
   testID: string,
 ): unknown[] {
-  return renderer.root
-    .findAllByProps({ testID })
-    .flatMap(node => node.findAllByType(Text))
-    .map(node => node.props.children);
+  // A View matches twice while walking the tree -- once as the element and
+  // once as the host node it renders -- so the first match is the one whose
+  // children are the heading rather than a duplicate of itself.
+  const [header] = renderer.root.findAllByProps({ testID });
+  if (header === undefined) throw new Error(`no ${testID} heading`);
+  return header.findAllByType(Text).map(node => node.props.children);
 }
 
 test('a pinned conversation is listed under its own heading, not in recent', async () => {
