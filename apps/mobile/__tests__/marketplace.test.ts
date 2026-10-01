@@ -7,13 +7,18 @@ import {
   marketplaceEntryId,
   marketplaceInstallState,
   parseMarketplaceCatalog,
+  type MarketplaceEntry,
 } from '../src/marketplace';
 import { BUILTIN_MARKETPLACE } from '../src/marketplace';
 import { upsertPlugin, type Plugin } from '../src/plugins/plugins';
 import { upsertSkill, type Skill } from '../src/skills';
 
-const skillEntry = (version = '1.0.0') => ({
-  kind: 'skill' as const,
+// Narrowed to the one kind it builds, so a test can reach the payload it is
+// installing while the entry still satisfies the union every caller takes.
+const skillEntry = (
+  version = '1.0.0',
+): Extract<MarketplaceEntry, { kind: 'skill' }> => ({
+  kind: 'skill',
   publisher: 'Rish',
   summary: 'A skill.',
   skill: {
@@ -25,8 +30,10 @@ const skillEntry = (version = '1.0.0') => ({
   },
 });
 
-const pluginEntry = (version = '1.0.0') => ({
-  kind: 'plugin' as const,
+const pluginEntry = (
+  version = '1.0.0',
+): Extract<MarketplaceEntry, { kind: 'plugin' }> => ({
+  kind: 'plugin',
   publisher: 'Rish',
   summary: 'A plugin.',
   plugin: {
