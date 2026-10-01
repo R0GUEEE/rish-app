@@ -14,7 +14,12 @@ import Trash2 from 'lucide-react-native/icons/trash-2';
 
 import { useAppPresentation } from '../presentation/AppPresentation';
 import { fonts, hitSlop, type ThemePalette } from '../theme';
-import type { Plugin, PluginCapability, PluginToolPosture } from '../plugins/plugins';
+import {
+  pluginToolName,
+  type Plugin,
+  type PluginCapability,
+  type PluginToolPosture,
+} from '../plugins/plugins';
 import { AppIcon } from './AppIcon';
 
 type Props = {
@@ -117,7 +122,7 @@ export function PluginManagerSheet(props: Props) {
                   plugin.tools.map(tool => (
                     <View key={tool.name} style={styles.toolRow}>
                       <Text numberOfLines={1} style={styles.toolName}>
-                        {plugin.id}__{tool.name}
+                        {pluginToolName(plugin.id, tool.name)}
                       </Text>
                       <Text style={styles.toolCapability}>
                         {t(CAPABILITY_LABELS[tool.capability])}
