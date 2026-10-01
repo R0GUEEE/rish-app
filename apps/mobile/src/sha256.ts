@@ -93,9 +93,52 @@ export function sha256Hex(bytes: readonly number[]): string {
   return [...hash].map(word => word.toString(16).padStart(8, '0')).join('');
 }
 
+/**
+ * The UTF-8 bytes of a string.
+ *
+ * Written out rather than taken from `TextEncoder`, which React Native does
+ * not promise: a digest that depends on a runtime global is a digest that
+ * would come out differently on a runtime that lacks it.
+ */
+export function utf8Bytes(text: string): readonly number[] {
+  const bytes: number[] = [];
+  for (let index = 0; index < text.length; index += 1) {
+    const unit = text.charCodeAt(index);
+    if (unit <= 0x7f) {
+      bytes.push(unit);
+    } else if (unit <= 0x7ff) {
+      bytes.push(0xc0 | (unit >>> 6), 0x80 | (unit & 0x3f));
+    } else if (unit >= 0xd800 && unit <= 0xdbff) {
+      const low = text.charCodeAt(index + 1);
+      if (low >= 0xdc00 && low <= 0xdfff) {
+        const point =
+          0x10000 + ((unit - 0xd800) << 10) + (low - 0xdc00);
+        bytes.push(
+          0xf0 | (point >>> 18),
+          0x80 | ((point >>> 12) & 0x3f),
+          0x80 | ((point >>> 6) & 0x3f),
+          0x80 | (point & 0x3f),
+        );
+        index += 1;
+      } else {
+        bytes.push(0xef, 0xbf, 0xbd);
+      }
+    } else if (unit >= 0xdc00 && unit <= 0xdfff) {
+      bytes.push(0xef, 0xbf, 0xbd);
+    } else {
+      bytes.push(
+        0xe0 | (unit >>> 12),
+        0x80 | ((unit >>> 6) & 0x3f),
+        0x80 | (unit & 0x3f),
+      );
+    }
+  }
+  return bytes;
+}
+
 /** The digest of a string's UTF-8 bytes, as lowercase hexadecimal. */
 export function sha256HexOfText(text: string): string {
-  return sha256Hex([...new TextEncoder().encode(text)]);
+  return sha256Hex(utf8Bytes(text));
 }
 
 /**

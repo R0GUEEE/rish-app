@@ -244,7 +244,10 @@ describe('catalogs that arrive over the network', () => {
     });
     expect(result.ok).toBe(true);
     if (!result.ok) throw new Error(result.reason);
-    expect(result.catalog.entries[0]!.skill.id).toBe('release_notes');
+    const entry = result.catalog.entries[0]!;
+    expect(entry.kind).toBe('skill');
+    if (entry.kind !== 'skill') throw new Error('expected a skill entry');
+    expect(entry.skill.id).toBe('release_notes');
   });
 
   test('too large and unreadable answers are refused for what they are', async () => {

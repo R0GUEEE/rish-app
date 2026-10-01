@@ -182,9 +182,10 @@ export async function fetchRemoteCatalog(
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), timeoutMs);
   try {
+    // No `redirect` option: React Native does not type one, and following is
+    // its default. Where the answer came from is checked below instead.
     const response = await doFetch(parsed.toString(), {
       headers: { accept: 'application/json' },
-      redirect: 'follow',
       signal: controller.signal,
     });
     const finalURL = response.url ?? '';
