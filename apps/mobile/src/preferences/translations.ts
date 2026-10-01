@@ -259,6 +259,27 @@ const enUS = {
     'Not saveable yet: check the id, the fields and the limits.',
   'skills.editor.save': 'Save skill',
   'marketplace.empty': 'This catalog has no entries.',
+  'marketplace.loadCatalog': 'Load a catalog',
+  'marketplace.loadTitle': 'Load a catalog',
+  'marketplace.loadHint':
+    'A catalog is fetched over HTTPS and every entry must carry a digest of its own payload. Nothing is installed until you choose it.',
+  'marketplace.loadUrl': 'Catalog address',
+  'marketplace.loadAction': 'Fetch',
+  'marketplace.loading': 'Fetching…',
+  'marketplace.loaded': 'Loaded {count} entries from {source}.',
+  'marketplace.loadRefused.notHttps': 'Only an HTTPS address is fetched.',
+  'marketplace.loadRefused.insecureRedirect':
+    'The address redirected away from HTTPS, so nothing was read.',
+  'marketplace.loadRefused.network':
+    'The catalog could not be fetched. Check the address and the connection.',
+  'marketplace.loadRefused.timeout': 'The catalog took too long to answer.',
+  'marketplace.loadRefused.tooLarge': 'The catalog is larger than this app reads.',
+  'marketplace.loadRefused.invalidCatalog':
+    'That address does not answer with a catalog this app can read.',
+  'marketplace.loadRefused.digestMissing':
+    'The catalog has an entry with no digest, so none of it was accepted.',
+  'marketplace.loadRefused.digestMismatch':
+    'An entry does not match the digest it came with, so none of it was accepted.',
   'marketplace.exportLibrary': 'Share this library',
   'marketplace.importLibrary': 'Import from text',
   'marketplace.importTitle': 'Import a library',
@@ -1468,6 +1489,25 @@ const zhCN: Readonly<Record<TranslationKey, string>> = {
   'skills.editor.invalid': '还不能保存：请检查标识、各项内容和长度限制。',
   'skills.editor.save': '保存技能',
   'marketplace.empty': '这个目录里还没有条目。',
+  'marketplace.loadCatalog': '加载目录',
+  'marketplace.loadTitle': '加载目录',
+  'marketplace.loadHint':
+    '目录通过 HTTPS 获取，每个条目都必须带自身内容的摘要。在你选择之前不会安装任何东西。',
+  'marketplace.loadUrl': '目录地址',
+  'marketplace.loadAction': '获取',
+  'marketplace.loading': '正在获取…',
+  'marketplace.loaded': '已从 {source} 加载 {count} 个条目。',
+  'marketplace.loadRefused.notHttps': '只会获取 HTTPS 地址。',
+  'marketplace.loadRefused.insecureRedirect':
+    '该地址跳转到了非 HTTPS，因此没有读取任何内容。',
+  'marketplace.loadRefused.network': '无法获取目录，请检查地址与网络连接。',
+  'marketplace.loadRefused.timeout': '目录响应超时。',
+  'marketplace.loadRefused.tooLarge': '目录超过本应用读取的大小上限。',
+  'marketplace.loadRefused.invalidCatalog': '该地址返回的不是本应用能读取的目录。',
+  'marketplace.loadRefused.digestMissing':
+    '目录中有条目缺少摘要，因此整份目录都不被接受。',
+  'marketplace.loadRefused.digestMismatch':
+    '有条目与它带来的摘要不符，因此整份目录都不被接受。',
   'marketplace.exportLibrary': '分享当前库',
   'marketplace.importLibrary': '从文本导入',
   'marketplace.importTitle': '导入插件与技能库',

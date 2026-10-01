@@ -35,6 +35,7 @@ type Props = {
   /** Shares the libraries as a document another device can read back. */
   onExportLibrary: () => void;
   onImportLibrary: () => void;
+  onLoadCatalog: () => void;
 };
 
 export function MarketplaceSheet(props: Props) {
@@ -142,6 +143,21 @@ export function MarketplaceSheet(props: Props) {
             );
           })}
         </ScrollView>
+        <Pressable
+          accessibilityLabel={t('marketplace.loadCatalog')}
+          accessibilityRole="button"
+          onPress={props.onLoadCatalog}
+          style={({ pressed }) => [
+            styles.transfer,
+            pressed && styles.pressed,
+          ]}
+          testID="marketplace-load-catalog"
+        >
+          <AppIcon color={colors.text} icon={RefreshCw} size={16} />
+          <Text style={styles.transferText}>
+            {t('marketplace.loadCatalog')}
+          </Text>
+        </Pressable>
         <Pressable
           accessibilityLabel={t('marketplace.exportLibrary')}
           accessibilityRole="button"

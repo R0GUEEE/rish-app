@@ -99,12 +99,13 @@ import {
 } from '../components/RuntimeEvidenceSheet';
 import { LibraryImportSheet } from '../components/LibraryImportSheet';
 import { MarketplaceSheet } from '../components/MarketplaceSheet';
+import { RemoteCatalogSheet } from '../components/RemoteCatalogSheet';
 import { PluginEditorSheet } from '../components/PluginEditorSheet';
 import { PluginManagerSheet } from '../components/PluginManagerSheet';
 import { SkillEditorSheet } from '../components/SkillEditorSheet';
 import { SkillManagerSheet } from '../components/SkillManagerSheet';
 import { pluginToolPosture } from '../plugins/plugins';
-import { BUILTIN_MARKETPLACE } from '../marketplace';
+import { BUILTIN_MARKETPLACE, type MarketplaceCatalog } from '../marketplace';
 import {
   serializeLibrary,
   summarizeLibraryMerge,
@@ -873,6 +874,13 @@ export function HomeScreen({
   );
   const [marketplaceVisible, setMarketplaceVisible] = useState(false);
   const [libraryImportVisible, setLibraryImportVisible] = useState(false);
+  const [remoteCatalogVisible, setRemoteCatalogVisible] = useState(false);
+  /**
+   * The catalog the marketplace is showing. The shipped one until a fetched
+   * catalog replaces it — a loaded catalog holds only what passed its digests.
+   */
+  const [marketplaceCatalog, setMarketplaceCatalog] =
+    useState<MarketplaceCatalog>(BUILTIN_MARKETPLACE);
   const [workspaceVisible, setWorkspaceVisible] = useState(false);
   const workspaceVisibleRef = useRef(false);
   workspaceSheetVisibleRef.current = workspaceSheetVisible;
@@ -6715,6 +6723,7 @@ export function HomeScreen({
     skillManagerVisible ||
     marketplaceVisible ||
     libraryImportVisible ||
+    remoteCatalogVisible ||
     pluginEditorVisible ||
     skillEditorVisible ||
     projectsVisible ||
@@ -7158,7 +7167,8 @@ export function HomeScreen({
         covered={
           settingsVisible || accountVisible || mirrorsVisible ||
           pluginManagerVisible || skillManagerVisible || marketplaceVisible ||
-          libraryImportVisible || pluginEditorVisible || skillEditorVisible
+          libraryImportVisible || remoteCatalogVisible || pluginEditorVisible ||
+          skillEditorVisible
         }
         pendingProjectCleanup={
           lifecycleSheetActive &&
@@ -7553,19 +7563,28 @@ export function HomeScreen({
         validation the managers apply, so an imported entry cannot be one the
         app would refuse to keep.
       */}
+      <RemoteCatalogSheet
+        visible={remoteCatalogVisible}
+        onClose={() => setRemoteCatalogVisible(false)}
+        onLoaded={catalog => {
+          setMarketplaceCatalog(catalog);
+          setRemoteCatalogVisible(false);
+        }}
+      />
       <LibraryImportSheet
         visible={libraryImportVisible}
         onClose={() => setLibraryImportVisible(false)}
         onImport={transfer => importLibrary(transfer)}
       />
       <MarketplaceSheet
-        catalog={BUILTIN_MARKETPLACE}
+        catalog={marketplaceCatalog}
         onExportLibrary={() => {
           Share.share({
             message: serializeLibrary(preferences.plugins, preferences.skills),
           }).catch(() => undefined);
         }}
         onImportLibrary={() => setLibraryImportVisible(true)}
+        onLoadCatalog={() => setRemoteCatalogVisible(true)}
         installedVersions={installedLibraryVersions}
         visible={marketplaceVisible}
         onClose={() => setMarketplaceVisible(false)}

@@ -6,7 +6,11 @@ import {
   isMarketplaceEntry,
   marketplaceEntryId,
   marketplaceInstallState,
+  MAX_CATALOG_BYTES,
+  fetchRemoteCatalog,
+  marketplaceEntryDigest,
   parseMarketplaceCatalog,
+  parseRemoteCatalog,
   type MarketplaceEntry,
 } from '../src/marketplace';
 import { BUILTIN_MARKETPLACE } from '../src/marketplace';
@@ -166,5 +170,112 @@ describe('installing', () => {
     expect(installSkillEntry(installed, pluginEntry(), upsertSkill)).toBe(
       installed,
     );
+  });
+});
+
+describe('catalogs that arrive over the network', () => {
+  const withDigests = (entries: readonly MarketplaceEntry[]) =>
+    entries.map(entry => ({
+      ...entry,
+      digest: marketplaceEntryDigest(entry) ?? undefined,
+    }));
+
+  test('a fetched catalog is accepted only when every digest matches', () => {
+    const entries = withDigests([skillEntry(), pluginEntry()]);
+    const accepted = parseRemoteCatalog(catalog(entries));
+    expect(accepted.ok).toBe(true);
+
+    const missing = parseRemoteCatalog(catalog([skillEntry()]));
+    expect(missing).toEqual({ ok: false, reason: 'digest_missing' });
+
+    // A digest covers the payload, so a listing that restates its summary is
+    // still the entry the publisher signed.
+    const restated = parseRemoteCatalog(
+      catalog([
+        { ...entries[0], summary: 'changed after the digest was taken' },
+        entries[1],
+      ]),
+    );
+    expect(restated.ok).toBe(true);
+
+    // A payload changed behind its digest is the case this exists for.
+    const swapped = parseRemoteCatalog(
+      catalog([
+        { ...entries[0], skill: { ...skillEntry().skill, instructions: 'other' } },
+      ]),
+    );
+    expect(swapped).toEqual({ ok: false, reason: 'digest_mismatch' });
+
+    expect(parseRemoteCatalog('nope')).toEqual({
+      ok: false,
+      reason: 'invalid_catalog',
+    });
+  });
+
+  test('a digest covers the payload, not the listing around it', () => {
+    const [entry] = withDigests([skillEntry()]);
+    expect(marketplaceEntryDigest(entry!)).toBe(entry!.digest);
+    expect(marketplaceEntryDigest(skillEntry())).toBe(entry!.digest);
+  });
+
+  const response = (body: string, url = 'https://example.com/catalog.json') => ({
+    ok: true,
+    url,
+    text: async () => body,
+  });
+
+  test('only https is fetched, and a redirect out of it is refused', async () => {
+    const http = await fetchRemoteCatalog('http://example.com/catalog.json', {
+      fetchImpl: jest.fn() as unknown as typeof fetch,
+    });
+    expect(http).toEqual({ ok: false, reason: 'not_https' });
+
+    const redirected = await fetchRemoteCatalog('https://example.com/c.json', {
+      fetchImpl: (async () =>
+        response('{}', 'http://mirror.example.com/c.json')) as unknown as typeof fetch,
+    });
+    expect(redirected).toEqual({ ok: false, reason: 'insecure_redirect' });
+  });
+
+  test('a good answer is read, and what it says is what is installed', async () => {
+    const body = JSON.stringify(catalog(withDigests([skillEntry()])));
+    const result = await fetchRemoteCatalog('https://example.com/catalog.json', {
+      fetchImpl: (async () => response(body)) as unknown as typeof fetch,
+    });
+    expect(result.ok).toBe(true);
+    if (!result.ok) throw new Error(result.reason);
+    expect(result.catalog.entries[0]!.skill.id).toBe('release_notes');
+  });
+
+  test('too large and unreadable answers are refused for what they are', async () => {
+    const huge = await fetchRemoteCatalog('https://example.com/c.json', {
+      fetchImpl: (async () =>
+        response('x'.repeat(MAX_CATALOG_BYTES + 1))) as unknown as typeof fetch,
+    });
+    expect(huge).toEqual({ ok: false, reason: 'too_large' });
+
+    const notJson = await fetchRemoteCatalog('https://example.com/c.json', {
+      fetchImpl: (async () => response('{oops')) as unknown as typeof fetch,
+    });
+    expect(notJson).toEqual({ ok: false, reason: 'invalid_catalog' });
+  });
+
+  test('a fetch that fails or is too slow says which it was', async () => {
+    const failed = await fetchRemoteCatalog('https://example.com/c.json', {
+      fetchImpl: (async () => {
+        throw new Error('offline');
+      }) as unknown as typeof fetch,
+    });
+    expect(failed).toEqual({ ok: false, reason: 'network' });
+
+    const aborted = await fetchRemoteCatalog('https://example.com/c.json', {
+      fetchImpl: (async () => {
+        const error = new Error('aborted');
+        error.name = 'AbortError';
+        throw error;
+      }) as unknown as typeof fetch,
+      timeoutMs: 5,
+    });
+    expect(aborted).toEqual({ ok: false, reason: 'timeout' });
   });
 });

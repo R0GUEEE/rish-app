@@ -9,6 +9,7 @@
  * catalog would have to provide, and the parser is the only door in.
  */
 import { isPlugin, type Plugin } from './plugins/plugins';
+import { canonicalJson, sha256HexOfText } from './sha256';
 import { isSkill, type Skill } from './skills';
 
 export const MARKETPLACE_SCHEMA_VERSION = 1;
@@ -17,18 +18,31 @@ export const MAX_CATALOG_ENTRIES = 200;
 export const MAX_PUBLISHER_LENGTH = 60;
 export const MAX_SUMMARY_LENGTH = 512;
 export const MAX_SOURCE_LABEL_LENGTH = 60;
+/**
+ * The most catalog text a fetch will read.
+ *
+ * React Native's fetch has no streaming cap, so the body is read and then
+ * measured: a server that sends more than this is refused after it answered,
+ * not before.
+ */
+export const MAX_CATALOG_BYTES = 512 * 1024;
+/** How long a catalog fetch may take. */
+export const CATALOG_FETCH_TIMEOUT_MS = 15_000;
 
 export type MarketplaceEntry =
   | {
       readonly kind: 'plugin';
       readonly publisher: string;
       readonly summary: string;
+      /** `sha256:<hex>` over the payload; required of a fetched catalog. */
+      readonly digest?: string;
       readonly plugin: Plugin;
     }
   | {
       readonly kind: 'skill';
       readonly publisher: string;
       readonly summary: string;
+      readonly digest?: string;
       readonly skill: Skill;
     };
 
@@ -56,27 +70,148 @@ export function isSummary(value: unknown): value is string {
   return boundedText(value, MAX_SUMMARY_LENGTH);
 }
 
+export const MARKETPLACE_DIGEST_PREFIX = 'sha256:';
+
+const MARKETPLACE_DIGEST = /^sha256:[0-9a-f]{64}$/u;
+
+export function isMarketplaceDigest(value: unknown): value is string {
+  return typeof value === 'string' && MARKETPLACE_DIGEST.test(value);
+}
+
 export function isMarketplaceEntry(value: unknown): value is MarketplaceEntry {
   if (typeof value !== 'object' || value === null || Array.isArray(value)) {
     return false;
   }
   const raw = value as Record<string, unknown>;
   if (!isPublisher(raw.publisher) || !isSummary(raw.summary)) return false;
+  const names = Object.keys(raw);
+  if (names.length !== 4 && names.length !== 5) return false;
+  if (names.length === 5 && !isMarketplaceDigest(raw.digest)) return false;
   if (raw.kind === 'plugin') {
     return (
-      Object.keys(raw).length === 4 &&
-      Object.prototype.hasOwnProperty.call(raw, 'plugin') &&
-      isPlugin(raw.plugin)
+      Object.prototype.hasOwnProperty.call(raw, 'plugin') && isPlugin(raw.plugin)
     );
   }
   if (raw.kind === 'skill') {
-    return (
-      Object.keys(raw).length === 4 &&
-      Object.prototype.hasOwnProperty.call(raw, 'skill') &&
-      isSkill(raw.skill)
-    );
+    return Object.prototype.hasOwnProperty.call(raw, 'skill') && isSkill(raw.skill);
   }
   return false;
+}
+
+/**
+ * The digest an entry should carry: SHA-256 over its payload written
+ * canonically, so the same declaration digests the same on every device and
+ * a catalog cannot be reordered into a different digest.
+ */
+export function marketplaceEntryDigest(entry: MarketplaceEntry): string | null {
+  const payload = entry.kind === 'plugin' ? entry.plugin : entry.skill;
+  const canonical = canonicalJson(payload);
+  return canonical === null
+    ? null
+    : `${MARKETPLACE_DIGEST_PREFIX}${sha256HexOfText(canonical)}`;
+}
+
+/** Why a catalog could not be accepted, or null when it can be. */
+export type RemoteCatalogRefusal =
+  | 'not_https'
+  | 'insecure_redirect'
+  | 'network'
+  | 'timeout'
+  | 'too_large'
+  | 'invalid_catalog'
+  | 'digest_missing'
+  | 'digest_mismatch';
+
+export type RemoteCatalogResult =
+  | { readonly ok: true; readonly catalog: MarketplaceCatalog }
+  | { readonly ok: false; readonly reason: RemoteCatalogRefusal };
+
+/**
+ * Reads a catalog that arrived over the network.
+ *
+ * Every entry must carry a digest of its payload and that digest must match,
+ * because a catalog is fetched from somewhere this app does not control: what
+ * is installed has to be what the publisher wrote, not what a server sent.
+ * One entry that fails refuses the whole catalog, as everywhere else here.
+ */
+export function parseRemoteCatalog(value: unknown): RemoteCatalogResult {
+  const catalog = parseMarketplaceCatalog(value);
+  if (catalog === null) return { ok: false, reason: 'invalid_catalog' };
+  for (const entry of catalog.entries) {
+    if (entry.digest === undefined) {
+      return { ok: false, reason: 'digest_missing' };
+    }
+    if (entry.digest !== marketplaceEntryDigest(entry)) {
+      return { ok: false, reason: 'digest_mismatch' };
+    }
+  }
+  return { ok: true, catalog };
+}
+
+export type CatalogFetchOptions = {
+  /** Injected so the rules can be tested without a network. */
+  readonly fetchImpl?: typeof fetch;
+  readonly timeoutMs?: number;
+};
+
+function httpsURL(value: string): URL | null {
+  try {
+    const url = new URL(value);
+    return url.protocol === 'https:' ? url : null;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Fetches a catalog over HTTPS and reads it.
+ *
+ * Only HTTPS is accepted, no credentials travel with the request, and a
+ * redirect that lands somewhere other than HTTPS is refused rather than
+ * followed into plain text. Nothing is installed here: this returns a catalog
+ * that passed its digests, and the person still chooses what to take.
+ */
+export async function fetchRemoteCatalog(
+  url: string,
+  options: CatalogFetchOptions = {},
+): Promise<RemoteCatalogResult> {
+  const parsed = httpsURL(url.trim());
+  if (parsed === null) return { ok: false, reason: 'not_https' };
+  const doFetch = options.fetchImpl ?? fetch;
+  const timeoutMs = options.timeoutMs ?? CATALOG_FETCH_TIMEOUT_MS;
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
+  try {
+    const response = await doFetch(parsed.toString(), {
+      headers: { accept: 'application/json' },
+      redirect: 'follow',
+      signal: controller.signal,
+    });
+    const finalURL = response.url ?? '';
+    if (finalURL.length > 0 && httpsURL(finalURL) === null) {
+      return { ok: false, reason: 'insecure_redirect' };
+    }
+    if (!response.ok) return { ok: false, reason: 'network' };
+    const text = await response.text();
+    if (text.length > MAX_CATALOG_BYTES) {
+      return { ok: false, reason: 'too_large' };
+    }
+    let body: unknown;
+    try {
+      body = JSON.parse(text) as unknown;
+    } catch {
+      return { ok: false, reason: 'invalid_catalog' };
+    }
+    return parseRemoteCatalog(body);
+  } catch (error) {
+    const aborted =
+      typeof error === 'object' &&
+      error !== null &&
+      (error as { name?: unknown }).name === 'AbortError';
+    return { ok: false, reason: aborted ? 'timeout' : 'network' };
+  } finally {
+    clearTimeout(timer);
+  }
 }
 
 /** The installed id of an entry, whichever library it belongs to. */

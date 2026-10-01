@@ -5,6 +5,7 @@ import ReactTestRenderer, {
 } from 'react-test-renderer';
 
 import { LibraryImportSheet } from '../src/components/LibraryImportSheet';
+import { RemoteCatalogSheet } from '../src/components/RemoteCatalogSheet';
 import { MarketplaceSheet } from '../src/components/MarketplaceSheet';
 import { SkillManagerSheet } from '../src/components/SkillManagerSheet';
 import { AppPresentationProvider } from '../src/presentation/AppPresentation';
@@ -73,6 +74,7 @@ function marketplace(
       onClose={jest.fn()}
       onExportLibrary={jest.fn()}
       onImportLibrary={jest.fn()}
+      onLoadCatalog={jest.fn()}
       onInstall={jest.fn()}
       {...overrides}
     />
@@ -212,4 +214,57 @@ test('an import is not offered until the document can be read', async () => {
   await act(async () => action().props.onPress());
   expect(onImport).toHaveBeenCalledTimes(1);
   expect(onImport.mock.calls[0]![0].skills[0].id).toBe('release_notes');
+});
+
+test('a fetched catalog is only handed on when every digest matched', async () => {
+  const onLoaded = jest.fn();
+  const refused = await render(
+    <RemoteCatalogSheet
+      visible
+      fetchImpl={
+        (async () => ({
+          ok: true,
+          url: 'https://example.com/catalog.json',
+          text: async () => JSON.stringify({ schemaVersion: 1, source: 'Far away', entries: [] }),
+        })) as unknown as typeof fetch
+      }
+      onClose={jest.fn()}
+      onLoaded={onLoaded}
+    />,
+  );
+  const field = refused.root.findByProps({ testID: 'catalog-url' });
+  await act(async () => field.props.onChangeText('https://example.com/catalog.json'));
+
+  // An empty catalog is a catalog: it has no entry that could fail a digest.
+  await act(async () => {
+    await refused.root.findByProps({ testID: 'catalog-fetch' }).props.onPress();
+  });
+  expect(onLoaded).toHaveBeenCalledTimes(1);
+
+  const bad = await render(
+    <RemoteCatalogSheet
+      visible
+      fetchImpl={
+        (async () => ({
+          ok: true,
+          url: 'https://example.com/catalog.json',
+          text: async () => '{not a catalog',
+        })) as unknown as typeof fetch
+      }
+      onClose={jest.fn()}
+      onLoaded={onLoaded}
+    />,
+  );
+  await act(async () => {
+    bad.root
+      .findByProps({ testID: 'catalog-url' })
+      .props.onChangeText('https://example.com/catalog.json');
+  });
+  await act(async () => {
+    await bad.root.findByProps({ testID: 'catalog-fetch' }).props.onPress();
+  });
+  expect(onLoaded).toHaveBeenCalledTimes(1);
+  expect(
+    bad.root.findByProps({ testID: 'catalog-refusal' }).props.children,
+  ).toContain('does not answer with a catalog');
 });
