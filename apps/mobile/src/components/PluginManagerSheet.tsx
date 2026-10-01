@@ -32,14 +32,16 @@ type Props = {
   onRemove: (id: string) => void;
 };
 
-const CAPABILITY_LABELS: Record<PluginCapability, string> = {
+// `as const`, not `Record<..., string>`: the translator is typed by its key
+// union, so a widened string would not be accepted as one of them.
+const CAPABILITY_LABELS = {
   file_read: 'plugins.capability.fileRead',
   file_write: 'plugins.capability.fileWrite',
   git_status: 'plugins.capability.gitStatus',
   git_commit: 'plugins.capability.gitCommit',
   git_push: 'plugins.capability.gitPush',
   guest_service: 'plugins.capability.guestService',
-};
+} as const satisfies Record<PluginCapability, string>;
 
 export function PluginManagerSheet(props: Props) {
   const insets = useSafeAreaInsets();
