@@ -7,6 +7,7 @@ import ChevronRight from 'lucide-react-native/icons/chevron-right';
 import Ellipsis from 'lucide-react-native/icons/ellipsis';
 import FolderKanban from 'lucide-react-native/icons/folder-kanban';
 import FolderOpen from 'lucide-react-native/icons/folder-open';
+import FileText from 'lucide-react-native/icons/file-text';
 import Pin from 'lucide-react-native/icons/pin';
 import Puzzle from 'lucide-react-native/icons/puzzle';
 import Plus from 'lucide-react-native/icons/plus';
@@ -68,6 +69,7 @@ type Props = {
   onOpenProjects: () => void;
   onOpenPendingProjectCleanup: () => void;
   onOpenPlugins: () => void;
+  onOpenSkills: () => void;
   onOpenHarnesses: () => void;
   onOpenRuntime: () => void;
   onOpenSettings: () => void;
@@ -285,6 +287,12 @@ export function ChatDrawer(props: Props) {
             label={t('drawer.plugins')}
             onPress={props.onOpenPlugins}
             testID="drawer-plugins"
+          />
+          <UtilityRow
+            icon={FileText}
+            label={t('drawer.skills')}
+            onPress={props.onOpenSkills}
+            testID="drawer-skills"
           />
           <UtilityRow
             icon={FolderKanban}

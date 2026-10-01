@@ -54,6 +54,7 @@ function renderDrawer(
           onOpenProjects={noop}
           onOpenPendingProjectCleanup={onOpenPendingProjectCleanup}
           onOpenPlugins={noop}
+          onOpenSkills={noop}
           onOpenHarnesses={noop}
           onOpenRuntime={noop}
           onOpenSettings={noop}

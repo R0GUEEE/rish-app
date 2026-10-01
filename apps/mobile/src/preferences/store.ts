@@ -11,6 +11,11 @@ import {
   upsertPlugin,
   type Plugin,
 } from '../plugins/plugins';
+import {
+  removeSkill,
+  upsertSkill,
+  type Skill,
+} from '../skills';
 import type {
   AgentPresetPreferences,
   AppPreferences,
@@ -19,6 +24,7 @@ import type {
   MessageFeedbackRating,
   MirrorCategory,
   PluginPreferences,
+  SkillPreferences,
   PreferencesAction,
   ThemeMode,
   ThinkingMode,
@@ -65,6 +71,11 @@ export type PreferencesStore = {
   deletePlugin(id: string): void;
   /** Enables or disables one plugin without touching its declaration. */
   setPluginEnabled(id: string, enabled: boolean): void;
+  /** Replaces the whole skill library; the reducer refuses anything invalid. */
+  setSkills(skills: SkillPreferences): void;
+  /** Adds a skill, or replaces the one carrying the same id. */
+  saveSkill(skill: Skill): void;
+  deleteSkill(id: string): void;
   /** Adds a preset, or replaces the one carrying the same id. */
   saveAgentPreset(preset: AgentPreset): void;
   deleteAgentPreset(id: string): void;
@@ -126,7 +137,10 @@ function preferencesEqual(
     // Plugins follow the same rule, and for the same reason: a redraw that
     // re-creates an equal plugin must not notify a single listener.
     left.plugins.length === right.plugins.length &&
-    left.plugins.every((plugin, index) => plugin === right.plugins[index])
+    left.plugins.every((plugin, index) => plugin === right.plugins[index]) &&
+    // And so do skills.
+    left.skills.length === right.skills.length &&
+    left.skills.every((skill, index) => skill === right.skills[index])
   );
 }
 
@@ -250,6 +264,21 @@ export function createPreferencesStore(
         payload: {
           plugins: withPluginEnabled(preferences.plugins, id, enabled),
         },
+      });
+    },
+    setSkills: skills => {
+      dispatch({ type: 'preferences/set-skills', payload: { skills } });
+    },
+    saveSkill: skill => {
+      dispatch({
+        type: 'preferences/set-skills',
+        payload: { skills: upsertSkill(preferences.skills, skill) },
+      });
+    },
+    deleteSkill: id => {
+      dispatch({
+        type: 'preferences/set-skills',
+        payload: { skills: removeSkill(preferences.skills, id) },
       });
     },
     setAgentPresets: agentPresets => {

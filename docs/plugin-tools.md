@@ -1,9 +1,12 @@
-# Plugin tools: what a plugin is, and what the Agent needs
+# Plugins, skills and the marketplace
 
 Rish lets a person add **plugins**: named declarations of tools they want the
 Agent to be able to call. This document is the contract between the app-side
 manager (`apps/mobile/src/plugins/plugins.ts`) and the native Agent core, and it
 records what the native side still has to do before a plugin tool can be called.
+It also covers **skills**, which are text rather than tools, and the
+**marketplace**, which is how both arrive (`apps/mobile/src/skills.ts`,
+`apps/mobile/src/marketplace.ts`).
 
 ## Why a plugin is a declaration
 
@@ -105,3 +108,38 @@ posture. `PluginManagerSheet` shows the list, each tool under its offered name
 with the capability it needs and whether a call asks first, and the posture
 line. `HomeScreen` reads the posture from the policy the Agent would actually
 run under rather than guessing from a constant.
+
+## Skills
+
+A skill is an instruction document: an id, a name, a version, a description and
+up to 8,192 characters of instructions. Using one puts `skillMessageText(skill)`
+in the message box, so it becomes an ordinary message the person can read,
+edit and send.
+
+That is the whole mechanism, and it is deliberately not more. The visible
+history an attempt may use is the conversation's own messages, so a skill that
+silently joined every round would be a claim about what the Agent was told that
+no transcript supports. Skills take effect when they are sent.
+
+The library holds at most 50 skills, ids are unique, and instructions may
+contain newlines and tabs but not the characters that render as nothing.
+
+## The marketplace
+
+A marketplace entry is a kind (`plugin` or `skill`), a publisher, a summary and
+one payload that passes the same validation the managers apply by hand. A
+catalog is a schema version, a source label and up to 200 entries, and it is
+refused as a whole if any part of it is not installable -- a listing silently
+missing from a marketplace is worse than one that says it could not be read.
+
+Installing writes the payload into the matching library, replacing the entry
+with the same id; a listing shows `Install`, `Update` or `Installed`. Versions
+are compared only when both are sequences of numbers: `1.2.10` is newer than
+`1.2.9`, while `2026-02-draft` has no ordering and counts as installed rather
+than inventing an update.
+
+The catalog this build ships with is bundled (`BUILTIN_MARKETPLACE`), so
+nothing is transferred and no digest is claimed. A remote catalog would have to
+provide the same shape and go through the same parser, which is the only door
+in; when one exists, its entries should carry a digest of the content and the
+install path should verify it before writing into a library.

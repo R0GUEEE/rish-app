@@ -96,8 +96,12 @@ import {
   RuntimeEvidenceSheet,
   type RuntimeVerificationStatus,
 } from '../components/RuntimeEvidenceSheet';
+import { MarketplaceSheet } from '../components/MarketplaceSheet';
 import { PluginManagerSheet } from '../components/PluginManagerSheet';
+import { SkillManagerSheet } from '../components/SkillManagerSheet';
 import { pluginToolPosture } from '../plugins/plugins';
+import { BUILTIN_MARKETPLACE } from '../marketplace';
+import { skillMessageText } from '../skills';
 import { SettingsSheet } from '../components/SettingsSheet';
 import { PresetSheet } from '../components/PresetSheet';
 import { UsageSheet } from '../components/UsageSheet';
@@ -846,6 +850,8 @@ export function HomeScreen({
   harnessesVisibleRef.current = harnessesVisible;
   const [evidenceVisible, setEvidenceVisible] = useState(false);
   const [pluginManagerVisible, setPluginManagerVisible] = useState(false);
+  const [skillManagerVisible, setSkillManagerVisible] = useState(false);
+  const [marketplaceVisible, setMarketplaceVisible] = useState(false);
   const [workspaceVisible, setWorkspaceVisible] = useState(false);
   const workspaceVisibleRef = useRef(false);
   workspaceSheetVisibleRef.current = workspaceSheetVisible;
@@ -2667,6 +2673,22 @@ export function HomeScreen({
     if (pinned.length === 0) return pinned;
     return pinned.filter(id => chatState.conversations[id] !== undefined);
   }, [preferences.pinnedConversations, chatState.conversations]);
+  /**
+   * What each library already holds, keyed the way an entry is keyed.
+   *
+   * A listing asks this for its own id, so a plugin and a skill that share an
+   * id are never confused for one another.
+   */
+  const installedLibraryVersions = useMemo(() => {
+    const versions: Record<string, string> = {};
+    for (const plugin of preferences.plugins) {
+      versions[`plugin:${plugin.id}`] = plugin.version;
+    }
+    for (const skill of preferences.skills) {
+      versions[`skill:${skill.id}`] = skill.version;
+    }
+    return versions;
+  }, [preferences.plugins, preferences.skills]);
   const activeModel = activeConversation?.modelId ??
     defaultModelForHarness(preferences.selectedHarnessId, preferences.defaultModel);
   const activeThinkingMode =
@@ -6614,6 +6636,8 @@ export function HomeScreen({
     harnessesVisible ||
     evidenceVisible ||
     pluginManagerVisible ||
+    skillManagerVisible ||
+    marketplaceVisible ||
     projectsVisible ||
     workspaceVisible ||
     contextSheetVisible;
@@ -7054,7 +7078,7 @@ export function HomeScreen({
         pinnedIds={pinnedConversationIds}
         covered={
           settingsVisible || accountVisible || mirrorsVisible ||
-          pluginManagerVisible
+          pluginManagerVisible || skillManagerVisible || marketplaceVisible
         }
         pendingProjectCleanup={
           lifecycleSheetActive &&
@@ -7109,6 +7133,11 @@ export function HomeScreen({
         onOpenPlugins={() =>
           openAfterDrawerDismiss(drawerRenderEpoch, () =>
             setPluginManagerVisible(true),
+          )
+        }
+        onOpenSkills={() =>
+          openAfterDrawerDismiss(drawerRenderEpoch, () =>
+            setSkillManagerVisible(true),
           )
         }
         onOpenSettings={() => openSettingsFromDrawer(drawerRenderEpoch)}
@@ -7362,6 +7391,10 @@ export function HomeScreen({
       */}
       <PluginManagerSheet
         plugins={preferences.plugins}
+        onOpenMarketplace={() => {
+          setPluginManagerVisible(false);
+          setMarketplaceVisible(true);
+        }}
         posture={pluginToolPosture(
           nativeAgentPolicy.policy?.registry_version ?? null,
         )}
@@ -7371,6 +7404,39 @@ export function HomeScreen({
         onToggle={(id, enabled) =>
           preferencesStore.setPluginEnabled(id, enabled)
         }
+      />
+      {/*
+        A skill is text, so using one fills the message box: nothing is sent
+        and nothing joins the attempt's history unless the person sends it.
+      */}
+      <SkillManagerSheet
+        skills={preferences.skills}
+        visible={skillManagerVisible}
+        onClose={() => setSkillManagerVisible(false)}
+        onOpenMarketplace={() => {
+          setSkillManagerVisible(false);
+          setMarketplaceVisible(true);
+        }}
+        onRemove={id => preferencesStore.deleteSkill(id)}
+        onUse={skill => {
+          const text = skillMessageText(skill);
+          setDraft(previous =>
+            previous.trim().length === 0
+              ? text
+              : `${previous.trimEnd()}\n\n${text}`,
+          );
+          setSkillManagerVisible(false);
+        }}
+      />
+      <MarketplaceSheet
+        catalog={BUILTIN_MARKETPLACE}
+        installedVersions={installedLibraryVersions}
+        visible={marketplaceVisible}
+        onClose={() => setMarketplaceVisible(false)}
+        onInstall={entry => {
+          if (entry.kind === 'plugin') preferencesStore.savePlugin(entry.plugin);
+          else preferencesStore.saveSkill(entry.skill);
+        }}
       />
       <RuntimeEvidenceSheet
         failure={runtimeFailure}

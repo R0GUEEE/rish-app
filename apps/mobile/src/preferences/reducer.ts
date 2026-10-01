@@ -19,6 +19,7 @@ import {
   type MirrorCategory,
   type MirrorPreferences,
   type PluginPreferences,
+  type SkillPreferences,
   type PinnedConversationPreferences,
   type PreferencesAction,
   type ThemeMode,
@@ -28,6 +29,7 @@ import {
 import { normalizeGitHttpsProxyUrl } from './gitProxy';
 import { MAX_AGENT_PRESETS, isAgentPreset } from '../presets/presets';
 import { normalizePlugins } from '../plugins/plugins';
+import { normalizeSkills } from '../skills';
 import type { AgentPresetPreferences } from './types';
 
 export { isGitHttpsProxyUrl, normalizeGitHttpsProxyUrl } from './gitProxy';
@@ -49,6 +51,9 @@ const NO_MESSAGE_FEEDBACK: MessageFeedbackPreferences = Object.freeze({});
 
 /** Shared until someone saves a preset; never mutated in place. */
 const NO_AGENT_PRESETS: AgentPresetPreferences = Object.freeze([]);
+
+/** Shared until someone keeps a skill; never mutated in place. */
+const NO_SKILLS: SkillPreferences = Object.freeze([]);
 
 /** Shared until someone adds a plugin; never mutated in place. */
 const NO_PLUGINS: PluginPreferences = Object.freeze([]);
@@ -75,6 +80,7 @@ export const DEFAULT_APP_PREFERENCES: AppPreferences = Object.freeze({
   pinnedConversations: NO_PINNED_CONVERSATIONS,
   agentPresets: NO_AGENT_PRESETS,
   plugins: NO_PLUGINS,
+  skills: NO_SKILLS,
 });
 
 const themes: ReadonlySet<string> = new Set(THEME_MODES);
@@ -425,6 +431,19 @@ export function preferencesReducer(
       }
       return { ...preferences, plugins: next };
     }
+    case 'preferences/set-skills': {
+      const next = normalizeSkills(action.payload.skills);
+      if (next === null || next === preferences.skills) {
+        return preferences;
+      }
+      if (
+        next.length === preferences.skills.length &&
+        next.every((entry, index) => entry === preferences.skills[index])
+      ) {
+        return preferences;
+      }
+      return { ...preferences, skills: next };
+    }
     case 'preferences/reset': {
       const defaults = DEFAULT_APP_PREFERENCES;
       const alreadyDefault = (
@@ -497,6 +516,9 @@ export const selectAgentPresets = (
 
 export const selectPlugins = (preferences: AppPreferences): PluginPreferences =>
   preferences.plugins;
+
+export const selectSkills = (preferences: AppPreferences): SkillPreferences =>
+  preferences.skills;
 
 /**
  * The whole list, or null when any entry is not a preset a round could honour.

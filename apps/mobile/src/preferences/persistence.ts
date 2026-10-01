@@ -23,6 +23,7 @@ import {
   normalizeMirrorBaseUrl,
 } from './reducer';
 import { normalizePlugins } from '../plugins/plugins';
+import { normalizeSkills } from '../skills';
 import { normalizeGitHttpsProxyUrl } from './gitProxy';
 import {
   MAX_MESSAGE_FEEDBACK_ENTRIES,
@@ -49,6 +50,7 @@ const persistedKeys: ReadonlySet<string> = new Set([
   'pinned_conversations',
   'agent_presets',
   'plugins',
+  'skills',
 ]);
 
 function invalid(path: string, message: string): never {
@@ -276,6 +278,25 @@ function decodePlugins(value: unknown): AppPreferences['plugins'] {
   return plugins;
 }
 
+/**
+ * The saved skills.
+ *
+ * Absent is the ordinary case for a state written before skills existed, so it
+ * hydrates to none rather than failing, and anything present is held to the
+ * bound and the identifier rules the library applies.
+ */
+function decodeSkills(value: unknown): AppPreferences['skills'] {
+  if (value === undefined || value === null) return [];
+  const skills = normalizeSkills(value);
+  if (skills === null) {
+    return invalid(
+      '$.skills',
+      'must be a bounded list of complete skills with unique ids',
+    );
+  }
+  return skills;
+}
+
 export function hydrateAppPreferences(input: unknown): AppPreferences {  const raw = record(decode(input));
   if (required(raw, 'schema_version') !== APP_PREFERENCES_SCHEMA_VERSION) {
     return invalid(
@@ -330,6 +351,7 @@ export function hydrateAppPreferences(input: unknown): AppPreferences {  const r
     pinnedConversations: decodePinnedConversations(raw.pinned_conversations),
     agentPresets: decodeAgentPresets(raw.agent_presets),
     plugins: decodePlugins(raw.plugins),
+    skills: decodeSkills(raw.skills),
   };
 }
 
@@ -383,6 +405,7 @@ export function serializeAppPreferences(preferences: AppPreferences): string {
     pinned_conversations: preferences.pinnedConversations,
     agent_presets: preferences.agentPresets,
     plugins: preferences.plugins,
+    skills: preferences.skills,
   };
   hydrateAppPreferences(persisted);
   return JSON.stringify(persisted);

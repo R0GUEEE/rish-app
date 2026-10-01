@@ -4,62 +4,38 @@ import {
   Pressable,
   ScrollView,
   StyleSheet,
-  Switch,
   Text,
   View,
 } from 'react-native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
-import Puzzle from 'lucide-react-native/icons/puzzle';
+import FileText from 'lucide-react-native/icons/file-text';
 import ShoppingBag from 'lucide-react-native/icons/shopping-bag';
 import Trash2 from 'lucide-react-native/icons/trash-2';
 
 import { useAppPresentation } from '../presentation/AppPresentation';
 import { fonts, hitSlop, type ThemePalette } from '../theme';
-import {
-  pluginToolName,
-  type Plugin,
-  type PluginCapability,
-  type PluginToolPosture,
-} from '../plugins/plugins';
+import type { Skill } from '../skills';
 import { AppIcon } from './AppIcon';
 
 type Props = {
   visible: boolean;
-  plugins: readonly Plugin[];
-  /**
-   * Whether the Agent's native tool table can carry plugin tools yet.
-   *
-   * The sheet says which state it is in rather than presenting a switch whose
-   * effect nobody can observe.
-   */
-  posture: PluginToolPosture;
+  skills: readonly Skill[];
   onClose: () => void;
-  onToggle: (id: string, enabled: boolean) => void;
+  /**
+   * Puts the skill in the message box.
+   *
+   * A skill is text the person sends, so this fills the composer rather than
+   * sending anything: what the Agent is told stays what the transcript shows.
+   */
+  onUse: (skill: Skill) => void;
   onRemove: (id: string) => void;
   onOpenMarketplace: () => void;
 };
 
-// `as const`, not `Record<..., string>`: the translator is typed by its key
-// union, so a widened string would not be accepted as one of them.
-const CAPABILITY_LABELS = {
-  file_read: 'plugins.capability.fileRead',
-  file_write: 'plugins.capability.fileWrite',
-  git_status: 'plugins.capability.gitStatus',
-  git_commit: 'plugins.capability.gitCommit',
-  git_push: 'plugins.capability.gitPush',
-  guest_service: 'plugins.capability.guestService',
-} as const satisfies Record<PluginCapability, string>;
-
-export function PluginManagerSheet(props: Props) {
+export function SkillManagerSheet(props: Props) {
   const insets = useSafeAreaInsets();
   const { colors, t } = useAppPresentation();
   const styles = useMemo(() => createStyles(colors), [colors]);
-  const postureText =
-    props.posture === 'admitted'
-      ? t('plugins.posture.admitted')
-      : props.posture === 'awaiting_native'
-        ? t('plugins.posture.awaiting')
-        : t('plugins.posture.unknown');
 
   return (
     <Modal
@@ -75,99 +51,74 @@ export function PluginManagerSheet(props: Props) {
       />
       <View style={[styles.sheet, { paddingBottom: insets.bottom + 18 }]}>
         <View style={styles.handle} />
-        <Text style={styles.eyebrow}>{t('plugins.eyebrow')}</Text>
-        <Text style={styles.title}>{t('plugins.title')}</Text>
-        <Text
-          accessibilityLiveRegion="polite"
-          style={styles.posture}
-          testID="plugin-posture"
-        >
-          {postureText}
-        </Text>
+        <Text style={styles.eyebrow}>{t('skills.eyebrow')}</Text>
+        <Text style={styles.title}>{t('skills.title')}</Text>
+        <Text style={styles.subtitle}>{t('skills.subtitle')}</Text>
         <Pressable
-          accessibilityLabel={t('plugins.openMarketplace')}
+          accessibilityLabel={t('skills.openMarketplace')}
           accessibilityRole="button"
           onPress={props.onOpenMarketplace}
           style={({ pressed }) => [
             styles.marketplace,
             pressed && styles.pressed,
           ]}
-          testID="plugins-open-marketplace"
+          testID="skills-open-marketplace"
         >
           <AppIcon color={colors.text} icon={ShoppingBag} size={16} />
           <Text style={styles.marketplaceText}>
-            {t('plugins.openMarketplace')}
+            {t('skills.openMarketplace')}
           </Text>
         </Pressable>
-        {props.plugins.length === 0 ? (
-          <Text style={styles.empty}>{t('plugins.empty')}</Text>
+        {props.skills.length === 0 ? (
+          <Text style={styles.empty} testID="skills-empty">
+            {t('skills.empty')}
+          </Text>
         ) : (
-          <ScrollView
-            contentContainerStyle={styles.list}
-            style={styles.scroll}
-          >
-            {props.plugins.map(plugin => (
+          <ScrollView contentContainerStyle={styles.list} style={styles.scroll}>
+            {props.skills.map(skill => (
               <View
-                key={plugin.id}
+                key={skill.id}
                 style={styles.row}
-                testID={`plugin-row-${plugin.id}`}
+                testID={`skill-row-${skill.id}`}
               >
                 <View style={styles.rowHeader}>
-                  <AppIcon color={colors.accent} icon={Puzzle} size={17} />
+                  <AppIcon color={colors.accent} icon={FileText} size={16} />
                   <View style={styles.rowCopy}>
                     <Text numberOfLines={1} style={styles.rowName}>
-                      {plugin.name}
+                      {skill.name}
                     </Text>
                     <Text numberOfLines={1} style={styles.rowVersion}>
-                      {plugin.id} · {plugin.version}
+                      {skill.id} · {skill.version}
                     </Text>
                   </View>
-                  <Switch
-                    accessibilityLabel={t('plugins.toggleAccessibility', {
-                      name: plugin.name,
-                    })}
-                    accessibilityState={{ checked: plugin.enabled }}
-                    onValueChange={value => props.onToggle(plugin.id, value)}
-                    testID={`plugin-toggle-${plugin.id}`}
-                    value={plugin.enabled}
-                  />
                 </View>
-                <Text style={styles.rowDescription}>{plugin.description}</Text>
-                {plugin.tools.length === 0 ? (
-                  <Text style={styles.noTools}>{t('plugins.noTools')}</Text>
-                ) : (
-                  plugin.tools.map(tool => (
-                    <View key={tool.name} style={styles.toolRow}>
-                      <Text numberOfLines={1} style={styles.toolName}>
-                        {pluginToolName(plugin.id, tool.name)}
-                      </Text>
-                      <Text style={styles.toolCapability}>
-                        {t(CAPABILITY_LABELS[tool.capability])}
-                      </Text>
-                      {tool.requiresApproval && (
-                        <Text style={styles.toolApproval}>
-                          {t('plugins.needsApproval')}
-                        </Text>
-                      )}
-                    </View>
-                  ))
-                )}
+                <Text style={styles.rowDescription}>{skill.description}</Text>
                 <Pressable
-                  accessibilityLabel={t('plugins.remove', {
-                    name: plugin.name,
-                  })}
+                  accessibilityLabel={t('skills.use', { name: skill.name })}
+                  accessibilityRole="button"
+                  onPress={() => props.onUse(skill)}
+                  style={({ pressed }) => [
+                    styles.use,
+                    pressed && styles.pressed,
+                  ]}
+                  testID={`skill-use-${skill.id}`}
+                >
+                  <Text style={styles.useText}>{t('skills.useLabel')}</Text>
+                </Pressable>
+                <Pressable
+                  accessibilityLabel={t('skills.remove', { name: skill.name })}
                   accessibilityRole="button"
                   hitSlop={hitSlop}
-                  onPress={() => props.onRemove(plugin.id)}
+                  onPress={() => props.onRemove(skill.id)}
                   style={({ pressed }) => [
                     styles.remove,
                     pressed && styles.pressed,
                   ]}
-                  testID={`plugin-remove-${plugin.id}`}
+                  testID={`skill-remove-${skill.id}`}
                 >
                   <AppIcon color={colors.danger} icon={Trash2} size={15} />
                   <Text style={styles.removeText}>
-                    {t('plugins.removeLabel')}
+                    {t('skills.removeLabel')}
                   </Text>
                 </Pressable>
               </View>
@@ -218,17 +169,11 @@ const createStyles = (colors: ThemePalette) =>
       fontSize: 26,
       marginTop: 8,
     },
-    posture: {
+    subtitle: {
       color: colors.muted,
       fontSize: 12,
       lineHeight: 17,
       marginTop: 10,
-    },
-    empty: {
-      color: colors.textDim,
-      fontSize: 13,
-      lineHeight: 19,
-      marginTop: 14,
     },
     marketplace: {
       height: 44,
@@ -243,6 +188,12 @@ const createStyles = (colors: ThemePalette) =>
       marginTop: 14,
     },
     marketplaceText: { color: colors.text, fontSize: 13, fontWeight: '700' },
+    empty: {
+      color: colors.textDim,
+      fontSize: 13,
+      lineHeight: 19,
+      marginTop: 18,
+    },
     scroll: { marginTop: 14 },
     list: { gap: 10, paddingBottom: 4 },
     row: {
@@ -267,21 +218,15 @@ const createStyles = (colors: ThemePalette) =>
       lineHeight: 17,
       marginTop: 9,
     },
-    noTools: { color: colors.faint, fontSize: 11, marginTop: 9 },
-    toolRow: {
-      flexDirection: 'row',
+    use: {
+      minHeight: 42,
+      borderRadius: 13,
+      backgroundColor: colors.text,
       alignItems: 'center',
-      gap: 8,
-      marginTop: 7,
+      justifyContent: 'center',
+      marginTop: 11,
     },
-    toolName: {
-      flexShrink: 1,
-      color: colors.textDim,
-      fontFamily: fonts.mono,
-      fontSize: 10,
-    },
-    toolCapability: { color: colors.muted, fontSize: 10 },
-    toolApproval: { color: colors.warning, fontSize: 10, fontWeight: '700' },
+    useText: { color: colors.background, fontSize: 12, fontWeight: '700' },
     remove: {
       flexDirection: 'row',
       alignItems: 'center',
@@ -289,18 +234,20 @@ const createStyles = (colors: ThemePalette) =>
       gap: 7,
       minHeight: 40,
       borderRadius: 13,
-      marginTop: 11,
+      marginTop: 8,
       backgroundColor: colors.surfaceWarm,
     },
     removeText: { color: colors.danger, fontSize: 12, fontWeight: '700' },
     done: {
       height: 48,
       borderRadius: 15,
-      backgroundColor: colors.text,
+      backgroundColor: colors.surfaceRaised,
+      borderWidth: 1,
+      borderColor: colors.line,
       alignItems: 'center',
       justifyContent: 'center',
       marginTop: 14,
     },
-    doneText: { color: colors.background, fontSize: 14, fontWeight: '700' },
+    doneText: { color: colors.text, fontSize: 14, fontWeight: '700' },
     pressed: { opacity: 0.6, transform: [{ scale: 0.987 }] },
   });

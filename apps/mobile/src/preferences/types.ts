@@ -16,6 +16,8 @@ export const MAX_PERSISTED_AGENT_PRESETS = 50 as const;
 export type AgentPresetPreferences = readonly import('../presets/presets').AgentPreset[];
 /** The plugins a person added; see `MAX_PLUGINS` for the bound and the rules. */
 export type PluginPreferences = readonly import('../plugins/plugins').Plugin[];
+/** The skills a person kept; see `MAX_SKILLS` for the bound and the rules. */
+export type SkillPreferences = readonly import('../skills').Skill[];
 /** The ratings a person can leave on an assistant message. */
 export const MESSAGE_FEEDBACK_RATINGS = ['up', 'down'] as const;
 /**
@@ -84,6 +86,7 @@ export type AppPreferences = {
   readonly pinnedConversations: PinnedConversationPreferences;
   readonly agentPresets: AgentPresetPreferences;
   readonly plugins: PluginPreferences;
+  readonly skills: SkillPreferences;
 };
 
 export type PersistedAppPreferencesV1 = {
@@ -108,6 +111,7 @@ export type PersistedAppPreferencesV1 = {
   readonly pinned_conversations?: PinnedConversationPreferences;
   readonly agent_presets?: AgentPresetPreferences;
   readonly plugins?: PluginPreferences;
+  readonly skills?: SkillPreferences;
 };
 
 export type PreferencesAction =
@@ -182,6 +186,10 @@ export type PreferencesAction =
   | {
       readonly type: 'preferences/set-plugins';
       readonly payload: { readonly plugins: PluginPreferences };
+    }
+  | {
+      readonly type: 'preferences/set-skills';
+      readonly payload: { readonly skills: SkillPreferences };
     }
   | { readonly type: 'preferences/reset' };
 
