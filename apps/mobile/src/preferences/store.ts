@@ -5,6 +5,12 @@ import {
   upsertAgentPreset,
   type AgentPreset,
 } from '../presets/presets';
+import {
+  removePlugin,
+  setPluginEnabled as withPluginEnabled,
+  upsertPlugin,
+  type Plugin,
+} from '../plugins/plugins';
 import type {
   AgentPresetPreferences,
   AppPreferences,
@@ -12,6 +18,7 @@ import type {
   LocalePreference,
   MessageFeedbackRating,
   MirrorCategory,
+  PluginPreferences,
   PreferencesAction,
   ThemeMode,
   ThinkingMode,
@@ -51,6 +58,13 @@ export type PreferencesStore = {
   setConversationPin(conversationId: string, pinned: boolean): void;
   /** Replaces the whole list; the reducer refuses anything invalid. */
   setAgentPresets(agentPresets: AgentPresetPreferences): void;
+  /** Replaces the whole plugin list; the reducer refuses anything invalid. */
+  setPlugins(plugins: PluginPreferences): void;
+  /** Adds a plugin, or replaces the one carrying the same id. */
+  savePlugin(plugin: Plugin): void;
+  deletePlugin(id: string): void;
+  /** Enables or disables one plugin without touching its declaration. */
+  setPluginEnabled(id: string, enabled: boolean): void;
   /** Adds a preset, or replaces the one carrying the same id. */
   saveAgentPreset(preset: AgentPreset): void;
   deleteAgentPreset(id: string): void;
@@ -108,7 +122,11 @@ function preferencesEqual(
     left.agentPresets.length === right.agentPresets.length &&
     left.agentPresets.every(
       (preset, index) => preset === right.agentPresets[index],
-    )
+    ) &&
+    // Plugins follow the same rule, and for the same reason: a redraw that
+    // re-creates an equal plugin must not notify a single listener.
+    left.plugins.length === right.plugins.length &&
+    left.plugins.every((plugin, index) => plugin === right.plugins[index])
   );
 }
 
@@ -209,6 +227,29 @@ export function createPreferencesStore(
       dispatch({
         type: 'preferences/set-conversation-pin',
         payload: { conversationId, pinned },
+      });
+    },
+    setPlugins: plugins => {
+      dispatch({ type: 'preferences/set-plugins', payload: { plugins } });
+    },
+    savePlugin: plugin => {
+      dispatch({
+        type: 'preferences/set-plugins',
+        payload: { plugins: upsertPlugin(preferences.plugins, plugin) },
+      });
+    },
+    deletePlugin: id => {
+      dispatch({
+        type: 'preferences/set-plugins',
+        payload: { plugins: removePlugin(preferences.plugins, id) },
+      });
+    },
+    setPluginEnabled: (id, enabled) => {
+      dispatch({
+        type: 'preferences/set-plugins',
+        payload: {
+          plugins: withPluginEnabled(preferences.plugins, id, enabled),
+        },
       });
     },
     setAgentPresets: agentPresets => {

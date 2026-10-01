@@ -96,6 +96,8 @@ import {
   RuntimeEvidenceSheet,
   type RuntimeVerificationStatus,
 } from '../components/RuntimeEvidenceSheet';
+import { PluginManagerSheet } from '../components/PluginManagerSheet';
+import { pluginToolPosture } from '../plugins/plugins';
 import { SettingsSheet } from '../components/SettingsSheet';
 import { PresetSheet } from '../components/PresetSheet';
 import { UsageSheet } from '../components/UsageSheet';
@@ -843,6 +845,7 @@ export function HomeScreen({
   const harnessesVisibleRef = useRef(false);
   harnessesVisibleRef.current = harnessesVisible;
   const [evidenceVisible, setEvidenceVisible] = useState(false);
+  const [pluginManagerVisible, setPluginManagerVisible] = useState(false);
   const [workspaceVisible, setWorkspaceVisible] = useState(false);
   const workspaceVisibleRef = useRef(false);
   workspaceSheetVisibleRef.current = workspaceSheetVisible;
@@ -6610,6 +6613,7 @@ export function HomeScreen({
     workspaceSheetVisible ||
     harnessesVisible ||
     evidenceVisible ||
+    pluginManagerVisible ||
     projectsVisible ||
     workspaceVisible ||
     contextSheetVisible;
@@ -7048,7 +7052,10 @@ export function HomeScreen({
         activeId={chatState.selectedConversationId}
         conversations={conversationSummaries}
         pinnedIds={pinnedConversationIds}
-        covered={settingsVisible || accountVisible || mirrorsVisible}
+        covered={
+          settingsVisible || accountVisible || mirrorsVisible ||
+          pluginManagerVisible
+        }
         pendingProjectCleanup={
           lifecycleSheetActive &&
           (lifecycleTargetId !== chatState.selectedConversationId ||
@@ -7099,6 +7106,11 @@ export function HomeScreen({
           )
         }
         onOpenRuntime={() => openRuntimeFromDrawer(drawerRenderEpoch)}
+        onOpenPlugins={() =>
+          openAfterDrawerDismiss(drawerRenderEpoch, () =>
+            setPluginManagerVisible(true),
+          )
+        }
         onOpenSettings={() => openSettingsFromDrawer(drawerRenderEpoch)}
         onSelect={id => selectConversation(id, drawerRenderEpoch)}
       />
@@ -7343,6 +7355,22 @@ export function HomeScreen({
         visible={harnessesVisible}
         onClose={() => setHarnessesVisible(false)}
         onSelect={selectHarness}
+      />
+      {/*
+        The posture comes from the policy the Agent would actually run under:
+        a registry version read from a workspace, not a guess about this build.
+      */}
+      <PluginManagerSheet
+        plugins={preferences.plugins}
+        posture={pluginToolPosture(
+          nativeAgentPolicy.policy?.registry_version ?? null,
+        )}
+        visible={pluginManagerVisible}
+        onClose={() => setPluginManagerVisible(false)}
+        onRemove={id => preferencesStore.deletePlugin(id)}
+        onToggle={(id, enabled) =>
+          preferencesStore.setPluginEnabled(id, enabled)
+        }
       />
       <RuntimeEvidenceSheet
         failure={runtimeFailure}

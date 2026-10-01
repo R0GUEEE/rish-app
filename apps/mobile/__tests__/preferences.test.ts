@@ -61,6 +61,7 @@ describe('app preferences reducer and selectors', () => {
       messageFeedback: {},
       pinnedConversations: [],
       agentPresets: [],
+      plugins: [],
     });
     expect(preferences).not.toBe(DEFAULT_APP_PREFERENCES);
     expect(Object.isFrozen(DEFAULT_APP_PREFERENCES)).toBe(true);
@@ -193,6 +194,7 @@ describe('strict preferences persistence', () => {
       messageFeedback: {},
       pinnedConversations: [],
       agentPresets: [],
+      plugins: [],
     };
   }
 
@@ -232,6 +234,7 @@ describe('strict preferences persistence', () => {
       message_feedback: {},
       pinned_conversations: [],
       agent_presets: [],
+      plugins: [],
     });
     expect(hydrateAppPreferences(first)).toEqual(preferences);
   });

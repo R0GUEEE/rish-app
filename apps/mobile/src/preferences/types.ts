@@ -14,6 +14,8 @@ export const MIRROR_CATEGORIES = ['alpine', 'pip', 'npm'] as const;
 /** The most presets that are kept; see `MAX_AGENT_PRESETS` for the rule. */
 export const MAX_PERSISTED_AGENT_PRESETS = 50 as const;
 export type AgentPresetPreferences = readonly import('../presets/presets').AgentPreset[];
+/** The plugins a person added; see `MAX_PLUGINS` for the bound and the rules. */
+export type PluginPreferences = readonly import('../plugins/plugins').Plugin[];
 /** The ratings a person can leave on an assistant message. */
 export const MESSAGE_FEEDBACK_RATINGS = ['up', 'down'] as const;
 /**
@@ -81,6 +83,7 @@ export type AppPreferences = {
   readonly messageFeedback: MessageFeedbackPreferences;
   readonly pinnedConversations: PinnedConversationPreferences;
   readonly agentPresets: AgentPresetPreferences;
+  readonly plugins: PluginPreferences;
 };
 
 export type PersistedAppPreferencesV1 = {
@@ -104,6 +107,7 @@ export type PersistedAppPreferencesV1 = {
   readonly message_feedback?: MessageFeedbackPreferences;
   readonly pinned_conversations?: PinnedConversationPreferences;
   readonly agent_presets?: AgentPresetPreferences;
+  readonly plugins?: PluginPreferences;
 };
 
 export type PreferencesAction =
@@ -174,6 +178,10 @@ export type PreferencesAction =
   | {
       readonly type: 'preferences/set-agent-presets';
       readonly payload: { readonly agentPresets: AgentPresetPreferences };
+    }
+  | {
+      readonly type: 'preferences/set-plugins';
+      readonly payload: { readonly plugins: PluginPreferences };
     }
   | { readonly type: 'preferences/reset' };
 

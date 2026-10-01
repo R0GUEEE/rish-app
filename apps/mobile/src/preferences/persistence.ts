@@ -22,6 +22,7 @@ import {
   normalizeAgentPresets,
   normalizeMirrorBaseUrl,
 } from './reducer';
+import { normalizePlugins } from '../plugins/plugins';
 import { normalizeGitHttpsProxyUrl } from './gitProxy';
 import {
   MAX_MESSAGE_FEEDBACK_ENTRIES,
@@ -47,6 +48,7 @@ const persistedKeys: ReadonlySet<string> = new Set([
   'message_feedback',
   'pinned_conversations',
   'agent_presets',
+  'plugins',
 ]);
 
 function invalid(path: string, message: string): never {
@@ -253,6 +255,27 @@ function decodeAgentPresets(
   return presets;
 }
 
+/**
+ * The saved plugins.
+ *
+ * Absent is the ordinary case for a state written before plugins existed, so
+ * it hydrates to none rather than failing. Anything present is held to the
+ * same rule the store applies -- a bounded list of complete, uniquely
+ * identified plugins -- as a whole, because a plugin silently dropped on load
+ * is a set of tools a person believes the Agent can call.
+ */
+function decodePlugins(value: unknown): AppPreferences['plugins'] {
+  if (value === undefined || value === null) return [];
+  const plugins = normalizePlugins(value);
+  if (plugins === null) {
+    return invalid(
+      '$.plugins',
+      'must be a bounded list of complete plugins with unique ids',
+    );
+  }
+  return plugins;
+}
+
 export function hydrateAppPreferences(input: unknown): AppPreferences {  const raw = record(decode(input));
   if (required(raw, 'schema_version') !== APP_PREFERENCES_SCHEMA_VERSION) {
     return invalid(
@@ -306,6 +329,7 @@ export function hydrateAppPreferences(input: unknown): AppPreferences {  const r
     messageFeedback: decodeMessageFeedback(raw.message_feedback),
     pinnedConversations: decodePinnedConversations(raw.pinned_conversations),
     agentPresets: decodeAgentPresets(raw.agent_presets),
+    plugins: decodePlugins(raw.plugins),
   };
 }
 
@@ -358,6 +382,7 @@ export function serializeAppPreferences(preferences: AppPreferences): string {
     message_feedback: preferences.messageFeedback,
     pinned_conversations: preferences.pinnedConversations,
     agent_presets: preferences.agentPresets,
+    plugins: preferences.plugins,
   };
   hydrateAppPreferences(persisted);
   return JSON.stringify(persisted);

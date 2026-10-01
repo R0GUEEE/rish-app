@@ -18,6 +18,7 @@ import {
   type MessageFeedbackRating,
   type MirrorCategory,
   type MirrorPreferences,
+  type PluginPreferences,
   type PinnedConversationPreferences,
   type PreferencesAction,
   type ThemeMode,
@@ -26,6 +27,7 @@ import {
 } from './types';
 import { normalizeGitHttpsProxyUrl } from './gitProxy';
 import { MAX_AGENT_PRESETS, isAgentPreset } from '../presets/presets';
+import { normalizePlugins } from '../plugins/plugins';
 import type { AgentPresetPreferences } from './types';
 
 export { isGitHttpsProxyUrl, normalizeGitHttpsProxyUrl } from './gitProxy';
@@ -48,6 +50,9 @@ const NO_MESSAGE_FEEDBACK: MessageFeedbackPreferences = Object.freeze({});
 /** Shared until someone saves a preset; never mutated in place. */
 const NO_AGENT_PRESETS: AgentPresetPreferences = Object.freeze([]);
 
+/** Shared until someone adds a plugin; never mutated in place. */
+const NO_PLUGINS: PluginPreferences = Object.freeze([]);
+
 /** Shared until someone pins a conversation; never mutated in place. */
 const NO_PINNED_CONVERSATIONS: PinnedConversationPreferences = Object.freeze(
   [],
@@ -69,6 +74,7 @@ export const DEFAULT_APP_PREFERENCES: AppPreferences = Object.freeze({
   messageFeedback: NO_MESSAGE_FEEDBACK,
   pinnedConversations: NO_PINNED_CONVERSATIONS,
   agentPresets: NO_AGENT_PRESETS,
+  plugins: NO_PLUGINS,
 });
 
 const themes: ReadonlySet<string> = new Set(THEME_MODES);
@@ -404,6 +410,21 @@ export function preferencesReducer(
       }
       return { ...preferences, agentPresets: next };
     }
+    case 'preferences/set-plugins': {
+      const next = normalizePlugins(action.payload.plugins);
+      if (next === null || next === preferences.plugins) {
+        return preferences;
+      }
+      // Same rule as presets: a rebuilt-but-equal list is not a change, or a
+      // store that re-derives it every render would notify forever.
+      if (
+        next.length === preferences.plugins.length &&
+        next.every((entry, index) => entry === preferences.plugins[index])
+      ) {
+        return preferences;
+      }
+      return { ...preferences, plugins: next };
+    }
     case 'preferences/reset': {
       const defaults = DEFAULT_APP_PREFERENCES;
       const alreadyDefault = (
@@ -473,6 +494,9 @@ export const isConversationPinned = (
 export const selectAgentPresets = (
   preferences: AppPreferences,
 ): AgentPresetPreferences => preferences.agentPresets;
+
+export const selectPlugins = (preferences: AppPreferences): PluginPreferences =>
+  preferences.plugins;
 
 /**
  * The whole list, or null when any entry is not a preset a round could honour.
