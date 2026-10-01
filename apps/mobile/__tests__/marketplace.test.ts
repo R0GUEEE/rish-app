@@ -7,14 +7,13 @@ import {
   marketplaceEntryId,
   marketplaceInstallState,
   parseMarketplaceCatalog,
-  type MarketplaceEntry,
 } from '../src/marketplace';
 import { BUILTIN_MARKETPLACE } from '../src/marketplace';
 import { upsertPlugin, type Plugin } from '../src/plugins/plugins';
 import { upsertSkill, type Skill } from '../src/skills';
 
-const skillEntry = (version = '1.0.0'): MarketplaceEntry => ({
-  kind: 'skill',
+const skillEntry = (version = '1.0.0') => ({
+  kind: 'skill' as const,
   publisher: 'Rish',
   summary: 'A skill.',
   skill: {
@@ -26,8 +25,8 @@ const skillEntry = (version = '1.0.0'): MarketplaceEntry => ({
   },
 });
 
-const pluginEntry = (version = '1.0.0'): MarketplaceEntry => ({
-  kind: 'plugin',
+const pluginEntry = (version = '1.0.0') => ({
+  kind: 'plugin' as const,
   publisher: 'Rish',
   summary: 'A plugin.',
   plugin: {
@@ -150,7 +149,7 @@ describe('catalogs', () => {
 
 describe('installing', () => {
   test('an entry replaces the one with the same id and leaves the other kind alone', () => {
-    const installed = upsertSkill([], skillEntry('1.0.0').skill as Skill);
+    const installed = upsertSkill([], skillEntry('1.0.0').skill);
     const updated = installSkillEntry(installed, skillEntry('1.1.0'), upsertSkill);
     expect(updated).toHaveLength(1);
     expect(updated[0]!.version).toBe('1.1.0');

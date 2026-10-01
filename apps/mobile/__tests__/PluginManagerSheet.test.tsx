@@ -48,6 +48,7 @@ async function renderSheet(
           plugins={[]}
           posture={'awaiting_native' as PluginToolPosture}
           onClose={jest.fn()}
+          onOpenMarketplace={jest.fn()}
           onRemove={jest.fn()}
           onToggle={jest.fn()}
           {...overrides}
