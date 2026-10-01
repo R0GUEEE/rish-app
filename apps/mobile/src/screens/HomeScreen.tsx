@@ -97,11 +97,14 @@ import {
   type RuntimeVerificationStatus,
 } from '../components/RuntimeEvidenceSheet';
 import { MarketplaceSheet } from '../components/MarketplaceSheet';
+import { PluginEditorSheet } from '../components/PluginEditorSheet';
 import { PluginManagerSheet } from '../components/PluginManagerSheet';
+import { SkillEditorSheet } from '../components/SkillEditorSheet';
 import { SkillManagerSheet } from '../components/SkillManagerSheet';
 import { pluginToolPosture } from '../plugins/plugins';
 import { BUILTIN_MARKETPLACE } from '../marketplace';
-import { skillMessageText } from '../skills';
+import { skillMessageText, type Skill } from '../skills';
+import type { Plugin } from '../plugins/plugins';
 import { SettingsSheet } from '../components/SettingsSheet';
 import { PresetSheet } from '../components/PresetSheet';
 import { UsageSheet } from '../components/UsageSheet';
@@ -851,6 +854,14 @@ export function HomeScreen({
   const [evidenceVisible, setEvidenceVisible] = useState(false);
   const [pluginManagerVisible, setPluginManagerVisible] = useState(false);
   const [skillManagerVisible, setSkillManagerVisible] = useState(false);
+  const [pluginEditorVisible, setPluginEditorVisible] = useState(false);
+  const [pluginEditorEditing, setPluginEditorEditing] = useState<Plugin | null>(
+    null,
+  );
+  const [skillEditorVisible, setSkillEditorVisible] = useState(false);
+  const [skillEditorEditing, setSkillEditorEditing] = useState<Skill | null>(
+    null,
+  );
   const [marketplaceVisible, setMarketplaceVisible] = useState(false);
   const [workspaceVisible, setWorkspaceVisible] = useState(false);
   const workspaceVisibleRef = useRef(false);
@@ -6638,6 +6649,8 @@ export function HomeScreen({
     pluginManagerVisible ||
     skillManagerVisible ||
     marketplaceVisible ||
+    pluginEditorVisible ||
+    skillEditorVisible ||
     projectsVisible ||
     workspaceVisible ||
     contextSheetVisible;
@@ -7078,7 +7091,8 @@ export function HomeScreen({
         pinnedIds={pinnedConversationIds}
         covered={
           settingsVisible || accountVisible || mirrorsVisible ||
-          pluginManagerVisible || skillManagerVisible || marketplaceVisible
+          pluginManagerVisible || skillManagerVisible || marketplaceVisible ||
+          pluginEditorVisible || skillEditorVisible
         }
         pendingProjectCleanup={
           lifecycleSheetActive &&
@@ -7391,6 +7405,14 @@ export function HomeScreen({
       */}
       <PluginManagerSheet
         plugins={preferences.plugins}
+        onAddPlugin={() => {
+          setPluginEditorEditing(null);
+          setPluginEditorVisible(true);
+        }}
+        onEditPlugin={plugin => {
+          setPluginEditorEditing(plugin);
+          setPluginEditorVisible(true);
+        }}
         onOpenMarketplace={() => {
           setPluginManagerVisible(false);
           setMarketplaceVisible(true);
@@ -7412,6 +7434,14 @@ export function HomeScreen({
       <SkillManagerSheet
         skills={preferences.skills}
         visible={skillManagerVisible}
+        onAddSkill={() => {
+          setSkillEditorEditing(null);
+          setSkillEditorVisible(true);
+        }}
+        onEditSkill={skill => {
+          setSkillEditorEditing(skill);
+          setSkillEditorVisible(true);
+        }}
         onClose={() => setSkillManagerVisible(false)}
         onOpenMarketplace={() => {
           setSkillManagerVisible(false);
@@ -7426,6 +7456,29 @@ export function HomeScreen({
               : `${previous.trimEnd()}\n\n${text}`,
           );
           setSkillManagerVisible(false);
+        }}
+      />
+      {/*
+        Writing a declaration by hand goes through the same validation the
+        libraries apply, so the editor cannot save something the app would
+        refuse to keep.
+      */}
+      <PluginEditorSheet
+        editing={pluginEditorEditing}
+        visible={pluginEditorVisible}
+        onClose={() => setPluginEditorVisible(false)}
+        onSave={plugin => {
+          preferencesStore.savePlugin(plugin);
+          setPluginEditorVisible(false);
+        }}
+      />
+      <SkillEditorSheet
+        editing={skillEditorEditing}
+        visible={skillEditorVisible}
+        onClose={() => setSkillEditorVisible(false)}
+        onSave={skill => {
+          preferencesStore.saveSkill(skill);
+          setSkillEditorVisible(false);
         }}
       />
       <MarketplaceSheet

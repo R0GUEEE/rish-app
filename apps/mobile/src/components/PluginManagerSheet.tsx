@@ -9,6 +9,8 @@ import {
   View,
 } from 'react-native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
+import Pencil from 'lucide-react-native/icons/pencil';
+import Plus from 'lucide-react-native/icons/plus';
 import Puzzle from 'lucide-react-native/icons/puzzle';
 import ShoppingBag from 'lucide-react-native/icons/shopping-bag';
 import Trash2 from 'lucide-react-native/icons/trash-2';
@@ -37,6 +39,9 @@ type Props = {
   onToggle: (id: string, enabled: boolean) => void;
   onRemove: (id: string) => void;
   onOpenMarketplace: () => void;
+  /** Writes a new declaration by hand. */
+  onAddPlugin: () => void;
+  onEditPlugin: (plugin: Plugin) => void;
 };
 
 // `as const`, not `Record<..., string>`: the translator is typed by its key
@@ -84,6 +89,16 @@ export function PluginManagerSheet(props: Props) {
         >
           {postureText}
         </Text>
+        <Pressable
+          accessibilityLabel={t('plugins.editor.add')}
+          accessibilityRole="button"
+          onPress={props.onAddPlugin}
+          style={({ pressed }) => [styles.secondary, pressed && styles.pressed]}
+          testID="plugins-add-by-hand"
+        >
+          <AppIcon color={colors.text} icon={Plus} size={16} />
+          <Text style={styles.secondaryText}>{t('plugins.editor.add')}</Text>
+        </Pressable>
         <Pressable
           accessibilityLabel={t('plugins.openMarketplace')}
           accessibilityRole="button"
@@ -152,6 +167,19 @@ export function PluginManagerSheet(props: Props) {
                     </View>
                   ))
                 )}
+                <Pressable
+                  accessibilityLabel={t('plugins.editor.edit')}
+                  accessibilityRole="button"
+                  onPress={() => props.onEditPlugin(plugin)}
+                  style={({ pressed }) => [
+                    styles.edit,
+                    pressed && styles.pressed,
+                  ]}
+                  testID={`plugin-edit-${plugin.id}`}
+                >
+                  <AppIcon color={colors.textDim} icon={Pencil} size={14} />
+                  <Text style={styles.editText}>{t('plugins.editor.edit')}</Text>
+                </Pressable>
                 <Pressable
                   accessibilityLabel={t('plugins.remove', {
                     name: plugin.name,
@@ -243,7 +271,33 @@ const createStyles = (colors: ThemePalette) =>
       marginTop: 14,
     },
     marketplaceText: { color: colors.text, fontSize: 13, fontWeight: '700' },
-    scroll: { marginTop: 14 },
+    secondary: {
+      flexDirection: 'row',
+      alignItems: 'center',
+      justifyContent: 'center',
+      gap: 8,
+      minHeight: 44,
+      borderRadius: 14,
+      backgroundColor: colors.surfaceRaised,
+      borderWidth: 1,
+      borderColor: colors.line,
+      marginTop: 10,
+    },
+    secondaryText: { color: colors.text, fontSize: 13, fontWeight: '700' },
+    edit: {
+      flexDirection: 'row',
+      alignItems: 'center',
+      justifyContent: 'center',
+      gap: 6,
+      minHeight: 38,
+      borderRadius: 12,
+      marginTop: 10,
+      backgroundColor: colors.surface,
+      borderWidth: 1,
+      borderColor: colors.line,
+    },
+    editText: { color: colors.textDim, fontSize: 11, fontWeight: '700' },
+    scroll: { maxHeight: 420, marginTop: 14 },
     list: { gap: 10, paddingBottom: 4 },
     row: {
       borderRadius: 16,

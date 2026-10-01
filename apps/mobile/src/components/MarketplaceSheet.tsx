@@ -57,6 +57,11 @@ export function MarketplaceSheet(props: Props) {
         <Text style={styles.source} testID="marketplace-source">
           {t('marketplace.source', { source: props.catalog.source })}
         </Text>
+        {props.catalog.entries.length === 0 && (
+          <Text style={styles.empty} testID="marketplace-empty">
+            {t('marketplace.empty')}
+          </Text>
+        )}
         <ScrollView contentContainerStyle={styles.list} style={styles.scroll}>
           {props.catalog.entries.map(entry => {
             const id = marketplaceEntryId(entry);
@@ -183,7 +188,13 @@ const createStyles = (colors: ThemePalette) =>
       lineHeight: 17,
       marginTop: 10,
     },
-    scroll: { marginTop: 14 },
+    empty: {
+      color: colors.textDim,
+      fontSize: 13,
+      lineHeight: 19,
+      marginTop: 14,
+    },
+    scroll: { maxHeight: 420, marginTop: 14 },
     list: { gap: 10, paddingBottom: 4 },
     row: {
       borderRadius: 16,

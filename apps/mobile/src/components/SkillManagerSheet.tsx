@@ -9,6 +9,8 @@ import {
 } from 'react-native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import FileText from 'lucide-react-native/icons/file-text';
+import Pencil from 'lucide-react-native/icons/pencil';
+import Plus from 'lucide-react-native/icons/plus';
 import ShoppingBag from 'lucide-react-native/icons/shopping-bag';
 import Trash2 from 'lucide-react-native/icons/trash-2';
 
@@ -30,6 +32,9 @@ type Props = {
   onUse: (skill: Skill) => void;
   onRemove: (id: string) => void;
   onOpenMarketplace: () => void;
+  /** Writes a new skill by hand. */
+  onAddSkill: () => void;
+  onEditSkill: (skill: Skill) => void;
 };
 
 export function SkillManagerSheet(props: Props) {
@@ -54,6 +59,16 @@ export function SkillManagerSheet(props: Props) {
         <Text style={styles.eyebrow}>{t('skills.eyebrow')}</Text>
         <Text style={styles.title}>{t('skills.title')}</Text>
         <Text style={styles.subtitle}>{t('skills.subtitle')}</Text>
+        <Pressable
+          accessibilityLabel={t('skills.editor.add')}
+          accessibilityRole="button"
+          onPress={props.onAddSkill}
+          style={({ pressed }) => [styles.secondary, pressed && styles.pressed]}
+          testID="skills-add-by-hand"
+        >
+          <AppIcon color={colors.text} icon={Plus} size={16} />
+          <Text style={styles.secondaryText}>{t('skills.editor.add')}</Text>
+        </Pressable>
         <Pressable
           accessibilityLabel={t('skills.openMarketplace')}
           accessibilityRole="button"
@@ -104,6 +119,19 @@ export function SkillManagerSheet(props: Props) {
                   testID={`skill-use-${skill.id}`}
                 >
                   <Text style={styles.useText}>{t('skills.useLabel')}</Text>
+                </Pressable>
+                <Pressable
+                  accessibilityLabel={t('skills.editor.edit')}
+                  accessibilityRole="button"
+                  onPress={() => props.onEditSkill(skill)}
+                  style={({ pressed }) => [
+                    styles.edit,
+                    pressed && styles.pressed,
+                  ]}
+                  testID={`skill-edit-${skill.id}`}
+                >
+                  <AppIcon color={colors.textDim} icon={Pencil} size={14} />
+                  <Text style={styles.editText}>{t('skills.editor.edit')}</Text>
                 </Pressable>
                 <Pressable
                   accessibilityLabel={t('skills.remove', { name: skill.name })}
@@ -188,13 +216,39 @@ const createStyles = (colors: ThemePalette) =>
       marginTop: 14,
     },
     marketplaceText: { color: colors.text, fontSize: 13, fontWeight: '700' },
+    secondary: {
+      flexDirection: 'row',
+      alignItems: 'center',
+      justifyContent: 'center',
+      gap: 8,
+      minHeight: 44,
+      borderRadius: 14,
+      backgroundColor: colors.surfaceRaised,
+      borderWidth: 1,
+      borderColor: colors.line,
+      marginTop: 10,
+    },
+    secondaryText: { color: colors.text, fontSize: 13, fontWeight: '700' },
+    edit: {
+      flexDirection: 'row',
+      alignItems: 'center',
+      justifyContent: 'center',
+      gap: 6,
+      minHeight: 38,
+      borderRadius: 12,
+      marginTop: 10,
+      backgroundColor: colors.surface,
+      borderWidth: 1,
+      borderColor: colors.line,
+    },
+    editText: { color: colors.textDim, fontSize: 11, fontWeight: '700' },
     empty: {
       color: colors.textDim,
       fontSize: 13,
       lineHeight: 19,
       marginTop: 18,
     },
-    scroll: { marginTop: 14 },
+    scroll: { maxHeight: 420, marginTop: 14 },
     list: { gap: 10, paddingBottom: 4 },
     row: {
       borderRadius: 16,

@@ -49,7 +49,9 @@ function skillManager(
     <SkillManagerSheet
       skills={[]}
       visible
+      onAddSkill={jest.fn()}
       onClose={jest.fn()}
+      onEditSkill={jest.fn()}
       onOpenMarketplace={jest.fn()}
       onRemove={jest.fn()}
       onUse={jest.fn()}
