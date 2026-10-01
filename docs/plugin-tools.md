@@ -143,3 +143,72 @@ nothing is transferred and no digest is claimed. A remote catalog would have to
 provide the same shape and go through the same parser, which is the only door
 in; when one exists, its entries should carry a digest of the content and the
 install path should verify it before writing into a library.
+
+## Guest-mapped execution (the v4 contract)
+
+A plugin brings no code. Nothing loads third-party executable code into an iOS
+app, so a plugin tool is a **mapping**: it names a program the guest already
+knows how to run, inside one of the language environments the app installs.
+
+```json
+{
+  "name": "fetch_page",
+  "description": "Fetch one page and return its readable text.",
+  "capability": "file_read",
+  "requiresApproval": false,
+  "execution": {
+    "kind": "guest_program",
+    "environmentId": "node",
+    "programPath": "plugin-scripts/fetch_page.js",
+    "arguments": []
+  }
+}
+```
+
+The app validates that declaration today: the id shape is the environment
+catalog's, the path is workspace-relative with no traversal (the same rule the
+workspace tools apply, because a mapping that could name a path outside the run
+would be a way around every approval the rest of the Agent asks for), and up to
+eight arguments of 256 characters each are passed literally. A tool without a
+mapping is accepted but reported as something the Agent could not call.
+
+### What the native core still has to do
+
+1. **Carry the declarations.** The round request grows an optional, bounded
+   field: the enabled plugins' tool declarations, taken from the same validated
+   library the manager writes. It travels with `registry_version`, so a host
+   that sends none keeps asking for the v3 table.
+2. **Admit them into the table.** `tool_registry::descriptors` grows the
+   declared tools — name (namespaced, `id__tool`), description, parameter
+   schema, `required_capability` — and the digest is taken over the extended
+   table. **This is why v4 is additive and policy-versioned:** `toolset_sha256`
+   is bound into every stored attempt, journal row and checkpoint, so a session
+   written under a v3 table must keep validating against the v3 table rather
+   than being re-read under v4. The table version a round used is already
+   recorded; it has to be *honoured* on read.
+3. **Project them into the policy.** Each declared tool appears in the policy
+   descriptor with an access level derived from its own declaration:
+   `conversation_confirm` when it asks first or when its capability writes,
+   `auto` only for a read-only capability that does not. The capability names
+   are the core's existing six, so the policy sheet and the conversation-grant
+   path need no change.
+4. **Execute by mapping.** A call for a plugin tool runs the named program
+   through the path `run_program` already uses: the same install-if-necessary
+   step, the same foreground bound (one guest at a time, ten minutes for a
+   one-shot), the same workspace copy handed to the run, and the same
+   stdout/stderr/exit reporting. The tool's `arguments` are passed literally
+   after the program path. Nothing new is executed that the environments
+   catalog and its digests do not already cover.
+5. **Refuse fail-closed.** A call whose plugin is disabled or removed, whose
+   mapping the table did not admit, or whose environment is not installed is
+   refused before dispatch, with the same evidence a missing built-in tool
+   produces today.
+
+### What is already done on the app side
+
+`apps/mobile/src/plugins.ts` validates the declaration and its bounds, the
+manager shows each tool under the name a provider would see, the editors write
+mappings by hand, a fetched catalog must pass a digest of its payload before it
+is shown at all, and the posture line reports whether the Agent's table can
+carry any of it yet. What remains above is the native half, and it is the only
+part of this document that is a plan rather than a description.

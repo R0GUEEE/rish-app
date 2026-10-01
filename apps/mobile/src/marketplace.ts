@@ -391,6 +391,14 @@ const SHIPPED: unknown = {
             description: 'Fetch one page and return its readable text.',
             capability: 'file_read',
             requiresApproval: false,
+            // A plugin brings no code of its own: the tool is a mapping onto a
+            // program the guest runs inside an installed environment.
+            execution: {
+              kind: 'guest_program',
+              environmentId: 'node',
+              programPath: 'plugin-scripts/fetch_page.js',
+              arguments: [],
+            },
           },
         ],
       },

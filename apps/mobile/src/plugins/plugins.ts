@@ -66,6 +66,31 @@ export const PLUGIN_CAPABILITIES = [
 ] as const;
 export type PluginCapability = (typeof PLUGIN_CAPABILITIES)[number];
 
+/** How many arguments a mapped program may take, and how long each may be. */
+export const MAX_PLUGIN_TOOL_ARGUMENTS = 8;
+export const MAX_PLUGIN_TOOL_ARGUMENT_LENGTH = 256;
+/** The longest path a mapping may name inside the guest workspace. */
+export const MAX_PLUGIN_TOOL_PROGRAM_PATH_LENGTH = 1024;
+
+/**
+ * What a tool runs when the Agent calls it.
+ *
+ * Nothing loads third-party code into an iOS app, so a plugin tool cannot
+ * bring its own implementation: it maps onto a program the guest already knows
+ * how to run, inside one of the language environments the app installs. The
+ * declaration is what the native tool table has to admit; until it does, this
+ * says what would run rather than pretending anything can.
+ */
+export type PluginToolExecution = {
+  readonly kind: 'guest_program';
+  /** The installed environment the program runs in, e.g. `node`. */
+  readonly environmentId: string;
+  /** The program's path inside the workspace the run is given. */
+  readonly programPath: string;
+  /** Arguments passed literally, after the program path. */
+  readonly arguments: readonly string[];
+};
+
 export type PluginTool = {
   /** The bare name, unique inside its plugin. */
   readonly name: string;
@@ -73,6 +98,8 @@ export type PluginTool = {
   readonly capability: PluginCapability;
   /** True when a call would have to be confirmed before it runs. */
   readonly requiresApproval: boolean;
+  /** What the call would run, when the plugin maps onto a guest program. */
+  readonly execution?: PluginToolExecution;
 };
 
 export type Plugin = {
@@ -142,12 +169,73 @@ export function isPluginToolDescription(value: unknown): value is string {
   return boundedText(value, MAX_PLUGIN_TOOL_DESCRIPTION_LENGTH);
 }
 
-export function isPluginTool(value: unknown): value is PluginTool {
+/** An environment id, in the shape the environment catalog uses. */
+export function isPluginEnvironmentId(value: unknown): value is string {
+  return typeof value === 'string' && /^[a-z0-9][a-z0-9-]{0,95}$/u.test(value);
+}
+
+/**
+ * A program path inside the workspace: relative, no traversal, bounded.
+ *
+ * The same rule the workspace tools apply, because a mapping that could name
+ * a path outside the run's workspace would be a way around every approval the
+ * rest of the Agent asks for.
+ */
+export function isPluginProgramPath(value: unknown): value is string {
+  if (
+    typeof value !== 'string' ||
+    value.length === 0 ||
+    value.length > MAX_PLUGIN_TOOL_PROGRAM_PATH_LENGTH ||
+    value.startsWith('/') ||
+    value.includes('\\') ||
+    /[\u0000-\u001f\u007f]/u.test(value)
+  ) {
+    return false;
+  }
+  return !value
+    .split('/')
+    .some(component => component.length === 0 || component === '.' || component === '..');
+}
+
+export function isPluginToolArgument(value: unknown): value is string {
+  return (
+    typeof value === 'string' &&
+    value.length <= MAX_PLUGIN_TOOL_ARGUMENT_LENGTH &&
+    !/[\u0000-\u001f\u007f]/u.test(value)
+  );
+}
+
+export function isPluginToolExecution(
+  value: unknown,
+): value is PluginToolExecution {
   if (typeof value !== 'object' || value === null || Array.isArray(value)) {
     return false;
   }
   const raw = value as Record<string, unknown>;
   if (Object.keys(raw).length !== 4) return false;
+  return (
+    raw.kind === 'guest_program' &&
+    isPluginEnvironmentId(raw.environmentId) &&
+    isPluginProgramPath(raw.programPath) &&
+    Array.isArray(raw.arguments) &&
+    raw.arguments.length <= MAX_PLUGIN_TOOL_ARGUMENTS &&
+    raw.arguments.every(isPluginToolArgument)
+  );
+}
+
+/** Whether a tool says what it would run. */
+export function pluginToolRunnable(tool: PluginTool): boolean {
+  return tool.execution !== undefined;
+}
+
+export function isPluginTool(value: unknown): value is PluginTool {
+  if (typeof value !== 'object' || value === null || Array.isArray(value)) {
+    return false;
+  }
+  const raw = value as Record<string, unknown>;
+  const names = Object.keys(raw);
+  if (names.length !== 4 && names.length !== 5) return false;
+  if (names.length === 5 && !isPluginToolExecution(raw.execution)) return false;
   return (
     isPluginToolName(raw.name) &&
     isPluginToolDescription(raw.description) &&

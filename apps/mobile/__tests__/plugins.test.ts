@@ -1,5 +1,10 @@
 import {
   MAX_PLUGINS,
+  MAX_PLUGIN_TOOL_ARGUMENTS,
+  MAX_PLUGIN_TOOL_ARGUMENT_LENGTH,
+  isPluginTool,
+  isPluginToolExecution,
+  pluginToolRunnable,
   MAX_PLUGIN_TOOLS,
   PLUGIN_TOOL_REGISTRY_VERSION,
   createPlugin,
@@ -293,5 +298,62 @@ describe('plugins as a preference', () => {
     store.deletePlugin(added.id);
     expect(listener).toHaveBeenCalledTimes(3);
     expect(selectPlugins(store.getState())).toEqual([]);
+  });
+});
+
+describe('a tool that says what it would run', () => {
+  const mapped = {
+    kind: 'guest_program' as const,
+    environmentId: 'node',
+    programPath: 'plugin-scripts/fetch_page.js',
+    arguments: ['--json'],
+  };
+
+  test('the mapping is bounded and stays inside the run workspace', () => {
+    expect(isPluginToolExecution(mapped)).toBe(true);
+    expect(isPluginToolExecution({ ...mapped, environmentId: 'Node' })).toBe(
+      false,
+    );
+    expect(isPluginToolExecution({ ...mapped, kind: 'native' })).toBe(false);
+    expect(isPluginToolExecution({ ...mapped, programPath: '/etc/passwd' })).toBe(
+      false,
+    );
+    expect(isPluginToolExecution({ ...mapped, programPath: '../secrets' })).toBe(
+      false,
+    );
+    expect(isPluginToolExecution({ ...mapped, programPath: 'a//b' })).toBe(false);
+    expect(
+      isPluginToolExecution({
+        ...mapped,
+        arguments: Array.from(
+          { length: MAX_PLUGIN_TOOL_ARGUMENTS + 1 },
+          () => 'x',
+        ),
+      }),
+    ).toBe(false);
+    expect(
+      isPluginToolExecution({
+        ...mapped,
+        arguments: ['x'.repeat(MAX_PLUGIN_TOOL_ARGUMENT_LENGTH + 1)],
+      }),
+    ).toBe(false);
+  });
+
+  test('a tool may say what it runs, and may also say nothing', () => {
+    const withMapping = { ...tool('fetch'), execution: mapped };
+    expect(isPluginTool(withMapping)).toBe(true);
+    expect(pluginToolRunnable(withMapping)).toBe(true);
+    expect(isPluginTool(tool('fetch'))).toBe(true);
+    expect(pluginToolRunnable(tool('fetch'))).toBe(false);
+    // A mapping the app could not run must not be accepted as one.
+    expect(isPluginTool({ ...tool('fetch'), execution: { kind: 'binary' } })).toBe(
+      false,
+    );
+  });
+
+  test('a mapped tool still needs a capability the core can check', () => {
+    expect(
+      isPluginTool({ ...tool('fetch'), execution: mapped, capability: 'root' }),
+    ).toBe(false);
   });
 });
