@@ -28,6 +28,14 @@ function renderDrawer(
   pendingProjectCleanup = false,
   onOpenPendingProjectCleanup = noop,
   pinnedIds: readonly string[] = [],
+  onSearchMessages: (query: string) => readonly {
+    conversationId: string;
+    conversationTitle: string;
+    messageId: string;
+    role: string;
+    snippet: string;
+  }[] = () => [],
+  onSelect: (id: string) => void = noop,
 ) {
   let renderer: ReactTestRenderer.ReactTestRenderer | undefined;
   const store = createPreferencesStore({
@@ -55,10 +63,11 @@ function renderDrawer(
           onOpenPendingProjectCleanup={onOpenPendingProjectCleanup}
           onOpenPlugins={noop}
           onOpenSkills={noop}
+          onSearchMessages={onSearchMessages}
           onOpenHarnesses={noop}
           onOpenRuntime={noop}
           onOpenSettings={noop}
-          onSelect={noop}
+          onSelect={onSelect}
         />
       </AppPresentationProvider>,
     );
@@ -68,6 +77,35 @@ function renderDrawer(
 }
 
 const NOW = Date.now();
+
+/** A drawer whose search finds one phrase inside one conversation. */
+async function renderSheetDrawer(onSelect: (id: string) => void) {
+  return renderDrawer(
+    [
+      {
+        id: 'match-conversation',
+        title: 'Why is the parser slow?',
+        preview: 'Because it rescans.',
+        updatedAt: NOW,
+        messageCount: 2,
+      },
+    ],
+    null,
+    false,
+    noop,
+    [],
+    () => [
+      {
+        conversationId: 'match-conversation',
+        conversationTitle: 'Why is the parser slow?',
+        messageId: 'm1',
+        role: 'assistant',
+        snippet: '\u2026the parser rescans\u2026',
+      },
+    ],
+    onSelect,
+  );
+}
 
 test('empty conversations are not treated as history entries', async () => {
   const renderer = renderDrawer([
@@ -222,4 +260,29 @@ test('searching keeps a matching pinned conversation on its shelf', async () => 
 
   expect(heading(renderer, 'drawer-pinned')).toEqual(['PINNED', 1]);
   expect(renderer.root.findAllByProps({ testID: 'drawer-recent' })).toHaveLength(0);
+});
+
+test('a phrase inside a message is offered with its context, and opens the chat', async () => {
+  const onSelect = jest.fn();
+  const renderer = await renderSheetDrawer(onSelect);
+  const match = renderer.root.findByProps({ testID: 'drawer-match-m1' });
+
+  expect(
+    renderer.root.findByProps({ testID: 'drawer-messages' }),
+  ).toBeDefined();
+  const snippet = JSON.stringify(renderer.toJSON());
+  expect(snippet).toContain('…the parser rescans…');
+  expect(snippet).toContain('Why is the parser slow?');
+
+  await act(async () => match.props.onPress());
+  expect(onSelect).toHaveBeenCalledWith('match-conversation');
+});
+
+test('with nothing to match, there is no messages section at all', async () => {
+  const renderer = await renderDrawer([
+    { id: 'recent-1', title: 'Something else', preview: 'q', updatedAt: NOW, messageCount: 2 },
+  ]);
+  expect(
+    renderer.root.findAllByProps({ testID: 'drawer-messages' }),
+  ).toHaveLength(0);
 });

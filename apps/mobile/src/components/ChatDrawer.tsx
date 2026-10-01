@@ -34,6 +34,7 @@ import { BrandMark } from './BrandMark';
 import {
   matchesConversationQuery,
   partitionConversations,
+  type MessageSearchMatch,
 } from './chatDrawerSections';
 import type { RuntimeVerificationStatus } from './RuntimeEvidenceSheet';
 import { SlidingSurface } from './SlidingSurface';
@@ -70,6 +71,13 @@ type Props = {
   onOpenPendingProjectCleanup: () => void;
   onOpenPlugins: () => void;
   onOpenSkills: () => void;
+  /**
+   * Finds a phrase inside conversations, not only in their titles.
+   *
+   * The messages live with the screen that owns the session, so the search is
+   * asked for rather than recomputed here on every render.
+   */
+  onSearchMessages: (query: string) => readonly MessageSearchMatch[];
   onOpenHarnesses: () => void;
   onOpenRuntime: () => void;
   onOpenSettings: () => void;
@@ -94,6 +102,9 @@ function timeLabel(timestamp: number, locale: string, t: Translator): string {
 export function ChatDrawer(props: Props) {
   const insets = useSafeAreaInsets();
   const { colors, locale, t } = useAppPresentation();
+  // Read out of props so the search memo depends on this one function rather
+  // than on the whole object, which changes whenever any prop does.
+  const { onSearchMessages } = props;
   const styles = useMemo(() => createStyles(colors), [colors]);
   const [query, setQuery] = useState('');
   // Zero-message conversations are working drafts, never history.
@@ -112,6 +123,11 @@ export function ChatDrawer(props: Props) {
     [filtered, props.pinnedIds],
   );
   const visibleCount = sections.pinned.length + sections.recent.length;
+  // Asked only while a search is running: an empty box is not a scan.
+  const messageMatches = useMemo(
+    () => onSearchMessages(query),
+    [onSearchMessages, query],
+  );
 
   const renderConversationRow = (
     item: ConversationSummary,
@@ -352,6 +368,40 @@ export function ChatDrawer(props: Props) {
                 false,
                 'drawer-recent',
               )}
+              {messageMatches.length > 0 && (
+                <React.Fragment key="drawer-messages">
+                  <View style={styles.sectionHeader} testID="drawer-messages">
+                    <Text style={styles.sectionLabel}>
+                      {t('drawer.inMessages')}
+                    </Text>
+                    <Text style={styles.sectionCount}>
+                      {messageMatches.length}
+                    </Text>
+                  </View>
+                  {messageMatches.map(match => (
+                    <Pressable
+                      key={`${match.conversationId}:${match.messageId}`}
+                      accessibilityLabel={t('drawer.openMatch', {
+                        title: match.conversationTitle,
+                      })}
+                      accessibilityRole="button"
+                      onPress={() => props.onSelect(match.conversationId)}
+                      style={({ pressed }) => [
+                        styles.matchRow,
+                        pressed && styles.pressed,
+                      ]}
+                      testID={`drawer-match-${match.messageId}`}
+                    >
+                      <Text numberOfLines={1} style={styles.matchTitle}>
+                        {match.conversationTitle}
+                      </Text>
+                      <Text numberOfLines={2} style={styles.matchSnippet}>
+                        {match.snippet}
+                      </Text>
+                    </Pressable>
+                  ))}
+                </React.Fragment>
+              )}
             </>
           )}
         </ScrollView>
@@ -585,6 +635,21 @@ const createStyles = (colors: ThemePalette) =>
       height: 52,
       alignItems: 'center',
       justifyContent: 'center',
+    },
+    matchRow: {
+      borderRadius: 14,
+      backgroundColor: colors.surface,
+      borderWidth: StyleSheet.hairlineWidth,
+      borderColor: colors.line,
+      paddingHorizontal: 12,
+      paddingVertical: 9,
+    },
+    matchTitle: { color: colors.textDim, fontSize: 11, fontWeight: '700' },
+    matchSnippet: {
+      color: colors.muted,
+      fontSize: 11,
+      lineHeight: 16,
+      marginTop: 4,
     },
     noResults: { paddingVertical: 30, paddingHorizontal: 12 },
     noResultsTitle: { color: colors.textDim, fontSize: 14, fontWeight: '600' },

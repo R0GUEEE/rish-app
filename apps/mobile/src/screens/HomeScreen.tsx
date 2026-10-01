@@ -44,6 +44,7 @@ import {
   type AttachmentSource,
 } from '../components/ChatComposer';
 import { ChatDrawer, type ConversationSummary } from '../components/ChatDrawer';
+import { searchMessageMatches } from '../components/chatDrawerSections';
 import { BrandMark } from '../components/BrandMark';
 import { AppIcon } from '../components/AppIcon';
 import { SpinningIcon } from '../components/SpinningIcon';
@@ -2690,6 +2691,25 @@ export function HomeScreen({
    * A listing asks this for its own id, so a plugin and a skill that share an
    * id are never confused for one another.
    */
+  /**
+   * Finds a phrase inside every conversation's messages.
+   *
+   * Built here because the messages live in the session this screen owns, and
+   * memoized on the session so the drawer can ask on each keystroke without
+   * rebuilding the list it searches.
+   */
+  const searchConversationMessages = useCallback(
+    (query: string) =>
+      searchMessageMatches(
+        selectOrderedConversations(chatState).map(conversation => ({
+          id: conversation.id,
+          title: conversation.title,
+          messages: conversation.messages,
+        })),
+        query,
+      ),
+    [chatState],
+  );
   const installedLibraryVersions = useMemo(() => {
     const versions: Record<string, string> = {};
     for (const plugin of preferences.plugins) {
@@ -7154,6 +7174,7 @@ export function HomeScreen({
             setSkillManagerVisible(true),
           )
         }
+        onSearchMessages={searchConversationMessages}
         onOpenSettings={() => openSettingsFromDrawer(drawerRenderEpoch)}
         onSelect={id => selectConversation(id, drawerRenderEpoch)}
       />
