@@ -9,6 +9,7 @@ import {
 } from 'react-native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import Download from 'lucide-react-native/icons/download';
+import Share from 'lucide-react-native/icons/share';
 import RefreshCw from 'lucide-react-native/icons/refresh-cw';
 import Check from 'lucide-react-native/icons/check';
 
@@ -31,6 +32,9 @@ type Props = {
   installedVersions: Readonly<Record<string, string>>;
   onClose: () => void;
   onInstall: (entry: MarketplaceEntry) => void;
+  /** Shares the libraries as a document another device can read back. */
+  onExportLibrary: () => void;
+  onImportLibrary: () => void;
 };
 
 export function MarketplaceSheet(props: Props) {
@@ -139,6 +143,36 @@ export function MarketplaceSheet(props: Props) {
           })}
         </ScrollView>
         <Pressable
+          accessibilityLabel={t('marketplace.exportLibrary')}
+          accessibilityRole="button"
+          onPress={props.onExportLibrary}
+          style={({ pressed }) => [
+            styles.transfer,
+            pressed && styles.pressed,
+          ]}
+          testID="marketplace-export-library"
+        >
+          <AppIcon color={colors.text} icon={Share} size={16} />
+          <Text style={styles.transferText}>
+            {t('marketplace.exportLibrary')}
+          </Text>
+        </Pressable>
+        <Pressable
+          accessibilityLabel={t('marketplace.importLibrary')}
+          accessibilityRole="button"
+          onPress={props.onImportLibrary}
+          style={({ pressed }) => [
+            styles.transfer,
+            pressed && styles.pressed,
+          ]}
+          testID="marketplace-import-library"
+        >
+          <AppIcon color={colors.text} icon={Download} size={16} />
+          <Text style={styles.transferText}>
+            {t('marketplace.importLibrary')}
+          </Text>
+        </Pressable>
+        <Pressable
           accessibilityLabel={t('common.close')}
           accessibilityRole="button"
           onPress={props.onClose}
@@ -240,6 +274,19 @@ const createStyles = (colors: ThemePalette) =>
       borderColor: colors.line,
     },
     installedText: { color: colors.muted },
+    transfer: {
+      flexDirection: 'row',
+      alignItems: 'center',
+      justifyContent: 'center',
+      gap: 8,
+      minHeight: 44,
+      borderRadius: 14,
+      backgroundColor: colors.surfaceRaised,
+      borderWidth: 1,
+      borderColor: colors.line,
+      marginTop: 10,
+    },
+    transferText: { color: colors.text, fontSize: 13, fontWeight: '700' },
     done: {
       height: 48,
       borderRadius: 15,

@@ -97,6 +97,7 @@ import {
   RuntimeEvidenceSheet,
   type RuntimeVerificationStatus,
 } from '../components/RuntimeEvidenceSheet';
+import { LibraryImportSheet } from '../components/LibraryImportSheet';
 import { MarketplaceSheet } from '../components/MarketplaceSheet';
 import { PluginEditorSheet } from '../components/PluginEditorSheet';
 import { PluginManagerSheet } from '../components/PluginManagerSheet';
@@ -104,6 +105,13 @@ import { SkillEditorSheet } from '../components/SkillEditorSheet';
 import { SkillManagerSheet } from '../components/SkillManagerSheet';
 import { pluginToolPosture } from '../plugins/plugins';
 import { BUILTIN_MARKETPLACE } from '../marketplace';
+import {
+  serializeLibrary,
+  summarizeLibraryMerge,
+  type LibraryTransfer,
+} from '../libraryTransfer';
+import { upsertPlugin } from '../plugins/plugins';
+import { upsertSkill } from '../skills';
 import { skillMessageText, type Skill } from '../skills';
 import type { Plugin } from '../plugins/plugins';
 import { SettingsSheet } from '../components/SettingsSheet';
@@ -864,6 +872,7 @@ export function HomeScreen({
     null,
   );
   const [marketplaceVisible, setMarketplaceVisible] = useState(false);
+  const [libraryImportVisible, setLibraryImportVisible] = useState(false);
   const [workspaceVisible, setWorkspaceVisible] = useState(false);
   const workspaceVisibleRef = useRef(false);
   workspaceSheetVisibleRef.current = workspaceSheetVisible;
@@ -2698,6 +2707,42 @@ export function HomeScreen({
    * memoized on the session so the drawer can ask on each keystroke without
    * rebuilding the list it searches.
    */
+  /**
+   * Merges an imported library by id and says what it did.
+   *
+   * The merge is reported before it is applied, so the count a person reads is
+   * the count of what actually changed rather than of what arrived.
+   */
+  const importLibrary = useCallback(
+    (transfer: LibraryTransfer) => {
+      const summary = summarizeLibraryMerge(
+        [...preferences.plugins, ...preferences.skills],
+        [...transfer.plugins, ...transfer.skills],
+      );
+      preferencesStore.setPlugins(
+        transfer.plugins.reduce(
+          (library, plugin) => upsertPlugin(library, plugin),
+          preferences.plugins,
+        ),
+      );
+      preferencesStore.setSkills(
+        transfer.skills.reduce(
+          (library, skill) => upsertSkill(library, skill),
+          preferences.skills,
+        ),
+      );
+      setLibraryImportVisible(false);
+      Alert.alert(
+        t('marketplace.importedTitle'),
+        t('marketplace.importedBody', {
+          added: summary.added,
+          replaced: summary.replaced,
+        }),
+      );
+    },
+    [preferences.plugins, preferences.skills, preferencesStore, t],
+  );
+
   const searchConversationMessages = useCallback(
     (query: string) =>
       searchMessageMatches(
@@ -6669,6 +6714,7 @@ export function HomeScreen({
     pluginManagerVisible ||
     skillManagerVisible ||
     marketplaceVisible ||
+    libraryImportVisible ||
     pluginEditorVisible ||
     skillEditorVisible ||
     projectsVisible ||
@@ -7112,7 +7158,7 @@ export function HomeScreen({
         covered={
           settingsVisible || accountVisible || mirrorsVisible ||
           pluginManagerVisible || skillManagerVisible || marketplaceVisible ||
-          pluginEditorVisible || skillEditorVisible
+          libraryImportVisible || pluginEditorVisible || skillEditorVisible
         }
         pendingProjectCleanup={
           lifecycleSheetActive &&
@@ -7502,8 +7548,24 @@ export function HomeScreen({
           setSkillEditorVisible(false);
         }}
       />
+      {/*
+        A library leaves as a document and comes back through the same
+        validation the managers apply, so an imported entry cannot be one the
+        app would refuse to keep.
+      */}
+      <LibraryImportSheet
+        visible={libraryImportVisible}
+        onClose={() => setLibraryImportVisible(false)}
+        onImport={transfer => importLibrary(transfer)}
+      />
       <MarketplaceSheet
         catalog={BUILTIN_MARKETPLACE}
+        onExportLibrary={() => {
+          Share.share({
+            message: serializeLibrary(preferences.plugins, preferences.skills),
+          }).catch(() => undefined);
+        }}
+        onImportLibrary={() => setLibraryImportVisible(true)}
         installedVersions={installedLibraryVersions}
         visible={marketplaceVisible}
         onClose={() => setMarketplaceVisible(false)}

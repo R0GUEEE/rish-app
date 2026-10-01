@@ -259,6 +259,21 @@ const enUS = {
     'Not saveable yet: check the id, the fields and the limits.',
   'skills.editor.save': 'Save skill',
   'marketplace.empty': 'This catalog has no entries.',
+  'marketplace.exportLibrary': 'Share this library',
+  'marketplace.importLibrary': 'Import from text',
+  'marketplace.importTitle': 'Import a library',
+  'marketplace.importHint':
+    'Paste a shared library document. An entry with the same id replaces the one already here.',
+  'marketplace.importPlaceholder': 'Paste the document here',
+  'marketplace.importAction': 'Import',
+  'marketplace.importRefused.notJson': 'That is not JSON.',
+  'marketplace.importRefused.notTransfer':
+    'That is not a document this app wrote.',
+  'marketplace.importRefused.tooLarge': 'That document is too large to read.',
+  'marketplace.importRefused.invalidEntry':
+    'The document holds an entry this app cannot keep, so nothing was imported.',
+  'marketplace.importedTitle': 'Library imported',
+  'marketplace.importedBody': 'Added {added}, replaced {replaced}.',
   'skills.eyebrow': 'SKILLS',
   'skills.title': 'Skills',
   'skills.subtitle':
@@ -1453,6 +1468,20 @@ const zhCN: Readonly<Record<TranslationKey, string>> = {
   'skills.editor.invalid': '还不能保存：请检查标识、各项内容和长度限制。',
   'skills.editor.save': '保存技能',
   'marketplace.empty': '这个目录里还没有条目。',
+  'marketplace.exportLibrary': '分享当前库',
+  'marketplace.importLibrary': '从文本导入',
+  'marketplace.importTitle': '导入插件与技能库',
+  'marketplace.importHint':
+    '粘贴分享来的库文档。标识相同的条目会覆盖这里已有的条目。',
+  'marketplace.importPlaceholder': '把文档粘贴到这里',
+  'marketplace.importAction': '导入',
+  'marketplace.importRefused.notJson': '这不是 JSON。',
+  'marketplace.importRefused.notTransfer': '这不是本应用写出的文档。',
+  'marketplace.importRefused.tooLarge': '文档太大，无法读取。',
+  'marketplace.importRefused.invalidEntry':
+    '文档里有本应用无法保存的条目，因此什么都没导入。',
+  'marketplace.importedTitle': '已导入',
+  'marketplace.importedBody': '新增 {added}，替换 {replaced}。',
   'skills.eyebrow': '技能',
   'skills.title': '技能',
   'skills.subtitle':

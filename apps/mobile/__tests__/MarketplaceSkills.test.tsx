@@ -4,6 +4,7 @@ import ReactTestRenderer, {
   type ReactTestRenderer as Renderer,
 } from 'react-test-renderer';
 
+import { LibraryImportSheet } from '../src/components/LibraryImportSheet';
 import { MarketplaceSheet } from '../src/components/MarketplaceSheet';
 import { SkillManagerSheet } from '../src/components/SkillManagerSheet';
 import { AppPresentationProvider } from '../src/presentation/AppPresentation';
@@ -12,6 +13,7 @@ import {
   createPreferencesStore,
 } from '../src/preferences';
 import { BUILTIN_MARKETPLACE } from '../src/marketplace';
+import { serializeLibrary } from '../src/libraryTransfer';
 import type { Skill } from '../src/skills';
 
 jest.mock('react-native-safe-area-context', () => ({
@@ -69,6 +71,8 @@ function marketplace(
       installedVersions={{}}
       visible
       onClose={jest.fn()}
+      onExportLibrary={jest.fn()}
+      onImportLibrary={jest.fn()}
       onInstall={jest.fn()}
       {...overrides}
     />
@@ -152,4 +156,60 @@ test('installing reports the entry it would install', async () => {
 
   expect(onInstall).toHaveBeenCalledTimes(1);
   expect(onInstall.mock.calls[0]![0]).toMatchObject({ kind: 'skill' });
+});
+
+test('a library can leave as a document and come back through the same door', async () => {
+  const onExportLibrary = jest.fn();
+  const onImportLibrary = jest.fn();
+  const marketplaceSheet = await render(
+    marketplace({ onExportLibrary, onImportLibrary }),
+  );
+  await act(async () => {
+    marketplaceSheet.root
+      .findByProps({ testID: 'marketplace-export-library' })
+      .props.onPress();
+  });
+  expect(onExportLibrary).toHaveBeenCalledTimes(1);
+  await act(async () => {
+    marketplaceSheet.root
+      .findByProps({ testID: 'marketplace-import-library' })
+      .props.onPress();
+  });
+  expect(onImportLibrary).toHaveBeenCalledTimes(1);
+});
+
+test('an import is not offered until the document can be read', async () => {
+  const onImport = jest.fn();
+  const renderer = await render(
+    <LibraryImportSheet visible onClose={jest.fn()} onImport={onImport} />,
+  );
+  const action = () =>
+    renderer.root.findByProps({ testID: 'library-import-action' });
+  expect(action().props.disabled).toBe(true);
+
+  const field = renderer.root.findByProps({ testID: 'library-import-text' });
+  await act(async () => field.props.onChangeText('{not json'));
+  expect(action().props.disabled).toBe(true);
+  expect(
+    renderer.root.findByProps({ testID: 'library-import-reason' }).props.children,
+  ).toBe('That is not JSON.');
+
+  await act(async () => {
+    field.props.onChangeText(
+      serializeLibrary([], [
+        {
+          id: 'release_notes',
+          name: 'Release notes',
+          version: '1.0.0',
+          description: 'Turn changes into notes.',
+          instructions: 'Read the diff.',
+        },
+      ]),
+    );
+  });
+  expect(action().props.disabled).toBe(false);
+
+  await act(async () => action().props.onPress());
+  expect(onImport).toHaveBeenCalledTimes(1);
+  expect(onImport.mock.calls[0]![0].skills[0].id).toBe('release_notes');
 });
